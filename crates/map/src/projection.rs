@@ -188,6 +188,8 @@ impl Projector {
         })?;
         let wgs84 = proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| e.to_string())?;
         let to_meter = native.to_meter();
+        // The central meridian proj4rs itself uses (it reads degrees, DMS and radians alike).
+        let lon0 = Some(native.longitude_of_origin().to_degrees()).filter(|l| l.is_finite()).unwrap_or(lon0);
         let engine = Engine::Proj { native: Box::new(native), wgs84: Box::new(wgs84) };
         Ok(Projector { engine, to_meter: if to_meter > 0.0 { to_meter } else { 1.0 }, domain, lon0 })
     }
@@ -535,5 +537,6 @@ mod tests {
         // Limited projections never reach the far meridian, so nothing is cut.
         assert_eq!(Projector::new("EPSG:32633").unwrap().seam(), None);
         assert_eq!(Projector::new("equalEarth").unwrap().seam(), Some(0.0));
+        assert!(Projector::new("EPSG:3832").unwrap().seam().is_some_and(|s| (s - 150.0).abs() < 1e-9), "PDC Mercator: lon_0 = 150");
     }
 }
