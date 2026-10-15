@@ -103,7 +103,7 @@ impl Domain {
             def.split_whitespace().find_map(|t| t.strip_prefix(&format!("+{k}="))).and_then(|v| v.parse().ok())
         };
         let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
-        let lat0 = param("lat_0").unwrap_or(0.0);
+        let lat0 = angle(def, "lat_0").unwrap_or(0.0);
         match proj {
             "tmerc" | "etmerc" | "utm" => {
                 let lon0 = if proj == "utm" { param("zone").map(|z| z * 6.0 - 183.0 + pm).unwrap_or(lon0) } else { lon0 };
@@ -139,13 +139,18 @@ fn prime_meridian(def: &str) -> f64 {
     angle(def, "pm").unwrap_or(0.0)
 }
 
-/// A definition's `+lon_0` or `+pm` in degrees, read the way proj4rs reads it (degrees, DMS, or a
-/// prime meridian's name), so the world projections computed here agree with it. `None` when it
-/// is missing or can't be read.
+/// A definition's `+lon_0`, `+lat_0` or `+pm` in degrees, read the way proj4rs reads it (degrees,
+/// DMS, or a prime meridian's name), so the world projections computed here and the areas of use
+/// agree with it. `None` when it is missing or can't be read.
 fn angle(def: &str, key: &str) -> Option<f64> {
     let v = def.split_whitespace().find_map(|t| t.strip_prefix(&format!("+{key}=")))?;
     let p = proj4rs::Proj::from_proj_string(&format!("+proj=longlat +ellps=WGS84 +{key}={v}")).ok()?;
-    let d = if key == "pm" { p.from_greenwich() } else { p.longitude_of_origin() }.to_degrees();
+    let d = match key {
+        "pm" => p.from_greenwich(),
+        "lat_0" => p.latitude_of_origin(),
+        _ => p.longitude_of_origin(),
+    }
+    .to_degrees();
     d.is_finite().then_some(d)
 }
 
@@ -176,8 +181,8 @@ const EDGE_SAMPLES: usize = 37;
 const EQUATOR: usize = EDGE_SAMPLES / 2;
 
 /// A world projection's edge in WGS84 longitudes: the meridian it runs along on average, and how far
-/// it strays from it every 5° of latitude. A datum shift moves the edge off the central meridian's
-/// opposite (by hundreds of metres for a local datum) and bends it, more and more towards the
+/// it strays from it every 5° of latitude. A datum shift moves the edge off the meridian opposite
+/// the central one (by hundreds of metres for a local datum) and bends it, more and more towards the
 /// poles, where a shift in metres spans more longitude.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Edge {
@@ -663,6 +668,8 @@ mod tests {
         // lon_0 in DMS, read as proj4rs reads it, for the world projections computed here too.
         assert!(angle("+proj=eqearth +lon_0=90d30'W", "lon_0").is_some_and(|d| (d + 90.5).abs() < 1e-9));
         assert_eq!(angle("+proj=eqearth", "lon_0"), None);
+        assert!(angle("+proj=stere +lat_0=-90 +lon_0=0", "lat_0").is_some_and(|d| (d + 90.0).abs() < 1e-9));
+        assert!(angle("+proj=laea +lat_0=52d30'N", "lat_0").is_some_and(|d| (d - 52.5).abs() < 1e-9));
     }
 
     #[test]
