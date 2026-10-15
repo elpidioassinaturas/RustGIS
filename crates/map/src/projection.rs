@@ -243,7 +243,7 @@ impl Projector {
     /// The central meridian, in WGS84 longitudes, of a projection that shows the whole world: the
     /// meridian opposite its edge (`edge().lon - 180`), which a datum shift moves slightly off
     /// `lon_0` (plus `+pm`). `None` for one limited to an area of use, which never reaches it.
-    pub fn seam(&self) -> Option<f64> {
+    pub fn central_meridian(&self) -> Option<f64> {
         self.edge().map(|e| e.lon - 180.0)
     }
 
@@ -251,6 +251,9 @@ impl Projector {
     /// out once; `None` for one limited to an area of use. Without a datum shift it is the meridian
     /// opposite the central one. With one, it is found every 5° of latitude by bisecting for where
     /// the map jumps from one side to the other.
+    /// If even the equator's edge can't be found, it falls back to the nominal edge with no
+    /// margin; `every_world_projection_wraps_opposite_its_central_meridian` checks that no EPSG
+    /// world projection does.
     pub fn edge(&self) -> Option<&Edge> {
         if self.domain != Domain::World {
             return None;
@@ -597,7 +600,7 @@ mod tests {
         // EPSG:5329: Mercator with lon_0 = 3.19° east of Jakarta (106.81°E), so centred on 110°E,
         // where its false easting puts x = 3 900 000 m (give or take the datum shift).
         let merc = Projector::new("EPSG:5329").unwrap();
-        let seam = merc.seam().unwrap();
+        let seam = merc.central_meridian().unwrap();
         // Its datum shift (Bessel, towgs84 -403,684,41) moves the edge about 290 m off 70°W in WGS84.
         assert!((seam - 110.0).abs() < 0.01, "{seam}");
         let edge = merc.edge().unwrap();
@@ -629,17 +632,22 @@ mod tests {
     }
 
     #[test]
-    fn every_world_projection_wraps_where_its_seam_says() {
-        // For every EPSG code drawn as a whole-world map, the map jumps sides at `seam() + 180°`:
+    fn every_world_projection_wraps_opposite_its_central_meridian() {
+        // For every EPSG code drawn as a whole-world map, the map jumps sides at `central_meridian() + 180°`:
         // just west of it draws on the east, just east of it on the west.
         let mut checked = 0;
         for n in 1024..=32767u32 {
             // Codes with a prime meridian other than Greenwich (+pm) and a datum shift included.
             let Ok(p) = Projector::new(&format!("EPSG:{n}")) else { continue };
-            let Some(lon0) = p.seam() else { continue };
+            let Some(lon0) = p.central_meridian() else { continue };
             let x = |lon: f64| p.forward(Coord::new(lon, 0.0)).map(|m| m.x);
             let (Some(west), Some(centre), Some(east)) = (x(lon0 + 179.5), x(lon0), x(lon0 + 180.5)) else { continue };
             assert!(west > centre && centre > east, "EPSG:{n}: lon_0 {lon0}: {west} / {centre} / {east}");
+            // With a datum shift the edge is found by search, which must not fall back to the
+            // nominal edge (no margin) for any of them.
+            if let Engine::Proj { .. } = p.engine {
+                assert!(p.find_edge(p.lon0 + 180.0).is_some(), "EPSG:{n}: the edge search fell back");
+            }
             checked += 1;
         }
         // 31 in crs-definitions 0.6 (Mercator, equirectangular, cylindrical equal-area, Equal Earth),
@@ -695,8 +703,11 @@ mod tests {
             assert_ne!(side(&polys[0]), side(&polys[1]), "{code}: the hole's parts sit on opposite edges");
         }
         // Limited projections never reach the far meridian, so nothing is cut.
-        assert_eq!(Projector::new("EPSG:32633").unwrap().seam(), None);
-        assert_eq!(Projector::new("equalEarth").unwrap().seam(), Some(0.0));
-        assert!(Projector::new("EPSG:3832").unwrap().seam().is_some_and(|s| (s - 150.0).abs() < 1e-9), "PDC Mercator: lon_0 = 150");
+        assert_eq!(Projector::new("EPSG:32633").unwrap().central_meridian(), None);
+        assert_eq!(Projector::new("equalEarth").unwrap().central_meridian(), Some(0.0));
+        assert!(
+            Projector::new("EPSG:3832").unwrap().central_meridian().is_some_and(|s| (s - 150.0).abs() < 1e-9),
+            "PDC Mercator: lon_0 = 150"
+        );
     }
 }
