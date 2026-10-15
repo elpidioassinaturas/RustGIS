@@ -6,8 +6,9 @@
 use rustgis_data::Geometry;
 use rustgis_geom::Coord;
 
-/// How far inside the edge cut points are kept, in degrees (about a centimetre on the ground), so
-/// each piece projects onto its own side of the map.
+/// How far inside the edge points moved by a turn are kept, in degrees (about a centimetre on the
+/// ground), so each piece projects onto its own side of the map even when the projection
+/// normalises longitudes (a datum shift goes through geocentric coordinates).
 const EDGE: f64 = 1e-7;
 
 /// Clipped rings smaller than this (square degrees) are slivers along the cut and are dropped.
@@ -44,13 +45,19 @@ fn span(pts: &[Coord], lo: f64) -> Option<(i64, i64)> {
     Some((k0, k1))
 }
 
-/// A point of window `k`, moved into the projection's own turn and kept off its edge.
+/// A point of window `k`, moved into the projection's own turn and kept off its edge. Points
+/// already in it (`k == 0`) stay exactly where they are, so geometry that needs no cut is
+/// unchanged (for hit-testing and snapping as much as for drawing).
 fn shift(c: Coord, lo: f64, k: i64) -> Coord {
+    if k == 0 {
+        return c;
+    }
     Coord::new((c.x - 360.0 * k as f64).clamp(lo + EDGE, lo + 360.0 - EDGE), c.y)
 }
 
 fn fold(c: Coord, lo: f64) -> Coord {
-    if !c.x.is_finite() {
+    // A point on either edge (180° under `lon_0 = 0`) stays on its own side.
+    if !c.x.is_finite() || (lo..=lo + 360.0).contains(&c.x) {
         return c;
     }
     shift(c, lo, ((c.x - lo) / 360.0).floor() as i64)
@@ -125,9 +132,8 @@ fn cut_polygon(rings: &[Vec<Coord>], lo: f64) -> Vec<Vec<Vec<Coord>>> {
         let mut polys: Vec<Vec<Vec<Coord>>> = pieces(outer).map(|p| vec![p]).collect();
         // A hole's pieces go with the piece of the exterior they lie in.
         for hole in rings.iter().skip(1).flat_map(pieces) {
-            let at = hole.iter().copied().find(|c| c.x != a && c.x != b);
-            if let Some(poly) = at.and_then(|at| polys.iter_mut().find(|p| ring_contains(&p[0], at))) {
-                poly.push(hole);
+            if let Some(i) = home(&polys, &hole, a, b) {
+                polys[i].push(hole);
             }
         }
         out.extend(polys.into_iter().map(|p| p.into_iter().map(|r| r.into_iter().map(|c| shift(c, lo, k)).collect()).collect()));
@@ -252,6 +258,29 @@ fn clip_half(pts: &[Coord], inside: impl Fn(Coord) -> bool, x: f64) -> Vec<Coord
     out
 }
 
+/// The exterior piece a hole piece lies in: the first that contains one of its vertices or edge
+/// midpoints off the cut, else (rounding at the cut) the one whose box holds the hole's box centre.
+fn home(polys: &[Vec<Vec<Coord>>], hole: &[Coord], a: f64, b: f64) -> Option<usize> {
+    let mids = hole.windows(2).map(|w| Coord::new((w[0].x + w[1].x) / 2.0, (w[0].y + w[1].y) / 2.0));
+    hole.iter()
+        .copied()
+        .chain(mids)
+        .filter(|c| c.x != a && c.x != b)
+        .find_map(|at| polys.iter().position(|p| ring_contains(&p[0], at)))
+        .or_else(|| {
+            let (x0, y0, x1, y1) = bounds(hole)?;
+            let centre = Coord::new((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            polys
+                .iter()
+                .position(|p| bounds(&p[0]).is_some_and(|(x0, y0, x1, y1)| (x0..=x1).contains(&centre.x) && (y0..=y1).contains(&centre.y)))
+        })
+}
+
+fn bounds(r: &[Coord]) -> Option<(f64, f64, f64, f64)> {
+    let first = r.first()?;
+    Some(r.iter().fold((first.x, first.y, first.x, first.y), |(x0, y0, x1, y1), c| (x0.min(c.x), y0.min(c.y), x1.max(c.x), y1.max(c.y))))
+}
+
 /// Whether `p` is inside a ring (even–odd).
 fn ring_contains(r: &[Coord], p: Coord) -> bool {
     let mut inside = false;
@@ -358,7 +387,7 @@ mod tests {
         let river = Geometry::Line(vec![vec![c(80.0, 50.0), c(100.0, 52.0)]]);
         let Geometry::Line(parts) = cut(&river, -90.0) else { panic!("a line") };
         assert_eq!(parts.len(), 2, "{parts:?}");
-        assert!((parts[0][1].x - 90.0).abs() < 1e-6 && parts[0][1].x < 90.0, "west part ends just inside the edge");
+        assert_eq!(parts[0][1].x, 90.0, "west part ends on the edge, in the projection's own turn");
         assert!((parts[1][0].x + 270.0).abs() < 1e-6 && parts[1][0].x > -270.0, "east part starts just inside the other edge");
         assert!((parts[0][1].y - 51.0).abs() < 1e-9 && (parts[1][0].y - 51.0).abs() < 1e-9);
     }
@@ -388,5 +417,21 @@ mod tests {
         assert_eq!(cut(&Geometry::Point(c(120.0, 1.0)), -90.0), Geometry::Point(c(-240.0, 1.0)));
         let odd = Geometry::Line(vec![vec![c(f64::NAN, 0.0), c(100.0, 0.0)]]);
         assert_eq!(format!("{:?}", cut(&odd, -90.0)), format!("{odd:?}"), "left for the projection to drop");
+        // Under a 0° central meridian nothing moves, not even points on ±180°.
+        let world =
+            Geometry::Polygon(vec![vec![vec![c(-180.0, -60.0), c(180.0, -60.0), c(180.0, 60.0), c(-180.0, 60.0), c(-180.0, -60.0)]]]);
+        assert_eq!(cut(&world, 0.0), world);
+        for x in [-180.0, 180.0] {
+            assert_eq!(cut(&Geometry::Point(c(x, 5.0)), 0.0), Geometry::Point(c(x, 5.0)), "{x} stays on its own edge");
+        }
+    }
+
+    #[test]
+    fn a_hole_finds_its_piece_from_any_point_off_the_cut() {
+        let square = vec![vec![c(0.0, 0.0), c(10.0, 0.0), c(10.0, 10.0), c(0.0, 10.0), c(0.0, 0.0)]];
+        // Two vertices on the cut (x = 0) and one on the exterior's own edge, where the
+        // even-odd test can go either way: an edge midpoint places it.
+        let hole = [c(0.0, 2.0), c(10.0, 5.0), c(0.0, 8.0), c(0.0, 2.0)];
+        assert_eq!(home(&[square], &hole, 0.0, 360.0), Some(0));
     }
 }
