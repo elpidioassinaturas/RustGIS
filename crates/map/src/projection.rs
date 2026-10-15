@@ -198,6 +198,35 @@ impl Edge {
     }
 }
 
+/// The edge's stray at every sampled latitude, from the ones `measured`. A latitude the projection
+/// can't show (`shown` false: Mercator's poles) needs no margin. One it can show but where the edge
+/// wasn't found gets its nearest measured neighbours' stray scaled to it (a shift in metres spans
+/// longitude as 1 / cos latitude), the larger of the two, with half again to spare, rather than
+/// the much wider stray found nearer a pole.
+fn fill_strays(measured: &[Option<f64>], lats: &[f64], shown: &[bool]) -> [f64; EDGE_SAMPLES] {
+    let scaled = |v: f64, from: f64, to: f64| v * from.to_radians().cos() / to.to_radians().cos().max(1e-3);
+    let nearest = |i: usize, step: isize| -> Option<f64> {
+        let mut j = i as isize + step;
+        while let Ok(k) = usize::try_from(j) {
+            let m = measured.get(k)?;
+            if let (Some(v), Some(from), Some(to)) = (m, lats.get(k), lats.get(i)) {
+                return Some(scaled(*v, *from, *to));
+            }
+            j += step;
+        }
+        None
+    };
+    let mut strays = [0.0; EDGE_SAMPLES];
+    for (i, s) in strays.iter_mut().enumerate() {
+        *s = match measured.get(i).copied().flatten() {
+            Some(v) => v,
+            None if shown.get(i).copied().unwrap_or(false) => 1.5 * nearest(i, -1).unwrap_or(0.0).max(nearest(i, 1).unwrap_or(0.0)),
+            None => 0.0,
+        };
+    }
+    strays
+}
+
 impl std::fmt::Debug for Projector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match &self.engine {
@@ -284,18 +313,9 @@ impl Projector {
         let found: Vec<Option<f64>> = lats.iter().map(|lat| self.edge_at(*lat, guess)).collect();
         // The equator's edge: most of the map, and where the edge strays least.
         let lon = (*found.get(EQUATOR)?)?;
-        // A latitude the projection can't show (Mercator's poles) needs no margin; one it can show
-        // but where the edge wasn't bracketed gets the widest stray found, to be safe.
-        let widest = found.iter().flatten().map(|x| (x - lon).abs()).fold(0.0, f64::max);
-        let mut strays = [0.0; EDGE_SAMPLES];
-        for ((s, f), lat) in strays.iter_mut().zip(&found).zip(&lats) {
-            *s = match f {
-                Some(x) => (x - lon).abs(),
-                None if self.forward(Coord::new(guess - 180.0, *lat)).is_some() => widest,
-                None => 0.0,
-            };
-        }
-        Some(Edge { lon, strays })
+        let measured: Vec<Option<f64>> = found.iter().map(|f| f.map(|x| (x - lon).abs())).collect();
+        let shown: Vec<bool> = lats.iter().map(|lat| self.forward(Coord::new(guess - 180.0, *lat)).is_some()).collect();
+        Some(Edge { lon, strays: fill_strays(&measured, &lats, &shown) })
     }
 
     /// The WGS84 longitude where the map jumps sides at a latitude, near `guess`.
@@ -667,6 +687,30 @@ mod tests {
         // 31 in crs-definitions 0.6 (Mercator, equirectangular, cylindrical equal-area, Equal Earth),
         // 6 of them Mercator from Jakarta (+pm).
         assert!(checked >= 31, "only {checked} world projections checked");
+    }
+
+    #[test]
+    fn unfound_edges_get_their_neighbours_stray() {
+        let lats: Vec<f64> = (0..EDGE_SAMPLES).map(|i| (-90.0 + EDGE_STEP * i as f64).clamp(-89.9, 89.9)).collect();
+        // A shift spanning 0.001° at the equator, as 1 / cos latitude.
+        let mut measured: Vec<Option<f64>> = lats.iter().map(|l| Some(0.001 / l.to_radians().cos())).collect();
+        let shown = vec![true; EDGE_SAMPLES];
+        let at = |lat: f64| ((lat + 90.0) / EDGE_STEP) as usize;
+        // Not found at 60°N, though shown: about the true 0.002°, with half again to spare, not the
+        // pole's 0.57°.
+        measured[at(60.0)] = None;
+        let strays = fill_strays(&measured, &lats, &shown);
+        assert!((strays[at(60.0)] - 1.5 * 0.002).abs() < 1e-4, "{}", strays[at(60.0)]);
+        assert!(strays[at(60.0)] < strays[EDGE_SAMPLES - 1] / 10.0);
+        // Not shown (Mercator's poles): no margin. Not found next to an unshown one: its other side.
+        measured[EDGE_SAMPLES - 1] = None;
+        measured[EDGE_SAMPLES - 2] = None;
+        let mut shown = shown;
+        shown[EDGE_SAMPLES - 1] = false;
+        let strays = fill_strays(&measured, &lats, &shown);
+        assert_eq!(strays[EDGE_SAMPLES - 1], 0.0);
+        let expected = 1.5 * 0.001 / 85.0_f64.to_radians().cos(); // 80°N's, scaled to 85°N
+        assert!((strays[EDGE_SAMPLES - 2] - expected).abs() / expected < 0.01, "{}", strays[EDGE_SAMPLES - 2]);
     }
 
     #[test]
