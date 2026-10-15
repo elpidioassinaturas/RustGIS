@@ -230,7 +230,8 @@ impl Projector {
         let to_meter = native.to_meter();
         // The central meridian proj4rs itself uses (it reads degrees, DMS and radians alike),
         // counted from the prime meridian like the rest of the definition.
-        let lon0 = Some(native.longitude_of_origin().to_degrees() + pm).filter(|l| l.is_finite()).unwrap_or(lon0);
+        let from_proj = native.longitude_of_origin().to_degrees() + pm;
+        let lon0 = if from_proj.is_finite() { from_proj } else { lon0 };
         let engine = Engine::Proj { native: Box::new(native), wgs84: Box::new(wgs84) };
         let to_meter = if to_meter > 0.0 { to_meter } else { 1.0 };
         Ok(Projector { engine, to_meter, domain, lon0, edge: std::sync::OnceLock::new() })
