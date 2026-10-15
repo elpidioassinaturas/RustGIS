@@ -184,7 +184,7 @@ pub struct Edge {
     pub lon: f64,
     /// How far the edge strays from `lon`, east or west (an absolute distance in degrees), at
     /// latitudes -90, -85, … 90 (±89.9 at the poles).
-    pub strays: [f64; EDGE_SAMPLES],
+    strays: [f64; EDGE_SAMPLES],
 }
 
 impl Edge {
@@ -621,7 +621,7 @@ mod tests {
         let pdc = Projector::new("EPSG:3832").unwrap();
         let pdc = pdc.edge().unwrap();
         assert_eq!(pdc.lon, 330.0, "no datum shift: the nominal edge, exactly, without a search");
-        assert!((pdc.lon - 330.0).abs() < 1e-9 && pdc.strays.iter().all(|s| *s < 1e-9), "{pdc:?}");
+        assert!(pdc.strays.iter().all(|s| *s == 0.0), "{pdc:?}");
         let centre = merc.forward(Coord::new(110.0, 0.0)).unwrap();
         assert!((centre.x - 3_900_000.0).abs() < 2_000.0, "{centre:?}");
         // EPSG:31251: Gauss–Krüger with lon_0 = 28° east of Ferro (17.67°W), so its band is around
