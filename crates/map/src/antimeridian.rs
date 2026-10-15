@@ -23,16 +23,16 @@ const FAR: f64 = 1080.0;
 /// `g` (longitude/latitude) cut along the edge of a world projection centred on `lon0`, with every
 /// piece moved by whole turns into `lon0 - 180 ..= lon0 + 180`.
 pub fn cut(g: &Geometry, lon0: f64) -> Geometry {
-    cut_with_margin(g, lon0, 0.0)
+    cut_with_margin(g, lon0, &|_| 0.0)
 }
 
-/// [`cut`], keeping cut pieces `margin` degrees further inside the edge: for a projection whose
-/// datum shift bends its edge off a meridian, by as far as it strays.
-pub fn cut_with_margin(g: &Geometry, lon0: f64, margin: f64) -> Geometry {
+/// [`cut`], keeping cut pieces `margin(latitude)` degrees further inside the edge: for a projection
+/// whose datum shift bends its edge off a meridian, by as far as it strays there.
+pub fn cut_with_margin(g: &Geometry, lon0: f64, margin: &dyn Fn(f64) -> f64) -> Geometry {
     if lon0.is_nan() || lon0.abs() > FAR {
         return g.clone();
     }
-    let t = Turn { lo: lon0 - 180.0, inset: EDGE + margin.max(0.0) };
+    let t = Turn { lo: lon0 - 180.0, margin };
     match g {
         Geometry::Point(c) => Geometry::Point(fold(*c, t)),
         Geometry::MultiPoint(v) => Geometry::MultiPoint(v.iter().map(|c| fold(*c, t)).collect()),
@@ -45,16 +45,17 @@ pub fn cut_with_margin(g: &Geometry, lon0: f64, margin: f64) -> Geometry {
     }
 }
 
-/// The projection's own turn, `lo ..= lo + 360`, and how far inside its edges cut pieces are kept.
+/// The projection's own turn, `lo ..= lo + 360`, and how much further than [`EDGE`] inside its
+/// edges cut pieces are kept, by latitude.
 #[derive(Clone, Copy)]
-struct Turn {
+struct Turn<'a> {
     lo: f64,
-    inset: f64,
+    margin: &'a dyn Fn(f64) -> f64,
 }
 
 /// The turns (360° windows from `lo`) that a run of points covers, or `None` when it can't be cut
 /// (a missing coordinate, or longitudes no data has).
-fn span(pts: &[Coord], t: Turn) -> Option<(i64, i64)> {
+fn span(pts: &[Coord], t: Turn<'_>) -> Option<(i64, i64)> {
     let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
     for c in pts {
         if !c.x.is_finite() {
@@ -78,17 +79,18 @@ fn span(pts: &[Coord], t: Turn) -> Option<(i64, i64)> {
 }
 
 /// A point of a cut piece in window `k`, moved into the projection's own turn and kept off its edge.
-fn shift(c: Coord, t: Turn, k: i64) -> Coord {
-    Coord::new((c.x - 360.0 * k as f64).clamp(t.lo + t.inset, t.lo + 360.0 - t.inset), c.y)
+fn shift(c: Coord, t: Turn<'_>, k: i64) -> Coord {
+    let inset = EDGE + (t.margin)(c.y).max(0.0);
+    Coord::new((c.x - 360.0 * k as f64).clamp(t.lo + inset, t.lo + 360.0 - inset), c.y)
 }
 
 /// A point of geometry that needs no cut, all of it in window `k`: moved a turn when it lies in
 /// another, left exactly as it is in the projection's own.
-fn place(c: Coord, t: Turn, k: i64) -> Coord {
+fn place(c: Coord, t: Turn<'_>, k: i64) -> Coord {
     if k == 0 { c } else { shift(c, t, k) }
 }
 
-fn fold(c: Coord, t: Turn) -> Coord {
+fn fold(c: Coord, t: Turn<'_>) -> Coord {
     // A point on either edge (180° under `lon_0 = 0`) stays on its own side.
     if c.x.is_nan() || c.x.abs() > FAR || (t.lo..=t.lo + 360.0).contains(&c.x) {
         return c;
@@ -96,7 +98,7 @@ fn fold(c: Coord, t: Turn) -> Coord {
     shift(c, t, ((c.x - t.lo) / 360.0).floor() as i64)
 }
 
-fn cut_line(part: &[Coord], t: Turn) -> Vec<Vec<Coord>> {
+fn cut_line(part: &[Coord], t: Turn<'_>) -> Vec<Vec<Coord>> {
     let Some((k0, k1)) = span(part, t) else { return vec![part.to_vec()] };
     if k0 == k1 {
         return vec![part.iter().map(|c| place(*c, t, k0)).collect()];
@@ -122,7 +124,7 @@ fn cut_line(part: &[Coord], t: Turn) -> Vec<Vec<Coord>> {
     out
 }
 
-fn keep_piece(out: &mut Vec<Vec<Coord>>, piece: Vec<Coord>, t: Turn, k: i64) {
+fn keep_piece(out: &mut Vec<Vec<Coord>>, piece: Vec<Coord>, t: Turn<'_>, k: i64) {
     if piece.windows(2).any(|w| w[0] != w[1]) {
         out.push(piece.into_iter().map(|c| shift(c, t, k)).collect());
     }
@@ -152,7 +154,7 @@ fn clip_segment(p: Coord, q: Coord, a: f64, b: f64) -> Option<(Coord, Coord)> {
     Some((at(t0), at(t1)))
 }
 
-fn cut_polygon(rings: &[Vec<Coord>], t: Turn) -> Vec<Vec<Vec<Coord>>> {
+fn cut_polygon(rings: &[Vec<Coord>], t: Turn<'_>) -> Vec<Vec<Vec<Coord>>> {
     // Vertices the projection can't use are left out, so the ring is still cut.
     let finite: Vec<Vec<Coord>>;
     let rings = if rings.iter().flatten().all(|c| c.is_finite()) {

@@ -165,12 +165,24 @@ pub struct Projector {
 }
 
 /// A world projection's edge in WGS84 longitudes: the meridian it runs along on average, and how far
-/// it strays from it. A datum shift moves the edge off the central meridian's opposite (by hundreds
-/// of metres for a local datum) and bends it a little with latitude.
+/// it strays from it every 5° of latitude. A datum shift moves the edge off the central meridian's
+/// opposite (by hundreds of metres for a local datum) and bends it, more and more towards the
+/// poles, where a shift in metres spans more longitude.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Edge {
     pub lon: f64,
-    pub stray: f64,
+    /// How far the edge strays from `lon` at latitudes -90, -85, … 90 (±89.9 at the poles).
+    pub strays: [f64; 37],
+}
+
+impl Edge {
+    /// How far the edge may stray at a latitude: the larger of the two samples around it (it
+    /// grows steadily towards the poles).
+    pub fn stray_at(&self, lat: f64) -> f64 {
+        let i = ((lat.clamp(-90.0, 90.0) + 90.0) / 5.0).floor() as usize;
+        let (a, b) = (self.strays.get(i).copied().unwrap_or(0.0), self.strays.get(i + 1).copied().unwrap_or(0.0));
+        a.max(b)
+    }
 }
 
 impl std::fmt::Debug for Projector {
@@ -230,41 +242,48 @@ impl Projector {
 
     /// Where the edge of a projection that shows the whole world runs, in WGS84 longitudes; `None`
     /// for one limited to an area of use. Without a datum shift it is the meridian opposite the
-    /// central one. With one, it is found at every 10° of latitude from 80°S to 80°N by bisecting
-    /// for where the map jumps from one side to the other.
+    /// central one. With one, it is found by bisecting
+    /// for where the map jumps from one side to the other, every 5° of latitude.
     pub fn edge(&self) -> Option<Edge> {
         if self.domain != Domain::World {
             return None;
         }
-        let exact = Edge { lon: self.lon0 + 180.0, stray: 0.0 };
+        let exact = Edge { lon: self.lon0 + 180.0, strays: [0.0; 37] };
         let Engine::Proj { .. } = self.engine else { return Some(exact) };
         Some(*self.edge.get_or_init(|| self.find_edge(exact.lon).unwrap_or(exact)))
     }
 
     fn find_edge(&self, guess: f64) -> Option<Edge> {
-        let mut found = Vec::with_capacity(17);
-        for i in 0..=16 {
-            let lat = -80.0 + 10.0 * i as f64;
-            let centre = self.forward(Coord::new(guess - 180.0, lat))?.x;
-            // West of the edge a point draws on the map's east side, past it on the west side.
-            let east_side = |lon: f64| self.forward(Coord::new(lon, lat)).map(|m| m.x > centre);
-            let (mut a, mut b) = (guess - 1.0, guess + 1.0);
-            if !east_side(a)? || east_side(b)? {
-                return None;
-            }
-            for _ in 0..60 {
-                let m = (a + b) / 2.0;
-                if east_side(m)? {
-                    a = m;
-                } else {
-                    b = m;
-                }
-            }
-            found.push((a + b) / 2.0);
+        let found: Vec<Option<f64>> = (0..37).map(|i| self.edge_at((-90.0 + 5.0 * i as f64).clamp(-89.9, 89.9), guess)).collect();
+        // The equator's edge: most of the map, and where the edge strays least.
+        let lon = (*found.get(18)?)?;
+        // Latitudes the projection can't show (Mercator's poles) need no margin.
+        let mut strays = [0.0; 37];
+        for (s, f) in strays.iter_mut().zip(&found) {
+            *s = f.map_or(0.0, |x| (x - lon).abs());
         }
-        let lon = found.iter().sum::<f64>() / found.len() as f64;
-        let stray = found.iter().map(|x| (x - lon).abs()).fold(0.0, f64::max);
-        Some(Edge { lon, stray })
+        Some(Edge { lon, strays })
+    }
+
+    /// The WGS84 longitude where the map jumps sides at a latitude, near `guess`.
+    fn edge_at(&self, lat: f64, guess: f64) -> Option<f64> {
+        let centre = self.forward(Coord::new(guess - 180.0, lat))?.x;
+        // West of the edge a point draws on the map's east side, past it on the west side.
+        let east_side = |lon: f64| self.forward(Coord::new(lon, lat)).map(|m| m.x > centre);
+        // Near the poles a shift of a few hundred metres spans a degree or more.
+        let (mut a, mut b) = (guess - 10.0, guess + 10.0);
+        if !east_side(a)? || east_side(b)? {
+            return None;
+        }
+        for _ in 0..60 {
+            let m = (a + b) / 2.0;
+            if east_side(m)? {
+                a = m;
+            } else {
+                b = m;
+            }
+        }
+        Some((a + b) / 2.0)
     }
 
     /// Longitude/latitude to map coordinates, `None` outside the projection.
@@ -375,7 +394,7 @@ impl Flat {
         if let Flat::Custom(p) = self
             && let Some(edge) = p.edge()
         {
-            return crate::antimeridian::cut_with_margin(g, edge.lon - 180.0, edge.stray).map_coords(&f);
+            return crate::antimeridian::cut_with_margin(g, edge.lon - 180.0, &|lat| edge.stray_at(lat)).map_coords(&f);
         }
         g.map_coords(&f)
     }
@@ -563,10 +582,12 @@ mod tests {
         // Its datum shift (Bessel, towgs84 -403,684,41) moves the edge about 290 m off 70°W in WGS84.
         assert!((seam - 110.0).abs() < 0.01, "{seam}");
         let edge = merc.edge().unwrap();
-        assert!(edge.stray < 0.005, "{edge:?}");
+        assert!(edge.stray_at(0.0) < 1e-4 && edge.stray_at(45.0) < 0.005, "{edge:?}");
+        // Towards the poles the same shift spans more longitude.
+        assert!(edge.stray_at(87.0) > edge.stray_at(45.0), "{edge:?}");
         // A projection on WGS84 has its edge exactly opposite its central meridian.
         let pdc = Projector::new("EPSG:3832").unwrap().edge().unwrap();
-        assert!((pdc.lon - 330.0).abs() < 1e-9 && pdc.stray < 1e-9, "{pdc:?}");
+        assert!((pdc.lon - 330.0).abs() < 1e-9 && pdc.strays.iter().all(|s| *s < 1e-9), "{pdc:?}");
         let centre = merc.forward(Coord::new(110.0, 0.0)).unwrap();
         assert!((centre.x - 3_900_000.0).abs() < 2_000.0, "{centre:?}");
         // EPSG:31251: Gauss–Krüger with lon_0 = 28° east of Ferro (17.67°W), so its band is around
