@@ -90,9 +90,10 @@ pub enum Domain {
 }
 
 impl Domain {
-    /// The area of use for a regional preset, or one worked out from the PROJ parameters, whose
-    /// longitudes are counted from the prime meridian `pm` (degrees east of Greenwich).
-    fn of(id: Option<&str>, def: &str, pm: f64) -> Domain {
+    /// The area of use for a regional preset, or one worked out from the PROJ parameters. `lon0` is
+    /// the central meridian east of Greenwich, and `pm` the prime meridian the definition's other
+    /// longitudes (a UTM zone's) are counted from.
+    fn of(id: Option<&str>, def: &str, lon0: f64, pm: f64) -> Domain {
         match id {
             Some("europeEqualArea") => return Domain::Box(Extent::new(-35.0, 25.0, 50.0, 75.0)),
             Some("usaAlbers") => return Domain::Box(Extent::new(-130.0, 18.0, -60.0, 55.0)),
@@ -102,7 +103,7 @@ impl Domain {
             def.split_whitespace().find_map(|t| t.strip_prefix(&format!("+{k}="))).and_then(|v| v.parse().ok())
         };
         let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
-        let (lon0, lat0) = (angle(def, "lon_0").unwrap_or(0.0) + pm, param("lat_0").unwrap_or(0.0));
+        let lat0 = param("lat_0").unwrap_or(0.0);
         match proj {
             "tmerc" | "etmerc" | "utm" => {
                 let lon0 = if proj == "utm" { param("zone").map(|z| z * 6.0 - 183.0 + pm).unwrap_or(lon0) } else { lon0 };
@@ -168,6 +169,12 @@ pub struct Projector {
     edge: std::sync::OnceLock<Edge>,
 }
 
+/// The edge is sampled every `EDGE_STEP`° of latitude from 90°S to 90°N: `EDGE_SAMPLES` latitudes,
+/// the equator's at `EQUATOR`.
+const EDGE_STEP: f64 = 5.0;
+const EDGE_SAMPLES: usize = 37;
+const EQUATOR: usize = EDGE_SAMPLES / 2;
+
 /// A world projection's edge in WGS84 longitudes: the meridian it runs along on average, and how far
 /// it strays from it every 5° of latitude. A datum shift moves the edge off the central meridian's
 /// opposite (by hundreds of metres for a local datum) and bends it, more and more towards the
@@ -175,15 +182,16 @@ pub struct Projector {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Edge {
     pub lon: f64,
-    /// How far the edge strays from `lon` at latitudes -90, -85, … 90 (±89.9 at the poles).
-    pub strays: [f64; 37],
+    /// How far the edge strays from `lon`, east or west (an absolute distance in degrees), at
+    /// latitudes -90, -85, … 90 (±89.9 at the poles).
+    pub strays: [f64; EDGE_SAMPLES],
 }
 
 impl Edge {
     /// How far the edge may stray at a latitude: the larger of the two samples around it (it
     /// grows steadily towards the poles).
     pub fn stray_at(&self, lat: f64) -> f64 {
-        let i = ((lat.clamp(-90.0, 90.0) + 90.0) / 5.0).floor() as usize;
+        let i = ((lat.clamp(-90.0, 90.0) + 90.0) / EDGE_STEP).floor() as usize;
         let (a, b) = (self.strays.get(i).copied().unwrap_or(0.0), self.strays.get(i + 1).copied().unwrap_or(0.0));
         a.max(b)
     }
@@ -216,10 +224,10 @@ impl Projector {
             .find(|(id, label, _)| id.eq_ignore_ascii_case(code_t) || label.eq_ignore_ascii_case(code_t))
             .map(|(id, _, _)| *id);
         let pm = prime_meridian(&def);
-        let domain = Domain::of(preset, &def, pm);
-        let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
         // proj4rs applies `+pm` itself; the world projections computed here take it in their centre.
         let lon0 = angle(&def, "lon_0").unwrap_or(0.0) + pm;
+        let domain = Domain::of(preset, &def, lon0, pm);
+        let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
         if let Some(kind) = crate::world::Kind::from_proj_name(proj) {
             let engine = Engine::World(crate::world::World { kind, lon0 });
             return Ok(Projector { engine, to_meter: 1.0, domain, lon0, edge: std::sync::OnceLock::new() });
@@ -248,34 +256,35 @@ impl Projector {
     }
 
     /// Where the edge of a projection that shows the whole world runs, in WGS84 longitudes, worked
-    /// out once; `None` for one limited to an area of use. Without a datum shift it is the meridian
-    /// opposite the central one. With one, it is found every 5° of latitude by bisecting for where
-    /// the map jumps from one side to the other.
-    /// If even the equator's edge can't be found, it falls back to the nominal edge with no
-    /// margin; `every_world_projection_wraps_opposite_its_central_meridian` checks that no EPSG
-    /// world projection does.
+    /// out once; `None` for one limited to an area of use.
+    ///
+    /// Without a datum shift it is the meridian opposite the central one: a probe at the equator
+    /// and at 60°N and S finds the map jumping sides exactly there. With one, it is found every 5°
+    /// of latitude by bisecting for where the map jumps from one side to the other. If even the
+    /// equator's edge can't be found, it falls back to the nominal edge with no margin;
+    /// `every_world_projection_wraps_opposite_its_central_meridian` checks that no EPSG world
+    /// projection does.
     pub fn edge(&self) -> Option<&Edge> {
         if self.domain != Domain::World {
             return None;
         }
         Some(self.edge.get_or_init(|| {
-            let exact = Edge { lon: self.lon0 + 180.0, strays: [0.0; 37] };
-            match self.engine {
-                Engine::Proj { .. } => self.find_edge(exact.lon).unwrap_or(exact),
-                Engine::World(_) => exact,
-            }
+            let exact = Edge { lon: self.lon0 + 180.0, strays: [0.0; EDGE_SAMPLES] };
+            let Engine::Proj { .. } = self.engine else { return exact };
+            let shifted = [0.0, 60.0, -60.0].iter().any(|lat| self.edge_at(*lat, exact.lon).is_none_or(|x| (x - exact.lon).abs() > 1e-9));
+            if shifted { self.find_edge(exact.lon).unwrap_or(exact) } else { exact }
         }))
     }
 
     fn find_edge(&self, guess: f64) -> Option<Edge> {
-        let lats: Vec<f64> = (0..37).map(|i| (-90.0 + 5.0 * i as f64).clamp(-89.9, 89.9)).collect();
+        let lats: Vec<f64> = (0..EDGE_SAMPLES).map(|i| (-90.0 + EDGE_STEP * i as f64).clamp(-89.9, 89.9)).collect();
         let found: Vec<Option<f64>> = lats.iter().map(|lat| self.edge_at(*lat, guess)).collect();
         // The equator's edge: most of the map, and where the edge strays least.
-        let lon = (*found.get(18)?)?;
+        let lon = (*found.get(EQUATOR)?)?;
         // A latitude the projection can't show (Mercator's poles) needs no margin; one it can show
         // but where the edge wasn't bracketed gets the widest stray found, to be safe.
         let widest = found.iter().flatten().map(|x| (x - lon).abs()).fold(0.0, f64::max);
-        let mut strays = [0.0; 37];
+        let mut strays = [0.0; EDGE_SAMPLES];
         for ((s, f), lat) in strays.iter_mut().zip(&found).zip(&lats) {
             *s = match f {
                 Some(x) => (x - lon).abs(),
@@ -510,7 +519,7 @@ mod tests {
         assert!(Projector::new("12x").is_err());
         assert!(Projector::new("epsgfoo32617").is_err());
         // A conic centred on the Pacific keeps points across the antimeridian.
-        let pacific = Domain::of(None, "+proj=lcc +lat_1=30 +lat_2=60 +lon_0=150", 0.0);
+        let pacific = Domain::of(None, "+proj=lcc +lat_1=30 +lat_2=60 +lon_0=150", 150.0, 0.0);
         assert!(pacific.contains(Coord::new(-170.0, 45.0)) && pacific.contains(Coord::new(120.0, 45.0)));
         assert!(!pacific.contains(Coord::new(0.0, 45.0)));
         assert!(Projector::new("EPSG 32617").is_ok());
@@ -601,7 +610,8 @@ mod tests {
         // where its false easting puts x = 3 900 000 m (give or take the datum shift).
         let merc = Projector::new("EPSG:5329").unwrap();
         let seam = merc.central_meridian().unwrap();
-        // Its datum shift (Bessel, towgs84 -403,684,41) moves the edge about 290 m off 70°W in WGS84.
+        // Its edge is nominally at 70°W, opposite 110°E; its datum shift (Bessel, towgs84
+        // -403,684,41) moves it about 290 m from there in WGS84 longitudes.
         assert!((seam - 110.0).abs() < 0.01, "{seam}");
         let edge = merc.edge().unwrap();
         assert!(edge.stray_at(0.0) < 1e-4 && edge.stray_at(45.0) < 0.005, "{edge:?}");
@@ -610,6 +620,7 @@ mod tests {
         // A projection on WGS84 has its edge exactly opposite its central meridian.
         let pdc = Projector::new("EPSG:3832").unwrap();
         let pdc = pdc.edge().unwrap();
+        assert_eq!(pdc.lon, 330.0, "no datum shift: the nominal edge, exactly, without a search");
         assert!((pdc.lon - 330.0).abs() < 1e-9 && pdc.strays.iter().all(|s| *s < 1e-9), "{pdc:?}");
         let centre = merc.forward(Coord::new(110.0, 0.0)).unwrap();
         assert!((centre.x - 3_900_000.0).abs() < 2_000.0, "{centre:?}");
