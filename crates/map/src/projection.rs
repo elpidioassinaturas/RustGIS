@@ -223,12 +223,12 @@ impl Projector {
             .iter()
             .find(|(id, label, _)| id.eq_ignore_ascii_case(code_t) || label.eq_ignore_ascii_case(code_t))
             .map(|(id, _, _)| *id);
-        let pm = prime_meridian(&def);
-        // proj4rs applies `+pm` itself; the world projections computed here take it in their centre.
-        let lon0 = angle(&def, "lon_0").unwrap_or(0.0) + pm;
-        let domain = Domain::of(preset, &def, lon0, pm);
         let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
         if let Some(kind) = crate::world::Kind::from_proj_name(proj) {
+            // Computed here: the centre is read from the definition as proj4rs would read it.
+            let pm = prime_meridian(&def);
+            let lon0 = angle(&def, "lon_0").unwrap_or(0.0) + pm;
+            let domain = Domain::of(preset, &def, lon0, pm);
             let engine = Engine::World(crate::world::World { kind, lon0 });
             return Ok(Projector { engine, to_meter: 1.0, domain, lon0, edge: std::sync::OnceLock::new() });
         }
@@ -239,10 +239,12 @@ impl Projector {
         })?;
         let wgs84 = proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| e.to_string())?;
         let to_meter = native.to_meter();
-        // The central meridian proj4rs itself uses (it reads degrees, DMS and radians alike),
-        // counted from the prime meridian like the rest of the definition.
-        let from_proj = native.longitude_of_origin().to_degrees() + pm;
-        let lon0 = if from_proj.is_finite() { from_proj } else { lon0 };
+        // The prime and central meridians proj4rs itself projects with, so the area of use, the
+        // edge and the projection all agree (it reads degrees, DMS, radians and names alike).
+        let finite = |d: f64| if d.is_finite() { d } else { 0.0 };
+        let pm = finite(native.from_greenwich().to_degrees());
+        let lon0 = finite(native.longitude_of_origin().to_degrees()) + pm;
+        let domain = Domain::of(preset, &def, lon0, pm);
         let engine = Engine::Proj { native: Box::new(native), wgs84: Box::new(wgs84) };
         let to_meter = if to_meter > 0.0 { to_meter } else { 1.0 };
         Ok(Projector { engine, to_meter, domain, lon0, edge: std::sync::OnceLock::new() })
