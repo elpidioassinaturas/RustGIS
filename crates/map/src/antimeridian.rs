@@ -175,10 +175,11 @@ fn cut_polygon(rings: &[Vec<Coord>], t: Turn<'_>) -> Vec<Vec<Vec<Coord>>> {
         // across the edge keeps both its pieces.
         let pieces = |r: &Vec<Coord>| clip_ring(r, a, b).into_iter().filter(|p| area(p) != 0.0);
         let mut polys: Vec<Vec<Vec<Coord>>> = pieces(outer).map(|p| vec![p]).collect();
+        let boxes: Vec<Option<Bounds>> = polys.iter().map(|p| p.first().and_then(|r| bounds(r))).collect();
         // A hole's pieces go with the piece of the exterior they lie in (dropped only when the
         // exterior has no piece in this window).
         for hole in rings.iter().skip(1).flat_map(pieces) {
-            if let Some(i) = home(&polys, &hole, a, b) {
+            if let Some(i) = home(&polys, &boxes, &hole, a, b) {
                 polys[i].push(hole);
             }
         }
@@ -307,25 +308,30 @@ fn clip_half(pts: &[Coord], inside: impl Fn(Coord) -> bool, x: f64) -> Vec<Coord
 /// The exterior piece a hole piece lies in: the first that contains one of its vertices or edge
 /// midpoints off the cut, else (rounding at the cut) the one whose box is nearest the hole's box
 /// centre. `None` only when there is no piece.
-fn home(polys: &[Vec<Vec<Coord>>], hole: &[Coord], a: f64, b: f64) -> Option<usize> {
+/// `boxes` are the pieces' exteriors' bounds, worked out once per window: a point is only tested
+/// against the rings whose box holds it.
+fn home(polys: &[Vec<Vec<Coord>>], boxes: &[Option<Bounds>], hole: &[Coord], a: f64, b: f64) -> Option<usize> {
     let mids = hole.windows(2).map(|w| Coord::new((w[0].x + w[1].x) / 2.0, (w[0].y + w[1].y) / 2.0));
+    let gap = |bx: &Option<Bounds>, c: Coord| match *bx {
+        Some((x0, y0, x1, y1)) => (x0 - c.x).max(c.x - x1).max(0.0).hypot((y0 - c.y).max(c.y - y1).max(0.0)),
+        None => f64::INFINITY,
+    };
     hole.iter()
         .copied()
         .chain(mids)
         .filter(|c| c.x != a && c.x != b)
-        .find_map(|at| polys.iter().position(|p| ring_contains(&p[0], at)))
+        .find_map(|at| polys.iter().zip(boxes).position(|(p, bx)| gap(bx, at) == 0.0 && p.first().is_some_and(|r| ring_contains(r, at))))
         .or_else(|| {
             let (x0, y0, x1, y1) = bounds(hole)?;
             let centre = Coord::new((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-            let gap = |p: &Vec<Vec<Coord>>| match p.first().and_then(|r| bounds(r)) {
-                Some((x0, y0, x1, y1)) => (x0 - centre.x).max(centre.x - x1).max(0.0).hypot((y0 - centre.y).max(centre.y - y1).max(0.0)),
-                None => f64::INFINITY,
-            };
-            (0..polys.len()).min_by(|&i, &j| gap(&polys[i]).total_cmp(&gap(&polys[j])))
+            (0..polys.len().min(boxes.len())).min_by(|&i, &j| gap(&boxes[i], centre).total_cmp(&gap(&boxes[j], centre)))
         })
 }
 
-fn bounds(r: &[Coord]) -> Option<(f64, f64, f64, f64)> {
+/// A ring's bounds: min x, min y, max x, max y.
+type Bounds = (f64, f64, f64, f64);
+
+fn bounds(r: &[Coord]) -> Option<Bounds> {
     let first = r.first()?;
     Some(r.iter().fold((first.x, first.y, first.x, first.y), |(x0, y0, x1, y1), c| (x0.min(c.x), y0.min(c.y), x1.max(c.x), y1.max(c.y))))
 }
@@ -523,13 +529,17 @@ mod tests {
         // Two vertices on the cut (x = 0) and one on the exterior's own edge, where the
         // even-odd test can go either way: an edge midpoint places it.
         let hole = [c(0.0, 2.0), c(10.0, 5.0), c(0.0, 8.0), c(0.0, 2.0)];
-        assert_eq!(home(std::slice::from_ref(&square), &hole, 0.0, 360.0), Some(0));
+        let boxes = |polys: &[Vec<Vec<Coord>>]| polys.iter().map(|p| bounds(&p[0])).collect::<Vec<_>>();
+        let one = std::slice::from_ref(&square);
+        assert_eq!(home(one, &boxes(one), &hole, 0.0, 360.0), Some(0));
         // A sliver lying just outside the exterior's edge (rounding at the cut): no point of it is
         // inside any piece, and it goes to the nearest piece rather than being dropped.
         let far = vec![vec![c(100.0, 0.0), c(110.0, 0.0), c(110.0, 10.0), c(100.0, 10.0), c(100.0, 0.0)]];
         let sliver = [c(10.0, 2.0), c(10.0, 8.0), c(10.0 + 1e-9, 5.0), c(10.0, 2.0)];
-        assert_eq!(home(&[far.clone(), square], &sliver, 0.0, 360.0), Some(1));
-        assert_eq!(home(&[far], &sliver, 0.0, 360.0), Some(0), "the only piece");
-        assert_eq!(home(&[], &sliver, 0.0, 360.0), None);
+        let two = [far.clone(), square];
+        assert_eq!(home(&two, &boxes(&two), &sliver, 0.0, 360.0), Some(1));
+        let only = [far];
+        assert_eq!(home(&only, &boxes(&only), &sliver, 0.0, 360.0), Some(0), "the only piece");
+        assert_eq!(home(&[], &[], &sliver, 0.0, 360.0), None);
     }
 }
