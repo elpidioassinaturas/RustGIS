@@ -1,6 +1,7 @@
 //! L2: the map model — layers with symbology and labels, the camera, colour ramps and basemaps.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod antimeridian;
 pub mod camera;
 pub mod color;
 pub mod design;
@@ -328,11 +329,11 @@ impl Layer {
 
     /// Copies of every geometry in a map projection's coordinates (`key` names the projection),
     /// rebuilt lazily when the geometry or the projection changes. Points a projection can't show
-    /// become NaN, which the renderer skips.
+    /// become NaN, which the renderer skips; features across a world projection's edge are cut
+    /// there ([`projection::Flat::project`]).
     pub fn projected_in(&mut self, flat: &projection::Flat, key: &str) -> &[Option<Geometry>] {
         if self.projected_rev != self.geometry_rev || self.projected.len() != self.dataset.features.len() || self.projected_for != key {
-            let f = |c: Coord| flat.forward_checked(c).unwrap_or(Coord::new(f64::NAN, f64::NAN));
-            self.projected = self.dataset.features.iter().map(|ft| ft.geometry.as_ref().map(|g| g.map_coords(&f))).collect();
+            self.projected = self.dataset.features.iter().map(|ft| ft.geometry.as_ref().map(|g| flat.project(g))).collect();
             self.projected_rev = self.geometry_rev;
             self.projected_for = key.to_string();
         }

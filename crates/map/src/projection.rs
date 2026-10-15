@@ -144,6 +144,8 @@ pub struct Projector {
     /// Metres per map unit.
     to_meter: f64,
     domain: Domain,
+    /// The central meridian, for cutting geometry along the map's edge.
+    lon0: f64,
 }
 
 impl std::fmt::Debug for Projector {
@@ -174,10 +176,10 @@ impl Projector {
             .map(|(id, _, _)| *id);
         let domain = Domain::of(preset, &def);
         let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
+        let lon0 = def.split_whitespace().find_map(|t| t.strip_prefix("+lon_0=")).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let lon0 = if f64::is_finite(lon0) { lon0 } else { 0.0 };
         if let Some(kind) = crate::world::Kind::from_proj_name(proj) {
-            let lon0 = def.split_whitespace().find_map(|t| t.strip_prefix("+lon_0=")).and_then(|v| v.parse().ok()).unwrap_or(0.0);
-            let lon0 = if f64::is_finite(lon0) { lon0 } else { 0.0 };
-            return Ok(Projector { engine: Engine::World(crate::world::World { kind, lon0 }), to_meter: 1.0, domain });
+            return Ok(Projector { engine: Engine::World(crate::world::World { kind, lon0 }), to_meter: 1.0, domain, lon0 });
         }
         let native = proj4rs::Proj::from_proj_string(&def).map_err(|e| match e {
             // A known code whose method isn't implemented (EPSG:5880's +proj=poly, say): name it.
@@ -187,7 +189,14 @@ impl Projector {
         let wgs84 = proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| e.to_string())?;
         let to_meter = native.to_meter();
         let engine = Engine::Proj { native: Box::new(native), wgs84: Box::new(wgs84) };
-        Ok(Projector { engine, to_meter: if to_meter > 0.0 { to_meter } else { 1.0 }, domain })
+        Ok(Projector { engine, to_meter: if to_meter > 0.0 { to_meter } else { 1.0 }, domain, lon0 })
+    }
+
+    /// The central meridian of a projection that shows the whole world, whose edge (the meridian
+    /// opposite) geometry is cut along; `None` for one limited to an area of use, which never
+    /// reaches that meridian.
+    pub fn seam(&self) -> Option<f64> {
+        (self.domain == Domain::World).then_some(self.lon0)
     }
 
     /// Longitude/latitude to map coordinates, `None` outside the projection.
@@ -287,6 +296,20 @@ impl Flat {
             Flat::Mercator => self.forward(c),
             Flat::Custom(p) => p.forward_checked(c),
         }
+    }
+
+    /// A longitude/latitude geometry in map coordinates, for drawing. Under a world projection it
+    /// is first cut along the map's edge, so a feature across it (Russia under a 90°W central
+    /// meridian) is drawn on both sides rather than as a band across the map (#209). Points the
+    /// projection can't show become NaN, which the renderer skips.
+    pub fn project(&self, g: &rustgis_data::Geometry) -> rustgis_data::Geometry {
+        let f = |c: Coord| self.forward_checked(c).unwrap_or(Coord::new(f64::NAN, f64::NAN));
+        if let Flat::Custom(p) = self
+            && let Some(lon0) = p.seam()
+        {
+            return crate::antimeridian::cut(g, lon0).map_coords(&f);
+        }
+        g.map_coords(&f)
     }
 
     /// Map coordinates to longitude/latitude.
@@ -461,5 +484,43 @@ mod tests {
         // A preset by label gets the same area of use as by id.
         assert_eq!(Projector::new("USA Contiguous Albers Equal Area").unwrap().domain(), Projector::new("usaAlbers").unwrap().domain());
         assert!(Flat::Mercator.inverse(Coord::new(f64::NAN, 0.0)).is_none());
+    }
+
+    #[test]
+    fn features_across_the_map_edge_are_cut_there() {
+        use rustgis_data::Geometry;
+        // #209: Equal Earth Americas (computed here, edge at 90°E) and PDC Mercator (proj4rs,
+        // lon_0 = 150°, edge at 30°W). Before, these drew as bands across the whole map.
+        for (code, edge) in [("EPSG:8858", 90.0), ("EPSG:3832", -30.0)] {
+            let flat = Flat::of(&crate::Projection::Custom(code.into()));
+            assert!(matches!(flat, Flat::Custom(_)), "{code}");
+            let width = flat.extent(&Extent::new(-180.0, -80.0, 180.0, 80.0)).width();
+            let line = Geometry::Line(vec![vec![Coord::new(edge - 10.0, 50.0), Coord::new(edge + 10.0, 52.0)]]);
+            let square = Geometry::Polygon(vec![vec![vec![
+                Coord::new(edge - 10.0, 40.0),
+                Coord::new(edge + 10.0, 40.0),
+                Coord::new(edge + 10.0, 60.0),
+                Coord::new(edge - 10.0, 60.0),
+                Coord::new(edge - 10.0, 40.0),
+            ]]]);
+            for g in [line, square] {
+                let parts: Vec<Vec<Coord>> = match flat.project(&g) {
+                    Geometry::Line(parts) => parts,
+                    Geometry::Polygon(polys) => polys.into_iter().flatten().collect(),
+                    other => panic!("{other:?}"),
+                };
+                assert_eq!(parts.len(), 2, "{code}: one piece on each side: {parts:?}");
+                for part in &parts {
+                    assert!(part.iter().all(|c| c.is_finite()), "{code}: {part:?}");
+                    let jump = part.windows(2).map(|w| (w[1].x - w[0].x).abs()).fold(0.0, f64::max);
+                    assert!(jump < width / 4.0, "{code}: no edge across the map ({jump} of {width})");
+                }
+                let side = |p: &Vec<Coord>| p.iter().map(|c| c.x).sum::<f64>().signum();
+                assert_ne!(side(&parts[0]), side(&parts[1]), "{code}: the pieces sit on opposite edges");
+            }
+        }
+        // Limited projections never reach the far meridian, so nothing is cut.
+        assert_eq!(Projector::new("EPSG:32633").unwrap().seam(), None);
+        assert_eq!(Projector::new("equalEarth").unwrap().seam(), Some(0.0));
     }
 }
