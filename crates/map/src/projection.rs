@@ -197,7 +197,8 @@ impl Projector {
 
     /// The central meridian of a projection that shows the whole world, whose edge (the meridian
     /// opposite) geometry is cut along; `None` for one limited to an area of use, which never
-    /// reaches that meridian.
+    /// reaches that meridian. It is `lon_0` as written, so a definition that counts longitudes
+    /// from another prime meridian (`+pm`) is cut in the wrong place (#271).
     pub fn seam(&self) -> Option<f64> {
         (self.domain == Domain::World).then_some(self.lon0)
     }
