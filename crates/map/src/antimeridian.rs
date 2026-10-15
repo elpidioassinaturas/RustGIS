@@ -78,6 +78,11 @@ fn span(pts: &[Coord], t: Turn<'_>) -> Option<(i64, i64)> {
     Some((k0, k1))
 }
 
+/// The longitudes window `k` covers: the turn `k` whole turns east of the projection's own.
+fn window(lo: f64, k: i64) -> (f64, f64) {
+    (lo + 360.0 * k as f64, lo + 360.0 * (k + 1) as f64)
+}
+
 /// A point of a cut piece in window `k`, moved into the projection's own turn and kept off its edge.
 fn shift(c: Coord, t: Turn<'_>, k: i64) -> Coord {
     let inset = EDGE + (t.margin)(c.y).max(0.0);
@@ -105,7 +110,7 @@ fn cut_line(part: &[Coord], t: Turn<'_>) -> Vec<Vec<Coord>> {
     }
     let mut out = Vec::new();
     for k in k0..=k1 {
-        let (a, b) = (t.lo + 360.0 * k as f64, t.lo + 360.0 * (k + 1) as f64);
+        let (a, b) = window(t.lo, k);
         let mut piece: Vec<Coord> = Vec::new();
         for w in part.windows(2) {
             match clip_segment(w[0], w[1], a, b) {
@@ -170,7 +175,7 @@ fn cut_polygon(rings: &[Vec<Coord>], t: Turn<'_>) -> Vec<Vec<Vec<Coord>>> {
     }
     let mut out = Vec::new();
     for k in k0..=k1 {
-        let (a, b) = (t.lo + 360.0 * k as f64, t.lo + 360.0 * (k + 1) as f64);
+        let (a, b) = window(t.lo, k);
         // Only pieces with no area at all (lying along the cut) are dropped: a tiny feature
         // across the edge keeps both its pieces.
         let pieces = |r: &Vec<Coord>| clip_ring(r, a, b).into_iter().filter(|p| area(p) != 0.0);
