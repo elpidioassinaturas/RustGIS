@@ -442,6 +442,32 @@ mod tests {
     }
 
     #[test]
+    fn rings_touching_the_cut_or_running_along_it_split_cleanly() {
+        let areas = |g: Geometry| -> Vec<f64> {
+            let Geometry::Polygon(polys) = g else { panic!("a polygon") };
+            let mut a: Vec<f64> = polys.iter().map(|p| area(&p[0]).abs()).collect();
+            a.sort_by(f64::total_cmp);
+            a
+        };
+        // Crosses 90°E between 0° and 10°N, and touches it at one vertex (90, 20) from the west.
+        let touching = vec![c(70.0, 0.0), c(100.0, 0.0), c(100.0, 10.0), c(85.0, 10.0), c(90.0, 20.0), c(70.0, 20.0), c(70.0, 0.0)];
+        let whole = area(&touching).abs();
+        let a = areas(cut(&Geometry::Polygon(vec![vec![touching]]), -90.0));
+        assert_eq!(a.len(), 2, "{a:?}");
+        assert!((a[0] - 100.0).abs() < 1e-6 && (a[0] + a[1] - whole).abs() < 1e-6, "{a:?} of {whole}");
+        // An edge lying along the cut, from (90, 10) to (90, 20).
+        let along = vec![c(70.0, 0.0), c(100.0, 0.0), c(100.0, 10.0), c(90.0, 10.0), c(90.0, 20.0), c(70.0, 20.0), c(70.0, 0.0)];
+        let a = areas(cut(&Geometry::Polygon(vec![vec![along]]), -90.0));
+        assert_eq!(a.len(), 2, "{a:?}");
+        assert!((a[0] - 100.0).abs() < 1e-6 && (a[1] - 400.0).abs() < 1e-6, "{a:?}");
+        // The same along-the-cut edge, met from the east side.
+        let mirrored = vec![c(110.0, 0.0), c(80.0, 0.0), c(80.0, 10.0), c(90.0, 10.0), c(90.0, 20.0), c(110.0, 20.0), c(110.0, 0.0)];
+        let a = areas(cut(&Geometry::Polygon(vec![vec![mirrored]]), -90.0));
+        assert_eq!(a.len(), 2, "{a:?}");
+        assert!((a[0] - 100.0).abs() < 1e-6 && (a[1] - 400.0).abs() < 1e-6, "{a:?}");
+    }
+
+    #[test]
     fn holes_follow_their_piece() {
         let outer = vec![c(60.0, 0.0), c(120.0, 0.0), c(120.0, 30.0), c(60.0, 30.0), c(60.0, 0.0)];
         let hole = vec![c(100.0, 10.0), c(100.0, 20.0), c(110.0, 20.0), c(110.0, 10.0), c(100.0, 10.0)];
