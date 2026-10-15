@@ -102,7 +102,7 @@ impl Domain {
             def.split_whitespace().find_map(|t| t.strip_prefix(&format!("+{k}="))).and_then(|v| v.parse().ok())
         };
         let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
-        let (lon0, lat0) = (param("lon_0").unwrap_or(0.0) + pm, param("lat_0").unwrap_or(0.0));
+        let (lon0, lat0) = (angle(def, "lon_0").unwrap_or(0.0) + pm, param("lat_0").unwrap_or(0.0));
         match proj {
             "tmerc" | "etmerc" | "utm" => {
                 let lon0 = if proj == "utm" { param("zone").map(|z| z * 6.0 - 183.0 + pm).unwrap_or(lon0) } else { lon0 };
@@ -135,13 +135,17 @@ impl Domain {
 /// east of Greenwich: `lon_0` and the definition's other longitudes are counted from it. 0 when
 /// there is none, or when it can't be read (proj4rs then refuses the definition anyway).
 fn prime_meridian(def: &str) -> f64 {
-    let Some(pm) = def.split_whitespace().find_map(|t| t.strip_prefix("+pm=")) else { return 0.0 };
-    // proj4rs reads names, degrees and DMS alike.
-    proj4rs::Proj::from_proj_string(&format!("+proj=longlat +ellps=WGS84 +pm={pm}"))
-        .map(|p| p.from_greenwich().to_degrees())
-        .ok()
-        .filter(|d| d.is_finite())
-        .unwrap_or(0.0)
+    angle(def, "pm").unwrap_or(0.0)
+}
+
+/// A definition's `+lon_0` or `+pm` in degrees, read the way proj4rs reads it (degrees, DMS, or a
+/// prime meridian's name), so the world projections computed here agree with it. `None` when it
+/// is missing or can't be read.
+fn angle(def: &str, key: &str) -> Option<f64> {
+    let v = def.split_whitespace().find_map(|t| t.strip_prefix(&format!("+{key}=")))?;
+    let p = proj4rs::Proj::from_proj_string(&format!("+proj=longlat +ellps=WGS84 +{key}={v}")).ok()?;
+    let d = if key == "pm" { p.from_greenwich() } else { p.longitude_of_origin() }.to_degrees();
+    d.is_finite().then_some(d)
 }
 
 /// How a projection is computed: by the PROJ port, or here (world projections it lacks).
@@ -214,9 +218,8 @@ impl Projector {
         let pm = prime_meridian(&def);
         let domain = Domain::of(preset, &def, pm);
         let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
-        let lon0 = def.split_whitespace().find_map(|t| t.strip_prefix("+lon_0=")).and_then(|v| v.parse().ok()).unwrap_or(0.0);
         // proj4rs applies `+pm` itself; the world projections computed here take it in their centre.
-        let lon0 = if f64::is_finite(lon0) { lon0 + pm } else { pm };
+        let lon0 = angle(&def, "lon_0").unwrap_or(0.0) + pm;
         if let Some(kind) = crate::world::Kind::from_proj_name(proj) {
             let engine = Engine::World(crate::world::World { kind, lon0 });
             return Ok(Projector { engine, to_meter: 1.0, domain, lon0, edge: std::sync::OnceLock::new() });
@@ -237,34 +240,45 @@ impl Projector {
         Ok(Projector { engine, to_meter, domain, lon0, edge: std::sync::OnceLock::new() })
     }
 
-    /// The central meridian of a projection that shows the whole world, whose edge (the meridian
-    /// opposite) geometry is cut along; `None` for one limited to an area of use, which never
-    /// reaches that meridian.
+    /// The central meridian, in WGS84 longitudes, of a projection that shows the whole world: the
+    /// meridian opposite its edge (`edge().lon - 180`), which a datum shift moves slightly off
+    /// `lon_0` (plus `+pm`). `None` for one limited to an area of use, which never reaches it.
     pub fn seam(&self) -> Option<f64> {
         self.edge().map(|e| e.lon - 180.0)
     }
 
-    /// Where the edge of a projection that shows the whole world runs, in WGS84 longitudes; `None`
-    /// for one limited to an area of use. Without a datum shift it is the meridian opposite the
-    /// central one. With one, it is found by bisecting
-    /// for where the map jumps from one side to the other, every 5° of latitude.
-    pub fn edge(&self) -> Option<Edge> {
+    /// Where the edge of a projection that shows the whole world runs, in WGS84 longitudes, worked
+    /// out once; `None` for one limited to an area of use. Without a datum shift it is the meridian
+    /// opposite the central one. With one, it is found every 5° of latitude by bisecting for where
+    /// the map jumps from one side to the other.
+    pub fn edge(&self) -> Option<&Edge> {
         if self.domain != Domain::World {
             return None;
         }
-        let exact = Edge { lon: self.lon0 + 180.0, strays: [0.0; 37] };
-        let Engine::Proj { .. } = self.engine else { return Some(exact) };
-        Some(*self.edge.get_or_init(|| self.find_edge(exact.lon).unwrap_or(exact)))
+        Some(self.edge.get_or_init(|| {
+            let exact = Edge { lon: self.lon0 + 180.0, strays: [0.0; 37] };
+            match self.engine {
+                Engine::Proj { .. } => self.find_edge(exact.lon).unwrap_or(exact),
+                Engine::World(_) => exact,
+            }
+        }))
     }
 
     fn find_edge(&self, guess: f64) -> Option<Edge> {
-        let found: Vec<Option<f64>> = (0..37).map(|i| self.edge_at((-90.0 + 5.0 * i as f64).clamp(-89.9, 89.9), guess)).collect();
+        let lats: Vec<f64> = (0..37).map(|i| (-90.0 + 5.0 * i as f64).clamp(-89.9, 89.9)).collect();
+        let found: Vec<Option<f64>> = lats.iter().map(|lat| self.edge_at(*lat, guess)).collect();
         // The equator's edge: most of the map, and where the edge strays least.
         let lon = (*found.get(18)?)?;
-        // Latitudes the projection can't show (Mercator's poles) need no margin.
+        // A latitude the projection can't show (Mercator's poles) needs no margin; one it can show
+        // but where the edge wasn't bracketed gets the widest stray found, to be safe.
+        let widest = found.iter().flatten().map(|x| (x - lon).abs()).fold(0.0, f64::max);
         let mut strays = [0.0; 37];
-        for (s, f) in strays.iter_mut().zip(&found) {
-            *s = f.map_or(0.0, |x| (x - lon).abs());
+        for ((s, f), lat) in strays.iter_mut().zip(&found).zip(&lats) {
+            *s = match f {
+                Some(x) => (x - lon).abs(),
+                None if self.forward(Coord::new(guess - 180.0, *lat)).is_some() => widest,
+                None => 0.0,
+            };
         }
         Some(Edge { lon, strays })
     }
@@ -274,11 +288,12 @@ impl Projector {
         let centre = self.forward(Coord::new(guess - 180.0, lat))?.x;
         // West of the edge a point draws on the map's east side, past it on the west side.
         let east_side = |lon: f64| self.forward(Coord::new(lon, lat)).map(|m| m.x > centre);
-        // Near the poles a shift of a few hundred metres spans a degree or more.
-        let (mut a, mut b) = (guess - 10.0, guess + 10.0);
-        if !east_side(a)? || east_side(b)? {
-            return None;
-        }
+        // Near the poles a shift of a few hundred metres spans a degree or more: widen the search
+        // until it holds the jump.
+        let (mut a, mut b) = [10.0, 30.0, 90.0]
+            .into_iter()
+            .map(|h| (guess - h, guess + h))
+            .find(|&(a, b)| east_side(a) == Some(true) && east_side(b) == Some(false))?;
         for _ in 0..60 {
             let m = (a + b) / 2.0;
             if east_side(m)? {
@@ -590,7 +605,8 @@ mod tests {
         // Towards the poles the same shift spans more longitude.
         assert!(edge.stray_at(87.0) > edge.stray_at(45.0), "{edge:?}");
         // A projection on WGS84 has its edge exactly opposite its central meridian.
-        let pdc = Projector::new("EPSG:3832").unwrap().edge().unwrap();
+        let pdc = Projector::new("EPSG:3832").unwrap();
+        let pdc = pdc.edge().unwrap();
         assert!((pdc.lon - 330.0).abs() < 1e-9 && pdc.strays.iter().all(|s| *s < 1e-9), "{pdc:?}");
         let centre = merc.forward(Coord::new(110.0, 0.0)).unwrap();
         assert!((centre.x - 3_900_000.0).abs() < 2_000.0, "{centre:?}");
@@ -607,6 +623,9 @@ mod tests {
         assert!((prime_meridian("+proj=merc +pm=-17.5") + 17.5).abs() < 1e-9);
         assert_eq!(prime_meridian("+proj=merc +lon_0=10"), 0.0);
         assert_eq!(prime_meridian("+proj=merc +pm=nowhere"), 0.0);
+        // lon_0 in DMS, read as proj4rs reads it, for the world projections computed here too.
+        assert!(angle("+proj=eqearth +lon_0=90d30'W", "lon_0").is_some_and(|d| (d + 90.5).abs() < 1e-9));
+        assert_eq!(angle("+proj=eqearth", "lon_0"), None);
     }
 
     #[test]

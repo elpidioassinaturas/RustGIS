@@ -85,7 +85,8 @@ fn window(lo: f64, k: i64) -> (f64, f64) {
 
 /// A point of a cut piece in window `k`, moved into the projection's own turn and kept off its edge.
 fn shift(c: Coord, t: Turn<'_>, k: i64) -> Coord {
-    let inset = EDGE + (t.margin)(c.y).max(0.0);
+    // Capped below half a turn, so the bounds can't cross whatever margin a caller passes.
+    let inset = (EDGE + (t.margin)(c.y).max(0.0)).min(179.0);
     Coord::new((c.x - 360.0 * k as f64).clamp(t.lo + inset, t.lo + 360.0 - inset), c.y)
 }
 
@@ -553,6 +554,16 @@ mod tests {
         }
         assert_eq!(cut(&Geometry::Line(vec![vec![]]), 0.0), Geometry::Line(vec![]));
         assert_eq!(cut(&Geometry::Polygon(vec![vec![vec![]]]), -90.0), Geometry::Polygon(vec![vec![vec![]]]));
+    }
+
+    #[test]
+    fn any_margin_is_safe() {
+        let river = Geometry::Line(vec![vec![c(80.0, 50.0), c(100.0, 52.0)]]);
+        for m in [0.0, 1.0, 500.0, -5.0, f64::NAN, f64::INFINITY] {
+            let Geometry::Line(parts) = cut_with_margin(&river, -90.0, &|_| m) else { panic!("a line") };
+            assert_eq!(parts.len(), 2, "margin {m}: {parts:?}");
+            assert!(parts.iter().flatten().all(|c| c.is_finite() && (-270.0..=90.0).contains(&c.x)), "margin {m}: {parts:?}");
+        }
     }
 
     #[test]
