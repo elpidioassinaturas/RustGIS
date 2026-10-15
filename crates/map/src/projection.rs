@@ -189,7 +189,8 @@ impl Projector {
         let wgs84 = proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| e.to_string())?;
         let to_meter = native.to_meter();
         // The central meridian proj4rs itself uses (it reads degrees, DMS and radians alike).
-        let lon0 = Some(native.longitude_of_origin().to_degrees()).filter(|l| l.is_finite()).unwrap_or(lon0);
+        let from_proj = native.longitude_of_origin().to_degrees();
+        let lon0 = if from_proj.is_finite() { from_proj } else { lon0 };
         let engine = Engine::Proj { native: Box::new(native), wgs84: Box::new(wgs84) };
         Ok(Projector { engine, to_meter: if to_meter > 0.0 { to_meter } else { 1.0 }, domain, lon0 })
     }

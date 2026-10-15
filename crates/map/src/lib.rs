@@ -330,7 +330,10 @@ impl Layer {
     /// Copies of every geometry in a map projection's coordinates (`key` names the projection),
     /// rebuilt lazily when the geometry or the projection changes. Points a projection can't show
     /// become NaN, which the renderer skips; features across a world projection's edge are cut
-    /// there ([`projection::Flat::project`]).
+    /// there ([`projection::Flat::project`]). There is one entry per feature, row for row, but its
+    /// parts and vertices needn't match the source's (a cut feature has more parts, and a point
+    /// the projection can't use breaks a line): hit-testing and snapping use the shape, never a
+    /// vertex index, which only the source geometry has.
     pub fn projected_in(&mut self, flat: &projection::Flat, key: &str) -> &[Option<Geometry>] {
         if self.projected_rev != self.geometry_rev || self.projected.len() != self.dataset.features.len() || self.projected_for != key {
             self.projected = self.dataset.features.iter().map(|ft| ft.geometry.as_ref().map(|g| flat.project(g))).collect();
