@@ -181,6 +181,7 @@ const EQUATOR: usize = EDGE_SAMPLES / 2;
 /// poles, where a shift in metres spans more longitude.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Edge {
+    /// Not normalised to ±180°: 330 for a projection centred on 150°E.
     pub lon: f64,
     /// How far the edge strays from `lon`, east or west (an absolute distance in degrees), at
     /// latitudes -90, -85, … 90 (±89.9 at the poles).

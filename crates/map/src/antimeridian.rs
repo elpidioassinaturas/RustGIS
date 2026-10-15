@@ -13,7 +13,8 @@ use rustgis_geom::Coord;
 /// edge. Geometry that needs no cut is left exactly as it is instead, so it stays unchanged for
 /// hit-testing and snapping as much as for drawing: a point or line on the edge itself is drawn
 /// there as before. A projection whose datum shift bends its edge adds how far it strays
-/// ([`cut_with_margin`]).
+/// ([`cut_with_margin`]), and there points within that of the edge are pulled inside even when
+/// nothing is cut.
 const EDGE: f64 = 1e-9;
 
 /// Longitudes (and central meridians) further out than this, three turns, aren't real data: such
@@ -91,15 +92,27 @@ fn shift(c: Coord, t: Turn<'_>, k: i64) -> Coord {
 }
 
 /// A point of geometry that needs no cut, all of it in window `k`: moved a turn when it lies in
-/// another, left exactly as it is in the projection's own.
+/// another, left exactly as it is in the projection's own, unless it is within the margin of an
+/// edge (see [`own_turn`]).
 fn place(c: Coord, t: Turn<'_>, k: i64) -> Coord {
-    if k == 0 { c } else { shift(c, t, k) }
+    if k == 0 { own_turn(c, t) } else { shift(c, t, k) }
+}
+
+/// A point already in the projection's own turn. Without a margin it stays exactly where it is (a
+/// point on the edge itself is drawn there). Under a datum shift the real edge strays from the
+/// cut meridian by the margin, so a point within that of either edge is pulled inside, by at
+/// most the margin, rather than projecting onto the far side.
+fn own_turn(c: Coord, t: Turn<'_>) -> Coord {
+    if (t.margin)(c.y) > 0.0 { shift(c, t, 0) } else { c }
 }
 
 fn fold(c: Coord, t: Turn<'_>) -> Coord {
-    // A point on either edge (180° under `lon_0 = 0`) stays on its own side.
-    if c.x.is_nan() || c.x.abs() > FAR || (t.lo..=t.lo + 360.0).contains(&c.x) {
+    if c.x.is_nan() || c.x.abs() > FAR {
         return c;
+    }
+    // A point on either edge (180° under `lon_0 = 0`) stays on its own side.
+    if (t.lo..=t.lo + 360.0).contains(&c.x) {
+        return own_turn(c, t);
     }
     shift(c, t, ((c.x - t.lo) / 360.0).floor() as i64)
 }
@@ -559,11 +572,33 @@ mod tests {
     #[test]
     fn any_margin_is_safe() {
         let river = Geometry::Line(vec![vec![c(80.0, 50.0), c(100.0, 52.0)]]);
+        let square = Geometry::Polygon(vec![vec![vec![c(60.0, 40.0), c(120.0, 40.0), c(120.0, 60.0), c(60.0, 60.0), c(60.0, 40.0)]]]);
+        let lake = Geometry::Polygon(vec![vec![vec![c(10.0, 40.0), c(20.0, 40.0), c(20.0, 50.0), c(10.0, 40.0)]]]);
         for m in [0.0, 1.0, 500.0, -5.0, f64::NAN, f64::INFINITY] {
             let Geometry::Line(parts) = cut_with_margin(&river, -90.0, &|_| m) else { panic!("a line") };
             assert_eq!(parts.len(), 2, "margin {m}: {parts:?}");
             assert!(parts.iter().flatten().all(|c| c.is_finite() && (-270.0..=90.0).contains(&c.x)), "margin {m}: {parts:?}");
+            let Geometry::Polygon(polys) = cut_with_margin(&square, -90.0, &|_| m) else { panic!("a polygon") };
+            assert_eq!(polys.len(), 2, "margin {m}: {polys:?}");
+            assert!(polys.iter().flatten().flatten().all(|c| c.is_finite() && (-270.0..=90.0).contains(&c.x)), "margin {m}: {polys:?}");
+            // Geometry that needs no cut stays finite and in the turn whatever the margin.
+            let Geometry::Polygon(kept) = cut_with_margin(&lake, -90.0, &|_| m) else { panic!("a polygon") };
+            assert!(kept.iter().flatten().flatten().all(|c| c.is_finite() && (-270.0..=90.0).contains(&c.x)), "margin {m}: {kept:?}");
         }
+    }
+
+    #[test]
+    fn near_a_bent_edge_points_are_pulled_inside() {
+        // Under a datum shift the edge strays by the margin: a point that needs no cut but lies
+        // within it of the edge is pulled inside, the rest stay exactly where they are.
+        let line = Geometry::Line(vec![vec![c(80.0, 60.0), c(89.995, 61.0)]]);
+        let Geometry::Line(parts) = cut_with_margin(&line, -90.0, &|_| 0.01) else { panic!("a line") };
+        assert_eq!(parts[0][0], c(80.0, 60.0));
+        assert!((parts[0][1].x - (90.0 - 0.01)).abs() < 1e-6 && parts[0][1].x < 89.99, "{parts:?}");
+        assert_eq!(cut_with_margin(&Geometry::Point(c(-269.995, 1.0)), -90.0, &|_| 0.01), Geometry::Point(c(-270.0 + 0.01 + EDGE, 1.0)));
+        // Without a margin nothing moves, not even a point on the edge.
+        assert_eq!(cut_with_margin(&line, -90.0, &|_| 0.0), line);
+        assert_eq!(cut(&Geometry::Point(c(90.0, 1.0)), -90.0), Geometry::Point(c(90.0, 1.0)));
     }
 
     #[test]
