@@ -1878,5 +1878,11 @@ Zoom To World	Приблизить к миру
 {url}: only HTTPS addresses, or plain HTTP on this computer or network, are allowed	{url}: разрешены только адреса HTTPS или обычный HTTP на этом компьютере или в этой сети
 © OpenStreetMap contributors	© участники OpenStreetMap
 ⌘K	⌘K
+MCP Relay	MCP-релей
+MCP relay stopped	MCP-релей остановлен
+MCP relay listening on 127.0.0.1:{port}	MCP-релей слушает 127.0.0.1:{port}
+MCP relay · {n} attached	MCP-релей · {n} подключено
+Stop MCP relay	Остановить MCP-релей
+MCP relay is already listening on 127.0.0.1:{port}; stop it first to use port {asked}	MCP-релей уже слушает 127.0.0.1:{port}; сначала остановите его, чтобы использовать порт {asked}
 Opening {url}…	Открывается {url}…
 {url}: downloaded after another project was opened, so it wasn't opened	{url}: загружен после открытия другого проекта, поэтому не открыт

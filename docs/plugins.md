@@ -246,12 +246,24 @@ Inside a request, `host::call(op, params)` sends one of these to RustGIS:
 | `map.addTiles` `{url, kind?, name?, attribution?, maxZoom?, overlay?, replace?}` | adds a web tile layer (`edit` and `network`) |
 | any command id (`layer.zoomTo`, `select.byAttributes`, `layer.symbology`…) | what the command returns, within the plugin's permissions |
 
+In the web app a command can't wait for a download, so where `layer.addUrl` has to download a
+file whole it answers `{"pending": true, "url": …}` there: RustGIS downloads the data off the
+frame and adds the layer when it lands, as **Home › Add Data › From URL** does. A PMTiles
+archive, a cloud-optimised GeoTIFF or a FlatGeobuf or GeoParquet read in place is added at once,
+as elsewhere.
+
 `rustgis-cli commands` lists every command id and its parameters.
 
 Tools work differently. A tool receives its layer parameters' features as GeoJSON (only the
 selected features when a layer has a selection), and its `file` parameters' files. It returns new layers, standalone tables or a
 selection, plus messages for the Geoprocessing history. RustGIS adds the results as it does for
 built-in tools, with undo. Tools can log, but they make no host requests.
+
+In the desktop app a plugin tool runs in the background, so the map and the rest of the window
+stay usable: the Tools pane shows the line the tool last logged, or a process plugin's last
+`progress` message, and a **Cancel** button. Cancel stops a process plugin's program; a WebAssembly tool runs on to its
+end and its result is dropped. One plugin tool runs at a time. `gp.run`, scripts and
+`rustgis-cli` still wait for the result.
 
 ### The ABI (version 1)
 
@@ -332,13 +344,16 @@ requests and replies over its standard input and output, one JSON object per lin
    - `{"call": {"op": "...", "params": {...}}}`: a [host request](#what-a-plugin-can-ask-for).
      RustGIS answers with one line, `{"ok": value}` or `{"error": "text"}`.
    - `{"log": "text"}`: a line for the log (and a tool's run messages).
+   - `{"progress": "text"}`: what a tool is doing now, shown while it runs and not kept in its
+     messages: a line per step of a long run, say.
    - Last, `{"ok": value}` or `{"error": "text"}`: the result.
 3. RustGIS then closes the program's input; a program still running a few seconds later is
    stopped.
 
 Output lines that aren't protocol messages are logged and skipped, since libraries print (even
 JSON), and so is the program's error output. A command is stopped after 2 minutes; a tool runs
-until it finishes. While it runs, RustGIS waits for it.
+until it finishes or is cancelled (the desktop app runs it in the background: see
+[What a plugin can ask for](#what-a-plugin-can-ask-for)).
 
 The plugin above, in Python with no SDK:
 

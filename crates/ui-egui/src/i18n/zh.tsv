@@ -1878,5 +1878,11 @@ Zoom To World	缩放至世界
 {url}: only HTTPS addresses, or plain HTTP on this computer or network, are allowed	{url}：仅允许 HTTPS 地址，或本机、本地网络上的普通 HTTP 地址
 © OpenStreetMap contributors	© OpenStreetMap 贡献者
 ⌘K	⌘K
+MCP Relay	MCP 中继
+MCP relay stopped	MCP 中继已停止
+MCP relay listening on 127.0.0.1:{port}	MCP 中继正在监听 127.0.0.1:{port}
+MCP relay · {n} attached	MCP 中继 · {n} 个已连接
+Stop MCP relay	停止 MCP 中继
+MCP relay is already listening on 127.0.0.1:{port}; stop it first to use port {asked}	MCP 中继已在 127.0.0.1:{port} 监听；请先停止它，再使用端口 {asked}
 Opening {url}…	正在打开 {url}…
 {url}: downloaded after another project was opened, so it wasn't opened	{url}：在打开另一个项目之后才下载完成，因此未打开

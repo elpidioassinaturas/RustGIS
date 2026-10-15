@@ -1878,5 +1878,11 @@ Zoom To World	Zoom para o mundo
 {url}: only HTTPS addresses, or plain HTTP on this computer or network, are allowed	{url}: só são permitidos endereços HTTPS, ou HTTP simples neste computador ou nesta rede
 © OpenStreetMap contributors	© Colaboradores do OpenStreetMap
 ⌘K	⌘K
+MCP Relay	Relé MCP
+MCP relay stopped	Relé MCP parado
+MCP relay listening on 127.0.0.1:{port}	Relé MCP a ouvir em 127.0.0.1:{port}
+MCP relay · {n} attached	Relé MCP · {n} ligados
+Stop MCP relay	Parar o relé MCP
+MCP relay is already listening on 127.0.0.1:{port}; stop it first to use port {asked}	O relé MCP já está a ouvir em 127.0.0.1:{port}; pare-o primeiro para usar a porta {asked}
 Opening {url}…	Abrindo {url}…
 {url}: downloaded after another project was opened, so it wasn't opened	{url}: baixado depois que outro projeto foi aberto, por isso não foi aberto

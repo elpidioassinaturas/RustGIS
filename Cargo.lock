@@ -3772,8 +3772,10 @@ name = "rustgis-assistant"
 version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
+ "getrandom 0.3.4",
  "log",
  "rustgis-engine",
+ "rustix 1.1.5",
  "serde_json",
  "ureq",
 ]

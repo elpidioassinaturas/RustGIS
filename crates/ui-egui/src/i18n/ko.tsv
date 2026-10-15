@@ -1878,5 +1878,11 @@ Zoom To World	세계로 확대/축소
 {url}: only HTTPS addresses, or plain HTTP on this computer or network, are allowed	{url}: HTTPS 주소 또는 이 컴퓨터나 네트워크의 일반 HTTP만 허용됩니다
 © OpenStreetMap contributors	© OpenStreetMap 기여자
 ⌘K	⌘K
+MCP Relay	MCP 릴레이
+MCP relay stopped	MCP 릴레이 중지됨
+MCP relay listening on 127.0.0.1:{port}	MCP 릴레이가 127.0.0.1:{port}에서 대기 중
+MCP relay · {n} attached	MCP 릴레이 · {n} 연결됨
+Stop MCP relay	MCP 릴레이 중지
+MCP relay is already listening on 127.0.0.1:{port}; stop it first to use port {asked}	MCP 릴레이가 이미 127.0.0.1:{port}에서 대기 중입니다. 포트 {asked}를 쓰려면 먼저 중지하세요
 Opening {url}…	{url} 여는 중…
 {url}: downloaded after another project was opened, so it wasn't opened	{url}: 다른 프로젝트를 연 뒤에 다운로드되어 열지 않았습니다

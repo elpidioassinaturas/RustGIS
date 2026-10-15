@@ -323,15 +323,26 @@ pub struct Session {
     /// Asynchronous runs started and not yet complete: (id, job, resolved params, start time).
     #[cfg(feature = "geolibre")]
     pub(crate) started: Vec<(u64, rustgis_geolibre::Job, serde_json::Value, u64)>,
+    /// Plugin tool runs started and not yet complete (`gp::plugin_start`).
+    pub(crate) plugin_runs: Vec<cmd::gp::StartedRun>,
     /// Data downloads of this project under way (Add Data › From URL), by id.
     downloading: Vec<u64>,
     /// Downloads that landed, waiting for `layer.addDownload`.
     pub(crate) downloaded: Vec<(u64, Vec<u8>)>,
+    /// Downloads a command asked for where nothing may wait (the browser): the parameters of
+    /// `layer.addUrl` calls, for the front end to fetch and add (see [`Session::take_url_requests`]).
+    pub(crate) url_requests: Vec<serde_json::Value>,
+    /// Set by [`Session::request_url`] for [`Session::guarded`]: the command running changed
+    /// nothing, it only left a request (a plugin's own answer can't claim that).
+    request_only: bool,
     /// Query results the app ran off the frame (the SQL pane), waiting for `layer.addSql {"ran"}`:
     /// the id, the query and database (label) they came from, and the result.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) sql_results: Vec<(u64, String, Option<String>, rustgis_data::source::duckdb::Output)>,
 }
+
+/// The most `layer.addUrl` requests kept for the front end at a time.
+const MAX_URL_REQUESTS: usize = 16;
 
 /// A finished tool run, held until `gp.finish` applies it.
 pub(crate) struct PendingRun {
@@ -425,8 +436,11 @@ impl Session {
             next_pending: 0,
             #[cfg(feature = "geolibre")]
             started: Vec::new(),
+            plugin_runs: Vec::new(),
             downloading: Vec::new(),
             downloaded: Vec::new(),
+            url_requests: Vec::new(),
+            request_only: false,
             #[cfg(not(target_arch = "wasm32"))]
             sql_results: Vec::new(),
         }
@@ -479,6 +493,27 @@ impl Session {
         let current = self.downloading.contains(&id);
         self.download_failed(id);
         current
+    }
+
+    /// Keeps a `layer.addUrl` request for the front end to download off the frame and add when
+    /// it lands (the browser, where a command may not wait): the command's answer, which says
+    /// so. An address asked for again while it waits is asked for once, and past a few waiting
+    /// requests the next is refused rather than silently dropping one already promised.
+    pub fn request_url(&mut self, p: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let url = p.get("url").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+        if !self.url_requests.iter().any(|q| q.get("url").and_then(serde_json::Value::as_str) == Some(url.as_str())) {
+            if self.url_requests.len() >= MAX_URL_REQUESTS {
+                return Err(format!("{url}: {MAX_URL_REQUESTS} downloads are already waiting; try again when they have landed"));
+            }
+            self.url_requests.push(p.clone());
+        }
+        self.request_only = true;
+        Ok(serde_json::json!({"pending": true, "url": url}))
+    }
+
+    /// The `layer.addUrl` requests waiting for the front end ([`Session::request_url`]), taken.
+    pub fn take_url_requests(&mut self) -> Vec<serde_json::Value> {
+        std::mem::take(&mut self.url_requests)
     }
 
     pub fn map(&self) -> &Map {
@@ -544,6 +579,9 @@ impl Session {
         let snapshot = mutates.then(|| self.project.clone());
         // Edit counts roll back with the project when a command fails part way.
         let counts = mutates.then(|| self.edit_counts.clone());
+        self.request_only = false;
+        // Requests a failed command left for the front end go with its other changes.
+        let requests = self.url_requests.len();
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)))
             .unwrap_or_else(|_| Err(format!("{label} failed unexpectedly; the project was restored")));
         // A command that changed a streamed layer's features or fields (not by reading its
@@ -556,6 +594,10 @@ impl Session {
             _ => res,
         };
         match (&res, snapshot) {
+            // A command that only left a request for the front end (a download in the browser,
+            // [`Session::request_url`]) changed nothing: no undo step, nothing to save yet. The
+            // session's own flag says so, not the answer, which a plugin's command could forge.
+            (Ok(_), Some(_)) if std::mem::take(&mut self.request_only) => {}
             (Ok(_), Some(mut snap)) => {
                 // Undo keeps streamed layers' sources, not their windows: they read the view again.
                 strip_windows(&mut snap);
@@ -573,6 +615,9 @@ impl Session {
                 }
             }
             _ => {}
+        }
+        if res.is_err() {
+            self.url_requests.truncate(requests);
         }
         if let Err(e) = &res {
             self.notify(e.clone(), true);
@@ -634,8 +679,10 @@ impl Session {
         self.pending.clear();
         #[cfg(feature = "geolibre")]
         self.started.clear();
+        self.plugin_runs.clear();
         self.downloading.clear();
         self.downloaded.clear();
+        self.url_requests.clear();
         #[cfg(not(target_arch = "wasm32"))]
         self.sql_results.clear();
     }
