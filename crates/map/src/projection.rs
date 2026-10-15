@@ -490,6 +490,27 @@ mod tests {
     }
 
     #[test]
+    fn every_world_projection_wraps_where_its_seam_says() {
+        // For every EPSG code drawn as a whole-world map, the map jumps sides at `seam() + 180°`:
+        // just west of it draws on the east, just east of it on the west.
+        let mut checked = 0;
+        for n in 1024..=32767u32 {
+            let code = format!("EPSG:{n}");
+            // Longitudes counted from another prime meridian aren't handled yet (#271).
+            if lookup(&code).is_ok_and(|(def, _)| def.contains("+pm=")) {
+                continue;
+            }
+            let Ok(p) = Projector::new(&code) else { continue };
+            let Some(lon0) = p.seam() else { continue };
+            let x = |lon: f64| p.forward(Coord::new(lon, 0.0)).map(|m| m.x);
+            let (Some(west), Some(centre), Some(east)) = (x(lon0 + 179.5), x(lon0), x(lon0 + 180.5)) else { continue };
+            assert!(west > centre && centre > east, "EPSG:{n}: lon_0 {lon0}: {west} / {centre} / {east}");
+            checked += 1;
+        }
+        assert!(checked > 20, "{checked}");
+    }
+
+    #[test]
     fn features_across_the_map_edge_are_cut_there() {
         use rustgis_data::Geometry;
         // #209: Equal Earth Americas (computed here, edge at 90°E) and PDC Mercator (proj4rs,
