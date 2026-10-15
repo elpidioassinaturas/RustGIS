@@ -497,8 +497,10 @@ mod tests {
         let mut checked = 0;
         for n in 1024..=32767u32 {
             let code = format!("EPSG:{n}");
-            // Longitudes counted from another prime meridian aren't handled yet (#271).
-            if lookup(&code).is_ok_and(|(def, _)| def.contains("+pm=")) {
+            // Codes crs-definitions lacks are skipped before building anything; longitudes
+            // counted from another prime meridian aren't handled yet (#271).
+            let Ok((def, _)) = lookup(&code) else { continue };
+            if def.contains("+pm=") {
                 continue;
             }
             let Ok(p) = Projector::new(&code) else { continue };
@@ -508,7 +510,8 @@ mod tests {
             assert!(west > centre && centre > east, "EPSG:{n}: lon_0 {lon0}: {west} / {centre} / {east}");
             checked += 1;
         }
-        assert!(checked > 20, "{checked}");
+        // 25 in crs-definitions 0.6 (Mercator, equirectangular, cylindrical equal-area, Equal Earth).
+        assert!(checked >= 25, "only {checked} world projections checked");
     }
 
     #[test]
