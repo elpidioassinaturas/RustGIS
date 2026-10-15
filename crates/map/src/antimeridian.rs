@@ -6,9 +6,11 @@
 use rustgis_data::Geometry;
 use rustgis_geom::Coord;
 
-/// How far inside the edge points moved by a turn are kept, in degrees (about a centimetre on the
-/// ground), so each piece projects onto its own side of the map even when the projection
-/// normalises longitudes (a datum shift goes through geocentric coordinates).
+/// How far inside the edge the pieces of a cut geometry are kept, in degrees (about a centimetre on
+/// the ground), so each projects onto its own side of the map even when the projection normalises
+/// longitudes (a datum shift goes through geocentric coordinates). Geometry that needs no cut is
+/// left exactly as it is instead, so it stays unchanged for hit-testing and snapping as much as
+/// for drawing: a point or line on the edge itself is drawn there as before.
 const EDGE: f64 = 1e-7;
 
 /// Clipped rings smaller than this (square degrees) are slivers along the cut and are dropped.
@@ -51,14 +53,15 @@ fn span(pts: &[Coord], lo: f64) -> Option<(i64, i64)> {
     Some((k0, k1))
 }
 
-/// A point of window `k`, moved into the projection's own turn and kept off its edge. Points
-/// already in it (`k == 0`) stay exactly where they are, so geometry that needs no cut is
-/// unchanged (for hit-testing and snapping as much as for drawing).
+/// A point of a cut piece in window `k`, moved into the projection's own turn and kept off its edge.
 fn shift(c: Coord, lo: f64, k: i64) -> Coord {
-    if k == 0 {
-        return c;
-    }
     Coord::new((c.x - 360.0 * k as f64).clamp(lo + EDGE, lo + 360.0 - EDGE), c.y)
+}
+
+/// A point of geometry that needs no cut, all of it in window `k`: moved a turn when it lies in
+/// another, left exactly as it is in the projection's own.
+fn place(c: Coord, lo: f64, k: i64) -> Coord {
+    if k == 0 { c } else { shift(c, lo, k) }
 }
 
 fn fold(c: Coord, lo: f64) -> Coord {
@@ -72,7 +75,7 @@ fn fold(c: Coord, lo: f64) -> Coord {
 fn cut_line(part: &[Coord], lo: f64) -> Vec<Vec<Coord>> {
     let Some((k0, k1)) = span(part, lo) else { return vec![part.to_vec()] };
     if k0 == k1 {
-        return vec![part.iter().map(|c| shift(*c, lo, k0)).collect()];
+        return vec![part.iter().map(|c| place(*c, lo, k0)).collect()];
     }
     let mut out = Vec::new();
     for k in k0..=k1 {
@@ -129,14 +132,15 @@ fn cut_polygon(rings: &[Vec<Coord>], lo: f64) -> Vec<Vec<Vec<Coord>>> {
     let Some(outer) = rings.first() else { return Vec::new() };
     let Some((k0, k1)) = span(outer, lo) else { return vec![rings.to_vec()] };
     if k0 == k1 {
-        return vec![rings.iter().map(|r| r.iter().map(|c| shift(*c, lo, k0)).collect()).collect()];
+        return vec![rings.iter().map(|r| r.iter().map(|c| place(*c, lo, k0)).collect()).collect()];
     }
     let mut out = Vec::new();
     for k in k0..=k1 {
         let (a, b) = (lo + 360.0 * k as f64, lo + 360.0 * (k + 1) as f64);
         let pieces = |r: &Vec<Coord>| clip_ring(r, a, b).into_iter().filter(|p| area(p).abs() > SLIVER);
         let mut polys: Vec<Vec<Vec<Coord>>> = pieces(outer).map(|p| vec![p]).collect();
-        // A hole's pieces go with the piece of the exterior they lie in.
+        // A hole's pieces go with the piece of the exterior they lie in (dropped only when the
+        // exterior has no piece in this window).
         for hole in rings.iter().skip(1).flat_map(pieces) {
             if let Some(i) = home(&polys, &hole, a, b) {
                 polys[i].push(hole);
@@ -265,7 +269,8 @@ fn clip_half(pts: &[Coord], inside: impl Fn(Coord) -> bool, x: f64) -> Vec<Coord
 }
 
 /// The exterior piece a hole piece lies in: the first that contains one of its vertices or edge
-/// midpoints off the cut, else (rounding at the cut) the one whose box holds the hole's box centre.
+/// midpoints off the cut, else (rounding at the cut) the one whose box is nearest the hole's box
+/// centre. `None` only when there is no piece.
 fn home(polys: &[Vec<Vec<Coord>>], hole: &[Coord], a: f64, b: f64) -> Option<usize> {
     let mids = hole.windows(2).map(|w| Coord::new((w[0].x + w[1].x) / 2.0, (w[0].y + w[1].y) / 2.0));
     hole.iter()
@@ -276,9 +281,11 @@ fn home(polys: &[Vec<Vec<Coord>>], hole: &[Coord], a: f64, b: f64) -> Option<usi
         .or_else(|| {
             let (x0, y0, x1, y1) = bounds(hole)?;
             let centre = Coord::new((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-            polys
-                .iter()
-                .position(|p| bounds(&p[0]).is_some_and(|(x0, y0, x1, y1)| (x0..=x1).contains(&centre.x) && (y0..=y1).contains(&centre.y)))
+            let gap = |p: &Vec<Vec<Coord>>| match p.first().and_then(|r| bounds(r)) {
+                Some((x0, y0, x1, y1)) => (x0 - centre.x).max(centre.x - x1).max(0.0).hypot((y0 - centre.y).max(centre.y - y1).max(0.0)),
+                None => f64::INFINITY,
+            };
+            (0..polys.len()).min_by(|&i, &j| gap(&polys[i]).total_cmp(&gap(&polys[j])))
         })
 }
 
@@ -393,7 +400,7 @@ mod tests {
         let river = Geometry::Line(vec![vec![c(80.0, 50.0), c(100.0, 52.0)]]);
         let Geometry::Line(parts) = cut(&river, -90.0) else { panic!("a line") };
         assert_eq!(parts.len(), 2, "{parts:?}");
-        assert_eq!(parts[0][1].x, 90.0, "west part ends on the edge, in the projection's own turn");
+        assert!((parts[0][1].x - 90.0).abs() < 1e-6 && parts[0][1].x < 90.0, "west part ends just inside the edge");
         assert!((parts[1][0].x + 270.0).abs() < 1e-6 && parts[1][0].x > -270.0, "east part starts just inside the other edge");
         assert!((parts[0][1].y - 51.0).abs() < 1e-9 && (parts[1][0].y - 51.0).abs() < 1e-9);
     }
@@ -444,6 +451,13 @@ mod tests {
         // Two vertices on the cut (x = 0) and one on the exterior's own edge, where the
         // even-odd test can go either way: an edge midpoint places it.
         let hole = [c(0.0, 2.0), c(10.0, 5.0), c(0.0, 8.0), c(0.0, 2.0)];
-        assert_eq!(home(&[square], &hole, 0.0, 360.0), Some(0));
+        assert_eq!(home(std::slice::from_ref(&square), &hole, 0.0, 360.0), Some(0));
+        // A sliver lying just outside the exterior's edge (rounding at the cut): no point of it is
+        // inside any piece, and it goes to the nearest piece rather than being dropped.
+        let far = vec![vec![c(100.0, 0.0), c(110.0, 0.0), c(110.0, 10.0), c(100.0, 10.0), c(100.0, 0.0)]];
+        let sliver = [c(10.0, 2.0), c(10.0, 8.0), c(10.0 + 1e-9, 5.0), c(10.0, 2.0)];
+        assert_eq!(home(&[far.clone(), square], &sliver, 0.0, 360.0), Some(1));
+        assert_eq!(home(&[far], &sliver, 0.0, 360.0), Some(0), "the only piece");
+        assert_eq!(home(&[], &sliver, 0.0, 360.0), None);
     }
 }
