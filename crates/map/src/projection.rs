@@ -90,8 +90,9 @@ pub enum Domain {
 }
 
 impl Domain {
-    /// The area of use for a regional preset, or one worked out from the PROJ parameters.
-    fn of(id: Option<&str>, def: &str) -> Domain {
+    /// The area of use for a regional preset, or one worked out from the PROJ parameters, whose
+    /// longitudes are counted from the prime meridian `pm` (degrees east of Greenwich).
+    fn of(id: Option<&str>, def: &str, pm: f64) -> Domain {
         match id {
             Some("europeEqualArea") => return Domain::Box(Extent::new(-35.0, 25.0, 50.0, 75.0)),
             Some("usaAlbers") => return Domain::Box(Extent::new(-130.0, 18.0, -60.0, 55.0)),
@@ -101,10 +102,10 @@ impl Domain {
             def.split_whitespace().find_map(|t| t.strip_prefix(&format!("+{k}="))).and_then(|v| v.parse().ok())
         };
         let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
-        let (lon0, lat0) = (param("lon_0").unwrap_or(0.0), param("lat_0").unwrap_or(0.0));
+        let (lon0, lat0) = (param("lon_0").unwrap_or(0.0) + pm, param("lat_0").unwrap_or(0.0));
         match proj {
             "tmerc" | "etmerc" | "utm" => {
-                let lon0 = if proj == "utm" { param("zone").map(|z| z * 6.0 - 183.0).unwrap_or(lon0) } else { lon0 };
+                let lon0 = if proj == "utm" { param("zone").map(|z| z * 6.0 - 183.0 + pm).unwrap_or(lon0) } else { lon0 };
                 Domain::Band { lon0, half: 30.0 }
             }
             "stere" | "sterea" | "somerc" | "krovak" => Domain::Cap { center: Coord::new(lon0, lat0), radius: 60.0 },
@@ -130,6 +131,19 @@ impl Domain {
     }
 }
 
+/// The prime meridian of a definition (`+pm=`: a name such as `paris`, or degrees), in degrees
+/// east of Greenwich: `lon_0` and the definition's other longitudes are counted from it. 0 when
+/// there is none, or when it can't be read (proj4rs then refuses the definition anyway).
+fn prime_meridian(def: &str) -> f64 {
+    let Some(pm) = def.split_whitespace().find_map(|t| t.strip_prefix("+pm=")) else { return 0.0 };
+    // proj4rs reads names, degrees and DMS alike.
+    proj4rs::Proj::from_proj_string(&format!("+proj=longlat +ellps=WGS84 +pm={pm}"))
+        .map(|p| p.from_greenwich().to_degrees())
+        .ok()
+        .filter(|d| d.is_finite())
+        .unwrap_or(0.0)
+}
+
 /// How a projection is computed: by the PROJ port, or here (world projections it lacks).
 #[derive(Clone)]
 enum Engine {
@@ -144,8 +158,19 @@ pub struct Projector {
     /// Metres per map unit.
     to_meter: f64,
     domain: Domain,
-    /// The central meridian, for cutting geometry along the map's edge.
+    /// The central meridian east of Greenwich, for cutting geometry along the map's edge.
     lon0: f64,
+    /// Where the map's edge runs in WGS84 longitudes, worked out on first use (see [`Projector::edge`]).
+    edge: std::sync::OnceLock<Edge>,
+}
+
+/// A world projection's edge in WGS84 longitudes: the meridian it runs along on average, and how far
+/// it strays from it. A datum shift moves the edge off the central meridian's opposite (by hundreds
+/// of metres for a local datum) and bends it a little with latitude.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Edge {
+    pub lon: f64,
+    pub stray: f64,
 }
 
 impl std::fmt::Debug for Projector {
@@ -174,12 +199,15 @@ impl Projector {
             .iter()
             .find(|(id, label, _)| id.eq_ignore_ascii_case(code_t) || label.eq_ignore_ascii_case(code_t))
             .map(|(id, _, _)| *id);
-        let domain = Domain::of(preset, &def);
+        let pm = prime_meridian(&def);
+        let domain = Domain::of(preset, &def, pm);
         let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
         let lon0 = def.split_whitespace().find_map(|t| t.strip_prefix("+lon_0=")).and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let lon0 = if f64::is_finite(lon0) { lon0 } else { 0.0 };
+        // proj4rs applies `+pm` itself; the world projections computed here take it in their centre.
+        let lon0 = if f64::is_finite(lon0) { lon0 + pm } else { pm };
         if let Some(kind) = crate::world::Kind::from_proj_name(proj) {
-            return Ok(Projector { engine: Engine::World(crate::world::World { kind, lon0 }), to_meter: 1.0, domain, lon0 });
+            let engine = Engine::World(crate::world::World { kind, lon0 });
+            return Ok(Projector { engine, to_meter: 1.0, domain, lon0, edge: std::sync::OnceLock::new() });
         }
         let native = proj4rs::Proj::from_proj_string(&def).map_err(|e| match e {
             // A known code whose method isn't implemented (EPSG:5880's +proj=poly, say): name it.
@@ -189,14 +217,54 @@ impl Projector {
         let wgs84 = proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| e.to_string())?;
         let to_meter = native.to_meter();
         let engine = Engine::Proj { native: Box::new(native), wgs84: Box::new(wgs84) };
-        Ok(Projector { engine, to_meter: if to_meter > 0.0 { to_meter } else { 1.0 }, domain, lon0 })
+        let to_meter = if to_meter > 0.0 { to_meter } else { 1.0 };
+        Ok(Projector { engine, to_meter, domain, lon0, edge: std::sync::OnceLock::new() })
     }
 
     /// The central meridian of a projection that shows the whole world, whose edge (the meridian
     /// opposite) geometry is cut along; `None` for one limited to an area of use, which never
     /// reaches that meridian.
     pub fn seam(&self) -> Option<f64> {
-        (self.domain == Domain::World).then_some(self.lon0)
+        self.edge().map(|e| e.lon - 180.0)
+    }
+
+    /// Where the edge of a projection that shows the whole world runs, in WGS84 longitudes; `None`
+    /// for one limited to an area of use. Without a datum shift it is the meridian opposite the
+    /// central one. With one, it is found at every 10° of latitude from 80°S to 80°N by bisecting
+    /// for where the map jumps from one side to the other.
+    pub fn edge(&self) -> Option<Edge> {
+        if self.domain != Domain::World {
+            return None;
+        }
+        let exact = Edge { lon: self.lon0 + 180.0, stray: 0.0 };
+        let Engine::Proj { .. } = self.engine else { return Some(exact) };
+        Some(*self.edge.get_or_init(|| self.find_edge(exact.lon).unwrap_or(exact)))
+    }
+
+    fn find_edge(&self, guess: f64) -> Option<Edge> {
+        let mut found = Vec::with_capacity(17);
+        for i in 0..=16 {
+            let lat = -80.0 + 10.0 * i as f64;
+            let centre = self.forward(Coord::new(guess - 180.0, lat))?.x;
+            // West of the edge a point draws on the map's east side, past it on the west side.
+            let east_side = |lon: f64| self.forward(Coord::new(lon, lat)).map(|m| m.x > centre);
+            let (mut a, mut b) = (guess - 1.0, guess + 1.0);
+            if !east_side(a)? || east_side(b)? {
+                return None;
+            }
+            for _ in 0..60 {
+                let m = (a + b) / 2.0;
+                if east_side(m)? {
+                    a = m;
+                } else {
+                    b = m;
+                }
+            }
+            found.push((a + b) / 2.0);
+        }
+        let lon = found.iter().sum::<f64>() / found.len() as f64;
+        let stray = found.iter().map(|x| (x - lon).abs()).fold(0.0, f64::max);
+        Some(Edge { lon, stray })
     }
 
     /// Longitude/latitude to map coordinates, `None` outside the projection.
@@ -305,9 +373,9 @@ impl Flat {
     pub fn project(&self, g: &rustgis_data::Geometry) -> rustgis_data::Geometry {
         let f = |c: Coord| self.forward_checked(c).unwrap_or(Coord::new(f64::NAN, f64::NAN));
         if let Flat::Custom(p) = self
-            && let Some(lon0) = p.seam()
+            && let Some(edge) = p.edge()
         {
-            return crate::antimeridian::cut(g, lon0).map_coords(&f);
+            return crate::antimeridian::cut_with_margin(g, edge.lon - 180.0, edge.stray).map_coords(&f);
         }
         g.map_coords(&f)
     }
@@ -401,7 +469,7 @@ mod tests {
         assert!(Projector::new("12x").is_err());
         assert!(Projector::new("epsgfoo32617").is_err());
         // A conic centred on the Pacific keeps points across the antimeridian.
-        let pacific = Domain::of(None, "+proj=lcc +lat_1=30 +lat_2=60 +lon_0=150");
+        let pacific = Domain::of(None, "+proj=lcc +lat_1=30 +lat_2=60 +lon_0=150", 0.0);
         assert!(pacific.contains(Coord::new(-170.0, 45.0)) && pacific.contains(Coord::new(120.0, 45.0)));
         assert!(!pacific.contains(Coord::new(0.0, 45.0)));
         assert!(Projector::new("EPSG 32617").is_ok());
@@ -487,11 +555,42 @@ mod tests {
     }
 
     #[test]
+    fn longitudes_are_counted_from_the_prime_meridian() {
+        // EPSG:5329: Mercator with lon_0 = 3.19° east of Jakarta (106.81°E), so centred on 110°E,
+        // where its false easting puts x = 3 900 000 m (give or take the datum shift).
+        let merc = Projector::new("EPSG:5329").unwrap();
+        let seam = merc.seam().unwrap();
+        // Its datum shift (Bessel, towgs84 -403,684,41) moves the edge about 290 m off 70°W in WGS84.
+        assert!((seam - 110.0).abs() < 0.01, "{seam}");
+        let edge = merc.edge().unwrap();
+        assert!(edge.stray < 0.005, "{edge:?}");
+        // A projection on WGS84 has its edge exactly opposite its central meridian.
+        let pdc = Projector::new("EPSG:3832").unwrap().edge().unwrap();
+        assert!((pdc.lon - 330.0).abs() < 1e-9 && pdc.stray < 1e-9, "{pdc:?}");
+        let centre = merc.forward(Coord::new(110.0, 0.0)).unwrap();
+        assert!((centre.x - 3_900_000.0).abs() < 2_000.0, "{centre:?}");
+        // EPSG:31251: Gauss–Krüger with lon_0 = 28° east of Ferro (17.67°W), so its band is around
+        // 10.33°E, not 28°E: Ireland is in it, the Caspian isn't.
+        let gk = Projector::new("EPSG:31251").unwrap();
+        let Domain::Band { lon0, half } = gk.domain() else { panic!("{:?}", gk.domain()) };
+        assert!((lon0 - (28.0 - 17.666666666667)).abs() < 1e-6 && half == 30.0, "{lon0}");
+        assert!(gk.forward_checked(Coord::new(13.0, 47.5)).is_some(), "Austria");
+        assert!(gk.forward_checked(Coord::new(-8.0, 53.0)).is_some(), "Ireland");
+        assert!(gk.forward_checked(Coord::new(50.0, 42.0)).is_none(), "the Caspian");
+        // Names, degrees and nothing at all.
+        assert!((prime_meridian("+proj=lcc +pm=paris") - 2.337229166667).abs() < 1e-9);
+        assert!((prime_meridian("+proj=merc +pm=-17.5") + 17.5).abs() < 1e-9);
+        assert_eq!(prime_meridian("+proj=merc +lon_0=10"), 0.0);
+        assert_eq!(prime_meridian("+proj=merc +pm=nowhere"), 0.0);
+    }
+
+    #[test]
     fn features_across_the_map_edge_are_cut_there() {
         use rustgis_data::Geometry;
         // #209: Equal Earth Americas (computed here, edge at 90°E) and PDC Mercator (proj4rs,
         // lon_0 = 150°, edge at 30°W). Before, these drew as bands across the whole map.
-        for (code, edge) in [("EPSG:8858", 90.0), ("EPSG:3832", -30.0)] {
+        // EPSG:5329 is centred on 110°E through its prime meridian (+pm=jakarta), with a datum shift.
+        for (code, edge) in [("EPSG:8858", 90.0), ("EPSG:3832", -30.0), ("EPSG:5329", -70.0)] {
             let flat = Flat::of(&crate::Projection::Custom(code.into()));
             assert!(matches!(flat, Flat::Custom(_)), "{code}");
             let width = flat.extent(&Extent::new(-180.0, -80.0, 180.0, 80.0)).width();
