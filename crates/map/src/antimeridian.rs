@@ -86,8 +86,13 @@ fn window(lo: f64, k: i64) -> (f64, f64) {
 
 /// A point of a cut piece in window `k`, moved into the projection's own turn and kept off its edge.
 fn shift(c: Coord, t: Turn<'_>, k: i64) -> Coord {
+    shift_by(c, t, k, (t.margin)(c.y))
+}
+
+/// [`shift`] with the margin at the point's latitude already worked out.
+fn shift_by(c: Coord, t: Turn<'_>, k: i64, margin: f64) -> Coord {
     // Capped below half a turn, so the bounds can't cross whatever margin a caller passes.
-    let inset = (EDGE + (t.margin)(c.y).max(0.0)).min(179.0);
+    let inset = (EDGE + margin.max(0.0)).min(179.0);
     Coord::new((c.x - 360.0 * k as f64).clamp(t.lo + inset, t.lo + 360.0 - inset), c.y)
 }
 
@@ -101,16 +106,18 @@ fn place(c: Coord, t: Turn<'_>, k: i64) -> Coord {
 /// A point already in the projection's own turn. Without a margin it stays exactly where it is (a
 /// point on the edge itself is drawn there). Under a datum shift the real edge strays from the
 /// cut meridian by the margin, so a point within that of either edge is pulled inside, by at
-/// most the margin, rather than projecting onto the far side.
+/// most the margin, rather than projecting onto the far side; it stays on its own side of the map.
 fn own_turn(c: Coord, t: Turn<'_>) -> Coord {
-    if (t.margin)(c.y) > 0.0 { shift(c, t, 0) } else { c }
+    let margin = (t.margin)(c.y);
+    if margin > 0.0 { shift_by(c, t, 0, margin) } else { c }
 }
 
 fn fold(c: Coord, t: Turn<'_>) -> Coord {
     if c.x.is_nan() || c.x.abs() > FAR {
         return c;
     }
-    // A point on either edge (180° under `lon_0 = 0`) stays on its own side.
+    // A point on either edge (180° under `lon_0 = 0`) stays on its own side: exactly there
+    // without a margin, just inside it with one.
     if (t.lo..=t.lo + 360.0).contains(&c.x) {
         return own_turn(c, t);
     }

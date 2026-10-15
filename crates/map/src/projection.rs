@@ -90,10 +90,10 @@ pub enum Domain {
 }
 
 impl Domain {
-    /// The area of use for a regional preset, or one worked out from the PROJ parameters. `lon0` is
-    /// the central meridian east of Greenwich, and `pm` the prime meridian the definition's other
-    /// longitudes (a UTM zone's) are counted from.
-    fn of(id: Option<&str>, def: &str, lon0: f64, pm: f64) -> Domain {
+    /// The area of use for a regional preset, or one worked out from the PROJ parameters.
+    /// `(lon0, lat0)` is the projection's centre (`lon0` east of Greenwich), as proj4rs reads it,
+    /// and `pm` the prime meridian the definition's other longitudes (a UTM zone's) are counted from.
+    fn of(id: Option<&str>, def: &str, (lon0, lat0): (f64, f64), pm: f64) -> Domain {
         match id {
             Some("europeEqualArea") => return Domain::Box(Extent::new(-35.0, 25.0, 50.0, 75.0)),
             Some("usaAlbers") => return Domain::Box(Extent::new(-130.0, 18.0, -60.0, 55.0)),
@@ -103,7 +103,6 @@ impl Domain {
             def.split_whitespace().find_map(|t| t.strip_prefix(&format!("+{k}="))).and_then(|v| v.parse().ok())
         };
         let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
-        let lat0 = angle(def, "lat_0").unwrap_or(0.0);
         match proj {
             "tmerc" | "etmerc" | "utm" => {
                 let lon0 = if proj == "utm" { param("zone").map(|z| z * 6.0 - 183.0 + pm).unwrap_or(lon0) } else { lon0 };
@@ -263,7 +262,8 @@ impl Projector {
             // Computed here: the centre is read from the definition as proj4rs would read it.
             let pm = prime_meridian(&def);
             let lon0 = angle(&def, "lon_0").unwrap_or(0.0) + pm;
-            let domain = Domain::of(preset, &def, lon0, pm);
+            let lat0 = angle(&def, "lat_0").unwrap_or(0.0);
+            let domain = Domain::of(preset, &def, (lon0, lat0), pm);
             let engine = Engine::World(crate::world::World { kind, lon0 });
             return Ok(Projector { engine, to_meter: 1.0, domain, lon0, edge: std::sync::OnceLock::new() });
         }
@@ -279,7 +279,8 @@ impl Projector {
         let finite = |d: f64| if d.is_finite() { d } else { 0.0 };
         let pm = finite(native.from_greenwich().to_degrees());
         let lon0 = finite(native.longitude_of_origin().to_degrees()) + pm;
-        let domain = Domain::of(preset, &def, lon0, pm);
+        let lat0 = finite(native.latitude_of_origin().to_degrees());
+        let domain = Domain::of(preset, &def, (lon0, lat0), pm);
         let engine = Engine::Proj { native: Box::new(native), wgs84: Box::new(wgs84) };
         let to_meter = if to_meter > 0.0 { to_meter } else { 1.0 };
         Ok(Projector { engine, to_meter, domain, lon0, edge: std::sync::OnceLock::new() })
@@ -547,7 +548,7 @@ mod tests {
         assert!(Projector::new("12x").is_err());
         assert!(Projector::new("epsgfoo32617").is_err());
         // A conic centred on the Pacific keeps points across the antimeridian.
-        let pacific = Domain::of(None, "+proj=lcc +lat_1=30 +lat_2=60 +lon_0=150", 150.0, 0.0);
+        let pacific = Domain::of(None, "+proj=lcc +lat_1=30 +lat_2=60 +lon_0=150", (150.0, 0.0), 0.0);
         assert!(pacific.contains(Coord::new(-170.0, 45.0)) && pacific.contains(Coord::new(120.0, 45.0)));
         assert!(!pacific.contains(Coord::new(0.0, 45.0)));
         assert!(Projector::new("EPSG 32617").is_ok());
