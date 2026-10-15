@@ -6,15 +6,14 @@
 use rustgis_data::Geometry;
 use rustgis_geom::Coord;
 
-/// How far inside the edge the pieces of a cut geometry are kept, in degrees (about a centimetre on
-/// the ground), so each projects onto its own side of the map even when the projection normalises
-/// longitudes (a datum shift goes through geocentric coordinates). Geometry that needs no cut is
-/// left exactly as it is instead, so it stays unchanged for hit-testing and snapping as much as
-/// for drawing: a point or line on the edge itself is drawn there as before.
-const EDGE: f64 = 1e-7;
-
-/// Clipped rings smaller than this (square degrees) are slivers along the cut and are dropped.
-const SLIVER: f64 = 1e-12;
+/// How far inside the edge the pieces of a cut geometry are kept, in degrees (about 0.1 mm on the
+/// ground), so each projects onto its own side of the map even when the projection normalises
+/// longitudes (a datum shift goes through geocentric coordinates): well past proj4rs' 1e-12 rad
+/// tolerance at ±180°, and small enough that only features narrower than it flatten against the
+/// edge. Geometry that needs no cut is left exactly as it is instead, so it stays unchanged for
+/// hit-testing and snapping as much as for drawing: a point or line on the edge itself is drawn
+/// there as before.
+const EDGE: f64 = 1e-9;
 
 /// Longitudes (and central meridians) further out than this, three turns, aren't real data: such
 /// geometry is left for the projection to drop, which also keeps the turn arithmetic small.
@@ -156,7 +155,9 @@ fn cut_polygon(rings: &[Vec<Coord>], lo: f64) -> Vec<Vec<Vec<Coord>>> {
     let mut out = Vec::new();
     for k in k0..=k1 {
         let (a, b) = (lo + 360.0 * k as f64, lo + 360.0 * (k + 1) as f64);
-        let pieces = |r: &Vec<Coord>| clip_ring(r, a, b).into_iter().filter(|p| area(p).abs() > SLIVER);
+        // Only pieces with no area at all (lying along the cut) are dropped: a tiny feature
+        // across the edge keeps both its pieces.
+        let pieces = |r: &Vec<Coord>| clip_ring(r, a, b).into_iter().filter(|p| area(p) != 0.0);
         let mut polys: Vec<Vec<Vec<Coord>>> = pieces(outer).map(|p| vec![p]).collect();
         // A hole's pieces go with the piece of the exterior they lie in (dropped only when the
         // exterior has no piece in this window).
@@ -327,12 +328,14 @@ fn ring_contains(r: &[Coord], p: Coord) -> bool {
     inside
 }
 
-/// Signed shoelace area.
+/// Signed shoelace area, taken about the ring's first vertex so that rounding doesn't grow with
+/// the coordinates: a ring lying along a meridian has exactly none.
 fn area(r: &[Coord]) -> f64 {
-    let Some(&last) = r.last() else { return 0.0 };
-    let mut prev = last;
+    let (Some(&o), Some(&last)) = (r.first(), r.last()) else { return 0.0 };
+    let mut prev = Coord::new(last.x - o.x, last.y - o.y);
     let mut s = 0.0;
     for &c in r {
+        let c = Coord::new(c.x - o.x, c.y - o.y);
         s += prev.x * c.y - c.x * prev.y;
         prev = c;
     }
@@ -402,6 +405,17 @@ mod tests {
                 assert!(!(on_cut && spans_gap), "an edge along the cut bridges the arms: {w:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_tiny_feature_across_the_edge_keeps_both_pieces() {
+        // About 2 cm by 10 cm across 90°E: each piece is about 1e-13 square degrees.
+        let tiny = vec![c(89.9999999, 0.0), c(90.0000001, 0.0), c(90.0000001, 0.000001), c(89.9999999, 0.000001), c(89.9999999, 0.0)];
+        let Geometry::Polygon(polys) = cut(&Geometry::Polygon(vec![vec![tiny]]), -90.0) else { panic!("a polygon") };
+        assert_eq!(polys.len(), 2, "{polys:?}");
+        assert!(polys.iter().all(|p| area(&p[0]) != 0.0), "{polys:?}");
+        // A ring lying along the cut has no area at all, whatever its longitude.
+        assert_eq!(area(&[c(90.0, 1.0), c(90.0, 5.0), c(90.0, 3.0), c(90.0, 1.0)]), 0.0);
     }
 
     #[test]
