@@ -518,6 +518,19 @@ mod tests {
                 let side = |p: &Vec<Coord>| p.iter().map(|c| c.x).sum::<f64>().signum();
                 assert_ne!(side(&parts[0]), side(&parts[1]), "{code}: the pieces sit on opposite edges");
             }
+            // A hole across the edge is cut with its polygon: each side keeps its part of it.
+            let ring = |x0: f64, x1: f64, y0: f64, y1: f64| {
+                vec![Coord::new(x0, y0), Coord::new(x1, y0), Coord::new(x1, y1), Coord::new(x0, y1), Coord::new(x0, y0)]
+            };
+            let holed = Geometry::Polygon(vec![vec![ring(edge - 10.0, edge + 10.0, 40.0, 60.0), ring(edge - 5.0, edge + 5.0, 45.0, 55.0)]]);
+            let Geometry::Polygon(polys) = flat.project(&holed) else { panic!("{code}: a polygon") };
+            assert_eq!(polys.len(), 2, "{code}: one piece on each side: {polys:?}");
+            for p in &polys {
+                assert_eq!(p.len(), 2, "{code}: each piece keeps its part of the hole: {p:?}");
+                assert!(p.iter().flatten().all(|c| c.is_finite()), "{code}: {p:?}");
+            }
+            let side = |p: &Vec<Vec<Coord>>| p[1].iter().map(|c| c.x).sum::<f64>().signum();
+            assert_ne!(side(&polys[0]), side(&polys[1]), "{code}: the hole's parts sit on opposite edges");
         }
         // Limited projections never reach the far meridian, so nothing is cut.
         assert_eq!(Projector::new("EPSG:32633").unwrap().seam(), None);
