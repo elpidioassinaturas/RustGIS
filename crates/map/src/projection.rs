@@ -623,7 +623,9 @@ mod tests {
             assert!(west > centre && centre > east, "EPSG:{n}: lon_0 {lon0}: {west} / {centre} / {east}");
             checked += 1;
         }
-        assert!(checked > 20, "{checked}");
+        // 31 in crs-definitions 0.6 (Mercator, equirectangular, cylindrical equal-area, Equal Earth),
+        // 6 of them Mercator from Jakarta (+pm).
+        assert!(checked >= 31, "only {checked} world projections checked");
     }
 
     #[test]
