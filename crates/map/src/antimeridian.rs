@@ -308,6 +308,7 @@ fn clip_half(pts: &[Coord], inside: impl Fn(Coord) -> bool, x: f64) -> Vec<Coord
 /// The exterior piece a hole piece lies in: the first that contains one of its vertices or edge
 /// midpoints off the cut, else (rounding at the cut) the one whose box is nearest the hole's box
 /// centre. `None` only when there is no piece.
+///
 /// `boxes` are the pieces' exteriors' bounds, worked out once per window: a point is only tested
 /// against the rings whose box holds it.
 fn home(polys: &[Vec<Vec<Coord>>], boxes: &[Option<Bounds>], hole: &[Coord], a: f64, b: f64) -> Option<usize> {
