@@ -41,7 +41,13 @@ fn span(pts: &[Coord], lo: f64) -> Option<(i64, i64)> {
         return None;
     }
     let k0 = ((min - lo) / 360.0).floor() as i64;
-    let k1 = (((max - lo) / 360.0).ceil() as i64 - 1).max(k0);
+    let k1 = ((max - lo) / 360.0).ceil() as i64 - 1;
+    if k1 < k0 {
+        // Every point on one edge (a meridian at 180° under `lon_0 = 0`): it belongs to both
+        // neighbouring turns, so keep it in the one nearer the projection's own, on its own side.
+        let k = if k1.abs() <= k0.abs() { k1 } else { k0 };
+        return Some((k, k));
+    }
     Some((k0, k1))
 }
 
@@ -423,7 +429,13 @@ mod tests {
         assert_eq!(cut(&world, 0.0), world);
         for x in [-180.0, 180.0] {
             assert_eq!(cut(&Geometry::Point(c(x, 5.0)), 0.0), Geometry::Point(c(x, 5.0)), "{x} stays on its own edge");
+            // So does a line lying along the edge (the graticule's meridian there).
+            let meridian = Geometry::Line(vec![vec![c(x, -80.0), c(x, 0.0), c(x, 80.0)]]);
+            assert_eq!(cut(&meridian, 0.0), meridian, "{x}");
         }
+        // The same for a projection's east edge elsewhere: 90°E under 90°W.
+        let east = Geometry::Line(vec![vec![c(90.0, -10.0), c(90.0, 10.0)]]);
+        assert_eq!(cut(&east, -90.0), east);
     }
 
     #[test]
