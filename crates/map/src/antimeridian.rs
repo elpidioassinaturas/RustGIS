@@ -16,14 +16,25 @@ const EDGE: f64 = 1e-7;
 /// Clipped rings smaller than this (square degrees) are slivers along the cut and are dropped.
 const SLIVER: f64 = 1e-12;
 
+/// Longitudes (and central meridians) further out than this, three turns, aren't real data: such
+/// geometry is left for the projection to drop, which also keeps the turn arithmetic small.
+const FAR: f64 = 1080.0;
+
 /// `g` (longitude/latitude) cut along the edge of a world projection centred on `lon0`, with every
 /// piece moved by whole turns into `lon0 - 180 ..= lon0 + 180`.
 pub fn cut(g: &Geometry, lon0: f64) -> Geometry {
+    if lon0.is_nan() || lon0.abs() > FAR {
+        return g.clone();
+    }
     let lo = lon0 - 180.0;
     match g {
         Geometry::Point(c) => Geometry::Point(fold(*c, lo)),
         Geometry::MultiPoint(v) => Geometry::MultiPoint(v.iter().map(|c| fold(*c, lo)).collect()),
-        Geometry::Line(parts) => Geometry::Line(parts.iter().flat_map(|p| cut_line(p, lo)).collect()),
+        // A point the projection can't use breaks a line, as the renderer does, and the runs
+        // either side are cut on their own.
+        Geometry::Line(parts) => Geometry::Line(
+            parts.iter().flat_map(|p| p.split(|c| !c.is_finite())).filter(|r| r.len() >= 2).flat_map(|r| cut_line(r, lo)).collect(),
+        ),
         Geometry::Polygon(polys) => Geometry::Polygon(polys.iter().flat_map(|p| cut_polygon(p, lo)).collect()),
     }
 }
@@ -39,7 +50,7 @@ fn span(pts: &[Coord], lo: f64) -> Option<(i64, i64)> {
         min = min.min(c.x);
         max = max.max(c.x);
     }
-    if !(min.is_finite() && max - min <= 1080.0) {
+    if pts.is_empty() || min < -FAR || max > FAR {
         return None;
     }
     let k0 = ((min - lo) / 360.0).floor() as i64;
@@ -66,7 +77,7 @@ fn place(c: Coord, lo: f64, k: i64) -> Coord {
 
 fn fold(c: Coord, lo: f64) -> Coord {
     // A point on either edge (180° under `lon_0 = 0`) stays on its own side.
-    if !c.x.is_finite() || (lo..=lo + 360.0).contains(&c.x) {
+    if c.x.is_nan() || c.x.abs() > FAR || (lo..=lo + 360.0).contains(&c.x) {
         return c;
     }
     shift(c, lo, ((c.x - lo) / 360.0).floor() as i64)
@@ -129,6 +140,14 @@ fn clip_segment(p: Coord, q: Coord, a: f64, b: f64) -> Option<(Coord, Coord)> {
 }
 
 fn cut_polygon(rings: &[Vec<Coord>], lo: f64) -> Vec<Vec<Vec<Coord>>> {
+    // Vertices the projection can't use are left out, so the ring is still cut.
+    let finite: Vec<Vec<Coord>>;
+    let rings = if rings.iter().flatten().all(|c| c.is_finite()) {
+        rings
+    } else {
+        finite = rings.iter().map(|r| r.iter().copied().filter(|c| c.is_finite()).collect()).collect();
+        &finite
+    };
     let Some(outer) = rings.first() else { return Vec::new() };
     let Some((k0, k1)) = span(outer, lo) else { return vec![rings.to_vec()] };
     if k0 == k1 {
@@ -428,8 +447,6 @@ mod tests {
         let line = Geometry::Line(vec![vec![c(-170.0, 0.0), c(-100.0, 10.0), c(80.0, -5.0)]]);
         assert_eq!(cut(&line, -90.0), line);
         assert_eq!(cut(&Geometry::Point(c(120.0, 1.0)), -90.0), Geometry::Point(c(-240.0, 1.0)));
-        let odd = Geometry::Line(vec![vec![c(f64::NAN, 0.0), c(100.0, 0.0)]]);
-        assert_eq!(format!("{:?}", cut(&odd, -90.0)), format!("{odd:?}"), "left for the projection to drop");
         // Under a 0° central meridian nothing moves, not even points on ±180°.
         let world =
             Geometry::Polygon(vec![vec![vec![c(-180.0, -60.0), c(180.0, -60.0), c(180.0, 60.0), c(-180.0, 60.0), c(-180.0, -60.0)]]]);
@@ -443,6 +460,31 @@ mod tests {
         // The same for a projection's east edge elsewhere: 90°E under 90°W.
         let east = Geometry::Line(vec![vec![c(90.0, -10.0), c(90.0, 10.0)]]);
         assert_eq!(cut(&east, -90.0), east);
+    }
+
+    #[test]
+    fn hostile_coordinates_are_cut_or_left_alone_without_panicking() {
+        // A missing coordinate breaks a line (as the renderer does) and is left out of a ring,
+        // and the rest is still cut.
+        let river = Geometry::Line(vec![vec![c(70.0, 50.0), c(f64::NAN, 0.0), c(80.0, 50.0), c(100.0, 52.0)]]);
+        let Geometry::Line(parts) = cut(&river, -90.0) else { panic!("a line") };
+        assert_eq!(parts.len(), 2, "the lone point is dropped, the run across the edge cut: {parts:?}");
+        assert!(parts.iter().flatten().all(|c| c.is_finite() && (-270.0..=90.0).contains(&c.x)), "{parts:?}");
+        let ring = vec![c(60.0, 40.0), c(120.0, 40.0), c(f64::INFINITY, 50.0), c(120.0, 60.0), c(60.0, 60.0), c(60.0, 40.0)];
+        let Geometry::Polygon(polys) = cut(&Geometry::Polygon(vec![vec![ring]]), -90.0) else { panic!("a polygon") };
+        assert_eq!(polys.len(), 2, "{polys:?}");
+        // Longitudes no data has, and absurd central meridians, are left for the projection.
+        for x in [-1e300, 1e300, f64::MIN, f64::MAX] {
+            let line = Geometry::Line(vec![vec![c(x, 0.0), c(x, 1.0)]]);
+            assert_eq!(cut(&line, -90.0), line, "{x}");
+            let ring = Geometry::Polygon(vec![vec![vec![c(x, 0.0), c(x, 1.0), c(x * 0.5, 1.0), c(x, 0.0)]]]);
+            assert_eq!(cut(&ring, 0.0), ring, "{x}");
+            assert_eq!(cut(&Geometry::Point(c(x, 1.0)), 0.0), Geometry::Point(c(x, 1.0)), "{x}");
+            let square = Geometry::Polygon(vec![vec![vec![c(60.0, 40.0), c(120.0, 40.0), c(120.0, 60.0), c(60.0, 40.0)]]]);
+            assert_eq!(cut(&square, x), square, "lon0 {x}");
+        }
+        assert_eq!(cut(&Geometry::Line(vec![vec![]]), 0.0), Geometry::Line(vec![]));
+        assert_eq!(cut(&Geometry::Polygon(vec![vec![vec![]]]), -90.0), Geometry::Polygon(vec![vec![vec![]]]));
     }
 
     #[test]
