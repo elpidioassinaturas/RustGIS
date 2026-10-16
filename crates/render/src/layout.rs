@@ -694,10 +694,11 @@ mod tests {
             (0..pm.height()).filter(|&y| (0..pm.width()).any(|x| pm.pixel(x, y).is_some_and(|p| p.red() < 200))).max().unwrap_or(0)
         };
         let (shown, all) = (depth(Some(1e6)), depth(None));
-        // A row is 15 px: the drawn legend is the layer's heading and "a"; every class adds b, c,
-        // <all other values> and the empty layer's row.
-        assert!(shown < 2 * 15 + 2, "{shown}");
-        assert!(all >= 5 * 15, "{all}");
+        // The drawn legend is two rows (the layer's heading and "a"); every class makes it six
+        // (b, c, <all other values> and the empty layer's row too). Compared with each other, so
+        // the font and antialiasing don't matter.
+        assert!(shown > 0, "the drawn class is listed");
+        assert!(all >= 2 * shown, "{shown} px of {all}");
     }
 
     #[test]
