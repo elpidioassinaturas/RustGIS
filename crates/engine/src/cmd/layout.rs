@@ -73,10 +73,10 @@ pub fn commands() -> Vec<C> {
             r#"{"layout"?, "shape"?: "rectangle"|"circle"|"ellipse"|"polygon"|"lasso", "points"?: [[u, v], …] (polygon/lasso, 0..1 across the frame), "map"?: name, "x"?, "y"?, "w"?, "h"?: mm}"#,
         ),
         C::new("layout.addElement", "Add Element", "Publish › Map Surrounds", add_element).params(
-            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA", "bold"?: bool (text), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "fill"?: "#RRGGBBAA" (rectangle), "width"?: outline width (rectangle), "image"?: base64, "path"?: picture file, "layer"?, "field"?, "label"?, "rows"?, "step"?: degrees, "labels"?: bool, "off"?: bool (grid), "x"?, "y"?, "w"?, "h"?: mm}"##,
+            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA", "bold"?: bool (text), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "hideOther"?: bool (legend: leave out <all other values>), "fill"?: "#RRGGBBAA" (rectangle), "width"?: outline width (rectangle), "image"?: base64, "path"?: picture file, "layer"?, "field"?, "label"?, "rows"?, "step"?: degrees, "labels"?: bool, "off"?: bool (grid), "x"?, "y"?, "w"?, "h"?: mm}"##,
         ),
         C::new("layout.update", "Element Properties", "Publish › Element", update).params(
-            r##"{"layout"?, "element": id, "x"?, "y"?, "w"?, "h"?: mm, "name"?, "visible"?, "text"?, "size"?, "color"?, "bold"?, "title"?, "allClasses"?: bool (legend), "map"?, "scale"?, "center"?: [lon, lat], "layer"?, "field"?, "rows"?}"##,
+            r##"{"layout"?, "element": id, "x"?, "y"?, "w"?, "h"?: mm, "name"?, "visible"?, "text"?, "size"?, "color"?, "bold"?, "title"?, "allClasses"?: bool (legend), "hideOther"?: bool (legend), "map"?, "scale"?, "center"?: [lon, lat], "layer"?, "field"?, "rows"?}"##,
         ),
         C::new("layout.removeElement", "Delete Element", "Publish › Element", |s, p| {
             let id = element_id(p)?;
@@ -234,7 +234,11 @@ pub(crate) fn new_layout(s: &mut Session, p: &Value) -> CmdResult {
                 (m, m, w - 2.0 * m, 14.0),
                 ElementKind::Text { text: map.clone(), size: 22.0, color: Rgba::rgb(0x1F, 0x29, 0x37), bold: true },
             );
-            l.add("Legend", (side, m + 16.0, sw, fh * 0.6), ElementKind::Legend { frame, title: "Legend".into(), all_classes: false });
+            l.add(
+                "Legend",
+                (side, m + 16.0, sw, fh * 0.6),
+                ElementKind::Legend { frame, title: "Legend".into(), all_classes: false, hide_other: false },
+            );
             l.add("North Arrow", (side + sw / 2.0 - 8.0, m + 16.0 + fh * 0.62, 16.0, 24.0), ElementKind::NorthArrow { frame });
             l.add("Scale Bar", (side, m + 16.0 + fh * 0.62 + 28.0, sw, 12.0), ElementKind::ScaleBar { frame });
             l.add(
@@ -363,7 +367,8 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
             let frame = frame_of(l, p)?;
             let title = ps(p, "title").unwrap_or("Legend").chars().take(200).collect();
             let all_classes = b(p, "allClasses").unwrap_or(false);
-            ("Legend", place(p, l, (pw - 70.0, 45.0, 60.0, 80.0))?, ElementKind::Legend { frame, title, all_classes })
+            let hide_other = b(p, "hideOther").unwrap_or(false);
+            ("Legend", place(p, l, (pw - 70.0, 45.0, 60.0, 80.0))?, ElementKind::Legend { frame, title, all_classes, hide_other })
         }
         "text" | "dynamicText" => {
             let default = if kind == "text" { "Text" } else { "{map} · {scale} · {date}" };
@@ -553,12 +558,15 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
                 *bold = v;
             }
         }
-        ElementKind::Legend { title, all_classes, .. } => {
+        ElementKind::Legend { title, all_classes, hide_other, .. } => {
             if let Some(t) = ps(p, "title") {
                 *title = t.chars().take(200).collect();
             }
             if let Some(v) = b(p, "allClasses") {
                 *all_classes = v;
+            }
+            if let Some(v) = b(p, "hideOther") {
+                *hide_other = v;
             }
         }
         ElementKind::MapFrame { map, center, scale, .. } => {

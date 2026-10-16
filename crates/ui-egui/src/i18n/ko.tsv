@@ -746,6 +746,7 @@ Hide	숨기기
 Hide features far from the view's centre.	뷰 중심에서 멀리 있는 피처를 숨깁니다.
 Hide labels when the viewer is closer than this.	보는 위치가 이보다 가까우면 라벨을 숨깁니다.
 Hide labels when the viewer is farther than this.	보는 위치가 이보다 멀면 라벨을 숨깁니다.
+Hide other values	기타 값 숨기기
 Hide walls facing away from you.	반대 방향을 향한 벽을 숨깁니다.
 High values of the first raster and low values of the second score best.	첫 번째 래스터의 값이 높고 두 번째 래스터의 값이 낮을수록 점수가 높습니다.
 Histogram Equalize	히스토그램 평활화

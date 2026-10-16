@@ -746,6 +746,7 @@ Hide	隐藏
 Hide features far from the view's centre.	隐藏远离视图中心的要素。
 Hide labels when the viewer is closer than this.	当观察者比此距离更近时隐藏标注。
 Hide labels when the viewer is farther than this.	当观察者比此距离更远时隐藏标注。
+Hide other values	隐藏其他值
 Hide walls facing away from you.	隐藏背向您的墙面。
 High values of the first raster and low values of the second score best.	第一个栅格的高值和第二个栅格的低值得分最高。
 Histogram Equalize	直方图均衡化

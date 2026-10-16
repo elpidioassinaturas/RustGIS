@@ -22,7 +22,8 @@ the maps; while one is open, its groups lead the Publish tab:
   the symbology is applied). A layer that draws
   nothing there, such as an empty one, is left out, in layouts saved before this too. Tick **All
   classes** in its properties (`"allClasses": true`) to list every class of every visible layer
-  instead.
+  instead, and **Hide other values** (`"hideOther": true`) to leave `<all other values>` out of
+  the legend in either mode (the features it stands for are still drawn).
 - **Text** and **Dynamic Text**: `{date}`, `{time}`, `{scale}`, `{map}`, `{crs}`, `{page}`,
   `{pages}`, `{pageName}` and `{layout}` fill in when the page is drawn. **Picture** places a PNG
   or JPEG.

@@ -138,6 +138,9 @@ pub enum Renderer {
     },
 }
 
+/// The legend label of a Unique Values renderer's fallback class.
+pub const OTHER_VALUES: &str = "<all other values>";
+
 /// One legend row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LegendEntry {
@@ -302,7 +305,7 @@ impl Renderer {
         let mut v: Vec<LegendEntry> =
             classes.iter().zip(&used).filter(|(_, u)| **u).map(|((k, s), _)| LegendEntry { label: k.clone(), symbol: *s }).collect();
         if other_used {
-            v.push(LegendEntry { label: "<all other values>".into(), symbol: *other });
+            v.push(LegendEntry { label: OTHER_VALUES.into(), symbol: *other });
         }
         v
     }
@@ -312,7 +315,7 @@ impl Renderer {
             Renderer::Single(_) => Vec::new(),
             Renderer::Unique { classes, other, .. } => {
                 let mut v: Vec<LegendEntry> = classes.iter().map(|(k, s)| LegendEntry { label: k.clone(), symbol: *s }).collect();
-                v.push(LegendEntry { label: "<all other values>".into(), symbol: *other });
+                v.push(LegendEntry { label: OTHER_VALUES.into(), symbol: *other });
                 v
             }
             Renderer::Graduated { breaks, symbols, min, .. } => {

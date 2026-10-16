@@ -746,6 +746,7 @@ Hide	Sembunyikan
 Hide features far from the view's centre.	Sembunyikan fitur yang jauh dari pusat tampilan.
 Hide labels when the viewer is closer than this.	Sembunyikan label saat penampil lebih dekat dari nilai ini.
 Hide labels when the viewer is farther than this.	Sembunyikan label saat penampil lebih jauh dari nilai ini.
+Hide other values	Sembunyikan nilai lain
 Hide walls facing away from you.	Sembunyikan dinding yang membelakangi Anda.
 High values of the first raster and low values of the second score best.	Nilai tinggi raster pertama dan nilai rendah raster kedua mendapat skor terbaik.
 Histogram Equalize	Ekualisasi Histogram

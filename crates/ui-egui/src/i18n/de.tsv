@@ -746,6 +746,7 @@ Hide	Ausblenden
 Hide features far from the view's centre.	Objekte weit entfernt vom Ansichtszentrum ausblenden.
 Hide labels when the viewer is closer than this.	Beschriftungen ausblenden, wenn der Betrachter näher ist.
 Hide labels when the viewer is farther than this.	Beschriftungen ausblenden, wenn der Betrachter weiter entfernt ist.
+Hide other values	Andere Werte ausblenden
 Hide walls facing away from you.	Von Ihnen abgewandte Wände ausblenden.
 High values of the first raster and low values of the second score best.	Hohe Werte des ersten und niedrige Werte des zweiten Rasters schneiden am besten ab.
 Histogram Equalize	Histogrammausgleich

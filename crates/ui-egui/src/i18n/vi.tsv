@@ -746,6 +746,7 @@ Hide	Ẩn
 Hide features far from the view's centre.	Ẩn các đối tượng ở xa tâm khung nhìn.
 Hide labels when the viewer is closer than this.	Ẩn nhãn khi người xem ở gần hơn giá trị này.
 Hide labels when the viewer is farther than this.	Ẩn nhãn khi người xem ở xa hơn giá trị này.
+Hide other values	Ẩn các giá trị khác
 Hide walls facing away from you.	Ẩn các bức tường quay lưng về phía bạn.
 High values of the first raster and low values of the second score best.	Giá trị cao của raster thứ nhất và giá trị thấp của raster thứ hai có điểm tốt nhất.
 Histogram Equalize	Cân bằng histogram

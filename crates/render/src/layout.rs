@@ -4,6 +4,7 @@
 use rustgis_data::GeometryType;
 use rustgis_geom::{Coord, Extent};
 use rustgis_map::layout::{ElementKind, FrameShape, Layout, PT_PER_MM, frame_camera};
+use rustgis_map::symbology::{LegendEntry, OTHER_VALUES};
 use rustgis_map::{Map, Rgba};
 use tiny_skia::{FillRule, Mask, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, Transform};
 
@@ -49,6 +50,22 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
         })
         .collect();
     let frame = |id: u32| frames.iter().find(|f| f.0 == id);
+    // What each legend's frame draws, worked out before any element is drawn: its map is synced
+    // to that frame's view first, so a streamed layer holds that frame's features whichever order
+    // the frames and legends come in, and whichever other frame showed the map last.
+    let mut shown: Vec<(u32, Vec<(u32, Vec<LegendEntry>)>)> = Vec::new();
+    for e in layout.elements.iter().filter(|e| e.visible) {
+        if let ElementKind::Legend { frame: f, all_classes: false, .. } = &e.kind
+            && !shown.iter().any(|(id, _)| id == f)
+            && let Some(&(_, mi, cam, fw, fh)) = frame(*f)
+            && let Some(map) = maps.get_mut(mi)
+        {
+            let view = View { width: fw, height: fh, pixels_per_point: 1.0, camera: cam, dark: false };
+            let lonlat = crate::view_lonlat(map, &view);
+            map.sync_sources(&lonlat, true);
+            shown.push((*f, shown_legends(map, map.ground_res_at(&cam) / rustgis_geom::PIXEL_M)));
+        }
+    }
     for e in layout.elements.iter().filter(|e| e.visible) {
         let (x, y, ew, eh) = ((e.x * k) as f32, (e.y * k) as f32, (e.w * k) as f32, (e.h * k) as f32);
         let Some(r) = Rect::from_xywh(x, y, ew.max(1.0), eh.max(1.0)) else { continue };
@@ -120,15 +137,12 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                     scale_bar(&mut pm, r, map.ground_res_at(&cam), ppp);
                 }
             }
-            ElementKind::Legend { frame: f, title, all_classes } => {
-                if let Some(&(_, mi, cam, _, _)) = frame(*f)
+            ElementKind::Legend { frame: f, title, all_classes, hide_other } => {
+                if let Some(&(_, mi, ..)) = frame(*f)
                     && let Some(map) = maps.get(mi)
                 {
-                    // The frame's scale as the renderer draws it (the one its layers' scale ranges
-                    // and display filters see), not the paper scale `{scale}` prints: the legend
-                    // follows what the frame actually draws.
-                    let scale = (!*all_classes).then(|| map.ground_res_at(&cam) / rustgis_geom::PIXEL_M);
-                    legend(&mut pm, r, map, title, scale, ppp);
+                    let drawn = (!*all_classes).then(|| shown.iter().find(|(id, _)| id == f).map(|(_, v)| v.as_slice()).unwrap_or(&[]));
+                    legend(&mut pm, r, map, title, drawn, *hide_other, ppp);
                 }
             }
             ElementKind::Text { text: t, size, color, bold } => {
@@ -463,10 +477,22 @@ fn scale_bar(pm: &mut Pixmap, r: Rect, ground_per_pt: f64, ppp: f64) {
     text::text_at(pm, &rustgis_geom::format_distance(target), x0 + len, ty, px, dark, false, text::Align::Center, false);
 }
 
-/// The legend of a frame's map. With the frame's `scale` it shows what the frame draws (#207): only
-/// layers drawn at that scale with a feature through their definition query and display filters,
-/// and only the classes those features have. Without, every class of every visible layer.
-fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, scale: Option<f64>, ppp: f64) {
+/// Each visible layer's legend for what it draws at a scale denominator (#207), by layer id; a
+/// layer that draws nothing there isn't listed. The scale is the one the renderer draws the frame
+/// at (the one its layers' scale ranges and display filters see), not the paper scale `{scale}`
+/// prints, so the legend follows what the frame actually shows.
+fn shown_legends(map: &Map, scale: f64) -> Vec<(u32, Vec<LegendEntry>)> {
+    map.layers
+        .iter()
+        .filter(|l| l.visible && !l.graphics && !l.is_raster())
+        .filter_map(|l| l.shown_legend(scale).map(|entries| (l.id, entries)))
+        .collect()
+}
+
+/// The legend of a frame's map. With `drawn` (from [`shown_legends`]) it shows what the frame
+/// draws: only the layers listed there, with their classes. Without, every class of every visible
+/// layer. `hide_other` leaves `<all other values>` out either way.
+fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32, Vec<LegendEntry>)]>, hide_other: bool, ppp: f64) {
     let ppp = ppp as f32;
     let dark = Rgba::rgb(0x22, 0x22, 0x22);
     let mut y = r.y();
@@ -480,13 +506,16 @@ fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, scale: Option<f64>, 
         if y + line > r.y() + r.height() {
             break;
         }
-        let entries = match scale {
-            Some(s) => match l.shown_legend(s) {
-                Some(entries) => entries,
+        let mut entries = match drawn {
+            Some(d) => match d.iter().find(|(id, _)| *id == l.id) {
+                Some((_, entries)) => entries.clone(),
                 None => continue,
             },
             None => l.renderer.legend(),
         };
+        if hide_other && matches!(l.renderer, rustgis_map::Renderer::Unique { .. }) {
+            entries.retain(|e| e.label != OTHER_VALUES);
+        }
         let gt = l.geometry_type();
         if entries.is_empty() {
             swatch(pm, r.x(), y, sw, line, gt, &l.renderer.symbol_for(&l.dataset, 0), ppp);
@@ -687,18 +716,24 @@ mod tests {
             l.renderer = rustgis_map::Renderer::Unique { field: "g".into(), classes, other: s(3), ramp: rustgis_map::Ramp::Ember };
         }
         // How far down the legend draws, in pixels.
-        let depth = |scale: Option<f64>| {
+        let depth = |drawn: Option<&[(u32, Vec<LegendEntry>)]>, hide_other: bool| {
             let mut pm = Pixmap::new(300, 400).unwrap();
             pm.fill(tiny_skia::Color::WHITE);
-            legend(&mut pm, Rect::from_xywh(0.0, 0.0, 300.0, 400.0).unwrap(), &map, "", scale, 1.0);
+            legend(&mut pm, Rect::from_xywh(0.0, 0.0, 300.0, 400.0).unwrap(), &map, "", drawn, hide_other, 1.0);
             (0..pm.height()).filter(|&y| (0..pm.width()).any(|x| pm.pixel(x, y).is_some_and(|p| p.red() < 200))).max().unwrap_or(0)
         };
-        let (shown, all) = (depth(Some(1e6)), depth(None));
+        let drawn = shown_legends(&map, 1e6);
+        assert_eq!(drawn.len(), 1, "the empty layer draws nothing: {drawn:?}");
+        let (shown, all) = (depth(Some(&drawn), false), depth(None, false));
         // The drawn legend is two rows (the layer's heading and "a"); every class makes it six
         // (b, c, <all other values> and the empty layer's row too). Compared with each other, so
         // the font and antialiasing don't matter.
         assert!(shown > 0, "the drawn class is listed");
         assert!(all >= 2 * shown, "{shown} px of {all}");
+        // Hiding <all other values> takes one row off the full legend, and nothing off the drawn
+        // one, which has none.
+        assert!(depth(None, true) < all);
+        assert_eq!(depth(Some(&drawn), true), shown);
     }
 
     #[test]

@@ -746,6 +746,7 @@ Hide	Nascondi
 Hide features far from the view's centre.	Nascondi gli elementi lontani dal centro della vista.
 Hide labels when the viewer is closer than this.	Nascondi le etichette quando l'osservatore è più vicino di questo valore.
 Hide labels when the viewer is farther than this.	Nascondi le etichette quando l'osservatore è più lontano di questo valore.
+Hide other values	Nascondi altri valori
 Hide walls facing away from you.	Nascondi le pareti rivolte dalla parte opposta.
 High values of the first raster and low values of the second score best.	I valori alti del primo raster e bassi del secondo ottengono il punteggio migliore.
 Histogram Equalize	Equalizzazione istogramma

@@ -746,6 +746,7 @@ Hide	Скрыть
 Hide features far from the view's centre.	Скрывать объекты, далёкие от центра вида.
 Hide labels when the viewer is closer than this.	Скрывать подписи, когда наблюдатель ближе этого расстояния.
 Hide labels when the viewer is farther than this.	Скрывать подписи, когда наблюдатель дальше этого расстояния.
+Hide other values	Скрыть прочие значения
 Hide walls facing away from you.	Скрывать стены, обращённые от вас.
 High values of the first raster and low values of the second score best.	Лучшую оценку получают высокие значения первого растра и низкие значения второго.
 Histogram Equalize	Выравнивание гистограммы

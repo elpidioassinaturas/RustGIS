@@ -746,6 +746,7 @@ Hide	Ocultar
 Hide features far from the view's centre.	Ocultar feições distantes do centro da visualização.
 Hide labels when the viewer is closer than this.	Ocultar os rótulos quando o observador estiver mais perto que isto.
 Hide labels when the viewer is farther than this.	Ocultar os rótulos quando o observador estiver mais longe que isto.
+Hide other values	Ocultar outros valores
 Hide walls facing away from you.	Ocultar paredes voltadas para longe de você.
 High values of the first raster and low values of the second score best.	Valores altos do primeiro raster e baixos do segundo obtêm a melhor pontuação.
 Histogram Equalize	Equalização de histograma

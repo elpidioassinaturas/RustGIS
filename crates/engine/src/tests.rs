@@ -1091,14 +1091,23 @@ fn layout_legends_list_what_the_frame_draws() {
     let (id, kind) = legend(&s);
     assert!(matches!(kind, rustgis_map::layout::ElementKind::Legend { all_classes: false, .. }), "{kind:?}");
     s.run("layout.update", &json!({"element": id, "allClasses": true})).unwrap();
-    assert!(matches!(legend(&s).1, rustgis_map::layout::ElementKind::Legend { all_classes: true, .. }));
+    assert!(matches!(legend(&s).1, rustgis_map::layout::ElementKind::Legend { all_classes: true, hide_other: false, .. }));
+    // <all other values> can be left out on its own, in either mode.
+    s.run("layout.update", &json!({"element": id, "hideOther": true})).unwrap();
+    assert!(matches!(legend(&s).1, rustgis_map::layout::ElementKind::Legend { all_classes: true, hide_other: true, .. }));
+    // Read like every other on/off parameter (`b`): a value that is neither a bool nor text keeps
+    // the setting, and text other than true/yes/1/on turns it off.
+    s.run("layout.update", &json!({"element": id, "hideOther": 5})).unwrap();
+    assert!(matches!(legend(&s).1, rustgis_map::layout::ElementKind::Legend { hide_other: true, .. }), "a number keeps the setting");
+    s.run("layout.update", &json!({"element": id, "hideOther": "off"})).unwrap();
+    assert!(matches!(legend(&s).1, rustgis_map::layout::ElementKind::Legend { hide_other: false, .. }));
     let r = s.run("layout.addElement", &json!({"kind": "legend", "allClasses": true})).unwrap();
     let added = r["element"].as_u64().unwrap() as u32;
     let kind = s.project.layouts[0].element(added).map(|e| e.kind.clone()).unwrap();
     assert!(matches!(kind, rustgis_map::layout::ElementKind::Legend { all_classes: true, .. }), "{kind:?}");
     // Layouts saved before the option open with it off.
     let old: rustgis_map::layout::ElementKind = serde_json::from_str(r#"{"Legend":{"frame":1,"title":"L"}}"#).unwrap();
-    assert!(matches!(old, rustgis_map::layout::ElementKind::Legend { all_classes: false, .. }));
+    assert!(matches!(old, rustgis_map::layout::ElementKind::Legend { all_classes: false, hide_other: false, .. }));
 }
 
 #[test]

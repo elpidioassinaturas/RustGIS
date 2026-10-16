@@ -746,6 +746,7 @@ Hide	დამალვა
 Hide features far from the view's centre.	ხედის ცენტრიდან შორს მდებარე ობიექტების დამალვა.
 Hide labels when the viewer is closer than this.	წარწერების დამალვა, როცა მაყურებელი ამაზე ახლოსაა.
 Hide labels when the viewer is farther than this.	წარწერების დამალვა, როცა მაყურებელი ამაზე შორსაა.
+Hide other values	სხვა მნიშვნელობების დამალვა
 Hide walls facing away from you.	თქვენგან გამოსულ მიმართულებით მდებარე კედლების დამალვა.
 High values of the first raster and low values of the second score best.	პირველი რასტრის მაღალი და მეორეს დაბალი მნიშვნელობები ყველაზე მაღალ ქულას იღებს.
 Histogram Equalize	ჰისტოგრამის გათანაბრება

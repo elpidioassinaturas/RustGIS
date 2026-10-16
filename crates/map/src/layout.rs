@@ -106,6 +106,10 @@ pub enum ElementKind {
         /// no layer that draws nothing at the frame's scale (#207).
         #[serde(default)]
         all_classes: bool,
+        /// Leave `<all other values>` out of the legend, in either mode. Only the legend changes:
+        /// the features it stands for are drawn as before.
+        #[serde(default)]
+        hide_other: bool,
     },
     /// Text; dynamic tokens (`{page}`, `{date}`, `{scale}`…) expand when drawn.
     Text {

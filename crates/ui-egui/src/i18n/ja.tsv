@@ -746,6 +746,7 @@ Hide	非表示
 Hide features far from the view's centre.	ビューの中心から遠いフィーチャを非表示にします。
 Hide labels when the viewer is closer than this.	視点がこれより近いときにラベルを非表示にします。
 Hide labels when the viewer is farther than this.	視点がこれより遠いときにラベルを非表示にします。
+Hide other values	その他の値を隠す
 Hide walls facing away from you.	背を向けた壁を非表示にします。
 High values of the first raster and low values of the second score best.	1 つ目のラスターの高い値と 2 つ目のラスターの低い値が最も高いスコアになります。
 Histogram Equalize	ヒストグラム均等化

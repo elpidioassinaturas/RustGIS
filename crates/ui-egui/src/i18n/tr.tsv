@@ -746,6 +746,7 @@ Hide	Gizle
 Hide features far from the view's centre.	Görünümün merkezinden uzaktaki detayları gizle.
 Hide labels when the viewer is closer than this.	Görüntüleyen bundan daha yakındayken etiketleri gizle.
 Hide labels when the viewer is farther than this.	Görüntüleyen bundan daha uzaktayken etiketleri gizle.
+Hide other values	Diğer değerleri gizle
 Hide walls facing away from you.	Size dönük olmayan duvarları gizle.
 High values of the first raster and low values of the second score best.	İlk rasterin yüksek, ikincinin düşük değerleri en iyi puanı alır.
 Histogram Equalize	Histogram Eşitleme
