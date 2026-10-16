@@ -16,8 +16,10 @@ the maps; while one is open, its groups lead the Publish tab:
 - **Map surrounds**: north arrow, scale bar, legend, table frame (a layer's attribute table) and
   chart frame (a bar chart of a numeric field), plus a neatline or backdrop. A legend shows what
   its frame draws: only layers with a feature at the frame's scale (through their definition
-  query, display filters and scale range), only the classes those features have, and
-  `<all other values>` only when some feature falls in it. Tick **All classes** in its
+  query, display filters and scale range) and, for Unique Values, only the classes those features
+  have, with `<all other values>` only when some feature falls in it. Graduated Colors and
+  Proportional Symbols list their classes as they are (they are taken from the kept features when
+  the symbology is applied). Tick **All classes** in its
   properties (`"allClasses": true`) to list every class of every visible layer instead.
 - **Text** and **Dynamic Text**: `{date}`, `{time}`, `{scale}`, `{map}`, `{crs}`, `{page}`,
   `{pages}`, `{pageName}` and `{layout}` fill in when the page is drawn. **Picture** places a PNG
