@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use rustgis_data::{GeometryType, photo};
+use rustgis_map::symbology::{ClassRef, ClassStyle};
 use rustgis_map::{ClassMethod, Marker, Ramp, Renderer, Rgba};
 use serde_json::{Value, json};
 
@@ -100,6 +101,11 @@ pub fn commands() -> Vec<C> {
             })
         }).params(r#"{"layer"?, "ramp": colour ramp name}"#)
         .when(need_layer),
+        C::new("layer.classStyle", "Class Style", "Style › Drawing", class_style)
+            .when(need_feature_layer)
+            .params(
+                r##"{"layer"?, "value"?: text|number (a Unique Values class), "index"?: number (a Graduated Colors class, 0 = the lowest), "other"?: true (Unique Values' <all other values>), "color"?: "#RRGGBB"|"#RRGGBBAA", "outline"?: "#RRGGBB"|"#RRGGBBAA", "label"?: text (the legend label; "" goes back to the value or range)}"##,
+            ),
         C::new("layer.color", "Symbol Color", "Style › Drawing", |s, p| {
             let c = Rgba::from_hex(s_req(p, "color")?).ok_or("color must be #RRGGBB or #RRGGBBAA")?;
             with(s, p, |l| {
@@ -719,7 +725,14 @@ fn apply_styles(s: &mut Session, id: u32, styles: &[(String, rustgis_data::kml::
             (name.clone(), sym)
         })
         .collect();
-    layer.renderer = Renderer::Unique { field: "style".into(), classes, other: base, ramp: Default::default() };
+    layer.renderer = Renderer::Unique {
+        field: "style".into(),
+        classes,
+        other: base,
+        ramp: Default::default(),
+        labels: Default::default(),
+        other_label: None,
+    };
 }
 
 /// The layers a file holds, without adding them: a GeoPackage's feature tables, a GDAL dataset's
@@ -1975,5 +1988,34 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
         }
         other => return Err(format!("unknown symbology '{other}'")),
     };
+    // Applied again on the same field, the classes keep the labels set by hand, and their colours
+    // too while the colour scheme stays (#314).
+    let mut r = r;
+    r.carry_edits_from(&l.renderer);
     with(s, p, |l| l.renderer = r)
+}
+
+/// `layer.classStyle`: one class's colour, outline colour and legend label (#314).
+fn class_style(s: &mut Session, p: &Value) -> CmdResult {
+    let other = b(p, "other").unwrap_or(false);
+    let class = match (p.get("value"), uint(p, "index"), other) {
+        (Some(v), None, false) => ClassRef::Value(match v {
+            Value::String(t) => t.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => return Err("value must be a text or a number".into()),
+        }),
+        (None, Some(i), false) => ClassRef::Index(usize::try_from(i).map_err(|_| "index is too large")?),
+        (None, None, true) => ClassRef::Other,
+        _ => return Err("name one class: value (Unique Values), index (Graduated Colors) or other: true".into()),
+    };
+    let style =
+        ClassStyle { color: s.get_color(p, "color")?, outline: s.get_color(p, "outline")?, label: ps(p, "label").map(str::to_string) };
+    if style == ClassStyle::default() {
+        return Err("nothing to change: give a color, an outline or a label".into());
+    }
+    let id = s.layer_id(p)?;
+    let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
+    let g = l.geometry_type();
+    let e = l.renderer.set_class_style(&class, &style, g)?;
+    Ok(json!({"label": e.label, "color": e.symbol.fill.hex(), "outline": e.symbol.stroke.hex()}))
 }

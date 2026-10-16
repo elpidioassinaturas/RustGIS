@@ -1097,6 +1097,51 @@ fn symbology_classes_follow_the_definition_query() {
 }
 
 #[test]
+fn layer_class_style_edits_one_class() {
+    // #314: one class's colour and legend label, by command (the Symbology pane runs the same).
+    let mut s = world();
+    s.run("layer.symbology", &json!({"layer": "Countries", "type": "unique", "field": "income_grp"})).unwrap();
+    let renderer = |s: &Session| s.map().layer_by_name("Countries").unwrap().renderer.clone();
+    let first = |s: &Session| renderer(s).legend().into_iter().next().unwrap();
+    let value = first(&s).label;
+    let r = s.run("layer.classStyle", &json!({"layer": "Countries", "value": value, "color": "#123456", "label": "Rich"})).unwrap();
+    assert_eq!(r["label"], "Rich");
+    assert!(r["color"].as_str().is_some_and(|c| c.starts_with("#123456")), "{r}");
+    assert_eq!(first(&s).label, "Rich");
+    // One undo step, as every command is.
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(first(&s).label, value);
+    s.run("edit.redo", &Value::Null).unwrap();
+    let edited = first(&s);
+    assert_eq!(edited.label, "Rich");
+    // Applying the symbology again on the same field keeps the edit; a new scheme recolours
+    // every class and keeps the label.
+    s.run("layer.symbology", &json!({"layer": "Countries", "type": "unique", "field": "income_grp"})).unwrap();
+    assert_eq!(first(&s), edited);
+    s.run("layer.ramp", &json!({"layer": "Countries", "ramp": "Ember"})).unwrap();
+    assert_eq!(first(&s).label, "Rich");
+    assert_ne!(first(&s).symbol, edited.symbol);
+    // The fallback class.
+    s.run("layer.classStyle", &json!({"layer": "Countries", "other": true, "label": "Rest"})).unwrap();
+    assert_eq!(renderer(&s).legend().last().map(|e| e.label.clone()).as_deref(), Some("Rest"));
+    // Refused: no such class, the wrong way to name one, two at once, or nothing to change.
+    for bad in [
+        json!({"layer": "Countries", "value": "Atlantis", "color": "#000000"}),
+        json!({"layer": "Countries", "index": 0, "color": "#000000"}),
+        json!({"layer": "Countries", "value": value, "other": true, "label": "x"}),
+        json!({"layer": "Countries", "value": value}),
+        json!({"layer": "Countries", "value": value, "color": "red"}),
+    ] {
+        assert!(s.run("layer.classStyle", &bad).is_err(), "{bad}");
+    }
+    // Graduated Colors, by number: the label replaces the range.
+    s.run("layer.symbology", &json!({"layer": "Countries", "type": "graduated", "field": "pop_est", "classes": 3})).unwrap();
+    s.run("layer.classStyle", &json!({"layer": "Countries", "index": 2, "label": "Most populous"})).unwrap();
+    assert_eq!(renderer(&s).legend().get(2).map(|e| e.label.clone()).as_deref(), Some("Most populous"));
+    assert!(s.run("layer.classStyle", &json!({"layer": "Countries", "index": 3, "label": "x"})).is_err());
+}
+
+#[test]
 fn layout_legends_list_what_the_frame_draws() {
     // #207's repro: classes taken before the query (or from a style) name values no drawn country has.
     let mut s = world();

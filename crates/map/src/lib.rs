@@ -1141,6 +1141,8 @@ mod tests {
             classes: vec![("1".into(), s(0)), ("2".into(), s(1)), ("9".into(), s(2))],
             other: s(3),
             ramp: Ramp::Ember,
+            labels: Default::default(),
+            other_label: None,
         };
         let labels = |l: &Layer, scale| l.shown_legend(scale).map(|v| v.into_iter().map(|e| e.label).collect::<Vec<_>>());
         assert_eq!(labels(l, 1e6), Some(vec!["1".to_string(), "2".to_string()]), "no 9, no <all other values>");

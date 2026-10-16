@@ -2422,7 +2422,7 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             ui.label(
                 egui::RichText::new(crate::i18n::fmt("{n} classes", &[("n", &classes.len().to_string())])).size(11.5).color(t.text_dim),
             );
-            legend_list(ui, &l, t);
+            legend_list(app, ui, &l, t);
         }
         Renderer::Graduated { field, breaks, ramp, method, .. } => {
             field_combo(app, ui, "Field", field, &numeric, "graduated");
@@ -2448,12 +2448,12 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             });
             ramp_picker(app, ui, ramp, t);
             ui.add_space(6.0);
-            legend_list(ui, &l, t);
+            legend_list(app, ui, &l, t);
         }
         Renderer::Proportional { field, base, .. } => {
             field_combo(app, ui, "Field", field, &numeric, "proportional");
             symbol_editor(app, ui, *base, g, t);
-            legend_list(ui, &l, t);
+            legend_list(app, ui, &l, t);
         }
     }
     ui.add_space(10.0);
@@ -2517,20 +2517,62 @@ fn ramp_picker(app: &mut RustGisApp, ui: &mut Ui, cur: &Ramp, t: &Tokens) {
     }
 }
 
-fn legend_list(ui: &mut Ui, l: &Layer, t: &Tokens) {
+/// The renderer's legend rows. A Unique Values or Graduated Colors class can be edited in place
+/// (#314): its colour button and its legend label, which applies when the field loses focus and
+/// goes back to the value or range when cleared.
+fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
+    // Each row's class, as layer.classStyle names it; none for renderers without classes.
+    let classes: Vec<Value> = match &l.renderer {
+        Renderer::Unique { classes, .. } => {
+            classes.iter().map(|(k, _)| json!({"value": k})).chain(std::iter::once(json!({"other": true}))).collect()
+        }
+        Renderer::Graduated { symbols, .. } => (0..symbols.len()).map(|i| json!({"index": i})).collect(),
+        _ => Vec::new(),
+    };
     egui::Frame::NONE.stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::same(6)).show(
         ui,
         |ui| {
             ui.set_width(ui.available_width());
-            for e in l.renderer.legend().iter().take(64) {
-                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
-                patch(
-                    ui.painter(),
-                    Rect::from_center_size(pos2(r.min.x + 12.0, r.center().y), vec2(18.0, 14.0)),
-                    &e.symbol,
-                    l.geometry_type(),
-                );
-                ui.painter().text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, &e.label, regular(11.5), t.text);
+            for (i, e) in l.renderer.legend().iter().take(64).enumerate() {
+                let Some(class) = classes.get(i) else {
+                    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+                    patch(
+                        ui.painter(),
+                        Rect::from_center_size(pos2(r.min.x + 12.0, r.center().y), vec2(18.0, 14.0)),
+                        &e.symbol,
+                        l.geometry_type(),
+                    );
+                    ui.painter().text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, &e.label, regular(11.5), t.text);
+                    continue;
+                };
+                let with = |key: &str, v: Value| {
+                    let mut p = class.clone();
+                    if let Some(o) = p.as_object_mut() {
+                        o.insert("layer".into(), json!(l.id));
+                        o.insert(key.into(), v);
+                    }
+                    p
+                };
+                ui.horizontal(|ui| {
+                    let mut c = c32(e.symbol.fill);
+                    if ui.color_edit_button_srgba(&mut c).on_hover_text(tl!("Class color")).changed() {
+                        let _ = app.run("layer.classStyle", with("color", json!(rgba(c).hex())));
+                    }
+                    // The typing lives in the pane's state while the field has focus.
+                    let id = egui::Id::new(("class_label", l.id, i));
+                    let mut buf = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| e.label.clone());
+                    let r = ui
+                        .add(egui::TextEdit::singleline(&mut buf).desired_width(ui.available_width()))
+                        .on_hover_text(tl!("Legend label. Clear it to show the value again."));
+                    if r.lost_focus() {
+                        ui.data_mut(|d| d.remove::<String>(id));
+                        if buf != e.label {
+                            let _ = app.run("layer.classStyle", with("label", json!(buf)));
+                        }
+                    } else if r.has_focus() {
+                        ui.data_mut(|d| d.insert_temp(id, buf));
+                    }
+                });
             }
         },
     );

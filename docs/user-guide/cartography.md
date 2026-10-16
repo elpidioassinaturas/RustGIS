@@ -21,6 +21,25 @@ Proportional Symbols take their values, classes and sizes from those features wh
 [subtypes](editing.md#data-design) can be symbolized by them. **Style › Styles** saves symbology
 as styles to reuse on other layers and in other projects.
 
+### Edit a class
+
+With Unique Values or Graduated Colors, each class in the Symbology pane's list has a colour button
+and a legend label. Pick a colour to give that class its own. Type a label to show in the Layers
+pane and in layout legends instead of the value or range (for example `High income` for
+`1. High income: OECD`); clear it to show the value again. `<all other values>` can be edited the
+same way. Applying the symbology again on the same field keeps the colours and labels of the
+classes that are still there; picking another colour scheme recolours every class but keeps the
+labels. A Graduated Colors label stays while its range does. By command:
+
+```text
+layer.classStyle={"layer":"Countries","value":"1. High income: OECD","color":"#2E6B4F","label":"High income"}
+layer.classStyle={"layer":"Countries","index":0,"label":"Under 1 million"}
+layer.classStyle={"layer":"Countries","other":true,"label":"No data"}
+```
+
+`value` names a Unique Values class, `index` a Graduated Colors class (0 is the lowest) and
+`other` the `<all other values>` class; `outline` sets a class's outline colour.
+
 ### Custom color ramps
 
 Besides the built-in color schemes, a project can hold your own color ramps: an organization's
