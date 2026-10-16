@@ -121,7 +121,7 @@ pub enum Renderer {
         ramp: Ramp,
         /// Legend labels set by hand, by class value; a class without one shows its value.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        labels: BTreeMap<String, String>,
+        class_labels: BTreeMap<String, String>,
         /// The legend label of `other`, when set by hand (otherwise `<all other values>`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         other_label: Option<String>,
@@ -137,7 +137,7 @@ pub enum Renderer {
         /// Legend labels set by hand, by class index (0 is the lowest class); a class without one
         /// shows its range.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        labels: BTreeMap<usize, String>,
+        class_labels: BTreeMap<usize, String>,
     },
     /// Marker size grows with the value.
     Proportional {
@@ -229,7 +229,7 @@ impl Renderer {
             classes,
             other,
             ramp,
-            labels: BTreeMap::new(),
+            class_labels: BTreeMap::new(),
             other_label: None,
         })
     }
@@ -266,7 +266,7 @@ impl Renderer {
             ramp,
             method,
             min,
-            labels: BTreeMap::new(),
+            class_labels: BTreeMap::new(),
         })
     }
 
@@ -332,7 +332,7 @@ impl Renderer {
     /// or from before a definition query changed, so they can name values no kept feature has. The
     /// other renderers list their classes as they are.
     pub fn legend_for(&self, ds: &Dataset, rows: &[bool]) -> Vec<LegendEntry> {
-        let Renderer::Unique { field, classes, other, labels, other_label, .. } = self else { return self.legend() };
+        let Renderer::Unique { field, classes, other, class_labels, other_label, .. } = self else { return self.legend() };
         // A value matches its first class, as in `symbol_for`.
         let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for (i, (k, _)) in classes.iter().enumerate() {
@@ -367,7 +367,7 @@ impl Renderer {
             .iter()
             .zip(&used)
             .filter(|(_, u)| **u)
-            .map(|((k, s), _)| LegendEntry { label: unique_label(labels, k), symbol: *s, fallback: false })
+            .map(|((k, s), _)| LegendEntry { label: unique_label(class_labels, k), symbol: *s, fallback: false })
             .collect();
         if other_used {
             v.push(LegendEntry { label: other_label.clone().unwrap_or_else(|| OTHER_VALUES.into()), symbol: *other, fallback: true });
@@ -378,20 +378,22 @@ impl Renderer {
     pub fn legend(&self) -> Vec<LegendEntry> {
         match self {
             Renderer::Single(_) => Vec::new(),
-            Renderer::Unique { classes, other, labels, other_label, .. } => {
-                let mut v: Vec<LegendEntry> =
-                    classes.iter().map(|(k, s)| LegendEntry { label: unique_label(labels, k), symbol: *s, fallback: false }).collect();
+            Renderer::Unique { classes, other, class_labels, other_label, .. } => {
+                let mut v: Vec<LegendEntry> = classes
+                    .iter()
+                    .map(|(k, s)| LegendEntry { label: unique_label(class_labels, k), symbol: *s, fallback: false })
+                    .collect();
                 v.push(LegendEntry { label: other_label.clone().unwrap_or_else(|| OTHER_VALUES.into()), symbol: *other, fallback: true });
                 v
             }
-            Renderer::Graduated { breaks, symbols, min, labels, .. } => {
+            Renderer::Graduated { breaks, symbols, min, class_labels, .. } => {
                 let mut lo = *min;
                 breaks
                     .iter()
                     .zip(symbols)
                     .enumerate()
                     .map(|(i, (b, s))| {
-                        let label = labels.get(&i).cloned().unwrap_or_else(|| format!("{} – {}", fmt_num(lo), fmt_num(*b)));
+                        let label = class_labels.get(&i).cloned().unwrap_or_else(|| format!("{} – {}", fmt_num(lo), fmt_num(*b)));
                         lo = *b;
                         LegendEntry { label, symbol: *s, fallback: false }
                     })
@@ -446,16 +448,16 @@ impl Renderer {
         };
         // The class's row in `legend()`, which lists the classes in order and then `other`.
         let row = match (&mut *self, class) {
-            (Renderer::Unique { classes, labels, .. }, ClassRef::Value(v)) => {
+            (Renderer::Unique { classes, class_labels, .. }, ClassRef::Value(v)) => {
                 let i = classes.iter().position(|(k, _)| k == v).ok_or_else(|| format!("no class with the value '{v}'"))?;
                 if let Some((k, s)) = classes.get_mut(i) {
                     restyle(s);
                     match label {
                         Some(t) if t.is_empty() => {
-                            labels.remove(k.as_str());
+                            class_labels.remove(k.as_str());
                         }
                         Some(t) => {
-                            labels.insert(k.clone(), t);
+                            class_labels.insert(k.clone(), t);
                         }
                         None => {}
                     }
@@ -469,16 +471,16 @@ impl Renderer {
                 }
                 classes.len()
             }
-            (Renderer::Graduated { symbols, labels, .. }, ClassRef::Index(i)) => {
+            (Renderer::Graduated { symbols, class_labels, .. }, ClassRef::Index(i)) => {
                 let n = symbols.len();
                 let s = symbols.get_mut(*i).ok_or_else(|| format!("no class {i}: this renderer has {n} (0 to {})", n.saturating_sub(1)))?;
                 restyle(s);
                 match label {
                     Some(t) if t.is_empty() => {
-                        labels.remove(i);
+                        class_labels.remove(i);
                     }
                     Some(t) => {
-                        labels.insert(*i, t);
+                        class_labels.insert(*i, t);
                     }
                     None => {}
                 }
@@ -501,13 +503,13 @@ impl Renderer {
     pub fn carry_edits_from(&mut self, old: &Renderer) {
         match (self, old) {
             (
-                Renderer::Unique { field, classes, other, ramp, labels, other_label },
-                Renderer::Unique { field: of, classes: oc, other: oo, ramp: or, labels: ol, other_label: ool },
+                Renderer::Unique { field, classes, other, ramp, class_labels, other_label },
+                Renderer::Unique { field: of, classes: oc, other: oo, ramp: or, class_labels: ol, other_label: ool },
             ) if field == of => {
                 let same_scheme = ramp == or;
                 for (k, s) in classes.iter_mut() {
                     if let Some(t) = ol.get(k.as_str()) {
-                        labels.insert(k.clone(), t.clone());
+                        class_labels.insert(k.clone(), t.clone());
                     }
                     if same_scheme && let Some((_, os)) = oc.iter().find(|(ok, _)| ok == k) {
                         *s = *os;
@@ -519,11 +521,11 @@ impl Renderer {
                 }
             }
             (
-                Renderer::Graduated { field, breaks, symbols, ramp, min, labels, .. },
-                Renderer::Graduated { field: of, breaks: ob, symbols: os, ramp: or, min: om, labels: ol, .. },
+                Renderer::Graduated { field, breaks, symbols, ramp, min, class_labels, .. },
+                Renderer::Graduated { field: of, breaks: ob, symbols: os, ramp: or, min: om, class_labels: ol, .. },
             ) if field == of => {
                 if breaks == ob && min == om {
-                    labels.clone_from(ol);
+                    class_labels.clone_from(ol);
                 }
                 if ramp == or && symbols.len() == os.len() {
                     symbols.clone_from(os);
@@ -548,8 +550,8 @@ impl Renderer {
 }
 
 /// A Unique Values class's legend label: the one set by hand, or its value.
-fn unique_label(labels: &BTreeMap<String, String>, value: &str) -> String {
-    labels.get(value).cloned().unwrap_or_else(|| value.to_string())
+fn unique_label(class_labels: &BTreeMap<String, String>, value: &str) -> String {
+    class_labels.get(value).cloned().unwrap_or_else(|| value.to_string())
 }
 
 /// Compact number formatting for legends: 1.2M, 35K, 0.42.
@@ -800,7 +802,7 @@ mod tests {
             classes: vec![("a".into(), s(0)), ("b".into(), s(1)), ("c".into(), s(2))],
             other: s(3),
             ramp: Ramp::Ember,
-            labels: Default::default(),
+            class_labels: Default::default(),
             other_label: None,
         };
         let labels = |rows: &[bool]| r.legend_for(&d, rows).into_iter().map(|e| e.label).collect::<Vec<_>>();
@@ -817,7 +819,7 @@ mod tests {
             classes: vec![("a".into(), s(0)), ("a".into(), s(1)), ("b".into(), s(2))],
             other: s(3),
             ramp: Ramp::Ember,
-            labels: Default::default(),
+            class_labels: Default::default(),
             other_label: None,
         };
         let shown = twice.legend_for(&d, &[]);
@@ -829,7 +831,7 @@ mod tests {
             classes: vec![("a".into(), s(0))],
             other: s(3),
             ramp: Ramp::Ember,
-            labels: Default::default(),
+            class_labels: Default::default(),
             other_label: None,
         };
         assert_eq!(gone.legend_for(&d, &[]).len(), 1);
@@ -839,7 +841,7 @@ mod tests {
             classes: vec![("a".into(), s(0)), (OTHER_VALUES.into(), s(1))],
             other: s(3),
             ramp: Ramp::Ember,
-            labels: Default::default(),
+            class_labels: Default::default(),
             other_label: None,
         };
         let mut d2 = d.clone();
@@ -919,7 +921,7 @@ mod tests {
             classes: classes.iter().map(|(k, s)| (k.to_string(), *s)).collect(),
             other,
             ramp,
-            labels: Default::default(),
+            class_labels: Default::default(),
             other_label: None,
         }
     }
@@ -932,7 +934,7 @@ mod tests {
             ramp,
             method: ClassMethod::Quantile,
             min: 0.0,
-            labels: Default::default(),
+            class_labels: Default::default(),
         }
     }
 
@@ -995,7 +997,7 @@ mod tests {
         // A renderer nobody edited saves as before #314, so older versions still read it.
         let mut r = unique(&[("a", s(0))], s(1), Ramp::Ember);
         let j = serde_json::to_string(&r).unwrap();
-        assert!(!j.contains("labels") && !j.contains("other_label"), "{j}");
+        assert!(!j.contains("class_labels") && !j.contains("other_label"), "{j}");
         assert_eq!(serde_json::from_str::<Renderer>(&j).unwrap(), r);
         r.set_class_style(&ClassRef::Value("a".into()), &ClassStyle { label: Some("A".into()), ..Default::default() }, g).unwrap();
         r.set_class_style(&ClassRef::Other, &ClassStyle { label: Some("Rest".into()), ..Default::default() }, g).unwrap();

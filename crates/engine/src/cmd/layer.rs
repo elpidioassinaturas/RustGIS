@@ -730,7 +730,7 @@ fn apply_styles(s: &mut Session, id: u32, styles: &[(String, rustgis_data::kml::
         classes,
         other: base,
         ramp: Default::default(),
-        labels: Default::default(),
+        class_labels: Default::default(),
         other_label: None,
     };
 }

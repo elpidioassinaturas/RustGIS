@@ -723,7 +723,7 @@ mod tests {
                 classes,
                 other: s(3),
                 ramp: rustgis_map::Ramp::Ember,
-                labels: Default::default(),
+                class_labels: Default::default(),
                 other_label: None,
             };
         }

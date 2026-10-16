@@ -2554,7 +2554,10 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     p
                 };
                 ui.horizontal(|ui| {
-                    let mut c = c32(e.symbol.fill);
+                    // A polygon class keeps its own transparency when recoloured (`with_fill`), so
+                    // its button shows the colour solid rather than over a checkerboard.
+                    let shown = if l.geometry_type() == GeometryType::Polygon { e.symbol.fill.with_alpha(255) } else { e.symbol.fill };
+                    let mut c = c32(shown);
                     if ui.color_edit_button_srgba(&mut c).on_hover_text(tl!("Class color")).changed() {
                         let _ = app.run("layer.classStyle", with("color", json!(rgba(c).hex())));
                     }

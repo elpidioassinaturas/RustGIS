@@ -1141,7 +1141,7 @@ mod tests {
             classes: vec![("1".into(), s(0)), ("2".into(), s(1)), ("9".into(), s(2))],
             other: s(3),
             ramp: Ramp::Ember,
-            labels: Default::default(),
+            class_labels: Default::default(),
             other_label: None,
         };
         let labels = |l: &Layer, scale| l.shown_legend(scale).map(|v| v.into_iter().map(|e| e.label).collect::<Vec<_>>());
