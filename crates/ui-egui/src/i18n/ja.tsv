@@ -444,6 +444,8 @@ Delete selected features	選択したフィーチャを削除
 Delete selected rows	選択した行を削除
 Delete Style	スタイルの削除
 Delete Task	タスクの削除
+Delete the layout {name}?	レイアウト {name} を削除しますか?
+Delete the map {name}?	マップ {name} を削除しますか?
 Delete the selected features.	選択したフィーチャを削除します。
 Depth Priority	深度優先
 Descending	降順
@@ -1836,6 +1838,7 @@ XY Table To Point…	XY テーブル → ポイント…
 Y (mm)	Y (mm)
 Y Field	Y フィールド
 Yes	はい
+You can undo this with {shortcut}.	{shortcut} で元に戻せます。
 You have version {version}.	現在のバージョンは {version} です。
 z (m)	z (m)
 Z factor	Z 係数

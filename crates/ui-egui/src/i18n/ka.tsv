@@ -444,6 +444,8 @@ Delete selected features	მონიშნული ობიექტები
 Delete selected rows	მონიშნული სტრიქონების წაშლა
 Delete Style	სტილის წაშლა
 Delete Task	ამოცანის წაშლა
+Delete the layout {name}?	წაიშალოს განლაგება {name}?
+Delete the map {name}?	წაიშალოს რუკა {name}?
 Delete the selected features.	მონიშნული ობიექტების წაშლა.
 Depth Priority	სიღრმის პრიორიტეტი
 Descending	კლებადობით
@@ -1836,6 +1838,7 @@ XY Table To Point…	XY ცხრილი წერტილებად…
 Y (mm)	Y (მმ)
 Y Field	Y ველი
 Yes	დიახ
+You can undo this with {shortcut}.	ამის გაუქმება შეგიძლიათ {shortcut}-ით.
 You have version {version}.	თქვენ გაქვთ ვერსია {version}.
 z (m)	z (მ)
 Z factor	Z კოეფიციენტი

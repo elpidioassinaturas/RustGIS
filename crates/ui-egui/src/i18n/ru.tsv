@@ -444,6 +444,8 @@ Delete selected features	Удалить выбранные объекты
 Delete selected rows	Удалить выбранные строки
 Delete Style	Удалить стиль
 Delete Task	Удалить задачу
+Delete the layout {name}?	Удалить макет {name}?
+Delete the map {name}?	Удалить карту {name}?
 Delete the selected features.	Удалить выбранные объекты.
 Depth Priority	Приоритет глубины
 Descending	По убыванию
@@ -1836,6 +1838,7 @@ XY Table To Point…	Таблица XY в точки…
 Y (mm)	Y (мм)
 Y Field	Поле Y
 Yes	Да
+You can undo this with {shortcut}.	Это можно отменить с помощью {shortcut}.
 You have version {version}.	У вас версия {version}.
 z (m)	z (м)
 Z factor	Z-фактор

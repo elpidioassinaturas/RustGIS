@@ -79,6 +79,8 @@ pub struct MapView {
     /// The magnifying lens follows the pointer.
     pub magnifier: bool,
     pub popup: Option<Popup>,
+    /// A map or layout waiting for the user to confirm its deletion.
+    pub deleting: Option<Deletion>,
     pub pointer_lonlat: Option<Coord>,
     pub dms: bool,
     pub render_ms: u64,
@@ -118,6 +120,7 @@ impl Default for MapView {
             split_mode: false,
             magnifier: false,
             popup: None,
+            deleting: None,
             pointer_lonlat: None,
             dms: false,
             render_ms: 0,
@@ -1429,8 +1432,8 @@ fn view_tabs(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let mut x = r.min.x + 6.0;
     let names: Vec<String> = app.session.project.maps.iter().map(|m| m.name.clone()).collect();
     let active = if app.session.active_layout.is_some() { usize::MAX } else { app.session.project.active_map };
-    // A tab's close button deletes its map or layout after the strip is drawn.
-    let mut close: Option<(&str, String)> = None;
+    // A tab's close button asks to delete its map or layout.
+    let mut close: Option<Deletion> = None;
     for (i, n) in names.iter().enumerate() {
         let w = crate::widgets::text_w(ui, n, regular(12.0)) + 46.0 + TAB_CLOSE_W;
         let tr = Rect::from_min_size(pos2(x, r.min.y + 4.0), vec2(w, r.height() - 4.0));
@@ -1459,7 +1462,7 @@ fn view_tabs(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         );
         // Over the tab's fill, so painted after it.
         if tab_close(ui, t, tr, egui::Id::new(("maptab_close", i)), is, !last, tip) {
-            close = Some(("map.remove", n.clone()));
+            close = Some(Deletion::Map(n.clone()));
         }
         if resp.clicked() && !is {
             let _ = app.run("layout.close", Value::Null);
@@ -1501,7 +1504,7 @@ fn view_tabs(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         );
         // Over the tab's fill, so painted after it.
         if tab_close(ui, t, tr, egui::Id::new(("layouttab_close", i)), is, true, tl!("Delete Layout")) {
-            close = Some(("layout.remove", n.clone()));
+            close = Some(Deletion::Layout(n.clone()));
         }
         if resp.clicked() && !is {
             let _ = app.run("layout.activate", json!({"name": n}));
@@ -1518,11 +1521,69 @@ fn view_tabs(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     if resp.on_hover_text(tl!("New Map")).clicked() {
         let _ = app.run("map.new", Value::Null);
     }
-    match close {
-        Some(("map.remove", name)) => delete_map(app, &name),
-        Some((cmd, name)) => {
-            let _ = app.run(cmd, json!({"name": name}));
+    if close.is_some() {
+        app.map.deleting = close;
+    }
+}
+
+/// A map or a layout, by name, to delete once the user confirms ([`confirm_delete`]).
+#[derive(Clone)]
+pub enum Deletion {
+    Map(String),
+    Layout(String),
+}
+
+/// Asks before deleting the map or layout in `app.map.deleting` (tab close buttons, the
+/// Browser): a whole map or layout goes in one click. The commands themselves never ask.
+pub fn confirm_delete(app: &mut RustGisApp, ctx: &egui::Context) {
+    let Some(d) = app.map.deleting.clone() else { return };
+    // Gone meanwhile (a command, the assistant), or the last map now: nothing left to ask.
+    let p = &app.session.project;
+    let possible = match &d {
+        Deletion::Map(n) => p.maps.len() > 1 && p.maps.iter().any(|m| m.name.eq_ignore_ascii_case(n)),
+        Deletion::Layout(n) => p.layouts.iter().any(|l| l.name.eq_ignore_ascii_case(n)),
+    };
+    if !possible {
+        app.map.deleting = None;
+        return;
+    }
+    let t = Tokens::get(ctx);
+    let title = match &d {
+        Deletion::Map(n) => crate::i18n::fmt("Delete the map {name}?", &[("name", n)]),
+        Deletion::Layout(n) => crate::i18n::fmt("Delete the layout {name}?", &[("name", n)]),
+    };
+    let undo = crate::widgets::shortcut_text(app, "edit.undo");
+    let mut decision = None;
+    egui::Modal::new(egui::Id::new("confirm_delete")).show(ctx, |ui| {
+        ui.set_width(360.0);
+        ui.label(egui::RichText::new(title).font(semibold(15.0)));
+        if !undo.is_empty() {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(crate::i18n::fmt("You can undo this with {shortcut}.", &[("shortcut", &undo)])).color(t.text_dim));
         }
+        ui.add_space(10.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            if crate::widgets::dialog_button(ui, tl!("Delete"), Some(t.red), vec2(84.0, 28.0)).clicked() {
+                decision = Some(true);
+            }
+            if crate::widgets::dialog_button(ui, tl!("Cancel"), None, vec2(84.0, 28.0)).clicked()
+                || ui.input(|i| i.key_pressed(egui::Key::Escape))
+            {
+                decision = Some(false);
+            }
+        });
+    });
+    match decision {
+        Some(true) => {
+            app.map.deleting = None;
+            match d {
+                Deletion::Map(n) => delete_map(app, &n),
+                Deletion::Layout(n) => {
+                    let _ = app.run("layout.remove", json!({"name": n}));
+                }
+            }
+        }
+        Some(false) => app.map.deleting = None,
         None => {}
     }
 }

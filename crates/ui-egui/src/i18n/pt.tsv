@@ -444,6 +444,8 @@ Delete selected features	Excluir as feições selecionadas
 Delete selected rows	Excluir as linhas selecionadas
 Delete Style	Excluir estilo
 Delete Task	Excluir tarefa
+Delete the layout {name}?	Excluir o layout {name}?
+Delete the map {name}?	Excluir o mapa {name}?
 Delete the selected features.	Excluir as feições selecionadas.
 Depth Priority	Prioridade de profundidade
 Descending	Decrescente
@@ -1836,6 +1838,7 @@ XY Table To Point…	Tabela XY para ponto…
 Y (mm)	Y (mm)
 Y Field	Campo Y
 Yes	Sim
+You can undo this with {shortcut}.	Você pode desfazer com {shortcut}.
 You have version {version}.	Você tem a versão {version}.
 z (m)	z (m)
 Z factor	Fator Z

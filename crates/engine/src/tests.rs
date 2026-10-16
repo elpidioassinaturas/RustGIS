@@ -409,6 +409,44 @@ fn with_raster() -> Session {
     s
 }
 
+/// The parts of a large GeoTIFF the web app reads (#140), opened and kept in a project: a
+/// cloud-optimised file read a part at a time, as `parts.rs` reads a picked file.
+#[test]
+fn geotiff_parts_open_and_survive_a_saved_project() {
+    use base64::Engine;
+    use rustgis_data::raster::cog::{self, Sparse};
+    use rustgis_data::raster::geotiff::{self, Partial};
+    let file = cog::example(1024, 256);
+    let len = file.len() as u64;
+    let mut parts = Sparse::default().with_len(len).with(0, file[..4096].to_vec());
+    let mut done = false;
+    for _ in 0..100 {
+        match geotiff::read_sparse(&parts, "scene").unwrap() {
+            Partial::Done(_) => {
+                done = true;
+                break;
+            }
+            Partial::Need(a, b) => {
+                let end = b.max(a + (64 << 10)).min(len).min(parts.next_start(a).unwrap_or(len));
+                parts = parts.with(a, file[a as usize..end as usize].to_vec());
+            }
+        }
+    }
+    assert!(done);
+    let container = parts.container();
+    let mut s = world();
+    let data = base64::engine::general_purpose::STANDARD.encode(&container);
+    s.run("layer.addDataBytes", &json!({"fileName": "scene.tif", "data": data})).unwrap();
+    let value = |s: &Session| s.map().layer_by_name("scene").and_then(|l| l.raster.as_ref()?.data.as_ref()?.value(0, 300, 200));
+    // Pixel (x, y) of the example is (x + y) % 256.
+    assert_eq!(value(&s), Some(244.0));
+    // Saved, the project keeps the parts, not the whole file, and opens the raster again.
+    let text = serde_json::to_string(&s.project).unwrap();
+    assert!(text.len() < file.len() * 2, "{} for a {}-byte file", text.len(), file.len());
+    s.run("project.openText", &json!({"text": text})).unwrap();
+    assert_eq!(value(&s), Some(244.0));
+}
+
 #[test]
 fn globe_projection_toggles_renders_and_saves() {
     let mut s = with_raster();

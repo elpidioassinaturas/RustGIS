@@ -444,6 +444,8 @@ Delete selected features	Hapus fitur terpilih
 Delete selected rows	Hapus baris terpilih
 Delete Style	Hapus Gaya
 Delete Task	Hapus Tugas
+Delete the layout {name}?	Hapus tata letak {name}?
+Delete the map {name}?	Hapus peta {name}?
 Delete the selected features.	Hapus fitur terpilih.
 Depth Priority	Prioritas Kedalaman
 Descending	Menurun
@@ -1836,6 +1838,7 @@ XY Table To Point…	Tabel XY ke Titik…
 Y (mm)	Y (mm)
 Y Field	Kolom Y
 Yes	Ya
+You can undo this with {shortcut}.	Anda dapat mengurungkannya dengan {shortcut}.
 You have version {version}.	Anda memiliki versi {version}.
 z (m)	z (m)
 Z factor	Faktor Z

@@ -444,6 +444,8 @@ Delete selected features	Geselecteerde objecten verwijderen
 Delete selected rows	Geselecteerde rijen verwijderen
 Delete Style	Stijl verwijderen
 Delete Task	Taak verwijderen
+Delete the layout {name}?	Lay-out {name} verwijderen?
+Delete the map {name}?	Kaart {name} verwijderen?
 Delete the selected features.	De geselecteerde objecten verwijderen.
 Depth Priority	Diepteprioriteit
 Descending	Aflopend
@@ -1836,6 +1838,7 @@ XY Table To Point…	XY-tabel naar punt…
 Y (mm)	Y (mm)
 Y Field	Y-veld
 Yes	Ja
+You can undo this with {shortcut}.	U kunt dit ongedaan maken met {shortcut}.
 You have version {version}.	U hebt versie {version}.
 z (m)	z (m)
 Z factor	Z-factor

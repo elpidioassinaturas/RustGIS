@@ -444,6 +444,8 @@ Delete selected features	删除所选要素
 Delete selected rows	删除所选行
 Delete Style	删除样式
 Delete Task	删除任务
+Delete the layout {name}?	删除布局 {name}?
+Delete the map {name}?	删除地图 {name}?
 Delete the selected features.	删除所选要素。
 Depth Priority	深度优先级
 Descending	降序
@@ -1836,6 +1838,7 @@ XY Table To Point…	XY 表转点…
 Y (mm)	Y（mm）
 Y Field	Y 字段
 Yes	是
+You can undo this with {shortcut}.	可以用 {shortcut} 撤销。
 You have version {version}.	你的版本是 {version}。
 z (m)	z（m）
 Z factor	Z 因子

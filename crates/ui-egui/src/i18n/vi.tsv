@@ -444,6 +444,8 @@ Delete selected features	Xóa các đối tượng được chọn
 Delete selected rows	Xóa các hàng được chọn
 Delete Style	Xóa kiểu
 Delete Task	Xóa nhiệm vụ
+Delete the layout {name}?	Xóa bố cục {name}?
+Delete the map {name}?	Xóa bản đồ {name}?
 Delete the selected features.	Xóa các đối tượng được chọn.
 Depth Priority	Ưu tiên độ sâu
 Descending	Giảm dần
@@ -1836,6 +1838,7 @@ XY Table To Point…	Bảng XY thành điểm…
 Y (mm)	Y (mm)
 Y Field	Trường Y
 Yes	Có
+You can undo this with {shortcut}.	Bạn có thể hoàn tác bằng {shortcut}.
 You have version {version}.	Bạn đang dùng phiên bản {version}.
 z (m)	z (m)
 Z factor	Hệ số Z
