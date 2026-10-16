@@ -19,8 +19,10 @@ the maps; while one is open, its groups lead the Publish tab:
   query, display filters and scale range) and, for Unique Values, only the classes those features
   have, with `<all other values>` only when some feature falls in it. Graduated Colors and
   Proportional Symbols list their classes as they are (they are taken from the kept features when
-  the symbology is applied). Tick **All classes** in its
-  properties (`"allClasses": true`) to list every class of every visible layer instead.
+  the symbology is applied). A layer that draws
+  nothing there, such as an empty one, is left out, in layouts saved before this too. Tick **All
+  classes** in its properties (`"allClasses": true`) to list every class of every visible layer
+  instead.
 - **Text** and **Dynamic Text**: `{date}`, `{time}`, `{scale}`, `{map}`, `{crs}`, `{page}`,
   `{pages}`, `{pageName}` and `{layout}` fill in when the page is drawn. **Picture** places a PNG
   or JPEG.
