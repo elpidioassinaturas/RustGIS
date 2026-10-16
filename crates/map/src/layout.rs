@@ -101,6 +101,11 @@ pub enum ElementKind {
     Legend {
         frame: u32,
         title: String,
+        /// List every class of every visible layer. Off (the default), the legend shows what the
+        /// frame draws: classes some drawn feature has, `<all other values>` only when used, and
+        /// no layer that draws nothing at the frame's scale (#207).
+        #[serde(default)]
+        all_classes: bool,
     },
     /// Text; dynamic tokens (`{page}`, `{date}`, `{scale}`…) expand when drawn.
     Text {

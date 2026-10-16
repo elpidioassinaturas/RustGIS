@@ -120,11 +120,13 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                     scale_bar(&mut pm, r, map.ground_res_at(&cam), ppp);
                 }
             }
-            ElementKind::Legend { frame: f, title } => {
-                if let Some(&(_, mi, ..)) = frame(*f)
+            ElementKind::Legend { frame: f, title, all_classes } => {
+                if let Some(&(_, mi, cam, _, _)) = frame(*f)
                     && let Some(map) = maps.get(mi)
                 {
-                    legend(&mut pm, r, map, title, ppp);
+                    // The frame's scale, as its layers' scale ranges and display filters see it.
+                    let scale = (!*all_classes).then(|| map.ground_res_at(&cam) / rustgis_geom::PIXEL_M);
+                    legend(&mut pm, r, map, title, scale, ppp);
                 }
             }
             ElementKind::Text { text: t, size, color, bold } => {
@@ -459,7 +461,10 @@ fn scale_bar(pm: &mut Pixmap, r: Rect, ground_per_pt: f64, ppp: f64) {
     text::text_at(pm, &rustgis_geom::format_distance(target), x0 + len, ty, px, dark, false, text::Align::Center, false);
 }
 
-fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, ppp: f64) {
+/// The legend of a frame's map. With the frame's `scale` it shows what the frame draws (#207): only
+/// layers drawn at that scale with a feature through their definition query and display filters,
+/// and only the classes those features have. Without, every class of every visible layer.
+fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, scale: Option<f64>, ppp: f64) {
     let ppp = ppp as f32;
     let dark = Rgba::rgb(0x22, 0x22, 0x22);
     let mut y = r.y();
@@ -473,7 +478,13 @@ fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, ppp: f64) {
         if y + line > r.y() + r.height() {
             break;
         }
-        let entries = l.renderer.legend();
+        let entries = match scale {
+            Some(s) => match l.shown_legend(s) {
+                Some(entries) => entries,
+                None => continue,
+            },
+            None => l.renderer.legend(),
+        };
         let gt = l.geometry_type();
         if entries.is_empty() {
             swatch(pm, r.x(), y, sw, line, gt, &l.renderer.symbol_for(&l.dataset, 0), ppp);

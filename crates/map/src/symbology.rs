@@ -262,6 +262,36 @@ impl Renderer {
         }
     }
 
+    /// The legend for the features `rows` keeps (a row past its end counts, so `&[]` keeps them
+    /// all): a Unique Values class only when some kept feature has it, and `<all other values>`
+    /// only when some kept feature matches no class (#207). The classes may come from a style file
+    /// or from before a definition query changed, so they can name values no kept feature has. The
+    /// other renderers list their classes as they are.
+    pub fn legend_for(&self, ds: &Dataset, rows: &[bool]) -> Vec<LegendEntry> {
+        let Renderer::Unique { field, classes, other, .. } = self else { return self.legend() };
+        // A value matches its first class, as in `symbol_for`.
+        let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (i, (k, _)) in classes.iter().enumerate() {
+            index.entry(k.as_str()).or_insert(i);
+        }
+        let fi = ds.field_index(field);
+        let mut used = vec![false; classes.len()];
+        let mut other_used = false;
+        for r in (0..ds.features.len()).filter(|r| rows.get(*r).copied().unwrap_or(true)) {
+            let class = fi.and_then(|fi| index.get(ds.value(r, fi).to_string().as_str()).copied());
+            match class.and_then(|i| used.get_mut(i)) {
+                Some(u) => *u = true,
+                None => other_used = true,
+            }
+        }
+        let mut v: Vec<LegendEntry> =
+            classes.iter().zip(&used).filter(|(_, u)| **u).map(|((k, s), _)| LegendEntry { label: k.clone(), symbol: *s }).collect();
+        if other_used {
+            v.push(LegendEntry { label: "<all other values>".into(), symbol: *other });
+        }
+        v
+    }
+
     pub fn legend(&self) -> Vec<LegendEntry> {
         match self {
             Renderer::Single(_) => Vec::new(),
@@ -562,6 +592,35 @@ impl Labeling {
 mod tests {
     use super::*;
     use rustgis_data::{Field, Value};
+
+    #[test]
+    fn the_legend_lists_only_classes_kept_features_have() {
+        let mut d = Dataset::new("t", GeometryType::Polygon, vec![Field::new("g", FieldType::Text)]);
+        for g in ["a", "b", "a", "z"] {
+            d.push(None, vec![Value::Text(g.into())]);
+        }
+        let s = |c| Symbol::default_for(GeometryType::Polygon, c);
+        // "c" is no feature's value; "z" matches no class.
+        let r = Renderer::Unique {
+            field: "g".into(),
+            classes: vec![("a".into(), s(0)), ("b".into(), s(1)), ("c".into(), s(2))],
+            other: s(3),
+            ramp: Ramp::Ember,
+        };
+        let labels = |rows: &[bool]| r.legend_for(&d, rows).into_iter().map(|e| e.label).collect::<Vec<_>>();
+        assert_eq!(labels(&[]), ["a", "b", "<all other values>"]);
+        assert_eq!(labels(&[true, false, true, false]), ["a"], "<all other values> only when used");
+        assert_eq!(labels(&[false, true]), ["a", "b", "<all other values>"], "rows past the end (a, z) count as kept");
+        assert_eq!(labels(&[false, false, false, true]), ["<all other values>"]);
+        assert!(labels(&[false; 4]).is_empty());
+        // The full legend is unchanged.
+        assert_eq!(r.legend().len(), 4);
+        // A field the data no longer has: every feature is "other".
+        let gone = Renderer::Unique { field: "nope".into(), classes: vec![("a".into(), s(0))], other: s(3), ramp: Ramp::Ember };
+        assert_eq!(gone.legend_for(&d, &[]).len(), 1);
+        // Other renderers list their classes as they are.
+        assert_eq!(Renderer::Single(s(0)).legend_for(&d, &[false; 4]), Vec::new());
+    }
 
     #[test]
     fn breaks() {

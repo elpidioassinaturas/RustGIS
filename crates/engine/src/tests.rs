@@ -1027,6 +1027,43 @@ fn symbology_classes_follow_the_definition_query() {
 }
 
 #[test]
+fn layout_legends_list_what_the_frame_draws() {
+    // #207's repro: classes taken before the query (or from a style) name values no drawn country has.
+    let mut s = world();
+    s.run("layer.symbology", &json!({"layer": "Countries", "type": "unique", "field": "income_grp"})).unwrap();
+    s.run("layer.definitionQuery", &json!({"layer": "Countries", "where": "continent = 'South America'"})).unwrap();
+    let l = s.map().layer_by_name("Countries").unwrap();
+    let rustgis_map::Renderer::Unique { classes, .. } = &l.renderer else { panic!("unique renderer expected") };
+    assert!(classes.len() > 2, "{classes:?}");
+    let shown: Vec<String> = l.shown_legend(4e7).unwrap().into_iter().map(|e| e.label).collect();
+    let mut drawn: Vec<String> = {
+        let fi = l.dataset.field_index("income_grp").unwrap();
+        l.visible_rows().iter().enumerate().filter(|(_, v)| **v).map(|(r, _)| l.dataset.value(r, fi).to_string()).collect()
+    };
+    drawn.sort();
+    drawn.dedup();
+    let mut sorted = shown.clone();
+    sorted.sort();
+    assert_eq!(sorted, drawn, "only the classes South America has, and no <all other values>");
+    assert!(shown.len() < classes.len());
+    // The legend element lists what its frame draws unless told to list every class.
+    s.run("layout.new", &json!({"page": "a4", "orientation": "portrait", "template": "map"})).unwrap();
+    let legend =
+        |s: &Session| s.project.layouts[0].elements.iter().find(|e| e.kind.code() == "legend").map(|e| (e.id, e.kind.clone())).unwrap();
+    let (id, kind) = legend(&s);
+    assert!(matches!(kind, rustgis_map::layout::ElementKind::Legend { all_classes: false, .. }), "{kind:?}");
+    s.run("layout.update", &json!({"element": id, "allClasses": true})).unwrap();
+    assert!(matches!(legend(&s).1, rustgis_map::layout::ElementKind::Legend { all_classes: true, .. }));
+    let r = s.run("layout.addElement", &json!({"kind": "legend", "allClasses": true})).unwrap();
+    let added = r["element"].as_u64().unwrap() as u32;
+    let kind = s.project.layouts[0].element(added).map(|e| e.kind.clone()).unwrap();
+    assert!(matches!(kind, rustgis_map::layout::ElementKind::Legend { all_classes: true, .. }), "{kind:?}");
+    // Layouts saved before the option open with it off.
+    let old: rustgis_map::layout::ElementKind = serde_json::from_str(r#"{"Legend":{"frame":1,"title":"L"}}"#).unwrap();
+    assert!(matches!(old, rustgis_map::layout::ElementKind::Legend { all_classes: false, .. }));
+}
+
+#[test]
 fn layouts_compose_export_and_round_trip() {
     use base64::Engine;
     let dir = std::env::temp_dir().join(format!("rustgis-layout-{}", std::process::id()));
