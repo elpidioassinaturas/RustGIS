@@ -398,6 +398,11 @@ impl Layer {
         if !self.in_scale_range(scale) {
             return None;
         }
+        // Nothing to filter: every feature is drawn, and no row list needs building.
+        let query = self.definition_query.as_deref().is_some_and(|q| !q.trim().is_empty());
+        if !query && self.display_filters.is_empty() {
+            return (!self.dataset.features.is_empty()).then(|| self.renderer.legend_for(&self.dataset, &[]));
+        }
         let rows = self.drawn_rows(scale);
         rows.contains(&true).then(|| self.renderer.legend_for(&self.dataset, &rows))
     }
@@ -1024,5 +1029,9 @@ mod tests {
         assert!(labels(l, 5e4).is_some());
         // The full legend is still there for "all classes".
         assert_eq!(l.renderer.legend().len(), 4);
+        // An empty layer, with no query or filter to evaluate, draws nothing either.
+        l.min_scale = None;
+        l.dataset.features.clear();
+        assert_eq!(labels(l, 1e6), None);
     }
 }
