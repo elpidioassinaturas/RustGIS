@@ -513,8 +513,17 @@ fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32
             },
             None => l.renderer.legend(),
         };
-        if hide_other && matches!(l.renderer, rustgis_map::Renderer::Unique { .. }) {
-            entries.retain(|e| e.label != OTHER_VALUES);
+        // <all other values> is a Unique Values legend's last row, with the renderer's own "other"
+        // symbol: a class that happens to have that name stays.
+        if hide_other
+            && let rustgis_map::Renderer::Unique { other, .. } = &l.renderer
+            && entries.last().is_some_and(|e| e.label == OTHER_VALUES && e.symbol == *other)
+        {
+            entries.pop();
+            // Nothing left to show for this layer: leave it out rather than draw its plain swatch.
+            if entries.is_empty() {
+                continue;
+            }
         }
         let gt = l.geometry_type();
         if entries.is_empty() {
@@ -716,15 +725,15 @@ mod tests {
             l.renderer = rustgis_map::Renderer::Unique { field: "g".into(), classes, other: s(3), ramp: rustgis_map::Ramp::Ember };
         }
         // How far down the legend draws, in pixels.
-        let depth = |drawn: Option<&[(u32, Vec<LegendEntry>)]>, hide_other: bool| {
+        let depth = |map: &Map, drawn: Option<&[(u32, Vec<LegendEntry>)]>, hide_other: bool| {
             let mut pm = Pixmap::new(300, 400).unwrap();
             pm.fill(tiny_skia::Color::WHITE);
-            legend(&mut pm, Rect::from_xywh(0.0, 0.0, 300.0, 400.0).unwrap(), &map, "", drawn, hide_other, 1.0);
+            legend(&mut pm, Rect::from_xywh(0.0, 0.0, 300.0, 400.0).unwrap(), map, "", drawn, hide_other, 1.0);
             (0..pm.height()).filter(|&y| (0..pm.width()).any(|x| pm.pixel(x, y).is_some_and(|p| p.red() < 200))).max().unwrap_or(0)
         };
         let drawn = shown_legends(&map, 1e6);
         assert_eq!(drawn.len(), 1, "the empty layer draws nothing: {drawn:?}");
-        let (shown, all) = (depth(Some(&drawn), false), depth(None, false));
+        let (shown, all) = (depth(&map, Some(&drawn), false), depth(&map, None, false));
         // The drawn legend is two rows (the layer's heading and "a"); every class makes it six
         // (b, c, <all other values> and the empty layer's row too). Compared with each other, so
         // the font and antialiasing don't matter.
@@ -732,8 +741,18 @@ mod tests {
         assert!(all >= 2 * shown, "{shown} px of {all}");
         // Hiding <all other values> takes one row off the full legend, and nothing off the drawn
         // one, which has none.
-        assert!(depth(None, true) < all);
-        assert_eq!(depth(Some(&drawn), true), shown);
+        assert!(depth(&map, None, true) < all);
+        assert_eq!(depth(&map, Some(&drawn), true), shown);
+        // A layer whose drawn features all fall in <all other values>, hidden, is left out rather
+        // than drawn as a plain swatch.
+        if let Some(l) = map.layers.iter_mut().find(|l| l.id == pts)
+            && let rustgis_map::Renderer::Unique { classes, .. } = &mut l.renderer
+        {
+            classes.retain(|(k, _)| k != "a");
+        }
+        let drawn = shown_legends(&map, 1e6);
+        assert!(depth(&map, Some(&drawn), false) > 0, "<all other values> alone is listed");
+        assert_eq!(depth(&map, Some(&drawn), true), 0, "and hidden, the layer is left out");
     }
 
     #[test]
