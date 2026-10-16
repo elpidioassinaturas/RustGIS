@@ -4,7 +4,7 @@
 use rustgis_data::GeometryType;
 use rustgis_geom::{Coord, Extent};
 use rustgis_map::layout::{ElementKind, FrameShape, Layout, PT_PER_MM, frame_camera};
-use rustgis_map::symbology::{LegendEntry, OTHER_VALUES};
+use rustgis_map::symbology::LegendEntry;
 use rustgis_map::{Map, Rgba};
 use tiny_skia::{FillRule, Mask, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, Transform};
 
@@ -513,13 +513,9 @@ fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32
             },
             None => l.renderer.legend(),
         };
-        // <all other values> is a Unique Values legend's last row, with the renderer's own "other"
-        // symbol: a class that happens to have that name stays.
-        if hide_other
-            && let rustgis_map::Renderer::Unique { other, .. } = &l.renderer
-            && entries.last().is_some_and(|e| e.label == OTHER_VALUES && e.symbol == *other)
-        {
-            entries.pop();
+        // The fallback row only (a class that happens to bear its name stays).
+        if hide_other && entries.iter().any(|e| e.fallback) {
+            entries.retain(|e| !e.fallback);
             // Nothing left to show for this layer: leave it out rather than draw its plain swatch.
             if entries.is_empty() {
                 continue;
@@ -753,6 +749,22 @@ mod tests {
         let drawn = shown_legends(&map, 1e6);
         assert!(depth(&map, Some(&drawn), false) > 0, "<all other values> alone is listed");
         assert_eq!(depth(&map, Some(&drawn), true), 0, "and hidden, the layer is left out");
+        // A class that bears the fallback's name is a class: hiding the fallback keeps it.
+        if let Some(l) = map.layers.iter_mut().find(|l| l.id == pts)
+            && let rustgis_map::Renderer::Unique { classes, .. } = &mut l.renderer
+        {
+            classes.push(("a".into(), s(0)));
+            classes.iter_mut().for_each(|(k, _)| {
+                if k == "a" {
+                    *k = rustgis_map::symbology::OTHER_VALUES.into();
+                }
+            });
+        }
+        if let Some(l) = map.layers.iter_mut().find(|l| l.id == pts) {
+            l.dataset.features.iter_mut().for_each(|f| f.attrs = vec![Value::Text(rustgis_map::symbology::OTHER_VALUES.into())]);
+        }
+        let drawn = shown_legends(&map, 1e6);
+        assert!(depth(&map, Some(&drawn), true) > 0, "the class named like the fallback is still listed");
     }
 
     #[test]

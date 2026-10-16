@@ -146,6 +146,9 @@ pub const OTHER_VALUES: &str = "<all other values>";
 pub struct LegendEntry {
     pub label: String,
     pub symbol: Symbol,
+    /// The Unique Values fallback row (`<all other values>`), told apart from a class whatever
+    /// its label: a legend can leave it out without touching a class that bears the same name.
+    pub fallback: bool,
 }
 
 /// Most unique-value classes created automatically.
@@ -302,10 +305,14 @@ impl Renderer {
                 }
             }
         }
-        let mut v: Vec<LegendEntry> =
-            classes.iter().zip(&used).filter(|(_, u)| **u).map(|((k, s), _)| LegendEntry { label: k.clone(), symbol: *s }).collect();
+        let mut v: Vec<LegendEntry> = classes
+            .iter()
+            .zip(&used)
+            .filter(|(_, u)| **u)
+            .map(|((k, s), _)| LegendEntry { label: k.clone(), symbol: *s, fallback: false })
+            .collect();
         if other_used {
-            v.push(LegendEntry { label: OTHER_VALUES.into(), symbol: *other });
+            v.push(LegendEntry { label: OTHER_VALUES.into(), symbol: *other, fallback: true });
         }
         v
     }
@@ -314,8 +321,9 @@ impl Renderer {
         match self {
             Renderer::Single(_) => Vec::new(),
             Renderer::Unique { classes, other, .. } => {
-                let mut v: Vec<LegendEntry> = classes.iter().map(|(k, s)| LegendEntry { label: k.clone(), symbol: *s }).collect();
-                v.push(LegendEntry { label: OTHER_VALUES.into(), symbol: *other });
+                let mut v: Vec<LegendEntry> =
+                    classes.iter().map(|(k, s)| LegendEntry { label: k.clone(), symbol: *s, fallback: false }).collect();
+                v.push(LegendEntry { label: OTHER_VALUES.into(), symbol: *other, fallback: true });
                 v
             }
             Renderer::Graduated { breaks, symbols, min, .. } => {
@@ -324,19 +332,20 @@ impl Renderer {
                     .iter()
                     .zip(symbols)
                     .map(|(b, s)| {
-                        let e = LegendEntry { label: format!("{} – {}", fmt_num(lo), fmt_num(*b)), symbol: *s };
+                        let e = LegendEntry { label: format!("{} – {}", fmt_num(lo), fmt_num(*b)), symbol: *s, fallback: false };
                         lo = *b;
                         e
                     })
                     .collect()
             }
             Renderer::Proportional { base, min_size, max_size, min, max, .. } => vec![
-                LegendEntry { label: fmt_num(*min), symbol: Symbol { size: *min_size, ..*base } },
+                LegendEntry { label: fmt_num(*min), symbol: Symbol { size: *min_size, ..*base }, fallback: false },
                 LegendEntry {
                     label: fmt_num((min + max) / 2.0),
                     symbol: Symbol { size: min_size + (max_size - min_size) * 0.707, ..*base },
+                    fallback: false,
                 },
-                LegendEntry { label: fmt_num(*max), symbol: Symbol { size: *max_size, ..*base } },
+                LegendEntry { label: fmt_num(*max), symbol: Symbol { size: *max_size, ..*base }, fallback: false },
             ],
         }
     }
@@ -646,6 +655,20 @@ mod tests {
         // A field the data no longer has: every feature is "other".
         let gone = Renderer::Unique { field: "nope".into(), classes: vec![("a".into(), s(0))], other: s(3), ramp: Ramp::Ember };
         assert_eq!(gone.legend_for(&d, &[]).len(), 1);
+        // The fallback row is marked as such, whatever a class is called.
+        let named = Renderer::Unique {
+            field: "g".into(),
+            classes: vec![("a".into(), s(0)), (OTHER_VALUES.into(), s(1))],
+            other: s(3),
+            ramp: Ramp::Ember,
+        };
+        let mut d2 = d.clone();
+        d2.push(None, vec![Value::Text(OTHER_VALUES.into())]);
+        let rows = named.legend_for(&d2, &[]);
+        assert_eq!(
+            rows.iter().map(|e| (e.label.as_str(), e.fallback)).collect::<Vec<_>>(),
+            [("a", false), (OTHER_VALUES, false), (OTHER_VALUES, true)]
+        );
         // Other renderers list their classes as they are.
         assert_eq!(Renderer::Single(s(0)).legend_for(&d, &[false; 4]), Vec::new());
     }
