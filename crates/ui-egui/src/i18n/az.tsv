@@ -444,6 +444,8 @@ Delete selected features	Seçilmiş obyektləri sil
 Delete selected rows	Seçilmiş sətirləri sil
 Delete Style	Üslubu sil
 Delete Task	Tapşırığı sil
+Delete the layout {name}?	{name} tərtibatı silinsin?
+Delete the map {name}?	{name} xəritəsi silinsin?
 Delete the selected features.	Seçilmiş obyektləri silin.
 Depth Priority	Dərinlik prioriteti
 Descending	Azalan
@@ -1836,6 +1838,7 @@ XY Table To Point…	XY cədvəlindən nöqtəyə…
 Y (mm)	Y (mm)
 Y Field	Y sahəsi
 Yes	Bəli
+You can undo this with {shortcut}.	Bunu {shortcut} ilə geri ala bilərsiniz.
 You have version {version}.	Sizdə {version} versiyası var.
 z (m)	z (m)
 Z factor	Z əmsalı

@@ -964,12 +964,14 @@ mod tests {
         }));
         let mut client = TcpStream::connect(("127.0.0.1", relay.port())).unwrap();
         attach(&mut client, &relay, false);
+        // The relay changes the count, then wakes the UI: wait for both, as the test thread can
+        // see the new count before the wake.
         wait_until("the attach", || relay.attached_clients() == 1);
-        assert!(wakes.load(SeqCst) >= 1, "the attach did not wake the UI");
+        wait_until("the attach to wake the UI", || wakes.load(SeqCst) >= 1);
         let before = wakes.load(SeqCst);
         drop(client);
         wait_until("the disconnect", || relay.attached_clients() == 0);
-        assert!(wakes.load(SeqCst) > before, "the disconnect did not wake the UI");
+        wait_until("the disconnect to wake the UI", || wakes.load(SeqCst) > before);
         relay.stop();
     }
 

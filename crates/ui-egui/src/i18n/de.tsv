@@ -444,6 +444,8 @@ Delete selected features	Ausgewählte Objekte löschen
 Delete selected rows	Ausgewählte Zeilen löschen
 Delete Style	Stil löschen
 Delete Task	Aufgabe löschen
+Delete the layout {name}?	Layout {name} löschen?
+Delete the map {name}?	Karte {name} löschen?
 Delete the selected features.	Die ausgewählten Objekte löschen.
 Depth Priority	Tiefenpriorität
 Descending	Absteigend
@@ -1836,6 +1838,7 @@ XY Table To Point…	XY-Tabelle zu Punkt…
 Y (mm)	Y (mm)
 Y Field	Y-Feld
 Yes	Ja
+You can undo this with {shortcut}.	Sie können das mit {shortcut} rückgängig machen.
 You have version {version}.	Sie haben Version {version}.
 z (m)	z (m)
 Z factor	Z-Faktor

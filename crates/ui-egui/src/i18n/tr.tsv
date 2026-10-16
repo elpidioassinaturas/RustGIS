@@ -444,6 +444,8 @@ Delete selected features	Seçili detayları sil
 Delete selected rows	Seçili satırları sil
 Delete Style	Stili Sil
 Delete Task	Görevi Sil
+Delete the layout {name}?	{name} sayfa düzeni silinsin mi?
+Delete the map {name}?	{name} haritası silinsin mi?
 Delete the selected features.	Seçili detayları sil.
 Depth Priority	Derinlik Önceliği
 Descending	Azalan
@@ -1836,6 +1838,7 @@ XY Table To Point…	XY Tablosundan Noktaya…
 Y (mm)	Y (mm)
 Y Field	Y Alanı
 Yes	Evet
+You can undo this with {shortcut}.	Bunu {shortcut} ile geri alabilirsiniz.
 You have version {version}.	Sizdeki sürüm: {version}.
 z (m)	z (m)
 Z factor	Z faktörü

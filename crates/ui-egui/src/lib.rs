@@ -897,6 +897,8 @@ impl RustGisApp {
         // names it again).
         if r.is_ok() && matches!(id, "project.new" | "project.sample" | "project.open" | "project.openText" | "project.fromTemplate") {
             self.ui.web_file = None;
+            // A deletion asked for in the old project never reaches a namesake in the new one.
+            self.map.deleting = None;
         }
         // Sources added, saved or made favourites are kept with the preferences.
         sourcespane::save(self);
@@ -2272,6 +2274,7 @@ impl RustGisApp {
             });
         }
         dialogs::show(self, &ctx);
+        mapview::confirm_delete(self, &ctx);
         pluginsui::show(self, &ctx);
         update::show(self, &ctx);
         chrome::command_search(self, &ctx);

@@ -444,6 +444,8 @@ Delete selected features	Elimina elementi selezionati
 Delete selected rows	Elimina righe selezionate
 Delete Style	Elimina stile
 Delete Task	Elimina attività
+Delete the layout {name}?	Eliminare il layout {name}?
+Delete the map {name}?	Eliminare la mappa {name}?
 Delete the selected features.	Elimina gli elementi selezionati.
 Depth Priority	Priorità di profondità
 Descending	Decrescente
@@ -1836,6 +1838,7 @@ XY Table To Point…	Da tabella XY a punto…
 Y (mm)	Y (mm)
 Y Field	Campo Y
 Yes	Sì
+You can undo this with {shortcut}.	Puoi annullare con {shortcut}.
 You have version {version}.	Hai la versione {version}.
 z (m)	z (m)
 Z factor	Fattore Z
