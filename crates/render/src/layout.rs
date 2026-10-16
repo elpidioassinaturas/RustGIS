@@ -124,7 +124,9 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                 if let Some(&(_, mi, cam, _, _)) = frame(*f)
                     && let Some(map) = maps.get(mi)
                 {
-                    // The frame's scale, as its layers' scale ranges and display filters see it.
+                    // The frame's scale as the renderer draws it (the one its layers' scale ranges
+                    // and display filters see), not the paper scale `{scale}` prints: the legend
+                    // follows what the frame actually draws.
                     let scale = (!*all_classes).then(|| map.ground_res_at(&cam) / rustgis_geom::PIXEL_M);
                     legend(&mut pm, r, map, title, scale, ppp);
                 }
@@ -669,6 +671,34 @@ fn chart(pm: &mut Pixmap, r: Rect, ds: &rustgis_data::Dataset, field: &str, labe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legends_leave_out_what_the_frame_does_not_draw() {
+        use rustgis_data::{Dataset, Field, FieldType, Geometry, Value};
+        // A layer with one feature, of class "a", classed a, b and c; and an empty layer.
+        let mut map = Map::new("m");
+        let mut d = Dataset::new("pts", GeometryType::Point, vec![Field::new("g", FieldType::Text)]);
+        d.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![Value::Text("a".into())]);
+        let pts = map.add_dataset(d);
+        map.add_dataset(Dataset::new("empty", GeometryType::Point, vec![]));
+        let s = |c| rustgis_map::Symbol::default_for(GeometryType::Point, c);
+        if let Some(l) = map.layers.iter_mut().find(|l| l.id == pts) {
+            let classes = ["a", "b", "c"].iter().zip(0u32..).map(|(k, i)| (k.to_string(), s(i))).collect();
+            l.renderer = rustgis_map::Renderer::Unique { field: "g".into(), classes, other: s(3), ramp: rustgis_map::Ramp::Ember };
+        }
+        // How far down the legend draws, in pixels.
+        let depth = |scale: Option<f64>| {
+            let mut pm = Pixmap::new(300, 400).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            legend(&mut pm, Rect::from_xywh(0.0, 0.0, 300.0, 400.0).unwrap(), &map, "", scale, 1.0);
+            (0..pm.height()).filter(|&y| (0..pm.width()).any(|x| pm.pixel(x, y).is_some_and(|p| p.red() < 200))).max().unwrap_or(0)
+        };
+        let (shown, all) = (depth(Some(1e6)), depth(None));
+        // A row is 15 px: the drawn legend is the layer's heading and "a"; every class adds b, c,
+        // <all other values> and the empty layer's row.
+        assert!(shown < 2 * 15 + 2, "{shown}");
+        assert!(all >= 5 * 15, "{all}");
+    }
 
     #[test]
     fn hairline_rectangles_draw_thin() {
