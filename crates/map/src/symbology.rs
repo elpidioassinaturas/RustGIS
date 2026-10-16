@@ -277,11 +277,26 @@ impl Renderer {
         let fi = ds.field_index(field);
         let mut used = vec![false; classes.len()];
         let mut other_used = false;
+        // Distinct classes still unseen: once every class and "other" are in, the rest can't add any.
+        let mut unseen = index.len() + 1;
+        // One buffer for every value's text, rather than a string per feature.
+        let mut text = String::new();
         for r in (0..ds.features.len()).filter(|r| rows.get(*r).copied().unwrap_or(true)) {
-            let class = fi.and_then(|fi| index.get(ds.value(r, fi).to_string().as_str()).copied());
-            match class.and_then(|i| used.get_mut(i)) {
-                Some(u) => *u = true,
-                None => other_used = true,
+            let class = fi.and_then(|fi| {
+                use std::fmt::Write;
+                text.clear();
+                write!(text, "{}", ds.value(r, fi)).ok()?;
+                index.get(text.as_str()).copied()
+            });
+            let seen = match class.and_then(|i| used.get_mut(i)) {
+                Some(u) => std::mem::replace(u, true),
+                None => std::mem::replace(&mut other_used, true),
+            };
+            if !seen {
+                unseen -= 1;
+                if unseen == 0 {
+                    break;
+                }
             }
         }
         let mut v: Vec<LegendEntry> =
@@ -615,6 +630,16 @@ mod tests {
         assert!(labels(&[false; 4]).is_empty());
         // The full legend is unchanged.
         assert_eq!(r.legend().len(), 4);
+        // A class listed twice: the first matches, and the scan still stops once all are seen.
+        let twice = Renderer::Unique {
+            field: "g".into(),
+            classes: vec![("a".into(), s(0)), ("a".into(), s(1)), ("b".into(), s(2))],
+            other: s(3),
+            ramp: Ramp::Ember,
+        };
+        let shown = twice.legend_for(&d, &[]);
+        assert_eq!(shown.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["a", "b", "<all other values>"]);
+        assert_eq!(shown[0].symbol, s(0));
         // A field the data no longer has: every feature is "other".
         let gone = Renderer::Unique { field: "nope".into(), classes: vec![("a".into(), s(0))], other: s(3), ramp: Ramp::Ember };
         assert_eq!(gone.legend_for(&d, &[]).len(), 1);

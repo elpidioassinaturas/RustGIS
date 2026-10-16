@@ -393,7 +393,7 @@ impl Layer {
 
     /// The legend rows for what this layer draws at a scale denominator (#207): the classes of the
     /// features its definition query and display filters keep. `None` when it draws nothing there
-    /// (out of its scale range, or no feature kept), so a legend can leave it out.
+    /// (out of its scale range, or no feature kept, as in an empty layer), so a legend can leave it out.
     pub fn shown_legend(&self, scale: f64) -> Option<Vec<symbology::LegendEntry>> {
         if !self.in_scale_range(scale) {
             return None;
