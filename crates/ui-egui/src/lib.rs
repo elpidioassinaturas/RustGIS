@@ -79,8 +79,9 @@ pub struct Start {
     pub projection: Option<String>,
     /// The extent to open on, as `minLon,minLat,maxLon,maxLat`.
     pub extent: Option<String>,
-    /// The last run ended in a crash: don't open a Start With project, which may be what crashed
-    /// (one that crashes every launch would leave no way into Settings to change it).
+    /// The last run didn't close cleanly (a crash, a kill, a power cut): don't open a Start With
+    /// project, which may be what crashed (one that crashes every launch would leave no way into
+    /// Settings to change it).
     pub after_crash: bool,
 }
 
@@ -1007,9 +1008,12 @@ impl RustGisApp {
                 false
             }
             (Some(false), _) | (None, StartWith::Sample) => false,
-            (None, StartWith::Last | StartWith::File(_)) if overrides.after_crash => {
+            // Only when there is a project to skip: Last Project with none yet starts the sample anyway.
+            (None, StartWith::Last | StartWith::File(_))
+                if overrides.after_crash && (self.ui.last_project.is_some() || self.ui.start_with != StartWith::Last) =>
+            {
                 let text = i18n::fmt(
-                    "RustGIS closed unexpectedly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project tab when you're ready.",
+                    "RustGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.",
                     &[],
                 );
                 self.session.notify(text, true);

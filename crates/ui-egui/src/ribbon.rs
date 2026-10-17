@@ -2807,7 +2807,7 @@ fn start_project_menu(app: &mut RustGisApp, ui: &mut Ui) {
         let last = app.ui.last_project.clone();
         let item = ui
             .add_enabled(last.is_some() || with == StartWith::Last, egui::Button::selectable(with == StartWith::Last, tl!("Last Project")))
-            .on_hover_text(last.clone().unwrap_or_default())
+            .on_hover_text(last.clone().unwrap_or_else(|| tl!("No project opened or saved yet").to_string()))
             .on_disabled_hover_text(tl!("No project opened or saved yet"));
         if item.clicked() {
             let _ = app.run("ui.startup", json!({"project": "last"}));

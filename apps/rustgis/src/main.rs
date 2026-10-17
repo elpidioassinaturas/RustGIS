@@ -148,6 +148,47 @@ mod crash {
     }
 }
 
+/// Whether the last launch ended without a clean exit, told by a marker file this run holds
+/// (locked) and empties when it closes. A crash of any kind (a panic, a native abort, a stack
+/// overflow, running out of memory), a kill or a power cut leaves it set; a panic that was caught
+/// and recovered from doesn't. A second copy running alongside can't lock it, so it doesn't count.
+mod running {
+    use std::fs::{File, OpenOptions};
+    use std::io::{Read, Seek, Write};
+    use std::path::Path;
+
+    /// The marker, held while this run lasts.
+    pub struct Marker(File);
+
+    /// Takes `<dir>/running` for this run: the marker (none when another copy holds it or the
+    /// folder can't be written) and whether the previous run didn't close cleanly.
+    pub fn start(dir: Option<&Path>) -> (Option<Marker>, bool) {
+        let Some(dir) = dir else { return (None, false) };
+        let file = std::fs::create_dir_all(dir)
+            .and_then(|_| OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("running")));
+        let Ok(mut file) = file else { return (None, false) };
+        if file.try_lock().is_err() {
+            return (None, false);
+        }
+        let mut text = String::new();
+        let unclean = file.read_to_string(&mut text).is_ok() && text.trim() == "running";
+        let marked = file.set_len(0).and_then(|_| file.rewind()).and_then(|_| file.write_all(b"running")).and_then(|_| file.flush());
+        if let Err(e) = marked {
+            log::warn!("could not mark this run: {e}");
+        }
+        (Some(Marker(file)), unclean)
+    }
+
+    impl Marker {
+        /// A clean exit: the next launch starts as usual. Dropping the file releases the lock.
+        pub fn close(self) {
+            if let Err(e) = self.0.set_len(0) {
+                log::warn!("could not clear the run marker: {e}");
+            }
+        }
+    }
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // The GPU map backend draws inside egui's wgpu pass; hand over the render state.
@@ -179,6 +220,9 @@ fn main() -> eframe::Result {
     }
     // What an earlier session left, before this one can write a new log.
     let crashed = crash::take_previous(prefs::dir());
+    // Whether it closed cleanly: if not, the Start With project isn't opened (it may be what
+    // crashed, and reopening it on every launch would leave no way into Settings).
+    let (marker, unclean) = running::start(prefs::dir().as_deref());
     crash::install(prefs::dir());
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     // Installed plugins, before the first session lists commands and tools.
@@ -191,12 +235,12 @@ fn main() -> eframe::Result {
     let mut app = app.with_services(prefs::services());
     // Settings › Start-up; `--sample` still opens the sample.
     let blank = if args.iter().any(|a| a == "--sample") { Some(false) } else { (!files.is_empty()).then_some(true) };
-    if let Err(e) = app.start(&rustgis_ui_egui::Start { blank, after_crash: crashed.is_some(), ..Default::default() }) {
+    if let Err(e) = app.start(&rustgis_ui_egui::Start { blank, after_crash: unclean, ..Default::default() }) {
         log::warn!("start-up: {e}");
     }
     if let Some(log) = crashed {
         // Notices are shown as written: translate this one now that the language is known.
-        rustgis_ui_egui::i18n::set_current(app.lang());
+        rustgis_ui_egui::i18n::set_current(app.chosen_lang());
         let text = rustgis_ui_egui::i18n::fmt(
             "RustGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.",
             &[("path", &log.display().to_string())],
@@ -229,13 +273,37 @@ fn main() -> eframe::Result {
         viewport = viewport.with_icon(egui::IconData { rgba, width: size, height: size });
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    eframe::run_native("RustGIS", options, Box::new(move |_cc| Ok(Box::new(App(app)))))
+    let result = eframe::run_native("RustGIS", options, Box::new(move |_cc| Ok(Box::new(App(app)))));
+    if let Some(marker) = marker {
+        marker.close();
+    }
+    result
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use super::crash;
+    use super::{crash, running};
+
+    #[test]
+    fn a_run_that_did_not_close_is_noticed_once() {
+        let dir = std::env::temp_dir().join(format!("rustgis-running-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (first, unclean) = running::start(Some(&dir));
+        assert!(first.is_some() && !unclean, "a first run");
+        // Another copy running alongside can't take it, and doesn't count as a crash.
+        let (second, unclean) = running::start(Some(&dir));
+        assert!(second.is_none() && !unclean);
+        // This run ends without closing (a crash): the next one notices, once it closes cleanly.
+        drop(first);
+        let (after_crash, unclean) = running::start(Some(&dir));
+        assert!(unclean);
+        after_crash.unwrap().close();
+        let (next, unclean) = running::start(Some(&dir));
+        assert!(!unclean);
+        drop(next);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn crash_times_are_utc_dates() {

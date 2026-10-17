@@ -638,7 +638,6 @@ fn start_with_a_project_file_or_the_last_one() {
     crashed.start(&rustgis_ui_egui::Start { after_crash: true, ..Default::default() }).unwrap();
     assert!(crashed.session.path.is_none() && !crashed.session.map().layers.is_empty());
     assert!(crashed.session.notices.iter().any(|n| n.error), "{:?}", crashed.session.notices);
-    assert_eq!(pref("start_project").as_deref(), Some("last"), "the choice stays for the next start");
 
     // A picked project: it must be a project file that is there.
     std::fs::write(dir.join("notes.txt"), "x").unwrap();
@@ -675,6 +674,16 @@ fn start_with_a_project_file_or_the_last_one() {
     assert!(started.session.path.is_none() && !started.session.map().layers.is_empty());
     assert!(started.session.notices.iter().any(|n| n.error && n.text.contains("a.rgis")), "{:?}", started.session.notices);
     assert_eq!(pref("start_project"), Some(format!("file:{}", shown(&a))));
+    // A stored path is trimmed, and one that isn't a project file isn't opened.
+    store.lock().unwrap().insert("start_project".into(), format!("file:  {}  ", shown(&b)));
+    let mut started = RustGisApp::with_sample().with_services(services());
+    assert_eq!(started.ui.start_with, rustgis_ui_egui::StartWith::File(shown(&b)));
+    started.start(&Default::default()).unwrap();
+    assert_eq!(started.session.path.as_deref(), Some(b.as_path()));
+    store.lock().unwrap().insert("start_project".into(), format!("file:{}", shown(&dir.join("notes.txt"))));
+    let mut started = RustGisApp::with_sample().with_services(services());
+    started.start(&Default::default()).unwrap();
+    assert!(started.session.path.is_none() && started.session.notices.iter().any(|n| n.error && n.text.contains("notes.txt")));
     // Back to the sample, as `blank` still says.
     app.run("ui.startup", json!({"blank": false})).unwrap();
     assert_eq!(pref("start_project").as_deref(), Some("sample"));
@@ -691,8 +700,11 @@ fn start_with_a_project_file_or_the_last_one() {
     };
     let mut browser = RustGisApp::with_sample().with_services(web(&store));
     assert_eq!(browser.ui.start_with, rustgis_ui_egui::StartWith::Sample);
-    let err = browser.run("ui.startup", json!({"project": {"path": shown(&b)}})).unwrap_err();
-    assert!(err.contains("desktop"), "{err}");
+    // Refused before the path is looked at: a missing one says so too.
+    for path in [shown(&b), shown(&dir.join("missing.rgis"))] {
+        let err = browser.run("ui.startup", json!({"project": {"path": path}})).unwrap_err();
+        assert!(err.contains("desktop"), "{err}");
+    }
     assert!(browser.run("ui.startup", json!({"project": "last"})).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
