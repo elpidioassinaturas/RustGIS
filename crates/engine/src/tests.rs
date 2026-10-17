@@ -1152,6 +1152,12 @@ fn layer_class_style_edits_one_class() {
         let err = s.run("layer.classStyle", &json!({"layer": "Countries", "index": index, "label": "x"})).unwrap_err();
         assert!(err.contains("whole number"), "{index}: {err}");
     }
+    // A numeric value names its class as the data prints it, whether sent as an integer or not.
+    s.run("layer.symbology", &json!({"layer": "Countries", "type": "unique", "field": "pop_est"})).unwrap();
+    for v in [json!(211049527), json!(211049527.0)] {
+        let r = s.run("layer.classStyle", &json!({"layer": "Countries", "value": v, "label": "Brazil"})).unwrap();
+        assert_eq!(r["label"], "Brazil", "{v}");
+    }
     // Graduated Colors, by number: the label replaces the range.
     s.run("layer.symbology", &json!({"layer": "Countries", "type": "graduated", "field": "pop_est", "classes": 3})).unwrap();
     s.run("layer.classStyle", &json!({"layer": "Countries", "index": 2, "label": "Most populous"})).unwrap();

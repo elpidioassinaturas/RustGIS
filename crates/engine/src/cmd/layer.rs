@@ -2005,7 +2005,12 @@ fn class_style(s: &mut Session, p: &Value) -> CmdResult {
     let class = match (p.get("value"), index, other) {
         (Some(v), None, false) => ClassRef::Value(match v {
             Value::String(t) => t.clone(),
-            Value::Number(n) => n.to_string(),
+            // As the data prints it (the classes' own keys): `1000.0` is the class "1000".
+            Value::Number(n) => match (n.as_i64(), n.as_f64()) {
+                (Some(i), _) => rustgis_data::Value::Int(i).to_string(),
+                (None, Some(x)) => rustgis_data::Value::Float(x).to_string(),
+                _ => n.to_string(),
+            },
             _ => return Err("value must be a text or a number".into()),
         }),
         (None, Some(i), false) => ClassRef::Index(usize::try_from(i).map_err(|_| "index is too large")?),

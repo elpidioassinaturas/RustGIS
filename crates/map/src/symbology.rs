@@ -564,11 +564,13 @@ impl Renderer {
 /// `new` with the hand-made parts of `old`, a class whose scheme colour was `scheme`: the fill
 /// when it isn't that colour, and the outline when it isn't the one [`Symbol::with_fill`] derives
 /// (a polygon's shaded fill, a line's own colour; for points, the new base symbol's outline).
-/// Colours compare without alpha: a polygon keeps its own transparency.
+/// A polygon's fill compares without alpha (a polygon keeps its own transparency); a point's or a
+/// line's with it, since `with_fill` gives them the colour's alpha as it is.
 fn carry_class(new: Symbol, old: &Symbol, scheme: Rgba, g: GeometryType) -> Symbol {
     let rgb = |c: Rgba| (c.r(), c.g(), c.b());
     let mut s = new;
-    if rgb(old.fill) != rgb(scheme) {
+    let edited = if g == GeometryType::Polygon { rgb(old.fill) != rgb(scheme) } else { old.fill != scheme };
+    if edited {
         let c = if g == GeometryType::Polygon { Rgba::rgb(old.fill.r(), old.fill.g(), old.fill.b()) } else { old.fill };
         s = s.with_fill(c, g);
     }

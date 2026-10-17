@@ -8,7 +8,7 @@ use rustgis_engine::Session;
 use rustgis_engine::analysis::{ParamKind, tools};
 use rustgis_engine::data::GeometryType;
 use rustgis_engine::map::raster::RasterLegend;
-use rustgis_engine::map::symbology::{ClassRef, ClassStyle};
+use rustgis_engine::map::symbology::{ClassRef, ClassStyle, MAX_UNIQUE};
 use rustgis_engine::map::tiles::TileLayer;
 use rustgis_engine::map::{ClassMethod, Layer, Marker, Ramp, RasterRenderer, Renderer, Resampling, Stretch, Symbol};
 use serde_json::{Value, json};
@@ -2573,7 +2573,8 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
         ui,
         |ui| {
             ui.set_width(ui.available_width());
-            for (i, e) in l.renderer.legend().iter().take(64).enumerate() {
+            // Every class and `<all other values>`, so each one has its editor.
+            for (i, e) in l.renderer.legend().iter().take(MAX_UNIQUE + 1).enumerate() {
                 let Some((class, class_ref)) = classes.get(i) else {
                     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
                     patch(
