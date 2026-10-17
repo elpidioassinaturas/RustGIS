@@ -1998,7 +1998,11 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
 /// `layer.classStyle`: one class's colour, outline colour and legend label (#314).
 fn class_style(s: &mut Session, p: &Value) -> CmdResult {
     let other = b(p, "other").unwrap_or(false);
-    let class = match (p.get("value"), uint(p, "index"), other) {
+    let index = match p.get("index") {
+        Some(_) => Some(uint(p, "index").ok_or("index must be a whole number from 0")?),
+        None => None,
+    };
+    let class = match (p.get("value"), index, other) {
         (Some(v), None, false) => ClassRef::Value(match v {
             Value::String(t) => t.clone(),
             Value::Number(n) => n.to_string(),

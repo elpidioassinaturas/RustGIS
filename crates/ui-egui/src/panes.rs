@@ -8,6 +8,7 @@ use rustgis_engine::Session;
 use rustgis_engine::analysis::{ParamKind, tools};
 use rustgis_engine::data::GeometryType;
 use rustgis_engine::map::raster::RasterLegend;
+use rustgis_engine::map::symbology::{ClassRef, ClassStyle};
 use rustgis_engine::map::tiles::TileLayer;
 use rustgis_engine::map::{ClassMethod, Layer, Marker, Ramp, RasterRenderer, Renderer, Resampling, Stretch, Symbol};
 use serde_json::{Value, json};
@@ -2523,20 +2524,40 @@ fn ramp_picker(app: &mut RustGisApp, ui: &mut Ui, cur: &Ramp, t: &Tokens) {
 /// (#314): its colour button and its legend label, which applies when the field loses focus and
 /// goes back to the value or range when cleared.
 fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
-    // Each row's class, as layer.classStyle names it; none for renderers without classes.
-    let classes: Vec<Value> = match &l.renderer {
-        Renderer::Unique { classes, .. } => {
-            classes.iter().map(|(k, _)| json!({"value": k})).chain(std::iter::once(json!({"other": true}))).collect()
-        }
-        Renderer::Graduated { symbols, .. } => (0..symbols.len()).map(|i| json!({"index": i})).collect(),
+    // Each row's class, as layer.classStyle names it (and as the renderer does); none for
+    // renderers without classes.
+    let classes: Vec<(Value, ClassRef)> = match &l.renderer {
+        Renderer::Unique { classes, .. } => classes
+            .iter()
+            .map(|(k, _)| (json!({"value": k}), ClassRef::Value(k.clone())))
+            .chain(std::iter::once((json!({"other": true}), ClassRef::Other)))
+            .collect(),
+        Renderer::Graduated { symbols, .. } => (0..symbols.len()).map(|i| (json!({"index": i}), ClassRef::Index(i))).collect(),
         _ => Vec::new(),
     };
+    // A colour dragged in the picker previews in the project and runs layer.classStyle once, when
+    // the pointer is let go, with the pre-drag renderer put back first so that one undo step
+    // holds it (as `live_drag` does for the ribbon's sliders).
+    let (pending, original) = (egui::Id::new(("class_color_pending", l.id)), egui::Id::new(("class_color_original", l.id)));
+    if !ui.input(|i| i.pointer.primary_down())
+        && let Some(params) = ui.data_mut(|d| d.remove_temp::<Value>(pending))
+    {
+        if let Some(r) = ui.data_mut(|d| {
+            let r = d.get_temp::<Renderer>(original);
+            d.remove::<Renderer>(original);
+            r
+        }) && let Some(layer) = app.session.map_mut().layer_mut(l.id)
+        {
+            layer.renderer = r;
+        }
+        let _ = app.run("layer.classStyle", params);
+    }
     egui::Frame::NONE.stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::same(6)).show(
         ui,
         |ui| {
             ui.set_width(ui.available_width());
             for (i, e) in l.renderer.legend().iter().take(64).enumerate() {
-                let Some(class) = classes.get(i) else {
+                let Some((class, class_ref)) = classes.get(i) else {
                     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
                     patch(
                         ui.painter(),
@@ -2561,10 +2582,28 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     let shown = if l.geometry_type() == GeometryType::Polygon { e.symbol.fill.with_alpha(255) } else { e.symbol.fill };
                     let mut c = c32(shown);
                     if ui.color_edit_button_srgba(&mut c).on_hover_text(tl!("Class color")).changed() {
-                        let _ = app.run("layer.classStyle", with("color", json!(rgba(c).hex())));
+                        let params = with("color", json!(rgba(c).hex()));
+                        if ui.input(|i| i.pointer.primary_down()) {
+                            if ui.data(|d| d.get_temp::<Renderer>(original).is_none()) {
+                                ui.data_mut(|d| d.insert_temp(original, l.renderer.clone()));
+                            }
+                            if let Some(layer) = app.session.map_mut().layer_mut(l.id) {
+                                let g = layer.geometry_type();
+                                let _ = layer.renderer.set_class_style(
+                                    class_ref,
+                                    &ClassStyle { color: Some(rgba(c)), ..Default::default() },
+                                    g,
+                                );
+                            }
+                            app.session.revision = app.session.revision.wrapping_add(1);
+                            ui.data_mut(|d| d.insert_temp(pending, params));
+                        } else {
+                            let _ = app.run("layer.classStyle", params);
+                        }
                     }
-                    // The typing lives in the pane's state while the field has focus.
-                    let id = egui::Id::new(("class_label", l.id, i));
+                    // The typing lives in the pane's state while the field has focus, under the
+                    // class it names (not the row, which another class can take meanwhile).
+                    let id = egui::Id::new(("class_label", l.id, l.renderer.field().unwrap_or_default(), class.to_string()));
                     let mut buf = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| e.label.clone());
                     let r = ui
                         .add(egui::TextEdit::singleline(&mut buf).desired_width(ui.available_width()))

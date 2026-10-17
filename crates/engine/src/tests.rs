@@ -1147,6 +1147,11 @@ fn layer_class_style_edits_one_class() {
     ] {
         assert!(s.run("layer.classStyle", &bad).is_err(), "{bad}");
     }
+    // A malformed index says what is wrong with it.
+    for index in [json!(0.5), json!(-1), json!("first")] {
+        let err = s.run("layer.classStyle", &json!({"layer": "Countries", "index": index, "label": "x"})).unwrap_err();
+        assert!(err.contains("whole number"), "{index}: {err}");
+    }
     // Graduated Colors, by number: the label replaces the range.
     s.run("layer.symbology", &json!({"layer": "Countries", "type": "graduated", "field": "pop_est", "classes": 3})).unwrap();
     s.run("layer.classStyle", &json!({"layer": "Countries", "index": 2, "label": "Most populous"})).unwrap();
