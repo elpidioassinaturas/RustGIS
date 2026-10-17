@@ -2562,10 +2562,17 @@ fn finish_class_color_drag(app: &mut RustGisApp, ui: &Ui) {
 
 /// Puts the pre-drag renderer back and runs the drag's layer.classStyle: one undo step.
 fn apply_class_color_drag(app: &mut RustGisApp, drag: ClassColorDrag) {
-    if let Some(layer) = app.session.map_mut().layer_mut(drag.layer) {
-        layer.renderer = drag.before;
+    // A layer removed mid-drag took its preview with it: there is nothing to restore or style.
+    let Some(layer) = app.session.map_mut().layer_mut(drag.layer) else { return };
+    layer.renderer = drag.before;
+    run_class_style(app, drag.params);
+}
+
+/// Runs a layer.classStyle from the pane; a refusal (the class is gone, say) shows as a notice.
+fn run_class_style(app: &mut RustGisApp, params: Value) {
+    if let Err(e) = app.run("layer.classStyle", params) {
+        app.session.notify(e, true);
     }
-    let _ = app.run("layer.classStyle", drag.params);
 }
 
 /// The renderer's legend rows. A Unique Values or Graduated Colors class can be edited in place
@@ -2654,7 +2661,7 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                             app.session.revision = app.session.revision.wrapping_add(1);
                             ui.data_mut(|d| d.insert_temp(key, ClassColorDrag { layer: l.id, params, before }));
                         } else {
-                            let _ = app.run("layer.classStyle", params);
+                            run_class_style(app, params);
                         }
                     }
                     // The typing lives in the pane's state while the field has focus, under the
@@ -2688,7 +2695,7 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                         };
                         let changed = text != normalize_label(&e.label) && (has_label || !text.is_empty());
                         if changed && !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                            let _ = app.run("layer.classStyle", with("label", json!(buf)));
+                            run_class_style(app, with("label", json!(buf)));
                         }
                     } else if r.has_focus() {
                         ui.data_mut(|d| d.insert_temp(typing, buf));
