@@ -2575,9 +2575,25 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
         ui,
         |ui| {
             ui.set_width(ui.available_width());
-            // Every class and `<all other values>`, so each one has its editor.
-            for (i, e) in l.renderer.legend().iter().take(MAX_UNIQUE + 1).enumerate() {
-                let Some((class, class_ref)) = classes.get(i) else {
+            let legend = l.renderer.legend();
+            // At most MAX_UNIQUE classes (a style import can bring more), then Unique Values'
+            // `<all other values>`, the legend's last row, whatever their number.
+            let rows: Vec<usize> = match &l.renderer {
+                Renderer::Unique { .. } => {
+                    (0..legend.len().saturating_sub(1)).take(MAX_UNIQUE).chain(legend.len().checked_sub(1)).collect()
+                }
+                _ => (0..legend.len()).take(MAX_UNIQUE + 1).collect(),
+            };
+            let mut seen = std::collections::HashSet::new();
+            for i in rows {
+                let Some(e) = legend.get(i) else { continue };
+                // A value listed twice is drawn with its first class (`symbol_for`): the repeat
+                // is shown but not editable, since editing it would change the first.
+                let editable = classes.get(i).filter(|(_, r)| match r {
+                    ClassRef::Value(v) => seen.insert(v.clone()),
+                    _ => true,
+                });
+                let Some((class, class_ref)) = editable else {
                     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
                     patch(
                         ui.painter(),
