@@ -440,8 +440,12 @@ impl Renderer {
     /// polygon class gets a matching outline unless `outline` names one. Returns the class's
     /// legend row as it now is.
     pub fn set_class_style(&mut self, class: &ClassRef, style: &ClassStyle, g: GeometryType) -> Result<LegendEntry, String> {
-        // Cut to MAX_LABEL, then trimmed again: a cut can end in a space.
-        let label = style.label.as_deref().map(|t| t.trim().chars().take(MAX_LABEL).collect::<String>().trim_end().to_string());
+        // One line (control characters such as line breaks become spaces), cut to MAX_LABEL, then
+        // trimmed again: a cut can end in a space.
+        let label = style.label.as_deref().map(|t| {
+            let t: String = t.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+            t.trim().chars().take(MAX_LABEL).collect::<String>().trim_end().to_string()
+        });
         let restyle = |s: &mut Symbol| {
             if let Some(c) = style.color {
                 *s = s.with_fill(c, g);
@@ -1025,6 +1029,22 @@ mod tests {
         // A very long label is cut.
         let e = gr.set_class_style(&ClassRef::Index(0), &style(None, None, Some(&"x".repeat(500))), g).unwrap();
         assert_eq!(e.label.chars().count(), MAX_LABEL);
+        // A label is one line.
+        let e = gr
+            .set_class_style(
+                &ClassRef::Index(0),
+                &style(
+                    None,
+                    None,
+                    Some(
+                        "Low
+income	",
+                    ),
+                ),
+                g,
+            )
+            .unwrap();
+        assert_eq!(e.label, "Low income");
         // A cut that lands on a space doesn't leave it at the end.
         let long = format!("{} {}", "x".repeat(MAX_LABEL - 1), "y".repeat(10));
         let e = gr.set_class_style(&ClassRef::Index(0), &style(None, None, Some(&long)), g).unwrap();
