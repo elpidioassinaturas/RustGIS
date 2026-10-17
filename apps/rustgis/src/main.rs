@@ -178,8 +178,16 @@ mod running {
             log::info!("the run marker is held ({e}): another copy of RustGIS is running");
             return (None, false);
         }
-        let mut text = String::new();
-        let unclean = file.read_to_string(&mut text).is_ok() && text.trim() == "running";
+        // A clean exit leaves the marker empty: anything in it (whatever it reads as) means the
+        // last run didn't close, and so does a marker that can't be read.
+        let mut bytes = Vec::new();
+        let unclean = match file.read_to_end(&mut bytes) {
+            Ok(_) => !bytes.is_empty(),
+            Err(e) => {
+                log::warn!("could not read the run marker ({e}): taking the last run as not closed");
+                true
+            }
+        };
         let marked = file.set_len(0).and_then(|_| file.rewind()).and_then(|_| file.write_all(b"running")).and_then(|_| file.flush());
         if let Err(e) = marked {
             log::warn!("could not mark this run: {e}");
