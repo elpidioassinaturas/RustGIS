@@ -181,8 +181,11 @@ mod running {
                 return (None, false);
             }
             // The folder can't lock files (some network or FUSE folders): keep the marker unlocked,
-            // so unclean exits are still noticed. A second copy running alongside is then taken for
-            // one, which only costs that copy its start-up project.
+            // so unclean exits are still noticed. Without a lock, copies running side by side share
+            // it: the second is taken for an unclean exit (it only loses its start-up project), and
+            // when it closes first it clears the marker, so a later crash of the first goes
+            // unnoticed. Every copy still clears the marker on a clean exit: none holds a lock here,
+            // and a marker nobody clears would make every later launch look unclean.
             Err(std::fs::TryLockError::Error(e)) => {
                 log::warn!("could not lock the run marker ({e}): a second copy running alongside will look like an unclean exit");
             }
