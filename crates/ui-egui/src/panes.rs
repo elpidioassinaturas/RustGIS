@@ -1501,11 +1501,20 @@ fn catalog(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                             icons::paint(ui.painter(), r, "run", t.icon, t.accent);
                             let resp = ui
                                 .link(crate::i18n::fmt("{name} ({n} steps)", &[("name", &n), ("n", &steps.to_string())]))
-                                .on_hover_text(tl!("Run the task"));
+                                .on_hover_text(tl!("Open the task's steps"));
+                            // A click opens the steps; running them all at once is a deliberate
+                            // choice, in the context menu.
                             if resp.clicked() {
-                                let _ = app.run("task.run", json!({"task": n}));
+                                app.ws.task = n.clone();
+                                app.ws.task_step = 0;
+                                app.ui.right = Some(RightPane::Tasks);
                             }
                             resp.context_menu(|ui| {
+                                if ui.button(tl!("Run All Steps")).clicked() {
+                                    let _ = app.run("task.run", json!({"task": n}));
+                                    app.map.invalidate();
+                                    ui.close();
+                                }
                                 if ui.button(tl!("Delete")).clicked() {
                                     let _ = app.run("task.remove", json!({"task": n}));
                                     ui.close();

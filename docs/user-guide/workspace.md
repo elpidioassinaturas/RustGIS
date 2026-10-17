@@ -6,9 +6,20 @@ Tools for working across maps and views, and for setting up the app the way you 
   place and scale, and **Link Cursors** marks the pointer's place on the other map.
 - **Browser View** shows the project's maps, layouts, tables, styles, tasks, models, folders and
   offline areas as cards (double-click to open); **Item Pop-ups** add hover details.
-- **Pane Sets** save the panes you have open and bring them back. **Tasks** steps through a
-  task's instructions; the **Workflow Manager** tracks jobs (new, in progress, on hold, done)
-  with the area each covers.
+- **Pane Sets** save the panes you have open and bring them back. The **Workflow Manager** tracks
+  jobs (new, in progress, on hold, done) with the area each covers.
+- **Tasks** (View › Tasks) steps through a task's instructions: read the current step, do it, or
+  click **Run** to have it done.
+  - **Record Task** (in the pane, or Home › Task) turns an exercise into a task: do it once, and
+    each command that changes the project becomes a step. Panes, dialogs and moving the view
+    aren't recorded, and a colour adjusted several times stays one step. **Stop Recording** makes
+    the task and opens it for editing.
+  - **Edit Steps** gives each step ▲ ▼ to reorder it, ✎ to edit its title and instructions, and ✕
+    to delete it.
+  - In the Browser pane, a click on a task opens its steps; **Run All Steps** is in its context
+    menu.
+  - A task from a file (`.rgistask`, or inside a project or a package) can't read or write files
+    or run scripts, but its tools may name their output layers.
 - **Thumbnails** for the project and for each map, from the view or an image.
 - **Animation**: add keyframes (views), play them, and export the moves as PNG frames.
 - **Profile**: elevation profiles along clicked points or selected lines, auto-completed to the

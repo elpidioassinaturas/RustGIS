@@ -719,6 +719,59 @@ fn start_with_a_project_file_or_the_last_one() {
 }
 
 #[test]
+fn a_task_is_recorded_from_what_changes_the_project_and_edited_in_its_pane() {
+    let mut h = harness();
+    h.step();
+    let app = h.state_mut();
+    assert!(app.run("ui.taskRecord", json!({})).unwrap()["recording"].as_bool().unwrap());
+    // A colour dragged in its picker: one step, with the last colour.
+    for c in ["#112233", "#223344", "#336699"] {
+        app.run("layer.color", json!({"layer": "Lakes", "color": c})).unwrap();
+    }
+    // Neither panes nor the view are steps.
+    app.run("ui.pane.symbology", json!(null)).unwrap();
+    app.run("map.zoomIn", json!(null)).unwrap();
+    app.run("gp.run", json!({"tool": "buffer", "params": {"input": "Cities", "distance": 100, "output": "Near"}})).unwrap();
+    app.run("layer.color", json!({"layer": "Near", "color": "#1B8A3A"})).unwrap();
+    let r = app.run("ui.taskRecord", json!({"name": "Lesson"})).unwrap();
+    assert_eq!(r["steps"], json!(3));
+    let task = app.session.project.tasks.iter().find(|t| t.name == "Lesson").unwrap().clone();
+    let commands: Vec<&str> = task.steps.iter().map(|s| s.command.as_str()).collect();
+    assert_eq!(commands, ["layer.color", "gp.run", "layer.color"]);
+    assert_eq!(task.steps[0].params["color"], json!("#336699"));
+    // It opens in the Tasks pane, ready to edit.
+    assert_eq!(app.ui.right, Some(rustgis_ui_egui::RightPane::Tasks));
+    assert!(app.ws.task_editing && app.ws.task == "Lesson");
+    // Stopping with nothing recorded makes no task.
+    app.run("ui.taskRecord", json!({})).unwrap();
+    assert_eq!(app.run("ui.taskRecord", json!({})).unwrap()["steps"], json!(0));
+    assert_eq!(app.session.project.tasks.len(), 1);
+
+    // The pane draws while a step is being edited, and saving it keeps the new words.
+    h.state_mut().ws.task_edit = Some((
+        1,
+        "Buffer the cities".into(),
+        "Analyze › Tools › Buffer.
+Distance: 100 km."
+            .into(),
+    ));
+    h.step();
+    h.step();
+    let app = h.state_mut();
+    app.run(
+        "task.editStep",
+        json!({"task": "Lesson", "step": 1, "title": "Buffer the cities", "instructions": "Analyze › Tools › Buffer."}),
+    )
+    .unwrap();
+    assert_eq!(app.session.project.tasks[0].steps[1].title, "Buffer the cities");
+    // Out of edit mode, a step runs from the pane as before.
+    app.ws.task_editing = false;
+    app.ws.task_edit = None;
+    h.step();
+    h.step();
+}
+
+#[test]
 fn old_and_unknown_tab_names_open_a_current_tab() {
     let mut h = harness();
     for (asked, opened) in [("Imagery", "Analyze"), ("Feature Layer", "Style"), ("Share", "Publish"), ("Map", "Home"), ("nope", "Home")] {

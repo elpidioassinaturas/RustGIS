@@ -245,6 +245,47 @@ pub fn commands() -> Vec<C> {
             Ok(json!({"steps": t.steps.len()}))
         })
         .params(r#"{"task"?: name, "title": string, "instructions"?: string, "command": id, "params"?: {}}"#),
+        // Editing a step's words, its place or the step itself. Its command and parameters stay
+        // as they were, so a task from a file stays as untrusted as it came.
+        C::new("task.editStep", "Edit Task Step", "Tasks", |s, p| {
+            let (title, instructions) = (ps(p, "title"), ps(p, "instructions"));
+            if title.is_some_and(|t| t.trim().is_empty()) {
+                return Err("a step needs a title".into());
+            }
+            let step = step_index(p)?;
+            let t = task_mut(s, p)?;
+            let n = t.steps.len();
+            let st = t.steps.get_mut(step).ok_or_else(|| format!("{} has {n} steps", t.name))?;
+            if let Some(title) = title {
+                st.title = title.trim().chars().take(200).collect();
+            }
+            if let Some(text) = instructions {
+                st.instructions = text.chars().take(4000).collect();
+            }
+            Ok(json!({"step": step}))
+        })
+        .params(r#"{"task"?: name, "step": number (from 0), "title"?: string, "instructions"?: string}"#),
+        C::new("task.moveStep", "Move Task Step", "Tasks", |s, p| {
+            let (step, to) = (step_index(p)?, p.get("to").and_then(Value::as_u64).ok_or("to is required")? as usize);
+            let t = task_mut(s, p)?;
+            if step >= t.steps.len() || to >= t.steps.len() {
+                return Err(format!("{} has {} steps", t.name, t.steps.len()));
+            }
+            let st = t.steps.remove(step);
+            t.steps.insert(to, st);
+            Ok(json!({"step": to}))
+        })
+        .params(r#"{"task"?: name, "step": number (from 0), "to": number (from 0)}"#),
+        C::new("task.removeStep", "Delete Task Step", "Tasks", |s, p| {
+            let step = step_index(p)?;
+            let t = task_mut(s, p)?;
+            if step >= t.steps.len() {
+                return Err(format!("{} has {} steps", t.name, t.steps.len()));
+            }
+            t.steps.remove(step);
+            Ok(json!({"steps": t.steps.len()}))
+        })
+        .params(r#"{"task"?: name, "step": number (from 0)}"#),
         C::new("task.run", "Run Task", "Tasks", run_task).params(r#"{"task"?: name, "step"?: number (one step; all when omitted)}"#),
         C::new("task.remove", "Delete Task", "Tasks", |s, p| {
             let name = ps(p, "task").ok_or("task is required")?;
@@ -552,6 +593,11 @@ fn task_ref<'a>(s: &'a Session, p: &Value) -> Result<&'a Task, String> {
     }
 }
 
+/// A step's index from `step` (from 0).
+fn step_index(p: &Value) -> Result<usize, String> {
+    p.get("step").and_then(Value::as_u64).map(|i| i as usize).ok_or_else(|| "step is required".to_string())
+}
+
 fn task_mut<'a>(s: &'a mut Session, p: &Value) -> Result<&'a mut Task, String> {
     match ps(p, "task") {
         Some(n) => s.project.tasks.iter_mut().find(|t| t.name.eq_ignore_ascii_case(n)).ok_or_else(|| format!("no task '{n}'")),
@@ -605,12 +651,28 @@ fn run_task(s: &mut Session, p: &Value) -> CmdResult {
 pub(crate) fn touches_files(command: &str, params: &Value) -> bool {
     const KEYS: &[&str] =
         &["path", "folder", "dir", "file", "url", "uri", "source", "output", "connection", "database", "data", "text", "poster", "locator"];
-    let reaches = |v: &Value| names_place(v, KEYS, 0);
+    let reaches = |v: &Value| names_place(&output_names_left_out(v, 0), KEYS, 0);
     let id = command.to_ascii_lowercase();
     let verb = id.split('.').nth(1).unwrap_or("");
     ["script.", "notebook.", "model.", "project.", "task.", "share.", "offline.", "cache.", "locator."].iter().any(|p| id.starts_with(p))
         || ["import", "export", "open", "save", "add", "package", "upload", "download"].iter().any(|w| verb.starts_with(w))
         || reaches(params)
+}
+
+/// Parameters without the `output` entries that only name a new layer: a tool's output name
+/// (`gp.run`'s `{"output": "riparian"}`) stays in the session, so a task from a file may set it. An
+/// `output` that looks like a path or an address is kept, so it still counts as a place.
+fn output_names_left_out(v: &Value, depth: usize) -> Value {
+    match v {
+        Value::Object(o) if depth < 16 => Value::Object(
+            o.iter()
+                .filter(|(k, v)| !(k.eq_ignore_ascii_case("output") && v.as_str().is_some_and(|t| !looks_like_path(t))))
+                .map(|(k, v)| (k.clone(), output_names_left_out(v, depth + 1)))
+                .collect(),
+        ),
+        Value::Array(a) if depth < 16 => Value::Array(a.iter().map(|v| output_names_left_out(v, depth + 1)).collect()),
+        v => v.clone(),
+    }
 }
 
 /// Whether a string looks like a file path or an address.

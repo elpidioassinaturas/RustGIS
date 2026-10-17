@@ -1194,10 +1194,41 @@ impl RustGisApp {
         if r.is_ok() && matches!(id, "edit.undo" | "edit.redo") {
             self.map.vertex = None;
         }
+        if r.is_ok() {
+            self.record_step(id, &params);
+        }
         self.note_last_project();
         // Sources added, saved or made favourites are kept with the preferences.
         sourcespane::save(self);
         r
+    }
+
+    /// Record Task: adds a command that ran from the app and changed the project as a step. Not
+    /// panes and dialogs (`ui.*`), tasks themselves, or what only moves the view. The same command
+    /// again on the same layer (a colour dragged in its picker) updates the step it just made.
+    fn record_step(&mut self, id: &str, params: &Value) {
+        let Some(steps) = self.ws.recording.as_mut() else { return };
+        if id.starts_with("ui.") || id.starts_with("task.") {
+            return;
+        }
+        let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates) else { return };
+        // Tools and added data are always steps of their own.
+        if let Some(last) = steps.last_mut()
+            && !matches!(id, "gp.run" | "layer.addData" | "layer.addUrl")
+            && last.command == id
+            && last.params.get("layer") == params.get("layer")
+        {
+            last.params = params.clone();
+            return;
+        }
+        if steps.len() < 200 {
+            steps.push(rustgis_engine::project::TaskStep {
+                title: tl!(spec.label).to_string(),
+                instructions: String::new(),
+                command: id.to_string(),
+                params: params.clone(),
+            });
+        }
     }
 
     fn run_ui(&mut self, id: &str, p: &Value) -> Result<Value, String> {
@@ -1911,6 +1942,27 @@ impl RustGisApp {
                 }
             }
             "ui.pane.tasks" => toggle_right(&mut self.ui, RightPane::Tasks),
+            // Record Task: starts recording, or stops and makes the task (named `name`, else
+            // "Recorded Task"). Says whether it is recording and how many steps it has.
+            "ui.taskRecord" => match self.ws.recording.take() {
+                None => {
+                    self.ws.recording = Some(Vec::new());
+                    return Ok(json!({"recording": true, "steps": 0}));
+                }
+                Some(steps) if steps.is_empty() => return Ok(json!({"recording": false, "steps": 0})),
+                Some(steps) => {
+                    let name = p.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Recorded Task");
+                    let n = steps.len();
+                    let r = self.session.run("task.new", &json!({"name": name, "steps": steps}))?;
+                    if let Some(task) = r.get("task").and_then(Value::as_str) {
+                        self.ws.task = task.to_string();
+                        self.ws.task_step = 0;
+                        self.ws.task_editing = true;
+                    }
+                    self.ui.right = Some(RightPane::Tasks);
+                    return Ok(json!({"recording": false, "steps": n, "task": r.get("task")}));
+                }
+            },
             "ui.pane.jobs" => toggle_right(&mut self.ui, RightPane::Jobs),
             "ui.pane.profile" => toggle_right(&mut self.ui, RightPane::Profile),
             "ui.pane.diagnostics" => toggle_right(&mut self.ui, RightPane::Diagnostics),

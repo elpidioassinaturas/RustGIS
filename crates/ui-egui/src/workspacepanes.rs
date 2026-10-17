@@ -12,6 +12,12 @@ use crate::theme::{Tokens, regular, semibold};
 pub struct WorkspaceState {
     pub task: String,
     pub task_step: usize,
+    /// The steps recorded so far while Record Task is on.
+    pub recording: Option<Vec<rustgis_engine::project::TaskStep>>,
+    /// The Tasks pane shows its editing controls.
+    pub task_editing: bool,
+    /// The step being edited: its index, title and instructions as typed so far.
+    pub task_edit: Option<(usize, String, String)>,
     pub job_name: String,
     pub profile_layer: String,
     pub profile_lines: String,
@@ -57,9 +63,32 @@ fn run(app: &mut RustGisApp, id: &str, p: Value) -> Option<Value> {
     }
 }
 
-/// Tasks: pick one, read each step's instructions and run it.
+/// Record Task: the button that starts or stops recording, and how far it has got.
+fn record_row(app: &mut RustGisApp, ui: &mut Ui) {
+    ui.horizontal(|ui| match app.ws.recording.as_ref().map(Vec::len) {
+        Some(n) => {
+            ui.label(egui::RichText::new("●").color(Color32::from_rgb(0xD0, 0x30, 0x30)));
+            ui.label(crate::i18n::fmt("Recording: {n} steps", &[("n", &n.to_string())]));
+            if ui.button(tl!("Stop Recording")).on_hover_text(tl!("Make a task of the steps recorded")).clicked() {
+                run(app, "ui.taskRecord", json!({}));
+            }
+        }
+        None => {
+            if ui
+                .button(tl!("Record Task"))
+                .on_hover_text(tl!("Do the exercise once: each command that changes the project becomes a step"))
+                .clicked()
+            {
+                run(app, "ui.taskRecord", json!({}));
+            }
+        }
+    });
+}
+
+/// Tasks: pick one, read each step's instructions and run it; record a task, and edit its steps.
 pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
     message(app, ui);
+    record_row(app, ui);
     let tasks = app.session.project.tasks.clone();
     if tasks.is_empty() {
         ui.label(egui::RichText::new(tl!("No tasks yet. Data › Task makes one, for example from your geoprocessing history.")).weak());
@@ -68,19 +97,29 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
     if !tasks.iter().any(|t| t.name == app.ws.task) {
         app.ws.task = tasks.first().map(|t| t.name.clone()).unwrap_or_default();
         app.ws.task_step = 0;
+        app.ws.task_edit = None;
     }
-    egui::ComboBox::from_id_salt("task_pick").selected_text(app.ws.task.as_str()).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
-        for t in &tasks {
-            if ui.selectable_label(t.name == app.ws.task, t.name.as_str()).clicked() {
-                app.ws.task = t.name.clone();
-                app.ws.task_step = 0;
-            }
-        }
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("task_pick").selected_text(app.ws.task.as_str()).width(ui.available_width() - 110.0).show_ui(
+            ui,
+            |ui| {
+                for t in &tasks {
+                    if ui.selectable_label(t.name == app.ws.task, t.name.as_str()).clicked() {
+                        app.ws.task = t.name.clone();
+                        app.ws.task_step = 0;
+                        app.ws.task_edit = None;
+                    }
+                }
+            },
+        );
+        ui.checkbox(&mut app.ws.task_editing, tl!("Edit Steps"));
     });
     let Some(task) = tasks.iter().find(|t| t.name == app.ws.task) else { return };
     if !task.description.is_empty() {
-        ui.label(egui::RichText::new(&task.description).small());
+        ui.label(egui::RichText::new(&task.description));
     }
+    let name = task.name.clone();
+    let last = task.steps.len().saturating_sub(1);
     for (i, st) in task.steps.iter().enumerate() {
         let current = i == app.ws.task_step;
         egui::Frame::NONE
@@ -88,26 +127,64 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
             .fill(if current { ui.visuals().selection.bg_fill.gamma_multiply(0.25) } else { Color32::TRANSPARENT })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("{}. {}", i + 1, st.title)).font(if current {
-                        semibold(12.0)
-                    } else {
-                        regular(12.0)
-                    }));
-                    if ui.small_button(tl!("Run")).clicked() {
-                        let name = task.name.clone();
-                        if run(app, "task.run", json!({"task": name, "step": i})).is_some() {
-                            app.ws.task_step = i + 1;
-                            app.ws.message = Some((crate::i18n::fmt("Step {n} done", &[("n", &(i + 1).to_string())]), false));
-                            app.map.invalidate();
+                    let title =
+                        egui::RichText::new(format!("{}. {}", i + 1, st.title)).font(if current { semibold(12.5) } else { regular(12.5) });
+                    // Clicking a step's title makes it the current one, to read it.
+                    if ui.add(egui::Label::new(title).sense(Sense::click())).clicked() {
+                        app.ws.task_step = i;
+                    }
+                    if app.ws.task_editing {
+                        if ui.add_enabled(i > 0, egui::Button::new("▲").small()).on_hover_text(tl!("Move Up")).clicked() {
+                            run(app, "task.moveStep", json!({"task": name, "step": i, "to": i - 1}));
                         }
+                        if ui.add_enabled(i < last, egui::Button::new("▼").small()).on_hover_text(tl!("Move Down")).clicked() {
+                            run(app, "task.moveStep", json!({"task": name, "step": i, "to": i + 1}));
+                        }
+                        if ui.small_button("✎").on_hover_text(tl!("Edit the title and instructions")).clicked() {
+                            app.ws.task_edit = Some((i, st.title.clone(), st.instructions.clone()));
+                            app.ws.task_step = i;
+                        }
+                        if ui.small_button("✕").on_hover_text(tl!("Delete the step")).clicked() {
+                            run(app, "task.removeStep", json!({"task": name, "step": i}));
+                            app.ws.task_edit = None;
+                        }
+                    } else if ui.small_button(tl!("Run")).clicked() && run(app, "task.run", json!({"task": name, "step": i})).is_some() {
+                        app.ws.task_step = i + 1;
+                        app.ws.message = Some((crate::i18n::fmt("Step {n} done", &[("n", &(i + 1).to_string())]), false));
+                        app.map.invalidate();
                     }
                 });
-                if !st.instructions.is_empty() && current {
-                    ui.label(egui::RichText::new(&st.instructions).small().weak());
+                let editing = app.ws.task_editing && app.ws.task_edit.as_ref().is_some_and(|e| e.0 == i);
+                if editing {
+                    let mut save = false;
+                    let mut cancel = false;
+                    if let Some((_, title, text)) = app.ws.task_edit.as_mut() {
+                        ui.add(egui::TextEdit::singleline(title).desired_width(f32::INFINITY).hint_text(tl!("Title")));
+                        ui.add(
+                            egui::TextEdit::multiline(text)
+                                .desired_rows(5)
+                                .desired_width(f32::INFINITY)
+                                .hint_text(tl!("What to do, where to find it and why")),
+                        );
+                        ui.horizontal(|ui| {
+                            save = ui.button(tl!("Save")).clicked();
+                            cancel = ui.button(tl!("Cancel")).clicked();
+                        });
+                    }
+                    if save && let Some((step, title, text)) = app.ws.task_edit.clone() {
+                        if run(app, "task.editStep", json!({"task": name, "step": step, "title": title, "instructions": text})).is_some() {
+                            app.ws.task_edit = None;
+                        }
+                    } else if cancel {
+                        app.ws.task_edit = None;
+                    }
+                } else if !st.instructions.is_empty() && current {
+                    // Read on a lab screen: the normal text size, not dimmed.
+                    ui.label(egui::RichText::new(&st.instructions).font(regular(12.5)));
                 }
             });
     }
-    if app.ws.task_step >= task.steps.len() && !task.steps.is_empty() {
+    if !app.ws.task_editing && app.ws.task_step >= task.steps.len() && !task.steps.is_empty() {
         ui.label(egui::RichText::new(tl!("All steps done.")).small());
         if ui.button(tl!("Start Over")).clicked() {
             app.ws.task_step = 0;
