@@ -119,7 +119,9 @@ pub enum Renderer {
         classes: Vec<(String, Symbol)>,
         other: Symbol,
         ramp: Ramp,
-        /// Legend labels set by hand, by class value; a class without one shows its value.
+        /// Legend labels set by hand, by class value; a class without one shows its value. A value
+        /// listed twice (a style import can do that) shares one label, as it shares one drawn
+        /// symbol: features take their value's first class (`symbol_for`).
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         class_labels: BTreeMap<String, String>,
         /// The legend label of `other`, when set by hand (otherwise `<all other values>`).
