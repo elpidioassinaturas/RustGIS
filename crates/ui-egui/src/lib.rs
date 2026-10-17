@@ -2416,9 +2416,6 @@ impl RustGisApp {
 
     /// Per-frame work that doesn't draw (theme, fonts, files that arrived).
     pub fn logic(&mut self, ctx: &egui::Context) {
-        // A project the MCP relay or the assistant opened or saved, which ran on the session
-        // directly, becomes Last Project too.
-        self.note_last_project();
         // The MCP relay: what attached agents sent runs here, on this session, before the frame
         // draws (Session lives on this thread; the listener only queues messages).
         #[cfg(not(target_arch = "wasm32"))]
@@ -2466,6 +2463,10 @@ impl RustGisApp {
         zarrui::poll(self, ctx);
         pluginsui::poll(self, ctx);
         assistantpane::poll(self, ctx);
+        // A project the MCP relay, the assistant or a plugin opened or saved this frame (they run
+        // on the session directly) becomes Last Project now, not a frame later the app may not
+        // reach.
+        self.note_last_project();
         self.ensure_script_font();
         // Fonts downloaded by the web app.
         let fonts: Vec<(String, Vec<u8>)> = match &self.services.font_inbox {
