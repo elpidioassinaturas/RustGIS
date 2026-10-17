@@ -1988,10 +1988,10 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
         }
         other => return Err(format!("unknown symbology '{other}'")),
     };
-    // Applied again on the same field, the classes keep the labels set by hand, and their colours
-    // too while the colour scheme stays (#314).
+    // Applied again on the same field, the classes keep the labels set by hand, and the colours
+    // and outlines set by hand too while the colour scheme stays (#314).
     let mut r = r;
-    r.carry_edits_from(&l.renderer);
+    r.carry_edits_from(&l.renderer, g);
     with(s, p, |l| l.renderer = r)
 }
 

@@ -27,9 +27,9 @@ With Unique Values or Graduated Colors, each class in the Symbology pane's list 
 and a legend label. Pick a colour to give that class its own. Type a label to show in the Layers
 pane and in layout legends instead of the value or range (for example `High income` for
 `1. High income: OECD`); clear it to show the value again. `<all other values>` can be edited the
-same way. Applying the symbology again on the same field keeps the colours and labels of the
-classes that are still there; picking another colour scheme recolours every class but keeps the
-labels. A Graduated Colors label stays while its range does. By command:
+same way. Applying the symbology again on the same field keeps the colours, outlines and labels
+you set by hand on the classes that are still there (the others take the scheme's colours again);
+picking another colour scheme recolours every class but keeps the labels. A Graduated Colors label stays while its range does. By command:
 
 ```text
 layer.classStyle={"layer":"Countries","value":"1. High income: OECD","color":"#2E6B4F","label":"High income"}

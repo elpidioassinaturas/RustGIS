@@ -166,6 +166,9 @@ pub struct LegendEntry {
 /// Most unique-value classes created automatically.
 pub const MAX_UNIQUE: usize = 64;
 
+/// The colour of a new Unique Values renderer's `<all other values>` class.
+pub const OTHER_FILL: Rgba = Rgba::rgb(0xB0, 0xB0, 0xB0);
+
 /// The longest legend label set by hand, in characters.
 pub const MAX_LABEL: usize = 200;
 
@@ -223,7 +226,7 @@ impl Renderer {
         let vals = ds.unique_values(fi, rows, MAX_UNIQUE);
         let n = vals.len();
         let classes = vals.into_iter().enumerate().map(|(k, v)| (v, base.with_fill(ramp.pick(k, n), ds.geometry_type))).collect();
-        let other = base.with_fill(Rgba::rgb(0xB0, 0xB0, 0xB0), ds.geometry_type);
+        let other = base.with_fill(OTHER_FILL, ds.geometry_type);
         Ok(Renderer::Unique {
             field: ds.fields.get(fi).map(|f| f.name.clone()).unwrap_or_default(),
             classes,
@@ -497,27 +500,33 @@ impl Renderer {
 
     /// Carries hand-made class edits over from `old` when the symbology is applied again (#314).
     /// On the same field, a class that is still there keeps its legend label (a Graduated Colors
-    /// label while the ranges are the same: it names a range), and, when the colour scheme is
-    /// the same too, its symbol. A different scheme recolours every class (picking a scheme is
-    /// asking for its colours); a different field starts fresh.
-    pub fn carry_edits_from(&mut self, old: &Renderer) {
+    /// label while the ranges are the same: it names a range). With the same colour scheme too,
+    /// it keeps the colour and outline set by hand: those that aren't what the scheme gave it at
+    /// its place in `old` (see [`carry_class`]). The other classes take the new scheme's colours
+    /// at their new places, on the new base symbol. A different scheme recolours every class
+    /// (picking a scheme is asking for its colours); a different field starts fresh.
+    pub fn carry_edits_from(&mut self, old: &Renderer, g: GeometryType) {
         match (self, old) {
             (
                 Renderer::Unique { field, classes, other, ramp, class_labels, other_label },
                 Renderer::Unique { field: of, classes: oc, other: oo, ramp: or, class_labels: ol, other_label: ool },
             ) if field == of => {
                 let same_scheme = ramp == or;
+                let n = oc.len();
                 for (k, s) in classes.iter_mut() {
                     if let Some(t) = ol.get(k.as_str()) {
                         class_labels.insert(k.clone(), t.clone());
                     }
-                    if same_scheme && let Some((_, os)) = oc.iter().find(|(ok, _)| ok == k) {
-                        *s = *os;
+                    if same_scheme
+                        && let Some(j) = oc.iter().position(|(ok, _)| ok == k)
+                        && let Some((_, os)) = oc.get(j)
+                    {
+                        *s = carry_class(*s, os, or.pick(j, n), g);
                     }
                 }
                 other_label.clone_from(ool);
                 if same_scheme {
-                    *other = *oo;
+                    *other = carry_class(*other, oo, OTHER_FILL, g);
                 }
             }
             (
@@ -528,7 +537,10 @@ impl Renderer {
                     class_labels.clone_from(ol);
                 }
                 if ramp == or && symbols.len() == os.len() {
-                    symbols.clone_from(os);
+                    let n = os.len();
+                    for (i, (s, o)) in symbols.iter_mut().zip(os).enumerate() {
+                        *s = carry_class(*s, o, or.pick(i, n), g);
+                    }
                 }
             }
             _ => {}
@@ -547,6 +559,28 @@ impl Renderer {
             Renderer::Proportional { base, .. } => f(base),
         }
     }
+}
+
+/// `new` with the hand-made parts of `old`, a class whose scheme colour was `scheme`: the fill
+/// when it isn't that colour, and the outline when it isn't the one [`Symbol::with_fill`] derives
+/// (a polygon's shaded fill, a line's own colour; for points, the new base symbol's outline).
+/// Colours compare without alpha: a polygon keeps its own transparency.
+fn carry_class(new: Symbol, old: &Symbol, scheme: Rgba, g: GeometryType) -> Symbol {
+    let rgb = |c: Rgba| (c.r(), c.g(), c.b());
+    let mut s = new;
+    if rgb(old.fill) != rgb(scheme) {
+        let c = if g == GeometryType::Polygon { Rgba::rgb(old.fill.r(), old.fill.g(), old.fill.b()) } else { old.fill };
+        s = s.with_fill(c, g);
+    }
+    let derived = match g {
+        GeometryType::Polygon => Rgba::rgb(old.fill.r(), old.fill.g(), old.fill.b()).shade(0.6),
+        GeometryType::Polyline => old.fill,
+        _ => new.stroke,
+    };
+    if rgb(old.stroke) != rgb(derived) {
+        s.stroke = old.stroke;
+    }
+    s
 }
 
 /// A Unique Values class's legend label: the one set by hand, or its value.
@@ -1011,51 +1045,75 @@ mod tests {
     #[test]
     fn applying_the_symbology_again_keeps_hand_edits() {
         let g = GeometryType::Polygon;
-        let s = |c| Symbol::default_for(g, c);
-        let red = Rgba::rgb(0xC0, 0x30, 0x20);
-        let mut old = unique(&[("a", s(0)), ("b", s(1))], s(3), Ramp::Ember);
-        old.set_class_style(
-            &ClassRef::Value("b".into()),
-            &ClassStyle { color: Some(red), label: Some("Bee".into()), ..Default::default() },
-            g,
-        )
-        .unwrap();
-        old.set_class_style(&ClassRef::Other, &ClassStyle { color: Some(red), label: Some("Rest".into()), ..Default::default() }, g)
-            .unwrap();
-        // Same field and scheme: "b" keeps its colour and label, the new "c" gets its own colour.
-        let mut again = unique(&[("b", s(5)), ("c", s(6))], s(7), Ramp::Ember);
-        again.carry_edits_from(&old);
-        let Renderer::Unique { classes, other, .. } = &again else { panic!("unique renderer expected") };
-        assert_eq!((classes[0].1, classes[1].1, *other), (s(1).with_fill(red, g), s(6), s(3).with_fill(red, g)));
-        assert_eq!(labels_of(&again), ["Bee", "c", "Rest"]);
+        let base = Symbol::default_for(g, 0);
+        // Classes coloured by their scheme, as Renderer::unique and Renderer::graduated make them.
+        let ramped = |keys: &[&str], ramp: Ramp| {
+            let n = keys.len();
+            let classes: Vec<(&str, Symbol)> = keys.iter().enumerate().map(|(k, v)| (*v, base.with_fill(ramp.pick(k, n), g))).collect();
+            unique(&classes, base.with_fill(OTHER_FILL, g), ramp)
+        };
+        let (red, blue) = (Rgba::rgb(0xC0, 0x30, 0x20), Rgba::rgb(0, 0, 0xFF));
+        let edit = |r: &mut Renderer, c: ClassRef, color: Option<Rgba>, outline: Option<Rgba>, label: Option<&str>| {
+            r.set_class_style(&c, &ClassStyle { color, outline, label: label.map(str::to_string) }, g).unwrap();
+        };
+        let mut old = ramped(&["a", "b", "c"], Ramp::Ember);
+        edit(&mut old, ClassRef::Value("b".into()), Some(red), None, Some("Bee"));
+        edit(&mut old, ClassRef::Value("c".into()), None, Some(blue), None);
+        edit(&mut old, ClassRef::Other, Some(red), None, Some("Rest"));
+        // Same field and scheme, "a" gone and "d" new: only the hand edits carry over. "c" keeps
+        // its outline but takes the scheme's colour at its new place, not the one it had.
+        let fresh = ramped(&["b", "c", "d"], Ramp::Ember);
+        let mut again = fresh.clone();
+        again.carry_edits_from(&old, g);
+        let (Renderer::Unique { classes, other, .. }, Renderer::Unique { classes: fc, other: fo, .. }) = (&again, &fresh) else {
+            panic!("unique renderers expected")
+        };
+        assert_eq!(classes[0].1, fc[0].1.with_fill(red, g), "b keeps its colour");
+        assert_eq!((classes[1].1.fill, classes[1].1.stroke), (fc[1].1.fill, blue), "c keeps its outline only");
+        assert_eq!(classes[2].1, fc[2].1, "d is new");
+        assert_eq!(*other, fo.with_fill(red, g));
+        assert_eq!(labels_of(&again), ["Bee", "c", "d", "Rest"]);
+        // An unedited renderer applied again is the fresh one.
+        let mut plain = fresh.clone();
+        plain.carry_edits_from(&ramped(&["b", "c"], Ramp::Ember), g);
+        assert_eq!(plain, fresh);
         // Another scheme recolours but keeps the labels; another field starts fresh.
-        let mut recoloured = unique(&[("b", s(5))], s(7), Ramp::Harbour);
-        recoloured.carry_edits_from(&old);
-        let Renderer::Unique { classes, other, .. } = &recoloured else { panic!("unique renderer expected") };
-        assert_eq!((classes[0].1, *other), (s(5), s(7)));
+        let fresh = ramped(&["b"], Ramp::Harbour);
+        let mut recoloured = fresh.clone();
+        recoloured.carry_edits_from(&old, g);
+        let (Renderer::Unique { classes, other, .. }, Renderer::Unique { classes: fc, other: fo, .. }) = (&recoloured, &fresh) else {
+            panic!("unique renderers expected")
+        };
+        assert_eq!((classes, other), (fc, fo));
         assert_eq!(labels_of(&recoloured), ["Bee", "Rest"]);
-        let mut other_field = unique(&[("b", s(5))], s(7), Ramp::Ember);
+        let mut other_field = ramped(&["b"], Ramp::Ember);
         if let Renderer::Unique { field, .. } = &mut other_field {
             *field = "h".into();
         }
         let fresh = other_field.clone();
-        other_field.carry_edits_from(&old);
+        other_field.carry_edits_from(&old, g);
         assert_eq!(other_field, fresh);
-        // Graduated Colors: colours by number while the count and scheme stay; labels while the ranges do.
-        let mut gold = graduated(&[10.0, 20.0], &[s(0), s(1)], Ramp::Ember);
-        gold.set_class_style(&ClassRef::Index(0), &ClassStyle { color: Some(red), label: Some("Low".into()), ..Default::default() }, g)
-            .unwrap();
-        let mut same = graduated(&[10.0, 20.0], &[s(5), s(6)], Ramp::Ember);
-        same.carry_edits_from(&gold);
+        // Graduated Colors: edits by number while the count and scheme stay; labels while the ranges do.
+        let ramped = |breaks: &[f64], ramp: Ramp| {
+            let n = breaks.len();
+            graduated(breaks, &(0..n).map(|i| base.with_fill(ramp.pick(i, n), g)).collect::<Vec<_>>(), ramp)
+        };
+        let mut gold = ramped(&[10.0, 20.0], Ramp::Ember);
+        edit(&mut gold, ClassRef::Index(0), Some(red), None, Some("Low"));
+        let mut same = ramped(&[10.0, 20.0], Ramp::Ember);
+        same.carry_edits_from(&gold, g);
         assert_eq!(same, gold);
-        let mut moved = graduated(&[12.0, 20.0], &[s(5), s(6)], Ramp::Ember);
-        moved.carry_edits_from(&gold);
-        let Renderer::Graduated { symbols, .. } = &moved else { panic!("graduated renderer expected") };
-        assert_eq!(symbols[0], s(0).with_fill(red, g), "same count and scheme: the colour stays");
+        let fresh = ramped(&[12.0, 20.0], Ramp::Ember);
+        let mut moved = fresh.clone();
+        moved.carry_edits_from(&gold, g);
+        let (Renderer::Graduated { symbols, .. }, Renderer::Graduated { symbols: fs, .. }) = (&moved, &fresh) else {
+            panic!("graduated renderers expected")
+        };
+        assert_eq!((symbols[0], symbols[1]), (fs[0].with_fill(red, g), fs[1]), "same count and scheme: the edit stays");
         assert_eq!(labels_of(&moved), ["0 – 12", "12 – 20"], "the range moved: its label goes");
-        let mut more = graduated(&[10.0, 15.0, 20.0], &[s(5), s(6), s(7)], Ramp::Ember);
-        more.carry_edits_from(&gold);
-        let Renderer::Graduated { symbols, .. } = &more else { panic!("graduated renderer expected") };
-        assert_eq!(symbols.as_slice(), [s(5), s(6), s(7)], "another number of classes recolours");
+        let fresh = ramped(&[10.0, 15.0, 20.0], Ramp::Ember);
+        let mut more = fresh.clone();
+        more.carry_edits_from(&gold, g);
+        assert_eq!(more, fresh, "another number of classes starts fresh");
     }
 }

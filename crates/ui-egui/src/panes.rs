@@ -2602,19 +2602,29 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                         }
                     }
                     // The typing lives in the pane's state while the field has focus, under the
-                    // class it names (not the row, which another class can take meanwhile).
+                    // class it names (not the row, which another class can take meanwhile). Enter or
+                    // clicking away applies it; Escape drops it.
                     let id = egui::Id::new(("class_label", l.id, l.renderer.field().unwrap_or_default(), class.to_string()));
-                    let mut buf = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| e.label.clone());
+                    let typing = id.with("typing");
+                    let focused = ui.memory(|m| m.has_focus(id));
+                    let mut buf = match focused {
+                        true => ui.data_mut(|d| d.get_temp::<String>(typing)).unwrap_or_else(|| e.label.clone()),
+                        false => {
+                            // Left over from a field that stopped being drawn while focused.
+                            ui.data_mut(|d| d.remove::<String>(typing));
+                            e.label.clone()
+                        }
+                    };
                     let r = ui
-                        .add(egui::TextEdit::singleline(&mut buf).desired_width(ui.available_width()))
+                        .add(egui::TextEdit::singleline(&mut buf).id(id).desired_width(ui.available_width()))
                         .on_hover_text(tl!("Legend label. Clear it to show the value again."));
                     if r.lost_focus() {
-                        ui.data_mut(|d| d.remove::<String>(id));
-                        if buf != e.label {
+                        ui.data_mut(|d| d.remove::<String>(typing));
+                        if buf != e.label && !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             let _ = app.run("layer.classStyle", with("label", json!(buf)));
                         }
                     } else if r.has_focus() {
-                        ui.data_mut(|d| d.insert_temp(id, buf));
+                        ui.data_mut(|d| d.insert_temp(typing, buf));
                     }
                 });
             }
