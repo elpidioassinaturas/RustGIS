@@ -64,6 +64,7 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
         RightPane::Assistant => ("AI Assistant", "ui.pane.assistant"),
         RightPane::Shares => ("Shared Items", "ui.pane.shares"),
         RightPane::Sql => ("SQL", "ui.pane.sql"),
+        RightPane::Directions => ("Directions", "ui.pane.directions"),
     };
     pane_header(app, ui, tl!(title), close, t);
     // The chat lays out its own scrolling, with the message box kept at the bottom.
@@ -96,6 +97,7 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
             RightPane::Notebook => crate::docpanes::notebook(app, ui, t),
             RightPane::Assistant | RightPane::Sql => {}
             RightPane::Shares => crate::docpanes::shares(app, ui, t),
+            RightPane::Directions => crate::navui::show(app, ui, t),
         });
     });
 }

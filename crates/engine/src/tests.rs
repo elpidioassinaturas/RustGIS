@@ -682,6 +682,19 @@ fn hostile_params_never_panic() {
             continue;
         }
         for p in &junk {
+            // Places given by name go to the public geocoder: with an answer given, the junk
+            // goes through reading it and the options, and nothing is fetched.
+            let routed;
+            let p = match p {
+                Value::Object(o) if id == "map.route" => {
+                    let mut o = o.clone();
+                    o.insert("answer".into(), json!(r#"{"code":"Ok","routes":[{"legs":[{"steps":[{"geometry":"_ibE_ibE_ibE_ibE","maneuver":{"type":"depart"}}]}]}]}"#));
+                    routed = Value::Object(o);
+                    &routed
+                }
+                _ if id == "map.route" => continue,
+                p => p,
+            };
             let mut s = world();
             let _ = s.run(id, p);
             let _ = s.run("info.project", &Value::Null);
@@ -4282,6 +4295,51 @@ fn stac_search_and_assets() {
         assert!(s.run("stac.search", &bad).is_err() || s.run("stac.addAsset", &bad).is_err(), "{bad}");
     }
     assert!(s.run("stac.addAsset", &json!({"item": {"type": "Feature", "id": "x", "assets": {}}})).is_err());
+}
+
+/// Directions through a routing server of one's own (a local Valhalla answer here): the route
+/// and its steps as layers; the app's answer can be passed in instead, and nothing is fetched.
+#[test]
+fn directions_between_places() {
+    const ANSWER: &str = r#"{"code":"Ok","routes":[{"duration":302.776,"distance":1921.553,"legs":[{"summary":"Pariser Platz","steps":[
+        {"geometry":"g~idcBwjpoXl@InGo@","name":"Pariser Platz","distance":17.553,"duration":6.327,"maneuver":{"instruction":"Drive south on Pariser Platz.","type":"depart","location":[13.378236,52.51634]}},
+        {"geometry":"itidcBqlpoXiD}mAYsKe@cS","name":"Pariser Platz","distance":1904.0,"duration":296.448,"maneuver":{"modifier":"left","instruction":"Turn left to stay on Pariser Platz.","type":"continue","location":[13.378265,52.516181]}},
+        {"geometry":"ycqdcBurdqX??","name":"","distance":0.0,"duration":0.0,"maneuver":{"instruction":"You have arrived at your destination.","type":"arrive","location":[13.404987,52.520013]}}]}]}]}"#;
+    let base = serve(ANSWER.as_bytes(), 1);
+    let mut s = Session::new(Project::default());
+    let r = s
+        .run("map.route", &json!({"from": "52.5163, 13.3777", "to": [13.405, 52.52], "via": [{"lon": 13.39, "lat": 52.517}], "mode": "drive", "avoid": ["tolls"], "url": base}))
+        .unwrap();
+    assert_eq!(r["duration"], "5 min");
+    assert_eq!(r["steps"].as_array().map(Vec::len), Some(3));
+    assert_eq!(r["steps"][1]["modifier"], "left");
+    let line = s.map().layer_by_name("Route (1.9 km)").unwrap();
+    assert_eq!(line.dataset.geometry_type, rustgis_data::GeometryType::Polyline);
+    let steps = s.map().layer_by_name("Route steps").unwrap();
+    assert_eq!(steps.dataset.features.len(), 3);
+    // The camera went to the route.
+    let c = s.map().to_lonlat(s.map().camera.center).unwrap();
+    assert!((c.x - 13.39).abs() < 0.05 && (c.y - 52.518).abs() < 0.05, "{c:?}");
+    // The app's answer: nothing is fetched (the server above answered once only).
+    let r = s.run("map.route", &json!({"answer": ANSWER, "mode": "walk", "zoom": false})).unwrap();
+    assert!(r["layer"].is_u64());
+    assert!(s.map().layer_by_name("Route (1.9 km) (2)").is_some());
+    for bad in [
+        json!({}),
+        json!({"from": [13.0, 52.0]}),
+        json!({"from": [200, 0], "to": [0, 0], "url": base}),
+        json!({"from": [0, 0], "to": [1, 1], "mode": "teleport"}),
+        json!({"from": [0, 0], "to": [1, 1], "avoid": ["mountains"]}),
+        json!({"from": [0, 0], "to": [1, 1], "via": 7}),
+        json!({"from": [0, 0], "to": [1, 1], "url": "file:///etc/passwd"}),
+        json!({"answer": "<html>"}),
+        json!({"answer": ANSWER, "route": 3}),
+        json!({"answer": ANSWER, "route": u64::MAX}),
+        // More names than one call looks up (refused before any is).
+        json!({"from": "a", "to": "b", "via": ["c", "d", "e", "f"]}),
+    ] {
+        assert!(s.run("map.route", &bad).is_err(), "{bad}");
+    }
 }
 
 /// Places found by name, and a table's addresses turned into points, through a geocoder of one's
