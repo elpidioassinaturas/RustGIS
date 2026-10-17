@@ -134,6 +134,26 @@ pub static TOOLS: &[ToolSpec] = &[
         run: simplify,
     },
     ToolSpec {
+        id: "tissot",
+        name: "Tissot's Indicatrix",
+        toolbox: "Cartography › Projections",
+        summary: "Geodesic circles on a grid that show how the map's projection distorts scale, area and angles.",
+        params: &[
+            P { name: "spacing", label: "Grid Spacing (degrees)", kind: K::Number, required: false, default: "30", help: "" },
+            P { name: "radius", label: "Circle Radius (km)", kind: K::Number, required: false, default: "500", help: "" },
+            P {
+                name: "area",
+                label: "Area",
+                kind: K::Choice(&["World", "Map Extent"]),
+                required: false,
+                default: "\"World\"",
+                help: "Map Extent fills the view: for a country or a state, use a smaller spacing and radius.",
+            },
+            P { name: "output", label: "Output Name", kind: K::Text, required: false, default: "", help: "" },
+        ],
+        run: crate::tissot::run,
+    },
+    ToolSpec {
         id: "selectByLocation",
         name: "Select Layer By Location",
         toolbox: "Data Management › Layers and Table Views",

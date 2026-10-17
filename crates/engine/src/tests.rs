@@ -561,6 +561,44 @@ Line two."
 }
 
 #[test]
+fn tissot_indicatrix_reports_the_maps_own_distortion() {
+    let mut s = Session::new(sample::world_project());
+    let field = |s: &Session, layer: &str, lat: f64, name: &str| -> Value {
+        let ds = &s.map().layer_by_name(layer).unwrap().dataset;
+        let col = |n: &str| ds.fields.iter().position(|f| f.name == n).unwrap();
+        let row = (0..ds.features.len())
+            .find(|&r| {
+                ds.value(r, col("lat")) == &rustgis_data::Value::Float(lat) && ds.value(r, col("lon")) == &rustgis_data::Value::Float(0.0)
+            })
+            .unwrap();
+        match ds.value(row, col(name)) {
+            rustgis_data::Value::Float(v) => json!(v),
+            rustgis_data::Value::Text(t) => json!(t),
+            v => panic!("{name}: {v:?}"),
+        }
+    };
+    // Web Mercator, the default: area grows to about sec² 60° = 4, shapes are kept.
+    s.run("gp.run", &json!({"tool": "tissot", "params": {"output": "merc"}})).unwrap();
+    assert_eq!(field(&s, "merc", 60.0, "projection"), json!("Web Mercator"));
+    let area = field(&s, "merc", 60.0, "area_scale").as_f64().unwrap();
+    assert!((area - 4.0).abs() < 0.05, "{area}");
+    assert!(field(&s, "merc", 60.0, "max_angle").as_f64().unwrap() < 0.5);
+    // Mollweide is equal-area: about 1 everywhere, while angles bend away from its centre.
+    s.run("map.projection", &json!({"type": "mollweide"})).unwrap();
+    s.run("gp.run", &json!({"tool": "tissot", "params": {"output": "moll"}})).unwrap();
+    for lat in [-60.0, 0.0, 30.0, 60.0] {
+        let area = field(&s, "moll", lat, "area_scale").as_f64().unwrap();
+        assert!((area - 1.0).abs() < 0.01, "{lat}: {area}");
+    }
+    assert!(field(&s, "moll", 60.0, "max_angle").as_f64().unwrap() > 10.0);
+    // On the globe there's no flat projection to measure: circles only.
+    s.run("map.projection", &json!({"type": "globe"})).unwrap();
+    s.run("gp.run", &json!({"tool": "tissot", "params": {"output": "globe"}})).unwrap();
+    let fields: Vec<String> = s.map().layer_by_name("globe").unwrap().dataset.fields.iter().map(|f| f.name.clone()).collect();
+    assert_eq!(fields, ["lat", "lon"]);
+}
+
+#[test]
 fn globe_projection_toggles_renders_and_saves() {
     let mut s = with_raster();
     assert_eq!(s.run("map.projection", &Value::Null).unwrap()["projection"], "globe");

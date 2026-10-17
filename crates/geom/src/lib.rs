@@ -382,6 +382,21 @@ mod tests {
     }
 
     #[test]
+    fn destination_lies_at_its_distance_and_bearing() {
+        let from = Coord::new(10.0, 60.0);
+        for az in [0.0, 45.0, 90.0, 180.0, 270.0, 333.0] {
+            let to = geodesic_destination(from, az, 500_000.0);
+            assert!((haversine_m(from, to) - 500_000.0).abs() < 1e-3, "{az}: {to:?}");
+        }
+        // North and east go where they say.
+        assert!((geodesic_destination(from, 0.0, 111_195.0).y - 61.0).abs() < 1e-3);
+        assert!(geodesic_destination(from, 90.0, 1000.0).x > 10.0);
+        // Longitudes stay continuous across the antimeridian, so the points around one centre
+        // form one shape (Tissot's indicatrix draws its circles with them).
+        assert!(geodesic_destination(Coord::new(179.9, 0.0), 90.0, 100_000.0).x > 180.0);
+    }
+
+    #[test]
     fn ring_area_one_degree_square_at_equator() {
         let ring = [Coord::new(0.0, 0.0), Coord::new(1.0, 0.0), Coord::new(1.0, 1.0), Coord::new(0.0, 1.0)];
         let a = geodesic_ring_area_m2(&ring);

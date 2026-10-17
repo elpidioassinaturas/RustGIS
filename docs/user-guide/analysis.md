@@ -40,6 +40,7 @@ The built-in tools:
 | Dissolve | Data Management › Generalization |
 | Minimum Bounding Geometry, Feature To Point, XY Table To Point, Calculate Geometry Attributes | Data Management › Features |
 | Simplify | Cartography › Generalization |
+| Tissot's Indicatrix | Cartography › Projections |
 | Select Layer By Location / Attribute | Data Management › Layers and Table Views |
 | Summarize Within, Summary Statistics | Analysis › Summarize / Statistics |
 | Export Features | Conversion |
@@ -57,6 +58,16 @@ kilometres, so a 1000 km circle at 60°N reaches as far north as south.
 cell by 1/distanceᴾ, where P is the distance coefficient (2 by default). Lines and polygons
 contribute their vertices. Leave the extent empty to use the input's, or give it as
 `xmin,ymin,xmax,ymax` in degrees. The result is a Float32 GeoTIFF layer.
+
+**Tissot's Indicatrix** shows what the map's projection does to the Earth. It draws the same small circle repeated over a grid: by default every 30°, 500 km across the whole world. With **Area: Map Extent** it fills the view instead, for a country or a state with a smaller spacing and radius.
+
+- **The circles are geodesic,** in longitude/latitude. The map draws each one as the ellipse its projection makes of it, and redraws them when you change the projection: growing circles in Web Mercator, flattened ellipses of equal area in Mollweide.
+- **On a flat map, each circle also records Tissot's parameters at its centre** for the projection the map had when the tool ran:
+  - `h` and `k`: scale along the meridian and the parallel;
+  - `a` and `b`: the ellipse's semi-axes;
+  - `area_scale`: `a·b`, which is 1 on an equal-area projection;
+  - `max_angle`: the largest angular distortion ω in degrees, 0 on a conformal projection.
+- **Making a distortion map:** color the circles by `area_scale` or `max_angle`.
 
 ## GeoLibre tools
 

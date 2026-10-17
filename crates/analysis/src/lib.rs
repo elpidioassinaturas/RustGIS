@@ -15,6 +15,7 @@ pub mod geodesic;
 pub mod network;
 pub mod neural;
 pub mod rasterops;
+pub mod tissot;
 mod tools;
 pub mod topology;
 
@@ -123,6 +124,20 @@ pub trait Inputs {
     fn selection(&self, layer: &str) -> &[usize];
     /// A raster layer by name.
     fn raster(&self, _layer: &str) -> Option<RasterInput<'_>> {
+        None
+    }
+    /// The active map's flat projection, for tools that show what it does to the Earth (Tissot's
+    /// indicatrix): its name. `None` when there's no map or it is a globe.
+    fn projection_name(&self) -> Option<String> {
+        None
+    }
+    /// A longitude/latitude point on the active map's projection plane, in metres. `None` where
+    /// the projection doesn't reach, or with no flat map ([`Inputs::projection_name`]).
+    fn project(&self, _c: rustgis_geom::Coord) -> Option<rustgis_geom::Coord> {
+        None
+    }
+    /// The longitude/latitude extent the map's view shows, when there is a view.
+    fn view_extent(&self) -> Option<rustgis_geom::Extent> {
         None
     }
 }
