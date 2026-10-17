@@ -1974,7 +1974,7 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
         }
         Ok(rows)
     };
-    let r = match kind.as_str() {
+    let mut r = match kind.as_str() {
         "single" | "singlesymbol" => Renderer::Single(base),
         "unique" | "uniquevalues" => Renderer::unique(&l.dataset, &rows()?, &field()?, ramp.unwrap_or(Ramp::Harbour), base)?,
         "graduated" | "graduatedcolors" => {
@@ -1990,7 +1990,6 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
     };
     // Applied again on the same field, the classes keep the labels set by hand, and the colours
     // and outlines set by hand too while the colour scheme stays (#314).
-    let mut r = r;
     r.carry_edits_from(&l.renderer, g);
     with(s, p, |l| l.renderer = r)
 }

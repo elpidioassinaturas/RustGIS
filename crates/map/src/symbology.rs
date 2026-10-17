@@ -440,12 +440,7 @@ impl Renderer {
     /// polygon class gets a matching outline unless `outline` names one. Returns the class's
     /// legend row as it now is.
     pub fn set_class_style(&mut self, class: &ClassRef, style: &ClassStyle, g: GeometryType) -> Result<LegendEntry, String> {
-        // One line (control characters such as line breaks become spaces), cut to MAX_LABEL, then
-        // trimmed again: a cut can end in a space.
-        let label = style.label.as_deref().map(|t| {
-            let t: String = t.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-            t.trim().chars().take(MAX_LABEL).collect::<String>().trim_end().to_string()
-        });
+        let label = style.label.as_deref().map(normalize_label);
         let restyle = |s: &mut Symbol| {
             if let Some(c) = style.color {
                 *s = s.with_fill(c, g);
@@ -588,6 +583,14 @@ fn carry_class(new: Symbol, old: &Symbol, scheme: Rgba, g: GeometryType) -> Symb
         s.stroke = old.stroke;
     }
     s
+}
+
+/// A legend label as [`Renderer::set_class_style`] keeps it: one line (control characters such as
+/// line breaks become spaces), trimmed, cut to [`MAX_LABEL`] characters and trimmed again (a cut
+/// can end in a space). An editor compares its text this way to tell whether it changed.
+pub fn normalize_label(t: &str) -> String {
+    let t: String = t.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    t.trim().chars().take(MAX_LABEL).collect::<String>().trim_end().to_string()
 }
 
 /// A Unique Values class's legend label: the one set by hand, or its value.
