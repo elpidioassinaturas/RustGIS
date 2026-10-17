@@ -2646,8 +2646,16 @@ mod start_with_tests {
         for (v, w) in [(json!("sample"), StartWith::Sample), (json!("blank"), StartWith::Blank), (json!("last"), StartWith::Last)] {
             assert_eq!(StartWith::from_json(&v), Ok(w));
         }
+        /// Removes the folder when the test ends, a failed assertion included.
+        struct TempDir(std::path::PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
         let dir = std::env::temp_dir().join(format!("rustgis-from-json-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _cleanup = TempDir(dir.clone());
         let project = dir.join("p.rgis");
         std::fs::write(&project, "{}").unwrap();
         std::fs::write(dir.join("notes.txt"), "x").unwrap();
@@ -2664,7 +2672,6 @@ mod start_with_tests {
         ] {
             assert!(StartWith::from_json(&bad).is_err(), "{bad}");
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
