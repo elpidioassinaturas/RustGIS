@@ -18,6 +18,8 @@ use crate::{LayersView, LeftPane, RightPane, RustGisApp, icons};
 
 pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
+    // Here rather than in the Symbology pane: a drag still finishes if the pane closes meanwhile.
+    finish_class_color_drag(app, ui);
     let frame = egui::Frame::NONE.fill(t.pane).inner_margin(egui::Margin::ZERO);
     if let Some(left) = app.ui.left {
         egui::Panel::left("left_pane").resizable(true).default_size(270.0).size_range(200.0..=480.0).frame(frame).show(ui, |ui| {
@@ -2520,6 +2522,38 @@ fn ramp_picker(app: &mut RustGisApp, ui: &mut Ui, cur: &Ramp, t: &Tokens) {
     }
 }
 
+/// Where a class colour being dragged in the Symbology pane's picker waits (#314).
+const CLASS_COLOR_DRAG: &str = "class_color_drag";
+
+/// A class colour being dragged: it previews in the project, and when the pointer is let go
+/// `finish_class_color_drag` puts `before` back and runs `params` (a layer.classStyle) once, so a
+/// colour pick is one undo step holding the pre-drag renderer (as `live_drag` does for the
+/// ribbon's sliders).
+#[derive(Clone)]
+struct ClassColorDrag {
+    layer: u32,
+    params: Value,
+    before: Renderer,
+}
+
+fn finish_class_color_drag(app: &mut RustGisApp, ui: &Ui) {
+    if ui.input(|i| i.pointer.primary_down()) {
+        return;
+    }
+    let key = egui::Id::new(CLASS_COLOR_DRAG);
+    let Some(drag) = ui.data_mut(|d| {
+        let drag = d.get_temp::<ClassColorDrag>(key);
+        d.remove::<ClassColorDrag>(key);
+        drag
+    }) else {
+        return;
+    };
+    if let Some(layer) = app.session.map_mut().layer_mut(drag.layer) {
+        layer.renderer = drag.before;
+    }
+    let _ = app.run("layer.classStyle", drag.params);
+}
+
 /// The renderer's legend rows. A Unique Values or Graduated Colors class can be edited in place
 /// (#314): its colour button and its legend label, which applies when the field loses focus and
 /// goes back to the value or range when cleared.
@@ -2535,23 +2569,6 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
         Renderer::Graduated { symbols, .. } => (0..symbols.len()).map(|i| (json!({"index": i}), ClassRef::Index(i))).collect(),
         _ => Vec::new(),
     };
-    // A colour dragged in the picker previews in the project and runs layer.classStyle once, when
-    // the pointer is let go, with the pre-drag renderer put back first so that one undo step
-    // holds it (as `live_drag` does for the ribbon's sliders).
-    let (pending, original) = (egui::Id::new(("class_color_pending", l.id)), egui::Id::new(("class_color_original", l.id)));
-    if !ui.input(|i| i.pointer.primary_down())
-        && let Some(params) = ui.data_mut(|d| d.remove_temp::<Value>(pending))
-    {
-        if let Some(r) = ui.data_mut(|d| {
-            let r = d.get_temp::<Renderer>(original);
-            d.remove::<Renderer>(original);
-            r
-        }) && let Some(layer) = app.session.map_mut().layer_mut(l.id)
-        {
-            layer.renderer = r;
-        }
-        let _ = app.run("layer.classStyle", params);
-    }
     egui::Frame::NONE.stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::same(6)).show(
         ui,
         |ui| {
@@ -2584,9 +2601,10 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     if ui.color_edit_button_srgba(&mut c).on_hover_text(tl!("Class color")).changed() {
                         let params = with("color", json!(rgba(c).hex()));
                         if ui.input(|i| i.pointer.primary_down()) {
-                            if ui.data(|d| d.get_temp::<Renderer>(original).is_none()) {
-                                ui.data_mut(|d| d.insert_temp(original, l.renderer.clone()));
-                            }
+                            // A drag in the picker: preview it, and let finish_class_color_drag run
+                            // the command once the pointer is let go.
+                            let key = egui::Id::new(CLASS_COLOR_DRAG);
+                            let before = ui.data(|d| d.get_temp::<ClassColorDrag>(key)).map_or_else(|| l.renderer.clone(), |d| d.before);
                             if let Some(layer) = app.session.map_mut().layer_mut(l.id) {
                                 let g = layer.geometry_type();
                                 let _ = layer.renderer.set_class_style(
@@ -2596,7 +2614,7 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                                 );
                             }
                             app.session.revision = app.session.revision.wrapping_add(1);
-                            ui.data_mut(|d| d.insert_temp(pending, params));
+                            ui.data_mut(|d| d.insert_temp(key, ClassColorDrag { layer: l.id, params, before }));
                         } else {
                             let _ = app.run("layer.classStyle", params);
                         }
