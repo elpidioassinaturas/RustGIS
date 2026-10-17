@@ -606,6 +606,14 @@ fn start_with_a_project_file_or_the_last_one() {
     };
     let dir = std::env::temp_dir().join(format!("rustgis-start-with-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
+    // Removed however the test ends, passed or failed.
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = TempDir(dir.clone());
     let (a, b) = (dir.join("a.rgis"), dir.join("b.rgis"));
     let shown = |p: &std::path::Path| p.display().to_string();
     let pref = |k: &str| store.lock().unwrap().get(k).cloned();
@@ -706,7 +714,6 @@ fn start_with_a_project_file_or_the_last_one() {
         assert!(err.contains("desktop"), "{err}");
     }
     assert!(browser.run("ui.startup", json!({"project": "last"})).is_err());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

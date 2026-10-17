@@ -131,6 +131,29 @@ impl StartWith {
     fn opens_a_file(&self) -> bool {
         matches!(self, StartWith::Last | StartWith::File(_))
     }
+
+    /// From `ui.startup`'s `project`: `"sample"`, `"blank"`, `"last"` or `{"path": …}`, a project
+    /// file that is there, kept by its full path.
+    pub fn from_json(v: &Value) -> Result<StartWith, String> {
+        match v {
+            Value::String(s) if s == "sample" => Ok(StartWith::Sample),
+            Value::String(s) if s == "blank" => Ok(StartWith::Blank),
+            Value::String(s) if s == "last" => Ok(StartWith::Last),
+            Value::Object(_) => {
+                let path =
+                    v.get("path").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()).ok_or("project's path is required")?;
+                if !rustgis_engine::project::is_project_file(path) {
+                    return Err(format!("{path} isn't a RustGIS project file"));
+                }
+                let full = std::path::absolute(path).map_err(|e| format!("{path}: {e}"))?;
+                if !full.is_file() {
+                    return Err(format!("no project at {}", full.display()));
+                }
+                Ok(StartWith::File(full.display().to_string()))
+            }
+            _ => Err("project is \"sample\", \"blank\", \"last\" or {\"path\": a project file}".into()),
+        }
+    }
 }
 
 /// Reads `minLon,minLat,maxLon,maxLat` (commas or spaces) into a valid longitude/latitude extent.
@@ -1216,28 +1239,7 @@ impl RustGisApp {
                         if (v.as_str() == Some("last") || v.is_object()) && !self.opens_files() {
                             return Err("starting with a project file needs the desktop app".into());
                         }
-                        Some(match v {
-                            Value::String(s) if s == "sample" => StartWith::Sample,
-                            Value::String(s) if s == "blank" => StartWith::Blank,
-                            Value::String(s) if s == "last" => StartWith::Last,
-                            Value::Object(_) => {
-                                let path = v
-                                    .get("path")
-                                    .and_then(Value::as_str)
-                                    .map(str::trim)
-                                    .filter(|p| !p.is_empty())
-                                    .ok_or("project's path is required")?;
-                                if !rustgis_engine::project::is_project_file(path) {
-                                    return Err(format!("{path} isn't a RustGIS project file"));
-                                }
-                                let full = std::path::absolute(path).map_err(|e| format!("{path}: {e}"))?;
-                                if !full.is_file() {
-                                    return Err(format!("no project at {}", full.display()));
-                                }
-                                StartWith::File(full.display().to_string())
-                            }
-                            _ => return Err("project is \"sample\", \"blank\", \"last\" or {\"path\": a project file}".into()),
-                        })
+                        Some(StartWith::from_json(v)?)
                     }
                 };
                 // Validate before changing anything; `mercator` is stored as the default.
@@ -2618,6 +2620,51 @@ fn project_file_name(url: &str) -> Option<&str> {
     let path = url.split(['?', '#']).next().unwrap_or("");
     let last = path.rsplit('/').next().unwrap_or("");
     (rustgis_engine::project::is_project_file(last) || last.to_ascii_lowercase().ends_with(".rgispkg")).then_some(last)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod start_with_tests {
+    use super::StartWith;
+    use serde_json::json;
+
+    #[test]
+    fn start_with_reads_back_what_it_stores() {
+        for w in [StartWith::Sample, StartWith::Blank, StartWith::Last, StartWith::File("C:/maps/a.rgis".into())] {
+            assert_eq!(StartWith::from_pref(&w.pref()), w);
+        }
+        // Anything else is the sample; a stored path is trimmed.
+        for v in ["", "nope", "file:", "file:   "] {
+            assert_eq!(StartWith::from_pref(v), StartWith::Sample, "{v:?}");
+        }
+        assert_eq!(StartWith::from_pref("file:  /a/b.rgis "), StartWith::File("/a/b.rgis".into()));
+    }
+
+    #[test]
+    fn start_with_takes_a_named_choice_or_a_project_that_is_there() {
+        for (v, w) in [(json!("sample"), StartWith::Sample), (json!("blank"), StartWith::Blank), (json!("last"), StartWith::Last)] {
+            assert_eq!(StartWith::from_json(&v), Ok(w));
+        }
+        let dir = std::env::temp_dir().join(format!("rustgis-from-json-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = dir.join("p.rgis");
+        std::fs::write(&project, "{}").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        let shown = |name: &str| dir.join(name).display().to_string();
+        assert_eq!(StartWith::from_json(&json!({"path": shown("p.rgis")})), Ok(StartWith::File(shown("p.rgis"))));
+        for bad in [
+            json!(null),
+            json!(5),
+            json!("nope"),
+            json!({}),
+            json!({"path": " "}),
+            json!({"path": shown("notes.txt")}),
+            json!({"path": shown("missing.rgis")}),
+        ] {
+            assert!(StartWith::from_json(&bad).is_err(), "{bad}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]

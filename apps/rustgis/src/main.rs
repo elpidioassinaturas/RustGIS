@@ -166,8 +166,15 @@ mod running {
         let Some(dir) = dir else { return (None, false) };
         let file = std::fs::create_dir_all(dir)
             .and_then(|_| OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("running")));
-        let Ok(mut file) = file else { return (None, false) };
-        if file.try_lock().is_err() {
+        let mut file = match file {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("no run marker in {} ({e}): an unclean exit won't be noticed", dir.display());
+                return (None, false);
+            }
+        };
+        if let Err(e) = file.try_lock() {
+            log::info!("the run marker is held ({e}): another copy of RustGIS is running");
             return (None, false);
         }
         let mut text = String::new();
@@ -289,6 +296,8 @@ mod tests {
     fn a_run_that_did_not_close_is_noticed_once() {
         let dir = std::env::temp_dir().join(format!("rustgis-running-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        // Removed however the test ends (declared first, so dropped after the markers).
+        let _cleanup = TempDir(dir.clone());
         let (first, unclean) = running::start(Some(&dir));
         assert!(first.is_some() && !unclean, "a first run");
         // Another copy running alongside can't take it, and doesn't count as a crash.
@@ -302,7 +311,15 @@ mod tests {
         let (next, unclean) = running::start(Some(&dir));
         assert!(!unclean);
         drop(next);
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder removed when the test ends, passed or failed.
+    struct TempDir(std::path::PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
