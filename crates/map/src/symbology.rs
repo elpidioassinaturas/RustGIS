@@ -1058,20 +1058,7 @@ mod tests {
         let e = gr.set_class_style(&ClassRef::Index(0), &style(None, None, Some(&"x".repeat(500))), g).unwrap();
         assert_eq!(e.label.chars().count(), MAX_LABEL);
         // A label is one line.
-        let e = gr
-            .set_class_style(
-                &ClassRef::Index(0),
-                &style(
-                    None,
-                    None,
-                    Some(
-                        "Low
-income	",
-                    ),
-                ),
-                g,
-            )
-            .unwrap();
+        let e = gr.set_class_style(&ClassRef::Index(0), &style(None, None, Some("Low\nincome\t")), g).unwrap();
         assert_eq!(e.label, "Low income");
         // A cut that lands on a space doesn't leave it at the end.
         let long = format!("{} {}", "x".repeat(MAX_LABEL - 1), "y".repeat(10));
