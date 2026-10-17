@@ -39,7 +39,9 @@ layer.classStyle={"layer":"Countries","other":true,"label":"No data"}
 ```
 
 `value` names a Unique Values class, `index` a Graduated Colors class (0 is the lowest) and
-`other` the `<all other values>` class; `outline` sets a class's outline colour.
+`other` the `<all other values>` class; `outline` sets a class's outline colour. A polygon class
+keeps its own transparency (the layer's, as a colour scheme leaves it), so the `AA` of a
+`#RRGGBBAA` colour applies to points and lines only.
 
 ### Custom color ramps
 

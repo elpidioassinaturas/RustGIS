@@ -439,7 +439,8 @@ impl Renderer {
 
     /// Sets one class's colour, outline colour and legend label (#314). The colour goes through
     /// [`Symbol::with_fill`], as a ramp's does, so a line class takes it as its line colour and a
-    /// polygon class gets a matching outline unless `outline` names one. Returns the class's
+    /// polygon class gets a matching outline unless `outline` names one; a polygon class also keeps
+    /// its own transparency, so the colour's alpha applies to points and lines only. Returns the class's
     /// legend row as it now is.
     pub fn set_class_style(&mut self, class: &ClassRef, style: &ClassStyle, g: GeometryType) -> Result<LegendEntry, String> {
         let label = style.label.as_deref().map(normalize_label);
