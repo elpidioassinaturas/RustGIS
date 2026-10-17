@@ -3190,6 +3190,41 @@ fn tools_read_streamed_layers_whole() {
 }
 
 #[test]
+fn web_shares_carry_every_feature_of_a_streamed_layer() {
+    let path = grid_fgb("webshare", 50);
+    let dir = std::env::temp_dir().join(format!("rustgis-webshare-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path.display().to_string(), "stream": true})).unwrap();
+    // Only a corner is in view.
+    let v = view_of(&mut s, rustgis_geom::Extent::new(0.0, 0.0, 20.0, 20.0));
+    crate::render::render_png(s.map_mut(), &v).unwrap();
+    assert!(s.map().layers[0].dataset.features.len() < 2500);
+    let count = |zip: &std::path::Path, name: &str| -> usize {
+        let z = rustgis_data::zip::read(&std::fs::read(zip).unwrap()).unwrap();
+        let items = z.iter().find(|e| e.0 == name).unwrap();
+        let v: Value = serde_json::from_slice(&items.1).unwrap();
+        v["features"].as_array().unwrap().len()
+    };
+    let layer_zip = dir.join("layer.zip");
+    s.run("share.webLayer", &json!({"layer": "webshare", "path": layer_zip.display().to_string()})).unwrap();
+    assert_eq!(count(&layer_zip, "collections/webshare/items.json"), 2500);
+    let service_zip = dir.join("service.zip");
+    s.run("share.geodataService", &json!({"path": service_zip.display().to_string()})).unwrap();
+    assert_eq!(count(&service_zip, "collections/webshare/items.json"), 2500);
+    // A scene from the corner view matches one made with every feature in hand.
+    let scene = dir.join("scene.gltf");
+    s.run("share.webScene", &json!({"path": scene.display().to_string()})).unwrap();
+    let windowed = std::fs::read(&scene).unwrap();
+    let all = s.map().layers[0].load_all().unwrap();
+    s.map_mut().layers[0].dataset = all;
+    s.run("share.webScene", &json!({"path": scene.display().to_string()})).unwrap();
+    assert!(windowed == std::fs::read(&scene).unwrap(), "the scene depends on the view");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn a_streamed_layer_whose_file_goes_away_shows_an_error_not_stale_features() {
     let path = grid_fgb("vanishing", 40);
     let mut s = Session::new(Project::default());
