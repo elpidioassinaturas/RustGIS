@@ -504,7 +504,8 @@ impl Renderer {
 
     /// Carries hand-made class edits over from `old` when the symbology is applied again (#314).
     /// On the same field, a class that is still there keeps its legend label (a Graduated Colors
-    /// label while the ranges are the same: it names a range). With the same colour scheme too,
+    /// class keeps its edits only while the ranges are the same: they belong to a range). With the
+    /// same colour scheme too,
     /// it keeps the colour and outline set by hand: those that aren't what the scheme gave it at
     /// its place in `old` (see [`carry_class`]). The other classes take the new scheme's colours
     /// at their new places, on the new base symbol. A different scheme recolours every class
@@ -537,9 +538,11 @@ impl Renderer {
                 Renderer::Graduated { field, breaks, symbols, ramp, min, class_labels, .. },
                 Renderer::Graduated { field: of, breaks: ob, symbols: os, ramp: or, min: om, class_labels: ol, .. },
             ) if field == of => {
-                if breaks == ob && min == om {
-                    class_labels.clone_from(ol);
+                // A Graduated Colors edit belongs to a range: it stays only while the ranges do.
+                if breaks != ob || min != om {
+                    return;
                 }
+                class_labels.clone_from(ol);
                 if ramp == or && symbols.len() == os.len() {
                     let n = os.len();
                     for (i, (s, o)) in symbols.iter_mut().zip(os).enumerate() {
@@ -1173,8 +1176,8 @@ income	",
         let (Renderer::Graduated { symbols, .. }, Renderer::Graduated { symbols: fs, .. }) = (&moved, &fresh) else {
             panic!("graduated renderers expected")
         };
-        assert_eq!((symbols[0], symbols[1]), (fs[0].with_fill(red, g), fs[1]), "same count and scheme: the edit stays");
-        assert_eq!(labels_of(&moved), ["0 – 12", "12 – 20"], "the range moved: its label goes");
+        assert_eq!((symbols[0], symbols[1]), (fs[0], fs[1]), "the range moved: its colour goes");
+        assert_eq!(labels_of(&moved), ["0 – 12", "12 – 20"], "and its label too");
         let fresh = ramped(&[10.0, 15.0, 20.0], Ramp::Ember);
         let mut more = fresh.clone();
         more.carry_edits_from(&gold, g);

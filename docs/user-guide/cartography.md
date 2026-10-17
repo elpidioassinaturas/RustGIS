@@ -30,7 +30,7 @@ pane and in layout legends instead of the value or range (for example `High inco
 same way. Applying the symbology again on the same field keeps the colours, outlines and labels
 you set by hand on the classes that are still there (the others take the scheme's colours again);
 picking another colour scheme recolours every class but keeps the labels. A Graduated Colors
-label stays while its range does. By command:
+class keeps its colour and label while its range stays the same. By command:
 
 ```text
 layer.classStyle={"layer":"Countries","value":"1. High income: OECD","color":"#2E6B4F","label":"High income"}
