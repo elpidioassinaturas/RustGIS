@@ -2021,6 +2021,12 @@ fn class_style(s: &mut Session, p: &Value) -> CmdResult {
         Some(Value::String(t)) => Some(t.clone()),
         Some(_) => return Err("label must be a text (an empty one goes back to the value or range)".into()),
     };
+    // A colour given as something other than text is refused, not taken as absent.
+    for k in ["color", "outline"] {
+        if p.get(k).is_some_and(|v| !v.is_string()) {
+            return Err(format!("{k} must be #RRGGBB or #RRGGBBAA"));
+        }
+    }
     let style = ClassStyle { color: s.get_color(p, "color")?, outline: s.get_color(p, "outline")?, label };
     if style == ClassStyle::default() {
         return Err("nothing to change: give a color, an outline or a label".into());

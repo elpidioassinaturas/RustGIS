@@ -1146,6 +1146,8 @@ fn layer_class_style_edits_one_class() {
         json!({"layer": "Countries", "value": value, "color": "red"}),
         json!({"layer": "Countries", "value": value, "color": "#000000", "label": 5}),
         json!({"layer": "Countries", "value": value, "label": null}),
+        json!({"layer": "Countries", "value": value, "label": "x", "color": 5}),
+        json!({"layer": "Countries", "value": value, "label": "x", "outline": true}),
     ] {
         assert!(s.run("layer.classStyle", &bad).is_err(), "{bad}");
     }
