@@ -11,7 +11,8 @@ use serde_json::json;
 #[cfg(target_os = "macos")]
 mod macos;
 
-struct App(RustGisApp);
+/// The app, and this run's marker (see [`running`]), cleared when eframe closes it.
+struct App(RustGisApp, running::Shared);
 
 /// Preferences in `prefs.json` beside the platform's other app settings.
 mod prefs {
@@ -194,6 +195,19 @@ mod running {
             }
         }
     }
+
+    /// The marker as the app and `main` both hold it: whichever sees the clean exit first
+    /// clears it (the app's `on_exit`, or `main` when `run_native` returns, which also covers
+    /// eframe failing to start before the app exists).
+    pub type Shared = std::sync::Arc<std::sync::Mutex<Option<Marker>>>;
+
+    /// Clears a shared marker once.
+    pub fn close(marker: &Shared) {
+        let taken = marker.lock().map(|mut m| m.take()).unwrap_or_else(|poisoned| poisoned.into_inner().take());
+        if let Some(m) = taken {
+            m.close();
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -216,6 +230,11 @@ impl eframe::App for App {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.0.ui(ui);
+    }
+    /// Every way eframe closes the app comes here, Cmd+Q on macOS included, which may not
+    /// return from `run_native`: the run ended cleanly.
+    fn on_exit(&mut self) {
+        running::close(&self.1);
     }
 }
 
@@ -280,10 +299,10 @@ fn main() -> eframe::Result {
         viewport = viewport.with_icon(egui::IconData { rgba, width: size, height: size });
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    let result = eframe::run_native("RustGIS", options, Box::new(move |_cc| Ok(Box::new(App(app)))));
-    if let Some(marker) = marker {
-        marker.close();
-    }
+    let marker: running::Shared = std::sync::Arc::new(std::sync::Mutex::new(marker));
+    let held = marker.clone();
+    let result = eframe::run_native("RustGIS", options, Box::new(move |_cc| Ok(Box::new(App(app, held)))));
+    running::close(&marker);
     result
 }
 
