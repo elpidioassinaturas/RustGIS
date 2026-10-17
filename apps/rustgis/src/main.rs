@@ -174,9 +174,18 @@ mod running {
                 return (None, false);
             }
         };
-        if let Err(e) = file.try_lock() {
-            log::info!("the run marker is held ({e}): another copy of RustGIS is running");
-            return (None, false);
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                log::info!("the run marker is held: another copy of RustGIS is running");
+                return (None, false);
+            }
+            // The folder can't lock files (some network or FUSE folders): keep the marker unlocked,
+            // so unclean exits are still noticed. A second copy running alongside is then taken for
+            // one, which only costs that copy its start-up project.
+            Err(std::fs::TryLockError::Error(e)) => {
+                log::warn!("could not lock the run marker ({e}): a second copy running alongside will look like an unclean exit");
+            }
         }
         // A clean exit leaves the marker empty: anything in it (whatever it reads as) means the
         // last run didn't close, and so does a marker that can't be read.
