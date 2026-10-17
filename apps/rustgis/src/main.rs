@@ -191,7 +191,7 @@ fn main() -> eframe::Result {
     let mut app = app.with_services(prefs::services());
     // Settings › Start-up; `--sample` still opens the sample.
     let blank = if args.iter().any(|a| a == "--sample") { Some(false) } else { (!files.is_empty()).then_some(true) };
-    if let Err(e) = app.start(&rustgis_ui_egui::Start { blank, ..Default::default() }) {
+    if let Err(e) = app.start(&rustgis_ui_egui::Start { blank, after_crash: crashed.is_some(), ..Default::default() }) {
         log::warn!("start-up: {e}");
     }
     if let Some(log) = crashed {
