@@ -29,7 +29,8 @@ pane and in layout legends instead of the value or range (for example `High inco
 `1. High income: OECD`); clear it to show the value again. `<all other values>` can be edited the
 same way. Applying the symbology again on the same field keeps the colours, outlines and labels
 you set by hand on the classes that are still there (the others take the scheme's colours again);
-picking another colour scheme recolours every class but keeps the labels. A Graduated Colors label stays while its range does. By command:
+picking another colour scheme recolours every class but keeps the labels. A Graduated Colors
+label stays while its range does. By command:
 
 ```text
 layer.classStyle={"layer":"Countries","value":"1. High income: OECD","color":"#2E6B4F","label":"High income"}

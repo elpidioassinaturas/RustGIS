@@ -18,8 +18,6 @@ use crate::{LayersView, LeftPane, RightPane, RustGisApp, icons};
 
 pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
-    // Here rather than in the Symbology pane: a drag still finishes if the pane closes meanwhile.
-    finish_class_color_drag(app, ui);
     let frame = egui::Frame::NONE.fill(t.pane).inner_margin(egui::Margin::ZERO);
     if let Some(left) = app.ui.left {
         egui::Panel::left("left_pane").resizable(true).default_size(270.0).size_range(200.0..=480.0).frame(frame).show(ui, |ui| {
@@ -44,6 +42,10 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
             ui.advance_cursor_after_rect(rect);
         });
     }
+    // Here rather than in the Symbology pane, so a drag still finishes if the pane closes
+    // meanwhile; and after the panes, so a change the picker reports as the pointer is let go
+    // joins the drag instead of running a command of its own.
+    finish_class_color_drag(app, ui);
 }
 
 fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
@@ -2601,11 +2603,12 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     let mut c = c32(shown);
                     if ui.color_edit_button_srgba(&mut c).on_hover_text(tl!("Class color")).changed() {
                         let params = with("color", json!(rgba(c).hex()));
-                        if ui.input(|i| i.pointer.primary_down()) {
+                        let key = egui::Id::new(CLASS_COLOR_DRAG);
+                        let dragging = ui.data(|d| d.get_temp::<ClassColorDrag>(key)).filter(|d| d.layer == l.id);
+                        if ui.input(|i| i.pointer.primary_down()) || dragging.is_some() {
                             // A drag in the picker: preview it, and let finish_class_color_drag run
                             // the command once the pointer is let go.
-                            let key = egui::Id::new(CLASS_COLOR_DRAG);
-                            let before = ui.data(|d| d.get_temp::<ClassColorDrag>(key)).map_or_else(|| l.renderer.clone(), |d| d.before);
+                            let before = dragging.map_or_else(|| l.renderer.clone(), |d| d.before);
                             if let Some(layer) = app.session.map_mut().layer_mut(l.id) {
                                 let g = layer.geometry_type();
                                 let _ = layer.renderer.set_class_style(
@@ -2639,7 +2642,8 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                         .on_hover_text(tl!("Legend label. Clear it to show the value again."));
                     if r.lost_focus() {
                         ui.data_mut(|d| d.remove::<String>(typing));
-                        if buf != e.label && !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        // The command trims the label: spaces alone are no change.
+                        if buf.trim() != e.label && !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             let _ = app.run("layer.classStyle", with("label", json!(buf)));
                         }
                     } else if r.has_focus() {
