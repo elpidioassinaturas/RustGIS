@@ -564,8 +564,9 @@ impl Renderer {
 /// `new` with the hand-made parts of `old`, a class whose scheme colour was `scheme`: the fill
 /// when it isn't that colour, and the outline when it isn't the one [`Symbol::with_fill`] derives
 /// (a polygon's shaded fill, a line's own colour; for points, the new base symbol's outline).
-/// A polygon's fill compares without alpha (a polygon keeps its own transparency); a point's or a
-/// line's with it, since `with_fill` gives them the colour's alpha as it is.
+/// A polygon's fill compares without alpha (`with_fill` keeps a polygon's own transparency) and,
+/// when edited, carries over whole, transparency included; a point's or a line's compares with it,
+/// since `with_fill` gives them the colour's alpha as it is. Outlines compare whole.
 fn carry_class(new: Symbol, old: &Symbol, scheme: Rgba, g: GeometryType) -> Symbol {
     let rgb = |c: Rgba| (c.r(), c.g(), c.b());
     let mut s = new;
@@ -573,13 +574,16 @@ fn carry_class(new: Symbol, old: &Symbol, scheme: Rgba, g: GeometryType) -> Symb
     if edited {
         let c = if g == GeometryType::Polygon { Rgba::rgb(old.fill.r(), old.fill.g(), old.fill.b()) } else { old.fill };
         s = s.with_fill(c, g);
+        if g == GeometryType::Polygon {
+            s.fill = old.fill;
+        }
     }
     let derived = match g {
         GeometryType::Polygon => Rgba::rgb(old.fill.r(), old.fill.g(), old.fill.b()).shade(0.6),
         GeometryType::Polyline => old.fill,
         _ => new.stroke,
     };
-    if rgb(old.stroke) != rgb(derived) {
+    if old.stroke != derived {
         s.stroke = old.stroke;
     }
     s
@@ -1103,6 +1107,18 @@ income	",
         assert_eq!(classes[2].1, fc[2].1, "d is new");
         assert_eq!(*other, fo.with_fill(red, g));
         assert_eq!(labels_of(&again), ["Bee", "c", "d", "Rest"]);
+        // A polygon class's own transparency, and an outline that differs only in it, carry over too.
+        let mut tinted = ramped(&["a"], Ramp::Ember);
+        if let Renderer::Unique { classes, .. } = &mut tinted {
+            classes[0].1.fill = red.with_alpha(80);
+            classes[0].1.stroke = red.shade(0.6).with_alpha(100);
+        }
+        let mut kept = ramped(&["a"], Ramp::Ember);
+        kept.carry_edits_from(&tinted, g);
+        let (Renderer::Unique { classes: kc, .. }, Renderer::Unique { classes: tc, .. }) = (&kept, &tinted) else {
+            panic!("unique renderers expected")
+        };
+        assert_eq!((kc[0].1.fill, kc[0].1.stroke), (tc[0].1.fill, tc[0].1.stroke));
         // An unedited renderer applied again is the fresh one.
         let mut plain = fresh.clone();
         plain.carry_edits_from(&ramped(&["b", "c"], Ramp::Ember), g);
