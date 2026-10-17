@@ -81,6 +81,54 @@ pub struct Start {
     pub extent: Option<String>,
 }
 
+/// What RustGIS opens with: Settings › Start-up › Start With (#377).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum StartWith {
+    /// The World Atlas sample.
+    #[default]
+    Sample,
+    /// An empty project.
+    Blank,
+    /// The project last opened or saved on this computer (the desktop app).
+    Last,
+    /// A project file the user picked (the desktop app).
+    File(String),
+}
+
+impl StartWith {
+    /// As the `start_project` preference stores it.
+    fn pref(&self) -> String {
+        match self {
+            StartWith::Sample => "sample".into(),
+            StartWith::Blank => "blank".into(),
+            StartWith::Last => "last".into(),
+            StartWith::File(p) => format!("file:{p}"),
+        }
+    }
+
+    /// From the `start_project` preference; anything else is the sample.
+    fn from_pref(v: &str) -> StartWith {
+        match v {
+            "blank" => StartWith::Blank,
+            "last" => StartWith::Last,
+            _ => v.strip_prefix("file:").filter(|p| !p.trim().is_empty()).map_or(StartWith::Sample, |p| StartWith::File(p.into())),
+        }
+    }
+
+    /// As `ui.startup` takes and reports it: `"sample"`, `"blank"`, `"last"` or `{"path": …}`.
+    pub fn json(&self) -> Value {
+        match self {
+            StartWith::File(p) => serde_json::json!({"path": p}),
+            other => Value::String(other.pref()),
+        }
+    }
+
+    /// A choice that opens a file: the desktop app's only.
+    fn opens_a_file(&self) -> bool {
+        matches!(self, StartWith::Last | StartWith::File(_))
+    }
+}
+
 /// Reads `minLon,minLat,maxLon,maxLat` (commas or spaces) into a valid longitude/latitude extent.
 pub fn parse_extent(text: &str) -> Option<[f64; 4]> {
     let n: Vec<f64> = text.split([',', ' ']).filter(|x| !x.is_empty()).map(|x| x.trim().parse().ok()).collect::<Option<_>>()?;
@@ -290,8 +338,10 @@ pub struct UiState {
     /// Worldview preference for the built-in countries and world outline: `auto`, `default` or
     /// `china`.
     pub worldview: String,
-    /// Start-up preference: begin with an empty project instead of the World Atlas sample.
-    pub start_blank: bool,
+    /// Start-up preference: what RustGIS opens with.
+    pub start_with: StartWith,
+    /// The project last opened or saved on this computer, for Start With › Last Project.
+    pub last_project: Option<String>,
     /// Start-up preference: the projection the first map starts in (a [`Projection`] code);
     /// empty for Web Mercator.
     ///
@@ -405,7 +455,8 @@ impl Default for UiState {
             dark_follows_system: true,
             language: i18n::AUTO.into(),
             worldview: i18n::AUTO.into(),
-            start_blank: false,
+            start_with: StartWith::Sample,
+            last_project: None,
             start_projection: String::new(),
             start_projection_input: String::new(),
             start_extent: None,
@@ -573,7 +624,13 @@ impl RustGisApp {
             self.ui.worldview = w.trim().to_ascii_lowercase();
         }
         self.apply_worldview();
-        self.ui.start_blank = self.services.load_pref.as_ref().and_then(|load| load("start_project")).as_deref() == Some("blank");
+        self.ui.start_with =
+            self.services.load_pref.as_ref().and_then(|load| load("start_project")).map_or(StartWith::Sample, |v| StartWith::from_pref(&v));
+        // A shell without file paths (the web app) can't open a file at start.
+        if self.ui.start_with.opens_a_file() && !self.opens_files() {
+            self.ui.start_with = StartWith::Sample;
+        }
+        self.ui.last_project = self.services.load_pref.as_ref().and_then(|load| load("last_project")).filter(|p| !p.trim().is_empty());
         // A stored projection this version can't use means Web Mercator.
         if let Some(code) = self.services.load_pref.as_ref().and_then(|load| load("start_projection"))
             && let Ok(p) = rustgis_engine::map::Projection::from_code(&code)
@@ -934,10 +991,22 @@ impl RustGisApp {
     /// once, after [`Self::with_services`] and before opening files. The start is not an edit to
     /// undo or save.
     pub fn start(&mut self, overrides: &Start) -> Result<(), String> {
-        if overrides.blank.unwrap_or(self.ui.start_blank) {
-            self.run("project.new", Value::Null)?;
-        }
-        let code = overrides.projection.clone().unwrap_or_else(|| self.ui.start_projection.clone());
+        // A shell's `blank` wins (a file on the command line, `--sample`, the web app's `?blank`).
+        let opened = match (overrides.blank, self.ui.start_with.clone()) {
+            (Some(true), _) | (None, StartWith::Blank) => {
+                self.run("project.new", Value::Null)?;
+                false
+            }
+            (Some(false), _) | (None, StartWith::Sample) => false,
+            (None, StartWith::Last) => match self.ui.last_project.clone() {
+                Some(path) => self.open_start_project(&path),
+                None => false,
+            },
+            (None, StartWith::File(path)) => self.open_start_project(&path),
+        };
+        // A project opened at start keeps its own projection and view: the Start-up projection and
+        // extent are for the sample and a blank map. A shell's own still apply.
+        let code = overrides.projection.clone().unwrap_or_else(|| if opened { String::new() } else { self.ui.start_projection.clone() });
         let mut result = Ok(());
         let mut projected = false;
         if !code.trim().is_empty() {
@@ -954,6 +1023,7 @@ impl RustGisApp {
                     self.ui.start_extent
                 }
             },
+            None if opened => None,
             None => self.ui.start_extent,
         };
         if let Some(e) = extent {
@@ -965,6 +1035,25 @@ impl RustGisApp {
         self.session.clear_history();
         self.map.invalidate();
         result
+    }
+
+    /// Opens the Start With project. One that doesn't open (moved, deleted, unreadable) leaves
+    /// what the app started with and says why; the next start tries again.
+    fn open_start_project(&mut self, path: &str) -> bool {
+        match self.run("project.open", serde_json::json!({"path": path})) {
+            Ok(_) => true,
+            Err(e) => {
+                let text = crate::i18n::fmt("The start-up project {path} didn't open: {error}", &[("path", path), ("error", &e)]);
+                self.session.notify(text, true);
+                false
+            }
+        }
+    }
+
+    /// Whether this shell opens files by path (the desktop app; the web app picks them in the
+    /// browser instead).
+    fn opens_files(&self) -> bool {
+        !cfg!(target_arch = "wasm32") && self.services.open_async.is_none()
     }
 
     /// Runs a command by id: `ui.*` here, everything else in the engine.
@@ -982,6 +1071,21 @@ impl RustGisApp {
             self.ui.web_file = None;
             // A deletion asked for in the old project never reaches a namesake in the new one.
             self.map.deleting = None;
+        }
+        // Settings › Start-up › Last Project: the project last opened or saved here, by its full
+        // path (a relative one would depend on where the next start runs from).
+        if r.is_ok()
+            && matches!(id, "project.open" | "project.save" | "project.saveAs")
+            && self.opens_files()
+            && let Some(path) =
+                self.session.path.as_ref().map(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone()).display().to_string())
+            && rustgis_engine::project::is_project_file(&path)
+            && self.ui.last_project.as_deref() != Some(path.as_str())
+        {
+            if let Some(save) = &self.services.save_pref {
+                save("last_project", &path);
+            }
+            self.ui.last_project = Some(path);
         }
         // Sources added, saved or made favourites are kept with the preferences.
         sourcespane::save(self);
@@ -1072,7 +1176,35 @@ impl RustGisApp {
                 self.apply_worldview();
             }
             "ui.startup" => {
-                let blank = p.get("blank").and_then(Value::as_bool);
+                // `project` (#377) or, as before, `blank`; `project` wins when both are given.
+                let start_with = match p.get("project") {
+                    None => p.get("blank").and_then(Value::as_bool).map(|b| if b { StartWith::Blank } else { StartWith::Sample }),
+                    Some(Value::String(v)) => Some(match v.as_str() {
+                        "sample" => StartWith::Sample,
+                        "blank" => StartWith::Blank,
+                        "last" => StartWith::Last,
+                        _ => return Err("project is \"sample\", \"blank\", \"last\" or {\"path\": a .rgis file}".into()),
+                    }),
+                    Some(v) => {
+                        let path = v
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|p| !p.is_empty())
+                            .ok_or("project's path is required")?;
+                        if !rustgis_engine::project::is_project_file(path) {
+                            return Err(format!("{path} isn't a RustGIS project (.rgis)"));
+                        }
+                        let full = std::path::absolute(path).map_err(|e| format!("{path}: {e}"))?;
+                        if !full.is_file() {
+                            return Err(format!("no project at {}", full.display()));
+                        }
+                        Some(StartWith::File(full.display().to_string()))
+                    }
+                };
+                if start_with.as_ref().is_some_and(StartWith::opens_a_file) && !self.opens_files() {
+                    return Err("starting with a project file needs the desktop app".into());
+                }
                 // Validate before changing anything; `mercator` is stored as the default.
                 let projection = match p.get("projection").and_then(Value::as_str) {
                     Some(code) => Some(rustgis_engine::map::Projection::from_code(code)?),
@@ -1098,11 +1230,11 @@ impl RustGisApp {
                         save("start_extent", &text);
                     }
                 }
-                if let Some(b) = blank {
-                    self.ui.start_blank = b;
+                if let Some(w) = start_with {
                     if let Some(save) = &self.services.save_pref {
-                        save("start_project", if b { "blank" } else { "sample" });
+                        save("start_project", &w.pref());
                     }
+                    self.ui.start_with = w;
                 }
                 if let Some(proj) = projection {
                     self.ui.start_projection =
@@ -1112,7 +1244,9 @@ impl RustGisApp {
                     }
                 }
                 return Ok(serde_json::json!({
-                    "blank": self.ui.start_blank,
+                    "blank": self.ui.start_with == StartWith::Blank,
+                    "project": self.ui.start_with.json(),
+                    "lastProject": self.ui.last_project,
                     "projection": if self.ui.start_projection.is_empty() { "mercator" } else { self.ui.start_projection.as_str() },
                     "extent": self.ui.start_extent,
                 }));

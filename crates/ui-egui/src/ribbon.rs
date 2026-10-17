@@ -2770,16 +2770,51 @@ fn settings_tab(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Start-up", |ui| start_project_menu(app, ui));
 }
 
-/// Settings › Start-up › Start With: the World Atlas sample or an empty project.
+/// Settings › Start-up › Start With: the World Atlas sample, an empty project, or (in the
+/// desktop app) a project picked once or the last one opened or saved (#377).
 fn start_project_menu(app: &mut RustGisApp, ui: &mut Ui) {
-    let blank = app.ui.start_blank;
-    let current = if blank { tl!("Blank Map") } else { tl!("World Atlas") };
+    use crate::StartWith;
+    let with = app.ui.start_with.clone();
+    let file_name = |p: &str| std::path::Path::new(p).file_name().map_or_else(|| p.to_string(), |n| n.to_string_lossy().into_owned());
+    let current = match &with {
+        StartWith::Sample => tl!("World Atlas").to_string(),
+        StartWith::Blank => tl!("Blank Map").to_string(),
+        StartWith::Last => tl!("Last Project").to_string(),
+        StartWith::File(p) => file_name(p),
+    };
     let label = format!("{}\n{current}", tl!("Start With"));
-    big_menu(ui, app, "map", &label, "What RustGIS opens with: the World Atlas sample or a blank map.", move |ui, app| {
-        for (b, name) in [(false, tl!("World Atlas")), (true, tl!("Blank Map"))] {
-            if ui.add(egui::Button::selectable(blank == b, name)).clicked() {
-                let _ = app.run("ui.startup", json!({"blank": b}));
+    let files = !cfg!(target_arch = "wasm32") && app.services.open_async.is_none();
+    let tip = if files {
+        "What RustGIS opens with: the World Atlas sample, a blank map, a project you pick, or the last project opened or saved."
+    } else {
+        "What RustGIS opens with: the World Atlas sample or a blank map."
+    };
+    big_menu(ui, app, "map", &label, tip, move |ui, app| {
+        for (w, name) in [(StartWith::Sample, tl!("World Atlas")), (StartWith::Blank, tl!("Blank Map"))] {
+            if ui.add(egui::Button::selectable(with == w, name)).clicked() {
+                let _ = app.run("ui.startup", json!({"project": w.json()}));
                 ui.close();
+            }
+        }
+        if !files {
+            return;
+        }
+        let last = app.ui.last_project.clone();
+        let hint = last.clone().unwrap_or_else(|| tl!("No project opened or saved yet").to_string());
+        if ui.add(egui::Button::selectable(with == StartWith::Last, tl!("Last Project"))).on_hover_text(hint).clicked() {
+            let _ = app.run("ui.startup", json!({"project": "last"}));
+            ui.close();
+        }
+        let picked = match &with {
+            StartWith::File(p) => format!("{} ({})", tl!("A Project…"), file_name(p)),
+            _ => tl!("A Project…").to_string(),
+        };
+        if ui.add(egui::Button::selectable(matches!(with, StartWith::File(_)), picked)).clicked() {
+            ui.close();
+            if let Some(path) = crate::dialogs::pick_open(&["rgis", "rgisx"], tl!("RustGIS project"))
+                && let Err(e) = app.run("ui.startup", json!({"project": {"path": path}}))
+            {
+                app.session.notify(e, true);
             }
         }
     });

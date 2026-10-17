@@ -540,7 +540,7 @@ fn start_up_preferences() {
     let mut app = RustGisApp::with_sample().with_services(services());
     assert!(app.run("ui.startup", json!({"projection": "nope"})).is_err());
     let r = app.run("ui.startup", json!({"blank": true, "projection": "epsg:3010"})).unwrap();
-    assert_eq!(r, json!({"blank": true, "projection": "EPSG:3010", "extent": null}));
+    assert_eq!(r, json!({"blank": true, "project": "blank", "lastProject": null, "projection": "EPSG:3010", "extent": null}));
     assert_eq!(store.lock().unwrap().get("start_project").map(String::as_str), Some("blank"));
 
     let mut app = RustGisApp::with_sample().with_services(services());
@@ -583,6 +583,81 @@ fn start_up_preferences() {
     // Web Mercator is the default, stored as nothing.
     app.run("ui.startup", json!({"blank": false, "projection": "mercator"})).unwrap();
     assert_eq!(store.lock().unwrap().get("start_projection").map(String::as_str), Some(""));
+}
+
+/// Settings › Start-up › Start With a project (#377): the last one opened or saved, or one picked
+/// once. It opens with its own projection and view, a shell's `blank` still wins, and one that no
+/// longer opens leaves the sample with a notice.
+#[test]
+fn start_with_a_project_file_or_the_last_one() {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    let store: Arc<Mutex<HashMap<String, String>>> = Arc::default();
+    let services = || {
+        let (load, save) = (store.clone(), store.clone());
+        rustgis_ui_egui::Services {
+            load_pref: Some(Box::new(move |k| load.lock().unwrap().get(k).cloned())),
+            save_pref: Some(Box::new(move |k, v| {
+                save.lock().unwrap().insert(k.to_string(), v.to_string());
+            })),
+            ..Default::default()
+        }
+    };
+    let dir = std::env::temp_dir().join(format!("rustgis-start-with-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("a.rgis"), dir.join("b.rgis"));
+    let shown = |p: &std::path::Path| p.display().to_string();
+
+    // Saving records the last project, by its full path.
+    let mut app = RustGisApp::with_sample().with_services(services());
+    app.run("project.saveAs", json!({"path": shown(&a)})).unwrap();
+    assert_eq!(store.lock().unwrap().get("last_project"), Some(&shown(&a)));
+    let saved_projection = app.session.map().projection.code();
+    // Last Project opens it, with its own projection rather than the Start-up one.
+    let r = app.run("ui.startup", json!({"project": "last", "projection": "robinson"})).unwrap();
+    assert_eq!((r["project"].clone(), r["lastProject"].clone()), (json!("last"), json!(shown(&a))));
+    assert_eq!(store.lock().unwrap().get("start_project").map(String::as_str), Some("last"));
+    let mut started = RustGisApp::with_sample().with_services(services());
+    started.start(&Default::default()).unwrap();
+    assert_eq!(started.session.path.as_deref(), Some(a.as_path()));
+    assert_eq!(started.session.map().projection.code(), saved_projection);
+    assert!(!started.session.dirty && !started.session.can_undo());
+    // A shell's blank wins (a file on the command line).
+    let mut shell = RustGisApp::with_sample().with_services(services());
+    shell.start(&rustgis_ui_egui::Start { blank: Some(true), ..Default::default() }).unwrap();
+    assert!(shell.session.path.is_none() && shell.session.map().layers.is_empty());
+
+    // A picked project: it must be a .rgis that is there.
+    std::fs::write(dir.join("notes.txt"), "x").unwrap();
+    for bad in [
+        json!({"path": shown(&dir.join("notes.txt"))}),
+        json!({"path": shown(&dir.join("missing.rgis"))}),
+        json!({"path": ""}),
+        json!(5),
+        json!("nope"),
+    ] {
+        assert!(app.run("ui.startup", json!({"project": bad})).is_err(), "{bad}");
+    }
+    assert_eq!(store.lock().unwrap().get("start_project").map(String::as_str), Some("last"), "a refusal changes nothing");
+    app.run("project.saveAs", json!({"path": shown(&b)})).unwrap();
+    let r = app.run("ui.startup", json!({"project": {"path": shown(&a)}})).unwrap();
+    assert_eq!(r["project"], json!({"path": shown(&a)}));
+    let mut started = RustGisApp::with_sample().with_services(services());
+    assert_eq!(started.ui.last_project, Some(shown(&b)));
+    started.start(&Default::default()).unwrap();
+    assert_eq!(started.session.path.as_deref(), Some(a.as_path()), "the picked project, not the last one");
+
+    // A project that no longer opens leaves the sample, says why, and is tried again next time.
+    std::fs::remove_file(&a).unwrap();
+    let mut started = RustGisApp::with_sample().with_services(services());
+    started.start(&Default::default()).unwrap();
+    assert!(started.session.path.is_none() && !started.session.map().layers.is_empty());
+    assert!(started.session.notices.iter().any(|n| n.error && n.text.contains("a.rgis")), "{:?}", started.session.notices);
+    assert_eq!(store.lock().unwrap().get("start_project"), Some(&format!("file:{}", shown(&a))));
+    // Back to the sample, as `blank` still says.
+    app.run("ui.startup", json!({"blank": false})).unwrap();
+    assert_eq!(store.lock().unwrap().get("start_project").map(String::as_str), Some("sample"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
