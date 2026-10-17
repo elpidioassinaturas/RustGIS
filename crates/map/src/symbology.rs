@@ -396,7 +396,7 @@ impl Renderer {
                     .zip(symbols)
                     .enumerate()
                     .map(|(i, (b, s))| {
-                        let label = class_labels.get(&i).cloned().unwrap_or_else(|| format!("{} – {}", fmt_num(lo), fmt_num(*b)));
+                        let label = class_labels.get(&i).cloned().unwrap_or_else(|| range_label(lo, *b));
                         lo = *b;
                         LegendEntry { label, symbol: *s, fallback: false }
                     })
@@ -456,7 +456,8 @@ impl Renderer {
                 if let Some((k, s)) = classes.get_mut(i) {
                     restyle(s);
                     match label {
-                        Some(t) if t.is_empty() => {
+                        // Empty, or the value itself: the class shows its value, with no label of its own.
+                        Some(t) if t.is_empty() || t == *k => {
                             class_labels.remove(k.as_str());
                         }
                         Some(t) => {
@@ -470,16 +471,19 @@ impl Renderer {
             (Renderer::Unique { classes, other, other_label, .. }, ClassRef::Other) => {
                 restyle(other);
                 if let Some(t) = label {
-                    *other_label = (!t.is_empty()).then_some(t);
+                    *other_label = (!t.is_empty() && t != OTHER_VALUES).then_some(t);
                 }
                 classes.len()
             }
-            (Renderer::Graduated { symbols, class_labels, .. }, ClassRef::Index(i)) => {
+            (Renderer::Graduated { symbols, class_labels, breaks, min, .. }, ClassRef::Index(i)) => {
+                // The range the class shows when it has no label of its own.
+                let lo = if *i == 0 { Some(*min) } else { breaks.get(*i - 1).copied() };
+                let range = lo.zip(breaks.get(*i).copied()).map(|(lo, hi)| range_label(lo, hi));
                 let n = symbols.len();
                 let s = symbols.get_mut(*i).ok_or_else(|| format!("no class {i}: this renderer has {n} (0 to {})", n.saturating_sub(1)))?;
                 restyle(s);
                 match label {
-                    Some(t) if t.is_empty() => {
+                    Some(t) if t.is_empty() || Some(&t) == range.as_ref() => {
                         class_labels.remove(i);
                     }
                     Some(t) => {
@@ -600,6 +604,11 @@ pub fn normalize_label(t: &str) -> String {
 /// A Unique Values class's legend label: the one set by hand, or its value.
 fn unique_label(class_labels: &BTreeMap<String, String>, value: &str) -> String {
     class_labels.get(value).cloned().unwrap_or_else(|| value.to_string())
+}
+
+/// A Graduated Colors class's legend label when it has none of its own: its range.
+fn range_label(lo: f64, hi: f64) -> String {
+    format!("{} – {}", fmt_num(lo), fmt_num(hi))
 }
 
 /// Compact number formatting for legends: 1.2M, 35K, 0.42.
@@ -1011,6 +1020,13 @@ mod tests {
             d.push(None, vec![Value::Text(v.into())]);
         }
         assert_eq!(r.legend_for(&d, &[]).into_iter().map(|e| e.label).collect::<Vec<_>>(), ["Bee", "Others"]);
+        // A label that is the value itself (or <all other values>) is no label of its own.
+        r.set_class_style(&ClassRef::Value("b".into()), &style(None, None, Some("b")), g).unwrap();
+        assert!(matches!(&r, Renderer::Unique { class_labels, .. } if class_labels.is_empty()));
+        r.set_class_style(&ClassRef::Value("b".into()), &style(None, None, Some("Bee")), g).unwrap();
+        r.set_class_style(&ClassRef::Other, &style(None, None, Some(OTHER_VALUES)), g).unwrap();
+        assert!(matches!(&r, Renderer::Unique { other_label: None, .. }));
+        r.set_class_style(&ClassRef::Other, &style(None, None, Some("Others")), g).unwrap();
         // An empty (or blank) label goes back to the value.
         r.set_class_style(&ClassRef::Value("b".into()), &style(None, None, Some("")), g).unwrap();
         r.set_class_style(&ClassRef::Other, &style(None, None, Some("  ")), g).unwrap();
@@ -1031,6 +1047,8 @@ mod tests {
         let e = gr.set_class_style(&ClassRef::Index(1), &style(Some(red), None, Some("High")), g).unwrap();
         assert_eq!((e.label.as_str(), e.symbol), ("High", s(1).with_fill(red, g)));
         assert_eq!(labels_of(&gr), ["0 – 10", "High"]);
+        gr.set_class_style(&ClassRef::Index(0), &style(None, None, Some("0 – 10")), g).unwrap();
+        assert!(matches!(&gr, Renderer::Graduated { class_labels, .. } if !class_labels.contains_key(&0)), "the range itself is no label");
         assert!(gr.set_class_style(&ClassRef::Index(2), &style(None, None, Some("x")), g).is_err());
         assert!(gr.set_class_style(&ClassRef::Other, &style(None, None, Some("x")), g).is_err());
         // A very long label is cut.

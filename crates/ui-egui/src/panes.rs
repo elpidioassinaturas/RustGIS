@@ -2539,7 +2539,9 @@ struct ClassColorDrag {
 }
 
 fn finish_class_color_drag(app: &mut RustGisApp, ui: &Ui) {
-    if ui.input(|i| i.pointer.primary_down()) {
+    // Still dragging: the pointer is down and the window has focus (a release outside a window
+    // that lost focus may never arrive).
+    if ui.input(|i| i.pointer.primary_down() && i.focused) {
         return;
     }
     let key = egui::Id::new(CLASS_COLOR_DRAG);
@@ -2670,8 +2672,17 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     if r.lost_focus() {
                         ui.data_mut(|d| d.remove::<String>(typing));
                         // Compared as the command keeps labels: spaces, a pasted line break or a
-                        // cut alone are no change.
-                        if normalize_label(&buf) != normalize_label(&e.label) && !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        // cut alone are no change, and neither is clearing a class with no label
+                        // of its own.
+                        let text = normalize_label(&buf);
+                        let has_label = match (&l.renderer, class_ref) {
+                            (Renderer::Unique { class_labels, .. }, ClassRef::Value(v)) => class_labels.contains_key(v),
+                            (Renderer::Unique { other_label, .. }, ClassRef::Other) => other_label.is_some(),
+                            (Renderer::Graduated { class_labels, .. }, ClassRef::Index(i)) => class_labels.contains_key(i),
+                            _ => false,
+                        };
+                        let changed = text != normalize_label(&e.label) && (has_label || !text.is_empty());
+                        if changed && !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             let _ = app.run("layer.classStyle", with("label", json!(buf)));
                         }
                     } else if r.has_focus() {
