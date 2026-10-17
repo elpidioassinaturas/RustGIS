@@ -2016,8 +2016,12 @@ fn class_style(s: &mut Session, p: &Value) -> CmdResult {
         (None, None, true) => ClassRef::Other,
         _ => return Err("name one class: value (Unique Values), index (Graduated Colors) or other: true".into()),
     };
-    let style =
-        ClassStyle { color: s.get_color(p, "color")?, outline: s.get_color(p, "outline")?, label: ps(p, "label").map(str::to_string) };
+    let label = match p.get("label") {
+        None => None,
+        Some(Value::String(t)) => Some(t.clone()),
+        Some(_) => return Err("label must be a text (an empty one goes back to the value or range)".into()),
+    };
+    let style = ClassStyle { color: s.get_color(p, "color")?, outline: s.get_color(p, "outline")?, label };
     if style == ClassStyle::default() {
         return Err("nothing to change: give a color, an outline or a label".into());
     }

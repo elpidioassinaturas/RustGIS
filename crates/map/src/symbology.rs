@@ -505,11 +505,11 @@ impl Renderer {
     /// Carries hand-made class edits over from `old` when the symbology is applied again (#314).
     /// On the same field, a class that is still there keeps its legend label (a Graduated Colors
     /// class keeps its edits only while the ranges are the same: they belong to a range). With the
-    /// same colour scheme too,
-    /// it keeps the colour and outline set by hand: those that aren't what the scheme gave it at
-    /// its place in `old` (see [`carry_class`]). The other classes take the new scheme's colours
-    /// at their new places, on the new base symbol. A different scheme recolours every class
-    /// (picking a scheme is asking for its colours); a different field starts fresh.
+    /// same colour scheme too, it keeps the colour and outline set by hand: those that aren't what
+    /// the scheme gave it at its place in `old` (see [`carry_class`]). The other classes take the
+    /// new scheme's colours at their new places, on the new base symbol. A different scheme
+    /// recolours every class (picking a scheme is asking for its colours); a different field
+    /// starts fresh.
     pub fn carry_edits_from(&mut self, old: &Renderer, g: GeometryType) {
         match (self, old) {
             (
