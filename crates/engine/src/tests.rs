@@ -550,6 +550,8 @@ Line two."
     // Neither changes nothing (which would leave an undo step).
     let depth = s.undo_depth();
     assert!(s.run("task.moveStep", &json!({"task": "Lesson", "step": 1, "to": 1})).is_err());
+    let bad = s.run("task.removeStep", &json!({"task": "Lesson", "step": -1})).unwrap_err();
+    assert!(bad.contains("whole number"), "{bad}");
     assert!(s.run("task.editStep", &json!({"task": "Lesson", "step": 1})).is_err());
     let same = s.project.tasks.iter().find(|t| t.name == "Lesson").unwrap().steps[1].title.clone();
     assert!(s.run("task.editStep", &json!({"task": "Lesson", "step": 1, "title": format!(" {same} ")})).is_err());

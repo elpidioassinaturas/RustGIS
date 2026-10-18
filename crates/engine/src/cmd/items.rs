@@ -607,7 +607,10 @@ fn task_ref<'a>(s: &'a Session, p: &Value) -> Result<&'a Task, String> {
 /// A step's index from `step` (from 0).
 fn step_index(p: &Value) -> Result<usize, String> {
     // Checked: on wasm32 `as usize` would wrap a large number round to a small, valid index.
-    p.get("step").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()).ok_or_else(|| "step is required".to_string())
+    match p.get("step") {
+        None | Some(Value::Null) => Err("step is required".to_string()),
+        Some(v) => v.as_u64().and_then(|i| usize::try_from(i).ok()).ok_or_else(|| format!("step must be a whole number from 0, not {v}")),
+    }
 }
 
 fn task_mut<'a>(s: &'a mut Session, p: &Value) -> Result<&'a mut Task, String> {
