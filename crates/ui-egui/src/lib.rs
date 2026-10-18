@@ -1233,10 +1233,6 @@ impl RustGisApp {
         r
     }
 
-    /// Record Task: adds a command that ran from the app and changed the project as a step. Not
-    /// panes and dialogs (`ui.*`), tasks themselves, or what only moves the view. A colour, outline
-    /// or transparency set again on the same layer (dragged in its picker) updates the step it just
-    /// made.
     /// The name of the active layer, when command `id` would act on it for want of a `layer`:
     /// it takes a `layer` and needs an active one to be enabled, or is one of those that
     /// default to it while enabled without one. Elsewhere `layer` names something else (a file's
@@ -1259,6 +1255,11 @@ impl RustGisApp {
         active.and_then(|l| self.session.map().layer(l)).map(|l| l.name.clone())
     }
 
+    /// Record Task: adds a command that ran from the app and changed the project as a step. Not
+    /// panes and dialogs (`ui.*`), tasks themselves, or what only moves the view. A colour, outline
+    /// or transparency set again on the same layer (dragged in its picker) updates the step it just
+    /// made.
+    /// `active` is the active layer's name from [`Self::layer_acted_on`], read before it ran.
     fn record_step(&mut self, id: &str, params: &Value, active: Option<String>) {
         let Some(steps) = self.ws.recording.as_mut() else { return };
         // Undo doesn't take back a recorded step (the undo history and the recording don't line

@@ -39,7 +39,8 @@ pub fn start(app: &mut RustGisApp, st: &TaskStep) -> String {
     if matches!(id, "layer.color" | "layer.outline" | "layer.symbology" | "layer.transparency") {
         // Making the step's layer the active one is what shows its symbology. It runs on the
         // session directly, so a recording doesn't keep it as a step.
-        if let Some(layer) = st.params.get("layer")
+        // A null layer (a task from a file may hold one) is the active layer, as the command reads it.
+        if let Some(layer) = st.params.get("layer").filter(|v| !v.is_null())
             && app.session.run("layer.select", &json!({"layer": layer})).is_err()
         {
             let name = layer.as_str().map_or_else(|| layer.to_string(), str::to_string);
