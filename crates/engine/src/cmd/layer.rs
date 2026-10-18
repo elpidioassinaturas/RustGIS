@@ -65,23 +65,8 @@ pub fn commands() -> Vec<C> {
                     l.mask = Some(n.clone());
                 }
             }
-            // So do legends that leave it out, in the frames that show this map.
-            let map = s.map().name.clone();
-            for layout in &mut s.project.layouts {
-                let frames: Vec<u32> = layout
-                    .elements
-                    .iter()
-                    .filter(|e| matches!(&e.kind, rustgis_map::layout::ElementKind::MapFrame { map: m, .. } if *m == map))
-                    .map(|e| e.id)
-                    .collect();
-                for e in &mut layout.elements {
-                    if let rustgis_map::layout::ElementKind::Legend { frame, exclude, .. } = &mut e.kind
-                        && frames.contains(frame)
-                    {
-                        exclude.iter_mut().filter(|x| x.eq_ignore_ascii_case(&old)).for_each(|x| x.clone_from(&n));
-                    }
-                }
-            }
+            // So do legends that leave it out.
+            legends_follow_layer(s, &old, Some(&n));
             Ok(r)
         }).params(r#"{"layer"?, "name": string}"#)
         .when(need_layer),
@@ -2081,8 +2066,37 @@ fn add_sample(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"layer": id}))
 }
 
+/// Legends that leave out layer `old` of the active map, in the frames that show it, follow it:
+/// to its new name, or (`None`, the layer deleted) by dropping it, so a later layer of that name
+/// isn't left out unasked.
+fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>) {
+    let map = s.map().name.clone();
+    for layout in &mut s.project.layouts {
+        let frames: Vec<u32> = layout
+            .elements
+            .iter()
+            .filter(|e| matches!(&e.kind, rustgis_map::layout::ElementKind::MapFrame { map: m, .. } if *m == map))
+            .map(|e| e.id)
+            .collect();
+        for e in &mut layout.elements {
+            if let rustgis_map::layout::ElementKind::Legend { frame, exclude, .. } = &mut e.kind
+                && frames.contains(frame)
+            {
+                match new {
+                    Some(n) => exclude.iter_mut().filter(|x| x.eq_ignore_ascii_case(old)).for_each(|x| *x = n.to_string()),
+                    None => exclude.retain(|x| !x.eq_ignore_ascii_case(old)),
+                }
+            }
+        }
+    }
+}
+
 fn remove(s: &mut Session, p: &Value) -> CmdResult {
     let id = s.layer_id(p)?;
+    // A legend that left it out forgets it.
+    if let Some(name) = s.map().layer(id).map(|l| l.name.clone()) {
+        legends_follow_layer(s, &name, None);
+    }
     let m = s.map_mut();
     let i = m.layer_index(id).ok_or("no such layer")?;
     m.layers.remove(i);

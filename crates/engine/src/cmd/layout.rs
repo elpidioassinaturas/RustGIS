@@ -697,8 +697,6 @@ fn text_style(p: &Value, italic: bool, align: TextAlign, spacing: f64) -> Result
     Ok((italic, align, spacing))
 }
 
-/// A north arrow or scale bar with the options in `p` over `kind`'s; `None` for other elements
-/// or when `p` has none. A bad value is an error, leaving nothing changed.
 /// A legend's `exclude` from `p`: the names of layers in its frame's map, as the map spells them;
 /// `None` when not given. Not a list of names, or a name the map hasn't, is an error.
 fn legend_exclude(s: &Session, l: &Layout, frame: u32, p: &Value) -> Result<Option<Vec<String>>, String> {
@@ -720,6 +718,8 @@ fn legend_exclude(s: &Session, l: &Layout, frame: u32, p: &Value) -> Result<Opti
     Ok(Some(out))
 }
 
+/// A north arrow or scale bar with the options in `p` over `kind`'s; `None` for other elements
+/// or when `p` has none. A bad value is an error, leaving nothing changed.
 fn restyle(kind: &ElementKind, p: &Value) -> Result<Option<ElementKind>, String> {
     match kind {
         ElementKind::NorthArrow { frame, style, fill, outline } => {

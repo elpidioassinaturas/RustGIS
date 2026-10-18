@@ -8950,7 +8950,11 @@ fn legends_leave_layers_out() {
     assert_eq!(left_out(&s, lakes), ["Rios"]);
     let back: rustgis_map::layout::Layout = serde_json::from_str(&serde_json::to_string(&s.project.layouts[0]).unwrap()).unwrap();
     assert!(back.element(lakes).is_some_and(|e| matches!(&e.kind, ElementKind::Legend { exclude, .. } if exclude == &["Rios"])));
+    // Deleting the layer drops it from the list, so a later layer of that name is listed.
+    s.run("layer.remove", &json!({"layer": "Rios"})).unwrap();
+    assert!(left_out(&s, lakes).is_empty());
     // An empty list lists every layer again.
+    s.run("layout.update", &json!({"element": lakes, "exclude": ["Lakes"]})).unwrap();
     s.run("layout.update", &json!({"element": lakes, "exclude": []})).unwrap();
     assert!(left_out(&s, lakes).is_empty());
 }
