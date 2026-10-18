@@ -179,16 +179,18 @@ pub fn styled_at(pm: &mut Pixmap, text: &str, left: f32, cy: f32, px: f32, color
         let bb = og.px_bounds();
         og.draw(|gx, gy, cov| {
             let (px_x, px_y) = (bb.min.x + gx as f32, bb.min.y + gy as f32);
+            // (Floored, so a row just above or left of the pixmap is clipped, not drawn on row 0.)
+            let row = px_y.floor() as i32;
             if !italic {
-                blend(pm, px_x as i32, px_y as i32, color, cov);
+                blend(pm, px_x.floor() as i32, row, color, cov);
                 return;
             }
             // Each row leans right by its height above the baseline, split across the two
             // pixels it falls between so the slant stays smooth.
             let shifted = px_x + SLANT * (base - px_y - 0.5);
             let (ix, frac) = (shifted.floor(), shifted - shifted.floor());
-            blend(pm, ix as i32, px_y as i32, color, cov * (1.0 - frac));
-            blend(pm, ix as i32 + 1, px_y as i32, color, cov * frac);
+            blend(pm, ix as i32, row, color, cov * (1.0 - frac));
+            blend(pm, ix as i32 + 1, row, color, cov * frac);
         });
     }
 }
