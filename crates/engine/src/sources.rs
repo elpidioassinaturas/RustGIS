@@ -322,8 +322,11 @@ fn looks_like_a_key(t: &str) -> bool {
     };
     let classes: Vec<Option<Class>> = t.chars().map(class).collect();
     let alnum = classes.iter().filter(|c| c.is_some()).count();
-    // Changes between two letters or digits side by side (a separator breaks the pair).
-    let changes = classes.windows(2).filter(|w| matches!(w, [Some(a), Some(b)] if a != b)).count();
+    // Changes between two letters or digits side by side (a separator breaks the pair). An upper
+    // case letter followed by lower case is a capitalised word going on (`Land` in camelCase), so
+    // each word boundary counts once, at its capital.
+    let changes =
+        classes.windows(2).filter(|w| matches!(w, [Some(a), Some(b)] if a != b && !(*a == Class::Upper && *b == Class::Lower))).count();
     t.chars().count() >= 20 && !t.contains(char::is_whitespace) && changes * 10 >= alnum * 3
 }
 
@@ -554,6 +557,8 @@ MIIE
             "parcel_id",
             "municipality_code_2020",
             "municipalityCode2020Total",
+            "parcelLandUseAreaCode2020",
+            "ParcelLandUseAreaCode",
             "CD_MUN",
             "nome do município com espaços longos",
             "area_2010_2020_km2_total",
