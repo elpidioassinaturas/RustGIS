@@ -1024,8 +1024,23 @@ mod tests {
                     dirs.push(path);
                 } else if path.extension().is_some_and(|e| e == "rs") {
                     let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
-                    // The tests (this one reads files) are the `mod tests` closing each file.
-                    let code = text.split("#[cfg(test)]\nmod ").next().unwrap_or_default();
+                    // The tests (this one reads files) are the `mod tests` closing each file. Held to
+                    // that, so nothing is skipped unseen: the first `#[cfg(test)]` opens it, and its
+                    // closing brace (the first `}` at the start of a line) ends the file.
+                    let code = match text.find("#[cfg(test)]") {
+                        None => text.as_str(),
+                        Some(at) => {
+                            let (code, tests) = text.split_at(at);
+                            assert!(
+                                tests.starts_with("#[cfg(test)]\nmod tests {"),
+                                "{}: a `#[cfg(test)]` before its `mod tests`",
+                                path.display()
+                            );
+                            let end = tests.find("\n}").map_or(tests.len(), |i| i + 2);
+                            assert!(tests[end..].trim().is_empty(), "{}: code after its `mod tests`", path.display());
+                            code
+                        }
+                    };
                     // The standard library's files and paths, and rustgis-data's writers that take a path
                     // (its byte writers, such as GeoTIFF's, return bytes and are fine).
                     let reaches =
