@@ -2104,7 +2104,7 @@ impl RustGisApp {
                 Some(steps) => {
                     let name = p.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Recorded Task");
                     let n = steps.len();
-                    let r = match self.session.run("task.new", &json!({"name": name, "steps": steps.clone()})) {
+                    let r = match self.session.run("task.new", &json!({"name": name, "steps": &steps})) {
                         Ok(r) => r,
                         Err(e) => {
                             // The exercise stays recorded: stopping again tries again.

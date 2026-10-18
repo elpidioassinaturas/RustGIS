@@ -33,7 +33,9 @@ Tools for working across maps and views, and for setting up the app the way you 
     menu.
   - A task from a file (`.rgistask`, or inside a project or a package) can't read or write files
     or run scripts. Its built-in analysis tools may still name their output layers with a plain
-    name (no folder, extension or drive); GeoLibre and plugin tools' outputs are refused.
+    name: one with `/`, `\`, `.` or `:` (a folder, an extension or a drive) makes the task count
+    as writing files, so write `Buffer 1500 m` rather than `Buffer 1.5 km`. GeoLibre and plugin
+    tools' outputs are refused.
 - **Thumbnails** for the project and for each map, from the view or an image.
 - **Animation**: add keyframes (views), play them, and export the moves as PNG frames.
 - **Profile**: elevation profiles along clicked points or selected lines, auto-completed to the
