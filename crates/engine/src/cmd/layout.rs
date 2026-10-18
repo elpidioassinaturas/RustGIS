@@ -671,8 +671,6 @@ fn edges(v: &Value) -> Result<GridEdges, String> {
     Ok(e)
 }
 
-/// A north arrow or scale bar with the options in `p` over `kind`'s; `None` for other elements
-/// or when `p` has none. A bad value is an error, leaving nothing changed.
 /// A text element's italic, alignment and letter spacing (points) from `italic`, `align` and
 /// `letterSpacing` in `p`, each keeping the current one when not given; one given but not of its
 /// kind is an error.
@@ -698,6 +696,8 @@ fn text_style(p: &Value, italic: bool, align: TextAlign, spacing: f64) -> Result
     Ok((italic, align, spacing))
 }
 
+/// A north arrow or scale bar with the options in `p` over `kind`'s; `None` for other elements
+/// or when `p` has none. A bad value is an error, leaving nothing changed.
 fn restyle(kind: &ElementKind, p: &Value) -> Result<Option<ElementKind>, String> {
     match kind {
         ElementKind::NorthArrow { frame, style, fill, outline } => {

@@ -1048,7 +1048,10 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                 ui.end_row();
                 ui.label(tl!("Italic"));
                 let mut it = *italic;
-                if ui.checkbox(&mut it, "").changed() {
+                // Named for assistive technology, as its label sits in the other column.
+                let r = ui.checkbox(&mut it, "");
+                r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, it, tl!("Italic")));
+                if r.changed() {
                     update(app, json!({"italic": it}));
                 }
                 ui.end_row();
@@ -1066,6 +1069,10 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                 let r = ui.add(
                     egui::DragValue::new(&mut ls).range(MIN_LETTER_SPACING..=MAX_LETTER_SPACING).speed(0.1).max_decimals(1).suffix(" pt"),
                 );
+                r.widget_info(|| egui::WidgetInfo {
+                    label: Some(tl!("Letter spacing").to_string()),
+                    ..egui::WidgetInfo::drag_value(true, ls)
+                });
                 if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && (ls - letter_spacing).abs() > 1e-6 {
                     update(app, json!({"letterSpacing": ls}));
                 }
@@ -1538,7 +1545,7 @@ mod tests {
     /// A text element's properties set italic, alignment and letter spacing (#213, point c).
     #[test]
     fn a_text_element_takes_italic_alignment_and_spacing() {
-        use egui_kittest::kittest::Queryable;
+        use egui_kittest::kittest::{NodeT, Queryable};
         use rustgis_engine::map::layout::{ElementKind, TextAlign};
         let mut app = RustGisApp::with_sample();
         app.run("layout.new", json!({"name": "Type"})).unwrap();
@@ -1558,15 +1565,24 @@ mod tests {
             app,
         );
         h.run_steps(3);
-        for control in ["Italic", "Alignment", "Letter spacing"] {
-            assert!(h.query_by_label(control).is_some(), "{control} is in the text's properties");
-        }
-        // A script's change reaches the panel's element, which draws on.
-        h.state_mut().run("layout.update", json!({"element": title, "align": "right", "italic": true})).unwrap();
+        use egui::accesskit::{Action, ActionData, ActionRequest, Role};
+        assert!(h.query_by_label("Alignment").is_some());
+        // Ticking Italic, and setting the spacing as assistive technology does, store them.
+        h.get_by_role_and_label(Role::CheckBox, "Italic").click();
         h.run_steps(2);
-        assert!(h.query_by_label("Letter spacing").is_some());
+        let (node, tree) = h.get_by_role_and_label(Role::SpinButton, "Letter spacing").accesskit_node().locate();
+        h.event(egui::Event::AccessKitActionRequest(ActionRequest {
+            action: Action::SetValue,
+            target_tree: tree,
+            target_node: node,
+            data: Some(ActionData::NumericValue(3.5)),
+        }));
+        h.run_steps(3);
         let kind = &h.state().session.project.layouts[li].element(title).unwrap().kind;
-        assert!(matches!(kind, ElementKind::Text { italic: true, align: TextAlign::Right, .. }), "{kind:?}");
+        assert!(
+            matches!(kind, ElementKind::Text { italic: true, align: TextAlign::Left, letter_spacing, .. } if *letter_spacing == 3.5),
+            "{kind:?}"
+        );
     }
 
     /// An overview frame's properties show its extent indicator's colour and width (#213), and

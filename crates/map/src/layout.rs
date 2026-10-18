@@ -628,12 +628,12 @@ fn rows() -> usize {
 }
 
 impl ElementKind {
-    /// A north arrow for `frame`, in the default style.
     /// A text element in the plain style: upright, left-aligned, normally spaced.
     pub fn text(text: impl Into<String>, size: f64, color: Rgba, bold: bool) -> ElementKind {
         ElementKind::Text { text: text.into(), size, color, bold, italic: false, align: TextAlign::Left, letter_spacing: 0.0 }
     }
 
+    /// A north arrow for `frame`, in the default style.
     pub fn north_arrow(frame: u32) -> ElementKind {
         ElementKind::NorthArrow { frame, style: ArrowStyle::default(), fill: ink(), outline: ink() }
     }

@@ -953,7 +953,6 @@ fn colorbar(pm: &mut Pixmap, r: Rect, scale: &ColorScale, bar: &Bar, ppp: f64) {
     }
 }
 
-/// Text in an element: lines split at `\n`, left-aligned from the top.
 /// How a text element's lines are drawn, beyond their size and colour.
 #[derive(Clone, Copy)]
 struct TextStyle {
@@ -964,6 +963,7 @@ struct TextStyle {
     spacing: f32,
 }
 
+/// Text in an element: lines split at `\n` from the top, each placed by the style's alignment.
 fn text_block(pm: &mut Pixmap, r: Rect, s: &str, size: f32, color: Rgba, style: TextStyle, ppp: f64) {
     let px = size.clamp(2.0, 400.0) * 1.33 * ppp as f32;
     // Letter spacing is in points, as the size is.
@@ -973,11 +973,15 @@ fn text_block(pm: &mut Pixmap, r: Rect, s: &str, size: f32, color: Rgba, style: 
         if y > r.y() + r.height() + px {
             break;
         }
-        let w = text::styled_width(line, px, style.bold, spacing);
+        // Centred and right-aligned lines are placed by the ink they draw (italic overhang and a
+        // negative spacing included), which an advance doesn't measure; left-aligned ones start
+        // at the edge as plain text always has.
+        let (ink_left, ink_right) = text::styled_extent(line, px, style.bold, style.italic, spacing);
+        let ink = ink_right - ink_left;
         let left = match style.align {
             TextAlign::Left => r.x(),
-            TextAlign::Center => r.x() + (r.width() - w) / 2.0,
-            TextAlign::Right => r.x() + r.width() - w,
+            TextAlign::Center => r.x() + (r.width() - ink) / 2.0 - ink_left,
+            TextAlign::Right => r.x() + r.width() - ink - ink_left,
         };
         text::styled_at(pm, line, left, y, px, color, style.bold, style.italic, spacing);
         y += px * 1.25;
@@ -1300,7 +1304,7 @@ mod tests {
         assert_eq!(text_ink(&old).1.abs_diff(r), 0);
         // Right and centre: the same width, moved.
         let (rl, rr, ..) = text_ink(&styled_line(TextStyle { align: TextAlign::Right, ..plain }));
-        assert!(rr > 395 && (rr - rl).abs_diff(r - l) <= 1, "right-aligned ends at the right: {rl}..{rr}");
+        assert!((397..=399).contains(&rr) && (rr - rl).abs_diff(r - l) <= 1, "right-aligned ends at the right: {rl}..{rr}");
         let (cl, cr, ..) = text_ink(&styled_line(TextStyle { align: TextAlign::Center, ..plain }));
         assert!(cl.abs_diff(400 - cr) <= 2, "centred: {cl}..{cr}");
         // Spacing: 15 gaps of 3 pt widen the line by about 15 × 3 × 1.33 px.
@@ -1320,6 +1324,24 @@ mod tests {
         let ((upright, _), (lean, height)) = (stem(false), stem(true));
         assert!(upright.abs() <= 1, "upright stem: {upright}");
         assert!((lean as f32 - 0.2126 * height as f32).abs() <= 3.0, "lean {lean} over {height} px");
+        // Right-aligned, slanted or tightened past the letters' width, the ink stays in the box.
+        for style in
+            [TextStyle { align: TextAlign::Right, italic: true, ..plain }, TextStyle { align: TextAlign::Right, spacing: -5.0, ..plain }]
+        {
+            let mut pm = Pixmap::new(400, 60).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            let r = Rect::from_xywh(0.0, 0.0, 300.0, 60.0).unwrap();
+            text_block(&mut pm, r, "Oceano Atlântico", 20.0, Rgba::rgb(0, 0, 0), style, 1.0);
+            let (l, r, ..) = text_ink(&pm);
+            assert!((296..=300).contains(&r) && l < r, "inked {l}..{r} in a 300 px box");
+        }
+        // 2 pt letters at -5 pt run backwards: still drawn, inside the box.
+        let mut pm = Pixmap::new(400, 60).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let r = Rect::from_xywh(0.0, 0.0, 300.0, 60.0).unwrap();
+        text_block(&mut pm, r, "MMMM", 2.0, Rgba::rgb(0, 0, 0), TextStyle { align: TextAlign::Right, spacing: -5.0, ..plain }, 4.0);
+        let (l, r, ..) = text_ink(&pm);
+        assert!(r <= 300 && l < r, "inked {l}..{r}");
     }
 
     /// The extent indicator is drawn in its own colour and width (#213): red and 2 pt until set.

@@ -141,10 +141,24 @@ fn draw_text(pm: &mut Pixmap, text: &str, cx: f32, cy: f32, px_size: f32, color:
 /// slant an oblique.
 const SLANT: f32 = 0.2126;
 
-/// The width in pixels of `text` at `px` with `spacing` pixels added between letters.
-pub fn styled_width(text: &str, px: f32, bold: bool, spacing: f32) -> f32 {
-    let (glyphs, width) = shape(text, px, bold);
-    width + spacing * glyphs.len().saturating_sub(1) as f32
+/// The ink `text` draws at `px` with `spacing` and `italic`, from the pen's start: its leftmost
+/// and rightmost pixel offsets. With a negative spacing the letters can run backwards past the
+/// pen, and a slant moves their tops right and their descenders left; (0, 0) when nothing draws.
+pub fn styled_extent(text: &str, px: f32, bold: bool, italic: bool, spacing: f32) -> (f32, f32) {
+    let Some(f) = font(bold) else { return (0.0, 0.0) };
+    let sf = f.as_scaled(PxScale::from(px));
+    let base = (sf.ascent() + sf.descent()) / 2.0;
+    let (glyphs, _) = shape(text, px, bold);
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for (i, (f, id, x)) in glyphs.into_iter().enumerate() {
+        let g = id.with_scale_and_position(sf.scale(), ab_glyph::point(x + spacing * i as f32, base));
+        let Some(og) = f.outline_glyph(g) else { continue };
+        let bb = og.px_bounds();
+        let (lean_top, lean_bottom) = if italic { (SLANT * (base - bb.min.y), SLANT * (base - bb.max.y)) } else { (0.0, 0.0) };
+        lo = lo.min(bb.min.x + lean_top.min(lean_bottom));
+        hi = hi.max(bb.max.x + lean_top.max(lean_bottom) + if italic { 1.0 } else { 0.0 });
+    }
+    if lo.is_finite() && hi.is_finite() { (lo, hi) } else { (0.0, 0.0) }
 }
 
 /// Draws `text` from `left` (pixels), its line centred on `cy`, at `px` with `spacing` pixels
