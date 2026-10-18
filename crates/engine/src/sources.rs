@@ -254,7 +254,9 @@ pub fn holds_secret(params: &serde_json::Value) -> bool {
             }),
             Value::Array(a) if depth < 16 => a.iter().any(|v| walk(v, depth + 1)),
             Value::Object(_) | Value::Array(_) => true,
-            Value::String(t) => redact(t) != *t,
+            // An address or a connection is short; a file's contents (Add Data's `data`, a
+            // GeoJSON `text`) needn't be read through for one.
+            Value::String(t) => t.len() <= 8192 && redact(t) != *t,
             _ => false,
         }
     }
@@ -456,6 +458,7 @@ mod tests {
             json!({"database": "postgres:host=db dbname=gis user=ana", "password": ""}),
             json!({"url": "https://example.com/data.geojson", "token": false}),
             json!({"layer": "Parcels", "key": "parcel_id"}),
+            json!({"fileName": "big.geojson", "data": "A".repeat(100_000)}),
         ] {
             assert!(!holds_secret(&p), "{p}");
         }
