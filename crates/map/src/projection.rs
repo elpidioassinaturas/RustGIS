@@ -153,6 +153,7 @@ pub fn lookup(code: &str) -> Result<(String, String), String> {
     if let Some((id, params)) = parse_preset(code)? {
         let (_, label, def) = PRESETS.iter().find(|(p, _, _)| *p == id).ok_or("no such preset")?;
         let value = |k: &str| params.iter().find(|(g, _)| *g == k).map(|(_, v)| *v).or_else(|| preset_value(id, k));
+        // A sum under 1° is a mean under 0.5°.
         if let (Some(a), Some(b)) = (value("lat_1"), value("lat_2"))
             && (a + b).abs() < 1.0
         {
