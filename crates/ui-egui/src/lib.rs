@@ -1244,6 +1244,16 @@ impl RustGisApp {
             return;
         }
         let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates) else { return };
+        // A task is saved with the project and shared as a file: a command holding a password,
+        // key or token (a database connection, a signed address) isn't recorded.
+        if rustgis_engine::sources::holds_secret(params) {
+            let text = crate::i18n::fmt(
+                "{command} isn't recorded: it holds a password, key or token, which a task would keep.",
+                &[("command", tl!(spec.label))],
+            );
+            self.session.notify(text, false);
+            return;
+        }
         // The symbol editor and the ribbon set a colour, outline or transparency on the active
         // layer without naming it: the step names it, so it replays on that layer and a drag
         // merges into one step. A layer the command names is kept.

@@ -22,7 +22,8 @@ Tools for working across maps and views, and for setting up the app the way you 
     - Undo doesn't remove a recorded step; delete it with Edit Steps.
     - A task holds at most 200 steps.
     - Steps keep their parameters as they ran, file paths included (a file you added, say), so
-      check them before sharing a task.
+      check them before sharing a task. A command holding a password, key or token (a database
+      connection, a signed address) isn't recorded.
   - **Edit Steps** gives each step ▲ ▼ to reorder it, **Edit** for its title and instructions, and
     **Delete**. A recorded tool's step is named after the tool.
   - In the Browser pane, a click on a task opens its steps; **Run All Steps** is in its context

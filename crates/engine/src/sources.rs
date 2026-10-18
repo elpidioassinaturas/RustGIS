@@ -231,6 +231,31 @@ fn secret_in(k: &str, keys: &[String]) -> bool {
     secret_key(&k) || (has("sig") && has("sv") && SAS_KEYS.contains(&k.as_str())) || (k == "code" && has("state"))
 }
 
+/// Whether command parameters hold something that gives access: a non-empty value under a key
+/// that names a password, key, secret or token ([`secret_key`]), or an address or PostgreSQL
+/// connection that [`redact`] would change. Recording a task leaves such a command out, since a
+/// task is saved with the project and shared as a file.
+pub fn holds_secret(params: &serde_json::Value) -> bool {
+    fn walk(v: &serde_json::Value, depth: usize) -> bool {
+        use serde_json::Value;
+        match v {
+            Value::Object(o) if depth < 16 => o.iter().any(|(k, v)| {
+                let filled = match v {
+                    Value::String(t) => !t.trim().is_empty(),
+                    Value::Null => false,
+                    _ => true,
+                };
+                (secret_key(k) && filled) || walk(v, depth + 1)
+            }),
+            Value::Array(a) if depth < 16 => a.iter().any(|v| walk(v, depth + 1)),
+            Value::Object(_) | Value::Array(_) => true,
+            Value::String(t) => redact(t) != *t,
+            _ => false,
+        }
+    }
+    walk(params, 0)
+}
+
 /// An address without what would give someone else the user's access: the user and password of
 /// a web address, query parameters that are keys, tokens or signatures (a signed blob's SAS, an
 /// S3 presigned URL), and a PostgreSQL connection string's password.
@@ -388,6 +413,28 @@ fn build_library() -> Vec<(&'static str, Source)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secrets_in_command_parameters_are_noticed() {
+        use serde_json::json;
+        for p in [
+            json!({"database": "postgres:host=db dbname=gis user=ana", "password": "s3cret"}),
+            json!({"database": "postgres:host=db dbname=gis user=ana password=s3cret"}),
+            json!({"url": "https://ana:s3cret@example.com/data.geojson"}),
+            json!({"url": "https://example.com/tiles/{z}/{x}/{y}.png?access_token=pk.abc"}),
+            json!({"source": {"headers": {"X-API-Key": "abc"}}}),
+        ] {
+            assert!(holds_secret(&p), "{p}");
+        }
+        for p in [
+            json!({"layer": "Lakes", "color": "#336699"}),
+            json!({"tool": "buffer", "params": {"input": "rivers", "distance": 30, "output": "APP"}}),
+            json!({"url": "https://example.com/data.geojson"}),
+            json!({"database": "postgres:host=db dbname=gis user=ana", "password": ""}),
+        ] {
+            assert!(!holds_secret(&p), "{p}");
+        }
+    }
 
     #[test]
     fn postgres_connections_lose_every_secret() {

@@ -764,6 +764,14 @@ fn a_task_is_recorded_from_what_changes_the_project_and_edited_in_its_pane() {
     assert_eq!(steps.len(), 1);
     assert_eq!((steps[0].params["layer"].clone(), steps[0].params["color"].clone()), (json!("Lakes"), json!("#303030")));
     app.ws.recording = None;
+    // A command holding a token isn't recorded, and that is said; the same without one is a step.
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("map.addTiles", json!({"url": "https://tiles.example.com/{z}/{x}/{y}.png?access_token=pk.abc", "name": "Private"})).unwrap();
+    assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(0));
+    assert!(app.session.notices.iter().any(|n| n.text.contains("password, key or token")));
+    app.run("map.addTiles", json!({"url": "https://tiles.example.com/{z}/{x}/{y}.png", "name": "Public"})).unwrap();
+    assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(1));
+    app.ws.recording = None;
     // Undo while recording keeps the step, and says how to drop it.
     app.run("ui.taskRecord", json!({})).unwrap();
     app.run("layer.color", json!({"layer": "Lakes", "color": "#445566"})).unwrap();
