@@ -1229,6 +1229,18 @@ impl RustGisApp {
             return;
         }
         let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates) else { return };
+        // The symbol editor and the ribbon set a colour, outline or transparency on the active
+        // layer without naming it: the step names it, so it replays on that layer and a drag
+        // merges into one step. A layer the command names is kept.
+        let mut params = params.clone();
+        if matches!(id, "layer.color" | "layer.outline" | "layer.transparency")
+            && params.get("layer").is_none()
+            && let Some(name) = self.session.active_layer.and_then(|l| self.session.map().layer(l)).map(|l| l.name.clone())
+            && let Some(object) = params.as_object_mut()
+        {
+            object.insert("layer".into(), json!(name));
+        }
+        let params = &params;
         // Only a setting adjusted again and again on one layer (a colour dragged in its picker)
         // updates its step; anything else, a second selection on the same layer included, is a
         // step of its own.
@@ -2007,6 +2019,7 @@ impl RustGisApp {
                     if let Some(task) = r.get("task").and_then(Value::as_str) {
                         self.ws.task = task.to_string();
                         self.ws.task_step = 0;
+                        self.ws.task_edit = None;
                         self.ws.task_editing = true;
                     }
                     self.ui.right = Some(RightPane::Tasks);

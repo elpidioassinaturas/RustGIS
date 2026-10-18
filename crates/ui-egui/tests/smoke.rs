@@ -753,6 +753,17 @@ fn a_task_is_recorded_from_what_changes_the_project_and_edited_in_its_pane() {
     // It opens in the Tasks pane, ready to edit.
     assert_eq!(app.ui.right, Some(rustgis_ui_egui::RightPane::Tasks));
     assert!(app.ws.task_editing && app.ws.task == "Lesson");
+    // The symbol editor sets the active layer's colour without naming it: the step names the
+    // layer, and a drag is one step.
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("layer.select", json!({"layer": "Lakes"})).unwrap();
+    for c in ["#101010", "#202020", "#303030"] {
+        app.run("layer.color", json!({"color": c})).unwrap();
+    }
+    let steps = app.ws.recording.clone().unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!((steps[0].params["layer"].clone(), steps[0].params["color"].clone()), (json!("Lakes"), json!("#303030")));
+    app.ws.recording = None;
     // Undo while recording keeps the step, and says how to drop it.
     app.run("ui.taskRecord", json!({})).unwrap();
     app.run("layer.color", json!({"layer": "Lakes", "color": "#445566"})).unwrap();

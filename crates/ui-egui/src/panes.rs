@@ -1507,6 +1507,8 @@ fn catalog(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                             if resp.clicked() {
                                 app.ws.task = n.clone();
                                 app.ws.task_step = 0;
+                                // An edit open on another task's step mustn't be saved into this one.
+                                app.ws.task_edit = None;
                                 app.ui.right = Some(RightPane::Tasks);
                             }
                             resp.context_menu(|ui| {
