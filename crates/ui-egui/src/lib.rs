@@ -1303,7 +1303,7 @@ impl RustGisApp {
         // key or token (a database connection, a signed address) isn't recorded.
         if rustgis_engine::sources::holds_secret(params) {
             let text = crate::i18n::fmt(
-                "{command} isn't recorded: a parameter named like a password, key or token is set, and a task would keep it.",
+                "{command} isn't recorded: its parameters may hold a password, key or token (one is named like it, an address carries one, or they nest too deep to check), and a task would keep it.",
                 &[("command", tl!(spec.label))],
             );
             self.session.notify(text, false);

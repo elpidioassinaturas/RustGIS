@@ -1026,7 +1026,11 @@ mod tests {
                     let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
                     // The tests (this one reads files) are the `mod tests` closing each file.
                     let code = text.split("#[cfg(test)]\nmod ").next().unwrap_or_default();
-                    for reach in ["fs::", "std::fs", "File::", "io::Write", "OpenOptions", "use std::{"] {
+                    // The standard library's files and paths, and rustgis-data's writers that take a path
+                    // (its byte writers, such as GeoTIFF's, return bytes and are fine).
+                    let reaches =
+                        ["fs::", "std::fs", "File::", "io::Write", "OpenOptions", "std::path", "write_path", "write_atomic", "gpkg::write"];
+                    for reach in reaches {
                         assert!(!code.contains(reach), "{}: names {reach}, so a tool's output could become a place", path.display());
                     }
                     scanned += 1;
