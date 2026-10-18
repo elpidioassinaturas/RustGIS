@@ -96,20 +96,21 @@ pub fn commands() -> Vec<C> {
                 }
             }
             let m = s.map_mut();
-            let next = match ps(p, "type") {
-                _ if !given.is_empty() => {
-                    let base = ps(p, "type").map_or_else(|| m.projection.code(), str::to_string);
-                    let (id, mut params) = rustgis_map::projection::parse_preset(&base)?
-                        .ok_or_else(|| format!("only presets take lon_0, lat_1 and lat_2, not {}", Projection::from_code(&base).map_or(base.clone(), |p| p.label())))?;
-                    for (k, v) in given {
-                        params.retain(|(q, _)| *q != k);
-                        params.push((k, v));
-                    }
-                    Projection::from_code(&rustgis_map::projection::preset_code(id, &params))?
+            let next = if given.is_empty() {
+                match ps(p, "type") {
+                    Some(t) => Projection::from_code(t)?,
+                    None if m.projection.is_globe() => Projection::WebMercator,
+                    None => Projection::Globe,
                 }
-                Some(t) => Projection::from_code(t)?,
-                None if m.projection.is_globe() => Projection::WebMercator,
-                None => Projection::Globe,
+            } else {
+                let base = ps(p, "type").map_or_else(|| m.projection.code(), str::to_string);
+                let (id, mut params) = rustgis_map::projection::parse_preset(&base)?
+                    .ok_or_else(|| format!("only presets take lon_0, lat_1 and lat_2, not {}", Projection::from_code(&base).map_or(base.clone(), |p| p.label())))?;
+                for (k, v) in given {
+                    params.retain(|(q, _)| *q != k);
+                    params.push((k, v));
+                }
+                Projection::from_code(&rustgis_map::projection::preset_code(id, &params))?
             };
             m.set_projection(next);
             let out = json!({"projection": m.projection.code(), "label": m.projection.label()});
