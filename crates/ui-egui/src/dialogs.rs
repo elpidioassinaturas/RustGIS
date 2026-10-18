@@ -1194,8 +1194,13 @@ fn preset_fields(app: &mut RustGisApp, ui: &mut egui::Ui) {
         }
     });
     if next != params {
-        // In the preset's order, as the map will write it.
-        let next: Vec<(&str, f64)> = takes.iter().filter_map(|p| next.iter().find(|(k, _)| *k == p.key)).copied().collect();
+        // As the map will write it: in the preset's order, without the preset's own values.
+        let next: Vec<(&str, f64)> = takes
+            .iter()
+            .filter_map(|p| next.iter().find(|(k, _)| *k == p.key))
+            .filter(|(k, v)| preset_value(id, k) != Some(*v))
+            .copied()
+            .collect();
         app.dialogs.text = preset_code(id, &next);
     }
     ui.add_space(4.0);
@@ -1333,6 +1338,26 @@ mod tests {
         }));
         h.run_steps(3);
         assert_eq!(h.state().dialogs.text, "robinson +lon_0=150");
+        h.get_by_label("Apply").click();
+        h.run_steps(3);
+        assert_eq!(h.state().session.map().projection.code(), "robinson +lon_0=150");
+        // Set back to the preset's own value, the code is the preset alone.
+        h.state_mut().dialogs.open = Some("coordinateSystem");
+        h.run_steps(3);
+        let (node, tree) = h.get_by_role_and_label(Role::SpinButton, "Central meridian").accesskit_node().locate();
+        h.event(egui::Event::AccessKitActionRequest(ActionRequest {
+            action: Action::SetValue,
+            target_tree: tree,
+            target_node: node,
+            data: Some(ActionData::NumericValue(0.0)),
+        }));
+        h.run_steps(3);
+        assert_eq!(h.state().dialogs.text, "robinson");
+        // Parallels that make no cone: the fields stay, the reason shows below them, and Apply is off.
+        h.state_mut().dialogs.text = "albers +lat_1=-30 +lat_2=30".into();
+        h.run_steps(3);
+        assert!(h.query_by_role_and_label(Role::SpinButton, "First standard parallel").is_some());
+        assert!(h.query_by_label_contains("makes no cone").is_some());
         h.get_by_label("Apply").click();
         h.run_steps(3);
         assert_eq!(h.state().session.map().projection.code(), "robinson +lon_0=150");
