@@ -764,6 +764,15 @@ fn a_task_is_recorded_from_what_changes_the_project_and_edited_in_its_pane() {
     assert_eq!(steps.len(), 1);
     assert_eq!((steps[0].params["layer"].clone(), steps[0].params["color"].clone()), (json!("Lakes"), json!("#303030")));
     app.ws.recording = None;
+    // So does any command run on the active layer, named as it was before the command ran (a
+    // rename changes it).
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("layer.select", json!({"layer": "Rivers"})).unwrap();
+    app.run("select.all", json!({})).unwrap();
+    app.run("layer.rename", json!({"name": "Streams"})).unwrap();
+    let steps = app.ws.recording.take().unwrap();
+    assert_eq!(steps.iter().map(|s| s.params["layer"].clone()).collect::<Vec<_>>(), [json!("Rivers"), json!("Rivers")]);
+    app.run("layer.rename", json!({"layer": "Streams", "name": "Rivers"})).unwrap();
     // A command holding a token isn't recorded, and that is said; the same without one is a step.
     app.run("ui.taskRecord", json!({})).unwrap();
     app.run("map.addTiles", json!({"url": "https://tiles.example.com/{z}/{x}/{y}.png?access_token=pk.abc", "name": "Private"})).unwrap();

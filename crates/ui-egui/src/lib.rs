@@ -1197,6 +1197,8 @@ impl RustGisApp {
         if !matches!(id, "ui.menu" | "ui.ribbon" | "ui.language" | "ui.worldview") {
             self.ui.ribbon_peek = false;
         }
+        // Read before the command runs: removing or renaming the active layer changes it.
+        let active = if self.ws.recording.is_some() { self.layer_acted_on(id, &params) } else { None };
         let r = if id.starts_with("ui.") { self.run_ui(id, &params) } else { self.session.run(id, &params) };
         if let Err(e) = &r {
             log::info!("{id}: {e}");
@@ -1222,7 +1224,7 @@ impl RustGisApp {
             self.map.vertex = None;
         }
         if r.is_ok() {
-            self.record_step(id, &params);
+            self.record_step(id, &params, active);
         }
         self.note_last_project();
         // Sources added, saved or made favourites are kept with the preferences.
@@ -1235,7 +1237,29 @@ impl RustGisApp {
     /// panes and dialogs (`ui.*`), tasks themselves, or what only moves the view. A colour, outline
     /// or transparency set again on the same layer (dragged in its picker) updates the step it just
     /// made.
-    fn record_step(&mut self, id: &str, params: &Value) {
+    /// The name of the active layer, when command `id` would act on it for want of a `layer`:
+    /// it takes a `layer` and needs an active one to be enabled, or is one of those that
+    /// default to it while enabled without one. Elsewhere `layer` names something else (a file's
+    /// layer for Add Data, a service's), and a layer the command names is its own.
+    fn layer_acted_on(&mut self, id: &str, params: &Value) -> Option<String> {
+        let spec = self.session.registry.get(id).filter(|c| c.mutates && params.get("layer").is_none_or(Value::is_null)).copied()?;
+        if !spec.param_keys().is_some_and(|k| k.contains(&"layer")) {
+            return None;
+        }
+        let defaults = matches!(
+            id,
+            "select.byAttributes" | "select.rows" | "select.layerFromSelection" | "data.similar" | "layer.geocode" | "report.new"
+        );
+        let active = self.session.active_layer.take();
+        let needs = (spec.enabled)(&self.session).is_some();
+        self.session.active_layer = active;
+        if !defaults && !(needs && (spec.enabled)(&self.session).is_none()) {
+            return None;
+        }
+        active.and_then(|l| self.session.map().layer(l)).map(|l| l.name.clone())
+    }
+
+    fn record_step(&mut self, id: &str, params: &Value, active: Option<String>) {
         let Some(steps) = self.ws.recording.as_mut() else { return };
         // Undo doesn't take back a recorded step (the undo history and the recording don't line
         // up step for step): say how to.
@@ -1276,16 +1300,17 @@ impl RustGisApp {
             self.session.notify(text, false);
             return;
         }
-        // The symbol editor and the ribbon set a colour, outline or transparency on the active
-        // layer without naming it: the step names it, so it replays on that layer and a drag
-        // merges into one step. A layer the command names is kept.
+        // The ribbon, the symbol editor and the panes run a command on the active layer without
+        // naming it: the step names it (`active`, from `layer_acted_on`), so it replays on that
+        // layer, not on whichever is active then, and a colour dragged merges into one step.
         let mut params = params.clone();
-        if matches!(id, "layer.color" | "layer.outline" | "layer.transparency")
-            && params.get("layer").is_none()
-            && let Some(name) = self.session.active_layer.and_then(|l| self.session.map().layer(l)).map(|l| l.name.clone())
-            && let Some(object) = params.as_object_mut()
-        {
-            object.insert("layer".into(), json!(name));
+        if let Some(name) = active {
+            if params.is_null() {
+                params = json!({});
+            }
+            if let Some(object) = params.as_object_mut() {
+                object.insert("layer".into(), json!(name));
+            }
         }
         let params = &params;
         // Only a setting adjusted again and again on one layer (a colour dragged in its picker)
@@ -2954,10 +2979,10 @@ mod record_tests {
     fn downloaded_data_isnt_recorded() {
         let mut app = RustGisApp::with_sample();
         app.ws.recording = Some(Vec::new());
-        app.record_step("layer.addDownload", &json!({"id": 1, "url": "https://example.com/rivers.geojson"}));
+        app.record_step("layer.addDownload", &json!({"id": 1, "url": "https://example.com/rivers.geojson"}), None);
         assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(0));
         assert!(app.session.notices.iter().any(|n| n.text.contains("session only")));
-        app.record_step("layer.color", &json!({"layer": "Lakes", "color": "#123456"}));
+        app.record_step("layer.color", &json!({"layer": "Lakes", "color": "#123456"}), None);
         assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(1));
     }
 }
