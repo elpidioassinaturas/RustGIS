@@ -896,6 +896,14 @@ fn show_me_points_at_where_a_steps_command_is() {
     // Symbology: the Symbology pane, on the step's layer.
     show(&mut h, step("layer.color", json!({"layer": "Lakes", "color": "#336699"})));
     assert_eq!(h.state_mut().ui.right, Some(RightPane::Symbology));
+    // A Layers filter hiding the step's layer is cleared, so the layer stays active.
+    h.state_mut().ui.layer_filter = "Riv".into();
+    h.step();
+    show(&mut h, step("layer.color", json!({"layer": "Lakes", "color": "#336699"})));
+    let app = h.state_mut();
+    let lakes = app.session.map().layer_by_name("Lakes").unwrap().id;
+    assert_eq!(app.session.active_layer, Some(lakes), "Lakes stays active");
+    assert!(app.ui.layer_filter.is_empty());
     // A step whose layer isn't in the map says so, and opens nothing.
     h.state_mut().ui.right = None;
     let said =

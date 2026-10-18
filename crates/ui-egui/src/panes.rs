@@ -427,6 +427,16 @@ pub fn follow_layer_filter(app: &mut RustGisApp) {
     }
 }
 
+/// Clears the Layers filter if it hides layer `id`, which would otherwise stop being the active
+/// layer on the next frame (Show Me makes a step's layer active to open its symbology).
+pub fn reveal_in_filter(app: &mut RustGisApp, id: u32) {
+    let q = filter_query(&app.ui.layer_filter);
+    if app.session.map().layer(id).is_some_and(|l| !filter_shows(&q, &l.name)) {
+        app.ui.layer_filter.clear();
+        app.ui.layer_filter_hid = None;
+    }
+}
+
 /// The filter's text as matched: trimmed and lowercased (empty: no filter).
 fn filter_query(text: &str) -> String {
     text.trim().to_lowercase()

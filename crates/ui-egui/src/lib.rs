@@ -1256,11 +1256,21 @@ impl RustGisApp {
             return;
         }
         let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates) else { return };
+        // Downloaded data is kept for this session only, and adding it uses it up: a task
+        // couldn't add it again.
+        if id == "layer.addDownload" {
+            let text = crate::i18n::fmt(
+                "{command} isn't recorded: the downloaded data is kept for this session only, so a task couldn't add it again.",
+                &[("command", tl!(spec.label))],
+            );
+            self.session.notify(text, false);
+            return;
+        }
         // A task is saved with the project and shared as a file: a command holding a password,
         // key or token (a database connection, a signed address) isn't recorded.
         if rustgis_engine::sources::holds_secret(params) {
             let text = crate::i18n::fmt(
-                "{command} isn't recorded: it holds a password, key or token, which a task would keep.",
+                "{command} isn't recorded: a parameter named like a password, key or token is set, and a task would keep it.",
                 &[("command", tl!(spec.label))],
             );
             self.session.notify(text, false);
@@ -2929,6 +2939,26 @@ mod service_text_tests {
         }
         let valid = "{\"title\":\"Café\"}";
         assert!(super::service_text(valid.as_bytes().to_vec()).is_ok_and(|text| text == valid));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod record_tests {
+    use super::RustGisApp;
+    use serde_json::json;
+
+    /// Data added from a download isn't a step: its download is used up, so a task couldn't
+    /// add it again.
+    #[test]
+    fn downloaded_data_isnt_recorded() {
+        let mut app = RustGisApp::with_sample();
+        app.ws.recording = Some(Vec::new());
+        app.record_step("layer.addDownload", &json!({"id": 1, "url": "https://example.com/rivers.geojson"}));
+        assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(0));
+        assert!(app.session.notices.iter().any(|n| n.text.contains("session only")));
+        app.record_step("layer.color", &json!({"layer": "Lakes", "color": "#123456"}));
+        assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(1));
     }
 }
 

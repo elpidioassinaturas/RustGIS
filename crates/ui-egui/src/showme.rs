@@ -45,6 +45,9 @@ pub fn start(app: &mut RustGisApp, st: &TaskStep) -> String {
             let name = layer.as_str().map_or_else(|| layer.to_string(), str::to_string);
             return crate::i18n::fmt("The step's layer {name} isn't in the map.", &[("name", &name)]);
         }
+        if let Some(id) = app.session.active_layer {
+            crate::panes::reveal_in_filter(app, id);
+        }
         app.ui.open_right(RightPane::Symbology);
         return tl!("It's in the Symbology pane, open on the step's layer.").to_string();
     }
