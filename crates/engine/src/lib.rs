@@ -261,6 +261,9 @@ pub struct Notice {
 
 const UNDO_LIMIT: usize = 40;
 
+/// An undo or redo step: the project before it, the layout open then, its label and who made it.
+type Step = (Project, Option<usize>, &'static str, Option<String>);
+
 pub struct Session {
     pub project: Project,
     pub path: Option<PathBuf>,
@@ -332,8 +335,11 @@ pub struct Session {
     pub layer_clipboard: Option<cmd::layer_copy::LayerClip>,
     /// Each step keeps the layout that was open with its project (`active_layout` is the
     /// session's, so a step that added or moved layouts opens the right one when undone).
-    undo: Vec<(Project, Option<usize>, &'static str)>,
-    redo: Vec<(Project, Option<usize>, &'static str)>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
+    /// Who runs commands now: `None` is the user; the MCP relay names an attached agent around
+    /// its calls. Each undo step remembers who made it ([`Session::undo_actor`]).
+    pub actor: Option<String>,
     back: Vec<Camera>,
     forward: Vec<Camera>,
     /// Last camera recorded in the extent history.
@@ -472,6 +478,7 @@ impl Session {
             auto_cache: false,
             undo: Vec::new(),
             redo: Vec::new(),
+            actor: None,
             back: Vec::new(),
             forward: Vec::new(),
             last_camera: None,
@@ -676,7 +683,7 @@ impl Session {
             (Ok(_), Some(mut snap)) => {
                 // Undo keeps streamed layers' sources, not their windows: they read the view again.
                 strip_windows(&mut snap);
-                self.undo.push((snap, open_layout, label));
+                self.undo.push((snap, open_layout, label, self.actor.clone()));
                 if self.undo.len() > UNDO_LIMIT {
                     self.undo.remove(0);
                 }
@@ -741,6 +748,15 @@ impl Session {
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
+    /// Who made the step undo would take back: `Some(None)` for the user, `Some(Some(name))`
+    /// for an agent ([`Session::actor`]), `None` when there is nothing to undo.
+    pub fn undo_actor(&self) -> Option<Option<&str>> {
+        self.undo.last().map(|u| u.3.as_deref())
+    }
+    /// Who made the step redo would bring back, as [`Session::undo_actor`].
+    pub fn redo_actor(&self) -> Option<Option<&str>> {
+        self.redo.last().map(|u| u.3.as_deref())
+    }
     pub fn undo_label(&self) -> Option<&'static str> {
         self.undo.last().map(|u| u.2)
     }
@@ -781,23 +797,23 @@ impl Session {
     }
 
     pub(crate) fn undo(&mut self) -> bool {
-        let Some((p, saved, label)) = self.undo.pop() else { return false };
+        let Some((p, saved, label, actor)) = self.undo.pop() else { return false };
         let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);
         self.project.keep_table_ids(&cur);
         self.reopen_layout(open, saved);
-        self.redo.push((cur, was, label));
+        self.redo.push((cur, was, label, actor));
         self.touch_all_geometry();
         true
     }
 
     pub(crate) fn redo(&mut self) -> bool {
-        let Some((p, saved, label)) = self.redo.pop() else { return false };
+        let Some((p, saved, label, actor)) = self.redo.pop() else { return false };
         let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);
         self.project.keep_table_ids(&cur);
         self.reopen_layout(open, saved);
-        self.undo.push((cur, was, label));
+        self.undo.push((cur, was, label, actor));
         self.touch_all_geometry();
         true
     }

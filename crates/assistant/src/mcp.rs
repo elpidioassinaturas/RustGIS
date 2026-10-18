@@ -249,12 +249,31 @@ impl Server {
         if call.name == "run" {
             let script = call.args.get("script").and_then(Value::as_str).unwrap_or("");
             let lines = rustgis_engine::cmd::workflows::script_commands(script).ok()?;
+            // An agent's undo is checked against the step on top before the script runs, so a
+            // second undo in it could reach a step beneath, the user's: undo and redo run alone.
+            if s.actor.is_some()
+                && let Some((n, id, _)) = lines.iter().find(|(_, id, _)| matches!(id.as_str(), "edit.undo" | "edit.redo"))
+            {
+                return Some(format!(
+                    "line {n}: '{id}' runs on its own (run_command), not in a script, so it takes back only your own last step"
+                ));
+            }
             return lines.into_iter().find_map(|(n, id, params)| {
                 let line = ToolCall { id: String::new(), name: "run_command".into(), args: json!({"command": id, "params": params}) };
                 self.refusal(s, &line).map(|why| format!("line {n}: {why}"))
             });
         }
         let (id, params) = tools::target(call)?;
+        // An agent working on the user's project undoes and redoes only its own steps.
+        if let (Some(me), true) = (s.actor.as_deref(), matches!(id.as_str(), "edit.undo" | "edit.redo")) {
+            let top = if id == "edit.undo" { s.undo_actor() } else { s.redo_actor() };
+            if let Some(by) = top.filter(|by| *by != Some(me)) {
+                let whose = by.map_or_else(|| "the user's".to_string(), |other| format!("{other}'s"));
+                return Some(format!(
+                    "'{id}' was not run: the step it would change is {whose}, and an agent undoes and redoes only its own steps"
+                ));
+            }
+        }
         let project = PROJECT_COMMANDS.contains(&id.as_str());
         if project && self.users_project {
             return Some(format!(

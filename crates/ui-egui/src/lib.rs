@@ -1676,15 +1676,23 @@ impl RustGisApp {
                     let text = i18n::fmt("MCP relay listening on 127.0.0.1:{port}", &[("port", &relay.port().to_string())]);
                     self.session.notify(text, false);
                 } else {
-                    let port = p
-                        .get("port")
-                        .and_then(Value::as_u64)
-                        .and_then(|n| u16::try_from(n).ok())
-                        .unwrap_or(rustgis_assistant::relay::DEFAULT_PORT);
+                    // A port asked for that isn't one is an error, as RUSTGIS_MCP_PORT's is.
+                    let port = match p.get("port") {
+                        None | Some(Value::Null) => rustgis_assistant::relay::default_port()?,
+                        Some(v) => v.as_u64().and_then(|n| u16::try_from(n).ok()).ok_or_else(|| {
+                            i18n::fmt("ui.mcpRelay: port {port} is not a port number (0 to 65535)", &[("port", &v.to_string())])
+                        })?,
+                    };
                     let relay = rustgis_assistant::relay::Relay::start(port)?;
+                    // Where it is, for clients and setup scripts; the relay works without it.
+                    if let Err(e) = relay.publish_endpoint() {
+                        log::warn!("MCP relay: could not publish its endpoint file: {e}");
+                    }
                     // With agents turned on in the assistant settings, they may use files and the
                     // network without asking (--yes); otherwise what each asks for decides.
                     relay.set_allow_access(connectui::enabled(self));
+                    // What agents do to the user's project is kept, for review.
+                    relay.set_audit_dir(rustgis_assistant::audit::dir());
                     relay.set_full_access(connectui::full_access(self));
                     // The relay only queues; the frame runs the messages, so a queued message
                     // asks for the frame that will run it. Before the first frame there is no

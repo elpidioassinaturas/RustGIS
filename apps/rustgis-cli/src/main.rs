@@ -40,7 +40,7 @@ use serde_json::{Value, json};
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  rustgis-cli commands | tools\n  rustgis-cli plugins [install <file|folder> | uninstall <id> | enable <id> | disable <id> | browse | get <id> | prepare <id>] [--registry URL]\n  rustgis-cli skills [add <SKILL.md|folder|.zip> | remove <name> | enable <name> | disable <name>]\n  rustgis-cli info <data>\n  rustgis-cli logo <out.png|out.ico|out.bmp> [--size N] [--canvas WxH --at X,Y (.bmp only)]\n  rustgis-cli render <data|project> <out.png> [--basemap NAME] [--tiles URL] [--width N] [--height N] [--dpi N] [--worldview auto|default|china]\n  rustgis-cli run [--sample] [--project P] [--data F]… --cmd 'id={{json}}'… [--save P] [--worldview auto|default|china]\n  rustgis-cli ask [--sample] [--project P] [--data F]… \"request\" [--provider P] [--model M] [--base-url URL] [--yes] [--save P]\n  rustgis-cli ask --models [--provider P]\n  rustgis-cli ask --login [--another-account] [--account CLIENT_ID] | --logout\n  rustgis-cli ask --accounts | --account CLIENT_ID\n  rustgis-cli mcp [--sample] [--project P] [--data F]… [--yes] [--attach [PORT] [--token-file FILE]]"
+        "usage:\n  rustgis-cli commands | tools\n  rustgis-cli plugins [install <file|folder> | uninstall <id> | enable <id> | disable <id> | browse | get <id> | prepare <id>] [--registry URL]\n  rustgis-cli skills [add <SKILL.md|folder|.zip> | remove <name> | enable <name> | disable <name>]\n  rustgis-cli info <data>\n  rustgis-cli logo <out.png|out.ico|out.bmp> [--size N] [--canvas WxH --at X,Y (.bmp only)]\n  rustgis-cli render <data|project> <out.png> [--basemap NAME] [--tiles URL] [--width N] [--height N] [--dpi N] [--worldview auto|default|china]\n  rustgis-cli run [--sample] [--project P] [--data F]… --cmd 'id={{json}}'… [--save P] [--worldview auto|default|china]\n  rustgis-cli ask [--sample] [--project P] [--data F]… \"request\" [--provider P] [--model M] [--base-url URL] [--yes] [--save P]\n  rustgis-cli ask --models [--provider P]\n  rustgis-cli ask --login [--another-account] [--account CLIENT_ID] | --logout\n  rustgis-cli ask --accounts | --account CLIENT_ID\n  rustgis-cli mcp [--sample] [--project P] [--data F]… [--yes] [--attach [PORT] [--token-file FILE] [--timeout SECONDS (5-600)]]"
     );
     ExitCode::from(2)
 }
@@ -348,7 +348,7 @@ fn attach_port(args: &[String]) -> Result<Option<u16>, String> {
     let Some(i) = args.iter().position(|a| a == "--attach") else { return Ok(None) };
     match args.get(i + 1).filter(|a| !a.starts_with("--")) {
         Some(p) => p.parse::<u16>().map(Some).map_err(|_| format!("mcp --attach {p}: expected a port number")),
-        None => Ok(Some(rustgis_assistant::relay::DEFAULT_PORT)),
+        None => rustgis_assistant::relay::default_port().map(Some),
     }
 }
 
@@ -356,7 +356,7 @@ fn attach_port(args: &[String]) -> Result<Option<u16>, String> {
 /// app's session runs the calls (its MCP Relay command started the listener on 127.0.0.1); this
 /// process relays the protocol only. `--yes` goes along with the connection, so the app applies
 /// the same file and network refusals as the private server does here.
-fn attach(port: u16, allow_access: bool, token_file: Option<&str>) -> Result<(), String> {
+fn attach(port: u16, allow_access: bool, token_file: Option<&str>, timeout: Option<f64>) -> Result<(), String> {
     // The relay wrote the run's token where only this user can read it; carrying it in the
     // attach message is what proves this is the user's own client, so nothing is pasted. An
     // agent the app starts itself gets a token file of its own (`--token-file`).
@@ -366,7 +366,11 @@ fn attach(port: u16, allow_access: bool, token_file: Option<&str>) -> Result<(),
     };
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))
         .map_err(|e| format!("nothing is listening on 127.0.0.1:{port} ({e}); start RustGIS's MCP Relay command first"))?;
-    let hello = json!({"jsonrpc": "2.0", "method": "rustgis/attach", "params": {"access": allow_access, "token": token}});
+    let mut hello = json!({"jsonrpc": "2.0", "method": "rustgis/attach", "params": {"access": allow_access, "token": token}});
+    // How long each call may wait for the app (5 to 600 seconds; 60 unless asked).
+    if let (Some(secs), Some(params)) = (timeout, hello.get_mut("params").and_then(Value::as_object_mut)) {
+        params.insert("timeout_s".into(), json!(secs));
+    }
     writeln!(stream, "{hello}").map_err(|e| format!("telling the app what --yes allows: {e}"))?;
     eprintln!(
         "rustgis-cli: MCP server ready (the open RustGIS app at 127.0.0.1:{port}; file and network access {})",
@@ -422,7 +426,19 @@ fn mcp(s: &mut Session, args: &[String]) -> Result<(), String> {
         if args.iter().any(|a| matches!(a.as_str(), "--sample" | "--project" | "--data")) {
             return Err("mcp --attach manages the project open in the app; --sample, --project and --data make a private one".into());
         }
-        return attach(port, allow_access, opt(args, "--token-file"));
+        let timeout = match opt(args, "--timeout") {
+            Some(t) => Some(
+                t.parse::<f64>()
+                    .ok()
+                    .filter(|s| (5.0..=600.0).contains(s))
+                    .ok_or_else(|| format!("mcp --timeout {t}: expected seconds from 5 to 600"))?,
+            ),
+            None => None,
+        };
+        return attach(port, allow_access, opt(args, "--token-file"), timeout);
+    }
+    if args.iter().any(|a| a == "--timeout") {
+        return Err("mcp --timeout sets how long calls wait for the open app; use it with --attach".into());
     }
     let mut server = rustgis_assistant::mcp::Server::new(allow_access);
     server.skills = rustgis_assistant::skills::installed();

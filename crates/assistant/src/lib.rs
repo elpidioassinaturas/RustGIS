@@ -15,6 +15,8 @@
 
 pub mod acp;
 pub mod agent;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod audit;
 pub mod chatgpt;
 pub mod compact;
 pub mod docs;

@@ -246,7 +246,7 @@ fn undo_steps_share_the_layers_they_leave_alone() {
     s.run("layer.rename", &json!({"layer": "Nations", "name": "States"})).unwrap();
     let live = s.map().layer_by_name("States").unwrap();
     let id = live.id;
-    for (snap, _, _) in &s.undo {
+    for (snap, _, _, _) in &s.undo {
         let old = snap.maps.iter().flat_map(|m| &m.layers).find(|l| l.id == id).unwrap();
         assert!(old.dataset.features.shares(&live.dataset.features), "the snapshot copied the features");
         assert_eq!(old.projected_cache().as_ptr(), live.projected_cache().as_ptr(), "the snapshot copied the projected geometry");
@@ -255,7 +255,7 @@ fn undo_steps_share_the_layers_they_leave_alone() {
     let before = s.map().layer_by_name("Cities").unwrap().dataset.features.len();
     s.run("edit.addFeature", &json!({"layer": "Cities", "geometry": {"type": "Point", "coordinates": [1.0, 2.0]}})).unwrap();
     let cities = s.map().layer_by_name("Cities").unwrap();
-    let (snap, _, _) = s.undo.last().unwrap();
+    let (snap, _, _, _) = s.undo.last().unwrap();
     let old = snap.maps.iter().flat_map(|m| &m.layers).find(|l| l.id == cities.id).unwrap();
     assert!(!old.dataset.features.shares(&cities.dataset.features));
     assert_eq!((old.dataset.features.len(), cities.dataset.features.len()), (before, before + 1));
@@ -8866,4 +8866,22 @@ fn text_elements_take_italic_alignment_and_spacing() {
         assert!(s.run("layout.addElement", &add).is_err());
     }
     assert_eq!(style(&s, ocean), (false, TextAlign::Center, MAX_LETTER_SPACING));
+}
+
+/// Each undo step remembers who made it, through undo and redo: the user (no actor) or the
+/// agent the MCP relay named.
+#[test]
+fn undo_steps_remember_who_made_them() {
+    let mut s = world();
+    assert_eq!(s.undo_actor(), None);
+    s.run("layer.rename", &json!({"layer": "Rivers", "name": "Streams"})).unwrap();
+    assert_eq!(s.undo_actor(), Some(None));
+    s.actor = Some("agent 1".into());
+    s.run("layer.rename", &json!({"layer": "Lakes", "name": "Ponds"})).unwrap();
+    s.actor = None;
+    assert_eq!(s.undo_actor(), Some(Some("agent 1")));
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!((s.undo_actor(), s.redo_actor()), (Some(None), Some(Some("agent 1"))));
+    s.run("edit.redo", &json!({})).unwrap();
+    assert_eq!((s.undo_actor(), s.redo_actor()), (Some(Some("agent 1")), None));
 }

@@ -92,7 +92,18 @@ rules.
 ```sh
 rustgis-cli mcp --attach                 # the open app on 127.0.0.1:8767
 rustgis-cli mcp --attach 9000 --yes      # another port, with file and network access
+rustgis-cli mcp --attach --timeout 300   # wait up to 5 minutes for each call (5 to 600 seconds)
 ```
+
+The port is 8767 unless the `RUSTGIS_MCP_PORT` environment variable names another, for the app
+and for `--attach` alike (a second copy of RustGIS, or a port another program holds). When the
+port is taken, the relay's error says so and names that variable; a value that isn't a port number
+is an error too, not a quiet fall back to 8767. While the relay runs, the app
+publishes `endpoint.json` in the relay's private folder: `schema`, `host`, `port`, `url`, `pid`,
+`started_at`, the app `version`, the `token_file` path (not the token) and the `attach` command.
+Setup scripts can read it instead of hard-coding the port. It's removed when the relay stops. With
+two copies of RustGIS on different ports it describes the one started last, and a crash can leave
+it behind: check that its `pid` is still running before trusting it.
 
 ```json
 {
@@ -111,8 +122,27 @@ the window shows it. The relay holds the request until the app has taken the pic
 nothing else meanwhile. File and network commands need `--yes`, unless **Let your Agents Control RustGIS**
 is ticked. The session is the project you have open, so an attached agent can't replace it:
 `project.new`, `project.open`, `project.openText`, `project.sample` and `project.fromTemplate`
-are refused, with or without `--yes`. `edit.undo` and `edit.redo` work, in the same history as
-your own steps.
+are refused, with or without `--yes`. Each agent command is a step in your own undo history,
+named for the agent (`agent 1`, `agent 2`…, in the order they first call, with the relay run, so a
+relay started again doesn't take an earlier run's agent for its own). An agent's `edit.undo`
+and `edit.redo` work only on its own steps: when the step on top is yours (or another agent's),
+they're refused, and they run on their own (`run_command`), not inside a `run` script. You can
+still undo anything. Each agent also has its own active layer: when an
+agent selects a layer (`layer.select`, or a command that makes a layer active), your selection in
+the Layers pane stays as it was. Once the agent has chosen a layer (selected one, or run a command
+that made one active), its commands that name no layer act on that layer, whatever you select
+meanwhile; until then they act on the one you have selected.
+
+Every tool call an attached agent makes is written to an audit log, one JSON line per call in a
+file per day (`2026-10-18.jsonl`) in the `mcp-audit` folder of the app-data folder
+(`~/.local/share/rustgis/mcp-audit` on Linux, `~/Library/Application Support/RustGIS/mcp-audit` on
+macOS, `%LOCALAPPDATA%\RustGIS\mcp-audit` on Windows). Each line holds `ts`, `source` (`mcp`),
+`tool`, `command` or `script` when there is one, `args`, `success`, `duration_s` and `error`.
+Passwords, keys and tokens in the arguments, a `run` script's lines included, are replaced before
+they are written. On Linux and macOS the folder and files are readable by you only; on Windows they're protected by
+your user profile's permissions. A batch's calls share the batch's
+`duration_s` and are marked `"batch": true`. An error whose text mentions a credential (a token, a
+password, a bearer…) is logged as withheld rather than risk keeping the credential. Days older than 30 are removed.
 
 An agent the app starts itself gets a run-scoped token instead of the relay's own:
 `rustgis-cli mcp --attach PORT --token-file FILE`. Each such grant carries its own file and network
@@ -181,11 +211,20 @@ like the relay's token.
   connection beyond either cap is dropped without a reply.
 - **Queue cap.** At most 64 messages wait for the app's frame. A request beyond that gets error
   `-32001` (`the app is busy; try again`) if it expects a reply.
-- **Bounded request waits.** A request waits up to 60 seconds for the app to run it. If it is
-  still pending then, it is cancelled and never runs; the client gets error `-32002`. If it is
-  already running, the client waits one more 60-second interval. If the reply still has not
-  come, the client gets error `-32003` (`its outcome is unknown`), and the command may still
-  complete later.
+- **Bounded request waits.** A request waits up to 60 seconds for the app to run it, or as long
+  as the client's attach asks (`timeout_s`, 5 to 600 seconds; `--timeout` on the command line).
+  If it is still pending then, it is cancelled and never runs; the client gets error `-32002`. If
+  it is already running, the client waits one more interval of the same length. If the reply
+  still has not come, the client gets error `-32003` (`its outcome is unknown`), and the command
+  may still complete later.
+- **Busy app.** When the app has drawn no frame for 10 seconds since a request was queued (a file
+  dialog is open, a long tool is running, or the window is minimized or hidden and the system has
+  stopped drawing it), the request is cancelled at once and the client gets
+  error `-32004` saying RustGIS is busy (apart from the full queue's `-32001`). It never runs, and the connection stays open. An app that
+  was only idle before the request isn't busy: the request wakes it. This comes before a long
+  `timeout_s`: a stalled app answers after 10 seconds whatever the client's wait, and a client
+  waiting less than 10 seconds gets `-32002` instead. A `timeout_s` outside 5 to 600 is clamped to
+  that range, and one that isn't a number is ignored (the 60-second default).
 - **Stop.** Stopping the relay, or dropping its last owner, closes the listener and every
   client, drops queued messages unrun, and removes the token file. A waiting request ends at
   once, checked every 25 milliseconds.
@@ -207,11 +246,18 @@ These behavioral tests in `crates/assistant/src/relay.rs` check the requirements
 - Token required: `relay_drops_connections_without_the_token`
 - Parse error after attach: `relay_returns_parse_error_after_attach_and_stays_usable`
 - File commands need `--yes`: `relay_refuses_file_commands_without_yes`
+- Separate active layers: `relay_keeps_the_agents_active_layer_apart_from_the_users`
+- Agents undo only their own steps: `relay_agents_undo_only_their_own_steps`
+- Agents of an earlier relay run aren't this run's: `relay_agents_of_another_run_cant_undo_earlier_steps`
+- Busy app: `relay_says_the_app_is_busy_early`
+- Client-chosen waits: `relay_waits_as_long_as_the_client_asks`
+- Endpoint file and port variable: `relay_publishes_its_endpoint_and_names_the_port_variable`
 - Full access, for the relay's own token only: `relay_full_access_lifts_the_refusals_for_its_own_token_only`
 - Screen snapshots go to the app: `relay_hands_screen_snapshots_to_the_app`
 - Snapshots without the screen: `relay_draws_snapshots_offscreen_without_the_screen`
 - Saved snapshots need access: `relay_refuses_a_saved_snapshot_without_access`
 - The agent's last call, for the status bar: `relay_records_the_agents_last_call`
+- Audit log: `relay_writes_each_call_to_the_audit_log`
 - The open project stays the user's: `relay_keeps_project_commands_for_the_user`
 - Timed-out command never runs: `relay_cancels_a_timed_out_command_so_it_never_runs`
 - Stop cleanup: `relay_stop_closes_clients_and_removes_the_token`

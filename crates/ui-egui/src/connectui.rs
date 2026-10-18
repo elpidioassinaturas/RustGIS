@@ -41,10 +41,22 @@ pub fn full_access(app: &RustGisApp) -> bool {
 
 /// At launch, starts the relay when the user had agents turned on.
 pub fn resume(app: &mut RustGisApp) {
-    resume_on(app, rustgis_assistant::relay::DEFAULT_PORT);
+    // Read only once, and only said when agents are on (`resume_with` returns early otherwise).
+    if app.connect.resumed {
+        return;
+    }
+    let port = rustgis_assistant::relay::default_port();
+    resume_with(app, port);
 }
 
+/// [`resume`] on a given port (tests, with a port of their own).
+#[cfg(test)]
 fn resume_on(app: &mut RustGisApp, port: u16) {
+    resume_with(app, Ok(port));
+}
+
+/// [`resume`] on `port`, or with why there is none (a `RUSTGIS_MCP_PORT` that isn't a port).
+fn resume_with(app: &mut RustGisApp, port: Result<u16, String>) {
     if std::mem::replace(&mut app.connect.resumed, true) {
         return;
     }
@@ -54,7 +66,12 @@ fn resume_on(app: &mut RustGisApp, port: u16) {
         return;
     }
     let bridge = start_bridge(app);
-    let relay = if app.relay.is_some() { Ok(()) } else { app.run("ui.mcpRelay", json!({"port": port})).map(|_| ()) };
+    // A RUSTGIS_MCP_PORT that isn't a port fails the relay as a busy port would.
+    let relay = match port {
+        _ if app.relay.is_some() => Ok(()),
+        Ok(port) => app.run("ui.mcpRelay", json!({"port": port})).map(|_| ()),
+        Err(e) => Err(e),
+    };
     started(app, relay, bridge);
 }
 
@@ -253,6 +270,20 @@ mod tests {
         assert!(app.file_bridge.is_none() && !enabled(&app));
         assert!(saved.lock().unwrap().iter().any(|(k, v)| k == PREF && v == "off"));
     }
+    /// A port variable that isn't a port is said only when agents are on.
+    #[test]
+    fn a_bad_port_variable_is_said_only_with_agents_on() {
+        let mut app = RustGisApp::with_sample();
+        let mark = app.session.notice_mark();
+        resume_with(&mut app, Err("RUSTGIS_MCP_PORT=x is not a port number".into()));
+        assert!(app.session.notices_since(mark).is_empty() && app.connect.error.is_none(), "agents are off");
+        let mut app = RustGisApp::with_sample();
+        app.services.load_pref = Some(Box::new(|key: &str| (key == PREF).then(|| "on".to_string())));
+        resume_with(&mut app, Err("RUSTGIS_MCP_PORT=x is not a port number".into()));
+        assert!(app.connect.error.as_deref().is_some_and(|e| e.contains("RUSTGIS_MCP_PORT")));
+        assert!(app.relay.is_none());
+    }
+
     /// The app runs what an agent writes to the file bridge on its frame, and says how it went.
     #[test]
     fn the_app_runs_file_bridge_scripts() {
