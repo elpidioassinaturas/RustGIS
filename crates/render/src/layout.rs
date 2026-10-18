@@ -976,12 +976,13 @@ fn text_block(pm: &mut Pixmap, r: Rect, s: &str, size: f32, color: Rgba, style: 
         // Centred and right-aligned lines are placed by the ink they draw (italic overhang and a
         // negative spacing included), which an advance doesn't measure; left-aligned ones start
         // at the edge as plain text always has.
-        let (ink_left, ink_right) = text::styled_extent(line, px, style.bold, style.italic, spacing);
-        let ink = ink_right - ink_left;
         let left = match style.align {
             TextAlign::Left => r.x(),
-            TextAlign::Center => r.x() + (r.width() - ink) / 2.0 - ink_left,
-            TextAlign::Right => r.x() + r.width() - ink - ink_left,
+            aligned => {
+                let (ink_left, ink_right) = text::styled_extent(line, px, style.bold, style.italic, spacing);
+                let free = r.width() - (ink_right - ink_left);
+                r.x() + if aligned == TextAlign::Center { free / 2.0 } else { free } - ink_left
+            }
         };
         text::styled_at(pm, line, left, y, px, color, style.bold, style.italic, spacing);
         y += px * 1.25;
