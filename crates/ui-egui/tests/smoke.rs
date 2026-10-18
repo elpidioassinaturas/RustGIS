@@ -769,7 +769,7 @@ fn a_task_is_recorded_from_what_changes_the_project_and_edited_in_its_pane() {
     app.run("layer.color", json!({"layer": "Lakes", "color": "#445566"})).unwrap();
     app.run("edit.undo", json!(null)).unwrap();
     assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(1));
-    assert!(app.session.notices.iter().any(|n| n.text.contains("Edit Steps") || n.text.contains("Editar passos")));
+    assert!(app.session.notices.iter().any(|n| n.text.contains("Edit Steps")));
     // Past 200 steps nothing more is kept, and that is said once.
     let given = app.session.notices.iter().filter(|n| n.error).count();
     for i in 0..205 {

@@ -83,6 +83,23 @@ pub fn follow_move(app: &mut RustGisApp, from: usize, to: usize) {
     app.ws.task_step = swap(app.ws.task_step);
 }
 
+/// After a step is deleted: an edit open on it closes, one open on a later step (and the current
+/// step) moves up with it, so typed text stays with its step.
+pub fn follow_delete(app: &mut RustGisApp, deleted: usize) {
+    match app.ws.task_edit.as_ref().map(|e| e.0) {
+        Some(e) if e == deleted => app.ws.task_edit = None,
+        Some(e) if e > deleted => {
+            if let Some(edit) = app.ws.task_edit.as_mut() {
+                edit.0 -= 1;
+            }
+        }
+        _ => {}
+    }
+    if app.ws.task_step > deleted {
+        app.ws.task_step -= 1;
+    }
+}
+
 /// Record Task: the button that starts or stops recording, and how far it has got.
 fn record_row(app: &mut RustGisApp, ui: &mut Ui) {
     ui.horizontal(|ui| match app.ws.recording.as_ref().map(Vec::len) {
@@ -174,12 +191,10 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
                             app.ws.task_edit = Some((i, st.title.clone(), st.instructions.clone()));
                             app.ws.task_step = i;
                         }
-                        if ui.small_button(tl!("Delete")).on_hover_text(tl!("Delete the step")).clicked() {
-                            if run(app, "task.removeStep", json!({"task": name, "step": i})).is_some() && app.ws.task_step > i {
-                                // The current step keeps pointing at the same step.
-                                app.ws.task_step -= 1;
-                            }
-                            app.ws.task_edit = None;
+                        if ui.small_button(tl!("Delete")).on_hover_text(tl!("Delete the step")).clicked()
+                            && run(app, "task.removeStep", json!({"task": name, "step": i})).is_some()
+                        {
+                            follow_delete(app, i);
                         }
                     } else {
                         // Practice: Show Me says where to do the step; Run does it.
@@ -577,5 +592,22 @@ mod tests {
         // Steps elsewhere don't touch it.
         follow_move(&mut app, 4, 5);
         assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(0));
+    }
+
+    #[test]
+    fn deleting_a_step_keeps_an_edit_on_another() {
+        let mut app = RustGisApp::with_sample();
+        app.ws.task_edit = Some((3, "Title".into(), "Typed".into()));
+        app.ws.task_step = 3;
+        // An earlier step goes: the edit stays, one place up.
+        follow_delete(&mut app, 1);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| (e.0, e.2.as_str())), Some((2, "Typed")));
+        assert_eq!(app.ws.task_step, 2);
+        // A later step goes: nothing moves.
+        follow_delete(&mut app, 5);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(2));
+        // The step being edited goes: its edit closes.
+        follow_delete(&mut app, 2);
+        assert!(app.ws.task_edit.is_none());
     }
 }
