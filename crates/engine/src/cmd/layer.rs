@@ -65,6 +65,23 @@ pub fn commands() -> Vec<C> {
                     l.mask = Some(n.clone());
                 }
             }
+            // So do legends that leave it out, in the frames that show this map.
+            let map = s.map().name.clone();
+            for layout in &mut s.project.layouts {
+                let frames: Vec<u32> = layout
+                    .elements
+                    .iter()
+                    .filter(|e| matches!(&e.kind, rustgis_map::layout::ElementKind::MapFrame { map: m, .. } if *m == map))
+                    .map(|e| e.id)
+                    .collect();
+                for e in &mut layout.elements {
+                    if let rustgis_map::layout::ElementKind::Legend { frame, exclude, .. } = &mut e.kind
+                        && frames.contains(frame)
+                    {
+                        exclude.iter_mut().filter(|x| x.eq_ignore_ascii_case(&old)).for_each(|x| x.clone_from(&n));
+                    }
+                }
+            }
             Ok(r)
         }).params(r#"{"layer"?, "name": string}"#)
         .when(need_layer),

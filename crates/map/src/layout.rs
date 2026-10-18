@@ -312,6 +312,9 @@ fn is_left(a: &TextAlign) -> bool {
     *a == TextAlign::Left
 }
 
+/// The most layers a legend leaves out.
+pub const MAX_LEGEND_EXCLUDED: usize = 1000;
+
 /// A north arrow's look.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArrowStyle {
@@ -558,6 +561,10 @@ pub enum ElementKind {
         /// the features it stands for are drawn as before.
         #[serde(default)]
         hide_other: bool,
+        /// Layers (by name, any case) the legend leaves out though the map draws them: a mask, a
+        /// highlight, a basemap-like layer. Empty, it lists every layer it would otherwise.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude: Vec<String>,
     },
     /// The colour scale of a raster layer in a frame's map: a gradient bar for a stretch, steps
     /// for classes, a block per value for unique values and colour tables (#326).
@@ -862,6 +869,10 @@ impl Layout {
                         g.tick_length = finite_or(g.tick_length, tick_length()).clamp(0.0, MAX_TICK_MM);
                         g.width = finite_or(g.width, grid_width()).clamp(0.0, MAX_GRID_WIDTH);
                     }
+                }
+                ElementKind::Legend { exclude, .. } => {
+                    exclude.truncate(MAX_LEGEND_EXCLUDED);
+                    exclude.iter_mut().for_each(|n| *n = n.chars().take(200).collect());
                 }
                 ElementKind::Text { text, size, letter_spacing, .. } => {
                     *size = finite_or(*size, 12.0).clamp(2.0, 400.0);

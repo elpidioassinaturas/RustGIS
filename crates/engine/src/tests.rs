@@ -8912,3 +8912,45 @@ fn undo_steps_remember_who_made_them() {
     s.run("edit.redo", &json!({})).unwrap();
     assert_eq!((s.undo_actor(), s.redo_actor()), (Some(Some("agent 1")), None));
 }
+
+/// A legend can leave layers out though the map draws them: set when added or later, checked
+/// against its frame's map, kept through a save (not written when empty), and following a
+/// renamed layer.
+#[test]
+fn legends_leave_layers_out() {
+    use rustgis_map::layout::ElementKind;
+    let mut s = Session::new(sample::world_project());
+    s.run("layout.new", &json!({"name": "Legends"})).unwrap();
+    let left_out = |s: &Session, id: u32| match s.project.layouts[0].element(id).map(|e| &e.kind) {
+        Some(ElementKind::Legend { exclude, .. }) => exclude.clone(),
+        _ => panic!("a legend"),
+    };
+    let plain = s.run("layout.addElement", &json!({"kind": "legend"})).unwrap()["element"].as_u64().unwrap() as u32;
+    assert!(left_out(&s, plain).is_empty());
+    let saved = serde_json::to_string(&s.project.layouts[0]).unwrap();
+    assert!(!saved.contains("exclude"), "an empty list isn't written");
+    // Names as the map spells them, once each.
+    let lakes = s.run("layout.addElement", &json!({"kind": "legend", "exclude": ["lakes", "LAKES", "Rivers"]})).unwrap()["element"]
+        .as_u64()
+        .unwrap() as u32;
+    assert_eq!(left_out(&s, lakes), ["Lakes", "Rivers"]);
+    s.run("layout.update", &json!({"element": lakes, "exclude": ["Rivers"]})).unwrap();
+    assert_eq!(left_out(&s, lakes), ["Rivers"]);
+    // A layer the map hasn't, or not a list of names, is an error that changes nothing; so is
+    // `exclude` on another kind of element.
+    for bad in [json!(["Atlantis"]), json!("Rivers"), json!([3])] {
+        assert!(s.run("layout.update", &json!({"element": lakes, "exclude": bad})).is_err(), "{bad}");
+        assert!(s.run("layout.addElement", &json!({"kind": "legend", "exclude": bad})).is_err(), "{bad}");
+    }
+    assert_eq!(left_out(&s, lakes), ["Rivers"]);
+    let title = s.project.layouts[0].elements.iter().find(|e| e.name == "Title").unwrap().id;
+    assert!(s.run("layout.update", &json!({"element": title, "exclude": ["Rivers"]})).unwrap_err().contains("only legends"));
+    // Renaming the layer keeps it left out.
+    s.run("layer.rename", &json!({"layer": "Rivers", "name": "Rios"})).unwrap();
+    assert_eq!(left_out(&s, lakes), ["Rios"]);
+    let back: rustgis_map::layout::Layout = serde_json::from_str(&serde_json::to_string(&s.project.layouts[0]).unwrap()).unwrap();
+    assert!(back.element(lakes).is_some_and(|e| matches!(&e.kind, ElementKind::Legend { exclude, .. } if exclude == &["Rios"])));
+    // An empty list lists every layer again.
+    s.run("layout.update", &json!({"element": lakes, "exclude": []})).unwrap();
+    assert!(left_out(&s, lakes).is_empty());
+}
