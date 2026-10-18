@@ -109,6 +109,9 @@ pub fn follow_delete(app: &mut RustGisApp, deleted: usize) {
     if app.ws.task_step > deleted {
         app.ws.task_step -= 1;
     }
+    // Deleting the last step leaves the current one on the step before it.
+    let n = app.session.project.tasks.iter().find(|t| t.name == app.ws.task).map_or(0, |t| t.steps.len());
+    app.ws.task_step = app.ws.task_step.min(n.saturating_sub(1));
 }
 
 /// Record Task: the button that starts or stops recording, and how far it has got.
@@ -257,7 +260,7 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
                             .iter()
                             .find(|t| t.name == name)
                             .and_then(|t| t.steps.get(step))
-                            .is_some_and(|s| s.title == title.trim() && s.instructions == text);
+                            .is_some_and(|s| s.title == title.trim().chars().take(200).collect::<String>() && s.instructions == text);
                         if unchanged
                             || run(app, "task.editStep", json!({"task": name, "step": step, "title": title, "instructions": text}))
                                 .is_some()
@@ -634,17 +637,33 @@ mod tests {
     #[test]
     fn deleting_a_step_keeps_an_edit_on_another() {
         let mut app = RustGisApp::with_sample();
+        // The task as follow_delete sees it, after each deletion (it only reads the count).
+        let task = |app: &mut RustGisApp, n: usize| {
+            let steps: Vec<_> = (0..n).map(|i| json!({"title": format!("Step {i}"), "command": "map.zoomFull", "params": {}})).collect();
+            let _ = app.session.run("task.remove", &json!({"task": "Lesson"}));
+            app.session.run("task.new", &json!({"name": "Lesson", "steps": steps})).unwrap();
+            app.ws.task = "Lesson".into();
+        };
+        task(&mut app, 5);
         app.ws.task_edit = Some((3, "Title".into(), "Typed".into()));
         app.ws.task_step = 3;
         // An earlier step goes: the edit stays, one place up.
+        task(&mut app, 4);
         follow_delete(&mut app, 1);
         assert_eq!(app.ws.task_edit.as_ref().map(|e| (e.0, e.2.as_str())), Some((2, "Typed")));
         assert_eq!(app.ws.task_step, 2);
         // A later step goes: nothing moves.
-        follow_delete(&mut app, 5);
+        task(&mut app, 3);
+        follow_delete(&mut app, 3);
         assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(2));
         // The step being edited goes: its edit closes.
+        task(&mut app, 2);
         follow_delete(&mut app, 2);
         assert!(app.ws.task_edit.is_none());
+        // The last step going leaves the current one on the step before it.
+        app.ws.task_step = 1;
+        task(&mut app, 1);
+        follow_delete(&mut app, 1);
+        assert_eq!(app.ws.task_step, 0);
     }
 }

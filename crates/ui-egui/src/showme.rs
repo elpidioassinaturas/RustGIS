@@ -117,6 +117,6 @@ pub fn tick(app: &mut RustGisApp, ctx: &egui::Context) {
         // Redraw once more, so an idle window doesn't keep the outline.
         ctx.request_repaint();
     } else {
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        ctx.request_repaint_after(web_time::Duration::from_millis(100));
     }
 }
