@@ -104,11 +104,19 @@ fn centres(area: Extent, spacing: f64, reach: f64, world: bool, cap: usize) -> R
         (first..=last).map(|i| at(i, spacing)).filter(|lat| lat.abs() + reach < 90.0 - POLE_MARGIN).collect()
     };
     let mut lons = span(lon_min, lon_max);
-    // A view a turn wide or more holds each place once (not at both `lon` and `lon + 360`): one
-    // turn from its first grid longitude, keeping the view's own longitudes.
+    // A view a turn wide or more holds each place once (not at both `lon` and `lon + 360`): the
+    // columns stop before the first that repeats one, which is a whole number of turns from the
+    // first (12 columns at 30°, but 36 at 70°, whose multiples come back round only after 7
+    // turns), keeping the view's own longitudes.
     if !world {
-        let turn = (360.0 / spacing - 1e-9).ceil() as i64;
-        lons.1 = lons.1.min(lons.0.saturating_add(turn - 1));
+        let columns = lons.1.saturating_sub(lons.0).saturating_add(1).max(0);
+        let repeats = |m: i64| {
+            let turns = m as f64 * spacing / 360.0;
+            (turns - turns.round()).abs() < 1e-9
+        };
+        if let Some(period) = (1..columns).find(|&m| repeats(m)) {
+            lons.1 = lons.0 + period - 1;
+        }
     }
     let n = (lats.len() as u64).saturating_mul(count(lons));
     if n > cap as u64 {
@@ -345,6 +353,11 @@ mod tests {
         assert_eq!(places.len(), n, "each longitude once");
         assert_eq!(n, 12, "a turn of 30° steps at the equator");
         assert!((0..n).all(|r| float(&ds, r, "lon") >= 170.0), "the view's own longitudes");
+        // A spacing that doesn't divide a turn keeps every column until one repeats: at 70° over
+        // 0..430°, all seven (0 … 420), none a turn from another.
+        let seventy = Mercator(Extent::new(0.0, -10.0, 430.0, 10.0));
+        let ds = layer(run(&seventy, &serde_json::json!({"area": "Map Extent", "spacing": 70, "radius": 100})).unwrap());
+        assert_eq!(ds.features.len(), 7);
         // A view far past the Earth is held to it: no endless grid, no overflow.
         let huge = Mercator(Extent::new(-1e300, -1e300, 1e300, 1e300));
         assert!(run(&huge, &serde_json::json!({"area": "Map Extent", "spacing": 0.01})).is_err_and(|e| e.contains("too many")));

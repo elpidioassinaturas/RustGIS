@@ -598,7 +598,8 @@ fn tissot_indicatrix_reports_the_maps_own_distortion() {
     assert_eq!(fields, ["lat", "lon"]);
     // Map Extent on the globe fills the whole Earth.
     s.run("gp.run", &json!({"tool": "tissot", "params": {"area": "Map Extent", "spacing": 60, "output": "globeView"}})).unwrap();
-    assert!(!s.map().layer_by_name("globeView").unwrap().dataset.features.is_empty());
+    // Six columns of 60° and three rows (−60°, 0°, 60°; the poles' rows are left out).
+    assert_eq!(s.map().layer_by_name("globeView").unwrap().dataset.features.len(), 18);
 }
 
 #[test]
