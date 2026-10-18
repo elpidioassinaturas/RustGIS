@@ -8976,4 +8976,16 @@ fn legends_leave_layers_out() {
     let many = vec!["Countries"; rustgis_map::layout::MAX_LEGEND_EXCLUDED + 1];
     assert!(s.run("layout.update", &json!({"element": lakes, "exclude": many})).unwrap_err().contains("at most"));
     assert_eq!(left_out(&s, lakes), ["Countries"]);
+    // A frame naming its map in another case (as an imported layout may) still takes a list and
+    // follows renames, as the renderer finds the map.
+    let lower = s.map().name.to_lowercase();
+    assert_ne!(lower, s.map().name);
+    for e in &mut s.project.layouts[0].elements {
+        if let ElementKind::MapFrame { map, .. } = &mut e.kind {
+            map.clone_from(&lower);
+        }
+    }
+    s.run("layout.update", &json!({"element": lakes, "exclude": ["countries"]})).unwrap();
+    s.run("layer.rename", &json!({"layer": "Countries", "name": "Nations"})).unwrap();
+    assert_eq!(left_out(&s, lakes), ["Nations"]);
 }

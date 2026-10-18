@@ -2079,7 +2079,7 @@ pub(crate) fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>
         let frames: Vec<u32> = layout
             .elements
             .iter()
-            .filter(|e| matches!(&e.kind, rustgis_map::layout::ElementKind::MapFrame { map: m, .. } if *m == map))
+            .filter(|e| matches!(&e.kind, rustgis_map::layout::ElementKind::MapFrame { map: m, .. } if m.eq_ignore_ascii_case(&map)))
             .map(|e| e.id)
             .collect();
         for e in &mut layout.elements {

@@ -709,7 +709,7 @@ fn legend_exclude(s: &Session, l: &Layout, frame: u32, p: &Value) -> Result<Opti
         Some(ElementKind::MapFrame { map, .. }) => map.clone(),
         _ => return Err("the legend's frame isn't a map frame".into()),
     };
-    let map = s.project.maps.iter().find(|m| m.name == map_name).ok_or_else(|| format!("no map '{map_name}'"))?;
+    let map = s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(&map_name)).ok_or_else(|| format!("no map '{map_name}'"))?;
     let mut out: Vec<String> = Vec::new();
     for n in names {
         let n = n.as_str().ok_or("exclude is a list of layer names")?;

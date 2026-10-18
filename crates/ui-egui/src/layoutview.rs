@@ -1263,7 +1263,7 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
     // listed. Names gone from the map drop out of the list as it's written back.
     if let ElementKind::Legend { frame, exclude, .. } = &e.kind {
         let map = layout.element(*frame).and_then(|f| match &f.kind {
-            ElementKind::MapFrame { map, .. } => app.session.project.maps.iter().find(|m| m.name == *map),
+            ElementKind::MapFrame { map, .. } => app.session.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map)),
             _ => None,
         });
         let names: Vec<String> = map
