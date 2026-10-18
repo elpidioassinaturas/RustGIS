@@ -252,7 +252,6 @@ pub fn commands() -> Vec<C> {
             if title.is_some_and(|t| t.trim().is_empty()) {
                 return Err("a step needs a title".into());
             }
-            // Changing nothing would still leave an undo step.
             if title.is_none() && instructions.is_none() {
                 return Err("title or instructions is required".into());
             }
@@ -260,12 +259,14 @@ pub fn commands() -> Vec<C> {
             let t = task_mut(s, p)?;
             let n = t.steps.len();
             let st = t.steps.get_mut(step).ok_or_else(|| format!("{} has {n} steps", t.name))?;
-            if let Some(title) = title {
-                st.title = title.trim().chars().take(200).collect();
+            let title = title.map_or_else(|| st.title.clone(), |t| t.trim().chars().take(200).collect());
+            let instructions = instructions.map_or_else(|| st.instructions.clone(), |t| t.chars().take(4000).collect());
+            // Changing nothing would still leave an undo step.
+            if title == st.title && instructions == st.instructions {
+                return Err(format!("step {step} already reads so"));
             }
-            if let Some(text) = instructions {
-                st.instructions = text.chars().take(4000).collect();
-            }
+            st.title = title;
+            st.instructions = instructions;
             Ok(json!({"step": step}))
         })
         .params(r#"{"task"?: name, "step": number (from 0), "title"?: string, "instructions"?: string}"#),

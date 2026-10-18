@@ -240,9 +240,10 @@ pub fn holds_secret(params: &serde_json::Value) -> bool {
         use serde_json::Value;
         match v {
             Value::Object(o) if depth < 16 => o.iter().any(|(k, v)| {
+                // A switch (`"token": false`) holds no secret; a number might (a PIN).
                 let filled = match v {
                     Value::String(t) => !t.trim().is_empty(),
-                    Value::Null => false,
+                    Value::Null | Value::Bool(_) => false,
                     _ => true,
                 };
                 (secret_key(k) && filled) || walk(v, depth + 1)
@@ -431,6 +432,7 @@ mod tests {
             json!({"tool": "buffer", "params": {"input": "rivers", "distance": 30, "output": "APP"}}),
             json!({"url": "https://example.com/data.geojson"}),
             json!({"database": "postgres:host=db dbname=gis user=ana", "password": ""}),
+            json!({"url": "https://example.com/data.geojson", "token": false}),
         ] {
             assert!(!holds_secret(&p), "{p}");
         }

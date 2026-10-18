@@ -551,6 +551,8 @@ Line two."
     let depth = s.undo_depth();
     assert!(s.run("task.moveStep", &json!({"task": "Lesson", "step": 1, "to": 1})).is_err());
     assert!(s.run("task.editStep", &json!({"task": "Lesson", "step": 1})).is_err());
+    let same = s.project.tasks.iter().find(|t| t.name == "Lesson").unwrap().steps[1].title.clone();
+    assert!(s.run("task.editStep", &json!({"task": "Lesson", "step": 1, "title": format!(" {same} ")})).is_err());
     assert_eq!(s.undo_depth(), depth);
     // Still a task from a file: a step that writes a file stays refused after editing.
     assert!(!s.trusted_tasks.contains("lesson"));

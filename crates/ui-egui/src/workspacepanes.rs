@@ -240,7 +240,19 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
                         });
                     }
                     if save && let Some((step, title, text)) = app.ws.task_edit.clone() {
-                        if run(app, "task.editStep", json!({"task": name, "step": step, "title": title, "instructions": text})).is_some() {
+                        // Saving what the step already says only closes the editor.
+                        let unchanged = app
+                            .session
+                            .project
+                            .tasks
+                            .iter()
+                            .find(|t| t.name == name)
+                            .and_then(|t| t.steps.get(step))
+                            .is_some_and(|s| s.title == title.trim() && s.instructions == text);
+                        if unchanged
+                            || run(app, "task.editStep", json!({"task": name, "step": step, "title": title, "instructions": text}))
+                                .is_some()
+                        {
                             app.ws.task_edit = None;
                         }
                     } else if cancel {
