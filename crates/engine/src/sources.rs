@@ -241,6 +241,10 @@ fn secret_in(k: &str, keys: &[String]) -> bool {
 /// connection that [`redact`] would change. Recording a task leaves such a command out, since a
 /// task is saved with the project and shared as a file.
 pub fn holds_secret(params: &serde_json::Value) -> bool {
+    // Keys holding a file's contents.
+    fn contents_key(k: &str) -> bool {
+        k.eq_ignore_ascii_case("data") || k.eq_ignore_ascii_case("text")
+    }
     // A PEM private key (`-----BEGIN … PRIVATE KEY-----`), wherever it was pasted.
     fn private_key(t: &str) -> bool {
         t.contains("PRIVATE KEY-----")
@@ -259,19 +263,20 @@ pub fn holds_secret(params: &serde_json::Value) -> bool {
                 };
                 // A bare `key` beside a web address is that service's key; elsewhere it's as likely
                 // a field or a lookup key (a `?key=…` in an address `redact` reads in the string).
-                // (The address may sit inside a sibling: `{"source": {"url": …}, "key": …}`.)
+                // (The address may sit inside a sibling: `{"source": {"url": …}, "key": …}`; a file's
+                // contents, under `data` or `text`, isn't one.)
                 fn address(v: &Value, depth: usize) -> bool {
                     match v {
-                        Value::String(t) => t.trim_start().to_ascii_lowercase().starts_with("http"),
-                        Value::Object(o) if depth < 4 => o.values().any(|v| address(v, depth + 1)),
+                        Value::String(t) => t.trim_start().get(..4).is_some_and(|p| p.eq_ignore_ascii_case("http")),
+                        Value::Object(o) if depth < 4 => o.iter().any(|(k, v)| !contents_key(k) && address(v, depth + 1)),
                         Value::Array(a) if depth < 4 => a.iter().any(|v| address(v, depth + 1)),
                         _ => false,
                     }
                 }
-                let beside_address = || o.iter().any(|(sibling, v)| sibling != k && address(v, 0));
+                let beside_address = || o.iter().any(|(sibling, v)| sibling != k && !contents_key(sibling) && address(v, 0));
                 // A file's contents (Add Data's `data`, a GeoJSON `text`) isn't an address to read
                 // through, only checked for a private key pasted in.
-                let contents = matches!(k.to_ascii_lowercase().as_str(), "data" | "text");
+                let contents = contents_key(k);
                 let inside = match v {
                     // (Short ones, which can't be much of a file, are read as any string.)
                     Value::String(t) if contents && t.len() > 1024 => private_key(t),
@@ -290,17 +295,36 @@ pub fn holds_secret(params: &serde_json::Value) -> bool {
     walk(params, 0)
 }
 
-/// Whether `t` reads as an access key rather than a name: long, with no spaces, and letters and
-/// digits touching again and again (`sk-4f9aB27c…`, `pk.eyJ1Ijoi…`), unlike a field or a lookup
-/// key (`parcel_id`, `area_2010_2020_km2`), whose numbers stand apart between separators.
+/// Whether `t` reads as an access key rather than a name: long, with no spaces, and changing
+/// between lower case, upper case and digits at a good share of its letters and digits, as a
+/// random token does (`sk-4f9aB27c…`, `pk.eyJ1Ijoi…`, a hex hash or id), unlike a field or a
+/// lookup key, whose words and numbers come in runs (`parcel_id`, `municipalityCode2020`,
+/// `area_2010_2020_km2_total`). A hex id counts as a key on purpose: it may be one, and a step
+/// left out (with a notice) costs less than a key shared.
 fn looks_like_a_key(t: &str) -> bool {
+    #[derive(PartialEq)]
+    enum Class {
+        Lower,
+        Upper,
+        Digit,
+    }
     let t = t.trim();
-    let chars: Vec<char> = t.chars().collect();
-    let touching = chars
-        .windows(2)
-        .filter(|w| (w[0].is_ascii_alphabetic() && w[1].is_ascii_digit()) || (w[0].is_ascii_digit() && w[1].is_ascii_alphabetic()))
-        .count();
-    chars.len() >= 20 && !t.contains(char::is_whitespace) && touching >= 6
+    let class = |c: char| {
+        if c.is_ascii_digit() {
+            Some(Class::Digit)
+        } else if c.is_ascii_lowercase() {
+            Some(Class::Lower)
+        } else if c.is_ascii_uppercase() {
+            Some(Class::Upper)
+        } else {
+            None
+        }
+    };
+    let classes: Vec<Option<Class>> = t.chars().map(class).collect();
+    let alnum = classes.iter().filter(|c| c.is_some()).count();
+    // Changes between two letters or digits side by side (a separator breaks the pair).
+    let changes = classes.windows(2).filter(|w| matches!(w, [Some(a), Some(b)] if a != b)).count();
+    t.chars().count() >= 20 && !t.contains(char::is_whitespace) && changes * 10 >= alnum * 3
 }
 
 /// Whether command parameters set a plain `key` (at any depth), which [`holds_secret`] lets
@@ -491,6 +515,10 @@ mod tests {
             // A plain key with no address near it, but reading as an access key.
             json!({"provider": "x", "key": "sk-4f9aB27c81dE0e5f3a6b9C"}),
             json!({"key": "pk.eyJ1IjoiYW5hIiwiYSI6ImNsMnQ4"}),
+            // Mostly letters, mixed case, as random tokens are.
+            json!({"key": "kXqPzLmNvBtRwYsHaJdFgQ"}),
+            // A hex hash or id counts as a key on purpose (see `looks_like_a_key`).
+            json!({"key": "3fa85f64-5717-4562-b3fc-2c963f66afa6"}),
             json!({"source": {"headers": {"X-API-Key": "abc"}}}),
             json!({"url": "https://example.com/data.geojson", "headers": {"Authorization": "Bearer abc"}}),
             json!({"headers": {"Cookie": "session=abc"}}),
@@ -518,9 +546,18 @@ MIIE
         }
         // A plain key is let through, and noticed so the user is told.
         assert!(holds_plain_key(&json!({"layer": "Parcels", "key": "parcel_id"})));
+        // A file's contents beside a plain key is no address for it.
+        assert!(!holds_secret(&json!({"key": "parcel_id", "source": {"data": "https://example.com/list"}})));
+        assert!(!holds_secret(&json!({"key": "parcel_id", "text": "https://example.com/list"})));
         // Names stay plain keys, long or not.
-        for name in ["parcel_id", "municipality_code_2020", "CD_MUN", "nome do município com espaços longos", "area_2010_2020_km2_total"]
-        {
+        for name in [
+            "parcel_id",
+            "municipality_code_2020",
+            "municipalityCode2020Total",
+            "CD_MUN",
+            "nome do município com espaços longos",
+            "area_2010_2020_km2_total",
+        ] {
             assert!(!holds_secret(&json!({"layer": "Parcels", "key": name})), "{name}");
         }
         assert!(holds_plain_key(&json!({"source": [{"key": "abc"}]})));

@@ -1047,11 +1047,13 @@ mod tests {
                     // (its byte writers, such as GeoTIFF's, return bytes and are fine).
                     let reaches =
                         ["fs::", "std::fs", "File::", "io::Write", "OpenOptions", "std::path", "write_path", "write_atomic", "gpkg::write"];
-                    // Code only, not comments; and a name only where it starts (`fs::`, not `bufs::`).
+                    // Code only, not comment lines. A path-like name counts only where a name starts
+                    // (`fs::`, not `bufs::`); a writer's name counts anywhere (`do_write_atomic(`).
                     let code: String = code.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
                     let names = |reach: &str| {
+                        let anywhere = reach.starts_with("write_") || reach.starts_with("gpkg::");
                         code.match_indices(reach)
-                            .any(|(i, _)| !code[..i].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_'))
+                            .any(|(i, _)| anywhere || !code[..i].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_'))
                     };
                     for reach in reaches {
                         assert!(!names(reach), "{}: names {reach}, so a tool's output could become a place", path.display());
