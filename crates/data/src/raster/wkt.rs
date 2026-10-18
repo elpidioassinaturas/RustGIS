@@ -237,7 +237,7 @@ fn geographic(g: &Node) -> Result<Crs, String> {
     }
     let datum = g.child("DATUM");
     let greenwich = g.child("PRIMEM").and_then(|m| m.num(0)).is_none_or(|pm| pm == 0.0);
-    if greenwich && (datum.is_none() || wgs84_like(datum).is_some()) {
+    if greenwich && (datum.is_none() || (wgs84_like(datum).is_some() && !shifted(datum))) {
         return Ok(Crs::LonLat);
     }
     let label = match g.title().trim() {
@@ -264,7 +264,10 @@ fn projected(p: &Node) -> Result<Crs, String> {
     {
         return Ok(Crs::WebMercator);
     }
-    if let Some(crs) = utm(&name).and_then(Crs::from_epsg) {
+    // (By its EPSG code only when the file adds no shift of its own to the datum.)
+    if !shifted(p.child("GEOGCS").and_then(|g| g.child("DATUM")))
+        && let Some(crs) = utm(&name).and_then(Crs::from_epsg)
+    {
         return Ok(crs);
     }
     custom(p, &method)
@@ -397,6 +400,12 @@ fn wgs84_like(datum: Option<&Node>) -> Option<&'static str> {
     }
 }
 
+/// Whether the file gives the datum a `TOWGS84` shift other than none, which then wins over the
+/// null shift a WGS 84-like datum would get by its name: the file says what it was made with.
+fn shifted(datum: Option<&Node>) -> bool {
+    towgs84(datum).is_some_and(|t| t.iter().any(|v| *v != 0.0))
+}
+
 /// The datum's `TOWGS84` shift, when it gives a usable one.
 fn towgs84(datum: Option<&Node>) -> Option<Vec<f64>> {
     datum.and_then(|d| d.child("TOWGS84")).map(Node::nums).filter(|t| (t.len() == 3 || t.len() == 7) && t.iter().all(|v| v.is_finite()))
@@ -418,7 +427,7 @@ fn datum_note(geog: Option<&Node>) -> Option<String> {
 /// prime meridian.
 fn earth(geog: Option<&Node>) -> String {
     let datum = geog.and_then(|g| g.child("DATUM"));
-    let mut out = match wgs84_like(datum) {
+    let mut out = match wgs84_like(datum).filter(|_| !shifted(datum)) {
         Some(d) => d.to_string(),
         None => {
             let sph = datum.and_then(|d| d.child("SPHEROID").or_else(|| d.child("ELLIPSOID")));
@@ -534,6 +543,20 @@ mod tests {
         let zone_10s = utm_24s.replace("Zone_24S", "Zone_10S").replace("-39.0", "-123.0");
         let (crs, note) = read_wkt(&zone_10s).unwrap();
         assert!(matches!(crs, Crs::Custom(_)) && note.is_none());
+        // A shift the file gives the datum wins over the null one its name would get, for every
+        // WGS 84-like datum, geographic or projected; a zero shift changes nothing.
+        let shift = r#"TOWGS84[-67.35,3.88,-38.22,0,0,0,0]"#;
+        let with = |wkt: &str, datum: &str| wkt.replace(&format!(r#"DATUM["{datum}","#), &format!(r#"DATUM["{datum}",{shift},"#));
+        for (wkt, datum) in [(geographic, "D_SIRGAS_2000"), (utm_24s, "D_SIRGAS_2000"), (GEOG_4326, "D_WGS_1984")] {
+            let (crs, note) = read_wkt(&with(wkt, datum)).unwrap();
+            let def = crs.custom_def().unwrap_or_else(|| panic!("{datum}: {crs:?}"));
+            assert!(def.proj4.contains("+towgs84=-67.35,3.88,-38.22"), "{}", def.proj4);
+            assert!(note.is_none());
+        }
+        let nad83 = r#"GEOGCS["GCS_North_American_1983",DATUM["D_North_American_1983",TOWGS84[1,2,3],SPHEROID["GRS_1980",6378137.0,298.257222101]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]"#;
+        assert!(read_wkt(nad83).unwrap().0.custom_def().is_some_and(|d| d.proj4.contains("+towgs84=1,2,3")));
+        let zero = utm_24s.replace(r#"DATUM["D_SIRGAS_2000","#, r#"DATUM["D_SIRGAS_2000",TOWGS84[0,0,0,0,0,0,0],"#);
+        assert_eq!(read_wkt(&zero), Ok((Crs::Epsg(31984), None)));
         // Brazil's older datums keep the note: without TOWGS84 they're tens of metres off.
         for (datum, spheroid) in [
             ("D_South_American_1969", r#"SPHEROID["GRS_1967_Truncated",6378160.0,298.25]"#),
