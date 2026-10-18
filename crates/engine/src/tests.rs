@@ -8812,3 +8812,58 @@ fn scripts_refuse_edits_to_streamed_layers() {
     assert_eq!(Some(l.dataset.features.len()), before);
     let _ = std::fs::remove_file(path);
 }
+
+/// Text elements take italic, alignment and letter spacing (#213, point c): set when added or
+/// later, kept through a save, plain by default and not written until changed; a bad value is an
+/// error that changes nothing.
+#[test]
+fn text_elements_take_italic_alignment_and_spacing() {
+    use rustgis_map::layout::{ElementKind, MAX_LETTER_SPACING, TextAlign};
+    let mut s = Session::new(sample::world_project());
+    s.run("layout.new", &json!({"name": "Type"})).unwrap();
+    let style = |s: &Session, id: u32| match s.project.layouts[0].element(id).map(|e| &e.kind) {
+        Some(ElementKind::Text { italic, align, letter_spacing, .. }) => (*italic, *align, *letter_spacing),
+        _ => panic!("a text element"),
+    };
+    let plain = s.run("layout.addElement", &json!({"kind": "text", "text": "Brasil"})).unwrap()["element"].as_u64().unwrap() as u32;
+    assert_eq!(style(&s, plain), (false, TextAlign::Left, 0.0));
+    let saved = serde_json::to_string(&s.project.layouts[0]).unwrap();
+    assert!(!saved.contains("italic") && !saved.contains("letter_spacing") && !saved.contains("align"), "defaults aren't written");
+    let ocean = s
+        .run(
+            "layout.addElement",
+            &json!({"kind": "text", "text": "OCEANO ATLÂNTICO", "italic": true, "align": "center", "letterSpacing": 4}),
+        )
+        .unwrap()["element"]
+        .as_u64()
+        .unwrap() as u32;
+    assert_eq!(style(&s, ocean), (true, TextAlign::Center, 4.0));
+    let dynamic =
+        s.run("layout.addElement", &json!({"kind": "dynamicText", "align": "Right"})).unwrap()["element"].as_u64().unwrap() as u32;
+    assert_eq!(style(&s, dynamic).1, TextAlign::Right);
+    // One value changed keeps the others; spacing is clamped.
+    s.run("layout.update", &json!({"element": ocean, "letterSpacing": 999})).unwrap();
+    assert_eq!(style(&s, ocean), (true, TextAlign::Center, MAX_LETTER_SPACING));
+    s.run("layout.update", &json!({"element": ocean, "italic": false, "align": "centre"})).unwrap();
+    assert_eq!(style(&s, ocean), (false, TextAlign::Center, MAX_LETTER_SPACING));
+    let back: rustgis_map::layout::Layout = serde_json::from_str(&serde_json::to_string(&s.project.layouts[0]).unwrap()).unwrap();
+    assert!(back.element(ocean).is_some_and(
+        |e| matches!(&e.kind, ElementKind::Text { align: TextAlign::Center, letter_spacing, .. } if *letter_spacing == MAX_LETTER_SPACING)
+    ));
+    // A bad value names itself and changes nothing.
+    for (bad, field) in [
+        (json!({"align": "justify"}), "unknown alignment"),
+        (json!({"align": 3}), "align"),
+        (json!({"italic": "very"}), "italic"),
+        (json!({"letterSpacing": "wide"}), "letterSpacing"),
+    ] {
+        let mut p = bad.clone();
+        p["element"] = json!(ocean);
+        let err = s.run("layout.update", &p).unwrap_err();
+        assert!(err.starts_with(field), "{err}");
+        let mut add = bad;
+        add["kind"] = json!("text");
+        assert!(s.run("layout.addElement", &add).is_err());
+    }
+    assert_eq!(style(&s, ocean), (false, TextAlign::Center, MAX_LETTER_SPACING));
+}

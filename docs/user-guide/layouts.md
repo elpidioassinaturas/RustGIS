@@ -62,8 +62,12 @@ the maps; while one is open, its groups lead the Publish tab:
   picked. From a command:
   `layout.addElement={"kind":"colorbar","layer":"DEM","title":"Elevation (m)","orientation":"vertical","ticks":3}`.
 - **Text** and **Dynamic Text**: `{date}`, `{time}`, `{scale}`, `{map}`, `{crs}`, `{page}`,
-  `{pages}`, `{pageName}` and `{layout}` fill in when the page is drawn. **Picture** places a PNG
-  or JPEG.
+  `{pages}`, `{pageName}` and `{layout}` fill in when the page is drawn. Besides size, colour and
+  bold, their properties set **Italic** (slanted, as water and ocean names are; the built-in
+  fonts have no italic face, so the letters are slanted 12°), **Alignment** (left, center or
+  right within the element) and **Letter spacing** in points (spaced-out names such as
+  O C E A N O, or a negative value to tighten). Scripts set them with `italic`, `align` and
+  `letterSpacing` on `layout.addElement` and `layout.update`. **Picture** places a PNG or JPEG.
 - **Map Series**: one page per feature of an index layer, with the frame zoomed to each feature;
   step through pages, refresh, and export every page into one PDF.
 - Click an element to select it, drag to move, drag its handles to resize, and edit it in the

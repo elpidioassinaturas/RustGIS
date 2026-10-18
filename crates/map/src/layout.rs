@@ -263,6 +263,55 @@ impl Default for GridEdges {
     }
 }
 
+/// Where a text element's lines sit across it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl TextAlign {
+    pub const ALL: [TextAlign; 3] = [TextAlign::Left, TextAlign::Center, TextAlign::Right];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            TextAlign::Left => "left",
+            TextAlign::Center => "center",
+            TextAlign::Right => "right",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TextAlign::Left => "Left",
+            TextAlign::Center => "Center",
+            TextAlign::Right => "Right",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<TextAlign> {
+        let s = s.trim();
+        TextAlign::ALL
+            .into_iter()
+            .find(|v| v.code().eq_ignore_ascii_case(s))
+            .or(s.eq_ignore_ascii_case("centre").then_some(TextAlign::Center))
+    }
+}
+
+/// The most letter spacing a text element takes, either way (points).
+pub const MAX_LETTER_SPACING: f64 = 50.0;
+pub const MIN_LETTER_SPACING: f64 = -5.0;
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+fn is_left(a: &TextAlign) -> bool {
+    *a == TextAlign::Left
+}
+
 /// A north arrow's look.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArrowStyle {
@@ -540,6 +589,15 @@ pub enum ElementKind {
         color: Rgba,
         #[serde(default)]
         bold: bool,
+        /// Slanted, as water and ocean names are.
+        #[serde(default, skip_serializing_if = "is_false")]
+        italic: bool,
+        /// Where each line sits across the element.
+        #[serde(default, skip_serializing_if = "is_left")]
+        align: TextAlign,
+        /// Space added between letters, in points (spaced-out ocean names); negative tightens.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        letter_spacing: f64,
     },
     Picture {
         /// Base64 PNG or JPEG.
@@ -571,6 +629,11 @@ fn rows() -> usize {
 
 impl ElementKind {
     /// A north arrow for `frame`, in the default style.
+    /// A text element in the plain style: upright, left-aligned, normally spaced.
+    pub fn text(text: impl Into<String>, size: f64, color: Rgba, bold: bool) -> ElementKind {
+        ElementKind::Text { text: text.into(), size, color, bold, italic: false, align: TextAlign::Left, letter_spacing: 0.0 }
+    }
+
     pub fn north_arrow(frame: u32) -> ElementKind {
         ElementKind::NorthArrow { frame, style: ArrowStyle::default(), fill: ink(), outline: ink() }
     }
@@ -800,8 +863,9 @@ impl Layout {
                         g.width = finite_or(g.width, grid_width()).clamp(0.0, MAX_GRID_WIDTH);
                     }
                 }
-                ElementKind::Text { text, size, .. } => {
+                ElementKind::Text { text, size, letter_spacing, .. } => {
                     *size = finite_or(*size, 12.0).clamp(2.0, 400.0);
+                    *letter_spacing = finite_or(*letter_spacing, 0.0).clamp(MIN_LETTER_SPACING, MAX_LETTER_SPACING);
                     text.truncate(text.char_indices().nth(5000).map_or(text.len(), |(i, _)| i));
                 }
                 ElementKind::Table { rows, .. } => *rows = (*rows).clamp(1, 500),
@@ -1013,11 +1077,7 @@ mod tests {
             },
         );
         let n = l.add("North Arrow", (215.0, 10.0, 15.0, 20.0), ElementKind::north_arrow(f));
-        let t = l.add(
-            "Title",
-            (20.0, 165.0, 100.0, 12.0),
-            ElementKind::Text { text: "World".into(), size: 18.0, color: Rgba::rgb(0, 0, 0), bold: true },
-        );
+        let t = l.add("Title", (20.0, 165.0, 100.0, 12.0), ElementKind::text("World", 18.0, Rgba::rgb(0, 0, 0), true));
         assert_eq!(l.hit(50.0, 50.0), Some(f));
         assert_eq!(l.hit(220.0, 15.0), Some(n));
         assert_eq!(l.hit(290.0, 200.0), None);
@@ -1030,7 +1090,7 @@ mod tests {
     fn hostile_layouts_are_repaired() {
         let text = r#"{"name":"x","width":1e300,"height":-5,"elements":[
             {"id":3,"name":"a","x":0,"y":0,"w":1e9,"h":10,"kind":{"MapFrame":{"map":"M","center":{"x":1e300,"y":200},"scale":-1,"shape":{"Polygon":[[0,0],[1,1]]},"extent_of":3,"extent_width":1e9}}},
-            {"id":3,"name":"b","x":0,"y":0,"w":10,"h":10,"kind":{"Text":{"text":"t","size":1e9,"color":[0,0,0,255]}}},
+            {"id":3,"name":"b","x":0,"y":0,"w":10,"h":10,"kind":{"Text":{"text":"t","size":1e9,"color":[0,0,0,255],"letter_spacing":-1e9}}},
             {"id":9,"name":"c","x":0,"y":0,"w":10,"h":10,"kind":{"Legend":{"frame":42,"title":"L"}}}],
             "series":{"frame":77,"layer":"x"}}"#;
         let mut l: Layout = serde_json::from_str(text).unwrap_or_else(|e| panic!("{e}"));
@@ -1046,7 +1106,9 @@ mod tests {
             }
             _ => panic!("frame expected"),
         }
-        assert!(matches!(&l.elements[1].kind, ElementKind::Text { size, .. } if *size <= 400.0));
+        assert!(
+            matches!(&l.elements[1].kind, ElementKind::Text { size, letter_spacing, .. } if *size <= 400.0 && *letter_spacing == MIN_LETTER_SPACING)
+        );
         let id = l.add("n", (0.0, 0.0, 1.0, 1.0), ElementKind::north_arrow(ids[0]));
         assert!(!ids.contains(&id));
         // An id at u32::MAX is renumbered, and adding after it doesn't overflow.

@@ -6,8 +6,9 @@
 
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use rustgis_engine::map::layout::{
-    ArrowStyle, CoordFormat, ElementKind, Grid, GridStyle, Layout, MAX_COLORBAR_TICKS, MAX_GRID_WIDTH, MAX_SCALE_DIVISIONS, MAX_TICK_MM,
-    Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TickSide, frame_camera,
+    ArrowStyle, CoordFormat, ElementKind, Grid, GridStyle, Layout, MAX_COLORBAR_TICKS, MAX_GRID_WIDTH, MAX_LETTER_SPACING,
+    MAX_SCALE_DIVISIONS, MAX_TICK_MM, MIN_LETTER_SPACING, Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TextAlign, TickSide,
+    frame_camera,
 };
 use serde_json::{Value, json};
 
@@ -1025,7 +1026,7 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
         }
         ui.end_row();
         match &e.kind {
-            ElementKind::Text { text, size, color, bold } => {
+            ElementKind::Text { text, size, color, bold, italic, align, letter_spacing } => {
                 ui.label(tl!("Size"));
                 let mut sz = *size;
                 let r = ui.add(egui::DragValue::new(&mut sz).range(2.0..=400.0).speed(0.2).suffix(" pt"));
@@ -1043,6 +1044,30 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                 let mut bb = *bold;
                 if ui.checkbox(&mut bb, "").changed() {
                     update(app, json!({"bold": bb}));
+                }
+                ui.end_row();
+                ui.label(tl!("Italic"));
+                let mut it = *italic;
+                if ui.checkbox(&mut it, "").changed() {
+                    update(app, json!({"italic": it}));
+                }
+                ui.end_row();
+                ui.label(tl!("Alignment"));
+                egui::ComboBox::from_id_salt(("text_align", id)).selected_text(tl!(align.label())).show_ui(ui, |ui| {
+                    for v in TextAlign::ALL {
+                        if ui.selectable_label(*align == v, tl!(v.label())).clicked() && *align != v {
+                            update(app, json!({"align": v.code()}));
+                        }
+                    }
+                });
+                ui.end_row();
+                ui.label(tl!("Letter spacing"));
+                let mut ls = *letter_spacing;
+                let r = ui.add(
+                    egui::DragValue::new(&mut ls).range(MIN_LETTER_SPACING..=MAX_LETTER_SPACING).speed(0.1).max_decimals(1).suffix(" pt"),
+                );
+                if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && (ls - letter_spacing).abs() > 1e-6 {
+                    update(app, json!({"letterSpacing": ls}));
                 }
                 ui.end_row();
                 ui.label(tl!("Text"));
@@ -1508,6 +1533,40 @@ mod tests {
         assert_eq!(layout.elements.len(), n, "Backspace deleted the copy");
         assert!(layout.element(copy).is_none() && layout.element(title.id).is_some());
         assert_eq!(app.layout.selected, None);
+    }
+
+    /// A text element's properties set italic, alignment and letter spacing (#213, point c).
+    #[test]
+    fn a_text_element_takes_italic_alignment_and_spacing() {
+        use egui_kittest::kittest::Queryable;
+        use rustgis_engine::map::layout::{ElementKind, TextAlign};
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Type"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let title = app.session.project.layouts[li].elements.iter().find(|e| e.name == "Title").unwrap().id;
+        app.layout.selected = Some(title);
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                super::show(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        for control in ["Italic", "Alignment", "Letter spacing"] {
+            assert!(h.query_by_label(control).is_some(), "{control} is in the text's properties");
+        }
+        // A script's change reaches the panel's element, which draws on.
+        h.state_mut().run("layout.update", json!({"element": title, "align": "right", "italic": true})).unwrap();
+        h.run_steps(2);
+        assert!(h.query_by_label("Letter spacing").is_some());
+        let kind = &h.state().session.project.layouts[li].element(title).unwrap().kind;
+        assert!(matches!(kind, ElementKind::Text { italic: true, align: TextAlign::Right, .. }), "{kind:?}");
     }
 
     /// An overview frame's properties show its extent indicator's colour and width (#213), and

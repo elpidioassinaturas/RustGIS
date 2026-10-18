@@ -137,6 +137,48 @@ fn draw_text(pm: &mut Pixmap, text: &str, cx: f32, cy: f32, px_size: f32, color:
     }
 }
 
+/// The slant of synthetic italics (the fonts have no italic face): tan 12°, as type designers
+/// slant an oblique.
+const SLANT: f32 = 0.2126;
+
+/// The width in pixels of `text` at `px` with `spacing` pixels added between letters.
+pub fn styled_width(text: &str, px: f32, bold: bool, spacing: f32) -> f32 {
+    let (glyphs, width) = shape(text, px, bold);
+    width + spacing * glyphs.len().saturating_sub(1) as f32
+}
+
+/// Draws `text` from `left` (pixels), its line centred on `cy`, at `px` with `spacing` pixels
+/// between letters, slanted when `italic`. Plain (no spacing, upright) it draws as
+/// [`text_at`] does from the left.
+#[allow(clippy::too_many_arguments)]
+pub fn styled_at(pm: &mut Pixmap, text: &str, left: f32, cy: f32, px: f32, color: Rgba, bold: bool, italic: bool, spacing: f32) {
+    if !(left.is_finite() && cy.is_finite() && px.is_finite() && spacing.is_finite()) || px <= 0.0 {
+        return;
+    }
+    let Some(f) = font(bold) else { return };
+    let sf = f.as_scaled(PxScale::from(px));
+    let base = cy + (sf.ascent() + sf.descent()) / 2.0;
+    let (glyphs, _) = shape(text, px, bold);
+    for (i, (f, id, x)) in glyphs.into_iter().enumerate() {
+        let g = id.with_scale_and_position(sf.scale(), ab_glyph::point(left + x + spacing * i as f32, base));
+        let Some(og) = f.outline_glyph(g) else { continue };
+        let bb = og.px_bounds();
+        og.draw(|gx, gy, cov| {
+            let (px_x, px_y) = (bb.min.x + gx as f32, bb.min.y + gy as f32);
+            if !italic {
+                blend(pm, px_x as i32, px_y as i32, color, cov);
+                return;
+            }
+            // Each row leans right by its height above the baseline, split across the two
+            // pixels it falls between so the slant stays smooth.
+            let shifted = px_x + SLANT * (base - px_y - 0.5);
+            let (ix, frac) = (shifted.floor(), shifted - shifted.floor());
+            blend(pm, ix as i32, px_y as i32, color, cov * (1.0 - frac));
+            blend(pm, ix as i32 + 1, px_y as i32, color, cov * frac);
+        });
+    }
+}
+
 /// Draws a placed label (logical coordinates) with its halo.
 pub fn draw(pm: &mut Pixmap, l: &PlacedLabel, ppp: f32) {
     let px = l.size * 1.33 * ppp;

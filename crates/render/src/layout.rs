@@ -4,7 +4,7 @@
 use rustgis_data::GeometryType;
 use rustgis_geom::{Coord, Extent};
 use rustgis_map::layout::{
-    ArrowStyle, ColorScale, ElementKind, FrameShape, Grid, Layout, Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TickSide,
+    ArrowStyle, ColorScale, ElementKind, FrameShape, Grid, Layout, Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TextAlign, TickSide,
     frame_camera,
 };
 use rustgis_map::symbology::LegendEntry;
@@ -170,10 +170,11 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                     None => placeholder(&mut pm, r, "Colorbar", ppp),
                 }
             }
-            ElementKind::Text { text: t, size, color, bold } => {
+            ElementKind::Text { text: t, size, color, bold, italic, align, letter_spacing } => {
                 let first = layout.first_frame().and_then(frame);
                 let s = expand(t, layout, info, first.and_then(|f| maps.get(f.1).map(|m| (m, f.2))));
-                text_block(&mut pm, r, &s, *size as f32, *color, *bold, ppp);
+                let style = TextStyle { bold: *bold, italic: *italic, align: *align, spacing: *letter_spacing as f32 };
+                text_block(&mut pm, r, &s, *size as f32, *color, style, ppp);
             }
             ElementKind::Picture { image } => {
                 if let Some(img) = crate::picture::decode(image) {
@@ -953,14 +954,32 @@ fn colorbar(pm: &mut Pixmap, r: Rect, scale: &ColorScale, bar: &Bar, ppp: f64) {
 }
 
 /// Text in an element: lines split at `\n`, left-aligned from the top.
-fn text_block(pm: &mut Pixmap, r: Rect, s: &str, size: f32, color: Rgba, bold: bool, ppp: f64) {
+/// How a text element's lines are drawn, beyond their size and colour.
+#[derive(Clone, Copy)]
+struct TextStyle {
+    bold: bool,
+    italic: bool,
+    align: TextAlign,
+    /// Letter spacing in points.
+    spacing: f32,
+}
+
+fn text_block(pm: &mut Pixmap, r: Rect, s: &str, size: f32, color: Rgba, style: TextStyle, ppp: f64) {
     let px = size.clamp(2.0, 400.0) * 1.33 * ppp as f32;
+    // Letter spacing is in points, as the size is.
+    let spacing = style.spacing * 1.33 * ppp as f32;
     let mut y = r.y() + px * 0.6;
     for line in s.lines().take(200) {
         if y > r.y() + r.height() + px {
             break;
         }
-        text::text_at(pm, line, r.x(), y, px, color, bold, text::Align::Left, false);
+        let w = text::styled_width(line, px, style.bold, spacing);
+        let left = match style.align {
+            TextAlign::Left => r.x(),
+            TextAlign::Center => r.x() + (r.width() - w) / 2.0,
+            TextAlign::Right => r.x() + r.width() - w,
+        };
+        text::styled_at(pm, line, left, y, px, color, style.bold, style.italic, spacing);
         y += px * 1.25;
     }
 }
@@ -1236,6 +1255,71 @@ mod tests {
             .flat_map(|y| ((5.0 * k) as u32..(55.0 * k) as u32).map(move |x| (x, y)))
             .filter(|&(x, y)| near(rgb(pm, x, y)))
             .count()
+    }
+
+    /// One line of black text drawn in a white 400 × 60 px box with `style`.
+    fn styled_line(style: TextStyle) -> Pixmap {
+        let mut pm = Pixmap::new(400, 60).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let r = Rect::from_xywh(0.0, 0.0, 400.0, 60.0).unwrap();
+        text_block(&mut pm, r, "Oceano Atlântico", 20.0, Rgba::rgb(0, 0, 0), style, 1.0);
+        pm
+    }
+
+    /// The leftmost and rightmost inked columns, and the inked column nearest the left at the
+    /// top and at the bottom of the letters.
+    fn text_ink(pm: &Pixmap) -> (u32, u32, u32, u32) {
+        let dark = |x: u32, y: u32| rgb(pm, x, y).0 < 128;
+        let rows: Vec<u32> = (0..pm.height()).filter(|&y| (0..pm.width()).any(|x| dark(x, y))).collect();
+        let (top, bottom) = (rows[0], rows[rows.len() - 1]);
+        let cols: Vec<u32> = (0..pm.width()).filter(|&x| (0..pm.height()).any(|y| dark(x, y))).collect();
+        let first = |y: u32| (0..pm.width()).find(|&x| dark(x, y)).unwrap_or(0);
+        (cols[0], cols[cols.len() - 1], first(top + 1), first(bottom - 1))
+    }
+
+    /// The height of the inked rows.
+    fn text_height(pm: &Pixmap) -> u32 {
+        let rows: Vec<u32> = (0..pm.height()).filter(|&y| (0..pm.width()).any(|x| rgb(pm, x, y).0 < 128)).collect();
+        rows[rows.len() - 1] - rows[0]
+    }
+
+    /// Text elements take italic, alignment and letter spacing (#213, point c); plain, they draw
+    /// as before.
+    #[test]
+    fn text_takes_italic_alignment_and_letter_spacing() {
+        let plain = TextStyle { bold: false, italic: false, align: TextAlign::Left, spacing: 0.0 };
+        let base = styled_line(plain);
+        let (l, r, ..) = text_ink(&base);
+        assert!(l < 4, "left-aligned starts at the left: {l}");
+        // Plain is what the old upright, left-aligned drawing gave.
+        let mut old = Pixmap::new(400, 60).unwrap();
+        old.fill(tiny_skia::Color::WHITE);
+        let px = 20.0 * 1.33;
+        text::text_at(&mut old, "Oceano Atlântico", 0.0, px * 0.6, px, Rgba::rgb(0, 0, 0), false, text::Align::Left, false);
+        assert_eq!(text_ink(&old).0.abs_diff(l), 0);
+        assert_eq!(text_ink(&old).1.abs_diff(r), 0);
+        // Right and centre: the same width, moved.
+        let (rl, rr, ..) = text_ink(&styled_line(TextStyle { align: TextAlign::Right, ..plain }));
+        assert!(rr > 395 && (rr - rl).abs_diff(r - l) <= 1, "right-aligned ends at the right: {rl}..{rr}");
+        let (cl, cr, ..) = text_ink(&styled_line(TextStyle { align: TextAlign::Center, ..plain }));
+        assert!(cl.abs_diff(400 - cr) <= 2, "centred: {cl}..{cr}");
+        // Spacing: 15 gaps of 3 pt widen the line by about 15 × 3 × 1.33 px.
+        let (sl, sr, ..) = text_ink(&styled_line(TextStyle { spacing: 3.0, ..plain }));
+        let grown = (sr - sl) as f32 - (r - l) as f32;
+        assert!((grown - 15.0 * 3.0 * 1.33).abs() < 3.0, "{grown}");
+        // Italic: a straight stem (an `l`) leans right, its top about tan 12° of its height
+        // right of its foot; upright, it stands straight.
+        let stem = |italic: bool| {
+            let mut pm = Pixmap::new(120, 120).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            let r = Rect::from_xywh(40.0, 0.0, 80.0, 120.0).unwrap();
+            text_block(&mut pm, r, "l", 60.0, Rgba::rgb(0, 0, 0), TextStyle { italic, ..plain }, 1.0);
+            let (.., top, bottom) = text_ink(&pm);
+            (top as i32 - bottom as i32, text_height(&pm))
+        };
+        let ((upright, _), (lean, height)) = (stem(false), stem(true));
+        assert!(upright.abs() <= 1, "upright stem: {upright}");
+        assert!((lean as f32 - 0.2126 * height as f32).abs() <= 3.0, "lean {lean} over {height} px");
     }
 
     /// The extent indicator is drawn in its own colour and width (#213): red and 2 pt until set.

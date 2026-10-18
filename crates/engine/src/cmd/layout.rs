@@ -7,8 +7,8 @@ use rustgis_geom::{Coord, Extent};
 use rustgis_map::Rgba;
 use rustgis_map::layout::{
     ArrowStyle, CoordFormat, ElementKind, FrameShape, Grid, GridEdges, GridStyle, Guides, Layout, MAX_COLORBAR_TICKS, MAX_GRID_WIDTH,
-    MAX_GUIDES, MAX_SCALE_DIVISIONS, MAX_TICK_MM, MIN_ELEMENT_MM, MapSeries, Orientation, PAGES, ScaleBarStyle, ScaleUnits, TickSide,
-    fit_scale,
+    MAX_GUIDES, MAX_SCALE_DIVISIONS, MAX_TICK_MM, MIN_ELEMENT_MM, MapSeries, Orientation, PAGES, ScaleBarStyle, ScaleUnits, TextAlign,
+    TickSide, fit_scale,
 };
 use serde_json::{Value, json};
 
@@ -82,10 +82,10 @@ pub fn commands() -> Vec<C> {
             r#"{"layout"?, "shape"?: "rectangle"|"circle"|"ellipse"|"polygon"|"lasso", "points"?: [[u, v], …] (polygon/lasso, 0..1 across the frame), "map"?: name, "x"?, "y"?, "w"?, "h"?: mm}"#,
         ),
         C::new("layout.addElement", "Add Element", "Publish › Map Surrounds", add_element).params(
-            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"colorbar"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator, which also takes "color" and "width" in points, default red and 2), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA", "bold"?: bool (text), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "hideOther"?: bool (legend: leave out <all other values>), "orientation"?: "horizontal"|"vertical" (colorbar), "ticks"?: 2..21 (colorbar: labelled values, ends included), "tickSide"?: "below"|"above"|"right"|"left" (colorbar), "reverse"?: bool (colorbar: high values first), "fill"?: "#RRGGBBAA" (rectangle, northArrow), "width"?: outline width (rectangle) or line width in points (grid), "image"?: base64, "path"?: picture file, "layer"?: (table, chart; colorbar: a raster layer, default the top visible one), "field"?, "label"?, "rows"?, "step"?: degrees (0 picks one), "labels"?: bool, "style"?: "lines"|"ticks"|"linesAndTicks" (grid) or "classic"|"compass"|"triangle"|"star" (northArrow) or "alternating"|"stepped"|"line" (scaleBar), "tickLength"?: mm, "format"?: "decimal"|"dms", "hemisphere"?: bool (N/S/E/W rather than a sign), "edges"?: ["top","bottom","left","right"] (labelled edges), "labelOrientation"?: "horizontal"|"vertical", "off"?: bool (grid; options not given keep the grid's), "outline"?: "#RRGGBB" (northArrow), "units"?: "auto"|"kilometers"|"meters"|"miles"|"feet", "divisions"?: 1..10 (scaleBar), "x"?, "y"?, "w"?, "h"?: mm}"##,
+            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"colorbar"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator, which also takes "color" and "width" in points, default red and 2), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA", "bold"?: bool (text), "italic"?: bool, "align"?: "left"|"center"|"right", "letterSpacing"?: points, -5 to 50 (text, dynamicText), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "hideOther"?: bool (legend: leave out <all other values>), "orientation"?: "horizontal"|"vertical" (colorbar), "ticks"?: 2..21 (colorbar: labelled values, ends included), "tickSide"?: "below"|"above"|"right"|"left" (colorbar), "reverse"?: bool (colorbar: high values first), "fill"?: "#RRGGBBAA" (rectangle, northArrow), "width"?: outline width (rectangle) or line width in points (grid), "image"?: base64, "path"?: picture file, "layer"?: (table, chart; colorbar: a raster layer, default the top visible one), "field"?, "label"?, "rows"?, "step"?: degrees (0 picks one), "labels"?: bool, "style"?: "lines"|"ticks"|"linesAndTicks" (grid) or "classic"|"compass"|"triangle"|"star" (northArrow) or "alternating"|"stepped"|"line" (scaleBar), "tickLength"?: mm, "format"?: "decimal"|"dms", "hemisphere"?: bool (N/S/E/W rather than a sign), "edges"?: ["top","bottom","left","right"] (labelled edges), "labelOrientation"?: "horizontal"|"vertical", "off"?: bool (grid; options not given keep the grid's), "outline"?: "#RRGGBB" (northArrow), "units"?: "auto"|"kilometers"|"meters"|"miles"|"feet", "divisions"?: 1..10 (scaleBar), "x"?, "y"?, "w"?, "h"?: mm}"##,
         ),
         C::new("layout.update", "Element Properties", "Publish › Element", update).params(
-            r##"{"layout"?, "element": id, "x"?, "y"?, "w"?, "h"?: mm, "name"?, "visible"?, "text"?, "size"?, "color"?, "bold"?, "title"?, "allClasses"?: bool (legend), "hideOther"?: bool (legend), "orientation"?, "ticks"?, "tickSide"?, "reverse"?: (colorbar), "style"?: (northArrow, scaleBar), "fill"?, "outline"? (northArrow), "units"?, "divisions"? (scaleBar), "map"?, "scale"?, "center"?: [lon, lat], "bearing"?: degrees clockwise from north, "pitch"?: degrees of tilt (0 to 85), "grid"?: {grid options as in layout.addElement} | false (map frame), "extentIndicator"?: {"color"?, "width"?: points} | false (map frame: its extent indicator's style, or removes it), "layer"?: (colorbar: "" for the top visible raster), "field"?, "rows"?}"##,
+            r##"{"layout"?, "element": id, "x"?, "y"?, "w"?, "h"?: mm, "name"?, "visible"?, "text"?, "size"?, "color"?, "bold"?, "italic"?, "align"?, "letterSpacing"? (text), "title"?, "allClasses"?: bool (legend), "hideOther"?: bool (legend), "orientation"?, "ticks"?, "tickSide"?, "reverse"?: (colorbar), "style"?: (northArrow, scaleBar), "fill"?, "outline"? (northArrow), "units"?, "divisions"? (scaleBar), "map"?, "scale"?, "center"?: [lon, lat], "bearing"?: degrees clockwise from north, "pitch"?: degrees of tilt (0 to 85), "grid"?: {grid options as in layout.addElement} | false (map frame), "extentIndicator"?: {"color"?, "width"?: points} | false (map frame: its extent indicator's style, or removes it), "layer"?: (colorbar: "" for the top visible raster), "field"?, "rows"?}"##,
         ),
         C::new("layout.guides", "Guides", "Publish › Page Setup", guides).params(
             r#"{"layout"?, "x"?: [mm] (vertical guides, from the page's left edge), "y"?: [mm] (horizontal guides, from its top edge), "clear"?: bool (remove every guide first)}"#,
@@ -261,11 +261,7 @@ pub(crate) fn new_layout(s: &mut Session, p: &Value) -> CmdResult {
             let frame = l.add("Map Frame", (m, m + 16.0, fw, fh), frame_kind(s, &map, fw, FrameShape::Rectangle));
             let side = m + fw + 6.0;
             let sw = w - side - m;
-            l.add(
-                "Title",
-                (m, m, w - 2.0 * m, 14.0),
-                ElementKind::Text { text: map.clone(), size: 22.0, color: Rgba::rgb(0x1F, 0x29, 0x37), bold: true },
-            );
+            l.add("Title", (m, m, w - 2.0 * m, 14.0), ElementKind::text(map.clone(), 22.0, Rgba::rgb(0x1F, 0x29, 0x37), true));
             l.add(
                 "Legend",
                 (side, m + 16.0, sw, fh * 0.6),
@@ -276,7 +272,7 @@ pub(crate) fn new_layout(s: &mut Session, p: &Value) -> CmdResult {
             l.add(
                 "Credits",
                 (side, h - m - 10.0, sw, 10.0),
-                ElementKind::Text { text: "{scale} · {date}".into(), size: 8.0, color: Rgba::rgb(0x55, 0x5B, 0x66), bold: false },
+                ElementKind::text("{scale} · {date}", 8.0, Rgba::rgb(0x55, 0x5B, 0x66), false),
             );
         }
         t => return Err(format!("unknown template '{t}'")),
@@ -476,11 +472,15 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
             let default = if kind == "text" { "Text" } else { "{map} · {scale} · {date}" };
             let text: String = ps(p, "text").unwrap_or(default).chars().take(5000).collect();
             let size = f(p, "size").unwrap_or(12.0).clamp(2.0, 400.0);
+            let (italic, align, letter_spacing) = text_style(p, false, TextAlign::Left, 0.0)?;
             let k = ElementKind::Text {
                 text,
                 size,
                 color: color(p, "color", Rgba::rgb(0x1F, 0x29, 0x37))?,
                 bold: b(p, "bold").unwrap_or(false),
+                italic,
+                align,
+                letter_spacing,
             };
             (if kind == "text" { "Text" } else { "Dynamic Text" }, place(p, l, (15.0, 12.0, 120.0, (size * 0.5).max(8.0)))?, k)
         }
@@ -673,6 +673,31 @@ fn edges(v: &Value) -> Result<GridEdges, String> {
 
 /// A north arrow or scale bar with the options in `p` over `kind`'s; `None` for other elements
 /// or when `p` has none. A bad value is an error, leaving nothing changed.
+/// A text element's italic, alignment and letter spacing (points) from `italic`, `align` and
+/// `letterSpacing` in `p`, each keeping the current one when not given; one given but not of its
+/// kind is an error.
+fn text_style(p: &Value, italic: bool, align: TextAlign, spacing: f64) -> Result<(bool, TextAlign, f64), String> {
+    let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
+    let italic = match p.get("italic") {
+        None | Some(Value::Null) => italic,
+        Some(Value::Bool(v)) => *v,
+        Some(Value::String(t)) if ["true", "yes", "1", "on"].contains(&t.trim()) => true,
+        Some(Value::String(t)) if ["false", "no", "0", "off"].contains(&t.trim()) => false,
+        Some(_) => return Err("italic must be true or false".into()),
+    };
+    let align = match ps(p, "align") {
+        Some(a) => TextAlign::from_name(a).ok_or_else(|| format!("unknown alignment '{a}' (left, center or right)"))?,
+        None if given("align") => return Err("align must be left, center or right".into()),
+        None => align,
+    };
+    let spacing = match (given("letterSpacing"), f(p, "letterSpacing")) {
+        (_, Some(v)) => v.clamp(rustgis_map::layout::MIN_LETTER_SPACING, rustgis_map::layout::MAX_LETTER_SPACING),
+        (true, None) => return Err("letterSpacing must be a number of points".into()),
+        (false, None) => spacing,
+    };
+    Ok((italic, align, spacing))
+}
+
 fn restyle(kind: &ElementKind, p: &Value) -> Result<Option<ElementKind>, String> {
     match kind {
         ElementKind::NorthArrow { frame, style, fill, outline } => {
@@ -840,6 +865,11 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         Some(c) => Some(Rgba::from_hex(c).ok_or("color must be #RRGGBB or #RRGGBBAA")?),
         None => None,
     };
+    // A text element's italic, alignment and spacing, checked before anything changes.
+    let new_text_style = match s.project.layouts.get(li).and_then(|l| l.element(id)).map(|e| &e.kind) {
+        Some(ElementKind::Text { italic, align, letter_spacing, .. }) => Some(text_style(p, *italic, *align, *letter_spacing)?),
+        _ => None,
+    };
     let l = active(s, p)?;
     let e = l.element_mut(id).ok_or_else(|| format!("no element {id}"))?;
     let num = |k: &str, lo: f64, hi: f64| f(p, k).map(|v| v.clamp(lo, hi));
@@ -873,7 +903,10 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         e.kind = k;
     }
     match &mut e.kind {
-        ElementKind::Text { text, size, color, bold } => {
+        ElementKind::Text { text, size, color, bold, italic, align, letter_spacing } => {
+            if let Some((i, a, l)) = new_text_style {
+                (*italic, *align, *letter_spacing) = (i, a, l);
+            }
             if let Some(t) = ps(p, "text") {
                 *text = t.chars().take(5000).collect();
             }

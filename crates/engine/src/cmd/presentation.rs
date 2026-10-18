@@ -281,7 +281,7 @@ pub fn page_layout(s: &Session, pres: &Presentation, page: &Page) -> Layout {
     let dark = Rgba::rgb(0x1F, 0x29, 0x37);
     let has_title = !page.title.trim().is_empty();
     let top = if has_title { m + h * 0.14 } else { m };
-    let text = |text: &str, size: f64, color: Rgba, bold: bool| ElementKind::Text { text: text.to_string(), size, color, bold };
+    let text = |text: &str, size: f64, color: Rgba, bold: bool| ElementKind::text(text, size, color, bold);
     match &page.kind {
         PageKind::Blank { text: body, background } => {
             l.add("Background", (0.0, 0.0, w, h), ElementKind::Rectangle { fill: *background, outline: *background, width: 0.0 });
