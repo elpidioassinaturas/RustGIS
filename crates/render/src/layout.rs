@@ -963,7 +963,9 @@ struct TextStyle {
     spacing: f32,
 }
 
-/// Text in an element: lines split at `\n` from the top, each placed by the style's alignment.
+/// Text in an element: lines split at `\n` from the top, each placed by the style's alignment. A
+/// centred or right-aligned line wider than the element runs out past its left edge, as a
+/// left-aligned one runs past its right.
 fn text_block(pm: &mut Pixmap, r: Rect, s: &str, size: f32, color: Rgba, style: TextStyle, ppp: f64) {
     let px = size.clamp(2.0, 400.0) * 1.33 * ppp as f32;
     // Letter spacing is in points, as the size is.
