@@ -1213,7 +1213,13 @@ impl RustGisApp {
     /// made.
     fn record_step(&mut self, id: &str, params: &Value) {
         let Some(steps) = self.ws.recording.as_mut() else { return };
-        if id.starts_with("ui.") || id.starts_with("task.") {
+        // Not steps of an exercise: panes, tasks, opening or saving the project, undo and redo,
+        // and picking the layer to work on (a click in the Layers pane).
+        if id.starts_with("ui.")
+            || id.starts_with("task.")
+            || id.starts_with("project.")
+            || matches!(id, "edit.undo" | "edit.redo" | "layer.select")
+        {
             return;
         }
         let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates) else { return };

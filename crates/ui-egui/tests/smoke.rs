@@ -733,6 +733,8 @@ fn a_task_is_recorded_from_what_changes_the_project_and_edited_in_its_pane() {
     app.run("map.basemap", json!({"name": "paper"})).unwrap();
     app.run("select.byAttributes", json!({"layer": "Countries", "where": "pop_est > 1000000"})).unwrap();
     app.run("select.byAttributes", json!({"layer": "Countries", "where": "pop_est > 5000000"})).unwrap();
+    // Picking the layer to work on isn't a step either.
+    app.run("layer.select", json!({"layer": "Lakes"})).unwrap();
     // Neither panes nor the view are steps.
     app.run("ui.pane.symbology", json!(null)).unwrap();
     app.run("map.zoomIn", json!(null)).unwrap();

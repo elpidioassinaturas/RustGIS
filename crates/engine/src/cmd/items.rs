@@ -266,7 +266,8 @@ pub fn commands() -> Vec<C> {
         })
         .params(r#"{"task"?: name, "step": number (from 0), "title"?: string, "instructions"?: string}"#),
         C::new("task.moveStep", "Move Task Step", "Tasks", |s, p| {
-            let (step, to) = (step_index(p)?, p.get("to").and_then(Value::as_u64).ok_or("to is required")? as usize);
+            let to = p.get("to").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()).ok_or("to is required")?;
+            let step = step_index(p)?;
             let t = task_mut(s, p)?;
             if step >= t.steps.len() || to >= t.steps.len() {
                 return Err(format!("{} has {} steps", t.name, t.steps.len()));
@@ -595,7 +596,8 @@ fn task_ref<'a>(s: &'a Session, p: &Value) -> Result<&'a Task, String> {
 
 /// A step's index from `step` (from 0).
 fn step_index(p: &Value) -> Result<usize, String> {
-    p.get("step").and_then(Value::as_u64).map(|i| i as usize).ok_or_else(|| "step is required".to_string())
+    // Checked: on wasm32 `as usize` would wrap a large number round to a small, valid index.
+    p.get("step").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()).ok_or_else(|| "step is required".to_string())
 }
 
 fn task_mut<'a>(s: &'a mut Session, p: &Value) -> Result<&'a mut Task, String> {
@@ -608,8 +610,11 @@ fn task_mut<'a>(s: &'a mut Session, p: &Value) -> Result<&'a mut Task, String> {
 /// Runs a task's steps (or one of them), stopping at the first that fails.
 fn run_task(s: &mut Session, p: &Value) -> CmdResult {
     let t = task_ref(s, p)?.clone();
-    let steps: Vec<(usize, TaskStep)> = match p.get("step").and_then(Value::as_u64) {
-        Some(i) => vec![(i as usize, t.steps.get(i as usize).cloned().ok_or_else(|| format!("{} has {} steps", t.name, t.steps.len()))?)],
+    let steps: Vec<(usize, TaskStep)> = match p.get("step") {
+        Some(_) => {
+            let i = step_index(p)?;
+            vec![(i, t.steps.get(i).cloned().ok_or_else(|| format!("{} has {} steps", t.name, t.steps.len()))?)]
+        }
         None => t.steps.iter().cloned().enumerate().collect(),
     };
     let mut done = Vec::new();

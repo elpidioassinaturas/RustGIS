@@ -37,8 +37,9 @@ const DIALOGS: &[(&str, &str)] = &[("select.byAttributes", "selectByAttributes")
 pub fn start(app: &mut RustGisApp, st: &TaskStep) -> String {
     let id = st.command.as_str();
     if matches!(id, "layer.color" | "layer.outline" | "layer.symbology" | "layer.transparency") {
+        // On the session directly: Show Me does nothing a recording should keep.
         if let Some(layer) = st.params.get("layer") {
-            let _ = app.run("layer.select", json!({"layer": layer}));
+            let _ = app.session.run("layer.select", &json!({"layer": layer}));
         }
         app.ui.open_right(RightPane::Symbology);
         return tl!("It's in the Symbology pane, open on the step's layer.").to_string();

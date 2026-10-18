@@ -173,7 +173,10 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
                             app.ws.task_step = i;
                         }
                         if ui.small_button(tl!("Delete")).on_hover_text(tl!("Delete the step")).clicked() {
-                            run(app, "task.removeStep", json!({"task": name, "step": i}));
+                            if run(app, "task.removeStep", json!({"task": name, "step": i})).is_some() && app.ws.task_step > i {
+                                // The current step keeps pointing at the same step.
+                                app.ws.task_step -= 1;
+                            }
                             app.ws.task_edit = None;
                         }
                     } else {
