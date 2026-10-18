@@ -1205,7 +1205,13 @@ impl RustGisApp {
         let active = if self.ws.recording.is_some() { self.layer_acted_on(id, &params) } else { None };
         // A step being edited is known by its place in the task: Undo or Redo of a move or a
         // deletion would leave that place naming another step.
-        let task_steps = |app: &Self| app.session.project.tasks.iter().find(|t| t.name == app.ws.task).map(|t| t.steps.clone());
+        // What is compared: the task's length and the step at the edit's place (its words and
+        // command, not its parameters, which may be large).
+        let task_steps = |app: &Self| {
+            let task = app.session.project.tasks.iter().find(|t| t.name == app.ws.task)?;
+            let at = app.ws.task_edit.as_ref().and_then(|e| task.steps.get(e.0));
+            Some((task.steps.len(), at.map(|s| (s.title.clone(), s.instructions.clone(), s.command.clone()))))
+        };
         let steps_before = (matches!(id, "edit.undo" | "edit.redo") && self.ws.task_edit.is_some()).then(|| task_steps(self)).flatten();
         let r = if id.starts_with("ui.") { self.run_ui(id, &params) } else { self.session.run(id, &params) };
         if let Err(e) = &r {
