@@ -728,20 +728,25 @@ fn a_task_is_recorded_from_what_changes_the_project_and_edited_in_its_pane() {
     for c in ["#112233", "#223344", "#336699"] {
         app.run("layer.color", json!({"layer": "Lakes", "color": c})).unwrap();
     }
-    // A command that names no layer, run twice, is two steps.
+    // A command that names no layer, run twice, is two steps; so are two selections on one layer.
     app.run("map.basemap", json!({"name": "ocean"})).unwrap();
     app.run("map.basemap", json!({"name": "paper"})).unwrap();
+    app.run("select.byAttributes", json!({"layer": "Countries", "where": "pop_est > 1000000"})).unwrap();
+    app.run("select.byAttributes", json!({"layer": "Countries", "where": "pop_est > 5000000"})).unwrap();
     // Neither panes nor the view are steps.
     app.run("ui.pane.symbology", json!(null)).unwrap();
     app.run("map.zoomIn", json!(null)).unwrap();
     app.run("gp.run", json!({"tool": "buffer", "params": {"input": "Cities", "distance": 100, "output": "Near"}})).unwrap();
     app.run("layer.color", json!({"layer": "Near", "color": "#1B8A3A"})).unwrap();
     let r = app.run("ui.taskRecord", json!({"name": "Lesson"})).unwrap();
-    assert_eq!(r["steps"], json!(5));
+    assert_eq!(r["steps"], json!(7));
     let task = app.session.project.tasks.iter().find(|t| t.name == "Lesson").unwrap().clone();
     let commands: Vec<&str> = task.steps.iter().map(|s| s.command.as_str()).collect();
-    assert_eq!(commands, ["layer.color", "map.basemap", "map.basemap", "gp.run", "layer.color"]);
-    assert_eq!(task.steps[3].title, "Buffer", "a tool's step has the tool's name");
+    assert_eq!(
+        commands,
+        ["layer.color", "map.basemap", "map.basemap", "select.byAttributes", "select.byAttributes", "gp.run", "layer.color"]
+    );
+    assert_eq!(task.steps[5].title, "Buffer", "a tool's step has the tool's name");
     assert_eq!(task.steps[0].params["color"], json!("#336699"));
     // It opens in the Tasks pane, ready to edit.
     assert_eq!(app.ui.right, Some(rustgis_ui_egui::RightPane::Tasks));
@@ -799,6 +804,11 @@ fn show_me_points_at_where_a_steps_command_is() {
     assert_eq!(app.ui.tab, "Analyze");
     assert!(app.ui.show_me.as_ref().is_some_and(|s| s.found), "the Buffer button is outlined");
     assert_ne!(app.ui.right, Some(RightPane::Geoprocessing));
+    // With the ribbon minimized, Show Me opens it to outline the button.
+    h.state_mut().ui.ribbon_minimized = true;
+    show(&mut h, step("gp.run", json!({"tool": "buffer", "params": {}})));
+    assert!(h.state_mut().ui.show_me.as_ref().is_some_and(|s| s.found), "found on the peeked ribbon");
+    h.state_mut().ui.ribbon_minimized = false;
     // A tool with no button on the ribbon opens, empty, in the Tools pane.
     show(&mut h, step("gp.run", json!({"tool": "xyTableToPoint", "params": {}})));
     assert_eq!(h.state_mut().ui.right, Some(RightPane::Geoprocessing));

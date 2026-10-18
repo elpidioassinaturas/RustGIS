@@ -1208,18 +1208,20 @@ impl RustGisApp {
     }
 
     /// Record Task: adds a command that ran from the app and changed the project as a step. Not
-    /// panes and dialogs (`ui.*`), tasks themselves, or what only moves the view. The same command
-    /// again on the same layer (a colour dragged in its picker) updates the step it just made; a
-    /// command that names no layer always makes a step of its own.
+    /// panes and dialogs (`ui.*`), tasks themselves, or what only moves the view. A colour, outline
+    /// or transparency set again on the same layer (dragged in its picker) updates the step it just
+    /// made.
     fn record_step(&mut self, id: &str, params: &Value) {
         let Some(steps) = self.ws.recording.as_mut() else { return };
         if id.starts_with("ui.") || id.starts_with("task.") {
             return;
         }
         let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates) else { return };
-        // Tools and added data are always steps of their own.
+        // Only a setting adjusted again and again on one layer (a colour dragged in its picker)
+        // updates its step; anything else, a second selection on the same layer included, is a
+        // step of its own.
         if let Some(last) = steps.last_mut()
-            && !matches!(id, "gp.run" | "layer.addData" | "layer.addUrl")
+            && matches!(id, "layer.color" | "layer.outline" | "layer.transparency")
             && last.command == id
             && params.get("layer").is_some()
             && last.params.get("layer") == params.get("layer")
@@ -1974,7 +1976,14 @@ impl RustGisApp {
                 Some(steps) => {
                     let name = p.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Recorded Task");
                     let n = steps.len();
-                    let r = self.session.run("task.new", &json!({"name": name, "steps": steps}))?;
+                    let r = match self.session.run("task.new", &json!({"name": name, "steps": steps.clone()})) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            // The exercise stays recorded: stopping again tries again.
+                            self.ws.recording = Some(steps);
+                            return Err(e);
+                        }
+                    };
                     if let Some(task) = r.get("task").and_then(Value::as_str) {
                         self.ws.task = task.to_string();
                         self.ws.task_step = 0;

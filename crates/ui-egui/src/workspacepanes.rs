@@ -63,6 +63,24 @@ fn run(app: &mut RustGisApp, id: &str, p: Value) -> Option<Value> {
     }
 }
 
+/// After two neighbouring steps swap places, the step being edited (and the current one) keep
+/// pointing at the same steps, so Save writes the text where it was typed.
+pub fn follow_move(app: &mut RustGisApp, from: usize, to: usize) {
+    let swap = |i: usize| {
+        if i == from {
+            to
+        } else if i == to {
+            from
+        } else {
+            i
+        }
+    };
+    if let Some(edit) = app.ws.task_edit.as_mut() {
+        edit.0 = swap(edit.0);
+    }
+    app.ws.task_step = swap(app.ws.task_step);
+}
+
 /// Record Task: the button that starts or stops recording, and how far it has got.
 fn record_row(app: &mut RustGisApp, ui: &mut Ui) {
     ui.horizontal(|ui| match app.ws.recording.as_ref().map(Vec::len) {
@@ -140,11 +158,15 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
                         app.ws.task_step = i;
                     }
                     if app.ws.task_editing {
-                        if ui.add_enabled(i > 0, egui::Button::new("▲").small()).on_hover_text(tl!("Move Up")).clicked() {
-                            run(app, "task.moveStep", json!({"task": name, "step": i, "to": i - 1}));
+                        if ui.add_enabled(i > 0, egui::Button::new("▲").small()).on_hover_text(tl!("Move Up")).clicked()
+                            && run(app, "task.moveStep", json!({"task": name, "step": i, "to": i - 1})).is_some()
+                        {
+                            follow_move(app, i, i - 1);
                         }
-                        if ui.add_enabled(i < last, egui::Button::new("▼").small()).on_hover_text(tl!("Move Down")).clicked() {
-                            run(app, "task.moveStep", json!({"task": name, "step": i, "to": i + 1}));
+                        if ui.add_enabled(i < last, egui::Button::new("▼").small()).on_hover_text(tl!("Move Down")).clicked()
+                            && run(app, "task.moveStep", json!({"task": name, "step": i, "to": i + 1})).is_some()
+                        {
+                            follow_move(app, i, i + 1);
                         }
                         if ui.small_button(tl!("Edit")).on_hover_text(tl!("Edit the title and instructions")).clicked() {
                             app.ws.task_edit = Some((i, st.title.clone(), st.instructions.clone()));
@@ -527,5 +549,28 @@ pub fn catalog_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             app.ui.tab = "Publish".into();
         }
         app.map.invalidate();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_step_being_edited_follows_a_move() {
+        let mut app = RustGisApp::with_sample();
+        app.ws.task_edit = Some((2, "Title".into(), "Text".into()));
+        app.ws.task_step = 2;
+        // Step 2 moves up: the text typed for it stays with it, now at 1.
+        follow_move(&mut app, 2, 1);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(1));
+        assert_eq!(app.ws.task_step, 1);
+        // The step above moves down into its place: it moves up, out of the way, to 0.
+        follow_move(&mut app, 0, 1);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(0));
+        // Steps elsewhere don't touch it.
+        follow_move(&mut app, 4, 5);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(0));
     }
 }

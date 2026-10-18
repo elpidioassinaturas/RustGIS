@@ -58,6 +58,10 @@ pub fn start(app: &mut RustGisApp, st: &TaskStep) -> String {
     if let Some(tab) = spec.and_then(|c| c.location.split(" › ").next()).filter(|t| ribbon::TABS.contains(t)) {
         app.ui.tab = tab.to_string();
         app.ui.backstage = false;
+        // A minimized ribbon draws no buttons: show it, as a click on a tab does.
+        if app.ui.ribbon_minimized {
+            app.ui.ribbon_peek = true;
+        }
     }
     let label_shown = match id {
         "gp.run" => st
