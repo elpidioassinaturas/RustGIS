@@ -1012,8 +1012,11 @@ mod tests {
         let m = inputs();
         let r = crate::run("buffer", &m, &serde_json::json!({"input": "pts", "distance": 1, "output": "Named"})).unwrap();
         assert_eq!(layer(r).name, "Named");
-        // A tripwire, not a proof: the crate's code (every file under src/, up to its test module)
-        // names nothing that reaches the file system. Review still has to keep tools to that.
+        // A best-effort tripwire, not a proof: the crate's code (every file under src/, up to its
+        // test module) names nothing that reaches the file system, a path type included (a tool
+        // here takes layers, not paths). It can't see a write through another crate's helper;
+        // `no_built_in_tool_writes_its_output_as_a_file` runs the tools for that, and review
+        // still has to keep tools to it.
         // (Read where the sources are: not in a wasm test runner.)
         let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
         let mut scanned = 0;

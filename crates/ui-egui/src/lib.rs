@@ -1325,6 +1325,16 @@ impl RustGisApp {
             self.session.notify(text, false);
             return;
         }
+        // A task keeps its steps' parameters in the project: one carrying megabytes (a file's
+        // contents added from the app) would swell every save of it.
+        if serde_json::to_vec(params).map_or(0, |b| b.len()) > MAX_STEP_BYTES {
+            let text = crate::i18n::fmt(
+                "{command} isn't recorded: its parameters are over 4 MB, too much for a task to keep. Add that data to the project before recording.",
+                &[("command", tl!(spec.label))],
+            );
+            self.session.notify(text, false);
+            return;
+        }
         // A plain `key` is kept (a field or a lookup key, as often as not), but it might be an
         // access key: said once a recording.
         if rustgis_engine::sources::holds_plain_key(params) && !self.ws.recording_key_said {
@@ -3034,6 +3044,9 @@ mod service_text_tests {
     }
 }
 
+/// The most a recorded step's parameters may hold, serialized.
+const MAX_STEP_BYTES: usize = 4 << 20;
+
 /// Commands that act on the active layer when given no `layer`, though they are enabled without
 /// one (so [`RustGisApp::layer_acted_on`] can't tell from their `enabled`). A command added with
 /// an optional `layer` that defaults to the active layer goes here, so a recorded step names it;
@@ -3129,6 +3142,19 @@ mod record_tests {
         app.run("edit.undo", json!(null)).unwrap();
         assert!(app.ws.task_edit.is_none(), "the edit's place now names another step");
         assert!(app.session.notices.iter().any(|n| n.text.contains("step being edited was closed")));
+    }
+
+    /// A step whose parameters would swell the task isn't recorded, and that is said.
+    #[test]
+    fn a_step_over_the_size_limit_isnt_recorded() {
+        let mut app = RustGisApp::with_sample();
+        app.ws.recording = Some(Vec::new());
+        let big = "A".repeat(super::MAX_STEP_BYTES + 1);
+        app.record_step("layer.addDataBytes", &json!({"fileName": "big.geojson", "data": big}), None);
+        assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(0));
+        assert!(app.session.notices.iter().any(|n| n.text.contains("over 4 MB")));
+        app.record_step("layer.addDataBytes", &json!({"fileName": "small.geojson", "data": "AAAA"}), None);
+        assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(1));
     }
 
     /// A step keeping a plain `key` is recorded, and that is said once a recording.

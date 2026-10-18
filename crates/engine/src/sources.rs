@@ -241,6 +241,10 @@ fn secret_in(k: &str, keys: &[String]) -> bool {
 /// connection that [`redact`] would change. Recording a task leaves such a command out, since a
 /// task is saved with the project and shared as a file.
 pub fn holds_secret(params: &serde_json::Value) -> bool {
+    // A PEM private key (`-----BEGIN … PRIVATE KEY-----`), wherever it was pasted.
+    fn private_key(t: &str) -> bool {
+        t.contains("PRIVATE KEY-----")
+    }
     fn walk(v: &serde_json::Value, depth: usize) -> bool {
         use serde_json::Value;
         match v {
@@ -257,13 +261,18 @@ pub fn holds_secret(params: &serde_json::Value) -> bool {
                 // a field or a lookup key (a `?key=…` in an address `redact` reads in the string).
                 let beside_address =
                     || o.values().any(|v| v.as_str().is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("http")));
-                (secret_key(k) && (!k.eq_ignore_ascii_case("key") || beside_address()) && filled) || walk(v, depth + 1)
+                // A file's contents (Add Data's `data`, a GeoJSON `text`) isn't an address to read
+                // through, only checked for a private key pasted in.
+                let contents = matches!(k.to_ascii_lowercase().as_str(), "data" | "text");
+                let inside = match v {
+                    Value::String(t) if contents => private_key(t),
+                    _ => walk(v, depth + 1),
+                };
+                (secret_key(k) && (!k.eq_ignore_ascii_case("key") || beside_address()) && filled) || inside
             }),
             Value::Array(a) if depth < 16 => a.iter().any(|v| walk(v, depth + 1)),
             Value::Object(_) | Value::Array(_) => true,
-            // An address or a connection is short; a file's contents (Add Data's `data`, a
-            // GeoJSON `text`) needn't be read through for one.
-            Value::String(t) => t.len() <= 8192 && redact(t) != *t,
+            Value::String(t) => private_key(t) || redact(t) != *t,
             _ => false,
         }
     }
@@ -457,6 +466,10 @@ mod tests {
             json!({"source": {"headers": {"X-API-Key": "abc"}}}),
             json!({"url": "https://example.com/data.geojson", "headers": {"Authorization": "Bearer abc"}}),
             json!({"headers": {"Cookie": "session=abc"}}),
+            json!({"url": format!("https://example.com/{}?sig=abc&sv=2024", "a".repeat(10_000))}),
+            json!({"certificate": "-----BEGIN RSA PRIVATE KEY-----
+MIIE
+-----END RSA PRIVATE KEY-----"}),
         ] {
             assert!(holds_secret(&p), "{p}");
         }
@@ -469,6 +482,7 @@ mod tests {
             json!({"token": {}, "password": []}),
             json!({"layer": "Parcels", "key": "parcel_id"}),
             json!({"fileName": "big.geojson", "data": "A".repeat(100_000)}),
+            json!({"fileName": "a.geojson", "text": "{\"type\": \"FeatureCollection\", \"note\": \"https://x.example/?token=t\"}"}),
         ] {
             assert!(!holds_secret(&p), "{p}");
         }

@@ -21,7 +21,8 @@ Tools for working across maps and views, and for setting up the app the way you 
     the task, named as typed beside it, and opens it for editing. Opening or creating another
     project ends a recording without making a task.
     - Undo doesn't remove a recorded step; delete it with Edit Steps.
-    - A task holds at most 200 steps.
+    - A task holds at most 200 steps, and a step's parameters at most 4 MB: add large data to
+      the project before recording.
     - Steps keep their parameters as they ran, file paths included (a file you added, say), so
       check them before sharing a task. A command run on the selected layer names it, so the
       step replays on that layer whichever is selected then; where two layers share a name it
