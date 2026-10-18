@@ -651,7 +651,7 @@ fn run_task(s: &mut Session, p: &Value) -> CmdResult {
 pub(crate) fn touches_files(command: &str, params: &Value) -> bool {
     const KEYS: &[&str] =
         &["path", "folder", "dir", "file", "url", "uri", "source", "output", "connection", "database", "data", "text", "poster", "locator"];
-    let reaches = |v: &Value| names_place(&output_names_left_out(v, 0), KEYS, 0);
+    let reaches = |v: &Value| names_place(&layer_name_left_out(command, v), KEYS, 0);
     let id = command.to_ascii_lowercase();
     let verb = id.split('.').nth(1).unwrap_or("");
     ["script.", "notebook.", "model.", "project.", "task.", "share.", "offline.", "cache.", "locator."].iter().any(|p| id.starts_with(p))
@@ -659,20 +659,23 @@ pub(crate) fn touches_files(command: &str, params: &Value) -> bool {
         || reaches(params)
 }
 
-/// Parameters without the `output` entries that only name a new layer: a tool's output name
-/// (`gp.run`'s `{"output": "riparian"}`) stays in the session, so a task from a file may set it. An
-/// `output` that looks like a path or an address is kept, so it still counts as a place.
-fn output_names_left_out(v: &Value, depth: usize) -> Value {
-    match v {
-        Value::Object(o) if depth < 16 => Value::Object(
-            o.iter()
-                .filter(|(k, v)| !(k.eq_ignore_ascii_case("output") && v.as_str().is_some_and(|t| !looks_like_path(t))))
-                .map(|(k, v)| (k.clone(), output_names_left_out(v, depth + 1)))
-                .collect(),
-        ),
-        Value::Array(a) if depth < 16 => Value::Array(a.iter().map(|v| output_names_left_out(v, depth + 1)).collect()),
-        v => v.clone(),
+/// Parameters without a built-in tool's output layer name, which stays in the session, so a task
+/// from a file may set it: only `gp.run`'s `params.output`, only for RustGIS's own tools (GeoLibre
+/// and plugin tools, `geolibre:…` and `plugin:…`, may write theirs as files), and only a plain name,
+/// with no `/`, `\`, `.` or `:` that could make it a file. Anything else stays a place.
+fn layer_name_left_out(command: &str, params: &Value) -> Value {
+    let built_in = params.get("tool").and_then(Value::as_str).is_some_and(|t| !t.contains(':'));
+    let plain = |t: &str| !t.trim().is_empty() && !t.contains(['/', '\\', '.', ':']) && !looks_like_path(t);
+    let named = params.pointer("/params/output").and_then(Value::as_str).is_some_and(plain);
+    let mut out = params.clone();
+    if command == "gp.run"
+        && built_in
+        && named
+        && let Some(p) = out.get_mut("params").and_then(Value::as_object_mut)
+    {
+        p.remove("output");
     }
+    out
 }
 
 /// Whether a string looks like a file path or an address.

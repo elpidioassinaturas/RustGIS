@@ -728,17 +728,20 @@ fn a_task_is_recorded_from_what_changes_the_project_and_edited_in_its_pane() {
     for c in ["#112233", "#223344", "#336699"] {
         app.run("layer.color", json!({"layer": "Lakes", "color": c})).unwrap();
     }
+    // A command that names no layer, run twice, is two steps.
+    app.run("map.basemap", json!({"name": "ocean"})).unwrap();
+    app.run("map.basemap", json!({"name": "paper"})).unwrap();
     // Neither panes nor the view are steps.
     app.run("ui.pane.symbology", json!(null)).unwrap();
     app.run("map.zoomIn", json!(null)).unwrap();
     app.run("gp.run", json!({"tool": "buffer", "params": {"input": "Cities", "distance": 100, "output": "Near"}})).unwrap();
     app.run("layer.color", json!({"layer": "Near", "color": "#1B8A3A"})).unwrap();
     let r = app.run("ui.taskRecord", json!({"name": "Lesson"})).unwrap();
-    assert_eq!(r["steps"], json!(3));
+    assert_eq!(r["steps"], json!(5));
     let task = app.session.project.tasks.iter().find(|t| t.name == "Lesson").unwrap().clone();
     let commands: Vec<&str> = task.steps.iter().map(|s| s.command.as_str()).collect();
-    assert_eq!(commands, ["layer.color", "gp.run", "layer.color"]);
-    assert_eq!(task.steps[1].title, "Buffer", "a tool's step has the tool's name");
+    assert_eq!(commands, ["layer.color", "map.basemap", "map.basemap", "gp.run", "layer.color"]);
+    assert_eq!(task.steps[3].title, "Buffer", "a tool's step has the tool's name");
     assert_eq!(task.steps[0].params["color"], json!("#336699"));
     // It opens in the Tasks pane, ready to edit.
     assert_eq!(app.ui.right, Some(rustgis_ui_egui::RightPane::Tasks));

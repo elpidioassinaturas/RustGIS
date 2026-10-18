@@ -1209,7 +1209,8 @@ impl RustGisApp {
 
     /// Record Task: adds a command that ran from the app and changed the project as a step. Not
     /// panes and dialogs (`ui.*`), tasks themselves, or what only moves the view. The same command
-    /// again on the same layer (a colour dragged in its picker) updates the step it just made.
+    /// again on the same layer (a colour dragged in its picker) updates the step it just made; a
+    /// command that names no layer always makes a step of its own.
     fn record_step(&mut self, id: &str, params: &Value) {
         let Some(steps) = self.ws.recording.as_mut() else { return };
         if id.starts_with("ui.") || id.starts_with("task.") {
@@ -1220,6 +1221,7 @@ impl RustGisApp {
         if let Some(last) = steps.last_mut()
             && !matches!(id, "gp.run" | "layer.addData" | "layer.addUrl")
             && last.command == id
+            && params.get("layer").is_some()
             && last.params.get("layer") == params.get("layer")
         {
             last.params = params.clone();

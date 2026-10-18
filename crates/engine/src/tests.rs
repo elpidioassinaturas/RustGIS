@@ -499,6 +499,19 @@ fn imported_tasks_name_outputs_and_steps_are_edited() {
     assert!(s.run("task.import", &json!({"text": to_a_file.to_string()})).is_err());
     assert!(crate::cmd::items::touches_files("gp.run", &json!({"tool": "buffer", "params": {"output": "../x.shp"}})));
     assert!(!crate::cmd::items::touches_files("gp.run", &json!({"tool": "buffer", "params": {"output": "Near cities"}})));
+    // Only a plain layer name, only gp.run's, only for RustGIS's own tools.
+    for (command, params) in [
+        ("gp.run", json!({"tool": "buffer", "params": {"output": "x.shp"}})),
+        ("gp.run", json!({"tool": "buffer", "params": {"output": "sub/x"}})),
+        ("gp.run", json!({"tool": "buffer", "params": {"output": "sub\\x"}})),
+        ("gp.run", json!({"tool": "buffer", "params": {"output": ".bashrc"}})),
+        ("gp.run", json!({"tool": "geolibre:slope", "params": {"output": "slope"}})),
+        ("gp.run", json!({"tool": "plugin:kit/hex", "params": {"output": "hex"}})),
+        ("gp.run", json!({"tool": "buffer", "params": {"input": "Cities", "nested": {"output": "x"}}})),
+        ("layer.rename", json!({"layer": "Cities", "output": "x"})),
+    ] {
+        assert!(crate::cmd::items::touches_files(command, &params), "{command} {params}");
+    }
 
     // Steps are edited, moved and deleted, each one undoable.
     s.run(
