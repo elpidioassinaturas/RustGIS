@@ -69,14 +69,17 @@ fn run(app: &mut RustGisApp, id: &str, p: Value) -> Option<Value> {
     }
 }
 
-/// After two neighbouring steps swap places, the step being edited (and the current one) keep
-/// pointing at the same steps, so Save writes the text where it was typed.
+/// After step `from` moves to `to` (as `task.moveStep` does), the step being edited (and the
+/// current one) keep pointing at the same steps, so Save writes the text where it was typed: the
+/// moved step is at `to`, and those it passed shift by one towards `from`.
 pub fn follow_move(app: &mut RustGisApp, from: usize, to: usize) {
     let swap = |i: usize| {
         if i == from {
             to
-        } else if i == to {
-            from
+        } else if from < to && (from + 1..=to).contains(&i) {
+            i - 1
+        } else if to < from && (to..from).contains(&i) {
+            i + 1
         } else {
             i
         }
@@ -612,6 +615,16 @@ mod tests {
         // Steps elsewhere don't touch it.
         follow_move(&mut app, 4, 5);
         assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(0));
+        // A move past it, several places at once, shifts it by one: step 0 to 3 moves it to 0's
+        // old place's neighbour, and back.
+        app.ws.task_edit = Some((2, "Title".into(), "Text".into()));
+        follow_move(&mut app, 0, 3);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(1));
+        follow_move(&mut app, 3, 0);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(2));
+        // The edited step itself moving far goes where it went.
+        follow_move(&mut app, 2, 5);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(5));
     }
 
     #[test]

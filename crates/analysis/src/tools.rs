@@ -1012,23 +1012,28 @@ mod tests {
         let m = inputs();
         let r = crate::run("buffer", &m, &serde_json::json!({"input": "pts", "distance": 1, "output": "Named"})).unwrap();
         assert_eq!(layer(r).name, "Named");
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // A tripwire, not a proof: the crate's code (every file under src/, up to its test module)
+        // names nothing that reaches the file system. Review still has to keep tools to that.
         // (Read where the sources are: not in a wasm test runner.)
-        for entry in std::fs::read_dir(&src).into_iter().flatten() {
-            let path = entry.unwrap().path();
-            if path.extension().is_some_and(|e| e == "rs") {
-                let text = std::fs::read_to_string(&path).unwrap();
-                // The tools' code, not their tests (this one reads files).
-                let code = text.split("#[cfg(test)]").next().unwrap_or_default();
-                for writes in ["std::fs", "fs::write", "File::create", "OpenOptions"] {
-                    assert!(
-                        !code.contains(writes),
-                        "{}: a built-in tool writes files ({writes}), so its output could be a place",
-                        path.display()
-                    );
+        let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut scanned = 0;
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+                    // The tests (this one reads files) are the `mod tests` closing each file.
+                    let code = text.split("#[cfg(test)]\nmod ").next().unwrap_or_default();
+                    for reach in ["fs::", "File::", "io::Write", "OpenOptions", "use std::{"] {
+                        assert!(!code.contains(reach), "{}: names {reach}, so a tool's output could become a place", path.display());
+                    }
+                    scanned += 1;
                 }
             }
         }
+        assert!(cfg!(target_arch = "wasm32") || scanned > 5, "the sources were read");
     }
 
     #[test]

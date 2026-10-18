@@ -685,7 +685,15 @@ pub(crate) fn touches_files(command: &str, params: &Value) -> bool {
 /// a place.
 fn layer_name_left_out<'a>(command: &str, params: &'a Value) -> std::borrow::Cow<'a, Value> {
     use std::borrow::Cow;
-    let built_in = || params.get("tool").and_then(Value::as_str).is_some_and(|t| rustgis_analysis::TOOLS.iter().any(|spec| spec.id == t));
+    // Resolved as gp.run resolves it (by id or name, a built-in tool first), then held to the
+    // built-in list, so the two can't drift: an external tool of a built-in's name isn't let in.
+    let built_in = || {
+        params
+            .get("tool")
+            .and_then(Value::as_str)
+            .and_then(rustgis_analysis::tool)
+            .is_some_and(|spec| rustgis_analysis::TOOLS.iter().any(|b| std::ptr::eq(b, spec)))
+    };
     let plain = |t: &str| !t.trim().is_empty() && !t.contains(['/', '\\', '.', ':']) && !looks_like_path(t);
     let named = || params.pointer("/params/output").and_then(Value::as_str).is_some_and(plain);
     // Copied only when there is a name to leave out: other commands' parameters (a file's
