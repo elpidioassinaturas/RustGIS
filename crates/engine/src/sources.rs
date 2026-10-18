@@ -277,7 +277,9 @@ pub fn holds_secret(params: &serde_json::Value) -> bool {
                     Value::String(t) if contents && t.len() > 1024 => private_key(t),
                     _ => walk(v, depth + 1),
                 };
-                (secret_key(k) && (!k.eq_ignore_ascii_case("key") || beside_address()) && filled) || inside
+                let plain_key = k.eq_ignore_ascii_case("key");
+                let key_like = || v.as_str().is_some_and(looks_like_a_key);
+                (secret_key(k) && (!plain_key || beside_address() || key_like()) && filled) || inside
             }),
             Value::Array(a) if depth < 16 => a.iter().any(|v| walk(v, depth + 1)),
             Value::Object(_) | Value::Array(_) => true,
@@ -286,6 +288,19 @@ pub fn holds_secret(params: &serde_json::Value) -> bool {
         }
     }
     walk(params, 0)
+}
+
+/// Whether `t` reads as an access key rather than a name: long, with no spaces, and letters and
+/// digits touching again and again (`sk-4f9aB27c…`, `pk.eyJ1Ijoi…`), unlike a field or a lookup
+/// key (`parcel_id`, `area_2010_2020_km2`), whose numbers stand apart between separators.
+fn looks_like_a_key(t: &str) -> bool {
+    let t = t.trim();
+    let chars: Vec<char> = t.chars().collect();
+    let touching = chars
+        .windows(2)
+        .filter(|w| (w[0].is_ascii_alphabetic() && w[1].is_ascii_digit()) || (w[0].is_ascii_digit() && w[1].is_ascii_alphabetic()))
+        .count();
+    chars.len() >= 20 && !t.contains(char::is_whitespace) && touching >= 6
 }
 
 /// Whether command parameters set a plain `key` (at any depth), which [`holds_secret`] lets
@@ -473,6 +488,9 @@ mod tests {
             json!({"url": "https://maps.example.com/tiles/{z}/{x}/{y}.png?key=abc"}),
             json!({"url": "https://api.example.com/tiles", "key": "abc"}),
             json!({"source": {"url": "https://api.example.com/tiles"}, "key": "abc"}),
+            // A plain key with no address near it, but reading as an access key.
+            json!({"provider": "x", "key": "sk-4f9aB27c81dE0e5f3a6b9C"}),
+            json!({"key": "pk.eyJ1IjoiYW5hIiwiYSI6ImNsMnQ4"}),
             json!({"source": {"headers": {"X-API-Key": "abc"}}}),
             json!({"url": "https://example.com/data.geojson", "headers": {"Authorization": "Bearer abc"}}),
             json!({"headers": {"Cookie": "session=abc"}}),
@@ -500,6 +518,11 @@ MIIE
         }
         // A plain key is let through, and noticed so the user is told.
         assert!(holds_plain_key(&json!({"layer": "Parcels", "key": "parcel_id"})));
+        // Names stay plain keys, long or not.
+        for name in ["parcel_id", "municipality_code_2020", "CD_MUN", "nome do município com espaços longos", "area_2010_2020_km2_total"]
+        {
+            assert!(!holds_secret(&json!({"layer": "Parcels", "key": name})), "{name}");
+        }
         assert!(holds_plain_key(&json!({"source": [{"key": "abc"}]})));
         assert!(!holds_plain_key(&json!({"layer": "Parcels", "key": ""})));
         assert!(!holds_plain_key(&json!({"api_key": "abc"})));

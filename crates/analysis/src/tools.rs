@@ -1047,8 +1047,14 @@ mod tests {
                     // (its byte writers, such as GeoTIFF's, return bytes and are fine).
                     let reaches =
                         ["fs::", "std::fs", "File::", "io::Write", "OpenOptions", "std::path", "write_path", "write_atomic", "gpkg::write"];
+                    // Code only, not comments; and a name only where it starts (`fs::`, not `bufs::`).
+                    let code: String = code.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+                    let names = |reach: &str| {
+                        code.match_indices(reach)
+                            .any(|(i, _)| !code[..i].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_'))
+                    };
                     for reach in reaches {
-                        assert!(!code.contains(reach), "{}: names {reach}, so a tool's output could become a place", path.display());
+                        assert!(!names(reach), "{}: names {reach}, so a tool's output could become a place", path.display());
                     }
                     scanned += 1;
                 }
