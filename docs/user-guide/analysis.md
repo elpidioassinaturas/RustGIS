@@ -67,6 +67,8 @@ contribute their vertices. Leave the extent empty to use the input's, or give it
   - `a` and `b`: the ellipse's semi-axes;
   - `area_scale`: `a·b`, which is 1 on an equal-area projection;
   - `max_angle`: the largest angular distortion ω in degrees, 0 on a conformal projection.
+
+  They are measured against the WGS 84 ellipsoid. For a world projection the map draws on a sphere (Mollweide, Robinson…), they can be off by a few tenths of a percent.
 - **Making a distortion map:** color the circles by `area_scale` or `max_angle`.
 
 ## GeoLibre tools

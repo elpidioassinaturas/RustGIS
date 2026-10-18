@@ -79,12 +79,15 @@ pub fn circle(centre: Coord, metres: f64) -> Vec<Coord> {
 /// before any is made: more than `cap` gives their number instead, so a fine spacing over a large
 /// area can't run out of memory.
 fn centres(area: Extent, spacing: f64, reach: f64, world: bool, cap: usize) -> Result<Vec<Coord>, u64> {
-    let (lon_min, lon_max) = if world { (-180.0 + spacing / 2.0, 180.0 - spacing / 2.0) } else { (area.min_x, area.max_x) };
+    // A view can reach past the Earth (or report nonsense): the grid stays on it, a turn of
+    // longitude either side at most, so no count below can grow without bound or overflow.
+    let (lon_min, lon_max) =
+        if world { (-180.0 + spacing / 2.0, 180.0 - spacing / 2.0) } else { (area.min_x.max(-540.0), area.max_x.min(540.0)) };
     // The first and last multiple in [lo, hi] (none when last < first).
     let span = |lo: f64, hi: f64| ((lo / spacing).ceil() as i64, (hi / spacing).floor() as i64);
-    let count = |(first, last): (i64, i64)| u64::try_from(last - first + 1).unwrap_or(0);
+    let count = |(first, last): (i64, i64)| u64::try_from(last.saturating_sub(first).saturating_add(1)).unwrap_or(0);
     let lats: Vec<f64> = {
-        let (first, last) = span(area.min_y, area.max_y);
+        let (first, last) = span(area.min_y.max(-90.0), area.max_y.min(90.0));
         // (At most 18,001 latitudes: a spacing is at least 0.01°.)
         (first..=last).map(|i| i as f64 * spacing).filter(|lat| lat.abs() + reach < 90.0 - POLE_MARGIN).collect()
     };
@@ -119,7 +122,7 @@ pub fn run(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     let reach = metres / (EARTH_RADIUS_M * std::f64::consts::PI / 180.0);
     let in_view = text(p, "area") == "Map Extent";
     let area = if in_view {
-        inp.view_extent().filter(|e| !e.is_empty()).ok_or("There's no map view to fill; choose World")?
+        inp.view_extent().ok_or("There's no map view to fill; choose World")?
     } else {
         Extent::new(-180.0, -90.0, 180.0, 90.0)
     };
@@ -277,6 +280,11 @@ mod tests {
         // The finest spacing over the world is refused by its count, before a point is made
         // (about 650 million of them would be gigabytes).
         assert!(run(&NoMap, &serde_json::json!({"spacing": 0.01, "radius": 0.001})).is_err_and(|e| e.contains("too many")));
+        // A view far past the Earth is held to it: no endless grid, no overflow.
+        let huge = Mercator(Extent::new(-1e300, -1e300, 1e300, 1e300));
+        assert!(run(&huge, &serde_json::json!({"area": "Map Extent", "spacing": 0.01})).is_err_and(|e| e.contains("too many")));
+        let ds = layer(run(&huge, &serde_json::json!({"area": "Map Extent", "spacing": 30, "radius": 100})).unwrap());
+        assert!((0..ds.features.len()).all(|r| float(&ds, r, "lat").abs() <= 90.0 && float(&ds, r, "lon").abs() <= 540.0));
         assert!(run(&NoMap, &serde_json::json!({"radius": 0})).is_err());
         // Circles that would reach a pole are left out.
         let ds = layer(run(&NoMap, &serde_json::json!({"spacing": 10, "radius": 2000})).unwrap());
