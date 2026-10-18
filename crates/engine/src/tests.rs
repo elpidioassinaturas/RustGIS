@@ -8946,6 +8946,7 @@ fn legends_leave_layers_out() {
     assert_eq!(left_out(&s, lakes), ["Rivers"]);
     let title = s.project.layouts[0].elements.iter().find(|e| e.name == "Title").unwrap().id;
     assert!(s.run("layout.update", &json!({"element": title, "exclude": ["Rivers"]})).unwrap_err().contains("only legends"));
+    assert!(s.run("layout.addElement", &json!({"kind": "northArrow", "exclude": ["Rivers"]})).unwrap_err().contains("only legends"));
     // Renaming the layer keeps it left out.
     s.run("layer.rename", &json!({"layer": "Rivers", "name": "Rios"})).unwrap();
     assert_eq!(left_out(&s, lakes), ["Rios"]);

@@ -413,6 +413,9 @@ pub(crate) fn color(p: &Value, k: &str, d: Rgba) -> Result<Rgba, String> {
 
 fn add_element(s: &mut Session, p: &Value) -> CmdResult {
     let kind = ps(p, "kind").ok_or("kind is required")?;
+    if kind != "legend" && p.get("exclude").is_some_and(|v| !v.is_null()) {
+        return Err("only legends leave layers out".into());
+    }
     let i = index(s, p)?;
     let image = if kind == "picture" { Some(super::graphics::picture(p)?) } else { None };
     let layer_name = |s: &Session, l: &Layout, frame: u32| -> Result<String, String> {
