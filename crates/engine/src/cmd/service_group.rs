@@ -306,8 +306,10 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
     }
     let ids: Vec<u32> = children.iter().map(|c| c.layer).collect();
     let map = s.map_mut();
+    let mut gone_names = Vec::new();
     if child_id.is_none() {
         let gone: Vec<u32> = old.children.iter().map(|c| c.layer).filter(|id| !ids.contains(id)).collect();
+        gone_names = map.layers.iter().filter(|l| gone.contains(&l.id)).map(|l| l.name.clone()).collect();
         map.layers.retain(|l| !gone.contains(&l.id));
         if let Some(lock) = &mut map.label_lock {
             lock.retain(|(id, _)| !gone.contains(id));
@@ -324,14 +326,24 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
             }
         }
     }
+    // Legends that left out the layers gone forget them.
+    for n in &gone_names {
+        crate::cmd::layer::legends_follow_layer(s, n, None);
+    }
     Ok(json!({"group":old.id,"layers":ids}))
 }
 
 fn set_group(s: &mut Session, p: &Value) -> CmdResult {
     let (group, _) = target(s, p)?.ok_or("group is required")?;
     if p.get("remove").and_then(Value::as_bool) == Some(true) {
-        s.map_mut().layers.retain(|l| !group.children.iter().any(|c| c.layer == l.id));
+        let ours = |l: &rustgis_map::Layer| group.children.iter().any(|c| c.layer == l.id);
+        let names: Vec<String> = s.map().layers.iter().filter(|l| ours(l)).map(|l| l.name.clone()).collect();
+        s.map_mut().layers.retain(|l| !ours(l));
         s.map_mut().service_groups.retain(|g| g.id != group.id);
+        // Legends that left its layers out forget them.
+        for n in &names {
+            crate::cmd::layer::legends_follow_layer(s, n, None);
+        }
         return Ok(Value::Null);
     }
     if let Some(visible) = p.get("visible").and_then(Value::as_bool) {

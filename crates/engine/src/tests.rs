@@ -8966,4 +8966,13 @@ fn legends_leave_layers_out() {
     s.run("layout.update", &json!({"element": lakes, "exclude": ["Countries"]})).unwrap();
     s.run("layout.update", &json!({"element": lakes, "exclude": []})).unwrap();
     assert!(left_out(&s, lakes).is_empty());
+    // Removing a group with its layers drops them too.
+    s.run("layout.update", &json!({"element": lakes, "exclude": ["Cities", "Countries"]})).unwrap();
+    s.run("group.add", &json!({"name": "Places", "layers": ["Cities"]})).unwrap();
+    s.run("group.remove", &json!({"group": "Places"})).unwrap();
+    assert_eq!(left_out(&s, lakes), ["Countries"]);
+    // A list past the cap is refused rather than cut short.
+    let many = vec!["Countries"; rustgis_map::layout::MAX_LEGEND_EXCLUDED + 1];
+    assert!(s.run("layout.update", &json!({"element": lakes, "exclude": many})).unwrap_err().contains("at most"));
+    assert_eq!(left_out(&s, lakes), ["Countries"]);
 }

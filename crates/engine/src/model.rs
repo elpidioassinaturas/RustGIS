@@ -604,11 +604,15 @@ fn run_into(s: &mut Session, g: &ModelGraph, trusted: bool, report: &mut RunRepo
         let feeds_tools_only = to.clone().next().is_some() && to.all(|n| n.kind == ModelNodeKind::Tool);
         if feeds_tools_only {
             let m = s.map_mut();
+            let mut names = Vec::new();
             for l in layers {
                 if let Some(i) = m.layer_index(*l) {
-                    m.layers.remove(i);
+                    names.push(m.layers.remove(i).name);
                     m.set_group(*l, None);
                 }
+            }
+            for n in &names {
+                crate::cmd::layer::legends_follow_layer(s, n, None);
             }
         }
     }

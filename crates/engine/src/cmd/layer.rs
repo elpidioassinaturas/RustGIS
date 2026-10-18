@@ -2068,11 +2068,10 @@ fn add_sample(s: &mut Session, p: &Value) -> CmdResult {
 
 /// Legends that leave out layer `old` of the active map, in the frames that show it, follow it:
 /// to its new name, or (`None`, the layer deleted) by dropping it, so a later layer of that name
-/// isn't left out unasked. Called once the layer is renamed, or before it goes: while another
-/// layer still bears `old` (names may repeat), the legends keep it for that one.
-fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>) {
-    let bearers = s.map().layers.iter().filter(|l| l.name.eq_ignore_ascii_case(old)).count();
-    if bearers > usize::from(new.is_none()) {
+/// isn't left out unasked. Called once the layer is renamed or gone: while another layer still
+/// bears `old` (names may repeat), the legends keep it for that one.
+pub(crate) fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>) {
+    if s.map().layers.iter().any(|l| l.name.eq_ignore_ascii_case(old)) {
         return;
     }
     let map = s.map().name.clone();
@@ -2093,11 +2092,11 @@ fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>) {
                         // Once each, should the new name have been left out already.
                         let mut seen: Vec<String> = Vec::new();
                         exclude.retain(|x| {
-                            let new = !seen.iter().any(|y| y.eq_ignore_ascii_case(x));
-                            if new {
+                            let first = !seen.iter().any(|y| y.eq_ignore_ascii_case(x));
+                            if first {
                                 seen.push(x.clone());
                             }
-                            new
+                            first
                         });
                     }
                     None => exclude.retain(|x| !x.eq_ignore_ascii_case(old)),
@@ -2109,16 +2108,14 @@ fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>) {
 
 fn remove(s: &mut Session, p: &Value) -> CmdResult {
     let id = s.layer_id(p)?;
-    // A legend that left it out forgets it.
-    if let Some(name) = s.map().layer(id).map(|l| l.name.clone()) {
-        legends_follow_layer(s, &name, None);
-    }
     let m = s.map_mut();
     let i = m.layer_index(id).ok_or("no such layer")?;
-    m.layers.remove(i);
+    let name = m.layers.remove(i).name;
     m.set_group(id, None);
     let next = m.layers.get(i.min(m.layers.len().saturating_sub(1))).map(|l| l.id);
     s.active_layer = next;
+    // A legend that left it out forgets it.
+    legends_follow_layer(s, &name, None);
     Ok(Value::Null)
 }
 

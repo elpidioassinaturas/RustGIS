@@ -702,13 +702,16 @@ fn text_style(p: &Value, italic: bool, align: TextAlign, spacing: f64) -> Result
 fn legend_exclude(s: &Session, l: &Layout, frame: u32, p: &Value) -> Result<Option<Vec<String>>, String> {
     let Some(v) = p.get("exclude").filter(|v| !v.is_null()) else { return Ok(None) };
     let names = v.as_array().ok_or("exclude is a list of layer names")?;
+    if names.len() > rustgis_map::layout::MAX_LEGEND_EXCLUDED {
+        return Err(format!("a legend leaves out at most {} layers", rustgis_map::layout::MAX_LEGEND_EXCLUDED));
+    }
     let map_name = match l.element(frame).map(|e| &e.kind) {
         Some(ElementKind::MapFrame { map, .. }) => map.clone(),
         _ => return Err("the legend's frame isn't a map frame".into()),
     };
     let map = s.project.maps.iter().find(|m| m.name == map_name).ok_or_else(|| format!("no map '{map_name}'"))?;
     let mut out: Vec<String> = Vec::new();
-    for n in names.iter().take(rustgis_map::layout::MAX_LEGEND_EXCLUDED) {
+    for n in names {
         let n = n.as_str().ok_or("exclude is a list of layer names")?;
         let layer = map.layer_by_name(n.trim()).ok_or_else(|| format!("no layer '{n}' in map '{map_name}'"))?;
         if !out.iter().any(|o| o.eq_ignore_ascii_case(&layer.name)) {
