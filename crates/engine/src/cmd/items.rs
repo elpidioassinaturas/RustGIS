@@ -680,19 +680,21 @@ pub(crate) fn touches_files(command: &str, params: &Value) -> bool {
 /// layer and never a file through it (see `out_name` there), not GeoLibre or plugin tools, which may
 /// write theirs as files, and only a plain name, with no `/`, `\`, `.` or `:`. Anything else stays
 /// a place.
-fn layer_name_left_out(command: &str, params: &Value) -> Value {
-    let built_in = params.get("tool").and_then(Value::as_str).is_some_and(|t| rustgis_analysis::TOOLS.iter().any(|spec| spec.id == t));
+fn layer_name_left_out<'a>(command: &str, params: &'a Value) -> std::borrow::Cow<'a, Value> {
+    use std::borrow::Cow;
+    let built_in = || params.get("tool").and_then(Value::as_str).is_some_and(|t| rustgis_analysis::TOOLS.iter().any(|spec| spec.id == t));
     let plain = |t: &str| !t.trim().is_empty() && !t.contains(['/', '\\', '.', ':']) && !looks_like_path(t);
-    let named = params.pointer("/params/output").and_then(Value::as_str).is_some_and(plain);
+    let named = || params.pointer("/params/output").and_then(Value::as_str).is_some_and(plain);
+    // Copied only when there is a name to leave out: other commands' parameters (a file's
+    // contents, say) are read as they are.
+    if command != "gp.run" || !built_in() || !named() {
+        return Cow::Borrowed(params);
+    }
     let mut out = params.clone();
-    if command == "gp.run"
-        && built_in
-        && named
-        && let Some(p) = out.get_mut("params").and_then(Value::as_object_mut)
-    {
+    if let Some(p) = out.get_mut("params").and_then(Value::as_object_mut) {
         p.remove("output");
     }
-    out
+    Cow::Owned(out)
 }
 
 /// Whether a string looks like a file path or an address.
