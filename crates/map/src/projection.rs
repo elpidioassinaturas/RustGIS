@@ -102,7 +102,8 @@ pub fn parse_preset(code: &str) -> Result<Option<(&'static str, Vec<(&'static st
         if given.iter().any(|(g, _)| *g == p.key) {
             return Err(format!("{} is given twice", p.key));
         }
-        given.push((p.key, v));
+        // `-0` is 0, so the code is written one way.
+        given.push((p.key, v + 0.0));
     }
     let own = |k: &str| preset_value(id, k);
     let params =
@@ -155,8 +156,12 @@ pub fn lookup(code: &str) -> Result<(String, String), String> {
         if let (Some(a), Some(b)) = (value("lat_1"), value("lat_2"))
             && (a + b).abs() < 1.0
         {
+            // Name a parallel taken from the preset, as only the other may have been typed.
+            let own = |k: &str| if params.iter().any(|(g, _)| *g == k) { "" } else { " (the preset's own)" };
             return Err(format!(
-                "standard parallels {a} and {b} average within 0.5° of the equator, which makes no cone: pick a cylindrical projection"
+                "standard parallels {a}{} and {b}{} average within 0.5° of the equator, which makes no cone: pick a cylindrical projection",
+                own("lat_1"),
+                own("lat_2")
             ));
         }
         if params.is_empty() {
@@ -661,6 +666,9 @@ mod tests {
         assert_eq!(preset_code(id, &p), "albers +lon_0=-55 +lat_1=-5 +lat_2=-35");
         assert_eq!(lookup("robinson +lon_0=150").unwrap().1, "Robinson (lon_0=150)");
         assert!(lookup("+proj=robin +lon_0=150").unwrap_err().contains("PROJ strings"));
+        assert!(lookup("albers +lat_1=-50").unwrap_err().contains("50 (the preset's own)"));
+        let (id, p) = parse_preset("albers +lat_1=-0").unwrap().unwrap();
+        assert_eq!(preset_code(id, &p), "albers +lat_1=0");
         for bad in [
             "robinson +lon_0=181",
             "robinson +lon_0=x",
