@@ -8939,7 +8939,7 @@ fn legends_leave_layers_out() {
     assert_eq!(left_out(&s, lakes), ["Rivers"]);
     // A layer the map hasn't, or not a list of names, is an error that changes nothing; so is
     // `exclude` on another kind of element.
-    for bad in [json!(["Atlantis"]), json!("Rivers"), json!([3])] {
+    for bad in [json!(["Atlantis"]), json!("Rivers"), json!([3]), json!([null]), json!([""]), json!([{"x": 1}]), json!(["Rivers", 7])] {
         assert!(s.run("layout.update", &json!({"element": lakes, "exclude": bad})).is_err(), "{bad}");
         assert!(s.run("layout.addElement", &json!({"kind": "legend", "exclude": bad})).is_err(), "{bad}");
     }
