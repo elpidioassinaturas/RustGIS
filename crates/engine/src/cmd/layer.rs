@@ -2089,6 +2089,8 @@ pub(crate) fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>
                 && frames.contains(frame)
             {
                 match new {
+                    // Another layer the legend lists bears the new name: carrying the exclusion
+                    // over would take that one out too, so the renamed layer is listed with it.
                     Some(n) if shared && !exclude.iter().any(|x| x.eq_ignore_ascii_case(n)) => {
                         exclude.retain(|x| !x.eq_ignore_ascii_case(old));
                     }
