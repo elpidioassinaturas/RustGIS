@@ -8988,4 +8988,10 @@ fn legends_leave_layers_out() {
     s.run("layout.update", &json!({"element": lakes, "exclude": ["countries"]})).unwrap();
     s.run("layer.rename", &json!({"layer": "Countries", "name": "Nations"})).unwrap();
     assert_eq!(left_out(&s, lakes), ["Nations"]);
+    // Renamed onto the name of a layer the legend lists, a layer left out is listed with it.
+    s.run("layer.addSample", &json!({"name": "lakes"})).unwrap();
+    s.run("layout.update", &json!({"element": lakes, "exclude": ["Lakes"]})).unwrap();
+    s.run("layer.rename", &json!({"layer": "Nations", "name": "Countries"})).unwrap();
+    s.run("layer.rename", &json!({"layer": "Lakes", "name": "Countries"})).unwrap();
+    assert!(left_out(&s, lakes).is_empty(), "the other Countries isn't taken out");
 }
