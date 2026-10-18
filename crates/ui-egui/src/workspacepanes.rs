@@ -87,6 +87,9 @@ fn record_row(app: &mut RustGisApp, ui: &mut Ui) {
 
 /// Tasks: pick one, read each step's instructions and run it; record a task, and edit its steps.
 pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
+    // Rows wrap at the pane's width rather than widen it: long titles and instructions would
+    // otherwise be cut at its edge.
+    ui.set_max_width(ui.available_width());
     message(app, ui);
     record_row(app, ui);
     let tasks = app.session.project.tasks.clone();
@@ -99,10 +102,11 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
         app.ws.task_step = 0;
         app.ws.task_edit = None;
     }
-    ui.horizontal(|ui| {
-        egui::ComboBox::from_id_salt("task_pick").selected_text(app.ws.task.as_str()).width(ui.available_width() - 110.0).show_ui(
-            ui,
-            |ui| {
+    ui.horizontal_wrapped(|ui| {
+        egui::ComboBox::from_id_salt("task_pick")
+            .selected_text(app.ws.task.as_str())
+            .width((ui.available_width() - 120.0).max(160.0))
+            .show_ui(ui, |ui| {
                 for t in &tasks {
                     if ui.selectable_label(t.name == app.ws.task, t.name.as_str()).clicked() {
                         app.ws.task = t.name.clone();
@@ -110,8 +114,7 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
                         app.ws.task_edit = None;
                     }
                 }
-            },
-        );
+            });
         ui.checkbox(&mut app.ws.task_editing, tl!("Edit Steps"));
     });
     let Some(task) = tasks.iter().find(|t| t.name == app.ws.task) else { return };
@@ -126,7 +129,8 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
             .inner_margin(egui::Margin::symmetric(6, 4))
             .fill(if current { ui.visuals().selection.bg_fill.gamma_multiply(0.25) } else { Color32::TRANSPARENT })
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.set_max_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
                     let title =
                         egui::RichText::new(format!("{}. {}", i + 1, st.title)).font(if current { semibold(12.5) } else { regular(12.5) });
                     // Clicking a step's title makes it the current one, to read it.
