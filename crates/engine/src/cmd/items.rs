@@ -271,7 +271,10 @@ pub fn commands() -> Vec<C> {
         })
         .params(r#"{"task"?: name, "step": number (from 0), "title"?: string, "instructions"?: string}"#),
         C::new("task.moveStep", "Move Task Step", "Tasks", |s, p| {
-            let to = p.get("to").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()).ok_or("to is required")?;
+            let to = match p.get("to") {
+                None | Some(Value::Null) => return Err("to is required".into()),
+                Some(v) => v.as_u64().and_then(|i| usize::try_from(i).ok()).ok_or_else(|| format!("to must be a whole number from 0, not {v}"))?,
+            };
             let step = step_index(p)?;
             let t = task_mut(s, p)?;
             if step >= t.steps.len() || to >= t.steps.len() {

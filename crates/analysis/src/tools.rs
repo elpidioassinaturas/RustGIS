@@ -1088,7 +1088,11 @@ mod tests {
             p.insert("output".into(), serde_json::json!(out.display().to_string()));
             ran += usize::from(crate::run(spec.id, &m, &serde_json::Value::Object(p)).is_ok());
             let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
-            assert!(left.is_empty(), "{} wrote {left:?} where its output was named", spec.id);
+            if !left.is_empty() {
+                // (The folder goes before the test fails, not left behind.)
+                let _ = std::fs::remove_dir_all(&dir);
+                panic!("{} wrote {left:?} where its output was named", spec.id);
+            }
         }
         let _ = std::fs::remove_dir(&dir);
         assert!(ran * 2 >= TOOLS.len(), "only {ran} of {} tools ran on these inputs", TOOLS.len());

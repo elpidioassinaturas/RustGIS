@@ -211,6 +211,11 @@ fn secret_key(k: &str) -> bool {
             | "sig"
             | "signature"
             | "sas"
+            | "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "bearer"
     ) || k.starts_with("x-amz-")
         || k.starts_with("x-goog-")
         || k.contains("password")
@@ -448,6 +453,8 @@ mod tests {
             json!({"url": "https://maps.example.com/tiles/{z}/{x}/{y}.png?key=abc"}),
             json!({"url": "https://api.example.com/tiles", "key": "abc"}),
             json!({"source": {"headers": {"X-API-Key": "abc"}}}),
+            json!({"url": "https://example.com/data.geojson", "headers": {"Authorization": "Bearer abc"}}),
+            json!({"headers": {"Cookie": "session=abc"}}),
         ] {
             assert!(holds_secret(&p), "{p}");
         }

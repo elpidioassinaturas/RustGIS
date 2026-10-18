@@ -115,10 +115,10 @@ pub fn follow_delete(app: &mut RustGisApp, deleted: usize) {
 }
 
 /// Record Task: the button that starts or stops recording, and how far it has got.
-fn record_row(app: &mut RustGisApp, ui: &mut Ui) {
+fn record_row(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     ui.horizontal_wrapped(|ui| match app.ws.recording.as_ref().map(Vec::len) {
         Some(n) => {
-            ui.label(egui::RichText::new("●").color(Color32::from_rgb(0xD0, 0x30, 0x30)));
+            ui.label(egui::RichText::new("●").color(t.red));
             ui.label(crate::i18n::fmt("Recording: {n} steps", &[("n", &n.to_string())]));
             ui.add(egui::TextEdit::singleline(&mut app.ws.record_name).hint_text(tl!("Task name")).desired_width(150.0));
             if ui.button(tl!("Stop Recording")).on_hover_text(tl!("Make a task of the steps recorded")).clicked() {
@@ -139,12 +139,12 @@ fn record_row(app: &mut RustGisApp, ui: &mut Ui) {
 }
 
 /// Tasks: pick one, read each step's instructions and run it; record a task, and edit its steps.
-pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
+pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     // Rows wrap at the pane's width rather than widen it: long titles and instructions would
     // otherwise be cut at its edge.
     ui.set_max_width(ui.available_width());
     message(app, ui);
-    record_row(app, ui);
+    record_row(app, ui, t);
     let tasks = app.session.project.tasks.clone();
     if tasks.is_empty() {
         ui.label(
