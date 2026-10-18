@@ -75,24 +75,25 @@ pub fn circle(centre: Coord, metres: f64) -> Vec<Coord> {
 }
 
 /// The circles' centres: every multiple of `spacing` degrees inside `area`, leaving out the
-/// antimeridian when the area is the whole world and any circle that would reach a pole.
-fn centres(area: Extent, spacing: f64, reach: f64, world: bool) -> Vec<Coord> {
+/// antimeridian when the area is the whole world and any circle that would reach a pole. Counted
+/// before any is made: more than `cap` gives their number instead, so a fine spacing over a large
+/// area can't run out of memory.
+fn centres(area: Extent, spacing: f64, reach: f64, world: bool, cap: usize) -> Result<Vec<Coord>, u64> {
     let (lon_min, lon_max) = if world { (-180.0 + spacing / 2.0, 180.0 - spacing / 2.0) } else { (area.min_x, area.max_x) };
-    let multiples = |lo: f64, hi: f64| -> Vec<f64> {
-        let first = (lo / spacing).ceil() as i64;
-        let last = (hi / spacing).floor() as i64;
-        (first..=last).map(|i| i as f64 * spacing).collect()
+    // The first and last multiple in [lo, hi] (none when last < first).
+    let span = |lo: f64, hi: f64| ((lo / spacing).ceil() as i64, (hi / spacing).floor() as i64);
+    let count = |(first, last): (i64, i64)| u64::try_from(last - first + 1).unwrap_or(0);
+    let lats: Vec<f64> = {
+        let (first, last) = span(area.min_y, area.max_y);
+        // (At most 18,001 latitudes: a spacing is at least 0.01°.)
+        (first..=last).map(|i| i as f64 * spacing).filter(|lat| lat.abs() + reach < 90.0 - POLE_MARGIN).collect()
     };
-    let mut out = Vec::new();
-    for lat in multiples(area.min_y, area.max_y) {
-        if lat.abs() + reach >= 90.0 - POLE_MARGIN {
-            continue;
-        }
-        for lon in multiples(lon_min, lon_max) {
-            out.push(Coord::new(lon, lat));
-        }
+    let lons = span(lon_min, lon_max);
+    let n = (lats.len() as u64).saturating_mul(count(lons));
+    if n > cap as u64 {
+        return Err(n);
     }
-    out
+    Ok(lats.iter().flat_map(|&lat| (lons.0..=lons.1).map(move |i| Coord::new(i as f64 * spacing, lat))).collect())
 }
 
 fn num(p: &Json, k: &str) -> Option<f64> {
@@ -122,12 +123,10 @@ pub fn run(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     } else {
         Extent::new(-180.0, -90.0, 180.0, 90.0)
     };
-    let points = centres(area, spacing, reach, !in_view);
+    let points = centres(area, spacing, reach, !in_view, MAX_CIRCLES)
+        .map_err(|n| format!("{n} circles is too many (at most {MAX_CIRCLES}): use a larger spacing"))?;
     if points.is_empty() {
         return Err(format!("No grid point every {spacing}° falls in the area: use a smaller spacing"));
-    }
-    if points.len() > MAX_CIRCLES {
-        return Err(format!("{} circles is too many (at most {MAX_CIRCLES}): use a larger spacing", points.len()));
     }
     let projection = inp.projection_name();
     let mut fields = vec![Field::new("lat", FieldType::Double), Field::new("lon", FieldType::Double)];
@@ -275,6 +274,9 @@ mod tests {
         assert!(run(&NoMap, &serde_json::json!({"area": "Map Extent"})).is_err());
         assert!(run(&es, &serde_json::json!({"area": "Map Extent"})).is_err_and(|e| e.contains("smaller spacing")));
         assert!(run(&NoMap, &serde_json::json!({"spacing": 1, "radius": 10})).is_err_and(|e| e.contains("too many")));
+        // The finest spacing over the world is refused by its count, before a point is made
+        // (about 650 million of them would be gigabytes).
+        assert!(run(&NoMap, &serde_json::json!({"spacing": 0.01, "radius": 0.001})).is_err_and(|e| e.contains("too many")));
         assert!(run(&NoMap, &serde_json::json!({"radius": 0})).is_err());
         // Circles that would reach a pole are left out.
         let ds = layer(run(&NoMap, &serde_json::json!({"spacing": 10, "radius": 2000})).unwrap());
