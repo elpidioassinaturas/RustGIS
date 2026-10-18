@@ -1248,7 +1248,8 @@ impl RustGisApp {
     /// it takes a `layer` and needs an active one to be enabled, or is one of those that
     /// default to it while enabled without one. Elsewhere `layer` names something else (a file's
     /// layer for Add Data, a service's), and a layer the command names is its own.
-    fn layer_acted_on(&mut self, id: &str, params: &Value) -> Option<String> {
+    /// Also whether another layer has that name, so the step would replay on the first of them.
+    fn layer_acted_on(&mut self, id: &str, params: &Value) -> Option<(String, bool)> {
         let spec = self.session.registry.get(id).filter(|c| c.mutates && params.get("layer").is_none_or(Value::is_null)).copied()?;
         if !spec.param_keys().is_some_and(|k| k.contains(&"layer")) {
             return None;
@@ -1260,7 +1261,10 @@ impl RustGisApp {
         if !defaults && !(needs && (spec.enabled)(&self.session).is_none()) {
             return None;
         }
-        active.and_then(|l| self.session.map().layer(l)).map(|l| l.name.clone())
+        let map = self.session.map();
+        let name = active.and_then(|l| map.layer(l)).map(|l| l.name.clone())?;
+        let shared = map.layers.iter().filter(|l| l.name.eq_ignore_ascii_case(&name)).count() > 1;
+        Some((name, shared))
     }
 
     /// Record Task: adds a command that ran from the app and changed the project as a step. Not
@@ -1268,7 +1272,7 @@ impl RustGisApp {
     /// or transparency set again on the same layer (dragged in its picker) updates the step it just
     /// made.
     /// `active` is the active layer's name from [`Self::layer_acted_on`], read before it ran.
-    fn record_step(&mut self, id: &str, params: &Value, active: Option<String>) {
+    fn record_step(&mut self, id: &str, params: &Value, active: Option<(String, bool)>) {
         let Some(steps) = self.ws.recording.as_mut() else { return };
         // Undo doesn't take back a recorded step (the undo history and the recording don't line
         // up step for step): say how to.
@@ -1288,7 +1292,7 @@ impl RustGisApp {
         {
             return;
         }
-        let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates) else { return };
+        let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates).copied() else { return };
         // Downloaded data is kept for this session only, and adding it uses it up: a task
         // couldn't add it again.
         if id == "layer.addDownload" {
@@ -1313,7 +1317,17 @@ impl RustGisApp {
         // naming it: the step names it (`active`, from `layer_acted_on`), so it replays on that
         // layer, not on whichever is active then, and a colour dragged merges into one step.
         let mut params = params.clone();
-        if let Some(name) = active {
+        if let Some((name, shared)) = active {
+            // Steps name layers, and a name two layers share replays on the first: say so, once
+            // a recording for each name.
+            if shared && !self.ws.recording_shared_said.contains(&name) {
+                let text = crate::i18n::fmt(
+                    "Two layers are named {name}: the step names it, so it replays on the first of them. Rename one to tell them apart.",
+                    &[("name", &name)],
+                );
+                self.session.notify(text, false);
+                self.ws.recording_shared_said.push(name.clone());
+            }
             if params.is_null() {
                 params = json!({});
             }
@@ -2095,6 +2109,7 @@ impl RustGisApp {
                     self.ws.recording = Some(Vec::new());
                     self.ws.recording_full = false;
                     self.ws.recording_undo_said = false;
+                    self.ws.recording_shared_said.clear();
                     self.ws.record_name.clear();
                     return Ok(json!({"recording": true, "steps": 0}));
                 }
@@ -3071,6 +3086,21 @@ mod record_tests {
             .map(|c| c.id)
             .collect();
         assert!(unplaced.is_empty(), "say whether these act on the active layer: {unplaced:?}");
+    }
+
+    /// A step naming a layer whose name another layer shares says so, once for the name.
+    #[test]
+    fn a_shared_layer_name_is_said_once() {
+        let mut app = RustGisApp::with_sample();
+        let rivers = app.session.map().layer_by_name("Rivers").unwrap().id;
+        app.session.map_mut().layers.iter_mut().find(|l| l.id == rivers).unwrap().name = "Lakes".into();
+        app.run("layer.select", json!({"layer": rivers})).unwrap();
+        app.run("ui.taskRecord", json!({})).unwrap();
+        let said = |app: &RustGisApp| app.session.notices.iter().filter(|n| n.text.contains("Two layers are named Lakes")).count();
+        app.run("layer.color", json!({"color": "#123456"})).unwrap();
+        app.run("layer.visibility", json!({})).unwrap();
+        assert_eq!(app.ws.recording.as_ref().unwrap()[0].params["layer"], json!("Lakes"));
+        assert_eq!(said(&app), 1);
     }
 
     /// Data added from a download isn't a step: its download is used up, so a task couldn't

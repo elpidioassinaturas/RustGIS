@@ -24,7 +24,8 @@ Tools for working across maps and views, and for setting up the app the way you 
     - A task holds at most 200 steps.
     - Steps keep their parameters as they ran, file paths included (a file you added, say), so
       check them before sharing a task. A command run on the selected layer names it, so the
-      step replays on that layer whichever is selected then. A command holding a password, key or token (a database
+      step replays on that layer whichever is selected then; where two layers share a name it
+      replays on the first, so rename one first (the recording says so). A command holding a password, key or token (a database
       connection, a signed address) isn't recorded, nor is data added from a download, which is
       kept for the session only.
   - **Edit Steps** gives each step ▲ ▼ to reorder it, **Edit** for its title and instructions, and
