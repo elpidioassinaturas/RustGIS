@@ -665,11 +665,13 @@ pub(crate) fn touches_files(command: &str, params: &Value) -> bool {
 }
 
 /// Parameters without a built-in tool's output layer name, which stays in the session, so a task
-/// from a file may set it: only `gp.run`'s `params.output`, only for RustGIS's own tools (GeoLibre
-/// and plugin tools, `geolibre:…` and `plugin:…`, may write theirs as files), and only a plain name,
-/// with no `/`, `\`, `.` or `:` that could make it a file. Anything else stays a place.
+/// (or a model, or a notebook) from a file may set it: only `gp.run`'s `{"tool", "params"}` shape,
+/// only `params.output`, only for the tools in `rustgis_analysis::TOOLS`, which name their output
+/// layer and never a file through it (see `out_name` there), not GeoLibre or plugin tools, which may
+/// write theirs as files, and only a plain name, with no `/`, `\`, `.` or `:`. Anything else stays
+/// a place.
 fn layer_name_left_out(command: &str, params: &Value) -> Value {
-    let built_in = params.get("tool").and_then(Value::as_str).is_some_and(|t| !t.contains(':'));
+    let built_in = params.get("tool").and_then(Value::as_str).is_some_and(|t| rustgis_analysis::TOOLS.iter().any(|spec| spec.id == t));
     let plain = |t: &str| !t.trim().is_empty() && !t.contains(['/', '\\', '.', ':']) && !looks_like_path(t);
     let named = params.pointer("/params/output").and_then(Value::as_str).is_some_and(plain);
     let mut out = params.clone();

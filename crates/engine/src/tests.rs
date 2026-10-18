@@ -507,6 +507,8 @@ fn imported_tasks_name_outputs_and_steps_are_edited() {
         ("gp.run", json!({"tool": "buffer", "params": {"output": ".bashrc"}})),
         ("gp.run", json!({"tool": "geolibre:slope", "params": {"output": "slope"}})),
         ("gp.run", json!({"tool": "plugin:kit/hex", "params": {"output": "hex"}})),
+        // Not one of RustGIS's own tools, even without a prefix.
+        ("gp.run", json!({"tool": "someOtherTool", "params": {"output": "x"}})),
         ("gp.run", json!({"tool": "buffer", "params": {"input": "Cities", "nested": {"output": "x"}}})),
         ("layer.rename", json!({"layer": "Cities", "output": "x"})),
     ] {

@@ -1213,6 +1213,12 @@ impl RustGisApp {
     /// made.
     fn record_step(&mut self, id: &str, params: &Value) {
         let Some(steps) = self.ws.recording.as_mut() else { return };
+        // Undo doesn't take back a recorded step (the undo history and the recording don't line
+        // up step for step): say how to.
+        if id == "edit.undo" && !steps.is_empty() {
+            self.session.notify(tl!("Undo doesn't remove the recorded step: delete it in Edit Steps once you stop recording."), false);
+            return;
+        }
         // Not steps of an exercise: panes, tasks, opening or saving the project, undo and redo,
         // and picking the layer to work on (a click in the Layers pane).
         if id.starts_with("ui.")
@@ -1240,14 +1246,21 @@ impl RustGisApp {
             Some(tool) if id == "gp.run" => tl!(tool.name).to_string(),
             _ => tl!(spec.label).to_string(),
         };
-        if steps.len() < 200 {
-            steps.push(rustgis_engine::project::TaskStep {
-                title,
-                instructions: String::new(),
-                command: id.to_string(),
-                params: params.clone(),
-            });
+        if steps.len() >= 200 {
+            // A task holds at most 200 steps: say so once, when the first one is left out.
+            if !self.ws.recording_full {
+                self.ws.recording_full = true;
+                self.session
+                    .notify(tl!("A task holds at most 200 steps: stop recording to make it, then record the rest as another task."), true);
+            }
+            return;
         }
+        steps.push(rustgis_engine::project::TaskStep {
+            title,
+            instructions: String::new(),
+            command: id.to_string(),
+            params: params.clone(),
+        });
     }
 
     fn run_ui(&mut self, id: &str, p: &Value) -> Result<Value, String> {
@@ -1976,6 +1989,7 @@ impl RustGisApp {
             "ui.taskRecord" => match self.ws.recording.take() {
                 None => {
                     self.ws.recording = Some(Vec::new());
+                    self.ws.recording_full = false;
                     return Ok(json!({"recording": true, "steps": 0}));
                 }
                 Some(steps) if steps.is_empty() => return Ok(json!({"recording": false, "steps": 0})),

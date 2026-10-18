@@ -273,6 +273,11 @@ fn rows(inp: &dyn Inputs, p: &Json, k: &str, ds: &Dataset) -> Vec<usize> {
     if sel.is_empty() { (0..ds.features.len()).collect() } else { sel.iter().copied().filter(|r| *r < ds.features.len()).collect() }
 }
 
+/// The name of a tool's new layer, from its `output` parameter. Every built-in tool names its
+/// output layer through here, and an `output` is only ever a layer name in the session, never a
+/// file: `touches_files` in rustgis-engine relies on this to let tasks, models and notebooks from
+/// files name their outputs. A built-in tool that writes a file must take its path under another
+/// parameter (`path`), which stays refused.
 fn out_name(p: &Json, default: String) -> String {
     let n = s(p, "output").trim();
     if n.is_empty() { default } else { n.to_string() }

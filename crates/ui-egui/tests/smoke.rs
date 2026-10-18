@@ -753,6 +753,23 @@ fn a_task_is_recorded_from_what_changes_the_project_and_edited_in_its_pane() {
     // It opens in the Tasks pane, ready to edit.
     assert_eq!(app.ui.right, Some(rustgis_ui_egui::RightPane::Tasks));
     assert!(app.ws.task_editing && app.ws.task == "Lesson");
+    // Undo while recording keeps the step, and says how to drop it.
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("layer.color", json!({"layer": "Lakes", "color": "#445566"})).unwrap();
+    app.run("edit.undo", json!(null)).unwrap();
+    assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(1));
+    assert!(app.session.notices.iter().any(|n| n.text.contains("Edit Steps") || n.text.contains("Editar passos")));
+    // Past 200 steps nothing more is kept, and that is said once.
+    let given = app.session.notices.iter().filter(|n| n.error).count();
+    for i in 0..205 {
+        let layer = if i % 2 == 0 { "Rivers" } else { "Lakes" };
+        app.run("layer.color", json!({"layer": layer, "color": "#112233"})).unwrap();
+    }
+    assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(200));
+    assert_eq!(app.session.notices.iter().filter(|n| n.error).count(), given + 1, "one notice at the cap");
+    app.run("ui.taskRecord", json!({"name": "Long"})).unwrap();
+    assert_eq!(app.session.project.tasks.iter().find(|t| t.name == "Long").unwrap().steps.len(), 200);
+    app.run("task.remove", json!({"task": "Long"})).unwrap();
     // Stopping with nothing recorded makes no task.
     app.run("ui.taskRecord", json!({})).unwrap();
     assert_eq!(app.run("ui.taskRecord", json!({})).unwrap()["steps"], json!(0));

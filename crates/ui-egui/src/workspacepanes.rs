@@ -14,6 +14,8 @@ pub struct WorkspaceState {
     pub task_step: usize,
     /// The steps recorded so far while Record Task is on.
     pub recording: Option<Vec<rustgis_engine::project::TaskStep>>,
+    /// The recording reached a task's 200 steps (and said so).
+    pub recording_full: bool,
     /// The Tasks pane shows its editing controls.
     pub task_editing: bool,
     /// The step being edited: its index, title and instructions as typed so far.
