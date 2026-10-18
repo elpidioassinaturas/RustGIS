@@ -7,7 +7,7 @@ use egui::{Align2, CornerRadius, Rect, Sense, Stroke, Ui, pos2, vec2};
 use rustgis_engine::Session;
 use rustgis_engine::analysis::{ParamKind, tools};
 use rustgis_engine::data::GeometryType;
-use rustgis_engine::map::raster::RasterLegend;
+use rustgis_engine::map::raster::{RasterLegend, RasterStyle};
 use rustgis_engine::map::symbology::{ClassRef, ClassStyle, MAX_LABEL, MAX_UNIQUE, normalize_label};
 use rustgis_engine::map::tiles::TileLayer;
 use rustgis_engine::map::{ClassMethod, Layer, Marker, Ramp, RasterRenderer, Renderer, Resampling, Stretch, Symbol};
@@ -3389,8 +3389,9 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                 band_combo(app, ui, label, cur, &|i| ("raster.bands".into(), json!({ key: i + 1 })));
             }
         }
-        RasterRenderer::Classify { band, method, ramp, breaks } => {
-            let (m, k, r) = (*method, breaks.len(), ramp.name().to_string());
+        RasterRenderer::Classify { band, method, ramp, breaks, classes } => {
+            let k = if *classes > 0 { *classes } else { breaks.len() };
+            let (m, r) = (*method, ramp.name().to_string());
             band_combo(app, ui, "Band", *band, &|i| {
                 ("raster.symbology".into(), json!({"type": "classify", "band": i + 1, "classes": k, "method": format!("{m:?}")}))
             });
@@ -3545,6 +3546,7 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
             }
         });
     });
+    raster_masking(app, ui, l, &d, &style, t);
     ui.add_space(6.0);
     egui::Frame::NONE.stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::same(6)).show(
         ui,
@@ -3565,6 +3567,102 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
             let _ = app.run("layer.transparency", json!({"value": tr}));
         }
     });
+}
+
+/// The Masking section of a raster's symbology (#348): values drawn as no data, and a range of
+/// values shown.
+fn raster_masking(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, d: &rustgis_engine::data::raster::Raster, style: &RasterStyle, t: &Tokens) {
+    let mask = &style.mask;
+    let title = if mask.is_empty() { tl!("Masking").to_string() } else { format!("{} ●", tl!("Masking")) };
+    egui::CollapsingHeader::new(egui::RichText::new(title).font(semibold(12.5)))
+        .id_salt(("raster_mask", l.id))
+        .default_open(!mask.is_empty())
+        .show(ui, |ui| {
+            // The values typed are kept here until they are applied, remembering the layer's
+            // values they started from (they go stale when those change).
+            let text: String = mask.values.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(", ");
+            let key = ui.id().with(("mask_values", l.id));
+            let pending = ui.data(|d| d.get_temp::<(String, String, bool)>(key)).filter(|(base, _, _)| *base == text);
+            let (mut edit, bad) = pending.map_or((text.clone(), false), |(_, e, bad)| (e, bad));
+            ui.label(tl!("Hide values (no data)"));
+            let r = ui
+                .add(egui::TextEdit::singleline(&mut edit).hint_text(tl!("e.g. 0, 255, -9999")).desired_width(ui.available_width() - 4.0));
+            if r.lost_focus() && edit != text {
+                let ok = app.run("raster.mask", json!({"values": edit})).is_ok();
+                ui.data_mut(|d| {
+                    if ok {
+                        d.remove::<(String, String, bool)>(key);
+                    } else {
+                        d.insert_temp(key, (text.clone(), edit.clone(), true));
+                    }
+                });
+            } else if r.changed() {
+                ui.data_mut(|d| d.insert_temp(key, (text.clone(), edit.clone(), false)));
+            }
+            if bad {
+                ui.label(egui::RichText::new(tl!("Type numbers separated by commas")).size(11.5).color(t.red));
+            }
+            ui.add_space(4.0);
+            let ranged = mask.min.is_some() || mask.max.is_some();
+            let modes = [(0, tl!("Show all values")), (1, tl!("Hide values outside a range")), (2, tl!("Hide values inside a range"))];
+            let cur = if !ranged {
+                0
+            } else if mask.inside {
+                2
+            } else {
+                1
+            };
+            ui.horizontal(|ui| {
+                ui.label(tl!("Range"));
+                let shown = modes.iter().find(|(m, _)| *m == cur).map(|(_, label)| label.to_string()).unwrap_or_default();
+                egui::ComboBox::from_id_salt(("raster_mask_range", l.id)).selected_text(shown).width(190.0).show_ui(ui, |ui| {
+                    for (m, label) in modes {
+                        if ui.selectable_label(m == cur, label).clicked() && m != cur {
+                            let p = match m {
+                                0 => json!({"min": null, "max": null, "inside": false}),
+                                // Starting from the values of the band drawn.
+                                _ if !ranged => {
+                                    let band = style.renderer.bands().first().copied().unwrap_or(0);
+                                    let (lo, hi) = d.bands.get(band).map_or((0.0, 1.0), |b| (b.stats.min, b.stats.max));
+                                    json!({"min": lo, "max": hi, "inside": m == 2})
+                                }
+                                _ => json!({"inside": m == 2}),
+                            };
+                            let _ = app.run("raster.mask", p);
+                        }
+                    }
+                });
+            });
+            if ranged {
+                // As with a custom stretch: kept here until both bounds are valid.
+                let (min, max) = (mask.min.unwrap_or(f64::NEG_INFINITY), mask.max.unwrap_or(f64::INFINITY));
+                let key = ui.id().with(("mask_range", l.id));
+                let pending = ui.data(|d| d.get_temp::<([f64; 2], [f64; 2])>(key)).filter(|(base, _)| *base == [min, max]);
+                let [mut lo, mut hi] = pending.map_or([min, max], |(_, edit)| edit);
+                let span = if min.is_finite() && max.is_finite() { (max - min).abs() } else { 100.0 };
+                let speed = (span / 200.0).clamp(1e-6, 1e6);
+                ui.horizontal(|ui| {
+                    ui.label(tl!("Min"));
+                    let a = ui.add(egui::DragValue::new(&mut lo).speed(speed));
+                    ui.label(tl!("Max"));
+                    let b = ui.add(egui::DragValue::new(&mut hi).speed(speed));
+                    let done = a.drag_stopped() || b.drag_stopped() || ((a.changed() || b.changed()) && !a.dragged() && !b.dragged());
+                    if lo <= hi && done {
+                        ui.data_mut(|d| d.remove::<([f64; 2], [f64; 2])>(key));
+                        let bound = |v: f64| if v.is_finite() { json!(v) } else { Value::Null };
+                        let _ = app.run("raster.mask", json!({"min": bound(lo), "max": bound(hi)}));
+                    } else if a.changed() || b.changed() {
+                        ui.data_mut(|d| d.insert_temp(key, ([min, max], [lo, hi])));
+                    }
+                });
+                if lo > hi {
+                    ui.label(egui::RichText::new(tl!("Min must not be more than Max")).size(11.5).color(t.red));
+                }
+            }
+            if !mask.is_empty() && ui.button(tl!("Clear mask")).clicked() {
+                let _ = app.run("raster.mask", json!({"clear": true}));
+            }
+        });
 }
 
 #[cfg(test)]

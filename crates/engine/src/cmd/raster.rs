@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rustgis_data::raster::{self, Raster};
-use rustgis_map::raster::{RasterLayer, RasterRenderer, Resampling, Stretch, classify, unique_values};
+use rustgis_map::raster::{RasterLayer, RasterMask, RasterRenderer, Resampling, Stretch, classify_masked, unique_values};
 use rustgis_map::{ClassMethod, Ramp};
 use serde_json::{Value, json};
 
@@ -83,6 +83,9 @@ pub fn commands() -> Vec<C> {
         })
         .when(need_raster)
         .params(r#"{"layer"?, "on"?: bool}"#),
+        C::new("raster.mask", "Mask Values", "Style › Rendering", mask).when(need_raster).params(
+            r#"{"layer"?, "values"?: [numbers] or "0, 254, 255" (drawn as no data; [] for none), "min"?, "max"?: hide values outside this range (null for no bound), "inside"?: bool (hide those inside it instead), "clear"?: bool}"#,
+        ),
         C::new("raster.resampling", "Resampling Type", "Style › Rendering", |s, p| {
             let name = ps(p, "type").ok_or("type is required")?;
             let r = Resampling::from_name(name).ok_or_else(|| format!("unknown resampling '{name}'"))?;
@@ -305,7 +308,8 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
             "classify" => {
                 let classes = f(p, "classes").map(|c| c.clamp(1.0, 32.0) as usize).unwrap_or(5);
                 let method = ps(p, "method").and_then(ClassMethod::from_name).unwrap_or_default();
-                classify(r, bi, classes, method, ramp.or(cur_ramp.filter(|r| !r.is_qualitative())).unwrap_or(Ramp::Ember))
+                let ramp = ramp.or(cur_ramp.filter(|r| !r.is_qualitative())).unwrap_or(Ramp::Ember);
+                classify_masked(r, bi, classes, method, ramp, &rl.style.mask)
             }
             "unique" | "uniquevalues" => {
                 if r.bands.get(bi).and_then(|b| b.stats.categories.as_ref()).is_none() {
@@ -333,6 +337,80 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
         } else if rl.style.stretch == Stretch::None && r.data_type != "UInt8" {
             rl.style.stretch = Stretch::default();
         }
+        Ok(())
+    })
+}
+
+/// Most values a mask lists.
+const MAX_MASK_VALUES: usize = 256;
+
+/// The values of `raster.mask`'s `values`: a list of numbers, or numbers in text.
+fn mask_values(v: &Value) -> Result<Vec<f64>, String> {
+    let num = |v: &Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())).filter(|x: &f64| x.is_finite());
+    let mut out = match v {
+        Value::Null => Vec::new(),
+        Value::Array(a) => a.iter().map(|x| num(x).ok_or_else(|| format!("mask value {x} isn't a number"))).collect::<Result<_, _>>()?,
+        Value::String(t) => t
+            .split([',', ';', ' ', '\t', '\n'])
+            .filter(|x| !x.trim().is_empty())
+            .map(|x| {
+                x.trim().parse::<f64>().ok().filter(|x| x.is_finite()).ok_or_else(|| format!("mask value '{}' isn't a number", x.trim()))
+            })
+            .collect::<Result<_, _>>()?,
+        Value::Number(_) => vec![num(v).ok_or("mask values must be finite numbers")?],
+        _ => return Err("values must be a list of numbers".into()),
+    };
+    if out.len() > MAX_MASK_VALUES {
+        return Err(format!("a mask lists at most {MAX_MASK_VALUES} values"));
+    }
+    out.sort_by(f64::total_cmp);
+    out.dedup();
+    Ok(out)
+}
+
+/// Sets which pixel values a raster layer hides: values drawn as no data, and a range.
+fn mask(s: &mut Session, p: &Value) -> CmdResult {
+    let values = p.get("values").map(mask_values).transpose()?;
+    // A bound given as null (or empty text) is removed; one given as anything but a number is refused.
+    let bound = |k: &str| -> Result<Option<Option<f64>>, String> {
+        match p.get(k) {
+            None => Ok(None),
+            Some(Value::Null) => Ok(Some(None)),
+            Some(Value::String(t)) if t.trim().is_empty() => Ok(Some(None)),
+            Some(_) => f(p, k).map(|x| Some(Some(x))).ok_or_else(|| format!("{k} must be a finite number")),
+        }
+    };
+    let (min, max) = (bound("min")?, bound("max")?);
+    let (inside, clear) = (b(p, "inside"), b(p, "clear").unwrap_or(false));
+    with(s, p, |rl, r| {
+        let mut m = if clear { RasterMask::default() } else { rl.style.mask.clone() };
+        if let Some(v) = values {
+            m.values = v;
+        }
+        if let Some(v) = min {
+            m.min = v;
+        }
+        if let Some(v) = max {
+            m.max = v;
+        }
+        if let Some(v) = inside {
+            m.inside = v;
+        }
+        if let (Some(lo), Some(hi)) = (m.min, m.max)
+            && lo > hi
+        {
+            return Err(format!("min {lo} must not be more than max {hi}"));
+        }
+        // Class breaks worked out from the pixels shown are worked out again; breaks edited by
+        // hand are kept.
+        if let RasterRenderer::Classify { band, method, ramp, breaks, classes } = &rl.style.renderer {
+            let n = if *classes > 0 { *classes } else { breaks.len().max(1) };
+            let auto = classify_masked(r, *band, n, *method, ramp.clone(), &rl.style.mask);
+            if matches!(&auto, RasterRenderer::Classify { breaks: b, .. } if b == breaks) {
+                rl.style.renderer = classify_masked(r, *band, n, *method, ramp.clone(), &m);
+            }
+        }
+        rl.style.mask = m;
         Ok(())
     })
 }
@@ -388,6 +466,7 @@ fn info(s: &mut Session, p: &Value) -> CmdResult {
         "extent": {"west": r.extent().min_x, "south": r.extent().min_y, "east": r.extent().max_x, "north": r.extent().max_y},
         "renderer": rl.style.renderer.label(),
         "stretch": rl.style.stretch.label(),
+        "mask": (!rl.style.mask.is_empty()).then(|| rl.style.mask.label()),
     }))
 }
 

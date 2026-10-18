@@ -284,7 +284,9 @@ pub fn layout(bytes: &Sparse) -> Result<Parse> {
 
 fn read_layout(r: Sparse) -> Result<Parse> {
     let mut dec = Decoder::new(super::geotiff::reader(r).map_err(err)?).map_err(err)?.with_limits(limits());
-    let geo = super::geotiff::cog_geo(&mut dec)?;
+    let Some(geo) = super::geotiff::cog_geo(&mut dec)? else {
+        return Ok(Parse::NotTiled("a rotated image is read whole".into()));
+    };
     let ct = dec.colortype().map_err(err)?;
     let (bands, color) = match ct {
         ColorType::Gray(_) => (1, ColorHint::Gray),
@@ -596,6 +598,10 @@ pub(crate) mod tests {
         assert!(is_tiff(b"II*\0") && is_tiff(b"MM\0+") && !is_tiff(b"PK\x03\x04"));
         let strips = crate::raster::geotiff::tests_support::strip_tiff();
         assert!(matches!(layout(&Sparse::default().with(0, strips)).unwrap(), Parse::NotTiled(_)));
+        // A rotated image is read whole, and turned north-up then (issue #251).
+        let m = [30.0, 5.0, 0.0, 400_000.0, 3.0, -30.0, 0.0, 5_000_000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let rotated = crate::raster::geotiff::tests_support::matrix_tiff(m, false);
+        assert!(matches!(layout(&Sparse::default().with(0, rotated)).unwrap(), Parse::NotTiled(_)));
         // Every truncation of a COG: a range asked for, an error, never a panic.
         let file = example(512, 256);
         for n in 0..300 {

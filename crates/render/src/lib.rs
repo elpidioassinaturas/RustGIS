@@ -1184,12 +1184,14 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                     Some(g) => raster::Place::Globe(g),
                     None => raster::Place::Flat(&flat, &key),
                 };
+                let stats = rl.masked_stats();
+                let stats = stats.as_ref().map(|s| s.as_slice());
                 if offscreen {
                     let mut target = Pixmap::new(w, h)?;
-                    raster::draw(&mut target, data, &rl.style, view, 1.0, full_res_rasters, place);
+                    raster::draw(&mut target, data, &rl.style, stats, view, 1.0, full_res_rasters, place);
                     composite(&mut pm, &target);
                 } else {
-                    raster::draw(&mut pm, data, &rl.style, view, opacity, full_res_rasters, place);
+                    raster::draw(&mut pm, data, &rl.style, stats, view, opacity, full_res_rasters, place);
                 }
                 cpu_dirty = true;
             }

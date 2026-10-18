@@ -788,6 +788,11 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
     app.map.pointer_lonlat = hover.and_then(|p| screen_to_lonlat(app, rect, p));
     let tool = app.session.tool;
 
+    // A map tool aims with a crosshair, only over the map: the ribbon and panes keep their cursor.
+    // A finished measurement keeps its points on show but waits for a new one.
+    if hover.is_some() && tool != Tool::Explore && (app.map.sketch_len() == 0 || app.map.sketch_done) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
     // A place for Directions waits for a click.
     if hover.is_some() && app.ui.nav.picking.is_some() && app.ui.right == Some(crate::RightPane::Directions) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);

@@ -2,7 +2,6 @@
 //! keyboard shortcuts, the command search palette, About and notifications.
 
 use egui::{Align2, CornerRadius, Key, KeyboardShortcut, Modifiers, Rect, Sense, Stroke, Ui, pos2, vec2};
-use rustgis_engine::Tool;
 use serde_json::{Value, json};
 
 use crate::mapview::Toast;
@@ -434,9 +433,6 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
             continue;
         }
         let _ = app.run(id, p);
-    }
-    if app.session.tool != Tool::Explore && app.map.sketch_len() == 0 {
-        ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
     }
 }
 

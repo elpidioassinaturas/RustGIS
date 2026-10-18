@@ -3,7 +3,8 @@
 //! Supports grey, RGB(A), palette and multiband images of any integer or floating-point pixel
 //! type, stored in strips or tiles, chunky or planar, uncompressed or compressed with Deflate, LZW,
 //! PackBits or JPEG. Georeferencing comes from the GeoTIFF tags (pixel scale and tie point, or a
-//! transformation matrix without rotation) and the EPSG code in the GeoKey directory.
+//! transformation matrix) and the EPSG code in the GeoKey directory. A rotated or skewed image is
+//! resampled to a north-up grid as it's read.
 
 use std::io::{Read, Seek};
 
@@ -23,6 +24,10 @@ fn err(e: impl std::fmt::Display) -> DataError {
 /// The GeoTIFF parts of a TIFF's first image.
 struct Geo {
     transform: GeoTransform,
+    /// A rotated or skewed image's full transformation (GDAL's order: x, x per column, x per row,
+    /// y, y per column, y per row); `transform` then holds only its origin and the column and row
+    /// steps along the axes.
+    affine: Option<[f64; 6]>,
     crs: Option<Crs>,
     /// An EPSG code that was named but isn't known.
     unknown_epsg: Option<u32>,
@@ -64,10 +69,11 @@ fn geo_tags<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Geo> {
         (code, code.and_then(Crs::from_epsg))
     };
 
+    let mut affine = None;
     let transform = if let Some(m) = doubles(dec, 34264).filter(|m| m.len() >= 8) {
         let at = |i: usize| m.get(i).copied().unwrap_or(0.0);
         if at(1) != 0.0 || at(4) != 0.0 {
-            return Err(err("rotated rasters aren't supported yet"));
+            affine = Some([at(3), at(0), at(1), at(7), at(4), at(5)]);
         }
         GeoTransform { origin_x: at(3), origin_y: at(7), pixel_width: at(0), pixel_height: at(5) }
     } else {
@@ -77,6 +83,13 @@ fn geo_tags<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Geo> {
         let t = |i: usize| tie.get(i).copied().unwrap_or(0.0);
         GeoTransform { origin_x: t(3) - t(0) * s(0), origin_y: t(4) + t(1) * s(1), pixel_width: s(0), pixel_height: -s(1) }
     };
+    // A point's value is at a pixel's centre: the image starts half a pixel up and left of it.
+    let affine =
+        affine.map(
+            |[x, xc, xr, y, yc, yr]| {
+                if pixel_is_point { [x - (xc + xr) / 2.0, xc, xr, y - (yc + yr) / 2.0, yc, yr] } else { [x, xc, xr, y, yc, yr] }
+            },
+        );
     let transform = if pixel_is_point {
         GeoTransform {
             origin_x: transform.origin_x - transform.pixel_width / 2.0,
@@ -92,13 +105,16 @@ fn geo_tags<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Geo> {
         .flatten()
         .and_then(|v| v.into_string().ok())
         .and_then(|s| s.trim_matches(|c: char| c == '\0' || c.is_whitespace()).parse::<f64>().ok());
-    Ok(Geo { transform, crs, unknown_epsg: code.filter(|_| crs.is_none()), geographic_model, nodata, custom_error })
+    Ok(Geo { transform, affine, crs, unknown_epsg: code.filter(|_| crs.is_none()), geographic_model, nodata, custom_error })
 }
 
 /// A cloud-optimised GeoTIFF's coordinate system, georeferencing and no-data value, from its first
-/// image (as [`read`] finds them).
-pub(crate) fn cog_geo<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<(Crs, GeoTransform, Option<f64>)> {
+/// image (as [`read`] finds them); `None` for a rotated or skewed image, which is read whole.
+pub(crate) fn cog_geo<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Option<(Crs, GeoTransform, Option<f64>)>> {
     let geo = geo_tags(dec)?;
+    if geo.affine.is_some() {
+        return Ok(None);
+    }
     let crs = match geo.crs {
         Some(c) => c,
         None if geo.geographic_model => Crs::LonLat,
@@ -112,7 +128,7 @@ pub(crate) fn cog_geo<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<(Crs, GeoT
             }
         },
     };
-    Ok((crs, geo.transform, geo.nodata))
+    Ok(Some((crs, geo.transform, geo.nodata)))
 }
 
 #[cfg(test)]
@@ -132,6 +148,25 @@ pub(crate) mod tests_support {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         super::write(&r, 0).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// A 20×10 byte image in UTM zone 33N placed by a transformation matrix (`m`, row by row), as
+    /// GDAL writes it: 100 in its top half and 200 below, 7 at its first pixel and 9 at its last.
+    pub(crate) fn matrix_tiff(m: [f64; 16], pixel_is_point: bool) -> Vec<u8> {
+        use tiff::encoder::{TiffEncoder, colortype};
+        use tiff::tags::Tag;
+        let mut px = vec![100u8; 100];
+        px.extend([200u8; 100]);
+        px[0] = 7;
+        px[199] = 9;
+        let keys: [u16; 16] = [1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, if pixel_is_point { 2 } else { 1 }, 3072, 0, 1, 32633];
+        let mut out = std::io::Cursor::new(Vec::new());
+        let mut enc = TiffEncoder::new(&mut out).unwrap_or_else(|e| panic!("{e}"));
+        let mut img = enc.new_image::<colortype::Gray8>(20, 10).unwrap_or_else(|e| panic!("{e}"));
+        img.encoder().write_tag(Tag::Unknown(34264), &m[..]).unwrap_or_else(|e| panic!("{e}"));
+        img.encoder().write_tag(Tag::GeoKeyDirectoryTag, &keys[..]).unwrap_or_else(|e| panic!("{e}"));
+        img.write_data(&px).unwrap_or_else(|e| panic!("{e}"));
+        out.into_inner()
     }
 }
 
@@ -798,14 +833,25 @@ fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<Opener<'_>>)
     };
 
     let mut transform = geo.transform;
-    if decimate_by > 1 {
+    // How many full-image pixels one pixel read spans, across and down.
+    let (sx, sy) = if decimate_by > 1 {
         // Every k-th pixel: pixels k times the size, from the same corner.
-        transform.pixel_width *= f64::from(decimate_by);
-        transform.pixel_height *= f64::from(decimate_by);
+        (f64::from(decimate_by), f64::from(decimate_by))
     } else if overview.is_some() {
-        transform.pixel_width *= full_w as f64 / w.max(1) as f64;
-        transform.pixel_height *= full_h as f64 / h.max(1) as f64;
-    }
+        (full_w as f64 / w.max(1) as f64, full_h as f64 / h.max(1) as f64)
+    } else {
+        (1.0, 1.0)
+    };
+    transform.pixel_width *= sx;
+    transform.pixel_height *= sy;
+    let (bands, w, h) = match geo.affine {
+        Some([x, xc, xr, y, yc, yr]) => {
+            let (bands, ow, oh, north_up) = super::north_up(bands, w, h, [x, xc * sx, xr * sy, y, yc * sx, yr * sy], max)?;
+            transform = north_up;
+            (bands, ow, oh)
+        }
+        None => (bands, w, h),
+    };
     let crs = match geo.crs {
         Some(c) => c,
         None => {
@@ -954,6 +1000,58 @@ mod tests {
         assert_eq!(back.value(0, 2, 1), Some(7.0));
         assert_eq!(back.value(0, 1, 1), None);
         assert_eq!(back.data_type, "Float32");
+    }
+
+    #[test]
+    fn rotated_matrix_is_turned_north_up() {
+        // Issue #251: GDAL's geotransform (400000, 30, 5, 5000000, 3, -30).
+        let m = [30.0, 5.0, 0.0, 400_000.0, 3.0, -30.0, 0.0, 5_000_000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let r = read(std::io::Cursor::new(tests_support::matrix_tiff(m, false)), "rot").unwrap();
+        assert_eq!(r.crs, Crs::from_epsg(32633).unwrap());
+        // gdalinfo's corners: x from 400000 to 400650, y from 4999700 to 5000060; pixels of the
+        // same area (30 × 30 + 5 × 3).
+        let gt = r.transform;
+        let cell = (30.0f64 * 30.0 + 5.0 * 3.0).sqrt();
+        assert!((gt.pixel_width - cell).abs() < 1e-9 && (gt.pixel_height + cell).abs() < 1e-9);
+        assert_eq!((gt.origin_x, gt.origin_y), (400_000.0, 5_000_060.0));
+        let (right, bottom) = (gt.origin_x + gt.pixel_width * f64::from(r.width), gt.origin_y + gt.pixel_height * f64::from(r.height));
+        assert!((400_650.0..400_650.0 + cell).contains(&right), "{right}");
+        assert!((4_999_700.0 - cell..=4_999_700.0).contains(&bottom), "{bottom}");
+        // The pixels sit where the matrix puts them; the box's corners outside the image are empty.
+        let at = |x: f64, y: f64| {
+            let (c, row) = gt.to_pixel(rustgis_geom::Coord::new(x, y));
+            r.value(0, c.floor() as i64, row.floor() as i64)
+        };
+        let world = |c: f64, row: f64| (400_000.0 + 30.0 * c + 5.0 * row, 5_000_000.0 + 3.0 * c - 30.0 * row);
+        let (x, y) = world(0.5, 0.5);
+        assert_eq!(at(x, y), Some(7.0));
+        let (x, y) = world(19.5, 9.5);
+        assert_eq!(at(x, y), Some(9.0));
+        let (x, y) = world(10.0, 2.5);
+        assert_eq!(at(x, y), Some(100.0));
+        let (x, y) = world(10.0, 7.5);
+        assert_eq!(at(x, y), Some(200.0));
+        assert_eq!(r.value(0, 0, 0), None);
+        assert_eq!(r.value(0, i64::from(r.width) - 1, i64::from(r.height) - 1), None);
+
+        // A point's value at a pixel's centre: the image starts half a pixel up and left.
+        let p = read(std::io::Cursor::new(tests_support::matrix_tiff(m, true)), "rot").unwrap();
+        assert_eq!((p.transform.origin_x, p.transform.origin_y), (400_000.0 - 17.5, 5_000_060.0 - 1.5 + 15.0));
+
+        // Read every 4th pixel (a small limit): the matrix's steps scale, so the box stays put.
+        let file = tests_support::matrix_tiff(m, false);
+        let d = read_limited(reader(std::io::Cursor::new(&file)).unwrap(), "rot", 50, None).unwrap();
+        assert_eq!(d.overview, Some((20, 10)));
+        assert!(d.width as usize * d.height as usize <= 50);
+        let dg = d.transform;
+        assert_eq!((dg.origin_x, dg.origin_y), (400_000.0, 5_000_060.0));
+        let (right, bottom) = (dg.origin_x + dg.pixel_width * f64::from(d.width), dg.origin_y + dg.pixel_height * f64::from(d.height));
+        assert!((400_650.0..400_650.0 + dg.pixel_width).contains(&right), "{right}");
+        assert!((4_999_700.0 + dg.pixel_height..=4_999_700.0).contains(&bottom), "{bottom}");
+
+        // A degenerate matrix (no area) is refused, not divided by.
+        let flat = [30.0, 60.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        assert!(read(std::io::Cursor::new(tests_support::matrix_tiff(flat, false)), "flat").is_err());
     }
 
     #[test]

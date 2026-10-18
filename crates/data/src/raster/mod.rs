@@ -12,6 +12,7 @@ mod epsg_gap;
 pub mod gdal;
 pub mod geotiff;
 mod lzw;
+pub mod pam;
 pub mod wkt;
 pub mod zarr;
 
@@ -91,6 +92,12 @@ impl BandStats {
     }
 
     fn compute(data: &[f32], valid: impl Fn(f32) -> bool) -> BandStats {
+        BandStats::compute_with(data, valid, None)
+    }
+
+    /// [`BandStats::compute`], taking the range, mean and spread from `stored` (statistics of the
+    /// whole band, when `data` is a reduced overview of it).
+    fn compute_with(data: &[f32], valid: impl Fn(f32) -> bool, stored: Option<pam::Stats>) -> BandStats {
         let (mut n, mut min, mut max, mut sum, mut sum2) = (0usize, f64::INFINITY, f64::NEG_INFINITY, 0.0f64, 0.0f64);
         let mut whole = true;
         for &v in data {
@@ -108,8 +115,13 @@ impl BandStats {
         if n == 0 {
             return BandStats::default();
         }
-        let mean = sum / n as f64;
-        let std_dev = (sum2 / n as f64 - mean * mean).max(0.0).sqrt();
+        let mut mean = sum / n as f64;
+        let mut std_dev = (sum2 / n as f64 - mean * mean).max(0.0).sqrt();
+        if let Some(s) = stored {
+            (min, max) = (min.min(s.min), max.max(s.max));
+            mean = s.mean.unwrap_or(mean);
+            std_dev = s.std_dev.unwrap_or(std_dev);
+        }
         let mut histogram = vec![0u64; HISTOGRAM_BINS];
         let span = max - min;
         // Whole numbers within 16 bits are tracked in a bit set (fast for byte imagery); others in
@@ -278,6 +290,30 @@ impl Raster {
         Ok(r)
     }
 
+    /// Applies what GDAL's `.aux.xml` sidecar says about the bands: their descriptions name them,
+    /// its no-data value applies when the file has none, and its statistics stand in for those of
+    /// a reduced overview (the whole band's, where the overview's only approximate them).
+    pub fn apply_pam(&mut self, pam: &pam::Pam) {
+        let mut recompute = false;
+        if self.nodata.is_none() {
+            self.nodata = pam.nodata();
+            recompute = self.nodata.is_some();
+        }
+        let nd = self.nodata.map(|v| v as f32);
+        let valid = move |v: f32| v.is_finite() && nd.is_none_or(|d| v != d);
+        let overview = self.overview.is_some();
+        for (i, band) in self.bands.iter_mut().enumerate() {
+            let p = pam.band(i + 1);
+            if let Some(d) = p.and_then(|p| p.description.as_ref()) {
+                band.name = d.clone();
+            }
+            let stored = p.and_then(|p| p.stats).filter(|_| overview);
+            if recompute || stored.is_some() {
+                band.stats = BandStats::compute_with(&band.data, valid, stored);
+            }
+        }
+    }
+
     /// Longitude/latitude bounds, from points along the grid's edges.
     fn compute_extent(&self) -> Extent {
         let mut e = Extent::EMPTY;
@@ -395,6 +431,9 @@ pub fn read_path(path: &Path) -> Result<Raster> {
         }
         other => return Err(DataError::Unsupported(format!(".{other}"))),
     };
+    if let Some(p) = pam::read(path) {
+        r.apply_pam(&p);
+    }
     r.source = Some(path.display().to_string());
     Ok(r)
 }
@@ -481,6 +520,61 @@ fn rotate(r: &Raster, degrees: f64) -> Result<Raster> {
     }
     let transform = GeoTransform { origin_x: cx + min_x, origin_y: cy + max_y, pixel_width: px, pixel_height: -py };
     Raster::new(r.name.clone(), ow, oh, bands, transform, r.crs, None, r.color.clone(), r.data_type.clone())
+}
+
+/// A `w`×`h` image placed by a rotated or skewed `affine` (GDAL's order: x, x per column, x per
+/// row, y, y per column, y per row), resampled (nearest pixel) to the north-up grid of square
+/// pixels over its bounding box: pixels of the same area, coarser if that would hold more than
+/// `max` samples. Outside the image is NaN (transparent). Returns the bands, their size and grid.
+fn north_up(bands: Vec<Vec<f32>>, w: u32, h: u32, affine: [f64; 6], max: usize) -> Result<(Vec<Vec<f32>>, u32, u32, GeoTransform)> {
+    let [x0, xc, xr, y0, yc, yr] = affine;
+    let det = xc * yr - xr * yc;
+    if !affine.iter().all(|v| v.is_finite()) || !det.is_normal() {
+        return Err(DataError::Format("the raster has no usable georeferencing".into()));
+    }
+    let (fw, fh) = (f64::from(w), f64::from(h));
+    let corners = [(0.0, 0.0), (fw, 0.0), (0.0, fh), (fw, fh)].map(|(c, r)| (x0 + c * xc + r * xr, y0 + c * yc + r * yr));
+    let (min_x, max_x) = corners.iter().fold((f64::MAX, f64::MIN), |(a, b), (x, _)| (a.min(*x), b.max(*x)));
+    let (min_y, max_y) = corners.iter().fold((f64::MAX, f64::MIN), |(a, b), (_, y)| (a.min(*y), b.max(*y)));
+    let nbands = bands.len().max(1);
+    let mut cell = det.abs().sqrt();
+    let size = |cell: f64| (((max_x - min_x) / cell).ceil().max(1.0), ((max_y - min_y) / cell).ceil().max(1.0));
+    let (mut ow, mut oh) = size(cell);
+    // A strong skew spreads the image over a much larger box: coarser pixels keep it in bounds,
+    // each step at least 1% coarser so a box rounded up past the limit still shrinks.
+    for _ in 0..64 {
+        let n = ow * oh * nbands as f64;
+        if n <= max as f64 && ow <= f64::from(u32::MAX) && oh <= f64::from(u32::MAX) {
+            break;
+        }
+        cell *= (n / max.max(1) as f64).sqrt().max(1.01);
+        (ow, oh) = size(cell);
+    }
+    if ow * oh * nbands as f64 > max as f64 {
+        return Err(DataError::Format(format!("{w} × {h} pixels turned is too large to open")));
+    }
+    let (ow, oh) = (ow as u32, oh as u32);
+    let n = ow as usize * oh as usize;
+    let mut out: Vec<Vec<f32>> = vec![vec![f32::NAN; n]; bands.len()];
+    for row in 0..oh {
+        let y = max_y - (f64::from(row) + 0.5) * cell - y0;
+        for col in 0..ow {
+            let x = min_x + (f64::from(col) + 0.5) * cell - x0;
+            // The output pixel's centre, back in the image's columns and rows.
+            let (c, r) = (((yr * x - xr * y) / det).floor(), ((xc * y - yc * x) / det).floor());
+            if !(0.0..fw).contains(&c) || !(0.0..fh).contains(&r) {
+                continue;
+            }
+            let src = r as usize * w as usize + c as usize;
+            let dst = row as usize * ow as usize + col as usize;
+            for (o, b) in out.iter_mut().zip(&bands) {
+                if let (Some(o), Some(v)) = (o.get_mut(dst), b.get(src)) {
+                    *o = *v;
+                }
+            }
+        }
+    }
+    Ok((out, ow, oh, GeoTransform { origin_x: min_x, origin_y: max_y, pixel_width: cell, pixel_height: -cell }))
 }
 
 fn from_image_unrotated(name: &str, bytes: &[u8], bbox: [f64; 4]) -> Result<Raster> {
@@ -584,6 +678,51 @@ pub(crate) mod tests {
         let gt = GeoTransform { origin_x: 10.0, origin_y: 50.0, pixel_width: 0.5, pixel_height: -0.5 };
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, -9999.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
         Raster::new("small", 4, 3, vec![data], gt, Crs::LonLat, Some(-9999.0), ColorHint::Gray, "Float32").unwrap()
+    }
+
+    #[test]
+    fn gdal_sidecars_name_bands_and_set_nodata() {
+        let dir = std::env::temp_dir().join(format!("rustgis-pam-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gt = GeoTransform { origin_x: 10.0, origin_y: 50.0, pixel_width: 0.5, pixel_height: -0.5 };
+        let r = Raster::new("dem", 2, 2, vec![vec![0.0, 5.0, 7.0, 9.0]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let tif = dir.join("dem.tif");
+        std::fs::write(&tif, geotiff::write(&r, 0).unwrap()).unwrap();
+        let xml = r#"<PAMDataset><PAMRasterBand band="1"><Description>Elevation</Description><NoDataValue>0</NoDataValue></PAMRasterBand></PAMDataset>"#;
+        std::fs::write(dir.join("dem.tif.aux.xml"), xml).unwrap();
+        let back = read_path(&tif).unwrap();
+        assert_eq!((back.bands[0].name.as_str(), back.nodata), ("Elevation", Some(0.0)));
+        assert_eq!((back.value(0, 0, 0), back.bands[0].stats.count, back.bands[0].stats.min), (None, 3, 5.0));
+        // An ASCII grid's `x.aux.xml`; the file's own no-data value wins.
+        let asc = dir.join("grid.asc");
+        std::fs::write(&asc, "ncols 2\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -1\n-1 0\n").unwrap();
+        std::fs::write(dir.join("grid.aux.xml"), xml).unwrap();
+        let g = read_path(&asc).unwrap();
+        assert_eq!((g.bands[0].name.as_str(), g.nodata, g.value(0, 1, 0)), ("Elevation", Some(-1.0), Some(0.0)));
+        // A broken sidecar is ignored.
+        std::fs::write(dir.join("dem.tif.aux.xml"), "<PAMDataset><PAMRasterBand").unwrap();
+        assert_eq!(read_path(&tif).unwrap().bands[0].name, "Band 1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sidecar_statistics_stand_in_for_an_overview() {
+        let pam = pam::Pam {
+            bands: vec![pam::PamBand {
+                band: 1,
+                stats: Some(pam::Stats { min: -50.0, max: 900.0, mean: Some(300.0), std_dev: Some(40.0) }),
+                ..Default::default()
+            }],
+        };
+        let mut full = small();
+        full.apply_pam(&pam);
+        assert_eq!((full.bands[0].stats.min, full.bands[0].stats.max), (1.0, 12.0), "the whole band's own statistics are exact");
+        let mut ov = small();
+        ov.overview = Some((400, 300));
+        ov.apply_pam(&pam);
+        let s = &ov.bands[0].stats;
+        assert_eq!((s.min, s.max, s.mean, s.std_dev, s.count), (-50.0, 900.0, 300.0, 40.0, 11));
+        assert_eq!(s.histogram.iter().sum::<u64>(), 11);
     }
 
     #[test]

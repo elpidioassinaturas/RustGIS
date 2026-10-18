@@ -10,7 +10,7 @@ use rustgis_data::raster::{BandStats, ColorHint, Raster};
 use rustgis_geom::{Coord, Extent, extent_to_merc};
 use rustgis_map::Globe;
 use rustgis_map::projection::Flat;
-use rustgis_map::raster::{Colorizer, RasterRenderer, RasterStyle, Resampling, hillshade};
+use rustgis_map::raster::{Colorizer, RasterMask, RasterRenderer, RasterStyle, Resampling, hillshade};
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
 
 use crate::View;
@@ -47,8 +47,13 @@ fn source(r: &Raster, view: &View, place: Place, k: f64, dx: f64, dy: f64) -> Op
     (c.is_finite() && row.is_finite()).then_some((c, row))
 }
 
-fn sample(r: &Raster, band: usize, c: f64, row: f64, resampling: Resampling) -> f32 {
-    let nearest = || r.value(band, c.floor() as i64, row.floor() as i64).unwrap_or(f32::NAN);
+/// The value of `band` at a pixel, unless it is no data, masked or outside the grid.
+fn value(r: &Raster, mask: &RasterMask, band: usize, col: i64, row: i64) -> Option<f32> {
+    r.value(band, col, row).filter(|v| !mask.hides(*v))
+}
+
+fn sample(r: &Raster, mask: &RasterMask, band: usize, c: f64, row: f64, resampling: Resampling) -> f32 {
+    let nearest = || value(r, mask, band, c.floor() as i64, row.floor() as i64).unwrap_or(f32::NAN);
     if resampling == Resampling::Nearest {
         return nearest();
     }
@@ -57,7 +62,8 @@ fn sample(r: &Raster, band: usize, c: f64, row: f64, resampling: Resampling) -> 
     let (i, j) = (x.floor(), y.floor());
     let (fx, fy) = ((x - i) as f32, (y - j) as f32);
     let (i, j) = (i as i64, j as i64);
-    match (r.value(band, i, j), r.value(band, i + 1, j), r.value(band, i, j + 1), r.value(band, i + 1, j + 1)) {
+    let v = |i, j| value(r, mask, band, i, j);
+    match (v(i, j), v(i + 1, j), v(i, j + 1), v(i + 1, j + 1)) {
         (Some(a), Some(b), Some(cc), Some(d)) => {
             let top = a + (b - a) * fx;
             let bottom = cc + (d - cc) * fx;
@@ -71,15 +77,36 @@ fn place_is_flat(p: &Place) -> bool {
     matches!(p, Place::Flat(..))
 }
 
-/// Draws a raster layer onto `pm` at `opacity`.
-pub(crate) fn draw(pm: &mut Pixmap, r: &Raster, style: &RasterStyle, view: &View, opacity: f32, full_res: bool, place: Place) {
+/// Draws a raster layer onto `pm` at `opacity`. `stats` are the renderer bands' statistics
+/// without the masked pixels, when the style has a mask.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw(
+    pm: &mut Pixmap,
+    r: &Raster,
+    style: &RasterStyle,
+    stats: Option<&[BandStats]>,
+    view: &View,
+    opacity: f32,
+    full_res: bool,
+    place: Place,
+) {
     let threads = threads_for(pm.width() as usize * pm.height() as usize);
-    draw_with(pm, r, style, view, opacity, full_res, place, threads);
+    draw_with(pm, r, style, stats, view, opacity, full_res, place, threads);
 }
 
 /// [`draw`], its rows spread over `threads` threads.
 #[allow(clippy::too_many_arguments)]
-fn draw_with(pm: &mut Pixmap, r: &Raster, style: &RasterStyle, view: &View, opacity: f32, full_res: bool, place: Place, threads: usize) {
+fn draw_with(
+    pm: &mut Pixmap,
+    r: &Raster,
+    style: &RasterStyle,
+    stats: Option<&[BandStats]>,
+    view: &View,
+    opacity: f32,
+    full_res: bool,
+    place: Place,
+    threads: usize,
+) {
     // On high-density screens, compute at logical-pixel resolution and scale up (unless asked
     // for full resolution, as exports are): a quarter of the work at 2×.
     let k = if view.pixels_per_point >= 1.5 && !full_res { view.pixels_per_point } else { 1.0 };
@@ -189,6 +216,7 @@ fn draw_with(pm: &mut Pixmap, r: &Raster, style: &RasterStyle, view: &View, opac
         resampling,
         alpha_band,
         cell: r.cell_size_m(),
+        mask: &style.mask,
     };
     let mut vals = vec![f32::NAN; bw * bh * nb];
     let mut shade = if relief.is_some() { vec![0u8; bw * bh] } else { Vec::new() };
@@ -204,7 +232,7 @@ fn draw_with(pm: &mut Pixmap, r: &Raster, style: &RasterStyle, view: &View, opac
     // Dynamic range adjustment: statistics of the values in view.
     let view_stats: Option<Vec<BandStats>> =
         style.dra.then(|| (0..nb).map(|k| BandStats::from_values(&vals.iter().skip(k).step_by(nb).copied().collect::<Vec<_>>())).collect());
-    let colorizer = Colorizer::new(style, r, view_stats.as_deref());
+    let colorizer = Colorizer::new(style, r, view_stats.as_deref().or(stats));
 
     // Pass 2: colours, premultiplied, into a pixmap the size of the raster's screen box.
     let Some(mut lay) = Pixmap::new(bw as u32, bh as u32) else { return };
@@ -270,6 +298,8 @@ struct Pass1<'a> {
     resampling: Resampling,
     alpha_band: Option<usize>,
     cell: (f64, f64),
+    /// Values drawn as no data.
+    mask: &'a RasterMask,
 }
 
 impl Pass1<'_> {
@@ -346,24 +376,24 @@ impl Pass1<'_> {
                     let at = cell.1 as usize * r.width as usize + cell.0 as usize;
                     for (bi, data) in self.data.iter().enumerate() {
                         if let (Some(slot), Some(v)) = (row_vals.get_mut(dx * nb + bi), data.and_then(|d| d.get(at))) {
-                            *slot = if r.is_valid(*v) { *v } else { f32::NAN };
+                            *slot = if r.is_valid(*v) && !self.mask.hides(*v) { *v } else { f32::NAN };
                         }
                     }
                 } else {
                     for (bi, b) in self.bands.iter().enumerate() {
                         if let Some(slot) = row_vals.get_mut(dx * nb + bi) {
-                            *slot = sample(r, *b, c, row, self.resampling);
+                            *slot = sample(r, self.mask, *b, c, row, self.resampling);
                         }
                     }
                 }
                 if let (Some((az, alt, zf)), Some(b)) = (self.relief, self.bands.first()) {
                     let (ci, ri) = cell;
-                    let centre = r.value(*b, ci, ri).unwrap_or(0.0) as f64;
+                    let centre = value(r, self.mask, *b, ci, ri).unwrap_or(0.0) as f64;
                     let mut z = [centre; 9];
                     for (k, (dx, dy)) in
                         [(-1, -1), (0, -1), (1, -1), (-1, 0), (0, 0), (1, 0), (-1, 1), (0, 1), (1, 1)].into_iter().enumerate()
                     {
-                        z[k] = r.value(*b, ci + dx, ri + dy).map(f64::from).unwrap_or(centre);
+                        z[k] = value(r, self.mask, *b, ci + dx, ri + dy).map(f64::from).unwrap_or(centre);
                     }
                     if let Some(s) = shade.get_mut(i) {
                         *s = hillshade(&z, self.cell.0, self.cell.1, az, alt, zf);
@@ -415,6 +445,56 @@ mod tests {
 
     use super::*;
 
+    /// #348: masked values draw as no data, are never blended into their neighbours, and leave
+    /// the stretch to the values shown.
+    #[test]
+    fn masked_values_draw_as_no_data() {
+        // 100 × 100 cells of 1 km in UTM 17N around 81°W, 42°N: a -9999 background the file
+        // doesn't flag in the west half, 49 down to 0 by column in the east.
+        let gt = GeoTransform { origin_x: 450_000.0, origin_y: 4_700_000.0, pixel_width: 1000.0, pixel_height: -1000.0 };
+        let data: Vec<f32> = (0..10_000).map(|i| if i % 100 < 50 { -9999.0 } else { (99 - i % 100) as f32 }).collect();
+        let r = Raster::new("utm", 100, 100, vec![data], gt, Crs::from_epsg(32617).unwrap(), None, ColorHint::Gray, "Float32").unwrap();
+        let camera = Camera { center: lonlat_to_merc(Coord::new(-81.0, 42.0)), res: 250.0, bearing: 0.0 };
+        let view = View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
+        let flat = Place::Flat(&Flat::Mercator, "mercator");
+        let mut style = RasterStyle::default_for(&r);
+        style.resampling = Resampling::Bilinear;
+        let draw_it = |style: &RasterStyle, stats: Option<&[BandStats]>| {
+            let mut pm = Pixmap::new(200, 200).unwrap();
+            draw(&mut pm, &r, style, stats, &view, 1.0, false, flat);
+            pm
+        };
+        let px = |pm: &Pixmap, x: u32| pm.pixel(x, 100).map(|p| (p.alpha(), p.red())).unwrap_or((0, 0));
+        let plain = draw_it(&style, None);
+        assert_eq!(px(&plain, 70).0, 255, "unmasked, the background is drawn");
+
+        style.mask = RasterMask { values: vec![-9999.0], ..RasterMask::default() };
+        let stats = [style.mask.stats(&r, 0)];
+        assert!(stats[0].min == 0.0 && stats[0].max == 49.0, "{:?}", stats[0]);
+        let masked = draw_it(&style, Some(&stats));
+        assert_eq!(px(&masked, 70).0, 0, "the background is hidden");
+        // Across the edge: drawn or hidden, never a blend of -9999 and the 49 beside it, which the
+        // stretch (0–49, light to dark) would show black.
+        let first = (100..200).find(|x| px(&masked, *x).0 > 0).unwrap();
+        assert!(px(&masked, first).1 > 200, "the edge is the light high end: {:?}", px(&masked, first));
+        // Stretched over the values shown, 0–49, not with the file's statistics (-9999–49).
+        let spread = |pm: &Pixmap| px(pm, first).1.abs_diff(px(pm, 199).1);
+        let file_stats = draw_it(&style, None);
+        assert!(spread(&masked) > spread(&file_stats) + 40, "{} vs {}", spread(&masked), spread(&file_stats));
+
+        // A range: values outside 35–45 are hidden; with `inside`, those within.
+        style.mask = RasterMask { min: Some(35.0), max: Some(45.0), ..RasterMask::default() };
+        let outside = draw_it(&style, None);
+        style.mask.inside = true;
+        let inside = draw_it(&style, None);
+        let shown = |pm: &Pixmap| (0..200).filter(|x| px(pm, *x).0 > 0).count();
+        assert!(shown(&outside) > 0 && shown(&inside) > 0);
+        assert!(shown(&outside) < shown(&plain) && shown(&inside) < shown(&plain));
+        for x in 0..200 {
+            assert!(!(px(&outside, x).0 > 0 && px(&inside, x).0 > 0), "column {x} is in and out");
+        }
+    }
+
     #[test]
     fn draws_a_utm_raster_where_it_belongs() {
         // 100 × 100 cells of 1 km in UTM 17N around 81°W, 42°N, valued by column.
@@ -425,7 +505,7 @@ mod tests {
         let camera = Camera { center: lonlat_to_merc(Coord::new(-81.0, 42.0)), res: 2000.0, bearing: 0.0 };
         let view = View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
         let mut pm = Pixmap::new(200, 200).unwrap();
-        draw(&mut pm, &r, &style, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"));
+        draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"));
         let alpha = |x: u32, y: u32| pm.pixel(x, y).map(|p| p.alpha()).unwrap_or(0);
         assert_eq!(alpha(100, 100), 255, "the centre is covered");
         assert_eq!(alpha(2, 2), 0, "the corner of the view is outside the raster");
@@ -443,12 +523,12 @@ mod tests {
             };
             s.dra = true;
             s.resampling = Resampling::Bilinear;
-            draw(&mut pm, &r, &s, &view, 0.5, false, Place::Flat(&Flat::Mercator, "mercator"));
+            draw(&mut pm, &r, &s, None, &view, 0.5, false, Place::Flat(&Flat::Mercator, "mercator"));
         }
         // High-density screens draw at logical resolution, scaled up.
         let hi = View { pixels_per_point: 2.0, ..view };
         let mut pm2 = Pixmap::new(400, 400).unwrap();
-        draw(&mut pm2, &r, &style, &hi, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"));
+        draw(&mut pm2, &r, &style, None, &hi, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"));
         assert_eq!(pm2.pixel(200, 200).map(|p| p.alpha()), Some(255));
         assert_eq!(pm2.pixel(4, 4).map(|p| p.alpha()), Some(0));
         // Spread over threads, every pixel comes out as drawn on one, for each renderer.
@@ -462,13 +542,13 @@ mod tests {
             };
             let mut one = Pixmap::new(420, 300).unwrap();
             let mut many = Pixmap::new(420, 300).unwrap();
-            draw_with(&mut one, &r, &s, &wide, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), 1);
-            draw_with(&mut many, &r, &s, &wide, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), 7);
+            draw_with(&mut one, &r, &s, None, &wide, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), 1);
+            draw_with(&mut many, &r, &s, None, &wide, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), 7);
             assert!(one.data() == many.data(), "{kind}");
             assert!(one.pixels().iter().any(|p| p.alpha() == 255), "{kind} draws");
         }
         let far = View { width: 3.0, height: 1.0, pixels_per_point: 2.0, camera: Camera::world(), sky: false };
         let mut tiny = Pixmap::new(6, 2).unwrap();
-        draw(&mut tiny, &r, &style, &far, 1.0, true, Place::Flat(&Flat::Mercator, "mercator"));
+        draw(&mut tiny, &r, &style, None, &far, 1.0, true, Place::Flat(&Flat::Mercator, "mercator"));
     }
 }

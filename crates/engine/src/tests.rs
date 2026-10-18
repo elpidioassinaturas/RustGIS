@@ -696,6 +696,82 @@ fn raster_layers_open_style_identify_and_round_trip() {
     assert!(crate::cmd::share::map_png(&mut s, Some(320.0), Some(200.0), None).is_ok());
 }
 
+/// #348: `raster.mask` hides pixel values on the fly: values drawn as no data and a range,
+/// kept in the project and undone like any style change.
+#[test]
+fn raster_masks_hide_values() {
+    let mut s = with_raster();
+    let style = |s: &Session| s.map().layer_by_name("scene").unwrap().raster.as_ref().unwrap().style.clone();
+    let info = s.run("raster.info", &Value::Null).unwrap();
+    let (lo, hi) = (info["bands"][0]["min"].as_f64().unwrap(), info["bands"][0]["max"].as_f64().unwrap());
+    assert!(info["mask"].is_null());
+    s.run("raster.mask", &json!({"values": format!("{lo}, {lo} ; {hi}")})).unwrap();
+    assert_eq!(style(&s).mask.values, vec![lo, hi], "text, sorted and without repeats");
+    let rl = s.map().layer_by_name("scene").unwrap().raster.clone().unwrap();
+    let st = rl.masked_stats().unwrap();
+    assert!(st[0].min > lo && st[0].max < hi, "{:?}", st[0]);
+    // A range on top, then the other way round; a bound given as null is removed.
+    s.run("raster.mask", &json!({"min": lo + 1.0, "max": hi - 1.0})).unwrap();
+    s.run("raster.mask", &json!({"inside": true, "max": null})).unwrap();
+    let m = style(&s).mask;
+    assert_eq!((m.min, m.max, m.inside, m.values.len()), (Some(lo + 1.0), None, true, 2));
+    assert!(s.run("raster.info", &Value::Null).unwrap()["mask"].as_str().is_some_and(|t| t.contains('≥')));
+    // Refused: a reversed range, values that aren't numbers, too many values.
+    assert!(s.run("raster.mask", &json!({"min": 5, "max": 1})).is_err());
+    assert!(s.run("raster.mask", &json!({"values": "1, x"})).is_err());
+    assert!(s.run("raster.mask", &json!({"values": [1, "nan"]})).is_err());
+    assert!(s.run("raster.mask", &json!({"min": "x"})).is_err());
+    assert!(s.run("raster.mask", &json!({"values": (0..300).collect::<Vec<_>>()})).is_err());
+    assert_eq!(style(&s).mask, m, "nothing changed by a refused mask");
+    // Class breaks follow the pixels shown.
+    s.run("raster.mask", &json!({"clear": true, "min": lo, "max": (lo + hi) / 2.0})).unwrap();
+    s.run("raster.symbology", &json!({"type": "classify", "classes": 4})).unwrap();
+    let top = |s: &Session| match style(s).renderer {
+        rustgis_map::RasterRenderer::Classify { breaks, .. } => breaks.last().copied().unwrap_or_default(),
+        _ => f64::NAN,
+    };
+    assert!(top(&s) <= (lo + hi) / 2.0, "{}", top(&s));
+    s.run("raster.mask", &json!({"max": null})).unwrap();
+    assert!(top(&s) > (lo + hi) / 2.0, "worked out again without the bound");
+    // Masking down to one value collapses the classes; clearing the mask brings back the 4 asked for.
+    let classes = |s: &Session| match style(s).renderer {
+        rustgis_map::RasterRenderer::Classify { breaks, .. } => breaks.len(),
+        _ => 0,
+    };
+    s.run("raster.mask", &json!({"min": lo, "max": lo})).unwrap();
+    assert_eq!(classes(&s), 1);
+    s.run("raster.mask", &json!({"clear": true})).unwrap();
+    assert_eq!(classes(&s), 4);
+    // Undo the clear and the one-value range.
+    s.run("edit.undo", &Value::Null).unwrap();
+    s.run("edit.undo", &Value::Null).unwrap();
+    // Breaks edited by hand are kept.
+    let mut edited = style(&s);
+    if let rustgis_map::RasterRenderer::Classify { breaks, .. } = &mut edited.renderer {
+        breaks[0] += 0.5;
+    }
+    let id = s.map().layer_by_name("scene").unwrap().id;
+    s.map_mut().layer_mut(id).unwrap().raster.as_mut().unwrap().style = edited.clone();
+    s.run("raster.mask", &json!({"values": [lo]})).unwrap();
+    assert_eq!(style(&s).renderer, edited.renderer);
+    // Undo that mask.
+    s.run("edit.undo", &Value::Null).unwrap();
+    // Undo removing the max bound; then saved and drawn.
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(style(&s).mask.max, Some((lo + hi) / 2.0));
+    let dir = std::env::temp_dir().join(format!("rustgis-mask-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let proj = dir.join("p.rgis");
+    s.run("project.saveAs", &json!({"path": proj.display().to_string()})).unwrap();
+    s.run("project.open", &json!({"path": proj.display().to_string()})).unwrap();
+    assert_eq!(style(&s).mask.max, Some((lo + hi) / 2.0), "kept in the project");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(crate::cmd::share::map_png(&mut s, Some(320.0), Some(200.0), None).is_ok());
+    s.active_layer = s.map().layer_by_name("scene").map(|l| l.id);
+    s.run("raster.mask", &json!({"clear": true})).unwrap();
+    assert!(style(&s).mask.is_empty());
+}
+
 /// Every command with junk parameters returns Ok or Err, never panics, and leaves a usable session.
 #[test]
 fn hostile_params_never_panic() {
