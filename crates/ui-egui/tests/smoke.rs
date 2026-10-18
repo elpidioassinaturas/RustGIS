@@ -831,11 +831,15 @@ Distance: 100 km."
     )
     .unwrap();
     assert_eq!(app.session.project.tasks[0].steps[1].title, "Buffer the cities");
-    // Out of edit mode, a step runs from the pane as before.
-    app.ws.task_editing = false;
-    app.ws.task_edit = None;
+    // Unticking Edit Steps drops an unsaved edit; out of edit mode, a step runs from the pane.
+    app.ws.task_edit = Some((0, "Typed".into(), String::new()));
+    h.step();
+    h.get_by_label("Edit Steps").click();
     h.step();
     h.step();
+    let app = h.state_mut();
+    assert!(!app.ws.task_editing);
+    assert!(app.ws.task_edit.is_none(), "the unsaved edit is dropped");
     // The name typed beside Stop Recording names the task.
     let app = h.state_mut();
     app.run("ui.taskRecord", json!({})).unwrap();

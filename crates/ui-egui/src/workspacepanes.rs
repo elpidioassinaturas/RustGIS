@@ -170,7 +170,10 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                     }
                 }
             });
-        ui.checkbox(&mut app.ws.task_editing, tl!("Edit Steps"));
+        // Leaving edit mode drops a step's unsaved edit, which would come back stale.
+        if ui.checkbox(&mut app.ws.task_editing, tl!("Edit Steps")).changed() && !app.ws.task_editing {
+            app.ws.task_edit = None;
+        }
     });
     let Some(task) = tasks.iter().find(|t| t.name == app.ws.task) else { return };
     if !task.description.is_empty() {
