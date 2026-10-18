@@ -800,7 +800,7 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
     // A north arrow's or scale bar's new look, and a map frame's grid: `"grid": false` removes it,
     // `true` adds the default one, an object changes the options it names, and null (not set)
     // leaves it as it is.
-    let (restyled, new_grid) = {
+    let (restyled, new_grid, new_indicator) = {
         let l = s.project.layouts.get(li).ok_or("no layout")?;
         let kind = &l.element(id).ok_or_else(|| format!("no element {id}"))?.kind;
         // `"extentIndicator": false` takes the frame's indicator away; an object restyles it.
@@ -824,9 +824,8 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
             (_, Some(_)) => return Err("only map frames have a grid".into()),
             _ => None,
         };
-        (restyle(kind, p)?, (grid, indicator))
+        (restyle(kind, p)?, grid, indicator)
     };
-    let (new_grid, new_indicator) = new_grid;
     let map_name = match ps(p, "map") {
         Some(n) => Some(
             s.project
