@@ -515,6 +515,12 @@ fn imported_tasks_name_outputs_and_steps_are_edited() {
         assert!(crate::cmd::items::touches_files(command, &params), "{command} {params}");
     }
 
+    // `"step": null` runs the whole task, as before; a step that isn't an index is refused.
+    s.run("select.all", &json!({"layer": "Cities"})).unwrap();
+    let r = s.run("task.run", &json!({"task": "Lesson", "step": null})).unwrap();
+    assert_eq!(r["ran"].as_array().unwrap().len(), 3);
+    assert!(s.run("task.run", &json!({"task": "Lesson", "step": "two"})).is_err());
+
     // Steps are edited, moved and deleted, each one undoable.
     s.run(
         "task.editStep",

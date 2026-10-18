@@ -610,7 +610,8 @@ fn task_mut<'a>(s: &'a mut Session, p: &Value) -> Result<&'a mut Task, String> {
 /// Runs a task's steps (or one of them), stopping at the first that fails.
 fn run_task(s: &mut Session, p: &Value) -> CmdResult {
     let t = task_ref(s, p)?.clone();
-    let steps: Vec<(usize, TaskStep)> = match p.get("step") {
+    // `"step": null` runs them all, as no step does.
+    let steps: Vec<(usize, TaskStep)> = match p.get("step").filter(|v| !v.is_null()) {
         Some(_) => {
             let i = step_index(p)?;
             vec![(i, t.steps.get(i).cloned().ok_or_else(|| format!("{} has {} steps", t.name, t.steps.len()))?)]

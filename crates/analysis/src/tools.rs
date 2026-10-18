@@ -997,6 +997,21 @@ mod tests {
         }
     }
 
+    /// `touches_files` in rustgis-engine lets tasks, models and notebooks from files set a built-in
+    /// tool's `output`, because it only names the new layer (`out_name`). Hold every built-in tool
+    /// to that: an `output` parameter is plain text, and a run names its layer after it.
+    #[test]
+    fn a_built_in_tools_output_only_names_its_layer() {
+        for spec in TOOLS {
+            for p in spec.params.iter().filter(|p| p.name.eq_ignore_ascii_case("output")) {
+                assert!(matches!(p.kind, K::Text), "{}: output must be a layer name (Text), not {:?}", spec.id, p.kind);
+            }
+        }
+        let m = inputs();
+        let r = crate::run("buffer", &m, &serde_json::json!({"input": "pts", "distance": 1, "output": "Named"})).unwrap();
+        assert_eq!(layer(r).name, "Named");
+    }
+
     #[test]
     fn dissolved_buffers_merge() {
         let mut pts = Dataset::new("p", GeometryType::Point, vec![]);
