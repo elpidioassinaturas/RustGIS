@@ -1207,6 +1207,15 @@ impl RustGisApp {
             self.ui.web_file = None;
             // A deletion asked for in the old project never reaches a namesake in the new one.
             self.map.deleting = None;
+            // A recording's steps name the old project's layers: it ends here, and says so.
+            if let Some(steps) = self.ws.recording.take() {
+                let n = steps.len().to_string();
+                let text = crate::i18n::fmt(
+                    "Recording stopped: another project opened, and its {n} steps were for the previous one.",
+                    &[("n", &n)],
+                );
+                self.session.notify(text, true);
+            }
         }
         // Undo and redo can move vertices: an index chosen before may now name another vertex.
         if r.is_ok() && matches!(id, "edit.undo" | "edit.redo") {
@@ -1231,7 +1240,10 @@ impl RustGisApp {
         // Undo doesn't take back a recorded step (the undo history and the recording don't line
         // up step for step): say how to.
         if id == "edit.undo" && !steps.is_empty() {
-            self.session.notify(tl!("Undo doesn't remove the recorded step: delete it in Edit Steps once you stop recording."), false);
+            if !self.ws.recording_undo_said {
+                self.ws.recording_undo_said = true;
+                self.session.notify(tl!("Undo doesn't remove the recorded step: delete it in Edit Steps once you stop recording."), false);
+            }
             return;
         }
         // Not steps of an exercise: panes, tasks, opening or saving the project, undo and redo,
@@ -2038,9 +2050,14 @@ impl RustGisApp {
                 None => {
                     self.ws.recording = Some(Vec::new());
                     self.ws.recording_full = false;
+                    self.ws.recording_undo_said = false;
+                    self.ws.record_name.clear();
                     return Ok(json!({"recording": true, "steps": 0}));
                 }
-                Some(steps) if steps.is_empty() => return Ok(json!({"recording": false, "steps": 0})),
+                Some(steps) if steps.is_empty() => {
+                    self.session.notify(tl!("Nothing was recorded, so no task was made."), false);
+                    return Ok(json!({"recording": false, "steps": 0}));
+                }
                 Some(steps) => {
                     let name = p.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Recorded Task");
                     let n = steps.len();

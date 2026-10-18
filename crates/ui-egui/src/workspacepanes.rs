@@ -16,6 +16,10 @@ pub struct WorkspaceState {
     pub recording: Option<Vec<rustgis_engine::project::TaskStep>>,
     /// The recording reached a task's 200 steps (and said so).
     pub recording_full: bool,
+    /// The recording said that Undo keeps a recorded step.
+    pub recording_undo_said: bool,
+    /// The name typed for the task being recorded.
+    pub record_name: String,
     /// The Tasks pane shows its editing controls.
     pub task_editing: bool,
     /// The step being edited: its index, title and instructions as typed so far.
@@ -102,12 +106,14 @@ pub fn follow_delete(app: &mut RustGisApp, deleted: usize) {
 
 /// Record Task: the button that starts or stops recording, and how far it has got.
 fn record_row(app: &mut RustGisApp, ui: &mut Ui) {
-    ui.horizontal(|ui| match app.ws.recording.as_ref().map(Vec::len) {
+    ui.horizontal_wrapped(|ui| match app.ws.recording.as_ref().map(Vec::len) {
         Some(n) => {
             ui.label(egui::RichText::new("●").color(Color32::from_rgb(0xD0, 0x30, 0x30)));
             ui.label(crate::i18n::fmt("Recording: {n} steps", &[("n", &n.to_string())]));
+            ui.add(egui::TextEdit::singleline(&mut app.ws.record_name).hint_text(tl!("Task name")).desired_width(150.0));
             if ui.button(tl!("Stop Recording")).on_hover_text(tl!("Make a task of the steps recorded")).clicked() {
-                run(app, "ui.taskRecord", json!({}));
+                let name = app.ws.record_name.clone();
+                run(app, "ui.taskRecord", json!({"name": name}));
             }
         }
         None => {

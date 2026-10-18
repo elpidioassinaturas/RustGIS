@@ -789,10 +789,21 @@ fn a_task_is_recorded_from_what_changes_the_project_and_edited_in_its_pane() {
     app.run("ui.taskRecord", json!({"name": "Long"})).unwrap();
     assert_eq!(app.session.project.tasks.iter().find(|t| t.name == "Long").unwrap().steps.len(), 200);
     app.run("task.remove", json!({"task": "Long"})).unwrap();
-    // Stopping with nothing recorded makes no task.
+    // Undo said once per recording.
+    let said = |app: &RustGisApp| app.session.notices.iter().filter(|n| n.text.contains("Edit Steps")).count();
+    let before = said(app);
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("layer.color", json!({"layer": "Lakes", "color": "#445566"})).unwrap();
+    app.run("edit.undo", json!(null)).unwrap();
+    app.run("layer.color", json!({"layer": "Rivers", "color": "#445566"})).unwrap();
+    app.run("edit.undo", json!(null)).unwrap();
+    assert_eq!(said(app), before + 1, "the undo notice once per recording");
+    app.ws.recording = None;
+    // Stopping with nothing recorded makes no task, and says so.
     app.run("ui.taskRecord", json!({})).unwrap();
     assert_eq!(app.run("ui.taskRecord", json!({})).unwrap()["steps"], json!(0));
     assert_eq!(app.session.project.tasks.len(), 1);
+    assert!(app.session.notices.iter().any(|n| n.text.contains("Nothing was recorded")));
 
     // The pane draws while a step is being edited, and saving it keeps the new words.
     h.state_mut().ws.task_edit = Some((
@@ -816,6 +827,28 @@ Distance: 100 km."
     app.ws.task_edit = None;
     h.step();
     h.step();
+    // The name typed beside Stop Recording names the task.
+    let app = h.state_mut();
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("layer.color", json!({"layer": "Lakes", "color": "#654321"})).unwrap();
+    app.ws.record_name = "Lake colours".into();
+    h.step();
+    h.step();
+    assert!(h.get_by_label("Stop Recording").rect().max.x <= 1400.0, "the name field leaves Stop Recording in the pane");
+    h.get_by_label("Stop Recording").click();
+    h.step();
+    h.step();
+    let app = h.state_mut();
+    assert!(app.ws.recording.is_none());
+    assert!(app.session.project.tasks.iter().any(|t| t.name == "Lake colours"));
+    // Opening another project ends a recording, and says so.
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("layer.color", json!({"layer": "Lakes", "color": "#123456"})).unwrap();
+    let errors = app.session.notices.iter().filter(|n| n.error).count();
+    app.run("project.new", json!(null)).unwrap();
+    assert!(app.ws.recording.is_none());
+    assert_eq!(app.session.notices.iter().filter(|n| n.error).count(), errors + 1);
+    assert!(app.session.project.tasks.is_empty(), "nothing recorded lands in the new project");
 }
 
 #[test]
