@@ -1262,12 +1262,11 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
     // The layers a legend lists: a checkbox for each vector layer of its frame's map, ticked when
     // listed. Names gone from the map drop out of the list as it's written back.
     if let ElementKind::Legend { frame, exclude, .. } = &e.kind {
-        let names: Vec<String> = layout
-            .element(*frame)
-            .and_then(|f| match &f.kind {
-                ElementKind::MapFrame { map, .. } => app.session.project.maps.iter().find(|m| m.name == *map),
-                _ => None,
-            })
+        let map = layout.element(*frame).and_then(|f| match &f.kind {
+            ElementKind::MapFrame { map, .. } => app.session.project.maps.iter().find(|m| m.name == *map),
+            _ => None,
+        });
+        let names: Vec<String> = map
             .map(|m| {
                 // Once each: layers may share a name, and the legend leaves names out.
                 let mut names: Vec<String> = Vec::new();
@@ -1279,6 +1278,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                 names
             })
             .unwrap_or_default();
+        // The names left out that the map still has, those not listed here (a raster's) too.
+        let kept: Vec<String> =
+            exclude.iter().filter(|x| map.is_some_and(|m| m.layers.iter().any(|l| l.name.eq_ignore_ascii_case(x)))).cloned().collect();
         if !names.is_empty() {
             ui.add_space(4.0);
             egui::CollapsingHeader::new(tl!("Layers")).id_salt(("legend_layers", id)).default_open(!exclude.is_empty()).show(ui, |ui| {
@@ -1286,7 +1288,10 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                 for n in &names {
                     let mut listed = !left_out(n);
                     if ui.checkbox(&mut listed, n.as_str()).on_hover_text(tl!("List this layer in the legend")).changed() {
-                        let next: Vec<&String> = names.iter().filter(|m| if *m == n { !listed } else { left_out(m) }).collect();
+                        let mut next: Vec<&String> = kept.iter().filter(|x| !x.eq_ignore_ascii_case(n)).collect();
+                        if !listed {
+                            next.push(n);
+                        }
                         update(app, json!({"exclude": next}));
                     }
                 }
@@ -1665,6 +1670,10 @@ mod tests {
         app.run("layout.new", json!({"name": "Legend"})).unwrap();
         let li = app.session.active_layout.unwrap();
         let legend = app.session.project.layouts[li].elements.iter().find(|e| matches!(e.kind, ElementKind::Legend { .. })).unwrap().id;
+        // A layer the section doesn't list (graphics here), left out through the command, stays
+        // left out whatever is ticked.
+        app.session.map_mut().layers.iter_mut().find(|l| l.name == "Cities").unwrap().graphics = true;
+        app.run("layout.update", json!({"element": legend, "exclude": ["Cities"]})).unwrap();
         app.layout.selected = Some(legend);
         let mut fonts = false;
         let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).build_ui_state(
@@ -1679,8 +1688,7 @@ mod tests {
             app,
         );
         h.run_steps(3);
-        h.get_by_label("Layers").click();
-        h.run_steps(2);
+        assert!(h.query_by_role_and_label(Role::CheckBox, "Cities").is_none());
         h.get_by_role_and_label(Role::CheckBox, "Rivers").click();
         h.run_steps(2);
         let left_out =
@@ -1688,11 +1696,11 @@ mod tests {
                 ElementKind::Legend { exclude, .. } => exclude.clone(),
                 _ => panic!("a legend"),
             };
-        assert_eq!(left_out(&h), ["Rivers"]);
+        assert_eq!(left_out(&h), ["Cities", "Rivers"]);
         // Ticked again, it's listed again.
         h.get_by_role_and_label(Role::CheckBox, "Rivers").click();
         h.run_steps(2);
-        assert!(left_out(&h).is_empty());
+        assert_eq!(left_out(&h), ["Cities"]);
     }
 
     /// Element ids are per layout: opening another layout ends the selection, so Delete or

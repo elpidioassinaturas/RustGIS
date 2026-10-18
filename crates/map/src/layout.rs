@@ -871,8 +871,9 @@ impl Layout {
                     }
                 }
                 ElementKind::Legend { exclude, .. } => {
+                    // Names stay whole: a layer's own name isn't cut, and a cut one would no
+                    // longer match it.
                     exclude.truncate(MAX_LEGEND_EXCLUDED);
-                    exclude.iter_mut().for_each(|n| *n = n.chars().take(200).collect());
                 }
                 ElementKind::Text { text, size, letter_spacing, .. } => {
                     *size = finite_or(*size, 12.0).clamp(2.0, 400.0);
