@@ -59,7 +59,7 @@ cell by 1/distanceᴾ, where P is the distance coefficient (2 by default). Lines
 contribute their vertices. Leave the extent empty to use the input's, or give it as
 `xmin,ymin,xmax,ymax` in degrees. The result is a Float32 GeoTIFF layer.
 
-**Tissot's Indicatrix** shows what the map's projection does to the Earth. It draws the same small circle repeated over a grid: by default every 30°, 500 km across the whole world. With **Area: Map Extent** it fills the view instead, for a country or a state with a smaller spacing and radius.
+**Tissot's Indicatrix** shows what the map's projection does to the Earth. It draws the same small circle repeated over a grid: by default circles of 500 km radius every 30° over the whole world. With **Area: Map Extent** it fills the view instead (the whole Earth on the globe), for a country or a state with a smaller spacing and radius.
 
 - **The circles are geodesic,** in longitude/latitude. The map draws each one as the ellipse its projection makes of it, and redraws them when you change the projection: growing circles in Web Mercator, flattened ellipses of equal area in Mollweide.
 - **On a flat map, each circle also records Tissot's parameters at its centre** for the projection the map had when the tool ran:

@@ -590,7 +590,13 @@ impl Inputs for MapInputs<'_> {
         flat.forward(c).map(|m| rustgis_geom::Coord::new(m.x * to_meter, m.y * to_meter))
     }
     fn view_extent(&self) -> Option<rustgis_geom::Extent> {
-        *self.6.get_or_init(|| Some(super::workspace::view_extent(self.5)).filter(|e| !e.is_empty()))
+        *self.6.get_or_init(|| {
+            // The globe shows the whole Earth (the camera's flat extent means nothing there).
+            if self.0.projection.is_globe() {
+                return Some(rustgis_geom::Extent::new(-180.0, -90.0, 180.0, 90.0));
+            }
+            Some(super::workspace::view_extent(self.5)).filter(|e| !e.is_empty())
+        })
     }
     fn raster(&self, layer: &str) -> Option<RasterInput<'_>> {
         let rl = self.0.layer_by_name(layer)?.raster.as_ref()?;

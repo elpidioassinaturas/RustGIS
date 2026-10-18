@@ -596,6 +596,9 @@ fn tissot_indicatrix_reports_the_maps_own_distortion() {
     s.run("gp.run", &json!({"tool": "tissot", "params": {"output": "globe"}})).unwrap();
     let fields: Vec<String> = s.map().layer_by_name("globe").unwrap().dataset.fields.iter().map(|f| f.name.clone()).collect();
     assert_eq!(fields, ["lat", "lon"]);
+    // Map Extent on the globe fills the whole Earth.
+    s.run("gp.run", &json!({"tool": "tissot", "params": {"area": "Map Extent", "spacing": 60, "output": "globeView"}})).unwrap();
+    assert!(!s.map().layer_by_name("globeView").unwrap().dataset.features.is_empty());
 }
 
 #[test]

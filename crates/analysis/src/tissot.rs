@@ -89,14 +89,26 @@ fn centres(area: Extent, spacing: f64, reach: f64, world: bool, cap: usize) -> R
     let lats: Vec<f64> = {
         let (first, last) = span(area.min_y.max(-90.0), area.max_y.min(90.0));
         // (At most 18,001 latitudes: a spacing is at least 0.01°.)
-        (first..=last).map(|i| i as f64 * spacing).filter(|lat| lat.abs() + reach < 90.0 - POLE_MARGIN).collect()
+        (first..=last).map(|i| at(i, spacing)).filter(|lat| lat.abs() + reach < 90.0 - POLE_MARGIN).collect()
     };
-    let lons = span(lon_min, lon_max);
+    let mut lons = span(lon_min, lon_max);
+    // A view a turn wide or more holds each place once (not at both `lon` and `lon + 360`): one
+    // turn from its first grid longitude, keeping the view's own longitudes.
+    if !world {
+        let turn = (360.0 / spacing - 1e-9).ceil() as i64;
+        lons.1 = lons.1.min(lons.0.saturating_add(turn - 1));
+    }
     let n = (lats.len() as u64).saturating_mul(count(lons));
     if n > cap as u64 {
         return Err(n);
     }
-    Ok(lats.iter().flat_map(|&lat| (lons.0..=lons.1).map(move |i| Coord::new(i as f64 * spacing, lat))).collect())
+    Ok(lats.iter().flat_map(|&lat| (lons.0..=lons.1).map(move |i| Coord::new(at(i, spacing), lat))).collect())
+}
+
+/// The `i`th multiple of `spacing`, without the binary noise of a spacing such as 0.1
+/// (`0.30000000000000004`), so a centre's `lat` and `lon` read as typed.
+fn at(i: i64, spacing: f64) -> f64 {
+    (i as f64 * spacing * 1e9).round() / 1e9
 }
 
 fn num(p: &Json, k: &str) -> Option<f64> {
@@ -280,6 +292,19 @@ mod tests {
         // The finest spacing over the world is refused by its count, before a point is made
         // (about 650 million of them would be gigabytes).
         assert!(run(&NoMap, &serde_json::json!({"spacing": 0.01, "radius": 0.001})).is_err_and(|e| e.contains("too many")));
+        // Grid values read as typed, without binary noise.
+        let tenth = layer(run(&es, &serde_json::json!({"area": "Map Extent", "spacing": 0.1, "radius": 1})).unwrap());
+        assert!((0..tenth.features.len()).any(|r| float(&tenth, r, "lat") == -21.3));
+        // A view more than a turn wide holds each place once.
+        let wide = Mercator(Extent::new(170.0, -10.0, 560.0, 10.0));
+        let ds = layer(run(&wide, &serde_json::json!({"area": "Map Extent", "spacing": 30, "radius": 100})).unwrap());
+        let mut places: Vec<i64> = (0..ds.features.len()).map(|r| (float(&ds, r, "lon").rem_euclid(360.0) * 10.0).round() as i64).collect();
+        let n = places.len();
+        places.sort_unstable();
+        places.dedup();
+        assert_eq!(places.len(), n, "each longitude once");
+        assert_eq!(n, 12, "a turn of 30° steps at the equator");
+        assert!((0..n).all(|r| float(&ds, r, "lon") >= 170.0), "the view's own longitudes");
         // A view far past the Earth is held to it: no endless grid, no overflow.
         let huge = Mercator(Extent::new(-1e300, -1e300, 1e300, 1e300));
         assert!(run(&huge, &serde_json::json!({"area": "Map Extent", "spacing": 0.01})).is_err_and(|e| e.contains("too many")));
