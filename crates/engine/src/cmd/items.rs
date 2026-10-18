@@ -252,6 +252,10 @@ pub fn commands() -> Vec<C> {
             if title.is_some_and(|t| t.trim().is_empty()) {
                 return Err("a step needs a title".into());
             }
+            // Changing nothing would still leave an undo step.
+            if title.is_none() && instructions.is_none() {
+                return Err("title or instructions is required".into());
+            }
             let step = step_index(p)?;
             let t = task_mut(s, p)?;
             let n = t.steps.len();
@@ -271,6 +275,9 @@ pub fn commands() -> Vec<C> {
             let t = task_mut(s, p)?;
             if step >= t.steps.len() || to >= t.steps.len() {
                 return Err(format!("{} has {} steps", t.name, t.steps.len()));
+            }
+            if step == to {
+                return Err(format!("step {step} is already there"));
             }
             let st = t.steps.remove(step);
             t.steps.insert(to, st);

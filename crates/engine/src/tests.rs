@@ -547,6 +547,11 @@ Line two."
     s.run("task.removeStep", &json!({"task": "Lesson", "step": 2})).unwrap();
     assert_eq!(s.project.tasks.iter().find(|t| t.name == "Lesson").unwrap().steps.len(), 2);
     assert!(s.run("task.moveStep", &json!({"task": "Lesson", "step": 0, "to": 5})).is_err());
+    // Neither changes nothing (which would leave an undo step).
+    let depth = s.undo_depth();
+    assert!(s.run("task.moveStep", &json!({"task": "Lesson", "step": 1, "to": 1})).is_err());
+    assert!(s.run("task.editStep", &json!({"task": "Lesson", "step": 1})).is_err());
+    assert_eq!(s.undo_depth(), depth);
     // Still a task from a file: a step that writes a file stays refused after editing.
     assert!(!s.trusted_tasks.contains("lesson"));
 }
