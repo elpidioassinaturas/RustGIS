@@ -239,9 +239,10 @@ parallels: pick the preset in the **Coordinate System** dialog and set **Central
 `{"type": "albers", "lon_0": -55, "lat_1": -5, "lat_2": -35}`. Without `type`, the values go to the
 map's current preset. The map saves them in its code (`robinson +lon_0=150`), which can also be
 typed as it is. Meridians run from -180° to 180° and parallels from -89° to 89°. Parallels mirrored
-about the equator (such as -30° and 30°) make no cone and are refused, as is a value a preset
-doesn't take. The two regional grids keep their standard definitions. A conic's area of use runs
-35° beyond its parallels and 90° either side of its meridian.
+about the equator to within 1° (such as -30° and 30°, or -30° and 29.5°) make no cone and are
+refused, as is a value a preset doesn't take. The two regional grids keep their standard
+definitions. A conic's area of use runs 35° beyond its parallels and 90° either side of its
+meridian.
 
 Layers are projected on the fly. A feature that crosses the edge of a world projection (the
 meridian opposite its central one, such as 90°E in Equal Earth Americas) is cut there and drawn on

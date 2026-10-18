@@ -75,7 +75,11 @@ pub fn parse_preset(code: &str) -> Result<Option<(&'static str, Vec<(&'static st
     let (head, rest) = code.trim().split_once('+').unwrap_or((code.trim(), ""));
     let head = head.trim();
     let Some((id, _, _)) = PRESETS.iter().find(|(id, label, _)| id.eq_ignore_ascii_case(head) || label.eq_ignore_ascii_case(head)) else {
-        return if rest.is_empty() { Ok(None) } else { Err(format!("only presets take parameters: '{head}' isn't one")) };
+        return match (head, rest) {
+            (_, "") => Ok(None),
+            ("", _) => Err("PROJ strings aren't taken: pick a preset, or an EPSG or ESRI code".into()),
+            _ => Err(format!("only presets take parameters: '{head}' isn't one")),
+        };
     };
     let takes = preset_params(id);
     let mut given: Vec<(&'static str, f64)> = Vec::new();
@@ -150,7 +154,7 @@ pub fn lookup(code: &str) -> Result<(String, String), String> {
         if let (Some(a), Some(b)) = (value("lat_1"), value("lat_2"))
             && (a + b).abs() < 1.0
         {
-            return Err(format!("standard parallels {a} and {b} mirror each other about the equator, which makes no cone"));
+            return Err(format!("standard parallels {a} and {b} mirror each other about the equator (within 1°), which makes no cone"));
         }
         if params.is_empty() {
             return Ok((def.to_string(), label.to_string()));
@@ -653,6 +657,7 @@ mod tests {
         let (id, p) = parse_preset("albers +lat_2=-35 +LON_0=-55 + lat_1 = -5").unwrap().unwrap();
         assert_eq!(preset_code(id, &p), "albers +lon_0=-55 +lat_1=-5 +lat_2=-35");
         assert_eq!(lookup("robinson +lon_0=150").unwrap().1, "Robinson (lon_0=150)");
+        assert!(lookup("+proj=robin +lon_0=150").unwrap_err().contains("PROJ strings"));
         for bad in [
             "robinson +lon_0=181",
             "robinson +lon_0=x",
@@ -664,6 +669,8 @@ mod tests {
             "EPSG:3035 +lon_0=10",
             "albers +lat_1=-30 +lat_2=30",
             "albers +lat_1=-89.5",
+            "albers +lat_1=-30 +lat_2=29.5",
+            "+proj=robin +lon_0=150",
         ] {
             assert!(lookup(bad).is_err(), "{bad}");
             assert!(Projector::new(bad).is_err(), "{bad}");

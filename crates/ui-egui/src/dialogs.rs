@@ -1194,6 +1194,8 @@ fn preset_fields(app: &mut RustGisApp, ui: &mut egui::Ui) {
         }
     });
     if next != params {
+        // In the preset's order, as the map will write it.
+        let next: Vec<(&str, f64)> = takes.iter().filter_map(|p| next.iter().find(|(k, _)| *k == p.key)).copied().collect();
         app.dialogs.text = preset_code(id, &next);
     }
     ui.add_space(4.0);
