@@ -454,7 +454,7 @@ mod tests {
         let gt = GeoTransform { origin_x: 450_000.0, origin_y: 4_700_000.0, pixel_width: 1000.0, pixel_height: -1000.0 };
         let data: Vec<f32> = (0..10_000).map(|i| if i % 100 < 50 { -9999.0 } else { (99 - i % 100) as f32 }).collect();
         let r = Raster::new("utm", 100, 100, vec![data], gt, Crs::from_epsg(32617).unwrap(), None, ColorHint::Gray, "Float32").unwrap();
-        let camera = Camera { center: lonlat_to_merc(Coord::new(-81.0, 42.0)), res: 250.0, bearing: 0.0 };
+        let camera = Camera { center: lonlat_to_merc(Coord::new(-81.0, 42.0)), res: 250.0, bearing: 0.0, pitch: 0.0 };
         let view = View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
         let flat = Place::Flat(&Flat::Mercator, "mercator");
         let mut style = RasterStyle::default_for(&r);
@@ -502,7 +502,7 @@ mod tests {
         let data: Vec<f32> = (0..10_000).map(|i| (i % 100) as f32).collect();
         let r = Raster::new("utm", 100, 100, vec![data], gt, Crs::from_epsg(32617).unwrap(), None, ColorHint::Gray, "Float32").unwrap();
         let style = RasterStyle::default_for(&r);
-        let camera = Camera { center: lonlat_to_merc(Coord::new(-81.0, 42.0)), res: 2000.0, bearing: 0.0 };
+        let camera = Camera { center: lonlat_to_merc(Coord::new(-81.0, 42.0)), res: 2000.0, bearing: 0.0, pitch: 0.0 };
         let view = View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
         let mut pm = Pixmap::new(200, 200).unwrap();
         draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"));

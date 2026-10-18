@@ -335,6 +335,42 @@ impl RasterRenderer {
     }
 }
 
+/// How a newly added single-band raster of continuous values is drawn: a colour ramp stretch with
+/// these settings (`raster.setDefaultStyle`). The app keeps them with its preferences, not the
+/// project; the default is an inverted grey stretch clipping 0.5 % at each end.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RasterDefaults {
+    pub ramp: Ramp,
+    pub invert: bool,
+    /// Never [`Stretch::Custom`]: its bounds are one raster's own units.
+    pub stretch: Stretch,
+    pub resampling: Resampling,
+}
+
+impl Default for RasterDefaults {
+    fn default() -> Self {
+        RasterDefaults { ramp: Ramp::Greys, invert: true, stretch: Stretch::default(), resampling: Resampling::Nearest }
+    }
+}
+
+impl RasterDefaults {
+    /// Settings read from a file or preference, made safe to use: a custom stretch falls back to
+    /// the default one and parameters are clamped to what `raster.stretch` accepts.
+    pub fn sanitized(mut self) -> RasterDefaults {
+        self.stretch = match self.stretch {
+            Stretch::Custom { .. } => Stretch::default(),
+            Stretch::PercentClip { low, high } => {
+                let pct = |v: f64| if v.is_finite() { v.clamp(0.0, 49.0) } else { 0.5 };
+                Stretch::PercentClip { low: pct(low), high: pct(high) }
+            }
+            Stretch::StandardDeviation { n } => Stretch::StandardDeviation { n: if n.is_finite() { n.clamp(0.1, 10.0) } else { 2.0 } },
+            st => st,
+        };
+        self
+    }
+}
+
 /// Most values given their own colour by Unique Values.
 pub const MAX_UNIQUE_VALUES: usize = 256;
 
@@ -455,6 +491,12 @@ impl RasterStyle {
     /// The default look: the file's colours, RGB for colour images, unique values for a few
     /// categories, otherwise a grey stretch.
     pub fn default_for(r: &Raster) -> RasterStyle {
+        RasterStyle::default_with(r, &RasterDefaults::default())
+    }
+
+    /// The default look, with `d` for a single band of continuous values in place of the grey
+    /// stretch.
+    pub fn default_with(r: &Raster, d: &RasterDefaults) -> RasterStyle {
         let byte_rgb = r.data_type == "UInt8";
         let (renderer, stretch) = match &r.color {
             ColorHint::Palette(_) => (RasterRenderer::Colormap, Stretch::None),
@@ -464,14 +506,15 @@ impl RasterStyle {
             _ if r.band_count() >= 3 => (RasterRenderer::Rgb { red: 0, green: 1, blue: 2 }, Stretch::default()),
             _ => match r.bands.first().and_then(|b| b.stats.categories.as_ref()).filter(|c| c.len() <= 16 && r.data_type.contains("Int")) {
                 Some(_) => (unique_values(r, 0, Ramp::Harbour), Stretch::None),
-                None => (RasterRenderer::Stretch { band: 0, ramp: Ramp::Greys, invert: true }, Stretch::default()),
+                None => (RasterRenderer::Stretch { band: 0, ramp: d.ramp.clone(), invert: d.invert }, d.stretch),
             },
         };
+        let continuous = matches!(renderer, RasterRenderer::Stretch { .. });
         RasterStyle {
             renderer,
             stretch,
             dra: false,
-            resampling: Resampling::Nearest,
+            resampling: if continuous { d.resampling } else { Resampling::Nearest },
             brightness: 0.0,
             contrast: 0.0,
             gamma: 1.0,

@@ -15,7 +15,7 @@ use crate::{RustGisApp, icons};
 #[derive(Clone, Copy, PartialEq)]
 struct Key {
     rev: u64,
-    cam: (i64, i64, i64, i64),
+    cam: (i64, i64, i64, i64, i64),
     size: [usize; 2],
     /// Rendered at reduced resolution while the globe was moving.
     draft: bool,
@@ -28,6 +28,8 @@ struct Key {
 #[derive(Clone, Copy, PartialEq)]
 enum DragKind {
     Pan,
+    /// Turning and tilting the flat map (Ctrl+drag with the Pan tool, as in MapLibre).
+    Turn,
     Box,
     /// Drawing a graphic by dragging (rectangle, circle, ellipse, freehand, lasso, picture).
     Sketch,
@@ -81,6 +83,9 @@ pub struct MapView {
     /// On the globe, where each label stands on the Earth, so it follows the globe as it turns
     /// and zooms until the next frame places them again.
     label_lonlat: Vec<Option<Coord>>,
+    /// Where on a tilted map's ground each label is (the camera's coordinates), so it stays there
+    /// while the map moves.
+    label_map: Vec<Option<Coord>>,
     /// The camera the labels were placed for.
     label_camera: Camera,
     last_interaction: f64,
@@ -114,7 +119,7 @@ pub struct MapView {
     snap: Option<([f64; 5], Option<Coord>)>,
     /// The side-by-side map's last render (texture and labels) and what it was drawn for, so it
     /// redraws only when that map, the project or the view changes.
-    split: Option<([f64; 9], egui::TextureHandle, Vec<PlacedLabel>)>,
+    split: Option<([f64; 10], egui::TextureHandle, Vec<PlacedLabel>)>,
     /// The picture an identified feature carries (a photo's thumbnail, a `data:image/…` value):
     /// a hash of the value, and its texture (or why it couldn't be read).
     picture: Option<(u64, Result<egui::TextureHandle, String>)>,
@@ -126,6 +131,8 @@ pub struct MapView {
     last_render: f64,
     /// The map drawn flat and laid over the globe while it moves.
     drape: crate::globe_drape::GlobeDrape,
+    /// The moving tilted map's drape.
+    tilt_drape: crate::tilt_drape::TiltDrape,
     /// Shooting stars around the globe.
     comets: crate::comets::Comets,
     /// GPU map backend: pipelines (built lazily from the render state), the uploaded scene,
@@ -136,7 +143,7 @@ pub struct MapView {
     pub(crate) gpu_target: std::sync::Arc<std::sync::Mutex<Option<crate::mapgpu::SceneTarget>>>,
     /// The last side-by-side map's GPU scene (its key, buffers and labels), when the second
     /// map rendered on the GPU.
-    pub(crate) split_gpu: Option<([f64; 9], std::sync::Arc<crate::mapgpu::SceneBuffers>, Vec<PlacedLabel>)>,
+    pub(crate) split_gpu: Option<([f64; 10], std::sync::Arc<crate::mapgpu::SceneBuffers>, Vec<PlacedLabel>)>,
     /// The split map's offscreen MSAA target (its own slot — main and split differ in size).
     pub(crate) gpu_target_split: std::sync::Arc<std::sync::Mutex<Option<crate::mapgpu::SceneTarget>>>,
     pub(crate) render_state: Option<egui_wgpu::RenderState>,
@@ -183,6 +190,8 @@ impl Default for MapView {
             tile_errors: std::collections::HashSet::new(),
             last_render: -10.0,
             drape: Default::default(),
+            tilt_drape: Default::default(),
+            label_map: Vec::new(),
             comets: Default::default(),
             gpu_renderer: None,
             gpu_frame: None,
@@ -311,10 +320,22 @@ fn split_view(app: &mut RustGisApp, ui: &mut Ui, other: usize, rect: Rect, t: &T
     let view = View { width: w, height: h, pixels_per_point: ppp as f64, camera: m.camera, sky: true };
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, c32(m.basemap.palette().0));
-    let key = [other as f64, revision as f64, m.camera.center.x, m.camera.center.y, m.camera.res, m.camera.bearing, w, h, f64::from(ppp)];
+    let key = [
+        other as f64,
+        revision as f64,
+        m.camera.center.x,
+        m.camera.center.y,
+        m.camera.res,
+        m.camera.bearing,
+        m.camera.pitch,
+        w,
+        h,
+        f64::from(ppp),
+    ];
     let gpu_ok = app.map.gpu_enabled
         && !m.projection.is_globe()
         && m.camera.bearing == 0.0
+        && m.camera.pitch == 0.0
         && m.view.effects.is_none()
         && m.view.color_vision == rustgis_engine::map::view::ColorVision::Normal;
     // Fresh GPU scene? Keep it. Stale? Rebuild. Either way `rendered_gpu` tracks whether the
@@ -411,8 +432,11 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     // reduced resolution; it is drawn exactly once it settles.
     let cam = app.session.map().camera;
     let globe_view = app.session.map().projection == Projection::Globe;
-    let dragging = app.map.drag.is_some_and(|(_, k)| k == DragKind::Pan);
-    let moving = dragging || time - app.map.last_interaction < 0.18;
+    let dragging = app.map.drag.is_some_and(|(_, k)| k == DragKind::Pan || k == DragKind::Turn);
+    // A tilted map waits longer before its exact (slower) frame: its drape already shows it in
+    // perspective, so a short pause in a gesture doesn't stop to draw it.
+    let settle = if !globe_view && cam.pitch != 0.0 { 0.4 } else { 0.18 };
+    let moving = dragging || time - app.map.last_interaction < settle;
     let draped = if globe_view && moving {
         let key = crate::globe_drape::DrapeKey { rev: app.session.revision, sources: rustgis_engine::map::source::generation() };
         let tiles = if app.session.map().tiles.is_empty() { 0 } else { rustgis_engine::render::rustgis_tiles::cache::generation() };
@@ -423,11 +447,30 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         }
         false
     };
+    // A tilted map moving: its bands drawn flat once are laid over the tilted ground (see
+    // `tilt_drape`), or failing that it redraws every frame.
+    let tilted = !globe_view && cam.pitch != 0.0;
+    let tilt_draped = if tilted && moving {
+        let key = crate::globe_drape::DrapeKey { rev: app.session.revision, sources: rustgis_engine::map::source::generation() };
+        let tiles = if app.session.map().tiles.is_empty() { 0 } else { rustgis_engine::render::rustgis_tiles::cache::generation() };
+        app.map.tilt_drape.prepare(ui.ctx(), app.session.map_mut(), key, tiles, w, h, ppp, time)
+    } else {
+        if !tilted {
+            app.map.tilt_drape.clear();
+        }
+        false
+    };
     let draft = globe_view && moving && !draped;
     let render_ppp = if draft { (ppp * 0.6).max(0.5) } else { ppp };
     let key = Key {
         rev: app.session.revision,
-        cam: ((cam.center.x * 100.0) as i64, (cam.center.y * 100.0) as i64, (cam.res * 1000.0) as i64, (cam.bearing * 1000.0) as i64),
+        cam: (
+            (cam.center.x * 100.0) as i64,
+            (cam.center.y * 100.0) as i64,
+            (cam.res * 1000.0) as i64,
+            (cam.bearing * 1000.0) as i64,
+            (cam.pitch * 1000.0) as i64,
+        ),
         size: [(w as f32 * ppp).round() as usize, (h as f32 * ppp).round() as usize],
         draft,
         tiles: 0,
@@ -453,8 +496,8 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
     }
-    let interacting = moving && (!globe_view || draped);
-    if globe_view && moving {
+    let interacting = moving && (!globe_view || draped) && (!tilted || tilt_draped);
+    if (globe_view || tilted) && moving {
         // Wake up once the motion has settled, for the full-resolution frame.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
     }
@@ -466,6 +509,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let gpu_ok = app.map.gpu_enabled
         && !globe_view
         && cam.bearing == 0.0
+        && cam.pitch == 0.0
         && app.session.map().view.effects.is_none()
         && app.session.map().view.color_vision == rustgis_engine::map::view::ColorVision::Normal;
     // GPU fast path: during pan/zoom (or a camera animation) with an all-GPU scene (no CPU
@@ -495,8 +539,10 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     // when stretched, at the view. Frames are drawn coarser while they're slow, and sharpening
     // ones spaced out by how long the last took, so the motion between them stays smooth.
     // Turning the map isn't a shift and a scale: each step is drawn.
-    let turning = app.map.tex_camera.bearing != cam.bearing;
-    let motion = (stale && interacting && !gpu_ok && !globe_view && !turning && app.map.texture.is_some())
+    // Nor is moving a tilted map (its perspective changes).
+    // The tilted map's drape stands in for both.
+    let turning = !tilt_draped && (app.map.tex_camera.bearing != cam.bearing || app.map.tex_camera.pitch != cam.pitch || tilted);
+    let motion = (stale && interacting && !gpu_ok && !globe_view && !tilted && !turning && app.map.texture.is_some())
         .then(|| {
             let r = tex_rect(app, cam, rect, false);
             let stretch = r.width() as f64 / app.map.tex_size.0.max(1.0);
@@ -544,6 +590,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 app.map.labels = scene.labels;
                 app.map.labels.splice(0..0, scene.unplaced);
                 app.map.label_lonlat = Vec::new();
+                app.map.label_map = Vec::new();
                 app.map.label_camera = cam;
                 app.map.attribution = scene.attribution;
                 app.map.last_render = time;
@@ -583,6 +630,10 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                         }
                         false => Vec::new(),
                     };
+                    app.map.label_map = match tilted {
+                        true => app.map.labels.iter().map(|l| cam.try_to_map(l.x as f64, l.y as f64, w, h)).collect(),
+                        false => Vec::new(),
+                    };
                     app.map.label_camera = cam;
                 }
                 app.map.attribution = r.attribution;
@@ -620,6 +671,8 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         app.map.drape.paint(ui.ctx(), &painter, rect, app.session.map(), ppp);
     } else if globe_view {
         app.map.drape.paint_space(ui.ctx(), &painter, rect, app.session.map(), ppp);
+    } else if tilt_draped {
+        app.map.tilt_drape.paint(&painter, rect, app.session.map());
     } else {
         painter.rect_filled(rect, 0.0, c32(basemap.palette().0));
     }
@@ -629,12 +682,13 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     // A fresh GPU frame (re-rendered whenever the key changed, so its camera is the current
     // one: tex_rect == rect and labels sit unshifted) draws inside egui's wgpu pass. The GPU
     // backend only serves flat maps, so the globe's drape never meets it.
-    if let (Some(gf), Some(gr)) = (&app.map.gpu_frame, &app.map.gpu_renderer) {
+    // Not under the tilted map's drape: a flat GPU frame from before the tilt would cover it.
+    if let (Some(gf), Some(gr)) = (app.map.gpu_frame.as_ref().filter(|_| !tilt_draped), &app.map.gpu_renderer) {
         painter.add(egui_wgpu::Callback::new_paint_callback(
             rect,
             crate::mapgpu::SceneCallback { renderer: gr.clone(), buffers: gf.clone(), target: app.map.gpu_target.clone() },
         ));
-    } else if let Some(tex) = app.map.texture.as_ref().filter(|_| !draped) {
+    } else if let Some(tex) = app.map.texture.as_ref().filter(|_| !draped && !tilt_draped) {
         painter.image(tex.id(), tex_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     }
     // Shooting stars, while space shows around the globe.
@@ -656,6 +710,14 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         let g = Globe::new(&cam, w, h);
         for (l, c) in app.map.labels.iter().zip(&app.map.label_lonlat) {
             if let Some((x, y)) = c.and_then(|c| g.forward(c)) {
+                draw_label(&painter, l, rect.min + vec2(x as f32, y as f32));
+            }
+        }
+    } else if tilt_draped && placed != cam {
+        // On a moving tilted map each label stays on its ground; under the sky it drops out.
+        let sky = cam.sky_y(h).unwrap_or(0.0);
+        for (l, m) in app.map.labels.iter().zip(&app.map.label_map) {
+            if let Some((x, y)) = m.and_then(|m| cam.try_to_screen(m, w, h)).filter(|s| s.1 > sky) {
                 draw_label(&painter, l, rect.min + vec2(x as f32, y as f32));
             }
         }
@@ -689,6 +751,11 @@ fn tex_rect(app: &RustGisApp, cam: Camera, rect: Rect, globe_view: bool) -> Rect
             Some((x, y)) if s.is_finite() => Rect::from_center_size(pos2(rect.min.x + x as f32, rect.min.y + y as f32), rect.size() * s),
             _ => rect,
         };
+    }
+    // A tilted frame isn't shifted (its perspective moves with the camera; the drape stands in
+    // while it moves): it fills the view.
+    if old.pitch != 0.0 || cam.pitch != 0.0 {
+        return rect;
     }
     let (tw, th) = if app.map.tex_size.0 > 0.0 { app.map.tex_size } else { (w, h) };
     // The frame's corners where they are now (at the same bearing the frame stays upright).
@@ -730,7 +797,8 @@ pub(crate) fn screen_to_lonlat(app: &RustGisApp, rect: Rect, p: Pos2) -> Option<
     let (x, y) = ((p.x - rect.min.x) as f64, (p.y - rect.min.y) as f64);
     match globe(app, rect) {
         Some(g) => g.inverse(x, y),
-        None => app.session.map().to_lonlat(app.session.map().camera.to_map(x, y, w, h)),
+        // Nothing under the sky of a tilted map.
+        None => app.session.map().to_lonlat(app.session.map().camera.try_to_map(x, y, w, h)?),
     }
 }
 
@@ -739,7 +807,7 @@ pub(crate) fn lonlat_to_screen(app: &RustGisApp, rect: Rect, c: Coord) -> Option
     let (w, h) = (rect.width() as f64, rect.height() as f64);
     let (x, y) = match globe(app, rect) {
         Some(g) => g.forward(c)?,
-        None => app.session.map().camera.to_screen(app.session.map().to_map(c)?, w, h),
+        None => app.session.map().camera.try_to_screen(app.session.map().to_map(c)?, w, h)?,
     };
     Some(pos2(rect.min.x + x as f32, rect.min.y + y as f32))
 }
@@ -769,6 +837,15 @@ fn turn_by(app: &mut RustGisApp, degrees: f64) {
     let cam = &mut app.session.map_mut().camera;
     let bearing = cam.bearing + degrees;
     cam.set_bearing(bearing);
+}
+
+/// Tilts the flat map by `degrees`.
+fn tilt_by(app: &mut RustGisApp, degrees: f64) {
+    if degrees != 0.0 {
+        let cam = &mut app.session.map_mut().camera;
+        let pitch = cam.pitch + degrees;
+        cam.set_pitch(pitch);
+    }
 }
 
 /// Zooms by `factor` about a screen point.
@@ -844,9 +921,10 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
             ui.ctx().request_repaint();
         }
     }
-    // Arrow keys pan; Shift+Left and Shift+Right turn the flat map (as in MapLibre).
+    // Arrow keys pan; Shift+Left and Shift+Right turn the flat map, Shift+Up and Shift+Down tilt
+    // it (as in MapLibre).
     if !ui.ctx().egui_wants_keyboard_input() {
-        let (mut dx, mut dy, mut turn) = (0.0, 0.0, 0.0);
+        let (mut dx, mut dy, mut turn, mut tilt) = (0.0, 0.0, 0.0, 0.0);
         let flat = globe(app, rect).is_none();
         ui.input(|i| {
             // Ninety degrees a second, whatever the frame rate.
@@ -857,6 +935,12 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
                 }
                 if i.key_down(egui::Key::ArrowRight) {
                     turn += step;
+                }
+                if i.key_down(egui::Key::ArrowUp) {
+                    tilt += step / 2.0;
+                }
+                if i.key_down(egui::Key::ArrowDown) {
+                    tilt -= step / 2.0;
                 }
                 return;
             }
@@ -878,8 +962,9 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
             app.map.last_interaction = time;
             app.map.camera_moved = true;
         }
-        if turn != 0.0 {
+        if turn != 0.0 || tilt != 0.0 {
             turn_by(app, turn);
+            tilt_by(app, tilt);
             app.map.last_interaction = time;
             app.map.camera_moved = true;
             ui.ctx().request_repaint();
@@ -888,12 +973,14 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
 
     let shift = ui.input(|i| i.modifiers.shift);
     let middle = ui.input(|i| i.pointer.middle_down());
-    // Dragging with the right button turns the flat map: to the right turns it clockwise, as in
-    // MapLibre.
+    let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+    // Dragging with the right button turns the flat map (to the right turns it clockwise) and
+    // tilts it (up tilts it further), as in MapLibre.
     if resp.dragged_by(egui::PointerButton::Secondary) && globe(app, rect).is_none() {
-        let dx = resp.drag_delta().x as f64;
-        if dx != 0.0 {
-            turn_by(app, dx * 0.8);
+        let d = resp.drag_delta();
+        if d != egui::Vec2::ZERO {
+            turn_by(app, d.x as f64 * 0.8);
+            tilt_by(app, -d.y as f64 * 0.5);
             app.map.camera_moved = true;
             app.map.last_interaction = time;
         }
@@ -913,6 +1000,8 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
         } else {
             match tool {
                 Tool::Explore if shift => DragKind::Box,
+                // Ctrl+drag turns and tilts the flat map, as the right button does.
+                Tool::Explore if ctrl && globe(app, rect).is_none() => DragKind::Turn,
                 Tool::Explore => DragKind::Pan,
                 Tool::Select | Tool::ZoomIn => DragKind::Box,
                 t if drag_shape(t).is_some() => DragKind::Sketch,
@@ -956,6 +1045,15 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
         crate::vertexedit::drag_stop(app);
         return;
     }
+    if let Some((_, DragKind::Turn)) = app.map.drag {
+        let d = resp.drag_delta();
+        if d != egui::Vec2::ZERO {
+            turn_by(app, d.x as f64 * 0.8);
+            tilt_by(app, -d.y as f64 * 0.5);
+            app.map.camera_moved = true;
+            app.map.last_interaction = time;
+        }
+    }
     if let Some((_, DragKind::Pan)) = app.map.drag {
         let d = resp.drag_delta();
         if d != egui::Vec2::ZERO {
@@ -965,6 +1063,11 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
                     let (x, y) = ((p.x - rect.min.x) as f64, (p.y - rect.min.y) as f64);
                     let m = app.session.map_mut();
                     Globe::drag_point(&mut m.camera, (x - d.x as f64, y - d.y as f64), (x, y), w, h);
+                }
+                // A tilted map moves so the grabbed ground stays under the pointer.
+                (None, Some(p)) => {
+                    let (x, y) = ((p.x - rect.min.x) as f64, (p.y - rect.min.y) as f64);
+                    app.session.map_mut().camera.drag_px((x - d.x as f64, y - d.y as f64), (x, y), w, h);
                 }
                 _ => pan(app, d.x as f64, d.y as f64, w, h),
             }
@@ -1476,10 +1579,12 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
         crate::searchbox::paint_marker(p, sp, name, t);
     }
     scale_bar(app, p, rect, t);
-    // The arrow points north; on a turned map clicking it faces north again.
-    let bearing = if app.session.map().projection.is_globe() { 0.0 } else { app.session.map().camera.bearing };
+    // The arrow points north, leaning back with the map's tilt; on a turned or tilted map clicking
+    // it faces north and looks straight down again.
+    let cam = app.session.map().camera;
+    let (bearing, pitch) = if app.session.map().projection.is_globe() { (0.0, 0.0) } else { (cam.bearing, cam.pitch) };
     // Facing north the corner stays the map's (identify, select and sketch clicks land there).
-    if bearing != 0.0 {
+    if bearing != 0.0 || pitch != 0.0 {
         let hit = ui
             .interact(north_arrow_rect(rect), egui::Id::new("map_north_arrow"), Sense::click())
             .on_hover_text(tl!("Reset north"))
@@ -1488,7 +1593,7 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
             let _ = app.run("map.resetNorth", json!({}));
         }
     }
-    north_arrow(p, rect, t, bearing);
+    north_arrow(p, rect, t, bearing, pitch);
     // Attribution.
     let mut att = String::from("Natural Earth");
     for a in &app.map.attribution {
@@ -1541,11 +1646,16 @@ fn north_arrow_rect(rect: Rect) -> Rect {
     Rect::from_center_size(pos2(rect.min.x + 30.0, rect.min.y + 34.0), vec2(34.0, 34.0))
 }
 
-/// The north arrow, turned to point north on a map facing `bearing`.
-fn north_arrow(p: &egui::Painter, rect: Rect, t: &Tokens, bearing: f64) {
+/// The north arrow, turned to point north on a map facing `bearing` and foreshortened by its
+/// `pitch`.
+fn north_arrow(p: &egui::Painter, rect: Rect, t: &Tokens, bearing: f64, pitch: f64) {
     let c = north_arrow_rect(rect).center();
     let (sn, cs) = (-bearing.to_radians() as f32).sin_cos();
-    let at = |x: f32, y: f32| c + vec2(x * cs - y * sn, x * sn + y * cs);
+    let k = (pitch.to_radians().cos() as f32).max(0.3);
+    let at = |x: f32, y: f32| {
+        let (x, y) = (x * cs - y * sn, x * sn + y * cs);
+        c + vec2(x, y * k)
+    };
     p.circle_filled(c, 17.0, t.ribbon.gamma_multiply(0.85));
     p.circle_stroke(c, 17.0, Stroke::new(1.0, t.border_strong));
     p.add(egui::Shape::convex_polygon(vec![at(0.0, -12.0), at(6.0, 6.0), at(0.0, 2.5)], t.text, Stroke::NONE));

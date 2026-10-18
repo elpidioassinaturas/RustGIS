@@ -53,6 +53,7 @@ impl Dialogs {
             "renameMap" => "renameMap",
             "renameLayout" => "renameLayout",
             "renameServiceGroup" => "renameServiceGroup",
+            "renameGroup" => "renameGroup",
             "coordinateSystem" => "coordinateSystem",
             "graphicText" => "graphicText",
             "camera" => "camera",
@@ -161,6 +162,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "renameMap" => "Rename Map",
         "renameLayout" => "Rename Layout",
         "renameServiceGroup" => "Rename Service Group",
+        "renameGroup" => "Rename Group",
         _ => "Rename Layer",
     };
     let t = Tokens::get(ctx);
@@ -343,6 +345,14 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                 close = buttons(app, ui, "Rename", |app| {
                     let group = app.dialogs.layer.parse::<u32>().map_err(|e| e.to_string())?;
                     app.run("service.group", json!({"group":group,"name":app.dialogs.text})).map(|_| ())
+                });
+            }
+            "renameGroup" => {
+                ui.label(tl!("Name"));
+                ui.add(egui::TextEdit::singleline(&mut app.dialogs.text).desired_width(f32::INFINITY));
+                close = buttons(app, ui, "Rename", |app| {
+                    let group = app.dialogs.layer.parse::<u32>().map_err(|e| e.to_string())?;
+                    app.run("group.set", json!({"group": group, "name": app.dialogs.text})).map(|_| ())
                 });
             }
             _ => {

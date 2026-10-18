@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+mod scientific;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Rgba(pub [u8; 4]);
 
@@ -224,6 +226,43 @@ impl CustomRamp {
     }
 }
 
+/// The groups the Symbology pane lists colour ramps in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RampGroup {
+    /// Even steps in lightness: no false edges, readable in greyscale and by colour-blind readers.
+    PerceptuallyUniform,
+    Sequential,
+    Diverging,
+    /// Elevation and bathymetry.
+    Topographic,
+    Qualitative,
+    /// The project's own ramps.
+    Custom,
+}
+
+impl RampGroup {
+    /// The groups, in the order they are listed.
+    pub const ALL: [RampGroup; 6] = [
+        RampGroup::PerceptuallyUniform,
+        RampGroup::Sequential,
+        RampGroup::Diverging,
+        RampGroup::Topographic,
+        RampGroup::Qualitative,
+        RampGroup::Custom,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RampGroup::PerceptuallyUniform => "Perceptually Uniform",
+            RampGroup::Sequential => "Sequential",
+            RampGroup::Diverging => "Diverging",
+            RampGroup::Topographic => "Topographic and Bathymetric",
+            RampGroup::Qualitative => "Qualitative",
+            RampGroup::Custom => "Custom",
+        }
+    }
+}
+
 /// A colour ramp: one of our own (sequential, diverging and qualitative), or a custom one.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum Ramp {
@@ -240,12 +279,33 @@ pub enum Ramp {
     Terrain,
     /// Deep indigo through teal to bright yellow, perceptually even.
     Aurora,
+    // Published scientific colour maps (`color/scientific.rs`).
+    Viridis,
+    Plasma,
+    Inferno,
+    Magma,
+    Cividis,
+    /// Crameri's perceptually even ramp for elevation and other data alike.
+    Batlow,
+    /// A rainbow, smoother than Jet: dark blue through green and yellow to dark red.
+    Turbo,
+    /// cmocean's dark blue to yellow-green, for salinity and other sequential data.
+    Haline,
+    Vik,
+    Roma,
+    Balance,
+    /// Blue bathymetry below sea level, green-brown land above it (split at the middle).
+    Oleron,
+    /// cmocean's ocean blues and land greens and browns (split at the middle).
+    Topo,
+    /// cmocean's pale yellow to deep blue, for water depth.
+    Deep,
     /// A ramp defined by the user.
     Custom(Box<CustomRamp>),
 }
 
 impl Ramp {
-    pub const ALL: [Ramp; 10] = [
+    pub const ALL: [Ramp; 24] = [
         Ramp::Ember,
         Ramp::Lagoon,
         Ramp::Forest,
@@ -256,6 +316,20 @@ impl Ramp {
         Ramp::Terrain,
         Ramp::Aurora,
         Ramp::Harbour,
+        Ramp::Viridis,
+        Ramp::Plasma,
+        Ramp::Inferno,
+        Ramp::Magma,
+        Ramp::Cividis,
+        Ramp::Batlow,
+        Ramp::Turbo,
+        Ramp::Haline,
+        Ramp::Vik,
+        Ramp::Roma,
+        Ramp::Balance,
+        Ramp::Oleron,
+        Ramp::Topo,
+        Ramp::Deep,
     ];
 
     /// The name commands take (`"Ember"`, or a custom ramp's own name).
@@ -271,6 +345,20 @@ impl Ramp {
             Ramp::Harbour => "Harbour",
             Ramp::Terrain => "Terrain",
             Ramp::Aurora => "Aurora",
+            Ramp::Viridis => "Viridis",
+            Ramp::Plasma => "Plasma",
+            Ramp::Inferno => "Inferno",
+            Ramp::Magma => "Magma",
+            Ramp::Cividis => "Cividis",
+            Ramp::Batlow => "Batlow",
+            Ramp::Turbo => "Turbo",
+            Ramp::Haline => "Haline",
+            Ramp::Vik => "Vik",
+            Ramp::Roma => "Roma",
+            Ramp::Balance => "Balance",
+            Ramp::Oleron => "Oleron",
+            Ramp::Topo => "Topo",
+            Ramp::Deep => "Deep",
             Ramp::Custom(c) => c.name(),
         }
     }
@@ -278,7 +366,7 @@ impl Ramp {
     pub fn kind(&self) -> RampKind {
         match self {
             Ramp::Harbour => RampKind::Qualitative,
-            Ramp::Diverging => RampKind::Diverging,
+            Ramp::Diverging | Ramp::Vik | Ramp::Roma | Ramp::Balance | Ramp::Oleron | Ramp::Topo => RampKind::Diverging,
             Ramp::Custom(c) => c.kind(),
             _ => RampKind::Sequential,
         }
@@ -296,7 +384,26 @@ impl Ramp {
             Ramp::Harbour => "Harbour (qualitative)",
             Ramp::Terrain => "Terrain",
             Ramp::Aurora => "Aurora",
+            Ramp::Turbo => "Turbo (rainbow)",
+            Ramp::Topo => "Topo (land and sea)",
+            Ramp::Deep => "Deep (bathymetry)",
             Ramp::Custom(c) => c.name(),
+            // Their published names.
+            _ => self.name(),
+        }
+    }
+
+    /// The group the Symbology pane lists it under.
+    pub fn group(&self) -> RampGroup {
+        match self {
+            Ramp::Viridis | Ramp::Plasma | Ramp::Inferno | Ramp::Magma | Ramp::Cividis | Ramp::Batlow | Ramp::Aurora => {
+                RampGroup::PerceptuallyUniform
+            }
+            Ramp::Diverging | Ramp::Vik | Ramp::Roma | Ramp::Balance => RampGroup::Diverging,
+            Ramp::Terrain | Ramp::Oleron | Ramp::Topo | Ramp::Deep => RampGroup::Topographic,
+            Ramp::Harbour => RampGroup::Qualitative,
+            Ramp::Custom(_) => RampGroup::Custom,
+            _ => RampGroup::Sequential,
         }
     }
 
@@ -332,6 +439,20 @@ impl Ramp {
                 [0x8D, 0x9B, 0x3A],
                 [0xD9, 0x5D, 0x5D],
             ],
+            Ramp::Viridis => scientific::VIRIDIS,
+            Ramp::Plasma => scientific::PLASMA,
+            Ramp::Inferno => scientific::INFERNO,
+            Ramp::Magma => scientific::MAGMA,
+            Ramp::Cividis => scientific::CIVIDIS,
+            Ramp::Batlow => scientific::BATLOW,
+            Ramp::Turbo => scientific::TURBO,
+            Ramp::Haline => scientific::HALINE,
+            Ramp::Vik => scientific::VIK,
+            Ramp::Roma => scientific::ROMA,
+            Ramp::Balance => scientific::BALANCE,
+            Ramp::Oleron => scientific::OLERON,
+            Ramp::Topo => scientific::TOPO,
+            Ramp::Deep => scientific::DEEP,
             // Sampled from its own stops (`CustomRamp::at`).
             Ramp::Custom(_) => &[],
         }
@@ -347,7 +468,13 @@ impl Ramp {
         if let Ramp::Custom(c) = self {
             return c.at(t);
         }
-        let s = self.stops();
+        let mut s = self.stops();
+        let mut t = t;
+        // Two runs of stops that meet at the middle without blending: sample the half `t` is in.
+        if matches!(self, Ramp::Oleron | Ramp::Topo) {
+            let (low, high) = s.split_at(scientific::SPLIT.min(s.len()));
+            (s, t) = if t < 0.5 { (low, t * 2.0) } else { (high, t * 2.0 - 1.0) };
+        }
         let n = s.len();
         if n == 0 {
             return Rgba::rgb(128, 128, 128);
@@ -392,6 +519,42 @@ mod tests {
             let _ = r.pick(99, 3);
             let _ = r.pick(0, 0);
             assert_eq!(Ramp::from_name(r.name()), Some(r.clone()));
+        }
+    }
+
+    #[test]
+    fn scientific_ramps() {
+        // Their published end colours.
+        assert_eq!(Ramp::Viridis.at(0.0), Rgba::rgb(0x44, 0x01, 0x54));
+        assert_eq!(Ramp::Viridis.at(1.0), Rgba::rgb(0xFD, 0xE7, 0x25));
+        assert_eq!(Ramp::Magma.at(0.0), Rgba::rgb(0x00, 0x00, 0x04));
+        // Names travel in project files as before, and older ones still read.
+        for r in Ramp::ALL {
+            let text = serde_json::to_string(&r).unwrap();
+            assert_eq!(serde_json::from_str::<Ramp>(&text).unwrap(), r, "{text}");
+            assert_ne!(r.group(), RampGroup::Custom);
+        }
+        assert_eq!(serde_json::from_str::<Ramp>(r#""Aurora""#).unwrap(), Ramp::Aurora);
+        assert_eq!(Ramp::from_name("topo (land and sea)"), Some(Ramp::Topo));
+        // Each group but the project's own lists some, every one in exactly one.
+        for g in RampGroup::ALL {
+            assert_eq!(Ramp::ALL.iter().any(|r| r.group() == g), g != RampGroup::Custom, "{g:?}");
+        }
+        // Oleron and Topo jump at sea level instead of blending through it.
+        for r in [Ramp::Oleron, Ramp::Topo] {
+            let (below, above) = (r.at(0.4999), r.at(0.5));
+            let jump: i32 = (0..3).map(|i| (below.0[i] as i32 - above.0[i] as i32).abs()).sum();
+            assert!(jump > 100, "{r:?}: {below:?} → {above:?}");
+            assert_eq!(r.at(0.0), r.pick(0, 5));
+            assert_eq!(r.at(1.0), r.pick(4, 5));
+        }
+        // Smooth elsewhere: neighbours a hundredth apart are close.
+        for r in [Ramp::Turbo, Ramp::Viridis, Ramp::Vik] {
+            for k in 0..99 {
+                let (a, b) = (r.at(k as f64 / 100.0), r.at((k + 1) as f64 / 100.0));
+                let step: i32 = (0..3).map(|i| (a.0[i] as i32 - b.0[i] as i32).abs()).sum();
+                assert!(step < 40, "{r:?} at {k}: {a:?} → {b:?}");
+            }
         }
     }
 

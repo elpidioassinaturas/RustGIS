@@ -1038,6 +1038,18 @@ pub fn paint(painter: &Painter, r: Rect, name: &str, ink: Color32, accent: Color
                 p.line(&[(12.0, y), (18.0, y)], 1.1, ink);
             }
         }
+        // A gradient bar over its tick marks.
+        "colorbar" => {
+            for i in 0..9 {
+                let t = i as f32 / 8.0;
+                p.rect(3.0 + i as f32 * 2.0, 5.0, 2.2, 7.0, Some(accent.lerp_to_gamma(amber, t)), None, 0.0);
+            }
+            p.rect(3.0, 5.0, 18.0, 7.0, None, Some((1.2, ink)), 0.5);
+            for x in [3.6, 12.0, 20.4] {
+                p.line(&[(x, 12.0), (x, 15.0)], 1.1, ink);
+                p.line(&[(x - 1.6, 18.5), (x + 1.6, 18.5)], 1.3, ink);
+            }
+        }
         "plugin" | "plugin_add" => {
             // A puzzle piece: a body with two knobs.
             p.rect(3.5, 7.5, 13.0, 13.0, Some(p.tint(40)), Some((1.3, ink)), 2.0);
@@ -1121,6 +1133,7 @@ pub const ALL: &[&str] = &[
     "simplify",
     "stats",
     "chart",
+    "colorbar",
     "count",
     "calc_geom",
     "table",

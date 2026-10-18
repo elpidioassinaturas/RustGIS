@@ -5,7 +5,10 @@ use std::path::Path;
 
 use rustgis_geom::{Coord, Extent};
 use rustgis_map::Rgba;
-use rustgis_map::layout::{ElementKind, FrameShape, Grid, Guides, Layout, MAX_GUIDES, MIN_ELEMENT_MM, MapSeries, PAGES, fit_scale};
+use rustgis_map::layout::{
+    ElementKind, FrameShape, Grid, Guides, Layout, MAX_COLORBAR_TICKS, MAX_GUIDES, MIN_ELEMENT_MM, MapSeries, Orientation, PAGES, TickSide,
+    fit_scale,
+};
 use serde_json::{Value, json};
 
 use super::{b, f, numbered, ps};
@@ -78,10 +81,10 @@ pub fn commands() -> Vec<C> {
             r#"{"layout"?, "shape"?: "rectangle"|"circle"|"ellipse"|"polygon"|"lasso", "points"?: [[u, v], …] (polygon/lasso, 0..1 across the frame), "map"?: name, "x"?, "y"?, "w"?, "h"?: mm}"#,
         ),
         C::new("layout.addElement", "Add Element", "Publish › Map Surrounds", add_element).params(
-            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA", "bold"?: bool (text), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "hideOther"?: bool (legend: leave out <all other values>), "fill"?: "#RRGGBBAA" (rectangle), "width"?: outline width (rectangle), "image"?: base64, "path"?: picture file, "layer"?, "field"?, "label"?, "rows"?, "step"?: degrees, "labels"?: bool, "off"?: bool (grid), "x"?, "y"?, "w"?, "h"?: mm}"##,
+            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"colorbar"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA", "bold"?: bool (text), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "hideOther"?: bool (legend: leave out <all other values>), "orientation"?: "horizontal"|"vertical" (colorbar), "ticks"?: 2..21 (colorbar: labelled values, ends included), "tickSide"?: "below"|"above"|"right"|"left" (colorbar), "reverse"?: bool (colorbar: high values first), "fill"?: "#RRGGBBAA" (rectangle), "width"?: outline width (rectangle), "image"?: base64, "path"?: picture file, "layer"?: (table, chart; colorbar: a raster layer, default the top visible one), "field"?, "label"?, "rows"?, "step"?: degrees, "labels"?: bool, "off"?: bool (grid), "x"?, "y"?, "w"?, "h"?: mm}"##,
         ),
         C::new("layout.update", "Element Properties", "Publish › Element", update).params(
-            r##"{"layout"?, "element": id, "x"?, "y"?, "w"?, "h"?: mm, "name"?, "visible"?, "text"?, "size"?, "color"?, "bold"?, "title"?, "allClasses"?: bool (legend), "hideOther"?: bool (legend), "map"?, "scale"?, "center"?: [lon, lat], "layer"?, "field"?, "rows"?}"##,
+            r##"{"layout"?, "element": id, "x"?, "y"?, "w"?, "h"?: mm, "name"?, "visible"?, "text"?, "size"?, "color"?, "bold"?, "title"?, "allClasses"?: bool (legend), "hideOther"?: bool (legend), "orientation"?, "ticks"?, "tickSide"?, "reverse"?: (colorbar), "map"?, "scale"?, "center"?: [lon, lat], "layer"?: (colorbar: "" for the top visible raster), "field"?, "rows"?}"##,
         ),
         C::new("layout.guides", "Guides", "Publish › Page Setup", guides).params(
             r#"{"layout"?, "x"?: [mm] (vertical guides, from the page's left edge), "y"?: [mm] (horizontal guides, from its top edge), "clear"?: bool (remove every guide first)}"#,
@@ -407,6 +410,27 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
             let hide_other = b(p, "hideOther").unwrap_or(false);
             ("Legend", place(p, l, (pw - 70.0, 45.0, 60.0, 80.0))?, ElementKind::Legend { frame, title, all_classes, hide_other })
         }
+        "colorbar" => {
+            let frame = frame_of(l, p)?;
+            let layer = colorbar_layer(s, l, frame, ps(p, "layer"))?;
+            let title = ps(p, "title").map(|t| t.chars().take(200).collect()).unwrap_or_else(|| layer.clone().unwrap_or_default());
+            let orientation = orientation(p)?.unwrap_or_default();
+            let rect = match orientation {
+                Orientation::Horizontal => (15.0, ph - 45.0, 80.0, 16.0),
+                Orientation::Vertical => (pw - 40.0, 45.0, 25.0, 80.0),
+            };
+            let k = ElementKind::Colorbar {
+                frame,
+                // Kept only when named: otherwise (none, or "") it follows the map's top visible raster.
+                layer: ps(p, "layer").filter(|n| !n.trim().is_empty()).and(layer),
+                title,
+                orientation,
+                ticks: ticks(p).unwrap_or(5),
+                tick_side: tick_side(p)?.unwrap_or_default(),
+                reverse: b(p, "reverse").unwrap_or(false),
+            };
+            ("Colorbar", place(p, l, rect)?, k)
+        }
         "text" | "dynamicText" => {
             let default = if kind == "text" { "Text" } else { "{map} · {scale} · {date}" };
             let text: String = ps(p, "text").unwrap_or(default).chars().take(5000).collect();
@@ -485,6 +509,43 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"element": id}))
 }
 
+/// The raster layer a colorbar on `frame` shows: `name` checked against the frame's map, or the
+/// map's top visible raster (`None` when the map has none yet).
+fn colorbar_layer(s: &Session, l: &Layout, frame: u32, name: Option<&str>) -> Result<Option<String>, String> {
+    let map = match l.element(frame).map(|e| &e.kind) {
+        Some(ElementKind::MapFrame { map, .. }) => map.clone(),
+        _ => return Err("no such frame".into()),
+    };
+    let m = s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(&map)).ok_or_else(|| format!("no map '{map}'"))?;
+    match name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => match rustgis_map::layout::colorbar_layer(m, Some(n)) {
+            Some(layer) => Ok(Some(layer.name.clone())),
+            None => Err(format!("no raster layer '{n}' in {map}")),
+        },
+        None => Ok(rustgis_map::layout::colorbar_layer(m, None).map(|l| l.name.clone())),
+    }
+}
+
+fn orientation(p: &Value) -> Result<Option<Orientation>, String> {
+    match ps(p, "orientation").map(|o| o.trim().to_ascii_lowercase()) {
+        None => Ok(None),
+        Some(o) if o == "horizontal" => Ok(Some(Orientation::Horizontal)),
+        Some(o) if o == "vertical" => Ok(Some(Orientation::Vertical)),
+        Some(o) => Err(format!("unknown orientation '{o}' (horizontal or vertical)")),
+    }
+}
+
+fn tick_side(p: &Value) -> Result<Option<TickSide>, String> {
+    match ps(p, "tickSide") {
+        None => Ok(None),
+        Some(t) => TickSide::from_name(t).map(Some).ok_or_else(|| format!("unknown tickSide '{t}' (below, above, right or left)")),
+    }
+}
+
+fn ticks(p: &Value) -> Option<usize> {
+    f(p, "ticks").filter(|v| v.is_finite()).map(|v| v.round().clamp(2.0, MAX_COLORBAR_TICKS as f64) as usize)
+}
+
 fn update(s: &mut Session, p: &Value) -> CmdResult {
     let id = element_id(p)?;
     // Checked before anything changes, so a bad value leaves the element as it was.
@@ -544,6 +605,21 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
             _ => None,
         }
     };
+    // A colorbar's new layer must be a raster in its frame's map; empty follows the top raster.
+    let colorbar = {
+        let l = s.project.layouts.get(li).ok_or("no layout")?;
+        match l.element(id).map(|e| &e.kind) {
+            Some(ElementKind::Colorbar { frame, .. }) => {
+                let layer = match ps(p, "layer") {
+                    Some(n) if n.trim().is_empty() => Some(None),
+                    Some(n) => Some(colorbar_layer(s, l, *frame, Some(n))?),
+                    None => None,
+                };
+                Some((layer, orientation(p)?, tick_side(p)?))
+            }
+            _ => None,
+        }
+    };
     let map_name = match ps(p, "map") {
         Some(n) => Some(
             s.project
@@ -580,6 +656,14 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
     if let Some(v) = b(p, "visible") {
         e.visible = v;
     }
+    // A colorbar turned keeps its size: its length and thickness swap, unless given.
+    if let (ElementKind::Colorbar { orientation, .. }, Some((_, Some(o), _))) = (&e.kind, &colorbar)
+        && o != orientation
+        && f(p, "w").is_none()
+        && f(p, "h").is_none()
+    {
+        std::mem::swap(&mut e.w, &mut e.h);
+    }
     match &mut e.kind {
         ElementKind::Text { text, size, color, bold } => {
             if let Some(t) = ps(p, "text") {
@@ -604,6 +688,28 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
             }
             if let Some(v) = b(p, "hideOther") {
                 *hide_other = v;
+            }
+        }
+        ElementKind::Colorbar { layer, title, orientation, ticks: n, tick_side, reverse, .. } => {
+            if let Some(t) = ps(p, "title") {
+                *title = t.chars().take(200).collect();
+            }
+            if let Some((new_layer, new_orientation, new_side)) = colorbar {
+                if let Some(nl) = new_layer {
+                    *layer = nl;
+                }
+                if let Some(o) = new_orientation {
+                    *orientation = o;
+                }
+                if let Some(t) = new_side {
+                    *tick_side = t;
+                }
+            }
+            if let Some(v) = ticks(p) {
+                *n = v;
+            }
+            if let Some(v) = b(p, "reverse") {
+                *reverse = v;
             }
         }
         ElementKind::MapFrame { map, center, scale, .. } => {

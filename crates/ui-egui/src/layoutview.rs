@@ -5,7 +5,7 @@
 //! to remove it. Dragged elements snap to guides, the page and each other (Alt places freely).
 
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
-use rustgis_engine::map::layout::{ElementKind, Layout, PT_PER_MM, frame_camera};
+use rustgis_engine::map::layout::{ElementKind, Layout, MAX_COLORBAR_TICKS, Orientation, PT_PER_MM, TickSide, frame_camera};
 use serde_json::{Value, json};
 
 use crate::RustGisApp;
@@ -828,7 +828,7 @@ fn save_drafts(app: &mut RustGisApp, li: usize) {
         let current = app.session.project.layouts.get(l).and_then(|x| x.element(id)).and_then(|e| match (field, &e.kind) {
             ("name", _) => Some(e.name.clone()),
             ("text", ElementKind::Text { text, .. }) => Some(text.clone()),
-            ("title", ElementKind::Legend { title, .. }) => Some(title.clone()),
+            ("title", ElementKind::Legend { title, .. } | ElementKind::Colorbar { title, .. }) => Some(title.clone()),
             _ => None,
         });
         if current.is_some_and(|c| c != text) {
@@ -942,6 +942,71 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                 let mut hide = *hide_other;
                 if ui.checkbox(&mut hide, "").changed() {
                     update(app, json!({"hideOther": hide}));
+                }
+                ui.end_row();
+            }
+            ElementKind::Colorbar { frame, layer, title, orientation, ticks, tick_side, reverse } => {
+                ui.label(tl!("Title"));
+                if let Some(tt) = text_field(app, ui, (li, id, "title"), title, false) {
+                    update(app, json!({"title": tt}));
+                }
+                ui.end_row();
+                // The rasters of the frame's map; none picked follows the top visible one.
+                ui.label(tl!("Layer"));
+                let rasters: Vec<String> = match layout.element(*frame).map(|f| &f.kind) {
+                    Some(ElementKind::MapFrame { map, .. }) => app
+                        .session
+                        .project
+                        .maps
+                        .iter()
+                        .find(|m| m.name.eq_ignore_ascii_case(map))
+                        .map(|m| m.layers.iter().filter(|l| l.is_raster()).map(|l| l.name.clone()).collect())
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                let top = tl!("Top visible raster");
+                egui::ComboBox::from_id_salt(("colorbar_layer", id)).selected_text(layer.as_deref().unwrap_or(top)).show_ui(ui, |ui| {
+                    if ui.selectable_label(layer.is_none(), top).clicked() {
+                        update(app, json!({"layer": ""}));
+                    }
+                    for n in rasters {
+                        if ui.selectable_label(layer.as_deref() == Some(n.as_str()), n.as_str()).clicked() {
+                            update(app, json!({"layer": n}));
+                        }
+                    }
+                });
+                ui.end_row();
+                let vertical = *orientation == Orientation::Vertical;
+                ui.label(tl!("Orientation"));
+                ui.horizontal(|ui| {
+                    for (label, v) in [("Horizontal", false), ("Vertical", true)] {
+                        if ui.selectable_label(vertical == v, tl!(label)).clicked() && vertical != v {
+                            update(app, json!({"orientation": if v { "vertical" } else { "horizontal" }}));
+                        }
+                    }
+                });
+                ui.end_row();
+                ui.label(tl!("Labels"));
+                ui.horizontal(|ui| {
+                    let sides = if vertical { [("Right", "right"), ("Left", "left")] } else { [("Below", "below"), ("Above", "above")] };
+                    for ((label, code), side) in sides.into_iter().zip([TickSide::End, TickSide::Start]) {
+                        if ui.selectable_label(*tick_side == side, tl!(label)).clicked() && *tick_side != side {
+                            update(app, json!({"tickSide": code}));
+                        }
+                    }
+                });
+                ui.end_row();
+                ui.label(tl!("Ticks"));
+                let mut n = *ticks as u64;
+                let r = ui.add(egui::DragValue::new(&mut n).range(2..=MAX_COLORBAR_TICKS as u64));
+                if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && n as usize != *ticks {
+                    update(app, json!({"ticks": n}));
+                }
+                ui.end_row();
+                ui.label(tl!("Reverse"));
+                let mut rev = *reverse;
+                if ui.checkbox(&mut rev, "").changed() {
+                    update(app, json!({"reverse": rev}));
                 }
                 ui.end_row();
             }

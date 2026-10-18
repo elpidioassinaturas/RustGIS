@@ -351,6 +351,7 @@ pub fn hosted_bytes(s: &mut Session, p: &Value) -> Result<(Vec<u8>, Value), Stri
             center: Coord::new((min_x + max_x) / 2.0, (min_y + max_y) / 2.0),
             res: (max_x - min_x) / f64::from(TILE),
             bearing: 0.0,
+            pitch: 0.0,
         };
         let view = rustgis_render::View { width: f64::from(TILE), height: f64::from(TILE), pixels_per_point: 1.0, camera, sky: false };
         let Some(mut img) = rustgis_render::render(&mut map, &view).map(|r| r.pixmap) else { continue };

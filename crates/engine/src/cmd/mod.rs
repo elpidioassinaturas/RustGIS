@@ -10,6 +10,7 @@ pub mod effects;
 pub mod geocode;
 pub mod gp;
 pub mod graphics;
+pub mod group;
 pub mod imagery;
 pub mod items;
 pub mod labels;
@@ -54,6 +55,7 @@ pub fn all() -> Vec<CommandSpec> {
     v.extend(s3::commands());
     v.extend(sources::commands());
     v.extend(layer::commands());
+    v.extend(group::commands());
     v.extend(raster::commands());
     v.extend(zarr::commands());
     v.extend(select::commands());

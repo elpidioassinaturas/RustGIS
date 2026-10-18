@@ -31,7 +31,7 @@ pub fn apply_worldview(pref: &str) -> Worldview {
 }
 
 fn cam(lon: f64, lat: f64, res: f64) -> Camera {
-    Camera { center: lonlat_to_merc(Coord::new(lon, lat)), res, bearing: 0.0 }
+    Camera { center: lonlat_to_merc(Coord::new(lon, lat)), res, bearing: 0.0, pitch: 0.0 }
 }
 
 /// The built-in countries in a worldview.

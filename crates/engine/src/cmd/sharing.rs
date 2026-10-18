@@ -237,11 +237,14 @@ pub fn share_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Ve
     }
 }
 
+/// A map to share, its layer groups folded into their layers (the shared formats have none).
 fn map_of(s: &Session, p: &Value) -> Result<Map, String> {
-    match ps(p, "map") {
-        Some(n) => s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(n)).cloned().ok_or_else(|| format!("no map '{n}'")),
-        None => Ok(s.map().clone()),
-    }
+    let mut m = match ps(p, "map") {
+        Some(n) => s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(n)).cloned().ok_or_else(|| format!("no map '{n}'"))?,
+        None => s.map().clone(),
+    };
+    m.bake_groups();
+    Ok(m)
 }
 
 /// A streamed layer shares its whole source, not the features read for the current view.
@@ -482,7 +485,8 @@ fn web_map_html(m: &Map, title: &str) -> Result<String, String> {
             let (w, h) = ((b.x - a.x).abs(), (b.y - a.y).abs());
             let px = 1600.0f64;
             let (vw, vh) = if w >= h { (px, (px * h / w.max(1e-9)).max(1.0)) } else { ((px * w / h.max(1e-9)).max(1.0), px) };
-            let camera = rustgis_map::Camera { center: Coord::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0), res: w / vw, bearing: 0.0 };
+            let camera =
+                rustgis_map::Camera { center: Coord::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0), res: w / vw, bearing: 0.0, pitch: 0.0 };
             let view = rustgis_render::View { width: vw, height: vh, pixels_per_point: 1.0, camera, sky: false };
             let png = rustgis_render::render_png(&mut only, &view)?;
             pictures += png.len();

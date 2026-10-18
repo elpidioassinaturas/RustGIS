@@ -19,6 +19,19 @@ desktop app and command line run its separately downloaded `geolibre` runner, an
 loads its WebAssembly runner (the `geolibre-wasm` npm package, from jsDelivr) when asked. Its
 tool names, descriptions and categories come from the runner's manifests.
 
+The scientific colour ramps (`crates/map/src/color/scientific.rs`) are sampled from published
+colour maps: Viridis, Plasma, Inferno and Magma by Stéfan van der Walt and Nathaniel Smith (CC0),
+and Cividis by Jamie R. Nuñez, Christopher R. Anderton and Ryan S. Renslow, as
+[matplotlib](https://matplotlib.org) ships them (matplotlib licence); Turbo by Anton Mikhailov,
+Copyright 2019 Google LLC (Apache-2.0); Batlow, Vik, Roma and Oleron from Fabio Crameri's
+[Scientific colour maps](https://www.fabiocrameri.ch/colourmaps/), Copyright (c) 2020 Fabio
+Crameri (MIT, through [cmcrameri](https://github.com/callumrollo/cmcrameri)); and Balance,
+Haline, Deep and Topo from [cmocean](https://matplotlib.org/cmocean/), Copyright (c) 2015
+Kristen M. Thyng (MIT). The MIT licence's terms: permission is granted, free of charge, to use,
+copy, modify, merge, publish, distribute, sublicense and sell copies, provided the copyright
+notice and permission notice are included; the software is provided "as is", without warranty
+of any kind.
+
 Icons are original vector drawings in code (`crates/ui-egui/src/icons.rs`). Fonts are not
 bundled: the interface uses an installed system sans-serif when one is found, otherwise the
 Ubuntu Light face that ships inside `epaint_default_fonts` (Ubuntu Font Licence 1.0).

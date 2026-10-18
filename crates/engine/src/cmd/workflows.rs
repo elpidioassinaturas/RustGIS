@@ -580,7 +580,7 @@ fn neighborhood(s: &mut Session, p: &Value) -> CmdResult {
         p.get("layers").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_ascii_lowercase)).collect());
     let mut out = Vec::new();
     let mut found: Vec<(u32, Vec<usize>)> = Vec::new();
-    for l in s.map().layers.iter().filter(|l| l.visible && !l.is_raster() && !l.graphics) {
+    for l in s.map().layers.iter().filter(|l| s.map().shows(l) && !l.is_raster() && !l.graphics) {
         if only.as_ref().is_some_and(|o| !o.contains(&l.name.to_ascii_lowercase())) {
             continue;
         }

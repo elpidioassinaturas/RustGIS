@@ -1056,8 +1056,9 @@ pub fn snap_except(s: &mut Session, c: Coord, skip: Option<(u32, usize)>) -> Opt
             *slot = Some((d2, at, kind));
         }
     };
+    let held = s.map().held_by_group(scale);
     for l in s.map_mut().layers.iter_mut().filter(|l| l.visible && !l.is_raster() && !l.graphics) {
-        if !l.in_scale_range(scale) {
+        if !l.in_scale_range(scale) || held.contains(&l.id) {
             continue;
         }
         let id = l.id;

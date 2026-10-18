@@ -15,7 +15,7 @@ the maps; while one is open, its groups lead the Publish tab:
   to pan its map. Double-click a frame to match the map view, or set the scale in its properties.
   **Grid** draws a labelled graticule over a frame; **Extent Indicator** outlines another frame's
   extent (an overview map).
-- **Map surrounds**: north arrow, scale bar, legend, table frame (a layer's attribute table) and
+- **Map surrounds**: north arrow, scale bar, legend, colorbar, table frame (a layer's attribute table) and
   chart frame (a bar chart of a numeric field), plus a neatline or backdrop. A legend shows what
   its frame draws: only layers with a feature at the frame's scale (through their definition
   query, display filters and scale range) and, for Unique Values, only the classes those features
@@ -27,6 +27,17 @@ the maps; while one is open, its groups lead the Publish tab:
   classes** in its properties (`"allClasses": true`) to list every class of every visible layer
   instead, and **Hide other values** (`"hideOther": true`) to leave `<all other values>` out of
   the legend in either mode (the features it stands for are still drawn).
+- **Colorbar**: the colour scale of a raster layer in the frame's map, as the map draws it (its
+  stretch, colour ramp and enhancement): a gradient bar for a stretch or a tinted hillshade,
+  steps labelled at their breaks for Classify, and a block per value for Unique Values and colour
+  tables. Its properties pick the **Layer** (the top visible raster unless one is picked), the
+  **Title** (the units, such as `Elevation (m)`; the layer's name to start with), the
+  **Orientation**, which side the **Labels** go on, how many **Ticks** a gradient labels (2 to
+  21, the ends included) and **Reverse** (high values first). An RGB raster or a hillshade
+  without a tint has no colour scale and shows a placeholder, as does a picked layer that was
+  renamed or removed (it is kept by name, like a table or chart frame's layer) until another is
+  picked. From a command:
+  `layout.addElement={"kind":"colorbar","layer":"DEM","title":"Elevation (m)","orientation":"vertical","ticks":3}`.
 - **Text** and **Dynamic Text**: `{date}`, `{time}`, `{scale}`, `{map}`, `{crs}`, `{page}`,
   `{pages}`, `{pageName}` and `{layout}` fill in when the page is drawn. **Picture** places a PNG
   or JPEG.

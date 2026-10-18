@@ -242,7 +242,7 @@ mod tests {
     }
 
     fn pixel(map: &mut Map) -> [u8; 4] {
-        let camera = Camera { center: lonlat_to_merc(Coord::new(10.0, 50.0)), res: 2000.0, bearing: 0.0 };
+        let camera = Camera { center: lonlat_to_merc(Coord::new(10.0, 50.0)), res: 2000.0, bearing: 0.0, pitch: 0.0 };
         let view = View { width: 200.0, height: 100.0, pixels_per_point: 1.0, camera, sky: false };
         let png = crate::render_png(map, &view).unwrap();
         let pm = tiny_skia::Pixmap::decode_png(&png).unwrap();
@@ -273,7 +273,7 @@ mod tests {
         // A layer that can't load draws nothing and says why.
         m.projection = Projection::WebMercator;
         m.tiles = vec![TileLayer::new("Gone", TileKind::Style, "https://tiles.test/missing.json")];
-        let camera = Camera { center: lonlat_to_merc(Coord::new(10.0, 50.0)), res: 2000.0, bearing: 0.0 };
+        let camera = Camera { center: lonlat_to_merc(Coord::new(10.0, 50.0)), res: 2000.0, bearing: 0.0, pitch: 0.0 };
         let view = View { width: 200.0, height: 100.0, pixels_per_point: 1.0, camera, sky: false };
         let r = crate::render_complete(&mut m, &view).unwrap();
         assert!(!r.tiles_pending);

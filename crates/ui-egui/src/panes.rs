@@ -10,7 +10,9 @@ use rustgis_engine::data::GeometryType;
 use rustgis_engine::map::raster::{RasterLegend, RasterStyle};
 use rustgis_engine::map::symbology::{ClassRef, ClassStyle, MAX_LABEL, MAX_UNIQUE, normalize_label};
 use rustgis_engine::map::tiles::TileLayer;
-use rustgis_engine::map::{ClassMethod, Layer, Marker, Ramp, RasterRenderer, Renderer, Resampling, Stretch, Symbol};
+use rustgis_engine::map::{
+    ClassMethod, Layer, Marker, Ramp, RampGroup, RasterDefaults, RasterRenderer, Renderer, Resampling, Stretch, Symbol,
+};
 use serde_json::{Value, json};
 
 use crate::theme::{Tokens, c32, regular, rgba, semibold};
@@ -483,20 +485,30 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         });
         let layers: Vec<Layer> = app.session.map().layers.clone();
         let groups = app.session.map().service_groups.clone();
+        let layer_groups = app.session.map().groups.clone();
         let tiles: Vec<TileLayer> = app.session.map().tiles.clone();
         let scale = app.session.scale();
         // How many layer, service group and tile entries the view lists.
         let listed = match view {
             LayersView::DrawingOrder => {
                 let mut shown = std::collections::HashSet::new();
-                let mut blocks = Vec::new();
-                for layer in layers.iter().filter(|l| shows(&l.name)) {
+                let mut rows: Vec<DropRow> = Vec::new();
+                // A layer group lists at its topmost layer (its layers are kept together); while
+                // filtering, when one of its layers or its own name matches.
+                for layer in
+                    layers.iter().filter(|l| shows(&l.name) || layer_groups.iter().any(|g| g.children.contains(&l.id) && shows(&g.name)))
+                {
                     if let Some(group) = groups.iter().find(|g| g.children.iter().any(|c| c.layer == layer.id)) {
-                        if shown.insert(group.id) {
+                        if shows(&layer.name) && shown.insert(group.id) {
                             service_group_row(app, ui, group, &layers, scale, t);
                         }
+                    } else if let Some(group) = layer_groups.iter().find(|g| g.children.contains(&layer.id)) {
+                        if shown.insert(group.id) {
+                            layer_group_row(app, ui, group, &layers, scale, reorder, &mut rows, t);
+                        }
                     } else {
-                        blocks.push((layer.id, layer_row(app, ui, layer, scale, reorder, t)));
+                        let rect = layer_row(app, ui, layer, scale, reorder, t);
+                        rows.push(DropRow { id: layer.id, rect, group: None, header: false });
                     }
                 }
                 for group in &groups {
@@ -504,11 +516,17 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                         service_group_row(app, ui, group, &layers, scale, t);
                     }
                 }
+                // Groups with no layers yet, at the bottom.
+                for group in &layer_groups {
+                    if shows(&group.name) && shown.insert(group.id) {
+                        layer_group_row(app, ui, group, &layers, scale, reorder, &mut rows, t);
+                    }
+                }
                 if reorder {
-                    layer_drop(app, ui, &blocks, t);
+                    layer_drop(app, ui, &rows, t);
                 }
                 // Web tile layers (services, tile addresses) draw over the basemap and under the layers.
-                let mut n = blocks.len() + shown.len();
+                let mut n = rows.iter().filter(|r| r.group.is_none() && !r.header).count() + shown.len();
                 for (i, tile) in tiles.iter().enumerate().filter(|(_, x)| shows(&x.name)) {
                     tile_row(app, ui, i, tiles.len(), reorder, tile, t);
                     n += 1;
@@ -548,7 +566,7 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 );
             });
         }
-        if layers.is_empty() && groups.is_empty() {
+        if layers.is_empty() && groups.is_empty() && layer_groups.is_empty() {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new(tl!("This map has no layers yet.")).color(t.text_dim));
@@ -919,16 +937,121 @@ fn service_group_row(
     });
 }
 
+/// A layer group's row (#413): its arrow folds it, its box shows or hides its layers together,
+/// and right-click renames it, sets its transparency, ungroups or removes it. With `reorder` the
+/// row drags the whole group, and it and its layers' rows join `rows`, where layers drop (see
+/// [`layer_drop`]).
+fn layer_group_row(
+    app: &mut RustGisApp,
+    ui: &mut Ui,
+    group: &rustgis_engine::map::LayerGroup,
+    layers: &[Layer],
+    scale: f64,
+    reorder: bool,
+    rows: &mut Vec<DropRow>,
+    t: &Tokens,
+) {
+    let q = filter_query(&app.ui.layer_filter);
+    let filtering = !q.is_empty();
+    // In drawing order, as they draw.
+    let children: Vec<&Layer> = layers.iter().filter(|l| group.children.contains(&l.id)).collect();
+    ui.push_id(("layer_group", group.id), |ui| {
+        let name = row_name(ui, group.name.clone(), semibold(12.5), ui.available_width() - NAME_X - 8.0);
+        let sense = if reorder { Sense::click_and_drag() } else { Sense::click() };
+        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), name.row_h), sense);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &group.name));
+        if reorder && resp.drag_started_by(egui::PointerButton::Primary) {
+            egui::DragAndDrop::set_payload(ui.ctx(), DraggedLayer(group.id));
+        }
+        let dragging = egui::DragAndDrop::payload::<DraggedLayer>(ui.ctx()).is_some_and(|d| d.0 == group.id);
+        rows.push(DropRow { id: group.id, rect: r, group: None, header: true });
+        if resp.hovered() || dragging {
+            ui.painter().rect_filled(r.shrink2(vec2(4.0, 1.0)), CornerRadius::same(5), t.hover);
+        }
+        let cy = r.min.y + 13.0;
+        let ar = Rect::from_center_size(pos2(r.min.x + 16.0, cy), vec2(14.0, 14.0));
+        icons::paint(ui.painter(), ar, if group.expanded { "chevron_down" } else { "chevron_right" }, t.text_dim, t.accent);
+        let arrow = ui.interact(hit(ar), egui::Id::new(("layer_group_expand", group.id)), Sense::click());
+        let cb = Rect::from_center_size(pos2(r.min.x + 33.0, cy), vec2(14.0, 14.0));
+        let cb_resp = ui.interact(hit(cb), egui::Id::new(("layer_group_visible", group.id)), Sense::click());
+        cb_resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, group.visible, tl!("Show or hide")));
+        visibility_box(ui, cb, group.visible, t);
+        icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 57.0, cy), vec2(18.0, 16.0)), "contents", t.icon, t.accent);
+        let elided = name.elided;
+        let out_of_range = !group.in_scale_range(scale);
+        name.paint(ui, r, r.min.x + NAME_X, if group.visible && !out_of_range { t.text } else { t.text_disabled });
+        if cb_resp.on_hover_text(tl!("Show or hide the group's layers")).clicked() {
+            let _ = app.run("group.set", json!({"group": group.id, "visible": !group.visible}));
+        } else if arrow.clicked() || resp.double_clicked() {
+            let _ = app.run("group.expand", json!({"group": group.id}));
+        }
+        let resp = if elided { resp.on_hover_text(&group.name) } else { resp };
+        resp.context_menu(|ui| {
+            if ui.button(if group.visible { tl!("Hide Group") } else { tl!("Show Group") }).clicked() {
+                let _ = app.run("group.set", json!({"group": group.id, "visible": !group.visible}));
+                ui.close();
+            }
+            if ui.button(tl!("Rename…")).clicked() {
+                let _ = app.run("ui.dialog", json!({"name": "renameGroup"}));
+                app.dialogs.layer = group.id.to_string();
+                app.dialogs.text = group.name.clone();
+                ui.close();
+            }
+            let mut tr = group.transparency;
+            ui.horizontal(|ui| {
+                ui.label(tl!("Transparency"));
+                let r = ui.add(egui::Slider::new(&mut tr, 0.0..=100.0).suffix(" %").integer());
+                if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                    let _ = app.run("group.set", json!({"group": group.id, "transparency": tr}));
+                }
+            });
+            if (group.min_scale.is_some() || group.max_scale.is_some()) && ui.button(tl!("Clear Visibility Range")).clicked() {
+                let _ = app.run("group.scaleRange", json!({"group": group.id}));
+                ui.close();
+            }
+            ui.separator();
+            if ui.button(tl!("Ungroup")).clicked() {
+                let _ = app.run("group.ungroup", json!({"group": group.id}));
+                ui.close();
+            }
+            if ui.button(tl!("Remove")).clicked() {
+                let _ = app.run("group.remove", json!({"group": group.id}));
+                ui.close();
+            }
+        });
+        if group.expanded || filtering {
+            ui.indent("children", |ui| {
+                for layer in children.iter().filter(|l| filter_shows(&q, &l.name) || filter_shows(&q, &group.name)) {
+                    let rect = layer_row(app, ui, layer, scale, reorder, t);
+                    rows.push(DropRow { id: layer.id, rect, group: Some(group.id), header: false });
+                }
+            });
+        }
+    });
+}
+
 /// The layer a row drag carries (egui's drag-and-drop payload).
 #[derive(Clone, Copy)]
 struct DraggedLayer(u32);
 
-/// Dragging a layer row over the list: marks the gap it would drop into and, on release, moves
-/// it there (`layer.move`, one undo step). Released anywhere but over the layer rows, the drag
-/// does nothing.
-fn layer_drop(app: &mut RustGisApp, ui: &Ui, blocks: &[(u32, Rect)], t: &Tokens) {
+/// A row of the drawing order view a dragged layer can drop on: a layer's (in a layer `group` or
+/// not) or a layer group's `header`.
+#[derive(Clone, Copy)]
+struct DropRow {
+    id: u32,
+    rect: Rect,
+    group: Option<u32>,
+    header: bool,
+}
+
+/// Dragging a layer or layer group row over the list: marks where it would drop and, on release,
+/// puts it there in one undo step. A layer dropped above one of a group's layers joins the group
+/// there, dropped elsewhere leaves its group, and dropped onto a group's row joins it at its end
+/// nearest the layer (`layer.group`); a group moves whole and only between groups (`group.move`). Released
+/// anywhere but over the rows, the drag does nothing.
+fn layer_drop(app: &mut RustGisApp, ui: &Ui, rows: &[DropRow], t: &Tokens) {
     let Some(dragged) = egui::DragAndDrop::payload::<DraggedLayer>(ui.ctx()) else { return };
-    let Some(from) = blocks.iter().position(|(id, _)| *id == dragged.0) else { return };
+    let Some(from) = rows.iter().position(|r| r.id == dragged.0) else { return };
     let view = ui.clip_rect();
     let Some(pointer) = ui.ctx().pointer_interact_pos().filter(|p| view.contains(*p)) else { return };
     // Near the top or bottom edge the list scrolls, faster the closer the pointer is.
@@ -940,30 +1063,82 @@ fn layer_drop(app: &mut RustGisApp, ui: &Ui, blocks: &[(u32, Rect)], t: &Tokens)
         ui.ctx().request_repaint();
     }
     // Only the layer rows take a drop: not the map's name above them, the basemap or a table below.
-    let (Some((_, first)), Some((_, last))) = (blocks.first(), blocks.last()) else { return };
-    if pointer.y < first.min.y || pointer.y > last.max.y {
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else { return };
+    if pointer.y < first.rect.min.y || pointer.y > last.rect.max.y {
+        return;
+    }
+    let released = ui.input(|i| i.pointer.any_released());
+    let m = app.session.map();
+    let moving_group = m.group(dragged.0).is_some();
+    let current = m.group_of(dragged.0).map(|g| g.id);
+    // The topmost layer of a group, in drawing order.
+    let top_of = |g: u32| m.group(g).and_then(|g| m.layers.iter().find(|l| g.children.contains(&l.id)).map(|l| l.id));
+    // Onto the middle of another group's row: into that group, at its end nearest the layer; onto
+    // its own group's row, nothing.
+    if !moving_group
+        && let Some(h) = rows
+            .iter()
+            .find(|r| r.header && pointer.y > r.rect.min.y + r.rect.height() / 4.0 && pointer.y < r.rect.max.y - r.rect.height() / 4.0)
+    {
+        if Some(h.id) == current {
+            return;
+        }
+        ui.painter().rect_stroke(
+            h.rect.shrink2(vec2(4.0, 1.0)),
+            CornerRadius::same(5),
+            Stroke::new(2.0, t.accent),
+            egui::StrokeKind::Inside,
+        );
+        if released {
+            let _ = app.run("layer.group", json!({"layer": dragged.0, "group": h.id}));
+        }
         return;
     }
     // The gap above the first row whose middle is below the pointer, or the one after the last.
-    let gap = blocks.iter().position(|(_, r)| pointer.y < r.center().y).unwrap_or(blocks.len());
-    // The gaps on either side of the dragged row leave it where it is.
-    let to = if gap > from { gap - 1 } else { gap };
-    if to == from {
+    let gap = rows.iter().position(|r| pointer.y < r.rect.center().y).unwrap_or(rows.len());
+    let below = rows.get(gap);
+    // Above one of a group's layers is in that group; anywhere else, in none.
+    let into = below.filter(|r| !r.header).and_then(|r| r.group);
+    // The layer the drop goes above (a group's row stands for its topmost layer); none at the end.
+    let before = below.and_then(|r| if r.header { top_of(r.id) } else { Some(r.id) });
+    if moving_group {
+        // A group's own rows run from its header to its last layer; next to them it stays put,
+        // and it never goes into another group.
+        let end = rows.iter().rposition(|r| r.group == Some(dragged.0)).unwrap_or(from);
+        if (gap >= from && gap <= end + 1) || into.is_some() {
+            return;
+        }
+    } else if into == current && (gap == from || gap == from + 1) {
         return;
     }
-    let line = match blocks.get(gap) {
-        Some((_, r)) => Some((r.min.y, r)),
-        None => blocks.last().map(|(_, r)| (r.max.y, r)),
+    let line = match below {
+        Some(r) => Some((r.rect.min.y, r.rect)),
+        None => rows.last().map(|r| (r.rect.max.y, r.rect)),
     };
     if let Some((y, r)) = line {
-        ui.painter().line_segment([pos2(r.min.x + 8.0, y), pos2(r.max.x - 8.0, y)], Stroke::new(2.0, t.accent));
+        // Indented when the drop goes into a group.
+        let x = match (into, below) {
+            (Some(_), Some(b)) => b.rect.min.x,
+            _ => first.rect.min.x,
+        };
+        ui.painter().line_segment([pos2(x + 8.0, y), pos2(r.max.x - 8.0, y)], Stroke::new(2.0, t.accent));
     }
-    if ui.input(|i| i.pointer.any_released()) {
-        // Nested/collapsed rows aren't positions in the map's flat rendering list.
-        if let Some(index) = blocks.get(to).and_then(|(id, _)| app.session.map().layer_index(*id)) {
-            let _ = app.run("layer.move", json!({"layer": dragged.0, "to": index}));
+    if !released {
+        return;
+    }
+    if let Some(g) = m.group(dragged.0) {
+        // Among the other layers, the place of the one it goes above.
+        let others: Vec<u32> = m.layers.iter().map(|l| l.id).filter(|id| !g.children.contains(id)).collect();
+        let pos = match before {
+            Some(id) => others.iter().position(|l| *l == id),
+            None => Some(others.len()),
+        };
+        if let Some(pos) = pos {
+            let _ = app.run("group.move", json!({"group": dragged.0, "to": pos}));
         }
+        return;
     }
+    let _ = app.run("layer.group", json!({"layer": dragged.0, "group": into, "before": before}));
 }
 
 /// A layer row's visibility checkbox, ticked when the layer is shown.
@@ -1166,11 +1341,12 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: 
         patch(ui.painter(), pr, &l.renderer.base_symbol(), l.geometry_type());
     }
     x += 24.0;
-    let out_of_range = !l.in_scale_range(scale);
+    let out_of_range = !app.session.map().in_scale_range(l, scale);
+    let group_hidden = !app.session.map().shows(l) && l.visible;
     let missing = l.raster.as_ref().is_some_and(|r| r.data.is_none()) || l.source.as_ref().is_some_and(|s| s.error.is_some());
     let color = if missing {
         t.red
-    } else if !l.visible || out_of_range {
+    } else if !l.visible || out_of_range || group_hidden {
         t.text_disabled
     } else {
         t.text
@@ -1318,6 +1494,31 @@ fn layer_menu(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, reorder: bool) {
     if ui.button(tl!("Rename…")).clicked() {
         let _ = app.run("ui.dialog", json!({"name": "renameLayer"}));
         ui.close();
+    }
+    // Layer groups (#413): a service's collections stay in their service group.
+    if !service_child {
+        let groups: Vec<(u32, String)> = app.session.map().groups.iter().map(|g| (g.id, g.name.clone())).collect();
+        let current = app.session.map().group_of(l.id).map(|g| g.id);
+        ui.menu_button(tl!("Group"), |ui| {
+            if ui.button(tl!("New Group")).clicked() {
+                let _ = app.run("group.add", json!({"layers": [l.id]}));
+                ui.close();
+            }
+            if current.is_some() && ui.button(tl!("Remove From Group")).clicked() {
+                let _ = app.run("layer.group", json!({"layer": l.id, "group": null}));
+                ui.close();
+            }
+            let others: Vec<&(u32, String)> = groups.iter().filter(|(id, _)| Some(*id) != current).collect();
+            if !others.is_empty() {
+                ui.separator();
+                for (id, name) in others {
+                    if ui.button(crate::i18n::fmt("Move To {group}", &[("group", name)])).clicked() {
+                        let _ = app.run("layer.group", json!({"layer": l.id, "group": id}));
+                        ui.close();
+                    }
+                }
+            }
+        });
     }
     if l.is_raster() {
         if ui.button(tl!("Export Raster…")).clicked() {
@@ -2842,8 +3043,9 @@ fn field_combo(app: &mut RustGisApp, ui: &mut Ui, label: &str, cur: &str, fields
 fn ramp_picker(app: &mut RustGisApp, ui: &mut Ui, cur: &Ramp, t: &Tokens) {
     ui.add_space(4.0);
     ui.label(egui::RichText::new(tl!("Color scheme")).size(11.5).color(t.text_dim));
-    let w = (ui.available_width() - 8.0) / 2.0;
     let grid = |app: &mut RustGisApp, ui: &mut Ui, id: &str, ramps: Vec<Ramp>| {
+        // Two to a row, in the width left inside the group's indent.
+        let w = (ui.available_width() - 8.0) / 2.0;
         egui::Grid::new(id).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
             for (i, r) in ramps.iter().enumerate() {
                 // Built-in names are translated; a custom ramp's is the user's own.
@@ -2857,12 +3059,18 @@ fn ramp_picker(app: &mut RustGisApp, ui: &mut Ui, cur: &Ramp, t: &Tokens) {
             }
         });
     };
-    grid(app, ui, "ramps", Ramp::ALL.to_vec());
+    // One collapsible list per group; the current scheme's group starts open.
     let custom: Vec<Ramp> = app.session.project.ramps.iter().map(|r| Ramp::Custom(Box::new(r.clone()))).collect();
-    if !custom.is_empty() {
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new(tl!("Custom")).size(11.5).color(t.text_dim));
-        grid(app, ui, "custom_ramps", custom);
+    for g in RampGroup::ALL {
+        let ramps: Vec<Ramp> =
+            if g == RampGroup::Custom { custom.clone() } else { Ramp::ALL.into_iter().filter(|r| r.group() == g).collect() };
+        if ramps.is_empty() {
+            continue;
+        }
+        egui::CollapsingHeader::new(egui::RichText::new(tl!(g.label())).size(11.5).color(t.text_dim))
+            .id_salt(("ramp_group", g.label()))
+            .default_open(cur.group() == g)
+            .show(ui, |ui| grid(app, ui, g.label(), ramps));
     }
     if ui
         .small_button(tl!("Add Color Ramp File…"))
@@ -2871,6 +3079,38 @@ fn ramp_picker(app: &mut RustGisApp, ui: &mut Ui, cur: &Ramp, t: &Tokens) {
     {
         let _ = app.run("ui.openItem", json!({"kind": "ramps"}));
     }
+}
+
+/// Save as Default and Reset Default: how single-band rasters added from now on are drawn.
+fn raster_default_buttons(app: &mut RustGisApp, ui: &mut Ui, style: &RasterStyle) {
+    let custom = matches!(style.stretch, Stretch::Custom { .. });
+    ui.horizontal(|ui| {
+        let tip = if custom {
+            tl!("A custom stretch is in this raster's own units: pick another stretch type to save it as the default.")
+        } else {
+            tl!("Draw single-band rasters added from now on with this color scheme, stretch and resampling.")
+        };
+        if ui
+            .add_enabled(!custom, egui::Button::new(tl!("Save as Default")).small())
+            .on_hover_text(tip)
+            .on_disabled_hover_text(tip)
+            .clicked()
+        {
+            match app.run("raster.setDefaultStyle", json!({"fromLayer": true})) {
+                Ok(_) => app.session.notify(tl!("Saved as the default style for new single-band rasters."), false),
+                Err(e) => app.session.notify(e, true),
+            }
+        }
+        let changed = app.session.raster_defaults != RasterDefaults::default();
+        if ui
+            .add_enabled(changed, egui::Button::new(tl!("Reset Default")).small())
+            .on_hover_text(tl!("Draw new single-band rasters with the inverted grey stretch again."))
+            .clicked()
+            && let Err(e) = app.run("raster.setDefaultStyle", json!({"reset": true}))
+        {
+            app.session.notify(e, true);
+        }
+    });
 }
 
 /// Where a class colour being dragged in the Symbology pane's picker waits (#314).
@@ -3548,6 +3788,9 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
             }
         });
     });
+    if matches!(style.renderer, RasterRenderer::Stretch { .. }) {
+        raster_default_buttons(app, ui, &style);
+    }
     raster_masking(app, ui, l, &d, &style, t);
     ui.add_space(6.0);
     egui::Frame::NONE.stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::same(6)).show(

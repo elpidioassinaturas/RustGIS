@@ -50,7 +50,7 @@ fn targets(app: &RustGisApp) -> Vec<(u32, usize, &Geometry)> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for l in m.layers.iter().filter(|l| l.visible && !l.selection.is_empty() && !l.is_raster() && !l.graphics && !l.is_streamed()) {
+    for l in m.layers.iter().filter(|l| m.shows(l) && !l.selection.is_empty() && !l.is_raster() && !l.graphics && !l.is_streamed()) {
         for r in &l.selection {
             if out.len() >= MAX_FEATURES {
                 return out;

@@ -42,12 +42,17 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"extent": [minLon, minLat, maxLon, maxLat]}"#),
         C::new("map.goToXY", "Go To XY", "Home › Navigate", go_to_xy)
             .view()
-            .params(r#"{"lon" | "x": number, "lat" | "y": number, "scale"?: number, "bearing"?: degrees clockwise from north}"#),
+            .params(r#"{"lon" | "x": number, "lat" | "y": number, "scale"?: number, "bearing"?: degrees clockwise from north, "pitch"?: degrees of tilt (0 to 85)}"#),
         C::new("map.setBearing", "Rotate Map", "Home › Navigate", set_bearing)
             .view()
             .params(r#"{"bearing": degrees clockwise from north (the direction the top of the view faces) | "by": degrees to turn it further}"#),
+        C::new("map.setPitch", "Tilt Map", "Home › Navigate", set_pitch)
+            .view()
+            .params(r#"{"pitch": degrees of tilt from looking straight down (0 to 85) | "by": degrees to tilt it further}"#),
         C::new("map.resetNorth", "Reset North", "Home › Navigate", |s, _| {
-            s.map_mut().camera.set_bearing(0.0);
+            let m = s.map_mut();
+            m.camera.set_bearing(0.0);
+            m.camera.set_pitch(0.0);
             s.record_extent();
             Ok(Value::Null)
         })
@@ -307,6 +312,10 @@ pub(crate) fn go_to_xy(s: &mut Session, p: &Value) -> CmdResult {
         None | Some(Value::Null) => None,
         Some(_) => Some(f(p, "bearing").ok_or("bearing must be a number of degrees")?),
     };
+    let pitch = match p.get("pitch") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(f(p, "pitch").ok_or("pitch must be a number of degrees")?),
+    };
     let m = s.map_mut();
     m.camera.center = m.to_map(Coord::new(lon, lat)).ok_or("that point is outside the map's projection")?;
     if let Some(sc) = f(p, "scale") {
@@ -315,15 +324,41 @@ pub(crate) fn go_to_xy(s: &mut Session, p: &Value) -> CmdResult {
     if let Some(b) = bearing {
         m.camera.set_bearing(b);
     }
+    if let Some(t) = pitch {
+        m.camera.set_pitch(t);
+    }
     m.camera.clamp();
     s.record_extent();
     Ok(Value::Null)
+}
+
+/// Tilts the flat map (the globe keeps the pitch for when the map is flat again).
+fn set_pitch(s: &mut Session, p: &Value) -> CmdResult {
+    if p.get("pitch").is_some_and(|v| !v.is_null()) && f(p, "pitch").is_none() {
+        return Err("pitch must be a number of degrees".into());
+    }
+    if p.get("by").is_some_and(|v| !v.is_null()) && f(p, "by").is_none() {
+        return Err("by must be a number of degrees".into());
+    }
+    let m = s.map_mut();
+    let pitch = match (f(p, "pitch"), f(p, "by")) {
+        (Some(t), _) => t,
+        (None, Some(by)) => m.camera.pitch + by,
+        (None, None) => return Err("pitch (degrees of tilt, 0 to 85) or by (degrees to tilt further) is required".into()),
+    };
+    m.camera.set_pitch(pitch);
+    let out = json!({"pitch": m.camera.pitch});
+    s.record_extent();
+    Ok(out)
 }
 
 /// Turns the flat map to a bearing (the globe keeps it for when the map is flat again).
 fn set_bearing(s: &mut Session, p: &Value) -> CmdResult {
     if p.get("bearing").is_some_and(|v| !v.is_null()) && f(p, "bearing").is_none() {
         return Err("bearing must be a number of degrees".into());
+    }
+    if p.get("by").is_some_and(|v| !v.is_null()) && f(p, "by").is_none() {
+        return Err("by must be a number of degrees".into());
     }
     let m = s.map_mut();
     let bearing = match (f(p, "bearing"), f(p, "by")) {
@@ -401,6 +436,7 @@ fn place_of(from: &Map, at: &rustgis_map::Camera, to: &Map) -> Option<rustgis_ma
     let lonlat = flat.inverse(at.center)?;
     let mut camera = place_at(to, lonlat, at.res * flat.ground_per_unit(at.center))?;
     camera.set_bearing(at.bearing);
+    camera.set_pitch(at.pitch);
     Some(camera)
 }
 
@@ -476,6 +512,9 @@ pub(crate) fn bookmarks_file(map: &Map) -> Result<Vec<u8>, String> {
             if b.camera.bearing != 0.0 {
                 mark["bearing"] = json!(b.camera.bearing);
             }
+            if b.camera.pitch != 0.0 {
+                mark["pitch"] = json!(b.camera.pitch);
+            }
             if !b.description.is_empty() {
                 mark["description"] = json!(b.description);
             }
@@ -509,6 +548,7 @@ fn import_bookmarks(s: &mut Session, p: &Value) -> CmdResult {
         let Some(mut camera) = place_at(m, Coord::new(lon, lat), ground) else { continue };
         // A file from before bearings faces north.
         camera.set_bearing(f(b, "bearing").unwrap_or(0.0));
+        camera.set_pitch(f(b, "pitch").unwrap_or(0.0));
         // Absent (a file from before descriptions, or written by hand) isn't empty: a bookmark
         // it replaces keeps its own.
         let description: Option<String> = super::ps(b, "description").map(|d| d.trim().chars().take(MAX_DESCRIPTION).collect());

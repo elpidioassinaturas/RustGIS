@@ -518,7 +518,7 @@ mod tests {
     use super::*;
 
     fn at(lon: f64, lat: f64, res: f64) -> Globe {
-        Globe::new(&Camera { center: lonlat_to_merc(Coord::new(lon, lat)), res, bearing: 0.0 }, 800.0, 600.0)
+        Globe::new(&Camera { center: lonlat_to_merc(Coord::new(lon, lat)), res, bearing: 0.0, pitch: 0.0 }, 800.0, 600.0)
     }
 
     #[test]
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn zoom_keeps_the_point_under_the_pointer() {
-        let mut cam = Camera { center: lonlat_to_merc(Coord::new(10.0, 40.0)), res: 20_000.0, bearing: 0.0 };
+        let mut cam = Camera { center: lonlat_to_merc(Coord::new(10.0, 40.0)), res: 20_000.0, bearing: 0.0, pitch: 0.0 };
         let before = Globe::new(&cam, 800.0, 600.0);
         let target = before.inverse(520.0, 240.0).unwrap();
         Globe::zoom_at(&mut cam, 1.6, 520.0, 240.0, 800.0, 600.0);
@@ -564,13 +564,13 @@ mod tests {
 
     #[test]
     fn dragging_keeps_the_globe_size_and_far_features_are_culled() {
-        let mut cam = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 20_000.0, bearing: 0.0 };
+        let mut cam = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 20_000.0, bearing: 0.0, pitch: 0.0 };
         let r0 = Globe::new(&cam, 800.0, 600.0).disc_radius();
         Globe::drag(&mut cam, 0.0, 200.0, 800.0, 600.0);
         assert!(cam.center_lonlat().y > 20.0);
         let r1 = Globe::new(&cam, 800.0, 600.0).disc_radius();
         assert!((r1 - r0).abs() < 1e-6 * r0, "{r0} vs {r1}");
-        let g = Globe::new(&Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 20_000.0, bearing: 0.0 }, 800.0, 600.0);
+        let g = Globe::new(&Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 20_000.0, bearing: 0.0, pitch: 0.0 }, 800.0, 600.0);
         let near = rustgis_geom::Extent::new(-5.0, -5.0, 5.0, 5.0);
         let far = rustgis_geom::Extent::new(170.0, -5.0, 179.0, 5.0);
         let limb = rustgis_geom::Extent::new(75.0, -5.0, 85.0, 5.0);
@@ -581,7 +581,7 @@ mod tests {
 
     #[test]
     fn a_grabbed_point_follows_the_pointer() {
-        let mut cam = Camera { center: lonlat_to_merc(Coord::new(20.0, 60.0)), res: 20_000.0, bearing: 0.0 };
+        let mut cam = Camera { center: lonlat_to_merc(Coord::new(20.0, 60.0)), res: 20_000.0, bearing: 0.0, pitch: 0.0 };
         let target = Globe::new(&cam, 800.0, 600.0).inverse(600.0, 200.0).unwrap();
         Globe::drag_point(&mut cam, (600.0, 200.0), (520.0, 260.0), 800.0, 600.0);
         let (x, y) = Globe::new(&cam, 800.0, 600.0).forward(target).unwrap();
@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn drapes_cover_the_view_until_it_turns_past_them() {
         let (w, h) = (800.0, 600.0);
-        let mut cam = Camera { center: lonlat_to_merc(Coord::new(10.0, 45.0)), res: 2_000.0, bearing: 0.0 };
+        let mut cam = Camera { center: lonlat_to_merc(Coord::new(10.0, 45.0)), res: 2_000.0, bearing: 0.0, pitch: 0.0 };
         let g = Globe::new(&cam, w, h);
         let boxes = g.drape_extents(w, h, 0.25);
         assert_eq!(boxes.len(), 1);
@@ -654,11 +654,11 @@ mod tests {
 
     #[test]
     fn drag_rotates_and_degenerate_input_is_safe() {
-        let mut cam = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 20_000.0, bearing: 0.0 };
+        let mut cam = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 20_000.0, bearing: 0.0, pitch: 0.0 };
         Globe::drag(&mut cam, -100.0, 0.0, 800.0, 600.0);
         assert!(cam.center_lonlat().x > 0.0, "dragging left turns the globe east");
         Globe::drag(&mut cam, f64::NAN, 1e12, 800.0, 600.0);
-        let g = Globe::new(&Camera { center: Coord::new(f64::NAN, 0.0), res: 0.0, bearing: 0.0 }, 0.0, 0.0);
+        let g = Globe::new(&Camera { center: Coord::new(f64::NAN, 0.0), res: 0.0, bearing: 0.0, pitch: 0.0 }, 0.0, 0.0);
         let _ = g.inverse(1.0, 1.0);
         let _ = g.forward(Coord::new(f64::NAN, f64::INFINITY));
         assert_eq!(densify([1.0, 0.0, 0.0], [1.0, 0.0, 0.0], 0.1).len(), 1);

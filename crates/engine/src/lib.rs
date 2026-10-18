@@ -267,6 +267,9 @@ pub struct Session {
     /// Favourite, recent and saved data sources (kept with the app's preferences, not the
     /// project).
     pub sources: sources::Sources,
+    /// How rasters added from now on are drawn (`raster.setDefaultStyle`; kept with the app's
+    /// preferences, not the project).
+    pub raster_defaults: rustgis_map::RasterDefaults,
     pub registry: Registry,
     /// Bumped on every change so views can cache.
     pub revision: u64,
@@ -409,6 +412,7 @@ impl Session {
             path: None,
             dirty: false,
             sources: sources::Sources::default(),
+            raster_defaults: rustgis_map::RasterDefaults::default(),
             registry: Registry { commands: cmd::all() },
             revision: 1,
             tool: Tool::Explore,
@@ -787,7 +791,8 @@ impl Session {
         if let Some(last) = self.last_camera {
             let moved = (last.center.x - cam.center.x).abs() > last.res * 2.0
                 || (last.res / cam.res - 1.0).abs() > 0.01
-                || rustgis_map::camera::normalize_bearing(last.bearing - cam.bearing).abs() > 0.5;
+                || rustgis_map::camera::normalize_bearing(last.bearing - cam.bearing).abs() > 0.5
+                || (last.pitch - cam.pitch).abs() > 0.5;
             if !moved {
                 return;
             }

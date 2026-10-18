@@ -231,7 +231,7 @@ mod tests {
     fn globe(lon: f64, res: f64) -> Map {
         let mut m = Map::new("m");
         m.projection = Projection::Globe;
-        m.camera = Camera { center: lonlat_to_merc(Coord::new(lon, 0.0)), res, bearing: 0.0 };
+        m.camera = Camera { center: lonlat_to_merc(Coord::new(lon, 0.0)), res, bearing: 0.0, pitch: 0.0 };
         m
     }
 

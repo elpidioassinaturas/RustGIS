@@ -252,6 +252,27 @@ pub fn status_bar(app: &mut RustGisApp, ui: &mut Ui) {
                             }
                         }
                     });
+                // The flat map's bearing and pitch (the globe has neither); clicking them on a
+                // turned or tilted map faces north and looks straight down again.
+                if !app.session.map().projection.is_globe() {
+                    let cam = app.session.map().camera;
+                    let text = crate::i18n::fmt(
+                        "Bearing {b}° · Pitch {p}°",
+                        // Rounded first, then + 0.0: a bearing just below zero reads 0, not -0.
+                        &[("b", &format!("{:.0}", cam.bearing.round() + 0.0)), ("p", &format!("{:.0}", cam.pitch.round() + 0.0))],
+                    );
+                    let level = cam.bearing.round() == 0.0 && cam.pitch.round() == 0.0;
+                    let resp = ui.add(
+                        egui::Label::new(egui::RichText::new(text).monospace().size(11.5).color(if level { t.text_dim } else { t.accent_text }))
+                            .sense(Sense::click()),
+                    );
+                    let resp = resp.on_hover_text(tl!(
+                        "Bearing: the direction the top of the map faces, clockwise from north. Pitch: the tilt from looking straight down. Click to reset both."
+                    ));
+                    if resp.clicked() && !level {
+                        let _ = app.run("map.resetNorth", json!({}));
+                    }
+                }
                 sep(ui, &t);
                 // Pointer coordinates.
                 let coord = app

@@ -632,6 +632,9 @@ pub fn context(s: &Session) -> String {
         if !l.visible {
             line.push_str(", hidden");
         }
+        if let Some(g) = m.group_of(l.id) {
+            line.push_str(&format!(", in group \"{}\"{}", g.name, if g.visible { "" } else { " (hidden)" }));
+        }
         if !l.selection.is_empty() {
             line.push_str(&format!(", {} selected", l.selection.len()));
         }

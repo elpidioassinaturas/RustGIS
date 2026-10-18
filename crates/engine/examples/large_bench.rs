@@ -39,7 +39,7 @@ fn main() {
         let (w, h) = (1600.0, 1000.0);
         let res0 = (e.width() / w).max(e.height() / h).max(1e-3);
         // Let streamed sources settle at the first view (they read in the background).
-        let cam0 = Camera { center: Coord::new((e.min_x + e.max_x) / 2.0, (e.min_y + e.max_y) / 2.0), res: res0, bearing: 0.0 };
+        let cam0 = Camera { center: Coord::new((e.min_x + e.max_x) / 2.0, (e.min_y + e.max_y) / 2.0), res: res0, bearing: 0.0, pitch: 0.0 };
         let t = Instant::now();
         if !settle(&mut s, &View { width: w, height: h, pixels_per_point: ppp, camera: cam0, sky: false }) {
             println!("  still reading after 10 s; skipped");
@@ -49,7 +49,7 @@ fn main() {
         println!("  settled in {:.0} ms ({n} features loaded)", t.elapsed().as_secs_f64() * 1000.0);
         for z in 0..9 {
             let res = res0 / 2f64.powi(z);
-            let camera = Camera { center: cam0.center, res, bearing: 0.0 };
+            let camera = Camera { center: cam0.center, res, bearing: 0.0, pitch: 0.0 };
             let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
             // Streamed layers read what this view shows first.
             if !settle(&mut s, &view) {

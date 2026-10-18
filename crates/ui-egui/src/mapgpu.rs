@@ -628,9 +628,9 @@ mod tests {
     fn matches_to_screen() {
         // World view, a city zoom, and a custom-projection's units (e.g. UTM metres).
         assert_matches_to_screen(Camera::world(), 1280.0, 720.0, Coord::new(2_611_702.0, 8_565_456.0), [0.0, 2_000_000.0]);
-        let city = Camera { center: Coord::new(2_000_000.0, 6_000_000.0), res: 150.0, bearing: 0.0 };
+        let city = Camera { center: Coord::new(2_000_000.0, 6_000_000.0), res: 150.0, bearing: 0.0, pitch: 0.0 };
         assert_matches_to_screen(city, 1280.0, 720.0, Coord::new(2_013_400.0, 5_991_100.0), [2_000_000.0, 6_000_000.0]);
-        let utm = Camera { center: Coord::new(500_000.0, 4_600_000.0), res: 25.0, bearing: 0.0 };
+        let utm = Camera { center: Coord::new(500_000.0, 4_600_000.0), res: 25.0, bearing: 0.0, pitch: 0.0 };
         assert_matches_to_screen(utm, 800.0, 600.0, Coord::new(500_312.0, 4_599_511.0), [500_000.0, 4_600_000.0]);
     }
 
@@ -638,7 +638,7 @@ mod tests {
     fn origin_off_center_shifts_clip() {
         // A vertex 100 units right of the origin, origin 1000 units right of the camera:
         // clip.x = (100 + 1000) * 2/(res*w) = 1100 * 0.002.
-        let cam = Camera { center: Coord::new(0.0, 0.0), res: 10.0, bearing: 0.0 };
+        let cam = Camera { center: Coord::new(0.0, 0.0), res: 10.0, bearing: 0.0, pitch: 0.0 };
         let m = view_proj(&cam, 100.0, 100.0, [1000.0, 0.0]);
         let clip_x = f64::from(m[0][0] * 100.0 + m[3][0]);
         assert!((clip_x - 2.2).abs() < 1e-5);
@@ -933,7 +933,7 @@ mod tests {
                 width: 640.0,
                 height: 400.0,
                 pixels_per_point: 1.0,
-                camera: Camera { center: Coord::new(0.0, 0.0), res: 15_000.0, bearing: 0.0 },
+                camera: Camera { center: Coord::new(0.0, 0.0), res: 15_000.0, bearing: 0.0, pitch: 0.0 },
                 sky: false,
             },
         );

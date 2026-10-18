@@ -185,6 +185,7 @@ fn info(s: &mut Session, _: &Value) -> CmdResult {
         "scale": m.scale().round(),
         "center": {"lon": m.center_lonlat().x, "lat": m.center_lonlat().y},
         "bearing": m.camera.bearing,
+        "pitch": m.camera.pitch,
         "layers": m.layers.iter().map(|l| match &l.raster {
             Some(rl) => json!({
                 "id": l.id, "name": l.name, "type": "Raster", "visible": l.visible, "renderer": rl.style.renderer.label(),
@@ -197,6 +198,10 @@ fn info(s: &mut Session, _: &Value) -> CmdResult {
                 "fields": l.dataset.fields.iter().map(|f| format!("{} ({})", f.name, f.ty.label())).collect::<Vec<_>>(),
             }),
         }).collect::<Vec<_>>(),
+        "groups": m.groups.iter().map(|g| json!({
+            "id": g.id, "name": g.name, "visible": g.visible, "transparency": g.transparency,
+            "minScale": g.min_scale, "maxScale": g.max_scale, "layers": g.children,
+        })).collect::<Vec<_>>(),
         // Web tile layers (XYZ, WMS, vector tiles, styles, archives) draw under the layers above.
         // Their addresses lose keys and tokens: the AI Assistant sends this to its provider.
         "tileLayers": super::tiles::list(s, true),

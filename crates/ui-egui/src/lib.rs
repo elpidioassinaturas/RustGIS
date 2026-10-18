@@ -48,6 +48,7 @@ mod sqlpane;
 mod stacui;
 mod table;
 pub mod theme;
+mod tilt_drape;
 mod update;
 mod vertexedit;
 mod widgets;
@@ -75,6 +76,9 @@ pub const TOOL_FILE_PURPOSE: &str = "toolfile:";
 /// Starts the name of a file the web shell's tool file picker put in the inbox: it goes to the
 /// Tools pane's file parameter, not onto the map.
 pub const TOOL_FILE_PICK: &str = "\u{1}toolfile:";
+
+/// The preference the default raster style (`raster.setDefaultStyle`) is kept under.
+const RASTER_DEFAULTS_PREF: &str = "raster_default_style";
 
 /// A result an asynchronous service fills in when it's done (the app polls it each frame).
 pub type Slot<T> = std::sync::Arc<std::sync::Mutex<Option<T>>>;
@@ -471,6 +475,8 @@ pub struct UiState {
     /// The Data Sources pane's boxes, and the sources' generation last kept in the preferences.
     pub sources: sourcespane::State,
     pub sources_saved: u64,
+    /// The default raster style last kept in the preferences.
+    pub raster_defaults_saved: rustgis_engine::map::RasterDefaults,
     /// Add Data › Zarr…: its store, choices and fetches.
     pub zarr: zarrui::State,
     /// A layout picture waiting for its image file (web).
@@ -570,6 +576,7 @@ impl Default for UiState {
             search: Default::default(),
             sources: Default::default(),
             sources_saved: 0,
+            raster_defaults_saved: Default::default(),
             zarr: Default::default(),
             hidden_tabs: Vec::new(),
             quick_access: Vec::new(),
@@ -721,6 +728,13 @@ impl RustGisApp {
             self.ui.start_projection = p.code();
         }
         self.ui.start_extent = self.services.load_pref.as_ref().and_then(|load| load("start_extent")).and_then(|v| parse_extent(&v));
+        // How new single-band rasters are drawn (Save as Default in the raster Symbology pane).
+        if let Some(d) = self.services.load_pref.as_ref().and_then(|load| load(RASTER_DEFAULTS_PREF))
+            && let Ok(d) = serde_json::from_str::<rustgis_engine::map::RasterDefaults>(&d)
+        {
+            self.session.raster_defaults = d.sanitized();
+        }
+        self.ui.raster_defaults_saved = self.session.raster_defaults.clone();
         // The GPU map backend: RUSTGIS_GPU forces it on, else the saved preference.
         self.map.gpu_enabled = std::env::var_os("RUSTGIS_GPU").is_some()
             || self.services.load_pref.as_ref().and_then(|load| load("ui.map.gpu")).as_deref() == Some("1");
@@ -1204,6 +1218,7 @@ impl RustGisApp {
         self.note_last_project();
         // Sources added, saved or made favourites are kept with the preferences.
         sourcespane::save(self);
+        self.save_raster_defaults();
         r
     }
 
@@ -1273,6 +1288,17 @@ impl RustGisApp {
             command: id.to_string(),
             params: params.clone(),
         });
+    }
+
+    /// Keeps the default raster style with the preferences when it changed.
+    fn save_raster_defaults(&mut self) {
+        if self.session.raster_defaults == self.ui.raster_defaults_saved {
+            return;
+        }
+        self.ui.raster_defaults_saved = self.session.raster_defaults.clone();
+        if let (Some(save), Ok(text)) = (&self.services.save_pref, serde_json::to_string(&self.session.raster_defaults)) {
+            save(RASTER_DEFAULTS_PREF, &text);
+        }
     }
 
     fn run_ui(&mut self, id: &str, p: &Value) -> Result<Value, String> {
@@ -2636,8 +2662,9 @@ impl RustGisApp {
         self.poll_service();
         serviceui::poll(self, ctx);
         // Sources the AI Assistant or a background add brought in (not through `run`) are kept
-        // too: a generation compared each frame.
+        // too: a generation compared each frame. So is a default raster style it set.
         sourcespane::save(self);
+        self.save_raster_defaults();
         cswui::poll(self);
         stacui::poll(self, ctx);
         s3ui::poll(self, ctx);

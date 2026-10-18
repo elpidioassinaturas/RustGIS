@@ -33,7 +33,8 @@ fn main() {
             let t = std::time::Instant::now();
             let n = 20;
             for i in 0..n {
-                let camera = Camera { center: lonlat_to_merc(Coord::new(-60.0 + i as f64 * 3.0, 30.0)), res: 20_000.0, bearing: 0.0 };
+                let camera =
+                    Camera { center: lonlat_to_merc(Coord::new(-60.0 + i as f64 * 3.0, 30.0)), res: 20_000.0, bearing: 0.0, pitch: 0.0 };
                 let view = View { width: 1100.0, height: 800.0, pixels_per_point: ppp, camera, sky: false };
                 render(&mut m, &view).unwrap();
             }

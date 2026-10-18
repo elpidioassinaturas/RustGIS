@@ -3,7 +3,7 @@
 
 use rustgis_data::GeometryType;
 use rustgis_geom::{Coord, Extent};
-use rustgis_map::layout::{ElementKind, FrameShape, Layout, PT_PER_MM, frame_camera};
+use rustgis_map::layout::{ColorScale, ElementKind, FrameShape, Layout, Orientation, PT_PER_MM, TickSide, frame_camera};
 use rustgis_map::symbology::LegendEntry;
 use rustgis_map::{Map, Rgba};
 use tiny_skia::{FillRule, Mask, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, Transform};
@@ -144,6 +144,23 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                 {
                     let drawn = (!*all_classes).then(|| shown.iter().find(|(id, _)| id == f).map(|(_, v)| v.as_slice()).unwrap_or(&[]));
                     legend(&mut pm, r, map, title, drawn, *hide_other, ppp);
+                }
+            }
+            ElementKind::Colorbar { frame: f, layer, title, orientation, ticks, tick_side, reverse } => {
+                let scale = frame(*f)
+                    .and_then(|fr| maps.get(fr.1))
+                    .and_then(|m| rustgis_map::layout::colorbar_layer(m, layer.as_deref()))
+                    .and_then(|l| l.raster.as_ref())
+                    .and_then(rustgis_map::layout::color_scale);
+                match scale {
+                    Some(sc) => colorbar(
+                        &mut pm,
+                        r,
+                        &sc,
+                        &Bar { title, orientation: *orientation, ticks: *ticks, side: *tick_side, reverse: *reverse },
+                        ppp,
+                    ),
+                    None => placeholder(&mut pm, r, "Colorbar", ppp),
                 }
             }
             ElementKind::Text { text: t, size, color, bold } => {
@@ -485,7 +502,7 @@ fn scale_bar(pm: &mut Pixmap, r: Rect, ground_per_pt: f64, ppp: f64) {
 fn shown_legends(map: &Map, scale: f64) -> Vec<(u32, Vec<LegendEntry>)> {
     map.layers
         .iter()
-        .filter(|l| l.visible && !l.graphics && !l.is_raster())
+        .filter(|l| map.draws_at(l, scale) && !l.graphics && !l.is_raster())
         .filter_map(|l| l.shown_legend(scale).map(|entries| (l.id, entries)))
         .collect()
 }
@@ -503,7 +520,7 @@ fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32
         y += line * 1.3;
     }
     let sw = 16.0 * ppp;
-    for l in map.layers.iter().filter(|l| l.visible && !l.graphics && !l.is_raster()) {
+    for l in map.layers.iter().filter(|l| map.shows(l) && !l.graphics && !l.is_raster()) {
         if y + line > r.y() + r.height() {
             break;
         }
@@ -589,6 +606,156 @@ fn swatch(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, gt: GeometryType, s: 
                     None,
                 );
             }
+        }
+    }
+}
+
+/// How a colorbar is laid out.
+struct Bar<'a> {
+    title: &'a str,
+    orientation: Orientation,
+    ticks: usize,
+    side: TickSide,
+    reverse: bool,
+}
+
+/// `n` values from `lo` to `hi`, the ends included, with the fewest decimals that keep each within
+/// a twentieth of the step of its value.
+fn tick_labels(lo: f64, hi: f64, n: usize) -> Vec<(f64, String)> {
+    if !(lo.is_finite() && hi.is_finite()) {
+        return Vec::new();
+    }
+    let n = if hi > lo { n.clamp(2, rustgis_map::layout::MAX_COLORBAR_TICKS) } else { 1 };
+    let step = if n > 1 { (hi - lo) / (n - 1) as f64 } else { 0.0 };
+    let values: Vec<f64> = (0..n).map(|i| if i + 1 == n { hi } else { lo + step * i as f64 }).collect();
+    if values.iter().any(|v| v.abs() >= 1e6) {
+        return values.into_iter().map(|v| (v, rustgis_map::symbology::fmt_num(v))).collect();
+    }
+    let tol = if step > 0.0 { step * 0.05 } else { (lo.abs() * 1e-3).max(1e-9) };
+    let decimals = (0..=6)
+        .find(|d| {
+            let k = 10f64.powi(*d);
+            values.iter().all(|v| ((v * k).round() / k - v).abs() <= tol)
+        })
+        .unwrap_or(6) as usize;
+    // Rounded first, then + 0.0, so a value rounded to zero isn't printed "-0".
+    let k = 10f64.powi(decimals as i32);
+    values.into_iter().map(|v| (v, format!("{:.*}", decimals, (v * k).round() / k + 0.0))).collect()
+}
+
+/// A colorbar: the bar, ticks and labels along it, and its title above.
+fn colorbar(pm: &mut Pixmap, r: Rect, scale: &ColorScale, bar: &Bar, ppp: f64) {
+    let ppp = ppp as f32;
+    let dark = Rgba::rgb(0x22, 0x22, 0x22);
+    let px = 8.0 * 1.33 * ppp;
+    let width = |s: &str| text::measure(s, px / 1.33, false);
+    let (mut top, bottom) = (r.y(), r.y() + r.height());
+    if !bar.title.is_empty() {
+        let tpx = 9.0 * 1.33 * ppp;
+        text::text_at(pm, bar.title, r.x(), top + tpx * 0.6, tpx, dark, true, text::Align::Left, false);
+        top += tpx * 1.4;
+    }
+    // Where each block or sample sits along the bar (0 low to 1 high), and the labels with theirs.
+    let (blocks, labels): (Vec<Rgba>, Vec<(f32, String)>) = match scale {
+        ColorScale::Ramp { lo, hi, colors } => {
+            let span = hi - lo;
+            let labels = tick_labels(*lo, *hi, bar.ticks)
+                .into_iter()
+                .map(|(v, s)| ((if span > 0.0 { (v - lo) / span } else { 0.5 }) as f32, s))
+                .collect();
+            (colors.clone(), labels)
+        }
+        ColorScale::Steps { edges, colors } => {
+            let n = colors.len().max(1) as f32;
+            let labels = edges.iter().enumerate().map(|(i, v)| (i as f32 / n, rustgis_map::symbology::fmt_num(*v))).collect();
+            (colors.clone(), labels)
+        }
+        ColorScale::Values(v) => {
+            let n = v.len().max(1) as f32;
+            let labels = v.iter().enumerate().map(|(i, (val, _))| ((i as f32 + 0.5) / n, rustgis_map::symbology::fmt_num(*val))).collect();
+            (v.iter().map(|(_, c)| *c).collect(), labels)
+        }
+    };
+    if blocks.is_empty() || r.width() < 2.0 || bottom - top < 2.0 {
+        return;
+    }
+    let tick = 2.5 * ppp;
+    let gap = 1.5 * ppp;
+    let vertical = bar.orientation == Orientation::Vertical;
+    // The bar's rectangle, leaving room for the labels on their side and for the end labels to
+    // stand past the bar's ends.
+    let (bx, by, bw, bh) = if vertical {
+        let label_w = labels.iter().map(|(_, s)| width(s)).fold(0.0f32, f32::max);
+        let bw = (r.width() - label_w - tick - gap).clamp(2.0 * ppp, (r.width() * 0.45).max(2.0 * ppp)).min(r.width());
+        let inset = (px / 2.0).min((bottom - top) * 0.25);
+        let bx = if bar.side == TickSide::Start { r.x() + r.width() - bw } else { r.x() };
+        (bx, top + inset, bw, (bottom - top - 2.0 * inset).max(1.0))
+    } else {
+        let ends = labels.first().map(|(_, s)| width(s)).unwrap_or(0.0).max(labels.last().map(|(_, s)| width(s)).unwrap_or(0.0));
+        let inset = (ends / 2.0).min(r.width() * 0.25);
+        // Too short for its labels (left out below), the bar fills the element.
+        let bh = match bottom - top - px * 1.2 - tick - gap {
+            h if h >= 3.0 * ppp => h,
+            _ => bottom - top,
+        };
+        let by = if bar.side == TickSide::Start { bottom - bh } else { top };
+        (r.x() + inset, by, (r.width() - 2.0 * inset).max(1.0), bh)
+    };
+    let len = if vertical { bh } else { bw };
+    // Distance along the bar from its start (left or top) for a position from low to high.
+    let flip = if vertical { !bar.reverse } else { bar.reverse };
+    let along = |t: f32| if flip { (1.0 - t) * len } else { t * len };
+    let n = blocks.len();
+    for (i, c) in blocks.iter().enumerate() {
+        let (a, b) = (along(i as f32 / n as f32), along((i + 1) as f32 / n as f32));
+        let (s0, s1) = (a.min(b), a.max(b));
+        // A touch longer than its share, so neighbours leave no seam.
+        let rect = if vertical { Rect::from_xywh(bx, by + s0, bw, s1 - s0 + 0.6) } else { Rect::from_xywh(bx + s0, by, s1 - s0 + 0.6, bh) };
+        if let Some(rect) = rect.and_then(|q| q.intersect(&Rect::from_xywh(bx, by, bw, bh)?)) {
+            pm.fill_rect(rect, &paint(*c, 1.0), Transform::identity(), None);
+        }
+    }
+    let line = Stroke { width: 0.6 * ppp, ..Stroke::default() };
+    if let Some(b) = Rect::from_xywh(bx, by, bw, bh) {
+        pm.stroke_path(&PathBuilder::from_rect(b), &paint(dark, 1.0), &line, Transform::identity(), None);
+    }
+    // A label (and its tick) is left out where it would spill out of a short or narrow element.
+    let inside =
+        |x: f32, y: f32, w: f32, h: f32| x >= r.x() - 1.0 && y >= r.y() - 1.0 && x + w <= r.right() + 1.0 && y + h <= r.bottom() + 1.0;
+    // Labels in order along the bar, each drawn only if it clears the one before.
+    let mut last_end = f32::NEG_INFINITY;
+    let mut ordered: Vec<(f32, &String)> = labels.iter().map(|(t, s)| (along(t.clamp(0.0, 1.0)), s)).collect();
+    ordered.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (d, label) in ordered {
+        let extent = if vertical { px } else { width(label) };
+        if d - extent / 2.0 < last_end + gap {
+            continue;
+        }
+        last_end = d + extent / 2.0;
+        let mut pb = PathBuilder::new();
+        if vertical {
+            let (y, x0) = (by + d, if bar.side == TickSide::Start { bx } else { bx + bw });
+            let x1 = if bar.side == TickSide::Start { x0 - tick } else { x0 + tick };
+            pb.move_to(x0, y);
+            pb.line_to(x1, y);
+            let lx = if bar.side == TickSide::Start { x1 - gap - width(label) } else { x1 + gap };
+            if !inside(lx, y - px / 2.0, width(label), px) {
+                continue;
+            }
+            text::text_at(pm, label, lx, y, px, dark, false, text::Align::Left, false);
+        } else {
+            let (x, y0) = (bx + d, if bar.side == TickSide::Start { by } else { by + bh });
+            let y1 = if bar.side == TickSide::Start { y0 - tick } else { y0 + tick };
+            pb.move_to(x, y0);
+            pb.line_to(x, y1);
+            let ly = if bar.side == TickSide::Start { y1 - gap - px * 0.5 } else { y1 + gap + px * 0.5 };
+            if !inside(x - width(label) / 2.0, ly - px / 2.0, width(label), px) {
+                continue;
+            }
+            text::text_at(pm, label, x, ly, px, dark, false, text::Align::Center, false);
+        }
+        if let Some(p) = pb.finish() {
+            pm.stroke_path(&p, &paint(dark, 1.0), &line, Transform::identity(), None);
         }
     }
 }
@@ -805,6 +972,143 @@ mod tests {
         }
         map.layers.retain(|l| l.id == pts);
         assert!(depth(&map, None, false) > 0, "the empty Graduated layer is listed");
+    }
+
+    /// A layout with one map frame on `map` and a colorbar of its raster at 10–90 × 10–30 mm
+    /// (a vertical one at 10–30 × 10–90 mm), drawn at 96 dpi.
+    fn colorbar_page(map: &Map, orientation: Orientation, reverse: bool, title: &str) -> Pixmap {
+        let mut l = Layout::new("Layout", 100.0, 100.0);
+        let frame = l.add(
+            "Map",
+            (95.0, 95.0, 4.0, 4.0),
+            ElementKind::MapFrame {
+                map: map.name.clone(),
+                center: Coord::new(0.0, 0.0),
+                scale: 1e8,
+                shape: FrameShape::Rectangle,
+                grid: None,
+                extent_of: None,
+            },
+        );
+        let rect = if orientation == Orientation::Vertical { (10.0, 10.0, 20.0, 80.0) } else { (10.0, 10.0, 80.0, 20.0) };
+        let kind =
+            ElementKind::Colorbar { frame, layer: None, title: title.into(), orientation, ticks: 5, tick_side: TickSide::End, reverse };
+        l.add("Colorbar", rect, kind);
+        render(&l, &mut [map.clone()], 96.0, &PageInfo::default()).unwrap()
+    }
+
+    /// A map with one 100 × 1 raster valued 0–99 by column, styled by `renderer`.
+    fn ramp_map(renderer: rustgis_map::raster::RasterRenderer, stretch: rustgis_map::raster::Stretch) -> Map {
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 0.01, pixel_height: -0.01 };
+        let data: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let r = Raster::new("dem", 100, 1, vec![data], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let mut rl = rustgis_map::raster::RasterLayer::from_path(r, "dem.tif");
+        rl.style.renderer = renderer;
+        rl.style.stretch = stretch;
+        let mut map = Map::new("m");
+        map.add_raster("dem", rl);
+        map
+    }
+
+    fn rgb(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8) {
+        pm.pixel(x, y).map(|p| (p.red(), p.green(), p.blue())).unwrap_or((255, 255, 255))
+    }
+
+    #[test]
+    fn colorbars_draw_the_raster_colour_scale() {
+        use rustgis_map::raster::{RasterRenderer, Stretch};
+        let ramp = rustgis_map::Ramp::Thermal;
+        let map = ramp_map(RasterRenderer::Stretch { band: 0, ramp: ramp.clone(), invert: false }, Stretch::MinMax);
+        let k = PT_PER_MM;
+        // A row through the bar, near its top edge (the labels are below it).
+        let y = (12.0 * k) as u32;
+        let pm = colorbar_page(&map, Orientation::Horizontal, false, "");
+        let (left, right) = (rgb(&pm, (16.0 * k) as u32, y), rgb(&pm, (84.0 * k) as u32, y));
+        let close = |a: (u8, u8, u8), b: Rgba| a.0.abs_diff(b.r()) < 40 && a.1.abs_diff(b.g()) < 40 && a.2.abs_diff(b.b()) < 40;
+        assert!(close(left, ramp.at(0.0)), "the low end is the ramp's start: {left:?} vs {:?}", ramp.at(0.0));
+        assert!(close(right, ramp.at(1.0)), "the high end is the ramp's end: {right:?} vs {:?}", ramp.at(1.0));
+        // Labelled below the bar: dark text under it, between the bar and the element's bottom.
+        let inked = |pm: &Pixmap, y0: f64, y1: f64| {
+            ((y0 * k) as u32..(y1 * k) as u32).any(|y| (0..pm.width()).any(|x| rgb(pm, x, y).0 < 80 && rgb(pm, x, y).2 < 80))
+        };
+        assert!(inked(&pm, 26.0, 30.0), "tick labels below the bar");
+        // Reversed, the ends swap.
+        let rev = colorbar_page(&map, Orientation::Horizontal, true, "");
+        assert!(close(rgb(&rev, (16.0 * k) as u32, y), ramp.at(1.0)));
+        assert!(close(rgb(&rev, (84.0 * k) as u32, y), ramp.at(0.0)));
+        // Vertical, low values sit at the bottom.
+        let v = colorbar_page(&map, Orientation::Vertical, false, "");
+        let x = (11.0 * k) as u32;
+        assert!(close(rgb(&v, x, (85.0 * k) as u32), ramp.at(0.0)), "{:?}", rgb(&v, x, (85.0 * k) as u32));
+        assert!(close(rgb(&v, x, (15.0 * k) as u32), ramp.at(1.0)), "{:?}", rgb(&v, x, (15.0 * k) as u32));
+        // A title pushes the bar down under it.
+        let t = colorbar_page(&map, Orientation::Horizontal, false, "Elevation (m)");
+        assert!(inked(&t, 10.0, 13.0), "the title is drawn at the top");
+
+        // Classes draw as steps, one colour each.
+        let breaks = vec![24.0, 49.0, 74.0, 99.0];
+        let classify =
+            RasterRenderer::Classify { band: 0, method: rustgis_map::ClassMethod::EqualInterval, ramp: ramp.clone(), breaks, classes: 4 };
+        let pm = colorbar_page(&ramp_map(classify, Stretch::MinMax), Orientation::Horizontal, false, "");
+        let mut colours: Vec<(u8, u8, u8)> = ((16.0 * k) as u32..(84.0 * k) as u32).map(|x| rgb(&pm, x, y)).collect();
+        colours.dedup();
+        assert!((4..=7).contains(&colours.len()), "four steps (and their seams): {colours:?}");
+
+        // In an element too short for its labels, they are left out rather than drawn under it.
+        let mut l = Layout::new("Layout", 100.0, 100.0);
+        let frame = l.add(
+            "Map",
+            (95.0, 95.0, 4.0, 4.0),
+            ElementKind::MapFrame {
+                map: "m".into(),
+                center: Coord::new(0.0, 0.0),
+                scale: 1e8,
+                shape: FrameShape::Rectangle,
+                grid: None,
+                extent_of: None,
+            },
+        );
+        let kind = ElementKind::Colorbar {
+            frame,
+            layer: None,
+            title: String::new(),
+            orientation: Orientation::Horizontal,
+            ticks: 5,
+            tick_side: TickSide::End,
+            reverse: false,
+        };
+        l.add("Colorbar", (10.0, 10.0, 80.0, 3.0), kind);
+        let short = render(&l, &mut [map.clone()], 96.0, &PageInfo::default()).unwrap();
+        assert!(!inked(&short, 13.5, 20.0), "nothing spills below the element");
+        assert!(close(rgb(&short, (16.0 * k) as u32, (11.0 * k) as u32), ramp.at(0.0)), "the bar is still drawn");
+
+        // RGB has no colour scale: a placeholder, not a bar.
+        let pm = colorbar_page(
+            &ramp_map(RasterRenderer::Rgb { red: 0, green: 0, blue: 0 }, Stretch::MinMax),
+            Orientation::Horizontal,
+            false,
+            "",
+        );
+        assert_eq!(rgb(&pm, (16.0 * k) as u32, y), (0xF0, 0xF1, 0xF3));
+    }
+
+    #[test]
+    fn colorbar_tick_labels_are_even_and_tidy() {
+        let labels = |lo, hi, n| tick_labels(lo, hi, n).into_iter().map(|(_, s)| s).collect::<Vec<_>>();
+        assert_eq!(labels(0.0, 100.0, 5), ["0", "25", "50", "75", "100"]);
+        assert_eq!(labels(0.0, 1.0, 5), ["0.00", "0.25", "0.50", "0.75", "1.00"]);
+        assert_eq!(labels(0.0, 1.0, 3), ["0.0", "0.5", "1.0"]);
+        assert_eq!(labels(-1.0, 1.0, 2), ["-1", "1"]);
+        // Odd bounds keep only the decimals the step needs.
+        assert_eq!(labels(12.345, 87.9, 2), ["12", "88"]);
+        assert_eq!(labels(-0.004, 1.0, 2), ["0", "1"], "no -0");
+        // One value: one label. Out of range counts are clamped.
+        assert_eq!(labels(5.0, 5.0, 5), ["5"]);
+        assert_eq!(tick_labels(0.0, 1.0, 0).len(), 2);
+        assert_eq!(tick_labels(0.0, 1.0, 1000).len(), rustgis_map::layout::MAX_COLORBAR_TICKS);
+        assert!(tick_labels(f64::NAN, 1.0, 5).is_empty());
+        assert_eq!(labels(0.0, 4e6, 2), ["0", "4.0M"]);
     }
 
     #[test]

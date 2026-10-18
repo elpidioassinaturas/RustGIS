@@ -2624,6 +2624,7 @@ fn layout_groups(app: &mut RustGisApp, ui: &mut Ui) {
             ("north_arrow", "North\nArrow", "northArrow", "Add a north arrow for the map frame."),
             ("scale_bar", "Scale\nBar", "scaleBar", "Add a scale bar for the map frame."),
             ("legend", "Legend", "legend", "Add a legend of the map frame's layers."),
+            ("colorbar", "Colorbar", "colorbar", "Add a colorbar of a raster layer's colour scale in the map frame."),
         ] {
             if big(ui, app, icon, label, desc, "ui.menu", Value::Null, false, false).clicked() {
                 add(app, json!({"kind": kind}));

@@ -34,11 +34,21 @@ This guide walks through RustGIS by task. Each page covers one part of the app:
   reorders layers. A layer that isn't selectable is skipped by the Select tool's clicks and boxes
   on the map; Select By Attributes, Select Layer By Location and the attribute table still select
   in it, since they name the layer.
+  **Group layers** to keep related ones together, such as one dataset drawn as several layers
+  with their own visibility ranges: right-click a layer and pick **Group › New Group**, or move
+  it into a group that already exists. A group folds open and closed with its arrow; its box
+  shows or hides all its layers at once (each keeps its own box), and its menu renames it, sets a
+  transparency over its layers' own, ungroups it (its layers stay) or removes it with its layers.
+  Drag a layer onto a group's row, or between its layers, to put it in the group; drag it out
+  of the group's rows to take it out. Drag the group's row to move all its layers in the drawing
+  order. Scripts and the AI Assistant build groups with `group.add`, `group.set`,
+  `group.scaleRange` (a visibility range on top of each layer's own), `group.move`,
+  `group.expand`, `group.ungroup`, `group.remove` and `layer.group`.
   The Style and Data tabs act on the layer selected here. The tabs at the top of the left pane
   switch it between **Layers**, **Browser** and **Data Sources** (also in **View › Windows**).
 - **Map view**: one tab per map and layout. The buttons at the top right zoom in, zoom out and go
-  to the full extent; the north arrow and scale bar sit in the corners (on a rotated map, click
-  the north arrow to face north); tile credits at the bottom right.
+  to the full extent; the north arrow and scale bar sit in the corners (on a rotated or tilted
+  map, click the north arrow to face north and look straight down); tile credits at the bottom right.
 - **Panes** (right): Catalog, Geoprocessing, Symbology, History, Details, Editing, Workflows,
   Script, the AI Assistant and more. Open them from **View › Windows** or the commands that use
   them. Each pane opened gets a tab at the top, in the order opened: click a tab to show its pane,

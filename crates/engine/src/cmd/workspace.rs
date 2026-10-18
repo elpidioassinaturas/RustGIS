@@ -466,7 +466,7 @@ pub fn infographic_of(s: &Session, only: Option<&str>) -> Value {
     let e = view_extent(s);
     let only = only.map(str::to_ascii_lowercase);
     let mut cards = Vec::new();
-    for l in s.map().layers.iter().filter(|l| l.visible && !l.is_raster() && !l.graphics) {
+    for l in s.map().layers.iter().filter(|l| s.map().shows(l) && !l.is_raster() && !l.graphics) {
         if only.as_ref().is_some_and(|o| *o != l.name.to_ascii_lowercase()) {
             continue;
         }

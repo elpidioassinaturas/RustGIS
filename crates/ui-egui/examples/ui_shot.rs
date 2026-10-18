@@ -8,7 +8,7 @@
 //! `"exact": true`, whose whole label is the text), `{"type": text}` types into the focused box,
 //! `{"key": "Enter"}` presses a key (egui's key names), `{"dark": true}` switches theme,
 //! `{"drag": [x, y, dx, dy]}` presses the pointer at (x, y) and moves it by (dx, dy), holding
-//! it (shots then catch the map mid-drag; `{"release": true}` lets go; `"button": "secondary"`
+//! it (shots then catch the map mid-drag; `{"release": true}` lets go; `"button": "secondary"`; `"ctrl": true` holds Ctrl
 //! drags with the right button),
 //! `{"rclick": [x, y]}` right-clicks at (x, y) (the map's menu),
 //! `{"scroll": [x, y, dy]}` turns the mouse wheel by `dy` points over (x, y) (negative zooms
@@ -64,6 +64,8 @@ fn main() {
     }
     // The button the last drag holds down.
     let mut held = egui::PointerButton::Primary;
+    // And the modifiers held with it.
+    let mut held_mods = egui::Modifiers::NONE;
     for l in lines {
         if let Some(p) = l.get("shot").and_then(|v| v.as_str()) {
             for _ in 0..4 {
@@ -141,17 +143,19 @@ fn main() {
                 harness.event(egui::Event::PointerButton { pos, button: held, pressed: false, modifiers: egui::Modifiers::NONE });
             }
             held = next;
-            let button = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
-                pos,
-                button: held,
-                pressed,
-                modifiers: egui::Modifiers::NONE,
+            held_mods = if l.get("ctrl").and_then(|v| v.as_bool()) == Some(true) {
+                egui::Modifiers { ctrl: true, command: true, ..egui::Modifiers::NONE }
+            } else {
+                egui::Modifiers::NONE
             };
+            let button = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton { pos, button: held, pressed, modifiers: held_mods };
+            harness.event(egui::Event::ModifiersChanged(held_mods));
             harness.event(egui::Event::PointerMoved(egui::pos2(x, y)));
             harness.event(button(egui::pos2(x, y), true));
             harness.step();
             for i in 1..=8 {
                 let t = i as f32 / 8.0;
+                harness.event(egui::Event::ModifiersChanged(held_mods));
                 harness.event(egui::Event::PointerMoved(egui::pos2(x + dx * t, y + dy * t)));
                 harness.step();
             }
@@ -190,8 +194,10 @@ fn main() {
             harness.step();
         } else if l.get("release").is_some() {
             if let Some(pos) = harness.ctx.input(|i| i.pointer.latest_pos()) {
-                harness.event(egui::Event::PointerButton { pos, button: held, pressed: false, modifiers: egui::Modifiers::NONE });
+                harness.event(egui::Event::PointerButton { pos, button: held, pressed: false, modifiers: held_mods });
             }
+            held_mods = egui::Modifiers::NONE;
+            harness.event(egui::Event::ModifiersChanged(held_mods));
             for _ in 0..3 {
                 harness.step();
             }
