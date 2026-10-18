@@ -278,6 +278,9 @@ pub struct Session {
     pub active_layer: Option<u32>,
     /// Map view size in logical points (set by the UI each frame).
     pub view_size: (f64, f64),
+    /// A MapLibre style tile layer (by its address) whose own view the map goes to once it loads
+    /// (`map.addTiles` with `"view": true`), and the camera then: moved since, the map stays.
+    pub style_view: Option<(String, Camera)>,
     pub notices: Vec<Notice>,
     /// Notices given in this session, including ones no longer kept (see [`Session::notices_since`]).
     notices_given: u64,
@@ -335,6 +338,10 @@ pub struct Session {
     pub(crate) started: Vec<(u64, rustgis_geolibre::Job, serde_json::Value, u64)>,
     /// Plugin tool runs started and not yet complete (`gp::plugin_start`).
     pub(crate) plugin_runs: Vec<cmd::gp::StartedRun>,
+    /// Plugins' panels, by plugin id: the widgets' values and what the plugin last said about
+    /// them (it keeps nothing between calls). Not saved with the project: a plugin's state
+    /// command reads what it needs from the map when the panel opens.
+    pub plugin_panels: std::collections::BTreeMap<String, rustgis_plugins::PanelState>,
     /// Data downloads of this project under way (Add Data › From URL), by id.
     downloading: Vec<u64>,
     /// Downloads that landed, waiting for `layer.addDownload`.
@@ -345,6 +352,13 @@ pub struct Session {
     /// Set by [`Session::request_url`] for [`Session::guarded`]: the command running changed
     /// nothing, it only left a request (a plugin's own answer can't claim that).
     request_only: bool,
+    /// Plugin commands waiting for their `host.fetch` answers to run again (the browser).
+    pub(crate) plugin_retries: Vec<cmd::plugins::fetch::Retry>,
+    /// How many times the plugin command running now has been run again for its fetches.
+    pub(crate) retry_tries: u32,
+    /// Set for [`Session::guarded`] by a command whose failure is no news (a plugin command
+    /// undone to run again once its fetches land): no error notice.
+    pub(crate) quiet_failure: bool,
     /// Query results the app ran off the frame (the SQL pane), waiting for `layer.addSql {"ran"}`:
     /// the id, the query and database (label) they came from, and the result.
     #[cfg(not(target_arch = "wasm32"))]
@@ -418,6 +432,7 @@ impl Session {
             tool: Tool::Explore,
             active_layer: None,
             view_size: (1200.0, 720.0),
+            style_view: None,
             notices: Vec::new(),
             notices_given: 0,
             table_layer: None,
@@ -448,10 +463,14 @@ impl Session {
             #[cfg(feature = "geolibre")]
             started: Vec::new(),
             plugin_runs: Vec::new(),
+            plugin_panels: std::collections::BTreeMap::new(),
             downloading: Vec::new(),
             downloaded: Vec::new(),
             url_requests: Vec::new(),
             request_only: false,
+            plugin_retries: Vec::new(),
+            retry_tries: 0,
+            quiet_failure: false,
             #[cfg(not(target_arch = "wasm32"))]
             sql_results: Vec::new(),
         }
@@ -539,9 +558,19 @@ impl Session {
         self.project.map_mut()
     }
 
+    /// Moves the map to the view of a style added with `"view": true` once the style has loaded
+    /// (the UI asks each frame). True when the map moved.
+    pub fn follow_style_view(&mut self) -> bool {
+        cmd::tiles::follow_style_view(self, web_time::Duration::ZERO)
+    }
+
     /// Runs a command by id. Mutating commands snapshot the project for undo; an error or a
     /// panic restores it.
     pub fn run(&mut self, id: &str, params: &Value) -> CmdResult {
+        // A style that loaded since: its view first, so the command sees where the map is.
+        if self.style_view.is_some() {
+            self.follow_style_view();
+        }
         if id.starts_with(rustgis_plugins::PREFIX) {
             return self.run_plugin(id, params);
         }
@@ -597,6 +626,7 @@ impl Session {
         // Edit counts roll back with the project when a command fails part way.
         let counts = mutates.then(|| self.edit_counts.clone());
         self.request_only = false;
+        self.quiet_failure = false;
         // Requests a failed command left for the front end go with its other changes.
         let requests = self.url_requests.len();
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)))
@@ -639,7 +669,10 @@ impl Session {
         if res.is_err() {
             self.url_requests.truncate(requests);
         }
-        if let Err(e) = &res {
+        let quiet = std::mem::take(&mut self.quiet_failure);
+        if let Err(e) = &res
+            && !quiet
+        {
             self.notify(e.clone(), true);
         }
         self.fix_active_layer();
@@ -703,6 +736,9 @@ impl Session {
         self.downloading.clear();
         self.downloaded.clear();
         self.url_requests.clear();
+        self.plugin_retries.clear();
+        // A style of the last project still loading doesn't move this one.
+        self.style_view = None;
         #[cfg(not(target_arch = "wasm32"))]
         self.sql_results.clear();
     }

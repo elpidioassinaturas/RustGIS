@@ -17,6 +17,7 @@
 
 pub mod manifest;
 pub mod package;
+pub mod panel;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod process;
 #[cfg(not(target_arch = "wasm32"))]
@@ -38,6 +39,7 @@ use serde_json::{Value, json};
 
 pub use manifest::{CommandDecl, Entry, GroupDecl, ItemDecl, Manifest, MenuDecl, Permission, Runtime, TabDecl, ToolDecl};
 pub use package::Package;
+pub use panel::{PanelDecl, PanelItemDecl, PanelState};
 pub use runtime::{Host, NoHost};
 
 /// Plugin command and tool ids start with this: `plugin:<plugin>/<command>`.
@@ -106,6 +108,7 @@ impl Plugin {
             "commands": m.commands.iter().map(|c| json!({"id": command_id(&m.id, &c.id), "label": c.label, "params": c.params})).collect::<Vec<_>>(),
             "tools": m.tools.iter().map(|t| json!({"id": command_id(&m.id, &t.id), "name": t.name})).collect::<Vec<_>>(),
             "tab": m.tab.as_ref().map(|t| t.label.clone()),
+            "panel": m.panel.as_ref().map(|p| p.title.clone()),
             "skills": m.skills.iter().map(|s| format!("{}:{s}", m.id)).collect::<Vec<_>>(),
             "runtime": match m.runtime { Runtime::Wasm => "wasm", Runtime::Process => "process", Runtime::Skills => "skills" },
             "enabled": self.enabled, "source": self.source, "sha256": self.sha256,
@@ -366,7 +369,16 @@ pub fn command(id: &str) -> Option<PluginCommand> {
 
 /// Runs a plugin command, letting it reach the project through `host`.
 pub fn run_command(cmd: &PluginCommand, host: &mut dyn Host, params: &Value) -> Result<Value, String> {
-    let request = json!({"abi": manifest::ABI, "kind": "command", "id": cmd.decl.id, "params": params, "lang": language()});
+    run_command_with_panel(cmd, host, params, None)
+}
+
+/// Runs a plugin command with its panel's values (`panel` in the request, see
+/// [`PanelState::request`]) when the plugin has a panel.
+pub fn run_command_with_panel(cmd: &PluginCommand, host: &mut dyn Host, params: &Value, panel: Option<Value>) -> Result<Value, String> {
+    let mut request = json!({"abi": manifest::ABI, "kind": "command", "id": cmd.decl.id, "params": params, "lang": language()});
+    if let (Some(panel), Some(o)) = (panel, request.as_object_mut()) {
+        o.insert("panel".into(), panel);
+    }
     call(&cmd.plugin, host, &request, false).map_err(|e| format!("{}: {e}", cmd.decl.label))
 }
 

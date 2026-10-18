@@ -1119,6 +1119,42 @@ pub struct Style {
     pub layers: Vec<StyleLayer>,
     pub glyphs: Option<String>,
     pub sprite: Option<String>,
+    /// Where the style places the map, from its root properties.
+    pub view: StyleView,
+}
+
+/// A style's root `center`, `zoom`, `bearing` and `pitch`: where MapLibre opens a map that was
+/// given no position of its own. Each is kept only when it is a usable number.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StyleView {
+    /// Longitude and latitude, in degrees.
+    pub center: Option<[f64; 2]>,
+    /// MapLibre's zoom (512-pixel tiles).
+    pub zoom: Option<f64>,
+    /// Degrees clockwise from north.
+    pub bearing: Option<f64>,
+    /// Degrees of tilt from looking straight down.
+    pub pitch: Option<f64>,
+}
+
+impl StyleView {
+    /// Reads the view from a style's root object.
+    pub fn parse(o: &Map<String, Json>) -> StyleView {
+        let num = |k: &str| o.get(k).and_then(Json::as_f64).filter(|v| v.is_finite());
+        let center = o.get("center").and_then(Json::as_array).and_then(|a| match a.as_slice() {
+            [lon, lat] => {
+                let (lon, lat) = (lon.as_f64()?, lat.as_f64()?);
+                ((-180.0..=180.0).contains(&lon) && (-90.0..=90.0).contains(&lat)).then_some([lon, lat])
+            }
+            _ => None,
+        });
+        StyleView { center, zoom: num("zoom").filter(|z| (0.0..=30.0).contains(z)), bearing: num("bearing"), pitch: num("pitch") }
+    }
+
+    /// Whether the style says nothing about where to look.
+    pub fn is_empty(&self) -> bool {
+        *self == StyleView::default()
+    }
 }
 
 /// A style source.
@@ -1217,6 +1253,7 @@ impl Style {
             layers: layers.iter().take(MAX_LAYERS).filter_map(StyleLayer::parse).collect(),
             glyphs: str_of(o.get("glyphs")),
             sprite,
+            view: StyleView::parse(o),
         })
     }
 
@@ -1999,6 +2036,23 @@ mod tests {
         );
         assert!(Style::parse(&json!([])).is_err());
         assert!(Style::parse(&json!({"layers": 3})).is_err());
+    }
+
+    /// A style's root view: kept where it is a usable number, left out otherwise.
+    #[test]
+    fn style_root_view() {
+        let st = Style::parse(&json!({"layers": [], "center": [-73.9857, 40.7484], "zoom": 15.5, "bearing": 30, "pitch": 60})).unwrap();
+        assert_eq!(st.view, StyleView { center: Some([-73.9857, 40.7484]), zoom: Some(15.5), bearing: Some(30.0), pitch: Some(60.0) });
+        assert!(!st.view.is_empty());
+        assert!(Style::parse(&json!({"layers": []})).unwrap().view.is_empty());
+        for bad in [
+            json!({"layers": [], "center": [200, 0], "zoom": -1, "bearing": "north", "pitch": null}),
+            json!({"layers": [], "center": [0, 95, 3], "zoom": 1e300}),
+            json!({"layers": [], "center": "0,0", "zoom": [1]}),
+            json!({"layers": [], "center": [null, 0]}),
+        ] {
+            assert!(Style::parse(&bad).unwrap().view.is_empty(), "{bad}");
+        }
     }
 
     fn sample_features() -> Vec<(GeomKind, Vec<(String, Value)>)> {

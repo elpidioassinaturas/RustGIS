@@ -344,14 +344,29 @@ pub fn download_blocking(url: &str) -> Result<Vec<u8>, String> {
 /// Like [`download_blocking`], but reads at most `max` bytes plus one overflow sentinel.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn download_blocking_limited(url: &str, max: usize) -> Result<Vec<u8>, String> {
-    crate::address::check(url, None)?;
-    native::get(&native::download_agent(BLOCKING_TIMEOUT), &download_address(url, max)).map_err(|e| {
+    download_blocking_within(url, max, BLOCKING_TIMEOUT).map_err(|e| {
         if e.contains("timeout") || e.contains("timed out") {
             format!("{e} (a large file: add it with Add Data › From URL, which downloads in the background)")
         } else {
             e
         }
     })
+}
+
+/// Like [`download_blocking_limited`], giving up after `timeout` (with the bare error).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn download_blocking_within(url: &str, max: usize, timeout: std::time::Duration) -> Result<Vec<u8>, String> {
+    crate::address::check(url, None)?;
+    native::get(&native::download_agent(timeout), &download_address(url, max))
+}
+
+/// Like [`download_blocking_within`], connecting only to internet addresses: a name, or a
+/// redirect to one, that resolves to this computer or the local network is refused when it is
+/// resolved, so it can't be used to reach there (as a plugin's fetch mustn't).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn download_public_within(url: &str, max: usize, timeout: std::time::Duration) -> Result<Vec<u8>, String> {
+    crate::address::check(url, None)?;
+    native::get(&native::public_agent(timeout), &download_address(url, max))
 }
 
 /// Fetches an address's bytes, uncached (through the browser's fetcher, or the worker threads).
@@ -655,6 +670,44 @@ mod native {
             .into()
     }
 
+    /// Resolves names as ureq does, keeping only the internet addresses (checked where the
+    /// connection is made, so a name that resolves elsewhere on another lookup is caught too).
+    #[derive(Debug, Default)]
+    struct PublicOnly(ureq::unversioned::resolver::DefaultResolver);
+
+    impl ureq::unversioned::resolver::Resolver for PublicOnly {
+        fn resolve(
+            &self,
+            uri: &ureq::http::Uri,
+            config: &ureq::config::Config,
+            timeout: ureq::unversioned::transport::NextTimeout,
+        ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+            let all = self.0.resolve(uri, config, timeout)?;
+            let mut kept = self.empty();
+            for a in all.iter().filter(|a| crate::address::ip_reach(a.ip()) == crate::address::Reach::Public) {
+                kept.push(*a);
+            }
+            if kept.is_empty() {
+                let host = uri.host().unwrap_or_default();
+                let msg = format!("{host} resolves to this computer or the local network, which isn't fetched from here");
+                return Err(ureq::Error::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg)));
+            }
+            Ok(kept)
+        }
+    }
+
+    /// A download agent that connects only to internet addresses.
+    pub(super) fn public_agent(timeout: std::time::Duration) -> ureq::Agent {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .user_agent(concat!("RustGIS/", env!("CARGO_PKG_VERSION"), " (+https://rustgis.app)"))
+            .max_redirects(0)
+            // A proxy would resolve the address itself, past `PublicOnly`.
+            .proxy(None)
+            .build();
+        ureq::Agent::with_parts(config, ureq::unversioned::transport::DefaultConnector::default(), PublicOnly::default())
+    }
+
     /// Downloads on a thread of its own, so a large file doesn't hold up the tiles.
     pub(super) fn download(url: String, done: Done) {
         std::thread::spawn(move || done(get(&download_agent(std::time::Duration::from_secs(900)), &url)));
@@ -834,6 +887,14 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name for this computer passes the check as written but is refused where it resolves.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn public_downloads_refuse_names_that_resolve_locally() {
+        let err = download_public_within("http://localhost:9/doc.json", 1024, std::time::Duration::from_secs(5)).unwrap_err();
+        assert!(err.contains("resolves to this computer or the local network"), "{err}");
+    }
 
     #[test]
     fn download_markers_preserve_addresses_and_budgets() {

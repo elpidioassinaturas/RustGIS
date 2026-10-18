@@ -124,12 +124,17 @@ force WebGL2. Combine them with `&`, so a self-hosted build can link to
 
 Links can carry data too: `?data=<address>` adds a file by its web address (any format Add Data
 reads, downloaded in the background; repeat it for up to 16, and the map zooms to the first that
-lands with something to show), `?style=<address>` adds a MapLibre style, `?tiles=<template>`
+lands with something to show), `?style=<address>` adds a MapLibre style (opening at the style's
+own place, zoom, bearing and pitch unless the link places the map), `?tiles=<template>`
 a tile layer, and `?zarr=<address>` opens Add Zarr Variable on a Zarr store. Percent-encode an address holding `&`, `#` or spaces (`encodeURIComponent`); a `+`
 stays a `+`. The server must allow the browser to fetch the file (CORS); a file that can't be
 added is said in a notice. For example,
 `?blank&data=https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_week.geojson` opens
 the past week's earthquakes.
+
+A MapLibre-style position after a `#` places the map: `#zoom/latitude/longitude/bearing/pitch`,
+the last two optional, so `?style=<address>#15.5/40.7484/-73.9857/30/60` opens a style tilted over
+Midtown Manhattan.
 
 `?project=<address>` opens a whole project by its web address: a `.rgis` file (or a
 `.rgispkg` package), or any address that answers with a project's JSON, such as an API that

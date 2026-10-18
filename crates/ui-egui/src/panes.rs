@@ -103,6 +103,16 @@ fn right_title(pane: RightPane) -> (&'static str, &'static str) {
         RightPane::Sql => ("SQL", "ui.pane.sql"),
         RightPane::Directions => ("Directions", "ui.pane.directions"),
         RightPane::Bookmarks => ("Bookmarks", "ui.pane.bookmarks"),
+        // Its tab says whose panel it is (see `right_name`).
+        RightPane::Plugin => ("Plugin", "ui.pane.plugin"),
+    }
+}
+
+/// A right pane's tab, in the interface language: a plugin's panel is named by its title.
+fn right_name(app: &RustGisApp, pane: RightPane) -> String {
+    match pane {
+        RightPane::Plugin => crate::pluginpanel::title(app),
+        _ => tl!(right_title(pane).0).to_string(),
     }
 }
 
@@ -140,6 +150,7 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
             RightPane::Shares => crate::docpanes::shares(app, ui, t),
             RightPane::Directions => crate::navui::show(app, ui, t),
             RightPane::Bookmarks => crate::bookmarkpane::show(app, ui, t),
+            RightPane::Plugin => crate::pluginpanel::show(app, ui, t),
         });
     });
 }
@@ -152,7 +163,7 @@ fn right_header(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens)
     let r = header_strip(ui, t);
     let (pad, cross, gap, more_w) = (9.0, 16.0, 2.0, 28.0);
     let open = app.ui.right_open.clone();
-    let names: Vec<&str> = open.iter().map(|p| tl!(right_title(*p).0)).collect();
+    let names: Vec<String> = open.iter().map(|p| right_name(app, *p)).collect();
     let font = |on: bool| if on { semibold(12.5) } else { regular(12.5) };
     let widths: Vec<f32> =
         open.iter().zip(&names).map(|(p, n)| pad + crate::widgets::text_w(ui, n, font(*p == right)) + 4.0 + cross + 5.0).collect();
@@ -180,7 +191,9 @@ fn right_header(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens)
     }
     let mut x = r.min.x + 6.0;
     for &i in &shown {
-        let (Some(pane), Some(name), Some(w)) = (open.get(i).copied(), names.get(i).copied(), widths.get(i).copied()) else { continue };
+        let (Some(pane), Some(name), Some(w)) = (open.get(i).copied(), names.get(i).map(String::as_str), widths.get(i).copied()) else {
+            continue;
+        };
         let (_, cmd) = right_title(pane);
         let on = pane == right;
         let tr = Rect::from_min_size(pos2(x, r.min.y), vec2(w, r.height()));
@@ -251,8 +264,8 @@ fn right_header(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens)
         let more = more.on_hover_text(tip);
         egui::Popup::menu(&more).show(|ui| {
             for pane in hidden {
-                let (title, cmd) = right_title(pane);
-                if ui.button(tl!(title)).clicked() {
+                let cmd = right_title(pane).1;
+                if ui.button(right_name(app, pane)).clicked() {
                     let _ = app.run(cmd, Value::Null);
                     ui.close();
                 }

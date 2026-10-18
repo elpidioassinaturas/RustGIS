@@ -34,6 +34,12 @@ puts east at the top; `{"by": 15}` turns it further), `map.setPitch` the pitch (
 or `{"by": 10}`), `map.resetNorth` faces north and looks straight down, and **Go To XY** takes a
 `bearing` and a `pitch` too. Page layout map frames and the globe are not turned or tilted.
 
+MapLibre map links carry a view in their address, as
+`#zoom/latitude/longitude/bearing/pitch` (`https://…/#15.5/40.7484/-73.9857/30/60`). **Go To Map
+Link** (`map.goToLink {"url": …}`) takes such a link, or the part after its `#`, to that place,
+zoom, bearing and pitch, and `map.link` gives the current view the same way. The web app reads
+one from its own address (see [Installation](../installation.md)).
+
 **Manage Bookmarks** (at the foot of the Bookmarks menu, or **View › Windows › Bookmarks**) opens
 the Bookmarks pane: every map's bookmarks, grouped by map (the map in view in the accent colour),
 with a box that filters them by name or description. On each bookmark, **Zoom To** shows its place
@@ -131,6 +137,8 @@ Ocean, Atlas, Blank), which need no network, and web tile layers over them:
   style's expressions and zoom functions. Line labels and shields along roads, line patterns,
   hillshade and 3D extrusion are not drawn (extrusions draw flat). A label shows the lines of
   its text that the map's font can draw: a style's "Syria / سوريا" shows as "Syria".
+  A style's root `center`, `zoom`, `bearing` and `pitch` say where it opens: `map.addTiles` with
+  `"view": true` takes the map there once the style has loaded.
 
 The gallery's **Web Basemaps** need no API key: the OpenFreeMap vector maps (Liberty, Bright,
 Positron, Dark, Fiord) and USGS Imagery. Choosing one replaces the other web basemaps; tick

@@ -214,8 +214,8 @@ pub struct GroupDecl {
     pub items: Vec<ItemDecl>,
 }
 
-/// A button: a command id or `tool:<id>` (opens the tool in the Tools pane), or a
-/// dropdown menu of them.
+/// A button: a command id, `tool:<id>` (opens the tool in the Tools pane) or `panel` (opens the
+/// plugin's panel), or a dropdown menu of them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ItemDecl {
@@ -234,11 +234,13 @@ pub struct MenuDecl {
     pub items: Vec<String>,
 }
 
-/// What a tab entry (`command-id` or `tool:tool-id`) refers to.
+/// What a tab entry (`command-id`, `tool:tool-id` or `panel`) refers to.
 #[derive(Clone, Copy, Debug)]
 pub enum Entry<'a> {
     Command(&'a CommandDecl),
     Tool(&'a ToolDecl),
+    /// The button that opens the plugin's panel.
+    Panel(&'a crate::panel::PanelDecl),
 }
 
 /// The parameter kinds a tool may use.
@@ -311,6 +313,10 @@ pub struct Manifest {
     /// A ribbon tab of its own (optional): its commands and tools in groups and menus.
     #[serde(default)]
     pub tab: Option<TabDecl>,
+    /// A panel of its own (optional): a pane of widgets bound to its commands (see
+    /// [`crate::panel`]).
+    #[serde(default)]
+    pub panel: Option<crate::panel::PanelDecl>,
     /// Skills for the AI assistant: folders in the package's `skills` folder, each holding a
     /// `SKILL.md`. The assistant offers them as `<plugin>:<name>` while the plugin is enabled.
     #[serde(default)]
@@ -464,8 +470,15 @@ impl Manifest {
                 if self.run.is_some() || self.python.is_some() {
                     return Err("plugin.json: 'run' and 'python' are for process plugins (\"runtime\": \"process\")".into());
                 }
-                if !self.commands.is_empty() || !self.tools.is_empty() || self.tab.is_some() || !self.permissions.is_empty() {
-                    return Err("plugin.json: a skills package (\"runtime\": \"skills\") has no commands, tools, tab or permissions".into());
+                if !self.commands.is_empty()
+                    || !self.tools.is_empty()
+                    || self.tab.is_some()
+                    || self.panel.is_some()
+                    || !self.permissions.is_empty()
+                {
+                    return Err(
+                        "plugin.json: a skills package (\"runtime\": \"skills\") has no commands, tools, tab, panel or permissions".into(),
+                    );
                 }
                 if self.skills.is_empty() {
                     return Err("plugin.json: a skills package (\"runtime\": \"skills\") lists its skills in 'skills'".into());
@@ -553,6 +566,15 @@ impl Manifest {
                 }
             }
         }
+        // Before the tab, which may name it.
+        if let Some(panel) = &self.panel {
+            if self.commands.iter().any(|c| c.id == "panel") {
+                return Err(
+                    "plugin.json: a plugin with a panel can't have a command called 'panel' (a tab's 'panel' opens the panel)".into()
+                );
+            }
+            panel.validate(&|c| self.commands.iter().any(|x| x.id == c))?;
+        }
         if let Some(tab) = &self.tab {
             self.validate_tab(tab)?;
         }
@@ -574,8 +596,13 @@ impl Manifest {
         translate(&self.i18n, lang, s)
     }
 
-    /// The command or tool a tab entry names.
+    /// The command, tool or panel a tab entry names.
     pub fn entry(&self, e: &str) -> Option<Entry<'_>> {
+        if e == "panel"
+            && let Some(p) = &self.panel
+        {
+            return Some(Entry::Panel(p));
+        }
         match e.strip_prefix("tool:") {
             Some(t) => self.tools.iter().find(|x| x.id == t).map(Entry::Tool),
             None => self.commands.iter().find(|x| x.id == e).map(Entry::Command),
@@ -594,9 +621,11 @@ impl Manifest {
             return Err(format!("plugin.json: the tab needs 1 to {MAX_GROUPS} groups"));
         }
         let entry = |e: &str| -> Result<(), String> {
-            self.entry(e)
-                .map(|_| ())
-                .ok_or_else(|| format!("plugin.json: the tab names '{e}', which isn't one of the plugin's commands or tools (tool:<id>)"))
+            self.entry(e).map(|_| ()).ok_or_else(|| {
+                format!(
+                    "plugin.json: the tab names '{e}', which isn't one of the plugin's commands, tools (tool:<id>) or its panel (panel)"
+                )
+            })
         };
         for g in &tab.groups {
             check_text("group label", &g.label, true)?;

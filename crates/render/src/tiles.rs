@@ -48,6 +48,19 @@ pub fn spec(t: &TileLayer) -> Spec {
     }
 }
 
+/// Where a MapLibre style layer's root properties place the map; `Ok(None)` while the style is
+/// still loading (asking starts loading it). Other tile layers have no view of their own.
+pub fn style_view(t: &TileLayer) -> Result<Option<rustgis_tiles::style::StyleView>, String> {
+    if t.kind != TileKind::Style {
+        return Ok(Some(Default::default()));
+    }
+    match rustgis_tiles::source::resolve(&spec(t)) {
+        rustgis_tiles::source::Resolve::Ready(r) => Ok(Some(r.style.view)),
+        rustgis_tiles::source::Resolve::Pending => Ok(None),
+        rustgis_tiles::source::Resolve::Failed(e) => Err(e),
+    }
+}
+
 /// Draws the map's visible tile layers, bottom first.
 pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels: bool) -> TileOutput {
     let mut out = TileOutput::default();
@@ -94,6 +107,7 @@ pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels
                     bold: l.bold,
                     icon,
                     align: -l.anchor[0],
+                    framed: false,
                 },
                 l.priority,
             ));

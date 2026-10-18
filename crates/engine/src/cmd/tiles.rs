@@ -40,7 +40,7 @@ pub const NETWORK: &[&str] = &[
 pub fn commands() -> Vec<C> {
     vec![
         C::new("map.addTiles", "Add Tile Layer", "Home › Add", add).params(
-            r#"{"url": "https://…/{z}/{x}/{y}.png" | vector tiles ".pbf" or TileJSON | MapLibre style.json | a PMTiles archive (web address or file path) | an MBTiles file path, "kind"?: "raster"|"vector"|"style"|"pmtiles"|"mbtiles" (guessed from the url), "name"?: text, "attribution"?: text, "minZoom"?: number, "maxZoom"?: number, "tileSize"?: 256|512, "tms"?: bool, "subdomains"?: [text], "layers"?: [vector tile layer names, drawn in colours of their own], "opacity"?: 0–1, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten"|"difference" (how it combines with what is beneath), "overlay"?: bool (a transparent layer kept on top), "replace"?: bool (removes the other tile basemaps, not overlays), "id"?: catalog id}"#,
+            r#"{"url": "https://…/{z}/{x}/{y}.png" | vector tiles ".pbf" or TileJSON | MapLibre style.json | a PMTiles archive (web address or file path) | an MBTiles file path, "kind"?: "raster"|"vector"|"style"|"pmtiles"|"mbtiles" (guessed from the url), "name"?: text, "attribution"?: text, "minZoom"?: number, "maxZoom"?: number, "tileSize"?: 256|512, "tms"?: bool, "subdomains"?: [text], "layers"?: [vector tile layer names, drawn in colours of their own], "opacity"?: 0–1, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten"|"difference" (how it combines with what is beneath), "overlay"?: bool (a transparent layer kept on top), "replace"?: bool (removes the other tile basemaps, not overlays), "id"?: catalog id, "view"?: bool (a MapLibre style: go to the place, zoom, bearing and pitch its root properties give, once it loads)}"#,
         ),
         C::new("map.removeTiles", "Remove Tile Layer", "Home › Add", remove)
             .params(r#"{"name"?: text, "index"?: number, "id"?: catalog id} (removes every tile layer when none is given)"#),
@@ -113,6 +113,11 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
     }
     t.repair()?;
     let replace = b(p, "replace").unwrap_or(false);
+    let view = b(p, "view").unwrap_or(false);
+    if view && t.kind != TileKind::Style {
+        return Err("view is read from a MapLibre style's root properties; this is no style".into());
+    }
+    let url = t.url.clone();
     let m = s.map_mut();
     if replace {
         m.tiles.retain(|o| o.overlay);
@@ -126,7 +131,61 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
     let at = if t.overlay { 0 } else { m.tiles.iter().position(|o| !o.overlay).unwrap_or(m.tiles.len()) };
     let out = json!({"name": t.name, "kind": t.kind.code(), "index": at});
     m.tiles.insert(at, t);
+    if view {
+        s.style_view = Some((url, s.map().camera));
+        follow_style_view(s, web_time::Duration::ZERO);
+    }
     Ok(out)
+}
+
+/// The most passes made waiting for a style to load (each waits for the fetches under way).
+const STYLE_WAITS: usize = 8;
+
+/// Moves the map to the view in the root properties of the style added with `"view": true`
+/// once it has loaded, unless the map has moved since, waiting up to `wait` for it (natively; the
+/// browser loads between frames). True when the map moved.
+pub(crate) fn follow_style_view(s: &mut Session, wait: web_time::Duration) -> bool {
+    let Some((url, camera)) = s.style_view.clone() else { return false };
+    if s.map().camera != camera {
+        // Moved (panned, a bookmark) while the style loaded: the map stays where it was put.
+        s.style_view = None;
+        return false;
+    }
+    let Some(t) = s.map().tiles.iter().find(|t| t.kind == TileKind::Style && t.url == url).cloned() else {
+        // Removed, or another map is active: nothing to follow.
+        s.style_view = None;
+        return false;
+    };
+    let wait = if cfg!(target_arch = "wasm32") { web_time::Duration::ZERO } else { wait };
+    let start = web_time::Instant::now();
+    let mut passes = 0;
+    let view = loop {
+        match rustgis_render::style_view(&t) {
+            Ok(Some(v)) => break v,
+            Ok(None) if passes < STYLE_WAITS && start.elapsed() < wait => {
+                rustgis_render::rustgis_tiles::cache::wait(wait.saturating_sub(start.elapsed()));
+                passes += 1;
+            }
+            Ok(None) => return false,
+            Err(e) => {
+                s.style_view = None;
+                s.notify(format!("{url}: {e}"), true);
+                return false;
+            }
+        }
+    };
+    s.style_view = None;
+    if view.is_empty() {
+        return false;
+    }
+    let center = view.center.map(|[lon, lat]| rustgis_geom::Coord::new(lon, lat));
+    match super::navigate::go_to_view(s, center, view.zoom, view.bearing, view.pitch) {
+        Ok(()) => true,
+        Err(e) => {
+            s.notify(format!("{url}: {e}"), true);
+            false
+        }
+    }
 }
 
 /// The tile layer a command names by `index`, `name` or `id`.

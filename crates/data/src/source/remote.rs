@@ -608,6 +608,12 @@ pub(crate) mod testing {
                 done(Err(Failed::Other("HTTP 404".into())));
                 return;
             };
+            // Busy elsewhere: every file kept is pushed out by others before the answer lands.
+            if url.ends_with("#busy") {
+                for i in 0..=MAX_FILES {
+                    super::file(&format!("test:busy-{i}"));
+                }
+            }
             let r = match w {
                 Want::Range(a, b) => f.get(a as usize..(b as usize).min(f.len())).map(<[u8]>::to_vec).unwrap_or_default(),
                 Want::Tail(n) => f.get(f.len().saturating_sub(n as usize)..).map(<[u8]>::to_vec).unwrap_or_default(),

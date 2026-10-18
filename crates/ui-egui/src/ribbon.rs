@@ -2767,6 +2767,12 @@ fn plugins_tab(app: &mut RustGisApp, ui: &mut Ui) {
     {
         let m = &p.manifest;
         group(ui, m.translate(lang, &m.name), |ui| {
+            // Its panel first, when it has one.
+            if let Some(d) = &m.panel {
+                let (icon, label, help) = panel_button(m, d, lang);
+                let open = panel_open(app, &m.id);
+                big(ui, app, icon, &label, &help, "ui.pane.plugin", json!({"id": m.id}), open, false);
+            }
             for c in &m.commands {
                 let icon = if crate::icons::ALL.contains(&c.icon.as_str()) { c.icon.as_str() } else { "plugin" };
                 let id = rustgis_engine::plugins::command_id(&m.id, &c.id);
@@ -2779,6 +2785,25 @@ fn plugins_tab(app: &mut RustGisApp, ui: &mut Ui) {
             }
         });
     }
+}
+
+/// The button that opens a plugin's panel: its icon, label (the panel's title, on two lines when
+/// long) and help, in language `lang`.
+fn panel_button(
+    m: &rustgis_engine::plugins::Manifest,
+    d: &rustgis_engine::plugins::PanelDecl,
+    lang: &str,
+) -> (&'static str, String, String) {
+    let icon = crate::icons::ALL.iter().copied().find(|i| *i == d.icon).unwrap_or("plugin");
+    let title = m.translate(lang, &d.title);
+    let label = if title.chars().count() > 12 { title.replacen(' ', "\n", 1) } else { title.to_string() };
+    let help = if d.help.is_empty() { tl!("Open the plugin's panel.").to_string() } else { m.translate(lang, &d.help).to_string() };
+    (icon, label, help)
+}
+
+/// Whether plugin `id`'s panel is in view.
+fn panel_open(app: &RustGisApp, id: &str) -> bool {
+    app.ui.right == Some(crate::RightPane::Plugin) && app.ui.plugin_panel.plugin.as_deref() == Some(id)
 }
 
 /// A plugin's own tab: its groups of commands, tools and menus.
@@ -2808,15 +2833,21 @@ fn plugin_tab(app: &mut RustGisApp, ui: &mut Ui, plugin: &str) {
                 "ui.gp.open".into(),
                 json!({"tool": command_id(&m.id, &t.id)}),
             ),
+            Entry::Panel(d) => {
+                let (icon, label, help) = panel_button(m, d, lang);
+                (icon.into(), label, help, "ui.pane.plugin".into(), json!({"id": m.id}))
+            }
         }
     };
+    let open = panel_open(app, &m.id);
     for g in &tab.groups {
         group(ui, m.translate(lang, &g.label), |ui| {
             for item in &g.items {
                 match item {
                     ItemDecl::Entry(e) => {
                         if let Some((icon, label, help, id, params)) = m.entry(e).map(target) {
-                            big(ui, app, &icon, &label, &help, &id, params, false, false);
+                            let checked = open && id == "ui.pane.plugin";
+                            big(ui, app, &icon, &label, &help, &id, params, checked, false);
                         }
                     }
                     ItemDecl::Menu(menu) => {

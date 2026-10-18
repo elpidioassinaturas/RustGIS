@@ -15,8 +15,24 @@ the maps; while one is open, its groups lead the Publish tab:
   to pan its map. Double-click a frame to match the map view, or set the scale in its properties.
   **Grid** draws a labelled graticule over a frame; **Extent Indicator** outlines another frame's
   extent (an overview map).
+- **Grids**: the **Grid** section of a frame's properties turns the grid on and sets its
+  **Interval** in degrees (**Auto** picks one from the frame's extent), its **Style** (full lines
+  across the frame, ticks along its neatline only, or both, with the **Tick length**), its colour
+  and **Line width**, and its labels: decimal degrees (`112.5°W`, as many decimals as the
+  interval needs) or degrees, minutes and seconds (`112°30′W`), with a hemisphere letter or a
+  sign (`-112.5°`), on any of the four edges (longitudes along the top and bottom, latitudes along
+  the left and right; the bottom and left to start with), and the side labels horizontal or
+  running along the edge. From a command:
+  `layout.addElement={"kind":"grid","step":0.5,"style":"ticks","format":"dms","edges":["top","bottom","left","right"],"labelOrientation":"vertical"}`
+  (given again, it changes only the options it names), or `layout.update` with
+  `"grid": {…}` (`false` removes the grid).
 - **Map surrounds**: north arrow, scale bar, legend, colorbar, table frame (a layer's attribute table) and
-  chart frame (a bar chart of a numeric field), plus a neatline or backdrop. A legend shows what
+  chart frame (a bar chart of a numeric field), plus a neatline or backdrop. A north arrow's
+  properties pick its **Style** (classic arrow, compass rose, triangle or star) and its **Fill**
+  and **Outline** colours (`"style":"compass","fill":"#B91C1C"`). A scale bar's pick its
+  **Style** (alternating bar, stepped line or single line), its **Units** (metres or kilometres
+  to suit the scale, or kilometres, metres, miles or feet) and its **Divisions** (1 to 10), each
+  labelled where there is room (`"style":"line","units":"miles","divisions":2`). A legend shows what
   its frame draws: only layers with a feature at the frame's scale (through their definition
   query, display filters and scale range) and, for Unique Values, only the classes those features
   have, with `<all other values>` only when some feature falls in it and its symbol is not fully

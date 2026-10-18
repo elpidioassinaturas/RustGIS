@@ -671,6 +671,12 @@ fn flatgeobuf_and_geoparquet_by_address() {
     remote::testing::serve("https://test.example/grid.parquet", std::fs::read(&p).unwrap());
     check(&open_driven("https://test.example/grid.parquet"), true);
 
+    // Opening keeps reading the file it fetches for, even when other files push it out of those
+    // kept while its bytes are on their way.
+    let busy = "https://test.example/busy.fgb#busy";
+    remote::testing::serve(busy, std::fs::read(&f).unwrap());
+    assert_eq!(open_driven(busy).info().count, src.info().count);
+
     // A view of a large file fetches a small part of it, and the same features as the file on disk.
     for (name, parquet) in [("big.fgb", false), ("big.parquet", true)] {
         let bytes = big(400, parquet);

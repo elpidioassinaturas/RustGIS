@@ -331,6 +331,211 @@ fn plugin_tabs_are_checked() {
 }
 
 #[test]
+fn plugin_panels_are_checked() {
+    let ok = Manifest::parse(&testing::panel_manifest("paneled")).unwrap();
+    let panel = ok.panel.as_ref().unwrap();
+    assert_eq!(panel.items.len(), 7);
+    // A button's id is its command's unless it has one; a tab's `panel` opens the panel.
+    assert!(panel.item("q-newer").is_none() && panel.item("newer").is_some_and(|i| i.command == "q-newer"));
+    assert!(matches!(ok.entry("panel"), Some(crate::Entry::Panel(_))));
+    let mut tabbed: Value = serde_json::from_str(&testing::panel_manifest("paneled")).unwrap();
+    tabbed["tab"] = json!({"label": "Wayback", "groups": [{"label": "G", "items": ["panel", {"menu": "M", "items": ["panel", "h"]}]}]});
+    assert!(Manifest::parse(&tabbed.to_string()).is_ok());
+    // Without a panel, `panel` on a tab is a command of that name, as before.
+    let mut plain: Value = serde_json::from_str(&testing::manifest("plain", &[])).unwrap();
+    plain["tab"] = json!({"label": "Plain", "groups": [{"label": "G", "items": ["panel"]}]});
+    assert!(Manifest::parse(&plain.to_string()).unwrap_err().contains("isn't one of"));
+    plain["commands"].as_array_mut().unwrap().push(json!({"id": "panel", "label": "Panel"}));
+    assert!(Manifest::parse(&plain.to_string()).is_ok());
+    let with_panel = |panel: Value| {
+        let mut m: Value = serde_json::from_str(&testing::manifest("paneled", &[])).unwrap();
+        m["panel"] = panel;
+        Manifest::parse(&m.to_string())
+    };
+    let item = |i: Value| json!({"title": "P", "items": [i]});
+    let long = "x".repeat(3000);
+    for (bad, why) in [
+        (json!({"title": "", "items": [{"kind": "button", "command": "h"}]}), "title"),
+        (json!({"title": "Two\nlines", "items": [{"kind": "button", "command": "h"}]}), "title"),
+        (json!({"title": "x".repeat(49), "items": [{"kind": "button", "command": "h"}]}), "title"),
+        (json!({"title": "P", "items": []}), "1 to 32 items"),
+        (
+            json!({"title": "P", "items": (0..33).map(|i| json!({"kind": "text", "id": format!("t{i}")})).collect::<Vec<_>>()}),
+            "1 to 32 items",
+        ),
+        (json!({"title": "P", "state": "nope", "items": [{"kind": "button", "command": "h"}]}), "state command"),
+        (item(json!({"kind": "dial", "id": "d"})), "isn't text, checkbox"),
+        (item(json!({"kind": "text"})), "invalid or repeated"),
+        (item(json!({"kind": "text", "id": "Bad Id"})), "invalid or repeated"),
+        (json!({"title": "P", "items": [{"kind": "text", "id": "t"}, {"kind": "text", "id": "t"}]}), "invalid or repeated"),
+        (json!({"title": "P", "items": [{"kind": "button", "command": "h"}, {"kind": "button", "command": "h"}]}), "invalid or repeated"),
+        (item(json!({"kind": "button"})), "invalid or repeated"),
+        (item(json!({"kind": "button", "id": "b"})), "needs a command"),
+        (item(json!({"kind": "button", "command": "zz"})), "isn't one of the plugin's commands"),
+        (item(json!({"kind": "button", "command": "m"})), "isn't one of the plugin's commands"),
+        (item(json!({"kind": "text", "id": "t", "command": "h"})), "runs no command"),
+        (item(json!({"kind": "checkbox", "id": "c"})), "needs a label"),
+        (item(json!({"kind": "checkbox", "id": "c", "label": "C", "default": 1})), "true or false"),
+        (item(json!({"kind": "slider", "id": "s", "min": 5, "max": 1})), "min must not be above"),
+        (item(json!({"kind": "slider", "id": "s", "min": 0, "max": 2_000_000_000i64})), "within"),
+        (item(json!({"kind": "slider", "id": "s", "max": 3, "default": 9})), "from min to max"),
+        (item(json!({"kind": "slider", "id": "s", "max": 3, "default": "1"})), "from min to max"),
+        (item(json!({"kind": "slider", "id": "s", "max": 1.5})), "plugin.json"),
+        (item(json!({"kind": "button", "command": "h", "max": 3})), "for sliders"),
+        (item(json!({"kind": "checkbox", "id": "c", "label": "C", "steps": true})), "for sliders"),
+        (item(json!({"kind": "button", "command": "h", "default": true})), "only checkboxes and sliders"),
+        (item(json!({"kind": "button", "command": "h", "text": "t"})), "for texts"),
+        (item(json!({"kind": "text", "id": "t", "text": long})), "too long"),
+        (item(json!({"kind": "text", "id": "t", "label": 7})), "plugin.json"),
+        (json!({"items": [{"kind": "button", "command": "h"}]}), "plugin.json"),
+        (json!("panel"), "plugin.json"),
+    ] {
+        let e = with_panel(bad.clone()).unwrap_err();
+        assert!(e.contains(why), "{bad}: {e}");
+    }
+    // A command called `panel` beside a panel would be ambiguous on a tab.
+    let mut m: Value = serde_json::from_str(&testing::panel_manifest("paneled")).unwrap();
+    m["commands"].as_array_mut().unwrap().push(json!({"id": "panel", "label": "Panel"}));
+    assert!(Manifest::parse(&m.to_string()).unwrap_err().contains("called 'panel'"));
+    // Skills packages have none.
+    let skills = json!({"id": "sk", "name": "S", "version": "1.0.0", "runtime": "skills", "skills": ["a"],
+        "panel": {"title": "P", "items": [{"kind": "text", "id": "t"}]}});
+    assert!(Manifest::parse(&skills.to_string()).unwrap_err().contains("panel"));
+}
+
+#[test]
+fn plugin_panel_state_round_trips() {
+    use crate::PanelState;
+    let pkg = Package::from_zip(&testing::panel_package("unit-panel")).unwrap();
+    let p = crate::load(pkg, "test").unwrap();
+    let decl = p.manifest.panel.clone().unwrap();
+    let mut st = PanelState::new(&decl);
+    assert_eq!(st.values, [("local".to_string(), json!(false)), ("release".to_string(), json!(0))].into_iter().collect());
+    assert_eq!(st.items["selected"].text, "None yet");
+    // The state command answers the panel's state; the host takes it in.
+    let cmd = crate::command("plugin:unit-panel/p").unwrap();
+    let answer = crate::run_command_with_panel(&cmd, &mut Recorder::default(), &json!({}), Some(st.request(&[]))).unwrap();
+    st.apply(&decl, &answer["panel"]);
+    assert_eq!(st.slider("release"), 12);
+    assert_eq!((st.items["release"].min, st.items["release"].max), (0, 12));
+    assert_eq!(st.slider_label("release", 0), "2014-02-20");
+    assert_eq!(st.slider_label("release", 12), "2025-12-18");
+    assert_eq!(st.slider_label("release", 99), "99", "past its labels, the number");
+    assert!(!st.items["newer"].enabled && st.items["older"].enabled);
+    assert!(st.items["metadata"].text.contains("Maxar"));
+    // The values go with every request: the echo command shows what the plugin got.
+    let changed = st.set_values(&decl, &json!({"release": 3, "local": true, "selected": "x", "nope": 1}));
+    assert_eq!(changed, ["local", "release"]);
+    let echo = crate::command("plugin:unit-panel/q").unwrap();
+    let got = crate::run_command_with_panel(&echo, &mut Recorder::default(), &json!({"a": 1}), Some(st.request(&changed))).unwrap();
+    assert_eq!(got["panel"], json!({"values": {"local": true, "release": 3}, "changed": ["local", "release"]}));
+    assert_eq!(got["params"], json!({"a": 1}));
+    assert_eq!(got["kind"], "command");
+    // Without a panel, no `panel` in the request.
+    let got = crate::run_command(&echo, &mut Recorder::default(), &json!({})).unwrap();
+    assert!(got.get("panel").is_none());
+    crate::unload("unit-panel");
+}
+
+#[test]
+fn panel_texts_are_limited_in_characters() {
+    // Two bytes a character: within the limit in characters though past it in bytes.
+    let with_help = |n: usize| {
+        let mut m: Value = serde_json::from_str(&testing::panel_manifest("chars-panel")).unwrap();
+        m["panel"]["help"] = json!("é".repeat(n));
+        Manifest::parse(&m.to_string())
+    };
+    assert!(with_help(crate::panel::MAX_DECLARED).is_ok());
+    assert!(with_help(crate::panel::MAX_DECLARED + 1).unwrap_err().contains("too long"));
+}
+
+#[test]
+fn a_panel_state_matches_only_its_declaration() {
+    use crate::PanelState;
+    let m = Manifest::parse(&testing::panel_manifest("match-panel")).unwrap();
+    let decl = m.panel.unwrap();
+    let state = PanelState::new(&decl);
+    assert!(state.matches(&decl));
+    // The plugin updated: a widget fewer, or a checkbox become a slider of the same id.
+    let mut fewer = decl.clone();
+    fewer.items.pop();
+    assert!(!state.matches(&fewer));
+    let mut retyped = decl.clone();
+    if let Some(i) = retyped.items.iter_mut().find(|i| i.kind == "checkbox") {
+        i.kind = "slider".into();
+    }
+    assert!(!state.matches(&retyped));
+    // A slider's declared range changed: matched again only by a state made from it.
+    let mut ranged = decl.clone();
+    if let Some(i) = ranged.items.iter_mut().find(|i| i.kind == "slider") {
+        i.max += 10;
+    }
+    assert!(!state.matches(&ranged));
+    assert!(PanelState::new(&ranged).matches(&ranged));
+}
+
+#[test]
+fn hostile_panel_states_are_tamed() {
+    use crate::PanelState;
+    let m = Manifest::parse(&testing::panel_manifest("hostile-panel")).unwrap();
+    let decl = m.panel.unwrap();
+    let fresh = PanelState::new(&decl);
+    let huge = "y".repeat(100_000);
+    // Past both slider label limits (count and length), without holding a gigabyte of text.
+    let long_label = "y".repeat(crate::panel::MAX_SLIDER_LABEL * 2);
+    let many: Vec<Value> = (0..crate::panel::MAX_SLIDER_LABELS * 2).map(|i| json!(format!("{i}{long_label}"))).collect();
+    for junk in [
+        Value::Null,
+        json!(7),
+        json!("panel"),
+        json!([1, 2]),
+        json!({"values": 5, "items": "x"}),
+        json!({"values": {"release": "9", "local": 1, "selected": true, "metadata": {}}}),
+        json!({"values": {"release": 1e300, "local": null}}),
+        json!({"values": {"release": -1e18}}),
+        json!({"values": {"release": 2.5}}),
+        json!({"items": {"release": {"min": 10, "max": 2}}}),
+        json!({"items": {"release": {"min": -5e18, "max": 5e18}}}),
+        json!({"items": {"release": {"min": "0", "max": [1], "labels": "a"}}}),
+        json!({"items": {"release": {"labels": many}}}),
+        json!({"items": {"selected": {"text": huge, "label": huge, "enabled": "no", "visible": 0}}}),
+        json!({"items": {"selected": {"text": 5, "label": {"x": 1}}, "older": {"text": "a button has none", "min": 3}}}),
+        json!({"items": {"nope": {"text": "x"}, "": {}, "local": {"label": null}}}),
+    ] {
+        let mut st = fresh.clone();
+        st.apply(&decl, &junk);
+        let _ = st.set_values(&decl, &junk);
+        let r = &st.items["release"];
+        assert!(r.min <= r.max && (r.min..=r.max).contains(&st.slider("release")), "{junk}");
+        assert!(st.items["selected"].text.chars().count() <= crate::panel::MAX_STATE_TEXT);
+        assert!(st.items["selected"].label.as_ref().is_none_or(|l| l.chars().count() <= crate::panel::MAX_STATE_LABEL));
+        assert!(
+            r.labels.len() <= crate::panel::MAX_SLIDER_LABELS
+                && r.labels.iter().all(|l| l.chars().count() <= crate::panel::MAX_SLIDER_LABEL)
+        );
+        assert!(st.items["older"].text.is_empty(), "a button has no text");
+        assert!(!st.values.contains_key("selected"), "a text has no value");
+        assert!(st.values["local"].is_boolean() && st.values["release"].is_i64());
+        let _ = st.slider_label("release", i64::MIN);
+        let _ = st.slider_label("release", i64::MAX);
+        let _ = st.slider_label("nope", 3);
+    }
+    // A narrower range keeps the value in it.
+    let mut st = fresh.clone();
+    st.apply(&decl, &json!({"items": {"release": {"min": 0, "max": 100}}, "values": {"release": 80}}));
+    assert_eq!(st.slider("release"), 80);
+    st.apply(&decl, &json!({"items": {"release": {"max": 10}}}));
+    assert_eq!(st.slider("release"), 10);
+    st.apply(&decl, &json!({"values": {"release": -4}}));
+    assert_eq!(st.slider("release"), 0);
+    // `label: null` brings back the declared label.
+    st.apply(&decl, &json!({"items": {"local": {"label": "Mine"}}}));
+    assert_eq!(st.items["local"].label.as_deref(), Some("Mine"));
+    st.apply(&decl, &json!({"items": {"local": {"label": null}}}));
+    assert_eq!(st.items["local"].label, None);
+}
+
+#[test]
 fn large_registries_are_read_quickly() {
     // 20,000 plugins (and a duplicate of each, which is dropped) parse in a fraction of a second;
     // the bound is generous so a busy CI machine doesn't fail it, while a quadratic scan
