@@ -672,6 +672,8 @@ pub(crate) fn touches_files(command: &str, params: &Value) -> bool {
     let verb = id.split('.').nth(1).unwrap_or("");
     ["script.", "notebook.", "model.", "project.", "task.", "share.", "offline.", "cache.", "locator."].iter().any(|p| id.starts_with(p))
         || ["import", "export", "open", "save", "add", "package", "upload", "download"].iter().any(|w| verb.starts_with(w))
+        // Its inputs may be bare file names, which don't look like paths.
+        || id == "raster.mosaic"
         || reaches(params)
 }
 

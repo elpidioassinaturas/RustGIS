@@ -32,7 +32,7 @@ pub fn set_dir(dir: Option<PathBuf>) {
     }
 }
 
-/// The plugins folder: `plugins` in the platform's app-data location.
+/// The plugins folder: `plugins` in the app's data folder.
 pub fn dir() -> Option<PathBuf> {
     if let Ok(d) = DIR.lock()
         && let Some(d) = d.clone()
@@ -42,17 +42,7 @@ pub fn dir() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os(ENV).filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(d));
     }
-    let base = if cfg!(target_os = "windows") {
-        std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("APPDATA")).map(|d| PathBuf::from(d).join("RustGIS"))
-    } else if cfg!(target_os = "macos") {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/RustGIS"))
-    } else {
-        std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-            .map(|d| d.join("rustgis"))
-    };
-    base.map(|b| b.join("plugins"))
+    rustgis_data::dirs::app_data_dir().map(|b| b.join("plugins"))
 }
 
 #[derive(Default, Serialize, Deserialize)]

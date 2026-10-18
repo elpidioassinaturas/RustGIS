@@ -139,8 +139,10 @@ Layer tab: **Layer Blend** (multiply, screen, overlay, darken, lighten, differen
 Edit › Graphics draws shapes in a graphics layer (Home › Add Data › Graphics Layer, or one is
 made with the first graphic). Point, Line, Curve and Polygon are clicked vertex by vertex
 (double-click to finish); Freehand, Lasso, Rectangle, Circle and Ellipse are dragged. Text places
-a label where you click, and Dynamic Text adds tokens that update as the map changes: `{map}`,
-`{scale}`, `{date}`, `{time}`, `{crs}`, `{layers}` and `{center}`. Picture: drag a rectangle,
+a label where you click. Dynamic Text is a menu of values that update as the map changes (map
+name, scale, date, time, coordinate system, number of layers, map centre): pick one, then click
+the map, and the text starts with its token (`{map}`, `{scale}`, `{date}`, `{time}`, `{crs}`,
+`{layers}` or `{center}`); the dialog's buttons add more. Picture: drag a rectangle,
 then pick a PNG or JPEG image to stretch over it. Tools return to Explore after each graphic
 unless Keep Tool is on. Each graphic keeps its own fill, outline, width and text size in the
 layer's attributes, so you can edit them in the attribute table or with `graphics.style`.

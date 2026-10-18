@@ -7552,3 +7552,126 @@ fn hostile_group_params_never_panic() {
         }
     }
 }
+
+/// Large elevation models come as tiles in a projected coordinate system (#155): mosaic them on
+/// their own grid, clip by a polygon layer, share one stretch, and say when a raster is an overview.
+#[test]
+fn dem_tiles_mosaic_clip_by_polygon_share_a_stretch_and_report_overviews() {
+    use base64::Engine;
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let utm = Crs::from_epsg(25832).unwrap();
+    // 10 × 10 tiles of 100 m cells: values 100 + column in the west, 200 + column in the east.
+    // Each tile has one no-data cell, `hole` cells from its top-left.
+    let tile = |name: &str, x0: f64, base: f32, cell: f64, hole: usize| {
+        let n = (1000.0 / cell) as u32;
+        let mut z: Vec<f32> = (0..n * n).map(|i| base + (i % n) as f32).collect();
+        if let Some(v) = z.get_mut(hole) {
+            *v = -9999.0;
+        }
+        let gt = GeoTransform { origin_x: x0, origin_y: 5_700_000.0, pixel_width: cell, pixel_height: -cell };
+        Raster::new(name, n, n, vec![z], gt, utm, Some(-9999.0), ColorHint::Gray, "Float32").unwrap()
+    };
+    let mut s = world();
+    for (name, r) in [
+        ("west", tile("west", 360_000.0, 100.0, 100.0, 99)),
+        ("east", tile("east", 361_000.0, 200.0, 100.0, 99)),
+        ("over", tile("over", 360_000.0, 900.0, 100.0, 0)),
+        ("coarse", tile("coarse", 362_000.0, 0.0, 200.0, 0)),
+        // Half a cell off the others' grid.
+        ("shifted", tile("shifted", 362_050.0, 0.0, 100.0, 0)),
+    ] {
+        let data = base64::engine::general_purpose::STANDARD.encode(geotiff::write(&r, 0).unwrap());
+        s.run("layer.addDataBytes", &json!({"fileName": format!("{name}.tif"), "data": data})).unwrap();
+    }
+    // Tiny cells far apart: more columns between them than a raster can have.
+    for (name, x0) in [("near", 0.0), ("far", 100.0)] {
+        let gt = GeoTransform { origin_x: x0, origin_y: 1e-6, pixel_width: 1e-9, pixel_height: -1e-9 };
+        let r = Raster::new(name, 10, 10, vec![vec![1.0; 100]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let bytes = geotiff::write(&r, 0).unwrap();
+        crate::cmd::raster::add_raster(&mut s, name, rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)).unwrap();
+    }
+    let raster =
+        |s: &Session, v: &Value| s.map().layer(v["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+
+    // Mosaic: one grid in the tiles' own CRS and cell size; the first input wins where they overlap.
+    let dir = std::env::temp_dir().join(format!("rustgis-mosaic-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("dem.tif").display().to_string();
+    let v = s.run("raster.mosaic", &json!({"inputs": ["west", "over", "east"], "name": "dem", "path": path})).unwrap();
+    assert_eq!(v["path"], json!(path));
+    let m = raster(&s, &v);
+    assert_eq!((m.width, m.height, m.crs, m.cell_size()), (20, 10, utm, (100.0, 100.0)));
+    assert_eq!((m.transform.origin_x, m.transform.origin_y), (360_000.0, 5_700_000.0));
+    assert_eq!((m.value(0, 3, 0), m.value(0, 15, 2)), (Some(103.0), Some(205.0)));
+    // West's no-data corner is filled from the overlapping tile; east's stays no-data.
+    assert_eq!((m.value(0, 0, 0), m.value(0, 9, 9), m.value(0, 19, 9)), (Some(100.0), Some(909.0), None));
+    let written = rustgis_data::raster::read_path(std::path::Path::new(&path)).unwrap();
+    assert_eq!((written.width, written.height, written.crs), (20, 10, utm));
+    std::fs::remove_dir_all(&dir).ok();
+    // Bare file names read files too: tasks and notebooks from elsewhere may not run it.
+    assert!(crate::cmd::items::touches_files("raster.mosaic", &json!({"inputs": ["a.tif", "b.tif"]})));
+    for (bad, why) in [
+        (json!({"inputs": ["west"]}), "two or more"),
+        (json!({"inputs": ["west", "coarse"]}), "cell size"),
+        (json!({"inputs": ["west", "shifted"]}), "line up"),
+        (json!({"inputs": ["near", "far"]}), "too far"),
+        (json!({"inputs": ["west", "Countries"]}), "no raster layer"),
+        (json!({"inputs": ["west", 3]}), "file path"),
+    ] {
+        let e = s.run("raster.mosaic", &bad).unwrap_err().to_string();
+        assert!(e.contains(why), "{bad}: {e}");
+    }
+
+    // Clip by a polygon layer: the window around it, cells outside it no-data.
+    let tr = m.transformer();
+    let ll = |x: f64, y: f64| {
+        let c = tr.to_lonlat(rustgis_geom::Coord::new(x, y)).unwrap();
+        json!([c.x, c.y])
+    };
+    s.run("layer.template", &json!({"template": "polygons", "name": "City"})).unwrap();
+    // A triangle, so the mask isn't just the window.
+    let ring = [ll(360_500.0, 5_700_000.0), ll(361_500.0, 5_700_000.0), ll(361_500.0, 5_699_500.0), ll(360_500.0, 5_700_000.0)];
+    s.run("edit.addFeature", &json!({"layer": "City", "geometry": {"type": "Polygon", "coordinates": [ring]}})).unwrap();
+    let v = s.run("raster.process", &json!({"layer": "dem", "operation": "clip", "polygon": "City"})).unwrap();
+    let c = raster(&s, &v);
+    // The diagonal runs from column 5 at row 0 to column 15 at row 5: rows of 9, 7, 5, 3 and 1
+    // cell centres inside, in a window trimmed to columns 6–14.
+    assert_eq!((c.width, c.height, c.crs), (9, 5, utm));
+    assert_eq!(c.bands[0].stats.count, 25);
+    assert_eq!((c.value(0, 8, 0), c.value(0, 0, 0), c.value(0, 0, 4)), (Some(204.0), Some(106.0), None));
+    s.run("layer.template", &json!({"template": "polygons", "name": "Elsewhere"})).unwrap();
+    let far = json!([[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]]]);
+    s.run("edit.addFeature", &json!({"layer": "Elsewhere", "geometry": {"type": "Polygon", "coordinates": far}})).unwrap();
+    let e = s.run("raster.process", &json!({"layer": "dem", "operation": "clip", "polygon": "Elsewhere"})).unwrap_err();
+    assert!(e.to_string().contains("no cell"), "{e}");
+    assert!(s.run("raster.process", &json!({"layer": "dem", "operation": "clip", "polygon": "west"})).is_err());
+
+    // One stretch shared across tiles, as fixed bounds.
+    s.run("raster.stretch", &json!({"layer": "west", "type": "custom", "min": 100, "max": 300})).unwrap();
+    s.run("raster.stretch", &json!({"layer": "east", "like": "west"})).unwrap();
+    let st = |s: &Session, n: &str| s.map().layer_by_name(n).unwrap().raster.as_ref().unwrap().style.stretch;
+    assert_eq!(st(&s, "east"), rustgis_map::Stretch::Custom { min: 100.0, max: 300.0 });
+    s.run("raster.stretch", &json!({"layer": "west", "type": "minMax"})).unwrap();
+    s.run("raster.stretch", &json!({"layer": "east", "like": "west"})).unwrap();
+    assert_eq!(st(&s, "east"), rustgis_map::Stretch::Custom { min: 100.0, max: 109.0 });
+    // A mask on the source narrows its range, and the shared one with it.
+    s.run("raster.mask", &json!({"layer": "west", "values": [100]})).unwrap();
+    s.run("raster.stretch", &json!({"layer": "east", "like": "west"})).unwrap();
+    assert_eq!(st(&s, "east"), rustgis_map::Stretch::Custom { min: 101.0, max: 109.0 });
+    assert!(s.run("raster.stretch", &json!({"layer": "east", "like": "Countries"})).is_err());
+
+    // A raster opened from an overview says so in its results, not only in a notice.
+    let mut ov = tile("big", 360_000.0, 100.0, 100.0, 99);
+    ov.overview = Some((20, 20));
+    let bytes = geotiff::write(&ov, 0).unwrap();
+    let v = crate::cmd::raster::add_raster(&mut s, "big", rustgis_map::RasterLayer::from_bytes(ov, "big.tif", bytes)).unwrap();
+    assert_eq!(v["overviewOf"], json!([20, 20]));
+    let out = std::env::temp_dir().join(format!("rustgis-overview-{}.tif", std::process::id()));
+    std::fs::remove_file(&out).ok();
+    let v = s.run("share.exportRaster", &json!({"layer": "big", "path": out.display().to_string()})).unwrap();
+    assert_eq!(v["overviewOf"], json!([20, 20]));
+    std::fs::remove_file(&out).ok();
+    let e = s.run("raster.mosaic", &json!({"inputs": ["big", "east"]})).unwrap_err();
+    assert!(e.to_string().contains("overview"), "{e}");
+}

@@ -17,22 +17,12 @@ pub(crate) fn program(env: &str, name: &str) -> Option<PathBuf> {
     dirs.into_iter().filter(|d| d.is_absolute()).map(|d| d.join(&exe)).find(|p| p.is_file())
 }
 
-/// A folder in the platform's cache folder (or the one `env` names, used as is).
+/// A folder in the app's cache folder (or the one `env` names, used as is).
 pub(crate) fn cache_dir(env: &str, sub: &str) -> Option<PathBuf> {
-    if let Some(d) = std::env::var_os(env) {
+    if let Some(d) = std::env::var_os(env).filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(d));
     }
-    let base = if cfg!(target_os = "windows") {
-        std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("RustGIS").join("cache"))
-    } else if cfg!(target_os = "macos") {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches/RustGIS"))
-    } else {
-        std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-            .map(|d| d.join("rustgis"))
-    };
-    base.map(|b| b.join(sub))
+    crate::dirs::cache_dir().map(|b| b.join(sub))
 }
 
 /// Runs a program, reading its output as it comes (so a chatty one can't block on a full pipe) and

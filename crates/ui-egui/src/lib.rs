@@ -483,6 +483,9 @@ pub struct UiState {
     pub pending_layout_picture: bool,
     /// The corners of a picture graphic waiting for its image file.
     pub pending_picture: Option<Vec<rustgis_engine::geom::Coord>>,
+    /// The value picked under Edit › Dynamic Text (a token such as `{scale}`): the text tool's
+    /// dialog starts with it. Cleared when the tool changes.
+    pub dynamic_text: Option<&'static str>,
     /// Text to put on the system clipboard at the end of the frame.
     pub copy_out: Option<String>,
     /// A web page to open at the end of the frame.
@@ -586,6 +589,7 @@ impl Default for UiState {
             layer_filter_map: String::new(),
             layer_filter_hid: None,
             layers_view: LayersView::DrawingOrder,
+            dynamic_text: None,
         }
     }
 }
@@ -1222,6 +1226,11 @@ impl RustGisApp {
         // Undo and redo can move vertices: an index chosen before may now name another vertex.
         if r.is_ok() && matches!(id, "edit.undo" | "edit.redo") {
             self.map.vertex = None;
+        }
+        // Choosing a tool, Text included, drops a value picked under Dynamic Text
+        // (`ui.dynamicText` picks it after choosing the tool).
+        if r.is_ok() && id == "tool.set" {
+            self.ui.dynamic_text = None;
         }
         if r.is_ok() {
             self.record_step(id, &params, active);
@@ -2417,6 +2426,17 @@ impl RustGisApp {
                     zarrui::connect(self);
                 }
             }
+            // Edit › Dynamic Text: the text tool, its dialog starting with one of the map's values.
+            "ui.dynamicText" => {
+                let text = p.get("text").and_then(Value::as_str).unwrap_or("");
+                let token = rustgis_engine::map::graphics::TOKENS
+                    .iter()
+                    .map(|(t, _)| *t)
+                    .find(|t| *t == text)
+                    .ok_or_else(|| format!("no dynamic text '{text}' (one of {{map}}, {{scale}}, {{date}}, …)"))?;
+                self.run("tool.set", json!({"tool": "graphicText"}))?;
+                self.ui.dynamic_text = Some(token);
+            }
             "ui.dialog" => {
                 let which = p.get("name").and_then(Value::as_str).unwrap_or("");
                 self.dialogs.open(which, &self.session)?;
@@ -2424,6 +2444,10 @@ impl RustGisApp {
                 if which == "graphicText" {
                     self.dialogs.a = p.get("lon").and_then(Value::as_f64).map(|v| v.to_string()).unwrap_or_default();
                     self.dialogs.b = p.get("lat").and_then(Value::as_f64).map(|v| v.to_string()).unwrap_or_default();
+                    // Dynamic Text starts it with the value picked.
+                    if let Some(t) = p.get("text").and_then(Value::as_str) {
+                        self.dialogs.text = t.chars().take(2000).collect();
+                    }
                 }
                 // Rename Map / Rename Layout remember which one (`target`, by name; default the
                 // one in view), so renaming another from the Browser leaves the view alone.
@@ -2712,6 +2736,11 @@ impl RustGisApp {
         panes::poll_geolibre(self, ctx);
         panes::poll_plugin_run(self, ctx);
         self.poll_downloads();
+        // A value picked under Dynamic Text lasts while the text tool does, however the tool
+        // changes (Esc, another tool, a text placed without Keep Tool, a command).
+        if self.session.tool != rustgis_engine::Tool::Graphic("text") {
+            self.ui.dynamic_text = None;
+        }
         // Addresses commands asked for where they couldn't download themselves (the browser):
         // fetched off the frame and added when they land, as Add Data › From URL does.
         for p in self.session.take_url_requests() {

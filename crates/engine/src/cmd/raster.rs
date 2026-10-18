@@ -34,6 +34,14 @@ pub fn commands() -> Vec<C> {
             r#"{"layer"?, "type": "stretch"|"rgb"|"classify"|"unique"|"colormap"|"shadedRelief", "band"?: 1.., "ramp"?, "invert"?: bool, "classes"?: 1..32, "method"?, "azimuth"?, "altitude"?, "zFactor"?, "grey"?: bool (shadedRelief without its colour ramp)}"#,
         ),
         C::new("raster.stretch", "Stretch Type", "Style › Rendering", |s, p| {
+            if let Some(like) = p.get("like").filter(|v| !v.is_null()) {
+                let like = like.as_str().ok_or("like is a raster layer's name")?;
+                let (min, max) = stretch_range(s, like)?;
+                return with(s, p, |rl, _| {
+                    rl.style.stretch = Stretch::Custom { min, max };
+                    Ok(())
+                });
+            }
             let code = ps(p, "type").ok_or("type is required")?;
             // A bound that was given but isn't a finite number is refused, not replaced by the layer's own.
             let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
@@ -73,7 +81,7 @@ pub fn commands() -> Vec<C> {
             })
         })
         .when(need_raster)
-        .params(r#"{"layer"?, "type": "none"|"minMax"|"custom"|"percentClip"|"standardDeviation"|"histogramEqualize", "low"?: %, "high"?: %, "n"?: deviations, "min"?, "max"?: custom bounds in the data's units (a missing one is the layer's own)}"#),
+        .params(r#"{"layer"?, "type": "none"|"minMax"|"custom"|"percentClip"|"standardDeviation"|"histogramEqualize", "low"?: %, "high"?: %, "n"?: deviations, "min"?, "max"?: custom bounds in the data's units (a missing one is the layer's own), "like"?: raster layer (instead of type: that layer's stretch as fixed bounds, so tiles match at their joins)}"#),
         C::new("raster.dra", "DRA", "Style › Rendering", |s, p| {
             let on = b(p, "on");
             with(s, p, |rl, _| {
@@ -133,6 +141,25 @@ fn get(s: &Session, p: &Value) -> Result<(u32, Arc<Raster>), String> {
     let rl = l.raster.as_ref().ok_or_else(|| format!("{} isn't a raster layer", l.name))?;
     let data = rl.data.clone().ok_or_else(|| format!("{}: the raster's data couldn't be read", l.name))?;
     Ok((id, data))
+}
+
+/// The value range a raster layer's stretch spans on the band it draws, for another layer to share.
+fn stretch_range(s: &Session, name: &str) -> Result<(f64, f64), String> {
+    let rl = s.map().layer_by_name(name).and_then(|l| l.raster.as_ref()).ok_or_else(|| format!("no raster layer '{name}'"))?;
+    let r = rl.data.as_ref().ok_or_else(|| format!("{name}: the raster's data couldn't be read"))?;
+    let band = rl.style.renderer.bands().first().copied().unwrap_or(0);
+    // Without the values its mask hides, as its own stretch is drawn.
+    let masked = rl.masked_stats();
+    let stats = masked
+        .as_ref()
+        .and_then(|m| m.first())
+        .or_else(|| r.bands.get(band).map(|b| &b.stats))
+        .ok_or_else(|| format!("{name} has no bands"))?;
+    let n = rustgis_map::raster::Normalizer::new(rl.style.stretch, stats, &r.data_type);
+    if !(n.lo.is_finite() && n.hi.is_finite() && n.lo < n.hi) {
+        return Err(format!("{name} has no range of values to share"));
+    }
+    Ok((n.lo, n.hi))
 }
 
 /// Applies `f` to the raster layer named by `p`.
@@ -236,7 +263,12 @@ pub fn add_raster(s: &mut Session, name: &str, mut layer: RasterLayer) -> CmdRes
     if empty_before && let Some(e) = s.map().layer(id).map(|l| l.extent()) {
         s.zoom_to(&e);
     }
-    Ok(json!({"layer": id, "width": w, "height": h, "bands": n}))
+    let mut v = json!({"layer": id, "width": w, "height": h, "bands": n});
+    // Callers that only read the result (the MCP server, scripts) learn about the overview too.
+    if let (Some(o), Some((fw, fh))) = (v.as_object_mut(), overview) {
+        o.insert("overviewOf".into(), json!([fw, fh]));
+    }
+    Ok(v)
 }
 
 /// Opens a raster file by path.
@@ -551,7 +583,10 @@ fn export(s: &mut Session, p: &Value) -> CmdResult {
         None => String::new(),
     };
     s.notify(format!("Exported {path}{note}"), false);
-    Ok(json!({"path": path}))
+    Ok(match r.overview {
+        Some((fw, fh)) => json!({"path": path, "width": r.width, "height": r.height, "overviewOf": [fw, fh]}),
+        None => json!({"path": path}),
+    })
 }
 
 /// Pixel values of the topmost visible raster under a longitude/latitude point.

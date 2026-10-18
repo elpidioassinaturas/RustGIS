@@ -5,9 +5,9 @@
 //! the waker (the app's repaint) is called, so the map draws again with the new tile. Exports
 //! and the command line, which can't draw a half-loaded map, [`wait`] for the fetches first.
 //!
-//! Natively, tiles are fetched on a few worker threads, the newest request first (the view the
-//! user is looking at now, not the one they panned away from). The browser app installs its own
-//! fetcher with [`set_fetcher`].
+//! Natively, tiles are fetched on worker threads, the newest request first (the view the user is
+//! looking at now, not the one they panned away from), a limited number at a time from each
+//! server. The browser app installs its own fetcher with [`set_fetcher`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -523,18 +523,38 @@ fn premultiply(data: &mut [u8]) {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    //! Worker threads fetching with `ureq`, newest request first.
+    //! Worker threads fetching with `ureq`, newest request first, a few at a time per server.
+    //!
+    //! A tile costs one or two round trips plus the server's own time (Esri's World Imagery
+    //! Wayback answers every tile with a redirect first), and the connections stay open between
+    //! tiles, so fetching is bound by latency: how many requests are under way at once. Each
+    //! server gets up to [`PER_HOST`] of them (OpenStreetMap's tile servers [`PER_HOST_OSM`]), and
+    //! the workers share one agent, so a server never sees more open connections than that.
 
+    use std::collections::HashMap;
     use std::sync::{Condvar, Mutex, OnceLock};
 
     use super::{DROPPED, Done, MAX_BYTES};
 
-    const WORKERS: usize = 8;
+    /// Fetches under way at once, over all servers: two servers at their cap.
+    const WORKERS: usize = 2 * PER_HOST;
+    /// Fetches under way at once from one server.
+    const PER_HOST: usize = 16;
+    /// From the OpenStreetMap Foundation's tile servers, which ask for restraint: what every
+    /// version of RustGIS before this one used in all.
+    const PER_HOST_OSM: usize = 8;
     /// Requests waiting beyond this many are dropped, oldest first: the view moved on.
     const QUEUE: usize = 512;
 
+    struct Jobs {
+        /// Waiting, oldest first: the address, its server and what to call with the answer.
+        waiting: Vec<(String, String, Done)>,
+        /// Fetches under way, by server.
+        active: HashMap<String, usize>,
+    }
+
     struct Queue {
-        jobs: Mutex<Vec<(String, Done)>>,
+        jobs: Mutex<Jobs>,
         ready: Condvar,
     }
 
@@ -547,8 +567,38 @@ mod native {
                     log::error!("could not start a tile fetcher: {e}");
                 }
             }
-            Queue { jobs: Mutex::new(Vec::new()), ready: Condvar::new() }
+            Queue { jobs: Mutex::new(Jobs { waiting: Vec::new(), active: HashMap::new() }), ready: Condvar::new() }
         })
+    }
+
+    /// The server an address is fetched from (`host[:port]`, lowercase), or `""` for a local
+    /// read, which no server limits.
+    pub(super) fn host(url: &str) -> String {
+        if crate::mbtiles::is_tile(url) || url.starts_with(LOCAL) {
+            return String::new();
+        }
+        let Some((_, rest)) = url.split_once("://") else { return String::new() };
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = rest.get(..end).unwrap_or(rest);
+        // Credentials in the address aren't part of the server.
+        authority.rsplit_once('@').map_or(authority, |(_, h)| h).to_ascii_lowercase()
+    }
+
+    /// How many fetches may be under way at once from `host`.
+    pub(super) fn cap(host: &str) -> usize {
+        let name = host.split(':').next().unwrap_or(host);
+        if host.is_empty() {
+            WORKERS
+        } else if name == "tile.openstreetmap.org" || name.ends_with(".tile.openstreetmap.org") {
+            PER_HOST_OSM
+        } else {
+            PER_HOST
+        }
+    }
+
+    /// The newest waiting job whose server is below its cap.
+    pub(super) fn pick(waiting: &[&str], active: &HashMap<String, usize>) -> Option<usize> {
+        waiting.iter().rposition(|h| active.get(*h).copied().unwrap_or(0) < cap(h))
     }
 
     /// A local file's range, read on a worker.
@@ -563,12 +613,14 @@ mod native {
         let q = queue();
         let dropped = {
             let mut jobs = q.jobs.lock().unwrap_or_else(|e| e.into_inner());
-            jobs.push((url, done));
-            (jobs.len() > QUEUE).then(|| jobs.remove(0))
+            let host = host(&url);
+            jobs.waiting.push((url, host, done));
+            (jobs.waiting.len() > QUEUE).then(|| jobs.waiting.remove(0))
         };
-        q.ready.notify_one();
+        // Every worker may be waiting for a server at its cap, and only some can take this one.
+        q.ready.notify_all();
         // Answered once the queue is unlocked: `done` takes the cache's lock and wakes the app.
-        if let Some((_, done)) = dropped {
+        if let Some((_, _, done)) = dropped {
             done(Err(DROPPED.into()));
         }
     }
@@ -579,8 +631,18 @@ mod native {
             .user_agent(concat!("RustGIS/", env!("CARGO_PKG_VERSION"), " (+https://rustgis.app)"))
             // Redirects are followed by `get`, which checks where each one leads.
             .max_redirects(0)
+            // The workers share the agent: keep a connection open for each fetch a server
+            // may have under way, so the next tile doesn't connect again.
+            .max_idle_connections_per_host(PER_HOST)
+            .max_idle_connections(WORKERS)
             .build()
             .into()
+    }
+
+    /// The agent the workers share, and with it their open connections.
+    fn shared_agent() -> &'static ureq::Agent {
+        static A: OnceLock<ureq::Agent> = OnceLock::new();
+        A.get_or_init(agent)
     }
 
     /// An agent for downloads, which may take minutes.
@@ -599,20 +661,34 @@ mod native {
     }
 
     fn work() {
-        let agent = agent();
+        let agent = shared_agent();
         let q = queue();
         loop {
-            let job = {
+            let (url, done, host) = {
                 let mut jobs = q.jobs.lock().unwrap_or_else(|e| e.into_inner());
                 loop {
-                    if let Some(j) = jobs.pop() {
-                        break j;
+                    let hosts: Vec<&str> = jobs.waiting.iter().map(|(_, h, _)| h.as_str()).collect();
+                    if let Some(i) = pick(&hosts, &jobs.active) {
+                        let (url, host, done) = jobs.waiting.remove(i);
+                        *jobs.active.entry(host.clone()).or_insert(0) += 1;
+                        break (url, done, host);
                     }
                     jobs = q.ready.wait(jobs).unwrap_or_else(|e| e.into_inner());
                 }
             };
-            let (url, done) = job;
-            done(get(&agent, &url));
+            let result = get(agent, &url);
+            {
+                let mut jobs = q.jobs.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(n) = jobs.active.get_mut(&host) {
+                    *n = n.saturating_sub(1);
+                    if *n == 0 {
+                        jobs.active.remove(&host);
+                    }
+                }
+            }
+            // A job waiting for this server may go now.
+            q.ready.notify_all();
+            done(result);
         }
     }
 
@@ -876,6 +952,69 @@ mod tests {
         // Too many.
         let base = serve((0..7).map(|_| redirect("/again")).collect());
         assert!(native::get(&agent, &format!("{base}/x")).unwrap_err().contains("too many"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fetches_are_limited_per_server() {
+        assert_eq!(native::host("https://Tile.Example.org/1/2/3.png"), "tile.example.org");
+        assert_eq!(native::host("http://127.0.0.1:8080/a?b#c"), "127.0.0.1:8080");
+        assert_eq!(native::host("https://user:pw@example.org"), "example.org");
+        assert_eq!(native::host(&format!("{DOWNLOAD}https://example.org/x")), "example.org");
+        assert_eq!(native::host("https://example.org/a.pmtiles#rustgis-range=0-9"), "example.org");
+        assert_eq!(native::host("mbtiles:/data/a.mbtiles/1/2/3"), "");
+        assert_eq!(native::host("not an address"), "");
+        // OpenStreetMap's servers get fewer than other servers; local reads aren't limited.
+        assert!(native::cap("tile.openstreetmap.org") < native::cap("example.org"));
+        assert_eq!(native::cap("a.tile.openstreetmap.org"), native::cap("tile.openstreetmap.org"));
+        assert!(native::cap("") >= native::cap("example.org"));
+        // The newest job whose server has room.
+        let full = native::cap("a.org");
+        let active: HashMap<String, usize> = [("a.org".to_string(), full)].into();
+        assert_eq!(native::pick(&["b.org", "a.org", "b.org", "a.org"], &active), Some(2));
+        assert_eq!(native::pick(&["a.org", "a.org"], &active), None);
+        assert_eq!(native::pick(&["a.org"], &HashMap::new()), Some(0));
+    }
+
+    /// Many tiles from one server are fetched more than 8 at a time (the old pool), and never
+    /// more than the server's cap.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fetches_from_one_server_run_side_by_side() {
+        use std::io::{Read, Write};
+        use std::sync::mpsc;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let open = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+        let (o, m) = (open.clone(), most.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let (o, m) = (o.clone(), m.clone());
+                std::thread::spawn(move || {
+                    let now = o.fetch_add(1, Ordering::SeqCst) + 1;
+                    m.fetch_max(now, Ordering::SeqCst);
+                    let mut buf = [0u8; 2048];
+                    let _ = stream.read(&mut buf);
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    o.fetch_sub(1, Ordering::SeqCst);
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntile");
+                });
+            }
+        });
+        let (tx, rx) = mpsc::channel();
+        let n = 40;
+        for i in 0..n {
+            let tx = tx.clone();
+            native::fetch(format!("http://{addr}/{i}.png"), Box::new(move |r| drop(tx.send(r))));
+        }
+        for _ in 0..n {
+            assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap().unwrap(), b"tile");
+        }
+        let most = most.load(Ordering::SeqCst);
+        assert!(most > 8, "only {most} at a time");
+        assert!(most <= native::cap(&addr.to_string()), "{most} at a time");
     }
 
     #[test]

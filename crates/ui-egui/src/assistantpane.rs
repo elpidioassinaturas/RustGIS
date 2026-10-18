@@ -1608,9 +1608,7 @@ mod tests {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", name])
             .env("RUSTGIS_TEST_ISOLATED", "1")
-            .env("XDG_CONFIG_HOME", &dir)
-            .env("APPDATA", &dir)
-            .env("HOME", &dir)
+            .env(rustgis_engine::data::dirs::CONFIG_ENV, &dir)
             .env("RUSTGIS_LANGUAGE", "en")
             .output()
             .unwrap();

@@ -608,6 +608,7 @@ mod native {
     };
     use crate::provider::{HttpRequest, HttpResponse};
     use crate::{Error, Recovery, http};
+    use rustgis_engine::data::dirs::config_dir;
 
     /// The credentials' file name, in the app's settings folder.
     const FILE: &str = "chatgpt-auth.json";
@@ -619,23 +620,9 @@ mod native {
 
     type Send<'a> = &'a mut dyn FnMut(&HttpRequest) -> Result<HttpResponse, Error>;
 
-    /// The settings folder the desktop app keeps its preferences in.
-    pub fn settings_dir() -> Option<PathBuf> {
-        if cfg!(target_os = "windows") {
-            std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("RustGIS"))
-        } else if cfg!(target_os = "macos") {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/RustGIS"))
-        } else {
-            std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-                .map(|d| d.join("rustgis"))
-        }
-    }
-
-    /// Where the sign-in is kept.
+    /// Where the sign-in is kept: the settings folder the desktop app keeps its preferences in.
     pub fn auth_path() -> Option<PathBuf> {
-        settings_dir().map(|d| d.join(FILE))
+        config_dir().map(|d| d.join(FILE))
     }
 
     fn now() -> i64 {
@@ -772,7 +759,7 @@ mod native {
 
     /// This computer's host id, created the first time.
     pub fn host_id() -> Result<String, Error> {
-        let path = settings_dir().ok_or("no settings folder")?.join(HOST_FILE);
+        let path = config_dir().ok_or("no settings folder")?.join(HOST_FILE);
         let _guard = store(&path)?;
         match std::fs::read_to_string(&path) {
             Ok(id) if valid_host_id(id.trim()) => return Ok(id.trim().to_string()),

@@ -63,7 +63,10 @@ pub fn commands() -> Vec<C> {
             r#"{"layer": raster, "index": "ndvi"|"ndwi"|"savi"|"nbr"|"ndbi"|"evi", "red"?, "green"?, "blue"?, "nir"?, "swir"?: band numbers, "name"?: output}"#,
         ),
         C::new("raster.process", "Process", "Analyze › Imagery Tools", process)
-            .params(r#"{"layer": raster, "operation": "clip"|"resample", "extent"?: [minLon, minLat, maxLon, maxLat] (clip; the view when omitted), "factor"?: n (resample: n×n pixels become one), "name"?: output}"#),
+            .params(r#"{"layer": raster, "operation": "clip"|"resample", "extent"?: [minLon, minLat, maxLon, maxLat] (clip; the view when omitted), "polygon"?: polygon layer (clip to its selected or all polygons; cells outside become no-data), "factor"?: n (resample: n×n pixels become one), "name"?: output}"#),
+        C::new("raster.mosaic", "Mosaic Rasters", "Analyze › Imagery Tools", raster_mosaic).params(
+            r#"{"inputs": [raster layer or file path, …] (two or more, in one coordinate system and cell size; where they overlap the first wins), "name"?: output, "path"?: GeoTIFF to write the mosaic to}"#,
+        ),
         C::new("raster.editPixels", "Pixel Editor", "Analyze › Imagery Tools", edit_pixels)
             .params(r#"{"layer": raster, "polygon": [[lon, lat], …], "value"?: number (no-data when omitted), "band"?: 1-based (all when omitted)}"#),
         // Measurements are session results, not project changes: no undo step.
@@ -337,6 +340,28 @@ fn index(s: &mut Session, p: &Value) -> CmdResult {
 fn process(s: &mut Session, p: &Value) -> CmdResult {
     let r = raster(s, p)?;
     match ps(p, "operation").ok_or("operation is required")? {
+        "clip" if p.get("polygon").is_some_and(|v| !v.is_null()) => {
+            let pl = ps(p, "polygon").ok_or("polygon is a polygon layer's name")?;
+            let l = s
+                .map()
+                .layer_by_name(pl)
+                .filter(|l| l.geometry_type() == GeometryType::Polygon)
+                .ok_or_else(|| format!("no polygon layer '{pl}'"))?;
+            // The selected polygons, or all of them.
+            let rows: Vec<usize> = if l.selection.is_empty() { (0..l.dataset.features.len()).collect() } else { l.selection.clone() };
+            let polygons: Vec<Vec<Vec<Coord>>> = rows
+                .iter()
+                .filter_map(|row| match l.dataset.features.get(*row).and_then(|f| f.geometry.as_ref()) {
+                    Some(Geometry::Polygon(polys)) => Some(polys.iter().cloned()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            let (cols, rows, mask) =
+                rasterops::polygon_mask(&r, &polygons).ok_or_else(|| format!("no cell of {} falls inside {pl}", r.name))?;
+            let out = clip_window(&r, cols, rows, Some(&mask), name(p, format!("{}_clip", r.name)))?;
+            add(s, out, false)
+        }
         "clip" => {
             let e = match p.get("extent").and_then(Value::as_array) {
                 Some(a) => {
@@ -372,23 +397,7 @@ fn process(s: &mut Session, p: &Value) -> CmdResult {
             if c1 <= c0 || r1 <= r0 {
                 return Err("the extent doesn't overlap the raster".into());
             }
-            let (w, h) = (c1 - c0, r1 - r0);
-            let bands: Vec<Vec<f32>> = r
-                .bands
-                .iter()
-                .map(|b| {
-                    (r0..r1)
-                        .flat_map(|row| (c0..c1).map(move |col| (row, col)))
-                        .map(|(row, col)| b.data.get((row * r.width + col) as usize).copied().unwrap_or(NODATA))
-                        .collect()
-                })
-                .collect();
-            let o = r.transform.to_world(c0 as f64, r0 as f64);
-            let gt = GeoTransform { origin_x: o.x, origin_y: o.y, ..r.transform };
-            let mut out =
-                Raster::new(name(p, format!("{}_clip", r.name)), w, h, bands, gt, r.crs, r.nodata, r.color.clone(), r.data_type.clone())
-                    .map_err(|e| e.to_string())?;
-            out.bands.iter_mut().zip(&r.bands).for_each(|(o, i)| o.name = i.name.clone());
+            let out = clip_window(&r, c0..c1, r0..r1, None, name(p, format!("{}_clip", r.name)))?;
             add(s, out, false)
         }
         "resample" => {
@@ -435,6 +444,182 @@ fn process(s: &mut Session, p: &Value) -> CmdResult {
         }
         o => Err(format!("unknown operation '{o}'")),
     }
+}
+
+/// Merges rasters on one grid (tiles of an elevation model, say) into one, keeping their
+/// coordinate system and cell size; where they overlap, the first input with data wins.
+fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
+    let inputs = p.get("inputs").and_then(Value::as_array).ok_or("inputs is a list of raster layers or file paths")?;
+    if inputs.len() < 2 {
+        return Err("a mosaic needs two or more rasters".into());
+    }
+    if inputs.len() > 10_000 {
+        return Err("a mosaic takes at most 10000 inputs".into());
+    }
+    let max = rustgis_data::raster::MAX_SAMPLES as i64;
+    let mut rs: Vec<Arc<Raster>> = Vec::with_capacity(inputs.len());
+    // Each input's place on the first one's grid, and the bounds of them all so far.
+    let mut places: Vec<(i64, i64)> = Vec::with_capacity(inputs.len());
+    let (mut c0, mut r0, mut c1, mut r1) = (0i64, 0i64, 0i64, 0i64);
+    // Each input is checked as it is read, so a mismatched or oversized set fails before the
+    // rest are loaded.
+    for v in inputs {
+        let n = v.as_str().map(str::trim).filter(|n| !n.is_empty()).ok_or("each input is a raster layer's name or a file path")?;
+        let r = match raster_named(s, n) {
+            Ok(r) => r,
+            Err(_) if rustgis_data::raster::is_raster_name(n) => {
+                Arc::new(rustgis_data::raster::read_path(std::path::Path::new(n)).map_err(|e| format!("{n}: {e}"))?)
+            }
+            Err(e) => return Err(e),
+        };
+        // An overview would quietly coarsen the whole mosaic.
+        if let Some((fw, fh)) = r.overview {
+            return Err(format!(
+                "{} is open as a {} × {} overview of the {fw} × {fh} raster; give its file path, or mosaic smaller tiles",
+                r.name, r.width, r.height
+            ));
+        }
+        let first = rs.first().unwrap_or(&r);
+        mosaic_matches(first, &r)?;
+        // Snapped to whole cells only when it is already within a hundredth of one.
+        let (c, rr) = first.transform.to_pixel(r.transform.to_world(0.0, 0.0));
+        let limit = f64::from(u32::MAX);
+        if !(c.is_finite() && rr.is_finite() && c.abs() < limit && rr.abs() < limit) {
+            return Err(format!("{} is too far from {} to mosaic", r.name, first.name));
+        }
+        if (c - c.round()).abs() > 0.01 || (rr - rr.round()).abs() > 0.01 {
+            return Err(format!("{}'s cells don't line up with {}'s: resample them onto one grid first", r.name, first.name));
+        }
+        let (pc, pr) = (c.round() as i64, rr.round() as i64);
+        (c0, r0) = if rs.is_empty() { (pc, pr) } else { (c0.min(pc), r0.min(pr)) };
+        (c1, r1) = (c1.max(pc + i64::from(r.width)), r1.max(pr + i64::from(r.height)));
+        let (w, h) = (c1 - c0, r1 - r0);
+        let samples = w.saturating_mul(h).saturating_mul(r.band_count().max(1) as i64);
+        if samples > max || w > i64::from(u32::MAX) || h > i64::from(u32::MAX) {
+            return Err(format!(
+                "the mosaic would be {w} × {h} cells × {} bands, more than the {max} values that fit in memory: clip the tiles or mosaic fewer at a time",
+                r.band_count()
+            ));
+        }
+        places.push((pc, pr));
+        rs.push(r);
+    }
+    let first = rs.first().ok_or("a mosaic needs two or more rasters")?;
+    let (w, h) = (c1 - c0, r1 - r0);
+    if w <= 0 || h <= 0 {
+        return Err("the mosaic would be empty".into());
+    }
+    let (w, h) = (w as u32, h as u32);
+    let nodata = first.nodata.or(Some(NODATA as f64));
+    let fill = nodata.map(|v| v as f32).unwrap_or(NODATA);
+    let mut bands: Vec<Vec<f32>> = vec![vec![fill; w as usize * h as usize]; first.band_count()];
+    for (r, (pc, pr)) in rs.iter().zip(&places) {
+        let (dc, dr) = ((pc - c0) as usize, (pr - r0) as usize);
+        for (out, b) in bands.iter_mut().zip(&r.bands) {
+            for row in 0..r.height as usize {
+                let (Some(src), Some(dst)) = (
+                    b.data.get(row * r.width as usize..(row + 1) * r.width as usize),
+                    out.get_mut((dr + row) * w as usize + dc..(dr + row) * w as usize + dc + r.width as usize),
+                ) else {
+                    continue;
+                };
+                for (d, v) in dst.iter_mut().zip(src) {
+                    // Earlier inputs keep their cells; later ones only fill the gaps.
+                    if (*d == fill || d.is_nan()) && r.is_valid(*v) {
+                        *d = *v;
+                    }
+                }
+            }
+        }
+    }
+    let o = first.transform.to_world(c0 as f64, r0 as f64);
+    let gt = GeoTransform { origin_x: o.x, origin_y: o.y, ..first.transform };
+    let mut out = Raster::new(
+        name(p, format!("{}_mosaic", first.name)),
+        w,
+        h,
+        bands,
+        gt,
+        first.crs,
+        nodata,
+        first.color.clone(),
+        first.data_type.clone(),
+    )
+    .map_err(|e| e.to_string())?;
+    out.bands.iter_mut().zip(&first.bands).for_each(|(o, i)| o.name = i.name.clone());
+    let path = ps(p, "path").map(str::trim).filter(|p| !p.is_empty()).map(str::to_string);
+    if let Some(path) = &path {
+        let bytes = rustgis_data::raster::geotiff::write(&out, 0).map_err(|e| e.to_string())?;
+        rustgis_data::io::write_atomic(std::path::Path::new(path), &bytes).map_err(|e| format!("{path}: {e}"))?;
+    }
+    let mut v = add(s, out, false)?;
+    if let (Some(o), Some(path)) = (v.as_object_mut(), path) {
+        o.insert("path".into(), json!(path));
+    }
+    Ok(v)
+}
+
+/// Whether `r` can join a mosaic on `first`'s grid: one coordinate system, cell size and band count.
+fn mosaic_matches(first: &Raster, r: &Raster) -> Result<(), String> {
+    let (pw, ph) = (first.transform.pixel_width, first.transform.pixel_height);
+    let same = |a: f64, b: f64| (a - b).abs() <= 1e-6 * a.abs().max(b.abs());
+    if r.crs != first.crs {
+        return Err(format!(
+            "{} is in {}, {} in {}: reproject them to one coordinate system first",
+            r.name,
+            r.crs.label(),
+            first.name,
+            first.crs.label()
+        ));
+    }
+    if !same(r.transform.pixel_width, pw) || !same(r.transform.pixel_height, ph) {
+        return Err(format!(
+            "{} has {} × {} cells, {} {} × {}: resample them to one cell size first",
+            r.name,
+            r.transform.pixel_width,
+            r.transform.pixel_height.abs(),
+            first.name,
+            pw,
+            ph.abs()
+        ));
+    }
+    if r.band_count() != first.band_count() {
+        return Err(format!("{} has {} bands, {} {}", r.name, r.band_count(), first.name, first.band_count()));
+    }
+    Ok(())
+}
+
+/// The cells of `r` in a column and row window, as a new raster on the same grid. With a mask
+/// (row-major over the window), the cells it leaves out become no-data.
+fn clip_window(
+    r: &Raster,
+    cols: std::ops::Range<u32>,
+    rows: std::ops::Range<u32>,
+    mask: Option<&[bool]>,
+    name: String,
+) -> Result<Raster, String> {
+    let (w, h) = (cols.end.saturating_sub(cols.start), rows.end.saturating_sub(rows.start));
+    let nodata = if mask.is_some() { r.nodata.or(Some(NODATA as f64)) } else { r.nodata };
+    let fill = nodata.map(|v| v as f32).unwrap_or(NODATA);
+    let bands: Vec<Vec<f32>> = r
+        .bands
+        .iter()
+        .map(|b| {
+            rows.clone()
+                .flat_map(|row| cols.clone().map(move |col| (row, col)))
+                .enumerate()
+                .map(|(i, (row, col))| match mask.map(|m| m.get(i).copied().unwrap_or(false)) {
+                    Some(false) => fill,
+                    _ => b.data.get((row * r.width + col) as usize).copied().unwrap_or(fill),
+                })
+                .collect()
+        })
+        .collect();
+    let o = r.transform.to_world(f64::from(cols.start), f64::from(rows.start));
+    let gt = GeoTransform { origin_x: o.x, origin_y: o.y, ..r.transform };
+    let mut out = Raster::new(name, w, h, bands, gt, r.crs, nodata, r.color.clone(), r.data_type.clone()).map_err(|e| e.to_string())?;
+    out.bands.iter_mut().zip(&r.bands).for_each(|(o, i)| o.name = i.name.clone());
+    Ok(out)
 }
 
 /// A point given as [lon, lat]; anything else is an error (a dropped point would give a wrong

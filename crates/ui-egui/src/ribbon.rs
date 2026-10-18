@@ -1157,15 +1157,48 @@ fn graphics_group(app: &mut RustGisApp, ui: &mut Ui) {
 
 fn graphics_and_text_group(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Graphics and Text", |ui| {
-        for (icon, label, desc, code) in [
-            ("g_text", "Text", "Click the map to place text.", "graphicText"),
-            ("dynamic_text", "Dynamic\nText", "Click the map to place text with live values, such as the scale or date.", "graphicText"),
-            ("picture", "Picture", "Drag a rectangle, then pick a PNG or JPEG image to place in it.", "graphicPicture"),
-        ] {
-            let checked = app.session.tool.code() == code && label != "Dynamic\nText";
-            if big(ui, app, icon, label, desc, "tool.set", json!({"tool": code}), checked, false).clicked() {
-                app.map.cancel_sketch();
+        let text_tool = app.session.tool.code() == "graphicText";
+        let dynamic = app.ui.dynamic_text.is_some();
+        let text = json!({"tool": "graphicText"});
+        if big(ui, app, "g_text", "Text", "Click the map to place text.", "tool.set", text, text_tool && !dynamic, false).clicked() {
+            app.map.cancel_sketch();
+        }
+        // A menu of the values, as in Publish › Text: the one picked starts the text placed.
+        let resp = big(
+            ui,
+            app,
+            "dynamic_text",
+            "Dynamic\nText",
+            "Pick a live value, such as the scale or date, then click the map to place it.",
+            "ui.menu",
+            Value::Null,
+            text_tool && dynamic,
+            true,
+        );
+        egui::Popup::menu(&resp).show(|ui| {
+            ui.set_min_width(200.0);
+            for &(token, what) in rustgis_engine::map::graphics::TOKENS {
+                if ui.button(format!("{}  {token}", tl!(what))).clicked() {
+                    app.map.cancel_sketch();
+                    let _ = app.run("ui.dynamicText", json!({"text": token}));
+                    ui.close();
+                }
             }
+        });
+        if big(
+            ui,
+            app,
+            "picture",
+            "Picture",
+            "Drag a rectangle, then pick a PNG or JPEG image to place in it.",
+            "tool.set",
+            json!({"tool": "graphicPicture"}),
+            app.session.tool.code() == "graphicPicture",
+            false,
+        )
+        .clicked()
+        {
+            app.map.cancel_sketch();
         }
     });
 }

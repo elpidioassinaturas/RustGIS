@@ -22,16 +22,7 @@ mod prefs {
     use serde_json::{Map, Value};
 
     pub fn dir() -> Option<PathBuf> {
-        if cfg!(target_os = "windows") {
-            std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("RustGIS"))
-        } else if cfg!(target_os = "macos") {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/RustGIS"))
-        } else {
-            std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-                .map(|d| d.join("rustgis"))
-        }
+        rustgis_engine::data::dirs::config_dir()
     }
 
     fn read() -> Map<String, Value> {

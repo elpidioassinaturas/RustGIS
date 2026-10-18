@@ -244,7 +244,7 @@ mod local {
         /// The usual folders: `skills` and `skills.json` in the settings folder, and
         /// `~/.agents/skills`.
         pub fn here() -> Places {
-            let settings = crate::chatgpt::settings_dir();
+            let settings = rustgis_engine::data::dirs::config_dir();
             let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).filter(|h| !h.is_empty());
             Places {
                 user: settings.as_ref().map(|d| d.join("skills")),

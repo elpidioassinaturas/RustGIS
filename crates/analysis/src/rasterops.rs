@@ -2,6 +2,8 @@
 //! onto another grid, weighted overlay, viewsheds, lines of sight, profiles, IDW interpolation,
 //! k-means classification and change detection. Outputs are new pixel arrays on a raster's grid.
 
+use std::ops::Range;
+
 use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
 use rustgis_geom::{Coord, Extent};
 
@@ -518,6 +520,84 @@ pub fn zonal_means(r: &Raster, bands: &[usize], rings: &[Vec<Coord>]) -> Option<
     (n > 0).then(|| (sums.into_iter().map(|s| s / n as f64).collect(), n))
 }
 
+/// The cells of `r` whose centres fall inside any of `polygons` (each an exterior ring and its
+/// holes, in longitude/latitude): the column and row window around the polygons, clamped to the
+/// raster, and a row-major mask over it. `None` when no cell centre falls inside.
+///
+/// The rings are projected onto the raster's own grid once and filled by scanline, so a large
+/// raster costs a pass over the polygon edges per row rather than a point test per cell.
+pub fn polygon_mask(r: &Raster, polygons: &[Vec<Vec<Coord>>]) -> Option<(Range<u32>, Range<u32>, Vec<bool>)> {
+    let tr = r.transformer();
+    let projected: Vec<Vec<Vec<(f64, f64)>>> = polygons
+        .iter()
+        .map(|rings| {
+            rings
+                .iter()
+                .map(|ring| ring.iter().filter_map(|c| tr.from_lonlat(*c)).map(|w| r.transform.to_pixel(w)).collect::<Vec<_>>())
+                .filter(|ring| ring.len() >= 3)
+                .collect::<Vec<_>>()
+        })
+        .filter(|rings| !rings.is_empty())
+        .collect();
+    let (mut c0, mut r0, mut c1, mut r1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for &(x, y) in projected.iter().flatten().flatten() {
+        (c0, r0, c1, r1) = (c0.min(x), r0.min(y), c1.max(x), r1.max(y));
+    }
+    if !(c0.is_finite() && r0.is_finite() && c1.is_finite() && r1.is_finite()) {
+        return None;
+    }
+    let clamp = |v: f64, n: u32| v.clamp(0.0, f64::from(n)) as u32;
+    let cols = clamp(c0.floor(), r.width)..clamp(c1.ceil(), r.width);
+    let rows = clamp(r0.floor(), r.height)..clamp(r1.ceil(), r.height);
+    if cols.is_empty() || rows.is_empty() {
+        return None;
+    }
+    let w = (cols.end - cols.start) as usize;
+    let mut mask = vec![false; w * (rows.end - rows.start) as usize];
+    let mut xs: Vec<f64> = Vec::new();
+    for (ri, row) in rows.clone().enumerate() {
+        let y = f64::from(row) + 0.5;
+        let line = mask.get_mut(ri * w..(ri + 1) * w).unwrap_or_default();
+        // Even-odd within each polygon (holes cut out), any polygon over the others.
+        for rings in &projected {
+            xs.clear();
+            for ring in rings {
+                for (i, &(ax, ay)) in ring.iter().enumerate() {
+                    let (bx, by) = ring.get(i + 1).or(ring.first()).copied().unwrap_or((ax, ay));
+                    if (ay <= y) != (by <= y) {
+                        xs.push(ax + (y - ay) * (bx - ax) / (by - ay));
+                    }
+                }
+            }
+            xs.sort_by(f64::total_cmp);
+            for &[x0, x1] in xs.as_chunks::<2>().0 {
+                // Cells whose centre (col + 0.5) lies in [x0, x1).
+                let a = clamp((x0 - 0.5).ceil(), r.width).max(cols.start);
+                let b = clamp((x1 - 0.5).ceil(), r.width).min(cols.end);
+                for col in a..b {
+                    if let Some(m) = line.get_mut((col - cols.start) as usize) {
+                        *m = true;
+                    }
+                }
+            }
+        }
+    }
+    // Trimmed to the cells inside: reprojected vertices on cell edges land a hair either side.
+    let (mut tc0, mut tr0, mut tc1, mut tr1) = (usize::MAX, usize::MAX, 0, 0);
+    for (i, _) in mask.iter().enumerate().filter(|(_, m)| **m) {
+        let (c, rr) = (i % w, i / w);
+        (tc0, tr0, tc1, tr1) = (tc0.min(c), tr0.min(rr), tc1.max(c + 1), tr1.max(rr + 1));
+    }
+    if tc0 >= tc1 || tr0 >= tr1 {
+        return None;
+    }
+    let trimmed: Vec<bool> =
+        (tr0..tr1).flat_map(|rr| (tc0..tc1).map(move |c| (rr, c))).map(|(rr, c)| mask.get(rr * w + c).copied().unwrap_or(false)).collect();
+    let cols = cols.start + tc0 as u32..cols.start + tc1 as u32;
+    let rows = rows.start + tr0 as u32..rows.start + tr1 as u32;
+    Some((cols, rows, trimmed))
+}
+
 /// A tiny arithmetic expression over band values.
 enum Expr {
     Num(f64),
@@ -627,6 +707,27 @@ mod tests {
         let b: Vec<f32> = (0..w * h).map(|i| (i / w) as f32).collect();
         let gt = GeoTransform { origin_x: 0.0, origin_y: 0.02, pixel_width: 0.001, pixel_height: -0.001 };
         Raster::new("ramp", w, h, vec![a, b], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn polygon_mask_fills_polygons_and_cuts_holes() {
+        let r = ramp();
+        let sq = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![Coord::new(x0, y0), Coord::new(x1, y0), Coord::new(x1, y1), Coord::new(x0, y1), Coord::new(x0, y0)]
+        };
+        // A square with a hole, and a second polygon in the south-west corner.
+        let polys = vec![vec![sq(0.005, 0.005, 0.015, 0.015), sq(0.009, 0.009, 0.011, 0.011)], vec![sq(0.0, 0.0, 0.002, 0.002)]];
+        let (cols, rows, mask) = polygon_mask(&r, &polys).unwrap_or_else(|| panic!("no mask"));
+        assert_eq!((cols.clone(), rows.clone()), (0..15, 5..20));
+        assert_eq!(mask.iter().filter(|m| **m).count(), 100 - 4 + 4);
+        let at = |col: u32, row: u32| mask[((row - rows.start) * 15 + col - cols.start) as usize];
+        // Rows count down from the north edge (0.02): row 5 is the square's northern row.
+        assert!(at(5, 5) && at(14, 14) && !at(4, 5) && !at(14, 15));
+        assert!(!at(9, 9) && !at(10, 10), "the hole stays out");
+        assert!(at(0, 19) && at(1, 18) && !at(2, 18));
+        // Outside the raster, or too small to hold a cell centre: nothing.
+        assert!(polygon_mask(&r, &[vec![sq(1.0, 1.0, 2.0, 2.0)]]).is_none());
+        assert!(polygon_mask(&r, &[vec![sq(0.0051, 0.0051, 0.0052, 0.0052)]]).is_none());
     }
 
     #[test]

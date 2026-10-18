@@ -179,6 +179,16 @@ RustGIS is free and open source, and stays that way. If it is useful to you or y
 
 See the [Become a Sponsor](https://rustgis.app/sponsor/) page for what sponsorship supports and for other, free ways to help.
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=opengeos%2Frustgis&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=opengeos/rustgis&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=opengeos/rustgis&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=opengeos/rustgis&type=date&legend=top-left" />
+ </picture>
+</a>
+
 ## License and credits
 
 Licensed under the [Apache License 2.0](LICENSE). Sample data from

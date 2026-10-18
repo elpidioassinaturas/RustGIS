@@ -160,8 +160,16 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
 - **Georeference** places a raster from control points (column, row, longitude, latitude) or
   stretches it over the map view.
 - **Change Detection** (difference, ratio, percent), **Spectral Analysis** (every band at a
-  pixel), **Indices** (NDVI, NDWI, SAVI, NBR, NDBI, EVI), **Process** (clip to the view,
+  pixel), **Indices** (NDVI, NDWI, SAVI, NBR, NDBI, EVI), **Process** (clip to the view, to a
+  box, or to a polygon layer's selected or all polygons, with the cells outside them no-data;
   resample) and the **Pixel Editor** (set the pixels inside a polygon).
+- **Mosaic Rasters** (`raster.mosaic`) merges tiles of one grid, such as the 1 km tiles of a state
+  elevation model, into one raster in their own coordinate system and cell size, optionally
+  written to a GeoTIFF: `{"inputs": ["dgm_1.tif", "dgm_2.tif", …], "path": "dem.tif"}`. Inputs
+  are layers or file paths; where they overlap, the first one with data wins. Tiles in different
+  coordinate systems or cell sizes, or opened from an overview, are refused rather than quietly
+  resampled, as are tiles whose cells don't line up; the mosaic has to fit in memory (120 million
+  values: cells times bands).
 - **Classification Wizard** (unsupervised k-means) and **Classification Tools** (minimum distance
   from training polygons).
 - **Mensuration**: distances along the surface, heights between two points, areas, and volumes

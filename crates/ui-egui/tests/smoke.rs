@@ -1691,3 +1691,67 @@ fn right_panes_open_as_tabs() {
         assert_eq!(h.state().ui.left, None, "a left pane's close never opens one");
     }
 }
+
+/// A primary click in the middle of the map.
+fn click_map(h: &mut egui_kittest::Harness<'_, RustGisApp>) {
+    let at = egui::pos2(700.0, 500.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(at));
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        });
+    }
+    for _ in 0..4 {
+        h.step();
+    }
+}
+
+#[test]
+fn dynamic_text_is_a_menu_of_values_that_starts_the_text() {
+    // Clicked through accesskit: the group may be scrolled out of the window.
+    let mut h = harness();
+    h.state_mut().ui.tab = "Edit".into();
+    h.step();
+    h.get_by_label("Dynamic Text").click_accesskit();
+    h.step();
+    h.get_by_label("Map scale  {scale}").click_accesskit();
+    h.step();
+    assert_eq!(h.state().session.tool.code(), "graphicText");
+    assert_eq!(h.state().ui.dynamic_text, Some("{scale}"));
+    // The dialog a click on the map opens starts with the value.
+    click_map(&mut h);
+    assert_eq!(h.state().dialogs.open, Some("graphicText"));
+    assert_eq!(h.state().dialogs.text, "{scale}");
+    h.state_mut().dialogs.open = None;
+    h.step();
+    // Text starts with "Text" again (the button: the dialog's box is labelled Text too).
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Text").click_accesskit();
+    h.step();
+    assert_eq!(h.state().ui.dynamic_text, None);
+    click_map(&mut h);
+    assert_eq!(h.state().dialogs.open, Some("graphicText"));
+    assert_eq!(h.state().dialogs.text, "Text");
+    h.state_mut().dialogs.open = None;
+    h.step();
+    // Another tool forgets the value.
+    h.get_by_label("Dynamic Text").click_accesskit();
+    h.step();
+    h.get_by_label("Current date  {date}").click_accesskit();
+    h.step();
+    assert_eq!(h.state().ui.dynamic_text, Some("{date}"));
+    h.state_mut().run("tool.set", json!({"tool": "explore"})).unwrap();
+    h.step();
+    assert_eq!(h.state().ui.dynamic_text, None);
+    // A command, for the Assistant and scripts too: only the map's values.
+    h.state_mut().run("ui.dynamicText", json!({"text": "{crs}"})).unwrap();
+    assert_eq!((h.state().session.tool.code(), h.state().ui.dynamic_text), ("graphicText", Some("{crs}")));
+    assert!(h.state_mut().run("ui.dynamicText", json!({"text": "{page}"})).is_err());
+    assert!(h.state_mut().run("ui.dynamicText", json!({})).is_err());
+    assert_eq!(h.state().ui.dynamic_text, Some("{crs}"), "a refused value leaves the one picked");
+    // Choosing Text again by command (Command Search, a script) starts plain text.
+    h.state_mut().run("tool.set", json!({"tool": "graphicText"})).unwrap();
+    assert_eq!(h.state().ui.dynamic_text, None);
+}
