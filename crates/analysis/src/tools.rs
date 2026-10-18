@@ -1026,7 +1026,7 @@ mod tests {
                     let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
                     // The tests (this one reads files) are the `mod tests` closing each file.
                     let code = text.split("#[cfg(test)]\nmod ").next().unwrap_or_default();
-                    for reach in ["fs::", "File::", "io::Write", "OpenOptions", "use std::{"] {
+                    for reach in ["fs::", "std::fs", "File::", "io::Write", "OpenOptions", "use std::{"] {
                         assert!(!code.contains(reach), "{}: names {reach}, so a tool's output could become a place", path.display());
                     }
                     scanned += 1;

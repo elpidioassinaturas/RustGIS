@@ -1243,7 +1243,8 @@ impl RustGisApp {
     }
 
     /// The name of the active layer, when command `id` would act on it for want of a `layer`
-    /// (enabled predicates only read the session, so asking twice changes nothing):
+    /// (an `enabled` predicate gets the session shared, `&Session`, so asking twice changes
+    /// nothing; what it says when disabled doesn't matter here):
     /// it takes a `layer` and needs an active one to be enabled, or is one of those that
     /// default to it while enabled without one. Elsewhere `layer` names something else (a file's
     /// layer for Add Data, a service's), and a layer the command names is its own.
@@ -3025,6 +3026,8 @@ mod record_tests {
     fn every_optional_layer_is_classified() {
         // `layer` is a file's or a service's, the graphics layer drawn on (the active one only if
         // it is a graphics layer), a layout element's, or the one a report or web layer had.
+        // Needs a layer read in place from its file, which the sample has none of; it acts on it.
+        const NEEDS_A_STREAMED_LAYER: &[&str] = &["layer.loadAll"];
         const SOMETHING_ELSE: &[&str] = &[
             "service.refresh",
             "service.group",
@@ -3042,12 +3045,29 @@ mod record_tests {
             "share.replaceWebLayer",
         ];
         let mut app = RustGisApp::with_sample();
-        app.session.active_layer = None;
+        // A raster too, for the commands that need one active (a 2×2 ASCII grid).
+        let grid = "bmNvbHMgMgpucm93cyAyCnhsbGNvcm5lciAwCnlsbGNvcm5lciAwCmNlbGxzaXplIDEKTk9EQVRBX3ZhbHVlIC05OTk5CjEgMgozIDQK";
+        app.session.run("layer.addDataBytes", &json!({"fileName": "grid.asc", "data": grid})).unwrap();
+        let layers: Vec<u32> = app.session.map().layers.iter().map(|l| l.id).collect();
+        // As `layer_acted_on` tells, whatever its message says: enabled with some layer active,
+        // and not with none.
+        let mut needs_active = |c: &rustgis_engine::CommandSpec| {
+            app.session.active_layer = None;
+            if (c.enabled)(&app.session).is_none() {
+                return false;
+            }
+            let some = layers.iter().any(|&l| {
+                app.session.active_layer = Some(l);
+                (c.enabled)(&app.session).is_none()
+            });
+            app.session.active_layer = None;
+            some
+        };
         let unplaced: Vec<_> = rustgis_engine::cmd::all()
             .into_iter()
             .filter(|c| c.mutates && c.params.contains(r#""layer"?"#))
-            .filter(|c| !(c.enabled)(&app.session).is_some_and(|why| why.contains("Layers pane")))
-            .filter(|c| !DEFAULTS_TO_ACTIVE_LAYER.contains(&c.id) && !SOMETHING_ELSE.contains(&c.id))
+            .filter(|c| !needs_active(c))
+            .filter(|c| ![DEFAULTS_TO_ACTIVE_LAYER, SOMETHING_ELSE, NEEDS_A_STREAMED_LAYER].iter().any(|list| list.contains(&c.id)))
             .map(|c| c.id)
             .collect();
         assert!(unplaced.is_empty(), "say whether these act on the active layer: {unplaced:?}");
