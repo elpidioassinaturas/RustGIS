@@ -227,9 +227,11 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
                     let mut save = false;
                     let mut cancel = false;
                     if let Some((_, title, text)) = app.ws.task_edit.as_mut() {
-                        ui.add(egui::TextEdit::singleline(title).desired_width(f32::INFINITY).hint_text(tl!("Title")));
+                        // As long as task.editStep keeps them, so nothing typed is cut on Save.
+                        ui.add(egui::TextEdit::singleline(title).desired_width(f32::INFINITY).char_limit(200).hint_text(tl!("Title")));
                         ui.add(
                             egui::TextEdit::multiline(text)
+                                .char_limit(4000)
                                 .desired_rows(5)
                                 .desired_width(f32::INFINITY)
                                 .hint_text(tl!("What to do, where to find it and why")),

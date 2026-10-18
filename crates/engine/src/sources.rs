@@ -246,7 +246,9 @@ pub fn holds_secret(params: &serde_json::Value) -> bool {
                     Value::Null | Value::Bool(_) => false,
                     _ => true,
                 };
-                (secret_key(k) && filled) || walk(v, depth + 1)
+                // A bare `key` is a key for an address (`?key=…`, which `redact` reads in the
+                // string), but as a parameter's own name it's as likely a field or a lookup key.
+                (secret_key(k) && !k.eq_ignore_ascii_case("key") && filled) || walk(v, depth + 1)
             }),
             Value::Array(a) if depth < 16 => a.iter().any(|v| walk(v, depth + 1)),
             Value::Object(_) | Value::Array(_) => true,
@@ -423,6 +425,7 @@ mod tests {
             json!({"database": "postgres:host=db dbname=gis user=ana password=s3cret"}),
             json!({"url": "https://ana:s3cret@example.com/data.geojson"}),
             json!({"url": "https://example.com/tiles/{z}/{x}/{y}.png?access_token=pk.abc"}),
+            json!({"url": "https://maps.example.com/tiles/{z}/{x}/{y}.png?key=abc"}),
             json!({"source": {"headers": {"X-API-Key": "abc"}}}),
         ] {
             assert!(holds_secret(&p), "{p}");
@@ -433,6 +436,7 @@ mod tests {
             json!({"url": "https://example.com/data.geojson"}),
             json!({"database": "postgres:host=db dbname=gis user=ana", "password": ""}),
             json!({"url": "https://example.com/data.geojson", "token": false}),
+            json!({"layer": "Parcels", "key": "parcel_id"}),
         ] {
             assert!(!holds_secret(&p), "{p}");
         }

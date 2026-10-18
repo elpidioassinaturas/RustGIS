@@ -999,7 +999,9 @@ mod tests {
 
     /// `touches_files` in rustgis-engine lets tasks, models and notebooks from files set a built-in
     /// tool's `output`, because it only names the new layer (`out_name`). Hold every built-in tool
-    /// to that: an `output` parameter is plain text, and a run names its layer after it.
+    /// to that: an `output` parameter is plain text, a run names its layer after it, and no tool
+    /// here writes a file at all (it hands back layers; the engine adds them), so `output` can't
+    /// be made a place by a tool's body either.
     #[test]
     fn a_built_in_tools_output_only_names_its_layer() {
         for spec in TOOLS {
@@ -1010,6 +1012,23 @@ mod tests {
         let m = inputs();
         let r = crate::run("buffer", &m, &serde_json::json!({"input": "pts", "distance": 1, "output": "Named"})).unwrap();
         assert_eq!(layer(r).name, "Named");
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // (Read where the sources are: not in a wasm test runner.)
+        for entry in std::fs::read_dir(&src).into_iter().flatten() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                // The tools' code, not their tests (this one reads files).
+                let code = text.split("#[cfg(test)]").next().unwrap_or_default();
+                for writes in ["std::fs", "fs::write", "File::create", "OpenOptions"] {
+                    assert!(
+                        !code.contains(writes),
+                        "{}: a built-in tool writes files ({writes}), so its output could be a place",
+                        path.display()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
