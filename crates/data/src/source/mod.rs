@@ -219,8 +219,14 @@ fn url_name(url: &str) -> String {
 /// One attempt at opening a file by its web address from what is fetched of it so far: fails
 /// with [`remote::NEED`] until its header (or footer) is in. See [`open_url`].
 pub fn open_url_now(url: &str) -> Result<Box<dyn FeatureSource>> {
-    let file = remote::file(url);
-    let name = url_name(url);
+    open_file_now(remote::file(url))
+}
+
+/// [`open_url_now`] from `file`: a drive's reads note what they miss on the file it fetches for,
+/// even after other files pushed it out of those kept.
+fn open_file_now(file: std::sync::Arc<remote::Remote>) -> Result<Box<dyn FeatureSource>> {
+    let url = file.url().to_string();
+    let name = url_name(&url);
     let lower = url.to_ascii_lowercase();
     let path = lower.split(['?', '#']).next().unwrap_or(&lower);
     if path.ends_with(".fgb") {
@@ -234,15 +240,17 @@ pub fn open_url_now(url: &str) -> Result<Box<dyn FeatureSource>> {
 
 /// Opens a file by its web address, fetching what it needs (off the caller's thread).
 pub fn open_url(url: &str, done: Box<dyn FnOnce(Result<Box<dyn FeatureSource>>) + Send>) {
-    let u = url.to_string();
-    remote::drive(remote::file(url), std::sync::Arc::new(move || open_url_now(&u)), done);
+    let file = remote::file(url);
+    let f = file.clone();
+    remote::drive(file, std::sync::Arc::new(move || open_file_now(f.clone())), done);
 }
 
 /// [`open_url`], waiting for it (the command line and tools).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_url_blocking(url: &str) -> Result<Box<dyn FeatureSource>> {
-    let u = url.to_string();
-    remote::drive_blocking(remote::file(url), std::sync::Arc::new(move || open_url_now(&u)))
+    let file = remote::file(url);
+    let f = file.clone();
+    remote::drive_blocking(file, std::sync::Arc::new(move || open_file_now(f.clone())))
 }
 
 /// Reads a request, fetching what a source read by its web address needs, and waiting for it.

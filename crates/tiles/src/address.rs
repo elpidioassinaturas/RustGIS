@@ -32,7 +32,8 @@ fn host(url: &str) -> Option<String> {
     Some(host.trim_end_matches('.').to_ascii_lowercase())
 }
 
-fn ip_reach(ip: IpAddr) -> Reach {
+/// How far an IP address reaches.
+pub fn ip_reach(ip: IpAddr) -> Reach {
     match ip {
         IpAddr::V4(v4) => v4_reach(v4),
         IpAddr::V6(v6) => {

@@ -6,7 +6,8 @@ use std::path::Path;
 use rustgis_geom::{Coord, Extent};
 use rustgis_map::Rgba;
 use rustgis_map::layout::{
-    ElementKind, FrameShape, Grid, Guides, Layout, MAX_COLORBAR_TICKS, MAX_GUIDES, MIN_ELEMENT_MM, MapSeries, Orientation, PAGES, TickSide,
+    ArrowStyle, CoordFormat, ElementKind, FrameShape, Grid, GridEdges, GridStyle, Guides, Layout, MAX_COLORBAR_TICKS, MAX_GRID_WIDTH,
+    MAX_GUIDES, MAX_SCALE_DIVISIONS, MAX_TICK_MM, MIN_ELEMENT_MM, MapSeries, Orientation, PAGES, ScaleBarStyle, ScaleUnits, TickSide,
     fit_scale,
 };
 use serde_json::{Value, json};
@@ -81,10 +82,10 @@ pub fn commands() -> Vec<C> {
             r#"{"layout"?, "shape"?: "rectangle"|"circle"|"ellipse"|"polygon"|"lasso", "points"?: [[u, v], …] (polygon/lasso, 0..1 across the frame), "map"?: name, "x"?, "y"?, "w"?, "h"?: mm}"#,
         ),
         C::new("layout.addElement", "Add Element", "Publish › Map Surrounds", add_element).params(
-            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"colorbar"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA", "bold"?: bool (text), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "hideOther"?: bool (legend: leave out <all other values>), "orientation"?: "horizontal"|"vertical" (colorbar), "ticks"?: 2..21 (colorbar: labelled values, ends included), "tickSide"?: "below"|"above"|"right"|"left" (colorbar), "reverse"?: bool (colorbar: high values first), "fill"?: "#RRGGBBAA" (rectangle), "width"?: outline width (rectangle), "image"?: base64, "path"?: picture file, "layer"?: (table, chart; colorbar: a raster layer, default the top visible one), "field"?, "label"?, "rows"?, "step"?: degrees, "labels"?: bool, "off"?: bool (grid), "x"?, "y"?, "w"?, "h"?: mm}"##,
+            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"colorbar"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA", "bold"?: bool (text), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "hideOther"?: bool (legend: leave out <all other values>), "orientation"?: "horizontal"|"vertical" (colorbar), "ticks"?: 2..21 (colorbar: labelled values, ends included), "tickSide"?: "below"|"above"|"right"|"left" (colorbar), "reverse"?: bool (colorbar: high values first), "fill"?: "#RRGGBBAA" (rectangle, northArrow), "width"?: outline width (rectangle) or line width in points (grid), "image"?: base64, "path"?: picture file, "layer"?: (table, chart; colorbar: a raster layer, default the top visible one), "field"?, "label"?, "rows"?, "step"?: degrees (0 picks one), "labels"?: bool, "style"?: "lines"|"ticks"|"linesAndTicks" (grid) or "classic"|"compass"|"triangle"|"star" (northArrow) or "alternating"|"stepped"|"line" (scaleBar), "tickLength"?: mm, "format"?: "decimal"|"dms", "hemisphere"?: bool (N/S/E/W rather than a sign), "edges"?: ["top","bottom","left","right"] (labelled edges), "labelOrientation"?: "horizontal"|"vertical", "off"?: bool (grid; options not given keep the grid's), "outline"?: "#RRGGBB" (northArrow), "units"?: "auto"|"kilometers"|"meters"|"miles"|"feet", "divisions"?: 1..10 (scaleBar), "x"?, "y"?, "w"?, "h"?: mm}"##,
         ),
         C::new("layout.update", "Element Properties", "Publish › Element", update).params(
-            r##"{"layout"?, "element": id, "x"?, "y"?, "w"?, "h"?: mm, "name"?, "visible"?, "text"?, "size"?, "color"?, "bold"?, "title"?, "allClasses"?: bool (legend), "hideOther"?: bool (legend), "orientation"?, "ticks"?, "tickSide"?, "reverse"?: (colorbar), "map"?, "scale"?, "center"?: [lon, lat], "layer"?: (colorbar: "" for the top visible raster), "field"?, "rows"?}"##,
+            r##"{"layout"?, "element": id, "x"?, "y"?, "w"?, "h"?: mm, "name"?, "visible"?, "text"?, "size"?, "color"?, "bold"?, "title"?, "allClasses"?: bool (legend), "hideOther"?: bool (legend), "orientation"?, "ticks"?, "tickSide"?, "reverse"?: (colorbar), "style"?: (northArrow, scaleBar), "fill"?, "outline"? (northArrow), "units"?, "divisions"? (scaleBar), "map"?, "scale"?, "center"?: [lon, lat], "grid"?: {grid options as in layout.addElement} | false (map frame), "layer"?: (colorbar: "" for the top visible raster), "field"?, "rows"?}"##,
         ),
         C::new("layout.guides", "Guides", "Publish › Page Setup", guides).params(
             r#"{"layout"?, "x"?: [mm] (vertical guides, from the page's left edge), "y"?: [mm] (horizontal guides, from its top edge), "clear"?: bool (remove every guide first)}"#,
@@ -249,8 +250,8 @@ pub(crate) fn new_layout(s: &mut Session, p: &Value) -> CmdResult {
                 (side, m + 16.0, sw, fh * 0.6),
                 ElementKind::Legend { frame, title: "Legend".into(), all_classes: false, hide_other: false },
             );
-            l.add("North Arrow", (side + sw / 2.0 - 8.0, m + 16.0 + fh * 0.62, 16.0, 24.0), ElementKind::NorthArrow { frame });
-            l.add("Scale Bar", (side, m + 16.0 + fh * 0.62 + 28.0, sw, 12.0), ElementKind::ScaleBar { frame });
+            l.add("North Arrow", (side + sw / 2.0 - 8.0, m + 16.0 + fh * 0.62, 16.0, 24.0), ElementKind::north_arrow(frame));
+            l.add("Scale Bar", (side, m + 16.0 + fh * 0.62 + 28.0, sw, 12.0), ElementKind::scale_bar(frame));
             l.add(
                 "Credits",
                 (side, h - m - 10.0, sw, 10.0),
@@ -397,11 +398,13 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
     let (name, rect, k) = match kind {
         "northArrow" => {
             let frame = frame_of(l, p)?;
-            ("North Arrow", place(p, l, (pw - 30.0, 15.0, 16.0, 24.0))?, ElementKind::NorthArrow { frame })
+            let k = restyle(&ElementKind::north_arrow(frame), p)?.unwrap_or(ElementKind::north_arrow(frame));
+            ("North Arrow", place(p, l, (pw - 30.0, 15.0, 16.0, 24.0))?, k)
         }
         "scaleBar" => {
             let frame = frame_of(l, p)?;
-            ("Scale Bar", place(p, l, (15.0, ph - 25.0, 70.0, 12.0))?, ElementKind::ScaleBar { frame })
+            let k = restyle(&ElementKind::scale_bar(frame), p)?.unwrap_or(ElementKind::scale_bar(frame));
+            ("Scale Bar", place(p, l, (15.0, ph - 25.0, 70.0, 12.0))?, k)
         }
         "legend" => {
             let frame = frame_of(l, p)?;
@@ -493,12 +496,15 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
         }
         "grid" => {
             let frame = frame_of(l, p)?;
-            let step = f(p, "step").unwrap_or(0.0).clamp(0.0, 90.0);
-            let c = color(p, "color", Rgba::new(0x40, 0x48, 0x55, 150))?;
+            // Options not given keep the frame's grid's, or the defaults for a new grid.
+            let base = match l.element(frame).map(|e| &e.kind) {
+                Some(ElementKind::MapFrame { grid: Some(g), .. }) => g.clone(),
+                _ => Grid::default(),
+            };
+            let new = if b(p, "off").unwrap_or(false) { None } else { Some(grid_params(p, base)?) };
             let l = active(s, p)?;
             if let Some(ElementKind::MapFrame { grid, .. }) = l.element_mut(frame).map(|e| &mut e.kind) {
-                *grid =
-                    if b(p, "off").unwrap_or(false) { None } else { Some(Grid { step, color: c, labels: b(p, "labels").unwrap_or(true) }) };
+                *grid = new;
             }
             return Ok(json!({"element": frame}));
         }
@@ -527,7 +533,11 @@ fn colorbar_layer(s: &Session, l: &Layout, frame: u32, name: Option<&str>) -> Re
 }
 
 fn orientation(p: &Value) -> Result<Option<Orientation>, String> {
-    match ps(p, "orientation").map(|o| o.trim().to_ascii_lowercase()) {
+    orientation_of(p, "orientation")
+}
+
+fn orientation_of(p: &Value, key: &str) -> Result<Option<Orientation>, String> {
+    match ps(p, key).map(|o| o.trim().to_ascii_lowercase()) {
         None => Ok(None),
         Some(o) if o == "horizontal" => Ok(Some(Orientation::Horizontal)),
         Some(o) if o == "vertical" => Ok(Some(Orientation::Vertical)),
@@ -544,6 +554,106 @@ fn tick_side(p: &Value) -> Result<Option<TickSide>, String> {
 
 fn ticks(p: &Value) -> Option<usize> {
     f(p, "ticks").filter(|v| v.is_finite()).map(|v| v.round().clamp(2.0, MAX_COLORBAR_TICKS as f64) as usize)
+}
+
+/// A grid with the options in `p` over `base`'s; a bad value is an error, leaving nothing changed.
+fn grid_params(p: &Value, base: Grid) -> Result<Grid, String> {
+    let mut g = base;
+    if let Some(v) = f(p, "step") {
+        g.step = v.clamp(0.0, 90.0);
+    }
+    g.color = color(p, "color", g.color)?;
+    if let Some(v) = b(p, "labels") {
+        g.labels = v;
+    }
+    if let Some(v) = ps(p, "style") {
+        g.style = GridStyle::from_name(v).ok_or_else(|| format!("unknown grid style '{v}' (lines, ticks or linesAndTicks)"))?;
+    }
+    if let Some(v) = f(p, "tickLength") {
+        g.tick_length = v.clamp(0.0, MAX_TICK_MM);
+    }
+    if let Some(v) = f(p, "width") {
+        g.width = v.clamp(0.0, MAX_GRID_WIDTH);
+    }
+    if let Some(v) = ps(p, "format") {
+        g.format = CoordFormat::from_name(v).ok_or_else(|| format!("unknown format '{v}' (decimal or dms)"))?;
+    }
+    if let Some(v) = b(p, "hemisphere") {
+        g.hemisphere = v;
+    }
+    if let Some(v) = p.get("edges") {
+        g.edges = edges(v)?;
+    }
+    if let Some(o) = orientation_of(p, "labelOrientation")? {
+        g.label_orientation = o;
+    }
+    Ok(g)
+}
+
+/// Labelled edges from `["top", "bottom", "left", "right"]` (any of them) or `"bottom,left"`.
+fn edges(v: &Value) -> Result<GridEdges, String> {
+    let names: Vec<String> = match v {
+        Value::Array(a) => a.iter().map(|n| n.as_str().map(str::to_string).ok_or("edges are names")).collect::<Result<_, _>>()?,
+        Value::String(t) => t.split(',').map(str::to_string).collect(),
+        _ => return Err("edges is a list of top, bottom, left and right".into()),
+    };
+    let mut e = GridEdges { top: false, bottom: false, left: false, right: false };
+    for n in names.iter().map(|n| n.trim().to_ascii_lowercase()).filter(|n| !n.is_empty()) {
+        match n.as_str() {
+            "top" => e.top = true,
+            "bottom" => e.bottom = true,
+            "left" => e.left = true,
+            "right" => e.right = true,
+            o => return Err(format!("unknown edge '{o}' (top, bottom, left or right)")),
+        }
+    }
+    Ok(e)
+}
+
+/// A north arrow or scale bar with the options in `p` over `kind`'s; `None` for other elements
+/// or when `p` has none. A bad value is an error, leaving nothing changed.
+fn restyle(kind: &ElementKind, p: &Value) -> Result<Option<ElementKind>, String> {
+    match kind {
+        ElementKind::NorthArrow { frame, style, fill, outline } => {
+            if ["style", "fill", "outline"].iter().all(|k| p.get(k).is_none()) {
+                return Ok(None);
+            }
+            let style = match ps(p, "style") {
+                Some(v) => ArrowStyle::from_name(v)
+                    .ok_or_else(|| format!("unknown north arrow style '{v}' (classic, compass, triangle or star)"))?,
+                None => *style,
+            };
+            Ok(Some(ElementKind::NorthArrow {
+                frame: *frame,
+                style,
+                fill: color(p, "fill", *fill)?,
+                outline: color(p, "outline", *outline)?,
+            }))
+        }
+        ElementKind::ScaleBar { frame, units, divisions, style } => {
+            if ["style", "units", "divisions"].iter().all(|k| p.get(k).is_none()) {
+                return Ok(None);
+            }
+            let style = match ps(p, "style") {
+                Some(v) => {
+                    ScaleBarStyle::from_name(v).ok_or_else(|| format!("unknown scale bar style '{v}' (alternating, stepped or line)"))?
+                }
+                None => *style,
+            };
+            let units = match ps(p, "units") {
+                Some(v) => {
+                    ScaleUnits::from_name(v).ok_or_else(|| format!("unknown units '{v}' (auto, kilometers, meters, miles or feet)"))?
+                }
+                None => *units,
+            };
+            let divisions = match p.get("divisions") {
+                Some(_) => f(p, "divisions").ok_or("divisions is a number")?.round().clamp(1.0, MAX_SCALE_DIVISIONS as f64) as usize,
+                None => *divisions,
+            };
+            Ok(Some(ElementKind::ScaleBar { frame: *frame, units, divisions, style }))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn update(s: &mut Session, p: &Value) -> CmdResult {
@@ -620,6 +730,24 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
             _ => None,
         }
     };
+    // A north arrow's or scale bar's new look, and a map frame's grid: `"grid": false` removes it,
+    // `true` adds the default one, an object changes the options it names, and null (not set)
+    // leaves it as it is.
+    let (restyled, new_grid) = {
+        let l = s.project.layouts.get(li).ok_or("no layout")?;
+        let kind = &l.element(id).ok_or_else(|| format!("no element {id}"))?.kind;
+        let grid = match (kind, p.get("grid").filter(|v| !v.is_null())) {
+            (ElementKind::MapFrame { grid, .. }, Some(v)) => Some(match v {
+                Value::Bool(false) => None,
+                Value::Bool(true) => Some(grid.clone().unwrap_or_default()),
+                Value::Object(_) => Some(grid_params(v, grid.clone().unwrap_or_default())?),
+                _ => return Err("grid is an object of grid options, or false to remove it".into()),
+            }),
+            (_, Some(_)) => return Err("only map frames have a grid".into()),
+            _ => None,
+        };
+        (restyle(kind, p)?, grid)
+    };
     let map_name = match ps(p, "map") {
         Some(n) => Some(
             s.project
@@ -663,6 +791,9 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         && f(p, "h").is_none()
     {
         std::mem::swap(&mut e.w, &mut e.h);
+    }
+    if let Some(k) = restyled {
+        e.kind = k;
     }
     match &mut e.kind {
         ElementKind::Text { text, size, color, bold } => {
@@ -712,9 +843,12 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
                 *reverse = v;
             }
         }
-        ElementKind::MapFrame { map, center, scale, .. } => {
+        ElementKind::MapFrame { map, center, scale, grid, .. } => {
             if let Some(m) = map_name {
                 *map = m;
+            }
+            if let Some(g) = new_grid {
+                *grid = g;
             }
             if let Some(v) = num("scale", 100.0, 1e10) {
                 *scale = v;

@@ -70,6 +70,342 @@ pub struct Grid {
     pub color: Rgba,
     #[serde(default = "yes")]
     pub labels: bool,
+    /// Lines across the frame, ticks along its edges (the neatline), or both.
+    #[serde(default)]
+    pub style: GridStyle,
+    /// Length of the edge ticks, in mm.
+    #[serde(default = "tick_length")]
+    pub tick_length: f64,
+    /// Width of the lines and ticks, in points.
+    #[serde(default = "grid_width")]
+    pub width: f64,
+    #[serde(default)]
+    pub format: CoordFormat,
+    /// Label with a hemisphere letter (`112.5°W`); off, with a sign (`-112.5°`).
+    #[serde(default = "yes")]
+    pub hemisphere: bool,
+    /// The edges that carry labels: longitudes along the top and bottom, latitudes along the left
+    /// and right.
+    #[serde(default)]
+    pub edges: GridEdges,
+    /// Vertical runs the left and right labels along their edge.
+    #[serde(default)]
+    pub label_orientation: Orientation,
+}
+
+impl Default for Grid {
+    fn default() -> Grid {
+        Grid {
+            step: 0.0,
+            color: Rgba::new(0x40, 0x48, 0x55, 150),
+            labels: true,
+            style: GridStyle::default(),
+            tick_length: tick_length(),
+            width: grid_width(),
+            format: CoordFormat::default(),
+            hemisphere: true,
+            edges: GridEdges::default(),
+            label_orientation: Orientation::default(),
+        }
+    }
+}
+
+/// The longest edge tick a grid draws, in mm.
+pub const MAX_TICK_MM: f64 = 20.0;
+/// The widest grid line, in points.
+pub const MAX_GRID_WIDTH: f64 = 10.0;
+
+fn tick_length() -> f64 {
+    2.0
+}
+
+fn grid_width() -> f64 {
+    0.6
+}
+
+impl Grid {
+    /// A graticule label: `v` degrees of longitude (`lon`) or latitude, on lines `step` apart.
+    ///
+    /// The Equator and prime meridian are `0°` (neither hemisphere), and so is the antimeridian
+    /// (`180°`). Decimal degrees show as many decimals as the step needs; degrees, minutes and
+    /// seconds leave out the minutes and seconds the step doesn't need.
+    pub fn label(&self, v: f64, lon: bool, step: f64) -> String {
+        // A stepped loop accumulates `+= step`, so 0 and ±180 can be off by rounding error.
+        let eps = step.abs().max(1e-9) * 1e-6;
+        let a = v.abs();
+        let d = match self.format {
+            CoordFormat::Decimal => format!("{}°", decimal(a, step)),
+            CoordFormat::Dms => dms(a, step),
+        };
+        let unsigned = a < eps || (a - 180.0).abs() < eps;
+        if unsigned {
+            d
+        } else if self.hemisphere {
+            let letter = match (lon, v > 0.0) {
+                (true, true) => 'E',
+                (true, false) => 'W',
+                (false, true) => 'N',
+                (false, false) => 'S',
+            };
+            format!("{d}{letter}")
+        } else if v < 0.0 {
+            format!("-{d}")
+        } else {
+            d
+        }
+    }
+}
+
+/// `a` with the fewest decimals (up to 4) that show a multiple of `step` exactly.
+fn decimal(a: f64, step: f64) -> String {
+    let places = (0..4usize).find(|&n| {
+        let k = step * 10f64.powi(n as i32);
+        (k - k.round()).abs() < 1e-6
+    });
+    format!("{a:.prec$}", prec = places.unwrap_or(4))
+}
+
+/// `a` degrees as `12°30′15″`, leaving out the minutes and seconds `step` doesn't need.
+fn dms(a: f64, step: f64) -> String {
+    let secs = (a * 3600.0).round();
+    if !secs.is_finite() {
+        return "0°".into();
+    }
+    let secs = secs as u64;
+    let (d, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    let step_secs = (step.abs() * 3600.0).round() as u64;
+    if step_secs.is_multiple_of(3600) && m == 0 && s == 0 {
+        format!("{d}°")
+    } else if step_secs.is_multiple_of(60) && s == 0 {
+        format!("{d}°{m:02}′")
+    } else {
+        format!("{d}°{m:02}′{s:02}″")
+    }
+}
+
+/// How a grid is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GridStyle {
+    /// Lines across the frame.
+    #[default]
+    Lines,
+    /// Short ticks along the frame's edges only.
+    Ticks,
+    /// Lines across the frame and ticks along its edges.
+    LinesAndTicks,
+}
+
+impl GridStyle {
+    pub const ALL: [GridStyle; 3] = [GridStyle::Lines, GridStyle::Ticks, GridStyle::LinesAndTicks];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            GridStyle::Lines => "lines",
+            GridStyle::Ticks => "ticks",
+            GridStyle::LinesAndTicks => "linesAndTicks",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GridStyle::Lines => "Full lines",
+            GridStyle::Ticks => "Ticks only",
+            GridStyle::LinesAndTicks => "Lines and ticks",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<GridStyle> {
+        GridStyle::ALL.into_iter().find(|v| v.code().eq_ignore_ascii_case(s.trim()))
+    }
+
+    pub fn lines(self) -> bool {
+        self != GridStyle::Ticks
+    }
+
+    pub fn ticks(self) -> bool {
+        self != GridStyle::Lines
+    }
+}
+
+/// How grid labels write a coordinate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CoordFormat {
+    /// Decimal degrees: `112.5°`.
+    #[default]
+    Decimal,
+    /// Degrees, minutes and seconds: `112°30′`.
+    Dms,
+}
+
+impl CoordFormat {
+    pub fn from_name(s: &str) -> Option<CoordFormat> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "decimal" | "dd" => Some(CoordFormat::Decimal),
+            "dms" => Some(CoordFormat::Dms),
+            _ => None,
+        }
+    }
+}
+
+/// The edges of a map frame that carry grid labels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GridEdges {
+    pub top: bool,
+    pub bottom: bool,
+    pub left: bool,
+    pub right: bool,
+}
+
+impl Default for GridEdges {
+    /// The bottom and left edges, as grids were labelled before edges could be picked.
+    fn default() -> GridEdges {
+        GridEdges { top: false, bottom: true, left: true, right: false }
+    }
+}
+
+/// A north arrow's look.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArrowStyle {
+    /// A split arrowhead, one half filled.
+    #[default]
+    Classic,
+    /// A four-point compass rose.
+    Compass,
+    /// A plain filled triangle.
+    Triangle,
+    /// An eight-point star.
+    Star,
+}
+
+impl ArrowStyle {
+    pub const ALL: [ArrowStyle; 4] = [ArrowStyle::Classic, ArrowStyle::Compass, ArrowStyle::Triangle, ArrowStyle::Star];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            ArrowStyle::Classic => "classic",
+            ArrowStyle::Compass => "compass",
+            ArrowStyle::Triangle => "triangle",
+            ArrowStyle::Star => "star",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ArrowStyle::Classic => "Classic arrow",
+            ArrowStyle::Compass => "Compass rose",
+            ArrowStyle::Triangle => "Triangle",
+            ArrowStyle::Star => "Star",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<ArrowStyle> {
+        ArrowStyle::ALL.into_iter().find(|v| v.code().eq_ignore_ascii_case(s.trim()))
+    }
+}
+
+/// The units a scale bar counts in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScaleUnits {
+    /// Metres or kilometres, whichever reads better at the frame's scale.
+    #[default]
+    Auto,
+    Kilometers,
+    Meters,
+    Miles,
+    Feet,
+}
+
+impl ScaleUnits {
+    pub const ALL: [ScaleUnits; 5] = [ScaleUnits::Auto, ScaleUnits::Kilometers, ScaleUnits::Meters, ScaleUnits::Miles, ScaleUnits::Feet];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            ScaleUnits::Auto => "auto",
+            ScaleUnits::Kilometers => "kilometers",
+            ScaleUnits::Meters => "meters",
+            ScaleUnits::Miles => "miles",
+            ScaleUnits::Feet => "feet",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ScaleUnits::Auto => "Automatic (m or km)",
+            ScaleUnits::Kilometers => "Kilometers",
+            ScaleUnits::Meters => "Meters",
+            ScaleUnits::Miles => "Miles",
+            ScaleUnits::Feet => "Feet",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<ScaleUnits> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(ScaleUnits::Auto),
+            "kilometers" | "kilometres" | "km" => Some(ScaleUnits::Kilometers),
+            "meters" | "metres" | "m" => Some(ScaleUnits::Meters),
+            "miles" | "mi" => Some(ScaleUnits::Miles),
+            "feet" | "ft" => Some(ScaleUnits::Feet),
+            _ => None,
+        }
+    }
+
+    /// The unit to count `total_m` metres in, and its metres and abbreviation.
+    pub fn resolve(self, total_m: f64) -> (f64, &'static str) {
+        match self {
+            ScaleUnits::Auto if total_m >= 1000.0 => (1000.0, "km"),
+            ScaleUnits::Auto | ScaleUnits::Meters => (1.0, "m"),
+            ScaleUnits::Kilometers => (1000.0, "km"),
+            ScaleUnits::Miles => (1609.344, "mi"),
+            ScaleUnits::Feet => (0.3048, "ft"),
+        }
+    }
+}
+
+/// A scale bar's look.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScaleBarStyle {
+    /// A bar of alternating dark and light divisions.
+    #[default]
+    Alternating,
+    /// A line stepping up and down at each division.
+    Stepped,
+    /// A single line with a tick at each division.
+    Line,
+}
+
+impl ScaleBarStyle {
+    pub const ALL: [ScaleBarStyle; 3] = [ScaleBarStyle::Alternating, ScaleBarStyle::Stepped, ScaleBarStyle::Line];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            ScaleBarStyle::Alternating => "alternating",
+            ScaleBarStyle::Stepped => "stepped",
+            ScaleBarStyle::Line => "line",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ScaleBarStyle::Alternating => "Alternating bar",
+            ScaleBarStyle::Stepped => "Stepped line",
+            ScaleBarStyle::Line => "Single line",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<ScaleBarStyle> {
+        ScaleBarStyle::ALL.into_iter().find(|v| v.code().eq_ignore_ascii_case(s.trim()))
+    }
+}
+
+/// The most divisions a scale bar has.
+pub const MAX_SCALE_DIVISIONS: usize = 10;
+
+fn divisions() -> usize {
+    4
+}
+
+fn ink() -> Rgba {
+    Rgba::rgb(0x22, 0x22, 0x22)
 }
 
 fn yes() -> bool {
@@ -131,9 +467,24 @@ pub enum ElementKind {
     },
     NorthArrow {
         frame: u32,
+        #[serde(default)]
+        style: ArrowStyle,
+        /// The filled parts.
+        #[serde(default = "ink")]
+        fill: Rgba,
+        /// The outline and the `N`.
+        #[serde(default = "ink")]
+        outline: Rgba,
     },
     ScaleBar {
         frame: u32,
+        #[serde(default)]
+        units: ScaleUnits,
+        /// Divisions along the bar, 1 to [`MAX_SCALE_DIVISIONS`].
+        #[serde(default = "divisions")]
+        divisions: usize,
+        #[serde(default)]
+        style: ScaleBarStyle,
     },
     Legend {
         frame: u32,
@@ -200,11 +551,7 @@ pub enum ElementKind {
         label: Option<String>,
     },
     /// A rectangle drawn on the page (a neatline or a backdrop).
-    Rectangle {
-        fill: Rgba,
-        outline: Rgba,
-        width: f64,
-    },
+    Rectangle { fill: Rgba, outline: Rgba, width: f64 },
 }
 
 fn rows() -> usize {
@@ -212,6 +559,16 @@ fn rows() -> usize {
 }
 
 impl ElementKind {
+    /// A north arrow for `frame`, in the default style.
+    pub fn north_arrow(frame: u32) -> ElementKind {
+        ElementKind::NorthArrow { frame, style: ArrowStyle::default(), fill: ink(), outline: ink() }
+    }
+
+    /// A scale bar for `frame`, in the default style.
+    pub fn scale_bar(frame: u32) -> ElementKind {
+        ElementKind::ScaleBar { frame, units: ScaleUnits::default(), divisions: divisions(), style: ScaleBarStyle::default() }
+    }
+
     pub fn code(&self) -> &'static str {
         match self {
             ElementKind::MapFrame { .. } => "mapFrame",
@@ -243,8 +600,8 @@ impl ElementKind {
     /// The map frame this element belongs to.
     pub fn frame(&self) -> Option<u32> {
         match self {
-            ElementKind::NorthArrow { frame }
-            | ElementKind::ScaleBar { frame }
+            ElementKind::NorthArrow { frame, .. }
+            | ElementKind::ScaleBar { frame, .. }
             | ElementKind::Legend { frame, .. }
             | ElementKind::Colorbar { frame, .. }
             | ElementKind::Table { frame, .. }
@@ -425,6 +782,8 @@ impl Layout {
                     }
                     if let Some(g) = grid {
                         g.step = finite_or(g.step, 0.0).clamp(0.0, 90.0);
+                        g.tick_length = finite_or(g.tick_length, tick_length()).clamp(0.0, MAX_TICK_MM);
+                        g.width = finite_or(g.width, grid_width()).clamp(0.0, MAX_GRID_WIDTH);
                     }
                 }
                 ElementKind::Text { text, size, .. } => {
@@ -432,6 +791,7 @@ impl Layout {
                     text.truncate(text.char_indices().nth(5000).map_or(text.len(), |(i, _)| i));
                 }
                 ElementKind::Table { rows, .. } => *rows = (*rows).clamp(1, 500),
+                ElementKind::ScaleBar { divisions, .. } => *divisions = (*divisions).clamp(1, MAX_SCALE_DIVISIONS),
                 ElementKind::Rectangle { width, .. } => *width = finite_or(*width, 1.0).clamp(0.0, 50.0),
                 _ => {}
             }
@@ -606,7 +966,7 @@ mod tests {
                 extent_of: None,
             },
         );
-        let n = l.add("North Arrow", (215.0, 10.0, 15.0, 20.0), ElementKind::NorthArrow { frame: f });
+        let n = l.add("North Arrow", (215.0, 10.0, 15.0, 20.0), ElementKind::north_arrow(f));
         let t = l.add(
             "Title",
             (20.0, 165.0, 100.0, 12.0),
@@ -640,7 +1000,7 @@ mod tests {
             _ => panic!("frame expected"),
         }
         assert!(matches!(&l.elements[1].kind, ElementKind::Text { size, .. } if *size <= 400.0));
-        let id = l.add("n", (0.0, 0.0, 1.0, 1.0), ElementKind::NorthArrow { frame: ids[0] });
+        let id = l.add("n", (0.0, 0.0, 1.0, 1.0), ElementKind::north_arrow(ids[0]));
         assert!(!ids.contains(&id));
         // An id at u32::MAX is renumbered, and adding after it doesn't overflow.
         let mut big: Layout = serde_json::from_str(r#"{"name":"b","width":100,"height":100,"elements":[{"id":4294967295,"name":"t","x":0,"y":0,"w":5,"h":5,"kind":{"Text":{"text":"t","size":10,"color":[0,0,0,255]}}}]}"#).unwrap_or_else(|e| panic!("{e}"));
@@ -708,7 +1068,7 @@ mod tests {
         assert_eq!(l.element(1).map(|e| e.name.as_str()), Some("frame"));
         let ids: std::collections::HashSet<u32> = l.elements.iter().map(|e| e.id).collect();
         assert_eq!(ids.len(), 3, "the box got a fresh id");
-        assert!(matches!(l.element(2).map(|e| &e.kind), Some(ElementKind::NorthArrow { frame: 1 })));
+        assert!(matches!(l.element(2).map(|e| &e.kind), Some(ElementKind::NorthArrow { frame: 1, .. })));
     }
 
     #[test]
@@ -719,5 +1079,75 @@ mod tests {
         l.clamp();
         assert_eq!(l.guides.x.len(), MAX_GUIDES);
         assert_eq!(l.guides.y, vec![-20.0, 50.0]);
+    }
+
+    #[test]
+    fn grid_labels_follow_the_format() {
+        let g = Grid::default();
+        // #210: the Equator and prime meridian are 0°, the antimeridian 180°, with no letter.
+        assert_eq!(g.label(0.0, false, 10.0), "0°");
+        assert_eq!(g.label(-0.0, false, 10.0), "0°");
+        assert_eq!(g.label(0.0, true, 10.0), "0°");
+        assert_eq!(g.label(180.0, true, 10.0), "180°");
+        assert_eq!(g.label(-180.0, true, 10.0), "180°");
+        assert_eq!(g.label(10.0, false, 10.0), "10°N");
+        assert_eq!(g.label(-10.0, false, 10.0), "10°S");
+        assert_eq!(g.label(20.0, true, 10.0), "20°E");
+        assert_eq!(g.label(-20.0, true, 10.0), "20°W");
+        // As many decimals as the step needs.
+        assert_eq!(g.label(0.5, false, 0.25), "0.50°N");
+        assert_eq!(g.label(-112.5, true, 0.5), "112.5°W");
+        // Accumulated decimal steps miss 0 and 180 by rounding error.
+        let mut v = -0.5;
+        for _ in 0..5 {
+            v += 0.1;
+        }
+        assert_ne!(v, 0.0);
+        assert_eq!(g.label(v, false, 0.1), "0.0°");
+        let mut v = 179.5;
+        for _ in 0..5 {
+            v += 0.1;
+        }
+        assert_eq!(g.label(v, true, 0.1), "180.0°");
+        // Signed rather than lettered.
+        let signed = Grid { hemisphere: false, ..Grid::default() };
+        assert_eq!(signed.label(-112.5, true, 0.5), "-112.5°");
+        assert_eq!(signed.label(45.0, false, 15.0), "45°");
+        assert_eq!(signed.label(0.0, false, 15.0), "0°");
+        // Degrees, minutes and seconds, leaving out what the step doesn't need.
+        let dms = Grid { format: CoordFormat::Dms, ..Grid::default() };
+        assert_eq!(dms.label(30.0, false, 5.0), "30°N");
+        assert_eq!(dms.label(-112.5, true, 0.5), "112°30′W");
+        assert_eq!(dms.label(-112.0, true, 0.5), "112°00′W");
+        assert_eq!(dms.label(12.0 + 1.0 / 120.0, false, 1.0 / 120.0), "12°00′30″N");
+        // Rounding up a second carries into the minutes and degrees.
+        assert_eq!(dms.label(12.999_999_9, false, 0.25), "13°00′N");
+    }
+
+    #[test]
+    fn surrounds_saved_before_their_options_open_as_they_were() {
+        let arrow: ElementKind = serde_json::from_str(r#"{"NorthArrow":{"frame":3}}"#).unwrap();
+        assert_eq!(arrow, ElementKind::north_arrow(3));
+        assert!(matches!(arrow, ElementKind::NorthArrow { style: ArrowStyle::Classic, .. }));
+        let bar: ElementKind = serde_json::from_str(r#"{"ScaleBar":{"frame":3}}"#).unwrap();
+        assert_eq!(bar, ElementKind::scale_bar(3));
+        assert!(matches!(bar, ElementKind::ScaleBar { units: ScaleUnits::Auto, divisions: 4, style: ScaleBarStyle::Alternating, .. }));
+        let grid: Grid = serde_json::from_str(r#"{"step":10,"color":[64,72,85,150],"labels":true}"#).unwrap();
+        assert_eq!(grid, Grid { step: 10.0, ..Grid::default() });
+        assert_eq!(grid.edges, GridEdges { top: false, bottom: true, left: true, right: false });
+        assert_eq!(grid.style, GridStyle::Lines);
+    }
+
+    #[test]
+    fn loaded_grids_and_scale_bars_are_limited() {
+        let text = r#"{"name":"x","width":200,"height":100,"elements":[
+            {"id":1,"name":"frame","x":0,"y":0,"w":100,"h":80,"kind":{"MapFrame":{"map":"M","center":{"x":0,"y":0},"scale":1e7,
+                "grid":{"step":10,"color":[0,0,0,255],"tick_length":1e9,"width":-5}}}},
+            {"id":2,"name":"bar","x":110,"y":0,"w":50,"h":10,"kind":{"ScaleBar":{"frame":1,"divisions":100000}}}]}"#;
+        let mut l: Layout = serde_json::from_str(text).unwrap();
+        l.clamp();
+        let Some(ElementKind::MapFrame { grid: Some(g), .. }) = l.element(1).map(|e| &e.kind) else { panic!() };
+        assert_eq!((g.tick_length, g.width), (MAX_TICK_MM, 0.0));
+        assert!(matches!(l.element(2).map(|e| &e.kind), Some(ElementKind::ScaleBar { divisions: MAX_SCALE_DIVISIONS, .. })));
     }
 }

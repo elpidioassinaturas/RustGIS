@@ -1387,6 +1387,95 @@ fn layout_legends_list_what_the_frame_draws() {
     assert!(matches!(old, rustgis_map::layout::ElementKind::Legend { all_classes: false, hide_other: false, .. }));
 }
 
+/// Grids, north arrows and scale bars take their cartographic options through commands (#327):
+/// checked before anything changes, kept when other options change, and saved with the layout.
+#[test]
+fn layout_surrounds_take_cartographic_options() {
+    use rustgis_map::Rgba;
+    use rustgis_map::layout::{ArrowStyle, CoordFormat, ElementKind, GridEdges, GridStyle, ScaleBarStyle, ScaleUnits};
+    let mut s = world();
+    s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "map"})).unwrap();
+    let find = |s: &Session, code: &str| s.project.layouts[0].elements.iter().find(|e| e.kind.code() == code).unwrap().clone();
+    let frame = find(&s, "mapFrame").id;
+    let grid = |s: &Session| match &s.project.layouts[0].element(frame).unwrap().kind {
+        ElementKind::MapFrame { grid, .. } => grid.clone(),
+        k => panic!("{k:?}"),
+    };
+    // A grid with ticks along the top and right edges, in degrees and minutes.
+    s.run(
+        "layout.addElement",
+        &json!({"kind": "grid", "step": 0.5, "style": "ticks", "tickLength": 3, "format": "dms", "edges": ["top", "right"], "labelOrientation": "vertical"}),
+    )
+    .unwrap();
+    let g = grid(&s).unwrap();
+    assert_eq!((g.step, g.style, g.tick_length, g.format), (0.5, GridStyle::Ticks, 3.0, CoordFormat::Dms));
+    assert_eq!(g.edges, GridEdges { top: true, bottom: false, left: false, right: true });
+    // Adding it again changes only what is named; a bad value changes nothing.
+    s.run("layout.addElement", &json!({"kind": "grid", "width": 1.5, "hemisphere": false})).unwrap();
+    let g2 = grid(&s).unwrap();
+    assert_eq!((g2.width, g2.hemisphere, g2.style, g2.step), (1.5, false, GridStyle::Ticks, 0.5));
+    for bad in [json!({"style": "dotted"}), json!({"format": "utm"}), json!({"edges": ["middle"]}), json!({"labelOrientation": "diagonal"})]
+    {
+        let mut p = bad.clone();
+        p["kind"] = json!("grid");
+        assert!(s.run("layout.addElement", &p).is_err(), "{bad}");
+        assert!(s.run("layout.update", &json!({"element": frame, "grid": bad})).is_err(), "{bad}");
+    }
+    assert_eq!(grid(&s).unwrap(), g2);
+    // The frame's properties edit, remove and restore its grid; sizes are clamped.
+    s.run("layout.update", &json!({"element": frame, "grid": {"style": "linesAndTicks", "tickLength": 1e9, "edges": "bottom, left"}}))
+        .unwrap();
+    let g3 = grid(&s).unwrap();
+    assert_eq!((g3.style, g3.tick_length, g3.edges), (GridStyle::LinesAndTicks, rustgis_map::layout::MAX_TICK_MM, GridEdges::default()));
+    s.run("layout.update", &json!({"element": frame, "grid": null})).unwrap();
+    assert_eq!(grid(&s), Some(g3), "null is not set: the grid stays");
+    s.run("layout.update", &json!({"element": frame, "grid": false})).unwrap();
+    assert!(grid(&s).is_none());
+    s.run("layout.update", &json!({"element": frame, "grid": true})).unwrap();
+    assert_eq!(grid(&s), Some(rustgis_map::layout::Grid::default()));
+    let arrow = find(&s, "northArrow").id;
+    assert!(s.run("layout.update", &json!({"element": arrow, "grid": true})).is_err(), "only frames have grids");
+    // North arrows: a style and colours.
+    s.run("layout.update", &json!({"element": arrow, "style": "compass", "fill": "#AA0000"})).unwrap();
+    assert!(matches!(
+        find(&s, "northArrow").kind,
+        ElementKind::NorthArrow { style: ArrowStyle::Compass, fill, outline, .. } if fill == Rgba::rgb(0xAA, 0, 0) && outline == Rgba::rgb(0x22, 0x22, 0x22)
+    ));
+    assert!(s.run("layout.update", &json!({"element": arrow, "style": "sundial"})).is_err());
+    assert!(s.run("layout.update", &json!({"element": arrow, "outline": "red"})).is_err());
+    assert!(matches!(find(&s, "northArrow").kind, ElementKind::NorthArrow { style: ArrowStyle::Compass, .. }));
+    let star = s.run("layout.addElement", &json!({"kind": "northArrow", "style": "STAR"})).unwrap()["element"].as_u64().unwrap() as u32;
+    assert!(matches!(s.project.layouts[0].element(star).unwrap().kind, ElementKind::NorthArrow { style: ArrowStyle::Star, .. }));
+    // Scale bars: units, divisions and a style; divisions are clamped.
+    let bar = find(&s, "scaleBar").id;
+    s.run("layout.update", &json!({"element": bar, "units": "mi", "divisions": 99, "style": "stepped"})).unwrap();
+    assert!(matches!(
+        find(&s, "scaleBar").kind,
+        ElementKind::ScaleBar { units: ScaleUnits::Miles, divisions: 10, style: ScaleBarStyle::Stepped, .. }
+    ));
+    s.run("layout.update", &json!({"element": bar, "divisions": "2"})).unwrap();
+    assert!(matches!(find(&s, "scaleBar").kind, ElementKind::ScaleBar { units: ScaleUnits::Miles, divisions: 2, .. }));
+    for bad in [json!({"units": "parsecs"}), json!({"divisions": "many"}), json!({"style": "zigzag"})] {
+        let mut p = bad.clone();
+        p["element"] = json!(bar);
+        assert!(s.run("layout.update", &p).is_err(), "{bad}");
+    }
+    let added = s.run("layout.addElement", &json!({"kind": "scaleBar", "units": "feet", "style": "line"})).unwrap()["element"]
+        .as_u64()
+        .unwrap() as u32;
+    assert!(matches!(
+        s.project.layouts[0].element(added).unwrap().kind,
+        ElementKind::ScaleBar { units: ScaleUnits::Feet, divisions: 4, style: ScaleBarStyle::Line, .. }
+    ));
+    // The page draws with them all, and they survive a save.
+    let out = std::env::temp_dir().join(format!("rustgis-surrounds-{}.png", std::process::id()));
+    s.run("layout.export", &json!({"path": out.to_string_lossy()})).unwrap();
+    let _ = std::fs::remove_file(&out);
+    let text = serde_json::to_string(&s.project.layouts[0]).unwrap();
+    let back: rustgis_map::layout::Layout = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, s.project.layouts[0]);
+}
+
 /// A colorbar shows a raster's colour scale on a layout (#326): added and edited through
 /// commands, checked against the frame's map, and saved with the layout.
 #[test]
@@ -2660,6 +2749,94 @@ fn plugin_edits_are_one_undo_step() {
 }
 
 #[test]
+fn plugin_panels_keep_their_state_between_calls() {
+    let mut s = world();
+    let pkg = rustgis_plugins::Package::from_zip(&rustgis_plugins::testing::panel_package("eng-panel")).unwrap();
+    rustgis_plugins::load(pkg, "test").unwrap();
+    // Opening it runs its state command, whose answer the session keeps.
+    let st = s.run("plugin.panel", &json!({"id": "eng-panel", "refresh": true})).unwrap();
+    assert_eq!(st["values"]["release"], 12);
+    assert_eq!(st["items"]["release"]["labels"][12], "2025-12-18");
+    assert_eq!(st["items"]["newer"]["enabled"], false);
+    assert!(!s.can_undo(), "a state command that changes nothing is no undo step");
+    // A widget's command gets the values, the one it set among them, and not as a parameter.
+    let got = s.run("plugin:eng-panel/q", &json!({"panel": {"release": 4, "nope": 1}, "keep": true})).unwrap();
+    assert_eq!(got["panel"], json!({"values": {"local": false, "release": 4}, "changed": ["release"]}));
+    assert_eq!(got["params"], json!({"keep": true}));
+    assert_eq!(s.plugin_panels["eng-panel"].slider("release"), 4);
+    // Any command gets them, from the ribbon or a script, and widgets that run nothing set them.
+    s.run("plugin.panel", &json!({"id": "eng-panel", "values": {"local": true, "release": 99}})).unwrap();
+    let got = s.run("plugin:eng-panel/h", &json!({})).unwrap();
+    assert_eq!(got, json!({"hello": "world"}));
+    let got = s.run("plugin:eng-panel/q", &json!({})).unwrap();
+    assert_eq!(got["panel"], json!({"values": {"local": true, "release": 12}, "changed": []}), "kept within the slider's ends");
+    // A failed command leaves the values as they were.
+    assert!(s.run("plugin:eng-panel/e", &json!({"panel": {"release": 1}})).is_err());
+    assert_eq!(s.plugin_panels["eng-panel"].slider("release"), 12);
+    // Hostile values and answers never panic, and never leave the slider outside its ends.
+    for junk in [json!(null), json!(7), json!("x"), json!([1]), json!({"release": "1"}), json!({"release": 1e300}), json!({"local": {}})] {
+        let _ = s.run("plugin:eng-panel/q", &json!({"panel": junk.clone()}));
+        let _ = s.run("plugin.panel", &json!({"id": "eng-panel", "values": junk}));
+        let st = &s.plugin_panels["eng-panel"];
+        assert!((0..=12).contains(&st.slider("release")));
+    }
+    // Plugins without a panel get no `panel`, and keep a `panel` parameter of their own.
+    plugin("eng-nopanel", &[]);
+    assert!(s.run("plugin.panel", &json!({"id": "eng-nopanel"})).unwrap_err().contains("no panel"));
+    assert!(s.plugin_panel("eng-nopanel").is_none());
+    assert_eq!(forward(&mut s, "eng-nopanel", "host.info", json!({})).unwrap()["plugin"], "eng-nopanel");
+    assert!(s.run("plugin.panel", &json!({"id": "nope"})).is_err());
+    assert!(s.run("plugin.panel", &json!({})).is_err());
+    // A plugin can't drive panels.
+    let e = forward(&mut s, "eng-nopanel", "plugin.panel", json!({"id": "eng-panel"})).unwrap_err();
+    assert!(e.contains("can't run"), "{e}");
+    // A disabled plugin's panel is gone.
+    rustgis_plugins::set_enabled("eng-panel", false).unwrap();
+    assert!(s.plugin_panel("eng-panel").is_none());
+    assert!(s.run("plugin.panel", &json!({"id": "eng-panel"})).unwrap_err().contains("disabled"));
+    rustgis_plugins::unload("eng-panel");
+    rustgis_plugins::unload("eng-nopanel");
+}
+
+/// Loads the panel test plugin with `edit`, its panel's state command being `state`.
+fn panel_plugin(id: &str, state: &str) {
+    let mut m: Value = serde_json::from_str(&rustgis_plugins::testing::panel_manifest(id)).unwrap();
+    m["permissions"] = json!(["edit"]);
+    m["panel"]["state"] = json!(state);
+    let zip =
+        rustgis_plugins::testing::zip_of(&[("plugin.json", m.to_string().as_bytes()), ("plugin.wasm", &rustgis_plugins::testing::wasm())]);
+    rustgis_plugins::load(rustgis_plugins::Package::from_zip(&zip).unwrap(), "test").unwrap();
+}
+
+#[test]
+fn panel_state_commands_that_change_nothing_are_no_undo_step() {
+    let mut s = world();
+    panel_plugin("eng-noop", "h");
+    s.run("plugin.panel", &json!({"id": "eng-noop", "refresh": true})).unwrap();
+    s.run("plugin:eng-noop/h", &Value::Null).unwrap();
+    assert!(!s.can_undo(), "its state command changed nothing");
+    // Its other commands keep their undo step, as plugins without a panel do.
+    s.run("plugin:eng-noop/q", &Value::Null).unwrap();
+    assert_eq!(s.undo_label(), Some("Echo"));
+    rustgis_plugins::unload("eng-noop");
+    plugin("eng-nopanel-noop", &["edit"]);
+    s.undo.clear();
+    s.run("plugin:eng-nopanel-noop/h", &Value::Null).unwrap();
+    assert_eq!(s.undo_label(), Some("Hello"));
+    rustgis_plugins::unload("eng-nopanel-noop");
+}
+
+#[test]
+fn a_failed_panel_refresh_leaves_the_values() {
+    let mut s = world();
+    panel_plugin("eng-badstate", "e");
+    let e = s.run("plugin.panel", &json!({"id": "eng-badstate", "values": {"local": true}, "refresh": true}));
+    assert!(e.is_err());
+    assert!(!s.plugin_panels["eng-badstate"].checked("local"), "the values it set are undone");
+    rustgis_plugins::unload("eng-badstate");
+}
+
+#[test]
 fn plugin_tile_layers_need_network() {
     let mut s = world();
     let osm = json!({"url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png", "attribution": "© OpenStreetMap contributors"});
@@ -2696,6 +2873,146 @@ fn plugin_tile_layers_need_network() {
     forward(&mut s, "eng-tiles-net", "map.removeTiles", json!({})).unwrap();
     assert!(s.map().tiles.is_empty());
     rustgis_plugins::unload("eng-tiles-net");
+}
+
+/// Serves documents for `host.fetch` on a local port, counting the requests: `/json`, `/text`,
+/// `/latin1` (not UTF-8), `/big` (over the size cap), `/inward` (a redirect to a forbidden
+/// address) and `/missing` (404). Returns the base address and the count.
+fn serve_documents() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = count.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut buf = [0u8; 4096];
+            let read = s.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..read]).to_string();
+            let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let (status, extra, body): (&str, String, Vec<u8>) = match path.as_str() {
+                p if p.starts_with("/json") => {
+                    ("200 OK", String::new(), br#"{"data":[1],"select":[49059],"size":[17053],"valid":true}"#.to_vec())
+                }
+                "/text" => ("200 OK", String::new(), b"plain text".to_vec()),
+                "/latin1" => ("200 OK", String::new(), b"caf\xe9".to_vec()),
+                "/big" => ("200 OK", String::new(), vec![b'x'; crate::cmd::plugins::fetch::MAX_BYTES + 10]),
+                "/inward" => ("302 Found", "Location: http://169.254.169.254/latest/meta-data/\r\n".into(), Vec::new()),
+                _ => ("404 Not Found", String::new(), b"no".to_vec()),
+            };
+            let _ = write!(s, "HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = s.write_all(&body);
+        }
+    });
+    (format!("http://{addr}"), count)
+}
+
+/// Lets this thread's plugin calls fetch from this computer (the test server) and, when `wait`
+/// is off, fetch as the browser does.
+fn fetch_mode(local: bool, wait: bool) {
+    crate::cmd::plugins::fetch::TEST.with(|t| t.set((local, wait)));
+}
+
+/// `host.fetch` needs `network`, takes only public http(s) addresses (redirects too), caps the
+/// size, wants UTF-8, answers JSON parsed, and keeps answers.
+#[test]
+fn plugins_fetch_documents_with_network() {
+    let mut s = world();
+    plugin("eng-fetch-none", &["edit"]);
+    let e = forward(&mut s, "eng-fetch-none", "host.fetch", json!({"url": "https://example.com/x.json"})).unwrap_err();
+    assert!(e.contains("'network' permission"), "{e}");
+    rustgis_plugins::unload("eng-fetch-none");
+
+    plugin("eng-fetch", &["network"]);
+    // Never this computer or the local network, by default; never another scheme.
+    for bad in [
+        json!({}),
+        json!({"url": 7}),
+        json!({"url": "file:///etc/passwd"}),
+        json!({"url": "s3://bucket/key"}),
+        json!({"url": "ftp://example.com/"}),
+        json!({"url": "http://127.0.0.1:9/x"}),
+        json!({"url": "http://localhost/x"}),
+        json!({"url": "http://192.168.0.1/"}),
+        json!({"url": "http://169.254.169.254/latest/meta-data/"}),
+    ] {
+        assert!(forward(&mut s, "eng-fetch", "host.fetch", bad.clone()).is_err(), "{bad}");
+    }
+    // Hostile parameters are errors, never a crash.
+    for junk in [Value::Null, json!([1, 2]), json!({"url": null}), json!({"url": {"nested": 1}}), json!({"url": "x".repeat(100_000)})] {
+        assert!(forward(&mut s, "eng-fetch", "host.fetch", junk.clone()).is_err(), "{junk}");
+    }
+
+    let (base, count) = serve_documents();
+    fetch_mode(true, true);
+    let a = forward(&mut s, "eng-fetch", "host.fetch", json!({"url": format!("{base}/json?r=1")})).unwrap();
+    assert_eq!(a["json"]["select"][0], 49059);
+    assert!(a["text"].as_str().unwrap().starts_with('{'));
+    let n = count.load(std::sync::atomic::Ordering::SeqCst);
+    // Asked again: the cache answers.
+    let again = forward(&mut s, "eng-fetch", "host.fetch", json!({"url": format!("{base}/json?r=1#ignored")})).unwrap();
+    assert_eq!(again, a);
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), n, "answered from the cache");
+    let t = forward(&mut s, "eng-fetch", "host.fetch", json!({"url": format!("{base}/text")})).unwrap();
+    assert_eq!(t["text"], "plain text");
+    assert!(t.get("json").is_none());
+    for (path, why) in [("/latin1", "UTF-8"), ("/big", "larger than"), ("/missing", "404"), ("/inward", "never fetched")] {
+        let e = forward(&mut s, "eng-fetch", "host.fetch", json!({"url": format!("{base}{path}")})).unwrap_err();
+        assert!(e.contains(why), "{path}: {e}");
+    }
+    fetch_mode(false, true);
+    rustgis_plugins::unload("eng-fetch");
+}
+
+/// Where nothing may wait (the browser), `host.fetch` answers pending: the command is undone,
+/// quietly, and runs again once the answer is in, when the cache answers.
+#[test]
+fn plugin_fetches_run_the_command_again_when_they_land() {
+    let mut s = world();
+    plugin("eng-fetch-web", &["network", "edit"]);
+    let (base, _) = serve_documents();
+    fetch_mode(true, false);
+    let url = format!("{base}/json?web=1");
+    let notices = s.notice_mark();
+    let undo = s.undo.len();
+    let r = forward(&mut s, "eng-fetch-web", "host.fetch", json!({"url": url})).unwrap();
+    assert_eq!(r["pending"], true);
+    assert_eq!(r["fetching"][0], url.as_str());
+    assert_eq!(s.undo.len(), undo, "no undo step for a run that waits");
+    assert!(s.notices_since(notices).is_empty(), "{:?}", s.notices_since(notices));
+    let t0 = std::time::Instant::now();
+    let ran = loop {
+        let ran = s.poll_plugin_retries();
+        if !ran.is_empty() || t0.elapsed() > std::time::Duration::from_secs(10) {
+            break ran;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(ran.len(), 1);
+    assert_eq!(ran[0].0, "plugin:eng-fetch-web/f");
+    assert_eq!(ran[0].1.as_ref().unwrap()["json"]["valid"], true);
+    assert!(s.poll_plugin_retries().is_empty(), "run once");
+    // A failed fetch is given to the run again as its error.
+    let r = forward(&mut s, "eng-fetch-web", "host.fetch", json!({"url": format!("{base}/missing")})).unwrap();
+    assert_eq!(r["pending"], true);
+    let t0 = std::time::Instant::now();
+    let ran = loop {
+        let ran = s.poll_plugin_retries();
+        if !ran.is_empty() || t0.elapsed() > std::time::Duration::from_secs(10) {
+            break ran;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(ran[0].1.as_ref().unwrap_err().contains("404"), "{:?}", ran[0].1);
+    // A command forever waiting gives up.
+    s.retry_tries = crate::cmd::plugins::fetch::MAX_RETRIES;
+    let e = forward(&mut s, "eng-fetch-web", "host.fetch", json!({"url": format!("{base}/json?web=2")})).unwrap_err();
+    assert!(e.contains("gave up"), "{e}");
+    s.retry_tries = 0;
+    fetch_mode(false, true);
+    rustgis_plugins::unload("eng-fetch-web");
 }
 
 #[test]
@@ -3586,6 +3903,159 @@ fn web_shares_carry_every_feature_of_a_streamed_layer() {
     assert!(windowed == std::fs::read(&scene).unwrap(), "the scene depends on the view");
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_file(path);
+}
+
+/// MapLibre map links: read with their bearing and pitch (or without), written back the same,
+/// and junk refused without moving the map.
+#[test]
+fn map_links() {
+    let mut s = world();
+    let r = s.run("map.goToLink", &json!({"url": "https://example.com/map/#15.5/40.7484/-73.9857/30/60"})).unwrap();
+    assert_eq!((r["bearing"].as_f64(), r["pitch"].as_f64()), (Some(30.0), Some(60.0)));
+    let c = s.map().center_lonlat();
+    assert!((c.x + 73.9857).abs() < 1e-6 && (c.y - 40.7484).abs() < 1e-6, "{c:?}");
+    assert_eq!(s.run("map.link", &Value::Null).unwrap()["hash"], "#15.5/40.7484/-73.9857/30/60");
+    // MapLibre's zoom 0 shows the world's 40,075 km across 512 pixels.
+    s.run("map.goToLink", &json!({"url": "0/0/0"})).unwrap();
+    let ground = s.map().camera.res * s.map().flat().ground_per_unit(s.map().camera.center);
+    assert!((ground - 2.0 * std::f64::consts::PI * 6_378_137.0 / 512.0).abs() < 1.0, "{ground}");
+    assert_eq!((s.map().camera.bearing, s.map().camera.pitch), (0.0, 0.0), "left out, they are zero");
+    // A named hash among other parameters, and bearing without pitch.
+    s.run("map.goToLink", &json!({"url": "https://example.com/#layers=a&map=4/10/20/-45"})).unwrap();
+    assert_eq!(s.map().camera.bearing, -45.0);
+    assert_eq!(s.run("map.link", &Value::Null).unwrap()["hash"], "#4/10/20/-45");
+    // MapLibre's own `map=` before other parameters that look like positions.
+    s.run("map.goToLink", &json!({"url": "#other=1/2/3&map=4/10/20"})).unwrap();
+    assert_eq!(s.run("map.link", &Value::Null).unwrap()["hash"], "#4/10/20");
+    // A view wider than zoom 0 gives a link that reads back; no "-0".
+    s.map_mut().camera.res = rustgis_map::camera::MAX_RES;
+    s.map_mut().camera.center = rustgis_geom::lonlat_to_merc(rustgis_geom::Coord::new(-1e-9, 0.0));
+    let hash = s.run("map.link", &Value::Null).unwrap()["hash"].as_str().unwrap().to_string();
+    assert_eq!(hash, "#0/0/0");
+    s.run("map.goToLink", &json!({"url": hash})).unwrap();
+    assert!(crate::cmd::navigate::is_map_link("#map=4/10/20") && !crate::cmd::navigate::is_map_link("#about"));
+    let before = s.map().camera;
+    for bad in [
+        json!({"url": "https://example.com/#about"}),
+        json!({"url": "https://example.com/?a=1/2/3"}),
+        json!({"url": "map=1/2/3"}),
+        json!({"url": "#4/95/0"}),
+        json!({"url": "#4/0/200"}),
+        json!({"url": "#99/0/0"}),
+        json!({"url": "#4/0"}),
+        json!({"url": "#4/0/0/1/2/3"}),
+        json!({"url": "#NaN/0/0"}),
+        json!({"url": "#inf/0/0"}),
+        json!({"url": "#4/0/0/1e400"}),
+        json!({"url": "/".repeat(100_000)}),
+        json!({"url": format!("#4/0/0{}", "é".repeat(100_000))}),
+        json!({"url": format!("{}#4/0/0", "€".repeat(2000))}),
+        json!({"url": 3}),
+        json!({}),
+    ] {
+        assert!(s.run("map.goToLink", &bad).is_err(), "{bad}");
+    }
+    assert_eq!(s.map().camera, before);
+}
+
+/// A MapLibre style added with `"view": true` takes the map to its root center, zoom, bearing
+/// and pitch once it has loaded; without it the map stays where it is.
+#[test]
+fn style_root_view_moves_the_map() {
+    const STYLE: &[u8] = br#"{"version": 8, "center": [2.2945, 48.8584], "zoom": 16, "bearing": -20, "pitch": 55, "sources": {}, "layers": [{"id": "bg", "type": "background"}]}"#;
+    let base = serve(STYLE, 5);
+    let mut s = world();
+    let before = s.map().camera;
+    s.run("map.addTiles", &json!({"url": format!("{base}/plain/style.json")})).unwrap();
+    assert!(s.style_view.is_none());
+    assert_eq!(s.map().camera, before);
+    s.run("map.addTiles", &json!({"url": format!("{base}/view/style.json"), "view": true})).unwrap();
+    // Loaded in the background; followed once it is.
+    let start = std::time::Instant::now();
+    while s.style_view.is_some() && start.elapsed() < std::time::Duration::from_secs(20) {
+        crate::cmd::tiles::follow_style_view(&mut s, web_time::Duration::from_secs(5));
+    }
+    assert!(s.style_view.is_none());
+    let m = s.map();
+    let c = m.center_lonlat();
+    assert!((c.x - 2.2945).abs() < 1e-6 && (c.y - 48.8584).abs() < 1e-6, "{c:?}");
+    assert_eq!((m.camera.bearing, m.camera.pitch), (-20.0, 55.0));
+    assert_eq!(s.run("map.link", &Value::Null).unwrap()["hash"], "#16/48.8584/2.2945/-20/55");
+    // Only a style has a view of its own.
+    let e = s.run("map.addTiles", &json!({"url": "https://tiles.example.com/{z}/{x}/{y}.png", "view": true})).unwrap_err();
+    assert!(e.contains("style"), "{e}");
+    // A style that can't load is said, and forgotten.
+    s.run("map.addTiles", &json!({"url": format!("{base}/missing/style.json"), "view": true})).unwrap();
+    let start = std::time::Instant::now();
+    while s.style_view.is_some() && start.elapsed() < std::time::Duration::from_secs(20) {
+        crate::cmd::tiles::follow_style_view(&mut s, web_time::Duration::from_secs(5));
+    }
+    assert!(s.style_view.is_none());
+    assert!(s.notices.iter().any(|n| n.error && n.text.contains("missing")), "{:?}", s.notices);
+    // Moved while the style loads: the map stays where it was put.
+    s.run("map.addTiles", &json!({"url": format!("{base}/moved/style.json"), "view": true})).unwrap();
+    assert!(s.style_view.is_some());
+    let panned = rustgis_geom::lonlat_to_merc(rustgis_geom::Coord::new(10.0, 20.0));
+    s.map_mut().camera.center = panned;
+    crate::cmd::tiles::follow_style_view(&mut s, web_time::Duration::from_secs(5));
+    assert!(s.style_view.is_none());
+    assert_eq!(s.map().camera.center, panned);
+    // A style still loading when another project opens doesn't move that one.
+    s.run("map.addTiles", &json!({"url": "https://tiles.example.invalid/style.json", "view": true})).unwrap();
+    assert!(s.style_view.is_some());
+    s.run("project.new", &Value::Null).unwrap();
+    assert!(s.style_view.is_none());
+}
+
+/// A web scene carries a camera at the map's viewpoint: straight down when the map is flat, and
+/// from its bearing and pitch when it is turned and tilted.
+#[test]
+fn web_scene_camera() {
+    let dir = std::env::temp_dir().join(format!("rustgis_scene_camera_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("scene.gltf").display().to_string();
+    let mut s = world();
+    s.view_size = (800.0, 600.0);
+    let scene = |s: &mut Session| -> Value {
+        s.run("share.webScene", &json!({"path": path})).unwrap();
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap()
+    };
+    // Where a node's camera looks (-z turned by its rotation) and its up (+y).
+    let axes = |n: &Value| {
+        let q: Vec<f64> = n["rotation"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+        let turn = |v: [f64; 3]| {
+            let t = [2.0 * (y * v[2] - z * v[1]), 2.0 * (z * v[0] - x * v[2]), 2.0 * (x * v[1] - y * v[0])];
+            [v[0] + w * t[0] + (y * t[2] - z * t[1]), v[1] + w * t[1] + (z * t[0] - x * t[2]), v[2] + w * t[2] + (x * t[1] - y * t[0])]
+        };
+        (turn([0.0, 0.0, -1.0]), turn([0.0, 1.0, 0.0]))
+    };
+    let near = |a: [f64; 3], b: [f64; 3]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-9);
+    let g = scene(&mut s);
+    let cam = g["nodes"].as_array().unwrap().iter().find(|n| n.get("camera").is_some()).unwrap().clone();
+    assert_eq!(g["cameras"][0]["type"], "perspective");
+    assert!((g["cameras"][0]["perspective"]["aspectRatio"].as_f64().unwrap() - 800.0 / 600.0).abs() < 1e-9);
+    let (look, up) = axes(&cam);
+    assert!(near(look, [0.0, -1.0, 0.0]) && near(up, [0.0, 0.0, -1.0]), "down, north up: {look:?} {up:?}");
+    let t: Vec<f64> = cam["translation"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    // As far up as the map's scale needs: 300 points of ground under half the field of view.
+    let ground = s.map().camera.res * s.map().flat().ground_per_unit(s.map().camera.center);
+    assert!(t[0].abs() < 1e-6 && t[2].abs() < 1e-6 && (t[1] - 300.0 * 3.0 * ground).abs() < 1e-3 * t[1], "{t:?}");
+    // Facing east, tilted 60°: behind the centre to the west, looking east and down.
+    s.run("map.setBearing", &json!({"bearing": 90})).unwrap();
+    s.run("map.setPitch", &json!({"pitch": 60})).unwrap();
+    let g = scene(&mut s);
+    assert_eq!((g["extras"]["bearing"].as_f64(), g["extras"]["pitch"].as_f64()), (Some(90.0), Some(60.0)));
+    let cam = g["nodes"].as_array().unwrap().iter().find(|n| n.get("camera").is_some()).unwrap().clone();
+    let (look, _) = axes(&cam);
+    let (s60, c60) = (60f64.to_radians().sin(), 60f64.to_radians().cos());
+    assert!(near(look, [s60, -c60, 0.0]), "{look:?}");
+    let t: Vec<f64> = cam["translation"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    assert!(t[0] < 0.0 && t[1] > 0.0 && t[2].abs() < 1e-6 * t[1], "{t:?}");
+    // The camera looks at the centre (the origin).
+    let d = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
+    assert!(near([-t[0] / d, -t[1] / d, -t[2] / d], look), "{t:?} {look:?}");
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

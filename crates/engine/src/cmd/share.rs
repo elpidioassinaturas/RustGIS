@@ -65,6 +65,8 @@ pub fn map_pdf(s: &mut Session, dpi: f64) -> Result<Vec<u8>, String> {
 
 fn export_map(s: &mut Session, p: &Value) -> CmdResult {
     let path = ps(p, "path").ok_or("path is required")?.to_string();
+    // A style added with its own view: the export waits for it to load, as it does for tiles.
+    super::tiles::follow_style_view(s, web_time::Duration::from_secs(30));
     let png = map_png(s, f(p, "width"), f(p, "height"), f(p, "dpi"))?;
     rustgis_data::io::write_atomic(std::path::Path::new(&path), &png).map_err(|e| format!("{path}: {e}"))?;
     s.notify(format!("Exported {path}"), false);

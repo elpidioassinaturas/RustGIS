@@ -5,7 +5,10 @@
 //! to remove it. Dragged elements snap to guides, the page and each other (Alt places freely).
 
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
-use rustgis_engine::map::layout::{ElementKind, Layout, MAX_COLORBAR_TICKS, Orientation, PT_PER_MM, TickSide, frame_camera};
+use rustgis_engine::map::layout::{
+    ArrowStyle, CoordFormat, ElementKind, Grid, GridStyle, Layout, MAX_COLORBAR_TICKS, MAX_GRID_WIDTH, MAX_SCALE_DIVISIONS, MAX_TICK_MM,
+    Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TickSide, frame_camera,
+};
 use serde_json::{Value, json};
 
 use crate::RustGisApp;
@@ -376,7 +379,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
             .resizable(false)
             .exact_size(270.0)
             .show_separator_line(true)
-            .show(ui, |ui| properties(app, ui, &layout, li));
+            .show(ui, |ui| egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| properties(app, ui, &layout, li)));
     }
     let area = ui.available_rect_before_wrap();
     // A stable id: dragging an element selects it and opens the properties beside the page,
@@ -856,6 +859,116 @@ fn text_field(app: &mut RustGisApp, ui: &mut Ui, key: (usize, u32, &'static str)
     None
 }
 
+/// A map frame's grid options; `set` sends the changed ones (`false` removes the grid).
+fn grid_properties(app: &mut RustGisApp, ui: &mut Ui, grid: Option<&Grid>, id: u32, set: &dyn Fn(&mut RustGisApp, Value)) {
+    let mut on = grid.is_some();
+    if ui.checkbox(&mut on, tl!("Show grid")).changed() {
+        set(app, json!(on));
+    }
+    let Some(g) = grid else { return };
+    let changed = |r: &egui::Response| r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged());
+    egui::Grid::new(("grid_props", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
+        ui.label(tl!("Interval"));
+        let mut step = g.step;
+        let r = ui.add(
+            egui::DragValue::new(&mut step)
+                .range(0.0..=90.0)
+                .speed(0.05)
+                .max_decimals(4)
+                .custom_formatter(|v, _| if v <= 0.0 { tl!("Auto").to_string() } else { format!("{v}°") }),
+        );
+        if changed(&r) && (step - g.step).abs() > 1e-9 {
+            set(app, json!({"step": step}));
+        }
+        ui.end_row();
+        ui.label(tl!("Style"));
+        egui::ComboBox::from_id_salt(("grid_style", id)).selected_text(tl!(g.style.label())).show_ui(ui, |ui| {
+            for v in GridStyle::ALL {
+                if ui.selectable_label(g.style == v, tl!(v.label())).clicked() && g.style != v {
+                    set(app, json!({"style": v.code()}));
+                }
+            }
+        });
+        ui.end_row();
+        ui.label(tl!("Color"));
+        let mut c = crate::theme::c32(g.color);
+        if crate::widgets::color_button(ui, &mut c).changed() {
+            set(app, json!({"color": crate::theme::rgba(c).hex()}));
+        }
+        ui.end_row();
+        ui.label(tl!("Line width"));
+        let mut w = g.width;
+        let r = ui.add(egui::DragValue::new(&mut w).range(0.0..=MAX_GRID_WIDTH).speed(0.05).max_decimals(2).suffix(" pt"));
+        if changed(&r) && (w - g.width).abs() > 1e-9 {
+            set(app, json!({"width": w}));
+        }
+        ui.end_row();
+        if g.style.ticks() {
+            ui.label(tl!("Tick length"));
+            let mut t = g.tick_length;
+            let r = ui.add(egui::DragValue::new(&mut t).range(0.0..=MAX_TICK_MM).speed(0.1).max_decimals(1).suffix(" mm"));
+            if changed(&r) && (t - g.tick_length).abs() > 1e-9 {
+                set(app, json!({"tickLength": t}));
+            }
+            ui.end_row();
+        }
+        ui.label(tl!("Labels"));
+        let mut labels = g.labels;
+        if ui.checkbox(&mut labels, "").changed() {
+            set(app, json!({"labels": labels}));
+        }
+        ui.end_row();
+        if !g.labels {
+            return;
+        }
+        ui.label(tl!("Format"));
+        ui.horizontal(|ui| {
+            for (label, v, code) in [("Decimal", CoordFormat::Decimal, "decimal"), ("DMS", CoordFormat::Dms, "dms")] {
+                if ui.selectable_label(g.format == v, tl!(label)).clicked() && g.format != v {
+                    set(app, json!({"format": code}));
+                }
+            }
+        });
+        ui.end_row();
+        ui.label(tl!("N/S/E/W"));
+        let mut hemi = g.hemisphere;
+        if ui.checkbox(&mut hemi, "").on_hover_text(tl!("Off, west and south are negative: -112.5°.")).changed() {
+            set(app, json!({"hemisphere": hemi}));
+        }
+        ui.end_row();
+        // Two rows, so the four edges fit the panel's width.
+        let e = g.edges;
+        let all = [("Top", "top", e.top), ("Bottom", "bottom", e.bottom), ("Left", "left", e.left), ("Right", "right", e.right)];
+        for (row, label) in [(0, tl!("Edges")), (2, "")] {
+            ui.label(label);
+            ui.horizontal(|ui| {
+                for (i, (label, _, shown)) in all.iter().enumerate().skip(row).take(2) {
+                    if ui.selectable_label(*shown, tl!(label)).clicked() {
+                        let names: Vec<&str> = all
+                            .iter()
+                            .enumerate()
+                            .filter(|(j, (_, _, s))| if *j == i { !*s } else { *s })
+                            .map(|(_, (_, n, _))| *n)
+                            .collect();
+                        set(app, json!({"edges": names}));
+                    }
+                }
+            });
+            ui.end_row();
+        }
+        ui.label(tl!("Side labels"));
+        ui.horizontal(|ui| {
+            let vertical = g.label_orientation == Orientation::Vertical;
+            for (label, v) in [("Horizontal", false), ("Vertical", true)] {
+                if ui.selectable_label(vertical == v, tl!(label)).clicked() && vertical != v {
+                    set(app, json!({"labelOrientation": if v { "vertical" } else { "horizontal" }}));
+                }
+            }
+        });
+        ui.end_row();
+    });
+}
+
 /// The selected element's properties.
 fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
     let Some(e) = app.layout.selected.and_then(|id| layout.element(id)).cloned() else { return };
@@ -1030,6 +1143,52 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                 }
                 ui.end_row();
             }
+            ElementKind::NorthArrow { style, fill, outline, .. } => {
+                ui.label(tl!("Style"));
+                egui::ComboBox::from_id_salt(("arrow_style", id)).selected_text(tl!(style.label())).show_ui(ui, |ui| {
+                    for v in ArrowStyle::ALL {
+                        if ui.selectable_label(*style == v, tl!(v.label())).clicked() && *style != v {
+                            update(app, json!({"style": v.code()}));
+                        }
+                    }
+                });
+                ui.end_row();
+                for (label, key, current) in [("Fill", "fill", *fill), ("Outline", "outline", *outline)] {
+                    ui.label(tl!(label));
+                    let mut c = crate::theme::c32(current);
+                    if crate::widgets::color_button(ui, &mut c).changed() {
+                        update(app, json!({key: crate::theme::rgba(c).hex()}));
+                    }
+                    ui.end_row();
+                }
+            }
+            ElementKind::ScaleBar { units, divisions, style, .. } => {
+                ui.label(tl!("Style"));
+                egui::ComboBox::from_id_salt(("scale_style", id)).selected_text(tl!(style.label())).show_ui(ui, |ui| {
+                    for v in ScaleBarStyle::ALL {
+                        if ui.selectable_label(*style == v, tl!(v.label())).clicked() && *style != v {
+                            update(app, json!({"style": v.code()}));
+                        }
+                    }
+                });
+                ui.end_row();
+                ui.label(tl!("Units"));
+                egui::ComboBox::from_id_salt(("scale_units", id)).selected_text(tl!(units.label())).show_ui(ui, |ui| {
+                    for v in ScaleUnits::ALL {
+                        if ui.selectable_label(*units == v, tl!(v.label())).clicked() && *units != v {
+                            update(app, json!({"units": v.code()}));
+                        }
+                    }
+                });
+                ui.end_row();
+                ui.label(tl!("Divisions"));
+                let mut n = *divisions as u64;
+                let r = ui.add(egui::DragValue::new(&mut n).range(1..=MAX_SCALE_DIVISIONS as u64));
+                if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && n as usize != *divisions {
+                    update(app, json!({"divisions": n}));
+                }
+                ui.end_row();
+            }
             ElementKind::Table { rows, .. } => {
                 ui.label(tl!("Rows"));
                 let mut n = *rows as u64;
@@ -1042,6 +1201,12 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             _ => {}
         }
     });
+    if let ElementKind::MapFrame { grid, .. } = &e.kind {
+        ui.add_space(4.0);
+        egui::CollapsingHeader::new(tl!("Grid")).id_salt(("frame_grid", id)).default_open(grid.is_some()).show(ui, |ui| {
+            grid_properties(app, ui, grid.as_ref(), id, &|app, g| update(app, json!({"grid": g})));
+        });
+    }
     ui.add_space(8.0);
     if let ElementKind::MapFrame { .. } = e.kind {
         ui.toggle_value(&mut app.layout.navigate, tl!("Pan and Zoom Map"))

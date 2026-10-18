@@ -132,12 +132,25 @@ pub fn start() {
                         }
                     }
                     let links = if project.is_some() { "" } else { q.as_str() };
+                    // `#zoom/lat/lon/bearing/pitch` (a MapLibre map link) places the map; without
+                    // it, `?extent=` or `?data=`, the first `?style=` opens at the style's own view.
+                    let fragment = hash();
+                    // A fragment that is no map position (`#about`) is left alone.
+                    let linked = project.is_none() && rustgis_engine::cmd::navigate::is_map_link(&fragment) && {
+                        let r = app.run("map.goToLink", serde_json::json!({"url": fragment}));
+                        if let Err(e) = &r {
+                            log::warn!("{fragment}: {e}");
+                        }
+                        r.is_ok()
+                    };
+                    let placed = linked || param(&q, "extent").is_some_and(|e| !e.is_empty()) || !params(links, "data", 1).is_empty();
                     // `?data=<url>` (repeatable) adds data by web address, downloaded in the
                     // background, the map zoomed to the first file that lands with something to
-                    // show; `?style=<url>` adds a MapLibre style; `?tiles=<template>` a tile
-                    // layer. Links that share a map. What fails is said in a notice.
+                    // show (unless a `#` map link placed it); `?style=<url>` adds a MapLibre style;
+                    // `?tiles=<template>` a tile layer. Links that share a map. What fails is said
+                    // in a notice.
                     for url in params(links, "data", 16) {
-                        if let Err(e) = app.run("ui.addUrl", serde_json::json!({"url": url, "zoom": true})) {
+                        if let Err(e) = app.run("ui.addUrl", serde_json::json!({"url": url, "zoom": !linked})) {
                             app.session.notify(format!("?data={url}: {e}"), true);
                         }
                     }
@@ -154,14 +167,20 @@ pub fn start() {
                     if stac.len() > 1 {
                         app.session.notify(format!("only the first ?stac= link is opened ({} more were left out)", stac.len() - 1), false);
                     }
+                    let mut style_view = project.is_none() && !placed;
                     for (key, kind) in [("style", Some("style")), ("tiles", None)] {
                         for url in params(links, key, 8) {
                             let mut p = serde_json::json!({"url": url});
                             if let Some(kind) = kind {
                                 p["kind"] = serde_json::json!(kind);
+                                if style_view {
+                                    p["view"] = serde_json::json!(true);
+                                }
                             }
-                            if let Err(e) = app.run("map.addTiles", p) {
-                                app.session.notify(format!("?{key}={url}: {e}"), true);
+                            match app.run("map.addTiles", p) {
+                                // The first style added opens at its view, not one that failed.
+                                Ok(_) => style_view &= kind.is_none(),
+                                Err(e) => app.session.notify(format!("?{key}={url}: {e}"), true),
                             }
                         }
                     }
@@ -232,6 +251,11 @@ fn flag(q: &str, key: &str) -> bool {
 
 fn query() -> String {
     web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default()
+}
+
+/// The page address's fragment (`#…`), as MapLibre's map links carry a position.
+fn hash() -> String {
+    web_sys::window().and_then(|w| w.location().hash().ok()).unwrap_or_default()
 }
 
 /// Reads dropped files asynchronously (browsers can't read them synchronously) into the inbox,

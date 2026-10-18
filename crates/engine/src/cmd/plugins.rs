@@ -3,7 +3,8 @@
 //! A plugin command (`plugin:<plugin>/<command>`) runs through [`Session::run`] like any other:
 //! one undo step, restored if it fails. While it runs, the plugin reaches the project through
 //! the requests [`Bridge`] answers: RustGIS commands by id, and a few `host.*` requests for
-//! reading layers. What it may run depends on the permissions it declared.
+//! reading layers and fetching documents (`host.fetch`, see [`fetch`]). What it may run depends
+//! on the permissions it declared.
 
 use std::sync::Arc;
 
@@ -12,6 +13,9 @@ use serde_json::{Value, json};
 
 use super::{b, ps, uint};
 use crate::{CmdResult, CommandSpec as C, Session};
+
+#[path = "plugin_fetch.rs"]
+pub mod fetch;
 
 pub fn commands() -> Vec<C> {
     vec![
@@ -27,10 +31,38 @@ pub fn commands() -> Vec<C> {
         C::new("plugin.installFromRegistry", "Install Plugin From Registry", "Plugins › Manage", install_from_registry)
             .view()
             .params(r#"{"id": plugin id, "url"?: registry.json}"#),
+        C::new("plugin.panel", "Plugin Panel State", "Plugins", panel).view().params(
+            r#"{"id": plugin id, "values"?: {widget id: true/false or a whole number}, "refresh"?: bool (run the panel's state command)}"#,
+        ),
         C::new("plugin.prepare", "Prepare Plugin Environment", "Plugins › Manage", prepare)
             .view()
             .params(r#"{"id": plugin id (a process plugin that declares "python": downloads its Python and packages)}"#),
     ]
+}
+
+/// A plugin's panel state (the panel's widgets' values and what the plugin said about them):
+/// sets values first, then runs the panel's state command with `refresh`. The panel's front
+/// end uses it to open the panel and for widgets that run no command.
+fn panel(s: &mut Session, p: &Value) -> CmdResult {
+    let id = ps(p, "id").ok_or("id is required")?;
+    let plugin = rustgis_plugins::get(id).ok_or_else(|| format!("no plugin '{id}'"))?;
+    if !plugin.enabled {
+        return Err(format!("the plugin {} is disabled", plugin.manifest.name));
+    }
+    let decl = plugin.manifest.panel.clone().ok_or_else(|| format!("{} has no panel", plugin.manifest.name))?;
+    let before = s.panel_state(id, &decl).clone();
+    if let Some(values) = p.get("values") {
+        s.panel_state(id, &decl).set_values(&decl, values);
+    }
+    if b(p, "refresh").unwrap_or(false) && !decl.state.is_empty() {
+        // A failed refresh leaves the values as they were, as a failed command does.
+        if let Err(e) = s.run_plugin(&rustgis_plugins::command_id(id, &decl.state), &json!({})) {
+            *s.panel_state(id, &decl) = before;
+            return Err(e);
+        }
+    }
+    let state = s.plugin_panel(id).ok_or("the panel is unavailable")?;
+    serde_json::to_value(state).map_err(|e| e.to_string())
 }
 
 /// Makes a Python plugin's environment (it can take minutes: downloads).
@@ -314,6 +346,10 @@ fn refused(plugin: &Plugin, spec: &C, params: &Value) -> Option<String> {
 struct Bridge<'a> {
     s: &'a mut Session,
     plugin: Arc<Plugin>,
+    /// What this call fetched (`host.fetch`).
+    fetches: fetch::Calls,
+    /// Whether a request could have changed the project (a command that mutates, a layer added).
+    changed: bool,
 }
 
 impl Bridge<'_> {
@@ -379,6 +415,7 @@ impl Bridge<'_> {
         let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or(&self.plugin.manifest.name).to_string();
         let gj = p.get("geojson").ok_or("geojson is required")?;
         let (ds, report) = rustgis_data::io::read_geojson(&gj.to_string(), &name).map_err(|e| e.to_string())?;
+        self.changed = true;
         let id = super::layer::add_dataset(self.s, ds);
         Ok(json!({"layer": id, "skipped": report.skipped}))
     }
@@ -392,6 +429,7 @@ impl Bridge<'_> {
             return Err(why);
         }
         let (enabled, run, label) = (spec.enabled, spec.run, spec.label);
+        self.changed |= spec.mutates;
         let named = params.get("layer").and_then(|_| self.s.layer_id(params).ok());
         let active = self.s.active_layer;
         if named.is_some() {
@@ -449,6 +487,11 @@ impl Host for Bridge<'_> {
                 Ok(Value::Null)
             }
             "host.addLayer" => self.add_layer(params),
+            "host.fetch" => {
+                // The address, and what the plugin answers, can carry what it read from the project.
+                self.need(Permission::Network, "fetch from the web")?;
+                self.fetches.fetch(params)
+            }
             _ if op.starts_with("host.") => Err(format!("unknown request '{op}'")),
             _ => self.command(op, params),
         }
@@ -471,6 +514,95 @@ impl Session {
         let label = leak(&cmd.decl.label);
         let mutates = cmd.mutates();
         let plugin = cmd.plugin.clone();
-        self.guarded(label, mutates, |s| rustgis_plugins::run_command(&cmd, &mut Bridge { s, plugin }, params))
+        // A plugin with a panel gets its values with every command (`panel` in the request),
+        // after the ones `params` sets (`{"panel": {"id": value}}`, which is taken out of them),
+        // and may answer the panel's new state. A failed command leaves the values as they were.
+        let pid = plugin.manifest.id.clone();
+        let panel = plugin.manifest.panel.clone();
+        let given = params;
+        let mut params = params;
+        let mut stripped;
+        let (before, request) = match &panel {
+            Some(decl) => {
+                let state = self.panel_state(&pid, decl);
+                let before = state.clone();
+                let mut changed = Vec::new();
+                if let Some(given) = params.get("panel") {
+                    changed = state.set_values(decl, given);
+                    stripped = params.clone();
+                    if let Some(o) = stripped.as_object_mut() {
+                        o.remove("panel");
+                    }
+                    params = &stripped;
+                }
+                (Some(before), Some(state.request(&changed)))
+            }
+            None => (None, None),
+        };
+        // The panel's state command runs each time the panel opens: when nothing it asked for
+        // could change the project, it is no undo step. Other commands keep theirs.
+        let state_command = panel.as_ref().is_some_and(|d| !d.state.is_empty() && d.state == cmd.decl.id);
+        let mut pending = Vec::new();
+        let res = self.guarded(label, mutates, |s| {
+            let fetches = fetch::Calls::for_plugin(&plugin.manifest.id);
+            let mut bridge = Bridge { s, plugin, fetches, changed: false };
+            let res = rustgis_plugins::run_command_with_panel(&cmd, &mut bridge, params, request);
+            if !bridge.fetches.pending.is_empty() {
+                // Waiting for a fetch (the browser): whatever the call did is undone, quietly,
+                // and the command runs again from the start once the answers are in.
+                pending = std::mem::take(&mut bridge.fetches.pending);
+                bridge.s.quiet_failure = true;
+                return Err(String::new());
+            }
+            if res.is_ok() && state_command && !bridge.changed {
+                bridge.s.request_only = true;
+            }
+            res
+        });
+        if let Some(decl) = &panel {
+            match (&res, self.plugin_panels.get_mut(&pid)) {
+                (Ok(answer), Some(state)) => {
+                    if let Some(update) = answer.get("panel") {
+                        state.apply(decl, update);
+                    }
+                }
+                (Err(_), Some(state)) => {
+                    if let Some(before) = before {
+                        *state = before;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if pending.is_empty() {
+            return res;
+        }
+        // The panel's values went back with the failed call: the run again sets them again.
+        let res = self.retry_plugin(id, given, pending);
+        if let Err(e) = &res {
+            self.notify(e.clone(), true);
+        }
+        res
+    }
+
+    /// A plugin's panel state, made from its manifest the first time.
+    pub fn plugin_panel(&mut self, plugin: &str) -> Option<&rustgis_plugins::PanelState> {
+        // A plugin uninstalled, disabled or updated without a panel leaves no state behind.
+        let Some(p) = rustgis_plugins::get(plugin).filter(|p| p.enabled && p.manifest.panel.is_some()) else {
+            self.plugin_panels.remove(plugin);
+            return None;
+        };
+        let decl = p.manifest.panel.as_ref()?;
+        Some(self.panel_state(plugin, decl))
+    }
+
+    /// The kept state of `plugin`'s panel `decl`: made from the declaration the first time, and
+    /// made again when the plugin was updated with other widgets since.
+    fn panel_state(&mut self, plugin: &str, decl: &rustgis_plugins::PanelDecl) -> &mut rustgis_plugins::PanelState {
+        let state = self.plugin_panels.entry(plugin.to_string()).or_insert_with(|| rustgis_plugins::PanelState::new(decl));
+        if !state.matches(decl) {
+            *state = rustgis_plugins::PanelState::new(decl);
+        }
+        state
     }
 }

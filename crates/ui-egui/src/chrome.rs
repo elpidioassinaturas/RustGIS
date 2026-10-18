@@ -535,6 +535,20 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
                 hits.push((c.id.clone(), label.to_string(), format!("{} › {}", tl!("Plugins"), m.translate(lang, &m.name))));
             }
         }
+        // Plugins' panels (`panel:<plugin>`).
+        for p in rustgis_engine::plugins::list().into_iter().filter(|p| p.enabled) {
+            let m = &p.manifest;
+            let Some(d) = &m.panel else { continue };
+            let title = m.translate(lang, &d.title);
+            if ql.is_empty()
+                || title.to_lowercase().contains(&ql)
+                || d.title.to_lowercase().contains(&ql)
+                || m.name.to_lowercase().contains(&ql)
+            {
+                let label = crate::i18n::fmt("{name} (panel)", &[("name", title)]);
+                hits.push((format!("panel:{}", m.id), label, format!("{} › {}", tl!("Plugins"), m.translate(lang, &m.name))));
+            }
+        }
         for (id, label, loc) in [
             ("ui.addData", "Add Data…", "Home › Add"),
             ("ui.addDelimited", "Add Delimited Text…", "Home › Add"),
@@ -578,7 +592,7 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
             let mut first = true;
             for (id, label, loc) in hits.iter().take(40) {
                 // Unavailable commands stay listed, greyed out, with the reason on hover.
-                let on = id.starts_with("gp:") || enabled(app, id);
+                let on = id.starts_with("gp:") || id.starts_with("panel:") || enabled(app, id);
                 let mut b = egui::Button::new(egui::RichText::new(label).size(13.0)).frame(false).min_size(vec2(row_w, 26.0));
                 if show_loc {
                     b = b.right_text(egui::RichText::new(loc).size(11.0).weak());
@@ -607,6 +621,8 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
         keep = false;
         if let Some(tool) = id.strip_prefix("gp:") {
             let _ = app.run("ui.gp.open", json!({"tool": tool}));
+        } else if let Some(plugin) = id.strip_prefix("panel:") {
+            let _ = app.run("ui.pane.plugin", json!({"id": plugin}));
         } else {
             let _ = app.run(&id, Value::Null);
         }

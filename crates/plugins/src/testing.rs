@@ -16,6 +16,13 @@
 //! - `r` (read, a tool with a `file` parameter, declared with the `files` permission): returns
 //!   what `m` does. A request carrying files has `files` before `id` (byte 15 is then the `"`
 //!   closing `"files"`), so it's answered the same way.
+//! - `p` (panel state): returns a fixed panel state (see [`panel_state`]), as the Historical
+//!   Imagery plugin's would look.
+//! - `q` (echo): returns the request itself, so a test sees what the plugin was sent; its
+//!   `panel` (the panel's values) is then the answer's, and is taken in again.
+//!
+//! [`panel_manifest`] declares a panel over `p` and `q`. With a panel, requests carry `panel`
+//! before `params`, so `f` reads them only from plugins without one.
 
 use std::io::Write;
 
@@ -29,6 +36,8 @@ const WAT: &str = r#"
   (data (i32.const 0) "{\22ok\22:{\22hello\22:\22world\22}}")
   (data (i32.const 64) "hi")
   (data (i32.const 128) "{\22error\22:\22nope\22}")
+  (data (i32.const 192) "{\22ok\22:")
+  (data (i32.const 2048) "PANEL_DATA")
   (data (i32.const 256) "{\22ok\22:{\22layers\22:[{\22name\22:\22Made\22,\22geojson\22:{\22type\22:\22FeatureCollection\22,\22features\22:[{\22type\22:\22Feature\22,\22properties\22:{\22n\22:1},\22geometry\22:{\22type\22:\22Point\22,\22coordinates\22:[1,2]}}]}}],\22messages\22:[\22made\22]}}")
   (data (i32.const 1024) "{\22ok\22:{\22selection\22:{\22layer\22:\22Cities\22,\22rows\22:[0,2]}}}")
   (func $alloc (export "rustgis_alloc") (param $n i32) (result i32)
@@ -40,6 +49,14 @@ const WAT: &str = r#"
     (local.get $p))
   (func $reply (param $p i32) (param $n i32) (result i64)
     (i64.or (i64.shl (i64.extend_i32_u (local.get $p)) (i64.const 32)) (i64.extend_i32_u (local.get $n))))
+  (func $copy (param $d i32) (param $s i32) (param $n i32)
+    (block $done (loop $l
+      (br_if $done (i32.eqz (local.get $n)))
+      (i32.store8 (local.get $d) (i32.load8_u (local.get $s)))
+      (local.set $d (i32.add (local.get $d) (i32.const 1)))
+      (local.set $s (i32.add (local.get $s) (i32.const 1)))
+      (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+      (br $l))))
   (func (export "rustgis_call") (param $p i32) (param $n i32) (result i64)
     (local $c i32) (local $len i32) (local $buf i32)
     (local.set $c (i32.load8_u (i32.add (local.get $p) (i32.const 15))))
@@ -58,13 +75,51 @@ const WAT: &str = r#"
     (if (i32.or (i32.eq (local.get $c) (i32.const 114)) (i32.eq (local.get $c) (i32.const 34)))
       (then (return (call $reply (i32.const 256) (i32.const 195)))))
     (if (i32.eq (local.get $c) (i32.const 120)) (then (return (call $reply (i32.const 1024) (i32.const 52)))))
+    (if (i32.eq (local.get $c) (i32.const 112)) (then (return (call $reply (i32.const 2048) (i32.const PANEL_LEN)))))
+    (if (i32.eq (local.get $c) (i32.const 113)) (then
+      (local.set $buf (call $alloc (i32.add (local.get $n) (i32.const 7))))
+      (call $copy (local.get $buf) (i32.const 192) (i32.const 6))
+      (call $copy (i32.add (local.get $buf) (i32.const 6)) (local.get $p) (local.get $n))
+      (i32.store8 (i32.add (i32.add (local.get $buf) (i32.const 6)) (local.get $n)) (i32.const 125))
+      (return (call $reply (local.get $buf) (i32.add (local.get $n) (i32.const 7))))))
     (call $reply (i32.const 128) (i32.const 16)))
 )
 "#;
 
+/// The panel state command `p` answers: a release timeline like the Historical Imagery
+/// plugin's, at its last release.
+pub fn panel_state() -> serde_json::Value {
+    let dates = [
+        "2014-02-20",
+        "2015-01-21",
+        "2016-01-13",
+        "2017-01-11",
+        "2018-01-08",
+        "2019-01-09",
+        "2020-01-08",
+        "2021-01-13",
+        "2022-01-12",
+        "2023-01-11",
+        "2024-01-18",
+        "2025-01-30",
+        "2025-12-18",
+    ];
+    serde_json::json!({"panel": {
+        "values": {"release": 12},
+        "items": {
+            "selected": {"text": "2025-12-18\nRelease 13192"},
+            "release": {"min": 0, "max": 12, "labels": dates},
+            "newer": {"enabled": false},
+            "metadata": {"text": "Source: Maxar (Vivid)\nResolution: 0.3 m\nCaptured: 2025-06-02\nAccuracy: 5 m"}
+        }
+    }})
+}
+
 /// The test module.
 pub fn wasm() -> Vec<u8> {
-    wat::parse_str(WAT).unwrap_or_default()
+    let answer = serde_json::json!({"ok": panel_state()}).to_string();
+    let data = answer.replace('\\', "\\5c").replace('"', "\\22");
+    wat::parse_str(WAT.replace("PANEL_DATA", &data).replace("PANEL_LEN", &answer.len().to_string())).unwrap_or_default()
 }
 
 /// A manifest for the test module, with the given id and permissions.
@@ -103,6 +158,43 @@ pub fn manifest(id: &str, permissions: &[&str]) -> String {
         ]}));
     }
     m.to_string()
+}
+
+/// A manifest for the test module with a panel like the Historical Imagery plugin's: texts, a
+/// checkbox and a stepped slider running the echo command `q`, buttons, and `p` as its state
+/// command.
+pub fn panel_manifest(id: &str) -> String {
+    let mut m: serde_json::Value = serde_json::from_str(&manifest(id, &[])).unwrap_or_default();
+    if let Some(c) = m["commands"].as_array_mut() {
+        c.push(serde_json::json!({"id": "p", "label": "Panel State"}));
+        c.push(serde_json::json!({"id": "q", "label": "Echo"}));
+        // Answered by their first letters, as `p` and `q` are.
+        c.push(serde_json::json!({"id": "p-older", "label": "Older", "icon": "prev_extent"}));
+        c.push(serde_json::json!({"id": "q-newer", "label": "Newer", "icon": "next_extent"}));
+    }
+    m["panel"] = serde_json::json!({
+        "title": "Historical Imagery",
+        "icon": "history",
+        "help": "Step through the archived releases.",
+        "state": "p",
+        "items": [
+            {"kind": "text", "id": "selected", "label": "Selected release", "text": "None yet"},
+            {"kind": "checkbox", "id": "local", "label": "Only versions with local changes", "command": "q"},
+            {"kind": "slider", "id": "release", "label": "Release timeline", "min": 0, "max": 0, "steps": true, "command": "q"},
+            {"kind": "button", "command": "p-older", "id": "older"},
+            {"kind": "button", "command": "q-newer", "id": "newer"},
+            {"kind": "button", "command": "h", "id": "hello", "label": "Say Hello"},
+            {"kind": "text", "id": "metadata", "label": "Location metadata"}
+        ]
+    });
+    m["i18n"] =
+        serde_json::json!({"de": {"Hello": "Hallo", "Historical Imagery": "Historische Luftbilder", "Release timeline": "Zeitleiste"}});
+    m.to_string()
+}
+
+/// A `.rgplugin` package of the test module with [`panel_manifest`].
+pub fn panel_package(id: &str) -> Vec<u8> {
+    zip_of(&[("plugin.json", panel_manifest(id).as_bytes()), ("plugin.wasm", &wasm())])
 }
 
 /// A `.rgplugin` package of the test module.

@@ -43,6 +43,14 @@ pub fn commands() -> Vec<C> {
         C::new("map.goToXY", "Go To XY", "Home › Navigate", go_to_xy)
             .view()
             .params(r#"{"lon" | "x": number, "lat" | "y": number, "scale"?: number, "bearing"?: degrees clockwise from north, "pitch"?: degrees of tilt (0 to 85)}"#),
+        C::new("map.goToLink", "Go To Map Link", "Home › Navigate", go_to_link)
+            .view()
+            .params(r#"{"url": a map link ending in #zoom/lat/lon[/bearing[/pitch]] (as MapLibre writes them; also #map=…), or just zoom/lat/lon[/bearing[/pitch]]}"#),
+        C::new("map.link", "Map Link", "Home › Navigate", |s, _| {
+            let hash = link_of(s.map()).ok_or("the view shows no part of the Earth")?;
+            Ok(json!({"hash": hash}))
+        })
+        .view(),
         C::new("map.setBearing", "Rotate Map", "Home › Navigate", set_bearing)
             .view()
             .params(r#"{"bearing": degrees clockwise from north (the direction the top of the view faces) | "by": degrees to turn it further}"#),
@@ -330,6 +338,129 @@ pub(crate) fn go_to_xy(s: &mut Session, p: &Value) -> CmdResult {
     m.camera.clamp();
     s.record_extent();
     Ok(Value::Null)
+}
+
+/// The most characters of a map link read.
+const MAX_LINK: usize = 4096;
+
+/// A MapLibre map position: zoom (512-pixel tiles), latitude and longitude, bearing and pitch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MapLink {
+    pub zoom: f64,
+    pub lat: f64,
+    pub lon: f64,
+    pub bearing: f64,
+    pub pitch: f64,
+}
+
+/// Reads a map position from a link's fragment, as MapLibre's `hash` option writes it:
+/// `#zoom/lat/lon[/bearing[/pitch]]`, or `#name=zoom/lat/lon…` among other `&`-separated
+/// parameters. Text without a `#` is read as the fragment itself.
+pub(crate) fn parse_link(text: &str) -> Option<MapLink> {
+    let text = text.trim();
+    // Cut on a character boundary: a hostile link is long and need not be ASCII.
+    let end = (0..=MAX_LINK.min(text.len())).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+    let text = text.get(..end).unwrap_or("");
+    // A web address's position is in its fragment; text with no `#` is a bare position only when
+    // it isn't an address (`https://x/?a=1/2/3` is none).
+    let fragment = match text.split_once('#') {
+        Some((_, f)) => f,
+        None if text.contains([':', '?', '=']) => return None,
+        None => text,
+    };
+    // MapLibre's own parameter (`map=`, or the fragment alone) before any other.
+    let parts: Vec<(Option<&str>, &str)> =
+        fragment.split('&').map(|part| part.split_once('=').map_or((None, part), |(k, v)| (Some(k), v))).collect();
+    let ours = parts.iter().filter(|(k, _)| matches!(k, None | Some("map")));
+    let others = parts.iter().filter(|(k, _)| !matches!(k, None | Some("map")));
+    ours.chain(others).find_map(|&(_, value)| {
+        let nums: Vec<f64> = value.split('/').map(|n| n.trim().parse::<f64>().ok().filter(|v| v.is_finite())).collect::<Option<_>>()?;
+        let (&zoom, &lat, &lon) = (nums.first()?, nums.get(1)?, nums.get(2)?);
+        if nums.len() > 5 || !(0.0..=30.0).contains(&zoom) || !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+            return None;
+        }
+        let (bearing, pitch) = (nums.get(3).copied().unwrap_or(0.0), nums.get(4).copied().unwrap_or(0.0));
+        Some(MapLink { zoom, lat, lon, bearing, pitch })
+    })
+}
+
+/// Whether `text` holds a map position [`parse_link`] reads (the web app asks before going to
+/// its own address's fragment, which may be something else).
+pub fn is_map_link(text: &str) -> bool {
+    parse_link(text).is_some()
+}
+
+/// Ground metres per pixel at MapLibre zoom `zoom` and latitude `lat`.
+pub(crate) fn ground_at_zoom(zoom: f64, lat: f64) -> f64 {
+    let lat = lat.clamp(-rustgis_geom::MAX_LAT, rustgis_geom::MAX_LAT);
+    std::f64::consts::TAU * rustgis_geom::MERCATOR_R / (512.0 * zoom.exp2()) * lat.to_radians().cos().abs()
+}
+
+/// The map's view as a MapLibre link fragment (`#zoom/lat/lon/bearing/pitch`, the last two left
+/// out while zero); None when its centre is no place on Earth.
+pub(crate) fn link_of(map: &Map) -> Option<String> {
+    let flat = map.flat();
+    let c = flat.inverse(map.camera.center)?;
+    let ground = map.camera.res * flat.ground_per_unit(map.camera.center);
+    let merc = ground / c.y.clamp(-rustgis_geom::MAX_LAT, rustgis_geom::MAX_LAT).to_radians().cos().abs().max(1e-9);
+    // Within what a link is read back with (a large window shows the world below zoom 0).
+    let zoom = (std::f64::consts::TAU * rustgis_geom::MERCATOR_R / (512.0 * merc)).log2().clamp(0.0, 30.0);
+    if !(zoom.is_finite() && c.x.is_finite() && c.y.is_finite()) {
+        return None;
+    }
+    let (bearing, pitch) = (map.camera.bearing, map.camera.pitch);
+    let round = |v: f64, places: i32| {
+        let k = 10f64.powi(places);
+        // + 0.0 turns a rounded -0 into 0.
+        (v * k).round() / k + 0.0
+    };
+    let mut hash = format!("#{}/{}/{}", round(zoom, 2), round(c.y, 5), round(c.x, 5));
+    if bearing.abs() >= 0.05 || pitch.abs() >= 0.05 {
+        hash.push_str(&format!("/{}", round(bearing, 1)));
+    }
+    if pitch.abs() >= 0.05 {
+        hash.push_str(&format!("/{}", round(pitch, 1)));
+    }
+    Some(hash)
+}
+
+/// Moves the map to a MapLibre-style view: a place, a zoom (512-pixel tiles), a bearing and a
+/// pitch, each kept as it is when not given.
+pub(crate) fn go_to_view(
+    s: &mut Session,
+    center: Option<Coord>,
+    zoom: Option<f64>,
+    bearing: Option<f64>,
+    pitch: Option<f64>,
+) -> Result<(), String> {
+    let m = s.map();
+    let flat = m.flat();
+    let lonlat = match center {
+        Some(c) => c,
+        None => flat.inverse(m.camera.center).ok_or("the view shows no part of the Earth")?,
+    };
+    let ground = match zoom {
+        Some(z) => ground_at_zoom(z, lonlat.y),
+        None => m.camera.res * flat.ground_per_unit(m.camera.center),
+    };
+    let mut camera = place_at(m, lonlat, ground).ok_or("that place is outside the map's projection")?;
+    if let Some(b) = bearing {
+        camera.set_bearing(b);
+    }
+    if let Some(t) = pitch {
+        camera.set_pitch(t);
+    }
+    s.map_mut().camera = camera;
+    s.record_extent();
+    Ok(())
+}
+
+/// Goes to the place a MapLibre map link shows.
+fn go_to_link(s: &mut Session, p: &Value) -> CmdResult {
+    let url = ps(p, "url").ok_or("url is required")?;
+    let l = parse_link(url).ok_or("the link has no map position (#zoom/lat/lon[/bearing[/pitch]])")?;
+    go_to_view(s, Some(Coord::new(l.lon, l.lat)), Some(l.zoom), Some(l.bearing), Some(l.pitch))?;
+    Ok(json!({"lon": l.lon, "lat": l.lat, "zoom": l.zoom, "bearing": s.map().camera.bearing, "pitch": s.map().camera.pitch}))
 }
 
 /// Tilts the flat map (the globe keeps the pitch for when the map is flat again).

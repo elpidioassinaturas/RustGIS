@@ -776,6 +776,13 @@ fn draw_label(p: &egui::Painter, l: &PlacedLabel, at: Pos2) {
     } else {
         Align2::CENTER_CENTER
     };
+    // A selected text graphic: framed as laid out, under the text.
+    if l.framed {
+        let galley = p.layout_no_wrap(l.text.clone(), font.clone(), Color32::TRANSPARENT);
+        let r = align.anchor_size(at, galley.size()).expand(3.0);
+        let cyan = c32(rustgis_engine::render::SELECTION);
+        p.rect(r, 0.0, cyan.gamma_multiply(40.0 / 255.0), Stroke::new(2.0, cyan), egui::StrokeKind::Outside);
+    }
     if let Some(h) = l.halo {
         let hc = c32(h);
         for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-0.8, -0.8), (0.8, 0.8), (-0.8, 0.8), (0.8, -0.8)] {

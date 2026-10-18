@@ -13,6 +13,8 @@
 //! `{"rclick": [x, y]}` right-clicks at (x, y) (the map's menu),
 //! `{"scroll": [x, y, dy]}` turns the mouse wheel by `dy` points over (x, y) (negative zooms
 //! out) and runs one frame (shots then catch the map mid-zoom),
+//! `{"plugin": path}` loads a `.rgplugin` or a plugin folder for the run (as `rustgis-cli run
+//! --plugin` does), and `{"testPlugin": "panel"}` the plugin tests use, with a panel,
 //! `{"titlebar": {"left_inset": 80, "height": 34}}`
 //! draws the header as a macOS unified title bar (`null` turns it off), and
 //! `{"width": w, "height": h}` on the first line sets the size (default
@@ -93,6 +95,25 @@ fn main() {
             let params = l.get("params").cloned().unwrap_or(serde_json::Value::Null);
             if let Err(e) = harness.state_mut().run(id, params) {
                 eprintln!("{id}: {e}");
+            }
+            for _ in 0..3 {
+                harness.step();
+            }
+        } else if let Some(p) = l.get("plugin").and_then(|v| v.as_str()) {
+            let loaded = rustgis_plugins::Package::from_path(std::path::Path::new(p)).and_then(|pkg| rustgis_plugins::load(pkg, p));
+            if let Err(e) = loaded {
+                eprintln!("{p}: {e}");
+            }
+            for _ in 0..3 {
+                harness.step();
+            }
+        } else if let Some(which) = l.get("testPlugin").and_then(|v| v.as_str()) {
+            let bytes = match which {
+                "panel" => rustgis_plugins::testing::panel_package("test-panel"),
+                _ => rustgis_plugins::testing::package("test-plugin", &[]),
+            };
+            if let Err(e) = rustgis_plugins::Package::from_zip(&bytes).and_then(|pkg| rustgis_plugins::load(pkg, "test")) {
+                eprintln!("{which}: {e}");
             }
             for _ in 0..3 {
                 harness.step();

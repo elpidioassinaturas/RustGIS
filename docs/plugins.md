@@ -55,11 +55,12 @@ described below, and RustGIS checks each one:
   if the command fails.
 - With the **`files`** permission, it can run commands that read or write files the user names,
   and its tools can take a file the user picks (a [`file` parameter](#file-parameters)).
-- With the **`network`** permission (and `edit`), it can add web tile layers (`map.addTiles`).
-  The map then loads tiles from the addresses the plugin gave, and an address can carry what the
-  plugin read from the project, so this is a permission of its own. A command that would bring
-  in a tile layer some other way (importing a map file) has it taken out again without
-  `network`.
+- With the **`network`** permission, it can reach the web: read a small document from a web
+  address ([`host.fetch`](#fetching-a-document)) and run the commands that fetch (adding data
+  or services by their address). With `edit` too, it can add web tile layers (`map.addTiles`).
+  The addresses are the plugin's choice and can carry what it read from the project, so this is
+  a permission of its own. A command that would bring in a tile layer some other way (importing
+  a map file) has it taken out again without `network`.
 - No plugin may run the user's scripts, tasks or models, install or locate other software,
   manage plugins, replace the project, or step through undo history.
 
@@ -148,6 +149,8 @@ cargo build --release --target wasm32-unknown-unknown
 - Tool parameter `kind`s: `layer`, `vectorLayer`, `polygonLayer`, `pointLayer`, `field`,
   `numericField`, `number`, `text`, `choice` (with `choices`), `bool` and `file` (see
   [File parameters](#file-parameters)).
+- `panel` (optional) gives the plugin a pane of its own, with widgets bound to its commands. See
+  [A panel](#a-panel).
 - `i18n` translates the plugin's own text into the interface language, by language code (`de`,
   `zh-CN`…). See [Translations](#translations).
 - `skills` (optional) lists skills for the AI Assistant that the package carries. See
@@ -190,8 +193,8 @@ English strings and their translations, written exactly as they appear in `plugi
 ```
 
 - It covers the plugin's name and description, command labels and help, tool names, summaries
-  and toolboxes, parameter labels and `choice` values, and the tab, group and menu labels. A
-  string with no translation shows in English.
+  and toolboxes, parameter labels and `choice` values, the tab, group and menu labels, and the
+  panel's title, help and widget labels. A string with no translation shows in English.
 - RustGIS's interface languages are `de`, `es`, `fr`, `it`, `nl`, `pt`, `ru`, `tr`, `az`, `id`,
   `vi`, `zh`, `ja` and `ko`. A code with a region matches its language: `zh-CN` serves `zh`.
 - The registry copies the name and description translations into `registry.json`, so the
@@ -224,7 +227,8 @@ can hide it like any other. Declare it in `plugin.json`:
 ```
 
 - `items` lists the buttons. An item is a command id, `tool:<id>` (which opens that tool in the
-  Tools pane), or a dropdown `menu` whose `items` are command ids or `tool:<id>`.
+  Tools pane), `panel` (which opens the plugin's [panel](#a-panel)), or a dropdown `menu` whose
+  `items` are any of those.
 - A tab has 1 to 8 groups, a group has 1 to 16 items, and a menu has 1 to 32 entries. Every
   entry must name one of the plugin's own commands or tools.
 - The label can't be the name of one of RustGIS's tabs (Map, Insert, Analysis, Plugins…). The
@@ -232,6 +236,103 @@ can hide it like any other. Declare it in `plugin.json`:
 
 [Map Explorer](https://github.com/opengeos/rustgis-plugins/tree/main/plugins/map-explorer) is
 an example.
+
+### A panel
+
+A plugin can have a panel: a pane on the right of the map with texts, checkboxes, sliders and
+buttons bound to its commands. Declare it in `plugin.json`:
+
+```json
+"panel": {
+  "title": "Historical Imagery",
+  "icon": "history",
+  "help": "Step through the archived releases of World Imagery.",
+  "state": "panel-state",
+  "items": [
+    { "kind": "text", "id": "selected", "label": "Selected release" },
+    { "kind": "checkbox", "id": "local", "label": "Only versions with local changes", "command": "panel-state" },
+    { "kind": "slider", "id": "release", "label": "Release timeline", "steps": true, "command": "go-to-release" },
+    { "kind": "button", "command": "older" },
+    { "kind": "button", "command": "newer" },
+    { "kind": "text", "id": "metadata", "label": "Location metadata" }
+  ]
+}
+```
+
+- `title` is the pane's tab and the label of the button that opens it, which RustGIS puts
+  first in the plugin's group on the **Plugins** tab. On a tab of its own, put `panel` among a
+  group's items. Command search lists the panel too. `icon` and `help` are for that button.
+- `items` lists the widgets, top to bottom (1 to 32). Buttons that follow each other share a
+  row. Each has an `id` (lower-case letters, digits and hyphens; a button's is its command's
+  unless given), and `label` and `help` (on hover) where they apply:
+  - `text`: a caption (`label`) over text the plugin sets (`text` is what it shows first).
+  - `checkbox`: a box with a `label`, `default` `false` unless given.
+  - `slider`: whole numbers from `min` to `max` (`default` is `min` unless given), with a
+    caption, the value's label, and its two ends' labels. `steps: true` adds ‹ and › buttons
+    that move it by one.
+  - `button`: runs its `command`; its `label` is the command's unless given.
+- A checkbox runs its `command` when it changes, and a slider when it is let go, or stepped:
+  never while it is dragged, while the pane shows the label of the value it would take. Without
+  a `command`, a widget's value just goes with the plugin's next request.
+- `state` (optional) is a command RustGIS runs each time the panel is opened, to answer its
+  state.
+- Every command and widget must be one of the plugin's own commands. A plugin with a panel
+  can't have a command called `panel`.
+
+A plugin keeps nothing between calls, so RustGIS keeps the panel's state. Every request of a
+plugin with a panel carries the widgets' values, whatever ran the command (the panel, a ribbon
+button, a script or the command line):
+
+```json
+"panel": { "values": { "local": false, "release": 196 }, "changed": ["release"] }
+```
+
+`values` has each checkbox (`true` or `false`) and slider (a whole number), and `changed` the
+ones this call set: the widget the user just moved. A widget's command is run with
+`{"panel": {"release": 196}}` as its parameters, which sets the values before the call and is
+taken out of the request's `params`, so a script or `rustgis-cli` can do the same:
+
+```sh
+rustgis-cli run --sample --cmd 'plugin:historical-imagery/go-to-release={"panel": {"release": 40}}'
+```
+
+Any command can answer the panel's new state, beside the rest of its answer:
+
+```json
+{
+  "panel": {
+    "values": { "release": 196 },
+    "items": {
+      "selected": { "text": "2025-12-18\nRelease 13192" },
+      "release": { "min": 0, "max": 196, "labels": ["2014-02-20", "…", "2025-12-18"] },
+      "newer": { "enabled": false },
+      "metadata": { "text": "Source: Maxar (Vivid)\nResolution: 0.3 m" }
+    }
+  }
+}
+```
+
+- An item can set `label` (`null` brings back the declared one), `enabled` and `visible`; a text
+  its `text`; a slider its `min`, `max` and `labels`, one per value from `min` (the numbers when
+  there are none). What an answer leaves out stays as it was.
+- RustGIS checks the answer like any other: unknown ids and fields and values of the wrong type
+  are ignored, a slider's value stays within its ends, texts are clipped to 4,000 characters,
+  labels to 200, and a slider has at most 2,000 labels of 80 characters.
+- A plugin words what it sets in the request's `lang`; RustGIS translates only what the
+  manifest declares.
+- A command that fails leaves the values as they were. The panel's state command is no undo
+  step when it changes nothing in the project (it only reads the map); other commands keep
+  theirs.
+- RustGIS asks for the state only when the panel opens, and takes in what the plugin's own
+  commands answer. It doesn't run the plugin when the map changes in other ways: undo, another
+  plugin, a project opened. A state command that reads what it shows from the map (which
+  release is on it) puts the panel right when it is opened again.
+- The values are kept while RustGIS runs, not saved with the project.
+- `plugin.panel {"id": "<plugin>"}` answers a panel's state (`values` and `items`), and sets
+  `values` or, with `"refresh": true`, runs the state command first. On the command line, which
+  has no panes, the commands still run with the values given.
+- RustGIS versions before panels ignore `panel` (and refuse a tab that names it): keep the
+  commands usable from the ribbon too, or set `minRustgisVersion`.
 
 ### What a plugin can ask for
 
@@ -245,6 +346,7 @@ Inside a request, `host::call(op, params)` sends one of these to RustGIS:
 | `host.view` | `{center: [lon, lat], scale, projection}` |
 | `host.notify` `{text, error?}` | shows a message in the status bar |
 | `host.addLayer` `{name, geojson}` | adds a layer (`edit`) |
+| `host.fetch` `{url}` | `{url, text, json?}`: the document at a web address (`network`; see [Fetching a document](#fetching-a-document)) |
 | `map.addTiles` `{url, kind?, name?, attribution?, maxZoom?, overlay?, replace?, blend?}` | adds a web tile layer (`edit` and `network`) |
 | any command id (`layer.zoomTo`, `select.byAttributes`, `layer.symbology`…) | what the command returns, within the plugin's permissions |
 
@@ -255,6 +357,42 @@ archive, a cloud-optimised GeoTIFF or a FlatGeobuf or GeoParquet read in place i
 as elsewhere.
 
 `rustgis-cli commands` lists every command id and its parameters.
+
+#### Fetching a document
+
+`host.fetch {"url": "https://…"}` reads a small text document, such as a web API's JSON
+answer, with a GET request. It needs the `network` permission. The answer is
+`{"url", "text", "json"?}`: `url` is the address fetched, `text` the document, and `json` the
+document parsed when it is a JSON object or array.
+
+- Only `http://` and `https://` addresses on the internet: not this computer, the local network
+  or cloud metadata addresses, and no redirect may lead there or from `https` to `http`. Names
+  are checked as written and again where they resolve, on every redirect too, so a name that
+  resolves to this computer or the local network is refused on the desktop and the command line
+  (in the web app, the browser decides what it may reach). Requests carry no credentials (an
+  S3 connection's included) and no headers of the plugin's. On the desktop and the command line
+  they never go through a proxy (`HTTPS_PROXY` and the like are ignored), since a proxy would
+  reach addresses RustGIS can't check.
+- At most 2 MB, in UTF-8 (a byte-order mark is dropped). An answer that isn't a success (404,
+  500…) is an error ending in `HTTP <status>`.
+- Answers are kept for 10 minutes (up to 256 documents and 16 MB in all) while RustGIS runs,
+  so asking for the same address again costs nothing. Each plugin has answers of its own: one
+  never reads what another fetched. Errors are kept for 30 seconds,
+  so every command waiting for an address sees its error; after that it is fetched again.
+- On the desktop and the command line the request waits for the answer: at most 20 seconds for
+  one, and 60 seconds for all the fetches of one plugin call. A call makes at most 64 fetches.
+- In the web app nothing may wait. A fetch that isn't kept yet answers
+  `{"pending": true, "url"}` and starts in the background. The command should then return
+  straight away, before doing anything outside the project (writing a file): RustGIS undoes
+  what the call did to the project (its notices stay, and so does anything done outside it),
+  and runs the command
+  again with the same parameters once every pending answer has landed (up to 8 per call), when
+  `host.fetch` answers from what was kept. A command that walks a chain of documents, each
+  address taken from the one before, runs once per step, up to 64 times. The browser follows
+  redirects itself, and the server must allow requests from web pages (CORS).
+
+The plugins SDK may offer this as a `host::fetch` helper; until then, use
+`host::call("host.fetch", json!({"url": url}))`.
 
 Tools work differently. A tool receives its layer parameters' features as GeoJSON (only the
 selected features when a layer has a selection), and its `file` parameters' files. It returns new layers, standalone tables or a
@@ -288,7 +426,8 @@ The module exports:
   `reply_ptr << 32 | reply_len`. The reply is `{"ok": value}` or `{"error": "text"}`.
 
 Requests are `{"abi": 1, "kind": "command" | "tool", "id": "...", "params": {...}, "layers": {...}, "lang": "de"}`.
-`lang` is the interface language's code (`en` for English).
+`lang` is the interface language's code (`en` for English). Commands of a plugin with a
+[panel](#a-panel) also get `panel`, and may answer `panel` beside the rest of their `ok` value.
 Tools also get `layers`, which maps each layer's name to its FeatureCollection, and, when
 they have `file` parameters, `files`, which maps each one's name to `{"name", "data"}` with the
 file's contents in base64. A tool's `ok`

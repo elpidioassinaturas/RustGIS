@@ -1,0 +1,70 @@
+name: Auto-merge
+
+# A maintainer labels a pull request `automerge`: it's approved and squash-merged as soon as the
+# checks the `main` ruleset requires pass. A later push drops the label and turns auto-merge off,
+# so new commits need another look; removing the label turns it off too.
+#
+# `pull_request_target` so fork pull requests get the token; the pull request's code is never
+# checked out or run. The token is a maintainer's (`AUTOMERGE_TOKEN`), not GITHUB_TOKEN: Actions
+# can't approve pull requests here, and a merge made with GITHUB_TOKEN wouldn't start the
+# workflows that run on pushes to `main`.
+
+on:
+  pull_request_target:
+    types: [labeled, unlabeled, synchronize]
+
+permissions: {}
+
+# One group per action: a pending run is replaced by the next one in its group, so a push's revoke
+# run mustn't share a group with runs for other labels.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{ github.event.action }}
+
+jobs:
+  enable:
+    name: Enable auto-merge
+    if: github.event.action == 'labeled' && github.event.label.name == 'automerge'
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+          PR: ${{ github.event.pull_request.html_url }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          SENDER: ${{ github.event.sender.login }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          # Triage can label too: only someone who could merge it themselves may use the label.
+          perm=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$SENDER/permission" --jq .permission)
+          case "$perm" in
+            admin|maintain|write) ;;
+            *) echo "::error::$SENDER ($perm) can't use automerge."; exit 1 ;;
+          esac
+          owner=$(gh api user --jq .login)
+          # The approval stands in for someone else's review, so it isn't for the labeller's own work.
+          if [ "$SENDER" = "$AUTHOR" ] && [ "$AUTHOR" != "$owner" ]; then
+            echo "::error::$SENDER can't use automerge on their own pull request."; exit 1
+          fi
+          # Both pinned to the commit that was labelled: if the head has moved, enabling auto-merge
+          # fails before anything is approved.
+          gh pr merge "$PR" --auto --squash --match-head-commit "$SHA"
+          # The token owner can't approve their own pull requests, and needn't: they bypass the review.
+          if [ "$AUTHOR" != "$owner" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" -f commit_id="$SHA" -f event=APPROVE \
+              --silent || { gh pr merge "$PR" --disable-auto; exit 1; }
+          fi
+
+  revoke:
+    name: Revoke auto-merge
+    if: >-
+      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'automerge'))
+      || (github.event.action == 'unlabeled' && github.event.label.name == 'automerge')
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+          PR: ${{ github.event.pull_request.html_url }}
+          ACTION: ${{ github.event.action }}
+        run: |
+          gh pr merge "$PR" --disable-auto || echo "Auto-merge was off."
+          if [ "$ACTION" = synchronize ]; then gh pr edit "$PR" --remove-label automerge; fi

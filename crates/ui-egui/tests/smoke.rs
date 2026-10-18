@@ -1701,6 +1701,72 @@ fn right_panes_open_as_tabs() {
     }
 }
 
+#[test]
+fn plugin_panels_run_their_commands_when_a_slider_is_let_go() {
+    let _turn = PLUGINS.lock().unwrap_or_else(|e| e.into_inner());
+    use rustgis_ui_egui::rustgis_engine::plugins as rp;
+    rp::load(rp::Package::from_zip(&rp::testing::panel_package("ui-panel")).unwrap(), "test").unwrap();
+    let mut h = harness();
+    for _ in 0..4 {
+        h.step();
+    }
+    // Its button on the Plugins tab opens it, and its state command fills it in.
+    h.state_mut().ui.tab = "Plugins".into();
+    h.step();
+    h.step();
+    h.get_by_label("Historical Imagery").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    assert_eq!(h.state().ui.right, Some(rustgis_ui_egui::RightPane::Plugin));
+    let release = |h: &egui_kittest::Harness<'_, RustGisApp>| h.state().session.plugin_panels["ui-panel"].slider("release");
+    assert_eq!(release(&h), 12);
+    assert!(h.query_by_label("Location metadata").is_some());
+    // Dragging the slider shows where it would go and runs nothing until it is let go.
+    let rect = h.query_all_by_label("Release timeline").map(|n| n.rect()).max_by(|a, b| a.width().total_cmp(&b.width())).unwrap();
+    let (from, to) = (egui::pos2(rect.max.x - 4.0, rect.center().y), egui::pos2(rect.center().x, rect.center().y));
+    h.event(egui::Event::PointerMoved(from));
+    h.event(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    for i in 1..=6 {
+        h.event(egui::Event::PointerMoved(from + (to - from) * (i as f32 / 6.0)));
+        h.step();
+    }
+    assert_eq!(release(&h), 12, "nothing sent while dragging");
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.step();
+    let moved = release(&h);
+    assert!((1..12).contains(&moved), "sent when let go: {moved}");
+    // The step buttons and the checkbox run the widgets' command too.
+    h.get_by_label("Step back").click();
+    h.step();
+    h.step();
+    assert_eq!(release(&h), moved - 1);
+    h.get_by_label("Only versions with local changes").click();
+    h.step();
+    h.step();
+    assert!(h.state().session.plugin_panels["ui-panel"].checked("local"));
+    // Its button closes it again; a disabled plugin's panel closes.
+    h.state_mut().run("ui.pane.plugin", json!({"id": "ui-panel"})).unwrap();
+    h.step();
+    assert_eq!(h.state().ui.right, None);
+    h.state_mut().run("ui.pane.plugin", json!({"id": "ui-panel"})).unwrap();
+    h.step();
+    rp::set_enabled("ui-panel", false).unwrap();
+    h.step();
+    h.step();
+    assert_eq!(h.state().ui.right, None);
+    assert!(h.state_mut().run("ui.pane.plugin", json!({"id": "ui-panel"})).is_err());
+    assert!(h.state_mut().run("ui.pane.plugin", json!({"id": 7})).is_err());
+    rp::unload("ui-panel");
+}
+
 /// A primary click in the middle of the map.
 fn click_map(h: &mut egui_kittest::Harness<'_, RustGisApp>) {
     let at = egui::pos2(700.0, 500.0);

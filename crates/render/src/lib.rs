@@ -21,7 +21,7 @@ mod text;
 mod tiles;
 
 pub use rustgis_tiles;
-pub use tiles::spec as tile_spec;
+pub use tiles::{spec as tile_spec, style_view};
 
 /// Natural Earth 1:110m sample data (public domain), fetched by `build.rs` from rustgis-assets.
 pub mod sample_data {
@@ -159,6 +159,9 @@ pub struct PlacedLabel {
     /// Each renderer lines the text up with its own measure of the width, so text set beside an
     /// icon keeps clear of it whatever the font.
     pub align: f32,
+    /// Framed in the selection colour: a selected text graphic. Each renderer frames the text as
+    /// it lays it out.
+    pub framed: bool,
 }
 
 impl PlacedLabel {
@@ -1670,6 +1673,11 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
             if let Some(Some(g)) = geoms.get(*row)
                 && rows.get(*row) == Some(&true)
             {
+                // A text graphic's point is invisible: its label carries the frame (`framed`),
+                // drawn with the text wherever that lands (turned, tilted or on the globe).
+                if layer.graphics && rustgis_map::graphics::label(ds_ptr, *row).is_some() {
+                    continue;
+                }
                 // Follow the layer's own backend: when it fell back to the CPU pixmap, the
                 // highlight must too — tessellated here, the layer's later-flushed Image would
                 // draw over it (the CPU path draws highlights over the layer).
@@ -1703,6 +1711,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                         bold: false,
                         icon: None,
                         align: 0.0,
+                        framed: selection.contains(&row),
                     });
                 }
             }
@@ -1751,6 +1760,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                         bold: labels.bold,
                         icon: None,
                         align: 0.0,
+                        framed: false,
                     },
                     pri,
                     (lid, row),
@@ -2372,6 +2382,7 @@ pub(crate) fn draw_attribution(pm: &mut Pixmap, attribution: &[String], ppp: f32
         bold: false,
         icon: None,
         align: 0.0,
+        framed: false,
     };
     text::draw(pm, &label, ppp);
 }
@@ -2380,7 +2391,18 @@ pub(crate) fn draw_attribution(pm: &mut Pixmap, attribution: &[String], ppp: f32
 mod tests {
 
     fn label(text: &str, x: f32, icon: Option<PlacedIcon>, align: f32) -> PlacedLabel {
-        PlacedLabel { text: text.into(), x, y: 20.0, size: 10.0, color: Rgba::rgb(0, 0, 0), halo: None, bold: false, icon, align }
+        PlacedLabel {
+            text: text.into(),
+            x,
+            y: 20.0,
+            size: 10.0,
+            color: Rgba::rgb(0, 0, 0),
+            halo: None,
+            bold: false,
+            icon,
+            align,
+            framed: false,
+        }
     }
 
     #[test]
@@ -2532,6 +2554,33 @@ mod tests {
         let png = render_png(&mut m, &view).unwrap();
         assert!(png.len() > 1000);
         assert!(!world().is_empty());
+    }
+
+    #[test]
+    fn a_selected_text_graphic_is_framed_with_its_label() {
+        let mut m = Map::new("Map");
+        let id = m.add_graphics("Graphics");
+        let at = Coord::new(2.35, 48.85);
+        if let Some(l) = m.layer_mut(id) {
+            l.dataset.push(Some(Geometry::Point(at)), vec![Value::Text("text".into()), Value::Text("Selected text".into())]);
+        }
+        let camera = Camera { center: lonlat_to_merc(at), res: 5000.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let framed = |m: &mut Map| render(m, &view).unwrap().labels.iter().find(|l| l.text == "Selected text").map(|l| l.framed);
+        assert_eq!(framed(&mut m), Some(false));
+        if let Some(l) = m.layer_mut(id) {
+            l.selection = vec![0];
+        }
+        assert_eq!(framed(&mut m), Some(true));
+        // Drawn into an image (an export), the frame goes around the text in the selection colour.
+        let r = render(&mut m, &view).unwrap();
+        let mut pm = Pixmap::new(400, 300).unwrap();
+        for l in &r.labels {
+            text::draw(&mut pm, l, 1.0);
+        }
+        let edge = (200.0 - text::measure("Selected text", 14.0, false) / 2.0 - 3.0).round() as u32;
+        let cyan = |x: u32, y: u32| pm.pixel(x, y).is_some_and(|c| c.alpha() > 200 && c.red() < 60 && c.green() > 180 && c.blue() > 200);
+        assert!((0..300).any(|y| (edge - 1..=edge + 1).any(|x| cyan(x, y))), "no frame at x = {edge}");
     }
 
     #[test]

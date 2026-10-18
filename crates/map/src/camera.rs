@@ -14,7 +14,7 @@ pub const MAX_PITCH: f64 = 85.0;
 const MIN_PITCH: f64 = 1e-6;
 /// The tangent of half the vertical field of view: MapLibre's 36.87°. The horizon comes into
 /// view above about 71.6° of pitch.
-const TAN_HALF_FOV: f64 = 1.0 / 3.0;
+pub const TAN_HALF_FOV: f64 = 1.0 / 3.0;
 /// How far a tilted view reaches, as a multiple of the camera's distance from the centre: past
 /// it (a sixteenth of the centre's scale) is sky.
 pub const FAR: f64 = 16.0;

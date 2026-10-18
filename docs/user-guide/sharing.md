@@ -27,7 +27,8 @@ first **data store** (a folder registered under **Publish › Manage › Data St
 - **Locator**: the selected layer's names as a place-search file; `locator.find` searches it and
   can zoom to the best match.
 - **Web Tool**: the last model as a tool file, which `model.import` adds to another project.
-- **Web Scene**: the map in 3D as glTF, polygons extruded by their layer's extrusion setting.
+- **Web Scene**: the map in 3D as glTF, polygons extruded by their layer's extrusion setting,
+  with a camera that looks at the map's centre from its bearing and pitch.
 - **Web Link Chart**: the features joined by the map's relationships, as a node-link page.
 
 **Status › Jobs** (the Shared Items pane) lists every share; **Save Web Map**, **Replace Web

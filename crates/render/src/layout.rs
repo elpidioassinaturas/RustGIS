@@ -3,7 +3,10 @@
 
 use rustgis_data::GeometryType;
 use rustgis_geom::{Coord, Extent};
-use rustgis_map::layout::{ColorScale, ElementKind, FrameShape, Layout, Orientation, PT_PER_MM, TickSide, frame_camera};
+use rustgis_map::layout::{
+    ArrowStyle, ColorScale, ElementKind, FrameShape, Grid, Layout, Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TickSide,
+    frame_camera,
+};
 use rustgis_map::symbology::LegendEntry;
 use rustgis_map::{Map, Rgba};
 use tiny_skia::{FillRule, Mask, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, Transform};
@@ -130,12 +133,12 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                     );
                 }
             }
-            ElementKind::NorthArrow { .. } => north_arrow(&mut pm, r, ppp),
-            ElementKind::ScaleBar { frame: f } => {
+            ElementKind::NorthArrow { style, fill, outline, .. } => north_arrow(&mut pm, r, *style, *fill, *outline, ppp),
+            ElementKind::ScaleBar { frame: f, units, divisions, style } => {
                 if let Some(&(_, mi, cam, _, _)) = frame(*f)
                     && let Some(map) = maps.get(mi)
                 {
-                    scale_bar(&mut pm, r, map.ground_res_at(&cam), ppp);
+                    scale_bar(&mut pm, r, map.ground_res_at(&cam), (*units, *divisions, *style), ppp);
                 }
             }
             ElementKind::Legend { frame: f, title, all_classes, hide_other } => {
@@ -311,19 +314,49 @@ fn outline_lonlat(pm: &mut Pixmap, map: &Map, view: &View, ring: &[Coord], color
     }
 }
 
-/// Formats a graticule meridian or parallel label.
-///
-/// The Equator and prime meridian are `0°` (neither hemisphere). The antimeridian
-/// is `180°` without an E/W suffix. Other values keep the usual hemisphere letter.
-fn grid_degree_label(v: f64, pos: char, neg: char, step: f64) -> String {
-    let d = if step < 1.0 { format!("{:.2}", v.abs()) } else { format!("{:.0}", v.abs()) };
-    // The stepped loop accumulates `+= step`, so 0 and ±180 can be off by rounding error.
-    let eps = step.abs() * 1e-6;
-    if v.abs() < eps || (v.abs() - 180.0).abs() < eps { format!("{d}°") } else { format!("{d}°{}", if v > 0.0 { pos } else { neg }) }
+/// A graticule label as [`Grid::label`] writes it, with plain `'` and `"` for minutes and seconds
+/// when the label font has no prime marks.
+fn grid_label(g: &Grid, v: f64, lon: bool, step: f64) -> String {
+    let s = g.label(v, lon, step);
+    if text::covers(&s, false) { s } else { s.replace('′', "'").replace('″', "\"") }
 }
 
-/// A graticule over a frame, labelled along its bottom and left edges.
-fn draw_grid(pm: &mut Pixmap, map: &Map, view: &View, g: &rustgis_map::layout::Grid) {
+/// Where a polyline (in pixels) crosses the edges of a `w` × `h` frame, as (edge, position along
+/// it): the top and bottom edges give x, the left and right ones y.
+fn edge_crossings(pts: &[(f32, f32)], w: f32, h: f32) -> Vec<(Edge, f32)> {
+    let mut out = Vec::new();
+    for pair in pts.windows(2) {
+        let &[(x0, y0), (x1, y1)] = pair else { continue };
+        for (edge, a, b, at) in [(Edge::Top, y0, y1, 0.0), (Edge::Bottom, y0, y1, h), (Edge::Left, x0, x1, 0.0), (Edge::Right, x0, x1, w)] {
+            let (da, db) = (a - at, b - at);
+            // Counted once where a vertex sits on the edge, and never along it.
+            if !((da <= 0.0 && db > 0.0) || (da > 0.0 && db <= 0.0)) {
+                continue;
+            }
+            let t = da / (da - db);
+            let (along, limit) = match edge {
+                Edge::Top | Edge::Bottom => (x0 + (x1 - x0) * t, w),
+                Edge::Left | Edge::Right => (y0 + (y1 - y0) * t, h),
+            };
+            if along.is_finite() && (0.0..=limit).contains(&along) {
+                out.push((edge, along));
+            }
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Edge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// A graticule over a frame: lines across it, ticks along its edges or both, labelled at the
+/// edges the grid names.
+fn draw_grid(pm: &mut Pixmap, map: &Map, view: &View, g: &Grid) {
     let ppp = view.pixels_per_point as f32;
     let (w, h) = (view.width, view.height);
     let mut ext = Extent::EMPTY;
@@ -341,69 +374,113 @@ fn draw_grid(pm: &mut Pixmap, map: &Map, view: &View, g: &rustgis_map::layout::G
     } else {
         *[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 45.0].iter().find(|s| span / **s <= 8.0).unwrap_or(&60.0)
     };
-    let to_px = |c: Coord| map.to_map(c).map(|m| view.to_screen(m)).map(|(x, y)| (x as f32 * ppp, y as f32 * ppp));
-    let stroke = Stroke { width: 0.6 * ppp, ..Stroke::default() };
-    let lines = |pm: &mut Pixmap, pts: Vec<Coord>| {
-        let mut pb = PathBuilder::new();
-        let mut started = false;
-        for c in pts {
-            match to_px(c) {
-                Some((x, y)) if x.is_finite() && y.is_finite() => {
-                    if started {
-                        pb.line_to(x, y)
-                    } else {
-                        pb.move_to(x, y)
-                    }
-                    started = true;
+    // Lines run a little past the frame so they cross its edges rather than end on them.
+    let pad = span * 0.02;
+    let (lat0, lat1) = ((ext.min_y - pad).max(-89.9), (ext.max_y + pad).min(89.9));
+    let (lon0, lon1) = (ext.min_x - pad, ext.max_x + pad);
+    let to_px = |c: Coord| {
+        map.to_map(c)
+            .map(|m| view.to_screen(m))
+            .map(|(x, y)| (x as f32 * ppp, y as f32 * ppp))
+            .filter(|(x, y)| x.is_finite() && y.is_finite())
+    };
+    let (pw, ph) = (pm.width() as f32, pm.height() as f32);
+    let paint_line = paint(g.color, 1.0);
+    let stroke = Stroke { width: g.width.max(0.0) as f32 * ppp, ..Stroke::default() };
+    let tick = if g.style.ticks() { (g.tick_length * PT_PER_MM) as f32 * ppp } else { 0.0 };
+    let label_px = 8.0 * 1.33 * ppp;
+    let label_color = Rgba::rgb(0x20, 0x20, 0x20);
+    let vertical = g.label_orientation == Orientation::Vertical;
+    let mut pb = PathBuilder::new();
+    let mut labels: Vec<(Edge, f32, String)> = Vec::new();
+    let mut draw_line = |pb: &mut PathBuilder, pts: Vec<Coord>, v: f64, lon: bool| {
+        let px: Vec<Option<(f32, f32)>> = pts.into_iter().map(to_px).collect();
+        // Runs of points that projected, so a line breaks where its projection does.
+        for run in px.split(|p| p.is_none()) {
+            let run: Vec<(f32, f32)> = run.iter().flatten().copied().collect();
+            if g.style.lines() {
+                for (i, (x, y)) in run.iter().enumerate() {
+                    if i == 0 { pb.move_to(*x, *y) } else { pb.line_to(*x, *y) }
                 }
-                _ => started = false,
+            }
+            for (edge, at) in edge_crossings(&run, pw, ph) {
+                if tick > 0.0 {
+                    let (a, b) = match edge {
+                        Edge::Top => ((at, 0.0), (at, tick)),
+                        Edge::Bottom => ((at, ph), (at, ph - tick)),
+                        Edge::Left => ((0.0, at), (tick, at)),
+                        Edge::Right => ((pw, at), (pw - tick, at)),
+                    };
+                    pb.move_to(a.0, a.1);
+                    pb.line_to(b.0, b.1);
+                }
+                let shown = match edge {
+                    Edge::Top => g.edges.top,
+                    Edge::Bottom => g.edges.bottom,
+                    Edge::Left => g.edges.left,
+                    Edge::Right => g.edges.right,
+                };
+                if g.labels && shown {
+                    labels.push((edge, at, grid_label(g, v, lon, step)));
+                }
             }
         }
-        if let Some(p) = pb.finish() {
-            pm.stroke_path(&p, &paint(g.color, 1.0), &stroke, Transform::identity(), None);
-        }
     };
-    let fmt = |v: f64, pos: char, neg: char| grid_degree_label(v, pos, neg, step);
-    let label_color = Rgba::rgb(0x20, 0x20, 0x20);
-    let mut lon = (ext.min_x / step).floor() * step;
     let mut n = 0;
-    while lon <= ext.max_x && n < 200 {
-        let pts: Vec<Coord> = (0..=48).map(|i| Coord::new(lon, ext.min_y + (ext.max_y - ext.min_y) * i as f64 / 48.0)).collect();
-        lines(pm, pts);
-        if g.labels
-            && let Some((x, _)) = to_px(Coord::new(lon, ext.min_y.max(-85.0)))
-            && x > 12.0 * ppp
-            && x < pm.width() as f32 - 12.0 * ppp
-        {
-            text::text_at(
-                pm,
-                &fmt(lon, 'E', 'W'),
-                x,
-                pm.height() as f32 - 7.0 * ppp,
-                8.0 * 1.33 * ppp,
-                label_color,
-                false,
-                text::Align::Center,
-                true,
-            );
-        }
+    let mut lon = (ext.min_x / step).floor() * step;
+    while lon <= ext.max_x + step * 1e-9 && n < 200 {
+        let pts = (0..=48).map(|i| Coord::new(lon, lat0 + (lat1 - lat0) * i as f64 / 48.0)).collect();
+        draw_line(&mut pb, pts, lon, true);
         lon += step;
         n += 1;
     }
     let mut lat = (ext.min_y / step).floor() * step;
-    while lat <= ext.max_y && n < 400 {
-        let pts: Vec<Coord> = (0..=48).map(|i| Coord::new(ext.min_x + (ext.max_x - ext.min_x) * i as f64 / 48.0, lat)).collect();
-        lines(pm, pts);
-        if g.labels
-            && let Some((_, y)) = to_px(Coord::new(ext.min_x, lat))
-            && y > 10.0 * ppp
-            && y < pm.height() as f32 - 14.0 * ppp
-        {
-            text::text_at(pm, &fmt(lat, 'N', 'S'), 3.0 * ppp, y, 8.0 * 1.33 * ppp, label_color, false, text::Align::Left, true);
+    while lat <= ext.max_y + step * 1e-9 && n < 400 {
+        if lat.abs() <= 90.0 {
+            let pts = (0..=48).map(|i| Coord::new(lon0 + (lon1 - lon0) * i as f64 / 48.0, lat)).collect();
+            draw_line(&mut pb, pts, lat, false);
         }
         lat += step;
         n += 1;
     }
+    if let Some(p) = pb.finish() {
+        pm.stroke_path(&p, &paint_line, &stroke, Transform::identity(), None);
+    }
+    // Labels sit just inside the frame, past the ticks, away from the corners: a label is
+    // skipped unless all of it, half its length either side of the crossing, fits on its edge.
+    let inset = tick + 3.0 * ppp;
+    for (edge, at, s) in labels {
+        let tw = text::measure(&s, label_px / 1.33, false);
+        let (along_limit, along) = match edge {
+            Edge::Top | Edge::Bottom => (pw, tw),
+            Edge::Left | Edge::Right if vertical => (ph, tw),
+            Edge::Left | Edge::Right => (ph, label_px),
+        };
+        let margin = (along / 2.0 + 3.0 * ppp).max(12.0 * ppp);
+        if at < margin || at > along_limit - margin {
+            continue;
+        }
+        match edge {
+            Edge::Top => text::text_at(pm, &s, at, inset + label_px * 0.4, label_px, label_color, false, text::Align::Center, true),
+            Edge::Bottom => text::text_at(pm, &s, at, ph - inset - label_px * 0.4, label_px, label_color, false, text::Align::Center, true),
+            Edge::Left if vertical => rotated_text(pm, &s, inset + label_px * 0.4, at, label_px, label_color),
+            Edge::Right if vertical => rotated_text(pm, &s, pw - inset - label_px * 0.4, at, label_px, label_color),
+            Edge::Left => text::text_at(pm, &s, inset, at, label_px, label_color, false, text::Align::Left, true),
+            Edge::Right => text::text_at(pm, &s, pw - inset - tw, at, label_px, label_color, false, text::Align::Left, true),
+        }
+    }
+}
+
+/// One line of haloed text centred on (`cx`, `cy`), turned to read from bottom to top.
+fn rotated_text(pm: &mut Pixmap, s: &str, cx: f32, cy: f32, px: f32, color: Rgba) {
+    // Whole pixels throughout, so the quarter turn moves pixels without resampling them.
+    let tw = (text::measure(s, px / 1.33, false) + px * 0.4).ceil().max(1.0);
+    let th = (px * 1.6).ceil().max(1.0);
+    let Some(mut tmp) = Pixmap::new(tw as u32, th as u32) else { return };
+    text::text_at(&mut tmp, s, tw / 2.0, th / 2.0, px, color, false, text::Align::Center, true);
+    let (x, y) = ((cx - th / 2.0).round(), (cy + tw / 2.0).round());
+    let t = Transform::from_row(0.0, -1.0, 1.0, 0.0, x, y);
+    pm.draw_pixmap(0, 0, tmp.as_ref(), &PixmapPaint { quality: tiny_skia::FilterQuality::Nearest, ..PixmapPaint::default() }, t, None);
 }
 
 fn placeholder(pm: &mut Pixmap, r: Rect, label: &str, ppp: f64) {
@@ -429,70 +506,162 @@ fn placeholder(pm: &mut Pixmap, r: Rect, label: &str, ppp: f64) {
     );
 }
 
-fn north_arrow(pm: &mut Pixmap, r: Rect, ppp: f64) {
-    let (cx, top) = (r.x() + r.width() / 2.0, r.y());
-    let s = (r.width() * 0.5).min(r.height() * 0.32);
-    let label_h = (r.height() * 0.25).min(14.0 * ppp as f32);
-    let (tip, base) = (top + label_h + 2.0, r.y() + r.height());
-    let mid = tip + (base - tip) * 0.68;
-    let mut left = PathBuilder::new();
-    left.move_to(cx, tip);
-    left.line_to(cx - s, base);
-    left.line_to(cx, mid);
-    left.close();
-    let mut right = PathBuilder::new();
-    right.move_to(cx, tip);
-    right.line_to(cx + s, base);
-    right.line_to(cx, mid);
-    right.close();
-    let dark = paint(Rgba::rgb(0x22, 0x22, 0x22), 1.0);
-    let stroke = Stroke { width: 0.8 * ppp as f32, ..Stroke::default() };
-    if let Some(p) = left.finish() {
-        pm.fill_path(&p, &dark, FillRule::Winding, Transform::identity(), None);
+/// Fills `pts` with `fill` and outlines it with `outline`.
+fn shape(pm: &mut Pixmap, pts: &[(f32, f32)], fill: Rgba, outline: Rgba, width: f32) {
+    let mut pb = PathBuilder::new();
+    for (i, (x, y)) in pts.iter().enumerate() {
+        if i == 0 { pb.move_to(*x, *y) } else { pb.line_to(*x, *y) }
     }
-    if let Some(p) = right.finish() {
-        pm.fill_path(&p, &paint(Rgba::rgb(0xFF, 0xFF, 0xFF), 1.0), FillRule::Winding, Transform::identity(), None);
-        pm.stroke_path(&p, &dark, &stroke, Transform::identity(), None);
+    pb.close();
+    if let Some(p) = pb.finish() {
+        pm.fill_path(&p, &paint(fill, 1.0), FillRule::Winding, Transform::identity(), None);
+        pm.stroke_path(&p, &paint(outline, 1.0), &Stroke { width, ..Stroke::default() }, Transform::identity(), None);
     }
-    text::text_at(pm, "N", cx, top + label_h / 2.0, label_h * 1.1, Rgba::rgb(0x22, 0x22, 0x22), true, text::Align::Center, false);
 }
 
-/// An alternating scale bar filling most of the element's width. `ground_per_pt` is ground metres
-/// per logical point of paper.
-fn scale_bar(pm: &mut Pixmap, r: Rect, ground_per_pt: f64, ppp: f64) {
+/// A north arrow in `style`, with an `N` above it.
+fn north_arrow(pm: &mut Pixmap, r: Rect, style: ArrowStyle, fill: Rgba, outline: Rgba, ppp: f64) {
+    let white = Rgba::rgb(0xFF, 0xFF, 0xFF);
+    let sw = 0.8 * ppp as f32;
+    let (cx, top) = (r.x() + r.width() / 2.0, r.y());
+    let label_h = (r.height() * 0.25).min(14.0 * ppp as f32);
+    let (tip, base) = (top + label_h + 2.0, r.y() + r.height());
+    match style {
+        ArrowStyle::Classic => {
+            let s = (r.width() * 0.5).min(r.height() * 0.32);
+            let mid = tip + (base - tip) * 0.68;
+            shape(pm, &[(cx, tip), (cx - s, base), (cx, mid)], fill, fill, sw);
+            shape(pm, &[(cx, tip), (cx + s, base), (cx, mid)], white, outline, sw);
+        }
+        ArrowStyle::Triangle => {
+            let s = (r.width() * 0.4).min(r.height() * 0.25);
+            shape(pm, &[(cx, tip), (cx + s, base), (cx - s, base)], fill, outline, sw);
+        }
+        ArrowStyle::Compass | ArrowStyle::Star => {
+            let cy = (tip + base) / 2.0;
+            let rad = (r.width() / 2.0).min((base - tip) / 2.0);
+            let arm = |pm: &mut Pixmap, angle: f32, len: f32, half: f32| {
+                // An arm from the centre, split down its length: one half filled, one light.
+                let (dx, dy) = (angle.sin(), -angle.cos());
+                let end = (cx + dx * len, cy + dy * len);
+                let (lx, ly) = (cx + dy * half, cy - dx * half);
+                let (rx, ry) = (cx - dy * half, cy + dx * half);
+                shape(pm, &[(cx, cy), end, (lx, ly)], fill, outline, sw);
+                shape(pm, &[(cx, cy), end, (rx, ry)], white, outline, sw);
+            };
+            if style == ArrowStyle::Star {
+                for k in 0..4 {
+                    arm(pm, std::f32::consts::FRAC_PI_4 + k as f32 * std::f32::consts::FRAC_PI_2, rad * 0.6, rad * 0.14);
+                }
+            }
+            for k in 0..4 {
+                arm(pm, k as f32 * std::f32::consts::FRAC_PI_2, rad, rad * 0.2);
+            }
+        }
+    }
+    text::text_at(pm, "N", cx, top + label_h / 2.0, label_h * 1.1, outline, true, text::Align::Center, false);
+}
+
+/// A scale bar label for `v`, a multiple of `step`: with the decimals the step needs (up to 6), so
+/// 0.0125 km stays 0.0125 rather than rounding to 0.01. A step with no exact decimal (a third)
+/// keeps two significant digits of it.
+fn scale_number(v: f64, step: f64) -> String {
+    let places = (0..6usize)
+        .find(|&n| {
+            let k = step * 10f64.powi(n as i32);
+            (k - k.round()).abs() < 1e-9 * k.abs().max(1.0)
+        })
+        .unwrap_or_else(|| {
+            let mag = if step.is_finite() && step > 0.0 { step.log10().floor() } else { 0.0 };
+            (1.0 - mag).clamp(0.0, 6.0) as usize
+        });
+    let s = format!("{v:.prec$}", prec = places);
+    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+}
+
+/// A scale bar filling most of the element's width, in `units`, with `divisions` labelled steps.
+/// `ground_per_pt` is ground metres per logical point of paper.
+fn scale_bar(pm: &mut Pixmap, r: Rect, ground_per_pt: f64, bar: (ScaleUnits, usize, ScaleBarStyle), ppp: f64) {
+    let (units, divisions, style) = bar;
     if !(ground_per_pt.is_finite() && ground_per_pt > 0.0) {
         return;
     }
-    let width_pt = r.width() as f64 / ppp;
-    let target = rustgis_geom::nice_distance(ground_per_pt * width_pt * 0.85);
-    if target <= 0.0 {
+    let divisions = divisions.clamp(1, rustgis_map::layout::MAX_SCALE_DIVISIONS);
+    let room_m = ground_per_pt * r.width() as f64 / ppp * 0.85;
+    let (unit_m, abbr) = units.resolve(rustgis_geom::nice_distance(room_m));
+    let total = rustgis_geom::nice_distance(room_m / unit_m);
+    if total <= 0.0 {
         return;
     }
-    let len = (target / ground_per_pt * ppp) as f32;
+    let len = (total * unit_m / ground_per_pt * ppp) as f32;
     let bar_h = (r.height() * 0.28).min(6.0 * ppp as f32);
     let (x0, y0) = (r.x() + 2.0, r.y() + r.height() * 0.62 - bar_h / 2.0);
-    for i in 0..4 {
-        let c = if i % 2 == 0 { Rgba::rgb(0x22, 0x22, 0x22) } else { Rgba::rgb(0xFF, 0xFF, 0xFF) };
-        if let Some(b) = Rect::from_xywh(x0 + len * i as f32 / 4.0, y0, len / 4.0, bar_h) {
-            pm.fill_rect(b, &paint(c, 1.0), Transform::identity(), None);
+    let dark = Rgba::rgb(0x22, 0x22, 0x22);
+    let seg = len / divisions as f32;
+    let line = Stroke { width: 0.6 * ppp as f32, ..Stroke::default() };
+    let stroke = |pm: &mut Pixmap, pts: &[(f32, f32)], w: &Stroke| {
+        let mut pb = PathBuilder::new();
+        for (i, (x, y)) in pts.iter().enumerate() {
+            if i == 0 { pb.move_to(*x, *y) } else { pb.line_to(*x, *y) }
+        }
+        if let Some(p) = pb.finish() {
+            pm.stroke_path(&p, &paint(dark, 1.0), w, Transform::identity(), None);
+        }
+    };
+    match style {
+        ScaleBarStyle::Alternating => {
+            for i in 0..divisions {
+                let c = if i % 2 == 0 { dark } else { Rgba::rgb(0xFF, 0xFF, 0xFF) };
+                if let Some(b) = Rect::from_xywh(x0 + seg * i as f32, y0, seg, bar_h) {
+                    pm.fill_rect(b, &paint(c, 1.0), Transform::identity(), None);
+                }
+            }
+            if let Some(b) = Rect::from_xywh(x0, y0, len, bar_h) {
+                pm.stroke_path(&PathBuilder::from_rect(b), &paint(dark, 1.0), &line, Transform::identity(), None);
+            }
+        }
+        ScaleBarStyle::Stepped => {
+            let mut pts = vec![(x0, y0 + bar_h)];
+            for i in 0..divisions {
+                let y = if i % 2 == 0 { y0 } else { y0 + bar_h };
+                let (a, b) = (x0 + seg * i as f32, x0 + seg * (i + 1) as f32);
+                pts.extend([(a, y), (b, y)]);
+            }
+            pts.push((x0 + len, y0 + bar_h));
+            stroke(pm, &pts, &Stroke { width: 1.0 * ppp as f32, ..Stroke::default() });
+        }
+        ScaleBarStyle::Line => {
+            let base = y0 + bar_h;
+            stroke(pm, &[(x0, base), (x0 + len, base)], &Stroke { width: 1.0 * ppp as f32, ..Stroke::default() });
+            for i in 0..=divisions {
+                let tall = if i == 0 || i == divisions { bar_h } else { bar_h * 0.6 };
+                let x = x0 + seg * i as f32;
+                stroke(pm, &[(x, base), (x, base - tall)], &line);
+            }
         }
     }
-    if let Some(b) = Rect::from_xywh(x0, y0, len, bar_h) {
-        let p = PathBuilder::from_rect(b);
-        pm.stroke_path(
-            &p,
-            &paint(Rgba::rgb(0x22, 0x22, 0x22), 1.0),
-            &Stroke { width: 0.6 * ppp as f32, ..Stroke::default() },
-            Transform::identity(),
-            None,
-        );
-    }
+    // Labels at the divisions, the last with the unit; one that would touch its neighbour is left
+    // out (never the ends).
     let px = 8.0 * 1.33 * ppp as f32;
     let ty = y0 - px * 0.7;
-    let dark = Rgba::rgb(0x22, 0x22, 0x22);
-    text::text_at(pm, "0", x0, ty, px, dark, false, text::Align::Center, false);
-    text::text_at(pm, &rustgis_geom::format_distance(target / 2.0), x0 + len / 2.0, ty, px, dark, false, text::Align::Center, false);
-    text::text_at(pm, &rustgis_geom::format_distance(target), x0 + len, ty, px, dark, false, text::Align::Center, false);
+    let gap = 3.0 * ppp as f32;
+    let labels: Vec<(f32, String)> = (0..=divisions)
+        .map(|i| {
+            let v = scale_number(total * i as f64 / divisions as f64, total / divisions as f64);
+            (x0 + seg * i as f32, if i == divisions { format!("{v} {abbr}") } else { v })
+        })
+        .collect();
+    let half = |s: &str| text::measure(s, px / 1.33, false) / 2.0;
+    let last = labels.last().map(|(x, s)| x - half(s)).unwrap_or(f32::MAX);
+    let mut right = f32::MIN;
+    for (i, (x, s)) in labels.iter().enumerate() {
+        let end = i == divisions;
+        if !end && (x - half(s) < right + gap || x + half(s) + gap > last) && i != 0 {
+            continue;
+        }
+        text::text_at(pm, s, *x, ty, px, dark, false, text::Align::Center, false);
+        right = x + half(s);
+    }
 }
 
 /// Each visible layer's legend for what it draws at a scale denominator (#207), by layer id; a
@@ -1126,31 +1295,158 @@ mod tests {
         assert!((1..=3).contains(&inked), "{inked} rows inked");
     }
 
+    /// A 100 × 100 mm page with one map frame filling 10–90 mm, showing the world at 1:200M with
+    /// `grid` over it, drawn at 96 dpi.
+    fn grid_page(grid: rustgis_map::layout::Grid) -> Pixmap {
+        let mut maps = vec![Map::new("m")];
+        let mut l = Layout::new("Layout", 100.0, 100.0);
+        l.add(
+            "Map",
+            (10.0, 10.0, 80.0, 80.0),
+            ElementKind::MapFrame {
+                map: "m".into(),
+                center: Coord::new(0.0, 0.0),
+                scale: 2e8,
+                shape: FrameShape::Rectangle,
+                grid: Some(grid),
+                extent_of: None,
+            },
+        );
+        render(&l, &mut maps, 96.0, &PageInfo::default()).unwrap()
+    }
+
+    /// Pixels in the box (page millimetres) that `hit` picks.
+    fn count(pm: &Pixmap, (x0, y0, x1, y1): (f64, f64, f64, f64), hit: impl Fn(tiny_skia::PremultipliedColorU8) -> bool) -> usize {
+        let px = |mm: f64| (mm * PT_PER_MM) as u32;
+        (px(y0)..px(y1)).flat_map(|y| (px(x0)..px(x1)).map(move |x| (x, y))).filter(|&(x, y)| pm.pixel(x, y).is_some_and(&hit)).count()
+    }
+
+    fn red(p: tiny_skia::PremultipliedColorU8) -> bool {
+        p.red() > 180 && p.green() < 90 && p.blue() < 90
+    }
+
+    fn ink(p: tiny_skia::PremultipliedColorU8) -> bool {
+        p.red() < 90 && p.green() < 90 && p.blue() < 90
+    }
+
     #[test]
-    fn grid_degree_label_omits_hemisphere_on_zero_and_antimeridian() {
-        // #210: Equator / prime meridian are 0°, antimeridian is 180°, not 0°N/0°E/180°E.
-        assert_eq!(grid_degree_label(0.0, 'N', 'S', 10.0), "0°");
-        assert_eq!(grid_degree_label(-0.0, 'N', 'S', 10.0), "0°");
-        assert_eq!(grid_degree_label(0.0, 'E', 'W', 10.0), "0°");
-        assert_eq!(grid_degree_label(180.0, 'E', 'W', 10.0), "180°");
-        assert_eq!(grid_degree_label(-180.0, 'E', 'W', 10.0), "180°");
-        assert_eq!(grid_degree_label(10.0, 'N', 'S', 10.0), "10°N");
-        assert_eq!(grid_degree_label(-10.0, 'N', 'S', 10.0), "10°S");
-        assert_eq!(grid_degree_label(20.0, 'E', 'W', 10.0), "20°E");
-        assert_eq!(grid_degree_label(-20.0, 'E', 'W', 10.0), "20°W");
-        assert_eq!(grid_degree_label(0.5, 'N', 'S', 0.25), "0.50°N");
-        assert_eq!(grid_degree_label(0.0, 'N', 'S', 0.25), "0.00°");
-        // Accumulated decimal steps miss 0 and 180 by rounding error.
-        let mut v = -0.5;
-        for _ in 0..5 {
-            v += 0.1;
+    fn grids_draw_lines_ticks_or_both() {
+        use rustgis_map::layout::{Grid, GridStyle};
+        let g = |style| Grid {
+            step: 30.0,
+            color: Rgba::rgb(0xFF, 0, 0),
+            labels: false,
+            style,
+            tick_length: 4.0,
+            width: 1.0,
+            ..Grid::default()
+        };
+        let inner = (25.0, 25.0, 75.0, 75.0);
+        let rim = (10.0, 10.0, 90.0, 13.0);
+        let lines = grid_page(g(GridStyle::Lines));
+        let ticks = grid_page(g(GridStyle::Ticks));
+        let both = grid_page(g(GridStyle::LinesAndTicks));
+        // Ticks only: nothing across the middle of the frame, but marks along its edge.
+        assert!(count(&lines, inner, red) > 100, "lines cross the frame");
+        assert_eq!(count(&ticks, inner, red), 0, "ticks stay at the edges");
+        assert!(count(&ticks, rim, red) > 10, "ticks along the top edge");
+        // Lines and ticks: the lines, with the ticks' extra width along the edge.
+        assert!(count(&both, inner, red) > 100);
+        assert!(count(&both, rim, red) > count(&lines, rim, red), "ticks thicken the lines at the edge");
+        // The line width is the grid's.
+        let thick = grid_page(Grid { width: 3.0, ..g(GridStyle::Lines) });
+        assert!(count(&thick, inner, red) > 2 * count(&lines, inner, red));
+    }
+
+    #[test]
+    fn grid_labels_go_on_the_edges_picked() {
+        use rustgis_map::layout::{Grid, GridEdges};
+        let g = |edges, label_orientation| Grid { step: 30.0, color: Rgba::new(0, 0, 0, 0), edges, label_orientation, ..Grid::default() };
+        let (top, bottom) = ((20.0, 10.0, 80.0, 16.0), (20.0, 84.0, 80.0, 90.0));
+        let (left, right) = ((10.0, 20.0, 18.0, 80.0), (82.0, 20.0, 90.0, 80.0));
+        let default = grid_page(g(GridEdges::default(), Orientation::Horizontal));
+        assert!(count(&default, bottom, ink) > 0 && count(&default, left, ink) > 0, "bottom and left by default");
+        assert_eq!(count(&default, top, ink) + count(&default, right, ink), 0);
+        let flipped = grid_page(g(GridEdges { top: true, bottom: false, left: false, right: true }, Orientation::Horizontal));
+        assert!(count(&flipped, top, ink) > 0 && count(&flipped, right, ink) > 0, "top and right when picked");
+        assert_eq!(count(&flipped, bottom, ink) + count(&flipped, left, ink), 0);
+        // Vertical side labels run along the edge: narrower across it than horizontal ones.
+        let across = |pm: &Pixmap| {
+            let cols: Vec<u32> = (0..pm.width()).filter(|&x| (0..pm.height()).any(|y| pm.pixel(x, y).is_some_and(ink))).collect();
+            cols.iter().filter(|&&x| (x as f64) < 30.0 * PT_PER_MM).count()
+        };
+        let horizontal = grid_page(g(GridEdges { top: false, bottom: false, left: true, right: false }, Orientation::Horizontal));
+        let vertical = grid_page(g(GridEdges { top: false, bottom: false, left: true, right: false }, Orientation::Vertical));
+        assert!(count(&vertical, left, ink) > 0);
+        assert!(across(&vertical) < across(&horizontal), "{} columns, against {}", across(&vertical), across(&horizontal));
+    }
+
+    #[test]
+    fn north_arrow_styles_differ_and_take_their_colours() {
+        let draw = |style, fill| {
+            let mut pm = Pixmap::new(80, 120).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            north_arrow(&mut pm, Rect::from_xywh(0.0, 0.0, 80.0, 120.0).unwrap(), style, fill, Rgba::rgb(0x22, 0x22, 0x22), 1.0);
+            pm
+        };
+        let red_fill = Rgba::rgb(0xFF, 0, 0);
+        let all: Vec<Pixmap> = ArrowStyle::ALL.iter().map(|&s| draw(s, red_fill)).collect();
+        for (i, a) in all.iter().enumerate() {
+            let filled = (0..120).flat_map(|y| (0..80).map(move |x| (x, y))).filter(|&(x, y)| a.pixel(x, y).is_some_and(red)).count();
+            assert!(filled > 50, "{:?} uses the fill colour", ArrowStyle::ALL[i]);
+            for b in &all[i + 1..] {
+                assert_ne!(a.data(), b.data(), "each style draws differently");
+            }
         }
-        assert_ne!(v, 0.0);
-        assert_eq!(grid_degree_label(v, 'N', 'S', 0.1), "0.00°");
-        let mut v = 179.5;
-        for _ in 0..5 {
-            v += 0.1;
+    }
+
+    #[test]
+    fn scale_bars_count_in_their_units_and_divisions() {
+        let draw = |bar| {
+            let mut pm = Pixmap::new(300, 60).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            // 100 m of ground per point: about 25 km across the bar.
+            scale_bar(&mut pm, Rect::from_xywh(0.0, 0.0, 300.0, 60.0).unwrap(), 100.0, bar, 1.0);
+            pm
+        };
+        // Dark runs along the bar's middle row: one per dark division of an alternating bar.
+        let runs = |pm: &Pixmap| {
+            let y = (60.0 * 0.62) as u32;
+            let dark: Vec<bool> = (0..pm.width()).map(|x| pm.pixel(x, y).is_some_and(ink)).collect();
+            dark.windows(2).filter(|w| !w[0] && w[1]).count() + usize::from(dark.first() == Some(&true))
+        };
+        let four = draw((ScaleUnits::Auto, 4, ScaleBarStyle::Alternating));
+        let five = draw((ScaleUnits::Auto, 5, ScaleBarStyle::Alternating));
+        assert_eq!(runs(&four), 2, "two dark divisions");
+        assert_eq!(runs(&five), 3, "three dark divisions, the last at the end");
+        // Miles and kilometres give bars of different lengths and labels.
+        assert_ne!(draw((ScaleUnits::Miles, 4, ScaleBarStyle::Alternating)).data(), four.data());
+        // A line or a stepped line fills no division.
+        for style in [ScaleBarStyle::Line, ScaleBarStyle::Stepped] {
+            let pm = draw((ScaleUnits::Auto, 4, style));
+            let dark = (0..300).filter(|&x| pm.pixel(x, 37).is_some_and(ink)).count();
+            assert!(dark < 20, "{style:?}: {dark} dark pixels across the bar");
+            assert_ne!(pm.data(), four.data());
         }
-        assert_eq!(grid_degree_label(v, 'E', 'W', 0.1), "180.00°");
+    }
+
+    #[test]
+    fn scale_numbers_are_short() {
+        assert_eq!(scale_number(5.0, 1.25), "5");
+        assert_eq!(scale_number(2.5, 1.25), "2.5");
+        assert_eq!(scale_number(1.25, 1.25), "1.25");
+        assert_eq!(scale_number(0.0, 1.25), "0");
+        assert_eq!(scale_number(100.0, 50.0), "100");
+        // Small totals keep their precision: 0.05 km in four divisions.
+        assert_eq!(scale_number(0.0125, 0.0125), "0.0125");
+        assert_eq!(scale_number(0.0375, 0.0125), "0.0375");
+        assert_eq!(scale_number(0.125, 0.125), "0.125");
+        // A step that never comes out even keeps two significant digits of it.
+        assert_eq!(scale_number(1.0 / 3.0, 1.0 / 3.0), "0.33");
+        assert_eq!(scale_number(2.0 / 3.0, 1.0 / 3.0), "0.67");
+        assert_eq!(scale_number(1.0, 1.0 / 3.0), "1");
+        assert_eq!(scale_number(20.0 / 3.0, 10.0 / 3.0), "6.7");
+        assert_eq!(scale_number(200.0 / 3.0, 100.0 / 3.0), "67");
+        assert_eq!(scale_number(0.01 / 3.0, 0.01 / 3.0), "0.0033");
     }
 }

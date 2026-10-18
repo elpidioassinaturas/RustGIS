@@ -223,7 +223,7 @@ pub fn share_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Ve
         "webScene" => {
             let mut m = map_of(s, p)?;
             m.layers.iter_mut().filter(|l| l.visible && !l.is_raster()).try_for_each(load_whole)?;
-            Ok((m.name.clone(), gltf(&m)?, m.name.clone()))
+            Ok((m.name.clone(), gltf(&m, s.view_size)?, m.name.clone()))
         }
         "linkChart" => {
             let rel = ps(p, "relationship").map(str::to_string);
@@ -810,8 +810,9 @@ fn find(s: &mut Session, p: &Value) -> CmdResult {
 
 /// A glTF 2.0 scene (embedded buffer): polygon layers extruded by their extrusion setting (flat
 /// otherwise), lines and points, coloured by their symbology. Metres east (x), up (y) and south
-/// (z) of the map's centre.
-fn gltf(m: &Map) -> Result<Vec<u8>, String> {
+/// (z) of the map's centre, with a camera where the map view (`view` points across) looks
+/// from: its bearing and pitch, as far off as MapLibre's camera would be.
+fn gltf(m: &Map, view: (f64, f64)) -> Result<Vec<u8>, String> {
     let c = m.center_lonlat();
     let origin = rustgis_geom::lonlat_to_merc(c);
     let k = c.y.to_radians().cos().abs().max(0.01);
@@ -989,6 +990,11 @@ fn gltf(m: &Map) -> Result<Vec<u8>, String> {
     if nodes.is_empty() {
         return Err("the map has no features to put in a scene".into());
     }
+    // As drawn: a camera set from outside a command may not be clamped yet.
+    let mut at = m.camera;
+    at.clamp();
+    let (camera, node) = viewpoint(m, &at, view);
+    nodes.push(node);
     let n = nodes.len();
     let doc = json!({
         "asset": {"version": "2.0", "generator": "RustGIS"},
@@ -1000,9 +1006,38 @@ fn gltf(m: &Map) -> Result<Vec<u8>, String> {
         "accessors": accessors,
         "bufferViews": views,
         "buffers": [{"byteLength": buffer.len(), "uri": format!("data:application/octet-stream;base64,{}", base64::engine::general_purpose::STANDARD.encode(&buffer))}],
-        "extras": {"origin": [c.x, c.y], "units": "metres east, up and south of origin (longitude, latitude)"},
+        "cameras": [camera],
+        "extras": {"origin": [c.x, c.y], "units": "metres east, up and south of origin (longitude, latitude)",
+            "bearing": at.bearing, "pitch": at.pitch},
     });
     serde_json::to_vec(&doc).map_err(|e| e.to_string())
+}
+
+/// The glTF camera of a scene and the node placing it: looking at the map's centre (the scene's
+/// origin) from camera `at` (clamped), with MapLibre's field of view, at the distance that shows
+/// the map's scale across a view `view` points in size.
+fn viewpoint(m: &Map, at: &rustgis_map::Camera, view: (f64, f64)) -> (Value, Value) {
+    let size = |v: f64| if v.is_finite() { v.clamp(1.0, 1e6) } else { 1.0 };
+    let (w, h) = (size(view.0), size(view.1));
+    let ground = at.res * m.flat().ground_per_unit(at.center);
+    let distance = h / 2.0 / rustgis_map::camera::TAN_HALF_FOV * ground;
+    let distance = if distance.is_finite() { distance.clamp(1.0, 1e9) } else { 1e6 };
+    let (bearing, pitch) = (at.bearing.to_radians(), at.pitch.to_radians());
+    // Backed off from the centre against the heading, and raised.
+    let (heading_x, heading_z) = (bearing.sin(), -bearing.cos());
+    let position = [-heading_x * distance * pitch.sin(), distance * pitch.cos(), -heading_z * distance * pitch.sin()];
+    // glTF cameras look down -z with +y up: tipped about x from level (looking north) to the
+    // pitch, then turned about y to the bearing.
+    let (tip, turn) = ((pitch - std::f64::consts::FRAC_PI_2) / 2.0, -bearing / 2.0);
+    let (sx, cx, sy, cy) = (tip.sin(), tip.cos(), turn.sin(), turn.cos());
+    let rotation = [cy * sx, cx * sy, -sx * sy, cy * cx];
+    let camera = json!({"name": "View", "type": "perspective", "perspective": {
+        "yfov": 2.0 * rustgis_map::camera::TAN_HALF_FOV.atan(),
+        "aspectRatio": w / h,
+        "znear": (distance / 1000.0).max(0.01),
+    }});
+    let node = json!({"name": "View", "camera": 0, "translation": position, "rotation": rotation});
+    (camera, node)
 }
 
 /// A link chart: the features joined by the map's relationships, as a node-link diagram (a

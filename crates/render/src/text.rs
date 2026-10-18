@@ -141,6 +141,12 @@ fn draw_text(pm: &mut Pixmap, text: &str, cx: f32, cy: f32, px_size: f32, color:
 pub fn draw(pm: &mut Pixmap, l: &PlacedLabel, ppp: f32) {
     let px = l.size * 1.33 * ppp;
     let (cx, cy) = (l.center_x() * ppp, l.y * ppp);
+    if l.framed {
+        let (w, h, pad) = (measure(&l.text, l.size, l.bold) * ppp, px * 1.2, 3.0 * ppp);
+        if let Some(r) = Rect::from_xywh(cx - w / 2.0 - pad, cy - h / 2.0 - pad, w + 2.0 * pad, h + 2.0 * pad) {
+            frame(pm, r, ppp);
+        }
+    }
     if let Some(h) = l.halo {
         let r = 1.2 * ppp;
         for (dx, dy) in
@@ -150,6 +156,15 @@ pub fn draw(pm: &mut Pixmap, l: &PlacedLabel, ppp: f32) {
         }
     }
     draw_text(pm, &l.text, cx, cy, px, l.color, l.bold, (0.0, 0.0));
+}
+
+/// The selection's frame: a light fill and an outline in the selection colour.
+fn frame(pm: &mut Pixmap, r: Rect, ppp: f32) {
+    let path = tiny_skia::PathBuilder::from_rect(r);
+    let fill = crate::paint(crate::SELECTION.with_alpha(40), 1.0);
+    pm.fill_path(&path, &fill, tiny_skia::FillRule::Winding, Transform::identity(), None);
+    let stroke = tiny_skia::Stroke { width: 2.0 * ppp, ..tiny_skia::Stroke::default() };
+    pm.stroke_path(&path, &crate::paint(crate::SELECTION, 1.0), &stroke, Transform::identity(), None);
 }
 
 /// A two-tone scale bar in the lower-left corner.
@@ -188,6 +203,7 @@ pub fn scale_bar(pm: &mut Pixmap, view: &View, ground_per_pt: f64) {
         bold: false,
         icon: None,
         align: 0.0,
+        framed: false,
     };
     draw(pm, &label, ppp);
 }
