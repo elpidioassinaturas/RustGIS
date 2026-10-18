@@ -249,7 +249,9 @@ pub fn holds_secret(params: &serde_json::Value) -> bool {
                 let filled = match v {
                     Value::String(t) => !t.trim().is_empty(),
                     Value::Null | Value::Bool(_) => false,
-                    _ => true,
+                    Value::Object(o) => !o.is_empty(),
+                    Value::Array(a) => !a.is_empty(),
+                    Value::Number(_) => true,
                 };
                 // A bare `key` beside a web address is that service's key; elsewhere it's as likely
                 // a field or a lookup key (a `?key=…` in an address `redact` reads in the string).
@@ -464,6 +466,7 @@ mod tests {
             json!({"url": "https://example.com/data.geojson"}),
             json!({"database": "postgres:host=db dbname=gis user=ana", "password": ""}),
             json!({"url": "https://example.com/data.geojson", "token": false}),
+            json!({"token": {}, "password": []}),
             json!({"layer": "Parcels", "key": "parcel_id"}),
             json!({"fileName": "big.geojson", "data": "A".repeat(100_000)}),
         ] {
