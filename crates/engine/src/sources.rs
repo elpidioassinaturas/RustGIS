@@ -265,7 +265,8 @@ pub fn holds_secret(params: &serde_json::Value) -> bool {
                 // through, only checked for a private key pasted in.
                 let contents = matches!(k.to_ascii_lowercase().as_str(), "data" | "text");
                 let inside = match v {
-                    Value::String(t) if contents => private_key(t),
+                    // (Short ones, which can't be much of a file, are read as any string.)
+                    Value::String(t) if contents && t.len() > 1024 => private_key(t),
                     _ => walk(v, depth + 1),
                 };
                 (secret_key(k) && (!k.eq_ignore_ascii_case("key") || beside_address()) && filled) || inside
@@ -466,6 +467,7 @@ mod tests {
             json!({"source": {"headers": {"X-API-Key": "abc"}}}),
             json!({"url": "https://example.com/data.geojson", "headers": {"Authorization": "Bearer abc"}}),
             json!({"headers": {"Cookie": "session=abc"}}),
+            json!({"text": "https://ana:s3cret@example.com/x"}),
             json!({"url": format!("https://example.com/{}?sig=abc&sv=2024", "a".repeat(10_000))}),
             json!({"certificate": "-----BEGIN RSA PRIVATE KEY-----
 MIIE
@@ -482,7 +484,8 @@ MIIE
             json!({"token": {}, "password": []}),
             json!({"layer": "Parcels", "key": "parcel_id"}),
             json!({"fileName": "big.geojson", "data": "A".repeat(100_000)}),
-            json!({"fileName": "a.geojson", "text": "{\"type\": \"FeatureCollection\", \"note\": \"https://x.example/?token=t\"}"}),
+            // A file's contents, past what an address could be, isn't read as one.
+            json!({"fileName": "a.geojson", "text": format!("{{\"type\": \"FeatureCollection\", \"note\": \"https://x.example/?token=t\", \"pad\": \"{}\"}}", "x".repeat(2000))}),
         ] {
             assert!(!holds_secret(&p), "{p}");
         }

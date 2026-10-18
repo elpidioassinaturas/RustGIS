@@ -56,7 +56,9 @@ pub fn start(app: &mut RustGisApp, st: &TaskStep) -> String {
     let label = spec.map_or_else(|| id.to_string(), |c| tl!(c.label).to_string());
     let (target, key, fallback) = match id {
         "gp.run" => {
-            let tool = st.params.get("tool").cloned().unwrap_or(Value::Null);
+            let Some(tool) = st.params.get("tool").filter(|t| t.is_string()).cloned() else {
+                return tl!("This step names no tool to show.").to_string();
+            };
             ("ui.gp.open", Some(("tool", tool.clone())), Some(("ui.gp.open", json!({"tool": tool}))))
         }
         _ => match DIALOGS.iter().find(|(c, _)| *c == id) {

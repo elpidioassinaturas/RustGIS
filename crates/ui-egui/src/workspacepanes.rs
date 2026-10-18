@@ -196,24 +196,19 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                         app.ws.task_step = i;
                     }
                     if app.ws.task_editing {
-                        if ui.add_enabled(i > 0, egui::Button::new("▲").small()).on_hover_text(tl!("Move Up")).clicked()
-                            && run(app, "task.moveStep", json!({"task": name, "step": i, "to": i - 1})).is_some()
-                        {
-                            follow_move(app, i, i - 1);
+                        // (`RustGisApp::run` keeps the open edit on its step: `follow_move`, `follow_delete`.)
+                        if ui.add_enabled(i > 0, egui::Button::new("▲").small()).on_hover_text(tl!("Move Up")).clicked() {
+                            run(app, "task.moveStep", json!({"task": name, "step": i, "to": i - 1}));
                         }
-                        if ui.add_enabled(i < last, egui::Button::new("▼").small()).on_hover_text(tl!("Move Down")).clicked()
-                            && run(app, "task.moveStep", json!({"task": name, "step": i, "to": i + 1})).is_some()
-                        {
-                            follow_move(app, i, i + 1);
+                        if ui.add_enabled(i < last, egui::Button::new("▼").small()).on_hover_text(tl!("Move Down")).clicked() {
+                            run(app, "task.moveStep", json!({"task": name, "step": i, "to": i + 1}));
                         }
                         if ui.small_button(tl!("Edit")).on_hover_text(tl!("Edit the title and instructions")).clicked() {
                             app.ws.task_edit = Some((i, st.title.clone(), st.instructions.clone()));
                             app.ws.task_step = i;
                         }
-                        if ui.small_button(tl!("Delete")).on_hover_text(tl!("Delete the step")).clicked()
-                            && run(app, "task.removeStep", json!({"task": name, "step": i})).is_some()
-                        {
-                            follow_delete(app, i);
+                        if ui.small_button(tl!("Delete")).on_hover_text(tl!("Delete the step")).clicked() {
+                            run(app, "task.removeStep", json!({"task": name, "step": i}));
                         }
                     } else {
                         // Practice: Show Me says where to do the step; Run does it.

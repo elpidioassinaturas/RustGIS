@@ -917,6 +917,11 @@ fn show_me_points_at_where_a_steps_command_is() {
     let lakes = app.session.map().layer_by_name("Lakes").unwrap().id;
     assert_eq!(app.session.active_layer, Some(lakes), "Lakes stays active");
     assert!(app.ui.layer_filter.is_empty());
+    // A tool step that names no tool says so, and opens nothing.
+    h.state_mut().ui.right = None;
+    let said = h.state_mut().run("ui.taskShowMe", json!({"command": "gp.run", "params": {}})).unwrap();
+    assert!(said["said"].as_str().unwrap().contains("names no tool"));
+    assert_eq!(h.state_mut().ui.right, None);
     // A step whose layer isn't in the map says so, and opens nothing.
     h.state_mut().ui.right = None;
     let said =

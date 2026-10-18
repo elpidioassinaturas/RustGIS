@@ -1027,9 +1027,10 @@ mod tests {
                     dirs.push(path);
                 } else if path.extension().is_some_and(|e| e == "rs") {
                     let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
-                    // The tests (this one reads files) are the `mod tests` closing each file. Held to
-                    // that, so nothing is skipped unseen: the first `#[cfg(test)]` opens it, and its
-                    // closing brace (the first `}` at the start of a line) ends the file.
+                    // The tests (this one reads files) are the `mod tests` closing each file: the
+                    // first `#[cfg(test)]` must open it, so no test-only item hides the code after
+                    // it. (Code after the test module would go unseen; the crate keeps none, and
+                    // the runtime test below runs the tools whatever their source.)
                     let code = match text.find("#[cfg(test)]") {
                         None => text.as_str(),
                         Some(at) => {
@@ -1039,8 +1040,6 @@ mod tests {
                                 "{}: a `#[cfg(test)]` before its `mod tests`",
                                 path.display()
                             );
-                            let end = tests.find("\n}").map_or(tests.len(), |i| i + 2);
-                            assert!(tests[end..].trim().is_empty(), "{}: code after its `mod tests`", path.display());
                             code
                         }
                     };

@@ -1228,6 +1228,26 @@ impl RustGisApp {
             }
         }
         // Undo and redo can move vertices: an index chosen before may now name another vertex.
+        // A step moved or deleted, from the pane, Command Search, the assistant or a script: the
+        // step being edited (and the current one) follow it, so Save writes where it was typed.
+        if r.is_ok() && matches!(id, "task.moveStep" | "task.removeStep") {
+            let tasks = &self.session.project.tasks;
+            // The task it acted on, as the command reads it: named, else the last one.
+            let acted = match params.get("task").and_then(Value::as_str) {
+                Some(n) => tasks.iter().find(|t| t.name.eq_ignore_ascii_case(n)),
+                None => tasks.last(),
+            };
+            let index = |k: &str| params.get(k).and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok());
+            if acted.is_some_and(|t| t.name == self.ws.task)
+                && let Some(step) = index("step")
+            {
+                match index("to") {
+                    Some(to) if id == "task.moveStep" => workspacepanes::follow_move(self, step, to),
+                    _ if id == "task.removeStep" => workspacepanes::follow_delete(self, step),
+                    _ => {}
+                }
+            }
+        }
         if r.is_ok() && matches!(id, "edit.undo" | "edit.redo") {
             self.map.vertex = None;
             if let Some(before) = steps_before
@@ -3136,8 +3156,8 @@ mod record_tests {
         app.ws.task_edit = Some((1, "Two".into(), "Typed".into()));
         app.run("edit.undo", json!(null)).unwrap();
         assert!(app.ws.task_edit.is_some(), "a colour undone leaves the steps alone");
+        // Run from anywhere (here, as Command Search would), the move takes the edit with it.
         app.run("task.moveStep", json!({"task": "Lesson", "step": 1, "to": 0})).unwrap();
-        crate::workspacepanes::follow_move(&mut app, 1, 0);
         assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(0));
         app.run("edit.undo", json!(null)).unwrap();
         assert!(app.ws.task_edit.is_none(), "the edit's place now names another step");
