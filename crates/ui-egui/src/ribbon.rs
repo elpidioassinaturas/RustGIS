@@ -1579,9 +1579,7 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
             let mut items: Vec<(String, String)> = vec![("mercator".into(), "Web Mercator".into())];
             items.extend(rustgis_engine::map::projection::PRESETS.iter().map(|(id, label, _)| (id.to_string(), label.to_string())));
             for (id, label) in items {
-                // A preset with parameters (`robinson +lon_0=150`) is still that preset.
-                let on = current == id || current.strip_prefix(id.as_str()).is_some_and(|r| r.starts_with(" +"));
-                if ui.add(egui::Button::selectable(on, tl!(label.as_str()))).clicked() {
+                if ui.add(egui::Button::selectable(is_projection(&current, &id), tl!(label.as_str()))).clicked() {
                     if app.run("map.projection", json!({"type": id})).is_ok() {
                         let _ = app.run("map.zoomFull", Value::Null);
                     }
@@ -3036,6 +3034,12 @@ fn start_extent_menu(app: &mut RustGisApp, ui: &mut Ui) {
     });
 }
 
+/// Whether projection code `current` is menu item `id`: the same code, or that preset with
+/// parameters (`robinson +lon_0=150` is Robinson).
+fn is_projection(current: &str, id: &str) -> bool {
+    current == id || rustgis_engine::map::projection::parse_preset(current).ok().flatten().is_some_and(|(p, _)| p == id)
+}
+
 /// Settings › Start-up › Projection: the projection the map opens in.
 fn start_projection_menu(app: &mut RustGisApp, ui: &mut Ui) {
     let current = if app.ui.start_projection.is_empty() { "mercator".to_string() } else { app.ui.start_projection.clone() };
@@ -3045,7 +3049,7 @@ fn start_projection_menu(app: &mut RustGisApp, ui: &mut Ui) {
         let mut items: Vec<(String, String)> = vec![("mercator".into(), "Web Mercator".into()), ("globe".into(), "Globe".into())];
         items.extend(rustgis_engine::map::projection::PRESETS.iter().map(|(id, label, _)| (id.to_string(), label.to_string())));
         for (id, label) in items {
-            if ui.add(egui::Button::selectable(current == id, tl!(label.as_str()))).clicked() {
+            if ui.add(egui::Button::selectable(is_projection(&current, &id), tl!(label.as_str()))).clicked() {
                 let _ = app.run("ui.startup", json!({"projection": id}));
                 ui.close();
             }

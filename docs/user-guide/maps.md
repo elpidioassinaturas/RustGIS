@@ -238,11 +238,12 @@ parallels: pick the preset in the **Coordinate System** dialog and set **Central
 `map.projection {"type": "robinson", "lon_0": 150}`, and an Albers for South America
 `{"type": "albers", "lon_0": -55, "lat_1": -5, "lat_2": -35}`. Without `type`, the values go to the
 map's current preset. The map saves them in its code (`robinson +lon_0=150`), which can also be
-typed as it is. Meridians run from -180° to 180° and parallels from -89° to 89°. Parallels that
-average within 0.5° of the equator (mirrored, such as -30° and 30°, or both next to it) make no
-cone and are refused, as is a value a preset doesn't take. The two regional grids keep their
-standard definitions. A conic's area of use runs 35° beyond its parallels and 90° either side of
-its meridian.
+typed as it is. **View › Projection** picks a preset in its standard form, and marks the one in
+use whatever its parameters. Meridians run from -180° to 180° and parallels from -89° to 89°.
+Parallels that average within 0.5° of the equator (mirrored, such as -30° and 30°, or both next
+to it) make no cone and are refused, as is a value a preset doesn't take. The two regional grids
+keep their standard definitions. A conic's area of use runs 35° beyond its parallels and 90°
+either side of its meridian.
 
 Layers are projected on the fly. A feature that crosses the edge of a world projection (the
 meridian opposite its central one, such as 90°E in Equal Earth Americas) is cut there and drawn on
