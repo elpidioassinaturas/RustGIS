@@ -8,8 +8,13 @@ Tools for working across maps and views, and for setting up the app the way you 
   offline areas as cards (double-click to open); **Item Pop-ups** add hover details.
 - **Pane Sets** save the panes you have open and bring them back. The **Workflow Manager** tracks
   jobs (new, in progress, on hold, done) with the area each covers.
-- **Tasks** (View › Tasks) steps through a task's instructions: read the current step, do it, or
-  click **Run** to have it done.
+- **Tasks** (View › Tasks) steps through a task's instructions: read the current step and do it
+  yourself, with **Show Me** to find where, or click **Run** to have it done.
+  - **Show Me** points at the step's command:
+    - a ribbon button gets its tab opened and is outlined for a few seconds;
+    - a tool is outlined in the Analyze gallery, or opened, empty, in the Tools pane;
+    - a symbology step opens the Symbology pane on its layer;
+    - a command no button runs opens Command Search on its name.
   - **Record Task** (in the pane, or Home › Task) turns an exercise into a task: do it once, and
     each command that changes the project becomes a step. Panes, dialogs and moving the view
     aren't recorded, and a colour adjusted several times stays one step. **Stop Recording** makes

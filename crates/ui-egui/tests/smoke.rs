@@ -772,6 +772,52 @@ Distance: 100 km."
 }
 
 #[test]
+fn show_me_points_at_where_a_steps_command_is() {
+    use rustgis_ui_egui::RightPane;
+    use rustgis_ui_egui::rustgis_engine::project::TaskStep;
+    let step = |command: &str, params: serde_json::Value| TaskStep {
+        title: "x".into(),
+        instructions: String::new(),
+        command: command.into(),
+        params,
+    };
+    let mut h = harness();
+    h.step();
+    let show = |h: &mut egui_kittest::Harness<'static, RustGisApp>, st: TaskStep| {
+        h.state_mut().run("ui.taskShowMe", serde_json::to_value(&st).unwrap()).unwrap();
+        for _ in 0..6 {
+            h.step();
+        }
+    };
+    // A tool in the Analyze gallery: its tab, its button outlined, nothing opened for the user.
+    show(&mut h, step("gp.run", json!({"tool": "buffer", "params": {"input": "Cities", "distance": 100}})));
+    let app = h.state_mut();
+    assert_eq!(app.ui.tab, "Analyze");
+    assert!(app.ui.show_me.as_ref().is_some_and(|s| s.found), "the Buffer button is outlined");
+    assert_ne!(app.ui.right, Some(RightPane::Geoprocessing));
+    // A tool with no button on the ribbon opens, empty, in the Tools pane.
+    show(&mut h, step("gp.run", json!({"tool": "xyTableToPoint", "params": {}})));
+    assert_eq!(h.state_mut().ui.right, Some(RightPane::Geoprocessing));
+    // A command whose button opens a dialog: that button.
+    show(&mut h, step("select.byAttributes", json!({"layer": "Countries", "where": "pop_est > 1"})));
+    let app = h.state_mut();
+    assert_eq!(app.ui.tab, "Home");
+    assert!(app.ui.show_me.as_ref().is_some_and(|s| s.found), "Select By Attributes is outlined");
+    // A command no ribbon button runs: Command Search on its name.
+    h.state_mut().ui.command_search = None;
+    show(&mut h, step("layer.zoomTo", json!({"layer": "Lakes"})));
+    assert!(h.state_mut().ui.command_search.is_some());
+    h.state_mut().ui.command_search = None;
+    // Symbology: the Symbology pane, on the step's layer.
+    show(&mut h, step("layer.color", json!({"layer": "Lakes", "color": "#336699"})));
+    assert_eq!(h.state_mut().ui.right, Some(RightPane::Symbology));
+    // Nothing is done for the user: Show Me leaves the layer as it was.
+    let before = format!("{:?}", h.state_mut().session.map().layer_by_name("Lakes").unwrap().renderer);
+    show(&mut h, step("layer.color", json!({"layer": "Lakes", "color": "#336699"})));
+    assert_eq!(format!("{:?}", h.state_mut().session.map().layer_by_name("Lakes").unwrap().renderer), before);
+}
+
+#[test]
 fn old_and_unknown_tab_names_open_a_current_tab() {
     let mut h = harness();
     for (asked, opened) in [("Imagery", "Analyze"), ("Feature Layer", "Style"), ("Share", "Publish"), ("Map", "Home"), ("nope", "Home")] {

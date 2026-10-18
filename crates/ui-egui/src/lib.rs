@@ -42,6 +42,7 @@ mod ribbon;
 mod s3ui;
 mod searchbox;
 mod serviceui;
+mod showme;
 mod sourcespane;
 mod sqlpane;
 mod stacui;
@@ -398,6 +399,8 @@ pub struct UiState {
     /// A minimized ribbon temporarily opened from its tab strip.
     pub ribbon_peek: bool,
     pub command_search: Option<String>,
+    /// A ribbon button being shown by a task step's Show Me.
+    pub show_me: Option<showme::ShowMe>,
     pub about: bool,
     pub shortcuts: bool,
     pub tab_strip_rect: Option<egui::Rect>,
@@ -535,6 +538,7 @@ impl Default for UiState {
             ribbon_minimized: false,
             ribbon_peek: false,
             command_search: None,
+            show_me: None,
             about: false,
             shortcuts: false,
             tab_strip_rect: None,
@@ -1942,6 +1946,16 @@ impl RustGisApp {
                 }
             }
             "ui.pane.tasks" => toggle_right(&mut self.ui, RightPane::Tasks),
+            // Show Me for a task step (`{"command", "params"?}`): where its command is.
+            "ui.taskShowMe" => {
+                let st: rustgis_engine::project::TaskStep = serde_json::from_value(json!({
+                    "title": p.get("title").cloned().unwrap_or(json!("")),
+                    "command": p.get("command").cloned().unwrap_or(Value::Null),
+                    "params": p.get("params").cloned().unwrap_or(Value::Null),
+                }))
+                .map_err(|e| format!("a step needs a command: {e}"))?;
+                return Ok(json!({"said": showme::start(self, &st)}));
+            }
             // Record Task: starts recording, or stops and makes the task (named `name`, else
             // "Recorded Task"). Says whether it is recording and how many steps it has.
             "ui.taskRecord" => match self.ws.recording.take() {
@@ -2717,6 +2731,7 @@ impl RustGisApp {
         mapview::confirm_delete(self, &ctx);
         pluginsui::show(self, &ctx);
         update::show(self, &ctx);
+        showme::tick(self, &ctx);
         chrome::command_search(self, &ctx);
         chrome::about(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]

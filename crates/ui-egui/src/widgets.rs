@@ -117,6 +117,7 @@ pub fn big(
         y += 13.5;
     }
     let resp = tooltip(app, resp, &label.replace('\n', " "), desc, id);
+    crate::showme::ring(ui, app, r, id, &params);
     if resp.clicked() && on && !menu {
         let _ = app.run(id, params);
     }
@@ -146,6 +147,7 @@ pub fn small(ui: &mut Ui, app: &mut RustGisApp, icon: &str, label: &str, desc: &
     }
     let title = if label.is_empty() { desc } else { label };
     let resp = tooltip(app, resp, title, if label.is_empty() { "" } else { desc }, id);
+    crate::showme::ring(ui, app, r, id, &params);
     if resp.clicked() && on {
         let _ = app.run(id, params);
     }

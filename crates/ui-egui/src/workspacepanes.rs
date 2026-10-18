@@ -148,10 +148,24 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
                             run(app, "task.removeStep", json!({"task": name, "step": i}));
                             app.ws.task_edit = None;
                         }
-                    } else if ui.small_button(tl!("Run")).clicked() && run(app, "task.run", json!({"task": name, "step": i})).is_some() {
-                        app.ws.task_step = i + 1;
-                        app.ws.message = Some((crate::i18n::fmt("Step {n} done", &[("n", &(i + 1).to_string())]), false));
-                        app.map.invalidate();
+                    } else {
+                        // Practice: Show Me says where to do the step; Run does it.
+                        if ui
+                            .small_button(tl!("Show Me"))
+                            .on_hover_text(tl!("Show where this step's command is, to do it yourself"))
+                            .clicked()
+                        {
+                            app.ws.task_step = i;
+                            let said = crate::showme::start(app, st);
+                            app.ws.message = Some((said, false));
+                        }
+                        if ui.small_button(tl!("Run")).on_hover_text(tl!("Do the step for me")).clicked()
+                            && run(app, "task.run", json!({"task": name, "step": i})).is_some()
+                        {
+                            app.ws.task_step = i + 1;
+                            app.ws.message = Some((crate::i18n::fmt("Step {n} done", &[("n", &(i + 1).to_string())]), false));
+                            app.map.invalidate();
+                        }
                     }
                 });
                 let editing = app.ws.task_editing && app.ws.task_edit.as_ref().is_some_and(|e| e.0 == i);
