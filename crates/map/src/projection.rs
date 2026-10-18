@@ -69,8 +69,9 @@ pub fn preset_value(id: &str, key: &str) -> Option<f64> {
 /// `+key=value` for each parameter (`robinson +lon_0=150`). Gives the preset's id and the values
 /// that differ from its own, in [`preset_params`]' order; `Ok(None)` when `code` names no preset.
 /// A parameter the preset doesn't take, or a value out of its range or given twice, is an error;
-/// [`lookup`] also refuses conic standard parallels mirrored about the equator, which make no
-/// cone (so a form being filled in can still read them).
+/// [`lookup`] also refuses conic standard parallels that average within 0.5° of the equator
+/// (mirrored, or both next to it), which make no cone (so a form being filled in can still read
+/// them).
 pub fn parse_preset(code: &str) -> Result<Option<(&'static str, Vec<(&'static str, f64)>)>, String> {
     let (head, rest) = code.trim().split_once('+').unwrap_or((code.trim(), ""));
     let head = head.trim();
@@ -154,7 +155,9 @@ pub fn lookup(code: &str) -> Result<(String, String), String> {
         if let (Some(a), Some(b)) = (value("lat_1"), value("lat_2"))
             && (a + b).abs() < 1.0
         {
-            return Err(format!("standard parallels {a} and {b} mirror each other about the equator (within 1°), which makes no cone"));
+            return Err(format!(
+                "standard parallels {a} and {b} average within 0.5° of the equator, which makes no cone: pick a cylindrical projection"
+            ));
         }
         if params.is_empty() {
             return Ok((def.to_string(), label.to_string()));
@@ -670,6 +673,7 @@ mod tests {
             "albers +lat_1=-30 +lat_2=30",
             "albers +lat_1=-89.5",
             "albers +lat_1=-30 +lat_2=29.5",
+            "lambertConformal +lat_1=0.3 +lat_2=0.3",
             "+proj=robin +lon_0=150",
         ] {
             assert!(lookup(bad).is_err(), "{bad}");
