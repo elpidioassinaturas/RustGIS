@@ -434,28 +434,39 @@ struct MapInputs<'a>(
     std::collections::HashMap<String, Vec<usize>>,
     /// Streamed layers the tool reads, loaded whole (by lowercase name).
     std::collections::HashMap<String, Dataset>,
-    /// The flat map's projection (its name, the projection and its unit in metres), built once
-    /// for the run; `None` on the globe.
-    Option<(String, rustgis_map::projection::Flat, f64)>,
+    /// The flat map's projection (its name, the projection and its unit in metres), built the
+    /// first time a tool asks for it (Tissot's indicatrix does), once for the run; `None` on the
+    /// globe.
+    std::cell::OnceCell<Option<(String, rustgis_map::projection::Flat, f64)>>,
     /// The longitude/latitude extent the view shows.
     Option<rustgis_geom::Extent>,
 );
+
+impl MapInputs<'_> {
+    /// The flat map's projection, built on first use.
+    fn flat(&self) -> Option<&(String, rustgis_map::projection::Flat, f64)> {
+        let map = self.0;
+        self.4
+            .get_or_init(|| {
+                (map.projection != rustgis_map::Projection::Globe).then(|| {
+                    let flat = map.flat();
+                    let to_meter = match &flat {
+                        rustgis_map::projection::Flat::Mercator => 1.0,
+                        rustgis_map::projection::Flat::Custom(p) => p.to_meter(),
+                    };
+                    (map.projection.label(), flat, to_meter)
+                })
+            })
+            .as_ref()
+    }
+}
 
 /// A tool's inputs on the active map.
 fn map_inputs<'a>(s: &'a Session, spec: Option<&rustgis_analysis::ToolSpec>, params: &Value) -> Result<MapInputs<'a>, String> {
     let full = streamed_inputs(s.map(), spec, params)?;
     let rows = env_inputs(s.map(), &full, &s.project.gp_env, params)?;
-    let map = s.map();
-    let flat = (map.projection != rustgis_map::Projection::Globe).then(|| {
-        let flat = map.flat();
-        let to_meter = match &flat {
-            rustgis_map::projection::Flat::Mercator => 1.0,
-            rustgis_map::projection::Flat::Custom(p) => p.to_meter(),
-        };
-        (map.projection.label(), flat, to_meter)
-    });
     let view = Some(super::workspace::view_extent(s)).filter(|e| !e.is_empty());
-    Ok(MapInputs(map, &s.project.tables, rows, full, flat, view))
+    Ok(MapInputs(s.map(), &s.project.tables, rows, full, std::cell::OnceCell::new(), view))
 }
 
 /// Every feature of the streamed layers a tool's parameters name (those without a selection,
@@ -571,10 +582,10 @@ impl Inputs for MapInputs<'_> {
         }
     }
     fn projection_name(&self) -> Option<String> {
-        self.4.as_ref().map(|(name, _, _)| name.clone())
+        self.flat().map(|(name, _, _)| name.clone())
     }
     fn project(&self, c: rustgis_geom::Coord) -> Option<rustgis_geom::Coord> {
-        let (_, flat, to_meter) = self.4.as_ref()?;
+        let (_, flat, to_meter) = self.flat()?;
         flat.forward(c).map(|m| rustgis_geom::Coord::new(m.x * to_meter, m.y * to_meter))
     }
     fn view_extent(&self) -> Option<rustgis_geom::Extent> {
