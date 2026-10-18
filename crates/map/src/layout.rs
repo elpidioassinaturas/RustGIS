@@ -464,6 +464,11 @@ pub enum ElementKind {
         /// Another frame whose extent this one outlines (an extent indicator).
         #[serde(default)]
         extent_of: Option<u32>,
+        /// The extent indicator's outline colour and width (points): red and 2 unless set.
+        #[serde(default = "indicator_color", skip_serializing_if = "is_indicator_color")]
+        extent_color: Rgba,
+        #[serde(default = "indicator_width", skip_serializing_if = "is_indicator_width")]
+        extent_width: f64,
         /// The map turned to a bearing (degrees clockwise from north) and tilted to a pitch
         /// (degrees from looking straight down, 0 to 85), as the map view is.
         #[serde(default, skip_serializing_if = "is_zero")]
@@ -771,8 +776,9 @@ impl Layout {
             e.y = finite_or(e.y, 0.0).clamp(-5000.0, 5000.0);
             e.name = e.name.chars().take(200).collect();
             match &mut e.kind {
-                ElementKind::MapFrame { center, scale, shape, grid, bearing, pitch, .. } => {
+                ElementKind::MapFrame { center, scale, shape, grid, bearing, pitch, extent_width, .. } => {
                     *scale = finite_or(*scale, 50_000_000.0).clamp(100.0, 1e10);
+                    *extent_width = finite_or(*extent_width, INDICATOR_WIDTH).clamp(MIN_INDICATOR_WIDTH, MAX_INDICATOR_WIDTH);
                     *bearing = crate::camera::normalize_bearing(*bearing);
                     *pitch = crate::camera::normalize_pitch(*pitch);
                     if !center.is_finite() {
@@ -828,6 +834,29 @@ impl Layout {
 
 fn finite_or(v: f64, d: f64) -> f64 {
     if v.is_finite() { v } else { d }
+}
+
+/// The extent indicator's colour and width (points) until they are set.
+pub const INDICATOR_COLOR: Rgba = Rgba::rgb(0xD0, 0x1C, 0x1C);
+pub const INDICATOR_WIDTH: f64 = 2.0;
+/// The narrowest and widest an extent indicator's outline may be (points); to hide it, remove it.
+pub const MIN_INDICATOR_WIDTH: f64 = 0.1;
+pub const MAX_INDICATOR_WIDTH: f64 = 20.0;
+
+fn indicator_color() -> Rgba {
+    INDICATOR_COLOR
+}
+
+fn is_indicator_color(c: &Rgba) -> bool {
+    *c == INDICATOR_COLOR
+}
+
+fn indicator_width() -> f64 {
+    INDICATOR_WIDTH
+}
+
+fn is_indicator_width(w: &f64) -> bool {
+    *w == INDICATOR_WIDTH
 }
 
 fn is_zero(v: &f64) -> bool {
@@ -977,6 +1006,8 @@ mod tests {
                 shape: FrameShape::Rectangle,
                 grid: None,
                 extent_of: None,
+                extent_color: INDICATOR_COLOR,
+                extent_width: INDICATOR_WIDTH,
                 bearing: 0.0,
                 pitch: 0.0,
             },
@@ -998,7 +1029,7 @@ mod tests {
     #[test]
     fn hostile_layouts_are_repaired() {
         let text = r#"{"name":"x","width":1e300,"height":-5,"elements":[
-            {"id":3,"name":"a","x":0,"y":0,"w":1e9,"h":10,"kind":{"MapFrame":{"map":"M","center":{"x":1e300,"y":200},"scale":-1,"shape":{"Polygon":[[0,0],[1,1]]},"extent_of":3}}},
+            {"id":3,"name":"a","x":0,"y":0,"w":1e9,"h":10,"kind":{"MapFrame":{"map":"M","center":{"x":1e300,"y":200},"scale":-1,"shape":{"Polygon":[[0,0],[1,1]]},"extent_of":3,"extent_width":1e9}}},
             {"id":3,"name":"b","x":0,"y":0,"w":10,"h":10,"kind":{"Text":{"text":"t","size":1e9,"color":[0,0,0,255]}}},
             {"id":9,"name":"c","x":0,"y":0,"w":10,"h":10,"kind":{"Legend":{"frame":42,"title":"L"}}}],
             "series":{"frame":77,"layer":"x"}}"#;
@@ -1009,8 +1040,9 @@ mod tests {
         assert_ne!(ids[0], ids[1], "duplicate ids are renumbered");
         assert!(l.width <= 5000.0 && l.height >= 20.0 && l.series.is_none());
         match &l.elements[0].kind {
-            ElementKind::MapFrame { scale, shape, extent_of, center, .. } => {
+            ElementKind::MapFrame { scale, shape, extent_of, center, extent_width, .. } => {
                 assert!(*scale >= 100.0 && *shape == FrameShape::Rectangle && extent_of.is_none() && center.is_finite());
+                assert_eq!(*extent_width, MAX_INDICATOR_WIDTH);
             }
             _ => panic!("frame expected"),
         }

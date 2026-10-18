@@ -74,7 +74,7 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
         let (x, y, ew, eh) = ((e.x * k) as f32, (e.y * k) as f32, (e.w * k) as f32, (e.h * k) as f32);
         let Some(r) = Rect::from_xywh(x, y, ew.max(1.0), eh.max(1.0)) else { continue };
         match &e.kind {
-            ElementKind::MapFrame { shape, grid, extent_of, .. } => {
+            ElementKind::MapFrame { shape, grid, extent_of, extent_color, extent_width, .. } => {
                 let Some(&(_, mi, cam, fw, fh)) = frame(e.id) else {
                     placeholder(&mut pm, r, "Missing map", ppp);
                     continue;
@@ -97,7 +97,7 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                 {
                     let ring = frame_outline_lonlat(om, &other.2, other.3, other.4);
                     if let Some(map) = maps.get(mi) {
-                        outline_lonlat(&mut frame_pm, map, &view, &ring, Rgba::rgb(0xD0, 0x1C, 0x1C), 2.0);
+                        outline_lonlat(&mut frame_pm, map, &view, &ring, *extent_color, *extent_width as f32);
                     }
                 }
                 // Whole pixels, so the clipped image and its outline line up.
@@ -1181,6 +1181,8 @@ mod tests {
                 shape: FrameShape::Rectangle,
                 grid: None,
                 extent_of: None,
+                extent_color: rustgis_map::layout::INDICATOR_COLOR,
+                extent_width: rustgis_map::layout::INDICATOR_WIDTH,
                 bearing: 0.0,
                 pitch: 0.0,
             },
@@ -1204,6 +1206,51 @@ mod tests {
         let mut map = Map::new("m");
         map.add_raster("dem", rl);
         map
+    }
+
+    /// A page with a main frame and an inset (5–55 mm) that outlines it in `color` at `width`.
+    fn indicator_page(color: Rgba, width: f64) -> Pixmap {
+        let map = Map::new("m");
+        let frame = |center, scale, extent_of| ElementKind::MapFrame {
+            map: "m".into(),
+            center,
+            scale,
+            shape: FrameShape::Rectangle,
+            grid: None,
+            extent_of,
+            extent_color: color,
+            extent_width: width,
+            bearing: 0.0,
+            pitch: 0.0,
+        };
+        let mut l = Layout::new("Layout", 100.0, 100.0);
+        let main = l.add("Main", (60.0, 60.0, 30.0, 30.0), frame(Coord::new(20.0, 10.0), 5e7, None));
+        l.add("Inset", (5.0, 5.0, 50.0, 50.0), frame(Coord::new(0.0, 0.0), 2e8, Some(main)));
+        render(&l, &mut [map], 96.0, &PageInfo::default()).unwrap()
+    }
+
+    /// Pixels inside the inset (5–55 mm) close to `c`.
+    fn inset_pixels(pm: &Pixmap, c: Rgba) -> usize {
+        let k = PT_PER_MM;
+        let near = |p: (u8, u8, u8)| p.0.abs_diff(c.r()) < 40 && p.1.abs_diff(c.g()) < 40 && p.2.abs_diff(c.b()) < 40;
+        ((5.0 * k) as u32..(55.0 * k) as u32)
+            .flat_map(|y| ((5.0 * k) as u32..(55.0 * k) as u32).map(move |x| (x, y)))
+            .filter(|&(x, y)| near(rgb(pm, x, y)))
+            .count()
+    }
+
+    /// The extent indicator is drawn in its own colour and width (#213): red and 2 pt until set.
+    #[test]
+    fn extent_indicators_take_their_colour_and_width() {
+        use rustgis_map::layout::{INDICATOR_COLOR, INDICATOR_WIDTH};
+        let blue = Rgba::rgb(0x1F, 0x4E, 0x9A);
+        let default = indicator_page(INDICATOR_COLOR, INDICATOR_WIDTH);
+        assert!(inset_pixels(&default, INDICATOR_COLOR) > 0, "red by default");
+        let thin = indicator_page(blue, 1.0);
+        let thick = indicator_page(blue, 6.0);
+        assert_eq!(inset_pixels(&thin, INDICATOR_COLOR), 0, "no red once restyled");
+        let (t, w) = (inset_pixels(&thin, blue), inset_pixels(&thick, blue));
+        assert!(t > 0 && w > 3 * t, "a wider outline covers more: {t} at 1 pt, {w} at 6 pt");
     }
 
     fn rgb(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8) {
@@ -1262,6 +1309,8 @@ mod tests {
                 shape: FrameShape::Rectangle,
                 grid: None,
                 extent_of: None,
+                extent_color: rustgis_map::layout::INDICATOR_COLOR,
+                extent_width: rustgis_map::layout::INDICATOR_WIDTH,
                 bearing: 0.0,
                 pitch: 0.0,
             },
@@ -1338,6 +1387,8 @@ mod tests {
                 shape: FrameShape::Rectangle,
                 grid: Some(grid),
                 extent_of: None,
+                extent_color: rustgis_map::layout::INDICATOR_COLOR,
+                extent_width: rustgis_map::layout::INDICATOR_WIDTH,
                 bearing: 0.0,
                 pitch: 0.0,
             },

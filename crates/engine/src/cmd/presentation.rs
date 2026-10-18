@@ -316,6 +316,8 @@ pub fn page_layout(s: &Session, pres: &Presentation, page: &Page) -> Layout {
                     shape: FrameShape::Rectangle,
                     grid: None,
                     extent_of: None,
+                    extent_color: rustgis_map::layout::INDICATOR_COLOR,
+                    extent_width: rustgis_map::layout::INDICATOR_WIDTH,
                     bearing: 0.0,
                     pitch: 0.0,
                 },

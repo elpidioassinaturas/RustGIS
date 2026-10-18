@@ -1233,6 +1233,38 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             grid_properties(app, ui, grid.as_ref(), id, &|app, g| update(app, json!({"grid": g})));
         });
     }
+    // The extent indicator this frame draws (another frame's extent): its colour and width.
+    if let ElementKind::MapFrame { extent_of: Some(of), extent_color, extent_width, .. } = &e.kind {
+        let other = layout.element(*of).map_or_else(|| of.to_string(), |o| o.name.clone());
+        ui.add_space(4.0);
+        egui::CollapsingHeader::new(tl!("Extent Indicator")).id_salt(("frame_indicator", id)).default_open(true).show(ui, |ui| {
+            ui.label(egui::RichText::new(crate::i18n::fmt("Outlines {frame}", &[("frame", &other)])).size(11.5));
+            egui::Grid::new(("indicator_props", id)).num_columns(2).show(ui, |ui| {
+                ui.label(tl!("Color"));
+                let mut c = crate::theme::c32(*extent_color);
+                if crate::widgets::color_button(ui, &mut c).changed() {
+                    update(app, json!({"extentIndicator": {"color": crate::theme::rgba(c).hex()}}));
+                }
+                ui.end_row();
+                ui.label(tl!("Line width"));
+                let mut w = *extent_width;
+                let r = ui.add(
+                    egui::DragValue::new(&mut w)
+                        .range(rustgis_engine::map::layout::MIN_INDICATOR_WIDTH..=rustgis_engine::map::layout::MAX_INDICATOR_WIDTH)
+                        .speed(0.05)
+                        .max_decimals(2)
+                        .suffix(" pt"),
+                );
+                if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && (w - extent_width).abs() > 1e-6 {
+                    update(app, json!({"extentIndicator": {"width": w}}));
+                }
+                ui.end_row();
+            });
+            if ui.button(tl!("Remove Extent Indicator")).clicked() {
+                update(app, json!({"extentIndicator": false}));
+            }
+        });
+    }
     ui.add_space(8.0);
     if let ElementKind::MapFrame { .. } = e.kind {
         ui.toggle_value(&mut app.layout.navigate, tl!("Pan and Zoom Map"))
@@ -1476,6 +1508,41 @@ mod tests {
         assert_eq!(layout.elements.len(), n, "Backspace deleted the copy");
         assert!(layout.element(copy).is_none() && layout.element(title.id).is_some());
         assert_eq!(app.layout.selected, None);
+    }
+
+    /// An overview frame's properties show its extent indicator's colour and width (#213), and
+    /// its Remove button takes the indicator away.
+    #[test]
+    fn an_overview_frame_shows_its_extent_indicator() {
+        use egui_kittest::kittest::Queryable;
+        use rustgis_engine::map::layout::ElementKind;
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Overview"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let main = app.session.project.layouts[li].elements.iter().find(|e| matches!(e.kind, ElementKind::MapFrame { .. })).unwrap().id;
+        let inset = app.run("layout.addFrame", json!({"x": 200, "y": 150, "w": 60, "h": 40})).unwrap()["element"].as_u64().unwrap() as u32;
+        app.run("layout.addElement", json!({"kind": "extentIndicator", "frame": inset, "of": main, "width": 1.5})).unwrap();
+        app.layout.selected = Some(inset);
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                super::show(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        assert!(h.query_by_label("Extent Indicator").is_some(), "the section shows for an overview frame");
+        h.get_by_label("Remove Extent Indicator").click();
+        h.run_steps(2);
+        let kind = &h.state().session.project.layouts[li].element(inset).unwrap().kind;
+        assert!(matches!(kind, ElementKind::MapFrame { extent_of: None, .. }), "removed");
+        h.run_steps(2);
+        assert!(h.query_by_label("Remove Extent Indicator").is_none(), "and its section with it");
     }
 
     /// Element ids are per layout: opening another layout ends the selection, so Delete or
