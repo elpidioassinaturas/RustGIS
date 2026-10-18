@@ -1268,7 +1268,16 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                 ElementKind::MapFrame { map, .. } => app.session.project.maps.iter().find(|m| m.name == *map),
                 _ => None,
             })
-            .map(|m| m.layers.iter().filter(|l| !l.graphics && !l.is_raster()).map(|l| l.name.clone()).collect())
+            .map(|m| {
+                // Once each: layers may share a name, and the legend leaves names out.
+                let mut names: Vec<String> = Vec::new();
+                for l in m.layers.iter().filter(|l| !l.graphics && !l.is_raster()) {
+                    if !names.iter().any(|n| n.eq_ignore_ascii_case(&l.name)) {
+                        names.push(l.name.clone());
+                    }
+                }
+                names
+            })
             .unwrap_or_default();
         if !names.is_empty() {
             ui.add_space(4.0);

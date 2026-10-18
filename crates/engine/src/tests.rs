@@ -8950,11 +8950,20 @@ fn legends_leave_layers_out() {
     assert_eq!(left_out(&s, lakes), ["Rios"]);
     let back: rustgis_map::layout::Layout = serde_json::from_str(&serde_json::to_string(&s.project.layouts[0]).unwrap()).unwrap();
     assert!(back.element(lakes).is_some_and(|e| matches!(&e.kind, ElementKind::Legend { exclude, .. } if exclude == &["Rios"])));
+    // Names may repeat. Renaming Lakes onto a name already left out keeps it once; with two
+    // layers named Rios, removing one keeps the name left out for the other.
+    s.run("layout.update", &json!({"element": lakes, "exclude": ["Rios", "Lakes"]})).unwrap();
+    s.run("layer.rename", &json!({"layer": "Lakes", "name": "Rios"})).unwrap();
+    assert_eq!(left_out(&s, lakes), ["Rios"], "once each");
+    assert_eq!(s.map().layers.iter().filter(|l| l.name == "Rios").count(), 2);
+    let first = s.map().layers.iter().find(|l| l.name == "Rios").unwrap().id;
+    s.run("layer.remove", &json!({"layer": first})).unwrap();
+    assert_eq!(left_out(&s, lakes), ["Rios"], "the other Rios is still left out");
     // Deleting the layer drops it from the list, so a later layer of that name is listed.
     s.run("layer.remove", &json!({"layer": "Rios"})).unwrap();
     assert!(left_out(&s, lakes).is_empty());
     // An empty list lists every layer again.
-    s.run("layout.update", &json!({"element": lakes, "exclude": ["Lakes"]})).unwrap();
+    s.run("layout.update", &json!({"element": lakes, "exclude": ["Countries"]})).unwrap();
     s.run("layout.update", &json!({"element": lakes, "exclude": []})).unwrap();
     assert!(left_out(&s, lakes).is_empty());
 }

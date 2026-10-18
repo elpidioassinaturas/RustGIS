@@ -2068,8 +2068,13 @@ fn add_sample(s: &mut Session, p: &Value) -> CmdResult {
 
 /// Legends that leave out layer `old` of the active map, in the frames that show it, follow it:
 /// to its new name, or (`None`, the layer deleted) by dropping it, so a later layer of that name
-/// isn't left out unasked.
+/// isn't left out unasked. Called once the layer is renamed, or before it goes: while another
+/// layer still bears `old` (names may repeat), the legends keep it for that one.
 fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>) {
+    let bearers = s.map().layers.iter().filter(|l| l.name.eq_ignore_ascii_case(old)).count();
+    if bearers > usize::from(new.is_none()) {
+        return;
+    }
     let map = s.map().name.clone();
     for layout in &mut s.project.layouts {
         let frames: Vec<u32> = layout
@@ -2083,7 +2088,18 @@ fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>) {
                 && frames.contains(frame)
             {
                 match new {
-                    Some(n) => exclude.iter_mut().filter(|x| x.eq_ignore_ascii_case(old)).for_each(|x| *x = n.to_string()),
+                    Some(n) => {
+                        exclude.iter_mut().filter(|x| x.eq_ignore_ascii_case(old)).for_each(|x| *x = n.to_string());
+                        // Once each, should the new name have been left out already.
+                        let mut seen: Vec<String> = Vec::new();
+                        exclude.retain(|x| {
+                            let new = !seen.iter().any(|y| y.eq_ignore_ascii_case(x));
+                            if new {
+                                seen.push(x.clone());
+                            }
+                            new
+                        });
+                    }
                     None => exclude.retain(|x| !x.eq_ignore_ascii_case(old)),
                 }
             }

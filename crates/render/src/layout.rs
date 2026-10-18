@@ -700,15 +700,15 @@ fn shown_legends(map: &Map, scale: f64) -> Vec<(u32, Vec<LegendEntry>)> {
         .collect()
 }
 
-/// The legend of a frame's map. With `drawn` (from [`shown_legends`]) it shows what the frame
-/// draws: only the layers listed there, with their classes. Without, every class of every visible
-/// layer. `hide_other` leaves `<all other values>` out either way.
 /// What a legend leaves out: `<all other values>`, and layers by name.
 struct LegendOptions<'a> {
     hide_other: bool,
     exclude: &'a [String],
 }
 
+/// The legend of a frame's map. With `drawn` (from [`shown_legends`]) it shows what the frame
+/// draws: only the layers listed there, with their classes. Without, every class of every visible
+/// layer. `opts` leaves out `<all other values>` and the layers it names, either way.
 fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32, Vec<LegendEntry>)]>, opts: LegendOptions, ppp: f64) {
     let hide_other = opts.hide_other;
     let excluded = |name: &str| opts.exclude.iter().any(|n| n.eq_ignore_ascii_case(name));
