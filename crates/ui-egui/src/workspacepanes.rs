@@ -20,6 +20,8 @@ pub struct WorkspaceState {
     pub recording_undo_said: bool,
     /// Layer names the recording said two layers share.
     pub recording_shared_said: Vec<String>,
+    /// The recording said a step keeps a `key` parameter.
+    pub recording_key_said: bool,
     /// The name typed for the task being recorded.
     pub record_name: String,
     /// The Tasks pane shows its editing controls.

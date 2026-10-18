@@ -1203,6 +1203,10 @@ impl RustGisApp {
         }
         // Read before the command runs: removing or renaming the active layer changes it.
         let active = if self.ws.recording.is_some() { self.layer_acted_on(id, &params) } else { None };
+        // A step being edited is known by its place in the task: Undo or Redo of a move or a
+        // deletion would leave that place naming another step.
+        let task_steps = |app: &Self| app.session.project.tasks.iter().find(|t| t.name == app.ws.task).map(|t| t.steps.clone());
+        let steps_before = (matches!(id, "edit.undo" | "edit.redo") && self.ws.task_edit.is_some()).then(|| task_steps(self)).flatten();
         let r = if id.starts_with("ui.") { self.run_ui(id, &params) } else { self.session.run(id, &params) };
         if let Err(e) = &r {
             log::info!("{id}: {e}");
@@ -1226,6 +1230,14 @@ impl RustGisApp {
         // Undo and redo can move vertices: an index chosen before may now name another vertex.
         if r.is_ok() && matches!(id, "edit.undo" | "edit.redo") {
             self.map.vertex = None;
+            if let Some(before) = steps_before
+                && task_steps(self).is_none_or(|now| now != before)
+            {
+                self.ws.task_edit = None;
+                self.session.notify(tl!("The task's steps changed, so the step being edited was closed: edit it again."), false);
+            }
+            let n = task_steps(self).map_or(0, |s| s.len());
+            self.ws.task_step = self.ws.task_step.min(n.saturating_sub(1));
         }
         // Choosing a tool, Text included, drops a value picked under Dynamic Text
         // (`ui.dynamicText` picks it after choosing the tool).
@@ -1312,6 +1324,16 @@ impl RustGisApp {
             );
             self.session.notify(text, false);
             return;
+        }
+        // A plain `key` is kept (a field or a lookup key, as often as not), but it might be an
+        // access key: said once a recording.
+        if rustgis_engine::sources::holds_plain_key(params) && !self.ws.recording_key_said {
+            self.ws.recording_key_said = true;
+            let text = crate::i18n::fmt(
+                "{command}'s step keeps its key parameter. If that is an access key, delete the step (Edit Steps) before sharing the task.",
+                &[("command", tl!(spec.label))],
+            );
+            self.session.notify(text, false);
         }
         // The ribbon, the symbol editor and the panes run a command on the active layer without
         // naming it: the step names it (`active`, from `layer_acted_on`), so it replays on that
@@ -2110,6 +2132,7 @@ impl RustGisApp {
                     self.ws.recording_full = false;
                     self.ws.recording_undo_said = false;
                     self.ws.recording_shared_said.clear();
+                    self.ws.recording_key_said = false;
                     self.ws.record_name.clear();
                     return Ok(json!({"recording": true, "steps": 0}));
                 }
@@ -3086,6 +3109,37 @@ mod record_tests {
             .map(|c| c.id)
             .collect();
         assert!(unplaced.is_empty(), "say whether these act on the active layer: {unplaced:?}");
+    }
+
+    /// Undo or Redo that moves a task's steps closes the step being edited, so Save can't write
+    /// its text into another step; one that leaves the steps alone keeps it open.
+    #[test]
+    fn undoing_a_step_move_closes_the_step_being_edited() {
+        let mut app = RustGisApp::with_sample();
+        let step = |t: &str| json!({"title": t, "command": "map.zoomFull", "params": {}});
+        app.run("task.new", json!({"name": "Lesson", "steps": [step("One"), step("Two")]})).unwrap();
+        app.ws.task = "Lesson".into();
+        app.run("layer.color", json!({"layer": "Lakes", "color": "#123456"})).unwrap();
+        app.ws.task_edit = Some((1, "Two".into(), "Typed".into()));
+        app.run("edit.undo", json!(null)).unwrap();
+        assert!(app.ws.task_edit.is_some(), "a colour undone leaves the steps alone");
+        app.run("task.moveStep", json!({"task": "Lesson", "step": 1, "to": 0})).unwrap();
+        crate::workspacepanes::follow_move(&mut app, 1, 0);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(0));
+        app.run("edit.undo", json!(null)).unwrap();
+        assert!(app.ws.task_edit.is_none(), "the edit's place now names another step");
+        assert!(app.session.notices.iter().any(|n| n.text.contains("step being edited was closed")));
+    }
+
+    /// A step keeping a plain `key` is recorded, and that is said once a recording.
+    #[test]
+    fn a_kept_key_is_said_once() {
+        let mut app = RustGisApp::with_sample();
+        app.ws.recording = Some(Vec::new());
+        app.record_step("layer.color", &json!({"layer": "Lakes", "color": "#123456", "key": "a"}), None);
+        app.record_step("layer.color", &json!({"layer": "Rivers", "color": "#123456", "key": "b"}), None);
+        assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(2));
+        assert_eq!(app.session.notices.iter().filter(|n| n.text.contains("keeps its key parameter")).count(), 1);
     }
 
     /// A step naming a layer whose name another layer shares says so, once for the name.

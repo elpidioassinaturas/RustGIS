@@ -259,6 +259,22 @@ pub fn holds_secret(params: &serde_json::Value) -> bool {
     walk(params, 0)
 }
 
+/// Whether command parameters set a plain `key` (at any depth), which [`holds_secret`] lets
+/// through: as often a field or a lookup key as an access key, so a recording keeps it and says so.
+pub fn holds_plain_key(params: &serde_json::Value) -> bool {
+    fn walk(v: &serde_json::Value, depth: usize) -> bool {
+        use serde_json::Value;
+        match v {
+            Value::Object(o) if depth < 16 => o
+                .iter()
+                .any(|(k, v)| (k.eq_ignore_ascii_case("key") && v.as_str().is_some_and(|t| !t.trim().is_empty())) || walk(v, depth + 1)),
+            Value::Array(a) if depth < 16 => a.iter().any(|v| walk(v, depth + 1)),
+            _ => false,
+        }
+    }
+    walk(params, 0)
+}
+
 /// An address without what would give someone else the user's access: the user and password of
 /// a web address, query parameters that are keys, tokens or signatures (a signed blob's SAS, an
 /// S3 presigned URL), and a PostgreSQL connection string's password.
@@ -440,6 +456,11 @@ mod tests {
         ] {
             assert!(!holds_secret(&p), "{p}");
         }
+        // A plain key is let through, and noticed so the user is told.
+        assert!(holds_plain_key(&json!({"layer": "Parcels", "key": "parcel_id"})));
+        assert!(holds_plain_key(&json!({"source": [{"key": "abc"}]})));
+        assert!(!holds_plain_key(&json!({"layer": "Parcels", "key": ""})));
+        assert!(!holds_plain_key(&json!({"api_key": "abc"})));
     }
 
     #[test]
