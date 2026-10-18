@@ -49,12 +49,22 @@ const LAT_2: PresetParam = PresetParam { key: "lat_2", min: -89.0, max: 89.0 };
 
 /// The parameters preset `id` takes: the central meridian for the world and polar presets, and
 /// the standard parallels too for the conics. None for the regional grids (ETRS89 LAEA, USA
-/// Albers), which are standard definitions with a fixed area of use.
+/// Albers), which are standard definitions with a fixed area of use, nor for a preset not listed
+/// here, so a new one takes none until it is.
 pub fn preset_params(id: &str) -> &'static [PresetParam] {
     match id {
-        "europeEqualArea" | "usaAlbers" => &[],
+        "equirectangular"
+        | "miller"
+        | "mollweide"
+        | "cylindricalEqualArea"
+        | "robinson"
+        | "equalEarth"
+        | "naturalEarth"
+        | "winkelTripel"
+        | "eckertIV"
+        | "northPolar"
+        | "southPolar" => &[LON_0],
         "albers" | "lambertConformal" => &[LON_0, LAT_1, LAT_2],
-        _ if PRESETS.iter().any(|(p, _, _)| *p == id) => &[LON_0],
         _ => &[],
     }
 }
@@ -77,9 +87,10 @@ pub fn parse_preset(code: &str) -> Result<Option<(&'static str, Vec<(&'static st
     let head = head.trim();
     let Some((id, _, _)) = PRESETS.iter().find(|(id, label, _)| id.eq_ignore_ascii_case(head) || label.eq_ignore_ascii_case(head)) else {
         return match (head, rest) {
-            (_, "") => Ok(None),
-            ("", _) => Err("PROJ strings aren't taken: pick a preset, or an EPSG or ESRI code".into()),
-            _ => Err(format!("only presets take parameters: '{head}' isn't one")),
+            ("", _) if !rest.is_empty() => Err("PROJ strings aren't taken: pick a preset, or an EPSG or ESRI code".into()),
+            (_, r) if r.contains('=') => Err(format!("only presets take parameters: '{head}' isn't one")),
+            // Not a preset (`epsg:+3035` too): lookup says what's wrong with it.
+            _ => Ok(None),
         };
     };
     let takes = preset_params(id);
@@ -102,8 +113,9 @@ pub fn parse_preset(code: &str) -> Result<Option<(&'static str, Vec<(&'static st
         if given.iter().any(|(g, _)| *g == p.key) {
             return Err(format!("{} is given twice", p.key));
         }
-        // `-0` is 0, so the code is written one way.
-        given.push((p.key, v + 0.0));
+        // `-0` is 0 and the meridian 180° is -180°, so the code is written one way.
+        let v = if p.key == "lon_0" && v == 180.0 { -180.0 } else { v + 0.0 };
+        given.push((p.key, v));
     }
     let own = |k: &str| preset_value(id, k);
     let params =
@@ -670,6 +682,13 @@ mod tests {
         assert!(lookup("albers +lat_1=-50").unwrap_err().contains("50 (the preset's own)"));
         let (id, p) = parse_preset("albers +lat_1=-0").unwrap().unwrap();
         assert_eq!(preset_code(id, &p), "albers +lat_1=0");
+        assert_eq!(parse_preset("robinson +lon_0=180").unwrap(), parse_preset("robinson +lon_0=-180").unwrap());
+        assert_eq!(parse_preset("epsg:+3035").unwrap(), None);
+        assert!(lookup("epsg:+3035").unwrap_err().contains("unknown"));
+        // Every preset is classified: the regional grids alone take nothing.
+        for (id, _, _) in PRESETS {
+            assert_eq!(preset_params(id).is_empty(), ["europeEqualArea", "usaAlbers"].contains(id), "{id}");
+        }
         for bad in [
             "robinson +lon_0=181",
             "robinson +lon_0=x",

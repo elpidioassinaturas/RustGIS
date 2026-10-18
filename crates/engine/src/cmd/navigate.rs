@@ -103,14 +103,7 @@ pub fn commands() -> Vec<C> {
                     None => Projection::Globe,
                 }
             } else {
-                let base = ps(p, "type").map_or_else(|| m.projection.code(), str::to_string);
-                let (id, mut params) = rustgis_map::projection::parse_preset(&base)?
-                    .ok_or_else(|| format!("only presets take lon_0, lat_1 and lat_2, not {}", Projection::from_code(&base).map_or(base.clone(), |p| p.label())))?;
-                for (k, v) in given {
-                    params.retain(|(q, _)| *q != k);
-                    params.push((k, v));
-                }
-                Projection::from_code(&rustgis_map::projection::preset_code(id, &params))?
+                with_preset_params(&ps(p, "type").map_or_else(|| m.projection.code(), str::to_string), given)?
             };
             m.set_projection(next);
             let out = json!({"projection": m.projection.code(), "label": m.projection.label()});
@@ -239,6 +232,20 @@ pub fn commands() -> Vec<C> {
         })
         .params(r#"{"name": string}"#),
     ]
+}
+
+/// Projection `base`, a preset with or without parameters, with `given` over its own values.
+fn with_preset_params(base: &str, given: Vec<(&str, f64)>) -> Result<Projection, String> {
+    use rustgis_map::projection::{parse_preset, preset_code};
+    let Some((id, mut params)) = parse_preset(base)? else {
+        let name = Projection::from_code(base).map_or_else(|_| base.to_string(), |p| p.label());
+        return Err(format!("only presets take lon_0, lat_1 and lat_2, not {name}"));
+    };
+    for (k, v) in given {
+        params.retain(|(q, _)| *q != k);
+        params.push((k, v));
+    }
+    Projection::from_code(&preset_code(id, &params))
 }
 
 fn s_name(p: &Value) -> Result<&str, String> {
