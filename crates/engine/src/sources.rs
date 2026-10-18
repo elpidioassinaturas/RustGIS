@@ -259,8 +259,16 @@ pub fn holds_secret(params: &serde_json::Value) -> bool {
                 };
                 // A bare `key` beside a web address is that service's key; elsewhere it's as likely
                 // a field or a lookup key (a `?key=…` in an address `redact` reads in the string).
-                let beside_address =
-                    || o.values().any(|v| v.as_str().is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("http")));
+                // (The address may sit inside a sibling: `{"source": {"url": …}, "key": …}`.)
+                fn address(v: &Value, depth: usize) -> bool {
+                    match v {
+                        Value::String(t) => t.trim_start().to_ascii_lowercase().starts_with("http"),
+                        Value::Object(o) if depth < 4 => o.values().any(|v| address(v, depth + 1)),
+                        Value::Array(a) if depth < 4 => a.iter().any(|v| address(v, depth + 1)),
+                        _ => false,
+                    }
+                }
+                let beside_address = || o.iter().any(|(sibling, v)| sibling != k && address(v, 0));
                 // A file's contents (Add Data's `data`, a GeoJSON `text`) isn't an address to read
                 // through, only checked for a private key pasted in.
                 let contents = matches!(k.to_ascii_lowercase().as_str(), "data" | "text");
@@ -464,6 +472,7 @@ mod tests {
             json!({"url": "https://example.com/tiles/{z}/{x}/{y}.png?access_token=pk.abc"}),
             json!({"url": "https://maps.example.com/tiles/{z}/{x}/{y}.png?key=abc"}),
             json!({"url": "https://api.example.com/tiles", "key": "abc"}),
+            json!({"source": {"url": "https://api.example.com/tiles"}, "key": "abc"}),
             json!({"source": {"headers": {"X-API-Key": "abc"}}}),
             json!({"url": "https://example.com/data.geojson", "headers": {"Authorization": "Bearer abc"}}),
             json!({"headers": {"Cookie": "session=abc"}}),
