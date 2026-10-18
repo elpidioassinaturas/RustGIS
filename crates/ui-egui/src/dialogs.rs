@@ -1188,7 +1188,8 @@ fn preset_fields(app: &mut RustGisApp, ui: &mut egui::Ui) {
             r.widget_info(|| egui::WidgetInfo { label: Some(label.to_string()), ..egui::WidgetInfo::drag_value(true, v) });
             if r.changed() {
                 next.retain(|(k, _)| *k != p.key);
-                next.push((p.key, v));
+                // To the 4 decimals shown, so no float noise from a drag reaches the code.
+                next.push((p.key, (v * 1e4).round() / 1e4));
             }
             ui.end_row();
         }
@@ -1334,7 +1335,7 @@ mod tests {
             action: Action::SetValue,
             target_tree: tree,
             target_node: node,
-            data: Some(ActionData::NumericValue(150.0)),
+            data: Some(ActionData::NumericValue(150.000_000_000_03)),
         }));
         h.run_steps(3);
         assert_eq!(h.state().dialogs.text, "robinson +lon_0=150");
