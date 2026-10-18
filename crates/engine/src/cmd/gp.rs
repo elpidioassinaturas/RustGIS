@@ -438,8 +438,10 @@ struct MapInputs<'a>(
     /// first time a tool asks for it (Tissot's indicatrix does), once for the run; `None` on the
     /// globe.
     std::cell::OnceCell<Option<(String, rustgis_map::projection::Flat, f64)>>,
-    /// The longitude/latitude extent the view shows.
-    Option<rustgis_geom::Extent>,
+    /// The session, for the view's longitude/latitude extent, and that extent once a tool asks
+    /// for it (it inverse-projects the view, which most tools never need).
+    &'a Session,
+    std::cell::OnceCell<Option<rustgis_geom::Extent>>,
 );
 
 impl MapInputs<'_> {
@@ -465,8 +467,7 @@ impl MapInputs<'_> {
 fn map_inputs<'a>(s: &'a Session, spec: Option<&rustgis_analysis::ToolSpec>, params: &Value) -> Result<MapInputs<'a>, String> {
     let full = streamed_inputs(s.map(), spec, params)?;
     let rows = env_inputs(s.map(), &full, &s.project.gp_env, params)?;
-    let view = Some(super::workspace::view_extent(s)).filter(|e| !e.is_empty());
-    Ok(MapInputs(s.map(), &s.project.tables, rows, full, std::cell::OnceCell::new(), view))
+    Ok(MapInputs(s.map(), &s.project.tables, rows, full, std::cell::OnceCell::new(), s, std::cell::OnceCell::new()))
 }
 
 /// Every feature of the streamed layers a tool's parameters name (those without a selection,
@@ -589,7 +590,7 @@ impl Inputs for MapInputs<'_> {
         flat.forward(c).map(|m| rustgis_geom::Coord::new(m.x * to_meter, m.y * to_meter))
     }
     fn view_extent(&self) -> Option<rustgis_geom::Extent> {
-        self.5
+        *self.6.get_or_init(|| Some(super::workspace::view_extent(self.5)).filter(|e| !e.is_empty()))
     }
     fn raster(&self, layer: &str) -> Option<RasterInput<'_>> {
         let rl = self.0.layer_by_name(layer)?.raster.as_ref()?;
