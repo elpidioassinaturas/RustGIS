@@ -26,8 +26,8 @@ pub enum Projection {
     WebMercator,
     /// A 3D globe.
     Globe,
-    /// Another flat projection: a preset id (see [`crate::projection::PRESETS`]), `EPSG:<code>`,
-    /// `ESRI:<code>` or `local:lon,lat`.
+    /// Another flat projection: a preset id (see [`crate::projection::PRESETS`]) with any
+    /// parameters (`robinson +lon_0=150`), `EPSG:<code>`, `ESRI:<code>` or `local:lon,lat`.
     Custom(String),
 }
 
@@ -77,9 +77,8 @@ impl Projection {
         }
         // Canonical form: the preset id, or the code as `lookup` names it (`EPSG:<n>`, `ESRI:<n>`,
         // whatever the spacing and leading zeros typed).
-        let preset = crate::projection::PRESETS.iter().find(|(id, label, _)| id.eq_ignore_ascii_case(s) || label.eq_ignore_ascii_case(s));
-        let canonical = match preset {
-            Some((id, _, _)) => id.to_string(),
+        let canonical = match crate::projection::parse_preset(s)? {
+            Some((id, params)) => crate::projection::preset_code(id, &params),
             None => named?,
         };
         Ok(Projection::Custom(canonical))

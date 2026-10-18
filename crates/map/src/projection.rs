@@ -30,7 +30,96 @@ pub const PRESETS: &[(&str, &str, &str)] = &[
         "USA Contiguous Albers Equal Area",
         "+proj=aea +lat_0=23 +lon_0=-96 +lat_1=29.5 +lat_2=45.5 +datum=NAD83 +units=m +no_defs",
     ),
+    ("albers", "Albers Equal Area Conic", "+proj=aea +lat_0=0 +lon_0=0 +lat_1=20 +lat_2=50 +datum=WGS84 +units=m +no_defs"),
+    ("lambertConformal", "Lambert Conformal Conic", "+proj=lcc +lat_0=0 +lon_0=0 +lat_1=20 +lat_2=50 +datum=WGS84 +units=m +no_defs"),
 ];
+
+/// A parameter a preset takes (opengeos/RustGIS#517): its PROJ name and the range, in degrees,
+/// it is checked against.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PresetParam {
+    pub key: &'static str,
+    pub min: f64,
+    pub max: f64,
+}
+
+const LON_0: PresetParam = PresetParam { key: "lon_0", min: -180.0, max: 180.0 };
+const LAT_1: PresetParam = PresetParam { key: "lat_1", min: -89.0, max: 89.0 };
+const LAT_2: PresetParam = PresetParam { key: "lat_2", min: -89.0, max: 89.0 };
+
+/// The parameters preset `id` takes: the central meridian for the world and polar presets, and
+/// the standard parallels too for the conics. None for the regional grids (ETRS89 LAEA, USA
+/// Albers), which are standard definitions with a fixed area of use.
+pub fn preset_params(id: &str) -> &'static [PresetParam] {
+    match id {
+        "europeEqualArea" | "usaAlbers" => &[],
+        "albers" | "lambertConformal" => &[LON_0, LAT_1, LAT_2],
+        _ if PRESETS.iter().any(|(p, _, _)| *p == id) => &[LON_0],
+        _ => &[],
+    }
+}
+
+/// The value preset `id`'s own definition gives parameter `key` (`+lon_0=0` gives 0).
+pub fn preset_value(id: &str, key: &str) -> Option<f64> {
+    let (_, _, def) = PRESETS.iter().find(|(p, _, _)| *p == id)?;
+    def.split_whitespace().find_map(|t| t.strip_prefix('+')?.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
+}
+
+/// A preset with its parameters, as a projection code writes it: the preset's id or name, then
+/// `+key=value` for each parameter (`robinson +lon_0=150`). Gives the preset's id and the values
+/// that differ from its own, in [`preset_params`]' order; `Ok(None)` when `code` names no preset.
+/// A parameter the preset doesn't take, or a value out of its range or given twice, is an error;
+/// [`lookup`] also refuses conic standard parallels mirrored about the equator, which make no
+/// cone (so a form being filled in can still read them).
+pub fn parse_preset(code: &str) -> Result<Option<(&'static str, Vec<(&'static str, f64)>)>, String> {
+    let (head, rest) = code.trim().split_once('+').unwrap_or((code.trim(), ""));
+    let head = head.trim();
+    let Some((id, _, _)) = PRESETS.iter().find(|(id, label, _)| id.eq_ignore_ascii_case(head) || label.eq_ignore_ascii_case(head)) else {
+        return if rest.is_empty() { Ok(None) } else { Err(format!("only presets take parameters: '{head}' isn't one")) };
+    };
+    let takes = preset_params(id);
+    let mut given: Vec<(&'static str, f64)> = Vec::new();
+    for t in rest.split('+').map(str::trim).filter(|t| !t.is_empty()) {
+        let (k, v) = t.split_once('=').ok_or_else(|| format!("a parameter is +key=value, not '+{t}'"))?;
+        let p = takes.iter().find(|p| p.key.eq_ignore_ascii_case(k.trim())).ok_or_else(|| match takes {
+            [] => format!("{id} takes no parameters"),
+            _ => format!("{id} takes {}, not '{}'", takes.iter().map(|p| p.key).collect::<Vec<_>>().join(", "), k.trim()),
+        })?;
+        let v = v
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| format!("{} is a number of degrees, not '{}'", p.key, v.trim()))?;
+        if !(p.min..=p.max).contains(&v) {
+            return Err(format!("{} is from {} to {} degrees, not {v}", p.key, p.min, p.max));
+        }
+        if given.iter().any(|(g, _)| *g == p.key) {
+            return Err(format!("{} is given twice", p.key));
+        }
+        given.push((p.key, v));
+    }
+    let own = |k: &str| preset_value(id, k);
+    let params =
+        takes.iter().filter_map(|p| given.iter().find(|(g, _)| *g == p.key)).filter(|(k, v)| own(k) != Some(*v)).copied().collect();
+    Ok(Some((id, params)))
+}
+
+/// The projection code of preset `id` with `params`: `robinson +lon_0=150`, or the id alone.
+pub fn preset_code(id: &str, params: &[(&str, f64)]) -> String {
+    params.iter().fold(id.to_string(), |s, (k, v)| format!("{s} +{k}={v}"))
+}
+
+/// `def` with `params` in place of its own values.
+fn with_params(def: &str, params: &[(&str, f64)]) -> String {
+    def.split_whitespace()
+        .map(|t| {
+            let set = params.iter().find(|(k, _)| t.strip_prefix('+').and_then(|t| t.strip_prefix(k)).is_some_and(|r| r.starts_with('=')));
+            set.map_or_else(|| t.to_string(), |(k, v)| format!("+{k}={v}"))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Whether local views (`local:lon,lat`, azimuthal equidistant) can be drawn in this build. They
 /// need proj4rs' `aeqd`, which the browser build leaves out (Cargo.toml); asking the projection
@@ -55,8 +144,19 @@ pub fn lookup(code: &str) -> Result<(String, String), String> {
             format!("Local ({lon:.2}°, {lat:.2}°)"),
         ));
     }
-    if let Some((_, label, def)) = PRESETS.iter().find(|(id, label, _)| id.eq_ignore_ascii_case(code) || label.eq_ignore_ascii_case(code)) {
-        return Ok((def.to_string(), label.to_string()));
+    if let Some((id, params)) = parse_preset(code)? {
+        let (_, label, def) = PRESETS.iter().find(|(p, _, _)| *p == id).ok_or("no such preset")?;
+        let value = |k: &str| params.iter().find(|(g, _)| *g == k).map(|(_, v)| *v).or_else(|| preset_value(id, k));
+        if let (Some(a), Some(b)) = (value("lat_1"), value("lat_2"))
+            && (a + b).abs() < 1.0
+        {
+            return Err(format!("standard parallels {a} and {b} mirror each other about the equator, which makes no cone"));
+        }
+        if params.is_empty() {
+            return Ok((def.to_string(), label.to_string()));
+        }
+        let shown: Vec<String> = params.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        return Ok((with_params(def, &params), format!("{label} ({})", shown.join(", "))));
     }
     // `3035`, `EPSG:3035` or `epsg 3035`: an optional prefix, then only digits.
     let lower = code.to_ascii_lowercase();
@@ -269,11 +369,7 @@ impl Projector {
     /// one it names.
     pub fn new(code: &str) -> Result<Projector, String> {
         let (def, _) = lookup(code)?;
-        let code_t = code.trim();
-        let preset = PRESETS
-            .iter()
-            .find(|(id, label, _)| id.eq_ignore_ascii_case(code_t) || label.eq_ignore_ascii_case(code_t))
-            .map(|(id, _, _)| *id);
+        let preset = parse_preset(code)?.map(|(id, _)| id);
         let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
         if let Some(kind) = crate::world::Kind::from_proj_name(proj) {
             // Computed here: the centre is read from the definition as proj4rs would read it.
@@ -544,6 +640,72 @@ impl Flat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Presets with parameters (opengeos/RustGIS#517): read strictly, written one way, and drawn
+    /// where they say, against pyproj 3.7.1 (PROJ 9.5.1).
+    #[test]
+    fn presets_take_parameters() {
+        // The id, then the values that differ from the preset's own, in a fixed order.
+        assert_eq!(parse_preset("Robinson +lon_0=150").unwrap(), Some(("robinson", vec![("lon_0", 150.0)])));
+        assert_eq!(parse_preset("robinson +lon_0=0").unwrap(), Some(("robinson", vec![])));
+        assert_eq!(parse_preset("robinson").unwrap(), Some(("robinson", vec![])));
+        assert_eq!(parse_preset("EPSG:3035").unwrap(), None);
+        let (id, p) = parse_preset("albers +lat_2=-35 +LON_0=-55 + lat_1 = -5").unwrap().unwrap();
+        assert_eq!(preset_code(id, &p), "albers +lon_0=-55 +lat_1=-5 +lat_2=-35");
+        assert_eq!(lookup("robinson +lon_0=150").unwrap().1, "Robinson (lon_0=150)");
+        for bad in [
+            "robinson +lon_0=181",
+            "robinson +lon_0=x",
+            "robinson +lon_0=inf",
+            "robinson +lon_0",
+            "robinson +lat_1=10",
+            "robinson +lon_0=1 +lon_0=2",
+            "usaAlbers +lon_0=-90",
+            "EPSG:3035 +lon_0=10",
+            "albers +lat_1=-30 +lat_2=30",
+            "albers +lat_1=-89.5",
+        ] {
+            assert!(lookup(bad).is_err(), "{bad}");
+            assert!(Projector::new(bad).is_err(), "{bad}");
+        }
+        // Each parameter a preset takes is in its definition, for the value to replace.
+        for (id, _, def) in PRESETS {
+            for p in preset_params(id) {
+                assert!(def.contains(&format!("+{}=", p.key)), "{id}: {}", p.key);
+            }
+        }
+        // Centred on 150°E: that meridian runs down the middle, and the edge along 30°W.
+        for id in [
+            "equirectangular",
+            "miller",
+            "mollweide",
+            "cylindricalEqualArea",
+            "robinson",
+            "equalEarth",
+            "naturalEarth",
+            "winkelTripel",
+            "eckertIV",
+        ] {
+            let p = Projector::new(&format!("{id} +lon_0=150")).unwrap();
+            assert!(p.forward(Coord::new(150.0, 20.0)).unwrap().x.abs() < 1e-6, "{id}");
+            let (w, e) = (p.forward(Coord::new(-30.5, 0.0)).unwrap(), p.forward(Coord::new(-29.5, 0.0)).unwrap());
+            assert!(w.x > 0.0 && e.x < 0.0, "{id}: {w:?} {e:?}");
+            let cm = p.central_meridian().unwrap();
+            assert!((cm - 150.0).rem_euclid(360.0).min((150.0 - cm).rem_euclid(360.0)) < 0.01, "{id}: {cm}");
+        }
+        let check = |code: &str, (lon, lat): (f64, f64), (x, y): (f64, f64)| {
+            let m = Projector::new(code).unwrap().forward(Coord::new(lon, lat)).unwrap();
+            assert!((m.x - x).abs() < 1.0 && (m.y - y).abs() < 1.0, "{code}: {m:?}, PROJ ({x}, {y})");
+        };
+        check("robinson +lon_0=150", (170.0, 40.0), (1741397.303, 4276351.584));
+        check("mollweide +lon_0=150", (-170.0, -30.0), (3667234.822, -3643853.564));
+        check("northPolar +lon_0=-45", (0.0, 70.0), (1547098.478, -1547098.478));
+        check("albers +lon_0=-55 +lat_1=-5 +lat_2=-35", (-40.0, -10.0), (1613154.256, -1174639.608));
+        check("lambertConformal +lon_0=-55 +lat_1=-5 +lat_2=-35", (-40.0, -10.0), (1611663.972, -1180384.624));
+        // A conic's area of use follows its parallels: South America, not the far north.
+        let p = Projector::new("albers +lon_0=-55 +lat_1=-5 +lat_2=-35").unwrap();
+        assert!(p.domain.contains(Coord::new(-50.0, -15.0)) && !p.domain.contains(Coord::new(-55.0, 60.0)));
+    }
 
     #[test]
     fn local_codes_are_read_strictly() {

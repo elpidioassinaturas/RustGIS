@@ -1115,8 +1115,9 @@ fn coordinate_system(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) -> boo
             ui.set_width(270.0);
             egui::ScrollArea::vertical().id_salt("crs_list").max_height(pane_h - 44.0).auto_shrink([false, false]).show(ui, |ui| {
                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                    let picked = rustgis_engine::map::projection::parse_preset(&app.dialogs.text).ok().flatten().map(|(id, _)| id);
                     for (id, label) in &choices {
-                        let selected = app.dialogs.text.eq_ignore_ascii_case(id);
+                        let selected = app.dialogs.text.eq_ignore_ascii_case(id) || picked == Some(id.as_str());
                         if ui.selectable_label(selected, tl!(label.as_str())).clicked() {
                             app.dialogs.text = id.clone();
                             app.dialogs.a.clear();
@@ -1137,6 +1138,7 @@ fn coordinate_system(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) -> boo
         ui.vertical(|ui| {
             ui.set_width(340.0);
             egui::ScrollArea::vertical().id_salt("crs_details").max_height(pane_h).show(ui, |ui| {
+                preset_fields(app, ui);
                 crs_details(ui, &app.dialogs.text, &current, t);
             });
         });
@@ -1163,6 +1165,40 @@ fn coordinate_system(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) -> boo
     close
 }
 
+/// The chosen preset's parameters (opengeos/RustGIS#517): the central meridian, and a conic's
+/// standard parallels, each written back into the chosen code. Nothing for a preset without any.
+fn preset_fields(app: &mut RustGisApp, ui: &mut egui::Ui) {
+    use rustgis_engine::map::projection::{parse_preset, preset_code, preset_params, preset_value};
+    let Ok(Some((id, params))) = parse_preset(&app.dialogs.text) else { return };
+    let takes = preset_params(id);
+    if takes.is_empty() {
+        return;
+    }
+    let mut next = params.clone();
+    egui::Grid::new("preset_params").num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
+        for p in takes {
+            let label = match p.key {
+                "lon_0" => tl!("Central meridian"),
+                "lat_1" => tl!("First standard parallel"),
+                _ => tl!("Second standard parallel"),
+            };
+            ui.label(label);
+            let mut v = params.iter().find(|(k, _)| *k == p.key).map(|(_, v)| *v).or_else(|| preset_value(id, p.key)).unwrap_or(0.0);
+            let r = ui.add(egui::DragValue::new(&mut v).range(p.min..=p.max).speed(0.5).max_decimals(4).suffix("°"));
+            r.widget_info(|| egui::WidgetInfo { label: Some(label.to_string()), ..egui::WidgetInfo::drag_value(true, v) });
+            if r.changed() {
+                next.retain(|(k, _)| *k != p.key);
+                next.push((p.key, v));
+            }
+            ui.end_row();
+        }
+    });
+    if next != params {
+        app.dialogs.text = preset_code(id, &next);
+    }
+    ui.add_space(4.0);
+}
+
 /// A typed coordinate system code: `ESRI:102033` or `Epsg: 3035` as it is (`lookup` reads the
 /// prefix in any case and spacing), a bare number as an EPSG code.
 pub(crate) fn typed_crs(text: &str) -> String {
@@ -1187,7 +1223,10 @@ fn crs_details(ui: &mut egui::Ui, chosen: &str, current: &str, t: &Tokens) {
     }
     let lower = code.to_ascii_lowercase();
     let epsg = lower.strip_prefix("epsg:").or_else(|| lower.strip_prefix("esri:")).map(str::to_string);
-    let (kind, page): (&str, Option<String>) = match code.as_str() {
+    // A preset with parameters is described as its preset, without the page of its standard form.
+    let preset = rustgis_engine::map::projection::parse_preset(&code).ok().flatten();
+    let tuned = preset.as_ref().is_some_and(|(_, p)| !p.is_empty());
+    let (kind, page): (&str, Option<String>) = match preset.map_or(code.as_str(), |(id, _)| id) {
         "mercator" => ("World, conformal: the usual web map; areas grow towards the poles.", Some("3857".into())),
         "globe" => ("A 3D globe seen from space.", None),
         "equirectangular" => ("World, cylindrical: equal steps of longitude and latitude.", Some("4087".into())),
@@ -1203,8 +1242,13 @@ fn crs_details(ui: &mut egui::Ui, chosen: &str, current: &str, t: &Tokens) {
         "southPolar" => ("Polar, conformal: Antarctica and the Southern Ocean.", Some("3031".into())),
         "europeEqualArea" => ("Regional, equal-area: the European standard for statistics.", Some("3035".into())),
         "usaAlbers" => ("Regional, equal-area: the contiguous United States.", Some("5070".into())),
+        "albers" => ("Conic, equal-area: true sizes across a mid-latitude region; set its meridian and parallels to the region.", None),
+        "lambertConformal" => {
+            ("Conic, conformal: true shapes across a mid-latitude region; set its meridian and parallels to the region.", None)
+        }
         _ => ("A projected coordinate system.", epsg.clone()),
     };
+    let page = page.filter(|_| !tuned);
     ui.label(tl!(kind));
     if let Ok(p) = Projector::new(&code) {
         let area = match p.domain() {
@@ -1246,5 +1290,49 @@ fn crs_details(ui: &mut egui::Ui, chosen: &str, current: &str, t: &Tokens) {
         let url = if shared { format!("https://epsg.io/?q=ESRI:{n}") } else { format!("https://epsg.io/{n}") };
         // In the browser build the link must not replace the app (and the map) in its tab.
         ui.add(egui::Hyperlink::from_label_and_url(text, url).open_in_new_tab(true));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Coordinate System dialog re-centres a preset (opengeos/RustGIS#517): the central
+    /// meridian, set as assistive technology does, goes into the code that Apply uses.
+    #[test]
+    fn the_coordinate_system_dialog_sets_a_central_meridian() {
+        use egui::accesskit::{Action, ActionData, ActionRequest, Role};
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let mut app = RustGisApp::with_sample();
+        app.run("map.projection", json!({"type": "robinson"})).unwrap();
+        app.run("ui.dialog", json!({"name": "coordinateSystem"})).unwrap();
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                let ctx = ui.ctx().clone();
+                super::show(app, &ctx);
+            },
+            app,
+        );
+        h.run_steps(3);
+        // A world preset takes only its meridian.
+        assert!(h.query_by_role_and_label(Role::SpinButton, "First standard parallel").is_none());
+        let (node, tree) = h.get_by_role_and_label(Role::SpinButton, "Central meridian").accesskit_node().locate();
+        h.event(egui::Event::AccessKitActionRequest(ActionRequest {
+            action: Action::SetValue,
+            target_tree: tree,
+            target_node: node,
+            data: Some(ActionData::NumericValue(150.0)),
+        }));
+        h.run_steps(3);
+        assert_eq!(h.state().dialogs.text, "robinson +lon_0=150");
+        h.get_by_label("Apply").click();
+        h.run_steps(3);
+        assert_eq!(h.state().session.map().projection.code(), "robinson +lon_0=150");
     }
 }

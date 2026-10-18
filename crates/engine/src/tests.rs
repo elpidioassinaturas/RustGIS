@@ -703,6 +703,46 @@ fn esri_projection_codes() {
     assert_eq!(s.run("map.projection", &json!({"type": "ESRI:102100"})).unwrap()["projection"], "mercator");
 }
 
+/// Presets take a central meridian, and the conics their standard parallels too (#517). The map
+/// keeps them, and a bad value changes nothing.
+#[test]
+fn projection_presets_take_parameters() {
+    let mut s = world();
+    let r = s.run("map.projection", &json!({"type": "robinson", "lon_0": 150})).unwrap();
+    assert_eq!(r["projection"], "robinson +lon_0=150");
+    assert_eq!(r["label"], "Robinson (lon_0=150)");
+    // Without a type, the values go to the map's own preset. A code with them, as typed, is the same.
+    s.run("map.projection", &json!({"lon_0": -20})).unwrap();
+    assert_eq!(s.map().projection.code(), "robinson +lon_0=-20");
+    s.run("map.projection", &json!({"type": "Albers Equal Area Conic +lat_2=-35 +lon_0=-55 +lat_1=-5"})).unwrap();
+    assert_eq!(s.map().projection.code(), "albers +lon_0=-55 +lat_1=-5 +lat_2=-35");
+    s.run("map.projection", &json!({"lat_1": 0})).unwrap();
+    assert_eq!(s.map().projection.code(), "albers +lon_0=-55 +lat_1=0 +lat_2=-35");
+    // The preset's own value drops out.
+    s.run("map.projection", &json!({"type": "robinson", "lon_0": 0})).unwrap();
+    assert_eq!(s.map().projection.code(), "robinson");
+    // Out of range, a parameter the preset doesn't take, not a number, parameters on a code or on
+    // Web Mercator, and parallels that make no cone: refused, and the map keeps its projection.
+    s.run("map.projection", &json!({"type": "robinson", "lon_0": 150})).unwrap();
+    for bad in [
+        json!({"lon_0": 200}),
+        json!({"lat_1": 10}),
+        json!({"lon_0": "east"}),
+        json!({"type": "EPSG:3035", "lon_0": 10}),
+        json!({"type": "mercator", "lon_0": 10}),
+        json!({"type": "robinson +lon_0=999"}),
+        json!({"type": "albers", "lat_1": -30, "lat_2": 30}),
+    ] {
+        assert!(s.run("map.projection", &bad).is_err(), "{bad}");
+        assert_eq!(s.map().projection.code(), "robinson +lon_0=150", "{bad}");
+    }
+    // Saved with the map, and drawn.
+    let json = serde_json::to_string(&s.project).unwrap();
+    assert_eq!(Project::from_json(&json).unwrap().map().projection.code(), "robinson +lon_0=150");
+    let png = crate::cmd::share::map_png(&mut s, Some(400.0), Some(300.0), None).unwrap();
+    assert!(png.len() > 1000);
+}
+
 #[test]
 fn custom_projections_switch_keep_scale_query_and_render() {
     let mut s = with_raster();

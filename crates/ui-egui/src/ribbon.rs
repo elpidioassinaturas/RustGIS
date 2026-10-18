@@ -1579,7 +1579,9 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
             let mut items: Vec<(String, String)> = vec![("mercator".into(), "Web Mercator".into())];
             items.extend(rustgis_engine::map::projection::PRESETS.iter().map(|(id, label, _)| (id.to_string(), label.to_string())));
             for (id, label) in items {
-                if ui.add(egui::Button::selectable(current == id, tl!(label.as_str()))).clicked() {
+                // A preset with parameters (`robinson +lon_0=150`) is still that preset.
+                let on = current == id || current.strip_prefix(id.as_str()).is_some_and(|r| r.starts_with(" +"));
+                if ui.add(egui::Button::selectable(on, tl!(label.as_str()))).clicked() {
                     if app.run("map.projection", json!({"type": id})).is_ok() {
                         let _ = app.run("map.zoomFull", Value::Null);
                     }
