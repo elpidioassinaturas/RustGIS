@@ -855,6 +855,12 @@ fn show_me_points_at_where_a_steps_command_is() {
     // Symbology: the Symbology pane, on the step's layer.
     show(&mut h, step("layer.color", json!({"layer": "Lakes", "color": "#336699"})));
     assert_eq!(h.state_mut().ui.right, Some(RightPane::Symbology));
+    // A step whose layer isn't in the map says so, and opens nothing.
+    h.state_mut().ui.right = None;
+    let said =
+        h.state_mut().run("ui.taskShowMe", json!({"command": "layer.color", "params": {"layer": "Gone", "color": "#336699"}})).unwrap();
+    assert!(said["said"].as_str().unwrap().contains("Gone"));
+    assert_eq!(h.state_mut().ui.right, None);
     // Nothing is done for the user: Show Me leaves the layer as it was.
     let before = format!("{:?}", h.state_mut().session.map().layer_by_name("Lakes").unwrap().renderer);
     show(&mut h, step("layer.color", json!({"layer": "Lakes", "color": "#336699"})));

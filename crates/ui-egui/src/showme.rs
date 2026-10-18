@@ -37,9 +37,13 @@ const DIALOGS: &[(&str, &str)] = &[("select.byAttributes", "selectByAttributes")
 pub fn start(app: &mut RustGisApp, st: &TaskStep) -> String {
     let id = st.command.as_str();
     if matches!(id, "layer.color" | "layer.outline" | "layer.symbology" | "layer.transparency") {
-        // On the session directly: Show Me does nothing a recording should keep.
-        if let Some(layer) = st.params.get("layer") {
-            let _ = app.session.run("layer.select", &json!({"layer": layer}));
+        // Making the step's layer the active one is what shows its symbology. It runs on the
+        // session directly, so a recording doesn't keep it as a step.
+        if let Some(layer) = st.params.get("layer")
+            && app.session.run("layer.select", &json!({"layer": layer})).is_err()
+        {
+            let name = layer.as_str().map_or_else(|| layer.to_string(), str::to_string);
+            return crate::i18n::fmt("The step's layer {name} isn't in the map.", &[("name", &name)]);
         }
         app.ui.open_right(RightPane::Symbology);
         return tl!("It's in the Symbology pane, open on the step's layer.").to_string();
@@ -106,6 +110,8 @@ pub fn tick(app: &mut RustGisApp, ctx: &egui::Context) {
         }
     } else if now - started > SHOWN_FOR {
         app.ui.show_me = None;
+        // Redraw once more, so an idle window doesn't keep the outline.
+        ctx.request_repaint();
     } else {
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
