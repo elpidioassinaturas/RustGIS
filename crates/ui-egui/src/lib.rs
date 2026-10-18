@@ -1233,7 +1233,8 @@ impl RustGisApp {
         r
     }
 
-    /// The name of the active layer, when command `id` would act on it for want of a `layer`:
+    /// The name of the active layer, when command `id` would act on it for want of a `layer`
+    /// (enabled predicates only read the session, so asking twice changes nothing):
     /// it takes a `layer` and needs an active one to be enabled, or is one of those that
     /// default to it while enabled without one. Elsewhere `layer` names something else (a file's
     /// layer for Add Data, a service's), and a layer the command names is its own.
@@ -1242,10 +1243,7 @@ impl RustGisApp {
         if !spec.param_keys().is_some_and(|k| k.contains(&"layer")) {
             return None;
         }
-        let defaults = matches!(
-            id,
-            "select.byAttributes" | "select.rows" | "select.layerFromSelection" | "data.similar" | "layer.geocode" | "report.new"
-        );
+        let defaults = DEFAULTS_TO_ACTIVE_LAYER.contains(&id);
         let active = self.session.active_layer.take();
         let needs = (spec.enabled)(&self.session).is_some();
         self.session.active_layer = active;
@@ -2968,11 +2966,63 @@ mod service_text_tests {
     }
 }
 
+/// Commands that act on the active layer when given no `layer`, though they are enabled without
+/// one (so [`RustGisApp::layer_acted_on`] can't tell from their `enabled`). A command added with
+/// an optional `layer` that defaults to the active layer goes here, so a recorded step names it;
+/// `record_tests::every_optional_layer_is_classified` fails until it is placed here or there.
+const DEFAULTS_TO_ACTIVE_LAYER: &[&str] = &[
+    "select.byAttributes",
+    "select.rows",
+    "select.layerFromSelection",
+    "data.similar",
+    "layer.geocode",
+    "report.new",
+    "report.open",
+    "share.webLayer",
+    "share.webStyle",
+    "share.locator",
+];
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod record_tests {
-    use super::RustGisApp;
+    use super::{DEFAULTS_TO_ACTIVE_LAYER, RustGisApp};
     use serde_json::json;
+
+    /// Every command with an optional `layer` either needs an active layer to be enabled, defaults
+    /// to it (`DEFAULTS_TO_ACTIVE_LAYER`), or reads `layer` as something else: a recorded step
+    /// names the active layer for the first two only.
+    #[test]
+    fn every_optional_layer_is_classified() {
+        // `layer` is a file's or a service's, the graphics layer drawn on (the active one only if
+        // it is a graphics layer), a layout element's, or the one a report or web layer had.
+        const SOMETHING_ELSE: &[&str] = &[
+            "service.refresh",
+            "service.group",
+            "layer.addData",
+            "layer.addDatabase",
+            "layer.addUrl",
+            "layer.addDownload",
+            "layer.addDataBytes",
+            "portal.add",
+            "graphics.add",
+            "layout.addElement",
+            "layout.update",
+            "layout.frameZoom",
+            "report.update",
+            "share.replaceWebLayer",
+        ];
+        let mut app = RustGisApp::with_sample();
+        app.session.active_layer = None;
+        let unplaced: Vec<_> = rustgis_engine::cmd::all()
+            .into_iter()
+            .filter(|c| c.mutates && c.params.contains(r#""layer"?"#))
+            .filter(|c| !(c.enabled)(&app.session).is_some_and(|why| why.contains("Layers pane")))
+            .filter(|c| !DEFAULTS_TO_ACTIVE_LAYER.contains(&c.id) && !SOMETHING_ELSE.contains(&c.id))
+            .map(|c| c.id)
+            .collect();
+        assert!(unplaced.is_empty(), "say whether these act on the active layer: {unplaced:?}");
+    }
 
     /// Data added from a download isn't a step: its download is used up, so a task couldn't
     /// add it again.
