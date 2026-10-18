@@ -1839,6 +1839,15 @@ fn layouts_compose_export_and_round_trip() {
     ));
     assert!(s.run("layout.update", &json!({"element": inset, "extentIndicator": {"color": "blue-ish"}})).is_err());
     assert!(s.run("layout.update", &json!({"element": inset, "extentIndicator": 3})).is_err());
+    // A value given but not a colour or a number is refused, naming it, and changes nothing.
+    for (bad, field) in [(json!({"width": "wide"}), "width"), (json!({"color": 123}), "color")] {
+        let err = s.run("layout.update", &json!({"element": inset, "extentIndicator": bad})).unwrap_err();
+        assert!(err.starts_with(field), "{err}");
+        let mut add = json!({"kind": "extentIndicator", "frame": inset, "of": frame});
+        add[field] = bad[field].clone();
+        assert!(s.run("layout.addElement", &add).is_err_and(|e| e.starts_with(field)));
+    }
+    assert_eq!((indicator(&s).1.as_str(), indicator(&s).2), ("#1F4E9A", rustgis_map::layout::MAX_INDICATOR_WIDTH));
     s.run("layout.update", &json!({"element": inset, "extentIndicator": false})).unwrap();
     assert_eq!(indicator(&s).0, None);
     let err = s.run("layout.update", &json!({"element": inset, "extentIndicator": {"color": "#000000"}})).unwrap_err();

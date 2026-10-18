@@ -598,18 +598,27 @@ fn ticks(p: &Value) -> Option<usize> {
     f(p, "ticks").filter(|v| v.is_finite()).map(|v| v.round().clamp(2.0, MAX_COLORBAR_TICKS as f64) as usize)
 }
 
-/// A grid with the options in `p` over `base`'s; a bad value is an error, leaving nothing changed.
 /// An extent indicator's outline colour and width (points) from `color` and `width` in `p`, each
-/// keeping the frame's (`kind`) when not given.
+/// keeping the frame's (`kind`) when not given; one given but not a colour or a number is an
+/// error, not left as it was.
 fn indicator_style(p: &Value, kind: Option<&ElementKind>) -> Result<(Rgba, f64), String> {
     let (c, w) = match kind {
         Some(ElementKind::MapFrame { extent_color, extent_width, .. }) => (*extent_color, *extent_width),
         _ => (rustgis_map::layout::INDICATOR_COLOR, rustgis_map::layout::INDICATOR_WIDTH),
     };
-    let width = f(p, "width").map_or(w, |v| v.clamp(rustgis_map::layout::MIN_INDICATOR_WIDTH, rustgis_map::layout::MAX_INDICATOR_WIDTH));
+    let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
+    let width = match (given("width"), f(p, "width")) {
+        (_, Some(v)) => v.clamp(rustgis_map::layout::MIN_INDICATOR_WIDTH, rustgis_map::layout::MAX_INDICATOR_WIDTH),
+        (true, None) => return Err("width must be a number of points".into()),
+        (false, None) => w,
+    };
+    if given("color") && ps(p, "color").is_none() {
+        return Err("color must be #RRGGBB or #RRGGBBAA".into());
+    }
     Ok((color(p, "color", c)?, width))
 }
 
+/// A grid with the options in `p` over `base`'s; a bad value is an error, leaving nothing changed.
 fn grid_params(p: &Value, base: Grid) -> Result<Grid, String> {
     let mut g = base;
     if let Some(v) = f(p, "step") {
