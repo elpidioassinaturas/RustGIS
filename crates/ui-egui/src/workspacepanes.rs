@@ -144,11 +144,11 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
                         if ui.add_enabled(i < last, egui::Button::new("▼").small()).on_hover_text(tl!("Move Down")).clicked() {
                             run(app, "task.moveStep", json!({"task": name, "step": i, "to": i + 1}));
                         }
-                        if ui.small_button("✎").on_hover_text(tl!("Edit the title and instructions")).clicked() {
+                        if ui.small_button(tl!("Edit")).on_hover_text(tl!("Edit the title and instructions")).clicked() {
                             app.ws.task_edit = Some((i, st.title.clone(), st.instructions.clone()));
                             app.ws.task_step = i;
                         }
-                        if ui.small_button("✕").on_hover_text(tl!("Delete the step")).clicked() {
+                        if ui.small_button(tl!("Delete")).on_hover_text(tl!("Delete the step")).clicked() {
                             run(app, "task.removeStep", json!({"task": name, "step": i}));
                             app.ws.task_edit = None;
                         }

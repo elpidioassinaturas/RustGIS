@@ -19,8 +19,8 @@ Tools for working across maps and views, and for setting up the app the way you 
     each command that changes the project becomes a step. Panes, dialogs and moving the view
     aren't recorded, and a colour adjusted several times stays one step. **Stop Recording** makes
     the task and opens it for editing.
-  - **Edit Steps** gives each step ▲ ▼ to reorder it, ✎ to edit its title and instructions, and ✕
-    to delete it.
+  - **Edit Steps** gives each step ▲ ▼ to reorder it, **Edit** for its title and instructions, and
+    **Delete**. A recorded tool's step is named after the tool.
   - In the Browser pane, a click on a task opens its steps; **Run All Steps** is in its context
     menu.
   - A task from a file (`.rgistask`, or inside a project or a package) can't read or write files

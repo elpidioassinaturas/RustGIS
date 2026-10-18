@@ -738,6 +738,7 @@ fn a_task_is_recorded_from_what_changes_the_project_and_edited_in_its_pane() {
     let task = app.session.project.tasks.iter().find(|t| t.name == "Lesson").unwrap().clone();
     let commands: Vec<&str> = task.steps.iter().map(|s| s.command.as_str()).collect();
     assert_eq!(commands, ["layer.color", "gp.run", "layer.color"]);
+    assert_eq!(task.steps[1].title, "Buffer", "a tool's step has the tool's name");
     assert_eq!(task.steps[0].params["color"], json!("#336699"));
     // It opens in the Tasks pane, ready to edit.
     assert_eq!(app.ui.right, Some(rustgis_ui_egui::RightPane::Tasks));

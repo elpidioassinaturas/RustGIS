@@ -1225,9 +1225,14 @@ impl RustGisApp {
             last.params = params.clone();
             return;
         }
+        // A tool's step is titled with the tool's name ("Buffer"), not "Run Tool".
+        let title = match params.get("tool").and_then(Value::as_str).and_then(rustgis_engine::analysis::tool) {
+            Some(tool) if id == "gp.run" => tl!(tool.name).to_string(),
+            _ => tl!(spec.label).to_string(),
+        };
         if steps.len() < 200 {
             steps.push(rustgis_engine::project::TaskStep {
-                title: tl!(spec.label).to_string(),
+                title,
                 instructions: String::new(),
                 command: id.to_string(),
                 params: params.clone(),
