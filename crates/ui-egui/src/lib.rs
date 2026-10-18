@@ -1236,7 +1236,7 @@ impl RustGisApp {
                 self.ws.task_edit = None;
                 self.session.notify(tl!("The task's steps changed, so the step being edited was closed: edit it again."), false);
             }
-            let n = task_steps(self).map_or(0, |s| s.len());
+            let n = self.session.project.tasks.iter().find(|t| t.name == self.ws.task).map_or(0, |t| t.steps.len());
             self.ws.task_step = self.ws.task_step.min(n.saturating_sub(1));
         }
         // Choosing a tool, Text included, drops a value picked under Dynamic Text
