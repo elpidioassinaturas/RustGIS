@@ -42,8 +42,20 @@ pub struct Distortion {
 /// sides of the point, or at a pole.
 pub fn distortion(project: &dyn Fn(Coord) -> Option<Coord>, c: Coord) -> Option<Distortion> {
     let step = 1e-4;
+    // A Map Extent grid may run past ±180°: measure at the same place on the Earth.
+    let c = Coord::new((c.x + 180.0).rem_euclid(360.0) - 180.0, c.y);
     let at = |dx: f64, dy: f64| project(Coord::new(c.x + dx, c.y + dy));
-    let (east, west, north, south) = (at(step, 0.0)?, at(-step, 0.0)?, at(0.0, step)?, at(0.0, -step)?);
+    let (centre, east, west, north, south) = (at(0.0, 0.0)?, at(step, 0.0)?, at(-step, 0.0)?, at(0.0, step)?, at(0.0, -step)?);
+    // Both sides of the centre must agree: one that falls on the far edge of the plane (the
+    // antimeridian of a world projection, or past where it's cut) would make a huge difference.
+    let agree = |a: Coord, b: Coord| {
+        let (one, other) = ((a.x - centre.x, a.y - centre.y), (centre.x - b.x, centre.y - b.y));
+        let gap = (one.0 - other.0).hypot(one.1 - other.1);
+        gap <= 0.5 * one.0.hypot(one.1).max(other.0.hypot(other.1)) + 1e-9
+    };
+    if !agree(east, west) || !agree(north, south) {
+        return None;
+    }
     let d = 2.0 * step.to_radians();
     let (x_lam, y_lam) = ((east.x - west.x) / d, (east.y - west.y) / d);
     let (x_phi, y_phi) = ((north.x - south.x) / d, (north.y - south.y) / d);
@@ -158,13 +170,17 @@ pub fn run(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     let mut out = Dataset::new(name, GeometryType::Polygon, fields);
     let round = |v: f64| (v * 1e4).round() / 1e4;
     let project = |c: Coord| inp.project(c);
+    let mut unmeasured = 0;
     for c in &points {
         let mut attrs = vec![Value::Float(c.y), Value::Float(c.x)];
         if let Some(label) = &projection {
             attrs.push(Value::Text(label.clone()));
             match distortion(&project, *c) {
                 Some(d) => attrs.extend([d.h, d.k, d.a, d.b, d.area, d.max_angle].map(|v| Value::Float(round(v)))),
-                None => attrs.extend(std::iter::repeat_n(Value::Null, 6)),
+                None => {
+                    unmeasured += 1;
+                    attrs.extend(std::iter::repeat_n(Value::Null, 6));
+                }
             }
         }
         out.push(Some(Geometry::Polygon(vec![vec![circle(*c, metres)]])), attrs);
@@ -175,6 +191,9 @@ pub fn run(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
         Some(label) => format!("; distortion fields for {label} (they don't follow later projection changes)"),
         None => "; no distortion fields on the globe".to_string(),
     });
+    if unmeasured > 0 {
+        msg.push_str(&format!("; {unmeasured} at the projection's edge or beyond it have none"));
+    }
     Ok(ToolResult { output: Output::Layer(out), messages: vec![msg] })
 }
 
@@ -276,6 +295,27 @@ mod tests {
         assert!((at_60.area - 1.0).abs() < 0.01, "{at_60:?}");
         assert!((at_60.k - 2.0).abs() < 0.02 && (at_60.h - 0.5).abs() < 0.01, "{at_60:?}");
         assert!(at_60.max_angle > 60.0, "{at_60:?}");
+    }
+
+    /// A centre on the antimeridian, or beyond ±180° (as a Map Extent grid can give), is measured
+    /// where it is on the Earth; one whose sides fall on opposite edges gets no parameters.
+    #[test]
+    fn centres_on_and_past_the_antimeridian() {
+        // Web Mercator with x wrapped to ±π·R, as a world projection's plane is.
+        let wrapped = |c: Coord| {
+            let m = lonlat_to_merc(c);
+            let half = std::f64::consts::PI * 6_378_137.0;
+            Some(Coord::new((m.x + half).rem_euclid(2.0 * half) - half, m.y))
+        };
+        let plain = |c: Coord| Some(lonlat_to_merc(c));
+        let at_60 = distortion(&plain, Coord::new(10.0, 60.0)).unwrap();
+        // Past ±180°: the same as the place it stands for.
+        assert_eq!(distortion(&plain, Coord::new(370.0, 60.0)), Some(at_60));
+        // On the edge, east and west land on opposite sides of the plane: refused, not huge.
+        assert_eq!(distortion(&wrapped, Coord::new(180.0, 0.0)), None);
+        // A degree away, both sides are on the same edge: measured as on the unwrapped plane.
+        let (w, p) = (distortion(&wrapped, Coord::new(179.0, 0.0)).unwrap(), distortion(&plain, Coord::new(179.0, 0.0)).unwrap());
+        assert!([(w.h, p.h), (w.k, p.k), (w.area, p.area)].iter().all(|(a, b)| (a - b).abs() < 1e-6), "{w:?} {p:?}");
     }
 
     #[test]

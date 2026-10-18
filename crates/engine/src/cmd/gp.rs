@@ -284,7 +284,7 @@ pub fn plugin_start(s: &mut Session, tool: &str, params: &Value) -> Result<Plugi
     let inputs = map_inputs(s, Some(spec), &resolved)?;
     let job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_plugins::tools::prepare(spec, &inputs, &resolved)))
         .unwrap_or_else(|_| Err(format!("{} failed unexpectedly", spec.name)))?;
-    let full_ids = full_ids(&inputs.3);
+    let full_ids = full_ids(&inputs.loaded);
     drop(inputs);
     let read = layer_names(Some(spec), &resolved)
         .into_iter()
@@ -428,27 +428,29 @@ fn finish(s: &mut Session, p: &Value) -> CmdResult {
     apply(s, r.tool, r.params, r.result, r.millis)
 }
 
-struct MapInputs<'a>(
-    &'a rustgis_map::Map,
-    &'a [crate::project::Table],
-    std::collections::HashMap<String, Vec<usize>>,
+/// A tool's inputs on the active map.
+struct MapInputs<'a> {
+    /// The session: its active map and its standalone tables.
+    session: &'a Session,
+    /// The rows of each layer (by lowercase name) the tool runs on: the selection or the
+    /// environment's extent.
+    rows: std::collections::HashMap<String, Vec<usize>>,
     /// Streamed layers the tool reads, loaded whole (by lowercase name).
-    std::collections::HashMap<String, Dataset>,
+    loaded: std::collections::HashMap<String, Dataset>,
     /// The flat map's projection (its name, the projection and its unit in metres), built the
     /// first time a tool asks for it (Tissot's indicatrix does), once for the run; `None` on the
     /// globe.
-    std::cell::OnceCell<Option<(String, rustgis_map::projection::Flat, f64)>>,
-    /// The session, for the view's longitude/latitude extent, and that extent once a tool asks
-    /// for it (it inverse-projects the view, which most tools never need).
-    &'a Session,
-    std::cell::OnceCell<Option<rustgis_geom::Extent>>,
-);
+    flat: std::cell::OnceCell<Option<(String, rustgis_map::projection::Flat, f64)>>,
+    /// The view's longitude/latitude extent, worked out the first time a tool asks for it (it
+    /// inverse-projects the view, which most tools never need).
+    view: std::cell::OnceCell<Option<rustgis_geom::Extent>>,
+}
 
 impl MapInputs<'_> {
     /// The flat map's projection, built on first use.
     fn flat(&self) -> Option<&(String, rustgis_map::projection::Flat, f64)> {
-        let map = self.0;
-        self.4
+        let map = self.session.map();
+        self.flat
             .get_or_init(|| {
                 (map.projection != rustgis_map::Projection::Globe).then(|| {
                     let flat = map.flat();
@@ -463,11 +465,10 @@ impl MapInputs<'_> {
     }
 }
 
-/// A tool's inputs on the active map.
 fn map_inputs<'a>(s: &'a Session, spec: Option<&rustgis_analysis::ToolSpec>, params: &Value) -> Result<MapInputs<'a>, String> {
     let full = streamed_inputs(s.map(), spec, params)?;
     let rows = env_inputs(s.map(), &full, &s.project.gp_env, params)?;
-    Ok(MapInputs(s.map(), &s.project.tables, rows, full, std::cell::OnceCell::new(), s, std::cell::OnceCell::new()))
+    Ok(MapInputs { session: s, rows, loaded: full, flat: std::cell::OnceCell::new(), view: std::cell::OnceCell::new() })
 }
 
 /// Every feature of the streamed layers a tool's parameters name (those without a selection,
@@ -564,21 +565,25 @@ fn env_rows(
 
 impl Inputs for MapInputs<'_> {
     fn dataset(&self, layer: &str) -> Option<&Dataset> {
-        self.3
+        self.loaded
             .get(&layer.to_ascii_lowercase())
-            .or_else(|| self.0.layer_by_name(layer).map(|l| &l.dataset))
+            .or_else(|| self.session.map().layer_by_name(layer).map(|l| &l.dataset))
             // A table as commands find one: by its name, else (names can repeat) by its id.
-            .or_else(|| crate::project::find_table(self.1, layer).and_then(|i| self.1.get(i)).map(|t| &t.dataset))
+            .or_else(|| {
+                crate::project::find_table(&self.session.project.tables, layer)
+                    .and_then(|i| self.session.project.tables.get(i))
+                    .map(|t| &t.dataset)
+            })
     }
     fn table(&self, id: u32) -> Option<&Dataset> {
-        self.1.iter().find(|t| t.id == id).map(|t| &t.dataset)
+        self.session.project.tables.iter().find(|t| t.id == id).map(|t| &t.dataset)
     }
     fn selection(&self, layer: &str) -> &[usize] {
-        match self.0.layer_by_name(layer) {
+        match self.session.map().layer_by_name(layer) {
             Some(l) if !l.selection.is_empty() => &l.selection,
             // No selection: the environment's extent picks the rows (an extent holding none is
             // refused before the tool runs, by `env_inputs`).
-            Some(l) => self.2.get(&l.name.to_ascii_lowercase()).map(Vec::as_slice).unwrap_or(&[]),
+            Some(l) => self.rows.get(&l.name.to_ascii_lowercase()).map(Vec::as_slice).unwrap_or(&[]),
             None => &[],
         }
     }
@@ -590,16 +595,16 @@ impl Inputs for MapInputs<'_> {
         flat.forward(c).map(|m| rustgis_geom::Coord::new(m.x * to_meter, m.y * to_meter))
     }
     fn view_extent(&self) -> Option<rustgis_geom::Extent> {
-        *self.6.get_or_init(|| {
+        *self.view.get_or_init(|| {
             // The globe shows the whole Earth (the camera's flat extent means nothing there).
-            if self.0.projection.is_globe() {
+            if self.session.map().projection.is_globe() {
                 return Some(rustgis_geom::Extent::new(-180.0, -90.0, 180.0, 90.0));
             }
-            Some(super::workspace::view_extent(self.5)).filter(|e| !e.is_empty())
+            Some(super::workspace::view_extent(self.session)).filter(|e| !e.is_empty())
         })
     }
     fn raster(&self, layer: &str) -> Option<RasterInput<'_>> {
-        let rl = self.0.layer_by_name(layer)?.raster.as_ref()?;
+        let rl = self.session.map().layer_by_name(layer)?.raster.as_ref()?;
         Some(RasterInput {
             raster: rl.data.as_deref()?,
             path: rl.path.as_deref(),
@@ -666,7 +671,7 @@ pub fn run_tool(s: &mut Session, tool: &str, params: &Value) -> CmdResult {
     let t0 = now_ms();
     let inputs = map_inputs(s, rustgis_analysis::tool(&tool), &params)?;
     let mut res = rustgis_analysis::run(&tool, &inputs, &params);
-    let ids = full_ids(&inputs.3);
+    let ids = full_ids(&inputs.loaded);
     drop(inputs);
     fit_to_windows(s, &mut res, &ids);
     let millis = now_ms().saturating_sub(t0);
