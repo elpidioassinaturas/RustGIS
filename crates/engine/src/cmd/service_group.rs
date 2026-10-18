@@ -305,16 +305,14 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
         children.push(child);
     }
     let ids: Vec<u32> = children.iter().map(|c| c.layer).collect();
-    let map = s.map_mut();
-    let mut gone_names = Vec::new();
     if child_id.is_none() {
         let gone: Vec<u32> = old.children.iter().map(|c| c.layer).filter(|id| !ids.contains(id)).collect();
-        gone_names = map.layers.iter().filter(|l| gone.contains(&l.id)).map(|l| l.name.clone()).collect();
-        map.layers.retain(|l| !gone.contains(&l.id));
-        if let Some(lock) = &mut map.label_lock {
+        crate::cmd::layer::drop_layers(s, &gone);
+        if let Some(lock) = &mut s.map_mut().label_lock {
             lock.retain(|(id, _)| !gone.contains(id));
         }
     }
+    let map = s.map_mut();
     let group = map.service_groups.iter_mut().find(|g| g.id == old.id).ok_or("the group was removed")?;
     if child_id.is_none() {
         group.children = children;
@@ -326,24 +324,15 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
             }
         }
     }
-    // Legends that left out the layers gone forget them.
-    for n in &gone_names {
-        crate::cmd::layer::legends_follow_layer(s, n, None);
-    }
     Ok(json!({"group":old.id,"layers":ids}))
 }
 
 fn set_group(s: &mut Session, p: &Value) -> CmdResult {
     let (group, _) = target(s, p)?.ok_or("group is required")?;
     if p.get("remove").and_then(Value::as_bool) == Some(true) {
-        let ours = |l: &rustgis_map::Layer| group.children.iter().any(|c| c.layer == l.id);
-        let names: Vec<String> = s.map().layers.iter().filter(|l| ours(l)).map(|l| l.name.clone()).collect();
-        s.map_mut().layers.retain(|l| !ours(l));
+        let ids: Vec<u32> = group.children.iter().map(|c| c.layer).collect();
+        crate::cmd::layer::drop_layers(s, &ids);
         s.map_mut().service_groups.retain(|g| g.id != group.id);
-        // Legends that left its layers out forget them.
-        for n in &names {
-            crate::cmd::layer::legends_follow_layer(s, n, None);
-        }
         return Ok(Value::Null);
     }
     if let Some(visible) = p.get("visible").and_then(Value::as_bool) {

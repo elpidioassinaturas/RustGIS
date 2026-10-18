@@ -173,17 +173,11 @@ fn ungroup(s: &mut Session, p: &Value) -> CmdResult {
 
 fn remove(s: &mut Session, p: &Value) -> CmdResult {
     let id = group_id(s.map(), p)?;
-    let m = s.map_mut();
-    let children = m.group(id).map(|g| g.children.clone()).unwrap_or_default();
-    let names: Vec<String> = m.layers.iter().filter(|l| children.contains(&l.id)).map(|l| l.name.clone()).collect();
-    m.layers.retain(|l| !children.contains(&l.id));
-    m.groups.retain(|g| g.id != id);
+    let children = s.map().group(id).map(|g| g.children.clone()).unwrap_or_default();
+    crate::cmd::layer::drop_layers(s, &children);
+    s.map_mut().groups.retain(|g| g.id != id);
     if s.active_layer.is_some_and(|a| children.contains(&a)) {
         s.active_layer = s.map().layers.first().map(|l| l.id);
-    }
-    // Legends that left its layers out forget them.
-    for n in &names {
-        crate::cmd::layer::legends_follow_layer(s, n, None);
     }
     Ok(Value::Null)
 }

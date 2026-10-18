@@ -2111,6 +2111,17 @@ pub(crate) fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>
     }
 }
 
+/// Removes the layers `ids` from the active map, and legends that left them out forget them, as
+/// `layer.remove` does. Paths that delete several layers at once go through here.
+pub(crate) fn drop_layers(s: &mut Session, ids: &[u32]) {
+    let m = s.map_mut();
+    let names: Vec<String> = m.layers.iter().filter(|l| ids.contains(&l.id)).map(|l| l.name.clone()).collect();
+    m.layers.retain(|l| !ids.contains(&l.id));
+    for n in &names {
+        legends_follow_layer(s, n, None);
+    }
+}
+
 fn remove(s: &mut Session, p: &Value) -> CmdResult {
     let id = s.layer_id(p)?;
     let m = s.map_mut();
