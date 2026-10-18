@@ -194,7 +194,7 @@ pub fn commands() -> Vec<C> {
         C::new("layer.template", "Layer Template", "Data › Layer Templates", layer_template)
             .params(r#"{"template": "points"|"lines"|"polygons"|"places"|"routes"|"areas"|"observations", "name"?: string}"#),
         // Tasks.
-        C::new("task.new", "New Task", "Home › Project", |s, p| {
+        C::new("task.new", "New Task", "Analyze › Tasks", |s, p| {
             let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Task");
             let steps: Vec<TaskStep> = match p.get("steps") {
                 Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("steps: {e}"))?,
@@ -299,7 +299,7 @@ pub fn commands() -> Vec<C> {
         C::new("task.save", "Save Task Item", "Publish › Save As", |s, p| save_item(s, "task", p))
         .view()
         .params(r#"{"task"?: name, "path": "*.rgistask"}"#),
-        C::new("task.import", "Import Task", "Home › Project", |s, p| {
+        C::new("task.import", "Import Task", "Analyze › Tasks", |s, p| {
             let text = read_text(p)?;
             let t: Task = serde_json::from_str(&text).map_err(|e| format!("not a RustGIS task: {e}"))?;
             // A task from a file is someone else's: it may not read or write files, or run scripts.

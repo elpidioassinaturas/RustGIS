@@ -94,7 +94,9 @@ pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
     record_row(app, ui);
     let tasks = app.session.project.tasks.clone();
     if tasks.is_empty() {
-        ui.label(egui::RichText::new(tl!("No tasks yet. Data › Task makes one, for example from your geoprocessing history.")).weak());
+        ui.label(
+            egui::RichText::new(tl!("No tasks yet. Record one, or make one from your geoprocessing history with Analyze › Task.")).weak(),
+        );
         return;
     }
     if !tasks.iter().any(|t| t.name == app.ws.task) {

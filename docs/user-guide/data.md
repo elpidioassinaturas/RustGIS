@@ -488,7 +488,7 @@ RustGIS saves pieces of a project as files you can share and reuse:
 | Project package (everything, rasters included) | `.rgispkg` | Publish › Package › Project | Project › Open, or drop it on the window |
 | Map package / mobile map package | `.rgismpk` | Publish › Package › Map or Mobile Map | Home › Import |
 | Results package (geoprocessing history and outputs) | `.rgisgpk` | Publish › Package › Results | any zip tool |
-| Task (guided command steps) | `.rgistask` | Home › Task, Publish › Save As › Task Item | Home › Task › Import Task |
+| Task (guided command steps) | `.rgistask` | Analyze › Task, Publish › Save As › Task Item | Analyze › Task › Import Task |
 | Bookmarks (as longitude, latitude and scale) | `.rgisbookmarks` | Home › Navigate › Bookmarks › Export Bookmarks | Home › Navigate › Bookmarks › Import Bookmarks |
 | Layout | `.rgislayout` | Publish › Save Layout File | Home › New Layout › Import Layout |
 

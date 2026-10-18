@@ -875,23 +875,6 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
                 menu_item(ui, app, "save_as", "New Custom Template…", "ui.saveItem", json!({"kind": "template"}));
                 menu_item(ui, app, "open", "Open Custom Template…", "ui.openItem", json!({"kind": "template"}));
             });
-            small_menu(ui, app, "run", "Task", "Tasks: guided steps that each run a command.", |ui, app| {
-                let record = if app.ws.recording.is_some() { "Stop Recording" } else { "Record Task" };
-                menu_item(ui, app, "edit", record, "ui.taskRecord", json!({}));
-                menu_item(ui, app, "history", "New Task From History", "task.new", json!({"name": "Workflow", "fromHistory": true}));
-                menu_item(ui, app, "open", "Import Task…", "ui.openItem", json!({"kind": "task"}));
-                let tasks: Vec<String> = app.session.project.tasks.iter().map(|t| t.name.clone()).collect();
-                if !tasks.is_empty() {
-                    ui.separator();
-                }
-                for t in tasks {
-                    if ui.button(crate::i18n::fmt("Run {name}", &[("name", &t)])).clicked() {
-                        let _ = app.run("task.run", json!({"task": t}));
-                        app.map.invalidate();
-                        ui.close();
-                    }
-                }
-            });
         });
     });
 }
@@ -1331,6 +1314,30 @@ fn analysis_groups(app: &mut RustGisApp, ui: &mut Ui) {
                     for t in tools {
                         let (id, name) = (t["id"].as_str().unwrap_or("").to_string(), t["name"].as_str().unwrap_or("").to_string());
                         menu_item(ui, app, "tools", &name, "ui.gp.open", json!({"tool": id}));
+                    }
+                }
+            });
+        });
+    });
+    // Tasks (guided steps, for teaching and repeated work) belong with the analysis tools, not on
+    // Home, which keeps what most users need.
+    group(ui, "Tasks", |ui| {
+        col(ui, |ui| {
+            small(ui, app, "run", "Tasks", "Step through a task.", "ui.pane.tasks", Value::Null, app.ui.right == Some(RightPane::Tasks));
+            small_menu(ui, app, "run", "Task", "Tasks: guided steps that each run a command.", |ui, app| {
+                let record = if app.ws.recording.is_some() { "Stop Recording" } else { "Record Task" };
+                menu_item(ui, app, "edit", record, "ui.taskRecord", json!({}));
+                menu_item(ui, app, "history", "New Task From History", "task.new", json!({"name": "Workflow", "fromHistory": true}));
+                menu_item(ui, app, "open", "Import Task…", "ui.openItem", json!({"kind": "task"}));
+                let tasks: Vec<String> = app.session.project.tasks.iter().map(|t| t.name.clone()).collect();
+                if !tasks.is_empty() {
+                    ui.separator();
+                }
+                for t in tasks {
+                    if ui.button(crate::i18n::fmt("Run {name}", &[("name", &t)])).clicked() {
+                        let _ = app.run("task.run", json!({"task": t}));
+                        app.map.invalidate();
+                        ui.close();
                     }
                 }
             });
