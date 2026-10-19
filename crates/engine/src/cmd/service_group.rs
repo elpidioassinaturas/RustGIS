@@ -305,14 +305,14 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
         children.push(child);
     }
     let ids: Vec<u32> = children.iter().map(|c| c.layer).collect();
-    let map = s.map_mut();
     if child_id.is_none() {
         let gone: Vec<u32> = old.children.iter().map(|c| c.layer).filter(|id| !ids.contains(id)).collect();
-        map.layers.retain(|l| !gone.contains(&l.id));
-        if let Some(lock) = &mut map.label_lock {
+        crate::cmd::layer::drop_layers(s, &gone);
+        if let Some(lock) = &mut s.map_mut().label_lock {
             lock.retain(|(id, _)| !gone.contains(id));
         }
     }
+    let map = s.map_mut();
     let group = map.service_groups.iter_mut().find(|g| g.id == old.id).ok_or("the group was removed")?;
     if child_id.is_none() {
         group.children = children;
@@ -330,7 +330,8 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
 fn set_group(s: &mut Session, p: &Value) -> CmdResult {
     let (group, _) = target(s, p)?.ok_or("group is required")?;
     if p.get("remove").and_then(Value::as_bool) == Some(true) {
-        s.map_mut().layers.retain(|l| !group.children.iter().any(|c| c.layer == l.id));
+        let ids: Vec<u32> = group.children.iter().map(|c| c.layer).collect();
+        crate::cmd::layer::drop_layers(s, &ids);
         s.map_mut().service_groups.retain(|g| g.id != group.id);
         return Ok(Value::Null);
     }

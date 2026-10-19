@@ -5,6 +5,7 @@
 
 use super::gpkg_blob::{field_type, is_empty_blob, split_blob};
 use super::{Batch, FeatureSource, Reproject, Request, Sampler, SourceInfo, clamp_limit, in_request, stride};
+use crate::raster::Crs;
 use crate::{DataError, Feature, Field, FieldType, GeometryType, Result, Value, wkb};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, params_from_iter};
@@ -372,7 +373,7 @@ const WGS84_WKT: &str = "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\
 
 /// A geometry as a GeoPackage blob: the `GP` header (little-endian, WGS 84, an XY envelope) and
 /// the WKB. Points of a multipoint layer are written as one-point multipoints.
-fn blob(g: &crate::Geometry, multi_points: bool) -> Vec<u8> {
+fn blob(g: &crate::Geometry, multi_points: bool, srs_id: i32) -> Vec<u8> {
     let g = match g {
         crate::Geometry::Point(c) if multi_points => &crate::Geometry::MultiPoint(vec![*c]),
         g => g,
@@ -384,10 +385,10 @@ fn blob(g: &crate::Geometry, multi_points: bool) -> Vec<u8> {
     if e.is_empty() {
         // No coordinates: flagged empty, without an envelope.
         out.push(0b1_0001);
-        out.extend_from_slice(&4326i32.to_le_bytes());
+        out.extend_from_slice(&srs_id.to_le_bytes());
     } else {
         out.push(0b0000_0011);
-        out.extend_from_slice(&4326i32.to_le_bytes());
+        out.extend_from_slice(&srs_id.to_le_bytes());
         for v in [e.min_x, e.max_x, e.min_y, e.max_y] {
             out.extend_from_slice(&v.to_le_bytes());
         }
@@ -406,11 +407,16 @@ fn free_name(fields: &[Field], base: &str) -> String {
 /// attributes table for a dataset without geometry. The file is built beside `path` and moved into
 /// place when complete, so a failed write leaves any existing file as it was.
 pub fn write(ds: &crate::Dataset, path: &Path) -> Result<()> {
+    write_in(ds, path, Crs::LonLat)
+}
+
+/// Writes a dataset whose geometry is in `crs`'s coordinates as a GeoPackage in that system.
+pub fn write_in(ds: &crate::Dataset, path: &Path, crs: Crs) -> Result<()> {
     let tmp = crate::io::temp_beside(path)?;
     std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
     let res = (|| {
         let conn = Connection::open(&tmp).map_err(err)?;
-        build(&conn, ds)?;
+        build(&conn, ds, crs)?;
         conn.close().map_err(|(_, e)| err(e))?;
         // Built without syncing (fast); synced once before it replaces anything. (Windows flushes
         // only a handle open for writing.)
@@ -430,8 +436,13 @@ pub fn write(ds: &crate::Dataset, path: &Path) -> Result<()> {
     res
 }
 
-fn build(conn: &Connection, ds: &crate::Dataset) -> Result<()> {
+fn build(conn: &Connection, ds: &crate::Dataset, crs: Crs) -> Result<()> {
     use rusqlite::types::Value as Sql;
+    // An EPSG system by its code; a custom one numbered as GDAL numbers them.
+    let srs_id = match crs.epsg() {
+        0 => 100_000,
+        c => i32::from(c),
+    };
     // Not a reserved name, and never empty.
     let mut table: String = ds.name.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string();
     if table.is_empty() {
@@ -513,6 +524,17 @@ fn build(conn: &Connection, ds: &crate::Dataset) -> Result<()> {
         [WGS84_WKT],
     )
     .map_err(err)?;
+    if srs_id != 4326 {
+        // GeoPackage readers take an EPSG system by its code; a custom one has only its WKT
+        // (`undefined` when it has none).
+        let org = if crs.epsg() > 0 { "EPSG" } else { "NONE" };
+        let wkt = crate::raster::wkt::to_wkt(crs);
+        conn.execute(
+            "INSERT INTO gpkg_spatial_ref_sys VALUES (?1, ?2, ?3, ?2, ?4, '')",
+            rusqlite::params![crs.label(), srs_id, org, wkt.as_deref().unwrap_or("undefined")],
+        )
+        .map_err(err)?;
+    }
 
     // Feature ids are kept when they are unique and fit; otherwise SQLite numbers the rows.
     let mut seen = std::collections::HashSet::new();
@@ -530,7 +552,7 @@ fn build(conn: &Connection, ds: &crate::Dataset) -> Result<()> {
             let mut row: Vec<Sql> = Vec::with_capacity(names.len());
             row.push(if keep_ids { i64::try_from(f.id).map(Sql::Integer).unwrap_or(Sql::Null) } else { Sql::Null });
             if has_geom {
-                row.push(f.geometry.as_ref().map(|x| Sql::Blob(blob(x, multi_points))).unwrap_or(Sql::Null));
+                row.push(f.geometry.as_ref().map(|x| Sql::Blob(blob(x, multi_points, srs_id))).unwrap_or(Sql::Null));
             }
             for (k, fd) in ds.fields.iter().enumerate() {
                 row.push(match (f.attrs.get(k).unwrap_or(&Value::Null), fd.ty) {
@@ -558,14 +580,14 @@ fn build(conn: &Connection, ds: &crate::Dataset) -> Result<()> {
 
     let e = ds.extent();
     let bounds: [Option<f64>; 4] = if e.is_empty() { [None; 4] } else { [Some(e.min_x), Some(e.min_y), Some(e.max_x), Some(e.max_y)] };
-    let srs: Option<i64> = has_geom.then_some(4326);
+    let srs: Option<i64> = has_geom.then_some(i64::from(srs_id));
     conn.execute(
         "INSERT INTO gpkg_contents (table_name, data_type, identifier, min_x, min_y, max_x, max_y, srs_id) VALUES (?1, ?2, ?1, ?3, ?4, ?5, ?6, ?7)",
         rusqlite::params![table, if has_geom { "features" } else { "attributes" }, bounds[0], bounds[1], bounds[2], bounds[3], srs],
     )
     .map_err(err)?;
     if has_geom {
-        conn.execute("INSERT INTO gpkg_geometry_columns VALUES (?1, ?2, ?3, 4326, 0, 0)", rusqlite::params![table, geom, geom_type])
+        conn.execute("INSERT INTO gpkg_geometry_columns VALUES (?1, ?2, ?3, ?4, 0, 0)", rusqlite::params![table, geom, geom_type, srs_id])
             .map_err(err)?;
         // The GeoPackage 1.4 triggers that keep the index in step with edits.
         let trig = |s: &str| quote(&format!("rtree_{table}_{geom}_{s}"));

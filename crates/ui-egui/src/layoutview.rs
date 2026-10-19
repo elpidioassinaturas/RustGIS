@@ -1259,6 +1259,45 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             _ => {}
         }
     });
+    // The layers a legend lists: a checkbox for each vector layer of its frame's map, ticked when
+    // listed. Names gone from the map drop out of the list as it's written back.
+    if let ElementKind::Legend { frame, exclude, .. } = &e.kind {
+        let map = layout.element(*frame).and_then(|f| match &f.kind {
+            ElementKind::MapFrame { map, .. } => app.session.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map)),
+            _ => None,
+        });
+        let names: Vec<String> = map
+            .map(|m| {
+                // Once each: layers may share a name, and the legend leaves names out.
+                let mut names: Vec<String> = Vec::new();
+                for l in m.layers.iter().filter(|l| !l.graphics && !l.is_raster()) {
+                    if !names.iter().any(|n| n.eq_ignore_ascii_case(&l.name)) {
+                        names.push(l.name.clone());
+                    }
+                }
+                names
+            })
+            .unwrap_or_default();
+        // The names left out that the map still has, those not listed here (a raster's) too.
+        let kept: Vec<String> =
+            exclude.iter().filter(|x| map.is_some_and(|m| m.layers.iter().any(|l| l.name.eq_ignore_ascii_case(x)))).cloned().collect();
+        if !names.is_empty() {
+            ui.add_space(4.0);
+            egui::CollapsingHeader::new(tl!("Layers")).id_salt(("legend_layers", id)).default_open(!exclude.is_empty()).show(ui, |ui| {
+                let left_out = |n: &str| exclude.iter().any(|x| x.eq_ignore_ascii_case(n));
+                for n in &names {
+                    let mut listed = !left_out(n);
+                    if ui.checkbox(&mut listed, n.as_str()).on_hover_text(tl!("List this layer in the legend")).changed() {
+                        let mut next: Vec<&String> = kept.iter().filter(|x| !x.eq_ignore_ascii_case(n)).collect();
+                        if !listed {
+                            next.push(n);
+                        }
+                        update(app, json!({"exclude": next}));
+                    }
+                }
+            });
+        }
+    }
     if let ElementKind::MapFrame { grid, .. } = &e.kind {
         ui.add_space(4.0);
         egui::CollapsingHeader::new(tl!("Grid")).id_salt(("frame_grid", id)).default_open(grid.is_some()).show(ui, |ui| {
@@ -1618,6 +1657,50 @@ mod tests {
         assert!(matches!(kind, ElementKind::MapFrame { extent_of: None, .. }), "removed");
         h.run_steps(2);
         assert!(h.query_by_label("Remove Extent Indicator").is_none(), "and its section with it");
+    }
+
+    /// A legend's properties list the layers of its frame's map; unticking one leaves it out of
+    /// the legend.
+    #[test]
+    fn a_legend_leaves_out_the_layers_unticked() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        use rustgis_engine::map::layout::ElementKind;
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Legend"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let legend = app.session.project.layouts[li].elements.iter().find(|e| matches!(e.kind, ElementKind::Legend { .. })).unwrap().id;
+        // A layer the section doesn't list (graphics here), left out through the command, stays
+        // left out whatever is ticked.
+        app.session.map_mut().layers.iter_mut().find(|l| l.name == "Cities").unwrap().graphics = true;
+        app.run("layout.update", json!({"element": legend, "exclude": ["Cities"]})).unwrap();
+        app.layout.selected = Some(legend);
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                super::show(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        assert!(h.query_by_role_and_label(Role::CheckBox, "Cities").is_none());
+        h.get_by_role_and_label(Role::CheckBox, "Rivers").click();
+        h.run_steps(2);
+        let left_out =
+            |h: &egui_kittest::Harness<'_, RustGisApp>| match &h.state().session.project.layouts[li].element(legend).unwrap().kind {
+                ElementKind::Legend { exclude, .. } => exclude.clone(),
+                _ => panic!("a legend"),
+            };
+        assert_eq!(left_out(&h), ["Cities", "Rivers"]);
+        // Ticked again, it's listed again.
+        h.get_by_role_and_label(Role::CheckBox, "Rivers").click();
+        h.run_steps(2);
+        assert_eq!(left_out(&h), ["Cities"]);
     }
 
     /// Element ids are per layout: opening another layout ends the selection, so Delete or

@@ -1,4 +1,5 @@
-//! Coordinate systems from WKT, the text of a `.prj` file next to a Shapefile or a grid.
+//! Coordinate systems from WKT, the text of a `.prj` file next to a Shapefile or a grid, and to
+//! WKT for the files RustGIS writes ([`to_wkt`]).
 //!
 //! WKT1 (OGC and Esri) is read directly. WKT2 (`PROJCRS`, `GEOGCRS`, as PROJ 6 and later write
 //! it) is first rewritten as the WKT1 it corresponds to, its units folded into degrees and the
@@ -8,7 +9,7 @@
 //! none (`PROJCS["WGS_1984_UTM_Zone_31N",…]`), so Web Mercator and UTM are also known by name, and
 //! any other projection is turned into a PROJ definition from its parameters.
 
-use super::crs::{Crs, CustomCrs};
+use super::crs::{Crs, CustomCrs, epsg_proj4};
 
 /// The most nested brackets read.
 const MAX_DEPTH: usize = 32;
@@ -757,6 +758,266 @@ fn earth(geog: Option<&Node>) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------------------------
+// Writing
+
+/// WGS 84 longitude/latitude.
+const WGS84_GEOGCS: &str = r#"GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AXIS["Longitude",EAST],AXIS["Latitude",NORTH],AUTHORITY["EPSG","4326"]]"#;
+
+/// Web Mercator, as GDAL writes it.
+const WEB_MERCATOR: &str = r#"PROJCS["WGS 84 / Pseudo-Mercator",GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4326"]],PROJECTION["Mercator_1SP"],PARAMETER["central_meridian",0],PARAMETER["scale_factor",1],PARAMETER["false_easting",0],PARAMETER["false_northing",0],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH],EXTENSION["PROJ4","+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs"],AUTHORITY["EPSG","3857"]]"#;
+
+/// PROJ's datums by name: the WKT datum name, the ellipsoid's PROJ name and the shift to WGS 84
+/// PROJ gives it.
+const DATUMS: &[(&str, &str, &str, Option<&str>)] = &[
+    ("WGS84", "WGS_1984", "WGS84", None),
+    ("NAD83", "North_American_Datum_1983", "GRS80", Some("0,0,0")),
+    ("NAD27", "North_American_Datum_1927", "clrk66", None),
+    ("GGRS87", "Greek_Geodetic_Reference_System_1987", "GRS80", Some("-199.87,74.79,246.62")),
+    ("potsdam", "Deutsches_Hauptdreiecksnetz", "bessel", Some("598.1,73.7,418.2,0.202,0.045,-2.455,6.7")),
+    ("carthage", "Carthage", "clrk80ign", Some("-263.0,6.0,431.0")),
+    ("hermannskogel", "Militar_Geographische_Institut", "bessel", Some("577.326,90.129,463.919,5.137,1.474,5.297,2.4232")),
+    ("ire65", "TM65", "mod_airy", Some("482.530,-130.596,564.557,-1.042,-0.214,-0.631,8.15")),
+    ("nzgd49", "New_Zealand_Geodetic_Datum_1949", "intl", Some("59.47,-5.04,187.44,0.47,-0.1,1.024,-4.5993")),
+    ("OSGB36", "OSGB_1936", "airy", Some("446.448,-125.157,542.06,0.15,0.247,0.842,-20.489")),
+];
+
+/// PROJ's ellipsoids by name, with the name WKT gives them and their inverse flattening (0 for a
+/// sphere), as EPSG gives it.
+const ELLIPSOIDS: &[(&str, &str, f64)] = &[
+    ("WGS84", "WGS 84", 298.257223563),
+    ("GRS80", "GRS 1980", 298.257222101),
+    ("WGS72", "WGS 72", 298.26),
+    ("intl", "International 1924", 297.0),
+    ("bessel", "Bessel 1841", 299.1528128),
+    ("bess_nam", "Bessel Namibia (GLM)", 299.1528128),
+    ("clrk66", "Clarke 1866", 294.978698213898),
+    ("clrk80", "Clarke 1880 (RGS)", 293.465),
+    ("clrk80ign", "Clarke 1880 (IGN)", 293.466021293627),
+    ("krass", "Krassowsky 1940", 298.3),
+    ("airy", "Airy 1830", 299.3249646),
+    ("mod_airy", "Airy Modified 1849", 299.3249646),
+    ("aust_SA", "Australian National Spheroid", 298.25),
+    ("helmert", "Helmert 1906", 298.3),
+    ("evrst30", "Everest 1830", 300.8017),
+    ("evrstSS", "Everest 1830 (1967 Definition)", 300.8017),
+    ("GRS67", "GRS 1967", 298.247167427),
+    ("sphere", "Sphere", 0.0),
+];
+
+/// A WKT text value, its quotes doubled.
+fn quoted(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// A number as WKT writes it: no `.0` on a whole number, no exponent for ordinary values.
+fn num(v: f64) -> String {
+    if v == 0.0 { "0".into() } else { format!("{v}") }
+}
+
+/// A coordinate system as WKT1 (OGC, the form `.prj` files, GeoPackages and FlatGeobuf hold),
+/// built from its PROJ definition, with its EPSG code as the authority. `None` for a projection
+/// it can't describe (one WKT1 has no name for).
+pub fn to_wkt(crs: Crs) -> Option<String> {
+    let (def, name, code) = match crs {
+        Crs::LonLat => return Some(WGS84_GEOGCS.into()),
+        Crs::WebMercator => return Some(WEB_MERCATOR.into()),
+        Crs::Epsg(c) => (epsg_proj4(c)?.to_string(), format!("EPSG:{c}"), Some(c)),
+        Crs::Custom(_) => {
+            let d = crs.custom_def()?;
+            (d.proj4.clone(), d.label.clone(), None)
+        }
+    };
+    let proj = proj4rs::Proj::from_proj_string(&def).ok()?;
+    let params: Vec<(&str, Option<&str>)> = def
+        .split_whitespace()
+        .filter_map(|t| t.strip_prefix('+'))
+        .map(|t| t.split_once('=').map_or((t, None), |(k, v)| (k, Some(v))))
+        .collect();
+    let text = |k: &str| params.iter().find(|(n, _)| *n == k).and_then(|(_, v)| *v);
+    let flag = |k: &str| params.iter().any(|(n, _)| *n == k);
+    let get = |k: &str| text(k).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
+    let authority = |c: Option<u16>| c.map(|c| format!(",AUTHORITY[\"EPSG\",\"{c}\"]")).unwrap_or_default();
+
+    // The datum and its ellipsoid.
+    let datum = text("datum").and_then(|d| DATUMS.iter().find(|r| r.0.eq_ignore_ascii_case(d)));
+    let ellps = text("ellps").or(datum.map(|d| d.2));
+    let known = ellps.and_then(|e| ELLIPSOIDS.iter().find(|r| r.0.eq_ignore_ascii_case(e)));
+    let ellps_name = known.map_or("unnamed", |r| r.1);
+    let (a, b) = proj.ellipse_parameters();
+    // A named ellipsoid's flattening as published; else from its axes (PROJ keeps a and b).
+    let rf = match known {
+        Some(k) if text("rf").is_none() && text("b").is_none() => k.2,
+        _ if (a - b).abs() < 1e-9 => 0.0,
+        _ => (a / (a - b) * 1e9).round() / 1e9,
+    };
+    let datum_name = match datum {
+        Some(d) => d.1.to_string(),
+        None => format!("Unknown based on {ellps_name} ellipsoid"),
+    };
+    // A null shift (ETRS89, NAD83, GDA94…) is left unsaid: readers would take the system as one
+    // bound to WGS 84 rather than as itself.
+    let towgs84 = text("towgs84")
+        .or(datum.and_then(|d| d.3))
+        .filter(|t| t.split(',').any(|v| v.trim().parse::<f64>().is_ok_and(|v| v != 0.0)))
+        .map(|t| format!(",TOWGS84[{t}]"))
+        .unwrap_or_default();
+    // A prime meridian by name (`+pm=paris`), a grid shift or axes other than east and north have
+    // no plain WKT1 form.
+    if (text("pm").is_some() && get("pm").is_none()) || flag("nadgrids") || text("axis").is_some_and(|a| a != "enu") {
+        return None;
+    }
+    let pm = get("pm").unwrap_or(0.0);
+    let geog_name = match datum {
+        Some(d) if d.0 == "WGS84" => "WGS 84".to_string(),
+        _ => datum_name.trim_start_matches("Unknown based on ").to_string(),
+    };
+    let geogcs = |auth: &str| {
+        format!(
+            "GEOGCS[{},DATUM[{},SPHEROID[{},{},{}]{towgs84}],PRIMEM[{},{}],UNIT[\"degree\",0.0174532925199433]{auth}]",
+            quoted(&geog_name),
+            quoted(&datum_name),
+            quoted(ellps_name),
+            num(a),
+            num(rf),
+            quoted(if pm == 0.0 { "Greenwich" } else { "unnamed" }),
+            num(pm),
+        )
+    };
+    let kind = text("proj")?;
+    if kind == "longlat" || kind == "latlong" {
+        return Some(geogcs(&authority(code)));
+    }
+
+    // The projection and its parameters, in degrees and metres.
+    let lat0 = get("lat_0").unwrap_or(0.0);
+    let lon0 = get("lon_0").unwrap_or(0.0);
+    let k0 = get("k_0").or(get("k")).unwrap_or(1.0);
+    let to_m = proj.to_meter();
+    let (x0, y0) = (get("x_0").unwrap_or(0.0), get("y_0").unwrap_or(0.0));
+    let lat1 = get("lat_1");
+    let lat2 = get("lat_2");
+    let lat_ts = get("lat_ts");
+    let mut ps: Vec<(&str, f64)>;
+    let method = match kind {
+        "utm" => {
+            let zone = get("zone").filter(|z| (1.0..=60.0).contains(z))?;
+            ps = vec![
+                ("latitude_of_origin", 0.0),
+                ("central_meridian", zone * 6.0 - 183.0),
+                ("scale_factor", 0.9996),
+                ("false_easting", 500_000.0),
+                ("false_northing", if flag("south") { 10_000_000.0 } else { 0.0 }),
+            ];
+            "Transverse_Mercator"
+        }
+        "tmerc" => {
+            ps = vec![("latitude_of_origin", lat0), ("central_meridian", lon0), ("scale_factor", k0)];
+            "Transverse_Mercator"
+        }
+        "merc" => match lat_ts {
+            Some(ts) => {
+                ps = vec![("standard_parallel_1", ts), ("central_meridian", lon0)];
+                "Mercator_2SP"
+            }
+            None => {
+                ps = vec![("central_meridian", lon0), ("scale_factor", k0)];
+                "Mercator_1SP"
+            }
+        },
+        "lcc" => {
+            let l1 = lat1.unwrap_or(lat0);
+            match lat2.filter(|l2| (l2 - l1).abs() > 1e-12) {
+                Some(l2) => {
+                    ps = vec![
+                        ("standard_parallel_1", l1),
+                        ("standard_parallel_2", l2),
+                        ("latitude_of_origin", lat0),
+                        ("central_meridian", lon0),
+                    ];
+                    "Lambert_Conformal_Conic_2SP"
+                }
+                None => {
+                    ps = vec![("latitude_of_origin", l1), ("central_meridian", lon0), ("scale_factor", k0)];
+                    "Lambert_Conformal_Conic_1SP"
+                }
+            }
+        }
+        "aea" => {
+            let l1 = lat1.unwrap_or(lat0);
+            ps = vec![
+                ("standard_parallel_1", l1),
+                ("standard_parallel_2", lat2.unwrap_or(l1)),
+                ("latitude_of_center", lat0),
+                ("longitude_of_center", lon0),
+            ];
+            "Albers_Conic_Equal_Area"
+        }
+        "laea" => {
+            ps = vec![("latitude_of_center", lat0), ("longitude_of_center", lon0)];
+            "Lambert_Azimuthal_Equal_Area"
+        }
+        "aeqd" => {
+            ps = vec![("latitude_of_center", lat0), ("longitude_of_center", lon0)];
+            "Azimuthal_Equidistant"
+        }
+        "sterea" => {
+            ps = vec![("latitude_of_origin", lat0), ("central_meridian", lon0), ("scale_factor", k0)];
+            "Oblique_Stereographic"
+        }
+        "stere" if lat0.abs() == 90.0 => {
+            ps = match lat_ts {
+                Some(ts) => vec![("latitude_of_origin", ts), ("central_meridian", lon0)],
+                None => vec![("latitude_of_origin", lat0), ("central_meridian", lon0), ("scale_factor", k0)],
+            };
+            "Polar_Stereographic"
+        }
+        "stere" => {
+            ps = vec![("latitude_of_origin", lat0), ("central_meridian", lon0), ("scale_factor", k0)];
+            "Stereographic"
+        }
+        "eqc" => {
+            ps = vec![("standard_parallel_1", lat_ts.unwrap_or(0.0)), ("central_meridian", lon0)];
+            "Equirectangular"
+        }
+        "cea" => {
+            ps = vec![("standard_parallel_1", lat_ts.unwrap_or(0.0)), ("central_meridian", lon0)];
+            "Cylindrical_Equal_Area"
+        }
+        "moll" => {
+            ps = vec![("central_meridian", lon0)];
+            "Mollweide"
+        }
+        "mill" => {
+            ps = vec![("central_meridian", lon0)];
+            "Miller_Cylindrical"
+        }
+        _ => return None,
+    };
+    if kind != "utm" {
+        // PROJ's false easting and northing are in metres, WKT's in the system's unit.
+        ps.push(("false_easting", x0 / to_m));
+        ps.push(("false_northing", y0 / to_m));
+    }
+    let unit = match text("units") {
+        Some("m") | None if (to_m - 1.0).abs() < 1e-12 => "metre",
+        Some("us-ft") => "US survey foot",
+        Some("ft") => "foot",
+        Some("km") => "kilometre",
+        _ => "unknown",
+    };
+    let parameters: String = ps.iter().map(|(n, v)| format!(",PARAMETER[{},{}]", quoted(n), num(*v))).collect();
+    Some(format!(
+        "PROJCS[{},{},PROJECTION[{}]{parameters},UNIT[{},{}],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH]{}]",
+        quoted(&name),
+        geogcs(""),
+        quoted(method),
+        quoted(unit),
+        num(to_m),
+        authority(code),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use rustgis_geom::Coord;
@@ -1066,5 +1327,49 @@ mod tests {
         let deep = format!("{}{}", "A[".repeat(10_000), "]".repeat(10_000));
         assert!(crs_from_wkt(&deep).is_err());
         assert_eq!(crs_from_wkt(r#"GEOGCS["a ""quoted"" name",UNIT["Degree",0.0174532925199433]]"#), Ok(Crs::LonLat));
+    }
+
+    #[test]
+    fn written_wkt_reads_back_as_the_same_system() {
+        // UTM (with and without the zone prefixed to the easting), transverse Mercator with a
+        // datum shift, Lambert conformal in US feet, Albers, Lambert azimuthal, polar
+        // stereographic, Mercator and geographic systems; each with a place in its area.
+        let systems = [
+            (25832u32, (10.0, 50.0)),
+            (4647, (10.0, 50.0)),
+            (32617, (-81.0, 42.0)),
+            (32735, (27.0, -10.0)),
+            (27700, (-1.5, 52.0)),
+            (31467, (10.0, 50.0)),
+            (2263, (-73.98, 40.75)),
+            (5070, (-95.0, 40.0)),
+            (3035, (10.0, 50.0)),
+            (3413, (-45.0, 75.0)),
+            (3395, (10.0, 50.0)),
+            (4258, (10.0, 50.0)),
+            (4269, (-95.0, 40.0)),
+        ];
+        for (code, (lon, lat)) in systems {
+            let crs = Crs::from_epsg(code).unwrap();
+            let wkt = to_wkt(crs).unwrap_or_else(|| panic!("EPSG:{code}"));
+            assert!(wkt.ends_with(&format!("AUTHORITY[\"EPSG\",\"{code}\"]]")), "{wkt}");
+            assert_eq!(crs_from_wkt(&wkt), Ok(crs), "{wkt}");
+            // Without its code, the parameters alone place points where the system does.
+            let bare = wkt.replace(&format!(",AUTHORITY[\"EPSG\",\"{code}\"]"), "");
+            let read = crs_from_wkt(&bare).unwrap_or_else(|e| panic!("EPSG:{code}: {e}: {bare}"));
+            let lonlat = Coord::new(lon, lat);
+            let a = crs.transformer().unwrap().from_lonlat(lonlat).unwrap();
+            let b = read.transformer().unwrap().from_lonlat(lonlat).unwrap();
+            let tolerance = if crs.is_geographic() { 1e-8 } else { 0.01 };
+            assert!((a.x - b.x).abs() < tolerance && (a.y - b.y).abs() < tolerance, "EPSG:{code}: {a:?} {b:?}\n{bare}");
+        }
+        assert_eq!(crs_from_wkt(&to_wkt(Crs::LonLat).unwrap()), Ok(Crs::LonLat));
+        assert_eq!(crs_from_wkt(&to_wkt(Crs::WebMercator).unwrap()), Ok(Crs::WebMercator));
+        // A custom system has no code; its parameters say it.
+        let custom = crs_from_wkt(&ESRI_32631.replace("WGS_1984_UTM_Zone_31N", "My_Grid")).unwrap();
+        let wkt = to_wkt(custom).unwrap();
+        assert!(wkt.starts_with("PROJCS[\"My_Grid\"") && !wkt.contains("AUTHORITY"), "{wkt}");
+        let back = crs_from_wkt(&wkt).unwrap().transformer().unwrap().to_lonlat(Coord::new(500_000.0, 5_000_000.0)).unwrap();
+        assert!((back.x - 3.0).abs() < 1e-6 && (back.y - 45.153_477).abs() < 1e-5, "{back:?}");
     }
 }

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value as Json, json};
 
+use crate::raster::Crs;
 use crate::{Coord, DataError, Dataset, Field, FieldType, Geometry, GeometryType, ReadReport, Result, Value};
 
 /// Largest file read into memory (256 MiB). Parsing JSON can take several times the file size.
@@ -308,11 +309,76 @@ fn without_geometry(ds: &Dataset) -> usize {
 /// format couldn't hold. A Shapefile (`shp` or `zip`) comes as a zip of its files, named after the
 /// dataset. GeoPackage needs a file ([`write_path`]).
 pub fn write_bytes(ds: &Dataset, ext: &str) -> Result<(Vec<u8>, usize)> {
+    write_bytes_in(ds, ext, Crs::LonLat)
+}
+
+/// The formats that can be written in a coordinate system other than WGS 84 longitude/latitude
+/// (GeoJSON, KML and GPX are longitude/latitude by definition).
+pub const PROJECTED_FORMATS: [&str; 4] = ["gpkg", "shp", "zip", "fgb"];
+
+/// The coordinate system an export to extension `ext` is written in when none is asked for: the
+/// one the dataset was read in, for a format that can say it, else WGS 84. A system without an
+/// EPSG code goes only into a Shapefile, whose `.prj` gives it in full; GeoPackage and FlatGeobuf
+/// readers (RustGIS's among them) go by the code.
+pub fn default_export_crs(ds: &Dataset, ext: &str) -> Crs {
+    let ext = ext.to_ascii_lowercase();
+    ds.crs
+        .filter(|c| PROJECTED_FORMATS.contains(&ext.as_str()) && (c.epsg() > 0 || matches!(ext.as_str(), "shp" | "zip")))
+        .unwrap_or(Crs::LonLat)
+}
+
+/// The dataset (in longitude/latitude, as every dataset is) in `crs`'s coordinates. Fails on a
+/// coordinate the system can't hold, naming its feature.
+pub fn project(ds: &Dataset, crs: Crs) -> Result<Dataset> {
+    if crs == Crs::LonLat {
+        return Ok(ds.clone());
+    }
+    let mut out = ds.clone();
+    let t = crs.transformer().map_err(DataError::Format)?;
+    for f in &mut out.features {
+        if let Some(g) = f.geometry.take() {
+            let mut ok = true;
+            let p = g.map_coords(&|c| t.from_lonlat(c).unwrap_or(Coord::new(f64::NAN, f64::NAN)));
+            p.for_each_coord(|c| ok &= c.is_finite());
+            if !ok {
+                return Err(DataError::Format(format!("feature {} can't be placed in {}", f.id, crs.label())));
+            }
+            f.geometry = Some(p);
+        }
+    }
+    Ok(out)
+}
+
+/// Refuses a system without an EPSG code for a GeoPackage or FlatGeobuf: their readers (RustGIS's
+/// among them) go by the code, and would read the file as longitude/latitude.
+fn check_projected(ext: &str, crs: Crs) -> Result<()> {
+    if crs.epsg() == 0 && matches!(ext, "gpkg" | "fgb") {
+        return Err(DataError::Unsupported(format!(".{ext} in {}: give the system as an EPSG code", crs.label())));
+    }
+    Ok(())
+}
+
+/// As [`write_bytes`], in the coordinate system `crs`: a GeoPackage, Shapefile or FlatGeobuf (see
+/// [`PROJECTED_FORMATS`]) says it; any other format is written only in longitude/latitude.
+pub fn write_bytes_in(ds: &Dataset, ext: &str, crs: Crs) -> Result<(Vec<u8>, usize)> {
+    let ext = ext.to_ascii_lowercase();
+    if crs != Crs::LonLat {
+        if !PROJECTED_FORMATS.contains(&ext.as_str()) {
+            return Err(DataError::Unsupported(format!(".{ext} in {} (it holds longitude/latitude only)", crs.label())));
+        }
+        check_projected(&ext, crs)?;
+        return projected_bytes(&project(ds, crs)?, &ext, crs);
+    }
+    projected_bytes(ds, &ext, crs)
+}
+
+/// [`write_bytes_in`] for a dataset already in `crs`'s coordinates.
+fn projected_bytes(ds: &Dataset, ext: &str, crs: Crs) -> Result<(Vec<u8>, usize)> {
     let fmt = |e: serde_json::Error| DataError::Format(e.to_string());
-    Ok(match ext.to_ascii_lowercase().as_str() {
+    Ok(match ext {
         "geojson" | "json" => (serde_json::to_vec(&to_geojson(ds)).map_err(fmt)?, 0),
         "csv" => (to_csv(ds)?.into_bytes(), 0),
-        "fgb" => (crate::source::fgb::write(ds)?, without_geometry(ds)),
+        "fgb" => (crate::source::fgb::write_in(ds, crs)?, without_geometry(ds)),
         "parquet" | "geoparquet" => (crate::source::parquet::write(ds)?, 0),
         "kml" => (crate::interop::to_kml(ds, name_field(ds)).into_bytes(), without_geometry(ds)),
         "kmz" => {
@@ -321,7 +387,7 @@ pub fn write_bytes(ds: &Dataset, ext: &str) -> Result<(Vec<u8>, usize)> {
         }
         "gpx" => (crate::interop::to_gpx(ds, name_field(ds)).into_bytes(), without_geometry(ds)),
         "shp" | "zip" => {
-            let (parts, left_out) = shapefile_parts(ds)?;
+            let (parts, left_out) = shapefile_parts_in(ds, crs)?;
             let base: String = ds.name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | ' ') { c } else { '_' }).collect();
             let base = if base.trim().is_empty() { "layer".to_string() } else { base };
             let entries: Vec<(String, Vec<u8>)> = parts.into_iter().map(|(e, b)| (format!("{base}.{e}"), b)).collect();
@@ -337,19 +403,33 @@ pub fn write_bytes(ds: &Dataset, ext: &str) -> Result<(Vec<u8>, usize)> {
 /// Shapefile is written as its `.shp`, `.shx`, `.dbf`, `.prj` and `.cpg` files (or zipped, to a
 /// `.zip`).
 pub fn write_path(ds: &Dataset, path: &Path) -> Result<usize> {
+    write_path_in(ds, path, Crs::LonLat)
+}
+
+/// As [`write_path`], in the coordinate system `crs` (a GeoPackage, Shapefile or FlatGeobuf; see
+/// [`write_bytes_in`]).
+pub fn write_path_in(ds: &Dataset, path: &Path, crs: Crs) -> Result<usize> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let projected;
+    let ds = if crs == Crs::LonLat || !PROJECTED_FORMATS.contains(&ext.as_str()) {
+        ds
+    } else {
+        check_projected(&ext, crs)?;
+        projected = project(ds, crs)?;
+        &projected
+    };
     match ext.as_str() {
         "gpkg" => {
             #[cfg(not(target_arch = "wasm32"))]
             {
-                crate::source::gpkg::write(ds, path)?;
+                crate::source::gpkg::write_in(ds, path, crs)?;
                 Ok(0)
             }
             #[cfg(target_arch = "wasm32")]
             Err(DataError::Unsupported("GeoPackage in the browser".into()))
         }
         "shp" => {
-            let (parts, left_out) = shapefile_parts(ds)?;
+            let (parts, left_out) = shapefile_parts_in(ds, crs)?;
             // Every part is written to a temporary file first and renamed into place only once all
             // are written, the .shp last, so a failed write leaves the old Shapefile whole.
             let mut written: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
@@ -415,8 +495,11 @@ pub fn write_path(ds: &Dataset, path: &Path) -> Result<usize> {
             }
             Ok(left_out)
         }
+        _ if crs != Crs::LonLat && !PROJECTED_FORMATS.contains(&ext.as_str()) => {
+            Err(DataError::Unsupported(format!(".{ext} in {} (it holds longitude/latitude only)", crs.label())))
+        }
         _ => {
-            let (bytes, left_out) = write_bytes(ds, &ext)?;
+            let (bytes, left_out) = projected_bytes(ds, &ext, crs)?;
             write_atomic(path, &bytes)?;
             Ok(left_out)
         }
@@ -1069,6 +1152,7 @@ pub(crate) fn read_rows(
     match crs.filter(|c| *c != crate::raster::Crs::LonLat) {
         Some(c) => {
             let t = c.transformer().map_err(DataError::Format)?;
+            ds.crs = Some(c);
             let mut lost = 0usize;
             for f in &mut ds.features {
                 if let Some(g) = f.geometry.take() {
@@ -1436,7 +1520,10 @@ fn read_shapefile_parts(parts: ShapefileParts, name: &str) -> Result<(Dataset, R
     let fields: Vec<Field> = order.iter().map(|(n, t)| Field::new(n.clone(), *t)).collect();
     let mut ds = Dataset::new(name, GeometryType::None, fields);
     let mut report = ReadReport::default();
-    let to_lonlat = shapefile_crs(parts.prj.as_deref(), &mut report);
+    let to_lonlat = shapefile_crs(parts.prj.as_deref(), &mut report).map(|(crs, t)| {
+        ds.crs = Some(crs);
+        t
+    });
     let (mut converted, mut unconverted) = (0usize, 0usize);
     let pt = |x: f64, y: f64| Coord::new(x, y);
     for item in reader.iter_shapes_and_records() {
@@ -1518,7 +1605,7 @@ fn read_shapefile_parts(parts: ShapefileParts, name: &str) -> Result<(Dataset, R
 /// Converts a Shapefile's coordinates to longitude/latitude, from the coordinate system in its
 /// `.prj`: `None` for longitude/latitude, or when there's no `.prj` or it isn't understood (said in
 /// the report).
-fn shapefile_crs(prj: Option<&str>, report: &mut ReadReport) -> Option<crate::raster::Transformer> {
+fn shapefile_crs(prj: Option<&str>, report: &mut ReadReport) -> Option<(Crs, crate::raster::Transformer)> {
     let crs = match crate::raster::wkt::read_wkt(prj?) {
         Ok((c, note)) => {
             if let Some(n) = note {
@@ -1535,7 +1622,7 @@ fn shapefile_crs(prj: Option<&str>, report: &mut ReadReport) -> Option<crate::ra
         return None;
     }
     match crs.transformer() {
-        Ok(t) => Some(t),
+        Ok(t) => Some((crs, t)),
         Err(e) => {
             report.messages.push(format!("the .prj file: {e}; coordinates are read as longitude/latitude"));
             None
@@ -1612,6 +1699,12 @@ fn dbf_names(fields: &[Field]) -> Vec<String> {
 /// features without it (or with nothing drawable) are left out, and the count of them returned.
 /// Field names are cut to dBase's 10 bytes and text to 254.
 pub fn shapefile_parts(ds: &Dataset) -> Result<(Vec<(&'static str, Vec<u8>)>, usize)> {
+    shapefile_parts_in(ds, Crs::LonLat)
+}
+
+/// As [`shapefile_parts`], for a dataset whose geometry is in `crs`'s coordinates: the `.prj`
+/// says `crs`, and is left out for a system WKT can't describe.
+pub fn shapefile_parts_in(ds: &Dataset, crs: Crs) -> Result<(Vec<(&'static str, Vec<u8>)>, usize)> {
     use shapefile::dbase::{FieldName, FieldValue, Record, TableWriterBuilder};
     use std::io::Cursor;
     let fmt = |e: shapefile::Error| DataError::Format(format!("Shapefile: {e}"));
@@ -1743,16 +1836,11 @@ pub fn shapefile_parts(ds: &Dataset) -> Result<(Vec<(&'static str, Vec<u8>)>, us
             return Err(DataError::Unsupported(format!("{what} as a Shapefile")));
         }
     }
-    Ok((
-        vec![
-            ("shp", shp.into_inner()),
-            ("shx", shx.into_inner()),
-            ("dbf", dbf.into_inner()),
-            ("prj", WGS84_PRJ.as_bytes().to_vec()),
-            ("cpg", b"UTF-8".to_vec()),
-        ],
-        left_out,
-    ))
+    let prj = if crs == Crs::LonLat { Some(WGS84_PRJ.to_string()) } else { crate::raster::wkt::to_wkt(crs) };
+    let mut parts = vec![("shp", shp.into_inner()), ("shx", shx.into_inner()), ("dbf", dbf.into_inner())];
+    parts.extend(prj.map(|p| ("prj", p.into_bytes())));
+    parts.push(("cpg", b"UTF-8".to_vec()));
+    Ok((parts, left_out))
 }
 
 fn is_outer<P>(r: &shapefile::PolygonRing<P>) -> bool {

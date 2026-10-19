@@ -603,12 +603,9 @@ fn run_into(s: &mut Session, g: &ModelGraph, trusted: bool, report: &mut RunRepo
         let mut to = g.edges.iter().filter(|e| e.from == *id).filter_map(|e| g.nodes.iter().find(|n| n.id == e.to));
         let feeds_tools_only = to.clone().next().is_some() && to.all(|n| n.kind == ModelNodeKind::Tool);
         if feeds_tools_only {
-            let m = s.map_mut();
+            crate::cmd::layer::drop_layers(s, layers);
             for l in layers {
-                if let Some(i) = m.layer_index(*l) {
-                    m.layers.remove(i);
-                    m.set_group(*l, None);
-                }
+                s.map_mut().set_group(*l, None);
             }
         }
     }

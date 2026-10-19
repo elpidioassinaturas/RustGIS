@@ -65,6 +65,8 @@ pub fn commands() -> Vec<C> {
                     l.mask = Some(n.clone());
                 }
             }
+            // So do legends that leave it out.
+            legends_follow_layer(s, &old, Some(&n));
             Ok(r)
         }).params(r#"{"layer"?, "name": string}"#)
         .when(need_layer),
@@ -2064,14 +2066,74 @@ fn add_sample(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"layer": id}))
 }
 
+/// Legends that leave out layer `old` of the active map, in the frames that show it, follow it:
+/// to its new name, or (`None`, the layer deleted) by dropping it, so a later layer of that name
+/// isn't left out unasked. Called once the layer is renamed or gone: while another layer still
+/// bears `old` (names may repeat), the legends keep it for that one. Renamed onto the name of
+/// another layer a legend lists, the layer is listed with it rather than taking that one out.
+pub(crate) fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>) {
+    if s.map().layers.iter().any(|l| l.name.eq_ignore_ascii_case(old)) {
+        return;
+    }
+    let shared = new.is_some_and(|n| s.map().layers.iter().filter(|l| l.name.eq_ignore_ascii_case(n)).count() > 1);
+    let map = s.map().name.clone();
+    for layout in &mut s.project.layouts {
+        let frames: Vec<u32> = layout
+            .elements
+            .iter()
+            .filter(|e| matches!(&e.kind, rustgis_map::layout::ElementKind::MapFrame { map: m, .. } if m.eq_ignore_ascii_case(&map)))
+            .map(|e| e.id)
+            .collect();
+        for e in &mut layout.elements {
+            if let rustgis_map::layout::ElementKind::Legend { frame, exclude, .. } = &mut e.kind
+                && frames.contains(frame)
+            {
+                match new {
+                    // Another layer the legend lists bears the new name: carrying the exclusion
+                    // over would take that one out too, so the renamed layer is listed with it.
+                    Some(n) if shared && !exclude.iter().any(|x| x.eq_ignore_ascii_case(n)) => {
+                        exclude.retain(|x| !x.eq_ignore_ascii_case(old));
+                    }
+                    Some(n) => {
+                        exclude.iter_mut().filter(|x| x.eq_ignore_ascii_case(old)).for_each(|x| *x = n.to_string());
+                        // Once each, should the new name have been left out already.
+                        let mut seen: Vec<String> = Vec::new();
+                        exclude.retain(|x| {
+                            let first = !seen.iter().any(|y| y.eq_ignore_ascii_case(x));
+                            if first {
+                                seen.push(x.clone());
+                            }
+                            first
+                        });
+                    }
+                    None => exclude.retain(|x| !x.eq_ignore_ascii_case(old)),
+                }
+            }
+        }
+    }
+}
+
+/// Removes the layers `ids` from the active map, and legends that left them out forget them, as
+/// `layer.remove` does. Paths that delete several layers at once go through here.
+pub(crate) fn drop_layers(s: &mut Session, ids: &[u32]) {
+    let m = s.map_mut();
+    let names: Vec<String> = m.layers.iter().filter(|l| ids.contains(&l.id)).map(|l| l.name.clone()).collect();
+    m.layers.retain(|l| !ids.contains(&l.id));
+    for n in &names {
+        legends_follow_layer(s, n, None);
+    }
+}
+
 fn remove(s: &mut Session, p: &Value) -> CmdResult {
     let id = s.layer_id(p)?;
     let m = s.map_mut();
     let i = m.layer_index(id).ok_or("no such layer")?;
-    m.layers.remove(i);
+    let name = m.layers.remove(i).name;
     m.set_group(id, None);
     let next = m.layers.get(i.min(m.layers.len().saturating_sub(1))).map(|l| l.id);
     s.active_layer = next;
+    // A legend that left it out forgets it.
+    legends_follow_layer(s, &name, None);
     Ok(Value::Null)
 }
 

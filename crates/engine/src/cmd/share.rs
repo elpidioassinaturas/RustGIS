@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use rustgis_data::raster::Crs;
 use rustgis_render::View;
 use serde_json::{Value, json};
 
@@ -17,7 +18,7 @@ pub fn commands() -> Vec<C> {
         C::new("share.exportLayer", "Export Features", "Publish › Output", export_layer)
             .view()
             .when(need_layer)
-            .params(r#"{"layer"?, "path": "*.geojson|*.csv|*.fgb|*.gpkg|*.parquet|*.shp|*.zip|*.kml|*.kmz|*.gpx"}"#),
+            .params(r#"{"layer"?, "path": "*.geojson|*.csv|*.fgb|*.gpkg|*.parquet|*.shp|*.zip|*.kml|*.kmz|*.gpx", "crs"?: "EPSG:… (or WKT) for a GeoPackage, Shapefile or FlatGeobuf (default: the system the layer was read in, else EPSG:4326)"}"#),
         C::new("share.exportTable", "Export Table", "Publish › Output", |s, p| {
             let path = ps(p, "path").ok_or("path is required")?;
             let t = s.project.tables.get(s.table_index(p)?).ok_or("no such table")?;
@@ -80,13 +81,23 @@ fn export_layer(s: &mut Session, p: &Value) -> CmdResult {
     // A streamed layer exports its whole source, not the features read for the view.
     let whole = if l.is_streamed() { Some(l.load_all()?) } else { None };
     let ds = whole.as_ref().unwrap_or(&l.dataset);
-    let left_out = rustgis_data::io::write_path(ds, Path::new(&path)).map_err(|e| e.to_string())?;
+    // GeoJSON, KML and GPX are longitude/latitude; the others keep the layer's own system unless
+    // told another.
+    let ext = Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let crs = match ps(p, "crs").map(str::trim).filter(|c| !c.is_empty()) {
+        Some(text) => Crs::parse(text)?,
+        None => rustgis_data::io::default_export_crs(ds, &ext),
+    };
+    let left_out = rustgis_data::io::write_path_in(ds, Path::new(&path), crs).map_err(|e| e.to_string())?;
     let written = ds.features.len().saturating_sub(left_out);
     // FlatGeobuf, KML, GPX and Shapefile hold features with geometry only (a Shapefile, only
     // geometry it can draw).
     if left_out > 0 {
         s.notify(format!("{path}: {left_out} features without drawable geometry were left out"), false);
     }
+    if matches!(ext.as_str(), "shp" | "zip") && rustgis_data::raster::wkt::to_wkt(crs).is_none() {
+        s.notify(format!("{path}: no .prj written, as {} has no WKT form", crs.label()), false);
+    }
     s.notify(format!("Exported {path}"), false);
-    Ok(json!({"path": path, "features": written, "leftOut": left_out}))
+    Ok(json!({"path": path, "features": written, "leftOut": left_out, "crs": crs.label()}))
 }

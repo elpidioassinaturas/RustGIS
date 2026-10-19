@@ -49,7 +49,11 @@ the maps; while one is open, its groups lead the Publish tab:
   nothing there, such as an empty one, is left out, in layouts saved before this too. Tick **All
   classes** in its properties (`"allClasses": true`) to list every class of every visible layer
   instead, and **Hide other values** (`"hideOther": true`) to leave `<all other values>` out of
-  the legend in either mode (the features it stands for are still drawn).
+  the legend in either mode (the features it stands for are still drawn). Its **Layers** section
+  has a checkbox for each layer of the frame's map: untick one to leave it out of the legend
+  while the map still draws it (a mask, a highlight, a basemap-like layer). Scripts give the same
+  with `"exclude": ["Graticule"]` on `layout.addElement` or `layout.update` (`[]` lists every
+  layer again); a renamed layer stays left out.
 - **Colorbar**: the colour scale of a raster layer in the frame's map, as the map draws it (its
   stretch, colour ramp and enhancement): a gradient bar for a stretch or a tinted hillshade,
   steps labelled at their breaks for Classify, and a block per value for Unique Values and colour

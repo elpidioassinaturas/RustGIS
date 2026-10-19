@@ -659,6 +659,10 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         if let Some(e) = &conn.error {
             ui.colored_label(t.red, e);
         }
+        // A refused or failed request: plainly, with what the server said folded below (#509).
+        if let Some(f) = &conn.failure {
+            crate::failureui::show(ui, f, &t);
+        }
         if let Some(v) = &conn.listing {
             let kind = v.get("kind").and_then(Value::as_str).unwrap_or("");
             let title = v.get("title").and_then(Value::as_str).unwrap_or("");
@@ -680,7 +684,7 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                 ui.horizontal(|ui| {
                     ui.label(tl!("Name"));
                     ui.text_edit_singleline(&mut app.ui.service_group_name);
-                    let ready = conn.pending.is_none() && conn.error.is_none() && app.ui.service_import.is_none();
+                    let ready = conn.pending.is_none() && conn.error.is_none() && conn.failure.is_none() && app.ui.service_import.is_none();
                     if ui.add_enabled(ready, egui::Button::new(tl!("Import All"))).clicked() {
                         let mut p = json!({"url":conn.url,"name":app.ui.service_group_name,"text":conn.text,"documents":conn.documents});
                         if conn.kind != "auto" {

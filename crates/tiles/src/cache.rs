@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tiny_skia::Pixmap;
 use web_time::{Duration, Instant};
 
+use crate::failure::Failure;
 use crate::mvt;
 
 /// What a fetched address is decoded as.
@@ -48,6 +49,8 @@ pub enum State {
 
 /// Called once with a fetch's bytes or error.
 pub type Done = Box<dyn FnOnce(Result<Vec<u8>, String>) + Send>;
+/// Called once with a download's bytes or what is known of its failure (#509).
+pub type DoneDetailed = Box<dyn FnOnce(Result<Vec<u8>, Failure>) + Send>;
 type Fetcher = Box<dyn Fn(String, Done) + Send + Sync>;
 
 /// Bytes the cache keeps before dropping the least recently used entries.
@@ -312,19 +315,28 @@ pub fn download(url: &str, done: Done) {
 
 /// Like [`download`], with a smaller budget enforced by the native and browser fetchers.
 pub fn download_limited(url: &str, max: usize, done: Done) {
+    download_detailed(url, max, Box::new(move |r| done(r.map_err(|f| f.message))));
+}
+
+/// Like [`download_limited`], telling what is known of a failure (#509): the status, the headers
+/// that say who answered and an excerpt of the answer. The browser's fetch tells only the
+/// status, read back from its error.
+pub fn download_detailed(url: &str, max: usize, done: DoneDetailed) {
     if let Err(e) = crate::address::check(url, None) {
-        done(Err(e));
+        done(Err(Failure::new(url, e)));
         return;
     }
     let marked = download_address(url, max);
     IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
-    let done: Done = Box::new(move |r| {
-        done(r);
+    // The failure names the address asked for, not the marked one fetched.
+    let asked = url.to_string();
+    let done: DoneDetailed = Box::new(move |r| {
+        done(r.map_err(|f| Failure { url: asked, ..f }));
         finished();
     });
     let f = fetcher().lock().unwrap_or_else(|e| e.into_inner()).clone();
     match f {
-        Some(f) => f(marked, done),
+        Some(f) => f(marked.clone(), Box::new(move |r| done(r.map_err(|e| Failure::new(&marked, e))))),
         None => native::download(marked, done),
     }
 }
@@ -549,7 +561,8 @@ mod native {
     use std::collections::HashMap;
     use std::sync::{Condvar, Mutex, OnceLock};
 
-    use super::{DROPPED, Done, MAX_BYTES};
+    use super::{DROPPED, Done, DoneDetailed, MAX_BYTES};
+    use crate::failure::{Failure, Reason};
 
     /// Fetches under way at once, over all servers: two servers at their cap.
     const WORKERS: usize = 2 * PER_HOST;
@@ -643,7 +656,7 @@ mod native {
     pub(super) fn agent() -> ureq::Agent {
         ureq::Agent::config_builder()
             .timeout_global(Some(std::time::Duration::from_secs(30)))
-            .user_agent(concat!("RustGIS/", env!("CARGO_PKG_VERSION"), " (+https://rustgis.app)"))
+            .user_agent(USER_AGENT)
             // Redirects are followed by `get`, which checks where each one leads.
             .max_redirects(0)
             // The workers share the agent: keep a connection open for each fetch a server
@@ -662,12 +675,7 @@ mod native {
 
     /// An agent for downloads, which may take minutes.
     pub(super) fn download_agent(timeout: std::time::Duration) -> ureq::Agent {
-        ureq::Agent::config_builder()
-            .timeout_global(Some(timeout))
-            .user_agent(concat!("RustGIS/", env!("CARGO_PKG_VERSION"), " (+https://rustgis.app)"))
-            .max_redirects(0)
-            .build()
-            .into()
+        ureq::Agent::config_builder().timeout_global(Some(timeout)).user_agent(USER_AGENT).max_redirects(0).build().into()
     }
 
     /// Resolves names as ureq does, keeping only the internet addresses (checked where the
@@ -700,7 +708,7 @@ mod native {
     pub(super) fn public_agent(timeout: std::time::Duration) -> ureq::Agent {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
-            .user_agent(concat!("RustGIS/", env!("CARGO_PKG_VERSION"), " (+https://rustgis.app)"))
+            .user_agent(USER_AGENT)
             .max_redirects(0)
             // A proxy would resolve the address itself, past `PublicOnly`.
             .proxy(None)
@@ -709,8 +717,8 @@ mod native {
     }
 
     /// Downloads on a thread of its own, so a large file doesn't hold up the tiles.
-    pub(super) fn download(url: String, done: Done) {
-        std::thread::spawn(move || done(get(&download_agent(std::time::Duration::from_secs(900)), &url)));
+    pub(super) fn download(url: String, done: DoneDetailed) {
+        std::thread::spawn(move || done(get_detailed(&download_agent(std::time::Duration::from_secs(900)), &url)));
     }
 
     fn work() {
@@ -749,14 +757,58 @@ mod native {
     /// it was made (the layer's address, or one its style or TileJSON chose, checked in
     /// `source::resolve`); each redirect is checked here.
     pub(super) fn get(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, String> {
+        fetch_answer(agent, url, false).map_err(|f| f.message)
+    }
+
+    /// The User-Agent every request goes with.
+    const USER_AGENT: &str = concat!("RustGIS/", env!("CARGO_PKG_VERSION"), " (+https://rustgis.app)");
+
+    /// A request that never got an answer: what kind of failure, for the user (#509).
+    fn unanswered(e: ureq::Error) -> Failure {
+        let reason = match &e {
+            ureq::Error::Timeout(_) => Reason::Timeout,
+            // Refused here (an address on this computer or the local network), not unreachable.
+            ureq::Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied => Reason::Other,
+            ureq::Error::HostNotFound
+            | ureq::Error::ConnectionFailed
+            | ureq::Error::Io(_)
+            | ureq::Error::Tls(_)
+            | ureq::Error::Rustls(_) => Reason::Unreachable,
+            _ => Reason::Other,
+        };
+        Failure::without_answer("", e.to_string(), reason)
+    }
+
+    /// An answer with an error status (#509): its kept headers and the start of its body.
+    fn refused(resp: &mut ureq::http::Response<ureq::Body>) -> Failure {
+        use std::io::Read;
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .filter(|(k, _)| crate::failure::KEPT_HEADERS.contains(&k.as_str()))
+            .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+            .collect();
+        let mut body = Vec::new();
+        let _ = resp.body_mut().as_reader().take(crate::failure::MAX_BODY).read_to_end(&mut body);
+        Failure::answered("", resp.status().as_u16(), &headers, &body).sent_as(USER_AGENT)
+    }
+
+    /// [`get`], telling what is known of a failure.
+    pub(super) fn get_detailed(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, Failure> {
+        fetch_answer(agent, url, true).map_err(|f| Failure { url: url.to_string(), ..f })
+    }
+
+    /// The answer to `url`; a refusal keeps the server's answer only when `detail` asks for it,
+    /// as tiles a server doesn't have are routine and only their status is read.
+    fn fetch_answer(agent: &ureq::Agent, url: &str, detail: bool) -> Result<Vec<u8>, Failure> {
         use std::io::Read;
         if crate::mbtiles::is_tile(url) {
-            return crate::mbtiles::read_local(url);
+            return crate::mbtiles::read_local(url).map_err(Failure::from);
         }
         if let Some(local) = url.strip_prefix(LOCAL) {
             let (path, range) = super::split_range(local);
             let (a, b) = range.ok_or("a local read without a range")?;
-            return crate::pmtiles::read_file(path, a, b - a + 1);
+            return crate::pmtiles::read_file(path, a, b - a + 1).map_err(Failure::from);
         }
         let (url, limit) = super::split_download_limit(url);
         let max = limit.unwrap_or(MAX_BYTES);
@@ -784,7 +836,16 @@ mod native {
                     req = req.header(k.as_str(), v.as_str());
                 }
             }
-            let resp = req.call().map_err(|e| e.to_string())?;
+            // An error status is answered, not failed: its headers and body say who refused.
+            let mut resp = req.config().http_status_as_error(false).build().call().map_err(unanswered)?;
+            let status = resp.status().as_u16();
+            if status >= 400 {
+                return Err(if detail {
+                    refused(&mut resp)
+                } else {
+                    Failure::without_answer("", format!("http status: {status}"), Reason::Status(status))
+                });
+            }
             if !resp.status().is_redirection() {
                 break resp;
             }
@@ -793,7 +854,7 @@ mod native {
                 return Err(format!(
                     "{url}: the S3 endpoint answered with a redirect (HTTP {}), which a signed request doesn't follow: check the connection's region and endpoint",
                     resp.status().as_u16()
-                ));
+                ).into());
             }
             let location = resp.headers().get("location").and_then(|v| v.to_str().ok()).ok_or("a redirect with no Location")?;
             let next = crate::template::join(&at, location);
@@ -801,7 +862,7 @@ mod native {
             crate::address::check(&next, Some(&at))?;
             // Never from HTTPS down to plain HTTP.
             if at.starts_with("https://") && !next.starts_with("https://") {
-                return Err(format!("{next}: a redirect from https to http"));
+                return Err(format!("{next}: a redirect from https to http").into());
             }
             redirects += 1;
             if redirects > 5 {
@@ -819,11 +880,11 @@ mod native {
         if let Some((a, _)) = range.filter(|_| whole)
             && a > 0
         {
-            return Err(format!("{url}: {}", super::NO_RANGES));
+            return Err(format!("{url}: {}", super::NO_RANGES).into());
         }
         let mut buf = Vec::new();
         if !resp.status().is_success() {
-            return Err(format!("HTTP {}", resp.status().as_u16()));
+            return Err(format!("HTTP {}", resp.status().as_u16()).into());
         }
         // The last bytes asked for and the whole file answered: fine when it is no longer.
         if let Some(n) = tail.filter(|_| resp.status().as_u16() != 206) {
@@ -838,10 +899,10 @@ mod native {
                 .read_to_end(&mut buf)
                 .map_err(|e| e.to_string())?;
             if buf.len() as u64 > n {
-                return Err(format!("{url}: {}", super::NO_RANGES));
+                return Err(format!("{url}: {}", super::NO_RANGES).into());
             }
             if buf.len() > max {
-                return Err(format!("larger than {max} bytes"));
+                return Err(format!("larger than {max} bytes").into());
             }
             return Ok(buf);
         }
@@ -854,11 +915,11 @@ mod native {
             .read_to_end(&mut buf)
             .map_err(|e| e.to_string())?;
         if buf.len() > max {
-            return Err(format!("larger than {max} bytes"));
+            return Err(format!("larger than {max} bytes").into());
         }
         if let Some((a, b)) = range.filter(|_| whole) {
             if buf.len() as u64 > b - a + 1 {
-                return Err(format!("{url}: {}", super::NO_RANGES));
+                return Err(format!("{url}: {}", super::NO_RANGES).into());
             }
             buf.truncate(usize::try_from(b - a + 1).unwrap_or(usize::MAX));
         }
@@ -868,14 +929,15 @@ mod native {
 
 #[cfg(target_arch = "wasm32")]
 mod native {
-    use super::Done;
+    use super::{Done, DoneDetailed};
 
     pub(super) fn fetch(url: String, done: Done) {
         done(Err(format!("{url}: this build has no way to fetch tiles")));
     }
 
-    pub(super) fn download(url: String, done: Done) {
-        fetch(url, done);
+    pub(super) fn download(url: String, done: DoneDetailed) {
+        let message = format!("{url}: this build has no way to fetch tiles");
+        done(Err(crate::failure::Failure::new(&url, message)));
     }
 
     pub(super) fn fetch_local(url: String, done: Done) {
@@ -996,6 +1058,28 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    /// A refused request keeps who refused it (#509); the plain error reads as it always has.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_refused_download_says_who_refused_it() {
+        let page = "<html><head><title>Attention Required! | Cloudflare</title></head><body>Sorry, you have been blocked</body></html>";
+        let blocked = format!(
+            "HTTP/1.1 403 Forbidden\r\nServer: cloudflare\r\nCF-RAY: a4c9-BOG\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+            page.len()
+        );
+        let agent = native::agent();
+        let base = serve(vec![blocked.clone(), blocked]);
+        let f = native::get_detailed(&agent, &format!("{base}/MapServer?f=json")).unwrap_err();
+        assert_eq!((f.status(), f.firewall(), f.excerpt()), (Some(403), Some("Cloudflare"), Some("Attention Required! | Cloudflare")));
+        assert_eq!((f.url.as_str(), f.request_id()), (format!("{base}/MapServer?f=json").as_str(), Some("cf-ray a4c9-BOG".to_string())));
+        assert!(f.user_agent().is_some_and(|u| u.starts_with("RustGIS/")));
+        assert_eq!(native::get(&agent, &format!("{base}/x")).unwrap_err(), "http status: 403");
+        // No server there: unreachable, not an answer.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let f = native::get_detailed(&agent, &format!("http://{closed}/x")).unwrap_err();
+        assert_eq!(f.reason, crate::failure::Reason::Unreachable, "{}", f.message);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

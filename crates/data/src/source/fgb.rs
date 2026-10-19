@@ -9,6 +9,7 @@
 
 use super::remote::{self, Remote};
 use super::{Batch, FeatureSource, Reproject, Request, Sampler, SourceInfo, clamp_limit, in_request, stride};
+use crate::raster::Crs;
 use crate::{DataError, Feature, Field, FieldType, GeometryType, Result, Value, wkb};
 use flatgeobuf::geozero::{ColumnValue, CoordDimensions, PropertyProcessor, ToWkb};
 use flatgeobuf::{ColumnType, FallibleStreamingIterator, FeatureProperties, FgbReader};
@@ -538,6 +539,12 @@ impl PropertyProcessor for Props<'_> {
 
 /// Writes a dataset as FlatGeobuf, with a spatial index (WGS 84 longitude/latitude).
 pub fn write(ds: &crate::Dataset) -> Result<Vec<u8>> {
+    write_in(ds, Crs::LonLat)
+}
+
+/// Writes a dataset whose geometry is in `crs`'s coordinates as FlatGeobuf, with a spatial index,
+/// the file saying `crs`.
+pub fn write_in(ds: &crate::Dataset, crs: Crs) -> Result<Vec<u8>> {
     use flatgeobuf::geozero::wkb::Wkb;
     use flatgeobuf::{FgbCrs, FgbWriter, FgbWriterOptions, GeometryType as G};
     let ty = match ds.geometry_type {
@@ -546,7 +553,12 @@ pub fn write(ds: &crate::Dataset) -> Result<Vec<u8>> {
         GeometryType::Polygon => G::MultiPolygon,
         GeometryType::None => return Err(DataError::Unsupported("a table without geometry as FlatGeobuf".into())),
     };
-    let options = FgbWriterOptions { crs: FgbCrs { code: 4326, ..Default::default() }, ..Default::default() };
+    let wkt = crate::raster::wkt::to_wkt(crs);
+    let code = i32::from(crs.epsg());
+    let options = FgbWriterOptions {
+        crs: FgbCrs { org: (code > 0).then_some("EPSG"), code, wkt: wkt.as_deref(), ..Default::default() },
+        ..Default::default()
+    };
     let mut w = FgbWriter::create_with_options(&ds.name, ty, options).map_err(err)?;
     for f in &ds.fields {
         let t = match f.ty {

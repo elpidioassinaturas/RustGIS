@@ -145,12 +145,12 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                     scale_bar(&mut pm, r, map.ground_res_at(&cam), (*units, *divisions, *style), ppp);
                 }
             }
-            ElementKind::Legend { frame: f, title, all_classes, hide_other } => {
+            ElementKind::Legend { frame: f, title, all_classes, hide_other, exclude } => {
                 if let Some(&(_, mi, ..)) = frame(*f)
                     && let Some(map) = maps.get(mi)
                 {
                     let drawn = (!*all_classes).then(|| shown.iter().find(|(id, _)| id == f).map(|(_, v)| v.as_slice()).unwrap_or(&[]));
-                    legend(&mut pm, r, map, title, drawn, *hide_other, ppp);
+                    legend(&mut pm, r, map, title, drawn, LegendOptions { hide_other: *hide_other, exclude }, ppp);
                 }
             }
             ElementKind::Colorbar { frame: f, layer, title, orientation, ticks, tick_side, reverse } => {
@@ -700,10 +700,18 @@ fn shown_legends(map: &Map, scale: f64) -> Vec<(u32, Vec<LegendEntry>)> {
         .collect()
 }
 
+/// What a legend leaves out: `<all other values>`, and layers by name.
+struct LegendOptions<'a> {
+    hide_other: bool,
+    exclude: &'a [String],
+}
+
 /// The legend of a frame's map. With `drawn` (from [`shown_legends`]) it shows what the frame
 /// draws: only the layers listed there, with their classes. Without, every class of every visible
-/// layer. `hide_other` leaves `<all other values>` out either way.
-fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32, Vec<LegendEntry>)]>, hide_other: bool, ppp: f64) {
+/// layer. `opts` leaves out `<all other values>` and the layers it names, either way.
+fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32, Vec<LegendEntry>)]>, opts: LegendOptions, ppp: f64) {
+    let hide_other = opts.hide_other;
+    let excluded = |name: &str| opts.exclude.iter().any(|n| n.eq_ignore_ascii_case(name));
     let ppp = ppp as f32;
     let dark = Rgba::rgb(0x22, 0x22, 0x22);
     let mut y = r.y();
@@ -713,7 +721,7 @@ fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32
         y += line * 1.3;
     }
     let sw = 16.0 * ppp;
-    for l in map.layers.iter().filter(|l| map.shows(l) && !l.graphics && !l.is_raster()) {
+    for l in map.layers.iter().filter(|l| map.shows(l) && !l.graphics && !l.is_raster() && !excluded(&l.name)) {
         if y + line > r.y() + r.height() {
             break;
         }
@@ -1118,12 +1126,14 @@ mod tests {
             };
         }
         // How far down the legend draws, in pixels.
-        let depth = |map: &Map, drawn: Option<&[(u32, Vec<LegendEntry>)]>, hide_other: bool| {
+        let depth_without = |map: &Map, drawn: Option<&[(u32, Vec<LegendEntry>)]>, hide_other: bool, exclude: &[String]| {
             let mut pm = Pixmap::new(300, 400).unwrap();
             pm.fill(tiny_skia::Color::WHITE);
-            legend(&mut pm, Rect::from_xywh(0.0, 0.0, 300.0, 400.0).unwrap(), map, "", drawn, hide_other, 1.0);
+            let opts = LegendOptions { hide_other, exclude };
+            legend(&mut pm, Rect::from_xywh(0.0, 0.0, 300.0, 400.0).unwrap(), map, "", drawn, opts, 1.0);
             (0..pm.height()).filter(|&y| (0..pm.width()).any(|x| pm.pixel(x, y).is_some_and(|p| p.red() < 200))).max().unwrap_or(0)
         };
+        let depth = |map: &Map, drawn: Option<&[(u32, Vec<LegendEntry>)]>, hide_other: bool| depth_without(map, drawn, hide_other, &[]);
         let drawn = shown_legends(&map, 1e6);
         assert_eq!(drawn.len(), 1, "the empty layer draws nothing: {drawn:?}");
         let (shown, all) = (depth(&map, Some(&drawn), false), depth(&map, None, false));
@@ -1132,6 +1142,11 @@ mod tests {
         // the font and antialiasing don't matter.
         assert!(shown > 0, "the drawn class is listed");
         assert!(all >= 2 * shown, "{shown} px of {all}");
+        // A layer the legend leaves out (by name, any case) isn't listed, drawn or not.
+        let name = map.layer(pts).unwrap().name.to_uppercase();
+        assert_eq!(depth_without(&map, Some(&drawn), false, std::slice::from_ref(&name)), 0, "its only drawn layer left out");
+        let rest = depth_without(&map, None, false, &[name]);
+        assert!(rest > 0 && rest < all, "the other layer is still listed: {rest} px of {all}");
         // Hiding <all other values> takes one row off the full legend, and nothing off the drawn
         // one, which has none.
         assert!(depth(&map, None, true) < all);

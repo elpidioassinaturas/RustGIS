@@ -1234,7 +1234,7 @@ fn a_service_is_listed_when_its_capabilities_land() {
     h.state_mut().run("ui.addService", json!({"url": format!("http://{addr}/wms"), "type": "wms"})).unwrap();
     for _ in 0..100 {
         h.step();
-        if h.state().ui.service.as_ref().is_some_and(|c| c.listing.is_some() || c.error.is_some()) {
+        if h.state().ui.service.as_ref().is_some_and(|c| c.listing.is_some() || c.error.is_some() || c.failure.is_some()) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1585,7 +1585,7 @@ fn ogc_landing_lists_both_offerings_and_keeps_maps_after_failure() {
         let conn = h.state().ui.service.as_ref().unwrap();
         let count = if fail { 1 } else { 2 };
         assert_eq!(conn.listing.as_ref().unwrap()["count"], count);
-        assert_eq!(conn.error.is_some(), fail);
+        assert_eq!(conn.failure.as_ref().and_then(|f| f.status()), fail.then_some(503));
         h.step();
         h.get_by_label("Example GIS (map tiles)");
         if !fail {
@@ -1596,6 +1596,34 @@ fn ogc_landing_lists_both_offerings_and_keeps_maps_after_failure() {
         wait_for_ogc(&mut h, |app| !app.session.map().tiles.is_empty());
         assert!(h.state().session.map().tiles[0].url.contains("/map/tiles/"));
     }
+}
+
+/// A service a firewall refuses (#509): the dialog says what happened plainly, with what the server
+/// said folded under Details until asked for.
+#[test]
+fn a_refused_service_is_told_plainly_with_its_details() {
+    use ogc_server::{ROOT, Route, Server};
+    let page = "<html><head><title>Attention Required! | Cloudflare</title></head><body>Sorry, you have been blocked</body></html>";
+    let mut blocked = Route::new(ROOT, page);
+    blocked.status = 403;
+    blocked.headers = vec![("Server".into(), "cloudflare".into()), ("CF-RAY".into(), "a4c9-BOG".into())];
+    let server = Server::new(vec![blocked]);
+    let mut h = harness();
+    h.state_mut().run("ui.language", json!({"code":"en"})).unwrap();
+    h.state_mut().run("ui.addService", json!(null)).unwrap();
+    h.state_mut().run("ui.addService", json!({"url": server.root()})).unwrap();
+    wait_for_ogc(&mut h, |app| app.ui.service.as_ref().is_some_and(|c| c.failure.is_some()));
+    let f = h.state().ui.service.as_ref().and_then(|c| c.failure.clone()).unwrap();
+    assert_eq!((f.status(), f.firewall()), (Some(403), Some("Cloudflare")));
+    h.step();
+    h.get_by_label("The server refused the request.");
+    assert!(h.query_by_label("Copy details").is_none(), "folded until asked for");
+    h.get_by_label("Details").click();
+    h.step();
+    h.step();
+    h.get_by_label("Copy details");
+    h.get_by_label("\"Attention Required! | Cloudflare\"");
+    h.get_by_label("cf-ray a4c9-BOG");
 }
 
 #[test]

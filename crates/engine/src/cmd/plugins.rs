@@ -400,6 +400,7 @@ impl Bridge<'_> {
             fields: l.dataset.fields.clone(),
             features: rows.iter().take(limit).filter_map(|&i| l.dataset.features.get(i).cloned()).collect(),
             source: None,
+            crs: None,
             windowed: false,
         };
         let mut gj = rustgis_data::io::to_geojson(&ds);

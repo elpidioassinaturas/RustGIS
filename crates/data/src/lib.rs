@@ -158,6 +158,10 @@ pub struct Dataset {
     /// Where it was read from, if anywhere.
     #[serde(default)]
     pub source: Option<String>,
+    /// The coordinate system it was read in, when that isn't longitude/latitude. Its geometry is
+    /// always longitude/latitude; this is what an export writes by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crs: Option<raster::Crs>,
     /// The features are a window onto a source read in place (the part of a large file in view),
     /// so they aren't saved: the source is read again instead.
     #[serde(skip)]
@@ -167,13 +171,18 @@ pub struct Dataset {
 impl Serialize for Dataset {
     fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("Dataset", 5)?;
+        let mut st = s.serialize_struct("Dataset", 6)?;
         st.serialize_field("name", &self.name)?;
         st.serialize_field("geometry_type", &self.geometry_type)?;
         st.serialize_field("fields", &self.fields)?;
         let none: &[Feature] = &[];
         st.serialize_field("features", if self.windowed { none } else { self.features.as_slice() })?;
         st.serialize_field("source", &self.source)?;
+        if let Some(crs) = &self.crs {
+            st.serialize_field("crs", crs)?;
+        } else {
+            st.skip_field("crs")?;
+        }
         st.end()
     }
 }
@@ -187,7 +196,7 @@ pub struct ReadReport {
 
 impl Dataset {
     pub fn new(name: impl Into<String>, geometry_type: GeometryType, fields: Vec<Field>) -> Self {
-        Dataset { name: name.into(), geometry_type, fields, features: Features::default(), source: None, windowed: false }
+        Dataset { name: name.into(), geometry_type, fields, features: Features::default(), source: None, crs: None, windowed: false }
     }
 
     /// Index of a field by case-insensitive name.

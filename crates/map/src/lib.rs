@@ -235,11 +235,12 @@ impl Layer {
 
     /// A streamed layer: a large file read in place, a view at a time.
     pub fn new_streamed(id: u32, source: source::SourceLayer) -> Self {
-        let (name, ty, fields) = match source.info() {
-            Some(i) => (i.name.clone(), i.geometry_type, i.fields.clone()),
-            None => ("layer".to_string(), GeometryType::None, Vec::new()),
+        let (name, ty, fields, crs) = match source.info() {
+            Some(i) => (i.name.clone(), i.geometry_type, i.fields.clone(), i.coordinate_system()),
+            None => ("layer".to_string(), GeometryType::None, Vec::new(), None),
         };
         let mut ds = Dataset::new(name, ty, fields);
+        ds.crs = crs;
         ds.windowed = true;
         ds.source = source
             .path

@@ -23,11 +23,13 @@ pub struct Route {
     pub body: String,
     pub status: u16,
     pub delay: Duration,
+    /// More headers to answer with (a firewall's, say).
+    pub headers: Vec<(String, String)>,
 }
 
 impl Route {
     pub fn new(path: &str, body: &str) -> Self {
-        Self { path: path.into(), body: body.into(), status: 200, delay: Duration::ZERO }
+        Self { path: path.into(), body: body.into(), status: 200, delay: Duration::ZERO, headers: Vec::new() }
     }
 }
 
@@ -120,19 +122,20 @@ impl Server {
                         .collect(),
                 });
                 let route = serving.lock().unwrap().iter().find(|r| r.path == path).cloned();
-                let (status, body) = match route {
+                let (status, body, extra) = match route {
                     Some(r) => {
                         let until = Instant::now() + r.delay;
                         while Instant::now() < until && !stopping.load(Ordering::SeqCst) {
                             std::thread::sleep(Duration::from_millis(5));
                         }
-                        (r.status, r.body.replace("{base}", &origin))
+                        let extra: String = r.headers.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
+                        (r.status, r.body.replace("{base}", &origin), extra)
                     }
-                    None => (404, String::new()),
+                    None => (404, String::new(), String::new()),
                 };
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
             }

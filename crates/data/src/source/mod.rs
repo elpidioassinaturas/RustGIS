@@ -100,6 +100,14 @@ pub struct SourceInfo {
     pub notes: Vec<String>,
 }
 
+impl SourceInfo {
+    /// The source's coordinate system, when it isn't longitude/latitude and is known by its EPSG
+    /// code.
+    pub fn coordinate_system(&self) -> Option<Crs> {
+        Crs::parse(&self.crs).ok().filter(|c| *c != Crs::LonLat)
+    }
+}
+
 /// A read: the features intersecting `extent` (longitude/latitude; `None` = all), at most `limit`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Request {
@@ -298,6 +306,7 @@ pub fn materialize(src: &dyn FeatureSource) -> Result<(Dataset, ReadReport)> {
     let info = src.info();
     let batch = src.read(&Request::all())?;
     let mut ds = Dataset::new(info.name.clone(), info.geometry_type, info.fields.clone());
+    ds.crs = info.coordinate_system();
     ds.features = batch.features.into();
     let mut report = ReadReport { skipped: batch.skipped, messages: info.notes.iter().map(|n| format!("{}: {n}", info.name)).collect() };
     if !batch.complete {

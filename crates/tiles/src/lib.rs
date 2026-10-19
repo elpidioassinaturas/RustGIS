@@ -12,6 +12,7 @@ pub mod boundaries;
 pub mod cache;
 pub mod cog;
 pub mod draw;
+pub mod failure;
 pub mod geocode;
 pub mod mbtiles;
 pub mod mvt;

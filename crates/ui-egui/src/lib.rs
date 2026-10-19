@@ -23,6 +23,7 @@ mod cswui;
 mod dialogs;
 mod docpanes;
 mod editpanes;
+mod failureui;
 mod geocodeui;
 mod globe_drape;
 pub mod icons;
@@ -60,6 +61,7 @@ mod widgets;
 mod workspacepanes;
 mod zarrui;
 
+use rustgis_engine::render::rustgis_tiles::failure::Failure;
 use rustgis_engine::{Project, Session};
 use serde_json::{Value, json};
 
@@ -262,7 +264,7 @@ pub struct ServiceConn {
     pub url: String,
     /// `wms`, `wmts`, `wfs`, `ogcapi`, `arcgis`, or `auto`.
     pub kind: &'static str,
-    pub slot: Slot<Result<Vec<u8>, String>>,
+    pub slot: Slot<Result<Vec<u8>, Failure>>,
     /// The capabilities document, once it has arrived.
     pub text: Option<String>,
     /// Additional capabilities documents, keyed by their requested address.
@@ -272,6 +274,8 @@ pub struct ServiceConn {
     /// What `service.layers` made of it.
     pub listing: Option<Value>,
     pub error: Option<String>,
+    /// A capabilities request that failed, with what the server said (#509).
+    pub failure: Option<Failure>,
     /// An OGC API layer whose advertised tile template is being read before it is added.
     pub resolving: Option<TilesResolve>,
     /// A WCS coverage whose description is being read before it is asked for: `service.coverage`'s
@@ -297,6 +301,18 @@ pub struct TilesResolve {
 /// Fetches an address into a slot, off the frame.
 pub(crate) fn fetch_into(url: &str) -> Slot<Result<Vec<u8>, String>> {
     fetch_into_limited(url, rustgis_engine::render::rustgis_tiles::cache::MAX_DOWNLOAD)
+}
+
+/// Like [`fetch_into`], with what is known of a failure (#509).
+pub(crate) fn fetch_detailed_into(url: &str) -> Slot<Result<Vec<u8>, Failure>> {
+    let slot: Slot<Result<Vec<u8>, Failure>> = Slot::default();
+    let land = slot.clone();
+    rustgis_engine::render::rustgis_tiles::cache::download_detailed(
+        url,
+        rustgis_engine::render::rustgis_tiles::cache::MAX_DOWNLOAD,
+        Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r)),
+    );
+    slot
 }
 
 pub(crate) fn fetch_into_limited(url: &str, max: usize) -> Slot<Result<Vec<u8>, String>> {
@@ -1905,12 +1921,8 @@ impl RustGisApp {
                     _ => "auto",
                 };
                 let caps = rustgis_engine::data::ogc::capabilities_url(url, (kind != "auto").then_some(kind));
-                let slot: Slot<Result<Vec<u8>, String>> = Slot::default();
-                let land = slot.clone();
-                rustgis_engine::render::rustgis_tiles::cache::download(
-                    &caps,
-                    Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r)),
-                );
+                // A refusal is told with what the server said (#509).
+                let slot = fetch_detailed_into(&caps);
                 // The dialog shows the address connected to, however the connection was asked for.
                 self.dialogs.text = url.to_string();
                 self.ui.service = Some(ServiceConn {
@@ -1922,6 +1934,7 @@ impl RustGisApp {
                     pending: Some(caps),
                     listing: None,
                     error: None,
+                    failure: None,
                     resolving: None,
                     describing: None,
                 });
@@ -2483,7 +2496,11 @@ impl RustGisApp {
                 let ext = p.get("format").and_then(Value::as_str).unwrap_or("geojson").to_ascii_lowercase();
                 // A streamed layer exports its whole source, not the features read for the view.
                 let whole = if l.is_streamed() { Some(l.load_all()?) } else { None };
-                let written = rustgis_engine::data::io::write_bytes(whole.as_ref().unwrap_or(&l.dataset), &ext).map_err(|e| e.to_string());
+                // In the layer's own coordinate system, as share.exportLayer writes a file.
+                let ds = whole.as_ref().unwrap_or(&l.dataset);
+                use rustgis_engine::data::io;
+                let crs = io::default_export_crs(ds, &ext);
+                let written = io::write_bytes_in(ds, &ext, crs).map_err(|e| e.to_string());
                 let (bytes, left_out) = match written {
                     Ok(w) => w,
                     Err(e) => {
@@ -2495,6 +2512,9 @@ impl RustGisApp {
                 let name = format!("{}.{ext}", l.name);
                 if left_out > 0 {
                     self.session.notify(format!("{name}: {left_out} features without drawable geometry were left out"), false);
+                }
+                if ext == "zip" && rustgis_engine::data::raster::wkt::to_wkt(crs).is_none() {
+                    self.session.notify(format!("{name}: no .prj written, as {} has no WKT form", crs.label()), false);
                 }
                 self.download(&name, bytes);
             }
@@ -2842,14 +2862,14 @@ impl RustGisApp {
                     Ok(v) => {
                         conn.pending = v.get("next").and_then(Value::as_str).map(str::to_string);
                         if let Some(next) = &conn.pending {
-                            conn.slot = fetch_into(next);
+                            conn.slot = fetch_detailed_into(next);
                         }
                         conn.listing = Some(v);
                     }
                     Err(e) => conn.error = Some(e),
                 }
             }
-            Err(e) => conn.error = Some(e),
+            Err(f) => conn.failure = Some(f),
         }
     }
 

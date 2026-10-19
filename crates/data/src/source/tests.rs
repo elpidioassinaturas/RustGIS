@@ -1028,3 +1028,76 @@ fn damaged_geojson_is_an_error_not_a_panic() {
     let b = src.read(&Request::all()).unwrap();
     assert!(b.skipped > 0);
 }
+
+/// The issue #514 squares: ETRS89 / UTM zone 32N (EPSG:25832), or the same with the zone prefixed
+/// to the easting (EPSG:4647).
+fn utm_squares(code: u32) -> Dataset {
+    let e0 = if code == 4647 { 32_500_000.0 } else { 500_000.0 };
+    let text: String = std::iter::once("side;wkt\n".to_string())
+        .chain([50.0, 100.0, 1000.0].iter().map(|s| {
+            let (x0, y0, x1, y1) = (e0, 5_700_000.0, e0 + s, 5_700_000.0 + s);
+            format!("{s} m;POLYGON (({x0} {y0}, {x1} {y0}, {x1} {y1}, {x0} {y1}, {x0} {y0}))\n")
+        }))
+        .collect();
+    let opts = crate::io::CsvOptions {
+        wkt: Some("wkt".into()),
+        crs: Some(Crs::from_epsg(code).unwrap()),
+        delimiter: Some(b';'),
+        ..Default::default()
+    };
+    crate::io::read_csv_with(&text, "squares", &opts).unwrap().0
+}
+
+#[test]
+fn exports_are_written_in_the_system_the_layer_was_read_in() {
+    let d = dir().join("export-crs");
+    std::fs::create_dir_all(&d).unwrap();
+    for code in [25832u32, 4647] {
+        let ds = utm_squares(code);
+        let crs = Crs::from_epsg(code).unwrap();
+        assert_eq!(ds.crs, Some(crs));
+        let e0 = if code == 4647 { 32_500_000.0 } else { 500_000.0 };
+        for ext in ["gpkg", "shp", "fgb"] {
+            let p = d.join(format!("squares-{code}.{ext}"));
+            crate::io::write_path_in(&ds, &p, crs).unwrap();
+            // The file says the system, and reading it back gives the same places.
+            let src = open_path(&p, None).unwrap();
+            assert_eq!(src.info().crs, format!("EPSG:{code}"), "{ext}");
+            let (back, _) = materialize(src.as_ref()).unwrap();
+            assert_eq!(back.crs, Some(crs), "{ext}");
+            // (FlatGeobuf orders features along its index.)
+            for b in &back.features {
+                let a = ds.features.iter().find(|a| a.attrs == b.attrs).unwrap();
+                let (a, b) = (a.geometry.as_ref().unwrap().extent(), b.geometry.as_ref().unwrap().extent());
+                assert!((a.min_x - b.min_x).abs() < 1e-9 && (a.max_y - b.max_y).abs() < 1e-9, "{ext}: {a:?} {b:?}");
+            }
+        }
+        // The Shapefile holds the system's own coordinates, and a .prj GDAL reads by its code.
+        let shp = d.join(format!("squares-{code}.shp"));
+        let shapes = shapefile::read_shapes_as::<_, shapefile::Polygon>(&shp).unwrap();
+        let b = shapes.last().unwrap().bbox();
+        assert!((b.min.x - e0).abs() < 1e-6 && (b.max.x - e0 - 1000.0).abs() < 1e-6, "{b:?}");
+        assert!((b.min.y - 5_700_000.0).abs() < 1e-6 && (b.max.y - 5_701_000.0).abs() < 1e-6, "{b:?}");
+        let prj = std::fs::read_to_string(shp.with_extension("prj")).unwrap();
+        assert!(prj.starts_with("PROJCS[") && prj.ends_with(&format!("AUTHORITY[\"EPSG\",\"{code}\"]]")), "{prj}");
+    }
+    // By default an export keeps the layer's system where the format can say it; a system without
+    // an EPSG code only where its WKT is read back (a Shapefile's .prj).
+    let mut ds = utm_squares(25832);
+    let utm = Crs::from_epsg(25832).unwrap();
+    assert_eq!(crate::io::default_export_crs(&ds, "GPKG"), utm);
+    assert_eq!(crate::io::default_export_crs(&ds, "geojson"), Crs::LonLat);
+    let wkt = crate::raster::wkt::to_wkt(utm).unwrap().replace(",AUTHORITY[\"EPSG\",\"25832\"]", "").replace("EPSG:25832", "My grid");
+    let custom = crate::raster::wkt::crs_from_wkt(&wkt).unwrap();
+    assert_eq!(custom.epsg(), 0);
+    ds.crs = Some(custom);
+    assert_eq!(crate::io::default_export_crs(&ds, "shp"), custom);
+    assert_eq!(crate::io::default_export_crs(&ds, "fgb"), Crs::LonLat);
+    // Asked for, it goes into a Shapefile, but not a file that would read back as longitude/latitude.
+    assert!(crate::io::write_path_in(&ds, &d.join("custom.shp"), custom).is_ok());
+    assert!(crate::io::write_path_in(&ds, &d.join("custom.gpkg"), custom).is_err());
+    assert!(crate::io::write_bytes_in(&ds, "fgb", custom).is_err());
+    // GeoJSON is longitude/latitude only.
+    let ds = utm_squares(25832);
+    assert!(crate::io::write_path_in(&ds, &d.join("squares.geojson"), Crs::from_epsg(25832).unwrap()).is_err());
+}
