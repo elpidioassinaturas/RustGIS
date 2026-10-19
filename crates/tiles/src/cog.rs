@@ -974,9 +974,12 @@ fn paint(pen: &Pen, spots: &[Option<(u32, usize)>], wanted: &[u32], tiles: &[Pic
 /// edges let the map show through as a thin line. Carried out, the step falls outside the file and
 /// its own pixels stay opaque. Pixels with no data inside the file are left empty. Where no file
 /// lies beside, at the data's outer edge, the picture grows by that pixel (1/256 of a map tile).
+/// The colour is copied whole, alpha included, so a half-transparent edge is carried out as it is.
 fn bleed(rgba: &mut [u8], spots: &[Option<(u32, usize)>]) {
     let s = SIZE as usize;
     let painted = |k: usize| rgba.get(k * 4 + 3).is_some_and(|a| *a > 0);
+    // A pixel of the file with a colour: what the edge is carried out from.
+    let source = |m: usize| spots.get(m).is_some_and(Option::is_some) && painted(m);
     let mut fill: Vec<(usize, usize)> = Vec::new();
     for (k, spot) in spots.iter().enumerate() {
         if spot.is_some() || painted(k) {
@@ -995,7 +998,7 @@ fn bleed(rgba: &mut [u8], spots: &[Option<(u32, usize)>]) {
             (south && west).then(|| k + s - 1),
             (south && east).then(|| k + s + 1),
         ];
-        if let Some(from) = near.into_iter().flatten().find(|m| spots.get(*m).is_some_and(Option::is_some) && painted(*m)) {
+        if let Some(from) = near.into_iter().flatten().find(|m| source(*m)) {
             fill.push((k, from));
         }
     }
