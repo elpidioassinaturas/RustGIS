@@ -116,6 +116,8 @@ pub fn parts(cell: u64) -> Option<Vec<Vec<Vec<Coord>>>> {
     let (edge, turn) = if hi > 180.0 { (180.0, -360.0) } else { (-180.0, 360.0) };
     let near = clip(&r, edge, edge > 0.0);
     let far: Vec<Coord> = clip(&r, edge, edge < 0.0).into_iter().map(|c| Coord::new(c.x + turn, c.y)).collect();
+    // A side that only touches the meridian (a corner on it, so fewer than four points) has no
+    // area and is left out.
     let out: Vec<Vec<Vec<Coord>>> = [near, far].into_iter().filter(|p| p.len() >= 4).map(|p| vec![p]).collect();
     (!out.is_empty()).then_some(out)
 }
@@ -205,11 +207,13 @@ fn estimate(rings: &[Vec<a5::LonLat>], res: i32) -> f64 {
 /// order; more than [`MAX_CELLS`] is an error. A covering's cells don't overlap, so it's counted
 /// exactly before any is made. Coverings can overlap one another (neighbouring parcels, buffers),
 /// so they're merged into a set as they come and a cell they share counts once.
-fn cells_of(coverings: &[Vec<u64>], res: i32) -> Result<Vec<u64>, String> {
+fn cells_of(coverings: impl IntoIterator<Item = Result<Vec<u64>, String>>, res: i32) -> Result<Vec<u64>, String> {
     // A coarser cell holds the ratio of the two resolutions' cell counts.
     let total = a5::get_num_cells(res);
     let mut cells: HashSet<u64> = HashSet::new();
+    // Covered one at a time, so a run over the cap stops at the covering that takes it there.
     for covering in coverings {
+        let covering = covering?;
         let parts = || covering.iter().copied().filter(|c| !a5::is_compaction_marker(*c));
         let n = parts().fold(0u64, |n, c| n.saturating_add(total / a5::get_num_cells(a5::get_resolution(c)).max(1)));
         if n > MAX_CELLS {
@@ -255,7 +259,7 @@ pub fn grid(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     let mut skipped = 0usize;
     let off = "is outside the globe's longitudes and latitudes (−180° to 180°, −90° to 90°)";
     let cells: Vec<u64> = if area == "World" {
-        cells_of(&[a5::get_res0_cells()?], res)?
+        cells_of([a5::get_res0_cells()], res)?
     } else {
         // The polygons to cover, each its rings.
         let shapes: Vec<Vec<Vec<a5::LonLat>>> = if area == "Input Layer" {
@@ -302,8 +306,7 @@ pub fn grid(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
         if guess > ESTIMATE_MARGIN * MAX_CELLS as f64 {
             return Err(too_many(if guess.is_finite() { format!("About {guess:.0}") } else { "Too many".into() }, res));
         }
-        let coverings = shapes.iter().map(|s| a5::polygon_to_cells(s, res, Some(options))).collect::<Result<Vec<_>, _>>()?;
-        let cells = cells_of(&coverings, res)?;
+        let cells = cells_of(shapes.iter().map(|s| a5::polygon_to_cells(s, res, Some(options))), res)?;
         if cells.is_empty() {
             return Err(format!("No cell at resolution {res} has its centre in the area: choose Cells: Overlapping or a finer resolution"));
         }
@@ -349,7 +352,7 @@ pub fn aggregate(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
             _ => continue,
         };
         let v = field.and_then(|i| ds.value(r, i).as_f64()).filter(|v| v.is_finite());
-        let mut credited: Vec<u64> = Vec::new();
+        let mut credited: HashSet<u64> = HashSet::new();
         for c in pts {
             if !c.is_finite() || c.y.abs() > 90.0 || c.x.abs() > 360.0 {
                 outside += 1;
@@ -362,11 +365,10 @@ pub fn aggregate(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
             let e = by.entry(cell).or_insert((0, 0.0, 0));
             e.0 += 1;
             if let Some(v) = v
-                && !credited.contains(&cell)
+                && credited.insert(cell)
             {
                 e.1 += v;
                 e.2 += 1;
-                credited.push(cell);
             }
             if by.len() as u64 > MAX_CELLS {
                 return Err(format!("The points fall in more than {MAX_CELLS} cells at resolution {res}: use a coarser resolution"));
@@ -561,7 +563,7 @@ mod tests {
         ] {
             let shape = vec![extent_ring(e)];
             let options = a5::PolygonToCellsOptions { containment: a5::Containment::Overlapping };
-            let n = cells_of(&[a5::polygon_to_cells(&shape, res, Some(options)).unwrap()], res).unwrap().len() as f64;
+            let n = cells_of([a5::polygon_to_cells(&shape, res, Some(options))], res).unwrap().len() as f64;
             let guess = estimate(&shape, res);
             assert!(guess > n / ESTIMATE_MARGIN && guess < n * ESTIMATE_MARGIN, "{e:?} r{res}: {guess} for {n}");
         }
