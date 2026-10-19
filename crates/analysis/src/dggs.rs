@@ -459,6 +459,10 @@ mod tests {
         let w = layer(grid(&inp, &serde_json::json!({"resolution": 1, "area": "World"})).unwrap());
         assert_eq!(w.features.len() as u64, a5::get_num_cells(1));
         assert!(grid(&inp, &serde_json::json!({"resolution": 12, "area": "World"})).unwrap_err().contains("too many"));
+        // The finest resolution's cell count (15·4³⁰, about 1.7e19) fits in a u64: the world there is
+        // counted, not overflowed, and refused.
+        let e = grid(&inp, &serde_json::json!({"resolution": 30, "area": "World"})).unwrap_err();
+        assert!(e.starts_with(&a5::get_num_cells(30).to_string()) && e.contains("too many"), "{e}");
         // A view far too big for the resolution is refused by the estimate, before it's covered
         // (a covering whose edges alone cross millions of cells); one just over by the exact count.
         let wide = One(points(&[]), Some(Extent::new(-60.0, -30.0, -40.0, -10.0)));
