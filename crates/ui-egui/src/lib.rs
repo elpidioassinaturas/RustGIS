@@ -3329,6 +3329,7 @@ const DEFAULTS_TO_ACTIVE_LAYER: &[&str] = &[
     "share.webStyle",
     "share.locator",
     "zarr.reduce",
+    "cube.trend",
 ];
 
 #[cfg(test)]

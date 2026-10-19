@@ -6281,6 +6281,13 @@ fn lidar_point_clouds() {
 /// A Zarr store in a temporary folder: `t` over three monthly steps (days since 2001-01-01: 0,
 /// 31, 59) on a 3 × 4 grid, step `k`'s values `100·k + i`.
 fn zarr_store_over_time(tag: &str) -> (std::path::PathBuf, String) {
+    zarr_store_at(tag, &[0, 31, 59])
+}
+
+/// A Zarr store of one variable, `t` (time × 3 × 4), with a step at each of `days` since 2001-01-01:
+/// step `k`'s cells are `100 k + cell`.
+fn zarr_store_at(tag: &str, days: &[i32]) -> (std::path::PathBuf, String) {
+    let n = days.len();
     let dir = std::env::temp_dir().join(format!("rustgis-zarr-{tag}-{}", std::process::id()));
     let store = dir.join("air.zarr");
     let _ = std::fs::remove_dir_all(&dir);
@@ -6295,13 +6302,13 @@ fn zarr_store_over_time(tag: &str) -> (std::path::PathBuf, String) {
     };
     let meta = json!({"metadata": {
         ".zgroup": {"zarr_format": 2},
-        "t/.zarray": arr("[3,3,4]", "[1,3,4]", "<f4"),
+        "t/.zarray": arr(&format!("[{n},3,4]"), "[1,3,4]", "<f4"),
         "t/.zattrs": {"_ARRAY_DIMENSIONS": ["time","lat","lon"], "units": "K"},
         "lat/.zarray": arr("[3]", "[3]", "<f4"),
         "lat/.zattrs": {"_ARRAY_DIMENSIONS": ["lat"], "units": "degrees_north"},
         "lon/.zarray": arr("[4]", "[4]", "<f4"),
         "lon/.zattrs": {"_ARRAY_DIMENSIONS": ["lon"], "units": "degrees_east"},
-        "time/.zarray": arr("[3]", "[3]", "<i4"),
+        "time/.zarray": arr(&format!("[{n}]"), &format!("[{n}]"), "<i4"),
         "time/.zattrs": {"_ARRAY_DIMENSIONS": ["time"], "units": "days since 2001-01-01"},
     }, "zarr_consolidated_format": 1});
     std::fs::write(store.join(".zmetadata"), meta.to_string()).unwrap();
@@ -6309,8 +6316,8 @@ fn zarr_store_over_time(tag: &str) -> (std::path::PathBuf, String) {
     let f32s = |v: &[f32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
     std::fs::write(store.join("lat/0"), f32s(&[10.0, 20.0, 30.0])).unwrap();
     std::fs::write(store.join("lon/0"), f32s(&[1.0, 2.0, 3.0, 4.0])).unwrap();
-    std::fs::write(store.join("time/0"), [0i32, 31, 59].iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
-    for t in 0..3 {
+    std::fs::write(store.join("time/0"), days.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+    for t in 0..n {
         let v: Vec<f32> = (0..12).map(|i| (t * 100 + i) as f32).collect();
         std::fs::write(store.join(format!("t/{t}.0.0")), f32s(&v)).unwrap();
     }
@@ -6418,6 +6425,99 @@ fn a_zarr_variable_summarised_over_time() {
         assert!(s.run("zarr.reduce", &bad).is_err(), "{bad}");
     }
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A trend over a data cube (#579), from the three kinds of cube: a stack of raster layers dated
+/// by their names, a raster whose bands are dates, and a Zarr variable along its time dimension.
+/// A cell with a clear trend gets Sen's slope and a significant slope; noise gets a slope but no
+/// significant one; a cell with too few values gets nothing.
+#[test]
+fn a_trend_over_a_data_cube() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let mut s = Session::new(Project::default());
+    let gt = GeoTransform { origin_x: -56.0, origin_y: -12.0, pixel_width: 0.01, pixel_height: -0.01 };
+    // Twelve years; cell 0 rises 0.02 a year, cell 1 is noise, cell 2 has three values only.
+    let years: Vec<i32> = (2013..2025).collect();
+    let noise = [0.03, -0.02, 0.05, -0.04, 0.01, 0.0, -0.05, 0.04, -0.01, 0.02, -0.03, 0.03];
+    let cells = |k: usize| -> Vec<f32> {
+        vec![0.3 + 0.02 * k as f32 + 0.002 * noise[k] as f32, 0.5 + noise[k] as f32, if k < 3 { 0.4 } else { f32::NAN }, 0.6]
+    };
+    let mut names = Vec::new();
+    for (k, y) in years.iter().enumerate() {
+        let name = format!("ndvi_{y}-07-01");
+        let r = Raster::new(&name, 2, 2, vec![cells(k)], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let bytes = geotiff::write(&r, 0).unwrap();
+        crate::cmd::raster::add_raster(&mut s, &name, rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)).unwrap();
+        names.push(name);
+    }
+    let value = |s: &Session, id: &Value, cell: usize| {
+        s.map().layer(id.as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap().bands[0].data[cell]
+    };
+    let r = s.run("cube.trend", &json!({"layers": names})).unwrap();
+    let ids = r["layers"].as_array().unwrap().clone();
+    assert_eq!((ids.len(), r["dates"].as_u64()), (4, Some(12)), "{r}");
+    let (slope, p, significant) = (&ids[0], &ids[2], &ids[3]);
+    assert!((value(&s, slope, 0) - 0.02).abs() < 1e-3, "{}", value(&s, slope, 0));
+    assert!(value(&s, p, 0) < 0.01 && (value(&s, significant, 0) - 0.02).abs() < 1e-3);
+    assert!(value(&s, slope, 1).is_finite() && value(&s, p, 1) > 0.05 && value(&s, significant, 1).is_nan());
+    assert!(value(&s, slope, 2).is_nan() && value(&s, p, 2).is_nan());
+    // A constant cell: no slope, and nothing significant.
+    assert_eq!(value(&s, slope, 3), 0.0);
+    assert!(value(&s, significant, 3).is_nan());
+    let name = |id: &Value| s.map().layer(id.as_u64().unwrap() as u32).unwrap().name.clone();
+    assert_eq!(name(slope), "ndvi 2013-07-01–2024-07-01 Sen slope per year");
+    assert!(name(&ids[1]).ends_with("Z (Hamed-Rao)"), "{}", name(&ids[1]));
+    // Per decade, another test, a period, and the dates given.
+    let r = s.run("cube.trend", &json!({"layers": names, "per": "decade", "test": "yueWang", "start": "2016", "name": "late"})).unwrap();
+    let late = r["layers"][0].clone();
+    assert_eq!(r["dates"], 9);
+    assert!((value(&s, &late, 0) - 0.2).abs() < 1e-2, "{}", value(&s, &late, 0));
+    let backwards: Vec<String> = (0..12).map(|k| format!("{}-01-01", 2030 - k)).collect();
+    let r = s.run("cube.trend", &json!({"layers": names, "dates": backwards, "test": "original"})).unwrap();
+    assert!(value(&s, &r["layers"][0], 0) < 0.0, "the dates given are used, in the layers' order");
+    // A raster whose bands are the dates, named by them.
+    let bands: Vec<Vec<f32>> = (0..12).map(cells).collect();
+    let mut cube = Raster::new("stack", 2, 2, bands, gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    for (b, y) in cube.bands.iter_mut().zip(&years) {
+        b.name = format!("NDVI {y}");
+    }
+    let bytes = geotiff::write(&cube, 0).unwrap();
+    let id =
+        crate::cmd::raster::add_raster(&mut s, "stack", rustgis_map::RasterLayer::from_bytes(cube, "stack.tif", bytes)).unwrap()["layer"]
+            .clone();
+    let r = s.run("cube.trend", &json!({"layer": id})).unwrap();
+    assert!((value(&s, &r["layers"][0], 0) - 0.02).abs() < 1e-3);
+    // A Zarr variable: every cell rises 100 a step.
+    let (dir, path) = zarr_store_at("trend", &[0, 31, 59, 90, 120, 151, 181, 212]);
+    let r = s.run("cube.trend", &json!({"path": path, "variable": "t", "test": "seasonal", "seasons": 4})).unwrap();
+    assert_eq!(r["dates"], 8);
+    assert!(value(&s, &r["layers"][0], 0) > 1000.0, "{}", value(&s, &r["layers"][0], 0));
+    let _ = std::fs::remove_dir_all(dir);
+    // Refused: too few layers, no dates, dates of another length, unknown options, another grid.
+    let other = Raster::new("ndvi_2030-01-01", 3, 3, vec![vec![0.0; 9]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    let bytes = geotiff::write(&other, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "ndvi_2030-01-01", rustgis_map::RasterLayer::from_bytes(other, "o.tif", bytes)).unwrap();
+    let mut mixed = names.clone();
+    mixed.push("ndvi_2030-01-01".into());
+    for bad in [
+        json!({"layers": &names[..3]}),
+        json!({"layers": names, "dates": ["2001", "2002"]}),
+        json!({"layers": names, "test": "ols"}),
+        json!({"layers": names, "alpha": 0.7}),
+        json!({"layers": names, "per": "week"}),
+        json!({"layers": names, "start": "2030"}),
+        json!({"layers": mixed}),
+        json!({"layer": names[0]}),
+    ] {
+        assert!(s.run("cube.trend", &bad).is_err(), "{bad}");
+    }
+    let undated = Raster::new("plain", 2, 2, vec![vec![0.0; 4]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    let bytes = geotiff::write(&undated, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "plain", rustgis_map::RasterLayer::from_bytes(undated, "plain.tif", bytes)).unwrap();
+    let mut no_date = names[..4].to_vec();
+    no_date[1] = "plain".into();
+    let e = s.run("cube.trend", &json!({"layers": no_date})).unwrap_err();
+    assert!(e.contains("no date in the name of plain"), "{e}");
 }
 
 /// A Zarr variable follows the time slider (#554): the slice drawn is the step the slider is at,

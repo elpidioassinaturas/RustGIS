@@ -33,7 +33,40 @@ pub struct Workflow {
     pub error: Option<String>,
     pub script: String,
     pub script_out: Vec<(String, bool)>,
+    pub trend: TrendForm,
 }
+
+/// The Trend Analysis section's inputs (#579), and a run under way.
+#[derive(Default)]
+pub struct TrendForm {
+    /// The cube: a stack of layers (`true`), or one layer (a Zarr variable, or a raster of bands).
+    pub stack: bool,
+    /// The layers ticked for a stack.
+    pub ticked: Vec<String>,
+    pub test: String,
+    pub seasons: u32,
+    pub alpha: String,
+    pub decade: bool,
+    pub start: String,
+    pub end: String,
+    pub months: String,
+    pub min_valid: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub running: Option<Trending>,
+}
+
+/// A trend running on a thread of its own: Cancel, the work done, and the result.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Trending {
+    pub total: usize,
+    pub params: Value,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub done: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub result: TrendResult,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type TrendResult = std::sync::Arc<std::sync::Mutex<Option<Result<(Vec<rustgis_engine::data::raster::Raster>, usize), String>>>>;
 
 fn heading(ui: &mut Ui, text: &str) {
     ui.add_space(6.0);
@@ -86,6 +119,7 @@ pub const SECTIONS: &[(&str, &str)] = &[
     ("models", "ModelBuilder"),
     ("georeference", "Georeference"),
     ("change", "Change Detection"),
+    ("trend", "Trend Analysis"),
     ("spectral", "Spectral Analysis"),
     ("classify", "Classification Wizard"),
     ("supervised", "Classification Tools"),
@@ -461,6 +495,7 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 );
             }
         }
+        "trend" => trend(app, ui, &rasters),
         "spectral" => {
             heading(ui, "Band values at a point");
             combo(ui, "wf_sp", &mut app.workflow.layer, &rasters);
@@ -717,6 +752,187 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     if let Some(r) = app.workflow.result.clone() {
         result_view(ui, &r, t);
+    }
+}
+
+/// The Trend Analysis section (opengeos/RustGIS#579): a cube (raster layers a date each, a Zarr
+/// variable, or a raster's bands), Sen's slope and the modified Mann–Kendall test, worked out on a
+/// thread with progress and Cancel, and added as four layers.
+fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if trend_running(app, ui) {
+        return;
+    }
+    heading(ui, "Trend over a series of rasters");
+    let f = &mut app.workflow.trend;
+    if f.test.is_empty() {
+        (f.test, f.seasons, f.alpha) = ("hamedRao".into(), 12, "0.05".into());
+    }
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut f.stack, true, tl!("Layers, a date each"));
+        ui.radio_value(&mut f.stack, false, tl!("One layer: a Zarr variable or a raster's bands"));
+    });
+    if f.stack {
+        f.ticked.retain(|n| rasters.contains(n));
+        ui.horizontal(|ui| {
+            if ui.small_button(tl!("All")).clicked() {
+                f.ticked = rasters.to_vec();
+            }
+            if ui.small_button(tl!("None")).clicked() {
+                f.ticked.clear();
+            }
+        });
+        egui::ScrollArea::vertical().id_salt("trend_layers").max_height(160.0).show(ui, |ui| {
+            for n in rasters {
+                let mut on = f.ticked.contains(n);
+                let date = rustgis_engine::cmd::cube::date_in_text(n)
+                    .map_or_else(|| tl!("no date in the name").to_string(), |d| rustgis_engine::data::time::format(d, "YYYY-MM-DD"));
+                if ui.checkbox(&mut on, format!("{n}  ({date})")).changed() {
+                    if on {
+                        f.ticked.push(n.clone());
+                    } else {
+                        f.ticked.retain(|x| x != n);
+                    }
+                }
+            }
+        });
+    } else {
+        combo(ui, "wf_tr_layer", &mut app.workflow.layer, rasters);
+    }
+    let f = &mut app.workflow.trend;
+    egui::Grid::new("trend_grid").num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
+        ui.label(tl!("Test"));
+        let tests = [
+            ("hamedRao", "Modified Mann–Kendall (Hamed & Rao)"),
+            ("yueWang", "Modified Mann–Kendall (Yue & Wang)"),
+            ("seasonal", "Seasonal Mann–Kendall"),
+            ("original", "Mann–Kendall"),
+        ];
+        let shown = tests.iter().find(|t| t.0 == f.test).map_or("", |t| t.1);
+        egui::ComboBox::from_id_salt("trend_test").selected_text(tl!(shown)).width(240.0).show_ui(ui, |ui| {
+            for (code, label) in tests {
+                ui.selectable_value(&mut f.test, code.to_string(), tl!(label));
+            }
+        });
+        ui.end_row();
+        if f.test == "seasonal" {
+            ui.label(tl!("Seasons a year"));
+            ui.add(egui::DragValue::new(&mut f.seasons).range(2..=366));
+            ui.end_row();
+        }
+        ui.label(tl!("Significance level"));
+        ui.add(egui::TextEdit::singleline(&mut f.alpha).desired_width(60.0));
+        ui.end_row();
+        ui.label(tl!("Slope per"));
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut f.decade, false, tl!("year"));
+            ui.radio_value(&mut f.decade, true, tl!("decade"));
+        });
+        ui.end_row();
+        ui.label(tl!("From"));
+        ui.add(egui::TextEdit::singleline(&mut f.start).hint_text("2000-01-01").desired_width(110.0));
+        ui.end_row();
+        ui.label(tl!("To"));
+        ui.add(egui::TextEdit::singleline(&mut f.end).hint_text("2024-12-31").desired_width(110.0));
+        ui.end_row();
+        ui.label(tl!("Months"));
+        ui.add(egui::TextEdit::singleline(&mut f.months).hint_text("12, 1, 2").desired_width(110.0));
+        ui.end_row();
+        ui.label(tl!("Dates a cell needs"));
+        ui.add(egui::TextEdit::singleline(&mut f.min_valid).hint_text(tl!("half")).desired_width(60.0));
+        ui.end_row();
+    });
+    ui.label(
+        egui::RichText::new(tl!("Writes Sen's slope, the test's Z and p-value, and the slope where the trend is significant."))
+            .weak()
+            .small(),
+    );
+    if !ui.button(tl!("Run")).clicked() {
+        return;
+    }
+    let mut p = json!({"test": f.test, "per": if f.decade { "decade" } else { "year" }});
+    if f.stack {
+        p["layers"] = json!(f.ticked);
+    } else {
+        p["layer"] = json!(app.workflow.layer);
+    }
+    if f.test == "seasonal" {
+        p["seasons"] = json!(f.seasons);
+    }
+    if let Ok(a) = f.alpha.trim().parse::<f64>() {
+        p["alpha"] = json!(a);
+    }
+    if let Ok(m) = f.min_valid.trim().parse::<u64>() {
+        p["minValid"] = json!(m);
+    }
+    for (k, v) in [("start", &f.start), ("end", &f.end)] {
+        if !v.trim().is_empty() {
+            p[k] = json!(v.trim());
+        }
+    }
+    let months: Vec<Value> = f.months.split([',', ' ']).filter_map(|m| m.trim().parse::<u64>().ok()).map(|m| json!(m)).collect();
+    if !months.is_empty() {
+        p["months"] = Value::Array(months);
+    }
+    // The web app has no threads: the run is made here.
+    #[cfg(target_arch = "wasm32")]
+    run(app, "cube.trend", p);
+    #[cfg(not(target_arch = "wasm32"))]
+    match rustgis_engine::cmd::cube::trend_start(&app.session, &p) {
+        Ok(job) => {
+            let r = Trending {
+                total: job.total(),
+                params: p,
+                cancel: Default::default(),
+                done: Default::default(),
+                result: Default::default(),
+            };
+            let (cancel, done, result) = (r.cancel.clone(), r.done.clone(), r.result.clone());
+            std::thread::spawn(move || {
+                let out = job.run(&cancel, &done).map(|rasters| (rasters, job.dates()));
+                if let Ok(mut g) = result.lock() {
+                    *g = Some(out);
+                }
+            });
+            app.workflow.trend.running = Some(r);
+            app.workflow.error = None;
+        }
+        Err(e) => app.workflow.error = Some(e),
+    }
+}
+
+/// A trend under way: its progress and Cancel, or, once it lands, its layers added through
+/// `cube.trend` (so it's in the History). Whether one is still running.
+#[cfg(not(target_arch = "wasm32"))]
+fn trend_running(app: &mut RustGisApp, ui: &mut Ui) -> bool {
+    use std::sync::atomic::Ordering;
+    let Some(r) = &app.workflow.trend.running else { return false };
+    let landed = r.result.lock().ok().and_then(|mut g| g.take());
+    match landed {
+        None => {
+            let (done, total) = (r.done.load(Ordering::Relaxed), r.total.max(1));
+            heading(ui, "Trend over a series of rasters");
+            ui.horizontal(|ui| {
+                ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!("{done} / {total}")).desired_width(200.0));
+                if ui.button(tl!("Cancel")).clicked() {
+                    r.cancel.store(true, Ordering::Relaxed);
+                }
+            });
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            true
+        }
+        Some(res) => {
+            let mut p = r.params.clone();
+            app.workflow.trend.running = None;
+            match res {
+                Ok((rasters, dates)) => {
+                    p["ran"] = json!(rustgis_engine::cmd::cube::land(rasters, dates));
+                    run(app, "cube.trend", p);
+                }
+                Err(e) => app.workflow.error = Some(e),
+            }
+            false
+        }
     }
 }
 

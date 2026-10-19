@@ -19,6 +19,7 @@ pub mod rasterops;
 pub mod tissot;
 mod tools;
 pub mod topology;
+pub mod trend;
 
 pub use tools::{TOOLS, holds_coordinates, simplify_geometry};
 

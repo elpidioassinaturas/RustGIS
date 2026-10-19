@@ -2,6 +2,7 @@
 
 pub mod catalogs;
 pub mod clipboard;
+pub mod cube;
 pub mod deeplearning;
 pub mod design;
 pub mod directions;
@@ -66,6 +67,7 @@ pub fn all() -> Vec<CommandSpec> {
     v.extend(layer_copy::commands());
     v.extend(raster::commands());
     v.extend(zarr::commands());
+    v.extend(cube::commands());
     v.extend(select::commands());
     v.extend(edit::commands());
     v.extend(clipboard::commands());

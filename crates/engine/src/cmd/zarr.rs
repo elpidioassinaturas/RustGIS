@@ -292,7 +292,7 @@ fn cached_store(url: &str) -> Result<std::sync::Arc<zarr::Store>, String> {
 
 /// Step `i` of a following layer's variable, from the kept slices or read now.
 #[cfg(not(target_arch = "wasm32"))]
-fn read_step(zt: &ZarrTime, i: usize) -> Result<std::sync::Arc<raster::Raster>, String> {
+pub(crate) fn read_step(zt: &ZarrTime, i: usize) -> Result<std::sync::Arc<raster::Raster>, String> {
     let sel = zt.selection(i);
     let key = format!("{}\u{0}{sel}\u{0}{}", zt.store, zt.crs.as_deref().unwrap_or(""));
     if let Some((_, r)) = slices().lock().ok().and_then(|c| c.iter().find(|(k, _)| *k == key).cloned()) {
@@ -816,52 +816,14 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
         None => 0.0,
         Some(v) => v.as_f64().filter(|v| (0.0..=1.0).contains(v)).ok_or("minValid is a share from 0 to 1")?,
     };
-    let months: Vec<u32> = match p.get("months").filter(|v| !v.is_null()) {
-        None => Vec::new(),
-        Some(Value::Array(a)) => a
-            .iter()
-            .map(|m| m.as_u64().filter(|m| (1..=12).contains(m)).map(|m| m as u32).ok_or("months are numbers from 1 to 12"))
-            .collect::<Result<_, _>>()?,
-        Some(_) => return Err("months is a list of months (1–12)".into()),
-    };
-    let mut src = series_source(s, p)?;
-    let store = if is_web(&src.root) {
-        cached_store(&src.root)?
-    } else {
-        std::sync::Arc::new(zarr::read_metadata(Path::new(&src.root)).map_err(|e| format!("{}: {e}", src.root))?)
-    };
-    pick_variable(&store, &mut src.sel)?;
-    let var = src.sel.variable.clone();
-    let coords = store_files(&src.root, &zarr::coordinate_keys(&store, &var))?;
-    let (dim, dates) = zarr::time_axis(&store, &var, &coords)
-        .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")"))?;
-    let date = |k: &str| -> Result<Option<f64>, String> {
-        match p.get(k).filter(|v| !v.is_null()) {
-            None => Ok(None),
-            Some(v) => rustgis_data::time::parse_input(v)
-                .map(Some)
-                .ok_or_else(|| format!("{k} is a date (2015-06-01, a year, or milliseconds since 1970)")),
-        }
-    };
-    let (start, end) = (date("start")?, date("end")?);
-    // The layer's period, when no period is given.
-    let (lo, hi) = match (start, end, src.period) {
-        (None, None, Some((o, n))) => {
-            let o = usize::try_from(o).unwrap_or(usize::MAX).min(dates.len());
-            (o, (o + n).min(dates.len()))
-        }
-        _ => (0, dates.len()),
-    };
-    let month = |d: f64| rustgis_data::time::format(d, "MM").parse::<u32>().unwrap_or(0);
-    let steps: Vec<usize> = (lo..hi)
-        .filter(|i| {
-            let d = dates[*i];
-            start.is_none_or(|a| d >= a) && end.is_none_or(|z| d <= z) && (months.is_empty() || months.contains(&month(d)))
-        })
-        .collect();
-    if steps.is_empty() {
-        return Err("no step of the variable falls in the period (and months) asked for".into());
-    }
+    let ZarrCube { zt, period } = zarr_cube(s, p)?;
+    let steps = super::cube::steps(&zt.dates, period, p)?;
+    let months: Vec<u32> = p
+        .get("months")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|m| m.as_u64()).map(|m| m as u32).collect())
+        .unwrap_or_default();
+    let (var, dates) = (zt.variable.clone(), &zt.dates);
     if steps.len() > rustgis_map::raster::MAX_ZARR_STEPS {
         return Err(format!(
             "{} steps; a summary reads {} at most: take a shorter period",
@@ -877,9 +839,42 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
         label = format!("{label} (months {})", m.join(","));
     }
     let name = ps(p, "name").map(str::to_string).unwrap_or(label);
+    let root = zt.store.clone();
+    Ok(ReduceRun { zt, steps, stat, min_valid, name, root, variable: var })
+}
+
+/// A Zarr variable's time axis as a data cube (#579): the store and variable to read, all its
+/// dates, and the steps of a following layer's period (else the whole axis).
+#[cfg(not(target_arch = "wasm32"))]
+pub struct ZarrCube {
+    pub zt: ZarrTime,
+    pub period: (usize, usize),
+}
+
+/// The cube of a Zarr layer, or of the store and variable the parameters name.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn zarr_cube(s: &Session, p: &Value) -> Result<ZarrCube, String> {
+    let mut src = series_source(s, p)?;
+    let store = if is_web(&src.root) {
+        cached_store(&src.root)?
+    } else {
+        std::sync::Arc::new(zarr::read_metadata(Path::new(&src.root)).map_err(|e| format!("{}: {e}", src.root))?)
+    };
+    pick_variable(&store, &mut src.sel)?;
+    let var = src.sel.variable.clone();
+    let coords = store_files(&src.root, &zarr::coordinate_keys(&store, &var))?;
+    let (dim, dates) = zarr::time_axis(&store, &var, &coords)
+        .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")"))?;
+    let period = match src.period {
+        Some((o, n)) => {
+            let o = usize::try_from(o).unwrap_or(usize::MAX).min(dates.len());
+            (o, (o + n).min(dates.len()))
+        }
+        None => (0, dates.len()),
+    };
     let zt = ZarrTime {
         store: src.root.clone(),
-        variable: var.clone(),
+        variable: var,
         index: src.sel.index.iter().filter(|(d, _)| *d != dim).cloned().collect(),
         dim,
         offset: 0,
@@ -887,7 +882,7 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
         crs: src.crs.clone(),
         shown: None,
     };
-    Ok(ReduceRun { zt, steps, stat, min_valid, name, root: src.root, variable: var })
+    Ok(ZarrCube { zt, period })
 }
 
 /// `zarr.reduce`: the summary computed here (blocking), and added as a raster layer kept in the

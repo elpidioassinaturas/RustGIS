@@ -294,6 +294,48 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
 - **Mensuration**: distances along the surface, heights between two points, areas, and volumes
   above or below a base height, with a list of results.
 
+### Trend analysis
+
+**Trend Analysis** (`cube.trend`, in the Workflows pane after Change Detection) asks of a series of
+rasters whether each cell is changing, how fast, and how surely: an NDVI series greening or
+browning, a temperature series warming. Each cell gets **Sen's slope**, the median of the slopes
+between every two dates, which holds up against outliers such as a cloud left in an NDVI scene,
+and a **Mann–Kendall** test of whether the trend is significant.
+
+- **The series** (a data cube) is any of:
+  - raster layers, a date each, dated by their names (`ndvi_2024-06-01`, MODIS's `A2024153`,
+    `2024-06`, a year) or by the `dates` given: `{"layers": ["ndvi_2015", "ndvi_2016", …]}`;
+  - a Zarr variable along its time dimension, by its layer or its store, as for Summarise over time
+    (see [Data](data.md)): `{"path": "air.zarr", "variable": "t2m"}`;
+  - a raster of several bands, a date each, as Earth Engine and openEO export, dated by the bands'
+    names or `dates`.
+
+  The rasters have to be on one grid; put them on one first with Raster Functions › Resample.
+- **The test:** NDVI and temperature series are autocorrelated, which makes the plain test report
+  too many significant cells, so the default is the **modified Mann–Kendall** test of **Hamed &
+  Rao (1998)**: the variance of S is corrected by the autocorrelation of the detrended series'
+  ranks, at the lags significant at the test's level. The others:
+  - **Yue & Wang (2004)**, from the lag-1 autocorrelation of the detrended series;
+  - **Seasonal** (Hirsch et al. 1982), for a series with a yearly cycle: the test is made within
+    each season (`"seasons": 12` for months, 23 for 16-day composites) and summed, and Sen's slope
+    comes from pairs within a season;
+  - **Mann–Kendall** for independent values.
+
+  The definitions follow `pymannkendall`'s, ties included.
+- **Options:** the significance level (`"alpha"`, 0.05), the slope per year or per decade (from the
+  real dates, so uneven spacing is handled), a period (`start`, `end`), a season across years
+  (`"months": [12, 1, 2]`), and the dates a cell needs (`"minValid"`, by default half of them, at
+  least 4). Missing values and no-data are skipped cell by cell.
+- **Outputs:** four 32-bit layers, kept in the project as GeoTIFFs: Sen's slope, the test's Z, the
+  p-value, and the slope where p < alpha (no-data elsewhere), the one a map usually shows on a
+  diverging ramp centred on 0.
+- **Size:** the cube is read into memory a slice at a time, up to 64 million values (cells times
+  dates) and 2,000 dates. It runs in the background with progress and Cancel.
+
+```sh
+rustgis-cli run --cmd 'cube.trend={"layers":["ndvi_2015","ndvi_2016","ndvi_2017","ndvi_2018"],"per":"decade"}'
+```
+
 ## Deep learning and hosted imagery
 
 **Analyze › Deep Learning Tools** trains a neural network (a multilayer perceptron) on the pixels
