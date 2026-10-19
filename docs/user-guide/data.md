@@ -438,6 +438,18 @@ and reads the slider's step again when it opens.
 rustgis-cli run --cmd 'layer.addZarr={"path":"air.zarr","variable":"t","time":true}' --cmd 'time.export={"path":"t.gif"}'
 ```
 
+**View › Time Series** (desktop; `zarr.series`) reads a Zarr variable's values through time at a
+point. Pick a Zarr layer, then **Pick a Point** on the map. A layer that follows the time slider
+gives its period, a slice the whole axis, and `"start"`/`"end"` any other. Only the chunks holding
+that point's cell are read. A store chunked one step at a time, such as ARCO-ERA5's map-oriented
+copy, reads a chunk per step: about 4,000 steps at most, so a long axis needs a shorter period.
+The chart draws up to six points as lines and marks the time slider's step, and a click on it
+takes the slider to that date. **Export CSV…** writes the date and value of each point.
+
+```sh
+rustgis-cli run --cmd 'zarr.series={"path":"air.zarr","variable":"t","lon":-55.7,"lat":-12.5}'
+```
+
 A store in a folder is saved in the project by its folder and slice (`2m_temperature[time=539100]`)
 and read again when the project opens, as Add Data on the folder does (its first variable); a
 store by web address is kept in the project as the slice read. `?zarr=<address>` in a web app link

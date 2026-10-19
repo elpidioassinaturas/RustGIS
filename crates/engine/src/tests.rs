@@ -6318,6 +6318,52 @@ fn zarr_store_over_time(tag: &str) -> (std::path::PathBuf, String) {
     (dir, path)
 }
 
+/// A Zarr variable's series at a point (#555): the values along its time dimension at the cell
+/// holding it, read from the chunks holding that cell, through a layer or the store itself.
+#[test]
+fn a_zarr_series_at_a_point() {
+    let (dir, path) = zarr_store_over_time("series");
+    let mut s = Session::new(Project::default());
+    // At 1°E 30°N: the stored row 2 (latitudes 10, 20, 30), column 0, so 100·k + 8 at step k.
+    let at = json!({"path": path, "variable": "t", "lon": 1.0, "lat": 30.0});
+    let r = s.run("zarr.series", &at).unwrap();
+    assert_eq!(r["values"], json!([8.0, 108.0, 208.0]), "{r}");
+    assert_eq!(r["labels"], json!(["2001-01-01 00:00", "2001-02-01 00:00", "2001-03-01 00:00"]));
+    assert_eq!(
+        (r["dimension"].as_str(), r["units"].as_str(), r["row"].as_u64(), r["col"].as_u64()),
+        (Some("time"), Some("K"), Some(2), Some(0))
+    );
+    // Longitudes either way round the globe; another cell.
+    let r = s.run("zarr.series", &json!({"path": path, "variable": "t", "lon": 363.5, "lat": 11.0})).unwrap();
+    assert_eq!(r["values"], json!([3.0, 103.0, 203.0]), "{r}");
+    // A period.
+    let r = s.run("zarr.series", &json!({"path": path, "variable": "t", "lon": 1.0, "lat": 30.0, "start": "2001-01-15"})).unwrap();
+    assert_eq!(r["values"], json!([108.0, 208.0]));
+    // Through a layer: one that follows the slider (its period), and a slice (the whole axis).
+    let late = s.run("layer.addZarr", &json!({"path": path, "variable": "t", "time": true, "start": "2001-01-20"})).unwrap()["layer"]
+        .as_u64()
+        .unwrap();
+    let r = s.run("zarr.series", &json!({"layer": late, "lon": 1.0, "lat": 30.0})).unwrap();
+    assert_eq!(r["values"], json!([108.0, 208.0]));
+    let slice = s.run("layer.addZarr", &json!({"path": path, "variable": "t", "index": {"time": 1}})).unwrap()["layer"].as_u64().unwrap();
+    let r = s.run("zarr.series", &json!({"layer": slice, "lon": 1.0, "lat": 30.0})).unwrap();
+    assert_eq!(r["values"], json!([8.0, 108.0, 208.0]));
+    for bad in [
+        json!({"path": path, "variable": "t", "lon": 50.0, "lat": 30.0}),
+        json!({"path": path, "variable": "t", "lon": 1.0, "lat": 95.0}),
+        json!({"path": path, "variable": "t", "lat": 30.0}),
+        json!({"path": path, "variable": "t", "lon": 1.0, "lat": 30.0, "start": "2003-01-01"}),
+        json!({"path": path, "variable": "lat", "lon": 1.0, "lat": 30.0}),
+        json!({"path": "/nowhere/x.zarr", "lon": 1.0, "lat": 30.0}),
+    ] {
+        assert!(s.run("zarr.series", &bad).is_err(), "{bad}");
+    }
+    // A layer that isn't Zarr.
+    let mut w = Session::new(sample::world_project());
+    assert!(w.run("zarr.series", &json!({"layer": "Countries", "lon": 1.0, "lat": 30.0})).is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A Zarr variable follows the time slider (#554): the slice drawn is the step the slider is at,
 /// the stretch is the same at every step, and the project keeps the layer by its store.
 #[test]

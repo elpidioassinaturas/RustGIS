@@ -1300,6 +1300,183 @@ pub fn time_axis(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>
     None
 }
 
+/// The chunk keys of `variable`'s map coordinates (its y and x), for [`locate`].
+pub fn map_coordinate_keys(store: &Store, variable: &str) -> Vec<String> {
+    let Some(a) = store.array(variable) else { return Vec::new() };
+    let names = a.dim_names();
+    let (y, x) = map_dims(a);
+    let mut keys = Vec::new();
+    for d in [y, x] {
+        if let Some(c) = names.get(d).and_then(|n| store.coordinate(a, n)).filter(|c| c.shape.first() == a.shape.get(d)) {
+            keys.extend(all_keys(c));
+        }
+    }
+    keys
+}
+
+/// Whether `variable`'s map is a longitude/latitude grid; otherwise its coordinates are in the
+/// coordinate system [`grid_crs`] gives (or the one a caller is told).
+pub fn is_lonlat_grid(store: &Store, variable: &str) -> bool {
+    let Some(a) = store.array(variable) else { return false };
+    let names = a.dim_names();
+    let (y, x) = map_dims(a);
+    let geo = |d: usize| names.get(d).and_then(|n| store.coordinate(a, n)).is_some_and(geographic);
+    geo(y) && geo(x)
+}
+
+/// The coordinate system `variable`'s attributes (or its grid mapping's) say, for a projected grid.
+pub fn grid_crs(store: &Store, variable: &str) -> Option<Crs> {
+    store.array(variable).and_then(|a| crs_of(store, a))
+}
+
+/// The stored (row, column) of `variable`'s map cell holding the point (`x`, `y`), in the grid's
+/// own coordinates: degrees of any longitude convention (-180–180 or 0–360) for a
+/// longitude/latitude grid. `None` outside the grid. The coordinates must be evenly spaced, as
+/// for a slice.
+pub fn locate(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>>, x: f64, y: f64) -> Result<Option<(u64, u64)>> {
+    let a = store.array(variable).ok_or_else(|| bad(format!("no variable named {variable}")))?;
+    let names = a.dim_names();
+    let (yd, xd) = map_dims(a);
+    let coord = |d: usize| names.get(d).and_then(|n| store.coordinate(a, n)).filter(|c| c.shape.first() == a.shape.get(d));
+    let (Some(yc), Some(xc)) = (coord(yd), coord(xd)) else {
+        return Err(bad(format!("{}: its y and x dimensions have no coordinates", a.path)));
+    };
+    let (ys, xs) = (values_1d(yc, chunks)?, values_1d(xc, chunks)?);
+    let (Some((y0, dy)), Some((x0, dx))) = (axis(&ys), axis(&xs)) else {
+        return Err(bad(format!("{}: its coordinates aren't evenly spaced", a.path)));
+    };
+    let cell = |v: f64, v0: f64, dv: f64, n: usize| {
+        let i = ((v - v0) / dv).floor();
+        (i >= 0.0 && i < n as f64).then_some(i as u64)
+    };
+    let row = cell(y, y0, dy, ys.len());
+    // A longitude may be written another way round the globe than the grid's.
+    let turns: &[f64] = if geographic(xc) { &[0.0, 360.0, -360.0] } else { &[0.0] };
+    let col = turns.iter().find_map(|k| cell(x + k, x0, dx, xs.len()));
+    Ok(row.zip(col))
+}
+
+/// What a point's series needs (see [`plan_series`]).
+#[derive(Clone, Debug)]
+pub struct SeriesPlan {
+    pub keys: Vec<String>,
+    var: String,
+    /// The time dimension, and every dimension's step (the cell's, and the others' fixed ones).
+    t: usize,
+    at: Vec<u64>,
+    from: u64,
+    count: u64,
+}
+
+/// The chunks holding the stored cell (`row`, `col`) of `sel`'s variable along dimension `dim`,
+/// from step `from` for `count` steps, the other dimensions at `sel`'s steps. At most
+/// [`MAX_CHUNKS`]: a store chunked a step at a time over a long axis needs a shorter period.
+pub fn plan_series(store: &Store, sel: &Selection, dim: &str, from: u64, count: u64, row: u64, col: u64) -> Result<SeriesPlan> {
+    let a = store.array(&sel.variable).ok_or_else(|| bad(format!("no variable named {}", sel.variable)))?;
+    if let Some(why) = a.unsupported() {
+        return Err(bad(why));
+    }
+    let names = a.dim_names();
+    let (y, x) = map_dims(a);
+    let t = names
+        .iter()
+        .position(|n| n == dim)
+        .filter(|t| *t != y && *t != x)
+        .ok_or_else(|| bad(format!("{} has no dimension {dim}", a.path)))?;
+    let n = a.shape.get(t).copied().unwrap_or(0);
+    if count == 0 || from.checked_add(count).is_none_or(|end| end > n) {
+        return Err(bad(format!("{dim} has {n} steps; {from} to {} is past them", from.saturating_add(count))));
+    }
+    if row >= a.shape.get(y).copied().unwrap_or(0) || col >= a.shape.get(x).copied().unwrap_or(0) {
+        return Err(bad("the cell is outside the grid"));
+    }
+    let mut at = vec![0u64; a.shape.len()];
+    for (d, i) in &sel.index {
+        let Some(k) = names.iter().position(|nm| nm == d) else { return Err(bad(format!("{} has no dimension {d}", a.path))) };
+        if k != y && k != x && k != t {
+            if *i >= a.shape.get(k).copied().unwrap_or(0) {
+                return Err(bad(format!("{d} has {} steps; {i} is past them", a.shape.get(k).copied().unwrap_or(0))));
+            }
+            if let Some(v) = at.get_mut(k) {
+                *v = *i;
+            }
+        }
+    }
+    if let Some(v) = at.get_mut(y) {
+        *v = row;
+    }
+    if let Some(v) = at.get_mut(x) {
+        *v = col;
+    }
+    let ct = a.chunks.get(t).copied().unwrap_or(1).max(1);
+    let (first, last) = (from / ct, (from + count - 1) / ct);
+    if last - first + 1 > MAX_CHUNKS as u64 {
+        return Err(bad(format!(
+            "{count} steps of {} need {} chunks, more than {MAX_CHUNKS}: take a shorter period",
+            a.path,
+            last - first + 1
+        )));
+    }
+    let keys = (first..=last)
+        .map(|g| {
+            let idx: Vec<u64> = (0..a.shape.len())
+                .map(|d| if d == t { g } else { at.get(d).copied().unwrap_or(0) / a.chunks.get(d).copied().unwrap_or(1).max(1) })
+                .collect();
+            a.chunk_key(&idx)
+        })
+        .collect();
+    Ok(SeriesPlan { keys, var: a.path.clone(), t, at, from, count })
+}
+
+/// The values of a [`plan_series`], one a step (`NaN` for no data, or a chunk that wasn't
+/// fetched), scaled as a slice's are.
+pub fn assemble_series(store: &Store, plan: &SeriesPlan, chunks: &HashMap<String, Vec<u8>>) -> Result<Vec<f64>> {
+    let a = store.array(&plan.var).ok_or_else(|| bad("the variable is gone"))?;
+    let nd = a.shape.len();
+    let v2_fill = if a.zarr_format == 2 { a.fill } else { None };
+    let mut missing: Vec<f64> = [v2_fill, attr_f64(a, "_FillValue"), attr_f64(a, "missing_value")].into_iter().flatten().collect();
+    missing.dedup();
+    let scale = attr_f64(a, "scale_factor").unwrap_or(1.0);
+    let offset = attr_f64(a, "add_offset").unwrap_or(0.0);
+    let chunk = |d: usize| a.chunks.get(d).copied().unwrap_or(1).max(1);
+    let strides: Vec<u64> = {
+        let mut s = vec![1u64; nd];
+        if a.fortran {
+            for d in 1..nd {
+                s[d] = s[d - 1] * a.chunks[d - 1];
+            }
+        } else {
+            for d in (0..nd.saturating_sub(1)).rev() {
+                s[d] = s[d + 1] * a.chunks[d + 1];
+            }
+        }
+        s
+    };
+    let step_at = |d: usize, step: u64| if d == plan.t { step } else { plan.at.get(d).copied().unwrap_or(0) };
+    let mut out = Vec::with_capacity(plan.count as usize);
+    let mut decoded: Option<(u64, Option<(Vec<u8>, DType)>)> = None;
+    for step in plan.from..plan.from + plan.count {
+        let g = step / chunk(plan.t);
+        if decoded.as_ref().is_none_or(|(k, _)| *k != g) {
+            let idx: Vec<u64> = (0..nd).map(|d| step_at(d, step) / chunk(d)).collect();
+            let got = match chunks.get(&a.chunk_key(&idx)) {
+                Some(b) => Some(a.decode_bytes(b)?),
+                None => None,
+            };
+            decoded = Some((g, got));
+        }
+        let Some((_, Some((vals, dt)))) = decoded.as_ref() else {
+            out.push(f64::NAN);
+            continue;
+        };
+        let i: u64 = (0..nd).map(|d| (step_at(d, step) % chunk(d)) * strides[d]).sum();
+        let at = usize::try_from(i).ok().and_then(|i| i.checked_mul(dt.size));
+        let v = at.and_then(|at| vals.get(at..at + dt.size)).map(|b| dt.value(b)).unwrap_or(f64::NAN);
+        out.push(if v.is_nan() || missing.contains(&v) { f64::NAN } else { v * scale + offset });
+    }
+    Ok(out)
+}
+
 /// A CF time coordinate's value as milliseconds since 1970 (see [`time_axis`]).
 fn time_ms(c: &Array, v: f64) -> Option<f64> {
     let units = attr_str(c, "units")?;

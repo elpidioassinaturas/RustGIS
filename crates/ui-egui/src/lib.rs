@@ -392,6 +392,8 @@ pub enum RightPane {
     Tasks,
     Jobs,
     Profile,
+    /// A Zarr variable's time series at points clicked on the map (#555).
+    TimeSeries,
     Diagnostics,
     Infographics,
     Report,
@@ -2348,6 +2350,7 @@ impl RustGisApp {
             },
             "ui.pane.jobs" => toggle_right(&mut self.ui, RightPane::Jobs),
             "ui.pane.profile" => toggle_right(&mut self.ui, RightPane::Profile),
+            "ui.pane.timeSeries" => toggle_right(&mut self.ui, RightPane::TimeSeries),
             "ui.pane.diagnostics" => toggle_right(&mut self.ui, RightPane::Diagnostics),
             "ui.pane.infographics" => toggle_right(&mut self.ui, RightPane::Infographics),
             "ui.pane.report" => toggle_right(&mut self.ui, RightPane::Report),

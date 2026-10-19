@@ -2067,6 +2067,17 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
             app.ui.right == Some(RightPane::Profile),
             false,
         );
+        big(
+            ui,
+            app,
+            "measure",
+            "Time\nSeries",
+            "A Zarr variable's values through time at points clicked on the map.",
+            "ui.pane.timeSeries",
+            Value::Null,
+            app.ui.right == Some(RightPane::TimeSeries),
+            false,
+        );
     });
 }
 

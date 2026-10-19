@@ -32,6 +32,9 @@ pub struct WorkspaceState {
     pub profile_layer: String,
     pub profile_lines: String,
     pub profile: Option<Value>,
+    /// The Time Series pane's Zarr layer, and the series read at points (`zarr.series`), newest last.
+    pub series_layer: String,
+    pub series: Vec<Value>,
     pub message: Option<(String, bool)>,
     pub catalog_view: bool,
     pub item_popups: bool,
@@ -460,6 +463,173 @@ pub fn profile(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     );
 }
 
+/// The most series the Time Series pane keeps (one line each).
+const MAX_SERIES: usize = 6;
+
+/// A Zarr variable's time series at points clicked on the map (opengeos/RustGIS#555): a line a
+/// point, the time slider's step marked, and a click on the chart takes the slider there.
+pub fn time_series(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    message(app, ui);
+    let map = app.session.map();
+    // Zarr layers: one that follows the time slider, or a slice (`t2m[time=3]`).
+    let layers: Vec<String> = map
+        .layers
+        .iter()
+        .filter(|l| l.raster.as_ref().is_some_and(|r| r.time_zarr.is_some() || r.subdataset.as_deref().is_some_and(|s| s.contains('['))))
+        .map(|l| l.name.clone())
+        .collect();
+    if layers.is_empty() {
+        ui.label(egui::RichText::new(tl!("Add a Zarr variable first (Add Data › Zarr…).")).weak());
+        return;
+    }
+    if !layers.contains(&app.ws.series_layer) {
+        app.ws.series_layer = layers.first().cloned().unwrap_or_default();
+    }
+    egui::ComboBox::from_id_salt("series_layer").selected_text(app.ws.series_layer.as_str()).show_ui(ui, |ui| {
+        for l in &layers {
+            ui.selectable_value(&mut app.ws.series_layer, l.clone(), l.as_str());
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        let active = app.workflow.pick.as_ref().is_some_and(|p| p.purpose == "ts_point");
+        if ui.selectable_label(active, tl!("Pick a Point")).clicked() {
+            app.workflow.pick =
+                if active { None } else { Some(crate::analysispane::Pick { purpose: "ts_point", needed: 1, points: Vec::new() }) };
+        }
+        if !app.ws.series.is_empty() {
+            if ui.button(tl!("Clear")).clicked() {
+                app.ws.series.clear();
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if ui.button(tl!("Export CSV…")).clicked()
+                && let Some(path) = crate::dialogs::pick_save("time_series.csv", &["csv"], tl!("Time series"))
+            {
+                app.ws.message = Some(match std::fs::write(&path, series_csv(&app.ws.series)) {
+                    Ok(()) => (crate::i18n::fmt("Saved {path}", &[("path", &path)]), false),
+                    Err(e) => (format!("{path}: {e}"), true),
+                });
+            }
+        }
+    });
+    // A point picked: its series, under the layer chosen.
+    let picked = app.workflow.pick.as_ref().filter(|p| p.purpose == "ts_point").and_then(|p| p.points.first().copied());
+    if let Some(c) = picked {
+        app.workflow.pick = None;
+        let layer = app.ws.series_layer.clone();
+        if let Some(v) = run(app, "zarr.series", json!({"layer": layer, "lon": c.x, "lat": c.y})) {
+            app.ws.series.push(v);
+            let excess = app.ws.series.len().saturating_sub(MAX_SERIES);
+            app.ws.series.drain(..excess);
+        }
+    }
+    if app.ws.series.is_empty() {
+        ui.label(egui::RichText::new(tl!("Pick a point on the map to see the variable's values through time there.")).weak().small());
+        return;
+    }
+    // One chart for every line: the dates and values of all of them.
+    let lines: Vec<Vec<(f64, f64)>> = app
+        .ws
+        .series
+        .iter()
+        .map(|s| {
+            let dates = s["dates"].as_array().cloned().unwrap_or_default();
+            let values = s["values"].as_array().cloned().unwrap_or_default();
+            dates.iter().zip(&values).filter_map(|(d, v)| Some((d.as_f64()?, v.as_f64()?))).collect()
+        })
+        .collect();
+    let all = lines.iter().flatten();
+    let (t0, t1) = all.clone().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), (d, _)| (a.min(*d), b.max(*d)));
+    let (lo, hi) = all.fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), (_, v)| (a.min(*v), b.max(*v)));
+    if !(t0.is_finite() && lo.is_finite()) {
+        ui.label(egui::RichText::new(tl!("No data at the points picked.")).weak().small());
+        return;
+    }
+    let (t1, hi) = (if t1 > t0 { t1 } else { t0 + 1.0 }, if hi > lo { hi } else { lo + 1.0 });
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 170.0), Sense::click());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, t.canvas);
+    let plot = rect.shrink2(vec2(8.0, 18.0));
+    let to = |(d, v): (f64, f64)| {
+        pos2(plot.min.x + ((d - t0) / (t1 - t0)) as f32 * plot.width(), plot.max.y - ((v - lo) / (hi - lo)) as f32 * plot.height())
+    };
+    // The time slider's step.
+    if let Some(sl) = app.session.map().time.as_ref()
+        && (t0..=t1).contains(&sl.current)
+    {
+        let x = to((sl.current, lo)).x;
+        painter.line_segment([pos2(x, plot.min.y), pos2(x, plot.max.y)], egui::Stroke::new(1.0, t.text_dim));
+    }
+    let colours = [
+        t.accent,
+        egui::Color32::from_rgb(214, 96, 77),
+        egui::Color32::from_rgb(77, 146, 33),
+        egui::Color32::from_rgb(118, 42, 131),
+        egui::Color32::from_rgb(230, 171, 2),
+        egui::Color32::from_rgb(27, 158, 119),
+    ];
+    for (i, line) in lines.iter().enumerate() {
+        let colour = colours[i % colours.len()];
+        let pts: Vec<egui::Pos2> = line.iter().map(|p| to(*p)).collect();
+        if pts.len() == 1 {
+            painter.circle_filled(pts[0], 2.5, colour);
+        } else {
+            painter.add(egui::Shape::line(pts, egui::Stroke::new(1.6, colour)));
+        }
+    }
+    let fmt = |v: f64| rustgis_engine::map::symbology::fmt_num(v);
+    let units = app.ws.series.last().and_then(|s| s["units"].as_str()).unwrap_or("").to_string();
+    painter.text(rect.left_top() + vec2(6.0, 3.0), egui::Align2::LEFT_TOP, format!("{} {units}", fmt(hi)), regular(10.0), t.text_dim);
+    painter.text(
+        rect.left_bottom() + vec2(6.0, -3.0),
+        egui::Align2::LEFT_BOTTOM,
+        format!("{} {units}", fmt(lo)),
+        regular(10.0),
+        t.text_dim,
+    );
+    let day = |ms: f64| rustgis_engine::data::time::format(ms, "YYYY-MM-DD");
+    painter.text(
+        rect.right_bottom() + vec2(-6.0, -3.0),
+        egui::Align2::RIGHT_BOTTOM,
+        format!("{} – {}", day(t0), day(t1)),
+        regular(10.0),
+        t.text_dim,
+    );
+    // A click on the chart takes the time slider to that date.
+    if resp.clicked()
+        && app.session.map().time.is_some()
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let ms = t0 + f64::from((pos.x - plot.min.x) / plot.width().max(1.0)) * (t1 - t0);
+        let _ = app.run("time.goTo", json!({"date": ms}));
+    }
+    // The points, in their lines' colours.
+    for (i, s) in app.ws.series.iter().enumerate() {
+        let colour = colours[i % colours.len()];
+        let text = format!(
+            "● {:.4}°, {:.4}° · {}",
+            s["lon"].as_f64().unwrap_or(0.0),
+            s["lat"].as_f64().unwrap_or(0.0),
+            s["variable"].as_str().unwrap_or("")
+        );
+        ui.label(egui::RichText::new(text).small().color(colour));
+    }
+}
+
+/// The Time Series pane's lines as CSV: one row a date and point.
+fn series_csv(series: &[Value]) -> String {
+    let mut out = String::from("lon,lat,variable,date,value\n");
+    for s in series {
+        let (lon, lat, var) = (s["lon"].as_f64().unwrap_or(0.0), s["lat"].as_f64().unwrap_or(0.0), s["variable"].as_str().unwrap_or(""));
+        let labels = s["labels"].as_array().cloned().unwrap_or_default();
+        let values = s["values"].as_array().cloned().unwrap_or_default();
+        for (l, v) in labels.iter().zip(&values) {
+            let v = v.as_f64().map(|v| v.to_string()).unwrap_or_default();
+            out.push_str(&format!("{lon},{lat},\"{}\",{},{v}\n", var.replace('"', "\"\""), l.as_str().unwrap_or("")));
+        }
+    }
+    out
+}
+
 /// The Diagnostic Monitor.
 pub fn diagnostics(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
@@ -663,5 +833,67 @@ mod tests {
         task(&mut app, 1);
         follow_delete(&mut app, 1);
         assert_eq!(app.ws.task_step, 0);
+    }
+
+    /// The Time Series pane (#555): a point picked on the map reads the series under the Zarr
+    /// layer chosen, the chart takes the slider to a date clicked, and Clear empties it.
+    #[test]
+    fn the_time_series_pane_reads_a_point() {
+        use egui_kittest::kittest::Queryable;
+        // A store of `t` over three monthly steps on a 3 × 4 grid (step k's values 100·k + i).
+        let dir = std::env::temp_dir().join(format!("rustgis-ui-series-{}", std::process::id()));
+        let store = dir.join("air.zarr");
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["t", "lat", "lon", "time"] {
+            std::fs::create_dir_all(store.join(d)).unwrap();
+        }
+        let arr = |shape: &str, dtype: &str, chunks: &str| json!({"shape": serde_json::from_str::<Value>(shape).unwrap(), "chunks": serde_json::from_str::<Value>(chunks).unwrap(), "dtype": dtype, "compressor": null, "fill_value": null, "filters": null, "order": "C", "zarr_format": 2});
+        let meta = json!({"metadata": {
+            ".zgroup": {"zarr_format": 2},
+            "t/.zarray": arr("[3,3,4]", "<f4", "[1,3,4]"),
+            "t/.zattrs": {"_ARRAY_DIMENSIONS": ["time","lat","lon"], "units": "K"},
+            "lat/.zarray": arr("[3]", "<f4", "[3]"),
+            "lat/.zattrs": {"_ARRAY_DIMENSIONS": ["lat"], "units": "degrees_north"},
+            "lon/.zarray": arr("[4]", "<f4", "[4]"),
+            "lon/.zattrs": {"_ARRAY_DIMENSIONS": ["lon"], "units": "degrees_east"},
+            "time/.zarray": arr("[3]", "<i4", "[3]"),
+            "time/.zattrs": {"_ARRAY_DIMENSIONS": ["time"], "units": "days since 2001-01-01"},
+        }, "zarr_consolidated_format": 1});
+        std::fs::write(store.join(".zmetadata"), meta.to_string()).unwrap();
+        std::fs::write(store.join(".zgroup"), r#"{"zarr_format":2}"#).unwrap();
+        let f32s = |v: &[f32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        std::fs::write(store.join("lat/0"), f32s(&[10.0, 20.0, 30.0])).unwrap();
+        std::fs::write(store.join("lon/0"), f32s(&[1.0, 2.0, 3.0, 4.0])).unwrap();
+        std::fs::write(store.join("time/0"), [0i32, 31, 59].iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+        for k in 0..3 {
+            let v: Vec<f32> = (0..12).map(|i| (k * 100 + i) as f32).collect();
+            std::fs::write(store.join(format!("t/{k}.0.0")), f32s(&v)).unwrap();
+        }
+        let mut app = RustGisApp::with_sample();
+        app.run("layer.addZarr", json!({"path": store.display().to_string(), "variable": "t", "time": true, "name": "air"})).unwrap();
+        // A point picked at 1°E 30°N.
+        app.workflow.pick =
+            Some(crate::analysispane::Pick { purpose: "ts_point", needed: 1, points: vec![rustgis_engine::geom::Coord::new(1.0, 30.0)] });
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(420.0, 600.0)).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let t = crate::theme::Tokens::get(ui.ctx());
+                time_series(app, ui, &t);
+            },
+            app,
+        );
+        h.run_steps(3);
+        assert_eq!(h.state().ws.series_layer, "air");
+        assert_eq!(h.state().ws.series.len(), 1);
+        assert_eq!(h.state().ws.series[0]["values"], json!([8.0, 108.0, 208.0]));
+        assert!(h.state().workflow.pick.is_none(), "the pick is used up");
+        // The CSV: one row a step.
+        let csv = series_csv(&h.state().ws.series);
+        assert_eq!(csv.lines().count(), 4, "{csv}");
+        assert!(csv.lines().nth(2).is_some_and(|l| l.ends_with("2001-02-01 00:00,108")), "{csv}");
+        // Clear empties the chart.
+        h.get_by_label("Clear").click();
+        h.run_steps(2);
+        assert!(h.state().ws.series.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

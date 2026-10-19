@@ -74,6 +74,8 @@ Tools for working across maps and views, and for setting up the app the way you 
     - **Export** writes the steps as an animated GIF (`time.export` also writes a zip of PNG
       frames). The slider, its window and the bindings are saved with the project; the off button
       turns it off and every feature shows again.
+- **Time Series**: a Zarr variable's values through time at points clicked on the map, as lines on
+  one chart; see [Zarr stores](data.md#zarr-stores).
 - **Profile**: elevation profiles along clicked points or selected lines, auto-completed to the
   raster's edge, or across a line (a cross section), with gain, loss and a chart.
 - **Infographics** (Home tab) summarise what's in view: counts, totals and top categories.
