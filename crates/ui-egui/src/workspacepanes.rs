@@ -35,6 +35,15 @@ pub struct WorkspaceState {
     /// The Time Series pane's Zarr layer, and the series read at points (`zarr.series`), newest last.
     pub series_layer: String,
     pub series: Vec<Value>,
+    /// The Time Series pane's summary over time (#556): the statistic, its threshold, the period
+    /// and months as typed, and the run under way.
+    pub reduce_stat: String,
+    pub reduce_above: f64,
+    pub reduce_start: String,
+    pub reduce_end: String,
+    pub reduce_months: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub reducing: Option<Reducing>,
     pub message: Option<(String, bool)>,
     pub catalog_view: bool,
     pub item_popups: bool,
@@ -463,6 +472,113 @@ pub fn profile(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     );
 }
 
+/// A summary over time running on a thread of its own: Cancel, the slices read, and the result.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Reducing {
+    pub run: rustgis_engine::cmd::zarr::ReduceRun,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub done: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub result: std::sync::Arc<std::sync::Mutex<Option<Result<Vec<u8>, String>>>>,
+}
+
+/// The Time Series pane's Summarise over time section (#556): a statistic of the chosen Zarr
+/// layer's steps over a period (and months), computed on a thread with progress and Cancel, and
+/// added as a raster layer.
+#[cfg(not(target_arch = "wasm32"))]
+fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
+    use std::sync::atomic::Ordering;
+    // A run under way: its progress, Cancel, and its result once it lands.
+    if let Some(r) = &app.ws.reducing {
+        let landed = r.result.lock().ok().and_then(|mut g| g.take());
+        match landed {
+            None => {
+                let (done, total) = (r.done.load(Ordering::Relaxed), r.run.total().max(1));
+                ui.horizontal(|ui| {
+                    ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!("{done} / {total}")).desired_width(200.0));
+                    if ui.button(tl!("Cancel")).clicked() {
+                        r.cancel.store(true, Ordering::Relaxed);
+                    }
+                });
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+                return;
+            }
+            Some(res) => {
+                let (root, variable, name) = (r.run.root.clone(), r.run.variable.clone(), r.run.name.clone());
+                app.ws.reducing = None;
+                match res {
+                    Ok(tif) => {
+                        let id = app.session.download_started();
+                        app.session.download_landed(id, tif);
+                        let key = if root.starts_with("http://") || root.starts_with("https://") { "url" } else { "path" };
+                        let _ = run(app, "layer.addZarr", json!({key: root, "variable": variable, "ran": id, "name": name}));
+                    }
+                    Err(e) => app.ws.message = Some((e, true)),
+                }
+            }
+        }
+    }
+    egui::CollapsingHeader::new(tl!("Summarise over time")).id_salt("series_reduce").show(ui, |ui| {
+        if app.ws.reduce_stat.is_empty() {
+            app.ws.reduce_stat = "mean".into();
+        }
+        egui::Grid::new("reduce_grid").num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
+            ui.label(tl!("Statistic"));
+            egui::ComboBox::from_id_salt("reduce_stat").selected_text(app.ws.reduce_stat.as_str()).show_ui(ui, |ui| {
+                for st in ["mean", "min", "max", "sum", "std", "count", "countAbove"] {
+                    ui.selectable_value(&mut app.ws.reduce_stat, st.to_string(), st);
+                }
+            });
+            ui.end_row();
+            if app.ws.reduce_stat == "countAbove" {
+                ui.label(tl!("Above"));
+                ui.add(egui::DragValue::new(&mut app.ws.reduce_above).speed(0.5));
+                ui.end_row();
+            }
+            ui.label(tl!("From"));
+            ui.add(egui::TextEdit::singleline(&mut app.ws.reduce_start).hint_text("1991-01-01").desired_width(110.0));
+            ui.end_row();
+            ui.label(tl!("To"));
+            ui.add(egui::TextEdit::singleline(&mut app.ws.reduce_end).hint_text("2020-12-31").desired_width(110.0));
+            ui.end_row();
+            ui.label(tl!("Months"));
+            ui.add(egui::TextEdit::singleline(&mut app.ws.reduce_months).hint_text("12, 1, 2").desired_width(110.0));
+            ui.end_row();
+        });
+        if ui.button(tl!("Summarise")).clicked() {
+            let mut p = json!({"layer": app.ws.series_layer, "stat": app.ws.reduce_stat});
+            if app.ws.reduce_stat == "countAbove" {
+                p["above"] = json!(app.ws.reduce_above);
+            }
+            for (k, v) in [("start", &app.ws.reduce_start), ("end", &app.ws.reduce_end)] {
+                if !v.trim().is_empty() {
+                    p[k] = json!(v.trim());
+                }
+            }
+            let months: Vec<Value> =
+                app.ws.reduce_months.split([',', ' ']).filter_map(|m| m.trim().parse::<u64>().ok()).map(|m| json!(m)).collect();
+            if !months.is_empty() {
+                p["months"] = Value::Array(months);
+            }
+            match rustgis_engine::cmd::zarr::reduce_start(&app.session, &p) {
+                Ok(job) => {
+                    let r = Reducing { run: job.clone(), cancel: Default::default(), done: Default::default(), result: Default::default() };
+                    let (cancel, done, result) = (r.cancel.clone(), r.done.clone(), r.result.clone());
+                    std::thread::spawn(move || {
+                        let out = job
+                            .run(&cancel, &done)
+                            .and_then(|r| rustgis_engine::data::raster::geotiff::write(&r, 0).map_err(|e| e.to_string()));
+                        if let Ok(mut g) = result.lock() {
+                            *g = Some(out);
+                        }
+                    });
+                    app.ws.reducing = Some(r);
+                }
+                Err(e) => app.ws.message = Some((e, true)),
+            }
+        }
+    });
+}
+
 /// The most series the Time Series pane keeps (one line each).
 const MAX_SERIES: usize = 6;
 
@@ -522,6 +638,8 @@ pub fn time_series(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             app.ws.series.drain(..excess);
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    summarise(app, ui);
     if app.ws.series.is_empty() {
         ui.label(egui::RichText::new(tl!("Pick a point on the map to see the variable's values through time there.")).weak().small());
         return;
@@ -894,6 +1012,26 @@ mod tests {
         h.get_by_label("Clear").click();
         h.run_steps(2);
         assert!(h.state().ws.series.is_empty());
+        // Summarise over time: the mean of the layer's three steps, computed on a thread and added.
+        h.get_by_label("Summarise over time").click();
+        h.run_steps(2);
+        h.get_by_label("Summarise").click();
+        for _ in 0..500 {
+            h.run_steps(1);
+            if h.state().ws.reducing.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(h.state().ws.reducing.is_none(), "the summary lands");
+        let mean = h
+            .state()
+            .session
+            .map()
+            .layer_by_name("t mean 2001-01-01–2001-03-01")
+            .and_then(|l| l.raster.as_ref())
+            .and_then(|r| r.data.clone());
+        assert_eq!(mean.map(|d| d.bands[0].data[0]), Some(108.0));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -24,6 +24,9 @@ pub fn commands() -> Vec<C> {
         C::new("zarr.series", "Time Series at a Point", "Home › Inspect", series).view().params(
             r#"{"lon", "lat", "layer"? (a Zarr layer: its store, variable and steps; default the active layer) | "path": folder | "url": "https://…", "variable"?, "index"?: {"level": 0} (the other dimensions' steps), "start"?, "end"?: dates (default: the layer's period, else the whole axis), "crs"?: for a projected store that doesn't say} → dates, values (null for no data) and labels along the variable's time dimension at the cell holding the point (desktop)"#,
         ),
+        C::new("zarr.reduce", "Summarise Zarr Over Time", "Analyze › Raster", reduce).params(
+            r#"{"layer"? (a Zarr layer: its store, variable and steps; default the active layer) | "path": folder | "url": "https://…", "variable"?, "index"?, "stat": "mean"|"min"|"max"|"sum"|"std"|"count"|"countAbove", "above"?: number (countAbove's threshold), "start"?, "end"?: dates (default: the layer's period, else the whole axis), "months"?: [1–12] (a season across years: [12, 1, 2]), "minValid"?: 0–1 (a cell with a smaller share of values is left empty; default 0), "name"?: text, "crs"?} → a raster layer of the statistic (desktop)"#,
+        ),
         C::new("layer.addZarr", "Add Zarr Variable", "Home › Add › Add Data", add).params(
             r#"{"path": folder | "url": "https://…", "variable"?: "its path in the store (default: the first)", "index"?: {"time": 3, "level": 0} (other dimensions' steps, default 0), "crs"?: "EPSG:… for a store that doesn't say", "name"?: text, "time"?: bool (follow the time slider: the layer shows the step the slider is at, and turns the slider on over the variable's dates when it is off; desktop), "start"?, "end"?: dates (with time: the period to take, for an axis longer than the slider's 20,000 steps), "ran"?: (internal: a slice the app has read)}"#,
         ),
@@ -644,5 +647,266 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
             "variable": var, "units": units, "dimension": dim, "lon": lon, "lat": lat, "row": row, "col": col,
             "dates": picked, "labels": labels, "values": values,
         }))
+    }
+}
+
+// --- A summary over time (opengeos/RustGIS#556) ----------------------------------------------------
+
+/// What a summary over time takes from each cell's values.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Stat {
+    Mean,
+    Min,
+    Max,
+    Sum,
+    Std,
+    Count,
+    /// How many of the values are above the threshold.
+    CountAbove(f64),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Stat {
+    fn code(self) -> &'static str {
+        match self {
+            Stat::Mean => "mean",
+            Stat::Min => "min",
+            Stat::Max => "max",
+            Stat::Sum => "sum",
+            Stat::Std => "std",
+            Stat::Count => "count",
+            Stat::CountAbove(_) => "countAbove",
+        }
+    }
+}
+
+/// A summary over time, prepared on the session (`zarr.reduce`'s parameters checked and the
+/// steps chosen) and computed anywhere with [`ReduceRun::run`], which reads one slice at a time:
+/// the desktop app runs it on a thread of its own, with progress and Cancel.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug)]
+pub struct ReduceRun {
+    zt: ZarrTime,
+    /// The steps to read, as indexes into `zt.dates`.
+    steps: Vec<usize>,
+    stat: Stat,
+    min_valid: f64,
+    /// The layer's name, and the store and variable to hand the result over with.
+    pub name: String,
+    pub root: String,
+    pub variable: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ReduceRun {
+    /// How many slices it reads.
+    pub fn total(&self) -> usize {
+        self.steps.len()
+    }
+
+    /// Reads the steps one at a time and folds them into running totals (Welford's method for
+    /// the standard deviation), so memory stays one slice and the totals whatever the period.
+    /// `done` counts the slices read; `cancel` stops it between slices.
+    pub fn run(&self, cancel: &std::sync::atomic::AtomicBool, done: &std::sync::atomic::AtomicUsize) -> Result<raster::Raster, String> {
+        use std::sync::atomic::Ordering;
+        let mut first: Option<std::sync::Arc<raster::Raster>> = None;
+        let (mut n, mut mean, mut m2, mut lo, mut hi, mut sum, mut above) = (
+            Vec::<u32>::new(),
+            Vec::<f64>::new(),
+            Vec::<f64>::new(),
+            Vec::<f64>::new(),
+            Vec::<f64>::new(),
+            Vec::<f64>::new(),
+            Vec::<u32>::new(),
+        );
+        for &i in &self.steps {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("cancelled".into());
+            }
+            let r = read_step(&self.zt, i)?;
+            let vals = &r.bands.first().ok_or("the slice has no band")?.data;
+            match &first {
+                None => {
+                    let len = vals.len();
+                    (n, mean, m2, sum, above) = (vec![0; len], vec![0.0; len], vec![0.0; len], vec![0.0; len], vec![0; len]);
+                    (lo, hi) = (vec![f64::INFINITY; len], vec![f64::NEG_INFINITY; len]);
+                    first = Some(r.clone());
+                }
+                Some(f) if (f.width, f.height) != (r.width, r.height) => {
+                    return Err(format!("step {} is {} × {}, unlike the first ({} × {})", i, r.width, r.height, f.width, f.height));
+                }
+                Some(_) => {}
+            }
+            for (c, v) in vals.iter().enumerate() {
+                if !v.is_finite() {
+                    continue;
+                }
+                let v = f64::from(*v);
+                n[c] += 1;
+                let d = v - mean[c];
+                mean[c] += d / f64::from(n[c]);
+                m2[c] += d * (v - mean[c]);
+                lo[c] = lo[c].min(v);
+                hi[c] = hi[c].max(v);
+                sum[c] += v;
+                if let Stat::CountAbove(t) = self.stat
+                    && v > t
+                {
+                    above[c] += 1;
+                }
+            }
+            done.fetch_add(1, Ordering::Relaxed);
+        }
+        let first = first.ok_or("no step to read")?;
+        // Too few values: empty, unless the statistic is a count.
+        let need = (self.min_valid.clamp(0.0, 1.0) * self.steps.len() as f64).ceil().max(1.0) as u32;
+        let out: Vec<f32> = (0..n.len())
+            .map(|c| {
+                let count = matches!(self.stat, Stat::Count | Stat::CountAbove(_));
+                if n[c] < need && !(count && self.min_valid == 0.0) {
+                    return f32::NAN;
+                }
+                (match self.stat {
+                    Stat::Mean => mean[c],
+                    Stat::Min => lo[c],
+                    Stat::Max => hi[c],
+                    Stat::Sum => sum[c],
+                    Stat::Std => (m2[c] / f64::from(n[c].max(1))).sqrt(),
+                    Stat::Count => f64::from(n[c]),
+                    Stat::CountAbove(_) => f64::from(above[c]),
+                }) as f32
+            })
+            .collect();
+        // One band: a project keeps the result as a GeoTIFF of one band (the count is a statistic of its own).
+        let mut r = raster::Raster::new(
+            &self.name,
+            first.width,
+            first.height,
+            vec![out],
+            first.transform,
+            first.crs,
+            None,
+            raster::ColorHint::Gray,
+            "Float32",
+        )
+        .map_err(|e| e.to_string())?;
+        r.source = Some(self.root.clone());
+        Ok(r)
+    }
+}
+
+/// Prepares `zarr.reduce`: the store, the statistic, and the steps of the period (and months)
+/// asked for. At most the time slider's 20,000 steps.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
+    let stat = match ps(p, "stat").map(str::trim).ok_or("stat is required (mean, min, max, sum, std, count or countAbove)")? {
+        x if x.eq_ignore_ascii_case("mean") => Stat::Mean,
+        x if x.eq_ignore_ascii_case("min") || x.eq_ignore_ascii_case("minimum") => Stat::Min,
+        x if x.eq_ignore_ascii_case("max") || x.eq_ignore_ascii_case("maximum") => Stat::Max,
+        x if x.eq_ignore_ascii_case("sum") => Stat::Sum,
+        x if x.eq_ignore_ascii_case("std") => Stat::Std,
+        x if x.eq_ignore_ascii_case("count") => Stat::Count,
+        x if x.eq_ignore_ascii_case("countAbove") => {
+            Stat::CountAbove(super::f(p, "above").ok_or("countAbove takes \"above\", the threshold")?)
+        }
+        x => return Err(format!("unknown stat '{x}' (mean, min, max, sum, std, count or countAbove)")),
+    };
+    let min_valid = match p.get("minValid").filter(|v| !v.is_null()) {
+        None => 0.0,
+        Some(v) => v.as_f64().filter(|v| (0.0..=1.0).contains(v)).ok_or("minValid is a share from 0 to 1")?,
+    };
+    let months: Vec<u32> = match p.get("months").filter(|v| !v.is_null()) {
+        None => Vec::new(),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|m| m.as_u64().filter(|m| (1..=12).contains(m)).map(|m| m as u32).ok_or("months are numbers from 1 to 12"))
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err("months is a list of months (1–12)".into()),
+    };
+    let mut src = series_source(s, p)?;
+    let store = if is_web(&src.root) {
+        cached_store(&src.root)?
+    } else {
+        std::sync::Arc::new(zarr::read_metadata(Path::new(&src.root)).map_err(|e| format!("{}: {e}", src.root))?)
+    };
+    pick_variable(&store, &mut src.sel)?;
+    let var = src.sel.variable.clone();
+    let coords = store_files(&src.root, &zarr::coordinate_keys(&store, &var))?;
+    let (dim, dates) = zarr::time_axis(&store, &var, &coords)
+        .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")"))?;
+    let date = |k: &str| -> Result<Option<f64>, String> {
+        match p.get(k).filter(|v| !v.is_null()) {
+            None => Ok(None),
+            Some(v) => rustgis_data::time::parse_input(v)
+                .map(Some)
+                .ok_or_else(|| format!("{k} is a date (2015-06-01, a year, or milliseconds since 1970)")),
+        }
+    };
+    let (start, end) = (date("start")?, date("end")?);
+    // The layer's period, when no period is given.
+    let (lo, hi) = match (start, end, src.period) {
+        (None, None, Some((o, n))) => {
+            let o = usize::try_from(o).unwrap_or(usize::MAX).min(dates.len());
+            (o, (o + n).min(dates.len()))
+        }
+        _ => (0, dates.len()),
+    };
+    let month = |d: f64| rustgis_data::time::format(d, "MM").parse::<u32>().unwrap_or(0);
+    let steps: Vec<usize> = (lo..hi)
+        .filter(|i| {
+            let d = dates[*i];
+            start.is_none_or(|a| d >= a) && end.is_none_or(|z| d <= z) && (months.is_empty() || months.contains(&month(d)))
+        })
+        .collect();
+    if steps.is_empty() {
+        return Err("no step of the variable falls in the period (and months) asked for".into());
+    }
+    if steps.len() > rustgis_map::raster::MAX_ZARR_STEPS {
+        return Err(format!(
+            "{} steps; a summary reads {} at most: take a shorter period",
+            steps.len(),
+            rustgis_map::raster::MAX_ZARR_STEPS
+        ));
+    }
+    let day = |i: usize| rustgis_data::time::format(dates[i], "YYYY-MM-DD");
+    let (a, z) = (steps.first().copied().unwrap_or(0), steps.last().copied().unwrap_or(0));
+    let mut label = format!("{var} {} {}–{}", stat.code(), day(a), day(z));
+    if !months.is_empty() {
+        let m: Vec<String> = months.iter().map(u32::to_string).collect();
+        label = format!("{label} (months {})", m.join(","));
+    }
+    let name = ps(p, "name").map(str::to_string).unwrap_or(label);
+    let zt = ZarrTime {
+        store: src.root.clone(),
+        variable: var.clone(),
+        index: src.sel.index.iter().filter(|(d, _)| *d != dim).cloned().collect(),
+        dim,
+        offset: 0,
+        dates,
+        crs: src.crs.clone(),
+        shown: None,
+    };
+    Ok(ReduceRun { zt, steps, stat, min_valid, name, root: src.root, variable: var })
+}
+
+/// `zarr.reduce`: the summary computed here (blocking), and added as a raster layer kept in the
+/// project as a GeoTIFF.
+fn reduce(s: &mut Session, p: &Value) -> CmdResult {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (s, p);
+        Err("in the web app, a Zarr variable can't be summarised over time yet".into())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let run = reduce_start(s, p)?;
+        let r = run.run(&std::sync::atomic::AtomicBool::new(false), &std::sync::atomic::AtomicUsize::new(0))?;
+        let tif = raster::geotiff::write(&r, 0).map_err(|e| e.to_string())?;
+        let mut layer = RasterLayer::from_bytes(r, format!("{}.tif", store_name(&run.root)), tif);
+        layer.subdataset = None;
+        let mut out = super::raster::add_raster(s, &run.name, layer)?;
+        out["steps"] = serde_json::json!(run.total());
+        Ok(out)
     }
 }

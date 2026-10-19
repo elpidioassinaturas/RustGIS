@@ -450,6 +450,20 @@ takes the slider to that date. **Export CSV…** writes the date and value of ea
 rustgis-cli run --cmd 'zarr.series={"path":"air.zarr","variable":"t","lon":-55.7,"lat":-12.5}'
 ```
 
+**Summarise over time** (in the Time Series pane; `zarr.reduce`) makes a raster of one statistic of
+a Zarr variable's steps: **mean**, **min**, **max**, **sum**, **std** (the population standard
+deviation), **count** of values, or **countAbove** a threshold (days above 30 °C, say). It reads a
+layer's period by default, else the `"start"`/`"end"` given, and `"months"` keeps one season across
+years (`[12, 1, 2]`). Slices are read one at a time and folded into running totals, so memory stays
+at a slice whatever the period: at most 20,000 steps, with progress and **Cancel** in the app. A
+cell keeps no value when it had fewer values than `"minValid"` (a share, 0 by default) of the steps
+read. The layer is named after what it holds (`tas mean 1991-01-01–2020-12-31`) and kept in the
+project as a GeoTIFF.
+
+```sh
+rustgis-cli run --cmd 'zarr.reduce={"path":"air.zarr","variable":"t","stat":"mean","months":[12,1,2]}'
+```
+
 A store in a folder is saved in the project by its folder and slice (`2m_temperature[time=539100]`)
 and read again when the project opens, as Add Data on the folder does (its first variable); a
 store by web address is kept in the project as the slice read. `?zarr=<address>` in a web app link

@@ -6364,6 +6364,62 @@ fn a_zarr_series_at_a_point() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A Zarr variable summarised over time (#556): each statistic, a season, a period and a layer's
+/// period, into a raster layer kept in the project.
+#[test]
+fn a_zarr_variable_summarised_over_time() {
+    let (dir, path) = zarr_store_over_time("reduce");
+    let mut s = Session::new(Project::default());
+    // The first pixel (north up) is the stored cell 8: 8, 108 and 208 at the three steps.
+    let first = |s: &Session, r: &Value| {
+        let l = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap();
+        let d = l.raster.as_ref().unwrap().data.clone().unwrap();
+        d.bands[0].data[0]
+    };
+    for (stat, want) in [("mean", 108.0), ("min", 8.0), ("max", 208.0), ("sum", 324.0), ("count", 3.0)] {
+        let r = s.run("zarr.reduce", &json!({"path": path, "variable": "t", "stat": stat})).unwrap();
+        assert_eq!(first(&s, &r), want, "{stat}");
+        assert_eq!(r["steps"], 3);
+    }
+    let r = s.run("zarr.reduce", &json!({"path": path, "variable": "t", "stat": "std"})).unwrap();
+    assert!((first(&s, &r) - 81.649_66).abs() < 1e-3, "{}", first(&s, &r));
+    let r = s.run("zarr.reduce", &json!({"path": path, "variable": "t", "stat": "countAbove", "above": 150})).unwrap();
+    assert_eq!(first(&s, &r), 1.0);
+    // A season (February alone), and a period.
+    let r = s.run("zarr.reduce", &json!({"path": path, "variable": "t", "stat": "mean", "months": [2]})).unwrap();
+    assert_eq!(first(&s, &r), 108.0);
+    let name = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().name.clone();
+    assert!(name.starts_with("t mean 2001-02-01–2001-02-01 (months 2)"), "{name}");
+    let r = s.run("zarr.reduce", &json!({"path": path, "variable": "t", "stat": "mean", "start": "2001-01-15"})).unwrap();
+    assert_eq!(first(&s, &r), 158.0);
+    // Through a layer that follows the slider: its period.
+    let late = s.run("layer.addZarr", &json!({"path": path, "variable": "t", "time": true, "start": "2001-01-20"})).unwrap()["layer"]
+        .as_u64()
+        .unwrap();
+    let r = s.run("zarr.reduce", &json!({"layer": late, "stat": "max", "name": "warmest"})).unwrap();
+    assert_eq!(first(&s, &r), 208.0);
+    assert!(s.map().layer_by_name("warmest").is_some());
+    // Kept in the project as a GeoTIFF, read again.
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text})).unwrap();
+    let again = t.map().layer_by_name("warmest").and_then(|l| l.raster.as_ref()).and_then(|r| r.data.clone()).unwrap();
+    assert_eq!(again.bands[0].data[0], 208.0);
+    for bad in [
+        json!({"path": path, "variable": "t"}),
+        json!({"path": path, "variable": "t", "stat": "median"}),
+        json!({"path": path, "variable": "t", "stat": "countAbove"}),
+        json!({"path": path, "variable": "t", "stat": "mean", "months": [13]}),
+        json!({"path": path, "variable": "t", "stat": "mean", "months": "June"}),
+        json!({"path": path, "variable": "t", "stat": "mean", "minValid": 1.5}),
+        json!({"path": path, "variable": "t", "stat": "mean", "start": "2005-01-01"}),
+        json!({"path": path, "variable": "lat", "stat": "mean"}),
+    ] {
+        assert!(s.run("zarr.reduce", &bad).is_err(), "{bad}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A Zarr variable follows the time slider (#554): the slice drawn is the step the slider is at,
 /// the stretch is the same at every step, and the project keeps the layer by its store.
 #[test]
