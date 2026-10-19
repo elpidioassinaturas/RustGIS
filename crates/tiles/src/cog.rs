@@ -972,7 +972,8 @@ fn paint(pen: &Pen, spots: &[Option<(u32, usize)>], wanted: &[u32], tiles: &[Pic
 /// bilinear filtering, which turns the step from painted to empty into a half-transparent pixel;
 /// at the edge between two files laid side by side (a data cube's tiles) the two half-transparent
 /// edges let the map show through as a thin line. Carried out, the step falls outside the file and
-/// its own pixels stay opaque. Pixels with no data inside the file are left empty.
+/// its own pixels stay opaque. Pixels with no data inside the file are left empty. Where no file
+/// lies beside, at the data's outer edge, the picture grows by that pixel (1/256 of a map tile).
 fn bleed(rgba: &mut [u8], spots: &[Option<(u32, usize)>]) {
     let s = SIZE as usize;
     let painted = |k: usize| rgba.get(k * 4 + 3).is_some_and(|a| *a > 0);
