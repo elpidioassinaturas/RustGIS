@@ -120,10 +120,11 @@ pub fn parts(cell: u64) -> Option<Vec<Vec<Vec<Coord>>>> {
     (!out.is_empty()).then_some(out)
 }
 
-/// Whether a polygon's ring can be covered: three corners or more, all finite.
+/// Whether a polygon's ring can be covered: three corners or more, each a longitude and latitude
+/// (within ±90°, and ±360° so a ring that runs on past the antimeridian is kept).
 fn usable(ring: &[Coord]) -> bool {
     let closed = ring.len() > 1 && ring.first() == ring.last();
-    ring.len() - usize::from(closed) >= 3 && ring.iter().all(|c| c.is_finite())
+    ring.len() - usize::from(closed) >= 3 && ring.iter().all(|c| c.is_finite() && c.y.abs() <= 90.0 && c.x.abs() <= 360.0)
 }
 
 /// The fields every A5 layer starts with: the cell's id (hex), resolution and area.
@@ -271,7 +272,10 @@ pub fn grid(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
                 shapes.push(vec![extent_ring(on_the_globe(extent).ok_or_else(|| format!("The extent of {name} {off}"))?)]);
             }
             if shapes.is_empty() {
-                return Err(format!("{name} has no features to cover"));
+                return Err(match skipped {
+                    0 => format!("{name} has no features to cover"),
+                    n => format!("{name} has nothing to cover: its {n} polygon parts have no usable outline"),
+                });
             }
             shapes
         } else {
@@ -298,7 +302,7 @@ pub fn grid(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     }
     let mut msg = format!("A5 grid: {} cells at resolution {res}, each {:.6} km²", out.features.len(), area_km2(res));
     if skipped > 0 {
-        msg.push_str(&format!("; {skipped} polygons without a usable outline were left out"));
+        msg.push_str(&format!("; {skipped} polygon parts without a usable outline were left out"));
     }
     Ok(ToolResult { output: Output::Layer(out), messages: vec![msg] })
 }
@@ -481,8 +485,25 @@ mod tests {
             vec![],
         );
         let r = grid(&One(shapes, None), &serde_json::json!({"resolution": 7, "area": "Input Layer", "input": "pts"})).unwrap();
-        assert!(r.messages[0].contains("2 polygons without a usable outline"), "{:?}", r.messages);
+        assert!(r.messages[0].contains("2 polygon parts without a usable outline"), "{:?}", r.messages);
         assert!(!layer(r).features.is_empty());
+        // Corners past the poles aren't a longitude and latitude: with nothing else, the error says
+        // why. A ring that runs on past the antimeridian is covered.
+        let mut off = Dataset::new("pts", GeometryType::Polygon, vec![]);
+        let tall =
+            vec![Coord::new(0.0, 80.0), Coord::new(10.0, 80.0), Coord::new(10.0, 95.0), Coord::new(0.0, 95.0), Coord::new(0.0, 80.0)];
+        off.push(Some(Geometry::Polygon(vec![vec![tall]])), vec![]);
+        let e = grid(&One(off, None), &serde_json::json!({"resolution": 3, "area": "Input Layer", "input": "pts"})).unwrap_err();
+        assert!(e.contains("1 polygon parts have no usable outline"), "{e}");
+        let mut across = Dataset::new("pts", GeometryType::Polygon, vec![]);
+        let wide =
+            vec![Coord::new(170.0, 0.0), Coord::new(190.0, 0.0), Coord::new(190.0, 10.0), Coord::new(170.0, 10.0), Coord::new(170.0, 0.0)];
+        across.push(Some(Geometry::Polygon(vec![vec![wide]])), vec![]);
+        let d = layer(grid(&One(across, None), &serde_json::json!({"resolution": 3, "area": "Input Layer", "input": "pts"})).unwrap());
+        let at = |lon: f64| a5::u64_to_hex(a5::lonlat_to_cell(a5::LonLat::new(lon, 5.0), 3).unwrap());
+        for lon in [175.0, -175.0] {
+            assert!((0..d.features.len()).any(|r| d.value(r, 0) == &Value::Text(at(lon))), "{lon}");
+        }
         assert!(grid(&inp, &serde_json::json!({"area": "Mars"})).unwrap_err().contains("Map Extent, Input Layer or World"));
         for bad in [serde_json::json!({"resolution": 31}), serde_json::json!({"resolution": 2.5}), serde_json::json!({"resolution": -1})] {
             assert!(grid(&inp, &bad).is_err(), "{bad}");
