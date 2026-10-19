@@ -17,6 +17,9 @@ use crate::{Inputs, Output, ToolResult};
 pub const MAX_CELLS: u64 = 200_000;
 /// A5's finest resolution.
 pub const MAX_RESOLUTION: i32 = 30;
+/// How far over [`MAX_CELLS`] an area's [`estimate`] may go before it's refused without being
+/// covered: the estimate is rough, and the exact count still applies after.
+const ESTIMATE_MARGIN: f64 = 2.0;
 
 fn num(p: &Json, k: &str) -> Option<f64> {
     p.get(k).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))).filter(|f: &f64| f.is_finite())
@@ -100,13 +103,72 @@ fn extent_ring(e: Extent) -> Vec<a5::LonLat> {
     ring
 }
 
-/// The cells of a covering, expanded, or an error when there would be more than [`MAX_CELLS`].
-fn expand(covering: &[u64], res: i32) -> Result<Vec<u64>, String> {
-    let n = a5::count(covering)?;
-    if n > MAX_CELLS {
-        return Err(format!("{n} cells at resolution {res} is too many (at most {MAX_CELLS}): use a coarser resolution or a smaller area"));
+/// An extent within the globe's longitudes and latitudes, for a view panned past ±180° or zoomed
+/// out past the poles; `None` when nothing of it is on the globe.
+fn on_the_globe(e: Extent) -> Option<Extent> {
+    let c = Extent::new(e.min_x.max(-180.0), e.min_y.max(-90.0), e.max_x.min(180.0), e.max_y.min(90.0));
+    (c.min_x < c.max_x && c.min_y < c.max_y).then_some(c)
+}
+
+fn too_many(n: impl std::fmt::Display, res: i32) -> String {
+    format!("{n} cells at resolution {res} is too many (at most {MAX_CELLS}): use a coarser resolution or a smaller area")
+}
+
+/// About how many cells cover a polygon (its outer ring, then its holes) at a resolution, worked
+/// out before A5 covers it: its area over a cell's, and a cell per cell's width along its rings,
+/// where a covering adds the cells its edges cross. Edges are taken as great circles.
+fn estimate(rings: &[Vec<a5::LonLat>], res: i32) -> f64 {
+    // A5's authalic sphere.
+    let radius = (a5::cell_area(-1) / (4.0 * std::f64::consts::PI)).sqrt();
+    let (mut area, mut length) = (0.0, 0.0);
+    for (i, ring) in rings.iter().enumerate() {
+        let (mut twice, mut arc) = (0.0, 0.0);
+        for (k, a) in ring.iter().enumerate() {
+            let b = &ring[(k + 1) % ring.len()];
+            let (l1, p1, l2, p2) =
+                (a.longitude().to_radians(), a.latitude().to_radians(), b.longitude().to_radians(), b.latitude().to_radians());
+            let mut dl = l2 - l1;
+            if dl > std::f64::consts::PI {
+                dl -= std::f64::consts::TAU;
+            } else if dl < -std::f64::consts::PI {
+                dl += std::f64::consts::TAU;
+            }
+            twice += dl * (2.0 + p1.sin() + p2.sin());
+            let h = ((p2 - p1) / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+            arc += 2.0 * h.clamp(0.0, 1.0).sqrt().asin();
+        }
+        let a = (twice / 2.0).abs() * radius * radius;
+        area += if i == 0 { a } else { -a };
+        length += arc * radius;
     }
-    a5::uncompact(covering)
+    let cell = a5::cell_area(res);
+    if !area.is_finite() || !length.is_finite() {
+        return f64::INFINITY;
+    }
+    area.max(0.0) / cell + length / cell.sqrt()
+}
+
+/// The cells at a resolution of coverings (each compacted, as A5 gives them), each once and in id
+/// order. They're counted before any is made, and more than [`MAX_CELLS`] is an error.
+fn cells_of(coverings: &[Vec<u64>], res: i32) -> Result<Vec<u64>, String> {
+    let parts: Vec<u64> = coverings.iter().flatten().copied().filter(|c| !a5::is_compaction_marker(*c)).collect();
+    // A coarser cell holds the ratio of the two resolutions' cell counts.
+    let total = a5::get_num_cells(res);
+    let n = parts.iter().fold(0u64, |n, c| n.saturating_add(total / a5::get_num_cells(a5::get_resolution(*c)).max(1)));
+    if n > MAX_CELLS {
+        return Err(too_many(n, res));
+    }
+    let mut cells: Vec<u64> = Vec::new();
+    for c in parts {
+        if a5::get_resolution(c) == res {
+            cells.push(c);
+        } else {
+            cells.extend(a5::cell_to_children(c, Some(res))?);
+        }
+    }
+    cells.sort_unstable();
+    cells.dedup();
+    Ok(cells)
 }
 
 /// The A5 Grid tool: the cells at a resolution over the map's extent, a layer's polygons (or its
@@ -117,68 +179,49 @@ pub fn grid(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
         containment: if text(p, "containment") == "Center" { a5::Containment::Center } else { a5::Containment::Overlapping },
     };
     let area = text(p, "area");
-    let cells: Vec<u64> = match area {
-        "World" => {
-            let n = a5::get_num_cells(res);
-            if n > MAX_CELLS {
-                return Err(format!(
-                    "{n} cells at resolution {res} is too many (at most {MAX_CELLS}): use a coarser resolution or a smaller area"
-                ));
-            }
-            let mut out = Vec::new();
-            for c in a5::get_res0_cells()? {
-                out.extend(if res == 0 { vec![c] } else { a5::cell_to_children(c, Some(res))? });
-            }
-            out
-        }
-        "Input Layer" => {
+    let off = "is outside the globe's longitudes and latitudes (−180° to 180°, −90° to 90°)";
+    let cells: Vec<u64> = if area == "World" {
+        cells_of(&[a5::get_res0_cells()?], res)?
+    } else {
+        // The polygons to cover, each its rings.
+        let shapes: Vec<Vec<Vec<a5::LonLat>>> = if area == "Input Layer" {
             let name = text(p, "input");
             let ds = inp.dataset(name).ok_or_else(|| format!("No layer named {name}"))?;
             let sel = inp.selection(name);
             let rows: Vec<usize> = if sel.is_empty() { (0..ds.features.len()).collect() } else { sel.to_vec() };
-            let mut covering: Vec<u64> = Vec::new();
+            let mut shapes = Vec::new();
             let mut extent = Extent::EMPTY;
             for r in rows {
                 match ds.features.get(r).and_then(|f| f.geometry.as_ref()) {
                     Some(Geometry::Polygon(polys)) => {
-                        for poly in polys {
-                            let rings: Vec<Vec<a5::LonLat>> =
-                                poly.iter().map(|ring| ring.iter().map(|c| a5::LonLat::new(c.x, c.y)).collect()).collect();
-                            covering.extend(
-                                a5::polygon_to_cells(&rings, res, Some(options))?.into_iter().filter(|c| !a5::is_compaction_marker(*c)),
-                            );
-                        }
+                        shapes.extend(
+                            polys
+                                .iter()
+                                .map(|poly| poly.iter().map(|ring| ring.iter().map(|c| a5::LonLat::new(c.x, c.y)).collect()).collect()),
+                        );
                     }
                     Some(g) => extent = extent.union(&g.extent()),
                     None => {}
                 }
             }
             if !extent.is_empty() {
-                covering.extend(
-                    a5::polygon_to_cells(&[extent_ring(extent)], res, Some(options))?.into_iter().filter(|c| !a5::is_compaction_marker(*c)),
-                );
+                shapes.push(vec![extent_ring(on_the_globe(extent).ok_or_else(|| format!("The extent of {name} {off}"))?)]);
             }
-            if covering.is_empty() {
+            if shapes.is_empty() {
                 return Err(format!("{name} has no features to cover"));
             }
-            // Coverings of several features, compacted each: expanded together, once each.
-            let mut cells: Vec<u64> = Vec::new();
-            for c in covering {
-                let r = a5::get_resolution(c);
-                let kids = if r == res { vec![c] } else { a5::cell_to_children(c, Some(res))? };
-                cells.extend(kids);
-                if cells.len() as u64 > MAX_CELLS {
-                    return Err(format!("More than {MAX_CELLS} cells at resolution {res}: use a coarser resolution or a smaller area"));
-                }
-            }
-            cells.sort_unstable();
-            cells.dedup();
-            cells
-        }
-        _ => {
+            shapes
+        } else {
             let e = inp.view_extent().ok_or("There's no map view to fill; choose World or Input Layer")?;
-            expand(&a5::polygon_to_cells(&[extent_ring(e)], res, Some(options))?, res)?
+            vec![vec![extent_ring(on_the_globe(e).ok_or_else(|| format!("The map view {off}"))?)]]
+        };
+        // Far too many is refused before A5 works on it; the count after is exact.
+        let guess: f64 = shapes.iter().map(|s| estimate(s, res)).sum();
+        if guess > ESTIMATE_MARGIN * MAX_CELLS as f64 {
+            return Err(too_many(if guess.is_finite() { format!("About {guess:.0}") } else { "Too many".into() }, res));
         }
+        let coverings = shapes.iter().map(|s| a5::polygon_to_cells(s, res, Some(options))).collect::<Result<Vec<_>, _>>()?;
+        cells_of(&coverings, res)?
     };
     let mut out = Dataset::new(output_name(p, &format!("A5 r{res}")), GeometryType::Polygon, cell_fields());
     for c in &cells {
@@ -231,9 +274,9 @@ pub fn aggregate(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
                 e.1 += v;
                 e.2 += 1;
             }
-        }
-        if by.len() as u64 > MAX_CELLS {
-            return Err(format!("The points fall in more than {MAX_CELLS} cells at resolution {res}: use a coarser resolution"));
+            if by.len() as u64 > MAX_CELLS {
+                return Err(format!("The points fall in more than {MAX_CELLS} cells at resolution {res}: use a coarser resolution"));
+            }
         }
     }
     if by.is_empty() {
@@ -320,10 +363,47 @@ mod tests {
         let w = layer(grid(&inp, &serde_json::json!({"resolution": 1, "area": "World"})).unwrap());
         assert_eq!(w.features.len() as u64, a5::get_num_cells(1));
         assert!(grid(&inp, &serde_json::json!({"resolution": 12, "area": "World"})).unwrap_err().contains("too many"));
+        // A view far too big for the resolution is refused before it's covered (A5 would take
+        // a covering whose edges alone cross millions of cells), and one just over is counted exactly.
+        let wide = One(points(&[]), Some(Extent::new(-60.0, -30.0, -40.0, -10.0)));
+        let t = std::time::Instant::now();
+        let e = grid(&wide, &serde_json::json!({"resolution": 30})).unwrap_err();
+        assert!(e.starts_with("About ") && e.contains("too many"), "{e}");
+        assert!(t.elapsed().as_secs_f64() < 1.0);
+        let e = grid(&One(points(&[]), Some(Extent::new(-60.0, -30.0, -46.0, -16.0))), &serde_json::json!({"resolution": 11})).unwrap_err();
+        assert!(!e.starts_with("About ") && e.contains("too many"), "{e}");
+        // A view panned past the antimeridian or the poles is cut to the globe; one off it is refused.
+        let panned = layer(
+            grid(&One(points(&[]), Some(Extent::new(-200.0, -100.0, -170.0, -80.0))), &serde_json::json!({"resolution": 3})).unwrap(),
+        );
+        assert!(!panned.features.is_empty());
+        assert!(
+            grid(&One(points(&[]), Some(Extent::new(190.0, 0.0, 200.0, 10.0))), &serde_json::json!({})).unwrap_err().contains("outside")
+        );
         for bad in [serde_json::json!({"resolution": 31}), serde_json::json!({"resolution": 2.5}), serde_json::json!({"resolution": -1})] {
             assert!(grid(&inp, &bad).is_err(), "{bad}");
         }
         assert!(grid(&One(points(&[]), None), &serde_json::json!({})).is_err(), "no view");
+    }
+
+    /// The estimate before covering against the exact count after: it's of the same order, so
+    /// a margin of [`ESTIMATE_MARGIN`] refuses only what's well over the cap.
+    #[test]
+    fn the_estimate_follows_the_count() {
+        for (e, res) in [
+            (Extent::new(-56.5, -13.5, -55.0, -12.0), 9),
+            (Extent::new(-75.0, -35.0, -35.0, 5.0), 6),
+            (Extent::new(-180.0, -90.0, 180.0, 90.0), 3),
+        ] {
+            let shape = vec![extent_ring(e)];
+            let options = a5::PolygonToCellsOptions { containment: a5::Containment::Overlapping };
+            let n = cells_of(&[a5::polygon_to_cells(&shape, res, Some(options)).unwrap()], res).unwrap().len() as f64;
+            let guess = estimate(&shape, res);
+            assert!(guess > n / ESTIMATE_MARGIN && guess < n * ESTIMATE_MARGIN, "{e:?} r{res}: {guess} for {n}");
+        }
+        // The whole globe's area is the authalic sphere's: every cell of a resolution.
+        let world = estimate(&[extent_ring(Extent::new(-180.0, -90.0, 180.0, 90.0))], 5);
+        assert!(world > a5::get_num_cells(5) as f64);
     }
 
     /// Rings across the antimeridian run on past ±180°; those round a pole close along it.
