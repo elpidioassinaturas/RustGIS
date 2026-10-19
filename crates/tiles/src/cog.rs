@@ -968,11 +968,11 @@ fn paint(pen: &Pen, spots: &[Option<(u32, usize)>], wanted: &[u32], tiles: &[Pic
 }
 
 /// Carries the file's edge one pixel out: each pixel outside the file (`spots` none) beside one
-/// painted, or touching one at a corner, takes its colour. A map tile is drawn scaled with bilinear filtering, which turns the
-/// step from painted to empty into a half-transparent pixel; at the edge between two files laid
-/// side by side (a data cube's tiles) the two half-transparent edges let the map show through as a
-/// thin line. Carried out, the step falls outside the file and its own pixels stay opaque. Pixels
-/// with no data inside the file are left empty.
+/// painted, or touching one at a corner, takes its colour. A map tile is drawn scaled with
+/// bilinear filtering, which turns the step from painted to empty into a half-transparent pixel;
+/// at the edge between two files laid side by side (a data cube's tiles) the two half-transparent
+/// edges let the map show through as a thin line. Carried out, the step falls outside the file and
+/// its own pixels stay opaque. Pixels with no data inside the file are left empty.
 fn bleed(rgba: &mut [u8], spots: &[Option<(u32, usize)>]) {
     let s = SIZE as usize;
     let painted = |k: usize| rgba.get(k * 4 + 3).is_some_and(|a| *a > 0);
@@ -982,19 +982,19 @@ fn bleed(rgba: &mut [u8], spots: &[Option<(u32, usize)>]) {
             continue;
         }
         let (i, j) = (k % s, k / s);
-        let (w, e, n, so) = (i > 0, i + 1 < s, j > 0, j + 1 < s);
+        let (west, east, north, south) = (i > 0, i + 1 < s, j > 0, j + 1 < s);
         // Beside first, then at a corner, where filtering at the file's corner reaches too.
         let near = [
-            w.then(|| k - 1),
-            e.then(|| k + 1),
-            n.then(|| k - s),
-            so.then(|| k + s),
-            (n && w).then(|| k - s - 1),
-            (n && e).then(|| k - s + 1),
-            (so && w).then(|| k + s - 1),
-            (so && e).then(|| k + s + 1),
+            west.then(|| k - 1),
+            east.then(|| k + 1),
+            north.then(|| k - s),
+            south.then(|| k + s),
+            (north && west).then(|| k - s - 1),
+            (north && east).then(|| k - s + 1),
+            (south && west).then(|| k + s - 1),
+            (south && east).then(|| k + s + 1),
         ];
-        if let Some(from) = near.into_iter().flatten().find(|n| spots.get(*n).is_some_and(Option::is_some) && painted(*n)) {
+        if let Some(from) = near.into_iter().flatten().find(|m| spots.get(*m).is_some_and(Option::is_some) && painted(*m)) {
             fill.push((k, from));
         }
     }
@@ -1100,6 +1100,18 @@ mod tests {
         assert_eq!(&px[below + 4..below + 8], &[64, 128, 191, 255], "touching pixel 0 only at a corner");
         assert_eq!(&px[8..12], &[0, 0, 0, 0], "beside pixel 1, which has no data");
         assert_eq!(&px[(below + 8)..(below + 12)], &[0, 0, 0, 0]);
+        // At the tile's own border: a file pixel in the top row's last column is carried left, down
+        // and down-left, not on into the next row's first pixel.
+        let s = SIZE as usize;
+        let last: Vec<Option<(u32, usize)>> = (0..s * s).map(|k| (k == s - 1).then_some((7, 0))).collect();
+        let tile: Picked = vec![(chunk(10.0), 0), (chunk(20.0), 0), (chunk(30.0), 0)];
+        let out = paint(&pen, &last, &[7], &[tile]).unwrap();
+        let px = &out[crate::cache::RAW.len() + 8..];
+        let at = |k: usize| &px[k * 4..k * 4 + 4];
+        for k in [s - 2, 2 * s - 2, 2 * s - 1] {
+            assert_eq!(at(k), &[64, 128, 191, 255], "pixel {k}");
+        }
+        assert_eq!(at(s), &[0, 0, 0, 0], "the next row's first pixel");
         // Nothing there: no picture.
         assert!(paint(&pen, &vec![None; spots.len()], &[], &[]).unwrap().is_empty());
     }
