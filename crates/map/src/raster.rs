@@ -32,6 +32,10 @@ pub struct RasterLayer {
     /// For a raster GDAL reads: the coordinate system given for a file that doesn't say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crs: Option<String>,
+    /// A Zarr variable that follows the time slider: its slice is the step the slider shows,
+    /// read by the engine as the slider moves (opengeos/RustGIS#554).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_zarr: Option<ZarrTime>,
     pub style: RasterStyle,
     /// The pixels; `None` when the source couldn't be read.
     #[serde(skip)]
@@ -66,6 +70,7 @@ impl RasterLayer {
             embedded: None,
             subdataset: None,
             crs: None,
+            time_zarr: None,
             style,
             data: Some(Arc::new(raster)),
             masked: MaskedStats::default(),
@@ -81,14 +86,19 @@ impl RasterLayer {
             embedded: Some(Arc::new(bytes)),
             subdataset: None,
             crs: None,
+            time_zarr: None,
             style,
             data: Some(Arc::new(raster)),
             masked: MaskedStats::default(),
         }
     }
 
-    /// Reads the pixels again from the path or the embedded file (after a project opens).
+    /// Reads the pixels again from the path or the embedded file (after a project opens). A
+    /// layer that follows the time slider is left to the engine, which reads the step shown.
     pub fn reload(&mut self) -> Result<(), String> {
+        if self.time_zarr.is_some() {
+            return Ok(());
+        }
         let r = if let Some(bytes) = &self.embedded {
             rustgis_data::raster::read_bytes(self.file_name.as_deref().unwrap_or("raster.tif"), bytes)
         } else if let Some(p) = &self.path {
@@ -132,6 +142,71 @@ impl RasterLayer {
             *cache = Some((mask.clone(), bands, Arc::downgrade(r), stats.clone()));
         }
         Some(stats)
+    }
+}
+
+/// The most steps a Zarr layer following the time slider lists (as the slider itself does).
+pub const MAX_ZARR_STEPS: usize = crate::time::MAX_STEPS;
+
+/// A Zarr variable that follows the time slider: the store (a folder or a web address), the
+/// variable, the other dimensions' fixed steps, and its time dimension's steps as dates.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ZarrTime {
+    /// The store's folder or web address.
+    pub store: String,
+    pub variable: String,
+    /// The other dimensions' steps (a pressure level), as `layer.addZarr`'s `index`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub index: Vec<(String, u64)>,
+    /// The time dimension's name.
+    pub dim: String,
+    /// The step of `dim` the first of `dates` is (a period chosen from a longer axis).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub offset: u64,
+    /// The steps' dates, milliseconds since 1970 (UTC), in order.
+    pub dates: Vec<f64>,
+    /// The coordinate system given for a store that doesn't say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crs: Option<String>,
+    /// The step whose slice the layer holds (an index into `dates`); `None` when none is.
+    #[serde(skip)]
+    pub shown: Option<usize>,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+impl ZarrTime {
+    /// The step to show for the slider's window `[from, to)`: the last one in it, `None` when
+    /// none falls in it. With the slider off, the first step.
+    pub fn step_for(&self, window: Option<(f64, f64)>) -> Option<usize> {
+        match window {
+            None => (!self.dates.is_empty()).then_some(0),
+            Some((from, to)) => self.dates.iter().rposition(|d| *d >= from && *d < to),
+        }
+    }
+
+    /// The selection of step `i` as `zarr::Selection::parse` reads it: `t2m[time=12,level=3]`.
+    pub fn selection(&self, i: usize) -> String {
+        let mut parts = vec![format!("{}={}", self.dim, self.offset.saturating_add(i as u64))];
+        parts.extend(self.index.iter().filter(|(d, _)| *d != self.dim).map(|(d, v)| format!("{d}={v}")));
+        format!("{}[{}]", self.variable, parts.join(","))
+    }
+
+    /// Keeps a loaded layer within bounds: dates finite, in order, at most [`MAX_ZARR_STEPS`];
+    /// names of sane length.
+    pub fn repair(&mut self) {
+        self.dates.retain(|d| d.is_finite());
+        self.dates.truncate(MAX_ZARR_STEPS);
+        self.dates.sort_by(f64::total_cmp);
+        self.dates.dedup();
+        self.index.truncate(32);
+        for t in [&mut self.store, &mut self.variable, &mut self.dim] {
+            *t = t.chars().take(4096).collect();
+        }
+        self.shown = None;
     }
 }
 

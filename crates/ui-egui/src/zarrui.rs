@@ -55,6 +55,8 @@ pub struct State {
     /// without metadata.
     forbidden: usize,
     pub error: Option<String>,
+    /// Add the variable as a layer that follows the time slider (opengeos/RustGIS#554).
+    pub follow: bool,
 }
 
 impl State {
@@ -339,6 +341,13 @@ pub fn picker(app: &mut RustGisApp, ui: &mut egui::Ui) {
             d["labels"].get(step as usize).and_then(Value::as_str).map(str::to_string)
         })
         .collect();
+    // A variable with a dimension besides the map's can follow the time slider (desktop).
+    let timed = vars[st.variable]["dims"].as_array().into_iter().flatten().any(|d| d["map"] != json!(true));
+    if cfg!(not(target_arch = "wasm32")) && timed {
+        ui.checkbox(&mut st.follow, crate::tl!("Follow the time slider")).on_hover_text(crate::tl!(
+            "The layer shows the step the time slider is at, and turns the slider on over the variable's dates."
+        ));
+    }
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         if ui.add_enabled(!busy, egui::Button::new(crate::tl!("Add to Map"))).clicked() {
@@ -355,6 +364,23 @@ fn add(app: &mut RustGisApp, sel: zarr::Selection, labels: &[String]) {
         Some(t) => format!("{t} {}", rustgis_engine::cmd::zarr::layer_name("", &sel, labels)),
         None => rustgis_engine::cmd::zarr::layer_name(&st.root, &sel, labels),
     };
+    // Following the time slider: the engine reads each step itself, a folder's or a web store's.
+    if st.follow && cfg!(not(target_arch = "wasm32")) {
+        let index: serde_json::Map<String, Value> = sel.index.iter().map(|(d, i)| (d.clone(), json!(i))).collect();
+        let key = if st.web { "url" } else { "path" };
+        let mut p = json!({key: st.root, "variable": sel.variable, "index": index, "time": true});
+        if let Some(t) = &st.title {
+            p["name"] = json!(format!("{t} {}", sel.variable));
+        }
+        if !st.crs.trim().is_empty() {
+            p["crs"] = json!(st.crs.trim());
+        }
+        match app.run("layer.addZarr", p) {
+            Ok(_) => app.map.invalidate(),
+            Err(e) => app.ui.zarr.error = Some(e),
+        }
+        return;
+    }
     if !st.web {
         let index: serde_json::Map<String, Value> = sel.index.iter().map(|(d, i)| (d.clone(), json!(i))).collect();
         let mut p = json!({"path": st.root, "variable": sel.variable, "index": index, "name": name});

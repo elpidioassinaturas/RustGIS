@@ -1256,6 +1256,81 @@ pub fn info_keys(store: &Store) -> Vec<String> {
     keys
 }
 
+/// The chunk keys of the coordinates of `variable`'s dimensions other than the map's (as
+/// [`info_keys`] lists them for every variable).
+pub fn coordinate_keys(store: &Store, variable: &str) -> Vec<String> {
+    let Some(v) = store.array(variable) else { return Vec::new() };
+    let (y, x) = map_dims(v);
+    let mut keys = Vec::new();
+    for (d, name) in v.dim_names().iter().enumerate() {
+        if d == y || d == x {
+            continue;
+        }
+        if let Some(c) =
+            store.coordinate(v, name).filter(|c| c.shape.first().is_some_and(|n| *n <= MAX_COORDS) && c.unsupported().is_none())
+        {
+            keys.extend(all_keys(c).into_iter().filter(|k| !keys.contains(k)).collect::<Vec<_>>());
+        }
+    }
+    keys
+}
+
+/// `variable`'s time dimension: the first of its dimensions other than the map's whose
+/// coordinate has CF time units (`days since 2001-01-01`), with its steps as milliseconds since
+/// 1970 (UTC). A model calendar's dates are taken by their day, one past its month's end (360_day's
+/// 30 February) on the month's last. `None` when no dimension has such a coordinate, or one of
+/// its steps isn't a date.
+pub fn time_axis(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>>) -> Option<(String, Vec<f64>)> {
+    let v = store.array(variable)?;
+    let (y, x) = map_dims(v);
+    for (d, name) in v.dim_names().iter().enumerate() {
+        if d == y || d == x {
+            continue;
+        }
+        let Some(c) = store.coordinate(v, name) else { continue };
+        if !attr_str(c, "units").is_some_and(|u| u.contains(" since ")) {
+            continue;
+        }
+        let Ok(vals) = values_1d(c, chunks) else { continue };
+        let ms: Option<Vec<f64>> = vals.iter().map(|t| time_ms(c, *t)).collect();
+        if let Some(ms) = ms.filter(|m| !m.is_empty()) {
+            return Some((name.clone(), ms));
+        }
+    }
+    None
+}
+
+/// A CF time coordinate's value as milliseconds since 1970 (see [`time_axis`]).
+fn time_ms(c: &Array, v: f64) -> Option<f64> {
+    let units = attr_str(c, "units")?;
+    let calendar = attr_str(c, "calendar").unwrap_or("standard").to_ascii_lowercase();
+    let (unit, since) = units.split_once(" since ")?;
+    let secs = match unit.trim().to_ascii_lowercase().as_str() {
+        "seconds" | "second" | "s" => 1.0,
+        "minutes" | "minute" | "min" => 60.0,
+        "hours" | "hour" | "h" => 3600.0,
+        "days" | "day" | "d" => 86_400.0,
+        _ => return None,
+    };
+    if !(v.is_finite() && v.abs() < 1e13) {
+        return None;
+    }
+    let since = since.trim();
+    let t = match calendar.as_str() {
+        "standard" | "gregorian" | "proleptic_gregorian" => epoch_seconds(since)? + v * secs,
+        "noleap" | "365_day" | "all_leap" | "366_day" | "360_day" => {
+            let day = fixed_calendar(&calendar, since, v * secs)?;
+            let mut p = day.splitn(3, '-').map(|x| x.parse::<i64>().ok());
+            let (y, m, d) = (p.next()??, p.next()??, p.next()??);
+            let last = days_from_civil(if m == 12 { y + 1 } else { y }, if m == 12 { 1 } else { m + 1 }, 1) - days_from_civil(y, m, 1);
+            days_from_civil(y, m, d.min(last)) as f64 * 86_400.0 + (v * secs).rem_euclid(86_400.0)
+        }
+        _ => return None,
+    };
+    let ms = t * 1000.0;
+    ms.is_finite().then_some(ms)
+}
+
 /// A coordinate value as a label: a CF time (`days since 1850-01-01`) as a date, else the
 /// number and units.
 fn label(c: &Array, v: f64) -> String {

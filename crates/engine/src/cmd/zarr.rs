@@ -9,9 +9,11 @@ use std::path::Path;
 
 use rustgis_data::raster::{self, Crs, zarr};
 use rustgis_map::raster::RasterLayer;
+#[cfg(not(target_arch = "wasm32"))]
+use rustgis_map::raster::ZarrTime;
 use serde_json::Value;
 
-use super::ps;
+use super::{b, ps};
 use crate::{CmdResult, CommandSpec as C, Session};
 
 pub fn commands() -> Vec<C> {
@@ -20,7 +22,7 @@ pub fn commands() -> Vec<C> {
             .view()
             .params(r#"{"path": "a Zarr store's folder" | "url": "https://… a store with consolidated metadata"}"#),
         C::new("layer.addZarr", "Add Zarr Variable", "Home › Add › Add Data", add).params(
-            r#"{"path": folder | "url": "https://…", "variable"?: "its path in the store (default: the first)", "index"?: {"time": 3, "level": 0} (other dimensions' steps, default 0), "crs"?: "EPSG:… for a store that doesn't say", "name"?: text, "ran"?: (internal: a slice the app has read)}"#,
+            r#"{"path": folder | "url": "https://…", "variable"?: "its path in the store (default: the first)", "index"?: {"time": 3, "level": 0} (other dimensions' steps, default 0), "crs"?: "EPSG:… for a store that doesn't say", "name"?: text, "time"?: bool (follow the time slider: the layer shows the step the slider is at, and turns the slider on over the variable's dates when it is off; desktop), "start"?, "end"?: dates (with time: the period to take, for an axis longer than the slider's 20,000 steps), "ran"?: (internal: a slice the app has read)}"#,
         ),
     ]
 }
@@ -182,6 +184,9 @@ pub fn pick_variable(store: &zarr::Store, sel: &mut zarr::Selection) -> Result<(
 }
 
 pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
+    if b(p, "time") == Some(true) {
+        return add_following(s, p);
+    }
     let src = source(p)?;
     #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut sel = selection(p);
@@ -234,5 +239,251 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             layer.subdataset = Some(sel.label());
             super::raster::add_raster(s, &name, layer)
         }
+    }
+}
+
+// --- Following the time slider (opengeos/RustGIS#554) --------------------------------------------
+
+/// Slices kept for layers that follow the time slider, by store and selection: the last few, so
+/// stepping back and forth or looping doesn't read them again.
+#[cfg(not(target_arch = "wasm32"))]
+const SLICES_KEPT: usize = 8;
+
+/// The slices kept (see [`SLICES_KEPT`]), newest last.
+#[cfg(not(target_arch = "wasm32"))]
+fn slices() -> &'static std::sync::Mutex<Vec<(String, std::sync::Arc<raster::Raster>)>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<Vec<(String, std::sync::Arc<raster::Raster>)>>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// Web stores' metadata, read once per run (the last few stores).
+#[cfg(not(target_arch = "wasm32"))]
+fn stores() -> &'static std::sync::Mutex<Vec<(String, std::sync::Arc<zarr::Store>)>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<Vec<(String, std::sync::Arc<zarr::Store>)>>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_web(store: &str) -> bool {
+    let lower = store.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+/// A web store's metadata, from the run's cache when it was read before.
+#[cfg(not(target_arch = "wasm32"))]
+fn cached_store(url: &str) -> Result<std::sync::Arc<zarr::Store>, String> {
+    if let Some((_, st)) = stores().lock().ok().and_then(|c| c.iter().find(|(u, _)| u == url).cloned()) {
+        return Ok(st);
+    }
+    let st = std::sync::Arc::new(store_at(url)?);
+    if let Ok(mut c) = stores().lock() {
+        c.push((url.to_string(), st.clone()));
+        let excess = c.len().saturating_sub(4);
+        c.drain(..excess);
+    }
+    Ok(st)
+}
+
+/// Step `i` of a following layer's variable, from the kept slices or read now.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_step(zt: &ZarrTime, i: usize) -> Result<std::sync::Arc<raster::Raster>, String> {
+    let sel = zt.selection(i);
+    let key = format!("{}\u{0}{sel}\u{0}{}", zt.store, zt.crs.as_deref().unwrap_or(""));
+    if let Some((_, r)) = slices().lock().ok().and_then(|c| c.iter().find(|(k, _)| *k == key).cloned()) {
+        return Ok(r);
+    }
+    let crs = zt.crs.as_deref().map(str::trim).filter(|c| !c.is_empty());
+    let r = if is_web(&zt.store) {
+        let st = cached_store(&zt.store)?;
+        let plan = zarr::plan(&st, &zarr::Selection::parse(&sel)).map_err(|e| e.to_string())?;
+        let (chunks, _) = fetch(&zt.store, &plan.keys)?;
+        let crs = crs.map(Crs::parse).transpose()?;
+        zarr::assemble(&st, &plan, &chunks, &sel, crs).map_err(|e| e.to_string())?
+    } else {
+        zarr::read_dir(Path::new(&zt.store), &sel, crs).map_err(|e| e.to_string())?
+    };
+    let r = std::sync::Arc::new(r);
+    if let Ok(mut c) = slices().lock() {
+        c.retain(|(k, _)| *k != key);
+        c.push((key, r.clone()));
+        let excess = c.len().saturating_sub(SLICES_KEPT);
+        c.drain(..excess);
+    }
+    Ok(r)
+}
+
+/// Layers that follow the time slider read the step it shows, in every map: the last of their
+/// steps in the slider's window, or none (the layer draws nothing) when no step falls in it. A
+/// web store's next steps are then read ahead in the background, so playing doesn't wait for
+/// each. A slice that can't be read leaves its layer empty, and says why.
+pub(crate) fn follow_time(s: &mut Session) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut errors = Vec::new();
+        let mut ahead: Vec<(ZarrTime, usize)> = Vec::new();
+        for m in &mut s.project.maps {
+            let window = m.time.as_ref().map(rustgis_map::time::TimeSlider::window);
+            for l in &mut m.layers {
+                let name = l.name.clone();
+                let Some(rl) = l.raster.as_mut() else { continue };
+                let Some(zt) = rl.time_zarr.as_mut() else { continue };
+                let want = zt.step_for(window);
+                if want == zt.shown && (want.is_none() || rl.data.is_some()) {
+                    continue;
+                }
+                match want {
+                    None => {
+                        rl.data = None;
+                        zt.shown = None;
+                    }
+                    Some(i) => match read_step(zt, i) {
+                        Ok(r) => {
+                            rl.data = Some(r);
+                            zt.shown = Some(i);
+                            if is_web(&zt.store) {
+                                ahead.push((zt.clone(), i));
+                            }
+                        }
+                        Err(e) => {
+                            rl.data = None;
+                            zt.shown = None;
+                            errors.push(format!("{name}: {e}"));
+                        }
+                    },
+                }
+            }
+        }
+        for e in errors {
+            s.notify(e, true);
+        }
+        for (zt, i) in ahead {
+            std::thread::spawn(move || {
+                for j in (i + 1..zt.dates.len()).take(2) {
+                    if read_step(&zt, j).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = s;
+}
+
+/// `layer.addZarr` with `"time": true`: the variable's time axis read from its coordinate, a layer
+/// that shows the step the slider is at, and the slider turned on over the axis when it is off.
+/// The stretch is fixed at the first slice's, so a colour means one value at every step.
+fn add_following(s: &mut Session, p: &Value) -> CmdResult {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (s, p);
+        Err("in the web app, a Zarr variable can't follow the time slider yet".into())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if p.get("ran").is_some_and(|r| !r.is_null()) {
+            return Err("time and ran don't go together".into());
+        }
+        let src = source(p)?;
+        let mut sel = selection(p);
+        let crs = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
+        if let Some(c) = &crs {
+            Crs::parse(c)?;
+        }
+        let (root, store, chunks) = match src {
+            Source::Dir(d) => {
+                let store = zarr::read_metadata(Path::new(&d)).map_err(|e| format!("{d}: {e}"))?;
+                let mut chunks = HashMap::new();
+                let mut total = 0u64;
+                for k in zarr::coordinate_keys(&store, &sel.variable) {
+                    let path = Path::new(&d).join(&k);
+                    let Ok(meta) = std::fs::metadata(&path) else { continue };
+                    if !meta.is_file() || meta.len() > zarr::MAX_CHUNK_FILE {
+                        continue;
+                    }
+                    total = total.saturating_add(meta.len());
+                    if total > zarr::MAX_READ {
+                        return Err(format!("{d}: the coordinates are too large to read"));
+                    }
+                    if let Ok(b) = std::fs::read(&path) {
+                        chunks.insert(k, b);
+                    }
+                }
+                let full = std::path::absolute(&d).map(|p| p.display().to_string()).unwrap_or(d);
+                (full, std::sync::Arc::new(store), chunks)
+            }
+            Source::Url(u) => {
+                let store = cached_store(&u)?;
+                (u, store, HashMap::new())
+            }
+        };
+        pick_variable(&store, &mut sel)?;
+        let chunks =
+            if chunks.is_empty() && is_web(&root) { fetch(&root, &zarr::coordinate_keys(&store, &sel.variable))?.0 } else { chunks };
+        let (dim, dates) = zarr::time_axis(&store, &sel.variable, &chunks).ok_or_else(|| {
+            format!("{} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")", sel.variable)
+        })?;
+        // The period asked for, else the whole axis.
+        let date = |k: &str| -> Result<Option<f64>, String> {
+            match p.get(k).filter(|v| !v.is_null()) {
+                None => Ok(None),
+                Some(v) => rustgis_data::time::parse_input(v)
+                    .map(Some)
+                    .ok_or_else(|| format!("{k} is a date (2015-06-01, a year, or milliseconds since 1970)")),
+            }
+        };
+        let (start, end) = (date("start")?, date("end")?);
+        let inside = |d: &f64| start.is_none_or(|a| *d >= a) && end.is_none_or(|z| *d <= z);
+        let first = dates.iter().position(inside).ok_or("no step of the variable falls between start and end")?;
+        let picked: Vec<f64> = dates[first..].iter().copied().take_while(inside).collect();
+        if picked.len() > rustgis_map::raster::MAX_ZARR_STEPS {
+            return Err(format!(
+                "{} has {} steps there; the time slider takes {} at most: give start and end",
+                sel.variable,
+                picked.len(),
+                rustgis_map::raster::MAX_ZARR_STEPS
+            ));
+        }
+        let mut zt = ZarrTime {
+            store: root.clone(),
+            variable: sel.variable.clone(),
+            index: sel.index.iter().filter(|(d, _)| *d != dim).cloned().collect(),
+            dim,
+            offset: first as u64,
+            dates: picked,
+            crs,
+            shown: None,
+        };
+        zt.repair();
+        // The slider, on over the variable's dates when it is off.
+        if s.map().time.is_none() {
+            let dates: Vec<Value> = zt.dates.iter().map(|d| serde_json::json!(d)).collect();
+            super::time::set(s, &serde_json::json!({"dates": dates}))?;
+        }
+        let window = s.map().time.as_ref().map(rustgis_map::time::TimeSlider::window);
+        let want = zt.step_for(window);
+        // The first slice the layer shows sets its style; with no step in the window, the first step's.
+        let r = read_step(&zt, want.unwrap_or(0)).map_err(|e| format!("{root}: {e}"))?;
+        let mut layer = RasterLayer::from_path((*r).clone(), root.clone());
+        if is_web(&root) {
+            layer.path = None;
+        }
+        layer.data = want.map(|_| r.clone());
+        // One stretch for every step: the first slice's range, fixed.
+        let band = layer.style.renderer.bands().first().copied().unwrap_or(0);
+        if !matches!(layer.style.stretch, rustgis_map::raster::Stretch::Custom { .. })
+            && let Some(stats) = r.bands.get(band).map(|b| &b.stats)
+        {
+            let n = rustgis_map::raster::Normalizer::new(layer.style.stretch, stats, &r.data_type);
+            if n.lo.is_finite() && n.hi.is_finite() && n.lo < n.hi {
+                layer.style.stretch = rustgis_map::raster::Stretch::Custom { min: n.lo, max: n.hi };
+            }
+        }
+        zt.shown = want;
+        let name = ps(p, "name")
+            .map(str::to_string)
+            .unwrap_or_else(|| layer_name(&root, &zarr::Selection { variable: zt.variable.clone(), index: zt.index.clone() }, &[]));
+        layer.time_zarr = Some(zt);
+        super::raster::add_raster(s, &name, layer)
     }
 }

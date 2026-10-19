@@ -51,6 +51,8 @@ fn reset(s: &mut Session, p: Project) {
     s.tool = Tool::Explore;
     s.clear_history();
     s.history_from_file = s.project.gp_history.len();
+    // Zarr layers that follow the time slider read the step it is at.
+    super::zarr::follow_time(s);
 }
 
 fn new(s: &mut Session, p: &Value) -> CmdResult {

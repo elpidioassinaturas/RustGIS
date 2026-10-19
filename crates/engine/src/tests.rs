@@ -6278,6 +6278,111 @@ fn lidar_point_clouds() {
 /// and by Add Data, saved by folder and selection and read again when the project opens; a slice
 /// the app read itself handed over by id.
 #[cfg(not(target_arch = "wasm32"))]
+/// A Zarr store in a temporary folder: `t` over three monthly steps (days since 2001-01-01: 0,
+/// 31, 59) on a 3 × 4 grid, step `k`'s values `100·k + i`.
+fn zarr_store_over_time(tag: &str) -> (std::path::PathBuf, String) {
+    let dir = std::env::temp_dir().join(format!("rustgis-zarr-{tag}-{}", std::process::id()));
+    let store = dir.join("air.zarr");
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["t", "lat", "lon", "time"] {
+        std::fs::create_dir_all(store.join(d)).unwrap();
+    }
+    let arr = |shape: &str, chunks: &str, dtype: &str| {
+        serde_json::from_str::<Value>(&format!(
+            r#"{{"shape":{shape},"chunks":{chunks},"dtype":"{dtype}","compressor":null,"fill_value":null,"filters":null,"order":"C","zarr_format":2}}"#
+        ))
+        .unwrap()
+    };
+    let meta = json!({"metadata": {
+        ".zgroup": {"zarr_format": 2},
+        "t/.zarray": arr("[3,3,4]", "[1,3,4]", "<f4"),
+        "t/.zattrs": {"_ARRAY_DIMENSIONS": ["time","lat","lon"], "units": "K"},
+        "lat/.zarray": arr("[3]", "[3]", "<f4"),
+        "lat/.zattrs": {"_ARRAY_DIMENSIONS": ["lat"], "units": "degrees_north"},
+        "lon/.zarray": arr("[4]", "[4]", "<f4"),
+        "lon/.zattrs": {"_ARRAY_DIMENSIONS": ["lon"], "units": "degrees_east"},
+        "time/.zarray": arr("[3]", "[3]", "<i4"),
+        "time/.zattrs": {"_ARRAY_DIMENSIONS": ["time"], "units": "days since 2001-01-01"},
+    }, "zarr_consolidated_format": 1});
+    std::fs::write(store.join(".zmetadata"), meta.to_string()).unwrap();
+    std::fs::write(store.join(".zgroup"), r#"{"zarr_format":2}"#).unwrap();
+    let f32s = |v: &[f32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    std::fs::write(store.join("lat/0"), f32s(&[10.0, 20.0, 30.0])).unwrap();
+    std::fs::write(store.join("lon/0"), f32s(&[1.0, 2.0, 3.0, 4.0])).unwrap();
+    std::fs::write(store.join("time/0"), [0i32, 31, 59].iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+    for t in 0..3 {
+        let v: Vec<f32> = (0..12).map(|i| (t * 100 + i) as f32).collect();
+        std::fs::write(store.join(format!("t/{t}.0.0")), f32s(&v)).unwrap();
+    }
+    let path = store.display().to_string();
+    (dir, path)
+}
+
+/// A Zarr variable follows the time slider (#554): the slice drawn is the step the slider is at,
+/// the stretch is the same at every step, and the project keeps the layer by its store.
+#[test]
+fn a_zarr_variable_follows_the_time_slider() {
+    let (dir, path) = zarr_store_over_time("follow");
+    let mut s = Session::new(Project::default());
+    let id = s.run("layer.addZarr", &json!({"path": path, "variable": "t", "time": true})).unwrap()["layer"].as_u64().unwrap() as u32;
+    // The slider is on over the variable's three dates, at the first.
+    let info = s.run("time.info", &Value::Null).unwrap();
+    assert_eq!(info["steps"], 3, "{info}");
+    let first = |s: &Session| s.map().layer(id).and_then(|l| l.raster.as_ref()).and_then(|r| r.data.as_ref()).map(|d| d.bands[0].data[0]);
+    // North up: the last latitude row first; step k's values are 100·k + i.
+    assert_eq!(first(&s), Some(8.0));
+    let rl = s.map().layer(id).unwrap().raster.clone().unwrap();
+    assert!(matches!(rl.style.stretch, rustgis_map::raster::Stretch::Custom { .. }), "{:?}", rl.style.stretch);
+    assert!(s.map().layer(id).unwrap().name.ends_with(" t"), "{}", s.map().layer(id).unwrap().name);
+    let stretch = rl.style.stretch;
+    // Moving the slider moves the slice; the stretch stays.
+    s.run("time.goTo", &json!({"step": 2})).unwrap();
+    assert_eq!(first(&s), Some(208.0));
+    s.run("time.step", &json!({"by": -1})).unwrap();
+    assert_eq!(first(&s), Some(108.0));
+    assert_eq!(s.map().layer(id).unwrap().raster.as_ref().unwrap().style.stretch, stretch);
+    // Saved and opened again: the store and the step, read again.
+    let text = serde_json::to_string(&s.project).unwrap();
+    assert!(text.contains("\"time_zarr\"") && !text.contains("\"embedded\""), "kept by its store, not as a slice");
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text})).unwrap();
+    let again = t
+        .map()
+        .layers
+        .iter()
+        .find(|l| l.is_raster())
+        .and_then(|l| l.raster.as_ref())
+        .and_then(|r| r.data.as_ref())
+        .map(|d| d.bands[0].data[0]);
+    assert_eq!(again, Some(108.0));
+    // A window with no step of the variable: nothing drawn.
+    s.run("time.set", &json!({"dates": ["2000-06-01", "2001-01-01", "2001-02-01", "2001-03-01"], "date": "2000-06-01"})).unwrap();
+    assert_eq!(first(&s), None);
+    s.run("time.goTo", &json!({"step": 3})).unwrap();
+    assert_eq!(first(&s), Some(208.0));
+    // The animation reads each step's slice.
+    let zip = std::env::temp_dir().join(format!("rustgis-zarr-frames-{}.zip", std::process::id()));
+    let r = s.run("time.export", &json!({"path": zip.display().to_string(), "width": 64, "height": 48})).unwrap();
+    assert_eq!(r["frames"], 4, "{r}");
+    let _ = std::fs::remove_file(zip);
+    // A period: the steps from February on, the layer's first step the second of the axis.
+    let id2 = s.run("layer.addZarr", &json!({"path": path, "variable": "t", "time": true, "start": "2001-01-20", "name": "late"})).unwrap()
+        ["layer"]
+        .as_u64()
+        .unwrap() as u32;
+    let zt = s.map().layer(id2).unwrap().raster.as_ref().unwrap().time_zarr.clone().unwrap();
+    assert_eq!((zt.offset, zt.dates.len(), zt.dim.as_str()), (1, 2, "time"));
+    for bad in [
+        json!({"path": path, "variable": "t", "time": true, "start": "2002-01-01"}),
+        json!({"path": path, "variable": "t", "time": true, "start": "June"}),
+        json!({"path": path, "variable": "t", "time": true, "ran": 1}),
+        json!({"path": path, "variable": "lat", "time": true}),
+    ] {
+        assert!(s.run("layer.addZarr", &bad).is_err(), "{bad}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn zarr_stores_in_folders_and_handed_over() {
     let dir = std::env::temp_dir().join(format!("rustgis-zarr-{}", std::process::id()));

@@ -424,6 +424,20 @@ Google Cloud's CMIP6 bucket does, ARCO-ERA5's doesn't (the desktop reads both).
 rustgis-cli run --cmd 'layer.addZarr={"url":"https://storage.googleapis.com/gcp-public-data-arco-era5/ar/1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2","variable":"2m_temperature","index":{"time":539100}}'
 ```
 
+**Follow the time slider** (desktop; `layer.addZarr` with `"time": true`) adds the variable as one
+layer whose step is the time slider's. The slider turns on over the variable's dates when it is
+off, and the layer shows the last of its steps in the slider's window, or nothing when none falls
+in it. Moving or playing the slider reads that step's slice (only its chunks), keeping the last
+eight read. A web store's next two steps are read ahead in the background. The stretch is fixed at
+the first slice's range, so a colour means the same value at every step, and **Export** writes an
+animation of it. An axis longer than the slider's 20,000 steps (hourly ERA5) needs `"start"` and
+`"end"` to take a period. The project keeps such a layer by its store and selection, not as a slice,
+and reads the slider's step again when it opens.
+
+```sh
+rustgis-cli run --cmd 'layer.addZarr={"path":"air.zarr","variable":"t","time":true}' --cmd 'time.export={"path":"t.gif"}'
+```
+
 A store in a folder is saved in the project by its folder and slice (`2m_temperature[time=539100]`)
 and read again when the project opens, as Add Data on the folder does (its first variable); a
 store by web address is kept in the project as the slice read. `?zarr=<address>` in a web app link

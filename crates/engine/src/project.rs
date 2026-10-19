@@ -504,6 +504,9 @@ impl Project {
             m.tiles.retain_mut(|t| t.repair().map_err(|e| log::warn!("{}: {e}", m.name)).is_ok());
             m.tiles.truncate(rustgis_map::tiles::MAX_TILE_LAYERS);
             for l in &mut m.layers {
+                if let Some(z) = l.raster.as_mut().and_then(|r| r.time_zarr.as_mut()) {
+                    z.repair();
+                }
                 if let Some(rl) = &mut l.raster
                     && rl.data.is_none()
                     && let Err(e) = rl.reload()
