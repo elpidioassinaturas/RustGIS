@@ -852,7 +852,21 @@ impl Map {
                 b.apply(dataset, window);
             }
         }
+        let window = self.time.as_ref().map(time::TimeSlider::window);
         for t in &mut self.tiles {
+            // A file per date (a STAC data cube's tile): the last date in the window, or none.
+            if !t.time_urls.is_empty() {
+                let at = match window {
+                    Some((from, to)) => t.time_urls.iter().rposition(|(d, _)| *d >= from && *d < to),
+                    None => Some(0),
+                };
+                t.time_hidden = at.is_none();
+                if let Some((d, u)) = at.and_then(|i| t.time_urls.get(i)) {
+                    t.url.clone_from(u);
+                    t.time_at = *d;
+                }
+                continue;
+            }
             // Only web addresses take dates (a file's template is dropped when it is repaired).
             if let Some(template) = t.time_url.as_ref().filter(|u| tiles::is_web(u)) {
                 // Off: the first date the slider showed, or the template's start of time.

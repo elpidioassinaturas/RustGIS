@@ -129,6 +129,9 @@ impl Preset {
 
 /// The dialog's choices and results.
 pub struct State {
+    /// Add as Time Series (#559): the band to follow the time slider with, and its range as typed.
+    pub cube_asset: String,
+    pub cube_range: String,
     pub api: String,
     /// Collections the API offers: id and title.
     pub collections: Vec<(String, String)>,
@@ -170,6 +173,8 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         State {
+            cube_asset: String::new(),
+            cube_range: String::new(),
             api: stac::EARTH_SEARCH.to_string(),
             collections: Vec::new(),
             collection: "sentinel-2-l2a".into(),
@@ -793,6 +798,8 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
     if search {
         find_items(app);
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    cube_row(app, ui, busy);
     let t = crate::theme::Tokens::get(ui.ctx());
     if let Some(e) = &app.ui.stac.error {
         ui.label(egui::RichText::new(e).color(t.red));
@@ -801,6 +808,76 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new(i).weak());
     }
     results(app, ui);
+}
+
+/// Add as Time Series (opengeos/RustGIS#559): when an API's items span several dates, a band of
+/// them as a data cube on the time slider (`stac.addCube`), with an optional fixed range.
+#[cfg(not(target_arch = "wasm32"))]
+fn cube_row(app: &mut RustGisApp, ui: &mut egui::Ui, busy: bool) {
+    let st = &app.ui.stac;
+    if catalog::is_static(&st.api) || st.collection.trim().is_empty() {
+        return;
+    }
+    let mut days: Vec<&str> = st.items.iter().filter_map(|i| i.datetime.get(..10)).collect();
+    days.sort_unstable();
+    days.dedup();
+    if days.len() < 2 {
+        return;
+    }
+    let (first, last) = (days.first().map(|d| d.to_string()).unwrap_or_default(), days.last().map(|d| d.to_string()).unwrap_or_default());
+    let keys: Vec<String> = st
+        .items
+        .first()
+        .map(|i| i.assets.iter().filter(|a| a.media_type.contains("tiff")).map(|a| a.key.clone()).collect())
+        .unwrap_or_default();
+    if keys.is_empty() {
+        return;
+    }
+    let st = &mut app.ui.stac;
+    if !keys.contains(&st.cube_asset) {
+        st.cube_asset = keys.first().cloned().unwrap_or_default();
+    }
+    let mut add = false;
+    ui.horizontal_wrapped(|ui| {
+        egui::ComboBox::from_id_salt("stac_cube_asset").selected_text(st.cube_asset.as_str()).width(110.0).show_ui(ui, |ui| {
+            for k in &keys {
+                ui.selectable_value(&mut st.cube_asset, k.clone(), k.as_str());
+            }
+        });
+        ui.add(egui::TextEdit::singleline(&mut st.cube_range).hint_text(tl!("range: 0, 0.9")).desired_width(90.0)).on_hover_text(tl!(
+            "The values shown from black to white, the same for every date and tile (the band's own units). Empty: each file's own stretch."
+        ));
+        add = ui
+            .add_enabled(!busy, egui::Button::new(tl!("Add as Time Series")))
+            .on_hover_text(tl!("A tile layer per grid tile, each following the time slider through its dates."))
+            .clicked();
+    });
+    if !add {
+        return;
+    }
+    let mut p = json!({
+        "url": st.api, "collection": st.collection.trim(), "asset": st.cube_asset,
+        "start": if st.from.trim().is_empty() { first } else { st.from.trim().to_string() },
+        "end": if st.to.trim().is_empty() { last } else { st.to.trim().to_string() },
+    });
+    if let Ok(c) = st.max_cloud.trim().parse::<f64>() {
+        p["maxCloud"] = json!(c);
+    }
+    let range: Vec<f64> = st.cube_range.split([',', ';', ' ']).filter_map(|v| v.trim().parse::<f64>().ok()).collect();
+    if range.len() == 2 {
+        p["range"] = json!(range);
+    }
+    match app.run("stac.addCube", p) {
+        Ok(r) => {
+            app.ui.stac.error = None;
+            app.ui.stac.info = Some(i18n::fmt(
+                "{layers} tiles, {dates} dates: the time slider steps through them",
+                &[("layers", &r["layers"].to_string()), ("dates", &r["dates"].to_string())],
+            ));
+            app.map.invalidate();
+        }
+        Err(e) => app.ui.stac.error = Some(e),
+    }
 }
 
 /// Finds items: an API's search, or a walk of a static catalog from the node picked.

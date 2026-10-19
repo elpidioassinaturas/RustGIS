@@ -17,6 +17,9 @@ pub fn commands() -> Vec<C> {
         ),
         C::new("stac.addFootprints", "Add STAC Footprints", "Home › Add › Web Data › STAC Search", add_footprints_cmd)
             .params(r#"{"footprints": GeoJSON FeatureCollection (items' footprints, as STAC Search finds them), "name"?: text}"#),
+        C::new("stac.addCube", "Add STAC Data Cube", "Home › Add › Web Data › STAC Search", add_cube).params(
+            r#"{"url"?: a STAC API (default: Earth Search), "collection": id, "asset": key (a band, such as NDVI), "bbox"?: [west, south, east, north] | "view" (default: the map's extent), "start", "end": dates, "maxCloud"?: percent, "range"?: [low, high] (the values shown from black to white, in the asset's own units after its raster:bands scale and offset, the same for every date and tile; default: each file's 2nd–98th percentile), "name"?: text} → a tile layer per tile of the grid the items cover, each a file per date following the time slider, which turns on over their dates when it is off (desktop)"#,
+        ),
         C::new("stac.addAsset", "Add STAC Asset", "Home › Add › Web Data › STAC Search", add_asset).params(
             r#"{"item": a STAC item (as stac.search returns it) | "url": an item's address (Planetary Computer assets are signed), "asset"?: key (default: visual, else the first GeoTIFF, else the first data asset), "name"?: text}"#,
         ),
@@ -232,4 +235,139 @@ fn add_asset(s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(not(target_arch = "wasm32"))]
     let href = stac::sign_blocking(&href)?;
     super::layer::add_url(s, &json!({"url": href, "name": name}))
+}
+
+/// The most items a data cube takes (its search is paged up to this).
+pub const MAX_CUBE_ITEMS: usize = 2000;
+
+/// `stac.addCube` (opengeos/RustGIS#559): a STAC collection's band as a data cube on the time
+/// slider. The items found are grouped by the grid tile they cover (the tile their properties
+/// name, else their bounding box) and by day; each tile becomes a tile layer that reads a file
+/// per date in place, the slider showing the last date in its window. A range, when given, is
+/// the same for every date and tile, so a grey means one value throughout.
+fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (s, p);
+        Err("in the web app, a STAC data cube can't be added yet".into())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let api = stac::api(ps(p, "url"))?;
+        if stac::catalog::is_static(&api) {
+            return Err("a data cube needs a STAC API's search; a static catalog can't be searched".into());
+        }
+        let collection = ps(p, "collection").map(str::trim).filter(|c| !c.is_empty()).ok_or("collection is required")?;
+        let asset = ps(p, "asset").map(str::trim).filter(|a| !a.is_empty()).ok_or("asset is required (a band, such as NDVI)")?;
+        let date = |k: &str| {
+            p.get(k)
+                .and_then(rustgis_data::time::parse_input)
+                .ok_or_else(|| format!("{k} is a date (2024-06-01, a year, or milliseconds since 1970)"))
+        };
+        let (start, end) = (date("start")?, date("end")?);
+        if end < start {
+            return Err("end is before start".into());
+        }
+        let range = match p.get("range").filter(|v| !v.is_null()) {
+            None => None,
+            Some(v) => {
+                let r: Option<Vec<f64>> = v.as_array().map(|a| a.iter().filter_map(Value::as_f64).filter(|x| x.is_finite()).collect());
+                match r.as_deref() {
+                    Some([lo, hi]) if lo < hi => Some((*lo, *hi)),
+                    _ => return Err("range is [low, high], low below high".into()),
+                }
+            }
+        };
+        let day = |ms: f64| rustgis_data::time::format(ms, "YYYY-MM-DD");
+        let mut q = json!({"collections": collection, "datetime": format!("{}/{}", day(start), day(end)), "limit": 200});
+        for k in ["bbox", "maxCloud"] {
+            if let Some(v) = p.get(k).filter(|v| !v.is_null()) {
+                q[k] = v.clone();
+            }
+        }
+        if q.get("bbox").is_none() {
+            q["bbox"] = json!("view");
+        }
+        let search = search_params(s, &q)?;
+        // Every page of the search, up to the cap.
+        let mut items: Vec<Item> = Vec::new();
+        let mut next = Some(stac::search_url(&api, &search)?);
+        while let Some(url) = next.take() {
+            let bytes = crate::render::rustgis_tiles::cache::download_blocking(&url)?;
+            let (page, more) = stac::parse_items(&bytes, &url)?;
+            items.extend(page);
+            if items.len() > MAX_CUBE_ITEMS {
+                return Err(format!("more than {MAX_CUBE_ITEMS} items: take a shorter period or a smaller area"));
+            }
+            next = more;
+        }
+        if items.is_empty() {
+            return Err(format!("no item of {collection} in the area and period"));
+        }
+        // By tile, then by day: the first item found for a tile and day (the search's order).
+        let mut tiles: std::collections::BTreeMap<String, std::collections::BTreeMap<i64, String>> = Default::default();
+        let mut scale: Option<(f64, f64)> = None;
+        let mut without = 0usize;
+        for i in &items {
+            let Some(ms) = rustgis_data::time::parse_text(&i.datetime) else {
+                without += 1;
+                continue;
+            };
+            let Some(a) = i.assets.iter().find(|a| a.key.eq_ignore_ascii_case(asset)) else {
+                without += 1;
+                continue;
+            };
+            scale.get_or_insert((a.scale.unwrap_or(1.0), a.offset.unwrap_or(0.0)));
+            let key = i.tile.clone().unwrap_or_else(|| match i.bbox {
+                Some([w, so, e, n]) => format!("{w:.2},{so:.2},{e:.2},{n:.2}"),
+                None => i.id.clone(),
+            });
+            let d = (ms / 86_400_000.0).floor() as i64;
+            tiles.entry(key).or_default().entry(d).or_insert_with(|| a.href.clone());
+        }
+        if tiles.is_empty() {
+            return Err(format!("no item of {collection} has an asset {asset}"));
+        }
+        // The range in the files' stored values.
+        let look = match (range, scale) {
+            (Some((lo, hi)), Some((k, o))) if k != 0.0 => {
+                let (a, b) = ((lo - o) / k, (hi - o) / k);
+                format!("#range={},{}", a.min(b), a.max(b))
+            }
+            (Some((lo, hi)), _) => format!("#range={lo},{hi}"),
+            (None, _) => String::new(),
+        };
+        let base = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map_or_else(|| format!("{collection} {asset}"), str::to_string);
+        let mut dates: Vec<f64> = Vec::new();
+        let many = tiles.len() > 1;
+        let mut added = Vec::new();
+        for (tile, by_day) in &tiles {
+            let urls: Vec<(f64, String)> = by_day.iter().map(|(d, u)| (*d as f64 * 86_400_000.0, format!("{u}{look}"))).collect();
+            dates.extend(urls.iter().map(|(d, _)| *d));
+            let Some((_, first)) = urls.first() else { continue };
+            let name = if many { format!("{base} {tile}") } else { base.clone() };
+            let r = super::layer::add_url(s, &json!({"url": first, "name": name}))?;
+            // The tile layer just added follows the slider through its dates.
+            let m = s.map_mut();
+            if let Some(t) = m.tiles.iter_mut().rev().find(|t| t.url.split('#').next() == first.split('#').next()) {
+                t.time_urls = urls;
+                t.name = name;
+                added.push(r);
+            }
+        }
+        dates.sort_by(f64::total_cmp);
+        dates.dedup();
+        dates.truncate(rustgis_map::time::MAX_STEPS);
+        if s.map().time.is_none() {
+            let d: Vec<Value> = dates.iter().map(|d| json!(d)).collect();
+            super::time::set(s, &json!({"dates": d}))?;
+        } else {
+            s.map_mut().apply_time();
+        }
+        let mut out = json!({"items": items.len(), "tiles": tiles.len(), "dates": dates.len(), "layers": added.len()});
+        if without > 0 {
+            out["skipped"] = json!(without);
+        }
+        Ok(out)
+    }
 }

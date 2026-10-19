@@ -76,7 +76,7 @@ pub(crate) struct Gpu<'a> {
 /// raster tile layers are placed as tiles for the GPU instead.
 pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels: bool, mut gpu: Option<Gpu<'_>>) -> TileOutput {
     let mut out = TileOutput::default();
-    let layers: Vec<&TileLayer> = map.tiles.iter().rev().filter(|t| t.visible && t.opacity > 0.0).collect();
+    let layers: Vec<&TileLayer> = map.tiles.iter().rev().filter(|t| t.draws() && t.opacity > 0.0).collect();
     if layers.is_empty() {
         return out;
     }

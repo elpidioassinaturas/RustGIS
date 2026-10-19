@@ -1484,7 +1484,7 @@ pub fn gpu_may_turn(map: &Map, view: &View) -> bool {
     if map.projection.is_globe()
         || !map.view.effects.is_none()
         || map.view.color_vision != rustgis_map::view::ColorVision::Normal
-        || map.tiles.iter().any(|t| t.visible)
+        || map.tiles.iter().any(|t| t.draws())
         // The GPU draws the ground flat: a view over terrain stays on the CPU.
         || terrain::Ground::of(map, &view.camera).is_some()
     {
@@ -2257,10 +2257,10 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
     // Image command (a pointless upload, and it poisons the camera fast path's `has_images`).
     // On the GPU raster tile layers are placed as tiles, which move with the camera.
     let tile_gpu =
-        (gpu && map.tiles.iter().any(|t| t.visible && t.opacity > 0.0)).then_some(tiles::Gpu { cmds: &mut cmds, dirty: &mut cpu_dirty });
+        (gpu && map.tiles.iter().any(|t| t.draws() && t.opacity > 0.0)).then_some(tiles::Gpu { cmds: &mut cmds, dirty: &mut cpu_dirty });
     let tile_out = tiles::draw(&mut pm, map, view, tile_place, !map.label_display.paused && map.label_lock.is_none(), tile_gpu);
     if !gpu {
-        cpu_dirty |= map.tiles.iter().any(|t| t.visible);
+        cpu_dirty |= map.tiles.iter().any(|t| t.draws());
     }
 
     // Layers, bottom first.

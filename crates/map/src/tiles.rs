@@ -142,7 +142,17 @@ pub struct TileLayer {
     /// The date `url` was last filled with.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub time_at: f64,
+    /// A file per date, as a STAC data cube's tile lists them (opengeos/RustGIS#559): (date,
+    /// address), in order. The time slider shows the last date in its window; `url` is it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub time_urls: Vec<(f64, String)>,
+    /// No date of `time_urls` falls in the slider's window: the layer draws nothing for now.
+    #[serde(skip)]
+    pub time_hidden: bool,
 }
+
+/// The most dates a tile layer lists (as the time slider steps through at most).
+pub const MAX_TIME_URLS: usize = crate::time::MAX_STEPS;
 
 /// Whether an address is on the web (`http://` or `https://`, in any case).
 pub fn is_web(url: &str) -> bool {
@@ -214,7 +224,15 @@ impl TileLayer {
             style_layers: String::new(),
             time_url: None,
             time_at: 0.0,
+            time_urls: Vec::new(),
+            time_hidden: false,
         }
+    }
+
+    /// Whether the layer draws now: shown, and with a date in the time slider's window when it
+    /// follows one.
+    pub fn draws(&self) -> bool {
+        self.visible && !self.time_hidden
     }
 
     /// Checks the address and brings the numbers into range, after reading one from a project
@@ -225,6 +243,11 @@ impl TileLayer {
         if self.time_url.as_ref().is_some_and(|u| !is_web(u) || u.len() > 4096) {
             self.time_url = None;
         }
+        // A file per date: web addresses, finite dates, in order.
+        self.time_urls.retain(|(d, u)| d.is_finite() && is_web(u) && u.len() <= 4096);
+        self.time_urls.truncate(MAX_TIME_URLS);
+        self.time_urls.sort_by(|a, b| a.0.total_cmp(&b.0));
+        self.time_urls.dedup_by(|a, b| a.0 == b.0);
         let local = matches!(self.kind, TileKind::PmTiles | TileKind::MbTiles) && is_local_archive(&self.url);
         if let Some(name) = self.url.strip_prefix(UPLOAD).filter(|_| self.kind == TileKind::MbTiles) {
             if name.is_empty() || name.len() > 512 || name.chars().any(char::is_control) {
