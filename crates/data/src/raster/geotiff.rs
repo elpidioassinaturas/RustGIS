@@ -1275,6 +1275,11 @@ mod tests {
     /// code, 27707 for South America: read as that system, not refused.
     #[test]
     fn an_equi7_tile_is_read() {
+        // The browser build has no azimuthal equidistant: there the code is left out (crs.rs).
+        if !super::super::crs::aeqd_supported() {
+            assert_eq!(Crs::from_epsg(27707), None);
+            return;
+        }
         let gt = GeoTransform { origin_x: 8_400_000.0, origin_y: 5_400_000.0, pixel_width: 20.0, pixel_height: -20.0 };
         let r =
             Raster::new("e7", 2, 2, vec![vec![1.0, 2.0, 3.0, 4.0]], gt, Crs::from_epsg(27707).unwrap(), None, ColorHint::Gray, "Float32")

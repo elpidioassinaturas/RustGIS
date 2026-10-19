@@ -26,6 +26,8 @@ fn listed_epsg(code: u16) -> Option<&'static str> {
 /// `local_views_supported` does, so the lookup and the tests stay in step with the build.
 pub fn aeqd_supported() -> bool {
     static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // Any `+proj=aeqd` definition builds or fails alike: the projection is in proj4rs or not.
+    // This is the shape of those it guards (Equi7's in `epsg_gap.rs`), at a neutral origin.
     *SUPPORTED.get_or_init(|| proj4rs::Proj::from_proj_string("+proj=aeqd +lat_0=0 +lon_0=0 +datum=WGS84 +units=m +no_defs").is_ok())
 }
 
