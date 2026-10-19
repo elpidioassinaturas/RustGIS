@@ -5,7 +5,7 @@
 //! change size with latitude or projection. Cells are identified by A5's 64-bit ids, written in
 //! hex (`a5`) so they survive CSV and JSON and join with data from other A5 tools.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value};
 use rustgis_geom::{Coord, Extent};
@@ -204,11 +204,11 @@ fn estimate(rings: &[Vec<a5::LonLat>], res: i32) -> f64 {
 /// The cells at a resolution of coverings (each compacted, as A5 gives them), each once and in id
 /// order; more than [`MAX_CELLS`] is an error. A covering's cells don't overlap, so it's counted
 /// exactly before any is made. Coverings can overlap one another (neighbouring parcels, buffers),
-/// so they're merged as they come and a cell they share counts once.
+/// so they're merged into a set as they come and a cell they share counts once.
 fn cells_of(coverings: &[Vec<u64>], res: i32) -> Result<Vec<u64>, String> {
     // A coarser cell holds the ratio of the two resolutions' cell counts.
     let total = a5::get_num_cells(res);
-    let mut cells: Vec<u64> = Vec::new();
+    let mut cells: HashSet<u64> = HashSet::new();
     for covering in coverings {
         let parts = || covering.iter().copied().filter(|c| !a5::is_compaction_marker(*c));
         let n = parts().fold(0u64, |n, c| n.saturating_add(total / a5::get_num_cells(a5::get_resolution(c)).max(1)));
@@ -217,21 +217,17 @@ fn cells_of(coverings: &[Vec<u64>], res: i32) -> Result<Vec<u64>, String> {
         }
         for c in parts() {
             if a5::get_resolution(c) == res {
-                cells.push(c);
+                cells.insert(c);
             } else {
                 cells.extend(a5::cell_to_children(c, Some(res))?);
             }
         }
         if cells.len() as u64 > MAX_CELLS {
-            cells.sort_unstable();
-            cells.dedup();
-            if cells.len() as u64 > MAX_CELLS {
-                return Err(too_many(format!("At least {}", cells.len()), res));
-            }
+            return Err(too_many(format!("At least {}", cells.len()), res));
         }
     }
+    let mut cells: Vec<u64> = cells.into_iter().collect();
     cells.sort_unstable();
-    cells.dedup();
     Ok(cells)
 }
 
