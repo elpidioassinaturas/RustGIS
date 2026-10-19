@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "a5"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73444b5953a4d7bada9b9554cfb3dea40060bc2b1cc48429556acc77bf58d6ee"
+dependencies = [
+ "lazy_static",
+]
+
+[[package]]
 name = "ab_glyph"
 version = "0.2.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4283,6 +4292,7 @@ dependencies = [
 name = "rustgis-analysis"
 version = "0.3.0"
 dependencies = [
+ "a5",
  "geo",
  "log",
  "rustgis-data",

@@ -662,6 +662,25 @@ fn tissot_indicatrix_reports_the_maps_own_distortion() {
     assert_eq!(s.map().layer_by_name("globeView").unwrap().dataset.features.len(), 18);
 }
 
+/// A5 grids (#551) through gp.run: a world grid of equal-area cells, and the sample's cities
+/// counted by cell, every city in one.
+#[test]
+fn a5_grids_and_points_by_cell() {
+    let mut s = world();
+    let r = s.run("gp.run", &json!({"tool": "a5Grid", "params": {"resolution": 1, "area": "World", "output": "cells"}})).unwrap();
+    let cells = s.map().layer_by_name("cells").unwrap_or_else(|| panic!("{r}"));
+    let names: Vec<&str> = cells.dataset.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["a5", "resolution", "area_km2"]);
+    assert!(cells.dataset.features.len() > 12);
+    let cities = s.map().layer_by_name("Cities").unwrap().dataset.features.len();
+    s.run("gp.run", &json!({"tool": "a5Aggregate", "params": {"input": "Cities", "resolution": 2, "output": "by cell"}})).unwrap();
+    let by = &s.map().layer_by_name("by cell").unwrap().dataset;
+    let i = by.field_index("count").unwrap();
+    let total: f64 = (0..by.features.len()).map(|r| by.value(r, i).as_f64().unwrap()).sum();
+    assert_eq!(total as usize, cities);
+    assert!(s.run("gp.run", &json!({"tool": "a5Grid", "params": {"resolution": 13, "area": "World"}})).is_err());
+}
+
 #[test]
 fn globe_projection_toggles_renders_and_saves() {
     let mut s = with_raster();

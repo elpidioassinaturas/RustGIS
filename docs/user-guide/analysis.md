@@ -78,6 +78,7 @@ The built-in tools:
 | Minimum Bounding Geometry, Feature To Point, XY Table To Point, Calculate Geometry Attributes | Data Management › Features |
 | Simplify | Cartography › Generalization |
 | Tissot's Indicatrix | Cartography › Projections |
+| A5 Grid, Aggregate Points to A5 | Analysis › DGGS |
 | Select Layer By Location / Attribute | Data Management › Layers and Table Views |
 | Summarize Within, Summary Statistics | Analysis › Summarize / Statistics |
 | Export Features | Conversion |
@@ -112,6 +113,23 @@ contribute their vertices. Leave the extent empty to use the input's, or give it
 
     They are measured against the WGS 84 ellipsoid. For a world projection the map draws on a sphere (Mollweide, Robinson…), they can be off by a few tenths of a percent.
 - **Making a distortion map:** color the circles by `area_scale` or `max_angle`.
+
+**A5 Grid** and **Aggregate Points to A5** use [A5](https://a5geo.org), a discrete global grid of
+pentagonal cells that all have the same area at a given resolution. A count per cell is therefore
+already a density, and stays comparable between regions, unlike a grid of cells that change size
+with latitude or the map's projection.
+
+- **A5 Grid** makes the cells at a resolution (0–30; each step divides a cell into four: 5 is
+  about 33,000 km², 9 about 130 km², 12 about 2 km²) over the map's extent, an input layer's
+  polygons (or the extent of its points and lines), or the whole world. **Cells: Overlapping**
+  covers the area without gaps; **Center** keeps the cells whose centre is inside. A run makes at
+  most 200,000 cells.
+- **Aggregate Points to A5** counts a point layer's points (its selection, when there is one) by the
+  cell holding them, and keeps only the cells that hold any. It adds `count` and
+  `density_per_km2`, and a numeric field's `_sum` and `_mean`.
+- Both write `a5` (the cell's 64-bit id in hex, as other A5 tools read it: DuckDB, PostgreSQL,
+  Python's `pya5`, R), `resolution` and `area_km2`. Cells across the antimeridian or round a pole
+  are drawn whole.
 
 ## GeoLibre tools
 
