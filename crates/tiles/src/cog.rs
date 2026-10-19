@@ -958,12 +958,38 @@ fn paint(pen: &Pen, spots: &[Option<(u32, usize)>], wanted: &[u32], tiles: &[Pic
     if !any {
         return Ok(Vec::new());
     }
+    bleed(&mut rgba, spots);
     let mut out = Vec::with_capacity(crate::cache::RAW.len() + 8 + rgba.len());
     out.extend_from_slice(crate::cache::RAW);
     out.extend_from_slice(&SIZE.to_le_bytes());
     out.extend_from_slice(&SIZE.to_le_bytes());
     out.extend_from_slice(&rgba);
     Ok(out)
+}
+
+/// Carries the file's edge one pixel out: each pixel outside the file (`spots` none) beside one
+/// painted takes its colour. A map tile is drawn scaled with bilinear filtering, which turns the
+/// step from painted to empty into a half-transparent pixel; at the edge between two files laid
+/// side by side (a data cube's tiles) the two half-transparent edges let the map show through as a
+/// thin line. Carried out, the step falls outside the file and its own pixels stay opaque. Pixels
+/// with no data inside the file are left empty.
+fn bleed(rgba: &mut [u8], spots: &[Option<(u32, usize)>]) {
+    let s = SIZE as usize;
+    let painted = |k: usize| rgba.get(k * 4 + 3).is_some_and(|a| *a > 0);
+    let mut fill: Vec<(usize, usize)> = Vec::new();
+    for (k, spot) in spots.iter().enumerate() {
+        if spot.is_some() || painted(k) {
+            continue;
+        }
+        let (i, j) = (k % s, k / s);
+        let near = [(i > 0).then(|| k - 1), (i + 1 < s).then(|| k + 1), (j > 0).then(|| k - s), (j + 1 < s).then(|| k + s)];
+        if let Some(from) = near.into_iter().flatten().find(|n| spots.get(*n).is_some_and(Option::is_some) && painted(*n)) {
+            fill.push((k, from));
+        }
+    }
+    for (k, from) in fill {
+        rgba.copy_within(from * 4..from * 4 + 4, k * 4);
+    }
 }
 
 /// Whether a failure says the file is a GeoTIFF to read whole rather than in place.
@@ -1056,6 +1082,12 @@ mod tests {
         let px = &out[crate::cache::RAW.len() + 8..];
         assert_eq!(&px[..4], &[64, 128, 191, 255]);
         assert_eq!(&px[4..8], &[0, 0, 0, 0]);
+        // Outside the file, beside a painted pixel: its colour, carried out (pixel 0's below);
+        // beside only empty ones, nothing.
+        let below = SIZE as usize * 4;
+        assert_eq!(&px[below..below + 4], &[64, 128, 191, 255]);
+        assert_eq!(&px[8..12], &[0, 0, 0, 0], "beside pixel 1, which has no data");
+        assert_eq!(&px[(below + 8)..(below + 12)], &[0, 0, 0, 0]);
         // Nothing there: no picture.
         assert!(paint(&pen, &vec![None; spots.len()], &[], &[]).unwrap().is_empty());
     }
