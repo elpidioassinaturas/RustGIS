@@ -5,9 +5,11 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod body;
+pub mod sinusoidal;
 pub mod triangulate;
 
 pub use body::{BODIES, Body};
+pub use sinusoidal::Sinusoidal;
 
 use serde::{Deserialize, Serialize};
 

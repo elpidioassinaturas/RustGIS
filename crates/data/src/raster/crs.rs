@@ -103,10 +103,13 @@ fn custom_table() -> &'static std::sync::Mutex<Vec<std::sync::Arc<CustomCrs>>> {
 }
 
 impl Crs {
-    /// A file's own coordinate system: checked (its PROJ definition must parse) and added to the
-    /// run's table, once per definition.
+    /// A file's own coordinate system: checked (its PROJ definition must parse, or be a
+    /// sinusoidal one RustGIS computes) and added to the run's table, once per definition.
     pub fn custom(def: CustomCrs) -> Result<Crs, String> {
-        proj4rs::Proj::from_proj_string(&def.proj4).map_err(|e| format!("{}: {e}", def.proj4))?;
+        match rustgis_geom::Sinusoidal::from_proj4(&def.proj4) {
+            Some(sinu) => drop(sinu.map_err(|e| format!("{}: {e}", def.proj4))?),
+            None => drop(proj4rs::Proj::from_proj_string(&def.proj4).map_err(|e| format!("{}: {e}", def.proj4))?),
+        }
         let mut t = custom_table().lock().unwrap_or_else(|e| e.into_inner());
         let index = |i: usize| u32::try_from(i).map(Crs::Custom).map_err(|_| "too many coordinate systems defined by files".to_string());
         if let Some(i) = t.iter().position(|d| d.proj4 == def.proj4) {
@@ -207,6 +210,10 @@ impl Crs {
                 }
                 Crs::Custom(_) => {
                     let def = self.custom_def().ok_or("an unknown custom coordinate system")?;
+                    // Sinusoidal (MODIS), which proj4rs lacks, is computed here.
+                    if let Some(sinu) = rustgis_geom::Sinusoidal::from_proj4(&def.proj4) {
+                        return Ok(Transformer { kind: Kind::Sinusoidal(sinu.map_err(|e| format!("{}: {e}", def.label))?) });
+                    }
                     let native = proj4rs::Proj::from_proj_string(&def.proj4).map_err(|e| format!("{}: {e}", def.label))?;
                     let wgs84 = proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| e.to_string())?;
                     Kind::Proj { native: Box::new(native), wgs84: Box::new(wgs84), geographic: self.is_geographic() }
@@ -221,6 +228,7 @@ enum Kind {
     LonLat,
     Merc,
     Proj { native: Box<proj4rs::Proj>, wgs84: Box<proj4rs::Proj>, geographic: bool },
+    Sinusoidal(rustgis_geom::Sinusoidal),
 }
 
 /// Converts between a raster's coordinates and WGS 84 longitude/latitude.
@@ -235,6 +243,7 @@ impl std::fmt::Debug for Transformer {
             Kind::LonLat => "lonlat",
             Kind::Merc => "mercator",
             Kind::Proj { .. } => "proj",
+            Kind::Sinusoidal(_) => "sinusoidal",
         };
         write!(f, "Transformer({k})")
     }
@@ -251,6 +260,7 @@ impl Transformer {
                 proj4rs::transform::transform(native, wgs84, &mut p).ok()?;
                 Coord::new(p.0.to_degrees(), p.1.to_degrees())
             }
+            Kind::Sinusoidal(s) => s.inverse(c)?,
         };
         out.is_finite().then_some(out)
     }
@@ -265,6 +275,7 @@ impl Transformer {
                 proj4rs::transform::transform(wgs84, native, &mut p).ok()?;
                 if *geographic { Coord::new(p.0.to_degrees(), p.1.to_degrees()) } else { Coord::new(p.0, p.1) }
             }
+            Kind::Sinusoidal(s) => s.forward(c)?,
         };
         out.is_finite().then_some(out)
     }
