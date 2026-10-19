@@ -10,10 +10,34 @@ use rustgis_geom::{Coord, lonlat_to_merc, merc_to_lonlat};
 use serde::{Deserialize, Serialize};
 
 /// The PROJ definition of an EPSG code: from the `crs-definitions` table, or from the built-in
-/// table of the codes it lacks (EPSG 9020–20003 and newer ones such as Equi7's, [`super::epsg_gap`]). `None` for a code that is
-/// neither.
+/// table of the codes it lacks (EPSG 9020–20003 and newer ones such as Equi7's,
+/// [`super::epsg_gap`]). `None` for a code that is neither, or whose projection this build lacks
+/// (an azimuthal equidistant one in the browser: see [`aeqd_supported`]).
 pub fn epsg_proj4(code: u16) -> Option<&'static str> {
+    listed_epsg(code).filter(|d| aeqd_supported() || !d.contains("+proj=aeqd"))
+}
+
+fn listed_epsg(code: u16) -> Option<&'static str> {
     crs_definitions::from_code(code).map(|d| d.proj4).or_else(|| super::epsg_gap::proj4(code))
+}
+
+/// Whether proj4rs' azimuthal equidistant projection (`aeqd`, Equi7's) is in this build. The
+/// browser build leaves it out (Cargo.toml); asked of proj4rs itself, as rustgis-map's
+/// `local_views_supported` does, so the lookup and the tests stay in step with the build.
+pub fn aeqd_supported() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| proj4rs::Proj::from_proj_string("+proj=aeqd +lat_0=0 +lon_0=0 +datum=WGS84 +units=m +no_defs").is_ok())
+}
+
+/// Why a file's EPSG code can't be used: a code the desktop app knows but this build can't project
+/// (Equi7's azimuthal equidistant ones in the web app) says so, rather than that it's unknown.
+pub fn unusable_epsg(code: u32) -> String {
+    let elsewhere = u16::try_from(code).ok().and_then(listed_epsg).is_some_and(|d| d.contains("+proj=aeqd")) && !aeqd_supported();
+    if elsewhere {
+        format!("the coordinate system EPSG:{code} (azimuthal equidistant) can't be used in the web app: open the file in the desktop app")
+    } else {
+        format!("the coordinate system EPSG:{code} isn't supported")
+    }
 }
 
 /// The PROJ definition of one of Esri's projected coordinate systems (`ESRI:102033`, South
@@ -361,6 +385,9 @@ mod tests {
             check(code, lonlat, xy, 0.01);
         }
         assert_eq!(Crs::parse("EPSG:27707"), Ok(Crs::Epsg(27707)));
+        // On the desktop azimuthal equidistant is there; a code that doesn't exist is unknown.
+        assert!(aeqd_supported());
+        assert_eq!(unusable_epsg(28707), "the coordinate system EPSG:28707 isn't supported");
     }
 
     /// The ESRI table (opengeos/RustGIS#213) is in order and holds only projected systems on Earth.
@@ -395,6 +422,12 @@ mod tests {
         }
         for &(code, def) in defs {
             assert!(crs_definitions::from_code(code).is_none(), "crs-definitions has EPSG:{code} now: drop it from the table");
+            // A build without azimuthal equidistant leaves Equi7's out, and says why.
+            if def.contains("+proj=aeqd") && !aeqd_supported() {
+                assert_eq!(epsg_proj4(code), None);
+                assert!(unusable_epsg(u32::from(code)).contains("web app"));
+                continue;
+            }
             assert_eq!(epsg_proj4(code), Some(def));
             let crs = Crs::from_epsg(u32::from(code)).unwrap_or_else(|| panic!("EPSG:{code}"));
             assert_eq!(crs.is_geographic(), def.contains("+proj=longlat"), "EPSG:{code}");

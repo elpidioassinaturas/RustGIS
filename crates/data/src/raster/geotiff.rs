@@ -119,7 +119,7 @@ pub(crate) fn cog_geo<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Option<(Cr
         Some(c) => c,
         None if geo.geographic_model => Crs::LonLat,
         None => match geo.unknown_epsg {
-            Some(code) => return Err(err(format!("the coordinate system EPSG:{code} isn't supported"))),
+            Some(code) => return Err(err(super::crs::unusable_epsg(code))),
             None => {
                 return Err(match geo.custom_error {
                     Some(e) => DataError::Format(e),
@@ -1009,7 +1009,7 @@ fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<Opener<'_>>)
             let degrees = [transform.origin_x, right].iter().all(|x| (-180.0..=180.0).contains(x))
                 && [transform.origin_y, bottom].iter().all(|y| (-90.0..=90.0).contains(y));
             if let Some(code) = geo.unknown_epsg {
-                return Err(err(format!("the coordinate system EPSG:{code} isn't supported")));
+                return Err(err(super::crs::unusable_epsg(code)));
             }
             if let Some(e) = &geo.custom_error
                 && !degrees
