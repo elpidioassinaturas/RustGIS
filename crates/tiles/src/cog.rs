@@ -968,7 +968,7 @@ fn paint(pen: &Pen, spots: &[Option<(u32, usize)>], wanted: &[u32], tiles: &[Pic
 }
 
 /// Carries the file's edge one pixel out: each pixel outside the file (`spots` none) beside one
-/// painted takes its colour. A map tile is drawn scaled with bilinear filtering, which turns the
+/// painted, or touching one at a corner, takes its colour. A map tile is drawn scaled with bilinear filtering, which turns the
 /// step from painted to empty into a half-transparent pixel; at the edge between two files laid
 /// side by side (a data cube's tiles) the two half-transparent edges let the map show through as a
 /// thin line. Carried out, the step falls outside the file and its own pixels stay opaque. Pixels
@@ -982,7 +982,18 @@ fn bleed(rgba: &mut [u8], spots: &[Option<(u32, usize)>]) {
             continue;
         }
         let (i, j) = (k % s, k / s);
-        let near = [(i > 0).then(|| k - 1), (i + 1 < s).then(|| k + 1), (j > 0).then(|| k - s), (j + 1 < s).then(|| k + s)];
+        let (w, e, n, so) = (i > 0, i + 1 < s, j > 0, j + 1 < s);
+        // Beside first, then at a corner, where filtering at the file's corner reaches too.
+        let near = [
+            w.then(|| k - 1),
+            e.then(|| k + 1),
+            n.then(|| k - s),
+            so.then(|| k + s),
+            (n && w).then(|| k - s - 1),
+            (n && e).then(|| k - s + 1),
+            (so && w).then(|| k + s - 1),
+            (so && e).then(|| k + s + 1),
+        ];
         if let Some(from) = near.into_iter().flatten().find(|n| spots.get(*n).is_some_and(Option::is_some) && painted(*n)) {
             fill.push((k, from));
         }
@@ -1086,6 +1097,7 @@ mod tests {
         // beside only empty ones, nothing.
         let below = SIZE as usize * 4;
         assert_eq!(&px[below..below + 4], &[64, 128, 191, 255]);
+        assert_eq!(&px[below + 4..below + 8], &[64, 128, 191, 255], "touching pixel 0 only at a corner");
         assert_eq!(&px[8..12], &[0, 0, 0, 0], "beside pixel 1, which has no data");
         assert_eq!(&px[(below + 8)..(below + 12)], &[0, 0, 0, 0]);
         // Nothing there: no picture.
