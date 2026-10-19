@@ -104,10 +104,16 @@ fn extent_ring(e: Extent) -> Vec<a5::LonLat> {
 }
 
 /// An extent within the globe's longitudes and latitudes, for a view panned past ±180° or zoomed
-/// out past the poles; `None` when nothing of it is on the globe.
+/// out past the poles; `None` when nothing of it is on the globe. A side with no width (one point,
+/// or a line along a parallel or meridian) is widened by a hair, so the cells holding it are found.
 fn on_the_globe(e: Extent) -> Option<Extent> {
-    let c = Extent::new(e.min_x.max(-180.0), e.min_y.max(-90.0), e.max_x.min(180.0), e.max_y.min(90.0));
-    (c.min_x < c.max_x && c.min_y < c.max_y).then_some(c)
+    const HAIR: f64 = 1e-7;
+    let side = |lo: f64, hi: f64, limit: f64| {
+        let (lo, hi) = (lo.max(-limit), hi.min(limit));
+        if lo == hi { ((lo - HAIR).max(-limit), (hi + HAIR).min(limit)) } else { (lo, hi) }
+    };
+    let ((x0, x1), (y0, y1)) = (side(e.min_x, e.max_x, 180.0), side(e.min_y, e.max_y, 90.0));
+    (x0 < x1 && y0 < y1).then(|| Extent::new(x0, y0, x1, y1))
 }
 
 fn too_many(n: impl std::fmt::Display, res: i32) -> String {
@@ -221,7 +227,11 @@ pub fn grid(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
             return Err(too_many(if guess.is_finite() { format!("About {guess:.0}") } else { "Too many".into() }, res));
         }
         let coverings = shapes.iter().map(|s| a5::polygon_to_cells(s, res, Some(options))).collect::<Result<Vec<_>, _>>()?;
-        cells_of(&coverings, res)?
+        let cells = cells_of(&coverings, res)?;
+        if cells.is_empty() {
+            return Err(format!("No cell at resolution {res} has its centre in the area: choose Cells: Overlapping or a finer resolution"));
+        }
+        cells
     };
     let mut out = Dataset::new(output_name(p, &format!("A5 r{res}")), GeometryType::Polygon, cell_fields());
     for c in &cells {
@@ -380,6 +390,19 @@ mod tests {
         assert!(
             grid(&One(points(&[]), Some(Extent::new(190.0, 0.0, 200.0, 10.0))), &serde_json::json!({})).unwrap_err().contains("outside")
         );
+        // A layer of one point, or of points along a parallel, has an extent with no width or
+        // height: it's covered by the cells holding it, or none has its centre there.
+        let one = One(points(&[(-55.72, -12.55, 1.0)]), None);
+        let d = layer(grid(&one, &serde_json::json!({"resolution": 9, "area": "Input Layer", "input": "pts"})).unwrap());
+        let here = a5::u64_to_hex(a5::lonlat_to_cell(a5::LonLat::new(-55.72, -12.55), 9).unwrap());
+        assert!((0..d.features.len()).any(|r| d.value(r, 0) == &Value::Text(here.clone())), "{here}");
+        let row = One(points(&[(-56.0, -12.55, 1.0), (-55.0, -12.55, 1.0)]), None);
+        assert!(
+            !layer(grid(&row, &serde_json::json!({"resolution": 9, "area": "Input Layer", "input": "pts"})).unwrap()).features.is_empty()
+        );
+        let e =
+            grid(&one, &serde_json::json!({"resolution": 9, "area": "Input Layer", "input": "pts", "containment": "Center"})).unwrap_err();
+        assert!(e.contains("Overlapping"), "{e}");
         for bad in [serde_json::json!({"resolution": 31}), serde_json::json!({"resolution": 2.5}), serde_json::json!({"resolution": -1})] {
             assert!(grid(&inp, &bad).is_err(), "{bad}");
         }
