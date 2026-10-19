@@ -975,6 +975,8 @@ fn paint(pen: &Pen, spots: &[Option<(u32, usize)>], wanted: &[u32], tiles: &[Pic
 /// its own pixels stay opaque. Pixels with no data inside the file are left empty. Where no file
 /// lies beside, at the data's outer edge, the picture grows by that pixel (1/256 of a map tile).
 /// The colour is copied whole, alpha included, so a half-transparent edge is carried out as it is.
+/// A file's edge on a map tile's own edge needs none: a tile is drawn clamped at its edges, and the
+/// pixels past them are the next tile's.
 fn bleed(rgba: &mut [u8], spots: &[Option<(u32, usize)>]) {
     let s = SIZE as usize;
     let painted = |k: usize| rgba.get(k * 4 + 3).is_some_and(|a| *a > 0);
@@ -1103,7 +1105,7 @@ mod tests {
         assert_eq!(&px[below..below + 4], &[64, 128, 191, 255]);
         assert_eq!(&px[below + 4..below + 8], &[64, 128, 191, 255], "touching pixel 0 only at a corner");
         assert_eq!(&px[8..12], &[0, 0, 0, 0], "beside pixel 1, which has no data");
-        assert_eq!(&px[(below + 8)..(below + 12)], &[0, 0, 0, 0]);
+        assert_eq!(&px[below + 8..below + 12], &[0, 0, 0, 0]);
         // At the tile's own border: a file pixel in the top row's last column is carried left, down
         // and down-left, not on into the next row's first pixel.
         let s = SIZE as usize;
