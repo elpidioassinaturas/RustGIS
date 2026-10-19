@@ -196,7 +196,14 @@ pub static TOOLS: &[ToolSpec] = &[
         params: &[
             P { name: "input", label: "Input Points", kind: K::PointLayer, required: true, default: "", help: "" },
             P { name: "resolution", label: "Resolution (0–30)", kind: K::Number, required: false, default: "9", help: "" },
-            P { name: "field", label: "Field to Sum and Average", kind: K::NumericField, required: false, default: "", help: "" },
+            P {
+                name: "field",
+                label: "Field to Sum and Average",
+                kind: K::NumericField,
+                required: false,
+                default: "",
+                help: "A feature's value counts once in each cell: a multipoint's, however many of its points fall in the cell.",
+            },
             P { name: "output", label: "Output Name", kind: K::Text, required: false, default: "", help: "" },
         ],
         run: crate::dggs::aggregate,

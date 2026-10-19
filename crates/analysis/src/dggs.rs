@@ -337,7 +337,8 @@ pub fn aggregate(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     };
     let sel = inp.selection(name);
     let rows: Vec<usize> = if sel.is_empty() { (0..ds.features.len()).collect() } else { sel.to_vec() };
-    // Per cell: its points, and the field's sum and how many values it had.
+    // Per cell: its points, and the field's sum and how many values it had (a feature's value
+    // once in each cell, however many of a multipoint's points fall in it).
     let mut by: HashMap<u64, (u64, f64, u64)> = HashMap::new();
     let mut outside = 0usize;
     for r in rows {
@@ -348,6 +349,7 @@ pub fn aggregate(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
             _ => continue,
         };
         let v = field.and_then(|i| ds.value(r, i).as_f64()).filter(|v| v.is_finite());
+        let mut credited: Vec<u64> = Vec::new();
         for c in pts {
             if !c.is_finite() || c.y.abs() > 90.0 || c.x.abs() > 360.0 {
                 outside += 1;
@@ -359,9 +361,12 @@ pub fn aggregate(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
             };
             let e = by.entry(cell).or_insert((0, 0.0, 0));
             e.0 += 1;
-            if let Some(v) = v {
+            if let Some(v) = v
+                && !credited.contains(&cell)
+            {
                 e.1 += v;
                 e.2 += 1;
+                credited.push(cell);
             }
             if by.len() as u64 > MAX_CELLS {
                 return Err(format!("The points fall in more than {MAX_CELLS} cells at resolution {res}: use a coarser resolution"));
@@ -614,6 +619,11 @@ mod tests {
         assert_eq!((d.value(row, 5).as_f64(), d.value(row, 6).as_f64()), (Some(4.0), Some(2.0)));
         let Value::Text(id) = d.value(row, 0) else { panic!("a hex id") };
         assert_eq!(a5::hex_to_u64(id).ok(), a5::lonlat_to_cell(a5::LonLat::new(-55.72, -12.55), 12).ok());
+        // A multipoint's value counts once in its cell, however many of its points are there.
+        let mut multi = points(&[(-55.72, -12.55, 1.0)]);
+        multi.push(Some(Geometry::MultiPoint(vec![Coord::new(-55.72, -12.55), Coord::new(-55.7201, -12.5501)])), vec![Value::Float(5.0)]);
+        let d = layer(aggregate(&One(multi, None), &serde_json::json!({"input": "pts", "resolution": 12, "field": "v"})).unwrap());
+        assert_eq!((d.value(0, 3).as_f64(), d.value(0, 5).as_f64(), d.value(0, 6).as_f64()), (Some(3.0), Some(6.0), Some(3.0)));
         for bad in [
             serde_json::json!({"input": "nope"}),
             serde_json::json!({"input": "pts", "field": "nope"}),

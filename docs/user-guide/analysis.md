@@ -126,7 +126,8 @@ with latitude or the map's projection.
   most 200,000 cells.
 - **Aggregate Points to A5** counts a point layer's points (its selection, when there is one) by the
   cell holding them, and keeps only the cells that hold any. It adds `count` and
-  `density_per_km2`, and a numeric field's `_sum` and `_mean`.
+  `density_per_km2`, and a numeric field's `_sum` and `_mean`, where a feature's value counts
+  once in each cell (a multipoint's, however many of its points fall there).
 - Both write `a5` (the cell's 64-bit id in hex, as other A5 tools read it: DuckDB, PostgreSQL,
   Python's `pya5`, R), `resolution` and `area_km2`. A cell across the antimeridian, or round a pole, is
   split at ±180° into two parts of one polygon, each within −180° to 180°.
