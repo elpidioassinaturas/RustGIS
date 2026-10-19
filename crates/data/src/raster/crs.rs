@@ -106,10 +106,11 @@ impl Crs {
     /// A file's own coordinate system: checked (its PROJ definition must parse, or be a
     /// sinusoidal one RustGIS computes) and added to the run's table, once per definition.
     pub fn custom(def: CustomCrs) -> Result<Crs, String> {
-        match rustgis_geom::Sinusoidal::from_proj4(&def.proj4) {
-            Some(sinu) => drop(sinu.map_err(|e| format!("{}: {e}", def.proj4))?),
-            None => drop(proj4rs::Proj::from_proj_string(&def.proj4).map_err(|e| format!("{}: {e}", def.proj4))?),
-        }
+        let checked = match rustgis_geom::Sinusoidal::from_proj4(&def.proj4) {
+            Some(sinu) => sinu.map(|_| ()),
+            None => proj4rs::Proj::from_proj_string(&def.proj4).map(|_| ()).map_err(|e| e.to_string()),
+        };
+        checked.map_err(|e| format!("{}: {e}", def.proj4))?;
         let mut t = custom_table().lock().unwrap_or_else(|e| e.into_inner());
         let index = |i: usize| u32::try_from(i).map(Crs::Custom).map_err(|_| "too many coordinate systems defined by files".to_string());
         if let Some(i) = t.iter().position(|d| d.proj4 == def.proj4) {

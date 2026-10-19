@@ -39,7 +39,8 @@ impl Sinusoidal {
 
     /// The projection a PROJ definition describes, when it is `+proj=sinu`: `None` for any other
     /// projection, an error for a sinusoidal one this can't compute exactly (a datum shift, a unit
-    /// other than the metre, a parameter that isn't a number).
+    /// other than the metre, a parameter that isn't a number, or one it doesn't read: an axis
+    /// order, grids, another sphere's radius).
     ///
     /// The earth is `+R`, else `+a` with `+b`, `+rf` or `+f`, else `+ellps` or `+datum`
     /// (WGS 84, GRS 1980, Clarke 1866), else GRS 1980 as in PROJ.
@@ -57,6 +58,18 @@ impl Sinusoidal {
                     Some(v) => v.parse::<f64>().ok().filter(|v| v.is_finite()).map(Some).ok_or_else(|| format!("+{k}={v} isn't a number")),
                 }
             };
+            // Only the parameters it reads (and `lat_0`, which PROJ's sinusoidal ignores too, and a
+            // scale of 1): any other would be dropped, and the result wrong.
+            const READ: [&str; 19] = [
+                "proj", "R", "a", "b", "rf", "f", "ellps", "datum", "lon_0", "x_0", "y_0", "lat_0", "k", "k_0", "units", "to_meter",
+                "towgs84", "pm", "no_defs",
+            ];
+            if let Some((k, _)) = params.iter().find(|(k, _)| !READ.contains(k) && *k != "type" && *k != "wktext") {
+                return Err(format!("+{k} isn't supported in a sinusoidal projection"));
+            }
+            if ["k", "k_0"].iter().any(|k| get(k).is_some_and(|v| v.parse::<f64>().ok() != Some(1.0))) {
+                return Err("a sinusoidal projection with a scale other than 1 isn't supported".into());
+            }
             // Only what the formulas say: no datum shift (a zero one is none), metres.
             if get("towgs84").is_some_and(|v| !v.split(',').all(|c| c.trim().parse::<f64>().is_ok_and(|c| c == 0.0))) {
                 return Err("a sinusoidal projection with a datum shift isn't supported".into());
@@ -248,6 +261,10 @@ mod tests {
             "+proj=sinu +R=-1",
             "+proj=sinu +a=6378137 +b=8000000",
             "+proj=sinu +pm=paris",
+            "+proj=sinu +axis=wsu +R=6371007.181",
+            "+proj=sinu +datum=WGS84 +nadgrids=@null",
+            "+proj=sinu +ellps=WGS84 +R_A",
+            "+proj=sinu +R=6371007.181 +k=0.9996",
         ] {
             assert!(Sinusoidal::from_proj4(bad).unwrap().is_err(), "{bad}");
         }

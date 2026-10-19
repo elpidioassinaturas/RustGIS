@@ -272,9 +272,10 @@ fn same_projection(a: &str, b: &str) -> bool {
     match (rustgis_geom::Sinusoidal::from_proj4(a), rustgis_geom::Sinusoidal::from_proj4(b)) {
         (Some(Ok(sa)), Some(Ok(sb))) => {
             return offsets.iter().all(|(dx, dy)| {
-                let (p, q) = (rustgis_geom::Coord::new(sa.x0 + dx, sa.y0 + dy), rustgis_geom::Coord::new(sb.x0 + dx, sb.y0 + dy));
+                // The same map point in both, so a different false origin is a different projection.
+                let m = rustgis_geom::Coord::new(sa.x0 + dx, sa.y0 + dy);
                 // Degrees: 1e-7 is about a centimetre.
-                matches!((sa.inverse(p), sb.inverse(q)), (Some(p), Some(q)) if (p.x - q.x).abs() < 1e-7 && (p.y - q.y).abs() < 1e-7)
+                matches!((sa.inverse(m), sb.inverse(m)), (Some(p), Some(q)) if (p.x - q.x).abs() < 1e-7 && (p.y - q.y).abs() < 1e-7)
             });
         }
         (None, None) => {}
@@ -1916,6 +1917,15 @@ mod tests {
         // ESRI:54008's definition, on WGS 84, is written as keys too.
         let (k, d, a) = keys_from_proj4("+proj=sinu +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs", "World_Sinusoidal").unwrap();
         assert!(custom_crs(&k, &d, &a).unwrap().custom_def().unwrap().proj4.starts_with("+proj=sinu"));
+        // A central meridian and false origin away from 0 (ESRI:102011, Africa Sinusoidal, at 15°)
+        // go through the keys and back as the same projection.
+        let africa = "+proj=sinu +lon_0=15 +x_0=200000 +y_0=-100000 +datum=WGS84 +units=m +no_defs";
+        let (k, d, a) = keys_from_proj4(africa, "Africa_Sinusoidal").unwrap();
+        let back = custom_crs(&k, &d, &a).unwrap().custom_def().unwrap().proj4.clone();
+        assert!(same_projection(africa, &back), "{back}");
+        // A false easting or northing of its own is another projection.
+        assert!(!same_projection(africa, "+proj=sinu +lon_0=15 +x_0=0 +y_0=-100000 +datum=WGS84 +units=m +no_defs"));
+        assert!(!same_projection(africa, "+proj=sinu +lon_0=15 +x_0=200000 +y_0=0 +datum=WGS84 +units=m +no_defs"));
     }
 
     /// A tiled, LZW-compressed Float32 GeoTIFF, `w × h` in `tile`-pixel tiles, written as GDAL
