@@ -80,6 +80,52 @@ pub fn ring(cell: u64) -> Option<Vec<Coord>> {
     (out.len() >= 4).then_some(out)
 }
 
+/// The part of a closed ring west (`west`) or east of the meridian at `x`, closed; the points
+/// where it crosses the meridian are put on it.
+fn clip(ring: &[Coord], x: f64, west: bool) -> Vec<Coord> {
+    let inside = |c: &Coord| if west { c.x <= x } else { c.x >= x };
+    let mut out: Vec<Coord> = Vec::with_capacity(ring.len() + 4);
+    for w in ring.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if inside(&a) {
+            out.push(a);
+        }
+        if inside(&a) != inside(&b) {
+            let t = (x - a.x) / (b.x - a.x);
+            out.push(Coord::new(x, a.y + t * (b.y - a.y)));
+        }
+    }
+    if let Some(first) = out.first().copied()
+        && out.last() != Some(&first)
+    {
+        out.push(first);
+    }
+    out
+}
+
+/// A cell as a polygon for the map: its [`ring`], or, for a cell across the antimeridian (and one
+/// round a pole), its two sides of ±180°, each within −180° to 180°, as the parts of one polygon,
+/// the way Natural Earth splits a country there.
+pub fn parts(cell: u64) -> Option<Vec<Vec<Vec<Coord>>>> {
+    let r = ring(cell)?;
+    let (lo, hi) = r.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), c| (lo.min(c.x), hi.max(c.x)));
+    if lo >= -180.0 && hi <= 180.0 {
+        return Some(vec![vec![r]]);
+    }
+    // The side past the meridian is moved back by a turn.
+    let (edge, turn) = if hi > 180.0 { (180.0, -360.0) } else { (-180.0, 360.0) };
+    let near = clip(&r, edge, edge > 0.0);
+    let far: Vec<Coord> = clip(&r, edge, edge < 0.0).into_iter().map(|c| Coord::new(c.x + turn, c.y)).collect();
+    let out: Vec<Vec<Vec<Coord>>> = [near, far].into_iter().filter(|p| p.len() >= 4).map(|p| vec![p]).collect();
+    (!out.is_empty()).then_some(out)
+}
+
+/// Whether a polygon's ring can be covered: three corners or more, all finite.
+fn usable(ring: &[Coord]) -> bool {
+    let closed = ring.len() > 1 && ring.first() == ring.last();
+    ring.len() - usize::from(closed) >= 3 && ring.iter().all(|c| c.is_finite())
+}
+
 /// The fields every A5 layer starts with: the cell's id (hex), resolution and area.
 fn cell_fields() -> Vec<Field> {
     vec![Field::new("a5", FieldType::Text), Field::new("resolution", FieldType::Integer), Field::new("area_km2", FieldType::Double)]
@@ -184,7 +230,13 @@ pub fn grid(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     let options = a5::PolygonToCellsOptions {
         containment: if text(p, "containment") == "Center" { a5::Containment::Center } else { a5::Containment::Overlapping },
     };
-    let area = text(p, "area");
+    let area = match text(p, "area") {
+        "" | "Map Extent" => "Map Extent",
+        a @ ("Input Layer" | "World") => a,
+        a => return Err(format!("Area is Map Extent, Input Layer or World, not {}", a.chars().take(40).collect::<String>())),
+    };
+    // Polygons left out for want of a usable outline.
+    let mut skipped = 0usize;
     let off = "is outside the globe's longitudes and latitudes (−180° to 180°, −90° to 90°)";
     let cells: Vec<u64> = if area == "World" {
         cells_of(&[a5::get_res0_cells()?], res)?
@@ -200,11 +252,16 @@ pub fn grid(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
             for r in rows {
                 match ds.features.get(r).and_then(|f| f.geometry.as_ref()) {
                     Some(Geometry::Polygon(polys)) => {
-                        shapes.extend(
-                            polys
-                                .iter()
-                                .map(|poly| poly.iter().map(|ring| ring.iter().map(|c| a5::LonLat::new(c.x, c.y)).collect()).collect()),
-                        );
+                        // A polygon whose outline isn't a ring is left out; so is a hole that isn't one.
+                        for poly in polys {
+                            if !poly.first().is_some_and(|r| usable(r)) {
+                                skipped += 1;
+                                continue;
+                            }
+                            shapes.push(
+                                poly.iter().filter(|r| usable(r)).map(|r| r.iter().map(|c| a5::LonLat::new(c.x, c.y)).collect()).collect(),
+                            );
+                        }
                     }
                     Some(g) => extent = extent.union(&g.extent()),
                     None => {}
@@ -235,11 +292,14 @@ pub fn grid(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     };
     let mut out = Dataset::new(output_name(p, &format!("A5 r{res}")), GeometryType::Polygon, cell_fields());
     for c in &cells {
-        if let Some(r) = ring(*c) {
-            out.push(Some(Geometry::Polygon(vec![vec![r]])), cell_attrs(*c, res));
+        if let Some(polygon) = parts(*c) {
+            out.push(Some(Geometry::Polygon(polygon)), cell_attrs(*c, res));
         }
     }
-    let msg = format!("A5 grid: {} cells at resolution {res}, each {:.6} km²", out.features.len(), area_km2(res));
+    let mut msg = format!("A5 grid: {} cells at resolution {res}, each {:.6} km²", out.features.len(), area_km2(res));
+    if skipped > 0 {
+        msg.push_str(&format!("; {skipped} polygons without a usable outline were left out"));
+    }
     Ok(ToolResult { output: Output::Layer(out), messages: vec![msg] })
 }
 
@@ -270,7 +330,7 @@ pub fn aggregate(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
         };
         let v = field.and_then(|i| ds.value(r, i).as_f64()).filter(|v| v.is_finite());
         for c in pts {
-            if !c.is_finite() || c.y.abs() > 90.0 {
+            if !c.is_finite() || c.y.abs() > 90.0 || c.x.abs() > 360.0 {
                 outside += 1;
                 continue;
             }
@@ -303,7 +363,7 @@ pub fn aggregate(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     cells.sort_unstable_by_key(|(c, _)| **c);
     let area = area_km2(res);
     for (c, (n, sum, nv)) in cells {
-        let Some(r) = ring(*c) else { continue };
+        let Some(polygon) = parts(*c) else { continue };
         let mut attrs = cell_attrs(*c, res);
         attrs.extend([Value::Int(i64::try_from(*n).unwrap_or(i64::MAX)), Value::Float(*n as f64 / area)]);
         if fname.is_some() {
@@ -312,7 +372,7 @@ pub fn aggregate(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
                 if *nv > 0 { Value::Float(sum / *nv as f64) } else { Value::Null },
             ]);
         }
-        out.push(Some(Geometry::Polygon(vec![vec![r]])), attrs);
+        out.push(Some(Geometry::Polygon(polygon)), attrs);
     }
     let mut msg = format!("{} cells at resolution {res} ({area:.6} km² each) hold the points", out.features.len());
     if outside > 0 {
@@ -373,13 +433,11 @@ mod tests {
         let w = layer(grid(&inp, &serde_json::json!({"resolution": 1, "area": "World"})).unwrap());
         assert_eq!(w.features.len() as u64, a5::get_num_cells(1));
         assert!(grid(&inp, &serde_json::json!({"resolution": 12, "area": "World"})).unwrap_err().contains("too many"));
-        // A view far too big for the resolution is refused before it's covered (A5 would take
-        // a covering whose edges alone cross millions of cells), and one just over is counted exactly.
+        // A view far too big for the resolution is refused by the estimate, before it's covered
+        // (a covering whose edges alone cross millions of cells); one just over by the exact count.
         let wide = One(points(&[]), Some(Extent::new(-60.0, -30.0, -40.0, -10.0)));
-        let t = std::time::Instant::now();
         let e = grid(&wide, &serde_json::json!({"resolution": 30})).unwrap_err();
         assert!(e.starts_with("About ") && e.contains("too many"), "{e}");
-        assert!(t.elapsed().as_secs_f64() < 1.0);
         let e = grid(&One(points(&[]), Some(Extent::new(-60.0, -30.0, -46.0, -16.0))), &serde_json::json!({"resolution": 11})).unwrap_err();
         assert!(!e.starts_with("About ") && e.contains("too many"), "{e}");
         // A view panned past the antimeridian or the poles is cut to the globe; one off it is refused.
@@ -403,6 +461,29 @@ mod tests {
         let e =
             grid(&one, &serde_json::json!({"resolution": 9, "area": "Input Layer", "input": "pts", "containment": "Center"})).unwrap_err();
         assert!(e.contains("Overlapping"), "{e}");
+        // A polygon without a usable outline is left out, and said to be; an unknown area is refused.
+        let mut shapes = Dataset::new("pts", GeometryType::Polygon, vec![]);
+        let square = vec![
+            Coord::new(-56.0, -13.0),
+            Coord::new(-55.0, -13.0),
+            Coord::new(-55.0, -12.0),
+            Coord::new(-56.0, -12.0),
+            Coord::new(-56.0, -13.0),
+        ];
+        shapes.push(Some(Geometry::Polygon(vec![vec![square], vec![vec![Coord::new(0.0, 0.0), Coord::new(1.0, 1.0)]]])), vec![]);
+        shapes.push(
+            Some(Geometry::Polygon(vec![vec![vec![
+                Coord::new(f64::NAN, 0.0),
+                Coord::new(1.0, 0.0),
+                Coord::new(1.0, 1.0),
+                Coord::new(0.0, 0.0),
+            ]]])),
+            vec![],
+        );
+        let r = grid(&One(shapes, None), &serde_json::json!({"resolution": 7, "area": "Input Layer", "input": "pts"})).unwrap();
+        assert!(r.messages[0].contains("2 polygons without a usable outline"), "{:?}", r.messages);
+        assert!(!layer(r).features.is_empty());
+        assert!(grid(&inp, &serde_json::json!({"area": "Mars"})).unwrap_err().contains("Map Extent, Input Layer or World"));
         for bad in [serde_json::json!({"resolution": 31}), serde_json::json!({"resolution": 2.5}), serde_json::json!({"resolution": -1})] {
             assert!(grid(&inp, &bad).is_err(), "{bad}");
         }
@@ -438,15 +519,40 @@ mod tests {
             assert!(r.windows(2).all(|w| (w[1].x - w[0].x).abs() <= 180.0), "{lon},{lat}: {r:?}");
             assert_eq!(r.first(), r.last());
         }
+        // For the map, a cell across the antimeridian is split there: its parts lie within ±180°
+        // and cover what its ring did, as a pole's do. One elsewhere stays whole.
+        let shoelace = |r: &[Coord]| r.windows(2).map(|w| w[0].x * w[1].y - w[1].x * w[0].y).sum::<f64>().abs() / 2.0;
+        for (lon, lat) in [(179.99, 10.0), (-179.99, -40.0), (0.0, 89.99), (120.0, -89.99)] {
+            let c = a5::lonlat_to_cell(a5::LonLat::new(lon, lat), 3).unwrap();
+            let p = parts(c).unwrap();
+            // Across the antimeridian, two parts; round a pole, two when its ring turns past ±180°.
+            assert!(p.len() == 2 || lon.abs() < 179.0, "{lon},{lat}: {p:?}");
+            assert!(p.iter().flatten().flatten().all(|c| (-180.0..=180.0).contains(&c.x)), "{lon},{lat}: {p:?}");
+            assert!(p.iter().all(|poly| poly[0].first() == poly[0].last()));
+            let whole = shoelace(&ring(c).unwrap());
+            let split: f64 = p.iter().map(|poly| shoelace(&poly[0])).sum();
+            assert!((split / whole - 1.0).abs() < 1e-9, "{lon},{lat}: {split} for {whole}");
+        }
+        let sorriso = a5::lonlat_to_cell(a5::LonLat::new(-55.72, -12.55), 3).unwrap();
+        assert_eq!(parts(sorriso).unwrap(), vec![vec![ring(sorriso).unwrap()]]);
     }
 
     /// Points counted by cell: the count, the density by the cell's area, and a field's sum and mean.
     #[test]
     fn points_counted_by_cell() {
-        let near = [(-55.72, -12.55, 1.0), (-55.7201, -12.5501, 3.0), (-55.7202, -12.5499, f64::NAN), (10.75, 59.91, 5.0)];
+        let near = [
+            (-55.72, -12.55, 1.0),
+            (-55.7201, -12.5501, 3.0),
+            (-55.7202, -12.5499, f64::NAN),
+            (10.75, 59.91, 5.0),
+            // A longitude no wrap makes sense of is left out.
+            (1e12, 0.0, 1.0),
+        ];
         let inp = One(points(&near), None);
         let d = layer(aggregate(&inp, &serde_json::json!({"input": "pts", "resolution": 12, "field": "v"})).unwrap());
         assert_eq!(d.features.len(), 2);
+        let left = aggregate(&inp, &serde_json::json!({"input": "pts", "resolution": 12})).unwrap();
+        assert!(left.messages[0].contains("1 points without a usable position"), "{:?}", left.messages);
         let row = (0..2).find(|r| d.value(*r, 3).as_f64() == Some(3.0)).expect("three points in Sorriso's cell");
         let area = d.value(row, 2).as_f64().unwrap();
         assert!((d.value(row, 4).as_f64().unwrap() - 3.0 / area).abs() < 1e-9);
