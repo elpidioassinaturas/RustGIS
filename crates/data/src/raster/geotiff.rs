@@ -1271,6 +1271,21 @@ mod tests {
         assert_eq!(back.data_type, "UInt8");
     }
 
+    /// An Equi7 tile (a Sentinel-1 product on TU Wien's grid, say) names its system by its EPSG
+    /// code, 27707 for South America: read as that system, not refused.
+    #[test]
+    fn an_equi7_tile_is_read() {
+        let gt = GeoTransform { origin_x: 8_400_000.0, origin_y: 5_400_000.0, pixel_width: 20.0, pixel_height: -20.0 };
+        let r =
+            Raster::new("e7", 2, 2, vec![vec![1.0, 2.0, 3.0, 4.0]], gt, Crs::from_epsg(27707).unwrap(), None, ColorHint::Gray, "Float32")
+                .unwrap();
+        let back = read(std::io::Cursor::new(write(&r, 0).unwrap()), "back").unwrap();
+        assert_eq!(back.crs.epsg(), 27707);
+        // Brasília is in it: about 8,609 km east and 5,356 km north of the grid's corner.
+        let at = back.crs.transformer().unwrap().to_lonlat(rustgis_geom::Coord::new(8608845.8731, 5356292.7056)).unwrap();
+        assert!((at.x + 47.88).abs() < 1e-6 && (at.y + 15.79).abs() < 1e-6, "{at:?}");
+    }
+
     #[test]
     fn rgb_export_keeps_no_data() {
         let gt = GeoTransform { origin_x: 0.0, origin_y: 2.0, pixel_width: 1.0, pixel_height: -1.0 };

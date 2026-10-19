@@ -10,7 +10,7 @@ use rustgis_geom::{Coord, lonlat_to_merc, merc_to_lonlat};
 use serde::{Deserialize, Serialize};
 
 /// The PROJ definition of an EPSG code: from the `crs-definitions` table, or from the built-in
-/// table of the codes it lacks (EPSG 9020–20003, [`super::epsg_gap`]). `None` for a code that is
+/// table of the codes it lacks (EPSG 9020–20003 and newer ones such as Equi7's, [`super::epsg_gap`]). `None` for a code that is
 /// neither.
 pub fn epsg_proj4(code: u16) -> Option<&'static str> {
     crs_definitions::from_code(code).map(|d| d.proj4).or_else(|| super::epsg_gap::proj4(code))
@@ -347,6 +347,20 @@ mod tests {
         // EPSG:10622 (an orthographic) has no implementation, so it is left out rather than
         // listed and refused.
         assert_eq!(Crs::from_epsg(10622), None);
+        // The Equi7 grids, above the gap (azimuthal equidistant on WGS 84), against PROJ 9's
+        // cs2cs: a capital, or McMurdo, in each continent's system.
+        for (code, lonlat, xy) in [
+            (27701, (36.82, -1.29), (7334614.4467, 4929069.6856)),
+            (27702, (166.67, -77.85), (4027107.7883, 2081695.0307)),
+            (27703, (116.40, 39.90), (6237986.3076, 4287997.5336)),
+            (27704, (16.37, 48.21), (5270556.2083, 1618120.6818)),
+            (27705, (-77.04, 38.89), (10035658.3291, 3647233.1)),
+            (27706, (151.21, -33.87), (8823663.5437, 5930910.0748)),
+            (27707, (-47.88, -15.79), (8608845.8731, 5356292.7056)),
+        ] {
+            check(code, lonlat, xy, 0.01);
+        }
+        assert_eq!(Crs::parse("EPSG:27707"), Ok(Crs::Epsg(27707)));
     }
 
     /// The ESRI table (opengeos/RustGIS#213) is in order and holds only projected systems on Earth.

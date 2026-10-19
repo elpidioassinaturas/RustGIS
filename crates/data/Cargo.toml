@@ -40,6 +40,9 @@ lz4_flex = { workspace = true }
 ruzstd = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Azimuthal equidistant systems (Equi7's EPSG 27701–27707, ESRI's polar ones) need proj4rs' `aeqd`,
+# native only as in rustgis-map: its geodesic routines need libm, which wasm32-unknown-unknown lacks.
+proj4rs = { workspace = true, features = ["aeqd"] }
 rusqlite = { workspace = true }
 postgres = { workspace = true }
 tokio-postgres-rustls = { workspace = true }
