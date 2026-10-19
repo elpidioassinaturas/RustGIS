@@ -202,26 +202,45 @@ fn estimate(rings: &[Vec<a5::LonLat>], res: i32) -> f64 {
 }
 
 /// The cells at a resolution of coverings (each compacted, as A5 gives them), each once and in id
-/// order. They're counted before any is made, and more than [`MAX_CELLS`] is an error.
+/// order; more than [`MAX_CELLS`] is an error. A covering's cells don't overlap, so it's counted
+/// exactly before any is made. Coverings can overlap one another (neighbouring parcels, buffers),
+/// so they're merged as they come and a cell they share counts once.
 fn cells_of(coverings: &[Vec<u64>], res: i32) -> Result<Vec<u64>, String> {
-    let parts: Vec<u64> = coverings.iter().flatten().copied().filter(|c| !a5::is_compaction_marker(*c)).collect();
     // A coarser cell holds the ratio of the two resolutions' cell counts.
     let total = a5::get_num_cells(res);
-    let n = parts.iter().fold(0u64, |n, c| n.saturating_add(total / a5::get_num_cells(a5::get_resolution(*c)).max(1)));
-    if n > MAX_CELLS {
-        return Err(too_many(n, res));
-    }
     let mut cells: Vec<u64> = Vec::new();
-    for c in parts {
-        if a5::get_resolution(c) == res {
-            cells.push(c);
-        } else {
-            cells.extend(a5::cell_to_children(c, Some(res))?);
+    for covering in coverings {
+        let parts = || covering.iter().copied().filter(|c| !a5::is_compaction_marker(*c));
+        let n = parts().fold(0u64, |n, c| n.saturating_add(total / a5::get_num_cells(a5::get_resolution(c)).max(1)));
+        if n > MAX_CELLS {
+            return Err(too_many(n, res));
+        }
+        for c in parts() {
+            if a5::get_resolution(c) == res {
+                cells.push(c);
+            } else {
+                cells.extend(a5::cell_to_children(c, Some(res))?);
+            }
+        }
+        if cells.len() as u64 > MAX_CELLS {
+            cells.sort_unstable();
+            cells.dedup();
+            if cells.len() as u64 > MAX_CELLS {
+                return Err(too_many(format!("At least {}", cells.len()), res));
+            }
         }
     }
     cells.sort_unstable();
     cells.dedup();
     Ok(cells)
+}
+
+/// "1 polygon part" or "2 polygon parts" (and points) without a usable outline (or position).
+fn left_out(n: usize, what: &str, lacking: &str) -> String {
+    match n {
+        1 => format!("1 {what} without a usable {lacking} was left out"),
+        n => format!("{n} {what}s without a usable {lacking} were left out"),
+    }
 }
 
 /// The A5 Grid tool: the cells at a resolution over the map's extent, a layer's polygons (or its
@@ -274,7 +293,7 @@ pub fn grid(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
             if shapes.is_empty() {
                 return Err(match skipped {
                     0 => format!("{name} has no features to cover"),
-                    n => format!("{name} has nothing to cover: its {n} polygon parts have no usable outline"),
+                    n => format!("{name} has nothing to cover: {}", left_out(n, "polygon part", "outline")),
                 });
             }
             shapes
@@ -302,7 +321,7 @@ pub fn grid(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     }
     let mut msg = format!("A5 grid: {} cells at resolution {res}, each {:.6} km²", out.features.len(), area_km2(res));
     if skipped > 0 {
-        msg.push_str(&format!("; {skipped} polygon parts without a usable outline were left out"));
+        msg.push_str(&format!("; {}", left_out(skipped, "polygon part", "outline")));
     }
     Ok(ToolResult { output: Output::Layer(out), messages: vec![msg] })
 }
@@ -380,7 +399,7 @@ pub fn aggregate(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     }
     let mut msg = format!("{} cells at resolution {res} ({area:.6} km² each) hold the points", out.features.len());
     if outside > 0 {
-        msg.push_str(&format!("; {outside} points without a usable position were left out"));
+        msg.push_str(&format!("; {}", left_out(outside, "point", "position")));
     }
     Ok(ToolResult { output: Output::Layer(out), messages: vec![msg] })
 }
@@ -494,7 +513,26 @@ mod tests {
             vec![Coord::new(0.0, 80.0), Coord::new(10.0, 80.0), Coord::new(10.0, 95.0), Coord::new(0.0, 95.0), Coord::new(0.0, 80.0)];
         off.push(Some(Geometry::Polygon(vec![vec![tall]])), vec![]);
         let e = grid(&One(off, None), &serde_json::json!({"resolution": 3, "area": "Input Layer", "input": "pts"})).unwrap_err();
-        assert!(e.contains("1 polygon parts have no usable outline"), "{e}");
+        assert!(e.contains("nothing to cover: 1 polygon part without a usable outline was left out"), "{e}");
+        // Overlapping polygons count the cells they share once: three copies of one, together
+        // over the cap but not once merged, make that one's cells.
+        let block = vec![
+            Coord::new(-60.0, -30.0),
+            Coord::new(-46.0, -30.0),
+            Coord::new(-46.0, -16.0),
+            Coord::new(-60.0, -16.0),
+            Coord::new(-60.0, -30.0),
+        ];
+        let mut copies = Dataset::new("pts", GeometryType::Polygon, vec![]);
+        for _ in 0..3 {
+            copies.push(Some(Geometry::Polygon(vec![vec![block.clone()]])), vec![]);
+        }
+        let p10 = serde_json::json!({"resolution": 10, "area": "Input Layer", "input": "pts"});
+        let three = layer(grid(&One(copies, None), &p10).unwrap()).features.len();
+        let mut single = Dataset::new("pts", GeometryType::Polygon, vec![]);
+        single.push(Some(Geometry::Polygon(vec![vec![block]])), vec![]);
+        let alone = layer(grid(&One(single, None), &p10).unwrap()).features.len();
+        assert!(3 * alone as u64 > MAX_CELLS && three == alone, "{alone} cells, {three} from three copies");
         let mut across = Dataset::new("pts", GeometryType::Polygon, vec![]);
         let wide =
             vec![Coord::new(170.0, 0.0), Coord::new(190.0, 0.0), Coord::new(190.0, 10.0), Coord::new(170.0, 10.0), Coord::new(170.0, 0.0)];
@@ -573,7 +611,7 @@ mod tests {
         let d = layer(aggregate(&inp, &serde_json::json!({"input": "pts", "resolution": 12, "field": "v"})).unwrap());
         assert_eq!(d.features.len(), 2);
         let left = aggregate(&inp, &serde_json::json!({"input": "pts", "resolution": 12})).unwrap();
-        assert!(left.messages[0].contains("1 points without a usable position"), "{:?}", left.messages);
+        assert!(left.messages[0].contains("1 point without a usable position was left out"), "{:?}", left.messages);
         let row = (0..2).find(|r| d.value(*r, 3).as_f64() == Some(3.0)).expect("three points in Sorriso's cell");
         let area = d.value(row, 2).as_f64().unwrap();
         assert!((d.value(row, 4).as_f64().unwrap() - 3.0 / area).abs() < 1e-9);
