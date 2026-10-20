@@ -6283,6 +6283,7 @@ fn zarr_store_over_time(tag: &str) -> (std::path::PathBuf, String) {
 
 /// A Zarr store of one variable, `t` (time × 3 × 4), with a step at each of `days` since 2001-01-01:
 /// step `k`'s cells are `100 k + cell`.
+#[cfg(not(target_arch = "wasm32"))]
 fn zarr_store_at(tag: &str, days: &[i32]) -> (std::path::PathBuf, String) {
     let n = days.len();
     let dir = std::env::temp_dir().join(format!("rustgis-zarr-{tag}-{}", std::process::id()));
@@ -6430,6 +6431,7 @@ fn a_zarr_variable_summarised_over_time() {
 /// by their names, a raster whose bands are dates, and a Zarr variable along its time dimension.
 /// A cell with a clear trend gets Sen's slope and a significant slope; noise gets a slope but no
 /// significant one; a cell with too few values gets nothing.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_trend_over_a_data_cube() {
     use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
