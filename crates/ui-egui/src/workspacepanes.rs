@@ -644,18 +644,28 @@ pub fn time_series(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         ui.label(egui::RichText::new(tl!("Pick a point on the map to see the variable's values through time there.")).weak().small());
         return;
     }
-    // One chart for every line: the dates and values of all of them.
-    let lines: Vec<Vec<(f64, f64)>> = app
+    // One chart for every line: the dates and values of all of them, each line in runs between
+    // steps with no data, so a gap shows as one rather than as a straight join.
+    let lines: Vec<Vec<Vec<(f64, f64)>>> = app
         .ws
         .series
         .iter()
         .map(|s| {
             let dates = s["dates"].as_array().cloned().unwrap_or_default();
             let values = s["values"].as_array().cloned().unwrap_or_default();
-            dates.iter().zip(&values).filter_map(|(d, v)| Some((d.as_f64()?, v.as_f64()?))).collect()
+            let mut runs: Vec<Vec<(f64, f64)>> = vec![Vec::new()];
+            for (d, v) in dates.iter().zip(&values) {
+                match (d.as_f64(), v.as_f64()) {
+                    (Some(d), Some(v)) => runs.last_mut().into_iter().for_each(|r| r.push((d, v))),
+                    _ if runs.last().is_some_and(|r| !r.is_empty()) => runs.push(Vec::new()),
+                    _ => {}
+                }
+            }
+            runs.retain(|r| !r.is_empty());
+            runs
         })
         .collect();
-    let all = lines.iter().flatten();
+    let all = lines.iter().flatten().flatten();
     let (t0, t1) = all.clone().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), (d, _)| (a.min(*d), b.max(*d)));
     let (lo, hi) = all.fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), (_, v)| (a.min(*v), b.max(*v)));
     if !(t0.is_finite() && lo.is_finite()) {
@@ -685,17 +695,22 @@ pub fn time_series(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         egui::Color32::from_rgb(230, 171, 2),
         egui::Color32::from_rgb(27, 158, 119),
     ];
-    for (i, line) in lines.iter().enumerate() {
+    for (i, runs) in lines.iter().enumerate() {
         let colour = colours[i % colours.len()];
-        let pts: Vec<egui::Pos2> = line.iter().map(|p| to(*p)).collect();
-        if pts.len() == 1 {
-            painter.circle_filled(pts[0], 2.5, colour);
-        } else {
-            painter.add(egui::Shape::line(pts, egui::Stroke::new(1.6, colour)));
+        for run in runs {
+            let pts: Vec<egui::Pos2> = run.iter().map(|p| to(*p)).collect();
+            if pts.len() == 1 {
+                painter.circle_filled(pts[0], 2.5, colour);
+            } else {
+                painter.add(egui::Shape::line(pts, egui::Stroke::new(1.6, colour)));
+            }
         }
     }
     let fmt = |v: f64| rustgis_engine::map::symbology::fmt_num(v);
-    let units = app.ws.series.last().and_then(|s| s["units"].as_str()).unwrap_or("").to_string();
+    // The units, when every line has the same (lines of other variables share the scale without them).
+    let mut all_units = app.ws.series.iter().map(|s| s["units"].as_str().unwrap_or(""));
+    let first_units = all_units.next().unwrap_or("");
+    let units = if all_units.all(|u| u == first_units) { first_units.to_string() } else { String::new() };
     painter.text(rect.left_top() + vec2(6.0, 3.0), egui::Align2::LEFT_TOP, format!("{} {units}", fmt(hi)), regular(10.0), t.text_dim);
     painter.text(
         rect.left_bottom() + vec2(6.0, -3.0),
@@ -717,7 +732,7 @@ pub fn time_series(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         && app.session.map().time.is_some()
         && let Some(pos) = resp.interact_pointer_pos()
     {
-        let ms = t0 + f64::from((pos.x - plot.min.x) / plot.width().max(1.0)) * (t1 - t0);
+        let ms = t0 + f64::from(((pos.x - plot.min.x) / plot.width().max(1.0)).clamp(0.0, 1.0)) * (t1 - t0);
         let _ = app.run("time.goTo", json!({"date": ms}));
     }
     // The points, in their lines' colours.
