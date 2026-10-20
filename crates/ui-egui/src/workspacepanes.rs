@@ -734,6 +734,7 @@ pub fn time_series(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
 }
 
 /// The Time Series pane's lines as CSV: one row a date and point.
+#[cfg(not(target_arch = "wasm32"))]
 fn series_csv(series: &[Value]) -> String {
     let mut out = String::from("lon,lat,variable,date,value\n");
     for s in series {
