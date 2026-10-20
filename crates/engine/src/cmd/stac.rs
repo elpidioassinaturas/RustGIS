@@ -300,8 +300,11 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         // An empty page, or a next link back to a page already read, ends it; so does the page cap.
         let mut next = Some(stac::search_url(&api, &search)?);
         let mut read: Vec<String> = Vec::new();
+        // Pages are read from the API's own host: a next link elsewhere ends the search.
+        let host = |u: &str| u.split_once("://").map(|(_, r)| r.split(['/', '?', '#']).next().unwrap_or("").to_ascii_lowercase());
+        let api_host = host(&api);
         while let Some(url) = next.take() {
-            if read.contains(&url) {
+            if read.contains(&url) || (!read.is_empty() && host(&url) != api_host) {
                 break;
             }
             if read.len() >= MAX_CUBE_PAGES {
@@ -376,8 +379,9 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         let mut dates: Vec<f64> = Vec::new();
         let many = tiles.len() > 1;
         let mut added = Vec::new();
-        // What the map had: a cube that can't be added whole puts it back as it was, tile layers
-        // it replaced (the same cube added before) included.
+        // What the map had: a cube that can't be added whole puts its tile layers back as they
+        // were (those it replaced, the same cube added before, included) and takes out the layers
+        // it added.
         let (tiles_before, layers_before): (Vec<rustgis_map::TileLayer>, Vec<u32>) =
             (s.map().tiles.clone(), s.map().layers.iter().map(|l| l.id).collect());
         let undo = |s: &mut Session| {
