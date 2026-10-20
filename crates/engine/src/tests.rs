@@ -8467,6 +8467,71 @@ fn text_graphics_take_italic_alignment_and_letter_spacing() {
     assert_eq!(style(&s, ra), (false, TextAlign::Left, 0.0));
 }
 
+/// Text graphics pasted into a graphics layer made before their style fields keep their style
+/// (#583): the layer gains the fields they carry, from the session's clipboard and from GeoJSON
+/// text alike; features that aren't graphics add none, even with a field of the same name.
+#[test]
+fn pasted_graphics_keep_their_style_in_an_older_graphics_layer() {
+    use rustgis_map::graphics;
+    use rustgis_map::layout::TextAlign;
+    let mut s = world();
+    let a = s
+        .run(
+            "graphics.add",
+            &json!({"shape": "text", "points": [[10, 50]], "text": "Styled", "bold": true, "italic": true, "align": "right", "letterSpacing": 4}),
+        )
+        .unwrap();
+    let (from, row) = (a["layer"].as_u64().unwrap() as u32, a["row"].as_u64().unwrap() as usize);
+    // A graphics layer from before the style fields.
+    let old = |s: &mut Session, name: &str| {
+        let id = s.run("graphics.newLayer", &json!({"name": name})).unwrap()["layer"].as_u64().unwrap() as u32;
+        let l = s.map_mut().layer_mut(id).unwrap();
+        for f in ["bold", "italic", "align", "letter_spacing"] {
+            let fi = l.dataset.field_index(f).unwrap();
+            l.dataset.fields.remove(fi);
+            l.dataset.features.iter_mut().for_each(|ft| {
+                ft.attrs.remove(fi);
+            });
+        }
+        id
+    };
+    let style = |s: &Session, id: u32| {
+        let ds = &s.map().layer(id).unwrap().dataset;
+        let r = ds.features.len() - 1;
+        (graphics::bold(ds, r), graphics::italic(ds, r), graphics::align(ds, r), graphics::letter_spacing(ds, r))
+    };
+    s.run("select.rows", &json!({"layer": from, "rows": [row]})).unwrap();
+    let text = s.run("edit.copy", &Value::Null).unwrap()["text"].as_str().unwrap().to_string();
+    // From the session's clipboard (the Paste command) and from its GeoJSON (Ctrl+V in the app).
+    for via_text in [false, true] {
+        let to = old(&mut s, "Older");
+        let mut p = json!({"layer": to});
+        if via_text {
+            p["text"] = json!(text);
+        }
+        s.run("edit.paste", &p).unwrap();
+        assert_eq!(style(&s, to), (true, true, TextAlign::Right, 4.0), "via text: {via_text}");
+    }
+    // Features that aren't graphics add no field, though one is named as a style: with no `kind`,
+    // or with a `kind` of their own that isn't a graphic's.
+    for properties in [r#"{"align":"N"}"#, r#"{"kind":"inspection","align":"center"}"#] {
+        let to = old(&mut s, "Notes");
+        let plain = format!(
+            r#"{{"type":"FeatureCollection","features":[{{"type":"Feature","geometry":{{"type":"Point","coordinates":[1,2]}},"properties":{properties}}}]}}"#
+        );
+        s.run("edit.paste", &json!({"layer": to, "text": plain})).unwrap();
+        assert!(s.map().layer(to).unwrap().dataset.field_index("align").is_none(), "{properties}");
+    }
+    // Pasted together, a graphic with no alignment and another feature with one: the feature's
+    // value doesn't make the layer gain the field.
+    let to = old(&mut s, "Mixed");
+    let mixed = r#"{"type":"FeatureCollection","features":[
+        {"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{"kind":"text","text":"A"}},
+        {"type":"Feature","geometry":{"type":"Point","coordinates":[3,4]},"properties":{"kind":"inspection","align":"center"}}]}"#;
+    s.run("edit.paste", &json!({"layer": to, "text": mixed})).unwrap();
+    assert!(s.map().layer(to).unwrap().dataset.field_index("align").is_none());
+}
+
 /// A text graphic is placed again by its points (dragged on the map, #516), as one undo step;
 /// other shapes move with `edit.move`.
 #[test]

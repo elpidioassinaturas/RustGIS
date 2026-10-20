@@ -322,3 +322,78 @@ fn fs_tile(in: TileOut) -> @location(0) vec4f {
     }
     return c;
 }
+
+// ---- tile meshes (a vector tile layer: each tile's shapes made once, drawn at any zoom) ----
+
+struct TileMeshUniforms {
+    c: CmdUniforms,
+    /// x: how far the camera's zoom is past the mesh's level (0..1), to blend what changes with
+    /// the zoom; y: physical pixels per point.
+    zoom: vec4f,
+    /// The tile's square, from the mesh's origin: least x and y, greatest x and y.
+    square: vec4f,
+};
+
+@group(0) @binding(0) var<uniform> u_tm: TileMeshUniforms;
+
+struct TileMeshIn {
+    @location(0) position: vec2f,
+    @location(1) normal: vec2f,
+    @location(2) color: vec4f,
+    @location(3) color_next: vec4f,
+    @location(4) width: vec2f,
+    @location(5) along: f32,
+    @location(6) dashes: vec4f,
+};
+
+struct TileMeshOut {
+    @builtin(position) clip: vec4f,
+    @location(0) color: vec4f,
+    /// Physical pixels along the line, and its dash and gap lengths in them.
+    @location(1) along: f32,
+    @location(2) dashes: vec4f,
+};
+
+@vertex
+fn vs_tile_mesh(in: TileMeshIn) -> TileMeshOut {
+    let t = u_tm.zoom.x;
+    let width = mix(in.width.x, in.width.y, t) * u_tm.zoom.y;
+    let per_px = u_tm.c.params.x;
+    // A stroke's or circle's vertex moves out from its line or centre by half its width.
+    let world = vec4f(in.position + in.normal * (width * per_px * 0.5), 0.0, 1.0);
+    var out: TileMeshOut;
+    out.clip = u_tm.c.view_proj * world;
+    out.color = mix(in.color, in.color_next, t);
+    out.along = in.along / per_px;
+    // In widths, at least a pixel's worth (as the CPU path lays dashes, half a pixel at least).
+    out.dashes = select(vec4f(0.0), max(in.dashes * max(width, 1.0), vec4f(0.5)), in.dashes > vec4f(0.0));
+    return out;
+}
+
+@fragment
+fn fs_tile_mesh(in: TileMeshOut) -> @location(0) vec4f {
+    let d = in.dashes;
+    let period = d.x + d.y + d.z + d.w;
+    if period > 0.0 {
+        let a = in.along - floor(in.along / period) * period;
+        // Dash, gap, dash, gap.
+        if (a >= d.x && a < d.x + d.y) || a >= d.x + d.y + d.z {
+            discard;
+        }
+    }
+    return in.color;
+}
+
+// A tile's square, marking the stencil (it draws nothing: its colour is clear) so the tile's
+// mesh draws only there, as MapLibre clips its tiles.
+@vertex
+fn vs_tile_square(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+    let s = u_tm.square;
+    var corners = array<vec2f, 6>(vec2f(s.x, s.y), vec2f(s.z, s.y), vec2f(s.z, s.w), vec2f(s.x, s.y), vec2f(s.z, s.w), vec2f(s.x, s.w));
+    return u_tm.c.view_proj * vec4f(corners[vi], 0.0, 1.0);
+}
+
+@fragment
+fn fs_tile_square() -> @location(0) vec4f {
+    return vec4f(0.0);
+}

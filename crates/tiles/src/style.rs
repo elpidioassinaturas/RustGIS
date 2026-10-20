@@ -398,6 +398,12 @@ impl Expr {
     pub fn eval(&self, f: &FeatureCtx) -> Val {
         eval(&self.0, f, &mut Vec::new())
     }
+
+    /// Whether it reads nothing of a feature (its properties, id or geometry type): the same
+    /// for every feature at a zoom.
+    pub fn feature_free(&self) -> bool {
+        free(&self.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -538,6 +544,19 @@ enum Node {
     LegacyGet(String),
     LegacyHas(String),
     LegacyIn(Box<Node>, Vec<Val>),
+}
+
+/// See [`Expr::feature_free`].
+fn free(n: &Node) -> bool {
+    match n {
+        Node::Lit(_) | Node::Var(_) => true,
+        Node::Call(op, args) => !matches!(op, Op::Get | Op::Has | Op::Id | Op::GeomType) && args.iter().all(free),
+        Node::Match(input, arms, default) => free(input) && arms.iter().all(|(_, o)| free(o)) && free(default),
+        Node::Step(input, first, stops) => free(input) && free(first) && stops.iter().all(|(_, o)| free(o)),
+        Node::Interp(_, input, stops) => free(input) && stops.iter().all(|(_, o)| free(o)),
+        Node::Let(binds, body) => binds.iter().all(|(_, v)| free(v)) && free(body),
+        Node::Tokens(_) | Node::LegacyGet(_) | Node::LegacyHas(_) | Node::LegacyIn(..) => false,
+    }
 }
 
 fn null() -> Node {
@@ -833,9 +852,30 @@ fn eval(n: &Node, f: &FeatureCtx, vars: &mut Vars) -> Val {
             _ => f.prop(k).is_some(),
         }),
         Node::LegacyIn(key, set) => {
+            if let Node::LegacyGet(k) = &**key {
+                return Val::Bool(set.iter().any(|v| reads(k, true, f, v)));
+            }
             let v = eval(key, f, vars);
             Val::Bool(set.contains(&v))
         }
+    }
+}
+
+/// Whether the feature's `key` (a legacy key, `$type` and `$id` among them, when `legacy`) is
+/// `v`, without making a value of it: filters compare thousands of features with every layer.
+fn reads(key: &str, legacy: bool, f: &FeatureCtx, v: &Val) -> bool {
+    match (key, legacy) {
+        ("$type", true) => matches!(v, Val::Str(s) if s == geom_name(f.kind)),
+        ("$id", true) => match f.id {
+            Some(i) => *v == Val::Num(i as f64),
+            None => *v == Val::Null,
+        },
+        _ => match f.prop(key) {
+            Some(Value::String(s)) => matches!(v, Val::Str(t) if t == s),
+            Some(Value::Number(n)) => matches!(v, Val::Num(m) if m == n),
+            Some(Value::Bool(b)) => matches!(v, Val::Bool(c) if c == b),
+            None => *v == Val::Null,
+        },
     }
 }
 
@@ -937,6 +977,20 @@ fn call(op: Op, args: &[Node], f: &FeatureCtx, vars: &mut Vars) -> Val {
                 }
             }
             return Val::Null;
+        }
+        // A feature's property against a literal, compared where it is.
+        Eq | Ne => {
+            let read = match args {
+                [Node::LegacyGet(k), Node::Lit(v)] => Some(reads(k, true, f, v)),
+                [Node::Call(Get, key), Node::Lit(v)] => match key.as_slice() {
+                    [Node::Lit(Val::Str(k))] => Some(reads(k, false, f, v)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(is) = read {
+                return Val::Bool(is == (op == Eq));
+            }
         }
         _ => {}
     }
@@ -1397,6 +1451,12 @@ impl StyleLayer {
     /// Whether a paint property is set (e.g. `fill-pattern`).
     pub fn has_paint(&self, name: &str) -> bool {
         self.paint.contains_key(name)
+    }
+
+    /// Whether every paint and layout property of the layer is the same for every feature at a
+    /// zoom (see [`Expr::feature_free`]).
+    pub fn paint_feature_free(&self) -> bool {
+        self.paint.values().chain(self.layout.values()).all(Expr::feature_free)
     }
 
     fn pval(&self, name: &str, f: &FeatureCtx) -> Val {
@@ -2320,5 +2380,43 @@ mod tests {
         e.push(json!(["var", "a"]));
         let v = Expr::property(&Json::Array(e)).eval(&f);
         assert_eq!(v.to_text().len(), MAX_STR);
+    }
+}
+
+#[cfg(test)]
+mod feature_free_tests {
+    use super::*;
+
+    #[test]
+    fn expressions_reading_the_feature_are_told_apart() {
+        let free = |j: Json| Expr::property(&j).feature_free();
+        assert!(free(serde_json::json!(3)));
+        assert!(free(serde_json::json!(["interpolate", ["linear"], ["zoom"], 5, 1, 10, 4])));
+        assert!(free(serde_json::json!({"stops": [[5, 1], [10, 4]]})));
+        assert!(!free(serde_json::json!(["get", "width"])));
+        assert!(!free(serde_json::json!(["match", ["get", "class"], "a", 1, 2])));
+        assert!(!free(serde_json::json!(["interpolate", ["linear"], ["zoom"], 5, ["get", "w"], 10, 4])));
+        assert!(!free(serde_json::json!({"property": "w", "stops": [[1, 1], [2, 2]]})));
+        assert!(!free(serde_json::json!(["==", ["geometry-type"], "Point"])));
+    }
+
+    #[test]
+    fn filters_compare_properties_in_place_as_they_did() {
+        let props = vec![("class".to_string(), Value::String("motorway".into())), ("rank".to_string(), Value::Number(3.0))];
+        let f = FeatureCtx { zoom: 10.0, kind: GeomKind::LineString, id: Some(7), props: &props };
+        let is = |j: Json| Expr::filter(&j).eval(&f) == Val::Bool(true);
+        assert!(is(serde_json::json!(["==", "class", "motorway"])));
+        assert!(!is(serde_json::json!(["!=", "class", "motorway"])));
+        assert!(is(serde_json::json!(["!=", "missing", "x"])));
+        assert!(is(serde_json::json!(["==", "$type", "LineString"])));
+        assert!(is(serde_json::json!(["==", "$id", 7])));
+        assert!(is(serde_json::json!(["==", "rank", 3])));
+        assert!(!is(serde_json::json!(["==", "rank", "3"])));
+        assert!(is(serde_json::json!(["in", "class", "trunk", "motorway"])));
+        assert!(!is(serde_json::json!(["in", "$type", "Point", "Polygon"])));
+        assert!(is(serde_json::json!(["!in", "class", "trunk"])));
+        assert!(is(serde_json::json!(["==", ["get", "class"], "motorway"])));
+        assert!(is(serde_json::json!(["!=", ["get", "nothing"], "motorway"])));
+        assert!(is(serde_json::json!(["all", ["==", "class", "motorway"], ["<", "rank", 4]])));
     }
 }

@@ -298,7 +298,9 @@ fn a_ribbon_wider_than_the_window_scrolls_with_arrow_buttons() {
 #[test]
 fn a_tab_strip_wider_than_the_window_scrolls_with_arrow_buttons() {
     let mut h = harness();
-    h.set_size(egui::vec2(560.0, 500.0));
+    // Narrower than the tabs' text alone, whatever the system font: at 560 points the tabs just
+    // fit on macOS once its semibold is drawn heavier (#591), so they didn't need to scroll.
+    h.set_size(egui::vec2(440.0, 500.0));
     for _ in 0..4 {
         h.step();
     }

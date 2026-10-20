@@ -4470,6 +4470,7 @@ dependencies = [
  "rustgis-geom",
  "rustgis-map",
  "rustgis-tiles",
+ "serde_json",
  "tiny-skia",
  "web-time",
 ]

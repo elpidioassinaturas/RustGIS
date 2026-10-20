@@ -1,4 +1,5 @@
-//! EPSG codes 9020–20003, which `crs-definitions` lacks (opengeos/RustGIS#198).
+//! EPSG codes 9020–20003, which `crs-definitions` lacks (opengeos/RustGIS#198), and newer codes
+//! above that range it lacks too.
 //!
 //! `crs-definitions` is generated from PostGIS's `spatial_ref_sys`, whose EPSG entries jump from
 //! 9019 to 20004; the EPSG registry has added some 400 coordinate systems in between since
@@ -21,6 +22,14 @@
 //! tens of metres off, as it is for its predecessor EPSG:2163 in crs-definitions. The Saba and
 //! Sint Eustatius Helmerts PROJ marks `+exact` (rotations of hundreds of arc-seconds); in the
 //! small-angle form `+towgs84` carries they come out 2–8 m off.
+//!
+//! Above the gap, `crs-definitions` also lacks the codes EPSG has added since PostGIS's table was
+//! made. Those listed here are written from the EPSG registry (dataset v13.106) as PROJ writes
+//! its method:
+//! - **Equi7** (TU Wien's continental grids, used by Sentinel-1 and other Earth observation
+//!   products, EPSG 27701–27707, change 2022.081): WGS 84 and the Azimuthal Equidistant method
+//!   (EPSG 1125, PROJ's ellipsoidal `aeqd`), with each continent's origin and false easting and
+//!   northing (conversions 17771–17777).
 
 /// The PROJ definition of an EPSG code in the gap, or `None`.
 pub fn proj4(code: u16) -> Option<&'static str> {
@@ -445,4 +454,11 @@ pub(crate) const DEFS: &[(u16, &str)] = &[
     (11117, "+proj=tmerc +lat_0=4.59620322222222 +lon_0=-71.0775077694444 +k=1 +x_0=1000000 +y_0=1000000 +ellps=GRS80 +units=m +no_defs"), // MAGNA-SIRGAS 2018 / Colombia East Central zone
     (11118, "+proj=tmerc +lat_0=4.59620322222222 +lon_0=-68.0775077694444 +k=1 +x_0=1000000 +y_0=1000000 +ellps=GRS80 +units=m +no_defs"), // MAGNA-SIRGAS 2018 / Colombia East zone
     (20002, "+proj=tmerc +lat_0=53.35 +lon_0=-2.55 +k=1 +x_0=171975.9382 +y_0=116744.6938 +ellps=GRS80 +units=m +no_defs"), // MWC18 Grid
+    (27701, "+proj=aeqd +lat_0=8.5 +lon_0=21.5 +x_0=5621452.02 +y_0=5990638.423 +datum=WGS84 +units=m +no_defs"), // WGS 84 / Equi7 Africa
+    (27702, "+proj=aeqd +lat_0=-90 +lon_0=0 +x_0=3714266.977 +y_0=3402016.506 +datum=WGS84 +units=m +no_defs"), // WGS 84 / Equi7 Antarctica
+    (27703, "+proj=aeqd +lat_0=47 +lon_0=94 +x_0=4340913.848 +y_0=4812712.923 +datum=WGS84 +units=m +no_defs"), // WGS 84 / Equi7 Asia
+    (27704, "+proj=aeqd +lat_0=53 +lon_0=24 +x_0=5837287.82 +y_0=2121415.696 +datum=WGS84 +units=m +no_defs"), // WGS 84 / Equi7 Europe
+    (27705, "+proj=aeqd +lat_0=52 +lon_0=-97.5 +x_0=8264722.177 +y_0=4867518.353 +datum=WGS84 +units=m +no_defs"), // WGS 84 / Equi7 North America
+    (27706, "+proj=aeqd +lat_0=-19.5 +lon_0=131.5 +x_0=6988408.536 +y_0=7654884.537 +datum=WGS84 +units=m +no_defs"), // WGS 84 / Equi7 Oceania
+    (27707, "+proj=aeqd +lat_0=-14 +lon_0=-60.5 +x_0=7257179.236 +y_0=5592024.446 +datum=WGS84 +units=m +no_defs"), // WGS 84 / Equi7 South America
 ];

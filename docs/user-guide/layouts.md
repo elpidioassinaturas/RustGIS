@@ -77,12 +77,11 @@ the maps; while one is open, its groups lead the Publish tab:
 - **Text** and **Dynamic Text**: `{date}`, `{time}`, `{scale}`, `{map}`, `{crs}`, `{page}`,
   `{pages}`, `{pageName}` and `{layout}` fill in when the page is drawn; the Format pane's
   **Insert Dynamic Text** menu, under the text, lists each with what it shows. The text, its
-  size (2 to 400 points, as text graphics on the map), colour and bold are the same form a text
-  on the map has in the pane; Enter ends the text and Shift+Enter starts a new line. Besides
-  those, their properties set **Italic** (slanted, as water and ocean names are; the built-in
-  fonts have no italic face, so the letters are slanted 12°), **Alignment** (left, center or
-  right within the element) and **Letter spacing** in points (spaced-out names such as
-  O C E A N O, or a negative value to tighten). Scripts set them with `italic`, `align` and
+  size (2 to 400 points, as text graphics on the map), colour, bold, **Italic** (slanted, as water
+  and ocean names are; the built-in fonts have no italic face, so the letters are slanted 12°),
+  **Alignment** (left, center or right within the element) and **Letter spacing** in points
+  (spaced-out names such as O C E A N O, or a negative value to tighten) are the same form a text
+  on the map has in the pane; Enter ends the text and Shift+Enter starts a new line. Scripts set them with `italic`, `align` and
   `letterSpacing` on `layout.addElement` and `layout.update`. **Picture** places a PNG or JPEG.
 - **Map Series**: one page per feature of an index layer, with the frame zoomed to each feature;
   step through pages, refresh, and export every page into one PDF.

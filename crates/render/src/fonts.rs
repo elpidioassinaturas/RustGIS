@@ -40,6 +40,13 @@ fn read(path: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// The weight the semibold face is drawn at where it is a variable font (#591): macOS's system
+/// font is one file for every weight, drawn at its default 400 unless told otherwise. 600 is
+/// semibold, as the static faces used elsewhere (Segoe UI Semibold, Inter SemiBold) are; a face
+/// with no weight axis ignores it. Both renderers set it, so text is as heavy on screen as in an
+/// export.
+pub const SEMIBOLD_WEIGHT: f32 = 600.0;
+
 /// The interface fonts, discovered once.
 pub fn ui_fonts() -> &'static UiFonts {
     static F: OnceLock<UiFonts> = OnceLock::new();

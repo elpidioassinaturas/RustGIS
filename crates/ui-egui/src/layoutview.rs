@@ -6,9 +6,8 @@
 
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use rustgis_engine::map::layout::{
-    ArrowStyle, CoordFormat, ElementKind, Grid, GridStyle, Layout, LineDir, MAX_COLORBAR_TICKS, MAX_GRID_WIDTH, MAX_LETTER_SPACING,
-    MAX_SCALE_DIVISIONS, MAX_TICK_MM, MIN_LETTER_SPACING, Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TextAlign, TickSide,
-    frame_camera,
+    ArrowStyle, CoordFormat, ElementKind, Grid, GridStyle, Layout, LineDir, MAX_COLORBAR_TICKS, MAX_GRID_WIDTH, MAX_SCALE_DIVISIONS,
+    MAX_TICK_MM, Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TickSide, frame_camera,
 };
 use serde_json::{Value, json};
 
@@ -1398,51 +1397,25 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             },
         );
     });
-    // A layout's text: the form a text graphic has too (#516), with the page's dynamic text, and
-    // the type settings only a layout's text has.
+    // A layout's text: the form a text graphic has too (#516, #535), with the page's dynamic text.
     if let ElementKind::Text { text, size, color, bold, italic, align, letter_spacing } = &e.kind {
         let key = (li, id, "text");
         let mut buf = app.layout.typing.remove(&key).unwrap_or_else(|| text.clone());
         let (mut sz, mut c, mut bb) = (*size, crate::theme::c32(*color), *bold);
+        let (mut it, mut al, mut ls) = (*italic, *align, *letter_spacing);
         let tokens = [rustgis_engine::map::graphics::TOKENS, rustgis_engine::map::layout::PAGE_TOKENS];
-        let fields = crate::textform::Fields { text: &mut buf, size: &mut sz, color: Some(&mut c), bold: Some(&mut bb), select: false };
-        // The type settings only a layout's text has, in the form's grid so they line up.
-        let settled = crate::textform::section(ui, "Text", |ui| {
-            crate::textform::show(ui, ("layout_text", li, id), &tokens, fields, |ui| {
-                ui.label(tl!("Italic"));
-                let mut it = *italic;
-                // Named for assistive technology, as its label sits in the other column.
-                let r = ui.checkbox(&mut it, "");
-                r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, it, tl!("Italic")));
-                if r.changed() {
-                    update(app, json!({"italic": it}));
-                }
-                ui.end_row();
-                ui.label(tl!("Alignment"));
-                egui::ComboBox::from_id_salt(("text_align", id)).selected_text(tl!(align.label())).show_ui(ui, |ui| {
-                    for v in TextAlign::ALL {
-                        if ui.selectable_label(*align == v, tl!(v.label())).clicked() && *align != v {
-                            update(app, json!({"align": v.code()}));
-                        }
-                    }
-                });
-                ui.end_row();
-                ui.label(tl!("Letter spacing"));
-                let mut ls = *letter_spacing;
-                let r = ui.add(
-                    egui::DragValue::new(&mut ls).range(MIN_LETTER_SPACING..=MAX_LETTER_SPACING).speed(0.1).max_decimals(1).suffix(" pt"),
-                );
-                r.widget_info(|| egui::WidgetInfo {
-                    label: Some(tl!("Letter spacing").to_string()),
-                    ..egui::WidgetInfo::drag_value(true, ls)
-                });
-                if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && (ls - letter_spacing).abs() > 1e-6 {
-                    update(app, json!({"letterSpacing": ls}));
-                }
-                ui.end_row();
-            })
-        })
-        .unwrap_or_default();
+        let fields = crate::textform::Fields {
+            text: &mut buf,
+            size: &mut sz,
+            color: Some(&mut c),
+            bold: Some(&mut bb),
+            italic: Some(&mut it),
+            align: Some(&mut al),
+            letter_spacing: Some(&mut ls),
+            select: false,
+        };
+        let settled = crate::textform::section(ui, "Text", |ui| crate::textform::show(ui, ("layout_text", li, id), &tokens, fields))
+            .unwrap_or_default();
         if settled.typing {
             app.layout.typing.insert(key, buf);
         } else if settled.text && buf != *text {
@@ -1456,6 +1429,15 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
         }
         if settled.bold {
             update(app, json!({"bold": bb}));
+        }
+        if settled.italic {
+            update(app, json!({"italic": it}));
+        }
+        if settled.align {
+            update(app, json!({"align": al.code()}));
+        }
+        if settled.letter_spacing {
+            update(app, json!({"letterSpacing": ls}));
         }
     }
     // The layers a legend lists: a checkbox for each vector layer of its frame's map, ticked when

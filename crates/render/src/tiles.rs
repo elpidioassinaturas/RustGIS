@@ -12,7 +12,7 @@ use rustgis_map::{Map, Rgba, TileKind, TileLayer};
 use rustgis_tiles::{Frame, Kind, Spec};
 use tiny_skia::{Pixmap, PixmapPaint, Transform};
 
-use crate::gpu_scene::{DrawCmd, TileQuad};
+use crate::gpu_scene::{DrawCmd, MeshTile, TileQuad};
 use crate::raster::Place;
 use crate::{PlacedIcon, PlacedLabel, View};
 
@@ -64,12 +64,94 @@ pub fn style_view(t: &TileLayer) -> Result<Option<rustgis_tiles::style::StyleVie
     }
 }
 
+/// A tile last drawn as a mesh: its mesh held weakly (the mesh cache decides how long it
+/// stays), where it is and the square it was drawn in, and its level.
+type LastTile = (std::sync::Weak<crate::tile_mesh::TileMesh>, [f64; 2], [f32; 4], u8);
+
+/// The tiles of each style last drawn as meshes (by the resolved style's address), which stand in
+/// for tiles whose meshes are still to be made. Any map's do: a mesh is the same wherever it is
+/// drawn, and only its square's part of it is.
+type Last = std::collections::HashMap<usize, (std::sync::Weak<rustgis_tiles::source::Resolved>, Vec<LastTile>)>;
+static LAST: std::sync::OnceLock<std::sync::Mutex<Last>> = std::sync::OnceLock::new();
+
+/// The meshes of `v`'s tiles, and whether some were made while the sprite was on its way. A map
+/// drawn for the screen at a pace (see `rustgis_tiles::Pace`) makes those missing a frame's worth
+/// at a time, nearest `centre` first, the tiles drawn last standing in for the rest meanwhile,
+/// clipped to their squares.
+fn mesh_tiles(v: &rustgis_tiles::shapes::VectorTiles, centre: [f64; 2]) -> (Vec<MeshTile>, bool) {
+    let pace = rustgis_tiles::pace();
+    let meshes = crate::tile_mesh::meshes(&v.style, &v.source, &v.tiles, v.level, pace.map(|(_, until)| (until, centre)));
+    let lock = || LAST.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    let key = std::sync::Arc::as_ptr(&v.style) as usize;
+    let last: Vec<MeshTile> = lock()
+        .get(&key)
+        // The same style still, not a new one at a freed address.
+        .filter(|(s, _)| s.upgrade().is_some_and(|s| std::sync::Arc::ptr_eq(&s, &v.style)))
+        .map(|(_, t)| {
+            t.iter()
+                .filter_map(|(m, origin, clip, level)| Some(MeshTile { mesh: m.upgrade()?, origin: *origin, clip: *clip, level: *level }))
+                .collect()
+        })
+        .unwrap_or_default();
+    let (mut stood_in, mut tiles, mut waiting) = (Vec::new(), Vec::new(), false);
+    for (d, m) in v.tiles.iter().zip(meshes) {
+        let o = [d.at.min_x, d.at.max_y];
+        match m {
+            Some(mesh) => {
+                waiting |= mesh.waiting;
+                if !mesh.indices.is_empty() {
+                    let c = &d.clip;
+                    let clip = [(c.min_x - o[0]) as f32, (c.min_y - o[1]) as f32, (c.max_x - o[0]) as f32, (c.max_y - o[1]) as f32];
+                    tiles.push(MeshTile { mesh, origin: o, clip, level: v.level });
+                }
+            }
+            None if matches!(&*d.payload, rustgis_tiles::cache::Payload::Vector(_)) => {
+                // Still to be made: what was drawn over its square last stands in.
+                let before = stood_in.len();
+                let s = &d.clip;
+                for t in &last {
+                    let c = [
+                        (t.origin[0] + f64::from(t.clip[0])).max(s.min_x),
+                        (t.origin[1] + f64::from(t.clip[1])).max(s.min_y),
+                        (t.origin[0] + f64::from(t.clip[2])).min(s.max_x),
+                        (t.origin[1] + f64::from(t.clip[3])).min(s.max_y),
+                    ];
+                    if c[0] < c[2] && c[1] < c[3] {
+                        let clip = [
+                            (c[0] - t.origin[0]) as f32,
+                            (c[1] - t.origin[1]) as f32,
+                            (c[2] - t.origin[0]) as f32,
+                            (c[3] - t.origin[1]) as f32,
+                        ];
+                        stood_in.push(MeshTile { clip, ..t.clone() });
+                    }
+                }
+                let covered = stood_in.len() > before;
+                rustgis_tiles::unfinished(match pace {
+                    Some((rustgis_tiles::Pace::Moving, _)) if covered => rustgis_tiles::Unfinished::Later,
+                    _ => rustgis_tiles::Unfinished::Next,
+                });
+            }
+            None => {}
+        }
+    }
+    // Under the tiles drawn now.
+    stood_in.extend(tiles);
+    let mut l = lock();
+    l.retain(|_, (s, _)| s.strong_count() > 0);
+    let kept = stood_in.iter().map(|t| (std::sync::Arc::downgrade(&t.mesh), t.origin, t.clip, t.level)).collect();
+    l.insert(key, (std::sync::Arc::downgrade(&v.style), kept));
+    (stood_in, waiting)
+}
+
 /// Where a GPU scene's tile layers go: raster tile layers as [`DrawCmd::Tiles`] in `cmds`,
 /// anything else drawn into the accumulator pixmap (`dirty` then set), which is flushed to `cmds`
 /// first so the layers keep their order.
 pub(crate) struct Gpu<'a> {
     pub cmds: &'a mut Vec<DrawCmd>,
     pub dirty: &'a mut bool,
+    /// Vector tile styles may be drawn as meshes ([`DrawCmd::TileMeshes`]).
+    pub meshes: bool,
 }
 
 /// Draws the map's visible tile layers, bottom first. With `gpu`, on the flat Web Mercator map,
@@ -142,10 +224,31 @@ pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels
         let fetch = crate::cull_extent(view, crate::CULL_MARGIN);
         let reach = crate::cull_extent(view, crate::GPU_CULL_MARGIN);
         let origin = [view.camera.center.x, view.camera.center.y];
+        let north_up = view.camera.bearing == 0.0 && view.camera.pitch == 0.0;
         for t in layers {
+            // A vector tile style as meshes, made once a tile and level and drawn at any zoom
+            // (see `tile_mesh`); a see-through or blended layer, as pictures.
+            if let Some(g) = gpu.as_mut()
+                && north_up
+                && g.meshes
+                && t.blend == Blend::Normal
+                && t.opacity >= 0.999
+                && let Some(v) =
+                    rustgis_tiles::shapes::vector_tiles(&spec(t), &frame, &fetch, Some(&reach), labels.then_some((pm.width(), pm.height())))
+                && crate::flush_acc(pm, g.cmds, g.dirty).is_some()
+            {
+                let (tiles, waiting) = mesh_tiles(&v, origin);
+                if !tiles.is_empty() {
+                    g.cmds.push(DrawCmd::TileMeshes { tiles });
+                }
+                let d = rustgis_tiles::Drawn { labels: v.labels, attribution: v.attribution, pending: v.pending || waiting, error: None };
+                collect(d, &t.name, &mut out);
+                continue;
+            }
             if let Some(g) = gpu.as_mut()
                 && t.blend == Blend::Normal
-                && let Some(p) = rustgis_tiles::place(&spec(t), t.opacity, &frame, &fetch, &reach)
+                && let Some(p) =
+                    rustgis_tiles::place(&spec(t), t.opacity, &frame, &fetch, &reach, labels.then_some((pm.width(), pm.height())))
             {
                 // What the accumulator holds goes first, under the tiles; with no room for a new
                 // accumulator the layer is drawn into this one instead.
@@ -154,7 +257,7 @@ pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels
                     if !p.tiles.is_empty() {
                         g.cmds.push(DrawCmd::Tiles { origin, tiles: p.tiles.iter().map(|q| quad(q, origin)).collect() });
                     }
-                    let d = rustgis_tiles::Drawn { labels: Vec::new(), attribution: p.attribution, pending: p.pending, error: p.error };
+                    let d = rustgis_tiles::Drawn { labels: p.labels, attribution: p.attribution, pending: p.pending, error: p.error };
                     collect(d, &t.name, &mut out);
                     continue;
                 }

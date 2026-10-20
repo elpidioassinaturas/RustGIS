@@ -19,6 +19,7 @@ mod raster;
 pub mod report;
 pub mod terrain;
 mod text;
+pub mod tile_mesh;
 mod tiles;
 
 pub use rustgis_tiles;
@@ -1406,7 +1407,7 @@ fn gpu_turned(map: &mut Map, view: &View) -> Option<gpu_scene::GpuScene> {
                 match c {
                     DrawCmd::Mesh { vertices, .. } => vertices.iter_mut().for_each(|v| v.stroke_px *= k),
                     DrawCmd::Points { instances, .. } => instances.iter_mut().for_each(|p| p.radius_px *= k),
-                    DrawCmd::Image { .. } | DrawCmd::Extrusion { .. } | DrawCmd::Tiles { .. } => {}
+                    DrawCmd::Image { .. } | DrawCmd::Extrusion { .. } | DrawCmd::Tiles { .. } | DrawCmd::TileMeshes { .. } => {}
                 }
             }
         }
@@ -2256,8 +2257,12 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
     // Hidden tile layers draw nothing: marking dirty anyway would emit an empty full-screen
     // Image command (a pointless upload, and it poisons the camera fast path's `has_images`).
     // On the GPU raster tile layers are placed as tiles, which move with the camera.
-    let tile_gpu =
-        (gpu && map.tiles.iter().any(|t| t.draws() && t.opacity > 0.0)).then_some(tiles::Gpu { cmds: &mut cmds, dirty: &mut cpu_dirty });
+    let tile_gpu = (gpu && map.tiles.iter().any(|t| t.draws() && t.opacity > 0.0)).then_some(tiles::Gpu {
+        cmds: &mut cmds,
+        dirty: &mut cpu_dirty,
+        // A tilted view's bands are drawn at their own densities: their tiles as pictures.
+        meshes: !matches!(labels_to, Labels::Tilted(..)),
+    });
     let tile_out = tiles::draw(&mut pm, map, view, tile_place, !map.label_display.paused && map.label_lock.is_none(), tile_gpu);
     if !gpu {
         cpu_dirty |= map.tiles.iter().any(|t| t.draws());
@@ -3626,6 +3631,7 @@ mod tests {
                 gpu_scene::DrawCmd::Extrusion { .. } => "extrusion",
                 gpu_scene::DrawCmd::Image { .. } => "image",
                 gpu_scene::DrawCmd::Tiles { .. } => "tiles",
+                gpu_scene::DrawCmd::TileMeshes { .. } => "tile meshes",
             })
             .collect()
     }

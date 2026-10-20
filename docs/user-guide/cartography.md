@@ -181,11 +181,15 @@ centre): pick one, then click the map, and the text starts with its token (`{map
 `{date}`, `{time}`, `{crs}`, `{layers}` or `{center}`); the pane's **Insert Dynamic Text** menu adds
 more. Picture: drag a rectangle, then pick a PNG or JPEG image to stretch over it. Tools return
 to Explore after each graphic unless Keep Tool is on. Each graphic keeps its own fill, outline,
-width, text size and bold in the layer's attributes, so you can edit them in the attribute table
-or with `graphics.style`. To change a text later, click anywhere on it (with Explore or Select):
-selected alone, it opens in the Format pane, with the same form a layout's text has there: text,
-size, colour and bold. Each change is one undo step on that text only (`graphics.edit` does the
-same by layer and row, with `text`, `fontSize`, `fill` for the colour and `bold`). Once a text is selected, drag it by
+width, text size, bold, italic, alignment and letter spacing in the layer's attributes, so you can
+edit them in the attribute table or with `graphics.style`. To change a text later, click anywhere
+on it (with Explore or Select): selected alone, it opens in the Format pane, with the same form a
+layout's text has there: text, size, colour, bold, **Italic** (slanted), **Alignment** (how the
+lines of a text of several lines line up; the text stays centred on its point) and **Letter
+spacing** in points (spaced-out names such as O C E A N O, or a negative value to tighten). A text
+looks the same on the map and in an exported map. Each change is one undo step on that text only
+(`graphics.edit` does the same by layer and row, with `text`, `fontSize`, `fill` for the colour,
+`bold`, `italic`, `align` and `letterSpacing`). Once a text is selected, drag it by
 its text to move it, as one undo step (`points` on `graphics.edit`); a drag anywhere else, or on a
 text that isn't selected, pans the map as usual. A graphics layer that isn't **Selectable** keeps
 its texts from being picked, moved or edited. Closing the

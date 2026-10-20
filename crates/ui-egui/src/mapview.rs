@@ -7,6 +7,7 @@ use rustgis_engine::Tool;
 use rustgis_engine::geom::{Coord, Extent, geodesic_length_m, geodesic_ring_area_m2};
 use rustgis_engine::map::layout::TextAlign;
 use rustgis_engine::map::{Camera, Globe, Projection};
+use rustgis_engine::render::rustgis_tiles::Unfinished;
 use rustgis_engine::render::{PlacedLabel, Rendered, View};
 use serde_json::{Value, json};
 
@@ -159,6 +160,8 @@ pub struct MapView {
     tilt_drape: crate::tilt_drape::TiltDrape,
     /// Exact globe, tilted and tiled flat frames, composed off the UI thread.
     tilt_settle: crate::tilt_settle::TiltSettle<Key>,
+    /// The frame shown has tile pictures still to draw: drawn again.
+    filling: bool,
     /// Shooting stars around the globe.
     comets: crate::comets::Comets,
     /// GPU map backend: pipelines (built lazily from the render state), the uploaded scene,
@@ -228,6 +231,7 @@ impl Default for MapView {
             drape: Default::default(),
             tilt_drape: Default::default(),
             tilt_settle: Default::default(),
+            filling: false,
             label_map: Vec::new(),
             comets: Default::default(),
             gpu_renderer: None,
@@ -244,9 +248,10 @@ impl Default for MapView {
 }
 
 impl MapView {
-    /// Whether an exact frame is being composed off the UI thread.
+    /// Whether an exact frame is being composed off the UI thread, or the frame shown waits for
+    /// tile pictures still to be drawn.
     pub fn drawing(&self) -> bool {
-        self.tilt_settle.busy()
+        self.tilt_settle.busy() || self.filling
     }
 
     /// egui's wgpu render state from the host (`frame.wgpu_render_state()`), for the GPU map
@@ -595,10 +600,17 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         let same_view = |a: Key, b: Key| Key { tiles: b.tiles, sources: b.sources, ..a } == b;
         if let Some((k, done)) = app.map.tilt_settle.take() {
             app.session.map_mut().adopt_caches(&done.map);
+            // A frame of this view that couldn't be drawn isn't tried again: nothing is to fill.
+            if same_view(k, key) && done.rendered.is_none() {
+                app.map.filling = false;
+            }
             // One drawn before tiles or data arrived still shows; the next follows.
             if same_view(k, key)
                 && let Some(r) = done.rendered
             {
+                // With tile pictures still to draw, a draft: the next frame draws more.
+                app.map.filling = done.incomplete;
+                let k = Key { draft: k.draft || done.incomplete, ..k };
                 app.map.render_ms = done.ms;
                 app.map.motion_cost = full_cost(done.ms as f64, &done.view, (w, h), ppp);
                 match r {
@@ -717,7 +729,8 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 (w * GAP_SPAN, h * GAP_SPAN, motion_resolution(full, GAP_SPAN * GAP_SPAN))
             } else {
                 let k = motion_resolution(full, 1.0);
-                if stretch <= MOTION_STRETCH || time - app.map.last_render < motion_gap(full * k * k) {
+                // Tile pictures still to draw are drawn as a stretched frame is sharpened.
+                if (stretch <= MOTION_STRETCH && !app.map.filling) || time - app.map.last_render < motion_gap(full * k * k) {
                     return None;
                 }
                 (w, h, k)
@@ -741,6 +754,9 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         let t0 = web_time::Instant::now();
         let view = View { width: vw, height: vh, pixels_per_point: vppp as f64, camera: cam, sky: true };
         let mut rendered_gpu = false;
+        // Tile pictures already drawn stand in for missing ones mid-motion, and pictures are
+        // drawn a frame's worth at a time: then the frame is a draft, drawn again.
+        let mut lacks = None;
         if gpu_ok {
             if app.map.gpu_renderer.is_none()
                 && let Some(rs) = &app.map.render_state
@@ -751,7 +767,11 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             // here too: the CPU block below renders the frame instead.
             let out = match (&app.map.gpu_renderer, &app.map.render_state) {
                 (Some(_), Some(_)) => {
-                    rustgis_engine::render::render_backend(app.session.map_mut(), &view, rustgis_engine::render::Backend::Gpu)
+                    let (out, s) = drawing(interacting, || {
+                        rustgis_engine::render::render_backend(app.session.map_mut(), &view, rustgis_engine::render::Backend::Gpu)
+                    });
+                    lacks = s;
+                    out
                 }
                 _ => None,
             };
@@ -768,7 +788,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 other => other,
             };
             if let Some(rustgis_engine::render::RenderOutput::Gpu(scene)) = out {
-                let key = Key { draft: key.draft || motion.is_some(), ..key };
+                let key = Key { draft: key.draft || motion.is_some() || lacks.is_some(), ..key };
                 rendered_gpu = show_gpu_frame(app, scene, &view, key, time);
             }
         }
@@ -783,17 +803,26 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             }
             app.map.gpu_frame = None;
             let view = View { width: vw, height: vh, pixels_per_point: vppp as f64, camera: cam, sky: true };
-            if let Some(r) = rustgis_engine::render::render(app.session.map_mut(), &view) {
+            let (r, s) = drawing(interacting, || rustgis_engine::render::render(app.session.map_mut(), &view));
+            lacks = s;
+            if let Some(r) = r {
                 // Mid-motion the frame stands in for the real one, which follows once it settles.
-                let key = Key { draft: key.draft || motion.is_some(), ..key };
+                let key = Key { draft: key.draft || motion.is_some() || lacks.is_some(), ..key };
                 show_frame(app, ui.ctx(), r, &view, (w, h), key, time, globe_view);
             }
         }
+        app.map.filling = lacks == Some(Unfinished::Next);
         app.map.render_ms = t0.elapsed().as_millis() as u64;
         let view = View { width: vw, height: vh, pixels_per_point: vppp as f64, camera: cam, sky: true };
         app.map.motion_cost = full_cost(t0.elapsed().as_secs_f64() * 1000.0, &view, (w, h), ppp);
         if motion.is_some() {
             ui.ctx().request_repaint();
+        } else if lacks == Some(Unfinished::Next) {
+            // The next pictures.
+            ui.ctx().request_repaint();
+        } else if lacks.is_some() {
+            // Once the motion has settled, for the exact frame.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
         } else if app.map.camera_moved {
             app.session.record_extent();
             app.map.camera_moved = false;
@@ -1016,6 +1045,13 @@ fn full_cost(ms: f64, view: &View, (w, h): (f64, f64), ppp: f32) -> f64 {
 fn motion_gap(ms: f64) -> f64 {
     let s = ms.min(300.0) / 1000.0;
     (if ms <= 60.0 { s * 1.5 } else { s * 3.0 }).max(1.0 / 30.0)
+}
+
+/// Draws with `f`, the tile pictures the map lacks drawn at the pace of a map `moving` or not
+/// (see `rustgis_tiles::Pace`); and what the frame still lacks.
+fn drawing<R>(moving: bool, f: impl FnOnce() -> R) -> (R, Option<Unfinished>) {
+    use rustgis_engine::render::rustgis_tiles::{Pace, paced};
+    paced(if moving { Pace::Moving } else { Pace::Settling }, f)
 }
 
 /// Where the map's last frame (drawn for `tex_camera`) lies on screen for the camera `cam`.

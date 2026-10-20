@@ -142,7 +142,11 @@ pub fn install_fonts(
     let f = rustgis_engine::render::fonts::ui_fonts();
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert("ui".into(), Arc::new(FontData::from_owned(f.regular.clone())));
-    fonts.font_data.insert("ui-semibold".into(), Arc::new(FontData::from_owned(f.semibold.clone())));
+    // Heavier where the face is variable (macOS's system font is one file for every weight, #591),
+    // as exports draw it; a face with no weight axis ignores it.
+    let weight = egui::epaint::text::VariationCoords::new([(b"wght", rustgis_engine::render::fonts::SEMIBOLD_WEIGHT)]);
+    let semibold = FontData::from_owned(f.semibold.clone()).tweak(egui::FontTweak { coords: weight, ..Default::default() });
+    fonts.font_data.insert("ui-semibold".into(), Arc::new(semibold));
     if let Some(prop) = fonts.families.get_mut(&FontFamily::Proportional) {
         prop.insert(0, "ui".into());
         // egui's Hack face has the Georgian letters that Ubuntu Light and Noto Sans lack.

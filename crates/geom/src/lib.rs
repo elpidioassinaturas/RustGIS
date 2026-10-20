@@ -5,9 +5,11 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod body;
+pub mod sinusoidal;
 pub mod triangulate;
 
 pub use body::{BODIES, Body};
+pub use sinusoidal::Sinusoidal;
 
 use serde::{Deserialize, Serialize};
 
@@ -321,10 +323,10 @@ pub fn format_lonlat(c: Coord) -> String {
 /// Formats a lon/lat pair as degrees-minutes-seconds.
 pub fn format_dms(c: Coord) -> String {
     fn dms(v: f64) -> String {
-        let a = v.abs();
-        let d = a.floor();
-        let m = ((a - d) * 60.0).floor();
-        let s = (a - d - m / 60.0) * 3600.0;
+        let tenths = (v.abs() * 36_000.0).round();
+        let d = (tenths / 36_000.0).floor();
+        let m = ((tenths % 36_000.0) / 600.0).floor();
+        let s = (tenths % 600.0) / 10.0;
         format!("{d:.0}°{m:02.0}′{s:04.1}″")
     }
     let ew = if c.x < 0.0 { 'W' } else { 'E' };
@@ -412,6 +414,14 @@ mod tests {
         assert_eq!(nice_distance(2_400.0), 2_000.0);
         assert_eq!(nice_distance(0.0), 0.0);
         assert_eq!(nice_distance(f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn dms_carries_rounded_seconds() {
+        assert_eq!(format_dms(Coord::new(12.5, -45.25)), "12°30′00.0″ E  45°15′00.0″ S");
+        // 59.96″ rounds to 60.0″, which carries into the minutes and then the degrees.
+        assert_eq!(format_dms(Coord::new(10.99999, -45.99999)), "11°00′00.0″ E  46°00′00.0″ S");
+        assert_eq!(format_dms(Coord::new(-0.5 - 59.97 / 3600.0, 0.0)), "0°31′00.0″ W  0°00′00.0″ N");
     }
 
     #[test]
