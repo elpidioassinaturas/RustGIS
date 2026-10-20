@@ -339,15 +339,22 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 without += 1;
                 continue;
             };
-            let this = (a.scale.unwrap_or(1.0), a.offset.unwrap_or(0.0));
-            scales_differ |= scale.is_some_and(|s| s != this);
-            scale.get_or_insert(this);
             let key = i.tile.clone().unwrap_or_else(|| match i.bbox {
                 Some([w, so, e, n]) => format!("{w:.2},{so:.2},{e:.2},{n:.2}"),
                 None => i.id.clone(),
             });
             let d = (ms / 86_400_000.0).floor() as i64;
-            tiles.entry(key).or_default().entry(d).or_insert_with(|| a.href.clone());
+            let by_day = tiles.entry(key).or_default();
+            if by_day.contains_key(&d) {
+                // A tile and day already have a file; this one is left out, its scale too.
+                continue;
+            }
+            // The file's address without a fragment of its own, so the range look is the only one.
+            by_day.insert(d, a.href.split('#').next().unwrap_or(&a.href).to_string());
+            // No scale or offset in the metadata reads as 1 and 0, the values as stored.
+            let this = (a.scale.unwrap_or(1.0), a.offset.unwrap_or(0.0));
+            scales_differ |= scale.is_some_and(|s| s != this);
+            scale.get_or_insert(this);
         }
         if tiles.is_empty() {
             return Err(format!("no item of {collection} has an asset {asset}"));

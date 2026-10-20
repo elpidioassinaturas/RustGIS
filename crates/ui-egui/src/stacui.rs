@@ -825,11 +825,13 @@ fn cube_row(app: &mut RustGisApp, ui: &mut egui::Ui, busy: bool) {
         return;
     }
     let (first, last) = (days.first().map(|d| d.to_string()).unwrap_or_default(), days.last().map(|d| d.to_string()).unwrap_or_default());
-    let keys: Vec<String> = st
-        .items
-        .first()
-        .map(|i| i.assets.iter().filter(|a| a.media_type.contains("tiff")).map(|a| a.key.clone()).collect())
-        .unwrap_or_default();
+    // The GeoTIFF bands any item has, in the order first met.
+    let mut keys: Vec<String> = Vec::new();
+    for a in st.items.iter().flat_map(|i| &i.assets).filter(|a| a.media_type.contains("tiff")) {
+        if !keys.contains(&a.key) {
+            keys.push(a.key.clone());
+        }
+    }
     if keys.is_empty() {
         return;
     }
