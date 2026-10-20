@@ -260,7 +260,7 @@ fn tile_features(s: &Session, lon: f64, lat: f64, tol_px: f64, first_layer: bool
     let mut out = Vec::new();
     for t in &map.tiles {
         let data = matches!(t.kind, TileKind::PmTiles | TileKind::MbTiles | TileKind::Vector) && (t.id.is_empty() || t.overlay);
-        if !data || !t.visible || t.opacity <= 0.0 {
+        if !data || !t.draws() || t.opacity <= 0.0 {
             continue;
         }
         let picked = draw::pick(&rustgis_render::tile_spec(t), at.x, at.y, m_per_px, tol_px as f32, limit - out.len());

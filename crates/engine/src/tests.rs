@@ -6173,6 +6173,20 @@ fn a_stac_data_cube_on_the_time_slider() {
         )
         .unwrap_err();
     assert!(e.contains("same scale and offset"), "{e}");
+    // Files behind signed addresses (Planetary Computer's) are refused before anything is added.
+    let signed = r#"{"type": "Feature", "id": "pc1", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+        "properties": {"datetime": "2024-01-01T00:00:00Z", "bdc:tiles": ["S"]},
+        "assets": {"NDVI": {"href": "https://sentinel2l2a01.blob.core.windows.net/sentinel2-l2/a.tif"}}}"#;
+    let signed_api = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{signed}]}}"#))], 2);
+    let (tiles, layers) = (s.map().tiles.len(), s.map().layers.len());
+    let e = s
+        .run(
+            "stac.addCube",
+            &json!({"url": format!("{signed_api}/v1"), "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31"}),
+        )
+        .unwrap_err();
+    assert!(e.contains("signed addresses"), "{e}");
+    assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
 }
 
 /// A cloud-optimised GeoTIFF by its address is read in place: its header, then only the tiles a

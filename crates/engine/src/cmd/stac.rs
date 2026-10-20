@@ -349,6 +349,13 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         if tiles.is_empty() {
             return Err(format!("no item of {collection} has an asset {asset}"));
         }
+        // Files reached through signed addresses (Planetary Computer's) expire within hours, so a
+        // cube of them couldn't be kept in a project or read a day later.
+        if tiles.values().flat_map(|by_day| by_day.values()).any(|href| stac::needs_signing(href)) {
+            return Err(format!(
+                "{collection}'s files are reached through signed addresses that expire, so they can't make a data cube kept in the project: use an API with public files (Earth Search, the Brazil Data Cube)"
+            ));
+        }
         // One range can't hold if the files store their values alike no longer (a processing
         // change of scale or offset partway).
         if range.is_some() && scales_differ {
