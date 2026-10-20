@@ -10,10 +10,34 @@ use rustgis_geom::{Coord, lonlat_to_merc, merc_to_lonlat};
 use serde::{Deserialize, Serialize};
 
 /// The PROJ definition of an EPSG code: from the `crs-definitions` table, or from the built-in
-/// table of the codes it lacks (EPSG 9020–20003, [`super::epsg_gap`]). `None` for a code that is
-/// neither.
+/// table of the codes it lacks (EPSG 9020–20003 and newer ones such as Equi7's,
+/// [`super::epsg_gap`]). `None` for a code that is neither, or whose projection this build lacks
+/// (an azimuthal equidistant one in the browser: see [`aeqd_supported`]).
 pub fn epsg_proj4(code: u16) -> Option<&'static str> {
+    listed_epsg(code).filter(|d| aeqd_supported() || !d.contains("+proj=aeqd"))
+}
+
+fn listed_epsg(code: u16) -> Option<&'static str> {
     crs_definitions::from_code(code).map(|d| d.proj4).or_else(|| super::epsg_gap::proj4(code))
+}
+
+/// Whether proj4rs' azimuthal equidistant projection (`aeqd`, Equi7's) is in this build. The
+/// browser build leaves it out (Cargo.toml); asked of proj4rs itself, as rustgis-map's
+/// `local_views_supported` does, so the lookup and the tests stay in step with the build.
+pub fn aeqd_supported() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| proj4rs::Proj::from_proj_string("+proj=aeqd +lat_0=0 +lon_0=0 +datum=WGS84 +units=m +no_defs").is_ok())
+}
+
+/// Why a file's EPSG code can't be used: a code the desktop app knows but this build can't project
+/// (Equi7's azimuthal equidistant ones in the web app) says so, rather than that it's unknown.
+pub fn unusable_epsg(code: u32) -> String {
+    let elsewhere = u16::try_from(code).ok().and_then(listed_epsg).is_some_and(|d| d.contains("+proj=aeqd")) && !aeqd_supported();
+    if elsewhere {
+        format!("the coordinate system EPSG:{code} (azimuthal equidistant) can't be used in the web app: open the file in the desktop app")
+    } else {
+        format!("the coordinate system EPSG:{code} isn't supported")
+    }
 }
 
 /// The PROJ definition of one of Esri's projected coordinate systems (`ESRI:102033`, South
@@ -103,10 +127,14 @@ fn custom_table() -> &'static std::sync::Mutex<Vec<std::sync::Arc<CustomCrs>>> {
 }
 
 impl Crs {
-    /// A file's own coordinate system: checked (its PROJ definition must parse) and added to the
-    /// run's table, once per definition.
+    /// A file's own coordinate system: checked (its PROJ definition must parse, or be a
+    /// sinusoidal one RustGIS computes) and added to the run's table, once per definition.
     pub fn custom(def: CustomCrs) -> Result<Crs, String> {
-        proj4rs::Proj::from_proj_string(&def.proj4).map_err(|e| format!("{}: {e}", def.proj4))?;
+        let checked = match rustgis_geom::Sinusoidal::from_proj4(&def.proj4) {
+            Some(sinu) => sinu.map(|_| ()),
+            None => proj4rs::Proj::from_proj_string(&def.proj4).map(|_| ()).map_err(|e| e.to_string()),
+        };
+        checked.map_err(|e| format!("{}: {e}", def.proj4))?;
         let mut t = custom_table().lock().unwrap_or_else(|e| e.into_inner());
         let index = |i: usize| u32::try_from(i).map(Crs::Custom).map_err(|_| "too many coordinate systems defined by files".to_string());
         if let Some(i) = t.iter().position(|d| d.proj4 == def.proj4) {
@@ -207,6 +235,10 @@ impl Crs {
                 }
                 Crs::Custom(_) => {
                     let def = self.custom_def().ok_or("an unknown custom coordinate system")?;
+                    // Sinusoidal (MODIS), which proj4rs lacks, is computed here.
+                    if let Some(sinu) = rustgis_geom::Sinusoidal::from_proj4(&def.proj4) {
+                        return Ok(Transformer { kind: Kind::Sinusoidal(sinu.map_err(|e| format!("{}: {e}", def.label))?) });
+                    }
                     let native = proj4rs::Proj::from_proj_string(&def.proj4).map_err(|e| format!("{}: {e}", def.label))?;
                     let wgs84 = proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| e.to_string())?;
                     Kind::Proj { native: Box::new(native), wgs84: Box::new(wgs84), geographic: self.is_geographic() }
@@ -221,6 +253,7 @@ enum Kind {
     LonLat,
     Merc,
     Proj { native: Box<proj4rs::Proj>, wgs84: Box<proj4rs::Proj>, geographic: bool },
+    Sinusoidal(rustgis_geom::Sinusoidal),
 }
 
 /// Converts between a raster's coordinates and WGS 84 longitude/latitude.
@@ -235,6 +268,7 @@ impl std::fmt::Debug for Transformer {
             Kind::LonLat => "lonlat",
             Kind::Merc => "mercator",
             Kind::Proj { .. } => "proj",
+            Kind::Sinusoidal(_) => "sinusoidal",
         };
         write!(f, "Transformer({k})")
     }
@@ -251,6 +285,7 @@ impl Transformer {
                 proj4rs::transform::transform(native, wgs84, &mut p).ok()?;
                 Coord::new(p.0.to_degrees(), p.1.to_degrees())
             }
+            Kind::Sinusoidal(s) => s.inverse(c)?,
         };
         out.is_finite().then_some(out)
     }
@@ -265,6 +300,7 @@ impl Transformer {
                 proj4rs::transform::transform(wgs84, native, &mut p).ok()?;
                 if *geographic { Coord::new(p.0.to_degrees(), p.1.to_degrees()) } else { Coord::new(p.0, p.1) }
             }
+            Kind::Sinusoidal(s) => s.forward(c)?,
         };
         out.is_finite().then_some(out)
     }
@@ -347,6 +383,23 @@ mod tests {
         // EPSG:10622 (an orthographic) has no implementation, so it is left out rather than
         // listed and refused.
         assert_eq!(Crs::from_epsg(10622), None);
+        // The Equi7 grids, above the gap (azimuthal equidistant on WGS 84), against PROJ 9's
+        // cs2cs: a capital, or McMurdo, in each continent's system.
+        for (code, lonlat, xy) in [
+            (27701, (36.82, -1.29), (7334614.4467, 4929069.6856)),
+            (27702, (166.67, -77.85), (4027107.7883, 2081695.0307)),
+            (27703, (116.40, 39.90), (6237986.3076, 4287997.5336)),
+            (27704, (16.37, 48.21), (5270556.2083, 1618120.6818)),
+            (27705, (-77.04, 38.89), (10035658.3291, 3647233.1)),
+            (27706, (151.21, -33.87), (8823663.5437, 5930910.0748)),
+            (27707, (-47.88, -15.79), (8608845.8731, 5356292.7056)),
+        ] {
+            check(code, lonlat, xy, 0.01);
+        }
+        assert_eq!(Crs::parse("EPSG:27707"), Ok(Crs::Epsg(27707)));
+        // On the desktop azimuthal equidistant is there; a code that doesn't exist is unknown.
+        assert!(aeqd_supported());
+        assert_eq!(unusable_epsg(28707), "the coordinate system EPSG:28707 isn't supported");
     }
 
     /// The ESRI table (opengeos/RustGIS#213) is in order and holds only projected systems on Earth.
@@ -381,6 +434,12 @@ mod tests {
         }
         for &(code, def) in defs {
             assert!(crs_definitions::from_code(code).is_none(), "crs-definitions has EPSG:{code} now: drop it from the table");
+            // A build without azimuthal equidistant leaves Equi7's out, and says why.
+            if def.contains("+proj=aeqd") && !aeqd_supported() {
+                assert_eq!(epsg_proj4(code), None);
+                assert!(unusable_epsg(u32::from(code)).contains("web app"));
+                continue;
+            }
             assert_eq!(epsg_proj4(code), Some(def));
             let crs = Crs::from_epsg(u32::from(code)).unwrap_or_else(|| panic!("EPSG:{code}"));
             assert_eq!(crs.is_geographic(), def.contains("+proj=longlat"), "EPSG:{code}");

@@ -278,6 +278,11 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
   orthomosaic, or elevation rasters into a surface model that exports as a 3D mesh (OBJ).
 - **Georeference** places a raster from control points (column, row, longitude, latitude) or
   stretches it over the map view.
+- **Control Point Fit** (`raster.gcpFit`) fits a similarity, affine, projective, second- or
+  third-order polynomial, or thin plate spline transform to control points and reports how well
+  it holds: each point's residual in pixels and map units, the RMSE, and each point's error when
+  it is left out of the fit. With `compare` it fits them all and recommends the simplest whose
+  leave-one-out error is close to the best.
 - **Change Detection** (difference, ratio, percent), **Spectral Analysis** (every band at a
   pixel), **Indices** (NDVI, NDWI, SAVI, NBR, NDBI, EVI), **Process** (clip to the view, to a
   box, or to a polygon layer's selected or all polygons, with the cells outside them no-data;

@@ -128,7 +128,7 @@ pub fn header(app: &mut RustGisApp, ui: &mut Ui) {
                     "",
                     app.session
                         .undo_label()
-                        .map(|l| crate::i18n::fmt("Undo {action}", &[("action", tl!(l))]))
+                        .map(|l| crate::i18n::fmt("Undo {action}", &[("action", tl_raw!(l))]))
                         .unwrap_or(tl!("Undo").into())
                         .as_str(),
                     "edit.undo",
@@ -142,7 +142,7 @@ pub fn header(app: &mut RustGisApp, ui: &mut Ui) {
                     "",
                     app.session
                         .redo_label()
-                        .map(|l| crate::i18n::fmt("Redo {action}", &[("action", tl!(l))]))
+                        .map(|l| crate::i18n::fmt("Redo {action}", &[("action", tl_raw!(l))]))
                         .unwrap_or(tl!("Redo").into())
                         .as_str(),
                     "edit.redo",
@@ -500,6 +500,20 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
             if element && i.consume_key(Modifiers::NONE, Key::Backspace) {
                 run.push(("edit.delete".into(), Value::Null));
             }
+            // Arrow keys nudge the selected layout element, further with Shift; held, it keeps
+            // going. Shift first: a plain arrow's pattern takes Shift-arrows too.
+            if element {
+                use crate::layoutview::{NUDGE_FAST_MM, NUDGE_MM};
+                for (key, dx, dy) in
+                    [(Key::ArrowLeft, -1.0, 0.0), (Key::ArrowRight, 1.0, 0.0), (Key::ArrowUp, 0.0, -1.0), (Key::ArrowDown, 0.0, 1.0)]
+                {
+                    for (m, step) in [(Modifiers::SHIFT, NUDGE_FAST_MM), (Modifiers::NONE, NUDGE_MM)] {
+                        for _ in 0..i.count_and_consume_key(m, key) {
+                            run.push(("ui.layoutNudge".into(), json!({"dx": dx * step, "dy": dy * step})));
+                        }
+                    }
+                }
+            }
             // Clipboard keys arrive as events, not key presses.
             for e in &i.events {
                 match e {
@@ -520,6 +534,20 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
                 app.ui.command_search = None;
                 continue;
             }
+        }
+        // An arrow key nudged the selected layout element (unless it's locked): a held key, or
+        // taps close together, are one step to undo.
+        if id == "ui.layoutNudge" {
+            let (dx, dy) = (p["dx"].as_f64().unwrap_or(0.0), p["dy"].as_f64().unwrap_or(0.0));
+            if let (Some(li), Some(el)) = (app.session.active_layout, app.layout.selected)
+                && let Some((x, y)) =
+                    app.session.project.layouts.get(li).and_then(|l| l.element(el)).filter(|e| !e.locked).map(|e| (e.x + dx, e.y + dy))
+            {
+                let key = app.layout.nudge_key(li, el, ctx.input(|i| i.time));
+                app.session.merge_undo(key);
+                let _ = app.run("layout.update", json!({"layout": li, "element": el, "x": x, "y": y}));
+            }
+            continue;
         }
         // Ctrl+D (Cmd+D on a Mac) duplicates the selected layout element and selects the copy.
         if id == "layout.duplicateElement" {
@@ -550,7 +578,7 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
             if kept {
                 let text = crate::i18n::fmt(
                     "{command}: {reason}",
-                    &[("command", tl!("Delete Element")), ("reason", crate::layoutview::locked_delete())],
+                    &[("command", tl_raw!("Delete Element")), ("reason", crate::layoutview::locked_delete())],
                 );
                 if !app.map.toasts.iter().any(|t| t.text == text) {
                     app.session.notify(text, true);
@@ -573,7 +601,7 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
             && let Some(why) = why_disabled(app, id)
         {
             let label = app.session.registry.get(id).map_or(id, |s| s.label);
-            let text = crate::i18n::fmt("{command}: {reason}", &[("command", tl!(label)), ("reason", tl!(why))]);
+            let text = crate::i18n::fmt("{command}: {reason}", &[("command", tl_raw!(label)), ("reason", tl_raw!(why))]);
             // Once while it shows: a held key repeats, and each repeat comes here.
             if !app.map.toasts.iter().any(|t| t.text == text) {
                 app.session.notify(text, true);
@@ -602,6 +630,7 @@ pub(crate) const UI_COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.mcpRelay", "MCP Relay", "Help › Help"),
     ("ui.pane.geoprocessing", "Tools Pane", "View › Windows"),
     ("ui.pane.symbology", "Symbology Pane", "Style › Drawing"),
+    ("ui.pane.labeling", "Labeling Pane", "View › Windows"),
     ("ui.pane.assistant", "AI Assistant", "Analyze › AI"),
     ("ui.pane.sql", "SQL Pane", "Analyze › Workflows"),
     ("ui.pane.directions", "Directions", "Home › Navigate"),
@@ -661,7 +690,7 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
             {
                 hits.push((
                     format!("gp:{}", tool.id),
-                    crate::i18n::fmt("{name} (tool)", &[("name", tl!(tool.name))]),
+                    crate::i18n::fmt("{name} (tool)", &[("name", tl_raw!(tool.name))]),
                     crate::i18n::location(tool.toolbox),
                 ));
             }
@@ -742,7 +771,7 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
                 // The scroll area would clip a fill wider than the row.
                 let mut resp = row_button(ui, on, b, 0.0);
                 if let Some(why) = why_disabled(app, id) {
-                    resp = resp.on_disabled_hover_text(crate::i18n::fmt("Unavailable: {reason}", &[("reason", tl!(why))]));
+                    resp = resp.on_disabled_hover_text(crate::i18n::fmt("Unavailable: {reason}", &[("reason", tl_raw!(why))]));
                 }
                 let enter = on && first && ui.input(|i| i.key_pressed(Key::Enter));
                 first &= !on;
@@ -801,11 +830,22 @@ pub fn about(app: &mut RustGisApp, ctx: &egui::Context) {
                 });
             });
             ui.add_space(8.0);
-            ui.label(tl!("A fast, free and open-source GIS written in pure Rust, for mapping, analyzing and sharing geospatial data on the desktop and in the browser."));
+            let t = Tokens::get(ctx);
+            crate::i18n::paragraph(
+                ui,
+                "A fast, free and open-source GIS written in pure Rust, for mapping, analyzing and sharing geospatial data on the desktop and in the browser.",
+                regular(12.5),
+                t.text,
+            );
             ui.add_space(4.0);
             project_links(ui);
             ui.add_space(6.0);
-            ui.label(egui::RichText::new(tl!("Sample data: Natural Earth (public domain). Licensed under Apache-2.0.")).small().weak());
+            crate::i18n::paragraph(
+                ui,
+                "Sample data: Natural Earth (public domain). Licensed under Apache-2.0.",
+                regular(10.5),
+                ui.visuals().weak_text_color(),
+            );
             let (fonts_from, _) = (rustgis_engine::render::fonts::ui_fonts().source.clone(), ());
             ui.label(egui::RichText::new(crate::i18n::fmt("Interface font: {font}", &[("font", &fonts_from)])).small().weak());
         });

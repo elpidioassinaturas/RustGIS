@@ -236,6 +236,10 @@ jobs:
           "$GITHUB_WORKSPACE"/dist/*.AppImage --appimage-extract > /dev/null
           squashfs-root/usr/bin/rustgis-cli logo logo.png --size 64
           test -x squashfs-root/AppRun
+          # The embedded update information points at the .zsync published beside it.
+          "$GITHUB_WORKSPACE"/dist/*.AppImage --appimage-updateinformation | tee update.txt
+          grep -q "^gh-releases-zsync|.*|latest|RustGIS-\*-linux-$(uname -m).AppImage.zsync$" update.txt
+          test -s "$GITHUB_WORKSPACE"/dist/*.AppImage.zsync
           # The GUI cannot start on a headless runner: check that its libraries resolve.
           if ldd squashfs-root/usr/bin/rustgis | grep 'not found'; then exit 1; fi
           rm -rf squashfs-root

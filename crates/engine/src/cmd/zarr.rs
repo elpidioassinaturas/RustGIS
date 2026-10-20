@@ -368,8 +368,8 @@ fn read_ahead(zt: ZarrTime, i: usize) {
     let ids: Vec<String> = keys.iter().map(|(_, k)| k.clone()).collect();
     let spawned = std::thread::Builder::new().name("zarr-read-ahead".into()).spawn(move || {
         let _done = Done(keys.iter().map(|(_, k)| k.clone()).collect());
-        for (n, (j, _)) in keys.iter().enumerate() {
-            let ok = read_step(&zt, *j).is_ok();
+        for (n, (j, k)) in keys.iter().enumerate() {
+            let ok = read_step(&zt, *j, k.clone()).is_ok();
             release(&keys[n..=n]);
             if !ok {
                 break;
@@ -395,15 +395,17 @@ fn wait_for_read_ahead(key: &str) {
 /// Step `i`, once a read ahead of it has finished, so it isn't fetched twice.
 #[cfg(not(target_arch = "wasm32"))]
 fn read_waiting(zt: &ZarrTime, i: usize) -> Result<std::sync::Arc<raster::Raster>, String> {
-    wait_for_read_ahead(&slice_key(zt, i));
-    read_step(zt, i)
+    // One key for the wait and the read: a store rewritten between them is read once.
+    let key = slice_key(zt, i);
+    wait_for_read_ahead(&key);
+    read_step(zt, i, key)
 }
 
-/// Step `i` of a following layer's variable, from the kept slices or read now.
+/// Step `i` of a following layer's variable, kept as `key` (its [`slice_key`]), from the kept
+/// slices or read now.
 #[cfg(not(target_arch = "wasm32"))]
-fn read_step(zt: &ZarrTime, i: usize) -> Result<std::sync::Arc<raster::Raster>, String> {
+fn read_step(zt: &ZarrTime, i: usize, key: String) -> Result<std::sync::Arc<raster::Raster>, String> {
     let sel = zt.selection(i);
-    let key = slice_key(zt, i);
     if let Some((_, r)) = slices().lock().ok().and_then(|c| c.iter().find(|(k, _)| *k == key).cloned()) {
         return Ok(r);
     }
@@ -575,7 +577,7 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         zt.repair();
         // The first step read before the slider is touched, so a store that can't be read leaves
         // the map as it was.
-        let first = read_step(&zt, 0).map_err(|e| format!("{root}: {e}"))?;
+        let first = read_step(&zt, 0, slice_key(&zt, 0)).map_err(|e| format!("{root}: {e}"))?;
         // The slider, on over the variable's dates when it is off.
         if s.map().time.is_none() {
             let dates: Vec<Value> = zt.dates.iter().map(|d| serde_json::json!(d)).collect();
@@ -585,7 +587,7 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         let want = zt.step_for(window);
         // The first slice the layer shows sets its style; with no step in the window, the first step's.
         let r = match want {
-            Some(i) if i != 0 => read_step(&zt, i).map_err(|e| format!("{root}: {e}"))?,
+            Some(i) if i != 0 => read_step(&zt, i, slice_key(&zt, i)).map_err(|e| format!("{root}: {e}"))?,
             _ => first,
         };
         let mut layer = RasterLayer::from_path((*r).clone(), root.clone());

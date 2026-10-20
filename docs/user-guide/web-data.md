@@ -258,6 +258,14 @@ and with commands `service.add` takes `"time"`:
 rustgis-cli run --cmd 'service.add={"url":"https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/1.0.0/WMTSCapabilities.xml","layer":"MODIS_Terra_CorrectedReflectance_TrueColor","time":"2024-06-01"}' --cmd 'share.exportMap={"path":"gibs.png"}'
 ```
 
+A service may name its time instead of dating it: swisstopo's layers on
+[geo.admin.ch](https://docs.geo.admin.ch/visualize-data/wmts.html) are drawn at `current`, their
+default, so they need no `"time"`:
+
+```sh
+rustgis-cli run --cmd 'service.add={"url":"https://wmts.geo.admin.ch/EPSG/3857/1.0.0/WMTSCapabilities.xml","layer":"ch.swisstopo.pixelkarte-farbe"}' --cmd 'share.exportMap={"path":"swisstopo.png"}'
+```
+
 ### NASA Earthaccess
 
 **Home › Web Data › NASA Earthaccess…** searches [NASA Earthdata](https://www.earthdata.nasa.gov)

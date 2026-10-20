@@ -978,6 +978,19 @@ pub fn paint(painter: &Painter, r: Rect, name: &str, ink: Color32, accent: Color
             p.arc(12.0, 11.0, 4.5, 180.0, 360.0, 1.8, ink);
             p.circle(12.0, 16.0, 1.4, Some(ink), None);
         }
+        "label_properties" => {
+            // The label with a gear at its lower right: its settings (the Labeling pane).
+            paint(painter, r, "label", ink, accent);
+            // At the corner, clear of the text: the teeth are turned so that a gap, not a tooth,
+            // faces the "c", and only the body reaches towards it.
+            let (cx, cy) = (18.8, 18.8);
+            for i in 0..8 {
+                let a = (i as f32 * 45.0 + 22.5).to_radians();
+                p.line(&[(cx + 3.0 * a.cos(), cy + 3.0 * a.sin()), (cx + 5.0 * a.cos(), cy + 5.0 * a.sin())], 1.9, ink);
+            }
+            p.circle(cx, cy, 3.6, Some(accent), Some((1.0, ink)));
+            p.circle(cx, cy, 1.25, Some(Color32::WHITE), None);
+        }
         "label_pause" => {
             paint(painter, r, "label", ink, accent);
             p.circle(18.0, 18.0, 4.5, Some(amber), None);
@@ -1008,6 +1021,10 @@ pub fn paint(painter: &Painter, r: Rect, name: &str, ink: Color32, accent: Color
         }
         "g_line" => {
             p.line(&[(3.0, 19.0), (10.0, 8.0), (15.0, 14.0), (21.0, 5.0)], 1.8, ink);
+        }
+        "g_arrow" => {
+            p.line(&[(4.0, 20.0), (16.0, 8.0)], 1.8, ink);
+            p.fill(&[(21.0, 3.0), (11.5, 6.5), (17.5, 12.5)], ink);
         }
         "g_curve" => {
             let pts: Vec<(f32, f32)> = (0..=20)
@@ -1162,6 +1179,7 @@ pub const ALL: &[&str] = &[
     "help",
     "label",
     "label_off",
+    "label_properties",
     "new_map",
     "map",
     "new_layout",

@@ -281,6 +281,7 @@ impl Conn {
 /// offers none, said in the second value), and sets the session read only with a statement
 /// timeout.
 fn open_client(config: &Config, password: Option<&str>) -> Result<((mysql::Conn, Server), bool)> {
+    super::tls_provider();
     let base = mysql::OptsBuilder::new()
         .ip_or_hostname(Some(config.host.clone()))
         .tcp_port(config.port)

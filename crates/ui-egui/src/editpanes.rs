@@ -52,7 +52,7 @@ fn number(app: &mut RustGisApp, text: &str, what: &str) -> Option<f64> {
     match text.trim().parse::<f64>() {
         Ok(v) if v.is_finite() => Some(v),
         _ => {
-            app.forms.message = Some((crate::i18n::fmt("{what} must be a number", &[("what", tl!(what))]), true));
+            app.forms.message = Some((crate::i18n::fmt("{what} must be a number", &[("what", tl_raw!(what))]), true));
             None
         }
     }

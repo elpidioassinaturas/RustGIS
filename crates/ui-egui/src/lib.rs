@@ -31,6 +31,7 @@ mod globe_drape;
 mod graphicformat;
 pub mod icons;
 mod keymap;
+mod labelpane;
 mod layoutview;
 #[cfg(not(target_arch = "wasm32"))]
 mod localagents;
@@ -406,6 +407,8 @@ pub enum RightPane {
     Bookmarks,
     /// The selected layout element's properties (#516).
     Format,
+    /// The selected feature layer's labels (#617).
+    Labeling,
     /// A Home › Web Data service: the one `UiState::web_data` names.
     WebData,
     /// A plugin's panel: the one `UiState::plugin_panel` names.
@@ -725,12 +728,13 @@ pub struct RustGisApp {
     /// to give its wake callback yet: `logic` installs the wake as soon as a context exists.
     #[cfg(not(target_arch = "wasm32"))]
     relay_wake_pending: bool,
-    /// Extra font faces installed with the interface fonts: (name, face, region). The current
-    /// language's region comes right after the interface font, so its glyph shapes win; the others
-    /// are last-resort fallbacks. Faces are shared, so reinstalling copies nothing.
-    extra_fonts: Vec<(String, std::sync::Arc<egui::FontData>, Option<rustgis_engine::render::fonts::CjkRegion>)>,
-    /// The CJK region whose face was put first at the last font install.
-    installed_region: Option<rustgis_engine::render::fonts::CjkRegion>,
+    /// Extra font faces installed with the interface fonts: (name, face, script). The current
+    /// language's face comes right after the interface font (before it for Arabic script), so its
+    /// glyph shapes win; the others are last-resort fallbacks. Faces are shared, so reinstalling
+    /// copies nothing.
+    extra_fonts: Vec<(String, std::sync::Arc<egui::FontData>, Option<rustgis_engine::render::fonts::ScriptFont>)>,
+    /// The script whose face was put first at the last font install.
+    installed_region: Option<rustgis_engine::render::fonts::ScriptFont>,
     fonts_dirty: bool,
     fonts_requested: Vec<String>,
     /// Downloads that failed; cleared when a language is picked, which retries them.
@@ -901,44 +905,45 @@ impl RustGisApp {
         }
     }
 
-    /// The CJK region of the current language, if any.
-    fn current_region(&self) -> Option<rustgis_engine::render::fonts::CjkRegion> {
+    /// The script face the current language needs, if any.
+    fn current_region(&self) -> Option<rustgis_engine::render::fonts::ScriptFont> {
         Self::script_region(self.chosen_lang().script())
     }
 
-    /// The CJK font region a script needs, if any.
-    fn script_region(script: i18n::Script) -> Option<rustgis_engine::render::fonts::CjkRegion> {
-        use rustgis_engine::render::fonts::CjkRegion;
+    /// The face a script needs beyond the interface fonts, if any.
+    fn script_region(script: i18n::Script) -> Option<rustgis_engine::render::fonts::ScriptFont> {
+        use rustgis_engine::render::fonts::{CjkRegion, ScriptFont};
         match script {
-            i18n::Script::Cjk(i18n::CjkFont::SimplifiedChinese) => Some(CjkRegion::SimplifiedChinese),
-            i18n::Script::Cjk(i18n::CjkFont::Japanese) => Some(CjkRegion::Japanese),
-            i18n::Script::Cjk(i18n::CjkFont::Korean) => Some(CjkRegion::Korean),
+            i18n::Script::Cjk(i18n::CjkFont::SimplifiedChinese) => Some(ScriptFont::Cjk(CjkRegion::SimplifiedChinese)),
+            i18n::Script::Cjk(i18n::CjkFont::Japanese) => Some(ScriptFont::Cjk(CjkRegion::Japanese)),
+            i18n::Script::Cjk(i18n::CjkFont::Korean) => Some(ScriptFont::Cjk(CjkRegion::Korean)),
+            i18n::Script::Arabic => Some(ScriptFont::Arabic),
             i18n::Script::Alphabetic => None,
         }
     }
 
-    /// Makes sure the current language's script has a font: an installed CJK face on the desktop,
-    /// a download on the web.
+    /// Makes sure the current language's script has a font: an installed face on the desktop, a
+    /// download on the web.
     fn ensure_script_font(&mut self) {
-        use rustgis_engine::render::fonts::{cjk_font, cjk_font_url};
-        // Switching between CJK languages reorders the faces already loaded.
+        use rustgis_engine::render::fonts::{script_font, script_font_url};
+        // Switching between script languages reorders the faces already loaded.
         if self.current_region() != self.installed_region {
             self.fonts_dirty = true;
         }
         let Some(region) = self.current_region() else { return };
-        let name = format!("cjk-{region:?}");
+        let name = format!("script-{region:?}");
         if self.extra_fonts.iter().any(|(n, _, _)| *n == name) || self.fonts_requested.contains(&name) || self.fonts_failed.contains(&name)
         {
             return;
         }
         self.fonts_requested.push(name.clone());
-        if let Some((bytes, index)) = cjk_font(region) {
+        if let Some((bytes, index)) = script_font(region) {
             let mut face = egui::FontData::from_static(bytes);
             face.index = *index;
             self.extra_fonts.push((name, std::sync::Arc::new(face), Some(region)));
             self.fonts_dirty = true;
         } else if let Some(fetch) = &self.services.fetch_font {
-            fetch(cjk_font_url(region));
+            fetch(script_font_url(region));
         } else {
             log::warn!("no {region:?} font installed; text in that script may not display");
         }
@@ -1453,7 +1458,7 @@ impl RustGisApp {
         if id == "layer.addDownload" {
             let text = crate::i18n::fmt(
                 "{command} isn't recorded: the downloaded data is kept for this session only, so a task couldn't add it again.",
-                &[("command", tl!(spec.label))],
+                &[("command", tl_raw!(spec.label))],
             );
             self.session.notify(text, false);
             return;
@@ -1463,7 +1468,7 @@ impl RustGisApp {
         if rustgis_engine::sources::holds_secret(params) {
             let text = crate::i18n::fmt(
                 "{command} isn't recorded: its parameters may hold a password, key or token (one is named like it, an address carries one, or they nest too deep to check), and a task would keep it.",
-                &[("command", tl!(spec.label))],
+                &[("command", tl_raw!(spec.label))],
             );
             self.session.notify(text, false);
             return;
@@ -1473,7 +1478,7 @@ impl RustGisApp {
         if serde_json::to_vec(params).map_or(0, |b| b.len()) > MAX_STEP_BYTES {
             let text = crate::i18n::fmt(
                 "{command} isn't recorded: its parameters are over 4 MB, too much for a task to keep. Add that data to the project before recording.",
-                &[("command", tl!(spec.label))],
+                &[("command", tl_raw!(spec.label))],
             );
             self.session.notify(text, false);
             return;
@@ -1484,7 +1489,7 @@ impl RustGisApp {
             self.ws.recording_key_said = true;
             let text = crate::i18n::fmt(
                 "{command}'s step keeps its key parameter. If that is an access key, delete the step (Edit Steps) before sharing the task.",
-                &[("command", tl!(spec.label))],
+                &[("command", tl_raw!(spec.label))],
             );
             self.session.notify(text, false);
         }
@@ -1586,6 +1591,28 @@ impl RustGisApp {
             "ui.pane.webData" => toggle_right(&mut self.ui, RightPane::WebData),
             "ui.pane.bookmarks" => toggle_right(&mut self.ui, RightPane::Bookmarks),
             "ui.pane.format" => toggle_right(&mut self.ui, RightPane::Format),
+            // The Labeling pane, on `{"layer": id}` when given (a layer's right-click menu).
+            "ui.pane.labeling" => {
+                // The layer given, else the selected one; checked before it is selected, so a
+                // refusal leaves the selection as it was.
+                let given = match p.get("layer").filter(|l| !l.is_null()) {
+                    Some(_) => Some(self.session.layer_id(p)?),
+                    None => None,
+                };
+                // Showing its tab already open needs no layer.
+                if given.is_some() || !self.ui.right_open.contains(&RightPane::Labeling) {
+                    match given.or(self.session.active_layer).and_then(|id| self.session.map().layer(id)) {
+                        None => return Err("select a layer in the Layers pane first".into()),
+                        Some(l) if l.is_raster() => return Err("labels are drawn for feature layers, not rasters".into()),
+                        Some(_) => {}
+                    }
+                }
+                if let Some(id) = given {
+                    self.session.run("layer.select", &json!({"layer": id}))?;
+                }
+                // A layer's menu asks for that layer's labels: shown, even when already in view.
+                if given.is_some() { self.ui.open_right(RightPane::Labeling) } else { toggle_right(&mut self.ui, RightPane::Labeling) }
+            }
             // A plugin's panel: `{"id": plugin}`.
             "ui.pane.plugin" => return pluginpanel::open(self, p),
             // The SQL pane; with "sql" (and "database"), opened on that query, run with "run".
@@ -2067,6 +2094,8 @@ impl RustGisApp {
                             "topojson",
                             "dxf",
                             "dwg",
+                            // A File Geodatabase is a folder: any of its tables adds it.
+                            "gdbtable",
                             "tab",
                             "mif",
                             "osm",
@@ -3087,9 +3116,12 @@ impl RustGisApp {
             None => Vec::new(),
         };
         for (url, bytes) in fonts {
-            use rustgis_engine::render::fonts::{CjkRegion, cjk_font_url, valid_font};
-            let region =
-                [CjkRegion::SimplifiedChinese, CjkRegion::Japanese, CjkRegion::Korean].into_iter().find(|r| cjk_font_url(*r) == url);
+            use rustgis_engine::render::fonts::{CjkRegion, ScriptFont, script_font_url, valid_font};
+            let region = [CjkRegion::SimplifiedChinese, CjkRegion::Japanese, CjkRegion::Korean]
+                .map(ScriptFont::Cjk)
+                .into_iter()
+                .chain([ScriptFont::Arabic])
+                .find(|r| script_font_url(*r) == url);
             if bytes.is_empty() || !valid_font(&bytes, 0) {
                 // A failed download: say so; picking the language again retries.
                 log::error!("{url}: no usable font downloaded");
@@ -3104,7 +3136,7 @@ impl RustGisApp {
                 );
                 self.session.notify(msg, true);
                 if let Some(r) = region {
-                    let name = format!("cjk-{r:?}");
+                    let name = format!("script-{r:?}");
                     self.fonts_requested.retain(|n| *n != name);
                     self.fonts_failed.push(name);
                 }

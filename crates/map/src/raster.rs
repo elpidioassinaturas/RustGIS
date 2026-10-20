@@ -36,6 +36,10 @@ pub struct RasterLayer {
     /// read by the engine as the slider moves (opengeos/RustGIS#554).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_zarr: Option<ZarrTime>,
+    /// For a scan with no coordinates: the longitude/latitude box (west, south, east, north) it
+    /// was laid over when added, so it is laid there again when the project opens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<[f64; 4]>,
     pub style: RasterStyle,
     /// The pixels; `None` when the source couldn't be read.
     #[serde(skip)]
@@ -71,6 +75,7 @@ impl RasterLayer {
             subdataset: None,
             crs: None,
             time_zarr: None,
+            placement: None,
             style,
             data: Some(Arc::new(raster)),
             masked: MaskedStats::default(),
@@ -87,6 +92,7 @@ impl RasterLayer {
             subdataset: None,
             crs: None,
             time_zarr: None,
+            placement: None,
             style,
             data: Some(Arc::new(raster)),
             masked: MaskedStats::default(),
@@ -106,6 +112,16 @@ impl RasterLayer {
         } else {
             return Err("the raster has no source".into());
         };
+        // A scan goes back where it was laid (a GeoTIFF opened `as` a scan is one again).
+        let r = r.and_then(|mut r| {
+            if let Some(bbox) = self.placement {
+                if r.georeferenced {
+                    r = r.into_scan()?;
+                }
+                r.place(bbox)?;
+            }
+            Ok(r)
+        });
         match r {
             Ok(r) => {
                 self.style.repair(&r);

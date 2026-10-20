@@ -1134,7 +1134,7 @@ fn composer(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, busy: bool, ctx: &egu
             ui,
             |ui| {
                 ui.label(RichText::new(tl!("Allow this action?")).font(semibold(12.5)));
-                ui.label(RichText::new(crate::i18n::fmt("The assistant wants to run this, and {why}:", &[("why", tl!(&why))])).small());
+                ui.label(RichText::new(crate::i18n::fmt("The assistant wants to run this, and {why}:", &[("why", tl_raw!(&why))])).small());
                 ui.label(RichText::new(what).monospace().small());
                 // Plugin commands, scripts and replacing the project are asked about every time.
                 if can_always {

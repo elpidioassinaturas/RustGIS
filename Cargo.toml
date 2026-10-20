@@ -78,6 +78,10 @@ tokio-postgres-rustls = { version = "0.14", default-features = false, features =
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # MySQL/MariaDB, in pure Rust: the client (zlib through miniz_oxide), TLS through rustls (ring).
 mysql = { version = "28", default-features = false, features = ["minimal-rust", "rustls-tls-ring"] }
+# SQL Server: TDS with rustls, Windows logins on Windows, and SQL Browser named instances.
+tiberius = { version = "0.13", default-features = false, features = ["tds80", "rustls", "winauth", "sql-browser-tokio"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
+tokio-util = { version = "0.7", default-features = false, features = ["compat"] }
 webpki-roots = "1"
 # Excel and OpenDocument spreadsheets, in pure Rust (the browser too).
 calamine = { version = "0.36", default-features = false }

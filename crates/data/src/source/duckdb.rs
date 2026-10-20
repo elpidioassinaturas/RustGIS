@@ -41,8 +41,8 @@ const KEEP: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600)
 /// The column added to sort rows into geometry families; never in a result.
 const DIM: &str = "__rustgis_dim";
 
-/// A database DuckDB reads: a DuckDB file, or a PostgreSQL database (PostGIS geometry included)
-/// through DuckDB's `postgres` extension.
+/// A database named by commands: DuckDB files, PostgreSQL connections (also queryable through
+/// DuckDB's `postgres` extension), or live-only MySQL, MariaDB and SQL Server connections.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Database {
     File(PathBuf),
@@ -52,14 +52,22 @@ pub enum Database {
     /// A `mysql://` or `mariadb://` address, without its password: its tables are read live by
     /// [`super::mysql`], not through DuckDB.
     Mysql(String),
+    /// An `mssql://` address, without its password: read live by [`super::sqlserver`].
+    Sqlserver(String),
 }
 
 impl Database {
     /// A database by how projects and commands name it: `postgres:<connection string>`, a
-    /// `postgresql://` URI, a `mysql://` or `mariadb://` address, or a file path. A password in it
-    /// is taken out and remembered for the session.
+    /// `postgresql://`, `mysql://`, `mariadb://` or `mssql://` address, or a file path.
+    /// A password in it is taken out and remembered for the session.
     pub fn parse(s: &str) -> Database {
         let t = s.trim();
+        if let Some((public, password)) = super::msconn::split_password(t) {
+            if let Some(p) = password {
+                remember_password(&public, &p);
+            }
+            return Database::Sqlserver(public);
+        }
         if let Some((public, password)) = super::myconn::split_password(t) {
             if let Some(p) = password {
                 remember_password(&public, &p);
@@ -94,7 +102,7 @@ impl Database {
             Database::File(p) => p.display().to_string(),
             Database::Postgres(d) if d.contains("://") => d.clone(),
             Database::Postgres(d) => format!("postgres:{d}"),
-            Database::Mysql(a) => a.clone(),
+            Database::Mysql(a) | Database::Sqlserver(a) => a.clone(),
         }
     }
 
@@ -108,6 +116,7 @@ impl Database {
                     .unwrap_or_else(|| d.rsplit('/').next().unwrap_or("postgres").split('?').next().unwrap_or("postgres").to_string())
             }
             Database::Mysql(a) => super::myconn::database_name(a).unwrap_or_else(|| "mysql".into()),
+            Database::Sqlserver(a) => super::msconn::database_name(a).unwrap_or_else(|| "sqlserver".into()),
         }
     }
 }
@@ -141,7 +150,7 @@ pub(crate) fn remembered_password(dsn: &str) -> Option<String> {
 fn password(database: Option<&Database>) -> Option<String> {
     match database? {
         Database::Postgres(dsn) => passwords().lock().unwrap_or_else(|e| e.into_inner()).get(dsn).cloned(),
-        Database::File(_) | Database::Mysql(_) => None,
+        Database::File(_) | Database::Mysql(_) | Database::Sqlserver(_) => None,
     }
 }
 
@@ -164,9 +173,11 @@ pub fn available() -> bool {
     program().is_some()
 }
 
-/// A MySQL or MariaDB database named for a query: its tables are read live instead.
-fn mysql_not_here() -> DataError {
-    DataError::Unsupported("SQL queries don't run on MySQL or MariaDB databases: add their tables with Add Data › Database…".into())
+/// A live-only database named for a query: add its tables instead.
+fn live_not_here() -> DataError {
+    DataError::Unsupported(
+        "SQL queries don't run on MySQL, MariaDB or SQL Server databases: add their tables with Add Data › Database…".into(),
+    )
 }
 
 fn missing() -> DataError {
@@ -270,7 +281,7 @@ fn prelude(dir: &Path, database: Option<&Database>, confined: bool) -> Result<St
         Some(Database::Postgres(dsn)) => {
             s.push_str(&format!(" INSTALL postgres; LOAD postgres; ATTACH {} AS src (TYPE postgres, READ_ONLY); USE src;", literal(dsn)));
         }
-        Some(Database::Mysql(_)) => return Err(mysql_not_here()),
+        Some(Database::Mysql(_) | Database::Sqlserver(_)) => return Err(live_not_here()),
         None => {}
     }
     if confined {
@@ -689,7 +700,7 @@ pub fn convert_table_of(database: &Database, table: &Table, crs: Option<&str>) -
     let dir = cache_dir().ok_or_else(|| DataError::Format("no cache folder for DuckDB results".into()))?;
     match database {
         Database::File(p) => convert_table_in(&dir, p, table, crs),
-        Database::Mysql(_) => Err(mysql_not_here()),
+        Database::Mysql(_) | Database::Sqlserver(_) => Err(live_not_here()),
         Database::Postgres(_) => {
             if !available() {
                 return Err(missing());
@@ -816,6 +827,17 @@ mod tests {
         let dir = std::env::temp_dir();
         let p = prelude(&dir, Some(&d), true).unwrap();
         assert!(p.contains("ATTACH 'host=db.example dbname=gis user=me' AS src (TYPE postgres, READ_ONLY)") && !p.contains("pw1"), "{p}");
+    }
+
+    #[test]
+    fn sqlserver_names_keep_no_password() {
+        let db = Database::parse("mssql://ana:p%40w@h/gis?password=other&pwd=query-secret&access_token=token-secret&encrypt=strict");
+        assert_eq!(db, Database::Sqlserver("mssql://ana@h/gis?encrypt=strict".into()));
+        assert_eq!(db.short(), "gis");
+        assert_eq!(remembered_password(&db.label()).as_deref(), Some("p@w"));
+        assert_eq!(password(Some(&db)), None);
+        assert!(prelude(&std::env::temp_dir(), Some(&db), true).is_err());
+        assert_eq!(Database::parse("mssql://h").short(), "sqlserver");
     }
 
     #[test]

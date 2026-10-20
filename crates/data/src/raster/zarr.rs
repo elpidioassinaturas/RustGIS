@@ -1287,7 +1287,9 @@ pub fn time_axis(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>
         if d == y || d == x {
             continue;
         }
-        let Some(c) = store.coordinate(v, name) else { continue };
+        // A coordinate of the dimension's own length (one found at the root, of another group,
+        // may not be), so date `i` is step `i`.
+        let Some(c) = store.coordinate(v, name).filter(|c| c.shape.first() == v.shape.get(d)) else { continue };
         if !attr_str(c, "units").is_some_and(|u| u.contains(" since ")) {
             continue;
         }
