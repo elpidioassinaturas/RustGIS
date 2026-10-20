@@ -140,9 +140,13 @@ pub fn trend(t: &[f64], y: &[f64], test: Test, alpha: f64) -> Option<Trend> {
     Some(Trend { n, slope, intercept, s, var_s, correction, z, p: p_value(z) })
 }
 
-/// Sen's slope: the median of the slopes between every two values at different times.
+/// Sen's slope: the median of the slopes between every two values at different times; `None`
+/// for more than [`MAX_VALUES`], whose slopes would take too much memory.
 pub fn sen_slope(t: &[f64], y: &[f64]) -> Option<f64> {
     let n = y.len().min(t.len());
+    if n > MAX_VALUES {
+        return None;
+    }
     let mut slopes = Vec::with_capacity(n * n.saturating_sub(1) / 2);
     for i in 0..n {
         for j in i + 1..n {
@@ -512,6 +516,7 @@ mod tests {
         let seasons: Vec<usize> = (0..t.len()).map(|i| if i == 0 { usize::MAX } else { i % 2 }).collect();
         assert!(trend_seasonal(&t, &y, &seasons, 0.05).is_none(), "a season index out of range");
         let many: Vec<f64> = (0..=MAX_VALUES).map(|i| i as f64).collect();
+        assert_eq!(sen_slope(&many, &many), None, "Sen's slope alone is bounded too");
         assert!(trend(&many, &many, Test::Original, 0.05).is_none());
         // Too few values, missing ones skipped.
         assert!(trend(&t, &[1.0, f64::NAN, 2.0, f64::NAN, 3.0], Test::Original, 0.05).is_none());
