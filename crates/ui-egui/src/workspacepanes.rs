@@ -571,15 +571,22 @@ fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
                 Ok(job) => {
                     let r = Reducing { run: job.clone(), cancel: Default::default(), done: Default::default(), result: Default::default() };
                     let (cancel, done, result) = (r.cancel.clone(), r.done.clone(), r.result.clone());
-                    std::thread::spawn(move || {
-                        let out = job
-                            .run(&cancel, &done)
-                            .and_then(|r| rustgis_engine::data::raster::geotiff::write(&r, 0).map_err(|e| e.to_string()));
+                    // A panic on the thread (a hostile store) lands as an error, so the run always
+                    // ends; a thread the system can't start is said.
+                    let spawned = std::thread::Builder::new().name("zarr-summary".into()).spawn(move || {
+                        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            job.run(&cancel, &done)
+                                .and_then(|r| rustgis_engine::data::raster::geotiff::write(&r, 0).map_err(|e| e.to_string()))
+                        }))
+                        .unwrap_or_else(|_| Err("the summary failed unexpectedly".into()));
                         if let Ok(mut g) = result.lock() {
                             *g = Some(out);
                         }
                     });
-                    app.ws.reducing = Some(r);
+                    match spawned {
+                        Ok(_) => app.ws.reducing = Some(r),
+                        Err(e) => app.ws.message = Some((format!("the summary couldn't start: {e}"), true)),
+                    }
                 }
                 Err(e) => app.ws.message = Some((e, true)),
             }
