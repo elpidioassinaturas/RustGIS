@@ -209,7 +209,9 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         r.source = Some(root.clone());
         let name = ps(p, "name").map(str::to_string).unwrap_or_else(|| layer_name(&root, &sel, &[]));
         let mut layer = RasterLayer::from_bytes(r, format!("{}.tif", store_name(&root)), tif);
-        layer.subdataset = Some(sel.label());
+        // A slice names its steps (`t2m[time=3]`); a summary over time (no steps) is no slice of
+        // the variable, so Time Series and Summarise don't take it for one.
+        layer.subdataset = (!sel.index.is_empty()).then(|| sel.label());
         return super::raster::add_raster(s, &name, layer);
     }
     #[cfg(target_arch = "wasm32")]
