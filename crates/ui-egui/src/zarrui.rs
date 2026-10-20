@@ -343,6 +343,10 @@ pub fn picker(app: &mut RustGisApp, ui: &mut egui::Ui) {
         .collect();
     // A variable with a dimension besides the map's can follow the time slider (desktop).
     let timed = vars[st.variable]["dims"].as_array().into_iter().flatten().any(|d| d["map"] != json!(true));
+    // A variable with only the map's dimensions can't follow: the box is gone, so is its choice.
+    if !timed {
+        st.follow = false;
+    }
     if cfg!(not(target_arch = "wasm32")) && timed {
         ui.checkbox(&mut st.follow, crate::tl!("Follow the time slider")).on_hover_text(crate::tl!(
             "The layer shows the step the time slider is at, and turns the slider on over the variable's dates."
