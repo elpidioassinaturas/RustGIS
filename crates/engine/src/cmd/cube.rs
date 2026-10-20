@@ -227,7 +227,12 @@ pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
         let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
         let zarr_layer = !given("path") && !given("url") && {
             let id = s.layer_id(p)?;
-            s.map().layer(id).and_then(|l| l.raster.as_ref()).is_some_and(|r| r.time_zarr.is_some() || r.subdataset.is_some())
+            // A Zarr layer: one following the slider, or a slice, named by its steps (`t2m[time=3]`);
+            // another file's subdataset (GDAL's) goes the bands' way below.
+            s.map()
+                .layer(id)
+                .and_then(|l| l.raster.as_ref())
+                .is_some_and(|r| r.time_zarr.is_some() || r.subdataset.as_deref().is_some_and(|d| d.contains('[')))
         };
         if given("path") || given("url") || zarr_layer {
             return Ok(Box::new(ZarrCube(super::zarr::zarr_cube(s, p)?)));
