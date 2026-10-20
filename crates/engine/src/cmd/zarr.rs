@@ -335,24 +335,37 @@ fn read_ahead(zt: ZarrTime, i: usize) {
         release(&keys);
         return;
     }
+    // Whatever ends the thread, a panic on a hostile store included, its keys and its place
+    // among the threads are given back.
+    struct Done(Vec<String>);
+    impl Drop for Done {
+        fn drop(&mut self) {
+            if let Ok(mut r) = reading_ahead().lock() {
+                for k in &self.0 {
+                    r.remove(k);
+                }
+            }
+            READ_AHEAD_THREADS.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
     std::thread::spawn(move || {
+        let _done = Done(keys.iter().map(|(_, k)| k.clone()).collect());
         for (n, (j, _)) in keys.iter().enumerate() {
             let ok = read_step(&zt, *j).is_ok();
             release(&keys[n..=n]);
             if !ok {
-                release(&keys[n + 1..]);
                 break;
             }
         }
-        READ_AHEAD_THREADS.fetch_sub(1, Ordering::SeqCst);
     });
 }
 
-/// Waits (up to a minute) for a step being read ahead, so it isn't fetched twice.
+/// Waits (up to 15 s) for a step being read ahead, so it isn't fetched twice; after that it is
+/// read here.
 #[cfg(not(target_arch = "wasm32"))]
 fn wait_for_read_ahead(key: &str) {
     let start = std::time::Instant::now();
-    while start.elapsed() < std::time::Duration::from_secs(60) && reading_ahead().lock().is_ok_and(|r| r.contains(key)) {
+    while start.elapsed() < std::time::Duration::from_secs(15) && reading_ahead().lock().is_ok_and(|r| r.contains(key)) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
