@@ -320,8 +320,11 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         let host = |u: &str| {
             u.split_once("://").map(|(scheme, r)| {
                 let authority = r.split(['/', '?', '#']).next().unwrap_or("");
-                let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-                format!("{}://{}", scheme.to_ascii_lowercase(), host.to_ascii_lowercase())
+                let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h).to_ascii_lowercase();
+                let scheme = scheme.to_ascii_lowercase();
+                // The scheme's own port written out is the same host.
+                let default = if scheme == "https" { ":443" } else { ":80" };
+                format!("{scheme}://{}", host.strip_suffix(default).unwrap_or(&host))
             })
         };
         let api_host = host(&api);
