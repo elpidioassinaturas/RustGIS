@@ -859,18 +859,36 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     if f.test == "seasonal" {
         p["seasons"] = json!(f.seasons);
     }
-    if let Ok(a) = f.alpha.trim().parse::<f64>() {
-        p["alpha"] = json!(a);
+    // A field filled in but not read as a number is said, never dropped for the default.
+    let mut bad: Option<String> = None;
+    match f.alpha.trim() {
+        "" => {}
+        a => match a.parse::<f64>() {
+            Ok(a) => p["alpha"] = json!(a),
+            Err(_) => bad = Some(tl!("The significance level is a number, such as 0.05").to_string()),
+        },
     }
-    if let Ok(m) = f.min_valid.trim().parse::<u64>() {
-        p["minValid"] = json!(m);
+    match f.min_valid.trim() {
+        "" => {}
+        m => match m.parse::<u64>() {
+            Ok(m) => p["minValid"] = json!(m),
+            Err(_) => bad = Some(tl!("Dates a cell needs is a whole number, or empty for half").to_string()),
+        },
     }
     for (k, v) in [("start", &f.start), ("end", &f.end)] {
         if !v.trim().is_empty() {
             p[k] = json!(v.trim());
         }
     }
-    let months: Vec<Value> = f.months.split([',', ' ']).filter_map(|m| m.trim().parse::<u64>().ok()).map(|m| json!(m)).collect();
+    let typed: Vec<&str> = f.months.split([',', ' ']).map(str::trim).filter(|m| !m.is_empty()).collect();
+    let months: Vec<Value> = typed.iter().filter_map(|m| m.parse::<u64>().ok()).map(|m| json!(m)).collect();
+    if months.len() != typed.len() {
+        bad = Some(tl!("Months are numbers from 1 to 12 (12, 1, 2 for December to February)").to_string());
+    }
+    if let Some(e) = bad {
+        app.workflow.error = Some(e);
+        return;
+    }
     if !months.is_empty() {
         p["months"] = Value::Array(months);
     }

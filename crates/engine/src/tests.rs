@@ -6608,6 +6608,11 @@ fn a_trend_over_a_data_cube() {
     assert!(e.contains("no longer kept"), "{e}");
     let e = s.run("cube.trend", &json!({"layers": names, "minValid": 99})).unwrap_err();
     assert!(e.contains("more than the"), "{e}");
+    // Two layers on one day would count twice in the test: refused.
+    let mut twice: Vec<String> = (0..names.len()).map(|k| format!("{}-06-01", 2010 + k)).collect();
+    twice[1] = twice[0].clone();
+    let e = s.run("cube.trend", &json!({"layers": names, "dates": twice})).unwrap_err();
+    assert!(e.contains("same date"), "{e}");
     // Seasons from the calendar: the 1st of every month is its month in every year, leap years
     // included, and a 16-day composite on the same day each year keeps its season.
     use crate::cmd::cube::season_of;

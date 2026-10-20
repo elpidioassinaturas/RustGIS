@@ -192,7 +192,14 @@ pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
             if band >= r.bands.len() {
                 return Err(format!("{} has {} bands", l.name, r.bands.len()));
             }
-            let file = l.raster.as_ref().and_then(|r| r.path.clone()).unwrap_or_default();
+            // The file's own name, not its folders' (`/data/2020/ndvi_a.tif` would date them all).
+            let file = l
+                .raster
+                .as_ref()
+                .and_then(|r| r.path.as_deref())
+                .and_then(|f| std::path::Path::new(f).file_name())
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let date = match &dates {
                 Some(d) => d[k],
                 None => date_in_text(&l.name)
@@ -201,6 +208,14 @@ pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
             };
             if label.is_empty() {
                 label = l.name.clone();
+            }
+            // One layer a date: two on a day would count as two ordered values in the test.
+            if items.iter().any(|(d, ..): &(f64, _, usize)| *d == date) {
+                return Err(format!(
+                    "{} and another layer have the same date ({}): one layer a date",
+                    l.name,
+                    rustgis_data::time::format(date, "YYYY-MM-DD")
+                ));
             }
             items.push((date, r, band));
         }
@@ -377,7 +392,7 @@ impl TrendRun {
                     block = vec![f32::NAN; cells * n];
                     grid = Some(r.clone());
                 }
-                Some(g) if (g.width, g.height, g.transform) != (r.width, r.height, r.transform) => {
+                Some(g) if (g.width, g.height, g.transform, g.crs) != (r.width, r.height, r.transform, r.crs) => {
                     return Err(format!(
                         "the slice at {} is {} × {} on another grid than the first ({} × {}): put them on one grid first (Raster Functions › Resample)",
                         rustgis_data::time::format(self.cube.dates()[i], "YYYY-MM-DD"),
