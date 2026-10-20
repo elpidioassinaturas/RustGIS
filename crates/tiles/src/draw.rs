@@ -15,7 +15,7 @@ use tiny_skia::{
 
 use crate::cache::{self, Payload, State, Want};
 use crate::mvt::GeomKind;
-use crate::source::{Resolve, Spec, resolve};
+use crate::source::{Resolve, Resolved, Spec, resolve};
 use crate::sprite::{self, Load, Sprite};
 use crate::style::{FeatureCtx, LayerKind, Rgba, Source, StyleLayer, Val};
 use crate::template::{self, Placed, TileId};
@@ -34,7 +34,7 @@ impl Frame {
     fn px(&self, x: f64, y: f64) -> (f32, f32) {
         (((x - self.left) / self.m_per_px) as f32, ((self.top - y) / self.m_per_px) as f32)
     }
-    fn extent(&self, w: u32, h: u32) -> Extent {
+    pub(crate) fn extent(&self, w: u32, h: u32) -> Extent {
         Extent::new(self.left, self.top - f64::from(h) * self.m_per_px, self.left + f64::from(w) * self.m_per_px, self.top)
     }
 }
@@ -83,11 +83,11 @@ pub struct Drawn {
 
 /// One tile's worth of drawing: the tile data, where that tile is, and the square it stands in for.
 #[derive(Clone)]
-struct Item {
-    payload: Arc<Payload>,
-    at: Extent,
-    z: u8,
-    clip: Extent,
+pub(crate) struct Item {
+    pub(crate) payload: Arc<Payload>,
+    pub(crate) at: Extent,
+    pub(crate) z: u8,
+    pub(crate) clip: Extent,
 }
 
 /// Draws `spec` into `pm` at `opacity`. Labels are collected when `labels` is set.
@@ -109,14 +109,54 @@ pub fn draw(pm: &mut Pixmap, spec: &Spec, opacity: f32, frame: &Frame, labels: b
         return out;
     }
     let (w, h) = (pm.width(), pm.height());
-    let view = frame.extent(w, h);
-    let zoom = template::style_zoom(frame.m_per_px * f64::from(frame.ppp));
+    // A style drawing vector shapes draws them from tile pictures drawn once (see `picture`):
+    // a map moving across them only puts them in place.
+    if let Some(pictures) = crate::picture::cover(&r, frame, &frame.extent(w, h), None, &mut out.pending) {
+        for it in &pictures {
+            draw_raster(pm, it, frame, opacity);
+        }
+        if labels {
+            draw_layers(None, (w, h), &frame.extent(w, h), &r, frame, Pass::Labels, &mut out);
+        }
+        return out;
+    }
     let mut layer_pm = if opacity < 0.999 { Pixmap::new(w, h) } else { None };
     let target: &mut Pixmap = match layer_pm.as_mut() {
         Some(p) => p,
         None => pm,
     };
+    draw_layers(Some(target), (w, h), &frame.extent(w, h), &r, frame, if labels { Pass::All } else { Pass::Shapes }, &mut out);
+    if let Some(lp) = layer_pm {
+        pm.draw_pixmap(0, 0, lp.as_ref(), &PixmapPaint { opacity, ..PixmapPaint::default() }, Transform::identity(), None);
+    }
+    out
+}
+
+/// Which of a style's layers [`draw_layers`] draws.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pass {
+    /// Everything, labels collected.
+    All,
+    /// Everything but labels.
+    Shapes,
+    /// Only the labels, collected (nothing is drawn).
+    Labels,
+}
+
+/// Draws the layers of a resolved style for `pass` into `target` (a `w × h` pixmap at `frame`)
+/// from the tiles over `view`, collecting labels into `out`.
+pub(crate) fn draw_layers(
+    mut target: Option<&mut Pixmap>,
+    (w, h): (u32, u32),
+    view: &Extent,
+    r: &Resolved,
+    frame: &Frame,
+    pass: Pass,
+    out: &mut Drawn,
+) {
+    let zoom = template::style_zoom(frame.m_per_px * f64::from(frame.ppp));
     let mut items: HashMap<String, Vec<Item>> = HashMap::new();
+    let mut boxes: Boxes = HashMap::new();
     // The sprite, fetched the first time a layer needs it.
     let mut sprite_state: Option<Option<Arc<Sprite>>> = None;
     let mut sprite = |pending: &mut bool| -> Option<Arc<Sprite>> {
@@ -132,32 +172,41 @@ pub fn draw(pm: &mut Pixmap, spec: &Spec, opacity: f32, frame: &Frame, labels: b
             .clone()
     };
     for (li, layer) in r.style.layers.iter().enumerate() {
-        if !layer.visible_at(zoom) {
+        let wanted = match pass {
+            Pass::All => true,
+            Pass::Shapes => layer.kind != LayerKind::Symbol,
+            Pass::Labels => layer.kind == LayerKind::Symbol,
+        };
+        if !wanted || !layer.visible_at(zoom) {
             continue;
         }
         if layer.kind == LayerKind::Background {
-            if let (Some(c), Some(rect)) = (layer.background_color(zoom), Rect::from_xywh(0.0, 0.0, w as f32, h as f32)) {
+            if let (Some(c), Some(rect), Some(t)) =
+                (layer.background_color(zoom), Rect::from_xywh(0.0, 0.0, w as f32, h as f32), target.as_deref_mut())
+            {
                 let mut p = Paint::default();
                 p.set_color(color(c, layer.background_opacity(zoom)));
-                target.fill_rect(rect, &p, Transform::identity(), None);
+                t.fill_rect(rect, &p, Transform::identity(), None);
             }
             continue;
         }
         let Some(src_id) = layer.source.as_deref() else { continue };
         if !items.contains_key(src_id) {
             let Some(src) = r.style.sources.iter().find(|s| s.0 == src_id).map(|s| &s.1) else { continue };
-            let list = tiles_for(src, &view, frame, zoom, &mut out.pending);
+            let list = tiles_for(src, view, frame, zoom, &mut out.pending);
             items.insert(src_id.to_string(), list);
         }
         let Some(list) = items.get(src_id) else { continue };
         match layer.kind {
             LayerKind::Raster => {
+                let Some(t) = target.as_deref_mut() else { continue };
                 let o = layer.raster_opacity(zoom);
                 for it in list {
-                    draw_raster(target, it, frame, o);
+                    draw_raster(t, it, frame, o);
                 }
             }
             LayerKind::Fill | LayerKind::FillExtrusion | LayerKind::Line | LayerKind::Circle => {
+                let Some(t) = target.as_deref_mut() else { continue };
                 if !drawable(layer) {
                     continue;
                 }
@@ -171,10 +220,11 @@ pub fn draw(pm: &mut Pixmap, spec: &Spec, opacity: f32, frame: &Frame, labels: b
                     None
                 };
                 for it in list {
-                    draw_vector(target, it, layer, frame, zoom, sheet.as_deref());
+                    let b = boxes_of(&mut boxes, it, layer);
+                    draw_vector(t, it, layer, frame, zoom, sheet.as_deref(), &b);
                 }
             }
-            LayerKind::Symbol if labels => {
+            LayerKind::Symbol if pass != Pass::Shapes => {
                 let sheet = if layer.has_layout("icon-image") { sprite(&mut out.pending) } else { None };
                 for it in list {
                     collect_labels(&mut out.labels, it, layer, frame, zoom, placement_rank(li), sheet.as_deref(), (w as f32, h as f32));
@@ -183,10 +233,6 @@ pub fn draw(pm: &mut Pixmap, spec: &Spec, opacity: f32, frame: &Frame, labels: b
             _ => {}
         }
     }
-    if let Some(lp) = layer_pm {
-        pm.draw_pixmap(0, 0, lp.as_ref(), &PixmapPaint { opacity, ..PixmapPaint::default() }, Transform::identity(), None);
-    }
-    out
 }
 
 /// One raster tile placed on the map, for a renderer that draws each tile itself (the GPU map
@@ -203,19 +249,23 @@ pub struct Placement {
     pub opacity: f32,
 }
 
-/// A raster tile layer as placed tiles, bottom first, rather than drawn into a pixmap.
+/// A tile layer as placed tiles, bottom first, rather than drawn into a pixmap.
 #[derive(Default)]
 pub struct PlacedTiles {
     pub tiles: Vec<Placement>,
+    /// The labels of its symbol layers, when asked for.
+    pub labels: Vec<Label>,
     pub attribution: Vec<String>,
     pub pending: bool,
     pub error: Option<String>,
 }
 
-/// `spec` as placed raster tiles over `view` (fetching those missing) and out to `reach` (only
-/// those already in the cache, so a camera moving there finds tiles to show), or `None` when it
-/// draws anything but raster tiles, which [`draw`] then draws into a pixmap.
-pub fn place(spec: &Spec, opacity: f32, frame: &Frame, view: &Extent, reach: &Extent) -> Option<PlacedTiles> {
+/// `spec` as placed tiles over `view` (fetching those missing) and out to `reach` (only those
+/// already in the cache, so a camera moving there finds tiles to show), or `None` when it can't
+/// be, which [`draw`] then draws into a pixmap. Raster tiles are placed as they are, vector tiles
+/// as pictures of their shapes (see `picture`); their labels are collected for a `labels`-sized
+/// pixmap at `frame` when that is given.
+pub fn place(spec: &Spec, opacity: f32, frame: &Frame, view: &Extent, reach: &Extent, labels: Option<(u32, u32)>) -> Option<PlacedTiles> {
     let mut out = PlacedTiles::default();
     let r = match resolve(spec) {
         Resolve::Ready(r) => r,
@@ -230,6 +280,17 @@ pub fn place(spec: &Spec, opacity: f32, frame: &Frame, view: &Extent, reach: &Ex
     };
     out.attribution = r.attribution.clone();
     if !(frame.m_per_px.is_finite() && frame.m_per_px > 0.0) || opacity <= 0.0 {
+        return Some(out);
+    }
+    if let Some(pictures) = crate::picture::cover(&r, frame, view, Some(reach), &mut out.pending) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        out.tiles = pictures.into_iter().map(|it| Placement { picture: it.payload, at: it.at, clip: it.clip, opacity }).collect();
+        if let Some(size) = labels {
+            let mut d = Drawn::default();
+            draw_layers(None, size, &frame.extent(size.0, size.1), &r, frame, Pass::Labels, &mut d);
+            out.labels = d.labels;
+            out.pending |= d.pending;
+        }
         return Some(out);
     }
     let zoom = template::style_zoom(frame.m_per_px * f64::from(frame.ppp));
@@ -409,7 +470,7 @@ fn tiles_for(src: &Source, view: &Extent, frame: &Frame, zoom: f32, pending: &mu
 
 /// The tiles of a source in view and out to `reach` (those in the cache only), with stand-ins
 /// for those not here yet.
-fn tiles_in(src: &Source, view: &Extent, reach: Option<&Extent>, frame: &Frame, zoom: f32, pending: &mut bool) -> Vec<Item> {
+pub(crate) fn tiles_in(src: &Source, view: &Extent, reach: Option<&Extent>, frame: &Frame, zoom: f32, pending: &mut bool) -> Vec<Item> {
     let (tiles, min_z, max_z, want, z) = match src {
         Source::Raster { tiles, tile_size, min_zoom, max_zoom, .. } => {
             let z = template::zoom_for(frame.m_per_px * f64::from(frame.ppp), *tile_size, *max_zoom);
@@ -530,13 +591,54 @@ fn draw_raster(pm: &mut Pixmap, it: &Item, frame: &Frame, opacity: f32) {
     if !(k.is_finite() && k > 0.0) {
         return;
     }
-    let quality = if (k - 1.0).abs() < 0.01 { FilterQuality::Nearest } else { FilterQuality::Bilinear };
+    if (k - 1.0).abs() < 0.01 {
+        copy_over(pm, img, clip, (x0, y0), k, opacity);
+        return;
+    }
+    let quality = FilterQuality::Bilinear;
     let shader = Pattern::new(img.as_ref(), SpreadMode::Pad, quality, opacity.clamp(0.0, 1.0), Transform::from_row(k, 0.0, 0.0, k, x0, y0));
     // Without anti-aliasing, neighbouring tiles meet without a seam.
     let paint = Paint { shader, anti_alias: false, ..Paint::default() };
     // Only the part in the pixmap.
     let Some(clip) = clip.intersect(&Rect::from_ltrb(0.0, 0.0, pm.width() as f32, pm.height() as f32).unwrap_or(clip)) else { return };
     pm.fill_rect(clip, &paint, Transform::identity(), None);
+}
+
+/// Draws a picture at its own size (`k`, the pixmap's pixels to one of its own, near 1) over the
+/// `clip` pixels of `pm`, its top-left corner at `at`: each pixel takes the picture's nearest,
+/// source over. Much faster than a pattern fill, for a map made of tile pictures.
+fn copy_over(pm: &mut Pixmap, img: &Pixmap, clip: Rect, at: (f32, f32), k: f32, opacity: f32) {
+    let (w, h) = (i64::from(pm.width()), i64::from(pm.height()));
+    let (x0, y0) = ((clip.left() as i64).max(0), (clip.top() as i64).max(0));
+    let (x1, y1) = ((clip.right() as i64).min(w), (clip.bottom() as i64).min(h));
+    let (iw, ih) = (i64::from(img.width()), i64::from(img.height()));
+    if x0 >= x1 || y0 >= y1 || iw == 0 || ih == 0 {
+        return;
+    }
+    let nearest = |p: i64, o: f32, n: i64| (((p as f32 + 0.5 - o) / k).floor() as i64).clamp(0, n - 1) as usize;
+    let cols: Vec<usize> = (x0..x1).map(|x| nearest(x, at.0, iw)).collect();
+    let o = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let (src, dst) = (img.data(), pm.data_mut());
+    for y in y0..y1 {
+        let from = nearest(y, at.1, ih) * iw as usize * 4;
+        let to = (y as usize * w as usize + x0 as usize) * 4;
+        for (i, &sx) in cols.iter().enumerate() {
+            let (si, di) = (from + sx * 4, to + i * 4);
+            let (Some(s), Some(d)) = (src.get(si..si + 4), dst.get_mut(di..di + 4)) else { continue };
+            // Premultiplied: the picture's pixel at the opacity, over what is there.
+            let s = [s[0], s[1], s[2], s[3]].map(|c| u32::from(c) * o / 255);
+            let a = s[3];
+            if a == 255 {
+                for (d, s) in d.iter_mut().zip(s) {
+                    *d = s as u8;
+                }
+            } else if a > 0 {
+                for (d, s) in d.iter_mut().zip(s) {
+                    *d = (s + u32::from(*d) * (255 - a) / 255).min(255) as u8;
+                }
+            }
+        }
+    }
 }
 
 /// A tile's geometry in pixels, clipped to the item's square (lines and polygons) or kept only
@@ -547,7 +649,81 @@ fn to_px(it: &Item, layer_extent: u32, frame: &Frame) -> impl Fn(&[f32; 2]) -> (
     move |p: &[f32; 2]| (x0 + p[0] * k, y0 + p[1] * k)
 }
 
-fn draw_vector(pm: &mut Pixmap, it: &Item, layer: &StyleLayer, frame: &Frame, zoom: f32, sheet: Option<&Sprite>) {
+/// The bounding boxes of a tile layer's features (in tile units), by the tile's payload and the
+/// layer's name: found once for every style layer and picture drawing it.
+type Boxes = HashMap<(usize, String), Arc<Vec<[f32; 4]>>>;
+
+/// The boxes of the features `layer` draws from `it`, from those known (`known`, for this draw)
+/// or those kept for every draw.
+type Kept = HashMap<(usize, String), (std::sync::Weak<Payload>, Arc<Vec<[f32; 4]>>)>;
+static KEPT: std::sync::OnceLock<std::sync::Mutex<Kept>> = std::sync::OnceLock::new();
+
+/// Forgets the features' boxes kept for every draw (with [`crate::cache::clear`]).
+pub(crate) fn forget_boxes() {
+    if let Some(k) = KEPT.get() {
+        k.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+fn boxes_of(known: &mut Boxes, it: &Item, layer: &StyleLayer) -> Arc<Vec<[f32; 4]>> {
+    let (Payload::Vector(tile), Some(name)) = (&*it.payload, layer.source_layer.as_deref()) else { return Arc::default() };
+    let key = (Arc::as_ptr(&it.payload) as usize, name.to_string());
+    if let Some(b) = known.get(&key) {
+        return b.clone();
+    }
+    let kept = KEPT.get_or_init(Default::default);
+    let lock = || kept.lock().unwrap_or_else(|e| e.into_inner());
+    let found = lock().get(&key).filter(|(p, _)| p.upgrade().is_some_and(|p| Arc::ptr_eq(&p, &it.payload))).map(|(_, b)| b.clone());
+    let b = found.unwrap_or_else(|| {
+        let b: Vec<[f32; 4]> = tile
+            .layers
+            .iter()
+            .find(|l| l.name == name)
+            .map(|l| {
+                l.features
+                    .iter()
+                    .map(|f| {
+                        f.geometry.iter().flatten().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| {
+                            [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])]
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let b = Arc::new(b);
+        let mut k = lock();
+        // Those of tiles the cache let go go too.
+        if k.len() > 1024 {
+            k.retain(|_, (p, _)| p.strong_count() > 0);
+        }
+        k.insert(key.clone(), (Arc::downgrade(&it.payload), b.clone()));
+        b
+    });
+    known.insert(key, b.clone());
+    b
+}
+
+/// How far past the pixmap a line or circle may lie and still be drawn into it, in points, at
+/// least: its half width.
+const OVERHANG: f32 = 16.0;
+
+/// How far a layer's shapes reach past their geometry at `zoom`, in points: a line's half width
+/// (twice its width at a mitred corner), a circle's radius and outline. Widths that depend on
+/// the feature are taken at the layer's own, and never less than [`OVERHANG`].
+pub(crate) fn overhang(layer: &StyleLayer, zoom: f32) -> f32 {
+    let ctx = FeatureCtx::zoom_only(zoom);
+    let reach = match layer.kind {
+        LayerKind::Line => {
+            let k = if layer.line_join(&ctx) == crate::style::LineJoin::Miter { 2.0 } else { 0.75 };
+            layer.line_width(&ctx) * k
+        }
+        LayerKind::Circle => layer.circle_radius(&ctx) + layer.circle_stroke_width(&ctx),
+        _ => 0.0,
+    };
+    if reach.is_finite() { reach.clamp(OVERHANG, 512.0) } else { OVERHANG }
+}
+
+fn draw_vector(pm: &mut Pixmap, it: &Item, layer: &StyleLayer, frame: &Frame, zoom: f32, sheet: Option<&Sprite>, boxes: &[[f32; 4]]) {
     let Payload::Vector(tile) = &*it.payload else { return };
     let Some(src_layer) = layer.source_layer.as_deref() else { return };
     let Some(l) = tile.layers.iter().find(|l| l.name == src_layer) else { return };
@@ -555,7 +731,26 @@ fn draw_vector(pm: &mut Pixmap, it: &Item, layer: &StyleLayer, frame: &Frame, zo
     let bounds = [clip.left(), clip.top(), clip.right(), clip.bottom()];
     let to = to_px(it, l.extent, frame);
     let ppp = frame.ppp;
-    for f in &l.features {
+    // The part of the tile drawn into the pixmap, in tile units: features outside it are skipped
+    // before the style looks at them (a picture of a tile's corner has most of its features
+    // outside).
+    let (x0, y0) = frame.px(it.at.min_x, it.at.max_y);
+    let k = (TileId::span(it.z) / frame.m_per_px) as f32 / l.extent.max(1) as f32;
+    // A fill reaches past its shape only by its outline.
+    let pad = if matches!(layer.kind, LayerKind::Fill | LayerKind::FillExtrusion) { 2.0 } else { overhang(layer, zoom) * ppp };
+    let (pw, ph) = (pm.width() as f32, pm.height() as f32);
+    // Shapes are cut a little past the pixmap too (in pixels, by `pad`), so a long road or a
+    // large park reaching far past it costs no more than the part in it.
+    let cut = |pad: f32| [bounds[0].max(-pad), bounds[1].max(-pad), bounds[2].min(pw + pad), bounds[3].min(ph + pad)];
+    let reach = cut(pad);
+    if reach[0] >= reach[2] || reach[1] >= reach[3] {
+        return;
+    }
+    let area = [(reach[0] - x0) / k, (reach[1] - y0) / k, (reach[2] - x0) / k, (reach[3] - y0) / k];
+    for (i, f) in l.features.iter().enumerate() {
+        if boxes.get(i).is_some_and(|b| b[0] > area[2] || b[2] < area[0] || b[1] > area[3] || b[3] < area[1]) {
+            continue;
+        }
         let ctx = FeatureCtx { zoom, kind: f.kind, id: f.id, props: &f.props };
         if !layer.matches(&ctx) {
             continue;
@@ -566,7 +761,7 @@ fn draw_vector(pm: &mut Pixmap, it: &Item, layer: &StyleLayer, frame: &Frame, zo
                 let mut pb = PathBuilder::new();
                 for ring in &f.geometry {
                     let pts: Vec<(f32, f32)> = ring.iter().map(&to).collect();
-                    let clipped = clip_polygon(&pts, bounds);
+                    let clipped = clip_polygon(&pts, cut(1.0));
                     push_ring(&mut pb, &clipped);
                 }
                 let Some(path) = pb.finish() else { continue };
@@ -602,7 +797,7 @@ fn draw_vector(pm: &mut Pixmap, it: &Item, layer: &StyleLayer, frame: &Frame, zo
                         {
                             pts.push(a);
                         }
-                        for piece in clip_line(&pts, bounds) {
+                        for piece in clip_line(&pts, cut(2.0)) {
                             push_line(&mut ob, &piece);
                         }
                     }
@@ -624,41 +819,64 @@ fn draw_vector(pm: &mut Pixmap, it: &Item, layer: &StyleLayer, frame: &Frame, zo
                 if !(width.is_finite() && width > 0.0) {
                     continue;
                 }
-                let mut pb = PathBuilder::new();
-                for line in &f.geometry {
-                    let pts: Vec<(f32, f32)> = line.iter().map(&to).collect();
-                    for piece in clip_line(&pts, bounds) {
-                        push_line(&mut pb, &piece);
-                    }
-                }
-                let Some(path) = pb.finish() else { continue };
+                let join = layer.line_join(&ctx);
+                // Cut past the pixmap by as far as its stroke reaches (a mitred corner up to
+                // twice the width).
+                let edge = cut(if join == crate::style::LineJoin::Miter { 2.0 } else { 0.75 } * width.min(512.0) + 2.0);
                 let mut paint = Paint::default();
                 paint.set_color(color(c, layer.line_opacity(&ctx)));
                 paint.anti_alias = true;
-                let dash = layer.line_dasharray(&ctx).and_then(|d| {
-                    let mut v: Vec<f32> = d.iter().take(32).map(|x| (x * width.max(1.0)).max(0.5)).collect();
-                    // An odd number of lengths repeats once over (as in SVG).
-                    if !v.len().is_multiple_of(2) {
-                        v.extend(v.clone());
-                    }
-                    StrokeDash::new(v, 0.0)
-                });
-                let stroke = Stroke {
+                let mut stroke = Stroke {
                     width: width.min(512.0),
                     line_cap: match layer.line_cap(&ctx) {
                         crate::style::LineCap::Round => LineCap::Round,
                         crate::style::LineCap::Square => LineCap::Square,
                         crate::style::LineCap::Butt => LineCap::Butt,
                     },
-                    line_join: match layer.line_join(&ctx) {
+                    line_join: match join {
                         crate::style::LineJoin::Round => LineJoin::Round,
                         crate::style::LineJoin::Bevel => LineJoin::Bevel,
                         crate::style::LineJoin::Miter => LineJoin::Miter,
                     },
-                    dash,
                     ..Stroke::default()
                 };
-                pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                let dashes = layer.line_dasharray(&ctx).map(|d| {
+                    let mut v: Vec<f32> = d.iter().take(32).map(|x| (x * width.max(1.0)).max(0.5)).collect();
+                    // An odd number of lengths repeats once over (as in SVG).
+                    if !v.len().is_multiple_of(2) {
+                        v.extend(v.clone());
+                    }
+                    v
+                });
+                let Some(dashes) = dashes else {
+                    let mut pb = PathBuilder::new();
+                    for line in &f.geometry {
+                        let pts: Vec<(f32, f32)> = line.iter().map(&to).collect();
+                        for piece in clip_line(&pts, edge) {
+                            push_line(&mut pb, &piece);
+                        }
+                    }
+                    if let Some(path) = pb.finish() {
+                        pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                    }
+                    continue;
+                };
+                // The dashes start at the tile's edge, as the line is cut there; each piece of it
+                // near the pixmap goes on from as far along as it is, so they line up with those
+                // drawn next to the pixmap.
+                let period: f32 = dashes.iter().sum();
+                for line in &f.geometry {
+                    let pts: Vec<(f32, f32)> = line.iter().map(&to).collect();
+                    for piece in clip_line(&pts, bounds) {
+                        for (part, along) in clip_line_along(&piece, edge) {
+                            let mut pb = PathBuilder::new();
+                            push_line(&mut pb, &part);
+                            let Some(path) = pb.finish() else { continue };
+                            stroke.dash = StrokeDash::new(dashes.clone(), along.rem_euclid(period.max(1e-3)));
+                            pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                        }
+                    }
+                }
             }
             LayerKind::Circle if f.kind == GeomKind::Point => {
                 let Some(c) = layer.circle_color(&ctx) else { continue };
@@ -905,6 +1123,45 @@ pub(crate) fn clip_line(pts: &[(f32, f32)], b: [f32; 4]) -> Vec<Vec<(f32, f32)>>
     out
 }
 
+/// A polyline clipped to a rectangle: the pieces inside it, each with how far along the line it
+/// starts.
+pub(crate) fn clip_line_along(pts: &[(f32, f32)], b: [f32; 4]) -> Vec<(Vec<(f32, f32)>, f32)> {
+    let mut out: Vec<(Vec<(f32, f32)>, f32)> = Vec::new();
+    let mut cur: Vec<(f32, f32)> = Vec::new();
+    let mut start = 0.0;
+    let mut along = 0.0f32;
+    for w in pts.windows(2) {
+        let (Some(&a), Some(&c)) = (w.first(), w.get(1)) else { continue };
+        let len = (c.0 - a.0).hypot(c.1 - a.1);
+        match clip_segment(a, c, b) {
+            Some((p, q)) => {
+                if cur.last().is_none_or(|l| (l.0 - p.0).abs() > 1e-3 || (l.1 - p.1).abs() > 1e-3) {
+                    if cur.len() >= 2 {
+                        out.push((std::mem::take(&mut cur), start));
+                    }
+                    cur.clear();
+                    cur.push(p);
+                    start = along + (p.0 - a.0).hypot(p.1 - a.1);
+                }
+                cur.push(q);
+            }
+            None => {
+                if cur.len() >= 2 {
+                    out.push((std::mem::take(&mut cur), start));
+                }
+                cur.clear();
+            }
+        }
+        if len.is_finite() {
+            along += len;
+        }
+    }
+    if cur.len() >= 2 {
+        out.push((cur, start));
+    }
+    out
+}
+
 /// Liang–Barsky.
 fn clip_segment(a: (f32, f32), c: (f32, f32), b: [f32; 4]) -> Option<((f32, f32), (f32, f32))> {
     let (dx, dy) = (c.0 - a.0, c.1 - a.1);
@@ -994,17 +1251,17 @@ mod tests {
         )
         .unwrap();
         let mut pm = Pixmap::new(64, 64).unwrap();
-        draw_vector(&mut pm, &item(vec![square.clone()]), &layer, &world_frame(), 0.0, Some(&sheet()));
+        draw_vector(&mut pm, &item(vec![square.clone()]), &layer, &world_frame(), 0.0, Some(&sheet()), &[]);
         let px = pm.pixel(32, 32).unwrap();
         assert_eq!((px.red(), px.green(), px.alpha()), (255, 0, 255));
         // Without the sprite, or with an image it lacks, nothing is drawn (not black).
         let mut pm = Pixmap::new(64, 64).unwrap();
-        draw_vector(&mut pm, &item(vec![square.clone()]), &layer, &world_frame(), 0.0, None);
+        draw_vector(&mut pm, &item(vec![square.clone()]), &layer, &world_frame(), 0.0, None, &[]);
         let missing = StyleLayer::parse(
             &serde_json::json!({"id": "a", "type": "fill", "source": "s", "source-layer": "l", "paint": {"fill-pattern": "nope"}}),
         )
         .unwrap();
-        draw_vector(&mut pm, &item(vec![square]), &missing, &world_frame(), 0.0, Some(&sheet()));
+        draw_vector(&mut pm, &item(vec![square]), &missing, &world_frame(), 0.0, Some(&sheet()), &[]);
         assert_eq!(pm.pixel(32, 32).unwrap().alpha(), 0);
     }
 
@@ -1206,6 +1463,83 @@ mod tests {
         }
         assert_eq!(got.iter().map(|p| p.source_layer.as_str()).collect::<Vec<_>>(), vec!["pois"]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn wide_lines_reach_in_from_past_the_pixmap() {
+        // The top-left 64 pixels of a tile drawn 256 across; a road 120 points wide runs 100
+        // pixels down, its edge 40 pixels down: in the pixmap, though its line isn't.
+        let road = crate::mvt::Feature {
+            id: None,
+            kind: GeomKind::LineString,
+            geometry: vec![vec![[0.0, 1600.0], [4096.0, 1600.0]]],
+            props: Vec::new(),
+        };
+        let layer = StyleLayer::parse(&serde_json::json!({"id": "r", "type": "line", "source": "s", "source-layer": "l",
+            "layout": {"line-join": "round"}, "paint": {"line-color": "#f00", "line-width": 120}}))
+        .unwrap();
+        assert_eq!(overhang(&layer, 0.0), 90.0);
+        let it = item(vec![road]);
+        let half = crate::template::HALF_WORLD;
+        let frame = Frame { left: -half, top: half, m_per_px: 2.0 * half / 256.0, ppp: 1.0 };
+        let mut pm = Pixmap::new(64, 64).unwrap();
+        let mut boxes = HashMap::new();
+        let b = boxes_of(&mut boxes, &it, &layer);
+        draw_vector(&mut pm, &it, &layer, &frame, 0.0, None, &b);
+        assert_eq!(pm.pixel(32, 60).unwrap().red(), 255);
+        assert_eq!(pm.pixel(32, 30).unwrap().alpha(), 0);
+    }
+
+    #[test]
+    fn dashed_lines_know_how_far_along_they_are_cut() {
+        // In at 10 along, out, and in again at 30 along the line.
+        let pieces = clip_line_along(&[(-10.0, 5.0), (5.0, 5.0), (5.0, 15.0), (5.0, 25.0), (5.0, 0.0)], [0.0, 0.0, 10.0, 10.0]);
+        let near = |a: &[(f32, f32)], b: &[(f32, f32)]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| (a.0 - b.0).abs() + (a.1 - b.1).abs() < 1e-3)
+        };
+        assert_eq!(pieces.len(), 2);
+        assert!(near(&pieces[0].0, &[(0.0, 5.0), (5.0, 5.0), (5.0, 10.0)]) && (pieces[0].1 - 10.0).abs() < 1e-3, "{pieces:?}");
+        assert!(near(&pieces[1].0, &[(5.0, 10.0), (5.0, 0.0)]) && (pieces[1].1 - 50.0).abs() < 1e-3, "{pieces:?}");
+        assert!(clip_line_along(&[(f32::NAN, 0.0), (1.0, 1.0)], [0.0, 0.0, 10.0, 10.0]).len() <= 1);
+    }
+
+    #[test]
+    fn copies_pictures_as_a_pattern_draws_them() {
+        let mut img = Pixmap::new(8, 8).unwrap();
+        for (i, p) in img.pixels_mut().iter_mut().enumerate() {
+            let a = [255, 128, 0, 40][i % 4];
+            *p = tiny_skia::ColorU8::from_rgba((i * 7 % 256) as u8, 90, 200, a).premultiply();
+        }
+        let it = Item {
+            payload: Arc::new(Payload::Image(img.clone())),
+            at: TileId { z: 0, x: 0, y: 0 }.extent(),
+            z: 0,
+            clip: TileId { z: 0, x: 0, y: 0 }.extent(),
+        };
+        // The world 8 pixels across, its corner 2.4 pixels in.
+        let half = crate::template::HALF_WORLD;
+        let frame =
+            Frame { left: -half - 2.4 * (2.0 * half / 8.0), top: half + 1.6 * (2.0 * half / 8.0), m_per_px: 2.0 * half / 8.0, ppp: 1.0 };
+        for opacity in [1.0, 0.5] {
+            let mut copied = Pixmap::new(12, 12).unwrap();
+            copied.fill(tiny_skia::Color::from_rgba8(10, 200, 30, 255));
+            let mut painted = copied.clone();
+            draw_raster(&mut copied, &it, &frame, opacity);
+            // As a pattern fill would.
+            let paint = Paint {
+                shader: Pattern::new(img.as_ref(), SpreadMode::Pad, FilterQuality::Nearest, opacity, Transform::from_translate(2.4, 1.6)),
+                anti_alias: false,
+                ..Paint::default()
+            };
+            painted.fill_rect(clip_rect(&it, &frame).unwrap(), &paint, Transform::identity(), None);
+            let worst = copied.data().iter().zip(painted.data()).map(|(a, b)| a.abs_diff(*b)).max();
+            assert!(worst <= Some(2), "opacity {opacity}: {worst:?}");
+        }
+        // Off the pixmap: nothing, and no panic.
+        let mut pm = Pixmap::new(4, 4).unwrap();
+        copy_over(&mut pm, &Pixmap::new(2, 2).unwrap(), Rect::from_ltrb(-50.0, -50.0, -10.0, -10.0).unwrap(), (-50.0, -50.0), 1.0, 1.0);
+        copy_over(&mut pm, &Pixmap::new(2, 2).unwrap(), Rect::from_ltrb(0.0, 0.0, 1e9, 1e9).unwrap(), (f32::NAN, 0.0), 1.0, 1.0);
+        assert!(pm.data().iter().all(|b| *b == 0));
     }
 
     #[test]

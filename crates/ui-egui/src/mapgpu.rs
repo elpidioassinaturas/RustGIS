@@ -59,8 +59,9 @@ use std::sync::Arc;
 use egui_wgpu::{CallbackResources, CallbackTrait, RenderState, wgpu};
 use wgpu::util::DeviceExt;
 
-use rustgis_engine::render::gpu_scene::{CmdClip, DrawCmd, GpuScene, SceneTilt, TileQuad};
+use rustgis_engine::render::gpu_scene::{CmdClip, DrawCmd, GpuScene, MeshTile, SceneTilt, TileMeshVertex, TileQuad};
 use rustgis_engine::render::rustgis_tiles::cache::Payload;
+use rustgis_engine::render::tile_mesh::TileMesh;
 
 /// Vertices per marker shape slot in the template bank (the circle's 24 fan triangles fill it
 /// exactly; smaller shapes pad with centre points — zero-area triangles are discarded).
@@ -146,6 +147,31 @@ impl CmdUniforms {
     }
 }
 
+/// A vector tile mesh's uniforms (WGSL `TileMeshUniforms`): the command's, how far the camera's
+/// zoom is past the mesh's level and the pixels per point, and the tile's square.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct TileMeshUniforms {
+    cmd: CmdUniforms,
+    zoom: [f32; 4],
+    square: [f32; 4],
+}
+
+impl TileMeshUniforms {
+    fn new(cam: &Camera, logical_size: [f64; 2], ppp: f32, tile: &MeshTile, tilt: Option<&SceneTilt>) -> Self {
+        TileMeshUniforms {
+            cmd: CmdUniforms::new(cam, logical_size, ppp, tile.origin, tilt, CmdClip::ALL),
+            zoom: [(camera_zoom(cam) - f32::from(tile.level)).clamp(0.0, 1.0), ppp, 0.0, 0.0],
+            square: tile.clip,
+        }
+    }
+}
+
+/// A camera's zoom as a style takes it (MapLibre's, for 512-pixel tiles).
+fn camera_zoom(cam: &Camera) -> f32 {
+    rustgis_engine::render::rustgis_tiles::template::style_zoom(cam.res)
+}
+
 /// The extrusions' light for a camera turned to its bearing (see [`CmdUniforms::light`]):
 /// `render::EXTRUSION_LIGHT` is given in the view's ground frame, x right and y down.
 fn extrusion_light(cam: &Camera) -> [f32; 4] {
@@ -222,8 +248,12 @@ pub(crate) struct GpuMapRenderer {
     shadow_pipeline: wgpu::RenderPipeline,
     /// Raster tiles, each its own texture placed on the map.
     tile_pipeline: wgpu::RenderPipeline,
+    /// Vector tile meshes, drawn where their square marked the stencil, and those squares.
+    tile_mesh_pipeline: wgpu::RenderPipeline,
+    tile_square_pipeline: wgpu::RenderPipeline,
     blit_pipeline: wgpu::RenderPipeline,
     cmd_layout: wgpu::BindGroupLayout,
+    tile_mesh_layout: wgpu::BindGroupLayout,
     backdrop_layout: wgpu::BindGroupLayout,
     image_layout: wgpu::BindGroupLayout,
     blit_layout: wgpu::BindGroupLayout,
@@ -233,6 +263,8 @@ pub(crate) struct GpuMapRenderer {
     samples: u32,
     /// The tile pictures uploaded so far, kept across scenes.
     tile_textures: std::sync::Mutex<TileTextures>,
+    /// The vector tile meshes uploaded so far, kept across scenes.
+    tile_meshes: std::sync::Mutex<TileMeshBuffers>,
 }
 
 impl GpuMapRenderer {
@@ -260,6 +292,10 @@ impl GpuMapRenderer {
                 uniform_buf(wgpu::ShaderStages::VERTEX_FRAGMENT, 0, std::mem::size_of::<CmdUniforms>() as u64),
                 uniform_buf(wgpu::ShaderStages::VERTEX, 1, (TEMPLATE_VERTS * SHAPES * 16) as u64),
             ],
+        });
+        let tile_mesh_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mapgpu_tile_mesh"),
+            entries: &[uniform_buf(wgpu::ShaderStages::VERTEX_FRAGMENT, 0, std::mem::size_of::<TileMeshUniforms>() as u64)],
         });
         let backdrop_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mapgpu_backdrop"),
@@ -378,6 +414,19 @@ impl GpuMapRenderer {
                 wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 16, shader_location: 2 },
             ],
         }];
+        let tile_mesh_buffers = [wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<TileMeshVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 8, shader_location: 1 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Unorm8x4, offset: 16, shader_location: 2 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Unorm8x4, offset: 20, shader_location: 3 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 24, shader_location: 4 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 32, shader_location: 5 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 36, shader_location: 6 },
+            ],
+        }];
         let samples = 4;
         let scene_format = wgpu::TextureFormat::Rgba8Unorm;
         // Everything but the extrusions draws in order, ignoring the depth buffer; extrusions test
@@ -403,6 +452,40 @@ impl GpuMapRenderer {
             stencil: wgpu::StencilState { front: once, back: once, read_mask: 0xff, write_mask: 0xff },
             ..d
         });
+        // A tile's square writes its number into the stencil; its mesh draws only where it is.
+        let stencil = |face: wgpu::StencilFaceState, write_mask: u32| {
+            flat.clone().map(|d| wgpu::DepthStencilState {
+                stencil: wgpu::StencilState { front: face, back: face, read_mask: 0xff, write_mask },
+                ..d
+            })
+        };
+        let mark = wgpu::StencilFaceState {
+            compare: wgpu::CompareFunction::Always,
+            fail_op: wgpu::StencilOperation::Keep,
+            depth_fail_op: wgpu::StencilOperation::Keep,
+            pass_op: wgpu::StencilOperation::Replace,
+        };
+        let inside = wgpu::StencilFaceState { compare: wgpu::CompareFunction::Equal, pass_op: wgpu::StencilOperation::Keep, ..mark };
+        let tile_mesh_pipeline = pipeline(
+            "mapgpu_tile_mesh",
+            "vs_tile_mesh",
+            "fs_tile_mesh",
+            &tile_mesh_buffers,
+            &[&tile_mesh_layout],
+            scene_format,
+            samples,
+            stencil(inside, 0),
+        );
+        let tile_square_pipeline = pipeline(
+            "mapgpu_tile_square",
+            "vs_tile_square",
+            "fs_tile_square",
+            &[],
+            &[&tile_mesh_layout],
+            scene_format,
+            samples,
+            stencil(mark, 0xff),
+        );
         let mesh_pipeline =
             pipeline("mapgpu_mesh", "vs_mesh", "fs_mesh", &mesh_buffers, &[&cmd_layout], scene_format, samples, flat.clone());
         let point_pipeline =
@@ -444,8 +527,11 @@ impl GpuMapRenderer {
             extrude_pipeline,
             shadow_pipeline,
             tile_pipeline,
+            tile_mesh_pipeline,
+            tile_square_pipeline,
             blit_pipeline,
             cmd_layout,
+            tile_mesh_layout,
             backdrop_layout,
             image_layout,
             blit_layout,
@@ -453,6 +539,7 @@ impl GpuMapRenderer {
             sampler,
             samples,
             tile_textures: Default::default(),
+            tile_meshes: Default::default(),
         }
     }
 }
@@ -574,6 +661,81 @@ impl TileTextures {
         }
         self.scene += 1;
     }
+}
+
+/// How many bytes of vector tile meshes are kept on the GPU besides the latest scene's.
+const KEPT_MESH_BYTES: u64 = if cfg!(target_arch = "wasm32") { 64 << 20 } else { 256 << 20 };
+
+/// The vector tile meshes on the GPU, kept across scenes as [`TileTextures`] keeps tile
+/// pictures: by the mesh's address, held weakly (the mesh cache keeps it alive).
+#[derive(Default)]
+struct TileMeshBuffers {
+    by_mesh: std::collections::HashMap<usize, MeshBuffers>,
+    scene: u64,
+}
+
+struct MeshBuffers {
+    mesh: std::sync::Weak<TileMesh>,
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    used: u64,
+    bytes: u64,
+}
+
+impl TileMeshBuffers {
+    /// A mesh's vertex and index buffers, uploaded the first time it is drawn.
+    fn buffers(&mut self, device: &wgpu::Device, mesh: &Arc<TileMesh>) -> (wgpu::Buffer, wgpu::Buffer) {
+        let key = Arc::as_ptr(mesh) as usize;
+        if let Some(b) = self.by_mesh.get_mut(&key)
+            && b.mesh.upgrade().is_some_and(|m| Arc::ptr_eq(&m, mesh))
+        {
+            b.used = self.scene;
+            return (b.vertices.clone(), b.indices.clone());
+        }
+        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mapgpu_tile_mesh_vertices"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mapgpu_tile_mesh_indices"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let bytes = mesh.bytes() as u64;
+        let b = MeshBuffers { mesh: Arc::downgrade(mesh), vertices: vertices.clone(), indices: indices.clone(), used: self.scene, bytes };
+        self.by_mesh.insert(key, b);
+        (vertices, indices)
+    }
+
+    /// Ends a scene: drops the buffers of meshes gone, and past [`KEPT_MESH_BYTES`] those unused
+    /// longest, but never one the scene just drew.
+    fn end_scene(&mut self) {
+        self.by_mesh.retain(|_, b| b.mesh.strong_count() > 0);
+        let mut old: Vec<(u64, u64, usize)> =
+            self.by_mesh.iter().filter(|(_, b)| b.used != self.scene).map(|(k, b)| (b.used, b.bytes, *k)).collect();
+        if old.iter().map(|o| o.1).sum::<u64>() > KEPT_MESH_BYTES {
+            old.sort_unstable_by_key(|o| std::cmp::Reverse(o.0));
+            let mut kept = 0u64;
+            for (_, bytes, k) in old {
+                kept = kept.saturating_add(bytes);
+                if kept > KEPT_MESH_BYTES {
+                    self.by_mesh.remove(&k);
+                }
+            }
+        }
+        self.scene += 1;
+    }
+}
+
+/// One tile of an uploaded vector tile layer.
+pub(crate) struct MeshTileDraw {
+    mesh: Arc<TileMesh>,
+    tile: MeshTile,
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    uniforms: wgpu::Buffer,
+    bind: wgpu::BindGroup,
 }
 
 /// The offscreen scene target: a 4× MSAA color attachment plus the plain texture it resolves
@@ -711,6 +873,12 @@ pub(crate) enum SceneDraw {
         clip: CmdClip,
         shadows: bool,
     },
+    /// A vector tile layer's meshes: what shows of them depends on the camera's zoom (its bits,
+    /// rewritten by `set_camera`).
+    TileMeshes {
+        tiles: Vec<MeshTileDraw>,
+        zoom: std::sync::atomic::AtomicU32,
+    },
     /// A tilted view's water, fog and sky, under everything.
     Backdrop {
         uniforms: wgpu::Buffer,
@@ -800,6 +968,11 @@ fn cmd_fits(limits: &wgpu::Limits, cmd: &DrawCmd) -> bool {
         }
         // A tile the device can't hold is left out (`TileTextures::bind`).
         DrawCmd::Tiles { tiles, .. } => tiles.len().checked_mul(6 * std::mem::size_of::<TileVertex>()).is_some_and(fits),
+        DrawCmd::TileMeshes { tiles, .. } => tiles.iter().all(|t| {
+            fits(std::mem::size_of_val(t.mesh.vertices.as_slice()))
+                && fits(std::mem::size_of_val(t.mesh.indices.as_slice()))
+                && u32::try_from(t.mesh.indices.len()).is_ok()
+        }),
     }
 }
 
@@ -825,6 +998,7 @@ impl SceneBuffers {
         let mut has_tiles = false;
         let tilt = scene.tilt.as_ref();
         let mut tile_textures = r.tile_textures.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tile_meshes = r.tile_meshes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = tilt.filter(|t| t.camera.pitch != 0.0) {
             let u = BackdropUniforms::new(&camera, size, ppp, scene.clear, t);
             let uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1025,9 +1199,34 @@ impl SceneBuffers {
                     });
                     has_tiles = true;
                 }
+                DrawCmd::TileMeshes { tiles } => {
+                    let tile_draws: Vec<MeshTileDraw> = tiles
+                        .iter()
+                        .map(|t| {
+                            let (vertices, indices) = tile_meshes.buffers(device, &t.mesh);
+                            let u = TileMeshUniforms::new(&camera, size, ppp, t, tilt);
+                            let uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("mapgpu_tile_mesh_uniforms"),
+                                contents: bytemuck::bytes_of(&u),
+                                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                            });
+                            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("mapgpu_tile_mesh_bind"),
+                                layout: &r.tile_mesh_layout,
+                                entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
+                            });
+                            MeshTileDraw { mesh: t.mesh.clone(), tile: t.clone(), vertices, indices, uniforms, bind }
+                        })
+                        .collect();
+                    if !tile_draws.is_empty() {
+                        let zoom = std::sync::atomic::AtomicU32::new(camera_zoom(&camera).to_bits());
+                        draws.push(SceneDraw::TileMeshes { tiles: tile_draws, zoom });
+                    }
+                }
             }
         }
         tile_textures.end_scene();
+        tile_meshes.end_scene();
         Some(SceneBuffers { draws, clear: scene.clear, size, ppp, has_images, has_tiles, tilt: scene.tilt })
     }
 
@@ -1046,6 +1245,14 @@ impl SceneBuffers {
                     if let Some(t) = &self.tilt {
                         let u = BackdropUniforms::new(cam, self.size, self.ppp, self.clear, t);
                         queue.write_buffer(uniforms, 0, bytemuck::bytes_of(&u));
+                    }
+                    continue;
+                }
+                SceneDraw::TileMeshes { tiles, zoom } => {
+                    zoom.store(camera_zoom(cam).to_bits(), std::sync::atomic::Ordering::Relaxed);
+                    for t in tiles {
+                        let u = TileMeshUniforms::new(cam, self.size, self.ppp, &t.tile, self.tilt.as_ref());
+                        queue.write_buffer(&t.uniforms, 0, bytemuck::bytes_of(&u));
                     }
                     continue;
                 }
@@ -1101,6 +1308,33 @@ fn paint_draws(renderer: &GpuMapRenderer, draws: &[SceneDraw], rp: &mut wgpu::Re
                 rp.set_pipeline(&renderer.image_pipeline);
                 rp.set_bind_group(0, bind, &[]);
                 rp.draw(0..6, 0..1);
+            }
+            SceneDraw::TileMeshes { tiles, zoom, .. } => {
+                let zoom = f32::from_bits(zoom.load(std::sync::atomic::Ordering::Relaxed));
+                // Each tile's square marks the stencil with its number, its mesh draws only
+                // there, and the squares clear it again for what comes next (a byte holds 255).
+                for batch in tiles.chunks(255) {
+                    let squares = |rp: &mut wgpu::RenderPass<'_>, mark: bool| {
+                        rp.set_pipeline(&renderer.tile_square_pipeline);
+                        for (i, t) in batch.iter().enumerate() {
+                            rp.set_stencil_reference(if mark { i as u32 + 1 } else { 0 });
+                            rp.set_bind_group(0, &t.bind, &[]);
+                            rp.draw(0..6, 0..1);
+                        }
+                    };
+                    squares(rp, true);
+                    rp.set_pipeline(&renderer.tile_mesh_pipeline);
+                    for (i, t) in batch.iter().enumerate() {
+                        rp.set_stencil_reference(i as u32 + 1);
+                        rp.set_bind_group(0, &t.bind, &[]);
+                        rp.set_vertex_buffer(0, t.vertices.slice(..));
+                        rp.set_index_buffer(t.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        for run in t.mesh.shown(zoom) {
+                            rp.draw_indexed(run, 0, 0..1);
+                        }
+                    }
+                    squares(rp, false);
+                }
             }
             SceneDraw::Tiles { vertices, textures, bind, .. } => {
                 rp.set_pipeline(&renderer.tile_pipeline);
@@ -1692,6 +1926,106 @@ mod tests {
             },
             &world_view(),
         );
+    }
+
+    /// A vector tile style drawn as meshes (#596): the GPU draws what the CPU draws, each tile
+    /// clipped to its square.
+    #[test]
+    fn parity_vector_tile_meshes() {
+        use rustgis_engine::geom::lonlat_to_merc;
+        use rustgis_engine::map::{TileKind, TileLayer};
+        use rustgis_engine::render::rustgis_tiles::mvt::{Feature, GeomKind, Layer, Tile, Value, encode};
+        use rustgis_engine::render::rustgis_tiles::pmtiles::{NewArchive, TileType, write};
+        // Zoom 1: each tile's park, see-through, reaching past the tile into its buffer (as real
+        // tiles do; drawn twice where tiles overlap unless each is clipped to its square), a road
+        // and a dashed path in it.
+        let feature = |kind, geometry: Vec<Vec<[f32; 2]>>, class: &str| Feature {
+            id: None,
+            kind,
+            geometry,
+            props: vec![("class".into(), Value::String(class.into()))],
+        };
+        let tile = |x: u32, y: u32| {
+            let o = (x * 500 + y * 300) as f32;
+            Tile {
+                layers: vec![
+                    Layer {
+                        name: "parks".into(),
+                        extent: 4096,
+                        features: vec![feature(
+                            GeomKind::Polygon,
+                            vec![vec![[-200.0, -200.0], [4296.0, -200.0], [4296.0, 4296.0], [-200.0, 4296.0], [-200.0, -200.0]]],
+                            "park",
+                        )],
+                    },
+                    Layer {
+                        name: "roads".into(),
+                        extent: 4096,
+                        features: vec![
+                            feature(GeomKind::LineString, vec![vec![[300.0, 600.0 + o], [3800.0, 3500.0 - o]]], "major"),
+                            feature(GeomKind::LineString, vec![vec![[300.0 + o, 3900.0], [3800.0, 200.0 + o]]], "path"),
+                        ],
+                    },
+                    Layer {
+                        name: "pois".into(),
+                        extent: 4096,
+                        features: vec![feature(GeomKind::Point, vec![vec![[2048.0, 2048.0]]], "cafe")],
+                    },
+                ],
+            }
+        };
+        let dir = std::env::temp_dir().join(format!("rustgis-parity-meshes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("t.pmtiles");
+        let new = NewArchive {
+            tile_type: TileType::Mvt,
+            gzipped_tiles: false,
+            bounds: [-180.0, -85.0, 180.0, 85.0],
+            metadata: serde_json::json!({"vector_layers": [{"id": "parks"}, {"id": "roads"}, {"id": "pois"}]}),
+        };
+        let tiles: Vec<(u8, u32, u32, Vec<u8>)> =
+            [(0, 0), (1, 0), (0, 1), (1, 1)].iter().map(|&(x, y)| (1, x, y, encode(&tile(x, y)))).collect();
+        std::fs::write(&path, write(tiles, &new).expect("an archive")).expect("written");
+        let style = r##"[
+            {"id": "bg", "type": "background", "paint": {"background-color": "#f0eee8"}},
+            {"id": "park", "type": "fill", "source": "x", "source-layer": "parks", "paint": {"fill-color": "#2a7f2a", "fill-opacity": 0.5}},
+            {"id": "major", "type": "line", "source": "x", "source-layer": "roads", "filter": ["==", "class", "major"],
+                "layout": {"line-join": "round", "line-cap": "round"}, "paint": {"line-color": "#e92", "line-width": 10}},
+            {"id": "path", "type": "line", "source": "x", "source-layer": "roads", "filter": ["==", "class", "path"],
+                "paint": {"line-color": "#333", "line-width": 3, "line-dasharray": [4, 3]}},
+            {"id": "poi", "type": "circle", "source": "x", "source-layer": "pois",
+                "paint": {"circle-color": "#c00", "circle-radius": 8, "circle-stroke-color": "#fff", "circle-stroke-width": 2}}
+        ]"##;
+        let build = || {
+            let mut m = Map::new("Map");
+            m.graticule = false;
+            let mut t = TileLayer::new("Parks", TileKind::PmTiles, path.display().to_string());
+            t.max_zoom = 1;
+            t.style_layers = style.into();
+            m.tiles.push(t);
+            m
+        };
+        // The four tiles about the corner where they meet, between levels, at one and two pixels a
+        // point.
+        let center = lonlat_to_merc(Coord::new(4.0, -3.0));
+        for (res, ppp, w, h) in [(30_000.0, 1.0, 900.0, 600.0), (20_000.0, 2.0, 600.0, 400.0)] {
+            let view =
+                View { width: w, height: h, pixels_per_point: ppp, camera: Camera { center, res, bearing: 0.0, pitch: 0.0 }, sky: false };
+            let mut m = build();
+            for _ in 0..500 {
+                if render::render(&mut m, &view).is_some_and(|r| !r.tiles_pending) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let Some(RenderOutput::Gpu(scene)) = render::render_backend(&mut m, &view, Backend::Gpu) else { panic!("gpu scene") };
+            assert!(scene.cmds.iter().any(|c| matches!(c, DrawCmd::TileMeshes { .. })), "meshes at {res}");
+            assert!(!scene.cmds.iter().any(|c| matches!(c, DrawCmd::Image { .. } | DrawCmd::Tiles { .. })), "no pictures at {res}");
+            // Dashes and round caps end on different pixels by tiny-skia's analytic coverage and
+            // the GPU's samples: a few outliers.
+            assert_parity_within(&format!("vector tile meshes {res}"), build, &view, wgpu::Backends::all(), 40);
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A map of raster tiles (#568): the GPU places each tile as its own texture, and draws

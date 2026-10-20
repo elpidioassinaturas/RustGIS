@@ -1,0 +1,3106 @@
+# fa interface catalog: English<TAB>translation
+ by 	توسط
+'{b}' isn't a bucket name	نام باکت «{b}» معتبر نیست
+'{text}' isn't a scale: type one such as 1:12,345	مقیاس «{text}» معتبر نیست: مقیاسی مانند ۱:۱۲٬۳۴۵ وارد کنید
+(b4-b3)/(b4+b3)	(b4-b3)/(b4+b3)
+(filtered)	(فیلتر شده)
++ Add Stop	+ افزودن توقف
++ Input	+ ورودی
++ Output	+ خروجی
+/F	/F
+/PID	/PID
+/T	/T
+00:00 UTC	00:00 UTC
+06:00 UTC	06:00 UTC
+12:00 UTC	12:00 UTC
+18:00 UTC	18:00 UTC
+3D mesh	مش سه‌بعدی
+<None>	<هیچ>
+A 3D globe seen from space.	یک کره سه‌بعدی که از فضای دیده می‌شود.
+A blank map with a basemap	یک نقشه خالی با نقشه پایه
+A catalogue's (CSW 2.0.2) address: search its records by words and, if you like, the map's area, then add the services and files they link to.	آدرس یک کاتالوگ (CSW 2.0.2): رکوردهایش را با کلمات و، در صورت تمایل، با محدودهٔ نقشه جستجو کنید؛ سپس سرویس‌ها و فایل‌های پیوندیافته به آن‌ها را اضافه کنید.
+A ChatGPT plan or app usage limit was reached. Review Weekly usage before trying again.	سقف مصرف طرح ChatGPT یا برنامه پر شده است. پیش از تلاش دوباره، «مصرف هفتگی» را ببینید.
+A ChatGPT sign-in can only be used with the OpenAI API.	ورود به ChatGPT فقط می‌تواند با API OpenAI استفاده شود.
+A country's administrative boundaries from geoBoundaries (CC BY 4.0): the country itself (ADM0), its first-level divisions (ADM1, such as states) and finer ones.	مرزهای اداری یک کشور از geoBoundaries (CC BY 4.0): خود کشور (ADM0)، تقسیمات سطح اول (ADM1، مانند ایالت‌ها) و تقسیمات ریزتر.
+A custom stretch is in this raster's own units: pick another stretch type to save it as the default.	یک کشش سفارشی بر حسب واحدهای خودِ این رستر است: برای ذخیره به‌عنوان پیش‌فرض، نوع کشش دیگری را انتخاب کنید.
+A fast, free and open-source GIS written in pure Rust, for mapping, analyzing and sharing geospatial data on the desktop and in the browser.	یک GIS سریع، رایگان و متن‌باز که به Rust خالص نوشته شده، برای نقشه‌برداری، تحلیل و به‌اشتراک‌گذاری داده‌های فضایی روی دسکتاپ و در مرورگر.
+A field (known once the model runs)	یک فیلد (پس از اجرای مدل مشخص می‌شود)
+A flat scene centred on the view (azimuthal equidistant).	یک صحنهٔ تخت با مرکز روی نما (سمتی هم‌فاصله).
+A GeoLens server's datasets, read as features (the first 1,000 of each).	داده‌های یک سرور GeoLens، به‌عنوان عناصر خوانده می‌شوند (اولین ۱٬۰۰۰ مورد از هر کدام).
+A globe scene.	یک صحنه کره‌ای.
+A latitude and longitude (40.7, -74.0 or 40°42'N 74°0'W), a layer, a bookmark or a value in a layer's table. Enter picks the highlighted row; Search places looks the text up as a place	عرض و طول جغرافیایی (۴۰.۷، -۷۴.۰ یا ۴۰°۴۲'ش ۷۴°۰'غ)، یک لایه، یک نشانک یا یک مقدار در جدول لایه. Enter سطر برجسته را انتخاب می‌کند؛ جستجوی مکان‌ها متن را به‌عنوان یک مکان جستجو می‌کند.
+A layer the model reads	یک لایه که مدل آن را می‌خواند
+A magnifying lens that follows the pointer.	یک لنز بزرگنمایی که نشانگر را دنبال می‌کند.
+A map, feature or coverage service's address: WMS, WMTS, WFS, WCS, OGC API Features or Tiles, or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer (or a services directory, to browse).	آدرس یک سرویس نقشه، عنصر یا پوشش: WMS، WMTS، WFS، WCS، OGC API Features or Tiles، یا یک FeatureServer، MapServer، ImageServer یا VectorTileServer ArcGIS (یا یک فهرست سرویس، برای مرور).
+a name, or owner/name such as giswqs/geospatial	یک نام، یا مالک/نامی مانند giswqs/geospatial
+A node cannot connect to itself.	یک گره نمی‌تواند به خودش متصل شود.
+A notebook of text and command cells.	یک دفترچه متنی از سلول‌های متن و دستور.
+A place or an address	یک مکان یا آدرس
+A project keeps at least one map	یک پروژه حداقل یک نقشه را نگه می‌دارد
+A projected coordinate system.	سیستم مختصات تصویری
+A report listing the selected layer's records, page after page.	گزارشی که رکوردهای لایه‌ی انتخاب‌شده را صفحه به صفحه فهرست می‌کند
+A result that only feeds other tools is removed once the model has run; add an output to keep it.	نتیجه‌ای که فقط سایر ابزارها را تغذیه می‌کند، پس از اجرای مدل حذف می‌شود؛ یک خروجی اضافه کنید تا آن را حفظ کنید
+A result the model keeps, under a name	نتیجه‌ای که مدل آن را حفظ می‌کند، تحت یک نام
+A service import or refresh is already running.	واردسازی یا تازه‌سازی سرویس در حال اجراست
+A task holds at most 200 steps: stop recording to make it, then record the rest as another task.	یک وظیفه حداکثر ۲۰۰ مرحله دارد: ضبط را متوقف کنید تا آن را ایجاد کنید، سپس بقیه را به عنوان وظیفه‌ی دیگری ضبط کنید
+A template with the first selected feature's values	قالبی با مقادیر اولین عنصر انتخاب‌شده
+A tile service's address: raster tiles with {z}/{x}/{y} (or {-y}, {q}, {bbox-epsg-3857} for WMS), vector tiles (.pbf) or TileJSON, a MapLibre style, a PMTiles archive (a web address, or a file on this computer), or an MBTiles file on this computer.	آدرس سرویس تایل: تایل‌های رستری با {z}/{x}/{y} (یا {-y}، {q}، {bbox-epsg-3857} برای WMS)، تایل‌های برداری (.pbf) یا TileJSON، استایل MapLibre، بایگانی PMTiles (آدرس وب، یا فایلی روی این کامپیوتر)، یا فایل MBTiles روی این کامپیوتر
+A token is set.	توکن تنظیم شده است
+A value, a field, or two of them joined by + − × ÷. Applies to the selected rows, or every row when none is selected.	یک مقدار، یک فیلد، یا دو مورد با + − × ÷ به هم پیوسته. بر روی ردیف‌های انتخاب‌شده اعمال می‌شود، یا بر روی هر ردیفی زمانی که هیچ‌کدام انتخاب نشده باشند
+a vector a pixel	یک برداری یک پیکسل
+a vector an image patch	یک برداری یک تصویر کوچک
+A Zarr store (format 2 or 3) by its web address, with consolidated metadata, or a folder on this computer. A variable's map is read for the steps picked of its other dimensions, such as time.	یک ذخیره‌سازی Zarr (فرمت ۲ یا ۳) با آدرس وب، با متادیتای ادغام‌شده، یا یک پوشه روی این کامپیوتر. نقشه‌ی یک متغیر برای مراحل انتخاب‌شده از ابعاد دیگر آن، مانند زمان، خوانده می‌شود
+About	درباره
+About plugins	درباره‌ی افزونه‌ها
+About RustGIS	درباره‌ی RustGIS
+About RustGIS.	درباره‌ی RustGIS.
+Above	بالا
+Above Left	بالا چپ
+Above Right	بالا راست
+Access key ID	شناسه کلید دسترسی
+Accessibility	دسترس‌پذیری
+Account	حساب
+Activate Map	فعال‌سازی نقشه
+Add	افزودن
+Add\nData	افزودن\nداده
+Add ({n})	افزودن ({n})
+Add a bar chart of a layer's numeric field.	افزودن نمودار میله‌ای از یک فیلد عددی لایه
+Add a colorbar of a raster layer's colour scale in the map frame.	افزودن نوار رنگی از مقیاس رنگی یک لایه‌ی رستری در قاب نقشه
+Add a description.	افزودن توضیح
+Add a field.	افزودن فیلد
+Add a file path	افزودن مسیر فایل
+Add a legend of the map frame's layers.	افزودن نمادین لایه‌های قاب نقشه
+Add a map frame showing a map of the project.	افزودن قاب نقشه که نقشه‌ی پروژه را نشان می‌دهد
+Add a new map to the project.	افزودن یک نقشه جدید به پروژه
+Add a north arrow for the map frame.	افزودن فلش شمال برای قاب نقشه
+Add a page	افزودن صفحه
+Add a page layout for printing and exporting the map.	افزودن چیدمان صفحه برای چاپ و برون‌بری نقشه
+Add a page to the presentation.	افزودن صفحه به ارائه.
+Add a PNG or JPEG picture to the page.	افزودن تصویر PNG یا JPEG به صفحه.
+Add a presentation file.	افزودن فایل ارائه.
+Add a report file, or a report template for the selected layer.	افزودن فایل گزارش یا الگوی گزارش برای لایه‌ی انتخاب شده.
+Add a scale bar for the map frame.	افزودن نوار مقیاس برای قاب نقشه.
+add a second map first (Data › New Map)	ابتدا نقشه‌ی دوم را اضافه کنید (داده › نقشه‌ی جدید)
+Add a second map frame first	ابتدا قاب نقشه‌ی دوم را اضافه کنید
+Add a text element.	افزودن عنصر متنی.
+Add a web basemap over the others instead of replacing them, to blend it with them. Click one that shows to take it off.	یک نقشه پایه وب را به جای جایگزینی آن‌ها، روی بقیه اضافه کنید تا با آن‌ها ترکیب شود. روی یکی که نمایش داده شده کلیک کنید تا آن را حذف کنید.
+Add Administrative Boundaries	افزودن مرزهای اداری
+Add an Earthdata Login token (Earthdata Login, above) to put NASA GeoTIFFs on the map.	توکن ورود به Earthdata Login (بالای صفحه) را اضافه کنید تا GeoTIFFهای NASA را روی نقشه قرار دهید.
+Add an elevation raster first.	ابتدا یک رستر ارتفاعی اضافه کنید.
+Add an elevation raster to the map first	ابتدا یک رستر ارتفاعی را به نقشه اضافه کنید
+Add an empty layer with a ready-made schema, to draw into.	یک لایه خالی با اسکیمای آماده برای رسم در آن اضافه کنید.
+Add an input for each layer the model reads.	برای هر لایه‌ای که مدل می‌خواند، یک ورودی اضافه کنید.
+Add an output to keep a result under a name.	یک خروجی برای نگهداری نتیجه تحت یک نام اضافه کنید.
+Add and Open	افزودن و باز کردن
+Add and Open Notebook	افزودن و باز کردن دفترچه یادداشت
+Add Archive	افزودning بایگانی
+add at least two keyframes	حداقل دو کلیدفریم اضافه کنید
+Add Cell	افزودن سلول
+Add Color Ramp File…	افزودن فایل رام رنگی…
+Add Color Ramps	افزودن رام‌های رنگی
+Add color ramps to the project from a .rgisramp file, a QGIS style, a GDAL color file or a GMT palette.	رام‌های رنگی را به پروژه از فایل .rgisramp، استایل QGIS، فایل رنگ GDAL یا پالت GMT اضافه کنید.
+Add Commands	افزودن دستورات
+Add Data	افزودن داده
+Add Data (from file contents)	افزودن داده (از محتوای فایل)
+Add Data (from text)	افزودن داده (از متن)
+Add Data From Database	افزودن داده از پایگاه داده
+Add data from public web services and catalogs.	افزودن داده از سرویس‌ها و کاتالوگ‌های وب عمومی.
+Add Data From SQL	افزودن داده از SQL
+Add Data From URL	افزودن داده از URL
+Add Data From URL…	افزودن داده از URL…
+Add Data Store…	افزودن ذخیره داده…
+Add Data…	افزودن داده…
+Add Delimited Text	افزودن متن جداشده
+Add Delimited Text…	افزودن متن جداشده…
+Add Downloaded Data	افزودن دانلود شده داده
+Add Element	افزودن عنصر
+Add Encoded Polyline	افزودن چندخطه کدگذاری شده
+Add Field	افزودن فیلد
+Add field	افزودن فیلد
+Add field boundaries	افزودن مرزهای فیلد
+Add field density	افزودن تراکم فیلد
+Add Fields of the World	افزودن فیلدهای جهان
+Add Folder	افزودن پوشه
+Add Folder…	افزودن پوشه…
+Add folder…	افزودن پوشه…
+Add From Database	افزودن از پایگاه داده
+Add From Service	افزودن از سرویس
+Add From Service…	افزودن از سرویس…
+Add GeoJSON, CSV or Shapefile data to the map.	افزودن داده GeoJSON، CSV یا Shapefile به نقشه.
+Add Graphic	افزودن گرافیک
+Add Graphics Layer	افزودن لایه گرافیک
+Add Input	افزودن ورودی
+Add Job	افزودن وظیفه
+Add Keyframe	افزودن کلیدفریم
+Add Layer File	افزودن پرونده لایه
+Add Open Data	افزودن داده باز
+Add Output	افزودن خروجی
+Add Overture Maps Data	افزودن داده نقشه‌های Overture
+Add Page After	افزودن صفحه بعد
+Add Page Before	افزودن صفحه قبل
+Add pages, layouts, related reports and related records to the report.	افزودن صفحات، چیدمان‌ها، گزارش‌های مرتبط و سوابق مرتبط به گزارش.
+Add Photos	افزودن عکس‌ها
+Add Plugin Folder…	افزودن پوشه افزونه‌ها…
+Add points	افزودن نقاط
+Add raster tiles, vector tiles or a map style by address.	افزودن کاشی‌های رستر، کاشی‌های برداری یا یک سبک نقشه با آدرس.
+Add Rule	افزودن قانون
+Add sample countries	افزودن کشورهای نمونه
+Add Sample Data	افزودن داده‌های نمونه
+Add Satellite Embeddings	افزودن Embeddings ماهواره‌ای
+Add Service Layer	افزودن لایه سرویس
+Add skill…	افزودن مهارت…
+Add STAC Asset	افزودن دارایی STAC
+Add STAC Footprints	افزودن ردپاهای STAC
+Add Step	افزودن مرحله
+Add Stroke	افزودن خطوط
+Add Style	افزودن سبک
+Add Style File…	افزودن فایل سبک…
+Add Task Step	افزودن مرحله وظیفه
+Add Text	افزودن متن
+Add text that updates: page, date, scale, map and more.	افزودن متن که به‌روز می‌شود: صفحه، تاریخ، مقیاس، نقشه و بیشتر.
+Add the attribute table of a layer in the map frame.	افزودن جدول ویژگی یک لایه در قاب نقشه.
+Add the current view as a keyframe.	افزودن نمای فعلی به عنوان کلیدفریم.
+Add the maps of a map file, map package, project or project package.	افزودن نقشه‌های یک فایل نقشه، بسته نقشه، پروژه یا بسته پروژه.
+Add The National Map Service	افزودن سرویس نقشه ملی
+Add this GeoTIFF to the map	افزودن این GeoTIFF به نقشه
+Add this MCP server to your agent:	این سرور MCP را به ایجنت خود اضافه کنید:
+Add Tile Layer	افزودن لایه کاشی
+Add Tile Layer…	افزودن لایه کاشی…
+Add To Current Selection	افزودن به انتخاب فعلی
+Add to Favourites	افزودن به علاقه‌مندی‌ها
+Add to Map	افزودن به نقشه
+Add vector data.	افزودن داده برداری.
+Add view	افزودن نما
+Add Zarr Variable	افزودن متغیر Zarr
+Add Zarr Variable…	افزودن متغیر Zarr…
+Add ▾	افزودن ▾
+Added	افزوده شد
+Added Overture's {theme} as map tiles ({release}; some themes show only zoomed in): {attribution}	تم {theme} از Overture به‌عنوان کاشی نقشه افزوده شد ({release}؛ بعضی تم‌ها فقط در بزرگ‌نمایی نزدیک نمایش داده می‌شوند): {attribution}
+Added {name}	افزوده شد: {name}
+Added {p} points, {l} lines and {g} polygons	{p} نقطه، {l} خط و {g} چندضلعی افزوده شد
+Added: {names}	افزوده شد: {names}
+Adding…	در حال افزودن…
+Additional surrounds.	عناصر پیرامونی اضافی.
+Address	نشانی
+Address fields	فیلدهای نشانی
+Adds geodesic area (km²), length (km) or centroid coordinates as fields.	مساحت ژئودزیک (km²)، طول (km) یا مختصات مرکز را به‌عنوان فیلد اضافه می‌کند.
+ADM0	ADM0
+ADM0 — the country	کشور — ADM0
+ADM1	ADM1
+ADM1 — states, provinces	ایالت‌ها و استان‌ها — ADM1
+ADM2	ADM2
+ADM2 — districts, counties	بخش‌ها و شهرستان‌ها — ADM2
+ADM3	ADM3
+ADM4	ADM4
+ADM5	ADM5
+Administrative Boundaries	مرزهای اداری
+After the event	پس از رویداد
+Agent input exceeds the protocol line limit.	ورودی ایجنت از حد خط پروتکل فراتر رفته است.
+Agent input pipe closed.	پایپ ورودی ایجنت بسته شد.
+Agent input queue is full or disconnected; stop the agent and try again.	صف ورودی ایجنت پر است یا قطع شده است؛ ایجنت را متوقف کنید و دوباره امتحان کنید.
+Agent threads	رشته‌های گفت‌وگوی ایجنت
+Agent work	کار ایجنت
+Agents have full access: they may run scripts, tasks, models and plugins. Click to stop the MCP relay	ایجنت‌ها دسترسی کامل دارند: آن‌ها می‌توانند اسکریپت، وظیفه، مدل و افزونه اجرا کنند. برای متوقف کردن رله MCP کلیک کنید
+Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	ایجنت‌های روی این رایانه که متصل می‌شوند (Claude Code، Codex، Cursor و دیگران) روی نقشه باز این‌جا با ابزارهای RustGIS کار می‌کنند: می‌توانند فایل‌ها را باز و ذخیره کنند و از وب استفاده کنند. اسکریپت‌ها و مدیریت افزونه‌ها خاموش می‌مانند.
+Agents then run commands, change files and use the web on this computer without asking you.	آنگاه ایجنت‌ها بدون پرسیدن از شما، روی این رایانه دستور اجرا می‌کنند، فایل‌ها را تغییر می‌دهند و از وب استفاده می‌کنند.
+Aggregation	تراکم
+Agricultural field boundaries the Fields of the World model found in Sentinel-2 imagery, worldwide, a year at a time (2nd Edition, CC BY 4.0). These are model predictions, not surveyed parcels.	مرزهای مزارع کشاورزی که مدل Fields of World در تصاویر Sentinel-2 در سراسر جهان، یک سال در یک بار (ویرایش دوم، CC BY 4.0) پیدا کرده است. این‌ها پیش‌بینی مدل هستند، نه قطعات نقشه‌برداری شده.
+AI	هوش مصنوعی
+AI\nAssistant	دستیار\nهوش مصنوعی
+AI Assistant	دستیار هوش مصنوعی
+AI provider	ارائه‌دهنده هوش مصنوعی
+Albers Equal Area Conic	کنیکال مساحت برابر آلبرز
+Alignment	چینش
+All	همه
+All categories	همه دسته‌بندی‌ها
+All classes	همه کلاس‌ها
+All files	همه فایل‌ها
+all of it	تمام آن
+All Selected	همه انتخاب شده
+All steps done.	تمام مراحل انجام شد.
+All tables with geometry	همه جداول با هندسه
+Allow	اجازه
+Allow ChatGPT plan use when signing in. If your workspace doesn't permit it, ask its admin or choose an API key provider.	هنگام ورود، استفاده از طرح ChatGPT را مجاز کنید. اگر فضای کاری شما اجازه نمی‌دهد، از مدیر آن بپرسید یا ارائه‌دهنده کلید API را انتخاب کنید.
+Allow only certain combinations of values across fields.	فقط ترکیب‌های خاصی از مقادیر در بین فیلدها را مجاز کن.
+Allow such actions for this conversation	اجازه چنین اقداماتی را برای این گفت‌وگو بده
+Allow this action?	این عمل مجاز است؟
+Allow this agent's RustGIS action?	اجازه عمل RustGIS این ایجنت را بدهید؟
+Along Selected Line	در امتاز خط انتخاب شده
+Alternating bar	نوار متناوب
+Altitude	ارتفاع
+Always allow	همیشه اجازه بده
+Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until RustGIS closes; a remembered connection keeps its name, endpoint and region, never its secret.	سرویس Amazon S3 یا یک سرویس سازگار با S3 (MinIO، Cloudflare R2، Wasabi…) با استفاده از endpoint. کلیدها تا زمان بسته شدن RustGIS نگهداری می‌شوند؛ یک اتصال به‌یادسپرده‌شده نام، endpoint و منطقه را حفظ می‌کند، نه secret آن را.
+amenity=cafe, shop	امنیت=کافه، فروشگاه
+An agent on this computer asks to:	ایجنتی روی این رایانه درخواست می‌کند:
+An AWS profile	پروفایل AWS
+Analysis	تحلیل
+Analyze	تحلیل
+Analyze › AI	تحلیل › هوش مصنوعی
+Analyze › Workflows	تحلیل › فرآیندها
+AND	و
+Angle	زاویه
+Animated GIF	انیمیشن GIF
+Animation	انیمیشن
+Another run is under way.	یک اجرای دیگر در حال انجام است.
+Any	هر
+anywhere in the records	در هر جایی از سوابق
+API key	کلید API
+Apply	اعمال
+Apply a function to a raster	اعمال یک تابع روی یک رستر
+Apply Control Points	اعمال نقاط کنترل
+Apply Style	اعمال سبک
+Apply to layers	اعمال بر روی لایه‌ها
+Apply to the selected layer	اعمال بر روی لایه‌ی انتخاب شده
+Approve agents' actions without asking	تأیید اقدام‌های ایجنت‌ها بدون پرسیدن
+ArcGIS	ArcGIS
+ArcGIS Hub	ArcGIS Hub
+ArcGIS Portal	ArcGIS Portal
+ArcGIS Portal…	ArcGIS Portal…
+ArcGIS REST	ArcGIS REST
+Archive	بایگانی
+Archive History	تاریخچه بایگانی
+Archiving	در حال بایگانی
+Area	مساحت
+Area of use: longitude {w}° to {e}°, latitude {s}° to {n}°	منطقه استفاده: طول {w}° تا {e}°، عرض {s}° تا {n}°
+Area of use: the whole world	منطقه استفاده: کل جهان
+Area of use: within {r}° of the {lon}° meridian	محدوده استفاده: در فاصله {r}° از نصف‌النهار {lon}°
+Area of use: within {r}° of {lon}°, {lat}°	محدوده استفاده: در فاصله {r}° از {lon}°، {lat}°
+Area {area}   ·   Perimeter {perimeter}	مساحت {area}   ·   محیط {perimeter}
+Areas (name, land use, area)	مساحت‌ها (نام، کاربری اراضی، مساحت)
+Arrange	چینش
+Ask a question about your data, or describe what to do with the map. The assistant runs RustGIS commands for you; every change can be undone.	در مورد داده‌های خود سوال بپرسید یا توضیح دهید که می‌خواهید با نقشه چه کنید. دستیار RustGIS دستورات را برای شما اجرا می‌کند؛ هر تغییری قابل بازگشت است.
+Ask about the map, or tell it what to do…	در مورد نقشه بپرسید یا بگویید که می‌خواهید چه کاری انجام دهد…
+Ask about your data, or tell the assistant what to do with the map.	در مورد داده‌های خود سوال بپرسید یا به دستیار بگویید که می‌خواهید با نقشه چه کاری انجام دهد.
+Asking NASA's CMR…	در حال پرسیدن از CMR ناسا…
+Asking the catalog…	در حال پرسیدن از فهرست…
+Asking the NLDI…	در حال پرسیدن از NLDI…
+Assistant settings	تنظیمات دستیار
+Atlas	اطلس
+Attachments	پیوست‌ها
+Attribute\nTable	جدول\nویژگی‌ها
+Attribute Rules	قوانین ویژگی
+Attribute Table	جدول ویژگی‌ها
+Attribute table	جدول ویژگی‌ها
+Attributes	ویژگی‌ها
+Attribution	ارجاع
+Aurora	نور قطبی
+Auto	خودکار
+Auto Cache	کاشه‌سازی خودکار
+Auto-complete (2 clicks)	تکمیل خودکار (۲ کلیک)
+Auto-complete Profile	پروفایل تکمیل خودکار
+Autofill Fields	پر کردن خودکار فیلدها
+Automatic	خودکار
+Automatic (m or km)	خودکار (م یا کیلومتر)
+Automatic (system language)	خودکار (زبان سیستم)
+Automatic (system time zone and region)	خودکار (منطقه و منطقه زمانی سیستم)
+Automatic ({kind})	خودکار ({kind})
+Avoid	اجتناب
+AWS	AWS
+AWS, anonymous	دسترسی ناشناس به AWS
+Azimuth	زاویه افق
+Back	بازگشت
+Back to Explore; cancel a sketch	بازگشت به کاوش؛ لغو طرح‌ریزی
+Back to the Map	بازگشت به نقشه
+Back to the map	بازگشت به نقشه
+Back to tools	بازگشت به ابزارها
+Backdrop	پس‌زمینه
+Band	باندها
+Band Combination	ترکیب باندها
+Band values at a point	مقدار باندها در یک نقطه
+Band {n}	باند {n}
+Bands	باندها
+Bands: blue green red NIR SWIR	باندها: آبی، سبز، قرمز، مادون قرمز نزدیک (NIR)، مادون قرمز کوتاه‌موج (SWIR)
+Basemap	نقشه‌ی پایه
+Basemaps	نقشه‌های پایه
+Basin from hydrolocation	حوضه آبریز از موقعیت هیدرولوژیک
+Bearing	جهت
+Bearing {b}° · Pitch {p}°	جهت {b}° · شیب {p}°
+Bearing: the direction the top of the map faces, clockwise from north. Pitch: the tilt from looking straight down. Click to reset both.	جهت: جهت روی نقشه که رو به شمال است، در جهت عقربه‌های ساعت. شیب: زاویه انحراف از دید مستقیم به پایین. کلیک برای بازنشانی هر دو.
+Before the event	پیش از رویداد
+Below	زیرین
+Below 1:5,000,000 show everything; beyond it only what matches:	زیر ۱:۵,۰۰۰,۰۰۰ همه را نشان بده؛ فراتر از آن فقط مواردی که مطابقت دارند:
+Below Left	پایین چپ
+Below Right	پایین راست
+Best	بهترین
+Bevel	لبه‌چینی
+Bike	دوچرخه
+Bilinear	دوخطی
+Bind To Time Slider	پیوند به لغزنده زمان
+Bind to Time Slider	پیوند به لغزنده زمان
+Blank	خالی
+Blank Letter page	صفحه نامه خالی
+Blank Map	نقشه خالی
+Blank Page	صفحه خالی
+Blend: {mode}	ترکیب: {mode}
+Blue	آبی
+Bold	توپر
+Bold label text.	متن برچسب را ضخیم کن.
+Bookmark Description	توضیحات نشانک
+Bookmarks	نشانک‌ها
+Bookmarks Pane	پنل نشانک‌ها
+Boolean	بولی
+Bottom	پایین
+Boundaries…	مرزها…
+Bounding\nGeometry	هندسه\nمحدودکننده
+Brightness	روشنایی
+Brightness, contrast, saturation and sepia for the whole map.	روشنایی، کنتراست، اشباع و سپیای کل نقشه.
+Bring this bookmark's map into view to update it	این نشانک را به دیدن بیاورید تا نقشه آن را به‌روز کنید
+Browse	مرور
+Browse it in the Browser	در مرورگر مرور کنید
+Browse Plugins	افزونه‌ها را مرور کنید
+Browse the geoprocessing toolbox.	جعبه ابزار پردازش فضایی را مرور کنید.
+Browse the project's maps, tables and folders.	نقشه‌ها، جداول و پوشه‌های پروژه را مرور کنید.
+Browse this folder below	این پوشه را در زیر مرور کنید
+Browse with	با مرورگر
+Browse, install, update and remove plugins.	افزونه‌ها را مرور، نصب، به‌روزرسانی و حذف کنید.
+Browser	مرورگر
+Browser\nPane	پنل\nمرورگر
+Browser View	نمای مرورگر
+Bucket	باکت
+Buffer	بافر
+Buffer A Point	بافر نقطه
+Buffer the cities by 200 km	بافر شهرها به فاصله 200 کیلومتر
+Buffer {distance}	بافر {distance}
+Buffer {distance} Here	اینجا بافر {distance}
+Build	ساخت
+Build a surface model and mesh from elevation rasters	ساخت مدل سطح و مش از رسترهای ارتفاع
+Build Mosaic	ساخت موزاییک
+Built in	داخلی
+Bundle the active map and its data.	بسته‌بندی نقشه فعال و داده‌های آن
+Bundle the geoprocessing history with the layers it made.	بسته‌بندی تاریخچه پردازش مکانی با لایه‌های ساخته شده
+Bundle the project and its data into one file to share.	بسته‌بندی پروژه و داده‌هایش در یک فایل برای اشتراک‌گذاری
+Bundle the visible layers, with simplified geometry for phones and tablets.	بسته‌بندی لایه‌های قابل‌دیدن، با هندسه ساده‌سازی‌شده برای تلفن‌ها و تبلت‌ها
+By\nAttributes	بر اساس\nویژگی‌ها
+By\nLocation	بر اساس\nموقعیت
+by {author}	توسط {author}
+By {field}	بر اساس {field}
+cached tiles	کاشی‌های کش‌شده
+Calculate	محاسبه
+Calculate\nGeometry	محاسبه\nهندسه
+Calculate Field	محاسبه ویژگی
+Calculate field	محاسبه ویژگی
+Calculate field values.	محاسبه مقادیر ویژگی.
+Calculate fields and enforce conditions on every edit.	محاسبه ویژگی‌ها و اعمال شرایط روی هر ویرایش.
+Calculate Geometry Attributes	محاسبه ویژگی‌های هندسی
+Calculation	محاسبه
+Camera	دوربین
+Camera Effect	افکت دوربین
+Can't read this folder	نمی‌توان این پوشه را خواند
+Cancel	لغو
+Cancel Caching	لغو کش کردن
+Cap	پوشش
+Capture To Clipboard	کپی به کلیپ‌بورد
+CARGO_PKG_VERSION	CARGO_PKG_VERSION
+Cartography	نقشه‌نگاری
+Case Field	فیلد مورد نظر
+Cast Shadow	انداختن سایه
+Catalog	کاتالوگ
+catalog is a static STAC catalog's catalog.json or collection.json	فهرست، فهرست استاتیک STAC از catalog.json یا collection.json است
+Catalogue search (CSW)	جستجوی فهرست (CSW)
+Celestial Bodies	اجسام آسمانی
+Celestial Body	جسم آسمانی
+Celestial body: {body}	جسم آسمانی: {body}
+Cell size	اندازه سلول
+cell size °	اندازه سلول °
+Center	مرکز
+Center Map Here	مرکز نقشه در این‌جا
+Centered	مرکز قرارگرفته
+Central meridian	نصف‌النهار مرکزی
+Chain functions	توابع زنجیره‌ای
+Chain raster functions.	توابع رستر زنجیره‌ای.
+Change dataset	تغییر مجموعه داده
+Change Detection	تشخیص تغییر
+Change the map's backdrop.	تغییر پس‌زمینه نقشه.
+Change the map's coordinate system	تغییر سیستم مختصات نقشه
+Change the page size and orientation.	تغییر اندازه و جهت صفحه.
+Change the project (add layers, edit features, change symbology)	تغییر پروژه (افزودن لایه، ویرایش عناصر، تغییر نمادگذاری)
+Chart categories	دسته‌بندی نمودار
+Chart Frame	چارچوب نمودار
+ChatGPT (sign in)	ورود به حساب ChatGPT
+ChatGPT plan use is unavailable for this account or workspace.	استفاده از طرح ChatGPT برای این حساب یا فضای کاری در دسترس نیست.
+ChatGPT sign-in failed. Check the connection and local settings, then try again.	ورود به ChatGPT ناموفق بود. اتصال و تنظیمات محلی را بررسی کنید و دوباره تلاش کنید.
+ChatGPT usage is temporarily unavailable. Keep your sign-in and try again later.	استفاده از ChatGPT موقتاً در دسترس نیست. ورود خود را نگه دارید و بعداً دوباره تلاش کنید.
+CHE	CHE
+Check Again	دوباره بررسی کن
+Check for\nUpdates	بررسی\nبه‌روزرسانی‌ها
+Check for Updates	بررسی به‌روزرسانی‌ها
+Check for Updates…	بررسی به‌روزرسانی‌ها…
+Check the address and the service type.	نشانی و نوع سرویس را بررسی کنید.
+Check the address and your connection.	نشانی و اتصال خود را بررسی کنید.
+Check the address.	نشانی را بررسی کنید.
+Check the integration's client, permissions, workspace policy and route configuration.	کلاینت یکپارچه‌سازی، مجوزها، خط‌مشی فضای کاری و پیکربندی مسیر را بررسی کنید.
+Checking for updates…	در حال بررسی به‌روزرسانی‌ها…
+China	چین
+Choice Test	آزمون انتخاب
+Choose a band combination to display the raster layer.	ترکیب باند را برای نمایش لایه رستری انتخاب کنید.
+Choose a contrast stretch for the raster layer.	نوع افزایش کنتراست را برای لایه رستری انتخاب کنید.
+Choose a country	انتخاب کشور
+Choose a delimited text file or a spreadsheet, then pick its columns.	یک فایل متن جداشده یا صفحه‌گسترده انتخاب کنید، سپس ستون‌هایش را برگزینید.
+Choose a destination	انتخاب مقصد
+choose a file first	ابتدا یک فایل انتخاب کنید
+Choose a layer…	انتخاب لایه…
+Choose a model.	یک مدل انتخاب کنید.
+Choose a resampling type for the raster layer.	نوع بازنمونه‌برداری را برای لایه رستری انتخاب کنید.
+Choose a start	انتخاب مبدأ
+Choose a stop	انتخاب مقصد میانی
+Choose an account	انتخاب حساب
+Choose extra buttons for the Quick Access Toolbar.	دکمه‌های اضافی نوار ابزار دسترسی سریع را انتخاب کنید.
+Choose File…	انتخاب فایل…
+Choose how the flat map lays out the Earth.	انتخاب کنید نقشه تخت، زمین را چگونه بچیند.
+Choose how the layer is drawn.	انتخاب کنید لایه چگونه ترسیم شود.
+Choose how the raster is drawn.	انتخاب کنید رستر چگونه ترسیم شود.
+Choose Project…	انتخاب پروژه…
+Choose the interface language.	زبان رابط کاربری را انتخاب کنید.
+Choose which layers a click identifies.	لایه‌هایی که با کلیک مشخص می‌شوند را انتخاب کنید.
+Choose which tabs the ribbon shows.	تب‌هایی که در نوار نمایش داده می‌شوند را انتخاب کنید.
+Circle	دایره
+Circle Radius (km)	شعاع دایره (کیلومتر)
+Class color	رنگ کلاس
+Class Style	سبک کلاس
+Classes	کلاس‌ها
+Classes from training polygons.	کلاس‌ها از چندضلعی‌های آموزشی.
+Classic arrow	فلش کلاسیک
+Classification\nTools	ابزارهای\nطبقه‌بندی
+Classification\nWizard	ویزارد\nطبقه‌بندی
+Classification Tools	ابزارهای طبقه‌بندی
+Classification Wizard	ویزارد طبقه‌بندی
+Classify	طبقه‌بندی
+Classify from training polygons	طبقه‌بندی از چندضلعی‌های آموزشی
+Claude Code and Codex connect through an ACP adapter. On first use, npx downloads and runs its pinned version from npm.	برای اتصال Claude Code و Codex از یک آداپتور ACP استفاده می‌شود. در اولین استفاده، npx نسخهٔ pin‌شدهٔ آن را از npm دانلود و اجرا می‌کند.
+Clear	پاک‌کردن
+Clear\nLimits	پاک‌کردن\nمحدودیت‌ها
+Clear Filters	پاک‌کردن فیلترها
+Clear Guides	پاک‌کردن راهنماها
+Clear History	پاک‌کردن تاریخچه
+Clear Limits	پاک‌کردن محدودیت‌ها
+Clear mask	پاک‌کردن ماسک
+Clear NLDI result	پاک‌کردن نتیجه NLDI
+Clear search	پاک‌کردن جستجو
+Clear Selection	پاک‌کردن انتخاب
+Clear selection	پاک‌کردن انتخاب
+Clear the filter to reorder	فیلتر را برای مرتب‌سازی پاک کنید
+Clear the selection in every layer.	انتخاب را در هر لایه پاک کنید.
+Clear the selection.	انتخاب را پاک کنید.
+Clear Visibility Range	پاک‌کردن محدوده نمایش
+Click a feature, then drag its vertices · click an edge to add one	روی یک عنصر کلیک کنید، سپس رأس‌های آن را بکشید · روی یک لبه کلیک کنید تا یک نقطه اضافه شود
+Click a pixel on the map	روی یک پیکسل در نقشه کلیک کنید
+Click a point on the map	روی یک نقطه در نقشه کلیک کنید
+Click a source to add it, or to open its browser connected. Right-click for favourites.	روی یک منبع کلیک کنید تا آن را اضافه یا مرورگر متصل به آن را باز کنید. کلیک راست برای نشانک‌ها.
+Click or drag a box to select features. Shift adds, Ctrl removes.	کلیک یا کشیدن یک جعبه برای انتخاب عناصر. Shift اضافه می‌کند و Ctrl حذف می‌کند.
+Click or drag a box · Shift adds · Ctrl removes	کلیک یا کشیدن یک جعبه · Shift اضافه می‌کند · Ctrl حذف می‌کند
+Click points a smooth curve passes through; double-click to finish.	روی نقاطی کلیک کنید که منحنی صاف از آن‌ها عبور می‌کند؛ دوبار کلیک برای پایان.
+Click the corners of a polygon; double-click to close it.	گوشه‌های چندضلعی را کلیک کنید؛ دوبار کلیک برای بستن آن.
+Click the corners of the area · double-click to finish	گوشه‌های منطقه را کلیک کنید · دوبار کلیک برای پایان
+Click the frame's corners · double-click to finish · Esc to stop	گوشه‌های قاب را کلیک کنید · دوبار کلیک برای پایان · Esc برای توقف
+Click the map to add a point	روی نقشه کلیک کنید تا نقطه‌ای اضافه شود
+Click the map to place a point	روی نقشه کلیک کنید تا نقطه قرار گیرد
+Click the map to place text	روی نقشه کلیک کنید تا متن قرار گیرد
+Click the map to place text.	روی نقشه کلیک کنید تا متن قرار گیرد.
+Click the map to trace a point	روی نقشه کلیک کنید تا یک نقطه ردیابی شود
+Click the map: {n} of {total}	روی نقشه کلیک کنید: {n} از {total}
+Click the observer on the map	روی ناظر در نقشه کلیک کنید
+Click the observer, then the target	روی ناظر سپس روی هدف کلیک کنید
+Click the polygon's corners	گوشه‌های چندضلعی را کلیک کنید
+Click the start, then the end	روی ابتدا سپس روی انتها کلیک کنید
+Click the vertices of a line; double-click to finish.	گره‌های یک خط را کلیک کنید؛ دوبار کلیک برای پایان.
+Click to add points · double-click to finish · Esc to stop	کلیک برای افزودن نقاط · دوبار کلیک برای پایان · Esc برای توقف
+Click to add vertices · double-click to close	کلیک برای افزودن گره‌ها · دوبار کلیک برای بستن
+Click to add vertices · double-click to close the polygon	کلیک برای افزودن گره‌ها · دوبار کلیک برای بستن چندضلعی
+Click to add vertices · double-click to finish	کلیک برای افزودن گره‌ها · دوبار کلیک برای پایان
+Click to add vertices · double-click to finish the line	کلیک برای افزودن گره‌ها · دوبار کلیک برای پایان خط
+Click to edit the description	کلیک برای ویرایش توضیحات
+Click to place a point graphic.	کلیک برای قرار دادن یک گرافیک نقطه‌ای.
+Click to select the node	کلیک برای انتخاب گره
+Click to switch between decimal degrees and DMS	کلیک برای سوئیچ بین درجه اعشاری و DMS
+Clip	برش
+Clip a raster to the view, or resample it.	برش رستر به نما، یا بازنمونه‌برداری آن.
+Clip Features	برش عناصر
+Clip or resample	برش یا بازنمونه‌برداری
+Clip To Map View	برش به نمای نقشه
+Clipboard	کلیپ‌بورد
+Close	بستن
+Close (Esc)	بستن (Esc)
+Close All	بستن همه
+Close all panes	بستن همه پنل‌ها
+Close ModelBuilder	بستن ModelBuilder
+Close Others	بستن بقیه
+Close Table	بستن جدول
+Close table	بستن جدول
+Close the layout and show the map.	صفحه‌آرایی را ببندید و نقشه را نشان دهید.
+Close the time slider (it stays on; Time Slider opens it again).	لغزنده زمان را ببندید (خاموش نمی‌شود؛ Time Slider دوباره بازش می‌کند).
+Close thread	بستن رشته گفت‌وگو
+Close {name}	بستن {name}
+Closest	نزدیک‌ترین
+Coded values, one per line: code=description	مقادیر کدشده، هر خط یکی: code=description
+Collapse or expand the ribbon	جمع‌کردن یا بازکردن نوار (Ribbon)
+Collapse the ribbon (Ctrl+F1)	جمع‌کردن نوار (Ribbon) (Ctrl+F1)
+Collection	مجموعه
+Collection {id}: choose dates and Find Items	مجموعه {id}: تاریخ‌ها را انتخاب کنید و Find Items را بزنید
+Collections	مجموعه‌ها
+Color	رنگ
+Color Infrared (4, 1, 2)	فروسرخ رنگی (4, 1, 2)
+Color Ramps	طیف‌های رنگی
+Color Scheme	طرح رنگ
+Color scheme	طرح رنگ
+Color Vision	دید رنگی
+Color Vision Simulator	شبیه‌ساز دید رنگی
+Colorbar	نوار رنگ
+Colormap	رنگ‌نگاشت
+Colors from the raster's own color table.	رنگ‌ها از جدول رنگ خود رستر.
+Colour ramps (RustGIS, QGIS, GDAL, GMT)	طیف‌های رنگی (RustGIS، QGIS، GDAL، GMT)
+Columns named like longitude/latitude, easting/northing or geometry are picked for you.	ستون‌هایی که نامشان مثل longitude/latitude، easting/northing یا geometry باشد خودکار انتخاب می‌شوند.
+Combinations from the box above, one per line	ترکیب‌های داخل کادر بالا، هر خط یکی
+COMID {comid}	COMID {comid}
+Comma	ویرگول
+Command\nSearch	جستجوی\nدستور
+command is required	دستور الزامی است
+Command Search	جستجوی دستور
+Commands	دستورها
+Commands on the Plugins tab: {commands} · Tools in the Tools pane: {tools}	دستورها در برگه Plugins: {commands} · ابزارها در پنل Tools: {tools}
+Commands…	دستورها…
+Common scales	مقیاس‌های رایج
+Compact	فشرده
+Compacted the earlier conversation.	گفت‌وگوی پیشین فشرده شد.
+Compare	مقایسه
+Compare two rasters	مقایسه دو رستر
+Compass rose	قطب‌نما
+Completed	کامل شد
+Confirm uninstall	تأیید حذف نصب
+Conic, conformal: true shapes across a mid-latitude region; set its meridian and parallels to the region.	مخروطی، هم‌شکل: شکل‌ها در یک ناحیه میان‌عرضی درست می‌مانند؛ نصف‌النهار و موازی‌های آن را روی همان ناحیه تنظیم کنید.
+Conic, equal-area: true sizes across a mid-latitude region; set its meridian and parallels to the region.	مخروطی، هم‌مساحت: اندازه‌ها در یک ناحیه میان‌عرضی درست می‌مانند؛ نصف‌النهار و موازی‌های آن را روی همان ناحیه تنظیم کنید.
+Connect	اتصال
+Connect a folder to the Browser.	یک پوشه را به Browser متصل کنید.
+Connect to S3	اتصال به S3
+Connect, or pick a layer	اتصال، یا انتخاب یک لایه
+Connecting to {url}…	در حال اتصال به {url}…
+Connection	اتصال
+Connections	اتصال‌ها
+Connect…	اتصال…
+Constant	ثابت
+Constant height	ارتفاع ثابت
+Constant…	ثابت…
+Contingent Values	مقادیر وابسته
+Continue	ادامه
+Continue with ChatGPT	ادامه با ChatGPT
+Contrast	کنتراست
+Conversion	تبدیل
+Convert	تبدیل
+Convert a layer to another format	تبدیل یک لایه به فرمت دیگر
+Convert the selected layer's labels into an annotation layer.	برچسب‌های لایه انتخابی را به یک لایه annotation تبدیل کن.
+Convert To Annotation	تبدیل به Annotation
+Converted data	داده تبدیل‌شده
+Convert…	تبدیل…
+Coordinate	مختصات
+Coordinate System	سیستم مختصات
+Coordinate system	سیستم مختصات
+Coordinate System…	سیستم مختصات…
+Copied the command.	فرمان کپی شد.
+Copied the map to the clipboard	نقشه در کلیپ‌برد کپی شد
+Copied {path}	کپی شد: {path}
+Copies the (selected) features of a layer to a new layer.	عناصر (انتخاب‌شده) یک لایه را به یک لایه جدید کپی می‌کند.
+Copy	کپی
+Copy a model.run command that runs this model, for the Script pane or Python	یک دستور model.run که این مدل را اجرا می‌کند، برای پنل Script یا Python کپی کن
+Copy Address	کپی آدرس
+Copy address	کپی آدرس
+Copy an image of the map to the clipboard.	یک تصویر از نقشه را در کلیپ‌برد کپی کن.
+Copy As GeoJSON	کپی به عنوان GeoJSON
+Copy Command	کپی دستور
+Copy coordinates to the clipboard	کپی مختصات در کلیپ‌برد
+Copy details	کپی جزئیات
+Copy Group	کپی گروه
+Copy Layer	کپی لایه
+Copy Layers	کپی لایه‌ها
+Copy Path	کپی مسیر
+Copy sign-in link	کپی پیوند ورود
+Copy the selected features (also as GeoJSON text).	کپی عناصر انتخاب‌شده (هم به صورت متن GeoJSON).
+Copy the selected features and delete them.	کپی عناصر انتخاب‌شده و حذف آن‌ها.
+Copy the selected layer's data source path.	کپی مسیر منبع داده لایه انتخاب‌شده.
+Copy this element (Ctrl+D, ⌘D on a Mac)	کپی این عنصر (Ctrl+D, ⌘D در مک)
+Corrections	اصلاحات
+Cost	هزینه
+could not draw the map	نمیتوانست نقشه را رسم کند
+Couldn't check for updates: {error}	نمی‌توان به‌روزرسانی‌ها را بررسی کرد: {error}
+Couldn't download the font for {language}; pick the language again to retry.	نمی‌توان فونت را برای {language} دانلود کرد؛ زبان را دوباره انتخاب کنید تا تلاش مجدد شود.
+Couldn't load the plugin registry: {error}	نمی‌توان رجیستر افزونه را بارگذاری کرد: {error}
+Count, sum, mean, min, max and standard deviation of a field, optionally per case field.	تعداد، مجموع، میانگین، حداقل، حداکثر و انحراف معیار یک فیلد، اختیاریاً بر اساس فیلد مورد.
+Countries, cities, rivers and lakes	کشورها، شهرها، رودها و دریاچه‌ها
+Country	کشور
+Counts the points that fall inside each polygon.	نقاطی را که درون هر چندضلعی قرار می‌گیرند، شمارش می‌کند.
+Counts, totals and top categories of what's in view.	تعداد، مجموع و برترین دسته‌بندی‌های محتوای قابل مشاهده.
+CPU	CPU
+Create	ایجاد
+Create (click points)	ایجاد (کلیک روی نقاط)
+Create a new project or start from the World Atlas sample.	یک پروژه جدید ایجاد کنید یا از نمونه اطلس جهانی شروع کنید.
+Create Feature	ایجاد عنصر
+Create Hosted\nImagery	ایجاد تصاویر میزبان\nهمراه
+Create Hosted Imagery	ایجاد تصاویر میزبان همراه
+Create Hosted Imagery…	ایجاد تصاویر میزبان همراه…
+Create Line	ایجاد خط
+Create Point	ایجاد نقطه
+Create Polygon	ایجاد چندضلعی
+Create Profile	ایجاد پروفایل
+Create Thumbnail	ایجاد تصویر بندانگشتی
+Creates a point inside each input feature.	در هر عنصر ورودی یک نقطه ایجاد می‌کند.
+Creates points from a table's x and y coordinate fields.	نقاط را از فیلدهای مختصات x و y یک جدول ایجاد می‌کند.
+Creates polygons around input features at a given distance.	پلی‌گون‌هایی را در فاصله مشخص شده دور عناصر ورودی ایجاد می‌کند.
+Cross Section	برش عرضی
+Cross Section (2 clicks)	برش عرضی (۲ کلیک)
+CSV	CSV
+Ctrl+	Ctrl+
+Ctrl+= / Ctrl+-	Ctrl+= / Ctrl+-
+Ctrl+F1	Ctrl+F1
+Ctrl+K	Ctrl+K
+Ctrl+N / O / S	Ctrl+N / O / S
+Ctrl+T	Ctrl+T
+Ctrl+Z / Ctrl+Y	Ctrl+Z / Ctrl+Y
+Cumulative	تراکمی
+Current date	تاریخ فعلی
+Current Project	پروژه فعلی
+Current time	زمان فعلی
+Curve	منحنی
+Custom	سفارشی
+Custom Min/Max	حداقل/حداکثر سفارشی
+Customize	شخصی‌سازی
+Cut	برش
+Cut a raster into web map tiles	یک رستر را به کاشی‌های نقشه وب برش بزنید
+Cut a raster into web map tiles (XYZ PNG) with a viewer page.	یک رستر را به کاشی‌های نقشه وب (XYZ PNG) با یک صفحه نمایشگر برش بزنید.
+Dark\nMode	حالت تاریک\n
+Data	داده‌ها
+Data\nSources	منابع داده\n
+Data Design	طراحی داده
+Data Engineering	مهندسی داده
+Data Interop	هم‌افزایی داده
+Data Management	مدیریت داده
+Data privacy	حریم خصوصی داده‌ها
+Data Source	منبع داده
+Data Sources	منابع داده
+Data Sources Pane	پنل منابع داده
+Data Stores	ذخیره‌گاه‌های داده
+Data type	نوع داده
+Data you add is listed here	داده‌های اضافه‌شده در اینجا لیست می‌شوند
+data.gov and CKAN catalogues	فهرست‌های data.gov و CKAN
+Database	پایگاه داده
+Databases	پایگاه‌های داده
+Database…	پایگاه داده…
+Dataset	مجموعه داده
+Datasets on Hugging Face by name or owner/name; browse a dataset's files and add GeoTIFFs, GeoParquet, PMTiles, LiDAR and other files.	مجموعه داده‌ها در Hugging Face بر اساس نام یا مالک/نام; فایل‌های یک مجموعه داده را مرور کرده و فایل‌های GeoTIFF، GeoParquet، PMTiles، LiDAR و سایر فایل‌ها را اضافه کنید.
+Data…	داده…
+Date	تاریخ
+Dates	تاریخ‌ها
+Day	روز
+Day and night shading for a time.	سایه‌روزی روز و شب برای یک زمان
+Decimal	ده‌دهی
+Decline	رد کردن
+Deep Learning	یادگیری عمیق
+Deep Learning\nTools	ابزارهای\nیادگیری عمیق
+Deep Learning Package	بسته یادگیری عمیق
+Deep Learning Tools	ابزارهای یادگیری عمیق
+Default	پیش‌فرض
+Definition\nQuery	پرسش\nتعریف
+Definition Query	پرسش تعریف
+Definition query	پرسش تعریف
+Definition Query…	پرسش تعریف…
+Delete	حذف
+Delete (or Backspace)	حذف (یا Backspace)
+Delete Cell	حذف سلول
+Delete Color Ramp	حذف طیف رنگی
+Delete Element	حذف عنصر
+Delete Field	حذف فیلد
+Delete Job	حذف کار
+Delete Layout	حذف صفحه‌آرایی
+Delete Map	حذف نقشه
+Delete Model	حذف مدل
+Delete node	حذف گره
+Delete Notebook	حذف Notebook
+Delete Page	حذف صفحه
+Delete Presentation	حذف Presentation
+Delete Report	حذف Report
+Delete selected features	حذف اشکال انتخاب‌شده
+Delete selected rows	حذف ردیف‌های انتخاب‌شده
+Delete Style	حذف Style
+Delete Task	حذف تسک
+Delete Task Step	حذف گام تسک
+Delete the GeoLibre runner that RustGIS installed. Install it again at any time.	اجراکننده GeoLibre‌ای که RustGIS نصب کرده را حذف می‌کند. هر وقت بخواهید می‌توانید دوباره نصبش کنید.
+Delete the layout {name}?	صفحه‌آرایی {name} حذف شود؟
+Delete the map {name}?	نقشه {name} حذف شود؟
+Delete the selected features.	عناصر انتخاب‌شده را حذف می‌کند.
+Delete the step	حذف گام
+Delimited Text	متن جداشده
+Delimited text and spreadsheets	متن جداشده و صفحه‌گسترده‌ها
+Delimited Text…	متن جداشده…
+Depth Priority	اولویت عمق
+Descending	نزولی
+Describing	در حال توصیف
+Description	توصیف
+Desktop and command line only	فقط دسکتاپ و خط فرمان
+Details	جزئیات
+Details of the selected layer.	جزئیات لایه انتخاب‌شده.
+Deviations	انحراف‌ها
+Diagnostic\nMonitor	پایش\nعیب‌یابی
+Diagnostic Monitor	پایش عیب‌یابی
+Diagnostics	عیب‌یابی
+Diamond	لوزی
+Difference, ratio or percent change between two rasters.	اختلاف، نسبت یا درصد تغییر بین دو رستر.
+Directions	مسیریابی
+Directions From Here	مسیریابی از این‌جا
+Directions To Here	مسیریابی به این‌جا
+Directions use an external routing server	مسیریابی از یک سرور مسیریابی بیرونی استفاده می‌کند
+Discard	دورانداختن
+Discard unsaved changes to the current model?	تغییرات ذخیره‌نشده مدل فعلی دور انداخته شود؟
+Disconnect	قطع اتصال
+Disconnect From S3	قطع اتصال از S3
+Display	نمایش
+Display Filters	فیلترهای نمایش
+Display Filters ({n})	فیلترهای نمایش ({n})
+Display Type	نوع نمایش
+Dissolve	حل مرزها
+Dissolve Field	فیلد حل مرزها
+Distance	فاصله
+Distance (km)	مسافت (km)
+Distance Coefficient P	ضریب مسافت P
+Distances along the surface, heights, areas and volumes.	مسافت‌ها روی سطح، ارتفاع‌ها، مساحت‌ها و حجم‌ها.
+DISTINCT	DISTINCT
+Distinct	یکتا
+Diverging	واگرا
+Divisions	تقسیم‌ها
+DMS	DMS
+Do the exercise once: each command that changes the project becomes a step	تمرین را یک‌بار انجام دهید: هر دستوری که پروژه را تغییر دهد یک گام می‌شود
+Do the step for me	این گام را برایم انجام بده
+Documents	Documents
+Domains	دامنه‌ها
+Done	انجام شد
+Double	Double
+Double-click	دابل‌کلیک
+Double-click to add	برای افزودن دابل‌کلیک کنید
+Download	دانلود
+Download\nMap	دانلود\nنقشه
+Download its features in the view (up to the server's limit)	عناصرش را در نما دانلود کنید (تا سقف مجاز سرور)
+Download Map	دانلود نقشه
+Download OpenStreetMap Data	دانلود داده OpenStreetMap
+Download the GeoLibre runner	دانلود اجراکننده GeoLibre
+Downloaded {name}	دانلود شد: {name}
+Downloading {url}…	در حال دانلود {url}…
+Downloading…	در حال دانلود…
+Downloading… {mb} MB	در حال دانلود… {mb} MB
+DRA	DRA
+Drag / middle-drag	کشیدن / کشیدن با دکمه میانی
+Drag a box	یک کادر بکشید
+Drag a box or click to zoom in	برای بزرگ‌نمایی، کادری بکشید یا کلیک کنید
+Drag a box to draw an ellipse.	برای رسم بیضی، کادری بکشید.
+Drag a box to zoom into.	برای بزرگ‌نمایی، کادری بکشید.
+Drag a map frame to pan its map, wheel to zoom it · Esc to stop	قاب نقشه را برای جابه‌جایی نقشه بکشید، با چرخ موس بزرگ‌نمایی کنید · برای توقف Esc
+Drag a rectangle, then pick a PNG or JPEG image to place in it.	یک مستطیل بکشید، سپس تصویری PNG یا JPEG برای قرار دادن در آن انتخاب کنید.
+Drag a tool from the palette to start building, or add an input layer.	ابزاری را از پالت بکشید تا ساختار را شروع کنید یا یک لایه ورودی اضافه کنید.
+Drag a vertex to move it · click an edge to add one · Delete removes the chosen vertex	یک رأس را بکشید تا آن را جابه‌جا کنید · روی یک لبه کلیک کنید تا یک رأس جدید اضافه شود · حذف، رأس انتخاب‌شده را حذف می‌کند.
+Drag from a node's right port to another node's left port to connect them.	از پورت راست گره به پورت چپ گره دیگر بکشید تا آن‌ها را به هم متصل کنید.
+Drag from the centre out	از مرکز به بیرون بکشید
+Drag from the centre to draw a circle.	از مرکز به بیرون بکشید تا دایره بکشید.
+Drag inside map frames to pan their maps and turn the wheel to zoom them, instead of moving them.	در داخل قاب‌های نقشه بکشید تا نقشه‌های آن‌ها را جابه‌جا کنید و چرخ موشی را بچرخانید تا آن‌ها را بزرگنمایی کنید، به جای اینکه آن‌ها را جابه‌جا کنید.
+Drag inside map frames to pan their maps and turn the wheel to zoom them, instead of moving them. Esc stops.	در داخل قاب‌های نقشه بکشید تا نقشه‌های آن‌ها را جابه‌جا کنید و چرخ موشی را بچرخانید تا آن‌ها را بزرگنمایی کنید، به جای اینکه آن‌ها را جابه‌جا کنید. Esc برای توقف.
+Drag the frame's outline · Esc to stop	ح outline قاب را بکشید · Esc برای توقف
+drag the picture's rectangle on the map first	ابتدا مستطیل تصویر را روی نقشه بکشید
+Drag the selected features' vertices to move them, click an edge to add one, Delete to remove one.	رأس‌های عناصر انتخاب‌شده را بکشید تا آن‌ها را جابه‌جا کنید، روی یک لبه کلیک کنید تا یک رأس جدید اضافه شود، Delete برای حذف یک رأس.
+Drag to draw	برای رسم بکشید
+Drag to draw a freehand line.	برای کشیدن خط دستی بکشید.
+Drag to draw a freehand polygon.	برای کشیدن چندضلعی دستی بکشید.
+Drag to draw a rectangle.	برای کشیدن مستطیل بکشید.
+Drag tools from the palette onto the canvas.	ابزارها را از پالت روی بوم بکشید.
+Drag vertices on the map; click an edge to add one	رأس‌ها را روی نقشه بکشید؛ روی یک لبه کلیک کنید تا یک رأس جدید اضافه شود
+Draw a halo around label text.	هاله‌ای اطراف متن برچسب بکشید.
+Draw a labelled latitude/longitude grid over the map frame.	یک شبکه عرض/طول جغرافیایی برچسب‌دار روی قاب نقشه بکشید.
+Draw a model: chain tools from input layers to the results to keep	یک مدل بکشید: ابزارها را از لایه‌های ورودی به نتایجی که باید نگه دارید زنجیره‌وار کنید.
+Draw a model: chain tools from input layers to the results to keep.	یک مدل بکشید: ابزارها را از لایه‌های ورودی به نتایجی که باید نگه دارید زنجیره‌وار کنید.
+Draw labels at every scale and distance.	برچسب‌ها را در هر مقیاس و فاصله بکشید.
+Draw new features in the selected layer. Double-click to finish lines and polygons.	عناصر جدید را در لایه انتخاب‌شده بکشید. برای خطوط و چندضلعی‌ها دوبار کلیک کنید تا پایان دهید.
+Draw new single-band rasters with the inverted grey stretch again.	رسترهای تک‌بانده جدید را با کشش خاکستری معکوس دوباره بکشید.
+Draw points as bins coloured by how many fall in each.	نقاط را به‌صورت خانه‌های رنگ‌آمیزی‌شده بر اساس تعداد نقاطِ هر خانه رسم کنید.
+Draw polygons as outlines only.	چندضلعی‌ها را فقط به صورت خطوط بیرونی بکشید.
+Draw single-band rasters added from now on with this color scheme, stretch and resampling.	رسترهای تک‌بانده که از این به بعد اضافه می‌شوند را با این طرح رنگ، کشش و بازنمونه‌گیری مجدد بکشید.
+Draw the layer at every scale.	این لایه را در هر مقیاس بکشید.
+Draw the map on the GPU (beta; the globe, view effects and colour-vision simulation stay on the CPU renderer).	نقشه را روی GPU بکشید (بتا؛ کره، جلوه‌های دید و شبیه‌سازی بینایی رنگی در رندر CPU باقی می‌مانند).
+Draw the selected layer above others.	لایه انتخاب‌شده را بالای لایه‌های دیگر بکشید.
+Draw the selected layer below others.	لایه انتخاب‌شده را زیر لایه‌های دیگر بکشید.
+Drawing	کشیدن
+Drawing Effects	جلوه‌های کشیدن
+Drawing Mode	حالت کشیدن
+Drawing Order	ترتیب کشیدن
+drawn by the server	توسط سرور کشیده شده
+Drive	درایو
+Drone and aerial imagery shared on OpenAerialMap, newest first, added as cloud-optimised GeoTIFFs.	تصاویر پهپادی و هوایی که در OpenAerialMap به اشتراک گذاشته شده‌اند، جدیدترین اول، به عنوان GeoTIFFهای بهینه‌شده در ابر اضافه می‌شوند.
+Duplicate	تکثیر
+Duplicate Element	تکثیر عنصر
+Duplicate Layout	تکثیر صفحه‌آرایی
+Duplicate Map	تکثیر نقشه
+Dusk	غروب
+Dynamic\nText	متن\nپویا
+Dynamic Picture	تصویر پویا
+Dynamic picture	تصویر پویا
+Dynamic range adjustment (stretch the pixels in view)	تنظیم دامنه پویا (کشش پیکسل‌های داخل نما)
+Dynamic range adjustment: stretch using the pixels in view.	تنظیم دامنه پویا: کشش با استفاده از پیکسل‌های داخل نما.
+Dynamical	دینامیکی
+Dynamical…	دینامیکی…
+e.g.  pop_est / 1000000   or   'Africa'   or   name	مثلاً:  pop_est / 1000000   یا   'Africa'   یا   name
+e.g. 0, 255, -9999	مثلاً 0، 255، -9999
+e.g. continent = 'Europe'	مثلاً continent = 'Europe'
+e.g. pop_est > 100000000 AND continent = 'Asia'	مثلاً pop_est > 100000000 AND continent = 'Asia'
+Each geoprocessing run becomes a step, chained by its outputs	هر اجرای زمین‌پردازش یک گام می‌شود که با خروجی‌هایش به هم زنجیر می‌شوند
+Earth Index has no points in the view	در این نما هیچ نقطه‌ای از Earth Index نیست
+Earth Search	Earth Search
+Earthdata Cloud	Earthdata Cloud
+Earthdata Cloud only	فقط Earthdata Cloud
+Earthdata footprints	ردپاهای Earthdata
+Earthdata GIS	Earthdata GIS
+Earthdata GIS…	Earthdata GIS…
+Earthdata Login Status	وضعیت ورود Earthdata
+Earthdata Login Token	توکن ورود Earthdata
+Earthdata Login: no token	ورود Earthdata: بدون توکن
+Earthdata Login: token expired	ورود Earthdata: توکن منقضی شده
+Earthdata Login: token set	ورود Earthdata: توکن تنظیم شده
+East	شرق
+Eckert IV (equal-area world)	اکرت IV (جهت هم‌مساحت)
+Edge	یال
+Edges	یال‌ها
+Edit	ویرایش
+Edit\nVertices	ویرایش\nرأس‌ها
+Edit and run the notebook.	ویرایش و اجرای notebook.
+Edit Attribute	ویرایش ویژگی
+Edit Cell	ویرایش سلول
+Edit Description	ویرایش توضیحات
+Edit Graphic	ویرایش گرافیک
+Edit Status	ویرایش وضعیت
+Edit Steps	ویرایش گام‌ها
+Edit Task Step	ویرایش گام تسک
+Edit Text…	ویرایش متن…
+Edit the title and instructions	ویرایش عنوان و دستورالعمل‌ها
+Edit Vertex	ویرایش رأس
+Edit Vertices	ویرایش رأس‌ها
+Editing	در حال ویرایش
+Editing on	ویرایش روشن
+Editing Settings	تنظیمات ویرایش
+Editing settings.	تنظیمات ویرایش.
+Editor\nTools	ابزارهای\nویرایشگر
+Editor Tools	ابزارهای ویرایشگر
+Edits since the project was saved.	ویرایش‌های پس از آخرین ذخیره پروژه.
+Edits the project	پروژه را ویرایش می‌کند
+Effects	جلوه‌ها
+Element	عنصر
+Element Properties	ویژگی‌های عنصر
+Elevation	ارتفاع
+Elevation model	مدل ارتفاعی
+Elevation profiles along lines, cross sections and more.	نیم‌رخ‌های ارتفاعی در طول خط‌ها، مقاطع عرضی و بیشتر.
+Eligible requests in RustGIS use your ChatGPT plan. You can manage usage in ChatGPT settings.	درخواست‌های واجد شرایط در RustGIS از طرح ChatGPT شما استفاده می‌کنند. مصرف را می‌توانید در تنظیمات ChatGPT مدیریت کنید.
+Ellipse	بیضی
+Embeddings	Embeddings
+Ember	Ember
+Empty	خالی
+Empty Cache	خالی‌کردن حافظه نهان
+Enable Lighting	روشن‌کردن نورپردازی
+Enable Plugin	فعال‌کردن افزونه
+Enabled	فعال
+Encloses each feature, or all features, in its convex hull.	هر عنصر، یا همه عناصر، را در پوسته محدب خود می‌پیچد.
+End	پایان
+End date	تاریخ پایان
+Endpoint	نقطه پایانی
+Enhancement	بهبود
+Enter	Enter
+Enter an API key.	یک کلید API وارد کنید.
+Enter the provider's address.	نشانی ارائه‌دهنده را وارد کنید.
+Enter to send, Shift+Enter for a new line	با Enter بفرستید، با Shift+Enter خط جدید
+EnviroAtlas	EnviroAtlas
+EnviroAtlas…	EnviroAtlas…
+Environments	محیط‌ها
+EPSG	EPSG
+EPSG or ESRI code	کد EPSG یا ESRI
+EPSG:	کد EPSG:
+EPSG:4326	EPSG:4326
+Equal Earth	زمین مساوی
+Equal Interval	فاصله مساوی
+Equirectangular (Plate Carrée)	مستطیل (پلات کاره)
+Erase	پاک‌کردن
+Erase Features	پاک‌کردن عناصر
+Error	خطا
+Error Inspector	بررسی‌کننده خطا
+Error Inspector (validate)	بررسی‌کننده خطا (اعتبارسنجی)
+Esc	Esc
+ESRI	ESRI
+ESRI:	ESRI:
+Europe Equal Area (ETRS89 LAEA)	اروپا مساحت برابر (ETRS89 LAEA)
+Every band's value at a pixel.	مقدار هر باندر در یک پیکسل
+Every editing tool.	هر ابزار ویرایش
+Every layer, as FEMA draws them	هر لایه، همان‌طور که FEMA ترسیم می‌کند
+every Socrata site, or one such as data.cityofnewyork.us	هر سایت سقراطا، یا سایتی مانند data.cityofnewyork.us
+Everywhere	هرwhere
+Existing Template	قالب موجود
+exit rotary	خروج از چرخ‌بر
+exit roundabout	خروج از دوربرگ
+Expand Group	گسترش گروه
+Expand Legend	گسترش افسانه
+Expand the ribbon (Ctrl+F1)	گسترش نوار (Ctrl+F1)
+Explode	انفجار
+Exploratory 3D Analysis	تحلیل سه‌بعدی کاوشگرانه
+Exploratory Analysis	تحلیل کاوشگرانه
+Explore	کاوش
+Export	خروجی
+Export\nFeatures	برون‌بری\nعناصر
+Export\nLayout	برون‌بری\nصفحه‌آرایی
+Export\nMap	برون‌بری\nنقشه
+Export\nRaster	برون‌بری\nرستر
+Export Animation	برون‌بری انیمیشن
+Export Bookmarks	برون‌بری نشانک‌ها
+Export Bookmarks…	برون‌بری نشانک‌ها…
+Export Features	برون‌بری عناصر
+Export Features (tool)	برون‌بری عناصر (ابزار)
+Export Features needs a vector layer (Data › Export Raster writes a raster)	برون‌بری عناصر به یک لایه برداری نیاز دارد (داده › برون‌بری رستر یک رستر می‌نویسد)
+Export Features…	برون‌بری عناصر…
+Export Layout	برون‌بری صفحه‌آرایی
+Export Map	برون‌بری نقشه
+Export Map failed unexpectedly	برون‌بری نقشه به‌طور غیرمنتظره‌ای ناموفق شد
+Export Map…	برون‌بری نقشه…
+Export Mesh	برون‌بری مش
+Export Mesh (OBJ)…	برون‌بری مش (OBJ)…
+Export Model	برون‌بری مدل
+Export Presentation	برون‌بری Presentation
+Export Presentation…	برون‌بری Presentation…
+Export Raster	برون‌بری رستر
+Export Raster…	برون‌بری رستر…
+Export Report	برون‌بری Report
+Export Report…	برون‌بری Report…
+Export Table	برون‌بری جدول
+Export the animation as PNG frames (zip).	برون‌بری انیمیشن به‌صورت فریم‌های PNG (zip).
+Export the layer.	برون‌بری لایه.
+Export the layout as PDF or PNG.	برون‌بری صفحه‌آرایی به‌صورت PDF یا PNG.
+Export the map view as a PNG image (with labels and a scale bar).	برون‌بری نمای نقشه به‌صورت تصویر PNG (با برچسب‌ها و خط مقیاس).
+Export the open layout as PDF or PNG.	برون‌بری صفحه‌آرایی باز به‌صورت PDF یا PNG.
+Export the presentation as a slideshow or PDF, or save it as a file.	برون‌بری Presentation به‌صورت اسلایدشو یا PDF، یا ذخیره آن به‌عنوان فایل.
+Export the report, or save it as a report file or template.	برون‌بری Report، یا ذخیره آن به‌عنوان فایل Report یا قالب.
+Export the selected layer as a 3D model (OBJ), polygons extruded.	برون‌بری لایه انتخاب‌شده به‌عنوان مدل سه‌بعدی (OBJ) با برجسته‌سازی چندضلعی‌ها.
+Export the selected layer to GeoJSON or CSV.	برون‌بری لایه انتخاب‌شده به GeoJSON یا CSV.
+Export the steps as an animated GIF.	برون‌بری گام‌ها به‌صورت GIF متحرک.
+Export Time Animation	برون‌بری انیمیشن زمانی
+Export To 3D	برون‌بری به سه‌بعدی
+Export To 3D File	برون‌بری به فایل سه‌بعدی
+Exported to {path}.	به {path} برون‌بری شد.
+exporting animations needs the desktop app	برون‌بری انیمیشن‌ها به برنامه دسکتاپ نیاز دارد
+exporting time animations needs the desktop app	برون‌بری انیمیشن‌های زمانی به برنامه دسکتاپ نیاز دارد
+Export…	برون‌بری…
+Expression	عبارت
+Extent	گستره
+Extent Indicator	نشانگر گستره
+extent is [minLon, minLat, maxLon, maxLat], "view" or null	گستره به‌صورت [minLon, minLat, maxLon, maxLat]، "view" یا null است
+Extent: {extent}	گستره: {extent}
+Extract	استخراج
+Extracts the parts of input features that fall inside clip polygons.	بخش‌هایی از عناصر ورودی را که داخل چندضلعی‌های برش می‌افتند استخراج می‌کند.
+Extruded shapes cast shadows on the map.	شکل‌های برجسته‌شده روی نقشه سایه می‌اندازند.
+Extrusion	برجسته‌سازی
+Face Culling	حذف رویه‌های پنهان
+Faces	رویه‌ها
+Factor	ضریب
+Failed	ناموفق
+Farthest	دورترین
+Faster drawing: no antialiasing.	ترسیم سریع‌تر: بدون antialiasing.
+Favourite Data Source	منبع داده مورد علاقه
+Favourites	علاقه‌مندی‌ها
+Feature	عنصر
+Feature\nAnalysis	تحلیل\nعناصر
+Feature\nTo Point	عنصر\nبه نقطه
+Feature Cache	حافظه نهان عناصر
+Feature Layer	لایه عناصر
+Feature Templates	قالب‌های عنصر
+Feature templates: default values for new features.	قالب‌های عنصر: مقادیر پیش‌فرض برای عناصر جدید.
+Feature To Point	عنصر به نقطه
+featured products	محصولات ویژه
+Features	عناصر
+Features most like the selected one	عنصرهایی که بیشترین شباهت را به عنصر انتخاب‌شده دارند
+Feet	فوت
+FEMA NFHL	FEMA NFHL
+FEMA NFHL…	FEMA NFHL…
+FEMA's National Flood Hazard Layer: effective flood zones, floodways, base flood elevations, levees and map panels. Its flood layers are drawn only from zoom 15 (closer than about 1:36,000), its availability map only farther out.	لایه ملی خطر سیل FEMA: پهنه‌های سیل معتبر، مسیرهای جاری سیل، ترازهای مبنای سیل، دیوارهای سیل‌بند و برگه‌های نقشه. لایه‌های سیل آن فقط از بزرگ‌نمایی 15 ترسیم می‌شوند (نزدیک‌تر از حدود 1:36,000) و نقشه پوشش آن فقط در دورهای بیشتر دیده می‌شود.
+Ferries	فرابندهای مسافری
+Fetch map tiles, data and web services from addresses it chooses	دریافت کاشی‌های نقشه، داده و سرویس‌های وب از نشانی‌هایی که خودش انتخاب می‌کند
+Fetch the tiles and styles of the web layers again.	کاشی‌ها و استایل لایه‌های وب را دوباره بگیرید.
+Field	فیلد
+field * 2, 'text', a + b	field * 2, 'text', a + b
+Field boundaries	مرزهای مزارع
+Field density	تراکم مزارع
+Field name	نام فیلد
+Fields	فیلدها
+Fields are drawn from zoom 9: zoom in to see them.	مزارع از بزرگ‌نمایی 9 ترسیم می‌شوند: برای دیدنشان بزرگ‌نمایی کنید.
+Fields colored by score, drawn from zoom 9	مزارع رنگ‌شده بر اساس امتیاز، از بزرگ‌نمایی 9 ترسیم می‌شوند
+Fields of the World	مزارع جهان
+Fields of the World…	مزارع جهان…
+fields, comma separated	فیلدها، با ویرگول جدا شده
+Fields, statistics, groups, pictures, attachments and charts in the report.	فیلدها، آمارها، گروه‌ها، تصاویر، پیوست‌ها و نمودارها در Report.
+Fields:	فیلدها:
+File	فایل
+File bridge only	فقط پل فایل
+File bridge: the script ran	پل فایل: اسکریپت اجرا شد
+File bridge: {error}	پل فایل: {error}
+File name	نام فایل
+file path	مسیر فایل
+Files ({n})	فایل‌ها ({n})
+Fill	پرکننده
+Fill Cache	پرکردن حافظه نهان
+Fill the cache whenever the projection changes.	هر بار تصویر تغییر کرد، حافظه نهان را پر کن.
+Film grain	دانه‌های فیلم
+Filter	فیلتر
+Filter bookmarks	پالایش نشانک‌ها
+Filter layers	پالایش لایه‌ها
+Filter rows…	پالایش ردیف‌ها…
+Find a place by coordinates.	یافتن مکانی با مختصات.
+Find a place or an address by name (OpenStreetMap).	یافتن مکان یا نشانی با نام (OpenStreetMap).
+Find and run geoprocessing tools.	یافتن و اجرای ابزارهای زمین‌پردازش.
+Find any command by name (Ctrl+K).	یافتن هر دستوری با نام (Ctrl+K).
+Find Items	یافتن آیتم‌ها
+Find Place	یافتن مکان
+Find plugins in the RustGIS plugin registry.	یافتن افزونه‌ها در فهرست افزونه‌های RustGIS.
+Find Similar	یافتن مشابه‌ها
+Find Tools	یافتن ابزارها
+Finding routes…	در حال یافتن مسیرها…
+Finish Polygon	پایان چندضلعی
+Finish Profile	پایان نیم‌رخ
+Finish Tool Run	پایان اجرای ابزار
+Finished: {tool}	تمام شد: {tool}
+Firewall	فایروال
+First standard parallel	موازی استاندارد اول
+First-Person	دید اول‌شخص
+First-Person Navigation	ناوبری اول‌شخص
+Fit	کلاف
+Fit To Map View	برازش به نمای نقشه
+Fix the problems listed below first	ابتدا مشکلات فهرست‌شده در پایین را برطرف کنید
+Fixed Zoom In	بزرگ‌نمایی ثابت به داخل
+Fixed Zoom Out	بزرگ‌نمایی ثابت به خارج
+Flat	تخت
+FlatGeobuf	FlatGeobuf
+Flip Line	وارونگی خط
+Flowline	خط جریان
+Fog	مه
+Folder	پوشه
+Folder Connections	اتصال‌های پوشه
+folder connections need the desktop app	اتصال‌های پوشه به برنامه دسکتاپ نیاز دارند
+Folders	پوشه‌ها
+Folder…	پوشه…
+for a store that doesn't say	برای فروشگاهی که نامش را ننوشته
+Forest	جنگل
+Forget Earthdata Login Token	فراموش‌کردن توکن ورود Earthdata
+Format	فرمت
+Found: {names}. An agent works on this map through RustGIS's tools and with its own (web, scripts, files) in a folder of its own, kept in Documents › RustGIS › Agent work. It asks you before each action.	پیدا شد: {names}. ایجنتی از طریق ابزارهای RustGIS روی این نقشه کار می‌کند و از ابزارهای خودش (وب، اسکریپت، فایل) در پوشه مخصوص به خود استفاده می‌کند که در Documents › RustGIS › Agent work نگه‌داری می‌شود. پیش از هر اقدام از شما می‌پرسد.
+Frame rate	نرخ فریم
+Frame rate, draw time, data size and memory.	نرخ فریم، زمان ترسیم، حجم داده و حافظه.
+France	فرانسه
+Free the prepared geometry.	آزادسازی هندسه آماده‌شده.
+Freehand	آزاد‌دست
+FROM	FROM
+From Selection	از انتخاب
+From Service…	از سرویس…
+From symbol	از نماد
+from the address	از نشانی
+from the service	از سرویس
+From URL…	از URL…
+Full Extent	گستره کامل
+Full extent	گستره کامل
+Full lines	خط‌های کامل
+Full size	اندازه کامل
+Function Editor	ویرایشگر تابع
+Gamma	گاما
+Gemini stopped the reply ({reason}).	پاسخ Gemini متوقف شد ({reason}).
+Generalization	تعمیم‌سازی
+Generate a token	ساخت توکن
+geoBoundaries listed no countries: type a country's code	هیچ کشوری از geoBoundaries فهرست نشده است: کد یک کشور را بنویسید
+Geocode	ژئوکدینگ
+Geocode Addresses	ژئوکدینگ نشانی‌ها
+Geocode Addresses…	ژئوکدینگ نشانی‌ها…
+Geocoder	ژئوکدر
+Geocoding {n} addresses…	در حال ژئوکدینگ {n} نشانی…
+Geodata Service	سرویس Geodata
+Geodesic circles on a grid that show how the map's projection distorts scale, area and angles.	دایره‌های ژئودزیک روی شبکه‌ای که نشان می‌دهند تصویر نقشه چگونه مقیاس، مساحت و زاویه‌ها را تغییر می‌دهد.
+GeoJSON	GeoJSON
+GeoJSON, CSV, GeoParquet, FlatGeobuf, GeoPackage, zipped Shapefiles, KML, GPX or GeoTIFF, up to 256 MB; the server must allow requests from web pages (CORS).	فرمت‌های GeoJSON، CSV، GeoParquet، FlatGeobuf، GeoPackage، Shapefileهای zip‌شده، KML، GPX یا GeoTIFF، تا 256 MB؛ سرور باید درخواست‌های صفحه‌های وب را مجاز بداند (CORS).
+GeoJSON, CSV, GeoParquet, FlatGeobuf, GeoPackage, zipped Shapefiles, KML, GPX or GeoTIFF, up to 512 MB.	فرمت‌های GeoJSON، CSV، GeoParquet، FlatGeobuf، GeoPackage، Shapefileهای zip‌شده، KML، GPX یا GeoTIFF، تا 512 MB.
+GeoLens	GeoLens
+GeoLens…	GeoLens…
+GeoLibre	GeoLibre
+GeoLibre Tools	ابزارهای GeoLibre
+Geometry	هندسه
+GeoPackage	GeoPackage
+GeoParquet	GeoParquet
+Geoprocessing	زمین‌پردازش
+Geoprocessing history.	تاریخچه زمین‌پردازش.
+Georeference	زمین‌مرجع‌دهی
+Geostatistical Wizard	ویزارد زمین‌آمار
+GeoTIFF	GeoTIFF
+Get a key	دریافت کلید
+Get it	دریافت
+GitHub	GitHub
+GitHub's latest release has no version number	آخرین انتشار GitHub شماره نسخه ندارد
+GitHub's reply isn't a release	پاسخ GitHub یک انتشار نیست
+GitHub's reply names no release	پاسخ GitHub هیچ انتشاری را نام نبرده است
+Give a Zarr store's address or folder	نشانی یا پوشه یک مخزن Zarr را بدهید
+Give the catalogue's web address	نشانی وب فهرست را بدهید
+Give the file's web address	نشانی وب فایل را بدهید
+Give the service's web address	نشانی وب سرویس را بدهید
+give the text's layer and row, or the lon and lat to place one	لایه و ردیف متن را بدهید، یا طول و عرض جغرافیایی را برای جای‌گذاری آن
+Global	سراسری
+Globe	کره
+Go	Go
+Go back a step.	یک گام به عقب.
+Go back to the previous extent.	بازگشت به گستره قبلی.
+Go forward a step.	یک گام به جلو.
+Go forward to the next extent.	رفتن به گستره بعدی.
+Go to a saved extent or save the current one.	رفتن به یک گستره ذخیره‌شده یا ذخیره گستره فعلی.
+Go To Bookmark	رفتن به نشانک
+Go to Date	رفتن به تاریخ
+Go To Map Link	رفتن به پیوند نقشه
+Go to the first step.	رفتن به گام اول.
+Go to the last step.	رفتن به گام آخر.
+Go To XY	رفتن به XY
+Go to {coordinate}	رفتن به {coordinate}
+Google Gemini	Google Gemini
+Got it	فهمیدم
+GPU	GPU
+GPU\nRendering	ترسیم\nGPU
+GPX	GPX
+Graduated Colors	رنگ‌های طبقه‌بندی‌شده
+Granules	گرانول‌ها
+Graphic Style	استایل گرافیک
+Graphics	گرافیک‌ها
+Graphics and Text	گرافیک‌ها و متن
+Graphics Layer	لایه گرافیک‌ها
+Graticule	شبکه جغرافیایی
+Green	سبز
+Greys	خاکستری‌ها
+Grid	شبکه
+Grid Spacing (degrees)	فاصله شبکه (درجه)
+Ground\nTo Grid	زمین\nبه شبکه
+Ground To Grid	زمین به شبکه
+Group	گروه
+GROUP BY	GROUP BY
+Group features by an integer code, each with default values.	عناصر را با یک کد عددی گروه‌بندی می‌کند، هر کدام با مقادیر پیش‌فرض.
+Group Option	گزینه گروه
+Group Properties	ویژگی‌های گروه
+Group Visibility Range	گستره دید گروه
+Groups	گروه‌ها
+Guided analysis: suitability, visibility, networks, interpolation and more.	تحلیل هدایت‌شده: تناسب‌سنجی، دیدپذیری، شبکه‌ها، درون‌یابی و بیشتر.
+Guides	راهنماها
+Halo	هاله
+Harbour (qualitative)	بندری (کیفی)
+Hazards	خطرها
+Haze	غبار
+Haze, fog, rain or snow over the map.	غبار، مه، باران یا برف روی نقشه.
+Height	ارتفاع
+Height (mm)	ارتفاع (mm)
+Help	کمک
+Help › Help	راهنما › راهنما
+Hexagons	شش‌ضلعی‌ها
+Hide	پنهان‌کردن
+Hide features far from the view's centre.	پنهان‌کردن عناصر دور از مرکز نما.
+Hide Group	پنهان‌کردن گروه
+Hide labels when the viewer is closer than this.	پنهان‌کردن برچسب‌ها وقتی بیننده نزدیک‌تر از این است.
+Hide labels when the viewer is farther than this.	پنهان‌کردن برچسب‌ها وقتی بیننده دورتر از این است.
+Hide other values	پنهان‌کردن مقادیر دیگر
+Hide Steps	پنهان‌کردن گام‌ها
+Hide the description	پنهان‌کردن توضیحات
+Hide values (no data)	پنهان‌کردن مقادیر (بدون داده)
+Hide values inside a range	پنهان‌کردن مقادیر داخل یک بازه
+Hide values outside a range	پنهان‌کردن مقادیر خارج از یک بازه
+Hide walls facing away from you.	پنهان‌کردن دیوارهای رو به دور از شما.
+Hides fields scoring below this. The score is the model's mean field probability × 100, a ranking rather than a calibrated probability.	فیلدهایی که امتیازشان زیر این عدد است را پنهان می‌کند. امتیاز یعنی میانگین احتمال مزرعه بودن مدل × 100؛ یک رتبه‌بندی است نه احتمال کالیبره‌شده.
+High values of the first raster and low values of the second score best.	مقادیر بالای رستر اول و مقادیر پایین رستر دوم بهترین امتیاز را می‌گیرند.
+Highways	بزرگراه‌ها
+Histogram Equalize	هم‌ترازسازی هیستوگرام
+Histograms and correlations	هیستوگرام‌ها و همبستگی‌ها
+History	تاریخچه
+Hold	نگه‌داشتن
+HOME	HOME
+Home	خانه
+Home › Add	خانه › افزودن
+Home › Navigate	خانه › ناوبری
+Home › Navigate › Bookmarks	خانه › ناوبری › نشانک‌ها
+Home › Web Data	خانه › داده وب
+Home › Web Data › United States	خانه › داده وب › ایالات متحده
+Homepage	صفحه خانگی
+Horizontal	افقی
+host=localhost dbname=gis user=postgres	host=localhost dbname=gis user=postgres
+host=… dbname=… user=…, or a .duckdb file	رشته‌ای مانند host=… dbname=… user=…، یا یک فایل .duckdb
+Hosted Imagery	تصاویر میزبانی‌شده
+Hour	ساعت
+How the layer's colours combine with the tile layers and basemap beneath.	نحوه ترکیب رنگ‌های لایه با لایه‌های کاشی و نقشه پایه زیر آن.
+How the layer's colours combine with what's beneath.	نحوه ترکیب رنگ‌های لایه با چیزی که زیر آن است.
+HUB Ocean's Ocean Data Platform: marine datasets, read as features (up to 10,000 each).	پلتفرم داده اقیانوس HUB Ocean: مجموعه داده‌های دریایی، خوانده‌شده به‌عنوان عناصر (تا 10,000 در هر کدام).
+hub.arcgis.com, or an organisation's Hub site	نشانی hub.arcgis.com یا سایت Hub یک سازمان
+Hugging Face	Hugging Face
+Hugging Face…	Hugging Face…
+Hydrography	هیدروگرافی
+Icechunk only, not read yet	فقط Icechunk، هنوز خوانده نشده
+Id: {id}	شناسه: {id}
+Identify	شناسایی
+Idle	بی‌کار
+IDW\nInterpolation	درون‌یابی\nIDW
+IDW Interpolation	درون‌یابی IDW
+IGN LiDAR HD	IGN LiDAR HD
+IGN LiDAR HD…	IGN LiDAR HD…
+IGN's LiDAR HD point clouds of France: 1 km tiles where the map is, added as COPC point clouds.	ابرهای نقطه LiDAR HD فرانسه از IGN: کاشی‌های 1 کیلومتری محل نقشه، افزوده‌شده به‌عنوان ابر نقطه COPC.
+Illumination	نورپردازی
+Image Analysis	تحلیل تصویر
+Image Classification	طبقه‌بندی تصویر
+Image Page	صفحه تصویر
+Imagery	تصاویر ماهواره‌ای
+Imagery Sharing	اشتراک تصاویر
+Imagery Tools	ابزارهای تصویر
+ImageServer	ImageServer
+Image…	تصویر…
+Import	واردی
+Import\nProject	درون‌بری\nپروژه
+Import All	درون‌بری همه
+Import Bookmarks	درون‌بری نشانک‌ها
+Import Bookmarks…	درون‌بری نشانک‌ها…
+Import Deep Learning Package	درون‌بری بسته یادگیری عمیق
+Import Layout	درون‌بری صفحه‌آرایی
+Import Layout…	درون‌بری صفحه‌آرایی…
+Import Model	درون‌بری مدل
+Import Package…	درون‌بری بسته…
+Import Presentation	درون‌بری Presentation
+Import Report	درون‌بری Report
+Import Service	درون‌بری سرویس
+Import Styles	درون‌بری استایل‌ها
+Import Styles From…	درون‌بری استایل‌ها از…
+Import Task	درون‌بری تسک
+Import Task…	درون‌بری تسک…
+Import Thumbnail	درون‌بری تصویر بندانگشتی
+Import…	درون‌بری…
+In Beyond	نزدیک‌تر از
+In memory	در حافظه
+In Progress	در حال انجام
+in progress	در حال انجام
+In project	در پروژه
+In RustGIS, it can:	در RustGIS می‌تواند:
+In use	در حال استفاده
+Indexes	اندیس‌ها
+Indices	شاخص‌ها
+Infographics	اینفوگرافیک‌ها
+Information	اطلاعات
+INPUT	INPUT
+Input	ورودی
+Input Features	عناصر ورودی
+Input Polygons	چندضلعی‌های ورودی
+Input Rows	ردیف‌های ورودی
+Input Summary Features	عناصر خلاصه ورودی
+Input Table	جدول ورودی
+Insert	درج
+Insert Dynamic Text	درج متن پویا
+Inspect	بازرسی
+Install	نصب
+Install a plugin	نصب یک افزونه
+Install a plugin from a .rgplugin file.	نصب افزونه از یک فایل .rgplugin.
+Install from a file	نصب از یک فایل
+Install From File	نصب از فایل
+Install From File…	نصب از فایل…
+Install GeoLibre Tools	نصب ابزارهای GeoLibre
+Install Plugin	نصب افزونه
+Install Plugin From Registry	نصب افزونه از فهرست
+Install the Basemaps plugin	نصب افزونه Basemaps
+Install Whitebox and GeoLibre tools	نصب ابزارهای Whitebox و GeoLibre
+Install {name} {version}?	نصب {name} {version}؟
+Installed	نصب شد
+Installed plugins are kept in {folder}	افزونه‌های نصب‌شده در {folder} نگه‌داری می‌شوند
+Installed with Homebrew, winget, the AUR or COPR? Update it there.	با Homebrew، winget، AUR یا COPR نصبش کرده‌اید؟ همان‌جا به‌روزرسانی‌اش کنید.
+Installed {name} {version}. Find it on the Plugins tab; its tools are also in the Tools pane.	نصب {name} {version} انجام شد. آن را در برگهٔ Plugins پیدا کنید؛ ابزارهایش هم در پنل Tools هستند.
+Installing it downloads Python {version} and the packages it needs from the internet.	نصب آن، Python {version} و بسته‌های مورد نیازش را از اینترنت دانلود می‌کند.
+Interface font: {font}	فونت رابط کاربری: {font}
+Interpolate a surface from points (IDW)	درون‌یابی سطح از نقاط (IDW)
+Interpolates a raster surface from feature values by inverse distance weighting, as QGIS does.	سطح رستری را از مقادیر عناصر با وزن‌دهی معکوس فاصله درون‌یابی می‌کند، مثل QGIS.
+Interpolation	درون‌یابی
+Interpolation Attribute	ویژگی درون‌یابی
+Interval	بازه
+invalid child id	شناسه فرزند نامعتبر
+Invalid: {error}	نامعتبر: {error}
+Invert	وارونه‌کردن
+Invert color scheme	وارونه‌کردن طرح رنگ
+Invert the selection.	وارونه‌کردن انتخاب.
+IS NULL	IS NULL
+it connects to an address on the internet	به نشانی‌ای در اینترنت وصل می‌شود
+It has no code: nothing in it runs.	کدی ندارد: هیچ بخشی از آن اجرا نمی‌شود.
+it is reserved to you (plugins, scripts, tasks, models and the GeoLibre runner)	مخصوص خود شماست (افزونه‌ها، اسکریپت‌ها، تسک‌ها، مدل‌ها و اجراکننده GeoLibre)
+it reads or writes files on this computer	روی این رایانه فایل می‌خواند یا می‌نویسد
+it replaces the open project	پروژه باز را جایگزین می‌کند
+it runs a plugin's command	دستور یک افزونه را اجرا می‌کند
+It runs in a sandbox with no other access to your computer or the network.	در یک سندباکس اجرا می‌شود و دسترسی دیگری به رایانه یا شبکه شما ندارد.
+It runs: {program}	این را اجرا می‌کند: {program}
+It's in the Symbology pane, open on the step's layer.	در پنل Symbology است که روی لایه گام باز می‌شود.
+It's installed but turned off: turn it on in the Plugin Manager.	نصب شده ولی خاموش است: در Plugin Manager روشنش کنید.
+It's too large to keep in the browser: install it again on your next visit.	برای نگه‌داشتن در مرورگر خیلی بزرگ است: در بازدید بعدی دوباره نصبش کنید.
+Italic	ایتالیک
+Item Pop-ups	پاپ‌آپ‌های آیتم
+Item {id}	آیتم {id}
+Its firewall ({firewall}) blocked RustGIS. The service may only allow some applications: contact its administrator and send them the details below.	فایروال آن ({firewall}) RustGIS را مسدود کرد. ممکن است سرویس فقط به بعضی برنامه‌ها اجازه بدهد: با مدیر آن تماس بگیرید و جزئیات زیر را برایش بفرستید.
+Jobs	کارها
+JOIN	JOIN
+Join	اتصال
+Keep a history of every edit to the layer, to look back or restore.	تاریخچه هر ویرایش روی لایه نگه می‌دارد، برای مرور یا بازگردانی.
+Keep an archive of edits	بایگانی ویرایش‌ها را نگه دار
+keep current	فعلی بماند
+Keep one value of each point's vector as its value field	یکی از مقادیر بردار هر نقطه را به‌عنوان فیلد مقدارش نگه دار
+Keep Result	نگه‌داشتن نتیجه
+Keep the labelled features fixed as the map moves.	عنصرهای برچسب‌دار هنگام حرکت نقشه ثابت می‌مانند.
+Keep the last drawing tool active after each graphic.	بعد از هر گرافیک، آخرین ابزار رسم فعال بماند.
+Keep the last tool active	آخرین ابزار فعال بماند
+Keep this result	این نتیجه نگه داشته شود
+Keep Tool	نگه‌داشتن ابزار
+Keep value	نگه‌داشتن مقدار
+Keyboard Shortcuts	میان‌برهای صفحه‌کلید
+Keyboard shortcuts.	میان‌برهای صفحه‌کلید.
+Keys from	کلیدها از
+Kilometers	کیلومتر
+kind is required	فیلد kind الزامی است
+KML	KML
+KMZ	KMZ
+Label	برچسب
+Label Class	کلاس برچسب
+Label Distance Range	گستره فاصله برچسب
+Label Field	فیلد برچسب
+Label Placement	جای‌گذاری برچسب
+Label Range	گستره برچسب
+Label the cities with their names	شهرها را با نامشان برچسب بزن
+Label Visibility Range	گستره دید برچسب
+Labeling	برچسب‌گذاری
+Labels	برچسب‌ها
+Lagoon	تالاب
+Lambert Conformal Conic	لامبرت هم‌شکل مخروطی
+Lambert Cylindrical Equal Area	لامبرت استوانه‌ای هم‌مساحت
+Landscape	افقی (Landscape)
+Language	زبان
+Lasso	لاسو
+Lasso (draw)	لاسو (رسم)
+Last agent call failed: {call} ({secs} s ago)	آخرین فراخوانی ایجنت ناموفق بود: {call} ({secs} ثانیه پیش)
+Last agent call: {call} ({secs} s ago)	آخرین فراخوانی ایجنت: {call} ({secs} ثانیه پیش)
+Last map render time	آخرین زمان ترسیم نقشه
+Last Project	آخرین پروژه
+Latitude	عرض جغرافیایی
+Latitude (Y)	عرض جغرافیایی (Y)
+Lay the nodes out along the flow	گره‌ها را در امتداد جریان بچین
+Layer	لایه
+Layer\nTemplates	قالب‌های\nلایه
+Layer Blend	ترکیب لایه
+Layer Extrusion	برجسته‌سازی لایه
+Layer File	فایل لایه
+Layer From\nSelection	لایه از\nانتخاب
+Layer Template	قالب لایه
+Layer Templates	قالب‌های لایه
+layer {id}	لایه {id}
+Layers	لایه‌ها
+Layers ({n})	لایه‌ها ({n})
+Layers and Table Views	لایه‌ها و نمای جدول‌ها
+Layout	صفحه‌آرایی
+Layout\nFile	فایل\nصفحه‌آرایی
+Layout after: {name}	صفحه‌آرایی پس از: {name}
+Layout before: {name}	صفحه‌آرایی پیش از: {name}
+Layout File…	فایل صفحه‌آرایی…
+Layout name	نام صفحه‌آرایی
+Layout: {kind}	صفحه‌آرایی: {kind}
+Layouts	صفحه‌آرایی‌ها
+Learn	یادگیری
+Learning\nResources	منابع\nیادگیری
+Left	چپ
+Legend	شرح
+Legend label. Clear it to show the value again.	برچسب راهنما. برای نمایش دوباره مقدار، آن را پاک کنید.
+Length {length} · gain {gain} m · loss {loss} m	طول {length} · صعود {gain} m · نزول {loss} m
+Let the assistant hand tasks to agents on this computer	اجازه بده دستیار کارها را به ایجنت‌های این رایانه بسپارد
+Let your Agents Control RustGIS	اجازه دهید ایجنت‌های شما RustGIS را کنترل کنند
+Letter spacing	فاصله حروف
+Level	سطح
+Library	کتابخانه
+Light and Shadow	نور و سایه
+Light the extruded shapes from the north-west.	شکل‌های برجسته از شمال‌غربی روشن می‌شوند.
+Lighting	نورپردازی
+LIKE	LIKE
+LIMIT	LIMIT
+Limit a field to coded values or a range.	محدودکردن یک فیلد به مقادیر کدشده یا یک بازه.
+Limit to map view	محدود به نمای نقشه
+Limit where tools work, and the cell size of new rasters.	محدودیت محل کار ابزارها و اندازه سلول رسترهای جدید.
+Limit which features draw with a SQL expression.	محدودکردن ترسیم عناصر با یک عبارت SQL.
+Limits	محدودیت‌ها
+Line	خط
+Line color	رنگ خط
+Line Of Sight	خط دید
+Line of sight between two points	خط دید بین دو نقطه
+Line Of Sight From Here	خط دید از این‌جا
+Line Strokes	ضرب‌های خط
+Line width	ضخامت خط
+Line {n} isn't four numbers (column row lon lat)	خط {n} چهار عدد نیست (ستون ردیف طول عرض)
+Lines	خط‌ها
+Lines and ticks	خط‌ها و تیک‌ها
+LineString	LineString
+Link	پیوند
+Link Cursors	پیوند مکان‌نماها
+Link Views	پیوند نماها
+List	فهرست
+List a Dataset's Files	فهرست فایل‌های یک مجموعه داده
+List by data source	فهرست بر اساس منبع داده
+List by drawing order	فهرست بر اساس ترتیب ترسیم
+List by selection	فهرست بر اساس انتخاب
+List Columns in File	فهرست ستون‌های فایل
+List Commands	فهرست دستورها
+List Data Sources	فهرست منابع داده
+List Database Columns	فهرست ستون‌های پایگاه داده
+List Database Tables	فهرست جدول‌های پایگاه داده
+List geoBoundaries Countries	فهرست کشورهای geoBoundaries
+List Layers in File	فهرست لایه‌های فایل
+List Products	فهرست محصولات
+List S3 Bucket	فهرست باکت S3
+List Source Cooperative Files	فهرست فایل‌های Source Cooperative
+List Source Cooperative Products	فهرست محصولات Source Cooperative
+List STAC Collections	فهرست مجموعه‌های STAC
+List Tables	فهرست جدول‌ها
+List The National Map Services	فهرست سرویس‌های The National Map
+List the provider's models	فهرست مدل‌های ارائه‌دهنده
+List this layer in the legend	این لایه در راهنما فهرست شود
+List what it holds	فهرست محتویاتش
+Listed for discovery: RustGIS doesn't read this dataset yet. Its data and paper are linked above.	برای شناسایی فهرست شده: RustGIS هنوز این مجموعه داده را نمی‌خواند. داده و مقاله آن بالا پیوند شده‌اند.
+Listing…	در حال فهرست‌کردن…
+Lit	روشن‌شده
+Live summary of the features in view.	خلاصه زنده عناصر داخل نما.
+Load All Features	بارگذاری همه عناصر
+Load an unpacked plugin from its folder while you develop it.	بارگذاری افزونه بسته‌نشده از پوشه‌اش هنگام توسعه آن.
+Load more	بارگذاری بیشتر
+Load sources & plot	بارگذاری منابع و رسم
+Load Whitebox and GeoLibre tools	بارگذاری ابزارهای Whitebox و GeoLibre
+Loaded {name} from its folder.	افزونهٔ {name} از پوشهٔ خودش بارگذاری شد.
+Loading the GeoLibre tools…	در حال بارگذاری ابزارهای GeoLibre…
+Loading…	در حال بارگذاری…
+Loads map tiles from the web	کاشی‌های نقشه را از وب می‌گیرد
+Local	محلی
+Locate	مکان‌یابی
+Locate GeoLibre Runner	مکان‌یابی اجراکننده GeoLibre
+Locate the GeoLibre runner	مکان‌یابی اجراکننده GeoLibre
+Locate…	مکان‌یابی…
+Location	مکان
+Locator	مکان‌یاب
+Lock	قفل
+Long	بلند
+Longitude	طول جغرافیایی
+Longitude (X)	طول جغرافیایی (X)
+Look for {name}, outlined on the ribbon.	ابزار {name} را پیدا کنید؛ روی نوار دورش خط کشیده شده است.
+Looking up the place…	در حال جستجوی مکان…
+Loop	حلقه
+Lower Priority	اولویت پایین‌تر
+Made in RustGIS: samples, drawings and tool outputs	ساخته‌شده در RustGIS: نمونه‌ها، ترسیم‌ها و خروجی ابزارها
+Magnifier	ذره‌بین
+Major Lakes	دریاچه‌های بزرگ
+Major Rivers	رودهای بزرگ
+Make a new layer of the selected features.	ساخت لایه جدید از عناصر انتخاب‌شده.
+Make a task of the steps recorded	از گام‌های ثبت‌شده یک تسک بساز
+Make Layer From Selected Features	ساخت لایه از عناصر انتخاب‌شده
+Manage	مدیریت
+Manage Bookmarks	مدیریت نشانک‌ها
+Manage Edits	مدیریت ویرایش‌ها
+Manage Templates	مدیریت قالب‌ها
+Map	نقشه
+Map\nFrame	قاب\nنقشه
+Map (the current view)	نقشه (نمای فعلی)
+map by date	نقشه بر اساس تاریخ
+Map centre	مرکز نقشه
+Map draw	ترسیم نقشه
+Map Extent	گستره نقشه
+Map File	فایل نقشه
+Map Frame	قاب نقشه
+Map Frames	قاب‌های نقشه
+Map frames per second (live while the map moves)	فریم در ثانیه نقشه (زنده هنگام حرکت نقشه)
+Map Link	پیوند نقشه
+Map name	نام نقشه
+Map Page	صفحه نقشه
+Map scale	مقیاس نقشه
+Map Series	سری نقشه‌ها
+Map Series Page	صفحه سری نقشه
+Map series page name	نام صفحه سری نقشه
+Map style (JSON)	استایل نقشه (JSON)
+Map Surrounds	عناصر پیرامونی نقشه
+Map Thumbnail	تصویر بندانگشتی نقشه
+Map tiles of the whole world	کاشی‌های نقشه سراسر جهان
+Map View	نمای نقشه
+map.goToXY {"lon": 2.35, "lat": 48.85, "scale": 5000000}\nselect.byAttributes {"layer": "Cities", "where": "pop_max > 1000000"}	map.goToXY {"lon": 2.35, "lat": 48.85, "scale": 5000000}\nselect.byAttributes {"layer": "Cities", "where": "pop_max > 1000000"}
+Map: {kind}	نقشه: {kind}
+Mapping	نقشه‌نگاری
+Maps	نقشه‌ها
+Maps move together.	نقشه‌ها با هم حرکت می‌کنند.
+MapServer	MapServer
+Marker	نشانه
+Mask Values	ماسک مقادیر
+Masking	ماسک‌کردن
+Matching places	مکان‌های منطبق
+Max	بیشینه
+Max %	بیشینه %
+Maximum zoom	بیشینه بزرگ‌نمایی
+MCP Relay	رله MCP
+MCP relay is already listening on 127.0.0.1:{port}; stop it first to use port {asked}	رله MCP همین حالا روی 127.0.0.1:{port} گوش می‌دهد؛ برای استفاده از درگاه {asked} اول آن را متوقف کنید
+MCP relay listening on 127.0.0.1:{port}	رله MCP روی 127.0.0.1:{port} گوش می‌دهد
+MCP relay stopped	رله MCP متوقف شد
+MCP relay · full access · {n} attached	رله MCP · دسترسی کامل · {n} متصل
+MCP relay · {n} attached	رله MCP · {n} متصل
+Mean	میانگین
+Measure	اندازه گیری
+Measure Area	اندازه‌گیری مساحت
+Measure Distance	اندازه‌گیری مسافت
+Measure geodesic distances and areas on the map.	اندازه‌گیری مسافت‌ها و مساحت‌های ژئودزیک روی نقشه.
+Measure on this body, with one of its basemaps.	اندازه‌گیری روی این جرم آسمانی، با یکی از نقشه‌های پایه‌اش.
+Measure with an elevation raster	اندازه‌گیری با رستر ارتفاعی
+Measurements so far.	اندازه‌گیری‌های تا این‌جا.
+Mensuration	اندازه‌نگاری
+Mensuration Tools	ابزارهای اندازه‌نگاری
+Merge	ادغام
+Merge elevation rasters into a surface model and export a 3D mesh.	ادغام رسترهای ارتفاعی در یک مدل سطح و برون‌بری مش سه‌بعدی.
+Merges polygons that share a field value into one feature per value.	چندضلعی‌هایی که مقدار یک فیلد را مشترک دارند، به یک عنصر برای هر مقدار ادغام می‌کند.
+Messages appear here.	پیام‌ها این‌جا ظاهر می‌شوند.
+Meters	متر
+Method	روش
+Midnight	نیمه‌شب
+Miles	مایل
+Miller Cylindrical	میلر استوانه‌ای
+Min	کمینه
+Min %	کمینه %
+Min must be less than Max	کمینه باید از بیشینه کمتر باشد
+Min must not be more than Max	کمینه نباید از بیشینه بیشتر باشد
+Minimum Bounding Geometry	کمینه هندسه دربرگیرنده
+Minimum Maximum	کمینه–بیشینه
+Minutes	دقیقه
+minutes ago	دقیقه پیش
+Miter	میتر
+Mobile Map	نقشه موبایل
+Mod+	Mod+
+Model	مدل
+Model\nBuilder	Model\nBuilder
+model id	شناسه مدل
+Model output	خروجی مدل
+ModelBuilder	ModelBuilder
+Models	مدل‌ها
+Modify	اصلاح
+Modify Selected Features	اصلاح عناصر انتخاب‌شده
+Mollweide (equal-area world)	مولواید (جهت هم‌مساحت)
+Month	ماه
+More	بیشتر
+More basemaps:	نقشه‌های پایه بیشتر:
+Mosaic images into an orthomosaic	موزاییک تصاویر در یک ارتو موزاییک
+Mosaic Rasters	موزاییک رسترها
+Mosaic the visible rasters into an orthomosaic.	موزاییک رسترهای نمایان در یک ارتو موزاییک.
+Most cloud cover (%)	بیشترین پوشش ابر (%)
+Mouse wheel	چرخ موس
+Move	جابجایی
+Move (m)	جابه‌جایی (m)
+Move Bookmark	جابه‌جایی نشانک
+Move Down	انتقال به پایین
+Move down	انتقال به پایین
+Move Group	جابه‌جایی گروه
+Move Task Step	جابه‌جایی گام تسک
+Move To Group	انتقال به گروه
+Move To {group}	انتقال به {group}
+Move Up	انتقال به بالا
+Move up	انتقال به بالا
+Move, rotate, scale, merge, explode, split or flip the selected features.	جابه‌جایی، چرخش، مقیاس، ادغام، تجزیه، شکستن یا وارونگی عناصر انتخاب‌شده.
+Move, Rotate, Scale…	جابه‌جایی، چرخش، مقیاس…
+MultiLineString	MultiLineString
+MultiPolygon	MultiPolygon
+My Buckets	باکت‌های من
+My OGC Layer	لایه OGC من
+N/S/E/W	ش/ج/خ/غ
+Name	نام
+name the plugin whose panel to open: {"id": plugin id}	افزونه‌ای که پنلش باز شود را نام ببرید: {"id": plugin id}
+NASA Earthaccess	NASA Earthaccess
+NASA Earthaccess…	NASA Earthaccess…
+NASA Earthdata	NASA Earthdata
+NASA Earthdata through Earthaccess's search: find a dataset, then its granules where the map is, drawn as footprints. GeoTIFFs are added as COGs, read in place. Searching needs no account.	داده‌های NASA Earthdata از طریق جستجوی Earthaccess: یک مجموعه داده پیدا کنید، سپس گرانول‌هایش را در محل نقشه، به‌صورت ردپا ترسیم‌شده ببینید. فایل‌های GeoTIFF به‌عنوان COG افزوده و در جا خوانده می‌شوند. جستجو به حساب نیاز ندارد.
+NASA Earthdata…	NASA Earthdata…
+NASA's CMR has no dataset named {name}	هیچ مجموعه داده‌ای به نام {name} در CMR ناسا نیست
+NASA's Earthdata GIS: imagery, maps, features and web maps of Earth science data.	سامانهٔ Earthdata GIS ناسا: تصاویر، نقشه‌ها، عناصر و نقشه‌های وب داده‌های علوم زمین.
+NASA's Global Imagery Browse Services (GIBS): over a thousand layers of satellite imagery and science data, most of them daily.	سرویس‌های مرور تصاویر جهانی ناسا (GIBS): بیش از هزار لایه تصویر ماهواره‌ای و داده علمی، بیشترشان روزانه.
+Natural Breaks (Jenks)	شکست‌های طبیعی (جِنکس)
+Natural Color (1, 2, 3)	رنگ طبیعی (1، 2، 3)
+Natural Earth	Natural Earth
+Natural Earth's public domain map data (countries, states, coastlines, rivers, lakes, roads and more) on Source Cooperative. PMTiles are added as tile layers, other files as layers.	داده نقشه مالکیت عمومی Natural Earth (کشورها، ایالت‌ها، خط ساحل، رودها، دریاچه‌ها، جاده‌ها و بیشتر) روی Source Cooperative. PMTiles به‌عنوان لایه کاشی و بقیه فایل‌ها به‌عنوان لایه افزوده می‌شوند.
+Natural Earth…	Natural Earth…
+Navigate	ناوبری
+Navigate with the mouse (planar) or walk with W A S D, Q and E (first-person).	با موس ناوبری کنید (مسطح) یا با W A S D، Q و E راه بروید (اول‌شخص).
+Navigation	ناوبری
+Navigation Mode	حالت ناوبری
+Navigator	ناوبر
+NDVI, NDWI, SAVI, NBR, NDBI, EVI.	NDVI، NDWI، SAVI، NBR، NDBI، EVI.
+Nearest Neighbor	نزدیک‌ترین همسایه
+Neatline	خط تمیز
+Needs three or more bands.	به سه باند یا بیشتر نیاز دارد.
+Neighborhood Explorer	کاوشگر همسایگی
+Network Analysis	تحلیل شبکه
+New	جدید
+New\nLayout	صفحه‌آرایی\nجدید
+New\nMap	نقشه\nجدید
+New\nNotebook	نوت‌بوک\nجدید
+New\nPresentation	ارائه\nجدید
+New\nReport	گزارش\nجدید
+New\nWorkspace	فضای کاری\nجدید
+New / Open / Save project	پروژه جدید / بازکردن / ذخیره
+New Bookmark	نشانک جدید
+New Bookmark…	نشانک جدید…
+New conversation	گفت‌وگوی جدید
+New Custom Template	قالب سفارشی جدید
+New Custom Template…	قالب سفارشی جدید…
+New features use this template's values	عناصر جدید از مقادیر این قالب استفاده می‌کنند
+New Group	گروه جدید
+New job name	نام کار جدید
+New Layout	صفحه‌آرایی جدید
+New Map	نقشه جدید
+New Model From History	مدل جدید از تاریخچه
+New Notebook	نوت‌بوک جدید
+New Presentation	ارائهٔ جدید
+New Project	پروژه جدید
+New project	پروژه جدید
+New Relationship…	رابطه جدید…
+New Report	گزارش جدید
+New Selection	انتخاب جدید
+New Style	استایل جدید
+New Style From Layer	استایل جدید از لایه
+New Task	تسک جدید
+New Task From History	تسک جدید از تاریخچه
+New Template	قالب جدید
+New Template (a layout page)	قالب جدید (یک صفحه صفحه‌آرایی)
+New Workspace	فضای کاری جدید
+New Workspace From Visible Rasters	فضای کاری جدید از رسترهای نمایان
+Next	بعدی
+Next Extent	گستره بعدی
+Next Page	صفحه بعد
+NLDI result cleared.	نتیجه NLDI پاک شد.
+NLDI returned no plottable navigation source.	هیچ منبع ناوبری قابل رسمی از NLDI برنگشت.
+No	No
+No agents that speak ACP (Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor, OpenCode, goose) were found on this computer.	هیچ ایجنتی که ACP بفهمد (Claude Code، Codex، Gemini CLI، GitHub Copilot CLI، Cursor، OpenCode، goose) روی این رایانه پیدا نشد.
+No AlphaEarth layer on the map	هیچ لایه AlphaEarth روی نقشه نیست
+No bookmark matches the filter.	هیچ نشانکی با پالایش مطابقت ندارد.
+No bookmarks yet	هنوز نشانکی نیست
+No bookmarks yet. New Bookmark saves the current view of the map.	هنوز نشانکی نیست. نشانک جدید، نمای فعلی نقشه را ذخیره می‌کند.
+No catalogs below this one: Find Items lists its items	زیر این فهرست، فهرستی نیست: Find Items آیتم‌هایش را فهرست می‌کند
+No COMID was returned for this point.	برای این نقطه هیچ COMIDای برگردانده نشد.
+no command	بدون دستور
+No connections this session	در این نشست اتصالی نبود
+No datasets match.	هیچ مجموعه داده‌ای مطابقت ندارد.
+No datasets with data RustGIS can add	هیچ مجموعه داده‌ای با داده قابل افزودن به RustGIS نیست
+No edits since the project was saved	از ذخیره پروژه ویرایشی نبوده است
+No field of this layer holds dates.	هیچ فیلدی از این لایه تاریخ نگه نمی‌دارد.
+No granules in this view and date range.	در این نما و بازه تاریخی گرانولی نیست.
+no home folder	بدون پوشه خانه
+no layer	بدون لایه
+No layer has a field of dates.	هیچ لایه‌ای فیلد تاریخ ندارد.
+no layer has a field of dates: add one that has, or a tile layer whose address has a date (map.addTiles)	هیچ لایه‌ای فیلد تاریخ ندارد: یکی که داشته باشد اضافه کنید، یا لایه کاشی‌ای که نشانی‌اش تاریخ دارد (map.addTiles)
+No layers match	هیچ لایه‌ای مطابقت ندارد
+No layers match your search.	هیچ لایه‌ای با جستجوی شما مطابقت ندارد.
+No mask	بدون ماسک
+No models are available for this account.	هیچ مدلی برای این حساب در دسترس نیست.
+No notebooks yet. Analyze › New Notebook starts one, or Add and Open Notebook opens one.	هنوز Notebookی نیست. تحلیل › Notebook جدید یکی می‌سازد، یا افزودن و بازکردن Notebook یکی را باز می‌کند.
+No offline areas	بدون پهنه آفلاین
+No other reports	گزارش دیگری نیست
+No place found	مکانی پیدا نشد
+No place matches that address.	هیچ مکانی با آن نشانی مطابقت ندارد.
+No plugin panel is open.	هیچ پنل افزونه‌ای باز نیست.
+No plugins are installed. Browse the plugin registry, or install a .rgplugin file.	هیچ افزونه‌ای نصب نیست. فهرست افزونه‌ها را ببینید، یا یک فایل .rgplugin نصب کنید.
+No plugins match.	هیچ افزونه‌ای مطابقت ندارد.
+No Pop-ups	بدون پاپ‌آپ
+No presentations yet. Publish › New Presentation starts one.	هنوز Presentationی نیست. انتشار › Presentation جدید یکی را شروع می‌کند.
+No products	بدون محصول
+No project opened or saved yet	هنوز پروژه‌ای باز یا ذخیره نشده است
+No properties	بدون ویژگی
+No relationships (Data Design › Relationships)	بدون رابطه (طراحی داده › رابطه‌ها)
+No relationships yet	هنوز رابطه‌ای نیست
+No reports yet. Publish › New Report lists the selected layer's records.	هنوز Reportی نیست. انتشار › Report جدید رکوردهای لایه انتخاب‌شده را فهرست می‌کند.
+no row	بدون ردیف
+no service or file links	بدون پیوند سرویس یا فایل
+No services match your search.	هیچ سرویسی با جستجوی شما مطابقت ندارد.
+No standalone tables	بدون جدول مستقل
+No styles yet	هنوز استایلی نیست
+No tasks yet. Record one, or make one from your geoprocessing history with Analyze › Task.	هنوز تسکی نیست. یکی ضبط کنید، یا از تاریخچه زمین‌پردازش با تحلیل › Task بسازید.
+no text graphic there	آن‌جا گرافیک متنی نیست
+No tools match your search.	هیچ ابزاری با جستجوی شما مطابقت ندارد.
+no yearly series	بدون سری سالانه
+NoData	NoData
+Nominatim	Nominatim
+None	هیچ
+None (public buckets)	هیچ (باکت‌های عمومی)
+none, a .duckdb file, or host=… dbname=… user=…	هیچ، یک فایل .duckdb، یا host=… dbname=… user=…
+none, or from PGPASSWORD or MYSQL_PWD	هیچ، یا از PGPASSWORD یا MYSQL_PWD
+None. Add one by address, or from a basemap plugin.	هیچ. یکی با نشانی اضافه کنید، یا از افزونه نقشه پایه.
+North	شمال
+North\nArrow	فلش\nشمال
+North Polar Stereographic	قطبی استریوگرافیک شمالی
+not a picture	تصویر نیست
+not a RustGIS layout	صفحه‌آرایی RustGIS نیست
+not a RustGIS project	پروژه RustGIS نیست
+Not for texts: a text is edited in the Format pane.	برای متن‌ها نیست: متن در پنل Format ویرایش می‌شود.
+not needed	لازم نیست
+Not sandboxed	بدون سندباکس
+Not saved yet	هنوز ذخیره نشده
+Not searched, as they didn't load: {folders}	جستجو نشدند چون بارگذاری نشدند: {folders}
+Not Selectable	غیرقابل انتخاب
+Notebook	Notebook
+Notebook Pane	پنل Notebook
+Nothing found	چیزی پیدا نشد
+Nothing found where the map is	در محل نقشه چیزی پیدا نشد
+Nothing here	اینجا چیزی نیست
+Nothing named {name} to rename	چیزی به نام {name} برای تغییر نام نیست
+Nothing shared yet. Publish › Share As makes web maps, layers, styles, scenes and more.	هنوز چیزی به اشتراک گذاشته نشده. انتشار › اشتراک به‌عنوان، نقشه وب، لایه، استایل، صحنه و بیشتر می‌سازد.
+Nothing was found at this address.	در این نشانی چیزی پیدا نشد.
+Nothing was recorded, so no task was made.	چیزی ثبت نشد، پس تسکی ساخته نشد.
+Now	اکنون
+NULL	NULL
+Nulls	تهی‌ها
+Observations (observer, date, species, count)	مشاهدات (ناظر، تاریخ، گونه، تعداد)
+observer height m	ارتفاع ناظر m
+Ocean	اقیانوس
+Ocean Data Platform	Ocean Data Platform
+Ocean Data Platform…	Ocean Data Platform…
+of a geometry that doesn't say	از هندسه‌ای که نامش را ننوشته
+Off	خاموش
+Off, west and south are negative: -112.5°.	خاموش؛ غرب و جنوب منفی هستند: -112.5°.
+Offline	آفلاین
+Offline area	پهنه آفلاین
+Offset	جابه‌جایی (آفست)
+OGC API	OGC API
+OGC API Features and Tiles	OGC API Features and Tiles
+OID	OID
+Ollama (local)	سرویس محلی Ollama
+On	On
+On Hold	در انتظار
+on hold	در انتظار
+On the desktop, the key can also come from {vars}.	در دسکتاپ، کلید می‌تواند از {vars} هم بیاید.
+On-screen compass, zoom slider and pan pad.	قطب‌نمای روی صفحه، لغزنده بزرگ‌نمایی و پد جابه‌جایی.
+One command per line: id {json}. Lines starting with # are comments.	هر خط یک دستور: id {json}. خط‌هایی که با # شروع می‌شوند توضیح‌اند.
+One DuckDB SELECT: DuckDB Spatial's ST_ functions, files and web addresses (read_parquet('…')), and the tables of the database below. Ctrl+Enter runs it.	یک SELECT از DuckDB: توابع ST_ در DuckDB Spatial، فایل‌ها و نشانی‌های وب (read_parquet('…')) و جدول‌های پایگاه داده زیر. با Ctrl+Enter اجرا می‌شود.
+One page per feature of an index layer.	برای هر عنصر لایه ایندکس، یک صفحه.
+One per line: code=name	هر خط یکی: code=name
+One stroke, from the symbol. Add strokes for casings, parallel lines and offsets.	یک ضربه، از نماد. برای پوسته، خط‌های موازی و آفست‌ها ضربه اضافه کنید.
+Only features matching this expression draw in {layer}.	فقط عناصری که با این عبارت مطابقت دارند در {layer} ترسیم می‌شوند.
+Only where the map is	فقط در محل نقشه
+Opacity	کدری
+Open	باز
+Open a .rgis project	بازکردن یک پروژه .rgis
+open a layout first	اول یک صفحه‌آرایی باز کنید
+Open a model file (*.model.json)	بازکردن یک فایل مدل (*.model.json)
+Open a model of this project	بازکردن مدلی از این پروژه
+Open a RustGIS or Jupyter notebook.	بازکردن یک Notebook از RustGIS یا Jupyter.
+Open a RustGIS project.	بازکردن یک پروژه RustGIS.
+Open an offline area to edit.	بازکردن یک پهنه آفلاین برای ویرایش.
+Open browser again	بازکردن دوباره مرورگر
+Open Custom Template	بازکردن قالب سفارشی
+Open Custom Template…	بازکردن قالب سفارشی…
+Open data catalogs registered with Portolan: pick a publisher's catalog, then Find Items for its collections.	فهرست‌های داده ثبت‌شده در Portolan را باز کنید: فهرست یک ناشر را برگزینید، سپس برای مجموعه‌هایش Find Items را بزنید.
+Open data catalogues searched by text. Files are added by their address (read in place when they can be); a service opens Add From Service to pick its layer.	فهرست‌های داده‌ای که با متن جستجو می‌شوند باز کنید. فایل‌ها با نشانی‌شان افزوده می‌شوند (هرجا ممکن باشد در جا خوانده می‌شوند)؛ یک سرویس، «افزودن از سرویس» را باز می‌کند تا لایه‌اش را برگزینید.
+Open data products on Source Cooperative. GeoParquet, FlatGeobuf, cloud-optimised GeoTIFFs and PMTiles are read in place; other files are downloaded.	محصولات داده باز روی Source Cooperative. GeoParquet، FlatGeobuf، GeoTIFFهای بهینه ابری و PMTiles در جا خوانده می‌شوند؛ بقیه فایل‌ها دانلود می‌شوند.
+Open folder	بازکردن پوشه
+Open In Geoprocessing…	بازکردن در زمین‌پردازش…
+Open in ModelBuilder	بازکردن در ModelBuilder
+Open Layout	بازکردن صفحه‌آرایی
+Open ModelBuilder	بازکردن ModelBuilder
+Open Notebook	بازکردن Notebook
+Open Offline Map	بازکردن نقشه آفلاین
+Open Presentation	بازکردن Presentation
+Open Project	بازکردن پروژه
+Open project	بازکردن پروژه
+Open Project (from text)	بازکردن پروژه (از متن)
+Open Report	بازکردن Report
+Open the attribute table of the selected layer.	بازکردن جدول ویژگی لایه انتخاب‌شده.
+Open the Basemaps tab	بازکردن برگه Basemaps
+Open the layer's attribute table.	بازکردن جدول ویژگی لایه.
+Open the layer's table.	بازکردن جدول لایه.
+Open the plugin's panel.	بازکردن پنل افزونه.
+Open the Release Page	بازکردن صفحه انتشار
+Open the RustGIS user guide.	بازکردن راهنمای کاربر RustGIS.
+Open the selected layer's table.	بازکردن جدول لایه انتخاب‌شده.
+Open the Symbology pane.	بازکردن پنل Symbology.
+Open the task's steps	بازکردن گام‌های تسک
+Open this granule in Earthdata Search	بازکردن این گرانول در Earthdata Search
+Open {code} on epsg.io	بازکردن {code} روی epsg.io
+Open, save and create projects	بازکردن، ذخیره و ساخت پروژه‌ها
+OpenAerialMap	OpenAerialMap
+OpenAerialMap…	OpenAerialMap…
+OpenAI-compatible	سازگار با OpenAI
+Opened {name} for printing	گزارش {name} برای چاپ باز شد
+OpenFreeMap Bright	روشن (OpenFreeMap)
+OpenFreeMap Dark	تیره (OpenFreeMap)
+OpenFreeMap Fiord	فیورد (OpenFreeMap)
+OpenFreeMap Liberty	لیبرتی (OpenFreeMap)
+OpenFreeMap Positron	پوزیترون (OpenFreeMap)
+OpenFreeMap © OpenMapTiles Data from OpenStreetMap	حق نشر OpenFreeMap؛ داده‌ها از OpenMapTiles و OpenStreetMap
+Opening {url}…	در حال بازکردن {url}…
+OpenStreetMap	OpenStreetMap
+OpenStreetMap data where the map is, from an Overpass server: a preset, or tag filters such as amenity=cafe, shop. The area can be up to about 50 × 50 km. © OpenStreetMap contributors (ODbL).	داده OpenStreetMap در محل نقشه، از یک سرور Overpass: یک پری‌ست، یا پالایش تگ‌ها مثل amenity=cafe، shop. پهنه می‌تواند تا حدود 50 × 50 کیلومتر باشد. © OpenStreetMap contributors (ODbL).
+OpenStreetMap's public server	سرور عمومی OpenStreetMap
+OpenStreetMap, Esri, USGS, NASA and more, from the plugin registry.	از فهرست افزونه‌ها: OpenStreetMap، Esri، USGS، NASA و بیشتر.
+OpenStreetMap…	OpenStreetMap…
+Open…	بازکردن…
+Optional. Shift+Enter starts a new line.	اختیاری. Shift+Enter خط جدید می‌سازد.
+Options	گزینه‌ها
+OR	OR
+Or	Or
+Or run in a POSIX shell, for Claude Code or Codex:	یا در یک شل POSIX اجرا کنید، برای Claude Code یا Codex:
+Or run in PowerShell, for Claude Code or Codex:	یا در PowerShell اجرا کنید، برای Claude Code یا Codex:
+Or run, for Claude Code or Codex:	یا برای Claude Code یا Codex اجرا کنید:
+ORDER BY	ORDER BY
+Orientation	جهت‌گیری
+Ortho Mapping	ارثومپینگ
+Other	سایر
+Other Data	داده‌های دیگر
+Out Beyond	دورتر از
+Outline	خط دور
+Outline another frame's extent in this map frame.	گستره قاب دیگر را در این قاب نقشه خط‌بندی می‌کند.
+Outline color	رنگ خط دور
+Outline width	ضخامت خط دور
+Outlines {frame}	خط دور {frame} را می‌کشد
+OUTPUT	OUTPUT
+Output	خروجی
+Output Name	نام خروجی
+Over 1,000 raster, vector, LiDAR, hydrology and terrain tools that run in the browser, from a one-time download of about 25 MB.	بیش از 1000 ابزار رستر، بردار، لیدار، هیدرولوژی و زمین که در مرورگر اجرا می‌شوند، با یک دانلود یک‌باره حدود 25 مگابایتی.
+Over 1,000 raster, vector, LiDAR, hydrology and terrain tools, from an optional download of about 20 MB.	بیش از 1000 ابزار رستر، بردار، لیدار، هیدرولوژی و زمین، با دانلود اختیاری حدود 20 مگابایتی.
+Overlay	رویه‌ی
+overlay	روی‌گذاری
+Overlay (a transparent layer kept on top, such as labels or roads)	روی‌گذاری (لایه شفافی که بالا نگه داشته می‌شود، مثل برچسب‌ها یا جاده‌ها)
+Overture has no {ty} data where the map is	داده {ty} در محل نقشه از Overture موجود نیست
+Overture Maps	Overture Maps
+Overture Maps' open data: buildings, places, transportation, administrative divisions, base layers and addresses. Where the map is, its features are read in place from Overture's GeoParquet files (zoom to a city or smaller); the whole world comes as map tiles.	داده باز Overture Maps: ساختمان‌ها، مکان‌ها، حمل‌ونقل، بخش‌های اداری، لایه‌های پایه و نشانی‌ها. در محل نقشه، عناصرش مستقیم از فایل‌های GeoParquet اوورت خوانده می‌شوند (به اندازه یک شهر یا کوچک‌تر بزرگ‌نمایی کنید)؛ کل جهان هم به‌صورت کاشی نقشه می‌آید.
+Overture Maps…	Overture Maps…
+Package	بسته‌بندی
+Package a trained deep learning model.	بسته‌بندی یک مدل یادگیری عمیق آموزش‌دیده.
+Package Map	بسته‌بندی نقشه
+Package Project	بسته‌بندی پروژه
+Package Results	بسته‌بندی نتایج
+Page	صفحه
+Page\nSize	اندازه\nصفحه
+Page after: {name}	صفحه پس از: {name}
+Page before: {name}	صفحه پیش از: {name}
+Page number	شماره صفحه
+Page Properties	ویژگی‌های صفحه
+Page Setup	تنظیم صفحه
+Page Size	اندازه صفحه
+Page text	متن صفحه
+Page title	عنوان صفحه
+Page {n} of {total}	صفحه {n} از {total}
+Page {n} of {total}: {name}	صفحه {n} از {total}: {name}
+Pages of maps, text, images and videos, shown one after another.	صفحه‌هایی از نقشه، متن، تصویر و ویدیو که پشت سر هم نمایش داده می‌شوند.
+Pan	جابه‌جایی
+Pan (Explore) · any tool	جابه‌جایی (کاوش) · هر ابزار
+Pan and Zoom Map	جابه‌جایی و بزرگ‌نمایی نقشه
+Pan To	جابه‌جایی به
+Pan to a longitude/latitude.	جابه‌جایی به یک طول/عرض جغرافیایی.
+Pan with the mouse, zoom with the wheel and click features to see their attributes.	با موس جابه‌جا شوید، با چرخ بزرگ‌نمایی کنید و برای دیدن ویژگی ها، روی عناصر کلیک کنید.
+Pan/Zoom\nMap	جابه‌جایی/بزرگ‌نمایی\nنقشه
+Pane Sets	مجموعه‌های پنل
+Paper	کاغذ
+Parent folder	پوشه والد
+parks, bike lanes, flood zones…	پارک‌ها، مسیر دوچرخه، پهنه‌های سیل…
+Password	رمز
+Paste	چسباندن
+Paste a token	چسباندن یک توکن
+Paste copied features into the selected layer, or as a new layer.	چسباندن عناصر کپی‌شده در لایه انتخاب‌شده، یا به‌عنوان لایه‌ای جدید.
+Paste Group	چسباندن گروه
+Paste Groups	چسباندن گروه‌ها
+Paste Layer	چسباندن لایه
+Paste Layers	چسباندن لایه‌ها
+Paste Special	چسباندن ویژه
+Paste Special (as a new layer)	چسباندن ویژه (به‌عنوان لایه جدید)
+paste your key	کلید خود را بچسبانید
+Pause	توقف موقت
+Pause.	توقف موقت.
+PDF or PNG	قالب PDF یا PNG
+Percent Clip	برش درصدی
+Perceptually Uniform	ادراکی یکنواخت
+Performance	کارایی
+Phase	فاز
+Photon	Photon
+Pick a live value, such as the scale or date, then click the map to place it.	یک مقدار زنده مثل مقیاس یا تاریخ انتخاب کنید، سپس برای جای‌گذاری روی نقشه کلیک کنید.
+Pick a route in the list, or click a grey route on the map.	یک مسیر از فهرست برگزینید، یا روی مسیر خاکستری روی نقشه کلیک کنید.
+Pick it on the map	انتخابش روی نقشه
+Picture	تصویر
+Pictures	تصاویر
+Pictures, attachments and chart	تصاویر، پیوست‌ها و نمودار
+Pipe	پایپ
+Pitch	زاویه دید
+Pixel	پیکسل
+Pixel Editor	ویرایشگر پیکسل
+Pixel Size (°)	اندازه پیکسل (°)
+Pixel type	نوع پیکسل
+Place a raster on the map	قرار دادن یک رستر روی نقشه
+Place a raster on the map from control points or the view.	قرار دادن رستری روی نقشه با نقاط کنترل یا نما.
+Placement	جای‌گذاری
+Places	مکان‌ها
+Places (name, category, address, rating)	مکان‌ها (نام، دسته، نشانی، امتیاز)
+Plan a route between places and follow it turn by turn (Valhalla, on OpenStreetMap data).	مسیریابی بین مکان‌ها و پیگیری گام‌به‌گام آن (Valhalla، روی داده OpenStreetMap).
+Planar	مسطح
+Planar Navigation	ناوبری مسطح
+Planet Open Data	Planet Open Data
+Planet Open Data…	Planet Open Data…
+Planet's imagery of disasters (CC BY-NC), a static STAC catalog on Source Cooperative: pick an event, then Find Items.	تصاویر بلایای Planet (CC BY-NC)، یک فهرست STAC ایستا روی Source Cooperative: یک رویداد برگزینید، سپس Find Items.
+Planetary Computer	Planetary Computer
+Planning a route sends its start, stops and destination to a routing server, and looking up a place by name sends the name to OpenStreetMap's Nominatim.	مسیریابی، مبدأ، مقصدها و مقصد را به یک سرور مسیریابی می‌فرستد، و جستجوی مکان با نام، نام را به Nominatim اوپن‌استریت‌مپ می‌فرستد.
+Play	پخش
+Play the animation.	پخش انیمیشن.
+Play through the steps.	پخش پیوسته گام‌ها.
+Plot another navigation layer	رسم یک لایه ناوبری دیگر
+Plotted {n} {source} features.	{n} عنصر {source} رسم شد.
+Plugin	افزونه
+Plugin\nManager	مدیریت\nافزونه
+Plugin folder	پوشه افزونه
+Plugin Manager	مدیریت افزونه
+Plugin Manager…	مدیریت افزونه…
+Plugin Panel State	وضعیت پنل افزونه
+Plugin registry	فهرست افزونه‌ها
+Plugins	افزونه‌ها
+Plugins are .rgplugin files. Install only plugins from people you trust.	افزونه‌ها فایل‌های .rgplugin هستند. فقط افزونه‌های افراد مورد اعتماد را نصب کنید.
+Plugins marked Not sandboxed run as programs on your computer instead, and can do anything you can.	افزونه‌های «بدون سندباکس» به‌جای آن، مثل یک برنامه روی رایانه شما اجرا می‌شوند و هر کاری را که شما می‌توانید، می‌کنند.
+Plugins run in a sandbox: they can't reach your files or the network, and they change the project only through RustGIS's own commands, within the permissions you accept.	افزونه‌ها در سندباکس اجرا می‌شوند: به فایل‌ها یا شبکه شما دسترسی ندارند و پروژه را فقط از طریق دستورهای خود RustGIS و در محدوده مجوزهایی که می‌پذیرید تغییر می‌دهند.
+PMTiles archive	بایگانی PMTiles
+PNG frames (zip)	فریم‌های PNG (zip)
+PNG image	تصویر PNG
+Point	نقطه
+Points	نقاط
+points each	نقطه در هر یک
+Polar, conformal: Antarctica and the Southern Ocean.	قطبی، هم‌شکل: جنوبگان و اقیانوس جنوبی.
+Polar, conformal: the Arctic and the northern lands.	قطبی، هم‌شکل: قطب شمال و سرزمین‌های شمالی.
+Polygon	چندضلعی
+Polygon (draw)	چندضلعی (رسم)
+Polygons	چندضلعی‌ها
+Polyline	خط‌های شکسته
+Pop-up Mode	حالت پاپ‌آپ
+pop_max > 1000000	pop_max > 1000000
+Populated Places	مکان‌های مسکونی
+Portal	پورتال
+Portolan	Portolan
+Portolan…	Portolan…
+Portrait	عمودی (Portrait)
+Postprocessing	پس‌پردازش
+power 2	توان 2
+Prepare	آماده‌سازی
+Prepare every layer's geometry for this projection.	آماده‌سازی هندسه همه لایه‌ها برای این تصویر.
+Prepare Plugin Environment	آماده‌سازی محیط افزونه
+Preparing its Python environment…	در حال آماده‌سازی محیط Python آن…
+Presentation	Presentation
+Presentation File	فایل Presentation
+Presentation Pane	پنل Presentation
+Preset	پری‌ست
+Press Load sources & plot first	اول «بارگذاری منابع و رسم» را بزنید
+Preview and set up the report.	پیش‌نمایش و تنظیم Report.
+Preview, edit and play the presentation.	پیش‌نمایش، ویرایش و پخش Presentation.
+Previous	قبلی
+Previous Extent	گستره قبلی
+Previous Page	صفحه قبل
+Primary\nSymbology	نمادگذاری\nاصلی
+Primary symbology	نمادگذاری اصلی
+Print	چاپ
+Print\nLayout	چاپ\nصفحه‌آرایی
+Print Map	چاپ نقشه
+Print the layout.	چاپ صفحه‌آرایی.
+Print the map view (through the system's PDF viewer).	چاپ نمای نقشه (از طریق نمایشگر PDF سیستم).
+Print the open layout (through the system's PDF viewer).	چاپ صفحه‌آرایی باز (از طریق نمایشگر PDF سیستم).
+printing failed unexpectedly	چاپ به‌طور غیرمنتظره‌ای ناموفق شد
+printing needs the desktop app	چاپ به برنامه دسکتاپ نیاز دارد
+Process	پردازش
+Products	محصولات
+Profile	نیم‌رخ
+Profile Along a Line	نیم‌رخ در امتداد یک خط
+Profile Along Selected Lines	نیم‌رخ در امتداد خط‌های انتخاب‌شده
+Profile every field	نیم‌رخ هر فیلد
+Profile Viewing	نمایش نیم‌رخ
+PROJ definition	تعریف PROJ
+Project	پروژه
+Project\nPackage	بسته\nپروژه
+Project Info	اطلاعات پروژه
+project is "sample", "blank", "last" or {"path": a project file}	پروژه "sample"، "blank"، "last" یا {"path": a project file} است
+Project Template	قالب پروژه
+Project templates: start projects from a saved setup.	قالب‌های پروژه: شروع پروژه‌ها از یک پیکربندی ذخیره‌شده.
+project's path is required	مسیر پروژه الزامی است
+Projection	تصویر نقشه
+Projections	تصویرها
+Proportional Symbols	نمادهای تناسبی
+Provider	ارائه‌دهنده
+Proximity	نزدیکی
+Public GIS portals of US counties and cities, by state.	پورتال‌های عمومی GIS شهرستان‌ها و شهرهای آمریکا، بر اساس ایالت.
+Public GIS portals of US federal agencies, by department.	پورتال‌های عمومی GIS نهادهای فدرال آمریکا، بر اساس وزارتخانه.
+Public GIS portals of US states and the District of Columbia.	پورتال‌های عمومی GIS ایالت‌های آمریکا و ناحیه کلمبیا.
+Public layers on ArcGIS Online or another ArcGIS portal: feature, map, image and vector tile services, web maps and GeoJSON files.	لایه‌های عمومی روی ArcGIS Online یا پورتال دیگر ArcGIS: سرویس‌های عنصری، نقشه، تصویر و کاشی برداری، نقشه‌های وب و فایل‌های GeoJSON.
+Publish	انتشار
+Publish › Output	انتشار › خروجی
+Put the layer back as it was then	بازگرداندن لایه به حالت آن زمان
+Python environment failed: {error}	محیط Python ناموفق بود: {error}
+Python environment not prepared	محیط Python آماده نشده است
+Python environment ready	محیط Python آماده است
+Qualitative	کیفی
+Quantile	چندک
+Query files, web addresses and databases with DuckDB Spatial; add results to the map.	پرس‌وجوی فایل‌ها، نشانی‌های وب و پایگاه‌های داده با DuckDB Spatial؛ افزودن نتایج به نقشه.
+Quick\nAccess	دسترسی\nسریع
+Quick Access Toolbar	نوار ابزار دسترسی سریع
+Quick actions	اقدام‌های سریع
+Quick Analysis	تحلیل سریع
+radius km	شعاع km
+radius m	شعاع m
+Rain	باران
+Raise polygons by a height or a field.	برجسته‌کردن چندضلعی‌ها با یک ارتفاع یا یک فیلد.
+Raise Priority	افزایش اولویت
+Random points in polygons	نقاط تصادفی در چندضلعی‌ها
+Range	بازه
+Raster	رستر
+Raster\nAnalysis	تحلیل\nرستر
+Raster\nInformation	اطلاعات\nرستر
+Raster Data	داده رستری
+Raster Effects	جلوه‌های رستر
+Raster Functions	توابع رستر
+Raster Information	اطلاعات رستر
+Raster Layer	لایه رستری
+Raster tiles (XYZ)	کاشی‌های رستری (XYZ)
+Raster · {w} × {h} · {n} bands · {renderer}	رستر · {w} × {h} · {n} باند · {renderer}
+Read and write files on this computer	خواندن و نوشتن فایل‌ها روی این رایانه
+Read the bands picked for the view (at most about 6 km a side)	خواندن باند انتخاب‌شده برای نما (حداکثر حدود 6 کیلومتر هر طرف)
+Read the map's layers and features	خواندن لایه‌ها و عناصر نقشه
+Read the points in the view, coloured by their principal components	خواندن نقاط داخل نما، رنگ‌آمیزی‌شده با مؤلفه‌های اصلی‌شان
+Reading a granule's files needs an Earthdata Login token, which works for every NASA DAAC. It is kept until RustGIS closes, never in the project, and sent only to NASA's Earthdata data servers.	خواندن فایل‌های یک گرانول به توکن ورود Earthdata نیاز دارد که برای همه DAACهای ناسا کار می‌کند. این توکن تا بسته‌شدن RustGIS نگه داشته می‌شود، هرگز داخل پروژه ذخیره نمی‌شود و فقط به سرورهای داده Earthdata ناسا فرستاده می‌شود.
+Reading the catalog: {n} documents read, {m} items found…	در حال خواندن فهرست: {n} سند خوانده شد، {m} آیتم پیدا شد…
+Reading the catalog…	در حال خواندن فهرست…
+Reading the embeddings…	در حال خواندن Embeddings…
+Reading the store… ({n} files to go)	در حال خواندن مخزن… ({n} فایل باقی مانده)
+Reading the tileset of	در حال خواندن مجموعه کاشی‌های
+Reading {n} of Overture's {ty} files where the map is: {attribution}	در حال خواندن {n} فایل {ty} از Overture در محل نقشه: {attribution}
+Reading {url}…	در حال خواندن {url}…
+Reads and writes files	فایل می‌خواند و می‌نویسد
+Reads the map	نقشه را می‌خواند
+Reality Mapping	نقشه‌نگاری واقعیت
+Recent	اخیر
+Record Task	ضبط تسک
+Recorded Task	تسک ضبط‌شده
+Recording stopped: another project opened, and its {n} steps were for the previous one.	ضبط متوقف شد: پروژه دیگری باز شد و {n} گامش مال پروژه قبلی بود.
+Recording: {n} steps	در حال ضبط: {n} گام
+Rectangle	مستطیل
+Red	قرمز
+Redo	بازانجام
+Redo (Ctrl+Y)	بازانجام (Ctrl+Y)
+Redo the change you undid.	بازانجام تغییری که واگرد کردید.
+Redo {action}	بازانجام {action}
+Red–Blue	قرمز–آبی
+Refine the search to see {n} more	جستجو را دقیق‌تر کنید تا {n} مورد دیگر را ببینید
+Refresh	تازه‌سازی
+Refresh Map Series	به‌روزرسانی سری نقشه‌ها
+Refresh the map series from its index layer.	به‌روزرسانی سری نقشه‌ها از لایه ایندکس آن.
+Region	منطقه
+Regional, equal-area: the contiguous United States.	منطقه‌ای، هم‌مساحت: سرزمین پیوسته ایالات متحده.
+Regional, equal-area: the European standard for statistics.	منطقه‌ای، هم‌مساحت: استاندارد آماری اروپا.
+Relate	ارتباط
+Related\nData	داده\nمرتبط
+Related Data	داده مرتبط
+Related Report	گزارش مرتبط
+Related report: {name}	گزارش مرتبط: {name}
+Relationship	رابطه
+Relationship name	نام رابطه
+Relationships	رابطه‌ها
+Release	انتشار
+Reload	بارگذاری دوباره
+Reload Web Layers	بارگذاری دوباره لایه‌های وب
+Remember (without the secret)	به یادگار بماند (بدون بخش محرمانه)
+Remember the key on this computer	کلید روی این رایانه به خاطر سپرده شود
+Remembered:	به خاطر سپرده شد:
+Remove	حذف‌کردن
+Remove All	حذف همه
+Remove an offline area.	حذف یک پهنه آفلاین.
+Remove Bookmark	حذف نشانک
+Remove Connection	حذف اتصال
+Remove Data Source	حذف منبع داده
+Remove every guide from this layout.	حذف همه راهنماها از این صفحه‌آرایی.
+Remove Extent Indicator	حذف نشانگر گستره
+Remove Folder	حذف پوشه
+Remove From Current Selection	حذف از انتخاب فعلی
+Remove from Favourites	حذف از علاقه‌مندی‌ها
+Remove From Group	حذف از گروه
+Remove Group	حذف گروه
+Remove Keyframe	حذف فریم کلیدی
+Remove Section	حذف بخش
+Remove Table	حذف جدول
+Remove the last keyframe.	حذف آخرین فریم کلیدی.
+Remove the layer from the map.	حذف لایه از نقشه.
+Remove the strokes and draw the symbol's line alone	حذف ضربه‌ها و ترسیم تنها خط نماد
+Remove this stop	حذف این مقصد میانی
+Remove Tile Layer	حذف لایه کاشی
+Remove token	حذف توکن
+Remove {name}	حذف {name}
+Removes the parts of polygon features that overlap erase polygons.	بخش‌هایی از عناصر چندضلعی که با چندضلعی‌های پاک‌کننده هم‌پوشانی دارند را حذف می‌کند.
+Removes vertices that deviate less than a tolerance (Douglas–Peucker).	رأس‌هایی که انحرافشان کمتر از یک رواداری است را حذف می‌کند (داگلاس–پوکر).
+Rename	تغییر نام
+Rename Bookmark	تغییر نام نشانک
+Rename Group	تغییر نام گروه
+Rename Layer	تغییر نام لایه
+Rename Layout	تغییر نام صفحه‌آرایی
+Rename Map	تغییر نام نقشه
+Rename Project	تغییر نام پروژه
+Rename Service Group	تغییر نام گروه سرویس
+Rename…	تغییر نام…
+Rendering	در حال ترسیم
+Replace Web Layer	جایگزینی لایه وب
+Replay the route as a drive the map follows	بازپخش مسیر مثل رانندگی‌ای که نقشه دنبال می‌کند
+Report	Report
+Report File	فایل Report
+Report Pane	پنل Report
+Report Properties	ویژگی‌های Report
+Report Section	بخش Report
+Report Template	قالب Report
+Request ID	شناسه درخواست
+Requests go to the OpenAI API and use your ChatGPT plan.	درخواست‌ها به API اوپن‌ای‌آی می‌روند و از طرح ChatGPT شما استفاده می‌کنند.
+Requests send your message and the map's layer names, fields and the rows the assistant reads to the provider.	درخواست‌ها پیام شما و نام لایه‌های نقشه، فیلدها و ردیف‌هایی که دستیار می‌خواند را برای ارائه‌دهنده می‌فرستند.
+Resample	بازنمونه‌برداری
+Resampling	بازنمونه‌برداری
+Resampling Type	نوع بازنمونه‌برداری
+Reset	بازنشانی
+Reset brightness, contrast and gamma.	بازنشانی روشنایی، کنتراست و گاما.
+Reset Default	بازنشانی پیش‌فرض
+Reset Effects	بازنشانی جلوه‌ها
+Reset North	بازنشانی شمال
+Reset north	بازنشانی شمال
+Response	پاسخ
+Restore	بازگردانی
+Restore From Archive	بازگردانی از بایگانی
+Result name	نام نتیجه
+Results	نتایج
+Resume	ادامه
+Retry	تلاش دوباره
+Retry after	تلاش دوباره پس از
+Reverse	برعکس‌کردن
+RGB	RGB
+Ribbon	نوار (Ribbon)
+Right	راست
+Right-click a source to add it here	برای افزودن منبع به این‌جا، روی آن راست‌کلیک کنید
+Robinson	Robinson
+Rotate	چرخش
+Rotate (°)	چرخش (°)
+Rotate 90°	چرخش 90 درجه
+Rotate Map	چرخش نقشه
+Rotation	چرخش
+Rotation Type	نوع چرخش
+rotation °	چرخش °
+Round	گرد
+roundabout turn	پیچ میدان
+Routes (name, surface, length)	مسیرها (نام، جنس سطح، طول)
+Routes by Valhalla (FOSSGIS) on OpenStreetMap data. Travel times don't include live traffic.	مسیرهای Valhalla (FOSSGIS) روی داده OpenStreetMap. زمان‌های سفر، ترافیک زنده را شامل نمی‌شوند.
+Rows	ردیف‌ها
+Rule name	نام قانون
+Rulers	خط‌کش‌ها
+Run	اجرا
+Run a query whose result has a geometry column	اجرای پرس‌وجویی که نتیجه‌اش ستون هندسه دارد
+Run All	اجرای همه
+Run All Steps	اجرای همه گام‌ها
+Run Cells	اجرای سلول‌ها
+Run Chain	اجرای زنجیره
+Run commands from text, one per line.	اجرای دستورها از متن، هر خط یکی.
+Run failed: {error}	اجرا ناموفق بود: {error}
+Run finished.	اجرا تمام شد.
+Run finished. Layers kept: {names}.	اجرا تمام شد. لایه‌های نگه‌داشته‌شده: {names}.
+Run Model	اجرای مدل
+Run Script	اجرای اسکریپت
+Run SQL Query	اجرای پرس‌وجوی SQL
+Run Task	اجرای تسک
+Run the model	اجرای مدل
+Run Tool	اجرای ابزار
+Run {name}	اجرای {name}
+Running the query for the map…	در حال اجرای پرس‌وجو برای نقشه…
+Running…	در حال اجرا…
+RustGIS	RustGIS
+RustGIS bookmarks	نشانک‌های RustGIS
+RustGIS couldn't reach the server.	دسترسی RustGIS به سرور ممکن نشد.
+RustGIS deep learning package	بسته یادگیری عمیق RustGIS
+RustGIS didn't close properly last time, so it started with the World Atlas instead of your start-up project. Open the project from the Project menu when you're ready.	دفعهٔ پیش RustGIS به‌درستی بسته نشد، بنابراین به‌جای پروژهٔ آغازین شما با اطلس جهانی شروع کرد. هر وقت آماده بودید، پروژه را از منوی Project باز کنید.
+RustGIS doesn't have this tool. Install the tools it comes from, or delete the node.	این ابزار در RustGIS موجود نیست. ابزارهایی را که از آن‌ها می‌آید نصب کنید، یا گره را حذف کنید.
+RustGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.	یک GIS آزاد و متن‌باز که به Rust خالص نوشته شده است: RustGIS روی دسکتاپ و در مرورگر اجرا می‌شود و هر اقدام آن، دستوری است که می‌توانید از خط فرمان هم اجرا کنید.
+RustGIS layer file	فایل لایه RustGIS
+RustGIS layers, maps and projects	لایه‌ها، نقشه‌ها و پروژه‌های RustGIS
+RustGIS layout	صفحه‌آرایی RustGIS
+RustGIS maps and projects	نقشه‌ها و پروژه‌های RustGIS
+RustGIS model	مدل RustGIS
+RustGIS or Jupyter notebook	نوت‌بوک RustGIS یا Jupyter
+RustGIS plugin	افزونه RustGIS
+RustGIS presentation	ارائهٔ RustGIS
+RustGIS project	پروژه RustGIS
+RustGIS project template	قالب پروژه RustGIS
+RustGIS ran into an internal error last time. The details are in {path}; please attach them to a bug report.	دفعهٔ پیش RustGIS به خطای داخلی خورد. جزئیات در {path} است؛ لطفاً آن را به گزارش اشکال ضمیمه کنید.
+RustGIS report or report template	گزارش یا قالب گزارش RustGIS
+RustGIS styles	استایل‌های RustGIS
+RustGIS task	تسک RustGIS
+RustGIS {latest} is available.	به‌روزرسانی RustGIS {latest} در دسترس است.
+RustGIS {version} is the latest version.	آخرین نسخه، RustGIS {version} است.
+RUSTGIS_ASSISTANT_MODEL	RUSTGIS_ASSISTANT_MODEL
+RUSTGIS_ASSISTANT_PROVIDER	RUSTGIS_ASSISTANT_PROVIDER
+RUSTGIS_GPU	RUSTGIS_GPU
+S3	S3
+S3 Buckets	باکت‌های S3
+S3 Connections	اتصال‌های S3
+S3…	S3…
+Sample data (Natural Earth)	داده نمونه (Natural Earth)
+Sample data © Natural Earth (public domain). RustGIS is licensed under Apache-2.0.	داده نمونه © Natural Earth (مالکیت عمومی). RustGIS با مجوز Apache-2.0 منتشر شده است.
+Sample data: Natural Earth (public domain). Licensed under Apache-2.0.	داده نمونه: Natural Earth (مالکیت عمومی). با مجوز Apache-2.0.
+Satellite Embedding Datasets	مجموعه داده Embedding ماهواره‌ای
+Satellite Embeddings	جاسازی‌های ماهواره‌ای
+Satellite Embeddings…	جاسازی‌های ماهواره‌ای…
+Saturation	اشباع رنگ
+Save	ذخیره
+Save As	ذخیره به‌عنوان
+Save as Default	ذخیره به‌عنوان پیش‌فرض
+Save as Default Raster Style	ذخیره به‌عنوان استایل پیش‌فرض رستر
+Save as Layer	ذخیره به‌عنوان لایه
+Save As Presentation File…	ذخیره به‌عنوان فایل Presentation…
+Save As Report File…	ذخیره به‌عنوان فایل Report…
+Save As Report Template…	ذخیره به‌عنوان قالب Report…
+Save as {name}	ذخیره به‌عنوان {name}
+Save As…	ذخیره به‌عنوان…
+Save Color Ramps	ذخیره طیف‌های رنگی
+Save Data Source	ذخیره منبع داده
+Save Layer File	ذخیره فایل لایه
+Save Layout File	ذخیره فایل صفحه‌آرایی
+Save Map File	ذخیره فایل نقشه
+Save Model	ذخیره مدل
+Save Notebook	ذخیره Notebook
+save or load a pane set by name	ذخیره یا بارگذاری یک مجموعه پنل با نام
+Save Project	ذخیره پروژه
+Save project	ذخیره پروژه
+Save Project As	ذخیره پروژه به‌عنوان
+Save Project Template	ذخیره قالب پروژه
+Save Style Items	ذخیره آیتم‌های استایل
+Save Task Item	ذخیره آیتم تسک
+Save the active map (with its data) as a map file.	ذخیره نقشه فعال (با داده‌هایش) به‌عنوان فایل نقشه.
+Save the last task as a task file.	ذخیره آخرین تسک به‌عنوان فایل تسک.
+Save the layout as a layout file.	ذخیره صفحه‌آرایی به‌عنوان فایل صفحه‌آرایی.
+Save the model as a file (*.model.json)	ذخیره مدل به‌عنوان فایل (*.model.json)
+Save the model in the project	ذخیره مدل در پروژه
+Save the open layout as a layout file.	ذخیره صفحه‌آرایی باز به‌عنوان فایل صفحه‌آرایی.
+Save the panes you have open, and switch back to them.	ذخیره پنل‌های باز و بازگشت به آن‌ها.
+Save the project under a new name.	ذخیره پروژه با نامی جدید.
+Save the project with your edits.	ذخیره پروژه همراه با ویرایش‌های شما.
+Save the project's custom color ramps to a color ramp file.	ذخیره طیف‌های رنگی سفارشی پروژه در یک فایل طیف رنگی.
+Save the project's setup, without its features, as a template.	ذخیره پیکربندی پروژه، بدون عناصرش، به‌عنوان قالب.
+Save the project's styles to a style file.	ذخیره استایل‌های پروژه در یک فایل استایل.
+Save the raster as a GeoTIFF.	ذخیره رستر به‌عنوان GeoTIFF.
+Save the selected layer with its symbology as a layer file.	ذخیره لایه انتخاب‌شده همراه نمادگذاری‌اش به‌عنوان فایل لایه.
+Save Web Link Chart	ذخیره نمودار پیوند وب
+Save Web Map	ذخیره نقشه وب
+Save Web Scene	ذخیره صحنه وب
+Saved	ذخیره شد
+Saved as the default style for new single-band rasters.	به‌عنوان استایل پیش‌فرض رسترهای جدید تک‌باندی ذخیره شد.
+Saved keys are kept unencrypted in the app's preferences (in the browser's storage on the web).	کلیدهای ذخیره‌شده، رمزنگاری‌نشده در ترجیحات برنامه نگه‌داری می‌شوند (روی وب، در حافظه مرورگر).
+Saved models	مدل‌های ذخیره‌شده
+Saved symbology: apply it to the selected layer, or save the layer's.	نمادگذاری ذخیره‌شده: اعمال آن روی لایه انتخاب‌شده، یا ذخیره نمادگذاری لایه.
+Saved View	نمای ذخیره‌شده
+Saved {name}	ذخیره شد: {name}
+Saved {name}.	ذخیره شد: {name}.
+saving failed unexpectedly	ذخیره به‌طور غیرمنتظره‌ای ناموفق شد
+Scale	مقیاس
+Scale\nBar	خط\nمقیاس
+Scale (×)	مقیاس (×)
+scale 0.9996	مقیاس 0.9996
+Scale 1:	مقیاس 1:
+Scale and rotate entered distances and directions to the grid.	مقیاس‌دهی و چرخش مسافت‌ها و جهت‌های وارد‌شده روی شبکه.
+Scale ×2	مقیاس ×2
+Scale ×½	مقیاس ×½
+Scene	صحنه
+Score threshold	آستانه امتیاز
+Score two rasters 1–10 and weight them	امتیازدهی دو رستر از 1 تا 10 و وزن‌دهی آن‌ها
+Script	اسکریپت
+Scroll the ribbon left	پیمایش نوار (Ribbon) به چپ
+Scroll the ribbon right	پیمایش نوار (Ribbon) به راست
+Scroll the tabs left	پیمایش برگه‌ها به چپ
+Scroll the tabs right	پیمایش برگه‌ها به راست
+Search	جستجو
+Search (this portal needs words)…	جستجو (این پورتال به واژه نیاز دارد)…
+Search Catalogue	جستجوی فهرست
+Search commands — e.g. buffer, basemap, labels	جستجوی دستورها — مثلاً بافر، نقشه پایه، برچسب‌ها
+Search datasets, e.g. GEDI biomass	جستجوی مجموعه داده‌ها، مثلاً زیست‌توده GEDI
+Search Distance (km)	فاصله جستجو (km)
+Search every command and its parameters	جستجو در همه دستورها و پارامترهایشان
+Search layers (e.g. temperature)	جستجوی لایه‌ها (مثلاً temperature)
+Search layers, places, lat/lon…	جستجوی لایه‌ها، مکان‌ها، طول/عرض…
+Search layers…	جستجوی لایه‌ها…
+Search NASA Earthdata Collections	جستجوی مجموعه‌های NASA Earthdata
+Search NASA Earthdata Granules	جستجوی گرانول‌های NASA Earthdata
+Search Open Data	جستجوی داده باز
+Search Open Data…	جستجوی داده باز…
+Search places for “{query}”	جستجوی مکان‌ها برای «{query}»
+Search plugins	جستجوی افزونه‌ها
+Search results © OpenStreetMap contributors	نتایج جستجو © OpenStreetMap contributors
+Search Satellite Embeddings	جستجوی Embeddings ماهواره‌ای
+Search services and layers…	جستجوی سرویس‌ها و لایه‌ها…
+Search services…	جستجوی سرویس‌ها…
+Search the map	جستجوی نقشه
+Search this view	جستجوی این نما
+Search tools	جستجوی ابزارها
+Search where the map is	جستجو در محل نقشه
+Search {name}…	جستجوی {name}…
+Searching places…	در حال جستجوی مکان‌ها…
+Searching the folders…	در حال جستجوی پوشه‌ها…
+Searching works here, but NASA's data servers don't let web pages read their files (no CORS), so GeoTIFFs and downloads of protected data need the desktop app. Download opens a file in a new tab, where Earthdata Login asks you to sign in.	جستجو در این‌جا کار می‌کند، ولی سرورهای داده ناسا به صفحه‌های وب اجازه خواندن فایل‌هایشان را نمی‌دهند (بدون CORS)، پس GeoTIFFها و دانلود داده‌های محافظت‌شده به برنامه دسکتاپ نیاز دارند. دانلود، فایل را در برگه‌ای جدید باز می‌کند که Earthdata Login از شما ورود می‌خواهد.
+Searching…	در حال جستجو…
+Searching… try again in a moment.	در حال جستجو… لحظه‌ای بعد دوباره تلاش کنید.
+Second standard parallel	موازی استاندارد دوم
+Seconds	ثانیه
+Secret access key	کلید دسترسی محرمانه
+Sections	بخش‌ها
+See and set the camera's position and scale.	دیدن و تنظیم موقعیت و مقیاس دوربین.
+See the map as people with colour vision deficiencies do.	دیدن نقشه همان‌طور که افراد با اختلال دید رنگی می‌بینند.
+See the tools you've run.	دیدن ابزارهایی که اجرا کرده‌اید.
+See whether a newer RustGIS has been released.	ببینید آیا RustGIS تازه‌تری منتشر شده است.
+SELECT	SELECT
+Select	انتخاب
+Select (click)	انتخاب (کلیک)
+Select (rectangle)	انتخاب (مستطیل)
+Select a direction…	انتخاب یک جهت…
+Select a feature layer in the Layers pane	انتخاب یک لایه عنصری در پنل Layers
+Select a layer in Layers to style it.	در Layers یک لایه انتخاب کنید تا نمادگذاری شود.
+Select a layer in the Layers pane	انتخاب یک لایه در پنل Layers
+select a layer in the Layers pane first	اول در پنل Layers یک لایه انتخاب کنید
+Select a layer in the Layers pane.	در پنل Layers یک لایه انتخاب کنید.
+Select a navigation method after tracing a point.	پس از ردگیری نقطه، یک روش ناوبری انتخاب کنید.
+Select All	انتخاب همه
+Select an element to format it.	عنصری انتخاب کنید تا قالب‌بندی شود.
+Select By\nAttributes	انتخاب با\nویژگی ها
+Select By\nLocation	انتخاب با\nموقعیت
+Select By Attributes	انتخاب با ویژگی ها
+Select every feature.	انتخاب همه عناصر.
+Select features by their spatial relationship.	انتخاب عناصر بر اساس رابطه فضایی‌شان.
+Select features that intersect another layer.	انتخاب عناصری که لایه دیگری را قطع می‌کنند.
+Select features with a SQL expression.	انتخاب عناصر با یک عبارت SQL.
+Select Layer	انتخاب لایه
+Select Layer By Attribute	انتخاب لایه با ویژگی
+Select Layer By Location	انتخاب لایه با موقعیت
+Select one text on the map, or a layout element, to format it.	یکی از متن‌های روی نقشه، یا یک عنصر صفحه‌آرایی را انتخاب کنید تا قالب‌بندی شود.
+Select Related	انتخاب مرتبط‌ها
+Select Rows	انتخاب ردیف‌ها
+Select rows with a SQL expression.	انتخاب ردیف‌ها با یک عبارت SQL.
+Select Subset From Current Selection	انتخاب زیرمجموعه از انتخاب فعلی
+Select the rows related to the selection.	انتخاب ردیف‌های مرتبط با انتخاب.
+Selectable	قابل انتخاب
+Selectable Layers	لایه‌های قابل انتخاب
+Selectable on the map: the Select tool picks its features	روی نقشه قابل انتخاب: ابزار Select عناصرش را برمی‌دارد
+Selected	انتخاب‌شده
+Selected Features: {n}	عناصر انتخاب‌شده: {n}
+Selected in Layers	انتخاب‌شده در Layers
+Selected only	فقط انتخاب‌شده‌ها
+Selected records only	فقط رکوردهای انتخاب‌شده
+Selecting Features	در حال انتخاب عناصر
+Selection	انتخاب
+Selection Type	نوع انتخاب
+Selects features that intersect features in another layer.	عنصرهایی را انتخاب می‌کند که عناصر لایه دیگری را قطع می‌کنند.
+Selects features with a SQL where clause, e.g. pop_est > 1000000.	عناصر را با یک بند where از SQL انتخاب می‌کند، مثلاً pop_est > 1000000.
+Semicolon	نقطه‌ویرگول
+Send	ارسال
+Send offline edits back and refresh.	بازفرستادن ویرایش‌های آفلاین و به‌روزرسانی.
+Sent as	فرستاده‌شده به‌عنوان
+Sentinel-2 Explorer	Sentinel-2 Explorer
+Sentinel-2 Explorer…	Sentinel-2 Explorer…
+Sentinel-2 scenes (Collection 1, Level-2A) from Earth Search, clearest first: add the true colour image (visual) or a band.	صحنه‌های Sentinel-2 (Collection 1، Level-2A) از Earth Search، شفاف‌ترین اول: تصویر رنگ واقعی (visual) یا یک باند را اضافه کنید.
+Separator	جداکننده
+Sepia	سپیا
+Sequential	ترتیبی
+Server	سرور
+Service Group	گروه سرویس
+Service group data exceeds 64 MB.	داده گروه سرویس از 64 MB فراتر رفته است.
+Service Import Requests	درخواست‌های درون‌بری سرویس
+Service Layers	لایه‌های سرویس
+Services	سرویس‌ها
+Set	تنظیم
+Set Cell Size	تنظیم اندازه سلول
+Set Domain	تنظیم دامنه
+Set Filter	تنظیم پالایش
+Set Geometry	تنظیم هندسه
+Set Map Tool	تنظیم ابزار نقشه
+Set Scale	تنظیم مقیاس
+Set Subtypes	تنظیم زیرگروه‌ها
+Set the pixels inside a polygon	تنظیم پیکسل‌های داخل یک چندضلعی
+Set the pixels inside a polygon.	پیکسل‌های داخل یک چندضلعی را تنظیم می‌کند.
+Settings	تنظیمات
+Shade walls by the way they face the light.	سایه‌زنی دیوارها بر اساس رو به نور بودن‌شان.
+Shaded	سایه‌زده
+Shaded Relief	سایه‌روشن
+Shape	شکل
+Shapefile	Shapefile
+Share	به‌اشتراک‌گذاری
+Share As	اشتراک به‌عنوان
+Share every layer and table as OGC API Features collections.	اشتراک همه لایه‌ها و جدول‌ها به‌عنوان مجموعه‌های OGC API Features.
+Share the last model as a tool file.	اشتراک آخرین مدل به‌عنوان فایل ابزار.
+Share the map as a web page that needs no server.	اشتراک نقشه به‌عنوان صفحه وبی که به سرور نیاز ندارد.
+Share the map in 3D (glTF), polygons extruded.	اشتراک نقشه به‌صورت سه‌بعدی (glTF) با برجسته‌سازی چندضلعی‌ها.
+Share the map's relationships as a link chart page.	اشتراک رابطه‌های نقشه به‌عنوان صفحه نمودار پیوند.
+Share the selected layer as an OGC API Features collection with its style.	اشتراک لایه انتخاب‌شده به‌عنوان مجموعه OGC API Features همراه استایلش.
+Share the selected layer's names as a place-search locator.	اشتراک نام‌های لایه انتخاب‌شده به‌عنوان مکان‌یاب جستجوی مکان.
+Share the selected layer's symbology as a MapLibre style.	اشتراک نمادگذاری لایه انتخاب‌شده به‌عنوان استایل MapLibre.
+Shared	مشترک
+Shared Items	آیتم‌های مشترک
+Shares made, with Manage tools to update them.	اشتراک‌های ساخته‌شده، با ابزارهای مدیریت برای به‌روزرسانی‌شان.
+sharp left	پیچ تند به چپ
+sharp right	پیچ تند به راست
+Shift+	Shift+
+Shift+drag	کشیدن با Shift
+Shift+Enter starts a new line.	برای خط جدید، Shift+Enter را بزنید.
+Shifts the stroke sideways: positive to the right of the line's direction, negative to the left	ضربه را به پهلو جابه‌جا می‌کند: مثبت به سمت راست جهت خط، منفی به سمت چپ
+Shortcuts	میان‌برها
+Shortest route over a line network	کوتاه‌ترین مسیر روی شبکه خطی
+Show	نمایش‌دهنده
+Show a second map beside this one.	نمایش نقشه دومی کنار این یکی.
+Show all values	نمایش همه مقادیر
+Show details when hovering items in the Browser view.	نمایش جزئیات هنگام اشاره به آیتم‌ها در نمای Browser.
+Show different features at different scales.	نمایش عناصر متفاوت در مقیاس‌های متفاوت.
+Show grid	نمایش شبکه
+Show Group	نمایش گروه
+Show latitude/longitude lines on the basemap.	نمایش خطوط طول/عرض روی نقشه پایه.
+Show layers through time: only the features whose date falls in the slider's window, and dated imagery for its date.	نمایش لایه‌ها در گذر زمان: فقط عنصرهایی که تاریخشان در پنجره لغزنده می‌افتد، و تصاویر تاریخ‌دار مربوط به آن تاریخ.
+Show Map	نمایش نقشه
+Show Me	نشانم بده
+Show or hide	نمایش یا پنهان‌کردن
+Show or hide the AI Assistant.	نمایش یا پنهان‌کردن دستیار هوش مصنوعی.
+Show or hide the Bookmarks pane: every map's bookmarks.	نمایش یا پنهان‌کردن پنل Bookmarks: نشانک‌های هر نقشه.
+Show or hide the Browser pane.	نمایش یا پنهان‌کردن پنل Browser.
+Show or hide the Data Sources pane: favourites, recent data, saved services, databases and STAC APIs, and a library of public sources.	نمایش یا پنهان‌کردن پنل Data Sources: علاقه‌مندی‌ها، داده‌های اخیر، سرویس‌های ذخیره‌شده، پایگاه‌های داده و APIهای STAC، و کتابخانه منابع عمومی.
+Show or hide the group's layers	نمایش یا پنهان‌کردن لایه‌های گروه
+Show or hide the layer.	نمایش یا پنهان‌کردن لایه.
+Show or hide the Layers pane.	نمایش یا پنهان‌کردن پنل Layers.
+Show or hide the Tools pane.	نمایش یا پنهان‌کردن پنل Tools.
+Show rulers. Drag from a ruler to add a guide; drag a guide back onto it to remove it.	نمایش خط‌کش‌ها. برای افزودن راهنما از خط‌کش بکشید؛ برای حذف، راهنما را روی آن برگردانید.
+Show the bands picked, read in place as the map needs them	نمایش باند انتخاب‌شده، خوانده‌شده در جا وقتی نقشه لازمشان دارد
+Show the description	نمایش توضیحات
+Show the labels that don't fit, in red.	نمایش برچسب‌هایی که جا نشدند، به رنگ قرمز.
+Show the layer only inside another layer's polygons.	نمایش لایه فقط داخل چندضلعی‌های لایه دیگری.
+Show the layer only left of a divider, to compare it with what's beneath.	نمایش لایه فقط سمت چپ یک جداکننده، برای مقایسه با چیزی که زیرش است.
+Show the map as a 3D globe, or as a flat map again.	نمایش نقشه به‌صورت کره سه‌بعدی، یا دوباره نقشه تخت.
+Show the next map series page.	نمایش صفحه بعدی سری نقشه.
+Show the pointer's place on the other map.	نمایش جای مکان‌نما روی نقشه دیگر.
+Show the previous map series page.	نمایش صفحه قبلی سری نقشه.
+Show the Symbology pane for the selected layer.	نمایش پنل Symbology برای لایه انتخاب‌شده.
+Show the whole model	نمایش کل مدل
+Show these bands and stretch on the AlphaEarth layers on the map	نمایش این باند و کشش روی لایه‌های AlphaEarth نقشه
+Show vertices	نمایش رأس‌ها
+Show where this step's command is, to do it yourself	نمایش جای دستور این گام، تا خودتان انجامش دهید
+Show {n} Steps	نمایش {n} گام
+showing everything through {to}	نمایش همه‌چیز تا {to}
+showing {date}	نمایش {date}
+showing {from} to {to}	نمایش {from} تا {to}
+Showing {n} datasets.	نمایش {n} مجموعه داده.
+Showing {n} granules, newest first.	نمایش {n} گرانول، جدیدترین اول.
+Showing {n} items	نمایش {n} آیتم
+Showing {n} items (more match: narrow the search)	نمایش {n} آیتم (بیشتر مطابقت دارند: جستجو را محدودتر کنید)
+Showing {n} items (some catalogs were too deep or too large to read: pick a catalog further down)	نمایش {n} آیتم (بعضی فهرست‌ها برای خواندن بیش از حد عمیق یا بزرگ بودند: فهرست پایین‌تری برگزینید)
+Showing {n} items (stopped after reading {r} documents: pick a catalog further down)	نمایش {n} آیتم (پس از خواندن {r} سند متوقف شد: فهرست پایین‌تری برگزینید)
+Showing {n} items ({f} documents couldn't be read)	نمایش {n} آیتم ({f} سند خوانده نشدند)
+Showing {n} of {m}	نمایش {n} از {m}
+Showing {n} of {m} items (narrow the search for others)	نمایش {n} از {m} آیتم (برای بقیه، جستجو را محدودتر کنید)
+Showing {n} of {total} on {portal}	نمایش {n} از {total} روی {portal}
+Side by Side	کنار هم
+Side labels	برچسب‌های کناری
+Sign in to choose a model.	برای انتخاب مدل وارد شوید.
+Sign in with your ChatGPT account.	با حساب ChatGPT خود وارد شوید.
+Sign out	خروج
+Sign-in	ورود
+Sign-in cancelled.	ورود لغو شد.
+Sign-in timed out. Start again and allow the browser to reach this computer's loopback address.	ورود با وقفه زمانی مواجه شد. دوباره شروع کنید و اجازه دهید مرورگر به نشانی loopback این رایانه دسترسی داشته باشد.
+signed in	وارد شده
+Signed out on this computer, but OpenAI didn't confirm it. You can disconnect RustGIS in ChatGPT's settings.	روی این رایانه خارج شدید، ولی OpenAI آن را تأیید نکرد. می‌توانید RustGIS را در تنظیمات ChatGPT قطع کنید.
+Signing in with ChatGPT works in the desktop app.	ورود با ChatGPT در برنامه دسکتاپ کار می‌کند.
+Signing the asset (Planetary Computer)…	در حال امضای asset (Planetary Computer)…
+Simplify	ساده‌سازی
+Simulate the drive, or save the route as a layer.	شبیه‌سازی رانندگی، یا ذخیره مسیر به‌عنوان لایه.
+Simulation	شبیه‌سازی
+Single line	تک‌خطی
+Single Symbol	نماد یکتا
+Size	اندازه
+Size, bands, statistics and coordinate system.	اندازه، باندها، آمارها و سیستم مختصات.
+Skill (SKILL.md or .zip)	مهارت (SKILL.md یا .zip)
+Skills	مهارت‌ها
+Skills for the AI Assistant: {names}	مهارت‌های دستیار هوش مصنوعی: {names}
+Slideshow, PDF or PNG	اسلایدشو، PDF یا PNG
+slight left	پیچ ملایم به چپ
+slight right	پیچ ملایم به راست
+Slope, aspect, hillshade, NDVI, band math, thresholds.	شیب، جهت شیب، سایه‌روشن، NDVI، ریاضیات باند و آستانه‌ها.
+Slope, hillshade, NDVI and more.	شیب، سایه‌روشن، NDVI و بیشتر.
+Small scales	مقیاس‌های کوچک
+Snap	گیرش
+Snap elements to guides, the page and each other as you move or resize them. Hold Alt to place one freely.	گیرش عناصر به راهنماها، صفحه و یکدیگر هنگام جابه‌جایی یا تغییر اندازه. با نگه‌داشتن Alt یک عنصر را آزاد بگذارید.
+Snap new vertices to nearby vertices, edges and line ends.	گیرش رأس‌های جدید به رأس‌ها، یال‌ها و انتهای خط‌های نزدیک.
+Snap Point	نقطه گیرش
+Snapping	گیرش
+Snow	برف
+Socrata	Socrata
+Source	منبع
+Source Cooperative	Source Cooperative
+Source Cooperative…	Source Cooperative…
+South	جنوب
+South Polar Stereographic	قطبی استریوگرافیک جنوبی
+Speaker notes	یادداشت‌های گوینده
+Spectral Analysis	تحلیل طیفی
+Spectral indices	شاخص‌های طیفی
+Speed Display	نمایش سرعت
+Split	شکستن
+Split (click the line)	شکستن (روی خط کلیک کنید)
+SQL	SQL
+SQL Pane	پنل SQL
+SQL queries run through DuckDB, a program the desktop app calls: open this project in the desktop app to query it.	پرس‌وجوهای SQL از طریق DuckDB اجرا می‌شوند، برنامه‌ای که دسکتاپ صدا می‌زند: برای پرس‌وجو، این پروژه را در برنامه دسکتاپ باز کنید.
+SQL that must be true, e.g. pop > 0	عبارت SQL که باید درست باشد، مثلاً pop > 0
+Square	مربعی
+Squares	مربع‌ها
+ST_Area	ST_Area
+ST_AsGeoJSON	ST_AsGeoJSON
+ST_AsText	ST_AsText
+ST_Buffer	ST_Buffer
+ST_Centroid	ST_Centroid
+ST_Contains	ST_Contains
+ST_ConvexHull	ST_ConvexHull
+ST_Difference	ST_Difference
+ST_Distance	ST_Distance
+ST_Envelope	ST_Envelope
+ST_GeometryType	ST_GeometryType
+ST_GeomFromGeoJSON	ST_GeomFromGeoJSON
+ST_GeomFromText	ST_GeomFromText
+ST_Intersection	ST_Intersection
+ST_Intersects	ST_Intersects
+ST_IsValid	ST_IsValid
+ST_Length	ST_Length
+ST_MakeLine	ST_MakeLine
+ST_MakePolygon	ST_MakePolygon
+ST_NPoints	ST_NPoints
+ST_Perimeter	ST_Perimeter
+ST_Point	ST_Point
+ST_Read	ST_Read
+ST_SetCRS	ST_SetCRS
+ST_Simplify	ST_Simplify
+ST_Touches	ST_Touches
+ST_Transform	ST_Transform
+ST_Union	ST_Union
+ST_Union_Agg	ST_Union_Agg
+ST_Within	ST_Within
+ST_X	ST_X
+ST_XMax	ST_XMax
+ST_XMin	ST_XMin
+ST_Y	ST_Y
+ST_YMax	ST_YMax
+ST_YMin	ST_YMin
+STAC API	STAC API
+STAC APIs	رابط‌های STAC
+STAC catalog	فهرست STAC
+STAC Search	جستجوی STAC
+STAC Search…	جستجوی STAC…
+Stack another stroke on top	چیدن ضربه دیگری روی آن
+Stack on the current basemaps	چیدن روی نقشه‌های پایه فعلی
+Standalone Tables	جدول‌های مستقل
+Standard Deviation	انحراف معیار
+Star	ستاره
+Stars	ستاره‌ها
+Start	شروع
+Start an empty model	شروع یک مدل خالی
+Start date	تاریخ شروع
+Start Over	شروع از نو
+Start over at the end while playing.	هنگام پخش، در انتها از نو شروع شود.
+Start With	شروع با
+Start-up	آغازین
+starting with a project file needs the desktop app	شروع با یک فایل پروژه به برنامه دسکتاپ نیاز دارد
+Statistics	آمار
+Statistics Field	فیلد آمار
+Status	وضعیت
+Status Bar	نوار وضعیت
+Std. Dev.	انحراف معیار
+Step	گام
+Step back	گام به عقب
+Step forward	گام به جلو
+Step through a task.	گام‌به‌گام‌کردن یک تسک.
+Step Time	زمان گام
+Step {n} done	گام {n} انجام شد
+Stepped line	خط پله‌ای
+Stop	توقف
+Stop drawing labels, for faster navigation.	توقف رسم برچسب‌ها، برای ناوبری سریع‌تر.
+Stop filling the cache.	توقف پرکردن حافظه نهان.
+Stop MCP relay	توقف رله MCP
+Stop Recording	توقف ضبط
+Stopped after {steps} steps; say "continue" to go on.	پس از {steps} گام متوقف شد؛ برای ادامه بنویسید "continue".
+Stopped.	متوقف شد.
+street, city, country	خیابان، شهر، کشور
+Stretch	کشش
+Stretch\nType	نوع\nکشش
+Stretch it over the map view, or give control points (one per line: column row lon lat).	آن را روی نمای نقشه بکشید، یا نقاط کنترل بدهید (هر خط یکی: ستون ردیف طول عرض).
+Stretch Type	نوع کشش
+Stretch type	نوع کشش
+Stroke {n}	ضربه {n}
+Strokes	ضربه‌ها
+Style	سبک
+Style Items	آیتم‌های استایل
+Style › Drawing	استایل › ترسیم
+Styles	استایل‌ها
+Subreport	زیرReport
+Subreport: {name}	زیرReport: {name}
+Subtypes	زیرگروه‌ها
+Subtypes, one per line: code=name	زیرگروه‌ها، هر خط یکی: code=name
+Suitability Modeler	مدل‌ساز تناسب‌سنجی
+Summarise the conversation so far, so a long chat stays within the model's context	خلاصه‌کردن گفت‌وگو تا این لحظه، تا گفت‌وگوی طولانی در بافت مدل جا شود
+Summarising the earlier conversation to keep it within the model's context…	خلاصه‌کردن گفت‌وگوی پیشین تا در بافت مدل جا شود…
+Summarize	خلاصه‌سازی
+Summarize\nWithin	خلاصه‌سازی\nدرون
+Summarize Within	خلاصه‌سازی درون
+Summary\nStatistics	آمار\nخلاصه
+Summary Statistics	آمار خلاصه
+Supplemental Page	صفحه مکمل
+Supplemental Page After	صفحه مکمل پس از
+Surface	سطح
+Surface: {layer}	سطح: {layer}
+Swap	جابه‌جایی دوطرفه
+Swap the start and the destination	جابه‌جایی مبدأ و مقصد
+Swipe	کشیدن (سوایپ)
+Switch	تغییر
+Switch between GPU and CPU map rendering	تغییر بین ترسیم نقشه با GPU و CPU
+Switch between light and dark themes.	تغییر بین پوسته روشن و تیره.
+Switch Selection	وارونه‌کردن انتخاب
+Switch selection	وارونه‌کردن انتخاب
+Switch to a dark basemap	تغییر به نقشه پایه تیره
+Symbol	نماد
+Symbol Color	رنگ نماد
+Symbology	نمادگذاری
+Symbology Pane	پنل Symbology
+Symbology Pane…	پنل Symbology…
+Sync	همگام‌سازی
+Tab	برگه
+tab is required	فیلد tab الزامی است
+Table	جدول
+Table Frame	قاب جدول
+Table or layer	جدول یا لایه
+Tables	جدول‌ها
+Tags	تگ‌ها
+Take the data in view offline, to edit and sync back later.	آفلاین‌کردن داده داخل نما، برای ویرایش و همگام‌سازی بعدی.
+Task	تسک
+Task Item	آیتم تسک
+Task name	نام تسک
+Tasks	تسک‌ها
+Tasks: guided steps that each run a command.	تسک‌ها: گام‌های هدایت‌شده که هرکدام یک دستور را اجرا می‌کنند.
+Template name	نام قالب
+Templates	قالب‌ها
+Tennessee GIS	Tennessee GIS
+Tennessee GIS…	Tennessee GIS…
+Tennessee's public GIS data (Tennessee GeoData, geodata.tn.gov): property boundaries, transportation, health, hydrology and more.	داده عمومی GIS تنسی (Tennessee GeoData، geodata.tn.gov): مرزهای املاک، حمل‌ونقل، سلامت، هیدرولوژی و بیشتر.
+Terrain	زمین
+Test	آزمون
+Text	متن
+Text Symbol	نماد متن
+That connection would create a loop.	آن اتصال یک حلقه می‌سازد.
+The address fields are empty in every row.	فیلدهای نشانی در همه ردیف‌ها خالی‌اند.
+the answer isn't UTF-8 text	پاسخ، متن UTF-8 نیست
+The assistant follows a skill's instructions when it uses it. Whatever they say, its commands that need your approval still ask.	دستیار هنگام استفاده از یک مهارت، دستورالعمل‌های همان مهارت را دنبال می‌کند. با هر محتوایی که داشته باشد، دستورهای نیازمند تأیید شما همچنان سؤال می‌پرسند.
+The assistant is busy; stop it or wait for it to finish.	دستیار مشغول است؛ متوقفش کنید یا صبر کنید تا تمام شود.
+The assistant wants to run this, and {why}:	دستیار می‌خواهد این را اجرا کند، و {why}:
+The Basemaps plugin's tab of public basemaps.	برگه نقشه‌های پایه عمومی افزونه Basemaps.
+the capture failed unexpectedly	گرفتن تصویر به‌طور غیرمنتظره‌ای ناموفق شد
+The connection failed; trying again in {seconds} s.	اتصال ناموفق بود؛ تلاش دوباره در {seconds} ثانیه.
+The country list couldn't be read ({e}): type a country's code	فهرست کشورها خوانده نشد ({e}): کد یک کشور را بنویسید
+The dataset has nothing RustGIS can add	این مجموعه داده چیزی برای افزودن به RustGIS ندارد
+The environment (AWS_ACCESS_KEY_ID…)	محیط (AWS_ACCESS_KEY_ID…)
+The features where the map is	عنصرهای موجود در محل نقشه
+The first 1,000 entries; narrow it down a folder at a time.	هزار ورودی اول؛ هر بار یک پوشه محدودش کنید.
+The first {n} are listed.	{n} مورد اول فهرست شده‌اند.
+The first {n} are shown: search to narrow them.	{n} مورد اول نمایش داده می‌شوند: برای محدودکردن، جستجو کنید.
+The first {n} rows	{n} ردیف اول
+The flowtrace didn't answer: the whole flowline nearest the point is shown.	پاسخی از flowtrace نیامد: کل خط جریان نزدیک به نقطه نمایش داده می‌شود.
+The installed GeoLibre runner lists no tools.	اجراکننده نصب‌شده GeoLibre هیچ ابزاری فهرست نمی‌کند.
+The job covers the map view	کار، نمای نقشه را پوشش می‌دهد
+The key is kept for this session only.	کلید فقط برای همین نشست نگه داشته می‌شود.
+The layer's file couldn't be read: {error}	فایل لایه خوانده نشد: {error}
+the layout export failed unexpectedly	برون‌بری صفحه‌آرایی به‌طور غیرمنتظره‌ای ناموفق شد
+The link doesn't say its STAC API: Find Items searches {api}	پیوند، API STAC خودش را نگفته: Find Items در {api} جستجو می‌کند
+The list of plugins to browse. Leave it empty for the RustGIS plugin registry.	فهرست افزونه‌ها برای مرور. برای فهرست افزونه RustGIS، خالی بگذارید.
+the map has no layers	نقشه لایه‌ای ندارد
+The map is drawn in this coordinate system; layers are projected on the fly.	نقشه در این سیستم مختصات ترسیم می‌شود؛ لایه‌ها به‌صورت لحظه‌ای تصویر می‌شوند.
+the map isn't on screen in RustGIS (a layout or the catalog is shown), so it was drawn offscreen	نقشه در صفحه RustGIS نیست (صفحه‌آرایی یا فهرست نمایش داده می‌شود)، پس بیرون از دید ترسیم شد
+The map view as it is now	نمای نقشه، همان‌طور که الان است
+The map's extent isn't known yet	گستره نقشه هنوز معلوم نیست
+The map's view takes {n} of Overture's {ty} files (up to {max}): zoom in, or add the theme as map tiles	نمای نقشه {n} فایل {ty} اوورت را می‌گیرد (تا {max}): بزرگ‌نمایی کنید، یا تم را به‌عنوان کاشی نقشه اضافه کنید
+the MCP relay couldn't start	رله MCP نتوانست راه‌اندازی شود
+The MCP relay couldn't start; agents can still use the file bridge. Click to turn agents off	رله MCP راه‌اندازی نشد؛ ایجنت‌ها همچنان می‌توانند از پل فایل استفاده کنند. برای خاموش‌کردن ایجنت‌ها کلیک کنید
+The model answering; click to change it	مدلی که پاسخ می‌دهد؛ برای تغییر کلیک کنید
+The model declined this request.	مدل این درخواست را رد کرد.
+The model declined this request: {why}	مدل این درخواست را رد کرد: {why}
+The model is ready to run.	مدل آماده اجراست.
+The model sent an empty reply; ask again, or try another model.	مدل پاسخی خالی فرستاد؛ دوباره بپرسید یا مدل دیگری را امتحان کنید.
+The National Map	The National Map
+The National Map…	The National Map…
+the NLDI's answer isn't UTF-8 text	پاسخ NLDI متن UTF-8 نیست
+the page is too large to draw	صفحه برای ترسیم خیلی بزرگ است
+the picture is too large to show	تصویر برای نمایش خیلی بزرگ است
+the picture is too large to show, or isn't one	تصویر برای نمایش خیلی بزرگ است، یا اصلاً تصویر نیست
+The places leave this device for the public Valhalla server at {server}, run by FOSSGIS. Don't continue if your project is bound by data privacy or data sovereignty rules.	مکان‌ها از این دستگاه به سرور عمومی Valhalla در {server} می‌روند که FOSSGIS اداره می‌کند. اگر پروژه شما تابع قواعد حریم خصوصی داده یا حاکمیت داده است، ادامه ندهید.
+the presentation export failed unexpectedly	برون‌بری Presentation به‌طور غیرمنتظره‌ای ناموفق شد
+the preview failed unexpectedly	پیش‌نمایش به‌طور غیرمنتظره‌ای ناموفق شد
+The project downloads as this file, to the folder your browser saves downloads in.	پروژه به‌صورت این فایل دانلود می‌شود، در پوشه‌ای که مرورگرتان دانلودها را ذخیره می‌کند.
+The project's items in place of the map.	آیتم‌های پروژه، به‌جای نقشه.
+The project's thumbnail, from an image.	تصویر بندانگشتی پروژه، از یک تصویر.
+The project's thumbnail, from the map view.	تصویر بندانگشتی پروژه، از نمای نقشه.
+The projection the map opens in.	تصویری که نقشه با آن باز می‌شود.
+The provider's content filter stopped the reply.	فیلتر محتوای ارائه‌دهنده، پاسخ را متوقف کرد.
+The public server is free and shared by many: it answers light use, and may ask you to wait.	سرور عمومی رایگان است و میان خیلی‌ها مشترک: پاسخ استفاده سبک است و ممکن است از شما بخواهد صبر کنید.
+The raster's data couldn't be read.	داده رستر خوانده نشد.
+The raster's data couldn't be read: {path}	داده رستر خوانده نشد: {path}
+the release isn't known	انتشار ناشناخته است
+The reply reached its length limit.	پاسخ به سقف طول رسید.
+The reply stopped before completion; no actions were run.	پاسخ پیش از کامل‌شدن متوقف شد؛ هیچ اقدامی اجرا نشد.
+The reply stopped early ({reason}).	پاسخ زودهنگام متوقف شد ({reason}).
+the report export failed unexpectedly	برون‌بری Report به‌طور غیرمنتظره‌ای ناموفق شد
+The request failed.	درخواست ناموفق بود.
+The result wired into this output is added to the map under this name.	نتیجه‌ای که به این خروجی وصل می‌شود، با همین نام به نقشه اضافه می‌گردد.
+The saved sign-in changed. Select your account again.	ورود ذخیره‌شده تغییر کرده است. حساب خود را دوباره انتخاب کنید.
+The server had a problem answering.	سرور در پاسخ‌دادن به مشکل خورد.
+The server is limiting requests.	سرور در حال محدودکردن درخواست‌هاست.
+The server refused the request.	سرور درخواست را رد کرد.
+The server took too long to answer.	سرور برای پاسخ‌دادن خیلی طول کشید.
+The service may be private or need a token.	ممکن است سرویس خصوصی باشد یا به توکن نیاز داشته باشد.
+The service needs a sign-in or a token.	سرویس به ورود یا توکن نیاز دارد.
+The service's answer isn't UTF-8 text	پاسخ سرویس متن UTF-8 نیست
+The Shapefile's files download as one zip.	فایل‌های Shapefile به‌صورت یک zip دانلود می‌شوند.
+The share of each cell covered by fields, for the zoomed-out view	سهم پوشش هر سلول از مزارع، برای نمای دور
+The sign-in expired or was revoked. Sign in again.	ورود منقضی یا باطل شده است. دوباره وارد شوید.
+The sign-in is kept in the app's settings folder, for your user account only, and never in a project file.	اطلاعات ورود در پوشه تنظیمات برنامه نگه‌داری می‌شود، فقط برای حساب کاربری شما، و هرگز در فایل پروژه ذخیره نمی‌شود.
+The start-up project {path} didn't open: {error}	پروژه آغازین {path} باز نشد: {error}
+The start-up project {path} isn't a RustGIS project file.	پروژه آغازین {path} یک فایل پروژه RustGIS نیست.
+The step's layer {name} isn't in the map.	لایه گام، یعنی {name}، در نقشه نیست.
+The store has no variables with two or more dimensions.	مخزن هیچ متغیری با دو بعد یا بیشتر ندارد.
+the store is gone	مخزن از دست رفته است
+The task's steps changed, so the step being edited was closed: edit it again.	گام‌های تسک تغییر کردند، پس گامِ در حال ویرایش بسته شد: دوباره ویرایشش کنید.
+the time slider is off	لغزنده زمان خاموش است
+The token expires on {date}.	توکن در {date} منقضی می‌شود.
+the view has no extent	نما گستره‌ای ندارد
+The view is larger than one read: its centre was read (zoom in for the rest)	نما از یک بار خواندن بزرگ‌تر است: مرکزش خوانده شد (برای بقیه بزرگ‌نمایی کنید)
+The web app always runs the latest release: reload the page to get it.	برنامه وب همیشه آخرین انتشار را اجرا می‌کند: برای دریافتش، صفحه را دوباره بارگذاری کنید.
+the window's screenshot didn't come back in time, so the map was drawn offscreen	عکس فوری پنجره به‌موقع برنگشت، پس نقشه بیرون از دید ترسیم شد
+the window's screenshot didn't hold the map, so it was drawn offscreen	عکس فوری پنجره نقشه را در بر نگرفت، پس نقشه بیرون از دید ترسیم شد
+Theme	پوسته
+Thermal	حرارتی
+Thinking…	در حال فکرکردن…
+this build can't download plugins	این بیلد نمی‌تواند افزونه دانلود کند
+this build can't reach AI providers	این بیلد نمی‌تواند به ارائه‌دهندگان هوش مصنوعی دسترسی پیدا کند
+this build saves projects with Save As	این بیلد پروژه‌ها را با «ذخیره به‌عنوان» ذخیره می‌کند
+This ChatGPT account was already saved. Next time, choose it in the list instead of adding it again.	این حساب ChatGPT قبلاً ذخیره شده است. دفعه بعد، به‌جای افزودن دوباره، آن را از فهرست انتخاب کنید.
+This map has no layers yet.	این نقشه هنوز لایه‌ای ندارد.
+This map's thumbnail, from an image.	تصویر بندانگشتی این نقشه، از یک تصویر.
+This map's thumbnail, from the view.	تصویر بندانگشتی این نقشه، از نما.
+This plugin can:	این افزونه می‌تواند:
+This plugin runs as a program on your computer, outside RustGIS's sandbox. It can do anything you can: read and change your files, use the network and run other programs. Install it only if you trust its author.	این افزونه مثل یک برنامه روی رایانه شما، بیرون از سندباکس RustGIS اجرا می‌شود. هر کاری را که شما می‌توانید می‌کند: خواندن و تغییر فایل‌هایتان، استفاده از شبکه و اجرای برنامه‌های دیگر. فقط اگر به نویسنده‌اش اعتماد دارید نصبش کنید.
+This request has no one-time allow option.	این درخواست گزینه اجازه یک‌باره ندارد.
+This request uses an unsupported capability. Check the parameter and change the request.	این درخواست از قابلیتی پشتیبانی‌نشده استفاده می‌کند. پارامتر را بررسی کنید و درخواست را تغییر دهید.
+This result is kept	این نتیجه نگه داشته می‌شود
+This step	این گام
+This step names no tool to show.	این گام ابزاری برای نمایش نام نبرده است.
+Thumbnail	تصویر بندانگشتی
+Tick length	طول تیک
+Ticks	تیک‌ها
+Ticks only	فقط تیک‌ها
+Tile archive	بایگانی کاشی
+Tile Archive File…	فایل بایگانی کاشی…
+Tile Layer Properties	ویژگی‌های لایه کاشی
+Tile Layers	لایه‌های کاشی
+Tilt Map	شیب‌دادن نقشه
+Tilt-shift	تیلت‌شیفت
+Tilt-shift blur and film grain.	تاری تیلت‌شیفت و دانه‌های فیلم.
+Time	زمان
+Time\nSlider	لغزنده\nزمان
+Time Fields	فیلدهای زمان
+Time Slider	لغزنده زمان
+Time Slider Settings	تنظیمات لغزنده زمان
+Tint by elevation	رنگ‌آمیزی بر اساس ارتفاع
+Tissot's Indicatrix	بیضی نشان تیسو
+Title	عنوان
+Toggle Dark Mode	تغییر حالت تیره
+Toggle GPU Rendering	تغییر ترسیم GPU
+Tolerance (km)	رواداری (km)
+Tolls	عوارض
+Tool Gallery	گالری ابزارها
+Toolbox	جعبه‌ابزار
+Toolboxes	جعبه‌ابزارها
+Tools	ابزارها
+Tools\nPane	پنل\nابزارها
+Tools Pane	پنل ابزارها
+Tools that analyse features.	ابزارهایی که عناصر را تحلیل می‌کنند.
+Tools that analyse rasters.	ابزارهایی که رسترها را تحلیل می‌کنند.
+Tools you run appear here.	ابزارهایی که اجرا می‌کنید این‌جا ظاهر می‌شوند.
+Top	بالا
+Top visible raster	بالاترین رستر نمایان
+Topmost Layer	بالاترین لایه
+Topographic and Bathymetric	توپوگرافی و آبنگاری
+Topology	توپولوژی
+Topology Options	گزینه‌های توپولوژی
+Topology Options…	گزینه‌های توپولوژی…
+Topology rules and the errors they find.	قوانین توپولوژی و خطاهایی که پیدا می‌کنند.
+Total {total}   ·   Segment {segment}	مجموع {total}   ·   قطعه {segment}
+Trace	ردگیری
+Trace a point first: click the map.	اول نقطه‌ای را ردگیری کنید: روی نقشه کلیک کنید.
+Track jobs and their status.	پیگیری کارها و وضعیتشان.
+Train a neural network on training polygons	آموزش یک شبکه عصبی روی چندضلعی‌های آموزشی
+Train a neural network on training polygons and classify every pixel.	آموزش شبکه عصبی روی چندضلعی‌های آموزشی و طبقه‌بندی هر پیکسل.
+Train And Classify	آموزش و طبقه‌بندی
+Train Deep Learning Model	آموزش مدل یادگیری عمیق
+Trained models	مدل‌های آموزش‌دیده
+Transparency	شفافیت
+Traverse	طی‌مسیر
+Triangle	مثلث
+Try again in a moment.	لحظه‌ای بعد دوباره تلاش کنید.
+Try again later.	بعداً دوباره تلاش کنید.
+Turn editing on or off for the map.	روشن یا خاموش‌کردن ویرایش برای نقشه.
+Turn Labels Off	خاموش‌کردن برچسب‌ها
+Turn labels on or off for the selected layer.	روشن یا خاموش‌کردن برچسب‌ها برای لایه انتخاب‌شده.
+Turn labels on or off.	روشن یا خاموش‌کردن برچسب‌ها.
+Turn Off	خاموش‌کردن
+Turn on the Basemaps plugin	روشن‌کردن افزونه Basemaps
+Turn the time slider off: every feature shows again.	خاموش‌کردن لغزنده زمان: همه عناصر دوباره نمایش داده می‌شوند.
+Turns a table's addresses into points: each row's address fields are joined with commas (such as street, city, country) and looked up. The public servers take up to 100 addresses a run, one a second; a server of your own takes more.	نشانی‌های جدول را به نقطه تبدیل می‌کند: فیلدهای نشانی هر ردیف با ویرگول به هم می‌پیوندند (مثل خیابان، شهر، کشور) و جستجو می‌شوند. سرورهای عمومی هر بار تا 100 نشانی می‌گیرند، ثانیه‌ای یکی؛ سرور خودتان بیشتر می‌گیرد.
+Two layers are named {name}: the step names it, so it replays on the first of them. Rename one to tell them apart.	دو لایه به نام {name} وجود دارند: گام با نام به آن اشاره می‌کند، پس روی اولی بازپخش می‌شود. یکی را تغییر نام دهید تا از هم تشخیص داده شوند.
+Type	نوع
+type a file name	نام فایل را بنویسید
+type a longitude and latitude, or click the map	طول و عرض جغرافیایی بنویسید، یا روی نقشه کلیک کنید
+Type a scale, such as 1:12,345, 12345 or 25k, and press Enter	یک مقیاس بنویسید، مثل 1:12,345 یا 12345 یا 25k، و Enter را بزنید
+Type an address or coordinates and press Enter, or click the map.	نشانی یا مختصات بنویسید و Enter را بزنید، یا روی نقشه کلیک کنید.
+Type numbers separated by commas	اعداد را با ویرگول جدا کنید و بنویسید
+Typed below	نوشته‌شده در پایین
+UM	UM
+Unavailable: {reason}	در دسترس نیست: {reason}
+Unbind From Time Slider	جدا کردن از لغزنده زمان
+Unbind from Time Slider	جدا کردن از لغزنده زمان
+Undo	واگرد
+Undo (Ctrl+Z)	واگرد (Ctrl+Z)
+Undo / Redo	واگرد / بازانجام
+Undo doesn't remove the recorded step: delete it in Edit Steps once you stop recording.	واگرد، گام ثبت‌شده را حذف نمی‌کند: وقتی ضبط را قطع کردید، آن را در ویرایش گام‌ها حذف کنید.
+Undo the last change.	واگرد آخرین تغییر.
+Undo {action}	واگرد {action}
+Ungroup	خارج‌کردن از گروه
+Uninstall	حذف نصب
+Uninstall GeoLibre Tools	حذف نصب ابزارهای GeoLibre
+Uninstall Plugin	حذف نصب افزونه
+Uninstalled {id}.	حذف نصب شد: {id}
+Unique Values	مقادیر یکتا
+United States	ایالات متحده
+Units	واحدها
+Units per step	واحد در هر گام
+UNKNOWN TOOL	ابزار ناشناخته
+Unload the GeoLibre tools and stop loading them when RustGIS starts.	تخلیه ابزارهای GeoLibre و توقف بارگذاری‌شان هنگام راه‌اندازی RustGIS.
+Unsaved changes	تغییرات ذخیره‌نشده
+Unsupervised classes (k-means)	طبقه‌های بدون نظارت (k-means)
+Unsupervised classes (k-means).	طبقه‌های بدون نظارت (k-means).
+Untitled model	مدل بی‌نام
+Up	Up
+Up a level	یک سطح بالا
+Update	به‌روزرسانی
+Update Bookmark	به‌روزرسانی نشانک
+Update Job	به‌روزرسانی کار
+Update to {version}	به‌روزرسانی به {version}
+Upload File	بارگذاری فایل
+Upload File…	بارگذاری فایل…
+url is required	فیلد url الزامی است
+US EPA EnviroAtlas: maps of ecosystem services, land cover, people and the built environment across the United States.	سرویس EnviroAtlas آژانس حفاظت محیط‌زیست آمریکا: نقشه‌های خدمات اکوسیستم، پوشش زمین، مردم و محیط ساخته‌شده در سراسر ایالات متحده.
+US Federal GIS	داده‌های GIS فدرال آمریکا
+US Federal GIS…	داده‌های GIS فدرال آمریکا…
+US Local GIS	داده‌های GIS محلی آمریکا
+US Local GIS…	داده‌های GIS محلی آمریکا…
+US State GIS	داده‌های GIS ایالتی آمریکا
+US State GIS…	داده‌های GIS ایالتی آمریکا…
+USA Contiguous Albers Equal Area	آلبرز هم‌مساحت سرزمین پیوسته آمریکا
+Use	استفاده
+Use a Single Stroke	استفاده از یک ضربه واحد
+Use another account	استفاده از حساب دیگر
+Use Current View	استفاده از نمای فعلی
+Use each feature's line color	استفاده از رنگ خط هر عنصر
+Use each feature's line width	استفاده از ضخامت خط هر عنصر
+USERPROFILE	USERPROFILE
+USGS 3DEP DEM	DEM USGS 3DEP
+USGS 3DEP DEM…	DEM USGS 3DEP…
+USGS 3DEP elevation models (GeoTIFF tiles from The National Map) where the map is.	مدل‌های ارتفاعی USGS 3DEP (کاشی‌های GeoTIFF از The National Map) در محل نقشه.
+USGS 3DEP LiDAR point clouds (COPC) from the Planetary Computer, where the map is: add a tile's data as a point cloud.	ابرهای نقطه لیدار USGS 3DEP (COPC) از Planetary Computer در محل نقشه: داده یک کاشی را به‌عنوان ابر نقطه اضافه کنید.
+USGS Imagery	تصاویر USGS
+USGS LiDAR	لیدار USGS
+USGS LiDAR…	لیدار USGS…
+USGS NLDI	USGS NLDI
+USGS NLDI network tools: choose a flowline direction and click the map (or trace the point below). Then get the basin, or choose a navigation method and press Load sources & plot to plot its flowlines, or pick a catalog such as stream gages or wells and plot it too. The NLDI covers the United States' NHDPlus network.	ابزارهای شبکه NLDI سازمان زمین‌شناسی آمریکا: یک جهت خط جریان انتخاب و روی نقشه کلیک کنید (یا نقطه زیر را ردگیری کنید). سپس آبریز را بگیرید، یا یک روش ناوبری انتخاب کنید و «بارگذاری منابع و رسم» را بزنید تا خط‌های جریانش رسم شود، یا فهرستی مثل ایستگاه‌های سنجش جریان یا چاه‌ها برگزینید و آن را هم رسم کنید. NLDI شبکه NHDPlus ایالات متحده را پوشش می‌دهد.
+USGS NLDI…	USGS NLDI…
+USGS The National Map	USGS The National Map
+USGS The National Map's map services (topographic maps, imagery, elevation, hydrography, boundaries and more) and a few partners'. Each is added as a tile layer.	سرویس‌های نقشه USGS The National Map (نقشه‌های توپوگرافی، تصاویر، ارتفاع، هیدروگرافی، مرزها و بیشتر) و چند شریک آن. هرکدام به‌عنوان لایه کاشی افزوده می‌شود.
+Using ChatGPT plan	در حال استفاده از طرح ChatGPT
+Utilities	ابزارهای کمکی
+Valid combinations, one per line: a, b	ترکیب‌های معتبر، هر خط یکی: a، b
+Valid expression · {n} matching rows	عبارت معتبر · {n} ردیف منطبق
+Validate	اعتبارسنجی
+Validate Model	اعتبارسنجی مدل
+value (empty: no-data)	مقدار (خالی: بدون داده)
+Values from −stretch to +stretch are shown from black to full colour	مقادیر از −کشش تا +کشش از سیاه تا تمام‌رنگ نمایش داده می‌شوند
+Vantor Open Data	داده باز Vantor
+Vantor's open imagery of disasters: pick an event and a phase (before or after it), then Find Items.	تصاویر باز Vantor از بلایا: یک رویداد و یک فاز (پیش یا پس از آن) برگزینید، سپس Find Items.
+Vantor…	Vantor…
+Variable	متغیر
+Vector and raster data	داده برداری و رستری
+Vector Layer	لایه برداری
+Vector tiles (MVT)	کاشی‌های برداری (MVT)
+Vectors a geospatial foundation model made for every pixel or image patch, found where the map is and shown as colours.	مدل پایهٔ جیومکانی Vectors برای هر پیکسل یا لکهٔ تصویر ساخته شده، در محل نقشه پیدا می‌شود و به‌صورت رنگ‌ها نمایش داده می‌شود.
+Version {version}	نسخه {version}
+Vertex	رأس
+Vertical	عمودی
+Via {roads}	از طریق {roads}
+Video	ویدیو
+Video file or URL	فایل ویدیو یا URL
+Video Page	صفحه ویدیو
+Videos	ویدیوها
+Video…	ویدیو…
+View	نمایش
+View Clipping	برش نما
+View Effects	جلوه‌های نما
+View Extent	گستره نما
+View In Google Earth	نمایش در Google Earth
+View In Google Maps	نمایش در Google Maps
+View Unplaced	نمایش جاافتاده‌ها
+View › Windows	نما › پنجره‌ها
+Viewshed from a point	میدان دید از یک نقطه
+Viewshed {radius}	میدان دید {radius}
+Viewshed {radius} Here	میدان دید {radius} از این‌جا
+Vignette	وینیت
+Vignette, edge outlines and the stars around the globe.	وینیت، خط دور لبه‌ها و ستاره‌های دور کره.
+Visibility	قابلیت‌بینایی
+Visibility Analysis	تحلیل دیدپذیری
+Visibility Range	گستره دید
+Visible	نمایان
+Visible Layers	لایه‌های نمایان
+Visual Effect	جلوه بصری
+Volume	حجم
+Waiting for the browser…	در انتظار مرورگر…
+Waiting for your answer	در انتظار پاسخ شما
+Walk	قدم‌زدن
+Want more basemaps?	نقشه پایه بیشتری می‌خواهید؟
+WCS	WCS
+WCS Coverage Request	درخواست Coverage از WCS
+Weather	آب‌وهوا
+Weather and climate data from dynamical.org (NOAA GFS, GEFS and HRRR, ECMWF, DWD ICON…) as Zarr stores: open a dataset, pick a variable and its time steps, and add it.	داده آب‌وهوا و اقلیم از dynamical.org (NOAA GFS، GEFS و HRRR، ECMWF، DWD ICON…) به‌صورت مخزن‌های Zarr: یک مجموعه داده باز کنید، متغیر و گام‌های زمانی‌اش را برگزینید و اضافه‌اش کنید.
+Web\nData	داده\nوب
+Web\nMap	نقشه\nوب
+Web Basemaps	نقشه‌های پایه وب
+Web Data	داده وب
+Web Layer	لایه وب
+Web Link Chart	نمودار پیوند وب
+Web maps	نقشه‌های وب
+Web Mercator	وب مرکاتور
+Web Scene	صحنه وب
+Web Style	استایل وب
+Web Tile Layers	لایه‌های کاشی وب
+Web Tool	ابزار وب
+Website	وب‌سایت
+Weekly usage	مصرف هفتگی
+Weights	وزن‌ها
+Welcome to RustGIS	به RustGIS خوش آمدید
+West	غرب
+WFS	WFS
+WGS 84 / Globe	کره (WGS 84)
+WGS 84 / Web Mercator	مرکاتور وب (WGS 84)
+What RustGIS opens with: the World Atlas sample or a blank map.	شروع RustGIS با چه چیزی باشد: نمونهٔ اطلس جهانی یا یک نقشهٔ خالی.
+What RustGIS opens with: the World Atlas sample, a blank map, a project you choose, or the last project opened or saved.	شروع RustGIS با چه چیزی باشد: نمونهٔ اطلس جهانی، یک نقشهٔ خالی، پروژه‌ای که خودتان انتخاب می‌کنید، یا آخرین پروژهٔ باز یا ذخیره‌شده.
+What to do, where to find it and why	چه کاری انجام شود، کجا پیدایش کنید و چرا
+What's near a point	چه چیزهایی نزدیک یک نقطه است
+WHERE	WHERE
+Where	کجا
+Where Clause	بند Where
+Where labels sit relative to their features.	جای برچسب‌ها نسبت به عناصرشان.
+Where new features get their elevation (the z field).	جایی که عناصر جدید ارتفاعشان را می‌گیرند (فیلد z).
+Where the map opens: the full extent or a view you saved.	جایی که نقشه باز می‌شود: گستره کامل یا نمای ذخیره‌شده شما.
+Where tools work	محل کار ابزارها
+Which 5 countries have the largest GDP?	کدام 5 کشور بیشترین GDP را دارند؟
+Whitebox and GeoLibre tools	ابزارهای Whitebox و GeoLibre
+Whole map	کل نقشه
+Whose borders the sample countries and the basemap outline show.	مرزهایی که کشورهای نمونه و خط دور نقشه پایه نشان می‌دهند.
+Wide (±1 step)	پهن (±1 گام)
+Wider (±3 steps)	پهن‌تر (±3 گام)
+Width	عرض
+Width (mm)	عرض (mm)
+Windows	پنجره‌ها
+Winkel Tripel	وینکل تریپل
+Wireframe	فریم‌وار
+Withdrawn	بازپس‌گرفته‌شده
+WKT column	ستون WKT
+WMS	WMS
+WMTS	WMTS
+Words	واژه‌ها
+words in the name	واژه‌ها در نام
+words to keep to (optional)	واژه‌های مقصد برای رسیدن (اختیاری)
+Workflow Manager	مدیر گردش‌کار
+Workflows	گردش‌کارها
+Working	در حال کار
+Workspace	فضای کاری
+Workspace cell size and blending.	اندازه سلول و ترکیب فضای کاری.
+Workspace Options	گزینه‌های فضای کاری
+World	جهان
+World Atlas	اطلس جهانی
+World Atlas Sample	نمونه اطلس جهانی
+World Countries	کشورهای جهان
+World, compromise: low overall distortion, used for world atlases.	جهانی، سازش‌کار: اعوجاج کلی کم، به‌کاررفته در اطلس‌های جهانی.
+World, compromise: neither equal-area nor conformal, balanced for wall maps.	جهانی، سازش‌کار: نه هم‌مساحت نه هم‌شکل، متعادل برای نقشه‌های دیواری.
+World, compromise: rounded corners, gentle shapes near the poles.	جهانی، سازش‌کار: گوشه‌های گرد، شکل‌های ملایم نزدیک قطب‌ها.
+World, conformal: the usual web map; areas grow towards the poles.	جهانی، هم‌شکل: نقشه وب مرسوم؛ مساحت‌ها به سمت قطب‌ها بزرگ می‌شوند.
+World, cylindrical: a compromise between Mercator and equal steps.	جهانی، استوانه‌ای: سازشی میان مرکاتور و گام‌های برابر.
+World, cylindrical: equal steps of longitude and latitude.	جهانی، استوانه‌ای: گام‌های برابر طول و عرض جغرافیایی.
+World, equal-area, cylindrical: true sizes, flattened near the poles.	جهانی، هم‌مساحت، استوانه‌ای: اندازه‌های درست، تخت‌شده نزدیک قطب‌ها.
+World, equal-area: true sizes with a Robinson-like look.	جهانی، هم‌مساحت: اندازه‌های درست با ظاهری شبیه رابینسون.
+World, equal-area: true sizes with rounded poles.	جهانی، هم‌مساحت: اندازه‌های درست با قطب‌های گرد.
+World, equal-area: true sizes, shapes bend towards the edges.	جهانی، هم‌مساحت: اندازه‌های درست، شکل‌ها به سمت لبه‌ها خم می‌شوند.
+Worldview	Worldview
+Write a plugin	نوشتن افزونه
+X (mm)	X (mm)
+X column	ستون X
+X Field	فیلد X
+XY Table To Point	جدول XY به نقطه
+XY Table To Point…	جدول XY به نقطه…
+Y (mm)	Y (mm)
+Y column	ستون Y
+Y Field	فیلد Y
+Year	سال
+Yes	بله
+You can undo this with {shortcut}.	می‌توانید این را با {shortcut} واگرد کنید.
+You have version {version}.	نسخه {version} را دارید.
+You're using your ChatGPT plan	در حال استفاده از طرح ChatGPT خود هستید
+Your skills are kept in the skills folder of the app's settings folder. Shared skills (~/.agents/skills) are off until you turn them on.	مهارت‌های شما در پوشه skills داخل پوشه تنظیمات برنامه نگه‌داری می‌شوند. مهارت‌های مشترک (~/.agents/skills) تا وقتی خودتان فعالشان کنید خاموش‌اند.
+Yours	متعلق به شما
+YYYY-MM-DD	YYYY-MM-DD
+YYYY-MM-DD, for the layers that change with time	قالب YYYY-MM-DD؛ برای لایه‌هایی که با زمان تغییر می‌کنند
+YYYY-MM-DD, for time layers	قالب YYYY-MM-DD؛ برای لایه‌های زمانی
+z (m)	z (m)
+Z factor	ضریب Z
+Zarr	Zarr
+Zarr Variables	متغیرهای Zarr
+Zarr…	Zarr…
+Zoom	زوم
+Zoom about the pointer	بزرگ‌نمایی حول مکان‌نما
+Zoom Box	کادر بزرگ‌نمایی
+Zoom Frame	بزرگ‌نمایی قاب
+Zoom In	بزرگ‌نمایی
+Zoom in	بزرگ‌نمایی
+Zoom in / out	بزرگ‌نمایی / کوچک‌نمایی
+Zoom In Here	بزرگ‌نمایی از این‌جا
+Zoom in on the centre of the map.	بزرگ‌نمایی روی مرکز نقشه.
+Zoom in · finish a sketch	بزرگ‌نمایی · پایان یک طرح دستی
+Zoom Out	کوچک‌نمایی
+Zoom out	کوچک‌نمایی
+Zoom out from the centre of the map.	کوچک‌نمایی از مرکز نقشه.
+Zoom To	بزرگ‌نمایی به
+Zoom To\nLayer	بزرگ‌نمایی به\nلایه
+Zoom to a box (Explore)	بزرگ‌نمایی به یک کادر (کاوش)
+Zoom To Extent	بزرگ‌نمایی به گستره
+Zoom To Layer	بزرگ‌نمایی به لایه
+Zoom To Map View	بزرگ‌نمایی به نمای نقشه
+Zoom To Selection	بزرگ‌نمایی به انتخاب
+Zoom to selection	بزرگ‌نمایی به انتخاب
+Zoom to the error	بزرگ‌نمایی به خطا
+Zoom to the extent of all layers.	بزرگ‌نمایی به گستره همه لایه‌ها.
+Zoom to the layer's extent.	بزرگ‌نمایی به گستره لایه.
+Zoom to the selected features.	بزرگ‌نمایی به عناصر انتخاب‌شده.
+Zoom to the whole world.	بزرگ‌نمایی به کل جهان.
+Zoom to this bookmark	بزرگ‌نمایی به این نشانک
+Zoom to Tokyo	بزرگ‌نمایی به توکیو
+Zoom To World	بزرگ‌نمایی به جهان
+{agent} was stopped by you.	عامل {agent} توسط شما متوقف شد.
+{id} changed since it was installed; install it again from the Plugin Manager.	افزونهٔ {id} از زمان نصب تغییر کرده است؛ از Plugin Manager دوباره نصبش کنید.
+{names}: needs Node.js (npx) for its ACP adapter.	افزونهٔ {names} برای آداپتور ACP خود به Node.js (npx) نیاز دارد.
+{name} is larger than {mb} MB	حجم {name} از {mb} MB بزرگ‌تر است
+{name} runs as a program on your computer: it needs the desktop app or rustgis-cli.	افزونهٔ {name} مثل یک برنامهٔ مستقل روی رایانهٔ شما اجرا می‌شود: به برنامهٔ دسکتاپ یا rustgis-cli نیاز دارد.
+{name} was withdrawn from the plugin registry and has been turned off.	افزونهٔ {name} از فهرست افزونه‌ها پس گرفته شده و خاموش شده است.
+{name} was withdrawn from the plugin registry: {reason}	افزونهٔ {name} از فهرست افزونه‌ها پس گرفته شد: {reason}
+{name}: the download doesn't match the registry; it wasn't installed.	نصب {name} انجام نشد؛ دانلود با فهرست مطابقت ندارد.
+{name}: the download is a different plugin; it wasn't installed.	نصب {name} انجام نشد؛ دانلود افزونهٔ دیگری است.
+{shown} of {total} plugins	{shown} از {total} افزونه
+{total} plugins	{total} افزونه
+{type} · {format}, read in place · a sample of {n} of the {matched} features in view (zoom in to see them all) · {renderer}	نوع {type} · قالب {format}، خوانده‌شده در جا · نمونه‌ای {n}تایی از {matched} عنصر داخل نما (برای دیدن همه بزرگ‌نمایی کنید) · {renderer}
+{type} · {format}, read in place · {n} of {total} features in view · {renderer}	نوع {type} · قالب {format}، خوانده‌شده در جا · {n} از {total} عنصر داخل نما · {renderer}
+{url}: downloaded after another project was opened, so it wasn't opened	نشانی {url}: پس از باز شدن پروژهٔ دیگری دانلود شد، بنابراین باز نشد
+{url}: only HTTPS addresses, or plain HTTP on this computer or network, are allowed	نشانی {url}: فقط نشانی‌های HTTPS، یا HTTP ساده روی همین رایانه یا شبکه، مجازند
+© OpenStreetMap contributors	© OpenStreetMap contributors
+±, dequantised	±، بدون کوانتیزه
+— fps	— fps
+⌘K	⌘K
+▶ Simulate	▶ شبیه‌سازی

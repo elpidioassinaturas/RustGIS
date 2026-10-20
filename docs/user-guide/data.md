@@ -207,6 +207,56 @@ when you add a table without one, and a project opening sends only a password gi
 session, as for PostGIS. SQL queries (`layer.addSql`, the SQL pane) don't run on MySQL or MariaDB
 databases.
 
+## SQL Server and Azure SQL
+
+**Home › Add Data › Database…** (`layer.addDatabase`) reads the `geometry` and `geography`
+columns of SQL Server 2012 or later and Azure SQL tables and views directly, on the desktop.
+Use `mssql://user@host:1433/database`; an empty host means `localhost`, and omitting the database
+uses the login's default database. **List Tables** (`info.databaseTables`) lists spatial columns.
+Choose a table as `table`, `schema.table` or `table:column`, or leave the choice empty to add all.
+For a named instance, use `?instance=SQLEXPRESS` without a port so SQL Browser can discover it.
+
+The connection is encrypted and its certificate checked against the platform's trust store by
+default (`encrypt=mandatory`, also `required`, `true` or `yes`). `encrypt=strict` selects TDS 8.0
+strict encryption on servers that support it. A private authority can be supplied as
+`?ca=/path/to/ca.pem`, and `hostname-in-certificate` overrides the expected certificate name.
+For a self-signed server, `?trust-server-certificate=true` disables certificate checking; the
+layer reports that it is unchecked. `?encrypt=false` (also `optional` or `no`) requests encryption
+for login only, not subsequent traffic; certificate validation still applies during login unless
+explicitly disabled with `trust-server-certificate=true`. `connect-timeout` sets a positive
+connection deadline in seconds (default: 10, maximum: 300).
+
+```sh
+rustgis-cli run --cmd 'layer.addDatabase={"database":"mssql://gis@db.example:1433/city","password":"…"}' \
+  --cmd 'share.exportMap={"path":"city.png"}'
+```
+
+SQL Server logins work on every desktop platform. On Windows, `DOMAIN%5Cuser` with a password
+uses a Windows login: `%5C` is the URL encoding of `\`, and a literal `DOMAIN\user` is also accepted
+in the address (escape it as `DOMAIN\\user` inside JSON). Leaving the user out signs in as the
+current Windows user. These Windows logins are not supported on macOS or Linux: give a SQL Server
+login instead. Passwords can be supplied in user-info or the `password`, `pass`, `pwd`, or `passwd`
+query parameters; the separate password field overrides an address's password.
+
+Large tables read a view at a time using their spatial index, with a server-numbered sample when
+more rows match than a view draws; small tables are loaded whole. Curves are linearized and
+coordinates converted to longitude/latitude. Only rows with the first non-null geometry's SRID
+are read; give `"crs"` for SRID 0. Mixed geometry families become separate layers. An integer
+primary key provides stable feature ids; without one (including views), ids are numbered as read.
+
+At database compatibility level 100 or lower, streamed `geography` layers filter their whole-table
+read or sample locally instead of sending a viewport polygon to the server. A small view can
+therefore miss features in a large sampled table. `geometry` layers and higher compatibility
+levels retain server-side viewport filtering.
+
+The provider only reads data; edits are not written back to SQL Server. The password is kept
+until RustGIS closes, never in the project. Secret-named query values such as `pwd` and
+`access_token` are removed from saved connection addresses. `SQLCMDPASSWORD` serves only when adding a database,
+not when reopening a project. A streamed layer reopening sends only credentials given this
+session; Windows integrated sign-in also requires that same address to have been added this
+session. Reconnect with **Add Data › Database…** when needed. SQL queries (`layer.addSql`, the SQL
+pane) do not run on SQL Server connections.
+
 ## Web Data
 
 **Home › Web Data** gathers public web services and catalogs: STAC imagery catalogs, Overture
@@ -285,7 +335,7 @@ places data comes from:
 - **S3**: this session's connections; a click opens the S3 browser on it.
 - **Library**: well-known public sources: OpenStreetMap tiles, EOX Sentinel-2 cloudless and
   NASA GIBS (WMTS), USGS imagery, topographic and hydrography maps (ArcGIS), GEBCO bathymetry
-  (WMS), Earth Search and Planetary Computer (STAC), and the Natural Earth sample layers.
+  (WMS), swisstopo's maps and imagery (geo.admin.ch, WMTS), Earth Search and Planetary Computer (STAC), and the Natural Earth sample layers.
 
 A click on a file, a web address, a tile layer or a sample adds it at once. The lists are kept
 with the app's preferences, never in a project. They hold no secrets: a web address loses its

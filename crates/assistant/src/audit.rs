@@ -204,7 +204,7 @@ fn redact_string(s: &str) -> String {
     if names_password {
         return "[withheld: it gives a password]".to_string();
     }
-    let schemes = ["postgres:", "postgresql:", "pg:", "mysql:", "mariadb:"];
+    let schemes = ["postgres:", "postgresql:", "pg:", "mysql:", "mariadb:", "mssql:"];
     let address = |w: &str| {
         let l = w.to_ascii_lowercase();
         w.contains("://") || schemes.iter().any(|p| l.starts_with(p))

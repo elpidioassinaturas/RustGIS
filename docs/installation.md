@@ -37,6 +37,10 @@ On macOS the command line tool is a separate `rustgis-cli-<version>-macos-<arch>
 the other packages include it (the Windows installers and the MSIX add `rustgis-cli` to every
 new terminal). `SHA256SUMS` lists the checksum of every file.
 
+The AppImages carry update information, so tools such as Gear Lever can update them to the
+latest release. AppImageUpdate, and AppImageLauncher through the AppImageUpdate library, download
+only the parts that changed, with the `.zsync` file published beside each AppImage.
+
 On Windows, `setup.exe` installs for your account in `%LOCALAPPDATA%\Programs\RustGIS` and needs
 no admin rights; the `.msi` installs for every user in `Program Files` and suits managed
 deployment (`msiexec /i RustGIS-<version>-windows-x86_64.msi /qn`). Both add a Start menu

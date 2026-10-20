@@ -222,6 +222,7 @@ fn every_tab_pane_and_dialog_renders() {
     }
     for (id, p) in [
         ("ui.pane.symbology", json!(null)),
+        ("ui.pane.labeling", json!({"layer": "Cities"})),
         ("ui.pane.geoprocessing", json!(null)),
         ("ui.gp.open", json!({"tool": "buffer"})),
         ("ui.pane.history", json!(null)),
@@ -298,7 +299,9 @@ fn a_ribbon_wider_than_the_window_scrolls_with_arrow_buttons() {
 #[test]
 fn a_tab_strip_wider_than_the_window_scrolls_with_arrow_buttons() {
     let mut h = harness();
-    h.set_size(egui::vec2(560.0, 500.0));
+    // Narrower than the tabs' text alone, whatever the system font: at 560 points the tabs just
+    // fit on macOS once its semibold is drawn heavier (#591), so they didn't need to scroll.
+    h.set_size(egui::vec2(440.0, 500.0));
     for _ in 0..4 {
         h.step();
     }
@@ -2094,4 +2097,37 @@ fn help_shortcuts_lists_the_keymap() {
     let undo = if cfg!(target_os = "macos") { "⌘Z" } else { "Ctrl+Z" };
     assert!(h.query_by_label(undo).is_some(), "Help › Shortcuts lists Undo's key");
     assert!(h.query_by_label("Map Tool: Explore").is_some(), "and what Esc does");
+}
+
+#[test]
+fn map_and_layout_tabs_rename_from_their_menus() {
+    let mut h = harness();
+    h.state_mut().run("ui.language", json!({"code":"en"})).unwrap();
+    h.state_mut().run("map.rename", json!({"name": "Tab Map"})).unwrap();
+    h.state_mut().run("layout.new", json!({"name": "Tab Layout"})).unwrap();
+    h.state_mut().run("layout.close", json!(null)).unwrap();
+    for (tab, new) in [("Tab Map", "Renamed Map"), ("Tab Layout", "Renamed Layout")] {
+        for _ in 0..4 {
+            h.step();
+        }
+        // The tab, not the map's name elsewhere in the window.
+        h.get_by(|n| n.role() == egui::accesskit::Role::Button && n.label().as_deref() == Some(tab)).click_secondary();
+        for _ in 0..4 {
+            h.step();
+        }
+        h.get_by_label("Rename…").click();
+        for _ in 0..4 {
+            h.step();
+        }
+        assert_eq!(h.state().dialogs.a, tab);
+        h.state_mut().dialogs.text = new.into();
+        h.get_by_label("Rename").click();
+        for _ in 0..4 {
+            h.step();
+        }
+        assert!(h.state().dialogs.open.is_none(), "{:?}", h.state().dialogs.error);
+    }
+    let p = &h.state().session.project;
+    assert_eq!(p.maps[0].name, "Renamed Map");
+    assert_eq!(p.layouts.last().map(|l| l.name.as_str()), Some("Renamed Layout"));
 }

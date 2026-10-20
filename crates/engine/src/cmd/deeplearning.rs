@@ -150,6 +150,7 @@ fn model_index(s: &Session, p: &Value) -> Result<usize, String> {
 /// Trains a model from the pixels under training polygons.
 fn train(s: &Session, p: &Value) -> Result<DlModel, String> {
     let r = raster(s, p)?;
+    r.require_coordinates()?;
     let bands = bands_param(p, &r)?;
     let tl = ps(p, "training").ok_or("training (a polygon layer) is required")?;
     let l = s
@@ -225,6 +226,7 @@ fn train(s: &Session, p: &Value) -> Result<DlModel, String> {
 
 fn classify(s: &mut Session, p: &Value) -> CmdResult {
     let r = raster(s, p)?;
+    r.require_coordinates()?;
     let (m, trained) = if p.get("training").is_some() {
         (train(s, p)?, true)
     } else {

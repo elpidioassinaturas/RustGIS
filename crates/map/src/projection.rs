@@ -298,8 +298,13 @@ fn angle(def: &str, key: &str) -> Option<f64> {
 /// How a projection is computed: by the PROJ port, or here (world projections it lacks).
 #[derive(Clone)]
 enum Engine {
-    Proj { native: Box<proj4rs::Proj>, wgs84: Box<proj4rs::Proj> },
+    Proj {
+        native: Box<proj4rs::Proj>,
+        wgs84: Box<proj4rs::Proj>,
+    },
     World(crate::world::World),
+    /// Sinusoidal (MODIS's grid, ESRI:54008), which proj4rs lacks.
+    Sinusoidal(rustgis_geom::Sinusoidal),
 }
 
 /// Converts between longitude/latitude and the coordinates of a custom projection.
@@ -378,6 +383,7 @@ impl std::fmt::Debug for Projector {
         let name = match &self.engine {
             Engine::Proj { native, .. } => native.projname(),
             Engine::World(w) => w.kind.proj_name(),
+            Engine::Sinusoidal(_) => "sinu",
         };
         write!(f, "Projector({name})")
     }
@@ -396,6 +402,13 @@ impl Projector {
         let (def, _) = lookup(code)?;
         let preset = parse_preset(code)?.map(|(id, _)| id);
         let proj = def.split_whitespace().find_map(|t| t.strip_prefix("+proj=")).unwrap_or("");
+        // Sinusoidal, computed here on the sphere or ellipsoid the definition gives.
+        if let Some(sinu) = rustgis_geom::Sinusoidal::from_proj4(&def) {
+            let sinu = sinu.map_err(|e| format!("{code}: {e}"))?;
+            let domain = Domain::of(preset, &def, (sinu.lon0, 0.0), 0.0);
+            let lon0 = sinu.lon0;
+            return Ok(Projector { engine: Engine::Sinusoidal(sinu), to_meter: 1.0, domain, lon0, edge: std::sync::OnceLock::new() });
+        }
         if let Some(kind) = crate::world::Kind::from_proj_name(proj) {
             // Computed here: the centre is read from the definition as proj4rs would read it.
             let pm = prime_meridian(&def);
@@ -498,6 +511,7 @@ impl Projector {
         let (native, wgs84) = match &self.engine {
             Engine::Proj { native, wgs84 } => (native, wgs84),
             Engine::World(w) => return w.forward(c),
+            Engine::Sinusoidal(s) => return s.forward(c).filter(|m| m.x.abs() < LIMIT && m.y.abs() < LIMIT),
         };
         let mut p = (c.x.to_radians(), c.y.clamp(-90.0, 90.0).to_radians(), 0.0);
         proj4rs::transform::transform(wgs84, native, &mut p).ok()?;
@@ -531,6 +545,7 @@ impl Projector {
         let (native, wgs84) = match &self.engine {
             Engine::Proj { native, wgs84 } => (native, wgs84),
             Engine::World(w) => return w.inverse(m),
+            Engine::Sinusoidal(s) => return s.inverse(m),
         };
         let mut p = (m.x, m.y, 0.0);
         proj4rs::transform::transform(native, wgs84, &mut p).ok()?;
@@ -744,6 +759,28 @@ mod tests {
         // A conic's area of use follows its parallels: South America, not the far north.
         let p = Projector::new("albers +lon_0=-55 +lat_1=-5 +lat_2=-35").unwrap();
         assert!(p.domain.contains(Coord::new(-50.0, -15.0)) && !p.domain.contains(Coord::new(-55.0, 60.0)));
+    }
+
+    /// Sinusoidal (opengeos/RustGIS#563), which proj4rs lacks: Esri's systems draw, against
+    /// pyproj 3.7.1 (PROJ 9.5.1), and wrap opposite their central meridian.
+    #[test]
+    fn sinusoidal_codes_draw() {
+        let check = |code: &str, (lon, lat): (f64, f64), (x, y): (f64, f64), lon0: f64| {
+            let p = Projector::new(code).unwrap_or_else(|e| panic!("{code}: {e}"));
+            let m = p.forward(Coord::new(lon, lat)).unwrap();
+            assert!((m.x - x).abs() < 0.01 && (m.y - y).abs() < 0.01, "{code}: {m:?}");
+            let back = p.inverse(m).unwrap();
+            assert!((back.x - lon).abs() < 1e-9 && (back.y - lat).abs() < 1e-9, "{code}: {back:?}");
+            assert_eq!(p.domain(), Domain::World, "{code}");
+            assert!((p.central_meridian().unwrap() - lon0).abs() < 1e-9, "{code}");
+            assert_eq!(format!("{p:?}"), "Projector(sinu)");
+        };
+        check("ESRI:54008", (-55.72, -12.55), (-6_055_475.958, -1_387_927.939), 0.0);
+        check("ESRI:102011", (36.82, -1.29), (2_428_379.790, -142_641.058), 15.0);
+        check("esri:53008", (10.75, 59.91), (599_298.080, 6_661_688.055), 0.0);
+        // Off the outline: nothing.
+        let p = Projector::new("ESRI:54008").unwrap();
+        assert!(p.inverse(Coord::new(19_000_000.0, 9_000_000.0)).is_none());
     }
 
     #[test]

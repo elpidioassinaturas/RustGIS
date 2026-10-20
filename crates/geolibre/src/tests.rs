@@ -6,6 +6,8 @@ use rustgis_data::{Feature, Field, FieldType, Geometry};
 /// A 40 × 40 DEM rising to the east (UTM 17N, 30 m pixels) and a point inside it.
 struct Fixture {
     dem: Raster,
+    /// The DEM as a scan: its pixels, with no coordinates.
+    scan: Raster,
     points: Dataset,
     /// The DEM as an embedded GeoTIFF, as a browser upload or a tool's output is kept.
     tiff: Vec<u8>,
@@ -21,7 +23,8 @@ impl Fixture {
         let mut points = Dataset::new("pts", rustgis_data::GeometryType::Point, vec![Field::new("id", FieldType::Integer)]);
         points.features.push(Feature { id: 1, geometry: Some(Geometry::Point(centre)), attrs: vec![rustgis_data::Value::Int(1)] });
         let tiff = rustgis_data::raster::geotiff::write(&dem, 0).unwrap();
-        Fixture { dem, points, tiff }
+        let scan = dem.clone().into_scan().unwrap();
+        Fixture { dem, scan, points, tiff }
     }
 }
 
@@ -35,6 +38,7 @@ impl Inputs for Fixture {
     fn raster(&self, layer: &str) -> Option<RasterInput<'_>> {
         match layer {
             "dem" => Some(RasterInput { raster: &self.dem, path: None, embedded: None }),
+            "scan" => Some(RasterInput { raster: &self.scan, path: None, embedded: None }),
             "embedded" => Some(RasterInput { raster: &self.dem, path: None, embedded: Some(("dem.tif", &self.tiff)) }),
             _ => None,
         }
@@ -231,6 +235,10 @@ fn prepare_and_finish_without_a_runner() {
     assert_eq!(option_value(&json!(3.0), Data::Number), json!(3));
     assert_eq!(option_value(&json!("2.5"), Data::Number), json!(2.5));
     assert!(job.argv("C:\\scratch").iter().any(|a| a == "--output=C:\\scratch\\output.geojson"), "Windows folders");
+    // A scan has no coordinates to hand a tool: refused before anything is staged.
+    let scan = rustgis_analysis::resolve_params(&spec, &json!({"input": "pts", "others": "scan", "distance": "250"})).unwrap();
+    let e = prepare_with(&spec, &meta, &f, &scan).unwrap_err();
+    assert!(e.contains("no coordinates"), "{e}");
 
     // Finish from what a runner returns: the output in UTM, and a JSON results line.
     let utm = Crs::from_epsg(32617).unwrap().transformer().unwrap();

@@ -4,6 +4,37 @@ use rustgis_geom::{Coord, lonlat_to_merc};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[test]
+fn file_geodatabase_names() {
+    assert!(is_gdb_name("/x/roads.gdb") && is_gdb_name("Roads.GDB/") && is_gdb_name(r"C:\x\roads.gdb\"));
+    assert!(!is_gdb_name("roads.gdbtable") && !is_gdb_name("gdb") && !is_gdb_name("roads.shp"));
+    // A file picked inside a geodatabase stands for the geodatabase.
+    assert_eq!(gdb_of(Path::new("/x/roads.gdb/a00000001.gdbtable")), Some(Path::new("/x/roads.gdb")));
+    assert_eq!(gdb_of(Path::new("/x/roads.gdb/gdb")), Some(Path::new("/x/roads.gdb")));
+    assert_eq!(gdb_of(Path::new("/x/roads.gdb/a0000000A.spx")), Some(Path::new("/x/roads.gdb")));
+    assert_eq!(gdb_of(Path::new("/x/roads.gdb/a00000004.CatItemsByType.atx")), Some(Path::new("/x/roads.gdb")));
+    assert_eq!(gdb_of(Path::new("/x/roads.gdb/timestamps")), Some(Path::new("/x/roads.gdb")));
+    // A file named like a table, but of another kind, is itself.
+    assert_eq!(gdb_of(Path::new("/x/roads.gdb/a00000001.csv")), None);
+    assert_eq!(gdb_of(Path::new("/x/roads.gdb/a0000000b.bak")), None);
+    // Other files kept in the folder are themselves.
+    assert_eq!(gdb_of(Path::new("/x/roads.gdb/readme.txt")), None);
+    assert_eq!(gdb_of(Path::new("/x/roads.gdb/export.csv")), None);
+    assert_eq!(gdb_of(Path::new("/x/roads.gdb/a1.gdbtable")), None);
+    assert_eq!(gdb_of(Path::new("/x/roads.gdb/x0000000a.gdbtable")), None);
+    assert_eq!(gdb_of(Path::new("/x/roads.gdb")), None);
+    assert_eq!(gdb_of(Path::new("/x/roads.gdb/")), None);
+    assert_eq!(gdb_of(Path::new("/x/roads.shp")), None);
+    assert_eq!(gdb_of(Path::new("a00000001.gdbtable")), None);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn tls_provider_builds_client_config() {
+    tls_provider();
+    let _ = rustls::ClientConfig::builder();
+}
+
 /// 30 × 20 points over the world, named and numbered.
 fn points() -> Vec<(Coord, String, i64)> {
     let mut v = Vec::new();

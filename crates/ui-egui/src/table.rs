@@ -138,7 +138,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
                                 );
                                 if r.on_hover_text(crate::i18n::fmt(
                                     "{field} ({type}) · click to sort",
-                                    &[("field", &fd.name), ("type", tl!(fd.ty.label()))],
+                                    &[("field", &fd.name), ("type", tl_raw!(fd.ty.label()))],
                                 ))
                                 .clicked()
                                 {

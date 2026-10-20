@@ -311,7 +311,7 @@ pub fn layout(bytes: &Sparse) -> Result<Parse> {
 fn read_layout(r: Sparse) -> Result<Parse> {
     let mut dec = Decoder::new(super::geotiff::reader(r).map_err(err)?).map_err(err)?.with_limits(limits());
     let Some(geo) = super::geotiff::cog_geo(&mut dec)? else {
-        return Ok(Parse::NotTiled("a rotated image is read whole".into()));
+        return Ok(Parse::NotTiled("a rotated image, or one without coordinates, is read whole".into()));
     };
     let ct = dec.colortype().map_err(err)?;
     let (bands, color) = match ct {

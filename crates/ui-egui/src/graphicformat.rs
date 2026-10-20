@@ -100,6 +100,8 @@ pub fn show(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) {
     let current = graphics::label(ds, row).unwrap_or_default().to_string();
     let (mut size, mut color, mut bold) =
         (f64::from(graphics::font_size(ds, row)), crate::theme::c32(graphics::text_color(ds, row)), graphics::bold(ds, row));
+    let (mut italic, mut align, mut spacing) =
+        (graphics::italic(ds, row), graphics::align(ds, row), f64::from(graphics::letter_spacing(ds, row)));
     let k = key(app, (layer, row));
     let opened = app.session.opened;
     app.graphic_format.drawn = Some(k);
@@ -111,14 +113,22 @@ pub fn show(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) {
             current.clone()
         }
     };
-    let heading = crate::i18n::fmt("Map: {kind}", &[("kind", tl!("Text"))]);
+    let heading = crate::i18n::fmt("Map: {kind}", &[("kind", tl_raw!("Text"))]);
     ui.label(egui::RichText::new(heading).font(crate::theme::semibold(14.0)));
     ui.separator();
     let select = app.graphic_format.select.take_if(|s| *s == k).is_some();
-    let fields = crate::textform::Fields { text: &mut text, size: &mut size, color: Some(&mut color), bold: Some(&mut bold), select };
-    let settled =
-        crate::textform::section(ui, "Text", |ui| crate::textform::show(ui, ("graphic_format", k), &[graphics::TOKENS], fields, |_| {}))
-            .unwrap_or_default();
+    let fields = crate::textform::Fields {
+        text: &mut text,
+        size: &mut size,
+        color: Some(&mut color),
+        bold: Some(&mut bold),
+        italic: Some(&mut italic),
+        align: Some(&mut align),
+        letter_spacing: Some(&mut spacing),
+        select,
+    };
+    let settled = crate::textform::section(ui, "Text", |ui| crate::textform::show(ui, ("graphic_format", k), &[graphics::TOKENS], fields))
+        .unwrap_or_default();
     let save = |app: &mut RustGisApp, change: serde_json::Value| {
         let mut p = json!({"layer": layer, "row": row});
         if let (Some(p), Some(c)) = (p.as_object_mut(), change.as_object()) {
@@ -139,6 +149,15 @@ pub fn show(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) {
     }
     if settled.bold {
         save(app, json!({"bold": bold}));
+    }
+    if settled.italic {
+        save(app, json!({"italic": italic}));
+    }
+    if settled.align {
+        save(app, json!({"align": align.code()}));
+    }
+    if settled.letter_spacing {
+        save(app, json!({"letterSpacing": spacing}));
     }
 }
 
@@ -166,8 +185,9 @@ pub(crate) fn save_draft(app: &mut RustGisApp) {
 mod tests {
     use super::*;
     use crate::RightPane::Format;
-    use egui::accesskit::Role;
-    use egui_kittest::kittest::Queryable;
+    use egui::accesskit::{Action, ActionData, ActionRequest, Role};
+    use egui_kittest::kittest::{NodeT, Queryable};
+    use rustgis_engine::map::layout::TextAlign;
 
     fn harness(app: RustGisApp) -> egui_kittest::Harness<'static, RustGisApp> {
         let mut fonts = false;
@@ -208,6 +228,25 @@ mod tests {
         h.run_steps(2);
         assert!(graphics::bold(&ds(&h), row));
         assert_eq!(h.state().session.undo_label(), Some("Edit Graphic"));
+        // Italic, alignment and letter spacing too, as a layout's text has them (#535), each saved.
+        h.get_by_role_and_label(Role::CheckBox, "Italic").click();
+        h.run_steps(2);
+        assert!(graphics::italic(&ds(&h), row));
+        h.get_by_role(Role::ComboBox).click();
+        h.run_steps(2);
+        h.get_by_role_and_label(Role::Button, "Center").click();
+        h.run_steps(2);
+        assert_eq!(graphics::align(&ds(&h), row), TextAlign::Center);
+        // Set as assistive technology sets a number.
+        let (node, tree) = h.get_by_role_and_label(Role::SpinButton, "Letter spacing").accesskit_node().locate();
+        h.event(egui::Event::AccessKitActionRequest(ActionRequest {
+            action: Action::SetValue,
+            target_tree: tree,
+            target_node: node,
+            data: Some(ActionData::NumericValue(3.5)),
+        }));
+        h.run_steps(3);
+        assert_eq!(graphics::letter_spacing(&ds(&h), row), 3.5);
         // Typed, then the pane closed: the text is saved, the text still selected.
         h.query_all_by_role(Role::MultilineTextInput).find(|n| n.value().as_deref() == Some("Old")).unwrap().focus();
         h.run_steps(2);

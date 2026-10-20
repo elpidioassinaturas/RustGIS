@@ -122,9 +122,9 @@ pub fn generation() -> u64 {
     GENERATION.load(Ordering::Relaxed)
 }
 
-/// How many fetches are under way.
+/// How many fetches are under way. Once a fetch no longer counts, its [`generation`] shows.
 pub fn in_flight() -> usize {
-    IN_FLIGHT.load(Ordering::Relaxed)
+    IN_FLIGHT.load(Ordering::Acquire)
 }
 
 /// What the cache holds for `url`, fetching it when it holds nothing (or a failure old enough
@@ -171,6 +171,8 @@ pub fn clear() {
     drop(c);
     // Styles, TileJSON documents and PMTiles archives are read again too.
     crate::source::forget();
+    crate::picture::forget();
+    crate::draw::forget_boxes();
     crate::sprite::forget();
     crate::pmtiles::forget();
     crate::mbtiles::forget();
@@ -475,8 +477,9 @@ pub(crate) fn notify() {
 
 /// A fetch is over: the map can draw again.
 fn finished() {
-    IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    // The generation first: whoever sees the fetch done sees what it brought.
     GENERATION.fetch_add(1, Ordering::Relaxed);
+    IN_FLIGHT.fetch_sub(1, Ordering::Release);
     let w = waker().lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(w) = w {
         w();

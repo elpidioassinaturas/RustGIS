@@ -35,6 +35,8 @@ struct Geo {
     nodata: Option<f64>,
     /// Why the file's own projection couldn't be read, if it has one.
     custom_error: Option<String>,
+    /// `false` for a TIFF with no GeoTIFF tags at all: `transform` is then a stand-in.
+    referenced: bool,
 }
 
 fn geo_tags<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Geo> {
@@ -69,6 +71,9 @@ fn geo_tags<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Geo> {
         (code, code.and_then(Crs::from_epsg))
     };
 
+    // A TIFF with none of the GeoTIFF tags is a scan; one with only some of them is damaged.
+    let tagless = keys.is_empty() && [33550u16, 33922, 34264].iter().all(|t| dec.find_tag(Tag::Unknown(*t)).ok().flatten().is_none());
+    let mut referenced = true;
     let mut affine = None;
     let transform = if let Some(m) = doubles(dec, 34264).filter(|m| m.len() >= 8) {
         let at = |i: usize| m.get(i).copied().unwrap_or(0.0);
@@ -77,11 +82,18 @@ fn geo_tags<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Geo> {
         }
         GeoTransform { origin_x: at(3), origin_y: at(7), pixel_width: at(0), pixel_height: at(5) }
     } else {
-        let scale = doubles(dec, 33550).filter(|s| s.len() >= 2).ok_or_else(|| err("the file isn't georeferenced"))?;
-        let tie = doubles(dec, 33922).filter(|t| t.len() >= 6).ok_or_else(|| err("the file isn't georeferenced"))?;
-        let s = |i: usize| scale.get(i).copied().unwrap_or(0.0);
-        let t = |i: usize| tie.get(i).copied().unwrap_or(0.0);
-        GeoTransform { origin_x: t(3) - t(0) * s(0), origin_y: t(4) + t(1) * s(1), pixel_width: s(0), pixel_height: -s(1) }
+        match (doubles(dec, 33550).filter(|s| s.len() >= 2), doubles(dec, 33922).filter(|t| t.len() >= 6)) {
+            (Some(scale), Some(tie)) => {
+                let s = |i: usize| scale.get(i).copied().unwrap_or(0.0);
+                let t = |i: usize| tie.get(i).copied().unwrap_or(0.0);
+                GeoTransform { origin_x: t(3) - t(0) * s(0), origin_y: t(4) + t(1) * s(1), pixel_width: s(0), pixel_height: -s(1) }
+            }
+            _ if tagless => {
+                referenced = false;
+                GeoTransform { origin_x: 0.0, origin_y: 0.0, pixel_width: 1.0, pixel_height: -1.0 }
+            }
+            _ => return Err(err("the file isn't georeferenced")),
+        }
     };
     // A point's value is at a pixel's centre: the image starts half a pixel up and left of it.
     let affine =
@@ -105,21 +117,22 @@ fn geo_tags<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Geo> {
         .flatten()
         .and_then(|v| v.into_string().ok())
         .and_then(|s| s.trim_matches(|c: char| c == '\0' || c.is_whitespace()).parse::<f64>().ok());
-    Ok(Geo { transform, affine, crs, unknown_epsg: code.filter(|_| crs.is_none()), geographic_model, nodata, custom_error })
+    Ok(Geo { transform, affine, crs, unknown_epsg: code.filter(|_| crs.is_none()), geographic_model, nodata, custom_error, referenced })
 }
 
 /// A cloud-optimised GeoTIFF's coordinate system, georeferencing and no-data value, from its first
-/// image (as [`read`] finds them); `None` for a rotated or skewed image, which is read whole.
+/// image (as [`read`] finds them); `None` for a rotated or skewed image, or one with no GeoTIFF
+/// tags (a scan), which is read whole.
 pub(crate) fn cog_geo<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Option<(Crs, GeoTransform, Option<f64>)>> {
     let geo = geo_tags(dec)?;
-    if geo.affine.is_some() {
+    if geo.affine.is_some() || !geo.referenced {
         return Ok(None);
     }
     let crs = match geo.crs {
         Some(c) => c,
         None if geo.geographic_model => Crs::LonLat,
         None => match geo.unknown_epsg {
-            Some(code) => return Err(err(format!("the coordinate system EPSG:{code} isn't supported"))),
+            Some(code) => return Err(err(super::crs::unusable_epsg(code))),
             None => {
                 return Err(match geo.custom_error {
                     Some(e) => DataError::Format(e),
@@ -243,6 +256,8 @@ fn proj4_of_keys(keys: &[u16], doubles: &[f64], ascii: &str) -> Result<(String, 
         }
         Some(16) => format!("+proj=sterea +lat_0={lat0} +lon_0={lon0} +k_0={k0} +x_0={x0} +y_0={y0}"),
         Some(17) => format!("+proj=eqc +lat_ts={lat1} +lon_0={lon0} +x_0={x0} +y_0={y0}"),
+        // MODIS's grid; RustGIS computes it (`rustgis_geom::Sinusoidal`).
+        Some(24) => format!("+proj=sinu +lon_0={lon0} +x_0={x0} +y_0={y0}"),
         Some(28) => format!("+proj=cea +lat_ts={lat1} +lon_0={lon0} +x_0={x0} +y_0={y0}"),
         Some(c) => return Err(err(format!("the file's own projection (coordinate transformation {c}) isn't supported"))),
         None => return Err(err("the file's own projection isn't described in its keys")),
@@ -265,6 +280,20 @@ fn proj4_of_keys(keys: &[u16], doubles: &[f64], ascii: &str) -> Result<(String, 
 /// Whether two PROJ definitions place the same points: points around the projection's origin,
 /// unprojected by both, land within a millimetre-scale tolerance.
 fn same_projection(a: &str, b: &str) -> bool {
+    let offsets = [(0.0, 0.0), (100_000.0, 50_000.0), (-250_000.0, 150_000.0), (300_000.0, -200_000.0), (-50_000.0, -400_000.0)];
+    // Sinusoidal, which proj4rs lacks, by its own inverse; one sinusoidal and one not differ.
+    match (rustgis_geom::Sinusoidal::from_proj4(a), rustgis_geom::Sinusoidal::from_proj4(b)) {
+        (Some(Ok(sa)), Some(Ok(sb))) => {
+            return offsets.iter().all(|(dx, dy)| {
+                // The same map point in both, so a different false origin is a different projection.
+                let m = rustgis_geom::Coord::new(sa.x0 + dx, sa.y0 + dy);
+                // Degrees: 1e-7 is about a centimetre.
+                matches!((sa.inverse(m), sb.inverse(m)), (Some(p), Some(q)) if (p.x - q.x).abs() < 1e-7 && (p.y - q.y).abs() < 1e-7)
+            });
+        }
+        (None, None) => {}
+        _ => return false,
+    }
     let (Ok(pa), Ok(pb), Ok(ll)) = (
         proj4rs::Proj::from_proj_string(a),
         proj4rs::Proj::from_proj_string(b),
@@ -272,7 +301,6 @@ fn same_projection(a: &str, b: &str) -> bool {
     ) else {
         return false;
     };
-    let offsets = [(0.0, 0.0), (100_000.0, 50_000.0), (-250_000.0, 150_000.0), (300_000.0, -200_000.0), (-50_000.0, -400_000.0)];
     offsets.iter().all(|(dx, dy)| {
         let (mut p, mut q) = ((*dx, *dy, 0.0), (*dx, *dy, 0.0));
         let ok = proj4rs::transform::transform(&pa, &ll, &mut p).is_ok() && proj4rs::transform::transform(&pb, &ll, &mut q).is_ok();
@@ -353,6 +381,8 @@ fn keys_from_proj4(proj4: &str, label: &str) -> Option<(Vec<u16>, Vec<f64>, Stri
         "sterea" => (16, vec![(3080, lon0), (3081, lat0), (3082, x0), (3083, y0), (3092, k0)]),
         "eqc" => (17, vec![(3078, num("lat_ts").unwrap_or(0.0)), (3080, lon0), (3082, x0), (3083, y0)]),
         "cea" => (28, vec![(3078, num("lat_ts").unwrap_or(0.0)), (3080, lon0), (3082, x0), (3083, y0)]),
+        // Its longitude is the projection centre's (3088), as GDAL and MODIS write it.
+        "sinu" => (24, vec![(3082, x0), (3083, y0), (3088, lon0)]),
         _ => return None,
     };
     // The earth: WGS 84 by code, any other by its axes.
@@ -981,6 +1011,13 @@ fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<Opener<'_>>)
         decimate(&mut dec, iw, ih, nbands, planar, decimate_by, open)?
     };
 
+    // A scan keeps a stand-in transform, sized to the pixels read.
+    if !geo.referenced {
+        let mut r = Raster::new(name, w, h, bands, super::unreferenced(w, h), Crs::LonLat, geo.nodata, color, data_type)?;
+        r.georeferenced = false;
+        r.overview = overview;
+        return Ok(r);
+    }
     let mut transform = geo.transform;
     // How many full-image pixels one pixel read spans, across and down.
     let (sx, sy) = if decimate_by > 1 {
@@ -1009,7 +1046,7 @@ fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<Opener<'_>>)
             let degrees = [transform.origin_x, right].iter().all(|x| (-180.0..=180.0).contains(x))
                 && [transform.origin_y, bottom].iter().all(|y| (-90.0..=90.0).contains(y));
             if let Some(code) = geo.unknown_epsg {
-                return Err(err(format!("the coordinate system EPSG:{code} isn't supported")));
+                return Err(err(super::crs::unusable_epsg(code)));
             }
             if let Some(e) = &geo.custom_error
                 && !degrees
@@ -1034,6 +1071,8 @@ fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<Opener<'_>>)
 /// raster always writes its colour bands, as its 8-bit form did before.
 pub fn write(r: &Raster, band: usize) -> Result<Vec<u8>> {
     use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, colortype};
+    // A scan's place is only where it was laid on the view: not coordinates to write into a file.
+    r.require_coordinates().map_err(err)?;
     let mut out = std::io::Cursor::new(Vec::new());
     let mut enc = TiffEncoder::new(&mut out).map_err(err)?.with_compression(Compression::Deflate(DeflateLevel::Balanced));
     let gt = r.transform;
@@ -1271,6 +1310,21 @@ mod tests {
         assert_eq!(back.data_type, "UInt8");
     }
 
+    /// An Equi7 tile (a Sentinel-1 product on TU Wien's grid, say) names its system by its EPSG
+    /// code, 27707 for South America: read as that system, not refused.
+    #[test]
+    fn an_equi7_tile_is_read() {
+        let gt = GeoTransform { origin_x: 8_400_000.0, origin_y: 5_400_000.0, pixel_width: 20.0, pixel_height: -20.0 };
+        let r =
+            Raster::new("e7", 2, 2, vec![vec![1.0, 2.0, 3.0, 4.0]], gt, Crs::from_epsg(27707).unwrap(), None, ColorHint::Gray, "Float32")
+                .unwrap();
+        let back = read(std::io::Cursor::new(write(&r, 0).unwrap()), "back").unwrap();
+        assert_eq!(back.crs.epsg(), 27707);
+        // Brasília is in it: about 8,609 km east and 5,356 km north of the grid's corner.
+        let at = back.crs.transformer().unwrap().to_lonlat(rustgis_geom::Coord::new(8608845.8731, 5356292.7056)).unwrap();
+        assert!((at.x + 47.88).abs() < 1e-6 && (at.y + 15.79).abs() < 1e-6, "{at:?}");
+    }
+
     #[test]
     fn rgb_export_keeps_no_data() {
         let gt = GeoTransform { origin_x: 0.0, origin_y: 2.0, pixel_width: 1.0, pixel_height: -1.0 };
@@ -1336,12 +1390,12 @@ mod tests {
     }
 
     #[test]
-    fn plain_tiff_is_not_georeferenced() {
+    fn plain_tiff_opens_as_a_scan() {
         use tiff::encoder::{TiffEncoder, colortype};
         let mut out = std::io::Cursor::new(Vec::new());
         TiffEncoder::new(&mut out).unwrap().write_image::<colortype::Gray8>(2, 2, &[1, 2, 3, 4]).unwrap();
-        let e = read(std::io::Cursor::new(out.into_inner()), "x").unwrap_err();
-        assert!(e.to_string().contains("georeferenced"), "{e}");
+        let r = read(std::io::Cursor::new(out.into_inner()), "x").unwrap();
+        assert_eq!((r.width, r.height, r.georeferenced), (2, 2, false));
     }
 
     #[test]
@@ -1859,6 +1913,56 @@ mod tests {
         let mut odd = keys;
         odd[27] = 99; // ProjCoordTransGeoKey
         assert!(custom_crs(&odd, &doubles, "").is_err());
+    }
+
+    /// MODIS's sinusoidal grid (coordinate transformation 24), as a MOD13Q1 tile's GeoKeys give
+    /// it: h12v10, whose corner is at 60.925597° W, 10° S (pyproj 3.7.1).
+    #[test]
+    fn modis_sinusoidal_is_read_and_written_back() {
+        let keys = [
+            1u16, 1, 0, 14, 1024, 0, 1, 1, 1025, 0, 1, 1, 2048, 0, 1, 32767, 2050, 0, 1, 32767, 2054, 0, 1, 9102, 2056, 0, 1, 32767, 2057,
+            34736, 1, 0, 2058, 34736, 1, 1, 3072, 0, 1, 32767, 3074, 0, 1, 32767, 3075, 0, 1, 24, 3076, 0, 1, 9001, 3082, 34736, 1, 2,
+            3083, 34736, 1, 3, 3088, 34736, 1, 4,
+        ];
+        let doubles = [6_371_007.181f64, 6_371_007.181, 0.0, 0.0, 0.0];
+        let px = 231.656_358_263_958_25;
+        let mut tiff = Vec::new();
+        {
+            use tiff::encoder::{TiffEncoder, colortype};
+            let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut tiff)).unwrap();
+            let mut img = enc.new_image::<colortype::Gray32Float>(2, 2).unwrap();
+            let e = img.encoder();
+            e.write_tag(Tag::ModelPixelScaleTag, &[px, px, 0.0][..]).unwrap();
+            e.write_tag(Tag::ModelTiepointTag, &[0.0f64, 0.0, 0.0, -6_671_703.118, -1_111_950.519_667, 0.0][..]).unwrap();
+            e.write_tag(Tag::GeoKeyDirectoryTag, &keys[..]).unwrap();
+            e.write_tag(Tag::Unknown(34736), &doubles[..]).unwrap();
+            img.write_data(&[1.0f32, 2.0, 3.0, 4.0]).unwrap();
+        }
+        let r = read(std::io::Cursor::new(&tiff), "modis").unwrap();
+        let p = r.crs.custom_def().unwrap().proj4.clone();
+        assert!(p.contains("+proj=sinu") && p.contains("+a=6371007.181 +b=6371007.181"), "{p}");
+        let t = r.crs.transformer().unwrap();
+        let ll = t.to_lonlat(rustgis_geom::Coord::new(-6_671_703.118, -1_111_950.519_667)).unwrap();
+        assert!((ll.x + 60.925_597).abs() < 1e-6 && (ll.y + 10.0).abs() < 1e-9, "{ll:?}");
+        let m = t.from_lonlat(ll).unwrap();
+        assert!((m.x + 6_671_703.118).abs() < 1e-3 && (m.y + 1_111_950.519_667).abs() < 1e-3, "{m:?}");
+        // Written and read again, the same system; saved, its definition.
+        let back = read(std::io::Cursor::new(write(&r, 0).unwrap()), "back").unwrap();
+        assert_eq!(back.crs.custom_def().unwrap().proj4, p);
+        let again: Crs = serde_json::from_str(&serde_json::to_string(&r.crs).unwrap()).unwrap();
+        assert_eq!(again.custom_def().unwrap().proj4, p);
+        // ESRI:54008's definition, on WGS 84, is written as keys too.
+        let (k, d, a) = keys_from_proj4("+proj=sinu +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs", "World_Sinusoidal").unwrap();
+        assert!(custom_crs(&k, &d, &a).unwrap().custom_def().unwrap().proj4.starts_with("+proj=sinu"));
+        // A central meridian and false origin away from 0 (ESRI:102011, Africa Sinusoidal, at 15°)
+        // go through the keys and back as the same projection.
+        let africa = "+proj=sinu +lon_0=15 +x_0=200000 +y_0=-100000 +datum=WGS84 +units=m +no_defs";
+        let (k, d, a) = keys_from_proj4(africa, "Africa_Sinusoidal").unwrap();
+        let back = custom_crs(&k, &d, &a).unwrap().custom_def().unwrap().proj4.clone();
+        assert!(same_projection(africa, &back), "{back}");
+        // A false easting or northing of its own is another projection.
+        assert!(!same_projection(africa, "+proj=sinu +lon_0=15 +x_0=0 +y_0=-100000 +datum=WGS84 +units=m +no_defs"));
+        assert!(!same_projection(africa, "+proj=sinu +lon_0=15 +x_0=200000 +y_0=0 +datum=WGS84 +units=m +no_defs"));
     }
 
     /// A tiled, LZW-compressed Float32 GeoTIFF, `w × h` in `tile`-pixel tiles, written as GDAL
