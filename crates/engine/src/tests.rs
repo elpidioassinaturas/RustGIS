@@ -6519,6 +6519,37 @@ fn a_trend_over_a_data_cube() {
     no_date[1] = "plain".into();
     let e = s.run("cube.trend", &json!({"layers": no_date})).unwrap_err();
     assert!(e.contains("no date in the name of plain"), "{e}");
+    // Seasons from the calendar: the 1st of every month is its month in every year, leap years
+    // included, and a 16-day composite on the same day each year keeps its season.
+    use crate::cmd::cube::season_of;
+    let day = |d: &str| rustgis_data::time::parse_text(d).unwrap();
+    for y in 2000..2010 {
+        for m in 1..=12 {
+            assert_eq!(season_of(day(&format!("{y}-{m:02}-01")), 12), m - 1, "{y}-{m}");
+        }
+        assert_eq!(season_of(day(&format!("{y}-01-17")), 23), 1, "{y}");
+        assert_eq!(season_of(day(&format!("{y}-12-19")), 23), 22, "{y}");
+    }
+    // A monthly cube dated on the 1st, with a yearly cycle and a rise: the seasonal test finds it
+    // per year and per decade alike.
+    let mut monthly = Vec::new();
+    for y in 2015..2021 {
+        for m in 1..=12 {
+            let k = (y - 2015) * 12 + (m - 1);
+            let v = 0.5 + 0.2 * (std::f32::consts::TAU * (m - 1) as f32 / 12.0).sin() + 0.01 * k as f32 / 12.0;
+            let name = format!("evi_{y}-{m:02}-01");
+            let r = Raster::new(&name, 1, 1, vec![vec![v]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+            let bytes = geotiff::write(&r, 0).unwrap();
+            crate::cmd::raster::add_raster(&mut s, &name, rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)).unwrap();
+            monthly.push(name);
+        }
+    }
+    for (per, want) in [("year", 0.01), ("decade", 0.1)] {
+        let r = s.run("cube.trend", &json!({"layers": monthly, "test": "seasonal", "per": per})).unwrap();
+        let slope = value(&s, &r["layers"][0], 0);
+        assert!((slope - want).abs() < want * 0.05, "{per}: {slope}");
+        assert!(value(&s, &r["layers"][2], 0) < 0.01, "{per}: significant");
+    }
 }
 
 /// A Zarr variable follows the time slider (#554): the slice drawn is the step the slider is at,

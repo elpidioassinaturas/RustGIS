@@ -79,8 +79,9 @@ pub struct Trend {
 
 /// The fewest values a trend is worked out from.
 pub const MIN_VALUES: usize = 4;
-/// The most: Sen's slope compares every two, so this bounds its memory (about 400 MB).
-pub const MAX_VALUES: usize = 10_000;
+/// The most: Sen's slope compares every two, so this bounds its memory (about 400 MB on the
+/// desktop; 2,000 values, 16 MB, in the browser's smaller memory).
+pub const MAX_VALUES: usize = if cfg!(target_arch = "wasm32") { 2_000 } else { 10_000 };
 
 /// The trend of the values `y` at times `t` (the same length; missing values skipped), or `None`
 /// when fewer than [`MIN_VALUES`] or more than [`MAX_VALUES`] are left (or, for the seasonal
@@ -161,10 +162,31 @@ fn intercept(t: &[f64], y: &[f64], slope: f64) -> Option<f64> {
 fn seasonal(t: &[f64], y: &[f64], seasons: u32) -> Option<Trend> {
     let m = seasons.max(1) as usize;
     // The season of a time: its place within its unit (year), in `m` equal parts.
-    let season = |t: f64| (((t - t.floor()) * m as f64).floor() as usize).min(m - 1);
+    let season: Vec<usize> = t.iter().map(|t| (((t - t.floor()) * m as f64).floor() as usize).min(m - 1)).collect();
+    seasonal_by(t, y, &season)
+}
+
+/// The seasonal test with each value's season given (its month, or its part of the year as the
+/// calendar has it): what a series of real dates should use, since a time's fraction of a year
+/// drifts against the calendar from year to year. Missing values are skipped as by [`trend`];
+/// `None` as it gives one.
+pub fn trend_seasonal(t: &[f64], y: &[f64], season: &[usize], alpha: f64) -> Option<Trend> {
+    let kept: Vec<(f64, f64, usize)> =
+        t.iter().zip(y).zip(season).filter(|((t, y), _)| t.is_finite() && y.is_finite()).map(|((t, y), s)| (*t, *y, *s)).collect();
+    if !(MIN_VALUES..=MAX_VALUES).contains(&kept.len()) || !(alpha > 0.0 && alpha < 1.0) {
+        return None;
+    }
+    let t: Vec<f64> = kept.iter().map(|k| k.0).collect();
+    let y: Vec<f64> = kept.iter().map(|k| k.1).collect();
+    let s: Vec<usize> = kept.iter().map(|k| k.2).collect();
+    seasonal_by(&t, &y, &s)
+}
+
+fn seasonal_by(t: &[f64], y: &[f64], season: &[usize]) -> Option<Trend> {
+    let m = season.iter().copied().max()? + 1;
     let mut by: Vec<(Vec<f64>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); m];
-    for (t, y) in t.iter().zip(y) {
-        let b = &mut by[season(*t)];
+    for ((t, y), k) in t.iter().zip(y).zip(season) {
+        let Some(b) = by.get_mut(*k) else { continue };
         b.0.push(*t);
         b.1.push(*y);
     }

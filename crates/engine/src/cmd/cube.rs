@@ -29,8 +29,8 @@ pub fn commands() -> Vec<C> {
 /// The most cell values a cube is read into at once (cells × dates): 64 million, 256 MB.
 pub const MAX_VALUES: u64 = 64_000_000;
 /// The most pairs of dates a trend compares in all (cells × dates² ⁄ 2), which bounds the time
-/// Sen's slope takes.
-pub const MAX_PAIRS: u64 = 20_000_000_000;
+/// Sen's slope takes: far fewer in the browser, which works them out on one thread.
+pub const MAX_PAIRS: u64 = if cfg!(target_arch = "wasm32") { 200_000_000 } else { 20_000_000_000 };
 /// The most dates a cube is read at.
 pub const MAX_DATES: usize = 2_000;
 
@@ -206,9 +206,9 @@ pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
         }
         return Ok(Box::new(Stack::new(items, common_label(&label))));
     }
-    let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
         let zarr_layer = !given("path") && !given("url") && {
             let id = s.layer_id(p)?;
             s.map().layer(id).and_then(|l| l.raster.as_ref()).is_some_and(|r| r.time_zarr.is_some() || r.subdataset.is_some())
@@ -256,6 +256,26 @@ fn common_label(name: &str) -> String {
     let cut: String = name.chars().take_while(|c| !c.is_ascii_digit()).collect();
     let cut = cut.trim_end_matches(['_', '-', ' ', '.', 'A']);
     if cut.is_empty() { name.to_string() } else { cut.to_string() }
+}
+
+/// A date's season among `m` in its calendar year (UTC): its month for 12, otherwise its part of
+/// the year by day, so a composite on the same day each year (16-day ones, 23 a year) is always
+/// in the same season, leap years included.
+pub fn season_of(ms: f64, m: u32) -> usize {
+    let m = m.max(1) as usize;
+    let month = rustgis_data::time::format(ms, "MM").parse::<usize>().unwrap_or(1);
+    if m == 12 {
+        return month.clamp(1, 12) - 1;
+    }
+    let year = rustgis_data::time::format(ms, "YYYY");
+    let start = rustgis_data::time::parse_text(&format!("{year}-01-01")).unwrap_or(ms);
+    let next = year
+        .parse::<i64>()
+        .ok()
+        .and_then(|y| rustgis_data::time::parse_text(&format!("{:04}-01-01", y + 1)))
+        .unwrap_or(start + 365.0 * 86_400_000.0);
+    let fraction = ((ms - start) / (next - start).max(1.0)).clamp(0.0, 1.0);
+    ((fraction * m as f64).floor() as usize).min(m - 1)
 }
 
 /// The dates of a cube a run takes: those between `start` and `end` and in `months`, or, with
@@ -377,6 +397,11 @@ impl TrendRun {
         // Times in the slope's unit.
         let year = 365.2425 * 86_400_000.0 * self.per;
         let times: Vec<f64> = self.steps.iter().map(|i| self.cube.dates()[*i] / year).collect();
+        // The seasonal test's seasons, from each date's place in its calendar year.
+        let seasons: Vec<usize> = match self.test {
+            Test::Seasonal(m) => self.steps.iter().map(|i| season_of(self.cube.dates()[*i], m)).collect(),
+            _ => Vec::new(),
+        };
         let need = self.min_valid.unwrap_or((n / 2).max(trend::MIN_VALUES)).max(trend::MIN_VALUES);
         let mut out = vec![f32::NAN; cells * OUTPUTS];
         let stopped = AtomicBool::new(false);
@@ -394,7 +419,11 @@ impl TrendRun {
                 if vals.iter().filter(|v| v.is_finite()).count() < need {
                     continue;
                 }
-                if let Some(t) = trend::trend(&times, &ys, self.test, self.alpha) {
+                let found = match self.test {
+                    Test::Seasonal(_) => trend::trend_seasonal(&times, &ys, &seasons, self.alpha),
+                    test => trend::trend(&times, &ys, test, self.alpha),
+                };
+                if let Some(t) = found {
                     o[0] = t.slope as f32;
                     o[1] = t.z as f32;
                     o[2] = t.p as f32;
