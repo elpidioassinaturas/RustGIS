@@ -481,8 +481,8 @@ in it. Moving or playing the slider reads that step's slice (only its chunks), k
 eight read. A web store's next two steps are read ahead in the background. The stretch is fixed at
 the first slice's range, so a colour means the same value at every step, and **Export** writes an
 animation of it. An axis longer than the slider's 20,000 steps (hourly ERA5) needs `"start"` and
-`"end"` to take a period. The project keeps such a layer by its store and selection, not as a slice,
-and reads the slider's step again when it opens.
+`"end"` to take a period. The project keeps such a layer by its store (a folder or a web address)
+and selection, not as a slice, and reads the slider's step again when it opens.
 
 ```sh
 rustgis-cli run --cmd 'layer.addZarr={"path":"air.zarr","variable":"t","time":true}' --cmd 'time.export={"path":"t.gif"}'
@@ -514,9 +514,10 @@ project as a GeoTIFF.
 rustgis-cli run --cmd 'zarr.reduce={"path":"air.zarr","variable":"t","stat":"mean","months":[12,1,2]}'
 ```
 
-A store in a folder is saved in the project by its folder and slice (`2m_temperature[time=539100]`)
-and read again when the project opens, as Add Data on the folder does (its first variable); a
-store by web address is kept in the project as the slice read. `?zarr=<address>` in a web app link
+A single step (a layer that doesn't follow the slider) from a store in a folder is saved in the
+project by its folder and slice (`2m_temperature[time=539100]`) and read again when the project
+opens, as Add Data on the folder does (its first variable); a single step from a store by web
+address is kept in the project as the slice read. `?zarr=<address>` in a web app link
 opens the dialog on a store.
 
 ## Project items
