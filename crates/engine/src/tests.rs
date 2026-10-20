@@ -6154,6 +6154,23 @@ fn a_stac_data_cube_on_the_time_slider() {
         .unwrap_err();
     assert!(e.contains("not a cloud-optimised"), "{e}");
     assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
+    // Files stored at another scale partway: one range can't fit them all, so it's refused.
+    let rescaled = |id: &str, date: &str, scale: f64| {
+        format!(
+            r#"{{"type": "Feature", "id": "{id}", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+               "properties": {{"datetime": "{date}T00:00:00Z", "bdc:tiles": ["T1"]}},
+               "assets": {{"NDVI": {{"href": "{cog}/{id}.tif", "type": "image/tiff; profile=cloud-optimized", "eo:bands": [{{"scale": {scale}}}]}}}}}}"#
+        )
+    };
+    let two = [rescaled("r1", "2024-01-01", 0.0001), rescaled("r2", "2024-01-17", 0.001)].join(",");
+    let rescaled_api = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{two}]}}"#))], 2);
+    let e = s
+        .run(
+            "stac.addCube",
+            &json!({"url": format!("{rescaled_api}/v1"), "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31", "range": [0, 0.9]}),
+        )
+        .unwrap_err();
+    assert!(e.contains("same scale and offset"), "{e}");
 }
 
 /// A cloud-optimised GeoTIFF by its address is read in place: its header, then only the tiles a

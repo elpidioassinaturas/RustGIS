@@ -281,7 +281,9 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
             }
         };
         let day = |ms: f64| rustgis_data::time::format(ms, "YYYY-MM-DD");
-        let mut q = json!({"collections": collection, "datetime": format!("{}/{}", day(start), day(end)), "limit": 200});
+        // RFC 3339, as STAC asks: the whole of the last day included.
+        let mut q =
+            json!({"collections": collection, "datetime": format!("{}T00:00:00Z/{}T23:59:59Z", day(start), day(end)), "limit": 200});
         for k in ["bbox", "maxCloud"] {
             if let Some(v) = p.get(k).filter(|v| !v.is_null()) {
                 q[k] = v.clone();
@@ -321,6 +323,7 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         // By tile, then by day: the first item found for a tile and day (the search's order).
         let mut tiles: std::collections::BTreeMap<String, std::collections::BTreeMap<i64, String>> = Default::default();
         let mut scale: Option<(f64, f64)> = None;
+        let mut scales_differ = false;
         let mut without = 0usize;
         for i in &items {
             let Some(ms) = rustgis_data::time::parse_text(&i.datetime) else {
@@ -331,7 +334,9 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 without += 1;
                 continue;
             };
-            scale.get_or_insert((a.scale.unwrap_or(1.0), a.offset.unwrap_or(0.0)));
+            let this = (a.scale.unwrap_or(1.0), a.offset.unwrap_or(0.0));
+            scales_differ |= scale.is_some_and(|s| s != this);
+            scale.get_or_insert(this);
             let key = i.tile.clone().unwrap_or_else(|| match i.bbox {
                 Some([w, so, e, n]) => format!("{w:.2},{so:.2},{e:.2},{n:.2}"),
                 None => i.id.clone(),
@@ -341,6 +346,13 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         }
         if tiles.is_empty() {
             return Err(format!("no item of {collection} has an asset {asset}"));
+        }
+        // The range in the files' stored values: one range can't hold if they store them alike
+        // no longer (a processing change of scale or offset partway).
+        if range.is_some() && scales_differ {
+            return Err(format!(
+                "the {asset} files don't all have the same scale and offset, so one range can't fit them all: leave range out"
+            ));
         }
         // The range in the files' stored values.
         let look = match (range, scale) {
@@ -355,12 +367,13 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         let mut dates: Vec<f64> = Vec::new();
         let many = tiles.len() > 1;
         let mut added = Vec::new();
-        // What the map had: a cube that can't be added whole takes back what it added.
-        let (tiles_before, layers_before): (Vec<String>, Vec<u32>) =
-            (s.map().tiles.iter().map(|t| t.url.clone()).collect(), s.map().layers.iter().map(|l| l.id).collect());
+        // What the map had: a cube that can't be added whole puts it back as it was, tile layers
+        // it replaced (the same cube added before) included.
+        let (tiles_before, layers_before): (Vec<rustgis_map::TileLayer>, Vec<u32>) =
+            (s.map().tiles.clone(), s.map().layers.iter().map(|l| l.id).collect());
         let undo = |s: &mut Session| {
             let m = s.map_mut();
-            m.tiles.retain(|t| tiles_before.contains(&t.url));
+            m.tiles = tiles_before.clone();
             m.layers.retain(|l| layers_before.contains(&l.id));
         };
         for (tile, by_day) in &tiles {
@@ -368,7 +381,6 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
             dates.extend(urls.iter().map(|(d, _)| *d));
             let Some((_, first)) = urls.first() else { continue };
             let name = if many { format!("{base} {tile}") } else { base.clone() };
-            let had = s.map().tiles.len();
             let r = match super::layer::add_url(s, &json!({"url": first, "name": name})) {
                 Ok(r) => r,
                 Err(e) => {
@@ -378,11 +390,11 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
             };
             // The tile layer just added follows the slider through its dates. A file read whole
             // instead (a GeoTIFF that isn't cloud-optimised) can't follow it.
+            // The tile layer add_url put in, at the index it gives, and at the file's address.
             let m = s.map_mut();
-            // One tile layer more, at the file's address.
-            let one = m.tiles.len() == had + 1;
             let file = first.split('#').next();
-            match m.tiles.iter_mut().rev().find(|t| t.url.split('#').next() == file).filter(|_| one) {
+            let at = r.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok());
+            match at.and_then(|i| m.tiles.get_mut(i)).filter(|t| t.url.split('#').next() == file) {
                 Some(t) => {
                     t.time_urls = urls;
                     t.name = name;
@@ -402,7 +414,10 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         dates.truncate(rustgis_map::time::MAX_STEPS);
         if s.map().time.is_none() {
             let d: Vec<Value> = dates.iter().map(|d| json!(d)).collect();
-            super::time::set(s, &json!({"dates": d}))?;
+            if let Err(e) = super::time::set(s, &json!({"dates": d})) {
+                undo(s);
+                return Err(e);
+            }
         } else {
             s.map_mut().apply_time();
         }
