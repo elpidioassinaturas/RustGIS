@@ -241,6 +241,8 @@ fn add_asset(s: &mut Session, p: &Value) -> CmdResult {
 pub const MAX_CUBE_ITEMS: usize = 2000;
 /// The most pages of a search a data cube reads, whatever they hold.
 pub const MAX_CUBE_PAGES: usize = 100;
+/// The most grid tiles a data cube makes into layers (each reads its first file's header).
+pub const MAX_CUBE_TILES: usize = 64;
 
 /// `stac.addCube` (opengeos/RustGIS#559): a STAC collection's band as a data cube on the time
 /// slider. The items found are grouped by the grid tile they cover (the tile their properties
@@ -420,6 +422,11 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
             m.tiles = tiles_before.clone();
             m.layers.retain(|l| layers_before.contains(&l.id));
         };
+        // A layer per grid tile, each reading its first file's header: a catalog without grid
+        // tiles (keyed by footprint) could otherwise make hundreds.
+        if tiles.len() > MAX_CUBE_TILES {
+            return Err(format!("{} grid tiles, more than {MAX_CUBE_TILES}: take a smaller area", tiles.len()));
+        }
         // Every file a web address of sane length, as a project keeps them (TileLayer::repair),
         // so the cube reopens as it was made.
         if let Some(bad) = tiles.values().flat_map(|by_day| by_day.values()).find(|h| {
