@@ -155,6 +155,8 @@ pub struct State {
     /// A static catalog's walk, and the documents being fetched for it.
     walk: Option<(Walk, Vec<(String, Answer)>)>,
     pub items: Vec<Item>,
+    /// The area the last search asked for (none: anywhere).
+    searched_area: Option<[f64; 4]>,
     /// The asset chosen for each item.
     pub chosen: Vec<String>,
     /// The item whose properties are shown.
@@ -191,6 +193,7 @@ impl Default for State {
             phase: String::new(),
             walk: None,
             items: Vec::new(),
+            searched_area: None,
             chosen: Vec::new(),
             details: None,
             counted: false,
@@ -862,9 +865,12 @@ fn cube_row(app: &mut RustGisApp, ui: &mut egui::Ui, busy: bool) {
         "start": if st.from.trim().is_empty() { first } else { st.from.trim().to_string() },
         "end": if st.to.trim().is_empty() { last } else { st.to.trim().to_string() },
     });
-    // The area of the items listed, so the cube covers what the search found, not the view now.
-    let area = st.items.iter().filter_map(|i| i.bbox).fold(None, |a: Option<[f64; 4]>, [w, s, e, n]| {
-        Some(a.map_or([w, s, e, n], |[aw, as_, ae, an]| [aw.min(w), as_.min(s), ae.max(e), an.max(n)]))
+    // The area the search asked for, so the cube covers what it found (every page of it), not the
+    // view now; a search anywhere, the area of the items listed.
+    let area = st.searched_area.or_else(|| {
+        st.items.iter().filter_map(|i| i.bbox).fold(None, |a: Option<[f64; 4]>, [w, s, e, n]| {
+            Some(a.map_or([w, s, e, n], |[aw, as_, ae, an]| [aw.min(w), as_.min(s), ae.max(e), an.max(n)]))
+        })
     });
     if let Some(b) = area {
         p["bbox"] = json!(b);
@@ -928,6 +934,7 @@ fn find_items(app: &mut RustGisApp) {
         p["bbox"] = json!("view");
     }
     let search = rustgis_engine::cmd::stac::search_params(&app.session, &p);
+    app.ui.stac.searched_area = search.as_ref().ok().and_then(|s| s.bbox);
     app.ui.stac.error = None;
     if is_static {
         let st = &app.ui.stac;

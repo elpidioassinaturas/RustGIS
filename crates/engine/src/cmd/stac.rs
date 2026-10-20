@@ -327,9 +327,10 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 format!("{scheme}://{}", host.strip_suffix(default).unwrap_or(&host))
             })
         };
+        // An address with no scheme has no host to match: a next link is never taken on it.
         let api_host = host(&api);
         while let Some(url) = next.take() {
-            if read.contains(&url) || (!read.is_empty() && host(&url) != api_host) {
+            if read.contains(&url) || (!read.is_empty() && (api_host.is_none() || host(&url) != api_host)) {
                 break;
             }
             if read.len() >= MAX_CUBE_PAGES {
