@@ -255,6 +255,14 @@ pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
                 date_in_text(&band.name).ok_or_else(|| format!("band {} ({}) has no date in its name: give \"dates\"", b + 1, band.name))?
             }
         };
+        // One band a date, as one layer a date in a stack.
+        if items.iter().any(|(d, ..): &(f64, _, usize)| *d == date) {
+            return Err(format!(
+                "band {} and another band have the same date ({}): one band a date",
+                b + 1,
+                rustgis_data::time::format(date, "YYYY-MM-DD")
+            ));
+        }
         items.push((date, r.clone(), b));
     }
     Ok(Box::new(Stack::new(items, l.name.clone())))

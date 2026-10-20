@@ -6572,6 +6572,10 @@ fn a_trend_over_a_data_cube() {
             .clone();
     let r = s.run("cube.trend", &json!({"layer": id})).unwrap();
     assert!((value(&s, &r["layers"][0], 0) - 0.02).abs() < 1e-3);
+    // Two bands on one date are refused, as two layers are.
+    let same: Vec<String> = (0..12).map(|k| format!("{}-06-01", 2000 + k.max(1))).collect();
+    let e = s.run("cube.trend", &json!({"layer": id, "dates": same})).unwrap_err();
+    assert!(e.contains("same date"), "{e}");
     // A Zarr variable: every cell rises 100 a step.
     let (dir, path) = zarr_store_at("trend", &[0, 31, 59, 90, 120, 151, 181, 212]);
     let r = s.run("cube.trend", &json!({"path": path, "variable": "t", "test": "seasonal", "seasons": 4})).unwrap();
