@@ -287,7 +287,18 @@ fn cached_store(url: &str) -> Result<std::sync::Arc<zarr::Store>, String> {
 /// The key a slice is kept by: its store, selection and coordinate system.
 #[cfg(not(target_arch = "wasm32"))]
 fn slice_key(zt: &ZarrTime, i: usize) -> String {
-    format!("{}\u{0}{}\u{0}{}", zt.store, zt.selection(i), zt.crs.as_deref().unwrap_or(""))
+    // A folder store rewritten on disk (a model run adding steps) is read again: its metadata's
+    // time of change is part of the key.
+    let changed = if is_web(&zt.store) {
+        String::new()
+    } else {
+        [".zmetadata", "zarr.json", ".zgroup"]
+            .iter()
+            .find_map(|f| std::fs::metadata(Path::new(&zt.store).join(f)).and_then(|m| m.modified()).ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or_else(String::new, |d| d.as_millis().to_string())
+    };
+    format!("{}\u{0}{}\u{0}{}\u{0}{changed}", zt.store, zt.selection(i), zt.crs.as_deref().unwrap_or(""))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
