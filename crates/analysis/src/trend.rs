@@ -183,7 +183,8 @@ pub fn trend_seasonal(t: &[f64], y: &[f64], season: &[usize], alpha: f64) -> Opt
 }
 
 fn seasonal_by(t: &[f64], y: &[f64], season: &[usize]) -> Option<Trend> {
-    let m = season.iter().copied().max()? + 1;
+    // A season index past any calendar's (366 days) is a caller's mistake: no trend, not a huge allocation.
+    let m = season.iter().copied().max()?.checked_add(1).filter(|m| *m <= 4096)?;
     let mut by: Vec<(Vec<f64>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); m];
     for ((t, y), k) in t.iter().zip(y).zip(season) {
         let Some(b) = by.get_mut(*k) else { continue };
@@ -505,6 +506,8 @@ mod tests {
         for alpha in [0.0, 1.0, f64::NAN] {
             assert!(trend(&t, &y, Test::HamedRao, alpha).is_none(), "{alpha}");
         }
+        let seasons: Vec<usize> = (0..t.len()).map(|i| if i == 0 { usize::MAX } else { i % 2 }).collect();
+        assert!(trend_seasonal(&t, &y, &seasons, 0.05).is_none(), "a season index out of range");
         let many: Vec<f64> = (0..=MAX_VALUES).map(|i| i as f64).collect();
         assert!(trend(&many, &many, Test::Original, 0.05).is_none());
         // Too few values, missing ones skipped.
