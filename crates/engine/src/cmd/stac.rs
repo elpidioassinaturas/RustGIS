@@ -402,11 +402,16 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         }
         // The range in the files' stored values.
         let look = match (range, scale) {
-            (Some((lo, hi)), Some((k, o))) if k != 0.0 => {
+            (Some(_), Some((k, o))) if k == 0.0 || !k.is_finite() || !o.is_finite() => {
+                return Err(format!(
+                    "the {asset} files' metadata gives a scale of {k} and an offset of {o}, so a range in the band's units can't be set: leave range out"
+                ));
+            }
+            (Some((lo, hi)), Some((k, o))) => {
                 let (a, b) = ((lo - o) / k, (hi - o) / k);
                 format!("#range={},{}", a.min(b), a.max(b))
             }
-            (Some((lo, hi)), _) => format!("#range={lo},{hi}"),
+            (Some((lo, hi)), None) => format!("#range={lo},{hi}"),
             (None, _) => String::new(),
         };
         let base = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map_or_else(|| format!("{collection} {asset}"), str::to_string);
@@ -485,7 +490,12 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         }
         dates.sort_by(f64::total_cmp);
         dates.dedup();
-        dates.truncate(rustgis_map::time::MAX_STEPS);
+        // At most MAX_CUBE_ITEMS dates, well under the slider's steps; were it ever more, the cube
+        // is refused rather than left with files the slider can't reach.
+        if dates.len() > rustgis_map::time::MAX_STEPS {
+            undo(s);
+            return Err(format!("{} dates; the time slider takes {} at most", dates.len(), rustgis_map::time::MAX_STEPS));
+        }
         // The slider over the cube's dates: on over them when it is off; when it is on, taking
         // them in (its own dates and the cube's, or its span widened to theirs), so every file
         // can be reached.
