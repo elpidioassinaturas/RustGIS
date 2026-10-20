@@ -1501,8 +1501,7 @@ fn time_ms(c: &Array, v: f64) -> Option<f64> {
         "standard" | "gregorian" | "proleptic_gregorian" => epoch_seconds(since)? + v * secs,
         "noleap" | "365_day" | "all_leap" | "366_day" | "360_day" => {
             let day = fixed_calendar(&calendar, since, v * secs)?;
-            let mut p = day.splitn(3, '-').map(|x| x.parse::<i64>().ok());
-            let (y, m, d) = (p.next()??, p.next()??, p.next()??);
+            let (Some(y), Some(m), Some(d)) = date_parts(&day) else { return None };
             let last = days_from_civil(if m == 12 { y + 1 } else { y }, if m == 12 { 1 } else { m + 1 }, 1) - days_from_civil(y, m, 1);
             days_from_civil(y, m, d.min(last)) as f64 * 86_400.0 + (v * secs).rem_euclid(86_400.0)
         }
@@ -1548,12 +1547,22 @@ fn label(c: &Array, v: f64) -> String {
     if units.is_empty() { n } else { format!("{n} {units}") }
 }
 
+/// A date's year, month and day as its text has them: `2001-03-05`, or `-0001-01-01` for a year
+/// before 1 CE (the sign is the year's, not a separator).
+fn date_parts(s: &str) -> (Option<i64>, Option<i64>, Option<i64>) {
+    let (sign, rest) = match s.trim().strip_prefix('-') {
+        Some(r) => (-1, r),
+        None => (1, s.trim()),
+    };
+    let mut p = rest.splitn(3, '-').map(|x| x.trim().parse::<i64>().ok());
+    (p.next().flatten().map(|y| sign * y), p.next().flatten(), p.next().flatten())
+}
+
 /// A date in a model calendar of fixed-length years (365, 366 or 360 days): `secs` after `since`.
 fn fixed_calendar(calendar: &str, since: &str, secs: f64) -> Option<String> {
-    let mut d = since.split([' ', 'T']).next()?.splitn(3, '-').map(|p| p.trim().parse::<i64>().ok());
+    let (y, m, d) = date_parts(since.split([' ', 'T']).next()?);
     // The parts of a hostile `units` string are kept to sane ranges, so nothing below overflows.
-    let (y0, m0, d0) =
-        (d.next()??.clamp(-MAX_YEAR, MAX_YEAR), d.next().flatten().unwrap_or(1).clamp(1, 12), d.next().flatten().unwrap_or(1).clamp(1, 31));
+    let (y0, m0, d0) = (y?.clamp(-MAX_YEAR, MAX_YEAR), m.unwrap_or(1).clamp(1, 12), d.unwrap_or(1).clamp(1, 31));
     let months: [i64; 12] = match calendar {
         "360_day" => [30; 12],
         "all_leap" | "366_day" => [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31],
@@ -1759,6 +1768,16 @@ pub fn read_dir(dir: &std::path::Path, selection: &str, crs: Option<&str>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A CF date's parts, a year before 1 CE included (its sign isn't a separator).
+    #[test]
+    fn dates_before_1_ce() {
+        assert_eq!(date_parts("2001-03-05"), (Some(2001), Some(3), Some(5)));
+        assert_eq!(date_parts("-0001-01-01"), (Some(-1), Some(1), Some(1)));
+        assert_eq!(date_parts("1850"), (Some(1850), None, None));
+        assert_eq!(date_parts("x-1-1"), (None, Some(1), Some(1)));
+        assert!(fixed_calendar("noleap", "-0001-01-01", 0.0).is_some());
+    }
 
     fn lz4_block(raw: &[u8]) -> Vec<u8> {
         lz4_flex::block::compress(raw)
