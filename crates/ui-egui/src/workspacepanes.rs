@@ -1056,6 +1056,9 @@ mod tests {
             .and_then(|l| l.raster.as_ref())
             .and_then(|r| r.data.clone());
         assert_eq!(mean.map(|d| d.bands[0].data[0]), Some(108.0));
+        // A summary is no slice of the variable: Time Series doesn't offer it as one.
+        let summary = h.state().session.map().layer_by_name("t mean 2001-01-01–2001-03-01").and_then(|l| l.raster.as_ref());
+        assert_eq!(summary.and_then(|r| r.subdataset.clone()), None);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
