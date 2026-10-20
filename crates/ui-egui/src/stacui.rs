@@ -155,8 +155,10 @@ pub struct State {
     /// A static catalog's walk, and the documents being fetched for it.
     walk: Option<(Walk, Vec<(String, Answer)>)>,
     pub items: Vec<Item>,
-    /// The area the last search asked for (none: anywhere).
+    /// The area the search whose items are listed asked for (none: anywhere, or items from a
+    /// link), and the one the search under way asks for, which takes its place when its items land.
     searched_area: Option<[f64; 4]>,
+    asked_area: Option<[f64; 4]>,
     /// The asset chosen for each item.
     pub chosen: Vec<String>,
     /// The item whose properties are shown.
@@ -194,6 +196,7 @@ impl Default for State {
             walk: None,
             items: Vec::new(),
             searched_area: None,
+            asked_area: None,
             chosen: Vec::new(),
             details: None,
             counted: false,
@@ -321,6 +324,7 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
                 st.counted = true;
                 st.chosen = items.iter().map(|i| i.pick(None).map(|a| a.key.clone()).unwrap_or_default()).collect();
                 st.items = items;
+                st.searched_area = st.asked_area;
                 show_footprints(app);
             }
             Err(e) => st.error = Some(e),
@@ -405,6 +409,7 @@ fn poll_walk(app: &mut RustGisApp, ctx: &egui::Context) {
     let items = walk.into_items();
     st.chosen = items.iter().map(|i| i.pick(None).map(|a| a.key.clone()).unwrap_or_default()).collect();
     st.items = items;
+    st.searched_area = st.asked_area;
     show_footprints(app);
 }
 
@@ -550,6 +555,7 @@ fn landed_link(app: &mut RustGisApp, url: &str, r: Result<Vec<u8>, String>) {
                 app.ui.stac.collection = item.collection.clone();
                 app.ui.stac.chosen = vec![item.pick(None).map(|a| a.key.clone()).unwrap_or_default()];
                 app.ui.stac.items = vec![item.clone()];
+                app.ui.stac.searched_area = None;
                 let found = api.is_some();
                 if let Some(api) = api {
                     app.ui.stac.api = api;
@@ -934,7 +940,7 @@ fn find_items(app: &mut RustGisApp) {
         p["bbox"] = json!("view");
     }
     let search = rustgis_engine::cmd::stac::search_params(&app.session, &p);
-    app.ui.stac.searched_area = search.as_ref().ok().and_then(|s| s.bbox);
+    app.ui.stac.asked_area = search.as_ref().ok().and_then(|s| s.bbox);
     app.ui.stac.error = None;
     if is_static {
         let st = &app.ui.stac;

@@ -76,8 +76,8 @@ pub struct Item {
     /// text cut.
     pub properties: Option<Value>,
     /// The tile of a grid it covers, when its properties name one (`grid:code`, `s2:mgrs_tile`,
-    /// Landsat's WRS path and row, Brazil Data Cube's `bdc:tiles`): items of a data cube on one
-    /// tile, at different dates.
+    /// the MGRS extension's zone, band and square, Landsat's WRS path and row, Brazil Data Cube's
+    /// `bdc:tiles`): items of a data cube on one tile, at different dates.
     pub tile: Option<String>,
 }
 
@@ -395,13 +395,18 @@ fn tile_of(p: &Value) -> Option<String> {
         Value::Array(a) => a.first().and_then(|x| x.as_str()).map(str::to_string),
         _ => None,
     };
-    let wrs = || Some(format!("{}/{}", plain(p.get("landsat:wrs_path")?)?, plain(p.get("landsat:wrs_row")?)?));
-    ["grid:code", "s2:mgrs_tile", "mgrs:grid_square", "bdc:tiles", "bdc:tile"]
+    let given = |k: &str| p.get(k).and_then(plain).filter(|t| !t.trim().is_empty());
+    let wrs = || Some(format!("{}/{}", given("landsat:wrs_path")?, given("landsat:wrs_row")?));
+    // The MGRS extension's square (`LS`) repeats in every zone and band: the three make the tile.
+    let mgrs = || Some(format!("{}{}{}", given("mgrs:utm_zone")?, given("mgrs:latitude_band")?, given("mgrs:grid_square")?));
+    // The first key with a value: one present but empty doesn't stop the others being tried.
+    ["grid:code", "s2:mgrs_tile"]
         .iter()
-        .find_map(|k| p.get(*k).and_then(plain))
+        .find_map(|k| given(k))
+        .or_else(mgrs)
+        .or_else(|| ["bdc:tiles", "bdc:tile"].iter().find_map(|k| given(k)))
         .or_else(wrs)
         .map(|t| t.chars().take(64).collect())
-        .filter(|t: &String| !t.trim().is_empty())
 }
 
 /// An asset's first band's number `key` (`scale`, `offset`): from `raster:bands`, else from
@@ -895,6 +900,13 @@ mod tests {
         assert_eq!(p(serde_json::json!({"bdc:tiles": ["020019"]})).as_deref(), Some("020019"));
         assert_eq!(p(serde_json::json!({"landsat:wrs_path": "220", "landsat:wrs_row": 71})).as_deref(), Some("220/71"));
         assert_eq!(p(serde_json::json!({"platform": "sentinel-2a"})), None);
+        // The MGRS extension: the square alone repeats from zone to zone, so it is never the tile.
+        let square = |zone: &str| serde_json::json!({"mgrs:utm_zone": zone, "mgrs:latitude_band": "T", "mgrs:grid_square": "LS"});
+        assert_eq!(p(square("32")).as_deref(), Some("32TLS"));
+        assert_eq!(p(square("33")).as_deref(), Some("33TLS"));
+        assert_eq!(p(serde_json::json!({"mgrs:grid_square": "LS"})), None);
+        // An empty code doesn't hide the next one.
+        assert_eq!(p(serde_json::json!({"grid:code": "", "bdc:tiles": ["020019"]})).as_deref(), Some("020019"));
         let a = serde_json::json!({"raster:bands": [{"scale": 0.0001, "offset": -0.1}], "eo:bands": [{"scale": 2.0}]});
         assert_eq!((band_number(&a, "scale"), band_number(&a, "offset")), (Some(0.0001), Some(-0.1)));
         assert_eq!(band_number(&serde_json::json!({"eo:bands": [{"scale": 0.0001}]}), "scale"), Some(0.0001));

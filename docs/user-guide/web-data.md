@@ -75,8 +75,8 @@ Assistant](assistant.md) asks before it runs them, and plugins need the network 
 ### Data cubes on the time slider
 
 When the items found span several dates, **Add as Time Series** (desktop; `stac.addCube`) adds a
-band of them as a data cube: a collection's cloud-optimised GeoTIFFs a file per tile, date and
-band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentinel-2 on Earth Search.
+band of them as a data cube: a collection's cloud-optimised GeoTIFFs, with one file per tile, date
+and band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentinel-2 on Earth Search.
 
 - **Search:** the collection is searched over the area (the map's, or `"bbox"`) and the period
   (`"start"`, `"end"`), page after page, up to 2,000 items.
