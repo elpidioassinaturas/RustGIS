@@ -113,7 +113,8 @@ pub fn tool_of(r: &GpRecord) -> Option<String> {
 /// as `sources::holds_secret` judges it), left empty. An object's keys too: the file may put
 /// anything there.
 fn redacted(v: &Value) -> Value {
-    use crate::sources::{looks_like_a_key, secret_key};
+    use crate::sources::looks_like_a_key;
+    use rustgis_data::source::credentials::secret_key;
     match v {
         Value::String(t) => Value::String(redacted_text(t)),
         Value::Array(a) => Value::Array(a.iter().map(redacted).collect()),
@@ -219,7 +220,7 @@ fn private_keys_removed(t: &str) -> String {
 }
 
 /// `t` with the value of each `name=value` pair whose name says it's a secret
-/// (`sources::secret_key`; a bare `key`, `sig` or `sas` when its value reads as a key) left
+/// (`credentials::secret_key`; a bare `key`, `sig` or `sas` when its value reads as a key) left
 /// empty, pairs being parted by spaces, commas or semicolons. A
 /// value in quotes or braces (`password='a b'`, ODBC's `PWD={a;b}`) goes whole, to its closer
 /// (to the end of the text when it has none).
@@ -254,7 +255,7 @@ fn secret_pairs_emptied(t: &str) -> String {
             let value = rest.get(at..).unwrap_or("");
             let v = value.get(..value.find(parts).unwrap_or(value.len())).unwrap_or("");
             !k.is_empty()
-                && crate::sources::secret_key(k)
+                && rustgis_data::source::credentials::secret_key(k)
                 && (!["key", "sig", "sas"].iter().any(|p| k.eq_ignore_ascii_case(p))
                     || crate::sources::looks_like_a_key(v.trim_matches(['\'', '"', '{', '}'])))
         };
@@ -308,11 +309,11 @@ fn closer(v: &str, c: char) -> Option<usize> {
 }
 
 /// Whether `t` is a database connection `sources::redact` reads as one: PostgreSQL's (a URI, or
-/// libpq's `key=value` words after `postgres:`, `postgresql:` or GDAL's `PG:`), MySQL's or
-/// MariaDB's.
+/// libpq's `key=value` words after `postgres:`, `postgresql:` or GDAL's `PG:`), MySQL's,
+/// MariaDB's or SQL Server's.
 fn connection(t: &str) -> bool {
     let lower = t.to_ascii_lowercase();
-    ["postgres:", "postgresql:", "pg:", "mysql:", "mariadb:"].iter().any(|p| lower.starts_with(p))
+    ["postgres:", "postgresql:", "pg:", "mysql:", "mariadb:", "mssql:"].iter().any(|p| lower.starts_with(p))
 }
 
 /// The project file a script opens: the one it was opened from or saved to, else one named

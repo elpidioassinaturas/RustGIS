@@ -3,6 +3,7 @@
 //! desktop and web apps keep them with their preferences. Never a secret: addresses are kept
 //! without their passwords, tokens or signatures.
 
+use rustgis_data::source::credentials::{redact_query, secret_key};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -185,57 +186,6 @@ pub fn default_name(address: &str) -> String {
     if n.is_empty() { address.chars().take(80).collect() } else { n }
 }
 
-/// Whether a query or `extra` key names a secret, wherever it is: an exact list (case aside),
-/// and any key naming a password, secret or token. Short keys that are ordinary elsewhere (an
-/// ArcGIS or WMS `sr`, an OAuth `code`) are judged with the rest of the query ([`secret_in`]).
-pub(crate) fn secret_key(k: &str) -> bool {
-    let k = k.to_ascii_lowercase();
-    matches!(
-        k.as_str(),
-        "token"
-            | "access_token"
-            | "id_token"
-            | "refresh_token"
-            | "api_key"
-            | "apikey"
-            | "api-key"
-            | "x-api-key"
-            | "key"
-            | "access_key"
-            | "accesskey"
-            | "secret"
-            | "client_secret"
-            | "password"
-            | "passwd"
-            | "pwd"
-            | "sig"
-            | "signature"
-            | "sas"
-            | "authorization"
-            | "proxy-authorization"
-            | "cookie"
-            | "set-cookie"
-            | "bearer"
-    ) || k.starts_with("x-amz-")
-        || k.starts_with("x-goog-")
-        || k.contains("password")
-        || k.contains("secret")
-        || k.contains("token")
-}
-
-/// The query keys of an Azure shared access signature, a secret only in one (a query with both
-/// `sig` and `sv`).
-const SAS_KEYS: &[&str] =
-    &["sv", "se", "sp", "sr", "st", "spr", "sip", "si", "ss", "srt", "skoid", "sktid", "skt", "ske", "sks", "skv", "sdd"];
-
-/// Whether query key `k` is a secret in a query holding `keys` (lower-cased): [`secret_key`], an
-/// Azure SAS's fields in a SAS, and an OAuth redirect's `code` (with its `state`).
-fn secret_in(k: &str, keys: &[String]) -> bool {
-    let k = k.to_ascii_lowercase();
-    let has = |x: &str| keys.iter().any(|q| q == x);
-    secret_key(&k) || (has("sig") && has("sv") && SAS_KEYS.contains(&k.as_str())) || (k == "code" && has("state"))
-}
-
 /// Whether command parameters hold something that gives access: a non-empty value under a key
 /// that names a password, key, secret or token ([`secret_key`]), or an address or PostgreSQL
 /// connection that [`redact`] would change. Recording a task leaves such a command out, since a
@@ -367,10 +317,13 @@ pub fn redact_text(text: &str) -> String {
 
 /// An address without what would give someone else the user's access: the user and password of
 /// a web address, query parameters that are keys, tokens or signatures (a signed blob's SAS, an
-/// S3 presigned URL), and a PostgreSQL connection string's password. A MySQL or MariaDB address
-/// keeps its user (the one to connect as), never its password.
+/// S3 presigned URL), and a PostgreSQL connection string's password. A MySQL, MariaDB or SQL Server
+/// address keeps its user (the one to connect as), never its password.
 pub fn redact(address: &str) -> String {
     if let Some((public, _)) = rustgis_data::source::myconn::split_password(address) {
+        return public;
+    }
+    if let Some((public, _)) = rustgis_data::source::msconn::split_password(address) {
         return public;
     }
     let lower = address.to_ascii_lowercase();
@@ -392,20 +345,8 @@ pub fn redact(address: &str) -> String {
     // The fragment never: OAuth and SAS-style links carry tokens there, and nothing that adds a
     // source needs it.
     let rest = rest.split('#').next().unwrap_or(rest);
-    let (before_query, query) = match rest.split_once('?') {
-        Some((b, q)) => (b, Some(q)),
-        None => (rest, None),
-    };
-    let mut out = format!("{scheme}://{before_query}");
-    if let Some(q) = query {
-        let key = |kv: &str| kv.split_once('=').map(|(k, _)| k).unwrap_or(kv).to_ascii_lowercase();
-        let keys: Vec<String> = q.split('&').map(key).collect();
-        let kept: Vec<&str> = q.split('&').filter(|kv| !kv.is_empty() && !secret_in(&key(kv), &keys)).collect();
-        if !kept.is_empty() {
-            out.push('?');
-            out.push_str(&kept.join("&"));
-        }
-    }
+    let mut out = format!("{scheme}://{rest}");
+    redact_query(&mut out);
     out
 }
 
@@ -510,6 +451,15 @@ fn build_library() -> Vec<(&'static str, Source)> {
         (
             "Maps",
             s("service", "GEBCO bathymetry", "https://wms.gebco.net/mapserv?request=getcapabilities&service=wms", json!({"type": "wms"})),
+        ),
+        (
+            "Maps",
+            s(
+                "service",
+                "swisstopo (geo.admin.ch)",
+                "https://wmts.geo.admin.ch/EPSG/3857/1.0.0/WMTSCapabilities.xml",
+                json!({"type": "wmts"}),
+            ),
         ),
         ("Catalogs", s("stac", "Earth Search (AWS)", "https://earth-search.aws.element84.com/v1", json!({"api": "true"}))),
         (
@@ -781,6 +731,23 @@ MIIE
         assert!(!serde_json::to_string(&s).unwrap().contains("pw"));
         assert!(holds_secret(&json!({"database": "mariadb://ana:pw@db/gis"})));
         assert!(!holds_secret(&json!({"database": "mariadb://ana@db/gis"})));
+        let s = added_by(
+            "layer.addDatabase",
+            &json!({"database": "mssql://ana:p%40w@db:1433/gis?password=pw2&encrypt=strict", "password": "pw"}),
+        )
+        .unwrap();
+        let s = clean(s).unwrap();
+        assert_eq!(s.address, "mssql://ana@db:1433/gis?encrypt=strict");
+        assert!(!serde_json::to_string(&s).unwrap().contains("pw"));
+        assert!(holds_secret(&json!({"database": "mssql://ana:pw@db/gis"})));
+        assert!(!holds_secret(&json!({"database": "mssql://ana@db/gis"})));
+        for key in ["pwd", "passwd", "token", "access_token", "client_secret"] {
+            let params = json!({"database": format!("mssql://ana@db/gis?{key}=query-secret&encrypt=strict")});
+            assert!(holds_secret(&params), "{key}");
+            let saved = clean(added_by("layer.addDatabase", &params).unwrap()).unwrap();
+            assert_eq!(saved.address, "mssql://ana@db/gis?encrypt=strict", "{key}");
+            assert!(!serde_json::to_string(&saved).unwrap().contains("query-secret"), "{key}");
+        }
         assert_eq!(
             added_by("service.add", &json!({"url": "https://h/wms", "layer": "a", "type": "wms"})).unwrap().extra,
             json!({"layer": "a", "type": "wms"})

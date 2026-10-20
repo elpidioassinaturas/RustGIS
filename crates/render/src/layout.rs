@@ -4,8 +4,8 @@
 use rustgis_data::GeometryType;
 use rustgis_geom::{Coord, Extent};
 use rustgis_map::layout::{
-    ArrowStyle, ColorScale, ElementKind, FrameShape, Grid, Layout, Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TextAlign, TickSide,
-    frame_camera,
+    ArrowStyle, ColorScale, ElementKind, FrameShape, Grid, Layout, LineHead, Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TextAlign,
+    TickSide, frame_camera,
 };
 use rustgis_map::symbology::LegendEntry;
 use rustgis_map::{Map, Rgba};
@@ -230,14 +230,45 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                     }
                 }
             }
-            ElementKind::Line { color, width, dir } => {
+            ElementKind::Line { color, width, dir, head } => {
                 let [(x0, y0), (x1, y1)] = dir.ends((r.x().into(), r.y().into(), r.width().into(), r.height().into()));
+                let (a, b) = ((x0 as f32, y0 as f32), (x1 as f32, y1 as f32));
+                let stroke_w = ((*width as f32) * ppp as f32).max(0.5);
+                let (at_start, at_end) = (matches!(head, LineHead::Start | LineHead::Both), matches!(head, LineHead::End | LineHead::Both));
+                let len = (b.0 - a.0).hypot(b.1 - a.1);
+                // A head grows with the line's width, but never past 40% of the line.
+                let heads = u8::from(at_start) + u8::from(at_end);
+                let head_len = if heads == 0 || len <= 0.0 {
+                    0.0
+                } else {
+                    ((6.0 + 2.5 * *width as f32) * ppp as f32).min(len * 0.4 / f32::from(heads))
+                };
+                let (ux, uy) = if len > 0.0 { ((b.0 - a.0) / len, (b.1 - a.1) / len) } else { (1.0, 0.0) };
+                // The shaft stops inside each head, so its square end doesn't poke through the tip.
+                let inset = head_len * 0.8;
+                let (s0, s1) = (
+                    if at_start { (a.0 + ux * inset, a.1 + uy * inset) } else { a },
+                    if at_end { (b.0 - ux * inset, b.1 - uy * inset) } else { b },
+                );
                 let mut pb = PathBuilder::new();
-                pb.move_to(x0 as f32, y0 as f32);
-                pb.line_to(x1 as f32, y1 as f32);
+                pb.move_to(s0.0, s0.1);
+                pb.line_to(s1.0, s1.1);
                 if let Some(p) = pb.finish() {
-                    let stroke = Stroke { width: ((*width as f32) * ppp as f32).max(0.5), ..Stroke::default() };
+                    let stroke = Stroke { width: stroke_w, ..Stroke::default() };
                     pm.stroke_path(&p, &paint(*color, 1.0), &stroke, Transform::identity(), None);
+                }
+                // Each head: a filled triangle, its tip on the line's end.
+                let half = (head_len * 0.45).max(stroke_w);
+                for (tip, (dx, dy)) in [(at_start, a, (-ux, -uy)), (at_end, b, (ux, uy))].into_iter().filter(|h| h.0).map(|h| (h.1, h.2)) {
+                    let base = (tip.0 - dx * head_len, tip.1 - dy * head_len);
+                    let mut pb = PathBuilder::new();
+                    pb.move_to(tip.0, tip.1);
+                    pb.line_to(base.0 - dy * half, base.1 + dx * half);
+                    pb.line_to(base.0 + dy * half, base.1 - dx * half);
+                    pb.close();
+                    if let Some(p) = pb.finish() {
+                        pm.fill_path(&p, &paint(*color, 1.0), FillRule::Winding, Transform::identity(), None);
+                    }
                 }
             }
         }
@@ -1527,13 +1558,39 @@ mod tests {
     }
 
     #[test]
+    fn arrowheads_are_drawn_at_the_ends_they_point_to() {
+        use rustgis_map::layout::LineDir;
+        // 100 × 20 mm at 254 dpi (ten pixels a millimetre); a level arrow from 10 to 90 mm.
+        let mut l = Layout::new("Layout", 100.0, 20.0);
+        let blue = Rgba::rgb(0, 0, 255);
+        l.add(
+            "Arrow",
+            (10.0, 7.0, 80.0, 6.0),
+            ElementKind::Line { color: blue, width: 1.0, dir: LineDir::Horizontal, head: LineHead::End },
+        );
+        let pm = render(&l, &mut [], 254.0, &PageInfo::default()).unwrap();
+        let inked = |x: u32, y: u32| pm.pixel(x, y).is_some_and(|p| p.red() < 128 && p.blue() > 128);
+        // At 254 dpi (2.65 pixels a point) the shaft is about 2.6 px wide and the head about 22 px
+        // long and 10 px either side of the line: 5 px off the line, 15 px back from the tip, is
+        // inside the head, but clear of the shaft at the tail.
+        assert!(inked(500, 100), "the shaft");
+        assert!(inked(885, 105) && inked(885, 95), "the head, either side of the line");
+        assert!(!inked(115, 105) && !inked(115, 95), "no head at the tail");
+        assert!(!inked(905, 100), "nothing past the tip");
+    }
+
+    #[test]
     fn ellipses_and_lines_draw_inside_their_boxes() {
         use rustgis_map::layout::LineDir;
         // 100 × 50 mm at 254 dpi: ten pixels a millimetre.
         let mut l = Layout::new("Layout", 100.0, 50.0);
         let red = Rgba::rgb(255, 0, 0);
         l.add("Circle", (10.0, 10.0, 30.0, 30.0), ElementKind::Ellipse { fill: red, outline: red, width: 0.0 });
-        l.add("Line", (50.0, 10.0, 40.0, 30.0), ElementKind::Line { color: Rgba::rgb(0, 0, 255), width: 2.0, dir: LineDir::Rising });
+        l.add(
+            "Line",
+            (50.0, 10.0, 40.0, 30.0),
+            ElementKind::Line { color: Rgba::rgb(0, 0, 255), width: 2.0, dir: LineDir::Rising, head: LineHead::None },
+        );
         let pm = render(&l, &mut [], 254.0, &PageInfo::default()).unwrap();
         let is = |x: u32, y: u32, want: (u8, u8, u8)| pm.pixel(x, y).is_some_and(|p| (p.red(), p.green(), p.blue()) == want);
         let (white, red, blue) = ((255, 255, 255), (255, 0, 0), (0, 0, 255));

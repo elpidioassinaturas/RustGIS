@@ -245,7 +245,7 @@ System** dialog, which also takes a projected EPSG code (such as `3035`, `32633`
 `ESRI:102033` for South America Albers Equal Area Conic, or `ESRI:54030` for World Robinson). A
 code whose projection method or datum grid RustGIS can't use (Polyconic such as `5880`, Cassini,
 oblique Mercator, or a NAD27 code that needs a grid) is refused with the reason, rather than drawn
-in another projection. Of Esri's projected systems, RustGIS knows the 1,983 it draws within a
+in another projection. Of Esri's projected systems, RustGIS knows the 1,986 it draws within a
 metre of PROJ; the rest, such as World Miller (`ESRI:54003`), are refused as unknown codes. The
 presets:
 
@@ -280,7 +280,9 @@ and scale, and the choice is saved with the map (`map.projection` from the comma
 raster already in the map's coordinate system draws without being reprojected. To open every new
 session in a projection, set it in **Settings › Start-up › Projection**. Robinson, Equal
 Earth, Natural Earth, Winkel Tripel and Eckert IV are computed by RustGIS itself on a sphere,
-so EPSG:8857 (Equal Earth) works too.
+so EPSG:8857 (Equal Earth) works too. So is the sinusoidal projection, on a sphere or an
+ellipsoid: MODIS rasters, whose GeoTIFFs give it as their own projection, open and draw, and
+World, Sphere and Africa Sinusoidal (`ESRI:54008`, `53008`, `102011`) can be the map's.
 
 ## Globe
 

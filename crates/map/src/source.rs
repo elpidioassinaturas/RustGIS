@@ -74,6 +74,9 @@ pub struct SourceLayer {
     /// For a layer read live from a MySQL or MariaDB table (desktop only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mysql: Option<MysqlOrigin>,
+    /// For a layer read live from a SQL Server table (desktop only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sqlserver: Option<SqlServerOrigin>,
 }
 
 /// A PostGIS table a layer reads live.
@@ -98,6 +101,21 @@ pub struct MysqlOrigin {
     /// The connection (a `mysql://` or `mariadb://` address), never with its password.
     pub database: String,
     /// The table, as `table`, `database.table`, with `:column` when it has several.
+    pub table: String,
+    /// The geometry family read, for a column of mixed types.
+    #[serde(default)]
+    pub family: Option<rustgis_data::source::Family>,
+    /// The coordinate system given for a geometry whose SRID is 0.
+    #[serde(default)]
+    pub crs: Option<String>,
+}
+
+/// A SQL Server table a layer reads live.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SqlServerOrigin {
+    /// The connection (an `mssql://` address), never with its password.
+    pub database: String,
+    /// The table, as `table`, `schema.table`, with `:column` when it has several.
     pub table: String,
     /// The geometry family read, for a column of mixed types.
     #[serde(default)]
@@ -225,6 +243,29 @@ fn open_mysql(my: &MysqlOrigin) -> rustgis_data::Result<Box<dyn FeatureSource>> 
     }
 }
 
+/// Connects to a SQL Server layer's table again (a project opening). Only a password given
+/// this session is sent, never `SQLCMDPASSWORD`, as for [`open_postgis`].
+fn open_sqlserver(ms: &SqlServerOrigin) -> rustgis_data::Result<Box<dyn FeatureSource>> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = ms;
+        Err(rustgis_data::DataError::Format("SQL Server databases are read in the desktop app".into()))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use rustgis_data::source::{duckdb::Database, sqlserver};
+        let Database::Sqlserver(address) = Database::parse(&ms.database) else {
+            return Err(rustgis_data::DataError::Format(format!("{}: not a SQL Server connection", ms.database)));
+        };
+        let again = |e: rustgis_data::DataError| {
+            rustgis_data::DataError::Format(format!("{e} (connect again with Add Data › Database…, giving its password)"))
+        };
+        let conn = sqlserver::connect(&address, false).map_err(again)?;
+        let table = sqlserver::find_table(&conn, &ms.table)?;
+        Ok(Box::new(sqlserver::SqlServerSource::open(conn, table, ms.family, ms.crs.as_deref())?))
+    }
+}
+
 /// What the layer's features hold.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Window {
@@ -283,6 +324,11 @@ impl SourceLayer {
         SourceLayer { mysql: Some(origin), handle: Some(Arc::from(handle)), ..SourceLayer::default() }
     }
 
+    /// A SQL Server table read live.
+    pub fn from_sqlserver(origin: SqlServerOrigin, handle: Box<dyn FeatureSource>) -> Self {
+        SourceLayer { sqlserver: Some(origin), handle: Some(Arc::from(handle)), ..SourceLayer::default() }
+    }
+
     /// A source read from a file's bytes, kept in the project.
     pub fn from_bytes(file_name: impl Into<String>, bytes: Arc<Vec<u8>>, table: Option<String>, handle: Box<dyn FeatureSource>) -> Self {
         SourceLayer {
@@ -304,6 +350,8 @@ impl SourceLayer {
             open_postgis(pg)
         } else if let Some(my) = &self.mysql {
             open_mysql(my)
+        } else if let Some(ms) = &self.sqlserver {
+            open_sqlserver(ms)
         } else if let Some(bytes) = &self.embedded {
             let name = self.file_name.as_deref().unwrap_or("layer.parquet");
             rustgis_data::source::open_shared(name, bytes.clone(), self.table.as_deref())

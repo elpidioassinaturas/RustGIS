@@ -3,7 +3,8 @@
 //! to rest. A copy of the map is drawn on a worker instead (the copy shares its features and
 //! caches, so it costs pointers), while the drape (see `tilt_drape`) stays on screen until the
 //! frame is ready. GPU scenes are composed here too, then uploaded on the UI thread. In the
-//! browser there are no threads: the frame is drawn at once, as before.
+//! browser there are no threads: the frame is drawn at once, its tile pictures a frame's worth at
+//! a time (see `rustgis_tiles::Pace`), the frame drawn again until they all are.
 
 use rustgis_engine::map::Map;
 use rustgis_engine::render::{self, Backend, RenderOutput, View};
@@ -18,6 +19,8 @@ pub(crate) struct Done {
     pub map: Map,
     /// How long it took (ms).
     pub ms: u64,
+    /// Tile pictures stand in for others, or are still to be drawn: it is drawn again.
+    pub incomplete: bool,
 }
 
 /// The frame being drawn (at most one at a time), and what it is for.
@@ -44,8 +47,17 @@ impl<K> Default for TiltSettle<K> {
 
 fn draw(mut map: Map, view: View, backend: Backend) -> Done {
     let t0 = web_time::Instant::now();
-    let rendered = render::render_backend(&mut map, &view, backend);
-    Done { rendered, view, map, ms: t0.elapsed().as_millis() as u64 }
+    // On the UI thread in the browser, a frame's worth of tile pictures at a time; on a worker
+    // natively, all of them.
+    #[cfg(target_arch = "wasm32")]
+    let (rendered, incomplete) = {
+        let (r, lacks) =
+            render::rustgis_tiles::paced(render::rustgis_tiles::Pace::Settling, || render::render_backend(&mut map, &view, backend));
+        (r, lacks.is_some())
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let (rendered, incomplete) = (render::render_backend(&mut map, &view, backend), false);
+    Done { rendered, view, map, ms: t0.elapsed().as_millis() as u64, incomplete }
 }
 
 impl<K: Copy + PartialEq> TiltSettle<K> {

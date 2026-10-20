@@ -161,12 +161,20 @@ fn about(ui: &mut Ui, t: &Tokens) {
     ui.add_space(8.0);
     ui.label(crate::i18n::fmt("Version {version}", &[("version", env!("CARGO_PKG_VERSION"))]));
     ui.add_space(8.0);
-    ui.label(tl!("RustGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line."));
+    crate::i18n::paragraph(
+        ui,
+        "RustGIS is a free and open-source GIS written in pure Rust. It runs on the desktop and in the browser, and every action is a command you can also run from the command line.",
+        regular(12.5),
+        t.text,
+    );
     ui.add_space(4.0);
     crate::chrome::project_links(ui);
     ui.add_space(8.0);
-    ui.label(
-        egui::RichText::new(tl!("Sample data © Natural Earth (public domain). RustGIS is licensed under Apache-2.0.")).color(t.text_dim),
+    crate::i18n::paragraph(
+        ui,
+        "Sample data © Natural Earth (public domain). RustGIS is licensed under Apache-2.0.",
+        regular(12.5),
+        t.text_dim,
     );
 }
 

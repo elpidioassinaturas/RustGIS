@@ -409,6 +409,10 @@ pub struct Session {
     /// session's, so a step that added or moved layouts opens the right one when undone).
     undo: Vec<Step>,
     redo: Vec<Step>,
+    /// The key the next command's undo step merges by ([`Session::merge_undo`]), and the key the
+    /// last step was made under.
+    merge: Option<String>,
+    merged: Option<String>,
     /// What the project replaced during the command running held beside itself, to give back if
     /// the command fails ([`PutAside`]); and how deep commands run within commands now.
     put_aside: Option<Box<PutAside>>,
@@ -562,6 +566,8 @@ impl Session {
             auto_cache: false,
             undo: Vec::new(),
             redo: Vec::new(),
+            merge: None,
+            merged: None,
             put_aside: None,
             depth: 0,
             restorable: 0,
@@ -680,11 +686,15 @@ impl Session {
     /// Runs a command by id. Mutating commands snapshot the project for undo; an error or a
     /// panic restores it.
     pub fn run(&mut self, id: &str, params: &Value) -> CmdResult {
+        // The merge key asked for ([`Session::merge_undo`]) goes to this command if it runs, and is
+        // gone if it's refused first, so it can't merge a later command into the last step.
+        let merge = if self.depth == 0 { self.merge.take() } else { None };
         // A style that loaded since: its view first, so the command sees where the map is.
         if self.style_view.is_some() {
             self.follow_style_view();
         }
         if id.starts_with(rustgis_plugins::PREFIX) {
+            self.merge = merge;
             return self.run_plugin(id, params);
         }
         let Some(&spec) = self.registry.get(id) else { return Err(format!("unknown command '{id}'")) };
@@ -720,6 +730,7 @@ impl Session {
             self.notify(e.clone(), true);
             return Err(e);
         }
+        self.merge = merge;
         let res = self.guarded(label, mutates, |s| run(s, params));
         // What was added, for the Data Sources pane's Recent list.
         if res.is_ok()
@@ -744,6 +755,9 @@ impl Session {
     /// and restored if `f` fails or panics.
     pub(crate) fn guarded(&mut self, label: &'static str, mutates: bool, f: impl FnOnce(&mut Session) -> CmdResult) -> CmdResult {
         let snapshot = mutates.then(|| self.project.clone());
+        // The merge key asked for applies to this command only, whatever it does; and to a
+        // command run by itself, not to those it runs.
+        let merge = if self.depth == 0 { self.merge.take() } else { None };
         let open_layout = self.active_layout;
         // The project's generation rolls back with it: a project opened part way (a task's step)
         // and then undone is the one before, still open.
@@ -797,9 +811,17 @@ impl Session {
                 }
                 // Undo keeps streamed layers' sources, not their windows: they read the view again.
                 strip_windows(&mut snap);
-                self.undo.push((snap, open_layout, label, self.actor.clone()));
-                if self.undo.len() > UNDO_LIMIT {
-                    self.undo.remove(0);
+                // A step made under the same merge key as the last one is part of it: undo goes
+                // back to before the first of them. Only a command run by itself merges.
+                let key = merge;
+                if key.is_none() || key != self.merged || self.undo.is_empty() {
+                    self.undo.push((snap, open_layout, label, self.actor.clone()));
+                    if self.undo.len() > UNDO_LIMIT {
+                        self.undo.remove(0);
+                    }
+                }
+                if self.depth == 0 {
+                    self.merged = key;
                 }
                 self.redo.clear();
                 self.dirty = true;
@@ -862,6 +884,7 @@ impl Session {
     /// tool…, which opening sets) is copied.
     fn take_project_state(&mut self) -> PutAside {
         use std::mem::take;
+        (self.merge, self.merged) = (None, None);
         PutAside {
             opened: self.opened,
             undo: take(&mut self.undo),
@@ -999,6 +1022,14 @@ impl Session {
         self.redo.last().map(|u| u.2)
     }
 
+    /// Makes the next command's undo step part of the last one, when that was made under the same
+    /// `key`: a held arrow key nudging a layout element is one step to undo, not one per repeat
+    /// (and doesn't push the work before it out of the history). Any other change in between,
+    /// or an undo or redo, starts a new step.
+    pub fn merge_undo(&mut self, key: impl Into<String>) {
+        self.merge = Some(key.into());
+    }
+
     /// Forgets undo/redo and extent history and marks the project clean (after new/open, or a
     /// front end setting up how the project starts): what [`PutAside`] holds, dropped.
     pub fn clear_history(&mut self) {
@@ -1007,6 +1038,7 @@ impl Session {
     }
 
     pub(crate) fn undo(&mut self) -> bool {
+        self.merged = None;
         let Some((p, saved, label, actor)) = self.undo.pop() else { return false };
         let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);
@@ -1019,6 +1051,7 @@ impl Session {
     }
 
     pub(crate) fn redo(&mut self) -> bool {
+        self.merged = None;
         let Some((p, saved, label, actor)) = self.redo.pop() else { return false };
         let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);

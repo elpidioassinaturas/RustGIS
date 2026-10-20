@@ -443,6 +443,8 @@ pub fn arg_text(v: &Value) -> String {
 /// Stages one input (a layer by name, or a file path) for `job`.
 fn stage(inputs: &dyn Inputs, value: &str, data: Data, tf: &Transformer, job: &mut Job) -> Result<FileRef, String> {
     if let Some(r) = inputs.raster(value) {
+        // Every tool places what it makes on the ground; a scan's place is only where it was laid.
+        r.raster.require_coordinates().map_err(|e| format!("{value}: {e}"))?;
         if let Some(p) = r.path.filter(|p| on_disk(p)) {
             return Ok(FileRef::Path(p.to_string()));
         }

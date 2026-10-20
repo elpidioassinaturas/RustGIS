@@ -136,13 +136,17 @@ pub fn semibold(size: f32) -> FontId {
 /// faces (name, bytes, collection index) as fallbacks for scripts it lacks, such as CJK.
 pub fn install_fonts(
     ctx: &egui::Context,
-    extra: &[(String, Arc<FontData>, Option<rustgis_engine::render::fonts::CjkRegion>)],
-    current: Option<rustgis_engine::render::fonts::CjkRegion>,
+    extra: &[(String, Arc<FontData>, Option<rustgis_engine::render::fonts::ScriptFont>)],
+    current: Option<rustgis_engine::render::fonts::ScriptFont>,
 ) {
     let f = rustgis_engine::render::fonts::ui_fonts();
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert("ui".into(), Arc::new(FontData::from_owned(f.regular.clone())));
-    fonts.font_data.insert("ui-semibold".into(), Arc::new(FontData::from_owned(f.semibold.clone())));
+    // Heavier where the face is variable (macOS's system font is one file for every weight, #591),
+    // as exports draw it; a face with no weight axis ignores it.
+    let weight = egui::epaint::text::VariationCoords::new([(b"wght", rustgis_engine::render::fonts::SEMIBOLD_WEIGHT)]);
+    let semibold = FontData::from_owned(f.semibold.clone()).tweak(egui::FontTweak { coords: weight, ..Default::default() });
+    fonts.font_data.insert("ui-semibold".into(), Arc::new(semibold));
     if let Some(prop) = fonts.families.get_mut(&FontFamily::Proportional) {
         prop.insert(0, "ui".into());
         // egui's Hack face has the Georgian letters that Ubuntu Light and Noto Sans lack.
@@ -156,9 +160,14 @@ pub fn install_fonts(
     for (name, data, region) in extra {
         fonts.font_data.insert(name.clone(), Arc::clone(data));
         let primary = region.is_some() && *region == current;
+        // Arabic script goes ahead of the interface face: egui shapes each run of one face on its
+        // own, so a Persian line reads in order only when this face draws its Latin words too.
+        let first = primary && *region == Some(rustgis_engine::render::fonts::ScriptFont::Arabic);
         for fam in [FontFamily::Proportional, FontFamily::Name("semibold".into())] {
             if let Some(v) = fonts.families.get_mut(&fam) {
-                if primary {
+                if first {
+                    v.insert(0, name.clone());
+                } else if primary {
                     // Right after the interface face, so its regional glyph shapes win.
                     v.insert(1.min(v.len()), name.clone());
                 } else {

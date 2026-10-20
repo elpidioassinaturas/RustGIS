@@ -521,7 +521,7 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
         Some(s) if s.id == "huggingface" => tl!("a name, or owner/name such as giswqs/geospatial").into(),
         _ if place => tl!("words to keep to (optional)").into(),
         Some(_) if needs => tl!("Search (this portal needs words)…").into(),
-        Some(s) => crate::i18n::fmt("Search {name}…", &[("name", tl!(s.title))]),
+        Some(s) => crate::i18n::fmt("Search {name}…", &[("name", tl_raw!(s.title))]),
         None => tl!("parks, bike lanes, flood zones…").into(),
     };
     ui.horizontal(|ui| {

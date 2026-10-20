@@ -13,7 +13,7 @@
 //! `Projector` and with pyproj, and kept only when they agree within 1 m. Left out:
 //!
 //! - systems whose method proj4rs lacks (`col_urban`, `omerc`, `cass`, `eqdc`, `poly`, `ortho`,
-//!   `sinu`, `bonne`, `wink2` and more), and the NAD27 ones whose grids proj4rs can't load: 170;
+//!   `bonne`, `wink2` and more), and the NAD27 ones whose grids proj4rs can't load: 167;
 //! - six world systems RustGIS computes on a sphere where PROJ uses the ellipsoid or other
 //!   parameters, kilometres apart: World Miller (54003), the WGS 84 Equal Earths (54035–54037)
 //!   and the Winkel Tripel NGS pair (53042, 54042), whose `lat_1` RustGIS doesn't read. The
@@ -23,6 +23,10 @@
 //!   planetary ones (Moon, Mars), whose bodies the map can't hold;
 //! - the seven PROJ can't write as a PROJ string (Hammer–Aitoff, Fuller, Cube, Tobler …) and the
 //!   two oblique Mercators it refuses (53025, 54025).
+//!
+//! The three Earth sinusoidal systems (Sphere and World Sinusoidal, 53008 and 54008, and Africa
+//! Sinusoidal, 102011) were added afterwards (opengeos/RustGIS#563): RustGIS computes the
+//! sinusoidal projection itself (`rustgis_geom::Sinusoidal`), checked against PROJ in its tests.
 //!
 //! Datum shifts follow `epsg_gap.rs`: where the definition has none and the first grid-free
 //! operation to WGS 84 that PROJ lists is a single non-zero Helmert step, it is written as
@@ -63,6 +67,7 @@ pub(crate) const DEFS: &[(u32, &str)] = &[
     (53002, "+proj=eqc +lat_ts=60 +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +R=6371000 +units=m +no_defs"), // Sphere_Equidistant_Cylindrical
     (53003, "+proj=mill +lon_0=0 +x_0=0 +y_0=0 +R=6371000 +units=m +no_defs"), // Sphere_Miller_Cylindrical
     (53004, "+proj=merc +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +R=6371000 +units=m +no_defs"), // Sphere_Mercator
+    (53008, "+proj=sinu +lon_0=0 +x_0=0 +y_0=0 +R=6371000 +units=m +no_defs"), // Sphere_Sinusoidal
     (53009, "+proj=moll +lon_0=0 +x_0=0 +y_0=0 +R=6371000 +units=m +no_defs"), // Sphere_Mollweide
     (53012, "+proj=eck4 +lon_0=0 +x_0=0 +y_0=0 +R=6371000 +units=m +no_defs"), // Sphere_Eckert_IV
     (53017, "+proj=cea +lat_ts=30 +lon_0=0 +x_0=0 +y_0=0 +R=6371000 +units=m +no_defs"), // Sphere_Behrmann
@@ -79,6 +84,7 @@ pub(crate) const DEFS: &[(u32, &str)] = &[
     (54001, "+proj=eqc +lat_ts=0 +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"), // World_Plate_Carree
     (54002, "+proj=eqc +lat_ts=60 +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"), // World_Equidistant_Cylindrical
     (54004, "+proj=merc +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"), // World_Mercator
+    (54008, "+proj=sinu +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"), // World_Sinusoidal
     (54009, "+proj=moll +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"), // World_Mollweide
     (54012, "+proj=eck4 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"), // World_Eckert_IV
     (54017, "+proj=cea +lat_ts=30 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"), // World_Behrmann
@@ -104,6 +110,7 @@ pub(crate) const DEFS: &[(u32, &str)] = &[
     (102007, "+proj=aea +lat_0=13 +lon_0=-157 +lat_1=8 +lat_2=18 +x_0=0 +y_0=0 +datum=NAD83 +units=m +no_defs"), // Hawaii_Albers_Equal_Area_Conic
     (102008, "+proj=aea +lat_0=40 +lon_0=-96 +lat_1=20 +lat_2=60 +x_0=0 +y_0=0 +datum=NAD83 +units=m +no_defs"), // North_America_Albers_Equal_Area_Conic
     (102009, "+proj=lcc +lat_0=40 +lon_0=-96 +lat_1=20 +lat_2=60 +x_0=0 +y_0=0 +datum=NAD83 +units=m +no_defs"), // North_America_Lambert_Conformal_Conic
+    (102011, "+proj=sinu +lon_0=15 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"), // Africa_Sinusoidal
     (102012, "+proj=lcc +lat_0=0 +lon_0=105 +lat_1=30 +lat_2=62 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"), // Asia_Lambert_Conformal_Conic
     (102013, "+proj=aea +lat_0=30 +lon_0=10 +lat_1=43 +lat_2=62 +x_0=0 +y_0=0 +ellps=intl +towgs84=-87,-98,-121,0,0,0,0 +units=m +no_defs"), // Europe_Albers_Equal_Area_Conic
     (102014, "+proj=lcc +lat_0=30 +lon_0=10 +lat_1=43 +lat_2=62 +x_0=0 +y_0=0 +ellps=intl +towgs84=-87,-98,-121,0,0,0,0 +units=m +no_defs"), // Europe_Lambert_Conformal_Conic

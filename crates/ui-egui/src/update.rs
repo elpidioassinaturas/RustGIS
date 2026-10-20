@@ -159,7 +159,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                     }
                 }
                 Some(Err(e)) => {
-                    ui.label(crate::i18n::fmt("Couldn't check for updates: {error}", &[("error", tl!(e.as_str()))]));
+                    ui.label(crate::i18n::fmt("Couldn't check for updates: {error}", &[("error", tl_raw!(e.as_str()))]));
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if ui.button(tl!("Open the Release Page")).clicked() {

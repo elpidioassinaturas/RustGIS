@@ -348,9 +348,19 @@ fn size_text(n: u64) -> String {
 pub fn sourcecoop(app: &mut RustGisApp, ui: &mut egui::Ui) {
     let locked = app.ui.catalogs.locked;
     if locked {
-        ui.label(egui::RichText::new(tl!("Natural Earth's public domain map data (countries, states, coastlines, rivers, lakes, roads and more) on Source Cooperative. PMTiles are added as tile layers, other files as layers.")).weak());
+        crate::i18n::paragraph(
+            ui,
+            "Natural Earth's public domain map data (countries, states, coastlines, rivers, lakes, roads and more) on Source Cooperative. PMTiles are added as tile layers, other files as layers.",
+            crate::theme::regular(12.5),
+            ui.visuals().weak_text_color(),
+        );
     } else {
-        ui.label(egui::RichText::new(tl!("Open data products on Source Cooperative. GeoParquet, FlatGeobuf, cloud-optimised GeoTIFFs and PMTiles are read in place; other files are downloaded.")).weak());
+        crate::i18n::paragraph(
+            ui,
+            "Open data products on Source Cooperative. GeoParquet, FlatGeobuf, cloud-optimised GeoTIFFs and PMTiles are read in place; other files are downloaded.",
+            crate::theme::regular(12.5),
+            ui.visuals().weak_text_color(),
+        );
     }
     let busy = app.ui.catalogs.waiting.is_some();
     let mut ask = None;

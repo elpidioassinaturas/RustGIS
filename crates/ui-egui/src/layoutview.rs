@@ -6,14 +6,14 @@
 
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use rustgis_engine::map::layout::{
-    ArrowStyle, CoordFormat, ElementKind, Grid, GridStyle, Layout, LineDir, MAX_COLORBAR_TICKS, MAX_GRID_WIDTH, MAX_LETTER_SPACING,
-    MAX_SCALE_DIVISIONS, MAX_TICK_MM, MIN_LETTER_SPACING, Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TextAlign, TickSide,
-    frame_camera,
+    ArrowStyle, CoordFormat, ElementKind, Grid, GridStyle, Layout, LineHead, MAX_COLORBAR_TICKS, MAX_GRID_WIDTH, MAX_SCALE_DIVISIONS,
+    MAX_TICK_MM, Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TickSide, frame_camera, line_angle, line_length,
 };
 use serde_json::{Value, json};
 
 use crate::RustGisApp;
 use crate::theme::{Tokens, regular, semibold};
+use crate::widgets::Dragged;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Drag {
@@ -31,6 +31,9 @@ enum Drag {
     NewGuide(bool),
     /// Moving a guide: vertical or horizontal, and its index.
     Guide(bool, usize),
+    /// Turning a line or arrow by its rotation handle: its id, its angle at the start, and the
+    /// pointer's angle about its centre then (degrees).
+    Rotate(u32, f64, f64),
 }
 
 /// Width of the rulers along the view's top and left edges (points).
@@ -90,6 +93,28 @@ pub struct LayoutView {
     /// Where the primary button last went down: egui forgets it on release, and a click is
     /// judged by where it started.
     pressed: Option<Pos2>,
+    /// The arrow-key nudges so far: how many runs of them there have been, and the last one's
+    /// layout, element and time (seconds), for [`LayoutView::nudge_key`].
+    nudges: u64,
+    nudged: Option<(usize, u32, f64)>,
+}
+
+/// How far (mm) an arrow key nudges the selected layout element, and with Shift.
+pub const NUDGE_MM: f64 = 1.0;
+pub const NUDGE_FAST_MM: f64 = 10.0;
+
+impl LayoutView {
+    /// The undo key for an arrow key nudging element `id` of layout `li` at `now` (seconds): the
+    /// last nudge's while the same element keeps being nudged, at most a second apart, so a held
+    /// key (or quick taps) is one step to undo.
+    pub fn nudge_key(&mut self, li: usize, id: u32, now: f64) -> String {
+        let same = self.nudged.is_some_and(|(l, i, t)| l == li && i == id && (0.0..=1.0).contains(&(now - t)));
+        if !same {
+            self.nudges = self.nudges.wrapping_add(1);
+        }
+        self.nudged = Some((li, id, now));
+        format!("layout nudge {}", self.nudges)
+    }
 }
 
 /// Forgets the selection and the text typed into its fields once another project has replaced
@@ -161,6 +186,51 @@ fn handle_at(app: &RustGisApp, layout: &Layout, page: Rect, s: f32, pos: Pos2) -
         .filter(|(_, d)| *d <= reach)
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(i, _)| (e.id, i))
+}
+
+/// How far (points) above a selected line or arrow its rotation handle sits.
+const ROTATE_GAP: f32 = 22.0;
+
+/// The selected line's rotation handle, unless it's locked: the line, where the handle is and the
+/// line's centre, on screen.
+fn rotate_handle(app: &RustGisApp, layout: &Layout, page: Rect, s: f32) -> Option<(u32, Pos2, Pos2)> {
+    let e = app.layout.selected.and_then(|id| layout.element(id)).filter(|e| !e.locked && matches!(e.kind, ElementKind::Line { .. }))?;
+    let r = Rect::from_min_max(to_screen(page, s, (e.x, e.y)), to_screen(page, s, (e.x + e.w, e.y + e.h)));
+    Some((e.id, pos2(r.center().x, r.top() - ROTATE_GAP), r.center()))
+}
+
+/// The rotation handle at a screen point: the line, and its centre on screen.
+fn rotate_at(app: &RustGisApp, layout: &Layout, page: Rect, s: f32, pos: Pos2) -> Option<(u32, Pos2)> {
+    let (id, h, c) = rotate_handle(app, layout, page, s)?;
+    ((h - pos).length() <= HANDLE_PICK).then_some((id, c))
+}
+
+/// A line element's angle (degrees, anticlockwise from pointing right).
+fn element_angle(layout: &Layout, id: u32) -> Option<f64> {
+    let e = layout.element(id)?;
+    match e.kind {
+        ElementKind::Line { dir, head, .. } => Some(line_angle((e.x, e.y, e.w, e.h), dir, head)),
+        _ => None,
+    }
+}
+
+/// The angle (degrees, anticlockwise from pointing right) of `p` seen from `c`, on screen.
+fn screen_angle(c: Pos2, p: Pos2) -> f64 {
+    f64::from(c.y - p.y).atan2(f64::from(p.x - c.x)).to_degrees()
+}
+
+/// A line's angle after the pointer went round its centre from `from` to `to` degrees: in 15°
+/// steps with `steps` (Shift), else onto a multiple of 45° within 3° of one, so level, upright
+/// and diagonal lines are easy to get. Within -180..180.
+fn turned(start: f64, from: f64, to: f64, steps: bool) -> f64 {
+    let a = start + (to - from);
+    let a = if steps {
+        (a / 15.0).round() * 15.0
+    } else {
+        let m = (a / 45.0).round() * 45.0;
+        if (a - m).abs() <= 3.0 { m } else { a }
+    };
+    (a + 180.0).rem_euclid(360.0) - 180.0
 }
 
 /// The cursor for dragging handle `h`.
@@ -570,8 +640,30 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
                 painter.rect_filled(hr, 2.0, if active == Some(i) { accent } else { Color32::WHITE });
                 painter.rect_stroke(hr, 2.0, Stroke::new(1.5, accent), egui::StrokeKind::Middle);
             }
+            // A line's rotation handle: a round knob on a stem above it, filled while it's under
+            // the pointer or turning.
+            if let Some((_, knob, _)) = rotate_handle(app, &layout, page, s) {
+                let on = matches!(app.layout.drag, Some(Drag::Rotate(..)))
+                    || (app.layout.drag.is_none() && pointer.is_some_and(|p| rotate_at(app, &layout, page, s, p).is_some()));
+                painter.line_segment([pos2(r.center().x, r.top()), knob], Stroke::new(1.2, accent));
+                painter.circle(knob, HANDLE * 0.6, if on { accent } else { Color32::WHITE }, Stroke::new(1.5, accent));
+            }
         }
         painter.text(r.left_top() + vec2(0.0, -4.0), Align2::LEFT_BOTTOM, &e.name, regular(11.0), accent);
+    }
+    // A line being turned: where it will point, and its angle.
+    if let (Some(Drag::Rotate(id, a0, from)), Some(p)) = (app.layout.drag, pointer)
+        && let Some(e) = layout.element(id)
+        && let ElementKind::Line { dir, .. } = e.kind
+    {
+        let r = Rect::from_min_max(to_screen(page, s, (e.x, e.y)), to_screen(page, s, (e.x + e.w, e.y + e.h)));
+        let c = r.center();
+        let a = turned(a0, from, screen_angle(c, p), ui.input(|i| i.modifiers.shift));
+        let half = (line_length((e.x, e.y, e.w, e.h), dir) * f64::from(s) / 2.0) as f32;
+        let u = vec2(a.to_radians().cos() as f32, -(a.to_radians().sin() as f32));
+        painter.line_segment([c - u * half, c + u * half], Stroke::new(2.0, accent));
+        painter.circle_filled(c + u * half, 3.5, accent);
+        painter.text(p + vec2(12.0, 12.0), Align2::LEFT_TOP, format!("{a:.0}°"), semibold(12.0), accent);
     }
     // A frame being drawn.
     if app.layout.tool.is_some() && !app.layout.sketch.is_empty() {
@@ -769,7 +861,11 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, layout: &L
             None if !navigating => handle_at(app, layout, page, s, p).map(|(_, h)| h),
             _ => None,
         };
+        let rotating = matches!(app.layout.drag, Some(Drag::Rotate(..)));
+        let knob = app.layout.drag.is_none() && rotate_at(app, layout, page, s, p).is_some();
         match (vertical, handle) {
+            _ if rotating => ui.ctx().set_cursor_icon(CursorIcon::Grabbing),
+            _ if knob => ui.ctx().set_cursor_icon(CursorIcon::Grab),
             (_, Some(h)) => ui.ctx().set_cursor_icon(handle_cursor(h)),
             (Some(true), _) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
             (Some(false), _) => ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical),
@@ -792,9 +888,11 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, layout: &L
     let pressed = if resp.clicked() || resp.drag_started() { app.layout.pressed.take() } else { None };
     if resp.clicked()
         && let Some(p) = pointer_mm
-        && pressed
-            .or(resp.interact_pointer_pos())
-            .is_none_or(|pos| ruler_at(&app.layout, resp.rect, pos).is_none() && handle_at(app, layout, page, s, pos).is_none())
+        && pressed.or(resp.interact_pointer_pos()).is_none_or(|pos| {
+            ruler_at(&app.layout, resp.rect, pos).is_none()
+                && handle_at(app, layout, page, s, pos).is_none()
+                && rotate_at(app, layout, page, s, pos).is_none()
+        })
     {
         app.layout.selected = layout.hit(p.0, p.1);
         // A click on the element already selected brings back the pane closed over it.
@@ -822,24 +920,32 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, layout: &L
         let handle = handle_at(app, layout, page, s, origin);
         let ruler = ruler_at(&app.layout, resp.rect, origin);
         let guide = guide_at(layout, page, s, origin);
-        app.layout.drag = match (ruler, handle, guide, layout.hit(p.0, p.1)) {
-            (Some(vertical), ..) => Some(Drag::NewGuide(vertical)),
-            (None, Some((id, h)), ..) => Some(Drag::Resize(id, h, p)),
-            (None, None, Some((vertical, i)), _) => Some(Drag::Guide(vertical, i)),
-            // A locked element is selected and stays put, its map too.
-            (None, None, None, Some(id)) if locked(layout, id) => {
-                app.layout.selected = Some(id);
-                None
+        // A line's rotation knob, outside its box, comes before anything under it.
+        let rotate = ruler.is_none().then(|| rotate_at(app, layout, page, s, origin)).flatten();
+        app.layout.drag = if let Some((id, c)) = rotate {
+            element_angle(layout, id).map(|a| Drag::Rotate(id, a, screen_angle(c, origin)))
+        } else {
+            match (ruler, handle, guide, layout.hit(p.0, p.1)) {
+                (Some(vertical), ..) => Some(Drag::NewGuide(vertical)),
+                (None, Some((id, h)), ..) => Some(Drag::Resize(id, h, p)),
+                (None, None, Some((vertical, i)), _) => Some(Drag::Guide(vertical, i)),
+                // A locked element is selected and stays put, its map too.
+                (None, None, None, Some(id)) if locked(layout, id) => {
+                    app.layout.selected = Some(id);
+                    None
+                }
+                (None, None, None, Some(id))
+                    if shift && matches!(layout.element(id).map(|e| &e.kind), Some(ElementKind::MapFrame { .. })) =>
+                {
+                    app.layout.selected = Some(id);
+                    Some(Drag::PanFrame(id, p))
+                }
+                (None, None, None, Some(id)) => {
+                    app.layout.selected = Some(id);
+                    Some(Drag::Move(id, p))
+                }
+                (None, None, None, None) => Some(Drag::Pan),
             }
-            (None, None, None, Some(id)) if shift && matches!(layout.element(id).map(|e| &e.kind), Some(ElementKind::MapFrame { .. })) => {
-                app.layout.selected = Some(id);
-                Some(Drag::PanFrame(id, p))
-            }
-            (None, None, None, Some(id)) => {
-                app.layout.selected = Some(id);
-                Some(Drag::Move(id, p))
-            }
-            (None, None, None, None) => Some(Drag::Pan),
         };
     }
     if app.layout.drag == Some(Drag::Pan) {
@@ -870,6 +976,15 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, layout: &L
                 drop_guide(app, layout, li, page, s, resp.rect, v, Some(i), at);
             }
             (Some(Drag::PanFrame(id, start)), Some(end)) => pan_frame(app, layout, li, id, end.0 - start.0, end.1 - start.1),
+            (Some(Drag::Rotate(id, a0, from)), _) => {
+                if let (Some(at), Some(e)) = (ui.input(|i| i.pointer.latest_pos()), layout.element(id)) {
+                    let c = Rect::from_min_max(to_screen(page, s, (e.x, e.y)), to_screen(page, s, (e.x + e.w, e.y + e.h))).center();
+                    let a = turned(a0, from, screen_angle(c, at), ui.input(|i| i.modifiers.shift));
+                    if (a - a0).abs() > 0.05 {
+                        let _ = app.run("layout.update", json!({"layout": li, "element": id, "angle": a}));
+                    }
+                }
+            }
             _ => {}
         }
         app.layout.drag = None;
@@ -1003,10 +1118,12 @@ fn grid_properties(app: &mut RustGisApp, ui: &mut Ui, grid: Option<&Grid>, id: u
         set(app, json!(on));
     }
     let Some(g) = grid else { return };
-    let changed = |r: &egui::Response| r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged());
+    // Each number kept across a drag until it is let go (#607).
+    let key = |field: &str| egui::Id::new(("grid_drag", id, field));
     egui::Grid::new(("grid_props", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
         ui.label(tl!("Interval"));
         let mut step = g.step;
+        let drag = Dragged::lend(ui, key("step"), &mut step);
         let r = ui.add(
             egui::DragValue::new(&mut step)
                 .range(0.0..=90.0)
@@ -1014,7 +1131,7 @@ fn grid_properties(app: &mut RustGisApp, ui: &mut Ui, grid: Option<&Grid>, id: u
                 .max_decimals(4)
                 .custom_formatter(|v, _| if v <= 0.0 { tl!("Auto").to_string() } else { format!("{v}°") }),
         );
-        if changed(&r) && (step - g.step).abs() > 1e-9 {
+        if drag.settled(ui, &r, &mut step) && (step - g.step).abs() > 1e-9 {
             set(app, json!({"step": step}));
         }
         ui.end_row();
@@ -1035,16 +1152,18 @@ fn grid_properties(app: &mut RustGisApp, ui: &mut Ui, grid: Option<&Grid>, id: u
         ui.end_row();
         ui.label(tl!("Line width"));
         let mut w = g.width;
+        let drag = Dragged::lend(ui, key("width"), &mut w);
         let r = ui.add(egui::DragValue::new(&mut w).range(0.0..=MAX_GRID_WIDTH).speed(0.05).max_decimals(2).suffix(" pt"));
-        if changed(&r) && (w - g.width).abs() > 1e-9 {
+        if drag.settled(ui, &r, &mut w) && (w - g.width).abs() > 1e-9 {
             set(app, json!({"width": w}));
         }
         ui.end_row();
         if g.style.ticks() {
             ui.label(tl!("Tick length"));
             let mut t = g.tick_length;
+            let drag = Dragged::lend(ui, key("tickLength"), &mut t);
             let r = ui.add(egui::DragValue::new(&mut t).range(0.0..=MAX_TICK_MM).speed(0.1).max_decimals(1).suffix(" mm"));
-            if changed(&r) && (t - g.tick_length).abs() > 1e-9 {
+            if drag.settled(ui, &r, &mut t) && (t - g.tick_length).abs() > 1e-9 {
                 set(app, json!({"tickLength": t}));
             }
             ui.end_row();
@@ -1117,7 +1236,7 @@ pub fn format(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             app.layout.drawn = Some(drawn);
             let Some(e) = layout.element(drawn.1) else { return };
             // Where it is ("Layout: Text"), as the pane also formats a text on the map ("Map: Text").
-            let heading = crate::i18n::fmt("Layout: {kind}", &[("kind", tl!(e.kind.label()))]);
+            let heading = crate::i18n::fmt("Layout: {kind}", &[("kind", tl_raw!(e.kind.label()))]);
             ui.label(egui::RichText::new(heading).font(semibold(14.0)));
             ui.separator();
             // Locked (#536), its properties show but take no change until it is unlocked.
@@ -1142,6 +1261,8 @@ pub fn format(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
 fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
     let Some(e) = app.layout.selected.and_then(|id| layout.element(id)).cloned() else { return };
     let id = e.id;
+    // Each number kept across a drag until it is let go (#607): one key per layout, element and field.
+    let drag_key = |field: &str| egui::Id::new(("layout_drag", li, id, field));
     let update = |app: &mut RustGisApp, p: Value| {
         let mut p = p;
         p["layout"] = json!(li);
@@ -1160,8 +1281,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                 for (label, key, v) in [("X (mm)", "x", e.x), ("Y (mm)", "y", e.y), ("Width (mm)", "w", e.w), ("Height (mm)", "h", e.h)] {
                     ui.label(tl!(label));
                     let mut val = v;
+                    let drag = Dragged::lend(ui, drag_key(key), &mut val);
                     let r = ui.add(egui::DragValue::new(&mut val).speed(0.5).max_decimals(1));
-                    if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && (val - v).abs() > 1e-6 {
+                    if drag.settled(ui, &r, &mut val) && (val - v).abs() > 1e-6 {
                         update(app, json!({key: val}));
                     }
                     ui.end_row();
@@ -1252,8 +1374,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                         ui.end_row();
                         ui.label(tl!("Ticks"));
                         let mut n = *ticks as u64;
+                        let drag = Dragged::lend(ui, drag_key("ticks"), &mut n);
                         let r = ui.add(egui::DragValue::new(&mut n).range(2..=MAX_COLORBAR_TICKS as u64));
-                        if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && n as usize != *ticks {
+                        if drag.settled(ui, &r, &mut n) && n as usize != *ticks {
                             update(app, json!({"ticks": n}));
                         }
                         ui.end_row();
@@ -1278,8 +1401,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                         ui.label(tl!("Scale 1:"));
                         let mut sc = *scale;
                         let speed = sc * 0.01;
+                        let drag = Dragged::lend(ui, drag_key("scale"), &mut sc);
                         let r = ui.add(egui::DragValue::new(&mut sc).range(100.0..=1e10).speed(speed).max_decimals(0));
-                        if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && (sc - scale).abs() > 0.5 {
+                        if drag.settled(ui, &r, &mut sc) && (sc - scale).abs() > 0.5 {
                             update(app, json!({"scale": sc}));
                         }
                         ui.end_row();
@@ -1289,8 +1413,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                         {
                             ui.label(tl!(label));
                             let mut v = current;
+                            let drag = Dragged::lend(ui, drag_key(key), &mut v);
                             let r = ui.add(egui::DragValue::new(&mut v).range(range).speed(0.5).max_decimals(1).suffix("°"));
-                            if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && (v - current).abs() > 1e-6 {
+                            if drag.settled(ui, &r, &mut v) && (v - current).abs() > 1e-6 {
                                 update(app, json!({key: v}));
                             }
                             ui.end_row();
@@ -1336,8 +1461,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                         ui.end_row();
                         ui.label(tl!("Divisions"));
                         let mut n = *divisions as u64;
+                        let drag = Dragged::lend(ui, drag_key("divisions"), &mut n);
                         let r = ui.add(egui::DragValue::new(&mut n).range(1..=MAX_SCALE_DIVISIONS as u64));
-                        if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && n as usize != *divisions {
+                        if drag.settled(ui, &r, &mut n) && n as usize != *divisions {
                             update(app, json!({"divisions": n}));
                         }
                         ui.end_row();
@@ -1345,8 +1471,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                     ElementKind::Table { rows, .. } => {
                         ui.label(tl!("Rows"));
                         let mut n = *rows as u64;
+                        let drag = Dragged::lend(ui, drag_key("rows"), &mut n);
                         let r = ui.add(egui::DragValue::new(&mut n).range(1..=500));
-                        if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && n as usize != *rows {
+                        if drag.settled(ui, &r, &mut n) && n as usize != *rows {
                             update(app, json!({"rows": n}));
                         }
                         ui.end_row();
@@ -1363,13 +1490,14 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                         }
                         ui.label(tl!("Outline width"));
                         let mut wd = *width;
+                        let drag = Dragged::lend(ui, drag_key("width"), &mut wd);
                         let r = ui.add(egui::DragValue::new(&mut wd).range(0.0..=50.0).speed(0.1).max_decimals(1).suffix(" pt"));
-                        if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && (wd - width).abs() > 1e-6 {
+                        if drag.settled(ui, &r, &mut wd) && (wd - width).abs() > 1e-6 {
                             update(app, json!({"width": wd}));
                         }
                         ui.end_row();
                     }
-                    ElementKind::Line { color, width, dir } => {
+                    ElementKind::Line { color, width, dir, head } => {
                         ui.label(tl!("Color"));
                         let mut c = crate::theme::c32(*color);
                         if crate::widgets::color_button(ui, &mut c).changed() {
@@ -1378,19 +1506,30 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                         ui.end_row();
                         ui.label(tl!("Width"));
                         let mut wd = *width;
+                        let drag = Dragged::lend(ui, drag_key("width"), &mut wd);
                         let r = ui.add(egui::DragValue::new(&mut wd).range(0.1..=50.0).speed(0.1).max_decimals(1).suffix(" pt"));
-                        if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && (wd - width).abs() > 1e-6 {
+                        if drag.settled(ui, &r, &mut wd) && (wd - width).abs() > 1e-6 {
                             update(app, json!({"width": wd}));
                         }
                         ui.end_row();
-                        ui.label(tl!("Direction"));
-                        egui::ComboBox::from_id_salt(("line_dir", id)).selected_text(tl!(dir.label())).show_ui(ui, |ui| {
-                            for d in LineDir::ALL {
-                                if ui.selectable_label(d == *dir, tl!(d.label())).clicked() {
-                                    update(app, json!({"dir": d.code()}));
+                        ui.label(tl!("Arrowheads"));
+                        egui::ComboBox::from_id_salt(("line_head", id)).selected_text(tl!(head.label())).show_ui(ui, |ui| {
+                            for h in LineHead::ALL {
+                                if ui.selectable_label(h == *head, tl!(h.label())).clicked() {
+                                    update(app, json!({"head": h.code()}));
                                 }
                             }
                         });
+                        ui.end_row();
+                        // Anticlockwise from pointing right; the rotation handle above it turns it too.
+                        ui.label(tl!("Angle"));
+                        let current = line_angle((e.x, e.y, e.w, e.h), *dir, *head);
+                        let mut a = current;
+                        let drag = Dragged::lend(ui, drag_key("angle"), &mut a);
+                        let r = ui.add(egui::DragValue::new(&mut a).range(-180.0..=180.0).speed(1.0).max_decimals(1).suffix("°"));
+                        if drag.settled(ui, &r, &mut a) && (a - current).abs() > 1e-6 {
+                            update(app, json!({"angle": a}));
+                        }
                         ui.end_row();
                     }
                     _ => {}
@@ -1398,51 +1537,25 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             },
         );
     });
-    // A layout's text: the form a text graphic has too (#516), with the page's dynamic text, and
-    // the type settings only a layout's text has.
+    // A layout's text: the form a text graphic has too (#516, #535), with the page's dynamic text.
     if let ElementKind::Text { text, size, color, bold, italic, align, letter_spacing } = &e.kind {
         let key = (li, id, "text");
         let mut buf = app.layout.typing.remove(&key).unwrap_or_else(|| text.clone());
         let (mut sz, mut c, mut bb) = (*size, crate::theme::c32(*color), *bold);
+        let (mut it, mut al, mut ls) = (*italic, *align, *letter_spacing);
         let tokens = [rustgis_engine::map::graphics::TOKENS, rustgis_engine::map::layout::PAGE_TOKENS];
-        let fields = crate::textform::Fields { text: &mut buf, size: &mut sz, color: Some(&mut c), bold: Some(&mut bb), select: false };
-        // The type settings only a layout's text has, in the form's grid so they line up.
-        let settled = crate::textform::section(ui, "Text", |ui| {
-            crate::textform::show(ui, ("layout_text", li, id), &tokens, fields, |ui| {
-                ui.label(tl!("Italic"));
-                let mut it = *italic;
-                // Named for assistive technology, as its label sits in the other column.
-                let r = ui.checkbox(&mut it, "");
-                r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, it, tl!("Italic")));
-                if r.changed() {
-                    update(app, json!({"italic": it}));
-                }
-                ui.end_row();
-                ui.label(tl!("Alignment"));
-                egui::ComboBox::from_id_salt(("text_align", id)).selected_text(tl!(align.label())).show_ui(ui, |ui| {
-                    for v in TextAlign::ALL {
-                        if ui.selectable_label(*align == v, tl!(v.label())).clicked() && *align != v {
-                            update(app, json!({"align": v.code()}));
-                        }
-                    }
-                });
-                ui.end_row();
-                ui.label(tl!("Letter spacing"));
-                let mut ls = *letter_spacing;
-                let r = ui.add(
-                    egui::DragValue::new(&mut ls).range(MIN_LETTER_SPACING..=MAX_LETTER_SPACING).speed(0.1).max_decimals(1).suffix(" pt"),
-                );
-                r.widget_info(|| egui::WidgetInfo {
-                    label: Some(tl!("Letter spacing").to_string()),
-                    ..egui::WidgetInfo::drag_value(true, ls)
-                });
-                if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && (ls - letter_spacing).abs() > 1e-6 {
-                    update(app, json!({"letterSpacing": ls}));
-                }
-                ui.end_row();
-            })
-        })
-        .unwrap_or_default();
+        let fields = crate::textform::Fields {
+            text: &mut buf,
+            size: &mut sz,
+            color: Some(&mut c),
+            bold: Some(&mut bb),
+            italic: Some(&mut it),
+            align: Some(&mut al),
+            letter_spacing: Some(&mut ls),
+            select: false,
+        };
+        let settled = crate::textform::section(ui, "Text", |ui| crate::textform::show(ui, ("layout_text", li, id), &tokens, fields))
+            .unwrap_or_default();
         if settled.typing {
             app.layout.typing.insert(key, buf);
         } else if settled.text && buf != *text {
@@ -1456,6 +1569,15 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
         }
         if settled.bold {
             update(app, json!({"bold": bb}));
+        }
+        if settled.italic {
+            update(app, json!({"italic": it}));
+        }
+        if settled.align {
+            update(app, json!({"align": al.code()}));
+        }
+        if settled.letter_spacing {
+            update(app, json!({"letterSpacing": ls}));
         }
     }
     // The layers a legend lists: a checkbox for each vector layer of its frame's map, ticked when
@@ -1518,6 +1640,7 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                 ui.end_row();
                 ui.label(tl!("Line width"));
                 let mut w = *extent_width;
+                let drag = Dragged::lend(ui, drag_key("extentWidth"), &mut w);
                 let r = ui.add(
                     egui::DragValue::new(&mut w)
                         .range(rustgis_engine::map::layout::MIN_INDICATOR_WIDTH..=rustgis_engine::map::layout::MAX_INDICATOR_WIDTH)
@@ -1525,7 +1648,7 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                         .max_decimals(2)
                         .suffix(" pt"),
                 );
-                if (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && (w - extent_width).abs() > 1e-6 {
+                if drag.settled(ui, &r, &mut w) && (w - extent_width).abs() > 1e-6 {
                     update(app, json!({"extentIndicator": {"width": w}}));
                 }
                 ui.end_row();
@@ -1578,11 +1701,74 @@ pub(crate) fn locked_delete() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{RULER, landing, page_rect, resized, snap_to, to_screen};
+    use super::{RULER, landing, page_rect, resized, rotate_handle, snap_to, to_screen, turned};
     use crate::RustGisApp;
     use egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect, vec2};
     use serde_json::json;
     use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn turns_snap_to_level_upright_and_diagonal() {
+        assert_eq!(turned(0.0, 90.0, 0.0, false), -90.0, "a quarter turn clockwise");
+        assert_eq!(turned(10.0, 0.0, 33.0, false), 45.0, "43° snaps to 45°");
+        assert!((turned(10.0, 0.0, 20.0, false) - 30.0).abs() < 1e-9, "30° is left alone");
+        assert_eq!(turned(0.0, 0.0, 20.0, true), 15.0, "Shift: 15° steps");
+        assert!((turned(170.0, 0.0, 30.0, false) + 160.0).abs() < 1e-9, "200° is -160°");
+    }
+
+    /// Dragging an arrow's round handle from above its centre round to its right turns it a
+    /// quarter turn clockwise, about its centre, keeping its length.
+    #[test]
+    fn an_arrow_turns_by_its_rotation_handle() {
+        use rustgis_engine::map::layout::{ElementKind, line_angle, line_length};
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Turn", "template": "blank"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let id = app.run("layout.addElement", json!({"layout": li, "kind": "arrow", "angle": 0, "length": 60})).unwrap()["element"]
+            .as_u64()
+            .unwrap() as u32;
+        app.layout.selected = Some(id);
+        let area = Rc::new(Cell::new(Rect::NOTHING));
+        let shown = area.clone();
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1000.0, 760.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                shown.set(ui.available_rect_before_wrap());
+                super::show(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        let layout = h.state().session.project.layouts[li].clone();
+        let (page, s) = page_rect(&h.state().layout, area.get(), &layout);
+        let (_, knob, c) = rotate_handle(h.state(), &layout, page, s).unwrap();
+        let to = c + vec2((knob - c).length(), 0.0);
+        let button = |pos: Pos2, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.event(Event::PointerMoved(knob));
+        h.step();
+        h.event(button(knob, true));
+        h.step();
+        for i in 1..=6 {
+            h.event(Event::PointerMoved(knob + (to - knob) * i as f32 / 6.0));
+            h.step();
+        }
+        h.event(button(to, false));
+        h.step();
+        let app = h.state();
+        let e = app.session.project.layouts[li].element(id).unwrap();
+        let ElementKind::Line { dir, head, .. } = e.kind else { panic!("not a line") };
+        let r = (e.x, e.y, e.w, e.h);
+        assert!((line_angle(r, dir, head) + 90.0).abs() < 1e-9, "points down: {}°", line_angle(r, dir, head));
+        assert!((line_length(r, dir) - 60.0).abs() < 1e-6);
+        let old = layout.element(id).unwrap();
+        assert!(((e.x + e.w / 2.0) - (old.x + old.w / 2.0)).abs() < 1e-9 && ((e.y + e.h / 2.0) - (old.y + old.h / 2.0)).abs() < 1e-9);
+        assert_eq!(app.layout.selected, Some(id), "still selected");
+    }
 
     /// Pressing a corner handle and dragging away fast resizes the element, though by the time
     /// egui starts the drag the pointer is already off the handle; it used to move the element.
@@ -1850,6 +2036,59 @@ mod tests {
         assert_eq!(h.state().session.revision, rev, "nothing was applied");
     }
 
+    /// Arrow keys nudge the selected element 1 mm, 10 mm with Shift; a run of them, held or
+    /// tapped, is one step to undo; a locked element stays put.
+    #[test]
+    fn arrow_keys_nudge_the_selected_element_and_undo_as_one() {
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Nudge"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let title = app.session.project.layouts[li].elements.iter().find(|e| e.name == "Title").unwrap().clone();
+        app.layout.selected = Some(title.id);
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1000.0, 760.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                let ctx = ui.ctx().clone();
+                crate::chrome::shortcuts(app, &ctx);
+                super::show(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        let key = |key, modifiers, repeat| Event::Key { key, physical_key: None, pressed: true, repeat, modifiers };
+        let at = |h: &egui_kittest::Harness<'_, RustGisApp>| {
+            let e = h.state().session.project.layouts[li].element(title.id).unwrap();
+            (e.x - title.x, e.y - title.y)
+        };
+        let depth = h.state().session.undo_depth();
+        h.event(key(Key::ArrowRight, Modifiers::NONE, false));
+        h.step();
+        assert_eq!(at(&h), (1.0, 0.0), "→ nudges 1 mm");
+        h.event(key(Key::ArrowDown, Modifiers::SHIFT, false));
+        h.step();
+        assert_eq!(at(&h), (1.0, 10.0), "Shift-↓ nudges 10 mm");
+        // A held key repeats, several times in a frame.
+        for _ in 0..3 {
+            h.event(key(Key::ArrowLeft, Modifiers::NONE, true));
+        }
+        h.step();
+        assert_eq!(at(&h), (-2.0, 10.0));
+        assert_eq!(h.state().session.undo_depth(), depth + 1, "one step to undo, not five");
+        h.state_mut().run("edit.undo", serde_json::Value::Null).unwrap();
+        assert_eq!(at(&h), (0.0, 0.0), "one undo puts it back");
+
+        // A locked element stays put.
+        h.state_mut().run("layout.update", json!({"layout": li, "element": title.id, "locked": true})).unwrap();
+        h.event(key(Key::ArrowUp, Modifiers::NONE, false));
+        h.step();
+        assert_eq!(at(&h), (0.0, 0.0));
+    }
+
     /// Ctrl+D (Cmd+D) duplicates the selected element and selects the copy; Backspace, the Mac's
     /// delete key, deletes it.
     #[test]
@@ -1996,6 +2235,99 @@ mod tests {
             matches!(kind, ElementKind::Text { italic: true, align: TextAlign::Left, letter_spacing, .. } if *letter_spacing == 3.5),
             "{kind:?}"
         );
+    }
+
+    /// A number dragged in the Format pane and let go is applied (#607): X moves the element by
+    /// the drag, though the pane lends the saved X each frame (it used to end where it started).
+    #[test]
+    fn dragging_x_in_the_format_pane_moves_the_element() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Drag"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let title = app.session.project.layouts[li].elements.iter().find(|e| e.name == "Title").unwrap().clone();
+        app.layout.selected = Some(title.id);
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                with_format(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        // X is the pane's first number, the topmost: Name, X, Y, Width, Height.
+        let at = h.query_all_by_role(Role::SpinButton).map(|n| n.rect()).min_by(|a, b| a.min.y.total_cmp(&b.min.y)).unwrap().center();
+        let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let undo = h.state().session.undo_depth();
+        h.event(Event::PointerMoved(at));
+        h.step();
+        h.event(button(at, true));
+        h.step();
+        // Dragged right over several frames (0.5 mm a point), then let go without moving.
+        for i in 1..=4 {
+            h.event(Event::PointerMoved(at + vec2(10.0 * i as f32, 0.0)));
+            h.step();
+        }
+        h.event(button(at + vec2(40.0, 0.0), false));
+        h.run_steps(3);
+        let e = h.state().session.project.layouts[li].element(title.id).unwrap().clone();
+        assert!(e.x - title.x > 10.0, "moved from {} to {}", title.x, e.x);
+        assert_eq!(e.y, title.y, "only X changed");
+        // Applied once, on release: one undo step, not one a frame of the drag.
+        assert_eq!(h.state().session.undo_depth(), undo + 1, "one undo step");
+        assert_eq!(h.state().session.undo_label(), Some("Element Properties"));
+    }
+
+    #[test]
+    fn dragging_the_angle_in_the_format_pane_turns_the_arrow() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        use rustgis_engine::map::layout::{ElementKind, line_angle};
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Turn", "template": "blank"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let id =
+            app.run("layout.addElement", json!({"kind": "arrow", "angle": 0, "length": 60})).unwrap()["element"].as_u64().unwrap() as u32;
+        app.layout.selected = Some(id);
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                with_format(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        // Angle is the line's last number, the bottommost.
+        let at = h.query_all_by_role(Role::SpinButton).map(|n| n.rect()).max_by(|a, b| a.min.y.total_cmp(&b.min.y)).unwrap().center();
+        let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let undo = h.state().session.undo_depth();
+        h.event(Event::PointerMoved(at));
+        h.step();
+        h.event(button(at, true));
+        h.step();
+        // Dragged right over several frames, then let go without moving: the turn is kept.
+        for i in 1..=4 {
+            h.event(Event::PointerMoved(at + vec2(10.0 * i as f32, 0.0)));
+            h.step();
+        }
+        h.event(button(at + vec2(40.0, 0.0), false));
+        h.run_steps(3);
+        let e = h.state().session.project.layouts[li].element(id).unwrap().clone();
+        let ElementKind::Line { dir, head, .. } = e.kind else { panic!("{:?}", e.kind) };
+        let a = line_angle((e.x, e.y, e.w, e.h), dir, head);
+        assert!(a > 10.0, "turned to {a}°");
+        assert_eq!(h.state().session.undo_depth(), undo + 1, "one undo step");
     }
 
     /// A layout's text has the shared text form (#516): the page's dynamic text as well as the

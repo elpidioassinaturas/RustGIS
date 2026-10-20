@@ -179,8 +179,14 @@ SPEC
       cp "$root/packaging/linux/rustgis.desktop" "$a/"
       logo "$a/rustgis.png" 256
       ln -s usr/bin/rustgis "$a/AppRun"
-      ARCH="$arch" APPIMAGE_EXTRACT_AND_RUN=1 "$t/appimagetool" --no-appstream --runtime-file "$t/runtime" \
-        "$a" "$dist/$name.AppImage"
+      # Update information for AppImageUpdate and friends: the newest GitHub release's .zsync,
+      # which appimagetool makes with its bundled zsyncmake. zsyncmake writes into the current
+      # folder, so run it from dist/.
+      repo="${GITHUB_REPOSITORY:-opengeos/RustGIS}"
+      update="gh-releases-zsync|${repo%%/*}|${repo#*/}|latest|RustGIS-*-linux-$arch.AppImage.zsync"
+      (cd "$dist" && ARCH="$arch" APPIMAGE_EXTRACT_AND_RUN=1 "$t/appimagetool" --no-appstream \
+        --runtime-file "$t/runtime" -u "$update" "$a" "$name.AppImage")
+      [ -f "$dist/$name.AppImage.zsync" ] || { echo "appimagetool wrote no $name.AppImage.zsync" >&2; exit 1; }
     fi
     ;;
 
