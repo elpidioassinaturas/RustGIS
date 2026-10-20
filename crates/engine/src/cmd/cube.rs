@@ -253,8 +253,12 @@ fn band_index(p: &Value) -> Result<usize, String> {
 
 /// A name with its date taken out (`NDVI_2024-06-01` → `NDVI`), for the outputs' names.
 fn common_label(name: &str) -> String {
-    let cut: String = name.chars().take_while(|c| !c.is_ascii_digit()).collect();
-    let cut = cut.trim_end_matches(['_', '-', ' ', '.', 'A']);
+    let lead: String = name.chars().take_while(|c| !c.is_ascii_digit()).collect();
+    // MODIS dates its files `A2024153` (year and day of the year): that A goes with the date; any
+    // other final A is the name's own (`NDVI_BETA2020`).
+    let modis = lead.ends_with('A') && name[lead.len()..].chars().take_while(char::is_ascii_digit).count() == 7;
+    let cut = if modis { &lead[..lead.len() - 1] } else { lead.as_str() };
+    let cut = cut.trim_end_matches(['_', '-', ' ', '.']);
     if cut.is_empty() { name.to_string() } else { cut.to_string() }
 }
 
@@ -406,10 +410,13 @@ impl TrendRun {
         let mut out = vec![f32::NAN; cells * OUTPUTS];
         let stopped = AtomicBool::new(false);
         // A part of the cells, worked out in place.
+        // Cancel is looked at after about the same work whatever the dates: a cell compares n²⁄2
+        // pairs, so every 4096 cells for a short series, every cell for a long one.
+        let every = (4_000_000 / (n * n).max(1)).clamp(1, 4096);
         let work = |block: &[f32], out: &mut [f32]| {
             let mut ys = vec![0.0f64; n];
             for (c, (vals, o)) in block.chunks(n).zip(out.chunks_mut(OUTPUTS)).enumerate() {
-                if c % 4096 == 0 && (cancel.load(Ordering::Relaxed) || stopped.load(Ordering::Relaxed)) {
+                if c % every == 0 && (cancel.load(Ordering::Relaxed) || stopped.load(Ordering::Relaxed)) {
                     stopped.store(true, Ordering::Relaxed);
                     return;
                 }
@@ -531,13 +538,16 @@ pub fn land(rasters: Vec<Raster>, dates: usize) -> u64 {
 /// `cube.trend`: the trend computed here (blocking), or the one the app worked out (`ran`), and
 /// its four layers added, kept in the project as GeoTIFFs.
 fn trend_cmd(s: &mut Session, p: &Value) -> CmdResult {
-    if let Some(id) = p.get("ran").and_then(Value::as_u64)
-        && let Some((rasters, dates)) = landed().lock().ok().and_then(|mut l| {
+    // A run the app worked out: added if it is still kept (the last few are), never worked out
+    // again here, which would block.
+    if let Some(ran) = p.get("ran").filter(|v| !v.is_null()) {
+        let id = ran.as_u64().ok_or("ran is the number of a run the app worked out")?;
+        let found = landed().lock().ok().and_then(|mut l| {
             let at = l.iter().position(|(k, ..)| *k == id)?;
             let (_, r, n) = l.remove(at);
             Some((r, n))
-        })
-    {
+        });
+        let (rasters, dates) = found.ok_or("that trend is no longer kept: run it again")?;
         return add_outputs(s, rasters, dates);
     }
     let run = trend_start(s, p)?;
@@ -557,4 +567,17 @@ pub fn add_outputs(s: &mut Session, rasters: Vec<Raster>, dates: usize) -> CmdRe
         layers.push(out["layer"].clone());
     }
     Ok(json!({ "layers": layers, "dates": dates }))
+}
+
+#[cfg(test)]
+mod tests {
+    /// The outputs' names: the date taken out, a MODIS date's A with it, and no other final A.
+    #[test]
+    fn labels_lose_their_date() {
+        assert_eq!(super::common_label("NDVI_2024-06-01"), "NDVI");
+        assert_eq!(super::common_label("MOD13Q1.A2024153"), "MOD");
+        assert_eq!(super::common_label("ndvi.A2024153.h12v10"), "ndvi");
+        assert_eq!(super::common_label("NDVI_BETA2020"), "NDVI_BETA");
+        assert_eq!(super::common_label("ETA_2020"), "ETA");
+    }
 }
