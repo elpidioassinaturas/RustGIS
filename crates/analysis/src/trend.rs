@@ -69,7 +69,9 @@ pub struct Trend {
     pub s: f64,
     /// S's variance, corrected for autocorrelation by the modified tests.
     pub var_s: f64,
-    /// The modified tests' correction, n/n* (1 for the others).
+    /// The modified tests' correction, n/n* (1 for the others). Where it would be zero or below
+    /// (strong negative autocorrelation on a short series), which would leave S without a
+    /// variance, it is 1: the uncorrected test, where `pymannkendall` gives no p-value.
     pub correction: f64,
     /// The standard normal statistic.
     pub z: f64,
@@ -79,9 +81,10 @@ pub struct Trend {
 
 /// The fewest values a trend is worked out from.
 pub const MIN_VALUES: usize = 4;
-/// The most: Sen's slope compares every two, so this bounds its memory (about 400 MB on the
-/// desktop; 2,000 values, 16 MB, in the browser's smaller memory).
-pub const MAX_VALUES: usize = if cfg!(target_arch = "wasm32") { 2_000 } else { 10_000 };
+/// The most: Sen's slope keeps the slope of every two, so this bounds its memory (4,000 values,
+/// about 64 MB, on the desktop; 2,000, 16 MB, in the browser's smaller memory). A data cube's
+/// trend takes fewer still (2,000 dates).
+pub const MAX_VALUES: usize = if cfg!(target_arch = "wasm32") { 2_000 } else { 4_000 };
 
 /// The trend of the values `y` at times `t` (the same length; missing values skipped), or `None`
 /// when fewer than [`MIN_VALUES`] or more than [`MAX_VALUES`] are left (or, for the seasonal
