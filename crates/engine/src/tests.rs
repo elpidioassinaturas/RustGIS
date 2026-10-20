@@ -6092,6 +6092,15 @@ fn a_stac_data_cube_on_the_time_slider() {
     );
     assert_eq!(r["duplicates"], 1, "the second item of T2 on 2024-01-01 is left out and counted");
     assert!(crate::cmd::tiles::NETWORK.contains(&"stac.addCube"), "a network command: a plugin needs the network permission to run it");
+    // An end given as a year or a month takes all of it: the same cube with "end": "2024-01".
+    let mut by_month = Session::new(Project::default());
+    let r2 = by_month
+        .run(
+            "stac.addCube",
+            &json!({"url": api, "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01"}),
+        )
+        .unwrap();
+    assert_eq!(r2["dates"], 2, "an end given as a year or a month reaches its last day: {r2}");
     let tiles = s.map().tiles.clone();
     assert_eq!(tiles.len(), 2);
     let t1 = tiles.iter().find(|t| t.name.ends_with("T1")).unwrap();

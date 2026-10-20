@@ -455,7 +455,8 @@ pub fn added_by(id: &str, p: &Value) -> Option<Source> {
                     extra.insert(k.into(), json!(v));
                 }
             }
-            Some(src("stac", text(p, "url")?, None, Value::Object(extra)))
+            // No API given: Earth Search, as the command takes.
+            Some(src("stac", text(p, "url").unwrap_or(crate::render::rustgis_tiles::stac::EARTH_SEARCH), None, Value::Object(extra)))
         }
         "layer.addSample" => Some(src("sample", text(p, "name")?, None, Value::Null)),
         _ => None,

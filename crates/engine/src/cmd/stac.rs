@@ -266,7 +266,22 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 .and_then(rustgis_data::time::parse_input)
                 .ok_or_else(|| format!("{k} is a date (2024-06-01, a year, or milliseconds since 1970)"))
         };
-        let (start, end) = (date("start")?, date("end")?);
+        let (start, mut end) = (date("start")?, date("end")?);
+        // An end given as a year or a month is the end of it: "end": "2024" takes all of 2024.
+        let given = p.get("end").map(|v| v.as_str().map_or_else(|| v.to_string(), |s| s.trim().to_string())).unwrap_or_default();
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit());
+        let next = match given.split_once('-') {
+            None if given.len() == 4 && digits(&given) => given.parse::<i32>().ok().map(|y| format!("{}-01-01", y + 1)),
+            Some((y, m)) if y.len() == 4 && m.len() == 2 && digits(y) && digits(m) => match (y.parse::<i32>(), m.parse::<u32>()) {
+                (Ok(y), Ok(12)) => Some(format!("{}-01-01", y + 1)),
+                (Ok(y), Ok(m)) if (1..12).contains(&m) => Some(format!("{y:04}-{:02}-01", m + 1)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(after) = next.and_then(|n| rustgis_data::time::parse_text(&n)) {
+            end = after - 86_400_000.0;
+        }
         if end < start {
             return Err("end is before start".into());
         }
