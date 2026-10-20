@@ -282,6 +282,7 @@ fn export(s: &mut Session, p: &Value) -> CmdResult {
     let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frames(s, &steps, w, h, gif.then_some(speed))));
     s.map_mut().time = Some(saved);
     s.map_mut().apply_time();
+    super::zarr::follow_time(s);
     let bytes = made.map_err(|_| "exporting the time steps failed unexpectedly".to_string())??;
     rustgis_data::io::write_atomic(std::path::Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
     Ok(json!({"path": path, "frames": steps.len(), "bytes": bytes.len()}))

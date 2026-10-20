@@ -421,7 +421,8 @@ pub(crate) fn follow_time(s: &mut Session) {
                 let Some(rl) = l.raster.as_mut() else { continue };
                 let Some(zt) = rl.time_zarr.as_mut() else { continue };
                 let want = zt.step_for(window);
-                if want == zt.shown && (want.is_none() || rl.data.is_some()) {
+                // The step shown, or one that couldn't be read (tried again once the slider moves).
+                if want == zt.shown {
                     continue;
                 }
                 match want {
@@ -439,7 +440,7 @@ pub(crate) fn follow_time(s: &mut Session) {
                         }
                         Err(e) => {
                             rl.data = None;
-                            zt.shown = None;
+                            zt.shown = Some(i);
                             errors.push(format!("{name}: {e}"));
                         }
                     },
@@ -547,6 +548,9 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
             shown: None,
         };
         zt.repair();
+        // The first step read before the slider is touched, so a store that can't be read leaves
+        // the map as it was.
+        let first = read_step(&zt, 0).map_err(|e| format!("{root}: {e}"))?;
         // The slider, on over the variable's dates when it is off.
         if s.map().time.is_none() {
             let dates: Vec<Value> = zt.dates.iter().map(|d| serde_json::json!(d)).collect();
@@ -555,7 +559,10 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         let window = s.map().time.as_ref().map(rustgis_map::time::TimeSlider::window);
         let want = zt.step_for(window);
         // The first slice the layer shows sets its style; with no step in the window, the first step's.
-        let r = read_step(&zt, want.unwrap_or(0)).map_err(|e| format!("{root}: {e}"))?;
+        let r = match want {
+            Some(i) if i != 0 => read_step(&zt, i).map_err(|e| format!("{root}: {e}"))?,
+            _ => first,
+        };
         let mut layer = RasterLayer::from_path((*r).clone(), root.clone());
         if is_web(&root) {
             layer.path = None;
