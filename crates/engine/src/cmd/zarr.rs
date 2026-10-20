@@ -348,7 +348,8 @@ fn read_ahead(zt: ZarrTime, i: usize) {
             READ_AHEAD_THREADS.fetch_sub(1, Ordering::SeqCst);
         }
     }
-    std::thread::spawn(move || {
+    let ids: Vec<String> = keys.iter().map(|(_, k)| k.clone()).collect();
+    let spawned = std::thread::Builder::new().name("zarr-read-ahead".into()).spawn(move || {
         let _done = Done(keys.iter().map(|(_, k)| k.clone()).collect());
         for (n, (j, _)) in keys.iter().enumerate() {
             let ok = read_step(&zt, *j).is_ok();
@@ -358,6 +359,10 @@ fn read_ahead(zt: ZarrTime, i: usize) {
             }
         }
     });
+    // No thread to be had: nothing is read ahead, and its keys and place are given back.
+    if spawned.is_err() {
+        drop(Done(ids));
+    }
 }
 
 /// Waits (up to 15 s) for a step being read ahead, so it isn't fetched twice; after that it is
@@ -421,7 +426,8 @@ pub(crate) fn follow_time(s: &mut Session) {
                 let Some(rl) = l.raster.as_mut() else { continue };
                 let Some(zt) = rl.time_zarr.as_mut() else { continue };
                 let want = zt.step_for(window);
-                // The step shown, or one that couldn't be read (tried again once the slider moves).
+                // The step shown, or one that couldn't be read: that one isn't read again (nor its
+                // error said again) until the slider has moved to another step and back.
                 if want == zt.shown {
                     continue;
                 }
@@ -481,6 +487,8 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         let (root, store, chunks) = match src {
             Source::Dir(d) => {
                 let store = zarr::read_metadata(Path::new(&d)).map_err(|e| format!("{d}: {e}"))?;
+                // The variable first (the store's first when none is given), so its coordinates are read.
+                pick_variable(&store, &mut sel)?;
                 let mut chunks = HashMap::new();
                 let mut total = 0u64;
                 for k in zarr::coordinate_keys(&store, &sel.variable) {
