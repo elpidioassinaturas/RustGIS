@@ -844,7 +844,7 @@ impl ReduceRun {
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
             }
-            let r = read_step(&self.zt, i)?;
+            let r = read_step(&self.zt, i, slice_key(&self.zt, i))?;
             let vals = &r.bands.first().ok_or("the slice has no band")?.data;
             match &first {
                 None => {
