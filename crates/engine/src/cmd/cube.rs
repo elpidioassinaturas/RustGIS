@@ -378,37 +378,45 @@ impl TrendRun {
         let year = 365.2425 * 86_400_000.0 * self.per;
         let times: Vec<f64> = self.steps.iter().map(|i| self.cube.dates()[*i] / year).collect();
         let need = self.min_valid.unwrap_or((n / 2).max(trend::MIN_VALUES)).max(trend::MIN_VALUES);
-        // The cells in as many parts as there are cores.
         let mut out = vec![f32::NAN; cells * OUTPUTS];
-        let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).clamp(1, 16);
-        let part = cells.div_ceil(threads).max(1);
         let stopped = AtomicBool::new(false);
-        std::thread::scope(|scope| {
-            for (block, out) in block.chunks(part * n).zip(out.chunks_mut(part * OUTPUTS)) {
-                let (times, stopped) = (&times, &stopped);
-                scope.spawn(move || {
-                    let mut ys = vec![0.0f64; n];
-                    for (c, (vals, o)) in block.chunks(n).zip(out.chunks_mut(OUTPUTS)).enumerate() {
-                        if c % 4096 == 0 && (cancel.load(Ordering::Relaxed) || stopped.load(Ordering::Relaxed)) {
-                            stopped.store(true, Ordering::Relaxed);
-                            return;
-                        }
-                        for (y, v) in ys.iter_mut().zip(vals) {
-                            *y = f64::from(*v);
-                        }
-                        if vals.iter().filter(|v| v.is_finite()).count() < need {
-                            continue;
-                        }
-                        if let Some(t) = trend::trend(times, &ys, self.test, self.alpha) {
-                            o[0] = t.slope as f32;
-                            o[1] = t.z as f32;
-                            o[2] = t.p as f32;
-                            o[3] = if t.p < self.alpha { t.slope as f32 } else { f32::NAN };
-                        }
-                    }
-                });
+        // A part of the cells, worked out in place.
+        let work = |block: &[f32], out: &mut [f32]| {
+            let mut ys = vec![0.0f64; n];
+            for (c, (vals, o)) in block.chunks(n).zip(out.chunks_mut(OUTPUTS)).enumerate() {
+                if c % 4096 == 0 && (cancel.load(Ordering::Relaxed) || stopped.load(Ordering::Relaxed)) {
+                    stopped.store(true, Ordering::Relaxed);
+                    return;
+                }
+                for (y, v) in ys.iter_mut().zip(vals) {
+                    *y = f64::from(*v);
+                }
+                if vals.iter().filter(|v| v.is_finite()).count() < need {
+                    continue;
+                }
+                if let Some(t) = trend::trend(&times, &ys, self.test, self.alpha) {
+                    o[0] = t.slope as f32;
+                    o[1] = t.z as f32;
+                    o[2] = t.p as f32;
+                    o[3] = if t.p < self.alpha { t.slope as f32 } else { f32::NAN };
+                }
             }
-        });
+        };
+        // On the desktop, the cells in as many parts as there are cores; the browser has no
+        // threads, so there they are worked out here.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).clamp(1, 16);
+            let part = cells.div_ceil(threads).max(1);
+            std::thread::scope(|scope| {
+                for (block, out) in block.chunks(part * n).zip(out.chunks_mut(part * OUTPUTS)) {
+                    let work = &work;
+                    scope.spawn(move || work(block, out));
+                }
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        work(&block, &mut out);
         if stopped.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }

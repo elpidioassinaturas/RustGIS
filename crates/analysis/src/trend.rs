@@ -79,14 +79,17 @@ pub struct Trend {
 
 /// The fewest values a trend is worked out from.
 pub const MIN_VALUES: usize = 4;
+/// The most: Sen's slope compares every two, so this bounds its memory (about 400 MB).
+pub const MAX_VALUES: usize = 10_000;
 
 /// The trend of the values `y` at times `t` (the same length; missing values skipped), or `None`
-/// when fewer than [`MIN_VALUES`] are left (or, for the seasonal test, no season has two).
-/// `alpha` is the test's level, which Hamed & Rao's correction also uses to choose its lags.
+/// when fewer than [`MIN_VALUES`] or more than [`MAX_VALUES`] are left (or, for the seasonal
+/// test, no season has two). `alpha` is the test's level, between 0 and 1, which Hamed & Rao's
+/// correction also uses to choose its lags; `None` for another.
 pub fn trend(t: &[f64], y: &[f64], test: Test, alpha: f64) -> Option<Trend> {
     let (t, y): (Vec<f64>, Vec<f64>) = t.iter().zip(y).filter(|(t, y)| t.is_finite() && y.is_finite()).map(|(t, y)| (*t, *y)).unzip();
     let n = y.len();
-    if n < MIN_VALUES {
+    if !(MIN_VALUES..=MAX_VALUES).contains(&n) || !(alpha > 0.0 && alpha < 1.0) {
         return None;
     }
     if let Test::Seasonal(m) = test {
@@ -99,7 +102,7 @@ pub fn trend(t: &[f64], y: &[f64], test: Test, alpha: f64) -> Option<Trend> {
     let mut correction = 1.0;
     let nf = n as f64;
     match test {
-        Test::HamedRao if n > 2 => {
+        Test::HamedRao => {
             // The ranks of the series with the trend taken out, and their autocorrelation.
             let detrended: Vec<f64> = t.iter().zip(&y).map(|(t, y)| y - slope * t).collect();
             let acf = autocorrelation(&ranks(&detrended));
@@ -476,6 +479,12 @@ mod tests {
         // Ties: two equal values take 2·1·9 out of 18·Var.
         let tied = trend(&t, &[1.0, 2.0, 2.0, 3.0, 4.0], Test::Original, 0.05).unwrap();
         assert!(close(tied.var_s, (5.0 * 4.0 * 15.0 - 18.0) / 18.0, 1e-12));
+        // A level outside (0, 1), or too many values for the pairs, gives no trend.
+        for alpha in [0.0, 1.0, f64::NAN] {
+            assert!(trend(&t, &y, Test::HamedRao, alpha).is_none(), "{alpha}");
+        }
+        let many: Vec<f64> = (0..=MAX_VALUES).map(|i| i as f64).collect();
+        assert!(trend(&many, &many, Test::Original, 0.05).is_none());
         // Too few values, missing ones skipped.
         assert!(trend(&t, &[1.0, f64::NAN, 2.0, f64::NAN, 3.0], Test::Original, 0.05).is_none());
         assert_eq!(trend(&t, &[1.0, f64::NAN, 2.0, 4.0, 3.0], Test::Original, 0.05).unwrap().n, 4);
