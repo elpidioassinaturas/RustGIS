@@ -1325,7 +1325,9 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, reorder: 
     x += 22.0;
     icons::paint(ui.painter(), Rect::from_center_size(pos2(x + 9.0, cy), vec2(18.0, 16.0)), "basemap", t.icon, t.accent);
     x += 24.0;
-    let color = if tile.visible && tile.opacity > 0.0 { t.text } else { t.text_disabled };
+    // Greyed when it draws nothing: hidden, transparent, or a data cube tile with no file at the
+    // slider's step (the box still shows the choice to show it).
+    let color = if tile.draws() && tile.opacity > 0.0 { t.text } else { t.text_disabled };
     let elided = name.elided;
     name.paint(ui, r, x, color);
     let mut action: Option<(&str, Value)> = None;
