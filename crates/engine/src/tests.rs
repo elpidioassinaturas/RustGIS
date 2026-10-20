@@ -6148,7 +6148,7 @@ fn a_stac_data_cube_on_the_time_slider() {
         assert!(s.run("stac.addCube", &bad).is_err(), "{bad}");
     }
     // A file read whole (a GeoTIFF that isn't cloud-optimised) can't follow the slider: the cube
-    // is refused, and what it added is taken back.
+    // is refused, and what it added is taken back, the view its first tile framed included.
     let gt = rustgis_data::raster::GeoTransform { origin_x: 10.0, origin_y: 46.0, pixel_width: 0.5, pixel_height: -0.5 };
     let plain = rustgis_data::raster::Raster::new(
         "p",
@@ -6167,8 +6167,11 @@ fn a_stac_data_cube_on_the_time_slider() {
         r#"{{"type": "Feature", "id": "p1", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
            "properties": {{"datetime": "2024-01-01T00:00:00Z", "bdc:tiles": ["P"]}}, "assets": {{"NDVI": {{"href": "{file}/p.tif"}}}}}}"#
     );
-    let plain_api = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{one}]}}"#))], 2);
+    let first = item("q1", "A", "2024-01-01", true);
+    let plain_api = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{first},{one}]}}"#))], 2);
+    s.zoom_to(&rustgis_geom::Extent::new(-60.0, -30.0, -50.0, -20.0));
     let (tiles, layers) = (s.map().tiles.len(), s.map().layers.len());
+    let (camera, time) = (s.map().camera, s.map().time.clone());
     let e = s
         .run(
             "stac.addCube",
@@ -6177,6 +6180,9 @@ fn a_stac_data_cube_on_the_time_slider() {
         .unwrap_err();
     assert!(e.contains("not a cloud-optimised"), "{e}");
     assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
+    // The view tile A framed and the slider are put back too.
+    assert_eq!(s.map().camera, camera);
+    assert_eq!(s.map().time, time);
     // Files stored at another scale partway: one range can't fit them all, so it's refused.
     let rescaled = |id: &str, date: &str, scale: f64| {
         format!(
