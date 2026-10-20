@@ -6124,6 +6124,36 @@ fn a_stac_data_cube_on_the_time_slider() {
     ] {
         assert!(s.run("stac.addCube", &bad).is_err(), "{bad}");
     }
+    // A file read whole (a GeoTIFF that isn't cloud-optimised) can't follow the slider: the cube
+    // is refused, and what it added is taken back.
+    let gt = rustgis_data::raster::GeoTransform { origin_x: 10.0, origin_y: 46.0, pixel_width: 0.5, pixel_height: -0.5 };
+    let plain = rustgis_data::raster::Raster::new(
+        "p",
+        2,
+        2,
+        vec![vec![1.0; 4]],
+        gt,
+        rustgis_data::raster::Crs::LonLat,
+        None,
+        rustgis_data::raster::ColorHint::Gray,
+        "Float32",
+    )
+    .unwrap();
+    let (file, _) = serve_ranges(rustgis_data::raster::geotiff::write(&plain, 0).unwrap());
+    let one = format!(
+        r#"{{"type": "Feature", "id": "p1", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+           "properties": {{"datetime": "2024-01-01T00:00:00Z", "bdc:tiles": ["P"]}}, "assets": {{"NDVI": {{"href": "{file}/p.tif"}}}}}}"#
+    );
+    let plain_api = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{one}]}}"#))], 2);
+    let (tiles, layers) = (s.map().tiles.len(), s.map().layers.len());
+    let e = s
+        .run(
+            "stac.addCube",
+            &json!({"url": format!("{plain_api}/v1"), "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31"}),
+        )
+        .unwrap_err();
+    assert!(e.contains("not a cloud-optimised"), "{e}");
+    assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
 }
 
 /// A cloud-optimised GeoTIFF by its address is read in place: its header, then only the tiles a

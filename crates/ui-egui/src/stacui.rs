@@ -860,12 +860,25 @@ fn cube_row(app: &mut RustGisApp, ui: &mut egui::Ui, busy: bool) {
         "start": if st.from.trim().is_empty() { first } else { st.from.trim().to_string() },
         "end": if st.to.trim().is_empty() { last } else { st.to.trim().to_string() },
     });
+    // The area of the items listed, so the cube covers what the search found, not the view now.
+    let area = st.items.iter().filter_map(|i| i.bbox).fold(None, |a: Option<[f64; 4]>, [w, s, e, n]| {
+        Some(a.map_or([w, s, e, n], |[aw, as_, ae, an]| [aw.min(w), as_.min(s), ae.max(e), an.max(n)]))
+    });
+    if let Some(b) = area {
+        p["bbox"] = json!(b);
+    }
     if let Ok(c) = st.max_cloud.trim().parse::<f64>() {
         p["maxCloud"] = json!(c);
     }
-    let range: Vec<f64> = st.cube_range.split([',', ';', ' ']).filter_map(|v| v.trim().parse::<f64>().ok()).collect();
-    if range.len() == 2 {
-        p["range"] = json!(range);
+    let typed: Vec<&str> = st.cube_range.split([',', ';', ' ']).map(str::trim).filter(|v| !v.is_empty()).collect();
+    let range: Vec<f64> = typed.iter().filter_map(|v| v.parse::<f64>().ok()).collect();
+    match (typed.len(), range.len()) {
+        (0, _) => {}
+        (2, 2) => p["range"] = json!(range),
+        _ => {
+            st.error = Some(tl!("The range is two numbers, low and high (0, 0.9)").to_string());
+            return;
+        }
     }
     match app.run("stac.addCube", p) {
         Ok(r) => {

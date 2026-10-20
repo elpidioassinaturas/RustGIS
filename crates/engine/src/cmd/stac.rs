@@ -239,6 +239,8 @@ fn add_asset(s: &mut Session, p: &Value) -> CmdResult {
 
 /// The most items a data cube takes (its search is paged up to this).
 pub const MAX_CUBE_ITEMS: usize = 2000;
+/// The most pages of a search a data cube reads, whatever they hold.
+pub const MAX_CUBE_PAGES: usize = 100;
 
 /// `stac.addCube` (opengeos/RustGIS#559): a STAC collection's band as a data cube on the time
 /// slider. The items found are grouped by the grid tile they cover (the tile their properties
@@ -291,10 +293,22 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         let search = search_params(s, &q)?;
         // Every page of the search, up to the cap.
         let mut items: Vec<Item> = Vec::new();
+        // An empty page, or a next link back to a page already read, ends it; so does the page cap.
         let mut next = Some(stac::search_url(&api, &search)?);
+        let mut read: Vec<String> = Vec::new();
         while let Some(url) = next.take() {
+            if read.contains(&url) {
+                break;
+            }
+            if read.len() >= MAX_CUBE_PAGES {
+                return Err(format!("more than {MAX_CUBE_PAGES} pages of results: take a shorter period or a smaller area"));
+            }
             let bytes = crate::render::rustgis_tiles::cache::download_blocking(&url)?;
             let (page, more) = stac::parse_items(&bytes, &url)?;
+            read.push(url);
+            if page.is_empty() {
+                break;
+            }
             items.extend(page);
             if items.len() > MAX_CUBE_ITEMS {
                 return Err(format!("more than {MAX_CUBE_ITEMS} items: take a shorter period or a smaller area"));
@@ -341,18 +355,46 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         let mut dates: Vec<f64> = Vec::new();
         let many = tiles.len() > 1;
         let mut added = Vec::new();
+        // What the map had: a cube that can't be added whole takes back what it added.
+        let (tiles_before, layers_before): (Vec<String>, Vec<u32>) =
+            (s.map().tiles.iter().map(|t| t.url.clone()).collect(), s.map().layers.iter().map(|l| l.id).collect());
+        let undo = |s: &mut Session| {
+            let m = s.map_mut();
+            m.tiles.retain(|t| tiles_before.contains(&t.url));
+            m.layers.retain(|l| layers_before.contains(&l.id));
+        };
         for (tile, by_day) in &tiles {
             let urls: Vec<(f64, String)> = by_day.iter().map(|(d, u)| (*d as f64 * 86_400_000.0, format!("{u}{look}"))).collect();
             dates.extend(urls.iter().map(|(d, _)| *d));
             let Some((_, first)) = urls.first() else { continue };
             let name = if many { format!("{base} {tile}") } else { base.clone() };
-            let r = super::layer::add_url(s, &json!({"url": first, "name": name}))?;
-            // The tile layer just added follows the slider through its dates.
+            let had = s.map().tiles.len();
+            let r = match super::layer::add_url(s, &json!({"url": first, "name": name})) {
+                Ok(r) => r,
+                Err(e) => {
+                    undo(s);
+                    return Err(e);
+                }
+            };
+            // The tile layer just added follows the slider through its dates. A file read whole
+            // instead (a GeoTIFF that isn't cloud-optimised) can't follow it.
             let m = s.map_mut();
-            if let Some(t) = m.tiles.iter_mut().rev().find(|t| t.url.split('#').next() == first.split('#').next()) {
-                t.time_urls = urls;
-                t.name = name;
-                added.push(r);
+            // One tile layer more, at the file's address.
+            let one = m.tiles.len() == had + 1;
+            let file = first.split('#').next();
+            match m.tiles.iter_mut().rev().find(|t| t.url.split('#').next() == file).filter(|_| one) {
+                Some(t) => {
+                    t.time_urls = urls;
+                    t.name = name;
+                    added.push(r);
+                }
+                None => {
+                    undo(s);
+                    return Err(format!(
+                        "{}: not a cloud-optimised GeoTIFF read in place; a data cube needs those",
+                        first.split('#').next().unwrap_or(first)
+                    ));
+                }
             }
         }
         dates.sort_by(f64::total_cmp);
