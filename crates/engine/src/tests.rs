@@ -6136,6 +6136,8 @@ fn a_stac_data_cube_on_the_time_slider() {
     let again = t.map().tiles.iter().find(|x| x.name.ends_with("T1")).unwrap();
     assert_eq!(again.time_urls.len(), 2);
     assert!(again.url.contains("/a2.tif"), "{}", again.url);
+    // T2, with no file at that step, draws nothing from the start: opening takes the window.
+    assert!(!t.map().tiles.iter().find(|x| x.name.ends_with("T2")).unwrap().draws());
     for bad in [
         json!({"url": api, "asset": "ndvi", "start": "2024-01-01", "end": "2024-01-31"}),
         json!({"url": api, "collection": "cube", "start": "2024-01-01", "end": "2024-01-31"}),

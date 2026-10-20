@@ -421,7 +421,8 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         let mut added = Vec::new();
         // What the map had: a cube that can't be added whole puts its tile layers back as they
         // were (those it replaced, the same cube added before, included) and takes out the layers
-        // it added.
+        // it added. The rest (the view a file framed, the slider) comes back with the project
+        // snapshot the command runs under (`Session::guarded`), as for any command that fails.
         let (tiles_before, layers_before): (Vec<rustgis_map::TileLayer>, Vec<u32>) =
             (s.map().tiles.clone(), s.map().layers.iter().map(|l| l.id).collect());
         let undo = |s: &mut Session| {
