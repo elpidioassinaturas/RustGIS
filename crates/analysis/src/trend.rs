@@ -338,7 +338,7 @@ pub fn erfc(x: f64) -> f64 {
     if x > 27.0 {
         return 0.0;
     }
-    // erfc(x) = exp(−x²) · R(x), R from Cody's coefficients for 0.5 ≤ x < 4 and x ≥ 4.
+    // erfc(x) = exp(−x²) · R(x), R from Cody's coefficients for 0.46875 < x < 4 and x ≥ 4.
     let r = if x < 4.0 {
         const P: [f64; 9] = [
             5.641_884_969_886_701e-1,
