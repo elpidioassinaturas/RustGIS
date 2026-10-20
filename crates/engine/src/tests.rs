@@ -6606,6 +6606,8 @@ fn a_trend_over_a_data_cube() {
     // A run the app no longer keeps is said, never worked out again here.
     let e = s.run("cube.trend", &json!({"ran": 987_654_321u64})).unwrap_err();
     assert!(e.contains("no longer kept"), "{e}");
+    let e = s.run("cube.trend", &json!({"layers": names, "minValid": 99})).unwrap_err();
+    assert!(e.contains("more than the"), "{e}");
     // Seasons from the calendar: the 1st of every month is its month in every year, leap years
     // included, and a 16-day composite on the same day each year keeps its season.
     use crate::cmd::cube::season_of;

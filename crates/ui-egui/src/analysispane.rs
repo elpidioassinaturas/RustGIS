@@ -888,14 +888,24 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
                 result: Default::default(),
             };
             let (cancel, done, result) = (r.cancel.clone(), r.done.clone(), r.result.clone());
-            std::thread::spawn(move || {
-                let out = job.run(&cancel, &done).map(|rasters| (rasters, job.dates()));
+            // A panic on the thread (a hostile store) lands as an error, so the run always ends;
+            // a thread the system can't start is said.
+            let spawned = std::thread::Builder::new().name("trend".into()).spawn(move || {
+                let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    job.run(&cancel, &done).map(|rasters| (rasters, job.dates()))
+                }))
+                .unwrap_or_else(|_| Err("the trend failed unexpectedly".into()));
                 if let Ok(mut g) = result.lock() {
                     *g = Some(out);
                 }
             });
-            app.workflow.trend.running = Some(r);
-            app.workflow.error = None;
+            match spawned {
+                Ok(_) => {
+                    app.workflow.trend.running = Some(r);
+                    app.workflow.error = None;
+                }
+                Err(e) => app.workflow.error = Some(format!("the trend couldn't start: {e}")),
+            }
         }
         Err(e) => app.workflow.error = Some(e),
     }

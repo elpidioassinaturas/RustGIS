@@ -508,6 +508,10 @@ pub fn trend_start(s: &Session, p: &Value) -> Result<TrendRun, String> {
     if steps.len() > MAX_DATES {
         return Err(format!("{} dates; a trend takes {MAX_DATES} at most: take a shorter period", steps.len()));
     }
+    // More valid dates asked for than there are would leave every cell out.
+    if let Some(m) = min_valid.filter(|m| *m > steps.len()) {
+        return Err(format!("minValid is {m}, more than the {} dates", steps.len()));
+    }
     let day = |i: usize| rustgis_data::time::format(cube.dates()[i], "YYYY-MM-DD");
     let (a, z) = (steps.first().copied().unwrap_or(0), steps.last().copied().unwrap_or(0));
     let label = format!("{} {}–{}", cube.label(), day(a), day(z));
