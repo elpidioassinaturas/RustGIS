@@ -6466,6 +6466,8 @@ fn a_zarr_variable_follows_the_time_slider() {
     let zip = std::env::temp_dir().join(format!("rustgis-zarr-frames-{}.zip", std::process::id()));
     let r = s.run("time.export", &json!({"path": zip.display().to_string(), "width": 64, "height": 48})).unwrap();
     assert_eq!(r["frames"], 4, "{r}");
+    // After the export the slider is back at its step, and the layer shows it.
+    assert_eq!(first(&s), Some(208.0), "the layer shows the step the slider is back at");
     let _ = std::fs::remove_file(zip);
     // A period: the steps from February on, the layer's first step the second of the axis.
     let id2 = s.run("layer.addZarr", &json!({"path": path, "variable": "t", "time": true, "start": "2001-01-20", "name": "late"})).unwrap()
@@ -6488,6 +6490,14 @@ fn a_zarr_variable_follows_the_time_slider() {
         .unwrap();
     let e = s.run("layer.addZarr", &json!({"path": twice, "variable": "t", "time": true})).unwrap_err();
     assert!(e.contains("increasing order"), "{e}");
+    // A store whose first slice can't be read leaves the slider as it was.
+    let (dir3, broken) = zarr_store_over_time("broken");
+    std::fs::remove_file(std::path::Path::new(&broken).join("t/0.0.0")).unwrap();
+    std::fs::write(std::path::Path::new(&broken).join("t/0.0.0"), b"short").unwrap();
+    let mut fresh = Session::new(Project::default());
+    assert!(fresh.run("layer.addZarr", &json!({"path": broken, "variable": "t", "time": true})).is_err());
+    assert!(fresh.map().time.is_none(), "a store that can't be read leaves the slider as it was");
+    let _ = std::fs::remove_dir_all(dir3);
     let _ = std::fs::remove_dir_all(dir2);
     let _ = std::fs::remove_dir_all(dir);
 }
