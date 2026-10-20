@@ -26,8 +26,9 @@ pub fn commands() -> Vec<C> {
     )]
 }
 
-/// The most cell values a cube is read into at once (cells × dates): 64 million, 256 MB.
-pub const MAX_VALUES: u64 = 64_000_000;
+/// The most cell values a cube is read into at once (cells × dates): 64 million, 256 MB, on the
+/// desktop; 16 million, 64 MB, in the browser's smaller memory.
+pub const MAX_VALUES: u64 = if cfg!(target_arch = "wasm32") { 16_000_000 } else { 64_000_000 };
 /// The most pairs of dates a trend compares in all (cells × dates² ⁄ 2), which bounds the time
 /// Sen's slope takes: far fewer in the browser, which works them out on one thread.
 pub const MAX_PAIRS: u64 = if cfg!(target_arch = "wasm32") { 200_000_000 } else { 20_000_000_000 };

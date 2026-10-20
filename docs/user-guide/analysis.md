@@ -335,7 +335,7 @@ and a **Mann–Kendall** test of whether the trend is significant.
   p-value, and the slope where p < alpha (no-data elsewhere), the one a map usually shows on a
   diverging ramp centred on 0.
 - **Size:** the cube is read into memory a slice at a time, up to 64 million values (cells times
-  dates) and 2,000 dates. It runs in the background with progress and Cancel.
+  dates; 16 million in the web app) and 2,000 dates. It runs in the background with progress and Cancel.
 
 ```sh
 rustgis-cli run --cmd 'cube.trend={"layers":["ndvi_2015","ndvi_2016","ndvi_2017","ndvi_2018"],"per":"decade"}'
