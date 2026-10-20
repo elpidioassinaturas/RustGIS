@@ -6364,6 +6364,7 @@ fn a_zarr_series_at_a_point() {
 
 /// A Zarr variable summarised over time (#556): each statistic, a season, a period and a layer's
 /// period, into a raster layer kept in the project.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_zarr_variable_summarised_over_time() {
     let (dir, path) = zarr_store_over_time("reduce");
