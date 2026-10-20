@@ -854,11 +854,12 @@ impl Map {
         }
         let window = self.time.as_ref().map(time::TimeSlider::window);
         for t in &mut self.tiles {
-            // A file per date (a STAC data cube's tile): the last date in the window, or none.
+            // A file per date (a STAC data cube's tile): the last date in the window, or none; with
+            // the slider off, the last date of all, as at the end of the slider.
             if !t.time_urls.is_empty() {
                 let at = match window {
                     Some((from, to)) => t.time_urls.iter().rposition(|(d, _)| *d >= from && *d < to),
-                    None => Some(0),
+                    None => t.time_urls.len().checked_sub(1),
                 };
                 t.time_hidden = at.is_none();
                 if let Some((d, u)) = at.and_then(|i| t.time_urls.get(i)) {

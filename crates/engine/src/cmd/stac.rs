@@ -273,7 +273,9 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         let range = match p.get("range").filter(|v| !v.is_null()) {
             None => None,
             Some(v) => {
-                let r: Option<Vec<f64>> = v.as_array().map(|a| a.iter().filter_map(Value::as_f64).filter(|x| x.is_finite()).collect());
+                // Two finite numbers, nothing else: a value that isn't one is refused, not skipped.
+                let r: Option<Vec<f64>> =
+                    v.as_array().filter(|a| a.len() == 2).and_then(|a| a.iter().map(|x| x.as_f64().filter(|x| x.is_finite())).collect());
                 match r.as_deref() {
                     Some([lo, hi]) if lo < hi => Some((*lo, *hi)),
                     _ => return Err("range is [low, high], low below high".into()),
@@ -347,8 +349,8 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         if tiles.is_empty() {
             return Err(format!("no item of {collection} has an asset {asset}"));
         }
-        // The range in the files' stored values: one range can't hold if they store them alike
-        // no longer (a processing change of scale or offset partway).
+        // One range can't hold if the files store their values alike no longer (a processing
+        // change of scale or offset partway).
         if range.is_some() && scales_differ {
             return Err(format!(
                 "the {asset} files don't all have the same scale and offset, so one range can't fit them all: leave range out"
@@ -388,9 +390,9 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                     return Err(e);
                 }
             };
-            // The tile layer just added follows the slider through its dates. A file read whole
-            // instead (a GeoTIFF that isn't cloud-optimised) can't follow it.
-            // The tile layer add_url put in, at the index it gives, and at the file's address.
+            // The tile layer add_url put in (at the index it gives, and the file's address) follows
+            // the slider through its dates; a file read whole instead (a GeoTIFF that isn't
+            // cloud-optimised) can't.
             let m = s.map_mut();
             let file = first.split('#').next();
             let at = r.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok());

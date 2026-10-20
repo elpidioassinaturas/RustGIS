@@ -6121,6 +6121,8 @@ fn a_stac_data_cube_on_the_time_slider() {
         json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "2024-02-01", "end": "2024-01-01"}),
         json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "2024-01-01", "end": "2024-01-31", "range": [1, 0]}),
         json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "June", "end": "2024-01-31"}),
+        json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "2024-01-01", "end": "2024-01-31", "range": ["a", 0, 1]}),
+        json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "2024-01-01", "end": "2024-01-31", "range": [0, "x", 1]}),
     ] {
         assert!(s.run("stac.addCube", &bad).is_err(), "{bad}");
     }
