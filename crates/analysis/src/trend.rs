@@ -151,8 +151,10 @@ pub fn sen_slope(t: &[f64], y: &[f64]) -> Option<f64> {
     for i in 0..n {
         for j in i + 1..n {
             let dt = t[j] - t[i];
-            if dt != 0.0 {
-                slopes.push((y[j] - y[i]) / dt);
+            // A slope too steep to hold (huge values, times a hair apart) is left out.
+            let slope = (y[j] - y[i]) / dt;
+            if dt != 0.0 && slope.is_finite() {
+                slopes.push(slope);
             }
         }
     }
@@ -206,8 +208,9 @@ fn seasonal_by(t: &[f64], y: &[f64], season: &[usize]) -> Option<Trend> {
         for i in 0..ts.len() {
             for j in i + 1..ts.len() {
                 let dt = ts[j] - ts[i];
-                if dt != 0.0 {
-                    slopes.push((ys[j] - ys[i]) / dt);
+                let slope = (ys[j] - ys[i]) / dt;
+                if dt != 0.0 && slope.is_finite() {
+                    slopes.push(slope);
                 }
             }
         }
