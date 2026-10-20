@@ -6490,6 +6490,10 @@ fn a_zarr_variable_follows_the_time_slider() {
         .unwrap();
     let e = s.run("layer.addZarr", &json!({"path": twice, "variable": "t", "time": true})).unwrap_err();
     assert!(e.contains("increasing order"), "{e}");
+    // With no variable named, a folder's first one follows the slider.
+    let mut plain = Session::new(Project::default());
+    let r = plain.run("layer.addZarr", &json!({"path": path, "time": true})).unwrap();
+    assert!(plain.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().time_zarr.is_some());
     // A store whose first slice can't be read leaves the slider as it was.
     let (dir3, broken) = zarr_store_over_time("broken");
     std::fs::remove_file(std::path::Path::new(&broken).join("t/0.0.0")).unwrap();
