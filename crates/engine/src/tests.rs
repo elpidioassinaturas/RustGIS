@@ -6102,6 +6102,15 @@ fn a_stac_data_cube_on_the_time_slider() {
         )
         .unwrap();
     assert_eq!(r2["dates"], 2, "an end given as a year or a month reaches its last day: {r2}");
+    // A slider already on takes the cube's dates in: one over other dates gains these two.
+    let mut busy = Session::new(Project::default());
+    busy.run("time.set", &json!({"dates": ["2023-06-01", "2023-07-01"]})).unwrap();
+    busy.run(
+        "stac.addCube",
+        &json!({"url": api, "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31"}),
+    )
+    .unwrap();
+    assert_eq!(busy.run("time.info", &Value::Null).unwrap()["steps"], 4, "the slider takes the cube's dates in");
     let tiles = s.map().tiles.clone();
     assert_eq!(tiles.len(), 2);
     let t1 = tiles.iter().find(|t| t.name.ends_with("T1")).unwrap();

@@ -420,6 +420,17 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
             m.tiles = tiles_before.clone();
             m.layers.retain(|l| layers_before.contains(&l.id));
         };
+        // Every file a web address of sane length, as a project keeps them (TileLayer::repair),
+        // so the cube reopens as it was made.
+        if let Some(bad) = tiles.values().flat_map(|by_day| by_day.values()).find(|h| {
+            let lower = h.to_ascii_lowercase();
+            !(lower.starts_with("https://") || lower.starts_with("http://")) || h.len() > 4000
+        }) {
+            return Err(format!(
+                "{}: a data cube's files are read in place from web addresses (http, https)",
+                bad.chars().take(200).collect::<String>()
+            ));
+        }
         for (tile, by_day) in &tiles {
             let urls: Vec<(f64, String)> = by_day.iter().map(|(d, u)| (*d as f64 * 86_400_000.0, format!("{u}{look}"))).collect();
             dates.extend(urls.iter().map(|(d, _)| *d));
@@ -456,14 +467,29 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         dates.sort_by(f64::total_cmp);
         dates.dedup();
         dates.truncate(rustgis_map::time::MAX_STEPS);
-        if s.map().time.is_none() {
-            let d: Vec<Value> = dates.iter().map(|d| json!(d)).collect();
-            if let Err(e) = super::time::set(s, &json!({"dates": d})) {
-                undo(s);
-                return Err(e);
+        // The slider over the cube's dates: on over them when it is off; when it is on, taking
+        // them in (its own dates and the cube's, or its span widened to theirs), so every file
+        // can be reached.
+        let slider = match s.map().time.as_ref() {
+            None => {
+                let d: Vec<Value> = dates.iter().map(|d| json!(d)).collect();
+                json!({"dates": d})
             }
-        } else {
-            s.map_mut().apply_time();
+            Some(t) if !t.dates.is_empty() => {
+                let mut all: Vec<f64> = t.dates.iter().chain(&dates).copied().collect();
+                all.sort_by(f64::total_cmp);
+                all.dedup();
+                all.truncate(rustgis_map::time::MAX_STEPS);
+                json!({"dates": all, "date": t.current})
+            }
+            Some(t) => {
+                let (first, last) = (dates.first().copied().unwrap_or(t.start), dates.last().copied().unwrap_or(t.end));
+                json!({"start": t.start.min(first), "end": t.end.max(last), "date": t.current})
+            }
+        };
+        if let Err(e) = super::time::set(s, &slider) {
+            undo(s);
+            return Err(e);
         }
         let mut out = json!({"items": items.len(), "tiles": tiles.len(), "dates": dates.len(), "layers": added.len()});
         if without > 0 {
