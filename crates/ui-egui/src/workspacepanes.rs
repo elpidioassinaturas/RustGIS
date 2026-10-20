@@ -504,6 +504,8 @@ fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
             }
             Some(res) => {
                 let (root, variable, name) = (r.run.root.clone(), r.run.variable.clone(), r.run.name.clone());
+                // A run the user cancelled stops quietly: no error for it.
+                let cancelled = r.cancel.load(Ordering::Relaxed);
                 app.ws.reducing = None;
                 match res {
                     Ok(tif) => {
@@ -512,6 +514,7 @@ fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
                         let key = if root.starts_with("http://") || root.starts_with("https://") { "url" } else { "path" };
                         let _ = run(app, "layer.addZarr", json!({key: root, "variable": variable, "ran": id, "name": name}));
                     }
+                    Err(_) if cancelled => {}
                     Err(e) => app.ws.message = Some((e, true)),
                 }
             }
@@ -554,8 +557,13 @@ fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
                     p[k] = json!(v.trim());
                 }
             }
-            let months: Vec<Value> =
-                app.ws.reduce_months.split([',', ' ']).filter_map(|m| m.trim().parse::<u64>().ok()).map(|m| json!(m)).collect();
+            // Every month written a number: one that isn't (`Dec`, a typo) is said, not dropped.
+            let typed: Vec<&str> = app.ws.reduce_months.split([',', ' ']).map(str::trim).filter(|m| !m.is_empty()).collect();
+            let months: Vec<Value> = typed.iter().filter_map(|m| m.parse::<u64>().ok()).map(|m| json!(m)).collect();
+            if months.len() != typed.len() {
+                app.ws.message = Some((tl!("Months are numbers from 1 to 12 (12, 1, 2 for December to February)").to_string(), true));
+                return;
+            }
             if !months.is_empty() {
                 p["months"] = Value::Array(months);
             }
