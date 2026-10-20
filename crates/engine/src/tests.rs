@@ -6324,6 +6324,7 @@ fn zarr_store_at(tag: &str, days: &[i32]) -> (std::path::PathBuf, String) {
 
 /// A Zarr variable's series at a point (#555): the values along its time dimension at the cell
 /// holding it, read from the chunks holding that cell, through a layer or the store itself.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_zarr_series_at_a_point() {
     let (dir, path) = zarr_store_over_time("series");
