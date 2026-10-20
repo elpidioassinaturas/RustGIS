@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use rustgis_analysis::georef::{self, Gcp, Kind};
 use rustgis_analysis::rasterops::{self, NODATA};
 use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
 use rustgis_data::{Geometry, GeometryType};
@@ -37,6 +38,10 @@ pub fn commands() -> Vec<C> {
     vec![
         C::new("raster.georeference", "Georeference", "Analyze › Alignment", georeference).params(
             r#"{"layer": raster, "points"?: [[column, row, lon, lat], …] (two or more), "extent"?: [minLon, minLat, maxLon, maxLat]}"#,
+        ),
+        // A fit is a measurement of the points, not a project change: no undo step.
+        C::new("raster.gcpFit", "Control Point Fit", "Analyze › Alignment", gcp_fit).view().params(
+            r#"{"points": [[column, row, x, y, on?], …] (on: 1/0 or true/false, default on), "transform"?: "similarity"|"affine"|"projective"|"polynomial2"|"polynomial3"|"spline" (default: similarity under 3 points, else affine), "compare"?: bool (fit every transform and recommend one; transform and leaveOneOut are then ignored), "leaveOneOut"?: bool (default true)}"#,
         ),
         C::new("raster.change", "Change Detection", "Analyze › Image Analysis", change)
             .params(r#"{"before": raster, "after": raster, "band"?: 1-based, "method"?: "difference"|"ratio"|"percent", "name"?}"#),
@@ -227,6 +232,85 @@ fn georeference(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"layer": v["layer"], "extent": [e.min_x, e.min_y, e.max_x, e.max_y]}))
 }
 
+/// Control points from `[column, row, x, y, on?]` entries.
+fn gcps(p: &Value) -> Result<Vec<Gcp>, String> {
+    const SHAPE: &str = "each control point is [column, row, x, y] or [column, row, x, y, on]";
+    let a = p.get("points").and_then(Value::as_array).ok_or("points is required: [[column, row, x, y], …]")?;
+    if a.len() > georef::MAX_POINTS {
+        return Err(format!("a fit takes at most {} control points", georef::MAX_POINTS));
+    }
+    a.iter()
+        .map(|v| {
+            let e = v.as_array().filter(|e| e.len() == 4 || e.len() == 5).ok_or(SHAPE)?;
+            let num = |i: usize| e.get(i).and_then(Value::as_f64).filter(|x| x.is_finite()).ok_or(SHAPE);
+            let on = match e.get(4) {
+                None => true,
+                Some(Value::Bool(b)) => *b,
+                Some(v) => v.as_f64().ok_or(SHAPE)? != 0.0,
+            };
+            Ok(Gcp { col: num(0)?, row: num(1)?, x: num(2)?, y: num(3)?, on })
+        })
+        .collect()
+}
+
+fn pair(e: (f64, f64)) -> Value {
+    json!({"pixels": e.0, "map": e.1})
+}
+
+/// A report's errors (no per-point residuals).
+fn errors(r: &georef::Report) -> Value {
+    json!({
+        "transform": r.fit.kind.id(),
+        "used": r.used,
+        "minimum": r.minimum,
+        "rmse": pair(r.rmse),
+        "meanError": pair(r.mean_error),
+        "leaveOneOut": r.leave_one_out_rmse.map(pair),
+        "leaveOneOutNote": r.leave_one_out_note,
+    })
+}
+
+/// Fits a transform to control points and reports how well it holds: each point's residual in
+/// pixels and map units, the RMSE and QGIS's mean error, and each point's error when left out.
+fn gcp_fit(_: &mut Session, p: &Value) -> CmdResult {
+    let pts = gcps(p)?;
+    if b(p, "compare").unwrap_or(false) {
+        let (reports, best) = georef::compare(&pts);
+        if reports.iter().all(|(_, r)| r.is_err()) {
+            return Err("the points can't fix any transform: give at least two, not on top of each other".into());
+        }
+        let transforms: Vec<Value> = reports
+            .iter()
+            .map(|(k, r)| match r {
+                Ok(r) => errors(r),
+                Err(e) => json!({"transform": k.id(), "error": e}),
+            })
+            .collect();
+        return Ok(json!({"recommended": best.map(Kind::id), "transforms": transforms}));
+    }
+    let kind = match ps(p, "transform") {
+        Some(t) => Kind::parse(t).ok_or_else(|| format!("unknown transform '{t}'"))?,
+        None if pts.iter().filter(|g| g.on).count() < 3 => Kind::Similarity,
+        None => Kind::Affine,
+    };
+    let r = georef::assess(kind, &pts, b(p, "leaveOneOut").unwrap_or(true))?;
+    let mut out = errors(&r);
+    out["residuals"] = r
+        .residuals
+        .iter()
+        .enumerate()
+        .map(|(i, res)| {
+            let left_out = r.leave_one_out.as_ref().and_then(|l| l.get(i).copied().flatten());
+            res.map_or(
+                Value::Null,
+                |x| json!({"pixels": [x.pixels.0, x.pixels.1], "map": [x.map.0, x.map.1], "leaveOneOut": left_out.map(pair)}),
+            )
+        })
+        .collect();
+    out["affine"] = json!(r.fit.affine());
+    Ok(out)
+}
+
 fn change(s: &mut Session, p: &Value) -> CmdResult {
     let a = raster_named(s, ps(p, "before").ok_or("before is required")?)?;
     let bfr = raster_named(s, ps(p, "after").ok_or("after is required")?)?;
@@ -283,6 +367,8 @@ fn spectral(s: &mut Session, p: &Value) -> CmdResult {
 
 fn supervised(s: &mut Session, p: &Value) -> CmdResult {
     let r = raster(s, p)?;
+    // Training polygons on the map mean nothing on a scan laid there to look at.
+    r.require_coordinates()?;
     let bands = bands_param(p, &r)?;
     let tl = ps(p, "training").ok_or("training (a polygon layer) is required")?;
     let l = s
@@ -341,6 +427,8 @@ fn process(s: &mut Session, p: &Value) -> CmdResult {
     let r = raster(s, p)?;
     match ps(p, "operation").ok_or("operation is required")? {
         "clip" if p.get("polygon").is_some_and(|v| !v.is_null()) => {
+            // Before the mask, which places the polygons on the raster's coordinates.
+            r.require_coordinates()?;
             let pl = ps(p, "polygon").ok_or("polygon is a polygon layer's name")?;
             let l = s
                 .map()
@@ -363,6 +451,8 @@ fn process(s: &mut Session, p: &Value) -> CmdResult {
             add(s, out, false)
         }
         "clip" => {
+            // Before the extent is placed on the raster's coordinates.
+            r.require_coordinates()?;
             let e = match p.get("extent").and_then(Value::as_array) {
                 Some(a) => {
                     let n: Vec<f64> = a.iter().filter_map(Value::as_f64).collect();
@@ -403,6 +493,7 @@ fn process(s: &mut Session, p: &Value) -> CmdResult {
         "resample" => {
             // Never coarser than the raster itself; trailing columns and rows short of a full
             // block are left out.
+            r.require_coordinates()?;
             let k = (uint(p, "factor").unwrap_or(2).clamp(2, 64) as u32).min(r.width.min(r.height)).max(1);
             let (w, h) = ((r.width / k).max(1), (r.height / k).max(1));
             // Each output pixel is the mean of the valid pixels it covers.
@@ -561,6 +652,8 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
 
 /// Whether `r` can join a mosaic on `first`'s grid: one coordinate system, cell size and band count.
 fn mosaic_matches(first: &Raster, r: &Raster) -> Result<(), String> {
+    first.require_coordinates()?;
+    r.require_coordinates()?;
     let (pw, ph) = (first.transform.pixel_width, first.transform.pixel_height);
     let same = |a: f64, b: f64| (a - b).abs() <= 1e-6 * a.abs().max(b.abs());
     if r.crs != first.crs {
@@ -598,6 +691,7 @@ fn clip_window(
     mask: Option<&[bool]>,
     name: String,
 ) -> Result<Raster, String> {
+    r.require_coordinates()?;
     let (w, h) = (cols.end.saturating_sub(cols.start), rows.end.saturating_sub(rows.start));
     let nodata = if mask.is_some() { r.nodata.or(Some(NODATA as f64)) } else { r.nodata };
     let fill = nodata.map(|v| v as f32).unwrap_or(NODATA);
@@ -652,6 +746,7 @@ fn pixel_window(r: &Raster, e: &Extent) -> Option<(std::ops::Range<u32>, std::op
 fn edit_pixels(s: &mut Session, p: &Value) -> CmdResult {
     let layer = ps(p, "layer").ok_or("layer is required")?.to_string();
     let r = raster(s, p)?;
+    r.require_coordinates()?;
     let ring: Vec<Coord> = p
         .get("polygon")
         .and_then(Value::as_array)
@@ -717,6 +812,10 @@ fn measure(s: &mut Session, p: &Value) -> CmdResult {
         p.get("points").and_then(Value::as_array).ok_or("points is required")?.iter().take(10_000).map(point).collect::<Result<_, _>>()?;
     let kind = ps(p, "kind").ok_or("kind is required")?;
     let dem = ps(p, "layer").map(|n| raster_named(s, n)).transpose()?;
+    // A scan's heights would be read at the made-up place it is laid.
+    if let Some(d) = &dem {
+        d.require_coordinates()?;
+    }
     let z = |c: Coord| dem.as_ref().and_then(|d| rasterops::elevation_at(d, 0, c));
     // Ground lengths and areas on the map's body.
     let body = s.map().body();
@@ -874,6 +973,7 @@ fn mosaic(s: &mut Session, p: &Value) -> CmdResult {
     let imgs: Vec<Arc<Raster>> = w.images.iter().map(|i| raster_named(s, i)).collect::<Result<_, _>>()?;
     let mut e = Extent::EMPTY;
     for r in &imgs {
+        r.require_coordinates()?;
         e = e.union(&r.extent());
     }
     let finest = imgs
@@ -933,6 +1033,8 @@ fn mesh(s: &mut Session, p: &Value) -> CmdResult {
         return Err("the mesh is written to an .obj file".into());
     }
     let r = raster(s, p)?;
+    // The mesh is laid out in metres on the ground, which a scan has none of.
+    r.require_coordinates()?;
     let step = uint(p, "step").unwrap_or(((r.width.max(r.height) / 300).max(1)) as u64).clamp(1, 1000) as i64;
     let (cx, cy) = r.cell_size_m();
     let (nc, nr) = ((r.width as i64 - 1) / step + 1, (r.height as i64 - 1) / step + 1);

@@ -40,6 +40,13 @@ fn read(path: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// The weight the semibold face is drawn at where it is a variable font (#591): macOS's system
+/// font is one file for every weight, drawn at its default 400 unless told otherwise. 600 is
+/// semibold, as the static faces used elsewhere (Segoe UI Semibold, Inter SemiBold) are; a face
+/// with no weight axis ignores it. Both renderers set it, so text is as heavy on screen as in an
+/// export.
+pub const SEMIBOLD_WEIGHT: f32 = 600.0;
+
 /// The interface fonts, discovered once.
 pub fn ui_fonts() -> &'static UiFonts {
     static F: OnceLock<UiFonts> = OnceLock::new();
@@ -133,5 +140,73 @@ pub fn cjk_font_url(region: CjkRegion) -> &'static str {
         CjkRegion::SimplifiedChinese => "https://assets.rustgis.app/fonts/NotoSansSC-Regular.otf",
         CjkRegion::Japanese => "https://assets.rustgis.app/fonts/NotoSansJP-Regular.otf",
         CjkRegion::Korean => "https://assets.rustgis.app/fonts/NotoSansKR-Regular.otf",
+    }
+}
+
+/// A script the interface fonts may lack, and that an interface language needs a face for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptFont {
+    Cjk(CjkRegion),
+    /// Arabic script (Persian). The face has Latin letters too: egui shapes each run of one face
+    /// on its own, so a line of Persian with a Latin word in it reads in order only when one face
+    /// draws the whole line.
+    Arabic,
+}
+
+/// Installed faces with both Arabic and Latin letters (checked by [`covers_arabic`]).
+const ARABIC_CANDIDATES: &[&str] = &[
+    "C:\\Windows\\Fonts\\segoeui.ttf",
+    "C:\\Windows\\Fonts\\tahoma.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Supplemental/Tahoma.ttf",
+    "/usr/share/fonts/TTF/Vazirmatn-Regular.ttf",
+    "/usr/share/fonts/truetype/vazirmatn/Vazirmatn-Regular.ttf",
+    "/usr/share/fonts/vazirmatn-fonts/Vazirmatn-Regular.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+];
+
+/// Whether a face draws Persian letters (farsi yeh, gaf) and Latin ones.
+fn covers_arabic(bytes: &[u8], index: u32) -> bool {
+    use ab_glyph::Font;
+    ab_glyph::FontRef::try_from_slice_and_index(bytes, index)
+        .is_ok_and(|f| ['\u{6CC}', '\u{6AF}', 'A', 'z'].iter().all(|c| f.glyph_id(*c).0 != 0))
+}
+
+/// An installed face for `script` (bytes and face index), found once. `None` on the web or when
+/// nothing suitable is installed.
+pub fn script_font(script: ScriptFont) -> Option<&'static (Vec<u8>, u32)> {
+    match script {
+        ScriptFont::Cjk(region) => cjk_font(region),
+        ScriptFont::Arabic => {
+            static FOUND: OnceLock<Option<(Vec<u8>, u32)>> = OnceLock::new();
+            FOUND.get_or_init(|| ARABIC_CANDIDATES.iter().find_map(|p| read(p).filter(|b| covers_arabic(b, 0)).map(|b| (b, 0)))).as_ref()
+        }
+    }
+}
+
+/// Where the web app downloads a face for `script` from (SIL Open Font License): Noto Sans for
+/// CJK, Vazirmatn for Arabic script.
+pub fn script_font_url(script: ScriptFont) -> &'static str {
+    match script {
+        ScriptFont::Cjk(region) => cjk_font_url(region),
+        ScriptFont::Arabic => "https://assets.rustgis.app/fonts/Vazirmatn-Regular.ttf",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn an_arabic_face_needs_persian_and_latin_letters() {
+        // Ubuntu Light has Latin but no Arabic; junk is no font at all.
+        assert!(!super::covers_arabic(epaint_default_fonts::UBUNTU_LIGHT, 0));
+        assert!(!super::covers_arabic(b"not a font", 0));
+        // DejaVu Sans has both, where it is installed.
+        for p in super::ARABIC_CANDIDATES.iter().filter(|p| p.contains("DejaVu")) {
+            if let Ok(b) = std::fs::read(p) {
+                assert!(super::covers_arabic(&b, 0), "{p}");
+            }
+        }
     }
 }

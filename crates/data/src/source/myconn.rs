@@ -15,6 +15,11 @@ pub fn split_password(s: &str) -> Option<(String, Option<String>)> {
     if !is_address(t) {
         return None;
     }
+    split_userinfo_password(t)
+}
+
+/// Removes user-info and query passwords without restricting the address's scheme.
+pub(super) fn split_userinfo_password(t: &str) -> Option<(String, Option<String>)> {
     let (scheme, rest) = t.split_once("://")?;
     // The user and password end at the `@` before the host, found before anything else splits
     // the address: a password may hold an unencoded `/`, `?`, `#` or `@`.

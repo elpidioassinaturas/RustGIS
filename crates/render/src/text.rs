@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use ab_glyph::{Font, FontRef, GlyphId, PxScale, ScaleFont};
+use ab_glyph::{Font, FontRef, GlyphId, PxScale, ScaleFont, VariableFont};
 use tiny_skia::{Paint, Pixmap, Rect, Transform};
 
 use crate::fonts::CjkRegion;
@@ -15,7 +15,13 @@ fn font(bold: bool) -> Option<&'static FontRef<'static>> {
     static B: OnceLock<Option<FontRef<'static>>> = OnceLock::new();
     let f = crate::fonts::ui_fonts();
     if bold {
-        B.get_or_init(|| FontRef::try_from_slice(&f.semibold).ok()).as_ref()
+        B.get_or_init(|| {
+            let mut face = FontRef::try_from_slice(&f.semibold).ok()?;
+            // Heavier where the face is variable (macOS's system font, #591); static ones ignore it.
+            face.set_variation(b"wght", crate::fonts::SEMIBOLD_WEIGHT);
+            Some(face)
+        })
+        .as_ref()
     } else {
         R.get_or_init(|| FontRef::try_from_slice(&f.regular).ok()).as_ref()
     }

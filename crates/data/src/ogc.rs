@@ -40,13 +40,15 @@ pub struct LayerTime {
 /// Most time values kept for a layer.
 const MAX_TIME_VALUES: usize = 64;
 
-/// A time given for a layer's `{Time}`: an ISO 8601 date or date-time (or `default`), never
-/// anything else, since it goes into tile addresses.
+/// A time given for a layer's `{Time}`: an ISO 8601 date or date-time (or `default`, or OGC's
+/// `current`), never anything else, since it goes into tile addresses.
 pub fn checked_time(t: &str) -> Result<String, String> {
     let t = t.trim();
     // A date starts with a digit, so `.` and `..` (path segments, in a tile address) never pass.
     let dated = t.as_bytes().first().is_some_and(u8::is_ascii_digit);
-    if (dated || t == "default") && t.len() <= 40 && t.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b':' | b'.' | b'+'))
+    if (dated || t == "default" || t == "current")
+        && t.len() <= 40
+        && t.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b':' | b'.' | b'+'))
     {
         Ok(t.to_string())
     } else {
@@ -2176,6 +2178,28 @@ mod tests {
  <TileMatrix><ows:Identifier>1</ows:Identifier><ScaleDenominator>279541132.0143589</ScaleDenominator><TopLeftCorner>-20037508.34278925 20037508.34278925</TopLeftCorner><TileWidth>256</TileWidth><TileHeight>256</TileHeight></TileMatrix>
 </TileMatrixSet></Contents></Capabilities>"#;
 
+    /// A WMTS whose only time is OGC's `current` and whose only template has `{Time}` (its
+    /// server has no KVP GetTile).
+    #[test]
+    fn wmts_current_time() {
+        let xml = r#"<Capabilities xmlns="http://www.opengis.net/wmts/1.0" xmlns:ows="http://www.opengis.net/ows/1.1" version="1.0.0">
+<ows:ServiceIdentification><ows:Title>Maps</ows:Title></ows:ServiceIdentification><Contents>
+<Layer><ows:Title>Topo</ows:Title><ows:Identifier>topo</ows:Identifier>
+ <Style><ows:Identifier>topo</ows:Identifier></Style><Format>image/jpeg</Format>
+ <Dimension><ows:Identifier>Time</ows:Identifier><Default>current</Default><Value>current</Value></Dimension>
+ <TileMatrixSetLink><TileMatrixSet>3857_19</TileMatrixSet></TileMatrixSetLink>
+ <ResourceURL format="image/jpeg" resourceType="tile" template="https://maps.example.org/1.0.0/topo/default/{Time}/3857/{TileMatrix}/{TileCol}/{TileRow}.jpeg"/></Layer>
+<TileMatrixSet><ows:Identifier>3857_19</ows:Identifier><ows:SupportedCRS>urn:ogc:def:crs:EPSG:3857</ows:SupportedCRS>
+ <TileMatrix><ows:Identifier>0</ows:Identifier><ScaleDenominator>559082264.0287178</ScaleDenominator><TopLeftCorner>-20037508.342789244 20037508.342789244</TopLeftCorner><TileWidth>256</TileWidth><TileHeight>256</TileHeight></TileMatrix>
+ <TileMatrix><ows:Identifier>1</ows:Identifier><ScaleDenominator>279541132.0143589</ScaleDenominator><TopLeftCorner>-20037508.342789244 20037508.342789244</TopLeftCorner><TileWidth>256</TileWidth><TileHeight>256</TileHeight></TileMatrix>
+</TileMatrixSet></Contents></Capabilities>"#;
+        let s = parse("https://maps.example.org/1.0.0/WMTSCapabilities.xml", xml.as_bytes()).unwrap();
+        assert_eq!(s.layers.len(), 1, "{:?}", s.notes);
+        let l = &s.layers[0];
+        assert_eq!(l.offer, Offer::Tiles { template: "https://maps.example.org/1.0.0/topo/default/{Time}/3857/{z}/{x}/{y}.jpeg".into() });
+        assert_eq!(l.time.as_ref().map(|t| t.default.as_str()), Some("current"));
+    }
+
     #[test]
     fn wmts_time_dimensions() {
         let s = parse("https://gibs.example.org/wmts/1.0.0/WMTSCapabilities.xml", GIBS.as_bytes()).unwrap();
@@ -2207,7 +2231,7 @@ mod tests {
         let t = s.layers[2].time.as_ref().unwrap();
         assert_eq!((t.default.as_str(), t.values.len()), ("1999-01-01", MAX_TIME_VALUES));
         assert!(checked_time("2024-06-01").is_ok() && checked_time("2024-06-01T10:00:00Z").is_ok());
-        assert!(checked_time("default").is_ok());
+        assert!(checked_time("default").is_ok() && checked_time("current").is_ok());
         for bad in ["", "..", ".", "../x", "2024-06-01/../..", "a b", "x?y=1", "latest", &"9".repeat(50)] {
             assert!(checked_time(bad).is_err(), "{bad}");
         }

@@ -87,7 +87,7 @@ impl TimeCube for ZarrCube {
         &self.0.zt.dates
     }
     fn slice(&self, i: usize) -> Result<(Arc<Raster>, usize), String> {
-        Ok((super::zarr::read_step(&self.0.zt, i)?, 0))
+        Ok((super::zarr::read_step(&self.0.zt, i, super::zarr::slice_key(&self.0.zt, i))?, 0))
     }
     fn label(&self) -> String {
         self.0.zt.variable.clone()

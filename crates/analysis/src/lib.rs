@@ -13,6 +13,7 @@
 pub mod convert;
 pub mod dggs;
 pub mod geodesic;
+pub mod georef;
 pub mod network;
 pub mod neural;
 pub mod rasterops;

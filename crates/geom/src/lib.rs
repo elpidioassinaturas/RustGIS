@@ -5,9 +5,11 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod body;
+pub mod sinusoidal;
 pub mod triangulate;
 
 pub use body::{BODIES, Body};
+pub use sinusoidal::Sinusoidal;
 
 use serde::{Deserialize, Serialize};
 
@@ -298,17 +300,18 @@ pub fn nice_distance(d: f64) -> f64 {
 
 /// Formats a distance in metres as `850 m` / `12.5 km`.
 pub fn format_distance(m: f64) -> String {
-    if m >= 1000.0 {
-        let km = m / 1000.0;
-        if km >= 100.0 { format!("{km:.0} km") } else { format!("{km:.1} km") }
-    } else {
+    if m.round() < 1000.0 {
         format!("{m:.0} m")
+    } else if (m / 100.0).round() < 1000.0 {
+        format!("{:.1} km", m / 1000.0)
+    } else {
+        format!("{:.0} km", m / 1000.0)
     }
 }
 
 /// Formats an area in square metres as `km²` or `m²`.
 pub fn format_area(m2: f64) -> String {
-    if m2 >= 1.0e6 { format!("{:.1} km²", m2 / 1.0e6) } else { format!("{m2:.0} m²") }
+    if m2.round() < 1.0e6 { format!("{m2:.0} m²") } else { format!("{:.1} km²", m2 / 1.0e6) }
 }
 
 /// Formats a lon/lat pair in decimal degrees with hemispheres: `12.345° E 45.678° N`.
@@ -321,10 +324,10 @@ pub fn format_lonlat(c: Coord) -> String {
 /// Formats a lon/lat pair as degrees-minutes-seconds.
 pub fn format_dms(c: Coord) -> String {
     fn dms(v: f64) -> String {
-        let a = v.abs();
-        let d = a.floor();
-        let m = ((a - d) * 60.0).floor();
-        let s = (a - d - m / 60.0) * 3600.0;
+        let tenths = (v.abs() * 36_000.0).round();
+        let d = (tenths / 36_000.0).floor();
+        let m = ((tenths % 36_000.0) / 600.0).floor();
+        let s = (tenths % 600.0) / 10.0;
         format!("{d:.0}°{m:02.0}′{s:04.1}″")
     }
     let ew = if c.x < 0.0 { 'W' } else { 'E' };
@@ -385,6 +388,20 @@ mod tests {
     }
 
     #[test]
+    fn distances_and_areas_switch_unit_when_they_round_up() {
+        assert_eq!(format_distance(850.0), "850 m");
+        assert_eq!(format_distance(999.4), "999 m");
+        assert_eq!(format_distance(999.6), "1.0 km");
+        assert_eq!(format_distance(12_500.0), "12.5 km");
+        assert_eq!(format_distance(99_960.0), "100 km");
+        assert_eq!(format_distance(99_949.0), "99.9 km");
+        assert_eq!(format_distance(1_000.0), "1.0 km");
+        assert_eq!(format_area(999_999.4), "999999 m²");
+        assert_eq!(format_area(999_999.6), "1.0 km²");
+        assert_eq!(format_area(1.0e6), "1.0 km²");
+    }
+
+    #[test]
     fn destination_lies_at_its_distance_and_bearing() {
         let from = Coord::new(10.0, 60.0);
         for az in [0.0, 45.0, 90.0, 180.0, 270.0, 333.0] {
@@ -412,6 +429,14 @@ mod tests {
         assert_eq!(nice_distance(2_400.0), 2_000.0);
         assert_eq!(nice_distance(0.0), 0.0);
         assert_eq!(nice_distance(f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn dms_carries_rounded_seconds() {
+        assert_eq!(format_dms(Coord::new(12.5, -45.25)), "12°30′00.0″ E  45°15′00.0″ S");
+        // 59.96″ rounds to 60.0″, which carries into the minutes and then the degrees.
+        assert_eq!(format_dms(Coord::new(10.99999, -45.99999)), "11°00′00.0″ E  46°00′00.0″ S");
+        assert_eq!(format_dms(Coord::new(-0.5 - 59.97 / 3600.0, 0.0)), "0°31′00.0″ W  0°00′00.0″ N");
     }
 
     #[test]

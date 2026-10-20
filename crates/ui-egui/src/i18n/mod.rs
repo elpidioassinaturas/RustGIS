@@ -8,7 +8,14 @@
 //! Settings › Language picks one by hand.
 //!
 //! The language set follows GeoLibre's, minus scripts egui can't yet shape or lay out
-//! (Arabic, Persian, Hebrew, Hindi, Thai).
+//! (Hebrew, Hindi, Thai). Persian is included: egui shapes its script and lays out a
+//! line whose first strong character is of it back to front, which pure Persian
+//! survives; [`rtl`] fixes the Latin runs and brackets inside such lines, and the
+//! Persian catalog starts its lines with Persian text, for a line that starts with a
+//! Latin letter is laid out front to back. [`paragraph`] shows long text: the
+//! toolkit's own wrapping fills rows from the end of a back-to-front line, so its
+//! rows are broken ahead of time. Laying out the widgets themselves right to left
+//! is future work.
 //!
 //! # Catalog format
 //! UTF-8, one `English<TAB>Translation` pair per line; `#` starts a comment line; `\n` and `\t`
@@ -21,6 +28,8 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+mod rtl;
+
 /// The preference value that follows the system.
 pub const AUTO: &str = "auto";
 
@@ -30,6 +39,9 @@ pub enum Script {
     /// Latin, Cyrillic, Greek or Georgian: covered by the interface fonts.
     Alphabetic,
     Cjk(CjkFont),
+    /// Arabic script (Persian): a face with Arabic and Latin letters, drawn ahead of the
+    /// interface font.
+    Arabic,
 }
 
 /// Which CJK face reads best for a language (the glyph shapes differ by region).
@@ -50,17 +62,35 @@ pub struct LangInfo {
     pub script: Script,
     source: &'static str,
     catalog: OnceLock<HashMap<&'static str, &'static str>>,
+    /// Catalog values in display form, for a language laid out back to front.
+    visual: OnceLock<HashMap<&'static str, &'static str>>,
 }
 
 macro_rules! lang {
     ($code:literal, $name:literal, $en:literal, $script:expr, $file:literal) => {
-        LangInfo { code: $code, name: $name, english: $en, script: $script, source: include_str!($file), catalog: OnceLock::new() }
+        LangInfo {
+            code: $code,
+            name: $name,
+            english: $en,
+            script: $script,
+            source: include_str!($file),
+            catalog: OnceLock::new(),
+            visual: OnceLock::new(),
+        }
     };
 }
 
 /// The registry. English first: it is the source language and the fallback.
-pub static LANGUAGES: [LangInfo; 16] = [
-    LangInfo { code: "en", name: "English", english: "English", script: Script::Alphabetic, source: "", catalog: OnceLock::new() },
+pub static LANGUAGES: [LangInfo; 17] = [
+    LangInfo {
+        code: "en",
+        name: "English",
+        english: "English",
+        script: Script::Alphabetic,
+        source: "",
+        catalog: OnceLock::new(),
+        visual: OnceLock::new(),
+    },
     lang!("de", "Deutsch", "German", Script::Alphabetic, "de.tsv"),
     lang!("es", "Español", "Spanish", Script::Alphabetic, "es.tsv"),
     lang!("fr", "Français", "French", Script::Alphabetic, "fr.tsv"),
@@ -72,6 +102,7 @@ pub static LANGUAGES: [LangInfo; 16] = [
     lang!("az", "Azərbaycanca", "Azerbaijani", Script::Alphabetic, "az.tsv"),
     lang!("id", "Bahasa Indonesia", "Indonesian", Script::Alphabetic, "id.tsv"),
     lang!("vi", "Tiếng Việt", "Vietnamese", Script::Alphabetic, "vi.tsv"),
+    lang!("fa", "فارسی", "Persian (Farsi)", Script::Arabic, "fa.tsv"),
     lang!("zh", "简体中文", "Chinese (Simplified)", Script::Cjk(CjkFont::SimplifiedChinese), "zh.tsv"),
     lang!("ja", "日本語", "Japanese", Script::Cjk(CjkFont::Japanese), "ja.tsv"),
     lang!("ko", "한국어", "Korean", Script::Cjk(CjkFont::Korean), "ko.tsv"),
@@ -128,6 +159,18 @@ impl LangInfo {
             }
             // Leaked once per language for the life of the process, so lookups return 'static.
             map.into_iter().map(|(k, v)| (&*Box::leak(k.into_boxed_str()), &*Box::leak(v.into_boxed_str()))).collect()
+        })
+    }
+
+    /// The catalog in display form: for a language whose text is laid out back to front,
+    /// each value as [`tr`] hands it out (Latin runs pre-reversed, brackets mirrored).
+    /// Empty — and free — for languages with no right-to-left text.
+    fn visual_catalog(&self) -> &HashMap<&'static str, &'static str> {
+        self.visual.get_or_init(|| {
+            if !rtl::has_rtl(self.source) {
+                return HashMap::new();
+            }
+            self.catalog().iter().map(|(k, v)| (*k, &*Box::leak(rtl::visual(v).into_boxed_str()))).collect()
         })
     }
 }
@@ -238,9 +281,14 @@ pub fn t(s: &str) -> &str {
     tr(current(), s)
 }
 
-/// `s` in `lang`; strings without a translation come back unchanged. Text the catalog doesn't
-/// have may be a plugin's (a tool name, a parameter label…): its own `i18n` translates it.
+/// `s` in `lang`, in display form: a line of right-to-left text has its Latin runs
+/// pre-reversed, so it reads correctly when the toolkit lays it out back to front.
+/// Strings without a translation come back unchanged. Text the catalog doesn't have may
+/// be a plugin's (a tool name, a parameter label…): its own `i18n` translates it.
 pub fn tr(lang: Lang, s: &str) -> &str {
+    if let Some(t) = lang.0.visual_catalog().get(s) {
+        return t;
+    }
     if let Some(t) = lang.0.catalog().get(s) {
         return t;
     }
@@ -250,22 +298,58 @@ pub fn tr(lang: Lang, s: &str) -> &str {
     plugin_tr(lang, s).unwrap_or(s)
 }
 
+/// `s` in `lang`, in logical order: [`tr`] without the display form, for a message whose
+/// placeholders are filled — and whose separators are joined — before it is shown. A
+/// plugin's translation is used when the catalog has none, so [`fmt`] and [`location`]
+/// translate plugin strings as well.
+fn tr_raw(lang: Lang, s: &str) -> &str {
+    if let Some(t) = lang.0.catalog().get(s) {
+        return t;
+    }
+    if lang == Lang::EN {
+        return s;
+    }
+    plugin_tr_raw(lang, s).unwrap_or(s)
+}
+
+/// `s` in the current language, in logical order: [`t`] without the display form, for a
+/// value filled into [`fmt`], which shows the finished message in display form:
+/// `tl_raw!` instead of `tl!` inside `fmt`'s arguments.
+pub fn t_raw(s: &str) -> &str {
+    tr_raw(current(), s)
+}
+
 /// Lookups kept before the plugin translation cache starts over (dynamic text, such as layer
 /// names, also misses the catalog).
 const PLUGIN_CACHE: usize = 20_000;
 
 thread_local! {
-    /// Plugin translations handed out so far, leaked once each so lookups return `&'static str`
+    /// Plugin translations in display form, handed out so far, leaked once each so
+    /// lookups return `&'static str`
     /// like the catalogs. Bounded: plugins' `i18n` tables are limited in size.
     static PLUGIN_STRINGS: std::cell::RefCell<std::collections::HashSet<&'static str>> = Default::default();
+    /// The same, in logical order, for messages whose placeholders are filled
+    /// ([`fmt`]) or whose segments are joined ([`location`]) before they are shown.
+    static PLUGIN_RAW_STRINGS: std::cell::RefCell<std::collections::HashSet<&'static str>> = Default::default();
     /// Plugin lookups this frame and the ones before, misses included: (plugin revision, language,
-    /// results). `tr` runs for every label every frame.
-    static PLUGIN_CACHE_MAP: std::cell::RefCell<(u64, &'static str, std::collections::HashMap<String, Option<&'static str>>)> =
+    /// logical and display results). `tr` runs for every label every frame.
+    static PLUGIN_CACHE_MAP: std::cell::RefCell<(u64, &'static str, std::collections::HashMap<String, Option<(&'static str, &'static str)>>)> =
         Default::default();
 }
 
-/// `s` translated by a loaded plugin's `i18n`.
-fn plugin_tr(lang: Lang, s: &str) -> Option<&'static str> {
+/// `s` leaked once, so repeated lookups of the same plugin string return the same
+/// `&'static str`.
+fn leak_once(seen: &mut std::collections::HashSet<&'static str>, s: String) -> &'static str {
+    if let Some(&kept) = seen.get(s.as_str()) {
+        return kept;
+    }
+    let kept: &'static str = Box::leak(s.into_boxed_str());
+    seen.insert(kept);
+    kept
+}
+
+/// `s` translated by a loaded plugin's `i18n`, in logical order and in display form.
+fn plugin_tr_pair(lang: Lang, s: &str) -> Option<(&'static str, &'static str)> {
     let revision = rustgis_engine::plugins::revision();
     PLUGIN_CACHE_MAP.with_borrow_mut(|(rev, code, map)| {
         if *rev != revision || *code != lang.code() || map.len() > PLUGIN_CACHE {
@@ -277,29 +361,42 @@ fn plugin_tr(lang: Lang, s: &str) -> Option<&'static str> {
             return *hit;
         }
         let found = rustgis_engine::plugins::translate(lang.code(), s).map(|t| {
-            PLUGIN_STRINGS.with_borrow_mut(|seen| match seen.get(t.as_str()) {
-                Some(&kept) => kept,
-                None => {
-                    let kept: &'static str = Box::leak(t.into_boxed_str());
-                    seen.insert(kept);
-                    kept
-                }
-            })
+            let shown = rtl::visual(&t);
+            let raw = PLUGIN_RAW_STRINGS.with_borrow_mut(|seen| leak_once(seen, t));
+            let vis = PLUGIN_STRINGS.with_borrow_mut(|seen| leak_once(seen, shown));
+            (raw, vis)
         });
         map.insert(s.to_string(), found);
         found
     })
 }
 
-/// A location such as `Map › Navigate`, translated segment by segment.
-pub fn location(loc: &str) -> String {
-    loc.split(" › ").map(t).collect::<Vec<_>>().join(" › ")
+/// `s` translated by a loaded plugin's `i18n`, in display form.
+fn plugin_tr(lang: Lang, s: &str) -> Option<&'static str> {
+    plugin_tr_pair(lang, s).map(|(_, vis)| vis)
 }
 
-/// Translates `template`, then fills its `{name}` placeholders in one pass (values are never
-/// re-read as templates, so a layer named `{n}` stays intact).
+/// `s` translated by a loaded plugin's `i18n`, in logical order.
+fn plugin_tr_raw(lang: Lang, s: &str) -> Option<&'static str> {
+    plugin_tr_pair(lang, s).map(|(raw, _)| raw)
+}
+
+/// A location such as `Map › Navigate`, translated segment by segment and shown in
+/// display form as one line.
+pub fn location(loc: &str) -> String {
+    let lang = current();
+    let loc = loc.split(" › ").map(|s| tr_raw(lang, s)).collect::<Vec<_>>().join(" › ");
+    rtl::visual(&loc)
+}
+
+/// Translates `template`, fills its `{name}` placeholders in one pass (values are never
+/// re-read as templates, so a layer named `{n}` stays intact), then puts the message in
+/// display form: a line that starts with right-to-left text has its Latin runs reversed
+/// so it reads correctly when the toolkit lays it out back to front. Values go in in
+/// logical order — [`t_raw`] (`tl_raw!`) for translated fragments, raw data as it is —
+/// for the finished message is transformed as a whole.
 pub fn fmt(template: &str, args: &[(&str, &str)]) -> String {
-    let template = t(template);
+    let template = tr_raw(current(), template);
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some((before, after)) = rest.split_once('{') {
@@ -307,7 +404,7 @@ pub fn fmt(template: &str, args: &[(&str, &str)]) -> String {
         let Some((name, tail)) = after.split_once('}') else {
             out.push('{');
             out.push_str(after);
-            return out;
+            return rtl::visual(&out);
         };
         match args.iter().find(|(k, _)| *k == name) {
             Some((_, v)) => out.push_str(v),
@@ -320,7 +417,68 @@ pub fn fmt(template: &str, args: &[(&str, &str)]) -> String {
         rest = tail;
     }
     out.push_str(rest);
-    out
+    rtl::visual(&out)
+}
+
+thread_local! {
+    /// Paragraph rows fitted by [`paragraph`], keyed by (text, width bucket, font):
+    /// a redrawing frame hands the same text, width and font back, and measuring
+    /// every row again would be work for nothing. Bounded: a handful of long
+    /// paragraphs are on screen at a time.
+    static FITTED: std::cell::RefCell<HashMap<(String, u64, u32), String>> = Default::default();
+}
+
+/// A hashable stand-in for the font a paragraph is fitted in.
+fn font_key(font_id: &egui::FontId) -> u32 {
+    let family = if font_id.family == egui::FontFamily::Proportional {
+        0x1000
+    } else if font_id.family == egui::FontFamily::Monospace {
+        0x2000
+    } else {
+        0x3000
+    };
+    font_id.size.to_bits() ^ family
+}
+
+/// Shows `s` in the current language as a wrapped paragraph. For a language laid
+/// out back to front, the rows are broken to the width ahead of time ([`rtl::fit`]:
+/// the toolkit's own wrapping fills rows from the end of such a line), given in
+/// display form, and aligned to the right, the way the paragraph reads; every
+/// other language gets a normal wrapping label. `font_id` and `color` are the
+/// label's: they also measure the rows.
+pub fn paragraph(ui: &mut egui::Ui, s: &str, font_id: egui::FontId, color: egui::Color32) -> egui::Response {
+    let text = tr_raw(current(), s).to_owned();
+    let wrap = ui.available_width();
+    let mut halign = egui::Align::LEFT;
+    let text = if rtl::has_rtl(&text) {
+        halign = egui::Align::RIGHT;
+        // Rows are fitted to a width bucket, never to a fraction of a pixel, so the
+        // next redraw of the same width reuses them. Below the width of a single
+        // word a row overflows anyway, and the toolkit's wrapping takes over.
+        let bucket = (((wrap / 8.0).floor()).max(1.0) as u64) * 8;
+        let font = font_key(&font_id);
+        let key = (text.clone(), bucket, font);
+        FITTED.with_borrow_mut(|fitted| {
+            if fitted.len() > 64 {
+                fitted.clear();
+            }
+            if let Some(rows) = fitted.get(&key) {
+                return rows.clone();
+            }
+            let width = |t: &str| -> f32 {
+                let job = egui::text::LayoutJob::simple(t.to_owned(), font_id.clone(), color, f32::INFINITY);
+                ui.painter().layout_job(job).rect.width()
+            };
+            let rows = rtl::fit(&text, (bucket as f32 - 2.0).max(50.0), &width);
+            fitted.insert(key, rows.clone());
+            rows
+        })
+    } else {
+        text
+    };
+    let mut job = egui::text::LayoutJob::simple(text, font_id, color, wrap);
+    job.halign = halign;
+    ui.add(egui::Label::new(ui.painter().layout_job(job)))
 }
 
 /// `s` in the current language: `tl!("Explore")`.
@@ -328,6 +486,16 @@ pub fn fmt(template: &str, args: &[(&str, &str)]) -> String {
 macro_rules! tl {
     ($s:expr) => {
         $crate::i18n::t($s)
+    };
+}
+
+/// `s` in the current language, in logical order: `tl_raw!("Add")` — for values
+/// filled into [`fmt`], which shows the finished message in display form, where
+/// `tl!`'s display form would be transformed twice.
+#[macro_export]
+macro_rules! tl_raw {
+    ($s:expr) => {
+        $crate::i18n::t_raw($s)
     };
 }
 

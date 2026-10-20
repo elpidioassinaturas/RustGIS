@@ -14,6 +14,7 @@ pub const MAX_PIXELS: usize = 64_000_000;
 
 /// A new single- or multi-band raster on `r`'s grid.
 pub fn derive(r: &Raster, name: &str, bands: Vec<Vec<f32>>) -> Result<Raster, String> {
+    r.require_coordinates()?;
     Raster::new(name, r.width, r.height, bands, r.transform, r.crs, Some(NODATA as f64), ColorHint::Gray, "Float32")
         .map_err(|e| e.to_string())
 }
@@ -134,6 +135,8 @@ pub fn remap(r: &Raster, b: usize, ranges: &[(f64, f64, f64)], keep: bool) -> Re
 
 /// `band`'s values resampled (nearest neighbour) onto `target`'s grid, through longitude/latitude.
 pub fn resample_to(src: &Raster, b: usize, target: &Raster) -> Result<Vec<f32>, String> {
+    src.require_coordinates()?;
+    target.require_coordinates()?;
     band(src, b)?;
     if src.width == target.width && src.height == target.height && src.transform == target.transform && src.crs == target.crs {
         return Ok(band(src, b)?.iter().map(|v| if src.is_valid(*v) { *v } else { NODATA }).collect());

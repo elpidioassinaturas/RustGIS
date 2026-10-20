@@ -34,7 +34,7 @@ pub const MAX_SAMPLES: usize = 32_000_000;
 /// Largest ASCII grid file read (1 GiB).
 pub const MAX_ASCII_BYTES: u64 = 1 << 30;
 /// File extensions read as rasters.
-pub const READ_EXTENSIONS: &[&str] = &["tif", "tiff", "asc"];
+pub const READ_EXTENSIONS: &[&str] = &["tif", "tiff", "asc", "png", "jpg", "jpeg"];
 
 /// Whether a file name is a raster this module reads.
 pub fn is_raster_name(name: &str) -> bool {
@@ -205,7 +205,8 @@ pub enum ColorHint {
     Palette(Vec<[u8; 4]>),
 }
 
-/// A georeferenced raster.
+/// A raster on a grid: georeferenced, unless `georeferenced` is false (a scan, whose transform
+/// is only a stand-in).
 #[derive(Clone)]
 pub struct Raster {
     pub name: String,
@@ -222,6 +223,9 @@ pub struct Raster {
     pub source: Option<String>,
     /// Whether the pixels come from a reduced-resolution overview.
     pub overview: Option<(u32, u32)>,
+    /// `false` for a scan (a TIFF with no GeoTIFF tags, a PNG, a JPEG): `transform` is then only
+    /// a stand-in until the picture is placed or georeferenced, and says nothing about the ground.
+    pub georeferenced: bool,
     transformer: Transformer,
     extent: Extent,
 }
@@ -281,6 +285,7 @@ impl Raster {
             data_type: data_type.into(),
             source: None,
             overview: None,
+            georeferenced: true,
             transformer,
             extent: Extent::EMPTY,
         };
@@ -340,6 +345,57 @@ impl Raster {
             }
         }
         e
+    }
+
+    /// Refuses a raster with no coordinates, for the tools that would give their result a place
+    /// on the ground (the result of georeferencing it first is another matter).
+    pub fn require_coordinates(&self) -> std::result::Result<(), String> {
+        if self.georeferenced {
+            Ok(())
+        } else {
+            Err(format!("{} has no coordinates: georeference it first (raster.georeference)", self.name))
+        }
+    }
+
+    /// This raster as a scan: its pixels with no coordinates, as `"as": "scan"` opens a picture.
+    pub fn into_scan(mut self) -> Result<Raster> {
+        if self.georeferenced {
+            self.crs = Crs::LonLat;
+            self.transformer = self.crs.transformer().map_err(DataError::Format)?;
+            self.transform = unreferenced(self.width, self.height);
+            self.georeferenced = false;
+            self.extent = self.compute_extent();
+            if self.extent.is_empty() {
+                return Err(DataError::Format("the picture's location couldn't be worked out".into()));
+            }
+        }
+        Ok(self)
+    }
+
+    /// Stretches a scan over a longitude/latitude box (west, south, east, north), as the
+    /// `raster.georeference` extent does. It stays marked as not georeferenced.
+    pub fn place(&mut self, bbox: [f64; 4]) -> Result<()> {
+        let [w, s, e, n] = bbox;
+        if self.georeferenced {
+            return Err(DataError::Format("only a raster with no coordinates can be placed".into()));
+        }
+        if !bbox.iter().all(|v| v.is_finite()) || !(w < e && s < n) {
+            return Err(DataError::Format("the box is [west, south, east, north]".into()));
+        }
+        let old = self.transform;
+        self.transform = GeoTransform {
+            origin_x: w,
+            origin_y: n,
+            pixel_width: (e - w) / f64::from(self.width),
+            pixel_height: -(n - s) / f64::from(self.height),
+        };
+        let extent = self.compute_extent();
+        if !self.transform.is_valid() || extent.is_empty() {
+            self.transform = old;
+            return Err(DataError::Format("the scan's location couldn't be worked out".into()));
+        }
+        self.extent = extent;
+        Ok(())
     }
 
     /// Longitude/latitude bounds.
@@ -418,6 +474,7 @@ pub fn read_path(path: &Path) -> Result<Raster> {
             let r = geotiff::read(std::io::BufReader::new(std::fs::File::open(path)?), &name)?;
             r
         }
+        "png" | "jpg" | "jpeg" => read_scan(&name, std::io::BufReader::new(std::fs::File::open(path)?))?,
         "asc" => {
             if meta.len() > MAX_ASCII_BYTES {
                 return Err(DataError::Format("the ASCII grid is too large to open".into()));
@@ -465,6 +522,108 @@ pub fn read_converted(path: &Path, c: &gdal::Converted) -> Result<Raster> {
         r.name = format!("{stem} {}", gdal::short_name(s));
     }
     r.source = Some(path.display().to_string());
+    Ok(r)
+}
+
+/// The stand-in transform of a scan of `w` × `h` pixels: square pixels, the longer side one degree,
+/// centred on 0°, 0°. Only [`Raster::place`] or georeferencing gives it a place.
+pub(crate) fn unreferenced(w: u32, h: u32) -> GeoTransform {
+    let side = f64::from(w.max(h).max(1));
+    GeoTransform {
+        origin_x: -0.5 * f64::from(w) / side,
+        origin_y: 0.5 * f64::from(h) / side,
+        pixel_width: 1.0 / side,
+        pixel_height: -1.0 / side,
+    }
+}
+
+/// Every `k`-th pixel of interleaved `ch`-sample pixels, one vector per band.
+fn deinterleave<T: Copy + Into<f32>>(raw: &[T], w: u32, h: u32, ch: usize, k: u32) -> Vec<Vec<f32>> {
+    let step = k.max(1) as usize;
+    let mut bands: Vec<Vec<f32>> = (0..ch).map(|_| Vec::with_capacity((w as usize).div_ceil(step) * (h as usize).div_ceil(step))).collect();
+    for row in (0..h as usize).step_by(step) {
+        for col in (0..w as usize).step_by(step) {
+            let at = (row * w as usize + col) * ch;
+            for (c, band) in bands.iter_mut().enumerate() {
+                band.push(raw.get(at + c).map_or(f32::NAN, |v| (*v).into()));
+            }
+        }
+    }
+    bands
+}
+
+/// Reads a PNG or JPEG as a raster with no coordinates (`georeferenced` is false): its bands as
+/// they are (grey, grey and alpha, RGB, RGBA; 8 or 16 bits). A picture is decoded whole, so one
+/// whose decoded size passes four times [`MAX_SAMPLES`] bytes is refused (save it as a TIFF); one
+/// with more than [`MAX_SAMPLES`] samples is read at every second pixel, with its `overview` set.
+pub fn read_scan<R: std::io::BufRead + std::io::Seek>(name: &str, source: R) -> Result<Raster> {
+    read_scan_limited(name, source, MAX_SAMPLES)
+}
+
+/// [`read_scan`], holding at most `max` samples (the tests' small limit exercises the reduction).
+fn read_scan_limited<R: std::io::BufRead + std::io::Seek>(name: &str, mut source: R, max: usize) -> Result<Raster> {
+    use image::DynamicImage as D;
+    use std::io::SeekFrom;
+    let fail = |e: &dyn std::fmt::Display| DataError::Format(format!("{name}: {e}"));
+    let too_large = || fail(&"the picture is too large to open: save it as a TIFF, which is read at a reduced size");
+    // The decoded picture, before its samples become `f32`: as the GeoTIFF reader allows.
+    let allowance = (max as u64).saturating_mul(4);
+    // The decoders read a file whole before any limit applies, and a picture's file is smaller
+    // than its pixels: a larger file is refused unread. (Whatever the extension says, the
+    // content is what is decoded.)
+    let len = source.seek(SeekFrom::End(0)).map_err(|e| fail(&e))?;
+    source.seek(SeekFrom::Start(0)).map_err(|e| fail(&e))?;
+    if len > allowance {
+        return Err(too_large());
+    }
+    let mut reader = image::ImageReader::new(source).with_guessed_format().map_err(|e| fail(&e))?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(allowance);
+    reader.limits(limits);
+    let img = reader.decode().map_err(|e| match e {
+        image::ImageError::Limits(_) => too_large(),
+        e => fail(&e),
+    })?;
+    let img = if matches!(
+        img,
+        D::ImageLuma8(_)
+            | D::ImageLumaA8(_)
+            | D::ImageRgb8(_)
+            | D::ImageRgba8(_)
+            | D::ImageLuma16(_)
+            | D::ImageLumaA16(_)
+            | D::ImageRgb16(_)
+            | D::ImageRgba16(_)
+    ) {
+        img
+    } else {
+        D::ImageRgba8(img.into_rgba8())
+    };
+    let (w, h) = (img.width(), img.height());
+    let ch = usize::from(img.color().channel_count());
+    let mut k = 1u32;
+    while (w.div_ceil(k) as usize).saturating_mul(h.div_ceil(k) as usize).saturating_mul(ch) > max {
+        k = k.saturating_mul(2);
+        if k > 1 << 20 {
+            return Err(too_large());
+        }
+    }
+    let (bands, color, data_type) = match &img {
+        D::ImageLuma8(i) => (deinterleave(i.as_raw(), w, h, ch, k), ColorHint::Gray, "UInt8"),
+        D::ImageLumaA8(i) => (deinterleave(i.as_raw(), w, h, ch, k), ColorHint::GrayAlpha, "UInt8"),
+        D::ImageRgb8(i) => (deinterleave(i.as_raw(), w, h, ch, k), ColorHint::Rgb { alpha: false }, "UInt8"),
+        D::ImageRgba8(i) => (deinterleave(i.as_raw(), w, h, ch, k), ColorHint::Rgb { alpha: true }, "UInt8"),
+        D::ImageLuma16(i) => (deinterleave(i.as_raw(), w, h, ch, k), ColorHint::Gray, "UInt16"),
+        D::ImageLumaA16(i) => (deinterleave(i.as_raw(), w, h, ch, k), ColorHint::GrayAlpha, "UInt16"),
+        D::ImageRgb16(i) => (deinterleave(i.as_raw(), w, h, ch, k), ColorHint::Rgb { alpha: false }, "UInt16"),
+        D::ImageRgba16(i) => (deinterleave(i.as_raw(), w, h, ch, k), ColorHint::Rgb { alpha: true }, "UInt16"),
+        _ => return Err(fail(&"this pixel format isn't supported")),
+    };
+    drop(img);
+    let (ow, oh) = (w.div_ceil(k), h.div_ceil(k));
+    let mut r = Raster::new(name, ow, oh, bands, unreferenced(ow, oh), Crs::LonLat, None, color, data_type)?;
+    r.georeferenced = false;
+    r.overview = (k > 1).then_some((w, h));
     Ok(r)
 }
 
@@ -619,6 +778,7 @@ pub fn read_bytes(file_name: &str, bytes: &[u8]) -> Result<Raster> {
             }
         }
         "tif" | "tiff" => geotiff::read(std::io::Cursor::new(bytes), &name),
+        "png" | "jpg" | "jpeg" => read_scan(&name, std::io::Cursor::new(bytes)),
         "asc" => {
             let text = std::str::from_utf8(bytes).map_err(|_| DataError::Format("not a text file".into()))?;
             ascii::read(text, &name, None)
@@ -755,6 +915,149 @@ pub(crate) mod tests {
         assert!(read_bytes("x.tif", b"not a tiff").is_err());
         assert!(read_bytes("x.asc", &[0xff, 0xfe]).is_err());
         assert!(read_bytes("x.png", b"").is_err());
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn tiff(tags: &[(u16, &[f64])]) -> Vec<u8> {
+        use tiff::encoder::{TiffEncoder, colortype};
+        let mut out = Cursor::new(Vec::new());
+        let mut enc = TiffEncoder::new(&mut out).unwrap();
+        let mut img = enc.new_image::<colortype::RGB8>(5, 3).unwrap();
+        for (tag, v) in tags {
+            img.encoder().write_tag(tiff::tags::Tag::Unknown(*tag), *v).unwrap();
+        }
+        img.write_data(&(0..45).collect::<Vec<u8>>()).unwrap();
+        out.into_inner()
+    }
+
+    fn encode(img: image::DynamicImage, format: image::ImageFormat) -> Vec<u8> {
+        let mut out = Cursor::new(Vec::new());
+        img.write_to(&mut out, format).unwrap();
+        out.into_inner()
+    }
+
+    fn picture(w: u32, h: u32, alpha: bool) -> image::DynamicImage {
+        if alpha {
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([x as u8, y as u8, 7, 200])))
+        } else {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| image::Rgb([x as u8, y as u8, 7])))
+        }
+    }
+
+    fn assert_scan(r: &Raster, size: (u32, u32), bands: usize, color: ColorHint) {
+        assert_eq!((r.width, r.height, r.bands.len()), (size.0, size.1, bands));
+        assert_eq!(r.color, color);
+        assert!(!r.georeferenced);
+        assert!(!r.extent().is_empty());
+        assert!(r.transform.is_valid());
+    }
+
+    #[test]
+    fn a_tiff_without_tags_opens_as_a_scan() {
+        let r = read_bytes("scan.tif", &tiff(&[])).unwrap();
+        assert_scan(&r, (5, 3), 3, ColorHint::Rgb { alpha: false });
+        assert_eq!(r.bands[1].data.get(1).copied(), Some(4.0));
+        // Part of the GeoTIFF tags is a damaged GeoTIFF, not a scan.
+        assert!(read_bytes("x.tif", &tiff(&[(33550, &[1.0, 1.0, 0.0])])).is_err());
+        // A real GeoTIFF is read as before.
+        let g = read_bytes("g.tif", &geotiff::tests_support::strip_tiff()).unwrap();
+        assert!(g.georeferenced);
+    }
+
+    #[test]
+    fn png_and_jpeg_open_as_scans() {
+        let png = read_bytes("a.png", &encode(picture(7, 4, true), image::ImageFormat::Png)).unwrap();
+        assert_scan(&png, (7, 4), 4, ColorHint::Rgb { alpha: true });
+        assert_eq!((png.data_type.as_str(), png.bands[0].data.get(3).copied()), ("UInt8", Some(3.0)));
+        let jpeg = read_bytes("b.JPG", &encode(picture(16, 9, false), image::ImageFormat::Jpeg)).unwrap();
+        assert_scan(&jpeg, (16, 9), 3, ColorHint::Rgb { alpha: false });
+        let grey =
+            encode(image::DynamicImage::ImageLuma16(image::ImageBuffer::from_pixel(3, 2, image::Luma([40_000]))), image::ImageFormat::Png);
+        let grey = read_bytes("c.png", &grey).unwrap();
+        assert_scan(&grey, (3, 2), 1, ColorHint::Gray);
+        assert_eq!((grey.data_type.as_str(), grey.bands[0].data.first().copied()), ("UInt16", Some(40_000.0)));
+    }
+
+    #[test]
+    fn a_scan_is_placed_over_a_box_and_stays_a_scan() {
+        let mut r = read_bytes("a.png", &encode(picture(20, 10, false), image::ImageFormat::Png)).unwrap();
+        r.place([10.0, 40.0, 12.0, 41.0]).unwrap();
+        assert!(!r.georeferenced);
+        let e = r.extent();
+        assert!((e.min_x - 10.0).abs() < 1e-9 && (e.max_y - 41.0).abs() < 1e-9);
+        assert!(r.place([1.0, 1.0, 0.0, 2.0]).is_err() && r.place([0.0, f64::NAN, 1.0, 2.0]).is_err());
+        assert!(from_image("o", &encode(picture(4, 4, true), image::ImageFormat::Png), [0.0, 0.0, 1.0, 1.0], 0.0).unwrap().georeferenced);
+    }
+
+    #[test]
+    fn a_scan_has_no_coordinates_to_write() {
+        let mut r = read_bytes("a.png", &encode(picture(8, 4, false), image::ImageFormat::Png)).unwrap();
+        let e = geotiff::write(&r, 0).unwrap_err().to_string();
+        assert!(e.contains("georeference it first"), "{e}");
+        r.place([10.0, 40.0, 12.0, 41.0]).unwrap();
+        assert!(geotiff::write(&r, 0).is_err());
+        // A GeoTIFF forced to be a scan loses its coordinates; one that has them still writes.
+        let g = read_bytes("g.tif", &geotiff::tests_support::strip_tiff()).unwrap();
+        assert!(geotiff::write(&g, 0).is_ok());
+        let s = g.into_scan().unwrap();
+        assert!(!s.georeferenced && s.require_coordinates().is_err() && geotiff::write(&s, 0).is_err());
+    }
+
+    #[test]
+    fn a_large_scan_is_read_at_every_other_pixel() {
+        let png = encode(picture(40, 30, false), image::ImageFormat::Png);
+        let r = read_scan_limited("big", Cursor::new(&png), 900).unwrap();
+        assert_scan(&r, (20, 15), 3, ColorHint::Rgb { alpha: false });
+        assert_eq!(r.overview, Some((40, 30)));
+        // Past the decoded-size allowance it is refused rather than allocated, in RustGIS's words.
+        let e = read_scan_limited("big", Cursor::new(&png), 100).unwrap_err().to_string();
+        assert!(e.contains("save it as a TIFF"), "{e}");
+        // A file larger than the allowance is refused before it is read (whatever its extension).
+        let jpeg = encode(picture(40, 30, false), image::ImageFormat::Jpeg);
+        let e = read_scan_limited("x.png", Cursor::new(&jpeg), jpeg.len() / 8).unwrap_err().to_string();
+        assert!(e.contains("save it as a TIFF"), "{e}");
+        assert!(read_scan_limited("x.png", Cursor::new(&jpeg), 900).is_ok());
+    }
+
+    #[test]
+    fn damaged_scans_are_errors() {
+        let files = [
+            ("a.tif", tiff(&[])),
+            ("a.png", encode(picture(30, 20, true), image::ImageFormat::Png)),
+            ("a.jpg", encode(picture(30, 20, false), image::ImageFormat::Jpeg)),
+        ];
+        for (name, bytes) in files {
+            for cut in [0, 1, 8, bytes.len() / 2, bytes.len() - 1] {
+                // Whatever a cut leaves is read or refused, never a panic.
+                let _ = read_bytes(name, bytes.get(..cut).unwrap_or_default());
+            }
+            assert!(read_bytes(name, bytes.get(..bytes.len() / 3).unwrap_or_default()).is_err(), "{name}");
+            assert!(read_bytes(name, &[0xAB; 64]).is_err(), "{name}");
+            assert!(read_bytes(name, b"").is_err(), "{name}");
+        }
+        // A header claiming a huge picture, with no pixels behind it (and a CRC that checks out,
+        // so only the size limit refuses it).
+        let mut png = encode(picture(2, 2, true), image::ImageFormat::Png);
+        if let Some(ihdr) = png.get_mut(16..24) {
+            ihdr.copy_from_slice(&[0, 0, 0xEA, 0x60, 0, 0, 0xEA, 0x60]);
+        }
+        let crc = png.get(12..29).unwrap_or_default().iter().fold(!0u32, |mut c, b| {
+            c ^= u32::from(*b);
+            for _ in 0..8 {
+                c = if c & 1 == 1 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+            c
+        });
+        if let Some(at) = png.get_mut(29..33) {
+            at.copy_from_slice(&(!crc).to_be_bytes());
+        }
+        let message = read_bytes("huge.png", &png).unwrap_err().to_string();
+        assert!(message.contains("save it as a TIFF"), "{message}");
     }
 }
 

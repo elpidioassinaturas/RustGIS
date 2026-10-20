@@ -11,6 +11,44 @@ use crate::{RustGisApp, icons};
 pub const CONTENT_H: f32 = 72.0;
 pub const LABEL_H: f32 = 18.0;
 
+/// A number its caller lends saved each frame and saves only once it is settled, kept across a
+/// drag (#597, #607). egui's `DragValue` keeps the value dragged so far in its own memory and
+/// forgets it when the pointer is released, a frame on which `dragged()` is false: lent the saved
+/// value again, the drag would end back where it started, nothing saved. `lend` before the
+/// `DragValue` and `settled` after it. The value dragged so far is kept with the saved one it was
+/// dragged from, so it goes stale when that changes (another element shown).
+pub(crate) struct Dragged<T> {
+    key: egui::Id,
+    saved: T,
+}
+
+impl<T: Copy + Default + PartialEq + Send + Sync + 'static> Dragged<T> {
+    /// Lends the value dragged so far in place of the saved one, mid-drag (so it doesn't flicker
+    /// back to the saved one when the pointer pauses). `key` names this number, steadily.
+    pub(crate) fn lend(ui: &Ui, key: egui::Id, value: &mut T) -> Self {
+        let saved = *value;
+        if let Some((_, dragged)) = ui.data(|d| d.get_temp::<(T, T)>(key)).filter(|(from, _)| *from == saved) {
+            *value = dragged;
+        }
+        Dragged { key, saved }
+    }
+
+    /// Whether the number is settled: let go after a drag (`value` is then the dragged one), typed
+    /// in, or set by assistive technology. The caller still compares it with the saved one.
+    pub(crate) fn settled(self, ui: &Ui, r: &Response, value: &mut T) -> bool {
+        if r.dragged() {
+            ui.data_mut(|d| d.insert_temp(self.key, (self.saved, *value)));
+            return false;
+        }
+        if let Some((from, dragged)) = ui.data_mut(|d| d.remove_temp::<(T, T)>(self.key))
+            && from == self.saved
+        {
+            *value = dragged;
+        }
+        r.drag_stopped() || r.lost_focus() || r.changed()
+    }
+}
+
 pub fn text_w(ui: &Ui, s: &str, font: egui::FontId) -> f32 {
     ui.ctx().fonts_mut(|f| f.layout_no_wrap(s.to_string(), font, egui::Color32::WHITE).size().x)
 }
@@ -47,7 +85,7 @@ pub fn tooltip(app: &RustGisApp, resp: Response, title: &str, desc: &str, id: &s
             ui.label(egui::RichText::new(desc).size(11.5).weak());
         }
         if let Some(w) = why {
-            ui.label(egui::RichText::new(crate::i18n::fmt("Unavailable: {reason}", &[("reason", tl!(w))])).size(11.0).italics().weak());
+            ui.label(egui::RichText::new(crate::i18n::fmt("Unavailable: {reason}", &[("reason", tl_raw!(w))])).size(11.0).italics().weak());
         }
     })
 }
@@ -486,5 +524,64 @@ mod tests {
         assert!(!offers_additive(|ui, c| {
             super::color_button(ui, c);
         }));
+    }
+
+    /// A number dragged and let go keeps the dragged value (#607), a decimal and a whole one
+    /// alike, though its caller lends the saved one each frame and saves only what is settled, as
+    /// the panes' callers do (it used to end where it started).
+    #[test]
+    fn a_dragged_number_is_kept_when_let_go() {
+        use egui::accesskit::Role;
+        #[derive(Default)]
+        struct Saved {
+            real: f64,
+            whole: u64,
+            settled: Vec<&'static str>,
+        }
+        let mut h = egui_kittest::Harness::builder().build_ui_state(
+            |ui, s: &mut Saved| {
+                let mut real = s.real;
+                let drag = super::Dragged::lend(ui, egui::Id::new("real"), &mut real);
+                let r = ui.add(egui::DragValue::new(&mut real).speed(0.1));
+                if drag.settled(ui, &r, &mut real) && real != s.real {
+                    s.real = real;
+                    s.settled.push("real");
+                }
+                let mut whole = s.whole;
+                let drag = super::Dragged::lend(ui, egui::Id::new("whole"), &mut whole);
+                let r = ui.add(egui::DragValue::new(&mut whole).speed(0.1));
+                if drag.settled(ui, &r, &mut whole) && whole != s.whole {
+                    s.whole = whole;
+                    s.settled.push("whole");
+                }
+            },
+            Saved { real: 1.0, whole: 2, ..Saved::default() },
+        );
+        h.run();
+        let spins: Vec<egui::Pos2> = h.query_all_by_role(Role::SpinButton).map(|n| n.rect().center()).collect();
+        assert_eq!(spins.len(), 2);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for at in spins {
+            h.event(egui::Event::PointerMoved(at));
+            h.step();
+            h.event(button(at, true));
+            h.step();
+            // Dragged right over several frames, then let go without moving.
+            for i in 1..=4 {
+                h.event(egui::Event::PointerMoved(at + egui::vec2(10.0 * i as f32, 0.0)));
+                h.step();
+            }
+            h.event(button(at + egui::vec2(40.0, 0.0), false));
+            h.step();
+            h.run();
+        }
+        let s = h.state();
+        assert_eq!(s.settled, ["real", "whole"], "each settled once");
+        assert!(s.real > 3.0 && s.whole > 4, "kept: {} and {}", s.real, s.whole);
     }
 }

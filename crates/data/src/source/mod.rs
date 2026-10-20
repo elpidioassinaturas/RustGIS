@@ -7,6 +7,7 @@
 //!
 //! Sources are hostile input: malformed rows are skipped and counted, never a panic.
 
+pub mod credentials;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod duckdb;
 #[cfg(not(target_arch = "wasm32"))]
@@ -21,6 +22,7 @@ pub mod gpkg;
 mod gpkg_blob;
 pub mod gpkg_mem;
 pub mod lidar;
+pub mod msconn;
 pub mod myconn;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mysql;
@@ -31,6 +33,8 @@ pub mod postgis;
 pub mod remote;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod shp;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod sqlserver;
 
 use crate::raster::{Crs, Transformer};
 use crate::{DataError, Dataset, Feature, Field, Geometry, GeometryType, ReadReport, Result};
@@ -76,6 +80,34 @@ pub const MAX_LIMIT: usize = if cfg!(target_arch = "wasm32") { 500_000 } else { 
 pub fn is_source_name(name: &str) -> bool {
     let ext = Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     EXTENSIONS.contains(&ext.as_str())
+}
+
+/// Whether a folder is an Esri File Geodatabase (`roads.gdb`): added as data, not browsed.
+pub fn is_gdb_name(name: &str) -> bool {
+    ext(Path::new(name.trim_end_matches(['/', '\\']))) == "gdb"
+}
+
+/// The File Geodatabase one of its own files belongs to (`roads.gdb/a00000001.gdbtable`, or the
+/// `gdb` file every one holds): file dialogs pick files, not the folder. Another file kept in the
+/// folder is left as it is.
+pub fn gdb_of(path: &Path) -> Option<&Path> {
+    let parent = path.parent()?;
+    let name = path.file_name()?.to_str()?;
+    (is_gdb_part(name) && is_gdb_name(&parent.to_string_lossy())).then_some(parent)
+}
+
+/// Whether a file name is one a File Geodatabase is made of: the `gdb` and `timestamps` files, and
+/// its tables and their indexes, `a` and eight hex digits (`a00000004.gdbtablx`,
+/// `a00000004.CatItemsByType.atx`).
+fn is_gdb_part(name: &str) -> bool {
+    if matches!(name, "gdb" | "timestamps") {
+        return true;
+    }
+    let (Some((stem, _)), Some((_, ext))) = (name.split_once('.'), name.rsplit_once('.')) else { return false };
+    stem.len() == 9
+        && stem.starts_with('a')
+        && stem.bytes().skip(1).all(|b| b.is_ascii_hexdigit())
+        && matches!(ext.to_ascii_lowercase().as_str(), "gdbtable" | "gdbtablx" | "gdbindexes" | "atx" | "spx" | "freelist" | "horizon")
 }
 
 /// What a source holds.
@@ -555,6 +587,14 @@ pub(crate) fn in_request(g: &Geometry, req: &Request) -> bool {
         Some(e) => g.extent().intersects(e),
         None => true,
     }
+}
+
+/// Makes ring rustls's process-wide crypto provider. SQL Server's client also builds aws-lc-rs
+/// into rustls, and with two providers built in rustls picks neither by itself (the MySQL
+/// client's `ClientConfig::builder()` would panic).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn tls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 #[cfg(test)]
