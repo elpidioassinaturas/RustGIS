@@ -6274,12 +6274,9 @@ fn lidar_point_clouds() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// A Zarr store in a folder: its variables listed (with time labels), a slice added by command
-/// and by Add Data, saved by folder and selection and read again when the project opens; a slice
-/// the app read itself handed over by id.
-#[cfg(not(target_arch = "wasm32"))]
 /// A Zarr store in a temporary folder: `t` over three monthly steps (days since 2001-01-01: 0,
 /// 31, 59) on a 3 × 4 grid, step `k`'s values `100·k + i`.
+#[cfg(not(target_arch = "wasm32"))]
 fn zarr_store_over_time(tag: &str) -> (std::path::PathBuf, String) {
     let dir = std::env::temp_dir().join(format!("rustgis-zarr-{tag}-{}", std::process::id()));
     let store = dir.join("air.zarr");
@@ -6422,6 +6419,7 @@ fn a_zarr_variable_summarised_over_time() {
 
 /// A Zarr variable follows the time slider (#554): the slice drawn is the step the slider is at,
 /// the stretch is the same at every step, and the project keeps the layer by its store.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_zarr_variable_follows_the_time_slider() {
     let (dir, path) = zarr_store_over_time("follow");
@@ -6482,9 +6480,20 @@ fn a_zarr_variable_follows_the_time_slider() {
     ] {
         assert!(s.run("layer.addZarr", &bad).is_err(), "{bad}");
     }
+    // An axis with a date twice, or going back: each date is a step, so it can't be followed.
+    let (dir2, twice) = zarr_store_over_time("twice");
+    std::fs::write(std::path::Path::new(&twice).join("time/0"), [0i32, 31, 31].iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>())
+        .unwrap();
+    let e = s.run("layer.addZarr", &json!({"path": twice, "variable": "t", "time": true})).unwrap_err();
+    assert!(e.contains("increasing order"), "{e}");
+    let _ = std::fs::remove_dir_all(dir2);
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A Zarr store in a folder: its variables listed (with time labels), a slice added by command
+/// and by Add Data, saved by folder and selection and read again when the project opens; a slice
+/// the app read itself handed over by id.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn zarr_stores_in_folders_and_handed_over() {
     let dir = std::env::temp_dir().join(format!("rustgis-zarr-{}", std::process::id()));
