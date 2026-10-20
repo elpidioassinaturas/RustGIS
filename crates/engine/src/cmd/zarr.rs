@@ -832,12 +832,13 @@ impl ReduceRun {
                     (lo, hi) = (vec![f64::INFINITY; len], vec![f64::NEG_INFINITY; len]);
                     first = Some(r.clone());
                 }
-                Some(f) if (f.width, f.height) != (r.width, r.height) => {
+                Some(f) if (f.width, f.height) != (r.width, r.height) || vals.len() != n.len() => {
                     return Err(format!("step {} is {} × {}, unlike the first ({} × {})", i, r.width, r.height, f.width, f.height));
                 }
                 Some(_) => {}
             }
-            for (c, v) in vals.iter().enumerate() {
+            // The totals are the first slice's length, which every slice is checked to have.
+            for (c, v) in vals.iter().enumerate().take(n.len()) {
                 if !v.is_finite() {
                     continue;
                 }
