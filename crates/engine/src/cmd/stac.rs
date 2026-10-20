@@ -424,8 +424,14 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         // for tile layers: a catalog without grid tiles (keyed by footprint) could make hundreds.
         let room = rustgis_map::tiles::MAX_TILE_LAYERS.saturating_sub(s.map().tiles.len());
         if tiles.len() > room {
+            // Items naming no grid tile are told apart by footprint, which can differ scene by scene.
+            let why = if items.iter().all(|i| i.tile.is_none()) {
+                format!("{collection}'s items name no grid tile, so each footprint counts as one")
+            } else {
+                "take a smaller area".to_string()
+            };
             return Err(format!(
-                "{} grid tiles, and the map has room for {room} more tile layers (at most {}): take a smaller area",
+                "{} grid tiles, and the map has room for {room} more tile layers (at most {}): {why}",
                 tiles.len(),
                 rustgis_map::tiles::MAX_TILE_LAYERS
             ));
