@@ -198,10 +198,12 @@ impl ZarrTime {
     /// Keeps a loaded layer within bounds: dates finite, in order, at most [`MAX_ZARR_STEPS`];
     /// names of sane length.
     pub fn repair(&mut self) {
-        self.dates.retain(|d| d.is_finite());
         self.dates.truncate(MAX_ZARR_STEPS);
-        self.dates.sort_by(f64::total_cmp);
-        self.dates.dedup();
+        // Date `i` is step `offset + i`: dates out of order, repeated or not finite (a project
+        // edited by hand) can't be matched to steps, so none is followed rather than the wrong one.
+        if !self.dates.iter().all(|d| d.is_finite()) || !self.dates.windows(2).all(|w| w[0] < w[1]) {
+            self.dates.clear();
+        }
         self.index.truncate(32);
         for t in [&mut self.store, &mut self.variable, &mut self.dim] {
             *t = t.chars().take(4096).collect();
@@ -936,6 +938,31 @@ mod tests {
     use rustgis_data::raster::{Crs, GeoTransform};
 
     use super::*;
+
+    /// A following layer's dates are its steps from `offset` on, one each: repair keeps them as
+    /// they are when they are in order, and follows none rather than the wrong step otherwise.
+    #[test]
+    fn zarr_dates_keep_their_steps() {
+        let zt = |dates: Vec<f64>| {
+            let mut z = ZarrTime {
+                store: "s".into(),
+                variable: "t".into(),
+                index: Vec::new(),
+                dim: "time".into(),
+                offset: 3,
+                dates,
+                crs: None,
+                shown: Some(1),
+            };
+            z.repair();
+            z
+        };
+        let ok = zt(vec![1.0, 2.0, 5.0]);
+        assert_eq!((ok.dates, ok.shown), (vec![1.0, 2.0, 5.0], None));
+        for bad in [vec![2.0, 1.0], vec![1.0, 1.0, 2.0], vec![1.0, f64::NAN]] {
+            assert!(zt(bad.clone()).dates.is_empty(), "{bad:?}");
+        }
+    }
 
     fn dem() -> Raster {
         let gt = GeoTransform { origin_x: 0.0, origin_y: 4.0, pixel_width: 1.0, pixel_height: -1.0 };
