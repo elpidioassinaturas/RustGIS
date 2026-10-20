@@ -647,7 +647,7 @@ fn planet_basemaps(ui: &mut Ui, app: &mut RustGisApp) {
         return;
     }
     ui.add_space(4.0);
-    let shown: Vec<String> = app.session.map().tiles.iter().filter(|l| !l.overlay && l.visible).map(|l| l.id.clone()).collect();
+    let shown: Vec<String> = app.session.map().tiles.iter().filter(|l| !l.overlay && l.draws()).map(|l| l.id.clone()).collect();
     egui::Grid::new("planet-basemaps").spacing(vec2(6.0, 4.0)).show(ui, |ui| {
         for (i, m) in rustgis_engine::map::planets::basemaps_of(body.id).enumerate() {
             let sel = shown.first().map(String::as_str) == Some(m.id);
@@ -697,7 +697,7 @@ fn web_basemaps(ui: &mut Ui, app: &mut RustGisApp, t: &Tokens) {
         ui.data_mut(|d| d.insert_persisted(stack_id, stack));
     }
     // The web basemaps showing: the one on top, or every one when stacking.
-    let shown: Vec<String> = app.session.map().tiles.iter().filter(|l| !l.overlay && l.visible).map(|l| l.id.clone()).collect();
+    let shown: Vec<String> = app.session.map().tiles.iter().filter(|l| !l.overlay && l.draws()).map(|l| l.id.clone()).collect();
     egui::Grid::new("web-basemaps").spacing(vec2(6.0, 4.0)).show(ui, |ui| {
         for (i, (id, name, kind, url, attribution, max_zoom)) in WEB_BASEMAPS.into_iter().enumerate() {
             let sel = if stack { shown.iter().any(|s| s == id) } else { shown.first().map(String::as_str) == Some(id) };
