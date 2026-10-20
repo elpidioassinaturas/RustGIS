@@ -28,6 +28,7 @@ pub const NETWORK: &[&str] = &[
     "stac.collections",
     "stac.search",
     "stac.addAsset",
+    "stac.addCube",
     "map.findPlace",
     "layer.geocode",
     "osm.download",

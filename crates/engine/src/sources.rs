@@ -448,6 +448,15 @@ pub fn added_by(id: &str, p: &Value) -> Option<Source> {
             Some(src("zarr", address, None, text(p, "variable").map(|v| json!({"variable": v})).unwrap_or(Value::Null)))
         }
         "stac.addAsset" => Some(src("stac", text(p, "url")?, None, layer("asset"))),
+        "stac.addCube" => {
+            let mut extra = serde_json::Map::new();
+            for k in ["collection", "asset"] {
+                if let Some(v) = text(p, k) {
+                    extra.insert(k.into(), json!(v));
+                }
+            }
+            Some(src("stac", text(p, "url")?, None, Value::Object(extra)))
+        }
         "layer.addSample" => Some(src("sample", text(p, "name")?, None, Value::Null)),
         _ => None,
     }

@@ -301,7 +301,14 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         let mut next = Some(stac::search_url(&api, &search)?);
         let mut read: Vec<String> = Vec::new();
         // Pages are read from the API's own host: a next link elsewhere ends the search.
-        let host = |u: &str| u.split_once("://").map(|(_, r)| r.split(['/', '?', '#']).next().unwrap_or("").to_ascii_lowercase());
+        // Scheme, user part, host and port compared: `https://host:443`, never another host or http.
+        let host = |u: &str| {
+            u.split_once("://").map(|(scheme, r)| {
+                let authority = r.split(['/', '?', '#']).next().unwrap_or("");
+                let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+                format!("{}://{}", scheme.to_ascii_lowercase(), host.to_ascii_lowercase())
+            })
+        };
         let api_host = host(&api);
         while let Some(url) = next.take() {
             if read.contains(&url) || (!read.is_empty() && host(&url) != api_host) {
@@ -329,6 +336,7 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         let mut tiles: std::collections::BTreeMap<String, std::collections::BTreeMap<i64, String>> = Default::default();
         let mut scale: Option<(f64, f64)> = None;
         let mut scales_differ = false;
+        let mut duplicates = 0usize;
         let mut without = 0usize;
         for i in &items {
             let Some(ms) = rustgis_data::time::parse_text(&i.datetime) else {
@@ -346,7 +354,8 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
             let d = (ms / 86_400_000.0).floor() as i64;
             let by_day = tiles.entry(key).or_default();
             if by_day.contains_key(&d) {
-                // A tile and day already have a file; this one is left out, its scale too.
+                // A tile and day already have a file; this one is left out (and counted), its scale too.
+                duplicates += 1;
                 continue;
             }
             // The file's address without a fragment of its own, so the range look is the only one.
@@ -444,6 +453,9 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         let mut out = json!({"items": items.len(), "tiles": tiles.len(), "dates": dates.len(), "layers": added.len()});
         if without > 0 {
             out["skipped"] = json!(without);
+        }
+        if duplicates > 0 {
+            out["duplicates"] = json!(duplicates);
         }
         Ok(out)
     }
