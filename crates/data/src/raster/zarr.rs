@@ -1439,23 +1439,25 @@ pub fn assemble_series(store: &Store, plan: &SeriesPlan, chunks: &HashMap<String
     let scale = attr_f64(a, "scale_factor").unwrap_or(1.0);
     let offset = attr_f64(a, "add_offset").unwrap_or(0.0);
     let chunk = |d: usize| a.chunks.get(d).copied().unwrap_or(1).max(1);
+    // A cell's place in a chunk, by dimension: saturating, so chunk shapes from a hostile store
+    // can't overflow (the value read is then just missing).
     let strides: Vec<u64> = {
         let mut s = vec![1u64; nd];
         if a.fortran {
             for d in 1..nd {
-                s[d] = s[d - 1] * a.chunks[d - 1];
+                s[d] = s[d - 1].saturating_mul(chunk(d - 1));
             }
         } else {
             for d in (0..nd.saturating_sub(1)).rev() {
-                s[d] = s[d + 1] * a.chunks[d + 1];
+                s[d] = s[d + 1].saturating_mul(chunk(d + 1));
             }
         }
         s
     };
     let step_at = |d: usize, step: u64| if d == plan.t { step } else { plan.at.get(d).copied().unwrap_or(0) };
-    let mut out = Vec::with_capacity(plan.count as usize);
+    let mut out = Vec::with_capacity(usize::try_from(plan.count).unwrap_or(0).min(1 << 20));
     let mut decoded: Option<(u64, Option<(Vec<u8>, DType)>)> = None;
-    for step in plan.from..plan.from + plan.count {
+    for step in plan.from..plan.from.saturating_add(plan.count) {
         let g = step / chunk(plan.t);
         if decoded.as_ref().is_none_or(|(k, _)| *k != g) {
             let idx: Vec<u64> = (0..nd).map(|d| step_at(d, step) / chunk(d)).collect();
@@ -1469,9 +1471,11 @@ pub fn assemble_series(store: &Store, plan: &SeriesPlan, chunks: &HashMap<String
             out.push(f64::NAN);
             continue;
         };
-        let i: u64 = (0..nd).map(|d| (step_at(d, step) % chunk(d)) * strides[d]).sum();
+        let i = (0..nd)
+            .map(|d| (step_at(d, step) % chunk(d)).saturating_mul(strides.get(d).copied().unwrap_or(0)))
+            .fold(0u64, u64::saturating_add);
         let at = usize::try_from(i).ok().and_then(|i| i.checked_mul(dt.size));
-        let v = at.and_then(|at| vals.get(at..at + dt.size)).map(|b| dt.value(b)).unwrap_or(f64::NAN);
+        let v = at.and_then(|at| vals.get(at..at.checked_add(dt.size)?)).map(|b| dt.value(b)).unwrap_or(f64::NAN);
         out.push(if v.is_nan() || missing.contains(&v) { f64::NAN } else { v * scale + offset });
     }
     Ok(out)
