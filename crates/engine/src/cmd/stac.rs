@@ -508,7 +508,14 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 let mut all: Vec<f64> = t.dates.iter().chain(&dates).copied().collect();
                 all.sort_by(f64::total_cmp);
                 all.dedup();
-                all.truncate(rustgis_map::time::MAX_STEPS);
+                if all.len() > rustgis_map::time::MAX_STEPS {
+                    undo(s);
+                    return Err(format!(
+                        "the time slider's dates and the cube's make {}, more than its {} steps: take a shorter period",
+                        all.len(),
+                        rustgis_map::time::MAX_STEPS
+                    ));
+                }
                 json!({"dates": all, "date": t.current})
             }
             Some(t) => {
