@@ -284,11 +284,91 @@ fn cached_store(url: &str) -> Result<std::sync::Arc<zarr::Store>, String> {
     Ok(st)
 }
 
+/// The key a slice is kept by: its store, selection and coordinate system.
+#[cfg(not(target_arch = "wasm32"))]
+fn slice_key(zt: &ZarrTime, i: usize) -> String {
+    format!("{}\u{0}{}\u{0}{}", zt.store, zt.selection(i), zt.crs.as_deref().unwrap_or(""))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_kept(key: &str) -> bool {
+    slices().lock().is_ok_and(|c| c.iter().any(|(k, _)| k == key))
+}
+
+/// Slices being read ahead in the background, by key: each is read once, however often the
+/// slider moves meanwhile.
+#[cfg(not(target_arch = "wasm32"))]
+fn reading_ahead() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// The most threads reading ahead at once.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_READ_AHEAD: usize = 2;
+
+#[cfg(not(target_arch = "wasm32"))]
+static READ_AHEAD_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Reads the two steps after `i` in the background, those neither kept nor already being read,
+/// on at most [`MAX_READ_AHEAD`] threads: a thread more is skipped (the next step starts one).
+#[cfg(not(target_arch = "wasm32"))]
+fn read_ahead(zt: ZarrTime, i: usize) {
+    use std::sync::atomic::Ordering;
+    let keys: Vec<(usize, String)> = (i + 1..zt.dates.len())
+        .take(2)
+        .map(|j| (j, slice_key(&zt, j)))
+        .filter(|(_, k)| !is_kept(k) && reading_ahead().lock().is_ok_and(|mut r| r.insert(k.clone())))
+        .collect();
+    if keys.is_empty() {
+        return;
+    }
+    let release = |keys: &[(usize, String)]| {
+        if let Ok(mut r) = reading_ahead().lock() {
+            for (_, k) in keys {
+                r.remove(k);
+            }
+        }
+    };
+    if READ_AHEAD_THREADS.fetch_add(1, Ordering::SeqCst) >= MAX_READ_AHEAD {
+        READ_AHEAD_THREADS.fetch_sub(1, Ordering::SeqCst);
+        release(&keys);
+        return;
+    }
+    std::thread::spawn(move || {
+        for (n, (j, _)) in keys.iter().enumerate() {
+            let ok = read_step(&zt, *j).is_ok();
+            release(&keys[n..=n]);
+            if !ok {
+                release(&keys[n + 1..]);
+                break;
+            }
+        }
+        READ_AHEAD_THREADS.fetch_sub(1, Ordering::SeqCst);
+    });
+}
+
+/// Waits (up to a minute) for a step being read ahead, so it isn't fetched twice.
+#[cfg(not(target_arch = "wasm32"))]
+fn wait_for_read_ahead(key: &str) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(60) && reading_ahead().lock().is_ok_and(|r| r.contains(key)) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Step `i`, once a read ahead of it has finished, so it isn't fetched twice.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_waiting(zt: &ZarrTime, i: usize) -> Result<std::sync::Arc<raster::Raster>, String> {
+    wait_for_read_ahead(&slice_key(zt, i));
+    read_step(zt, i)
+}
+
 /// Step `i` of a following layer's variable, from the kept slices or read now.
 #[cfg(not(target_arch = "wasm32"))]
 fn read_step(zt: &ZarrTime, i: usize) -> Result<std::sync::Arc<raster::Raster>, String> {
     let sel = zt.selection(i);
-    let key = format!("{}\u{0}{sel}\u{0}{}", zt.store, zt.crs.as_deref().unwrap_or(""));
+    let key = slice_key(zt, i);
     if let Some((_, r)) = slices().lock().ok().and_then(|c| c.iter().find(|(k, _)| *k == key).cloned()) {
         return Ok(r);
     }
@@ -336,7 +416,7 @@ pub(crate) fn follow_time(s: &mut Session) {
                         rl.data = None;
                         zt.shown = None;
                     }
-                    Some(i) => match read_step(zt, i) {
+                    Some(i) => match read_waiting(zt, i) {
                         Ok(r) => {
                             rl.data = Some(r);
                             zt.shown = Some(i);
@@ -357,13 +437,7 @@ pub(crate) fn follow_time(s: &mut Session) {
             s.notify(e, true);
         }
         for (zt, i) in ahead {
-            std::thread::spawn(move || {
-                for j in (i + 1..zt.dates.len()).take(2) {
-                    if read_step(&zt, j).is_err() {
-                        break;
-                    }
-                }
-            });
+            read_ahead(zt, i);
         }
     }
     #[cfg(target_arch = "wasm32")]
@@ -423,6 +497,11 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         let (dim, dates) = zarr::time_axis(&store, &sel.variable, &chunks).ok_or_else(|| {
             format!("{} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")", sel.variable)
         })?;
+        // Each date is a step: an axis out of order or with a date twice (stores joined end to end)
+        // can't be followed step by step.
+        if !dates.iter().all(|d| d.is_finite()) || !dates.windows(2).all(|w| w[0] < w[1]) {
+            return Err(format!("{}'s time axis isn't in increasing order without repeats, so it can't follow the slider", sel.variable));
+        }
         // The period asked for, else the whole axis.
         let date = |k: &str| -> Result<Option<f64>, String> {
             match p.get(k).filter(|v| !v.is_null()) {
