@@ -245,9 +245,10 @@ impl TileLayer {
         }
         // A file per date: web addresses, finite dates, in order.
         self.time_urls.retain(|(d, u)| d.is_finite() && is_web(u) && u.len() <= 4096);
-        self.time_urls.truncate(MAX_TIME_URLS);
+        // Sorted before the cap, so a list out of order keeps its first dates, not any.
         self.time_urls.sort_by(|a, b| a.0.total_cmp(&b.0));
         self.time_urls.dedup_by(|a, b| a.0 == b.0);
+        self.time_urls.truncate(MAX_TIME_URLS);
         let local = matches!(self.kind, TileKind::PmTiles | TileKind::MbTiles) && is_local_archive(&self.url);
         if let Some(name) = self.url.strip_prefix(UPLOAD).filter(|_| self.kind == TileKind::MbTiles) {
             if name.is_empty() || name.len() > 512 || name.chars().any(char::is_control) {
