@@ -221,6 +221,8 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         let mut layer = RasterLayer::from_bytes(r, format!("{}.tif", store_name(&root)), tif);
         // A slice names its steps (`t2m[time=3]`); a summary over time (no steps) is no slice of
         // the variable, so Time Series and Summarise don't take it for one.
+        // The layer is its GeoTIFF's bytes (`from_bytes`: no path), so it's never read again from
+        // the store and `subdataset` only names it: a slice by its steps, a summary by nothing.
         layer.subdataset = (!sel.index.is_empty()).then(|| sel.label());
         // The coordinate system given for a store that doesn't say, kept for its series and
         // summaries, as a folder's slice keeps it.
