@@ -970,8 +970,13 @@ impl ReduceRun {
                     }
                     first = Some((r.width, r.height, r.transform, r.crs));
                 }
-                // One grid for every step: the same size, place and coordinate system.
-                Some(f) if *f != (r.width, r.height, r.transform, r.crs) || vals.len() != n.len() => {
+                // One grid for every step: the same size and coordinate system, its place within a
+                // thousandth of a pixel, as for a trend.
+                Some(f)
+                    if (f.0, f.1, f.3) != (r.width, r.height, r.crs)
+                        || !super::cube::same_grid(&f.2, &r.transform)
+                        || vals.len() != n.len() =>
+                {
                     return Err(format!("step {} is {} × {}, unlike the first ({} × {})", i, r.width, r.height, f.0, f.1));
                 }
                 Some(_) => {}
@@ -1059,11 +1064,7 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
     };
     let ZarrCube { zt, period } = zarr_cube(s, p)?;
     let steps = super::cube::steps(&zt.dates, period, p)?;
-    let months: Vec<u32> = p
-        .get("months")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|m| m.as_u64()).map(|m| m as u32).collect())
-        .unwrap_or_default();
+    let months = super::cube::months(p)?;
     let (var, dates) = (zt.variable.clone(), &zt.dates);
     if steps.len() > rustgis_map::raster::MAX_ZARR_STEPS {
         return Err(format!(

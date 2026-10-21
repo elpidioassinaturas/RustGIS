@@ -344,14 +344,7 @@ pub fn steps(dates: &[f64], period: (usize, usize), p: &Value) -> Result<Vec<usi
                 .ok_or_else(|| format!("{k} is a date (2015-06-01, a year, or milliseconds since 1970)")),
         }
     };
-    let months: Vec<u32> = match p.get("months").filter(|v| !v.is_null()) {
-        None => Vec::new(),
-        Some(Value::Array(a)) => a
-            .iter()
-            .map(|m| m.as_u64().filter(|m| (1..=12).contains(m)).map(|m| m as u32).ok_or("months are numbers from 1 to 12"))
-            .collect::<Result<_, _>>()?,
-        Some(_) => return Err("months is a list of months (1–12)".into()),
-    };
+    let months = months(p)?;
     let (start, end) = (date("start")?, date("end")?);
     let (lo, hi) = match (start, end) {
         (None, None) => (period.0.min(dates.len()), period.1.min(dates.len())),
@@ -368,6 +361,21 @@ pub fn steps(dates: &[f64], period: (usize, usize), p: &Value) -> Result<Vec<usi
         return Err("no date of the cube falls in the period (and months) asked for".into());
     }
     Ok(out)
+}
+
+/// The `months` a run keeps (1 to 12; none for every month): the one reading of the parameter,
+/// for the steps and for the outputs' names.
+pub(crate) fn months(p: &Value) -> Result<Vec<u32>, String> {
+    match p.get("months").filter(|v| !v.is_null()) {
+        None => Ok(Vec::new()),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|m| {
+                m.as_u64().filter(|m| (1..=12).contains(m)).map(|m| m as u32).ok_or_else(|| "months are numbers from 1 to 12".to_string())
+            })
+            .collect(),
+        Some(_) => Err("months is a list of months (1–12)".into()),
+    }
 }
 
 /// What a trend writes for each cell.
@@ -593,7 +601,7 @@ pub fn trend_start(s: &Session, p: &Value) -> Result<TrendRun, String> {
 
 /// Whether two slices' grids are one: origins and pixel sizes within a thousandth of a pixel, so
 /// files written apart (an ulp off) still stack.
-fn same_grid(a: &rustgis_data::raster::GeoTransform, b: &rustgis_data::raster::GeoTransform) -> bool {
+pub(crate) fn same_grid(a: &rustgis_data::raster::GeoTransform, b: &rustgis_data::raster::GeoTransform) -> bool {
     let (w, h) = (a.pixel_width.abs().max(f64::MIN_POSITIVE), a.pixel_height.abs().max(f64::MIN_POSITIVE));
     let near = |x: f64, y: f64, unit: f64| (x - y).abs() <= unit * 1e-3;
     near(a.origin_x, b.origin_x, w)
