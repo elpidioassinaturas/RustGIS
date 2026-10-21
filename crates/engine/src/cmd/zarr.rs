@@ -240,6 +240,9 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             let tif = raster::geotiff::write(&r, 0).map_err(|e| e.to_string())?;
             let mut layer = RasterLayer::from_bytes(r, format!("{}.tif", store_name(&u)), tif);
             layer.subdataset = Some(sel.label());
+            // The coordinate system given for a store that doesn't say, kept as a folder's slice
+            // keeps it, so a time series read from the layer finds it.
+            layer.crs = crs.map(str::to_string);
             super::raster::add_raster(s, &name, layer)
         }
     }
