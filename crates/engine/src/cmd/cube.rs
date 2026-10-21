@@ -41,8 +41,9 @@ pub const MAX_DATES: usize = 2_000;
 pub trait TimeCube: Send + Sync {
     /// The dates, in milliseconds since 1970, in the cube's order.
     fn dates(&self) -> &[f64];
-    /// The slice at date `i`: a raster and the band holding the values.
-    fn slice(&self, i: usize) -> Result<(Arc<Raster>, usize), String>;
+    /// The slice at date `i`: a raster and the band holding the values, or `None` for a date
+    /// with nothing written (a Zarr step never written), which has no value for any cell.
+    fn slice(&self, i: usize) -> Result<Option<(Arc<Raster>, usize)>, String>;
     /// What the cube holds, for the outputs' names.
     fn label(&self) -> String;
     /// The steps taken when no period is asked for (a following Zarr layer's), as a range.
@@ -72,8 +73,8 @@ impl TimeCube for Stack {
     fn dates(&self) -> &[f64] {
         &self.dates
     }
-    fn slice(&self, i: usize) -> Result<(Arc<Raster>, usize), String> {
-        self.items.get(i).map(|(_, r, b)| (r.clone(), *b)).ok_or_else(|| format!("no date {i}"))
+    fn slice(&self, i: usize) -> Result<Option<(Arc<Raster>, usize)>, String> {
+        self.items.get(i).map(|(_, r, b)| Some((r.clone(), *b))).ok_or_else(|| format!("no date {i}"))
     }
     fn label(&self) -> String {
         self.label.clone()
@@ -89,16 +90,19 @@ impl TimeCube for ZarrCube {
     fn dates(&self) -> &[f64] {
         &self.0.zt.dates
     }
-    fn slice(&self, i: usize) -> Result<(Arc<Raster>, usize), String> {
+    fn slice(&self, i: usize) -> Result<Option<(Arc<Raster>, usize)>, String> {
         // A slice already kept is used; the others are read without being kept, so a trend over
-        // many dates doesn't push out the slices a layer following the slider holds.
+        // many dates doesn't push out the slices a layer following the slider holds. A step
+        // never written is `None`: no value that date, as the Zarr summary takes it.
         let zt = &self.0.zt;
         let r = match super::zarr::kept_slice(&super::zarr::slice_key(zt, i)) {
             Some(r) => r,
-            // A step never written has no value to read: a trend needs every date it takes.
-            None => Arc::new(super::zarr::read_slice(zt, i)?.ok_or_else(|| format!("{}: step {i} has no data written", zt.store))?),
+            None => match super::zarr::read_slice(zt, i)? {
+                Some(r) => Arc::new(r),
+                None => return Ok(None),
+            },
         };
-        Ok((r, 0))
+        Ok(Some((r, 0)))
     }
     fn label(&self) -> String {
         self.0.zt.variable.clone()
@@ -409,7 +413,11 @@ impl TrendRun {
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
             }
-            let (r, b) = self.cube.slice(i)?;
+            // A date with nothing written leaves its cells without a value (the block starts empty).
+            let Some((r, b)) = self.cube.slice(i)? else {
+                done.fetch_add(1, Ordering::Relaxed);
+                continue;
+            };
             let vals = &r.bands.get(b).ok_or("the slice has no such band")?.data;
             match &grid {
                 None => {

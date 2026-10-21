@@ -7512,6 +7512,12 @@ fn a_trend_over_a_data_cube() {
     assert_eq!(r["dates"], 8);
     assert!(value(&s, &r["layers"][0], 0) > 1000.0, "{}", value(&s, &r["layers"][0], 0));
     let _ = std::fs::remove_dir_all(dir);
+    // A step never written (its chunk absent) has no value; the trend goes on with the others.
+    let (gap_dir, gap) = zarr_store_at("trend-gap", &[0, 31, 59, 90, 120, 151, 181, 212]);
+    std::fs::remove_file(std::path::Path::new(&gap).join("t/3.0.0")).unwrap();
+    let r = s.run("cube.trend", &json!({"path": gap, "variable": "t", "test": "original"})).unwrap();
+    assert!(value(&s, &r["layers"][0], 0) > 1000.0, "{}", value(&s, &r["layers"][0], 0));
+    let _ = std::fs::remove_dir_all(gap_dir);
     // Refused: too few layers, no dates, dates of another length, unknown options, another grid.
     let other = Raster::new("ndvi_2030-01-01", 3, 3, vec![vec![0.0; 9]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
     let bytes = geotiff::write(&other, 0).unwrap();
