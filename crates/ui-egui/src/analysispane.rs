@@ -912,7 +912,7 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
                 let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     job.run(&cancel, &done).map(|rasters| (rasters, job.dates()))
                 }))
-                .unwrap_or_else(|_| Err("the trend failed unexpectedly".into()));
+                .unwrap_or_else(|_| Err(tl!("The trend failed unexpectedly").to_string()));
                 if let Ok(mut g) = result.lock() {
                     *g = Some(out);
                 }
@@ -922,7 +922,7 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
                     app.workflow.trend.running = Some(r);
                     app.workflow.error = None;
                 }
-                Err(e) => app.workflow.error = Some(format!("the trend couldn't start: {e}")),
+                Err(e) => app.workflow.error = Some(crate::i18n::fmt("The trend couldn't start: {error}", &[("error", &e.to_string())])),
             }
         }
         Err(e) => app.workflow.error = Some(e),

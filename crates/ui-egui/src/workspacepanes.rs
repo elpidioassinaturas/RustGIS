@@ -580,14 +580,17 @@ fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
                             job.run(&cancel, &done)
                                 .and_then(|r| rustgis_engine::data::raster::geotiff::write(&r, 0).map_err(|e| e.to_string()))
                         }))
-                        .unwrap_or_else(|_| Err("the summary failed unexpectedly".into()));
+                        .unwrap_or_else(|_| Err(tl!("The summary failed unexpectedly").to_string()));
                         if let Ok(mut g) = result.lock() {
                             *g = Some(out);
                         }
                     });
                     match spawned {
                         Ok(_) => app.ws.reducing = Some(r),
-                        Err(e) => app.ws.message = Some((format!("the summary couldn't start: {e}"), true)),
+                        Err(e) => {
+                            app.ws.message =
+                                Some((crate::i18n::fmt("The summary couldn't start: {error}", &[("error", &e.to_string())]), true))
+                        }
                     }
                 }
                 Err(e) => app.ws.message = Some((e, true)),
