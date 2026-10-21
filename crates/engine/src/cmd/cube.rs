@@ -406,7 +406,7 @@ impl TrendRun {
                     block = vec![f32::NAN; cells * n];
                     grid = Some(r.clone());
                 }
-                Some(g) if (g.width, g.height, g.transform, g.crs) != (r.width, r.height, r.transform, r.crs) => {
+                Some(g) if (g.width, g.height, g.crs) != (r.width, r.height, r.crs) || !same_grid(&g.transform, &r.transform) => {
                     return Err(format!(
                         "the slice at {} is {} × {} on another grid than the first ({} × {}): put them on one grid first (Raster Functions › Resample)",
                         rustgis_data::time::format(self.cube.dates()[i], "YYYY-MM-DD"),
@@ -548,6 +548,17 @@ pub fn trend_start(s: &Session, p: &Value) -> Result<TrendRun, String> {
     Ok(TrendRun { cube, steps, test, alpha, min_valid, per, name })
 }
 
+/// Whether two slices' grids are one: origins and pixel sizes within a thousandth of a pixel, so
+/// files written apart (an ulp off) still stack.
+fn same_grid(a: &rustgis_data::raster::GeoTransform, b: &rustgis_data::raster::GeoTransform) -> bool {
+    let (w, h) = (a.pixel_width.abs().max(f64::MIN_POSITIVE), a.pixel_height.abs().max(f64::MIN_POSITIVE));
+    let near = |x: f64, y: f64, unit: f64| (x - y).abs() <= unit * 1e-3;
+    near(a.origin_x, b.origin_x, w)
+        && near(a.origin_y, b.origin_y, h)
+        && near(a.pixel_width, b.pixel_width, w)
+        && near(a.pixel_height, b.pixel_height, h)
+}
+
 /// Trends the desktop app worked out on a thread, waiting to be added by `cube.trend`'s `ran`.
 fn landed() -> &'static std::sync::Mutex<Vec<(u64, Vec<Raster>, usize)>> {
     static LANDED: std::sync::OnceLock<std::sync::Mutex<Vec<(u64, Vec<Raster>, usize)>>> = std::sync::OnceLock::new();
@@ -555,12 +566,12 @@ fn landed() -> &'static std::sync::Mutex<Vec<(u64, Vec<Raster>, usize)>> {
 }
 
 /// Keeps a trend worked out elsewhere (its layers and how many dates), for `cube.trend` with
-/// `"ran"`: the id returned. The last few are kept.
+/// `"ran"`: the id returned. The last two are kept (each is four full rasters).
 pub fn land(rasters: Vec<Raster>, dates: usize) -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut l) = landed().lock() {
-        if l.len() >= 4 {
+        if l.len() >= 2 {
             l.remove(0);
         }
         l.push((id, rasters, dates));
@@ -612,5 +623,16 @@ mod tests {
         assert_eq!(super::common_label("ndvi.A2024153.h12v10"), "ndvi");
         assert_eq!(super::common_label("NDVI_BETA2020"), "NDVI_BETA");
         assert_eq!(super::common_label("ETA_2020"), "ETA");
+    }
+
+    /// Slices an ulp apart are one grid; half a pixel apart, another.
+    #[test]
+    fn grids_within_a_hair_are_one() {
+        use rustgis_data::raster::GeoTransform;
+        let a = GeoTransform { origin_x: -60.0, origin_y: 5.0, pixel_width: 0.25, pixel_height: -0.25 };
+        let hair = GeoTransform { origin_x: -60.0 + 1e-12, ..a };
+        let half = GeoTransform { origin_x: -60.125, ..a };
+        assert!(super::same_grid(&a, &hair));
+        assert!(!super::same_grid(&a, &half));
     }
 }
