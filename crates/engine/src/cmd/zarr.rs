@@ -1094,7 +1094,7 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
     let (lo, hi) = match (start, end, src.period) {
         (None, None, Some((o, n))) => {
             let o = usize::try_from(o).unwrap_or(usize::MAX).min(dates.len());
-            (o, (o + n).min(dates.len()))
+            (o, o.saturating_add(n).min(dates.len()))
         }
         _ => (0, dates.len()),
     };
