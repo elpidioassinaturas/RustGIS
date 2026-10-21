@@ -484,9 +484,6 @@ pub struct Reducing {
     pub result: std::sync::Arc<std::sync::Mutex<Option<Result<Vec<u8>, String>>>>,
 }
 
-/// The Time Series pane's Summarise over time section (#556): a statistic of the chosen Zarr
-/// layer's steps over a period (and months), computed on a thread with progress and Cancel, and
-/// added as a raster layer.
 /// A summary that has finished, added to the map (or its error kept for the pane): called
 /// every frame, whatever pane is in view, so a run lands though the Time Series pane closed or
 /// its layer went. `true` while one is still running.
@@ -518,6 +515,9 @@ pub fn land_summary(app: &mut RustGisApp) -> bool {
     false
 }
 
+/// The Time Series pane's Summarise over time section (#556): a statistic of the chosen Zarr
+/// layer's steps over a period (and months), computed on a thread with progress and Cancel, and
+/// added as a raster layer.
 #[cfg(not(target_arch = "wasm32"))]
 fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
     use std::sync::atomic::Ordering;
