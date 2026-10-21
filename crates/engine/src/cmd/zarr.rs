@@ -1022,6 +1022,10 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
     let coords = store_files(&src.root, &zarr::coordinate_keys(&store, &var))?;
     let (dim, dates) = zarr::time_axis(&store, &var, &coords)
         .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")"))?;
+    // Every step a date, so the period and months pick the steps they say.
+    if !dates.iter().all(|d| d.is_finite()) {
+        return Err(format!("{var}'s time axis has a step that isn't a date"));
+    }
     let date = |k: &str| -> Result<Option<f64>, String> {
         match p.get(k).filter(|v| !v.is_null()) {
             None => Ok(None),
