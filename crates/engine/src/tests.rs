@@ -11693,6 +11693,12 @@ fn text_elements_take_a_font_family() {
     assert!(back.element(plain).is_some_and(|e| matches!(&e.kind, ElementKind::Text { font: FontFamily::Serif, .. })));
     s.run("layout.update", &json!({"element": plain, "font": "sans-serif"})).unwrap();
     assert_eq!(font(&s, plain), FontFamily::Sans);
+    // Saved as the other layout enums are; the command's lowercase names read too (a layout
+    // written by hand).
+    assert!(serde_json::to_string(&s.project.layouts[0]).unwrap().contains(r#""font":"Serif""#));
+    for (name, f) in [("\"serif\"", FontFamily::Serif), ("\"Serif\"", FontFamily::Serif), ("\"sans\"", FontFamily::Sans)] {
+        assert_eq!(serde_json::from_str::<FontFamily>(name).unwrap(), f);
+    }
     for bad in [json!("comic"), json!(2)] {
         let err = s.run("layout.update", &json!({"element": title, "font": bad})).unwrap_err();
         assert!(err.contains("font"), "{err}");

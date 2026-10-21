@@ -309,10 +309,14 @@ impl TextAlign {
 /// anywhere and each machine draws it in a face it has.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FontFamily {
-    /// The interface's sans-serif.
+    /// The interface's sans-serif. Saved as the other layout enums are (`Sans`, as `TextAlign`
+    /// saves `Center`); the command's lowercase names are read too, so a layout written by hand
+    /// with `"font": "sans"` imports.
     #[default]
+    #[serde(alias = "sans", alias = "sans-serif")]
     Sans,
     /// An installed serif (Georgia, Times, Noto Serif…); the sans where there is none.
+    #[serde(alias = "serif")]
     Serif,
 }
 
