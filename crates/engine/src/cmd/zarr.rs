@@ -968,7 +968,7 @@ impl ReduceRun {
         }
         let first = first.ok_or("no step to read")?;
         // Too few values: empty, unless the statistic is a count.
-        let need = (self.min_valid.clamp(0.0, 1.0) * self.steps.len() as f64).ceil().max(1.0) as u32;
+        let need = (self.min_valid.clamp(0.0, 1.0) * self.steps.len() as f64 - 1e-9).ceil().max(1.0) as u32;
         let out: Vec<f32> = n
             .iter()
             .enumerate()
