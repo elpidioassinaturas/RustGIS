@@ -42,6 +42,7 @@ pub struct Settled {
     pub align: bool,
     /// The letter spacing changed and was let go, as the size.
     pub letter_spacing: bool,
+    /// Another family was picked.
     pub font: bool,
 }
 
@@ -155,7 +156,7 @@ pub fn show(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, tokens: &[&
         }
         if let Some(fam) = f.font {
             ui.label(tl!("Font"));
-            egui::ComboBox::from_id_salt(id.with("font")).selected_text(tl!(fam.label())).show_ui(ui, |ui| {
+            let list = egui::ComboBox::from_id_salt(id.with("font")).selected_text(tl!(fam.label())).show_ui(ui, |ui| {
                 for v in FontFamily::ALL {
                     if ui.selectable_label(*fam == v, tl!(v.label())).clicked() && *fam != v {
                         *fam = v;
@@ -163,6 +164,8 @@ pub fn show(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, tokens: &[&
                     }
                 }
             });
+            // Named for assistive technology, as its label sits in the other column.
+            list.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, tl!("Font")));
             ui.end_row();
             // A serif asked for where none is installed is drawn in the sans: said here, so the
             // page never differs from what was asked unsaid.

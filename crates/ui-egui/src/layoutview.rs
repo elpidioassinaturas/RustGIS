@@ -2240,9 +2240,7 @@ mod tests {
             "{kind:?}"
         );
         // The family (#517): Serif picked from the Font list is stored.
-        assert!(h.query_by_label("Font").is_some());
-        // The last list in the form (after Alignment).
-        h.get_all_by_role(Role::ComboBox).last().unwrap().click();
+        h.get_by_role_and_label(Role::ComboBox, "Font").click();
         h.run_steps(2);
         h.get_by_label("Serif").click();
         h.run_steps(3);
