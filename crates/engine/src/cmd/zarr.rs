@@ -250,7 +250,10 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             let store = store_at(&u)?;
             pick_variable(&store, &mut sel)?;
             let plan = zarr::plan(&store, &sel).map_err(|e| format!("{u}: {e}"))?;
-            let (chunks, _) = fetch(&u, &plan.keys)?;
+            let (chunks, forbidden) = fetch(&u, &plan.keys)?;
+            if forbidden > 0 {
+                return Err(format!("{u}: access denied (HTTP 403) to {forbidden} of the slice's chunks"));
+            }
             let name = ps(p, "name").map(str::to_string).unwrap_or_else(|| layer_name(&u, &sel, &[]));
             let mut r = zarr::assemble(&store, &plan, &chunks, &name, crs_parsed).map_err(|e| format!("{u}: {e}"))?;
             r.source = Some(u.clone());
@@ -450,7 +453,11 @@ fn read_slice(zt: &ZarrTime, i: usize) -> Result<raster::Raster, String> {
     if is_web(&zt.store) {
         let st = cached_store(&zt.store)?;
         let plan = zarr::plan(&st, &zarr::Selection::parse(&sel)).map_err(|e| e.to_string())?;
-        let (chunks, _) = fetch(&zt.store, &plan.keys)?;
+        let (chunks, forbidden) = fetch(&zt.store, &plan.keys)?;
+        // A chunk refused (HTTP 403) isn't one never written: it's said, not read as fill.
+        if forbidden > 0 {
+            return Err(format!("{}: access denied (HTTP 403) to {forbidden} of the slice's chunks", zt.store));
+        }
         let crs = crs.map(Crs::parse).transpose()?;
         zarr::assemble(&st, &plan, &chunks, &sel, crs).map_err(|e| e.to_string())
     } else {
