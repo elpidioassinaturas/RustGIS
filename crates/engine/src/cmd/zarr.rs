@@ -731,7 +731,12 @@ fn store_files(root: &str, keys: &[String]) -> Result<HashMap<String, Vec<u8>>, 
         let mut out = HashMap::new();
         let mut total = 0u64;
         for batch in keys.chunks(64) {
-            for (k, b) in fetch(root, batch)?.0 {
+            let (got, forbidden) = fetch(root, batch)?;
+            // A file refused (HTTP 403) isn't one never written: said, not read as missing.
+            if forbidden > 0 {
+                return Err(format!("{root}: access denied (HTTP 403) to {forbidden} of its files"));
+            }
+            for (k, b) in got {
                 total = total.saturating_add(b.len() as u64);
                 if total > zarr::MAX_READ {
                     return Err(format!("{root}: the series is too large to read: take a shorter period"));
