@@ -2092,17 +2092,20 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
             app.ui.right == Some(RightPane::Profile),
             false,
         );
-        big(
-            ui,
-            app,
-            "measure",
-            "Time\nSeries",
-            "A Zarr variable's values through time at points clicked on the map.",
-            "ui.pane.timeSeries",
-            Value::Null,
-            app.ui.right == Some(RightPane::TimeSeries),
-            false,
-        );
+        // A Zarr series is read by the desktop app (the web app can't read one yet).
+        if !cfg!(target_arch = "wasm32") {
+            big(
+                ui,
+                app,
+                "measure",
+                "Time\nSeries",
+                "A Zarr variable's values through time at points clicked on the map.",
+                "ui.pane.timeSeries",
+                Value::Null,
+                app.ui.right == Some(RightPane::TimeSeries),
+                false,
+            );
+        }
     });
 }
 

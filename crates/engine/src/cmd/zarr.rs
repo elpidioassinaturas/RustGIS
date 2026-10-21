@@ -574,7 +574,9 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
             // An axis longer than the slider takes, with no period given (the Zarr dialog gives
             // none): from the step picked on it, as many steps as the slider takes.
             let at = sel.index.iter().find(|(d, _)| *d == dim).map_or(0, |(_, i)| usize::try_from(*i).unwrap_or(usize::MAX));
-            let at = at.min(dates.len().saturating_sub(1));
+            if at >= dates.len() {
+                return Err(format!("the step picked on {dim} is past its {} steps", dates.len()));
+            }
             (at, dates[at..].iter().copied().take(rustgis_map::raster::MAX_ZARR_STEPS).collect())
         } else {
             let first = dates.iter().position(inside).ok_or("no step of the variable falls between start and end")?;
