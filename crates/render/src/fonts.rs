@@ -1,6 +1,7 @@
 //! Font discovery: a good installed sans-serif when there is one (Segoe UI, SF, Inter, Noto Sans,
-//! Open Sans, DejaVu Sans), else the Ubuntu Light face that ships with egui. Fonts are read at
-//! run time and never bundled.
+//! Open Sans, DejaVu Sans), else the Ubuntu Light face that ships with egui; and an installed
+//! serif for the layout texts that ask for one (#517). Fonts are read at run time and never
+//! bundled.
 
 use std::sync::OnceLock;
 
@@ -62,6 +63,109 @@ pub fn ui_fonts() -> &'static UiFonts {
         let b = epaint_default_fonts::UBUNTU_LIGHT.to_vec();
         UiFonts { regular: b.clone(), semibold: b, source: "built-in".into() }
     })
+}
+
+/// Installed serif families: (regular, bold, italic, bold italic) files, in order of preference.
+const SERIF_CANDIDATES: &[[&str; 4]] = &[
+    [
+        "C:\\Windows\\Fonts\\georgia.ttf",
+        "C:\\Windows\\Fonts\\georgiab.ttf",
+        "C:\\Windows\\Fonts\\georgiai.ttf",
+        "C:\\Windows\\Fonts\\georgiaz.ttf",
+    ],
+    [
+        "C:\\Windows\\Fonts\\times.ttf",
+        "C:\\Windows\\Fonts\\timesbd.ttf",
+        "C:\\Windows\\Fonts\\timesi.ttf",
+        "C:\\Windows\\Fonts\\timesbi.ttf",
+    ],
+    [
+        "/System/Library/Fonts/Supplemental/Georgia.ttf",
+        "/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Georgia Italic.ttf",
+        "/System/Library/Fonts/Supplemental/Georgia Bold Italic.ttf",
+    ],
+    [
+        "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+        "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf",
+        "/System/Library/Fonts/Supplemental/Times New Roman Bold Italic.ttf",
+    ],
+    [
+        "/usr/share/fonts/noto/NotoSerif-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSerif-Bold.ttf",
+        "/usr/share/fonts/noto/NotoSerif-Italic.ttf",
+        "/usr/share/fonts/noto/NotoSerif-BoldItalic.ttf",
+    ],
+    [
+        "/usr/share/fonts/truetype/noto/NotoSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSerif-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSerif-Italic.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSerif-BoldItalic.ttf",
+    ],
+    [
+        "/usr/share/fonts/google-noto/NotoSerif-Regular.ttf",
+        "/usr/share/fonts/google-noto/NotoSerif-Bold.ttf",
+        "/usr/share/fonts/google-noto/NotoSerif-Italic.ttf",
+        "/usr/share/fonts/google-noto/NotoSerif-BoldItalic.ttf",
+    ],
+    [
+        "/usr/share/fonts/TTF/DejaVuSerif.ttf",
+        "/usr/share/fonts/TTF/DejaVuSerif-Bold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSerif-Italic.ttf",
+        "/usr/share/fonts/TTF/DejaVuSerif-BoldItalic.ttf",
+    ],
+    [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Italic.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-BoldItalic.ttf",
+    ],
+    [
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Italic.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-BoldItalic.ttf",
+    ],
+    [
+        "/usr/share/fonts/liberation-serif/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/liberation-serif/LiberationSerif-Bold.ttf",
+        "/usr/share/fonts/liberation-serif/LiberationSerif-Italic.ttf",
+        "/usr/share/fonts/liberation-serif/LiberationSerif-BoldItalic.ttf",
+    ],
+];
+
+/// An installed serif family (#517): its regular face, and its bold, italic and bold italic ones
+/// where it has them (a style it lacks is drawn from the regular, slanted for italic).
+pub struct SerifFonts {
+    pub regular: Vec<u8>,
+    pub bold: Option<Vec<u8>>,
+    pub italic: Option<Vec<u8>>,
+    pub bold_italic: Option<Vec<u8>>,
+    /// File the regular face came from.
+    pub source: String,
+}
+
+/// The installed serif, found once: `None` when there is none (the web app, a bare Linux box),
+/// or with `RUSTGIS_BUILTIN_FONTS` set, so tests draw alike on every machine. Text asking for a
+/// serif is then drawn in the sans.
+pub fn serif_fonts() -> Option<&'static SerifFonts> {
+    static F: OnceLock<Option<SerifFonts>> = OnceLock::new();
+    F.get_or_init(|| {
+        if std::env::var_os("RUSTGIS_BUILTIN_FONTS").is_some() {
+            return None;
+        }
+        SERIF_CANDIDATES.iter().find_map(|[r, b, i, bi]| {
+            let regular = read(r)?;
+            Some(SerifFonts { regular, bold: read(b), italic: read(i), bold_italic: read(bi), source: (*r).to_string() })
+        })
+    })
+    .as_ref()
+}
+
+/// Whether a serif is installed: text asking for one is drawn in it, not in the sans.
+pub fn serif_available() -> bool {
+    serif_fonts().is_some()
 }
 
 /// Regional CJK glyph styles (the same code point is drawn differently by region).

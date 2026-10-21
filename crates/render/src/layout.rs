@@ -170,10 +170,11 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                     None => placeholder(&mut pm, r, "Colorbar", ppp),
                 }
             }
-            ElementKind::Text { text: t, size, color, bold, italic, align, letter_spacing } => {
+            ElementKind::Text { text: t, size, color, bold, italic, align, letter_spacing, font } => {
                 let first = layout.first_frame().and_then(frame);
                 let s = expand(t, layout, info, first.and_then(|f| maps.get(f.1).map(|m| (m, f.2))));
-                let style = TextStyle { bold: *bold, italic: *italic, align: *align, spacing: *letter_spacing as f32 };
+                let face = text::Face { bold: *bold, italic: *italic, serif: *font == rustgis_map::layout::FontFamily::Serif };
+                let style = TextStyle { face, align: *align, spacing: *letter_spacing as f32 };
                 text_block(&mut pm, r, &s, *size as f32, *color, style, ppp);
             }
             ElementKind::Picture { image } => {
@@ -1014,8 +1015,8 @@ fn colorbar(pm: &mut Pixmap, r: Rect, scale: &ColorScale, bar: &Bar, ppp: f64) {
 /// How a text element's lines are drawn, beyond their size and colour.
 #[derive(Clone, Copy)]
 struct TextStyle {
-    bold: bool,
-    italic: bool,
+    /// Bold, italic and the family.
+    face: text::Face,
     align: TextAlign,
     /// Letter spacing in points.
     spacing: f32,
@@ -1039,12 +1040,12 @@ fn text_block(pm: &mut Pixmap, r: Rect, s: &str, size: f32, color: Rgba, style: 
         let left = match style.align {
             TextAlign::Left => r.x(),
             aligned => {
-                let (ink_left, ink_right) = text::styled_extent(line, px, style.bold, style.italic, spacing);
+                let (ink_left, ink_right) = text::styled_extent(line, px, style.face, spacing);
                 let free = r.width() - (ink_right - ink_left);
                 r.x() + if aligned == TextAlign::Center { free / 2.0 } else { free } - ink_left
             }
         };
-        text::styled_at(pm, line, left, y, px, color, style.bold, style.italic, spacing);
+        text::styled_at(pm, line, left, y, px, color, style.face, spacing);
         y += px * 1.25;
     }
 }
@@ -1371,7 +1372,7 @@ mod tests {
     /// as before.
     #[test]
     fn text_takes_italic_alignment_and_letter_spacing() {
-        let plain = TextStyle { bold: false, italic: false, align: TextAlign::Left, spacing: 0.0 };
+        let plain = TextStyle { face: text::Face::default(), align: TextAlign::Left, spacing: 0.0 };
         let base = styled_line(plain);
         let (l, r, ..) = text_ink(&base);
         assert!(l < 4, "left-aligned starts at the left: {l}");
@@ -1397,7 +1398,7 @@ mod tests {
             let mut pm = Pixmap::new(120, 120).unwrap();
             pm.fill(tiny_skia::Color::WHITE);
             let r = Rect::from_xywh(40.0, 0.0, 80.0, 120.0).unwrap();
-            text_block(&mut pm, r, "l", 60.0, Rgba::rgb(0, 0, 0), TextStyle { italic, ..plain }, 1.0);
+            text_block(&mut pm, r, "l", 60.0, Rgba::rgb(0, 0, 0), TextStyle { face: text::Face { italic, ..plain.face }, ..plain }, 1.0);
             let (.., top, bottom) = text_ink(&pm);
             (top as i32 - bottom as i32, text_height(&pm))
         };
@@ -1405,9 +1406,10 @@ mod tests {
         assert!(upright.abs() <= 1, "upright stem: {upright}");
         assert!((lean as f32 - 0.2126 * height as f32).abs() <= 3.0, "lean {lean} over {height} px");
         // Right-aligned, slanted or tightened past the letters' width, the ink stays in the box.
-        for style in
-            [TextStyle { align: TextAlign::Right, italic: true, ..plain }, TextStyle { align: TextAlign::Right, spacing: -5.0, ..plain }]
-        {
+        for style in [
+            TextStyle { align: TextAlign::Right, face: text::Face { italic: true, ..plain.face }, ..plain },
+            TextStyle { align: TextAlign::Right, spacing: -5.0, ..plain },
+        ] {
             let mut pm = Pixmap::new(400, 60).unwrap();
             pm.fill(tiny_skia::Color::WHITE);
             let r = Rect::from_xywh(0.0, 0.0, 300.0, 60.0).unwrap();

@@ -125,6 +125,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) {
         italic: Some(&mut italic),
         align: Some(&mut align),
         letter_spacing: Some(&mut spacing),
+        font: None,
         select,
     };
     let settled = crate::textform::section(ui, "Text", |ui| crate::textform::show(ui, ("graphic_format", k), &[graphics::TOKENS], fields))
