@@ -1107,10 +1107,10 @@ pub fn zarr_cube(s: &Session, p: &Value) -> Result<ZarrCube, String> {
     let coords = store_files(&src.root, &zarr::coordinate_keys(&store, &var))?;
     let (dim, dates) = zarr::time_axis(&store, &var, &coords)
         .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")"))?;
-    // A trend takes the steps in time order: an axis out of order (descending) or with a date
-    // twice would turn the test's sign or count a date twice.
-    if !dates.iter().all(|d| d.is_finite()) || !dates.windows(2).all(|w| w[0] < w[1]) {
-        return Err(format!("{var}'s time axis isn't in increasing order without repeats, so a trend can't be read from it"));
+    // Every step a date, so a period and months pick the steps they say (a summary takes them
+    // in any order; a trend asks for time order itself, in `cube_from`).
+    if !dates.iter().all(|d| d.is_finite()) {
+        return Err(format!("{var}'s time axis has a step that isn't a date"));
     }
     let period = match src.period {
         Some((o, n)) => {

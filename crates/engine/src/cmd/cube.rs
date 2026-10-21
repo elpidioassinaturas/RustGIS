@@ -269,7 +269,18 @@ pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
         #[cfg(target_arch = "wasm32")]
         return Err("in the web app, a Zarr variable's trend can't be worked out yet (the desktop app can)".into());
         #[cfg(not(target_arch = "wasm32"))]
-        return Ok(Box::new(ZarrCube(super::zarr::zarr_cube(s, p)?)));
+        {
+            let cube = super::zarr::zarr_cube(s, p)?;
+            // A trend takes the steps in time order: an axis out of order (descending) or with a
+            // date twice would turn the test's sign or count a date twice.
+            if !cube.zt.dates.windows(2).all(|w| w[0] < w[1]) {
+                return Err(format!(
+                    "{}'s time axis isn't in increasing order without repeats, so a trend can't be read from it",
+                    cube.zt.variable
+                ));
+            }
+            return Ok(Box::new(ZarrCube(cube)));
+        }
     }
     let id = s.layer_id(p)?;
     let l = s.map().layer(id).ok_or("no such layer")?;
