@@ -89,12 +89,16 @@ pub const MIN_VALUES: usize = 4;
 /// trend takes fewer still (2,000 dates).
 pub const MAX_VALUES: usize = if cfg!(target_arch = "wasm32") { 2_000 } else { 4_000 };
 
-/// The trend of the values `y` at times `t` (the same length; missing values skipped), or `None`
+/// The trend of the values `y` at times `t` (the same length, in any order: they're taken in time
+/// order; missing values skipped), or `None`
 /// when fewer than [`MIN_VALUES`] or more than [`MAX_VALUES`] are left (or, for the seasonal
 /// test, no season has two). `alpha` is the test's level, between 0 and 1, which Hamed & Rao's
 /// correction also uses to choose its lags; `None` for another.
 pub fn trend(t: &[f64], y: &[f64], test: Test, alpha: f64) -> Option<Trend> {
-    let (t, y): (Vec<f64>, Vec<f64>) = t.iter().zip(y).filter(|(t, y)| t.is_finite() && y.is_finite()).map(|(t, y)| (*t, *y)).unzip();
+    let mut kept: Vec<(f64, f64)> = t.iter().zip(y).filter(|(t, y)| t.is_finite() && y.is_finite()).map(|(t, y)| (*t, *y)).collect();
+    // The test reads the values in time order (S, the autocorrelation).
+    kept.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (t, y): (Vec<f64>, Vec<f64>) = kept.into_iter().unzip();
     let n = y.len();
     if !(MIN_VALUES..=MAX_VALUES).contains(&n) || !(alpha > 0.0 && alpha < 1.0) {
         return None;
@@ -187,8 +191,9 @@ pub fn trend_seasonal(t: &[f64], y: &[f64], season: &[usize], alpha: f64) -> Opt
     if y.len() != t.len() || season.len() != t.len() {
         return None;
     }
-    let kept: Vec<(f64, f64, usize)> =
+    let mut kept: Vec<(f64, f64, usize)> =
         t.iter().zip(y).zip(season).filter(|((t, y), _)| t.is_finite() && y.is_finite()).map(|((t, y), s)| (*t, *y, *s)).collect();
+    kept.sort_by(|a, b| a.0.total_cmp(&b.0));
     if !(MIN_VALUES..=MAX_VALUES).contains(&kept.len()) || !(alpha > 0.0 && alpha < 1.0) {
         return None;
     }
@@ -531,6 +536,12 @@ mod tests {
             trend_seasonal(&[2000.0, 2000.5, 2001.0, 2001.5], &[1.0, 2.0, 3.0, 4.0], &[0, 1, 0], 0.05).is_none(),
             "seasons for every value"
         );
+        // Values in any order are taken in time order: the same trend as sorted.
+        let (t, y) = ([2000.0, 2001.0, 2002.0, 2003.0, 2004.0, 2005.0], [1.0, 3.0, 2.0, 5.0, 4.0, 6.0]);
+        let sorted = trend(&t, &y, Test::Original, 0.05).unwrap();
+        let shuffled =
+            trend(&[2003.0, 2000.0, 2005.0, 2001.0, 2004.0, 2002.0], &[5.0, 1.0, 6.0, 3.0, 4.0, 2.0], Test::Original, 0.05).unwrap();
+        assert_eq!((sorted.s, sorted.z, sorted.slope), (shuffled.s, shuffled.z, shuffled.slope));
         assert!(trend(&many, &many, Test::Original, 0.05).is_none());
         // Too few values, missing ones skipped.
         assert!(trend(&t, &[1.0, f64::NAN, 2.0, f64::NAN, 3.0], Test::Original, 0.05).is_none());
