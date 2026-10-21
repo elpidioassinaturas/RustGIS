@@ -574,7 +574,9 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
             // An axis longer than the slider takes, with no period given (the Zarr dialog gives
             // none): from the step picked on it, as many steps as the slider takes.
             let at = sel.index.iter().find(|(d, _)| *d == dim).map_or(0, |(_, i)| usize::try_from(*i).unwrap_or(usize::MAX));
-            let at = at.min(dates.len().saturating_sub(1));
+            if at >= dates.len() {
+                return Err(format!("the step picked on {dim} is past its {} steps", dates.len()));
+            }
             (at, dates[at..].iter().copied().take(rustgis_map::raster::MAX_ZARR_STEPS).collect())
         } else {
             let first = dates.iter().position(inside).ok_or("no step of the variable falls between start and end")?;
@@ -902,6 +904,10 @@ impl ReduceRun {
             match &first {
                 None => {
                     let len = vals.len();
+                    // The running totals take about 48 bytes a cell: bounded before they're made.
+                    if len > MAX_REDUCE_CELLS {
+                        return Err(format!("{len} cells, more than a summary takes ({MAX_REDUCE_CELLS})"));
+                    }
                     (n, mean, m2, sum, above) = (vec![0; len], vec![0.0; len], vec![0.0; len], vec![0.0; len], vec![0; len]);
                     (lo, hi) = (vec![f64::INFINITY; len], vec![f64::NEG_INFINITY; len]);
                     first = Some(r.clone());
@@ -1063,6 +1069,10 @@ pub fn zarr_cube(s: &Session, p: &Value) -> Result<ZarrCube, String> {
     };
     Ok(ZarrCube { zt, period })
 }
+
+/// The most cells a summary keeps running totals for (about 48 bytes each): 32 million, 1.5 GB.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_REDUCE_CELLS: usize = 32_000_000;
 
 /// `zarr.reduce`: the summary computed here (blocking), and added as a raster layer kept in the
 /// project as a GeoTIFF.
