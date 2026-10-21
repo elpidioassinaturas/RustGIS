@@ -907,6 +907,8 @@ impl ReduceRun {
         // Only the totals the statistic needs: each cell's count, one running value (the mean,
         // the least, the most, the sum or the count above), and for std the squared deviations.
         let (mut n, mut acc, mut m2) = (Vec::<u32>::new(), Vec::<f64>::new(), Vec::<f64>::new());
+        // Steps never written (no chunk at all), read as having no value.
+        let mut unwritten = 0usize;
         for &i in &self.steps {
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
@@ -920,6 +922,7 @@ impl ReduceRun {
                     // A step never written is its fill value: no value for any cell, so it only
                     // lowers the counts (and the step after it still sets the grid).
                     Err(e) if e.contains(zarr::NO_CHUNKS) => {
+                        unwritten += 1;
                         done.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
@@ -946,7 +949,8 @@ impl ReduceRun {
                     }
                     first = Some(r.clone());
                 }
-                Some(f) if (f.width, f.height) != (r.width, r.height) || vals.len() != n.len() => {
+                // One grid for every step: the same size, place and coordinate system.
+                Some(f) if (f.width, f.height, f.transform, f.crs) != (r.width, r.height, r.transform, r.crs) || vals.len() != n.len() => {
                     return Err(format!("step {} is {} × {}, unlike the first ({} × {})", i, r.width, r.height, f.width, f.height));
                 }
                 Some(_) => {}
@@ -978,7 +982,13 @@ impl ReduceRun {
             }
             done.fetch_add(1, Ordering::Relaxed);
         }
-        let first = first.ok_or("no step to read")?;
+        let first = first.ok_or_else(|| {
+            if unwritten > 0 {
+                format!("none of the {unwritten} steps in the period has data written (only fill values)")
+            } else {
+                "no step to read".to_string()
+            }
+        })?;
         // Too few values: empty, unless the statistic is a count.
         let need = (self.min_valid.clamp(0.0, 1.0) * self.steps.len() as f64 - 1e-9).ceil().max(1.0) as u32;
         let out: Vec<f32> = n
