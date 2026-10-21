@@ -11698,6 +11698,11 @@ fn text_elements_take_a_font_family() {
         assert!(s.run("layout.addElement", &json!({"kind": "text", "font": bad})).is_err());
     }
     assert_eq!(font(&s, title), FontFamily::Serif);
+    // Only a text takes a family: another element refuses it rather than ignore it.
+    let arrow = s.run("layout.addElement", &json!({"kind": "northArrow"})).unwrap()["element"].clone();
+    let err = s.run("layout.update", &json!({"element": arrow, "font": "serif"})).unwrap_err();
+    assert!(err.contains("only text elements"), "{err}");
+    assert!(s.run("layout.addElement", &json!({"kind": "northArrow", "font": "serif"})).unwrap_err().contains("only text elements"));
     // The page draws either way.
     assert!(s.run("layout.update", &json!({"element": title, "text": "Mapa do Brasil", "bold": true, "italic": true})).is_ok());
     assert!(!crate::cmd::layout::layout_bytes(&mut s, 0, false, 72.0, false).unwrap().is_empty());
