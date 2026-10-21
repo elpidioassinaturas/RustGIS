@@ -33,9 +33,13 @@ pub fn commands() -> Vec<C> {
 pub const MAX_VALUES: u64 = if cfg!(target_arch = "wasm32") { 16_000_000 } else { 64_000_000 };
 /// The most pairs of dates a trend compares in all (cells × dates² ⁄ 2), which bounds the time
 /// Sen's slope takes: far fewer in the browser, which works them out on one thread. At the cap a
-/// run can take minutes on the desktop: the app runs it on threads with progress and Cancel, and
-/// `cube.trend` called directly (a script, the CLI) waits for it.
+/// run can take minutes on the desktop, which the app runs on threads with progress and Cancel;
+/// `cube.trend` called directly (a script, the CLI) takes [`MAX_WAITED_PAIRS`].
 pub const MAX_PAIRS: u64 = if cfg!(target_arch = "wasm32") { 50_000_000 } else { 20_000_000_000 };
+/// The most pairs a trend worked out where it's called compares (`cube.trend` without `ran`: a
+/// script, the CLI), which waits for it with no Cancel: a tenth of the app's on the desktop. The
+/// browser works every trend out where it's called, within its own lower cap.
+pub const MAX_WAITED_PAIRS: u64 = if cfg!(target_arch = "wasm32") { MAX_PAIRS } else { MAX_PAIRS / 10 };
 /// The most dates a cube is read at.
 pub const MAX_DATES: usize = 2_000;
 
@@ -409,6 +413,9 @@ pub struct TrendRun {
     per: f64,
     /// The outputs' names start with this.
     pub name: String,
+    /// The most pairs it compares: [`MAX_PAIRS`] on the app's threads, with Cancel; fewer for a
+    /// call that waits for it ([`MAX_WAITED_PAIRS`]).
+    max_pairs: u64,
 }
 
 impl TrendRun {
@@ -451,8 +458,9 @@ impl TrendRun {
                         ));
                     }
                     let pairs = (cells as u64).saturating_mul((n * n.saturating_sub(1) / 2) as u64);
-                    if pairs > MAX_PAIRS {
-                        return Err(format!("{cells} cells × {n} dates is too long a run: take a smaller area or fewer dates"));
+                    if pairs > self.max_pairs {
+                        let how = if self.max_pairs < MAX_PAIRS { " (or run it from the Workflows pane, which can take more)" } else { "" };
+                        return Err(format!("{cells} cells × {n} dates is too long a run: take a smaller area or fewer dates{how}"));
                     }
                     block = vec![f32::NAN; cells * n];
                     grid = Some(r.clone());
@@ -609,7 +617,7 @@ pub fn trend_start(s: &Session, p: &Value) -> Result<TrendRun, String> {
     let (a, z) = (steps.first().copied().unwrap_or(0), steps.last().copied().unwrap_or(0));
     let label = format!("{} {}–{}", cube.label(), day(a), day(z));
     let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map_or(label, |n| n.chars().take(200).collect());
-    Ok(TrendRun { cube, steps, test, alpha, min_valid, per, name })
+    Ok(TrendRun { cube, steps, test, alpha, min_valid, per, name, max_pairs: MAX_PAIRS })
 }
 
 /// Whether two slices' grids are one: origins and pixel sizes within a thousandth of a pixel, so
@@ -658,7 +666,9 @@ fn trend_cmd(s: &mut Session, p: &Value) -> CmdResult {
         let (rasters, dates) = found.ok_or("that trend is no longer kept: run it again")?;
         return add_outputs(s, rasters, dates);
     }
-    let run = trend_start(s, p)?;
+    // Worked out here, waited for with no Cancel (a script, the CLI): a run of seconds, not minutes.
+    let mut run = trend_start(s, p)?;
+    run.max_pairs = MAX_WAITED_PAIRS.min(MAX_PAIRS);
     let rasters = run.run(&AtomicBool::new(false), &AtomicUsize::new(0))?;
     add_outputs(s, rasters, run.steps.len())
 }
