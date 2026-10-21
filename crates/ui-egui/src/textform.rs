@@ -1,8 +1,7 @@
 //! The text form shared by a text graphic (Add Text) and a layout's text (the Format pane, #516):
 //! its text, dynamic text, size, colour, boldness, italic, alignment and letter spacing (#535),
-//! and a layout text's font family (#517),
 //! laid out and limited the same in both, so the same text can look the same on the map and on
-//! the page. It edits the values it is lent
+//! the page; a layout's text also has its font family (#517). It edits the values it is lent
 //! and says what was settled; each caller runs its own command.
 
 use egui::{Color32, Ui, vec2};

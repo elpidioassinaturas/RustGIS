@@ -134,6 +134,12 @@ const SERIF_LAST: &[[&str; 4]] = &[
         "/usr/share/fonts/truetype/liberation/LiberationSerif-BoldItalic.ttf",
     ],
     [
+        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Italic.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSerif-BoldItalic.ttf",
+    ],
+    [
         "/usr/share/fonts/liberation-serif/LiberationSerif-Regular.ttf",
         "/usr/share/fonts/liberation-serif/LiberationSerif-Bold.ttf",
         "/usr/share/fonts/liberation-serif/LiberationSerif-Italic.ttf",
@@ -142,7 +148,8 @@ const SERIF_LAST: &[[&str; 4]] = &[
 ];
 
 /// An installed serif family (#517): its regular face, and its bold, italic and bold italic ones
-/// where it has them (a style it lacks is drawn from the regular, slanted for italic).
+/// where it has them. A style it lacks is drawn from the regular: slanted for italic, but not
+/// made heavier, so bold in a family with no bold file looks as the regular does.
 pub struct SerifFonts {
     pub regular: Vec<u8>,
     pub bold: Option<Vec<u8>>,

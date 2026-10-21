@@ -1079,6 +1079,7 @@ fn hostile_params_never_panic() {
         json!({"kind": "colorbar", "ticks": -1e308, "tickSide": 7, "orientation": "x", "layer": "", "reverse": "maybe"}),
         json!({"type": "albers", "lon_0": f64::MAX, "lat_1": "x", "lat_2": -1e308}),
         json!({"kind": "legend", "element": 1, "exclude": [null, 7, "", {"x": 1}]}),
+        json!({"kind": "text", "element": 1, "font": {"family": "serif"}, "italic": [], "align": 7}),
         // MySQL addresses that can't be read, so nothing connects.
         json!({"database": "mysql://u:p#@[::1/x?ssl-mode=nope", "password": 7, "layer": ":", "crs": "EPSG:-1"}),
         json!({"database": "MARIADB://u@h:99999999/%zz?ssl-mode=VERIFY_CA&ssl-ca=/nonexistent", "sql": "SELECT 1"}),

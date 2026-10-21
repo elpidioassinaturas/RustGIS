@@ -93,7 +93,8 @@ the maps; while one is open, its groups lead the Publish tab:
   **Font**: Sans-serif (the default) or Serif, for a title or a classic atlas look. The serif is
   one installed on the computer (Georgia or Times New Roman on Windows and macOS, Noto, DejaVu or
   Liberation Serif on Linux), with its own bold and italic faces, so italic there is a true italic
-  rather than slanted letters; RustGIS bundles no font. The project saves only the family, so it
+  rather than slanted letters (a family with no bold or italic file draws that style from its
+  regular face: italic slanted, bold as the regular); RustGIS bundles no font. The project saves only the family, so it
   opens anywhere. Where no serif is installed (the web app, a minimal Linux), the text is drawn in
   the sans-serif and the pane says so, as `layout.addElement` and `layout.update` do in a
   `warning`. Scripts set it with `"font": "serif"` or `"font": "sans"`. **Picture** places a PNG or JPEG.
