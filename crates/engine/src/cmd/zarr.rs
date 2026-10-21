@@ -762,6 +762,10 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
         let coords = store_files(&src.root, &keys)?;
         let (dim, dates) = zarr::time_axis(&store, &var, &coords)
             .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")"))?;
+        // A period is found along the axis in order, as following the slider takes it.
+        if !dates.iter().all(|d| d.is_finite()) || !dates.windows(2).all(|w| w[0] < w[1]) {
+            return Err(format!("{var}'s time axis isn't in increasing order without repeats, so its series can't be read by date"));
+        }
         // The period: the one asked for, else the layer's, else the whole axis.
         let date = |k: &str| -> Result<Option<f64>, String> {
             match p.get(k).filter(|v| !v.is_null()) {
