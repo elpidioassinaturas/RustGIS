@@ -98,6 +98,12 @@ pub const MAX_VALUES: usize = if cfg!(target_arch = "wasm32") { 2_000 } else { 4
 /// [`MAX_VALUES`] are left, for an `alpha` outside 0 to 1, or, for the seasonal test, when no
 /// season has two values.
 pub fn trend(t: &[f64], y: &[f64], test: Test, alpha: f64) -> Option<Trend> {
+    trend_with(t, y, test, alpha, &mut Vec::new())
+}
+
+/// [`trend`], keeping Sen's slopes in `slopes` (cleared first): a caller working out many series
+/// in turn (a cube, cell by cell) keeps one buffer and spares a fresh one each time.
+pub fn trend_with(t: &[f64], y: &[f64], test: Test, alpha: f64, slopes: &mut Vec<f64>) -> Option<Trend> {
     let mut kept: Vec<(f64, f64)> = t.iter().zip(y).filter(|(t, y)| t.is_finite() && y.is_finite()).map(|(t, y)| (*t, *y)).collect();
     // The test reads the values in time order (S, the autocorrelation).
     kept.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -107,9 +113,9 @@ pub fn trend(t: &[f64], y: &[f64], test: Test, alpha: f64) -> Option<Trend> {
         return None;
     }
     if let Test::Seasonal(m) = test {
-        return seasonal(&t, &y, m);
+        return seasonal(&t, &y, m, slopes);
     }
-    let slope = sen_slope(&t, &y)?;
+    let slope = sen_slope_in(&t, &y, slopes)?;
     let intercept = intercept(&t, &y, slope)?;
     let s = score(&y);
     let mut var_s = variance(&y);
@@ -153,13 +159,18 @@ pub fn trend(t: &[f64], y: &[f64], test: Test, alpha: f64) -> Option<Trend> {
 /// Sen's slope: the median of the slopes between every two values at different times; `None`
 /// for more than [`MAX_VALUES`], whose slopes would take too much memory.
 pub fn sen_slope(t: &[f64], y: &[f64]) -> Option<f64> {
+    sen_slope_in(t, y, &mut Vec::new())
+}
+
+/// [`sen_slope`] with its slopes kept in `slopes` (cleared first).
+fn sen_slope_in(t: &[f64], y: &[f64], slopes: &mut Vec<f64>) -> Option<f64> {
     let n = y.len().min(t.len());
     if n > MAX_VALUES {
         return None;
     }
-    let mut slopes = Vec::with_capacity(n * n.saturating_sub(1) / 2);
-    push_slopes(&t[..n], &y[..n], &mut slopes);
-    median(&mut slopes)
+    slopes.clear();
+    push_slopes(&t[..n], &y[..n], slopes);
+    median(slopes)
 }
 
 /// The slopes between every two values at different times, added to `out`: the one rule for
@@ -185,12 +196,12 @@ fn intercept(t: &[f64], y: &[f64], slope: f64) -> Option<f64> {
 
 /// The seasonal test: S and its variance summed over the seasons, and Sen's slope from pairs
 /// within a season.
-fn seasonal(t: &[f64], y: &[f64], seasons: u32) -> Option<Trend> {
+fn seasonal(t: &[f64], y: &[f64], seasons: u32, slopes: &mut Vec<f64>) -> Option<Trend> {
     let m = seasons.max(1) as usize;
     // The season of a time: its place within its unit (year), in `m` equal parts.
     // A hair above, so a time computed on a season's start (2000 + 3⁄12) isn't put in the one before.
     let season: Vec<usize> = t.iter().map(|t| (((t - t.floor()) * m as f64 + 1e-9).floor() as usize).min(m - 1)).collect();
-    seasonal_by(t, y, &season)
+    seasonal_by(t, y, &season, slopes)
 }
 
 /// The seasonal test with each value's season given (its month, or its part of the year as the
@@ -198,6 +209,11 @@ fn seasonal(t: &[f64], y: &[f64], seasons: u32) -> Option<Trend> {
 /// drifts against the calendar from year to year. Missing values are skipped as by [`trend`];
 /// `None` as it gives one, or when the three lists aren't the same length.
 pub fn trend_seasonal(t: &[f64], y: &[f64], season: &[usize], alpha: f64) -> Option<Trend> {
+    trend_seasonal_with(t, y, season, alpha, &mut Vec::new())
+}
+
+/// [`trend_seasonal`], keeping the slopes in `slopes` (cleared first), as [`trend_with`] does.
+pub fn trend_seasonal_with(t: &[f64], y: &[f64], season: &[usize], alpha: f64, slopes: &mut Vec<f64>) -> Option<Trend> {
     if y.len() != t.len() || season.len() != t.len() {
         return None;
     }
@@ -210,10 +226,10 @@ pub fn trend_seasonal(t: &[f64], y: &[f64], season: &[usize], alpha: f64) -> Opt
     let t: Vec<f64> = kept.iter().map(|k| k.0).collect();
     let y: Vec<f64> = kept.iter().map(|k| k.1).collect();
     let s: Vec<usize> = kept.iter().map(|k| k.2).collect();
-    seasonal_by(&t, &y, &s)
+    seasonal_by(&t, &y, &s, slopes)
 }
 
-fn seasonal_by(t: &[f64], y: &[f64], season: &[usize]) -> Option<Trend> {
+fn seasonal_by(t: &[f64], y: &[f64], season: &[usize], slopes: &mut Vec<f64>) -> Option<Trend> {
     // A season index past any calendar's (366 days) is a caller's mistake: no trend, not a huge allocation.
     let m = season.iter().copied().max()?.checked_add(1).filter(|m| *m <= 4096)?;
     let mut by: Vec<(Vec<f64>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); m];
@@ -222,17 +238,18 @@ fn seasonal_by(t: &[f64], y: &[f64], season: &[usize]) -> Option<Trend> {
         b.0.push(*t);
         b.1.push(*y);
     }
-    let (mut s, mut var_s, mut slopes, mut n) = (0.0, 0.0, Vec::new(), 0);
+    let (mut s, mut var_s, mut n) = (0.0, 0.0, 0);
+    slopes.clear();
     for (ts, ys) in by.iter().filter(|(_, ys)| ys.len() >= 2) {
         s += score(ys);
         var_s += variance(ys);
         n += ys.len();
-        push_slopes(ts, ys, &mut slopes);
+        push_slopes(ts, ys, slopes);
     }
     if n < MIN_VALUES {
         return None;
     }
-    let slope = median(&mut slopes)?;
+    let slope = median(slopes)?;
     // The intercept from every value, those of single-value seasons too (as pymannkendall's
     // seasonal test takes the medians of the whole series); `n`, S and the slope from the pairs.
     let intercept = intercept(t, y, slope)?;

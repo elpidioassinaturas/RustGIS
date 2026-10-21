@@ -514,6 +514,8 @@ impl TrendRun {
         let tick = cells.div_ceil(CELL_PARTS).max(1);
         let work = |block: &[f32], out: &mut [f32]| {
             let mut ys = vec![0.0f64; n];
+            // Sen's slopes, one buffer per thread, cleared cell by cell rather than made anew.
+            let mut slopes: Vec<f64> = Vec::new();
             for (c, (vals, o)) in block.chunks(n).zip(out.chunks_mut(OUTPUTS)).enumerate() {
                 if c > 0 && c % tick == 0 {
                     done.fetch_add(1, Ordering::Relaxed);
@@ -529,8 +531,8 @@ impl TrendRun {
                     continue;
                 }
                 let found = match self.test {
-                    Test::Seasonal(_) => trend::trend_seasonal(&times, &ys, &seasons, self.alpha),
-                    test => trend::trend(&times, &ys, test, self.alpha),
+                    Test::Seasonal(_) => trend::trend_seasonal_with(&times, &ys, &seasons, self.alpha, &mut slopes),
+                    test => trend::trend_with(&times, &ys, test, self.alpha, &mut slopes),
                 };
                 if let Some(t) = found
                     && let [slope, z, p, significant, ..] = o
