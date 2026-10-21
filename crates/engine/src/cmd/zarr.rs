@@ -924,7 +924,8 @@ impl ReduceRun {
     /// `done` counts the slices read; `cancel` stops it between slices.
     pub fn run(&self, cancel: &std::sync::atomic::AtomicBool, done: &std::sync::atomic::AtomicUsize) -> Result<raster::Raster, String> {
         use std::sync::atomic::Ordering;
-        let mut first: Option<std::sync::Arc<raster::Raster>> = None;
+        // The first slice's grid (its size, place and coordinate system), all the run keeps of it.
+        let mut first: Option<(u32, u32, raster::GeoTransform, Crs)> = None;
         // Only the totals the statistic needs: each cell's count, one running value (the mean,
         // the least, the most, the sum or the count above), and for std the squared deviations.
         let (mut n, mut acc, mut m2) = (Vec::<u32>::new(), Vec::<f64>::new(), Vec::<f64>::new());
@@ -967,11 +968,11 @@ impl ReduceRun {
                     if matches!(self.stat, Stat::Std) {
                         m2 = vec![0.0; len];
                     }
-                    first = Some(r.clone());
+                    first = Some((r.width, r.height, r.transform, r.crs));
                 }
                 // One grid for every step: the same size, place and coordinate system.
-                Some(f) if (f.width, f.height, f.transform, f.crs) != (r.width, r.height, r.transform, r.crs) || vals.len() != n.len() => {
-                    return Err(format!("step {} is {} × {}, unlike the first ({} × {})", i, r.width, r.height, f.width, f.height));
+                Some(f) if *f != (r.width, r.height, r.transform, r.crs) || vals.len() != n.len() => {
+                    return Err(format!("step {} is {} × {}, unlike the first ({} × {})", i, r.width, r.height, f.0, f.1));
                 }
                 Some(_) => {}
             }
@@ -1028,18 +1029,9 @@ impl ReduceRun {
             })
             .collect();
         // One band: a project keeps the result as a GeoTIFF of one band (the count is a statistic of its own).
-        let mut r = raster::Raster::new(
-            &self.name,
-            first.width,
-            first.height,
-            vec![out],
-            first.transform,
-            first.crs,
-            None,
-            raster::ColorHint::Gray,
-            "Float32",
-        )
-        .map_err(|e| e.to_string())?;
+        let mut r =
+            raster::Raster::new(&self.name, first.0, first.1, vec![out], first.2, first.3, None, raster::ColorHint::Gray, "Float32")
+                .map_err(|e| e.to_string())?;
         r.source = Some(self.root.clone());
         Ok(r)
     }
@@ -1108,7 +1100,7 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
     let month = |d: f64| rustgis_data::time::format(d, "MM").parse::<u32>().unwrap_or(0);
     let steps: Vec<usize> = (lo..hi)
         .filter(|i| {
-            let d = dates[*i];
+            let d = dates.get(*i).copied().unwrap_or(f64::NAN);
             start.is_none_or(|a| d >= a) && end.is_none_or(|z| d <= z) && (months.is_empty() || months.contains(&month(d)))
         })
         .collect();
@@ -1122,7 +1114,7 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
             rustgis_map::raster::MAX_ZARR_STEPS
         ));
     }
-    let day = |i: usize| rustgis_data::time::format(dates[i], "YYYY-MM-DD");
+    let day = |i: usize| rustgis_data::time::format(dates.get(i).copied().unwrap_or(f64::NAN), "YYYY-MM-DD");
     let (a, z) = (steps.first().copied().unwrap_or(0), steps.last().copied().unwrap_or(0));
     let mut label = format!("{var} {} {}–{}", stat.code(), day(a), day(z));
     if !months.is_empty() {
