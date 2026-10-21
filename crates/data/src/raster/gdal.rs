@@ -38,10 +38,9 @@ pub fn available() -> bool {
     program("gdal_translate").is_some() && program("gdalinfo").is_some()
 }
 
-/// Whether a file's contents are JPEG 2000: a JP2 file's signature box, or a bare codestream's
-/// first markers (SOC, SIZ).
+/// Whether a file's contents are JPEG 2000 (see [`super::jpeg2000_extension`]).
 pub fn is_jpeg2000(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"\0\0\0\x0cjP  \r\n\x87\n") || bytes.starts_with(&[0xff, 0x4f, 0xff, 0x51])
+    super::jpeg2000_extension(bytes).is_some()
 }
 
 /// What converting a file's contents made: the GeoTIFF's bytes, and whether the raster was taken
@@ -58,15 +57,14 @@ pub struct ConvertedBytes {
 /// allows the source plus three `max`-sized working copies; writes may overshoot between checks.
 /// Takes ownership so the input buffer is released after staging, before conversion/readback.
 pub fn convert_jpeg2000(bytes: Vec<u8>, crs: Option<&str>, max: u64) -> Result<ConvertedBytes> {
-    if !is_jpeg2000(&bytes) {
+    let Some(ext) = super::jpeg2000_extension(&bytes) else {
         return Err(DataError::Format("not a JPEG 2000 file (its contents don't start as one)".into()));
-    }
+    };
     let mut workspace = tempfile::Builder::new();
     workspace.prefix("rustgis-gdal-");
     #[cfg(unix)]
     workspace.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
     let dir = workspace.tempdir()?;
-    let ext = if bytes.starts_with(b"\0\0\0\x0c") { "jp2" } else { "j2k" };
     let src = dir.path().join(format!("download.{ext}"));
     {
         use std::io::Write;

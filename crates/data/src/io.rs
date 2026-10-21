@@ -131,9 +131,12 @@ pub fn read_layers(file_name: &str, bytes: &[u8]) -> Result<Vec<LayerRead>> {
 }
 
 /// The extension of a file from its first bytes, for a download whose address doesn't say:
-/// GeoParquet, FlatGeobuf, GeoTIFF, a zip, a GeoPackage, KML, GPX, GeoJSON or delimited text
-/// (`None` for anything else, such as a web page).
+/// GeoParquet, FlatGeobuf, GeoTIFF, a zip, a GeoPackage, KML, GPX, GeoJSON, delimited text or
+/// JPEG 2000 (`None` for anything else, such as a web page).
 pub fn sniff_extension(bytes: &[u8]) -> Option<&'static str> {
+    if let Some(ext) = crate::raster::jpeg2000_extension(bytes) {
+        return Some(ext);
+    }
     let head = bytes.get(..bytes.len().min(4096)).unwrap_or(bytes);
     let text = String::from_utf8_lossy(head);
     let start = text.trim_start_matches(['\u{feff}', ' ', '\t', '\r', '\n']);

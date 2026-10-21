@@ -63,7 +63,9 @@ in the web app (where the server must allow requests from web pages, CORS). On t
 is downloaded too, converted to a GeoTIFF that the project keeps, and added. Desktop byte uploads
 (`layer.addDataBytes`) of `.jp2` and `.j2k` use the same conversion. The web app rejects both JPEG
 2000 uploads and downloads with an explicit GDAL limitation; convert them to GeoTIFF first.
-The format comes from the address, or from the contents when the address has no extension (an API endpoint, say). The
+The format comes from the address, or from the contents when the address has no extension (an API
+endpoint, say), JPEG 2000 included: its signature is recognised in the contents, so the desktop
+converts it and the web app gives the same GDAL limitation. The
 app downloads in the background and adds the layer when the file arrives (to the project it was
 started in: opening another meanwhile drops it). A `.pmtiles` address is added as a tile layer
 and read a tile at a time instead.

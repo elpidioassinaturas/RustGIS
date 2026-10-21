@@ -1053,6 +1053,9 @@ fn hostile_params_never_panic() {
         json!({"points": [[], 7, [1, 2, 3, 4, "x"]], "transform": "spline"}),
         json!({"points": [[0, 0, 1e308, -1e308], [1, 0, -1e308, 1e308], [0, 1, 1e308, 1e308], [1, 1, 0, 0, 0]], "transform": "spline"}),
         json!({"points": vec![json!([5, 5, 1, 1]); 1000], "compare": true}),
+        // A warp: junk systems, sizes and paths with points that reach the fit.
+        json!({"transform": "spline", "crs": "EPSG:999999999", "pointsCrs": [7], "resampling": 1, "cellSize": -1e308, "path": 5, "points": [[0, 0, 1, 1]]}),
+        json!({"transform": "affine", "crs": 32613, "pointsCrs": 4326, "cellSize": 1e-300, "path": "/nonexistent/x.tif", "points": [[0, 0, 1, 1], [1, 0, 2, 1], [0, 1, 1, 2]]}),
         json!({"points": [[0, 0, f64::MAX, f64::MAX], [1, 0, -f64::MAX, f64::MAX], [0, 1, f64::MAX, -f64::MAX]], "compare": true}),
     ];
     let ids: Vec<&str> = Session::new(Project::default()).registry.commands.iter().map(|c| c.id).collect();
@@ -2834,6 +2837,404 @@ fn analysis_workflows_models_scripts_and_raster_functions() {
     model_graphs(&mut s);
     let g = s.run("gp.gallery", &json!({"kind": "raster"})).unwrap();
     assert!(g.as_array().unwrap().iter().any(|t| t["id"] == "raster.function"));
+}
+
+/// A 100 × 80 scan whose value is `ramp(col, row)` (so a bilinear warp reproduces it exactly), with
+/// a bright pixel at (50, 40), added as a layer with a placeholder position.
+fn scan_layer(s: &mut Session, name: &str) -> (fn(f64, f64) -> f32, (f64, f64)) {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    fn ramp(c: f64, r: f64) -> f32 {
+        (c * 2.0 + r * 0.5) as f32
+    }
+    let (w, h) = (100u32, 80u32);
+    let mut z: Vec<f32> = (0..w * h).map(|i| ramp(f64::from(i % w) + 0.5, f64::from(i / w) + 0.5)).collect();
+    z[(40 * w + 50) as usize] = 5000.0;
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 80.0, pixel_width: 1.0, pixel_height: -1.0 };
+    let r = Raster::new(name, w, h, vec![z], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    let bytes = geotiff::write(&r, 0).unwrap();
+    crate::cmd::raster::add_raster(s, name, rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)).unwrap();
+    (ramp, (50.5, 40.5))
+}
+
+/// The control points of a known map from the scan's corners and middle: `f` takes a pixel position
+/// to map coordinates.
+fn points_of(f: impl Fn(f64, f64) -> (f64, f64)) -> Value {
+    let pts: Vec<Value> = [(0.0, 0.0), (100.0, 0.0), (0.0, 80.0), (100.0, 80.0), (50.0, 40.0), (25.0, 60.0)]
+        .iter()
+        .map(|&(c, r)| {
+            let (x, y) = f(c, r);
+            json!([c, r, x, y])
+        })
+        .collect();
+    Value::Array(pts)
+}
+
+fn out_raster(s: &Session, v: &Value) -> std::sync::Arc<rustgis_data::raster::Raster> {
+    let id = v["layer"].as_u64().unwrap() as u32;
+    s.map().layer(id).unwrap().raster.as_ref().unwrap().data.clone().unwrap()
+}
+
+/// Warping through a known sheared affine puts every pixel where the matrix says: a bilinear
+/// warp of a ramp reproduces the ramp at the pixel each output cell comes from, and the bright
+/// pixel lands within half a cell of its place.
+#[test]
+fn a_warp_through_a_known_affine_puts_pixels_where_the_matrix_says() {
+    let mut s = world();
+    let (ramp, bright) = scan_layer(&mut s, "scan");
+    // x = 500000 + 10 col + 2 row, y = 4000000 - 10 row + 1 col, in UTM 13N.
+    let map = |c: f64, r: f64| (500_000.0 + 10.0 * c + 2.0 * r, 4_000_000.0 - 10.0 * r + c);
+    let v = s
+        .run(
+            "raster.georeference",
+            &json!({"layer": "scan", "transform": "affine", "pointsCrs": 32613, "crs": 32613, "points": points_of(map), "name": "warped", "resampling": "bilinear"}),
+        )
+        .unwrap();
+    assert_eq!(v["crs"], "EPSG:32613", "{v}");
+    let out = out_raster(&s, &v);
+    assert!(s.map().layer_by_name("scan").unwrap().raster.as_ref().unwrap().data.as_ref().unwrap().width == 100, "the scan is kept");
+    // The cell is the root of the pixel's area: |10 × -10 - 2 × 1| = 102.
+    let cell = 102f64.sqrt();
+    assert!((out.transform.pixel_width - cell).abs() < 1e-9 && (out.transform.pixel_height + cell).abs() < 1e-9);
+    // The grid covers the footprint, whose corners are the matrix's corners.
+    let corners = [(0.0, 0.0), (100.0, 0.0), (0.0, 80.0), (100.0, 80.0)].map(|(c, r)| map(c, r));
+    let (min_x, max_x) = corners.iter().fold((f64::MAX, f64::MIN), |(a, b), (x, _)| (a.min(*x), b.max(*x)));
+    let (min_y, max_y) = corners.iter().fold((f64::MAX, f64::MIN), |(a, b), (_, y)| (a.min(*y), b.max(*y)));
+    assert_eq!((out.transform.origin_x, out.transform.origin_y), (min_x, max_y));
+    assert!(out.transform.origin_x + out.transform.pixel_width * f64::from(out.width) >= max_x);
+    assert!(out.transform.origin_y + out.transform.pixel_height * f64::from(out.height) <= min_y);
+    // The matrix's inverse takes a map position back to the scan.
+    let det = 10.0 * -10.0 - 2.0 * 1.0;
+    let back = |x: f64, y: f64| {
+        let (dx, dy) = (x - 500_000.0, y - 4_000_000.0);
+        ((-10.0 * dx - 2.0 * dy) / det, (-dx + 10.0 * dy) / det)
+    };
+    let (mut checked, mut empty) = (0, 0);
+    for row in (0..i64::from(out.height)).step_by(7) {
+        for col in (0..i64::from(out.width)).step_by(5) {
+            let c = out.transform.to_world(col as f64 + 0.5, row as f64 + 0.5);
+            let (sc, sr) = back(c.x, c.y);
+            match out.value(0, col, row) {
+                // Away from the scan's edge and its bright pixel the value is the ramp's there.
+                Some(v) if (1.5..98.5).contains(&sc) && (1.5..78.5).contains(&sr) && (sc - 50.5).abs() > 2.0 && (sr - 40.5).abs() > 2.0 => {
+                    assert!((v - ramp(sc, sr)).abs() < 1e-3, "cell {col},{row}: {v} against {}", ramp(sc, sr));
+                    checked += 1;
+                }
+                Some(_) => {}
+                None => {
+                    assert!(!(0.0..100.0).contains(&sc) || !(0.0..80.0).contains(&sr), "cell {col},{row} comes from inside the scan");
+                    empty += 1;
+                }
+            }
+        }
+    }
+    assert!(checked > 100 && empty > 0, "{checked} checked, {empty} outside the scan");
+    // The bright pixel: its intensity-weighted position is within half a cell of the matrix's.
+    let (mut sum, mut sx, mut sy) = (0.0f64, 0.0f64, 0.0f64);
+    for row in 0..i64::from(out.height) {
+        for col in 0..i64::from(out.width) {
+            if let Some(v) = out.value(0, col, row).filter(|v| *v > 1000.0) {
+                let c = out.transform.to_world(col as f64 + 0.5, row as f64 + 0.5);
+                sum += f64::from(v);
+                sx += f64::from(v) * c.x;
+                sy += f64::from(v) * c.y;
+            }
+        }
+    }
+    let (ex, ey) = map(bright.0, bright.1);
+    assert!(
+        sum > 0.0 && (sx / sum - ex).abs() <= cell / 2.0 && (sy / sum - ey).abs() <= cell / 2.0,
+        "({}, {}) against ({ex}, {ey})",
+        sx / sum,
+        sy / sum
+    );
+}
+
+/// A 30° rotation, nearest sampling, replacing the layer's raster: the cells of the bright pixel
+/// are centred within half a cell of its place, and the grid's corners outside the turned image
+/// are no data.
+#[test]
+fn a_warp_through_a_known_rotation_puts_pixels_where_the_turn_says() {
+    let mut s = world();
+    let (_, bright) = scan_layer(&mut s, "scan");
+    let (sin, cos) = 30f64.to_radians().sin_cos();
+    // Ten metres a pixel, turned 30° about the origin (rows still run down the picture).
+    let map = |c: f64, r: f64| (500_000.0 + 10.0 * (c * cos + r * sin), 4_000_000.0 + 10.0 * (c * sin - r * cos));
+    let v = s
+        .run(
+            "raster.georeference",
+            &json!({"layer": "scan", "transform": "similarity", "pointsCrs": 32613, "crs": "EPSG:32613", "points": points_of(map), "resampling": "nearest", "cellSize": 2.5}),
+        )
+        .unwrap();
+    let out = out_raster(&s, &v);
+    assert_eq!(
+        s.map().layer_by_name("scan").unwrap().raster.as_ref().unwrap().data.as_ref().unwrap().width,
+        out.width,
+        "replaced in place"
+    );
+    assert!(out.width > 400, "the turned image needs a wider grid than its 1000 m / 2.5 m: {}", out.width);
+    // Nearest keeps the values: the bright pixel's cells are 5000, a square 10 m across turned 30°.
+    let (mut n, mut sx, mut sy) = (0.0f64, 0.0f64, 0.0f64);
+    for row in 0..i64::from(out.height) {
+        for col in 0..i64::from(out.width) {
+            if out.value(0, col, row) == Some(5000.0) {
+                let c = out.transform.to_world(col as f64 + 0.5, row as f64 + 0.5);
+                n += 1.0;
+                sx += c.x;
+                sy += c.y;
+            }
+        }
+    }
+    let (ex, ey) = map(bright.0, bright.1);
+    let cell = out.transform.pixel_width;
+    // About 100 / 6.25 = 16 cells.
+    assert!((10.0..=22.0).contains(&n), "{n} cells");
+    assert!((sx / n - ex).abs() <= cell / 2.0 && (sy / n - ey).abs() <= cell / 2.0, "({}, {}) against ({ex}, {ey})", sx / n, sy / n);
+    // The turned rectangle leaves the box's corners empty.
+    assert_eq!(out.value(0, 0, 0), None);
+    assert_eq!(out.value(0, i64::from(out.width) - 1, i64::from(out.height) - 1), None);
+    // At its default the cell is the pixel's 10 m.
+    let d = s
+        .run(
+            "raster.georeference",
+            &json!({"layer": "scan", "transform": "similarity", "pointsCrs": 32613, "crs": 32613, "points": points_of(map), "name": "d"}),
+        )
+        .unwrap();
+    assert!((out_raster(&s, &d).transform.pixel_width - 10.0).abs() < 1e-6);
+}
+
+/// Control points in longitude/latitude, warped into UTM: every cell holds the scan's value at
+/// the pixel the projection takes the cell's centre back to.
+#[test]
+fn a_warp_reprojects_from_the_points_crs() {
+    use rustgis_data::raster::Crs;
+    let mut s = world();
+    let (ramp, bright) = scan_layer(&mut s, "scan");
+    // A north-up block at 40°N, 105°W, a thousandth of a degree a pixel.
+    let map = |c: f64, r: f64| (-105.0 + c * 0.001, 40.0 - r * 0.001);
+    let v = s
+        .run(
+            "raster.georeference",
+            &json!({"layer": "scan", "transform": "affine", "crs": 32613, "pointsCrs": "EPSG:4326", "points": points_of(map), "name": "utm"}),
+        )
+        .unwrap();
+    let out = out_raster(&s, &v);
+    assert_eq!(out.crs.epsg(), 32613);
+    let t = Crs::from_epsg(32613).unwrap().transformer().unwrap();
+    let mut checked = 0;
+    for row in (0..i64::from(out.height)).step_by(3) {
+        for col in (0..i64::from(out.width)).step_by(3) {
+            let c = out.transform.to_world(col as f64 + 0.5, row as f64 + 0.5);
+            let ll = t.to_lonlat(c).unwrap();
+            let (sc, sr) = ((ll.x + 105.0) / 0.001, (40.0 - ll.y) / 0.001);
+            if (2.0..98.0).contains(&sc) && (2.0..78.0).contains(&sr) && (sc - 50.5).abs() > 2.5 && (sr - 40.5).abs() > 2.5 {
+                let got = out.value(0, col, row).unwrap();
+                assert!((got - ramp(sc, sr)).abs() < 0.05, "cell {col},{row}: {got} against {}", ramp(sc, sr));
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 100, "{checked}");
+    // The bright pixel's own UTM position is within a cell of a bright cell.
+    let (lon, lat) = map(bright.0, bright.1);
+    let at = t.from_lonlat(rustgis_geom::Coord::new(lon, lat)).unwrap();
+    let (col, row) = out.transform.to_pixel(at);
+    let (col, row) = (col.floor() as i64, row.floor() as i64);
+    let near = (-1..=1)
+        .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+        .filter_map(|(dx, dy)| out.value(0, col + dx, row + dy))
+        .fold(f32::MIN, f32::max);
+    assert!(near > 500.0, "{near}");
+}
+
+/// A 48-bit colour scan (UInt16 RGB) warps with alpha the renderer reads as opaque (it takes
+/// alpha as 0–255 in every type), and the COG keeps the 16-bit type.
+#[test]
+fn a_sixteen_bit_colour_warp_is_opaque_to_the_renderer() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+    let mut s = world();
+    let n = 60 * 40;
+    let bands = vec![vec![60_000.0; n], vec![30_000.0; n], vec![1000.0; n]];
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 40.0, pixel_width: 1.0, pixel_height: -1.0 };
+    let r = Raster::new("deep", 60, 40, bands, gt, Crs::LonLat, None, ColorHint::Rgb { alpha: false }, "UInt16").unwrap();
+    let bytes = rustgis_data::raster::geotiff::write(&r, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "deep", rustgis_map::RasterLayer::from_bytes(r, "deep.tif", bytes)).unwrap();
+    let (sin, cos) = 20f64.to_radians().sin_cos();
+    let map = |c: f64, r: f64| (500_000.0 + 10.0 * (c * cos + r * sin), 4_000_000.0 + 10.0 * (c * sin - r * cos));
+    let pts: Vec<Value> =
+        [(0.0, 0.0), (60.0, 0.0), (0.0, 40.0), (60.0, 40.0)].iter().map(|&(c, r)| json!([c, r, map(c, r).0, map(c, r).1])).collect();
+    let path = std::env::temp_dir().join(format!("rustgis-deep-{}.tif", std::process::id()));
+    let v = s
+        .run("raster.georeference", &json!({"layer": "deep", "transform": "similarity", "pointsCrs": 32613, "points": pts, "name": "w", "path": path.display().to_string()}))
+        .unwrap();
+    let out = out_raster(&s, &v);
+    assert_eq!(out.color, ColorHint::Rgb { alpha: true });
+    let (mid_c, mid_r) = (i64::from(out.width) / 2, i64::from(out.height) / 2);
+    // The renderer clamps alpha to 0–255: inside is 255, the collar 0.
+    let alpha = |c, r| out.value(3, c, r).map(|v| v.clamp(0.0, 255.0) as u8);
+    assert_eq!((alpha(mid_c, mid_r), alpha(0, 0)), (Some(255), Some(0)));
+    let back = rustgis_data::raster::read_path(&path).unwrap();
+    assert_eq!((back.data_type.as_str(), back.band_count()), ("UInt16", 4));
+    assert_eq!(back.value(0, mid_c, mid_r), Some(60_000.0));
+    std::fs::remove_file(&path).ok();
+}
+
+/// A scan that would span the globe in degrees is refused, and a long thin grid can't slip past
+/// the size limit through its row buffers.
+#[test]
+fn a_warp_refuses_a_globe_in_degrees_and_bounds_its_memory() {
+    use rustgis_analysis::georef::{self, Gcp, Kind};
+    use rustgis_analysis::warp::{self, Options, Resampling};
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+    let (w, h) = (40u32, 40u32);
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 40.0, pixel_width: 1.0, pixel_height: -1.0 };
+    let r = Raster::new("s", w, h, vec![vec![1.0; 1600]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    // A square of 2000 km centred on the pole, in polar stereographic (EPSG:3413).
+    let gcps = |f: &dyn Fn(f64, f64) -> (f64, f64)| -> Vec<Gcp> {
+        [(0.0, 0.0), (40.0, 0.0), (0.0, 40.0), (40.0, 40.0)]
+            .iter()
+            .map(|&(c, r)| {
+                let (x, y) = f(c, r);
+                Gcp { col: c, row: r, x, y, on: true }
+            })
+            .collect()
+    };
+    let fit = georef::fit(Kind::Affine, &gcps(&|c, r| (-1_000_000.0 + 50_000.0 * c, 1_000_000.0 - 50_000.0 * r))).unwrap();
+    let o = |crs: Crs, points: Crs, cell| Options { crs, points_crs: points, resampling: Resampling::Nearest, cell, name: "o".into() };
+    let polar = Crs::from_epsg(3413).unwrap();
+    // In degrees the scan spans every longitude: refused, with a hint.
+    let e = warp::warp(&r, &fit, &o(Crs::LonLat, polar, Some(0.05))).unwrap_err();
+    assert!(e.contains("projected crs"), "{e}");
+    // In Web Mercator it is placed (to its latitude limit), with the pole inside it.
+    assert!(warp::warp(&r, &fit, &o(Crs::WebMercator, polar, Some(100_000.0))).is_ok());
+    // A strip a hundred million metres long and a metre tall, from hostile points.
+    let strip = georef::fit(Kind::Affine, &gcps(&|c, r| (500_000.0 + c * 2.5e6, 4_000_000.0 - r * 0.025))).unwrap();
+    let utm13 = Crs::from_epsg(32613).unwrap();
+    let e = warp::warp(&r, &strip, &o(utm13, utm13, Some(1.0))).unwrap_err();
+    assert!(e.contains("cellSize"), "{e}");
+}
+
+/// A warp written as a COG becomes the layer's file; the options are checked.
+#[test]
+fn a_warp_can_write_a_cog_and_refuses_what_it_cannot_place() {
+    let mut s = world();
+    scan_layer(&mut s, "scan");
+    let map = |c: f64, r: f64| (500_000.0 + 10.0 * c, 4_000_000.0 - 10.0 * r);
+    let dir = std::env::temp_dir().join(format!("rustgis-warp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("warped.tif");
+    let v = s
+        .run(
+            "raster.georeference",
+            &json!({"layer": "scan", "transform": "affine", "pointsCrs": 32613, "crs": 32613, "points": points_of(map), "resampling": "cubic", "cellSize": 5, "name": "w", "path": path.display().to_string()}),
+        )
+        .unwrap();
+    assert_eq!(v["cog"]["overviews"], 0, "200 × 160 is one tile: {v}");
+    assert_eq!((v["width"].as_u64(), v["height"].as_u64()), (Some(200), Some(160)), "half-size cells double the grid");
+    let back = rustgis_data::raster::read_path(&path).unwrap();
+    assert_eq!((back.width, back.height, back.crs.epsg()), (200, 160, 32613));
+    assert_eq!(back.transform.origin_x, 500_000.0);
+    let layer = s.map().layer_by_name("w").unwrap().raster.as_ref().unwrap();
+    assert_eq!(layer.path.as_deref(), Some(path.display().to_string().as_str()), "the file is the layer's source");
+    // The same command without a transform is the old north-up fit.
+    s.run("raster.georeference", &json!({"layer": "scan", "extent": [10.0, 45.0, 10.1, 45.08]})).unwrap();
+    let ok = json!({"layer": "scan", "transform": "affine", "pointsCrs": 32613, "crs": 32613, "points": points_of(map)});
+    s.run("raster.georeference", &ok).unwrap();
+    for (k, bad) in [
+        ("transform", json!("warp")),
+        ("transform", json!(7)),
+        ("crs", json!("EPSG:99999999")),
+        ("crs", json!(-1)),
+        ("crs", json!(1e30)),
+        ("pointsCrs", json!([])),
+        ("resampling", json!("lanczos")),
+        ("cellSize", json!(0)),
+        ("cellSize", json!(-3)),
+        ("cellSize", json!(1e-9)),
+        ("cellSize", json!("x")),
+        ("path", json!("warped.png")),
+        ("path", json!(5)),
+        ("points", json!([[0, 0, 1, 1]])),
+    ] {
+        let mut p = ok.clone();
+        p[k] = bad.clone();
+        assert!(s.run("raster.georeference", &p).is_err(), "{k} = {bad}");
+    }
+    // A fit that collapses the image onto a line has no grid.
+    assert!(
+        s.run(
+            "raster.georeference",
+            &json!({"layer": "scan", "transform": "affine", "pointsCrs": 32613, "crs": 32613, "points": points_of(|c, _| (c, c))})
+        )
+        .is_err()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A scan opened from a PNG and warped onto its points has coordinates for real: the cell is the
+/// fit's pixel on the ground, not the stand-in size it was laid over the view at; the pixels land
+/// where the fit says; it can be exported; and the project reopens it where the warp put it, not
+/// laid over the view again.
+#[test]
+fn a_scan_warped_onto_its_points_is_placed_for_real() {
+    let dir = std::env::temp_dir().join(format!("rustgis-scan-warp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("plate.png");
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(40, 20, |x, y| image::Rgb([x as u8, y as u8, 9])))
+        .save_with_format(&png, image::ImageFormat::Png)
+        .unwrap();
+    let mut s = world();
+    let r = s.run("layer.addData", &json!({"path": png.display().to_string()})).unwrap();
+    assert_eq!(r["georeferenced"], false, "{r}");
+    let laid = s.map().layer_by_name("plate").unwrap().raster.clone().unwrap();
+    assert!(laid.placement.is_some());
+    let stand_in = laid.data.as_ref().unwrap().transform.pixel_width;
+    // 7.5 m a pixel in UTM 13N, from the scan's corners and two points inside it; the output's
+    // system is the points'.
+    let map = |c: f64, r: f64| (500_000.0 + 7.5 * c, 4_000_000.0 - 7.5 * r);
+    let pts: Vec<Value> = [(0.0, 0.0), (40.0, 0.0), (0.0, 20.0), (40.0, 20.0), (20.0, 10.0), (10.0, 15.0)]
+        .iter()
+        .map(|&(c, r)| {
+            let (x, y) = map(c, r);
+            json!([c, r, x, y])
+        })
+        .collect();
+    let v = s
+        .run(
+            "raster.georeference",
+            &json!({"layer": "plate", "transform": "affine", "pointsCrs": 32613, "points": pts, "resampling": "nearest"}),
+        )
+        .unwrap();
+    assert_eq!(v["crs"], "EPSG:32613", "{v}");
+    let l = s.map().layer_by_name("plate").unwrap().raster.clone().unwrap();
+    assert!(l.placement.is_none(), "no longer laid over the view");
+    let out = l.data.clone().unwrap();
+    assert!(out.georeferenced && out.crs.epsg() == 32613);
+    assert!(
+        (out.transform.pixel_width - 7.5).abs() < 1e-6 && (out.transform.pixel_height + 7.5).abs() < 1e-6 && (stand_in - 7.5).abs() > 0.5,
+        "{:?}, laid at {stand_in}",
+        out.transform
+    );
+    // Red is the column and green the row, so a pixel reads back where the fit puts it; the scan
+    // had no alpha or no data, so it gains an opaque alpha band.
+    assert_eq!(out.band_count(), 4);
+    let (x, y) = map(10.5, 5.5);
+    let (col, row) = out.transform.to_pixel(rustgis_geom::Coord { x, y });
+    let (col, row) = (col.floor() as i64, row.floor() as i64);
+    let px: Vec<Option<f32>> = (0..4).map(|b| out.value(b, col, row)).collect();
+    assert_eq!(px, [Some(10.0), Some(5.0), Some(9.0), Some(255.0)], "cell {col},{row}");
+    // Exporting is no longer refused.
+    let tif = dir.join("plate.tif");
+    s.run("share.exportRaster", &json!({"layer": "plate", "path": tif.display().to_string(), "cog": true})).unwrap();
+    let back = rustgis_data::raster::read_path(&tif).unwrap();
+    assert!(back.georeferenced && back.crs.epsg() == 32613 && back.transform == out.transform);
+    // The project reopens it where the warp put it.
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text})).unwrap();
+    let again = t.map().layer_by_name("plate").unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    assert!(again.georeferenced && again.transform == out.transform, "{:?} vs {:?}", again.transform, out.transform);
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -5367,10 +5768,20 @@ fn jpeg2000_from_a_web_address() {
     let vrt = serve(br#"<VRTDataset rasterXSize="1" rasterYSize="1"></VRTDataset>"#, 1);
     let e = s.run("layer.addUrl", &json!({"url": format!("{vrt}/TCI.jp2")})).unwrap_err();
     assert!(e.contains("not a JPEG 2000 file"), "{e}");
+    // Without a file name in the address, the contents alone say JPEG 2000 (a JP2 box or a bare
+    // codestream); the same bytes are refused where GDAL can't run. A VRT stays an unknown format.
+    let jp2_box = b"\0\0\0\x0cjP  \r\n\x87\n";
+    let codestream = [0xff, 0x4f, 0xff, 0x51, 0x00];
+    let named = |url: &str, bytes: &[u8]| crate::cmd::layer::url_file_name(url, bytes);
+    assert_eq!(named("https://x.org/api/tile?f=jp2", jp2_box).unwrap(), "tile.jp2");
+    assert_eq!(named("https://x.org/", &codestream).unwrap(), "data.j2k");
+    assert!(named("https://x.org/api/tile", br#"<VRTDataset></VRTDataset>"#).unwrap_err().contains("not a data format"));
     if !rustgis_data::raster::gdal::available() {
-        let jp2 = serve(b"\0\0\0\x0cjP  \r\n\x87\n", 1);
-        let e = s.run("layer.addUrl", &json!({"url": format!("{jp2}/TCI.jp2")})).unwrap_err();
-        assert!(e.contains("needs GDAL"), "{e}");
+        let jp2 = serve(jp2_box, 2);
+        for path in ["TCI.jp2", "api/tile"] {
+            let e = s.run("layer.addUrl", &json!({"url": format!("{jp2}/{path}")})).unwrap_err();
+            assert!(e.contains("needs GDAL"), "{path}: {e}");
+        }
         return;
     }
     let executable = if cfg!(windows) { "gdal_translate.exe" } else { "gdal_translate" };
@@ -5400,7 +5811,7 @@ fn jpeg2000_from_a_web_address() {
     // stays valid for the server thread's lifetime.
     let bytes = Vec::leak(std::fs::read(&jp2).unwrap());
     let uploaded = base64::engine::general_purpose::STANDARD.encode(&*bytes);
-    let base = serve(bytes, 1);
+    let base = serve(bytes, 2);
     let r = s.run("layer.addUrl", &json!({"url": format!("{base}/tiles/33/T/XN/TCI.jp2")})).unwrap();
     let l = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap();
     assert_eq!(l.name, "TCI");
@@ -5411,6 +5822,13 @@ fn jpeg2000_from_a_web_address() {
     assert!((e.min_x - 10.0).abs() < 1e-6 && (e.max_y - 41.5).abs() < 1e-6, "{e:?}");
     // The project keeps the converted GeoTIFF, so it opens again without GDAL.
     assert_eq!(rl.file_name.as_deref(), Some("TCI.tif"));
+    assert!(rl.embedded.is_some() && rl.path.is_none());
+    // The same file from an endpoint with no extension: named by its contents, converted alike.
+    let r = s.run("layer.addUrl", &json!({"url": format!("{base}/api/tile")})).unwrap();
+    let rl = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap();
+    let raster = rl.data.as_ref().unwrap();
+    assert_eq!((raster.width, raster.height, raster.georeferenced), (4, 3, true));
+    assert_eq!(rl.file_name.as_deref(), Some("tile.tif"));
     assert!(rl.embedded.is_some() && rl.path.is_none());
     for file_name in ["uploaded.jp2", "uploaded.J2K"] {
         let mut upload = Session::new(Project::default());

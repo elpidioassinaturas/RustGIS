@@ -1876,7 +1876,8 @@ fn read_delimited(
 
 /// The file name for data downloaded from `url`: its last path segment when that has an extension
 /// RustGIS reads, else `<segment or "data">.<ext>` with the extension its contents suggest
-/// (an error when they suggest none).
+/// (an error when they suggest none). JPEG 2000 named or recognised by its contents is refused
+/// where GDAL can't run (the browser).
 pub fn url_file_name(url: &str, bytes: &[u8]) -> Result<String, String> {
     let path = url.split(['?', '#']).next().unwrap_or(url);
     let path = path.split_once("://").map_or(path, |(_, rest)| rest.split_once('/').map_or("", |(_, p)| p));
@@ -1890,8 +1891,11 @@ pub fn url_file_name(url: &str, bytes: &[u8]) -> Result<String, String> {
         .collect();
     let ext = Path::new(&last).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
     // JPEG 2000 (Sentinel-2's imagery) is read through GDAL, which the browser can't run.
+    let jpeg2000_only_on_desktop = |name: String| {
+        if cfg!(target_arch = "wasm32") { Err(super::raster::JPEG2000_WEB_LIMITATION.to_string()) } else { Ok(name) }
+    };
     if rustgis_data::raster::is_jpeg2000_name(&last) {
-        return if cfg!(target_arch = "wasm32") { Err(super::raster::JPEG2000_WEB_LIMITATION.into()) } else { Ok(last) };
+        return jpeg2000_only_on_desktop(last);
     }
     let known = rustgis_data::io::READ_EXTENSIONS.contains(&ext.as_str()) || rustgis_data::raster::is_raster_name(&last) || ext == "tsv";
     if known && ext != "json" {
@@ -1899,7 +1903,10 @@ pub fn url_file_name(url: &str, bytes: &[u8]) -> Result<String, String> {
     }
     let stem = Path::new(&last).file_stem().and_then(|s| s.to_str()).filter(|s| !s.is_empty()).unwrap_or("data");
     match rustgis_data::io::sniff_extension(bytes) {
-        Some(ext) => Ok(format!("{stem}.{ext}")),
+        Some(ext) => {
+            let name = format!("{stem}.{ext}");
+            if rustgis_data::raster::is_jpeg2000_name(&name) { jpeg2000_only_on_desktop(name) } else { Ok(name) }
+        }
         None => {
             Err("not a data format RustGIS reads (GeoJSON, CSV, GeoParquet, FlatGeobuf, GeoPackage, zipped Shapefiles, KML, GPX, GeoTIFF)"
                 .into())
