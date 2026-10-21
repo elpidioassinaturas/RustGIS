@@ -1302,7 +1302,7 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
             .and_then(|i| layer.dataset.fields.get(i))
             .map(|f| f.name.clone())
             .ok_or_else(|| format!("no field '{fl}'"))?,
-        None => layer.labels.field.clone(),
+        None => layer.labels.default.field.clone(),
     };
     let layer = layer.name.clone();
     let margin = f(p, "margin").unwrap_or(0.1).clamp(0.0, 5.0);

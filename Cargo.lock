@@ -4526,6 +4526,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shapefile",
+ "tempfile",
  "thiserror 2.0.21",
  "tiberius",
  "tiff",

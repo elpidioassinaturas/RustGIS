@@ -21,6 +21,7 @@ pub mod terrain;
 mod text;
 pub mod tile_mesh;
 mod tiles;
+pub use tiles::{Live, live as live_tiles};
 
 pub use rustgis_tiles;
 pub use tiles::{spec as tile_spec, style_view};
@@ -186,6 +187,12 @@ pub struct PlacedLabel {
     /// How the lines line up in their block (a text graphic's, #535); the block itself sits where
     /// `align` puts it.
     pub line_align: TextAlign,
+    /// Turned with the map (a tile label along a street): the text's angle in radians,
+    /// clockwise, about its centre (`align` is then 0), kept upright. `None` is upright on the
+    /// screen.
+    pub angle: Option<f32>,
+    /// How it collides with other labels (padding, optional text or icon, overlaps).
+    pub collide: rustgis_tiles::Collide,
 }
 
 impl PlacedLabel {
@@ -203,6 +210,8 @@ pub struct PlacedIcon {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+    /// Turned with the map (an arrow along a street), in radians clockwise; `None` is upright.
+    pub angle: Option<f32>,
 }
 
 pub struct Rendered {
@@ -228,6 +237,16 @@ pub enum Backend {
     #[default]
     Cpu,
     Gpu,
+    /// A GPU scene whose raster tile layers, on a flat north-up map, are left for the GPU map to
+    /// place for every frame it shows ([`gpu_scene::DrawCmd::LiveTiles`], #635).
+    GpuLive,
+}
+
+impl Backend {
+    /// Whether this is a GPU scene.
+    pub fn is_gpu(self) -> bool {
+        matches!(self, Backend::Gpu | Backend::GpuLive)
+    }
 }
 
 /// A finished render in either backend.
@@ -1115,7 +1134,7 @@ fn render_with_backend(map: &mut Map, view: &View, full_res_rasters: bool, backe
     }
     {
         let view = View { camera, ..*view };
-        if matches!(backend, Backend::Gpu)
+        if backend.is_gpu()
             && (camera.pitch != 0.0 || camera.bearing != 0.0)
             && let Some(scene) = gpu_turned(map, &view)
         {
@@ -1132,7 +1151,7 @@ fn render_with_backend(map: &mut Map, view: &View, full_res_rasters: bool, backe
 }
 
 /// A label waiting to be placed: the label, its priority and its (layer id, row).
-type Candidate = (PlacedLabel, f32, (u32, usize));
+type Candidate = (PlacedLabel, f64, (u32, usize));
 
 /// Where a frame's labels go.
 enum Labels<'a> {
@@ -1407,7 +1426,11 @@ fn gpu_turned(map: &mut Map, view: &View) -> Option<gpu_scene::GpuScene> {
                 match c {
                     DrawCmd::Mesh { vertices, .. } => vertices.iter_mut().for_each(|v| v.stroke_px *= k),
                     DrawCmd::Points { instances, .. } => instances.iter_mut().for_each(|p| p.radius_px *= k),
-                    DrawCmd::Image { .. } | DrawCmd::Extrusion { .. } | DrawCmd::Tiles { .. } | DrawCmd::TileMeshes { .. } => {}
+                    DrawCmd::Image { .. }
+                    | DrawCmd::Extrusion { .. }
+                    | DrawCmd::Tiles { .. }
+                    | DrawCmd::LiveTiles { .. }
+                    | DrawCmd::TileMeshes { .. } => {}
                 }
             }
         }
@@ -1485,7 +1508,7 @@ pub fn gpu_may_turn(map: &Map, view: &View) -> bool {
     if map.projection.is_globe()
         || !map.view.effects.is_none()
         || map.view.color_vision != rustgis_map::view::ColorVision::Normal
-        || map.tiles.iter().any(|t| t.visible)
+        || map.tiles.iter().any(|t| t.draws())
         // The GPU draws the ground flat: a view over terrain stays on the CPU.
         || terrain::Ground::of(map, &view.camera).is_some()
     {
@@ -2130,12 +2153,12 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
         sprites: Default::default(),
     };
     // The Gpu backend draws flat, effect-free frames; anything else stays on the CPU pixmap.
-    let gpu = matches!(backend, Backend::Gpu)
+    let gpu = backend.is_gpu()
         && globe.is_none()
         && map.view.effects.is_none()
         && map.view.color_vision == rustgis_map::view::ColorVision::Normal;
     // The effective backend: the Gpu arm at the end only runs when the frame is compatible.
-    let backend = if gpu { Backend::Gpu } else { Backend::Cpu };
+    let backend = if gpu { backend } else { Backend::Cpu };
     // GPU draw commands; between them, tiny-skia-only content accumulates in `pm` and is
     // flushed as ordered Image commands (`flush_acc`, gated by `cpu_dirty`).
     let mut cmds: Vec<gpu_scene::DrawCmd> = Vec::new();
@@ -2257,19 +2280,21 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
     // Hidden tile layers draw nothing: marking dirty anyway would emit an empty full-screen
     // Image command (a pointless upload, and it poisons the camera fast path's `has_images`).
     // On the GPU raster tile layers are placed as tiles, which move with the camera.
-    let tile_gpu = (gpu && map.tiles.iter().any(|t| t.visible && t.opacity > 0.0)).then_some(tiles::Gpu {
+    let tile_gpu = (gpu && map.tiles.iter().any(|t| t.draws() && t.opacity > 0.0)).then_some(tiles::Gpu {
         cmds: &mut cmds,
         dirty: &mut cpu_dirty,
         // A tilted view's bands are drawn at their own densities: their tiles as pictures.
         meshes: !matches!(labels_to, Labels::Tilted(..)),
+        // Only a frame for the view itself (not a turned or tilted view's north-up stand-in).
+        live: backend == Backend::GpuLive && matches!(labels_to, Labels::Own),
     });
     let tile_out = tiles::draw(&mut pm, map, view, tile_place, !map.label_display.paused && map.label_lock.is_none(), tile_gpu);
     if !gpu {
-        cpu_dirty |= map.tiles.iter().any(|t| t.visible);
+        cpu_dirty |= map.tiles.iter().any(|t| t.draws());
     }
 
     // Layers, bottom first.
-    let mut label_candidates: Vec<(PlacedLabel, f32, (u32, usize))> = Vec::new();
+    let mut label_candidates: Vec<Candidate> = Vec::new();
     let display = map.label_display;
     if !display.locked {
         map.label_lock = None;
@@ -2503,23 +2528,25 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                         italic: rustgis_map::graphics::italic(ds_ptr, row),
                         spacing: rustgis_map::graphics::letter_spacing(ds_ptr, row),
                         line_align: rustgis_map::graphics::align(ds_ptr, row),
+                        angle: None,
+                        collide: Default::default(),
                     });
                 }
             }
         }
-        if labels.enabled
-            && !display.paused
-            && labels.in_range(scale, distance)
-            && let Some(fi) = ds_ptr.field_index(&labels.field)
-        {
+        // Each feature is labelled by the first label class whose clause takes it, Default last;
+        // that class draws it when shown, in range and on a field the layer has (#618).
+        let label_fields: Vec<Option<usize>> = if labels.enabled && !display.paused {
+            labels.in_order().map(|c| ds_ptr.field_index(&c.field).filter(|_| c.visible && c.in_range(scale, distance))).collect()
+        } else {
+            Vec::new()
+        };
+        if label_fields.iter().any(Option::is_some) {
+            let classes = rustgis_map::LabelMatcher::new(labels, ds_ptr);
             let lid = layer.id;
             for (row, g) in geoms.iter().enumerate() {
                 let Some(g) = g else { continue };
                 if rows.get(row) != Some(&true) || lock.as_ref().is_some_and(|k| !k.contains(&(lid, row))) {
-                    continue;
-                }
-                let v = ds_ptr.value(row, fi);
-                if v.is_null() {
                     continue;
                 }
                 let Some(c) = g.label_point() else { continue };
@@ -2527,12 +2554,19 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                     continue;
                 }
                 let Some((x, y)) = ctx.screen(c) else { continue };
+                // The clauses are read for the features in view only.
+                let Some((ci, class)) = classes.class_of(ds_ptr, row) else { continue };
+                let Some(fi) = label_fields.get(ci).copied().flatten() else { continue };
+                let v = ds_ptr.value(row, fi);
+                if v.is_null() {
+                    continue;
+                }
                 let text = v.to_string();
                 let is_point = g.kind() == GeometryType::Point;
                 let marker = if is_point { layer.symbol(row).size } else { 0.0 };
-                let (dx, dy) = labels.placement.offset(
-                    text::block_width(&text, labels.size, labels.bold),
-                    text::block_height(&text, labels.size),
+                let (dx, dy) = class.placement.offset(
+                    text::block_width(&text, class.size, class.bold),
+                    text::block_height(&text, class.size),
                     marker,
                     is_point,
                 );
@@ -2540,25 +2574,29 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                 let pri = match g {
                     Geometry::Polygon(_) => {
                         let e = g.extent();
-                        (e.width() * e.height()).sqrt() as f32
+                        // (An extent of no number counts as none.)
+                        let a = (e.width() * e.height()).sqrt();
+                        if a.is_finite() { a.clamp(0.0, 1e8) } else { 0.0 }
                     }
                     _ => 0.0,
-                } + (n_layers - li) as f32 * 1e9;
+                } + (n_layers - li) as f64 * 1e9;
                 label_candidates.push((
                     PlacedLabel {
                         text,
                         x: x as f32 + dx,
                         y: y as f32 + dy,
-                        size: labels.size,
-                        color: labels.color,
-                        halo: labels.halo.then_some(halo_for(labels.color)),
-                        bold: labels.bold,
+                        size: class.size,
+                        color: class.color,
+                        halo: class.halo.then_some(halo_for(class.color)),
+                        bold: class.bold,
                         icon: None,
                         align: 0.0,
                         framed: false,
                         italic: false,
                         spacing: 0.0,
                         line_align: TextAlign::Left,
+                        angle: None,
+                        collide: Default::default(),
                     },
                     pri,
                     (lid, row),
@@ -2572,7 +2610,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
     // Tile labels, after every layer's own.
     if lock.is_none() {
         for (i, (l, pri)) in tile_out.labels.into_iter().enumerate() {
-            label_candidates.push((l, pri - 1e10, (u32::MAX, i)));
+            label_candidates.push((l, pri - 1e13, (u32::MAX, i)));
         }
     }
     if let Labels::Tilted(to, out) = &mut labels_to {
@@ -2586,8 +2624,9 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
             let (sx, sy) = to.camera.try_to_screen(m, tw, th).filter(|_| near)?;
             (sy as f32 > sky_y).then_some((sx as f32, sy as f32))
         };
-        let fixed = fixed_labels.into_iter().map(|l| (l, f32::MAX, (u32::MAX, usize::MAX)));
+        let fixed = fixed_labels.into_iter().map(|l| (l, f64::MAX, (u32::MAX, usize::MAX)));
         for (mut l, pri, key) in fixed.chain(label_candidates) {
+            turn_with(&mut l, &at);
             let Some((x, y)) = at(l.x, l.y) else { continue };
             (l.x, l.y) = (x, y);
             if let Some(i) = &mut l.icon {
@@ -2611,6 +2650,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                 (sx as f32, sy as f32)
             };
             for l in label_candidates.iter_mut().map(|c| &mut c.0).chain(fixed_labels.iter_mut()) {
+                turn_with(l, &|x, y| Some(at(x, y)));
                 (l.x, l.y) = at(l.x, l.y);
                 if let Some(i) = &mut l.icon {
                     (i.x, i.y) = at(i.x, i.y);
@@ -2654,7 +2694,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
         Backend::Cpu => {
             Some(RenderOutput::Cpu(Rendered { pixmap: pm, labels, unplaced, attribution, tiles_pending, data_pending, tile_errors }))
         }
-        Backend::Gpu => {
+        Backend::Gpu | Backend::GpuLive => {
             flush_acc(&mut pm, &mut cmds, &mut cpu_dirty)?;
             // Pathological CPU/GPU alternation (rasters, masks, blends between every vector
             // layer) costs more full-screen uploads than a plain CPU rasterization.
@@ -2682,12 +2722,15 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
 fn draw_icon(pm: &mut Pixmap, icon: &PlacedIcon, ppp: f32) {
     let (iw, ih) = (icon.image.width().max(1) as f32, icon.image.height().max(1) as f32);
     let (sx, sy) = (icon.w * ppp / iw, icon.h * ppp / ih);
-    let (tx, ty) = ((icon.x - icon.w / 2.0) * ppp, (icon.y - icon.h / 2.0) * ppp);
-    if !(sx.is_finite() && sy.is_finite() && tx.is_finite() && ty.is_finite()) {
+    let (cx, cy) = (icon.x * ppp, icon.y * ppp);
+    if !(sx.is_finite() && sy.is_finite() && cx.is_finite() && cy.is_finite()) {
         return;
     }
+    // Scaled about its centre, turned there, then put in place.
+    let turn = icon.angle.filter(|a| a.is_finite()).map_or(0.0, f32::to_degrees);
+    let t = Transform::from_translate(-iw / 2.0, -ih / 2.0).post_scale(sx, sy).post_rotate(turn).post_translate(cx, cy);
     let paint = PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..PixmapPaint::default() };
-    pm.draw_pixmap(0, 0, Pixmap::as_ref(&icon.image), &paint, Transform::from_row(sx, 0.0, 0.0, sy, tx, ty), None);
+    pm.draw_pixmap(0, 0, Pixmap::as_ref(&icon.image), &paint, t, None);
 }
 
 /// Metres on the ground per logical point at the view's centre.
@@ -3106,6 +3149,26 @@ pub fn render_tilt_drape(map: &mut Map, view: &View, margin: f64, max_side: u32)
     out
 }
 
+/// Turns a label turned with the map (and its icon) as `at` moves it into another view (a
+/// turned or tilted one): its angle there is that of a short step along it, the text kept
+/// upright. Called before the label itself is moved.
+fn turn_with(l: &mut PlacedLabel, at: &impl Fn(f32, f32) -> Option<(f32, f32)>) {
+    let turned = |x: f32, y: f32, a: f32| -> Option<f32> {
+        let ((x0, y0), (x1, y1)) = (at(x, y)?, at(x + 4.0 * a.cos(), y + 4.0 * a.sin())?);
+        let b = (y1 - y0).atan2(x1 - x0);
+        b.is_finite().then_some(b)
+    };
+    if let Some(a) = l.angle {
+        let x = l.center_x();
+        l.angle = Some(turned(x, l.y, a).map_or(a, rustgis_tiles::symbols::upright));
+    }
+    if let Some(i) = &mut l.icon
+        && let Some(a) = i.angle
+    {
+        i.angle = Some(turned(i.x, i.y, a).unwrap_or(a));
+    }
+}
+
 /// A halo that contrasts with the text colour.
 fn halo_for(text: Rgba) -> Rgba {
     let lum = 0.299 * text.r() as f32 + 0.587 * text.g() as f32 + 0.114 * text.b() as f32;
@@ -3121,41 +3184,168 @@ struct Placement {
 
 /// Greedy collision-free placement, highest priority first. Locked labels are all placed (they
 /// were placed without collisions when the lock was taken).
-fn place_labels(mut cands: Vec<(PlacedLabel, f32, (u32, usize))>, fixed: Vec<PlacedLabel>, w: f32, h: f32, locked: bool) -> Placement {
-    cands.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    // The text's box and its icon's, together.
-    let bbox = |l: &PlacedLabel| {
-        let tw = text::label_width(l);
-        let th = text::block_height(&l.text, l.size);
-        let cx = l.center_x();
-        let text = (!l.text.is_empty()).then(|| [cx - tw / 2.0 - 2.0, l.y - th / 2.0, cx + tw / 2.0 + 2.0, l.y + th / 2.0]);
-        let icon = l.icon.as_ref().map(|i| [i.x - i.w / 2.0, i.y - i.h / 2.0, i.x + i.w / 2.0, i.y + i.h / 2.0]);
-        match (text, icon) {
-            (Some(t), Some(i)) => [t[0].min(i[0]), t[1].min(i[1]), t[2].max(i[2]), t[3].max(i[3])],
-            (Some(b), None) | (None, Some(b)) => b,
-            (None, None) => [l.x, l.y, l.x, l.y],
-        }
-    };
-    let mut boxes: Vec<[f32; 4]> = fixed.iter().map(bbox).collect();
+///
+/// As MapLibre places its symbols: a label's text and its icon each have a box (a turned label's
+/// text a chain of them along it) kept `collide`'s padding clear of the others; a label is placed
+/// when they fit, or the part that is optional is dropped when only the other fits, and a part
+/// allowed to overlap is shown whatever is under it. A part ignoring placement is shown without
+/// keeping the others off it. Labels reaching past the view's edge are placed (only those wholly
+/// outside it are left out), and the boxes are kept in a grid so a crowded view stays quick.
+fn place_labels(mut cands: Vec<Candidate>, fixed: Vec<PlacedLabel>, w: f32, h: f32, locked: bool) -> Placement {
+    // A priority of no number places last, not first (`total_cmp` puts NaN above everything).
+    let rank = |p: f64| if p.is_nan() { f64::NEG_INFINITY } else { p };
+    cands.sort_by(|a, b| rank(b.1).total_cmp(&rank(a.1)));
+    let mut grid = LabelGrid::new(w, h);
+    for l in &fixed {
+        let (text, icon) = label_boxes(l);
+        text.iter().chain(&icon).for_each(|b| grid.insert(*b));
+    }
     let mut out = Placement { labels: fixed, unplaced: Vec::new(), keys: Vec::new() };
-    for (l, _, key) in cands.into_iter().take(5000) {
-        let b = bbox(&l);
-        let off_screen = b[2] < 0.0 || b[3] < 0.0 || b[0] > w || b[1] > h;
-        let clipped = b[0] < 0.0 || b[1] < 0.0 || b[2] > w || b[3] > h;
-        if off_screen || (!locked && clipped) {
+    let outside = |b: &[f32; 4]| b[2] < 0.0 || b[3] < 0.0 || b[0] > w || b[1] > h;
+    for (l, _, key) in cands.into_iter().take(20_000) {
+        let (text, icon) = label_boxes(&l);
+        if text.iter().chain(&icon).all(outside) {
             continue;
         }
-        if !locked && boxes.iter().any(|o| b[0] < o[2] && o[0] < b[2] && b[1] < o[3] && o[1] < b[3]) {
-            if out.unplaced.len() < 2000 {
+        let c = l.collide;
+        let (has_text, has_icon) = (!text.is_empty(), !icon.is_empty());
+        let fits = |boxes: &[[f32; 4]], overlap: bool| locked || overlap || !boxes.iter().any(|b| grid.hits(b));
+        let mut show_text = has_text && fits(&text, c.text_allow_overlap);
+        let mut show_icon = has_icon && fits(&icon, c.icon_allow_overlap);
+        // Which part may show without the other (MapLibre's rules).
+        let icon_alone = c.text_optional || !has_text;
+        let text_alone = c.icon_optional || !has_icon;
+        if !icon_alone && !text_alone {
+            let both = show_text && show_icon;
+            (show_text, show_icon) = (both, both);
+        } else if !text_alone {
+            show_text = show_text && show_icon;
+        } else if !icon_alone {
+            show_icon = show_icon && show_text;
+        }
+        if !show_text && !show_icon {
+            if out.unplaced.len() < 2000 && has_text {
                 out.unplaced.push(PlacedLabel { color: UNPLACED, halo: Some(halo_for(UNPLACED)), icon: None, ..l });
             }
             continue;
         }
-        boxes.push(b);
+        if show_text && !c.text_ignore_placement {
+            text.iter().for_each(|b| grid.insert(*b));
+        }
+        if show_icon && !c.icon_ignore_placement {
+            icon.iter().for_each(|b| grid.insert(*b));
+        }
+        let mut l = l;
+        if !show_text {
+            l.text.clear();
+        }
+        if !show_icon {
+            l.icon = None;
+        }
         out.labels.push(l);
         out.keys.push(key);
     }
     out
+}
+
+/// A label's collision boxes, [left, top, right, bottom] in points, padded: its text's (one box,
+/// or a chain of squares along a turned label) and its icon's.
+fn label_boxes(l: &PlacedLabel) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
+    let mut text = Vec::new();
+    if !l.text.is_empty() {
+        let tw = text::label_width(l);
+        let th = text::block_height(&l.text, l.size);
+        let p = l.collide.text_padding.clamp(0.0, 100.0);
+        let cx = l.center_x();
+        match l.angle.filter(|a| a.is_finite() && a.abs() > 1e-3) {
+            Some(a) => {
+                // Squares as tall as the text, end to end along it.
+                // (A width of no number is one square, so the label still collides.)
+                let n = (tw / th.max(1.0)).ceil();
+                let n = if n.is_finite() { n.clamp(1.0, 200.0) } else { 1.0 };
+                let step = tw / n;
+                let r = step.max(th) / 2.0 + p;
+                let (dx, dy) = (a.cos(), a.sin());
+                for i in 0..n as usize {
+                    let t = (i as f32 + 0.5) * step - tw / 2.0;
+                    let (x, y) = (cx + dx * t, l.y + dy * t);
+                    text.push([x - r, y - r, x + r, y + r]);
+                }
+            }
+            None => text.push([cx - tw / 2.0 - p, l.y - th / 2.0 - p, cx + tw / 2.0 + p, l.y + th / 2.0 + p]),
+        }
+    }
+    let icon = l
+        .icon
+        .iter()
+        .map(|i| {
+            let p = l.collide.icon_padding.clamp(0.0, 100.0);
+            // A turned icon: the box round it as turned.
+            let (c, s) = i.angle.map_or((1.0, 0.0), |a| (a.cos().abs(), a.sin().abs()));
+            let (hw, hh) = ((i.w * c + i.h * s) / 2.0, (i.w * s + i.h * c) / 2.0);
+            [i.x - hw - p, i.y - hh - p, i.x + hw + p, i.y + hh + p]
+        })
+        .collect();
+    (text, icon)
+}
+
+/// Placed labels' boxes in a grid of cells over the view (and a margin round it), so a box is
+/// tested against those near it only.
+struct LabelGrid {
+    boxes: Vec<[f32; 4]>,
+    cells: Vec<Vec<u32>>,
+    cols: usize,
+    rows: usize,
+    /// The grid's top-left corner and the side of a cell, in points.
+    x0: f32,
+    y0: f32,
+    cell: f32,
+}
+
+impl LabelGrid {
+    const MARGIN: f32 = 512.0;
+
+    fn new(w: f32, h: f32) -> LabelGrid {
+        let (w, h) = (if w.is_finite() { w.clamp(1.0, 1e5) } else { 1.0 }, if h.is_finite() { h.clamp(1.0, 1e5) } else { 1.0 });
+        let cell = ((w + 2.0 * Self::MARGIN).max(h + 2.0 * Self::MARGIN) / 128.0).max(32.0);
+        let cols = ((w + 2.0 * Self::MARGIN) / cell).ceil() as usize + 1;
+        let rows = ((h + 2.0 * Self::MARGIN) / cell).ceil() as usize + 1;
+        LabelGrid { boxes: Vec::new(), cells: vec![Vec::new(); cols * rows], cols, rows, x0: -Self::MARGIN, y0: -Self::MARGIN, cell }
+    }
+
+    /// The cells a box falls in (those past the grid's edge clamped to it): columns, rows.
+    fn span(&self, b: &[f32; 4]) -> Option<(std::ops::RangeInclusive<usize>, std::ops::RangeInclusive<usize>)> {
+        if !b.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let at = |v: f32, o: f32, n: usize| (((v - o) / self.cell).floor().max(0.0) as usize).min(n.saturating_sub(1));
+        Some((at(b[0], self.x0, self.cols)..=at(b[2], self.x0, self.cols), at(b[1], self.y0, self.rows)..=at(b[3], self.y0, self.rows)))
+    }
+
+    fn insert(&mut self, b: [f32; 4]) {
+        let Some((xs, ys)) = self.span(&b) else { return };
+        let i = self.boxes.len() as u32;
+        self.boxes.push(b);
+        for y in ys {
+            for x in xs.clone() {
+                if let Some(c) = self.cells.get_mut(y * self.cols + x) {
+                    c.push(i);
+                }
+            }
+        }
+    }
+
+    /// Whether a box overlaps one already placed.
+    fn hits(&self, b: &[f32; 4]) -> bool {
+        let Some((xs, ys)) = self.span(b) else { return true };
+        ys.into_iter().any(|y| {
+            xs.clone().any(|x| {
+                self.cells.get(y * self.cols + x).is_some_and(|c| {
+                    c.iter().any(|&i| self.boxes.get(i as usize).is_some_and(|o| b[0] < o[2] && o[0] < b[2] && b[1] < o[3] && o[1] < b[3]))
+                })
+            })
+        })
+    }
 }
 
 /// Renders at full resolution once the map's tiles have arrived: each pass fetches what it is
@@ -3210,6 +3400,8 @@ pub(crate) fn draw_attribution(pm: &mut Pixmap, attribution: &[String], ppp: f32
         italic: false,
         spacing: 0.0,
         line_align: TextAlign::Left,
+        angle: None,
+        collide: Default::default(),
     };
     text::draw(pm, &label, ppp);
 }
@@ -3232,6 +3424,8 @@ mod tests {
             italic: false,
             spacing: 0.0,
             line_align: TextAlign::Left,
+            angle: None,
+            collide: Default::default(),
         }
     }
 
@@ -3240,7 +3434,7 @@ mod tests {
         let icon = |x: f32| {
             let mut p = Pixmap::new(4, 4).unwrap();
             p.fill(tiny_skia::Color::from_rgba8(0, 0, 255, 255));
-            PlacedIcon { image: std::sync::Arc::new(p), x, y: 20.0, w: 10.0, h: 10.0 }
+            PlacedIcon { image: std::sync::Arc::new(p), x, y: 20.0, w: 10.0, h: 10.0, angle: None }
         };
         // Two icons on the same spot collide even with no text; one far away doesn't.
         let cands = vec![
@@ -3259,6 +3453,231 @@ mod tests {
         let px = pm.pixel(50, 20).unwrap();
         assert_eq!((px.blue(), px.alpha()), (255, 255));
         assert_eq!(pm.pixel(60, 20).unwrap().alpha(), 0);
+    }
+
+    fn icon_at(x: f32, y: f32, w: f32, h: f32, angle: Option<f32>) -> PlacedIcon {
+        let mut p = Pixmap::new(4, 4).unwrap();
+        p.fill(tiny_skia::Color::from_rgba8(0, 0, 255, 255));
+        PlacedIcon { image: std::sync::Arc::new(p), x, y, w, h, angle }
+    }
+
+    fn texts(p: &Placement) -> Vec<&str> {
+        p.labels.iter().map(|l| l.text.as_str()).collect()
+    }
+
+    #[test]
+    fn labels_keep_their_padding_above_and_below() {
+        // Two labels a point apart vertically: their padding (2 on every side) keeps them apart.
+        let a = PlacedLabel { y: 20.0, ..label("Upper", 100.0, None, 0.0) };
+        let gap = text::block_height("Upper", 10.0) + 1.0;
+        let b = PlacedLabel { y: 20.0 + gap, ..label("Lower", 100.0, None, 0.0) };
+        let placed = place_labels(vec![(a.clone(), 2.0, (u32::MAX, 0)), (b.clone(), 1.0, (u32::MAX, 1))], Vec::new(), 200.0, 80.0, false);
+        assert_eq!(texts(&placed), ["Upper"]);
+        // Without padding they fit.
+        let none = rustgis_tiles::Collide { text_padding: 0.0, ..Default::default() };
+        let (a, b) = (PlacedLabel { collide: none, ..a }, PlacedLabel { collide: none, ..b });
+        let placed = place_labels(vec![(a, 2.0, (u32::MAX, 0)), (b, 1.0, (u32::MAX, 1))], Vec::new(), 200.0, 80.0, false);
+        assert_eq!(texts(&placed), ["Upper", "Lower"]);
+    }
+
+    #[test]
+    fn optional_text_and_icons_drop_alone() {
+        use rustgis_tiles::Collide;
+        // A word in the way of a station's name, not of its icon (to the left of it).
+        let blocker = || (label("Blocker", 100.0, None, 0.0), 9.0, (u32::MAX, 0));
+        let station =
+            |collide: Collide| PlacedLabel { collide, ..label("Station", 100.0, Some(icon_at(40.0, 20.0, 10.0, 10.0, None)), 0.0) };
+        let run = |collide: Collide| place_labels(vec![blocker(), (station(collide), 1.0, (u32::MAX, 1))], Vec::new(), 200.0, 40.0, false);
+        // Neither optional: the station isn't shown at all.
+        let p = run(Collide::default());
+        assert_eq!(p.labels.len(), 1);
+        // Its text optional: the icon shows on its own.
+        let p = run(Collide { text_optional: true, ..Default::default() });
+        assert_eq!(p.labels.len(), 2);
+        assert!(p.labels[1].text.is_empty() && p.labels[1].icon.is_some());
+        // Its icon optional, and the icon in the way instead: the text shows on its own.
+        let icon_blocked = vec![
+            (label("", 40.0, Some(icon_at(40.0, 20.0, 10.0, 10.0, None)), 0.0), 9.0, (u32::MAX, 0)),
+            (station(Collide { icon_optional: true, ..Default::default() }), 1.0, (u32::MAX, 1)),
+        ];
+        let p = place_labels(icon_blocked, Vec::new(), 200.0, 40.0, false);
+        assert_eq!(p.labels.len(), 2);
+        assert!(p.labels[1].text == "Station" && p.labels[1].icon.is_none());
+        // Allowed to overlap, the text shows over the blocker; ignoring placement, a later label
+        // goes over it.
+        let p = run(Collide { text_allow_overlap: true, ..Default::default() });
+        assert_eq!(p.labels.len(), 2);
+        assert!(p.labels[1].text == "Station" && p.labels[1].icon.is_some());
+        let ghost =
+            PlacedLabel { collide: Collide { text_ignore_placement: true, ..Default::default() }, ..label("Ghost", 100.0, None, 0.0) };
+        let p = place_labels(
+            vec![(ghost, 9.0, (u32::MAX, 0)), (label("Real", 100.0, None, 0.0), 1.0, (u32::MAX, 1))],
+            Vec::new(),
+            200.0,
+            40.0,
+            false,
+        );
+        assert_eq!(texts(&p), ["Ghost", "Real"]);
+    }
+
+    #[test]
+    fn labels_reaching_past_the_edge_are_placed() {
+        let half_out = label("Edge of the map", 0.0, None, 0.0);
+        let gone = label("Gone", -500.0, None, 0.0);
+        let p = place_labels(vec![(half_out, 1.0, (u32::MAX, 0)), (gone, 0.0, (u32::MAX, 1))], Vec::new(), 200.0, 40.0, false);
+        assert_eq!(texts(&p), ["Edge of the map"]);
+        assert!(p.unplaced.is_empty(), "a label wholly off the view isn't unplaced either");
+    }
+
+    #[test]
+    fn turned_labels_collide_along_their_text() {
+        // A long label at 45° and a short one in the corner of its bounding box, clear of the text.
+        let long = "A long street name along the line";
+        let w = text::measure(long, 10.0, false);
+        let turned = PlacedLabel { x: 100.0, y: 100.0, angle: Some(std::f32::consts::FRAC_PI_4), ..label(long, 100.0, None, 0.0) };
+        let corner = PlacedLabel { x: 100.0 + w * 0.3, y: 100.0 - w * 0.3, ..label("Hi", 0.0, None, 0.0) };
+        let across = PlacedLabel { x: 100.0 + w * 0.3, y: 100.0 + w * 0.3, ..label("Hi", 0.0, None, 0.0) };
+        let p = place_labels(
+            vec![(turned, 3.0, (u32::MAX, 0)), (corner, 2.0, (u32::MAX, 1)), (across, 1.0, (u32::MAX, 2))],
+            Vec::new(),
+            400.0,
+            400.0,
+            false,
+        );
+        assert_eq!(p.labels.len(), 2, "the corner one fits, the one on the text doesn't");
+        assert!(p.labels[1].y < 100.0);
+    }
+
+    #[test]
+    fn places_many_labels_quickly() {
+        // A grid of 20,000 candidates, a third of them fitting: placed without testing each
+        // against every other.
+        let cands: Vec<Candidate> = (0..20_000)
+            .map(|i| {
+                let (x, y) = ((i % 200) as f32 * 10.0, (i / 200) as f32 * 10.0);
+                (PlacedLabel { x, y, ..label("ab", x, None, 0.0) }, -f64::from(i), (u32::MAX, i as usize))
+            })
+            .collect();
+        let start = web_time::Instant::now();
+        let p = place_labels(cands, Vec::new(), 2000.0, 1000.0, false);
+        assert!(!p.labels.is_empty() && p.labels.len() < 20_000);
+        assert!(start.elapsed() < web_time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn tile_labels_are_sized_and_wrapped_as_maplibre() {
+        let l = rustgis_tiles::Label {
+            text: "West 42nd Street & Avenue of the Americas\nOuest".into(),
+            x: 100.0,
+            y: 100.0,
+            size: 12.0,
+            color: [0, 0, 0, 255],
+            halo: None,
+            bold: false,
+            italic: true,
+            letter_spacing: 0.1,
+            max_width: 9.0,
+            justify: 0.0,
+            priority: 7.5,
+            anchor: [0.0, 0.0],
+            offset: [0.0, 0.0],
+            angle: None,
+            icon: None,
+            collide: Default::default(),
+        };
+        let (p, pri) = tiles::tile_label(l.clone()).unwrap();
+        // text-size 12 is a 12-pixel font.
+        assert!((p.size * 1.33 - 12.0).abs() < 1e-3);
+        assert_eq!(pri, 7.5);
+        assert!(p.italic && (p.spacing - 0.1 * p.size).abs() < 1e-4 && p.line_align == TextAlign::Center);
+        // Wrapped to about 9 ems (108 pixels), the line break of its own kept.
+        let lines: Vec<&str> = text::lines(&p.text).collect();
+        assert!(lines.len() >= 3, "{lines:?}");
+        assert_eq!(lines.last(), Some(&"Ouest"));
+        for line in &lines {
+            assert!(text::measure(line, p.size, false) < 108.0 * 1.4, "{line} is too long");
+        }
+        // Along a line, never wrapped; turned with it.
+        let along =
+            rustgis_tiles::Label { max_width: 0.0, angle: Some(0.5), text: "West 42nd Street & Avenue of the Americas".into(), ..l };
+        let (p, _) = tiles::tile_label(along).unwrap();
+        assert_eq!((text::line_count(&p.text), p.angle), (1, Some(0.5)));
+    }
+
+    #[test]
+    fn wraps_balanced_at_spaces_and_dashes() {
+        let width = |s: &str| text::measure(s, 9.0, false);
+        let w = width("Times Square–42nd Street");
+        let lines = text::wrap("Times Square–42nd Street", 9.0, false, 0.0, w * 0.6);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines.join(" ").replace("– ", "–") == "Times Square–42nd Street", "{lines:?}");
+        // Balanced: neither line much longer than the other.
+        let (a, b) = (width(&lines[0]), width(&lines[1]));
+        assert!(a.max(b) / a.min(b) < 2.0, "{lines:?}");
+        // A space after an "&" is kept.
+        let lines = text::wrap("West 42nd Street & 8th Avenue", 9.0, false, 0.0, width("West 42nd Street"));
+        assert!(lines.iter().all(|l| !l.contains("&8")), "{lines:?}");
+        // What fits, or has nowhere to break, is left alone; junk is safe.
+        assert_eq!(text::wrap("Short", 9.0, false, 0.0, 1000.0), ["Short"]);
+        assert_eq!(text::wrap("Unbreakable", 9.0, false, 0.0, 1.0), ["Unbreakable"]);
+        assert!(!text::wrap("a b c", f32::NAN, false, f32::INFINITY, -1.0).is_empty());
+    }
+
+    #[test]
+    fn turned_text_and_icons_are_drawn_turned() {
+        // Ink from a long label at 90° runs down the pixmap, not across it.
+        let ink = |pm: &Pixmap| {
+            let (mut x0, mut x1, mut y0, mut y1) = (u32::MAX, 0, u32::MAX, 0);
+            for y in 0..pm.height() {
+                for x in 0..pm.width() {
+                    if pm.pixel(x, y).is_some_and(|p| p.alpha() > 0) {
+                        (x0, x1, y0, y1) = (x0.min(x), x1.max(x), y0.min(y), y1.max(y));
+                    }
+                }
+            }
+            (x1.saturating_sub(x0), y1.saturating_sub(y0))
+        };
+        let l = PlacedLabel { x: 100.0, y: 100.0, size: 12.0, ..label("Broadway Broadway", 100.0, None, 0.0) };
+        let mut flat = Pixmap::new(200, 200).unwrap();
+        text::draw(&mut flat, &l, 1.0);
+        let mut turned = Pixmap::new(200, 200).unwrap();
+        text::draw(&mut turned, &PlacedLabel { angle: Some(std::f32::consts::FRAC_PI_2), ..l }, 1.0);
+        let ((fw, fh), (tw, th)) = (ink(&flat), ink(&turned));
+        if fw > 0 {
+            assert!(fw > fh && th > tw, "flat {fw}×{fh}, turned {tw}×{th}");
+            assert!(th.abs_diff(fw) <= 3, "the same length either way");
+        }
+        // An arrow 20 long and 4 wide, turned to point down.
+        let mut pm = Pixmap::new(40, 40).unwrap();
+        draw_icon(&mut pm, &icon_at(20.0, 20.0, 20.0, 4.0, Some(std::f32::consts::FRAC_PI_2)), 1.0);
+        assert!(pm.pixel(20, 28).unwrap().alpha() > 0 && pm.pixel(28, 20).unwrap().alpha() == 0);
+    }
+
+    #[test]
+    fn labels_turn_with_a_turned_view() {
+        // A view turned by 30°: a label along a line turns with it, kept upright; one upright on
+        // the screen stays so.
+        let a = 30f32.to_radians();
+        let at = |x: f32, y: f32| Some((x * a.cos() - y * a.sin(), x * a.sin() + y * a.cos()));
+        let mut along =
+            PlacedLabel { angle: Some(0.0), icon: Some(icon_at(0.0, 0.0, 4.0, 4.0, Some(3.0))), ..label("Road", 50.0, None, 0.0) };
+        turn_with(&mut along, &at);
+        assert!(along.angle.is_some_and(|b| (b - a).abs() < 1e-3));
+        assert!(
+            along
+                .icon
+                .as_ref()
+                .and_then(|i| i.angle)
+                .is_some_and(
+                    |b| (b - 3.0 - a).rem_euclid(std::f32::consts::TAU).min((3.0 + a - b).rem_euclid(std::f32::consts::TAU)) < 1e-3
+                )
+        );
+        let mut flipped = PlacedLabel { angle: Some(80f32.to_radians()), ..label("Road", 50.0, None, 0.0) };
+        turn_with(&mut flipped, &at);
+        assert!(flipped.angle.is_some_and(|b| (b - (110f32 - 180.0).to_radians()).abs() < 1e-3), "{:?}", flipped.angle);
+        let mut upright = label("Town", 50.0, None, 0.0);
+        turn_with(&mut upright, &at);
+        assert_eq!(upright.angle, None);
     }
 
     use super::*;
@@ -3369,6 +3788,42 @@ mod tests {
         // Junk scales still give a tile.
         assert!(starfield(f32::NAN).is_some_and(|t| t.width() == 512));
         assert!(starfield(1e9).is_some_and(|t| t.width() == 2048));
+    }
+
+    /// Each feature is labelled by the first label class whose clause takes it, Default last; a
+    /// hidden class keeps its features unlabelled, and a clause that no longer reads takes none
+    /// (#618).
+    #[test]
+    fn label_classes_label_their_features() {
+        let mut m = Map::new("Map");
+        let fields = vec![Field::new("name", FieldType::Text), Field::new("capital", FieldType::Integer)];
+        let mut d = Dataset::new("pts", GeometryType::Point, fields);
+        d.push(Some(Geometry::Point(Coord::new(2.35, 48.85))), vec![Value::Text("Paris".into()), Value::Int(1)]);
+        d.push(Some(Geometry::Point(Coord::new(4.83, 45.76))), vec![Value::Text("Lyon".into()), Value::Int(0)]);
+        let id = m.add_dataset(d);
+        let capitals = |l: &mut rustgis_map::Layer, w: &str| {
+            let base = l.labels.default.clone();
+            l.labels.classes = vec![rustgis_map::LabelClass { name: "Capitals".into(), where_: Some(w.into()), size: 20.0, ..base }];
+        };
+        if let Some(l) = m.layer_mut(id) {
+            l.labels.enabled = true;
+            capitals(l, "capital = 1");
+        }
+        let camera = Camera { center: lonlat_to_merc(Coord::new(3.6, 47.3)), res: 5000.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 800.0, height: 600.0, pixels_per_point: 1.0, camera, sky: false };
+        let sizes = |m: &mut Map| {
+            let mut v: Vec<(String, f32)> = render(m, &view).unwrap().labels.into_iter().map(|l| (l.text, l.size)).collect();
+            v.sort_by(|a, b| a.0.cmp(&b.0));
+            v
+        };
+        let default = m.layer(id).unwrap().labels.default.size;
+        assert_eq!(sizes(&mut m), [("Lyon".to_string(), default), ("Paris".to_string(), 20.0)], "Paris is a capital, Lyon the rest");
+        // Hidden, the class still has Paris: it goes unlabelled, not to Default.
+        m.layer_mut(id).unwrap().labels.classes[0].visible = false;
+        assert_eq!(sizes(&mut m), [("Lyon".to_string(), default)]);
+        // A clause that doesn't read takes no feature: both go to Default.
+        capitals(m.layer_mut(id).unwrap(), "gone = 1");
+        assert_eq!(sizes(&mut m), [("Lyon".to_string(), default), ("Paris".to_string(), default)]);
     }
 
     #[test]
@@ -3631,6 +4086,7 @@ mod tests {
                 gpu_scene::DrawCmd::Extrusion { .. } => "extrusion",
                 gpu_scene::DrawCmd::Image { .. } => "image",
                 gpu_scene::DrawCmd::Tiles { .. } => "tiles",
+                gpu_scene::DrawCmd::LiveTiles { .. } => "live tiles",
                 gpu_scene::DrawCmd::TileMeshes { .. } => "tile meshes",
             })
             .collect()

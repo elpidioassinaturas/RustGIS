@@ -445,12 +445,7 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
             menu_item(ui, app, "", "S3…", "ui.dialog", json!({"name": "s3"}));
             menu_item(ui, app, "graphics_layer", "Graphics Layer", "graphics.newLayer", Value::Null);
             ui.separator();
-            ui.label(egui::RichText::new(tl!("Sample data (Natural Earth)")).small().weak());
-            for (n, label) in
-                [("countries", "World Countries"), ("cities", "Populated Places"), ("rivers", "Major Rivers"), ("lakes", "Major Lakes")]
-            {
-                menu_item(ui, app, "", label, "layer.addSample", json!({"name": n}));
-            }
+            sample_data_gallery(ui, app);
         });
         big_menu(ui, app, "web_data", "Web\nData", "Add data from public web services and catalogs.", web_data_menu);
     });
@@ -569,7 +564,16 @@ fn web_data_menu(ui: &mut Ui, app: &mut RustGisApp) {
     });
 }
 
-fn basemap_gallery(ui: &mut Ui, app: &mut RustGisApp) {
+pub(crate) fn sample_data_gallery(ui: &mut Ui, app: &mut RustGisApp) {
+    ui.label(egui::RichText::new(tl!("Sample data (Natural Earth)")).small().weak());
+    for (name, label) in
+        [("countries", "World Countries"), ("cities", "Populated Places"), ("rivers", "Major Rivers"), ("lakes", "Major Lakes")]
+    {
+        menu_item(ui, app, "", label, "layer.addSample", json!({"name": name}));
+    }
+}
+
+pub(crate) fn basemap_gallery(ui: &mut Ui, app: &mut RustGisApp) {
     let t = Tokens::get(ui.ctx());
     ui.label(egui::RichText::new(tl!("Basemaps")).font(semibold(12.5)));
     ui.add_space(4.0);
@@ -579,6 +583,7 @@ fn basemap_gallery(ui: &mut Ui, app: &mut RustGisApp) {
             let (r, resp) = ui.allocate_exact_size(vec2(92.0, 74.0), Sense::click());
             // Web basemaps cover the built-in one.
             let sel = app.session.map().basemap == b && app.session.map().tiles.iter().all(|t| t.overlay);
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, sel, tl!(b.label())));
             let thumb = Rect::from_min_size(r.min + vec2(4.0, 4.0), vec2(84.0, 48.0));
             ui.painter().rect_filled(thumb, CornerRadius::same(4), crate::theme::c32(water));
             // A little continent.
@@ -648,7 +653,7 @@ fn planet_basemaps(ui: &mut Ui, app: &mut RustGisApp) {
         return;
     }
     ui.add_space(4.0);
-    let shown: Vec<String> = app.session.map().tiles.iter().filter(|l| !l.overlay && l.visible).map(|l| l.id.clone()).collect();
+    let shown: Vec<String> = app.session.map().tiles.iter().filter(|l| !l.overlay && l.draws()).map(|l| l.id.clone()).collect();
     egui::Grid::new("planet-basemaps").spacing(vec2(6.0, 4.0)).show(ui, |ui| {
         for (i, m) in rustgis_engine::map::planets::basemaps_of(body.id).enumerate() {
             let sel = shown.first().map(String::as_str) == Some(m.id);
@@ -698,7 +703,7 @@ fn web_basemaps(ui: &mut Ui, app: &mut RustGisApp, t: &Tokens) {
         ui.data_mut(|d| d.insert_persisted(stack_id, stack));
     }
     // The web basemaps showing: the one on top, or every one when stacking.
-    let shown: Vec<String> = app.session.map().tiles.iter().filter(|l| !l.overlay && l.visible).map(|l| l.id.clone()).collect();
+    let shown: Vec<String> = app.session.map().tiles.iter().filter(|l| !l.overlay && l.draws()).map(|l| l.id.clone()).collect();
     egui::Grid::new("web-basemaps").spacing(vec2(6.0, 4.0)).show(ui, |ui| {
         for (i, (id, name, kind, url, attribution, max_zoom)) in WEB_BASEMAPS.into_iter().enumerate() {
             let sel = if stack { shown.iter().any(|s| s == id) } else { shown.first().map(String::as_str) == Some(id) };
@@ -1170,20 +1175,29 @@ fn notebook_group(app: &mut RustGisApp, ui: &mut Ui) {
 
 fn layer_templates_group(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Layer Templates", |ui| {
-        big_menu(ui, app, "graphics_layer", "Layer\nTemplates", "Add an empty layer with a ready-made schema, to draw into.", |ui, app| {
-            for (id, label) in [
-                ("points", "Points"),
-                ("lines", "Lines"),
-                ("polygons", "Polygons"),
-                ("places", "Places (name, category, address, rating)"),
-                ("routes", "Routes (name, surface, length)"),
-                ("areas", "Areas (name, land use, area)"),
-                ("observations", "Observations (observer, date, species, count)"),
-            ] {
-                menu_item(ui, app, "add_data", label, "layer.template", json!({"template": id}));
-            }
-        });
+        big_menu(
+            ui,
+            app,
+            "graphics_layer",
+            "Layer\nTemplates",
+            "Add an empty layer with a ready-made schema, to draw into.",
+            layer_templates_gallery,
+        );
     });
+}
+
+pub(crate) fn layer_templates_gallery(ui: &mut Ui, app: &mut RustGisApp) {
+    for (id, label) in [
+        ("points", "Points"),
+        ("lines", "Lines"),
+        ("polygons", "Polygons"),
+        ("places", "Places (name, category, address, rating)"),
+        ("routes", "Routes (name, surface, length)"),
+        ("areas", "Areas (name, land use, area)"),
+        ("observations", "Observations (observer, date, species, count)"),
+    ] {
+        menu_item(ui, app, "add_data", label, "layer.template", json!({"template": id}));
+    }
 }
 
 fn styles_group(app: &mut RustGisApp, ui: &mut Ui) {
@@ -4012,7 +4026,9 @@ fn label_groups(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Label Range", |ui| {
         ui.vertical(|ui| {
             ui.add_space(6.0);
-            for (label, cur, key) in [("Out Beyond", layer.labels.min_scale, "min"), ("In Beyond", layer.labels.max_scale, "max")] {
+            for (label, cur, key) in
+                [("Out Beyond", layer.labels.default.min_scale, "min"), ("In Beyond", layer.labels.default.max_scale, "max")]
+            {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(tl!(label)).size(11.5));
                     egui::ComboBox::from_id_salt(format!("label_scale_{key}")).selected_text(scale_label(cur)).width(118.0).show_ui(
@@ -4032,8 +4048,8 @@ fn label_groups(app: &mut RustGisApp, ui: &mut Ui) {
         });
         col(ui, |ui| {
             for (label, cur, key, desc) in [
-                ("Closest", layer.labels.closest, "closest", "Hide labels when the viewer is closer than this."),
-                ("Farthest", layer.labels.farthest, "farthest", "Hide labels when the viewer is farther than this."),
+                ("Closest", layer.labels.default.closest, "closest", "Hide labels when the viewer is closer than this."),
+                ("Farthest", layer.labels.default.farthest, "farthest", "Hide labels when the viewer is farther than this."),
             ] {
                 small_menu(ui, app, "eye", label, desc, |ui, app| {
                     for d in [None, Some(1_000.0), Some(10_000.0), Some(100_000.0), Some(1_000_000.0), Some(10_000_000.0)] {
@@ -4058,7 +4074,7 @@ fn label_groups(app: &mut RustGisApp, ui: &mut Ui) {
         });
     });
     group(ui, "Label Placement", |ui| {
-        let cur = layer.labels.placement;
+        let cur = layer.labels.default.placement;
         big_menu(ui, app, "placement", "Placement", "Where labels sit relative to their features.", |ui, app| {
             for pl in rustgis_engine::map::LabelPlacement::ALL {
                 if ui.radio(cur == pl, tl!(pl.label())).clicked() {
@@ -4072,7 +4088,7 @@ fn label_groups(app: &mut RustGisApp, ui: &mut Ui) {
         ui.vertical(|ui| {
             ui.add_space(8.0);
             let fields: Vec<String> = layer.dataset.fields.iter().map(|f| f.name.clone()).collect();
-            if let Some(f) = crate::widgets::ribbon_combo(ui, "label_field", "Field", &layer.labels.field, &fields, 140.0) {
+            if let Some(f) = crate::widgets::ribbon_combo(ui, "label_field", "Field", &layer.labels.default.field, &fields, 140.0) {
                 let _ = app.run("labels.field", json!({"field": f}));
             }
         });
@@ -4080,7 +4096,7 @@ fn label_groups(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Text Symbol", |ui| {
         col(ui, |ui| {
             // The whole range `labels.style` accepts (#457), so a larger label isn't cut back.
-            let mut size = f64::from(layer.labels.size);
+            let mut size = f64::from(layer.labels.default.size);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(tl!("Size")).size(11.5));
                 let range = rustgis_engine::map::symbology::LABEL_SIZE;
@@ -4088,7 +4104,7 @@ fn label_groups(app: &mut RustGisApp, ui: &mut Ui) {
                     let _ = app.run("labels.style", json!({"size": size}));
                 }
             });
-            let mut c = crate::theme::c32(layer.labels.color);
+            let mut c = crate::theme::c32(layer.labels.default.color);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(tl!("Color")).size(11.5));
                 if crate::widgets::color_button(ui, &mut c).changed() {
@@ -4097,7 +4113,16 @@ fn label_groups(app: &mut RustGisApp, ui: &mut Ui) {
             });
         });
         col(ui, |ui| {
-            small(ui, app, "label", "Bold", "Bold label text.", "labels.style", json!({"bold": !layer.labels.bold}), layer.labels.bold);
+            small(
+                ui,
+                app,
+                "label",
+                "Bold",
+                "Bold label text.",
+                "labels.style",
+                json!({"bold": !layer.labels.default.bold}),
+                layer.labels.default.bold,
+            );
             small(
                 ui,
                 app,
@@ -4105,8 +4130,8 @@ fn label_groups(app: &mut RustGisApp, ui: &mut Ui) {
                 "Halo",
                 "Draw a halo around label text.",
                 "labels.style",
-                json!({"halo": !layer.labels.halo}),
-                layer.labels.halo,
+                json!({"halo": !layer.labels.default.halo}),
+                layer.labels.default.halo,
             );
         });
     });

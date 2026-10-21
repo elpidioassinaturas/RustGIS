@@ -15,6 +15,188 @@ fn harness() -> egui_kittest::Harness<'static, RustGisApp> {
     )
 }
 
+fn search_layer_command(h: &mut egui_kittest::Harness<'_, RustGisApp>, command: &str) {
+    h.state_mut().ui.command_search = Some(command.into());
+    for _ in 0..3 {
+        h.step();
+    }
+    h.key_press(egui::Key::Enter);
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.state().ui.command_search.is_none());
+}
+
+#[test]
+fn command_search_adds_tiles_only_after_valid_dialog_submission() {
+    let mut h = harness();
+    search_layer_command(&mut h, "map.addTiles");
+    assert_eq!(h.state().dialogs.open, Some("addTiles"));
+    assert!(h.state().session.map().tiles.is_empty());
+    assert!(h.state().dialogs.error.is_none(), "opening the dialog must not submit it");
+    h.get_by_label("Add").click();
+    h.step();
+    assert_eq!(h.state().dialogs.open, Some("addTiles"));
+    assert!(h.state().dialogs.error.is_some());
+    assert!(h.state().session.map().tiles.is_empty());
+    h.state_mut().dialogs.text = "https://example.com/{z}/{x}/{y}.png".into();
+    h.state_mut().dialogs.a = "My tiles".into();
+    h.step();
+    h.get_by_label("Add").click();
+    h.step();
+    let tiles = &h.state().session.map().tiles;
+    assert_eq!(tiles.len(), 1);
+    assert_eq!(tiles[0].name, "My tiles");
+    assert_eq!(tiles[0].url, "https://example.com/{z}/{x}/{y}.png");
+    assert_eq!(h.state().dialogs.open, None);
+}
+
+#[test]
+fn command_search_basemap_gallery_selects_and_can_open_tile_dialog() {
+    let mut h = harness();
+    search_layer_command(&mut h, "map.basemap");
+    h.get_by_label("Midnight").click();
+    h.step();
+    assert_eq!(h.state().session.map().basemap.code(), "midnight");
+    assert_eq!(h.state().dialogs.open, None);
+    search_layer_command(&mut h, "map.basemap");
+    let pos = h.get_by_label("Web Basemaps").rect().center();
+    h.event(egui::Event::PointerMoved(pos));
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -800.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    for _ in 0..6 {
+        h.step();
+    }
+    h.get_by_label("Add Tile Layer…").click();
+    h.step();
+    assert_eq!(h.state().dialogs.open, Some("addTiles"), "the gallery must not close the new dialog");
+    for _ in 0..3 {
+        h.step();
+    }
+    h.get_by_label("Cancel").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    assert_eq!(h.state().dialogs.open, None);
+    assert_eq!(h.state().session.map().basemap.code(), "midnight");
+    assert!(h.state().session.map().tiles.is_empty());
+}
+
+#[test]
+fn command_search_celestial_body_opens_body_picker() {
+    let mut h = harness();
+    search_layer_command(&mut h, "map.body");
+    assert_eq!(h.state().dialogs.open, Some("body"));
+    assert!(h.state().session.map().body().is_earth(), "opening the picker must not change the body");
+    h.get_by_label("Moon").click();
+    h.step();
+    assert_eq!(h.state().session.map().body().id, "moon");
+    assert_eq!(h.state().dialogs.open, None);
+}
+
+#[test]
+fn command_search_adds_sample_template_and_encoded_polyline_layers() {
+    let mut h = harness();
+    h.state_mut().run("project.new", json!(null)).unwrap();
+    search_layer_command(&mut h, "layer.addSample");
+    h.get_by_label("Major Lakes").click();
+    h.step();
+    assert!(h.state().session.map().layer_by_name("Lakes").is_some());
+    assert_eq!(h.state().dialogs.open, None);
+    search_layer_command(&mut h, "layer.template");
+    h.get_by_label("Points").click();
+    h.step();
+    let points = h.state().session.active_layer.and_then(|id| h.state().session.map().layer(id)).unwrap();
+    assert_eq!(points.geometry_type(), rustgis_ui_egui::rustgis_engine::data::GeometryType::Point);
+    assert_eq!(h.state().dialogs.open, None);
+    search_layer_command(&mut h, "layer.addEncodedPolyline");
+    h.state_mut().dialogs.text = "_p~iF~ps|U_ulLnnqC_mqNvxq`@".into();
+    h.state_mut().dialogs.a = "Route".into();
+    h.step();
+    h.get_by_label("Add").click();
+    h.step();
+    let route = h.state().session.map().layer_by_name("Route").unwrap();
+    let min_x = route.dataset.features[0].geometry.as_ref().unwrap().extent().min_x;
+    assert!((min_x - -126.453).abs() < 1e-9, "{min_x}");
+    assert_eq!(h.state().dialogs.open, None);
+}
+
+#[test]
+fn command_search_collects_rename_and_field_inputs_before_changing_layer() {
+    let mut h = harness();
+    let id = h.state().session.active_layer.unwrap();
+    let old_name = h.state().session.map().layer(id).unwrap().name.clone();
+    search_layer_command(&mut h, "layer.rename");
+    assert_eq!(h.state().session.map().layer(id).unwrap().name, old_name);
+    h.state_mut().dialogs.text = "Renamed countries".into();
+    h.step();
+    h.get_by_label("Cancel").click();
+    h.step();
+    assert_eq!(h.state().session.map().layer(id).unwrap().name, old_name);
+    search_layer_command(&mut h, "layer.rename");
+    h.state_mut().dialogs.text = "Renamed countries".into();
+    h.step();
+    h.get_by_label("Rename").click();
+    h.step();
+    assert_eq!(h.state().session.map().layer(id).unwrap().name, "Renamed countries");
+    search_layer_command(&mut h, "edit.addField");
+    assert!(!h.state().session.map().layer(id).unwrap().dataset.fields.iter().any(|f| f.name == "score"));
+    h.state_mut().dialogs.a = "score".into();
+    h.step();
+    h.get_by_label("Add").click();
+    h.step();
+    assert!(h.state().session.map().layer(id).unwrap().dataset.fields.iter().any(|f| f.name == "score"));
+    assert_eq!(h.state().dialogs.open, None);
+}
+
+#[test]
+fn command_search_required_inputs_without_routes_do_not_execute() {
+    let mut h = harness();
+    for command in ["map.goToLink", "group.move"] {
+        let mark = h.state().session.notice_mark();
+        h.state_mut().ui.command_search = Some(command.into());
+        for _ in 0..3 {
+            h.step();
+        }
+        h.key_press(egui::Key::Enter);
+        h.step();
+        assert!(h.state().ui.command_search.is_some(), "{command} must not run without input");
+        assert!(h.state().session.notices_since(mark).is_empty(), "{command} must not fail into a toast");
+        h.key_press(egui::Key::Escape);
+        h.step();
+    }
+}
+
+#[test]
+fn command_search_workflow_collects_inputs_before_georeferencing() {
+    let mut h = harness();
+    let grid = "bmNvbHMgMgpucm93cyAyCnhsbGNvcm5lciAwCnlsbGNvcm5lciAwCmNlbGxzaXplIDEKTk9EQVRBX3ZhbHVlIC05OTk5CjEgMgozIDQK";
+    let result = h.state_mut().run("layer.addDataBytes", json!({"fileName":"grid.asc", "data":grid})).unwrap();
+    let id = result["layer"].as_u64().unwrap() as u32;
+    let before = h.state().session.map().layer(id).unwrap().extent();
+    search_layer_command(&mut h, "raster.georeference");
+    assert_eq!(h.state().ui.right, Some(rustgis_ui_egui::RightPane::Workflows));
+    assert_eq!(h.state().session.map().layer(id).unwrap().extent(), before);
+    h.get_by_label("Fit To Map View").click();
+    h.step();
+    assert!(h.state().workflow.error.is_none(), "{:?}", h.state().workflow.error);
+    assert_ne!(h.state().session.map().layer(id).unwrap().extent(), before);
+    // Opening the same workflow again must keep it visible, not toggle its pane closed.
+    search_layer_command(&mut h, "raster.georeference");
+    assert_eq!(h.state().ui.right, Some(rustgis_ui_egui::RightPane::Workflows));
+    search_layer_command(&mut h, "Classification Wizard");
+    assert_eq!(h.state().workflow.section, "classify");
+    assert_eq!(h.state().ui.right, Some(rustgis_ui_egui::RightPane::Workflows));
+    // A section id matches no command row, so the workflow's own hit must stay listed.
+    search_layer_command(&mut h, "deeplearning");
+    assert_eq!(h.state().workflow.section, "deepLearning");
+    assert_eq!(h.state().ui.right, Some(rustgis_ui_egui::RightPane::Workflows));
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn mcp_relay_early_start_wakes_queued_request_and_updates_ui() {

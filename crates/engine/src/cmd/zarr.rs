@@ -87,6 +87,9 @@ fn fetch(root: &str, keys: &[String]) -> Result<(HashMap<String, Vec<u8>>, usize
     use std::sync::Mutex;
     let out = Mutex::new(HashMap::new());
     let forbidden = std::sync::atomic::AtomicUsize::new(0);
+    // All the files fetched together, within what a folder's read takes, so many chunks each
+    // within the download limit can't fill the memory.
+    let total = std::sync::atomic::AtomicU64::new(0);
     let failure: Mutex<Option<String>> = Mutex::new(None);
     let next = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
@@ -100,6 +103,13 @@ fn fetch(root: &str, keys: &[String]) -> Result<(HashMap<String, Vec<u8>>, usize
                     }
                     match crate::render::rustgis_tiles::cache::download_blocking(&format!("{root}/{k}")) {
                         Ok(b) => {
+                            let len = b.len() as u64;
+                            if total.fetch_add(len, std::sync::atomic::Ordering::Relaxed).saturating_add(len) > zarr::MAX_READ {
+                                if let Ok(mut f) = failure.lock() {
+                                    f.get_or_insert(format!("{root}: more than {} GB to read: take a smaller part", zarr::MAX_READ >> 30));
+                                }
+                                break;
+                            }
                             if let Ok(mut o) = out.lock() {
                                 o.insert(k.clone(), b);
                             }
@@ -559,8 +569,16 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         };
         let (start, end) = (date("start")?, date("end")?);
         let inside = |d: &f64| start.is_none_or(|a| *d >= a) && end.is_none_or(|z| *d <= z);
-        let first = dates.iter().position(inside).ok_or("no step of the variable falls between start and end")?;
-        let picked: Vec<f64> = dates[first..].iter().copied().take_while(inside).collect();
+        let (first, picked): (usize, Vec<f64>) = if start.is_none() && end.is_none() && dates.len() > rustgis_map::raster::MAX_ZARR_STEPS {
+            // An axis longer than the slider takes, with no period given (the Zarr dialog gives
+            // none): from the step picked on it, as many steps as the slider takes.
+            let at = sel.index.iter().find(|(d, _)| *d == dim).map_or(0, |(_, i)| usize::try_from(*i).unwrap_or(usize::MAX));
+            let at = at.min(dates.len().saturating_sub(1));
+            (at, dates[at..].iter().copied().take(rustgis_map::raster::MAX_ZARR_STEPS).collect())
+        } else {
+            let first = dates.iter().position(inside).ok_or("no step of the variable falls between start and end")?;
+            (first, dates[first..].iter().copied().take_while(inside).collect())
+        };
         if picked.len() > rustgis_map::raster::MAX_ZARR_STEPS {
             return Err(format!(
                 "{} has {} steps there; the time slider takes {} at most: give start and end",
@@ -668,7 +686,20 @@ fn series_source(s: &Session, p: &Value) -> Result<SeriesSource, String> {
 #[cfg(not(target_arch = "wasm32"))]
 fn store_files(root: &str, keys: &[String]) -> Result<HashMap<String, Vec<u8>>, String> {
     if is_web(root) {
-        return Ok(fetch(root, keys)?.0);
+        // In batches, within the same total a folder's read takes: a store chunked a map a step
+        // (one chunk per step) can't fill the memory.
+        let mut out = HashMap::new();
+        let mut total = 0u64;
+        for batch in keys.chunks(64) {
+            for (k, b) in fetch(root, batch)?.0 {
+                total = total.saturating_add(b.len() as u64);
+                if total > zarr::MAX_READ {
+                    return Err(format!("{root}: the series is too large to read: take a shorter period"));
+                }
+                out.insert(k, b);
+            }
+        }
+        return Ok(out);
     }
     let mut out = HashMap::new();
     let mut total = 0u64;
@@ -701,8 +732,8 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
     {
         let num = |k: &str| super::f(p, k).ok_or_else(|| format!("{k} is required (degrees)"));
         let (lon, lat) = (num("lon")?, num("lat")?);
-        if !(-90.0..=90.0).contains(&lat) {
-            return Err("lat is from -90 to 90".into());
+        if !lon.is_finite() || !(-90.0..=90.0).contains(&lat) {
+            return Err("lon is a longitude and lat a latitude from -90 to 90 (degrees)".into());
         }
         let mut src = series_source(s, p)?;
         let store = if is_web(&src.root) {

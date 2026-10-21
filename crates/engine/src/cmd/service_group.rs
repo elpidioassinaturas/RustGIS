@@ -282,10 +282,11 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
             if changed_type || invalid_renderer {
                 layer.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol::default_for(layer.geometry_type(), layer.id));
             }
-            if layer.dataset.field_index(&layer.labels.field).is_none() {
+            if layer.dataset.field_index(&layer.labels.default.field).is_none() {
                 layer.labels.enabled = false;
-                layer.labels.field.clear();
+                layer.labels.default.field.clear();
             }
+            layer.labels.repoint_missing_fields(&layer.dataset);
             if layer.definition_query.as_deref().is_some_and(|q| rustgis_data::query::parse(q, &layer.dataset).is_err()) {
                 layer.definition_query = None;
             }

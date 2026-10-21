@@ -148,16 +148,16 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     };
     let numeric = fields_of(&app.workflow.layer, true);
     let w = &mut app.workflow;
-    if w.layer.is_empty() || !(rasters.contains(&w.layer) || features.contains(&w.layer)) {
-        w.layer = match w.section {
-            "rasterFunctions" | "functionEditor" | "suitability" | "visibility" | "lineOfSight" => {
-                rasters.first().cloned().unwrap_or_default()
-            }
-            "interpolate" => points.first().cloned().unwrap_or_default(),
-            "network" => lines.first().cloned().unwrap_or_default(),
-            "simulation" => polygons.first().cloned().unwrap_or_default(),
-            _ => features.first().cloned().unwrap_or_default(),
-        };
+    let inputs = match w.section {
+        "rasterFunctions" | "functionEditor" | "suitability" | "visibility" | "lineOfSight" | "georeference" | "change" | "spectral"
+        | "classify" | "supervised" | "deepLearning" | "hosted" | "indices" | "process" | "pixels" | "mensuration" | "reality" => &rasters,
+        "interpolate" => &points,
+        "network" => &lines,
+        "simulation" => &polygons,
+        _ => &features,
+    };
+    if !inputs.contains(&w.layer) {
+        w.layer = inputs.first().cloned().unwrap_or_default();
     }
     ui.add_space(6.0);
     match app.workflow.section {
@@ -766,16 +766,73 @@ fn result_view(ui: &mut Ui, r: &Value, t: &Tokens) {
     ui.label(egui::RichText::new(short).monospace().small());
 }
 
-/// The Script pane: commands typed one per line, run in order.
-pub fn script(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
+/// The lines the Script pane's box starts with; the fewest it keeps when the pane is short.
+const SCRIPT_MIN_ROWS: usize = 10;
+/// The most lines a run's results take below the Script pane's buttons; more scroll there.
+const SCRIPT_OUT_ROWS: f32 = 6.0;
+
+/// The Script pane, laid out to the pane's own height, out of the right pane's scroll (as the SQL
+/// and Assistant panes are): the box grows with the script down to the buttons and then scrolls
+/// inside, so Run and a run's results stay in view, and its height doesn't follow a scroll of the
+/// pane. Only a pane too short for the box's first lines and the buttons scrolls as a whole.
+pub fn script_pane(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+        // The hint above the box (two lines, in a narrow pane), the box's first lines, the rest.
+        let hint = (ui.text_style_height(&egui::TextStyle::Small) + ui.spacing().item_spacing.y) * 2.0;
+        let need = hint + script_rows(ui) + script_below(app, ui);
+        if ui.available_height() >= need {
+            script(app, ui, t, true);
+        } else {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| script(app, ui, t, false));
+        }
+    });
+}
+
+/// The height of the Script box's first lines.
+fn script_rows(ui: &Ui) -> f32 {
+    ui.text_style_height(&egui::TextStyle::Monospace) * SCRIPT_MIN_ROWS as f32
+}
+
+/// The height the Script pane needs below its box: the buttons, and a run's results (their own
+/// scroll, at most SCRIPT_OUT_ROWS lines) when there are any.
+fn script_below(app: &RustGisApp, ui: &Ui) -> f32 {
+    let gap = ui.spacing().item_spacing.y;
+    let results = if app.workflow.script_out.is_empty() { 0.0 } else { script_out_height(ui) + gap };
+    ui.spacing().interact_size.y + gap * 3.0 + results
+}
+
+/// The most height a run's results take.
+fn script_out_height(ui: &Ui) -> f32 {
+    (ui.text_style_height(&egui::TextStyle::Small) + ui.spacing().item_spacing.y) * SCRIPT_OUT_ROWS
+}
+
+/// The Script pane's content: commands typed one per line, run in order, coloured as they're typed
+/// (#653). `fit`: the box grows down to the buttons (the pane's own layout); else it keeps its
+/// first lines, in a pane that scrolls as a whole.
+fn script(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, fit: bool) {
     ui.label(egui::RichText::new(tl!("One command per line: id {json}. Lines starting with # are comments.")).small().weak());
-    ui.add(
-        egui::TextEdit::multiline(&mut app.workflow.script)
-            .code_editor()
-            .desired_rows(10)
-            .desired_width(f32::INFINITY)
-            .hint_text("map.goToXY {\"lon\": 2.35, \"lat\": 48.85, \"scale\": 5000000}\nselect.byAttributes {\"layer\": \"Cities\", \"where\": \"pop_max > 1000000\"}"),
-    );
+    let unknown = crate::scriptcolor::unknown_ids_cached(ui, &app.session, &app.workflow.script);
+    let palette = crate::scriptcolor::Palette::of(t);
+    let mut layouter =
+        |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| crate::scriptcolor::layout(ui, buf.as_str(), &unknown, palette, wrap);
+    // The box grows with the script down to what the buttons and results leave (the pane's own
+    // layout: `available_height` is what's left of the pane), then scrolls inside it.
+    let min = script_rows(ui);
+    let room = if fit { (ui.available_height() - script_below(app, ui)).max(min) } else { min };
+    let out_h = script_out_height(ui);
+    egui::ScrollArea::vertical().id_salt("script_box").max_height(room).auto_shrink([false, true]).show(ui, |ui| {
+        ui.add(
+            egui::TextEdit::multiline(&mut app.workflow.script)
+                // One id whether the pane scrolls as a whole or not, so resizing it across that
+                // keeps the box's focus, cursor and selection.
+                .id(egui::Id::new("script_text"))
+                .code_editor()
+                .layouter(&mut layouter)
+                .desired_rows(SCRIPT_MIN_ROWS)
+                .desired_width(f32::INFINITY)
+                .hint_text("map.goToXY {\"lon\": 2.35, \"lat\": 48.85, \"scale\": 5000000}\nselect.byAttributes {\"layer\": \"Cities\", \"where\": \"pop_max > 1000000\"}"),
+        );
+    });
     ui.horizontal(|ui| {
         if ui.button(tl!("Run")).clicked() {
             let script = app.workflow.script.clone();
@@ -793,8 +850,11 @@ pub fn script(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
             let _ = app.run("ui.commandSearch", Value::Null);
         }
     });
-    for (line, err) in &app.workflow.script_out {
-        let c = if *err { egui::Color32::from_rgb(0xC0, 0x30, 0x30) } else { ui.visuals().text_color() };
-        ui.label(egui::RichText::new(line.chars().take(400).collect::<String>()).monospace().small().color(c));
-    }
+    // In a scroll of their own, so a long error (it wraps) can't push them out of the pane.
+    egui::ScrollArea::vertical().id_salt("script_out").max_height(out_h).auto_shrink([false, true]).show(ui, |ui| {
+        for (line, err) in &app.workflow.script_out {
+            let c = if *err { egui::Color32::from_rgb(0xC0, 0x30, 0x30) } else { ui.visuals().text_color() };
+            ui.label(egui::RichText::new(line.chars().take(400).collect::<String>()).monospace().small().color(c));
+        }
+    });
 }

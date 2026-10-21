@@ -390,6 +390,15 @@ has none, and supplies the band statistics when only an overview of the raster i
 Exporting a raster opened from an overview writes that overview; the results of adding and of
 exporting it (`layer.addData`, `share.exportRaster`) give the full size as `overviewOf`, so scripts
 and the MCP server see it too.
+`share.exportRaster` writes an untiled GeoTIFF; with `"cog": true` it writes a cloud-optimised one:
+512-pixel tiles compressed with Deflate, overviews (each half the size of the last, down to one
+tile), and every directory ahead of the tiles, so a reader fetches the header once and then only the
+tiles it needs. Overviews are averaged, except for a palette raster or one with a few whole-number
+classes, whose overviews take a pixel so that no class is invented; a palette keeps its colour
+table, though not the table's transparency, which a TIFF colour table can't hold (GDAL drops it
+too). The file is classic TIFF when it would fit in 4 GiB even uncompressed and BigTIFF when it
+might not. Exported to a file it is written tile by tile, never held whole in memory (the browser
+builds it in memory to download it).
 GeoTIFFs may be regular or cloud-optimised: grey, RGB(A), palette (coloured by the file's colour
 table, as land cover such as the NLCD is) or multiband, of any pixel type, tiled or striped, and
 compressed with Deflate, LZW, PackBits, JPEG or Zstandard. The coordinate system is an EPSG code,
@@ -480,8 +489,8 @@ off, and the layer shows the last of its steps in the slider's window, or nothin
 in it. Moving or playing the slider reads that step's slice (only its chunks), keeping the last
 eight read. A web store's next two steps are read ahead in the background. The stretch is fixed at
 the first slice's range, so a colour means the same value at every step, and **Export** writes an
-animation of it. An axis longer than the slider's 20,000 steps (hourly ERA5) needs `"start"` and
-`"end"` to take a period. The project keeps such a layer by its store (a folder or a web address)
+animation of it. An axis longer than the slider's 20,000 steps (hourly ERA5) takes a period with `"start"` and
+`"end"`; given neither (as the dialog adds it), the layer takes 20,000 steps from the one picked. The project keeps such a layer by its store (a folder or a web address)
 and selection, not as a slice, and reads the slider's step again when it opens.
 
 ```sh

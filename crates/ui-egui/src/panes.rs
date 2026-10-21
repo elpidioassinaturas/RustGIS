@@ -141,6 +141,11 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
         crate::sqlpane::show(app, ui, t);
         return;
     }
+    // The Script pane fits its box to the pane's height, the buttons kept in view (#653).
+    if right == RightPane::Script {
+        crate::analysispane::script_pane(app, ui, t);
+        return;
+    }
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| match right {
             RightPane::Geoprocessing => geoprocessing(app, ui, t),
@@ -150,7 +155,6 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
             RightPane::Editing => crate::editpanes::editing(app, ui, t),
             RightPane::Design => crate::editpanes::design(app, ui, t),
             RightPane::Workflows => crate::analysispane::workflows(app, ui, t),
-            RightPane::Script => crate::analysispane::script(app, ui, t),
             RightPane::Tasks => crate::workspacepanes::tasks(app, ui, t),
             RightPane::Jobs => crate::workspacepanes::jobs(app, ui, t),
             RightPane::Profile => crate::workspacepanes::profile(app, ui, t),
@@ -160,7 +164,7 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
             RightPane::Report => crate::reportpane::report(app, ui, t),
             RightPane::Presentation => crate::docpanes::presentation(app, ui, t),
             RightPane::Notebook => crate::docpanes::notebook(app, ui, t),
-            RightPane::Assistant | RightPane::Sql => {}
+            RightPane::Assistant | RightPane::Sql | RightPane::Script => {}
             RightPane::Shares => crate::docpanes::shares(app, ui, t),
             RightPane::Directions => crate::navui::show(app, ui, t),
             RightPane::Bookmarks => crate::bookmarkpane::show(app, ui, t),
@@ -1313,8 +1317,8 @@ fn visibility_box(ui: &Ui, cb: Rect, visible: bool, t: &Tokens) {
 }
 
 /// A web tile layer's row (index `i` of `count`, top first as the map lists them): its checkbox
-/// shows or hides it; right-click zooms to it (an archive or GeoTIFF), sets its opacity, moves it
-/// up or down (not with `reorder` off: the list is filtered), or removes it.
+/// shows or hides it; right-click zooms to it (known bounds, an archive or GeoTIFF), sets its
+/// opacity, moves it up or down (not with `reorder` off: the list is filtered), or removes it.
 fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, reorder: bool, tile: &TileLayer, t: &Tokens) {
     let shown = if tile.overlay { format!("{} · {}", tile.name, tl!("overlay")) } else { tile.name.clone() };
     let name = row_name(ui, shown.clone(), regular(12.5), ui.available_width() - NAME_X - 8.0);
@@ -1331,7 +1335,9 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, reorder: 
     x += 22.0;
     icons::paint(ui.painter(), Rect::from_center_size(pos2(x + 9.0, cy), vec2(18.0, 16.0)), "basemap", t.icon, t.accent);
     x += 24.0;
-    let color = if tile.visible && tile.opacity > 0.0 { t.text } else { t.text_disabled };
+    // Greyed when it draws nothing: hidden, transparent, or a data cube tile with no file at the
+    // slider's step (the box still shows the choice to show it).
+    let color = if tile.draws() && tile.opacity > 0.0 { t.text } else { t.text_disabled };
     let elided = name.elided;
     name.paint(ui, r, x, color);
     let mut action: Option<(&str, Value)> = None;
@@ -1340,8 +1346,8 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, reorder: 
     }
     let resp = resp.on_hover_text(if elided { format!("{shown}\n{}", tile.url) } else { tile.url.clone() });
     resp.context_menu(|ui| {
-        // An archive or GeoTIFF says what it covers.
-        if matches!(tile.kind, TileKind::PmTiles | TileKind::Cog) {
+        // Stored bounds, an archive or GeoTIFF say what the layer covers.
+        if tile.bounds.is_some() || matches!(tile.kind, TileKind::PmTiles | TileKind::Cog) {
             if ui.button(tl!("Zoom To Layer")).clicked() {
                 action = Some(("map.zoomToTiles", json!({"index": i})));
                 ui.close();

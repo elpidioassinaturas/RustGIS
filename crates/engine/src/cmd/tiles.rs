@@ -28,6 +28,7 @@ pub const NETWORK: &[&str] = &[
     "stac.collections",
     "stac.search",
     "stac.addAsset",
+    "stac.addCube",
     "map.findPlace",
     "layer.geocode",
     "osm.download",
@@ -56,7 +57,7 @@ pub const NETWORK: &[&str] = &[
 pub fn commands() -> Vec<C> {
     vec![
         C::new("map.addTiles", "Add Tile Layer", "Home › Add", add).params(
-            r#"{"url": "https://…/{z}/{x}/{y}.png" | vector tiles ".pbf" or TileJSON | MapLibre style.json | a PMTiles archive (web address or file path) | an MBTiles file path, "kind"?: "raster"|"vector"|"style"|"pmtiles"|"mbtiles" (guessed from the url), "name"?: text, "attribution"?: text, "minZoom"?: number, "maxZoom"?: number, "tileSize"?: 256|512, "tms"?: bool, "subdomains"?: [text], "layers"?: [vector tile layer names, drawn in colours of their own], "styleLayers"?: [MapLibre style layers drawing vector tiles instead (their source is the tiles')], "opacity"?: 0–1, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten"|"difference" (how it combines with what is beneath), "overlay"?: bool (a transparent layer kept on top; one with the same address and role is replaced when it has the same name or the same look), "replace"?: bool (removes the other tile basemaps, not overlays), "id"?: catalog id, "view"?: bool (a MapLibre style: go to the place, zoom, bearing and pitch its root properties give, once it loads), "start"?, "end"?: dates a url with date placeholders ({date:YYYY-MM-DD}, {YYYY}) spans, turning the time slider on (or, when it is on, setting its span), "unit"?, "interval"?, "dates"?: its steps (as in time.set)}"#,
+            r#"{"url": "https://…/{z}/{x}/{y}.png" | vector tiles ".pbf" or TileJSON | MapLibre style.json | a PMTiles archive (web address or file path) | an MBTiles file path, "kind"?: "raster"|"vector"|"style"|"pmtiles"|"mbtiles" (guessed from the url), "name"?: text, "bounds"?: [west, south, east, north] (longitude/latitude coverage, when known), "attribution"?: text, "minZoom"?: number, "maxZoom"?: number, "tileSize"?: 256|512, "tms"?: bool, "subdomains"?: [text], "layers"?: [vector tile layer names, drawn in colours of their own], "styleLayers"?: [MapLibre style layers drawing vector tiles instead (their source is the tiles')], "opacity"?: 0–1, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten"|"difference" (how it combines with what is beneath), "overlay"?: bool (a transparent layer kept on top; one with the same address and role is replaced when it has the same name or the same look), "replace"?: bool (removes the other tile basemaps, not overlays), "id"?: catalog id, "view"?: bool (a MapLibre style: go to the place, zoom, bearing and pitch its root properties give, once it loads), "start"?, "end"?: dates a url with date placeholders ({date:YYYY-MM-DD}, {YYYY}) spans, turning the time slider on (or, when it is on, setting its span), "unit"?, "interval"?, "dates"?: its steps (as in time.set)}"#,
         ),
         C::new("map.removeTiles", "Remove Tile Layer", "Home › Add", remove)
             .params(r#"{"name"?: text, "index"?: number, "id"?: catalog id} (removes every tile layer when none is given)"#),
@@ -65,7 +66,7 @@ pub fn commands() -> Vec<C> {
         ),
         C::new("map.tiles", "Tile Layers", "Home › Add", |s, _| Ok(list(s, false))).view(),
         C::new("map.zoomToTiles", "Zoom To Tile Layer", "Home › Add", zoom_to)
-            .params(r#"{"name"?: text | "index"?: number (0 = top) | "id"?: catalog id} (a PMTiles archive or cloud-optimised GeoTIFF: the bounds its header gives)"#)
+            .params(r#"{"name"?: text | "index"?: number (0 = top) | "id"?: catalog id} (advertised service bounds, or the bounds in a PMTiles archive or cloud-optimised GeoTIFF header)"#)
             .view(),
         C::new("map.body", "Celestial Body", "Home › Add", body).params(
             r#"{"name"?: "earth"|"moon"|"mars"|"mercury"|"venus"|"io"|"europa"|"ganymede"|"callisto"|"titan"|"pluto"|"charon" (map.bodies lists them; default: the basemap's body), "basemap"?: a planetary basemap's id (default: the body's first; USGS Imagery on the Earth) | false (adds none, keeping the web basemaps but other bodies')}"#,
@@ -157,6 +158,13 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         kind,
         if dated { rustgis_data::time::fill_template(url, at) } else { url.to_string() },
     );
+    if let Some(bounds) = p.get("bounds").filter(|v| !v.is_null()) {
+        let bounds = serde::Deserialize::deserialize(bounds).map_err(|_| "bounds must be [west, south, east, north]")?;
+        if !rustgis_map::tiles::valid_bounds(&bounds) {
+            return Err("bounds must be a finite, ordered geographic rectangle".into());
+        }
+        t.bounds = Some(bounds);
+    }
     if dated {
         t.time_url = Some(url.to_string());
         t.time_at = at;
@@ -250,20 +258,21 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
     Ok(out)
 }
 
-/// What a tile layer covers, from its header (a PMTiles archive's or a cloud-optimised
-/// GeoTIFF's): `None` while it is still being read.
+/// What a tile layer covers, from service metadata or an archive/GeoTIFF header.
+/// `None` while a header is still being read.
 fn extent_of(t: &TileLayer) -> Result<Option<rustgis_geom::Extent>, String> {
     use rustgis_render::rustgis_tiles::pmtiles;
-    let bounds = match t.kind {
-        TileKind::PmTiles => pmtiles::info(&t.url)?.map(|i| i.bounds),
-        TileKind::Cog => cog::info(&t.url)?.map(|i| i.bounds),
+    let bounds = match (t.bounds, t.kind) {
+        (Some(bounds), _) => Some(bounds),
+        (None, TileKind::PmTiles) => pmtiles::info(&t.url)?.map(|i| i.bounds),
+        (None, TileKind::Cog) => cog::info(&t.url)?.map(|i| i.bounds),
         _ => return Err(format!("{}: a {} doesn't say what it covers", t.name, t.kind.label().to_lowercase())),
     };
     let Some([w, so, e, n]) = bounds else { return Ok(None) };
     let ok = [w, so, e, n].iter().all(|v| v.is_finite()) && w < e && so < n;
     let e = rustgis_geom::Extent::new(w.max(-180.0), so.max(-85.06), e.min(180.0), n.min(85.06));
     if !ok || e.is_empty() {
-        return Err(format!("{}: its header gives no bounds", t.name));
+        return Err(format!("{}: no usable geographic bounds are known", t.name));
     }
     Ok(Some(e))
 }
@@ -275,8 +284,8 @@ fn whole_world(e: &rustgis_geom::Extent) -> bool {
 
 fn zoom_to(s: &mut Session, p: &Value) -> CmdResult {
     let i = find(s, p)?.ok_or("give the tile layer's name or index")?;
-    let t = s.map().tiles.get(i).cloned().ok_or("no tile layer at that index")?;
-    let e = extent_of(&t)?.ok_or_else(|| format!("{}: still being read; try again in a moment", t.name))?;
+    let t = s.map().tiles.get(i).ok_or("no tile layer at that index")?;
+    let e = extent_of(t)?.ok_or_else(|| format!("{}: still being read; try again in a moment", t.name))?;
     s.zoom_to(&e);
     Ok(json!({"bounds": [e.min_x, e.min_y, e.max_x, e.max_y]}))
 }

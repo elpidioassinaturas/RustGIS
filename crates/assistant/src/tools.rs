@@ -728,6 +728,8 @@ pub fn context(s: &Session) -> String {
         }
         if !t.visible {
             line.push_str(", hidden");
+        } else if !t.draws() {
+            line.push_str(", hidden by the time slider (no date in its window)");
         }
         if t.opacity < 1.0 {
             line.push_str(&format!(", opacity {:.2}", t.opacity));

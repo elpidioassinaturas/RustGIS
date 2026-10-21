@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::source::external::{self, TempFile, fnv1a, output, stamp, touch};
+use crate::source::external::{self, TempFile, fnv1a, output_with_budget, stamp, touch};
 use crate::{DataError, Result};
 
 /// Raster file types read through GDAL. (Not `.vrt`, which can point GDAL at any file on the
@@ -33,6 +33,65 @@ fn program(name: &str) -> Option<PathBuf> {
     external::program("RUSTGIS_GDAL_BIN", name)
 }
 
+/// Whether GDAL's raster programs are installed.
+pub fn available() -> bool {
+    program("gdal_translate").is_some() && program("gdalinfo").is_some()
+}
+
+/// Whether a file's contents are JPEG 2000: a JP2 file's signature box, or a bare codestream's
+/// first markers (SOC, SIZ).
+pub fn is_jpeg2000(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\0\0\0\x0cjP  \r\n\x87\n") || bytes.starts_with(&[0xff, 0x4f, 0xff, 0x51])
+}
+
+/// What converting a file's contents made: the GeoTIFF's bytes, and whether the raster was taken
+/// as WGS 84 (see [`Converted::assumed_lonlat`]).
+pub struct ConvertedBytes {
+    pub tif: Vec<u8>,
+    pub assumed_lonlat: bool,
+}
+
+/// Converts a JPEG 2000 file's contents (an upload or download) to a cloud-optimised GeoTIFF's
+/// bytes, of at most `max` bytes; `crs` as for [`convert`]. Only JPEG 2000 is taken, by its
+/// signature: other contents could be a format that opens files on this computer (a VRT).
+/// Source, output and scratch files stay in a private temporary folder. Its monitored budget
+/// allows the source plus three `max`-sized working copies; writes may overshoot between checks.
+/// Takes ownership so the input buffer is released after staging, before conversion/readback.
+pub fn convert_jpeg2000(bytes: Vec<u8>, crs: Option<&str>, max: u64) -> Result<ConvertedBytes> {
+    if !is_jpeg2000(&bytes) {
+        return Err(DataError::Format("not a JPEG 2000 file (its contents don't start as one)".into()));
+    }
+    let mut workspace = tempfile::Builder::new();
+    workspace.prefix("rustgis-gdal-");
+    #[cfg(unix)]
+    workspace.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    let dir = workspace.tempdir()?;
+    let ext = if bytes.starts_with(b"\0\0\0\x0c") { "jp2" } else { "j2k" };
+    let src = dir.path().join(format!("download.{ext}"));
+    {
+        use std::io::Write;
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        let mut f = o.open(&src)?;
+        f.write_all(&bytes)?;
+    }
+    // COG generation can hold an intermediate image and overviews alongside the final output.
+    // Keep that working-space budget separate from the final GeoTIFF's size limit.
+    let budget = (bytes.len() as u64).saturating_add(max.saturating_mul(3));
+    drop(bytes);
+    let c = convert_in(dir.path(), &src, None, crs, Some(budget))?;
+    // A GeoTIFF is larger than the JPEG 2000 it came from (Sentinel-2's about twice).
+    if std::fs::metadata(&c.path)?.len() > max {
+        return Err(DataError::Format(format!(
+            "converted to a GeoTIFF larger than {} MB, too large to open: save the file and add it with Add Data",
+            max >> 20
+        )));
+    }
+    Ok(ConvertedBytes { tif: std::fs::read(&c.path)?, assumed_lonlat: c.assumed_lonlat })
+}
+
 fn missing() -> DataError {
     DataError::Unsupported(
         "this raster format needs GDAL: install it (gdal_translate and gdalinfo on the PATH, or RUSTGIS_GDAL_BIN naming their folder) and add the file again"
@@ -43,12 +102,17 @@ fn missing() -> DataError {
 /// The subdatasets of a file (NetCDF variables, HDF datasets): GDAL's name for each, and its
 /// description. Empty for a file that is one raster.
 pub fn subdatasets(src: &Path) -> Result<Vec<(String, String)>> {
+    subdatasets_with_budget(src, None)
+}
+
+/// Lists subdatasets with the downloaded raster's optional workspace budget.
+fn subdatasets_with_budget(src: &Path, workspace: Option<(&Path, u64)>) -> Result<Vec<(String, String)>> {
     let gdalinfo = program("gdalinfo").ok_or_else(missing)?;
     let full = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
     let mut c = Command::new(gdalinfo);
     // With the metadata (`-nomd` would drop the SUBDATASETS domain too, `-mdd` or not).
     c.arg("-json").arg("-nogcp").arg("-norat").arg("-noct").arg(&full);
-    let out = output(c, LIST_TIMEOUT, "GDAL")?;
+    let out = output_with_budget(c, LIST_TIMEOUT, "GDAL", workspace)?;
     if !out.status.success() {
         return Err(DataError::Format(format!("GDAL: {}", first_error(&out.stderr))));
     }
@@ -80,11 +144,11 @@ struct Described {
 }
 
 /// What GDAL says of a raster (a file or subdataset, as GDAL names it).
-fn describe(input: &std::ffi::OsStr) -> Result<Described> {
+fn describe(input: &std::ffi::OsStr, workspace: Option<(&Path, u64)>) -> Result<Described> {
     let gdalinfo = program("gdalinfo").ok_or_else(missing)?;
     let mut c = Command::new(gdalinfo);
     c.args(["-json", "-nogcp", "-nomd", "-norat", "-noct"]).arg(input);
-    let out = output(c, LIST_TIMEOUT, "GDAL")?;
+    let out = output_with_budget(c, LIST_TIMEOUT, "GDAL", workspace)?;
     if !out.status.success() {
         return Err(DataError::Format(format!("GDAL: {}", first_error(&out.stderr))));
     }
@@ -146,7 +210,7 @@ pub struct Converted {
 pub fn convert(src: &Path, layer: Option<&str>, crs: Option<&str>) -> Result<Converted> {
     let dir = external::cache_dir("RUSTGIS_GDAL_CACHE", "gdal")
         .ok_or_else(|| DataError::Format("no cache folder for GDAL conversions".into()))?;
-    convert_in(&dir, src, layer, crs)
+    convert_in(&dir, src, layer, crs, None)
 }
 
 /// Whether a coordinate system given for GDAL is one: an authority code (`EPSG:32633`), an OGC
@@ -204,7 +268,8 @@ fn same_file(a: &Path, b: &Path) -> bool {
     norm(a) == norm(b)
 }
 
-fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) -> Result<Converted> {
+fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>, budget: Option<u64>) -> Result<Converted> {
+    let workspace = budget.map(|max| (dir, max));
     if let Some(c) = crs
         && !valid_crs(c)
     {
@@ -238,7 +303,7 @@ fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) ->
         });
     }
     let translate = program("gdal_translate").ok_or_else(missing)?;
-    let subs = subdatasets(&full)?;
+    let subs = subdatasets_with_budget(&full, workspace)?;
     let (input, picked) = if subs.is_empty() {
         if let Some(l) = layer {
             return Err(DataError::Format(format!("no subdataset '{l}': the file is one raster")));
@@ -266,7 +331,7 @@ fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) ->
     // A raster that doesn't say its coordinate system: WGS 84 when its coordinates look like
     // longitude/latitude (as NetCDF climate grids often are), else the user must say.
     let mut assumed_lonlat = false;
-    let d = describe(&input)?;
+    let d = describe(&input, workspace)?;
     let Some(extent) = d.extent else {
         return Err(DataError::Format("the raster isn't georeferenced: GDAL finds no coordinates for its cells".into()));
     };
@@ -306,7 +371,7 @@ fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) ->
     };
     c.arg(&input).arg(&tmp);
     let mut tmp_guard = TempFile(Some(tmp.clone()));
-    let res = output(c, CONVERT_TIMEOUT, "GDAL")?;
+    let res = output_with_budget(c, CONVERT_TIMEOUT, "GDAL", workspace)?;
     if !res.status.success() || !tmp.exists() {
         return Err(DataError::Format(format!("GDAL: {}", first_error(&res.stderr))));
     }
@@ -436,15 +501,15 @@ mod tests {
             return;
         }
         let cache = dir.join("cache");
-        let c = convert_in(&cache, &img, None, None).unwrap();
+        let c = convert_in(&cache, &img, None, None, None).unwrap();
         assert!(c.subdataset.is_none() && c.others.is_empty());
         let r = crate::raster::read_path(&c.path).unwrap();
         assert_eq!((r.width, r.height), (4, 3));
         // The second time comes from the cache.
-        let again = convert_in(&cache, &img, None, None).unwrap();
+        let again = convert_in(&cache, &img, None, None, None).unwrap();
         assert_eq!(again.path, c.path);
-        assert!(convert_in(&cache, &img, Some("x"), None).is_err(), "no subdatasets");
-        assert!(convert_in(&cache, &img, None, Some("-of")).is_err());
+        assert!(convert_in(&cache, &img, Some("x"), None, None).is_err(), "no subdatasets");
+        assert!(convert_in(&cache, &img, None, Some("-of"), None).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
