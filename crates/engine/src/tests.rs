@@ -6910,6 +6910,14 @@ fn a_zarr_series_at_a_point() {
         (r["dimension"].as_str(), r["units"].as_str(), r["row"].as_u64(), r["col"].as_u64()),
         (Some("time"), Some("K"), Some(2), Some(0))
     );
+    // A point between centres takes the nearest (the axis starts half a cell before the first
+    // centre): 24°N is the 20°N row, 26°N the 30°N row.
+    let mut at =
+        |lat: f64| s.run("zarr.series", &json!({"path": path, "variable": "t", "lon": 1.0, "lat": lat})).unwrap()["values"].clone();
+    let (twenty, thirty) = (at(20.0), at(30.0));
+    assert_eq!(at(24.0), twenty);
+    assert_eq!(at(26.0), thirty);
+    assert_ne!(twenty, thirty);
     // Longitudes either way round the globe; another cell.
     let r = s.run("zarr.series", &json!({"path": path, "variable": "t", "lon": 363.5, "lat": 11.0})).unwrap();
     assert_eq!(r["values"], json!([3.0, 103.0, 203.0]), "{r}");
