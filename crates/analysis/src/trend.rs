@@ -182,8 +182,11 @@ fn seasonal(t: &[f64], y: &[f64], seasons: u32) -> Option<Trend> {
 /// The seasonal test with each value's season given (its month, or its part of the year as the
 /// calendar has it): what a series of real dates should use, since a time's fraction of a year
 /// drifts against the calendar from year to year. Missing values are skipped as by [`trend`];
-/// `None` as it gives one.
+/// `None` as it gives one, or when the three lists aren't the same length.
 pub fn trend_seasonal(t: &[f64], y: &[f64], season: &[usize], alpha: f64) -> Option<Trend> {
+    if y.len() != t.len() || season.len() != t.len() {
+        return None;
+    }
     let kept: Vec<(f64, f64, usize)> =
         t.iter().zip(y).zip(season).filter(|((t, y), _)| t.is_finite() && y.is_finite()).map(|((t, y), s)| (*t, *y, *s)).collect();
     if !(MIN_VALUES..=MAX_VALUES).contains(&kept.len()) || !(alpha > 0.0 && alpha < 1.0) {
@@ -524,6 +527,10 @@ mod tests {
         assert!(trend_seasonal(&t, &y, &seasons, 0.05).is_none(), "a season index out of range");
         let many: Vec<f64> = (0..=MAX_VALUES).map(|i| i as f64).collect();
         assert_eq!(sen_slope(&many, &many), None, "Sen's slope alone is bounded too");
+        assert!(
+            trend_seasonal(&[2000.0, 2000.5, 2001.0, 2001.5], &[1.0, 2.0, 3.0, 4.0], &[0, 1, 0], 0.05).is_none(),
+            "seasons for every value"
+        );
         assert!(trend(&many, &many, Test::Original, 0.05).is_none());
         // Too few values, missing ones skipped.
         assert!(trend(&t, &[1.0, f64::NAN, 2.0, f64::NAN, 3.0], Test::Original, 0.05).is_none());
