@@ -820,19 +820,28 @@ fn script(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, fit: bool) {
     let min = script_rows(ui);
     let room = if fit { (ui.available_height() - script_below(app, ui)).max(min) } else { min };
     let out_h = script_out_height(ui);
-    egui::ScrollArea::vertical().id_salt("script_box").max_height(room).auto_shrink([false, true]).show(ui, |ui| {
-        ui.add(
-            egui::TextEdit::multiline(&mut app.workflow.script)
-                // One id whether the pane scrolls as a whole or not, so resizing it across that
-                // keeps the box's focus, cursor and selection.
-                .id(egui::Id::new("script_text"))
-                .code_editor()
-                .layouter(&mut layouter)
-                .desired_rows(SCRIPT_MIN_ROWS)
-                .desired_width(f32::INFINITY)
-                .hint_text("map.goToXY {\"lon\": 2.35, \"lat\": 48.85, \"scale\": 5000000}\nselect.byAttributes {\"layer\": \"Cities\", \"where\": \"pop_max > 1000000\"}"),
-        );
+    // One id whether the pane scrolls as a whole or not, so resizing it across that keeps the
+    // box's focus, cursor and selection.
+    let box_id = egui::Id::new("script_text");
+    // The suggestion list's keys (#662), taken before the box sees them.
+    if let Some((offer, item)) = crate::scriptcomplete::keys(ui, box_id, &app.workflow.script) {
+        crate::scriptcomplete::accept(ui, box_id, &mut app.workflow.script, &offer, &item);
+    }
+    let out = egui::ScrollArea::vertical().id_salt("script_box").max_height(room).auto_shrink([false, true]).show(ui, |ui| {
+        egui::TextEdit::multiline(&mut app.workflow.script)
+            .id(box_id)
+            .code_editor()
+            .event_filter(crate::scriptcomplete::filter(ui, box_id))
+            .layouter(&mut layouter)
+            .desired_rows(SCRIPT_MIN_ROWS)
+            .desired_width(f32::INFINITY)
+            .hint_text("map.goToXY {\"lon\": 2.35, \"lat\": 48.85, \"scale\": 5000000}\nselect.byAttributes {\"layer\": \"Cities\", \"where\": \"pop_max > 1000000\"}")
+            .show(ui)
     });
+    let clicked = crate::scriptcomplete::show(ui, box_id, &out.inner, out.inner_rect, &app.workflow.script, &app.session);
+    if let Some((offer, item)) = clicked {
+        crate::scriptcomplete::accept(ui, box_id, &mut app.workflow.script, &offer, &item);
+    }
     ui.horizontal(|ui| {
         if ui.button(tl!("Run")).clicked() {
             let script = app.workflow.script.clone();

@@ -6,9 +6,11 @@ use std::sync::Arc;
 
 use rustgis_analysis::georef::{self, Gcp, Kind};
 use rustgis_analysis::rasterops::{self, NODATA};
+use rustgis_analysis::warp;
 use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
 use rustgis_data::{Geometry, GeometryType};
 use rustgis_geom::{Coord, Extent};
+use rustgis_map::RasterLayer;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -37,7 +39,7 @@ fn first() -> String {
 pub fn commands() -> Vec<C> {
     vec![
         C::new("raster.georeference", "Georeference", "Analyze › Alignment", georeference).params(
-            r#"{"layer": raster, "points"?: [[column, row, lon, lat], …] (two or more), "extent"?: [minLon, minLat, maxLon, maxLat]}"#,
+            r#"{"layer": raster, "points"?: [[column, row, lon, lat], …] (two or more; with "transform": [column, row, x, y, on?]), "extent"?: [minLon, minLat, maxLon, maxLat], "transform"?: "similarity"|"affine"|"projective"|"polynomial2"|"polynomial3"|"spline" (fits the points and warps the raster onto a north-up grid covering the warped image; without it the points and extent only shift and scale the grid), "pointsCrs"?: EPSG code or "EPSG:n" of the points' x and y (default 4326), "crs"?: the output's (default pointsCrs), "resampling"?: "nearest"|"bilinear"|"cubic" (default bilinear), "cellSize"?: output units (default about the source pixel's size on the ground), "name"?: new layer for the result (default replaces the layer's raster), "path"?: "*.tif" (also writes the warp as a cloud-optimised GeoTIFF)}"#,
         ),
         // A fit is a measurement of the points, not a project change: no undo step.
         C::new("raster.gcpFit", "Control Point Fit", "Analyze › Alignment", gcp_fit).view().params(
@@ -155,8 +157,12 @@ pub(crate) fn add(s: &mut Session, r: Raster, classes: bool) -> CmdResult {
 
 /// Replaces a raster layer's pixels, keeping its look.
 fn replace(s: &mut Session, layer: &str, r: Raster) -> CmdResult {
+    replace_layer(s, layer, layer_of(r)?)
+}
+
+/// [`replace`], with the new pixels already in a layer (kept in a file, say, not embedded).
+fn replace_layer(s: &mut Session, layer: &str, mut new: rustgis_map::RasterLayer) -> CmdResult {
     let id = s.map().layer_by_name(layer).map(|l| l.id).ok_or_else(|| format!("no raster layer '{layer}'"))?;
-    let mut new = layer_of(r)?;
     let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
     if let Some(old) = &l.raster {
         new.style = old.style.clone();
@@ -179,6 +185,9 @@ fn rebuild(r: &Raster, transform: GeoTransform, crs: Crs, bands: Vec<Vec<f32>>) 
 fn georeference(s: &mut Session, p: &Value) -> CmdResult {
     let layer = ps(p, "layer").ok_or("layer is required")?.to_string();
     let r = raster(s, p)?;
+    if p.get("transform").is_some() {
+        return warp_to_fit(s, p, &layer, &r);
+    }
     let gt = if let Some(e) = p.get("extent").and_then(Value::as_array) {
         let n: Vec<f64> = e.iter().filter_map(Value::as_f64).collect();
         let [x0, y0, x1, y1] = n.as_slice() else { return Err("extent is [minLon, minLat, maxLon, maxLat]".into()) };
@@ -230,6 +239,93 @@ fn georeference(s: &mut Session, p: &Value) -> CmdResult {
     let e = out.extent();
     let v = replace(s, &layer, out)?;
     Ok(json!({"layer": v["layer"], "extent": [e.min_x, e.min_y, e.max_x, e.max_y]}))
+}
+
+/// A coordinate system given as an EPSG code or any text [`Crs::parse`] reads.
+fn crs_param(p: &Value, key: &str) -> Result<Option<Crs>, String> {
+    let bad = || format!("{key} is an EPSG code such as 32613 or \"EPSG:32613\"");
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(t)) => Crs::parse(t).map(Some),
+        Some(v) => {
+            let code = v.as_u64().filter(|c| *c <= u64::from(u32::MAX)).ok_or_else(bad)?;
+            Crs::from_epsg(code as u32).map(Some).ok_or_else(|| format!("unknown coordinate system EPSG:{code}"))
+        }
+    }
+}
+
+/// `raster.georeference` with a transform: fits the control points and warps the raster onto a
+/// north-up grid in the output coordinate system (see `rustgis_analysis::warp`).
+fn warp_to_fit(s: &mut Session, p: &Value, layer: &str, r: &Raster) -> CmdResult {
+    let kind = ps(p, "transform")
+        .and_then(Kind::parse)
+        .ok_or("transform is similarity, affine, projective, polynomial2, polynomial3 or spline")?;
+    let fit = georef::fit(kind, &gcps(p)?)?;
+    // Points are longitude/latitude unless said otherwise, and the output stays in their system
+    // unless asked to reproject.
+    let points_crs = crs_param(p, "pointsCrs")?.unwrap_or(Crs::LonLat);
+    let crs = crs_param(p, "crs")?.unwrap_or(points_crs);
+    let resampling = match p.get("resampling") {
+        None | Some(Value::Null) => warp::Resampling::Bilinear,
+        Some(v) => v.as_str().and_then(warp::Resampling::parse).ok_or("resampling is nearest, bilinear or cubic")?,
+    };
+    let cell = match p.get("cellSize") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_f64().filter(|c| c.is_finite() && *c > 0.0).ok_or("cellSize is a positive number, in the output's units")?),
+    };
+    let path = match p.get("path") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_str().filter(|t| is_tif(t)).ok_or("path is a *.tif or *.tiff file")?.to_string()),
+    };
+    let new_layer = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(|n| n.chars().take(200).collect::<String>());
+    let out_name = new_layer.clone().unwrap_or_else(|| r.name.clone());
+    let out = warp::warp(r, &fit, &warp::Options { crs, points_crs, resampling, cell, name: out_name })?;
+    if let Some((fw, fh)) = r.overview {
+        let note =
+            format!("{}: warped at reduced resolution, from its {} × {} overview of the {fw} × {fh} raster", r.name, r.width, r.height);
+        s.notify(note, false);
+    }
+    let mut info = json!({
+        "transform": kind.id(), "crs": crs.label(), "pointsCrs": points_crs.label(), "resampling": resampling.id(),
+        "width": out.width, "height": out.height, "bands": out.band_count(), "cellSize": out.transform.pixel_width,
+    });
+    if let Some((fw, fh)) = r.overview {
+        info["warpedFromOverview"] = json!({"width": r.width, "height": r.height, "of": [fw, fh]});
+    }
+    // A file written is the layer's source; without one the pixels are kept in the project.
+    let rl = match &path {
+        Some(path) => {
+            let cog =
+                rustgis_data::raster::cogwrite::write_file(&out, 0, std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
+            info["path"] = json!(path);
+            info["cog"] = json!({"overviews": cog.levels.len().saturating_sub(1), "bigTiff": cog.big, "bytes": cog.bytes});
+            let e = out.extent();
+            info["extent"] = json!([e.min_x, e.min_y, e.max_x, e.max_y]);
+            RasterLayer::from_path(out, path.clone())
+        }
+        None => {
+            let e = out.extent();
+            info["extent"] = json!([e.min_x, e.min_y, e.max_x, e.max_y]);
+            layer_of(out)?
+        }
+    };
+    let v = match new_layer {
+        Some(n) => super::raster::add_raster(s, &n, rl)?,
+        None => replace_layer(s, layer, rl)?,
+    };
+    if let (Some(o), Some(i)) = (info.as_object_mut(), v.as_object()) {
+        for (k, val) in i {
+            o.entry(k.clone()).or_insert_with(|| val.clone());
+        }
+    }
+    Ok(info)
+}
+
+fn is_tif(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("tif") || e.eq_ignore_ascii_case("tiff"))
 }
 
 /// Control points from `[column, row, x, y, on?]` entries.
