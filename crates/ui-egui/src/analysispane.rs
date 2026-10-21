@@ -59,6 +59,9 @@ pub struct TrendForm {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Trending {
     pub total: usize,
+    /// Its place among the project's work under way: a trend that lands after another project
+    /// opened is dropped.
+    pub id: u64,
     pub params: Value,
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub done: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -898,8 +901,10 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     #[cfg(not(target_arch = "wasm32"))]
     match rustgis_engine::cmd::cube::trend_start(&app.session, &p) {
         Ok(job) => {
+            let id = app.session.download_started();
             let r = Trending {
                 total: job.total(),
+                id,
                 params: p,
                 cancel: Default::default(),
                 done: Default::default(),
@@ -922,7 +927,10 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
                     app.workflow.trend.running = Some(r);
                     app.workflow.error = None;
                 }
-                Err(e) => app.workflow.error = Some(crate::i18n::fmt("The trend couldn't start: {error}", &[("error", &e.to_string())])),
+                Err(e) => {
+                    app.session.download_failed(id);
+                    app.workflow.error = Some(crate::i18n::fmt("The trend couldn't start: {error}", &[("error", &e.to_string())]));
+                }
             }
         }
         Err(e) => app.workflow.error = Some(e),
@@ -953,10 +961,12 @@ fn trend_running(app: &mut RustGisApp, ui: &mut Ui) -> bool {
             let mut p = r.params.clone();
             // A run the user cancelled stops quietly: no error for it.
             let cancelled = r.cancel.load(Ordering::Relaxed);
+            // Still the project it was run in (`false` once another opened).
+            let current = app.session.download_done(r.id);
             app.workflow.trend.running = None;
             match res {
-                // Cancelled as it finished: nothing added either.
-                Ok(_) if cancelled => {}
+                // Cancelled as it finished, or another project open: nothing added.
+                Ok(_) if cancelled || !current => {}
                 Ok((rasters, dates)) => {
                     p["ran"] = json!(rustgis_engine::cmd::cube::land(rasters, dates));
                     run(app, "cube.trend", p);
