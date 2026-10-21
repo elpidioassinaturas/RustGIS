@@ -557,7 +557,7 @@ impl TrendRun {
 /// Prepares `cube.trend`: the cube, the dates, the test and its options checked.
 pub fn trend_start(s: &Session, p: &Value) -> Result<TrendRun, String> {
     // Read for the seasonal test only: another test leaves it alone, whatever it holds.
-    let seasonal = ps(p, "test").is_some_and(|t| t.trim().eq_ignore_ascii_case("seasonal"));
+    let seasonal = ps(p, "test").and_then(|t| Test::parse(t, 12)).is_some_and(|t| matches!(t, Test::Seasonal(_)));
     let seasons = match p.get("seasons").filter(|v| seasonal && !v.is_null()) {
         None => 12,
         Some(v) => v.as_u64().filter(|m| (2..=366).contains(m)).ok_or("seasons is a number from 2 to 366")? as u32,
