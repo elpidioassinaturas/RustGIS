@@ -289,7 +289,7 @@ pub const SQL: &str = "layer.addSql";
 /// Commands that read a database, which can be a PostgreSQL server's as well as a file, and a
 /// Zarr store, a folder or a web address.
 const DATABASES: &[&str] =
-    &[SQL, "layer.addDatabase", "info.databaseTables", "sql.query", "sql.schema", "raster.zarrInfo", "layer.addZarr"];
+    &[SQL, "layer.addDatabase", "info.databaseTables", "sql.query", "sql.schema", "raster.zarrInfo", "layer.addZarr", "zarr.series"];
 
 /// What a command reaches beyond the project when run with some parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

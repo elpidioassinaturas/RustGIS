@@ -489,8 +489,8 @@ off, and the layer shows the last of its steps in the slider's window, or nothin
 in it. Moving or playing the slider reads that step's slice (only its chunks), keeping the last
 eight read. A web store's next two steps are read ahead in the background. The stretch is fixed at
 the first slice's range, so a colour means the same value at every step, and **Export** writes an
-animation of it. An axis longer than the slider's 20,000 steps (hourly ERA5) needs `"start"` and
-`"end"` to take a period. The project keeps such a layer by its store (a folder or a web address)
+animation of it. An axis longer than the slider's 20,000 steps (hourly ERA5) takes a period with `"start"` and
+`"end"`; given neither (as the dialog adds it), the layer takes 20,000 steps from the one picked. The project keeps such a layer by its store (a folder or a web address)
 and selection, not as a slice, and reads the slider's step again when it opens.
 
 ```sh
