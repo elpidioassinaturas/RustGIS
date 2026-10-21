@@ -28,7 +28,7 @@ pub fn commands() -> Vec<C> {
             r#"{"layer"? (a Zarr layer: its store, variable and steps; default the active layer) | "path": folder | "url": "https://…", "variable"?, "index"?, "stat": "mean"|"min"|"max"|"sum"|"std" (the population standard deviation, n)|"count"|"countAbove", "above"?: number (countAbove's threshold), "start"?, "end"?: dates (default: the layer's period, else the whole axis), "months"?: [1–12] (a season across years: [12, 1, 2]), "minValid"?: 0–1 (a cell with a smaller share of values is left empty; default 0), "name"?: text, "crs"?} → a raster layer of the statistic (desktop)"#,
         ),
         C::new("layer.addZarr", "Add Zarr Variable", "Home › Add › Add Data", add).params(
-            r#"{"path": folder | "url": "https://…", "variable"?: "its path in the store (default: the first)", "index"?: {"time": 3, "level": 0} (other dimensions' steps, default 0), "crs"?: "EPSG:… for a store that doesn't say", "name"?: text, "time"?: bool (follow the time slider: the layer shows the step the slider is at, and turns the slider on over the variable's dates when it is off; desktop), "start"?, "end"?: dates (with time: the period to take, for an axis longer than the slider's 20,000 steps), "ran"?: (internal: a slice the app has read)}"#,
+            r#"{"path": folder | "url": "https://…", "variable"?: "its path in the store (default: the first)", "index"?: {"time": 3, "level": 0} (other dimensions' steps, default 0), "crs"?: "EPSG:… for a store that doesn't say", "name"?: text, "time"?: bool (follow the time slider: the layer shows the step the slider is at, and turns the slider on over the variable's dates when it is off; desktop), "start"?, "end"?: dates (with time: the period to take, for an axis longer than the slider's 20,000 steps), "ran"?: (internal: a slice the app has read), "summary"?: bool (internal: with ran, a summary over time rather than a slice)}"#,
         ),
     ]
 }
@@ -222,8 +222,9 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         // A slice names its steps (`t2m[time=3]`); a summary over time (no steps) is no slice of
         // the variable, so Time Series and Summarise don't take it for one.
         // The layer is its GeoTIFF's bytes (`from_bytes`: no path), so it's never read again from
-        // the store and `subdataset` only names it: a slice by its steps, a summary by nothing.
-        layer.subdataset = (!sel.index.is_empty()).then(|| sel.label());
+        // the store and `subdataset` only names it: a slice by its variable and steps, a summary
+        // (said by the app that worked it out) by nothing, so it isn't taken for a slice.
+        layer.subdataset = (super::b(p, "summary") != Some(true)).then(|| sel.label());
         // The coordinate system given for a store that doesn't say, kept for its series and
         // summaries, as a folder's slice keeps it.
         layer.crs = crs.map(str::to_string);
