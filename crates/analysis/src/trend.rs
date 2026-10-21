@@ -102,7 +102,8 @@ pub fn trend(t: &[f64], y: &[f64], test: Test, alpha: f64) -> Option<Trend> {
 }
 
 /// [`trend`], keeping Sen's slopes in `slopes` (cleared first): a caller working out many series
-/// in turn (a cube, cell by cell) keeps one buffer and spares a fresh one each time.
+/// in turn (a cube, cell by cell) keeps one buffer and spares the largest allocation (n²⁄2
+/// slopes) each time; the series' own vectors, of n values, are still made per call.
 pub fn trend_with(t: &[f64], y: &[f64], test: Test, alpha: f64, slopes: &mut Vec<f64>) -> Option<Trend> {
     let mut kept: Vec<(f64, f64)> = t.iter().zip(y).filter(|(t, y)| t.is_finite() && y.is_finite()).map(|(t, y)| (*t, *y)).collect();
     // The test reads the values in time order (S, the autocorrelation).
