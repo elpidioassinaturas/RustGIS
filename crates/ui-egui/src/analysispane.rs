@@ -187,7 +187,9 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let w = &mut app.workflow;
     let inputs = match w.section {
         "rasterFunctions" | "functionEditor" | "suitability" | "visibility" | "lineOfSight" | "georeference" | "change" | "spectral"
-        | "classify" | "supervised" | "deepLearning" | "hosted" | "indices" | "process" | "pixels" | "mensuration" | "reality" => &rasters,
+        | "classify" | "supervised" | "deepLearning" | "hosted" | "indices" | "process" | "pixels" | "mensuration" | "reality"
+        // The trend's one-layer mode takes a raster (a Zarr variable, or a raster of several bands).
+        | "trend" => &rasters,
         "interpolate" => &points,
         "network" => &lines,
         "simulation" => &polygons,

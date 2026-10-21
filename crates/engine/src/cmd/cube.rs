@@ -29,7 +29,8 @@ pub fn commands() -> Vec<C> {
 /// The most cell values a cube is read into at once (cells × dates): 64 million, 256 MB, on the
 /// desktop; 16 million, 64 MB, in the browser's smaller memory. A run also takes, on each of its
 /// threads (up to 16 on the desktop, one in the browser), a cell's Sen slopes at a time (dates² ⁄ 2:
-/// at most 16 MB at [`MAX_DATES`], so up to 256 MB more at the peak), freed cell by cell.
+/// at most 16 MB at [`MAX_DATES`], so up to 256 MB more at the peak), freed cell by cell; and its
+/// four outputs, four values a cell, made once the block is dropped.
 pub const MAX_VALUES: u64 = if cfg!(target_arch = "wasm32") { 16_000_000 } else { 64_000_000 };
 /// The most pairs of dates a trend compares in all (cells × dates² ⁄ 2), which bounds the time
 /// Sen's slope takes: far fewer in the browser, which works them out on one thread. At the cap a
@@ -555,6 +556,8 @@ impl TrendRun {
         if stopped.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
+        // The values are read: their block goes before the outputs are made from `out`.
+        drop(block);
         done.store(self.total(), Ordering::Relaxed);
         let unit = if self.per == 10.0 { "decade" } else { "year" };
         let names = [

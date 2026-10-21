@@ -243,9 +243,9 @@ fn seasonal_by(t: &[f64], y: &[f64], season: &[usize]) -> Option<Trend> {
 /// Mann–Kendall's S: the signs of every later value minus every earlier one, summed.
 fn score(y: &[f64]) -> f64 {
     let mut s = 0i64;
-    for i in 0..y.len() {
-        for j in i + 1..y.len() {
-            s += match y[j].partial_cmp(&y[i]) {
+    for (i, yi) in y.iter().enumerate() {
+        for yj in y.iter().skip(i + 1) {
+            s += match yj.partial_cmp(yi) {
                 Some(std::cmp::Ordering::Greater) => 1,
                 Some(std::cmp::Ordering::Less) => -1,
                 _ => 0,
