@@ -95,7 +95,8 @@ impl TimeCube for ZarrCube {
         let zt = &self.0.zt;
         let r = match super::zarr::kept_slice(&super::zarr::slice_key(zt, i)) {
             Some(r) => r,
-            None => Arc::new(super::zarr::read_slice(zt, i)?),
+            // A step never written has no value to read: a trend needs every date it takes.
+            None => Arc::new(super::zarr::read_slice(zt, i)?.ok_or_else(|| format!("{}: step {i} has no data written", zt.store))?),
         };
         Ok((r, 0))
     }

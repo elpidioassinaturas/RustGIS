@@ -35,10 +35,6 @@ const MAX_CHUNK_BYTES: u64 = 256 << 20;
 const MAX_COORDS: u64 = 4_000_000;
 /// Largest chunk file read from a folder (stored, before decoding).
 pub const MAX_CHUNK_FILE: u64 = MAX_CHUNK_BYTES;
-/// What a slice's read says when none of its chunks is there (a step never written, which Zarr
-/// reads as its fill value).
-pub const NO_CHUNKS: &str = "none of the slice's chunks could be read";
-
 /// Most bytes of chunk files one read takes from a folder.
 pub const MAX_READ: u64 = 4 << 30;
 
@@ -1164,7 +1160,7 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
         }
     }
     if found == 0 {
-        return Err(bad(format!("{}: {NO_CHUNKS}", a.path)));
+        return Err(DataError::NoChunks(a.path.clone()));
     }
     // Georeferencing from the coordinate arrays.
     let coords = |p: &Option<String>| -> Result<Option<(Vec<f64>, &Array)>> {
