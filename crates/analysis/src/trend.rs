@@ -231,6 +231,8 @@ fn seasonal_by(t: &[f64], y: &[f64], season: &[usize]) -> Option<Trend> {
         return None;
     }
     let slope = median(&mut slopes)?;
+    // The intercept from every value, those of single-value seasons too (as pymannkendall's
+    // seasonal test takes the medians of the whole series); `n`, S and the slope from the pairs.
     let intercept = intercept(t, y, slope)?;
     let z = z_score(s, var_s);
     Some(Trend { n, slope, intercept, s, var_s, correction: 1.0, z, p: p_value(z) })
