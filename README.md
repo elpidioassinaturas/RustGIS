@@ -201,6 +201,29 @@ See the [Become a Sponsor](https://rustgis.app/sponsor/) page for what sponsorsh
  </picture>
 </a>
 
+## Acknowledgements
+
+RustGIS builds on the work of many projects and their authors: [QGIS](https://qgis.org), ArcGIS
+Pro and [GDAL](https://gdal.org), the GIS it is measured against; [MapLibre](https://maplibre.org)
+and [PROJ](https://proj.org); the GeoLibre tool suite, after John Lindsay's
+[WhiteboxTools](https://www.whiteboxgeo.com); [OpenFreeMap](https://openfreemap.org) for vector
+basemaps; [Natural Earth](https://www.naturalearthdata.com),
+[OpenStreetMap](https://www.openstreetmap.org), [Overture Maps](https://overturemaps.org) and the
+EPSG dataset; and the Rust crates it is made of, among them [egui](https://github.com/emilk/egui),
+[wgpu](https://wgpu.rs), [tiny-skia](https://github.com/linebender/tiny-skia),
+[geo](https://github.com/georust/geo), [proj4rs](https://crates.io/crates/proj4rs),
+[tiff](https://github.com/image-rs/image-tiff), Apache Arrow and Parquet,
+[rusqlite](https://github.com/rusqlite/rusqlite) and [wasmi](https://github.com/wasmi-labs/wasmi).
+See the [acknowledgements](https://rustgis.app/acknowledgements/) for the full list, and
+[ATTRIBUTION.md](ATTRIBUTION.md) for every asset's source and licence.
+
+## Disclaimer
+
+RustGIS is primarily built with [Claude Opus 5.5](https://www.anthropic.com/claude), an AI model by
+Anthropic, working under human direction and review. Its results are tested, but check them for
+your own use, and please [report](https://github.com/opengeos/RustGIS/issues) anything that looks
+wrong.
+
 ## License and credits
 
 Licensed under the [Apache License 2.0](LICENSE). Sample data from

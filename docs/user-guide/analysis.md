@@ -221,7 +221,12 @@ click them on the map:
 
 Rasters these make are kept in the project. **Environments** limit tools to the map view, the full
 extent or everywhere, and set the cell size of new rasters. The **Script** pane runs commands from
-text, one per line (`id {json}`).
+text, one per line (`id {json}`); its box grows with the script down to the bottom of the pane,
+short of the buttons, and then scrolls, so **Run** stays in view. It colours them as you type, in
+both themes: `#` comments in green italics, the command id, and the JSON's strings, numbers and
+`true`/`false`/`null`; an id no command has, or one that can't run in a script (`ui.*`, `script.*`,
+`notebook.run`), and parameters that aren't valid JSON are red and underlined. A script is read to
+its 10,000th line; any further are dimmed, as Run doesn't read them.
 
 ## ModelBuilder
 

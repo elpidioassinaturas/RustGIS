@@ -22,10 +22,68 @@ const MOSAIC: f64 = 2048.0;
 /// What drawing the tile layers found.
 #[derive(Default)]
 pub(crate) struct TileOutput {
-    pub labels: Vec<(PlacedLabel, f32)>,
+    pub labels: Vec<(PlacedLabel, f64)>,
     pub attribution: Vec<String>,
     pub pending: bool,
     pub errors: Vec<String>,
+}
+
+/// A tile style's label as the map places it (in its logical points), with its priority:
+/// sized, wrapped and anchored as MapLibre lays it out. `None` when it has nothing to show.
+pub(crate) fn tile_label(l: rustgis_tiles::Label) -> Option<(PlacedLabel, f64)> {
+    // Styles often label in two scripts ("Syria\nسوريا"): only the lines the font can
+    // draw are kept, so a name never shows as boxes, and a label left with neither text
+    // nor an icon is left out.
+    let lines: Vec<&str> = l.text.lines().map(str::trim).filter(|s| !s.is_empty() && crate::text::covers(s, l.bold)).collect();
+    if lines.is_empty() && l.icon.is_none() {
+        return None;
+    }
+    // text-size is in CSS pixels, the map's logical points; a label's size is in type
+    // points (its font is 1.33 × that many pixels tall).
+    let size = l.size / 1.33;
+    // Letter spacing in points, as a text graphic's.
+    let spacing = l.letter_spacing * size;
+    // Wrapped at spaces to text-max-width (in ems) as MapLibre wraps a point's label,
+    // its own line breaks kept.
+    let max_w = l.max_width * l.size;
+    let text = if max_w > 0.0 {
+        lines.iter().flat_map(|line| crate::text::wrap(line, size, l.bold, spacing, max_w)).collect::<Vec<_>>().join("\n")
+    } else {
+        lines.join(" ")
+    };
+    // The text sits against the point as the style anchors and offsets it (beside its
+    // icon, for instance); without either it is centred on the point. Across, it is
+    // placed by the edge it is anchored at, so each renderer lines it up with its own
+    // measure of the width.
+    let (th, em) = (crate::text::block_height(&text, size), l.size);
+    let x = l.x + l.offset[0] * em;
+    let y = l.y + l.anchor[1] * th + l.offset[1] * em;
+    let icon = l.icon.map(|i| PlacedIcon { image: i.image, x: l.x + i.dx, y: l.y + i.dy, w: i.width, h: i.height, angle: i.angle });
+    let line_align = match l.justify {
+        j if j < -0.25 => TextAlign::Left,
+        j if j > 0.25 => TextAlign::Right,
+        _ => TextAlign::Center,
+    };
+    Some((
+        PlacedLabel {
+            text,
+            x,
+            y,
+            size,
+            color: Rgba(l.color),
+            halo: l.halo.map(Rgba),
+            bold: l.bold,
+            icon,
+            align: -l.anchor[0],
+            framed: false,
+            italic: l.italic,
+            spacing,
+            line_align,
+            angle: l.angle,
+            collide: l.collide,
+        },
+        l.priority,
+    ))
 }
 
 /// How the tiles crate sees a tile layer.
@@ -152,13 +210,54 @@ pub(crate) struct Gpu<'a> {
     pub dirty: &'a mut bool,
     /// Vector tile styles may be drawn as meshes ([`DrawCmd::TileMeshes`]).
     pub meshes: bool,
+    /// Raster tile layers are left for the GPU map to place for each frame ([`DrawCmd::LiveTiles`]).
+    pub live: bool,
+}
+
+/// How far past the view a live raster tile layer's tiles are fetched, a share of its size.
+const LIVE_FETCH_MARGIN: f64 = 0.25;
+
+/// A live raster tile layer's tiles for one frame (see [`live`]).
+pub struct Live {
+    /// Bottom first, from the camera's centre.
+    pub quads: Vec<TileQuad>,
+    /// Tiles in view are still on their way.
+    pub pending: bool,
+}
+
+/// A live raster tile layer's tiles for `view` ([`DrawCmd::LiveTiles`]): over the view, fetching
+/// those missing, and out to the margin a moving camera reaches, from the cache only, with
+/// parents and children standing in for tiles on their way, placed from the camera's centre.
+/// `None` when the layer draws anything but raster tiles (its style changed since the scene was
+/// drawn). Cheap: cache lookups.
+pub fn live(spec: &Spec, opacity: f32, view: &View) -> Option<Live> {
+    let res = view.camera.res;
+    let ppp = view.pixels_per_point as f32;
+    let frame = Frame {
+        left: view.camera.center.x - view.width / 2.0 * res,
+        top: view.camera.center.y + view.height / 2.0 * res,
+        m_per_px: res / view.pixels_per_point.max(0.01),
+        ppp,
+    };
+    // Fetched a quarter of the view past each side, so a pan finds its tiles waiting, and held
+    // out to the reach of a moving camera.
+    let fetch = crate::cull_extent(view, LIVE_FETCH_MARGIN);
+    let reach = crate::cull_extent(view, crate::GPU_CULL_MARGIN);
+    let p = rustgis_tiles::place_raster(spec, opacity, &frame, &fetch, &reach)?;
+    // The view's tiles three levels up (a tile or two) are fetched too: a coarse picture of
+    // anywhere the camera goes next stands in until its own tiles arrive, so the map shows no
+    // holes while they load (as the root tile is kept in forge3d's tile streaming).
+    let coarse = Frame { m_per_px: frame.m_per_px * 8.0, ..frame };
+    let _ = rustgis_tiles::place_raster(spec, opacity, &coarse, &fetch, &fetch);
+    let origin = [view.camera.center.x, view.camera.center.y];
+    Some(Live { quads: p.tiles.iter().map(|q| quad(q, origin)).collect(), pending: p.pending })
 }
 
 /// Draws the map's visible tile layers, bottom first. With `gpu`, on the flat Web Mercator map,
 /// raster tile layers are placed as tiles for the GPU instead.
 pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels: bool, mut gpu: Option<Gpu<'_>>) -> TileOutput {
     let mut out = TileOutput::default();
-    let layers: Vec<&TileLayer> = map.tiles.iter().rev().filter(|t| t.visible && t.opacity > 0.0).collect();
+    let layers: Vec<&TileLayer> = map.tiles.iter().rev().filter(|t| t.draws() && t.opacity > 0.0).collect();
     if layers.is_empty() {
         return out;
     }
@@ -173,42 +272,7 @@ pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels
         if let Some(e) = d.error {
             out.errors.push(format!("{name}: {e}"));
         }
-        for l in d.labels {
-            // Styles often label in two scripts ("Syria\nسوريا"): only the lines the font can
-            // draw are kept, so a name never shows as boxes, and a label left with neither text
-            // nor an icon is left out.
-            let lines: Vec<&str> = l.text.lines().map(str::trim).filter(|s| !s.is_empty() && crate::text::covers(s, l.bold)).collect();
-            if lines.is_empty() && l.icon.is_none() {
-                continue;
-            }
-            let text = lines.join(" ");
-            // The text sits against the point as the style anchors and offsets it (beside its
-            // icon, for instance); without either it is centred on the point. Across, it is
-            // placed by the edge it is anchored at, so each renderer lines it up with its own
-            // measure of the width.
-            let (th, em) = (l.size * 1.25, l.size * 1.33);
-            let x = l.x + l.offset[0] * em;
-            let y = l.y + l.anchor[1] * th + l.offset[1] * em;
-            let icon = l.icon.map(|i| PlacedIcon { image: i.image, x: l.x + i.dx, y: l.y + i.dy, w: i.width, h: i.height });
-            out.labels.push((
-                PlacedLabel {
-                    text,
-                    x,
-                    y,
-                    size: l.size,
-                    color: Rgba(l.color),
-                    halo: l.halo.map(Rgba),
-                    bold: l.bold,
-                    icon,
-                    align: -l.anchor[0],
-                    framed: false,
-                    italic: false,
-                    spacing: 0.0,
-                    line_align: TextAlign::Left,
-                },
-                l.priority,
-            ));
-        }
+        out.labels.extend(d.labels.into_iter().filter_map(tile_label));
     };
     if let Place::Flat(Flat::Mercator, _) = place {
         let res = view.camera.res;
@@ -242,6 +306,22 @@ pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels
                     g.cmds.push(DrawCmd::TileMeshes { tiles });
                 }
                 let d = rustgis_tiles::Drawn { labels: v.labels, attribution: v.attribution, pending: v.pending || waiting, error: None };
+                collect(d, &t.name, &mut out);
+                continue;
+            }
+            // A raster tile layer placed for every frame by the GPU map: the scene holds the layer.
+            // Placed here too for what the scene reports (credits, tiles on their way, errors),
+            // and to start fetching them.
+            let s = spec(t);
+            if let Some(g) = gpu.as_mut()
+                && g.live
+                && north_up
+                && t.blend == Blend::Normal
+                && let Some(p) = rustgis_tiles::place_raster(&s, t.opacity, &frame, &fetch, &reach)
+                && crate::flush_acc(pm, g.cmds, g.dirty).is_some()
+            {
+                g.cmds.push(DrawCmd::LiveTiles { spec: s, opacity: t.opacity });
+                let d = rustgis_tiles::Drawn { labels: Vec::new(), attribution: p.attribution, pending: p.pending, error: p.error };
                 collect(d, &t.name, &mut out);
                 continue;
             }
@@ -412,7 +492,20 @@ fn draw_layer(pm: &mut Pixmap, t: &TileLayer, frame: &Frame, labels: bool, scrat
 /// Half the width (and height) of the Web Mercator world, metres.
 const HALF: f64 = std::f64::consts::PI * rustgis_geom::MERCATOR_R;
 
+/// The side of the cells the warp works out exactly at their corners and interpolates inside.
+const WARP_CELL: usize = 8;
+
+/// How far (mosaic pixels) the interpolated middle of a cell may be from its exact place before
+/// the cell is worked out pixel by pixel.
+const WARP_TOLERANCE: f64 = 0.25;
+
 /// Draws the mosaic over `pm`: each pixel takes the mosaic pixel under its longitude/latitude.
+///
+/// The projections are worked out at the corners of [`WARP_CELL`]-pixel cells and interpolated
+/// inside them, where the mapping is smooth (checked at each cell's middle): every pixel of the
+/// globe took an inverse projection and a Web Mercator one, millions a frame, and the browser
+/// draws the globe on its one thread. Cells at the globe's edge or across the antimeridian, where
+/// it isn't smooth, are worked out pixel by pixel.
 fn warp(pm: &mut Pixmap, mosaic: &Pixmap, frame: &Frame, to_lonlat: &dyn Fn(f64, f64) -> Option<Coord>, to_merc: &dyn Fn(Coord) -> Coord) {
     let (w, h) = (pm.width() as usize, pm.height() as usize);
     let (mw, mh) = (mosaic.width() as usize, mosaic.height() as usize);
@@ -422,28 +515,69 @@ fn warp(pm: &mut Pixmap, mosaic: &Pixmap, frame: &Frame, to_lonlat: &dyn Fn(f64,
     let (fw, fh) = (mw as f64, (mh as f64).min(((frame.top + HALF) / frame.m_per_px).floor().max(1.0)));
     let src = mosaic.data();
     let dst = pm.data_mut();
-    for y in 0..h {
-        for x in 0..w {
-            let Some(c) = to_lonlat(x as f64 + 0.5, y as f64 + 0.5) else { continue };
-            let m = to_merc(c);
-            let (mx, my) = ((m.x - frame.left) / frame.m_per_px, (frame.top - m.y) / frame.m_per_px);
-            // Within a pixel of the mosaic's edge takes the edge (`fw`, `fh`).
-            if !(mx > -1.0 && my > -1.0 && mx < fw + 1.0 && my < fh + 1.0) {
-                continue;
-            }
-            let (mx, my) = (mx.max(0.0).min(fw - 1.0) as usize, my.max(0.0).min(fh - 1.0) as usize);
-            let si = (my * mw + mx) * 4;
-            let di = (y * w + x) * 4;
-            let (Some(s), Some(d)) = (src.get(si..si + 4), dst.get_mut(di..di + 4)) else { continue };
-            // Source-over, premultiplied.
-            let a = u32::from(s[3]);
-            if a == 0 {
-                continue;
-            }
-            for i in 0..4 {
-                d[i] = (u32::from(s[i]) + u32::from(d[i]) * (255 - a) / 255).min(255) as u8;
+    // The mosaic position (pixels) under a pixel's centre.
+    let at = |x: f64, y: f64| -> Option<(f64, f64)> {
+        let m = to_merc(to_lonlat(x + 0.5, y + 0.5)?);
+        Some(((m.x - frame.left) / frame.m_per_px, (frame.top - m.y) / frame.m_per_px))
+    };
+    let mut put = |x: usize, y: usize, (mx, my): (f64, f64)| {
+        // Within a pixel of the mosaic's edge takes the edge (`fw`, `fh`).
+        if !(mx > -1.0 && my > -1.0 && mx < fw + 1.0 && my < fh + 1.0) {
+            return;
+        }
+        let (mx, my) = (mx.max(0.0).min(fw - 1.0) as usize, my.max(0.0).min(fh - 1.0) as usize);
+        let si = (my * mw + mx) * 4;
+        let di = (y * w + x) * 4;
+        let (Some(s), Some(d)) = (src.get(si..si + 4), dst.get_mut(di..di + 4)) else { return };
+        // Source-over, premultiplied.
+        let a = u32::from(s[3]);
+        if a == 0 {
+            return;
+        }
+        for i in 0..4 {
+            d[i] = (u32::from(s[i]) + u32::from(d[i]) * (255 - a) / 255).min(255) as u8;
+        }
+    };
+    let n = WARP_CELL;
+    let (cols, rows) = (w.div_ceil(n), h.div_ceil(n));
+    // The corners' positions, a row of them at a time.
+    let corners = |j: usize| -> Vec<Option<(f64, f64)>> { (0..=cols).map(|i| at((i * n) as f64, (j * n) as f64)).collect() };
+    let mut above = corners(0);
+    for j in 0..rows {
+        let below = corners(j + 1);
+        let (y0, y1) = (j * n, ((j + 1) * n).min(h));
+        for i in 0..cols {
+            let (x0, x1) = (i * n, ((i + 1) * n).min(w));
+            let quad = match (above.get(i), above.get(i + 1), below.get(i), below.get(i + 1)) {
+                (Some(&Some(a)), Some(&Some(b)), Some(&Some(c)), Some(&Some(d))) => Some((a, b, c, d)),
+                _ => None,
+            };
+            // Bilinear between the corners, `t` across and `u` down the cell.
+            let lerp = |(a, b, c, d): ((f64, f64), (f64, f64), (f64, f64), (f64, f64)), t: f64, u: f64| {
+                let top = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                let bottom = (c.0 + (d.0 - c.0) * t, c.1 + (d.1 - c.1) * t);
+                (top.0 + (bottom.0 - top.0) * u, top.1 + (bottom.1 - top.1) * u)
+            };
+            let smooth = quad.filter(|&q| {
+                let half = n as f64 / 2.0;
+                at((x0 as f64) + half, (y0 as f64) + half).is_some_and(|e| {
+                    let g = lerp(q, 0.5, 0.5);
+                    (e.0 - g.0).abs() <= WARP_TOLERANCE && (e.1 - g.1).abs() <= WARP_TOLERANCE
+                })
+            });
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let m = match smooth {
+                        Some(q) => Some(lerp(q, (x - x0) as f64 / n as f64, (y - y0) as f64 / n as f64)),
+                        None => at(x as f64, y as f64),
+                    };
+                    if let Some(m) = m {
+                        put(x, y, m);
+                    }
+                }
             }
         }
+        above = below;
     }
 }
 
@@ -453,6 +587,57 @@ mod tests {
     use rustgis_map::{Camera, Map, Projection, TileKind, TileLayer};
 
     use crate::View;
+
+    /// The warp interpolating across cells puts every pixel where working it out pixel by pixel
+    /// does: on a globe zoomed in, on a whole one with its edge in view, across the antimeridian
+    /// (where the mosaic's longitudes jump from one side to the other), and with a pole in sight
+    /// (where latitudes are clamped to Web Mercator's limit).
+    #[test]
+    fn the_warp_matches_the_exact_projection() {
+        use rustgis_geom::MERCATOR_R;
+        let half = std::f64::consts::PI * MERCATOR_R;
+        // A whole-world mosaic whose colour is its position: red across, green down.
+        let side = 1024u32;
+        let mut mosaic = tiny_skia::Pixmap::new(side, side).unwrap();
+        for (i, px) in mosaic.data_mut().as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let (x, y) = (i as u32 % side, i as u32 / side);
+            px.copy_from_slice(&[(x / 4) as u8, (y / 4) as u8, 128, 255]);
+        }
+        let frame = rustgis_tiles::Frame { left: -half, top: half, m_per_px: 2.0 * half / f64::from(side), ppp: 1.0 };
+        for (lon, lat, res) in [
+            (10.0, 45.0, 2_000.0),
+            (10.0, 20.0, 40_000.0),
+            (179.0, -30.0, 5_000.0),
+            (30.0, 80.0, 15_000.0),
+            (-60.0, -84.0, 4_000.0),
+            (0.0, 85.0, 800.0),
+        ] {
+            let camera = Camera { center: lonlat_to_merc(Coord::new(lon, lat)), res, bearing: 0.0, pitch: 0.0 };
+            let g = rustgis_map::globe::Globe::new(&camera, 300.0, 200.0);
+            let to_lonlat = |x: f64, y: f64| g.inverse(x, y);
+            let to_merc = |c: Coord| lonlat_to_merc(Coord::new(c.x, c.y.clamp(-rustgis_geom::MAX_LAT, rustgis_geom::MAX_LAT)));
+            let mut fast = tiny_skia::Pixmap::new(300, 200).unwrap();
+            super::warp(&mut fast, &mosaic, &frame, &to_lonlat, &to_merc);
+            let (mut drawn, mut worst) = (0, 0);
+            for y in 0..200u32 {
+                for x in 0..300u32 {
+                    let got = fast.pixel(x, y).unwrap();
+                    let Some(m) = to_lonlat(f64::from(x) + 0.5, f64::from(y) + 0.5).map(to_merc) else {
+                        assert_eq!(got.alpha(), 0, "drawn off the globe at {x}, {y}");
+                        continue;
+                    };
+                    let (mx, my) =
+                        (((m.x - frame.left) / frame.m_per_px).clamp(0.0, 1023.0), ((frame.top - m.y) / frame.m_per_px).clamp(0.0, 1023.0));
+                    let want = ((mx as u32 / 4) as i32, (my as u32 / 4) as i32);
+                    assert_eq!(got.alpha(), 255, "left out at {x}, {y}");
+                    drawn += 1;
+                    worst = worst.max((i32::from(got.red()) - want.0).abs()).max((i32::from(got.green()) - want.1).abs());
+                }
+            }
+            assert!(drawn > 1000, "the globe at {lon}, {lat} is in view");
+            assert!(worst <= 1, "a pixel {worst} mosaic steps off at {lon}, {lat}");
+        }
+    }
 
     /// Requests that are never answered: their tiles stay on their way.
     static PARKED: std::sync::Mutex<Vec<rustgis_tiles::cache::Done>> = std::sync::Mutex::new(Vec::new());

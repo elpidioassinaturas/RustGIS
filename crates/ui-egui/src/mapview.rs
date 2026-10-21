@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use crate::theme::{Tokens, c32, regular, semibold};
 use crate::{RustGisApp, icons};
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 struct Key {
     rev: u64,
     cam: (i64, i64, i64, i64, i64),
@@ -109,6 +109,9 @@ pub struct MapView {
     label_map: Vec<Option<Coord>>,
     /// The camera the labels were placed for.
     label_camera: Camera,
+    /// The map revision whose GPU scene had only live tile layers (#635): tiles arriving draw
+    /// no new scene of it.
+    live_rev: Option<u64>,
     last_interaction: f64,
     /// The view's size (physical pixels) on the last frame, and when it last changed: while a
     /// side pane is dragged the last frame is shown as it is, drawn again once the size holds.
@@ -206,6 +209,7 @@ impl Default for MapView {
             labels: Vec::new(),
             label_lonlat: Vec::new(),
             label_camera: Camera::world(),
+            live_rev: None,
             last_interaction: -10.0,
             view_px: [0, 0],
             resized_at: -10.0,
@@ -301,6 +305,12 @@ impl MapView {
     /// tests).
     pub fn moves_on_gpu(&self) -> bool {
         self.gpu_frame.as_ref().is_some_and(|f| !f.has_images)
+    }
+
+    /// Whether the map shown places its tile layers for every frame (#635): its tiles are for the
+    /// camera shown, whatever camera its scene was drawn for (diagnostics and tests).
+    pub fn shows_live_tiles(&self) -> bool {
+        self.gpu_frame.as_ref().is_some_and(|f| f.tiles_live)
     }
 
     /// How long the last map draw took, in milliseconds.
@@ -451,6 +461,8 @@ fn split_view(app: &mut RustGisApp, ui: &mut Ui, other: usize, rect: Rect, t: &T
                 buffers: bufs.clone(),
                 target: app.map.gpu_target_split.clone(),
                 uv: Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                live: None,
+                repaint: None,
             },
         ));
         for l in labels {
@@ -574,7 +586,11 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         rustgis_engine::map::source::set_waker(move || ctx.request_repaint());
     });
     let mut key = key;
-    if fetches_tiles(app.session.map()) {
+    // A scene whose tile layers are all live places them for every frame: tiles arriving need no
+    // new scene (#635).
+    if gpu_ok && cam.bearing == 0.0 && cam.pitch == 0.0 && app.map.live_rev == Some(app.session.revision) {
+        key.tiles = 0;
+    } else if fetches_tiles(app.session.map()) {
         key.tiles = rustgis_engine::render::rustgis_tiles::cache::generation();
         if let Some(old) = app.map.key
             && old.tiles != key.tiles
@@ -623,6 +639,28 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     if !settling && let Some((_, done)) = app.map.tilt_settle.take() {
         app.session.map_mut().adopt_caches(&done.map);
     }
+    // A GPU scene that re-projects (no pictures) of this map, at this size: a camera move needs
+    // no picture drawn on the CPU meanwhile. One whose tile layers are all live, without labels
+    // to place again, that still holds the view at about its zoom needs no new scene at all:
+    // its tiles are placed for every frame (#635).
+    let reprojects = gpu_ok
+        && app.map.gpu_frame.as_ref().is_some_and(|f| !f.has_images && f.fits(&cam))
+        && app.map.key.is_some_and(|k| k.rev == key.rev && k.size == key.size && k.sources == key.sources && !k.draft);
+    let live_holds = reprojects
+        && app.map.gpu_frame.as_ref().is_some_and(|f| f.tiles_live)
+        && app.map.labels.is_empty()
+        && scene_covers(app.map.tex_camera, cam, w, h)
+        && (0.5..=2.0).contains(&(cam.res / app.map.tex_camera.res.max(1e-12)));
+    if settling && live_holds && app.map.key != Some(key) {
+        if let (Some(gf), Some(rs)) = (&app.map.gpu_frame, &app.map.render_state) {
+            gf.set_camera(&rs.queue, &cam);
+        }
+        app.map.key = Some(key);
+        if app.map.camera_moved {
+            app.session.record_extent();
+            app.map.camera_moved = false;
+        }
+    }
     if settling {
         let same_view = |a: Key, b: Key| Key { tiles: b.tiles, sources: b.sources, ..a } == b;
         if let Some((k, done)) = app.map.tilt_settle.take() {
@@ -664,7 +702,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             if tilted {
                 rustgis_engine::render::sync_tilted_view(app.session.map_mut(), &view);
             }
-            let backend = if gpu_ok { rustgis_engine::render::Backend::Gpu } else { rustgis_engine::render::Backend::Cpu };
+            let backend = if gpu_ok { rustgis_engine::render::Backend::GpuLive } else { rustgis_engine::render::Backend::Cpu };
             app.map.tilt_settle.start_backend(ui.ctx(), key, app.session.map().clone(), view, backend);
         }
         let shown = (app.map.texture.is_some() || app.map.gpu_frame.is_some())
@@ -677,7 +715,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 draped = app.map.drape.prepare(ui.ctx(), app.session.map_mut(), drape_key, tiles, w, h, ppp, time);
             } else if tilted {
                 tilt_draped = app.map.tilt_drape.prepare(ui.ctx(), app.session.map_mut(), drape_key, tiles, w, h, ppp, time);
-            } else if app.map.preview_attempt != Some(key) {
+            } else if app.map.preview_attempt != Some(key) && !reprojects {
                 // A small preview shows a visibility change immediately. The exact frame is
                 // already on its way. Even a failed preview is attempted only once per key.
                 app.map.preview_attempt = Some(key);
@@ -796,7 +834,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             let out = match (&app.map.gpu_renderer, &app.map.render_state) {
                 (Some(_), Some(_)) => {
                     let (out, s) = drawing(interacting, || {
-                        rustgis_engine::render::render_backend(app.session.map_mut(), &view, rustgis_engine::render::Backend::Gpu)
+                        rustgis_engine::render::render_backend(app.session.map_mut(), &view, rustgis_engine::render::Backend::GpuLive)
                     });
                     lacks = s;
                     out
@@ -881,6 +919,27 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     // backend only serves flat maps, so the globe's drape never meets it.
     // Not under the tilted map's drape: a flat GPU frame from before the tilt would cover it.
     if let (Some(gf), Some(gr)) = (app.map.gpu_frame.as_ref().filter(|_| !tilt_draped), &app.map.gpu_renderer) {
+        // Live tile layers, placed for this frame's camera; drawn again while tiles are uploaded.
+        let (live_frame, live_pending) = match gf.live_frame(cam) {
+            Some((f, pending, declined)) => {
+                // A layer no longer drawn live (its style turned out to draw more than raster
+                // tiles): the map is drawn again, as tiles arriving would draw it.
+                if declined && app.map.live_rev.take().is_some() {
+                    ui.ctx().request_repaint();
+                }
+                (Some(f), pending)
+            }
+            None => (None, false),
+        };
+        let backlog = live_frame.is_some() && gr.live_backlog.load(std::sync::atomic::Ordering::Relaxed);
+        if backlog {
+            ui.ctx().request_repaint();
+        }
+        // A scene whose tiles are all live is never drawn again for tiles arriving: whether the
+        // map is still filling in is this frame's (tiles on their way, pictures to upload).
+        if gf.tiles_live {
+            app.map.filling = (live_pending || backlog) && !moving && app.ws.playing.is_none();
+        }
         painter.add(egui_wgpu::Callback::new_paint_callback(
             rect,
             crate::mapgpu::SceneCallback {
@@ -896,6 +955,8 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 } else {
                     Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
                 },
+                live: live_frame,
+                repaint: Some(ui.ctx().clone()),
             },
         ));
     } else if let Some(tex) = app.map.texture.as_ref().filter(|_| !draped && !tilt_draped) {
@@ -970,6 +1031,7 @@ fn show_gpu_frame(app: &mut RustGisApp, scene: rustgis_engine::render::gpu_scene
     ) else {
         return false;
     };
+    app.map.live_rev = bufs.tiles_live.then_some(key.rev);
     app.map.gpu_frame = Some(std::sync::Arc::new(bufs));
     app.map.labels = scene.labels;
     app.map.labels.splice(0..0, scene.unplaced);
@@ -1148,6 +1210,23 @@ fn draw_label(p: &egui::Painter, l: &PlacedLabel, at: Pos2) {
     } else {
         Align2::CENTER_CENTER
     };
+    // A label turned with the map (along a street): turned about its centre, at `at`.
+    if let Some(angle) = l.angle.filter(|a| a.is_finite() && a.abs() > 1e-3) {
+        let (pos, _) = place_galley(Align2::CENTER_CENTER, at, &galley);
+        let shape = |offset: egui::Vec2, color: Color32| {
+            egui::epaint::TextShape::new(pos + offset, galley.clone(), color)
+                .with_override_text_color(color)
+                .with_angle_and_anchor(angle, Align2::CENTER_CENTER)
+        };
+        if let Some(h) = l.halo {
+            let hc = c32(h);
+            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-0.8, -0.8), (0.8, 0.8), (-0.8, 0.8), (0.8, -0.8)] {
+                p.add(shape(vec2(dx, dy), hc));
+            }
+        }
+        p.add(shape(egui::Vec2::ZERO, c32(l.color)));
+        return;
+    }
     let (pos, r) = place_galley(anchor, at, &galley);
     // A selected text graphic: framed as laid out, under the text.
     if l.framed {

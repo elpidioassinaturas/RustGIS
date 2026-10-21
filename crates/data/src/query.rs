@@ -42,7 +42,7 @@ enum Tok {
 }
 
 /// Longest clause accepted (characters).
-const MAX_LEN: usize = 10_000;
+pub const MAX_LEN: usize = 10_000;
 /// Deepest nesting accepted.
 const MAX_DEPTH: usize = 64;
 /// Most terms in one AND/OR chain (chains nest left, so this also bounds recursion).

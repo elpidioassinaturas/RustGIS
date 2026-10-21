@@ -173,9 +173,14 @@ fn delete_field(s: &mut Session, p: &Json) -> CmdResult {
     if l.renderer.field().is_some_and(|f| f.eq_ignore_ascii_case(&removed)) {
         l.renderer = rustgis_map::Renderer::Single(l.renderer.base_symbol());
     }
-    if l.labels.field.eq_ignore_ascii_case(&removed) {
-        l.labels = rustgis_map::Labeling { enabled: false, ..rustgis_map::Labeling::default_for(&l.dataset) };
+    // The layer's labels turn off if the Default class was on it, which starts again from the
+    // layer's first name-like field (keeping its name, clause and visibility). Another class on it
+    // labels with Default's field instead. A class clause naming it no longer reads, and takes no
+    // features, which go on to the next class: it is kept to edit, not dropped with its text symbol.
+    if l.labels.default.field.eq_ignore_ascii_case(&removed) {
+        l.labels.restart_default(&l.dataset);
     }
+    l.labels.repoint_missing_fields(&l.dataset);
     if let Some(q) = &l.definition_query
         && rustgis_data::query::parse(q, &l.dataset).is_err()
     {

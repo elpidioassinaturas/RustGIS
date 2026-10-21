@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use rustgis_data::{Dataset, Geometry, GeometryType};
 use rustgis_geom::Coord;
-use rustgis_map::symbology::Renderer;
+use rustgis_map::symbology::{MAX_LABEL_CLASSES, Renderer};
 use rustgis_map::{Layer, Map, Rgba};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -317,6 +317,8 @@ fn share(s: &mut Session, p: &Value, kind: &str) -> CmdResult {
         }
     };
     s.notify(format!("Shared {name} to {path}"), false);
+    // After it, so the status bar, which shows the last notice, keeps saying it.
+    note_label_classes(s, kind, p);
     Ok(json!({"item": id, "path": path, "bytes": bytes.len()}))
 }
 
@@ -545,7 +547,34 @@ onresize=draw;draw();
     ))
 }
 
+/// Says what a web layer or style (`kind`) leaves out of the labels: it labels every feature with
+/// the Default class's field and text symbol, since no SQL clause has a MapLibre filter written
+/// for it, and has no labels when Default is hidden (though the layer's labels are on). Run once
+/// the share is made, so its own notice comes after the one saying it's made.
+pub(crate) fn note_label_classes(s: &mut Session, kind: &str, p: &Value) {
+    if !matches!(kind, "webLayer" | "webStyle") {
+        return;
+    }
+    let Some(l) = s.layer_id(p).ok().and_then(|id| s.map().layer(id)).filter(|l| l.labels.enabled) else { return };
+    let n = l.labels.classes.len().min(MAX_LABEL_CLASSES);
+    let clause = l.labels.default.where_.as_deref().is_some_and(|w| !w.trim().is_empty());
+    let text = if !l.labels.default.visible {
+        Some(match n {
+            0 => format!("{}'s style has no labels: its Default class is hidden.", l.name),
+            _ => format!("{}'s style has no labels: its Default class is hidden, and its other label classes aren't in it.", l.name),
+        })
+    } else {
+        (n > 0 || clause).then(|| {
+            format!("{}'s style labels every feature with its Default class; its label classes' SQL clauses aren't in it.", l.name)
+        })
+    };
+    if let Some(text) = text {
+        s.notify(text, false);
+    }
+}
+
 /// A MapLibre (version 8) style for a layer, its symbology as expressions over a GeoJSON source.
+/// Its labels are the Default class's, none when it is hidden (see `note_label_classes`).
 pub fn web_style(l: &Layer) -> Value {
     let src = safe(&l.name);
     let gt = l.geometry_type();
@@ -614,10 +643,10 @@ pub fn web_style(l: &Layer) -> Value {
                 "circle-color": color(|s| s.fill), "circle-radius": radius, "circle-stroke-color": color(|s| s.stroke), "circle-stroke-width": width, "circle-opacity": opacity}}));
         }
     }
-    if l.labels.enabled && !l.labels.field.is_empty() {
+    if l.labels.enabled && l.labels.default.visible && !l.labels.default.field.is_empty() {
         layers.push(json!({"id": format!("{src}-labels"), "type": "symbol", "source": src,
-            "layout": {"text-field": ["to-string", prop(&l.labels.field)], "text-size": l.labels.size},
-            "paint": {"text-color": l.labels.color.hex(), "text-halo-color": "#ffffff", "text-halo-width": if l.labels.halo { 1.5 } else { 0.0 }}}));
+            "layout": {"text-field": ["to-string", prop(&l.labels.default.field)], "text-size": l.labels.default.size},
+            "paint": {"text-color": l.labels.default.color.hex(), "text-halo-color": "#ffffff", "text-halo-width": if l.labels.default.halo { 1.5 } else { 0.0 }}}));
     }
     let (minzoom, maxzoom) = zoom_range(l);
     for layer in &mut layers {

@@ -167,7 +167,12 @@ fn zooming_a_planet_with_raster_tiles_reuses_the_gpu_frame() {
     assert_eq!(h.state().map.full_frame_camera(), before, "navigation must reuse the uploaded image instead of redrawing every frame");
     assert_gpu_picture_matches_cpu(&mut h);
     wait_for_frame(&mut h);
-    assert_eq!(h.state().map.full_frame_camera(), h.state().session.map().camera, "settling sharpens the image");
+    // Live tiles are placed for every frame: sharp at rest without drawing the scene again (#635).
+    if h.state().map.shows_live_tiles() {
+        assert_gpu_picture_matches_cpu(&mut h);
+    } else {
+        assert_eq!(h.state().map.full_frame_camera(), h.state().session.map().camera, "settling sharpens the image");
+    }
     // Start from a CPU preview, then force the first GPU frame to fill a pan gap. Its
     // oversized picture must use cropped UVs immediately, including this very first frame.
     h.state_mut().map.invalidate();
@@ -305,7 +310,10 @@ fn raster_tiles_move_with_the_camera_on_the_gpu() {
         }
         wheel(&mut h, 1);
     }
-    assert_ne!(h.state().map.full_frame_camera(), before, "zoomed in past the tiles' own zoom, the new zoom's tiles are placed");
+    // Live tiles take the new zoom's tiles in the same scene (#635); otherwise a new scene does.
+    if !h.state().map.shows_live_tiles() {
+        assert_ne!(h.state().map.full_frame_camera(), before, "zoomed in past the tiles' own zoom, the new zoom's tiles are placed");
+    }
     assert!(h.state().map.moves_on_gpu());
     assert_gpu_picture_matches_cpu(&mut h);
 }

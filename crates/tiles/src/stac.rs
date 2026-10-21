@@ -47,6 +47,10 @@ pub struct Asset {
     pub media_type: String,
     pub roles: Vec<String>,
     pub title: String,
+    /// Its first band's `raster:bands` scale and offset: a stored value `v` means
+    /// `v · scale + offset`.
+    pub scale: Option<f64>,
+    pub offset: Option<f64>,
 }
 
 /// An item: a scene (or tile) with its footprint, time and assets.
@@ -71,6 +75,10 @@ pub struct Item {
     /// Its properties, to show: the first hundred plain values (not objects or arrays), long
     /// text cut.
     pub properties: Option<Value>,
+    /// The tile of a grid it covers, when its properties name one (`grid:code`, `s2:mgrs_tile`,
+    /// the MGRS extension's zone, band and square, Landsat's WRS path and row, Brazil Data Cube's
+    /// `bdc:tiles`): items of a data cube on one tile, at different dates.
+    pub tile: Option<String>,
 }
 
 /// What a search asks for.
@@ -342,6 +350,8 @@ fn item(f: &Value, from: Option<&str>) -> Option<Item> {
                     .map(str::to_string)
                     .collect(),
                 title: text(a.get("title")),
+                scale: band_number(a, "scale"),
+                offset: band_number(a, "offset"),
             })
         })
         .collect();
@@ -373,7 +383,36 @@ fn item(f: &Value, from: Option<&str>) -> Option<Item> {
         url,
         origin: from.map(str::to_string),
         properties,
+        tile: props.and_then(tile_of),
     })
+}
+
+/// The grid tile an item's properties name (see [`Item::tile`]), as text of sane length.
+fn tile_of(p: &Value) -> Option<String> {
+    let plain = |v: &Value| match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Array(a) => a.first().and_then(|x| x.as_str()).map(str::to_string),
+        _ => None,
+    };
+    let given = |k: &str| p.get(k).and_then(plain).filter(|t| !t.trim().is_empty());
+    let wrs = || Some(format!("{}/{}", given("landsat:wrs_path")?, given("landsat:wrs_row")?));
+    // The MGRS extension's square (`LS`) repeats in every zone and band: the three make the tile.
+    let mgrs = || Some(format!("{}{}{}", given("mgrs:utm_zone")?, given("mgrs:latitude_band")?, given("mgrs:grid_square")?));
+    // The first key with a value: one present but empty doesn't stop the others being tried.
+    ["grid:code", "s2:mgrs_tile"]
+        .iter()
+        .find_map(|k| given(k))
+        .or_else(mgrs)
+        .or_else(|| ["bdc:tiles", "bdc:tile"].iter().find_map(|k| given(k)))
+        .or_else(wrs)
+        .map(|t| t.chars().take(64).collect())
+}
+
+/// An asset's first band's number `key` (`scale`, `offset`): from `raster:bands`, else from
+/// `eo:bands`, where some catalogs (Brazil Data Cube's) put it.
+fn band_number(asset: &Value, key: &str) -> Option<f64> {
+    ["raster:bands", "eo:bands"].iter().find_map(|b| asset.get(*b)?.as_array()?.first()?.get(key)?.as_f64()).filter(|v| v.is_finite())
 }
 
 /// How many numbers a GeoJSON geometry holds (bounded by how deep it goes).
@@ -766,6 +805,8 @@ mod tests {
             media_type: String::new(),
             roles: vec![],
             title: String::new(),
+            scale: None,
+            offset: None,
         }];
         // A Planetary Computer asset is added after signing it with its container's token.
         let (_, href) = pc.asset_href(None).unwrap();
@@ -847,5 +888,28 @@ mod tests {
         assert_eq!(resolve("https://x.org/a", "//y.org/d.tif").as_deref(), Some("https://y.org/d.tif"));
         assert_eq!(resolve("https://x.org/a", "s3://b/k").as_deref(), Some("s3://b/k"));
         assert_eq!(resolve("https://x.org/a", ""), None);
+    }
+
+    /// A data cube's tile and a band's scale (#559): the grid codes catalogs use, and
+    /// `raster:bands` before `eo:bands`.
+    #[test]
+    fn tiles_and_band_scales() {
+        let p = |v: Value| tile_of(&v);
+        assert_eq!(p(serde_json::json!({"grid:code": "MGRS-32TLS"})).as_deref(), Some("MGRS-32TLS"));
+        assert_eq!(p(serde_json::json!({"s2:mgrs_tile": "32TLS"})).as_deref(), Some("32TLS"));
+        assert_eq!(p(serde_json::json!({"bdc:tiles": ["020019"]})).as_deref(), Some("020019"));
+        assert_eq!(p(serde_json::json!({"landsat:wrs_path": "220", "landsat:wrs_row": 71})).as_deref(), Some("220/71"));
+        assert_eq!(p(serde_json::json!({"platform": "sentinel-2a"})), None);
+        // The MGRS extension: the square alone repeats from zone to zone, so it is never the tile.
+        let square = |zone: &str| serde_json::json!({"mgrs:utm_zone": zone, "mgrs:latitude_band": "T", "mgrs:grid_square": "LS"});
+        assert_eq!(p(square("32")).as_deref(), Some("32TLS"));
+        assert_eq!(p(square("33")).as_deref(), Some("33TLS"));
+        assert_eq!(p(serde_json::json!({"mgrs:grid_square": "LS"})), None);
+        // An empty code doesn't hide the next one.
+        assert_eq!(p(serde_json::json!({"grid:code": "", "bdc:tiles": ["020019"]})).as_deref(), Some("020019"));
+        let a = serde_json::json!({"raster:bands": [{"scale": 0.0001, "offset": -0.1}], "eo:bands": [{"scale": 2.0}]});
+        assert_eq!((band_number(&a, "scale"), band_number(&a, "offset")), (Some(0.0001), Some(-0.1)));
+        assert_eq!(band_number(&serde_json::json!({"eo:bands": [{"scale": 0.0001}]}), "scale"), Some(0.0001));
+        assert_eq!(band_number(&serde_json::json!({"type": "image/tiff"}), "scale"), None);
     }
 }

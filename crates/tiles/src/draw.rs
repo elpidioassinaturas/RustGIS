@@ -17,7 +17,7 @@ use crate::cache::{self, Payload, State, Want};
 use crate::mvt::GeomKind;
 use crate::source::{Resolve, Resolved, Spec, resolve};
 use crate::sprite::{self, Load, Sprite};
-use crate::style::{FeatureCtx, LayerKind, Rgba, Source, StyleLayer, Val};
+use crate::style::{FeatureCtx, LayerKind, Rgba, Source, StyleLayer};
 use crate::template::{self, Placed, TileId};
 
 /// Where the pixmap is: the Web Mercator point at its top-left corner and the metres per
@@ -39,37 +39,7 @@ impl Frame {
     }
 }
 
-/// A label from a symbol layer, in logical points, for the renderer to place with its own.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Label {
-    pub text: String,
-    pub x: f32,
-    pub y: f32,
-    pub size: f32,
-    pub color: Rgba,
-    pub halo: Option<Rgba>,
-    pub bold: bool,
-    /// Higher places first.
-    pub priority: f32,
-    /// Where the text sits against the point, in text-box sizes (`text-anchor`): `[0.5, 0]`
-    /// puts its left edge on the point, `[0, 0.5]` its top edge.
-    pub anchor: [f32; 2],
-    /// How far the text is moved, in ems (`text-offset`).
-    pub offset: [f32; 2],
-    /// The icon drawn at the point (`icon-image`). A label may have an icon and no text.
-    pub icon: Option<LabelIcon>,
-}
-
-/// An icon from the style's sprite, in logical points.
-#[derive(Clone, Debug, PartialEq)]
-pub struct LabelIcon {
-    pub image: Arc<Pixmap>,
-    pub width: f32,
-    pub height: f32,
-    /// The icon's centre, from the point (`icon-offset`).
-    pub dx: f32,
-    pub dy: f32,
-}
+pub use crate::symbols::{Collide, Label, LabelIcon};
 
 /// What drawing a layer found.
 #[derive(Debug, Default)]
@@ -227,12 +197,23 @@ pub(crate) fn draw_layers(
             LayerKind::Symbol if pass != Pass::Shapes => {
                 let sheet = if layer.has_layout("icon-image") { sprite(&mut out.pending) } else { None };
                 for it in list {
-                    collect_labels(&mut out.labels, it, layer, frame, zoom, placement_rank(li), sheet.as_deref(), (w as f32, h as f32));
+                    crate::symbols::collect(
+                        &mut out.labels,
+                        it,
+                        layer,
+                        frame,
+                        zoom,
+                        crate::symbols::placement_rank(li),
+                        sheet.as_deref(),
+                        (w as f32, h as f32),
+                    );
                 }
             }
             _ => {}
         }
     }
+    // The cap keeps the labels placed first, whichever layers they came from.
+    crate::symbols::keep_first(&mut out.labels, crate::symbols::MAX_LABELS);
 }
 
 /// One raster tile placed on the map, for a renderer that draws each tile itself (the GPU map
@@ -266,9 +247,30 @@ pub struct PlacedTiles {
 /// as pictures of their shapes (see `picture`); their labels are collected for a `labels`-sized
 /// pixmap at `frame` when that is given.
 pub fn place(spec: &Spec, opacity: f32, frame: &Frame, view: &Extent, reach: &Extent, labels: Option<(u32, u32)>) -> Option<PlacedTiles> {
+    place_as(spec, opacity, frame, view, reach, labels, true)
+}
+
+/// `spec`'s raster tiles placed over `view` and out to `reach`, as [`place`] places them, or
+/// `None` when it draws anything but raster tiles. Cheap (cache lookups, nothing drawn): the GPU
+/// map's tile layer places them again for every frame it shows (#635).
+pub fn place_raster(spec: &Spec, opacity: f32, frame: &Frame, view: &Extent, reach: &Extent) -> Option<PlacedTiles> {
+    place_as(spec, opacity, frame, view, reach, None, false)
+}
+
+fn place_as(
+    spec: &Spec,
+    opacity: f32,
+    frame: &Frame,
+    view: &Extent,
+    reach: &Extent,
+    labels: Option<(u32, u32)>,
+    pictures: bool,
+) -> Option<PlacedTiles> {
     let mut out = PlacedTiles::default();
     let r = match resolve(spec) {
         Resolve::Ready(r) => r,
+        // A style still loading may draw more than raster tiles: not placed raster-only yet.
+        Resolve::Pending if !pictures => return None,
         Resolve::Pending => {
             out.pending = true;
             return Some(out);
@@ -282,7 +284,8 @@ pub fn place(spec: &Spec, opacity: f32, frame: &Frame, view: &Extent, reach: &Ex
     if !(frame.m_per_px.is_finite() && frame.m_per_px > 0.0) || opacity <= 0.0 {
         return Some(out);
     }
-    if let Some(pictures) = crate::picture::cover(&r, frame, view, Some(reach), &mut out.pending) {
+    // Without pictures, a style drawing shapes is left to the check below (no raster layers only).
+    if let Some(pictures) = pictures.then(|| crate::picture::cover(&r, frame, view, Some(reach), &mut out.pending)).flatten() {
         let opacity = opacity.clamp(0.0, 1.0);
         out.tiles = pictures.into_iter().map(|it| Placement { picture: it.payload, at: it.at, clip: it.clip, opacity }).collect();
         if let Some(size) = labels {
@@ -576,7 +579,7 @@ fn color(c: Rgba, opacity: f32) -> tiny_skia::Color {
 
 /// The square an item draws in, on whole pixels: neighbouring tiles then meet on a pixel edge,
 /// so anti-aliased fills cut there neither leave a seam nor overlap.
-fn clip_rect(it: &Item, frame: &Frame) -> Option<Rect> {
+pub(crate) fn clip_rect(it: &Item, frame: &Frame) -> Option<Rect> {
     let (x0, y0) = frame.px(it.clip.min_x, it.clip.max_y);
     let (x1, y1) = frame.px(it.clip.max_x, it.clip.min_y);
     Rect::from_ltrb(x0.round(), y0.round(), x1.round(), y1.round())
@@ -643,7 +646,7 @@ fn copy_over(pm: &mut Pixmap, img: &Pixmap, clip: Rect, at: (f32, f32), k: f32, 
 
 /// A tile's geometry in pixels, clipped to the item's square (lines and polygons) or kept only
 /// inside it (points).
-fn to_px(it: &Item, layer_extent: u32, frame: &Frame) -> impl Fn(&[f32; 2]) -> (f32, f32) + use<> {
+pub(crate) fn to_px(it: &Item, layer_extent: u32, frame: &Frame) -> impl Fn(&[f32; 2]) -> (f32, f32) + use<> {
     let (x0, y0) = frame.px(it.at.min_x, it.at.max_y);
     let k = (TileId::span(it.z) / frame.m_per_px) as f32 / layer_extent.max(1) as f32;
     move |p: &[f32; 2]| (x0 + p[0] * k, y0 + p[1] * k)
@@ -909,112 +912,6 @@ fn draw_vector(pm: &mut Pixmap, it: &Item, layer: &StyleLayer, frame: &Frame, zo
     }
 }
 
-fn collect_labels(
-    out: &mut Vec<Label>,
-    it: &Item,
-    layer: &StyleLayer,
-    frame: &Frame,
-    zoom: f32,
-    layer_rank: f32,
-    sheet: Option<&Sprite>,
-    view: (f32, f32),
-) {
-    if out.len() >= 4000 || !matches!(layer.symbol_placement(&FeatureCtx::zoom_only(zoom)), crate::style::SymbolPlacement::Point) {
-        return;
-    }
-    let Payload::Vector(tile) = &*it.payload else { return };
-    let Some(src_layer) = layer.source_layer.as_deref() else { return };
-    let Some(l) = tile.layers.iter().find(|l| l.name == src_layer) else { return };
-    let Some(clip) = clip_rect(it, frame) else { return };
-    // Within the tile's square and on screen: a tile reaches far past the view when zoomed in,
-    // and labels collected there would only use up the allowance.
-    let bounds = [clip.left().max(0.0), clip.top().max(0.0), clip.right().min(view.0), clip.bottom().min(view.1)];
-    let to = to_px(it, l.extent, frame);
-    let ppp = frame.ppp.max(0.1);
-    for f in l.features.iter().filter(|f| f.kind == GeomKind::Point) {
-        let ctx = FeatureCtx { zoom, kind: f.kind, id: f.id, props: &f.props };
-        if !layer.matches(&ctx) {
-            continue;
-        }
-        // Lines are kept: the renderer drops those its font can't draw (a name in another script).
-        let text = layer.text_field(&ctx).map(|t| t.trim().to_string()).unwrap_or_default();
-        let icon = sheet.and_then(|s| icon(s, layer, &ctx));
-        if text.is_empty() && icon.is_none() {
-            continue;
-        }
-        let Some(pt) = f.geometry.first().and_then(|g| g.first()) else { continue };
-        let (x, y) = to(pt);
-        if !inside(x, y, bounds) {
-            continue;
-        }
-        let size = layer.text_size(&ctx).clamp(4.0, 64.0);
-        let halo = layer.text_halo_color(&ctx).filter(|c| c[3] > 0 && layer.text_halo_width(&ctx) > 0.0);
-        let bold = layer.text_font(&ctx).iter().any(|f| f.contains("Bold") || f.contains("Semibold") || f.contains("Medium"));
-        let sort = layer.symbol_sort_key(&ctx).unwrap_or(0.0).clamp(-1e5, 1e5);
-        out.push(Label {
-            text: text.chars().take(80).collect(),
-            x: x / ppp,
-            y: y / ppp,
-            size: size * 0.85,
-            color: layer.text_color(&ctx).unwrap_or([0, 0, 0, 255]),
-            halo,
-            bold,
-            priority: layer_rank * 1e5 - sort,
-            anchor: text_anchor(layer, &ctx),
-            offset: pair(layer.layout_value("text-offset", &ctx)).unwrap_or([0.0, 0.0]),
-            icon,
-        });
-        if out.len() >= 4000 {
-            return;
-        }
-    }
-}
-
-/// How early a symbol layer's labels are placed: later layers first, as in MapLibre (styles
-/// list their most important labels last, like Liberty's POIs by rank and then its cities).
-fn placement_rank(layer_index: usize) -> f32 {
-    layer_index as f32
-}
-
-/// A label's icon (`icon-image`), when the sprite has it, sized by `icon-size` and moved by
-/// `icon-offset`; an SDF icon takes `icon-color`.
-fn icon(sheet: &Sprite, layer: &StyleLayer, ctx: &FeatureCtx) -> Option<LabelIcon> {
-    let name = layer.layout_value("icon-image", ctx)?;
-    let name = name.as_str().filter(|n| !n.is_empty())?;
-    let img = sheet.image(name, layer.paint_value("icon-color", ctx).and_then(|c| c.as_color()))?;
-    let k = layer.layout_value("icon-size", ctx).and_then(|v| v.as_f64()).filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.0, 8.0) as f32;
-    let (w, h) = (img.pixmap.width() as f32 / img.ratio * k, img.pixmap.height() as f32 / img.ratio * k);
-    if w < 0.5 || h < 0.5 {
-        return None;
-    }
-    let [dx, dy] = pair(layer.layout_value("icon-offset", ctx)).unwrap_or([0.0, 0.0]);
-    Some(LabelIcon { image: img.pixmap, width: w, height: h, dx: dx * k, dy: dy * k })
-}
-
-/// Two finite numbers (`[x, y]`), clamped to a sane range.
-fn pair(v: Option<Val>) -> Option<[f32; 2]> {
-    let Val::Arr(a) = v? else { return None };
-    let n = |i: usize| a.get(i).and_then(Val::as_f64).filter(|v| v.is_finite()).map(|v| v.clamp(-1000.0, 1000.0) as f32);
-    Some([n(0)?, n(1)?])
-}
-
-/// `text-anchor` as the text box's shift from the point, in box sizes.
-fn text_anchor(layer: &StyleLayer, ctx: &FeatureCtx) -> [f32; 2] {
-    let v = layer.layout_value("text-anchor", ctx);
-    let (x, y) = match v.as_ref().and_then(Val::as_str).unwrap_or("center") {
-        "left" => (0.5, 0.0),
-        "right" => (-0.5, 0.0),
-        "top" => (0.0, 0.5),
-        "bottom" => (0.0, -0.5),
-        "top-left" => (0.5, 0.5),
-        "top-right" => (-0.5, 0.5),
-        "bottom-left" => (0.5, -0.5),
-        "bottom-right" => (-0.5, -0.5),
-        _ => (0.0, 0.0),
-    };
-    [x, y]
-}
-
 fn inside(x: f32, y: f32, b: [f32; 4]) -> bool {
     x >= b[0] && x < b[2] && y >= b[1] && y < b[3]
 }
@@ -1198,7 +1095,7 @@ fn area(r: &[(f32, f32)]) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1215,14 +1112,14 @@ mod tests {
     }
 
     /// A one-layer tile ("l") holding `features`, as the item for tile 0/0/0.
-    fn item(features: Vec<crate::mvt::Feature>) -> Item {
+    pub(crate) fn item(features: Vec<crate::mvt::Feature>) -> Item {
         let tile = crate::mvt::Tile { layers: vec![crate::mvt::Layer { name: "l".into(), extent: 4096, features }] };
         let at = TileId { z: 0, x: 0, y: 0 }.extent();
         Item { payload: Arc::new(Payload::Vector(tile)), at, z: 0, clip: at }
     }
 
     /// A sprite of two 4×4 images: red "red" and an SDF "dot".
-    fn sheet() -> Sprite {
+    pub(crate) fn sheet() -> Sprite {
         let mut p = Pixmap::new(8, 4).unwrap();
         p.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 255));
         let index = serde_json::json!({
@@ -1233,7 +1130,7 @@ mod tests {
     }
 
     /// The whole world in a 64×64 pixmap.
-    fn world_frame() -> Frame {
+    pub(crate) fn world_frame() -> Frame {
         let half = crate::template::HALF_WORLD;
         Frame { left: -half, top: half, m_per_px: 2.0 * half / 64.0, ppp: 1.0 }
     }
@@ -1263,52 +1160,6 @@ mod tests {
         .unwrap();
         draw_vector(&mut pm, &item(vec![square]), &missing, &world_frame(), 0.0, Some(&sheet()), &[]);
         assert_eq!(pm.pixel(32, 32).unwrap().alpha(), 0);
-    }
-
-    #[test]
-    fn labels_points_with_icons() {
-        let point = |name: &str| crate::mvt::Feature {
-            id: None,
-            kind: GeomKind::Point,
-            geometry: vec![vec![[2048.0, 2048.0]]],
-            props: vec![("name".into(), crate::mvt::Value::String(name.into())), ("class".into(), crate::mvt::Value::String("dot".into()))],
-        };
-        let layer = StyleLayer::parse(&serde_json::json!({"id": "a", "type": "symbol", "source": "s", "source-layer": "l",
-            "layout": {"text-field": "{name}", "icon-image": "{class}", "icon-size": 2, "text-anchor": "left", "text-offset": [1, 0]},
-            "paint": {"icon-color": "#0000ff"}}))
-        .unwrap();
-        let mut out = Vec::new();
-        collect_labels(&mut out, &item(vec![point("A"), point("")]), &layer, &world_frame(), 0.0, 1.0, Some(&sheet()), (64.0, 64.0));
-        assert_eq!(out.len(), 2, "an icon without text is a label too");
-        let a = &out[0];
-        assert_eq!((a.text.as_str(), a.anchor, a.offset), ("A", [0.5, 0.0], [1.0, 0.0]));
-        let icon = a.icon.as_ref().unwrap();
-        // `{class}` names the image; icon-size doubles it; the SDF icon takes icon-color.
-        assert_eq!((icon.width, icon.height), (8.0, 8.0));
-        let px = icon.image.pixel(1, 1).unwrap();
-        assert_eq!((px.red(), px.blue()), (0, 255));
-        assert!(out[1].text.is_empty() && out[1].icon.is_some());
-    }
-
-    #[test]
-    fn later_layers_place_first() {
-        let point = crate::mvt::Feature {
-            id: None,
-            kind: GeomKind::Point,
-            geometry: vec![vec![[2048.0, 2048.0]]],
-            props: vec![("name".into(), crate::mvt::Value::String("Here".into()))],
-        };
-        let layer = |sort: f64| {
-            StyleLayer::parse(&serde_json::json!({"id": "a", "type": "symbol", "source": "s", "source-layer": "l",
-                "layout": {"text-field": "{name}", "symbol-sort-key": sort}}))
-            .unwrap()
-        };
-        // The same point labelled by style layers 3 and 7: layer 7's label wins, even with a
-        // worse sort key (which only orders labels within a layer).
-        let (mut early, mut late) = (Vec::new(), Vec::new());
-        collect_labels(&mut early, &item(vec![point.clone()]), &layer(0.0), &world_frame(), 0.0, placement_rank(3), None, (64.0, 64.0));
-        collect_labels(&mut late, &item(vec![point]), &layer(50.0), &world_frame(), 0.0, placement_rank(7), None, (64.0, 64.0));
-        assert!(late[0].priority > early[0].priority);
     }
 
     /// A one-feature MVT layer with one string property, `name`.

@@ -58,8 +58,38 @@ const DATA_EXTS: &[&str] = &[
 const CANVAS_ID: &str = "rustgis_canvas";
 const LOADING_ID: &str = "rustgis_loading";
 
+/// The console logger, without the drawing library's warnings. tiny-skia warns of every path
+/// it can't fill, stroke or dash (a vector tile's shapes shrunk to nothing, dashes past its
+/// limits): thousands a frame on a vector tile map, each written to the console with a stack
+/// trace, which made the map crawl and the page run out of memory.
+struct Logger(eframe::WebLogger);
+
+impl log::Log for Logger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        worth_logging(metadata) && self.0.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if worth_logging(record.metadata()) {
+            self.0.log(record);
+        }
+    }
+
+    fn flush(&self) {
+        self.0.flush();
+    }
+}
+
+/// Whether a message is worth the console: of tiny-skia's, only errors.
+fn worth_logging(metadata: &log::Metadata<'_>) -> bool {
+    let target = metadata.target();
+    let tiny_skia = target == "tiny_skia" || target.starts_with("tiny_skia::");
+    !tiny_skia || metadata.level() <= log::Level::Error
+}
+
 pub fn start() {
-    eframe::WebLogger::init(log::LevelFilter::Info).ok();
+    log::set_max_level(log::LevelFilter::Info);
+    log::set_boxed_logger(Box::new(Logger(eframe::WebLogger::new(log::LevelFilter::Info)))).ok();
     wasm_bindgen_futures::spawn_local(async {
         let Some(document) = web_sys::window().and_then(|w| w.document()) else {
             log::error!("no document");
@@ -109,6 +139,13 @@ pub fn start() {
                     };
                     if let Err(e) = app.start(&start) {
                         log::warn!("start-up: {e}");
+                    }
+                    // `?gpu` (or `?gpu=0`) turns the GPU map on (off) for this visit.
+                    if let Some(v) = param(&q, "gpu").or_else(|| flag(&q, "gpu").then(String::new)) {
+                        let on = !matches!(v.as_str(), "0" | "false" | "off");
+                        if let Err(e) = app.run("ui.map.gpu", serde_json::json!({"on": on, "remember": false})) {
+                            log::warn!("?gpu: {e}");
+                        }
                     }
                     // `?lang=de` picks the interface language for this visit.
                     if let Some(code) = q.trim_start_matches('?').split('&').find_map(|kv| kv.strip_prefix("lang=")) {
@@ -422,6 +459,83 @@ fn storage() -> Option<web_sys::Storage> {
     web_sys::window().and_then(|w| w.local_storage().ok().flatten())
 }
 
+/// Decodes a PNG, JPEG or WebP picture with the browser's decoder (`createImageBitmap`, off the
+/// page's thread) into the tile cache's RAW pixels: decoded in WebAssembly instead, a map's
+/// arriving tiles held up its frames for tens of milliseconds each.
+async fn decode_picture(bytes: &[u8]) -> Result<Vec<u8>, wasm_bindgen::JsValue> {
+    use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::RAW;
+    let window = web_sys::window().ok_or("no window")?;
+    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)?;
+    // No premultiplying or colour conversion on the way in (the canvas premultiplies, so pixels
+    // nearly transparent come back a little rounded: no matter for a map tile).
+    let options = web_sys::ImageBitmapOptions::new();
+    options.set_premultiply_alpha(web_sys::PremultiplyAlpha::None);
+    options.set_color_space_conversion(web_sys::ColorSpaceConversion::None);
+    let bitmap: web_sys::ImageBitmap =
+        wasm_bindgen_futures::JsFuture::from(window.create_image_bitmap_with_blob_and_image_bitmap_options(&blob, &options)?)
+            .await?
+            .dyn_into()?;
+    let (w, h) = (bitmap.width(), bitmap.height());
+    let pixels = read_bitmap(&bitmap, w, h);
+    // Closed whatever happened: its memory goes now, not when the garbage collector finds it.
+    bitmap.close();
+    let pixels = pixels?;
+    let mut raw = Vec::with_capacity(RAW.len() + 8 + pixels.len());
+    raw.extend_from_slice(RAW);
+    raw.extend_from_slice(&w.to_le_bytes());
+    raw.extend_from_slice(&h.to_le_bytes());
+    raw.extend_from_slice(&pixels);
+    Ok(raw)
+}
+
+/// The straight RGBA pixels of a `w × h` bitmap, drawn into a canvas read back on the CPU.
+fn read_bitmap(bitmap: &web_sys::ImageBitmap, w: u32, h: u32) -> Result<Vec<u8>, wasm_bindgen::JsValue> {
+    if w == 0 || h == 0 || w > 4096 || h > 4096 {
+        return Err("a picture of the wrong size".into());
+    }
+    let canvas = web_sys::OffscreenCanvas::new(w, h)?;
+    let attributes = js_sys::Object::new();
+    js_sys::Reflect::set(&attributes, &"willReadFrequently".into(), &true.into())?;
+    let ctx: web_sys::OffscreenCanvasRenderingContext2d =
+        canvas.get_context_with_context_options("2d", &attributes)?.ok_or("no 2D canvas")?.dyn_into()?;
+    ctx.draw_image_with_image_bitmap(bitmap, 0.0, 0.0)?;
+    Ok(ctx.get_image_data(0.0, 0.0, f64::from(w), f64::from(h))?.data().0)
+}
+
+/// How long a tile or document fetch may go without anything coming in: the answer's headers,
+/// or the next part of its body. A slow but steady answer is never cut off; one that stalls is
+/// given up, so it doesn't stay under way forever, holding its server's place in the queue.
+/// Downloads the user asked for have none.
+const STALL_MS: i32 = 30_000;
+
+/// What a step of a fetch waits for, or `None` once it has gone [`STALL_MS`] with nothing (the
+/// fetch is then aborted through `abort`).
+async fn unless_stalled(
+    step: js_sys::Promise,
+    abort: Option<&web_sys::AbortController>,
+) -> Option<Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>> {
+    let Some(abort) = abort else { return Some(wasm_bindgen_futures::JsFuture::from(step).await) };
+    let stalled = wasm_bindgen::JsValue::from_str("rustgis-stalled");
+    let marker = stalled.clone();
+    let handle = std::cell::Cell::new(None);
+    let timer = js_sys::Promise::new(&mut |resolve, _| {
+        if let Some(w) = web_sys::window() {
+            handle.set(w.set_timeout_with_callback_and_timeout_and_arguments_1(&resolve, STALL_MS, &marker).ok());
+        }
+    });
+    let raced = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::race(&js_sys::Array::of2(&step, &timer))).await;
+    // Answered in time: the timer goes, rather than one waiting out every step of every fetch.
+    if let (Some(w), Some(h)) = (web_sys::window(), handle.get()) {
+        w.clear_timeout_with_handle(h);
+    }
+    if raced.as_ref().is_ok_and(|v| *v == stalled) {
+        abort.abort();
+        return None;
+    }
+    Some(raced)
+}
+
 /// Downloads `url`, or the byte range it asks for (a PMTiles archive's part: see
 /// `rustgis_tiles::cache::split_range`).
 async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
@@ -442,8 +556,14 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
         (None, Some(n)) => Some(format!("bytes=-{n}")),
         (None, None) => None,
     };
-    let promise = if asked.is_some() || !prepared.headers.is_empty() {
-        let init = web_sys::RequestInit::new();
+    let init = web_sys::RequestInit::new();
+    // A tile or document that stalls is given up (see `STALL_MS`).
+    let abort = if limit.is_none() { web_sys::AbortController::new().ok() } else { None };
+    if let Some(a) = &abort {
+        init.set_signal(Some(&a.signal()));
+    }
+    let stalled = || format!("nothing came in {} seconds", STALL_MS / 1000);
+    if asked.is_some() || !prepared.headers.is_empty() {
         let headers = web_sys::Headers::new().map_err(err)?;
         if let Some(r) = &asked {
             headers.set("Range", r).map_err(err)?;
@@ -456,14 +576,13 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
         if prepared.signed {
             init.set_redirect(web_sys::RequestRedirect::Error);
         }
-        window.fetch_with_str_and_init(url, &init)
-    } else {
-        window.fetch_with_str(url)
-    };
+    }
+    let promise = window.fetch_with_str_and_init(url, &init);
     // A refused fetch is an opaque TypeError ("Failed to fetch") by design: the browser doesn't
     // say why, so the likely reasons are named, with the browser's own message but not its stack.
-    let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(promise)
+    let resp: web_sys::Response = unless_stalled(promise, abort.as_ref())
         .await
+        .ok_or_else(stalled)?
         .map_err(|e| {
             let why = e.dyn_ref::<js_sys::Error>().map(|e| String::from(e.message())).unwrap_or_else(|| err(e));
             format!(
@@ -507,7 +626,10 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
         let reader: web_sys::ReadableStreamDefaultReader =
             body.get_reader().dyn_into().map_err(|_| "the response has no readable body".to_string())?;
         loop {
-            let chunk = wasm_bindgen_futures::JsFuture::from(reader.read()).await.map_err(err)?;
+            // Headers came and then the body stalled: given up as a fetch that doesn't answer.
+            // (Aborting the fetch has cancelled its body too.)
+            let Some(chunk) = unless_stalled(reader.read(), abort.as_ref()).await else { return Err(stalled()) };
+            let chunk = chunk.map_err(err)?;
             if js_sys::Reflect::get(&chunk, &"done".into()).ok().and_then(|d| d.as_bool()).unwrap_or(true) {
                 break;
             }
@@ -628,6 +750,19 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
     // Map tiles come through the browser's fetch (the app repaints when they arrive).
     rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_fetcher(|url, done| {
         wasm_bindgen_futures::spawn_local(async move { done(fetch_bytes(&url).await) });
+    });
+    // Their pictures are decoded by the browser, off the page's thread.
+    rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_image_decoder(|bytes, done| {
+        wasm_bindgen_futures::spawn_local(async move {
+            match decode_picture(&bytes).await {
+                Ok(raw) => done(Ok(raw)),
+                // The browser can't: decoded in WebAssembly instead.
+                Err(e) => {
+                    log::debug!("the browser didn't decode a picture: {e:?}");
+                    done(Err(bytes))
+                }
+            }
+        });
     });
     // So are JSON documents POSTed (the NLDI's flowtrace).
     rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_poster(|url, body, done| {

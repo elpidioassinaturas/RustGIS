@@ -588,10 +588,21 @@ impl Globe {
         out.pos.reserve(n);
         out.uv.reserve(n);
         let mut hidden = Vec::with_capacity(n);
-        for &(lat, v) in &lats {
-            for i in 0..=cols {
+        // The grid's longitudes and latitudes each turned into sines and cosines once, not at
+        // every vertex: the mesh is made again every frame the globe moves, and in the browser
+        // its trigonometry was a good part of each frame. As `to_view`, row by column.
+        let lons: Vec<(f64, f64, f32)> = (0..=cols)
+            .map(|i| {
                 let t = i as f64 / cols as f64;
-                let mut p = self.to_view(Coord::new(ll.min_x + ll.width() * t, lat));
+                let (s, c) = (ll.min_x + ll.width() * t).to_radians().sin_cos();
+                (c, s, t as f32)
+            })
+            .collect();
+        for &(lat, v) in &lats {
+            let (slat, clat) = lat.to_radians().sin_cos();
+            for &(clon, slon, t) in &lons {
+                let e = [clat * clon, clat * slon, slat];
+                let mut p = [dot(e, self.x), dot(e, self.y), dot(e, self.z)];
                 let behind = p[2] <= h;
                 if behind {
                     let xy = (p[0] * p[0] + p[1] * p[1]).sqrt().max(1e-12);
@@ -599,7 +610,7 @@ impl Globe {
                 }
                 let (x, y) = self.project(p);
                 out.pos.push([x as f32, y as f32]);
-                out.uv.push([t as f32, v]);
+                out.uv.push([t, v]);
                 hidden.push(behind);
             }
         }
@@ -845,6 +856,20 @@ mod tests {
         let ll = rustgis_geom::merc_to_lonlat(merc.center());
         let (x, y) = g.forward(ll).unwrap();
         assert!((m.pos[k][0] - x as f32).abs() < 0.01 && (m.pos[k][1] - y as f32).abs() < 0.01);
+        // Every vertex on the near side is where `forward` puts its longitude/latitude (the mesh
+        // works out its sines and cosines by row and column instead).
+        let ll = Extent::from_points(
+            rustgis_geom::merc_to_lonlat(Coord::new(merc.min_x, merc.min_y)),
+            rustgis_geom::merc_to_lonlat(Coord::new(merc.max_x, merc.max_y)),
+        );
+        for (p, uv) in m.pos.iter().zip(&m.uv) {
+            let lon = ll.min_x + ll.width() * f64::from(uv[0]);
+            let y = merc.max_y - merc.height() * f64::from(uv[1]);
+            let lat = rustgis_geom::merc_to_lonlat(Coord::new(0.0, y)).y;
+            if let Some((x, y)) = g.forward(Coord::new(lon, lat)) {
+                assert!((p[0] - x as f32).abs() < 0.01 && (p[1] - y as f32).abs() < 0.01, "{p:?} vs {x}, {y}");
+            }
+        }
         // Junk boxes give no mesh.
         assert!(g.drape_mesh(&Extent::EMPTY).indices.is_empty());
         assert!(g.drape_mesh(&Extent::new(0.0, 0.0, f64::INFINITY, 1.0)).indices.is_empty());

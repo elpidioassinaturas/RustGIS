@@ -1305,7 +1305,7 @@ fn label_size_stays_within_what_text_symbol_shows() {
     // Style › Text Symbol offers the range `labels.style` accepts (#457): 72 pt is kept, and
     // anything outside is brought back to the nearest end.
     let mut s = world();
-    let size = |s: &Session| s.map().layers.iter().find(|l| l.name == "Countries").map(|l| f64::from(l.labels.size));
+    let size = |s: &Session| s.map().layers.iter().find(|l| l.name == "Countries").map(|l| f64::from(l.labels.default.size));
     for (given, kept) in [(72.0, 72.0), (100.0, 72.0), (1.0, 4.0)] {
         s.run("labels.style", &json!({"layer": "Countries", "size": given})).unwrap();
         assert_eq!(size(&s), Some(kept), "size {given}");
@@ -1348,7 +1348,7 @@ fn label_range_placement_lock_and_convert() {
     s.run("labels.viewUnplaced", &json!({"on": false})).unwrap();
     // Placement moves labels.
     s.run("labels.placement", &json!({"layer": "Cities", "position": "right"})).unwrap();
-    assert_eq!(s.map().layer_by_name("Cities").unwrap().labels.placement, crate::map::LabelPlacement::Right);
+    assert_eq!(s.map().layer_by_name("Cities").unwrap().labels.default.placement, crate::map::LabelPlacement::Right);
     assert!(s.run("labels.placement", &json!({"position": "sideways"})).is_err());
     // Lock keeps the labelled set as the map moves.
     s.run("labels.lock", &json!({"on": true})).unwrap();
@@ -1363,8 +1363,139 @@ fn label_range_placement_lock_and_convert() {
     let r = s.run("labels.convert", &json!({"layer": "Countries"})).unwrap();
     assert!(r["annotations"].as_u64().unwrap() > 100);
     let a = s.map().layer_by_name("Countries Annotation").unwrap();
-    assert!(a.labels.enabled && a.labels.field == "TEXT");
+    assert!(a.labels.enabled && a.labels.default.field == "TEXT");
     assert!(!s.map().layer_by_name("Countries").unwrap().labels.enabled);
+}
+
+/// Label classes by command (#618): added from Default and checked before it, renamed, given
+/// a clause, moved, styled and removed; refusals change nothing, and Default stays last.
+#[test]
+fn label_classes_by_command() {
+    use crate::map::LabelPlacement;
+    let mut s = world();
+    let cities = s.map().layer_by_name("Cities").unwrap().id;
+    s.run("layer.select", &json!({"layer": cities})).unwrap();
+    let labels = |s: &Session| s.map().layer(cities).unwrap().labels.clone();
+    let order = |s: &Session| labels(s).in_order().map(|c| c.name.clone()).collect::<Vec<_>>();
+    assert_eq!(s.run("labels.class.add", &json!({"name": "Big", "where": "pop_max > 5000000"})).unwrap()["class"], "Big");
+    s.run("labels.class.add", &json!({"name": " Medium ", "where": "pop_max > 1000000"})).unwrap();
+    assert_eq!(order(&s), ["Big", "Medium", "Default"]);
+    let l = labels(&s);
+    assert_eq!((l.classes[0].size, l.classes[0].field.as_str()), (l.default.size, l.default.field.as_str()), "a class starts as Default");
+    for bad in [
+        json!({"name": "big"}),
+        json!({"name": "default"}),
+        json!({"name": "  "}),
+        json!({"name": "X", "where": "(("}),
+        json!({"name": "X", "where": "nope = 1"}),
+        json!({"name": "X", "where": 5}),
+        json!({"name": "X", "from": "Nope"}),
+    ] {
+        assert!(s.run("labels.class.add", &bad).is_err(), "{bad}");
+    }
+    assert!(s.run("labels.class.remove", &json!({"class": "Default"})).is_err(), "Default stays");
+    assert!(s.run("labels.class.move", &json!({"class": "Default", "to": 0})).is_err(), "and stays last");
+    assert!(s.run("labels.class.rename", &json!({"class": "Big", "name": "medium"})).is_err());
+    assert!(s.run("labels.class.update", &json!({"class": "Big", "where": "(("})).is_err());
+    assert!(s.run("labels.style", &json!({"class": "Nope", "size": 30})).is_err());
+    // A class that isn't a name is refused, not taken for Default.
+    for bad in [json!(3), json!("  "), json!(["Big"])] {
+        assert!(s.run("labels.style", &json!({"class": bad, "size": 30})).is_err(), "{bad}");
+        assert!(s.run("labels.class.add", &json!({"name": "X", "from": bad})).is_err(), "{bad}");
+    }
+    assert_eq!(labels(&s), l, "refusals change nothing");
+    // A field for a class that isn't there turns nothing on; one for a class labels the layer.
+    s.run("labels.enable", &json!({"on": false})).unwrap();
+    assert!(s.run("labels.field", &json!({"class": "Nope", "field": "name"})).is_err());
+    assert!(!labels(&s).enabled);
+    s.run("labels.field", &json!({"class": "Big", "field": "name"})).unwrap();
+    assert!(labels(&s).enabled && labels(&s).classes[0].field == "name");
+    // The labels.* commands change the class named, Default when none is.
+    s.run("labels.style", &json!({"class": "big", "size": 20, "bold": true})).unwrap();
+    s.run("labels.placement", &json!({"class": "Big", "position": "right"})).unwrap();
+    s.run("labels.scaleRange", &json!({"class": "Medium", "min": 10000000})).unwrap();
+    s.run("labels.field", &json!({"class": "Medium", "field": "pop_max"})).unwrap();
+    let l = labels(&s);
+    assert_eq!((l.classes[0].size, l.classes[0].bold, l.classes[0].placement), (20.0, true, LabelPlacement::Right));
+    assert_eq!((l.classes[1].min_scale, l.classes[1].field.as_str()), (Some(10_000_000.0), "pop_max"));
+    assert!(l.default.size < 20.0 && l.default.field == "name", "Default is left as it was");
+    // Renamed (Default too), moved, its clause cleared, hidden; each one undo step.
+    s.run("labels.class.rename", &json!({"class": "Medium", "name": "Large"})).unwrap();
+    s.run("labels.class.move", &json!({"class": "Large", "to": 0})).unwrap();
+    s.run("labels.class.update", &json!({"class": "Big", "where": null, "visible": false})).unwrap();
+    s.run("labels.class.rename", &json!({"class": "Default", "name": "Other"})).unwrap();
+    assert_eq!(order(&s), ["Large", "Big", "Other"]);
+    let l = labels(&s);
+    assert_eq!((l.classes[1].where_.as_deref(), l.classes[1].visible), (None, false));
+    s.run("edit.undo", &json!(null)).unwrap();
+    assert_eq!(order(&s), ["Large", "Big", "Default"]);
+    let info = s.run("info.project", &json!(null)).unwrap().to_string();
+    assert!(info.contains("labelClasses") && info.contains("Large"), "info.project lists the classes");
+    s.run("labels.class.remove", &json!({"class": "big"})).unwrap();
+    assert_eq!(order(&s), ["Large", "Default"]);
+    // Clear removes the rest, Default kept; again, with none left, it is no error (a script
+    // that starts with it runs again).
+    assert_eq!(s.run("labels.class.clear", &json!({})).unwrap()["removed"], 1);
+    assert_eq!(order(&s), ["Default"]);
+    assert_eq!(s.run("labels.class.clear", &json!({})).unwrap()["removed"], 0);
+    // info.project lists the classes also for a Default alone that is hidden (or has a clause).
+    let listed = |s: &mut Session| {
+        let info = s.run("info.project", &json!(null)).unwrap();
+        info["layers"].as_array().unwrap().iter().find(|l| l["name"] == "Cities").unwrap()["labelClasses"].clone()
+    };
+    assert!(listed(&mut s).is_null(), "a plain Default isn't listed");
+    s.run("labels.class.update", &json!({"visible": false})).unwrap();
+    assert_eq!(listed(&mut s)[0]["visible"], false);
+    s.run("labels.class.update", &json!({"visible": true, "where": "pop_max > 0"})).unwrap();
+    assert_eq!(listed(&mut s)[0]["where"], "pop_max > 0");
+    s.run("labels.class.update", &json!({"where": null})).unwrap();
+    // A long name is cut at 100 characters, and doesn't end in the space it was cut at.
+    let long = format!("{} tail", "a".repeat(99));
+    assert_eq!(s.run("labels.class.add", &json!({"name": long})).unwrap()["class"], "a".repeat(99));
+}
+
+/// Converting labels with classes keeps each class's features apart: the annotation has the same
+/// classes, picking their points by a CLASS field (#618). Deleting a field a class labels with
+/// moves it to another field and keeps the class.
+#[test]
+fn label_classes_convert_and_outlive_a_deleted_field() {
+    let mut s = world();
+    let cities = s.map().layer_by_name("Cities").unwrap().id;
+    s.run("layer.select", &json!({"layer": cities})).unwrap();
+    s.run("labels.enable", &json!({"on": true})).unwrap();
+    s.run("labels.class.add", &json!({"name": "Big's", "where": "pop_max > 5000000"})).unwrap();
+    s.run("labels.style", &json!({"class": "Big's", "size": 18})).unwrap();
+    let big = rustgis_data::query::select("pop_max > 5000000", &s.map().layer(cities).unwrap().dataset).unwrap().len();
+    assert!(big > 0);
+    let r = s.run("labels.convert", &json!({})).unwrap();
+    let a = s.map().layer(u32::try_from(r["layer"].as_u64().unwrap()).unwrap()).unwrap();
+    let classes: Vec<_> = a.labels.in_order().map(|c| (c.name.clone(), c.where_.clone(), c.field.clone(), c.size)).collect();
+    assert_eq!(classes[0], ("Big's".to_string(), Some(r#""CLASS" = 'Big''s'"#.to_string()), "TEXT".to_string(), 18.0));
+    assert_eq!((classes[1].1.as_ref(), classes[1].2.as_str()), (None, "TEXT"), "Default takes the rest");
+    let picked = rustgis_data::query::select(classes[0].1.as_deref().unwrap(), &a.dataset).unwrap().len();
+    assert_eq!(picked, big, "the class's clause picks the points it labelled");
+    // A deleted field: the class labels with Default's field, and is kept.
+    s.run("layer.select", &json!({"layer": cities})).unwrap();
+    s.run("labels.field", &json!({"class": "Big's", "field": "pop_max"})).unwrap();
+    s.run("edit.deleteField", &json!({"layer": cities, "field": "pop_max"})).unwrap();
+    let l = &s.map().layer(cities).unwrap().labels;
+    assert_eq!(l.classes.len(), 1);
+    assert_eq!(l.classes[0].field, l.default.field);
+    assert!(l.default.field != "pop_max");
+    assert!(l.enabled, "another class's field going leaves the labels on");
+    // Default on a deleted field starts again on another, keeping its name, clause and visibility.
+    assert_eq!(l.default.field, "name");
+    s.run("labels.class.rename", &json!({"class": "Default", "name": "Rest"})).unwrap();
+    s.run("labels.class.update", &json!({"where": "name <> 'x'", "visible": false})).unwrap();
+    s.run("edit.deleteField", &json!({"layer": cities, "field": "name"})).unwrap();
+    let l = &s.map().layer(cities).unwrap().labels;
+    assert!(!l.enabled && l.default.field != "name", "Default's field going turns the labels off, as before classes");
+    assert_eq!(
+        (l.classes.len(), l.classes[0].field.as_str()),
+        (1, l.default.field.as_str()),
+        "the other classes are kept, on its new field"
+    );
+    assert_eq!((l.default.name.as_str(), l.default.visible, l.default.where_.as_deref()), ("Rest", false, Some("name <> 'x'")));
 }
 
 #[test]
@@ -2703,6 +2834,32 @@ fn analysis_workflows_models_scripts_and_raster_functions() {
     model_graphs(&mut s);
     let g = s.run("gp.gallery", &json!({"kind": "raster"})).unwrap();
     assert!(g.as_array().unwrap().iter().any(|t| t["id"] == "raster.function"));
+}
+
+#[test]
+fn exporting_a_raster_as_a_cog() {
+    let mut s = world();
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).unwrap().name.clone();
+    let dir = std::env::temp_dir().join(format!("rustgis-cog-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (plain, cog) = (dir.join("plain.tif"), dir.join("cog.tif"));
+    let v = s.run("share.exportRaster", &json!({"layer": dem, "path": plain.display().to_string()})).unwrap();
+    assert!(v.get("cog").is_none(), "an untiled GeoTIFF unless asked");
+    let v = s.run("share.exportRaster", &json!({"layer": dem, "path": cog.display().to_string(), "cog": true})).unwrap();
+    assert_eq!(v["cog"]["bigTiff"], false, "{v}");
+    let (a, b) = (rustgis_data::raster::read_path(&plain).unwrap(), rustgis_data::raster::read_path(&cog).unwrap());
+    assert_eq!((a.width, a.height, a.transform), (b.width, b.height, b.transform));
+    assert!(a.bands.iter().zip(&b.bands).all(|(x, y)| x.data == y.data));
+    // Tiled, not stripped: the tile tags are in the file.
+    let bytes = std::fs::read(&cog).unwrap();
+    assert!(bytes.windows(2).any(|w| w == [0x42, 0x01]), "TileWidth (322) is in a directory");
+    assert!(s.run("share.exportRaster", &json!({"layer": dem, "path": cog.display().to_string(), "cog": true, "band": 99})).is_err());
+    assert!(
+        s.run("share.exportRaster", &json!({"layer": dem, "path": dir.join("no").join("x.tif").display().to_string(), "cog": true}))
+            .is_err()
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -4066,6 +4223,22 @@ fn deep_learning_hosted_imagery_and_sharing() {
     let style: Value = serde_json::from_slice(&std::fs::read(path("Countries.json")).unwrap()).unwrap();
     assert_eq!(style["version"], 8);
     assert_eq!(style["layers"][0]["paint"]["fill-color"][0], "step", "graduated colours as a step expression");
+    // What a style leaves out of the labels is the last notice, after the one saying it's shared.
+    s.run("labels.enable", &json!({"layer": "Cities", "on": true})).unwrap();
+    s.run("labels.class.add", &json!({"layer": "Cities", "name": "Big", "where": "pop_max > 5000000"})).unwrap();
+    let last_two = |s: &Session| s.notices.iter().rev().take(2).map(|n| n.text.clone()).collect::<Vec<_>>();
+    s.run("share.webStyle", &json!({"layer": "Cities"})).unwrap();
+    let said = last_two(&s);
+    assert!(said[0].contains("labels every feature with its Default class") && said[1].starts_with("Shared Cities"), "{said:?}");
+    s.run("labels.class.update", &json!({"layer": "Cities", "visible": false})).unwrap();
+    s.run("share.webStyle", &json!({"layer": "Cities"})).unwrap();
+    let said = last_two(&s);
+    assert!(said[0].contains("has no labels") && said[1].starts_with("Shared Cities"), "{said:?}");
+    // A hidden Default alone is said too: the labels are on, and the style has none.
+    s.run("labels.class.clear", &json!({"layer": "Cities"})).unwrap();
+    s.run("share.webStyle", &json!({"layer": "Cities"})).unwrap();
+    let said = last_two(&s);
+    assert!(said[0].ends_with("its Default class is hidden.") && said[1].starts_with("Shared Cities"), "{said:?}");
     s.run("share.locator", &json!({"layer": "Cities", "fields": ["name"]})).unwrap();
     let r = s.run("locator.find", &json!({"text": "paris", "zoom": true})).unwrap();
     assert_eq!(r["matches"][0]["text"], "Paris");
@@ -4316,7 +4489,7 @@ fn web_style_carries_the_layers_scale_limits_as_zooms() {
     l.min_scale = Some(5_000_000.0);
     l.max_scale = Some(100_000.0);
     l.labels.enabled = true;
-    l.labels.field = "name".into();
+    l.labels.default.field = "name".into();
     let z = zooms(&s);
     // The label layer is limited like the symbols.
     assert!(z.len() >= 2, "{z:?}");
@@ -4331,6 +4504,14 @@ fn web_style_carries_the_layers_scale_limits_as_zooms() {
     assert!(zooms(&s).iter().all(|(a, b)| a.is_none() && b.is_none()));
     s.map_mut().layer_mut(id).unwrap().max_scale = Some(100_000.0);
     assert!(zooms(&s).iter().all(|(a, b)| a.is_none() && b.is_some()));
+    // A hidden Default class labels nothing on the map, nor in the style.
+    let labelled = |s: &Session| {
+        let style = crate::cmd::sharing::web_style(s.map().layer(id).unwrap());
+        style["layers"].as_array().unwrap().iter().any(|l| l["type"] == "symbol")
+    };
+    assert!(labelled(&s));
+    s.map_mut().layer_mut(id).unwrap().labels.default.visible = false;
+    assert!(!labelled(&s));
 }
 
 #[test]
@@ -4951,6 +5132,73 @@ fn pmtiles_archives_frame_the_map_on_their_bounds() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn explicit_tile_bounds_are_rejected_without_replacing_the_layer() {
+    let mut s = Session::new(Project::default());
+    let url = "https://tiles.example.com/{z}/{x}/{y}.png";
+    s.run("map.addTiles", &json!({"url": url, "name": "Coverage", "bounds": [5, 45, 15, 55]})).unwrap();
+    let before = serde_json::to_value(&s.project).unwrap();
+    for bounds in [
+        json!([20, 0, 10, 10]),
+        json!([0, 20, 10, 10]),
+        json!([10, 0, 10, 10]),
+        json!([0, 10, 10, 10]),
+        json!([-181, 0, 10, 10]),
+        json!([0, 0, 181, 10]),
+        json!([0, -91, 10, 10]),
+        json!([0, 0, 10, 91]),
+        json!([0, 0, 1e300, 10]),
+        json!([0, 0, 10]),
+        json!([0, "south", 10, 10]),
+        json!("not bounds"),
+    ] {
+        let r = s.run("map.addTiles", &json!({"url": url, "name": "Coverage", "bounds": bounds, "replace": true}));
+        assert!(r.is_err(), "{bounds}: {r:?}");
+        assert_eq!(serde_json::to_value(&s.project).unwrap(), before, "{bounds}");
+    }
+    let r = s.run("map.zoomToTiles", &json!({"name": "Coverage"})).unwrap();
+    assert_eq!(r["bounds"], json!([5.0, 45.0, 15.0, 55.0]));
+}
+
+/// Bad optional coverage must not prevent loading the tiles or the rest of the project.
+#[test]
+fn malformed_saved_tile_bounds_do_not_prevent_opening_the_project() {
+    let mut s = world();
+    let url = "https://tiles.example.com/{z}/{x}/{y}.png";
+    s.run("map.addTiles", &json!({"url": url, "name": "Coverage", "bounds": [5, 45, 15, 55], "opacity": 0.5})).unwrap();
+    s.run("map.addTiles", &json!({"url": "https://other.example.com/{z}/{x}/{y}.png", "name": "Valid", "bounds": [1, 2, 3, 4]})).unwrap();
+    let mut project = serde_json::to_value(&s.project).unwrap();
+    let coverage = project["maps"][0]["tiles"].as_array().unwrap().iter().position(|t| t["name"] == "Coverage").unwrap();
+    for bounds in [
+        json!([0, 0, 10]),
+        json!([0, 0, 10, 10, 20]),
+        json!([0, "south", 10, 10]),
+        json!([0, {"nested": [1, 2]}, 10, 10]),
+        json!([[0], 0, 10, 10]),
+        json!([]),
+        json!({"nested": [1, 2]}),
+        json!("x"),
+        json!(true),
+        json!(42),
+        Value::Null,
+        json!([20, 0, 10, 10]),
+    ] {
+        project["maps"][0]["tiles"][coverage]["bounds"] = bounds.clone();
+        let loaded = Project::from_json(&project.to_string()).unwrap_or_else(|e| panic!("{bounds}: {e}"));
+        let tile = loaded.map().tiles.iter().find(|t| t.name == "Coverage").unwrap();
+        assert_eq!(tile.bounds, None, "{bounds}");
+        assert_eq!((tile.url.as_str(), tile.opacity, tile.visible), (url, 0.5, true), "{bounds}");
+        assert_eq!(loaded.map().tiles.iter().find(|t| t.name == "Valid").unwrap().bounds, Some([1.0, 2.0, 3.0, 4.0]));
+        assert_eq!(
+            loaded.map().layer_by_name("Countries").unwrap().dataset.features.len(),
+            s.map().layer_by_name("Countries").unwrap().dataset.features.len()
+        );
+    }
+    project["maps"][0]["tiles"][coverage].as_object_mut().unwrap().remove("bounds");
+    let loaded = Project::from_json(&project.to_string()).unwrap();
+    assert_eq!(loaded.map().tiles.iter().find(|t| t.name == "Coverage").unwrap().bounds, None);
+}
+
 /// An MBTiles file of one red picture tile: added by path or as an upload, it is a tile layer that
 /// draws, survives a project round trip (by path), and a file that isn't an archive is refused.
 #[test]
@@ -5106,6 +5354,76 @@ fn data_from_a_web_address() {
     assert_eq!(crate::cmd::layer::url_file_name("https://x.org/a/b/", b"PAR1").unwrap(), "b.parquet");
     assert_eq!(crate::cmd::layer::url_file_name("https://x.org", b"lon,lat\n1,2").unwrap(), "data.csv");
     assert_eq!(crate::cmd::layer::url_file_name("https://x.org/q.json", b"[]").unwrap(), "q.geojson");
+}
+
+/// JPEG 2000 from a web address or uploaded bytes is read through GDAL on the desktop, as a file
+/// on disk is; contents that aren't JPEG 2000 never reach GDAL.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn jpeg2000_from_a_web_address() {
+    use base64::Engine;
+    let mut s = Session::new(Project::default());
+    // A VRT (which would have GDAL read other files on this computer) named like JPEG 2000.
+    let vrt = serve(br#"<VRTDataset rasterXSize="1" rasterYSize="1"></VRTDataset>"#, 1);
+    let e = s.run("layer.addUrl", &json!({"url": format!("{vrt}/TCI.jp2")})).unwrap_err();
+    assert!(e.contains("not a JPEG 2000 file"), "{e}");
+    if !rustgis_data::raster::gdal::available() {
+        let jp2 = serve(b"\0\0\0\x0cjP  \r\n\x87\n", 1);
+        let e = s.run("layer.addUrl", &json!({"url": format!("{jp2}/TCI.jp2")})).unwrap_err();
+        assert!(e.contains("needs GDAL"), "{e}");
+        return;
+    }
+    let executable = if cfg!(windows) { "gdal_translate.exe" } else { "gdal_translate" };
+    let translate = std::env::var_os("RUSTGIS_GDAL_BIN")
+        .map(|d| std::path::PathBuf::from(d).join(executable))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| executable.into());
+    let formats = std::process::Command::new(&translate).arg("--formats").output().expect("list GDAL drivers");
+    assert!(formats.status.success(), "GDAL driver discovery failed: {}", String::from_utf8_lossy(&formats.stderr));
+    if !String::from_utf8_lossy(&formats.stdout).lines().any(|line| line.split_whitespace().next() == Some("JP2OpenJPEG")) {
+        eprintln!("skipping JPEG 2000 conversion: GDAL has no optional JP2OpenJPEG driver");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-jp2-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let asc = dir.join("g.asc");
+    std::fs::write(&asc, "ncols 4\nnrows 3\nxllcorner 10\nyllcorner 40\ncellsize 0.5\n1 2 3 4\n5 6 7 8\n9 10 11 12\n").unwrap();
+    let jp2 = dir.join("g.jp2");
+    let made = std::process::Command::new(&translate)
+        .args(["-q", "-of", "JP2OpenJPEG", "-ot", "Byte", "-a_srs", "EPSG:4326"])
+        .arg(&asc)
+        .arg(&jp2)
+        .output()
+        .expect("generate JPEG 2000 fixture");
+    assert!(made.status.success(), "JPEG 2000 fixture conversion failed ({}): {}", made.status, String::from_utf8_lossy(&made.stderr));
+    // `serve` requires a 'static slice; intentionally leak this small test-only fixture so it
+    // stays valid for the server thread's lifetime.
+    let bytes = Vec::leak(std::fs::read(&jp2).unwrap());
+    let uploaded = base64::engine::general_purpose::STANDARD.encode(&*bytes);
+    let base = serve(bytes, 1);
+    let r = s.run("layer.addUrl", &json!({"url": format!("{base}/tiles/33/T/XN/TCI.jp2")})).unwrap();
+    let l = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap();
+    assert_eq!(l.name, "TCI");
+    let rl = l.raster.as_ref().unwrap();
+    let data = rl.data.as_ref().unwrap();
+    assert_eq!((data.width, data.height, data.georeferenced), (4, 3, true));
+    let e = data.extent();
+    assert!((e.min_x - 10.0).abs() < 1e-6 && (e.max_y - 41.5).abs() < 1e-6, "{e:?}");
+    // The project keeps the converted GeoTIFF, so it opens again without GDAL.
+    assert_eq!(rl.file_name.as_deref(), Some("TCI.tif"));
+    assert!(rl.embedded.is_some() && rl.path.is_none());
+    for file_name in ["uploaded.jp2", "uploaded.J2K"] {
+        let mut upload = Session::new(Project::default());
+        let r = upload.run("layer.addDataBytes", &json!({"fileName": file_name, "data": uploaded})).unwrap();
+        let rl = upload.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap();
+        let raster = rl.data.as_ref().unwrap();
+        assert_eq!((raster.width, raster.height, raster.georeferenced), (4, 3, true));
+        let e = raster.extent();
+        assert!((e.min_x - 10.0).abs() < 1e-6 && (e.max_y - 41.5).abs() < 1e-6, "{e:?}");
+        assert_eq!(rl.file_name.as_deref(), Some("uploaded.tif"));
+        assert!(rl.embedded.is_some() && rl.path.is_none());
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Where a command may not download itself (the browser), `layer.addUrl` leaves its request for
@@ -5428,6 +5746,14 @@ fn services_list_and_add_layers() {
     s.run("service.add", &json!({"url": url, "layer": "Roads", "text": WMS})).unwrap();
     let t = s.map().tiles.first().unwrap();
     assert!(t.url.contains("LAYERS=roads") && t.url.contains("{bbox-epsg-3857}") && t.overlay, "{}", t.url);
+    // Returning to a service layer's extent still works after saving and reopening the project.
+    let project = serde_json::to_string(&s.project).unwrap();
+    let mut reopened = Session::new(serde_json::from_str(&project).unwrap());
+    reopened.run("map.goToXY", &json!({"lon": -100, "lat": 0, "scale": 1000000})).unwrap();
+    let r = reopened.run("map.zoomToTiles", &json!({"name": "Roads"})).unwrap();
+    assert_eq!(r["bounds"], json!([5.0, 45.0, 15.0, 55.0]));
+    let center = reopened.map().center_lonlat();
+    assert!((center.x - 10.0).abs() < 0.1 && (center.y - 50.0).abs() < 0.5, "{center:?}");
     assert!(s.run("service.add", &json!({"url": url, "layer": "nope", "text": WMS})).is_err());
     assert!(s.run("service.layers", &json!({"url": url, "text": "<html>no</html>"})).is_err());
     assert!(s.run("service.layers", &json!({"url": "file:///etc/x", "text": WMS})).is_err());
@@ -6119,6 +6445,175 @@ fn serve_gated(
         }
     });
     (format!("http://{addr}"), sent)
+}
+
+/// A STAC collection's band as a data cube on the time slider (#559), from a local API: a tile
+/// layer per grid tile, each a file per date; the slider on over their dates; a fixed range in the
+/// band's own units, through its scale; a tile with no date in the window drawn as nothing.
+#[test]
+fn a_stac_data_cube_on_the_time_slider() {
+    let (cog, _) = serve_ranges(rustgis_data::raster::cog::example(512, 256));
+    let item = |id: &str, tile: &str, date: &str, band: bool| {
+        let asset = if band {
+            format!(
+                r#""NDVI": {{"href": "{cog}/{id}.tif", "type": "image/tiff; application=geotiff; profile=cloud-optimized", "eo:bands": [{{"scale": 0.0001}}]}}"#
+            )
+        } else {
+            format!(r#""EVI": {{"href": "{cog}/{id}.tif"}}"#)
+        };
+        format!(
+            r#"{{"type": "Feature", "id": "{id}", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+               "properties": {{"datetime": "{date}T00:00:00Z", "bdc:tiles": ["{tile}"]}}, "assets": {{{asset}}}}}"#
+        )
+    };
+    let features = [
+        item("a1", "T1", "2024-01-01", true),
+        item("a2", "T1", "2024-01-17", true),
+        item("b1", "T2", "2024-01-01", true),
+        item("b2", "T2", "2024-01-01", true),
+        item("c1", "T3", "2024-01-17", false),
+    ]
+    .join(",");
+    let base = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{features}]}}"#))], 4);
+    let api = format!("{base}/v1");
+    let mut s = Session::new(Project::default());
+    let r = s
+        .run(
+            "stac.addCube",
+            &json!({"url": api, "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31", "range": [0, 0.9]}),
+        )
+        .unwrap();
+    assert_eq!(
+        (r["items"].as_u64(), r["tiles"].as_u64(), r["dates"].as_u64(), r["layers"].as_u64(), r["skipped"].as_u64()),
+        (Some(5), Some(2), Some(2), Some(2), Some(1)),
+        "{r}"
+    );
+    assert_eq!(r["duplicates"], 1, "the second item of T2 on 2024-01-01 is left out and counted");
+    assert!(crate::cmd::tiles::NETWORK.contains(&"stac.addCube"), "a network command: a plugin needs the network permission to run it");
+    // An end given as a year or a month takes all of it: "end": "2024-01" reaches 31 January.
+    // Read as 1 January, it would be before this start and refused.
+    let mut by_month = Session::new(Project::default());
+    let r2 = by_month
+        .run(
+            "stac.addCube",
+            &json!({"url": api, "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-15", "end": "2024-01"}),
+        )
+        .unwrap();
+    assert_eq!(r2["dates"], 2, "an end given as a year or a month reaches its last day: {r2}");
+    // A slider already on takes the cube's dates in: one over other dates gains these two.
+    let mut busy = Session::new(Project::default());
+    busy.run("time.set", &json!({"dates": ["2023-06-01", "2023-07-01"]})).unwrap();
+    busy.run(
+        "stac.addCube",
+        &json!({"url": api, "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31"}),
+    )
+    .unwrap();
+    assert_eq!(busy.run("time.info", &Value::Null).unwrap()["steps"], 4, "the slider takes the cube's dates in");
+    let tiles = s.map().tiles.clone();
+    assert_eq!(tiles.len(), 2);
+    let t1 = tiles.iter().find(|t| t.name.ends_with("T1")).unwrap();
+    let t2 = tiles.iter().find(|t| t.name.ends_with("T2")).unwrap();
+    // A file per date (the first item of a tile and day), the range in stored values (0.9 / 0.0001).
+    assert_eq!(t1.time_urls.len(), 2);
+    assert_eq!(t2.time_urls.len(), 1);
+    assert!(t1.time_urls.iter().all(|(_, u)| u.ends_with("#range=0,9000")), "{:?}", t1.time_urls);
+    assert!(t2.time_urls[0].1.contains("/b1.tif"));
+    // The slider: on, over the two dates; at the first, both tiles draw.
+    assert_eq!(s.run("time.info", &Value::Null).unwrap()["steps"], 2);
+    assert!(t1.draws() && t2.draws() && t1.url.contains("/a1.tif"));
+    // The second date: T1's second file; T2 has none then and draws nothing.
+    s.run("time.goTo", &json!({"step": 1})).unwrap();
+    let t1 = s.map().tiles.iter().find(|t| t.name.ends_with("T1")).unwrap();
+    let t2 = s.map().tiles.iter().find(|t| t.name.ends_with("T2")).unwrap();
+    assert!(t1.url.contains("/a2.tif") && t1.draws(), "{}", t1.url);
+    assert!(!t2.draws());
+    // Saved and opened again, each tile's dates and the slider's step come back.
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text})).unwrap();
+    let again = t.map().tiles.iter().find(|x| x.name.ends_with("T1")).unwrap();
+    assert_eq!(again.time_urls.len(), 2);
+    assert!(again.url.contains("/a2.tif"), "{}", again.url);
+    // T2, with no file at that step, draws nothing from the start: opening takes the window.
+    assert!(!t.map().tiles.iter().find(|x| x.name.ends_with("T2")).unwrap().draws());
+    for bad in [
+        json!({"url": api, "asset": "ndvi", "start": "2024-01-01", "end": "2024-01-31"}),
+        json!({"url": api, "collection": "cube", "start": "2024-01-01", "end": "2024-01-31"}),
+        json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "2024-02-01", "end": "2024-01-01"}),
+        json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "2024-01-01", "end": "2024-01-31", "range": [1, 0]}),
+        json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "June", "end": "2024-01-31"}),
+        json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "2024-01-01", "end": "2024-01-31", "range": ["a", 0, 1]}),
+        json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "2024-01-01", "end": "2024-01-31", "range": [0, "x", 1]}),
+    ] {
+        assert!(s.run("stac.addCube", &bad).is_err(), "{bad}");
+    }
+    // A file read whole (a GeoTIFF that isn't cloud-optimised) can't follow the slider: the cube
+    // is refused, and what it added is taken back, the view its first tile framed included.
+    let gt = rustgis_data::raster::GeoTransform { origin_x: 10.0, origin_y: 46.0, pixel_width: 0.5, pixel_height: -0.5 };
+    let plain = rustgis_data::raster::Raster::new(
+        "p",
+        2,
+        2,
+        vec![vec![1.0; 4]],
+        gt,
+        rustgis_data::raster::Crs::LonLat,
+        None,
+        rustgis_data::raster::ColorHint::Gray,
+        "Float32",
+    )
+    .unwrap();
+    let (file, _) = serve_ranges(rustgis_data::raster::geotiff::write(&plain, 0).unwrap());
+    let one = format!(
+        r#"{{"type": "Feature", "id": "p1", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+           "properties": {{"datetime": "2024-01-01T00:00:00Z", "bdc:tiles": ["P"]}}, "assets": {{"NDVI": {{"href": "{file}/p.tif"}}}}}}"#
+    );
+    let first = item("q1", "A", "2024-01-01", true);
+    let plain_api = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{first},{one}]}}"#))], 2);
+    s.zoom_to(&rustgis_geom::Extent::new(-60.0, -30.0, -50.0, -20.0));
+    let (tiles, layers) = (s.map().tiles.len(), s.map().layers.len());
+    let (camera, time) = (s.map().camera, s.map().time.clone());
+    let e = s
+        .run(
+            "stac.addCube",
+            &json!({"url": format!("{plain_api}/v1"), "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31"}),
+        )
+        .unwrap_err();
+    assert!(e.contains("not a cloud-optimised"), "{e}");
+    assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
+    // The view tile A framed and the slider are put back too.
+    assert_eq!(s.map().camera, camera);
+    assert_eq!(s.map().time, time);
+    // Files stored at another scale partway: one range can't fit them all, so it's refused.
+    let rescaled = |id: &str, date: &str, scale: f64| {
+        format!(
+            r#"{{"type": "Feature", "id": "{id}", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+               "properties": {{"datetime": "{date}T00:00:00Z", "bdc:tiles": ["T1"]}},
+               "assets": {{"NDVI": {{"href": "{cog}/{id}.tif", "type": "image/tiff; profile=cloud-optimized", "eo:bands": [{{"scale": {scale}}}]}}}}}}"#
+        )
+    };
+    let two = [rescaled("r1", "2024-01-01", 0.0001), rescaled("r2", "2024-01-17", 0.001)].join(",");
+    let rescaled_api = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{two}]}}"#))], 2);
+    let e = s
+        .run(
+            "stac.addCube",
+            &json!({"url": format!("{rescaled_api}/v1"), "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31", "range": [0, 0.9]}),
+        )
+        .unwrap_err();
+    assert!(e.contains("same scale and offset"), "{e}");
+    // Files behind signed addresses (Planetary Computer's) are refused before anything is added.
+    let signed = r#"{"type": "Feature", "id": "pc1", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+        "properties": {"datetime": "2024-01-01T00:00:00Z", "bdc:tiles": ["S"]},
+        "assets": {"NDVI": {"href": "https://sentinel2l2a01.blob.core.windows.net/sentinel2-l2/a.tif"}}}"#;
+    let signed_api = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{signed}]}}"#))], 2);
+    let (tiles, layers) = (s.map().tiles.len(), s.map().layers.len());
+    let e = s
+        .run(
+            "stac.addCube",
+            &json!({"url": format!("{signed_api}/v1"), "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31"}),
+        )
+        .unwrap_err();
+    assert!(e.contains("signed addresses"), "{e}");
+    assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
 }
 
 /// A cloud-optimised GeoTIFF by its address is read in place: its header, then only the tiles a
@@ -7358,6 +7853,23 @@ fn params_name_every_key_a_command_reads() {
         }
     }
     assert!(missing.is_empty(), "{} commands read keys their params don't name:\n{}", missing.len(), missing.join("\n"));
+}
+
+#[test]
+fn needs_input_reads_descriptions() {
+    use crate::needs_input;
+    assert!(!needs_input("{}"));
+    assert!(!needs_input(r#"{"layer"?, "name"?: text}"#));
+    assert!(needs_input(r#"{"layer": raster, "points"?: [[column, row, lon, lat], …]}"#));
+    assert!(needs_input(r#"{"path": folder | "url": "https://…", "name"?: text}"#));
+    assert!(needs_input(r#"{"url": "https://…/x.json?f=json"}"#));
+    assert!(!needs_input(r#"{"steps"?: [{"required": value}], "url"?: "https://…/?q=x"}"#));
+    assert!(needs_input("a GeoJSON text: {type: …}"));
+    assert!(!needs_input("a GeoJSON text"));
+    assert!(needs_input("a service URL: https://…/query?f=json"));
+    let s = Session::new(Project::default());
+    assert!(s.registry.get("raster.georeference").is_some_and(crate::CommandSpec::needs_input));
+    assert!(s.registry.get("map.zoomIn").is_some_and(|c| !c.needs_input()));
 }
 
 #[test]
@@ -9494,8 +10006,8 @@ fn ogc_refresh_reconciles_fields_and_preserves_compatible_settings() {
             s.run("layer.symbology", &json!({"layer":layer, "type":renderer, "field":"value"})).unwrap();
             let l = s.map_mut().layer_mut(layer).unwrap();
             l.labels.enabled = true;
-            l.labels.field = "name".into();
-            l.labels.size = 19.;
+            l.labels.default.field = "name".into();
+            l.labels.default.size = 19.;
             l.definition_query = Some("value > 0".into());
             l.display_filters = ["value > 0", "keep = 1"]
                 .map(|q| rustgis_map::effects::DisplayFilter { name: q.into(), min_scale: None, max_scale: None, where_: q.into() })
@@ -9516,8 +10028,8 @@ fn ogc_refresh_reconciles_fields_and_preserves_compatible_settings() {
             let l = s.map().layer(layer).unwrap();
             assert!(matches!(l.renderer, rustgis_map::Renderer::Single(_)));
             assert!(!l.labels.enabled);
-            assert!(l.labels.field.is_empty());
-            assert_eq!(l.labels.size, 19.);
+            assert!(l.labels.default.field.is_empty());
+            assert_eq!(l.labels.default.size, 19.);
             assert!(l.definition_query.is_none());
             assert_eq!(l.display_filters.len(), 1);
             assert_eq!(l.display_filters[0].where_, "keep = 1");
@@ -10240,6 +10752,19 @@ fn project_info_describes_the_whole_project() {
     assert!(layers[0].get("fields").is_none(), "{some}");
 }
 
+/// A script refuses scripts, notebooks and `ui.*` commands, by the one rule the Script pane marks
+/// its lines with (#653).
+#[test]
+fn scripts_refuse_scripts_notebooks_and_ui_commands() {
+    use crate::cmd::workflows::{refused_in_script, script_commands};
+    for id in ["script.run", "ui.pane.labeling", "notebook.run"] {
+        assert!(refused_in_script(id), "{id}");
+        let e = script_commands(&format!("map.zoomFull\n{id} {{}}")).unwrap_err();
+        assert!(e.contains("line 2") && e.contains("can't run in a script"), "{e}");
+    }
+    assert!(!refused_in_script("map.zoomFull") && !refused_in_script("notebook.new"));
+}
+
 /// A script can't edit a layer read in place from its file, as a command run on its own can't:
 /// a later line loading the layer would otherwise lose the edit without a word.
 #[test]
@@ -10878,6 +11403,8 @@ fn scans_have_no_coordinates_to_give_away() {
     let _ = std::fs::remove_file(&out);
     let e = s.run("share.exportRaster", &json!({"path": out.display().to_string()})).unwrap_err();
     assert!(e.contains("georeference it first") && !out.exists(), "{e}");
+    let e = s.run("share.exportRaster", &json!({"path": out.display().to_string(), "cog": true})).unwrap_err();
+    assert!(e.contains("georeference it first") && !out.exists(), "as a COG: {e}");
     let before = s.map().layer_by_name("flat").unwrap().raster.clone().unwrap().placement;
     let tools: [(&str, Value); 14] = [
         ("raster.function", json!({"layer": "flat", "function": "hillshade"})),

@@ -52,6 +52,8 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
+# Private temporary workspaces for downloaded JPEG 2000 conversion through GDAL.
+tempfile = "3"
 
 [dev-dependencies]
 # Writing sample GeoParquet files.

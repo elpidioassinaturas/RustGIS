@@ -19,6 +19,8 @@ pub const MAX_UPLOAD_BYTES: usize = 512 << 20;
 #[cfg(target_arch = "wasm32")]
 pub const MAX_UPLOAD_BYTES: usize = 256 << 20;
 
+pub(crate) const JPEG2000_WEB_LIMITATION: &str = "JPEG 2000 opens in the desktop app, through GDAL; the web app reads GeoTIFFs";
+
 pub(crate) fn need_raster(s: &Session) -> Option<&'static str> {
     match s.active_layer.and_then(|id| s.map().layer(id)) {
         Some(l) if l.raster.as_ref().is_some_and(|r| r.data.is_some()) => None,
@@ -30,7 +32,7 @@ pub(crate) fn need_raster(s: &Session) -> Option<&'static str> {
 pub fn commands() -> Vec<C> {
     vec![
         C::new("layer.addDataBytes", "Add Data (from file contents)", "Home › Add", add_bytes)
-            .params(r#"{"fileName": "name.tif|.tiff|.asc|.geojson|.csv|.zip|.kml|.kmz|.gpx|.parquet|.fgb|.gpkg|.mbtiles", "data": base64, "layer"?: "one layer of a zip, KML or GPX by name", "name"?: text, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData)}"#),
+            .params(r#"{"fileName": "name.tif|.tiff|.asc|.geojson|.csv|.zip|.kml|.kmz|.gpx|.parquet|.fgb|.gpkg|.mbtiles|.jp2|.j2k (JPEG 2000: desktop, through GDAL)", "data": base64, "layer"?: "one layer of a zip, KML or GPX by name", "name"?: text, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData)}"#),
         C::new("raster.symbology", "Symbology", "Style › Rendering", symbology).when(need_raster).params(
             r#"{"layer"?, "type": "stretch"|"rgb"|"classify"|"unique"|"colormap"|"shadedRelief", "band"?: 1.., "ramp"?, "invert"?: bool, "classes"?: 1..32, "method"?, "azimuth"?, "altitude"?, "zFactor"?, "grey"?: bool (shadedRelief without its colour ramp)}"#,
         ),
@@ -130,7 +132,7 @@ pub fn commands() -> Vec<C> {
         ),
         C::new("raster.info", "Raster Information", "Data › Information", info).view().when(need_raster).params(r#"{"layer"?}"#),
         C::new("share.exportRaster", "Export Raster", "Data › Information", export).view().when(need_raster).params(
-            r#"{"layer"?, "path": "*.tif", "band"?: 1.. (rasters that aren't colour ones; a colour raster writes its colour bands)}"#,
+            r#"{"layer"?, "path": "*.tif", "band"?: 1.. (rasters that aren't colour ones; a colour raster writes its colour bands), "cog"?: bool (a cloud-optimised GeoTIFF: 512 px tiles, Deflate, overviews; default false, an untiled GeoTIFF)}"#,
         ),
     ]
 }
@@ -364,6 +366,22 @@ pub(crate) fn add_gdal_path(s: &mut Session, p: &Value, path: &str) -> CmdResult
     add_raster(s, &name, rl)
 }
 
+/// Adds an uploaded or downloaded JPEG 2000 raster, converted by GDAL to a GeoTIFF that the project
+/// keeps (it opens again without GDAL or the source file, as an uploaded GeoTIFF does).
+#[cfg(not(target_arch = "wasm32"))]
+fn add_jpeg2000_bytes(s: &mut Session, p: &Value, name: &str, bytes: Vec<u8>) -> CmdResult {
+    let crs = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty());
+    let c = raster::gdal::convert_jpeg2000(bytes, crs, MAX_UPLOAD_BYTES as u64).map_err(|e| format!("{name}: {e}"))?;
+    let stem = Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or("raster");
+    let file_name = format!("{stem}.tif");
+    let r = raster::read_bytes(&file_name, &c.tif).map_err(|e| format!("{name}: {e}"))?;
+    if c.assumed_lonlat {
+        s.notify(format!("{name} doesn't say its coordinate system; its coordinates look like longitude/latitude, so it's read as WGS 84 (give \"crs\" if not)"), false);
+    }
+    let title = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(|| r.name.clone());
+    add_raster(s, &title, RasterLayer::from_bytes(r, file_name, c.tif))
+}
+
 fn add_bytes(s: &mut Session, p: &Value) -> CmdResult {
     use base64::Engine;
     let name = ps(p, "fileName").ok_or("fileName is required")?.to_string();
@@ -384,6 +402,13 @@ pub(crate) fn add_named_bytes(s: &mut Session, p: &Value, name: String, bytes: V
     if !scan && rustgis_data::photo::is_photo_name(&name) {
         let layer = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or(super::layer::PHOTOS).to_string();
         return super::layer::add_photos_to(s, &layer, |reader| reader.add(&name, &bytes));
+    }
+    // JPEG 2000 (an upload or a download): through GDAL, on the desktop.
+    if raster::is_jpeg2000_name(&name) {
+        #[cfg(not(target_arch = "wasm32"))]
+        return add_jpeg2000_bytes(s, p, &name, bytes);
+        #[cfg(target_arch = "wasm32")]
+        return Err(JPEG2000_WEB_LIMITATION.into());
     }
     if raster::is_raster_name(&name) {
         let mut r = raster::read_bytes(&name, &bytes).map_err(|e| format!("{name}: {e}"))?;
@@ -628,28 +653,40 @@ fn info(s: &mut Session, p: &Value) -> CmdResult {
     }))
 }
 
-/// GeoTIFF bytes of a raster layer (band is 1-based; RGB rasters keep their colour bands).
+/// GeoTIFF bytes of a raster layer (band is 1-based; RGB rasters keep their colour bands; `cog`
+/// makes it a cloud-optimised one).
 pub fn geotiff_bytes(s: &Session, p: &Value) -> Result<(String, Vec<u8>), String> {
     let (_, r) = get(s, p)?;
     let bi = band(p, "band", &r)?.unwrap_or(0);
-    let bytes = raster::geotiff::write(&r, bi).map_err(|e| e.to_string())?;
-    Ok((r.name.clone(), bytes))
+    let bytes = if b(p, "cog") == Some(true) { raster::cogwrite::write(&r, bi) } else { raster::geotiff::write(&r, bi) };
+    Ok((r.name.clone(), bytes.map_err(|e| e.to_string())?))
 }
 
 fn export(s: &mut Session, p: &Value) -> CmdResult {
     let path = ps(p, "path").ok_or("path is required")?.to_string();
-    let (_, bytes) = geotiff_bytes(s, p)?;
-    rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
     let (_, r) = get(s, p)?;
+    let mut cog = None;
+    if b(p, "cog") == Some(true) {
+        // Tiles go to the file as they are made: the whole file is never held in memory.
+        let bi = band(p, "band", &r)?.unwrap_or(0);
+        cog = Some(raster::cogwrite::write_file(&r, bi, Path::new(&path)).map_err(|e| format!("{path}: {e}"))?);
+    } else {
+        let (_, bytes) = geotiff_bytes(s, p)?;
+        rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
+    }
     let note = match r.overview {
         Some((fw, fh)) => format!(" (the {} × {} overview of the {fw} × {fh} raster)", r.width, r.height),
         None => String::new(),
     };
     s.notify(format!("Exported {path}{note}"), false);
-    Ok(match r.overview {
+    let mut v = match r.overview {
         Some((fw, fh)) => json!({"path": path, "width": r.width, "height": r.height, "overviewOf": [fw, fh]}),
         None => json!({"path": path}),
-    })
+    };
+    if let (Some(o), Some(c)) = (v.as_object_mut(), cog) {
+        o.insert("cog".into(), json!({"overviews": c.levels.len().saturating_sub(1), "bigTiff": c.big, "bytes": c.bytes}));
+    }
+    Ok(v)
 }
 
 /// Pixel values of the topmost visible raster under a longitude/latitude point.
