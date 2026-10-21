@@ -48,13 +48,17 @@ fn serif() -> Option<&'static SerifFaces> {
     static S: OnceLock<Option<SerifFaces>> = OnceLock::new();
     S.get_or_init(|| {
         let f = crate::fonts::serif_fonts()?;
-        let parse = |b: &'static Option<Vec<u8>>| b.as_deref().and_then(|b| FontRef::try_from_slice(b).ok());
-        let heavy = |b: &'static Option<Vec<u8>>| {
+        let parse = |b: Option<&'static [u8]>| b.and_then(|b| FontRef::try_from_slice(b).ok());
+        let heavy = |b: Option<&'static [u8]>| {
             let mut face = parse(b)?;
             face.set_variation(b"wght", SERIF_BOLD_WEIGHT);
             Some(face)
         };
-        Some((FontRef::try_from_slice(&f.regular).ok()?, heavy(&f.bold), parse(&f.italic), heavy(&f.bold_italic)))
+        // A variable family's bold faces are its regular and italic bytes parsed again (a
+        // `FontRef` only borrows them), drawn at the bold weight.
+        let (bold, bold_italic) =
+            if f.variable { (Some(f.regular.as_slice()), f.italic.as_deref()) } else { (f.bold.as_deref(), f.bold_italic.as_deref()) };
+        Some((FontRef::try_from_slice(&f.regular).ok()?, heavy(bold), parse(f.italic.as_deref()), heavy(bold_italic)))
     })
     .as_ref()
 }

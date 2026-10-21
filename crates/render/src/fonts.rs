@@ -155,6 +155,9 @@ pub struct SerifFonts {
     pub bold: Option<Vec<u8>>,
     pub italic: Option<Vec<u8>>,
     pub bold_italic: Option<Vec<u8>>,
+    /// One file for every weight (a variable Noto Serif): `bold` and `bold_italic` are left empty
+    /// and drawn from `regular` and `italic` at the bold weight, so its bytes are kept once.
+    pub variable: bool,
     /// File the regular face came from.
     pub source: String,
 }
@@ -170,7 +173,7 @@ pub fn serif_fonts() -> Option<&'static SerifFonts> {
         }
         let family = |[r, b, i, bi]: &[&str; 4]| {
             let regular = read(r)?;
-            Some(SerifFonts { regular, bold: read(b), italic: read(i), bold_italic: read(bi), source: (*r).to_string() })
+            Some(SerifFonts { regular, bold: read(b), italic: read(i), bold_italic: read(bi), variable: false, source: (*r).to_string() })
         };
         SERIF_CANDIDATES.iter().find_map(family).or_else(|| variable_noto_serif(&FONT_ROOTS)).or_else(|| SERIF_LAST.iter().find_map(family))
     })
@@ -182,8 +185,8 @@ const FONT_ROOTS: [&str; 3] = ["/usr/share/fonts", "/usr/share/fonts/truetype", 
 
 /// Noto Serif as recent distributions ship it: a variable font (`NotoSerif[wdth,wght].ttf`, or
 /// `[wght]`), with its italic beside it, in a package folder under one of `roots` ([`FONT_ROOTS`]).
-/// Found by its name's start, whatever axes it lists; its bold is the same file, drawn at the bold
-/// weight.
+/// Found by its name's start, whatever axes it lists; its bold is the same file (kept once),
+/// drawn at the bold weight.
 fn variable_noto_serif(roots: &[&str]) -> Option<SerifFonts> {
     let named = |files: &[std::path::PathBuf], stem: &str| {
         files.iter().find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(stem) && n.ends_with(".ttf"))).cloned()
@@ -203,7 +206,7 @@ fn variable_noto_serif(roots: &[&str]) -> Option<SerifFonts> {
             let Some(regular) = r.to_str().and_then(read) else { continue };
             let italic = named(&files, "NotoSerif-Italic[").and_then(|p| p.to_str().and_then(read));
             let source = r.display().to_string();
-            return Some(SerifFonts { bold: Some(regular.clone()), bold_italic: italic.clone(), regular, italic, source });
+            return Some(SerifFonts { regular, bold: None, italic, bold_italic: None, variable: true, source });
         }
     }
     None
@@ -363,7 +366,7 @@ mod tests {
         let f = found.expect("found");
         assert!(f.source.ends_with("NotoSerif[wdth,wght].ttf"), "{}", f.source);
         assert_eq!(f.regular, epaint_default_fonts::HACK_REGULAR);
-        assert_eq!(f.bold.as_deref(), Some(epaint_default_fonts::HACK_REGULAR), "the bold is the same file");
+        assert!(f.variable && f.bold.is_none() && f.bold_italic.is_none(), "the bold is the same file, kept once");
         assert_eq!(f.italic.as_deref(), Some(epaint_default_fonts::UBUNTU_LIGHT));
         assert!(super::variable_noto_serif(&["/no/such/folder"]).is_none());
     }
