@@ -117,8 +117,9 @@ pub fn date_in_text(text: &str) -> Option<f64> {
         s.bytes().all(|c| c.is_ascii_digit()).then(|| s.parse().ok()).flatten()
     };
     // Digits at `i` not run on from a digit before.
-    let starts = |i: usize| i == 0 || !b[i - 1].is_ascii_digit();
-    let ends = |i: usize| i >= b.len() || !b[i].is_ascii_digit();
+    let before = |i: usize| i.checked_sub(1).and_then(|j| b.get(j)).copied();
+    let starts = |i: usize| !before(i).is_some_and(|c| c.is_ascii_digit());
+    let ends = |i: usize| !b.get(i).is_some_and(u8::is_ascii_digit);
     let day = |y: u32, m: u32, d: u32| {
         ((1800..=2200).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d))
             .then(|| rustgis_data::time::parse_text(&format!("{y:04}-{m:02}-{d:02}")))
@@ -138,7 +139,7 @@ pub fn date_in_text(text: &str) -> Option<f64> {
     // A year alone, only once no fuller date is found anywhere in the text, and only standing
     // apart (not `res2000` or `v2015`, which name something else).
     let mut bare = None;
-    let apart = |i: usize| (i == 0 || !b[i - 1].is_ascii_alphanumeric()) && (i + 4 >= b.len() || !b[i + 4].is_ascii_alphanumeric());
+    let apart = |i: usize| !before(i).is_some_and(|c| c.is_ascii_alphanumeric()) && !b.get(i + 4).is_some_and(u8::is_ascii_alphanumeric);
     for i in 0..b.len() {
         if !starts(i) {
             continue;
@@ -218,7 +219,7 @@ pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let date = match &dates {
-                Some(d) => d[k],
+                Some(d) => d.get(k).copied().ok_or("dates has a date for each layer, in their order")?,
                 None => date_in_text(&l.name)
                     .or_else(|| date_in_text(&file))
                     .ok_or_else(|| format!("no date in the name of {}: give \"dates\"", l.name))?,
@@ -271,7 +272,7 @@ pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
     let mut items = Vec::with_capacity(r.bands.len());
     for (b, band) in r.bands.iter().enumerate() {
         let date = match &dates {
-            Some(d) => d[b],
+            Some(d) => d.get(b).copied().ok_or("dates has a date for each band, in their order")?,
             None => {
                 date_in_text(&band.name).ok_or_else(|| format!("band {} ({}) has no date in its name: give \"dates\"", b + 1, band.name))?
             }

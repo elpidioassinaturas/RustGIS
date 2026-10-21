@@ -1080,7 +1080,7 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
             rustgis_map::raster::MAX_ZARR_STEPS
         ));
     }
-    let day = |i: usize| rustgis_data::time::format(dates[i], "YYYY-MM-DD");
+    let day = |i: usize| rustgis_data::time::format(dates.get(i).copied().unwrap_or(f64::NAN), "YYYY-MM-DD");
     let (a, z) = (steps.first().copied().unwrap_or(0), steps.last().copied().unwrap_or(0));
     let mut label = format!("{var} {} {}–{}", stat.code(), day(a), day(z));
     if !months.is_empty() {
