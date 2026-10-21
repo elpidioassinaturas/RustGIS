@@ -937,46 +937,51 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     }
 }
 
-/// A trend under way: its progress and Cancel, or, once it lands, its layers added through
-/// `cube.trend` (so it's in the History). Whether one is still running.
+/// A trend that has finished, its layers added through `cube.trend` (so it's in the History):
+/// called every frame, whatever pane is in view, so a run lands though the Workflows pane
+/// closed. `true` while one is still running.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn land_trend(app: &mut RustGisApp) -> bool {
+    use std::sync::atomic::Ordering;
+    let Some(r) = &app.workflow.trend.running else { return false };
+    let Some(res) = r.result.lock().ok().and_then(|mut g| g.take()) else { return true };
+    let mut p = r.params.clone();
+    // A run the user cancelled stops quietly: no error for it.
+    let cancelled = r.cancel.load(Ordering::Relaxed);
+    // Still the project it was run in (`false` once another opened).
+    let current = app.session.download_done(r.id);
+    app.workflow.trend.running = None;
+    match res {
+        // Cancelled as it finished, or another project open: nothing added.
+        Ok(_) if cancelled || !current => {}
+        Ok((rasters, dates)) => {
+            p["ran"] = json!(rustgis_engine::cmd::cube::land(rasters, dates));
+            run(app, "cube.trend", p);
+        }
+        Err(_) if cancelled => {}
+        Err(e) => app.workflow.error = Some(e),
+    }
+    false
+}
+
+/// A trend under way: its progress and Cancel (its result lands through `land_trend`). Whether
+/// one is still running.
 #[cfg(not(target_arch = "wasm32"))]
 fn trend_running(app: &mut RustGisApp, ui: &mut Ui) -> bool {
     use std::sync::atomic::Ordering;
-    let Some(r) = &app.workflow.trend.running else { return false };
-    let landed = r.result.lock().ok().and_then(|mut g| g.take());
-    match landed {
-        None => {
-            let (done, total) = (r.done.load(Ordering::Relaxed), r.total.max(1));
-            heading(ui, "Trend over a series of rasters");
-            ui.horizontal(|ui| {
-                ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!("{done} / {total}")).desired_width(200.0));
-                if ui.button(tl!("Cancel")).clicked() {
-                    r.cancel.store(true, Ordering::Relaxed);
-                }
-            });
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
-            true
-        }
-        Some(res) => {
-            let mut p = r.params.clone();
-            // A run the user cancelled stops quietly: no error for it.
-            let cancelled = r.cancel.load(Ordering::Relaxed);
-            // Still the project it was run in (`false` once another opened).
-            let current = app.session.download_done(r.id);
-            app.workflow.trend.running = None;
-            match res {
-                // Cancelled as it finished, or another project open: nothing added.
-                Ok(_) if cancelled || !current => {}
-                Ok((rasters, dates)) => {
-                    p["ran"] = json!(rustgis_engine::cmd::cube::land(rasters, dates));
-                    run(app, "cube.trend", p);
-                }
-                Err(_) if cancelled => {}
-                Err(e) => app.workflow.error = Some(e),
-            }
-            false
-        }
+    if !land_trend(app) {
+        return false;
     }
+    let Some(r) = &app.workflow.trend.running else { return false };
+    let (done, total) = (r.done.load(Ordering::Relaxed), r.total.max(1));
+    heading(ui, "Trend over a series of rasters");
+    ui.horizontal(|ui| {
+        ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!("{done} / {total}")).desired_width(200.0));
+        if ui.button(tl!("Cancel")).clicked() {
+            r.cancel.store(true, Ordering::Relaxed);
+        }
+    });
+    true
 }
 
 /// Shows a workflow's result: profiles and histograms as tables and bars, the rest as JSON.
