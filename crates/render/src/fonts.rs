@@ -66,6 +66,8 @@ pub fn ui_fonts() -> &'static UiFonts {
 }
 
 /// Installed serif families: (regular, bold, italic, bold italic) files, in order of preference.
+/// Full paths, as the sans candidates are; a variable Noto Serif is looked for after these (see
+/// [`variable_noto_serif`]), then [`SERIF_LAST`].
 const SERIF_CANDIDATES: &[[&str; 4]] = &[
     [
         "C:\\Windows\\Fonts\\georgia.ttf",
@@ -109,6 +111,10 @@ const SERIF_CANDIDATES: &[[&str; 4]] = &[
         "/usr/share/fonts/google-noto/NotoSerif-Italic.ttf",
         "/usr/share/fonts/google-noto/NotoSerif-BoldItalic.ttf",
     ],
+];
+
+/// Serif families taken when none of the above (nor a variable Noto Serif) is installed.
+const SERIF_LAST: &[[&str; 4]] = &[
     [
         "/usr/share/fonts/TTF/DejaVuSerif.ttf",
         "/usr/share/fonts/TTF/DejaVuSerif-Bold.ttf",
@@ -155,12 +161,39 @@ pub fn serif_fonts() -> Option<&'static SerifFonts> {
         if std::env::var_os("RUSTGIS_BUILTIN_FONTS").is_some() {
             return None;
         }
-        SERIF_CANDIDATES.iter().find_map(|[r, b, i, bi]| {
+        let family = |[r, b, i, bi]: &[&str; 4]| {
             let regular = read(r)?;
             Some(SerifFonts { regular, bold: read(b), italic: read(i), bold_italic: read(bi), source: (*r).to_string() })
-        })
+        };
+        SERIF_CANDIDATES.iter().find_map(family).or_else(|| variable_noto_serif(&FONT_ROOTS)).or_else(|| SERIF_LAST.iter().find_map(family))
     })
     .as_ref()
+}
+
+/// The folders under which distributions put each font package's own folder.
+const FONT_ROOTS: [&str; 3] = ["/usr/share/fonts", "/usr/share/fonts/truetype", "/usr/share/fonts/opentype"];
+
+/// Noto Serif as recent distributions ship it: a variable font (`NotoSerif[wdth,wght].ttf`, or
+/// `[wght]`), with its italic beside it, in a package folder under one of `roots` ([`FONT_ROOTS`]).
+/// Found by its name's start, whatever axes it lists; its bold is the same file, drawn at the bold
+/// weight.
+fn variable_noto_serif(roots: &[&str]) -> Option<SerifFonts> {
+    let named = |files: &[std::path::PathBuf], stem: &str| {
+        files.iter().find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(stem) && n.ends_with(".ttf"))).cloned()
+    };
+    for root in roots {
+        let Ok(dirs) = std::fs::read_dir(root) else { continue };
+        for dir in dirs.flatten().take(1000).map(|d| d.path()).filter(|p| p.is_dir()) {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let files: Vec<std::path::PathBuf> = entries.flatten().take(10_000).map(|e| e.path()).collect();
+            let Some(r) = named(&files, "NotoSerif[") else { continue };
+            let Some(regular) = r.to_str().and_then(read) else { continue };
+            let italic = named(&files, "NotoSerif-Italic[").and_then(|p| p.to_str().and_then(read));
+            let source = r.display().to_string();
+            return Some(SerifFonts { bold: Some(regular.clone()), bold_italic: italic.clone(), regular, italic, source });
+        }
+    }
+    None
 }
 
 /// Whether a serif is installed: text asking for one is drawn in it, not in the sans.
@@ -301,6 +334,27 @@ pub fn script_font_url(script: ScriptFont) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// A variable Noto Serif (one file for every weight, its italic beside it) is found in a
+    /// package folder by its name's start, whatever axes the name lists.
+    #[test]
+    fn a_variable_noto_serif_is_found() {
+        let root = std::env::temp_dir().join(format!("rustgis-noto-{}", std::process::id()));
+        let dir = root.join("google-noto-serif-vf");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Any valid face stands in for the font.
+        std::fs::write(dir.join("NotoSerif[wdth,wght].ttf"), epaint_default_fonts::HACK_REGULAR).unwrap();
+        std::fs::write(dir.join("NotoSerif-Italic[wdth,wght].ttf"), epaint_default_fonts::UBUNTU_LIGHT).unwrap();
+        std::fs::write(dir.join("NotoSerifDisplay[wdth,wght].ttf"), epaint_default_fonts::UBUNTU_LIGHT).unwrap();
+        let found = super::variable_noto_serif(&[root.to_str().unwrap(), "/no/such/folder"]);
+        let _ = std::fs::remove_dir_all(&root);
+        let f = found.expect("found");
+        assert!(f.source.ends_with("NotoSerif[wdth,wght].ttf"), "{}", f.source);
+        assert_eq!(f.regular, epaint_default_fonts::HACK_REGULAR);
+        assert_eq!(f.bold.as_deref(), Some(epaint_default_fonts::HACK_REGULAR), "the bold is the same file");
+        assert_eq!(f.italic.as_deref(), Some(epaint_default_fonts::UBUNTU_LIGHT));
+        assert!(super::variable_noto_serif(&["/no/such/folder"]).is_none());
+    }
+
     #[test]
     fn an_arabic_face_needs_persian_and_latin_letters() {
         // Ubuntu Light has Latin but no Arabic; junk is no font at all.

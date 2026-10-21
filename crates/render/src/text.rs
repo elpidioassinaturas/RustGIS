@@ -40,12 +40,21 @@ pub struct Face {
 /// The installed serif's faces, parsed once: (regular, bold, italic, bold italic).
 type SerifFaces = (FontRef<'static>, Option<FontRef<'static>>, Option<FontRef<'static>>, Option<FontRef<'static>>);
 
+/// The weight a serif's bold faces are drawn at where the file is a variable font (a variable
+/// Noto Serif is one file for every weight); static faces ignore it.
+const SERIF_BOLD_WEIGHT: f32 = 700.0;
+
 fn serif() -> Option<&'static SerifFaces> {
     static S: OnceLock<Option<SerifFaces>> = OnceLock::new();
     S.get_or_init(|| {
         let f = crate::fonts::serif_fonts()?;
         let parse = |b: &'static Option<Vec<u8>>| b.as_deref().and_then(|b| FontRef::try_from_slice(b).ok());
-        Some((FontRef::try_from_slice(&f.regular).ok()?, parse(&f.bold), parse(&f.italic), parse(&f.bold_italic)))
+        let heavy = |b: &'static Option<Vec<u8>>| {
+            let mut face = parse(b)?;
+            face.set_variation(b"wght", SERIF_BOLD_WEIGHT);
+            Some(face)
+        };
+        Some((FontRef::try_from_slice(&f.regular).ok()?, heavy(&f.bold), parse(&f.italic), heavy(&f.bold_italic)))
     })
     .as_ref()
 }
@@ -72,6 +81,13 @@ fn face_font(face: Face) -> Option<(&'static FontRef<'static>, bool)> {
 /// The label font of `face`'s weight, for the characters `f` lacks: `None` when `f` is it.
 fn sans_beside(f: &'static FontRef<'static>, face: Face) -> Option<&'static FontRef<'static>> {
     font(face.bold).filter(|s| !std::ptr::eq(*s, f))
+}
+
+/// Whether a glyph drawn from `g` leans: the whole line does when its face is slanted by hand
+/// (`slanted`), and in a real italic face `f` a glyph taken from another face (the sans or a
+/// CJK face, for a character the italic lacks) is slanted to match it.
+fn leans(face: Face, f: &FontRef<'static>, slanted: bool, g: &FontRef<'static>) -> bool {
+    slanted || (face.italic && !std::ptr::eq(f, g))
 }
 
 /// The scale that draws `f` with an em `px` pixels tall, as CSS sizes a font and the map view
@@ -355,14 +371,16 @@ const SLANT: f32 = 0.2126;
 /// and rightmost pixel offsets. With a negative spacing the letters can run backwards past the
 /// pen, and a slant moves their tops right and their descenders left; (0, 0) when nothing draws.
 pub fn styled_extent(text: &str, px: f32, face: Face, spacing: f32) -> (f32, f32) {
-    let Some((f, italic)) = face_font(face) else { return (0.0, 0.0) };
+    let Some((f, slanted)) = face_font(face) else { return (0.0, 0.0) };
     let sf = f.as_scaled(em(f, px));
     let base = (sf.ascent() + sf.descent()) / 2.0;
     let (glyphs, _) = shape(text, px, f, sans_beside(f, face));
     let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-    for (i, (f, id, x)) in glyphs.into_iter().enumerate() {
-        let g = id.with_scale_and_position(em(f, px), ab_glyph::point(x + spacing * i as f32, base));
-        let Some(og) = f.outline_glyph(g) else { continue };
+    for (i, (gf, id, x)) in glyphs.into_iter().enumerate() {
+        // Measured as `styled_at` draws it.
+        let italic = leans(face, f, slanted, gf);
+        let g = id.with_scale_and_position(em(gf, px), ab_glyph::point(x + spacing * i as f32, base));
+        let Some(og) = gf.outline_glyph(g) else { continue };
         let bb = og.px_bounds();
         let (lean_top, lean_bottom) = if italic { (SLANT * (base - bb.min.y), SLANT * (base - bb.max.y)) } else { (0.0, 0.0) };
         lo = lo.min(bb.min.x + lean_top.min(lean_bottom));
@@ -379,13 +397,14 @@ pub fn styled_at(pm: &mut Pixmap, text: &str, left: f32, cy: f32, px: f32, color
     if !(left.is_finite() && cy.is_finite() && px.is_finite() && spacing.is_finite()) || px <= 0.0 {
         return;
     }
-    let Some((f, italic)) = face_font(face) else { return };
+    let Some((f, slanted)) = face_font(face) else { return };
     let sf = f.as_scaled(em(f, px));
     let base = cy + (sf.ascent() + sf.descent()) / 2.0;
     let (glyphs, _) = shape(text, px, f, sans_beside(f, face));
-    for (i, (f, id, x)) in glyphs.into_iter().enumerate() {
-        let g = id.with_scale_and_position(em(f, px), ab_glyph::point(left + x + spacing * i as f32, base));
-        let Some(og) = f.outline_glyph(g) else { continue };
+    for (i, (gf, id, x)) in glyphs.into_iter().enumerate() {
+        let italic = leans(face, f, slanted, gf);
+        let g = id.with_scale_and_position(em(gf, px), ab_glyph::point(left + x + spacing * i as f32, base));
+        let Some(og) = gf.outline_glyph(g) else { continue };
         let bb = og.px_bounds();
         og.draw(|gx, gy, cov| {
             let (px_x, px_y) = (bb.min.x + gx as f32, bb.min.y + gy as f32);
@@ -638,6 +657,37 @@ mod coverage_tests {
                 assert!(std::ptr::eq(f, font(bold).unwrap()) && slant == italic);
             }
         }
+    }
+
+    /// The serif's faces picked for each style, a character it lacks taken from the sans, and that
+    /// glyph slanted in a real italic, with faces of the test's own (egui's bundled Hack as the
+    /// serif's regular, Ubuntu Light as its italic): run on every machine, serif installed or not.
+    #[test]
+    fn serif_faces_are_picked_and_fall_back() {
+        use super::{Face, SerifFaces, face_in, leans, shape};
+        use ab_glyph::{Font, FontRef};
+        let parse = |b: &'static [u8]| FontRef::try_from_slice(b).unwrap();
+        let faces: &'static SerifFaces =
+            Box::leak(Box::new((parse(epaint_default_fonts::HACK_REGULAR), None, Some(parse(epaint_default_fonts::UBUNTU_LIGHT)), None)));
+        let (regular, italic) = (&faces.0, faces.2.as_ref().unwrap());
+        let pick = |bold, it| face_in(Face { bold, italic: it, serif: true }, Some(faces)).unwrap();
+        let is = |(f, slant): (&FontRef, bool), g: &FontRef, s: bool| std::ptr::eq(f, g) && slant == s;
+        assert!(is(pick(false, false), regular, false));
+        assert!(is(pick(false, true), italic, false), "the real italic, not slanted");
+        // No bold file: the regular; no bold italic: the regular, slanted.
+        assert!(is(pick(true, false), regular, false));
+        assert!(is(pick(true, true), regular, true));
+        // A sans text never takes them.
+        assert!(!std::ptr::eq(face_in(Face::default(), Some(faces)).unwrap().0, regular));
+        // A character the serif lacks and the sans has: drawn from the sans.
+        let sans = italic;
+        let c = ('\u{100}'..='\u{2FFF}').find(|&c| regular.glyph_id(c).0 == 0 && sans.glyph_id(c).0 != 0).expect("a character Hack lacks");
+        let (glyphs, _) = shape(&format!("a{c}"), 24.0, regular, Some(sans));
+        assert!(glyphs.len() == 2 && std::ptr::eq(glyphs[1].0, sans), "{c:?} left out");
+        // In a real italic, a glyph from another face leans; the italic's own don't.
+        let it = Face { italic: true, serif: true, ..Face::default() };
+        assert!(!leans(it, italic, false, italic) && leans(it, italic, false, regular));
+        assert!(!leans(Face { serif: true, ..Face::default() }, regular, false, sans), "upright text stays upright");
     }
 
     /// With a serif installed (Georgia on Windows, Times on macOS, Noto or DejaVu Serif on Linux),
