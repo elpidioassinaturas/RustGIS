@@ -508,6 +508,8 @@ fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
                 let cancelled = r.cancel.load(Ordering::Relaxed);
                 app.ws.reducing = None;
                 match res {
+                    // Cancelled as it finished: nothing added either.
+                    Ok(_) if cancelled => {}
                     Ok(tif) => {
                         let id = app.session.download_started();
                         app.session.download_landed(id, tif);

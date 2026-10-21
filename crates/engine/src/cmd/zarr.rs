@@ -904,6 +904,10 @@ impl ReduceRun {
             match &first {
                 None => {
                     let len = vals.len();
+                    // The running totals take about 48 bytes a cell: bounded before they're made.
+                    if len > MAX_REDUCE_CELLS {
+                        return Err(format!("{len} cells, more than a summary takes ({MAX_REDUCE_CELLS})"));
+                    }
                     (n, mean, m2, sum, above) = (vec![0; len], vec![0.0; len], vec![0.0; len], vec![0.0; len], vec![0; len]);
                     (lo, hi) = (vec![f64::INFINITY; len], vec![f64::NEG_INFINITY; len]);
                     first = Some(r.clone());
@@ -1065,6 +1069,10 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
     };
     Ok(ReduceRun { zt, steps, stat, min_valid, name, root: src.root, variable: var })
 }
+
+/// The most cells a summary keeps running totals for (about 48 bytes each): 32 million, 1.5 GB.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_REDUCE_CELLS: usize = 32_000_000;
 
 /// `zarr.reduce`: the summary computed here (blocking), and added as a raster layer kept in the
 /// project as a GeoTIFF.
