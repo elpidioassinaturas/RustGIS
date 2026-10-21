@@ -21,7 +21,7 @@ pub fn commands() -> Vec<C> {
         C::new("raster.zarrInfo", "Zarr Variables", "Home › Add › Add Data › Zarr", info)
             .view()
             .params(r#"{"path": "a Zarr store's folder" | "url": "https://… a store with consolidated metadata"}"#),
-        C::new("zarr.series", "Time Series at a Point", "Home › Inspect", series).view().params(
+        C::new("zarr.series", "Time Series at a Point", "View › Time Series", series).view().params(
             r#"{"lon", "lat", "layer"? (a Zarr layer: its store, variable and steps; default the active layer) | "path": folder | "url": "https://…", "variable"?, "index"?: {"level": 0} (the other dimensions' steps), "start"?, "end"?: dates (default: the layer's period, else the whole axis), "crs"?: for a projected store that doesn't say} → dates, values (null for no data) and labels along the variable's time dimension at the cell holding the point (desktop)"#,
         ),
         C::new("zarr.reduce", "Summarise Zarr Over Time", "Analyze › Raster", reduce).params(
