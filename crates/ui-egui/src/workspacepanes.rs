@@ -493,6 +493,8 @@ fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
         match landed {
             None => {
                 let (done, total) = (r.done.load(Ordering::Relaxed), r.run.total().max(1));
+                // The section's title stays over its progress.
+                ui.label(egui::RichText::new(tl!("Summarise over time")).strong());
                 ui.horizontal(|ui| {
                     ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!("{done} / {total}")).desired_width(200.0));
                     if ui.button(tl!("Cancel")).clicked() {
@@ -671,10 +673,11 @@ pub fn time_series(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         .series
         .iter()
         .map(|s| {
-            let dates = s["dates"].as_array().cloned().unwrap_or_default();
-            let values = s["values"].as_array().cloned().unwrap_or_default();
+            // Read in place, not copied: the chart is drawn every frame.
+            let dates = s["dates"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+            let values = s["values"].as_array().map(Vec::as_slice).unwrap_or(&[]);
             let mut runs: Vec<Vec<(f64, f64)>> = vec![Vec::new()];
-            for (d, v) in dates.iter().zip(&values) {
+            for (d, v) in dates.iter().zip(values) {
                 match (d.as_f64(), v.as_f64()) {
                     (Some(d), Some(v)) => runs.last_mut().into_iter().for_each(|r| r.push((d, v))),
                     _ if runs.last().is_some_and(|r| !r.is_empty()) => runs.push(Vec::new()),
@@ -774,9 +777,9 @@ fn series_csv(series: &[Value]) -> String {
     let mut out = String::from("lon,lat,variable,date,value\n");
     for s in series {
         let (lon, lat, var) = (s["lon"].as_f64().unwrap_or(0.0), s["lat"].as_f64().unwrap_or(0.0), s["variable"].as_str().unwrap_or(""));
-        let labels = s["labels"].as_array().cloned().unwrap_or_default();
-        let values = s["values"].as_array().cloned().unwrap_or_default();
-        for (l, v) in labels.iter().zip(&values) {
+        let labels = s["labels"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let values = s["values"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        for (l, v) in labels.iter().zip(values) {
             let v = v.as_f64().map(|v| v.to_string()).unwrap_or_default();
             out.push_str(&format!("{lon},{lat},\"{}\",{},{v}\n", var.replace('"', "\"\""), l.as_str().unwrap_or("")));
         }

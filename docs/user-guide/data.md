@@ -513,10 +513,12 @@ rustgis-cli run --cmd 'zarr.series={"path":"air.zarr","variable":"t","lon":-55.7
 a Zarr variable's steps: **mean**, **min**, **max**, **sum**, **std** (the population standard
 deviation), **count** of values, or **countAbove** a threshold (days above 30 °C, say). It reads a
 layer's period by default, else the `"start"`/`"end"` given, and `"months"` keeps one season across
-years (`[12, 1, 2]`). Slices are read one at a time and folded into running totals, so memory stays
-at a slice whatever the period: at most 20,000 steps, with progress and **Cancel** in the app. A
-cell keeps no value when it had fewer values than `"minValid"` (a share, 0 by default) of the steps
-read. The layer is named after what it holds (`tas mean 1991-01-01–2020-12-31`) and kept in the
+years (`[12, 1, 2]`). Slices are read one at a time and folded into running totals (12 to 20 bytes a
+cell, for grids of up to 32 million cells), so memory depends on the grid, not on the period: at most
+20,000 steps, with progress and **Cancel** in the app. A cell keeps no value when it had fewer values
+than `"minValid"` (a share, 0 by default) of the steps read; with the default, **count** and
+**countAbove** give 0 where a cell never had a value (land in an ocean variable, say), and a
+`"minValid"` above 0 leaves such cells empty. The layer is named after what it holds (`tas mean 1991-01-01–2020-12-31`) and kept in the
 project as a GeoTIFF.
 
 ```sh
