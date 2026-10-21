@@ -955,6 +955,8 @@ fn trend_running(app: &mut RustGisApp, ui: &mut Ui) -> bool {
             let cancelled = r.cancel.load(Ordering::Relaxed);
             app.workflow.trend.running = None;
             match res {
+                // Cancelled as it finished: nothing added either.
+                Ok(_) if cancelled => {}
                 Ok((rasters, dates)) => {
                     p["ran"] = json!(rustgis_engine::cmd::cube::land(rasters, dates));
                     run(app, "cube.trend", p);

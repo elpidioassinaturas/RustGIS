@@ -352,6 +352,9 @@ pub fn steps(dates: &[f64], period: (usize, usize), p: &Value) -> Result<Vec<usi
 /// What a trend writes for each cell.
 const OUTPUTS: usize = 4;
 
+/// The parts a run's cells count for on a progress bar.
+const CELL_PARTS: usize = 100;
+
 /// A trend over a cube, prepared on the session and computed anywhere with [`TrendRun::run`]:
 /// the desktop app runs it on a thread of its own, with progress and Cancel.
 pub struct TrendRun {
@@ -367,9 +370,10 @@ pub struct TrendRun {
 }
 
 impl TrendRun {
-    /// The work, for a progress bar: the slices read, then the cells worked out.
+    /// The work, for a progress bar: the slices read, then the cells worked out, in
+    /// [`CELL_PARTS`] parts.
     pub fn total(&self) -> usize {
-        self.steps.len() + 1
+        self.steps.len() + CELL_PARTS
     }
 
     /// How many dates it reads.
@@ -443,9 +447,14 @@ impl TrendRun {
         // Cancel is looked at after about the same work whatever the dates: a cell compares n²⁄2
         // pairs, so every 4096 cells for a short series, every cell for a long one.
         let every = (4_000_000 / (n * n).max(1)).clamp(1, 4096);
+        // Progress through the cells: a part of the bar every `tick` cells, on whichever thread.
+        let tick = cells.div_ceil(CELL_PARTS).max(1);
         let work = |block: &[f32], out: &mut [f32]| {
             let mut ys = vec![0.0f64; n];
             for (c, (vals, o)) in block.chunks(n).zip(out.chunks_mut(OUTPUTS)).enumerate() {
+                if c > 0 && c % tick == 0 {
+                    done.fetch_add(1, Ordering::Relaxed);
+                }
                 if c % every == 0 && (cancel.load(Ordering::Relaxed) || stopped.load(Ordering::Relaxed)) {
                     stopped.store(true, Ordering::Relaxed);
                     return;
@@ -486,7 +495,7 @@ impl TrendRun {
         if stopped.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        done.fetch_add(1, Ordering::Relaxed);
+        done.store(self.total(), Ordering::Relaxed);
         let unit = if self.per == 10.0 { "decade" } else { "year" };
         let names = [
             format!("{} Sen slope per {unit}", self.name),

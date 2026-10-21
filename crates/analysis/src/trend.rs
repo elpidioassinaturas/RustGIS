@@ -174,7 +174,8 @@ fn intercept(t: &[f64], y: &[f64], slope: f64) -> Option<f64> {
 fn seasonal(t: &[f64], y: &[f64], seasons: u32) -> Option<Trend> {
     let m = seasons.max(1) as usize;
     // The season of a time: its place within its unit (year), in `m` equal parts.
-    let season: Vec<usize> = t.iter().map(|t| (((t - t.floor()) * m as f64).floor() as usize).min(m - 1)).collect();
+    // A hair above, so a time computed on a season's start (2000 + 3⁄12) isn't put in the one before.
+    let season: Vec<usize> = t.iter().map(|t| (((t - t.floor()) * m as f64 + 1e-9).floor() as usize).min(m - 1)).collect();
     seasonal_by(t, y, &season)
 }
 
