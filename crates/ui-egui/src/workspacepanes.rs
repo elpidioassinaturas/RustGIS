@@ -503,7 +503,11 @@ pub fn land_summary(app: &mut RustGisApp) -> bool {
         Ok(tif) => {
             if app.session.download_landed(id, tif) {
                 let key = if root.starts_with("http://") || root.starts_with("https://") { "url" } else { "path" };
+                // `run` puts any error in the pane's message.
                 let _ = run(app, "layer.addZarr", json!({key: root, "variable": variable, "ran": id, "summary": true, "name": name}));
+            } else {
+                app.ws.message =
+                    Some((tl!("The summary finished after another project was opened, so it wasn't added").to_string(), false));
             }
         }
         Err(_) if cancelled => app.session.download_failed(id),
