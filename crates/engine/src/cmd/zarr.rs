@@ -222,6 +222,9 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         // A slice names its steps (`t2m[time=3]`); a summary over time (no steps) is no slice of
         // the variable, so Time Series and Summarise don't take it for one.
         layer.subdataset = (!sel.index.is_empty()).then(|| sel.label());
+        // The coordinate system given for a store that doesn't say, kept for its series and
+        // summaries, as a folder's slice keeps it.
+        layer.crs = crs.map(str::to_string);
         return super::raster::add_raster(s, &name, layer);
     }
     #[cfg(target_arch = "wasm32")]
@@ -912,7 +915,16 @@ impl ReduceRun {
             // summary doesn't push out the slices a layer following the slider holds.
             let r = match kept_slice(&slice_key(&self.zt, i)) {
                 Some(r) => r,
-                None => std::sync::Arc::new(read_slice(&self.zt, i)?),
+                None => match read_slice(&self.zt, i) {
+                    Ok(r) => std::sync::Arc::new(r),
+                    // A step never written is its fill value: no value for any cell, so it only
+                    // lowers the counts (and the step after it still sets the grid).
+                    Err(e) if e.contains(zarr::NO_CHUNKS) => {
+                        done.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                },
             };
             let vals = &r.bands.first().ok_or("the slice has no band")?.data;
             match &first {
