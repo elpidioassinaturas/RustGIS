@@ -29,7 +29,9 @@ pub struct RasterLayer {
     /// For a raster GDAL reads: the subdataset added (a NetCDF variable), so it is read again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subdataset: Option<String>,
-    /// For a raster GDAL reads: the coordinate system given for a file that doesn't say.
+    /// The coordinate system given for a file or store that doesn't say: for a raster GDAL reads
+    /// (applied when it's read again from its path), and for a Zarr slice (which its series and
+    /// summaries read the store with; a slice kept as its GeoTIFF's bytes has it written in).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crs: Option<String>,
     /// A Zarr variable that follows the time slider: its slice is the step the slider shows,
