@@ -13,9 +13,12 @@
 //!   of the slopes between values of the same season.
 //! - **Original:** Mann (1945) and Kendall (1975), for independent values.
 //!
-//! The variants follow `pymannkendall`'s definitions, so results can be checked against it. Each
-//! series is the values at its times; missing values (not finite) are skipped. Times are in any
-//! unit (years, say): the slope is per that unit.
+//! The variants follow `pymannkendall`'s definitions, so results can be checked against it. One
+//! difference: the corrected tests take the trend out at each value's own time, where
+//! `pymannkendall` takes it out at the value's place (0, 1, 2…); the two agree on evenly spaced
+//! series, and on uneven ones (gaps, a months filter) this keeps the real spacing. Each series is
+//! the values at its times; missing values (not finite) are skipped. Times are in any unit (years,
+//! say): the slope is per that unit.
 
 /// The Mann–Kendall test to make.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
