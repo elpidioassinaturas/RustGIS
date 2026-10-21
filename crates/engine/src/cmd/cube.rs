@@ -208,6 +208,10 @@ pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
         if list.len() < trend::MIN_VALUES {
             return Err(format!("a stack needs {} layers or more, a date each", trend::MIN_VALUES));
         }
+        // At most a run's dates, refused before each is looked up and checked against the others.
+        if list.len() > MAX_DATES {
+            return Err(format!("{} layers; a trend takes {MAX_DATES} dates at most", list.len()));
+        }
         if dates.as_ref().is_some_and(|d| d.len() != list.len()) {
             return Err("dates has a date for each layer, in their order".into());
         }
@@ -671,7 +675,7 @@ fn trend_cmd(s: &mut Session, p: &Value) -> CmdResult {
     }
     // Worked out here, waited for with no Cancel (a script, the CLI): a run of seconds, not minutes.
     let mut run = trend_start(s, p)?;
-    run.max_pairs = MAX_WAITED_PAIRS.min(MAX_PAIRS);
+    run.max_pairs = MAX_WAITED_PAIRS;
     let rasters = run.run(&AtomicBool::new(false), &AtomicUsize::new(0))?;
     add_outputs(s, rasters, run.steps.len())
 }
