@@ -22,7 +22,7 @@ use crate::{CmdResult, CommandSpec as C, Session};
 
 pub fn commands() -> Vec<C> {
     vec![C::new("cube.trend", "Trend Analysis", "Analyze › Image Analysis", trend_cmd).params(
-        r#"{"layers"?: [raster layers, a date each] | "layer"?: a Zarr layer (or "path" | "url", "variable", "index", "crs" as for zarr.reduce) or a raster of several bands, a date each (default: the active layer), "band"?: 1-based (a stack's band), "dates"?: [dates] (a stack's or the bands' dates, in their order; default: read from the layers' names or files, or the bands' names), "start"?, "end"?: dates, "months"?: [1–12] (one season across years), "test"?: "hamedRao" (default) | "yueWang" | "seasonal" | "original", "seasons"?: parts of a year for the seasonal test (default 12), "alpha"?: 0.05, "minValid"?: dates a cell needs (default: half of them, at least 4), "per"?: "year" (default) | "decade", "name"?: text, "ran"?: (internal: a trend the app has worked out)} → four raster layers: Sen's slope, the test's Z and p-value, and the slope where p < alpha"#,
+        r#"{"layers"?: [raster layers, a date each] | "layer"?: a Zarr layer (or "path" | "url", "variable", "index", "crs" as for zarr.reduce) or a raster of several bands, a date each (default: the active layer), "band"?: 1-based (a stack's band), "dates"?: [dates] (a stack's or the bands' dates, in their order; default: read from the layers' names or files, or the bands' names), "start"?, "end"?: dates, "months"?: [1–12] (one season across years), "test"?: "hamedRao" (default) | "yueWang" | "seasonal" | "original", "seasons"?: parts of a year for the seasonal test (default 12), "alpha"?: 0.05 (above 0, below 0.5), "minValid"?: dates a cell needs (default: half of them, at least 4), "per"?: "year" (default) | "decade", "name"?: text, "ran"?: (internal: a trend the app has worked out)} → four raster layers: Sen's slope, the test's Z and p-value, and the slope where p < alpha"#,
     )]
 }
 
@@ -133,6 +133,10 @@ pub fn date_in_text(text: &str) -> Option<f64> {
             return Some(jan1 + f64::from(doy - 1) * 86_400_000.0);
         }
     }
+    // A year alone, only once no fuller date is found anywhere in the text, and only standing
+    // apart (not `res2000` or `v2015`, which name something else).
+    let mut bare = None;
+    let apart = |i: usize| (i == 0 || !b[i - 1].is_ascii_alphanumeric()) && (i + 4 >= b.len() || !b[i + 4].is_ascii_alphanumeric());
     for i in 0..b.len() {
         if !starts(i) {
             continue;
@@ -159,13 +163,15 @@ pub fn date_in_text(text: &str) -> Option<f64> {
                 return Some(ms);
             }
         }
-        if ends(i + 4)
+        if bare.is_none()
+            && ends(i + 4)
+            && apart(i)
             && let Some(ms) = day(y, 1, 1)
         {
-            return Some(ms);
+            bare = Some(ms);
         }
     }
-    None
+    bare
 }
 
 fn date_list(p: &Value) -> Result<Option<Vec<f64>>, String> {
@@ -300,8 +306,8 @@ fn common_label(name: &str) -> String {
 }
 
 /// A date's season among `m` in its calendar year (UTC): its month for 12, otherwise its part of
-/// the year by day, so a composite on the same day each year (16-day ones, 23 a year) is always
-/// in the same season, leap years included.
+/// the year by day, so a composite on the same day each year (16-day ones, 23 a year) keeps its
+/// season from year to year (a day near a season's edge can move by one in a leap year).
 pub fn season_of(ms: f64, m: u32) -> usize {
     let m = m.max(1) as usize;
     let month = rustgis_data::time::format(ms, "MM").parse::<usize>().unwrap_or(1);
@@ -647,6 +653,17 @@ mod tests {
     }
 
     /// Slices an ulp apart are one grid; half a pixel apart, another.
+    /// Dates in names: a full date anywhere before a year alone; a year only standing apart.
+    #[test]
+    fn dates_in_names() {
+        let day = |d: &str| rustgis_data::time::parse_text(d);
+        assert_eq!(super::date_in_text("ndvi_2015-06-01"), day("2015-06-01"));
+        assert_eq!(super::date_in_text("res2000_ndvi_20150601"), day("2015-06-01"));
+        assert_eq!(super::date_in_text("NDVI 2015"), day("2015-01-01"));
+        assert_eq!(super::date_in_text("ndvi_v2015"), None);
+        assert_eq!(super::date_in_text("MOD13Q1.A2024153"), day("2024-06-01"));
+    }
+
     #[test]
     fn grids_within_a_hair_are_one() {
         use rustgis_data::raster::GeoTransform;
