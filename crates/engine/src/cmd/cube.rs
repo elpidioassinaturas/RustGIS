@@ -498,11 +498,13 @@ impl TrendRun {
                     Test::Seasonal(_) => trend::trend_seasonal(&times, &ys, &seasons, self.alpha),
                     test => trend::trend(&times, &ys, test, self.alpha),
                 };
-                if let Some(t) = found {
-                    o[0] = t.slope as f32;
-                    o[1] = t.z as f32;
-                    o[2] = t.p as f32;
-                    o[3] = if t.p < self.alpha { t.slope as f32 } else { f32::NAN };
+                if let Some(t) = found
+                    && let [slope, z, p, significant, ..] = o
+                {
+                    *slope = t.slope as f32;
+                    *z = t.z as f32;
+                    *p = t.p as f32;
+                    *significant = if t.p < self.alpha { t.slope as f32 } else { f32::NAN };
                 }
             }
         };
