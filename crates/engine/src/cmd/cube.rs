@@ -523,12 +523,14 @@ impl TrendRun {
         let every = (4_000_000 / (n * n).max(1)).clamp(1, 4096);
         // Progress through the cells: a part of the bar every `tick` cells, on whichever thread.
         let tick = cells.div_ceil(CELL_PARTS).max(1);
-        let work = |block: &[f32], out: &mut [f32]| {
+        // `first`: the block's first cell among all of them, so the parts are counted over the
+        // whole grid, not again from 0 on each thread.
+        let work = |first: usize, block: &[f32], out: &mut [f32]| {
             let mut ys = vec![0.0f64; n];
             // Sen's slopes, one buffer per thread, cleared cell by cell rather than made anew.
             let mut slopes: Vec<f64> = Vec::new();
             for (c, (vals, o)) in block.chunks(n).zip(out.chunks_mut(OUTPUTS)).enumerate() {
-                if c > 0 && c % tick == 0 {
+                if first + c > 0 && (first + c).is_multiple_of(tick) {
                     done.fetch_add(1, Ordering::Relaxed);
                 }
                 if c % every == 0 && (cancel.load(Ordering::Relaxed) || stopped.load(Ordering::Relaxed)) {
@@ -562,14 +564,14 @@ impl TrendRun {
             let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).clamp(1, 16);
             let part = cells.div_ceil(threads).max(1);
             std::thread::scope(|scope| {
-                for (block, out) in block.chunks(part * n).zip(out.chunks_mut(part * OUTPUTS)) {
+                for (k, (block, out)) in block.chunks(part * n).zip(out.chunks_mut(part * OUTPUTS)).enumerate() {
                     let work = &work;
-                    scope.spawn(move || work(block, out));
+                    scope.spawn(move || work(k * part, block, out));
                 }
             });
         }
         #[cfg(target_arch = "wasm32")]
-        work(&block, &mut out);
+        work(0, &block, &mut out);
         if stopped.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
@@ -651,24 +653,16 @@ pub(crate) fn same_grid(a: &rustgis_data::raster::GeoTransform, b: &rustgis_data
         && near(a.pixel_height, b.pixel_height, h)
 }
 
-/// Trends the desktop app worked out on a thread, waiting to be added by `cube.trend`'s `ran`.
-fn landed() -> &'static std::sync::Mutex<Vec<(u64, Vec<Raster>, usize)>> {
-    static LANDED: std::sync::OnceLock<std::sync::Mutex<Vec<(u64, Vec<Raster>, usize)>>> = std::sync::OnceLock::new();
-    LANDED.get_or_init(Default::default)
-}
-
-/// Keeps a trend worked out elsewhere (its layers and how many dates), for `cube.trend` with
-/// `"ran"`: the id returned. The last two are kept (each is four full rasters).
-pub fn land(rasters: Vec<Raster>, dates: usize) -> u64 {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    if let Ok(mut l) = landed().lock() {
-        if l.len() >= 2 {
-            l.remove(0);
-        }
-        l.push((id, rasters, dates));
+/// Keeps a trend worked out elsewhere (its layers and how many dates) in this session, for
+/// `cube.trend` with `"ran"`: the id returned. The last two are kept (each is four full rasters),
+/// and another project opened doesn't see them.
+pub fn land(s: &mut Session, rasters: Vec<Raster>, dates: usize) -> u64 {
+    s.next_pending = s.next_pending.wrapping_add(1);
+    if s.trend_results.len() >= 2 {
+        s.trend_results.remove(0);
     }
-    id
+    s.trend_results.push((s.next_pending, rasters, dates));
+    s.next_pending
 }
 
 /// `cube.trend`: the trend computed here (blocking), or the one the app worked out (`ran`), and
@@ -678,12 +672,8 @@ fn trend_cmd(s: &mut Session, p: &Value) -> CmdResult {
     // again here, which would block.
     if let Some(ran) = p.get("ran").filter(|v| !v.is_null()) {
         let id = ran.as_u64().ok_or("ran is the number of a run the app worked out")?;
-        let found = landed().lock().ok().and_then(|mut l| {
-            let at = l.iter().position(|(k, ..)| *k == id)?;
-            let (_, r, n) = l.remove(at);
-            Some((r, n))
-        });
-        let (rasters, dates) = found.ok_or("that trend is no longer kept: run it again")?;
+        let at = s.trend_results.iter().position(|(k, ..)| *k == id).ok_or("that trend is no longer kept: run it again")?;
+        let (_, rasters, dates) = s.trend_results.remove(at);
         return add_outputs(s, rasters, dates);
     }
     // Worked out here, waited for with no Cancel (a script, the CLI): a run of seconds, not minutes.

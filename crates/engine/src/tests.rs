@@ -7757,6 +7757,14 @@ fn a_trend_over_a_data_cube() {
     // A run the app no longer keeps is said, never worked out again here.
     let e = s.run("cube.trend", &json!({"ran": 987_654_321u64})).unwrap_err();
     assert!(e.contains("no longer kept"), "{e}");
+    // A run kept by one session is that session's: another one (Python, tests side by side)
+    // doesn't take it, and it is added once.
+    let kept = Raster::new("kept", 2, 2, vec![vec![0.0; 4]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    let ran = crate::cmd::cube::land(&mut s, vec![kept], 12);
+    let mut other = Session::new(Project::default());
+    assert!(other.run("cube.trend", &json!({"ran": ran})).unwrap_err().contains("no longer kept"));
+    assert_eq!(s.run("cube.trend", &json!({"ran": ran})).unwrap()["dates"], 12);
+    assert!(s.run("cube.trend", &json!({"ran": ran})).is_err());
     let e = s.run("cube.trend", &json!({"layers": names, "minValid": 99})).unwrap_err();
     assert!(e.contains("more than the"), "{e}");
     // Two layers on one day would count twice in the test: refused.

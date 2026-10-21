@@ -961,7 +961,7 @@ pub fn land_trend(app: &mut RustGisApp) -> bool {
             app.workflow.error = Some(tl!("The trend finished after another project was opened, so it wasn't added").to_string());
         }
         Ok((rasters, dates)) => {
-            p["ran"] = json!(rustgis_engine::cmd::cube::land(rasters, dates));
+            p["ran"] = json!(rustgis_engine::cmd::cube::land(&mut app.session, rasters, dates));
             run(app, "cube.trend", p);
         }
         Err(_) if cancelled => {}
