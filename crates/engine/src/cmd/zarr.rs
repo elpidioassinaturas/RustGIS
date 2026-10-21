@@ -1115,7 +1115,7 @@ pub fn zarr_cube(s: &Session, p: &Value) -> Result<ZarrCube, String> {
     let period = match src.period {
         Some((o, n)) => {
             let o = usize::try_from(o).unwrap_or(usize::MAX).min(dates.len());
-            (o, (o + n).min(dates.len()))
+            (o, o.saturating_add(n).min(dates.len()))
         }
         None => (0, dates.len()),
     };
