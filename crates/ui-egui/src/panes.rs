@@ -42,6 +42,11 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
             ui.advance_cursor_after_rect(rect);
         });
     }
+    // A point picked for the Time Series pane is taken only while that pane shows: with it
+    // closed or another in view, the pick ends rather than waiting with a stale click.
+    if app.ui.right != Some(RightPane::TimeSeries) && app.workflow.pick.as_ref().is_some_and(|p| p.purpose == "ts_point") {
+        app.workflow.pick = None;
+    }
     // The pane in view always has its tab, however it was set.
     if let Some(right) = app.ui.right
         && !app.ui.right_open.contains(&right)
