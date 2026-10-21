@@ -493,6 +493,8 @@ fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
         match landed {
             None => {
                 let (done, total) = (r.done.load(Ordering::Relaxed), r.run.total().max(1));
+                // The section's title stays over its progress.
+                ui.label(egui::RichText::new(tl!("Summarise over time")).strong());
                 ui.horizontal(|ui| {
                     ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!("{done} / {total}")).desired_width(200.0));
                     if ui.button(tl!("Cancel")).clicked() {
