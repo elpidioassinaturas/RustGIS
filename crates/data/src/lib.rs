@@ -46,6 +46,10 @@ pub enum DataError {
     Format(String),
     #[error("unsupported file type: {0}")]
     Unsupported(String),
+    /// A Zarr slice none of whose chunks is there (the array named): a step never written,
+    /// which Zarr reads as its fill value, told apart from a slice that can't be read.
+    #[error("{0}: none of the slice's chunks could be read")]
+    NoChunks(String),
 }
 
 pub type Result<T> = std::result::Result<T, DataError>;

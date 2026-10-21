@@ -219,8 +219,6 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         r.source = Some(root.clone());
         let name = ps(p, "name").map(str::to_string).unwrap_or_else(|| layer_name(&root, &sel, &[]));
         let mut layer = RasterLayer::from_bytes(r, format!("{}.tif", store_name(&root)), tif);
-        // A slice names its steps (`t2m[time=3]`); a summary over time (no steps) is no slice of
-        // the variable, so Time Series and Summarise don't take it for one.
         // The layer is its GeoTIFF's bytes (`from_bytes`: no path), so it's never read again from
         // the store and `subdataset` only names it: a slice by its variable and steps, a summary
         // (said by the app that worked it out) by nothing, so it isn't taken for a slice.
@@ -432,7 +430,7 @@ fn read_step(zt: &ZarrTime, i: usize, key: String) -> Result<std::sync::Arc<rast
     if let Some(r) = kept_slice(&key) {
         return Ok(r);
     }
-    let r = std::sync::Arc::new(read_slice(zt, i)?);
+    let r = std::sync::Arc::new(read_slice(zt, i)?.ok_or_else(|| format!("{}: step {i} has no data written", zt.store))?);
     if let Ok(mut c) = slices().lock() {
         c.retain(|(k, _)| *k != key);
         c.push((key, r.clone()));
@@ -450,10 +448,10 @@ fn kept_slice(key: &str) -> Option<std::sync::Arc<raster::Raster>> {
 
 /// Step `i` of a following layer's variable, read from its store (no slice kept).
 #[cfg(not(target_arch = "wasm32"))]
-fn read_slice(zt: &ZarrTime, i: usize) -> Result<raster::Raster, String> {
+fn read_slice(zt: &ZarrTime, i: usize) -> Result<Option<raster::Raster>, String> {
     let sel = zt.selection(i);
     let crs = zt.crs.as_deref().map(str::trim).filter(|c| !c.is_empty());
-    if is_web(&zt.store) {
+    let read = if is_web(&zt.store) {
         let st = cached_store(&zt.store)?;
         let plan = zarr::plan(&st, &zarr::Selection::parse(&sel)).map_err(|e| e.to_string())?;
         let (chunks, forbidden) = fetch(&zt.store, &plan.keys)?;
@@ -462,9 +460,16 @@ fn read_slice(zt: &ZarrTime, i: usize) -> Result<raster::Raster, String> {
             return Err(format!("{}: access denied (HTTP 403) to {forbidden} of the slice's chunks", zt.store));
         }
         let crs = crs.map(Crs::parse).transpose()?;
-        zarr::assemble(&st, &plan, &chunks, &sel, crs).map_err(|e| e.to_string())
+        zarr::assemble(&st, &plan, &chunks, &sel, crs)
     } else {
-        zarr::read_dir(Path::new(&zt.store), &sel, crs).map_err(|e| e.to_string())
+        zarr::read_dir(Path::new(&zt.store), &sel, crs)
+    };
+    // A step none of whose chunks is there was never written (Zarr's fill value): `None`, told
+    // apart by its error kind, not its message.
+    match read {
+        Ok(r) => Ok(Some(r)),
+        Err(rustgis_data::DataError::NoChunks(_)) => Ok(None),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -933,16 +938,15 @@ impl ReduceRun {
             // summary doesn't push out the slices a layer following the slider holds.
             let r = match kept_slice(&slice_key(&self.zt, i)) {
                 Some(r) => r,
-                None => match read_slice(&self.zt, i) {
-                    Ok(r) => std::sync::Arc::new(r),
+                None => match read_slice(&self.zt, i)? {
+                    Some(r) => std::sync::Arc::new(r),
                     // A step never written is its fill value: no value for any cell, so it only
                     // lowers the counts (and the step after it still sets the grid).
-                    Err(e) if e.contains(zarr::NO_CHUNKS) => {
+                    None => {
                         unwritten += 1;
                         done.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
-                    Err(e) => return Err(e),
                 },
             };
             let vals = &r.bands.first().ok_or("the slice has no band")?.data;
