@@ -745,17 +745,18 @@ fn store_files(root: &str, keys: &[String]) -> Result<HashMap<String, Vec<u8>>, 
     let mut total = 0u64;
     for k in keys {
         let path = Path::new(root).join(k);
+        // A file that isn't there is a chunk never written (Zarr's fill value); one that is but
+        // can't be taken is said, so a value isn't silently missing.
         let Ok(meta) = std::fs::metadata(&path) else { continue };
         if !meta.is_file() || meta.len() > zarr::MAX_CHUNK_FILE {
-            continue;
+            return Err(format!("{root}: {k} isn't a chunk file that can be read (too large, or not a file)"));
         }
         total = total.saturating_add(meta.len());
         if total > zarr::MAX_READ {
             return Err(format!("{root}: the series is too large to read"));
         }
-        if let Ok(b) = std::fs::read(&path) {
-            out.insert(k.clone(), b);
-        }
+        let b = std::fs::read(&path).map_err(|e| format!("{root}: {k}: {e}"))?;
+        out.insert(k.clone(), b);
     }
     Ok(out)
 }
