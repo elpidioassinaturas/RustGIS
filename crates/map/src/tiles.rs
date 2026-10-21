@@ -96,6 +96,10 @@ pub struct TileLayer {
     pub kind: TileKind,
     /// The URL template, TileJSON or style address.
     pub url: String,
+    /// Advertised longitude/latitude coverage (west, south, east, north), kept from service
+    /// capabilities so Zoom To Layer works without fetching the service again.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_bounds")]
+    pub bounds: Option<[f64; 4]>,
     /// Subdomains that `{s}` takes in turn (`a`, `b`, `c` when empty and the URL has `{s}`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subdomains: Vec<String>,
@@ -142,12 +146,34 @@ pub struct TileLayer {
     /// The date `url` was last filled with.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub time_at: f64,
+    /// A file per date, as a STAC data cube's tile lists them (opengeos/RustGIS#559): (date,
+    /// address), in order. The time slider shows the last date in its window; `url` is it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub time_urls: Vec<(f64, String)>,
+    /// No date of `time_urls` falls in the slider's window: the layer draws nothing for now.
+    #[serde(skip)]
+    pub time_hidden: bool,
 }
+
+/// The most dates a tile layer lists (as the time slider steps through at most).
+pub const MAX_TIME_URLS: usize = crate::time::MAX_STEPS;
 
 /// Whether an address is on the web (`http://` or `https://`, in any case).
 pub fn is_web(url: &str) -> bool {
     let scheme = url.get(..8).unwrap_or(url).to_ascii_lowercase();
     scheme.starts_with("https://") || scheme.starts_with("http://")
+}
+
+/// Whether coverage is a finite, ordered geographic rectangle (west, south, east, north).
+/// Half a degree of tolerance matches service capabilities parsing.
+pub fn valid_bounds([w, s, e, n]: &[f64; 4]) -> bool {
+    [*w, *s, *e, *n].iter().all(|v| v.is_finite()) && -180.5 <= *w && *w < *e && *e <= 180.5 && -90.5 <= *s && *s < *n && *n <= 90.5
+}
+
+/// Discards malformed optional project metadata after consuming its entire JSON value.
+fn lenient_bounds<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<[f64; 4]>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 fn is_zero(x: &f64) -> bool {
@@ -199,6 +225,7 @@ impl TileLayer {
             name: name.into(),
             kind,
             url: url.into(),
+            bounds: None,
             subdomains: Vec::new(),
             min_zoom: 0,
             max_zoom: max_zoom(),
@@ -214,7 +241,15 @@ impl TileLayer {
             style_layers: String::new(),
             time_url: None,
             time_at: 0.0,
+            time_urls: Vec::new(),
+            time_hidden: false,
         }
+    }
+
+    /// Whether the layer draws now: shown, and with a date in the time slider's window when it
+    /// follows one.
+    pub fn draws(&self) -> bool {
+        self.visible && !self.time_hidden
     }
 
     /// Checks the address and brings the numbers into range, after reading one from a project
@@ -225,6 +260,12 @@ impl TileLayer {
         if self.time_url.as_ref().is_some_and(|u| !is_web(u) || u.len() > 4096) {
             self.time_url = None;
         }
+        // A file per date: web addresses, finite dates, in order.
+        self.time_urls.retain(|(d, u)| d.is_finite() && is_web(u) && u.len() <= 4096);
+        // Sorted before the cap, so a list out of order keeps its first dates, not any.
+        self.time_urls.sort_by(|a, b| a.0.total_cmp(&b.0));
+        self.time_urls.dedup_by(|a, b| a.0 == b.0);
+        self.time_urls.truncate(MAX_TIME_URLS);
         let local = matches!(self.kind, TileKind::PmTiles | TileKind::MbTiles) && is_local_archive(&self.url);
         if let Some(name) = self.url.strip_prefix(UPLOAD).filter(|_| self.kind == TileKind::MbTiles) {
             if name.is_empty() || name.len() > 512 || name.chars().any(char::is_control) {
@@ -252,6 +293,9 @@ impl TileLayer {
         if !self.style_layers.is_empty() && checked_style_layers(&self.style_layers).is_err() {
             self.style_layers.clear();
         }
+        // Bounds from a project must describe a finite geographic rectangle. Invalid metadata
+        // doesn't make the tiles unreadable; it only leaves their coverage unknown.
+        self.bounds = self.bounds.filter(valid_bounds);
         self.max_zoom = self.max_zoom.min(MAX_ZOOM);
         self.min_zoom = self.min_zoom.min(self.max_zoom);
         self.tile_size = if self.tile_size >= 384 { 512 } else { 256 };
@@ -356,6 +400,28 @@ mod tests {
         for bad in ["file:///etc/passwd", "ftp://x/{z}", "https://", "https:// x.com/{z}", "javascript:alert(1)"] {
             assert!(TileLayer::new("x", TileKind::Raster, bad).repair().is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn invalid_coverage_does_not_hide_tiles() {
+        let mut t = TileLayer::new("WMS", TileKind::Raster, "https://maps.example.com/wms");
+        for bounds in [
+            [f64::NAN, 40.0, 10.0, 50.0],
+            [0.0, 40.0, f64::INFINITY, 50.0],
+            [10.0, 40.0, 0.0, 50.0],
+            [0.0, 50.0, 10.0, 40.0],
+            [0.0, 40.0, 0.0, 50.0],
+            [0.0, 91.0, 10.0, 92.0],
+            [-200.0, 40.0, 10.0, 50.0],
+        ] {
+            t.bounds = Some(bounds);
+            t.repair().unwrap();
+            assert_eq!(t.bounds, None, "{bounds:?}");
+            assert!(t.visible);
+        }
+        t.bounds = Some([-180.0, -90.0, 180.0, 90.0]);
+        t.repair().unwrap();
+        assert_eq!(t.bounds, Some([-180.0, -90.0, 180.0, 90.0]));
     }
 
     #[test]

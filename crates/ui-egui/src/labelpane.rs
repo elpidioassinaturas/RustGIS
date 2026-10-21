@@ -4,7 +4,7 @@
 //! own (it reads the layer each frame, as the Symbology pane does) and every change undoes.
 
 use egui::{RichText, Ui, vec2};
-use rustgis_engine::map::symbology::LABEL_SIZE;
+use rustgis_engine::map::symbology::{DEFAULT_LABEL_CLASS, LABEL_SIZE, MAX_LABEL_CLASSES};
 use rustgis_engine::map::{LabelPlacement, Layer, Rgba};
 use serde_json::{Value, json};
 
@@ -58,25 +58,100 @@ fn grid(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
     egui::Grid::new(("label_pane", id)).num_columns(2).min_col_width(LABEL_W).spacing(vec2(8.0, 6.0)).show(ui, add);
 }
 
-/// One class for now, "Default": the field it labels with.
+/// The tabs of the Class section, as ArcGIS Pro's Class tab: what the label shows, and the SQL
+/// choosing the features it labels.
+#[derive(Clone, Copy, PartialEq)]
+enum ClassTab {
+    Field,
+    Sql,
+}
+
+/// One class for now, "Default": the field it labels with, and the SQL clause (#618) choosing the
+/// features it labels (the other classes are made with commands for now).
 fn class(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
     section(ui, "Class", |ui| {
-        grid(ui, "class", |ui| {
+        // Its own name once renamed (`labels.class.rename`), else "Default" translated.
+        let name = &l.labels.default.name;
+        let name = if name == DEFAULT_LABEL_CLASS { tl!("Default").to_string() } else { name.clone() };
+        ui.horizontal(|ui| {
             ui.label(tl!("Class"));
-            ui.label(RichText::new(tl!("Default")).color(t.text_dim));
-            ui.end_row();
-            ui.label(tl!("Field"));
-            let cur = &l.labels.field;
-            egui::ComboBox::from_id_salt("label_pane_field").selected_text(cur.as_str()).width(180.0).show_ui(ui, |ui| {
-                for f in &l.dataset.fields {
-                    if ui.selectable_label(f.name == *cur, &f.name).clicked() {
-                        run(app, "labels.field", json!({"field": f.name}));
-                    }
-                }
-            });
-            ui.end_row();
+            ui.label(RichText::new(name).color(t.text_dim));
         });
+        let key = egui::Id::new("label_pane_class_tab");
+        let mut tab = ui.data(|d| d.get_temp::<ClassTab>(key)).unwrap_or(ClassTab::Field);
+        ui.horizontal(|ui| {
+            for (label, it) in [(tl!("Field"), ClassTab::Field), (tl!("SQL"), ClassTab::Sql)] {
+                if ui.add(egui::Button::selectable(tab == it, label)).clicked() {
+                    tab = it;
+                }
+            }
+        });
+        ui.data_mut(|d| d.insert_temp(key, tab));
+        ui.add_space(4.0);
+        match tab {
+            ClassTab::Field => field(app, ui, l),
+            ClassTab::Sql => sql(app, ui, l, t),
+        }
     });
+}
+
+/// The field the class labels with.
+fn field(app: &mut RustGisApp, ui: &mut Ui, l: &Layer) {
+    grid(ui, "class", |ui| {
+        ui.label(tl!("Field"));
+        let cur = &l.labels.default.field;
+        egui::ComboBox::from_id_salt("label_pane_field").selected_text(cur.as_str()).width(180.0).show_ui(ui, |ui| {
+            for f in &l.dataset.fields {
+                if ui.selectable_label(f.name == *cur, &f.name).clicked() {
+                    run(app, "labels.field", json!({"field": f.name}));
+                }
+            }
+        });
+        ui.end_row();
+    });
+}
+
+/// The Default class's SQL clause: its labels, and their style, go only to the features that
+/// match it; none labels every feature.
+fn sql(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
+    let labels = &l.labels;
+    if !labels.enabled {
+        ui.label(RichText::new(tl!("Labels are off for this layer: the clause applies once they are on.")).small().color(t.text_dim));
+    }
+    if !labels.default.visible {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(tl!("This class is hidden, so it labels nothing.")).small().color(t.text_dim));
+            if ui.small_button(tl!("Show labels")).clicked() {
+                run(app, "labels.class.update", json!({"visible": true}));
+            }
+        });
+    }
+    if !labels.classes.is_empty() {
+        let n = labels.classes.len().min(MAX_LABEL_CLASSES).to_string();
+        let said = crate::i18n::fmt(
+            "Other label classes on this layer (made with commands): {n}. They are checked first; this clause is for the features they leave.",
+            &[("n", &n)],
+        );
+        ui.label(RichText::new(said).small().color(t.text_dim));
+    }
+    // Counted among the features the layer draws at the map's scale, as its labels are.
+    let scale = app.session.map().scale();
+    let count = |w: &str| -> Result<(usize, usize), String> {
+        let e = rustgis_engine::data::query::parse(w, &l.dataset)?;
+        let rows = l.drawn_rows(scale);
+        let of = rows.iter().filter(|r| **r).count();
+        let n = rows.iter().enumerate().filter(|(i, r)| **r && rustgis_engine::data::query::eval(&e, &l.dataset, *i)).count();
+        Ok((n, of))
+    };
+    // A draft belongs to this layer of this project: another project may reuse the layer's id.
+    let owner = egui::Id::new((app.session.opened, l.id));
+    // A count holds for this project state at this scale (display filters follow the scale).
+    let version = egui::Id::new((app.session.revision, scale.to_bits())).value();
+    match crate::sqlbox::show(ui, "label_sql", owner, version, labels.default.where_.as_deref(), &l.dataset, count) {
+        Some(crate::sqlbox::Apply::Clause(w)) => run(app, "labels.class.update", json!({"where": w})),
+        Some(crate::sqlbox::Apply::Clear) => run(app, "labels.class.update", json!({"where": null})),
+        None => {}
+    }
 }
 
 fn text_symbol(app: &mut RustGisApp, ui: &mut Ui, l: &Layer) {
@@ -85,36 +160,36 @@ fn text_symbol(app: &mut RustGisApp, ui: &mut Ui, l: &Layer) {
             ui.label(tl!("Size"));
             // The whole range `labels.style` accepts (#457); the map follows a drag and letting
             // go runs the command once, so a drag is one undo step.
-            let mut size = f64::from(l.labels.size);
+            let mut size = f64::from(l.labels.default.size);
             let r = ui.add(egui::DragValue::new(&mut size).range(LABEL_SIZE).speed(0.1).suffix(" pt"));
             let id = l.id;
             crate::ribbon::live_drag(
                 app,
                 ui,
                 &r,
-                f64::from(l.labels.size),
+                f64::from(l.labels.default.size),
                 size,
                 |app, x| {
                     if let Some(l) = app.session.map_mut().layer_mut(id) {
-                        l.labels.size = x.clamp(*LABEL_SIZE.start(), *LABEL_SIZE.end()) as f32;
+                        l.labels.default.size = x.clamp(*LABEL_SIZE.start(), *LABEL_SIZE.end()) as f32;
                     }
                 },
                 |app, x| run(app, "labels.style", json!({"size": x})),
             );
             ui.end_row();
             ui.label(tl!("Color"));
-            let mut c = c32(l.labels.color);
+            let mut c = c32(l.labels.default.color);
             if crate::widgets::color_button(ui, &mut c).changed() {
                 color_drag(app, ui, l, rgba(c));
             }
             ui.end_row();
             ui.label("");
             ui.horizontal(|ui| {
-                let mut bold = l.labels.bold;
+                let mut bold = l.labels.default.bold;
                 if ui.checkbox(&mut bold, tl!("Bold")).changed() {
                     run(app, "labels.style", json!({"bold": bold}));
                 }
-                let mut halo = l.labels.halo;
+                let mut halo = l.labels.default.halo;
                 if ui.checkbox(&mut halo, tl!("Halo")).changed() {
                     run(app, "labels.style", json!({"halo": halo}));
                 }
@@ -126,7 +201,7 @@ fn text_symbol(app: &mut RustGisApp, ui: &mut Ui, l: &Layer) {
 
 fn position(app: &mut RustGisApp, ui: &mut Ui, l: &Layer) {
     section(ui, "Position", |ui| {
-        let cur = l.labels.placement;
+        let cur = l.labels.default.placement;
         let pick = |app: &mut RustGisApp, ui: &mut Ui, pl: LabelPlacement| {
             if ui.add_sized(vec2(92.0, 22.0), egui::Button::selectable(cur == pl, tl!(pl.label())).truncate()).clicked() && cur != pl {
                 run(app, "labels.placement", json!({"position": pl.code()}));
@@ -148,7 +223,7 @@ fn position(app: &mut RustGisApp, ui: &mut Ui, l: &Layer) {
 fn visibility(app: &mut RustGisApp, ui: &mut Ui, l: &Layer) {
     section(ui, "Visibility Range", |ui| {
         grid(ui, "range", |ui| {
-            for (label, cur, key) in [("Out Beyond", l.labels.min_scale, "min"), ("In Beyond", l.labels.max_scale, "max")] {
+            for (label, cur, key) in [("Out Beyond", l.labels.default.min_scale, "min"), ("In Beyond", l.labels.default.max_scale, "max")] {
                 ui.label(tl!(label));
                 egui::ComboBox::from_id_salt(("label_pane_scale", key))
                     .selected_text(crate::ribbon::scale_label(cur))
@@ -162,7 +237,8 @@ fn visibility(app: &mut RustGisApp, ui: &mut Ui, l: &Layer) {
                     });
                 ui.end_row();
             }
-            for (label, cur, key) in [("Closest", l.labels.closest, "closest"), ("Farthest", l.labels.farthest, "farthest")] {
+            for (label, cur, key) in [("Closest", l.labels.default.closest, "closest"), ("Farthest", l.labels.default.farthest, "farthest")]
+            {
                 ui.label(tl!(label));
                 let text = |d: Option<f64>| d.map(rustgis_engine::geom::format_distance).unwrap_or_else(|| tl!("<None>").to_string());
                 egui::ComboBox::from_id_salt(("label_pane_distance", key)).selected_text(text(cur)).width(140.0).show_ui(ui, |ui| {
@@ -175,7 +251,9 @@ fn visibility(app: &mut RustGisApp, ui: &mut Ui, l: &Layer) {
                 ui.end_row();
             }
         });
-        let limited = [l.labels.min_scale, l.labels.max_scale, l.labels.closest, l.labels.farthest].iter().any(Option::is_some);
+        let limited = [l.labels.default.min_scale, l.labels.default.max_scale, l.labels.default.closest, l.labels.default.farthest]
+            .iter()
+            .any(Option::is_some);
         if ui
             .add_enabled(limited, egui::Button::new(tl!("Clear Limits")))
             .on_hover_text(tl!("Draw labels at every scale and distance."))
@@ -230,10 +308,10 @@ fn color_drag(app: &mut RustGisApp, ui: &Ui, l: &Layer, color: Rgba) {
         apply_color_drag(app, other);
     }
     // The colour before the first frame of this pick, kept while it goes on.
-    let before = pending.map_or(l.labels.color, |d| d.before);
+    let before = pending.map_or(l.labels.default.color, |d| d.before);
     ui.data_mut(|d| d.insert_temp(key, ColorDrag { layer: l.id, before, color }));
     if let Some(layer) = app.session.map_mut().layer_mut(l.id) {
-        layer.labels.color = color;
+        layer.labels.default.color = color;
     }
     app.session.revision = app.session.revision.wrapping_add(1);
 }
@@ -263,7 +341,7 @@ pub(crate) fn finish_color_drag(app: &mut RustGisApp, ui: &Ui) {
 fn apply_color_drag(app: &mut RustGisApp, drag: ColorDrag) {
     // A layer removed mid-pick took its preview with it: there is nothing to restore or style.
     let Some(layer) = app.session.map_mut().layer_mut(drag.layer) else { return };
-    layer.labels.color = drag.before;
+    layer.labels.default.color = drag.before;
     if drag.before != drag.color {
         // On the layer the pick was made on, as the active one: the command reaches it by id
         // (a name two layers share would reach the first), and a recorded step names it, as
@@ -353,14 +431,14 @@ mod tests {
         let app = h.state();
         let l = app.session.map().layer(app.session.active_layer.unwrap()).unwrap();
         assert_ne!(l.labels.enabled, before.enabled, "the checkbox toggles labels");
-        assert_eq!(l.labels.placement, rustgis_engine::map::LabelPlacement::BelowRight);
-        assert_ne!(l.labels.bold, before.bold, "bold toggles");
+        assert_eq!(l.labels.default.placement, rustgis_engine::map::LabelPlacement::BelowRight);
+        assert_ne!(l.labels.default.bold, before.default.bold, "bold toggles");
         // Each change is its own command, so each undoes on its own.
         let app = h.state_mut();
         app.run("edit.undo", json!(null)).unwrap();
         let l = app.session.map().layer(app.session.active_layer.unwrap()).unwrap();
-        assert_eq!(l.labels.bold, before.bold, "undo takes back the last change only");
-        assert_eq!(l.labels.placement, rustgis_engine::map::LabelPlacement::BelowRight);
+        assert_eq!(l.labels.default.bold, before.default.bold, "undo takes back the last change only");
+        assert_eq!(l.labels.default.placement, rustgis_engine::map::LabelPlacement::BelowRight);
     }
 
     /// Record Task names the layer in a step made from the pane, as it does for the ribbon, so the
@@ -392,7 +470,7 @@ mod tests {
         app.ws.recording = Some(Vec::new());
         let cities = app.session.active_layer.unwrap();
         let countries = layer_id(&app, "Countries");
-        let color = |app: &RustGisApp, id| app.session.map().layer(id).unwrap().labels.color;
+        let color = |app: &RustGisApp, id| app.session.map().layer(id).unwrap().labels.default.color;
         let (cities_before, countries_before) = (color(&app, cities), color(&app, countries));
         let steps = app.session.undo_depth();
         let mut h = egui_kittest::Harness::builder().build_ui_state(
@@ -446,7 +524,7 @@ mod tests {
     fn a_colour_pick_is_one_undo_step() {
         let app = with_cities();
         let id = app.session.active_layer.unwrap();
-        let before = app.session.map().layer(id).unwrap().labels.color;
+        let before = app.session.map().layer(id).unwrap().labels.default.color;
         let steps = app.session.undo_depth();
         // The picker's colour each frame, if it reports one, as `text_symbol` hands it on.
         let mut h = egui_kittest::Harness::builder().build_ui_state(
@@ -473,15 +551,188 @@ mod tests {
             h.state_mut().1 = Some(picked);
             h.step();
             let app = &h.state().0;
-            assert_eq!(app.session.map().layer(id).unwrap().labels.color, picked, "the map previews the pick");
+            assert_eq!(app.session.map().layer(id).unwrap().labels.default.color, picked, "the map previews the pick");
             assert_eq!(app.session.undo_depth(), steps, "no command while the pointer is down");
         }
         h.event(button(false));
         h.step();
         let app = &mut h.state_mut().0;
-        assert_eq!(app.session.map().layer(id).unwrap().labels.color, picked);
+        assert_eq!(app.session.map().layer(id).unwrap().labels.default.color, picked);
         assert_eq!(app.session.undo_depth(), steps + 1, "letting go runs labels.style once");
         app.run("edit.undo", json!(null)).unwrap();
-        assert_eq!(app.session.map().layer(id).unwrap().labels.color, before, "one undo takes the whole pick back");
+        assert_eq!(app.session.map().layer(id).unwrap().labels.default.color, before, "one undo takes the whole pick back");
+    }
+
+    fn clause(app: &RustGisApp) -> Option<String> {
+        app.session.map().layer(app.session.active_layer.unwrap()).unwrap().labels.default.where_.clone()
+    }
+
+    /// Opens the Class section's SQL tab.
+    fn sql_tab(app: RustGisApp) -> egui_kittest::Harness<'static, RustGisApp> {
+        let mut h = harness(app);
+        h.run();
+        h.get_by_label("SQL").click();
+        h.run();
+        h
+    }
+
+    fn type_clause(h: &mut egui_kittest::Harness<'static, RustGisApp>, text: &str) {
+        h.get_by_role(egui::accesskit::Role::MultilineTextInput).focus();
+        h.run();
+        h.get_by_role(egui::accesskit::Role::MultilineTextInput).type_text(text);
+        h.run();
+    }
+
+    /// The SQL tab writes a draft: typing applies nothing, Check counts, Apply sets the clause in
+    /// one undo step, and Clear takes it away in another (#618).
+    #[test]
+    fn the_sql_tab_applies_a_clause_in_one_step() {
+        let app = with_cities();
+        let steps = app.session.undo_depth();
+        let mut h = sql_tab(app);
+        h.get_by_label("There is no expression defined.");
+        h.get_by_label("+ New expression").click();
+        h.run();
+        type_clause(&mut h, "pop_max > 5000000");
+        assert_eq!((clause(h.state()), h.state().session.undo_depth()), (None, steps), "typing applies nothing");
+        h.get_by_label("Not applied yet.");
+        h.get_by_label("Check").click();
+        h.run();
+        let l = h.state().session.map().layer(h.state().session.active_layer.unwrap()).unwrap().clone();
+        let n = rustgis_engine::data::query::select("pop_max > 5000000", &l.dataset).unwrap().len();
+        let all = l.drawn_rows(h.state().session.map().scale()).iter().filter(|r| **r).count();
+        h.get_by_label(&format!("Valid: {n} of {all} features match"));
+        h.get_by_label("Apply").click();
+        h.run();
+        assert_eq!(clause(h.state()).as_deref(), Some("pop_max > 5000000"));
+        assert_eq!(h.state().session.undo_depth(), steps + 1, "one step");
+        assert!(h.query_by_label("Not applied yet.").is_none());
+        h.get_by_label("Clear").click();
+        h.run();
+        assert_eq!((clause(h.state()), h.state().session.undo_depth()), (None, steps + 2));
+        h.get_by_label("There is no expression defined.");
+        let app = h.state_mut();
+        app.run("edit.undo", json!(null)).unwrap();
+        assert_eq!(clause(app).as_deref(), Some("pop_max > 5000000"), "undo brings the clause back");
+    }
+
+    /// A clause that doesn't read says why, and Apply leaves the layer as it was.
+    #[test]
+    fn a_clause_that_doesnt_read_is_not_applied() {
+        let app = with_cities();
+        let steps = app.session.undo_depth();
+        let mut h = sql_tab(app);
+        h.get_by_label("+ New expression").click();
+        h.run();
+        type_clause(&mut h, "pop_max >");
+        assert!(h.query_by_label_contains("Invalid:").is_some());
+        h.get_by_label("Apply").click();
+        h.run();
+        assert_eq!((clause(h.state()), h.state().session.undo_depth()), (None, steps), "Apply is off");
+    }
+
+    /// A draft follows the clause when it changes underneath (undo, a script), until it is edited;
+    /// another layer has its own clause, and the draft is dropped.
+    #[test]
+    fn the_draft_follows_the_layer_and_its_clause() {
+        let app = with_cities();
+        let mut h = sql_tab(app);
+        h.state_mut().run("labels.class.update", json!({"where": "pop_max > 1"})).unwrap();
+        h.run();
+        assert_eq!(h.get_by_role(egui::accesskit::Role::MultilineTextInput).value().as_deref(), Some("pop_max > 1"));
+        type_clause(&mut h, " AND pop_max < 9");
+        h.state_mut().run("labels.class.update", json!({"where": "pop_max > 2"})).unwrap();
+        h.run();
+        let text = h.get_by_role(egui::accesskit::Role::MultilineTextInput).value().unwrap_or_default();
+        assert!(text.contains("AND pop_max < 9") && text != "pop_max > 2", "an edited draft is kept: {text}");
+        h.get_by_label("Not applied yet.");
+        let countries = layer_id(h.state(), "Countries");
+        h.state_mut().session.run("layer.select", &json!({"layer": countries})).unwrap();
+        h.run();
+        h.get_by_label("There is no expression defined.");
+    }
+
+    /// Classes made with commands, and a hidden Default, are said in the SQL tab; Show labels
+    /// shows Default again.
+    #[test]
+    fn the_sql_tab_says_what_else_decides_the_labels() {
+        let mut app = with_cities();
+        app.run("labels.class.add", json!({"name": "Big", "where": "pop_max > 5000000"})).unwrap();
+        app.run("labels.class.update", json!({"visible": false})).unwrap();
+        let mut h = sql_tab(app);
+        assert!(h.query_by_label_contains("Other label classes on this layer (made with commands): 1.").is_some());
+        h.get_by_label("Show labels").click();
+        h.run();
+        let l = &h.state().session.map().layer(h.state().session.active_layer.unwrap()).unwrap().labels;
+        assert!(l.default.visible);
+    }
+
+    /// A draft belongs to its layer in its project: another project, though it reuses the
+    /// layer's id, starts without it.
+    #[test]
+    fn a_draft_is_dropped_with_its_project() {
+        let app = with_cities();
+        let mut h = sql_tab(app);
+        h.get_by_label("+ New expression").click();
+        h.run();
+        type_clause(&mut h, "pop_max > 5000000");
+        h.get_by_label("Not applied yet.");
+        let app = h.state_mut();
+        app.run("project.sample", json!(null)).unwrap();
+        let cities = layer_id(app, "Cities");
+        app.session.run("layer.select", &json!({"layer": cities})).unwrap();
+        h.run();
+        h.get_by_label("There is no expression defined.");
+    }
+
+    /// A Check's count shows while nothing has changed since: after a change, it is asked again.
+    #[test]
+    fn a_check_is_dropped_after_a_change() {
+        let app = with_cities();
+        let mut h = sql_tab(app);
+        h.get_by_label("+ New expression").click();
+        h.run();
+        type_clause(&mut h, "pop_max > 5000000");
+        h.get_by_label("Check").click();
+        h.run();
+        assert!(h.query_by_label_contains("features match").is_some());
+        h.state_mut().run("labels.enable", json!({"on": true})).unwrap();
+        h.run();
+        assert!(h.query_by_label_contains("features match").is_none(), "the count may be stale");
+        // A zoom changes no revision, but the scale: display filters may draw other features.
+        h.get_by_label("Check").click();
+        h.run();
+        assert!(h.query_by_label_contains("features match").is_some());
+        h.state_mut().session.map_mut().camera.res *= 2.0;
+        h.run();
+        assert!(h.query_by_label_contains("features match").is_none(), "the count was for another scale");
+    }
+
+    /// A clause whose field was deleted since says so: it no longer reads, and labels nothing.
+    #[test]
+    fn a_clause_that_no_longer_reads_says_so() {
+        let mut app = with_cities();
+        app.run("labels.class.update", json!({"where": "pop_max > 1"})).unwrap();
+        app.run("edit.deleteField", json!({"field": "pop_max"})).unwrap();
+        let h = sql_tab(app);
+        assert!(h.query_by_label_contains("This clause no longer reads").is_some());
+    }
+
+    /// A clause applied from the pane is recorded on the layer by name, for Default (no class).
+    #[test]
+    fn a_clause_recorded_from_the_pane_names_the_layer() {
+        let mut app = with_cities();
+        app.ws.recording = Some(Vec::new());
+        let mut h = sql_tab(app);
+        h.get_by_label("+ New expression").click();
+        h.run();
+        type_clause(&mut h, "pop_max > 5000000");
+        h.get_by_label("Apply").click();
+        h.run();
+        let steps = h.state().ws.recording.clone().unwrap();
+        let last = steps.last().unwrap();
+        assert_eq!(last.command, "labels.class.update");
+        assert_eq!(last.params.get("layer"), Some(&json!("Cities")));
+        assert_eq!(last.params.get("class"), None);
     }
 }

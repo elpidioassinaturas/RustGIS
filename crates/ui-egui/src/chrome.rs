@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::mapview::Toast;
 use crate::theme::{Tokens, regular, semibold};
-use crate::widgets::{enabled, row_button, small, text_w, why_disabled};
+use crate::widgets::{row_button, small, text_w, why_disabled};
 use crate::{RustGisApp, icons};
 
 /// The native title bar the header is drawn into (macOS: a transparent title bar over a
@@ -641,6 +641,160 @@ pub(crate) const UI_COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.checkUpdate", "Check for Updates…", "Help › Help"),
 ];
 
+/// Command Search's interactive entry points. These collect input without changing the engine API.
+#[derive(Clone, Copy)]
+enum SearchAction {
+    Command(&'static str),
+    Dialog(&'static str),
+    OpenItem(&'static str),
+    SaveItem(&'static str),
+    Pane(crate::RightPane),
+    Workflow(&'static str),
+}
+
+fn search_action(id: &str) -> Option<SearchAction> {
+    use crate::RightPane;
+    use SearchAction::{Command, Dialog, OpenItem, Pane, SaveItem, Workflow};
+    Some(match id {
+        "project.open" => Command("ui.open"),
+        "project.save" => Command("ui.save"),
+        "project.saveAs" => Command("ui.saveAs"),
+        "project.addFolder" => Command("ui.addFolder"),
+        "project.fromTemplate" => OpenItem("template"),
+        "project.saveTemplate" | "project.newTemplate" => SaveItem("template"),
+        "project.package" => SaveItem("projectPackage"),
+        "map.import" => OpenItem("map"),
+        "map.save" => SaveItem("map"),
+        "map.package" => SaveItem("mapPackage"),
+        "map.rename" => Dialog("renameMap"),
+        "map.goToXY" => Dialog("goToXY"),
+        "map.camera" | "map.setScale" => Dialog("camera"),
+        "map.basemap" => Dialog("basemap"),
+        "map.body" => Dialog("body"),
+        "map.addTiles" => Dialog("addTiles"),
+        "bookmark.add" => Dialog("bookmark"),
+        "bookmark.import" => OpenItem("bookmarks"),
+        "bookmark.save" => SaveItem("bookmarks"),
+        "layer.addData" | "layer.addPhotos" => Command("ui.addData"),
+        "layer.addUrl" => Command("ui.addUrl"),
+        "service.add" | "service.import" => Command("ui.addService"),
+        "layer.addSql" => Pane(RightPane::Sql),
+        "layer.addDatabase" => Dialog("addDatabase"),
+        "layer.addZarr" => Command("ui.addZarr"),
+        "layer.addLayerFile" => OpenItem("layer"),
+        "layer.save" => SaveItem("layer"),
+        "layer.addSample" => Dialog("addSample"),
+        "layer.template" => Dialog("layerTemplate"),
+        "layer.addEncodedPolyline" => Dialog("addPolyline"),
+        "layer.geocode" => Dialog("geocode"),
+        "layer.rename" => Dialog("renameLayer"),
+        "layer.definitionQuery" => Dialog("definitionQuery"),
+        "layer.symbology" | "raster.symbology" | "layer.color" | "layer.outline" | "layer.lineStrokes" | "layer.ramp" => {
+            Pane(RightPane::Symbology)
+        }
+        "select.byAttributes" => Dialog("selectByAttributes"),
+        "select.rows" => Command("table.open"),
+        "edit.addField" => Dialog("addField"),
+        "edit.calculateField" => Dialog("calculateField"),
+        "edit.move" | "edit.rotate" | "edit.scale" | "edit.template" | "edit.elevation" | "edit.groundToGrid" => Pane(RightPane::Editing),
+        "data.domain" | "data.subtypes" | "data.attributeRule" | "data.contingentValues" | "data.relate" | "data.archiveRestore" => {
+            Pane(RightPane::Design)
+        }
+        "style.add" => OpenItem("styles"),
+        "style.import" => OpenItem("importStyles"),
+        "style.save" => SaveItem("styles"),
+        "ramp.add" => OpenItem("ramps"),
+        "ramp.save" => SaveItem("ramps"),
+        "layout.import" => Command("ui.importLayout"),
+        "layout.save" => Command("ui.saveLayout"),
+        "layout.export" => Command("ui.exportLayout"),
+        "layout.rename" => Dialog("renameLayout"),
+        "report.open" => OpenItem("report"),
+        "report.export" => Command("ui.exportReport"),
+        "report.save" => SaveItem("report"),
+        "report.saveTemplate" => SaveItem("reportTemplate"),
+        "report.existingTemplate" => Command("ui.reportLayoutFile"),
+        "presentation.import" => OpenItem("presentation"),
+        "presentation.export" => Command("ui.exportPresentation"),
+        "presentation.save" => SaveItem("presentation"),
+        "presentation.imagePage" => Command("ui.presentationPicture"),
+        "presentation.videoPage" => Command("ui.presentationVideo"),
+        "notebook.open" => OpenItem("notebook"),
+        "notebook.save" => SaveItem("notebook"),
+        "task.import" => OpenItem("task"),
+        "task.save" => SaveItem("task"),
+        "share.exportMap" => Command("ui.exportMap"),
+        "share.exportLayer" => Command("ui.exportLayer"),
+        "share.exportRaster" => Command("ui.exportRaster"),
+        "gp.run" => Command("ui.gp.open"),
+        "gp.package" => SaveItem("gpPackage"),
+        "gp.env" => Workflow("environments"),
+        "raster.function" => Workflow("rasterFunctions"),
+        "raster.functionChain" => Workflow("functionEditor"),
+        "raster.georeference" => Workflow("georeference"),
+        "raster.change" => Workflow("change"),
+        "raster.spectral" => Workflow("spectral"),
+        "raster.classify" => Workflow("classify"),
+        "raster.classifySupervised" => Workflow("supervised"),
+        "raster.index" => Workflow("indices"),
+        "raster.process" => Workflow("process"),
+        "raster.editPixels" => Workflow("pixels"),
+        "raster.measure" => Workflow("mensuration"),
+        "analysis.suitability" => Workflow("suitability"),
+        "analysis.viewshed" => Workflow("visibility"),
+        "analysis.lineOfSight" => Workflow("lineOfSight"),
+        "analysis.interpolate" => Workflow("interpolate"),
+        "analysis.route" => Workflow("network"),
+        "analysis.neighborhood" => Workflow("neighborhood"),
+        "analysis.simulate" => Workflow("simulation"),
+        "data.profile" => Workflow("profile"),
+        "data.explore" => Workflow("explore"),
+        "data.similar" => Workflow("similar"),
+        "data.convert" => Workflow("interop"),
+        "dl.classify" => Workflow("deepLearning"),
+        "dl.train" => Workflow("deepLearning"),
+        "dl.import" => OpenItem("dlPackage"),
+        "dl.package" => SaveItem("dlPackage"),
+        "imagery.hostedImagery" => Workflow("hosted"),
+        "imagery.workspace" | "imagery.mosaic" => Workflow("ortho"),
+        "imagery.mesh" => Workflow("reality"),
+        "model.run" => Workflow("models"),
+        "model.import" => Command("ui.importModel"),
+        "osm.download" => Dialog("osm"),
+        "overture.add" => Dialog("overture"),
+        "boundaries.add" => Dialog("boundaries"),
+        "embeddings.add" | "embeddings.search" => Dialog("embeddings"),
+        "nationalMap.add" => Dialog("nationalMap"),
+        "fieldsOfTheWorld.add" => Dialog("fieldsOfTheWorld"),
+        "portal.add" | "portal.search" => Command("ui.searchOpenData"),
+        "stac.addAsset" | "stac.addFootprints" | "stac.search" => Command("ui.stac"),
+        _ => return None,
+    })
+}
+
+/// Availability of the interactive entry point, not the parameterized engine operation.
+fn search_disabled(app: &RustGisApp, id: &str) -> Option<&'static str> {
+    if id.starts_with("gp:") || id.starts_with("panel:") || id.starts_with("pane:") {
+        return None;
+    }
+    if matches!(search_action(id), Some(SearchAction::Workflow(_))) {
+        return None; // The workflow lets the user choose its inputs, including the layer.
+    }
+    // The ribbon hides the Database dialog in the browser for the same reason.
+    if id == "layer.addDatabase" && cfg!(target_arch = "wasm32") {
+        return Some("databases are read through DuckDB, a program the browser can't run");
+    }
+    why_disabled(app, id).or_else(|| {
+        (search_action(id).is_none() && app.session.registry.get(id).is_some_and(rustgis_engine::CommandSpec::needs_input))
+            .then_some("it needs input: open it from its pane or button, or run it from a script or the assistant")
+    })
+}
+
+/// Whether the query matches a registry command's search row.
+fn command_matches(c: &rustgis_engine::CommandSpec, ql: &str) -> bool {
+    ql.is_empty() || c.label.to_lowercase().contains(ql) || c.id.to_lowercase().contains(ql) || c.location.to_lowercase().contains(ql)
+}
+
 /// The command palette: type to filter every command, Enter runs the first.
 pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
     let Some(mut q) = app.ui.command_search.take() else { return };
@@ -695,15 +849,23 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
                 ));
             }
         }
-        for c in &app.session.registry.commands {
-            if ql.is_empty()
-                || c.label.to_lowercase().contains(&ql)
-                || c.id.to_lowercase().contains(&ql)
-                || c.location.to_lowercase().contains(&ql)
-            {
-                if c.params.contains(':') && !c.params.contains("?") && c.params != "{}" {
-                    continue; // needs parameters: not runnable from the palette
+        // Workflow titles are searchable even when they differ from the engine command's label.
+        // A command with the same title that routes to the workflow is listed instead, if it matches.
+        if !ql.is_empty() {
+            for &(section, label) in crate::analysispane::SECTIONS {
+                if (label.to_lowercase().contains(&ql) || section.to_lowercase().contains(&ql) || tl!(label).to_lowercase().contains(&ql))
+                    && !app.session.registry.commands.iter().any(|c| {
+                        c.label == label
+                            && matches!(search_action(c.id), Some(SearchAction::Workflow(s)) if s == section)
+                            && command_matches(c, &ql)
+                    })
+                {
+                    hits.push((format!("pane:{section}"), tl!(label).to_string(), crate::i18n::location("Workflows")));
                 }
+            }
+        }
+        for c in &app.session.registry.commands {
+            if command_matches(c, &ql) {
                 hits.push((c.id.to_string(), tl!(c.label).to_string(), crate::i18n::location(c.location)));
             }
         }
@@ -756,7 +918,8 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
             let mut first = true;
             for (id, label, loc) in hits.iter().take(40) {
                 // Unavailable commands stay listed, greyed out, with the reason on hover.
-                let on = id.starts_with("gp:") || id.starts_with("panel:") || enabled(app, id);
+                let why = search_disabled(app, id);
+                let on = why.is_none();
                 let mut b = egui::Button::new(egui::RichText::new(label).size(13.0)).frame(false).min_size(vec2(row_w, 26.0));
                 // The command's shortcut after its location.
                 let keys = if id.contains(':') { String::new() } else { crate::keymap::shortcut_text(app, id, &Value::Null) };
@@ -770,7 +933,7 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
                 }
                 // The scroll area would clip a fill wider than the row.
                 let mut resp = row_button(ui, on, b, 0.0);
-                if let Some(why) = why_disabled(app, id) {
+                if let Some(why) = why {
                     resp = resp.on_disabled_hover_text(crate::i18n::fmt("Unavailable: {reason}", &[("reason", tl_raw!(why))]));
                 }
                 let enter = on && first && ui.input(|i| i.key_pressed(Key::Enter));
@@ -794,6 +957,20 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
             let _ = app.run("ui.gp.open", json!({"tool": tool}));
         } else if let Some(plugin) = id.strip_prefix("panel:") {
             let _ = app.run("ui.pane.plugin", json!({"id": plugin}));
+        } else if let Some(section) = id.strip_prefix("pane:") {
+            let _ = app.run("ui.pane.workflows", json!({"section": section}));
+        } else if let Some(action) = search_action(&id) {
+            let _ = match action {
+                SearchAction::Command(command) => app.run(command, Value::Null),
+                SearchAction::Dialog(name) => app.run("ui.dialog", json!({"name": name})),
+                SearchAction::OpenItem(kind) => app.run("ui.openItem", json!({"kind": kind})),
+                SearchAction::SaveItem(kind) => app.run("ui.saveItem", json!({"kind": kind})),
+                SearchAction::Workflow(section) => app.run("ui.pane.workflows", json!({"section": section})),
+                SearchAction::Pane(pane) => {
+                    app.ui.open_right(pane);
+                    Ok(Value::Null)
+                }
+            };
         } else {
             let _ = app.run(&id, Value::Null);
         }

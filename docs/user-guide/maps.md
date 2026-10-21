@@ -15,6 +15,14 @@ projection; places that projection can't show are skipped. Type a scale in the s
 to it. More navigation tools are under [View
 effects](#view-effects) below.
 
+**Zoom To Layer** in a layer's right-click menu shows that layer's extent instead of the whole
+map. It works for feature and raster data, PMTiles archives, cloud-optimised GeoTIFFs, and service
+tile layers whose capabilities advertise geographic bounds, including WMS. WMS 1.3 geographic
+bounds and WMS 1.1 latitude/longitude bounds are inherited from parent layers when needed and
+saved with the project. Re-add a service layer saved by an older version to retain its bounds.
+Tile layers without known bounds (such as plain XYZ/TMS or MVT templates, styles and MBTiles
+archives) have no **Zoom To Layer** action unless bounds were supplied when adding them.
+
 **Rotating and tilting the map.** Drag with the right mouse button, or hold ++ctrl++ and drag
 with the Pan tool, to turn the map about the centre of the view (to the right turns it clockwise)
 and to tilt it (up tilts it further), as in MapLibre; or hold ++shift++ and press ++arrow-left++ or ++arrow-right++ to turn it, ++arrow-up++ or ++arrow-down++
@@ -163,11 +171,16 @@ Ocean, Atlas, Blank), which need no network, and web tile layers over them:
   window); in the web app added with Add Data and held in memory for the session (a project keeps
   the layer, and asks for the file again).
 - **Map styles**: a MapLibre style document (`style.json`), with its vector and raster sources.
-  RustGIS draws background, fill, line, circle and raster layers, point labels with their icons
-  from the style's sprite (SDF icons in their `icon-color`), and fill patterns; it evaluates the
-  style's expressions and zoom functions. Line labels and shields along roads, line patterns,
-  hillshade and 3D extrusion are not drawn (extrusions draw flat). A label shows the lines of
-  its text that the map's font can draw: a style's "Syria / سوريا" shows as "Syria".
+  RustGIS draws background, fill, line, circle and raster layers, labels with their icons from
+  the style's sprite (SDF icons in their `icon-color`), and fill patterns; it evaluates the
+  style's expressions and zoom functions. Labels are placed as MapLibre places them: at points,
+  in the middle of areas, and along lines (street names every `symbol-spacing`, turned to the
+  street, where it bends less than `text-max-angle`; shields and one-way arrows), wrapped to
+  `text-max-width`, the style's later layers first and then by `symbol-sort-key`, kept apart by
+  `text-padding` and the `*-optional`, `*-allow-overlap` and `*-ignore-placement` rules. Text
+  along a line is drawn straight rather than curved round its bends. Line patterns, hillshade
+  and 3D extrusion are not drawn (extrusions draw flat). A label shows the lines of its text
+  that the map's font can draw: a style's "Syria / سوريا" shows as "Syria".
   A style's root `center`, `zoom`, `bearing` and `pitch` say where it opens: `map.addTiles` with
   `"view": true` takes the map there once the style has loaded.
 
@@ -181,7 +194,8 @@ which opens the Plugin Manager at the
 basemaps. Add any other with **Add Tile Layer…** at the bottom of the Basemap gallery.
 The gallery lists the map's tile layers: show or hide them, change their opacity and order, or
 remove them. The Layers pane lists them too, under the map's layers and above the basemap: tick
-one to show or hide it, and right-click it for its opacity, **Blend** mode, order and **Remove**.
+one to show or hide it, and right-click it for **Zoom To Layer** (when its bounds are known), opacity,
+**Blend** mode, order and **Remove**.
 A blend mode (Multiply, Screen, Overlay, Darken, Lighten, Difference) combines a tile layer with
 the tile layers and basemap beneath it: stack imagery over a hillshade and set it to Multiply to
 let the terrain show through. Overlays (labels, roads) stay on top of the basemaps; choosing a built-in basemap
@@ -191,7 +205,11 @@ their credits are shown in the corner of the map and drawn on exports.
 Tiles load in the background and the map fills in as they arrive, with coarser tiles standing in
 meanwhile; exports and `rustgis-cli` wait for them. On the globe and in other projections the
 tiles are reprojected. From scripts: `map.addTiles`, `map.removeTiles`, `map.setTiles`,
-`map.zoomToTiles` and `map.tiles`.
+`map.zoomToTiles` and `map.tiles`. `map.addTiles` accepts optional `"bounds": [west, south, east,
+north]` in longitude/latitude; `service.add` retains the bounds advertised by map and tile services.
+Explicit bounds must form a finite, ordered geographic rectangle; an invalid value rejects the
+command without adding or replacing a layer. Invalid or malformed bounds in a saved project
+are instead discarded, leaving the project and tile layer usable without that coverage metadata.
 
 ### Other worlds
 
@@ -335,10 +353,11 @@ Mode** switches it by hand.
 **View › Display › GPU Rendering** (beta) draws the flat map on the GPU instead of the CPU: vector
 layers are tessellated once and re-projected per frame, so panning and zooming stay smooth on
 large datasets. Raster tile layers (XYZ, TMS and WMS tiles, and raster PMTiles, MBTiles and
-styles) are drawn there as one texture per tile, moved with the camera like the vector layers,
-rather than as a picture of the view stretched until the map settles; zoomed in a little past the
-tiles' own zoom, the next zoom's tiles are placed, their parents and cached children standing in
-until they arrive. Vector tile styles and blended tile layers are still drawn as a picture of the
+styles) are placed again for every frame the map shows, from textures uploaded once and kept in
+a fixed pool, as MapLibre draws its tiles: panning and zooming never redraw the map for them, the
+tiles of each zoom are placed as the zoom passes, and parents and cached children stand in until
+they arrive (the view's tiles a few levels up are fetched too, so a coarse picture is always at
+hand). Vector tile styles and blended tile layers are still drawn as a picture of the
 view, shifted and scaled while the map moves. GPU Rendering is off by default, and the setting is
 remembered across sessions (`ui.map.gpu` is the command; `RUSTGIS_GPU=1` forces it on for
 development). The globe, view effects and the colour-vision simulator always render on the CPU,

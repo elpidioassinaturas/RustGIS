@@ -98,12 +98,13 @@ pub fn commands() -> Vec<C> {
                 return Err(format!("{name} is a {} style; {} is a {} layer", st.geometry.label(), l.name, l.geometry_type().label()));
             }
             l.renderer = st.renderer;
-            let field = l.labels.field.clone();
+            let field = l.labels.default.field.clone();
             l.labels = st.labels;
             // The label field stays if the style's isn't in this layer.
-            if l.dataset.field_index(&l.labels.field).is_none() {
-                l.labels.field = field;
+            if l.dataset.field_index(&l.labels.default.field).is_none() {
+                l.labels.default.field = field;
             }
+            l.labels.repoint_missing_fields(&l.dataset);
             l.transparency = st.transparency;
             Ok(Value::Null)
         })
@@ -595,7 +596,7 @@ fn layer_template(s: &mut Session, p: &Value) -> CmdResult {
     let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or(title);
     let id = super::layer::add_dataset(s, Dataset::new(name, gt, fields));
     if let Some(l) = s.map_mut().layer_mut(id) {
-        l.labels.field = "name".into();
+        l.labels.default.field = "name".into();
     }
     Ok(json!({"layer": id}))
 }
@@ -1001,6 +1002,7 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
         }
         k if super::sharing::KINDS.iter().any(|x| x.0 == k) => {
             let (name, bytes, _) = super::sharing::share_bytes(s, k, p)?;
+            super::sharing::note_label_classes(s, k, p);
             (name, bytes)
         }
         k => return Err(format!("unknown item '{k}'")),

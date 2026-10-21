@@ -34,7 +34,7 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"database": "as layer.addDatabase", "password"?: string}"#),
         C::new("layer.loadAll", "Load All Features", "Layers", load_all).when(need_streamed).params(r#"{"layer"?: name|id}"#),
         C::new("layer.addUrl", "Add Data From URL", "Home › Add", add_url).params(
-            r#"{"url": "https://…/data.geojson|.csv|.parquet|.fgb|.gpkg|.zip|.kml|.kmz|.gpx|.tif (the format from the address, else the contents) | a .pmtiles archive", "name"?: text, "layer"?: "one layer of a zip, KML or GPX", "zoom"?: "bool: true zooms to what was added; false keeps the view of a GeoParquet or FlatGeobuf read in place (zoomed to only when the map was empty)", "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "whole"?: "bool: download a cloud-optimised GeoTIFF whole (as a raster layer) instead of reading it in place", "start"?, "end"?, "unit"?, "interval"?, "dates"?: "a GeoTIFF address with date placeholders ({date:YYYY}, {YYYY}{MM}{DD}), one file per date: the dates it spans and steps through (as time.set), turning the time slider on"}"#,
+            r#"{"url": "https://…/data.geojson|.csv|.parquet|.fgb|.gpkg|.zip|.kml|.kmz|.gpx|.tif|.jp2 (JPEG 2000: desktop, through GDAL) (the format from the address, else the contents) | a .pmtiles archive", "name"?: text, "layer"?: "one layer of a zip, KML or GPX", "zoom"?: "bool: true zooms to what was added; false keeps the view of a GeoParquet or FlatGeobuf read in place (zoomed to only when the map was empty)", "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "whole"?: "bool: download a cloud-optimised GeoTIFF whole (as a raster layer) instead of reading it in place", "start"?, "end"?, "unit"?, "interval"?, "dates"?: "a GeoTIFF address with date placeholders ({date:YYYY}, {YYYY}{MM}{DD}), one file per date: the dates it spans and steps through (as time.set), turning the time slider on"}"#,
         ),
         C::new("layer.addDownload", "Add Downloaded Data", "Home › Add", add_download)
             .params(r#"{"id": a download the app finished (Add Data › From URL), "url": its address, "name"?: text, "layer"?: text, "zoom"?: bool, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "service"?: bool (a service's features: their axes and paging are checked), "coverage"?: bool (a WCS coverage: a GeoTIFF, else the service's error)}"#),
@@ -206,33 +206,34 @@ pub fn commands() -> Vec<C> {
             let id = s.layer_id(p)?;
             let fname = s.map().layer(id).and_then(|l| l.dataset.field_index(&name).and_then(|i| l.dataset.fields.get(i)).map(|f| f.name.clone()));
             let fname = fname.ok_or_else(|| format!("no field named '{name}'"))?;
-            with(s, p, |l| {
-                l.labels.field = fname.clone();
-                l.labels.enabled = true;
+            super::labels::with_labels(s, p, |labels| {
+                super::labels::class_in(labels, p)?.field = fname;
+                labels.enabled = true;
+                Ok(())
             })
-        }).params(r#"{"layer"?, "field": name}"#)
+        }).params(r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "field": name}"#)
         .when(need_feature_layer),
         C::new("labels.style", "Text Symbol", "Style › Text Symbol", |s, p| {
             let size = f(p, "size").map(|v| v.clamp(*LABEL_SIZE.start(), *LABEL_SIZE.end()) as f32);
             let color = s.get_color(p, "color")?;
             let (halo, bold) = (b(p, "halo"), b(p, "bold"));
-            with(s, p, |l| {
+            super::labels::with_class(s, p, |c| {
                 if let Some(v) = size {
-                    l.labels.size = v;
+                    c.size = v;
                 }
-                if let Some(c) = color {
-                    l.labels.color = c;
+                if let Some(col) = color {
+                    c.color = col;
                 }
                 if let Some(h) = halo {
-                    l.labels.halo = h;
+                    c.halo = h;
                 }
                 if let Some(bb) = bold {
-                    l.labels.bold = bb;
+                    c.bold = bb;
                 }
             })
         })
         .when(need_feature_layer)
-        .params(r##"{"layer"?, "size"?: number, "color"?: "#RRGGBB"|"#RRGGBBAA", "halo"?: bool, "bold"?: bool}"##),
+        .params(r##"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "size"?: number, "color"?: "#RRGGBB"|"#RRGGBBAA", "halo"?: bool, "bold"?: bool}"##),
         C::new("layer.definitionQuery", "Definition Query", "Data › Definition Query", |s, p| {
             let q = ps(p, "where").map(str::trim).unwrap_or("").to_string();
             let id = s.layer_id(p)?;
@@ -344,7 +345,7 @@ fn line_strokes(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"strokes": l.line_strokes.len()}))
 }
 
-fn s_req<'a>(p: &'a Value, k: &str) -> Result<&'a str, String> {
+pub(crate) fn s_req<'a>(p: &'a Value, k: &str) -> Result<&'a str, String> {
     ps(p, k).ok_or_else(|| format!("{k} is required"))
 }
 
@@ -1888,6 +1889,10 @@ pub fn url_file_name(url: &str, bytes: &[u8]) -> Result<String, String> {
         .take(120)
         .collect();
     let ext = Path::new(&last).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    // JPEG 2000 (Sentinel-2's imagery) is read through GDAL, which the browser can't run.
+    if rustgis_data::raster::is_jpeg2000_name(&last) {
+        return if cfg!(target_arch = "wasm32") { Err(super::raster::JPEG2000_WEB_LIMITATION.into()) } else { Ok(last) };
+    }
     let known = rustgis_data::io::READ_EXTENSIONS.contains(&ext.as_str()) || rustgis_data::raster::is_raster_name(&last) || ext == "tsv";
     if known && ext != "json" {
         return Ok(last);
@@ -1985,7 +1990,7 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
         }
         let bytes = crate::render::rustgis_tiles::cache::download_blocking(url).map_err(named)?;
         let name = url_file_name(url, &bytes).map_err(named)?;
-        super::raster::add_named_bytes(s, p, name, bytes)
+        super::raster::add_named_bytes(s, p, name, bytes).map_err(named)
     }
 }
 

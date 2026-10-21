@@ -711,11 +711,11 @@ pub fn time_series(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         egui::Color32::from_rgb(27, 158, 119),
     ];
     for (i, runs) in lines.iter().enumerate() {
-        let colour = colours[i % colours.len()];
+        let colour = colours.get(i % colours.len()).copied().unwrap_or(egui::Color32::GRAY);
         for run in runs {
             let pts: Vec<egui::Pos2> = run.iter().map(|p| to(*p)).collect();
-            if pts.len() == 1 {
-                painter.circle_filled(pts[0], 2.5, colour);
+            if let [point] = pts.as_slice() {
+                painter.circle_filled(*point, 2.5, colour);
             } else {
                 painter.add(egui::Shape::line(pts, egui::Stroke::new(1.6, colour)));
             }
@@ -752,7 +752,7 @@ pub fn time_series(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     // The points, in their lines' colours.
     for (i, s) in app.ws.series.iter().enumerate() {
-        let colour = colours[i % colours.len()];
+        let colour = colours.get(i % colours.len()).copied().unwrap_or(egui::Color32::GRAY);
         let text = format!(
             "● {:.4}°, {:.4}° · {}",
             s["lon"].as_f64().unwrap_or(0.0),

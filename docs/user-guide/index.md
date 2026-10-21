@@ -74,8 +74,14 @@ This guide walks through RustGIS by task. Each page covers one part of the app:
   change the projection), the pointer's coordinates (click them to switch between decimal
   degrees and DMS), the selection count and the draw time.
 
-**Command Search** (++ctrl+k++, or the box at the top right) finds any command or geoprocessing
-tool by name and runs it.
+**Command Search** (++ctrl+k++, or the box at the top right) finds commands and geoprocessing
+tools by name. Commands with an interactive entry point open their dialog, file picker or pane
+to collect input: for example, Basemap, Add Tile Layer, Rename, Select By Attributes and exports.
+Workflow tools such as Georeference and Classification Wizard open in the Workflows pane.
+Workflows can also be found by their translated titles or section ids, such as `deepLearning`.
+A command that needs input but has no interactive entry point stays listed greyed out, with
+the reason on hover, instead of running without its required parameters.
+Desktop-only database connections are also disabled in the browser.
 
 To give the map more room, collapse the ribbon to its tab row with the chevron at its right
 end, by double-clicking a tab, or with ++ctrl+f1++ (++cmd+f1++ on macOS, where F1 may need the Fn

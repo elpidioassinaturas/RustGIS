@@ -5,9 +5,10 @@
 //! the waker (the app's repaint) is called, so the map draws again with the new tile. Exports
 //! and the command line, which can't draw a half-loaded map, [`wait`] for the fetches first.
 //!
-//! Natively, tiles are fetched on worker threads, the newest request first (the view the user is
-//! looking at now, not the one they panned away from), a limited number at a time from each
-//! server. The browser app installs its own fetcher with [`set_fetcher`].
+//! Tiles are fetched a limited number at a time from each server, the newest request first (the
+//! view the user is looking at now, not the one they panned away from), and a waiting tile the
+//! map stopped asking for is dropped unfetched ([`crate::schedule`]). Natively they are fetched on
+//! worker threads; the browser app installs its own fetcher with [`set_fetcher`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -18,6 +19,7 @@ use web_time::{Duration, Instant};
 
 use crate::failure::Failure;
 use crate::mvt;
+use crate::schedule::{Queue, Waiting};
 
 /// What a fetched address is decoded as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +54,10 @@ pub type Done = Box<dyn FnOnce(Result<Vec<u8>, String>) + Send>;
 /// Called once with a download's bytes or what is known of its failure (#509).
 pub type DoneDetailed = Box<dyn FnOnce(Result<Vec<u8>, Failure>) + Send>;
 type Fetcher = Box<dyn Fn(String, Done) + Send + Sync>;
+/// Hands back a decoded picture: [`RAW`] pixels, or the encoded bytes it was given when it
+/// couldn't decode them (they are decoded here then).
+pub type Decoded = Box<dyn FnOnce(Result<Vec<u8>, Vec<u8>>) + Send>;
+type ImageDecoder = Box<dyn Fn(Vec<u8>, Decoded) + Send + Sync>;
 
 /// Bytes the cache keeps before dropping the least recently used entries.
 const BUDGET: usize = if cfg!(target_arch = "wasm32") { 160 << 20 } else { 384 << 20 };
@@ -75,6 +81,8 @@ enum Entry {
 struct Slot {
     entry: Entry,
     used: u64,
+    /// When the map last asked for it ([`get`]): a waiting tile not asked for lately is dropped.
+    asked: Instant,
 }
 
 #[derive(Default)]
@@ -82,6 +90,8 @@ struct Cache {
     slots: HashMap<String, Slot>,
     bytes: usize,
     tick: u64,
+    /// When the map last asked for any address.
+    latest: Option<Instant>,
 }
 
 fn cache() -> &'static Mutex<Cache> {
@@ -101,6 +111,11 @@ fn fetcher() -> &'static Mutex<Option<Arc<Fetcher>>> {
     F.get_or_init(Mutex::default)
 }
 
+fn image_decoder() -> &'static Mutex<Option<Arc<ImageDecoder>>> {
+    static D: OnceLock<Mutex<Option<Arc<ImageDecoder>>>> = OnceLock::new();
+    D.get_or_init(Mutex::default)
+}
+
 fn waker() -> &'static Mutex<Option<Arc<dyn Fn() + Send + Sync>>> {
     static W: OnceLock<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>> = OnceLock::new();
     W.get_or_init(Mutex::default)
@@ -110,6 +125,27 @@ fn waker() -> &'static Mutex<Option<Arc<dyn Fn() + Send + Sync>>> {
 /// Decode download markers with [`split_download_limit`] and enforce their budget while reading.
 pub fn set_fetcher(f: impl Fn(String, Done) + Send + Sync + 'static) {
     *fetcher().lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(Box::new(f)));
+}
+
+/// Replaces how tile pictures (PNG, JPEG, WebP) are decoded: the browser's own decoder works
+/// off the page's thread, where decoding them here held up every frame tiles arrived in. `done`
+/// must be called once, with the picture as [`RAW`] pixels, or with the bytes given back.
+pub fn set_image_decoder(f: impl Fn(Vec<u8>, Decoded) + Send + Sync + 'static) {
+    *image_decoder().lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(Box::new(f)));
+}
+
+/// Whether `bytes` are a PNG, JPEG or WebP picture of at most 4096 pixels a side, by its header:
+/// a larger one is left to [`decode_image`], whose limits refuse it before it takes the memory.
+fn encoded_picture(bytes: &[u8]) -> bool {
+    let known = bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || bytes.starts_with(&[0xff, 0xd8, 0xff])
+        || (bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"));
+    known
+        && image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()
+            .and_then(|r| r.into_dimensions().ok())
+            .is_some_and(|(w, h)| (1..=4096).contains(&w) && (1..=4096).contains(&h))
 }
 
 /// Sets what is called whenever a fetch finishes (the app asks for a repaint).
@@ -130,11 +166,14 @@ pub fn in_flight() -> usize {
 /// What the cache holds for `url`, fetching it when it holds nothing (or a failure old enough
 /// to try again).
 pub fn get(url: &str, want: Want) -> State {
+    let now = Instant::now();
     let mut c = lock();
     c.tick += 1;
     let tick = c.tick;
+    c.latest = Some(now);
     if let Some(slot) = c.slots.get_mut(url) {
         slot.used = tick;
+        slot.asked = now;
         match &slot.entry {
             Entry::Ready(p, _) => return State::Ready(p.clone()),
             Entry::Pending => return State::Pending,
@@ -142,7 +181,7 @@ pub fn get(url: &str, want: Want) -> State {
             Entry::Failed(..) => {}
         }
     }
-    c.slots.insert(url.to_string(), Slot { entry: Entry::Pending, used: tick });
+    c.slots.insert(url.to_string(), Slot { entry: Entry::Pending, used: tick, asked: now });
     drop(c);
     start(url.to_string(), want);
     State::Pending
@@ -195,27 +234,144 @@ pub fn wait(timeout: Duration) {
     let _ = timeout;
 }
 
+fn queue() -> &'static Mutex<Queue<Want>> {
+    static Q: OnceLock<Mutex<Queue<Want>>> = OnceLock::new();
+    Q.get_or_init(Mutex::default)
+}
+
+/// Asks for a tile: fetched now when its server has room, else it waits its turn.
 fn start(url: String, want: Want) {
     IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
-    let key = url.clone();
-    let done: Done = Box::new(move |bytes| {
-        if matches!(&bytes, Err(e) if e == DROPPED) {
-            lock().slots.remove(&key);
-            finished();
+    let mut swept = Vec::new();
+    let now = {
+        let mut q = queue().lock().unwrap_or_else(|e| e.into_inner());
+        let mut c = lock();
+        let latest = c.latest.unwrap_or_else(Instant::now);
+        let now = q.push(url, want, |u| c.slots.get(u).map(|s| s.asked), latest, &mut swept);
+        // Under the same lock as the choice: a tile asked for again meanwhile isn't forgotten.
+        forget(&mut c, &swept);
+        now
+    };
+    launch(now.into_iter().collect());
+}
+
+/// A fetch from `host` is over: starts the waiting tiles that take its place and forgets those
+/// the map stopped asking for.
+fn release(host: &str) {
+    let next = {
+        let mut q = queue().lock().unwrap_or_else(|e| e.into_inner());
+        let mut c = lock();
+        let latest = c.latest.unwrap_or_else(Instant::now);
+        let next = q.done(host, |url| c.slots.get(url).map(|s| s.asked), latest);
+        forget(&mut c, &next.drop);
+        next
+    };
+    launch(next.start);
+}
+
+/// Forgets tiles dropped unfetched: no longer under way, and fetched again when next asked for.
+/// Called holding the cache's lock taken to choose them, so a tile can't be asked for between.
+fn forget(c: &mut Cache, dropped: &[Waiting<Want>]) {
+    for w in dropped {
+        if matches!(c.slots.get(&w.url), Some(Slot { entry: Entry::Pending, .. })) {
+            c.slots.remove(&w.url);
+        }
+    }
+    IN_FLIGHT.fetch_sub(dropped.len(), Ordering::Release);
+}
+
+/// Starts fetches one after another, never inside each other: a fetch can be over at once (a
+/// local read, an archive that failed), and each one over starts the next waiting tile, so a
+/// long queue would otherwise go as deep into the stack as it is long.
+fn launch(jobs: Vec<Waiting<Want>>) {
+    static TO_START: Mutex<Vec<Waiting<Want>>> = Mutex::new(Vec::new());
+    static STARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let pop = || TO_START.lock().unwrap_or_else(|e| e.into_inner()).pop();
+    if !jobs.is_empty() {
+        // Newest first: `pop` takes from the end.
+        TO_START.lock().unwrap_or_else(|e| e.into_inner()).extend(jobs.into_iter().rev());
+    }
+    loop {
+        // Another call (this thread further up, or another thread) is starting them already.
+        if STARTING.swap(true, Ordering::AcqRel) {
             return;
         }
-        let entry = match bytes.and_then(|b| decode(&b, want)) {
-            Ok(p) => {
-                let size = payload_bytes(&p);
-                Entry::Ready(Arc::new(p), size)
+        {
+            // Lowered however this ends: a fetcher that panics must not stop every later fetch.
+            struct Lower;
+            impl Drop for Lower {
+                fn drop(&mut self) {
+                    STARTING.store(false, Ordering::Release);
+                }
             }
-            Err(e) => {
-                log::debug!("{key}: {e}");
-                Entry::Failed(e, Instant::now())
+            let _lower = Lower;
+            while let Some(w) = pop() {
+                fetch_tile(w.url, w.host, w.job);
             }
-        };
-        store(&key, entry);
+        }
+        // A tile queued after the last `pop` and before the flag went down is started here.
+        if TO_START.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+            return;
+        }
+    }
+}
+
+/// A tile fetch's answer: stored once it comes, and however the fetch ends (answered, dropped
+/// unanswered by its fetcher, or unwound by a panic) its server's place goes to the next tile
+/// and the fetch no longer counts as under way.
+struct Answer {
+    key: String,
+    host: String,
+    entry: Option<Entry>,
+}
+
+impl Answer {
+    /// Stored when the answer is dropped, after the fetch.
+    fn set(&mut self, entry: Entry) {
+        self.entry = Some(entry);
+    }
+}
+
+impl Drop for Answer {
+    fn drop(&mut self) {
+        match self.entry.take() {
+            Some(entry) => store(&self.key, entry),
+            // Never answered (or dropped by the fetcher): forgotten, fetched again when asked for.
+            None => {
+                let mut c = lock();
+                if matches!(c.slots.get(&self.key), Some(Slot { entry: Entry::Pending, .. })) {
+                    c.slots.remove(&self.key);
+                }
+            }
+        }
+        release(&self.host);
         finished();
+    }
+}
+
+fn fetch_tile(url: String, host: String, want: Want) {
+    let answer = Answer { key: url.clone(), host, entry: None };
+    let done: Done = Box::new(move |bytes| {
+        if matches!(&bytes, Err(e) if e == DROPPED) {
+            return;
+        }
+        // Stored once decoded, which the browser's decoder may finish later (the answer is held
+        // till then, and dropped unanswered if the decoder never calls back).
+        let settle = move |decoded: Result<Payload, String>| {
+            let mut answer = answer;
+            answer.set(match decoded {
+                Ok(p) => {
+                    let size = payload_bytes(&p);
+                    Entry::Ready(Arc::new(p), size)
+                }
+                Err(e) => {
+                    log::debug!("{}: {e}", answer.key);
+                    Entry::Failed(e, Instant::now())
+                }
+            });
+        };
+        let decoder = image_decoder().lock().unwrap_or_else(|e| e.into_inner()).clone();
+        decode_with(bytes, want, decoder.as_deref(), settle);
     });
     // A tile from a PMTiles archive is read from the archive, by range.
     if crate::pmtiles::is_tile(&url) {
@@ -233,6 +389,28 @@ fn start(url: String, want: Want) {
         return;
     }
     fetch_bytes(url, done);
+}
+
+/// Decodes what a fetch gave as `want` and hands it to `settle`: a picture through `decoder`, if
+/// one is set (see [`set_image_decoder`]), which may answer later.
+fn decode_with(
+    bytes: Result<Vec<u8>, String>,
+    want: Want,
+    decoder: Option<&ImageDecoder>,
+    settle: impl FnOnce(Result<Payload, String>) + Send + 'static,
+) {
+    match (bytes, decoder) {
+        (Ok(b), Some(decoder)) if want == Want::Image && b.len() <= MAX_BYTES && encoded_picture(&b) => decoder(
+            b,
+            Box::new(move |r| {
+                settle(match r {
+                    Ok(raw) => decode_image(&raw).map(Payload::Image),
+                    Err(b) => decode(&b, want),
+                })
+            }),
+        ),
+        (bytes, _) => settle(bytes.and_then(|b| decode(&b, want))),
+    }
 }
 
 /// Marks the part of an address that asks for a byte range, `#rustgis-range=<first>-<last>`:
@@ -491,7 +669,8 @@ fn store(url: &str, entry: Entry) {
     let added = if let Entry::Ready(_, n) = &entry { *n } else { 0 };
     // Dropped while it was fetched (cleared, or evicted): kept anyway, it was asked for.
     let tick = c.tick;
-    let old = c.slots.insert(url.to_string(), Slot { entry, used: tick });
+    let asked = c.slots.get(url).map_or_else(Instant::now, |s| s.asked);
+    let old = c.slots.insert(url.to_string(), Slot { entry, used: tick, asked });
     if let Some(Slot { entry: Entry::Ready(_, n), .. }) = old {
         c.bytes = c.bytes.saturating_sub(n);
     }
@@ -551,9 +730,10 @@ pub fn decode(bytes: &[u8], want: Want) -> Result<Payload, String> {
     }
 }
 
-/// Starts a picture drawn by RustGIS itself (a COG's map tile): its width and height (u32, little
-/// end first), then straight RGBA pixels. No encoding, so no PNG encoder in the browser build.
-pub(crate) const RAW: &[u8] = b"RUSTGIS-RGBA";
+/// Starts a picture drawn by RustGIS itself (a COG's map tile) or decoded by the browser (see
+/// [`set_image_decoder`]): its width and height (u32, little end first), then straight RGBA
+/// pixels. No encoding, so no PNG encoder in the browser build.
+pub const RAW: &[u8] = b"RUSTGIS-RGBA";
 
 /// Decodes a PNG, JPEG or WebP picture into a premultiplied pixmap (at most 4096 pixels a side).
 pub fn decode_image(bytes: &[u8]) -> Result<Pixmap, String> {
@@ -1127,6 +1307,45 @@ mod tests {
     }
 
     #[test]
+    fn a_decoder_set_for_pictures_decodes_them() {
+        let mut pm = Pixmap::new(3, 2).unwrap_or_else(|| panic!("pixmap"));
+        pm.fill(tiny_skia::Color::from_rgba8(200, 100, 50, 255));
+        let png = pm.encode_png().unwrap_or_else(|e| panic!("{e}"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        // Stands in for the browser's decoder: the picture as RAW pixels, or the bytes back.
+        let counted = calls.clone();
+        let raw: ImageDecoder = Box::new(move |b: Vec<u8>, done: Decoded| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            let p = decode_image(&b).unwrap_or_else(|e| panic!("{e}"));
+            let mut out = RAW.to_vec();
+            out.extend(p.width().to_le_bytes());
+            out.extend(p.height().to_le_bytes());
+            out.extend(p.data());
+            done(Ok(out));
+        });
+        let back: ImageDecoder = Box::new(|b: Vec<u8>, done: Decoded| done(Err(b)));
+        for decoder in [&raw, &back] {
+            let got = Arc::new(Mutex::new(None));
+            let slot = got.clone();
+            decode_with(Ok(png.clone()), Want::Image, Some(decoder), move |p| *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(p));
+            let got = got.lock().unwrap_or_else(|e| e.into_inner()).take();
+            let Some(Ok(Payload::Image(p))) = got else { panic!("no picture") };
+            assert_eq!((p.width(), p.height()), (3, 2));
+            assert_eq!(p.pixel(1, 1).map(|c| (c.red(), c.green(), c.blue(), c.alpha())), Some((200, 100, 50, 255)));
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        // Not a picture, or not wanted as one: decoded here.
+        let json = br#"{"a": 1}"#.to_vec();
+        decode_with(Ok(json), Want::Json, Some(&raw), |p| assert!(matches!(p, Ok(Payload::Json(_)))));
+        decode_with(Ok(b"junk".to_vec()), Want::Image, Some(&raw), |p| assert!(p.is_err()));
+        // Larger than a tile may be, by its header: refused here, never handed to the decoder.
+        let big = Pixmap::new(4097, 1).unwrap_or_else(|| panic!("pixmap")).encode_png().unwrap_or_else(|e| panic!("{e}"));
+        assert!(!encoded_picture(&big));
+        decode_with(Ok(big), Want::Image, Some(&raw), |p| assert!(p.is_err()));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn decodes_pictures_and_documents() {
         let mut pm = Pixmap::new(2, 2).unwrap_or_else(|| panic!("pixmap"));
         pm.fill(tiny_skia::Color::from_rgba8(200, 100, 50, 128));
@@ -1286,5 +1505,51 @@ mod tests {
         assert!(matches!(get("test://cache/first.json", Want::Json), State::Pending));
         assert!(matches!(get("test://cache/first.json", Want::Json), State::Pending), "fetched again");
         assert_eq!(CALLS.load(Ordering::Relaxed), 4);
+
+        // A server has a few fetches under way at once; the newest waiting tile goes next (#635).
+        static HELD: Mutex<Vec<(String, Done)>> = Mutex::new(Vec::new());
+        set_fetcher(|url, done| {
+            if url.starts_with("test://held/") {
+                HELD.lock().unwrap().push((url, done));
+            } else {
+                done(Ok(b"1".to_vec()));
+            }
+        });
+        let n = crate::schedule::PER_HOST + 3;
+        for i in 0..n {
+            assert!(matches!(get(&format!("test://held/{i}.json"), Want::Json), State::Pending));
+        }
+        assert_eq!(HELD.lock().unwrap().len(), crate::schedule::PER_HOST);
+        let (_, done) = HELD.lock().unwrap().remove(0);
+        done(Ok(b"2".to_vec()));
+        let held: Vec<String> = HELD.lock().unwrap().iter().map(|(u, _)| u.clone()).collect();
+        assert_eq!(held.len(), crate::schedule::PER_HOST);
+        assert_eq!(held.last().map(String::as_str), Some(format!("test://held/{}.json", n - 1).as_str()));
+        assert!(matches!(get("test://held/0.json", Want::Json), State::Ready(_)));
+        // The rest finish, and so do the waiting ones they make room for.
+        loop {
+            let Some((_, done)) = HELD.lock().unwrap().pop() else { break };
+            done(Ok(b"3".to_vec()));
+        }
+        for i in 0..n {
+            assert!(matches!(get(&format!("test://held/{i}.json"), Want::Json), State::Ready(_)), "{i}");
+        }
+
+        // A fetcher that drops a request unanswered (or panics) gives its server's place back:
+        // more requests than the cap still all reach it, and each is forgotten, not stuck.
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+        set_fetcher(|url, done| {
+            if url.starts_with("test://lost/") {
+                SEEN.fetch_add(1, Ordering::Relaxed);
+                drop(done);
+            } else {
+                done(Ok(b"1".to_vec()));
+            }
+        });
+        for i in 0..3 * crate::schedule::PER_HOST {
+            assert!(matches!(get(&format!("test://lost/{i}.json"), Want::Json), State::Pending));
+        }
+        assert_eq!(SEEN.load(Ordering::Relaxed), 3 * crate::schedule::PER_HOST);
+        assert!(peek("test://lost/0.json").is_none());
     }
 }

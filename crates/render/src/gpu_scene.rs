@@ -83,6 +83,10 @@ pub enum DrawCmd {
     /// texture per picture across frames and moves the tiles with the camera as it moves the
     /// meshes, so a map with a basemap stays sharp while it pans and zooms.
     Tiles { origin: [f64; 2], tiles: Vec<TileQuad> },
+    /// One raster tile layer the GPU map places again for every frame it shows, from the tile
+    /// cache, for the camera of that frame (see [`crate::tiles::live`]): the scene holds only
+    /// which layer, so panning and zooming never draw the scene again for its tiles (#635).
+    LiveTiles { spec: rustgis_tiles::Spec, opacity: f32 },
     /// One vector tile layer's tiles as meshes (see `tile_mesh`): the GPU keeps each mesh's
     /// buffers across frames, shows the layers of its runs that show at the camera's zoom and
     /// clips each tile to its square, as MapLibre draws its tiles.

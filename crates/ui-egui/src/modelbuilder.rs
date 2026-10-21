@@ -459,7 +459,7 @@ fn export(app: &mut RustGisApp) {
 }
 
 /// Imports a model file (`*.model.json`, or a web tool) and opens it.
-fn import(app: &mut RustGisApp) {
+pub(crate) fn import(app: &mut RustGisApp) {
     if let Some(open) = &app.services.open_async {
         app.ui.pending_open = Some("model.import");
         open("item");

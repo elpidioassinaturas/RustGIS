@@ -58,6 +58,11 @@ impl CommandSpec {
         param_keys(self.params)
     }
 
+    /// Whether the parameter description includes a required top-level input.
+    pub fn needs_input(&self) -> bool {
+        needs_input(self.params)
+    }
+
     pub const fn new(id: &'static str, label: &'static str, location: &'static str, run: fn(&mut Session, &Value) -> CmdResult) -> Self {
         CommandSpec { id, label, location, shortcut: "", params: "{}", mutates: true, enabled: always, run }
     }
@@ -85,6 +90,22 @@ impl CommandSpec {
 /// alternative (after `|`, followed by `?` or `:`, as in `"path": folder | "url": …` or
 /// `"lon" | "x": number`).
 pub fn param_keys(desc: &str) -> Option<Vec<&str>> {
+    let mut keys = Vec::new();
+    param_entries(desc, |key, _| keys.push(key))?;
+    Some(keys)
+}
+
+/// Whether a parameter description has a required key. Question marks in values do not count.
+pub fn needs_input(desc: &str) -> bool {
+    let mut required = false;
+    match param_entries(desc, |_, optional| required |= !optional) {
+        Some(()) => required,
+        None => desc.contains(':'),
+    }
+}
+
+/// Visits top-level keys with their optional flag without allocating while checking requirements.
+fn param_entries<'a>(desc: &'a str, mut visit: impl FnMut(&'a str, bool)) -> Option<()> {
     #[derive(PartialEq)]
     enum At {
         Value,
@@ -95,7 +116,7 @@ pub fn param_keys(desc: &str) -> Option<Vec<&str>> {
     if bytes.iter().find(|c| !c.is_ascii_whitespace()) != Some(&b'{') {
         return None;
     }
-    let (mut keys, mut depth, mut at, mut i) = (Vec::new(), 0usize, At::Value, 0);
+    let (mut depth, mut at, mut i) = (0usize, At::Value, 0);
     while let Some(&c) = bytes.get(i) {
         match c {
             b'"' => {
@@ -106,8 +127,11 @@ pub fn param_keys(desc: &str) -> Option<Vec<&str>> {
                     At::Alternative => matches!(next, Some(b'?' | b':')),
                     At::Value => false,
                 };
-                if depth == 1 && key {
-                    keys.extend(desc.get(i + 1..end));
+                if depth == 1
+                    && key
+                    && let Some(key) = desc.get(i + 1..end)
+                {
+                    visit(key, next == Some(&b'?'));
                 }
                 at = At::Value;
                 i = end;
@@ -127,7 +151,7 @@ pub fn param_keys(desc: &str) -> Option<Vec<&str>> {
         }
         i += 1;
     }
-    Some(keys)
+    Some(())
 }
 
 /// `s` cut to `n` characters, with `…` when cut.

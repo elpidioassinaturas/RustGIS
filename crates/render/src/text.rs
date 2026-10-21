@@ -27,6 +27,15 @@ fn font(bold: bool) -> Option<&'static FontRef<'static>> {
     }
 }
 
+/// The scale that draws `f` with an em `px` pixels tall, as CSS sizes a font and the map view
+/// (egui) draws it. (ab_glyph's own pixel scale is the height from descender to ascender,
+/// a good third more than the em in most faces.)
+fn em(f: &FontRef, px: f32) -> PxScale {
+    let (h, upm) = (f.height_unscaled(), f.units_per_em().unwrap_or(0.0));
+    let k = if h.is_finite() && upm.is_finite() && h > 0.0 && upm > 0.0 { h / upm } else { 1.0 };
+    PxScale::from(px * k)
+}
+
 /// Characters that never need a glyph: spaces, controls, zero-width joiners, variation selectors,
 /// soft hyphens.
 fn invisible(c: char) -> bool {
@@ -83,13 +92,12 @@ pub fn covers(text: &str, bold: bool) -> bool {
 /// Lays out `text` at `px` pixels: each drawable glyph with its face and pen position (from 0),
 /// and the total advance. Characters no font covers are left out.
 fn shape(text: &str, px: f32, bold: bool) -> (Vec<(&'static FontRef<'static>, GlyphId, f32)>, f32) {
-    let scale = PxScale::from(px);
     let mut out = Vec::new();
     let mut x = 0.0;
     let mut prev: Option<(&'static FontRef<'static>, GlyphId)> = None;
     for ch in text.chars().take(500) {
         let Some((f, id)) = glyph(ch, bold) else { continue };
-        let sf = f.as_scaled(scale);
+        let sf = f.as_scaled(em(f, px));
         if let Some((pf, pid)) = prev
             && std::ptr::eq(pf, f)
         {
@@ -122,6 +130,76 @@ pub fn measure(text: &str, size: f32, bold: bool) -> f32 {
         return text.chars().count() as f32 * size * 0.6;
     }
     shape(text, size * 1.33, bold).1
+}
+
+/// How wide `text` is on one line at `size` with `spacing` points between letters, in points.
+fn spaced_width(text: &str, size: f32, bold: bool, spacing: f32) -> f32 {
+    let w = measure(text, size, bold);
+    if spacing == 0.0 {
+        return w;
+    }
+    (w + spacing * 1.33 * text.chars().count().saturating_sub(1) as f32).max(0.0)
+}
+
+/// A line of a label broken into lines about `max_w` points wide, as MapLibre wraps a label to
+/// `text-max-width`: at spaces, and after a hyphen, dash, slash or the like; the lines balanced
+/// (each near the same width) rather than filled, and a word longer than that a line of its
+/// own. A line that fits, or can't be broken, is kept as it is.
+pub fn wrap(line: &str, size: f32, bold: bool, spacing: f32, max_w: f32) -> Vec<String> {
+    // The pieces a line may break after: each with whether a space followed it.
+    let mut pieces: Vec<(String, bool)> = Vec::new();
+    let mut cur = String::new();
+    for c in line.chars().take(2000) {
+        if c == ' ' {
+            if !cur.is_empty() {
+                pieces.push((std::mem::take(&mut cur), true));
+            } else if let Some(last) = pieces.last_mut() {
+                // A space after a piece that ended at a dash or "&".
+                last.1 = true;
+            }
+            continue;
+        }
+        cur.push(c);
+        if matches!(c, '-' | '/' | '&' | '+' | ')' | '\u{AD}' | '\u{B7}' | '\u{200B}' | '\u{2010}' | '\u{2013}') {
+            pieces.push((std::mem::take(&mut cur), false));
+        }
+    }
+    if !cur.is_empty() {
+        pieces.push((cur, true));
+    }
+    let width = |s: &str| spaced_width(s, size, bold, spacing);
+    let total = width(line);
+    if pieces.len() < 2 || !(max_w.is_finite() && max_w > 0.0) || total <= max_w {
+        return vec![line.to_string()];
+    }
+    // As many lines as the width takes, each aiming at an equal share of it.
+    let n = (total / max_w).ceil().max(1.0);
+    let target = total / n;
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut spaced = false;
+    for (piece, space_after) in pieces {
+        if cur.is_empty() {
+            cur = piece;
+            spaced = space_after;
+            continue;
+        }
+        let longer = if spaced { format!("{cur} {piece}") } else { format!("{cur}{piece}") };
+        let (now, then) = (width(&cur), width(&longer));
+        // The piece goes on this line if that brings it nearer the target (and no wider than
+        // the most a line may be), else it starts the next.
+        if then <= target || (then <= max_w.max(target) && (then - target).abs() <= (now - target).abs()) {
+            cur = longer;
+        } else {
+            out.push(std::mem::take(&mut cur));
+            cur = piece;
+        }
+        spaced = space_after;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 /// A label's width in points: its widest line, as [`draw`] lays its lines out (#577). Text drawn
@@ -199,12 +277,12 @@ fn blend(pm: &mut Pixmap, x: i32, y: i32, c: Rgba, cov: f32) {
 
 fn draw_text(pm: &mut Pixmap, text: &str, cx: f32, cy: f32, px_size: f32, color: Rgba, bold: bool, offset: (f32, f32)) {
     let Some(f) = font(bold) else { return };
-    let sf = f.as_scaled(PxScale::from(px_size));
+    let sf = f.as_scaled(em(f, px_size));
     let (glyphs, width) = shape(text, px_size, bold);
     let x0 = cx - width / 2.0 + offset.0;
     let base = cy + (sf.ascent() + sf.descent()) / 2.0 + offset.1;
     for (f, id, x) in glyphs {
-        let g = id.with_scale_and_position(sf.scale(), ab_glyph::point(x0 + x, base));
+        let g = id.with_scale_and_position(em(f, px_size), ab_glyph::point(x0 + x, base));
         if let Some(og) = f.outline_glyph(g) {
             let bb = og.px_bounds();
             og.draw(|gx, gy, cov| blend(pm, bb.min.x as i32 + gx as i32, bb.min.y as i32 + gy as i32, color, cov));
@@ -221,12 +299,12 @@ const SLANT: f32 = 0.2126;
 /// pen, and a slant moves their tops right and their descenders left; (0, 0) when nothing draws.
 pub fn styled_extent(text: &str, px: f32, bold: bool, italic: bool, spacing: f32) -> (f32, f32) {
     let Some(f) = font(bold) else { return (0.0, 0.0) };
-    let sf = f.as_scaled(PxScale::from(px));
+    let sf = f.as_scaled(em(f, px));
     let base = (sf.ascent() + sf.descent()) / 2.0;
     let (glyphs, _) = shape(text, px, bold);
     let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
     for (i, (f, id, x)) in glyphs.into_iter().enumerate() {
-        let g = id.with_scale_and_position(sf.scale(), ab_glyph::point(x + spacing * i as f32, base));
+        let g = id.with_scale_and_position(em(f, px), ab_glyph::point(x + spacing * i as f32, base));
         let Some(og) = f.outline_glyph(g) else { continue };
         let bb = og.px_bounds();
         let (lean_top, lean_bottom) = if italic { (SLANT * (base - bb.min.y), SLANT * (base - bb.max.y)) } else { (0.0, 0.0) };
@@ -245,11 +323,11 @@ pub fn styled_at(pm: &mut Pixmap, text: &str, left: f32, cy: f32, px: f32, color
         return;
     }
     let Some(f) = font(bold) else { return };
-    let sf = f.as_scaled(PxScale::from(px));
+    let sf = f.as_scaled(em(f, px));
     let base = cy + (sf.ascent() + sf.descent()) / 2.0;
     let (glyphs, _) = shape(text, px, bold);
     for (i, (f, id, x)) in glyphs.into_iter().enumerate() {
-        let g = id.with_scale_and_position(sf.scale(), ab_glyph::point(left + x + spacing * i as f32, base));
+        let g = id.with_scale_and_position(em(f, px), ab_glyph::point(left + x + spacing * i as f32, base));
         let Some(og) = f.outline_glyph(g) else { continue };
         let bb = og.px_bounds();
         og.draw(|gx, gy, cov| {
@@ -270,8 +348,35 @@ pub fn styled_at(pm: &mut Pixmap, text: &str, left: f32, cy: f32, px: f32, color
     }
 }
 
-/// Draws a placed label (logical coordinates) with its halo.
+/// Draws a placed label (logical coordinates) with its halo. A label turned with the map (one
+/// along a street) is drawn upright into a picture of its own, which is turned into place.
 pub fn draw(pm: &mut Pixmap, l: &PlacedLabel, ppp: f32) {
+    match l.angle {
+        Some(a) if a.is_finite() && a.abs() > 1e-3 => draw_turned(pm, l, a, ppp),
+        _ => draw_upright(pm, l, ppp),
+    }
+}
+
+/// Draws `l` turned by `angle` (radians, clockwise) about its centre.
+fn draw_turned(pm: &mut Pixmap, l: &PlacedLabel, angle: f32, ppp: f32) {
+    let (w, h) = (label_width(l), block_height(&l.text, l.size).max(line_pitch(l.size)));
+    // Room for the halo, and for the glyphs reaching past the line.
+    let pad = 4.0 + l.size * 0.5;
+    let (pw, ph) = (((w + 2.0 * pad) * ppp).ceil(), ((h + 2.0 * pad) * ppp).ceil());
+    if !(pw.is_finite() && ph.is_finite()) || pw > 4096.0 || ph > 4096.0 {
+        return;
+    }
+    let Some(mut pic) = Pixmap::new(pw.max(1.0) as u32, ph.max(1.0) as u32) else { return };
+    let (cx, cy) = (pw / ppp / 2.0, ph / ppp / 2.0);
+    let upright = PlacedLabel { x: cx + l.align * w, y: cy, angle: None, framed: false, icon: None, ..l.clone() };
+    draw_upright(&mut pic, &upright, ppp);
+    let (tx, ty) = (l.center_x() * ppp, l.y * ppp);
+    let t = Transform::from_translate(-pw / 2.0, -ph / 2.0).post_rotate(angle.to_degrees()).post_translate(tx, ty);
+    let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..tiny_skia::PixmapPaint::default() };
+    pm.draw_pixmap(0, 0, pic.as_ref(), &paint, t, None);
+}
+
+fn draw_upright(pm: &mut Pixmap, l: &PlacedLabel, ppp: f32) {
     let px = l.size * 1.33 * ppp;
     let (cx, cy) = (l.center_x() * ppp, l.y * ppp);
     // Several lines (#577) as the map view draws them: each aligned in a block as wide as the
@@ -373,6 +478,8 @@ pub fn scale_bar(pm: &mut Pixmap, view: &View, ground_per_pt: f64) {
         italic: false,
         spacing: 0.0,
         line_align: TextAlign::Left,
+        angle: None,
+        collide: Default::default(),
     };
     draw(pm, &label, ppp);
 }

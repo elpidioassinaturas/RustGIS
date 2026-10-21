@@ -398,27 +398,18 @@ fn wms(url: &str, root: &Node) -> Service {
         .unwrap_or("image/png");
     let mut service = Service { kind: "WMS".into(), title, ..Service::default() };
     let mut skipped = 0;
-    // Layers inherit their parents' coordinate systems.
-    let mut stack: Vec<(Node, Vec<String>)> = root
+    // Layers inherit their parents' coordinate systems and nearest valid geographic bounds.
+    let mut stack: Vec<(Node, Vec<String>, Option<[f64; 4]>)> = root
         .descendants()
         .filter(|n| n.is_element() && local(n) == "Capability")
         .flat_map(|c| children(&c, "Layer").collect::<Vec<_>>())
-        .map(|l| (l, Vec::new()))
+        .map(|l| (l, Vec::new(), None))
         .collect();
-    while let Some((layer, inherited)) = stack.pop() {
+    while let Some((layer, mut crs, inherited_bbox)) = stack.pop() {
         if service.layers.len() >= MAX_LAYERS {
             break;
         }
-        let mut crs = inherited.clone();
         crs.extend(layer.children().filter(|c| c.is_element() && matches!(local(c), "CRS" | "SRS")).map(|c| text_of(&c)));
-        for sub in children(&layer, "Layer") {
-            stack.push((sub, crs.clone()));
-        }
-        let Some(name) = child_text(&layer, "Name") else { continue };
-        if !crs.iter().any(|c| c.split_whitespace().any(is_web_mercator)) {
-            skipped += 1;
-            continue;
-        }
         let bbox = child(&layer, "EX_GeographicBoundingBox")
             .and_then(|b| {
                 let f = |k: &str| child_text(&b, k).and_then(|t| t.parse::<f64>().ok());
@@ -428,7 +419,16 @@ fn wms(url: &str, root: &Node) -> Service {
                 let b = child(&layer, "LatLonBoundingBox")?;
                 let f = |k: &str| b.attribute(k).and_then(|t| t.parse::<f64>().ok());
                 lonlat_box(f("minx")?, f("miny")?, f("maxx")?, f("maxy")?)
-            });
+            })
+            .or(inherited_bbox);
+        for sub in children(&layer, "Layer") {
+            stack.push((sub, crs.clone(), bbox));
+        }
+        let Some(name) = child_text(&layer, "Name") else { continue };
+        if !crs.iter().any(|c| c.split_whitespace().any(is_web_mercator)) {
+            skipped += 1;
+            continue;
+        }
         let crs_key = if v13 { "CRS" } else { "SRS" };
         let version = if v13 { "1.3.0" } else { "1.1.1" };
         let template = with_query(
@@ -2126,6 +2126,110 @@ mod tests {
         let water = s.layers.iter().find(|l| l.name == "water bodies").unwrap();
         assert!(matches!(&water.offer, Offer::Tiles { template } if template.contains("LAYERS=water%20bodies")));
         assert!(s.notes.iter().any(|n| n.contains("1 layers")));
+    }
+
+    #[test]
+    fn wms_13_geographic_bounds_inherit_and_override() {
+        let xml = r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms"><Capability>
+<Layer><CRS>EPSG:3857</CRS>
+  <EX_GeographicBoundingBox><westBoundLongitude>-120</westBoundLongitude><southBoundLatitude>-40</southBoundLatitude><eastBoundLongitude>150</eastBoundLongitude><northBoundLatitude>70</northBoundLatitude></EX_GeographicBoundingBox>
+  <Layer><Layer><Name>inherited</Name></Layer></Layer>
+  <Layer>
+    <EX_GeographicBoundingBox><westBoundLongitude>-20</westBoundLongitude><southBoundLatitude>10</southBoundLatitude><eastBoundLongitude>30</eastBoundLongitude><northBoundLatitude>50</northBoundLatitude></EX_GeographicBoundingBox>
+    <Layer><Name>overridden</Name></Layer>
+    <Layer>
+      <EX_GeographicBoundingBox><westBoundLongitude>0</westBoundLongitude><southBoundLatitude>10</southBoundLatitude><eastBoundLongitude>20</eastBoundLongitude><northBoundLatitude>100</northBoundLatitude></EX_GeographicBoundingBox>
+      <Layer><Name>invalid_keeps_nearest</Name></Layer>
+    </Layer>
+    <Layer><Name>direct</Name>
+      <EX_GeographicBoundingBox><westBoundLongitude>1</westBoundLongitude><southBoundLatitude>2</southBoundLatitude><eastBoundLongitude>3</eastBoundLongitude><northBoundLatitude>4</northBoundLatitude></EX_GeographicBoundingBox>
+      <Layer><Name>direct_descendant</Name></Layer>
+    </Layer>
+  </Layer>
+  <Layer><Name>sibling</Name></Layer>
+</Layer></Capability></WMS_Capabilities>"#;
+        let s = parse("https://maps.example.org/wms", xml.as_bytes()).unwrap();
+        assert_eq!(s.layers.len(), 6);
+        for (name, bbox) in [
+            ("inherited", [-120.0, -40.0, 150.0, 70.0]),
+            ("overridden", [-20.0, 10.0, 30.0, 50.0]),
+            ("invalid_keeps_nearest", [-20.0, 10.0, 30.0, 50.0]),
+            ("direct", [1.0, 2.0, 3.0, 4.0]),
+            ("direct_descendant", [1.0, 2.0, 3.0, 4.0]),
+            ("sibling", [-120.0, -40.0, 150.0, 70.0]),
+        ] {
+            assert_eq!(s.layers.iter().find(|l| l.name == name).unwrap().bbox, Some(bbox), "{name}");
+        }
+    }
+
+    #[test]
+    fn wms_11_geographic_bounds_inherit_and_override() {
+        let xml = r#"<WMT_MS_Capabilities version="1.1.1"><Capability>
+<Layer><SRS>EPSG:3857</SRS>
+  <LatLonBoundingBox minx="-120" miny="-40" maxx="150" maxy="70"/>
+  <Layer><Layer><Name>inherited</Name></Layer></Layer>
+  <Layer>
+    <LatLonBoundingBox minx="-20" miny="10" maxx="30" maxy="50"/>
+    <Layer><Name>overridden</Name></Layer>
+    <Layer>
+      <LatLonBoundingBox minx="0" miny="10" maxx="20" maxy="100"/>
+      <Layer><Name>invalid_keeps_nearest</Name></Layer>
+    </Layer>
+    <Layer><Name>direct</Name>
+      <LatLonBoundingBox minx="1" miny="2" maxx="3" maxy="4"/>
+      <Layer><Name>direct_descendant</Name></Layer>
+    </Layer>
+  </Layer>
+  <Layer><Name>sibling</Name></Layer>
+</Layer></Capability></WMT_MS_Capabilities>"#;
+        let s = parse("https://maps.example.org/wms", xml.as_bytes()).unwrap();
+        assert_eq!(s.layers.len(), 6);
+        for (name, bbox) in [
+            ("inherited", [-120.0, -40.0, 150.0, 70.0]),
+            ("overridden", [-20.0, 10.0, 30.0, 50.0]),
+            ("invalid_keeps_nearest", [-20.0, 10.0, 30.0, 50.0]),
+            ("direct", [1.0, 2.0, 3.0, 4.0]),
+            ("direct_descendant", [1.0, 2.0, 3.0, 4.0]),
+            ("sibling", [-120.0, -40.0, 150.0, 70.0]),
+        ] {
+            assert_eq!(s.layers.iter().find(|l| l.name == name).unwrap().bbox, Some(bbox), "{name}");
+        }
+    }
+
+    #[test]
+    fn wms_geographic_bounds_reject_invalid_without_ancestor() {
+        for (root, version, crs) in [("WMS_Capabilities", "1.3.0", "CRS"), ("WMT_MS_Capabilities", "1.1.1", "SRS")] {
+            for (w, s, e, n) in [
+                ("NaN", "0", "20", "30"),
+                ("0", "0", "inf", "30"),
+                ("20", "0", "10", "30"),
+                ("0", "30", "20", "10"),
+                ("0", "0", "0", "30"),
+                ("-181", "0", "20", "30"),
+                ("0", "-91", "20", "30"),
+                ("0", "0", "181", "30"),
+                ("0", "0", "20", "91"),
+                ("invalid", "0", "20", "30"),
+                ("0", "0", "20", ""),
+                ("", "", "", ""),
+            ] {
+                let bbox = if version == "1.3.0" {
+                    format!(
+                        "<EX_GeographicBoundingBox><westBoundLongitude>{w}</westBoundLongitude><southBoundLatitude>{s}</southBoundLatitude><eastBoundLongitude>{e}</eastBoundLongitude><northBoundLatitude>{n}</northBoundLatitude></EX_GeographicBoundingBox>"
+                    )
+                } else {
+                    format!(r#"<LatLonBoundingBox minx="{w}" miny="{s}" maxx="{e}" maxy="{n}"/>"#)
+                };
+                for bbox in ["", bbox.as_str()] {
+                    let xml = format!(
+                        r#"<{root} version="{version}"><Capability><Layer><Name>parent</Name><{crs}>EPSG:3857</{crs}>{bbox}<Layer><Name>child</Name></Layer></Layer></Capability></{root}>"#
+                    );
+                    let service = parse("https://maps.example.org/wms", xml.as_bytes()).unwrap();
+                    assert_eq!(service.layers.len(), 2);
+                    assert!(service.layers.iter().all(|l| l.bbox.is_none()), "{version}: {bbox}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -86,9 +86,9 @@ pub fn world_project() -> Project {
             });
         }
         l.labels.enabled = true;
-        l.labels.field = "name".into();
-        l.labels.size = 8.5;
-        l.labels.color = Rgba::rgb(0x33, 0x3A, 0x44);
+        l.labels.default.field = "name".into();
+        l.labels.default.size = 8.5;
+        l.labels.default.color = Rgba::rgb(0x33, 0x3A, 0x44);
     }
     if let Some(l) = lakes.and_then(|id| map.layer_mut(id)) {
         l.renderer = Renderer::Single(Symbol {
@@ -123,10 +123,10 @@ pub fn world_project() -> Project {
                 *max_size = 18.0;
             }
         }
-        l.labels.field = "name".into();
-        l.labels.size = 8.0;
-        l.labels.bold = true;
-        l.labels.color = Rgba::rgb(0x5A, 0x2A, 0x14);
+        l.labels.default.field = "name".into();
+        l.labels.default.size = 8.0;
+        l.labels.default.bold = true;
+        l.labels.default.color = Rgba::rgb(0x5A, 0x2A, 0x14);
         l.max_scale = None;
     }
     map.bookmarks = vec![

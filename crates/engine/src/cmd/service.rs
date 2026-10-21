@@ -342,18 +342,21 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
                 Some(t) => template.replace("{Time}", t),
                 None => template.to_string(),
             };
-            let r = super::tiles::add(s, &json!({"url": template, "kind": "raster", "name": name, "overlay": true}))?;
+            let r = super::tiles::add(s, &json!({"url": template, "kind": "raster", "name": name, "overlay": true, "bounds": layer.bbox}))?;
             zoom(s);
             Ok(r)
         }
         Offer::VectorTiles { template, layers } => {
             let template = advertised.as_deref().unwrap_or(template);
-            let r = super::tiles::add(s, &json!({"url": template, "kind": "vector", "name": name, "layers": layers, "overlay": true}))?;
+            let r = super::tiles::add(
+                s,
+                &json!({"url": template, "kind": "vector", "name": name, "layers": layers, "overlay": true, "bounds": layer.bbox}),
+            )?;
             zoom(s);
             Ok(r)
         }
         Offer::Style { url: style } => {
-            let r = super::tiles::add(s, &json!({"url": style, "kind": "style", "name": name}))?;
+            let r = super::tiles::add(s, &json!({"url": style, "kind": "style", "name": name, "bounds": layer.bbox}))?;
             zoom(s);
             Ok(r)
         }

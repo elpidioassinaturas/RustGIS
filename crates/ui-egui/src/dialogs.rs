@@ -57,6 +57,11 @@ impl Dialogs {
             "coordinateSystem" => "coordinateSystem",
             "camera" => "camera",
             "addTiles" => "addTiles",
+            "basemap" => "basemap",
+            "body" => "body",
+            "addSample" => "addSample",
+            "layerTemplate" => "layerTemplate",
+            "addPolyline" => "addPolyline",
             "addCsv" => "addCsv",
             "findPlace" => "findPlace",
             "geocode" => "geocode",
@@ -131,6 +136,11 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "coordinateSystem" => "Coordinate System",
         "camera" => "Camera",
         "addTiles" => "Add Tile Layer",
+        "basemap" => "Basemap",
+        "body" => "Celestial Body",
+        "addSample" => "Add Sample Data",
+        "layerTemplate" => "Layer Template",
+        "addPolyline" => "Add Encoded Polyline",
         "addCsv" => "Add Delimited Text",
         "findPlace" => "Find Place",
         "geocode" => "Geocode Addresses",
@@ -188,6 +198,38 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                 });
             }
             "coordinateSystem" => close = coordinate_system(app, ui, &t),
+            "basemap" | "body" | "addSample" | "layerTemplate" => {
+                // Menu items close their nearest closable parent. Keep that local to the
+                // gallery so picking an item doesn't persistently collapse the Window's body.
+                let gallery = ui.scope_builder(egui::UiBuilder::new().closable(), |ui| {
+                    if which == "basemap" {
+                        egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 180.0).max(120.0)).show(ui, |ui| {
+                            crate::ribbon::basemap_gallery(ui, app);
+                        });
+                    } else if which == "body" {
+                        crate::ribbon::body_menu(ui, app);
+                    } else if which == "addSample" {
+                        crate::ribbon::sample_data_gallery(ui, app);
+                    } else {
+                        crate::ribbon::layer_templates_gallery(ui, app);
+                    }
+                });
+                close = gallery.response.should_close();
+            }
+            "addPolyline" => {
+                ui.label(tl!("Encoded polyline"));
+                ui.add(text_box(&mut app.dialogs.text).desired_width(f32::INFINITY).desired_rows(3));
+                ui.label(tl!("Name"));
+                ui.text_edit_singleline(&mut app.dialogs.a);
+                ui.checkbox(&mut app.dialogs.flag, tl!("Precision 6 (OSRM, Valhalla)"));
+                close = buttons(app, ui, "Add", |app| {
+                    let mut p = json!({"polyline": app.dialogs.text.trim(), "precision": if app.dialogs.flag { 6 } else { 5 }});
+                    if !app.dialogs.a.trim().is_empty() {
+                        p["name"] = json!(app.dialogs.a.trim());
+                    }
+                    app.run("layer.addEncodedPolyline", p).map(|_| ())
+                });
+            }
             "addTiles" => close = add_tiles(app, ui),
             "addCsv" => close = add_csv(app, ui),
             "findPlace" => close = crate::geocodeui::find_place(app, ui),
@@ -318,7 +360,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
             ui.label(egui::RichText::new(i).color(t.green));
         }
     });
-    if !open || close {
+    if (!open || close) && app.dialogs.open == Some(which) {
         app.dialogs.open = None;
     }
 }
