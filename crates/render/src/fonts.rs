@@ -188,11 +188,17 @@ fn variable_noto_serif(roots: &[&str]) -> Option<SerifFonts> {
     let named = |files: &[std::path::PathBuf], stem: &str| {
         files.iter().find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(stem) && n.ends_with(".ttf"))).cloned()
     };
+    // Folders and files in name order, so the same one is picked on every machine whatever order
+    // the system lists them in; loose files don't count against the folders taken.
+    let listed = |dir: &std::path::Path| {
+        let mut paths: Vec<std::path::PathBuf> =
+            std::fs::read_dir(dir).map(|e| e.flatten().take(10_000).map(|e| e.path()).collect()).unwrap_or_default();
+        paths.sort();
+        paths
+    };
     for root in roots {
-        let Ok(dirs) = std::fs::read_dir(root) else { continue };
-        for dir in dirs.flatten().take(1000).map(|d| d.path()).filter(|p| p.is_dir()) {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-            let files: Vec<std::path::PathBuf> = entries.flatten().take(10_000).map(|e| e.path()).collect();
+        for dir in listed(std::path::Path::new(root)).into_iter().filter(|p| p.is_dir()).take(1000) {
+            let files = listed(&dir);
             let Some(r) = named(&files, "NotoSerif[") else { continue };
             let Some(regular) = r.to_str().and_then(read) else { continue };
             let italic = named(&files, "NotoSerif-Italic[").and_then(|p| p.to_str().and_then(read));

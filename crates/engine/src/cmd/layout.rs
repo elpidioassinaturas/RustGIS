@@ -1243,7 +1243,8 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         }
         _ => {}
     }
-    // A serif asked for where none is installed: said, as `layout.addElement` says it.
+    // A serif asked for where none is installed: said, as `layout.addElement` says it, only when
+    // this call sets the family (another change to a serif text doesn't repeat it).
     if ps(p, "font").is_some()
         && matches!(new_text_style, Some((_, FontFamily::Serif)))
         && let Some(w) = no_serif()
