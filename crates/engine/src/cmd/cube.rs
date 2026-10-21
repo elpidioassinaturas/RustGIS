@@ -302,8 +302,19 @@ fn band_index(p: &Value) -> Result<usize, String> {
     }
 }
 
-/// A name with its date taken out (`NDVI_2024-06-01` → `NDVI`), for the outputs' names.
+/// A name with its date taken out (`NDVI_2024-06-01` → `NDVI`, `MOD13Q1.A2024153` → `MOD13Q1`),
+/// for the outputs' names: cut where the date [`date_in_text`] finds begins, so a product name with
+/// digits of its own keeps them.
 fn common_label(name: &str) -> String {
+    // The date's start: the last place from which the same date is still found (past it, the date
+    // is gone or another). Names are short; a long one takes the simpler cut below.
+    if let Some(date) = date_in_text(name).filter(|_| name.len() <= 512) {
+        let start = name.char_indices().map(|(i, _)| i).take_while(|i| date_in_text(&name[*i..]) == Some(date)).last().unwrap_or(0);
+        let cut = name[..start].trim_end_matches(['_', '-', ' ', '.']);
+        if !cut.is_empty() {
+            return cut.to_string();
+        }
+    }
     let lead: String = name.chars().take_while(|c| !c.is_ascii_digit()).collect();
     // MODIS dates its files `A2024153` (year and day of the year): that A goes with the date; any
     // other final A is the name's own (`NDVI_BETA2020`).
@@ -670,7 +681,8 @@ mod tests {
     #[test]
     fn labels_lose_their_date() {
         assert_eq!(super::common_label("NDVI_2024-06-01"), "NDVI");
-        assert_eq!(super::common_label("MOD13Q1.A2024153"), "MOD");
+        assert_eq!(super::common_label("MOD13Q1.A2024153"), "MOD13Q1");
+        assert_eq!(super::common_label("sentinel2_ndvi_2024-06-01"), "sentinel2_ndvi");
         assert_eq!(super::common_label("ndvi.A2024153.h12v10"), "ndvi");
         assert_eq!(super::common_label("NDVI_BETA2020"), "NDVI_BETA");
         assert_eq!(super::common_label("ETA_2020"), "ETA");
