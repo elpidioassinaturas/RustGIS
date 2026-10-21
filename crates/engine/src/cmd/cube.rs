@@ -538,7 +538,7 @@ impl TrendRun {
             .into_iter()
             .enumerate()
             .map(|(k, name)| {
-                let band: Vec<f32> = out.chunks(OUTPUTS).map(|o| o[k]).collect();
+                let band: Vec<f32> = out.chunks(OUTPUTS).map(|o| o.get(k).copied().unwrap_or(f32::NAN)).collect();
                 Raster::new(name, grid.width, grid.height, vec![band], grid.transform, grid.crs, None, raster::ColorHint::Gray, "Float32")
                     .map_err(|e| e.to_string())
             })
