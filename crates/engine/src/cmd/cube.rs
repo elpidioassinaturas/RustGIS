@@ -32,7 +32,9 @@ pub fn commands() -> Vec<C> {
 /// at most 16 MB at [`MAX_DATES`], so up to 256 MB more at the peak), freed cell by cell.
 pub const MAX_VALUES: u64 = if cfg!(target_arch = "wasm32") { 16_000_000 } else { 64_000_000 };
 /// The most pairs of dates a trend compares in all (cells × dates² ⁄ 2), which bounds the time
-/// Sen's slope takes: far fewer in the browser, which works them out on one thread.
+/// Sen's slope takes: far fewer in the browser, which works them out on one thread. At the cap a
+/// run can take minutes on the desktop: the app runs it on threads with progress and Cancel, and
+/// `cube.trend` called directly (a script, the CLI) waits for it.
 pub const MAX_PAIRS: u64 = if cfg!(target_arch = "wasm32") { 50_000_000 } else { 20_000_000_000 };
 /// The most dates a cube is read at.
 pub const MAX_DATES: usize = 2_000;
