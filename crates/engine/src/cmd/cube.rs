@@ -27,12 +27,13 @@ pub fn commands() -> Vec<C> {
 }
 
 /// The most cell values a cube is read into at once (cells × dates): 64 million, 256 MB, on the
-/// desktop; 16 million, 64 MB, in the browser's smaller memory. A run also takes, on each thread,
-/// a cell's Sen slopes at a time (dates² ⁄ 2: at most 16 MB at [`MAX_DATES`]), freed cell by cell.
+/// desktop; 16 million, 64 MB, in the browser's smaller memory. A run also takes, on each of its
+/// threads (up to 16 on the desktop, one in the browser), a cell's Sen slopes at a time (dates² ⁄ 2:
+/// at most 16 MB at [`MAX_DATES`], so up to 256 MB more at the peak), freed cell by cell.
 pub const MAX_VALUES: u64 = if cfg!(target_arch = "wasm32") { 16_000_000 } else { 64_000_000 };
 /// The most pairs of dates a trend compares in all (cells × dates² ⁄ 2), which bounds the time
 /// Sen's slope takes: far fewer in the browser, which works them out on one thread.
-pub const MAX_PAIRS: u64 = if cfg!(target_arch = "wasm32") { 200_000_000 } else { 20_000_000_000 };
+pub const MAX_PAIRS: u64 = if cfg!(target_arch = "wasm32") { 50_000_000 } else { 20_000_000_000 };
 /// The most dates a cube is read at.
 pub const MAX_DATES: usize = 2_000;
 
@@ -652,7 +653,6 @@ mod tests {
         assert_eq!(super::common_label("ETA_2020"), "ETA");
     }
 
-    /// Slices an ulp apart are one grid; half a pixel apart, another.
     /// Dates in names: a full date anywhere before a year alone; a year only standing apart.
     #[test]
     fn dates_in_names() {
@@ -664,6 +664,7 @@ mod tests {
         assert_eq!(super::date_in_text("MOD13Q1.A2024153"), day("2024-06-01"));
     }
 
+    /// Slices an ulp apart are one grid; half a pixel apart, another.
     #[test]
     fn grids_within_a_hair_are_one() {
         use rustgis_data::raster::GeoTransform;
