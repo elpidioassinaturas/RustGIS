@@ -519,7 +519,11 @@ fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
                     Ok(tif) => {
                         if app.session.download_landed(id, tif) {
                             let key = if root.starts_with("http://") || root.starts_with("https://") { "url" } else { "path" };
-                            let _ = run(app, "layer.addZarr", json!({key: root, "variable": variable, "ran": id, "name": name}));
+                            let _ = run(
+                                app,
+                                "layer.addZarr",
+                                json!({key: root, "variable": variable, "ran": id, "summary": true, "name": name}),
+                            );
                         }
                     }
                     Err(_) if cancelled => app.session.download_failed(id),
