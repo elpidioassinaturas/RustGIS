@@ -1117,7 +1117,7 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
         let m: Vec<String> = months.iter().map(u32::to_string).collect();
         label = format!("{label} (months {})", m.join(","));
     }
-    let name = ps(p, "name").map(str::to_string).unwrap_or(label);
+    let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map_or(label, |n| n.chars().take(200).collect());
     let zt = ZarrTime {
         store: src.root.clone(),
         variable: var.clone(),
