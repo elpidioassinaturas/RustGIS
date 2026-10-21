@@ -487,53 +487,54 @@ pub struct Reducing {
 /// The Time Series pane's Summarise over time section (#556): a statistic of the chosen Zarr
 /// layer's steps over a period (and months), computed on a thread with progress and Cancel, and
 /// added as a raster layer.
+/// A summary that has finished, added to the map (or its error kept for the pane): called
+/// every frame, whatever pane is in view, so a run lands though the Time Series pane closed or
+/// its layer went. `true` while one is still running.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn land_summary(app: &mut RustGisApp) -> bool {
+    use std::sync::atomic::Ordering;
+    let Some(r) = &app.ws.reducing else { return false };
+    let Some(res) = r.result.lock().ok().and_then(|mut g| g.take()) else { return true };
+    let (root, variable, name, id) = (r.run.root.clone(), r.run.variable.clone(), r.run.name.clone(), r.id);
+    // A run the user cancelled stops quietly: no error for it.
+    let cancelled = r.cancel.load(Ordering::Relaxed);
+    app.ws.reducing = None;
+    match res {
+        // Cancelled as it finished: nothing added either.
+        Ok(_) if cancelled => app.session.download_failed(id),
+        // Added to the project it was run in: one opened meanwhile doesn't get it.
+        Ok(tif) => {
+            if app.session.download_landed(id, tif) {
+                let key = if root.starts_with("http://") || root.starts_with("https://") { "url" } else { "path" };
+                let _ = run(app, "layer.addZarr", json!({key: root, "variable": variable, "ran": id, "summary": true, "name": name}));
+            }
+        }
+        Err(_) if cancelled => app.session.download_failed(id),
+        Err(e) => {
+            app.session.download_failed(id);
+            app.ws.message = Some((e, true));
+        }
+    }
+    false
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
     use std::sync::atomic::Ordering;
-    // A run under way: its progress, Cancel, and its result once it lands.
-    if let Some(r) = &app.ws.reducing {
-        let landed = r.result.lock().ok().and_then(|mut g| g.take());
-        match landed {
-            None => {
-                let (done, total) = (r.done.load(Ordering::Relaxed), r.run.total().max(1));
-                // The section's title stays over its progress.
-                ui.label(egui::RichText::new(tl!("Summarise over time")).strong());
-                ui.horizontal(|ui| {
-                    ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!("{done} / {total}")).desired_width(200.0));
-                    if ui.button(tl!("Cancel")).clicked() {
-                        r.cancel.store(true, Ordering::Relaxed);
-                    }
-                });
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
-                return;
+    // A run under way: its progress and Cancel (its result lands through `land_summary`).
+    if land_summary(app)
+        && let Some(r) = &app.ws.reducing
+    {
+        let (done, total) = (r.done.load(Ordering::Relaxed), r.run.total().max(1));
+        // The section's title stays over its progress.
+        ui.label(egui::RichText::new(tl!("Summarise over time")).strong());
+        ui.horizontal(|ui| {
+            ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!("{done} / {total}")).desired_width(200.0));
+            if ui.button(tl!("Cancel")).clicked() {
+                r.cancel.store(true, Ordering::Relaxed);
             }
-            Some(res) => {
-                let (root, variable, name, id) = (r.run.root.clone(), r.run.variable.clone(), r.run.name.clone(), r.id);
-                // A run the user cancelled stops quietly: no error for it.
-                let cancelled = r.cancel.load(Ordering::Relaxed);
-                app.ws.reducing = None;
-                match res {
-                    // Cancelled as it finished: nothing added either.
-                    Ok(_) if cancelled => app.session.download_failed(id),
-                    // Added to the project it was run in: one opened meanwhile doesn't get it.
-                    Ok(tif) => {
-                        if app.session.download_landed(id, tif) {
-                            let key = if root.starts_with("http://") || root.starts_with("https://") { "url" } else { "path" };
-                            let _ = run(
-                                app,
-                                "layer.addZarr",
-                                json!({key: root, "variable": variable, "ran": id, "summary": true, "name": name}),
-                            );
-                        }
-                    }
-                    Err(_) if cancelled => app.session.download_failed(id),
-                    Err(e) => {
-                        app.session.download_failed(id);
-                        app.ws.message = Some((e, true));
-                    }
-                }
-            }
-        }
+        });
+        return;
     }
     egui::CollapsingHeader::new(tl!("Summarise over time")).id_salt("series_reduce").show(ui, |ui| {
         if app.ws.reduce_stat.is_empty() {
