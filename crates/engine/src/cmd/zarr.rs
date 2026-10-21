@@ -24,7 +24,7 @@ pub fn commands() -> Vec<C> {
         C::new("zarr.series", "Time Series at a Point", "View › Time Series", series).view().params(
             r#"{"lon", "lat", "layer"? (a Zarr layer: its store, variable and steps; default the active layer) | "path": folder | "url": "https://…", "variable"?, "index"?: {"level": 0} (the other dimensions' steps), "start"?, "end"?: dates (default: the layer's period, else the whole axis), "crs"?: for a projected store that doesn't say} → dates, values (null for no data) and labels along the variable's time dimension at the cell holding the point (desktop)"#,
         ),
-        C::new("zarr.reduce", "Summarise Zarr Over Time", "Analyze › Raster", reduce).params(
+        C::new("zarr.reduce", "Summarise Zarr Over Time", "View › Time Series", reduce).params(
             r#"{"layer"? (a Zarr layer: its store, variable and steps; default the active layer) | "path": folder | "url": "https://…", "variable"?, "index"?, "stat": "mean"|"min"|"max"|"sum"|"std" (the population standard deviation, n)|"count"|"countAbove", "above"?: number (countAbove's threshold), "start"?, "end"?: dates (default: the layer's period, else the whole axis), "months"?: [1–12] (a season across years: [12, 1, 2]), "minValid"?: 0–1 (a cell with a smaller share of values is left empty; default 0), "name"?: text, "crs"?} → a raster layer of the statistic (desktop)"#,
         ),
         C::new("layer.addZarr", "Add Zarr Variable", "Home › Add › Add Data", add).params(
@@ -420,21 +420,10 @@ fn read_waiting(zt: &ZarrTime, i: usize) -> Result<std::sync::Arc<raster::Raster
 /// slices or read now.
 #[cfg(not(target_arch = "wasm32"))]
 fn read_step(zt: &ZarrTime, i: usize, key: String) -> Result<std::sync::Arc<raster::Raster>, String> {
-    let sel = zt.selection(i);
-    if let Some((_, r)) = slices().lock().ok().and_then(|c| c.iter().find(|(k, _)| *k == key).cloned()) {
+    if let Some(r) = kept_slice(&key) {
         return Ok(r);
     }
-    let crs = zt.crs.as_deref().map(str::trim).filter(|c| !c.is_empty());
-    let r = if is_web(&zt.store) {
-        let st = cached_store(&zt.store)?;
-        let plan = zarr::plan(&st, &zarr::Selection::parse(&sel)).map_err(|e| e.to_string())?;
-        let (chunks, _) = fetch(&zt.store, &plan.keys)?;
-        let crs = crs.map(Crs::parse).transpose()?;
-        zarr::assemble(&st, &plan, &chunks, &sel, crs).map_err(|e| e.to_string())?
-    } else {
-        zarr::read_dir(Path::new(&zt.store), &sel, crs).map_err(|e| e.to_string())?
-    };
-    let r = std::sync::Arc::new(r);
+    let r = std::sync::Arc::new(read_slice(zt, i)?);
     if let Ok(mut c) = slices().lock() {
         c.retain(|(k, _)| *k != key);
         c.push((key, r.clone()));
@@ -442,6 +431,28 @@ fn read_step(zt: &ZarrTime, i: usize, key: String) -> Result<std::sync::Arc<rast
         c.drain(..excess);
     }
     Ok(r)
+}
+
+/// A slice kept by [`read_step`], by its key.
+#[cfg(not(target_arch = "wasm32"))]
+fn kept_slice(key: &str) -> Option<std::sync::Arc<raster::Raster>> {
+    slices().lock().ok().and_then(|c| c.iter().find(|(k, _)| k == key).map(|(_, r)| r.clone()))
+}
+
+/// Step `i` of a following layer's variable, read from its store (no slice kept).
+#[cfg(not(target_arch = "wasm32"))]
+fn read_slice(zt: &ZarrTime, i: usize) -> Result<raster::Raster, String> {
+    let sel = zt.selection(i);
+    let crs = zt.crs.as_deref().map(str::trim).filter(|c| !c.is_empty());
+    if is_web(&zt.store) {
+        let st = cached_store(&zt.store)?;
+        let plan = zarr::plan(&st, &zarr::Selection::parse(&sel)).map_err(|e| e.to_string())?;
+        let (chunks, _) = fetch(&zt.store, &plan.keys)?;
+        let crs = crs.map(Crs::parse).transpose()?;
+        zarr::assemble(&st, &plan, &chunks, &sel, crs).map_err(|e| e.to_string())
+    } else {
+        zarr::read_dir(Path::new(&zt.store), &sel, crs).map_err(|e| e.to_string())
+    }
 }
 
 /// Layers that follow the time slider read the step it shows, in every map: the last of their
@@ -897,7 +908,12 @@ impl ReduceRun {
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
             }
-            let r = read_step(&self.zt, i, slice_key(&self.zt, i))?;
+            // A slice already kept is used; the others are read without being kept, so a long
+            // summary doesn't push out the slices a layer following the slider holds.
+            let r = match kept_slice(&slice_key(&self.zt, i)) {
+                Some(r) => r,
+                None => std::sync::Arc::new(read_slice(&self.zt, i)?),
+            };
             let vals = &r.bands.first().ok_or("the slice has no band")?.data;
             match &first {
                 None => {
