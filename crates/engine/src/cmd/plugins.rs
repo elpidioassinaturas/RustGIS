@@ -298,6 +298,7 @@ const DATABASES: &[&str] = &[
     "layer.addZarr",
     "zarr.series",
     "zarr.reduce",
+    "cube.trend",
 ];
 
 /// What a command reaches beyond the project when run with some parameters.

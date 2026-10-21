@@ -951,12 +951,15 @@ fn trend_running(app: &mut RustGisApp, ui: &mut Ui) -> bool {
         }
         Some(res) => {
             let mut p = r.params.clone();
+            // A run the user cancelled stops quietly: no error for it.
+            let cancelled = r.cancel.load(Ordering::Relaxed);
             app.workflow.trend.running = None;
             match res {
                 Ok((rasters, dates)) => {
                     p["ran"] = json!(rustgis_engine::cmd::cube::land(rasters, dates));
                     run(app, "cube.trend", p);
                 }
+                Err(_) if cancelled => {}
                 Err(e) => app.workflow.error = Some(e),
             }
             false
