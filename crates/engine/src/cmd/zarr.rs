@@ -886,15 +886,9 @@ impl ReduceRun {
     pub fn run(&self, cancel: &std::sync::atomic::AtomicBool, done: &std::sync::atomic::AtomicUsize) -> Result<raster::Raster, String> {
         use std::sync::atomic::Ordering;
         let mut first: Option<std::sync::Arc<raster::Raster>> = None;
-        let (mut n, mut mean, mut m2, mut lo, mut hi, mut sum, mut above) = (
-            Vec::<u32>::new(),
-            Vec::<f64>::new(),
-            Vec::<f64>::new(),
-            Vec::<f64>::new(),
-            Vec::<f64>::new(),
-            Vec::<f64>::new(),
-            Vec::<u32>::new(),
-        );
+        // Only the totals the statistic needs: each cell's count, one running value (the mean,
+        // the least, the most, the sum or the count above), and for std the squared deviations.
+        let (mut n, mut acc, mut m2) = (Vec::<u32>::new(), Vec::<f64>::new(), Vec::<f64>::new());
         for &i in &self.steps {
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
@@ -904,12 +898,20 @@ impl ReduceRun {
             match &first {
                 None => {
                     let len = vals.len();
-                    // The running totals take about 48 bytes a cell: bounded before they're made.
+                    // The running totals take 12 to 20 bytes a cell: bounded before they're made.
                     if len > MAX_REDUCE_CELLS {
                         return Err(format!("{len} cells, more than a summary takes ({MAX_REDUCE_CELLS})"));
                     }
-                    (n, mean, m2, sum, above) = (vec![0; len], vec![0.0; len], vec![0.0; len], vec![0.0; len], vec![0; len]);
-                    (lo, hi) = (vec![f64::INFINITY; len], vec![f64::NEG_INFINITY; len]);
+                    n = vec![0; len];
+                    acc = match self.stat {
+                        Stat::Count => Vec::new(),
+                        Stat::Min => vec![f64::INFINITY; len],
+                        Stat::Max => vec![f64::NEG_INFINITY; len],
+                        _ => vec![0.0; len],
+                    };
+                    if matches!(self.stat, Stat::Std) {
+                        m2 = vec![0.0; len];
+                    }
                     first = Some(r.clone());
                 }
                 Some(f) if (f.width, f.height) != (r.width, r.height) || vals.len() != n.len() => {
@@ -923,17 +925,23 @@ impl ReduceRun {
                     continue;
                 }
                 let v = f64::from(*v);
-                n[c] += 1;
-                let d = v - mean[c];
-                mean[c] += d / f64::from(n[c]);
-                m2[c] += d * (v - mean[c]);
-                lo[c] = lo[c].min(v);
-                hi[c] = hi[c].max(v);
-                sum[c] += v;
-                if let Stat::CountAbove(t) = self.stat
-                    && v > t
-                {
-                    above[c] += 1;
+                let Some(k) = n.get_mut(c) else { continue };
+                *k += 1;
+                let k = f64::from(*k);
+                let (Some(a), m) = (acc.get_mut(c), m2.get_mut(c)) else { continue };
+                match self.stat {
+                    Stat::Mean | Stat::Std => {
+                        let d = v - *a;
+                        *a += d / k;
+                        if let Some(m) = m {
+                            *m += d * (v - *a);
+                        }
+                    }
+                    Stat::Min => *a = a.min(v),
+                    Stat::Max => *a = a.max(v),
+                    Stat::Sum => *a += v,
+                    Stat::CountAbove(t) if v > t => *a += 1.0,
+                    Stat::CountAbove(_) | Stat::Count => {}
                 }
             }
             done.fetch_add(1, Ordering::Relaxed);
@@ -941,20 +949,19 @@ impl ReduceRun {
         let first = first.ok_or("no step to read")?;
         // Too few values: empty, unless the statistic is a count.
         let need = (self.min_valid.clamp(0.0, 1.0) * self.steps.len() as f64).ceil().max(1.0) as u32;
-        let out: Vec<f32> = (0..n.len())
-            .map(|c| {
+        let out: Vec<f32> = n
+            .iter()
+            .enumerate()
+            .map(|(c, k)| {
                 let count = matches!(self.stat, Stat::Count | Stat::CountAbove(_));
-                if n[c] < need && !(count && self.min_valid == 0.0) {
+                if *k < need && !(count && self.min_valid == 0.0) {
                     return f32::NAN;
                 }
+                let a = acc.get(c).copied().unwrap_or(f64::NAN);
                 (match self.stat {
-                    Stat::Mean => mean[c],
-                    Stat::Min => lo[c],
-                    Stat::Max => hi[c],
-                    Stat::Sum => sum[c],
-                    Stat::Std => (m2[c] / f64::from(n[c].max(1))).sqrt(),
-                    Stat::Count => f64::from(n[c]),
-                    Stat::CountAbove(_) => f64::from(above[c]),
+                    Stat::Std => (m2.get(c).copied().unwrap_or(f64::NAN) / f64::from((*k).max(1))).sqrt(),
+                    Stat::Count => f64::from(*k),
+                    _ => a,
                 }) as f32
             })
             .collect();
@@ -1070,7 +1077,8 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
     Ok(ReduceRun { zt, steps, stat, min_valid, name, root: src.root, variable: var })
 }
 
-/// The most cells a summary keeps running totals for (about 48 bytes each): 32 million, 1.5 GB.
+/// The most cells a summary keeps running totals for (12 to 20 bytes each): 32 million, at most
+/// 640 MB.
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_REDUCE_CELLS: usize = 32_000_000;
 
