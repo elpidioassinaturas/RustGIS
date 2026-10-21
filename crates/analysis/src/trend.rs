@@ -90,10 +90,10 @@ pub const MIN_VALUES: usize = 4;
 pub const MAX_VALUES: usize = if cfg!(target_arch = "wasm32") { 2_000 } else { 4_000 };
 
 /// The trend of the values `y` at times `t` (the same length, in any order: they're taken in time
-/// order; missing values skipped), or `None`
-/// when fewer than [`MIN_VALUES`] or more than [`MAX_VALUES`] are left (or, for the seasonal
-/// test, no season has two). `alpha` is the test's level, between 0 and 1, which Hamed & Rao's
-/// correction also uses to choose its lags; `None` for another.
+/// order; missing values skipped). `alpha` is the test's level, between 0 and 1 (Hamed & Rao's
+/// correction also uses it to choose its lags). `None` when fewer than [`MIN_VALUES`] or more than
+/// [`MAX_VALUES`] are left, for an `alpha` outside 0 to 1, or, for the seasonal test, when no
+/// season has two values.
 pub fn trend(t: &[f64], y: &[f64], test: Test, alpha: f64) -> Option<Trend> {
     let mut kept: Vec<(f64, f64)> = t.iter().zip(y).filter(|(t, y)| t.is_finite() && y.is_finite()).map(|(t, y)| (*t, *y)).collect();
     // The test reads the values in time order (S, the autocorrelation).
