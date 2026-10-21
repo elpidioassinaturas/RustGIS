@@ -6999,6 +6999,15 @@ fn a_zarr_variable_summarised_over_time() {
     t.run("project.openText", &json!({"text": text})).unwrap();
     let again = t.map().layer_by_name("warmest").and_then(|l| l.raster.as_ref()).and_then(|r| r.data.clone()).unwrap();
     assert_eq!(again.bands[0].data[0], 208.0);
+    // A step never written (its chunk absent) is Zarr's fill value: no value that step, so the
+    // summary goes on with the others.
+    let (gap_dir, gap) = zarr_store_over_time("reduce-gap");
+    std::fs::remove_file(std::path::Path::new(&gap).join("t/1.0.0")).unwrap();
+    let r = s.run("zarr.reduce", &json!({"path": gap, "variable": "t", "stat": "count"})).unwrap();
+    assert_eq!(first(&s, &r), 2.0);
+    let r = s.run("zarr.reduce", &json!({"path": gap, "variable": "t", "stat": "mean"})).unwrap();
+    assert_eq!(first(&s, &r), 108.0);
+    let _ = std::fs::remove_dir_all(gap_dir);
     for bad in [
         json!({"path": path, "variable": "t"}),
         json!({"path": path, "variable": "t", "stat": "median"}),

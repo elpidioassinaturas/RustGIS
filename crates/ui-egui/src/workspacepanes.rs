@@ -476,6 +476,9 @@ pub fn profile(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Reducing {
     pub run: rustgis_engine::cmd::zarr::ReduceRun,
+    /// Its place among the project's downloads: a summary that lands after another project
+    /// opened is dropped.
+    pub id: u64,
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub done: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub result: std::sync::Arc<std::sync::Mutex<Option<Result<Vec<u8>, String>>>>,
@@ -505,21 +508,25 @@ fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
                 return;
             }
             Some(res) => {
-                let (root, variable, name) = (r.run.root.clone(), r.run.variable.clone(), r.run.name.clone());
+                let (root, variable, name, id) = (r.run.root.clone(), r.run.variable.clone(), r.run.name.clone(), r.id);
                 // A run the user cancelled stops quietly: no error for it.
                 let cancelled = r.cancel.load(Ordering::Relaxed);
                 app.ws.reducing = None;
                 match res {
                     // Cancelled as it finished: nothing added either.
-                    Ok(_) if cancelled => {}
+                    Ok(_) if cancelled => app.session.download_failed(id),
+                    // Added to the project it was run in: one opened meanwhile doesn't get it.
                     Ok(tif) => {
-                        let id = app.session.download_started();
-                        app.session.download_landed(id, tif);
-                        let key = if root.starts_with("http://") || root.starts_with("https://") { "url" } else { "path" };
-                        let _ = run(app, "layer.addZarr", json!({key: root, "variable": variable, "ran": id, "name": name}));
+                        if app.session.download_landed(id, tif) {
+                            let key = if root.starts_with("http://") || root.starts_with("https://") { "url" } else { "path" };
+                            let _ = run(app, "layer.addZarr", json!({key: root, "variable": variable, "ran": id, "name": name}));
+                        }
                     }
-                    Err(_) if cancelled => {}
-                    Err(e) => app.ws.message = Some((e, true)),
+                    Err(_) if cancelled => app.session.download_failed(id),
+                    Err(e) => {
+                        app.session.download_failed(id);
+                        app.ws.message = Some((e, true));
+                    }
                 }
             }
         }
@@ -573,7 +580,9 @@ fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
             }
             match rustgis_engine::cmd::zarr::reduce_start(&app.session, &p) {
                 Ok(job) => {
-                    let r = Reducing { run: job.clone(), cancel: Default::default(), done: Default::default(), result: Default::default() };
+                    let id = app.session.download_started();
+                    let r =
+                        Reducing { run: job.clone(), id, cancel: Default::default(), done: Default::default(), result: Default::default() };
                     let (cancel, done, result) = (r.cancel.clone(), r.done.clone(), r.result.clone());
                     // A panic on the thread (a hostile store) lands as an error, so the run always
                     // ends; a thread the system can't start is said.
@@ -590,6 +599,7 @@ fn summarise(app: &mut RustGisApp, ui: &mut Ui) {
                     match spawned {
                         Ok(_) => app.ws.reducing = Some(r),
                         Err(e) => {
+                            app.session.download_failed(id);
                             app.ws.message =
                                 Some((crate::i18n::fmt("The summary couldn't start: {error}", &[("error", &e.to_string())]), true))
                         }

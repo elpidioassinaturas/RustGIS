@@ -1458,7 +1458,9 @@ impl RustGisApp {
         let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates).copied() else { return };
         // Downloaded data is kept for this session only, and adding it uses it up: a task
         // couldn't add it again.
-        if id == "layer.addDownload" {
+        // A result handed over by the app (`ran`: a summary worked out on a thread) is used up
+        // the same way.
+        if id == "layer.addDownload" || (id == "layer.addZarr" && params.get("ran").is_some_and(|r| !r.is_null())) {
             let text = crate::i18n::fmt(
                 "{command} isn't recorded: the downloaded data is kept for this session only, so a task couldn't add it again.",
                 &[("command", tl_raw!(spec.label))],
