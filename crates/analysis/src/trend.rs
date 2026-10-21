@@ -158,17 +158,24 @@ pub fn sen_slope(t: &[f64], y: &[f64]) -> Option<f64> {
         return None;
     }
     let mut slopes = Vec::with_capacity(n * n.saturating_sub(1) / 2);
-    for i in 0..n {
-        for j in i + 1..n {
-            let dt = t[j] - t[i];
-            // A slope too steep to hold (huge values, times a hair apart) is left out.
-            let slope = (y[j] - y[i]) / dt;
+    push_slopes(&t[..n], &y[..n], &mut slopes);
+    median(&mut slopes)
+}
+
+/// The slopes between every two values at different times, added to `out`: the one rule for
+/// Sen's slope and the seasonal test's. A slope too steep to hold (huge values, times a hair
+/// apart) is left out. Its callers bound the values (at most [`MAX_VALUES`]), so `out` stays
+/// within `MAX_VALUES`² ⁄ 2.
+fn push_slopes(t: &[f64], y: &[f64], out: &mut Vec<f64>) {
+    for (i, (ti, yi)) in t.iter().zip(y).enumerate() {
+        for (tj, yj) in t.iter().zip(y).skip(i + 1) {
+            let dt = tj - ti;
+            let slope = (yj - yi) / dt;
             if dt != 0.0 && slope.is_finite() {
-                slopes.push(slope);
+                out.push(slope);
             }
         }
     }
-    median(&mut slopes)
 }
 
 /// Sen's intercept: the median value less the slope times the median time.
@@ -220,15 +227,7 @@ fn seasonal_by(t: &[f64], y: &[f64], season: &[usize]) -> Option<Trend> {
         s += score(ys);
         var_s += variance(ys);
         n += ys.len();
-        for i in 0..ts.len() {
-            for j in i + 1..ts.len() {
-                let dt = ts[j] - ts[i];
-                let slope = (ys[j] - ys[i]) / dt;
-                if dt != 0.0 && slope.is_finite() {
-                    slopes.push(slope);
-                }
-            }
-        }
+        push_slopes(ts, ys, &mut slopes);
     }
     if n < MIN_VALUES {
         return None;
