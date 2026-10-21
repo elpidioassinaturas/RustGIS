@@ -564,7 +564,8 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         };
         let (start, end) = (date("start")?, date("end")?);
         let inside = |d: &f64| start.is_none_or(|a| *d >= a) && end.is_none_or(|z| *d <= z);
-        let (first, picked): (usize, Vec<f64>) = if start.is_none() && end.is_none() && dates.len() > rustgis_map::raster::MAX_ZARR_STEPS {
+        let (cut, dates_len) = (start.is_none() && end.is_none() && dates.len() > rustgis_map::raster::MAX_ZARR_STEPS, dates.len());
+        let (first, picked): (usize, Vec<f64>) = if cut {
             // An axis longer than the slider takes, with no period given (the Zarr dialog gives
             // none): from the step picked on it, as many steps as the slider takes.
             let at = sel.index.iter().find(|(d, _)| *d == dim).map_or(0, |(_, i)| usize::try_from(*i).unwrap_or(usize::MAX));
@@ -627,8 +628,24 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         let name = ps(p, "name")
             .map(str::to_string)
             .unwrap_or_else(|| layer_name(&root, &zarr::Selection { variable: zt.variable.clone(), index: zt.index.clone() }, &[]));
+        // A long axis taken in part (no period given): said, with the period taken.
+        let part = cut.then(|| {
+            let day = |d: Option<&f64>| d.map_or_else(String::new, |d| rustgis_data::time::format(*d, "YYYY-MM-DD HH:mm"));
+            format!(
+                "{} has {dates_len} steps: the layer takes {} of them, {} to {}; give start and end for another period",
+                zt.variable,
+                zt.dates.len(),
+                day(zt.dates.first()),
+                day(zt.dates.last())
+            )
+        });
         layer.time_zarr = Some(zt);
-        super::raster::add_raster(s, &name, layer)
+        let mut out = super::raster::add_raster(s, &name, layer)?;
+        if let Some(w) = part {
+            s.notify(w.clone(), false);
+            out["warning"] = serde_json::json!(w);
+        }
+        Ok(out)
     }
 }
 
