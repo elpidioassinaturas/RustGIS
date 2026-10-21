@@ -619,7 +619,7 @@ pub fn time_series(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     // The points, in their lines' colours.
     for (i, s) in app.ws.series.iter().enumerate() {
-        let colour = colours[i % colours.len()];
+        let colour = colours.get(i % colours.len()).copied().unwrap_or(egui::Color32::GRAY);
         let text = format!(
             "● {:.4}°, {:.4}° · {}",
             s["lon"].as_f64().unwrap_or(0.0),
