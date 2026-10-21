@@ -89,7 +89,14 @@ impl TimeCube for ZarrCube {
         &self.0.zt.dates
     }
     fn slice(&self, i: usize) -> Result<(Arc<Raster>, usize), String> {
-        Ok((super::zarr::read_step(&self.0.zt, i, super::zarr::slice_key(&self.0.zt, i))?, 0))
+        // A slice already kept is used; the others are read without being kept, so a trend over
+        // many dates doesn't push out the slices a layer following the slider holds.
+        let zt = &self.0.zt;
+        let r = match super::zarr::kept_slice(&super::zarr::slice_key(zt, i)) {
+            Some(r) => r,
+            None => Arc::new(super::zarr::read_slice(zt, i)?),
+        };
+        Ok((r, 0))
     }
     fn label(&self) -> String {
         self.0.zt.variable.clone()
@@ -339,7 +346,7 @@ pub fn steps(dates: &[f64], period: (usize, usize), p: &Value) -> Result<Vec<usi
     let month = |d: f64| rustgis_data::time::format(d, "MM").parse::<u32>().unwrap_or(0);
     let out: Vec<usize> = (lo..hi)
         .filter(|i| {
-            let d = dates[*i];
+            let d = dates.get(*i).copied().unwrap_or(f64::NAN);
             start.is_none_or(|a| d >= a) && end.is_none_or(|z| d <= z) && (months.is_empty() || months.contains(&month(d)))
         })
         .collect();
@@ -414,7 +421,7 @@ impl TrendRun {
                 Some(g) if (g.width, g.height, g.crs) != (r.width, r.height, r.crs) || !same_grid(&g.transform, &r.transform) => {
                     return Err(format!(
                         "the slice at {} is {} × {} on another grid than the first ({} × {}): put them on one grid first (Raster Functions › Resample)",
-                        rustgis_data::time::format(self.cube.dates()[i], "YYYY-MM-DD"),
+                        rustgis_data::time::format(self.cube.dates().get(i).copied().unwrap_or(f64::NAN), "YYYY-MM-DD"),
                         r.width,
                         r.height,
                         g.width,
@@ -434,10 +441,11 @@ impl TrendRun {
         let grid = grid.ok_or("no date to read")?;
         // Times in the slope's unit.
         let year = 365.2425 * 86_400_000.0 * self.per;
-        let times: Vec<f64> = self.steps.iter().map(|i| self.cube.dates()[*i] / year).collect();
+        let date = |i: usize| self.cube.dates().get(i).copied().unwrap_or(f64::NAN);
+        let times: Vec<f64> = self.steps.iter().map(|i| date(*i) / year).collect();
         // The seasonal test's seasons, from each date's place in its calendar year.
         let seasons: Vec<usize> = match self.test {
-            Test::Seasonal(m) => self.steps.iter().map(|i| season_of(self.cube.dates()[*i], m)).collect(),
+            Test::Seasonal(m) => self.steps.iter().map(|i| season_of(date(*i), m)).collect(),
             _ => Vec::new(),
         };
         let need = self.min_valid.unwrap_or((n / 2).max(trend::MIN_VALUES)).max(trend::MIN_VALUES);
@@ -551,7 +559,7 @@ pub fn trend_start(s: &Session, p: &Value) -> Result<TrendRun, String> {
     if let Some(m) = min_valid.filter(|m| *m > steps.len()) {
         return Err(format!("minValid is {m}, more than the {} dates", steps.len()));
     }
-    let day = |i: usize| rustgis_data::time::format(cube.dates()[i], "YYYY-MM-DD");
+    let day = |i: usize| rustgis_data::time::format(cube.dates().get(i).copied().unwrap_or(f64::NAN), "YYYY-MM-DD");
     let (a, z) = (steps.first().copied().unwrap_or(0), steps.last().copied().unwrap_or(0));
     let label = format!("{} {}–{}", cube.label(), day(a), day(z));
     let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map_or(label, |n| n.chars().take(200).collect());

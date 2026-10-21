@@ -435,13 +435,13 @@ pub(crate) fn read_step(zt: &ZarrTime, i: usize, key: String) -> Result<std::syn
 
 /// A slice kept by [`read_step`], by its key.
 #[cfg(not(target_arch = "wasm32"))]
-fn kept_slice(key: &str) -> Option<std::sync::Arc<raster::Raster>> {
+pub(crate) fn kept_slice(key: &str) -> Option<std::sync::Arc<raster::Raster>> {
     slices().lock().ok().and_then(|c| c.iter().find(|(k, _)| k == key).map(|(_, r)| r.clone()))
 }
 
 /// Step `i` of a following layer's variable, read from its store (no slice kept).
 #[cfg(not(target_arch = "wasm32"))]
-fn read_slice(zt: &ZarrTime, i: usize) -> Result<raster::Raster, String> {
+pub(crate) fn read_slice(zt: &ZarrTime, i: usize) -> Result<raster::Raster, String> {
     let sel = zt.selection(i);
     let crs = zt.crs.as_deref().map(str::trim).filter(|c| !c.is_empty());
     if is_web(&zt.store) {
