@@ -952,8 +952,12 @@ pub fn land_trend(app: &mut RustGisApp) -> bool {
     let current = app.session.download_done(r.id);
     app.workflow.trend.running = None;
     match res {
-        // Cancelled as it finished, or another project open: nothing added.
-        Ok(_) if cancelled || !current => {}
+        // Cancelled as it finished: nothing added.
+        Ok(_) if cancelled => {}
+        // Another project opened meanwhile: nothing added, and said.
+        Ok(_) if !current => {
+            app.workflow.error = Some(tl!("The trend finished after another project was opened, so it wasn't added").to_string());
+        }
         Ok((rasters, dates)) => {
             p["ran"] = json!(rustgis_engine::cmd::cube::land(rasters, dates));
             run(app, "cube.trend", p);
