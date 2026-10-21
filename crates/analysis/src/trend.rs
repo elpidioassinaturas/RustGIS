@@ -227,7 +227,7 @@ fn seasonal_by(t: &[f64], y: &[f64], season: &[usize]) -> Option<Trend> {
             }
         }
     }
-    if n == 0 {
+    if n < MIN_VALUES {
         return None;
     }
     let slope = median(&mut slopes)?;
@@ -536,6 +536,9 @@ mod tests {
             trend_seasonal(&[2000.0, 2000.5, 2001.0, 2001.5], &[1.0, 2.0, 3.0, 4.0], &[0, 1, 0], 0.05).is_none(),
             "seasons for every value"
         );
+        // Seasons of one value give no pair: a series with too few in seasons of two or more has no
+        // trend, whatever its length.
+        assert!(trend_seasonal(&[2000.0, 2000.1, 2000.2, 2000.3, 2001.0], &[1.0, 2.0, 3.0, 4.0, 5.0], &[0, 1, 2, 3, 0], 0.05).is_none());
         // Values in any order are taken in time order: the same trend as sorted.
         let (t, y) = ([2000.0, 2001.0, 2002.0, 2003.0, 2004.0, 2005.0], [1.0, 3.0, 2.0, 5.0, 4.0, 6.0]);
         let sorted = trend(&t, &y, Test::Original, 0.05).unwrap();

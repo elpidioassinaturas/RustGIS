@@ -432,8 +432,11 @@ impl TrendRun {
             }
             let nodata = r.nodata.map(|v| v as f32);
             for (c, v) in vals.iter().enumerate().take(cells) {
-                if v.is_finite() && Some(*v) != nodata {
-                    block[c * n + k] = *v;
+                if v.is_finite()
+                    && Some(*v) != nodata
+                    && let Some(slot) = block.get_mut(c * n + k)
+                {
+                    *slot = *v;
                 }
             }
             done.fetch_add(1, Ordering::Relaxed);
