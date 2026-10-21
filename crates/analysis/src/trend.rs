@@ -24,7 +24,10 @@ pub enum Test {
     HamedRao,
     /// Yue & Wang's correction for autocorrelation, from the lag-1 autocorrelation.
     YueWang,
-    /// The seasonal test, with this many seasons in a unit of time (12: months of a year).
+    /// The seasonal test, with this many seasons in a unit of time (12: months of a year). Through
+    /// [`trend`], a value's season is its time's place within its unit (times in years: 2000.5 is
+    /// mid-2000), so times counted in steps (0, 1, 2…) put every value in one season; for real
+    /// dates, [`trend_seasonal`] takes each value's season from its calendar.
     Seasonal(u32),
     /// The test for independent values.
     Original,
