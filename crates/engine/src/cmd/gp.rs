@@ -10,6 +10,11 @@ use crate::{CmdResult, CommandSpec as C, GpRecord, Session};
 pub fn commands() -> Vec<C> {
     vec![
         C::new("gp.run", "Run Tool", "Analyze › Geoprocessing", run).when(need_layers).params(r#"{"tool": tool id, "params": {...} (a layer by name; a standalone table by name or id)}"#),
+        C::new("gp.spatialJoin", "Spatial Join", "Analyze › Overlay", spatial_join)
+            .when(need_layers)
+            .params(
+                r#"{"target": layer, "join": layer, "match"?: "Intersects" (default) | "Contains" | "Within", "operation"?: "Join one to one" (default) | "Join one to many", "keepAll"?: "Keep all" (default) | "Keep only matching", "prefix"?: "join_", "output"?: text}"#,
+            ),
         C::new("gp.bufferPoint", "Buffer A Point", "Analyze › Geoprocessing", buffer_point).params(
             r#"{"lon": number, "lat": number, "distance": number, "units"?: "Kilometers" (default) | "Meters" | "Miles", "name"?: output}"#,
         ),
@@ -563,7 +568,9 @@ fn env_rows(
     params: &Value,
 ) -> std::collections::HashMap<String, Vec<usize>> {
     let Some(e) = env.extent else { return std::collections::HashMap::new() };
-    let Some(input) = params.get("input").and_then(Value::as_str) else { return std::collections::HashMap::new() };
+    let Some(input) = params.get("target").or_else(|| params.get("input")).and_then(Value::as_str) else {
+        return std::collections::HashMap::new();
+    };
     // The layer the name finds (the first of that name), as the tool will.
     map.layer_by_name(input)
         .into_iter()
@@ -687,6 +694,11 @@ fn buffer_point(s: &mut Session, p: &Value) -> CmdResult {
     let millis = now_ms().saturating_sub(t0);
     let ran = Ran { name: "Buffer".into(), id: "buffer".into(), command: Some(("gp.bufferPoint".into(), command)), started: t0 };
     apply(s, ran, params, res, millis)
+}
+
+/// Joins attributes from another layer spatially: `target` receives attributes from `join`.
+fn spatial_join(s: &mut Session, p: &Value) -> CmdResult {
+    run_tool(s, "spatialJoin", p)
 }
 
 /// Runs a (built-in) tool and applies its result, as `gp.run` does.

@@ -279,6 +279,41 @@ fn geoprocessing_adds_layers_and_history() {
 }
 
 #[test]
+fn spatial_join_command_joins_layers_and_records_history() {
+    let mut s = world();
+    s.run(
+        "gp.spatialJoin",
+        &json!({
+            "target": "Cities",
+            "join": "Countries",
+            "match": "Intersects",
+            "operation": "Join one to one",
+            "output": "Joined_Cities"
+        }),
+    )
+    .unwrap();
+    let l = s.map().layer_by_name("Joined_Cities").unwrap();
+    assert_eq!(l.dataset.features.len(), s.map().layer_by_name("Cities").unwrap().dataset.features.len());
+    assert!(l.dataset.field_index("join_count").is_some());
+    assert_eq!(s.project.gp_history.len(), 1);
+
+    s.run(
+        "gp.run",
+        &json!({
+            "tool": "spatialJoin",
+            "params": {
+                "target": "Countries",
+                "join": "Cities",
+                "match": "Contains",
+                "output": "Countries_With_Cities"
+            }
+        }),
+    )
+    .unwrap();
+    assert!(s.map().layer_by_name("Countries_With_Cities").is_some());
+}
+
+#[test]
 fn editing_features_and_fields() {
     let mut s = world();
     s.run(
@@ -1828,6 +1863,182 @@ fn layer_class_style_edits_one_class() {
     s.run("layer.classStyle", &json!({"layer": "Countries", "index": 2, "label": "Most populous"})).unwrap();
     assert_eq!(renderer(&s).legend().get(2).map(|e| e.label.clone()).as_deref(), Some("Most populous"));
     assert!(s.run("layer.classStyle", &json!({"layer": "Countries", "index": 3, "label": "x"})).is_err());
+}
+
+/// Read classes by their command identity, not their sorted legend position.
+fn class_style_rows(s: &Session, layer: &str) -> Vec<(Value, rustgis_map::Symbol)> {
+    match &s.map().layer_by_name(layer).unwrap().renderer {
+        rustgis_map::Renderer::Graduated { symbols, .. } => {
+            symbols.iter().enumerate().map(|(i, symbol)| (json!({"layer": layer, "index": i}), *symbol)).collect()
+        }
+        rustgis_map::Renderer::Unique { classes, other, .. } => classes
+            .iter()
+            .map(|(value, symbol)| (json!({"layer": layer, "value": value}), *symbol))
+            .chain(std::iter::once((json!({"layer": layer, "other": true}), *other)))
+            .collect(),
+        _ => panic!("class renderer expected"),
+    }
+}
+
+#[test]
+fn layer_class_style_polygon_alpha_targets_only_the_named_class() {
+    use rustgis_map::Rgba;
+    for (kind, field) in [("graduated", "pop_est"), ("unique", "income_grp")] {
+        let mut s = world();
+        s.run("layer.symbology", &json!({"layer": "Countries", "type": kind, "field": field, "classes": 3})).unwrap();
+        let rows = class_style_rows(&s, "Countries");
+        // A middle graduated class, a unique value, and the unique fallback all use the same rules.
+        let targets = if kind == "unique" { vec![1, rows.len() - 1] } else { vec![1] };
+        for target in targets {
+            for (color, alpha) in [
+                ("#123456", 170),
+                (" #123456FF ", 255),
+                ("12345600", 0),
+                ("#12345640", 64),
+                ("#123456", 150),
+                ("#123456C8", 200),
+                (" 123456 ", 200),
+            ] {
+                let before = class_style_rows(&s, "Countries");
+                let mut params = before[target].0.clone();
+                params["color"] = json!(color);
+                let result = s.run("layer.classStyle", &params).unwrap();
+                let after = class_style_rows(&s, "Countries");
+                let fill = Rgba::rgb(0x12, 0x34, 0x56).with_alpha(alpha);
+                assert_eq!(after[target].1.fill, fill, "{kind}: {params}");
+                assert_eq!(Rgba::from_hex(result["color"].as_str().unwrap()), Some(fill));
+                for (i, (old, new)) in before.iter().zip(&after).enumerate() {
+                    assert_eq!(new.0, old.0);
+                    if i != target {
+                        assert_eq!(new.1, old.1, "{kind}: {params} changed class {i}");
+                    }
+                }
+                if alpha == 0 {
+                    s.run("edit.undo", &Value::Null).unwrap();
+                    assert_eq!(class_style_rows(&s, "Countries"), before);
+                    s.run("edit.redo", &Value::Null).unwrap();
+                    assert_eq!(class_style_rows(&s, "Countries"), after);
+                    let saved = serde_json::to_string(&s.project).unwrap();
+                    let reopened = Session::new(Project::from_json(&saved).unwrap());
+                    assert_eq!(class_style_rows(&reopened, "Countries"), after);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn layer_class_alpha_survives_reclassification_and_ramp() {
+    for (kind, field, scheme, next_scheme) in [("graduated", "pop_est", "Ember", "Harbour"), ("unique", "income_grp", "Harbour", "Ember")] {
+        let mut s = world();
+        let mut symbology = json!({"layer": "Countries", "type": kind, "field": field, "classes": 3, "ramp": scheme});
+        s.run("layer.symbology", &symbology).unwrap();
+        let original = class_style_rows(&s, "Countries");
+        for (i, (mut params, symbol)) in original.iter().cloned().enumerate() {
+            // Keep exactly the ramp's RGB: an alpha-only edit must not be mistaken for an untouched fill.
+            params["color"] = json!(symbol.fill.with_alpha([0, 64, 255][i % 3]).hex8());
+            s.run("layer.classStyle", &params).unwrap();
+        }
+        let edited = s.map().layer_by_name("Countries").unwrap().renderer.clone();
+        let before = class_style_rows(&s, "Countries");
+        for (i, ((_, old), (_, new))) in original.iter().zip(&before).enumerate() {
+            assert_eq!((new.fill.r(), new.fill.g(), new.fill.b()), (old.fill.r(), old.fill.g(), old.fill.b()));
+            assert_eq!(new.fill.a(), [0, 64, 255][i % 3]);
+        }
+        // Both an omitted scheme and an explicit unchanged scheme are reapplications, not resets.
+        let mut same = symbology.clone();
+        same.as_object_mut().unwrap().remove("ramp");
+        for params in [&same, &symbology] {
+            s.run("layer.symbology", params).unwrap();
+            assert_eq!(s.map().layer_by_name("Countries").unwrap().renderer, edited, "{kind}");
+        }
+        // Recolouring through layer.ramp keeps every class's exact alpha, including the fallback's.
+        s.run("layer.ramp", &json!({"layer": "Countries", "ramp": next_scheme})).unwrap();
+        let recolored = class_style_rows(&s, "Countries");
+        for ((old_target, old), (new_target, new)) in before.iter().zip(&recolored) {
+            assert_eq!(new_target, old_target);
+            assert_eq!(new.fill.a(), old.fill.a(), "{kind}: {new_target}");
+        }
+        assert!(
+            before
+                .iter()
+                .zip(&recolored)
+                .any(|((_, old), (_, new))| { (old.fill.r(), old.fill.g(), old.fill.b()) != (new.fill.r(), new.fill.g(), new.fill.b()) })
+        );
+        // A different scheme chosen through layer.symbology still resets polygon opacity as before.
+        symbology["ramp"] = json!(scheme);
+        s.run("layer.symbology", &symbology).unwrap();
+        assert!(class_style_rows(&s, "Countries").iter().all(|(_, symbol)| symbol.fill.a() == 170), "{kind}");
+    }
+}
+
+#[test]
+fn layer_class_creation_keeps_explicit_layer_fill_alpha() {
+    for (kind, field) in [("graduated", "pop_est"), ("unique", "income_grp")] {
+        for alpha in [0, 64, 255] {
+            let mut s = world();
+            s.run("layer.color", &json!({"layer": "Countries", "color": format!("#336699{alpha:02X}")})).unwrap();
+            s.run("layer.symbology", &json!({"layer": "Countries", "type": kind, "field": field, "classes": 3})).unwrap();
+            for (target, symbol) in class_style_rows(&s, "Countries") {
+                assert_eq!(symbol.fill.a(), alpha, "{kind}: {target}");
+            }
+        }
+    }
+}
+
+#[test]
+fn layer_class_style_point_and_line_colors_keep_their_supplied_alpha() {
+    use rustgis_map::Rgba;
+    let mut s = world();
+    for layer in ["Cities", "Rivers"] {
+        let field = s.map().layer_by_name(layer).unwrap().dataset.fields[0].name.clone();
+        s.run("layer.symbology", &json!({"layer": layer, "type": "unique", "field": field})).unwrap();
+        let mut params = class_style_rows(&s, layer)[0].0.clone();
+        for color in ["#12345600", "#12345640", "#123456FF", "#123456"] {
+            let before = class_style_rows(&s, layer);
+            params["color"] = json!(color);
+            s.run("layer.classStyle", &params).unwrap();
+            let after = class_style_rows(&s, layer);
+            let fill = Rgba::from_hex(color).unwrap();
+            assert_eq!(after[0].1.fill, fill, "{layer}: {color}");
+            assert_eq!(after[0].1.stroke, if layer == "Rivers" { fill } else { before[0].1.stroke });
+            assert_eq!(&after[1..], &before[1..], "{layer}: other classes are untouched");
+        }
+    }
+}
+
+#[test]
+fn layer_class_style_polygon_alpha_reaches_exported_pixels() {
+    isolate_plugins();
+    let fixture = json!({"type": "FeatureCollection", "features": [{
+        "type": "Feature", "properties": {"value": 1},
+        "geometry": {"type": "Polygon", "coordinates": [[[-0.25, -0.25], [0.25, -0.25], [0.25, 0.25], [-0.25, 0.25], [-0.25, -0.25]]]}
+    }]});
+    for kind in ["graduated", "unique"] {
+        let mut s = Session::new(Project::default());
+        s.run("layer.addDataText", &json!({"fileName": "square.geojson", "text": fixture.to_string()})).unwrap();
+        s.run("layer.symbology", &json!({"layer": "square", "type": kind, "field": "value", "classes": 1})).unwrap();
+        s.view_size = (128.0, 128.0);
+        s.map_mut().basemap = rustgis_map::Basemap::Blank;
+        s.map_mut().graticule = false;
+        s.map_mut().camera = rustgis_map::Camera { center: rustgis_geom::Coord::new(0.0, 0.0), res: 1000.0, bearing: 0.0, pitch: 0.0 };
+        let mut params = class_style_rows(&s, "square")[0].0.clone();
+        for alpha in [255, 0, 64] {
+            params["color"] = json!(format!("#FF0000{alpha:02X}"));
+            s.run("layer.classStyle", &params).unwrap();
+            let png = crate::cmd::share::map_png(&mut s, Some(128.0), Some(128.0), None).unwrap();
+            let pixels = crate::render::decode_png(&png).unwrap();
+            let center = pixels.pixel(64, 64).unwrap();
+            let background = pixels.pixel(0, 0).unwrap();
+            assert_eq!(center.alpha(), 255, "the export composites onto the blank basemap");
+            for (actual, source, behind) in
+                [(center.red(), 255, background.red()), (center.green(), 0, background.green()), (center.blue(), 0, background.blue())]
+            {
+                let expected = (source * alpha + u32::from(behind) * (255 - alpha) + 127) / 255;
+                assert!((i64::from(actual) - i64::from(expected)).abs() <= 1, "{kind}, alpha {alpha}: {center:?} over {background:?}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -8479,7 +8690,7 @@ fn literal_keys(body: &str, prefix: &str) -> Vec<String> {
 #[test]
 fn params_name_every_key_a_command_reads() {
     // Read by a shared helper but of no use to the command.
-    let unused = [("profile.alongSelected", "row"), ("sources.remove", "name"), ("sources.remove", "extra")];
+    let unused = [("gp.spatialJoin", "input"), ("profile.alongSelected", "row"), ("sources.remove", "name"), ("sources.remove", "extra")];
     let s = Session::new(Project::default());
     let mut missing = Vec::new();
     let found = keys_read_by_commands();

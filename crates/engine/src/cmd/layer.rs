@@ -106,7 +106,7 @@ pub fn commands() -> Vec<C> {
         C::new("layer.classStyle", "Class Style", "Style › Drawing", class_style)
             .when(need_feature_layer)
             .params(
-                r##"{"layer"?, "value"?: text|number (a Unique Values class), "index"?: number (a Graduated Colors class, 0 = the lowest), "other"?: true (Unique Values' <all other values>), "color"?: "#RRGGBB"|"#RRGGBBAA" (a polygon class keeps its own transparency), "outline"?: "#RRGGBB"|"#RRGGBBAA", "label"?: text (the legend label; "" goes back to the value or range)}"##,
+                r##"{"layer"?, "value"?: text|number (a Unique Values class), "index"?: number (a Graduated Colors class, 0 = the lowest), "other"?: true (Unique Values' <all other values>), "color"?: "#RRGGBB" (preserves polygon translucency, minimum alpha 150)|"#RRGGBBAA" (sets alpha exactly), "outline"?: "#RRGGBB"|"#RRGGBBAA", "label"?: text (the legend label; "" goes back to the value or range)}"##,
             ),
         C::new("layer.color", "Symbol Color", "Style › Drawing", |s, p| {
             let hex = s_req(p, "color")?;
@@ -2380,7 +2380,8 @@ fn class_style(s: &mut Session, p: &Value) -> CmdResult {
             return Err(format!("{k} must be #RRGGBB or #RRGGBBAA"));
         }
     }
-    let style = ClassStyle { color: s.get_color(p, "color")?, outline: s.get_color(p, "outline")?, label };
+    let preserve_fill_alpha = ps(p, "color").is_some_and(|hex| hex.trim().trim_start_matches('#').len() == 6);
+    let style = ClassStyle { color: s.get_color(p, "color")?, outline: s.get_color(p, "outline")?, label, preserve_fill_alpha };
     if style == ClassStyle::default() {
         return Err("nothing to change: give a color, an outline or a label".into());
     }

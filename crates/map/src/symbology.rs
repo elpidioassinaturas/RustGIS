@@ -81,6 +81,15 @@ impl Symbol {
         }
         self
     }
+
+    /// Ramp colours change hue, not a polygon's existing fill opacity (even below 150).
+    fn with_ramp_fill(self, c: Rgba, g: GeometryType) -> Symbol {
+        let mut out = self.with_fill(c, g);
+        if g == GeometryType::Polygon {
+            out.fill = c.with_alpha(self.fill.a());
+        }
+        out
+    }
 }
 
 /// How a stroke's open ends are drawn.
@@ -312,6 +321,8 @@ pub enum ClassRef {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClassStyle {
     pub color: Option<Rgba>,
+    /// For RGB-only command input, keep the polygon's legacy translucency instead of setting alpha.
+    pub preserve_fill_alpha: bool,
     pub outline: Option<Rgba>,
     /// `Some("")` clears a label set by hand, so the class shows its value or range again.
     pub label: Option<String>,
@@ -350,8 +361,8 @@ impl Renderer {
         let fi = ds.field_index(field).ok_or_else(|| format!("no field named '{field}'"))?;
         let vals = ds.unique_values(fi, rows, MAX_UNIQUE);
         let n = vals.len();
-        let classes = vals.into_iter().enumerate().map(|(k, v)| (v, base.with_fill(ramp.pick(k, n), ds.geometry_type))).collect();
-        let other = base.with_fill(OTHER_FILL, ds.geometry_type);
+        let classes = vals.into_iter().enumerate().map(|(k, v)| (v, base.with_ramp_fill(ramp.pick(k, n), ds.geometry_type))).collect();
+        let other = base.with_ramp_fill(OTHER_FILL, ds.geometry_type);
         Ok(Renderer::Unique {
             field: ds.fields.get(fi).map(|f| f.name.clone()).unwrap_or_default(),
             classes,
@@ -385,7 +396,7 @@ impl Renderer {
         let k = classes.clamp(1, 12);
         let breaks = class_breaks(&vals, k, method);
         let n = breaks.len();
-        let symbols = (0..n).map(|i| base.with_fill(ramp.pick(i, n), ds.geometry_type)).collect();
+        let symbols = (0..n).map(|i| base.with_ramp_fill(ramp.pick(i, n), ds.geometry_type)).collect();
         let min = vals.first().copied().unwrap_or(0.0);
         Ok(Renderer::Graduated {
             field: ds.fields.get(fi).map(|f| f.name.clone()).unwrap_or_default(),
@@ -556,20 +567,20 @@ impl Renderer {
         }
     }
 
-    /// Recolours every class from a ramp.
+    /// Recolours every class from a ramp, preserving each polygon fill's opacity.
     pub fn apply_ramp(&mut self, ramp: Ramp, g: GeometryType) {
         match self {
             Renderer::Unique { classes, ramp: r, .. } => {
                 let n = classes.len();
                 for (k, c) in classes.iter_mut().enumerate() {
-                    c.1 = c.1.with_fill(ramp.pick(k, n), g);
+                    c.1 = c.1.with_ramp_fill(ramp.pick(k, n), g);
                 }
                 *r = ramp;
             }
             Renderer::Graduated { symbols, ramp: r, .. } => {
                 let n = symbols.len();
                 for (k, s) in symbols.iter_mut().enumerate() {
-                    *s = s.with_fill(ramp.pick(k, n), g);
+                    *s = s.with_ramp_fill(ramp.pick(k, n), g);
                 }
                 *r = ramp;
             }
@@ -577,16 +588,18 @@ impl Renderer {
         }
     }
 
-    /// Sets one class's colour, outline colour and legend label (#314). The colour goes through
-    /// [`Symbol::with_fill`], as a ramp's does, so a line class takes it as its line colour and a
-    /// polygon class gets a matching outline unless `outline` names one; a polygon class also keeps
-    /// its own transparency, so the colour's alpha applies to points and lines only. Returns the class's
-    /// legend row as it now is.
+    /// Sets one class's colour, outline colour and legend label (#314). A line class takes the
+    /// colour as its line colour; a polygon class gets a matching outline unless `outline` names
+    /// one. Colours include their alpha unless `preserve_fill_alpha` requests the polygon's
+    /// legacy translucency for RGB-only input. Returns the class's legend row as it now is.
     pub fn set_class_style(&mut self, class: &ClassRef, style: &ClassStyle, g: GeometryType) -> Result<LegendEntry, String> {
         let label = style.label.as_deref().map(normalize_label);
         let restyle = |s: &mut Symbol| {
             if let Some(c) = style.color {
                 *s = s.with_fill(c, g);
+                if g == GeometryType::Polygon && !style.preserve_fill_alpha {
+                    s.fill = c;
+                }
             }
             if let Some(c) = style.outline {
                 s.stroke = c;
@@ -718,9 +731,9 @@ impl Renderer {
 /// `new` with the hand-made parts of `old`, a class whose scheme colour was `scheme`: the fill
 /// when it isn't that colour, and the outline when it isn't the one [`Symbol::with_fill`] derives
 /// (a polygon's shaded fill, a line's own colour; for points, the new base symbol's outline).
-/// A polygon's fill compares without alpha (`with_fill` keeps a polygon's own transparency) and,
-/// when edited, carries over whole, transparency included; a point's or a line's compares with it,
-/// since `with_fill` gives them the colour's alpha as it is. Outlines compare whole.
+/// Polygon hue edits compare without alpha because ramps keep polygon opacity. That opacity
+/// carries over independently, including alpha-only edits; point and line colours compare whole.
+/// Outlines compare whole.
 fn carry_class(new: Symbol, old: &Symbol, scheme: Rgba, g: GeometryType) -> Symbol {
     let rgb = |c: Rgba| (c.r(), c.g(), c.b());
     let mut s = new;
@@ -728,9 +741,9 @@ fn carry_class(new: Symbol, old: &Symbol, scheme: Rgba, g: GeometryType) -> Symb
     if edited {
         let c = if g == GeometryType::Polygon { Rgba::rgb(old.fill.r(), old.fill.g(), old.fill.b()) } else { old.fill };
         s = s.with_fill(c, g);
-        if g == GeometryType::Polygon {
-            s.fill = old.fill;
-        }
+    }
+    if g == GeometryType::Polygon {
+        s.fill = s.fill.with_alpha(old.fill.a());
     }
     let derived = match g {
         GeometryType::Polygon => Rgba::rgb(old.fill.r(), old.fill.g(), old.fill.b()).shade(0.6),
@@ -1550,10 +1563,11 @@ mod tests {
         let s = |c| Symbol::default_for(g, c);
         let (red, blue) = (Rgba::rgb(0xC0, 0x30, 0x20), Rgba::rgb(0, 0, 0xFF));
         let mut r = unique(&[("a", s(0)), ("b", s(1))], s(3), Ramp::Ember);
-        let style = |color, outline, label: Option<&str>| ClassStyle { color, outline, label: label.map(str::to_string) };
-        // The colour goes through with_fill, as a ramp's does; the label is trimmed.
+        let style =
+            |color, outline, label: Option<&str>| ClassStyle { color, outline, label: label.map(str::to_string), ..Default::default() };
         let e = r.set_class_style(&ClassRef::Value("b".into()), &style(Some(red), None, Some("  Bee ")), g).unwrap();
-        assert_eq!((e.label.as_str(), e.symbol, e.fallback), ("Bee", s(1).with_fill(red, g), false));
+        assert_eq!(e.label, "Bee");
+        assert_eq!((e.symbol.fill, e.symbol.stroke, e.fallback), (red, red.shade(0.6), false));
         assert_eq!(labels_of(&r), ["a", "Bee", OTHER_VALUES]);
         // The fallback class, with an outline alone: the fill stays.
         let e = r.set_class_style(&ClassRef::Other, &style(None, Some(blue), Some("Others")), g).unwrap();
@@ -1590,7 +1604,7 @@ mod tests {
         // Graduated Colors: by number, and the label replaces the range.
         let mut gr = graduated(&[10.0, 20.0], &[s(0), s(1)], Ramp::Ember);
         let e = gr.set_class_style(&ClassRef::Index(1), &style(Some(red), None, Some("High")), g).unwrap();
-        assert_eq!((e.label.as_str(), e.symbol), ("High", s(1).with_fill(red, g)));
+        assert_eq!((e.label.as_str(), e.symbol.fill, e.symbol.stroke), ("High", red, red.shade(0.6)));
         assert_eq!(labels_of(&gr), ["0 – 10", "High"]);
         gr.set_class_style(&ClassRef::Index(0), &style(None, None, Some("0 – 10")), g).unwrap();
         assert!(matches!(&gr, Renderer::Graduated { class_labels, .. } if !class_labels.contains_key(&0)), "the range itself is no label");
@@ -1638,7 +1652,7 @@ mod tests {
         };
         let (red, blue) = (Rgba::rgb(0xC0, 0x30, 0x20), Rgba::rgb(0, 0, 0xFF));
         let edit = |r: &mut Renderer, c: ClassRef, color: Option<Rgba>, outline: Option<Rgba>, label: Option<&str>| {
-            r.set_class_style(&c, &ClassStyle { color, outline, label: label.map(str::to_string) }, g).unwrap();
+            r.set_class_style(&c, &ClassStyle { color, outline, label: label.map(str::to_string), ..Default::default() }, g).unwrap();
         };
         let mut old = ramped(&["a", "b", "c"], Ramp::Ember);
         edit(&mut old, ClassRef::Value("b".into()), Some(red), None, Some("Bee"));
@@ -1649,13 +1663,13 @@ mod tests {
         let fresh = ramped(&["b", "c", "d"], Ramp::Ember);
         let mut again = fresh.clone();
         again.carry_edits_from(&old, g);
-        let (Renderer::Unique { classes, other, .. }, Renderer::Unique { classes: fc, other: fo, .. }) = (&again, &fresh) else {
+        let (Renderer::Unique { classes, other, .. }, Renderer::Unique { classes: fc, .. }) = (&again, &fresh) else {
             panic!("unique renderers expected")
         };
-        assert_eq!(classes[0].1, fc[0].1.with_fill(red, g), "b keeps its colour");
+        assert_eq!((classes[0].1.fill, classes[0].1.stroke), (red, red.shade(0.6)), "b keeps its colour");
         assert_eq!((classes[1].1.fill, classes[1].1.stroke), (fc[1].1.fill, blue), "c keeps its outline only");
         assert_eq!(classes[2].1, fc[2].1, "d is new");
-        assert_eq!(*other, fo.with_fill(red, g));
+        assert_eq!((other.fill, other.stroke), (red, red.shade(0.6)));
         assert_eq!(labels_of(&again), ["Bee", "c", "d", "Rest"]);
         // A polygon class's own transparency, and an outline that differs only in it, carry over too.
         let mut tinted = ramped(&["a"], Ramp::Ember);
