@@ -64,7 +64,8 @@ impl Test {
 /// A series' trend.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Trend {
-    /// The values used (finite ones).
+    /// The values used (finite ones; for the seasonal test, those in seasons of two or more,
+    /// which are the ones S and the slope come from).
     pub n: usize,
     /// Sen's slope, per unit of time.
     pub slope: f64,
