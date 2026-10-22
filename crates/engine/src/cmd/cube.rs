@@ -542,8 +542,11 @@ impl TrendRun {
             if let Some(f) = &first_piece {
                 let near = |a: f64, b: f64| (a - b).abs() <= f.transform.pixel_width.abs() * 1e-3;
                 let (a, b) = (&f.transform, &grid.transform);
+                // Its top on the row after the pieces above it.
+                let top = a.origin_y + rows as f64 * a.pixel_height;
                 if (f.width, f.crs) != (grid.width, grid.crs)
                     || !near(a.origin_x, b.origin_x)
+                    || !near(top, b.origin_y)
                     || !near(a.pixel_width, b.pixel_width)
                     || !near(a.pixel_height, b.pixel_height)
                 {

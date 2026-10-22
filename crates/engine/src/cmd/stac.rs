@@ -401,6 +401,16 @@ pub fn cube_files(s: &Session, p: &Value) -> Result<CubeFiles, String> {
     }
     // Files reached through signed addresses (Planetary Computer's) expire within hours, so a
     // cube of them couldn't be kept in a project or read a day later.
+    // The files' addresses come from the API's answer: each is checked as one that answer points
+    // to (http or https, never a forbidden address, and not into the local network from a public
+    // API), before a cube on the map or a trend reads it.
+    if let Some(e) = tiles
+        .values()
+        .flat_map(|by_day| by_day.values())
+        .find_map(|href| crate::render::rustgis_tiles::address::check(href, Some(&api)).err())
+    {
+        return Err(e);
+    }
     if tiles.values().flat_map(|by_day| by_day.values()).any(|href| stac::needs_signing(href)) {
         return Err(format!(
             "{collection}'s files are reached through signed addresses that expire within hours, so they can't make a data cube (one on the map keeps them in the project; a trend reads them for as long as it runs, unsigned): use an API with public files (Earth Search, the Brazil Data Cube)"
