@@ -7265,6 +7265,41 @@ fn a_stac_search_takes_view_in_any_case() {
     assert!(crate::cmd::stac::search_params(&s, &json!({})).unwrap().bbox.is_none(), "no bbox, no area");
 }
 
+/// A trend given `"bbox": " VIEW "` searches the map's view: its search request carries the box
+/// the trend reads, not no area at all.
+#[test]
+fn a_stac_trend_searches_the_view_it_reads() {
+    use std::io::{Read, Write};
+    let mut s = world();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let api = format!("http://{}/v1", listener.local_addr().unwrap());
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().take(4).flatten() {
+            let mut buf = [0u8; 8192];
+            let n = c.read(&mut buf).unwrap_or(0);
+            let line = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or("").to_string();
+            seen.lock().unwrap().push(line);
+            let body = r#"{"type": "FeatureCollection", "features": []}"#;
+            let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        }
+    });
+    let p = json!({"url": api, "collection": "mod", "asset": "NDVI", "bbox": " VIEW ", "start": "2024", "end": "2024"});
+    let e = s.run("cube.trend", &p).unwrap_err();
+    assert!(e.contains("no item"), "the search was made and found nothing: {e}");
+    let lines = asked.lock().unwrap().clone();
+    let search = lines.iter().find(|l| l.contains("/search")).unwrap_or_else(|| panic!("{lines:?}"));
+    let query = search.split(['?', ' ']).nth(2).unwrap_or_default();
+    let bbox = query.split('&').find_map(|kv| kv.strip_prefix("bbox=")).unwrap_or_else(|| panic!("no bbox in {search}"));
+    let asked: Vec<f64> = bbox.replace("%2C", ",").split(',').map(|v| v.parse().unwrap()).collect();
+    let view = crate::cmd::stac::search_params(&s, &json!({"bbox": "view"})).unwrap().bbox.unwrap();
+    assert_eq!(asked.len(), 4, "{search}");
+    for (a, v) in asked.iter().zip(view) {
+        assert!((a - v).abs() < 1e-6, "{search} against the view {view:?}");
+    }
+}
+
 /// A trend over a STAC collection's band (#579), read in place from its files over an area: each
 /// date's values scaled as its own metadata says (here date k's scale is k + 1 ten-thousandths,
 /// so every cell grows in a straight line), Sen's slope as worked out by hand; the same outputs
