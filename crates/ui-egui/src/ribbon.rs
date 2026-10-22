@@ -945,8 +945,11 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
             ui.menu_button(tl!("Publication Layout"), |ui| {
                 for (id, label, ..) in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
                     if ui.button(tl!(*label)).clicked() {
-                        let _ = app.run("layout.publication", json!({"profile": id, "title": app.session.map().name.clone()}));
-                        app.ui.tab = "Publish".into();
+                        // The view's extent may not be known (an empty map): said, and the tab stays.
+                        match app.run("layout.publication", json!({"profile": id, "title": app.session.map().name.clone()})) {
+                            Ok(_) => app.ui.tab = "Publish".into(),
+                            Err(e) => app.session.notify(e, true),
+                        }
                         ui.close();
                     }
                 }

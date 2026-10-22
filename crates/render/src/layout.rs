@@ -818,7 +818,8 @@ fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32
     }
     let sw = LEGEND_SWATCH * ppp;
     for row in legend_rows(map, drawn, &opts) {
-        if y + line > r.y() + r.height() {
+        // The rectangle's own bottom, which a sum of its top and height can miss by a rounding.
+        if y + line > r.bottom() {
             break;
         }
         match row {

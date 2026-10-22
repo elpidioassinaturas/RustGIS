@@ -2356,6 +2356,22 @@ fn publication_layouts_fit_their_pages() {
         assert!(std::fs::metadata(&png).unwrap().len() > 1000, "{profile}");
     }
     assert_eq!(s.project.layouts.len(), profiles.len(), "a layout each, the earlier ones untouched");
+    // A long title wraps within the frame, and pushes the map down; the result names every
+    // element for layout.update.
+    let r = s.run("layout.publication", &json!({"extent": piaui, "title": long})).unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let title = l.elements.iter().find(|e| e.name == "Title").unwrap();
+    let ElementKind::Text { text, size, .. } = &title.kind else { panic!() };
+    assert!(text.lines().count() >= 2, "{text}");
+    for line in text.lines() {
+        assert!(crate::render::report::width_mm(line, *size as f32, false) <= title.w, "{line}");
+    }
+    let frame = l.elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap();
+    assert!(frame.y >= title.y + title.h);
+    let listed = r["elements"].as_array().unwrap();
+    assert_eq!(listed.len(), l.elements.len());
+    assert!(listed.iter().any(|e| e["name"] == "Map Frame" && e["element"] == frame.id && e["kind"] == "mapFrame"), "{r}");
+    s.project.layouts.pop();
     // A journal figure is as tall as the map's shape asks: Piauí in Web Mercator is taller than wide.
     let one = s.project.layouts.iter().find(|l| l.name == "figure-1col").unwrap();
     assert!(one.width == 90.0 && one.height > 90.0, "{} × {}", one.width, one.height);
@@ -2371,6 +2387,7 @@ fn publication_layouts_fit_their_pages() {
         (json!({"extent": [10, 0, 5, 1]}), "extent is"),
         (json!({"extent": [10, 0, 11], "profile": "a4-portrait"}), "extent is"),
         (json!({"sources": vec![long; 40], "profile": "a4-landscape", "extent": piaui}), "no room"),
+        (json!({"reference": vec![long; 50], "profile": "thesis-half", "extent": piaui}), "no room"),
     ] {
         let e = s.run("layout.publication", &p).unwrap_err();
         assert!(e.contains(said), "{p}: {e}");

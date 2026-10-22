@@ -468,8 +468,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         around.push(("Frame".into(), (m, m, page_w - 2.0 * m, page_h - 2.0 * m), pub_box(clear, ink, 0.8)));
         let mut top = m + pad;
         if let Some(t) = &title {
-            let th = pitch(title_pt) + 1.5 * k;
-            around.push(("Title".into(), (x0, top, iw, th), pub_text(fill(t), title_pt, ink, true, TextAlign::Center)));
+            let lines = wrap(t, iw, title_pt);
+            let th = lines.len() as f64 * pitch(title_pt) + 1.5 * k;
+            around.push(("Title".into(), (x0, top, iw, th), pub_text(lines.join("\n"), title_pt, ink, true, TextAlign::Center)));
             top += th;
         }
         if let Some(t) = &subtitle {
@@ -481,11 +482,13 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         // The footer, from the bottom up: authorship, the note, then the two boxes side by side,
         // as tall as the longer column.
         let bottom = page_h - m - pad;
-        let author_y = bottom - pitch(small_pt);
+        let author_lines = wrap(&author, iw, small_pt);
+        let author_h = author_lines.len() as f64 * pitch(small_pt);
+        let author_y = bottom - author_h;
         around.push((
             "Author".into(),
-            (x0, author_y, iw, pitch(small_pt)),
-            pub_text(fill(&author), small_pt, soft, false, TextAlign::Right),
+            (x0, author_y, iw, author_h),
+            pub_text(author_lines.join("\n"), small_pt, soft, false, TextAlign::Right),
         ));
         let note_lines = note.as_deref().map(|t| wrap(t, iw, body_pt)).unwrap_or_default();
         let mut foot = author_y;
@@ -524,11 +527,11 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         (page_w, page_h, (x0, frame_top, iw, frame_bottom - frame_top))
     } else {
         // A figure: the map edge to edge, a line of the projection and datum under it.
-        for (k, given) in
+        for (field, given) in
             [("title", title.is_some()), ("subtitle", subtitle.is_some()), ("sources", !sources.is_empty()), ("note", note.is_some())]
         {
             if given {
-                warnings.push(format!("{k} goes in the figure's caption, not on it: left out"));
+                warnings.push(format!("{field} goes in the figure's caption, not on it: left out"));
             }
         }
         let line = reference.iter().map(|t| fill(t)).collect::<Vec<_>>().join(" · ");
@@ -542,6 +545,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         } else {
             (page_w * aspect(s, &extent).unwrap_or(0.75)).clamp(0.45 * page_w, 1.3 * page_w).round()
         };
+        if fh < 40.0 {
+            return Err("the reference leaves the map no room: shorten it".into());
+        }
         let h = if page_h > 0.0 { page_h } else { (fh + note_h).ceil() };
         around.push((
             "Reference".into(),
@@ -590,8 +596,26 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let (left, right, top, bottom) = (room(edges.left, true), room(edges.right, true), room(edges.top, false), room(edges.bottom, false));
     let (aw, ah) = if sheet { (8.0 * k, 12.0 * k) } else { (5.0, 7.5) };
     l.add("North Arrow", (fx + fw - right - aw, fy + top, aw, ah), ElementKind::north_arrow(frame));
+    // The legend lists what the frame draws: its map synced to the frame's view first, as an
+    // export does, so a streamed layer has its features there. While one is still reading, the
+    // classes can't be known: the legend gets a fixed size, to fit by hand. Nothing drawn in the
+    // frame, no legend.
     let render_scale = crate::render::layout::frame_render_scale(s.map(), center, scale);
-    let (cw, ch) = crate::render::layout::legend_size_mm(s.map(), render_scale, false, false, &[]);
+    let view = crate::render::View {
+        width: fw * rustgis_map::layout::PT_PER_MM,
+        height: fh * rustgis_map::layout::PT_PER_MM,
+        pixels_per_point: 1.0,
+        camera: rustgis_map::layout::frame_camera(s.map(), center, scale, 0.0, 0.0),
+        sky: false,
+    };
+    let lonlat = crate::render::view_lonlat(s.map(), &view);
+    let reading = s.map_mut().sync_sources(&lonlat, render_scale, true);
+    let (mut cw, mut ch) = crate::render::layout::legend_size_mm(s.map(), render_scale, false, false, &[]);
+    let listed = s.map().layers.iter().any(|l| s.map().shows(l) && !l.graphics && !l.is_raster());
+    if reading && listed {
+        (cw, ch) = (cw.max(fw * 0.3), ch.max(fh * 0.25));
+        warnings.push("the legend's classes aren't known yet (a layer still reading): it has a fixed size to fit by hand".into());
+    }
     if ch > 0.0 {
         let pad = 2.0;
         let (lw, lh) = ((cw + 2.0 * pad).min(fw * 0.45), (ch + 2.0 * pad).min(fh * 0.6));
@@ -614,10 +638,12 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     for (n, r, kind) in around {
         l.add(&n, r, kind);
     }
+    // Every element by name and id, for `layout.update`.
+    let elements: Vec<Value> = l.elements.iter().map(|e| json!({"element": e.id, "name": e.name, "kind": e.kind.code()})).collect();
     s.project.layouts.push(l);
     let i = s.project.layouts.len() - 1;
     s.active_layout = Some(i);
-    Ok(json!({"layout": i, "name": name, "page": [w, h], "scale": scale, "grid": step, "warnings": warnings}))
+    Ok(json!({"layout": i, "name": name, "page": [w, h], "scale": scale, "grid": step, "elements": elements, "warnings": warnings}))
 }
 
 fn page(s: &mut Session, p: &Value) -> CmdResult {

@@ -9,7 +9,8 @@ description: Make a printable page layout — map frame, title, legend, north ar
 2. For a finished sheet or a figure for a paper in one step, use `layout.publication` with a `"profile"`
    (`"a4-portrait"`, `"a3-landscape"`, … for a sheet; `"figure-1col"`, `"thesis-full"`, … for a figure), the `"extent"`
    to fit, and the texts: `"title"`, `"subtitle"`, `"sources"`, `"note"`. It places the frame at a round scale, the
-   graticule, legend, scale bar and north arrow, and wraps the footer, so skip to step 5 to adjust it. Otherwise,
+   graticule, legend, scale bar and north arrow, and wraps the footer. Its result lists every element's id and name
+   (`"elements"`), so skip to step 5 to adjust them. Otherwise,
    `layout.new` `{"name": N, "page": "letter"|"a4"|…, "orientation": "landscape"|"portrait"}` creates the layout and
    opens it.
 3. `layout.addFrame` for the map frame (`search_commands` "map frame" for its position and size parameters, in
