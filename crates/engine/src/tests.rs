@@ -7309,6 +7309,20 @@ fn a_trend_over_a_stac_collection() {
         let got = f64::from(ws.bands[0].data[y * 768 + 256 + x]);
         assert!((got - per_year(x, y)).abs() < 1e-4, "({x}, {y}): {got} vs {}", per_year(x, y));
     }
+    // The parameters read without the network are refused before the search: an API on a
+    // closed port, never asked.
+    for (bad, said) in [
+        (json!({"bbox": [11, 45, 10, 46]}), "bbox is"),
+        (json!({"cellSize": 0}), "cellSize is"),
+        (json!({"resampling": "bilinear"}), "resampling is"),
+    ] {
+        let mut q = json!({"url": "http://127.0.0.1:9/v1", "collection": "mod", "asset": "NDVI", "bbox": [10, 45, 11, 46], "start": "2024", "end": "2024"});
+        for (k, v) in bad.as_object().unwrap() {
+            q[k] = v.clone();
+        }
+        let e = s.run("cube.trend", &q).unwrap_err();
+        assert!(e.contains(said), "{e}");
+    }
     // An area no file covers (the items only near it) is refused, not four empty rasters.
     let away = json!({"url": api, "collection": "mod", "asset": "NDVI", "bbox": [20, 45, 21, 46], "start": "2024-01-01", "end": "2024-03"});
     let e = s.run("cube.trend", &away).unwrap_err();
