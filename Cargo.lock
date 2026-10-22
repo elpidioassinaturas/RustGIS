@@ -4645,6 +4645,7 @@ dependencies = [
  "rustgis-map",
  "rustgis-tiles",
  "serde_json",
+ "tempfile",
  "tiny-skia",
  "web-time",
 ]

@@ -7,7 +7,7 @@ use egui::{Align2, CornerRadius, Rect, Sense, Stroke, Ui, pos2, vec2};
 use rustgis_engine::Session;
 use rustgis_engine::analysis::{ParamKind, tools};
 use rustgis_engine::data::GeometryType;
-use rustgis_engine::map::raster::{RasterLegend, RasterStyle};
+use rustgis_engine::map::raster::{Normalizer, RasterLegend, RasterStyle};
 use rustgis_engine::map::symbology::{
     ClassRef, ClassStyle, LineCap, LineJoin, LineStroke, MAX_LABEL, MAX_STROKE_OFFSET, MAX_STROKE_WIDTH, MAX_STROKES, MAX_UNIQUE,
     normalize_label,
@@ -4039,6 +4039,42 @@ fn raster_details(ui: &mut Ui, rl: &rustgis_engine::map::RasterLayer, t: &Tokens
     });
 }
 
+/// A Min and Max for each colour channel of an RGB layer: a stretch to the bands' own minimum and
+/// maximum or to bounds of your own, which an edit turns it into. Edits are kept here until every
+/// pair is valid, so the layer's values don't snap back.
+fn rgb_stretch_bounds(app: &mut RustGisApp, ui: &mut Ui, layer: impl std::hash::Hash + std::fmt::Debug, t: &Tokens, shown: [[f64; 2]; 3]) {
+    type Bounds = [[f64; 2]; 3];
+    let key = ui.id().with(("custom_stretch_rgb", layer));
+    let pending = ui.data(|d| d.get_temp::<(Bounds, Bounds)>(key)).filter(|(base, _)| *base == shown);
+    let mut edit = pending.map_or(shown, |(_, e)| e);
+    let (mut done, mut changed) = (false, false);
+    for (name, pair) in [tl!("Red"), tl!("Green"), tl!("Blue")].into_iter().zip(edit.iter_mut()) {
+        let [mut lo, mut hi] = *pair;
+        let speed = ((hi - lo).abs() / 200.0).clamp(1e-6, 1e6);
+        ui.horizontal(|ui| {
+            ui.add_sized([44.0, 18.0], egui::Label::new(name));
+            ui.label(tl!("Min"));
+            let a = ui.add(egui::DragValue::new(&mut lo).speed(speed));
+            ui.label(tl!("Max"));
+            let b = ui.add(egui::DragValue::new(&mut hi).speed(speed));
+            done |= a.drag_stopped() || b.drag_stopped() || ((a.changed() || b.changed()) && !a.dragged() && !b.dragged());
+            changed |= a.changed() || b.changed();
+        });
+        if !(lo.is_finite() && hi.is_finite() && lo < hi) {
+            ui.label(egui::RichText::new(tl!("Min must be less than Max")).size(11.5).color(t.red));
+        }
+        *pair = [lo, hi];
+    }
+    let valid = edit.iter().all(|[lo, hi]| lo.is_finite() && hi.is_finite() && lo < hi);
+    if valid && done && edit != shown {
+        ui.data_mut(|d| d.remove::<(Bounds, Bounds)>(key));
+        let col = |i: usize| edit.map(|p| p[i]);
+        let _ = app.run("raster.stretch", json!({"type": "custom", "min": col(0), "max": col(1)}));
+    } else if changed {
+        ui.data_mut(|d| d.insert_temp(key, (shown, edit)));
+    }
+}
+
 fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
     ui.label(egui::RichText::new(&l.name).font(semibold(14.0)));
     let Some(rl) = l.raster.clone() else { return };
@@ -4245,7 +4281,19 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     }
                 });
             }
-            Stretch::Custom { min, max } => {
+            Stretch::Custom { .. } | Stretch::MinMax if matches!(style.renderer, RasterRenderer::Rgb { .. }) => {
+                let masked = rl.masked_stats();
+                let shown: [[f64; 2]; 3] = std::array::from_fn(|i| {
+                    let band = style.renderer.bands().get(i).copied().unwrap_or(0);
+                    let stats = masked.as_ref().and_then(|m| m.get(i)).or_else(|| d.bands.get(band).map(|b| &b.stats));
+                    stats.map_or([0.0, 1.0], |st| {
+                        let n = Normalizer::for_channel(style.stretch, i, st, &d.data_type);
+                        [n.lo, n.hi]
+                    })
+                });
+                rgb_stretch_bounds(app, ui, l.id, t, shown);
+            }
+            Stretch::Custom { min, max, .. } => {
                 // Edits are kept here until both bounds are valid, so the layer's values don't snap back.
                 // They remember the layer's bounds they started from, and go stale when those change.
                 let key = ui.id().with(("custom_stretch", l.id));

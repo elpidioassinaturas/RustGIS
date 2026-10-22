@@ -137,4 +137,5 @@ Every change is a command, and every command can be undone (++ctrl+z++) and redo
 | ++ctrl+c++ / ++ctrl+x++ / ++ctrl+v++ | Copy / Cut / Paste features |
 
 On macOS, ++cmd++ takes the place of ++ctrl++. **Help › Shortcuts** lists them all in the app,
-from the same table the app runs them from.
+from the same table the app runs them from. While you type in a text field, undo and redo take
+back its typing, not the project's last change.

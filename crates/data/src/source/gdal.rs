@@ -69,12 +69,12 @@ pub fn cache_dir() -> Option<PathBuf> {
     external::cache_dir("RUSTGIS_GDAL_CACHE", "gdal")
 }
 
-/// A layer: its name, whether it holds one kind of geometry (`Some`) or mixes them (`None`), and
-/// its feature count when GDAL knows it.
+/// A layer: its name, the one kind of geometry it holds (`None`: it mixes them), and its
+/// feature count when GDAL knows it.
 #[derive(Clone, Debug, PartialEq)]
 struct LayerInfo {
     name: String,
-    single: bool,
+    family: Option<Family>,
     count: Option<i64>,
     /// Whether the layer says its coordinate system.
     has_srs: bool,
@@ -98,10 +98,9 @@ fn list(src: &Path) -> Result<Vec<LayerInfo>> {
         .filter_map(|l| {
             let name = l.get("name")?.as_str()?.to_string();
             let geom = l.get("geometryFields").and_then(|g| g.as_array()).and_then(|g| g.first())?;
-            let ty = geom.get("type").and_then(|t| t.as_str()).unwrap_or("Geometry").to_ascii_lowercase();
-            let single = ["point", "linestring", "polygon", "curve", "surface"].iter().any(|k| ty.contains(k));
+            let family = Family::of_ogr_type(geom.get("type").and_then(|t| t.as_str()).unwrap_or("Geometry"));
             let has_srs = geom.get("coordinateSystem").is_some_and(|c| !c.is_null());
-            Some(LayerInfo { name, single, count: l.get("featureCount").and_then(|c| c.as_i64()), has_srs })
+            Some(LayerInfo { name, family, count: l.get("featureCount").and_then(|c| c.as_i64()), has_srs })
         })
         .take(MAX_LAYERS)
         .collect())
@@ -148,9 +147,9 @@ fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) ->
     for l in chosen {
         let before = out.len();
         let mut errors = Vec::new();
-        let families: Vec<Option<Family>> = if l.single { vec![None] } else { Family::ALL.iter().copied().map(Some).collect() };
+        let families: Vec<Option<Family>> = if l.family.is_some() { vec![None] } else { Family::ALL.iter().copied().map(Some).collect() };
         for family in families {
-            match convert_one_in(dir, src, &l.name, family, crs, l.has_srs) {
+            match convert_one_in(dir, src, &l.name, family, l.family, crs, l.has_srs) {
                 Ok(Some((path, unprojected))) => out.push(Converted {
                     path,
                     unprojected,
@@ -186,19 +185,30 @@ fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) ->
 /// features. The cache key covers the file's path, size and modification time.
 pub fn convert_one(src: &Path, layer: &str, family: Option<Family>, crs: Option<&str>) -> Result<Option<PathBuf>> {
     let dir = cache_dir().ok_or_else(|| DataError::Format("no cache folder for GDAL conversions".into()))?;
-    // Whether the layer says its coordinate system, as a fresh listing tells.
-    let has_srs = list(src)?.into_iter().find(|l| l.name == layer).is_none_or(|l| l.has_srs);
-    Ok(convert_one_in(&dir, src, layer, family, crs, has_srs)?.map(|(p, _)| p))
+    // The layer's own kind of geometry, and whether it says its coordinate system, as a fresh
+    // listing tells. Its name is matched as `convert` matches it, ignoring case (the exact
+    // spelling first), and converted under the listed spelling, so the two share a conversion.
+    let all = list(src)?;
+    let info = all.iter().find(|l| l.name == layer).or_else(|| all.iter().find(|l| l.name.eq_ignore_ascii_case(layer)));
+    let has_srs = info.is_none_or(|l| l.has_srs);
+    let kind = info.and_then(|l| l.family);
+    let layer = info.map_or(layer, |l| l.name.as_str());
+    Ok(convert_one_in(&dir, src, layer, family, kind, crs, has_srs)?.map(|(p, _)| p))
 }
 
 /// The conversion and whether it is unprojected (see [`Converted::unprojected`]).
-/// `has_srs` says whether the layer gives its coordinate system: one that doesn't (and has no
-/// `crs` given) is taken as it is, unprojected.
+///
+/// - `family` picks one kind of geometry out of a layer that mixes them; `kind` is the layer's
+///   own, when it holds one. Either converts curves and surfaces (an Esri multipatch is a TIN or
+///   a polyhedral surface) to plain lines and polygons, which the FlatGeobuf reader takes.
+/// - `has_srs` says whether the layer gives its coordinate system: one that doesn't (and has no
+///   `crs` given) is taken as it is, unprojected.
 fn convert_one_in(
     dir: &Path,
     src: &Path,
     layer: &str,
     family: Option<Family>,
+    kind: Option<Family>,
     crs: Option<&str>,
     has_srs: bool,
 ) -> Result<Option<(PathBuf, bool)>> {
@@ -213,7 +223,9 @@ fn convert_one_in(
     let (len, modified) = stamp(&full)?;
     // The cache key, spelled out: kept beside the conversion and checked, so a hash collision
     // can't hand back another file's layer.
-    let key = format!("{}\n{layer}\n{:?}\n{:?}\n{len}\n{modified}", full.display(), family.map(Family::label), crs);
+    let nlt = family.or(kind).map_or("PROMOTE_TO_MULTI", Family::ogr_type);
+    // The type is part of the key: conversions made before surfaces were kept are made again.
+    let key = format!("{}\n{layer}\n{:?}\n{:?}\n{nlt}\n{len}\n{modified}", full.display(), family.map(Family::label), crs);
     let tag = format!("{:016x}", fnv1a(key.as_bytes()));
     let out = dir.join(format!("{tag}.fgb"));
     let empty = dir.join(format!("{tag}.empty"));
@@ -243,7 +255,7 @@ fn convert_one_in(
     // neither is taken as it is.
     let unprojected = crs.is_none() && !has_srs;
     let mut c = Command::new(&ogr2ogr);
-    c.args(["-f", "FlatGeobuf", "-skipfailures", "-nlt", "PROMOTE_TO_MULTI", "-dim", "XY", "-lco", "SPATIAL_INDEX=YES"]);
+    c.args(["-f", "FlatGeobuf", "-skipfailures", "-nlt", nlt, "-dim", "XY", "-lco", "SPATIAL_INDEX=YES"]);
     if let Some(crs) = crs {
         c.args(["-s_srs", crs]);
     }
@@ -311,6 +323,7 @@ fn ours(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GeometryType;
 
     #[test]
     fn names() {
@@ -323,7 +336,7 @@ mod tests {
         );
         assert!(!is_gdal_name("a.geojson") && !is_gdal_name("a.fgb") && !is_gdal_name("noext"));
         // A layer named like an option never reaches GDAL.
-        let e = convert_one_in(&std::env::temp_dir(), Path::new("x.kml"), "-overwrite", None, None, true).unwrap_err();
+        let e = convert_one_in(&std::env::temp_dir(), Path::new("x.kml"), "-overwrite", None, None, None, true).unwrap_err();
         assert!(e.to_string().contains("starting with '-'"), "{e}");
         // Pruning touches only the cache's own files.
         assert!(ours("0123456789abcdef.fgb") && ours("0123456789abcdef.key") && ours("0123456789abcdef.empty"));
@@ -332,6 +345,68 @@ mod tests {
         // The cache key's hash is stable.
         assert_eq!(fnv1a(b"rustgis"), fnv1a(b"rustgis"));
         assert_ne!(fnv1a(b"a"), fnv1a(b"b"));
+    }
+
+    #[test]
+    fn layer_types_name_their_family() {
+        for (ty, family) in [
+            ("MultiPolygonZ", Some(Family::Polygons)),
+            ("TIN", Some(Family::Polygons)),
+            ("PolyhedralSurfaceZ", Some(Family::Polygons)),
+            ("MultiSurface", Some(Family::Polygons)),
+            ("CurvePolygon", Some(Family::Polygons)),
+            ("CompoundCurve", Some(Family::Lines)),
+            ("CircularStringZ", Some(Family::Lines)),
+            ("MultiLineString", Some(Family::Lines)),
+            ("PointZ", Some(Family::Points)),
+            ("GeometryZ", None),
+            ("Geometry", None),
+            ("GeometryCollection", None),
+        ] {
+            assert_eq!(Family::of_ogr_type(ty), family, "{ty}");
+        }
+    }
+
+    /// A layer mixing a point, a TIN (how GDAL reads an Esri multipatch), a curved polygon, a
+    /// compound curve and a collection of a TIN and a polygon (a multipatch from a Shapefile)
+    /// keeps all five: the surfaces, the curves and the collection were left out before.
+    #[test]
+    fn keeps_surfaces_curves_and_collections_when_gdal_is_installed() {
+        if !available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rustgis-gdal-surfaces-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("mixed.csv");
+        std::fs::write(
+            &csv,
+            "WKT,name\n\
+             \"POINT (10 20)\",p\n\
+             \"TIN Z (((0 0 1,1 0 1,0 1 2,0 0 1)),((1 0 1,1 1 2,0 1 2,1 0 1)))\",tin\n\
+             \"CURVEPOLYGON (CIRCULARSTRING (0 0,1 1,2 0,1 -1,0 0))\",curved\n\
+             \"COMPOUNDCURVE ((0 0,1 0),CIRCULARSTRING (1 0,2 1,3 0))\",curve\n\
+             \"GEOMETRYCOLLECTION Z (TIN Z (((5 5 1,6 5 1,5 6 2,5 5 1))),POLYGON Z ((7 7 0,8 7 0,8 8 0,7 7 0)))\",patch\n",
+        )
+        .unwrap();
+        let (out, failed) = convert_in(&dir.join("cache"), &csv, None, Some("EPSG:4326")).unwrap();
+        assert!(failed.is_empty(), "{failed:?}");
+        let kinds: Vec<(String, GeometryType, u64)> = out
+            .iter()
+            .map(|c| {
+                let s = crate::source::open_path(&c.path, None).unwrap();
+                (c.name.clone(), s.info().geometry_type, s.info().count.unwrap_or(0))
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("mixed (points)".to_string(), GeometryType::Point, 1),
+                ("mixed (lines)".to_string(), GeometryType::Polyline, 1),
+                ("mixed (polygons)".to_string(), GeometryType::Polygon, 3),
+            ],
+            "{kinds:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A KML mixing points and polygons, through GDAL when it is installed (skipped otherwise).

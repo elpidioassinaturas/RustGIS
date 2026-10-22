@@ -61,12 +61,42 @@ impl Family {
         }
     }
 
-    /// An OGR SQL filter on the geometry type.
+    /// An OGR SQL filter on the geometry type. Curves and surfaces count as lines and polygons:
+    /// an Esri multipatch, read as a TIN, a polyhedral surface or (from a Shapefile) a geometry
+    /// collection of them, is polygons. A collection of anything else fails the conversion to
+    /// polygons and is left out, as before.
     pub fn filter(self) -> &'static str {
         match self {
             Family::Points => "OGR_GEOMETRY IN ('POINT', 'MULTIPOINT')",
-            Family::Lines => "OGR_GEOMETRY IN ('LINESTRING', 'MULTILINESTRING')",
-            Family::Polygons => "OGR_GEOMETRY IN ('POLYGON', 'MULTIPOLYGON')",
+            Family::Lines => "OGR_GEOMETRY IN ('LINESTRING', 'MULTILINESTRING', 'CIRCULARSTRING', 'COMPOUNDCURVE', 'MULTICURVE')",
+            Family::Polygons => {
+                "OGR_GEOMETRY IN ('POLYGON', 'MULTIPOLYGON', 'CURVEPOLYGON', 'MULTISURFACE', 'TRIANGLE', 'TIN', 'POLYHEDRALSURFACE', 'GEOMETRYCOLLECTION')"
+            }
+        }
+    }
+
+    /// The OGR geometry type its features are converted to: curves become straight segments, and
+    /// a surface's faces the parts of a multipolygon.
+    pub fn ogr_type(self) -> &'static str {
+        match self {
+            Family::Points => "MULTIPOINT",
+            Family::Lines => "MULTILINESTRING",
+            Family::Polygons => "MULTIPOLYGON",
+        }
+    }
+
+    /// The family of an OGR layer geometry type as `ogrinfo -json` spells it (`MultiPolygonZ`,
+    /// `TIN`, `CompoundCurve`); `None` for one that mixes them (`GeometryZ`).
+    pub fn of_ogr_type(ty: &str) -> Option<Family> {
+        let ty = ty.to_ascii_lowercase();
+        if ty.contains("point") {
+            Some(Family::Points)
+        } else if ["polygon", "surface", "tin", "triangle"].iter().any(|k| ty.contains(k)) {
+            Some(Family::Polygons)
+        } else if ["linestring", "circularstring", "curve"].iter().any(|k| ty.contains(k)) {
+            Some(Family::Lines)
+        } else {
+            None
         }
     }
 }
@@ -171,6 +201,16 @@ pub struct Batch {
 
 /// A vector data source read in place.
 pub trait FeatureSource: Send + Sync {
+    /// Whether complete, ordered traversal is available without an interaction row limit.
+    fn streams_chunks(&self) -> bool {
+        false
+    }
+    /// Visits every matching feature in source painter order. Release each chunk before the
+    /// next callback. `bytes` targets owned feature storage; an indivisible larger row is emitted alone.
+    /// Callback errors stop traversal. Success returns an empty, complete summary batch.
+    fn visit_chunks(&self, _extent: Option<Extent>, _bytes: usize, _visit: &mut dyn FnMut(Vec<Feature>) -> Result<()>) -> Result<Batch> {
+        Err(DataError::Format("this provider does not support chunk traversal".into()))
+    }
     fn info(&self) -> &SourceInfo;
     /// Reads the features a request asks for. A source read by its web address fails with
     /// [`remote::NEED`] until the bytes the read needs are fetched: run it with
@@ -639,3 +679,7 @@ pub(crate) fn tls_provider() {
 
 #[cfg(test)]
 mod tests;
+
+pub mod chunk_memory;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod spill;

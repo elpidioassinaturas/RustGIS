@@ -334,6 +334,11 @@ pub enum Polled {
 }
 
 impl SourceLayer {
+    /// A source capable of a complete, ordered render traversal.
+    pub fn chunk_source(&self) -> Option<Arc<dyn FeatureSource>> {
+        self.handle.as_ref().filter(|h| h.streams_chunks()).cloned()
+    }
+
     /// Retained interaction bytes assigned by the map, or the standalone default.
     pub fn budget(&self) -> usize {
         if self.byte_budget == 0 { VIEW_BYTES } else { self.byte_budget }

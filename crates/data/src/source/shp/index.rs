@@ -112,11 +112,28 @@ impl DiskIndex {
 
     /// Visit in file order without allocating a list of all matches. SQLite's page cache is
     /// budgeted at 8 MiB; a large ordering operation spills to disk.
-    pub fn visit(&self, extent: Option<[f32; 4]>, limit: usize, mut visit: impl FnMut(u32, Place) -> Result<()>) -> Result<(u64, bool)> {
+    pub fn visit(&self, extent: Option<[f32; 4]>, limit: usize, visit: impl FnMut(u32, Place) -> Result<()>) -> Result<(u64, bool)> {
+        let db = self.db.lock().map_err(|_| bad("spatial index lock is poisoned"))?;
+        self.visit_on(&db, extent, limit, visit)
+    }
+
+    /// A complete render owns its read-only connection, so its callbacks never hold the
+    /// interaction connection's mutex. The index lease keeps this immutable file alive.
+    fn visit_complete(&self, extent: Option<[f32; 4]>, visit: impl FnMut(u32, Place) -> Result<()>) -> Result<(u64, bool)> {
+        let db = connect(self._lease.path(), false)?;
+        self.visit_on(&db, extent, u32::MAX as usize, visit)
+    }
+
+    fn visit_on(
+        &self,
+        db: &Connection,
+        extent: Option<[f32; 4]>,
+        limit: usize,
+        mut visit: impl FnMut(u32, Place) -> Result<()>,
+    ) -> Result<(u64, bool)> {
         // The index's own envelope (not the untrusted file header) proves that every box
         // matches. Skip the R-tree and its global ordering operation for overview requests.
         let extent = extent.filter(|e| u64::from(self.covered) != self.count || !self.covers_bbox(*e));
-        let db = self.db.lock().map_err(|_| bad("spatial index lock is poisoned"))?;
         let (from, args) = if let Some([x0, y0, x1, y1]) = extent {
             ("bounds CROSS JOIN records USING(id) WHERE x0<=?1 AND x1>=?2 AND y0<=?3 AND y1>=?4", vec![x1, x0, y1, y0])
         } else {
@@ -189,6 +206,13 @@ impl Index {
                 }
                 Ok(Self { count: u64::from(count), storage: Storage::Scan { path: path.to_path_buf(), len } })
             }
+        }
+    }
+    /// Complete file-order traversal without holding the shared interaction connection.
+    pub fn visit_complete(&self, extent: Option<[f32; 4]>, visit: impl FnMut(u32, Place) -> Result<()>) -> Result<(u64, bool)> {
+        match &self.storage {
+            Storage::Disk(disk) => disk.visit_complete(extent, visit),
+            Storage::Scan { .. } => self.visit(extent, u32::MAX as usize, visit),
         }
     }
     pub fn indexed(&self) -> bool {

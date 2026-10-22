@@ -185,6 +185,87 @@ impl FeatureSource for ShpSource {
         })?;
         Ok(Batch { features, matched, complete, skipped })
     }
+    fn streams_chunks(&self) -> bool {
+        true
+    }
+    fn visit_chunks(&self, extent: Option<Extent>, bytes: usize, visit: &mut dyn FnMut(Vec<Feature>) -> Result<()>) -> Result<Batch> {
+        if bytes == 0 {
+            return Err(bad("the render memory budget is zero"));
+        }
+        let extent = extent.map(|e| self.reproject.extent_from_lonlat(&e));
+        if extent.is_some_and(|e| e.is_empty()) {
+            return Ok(Batch { complete: true, ..Batch::default() });
+        }
+        let bounds = extent.map(|e| [e.min_x as f32, e.min_y as f32, e.max_x as f32, e.max_y as f32]);
+        let mut used = 0usize;
+        let mut shp = Cursor::open(&self.shp)?;
+        let mut dbf = Cursor::open(&self.dbf)?;
+        let mut buf = Vec::new();
+        let mut row = vec![0u8; self.table.row_len];
+        let mut features = Vec::new();
+        let mut skipped = 0;
+        // The same directory, ordering, extent rules and read-only scan fallback as sampled
+        // reads, with no interaction row cap. The index visits records without materializing
+        // their directory or the complete feature collection in memory.
+        // Every record id fits u32. This format bound visits them all while keeping SQLite's
+        // LIMIT within its signed integer range on 64-bit hosts.
+        let (matched, complete) = self.index.visit_complete(bounds, |i, place| {
+            buf.resize(place.len as usize, 0);
+            if shp.read_at(u64::from(place.offset), &mut buf).is_err() {
+                skipped += 1;
+                return Ok(());
+            }
+            let geometry = match parse_shape(&buf) {
+                Ok(Some(g)) => match self.reproject.geometry(g) {
+                    Some(g) => Some(g),
+                    None => {
+                        skipped += 1;
+                        return Ok(());
+                    }
+                },
+                Ok(None) => None,
+                Err(()) => {
+                    skipped += 1;
+                    return Ok(());
+                }
+            };
+            let attrs = if u64::from(i) < self.table.rows {
+                let at = self.table.header_len + u64::from(i) * self.table.row_len as u64;
+                if dbf.read_at(at, &mut row).is_err() {
+                    skipped += 1;
+                    return Ok(());
+                }
+                // A deleted row: its shape is left out too.
+                if row.first() == Some(&b'*') {
+                    return Ok(());
+                }
+                self.table.columns.iter().map(|c| value(c, row.get(1 + c.offset..1 + c.offset + c.len).unwrap_or(&[]))).collect()
+            } else {
+                vec![Value::Null; self.table.columns.len()]
+            };
+            let feature = Feature { id: u64::from(i) + 1, geometry, attrs };
+            let size = super::chunk_memory::feature_bytes(&feature).saturating_add(std::mem::size_of::<Feature>());
+            if !features.is_empty() && used.saturating_add(size) > bytes {
+                features.shrink_to_fit();
+                visit(std::mem::take(&mut features))?;
+                used = 0;
+            }
+            // A geometry is indivisible. Preserve a valid detailed row instead of dropping it
+            // or failing the entire layer when it alone exceeds the chunk target.
+            if size > bytes {
+                visit(vec![feature])?;
+                return Ok(());
+            }
+            used = used.saturating_add(size);
+            features.push(feature);
+            Ok(())
+        })?;
+        if !features.is_empty() {
+            features.shrink_to_fit();
+            visit(features)?;
+        }
+        Ok(Batch { features: Vec::new(), matched, complete, skipped })
+    }
 }
 
 /// A file read at offsets, through a buffer that a nearby offset reuses.

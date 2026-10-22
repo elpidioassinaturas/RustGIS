@@ -269,6 +269,18 @@ fn cache_child_fixture() {
             assert_eq!(batch.matched, 1);
             assert_eq!(batch.features.len(), limit.min(1));
         }
+        let expected = source.read(&crate::source::Request::all()).unwrap();
+        let mut rows = Vec::new();
+        let summary = source
+            .visit_chunks(None, 1, &mut |chunk| {
+                rows.extend(chunk);
+                Ok(())
+            })
+            .unwrap();
+        assert!(summary.complete);
+        assert!(summary.features.is_empty());
+        assert_eq!(summary.matched, expected.matched);
+        assert_eq!(rows, expected.features, "complete chunks must also work without a disk cache");
         assert_eq!(std::fs::read(root.join("blocked")).unwrap(), b"keep");
         assert_eq!(std::fs::read(index_fallback_dir()).unwrap(), b"keep fallback");
         return;
