@@ -665,6 +665,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let edges = GridEdges { top: sheet, bottom: true, left: true, right: sheet };
     let strip_w = if edges.left || edges.right { 2.0 * LABEL_ROOM_SIDE } else { 0.0 };
     let strip_h = if edges.top || edges.bottom { 2.0 * LABEL_ROOM_END } else { 0.0 };
+    if fw - strip_w < fw / 2.0 || fh - strip_h < fh / 2.0 {
+        warnings.push("the frame is too small to keep its graticule's labels off the map's edges: they may cover them".into());
+    }
     let (center, scale) = fit_scale(s.map(), &extent, (fw - strip_w).max(fw / 2.0), (fh - strip_h).max(fh / 2.0))
         .ok_or("the extent can't be drawn on the map's projection")?;
     let scale = round_scale(scale);

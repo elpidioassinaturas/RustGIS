@@ -952,7 +952,13 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
                         }
                         // The view's extent may not be known (an empty map): said, and the tab stays.
                         match app.run("layout.publication", p) {
-                            Ok(_) => app.ui.tab = "Publish".into(),
+                            Ok(r) => {
+                                // What the layout couldn't do as asked (a legend clipped, a layer still reading).
+                                for w in r["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str()) {
+                                    app.session.notify(w.to_string(), false);
+                                }
+                                app.ui.tab = "Publish".into();
+                            }
                             Err(e) => app.session.notify(e, true),
                         }
                         ui.close();
