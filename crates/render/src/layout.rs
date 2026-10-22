@@ -939,9 +939,11 @@ fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32
 
 /// The size a legend with no title takes, in mm (width, height): its rows as [`legend`] draws
 /// them, the classes a frame shows at the renderer's scale denominator `scale` (as the layout
-/// finds it for a frame), or every class with `all_classes`. For sizing a legend to its content.
-pub fn legend_size_mm(map: &Map, scale: f64, all_classes: bool, hide_other: bool, exclude: &[String]) -> (f64, f64) {
-    let drawn = (!all_classes).then(|| shown_legends(map, scale));
+/// finds it for a frame, a complete source read through as [`render`] reads it), or every class
+/// with `all_classes`. For sizing a legend to its content. `None` when a complete source can't be
+/// read, as [`render`] then draws no page.
+pub fn legend_size_mm(map: &mut Map, scale: f64, all_classes: bool, hide_other: bool, exclude: &[String]) -> Option<(f64, f64)> {
+    let drawn = if all_classes { None } else { Some(complete_shown_legends(map, scale)?) };
     let rows = legend_rows(map, drawn.as_deref(), &LegendOptions { hide_other, exclude });
     let width = rows
         .iter()
@@ -952,7 +954,7 @@ pub fn legend_size_mm(map: &Map, scale: f64, all_classes: bool, hide_other: bool
         })
         .fold(0.0f32, f32::max);
     let mm = 25.4 / 96.0;
-    (f64::from(width) * mm, rows.len() as f64 * f64::from(LEGEND_ROW) * mm)
+    Some((f64::from(width) * mm, rows.len() as f64 * f64::from(LEGEND_ROW) * mm))
 }
 
 /// The renderer's scale denominator for a frame showing `map` at paper scale 1:`scale` (the one
@@ -1361,11 +1363,11 @@ mod tests {
         // every class.
         let row = f64::from(LEGEND_ROW) * 25.4 / 96.0;
         for (all_classes, ink) in [(false, shown), (true, all)] {
-            let (w, h) = legend_size_mm(&map, 1e6, all_classes, false, &[]);
+            let (w, h) = legend_size_mm(&mut map, 1e6, all_classes, false, &[]).unwrap();
             let ink = f64::from(ink) * 25.4 / 96.0;
             assert!(w > 0.0 && ink <= h && h - ink < row, "{ink} mm drawn in {h} mm");
         }
-        assert!((legend_size_mm(&map, 1e6, false, false, &[]).1 - 2.0 * row).abs() < 1e-9);
+        assert!((legend_size_mm(&mut map, 1e6, false, false, &[]).unwrap().1 - 2.0 * row).abs() < 1e-9);
         // A layer the legend leaves out (by name, any case) isn't listed, drawn or not.
         let name = map.layer(pts).unwrap().name.to_uppercase();
         assert_eq!(depth_without(&map, Some(&drawn), false, std::slice::from_ref(&name)), 0, "its only drawn layer left out");

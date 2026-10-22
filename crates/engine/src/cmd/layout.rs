@@ -369,14 +369,32 @@ pub(crate) fn step_text(step: f64) -> String {
 }
 
 /// The map's projection and datum for a layout's texts: an EPSG name's two halves (`SIRGAS 2000 /
-/// UTM zone 23S`), else the projection's name over WGS 84, as the presets take longitudes and
-/// latitudes.
+/// UTM zone 23S`), else the projection's name and the datum its definition names (a preset's
+/// `+datum=NAD83`), WGS 84 when it names none.
 fn projection_and_datum(s: &Session) -> (String, String) {
-    let label = s.map().projection.label();
-    match label.split_once(" / ") {
-        Some((datum, projection)) => (projection.trim().to_string(), datum.trim().to_string()),
-        None => (label, "WGS 84".to_string()),
+    let projection = &s.map().projection;
+    let label = projection.label();
+    if let Some((datum, name)) = label.split_once(" / ") {
+        return (name.trim().to_string(), datum.trim().to_string());
     }
+    let datum = rustgis_map::projection::lookup(&projection.code()).ok().and_then(|(def, _)| datum_of(&def));
+    (label, datum.unwrap_or_else(|| "WGS 84".to_string()))
+}
+
+/// The datum a PROJ definition names: its `+datum`, else its `+ellps`, else a sphere for `+R`.
+pub(crate) fn datum_of(def: &str) -> Option<String> {
+    let param = |k: &str| def.split_whitespace().find_map(|t| t.strip_prefix(k).map(str::to_string));
+    if let Some(d) = param("+datum=") {
+        return Some(if d == "WGS84" { "WGS 84".into() } else { d });
+    }
+    if let Some(e) = param("+ellps=") {
+        return Some(match e.as_str() {
+            "WGS84" => "WGS 84".into(),
+            "GRS80" => "GRS 1980 ellipsoid".into(),
+            _ => format!("{e} ellipsoid"),
+        });
+    }
+    param("+R=").map(|_| "a sphere".into())
 }
 
 /// Texts given as one or a list (up to 50), each cut to [`MAX_PUBLICATION_TEXT`] characters.
@@ -684,7 +702,14 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     };
     let lonlat = crate::render::view_lonlat(s.map(), &view);
     let reading = s.map_mut().sync_sources(&lonlat, render_scale, true);
-    let (mut cw, mut ch) = crate::render::layout::legend_size_mm(s.map(), render_scale, false, false, &[]);
+    let (mut cw, mut ch) = match crate::render::layout::legend_size_mm(s.map_mut(), render_scale, false, false, &[]) {
+        Some(size) => size,
+        None => {
+            // A complete source that can't be read: the export says why; the legend is sized by hand.
+            warnings.push("a layer's source couldn't be read through, so the legend has a fixed size; exporting says why".into());
+            (fw * 0.3, fh * 0.25)
+        }
+    };
     let listed = s.map().layers.iter().any(|l| s.map().shows(l) && !l.graphics && !l.is_raster());
     if reading && listed {
         (cw, ch) = (cw.max(fw * 0.3), ch.max(fh * 0.25));

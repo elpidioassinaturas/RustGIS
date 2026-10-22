@@ -2408,7 +2408,18 @@ fn publication_layouts_fit_their_pages() {
     let one = s.project.layouts.iter().find(|l| l.name == "figure-1col").unwrap();
     assert!(one.width == 90.0 && one.height > 90.0, "{} × {}", one.width, one.height);
     // Graticule steps and round scales.
-    use crate::cmd::layout::{capitals, grid_step, round_scale, step_text};
+    use crate::cmd::layout::{capitals, datum_of, grid_step, round_scale, step_text};
+    assert_eq!(datum_of("+proj=aea +lat_1=29.5 +datum=NAD83 +units=m").as_deref(), Some("NAD83"));
+    assert_eq!(datum_of("+proj=robin +ellps=WGS84").as_deref(), Some("WGS 84"));
+    assert_eq!(datum_of("+proj=eqearth +R=6371008.8").as_deref(), Some("a sphere"));
+    assert_eq!(datum_of("+proj=moll"), None);
+    // A preset on NAD83 says so, though its name holds no datum.
+    s.run("map.projection", &json!({"type": "usaAlbers"})).unwrap();
+    s.run("layout.publication", &json!({"extent": [-100, 35, -90, 45]})).unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let ElementKind::Text { text, .. } = &l.elements.iter().find(|e| e.name == "Reference").unwrap().kind else { panic!() };
+    assert!(text.contains("Datum: NAD83"), "{text}");
+    s.project.layouts.pop();
     assert_eq!(capitals("Fontes, {date} e {pageName}"), "FONTES, {date} E {pageName}");
     assert_eq!(capitals("Dados {2024 e {só} }"), "DADOS {2024 E {SÓ} }", "a lone or odd brace is text");
     assert_eq!(grid_step(&rustgis_geom::Extent::new(10.0, 45.0, 11.0, 46.0)), 0.25);
