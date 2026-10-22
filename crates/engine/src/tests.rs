@@ -7333,9 +7333,11 @@ fn a_trend_over_a_stac_collection() {
         assert!((near - (2 * x + 2 * y) as f64 * unit - offsets).abs() < 1e-4, "nearest ({x}, {y}): {near}");
         assert!((avg - (2 * x + 2 * y + 1) as f64 * unit - offsets).abs() < 1e-4, "average ({x}, {y}): {avg}");
     }
-    coarse["resampling"] = json!("bilinear");
     let before = s.map().layers.len();
-    assert!(s.run("cube.trend", &coarse).unwrap_err().contains("resampling"));
+    for bad in [json!("bilinear"), json!(3)] {
+        coarse["resampling"] = bad;
+        assert!(s.run("cube.trend", &coarse).unwrap_err().contains("resampling"));
+    }
     assert_eq!(s.map().layers.len(), before, "refused, nothing added");
     coarse["resampling"] = Value::Null;
     // The level nearest the size asked: 0.0025 is nearer the full images' 1/512° than 1/256°.

@@ -564,10 +564,15 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
     // An overview is often made by taking one pixel in each block (the Brazil Data Cube's are,
     // GDAL's NEAREST), so a cell of it is one of the full images' pixels, which can differ much
     // from the place's mean: "average" reads the full images and takes the mean of each cell's.
-    let average = match ps(p, "resampling").map(str::trim) {
-        None | Some("") | Some("nearest") => false,
-        Some("average") => true,
-        Some(x) => return Err(format!("resampling is nearest or average, not {x}")),
+    let average = match p.get("resampling").filter(|v| !v.is_null()) {
+        None => false,
+        Some(v) => match v.as_str().map(str::trim) {
+            Some("") | Some("nearest") => false,
+            Some("average") => true,
+            Some(x) => return Err(format!("resampling is nearest or average, not {x}")),
+            // A number or anything else isn't read as the default: said.
+            None => return Err("resampling is nearest or average".into()),
+        },
     };
     let full = layout.levels.first().ok_or("the file has no image")?;
     let (read, factor) = if average && level > 0 {
