@@ -662,6 +662,11 @@ impl super::cube::TimeCube for StacCube {
             let lv = info.layout.levels.get(self.level).ok_or_else(|| format!("{href} has fewer overviews than the first file"))?;
             let lt = info.layout.transform_of(lv);
             let (dx, dy) = offset_in(&grid, &lt).ok_or_else(|| format!("{href} is on another grid of pixels than the first file"))?;
+            // Averaged, a cell is a block of `f` × `f` of the file's pixels: the file's corner
+            // has to fall on a block's, or the blocks would straddle cells.
+            if dx.rem_euclid(i64::from(f)) != 0 || dy.rem_euclid(i64::from(f)) != 0 {
+                return Err(format!("{href}'s pixels don't fall in whole cells of the area: take \"resampling\": \"nearest\""));
+            }
             // The piece's columns and rows in the file's pixels, within the file.
             let (fc0, fc1) = (dx.max(0), (dx + wf).min(i64::from(lv.width)));
             let (fr0, fr1) = ((dy + top_f).max(0), (dy + top_f + hf).min(i64::from(lv.height)));

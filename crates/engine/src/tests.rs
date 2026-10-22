@@ -1079,6 +1079,8 @@ fn hostile_params_never_panic() {
         json!({"kind": "colorbar", "ticks": -1e308, "tickSide": 7, "orientation": "x", "layer": "", "reverse": "maybe"}),
         json!({"type": "albers", "lon_0": f64::MAX, "lat_1": "x", "lat_2": -1e308}),
         json!({"kind": "legend", "element": 1, "exclude": [null, 7, "", {"x": 1}]}),
+        // A STAC trend's source: junk values, and an API on a closed local port, so nothing is read.
+        json!({"collection": "c", "asset": [], "url": "http://127.0.0.1:9/v1", "bbox": "nowhere", "cellSize": -1e308, "resampling": 3, "start": "x"}),
         // MySQL addresses that can't be read, so nothing connects.
         json!({"database": "mysql://u:p#@[::1/x?ssl-mode=nope", "password": 7, "layer": ":", "crs": "EPSG:-1"}),
         json!({"database": "MARIADB://u@h:99999999/%zz?ssl-mode=VERIFY_CA&ssl-ca=/nonexistent", "sql": "SELECT 1"}),
