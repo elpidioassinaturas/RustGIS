@@ -2516,6 +2516,64 @@ fn publication_layouts_fit_their_pages() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A publication layout's locator (#682, part 2): on a sheet, by default, a globe (a new map of
+/// the vector layers on the globe, its diameter nearly the frame's) in a round frame at the map's
+/// top left, the area outlined by the map frame's extent indicator; `"inset"` the surrounding
+/// region on the map itself; `"none"`, or a figure by default, none. The legend stops short of it,
+/// and undo takes the globe's map away with the layout.
+#[test]
+fn publication_layouts_locate_their_area() {
+    use rustgis_map::layout::{ElementKind, FrameShape};
+    let dir = std::env::temp_dir().join(format!("rustgis-locator-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = world();
+    let piaui = json!([-46.8, -11.6, -38.5, -2.2]);
+    let maps = s.project.maps.len();
+    let main = s.map().name.clone();
+    let r = s.run("layout.publication", &json!({"extent": piaui, "title": "PIAUÍ"})).unwrap();
+    let globe = r["locator"].as_str().unwrap().to_string();
+    assert_eq!((s.project.maps.len(), globe.as_str()), (maps + 1, format!("{main} Locator").as_str()));
+    let m = s.project.maps.iter().find(|m| m.name == globe).unwrap();
+    assert!(m.projection.is_globe() && m.layers.iter().all(|l| !l.is_raster()));
+    assert_eq!(s.map().name, main, "the map in view stays the active one");
+    let l = s.project.layouts.last().unwrap();
+    let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap_or_else(|| panic!("no {n}"));
+    let (frame, locator) = (named("Map Frame"), named("Locator"));
+    let ElementKind::MapFrame { map, shape, extent_of, scale, .. } = &locator.kind else { panic!() };
+    assert_eq!((map.as_str(), shape, *extent_of), (globe.as_str(), &FrameShape::Circle, Some(frame.id)));
+    // Inside the map frame at its top left, above the legend.
+    assert!(locator.x > frame.x && locator.y > frame.y && locator.x + locator.w < frame.x + frame.w / 2.0);
+    let legend = named("Legend Box");
+    assert!(legend.y >= locator.y + locator.h, "the legend stops short of the locator");
+    // The globe nearly fills its frame: drawn, its ink spans most of the frame's width.
+    assert!(*scale > 1e7, "1:{scale}");
+    let png = dir.join("globe.png");
+    s.run("layout.export", &json!({"path": png.display().to_string(), "dpi": 96})).unwrap();
+    // The surrounding region on the map itself: no new map, a coarser scale.
+    let r = s.run("layout.publication", &json!({"extent": piaui, "locator": "inset"})).unwrap();
+    assert_eq!((s.project.maps.len(), r["locator"].as_str()), (maps + 1, Some(main.as_str())));
+    let l = s.project.layouts.last().unwrap();
+    let main_scale = r["scale"].as_f64().unwrap();
+    let inset = l.elements.iter().find(|e| e.name == "Locator").unwrap();
+    let ElementKind::MapFrame { map, shape, scale, extent_of, .. } = &inset.kind else { panic!() };
+    assert!(map == &main && shape == &FrameShape::Rectangle && *scale > main_scale * 3.0 && extent_of.is_some(), "1:{scale}");
+    s.run("layout.export", &json!({"path": dir.join("inset.png").display().to_string(), "dpi": 96})).unwrap();
+    // None asked, or a figure by default: no locator.
+    for p in [json!({"extent": piaui, "locator": "none"}), json!({"extent": piaui, "profile": "figure-1col"})] {
+        let r = s.run("layout.publication", &p).unwrap();
+        assert!(r["locator"].is_null() && s.project.layouts.last().unwrap().elements.iter().all(|e| e.name != "Locator"), "{p}");
+    }
+    let e = s.run("layout.publication", &json!({"extent": piaui, "locator": "moon"})).unwrap_err();
+    assert!(e.contains("locator is"), "{e}");
+    // Undone, a globe locator's map goes with its layout.
+    let before = s.project.maps.len();
+    s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    assert_eq!(s.project.maps.len(), before + 1);
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(s.project.maps.len(), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn layouts_compose_export_and_round_trip() {
     use base64::Engine;
