@@ -42,8 +42,10 @@ pub fn search_params(s: &Session, p: &Value) -> Result<Search, String> {
                 _ => return Err("bbox is [west, south, east, north], or \"view\"".into()),
             }
         }
-        _ if b(p, "view").unwrap_or(false) => Some(view(s)?),
-        _ => None,
+        None | Some(Value::Null) if b(p, "view").unwrap_or(false) => Some(view(s)?),
+        None | Some(Value::Null) => None,
+        // Anything else ("nowhere", a number) is refused rather than read as no area at all.
+        Some(_) => return Err("bbox is [west, south, east, north], or \"view\"".into()),
     };
     Ok(Search {
         collections,

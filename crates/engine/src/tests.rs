@@ -7251,14 +7251,18 @@ fn a_stac_data_cube_on_the_time_slider() {
 }
 
 /// A search's `"bbox": "view"` is the map's view in any case or spacing, as the trend and the data
-/// cube read it, never no area at all.
+/// cube read it; any other text is refused, never read as no area at all.
 #[test]
 fn a_stac_search_takes_view_in_any_case() {
     let s = world();
     let search = |bbox: &str| crate::cmd::stac::search_params(&s, &json!({"bbox": bbox})).unwrap().bbox;
     assert!(search("view").is_some());
     assert_eq!(search(" VIEW "), search("view"));
-    assert!(crate::cmd::stac::search_params(&s, &json!({"bbox": "nowhere"})).unwrap().bbox.is_none());
+    for bad in [json!("nowhere"), json!(7), json!({"w": 1})] {
+        let e = crate::cmd::stac::search_params(&s, &json!({"bbox": bad})).unwrap_err();
+        assert!(e.contains("bbox is"), "{bad}: {e}");
+    }
+    assert!(crate::cmd::stac::search_params(&s, &json!({})).unwrap().bbox.is_none(), "no bbox, no area");
 }
 
 /// A trend over a STAC collection's band (#579), read in place from its files over an area: each
