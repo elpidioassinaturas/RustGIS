@@ -380,6 +380,12 @@ fn projection_and_datum(s: &Session) -> (String, String) {
     if let Some((datum, name)) = label.split_once(" / ") {
         return (name.trim().to_string(), datum.trim().to_string());
     }
+    // A UTM zone's EPSG code, named: its PROJ definition gives only an ellipsoid (SIRGAS 2000's
+    // zones have +ellps=GRS80), and its label only the code.
+    let code = label.strip_prefix("EPSG:").and_then(|n| n.parse::<u32>().ok());
+    if let Some((datum, zone, north)) = code.and_then(rustgis_data::raster::wkt::utm_of_code) {
+        return (format!("UTM zone {zone}{}", if north { "N" } else { "S" }), datum.to_string());
+    }
     let datum = rustgis_map::projection::lookup(&projection.code()).ok().and_then(|(def, _)| datum_of(&def));
     (label, datum.unwrap_or_else(|| "WGS 84".to_string()))
 }
@@ -471,6 +477,9 @@ enum Surround {
     Legend,
     Scale,
 }
+
+/// A publication layout's colorbar's height, in mm: its title, the bar and its labels.
+const COLORBAR_MM: f64 = 15.0;
 
 /// The share of a surround over what the map draws past which, a corner freer by as much having
 /// gone to another surround, the layout says so.
@@ -868,8 +877,16 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         surrounds.push((Surround::Locator, side, side, 0));
     }
     surrounds.push((Surround::Arrow, aw, ah, 1));
-    if ch > 0.0 {
-        surrounds.push((Surround::Legend, (cw + 2.0 * pad).min(fw * 0.45), (ch + 2.0 * pad).min(fh * 0.6), 2));
+    // The topmost visible raster drawn on a ramp gets a colorbar, under the legend in its box (a
+    // map whose theme is a raster has its key there, which the legend's rows don't give).
+    let bar = rustgis_map::layout::colorbar_layer(s.map(), None)
+        .filter(|l| l.raster.as_ref().and_then(rustgis_map::layout::color_scale).is_some())
+        .map(|l| l.name.clone());
+    let (bar_w, bar_h) = (if sheet { 50.0 * k } else { 40.0 }, COLORBAR_MM);
+    let bar_part = if bar.is_some() { bar_h + if ch > 0.0 { 2.0 } else { 0.0 } } else { 0.0 };
+    let (content_w, content_h) = (if bar.is_some() { cw.max(bar_w) } else { cw }, ch + bar_part);
+    if content_h > 0.0 {
+        surrounds.push((Surround::Legend, (content_w + 2.0 * pad).min(fw * 0.45), (content_h + 2.0 * pad).min(fh * 0.6), 2));
     }
     surrounds.push((Surround::Scale, sw, sh + nh, 3));
     // A corner's rectangle for a surround `w` × `h`.
@@ -940,17 +957,36 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         let room_w = other(corner ^ 1).map_or(f64::INFINITY, |(ow, _)| fw - left - right - ow - 2.0).max(10.0);
         let room_h = other(corner ^ 2).map_or(f64::INFINITY, |(_, oh)| fh - top - bottom - oh - e).max(10.0);
         let (lw, lh) = (w.min(room_w), h.min(room_h));
-        if cw + 2.0 * pad > lw || ch + 2.0 * pad > lh {
+        if content_w + 2.0 * pad > lw || content_h + 2.0 * pad > lh {
             warnings.push("the legend lists more than fits its corner: its last rows or the ends of long labels are left out".into());
         }
         let r = at(corner, lw, lh);
         placed.push(("legend", r));
         l.add("Legend Box", r, pub_box(paper, clear, 0.0));
-        l.add(
-            "Legend",
-            (r.0 + pad, r.1 + pad, lw - 2.0 * pad, lh - 2.0 * pad),
-            ElementKind::Legend { frame, title: String::new(), all_classes: false, hide_other: false, exclude: Vec::new() },
-        );
+        // The legend's rows at the top, the colorbar at the bottom of the box.
+        let (ix, iy, iw, ih) = (r.0 + pad, r.1 + pad, lw - 2.0 * pad, lh - 2.0 * pad);
+        if ch > 0.0 {
+            l.add(
+                "Legend",
+                (ix, iy, iw, (ih - bar_part).max(1.0)),
+                ElementKind::Legend { frame, title: String::new(), all_classes: false, hide_other: false, exclude: Vec::new() },
+            );
+        }
+        if let Some(layer) = &bar {
+            l.add(
+                "Colorbar",
+                (ix, iy + ih - bar_h, iw, bar_h),
+                ElementKind::Colorbar {
+                    frame,
+                    layer: Some(layer.clone()),
+                    title: layer.clone(),
+                    orientation: Orientation::Horizontal,
+                    ticks: 5,
+                    tick_side: TickSide::End,
+                    reverse: false,
+                },
+            );
+        }
     }
     if let Some((corner, w, h)) = corner_of(Surround::Scale) {
         let (sx, sy, ..) = at(corner, w, h);

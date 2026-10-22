@@ -2493,6 +2493,13 @@ fn publication_layouts_fit_their_pages() {
     assert_eq!(datum_of("+proj=robin +ellps=WGS84").as_deref(), Some("WGS 84"));
     assert_eq!(datum_of("+proj=eqearth +R=6371008.8").as_deref(), Some("a sphere"));
     assert_eq!(datum_of("+proj=moll"), None);
+    // A UTM zone's code is named by its zone and datum, not its ellipsoid.
+    s.run("map.projection", &json!({"type": "EPSG:31983"})).unwrap();
+    s.run("layout.publication", &json!({"extent": [-46, -11, -40, -2.7]})).unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let ElementKind::Text { text, .. } = &l.elements.iter().find(|e| e.name == "Reference").unwrap().kind else { panic!() };
+    assert!(text.contains("Projection: UTM zone 23S") && text.contains("Datum: SIRGAS 2000"), "{text}");
+    s.project.layouts.pop();
     // A preset on NAD83 says so, though its name holds no datum.
     s.run("map.projection", &json!({"type": "usaAlbers"})).unwrap();
     s.run("layout.publication", &json!({"extent": [-100, 35, -90, 45]})).unwrap();
@@ -2656,6 +2663,35 @@ fn publication_surrounds_keep_off_the_data() {
         assert!(s.run("layout.publication", &json!({"extent": extent, "decimal": p["decimal"]})).unwrap_err().contains("decimal is"));
     }
     s.run("layout.export", &json!({"path": dir.join("comma.png").display().to_string(), "dpi": 72})).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A publication layout keys a raster theme with a colorbar: the topmost visible raster drawn on a
+/// ramp gets one at the bottom of the legend's box; a map of vectors only gets none.
+#[test]
+fn a_publication_layouts_raster_gets_a_colorbar() {
+    use rustgis_map::layout::ElementKind;
+    let dir = std::env::temp_dir().join(format!("rustgis-colorbar-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tif = dir.join("ramp.tif");
+    std::fs::write(&tif, rustgis_data::raster::cog::example(256, 128)).unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": tif.display().to_string()})).unwrap();
+    let r = s.run("layout.publication", &json!({"extent": [10, 45, 11, 46], "author": "", "locator": "none"})).unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let named = |n: &str| l.elements.iter().find(|e| e.name == n);
+    let (bar, then) = (named("Colorbar").unwrap_or_else(|| panic!("no colorbar: {r}")), named("Legend Box").unwrap());
+    let ElementKind::Colorbar { layer, title, .. } = &bar.kind else { panic!() };
+    assert_eq!((layer.as_deref(), title.as_str()), (Some("ramp"), "ramp"));
+    assert!(
+        bar.x >= then.x && bar.x + bar.w <= then.x + then.w + 1e-9 && bar.y + bar.h <= then.y + then.h + 1e-9,
+        "inside the legend's box"
+    );
+    s.run("layout.export", &json!({"path": dir.join("colorbar.png").display().to_string(), "dpi": 72})).unwrap();
+    // Vectors only: no colorbar.
+    let mut s = world();
+    s.run("layout.publication", &json!({"extent": [10, 45, 11, 46]})).unwrap();
+    assert!(s.project.layouts.last().unwrap().elements.iter().all(|e| e.name != "Colorbar"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

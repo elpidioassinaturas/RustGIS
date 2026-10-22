@@ -607,6 +607,24 @@ fn utm(name: &str) -> Option<u32> {
     }
 }
 
+/// The datum and zone of a UTM zone's EPSG code on WGS 84, NAD 83, ETRS 89 or SIRGAS 2000, the
+/// codes [`utm`] reads names into: `31983` is `("SIRGAS 2000", 23, false)` (zone 23 south). For
+/// naming a map's projection where its PROJ definition gives only an ellipsoid.
+pub fn utm_of_code(code: u32) -> Option<(&'static str, u32, bool)> {
+    Some(match code {
+        32601..=32660 => ("WGS 84", code - 32600, true),
+        32701..=32760 => ("WGS 84", code - 32700, false),
+        26901..=26960 => ("NAD83", code - 26900, true),
+        25801..=25860 => ("ETRS89", code - 25800, true),
+        31965..=31976 => ("SIRGAS 2000", code - 31954, true),
+        6210 => ("SIRGAS 2000", 23, true),
+        6211 => ("SIRGAS 2000", 24, true),
+        31977..=31985 => ("SIRGAS 2000", code - 31960, false),
+        5396 => ("SIRGAS 2000", 26, false),
+        _ => return None,
+    })
+}
+
 /// A projection's PROJ definition built from its WKT parameters.
 fn custom(p: &Node, method: &str) -> Result<Crs, String> {
     let params: Vec<(String, f64)> = p
@@ -1107,6 +1125,14 @@ mod tests {
         for code in [31965, 31976, 6210, 6211, 31977, 31985, 5396] {
             assert!(Crs::from_epsg(code).is_some(), "EPSG:{code}");
         }
+        // And back: every code's datum and zone name it again.
+        for code in [32631, 32717, 26917, 25832, 31965, 31976, 6210, 6211, 31977, 31983, 31985, 5396] {
+            let (datum, zone, north) = utm_of_code(code).unwrap_or_else(|| panic!("EPSG:{code}"));
+            let name = format!("{}_UTM_ZONE_{zone}{}", datum.replace(' ', "_"), if north { "N" } else { "S" });
+            assert_eq!(utm(&name), Some(code), "{name}");
+        }
+        assert_eq!(utm_of_code(31983), Some(("SIRGAS 2000", 23, false)));
+        assert_eq!(utm_of_code(3857), None);
         // A zone without an EPSG code is still read, by its parameters, and without a note.
         let zone_10s = utm_24s.replace("Zone_24S", "Zone_10S").replace("-39.0", "-123.0");
         let (crs, note) = read_wkt(&zone_10s).unwrap();
