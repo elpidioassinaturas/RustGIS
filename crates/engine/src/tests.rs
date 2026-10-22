@@ -2379,6 +2379,15 @@ fn publication_layouts_fit_their_pages() {
     assert_eq!(listed.len(), l.elements.len());
     assert!(listed.iter().any(|e| e["name"] == "Map Frame" && e["element"] == frame.id && e["kind"] == "mapFrame"), "{r}");
     s.project.layouts.pop();
+    // Undone as one command: the layout goes, and the map is as it was (its layers, view and
+    // projection), the legend's sync of streamed layers included.
+    let (layouts, map) = (s.project.layouts.len(), s.map().clone());
+    s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(s.project.layouts.len(), layouts);
+    let ids = |m: &rustgis_map::Map| m.layers.iter().map(|l| (l.id, l.name.clone(), l.visible)).collect::<Vec<_>>();
+    assert_eq!(ids(s.map()), ids(&map));
+    assert_eq!((s.map().projection.code(), s.map().camera.center), (map.projection.code(), map.camera.center));
     // An empty author leaves the authorship out.
     for none in [json!(""), json!([]), json!(["  "])] {
         s.run("layout.publication", &json!({"extent": piaui, "author": none})).unwrap();
