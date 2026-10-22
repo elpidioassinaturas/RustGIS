@@ -449,7 +449,9 @@ const STAC_READERS: usize = 8;
 
 /// The most pixels of the files one slice of a piece reads: 1 million. A reader holds them (4
 /// bytes each) with its cells' sums, counts and values (16 bytes a cell, as many cells as pixels
-/// at most), about 20 MB, so the [`STAC_READERS`] hold about 160 MB together. A trend over few
+/// at most), about 20 MB, so the [`STAC_READERS`] hold about 160 MB together; the slices read and
+/// waiting to go into the block (as many as readers) keep only their values, 4 MB each, 32 MB
+/// more. The block itself is within [`super::cube::MAX_VALUES`]. A trend over few
 /// dates would otherwise make pieces of many cells, and averaging reads `factor²` pixels a cell.
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_PIECE_PIXELS: u64 = 1_000_000;

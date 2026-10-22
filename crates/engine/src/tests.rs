@@ -7298,6 +7298,17 @@ fn a_trend_over_a_stac_collection() {
     }
     // A straight rise over six dates is significant, (0, 0)'s too: its stored 0 rises by the offsets.
     assert!(whole[3].bands[0].data[20 * 512 + 10].is_finite() && whole[3].bands[0].data[0].is_finite());
+    // An area wider than the file: half a degree more to the west, 256 columns no file covers
+    // (NaN), and the file's own beside them, in their places.
+    let wider = json!({"url": api, "collection": "mod", "asset": "NDVI", "bbox": [9.5, 45, 11, 46], "start": "2024-01-01", "end": "2024-03", "test": "original"});
+    let (_, wide) = run(&mut s, &wider);
+    let ws = &wide[0];
+    assert_eq!((ws.width, ws.height), (768, 512));
+    assert!(ws.bands[0].data[20 * 768 + 255].is_nan() && ws.bands[0].data[0].is_nan());
+    for (x, y) in [(10, 20), (511, 511)] {
+        let got = f64::from(ws.bands[0].data[y * 768 + 256 + x]);
+        assert!((got - per_year(x, y)).abs() < 1e-4, "({x}, {y}): {got} vs {}", per_year(x, y));
+    }
     // Read in two pieces (a quarter of the rows' values each would make four; 256-row tiles make
     // it two), the outputs are the same, cell for cell.
     PIECE_VALUES.with(|v| v.set(Some(512 * 300 * 6)));
@@ -7824,6 +7835,11 @@ fn a_trend_over_a_data_cube() {
     assert_eq!(r["dates"], 7, "a month ends with it: 2020's July date is after June: {r}");
     // A year given as a number reads the same.
     let r = s.run("cube.trend", &json!({"layers": names, "end": 2020, "name": "to2020n"})).unwrap();
+    assert_eq!(r["dates"], 8, "{r}");
+    // A full date is that day, as before: 1 January 2020 leaves 2020's July out, its 1 July keeps it.
+    let r = s.run("cube.trend", &json!({"layers": names, "end": "2020-01-01", "name": "toNewYear"})).unwrap();
+    assert_eq!(r["dates"], 7, "{r}");
+    let r = s.run("cube.trend", &json!({"layers": names, "end": "2020-07-01", "name": "toJuly"})).unwrap();
     assert_eq!(r["dates"], 8, "{r}");
     let backwards: Vec<String> = (0..12).map(|k| format!("{}-01-01", 2030 - k)).collect();
     let r = s.run("cube.trend", &json!({"layers": names, "dates": backwards, "test": "original"})).unwrap();
