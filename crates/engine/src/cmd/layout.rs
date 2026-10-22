@@ -364,7 +364,10 @@ pub(crate) fn step_text(step: f64) -> String {
     } else if (minutes - minutes.round()).abs() < 1e-9 {
         format!("{}′", minutes.round())
     } else {
-        format!("{}″", (step * 3600.0).round())
+        // Minutes and seconds (1′12″), or seconds alone under a minute.
+        let seconds = (step * 3600.0).round();
+        let (m, sec) = ((seconds / 60.0).floor(), seconds % 60.0);
+        if m > 0.0 { format!("{m}′{sec}″") } else { format!("{sec}″") }
     }
 }
 
@@ -515,6 +518,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // draws (`{date}`, `{scale}`…) as wide as a typical value of theirs.
     let (map_name, crs) = (s.map().name.clone(), s.map().projection.label());
     let drawn = move |t: &str| {
+        // Most text has no token: measured as it is.
+        if !t.contains('{') {
+            return t.to_string();
+        }
         [
             ("{date}", "0000-00-00"),
             ("{time}", "00:00"),
