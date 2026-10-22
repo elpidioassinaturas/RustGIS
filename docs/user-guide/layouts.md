@@ -28,8 +28,9 @@ the maps; while one is open, its groups lead the Publish tab:
     most five lines across (2° for a state, 15′ for a city), and labels on every edge of a sheet.
     The north arrow, the legend (sized to what it lists) and the scale bar with the numeric scale
     under it sit in the frame's corners, on pale boxes, clear of the graticule's labels.
-  - **Texts**: the footer's lines are measured with the layout's font and wrapped to their box,
-    so none runs past it, and the footer grows to hold them. `{projection}`, `{datum}` and
+  - **Texts**: the title, subtitle, footer lines and authorship are measured with the layout's
+    font (the title and headings bold, as drawn) and wrapped to their box, so none runs past it,
+    and each box grows to hold them. `{projection}`, `{datum}` and
     `{grid}` are filled from the map when the layout is made. `{date}` and the other dynamic text
     tokens stay live. The reference defaults to the projection, datum and graticule, and the
     authorship to "Made with RustGIS · {date}" (`"author": ""` leaves it out). `headings` renames the two columns.

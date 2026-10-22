@@ -1362,10 +1362,28 @@ mod tests {
         // The size a legend takes holds what it draws, to within a row: two rows drawn, six with
         // every class.
         let row = f64::from(LEGEND_ROW) * 25.4 / 96.0;
-        for (all_classes, ink) in [(false, shown), (true, all)] {
+        // How far right the legend draws, in pixels (points at this scale), as `depth` goes down.
+        let reach = |map: &Map, drawn: Option<&[(u32, Vec<LegendEntry>)]>| {
+            let mut pm = Pixmap::new(300, 400).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            legend(
+                &mut pm,
+                Rect::from_xywh(0.0, 0.0, 300.0, 400.0).unwrap(),
+                map,
+                "",
+                drawn,
+                LegendOptions { hide_other: false, exclude: &[] },
+                1.0,
+            );
+            (0..pm.width()).filter(|&x| (0..pm.height()).any(|y| pm.pixel(x, y).is_some_and(|p| p.red() < 200))).max().unwrap_or(0)
+        };
+        for (all_classes, ink, right) in [(false, shown, reach(&map, Some(&drawn))), (true, all, reach(&map, None))] {
             let (w, h) = legend_size_mm(&mut map, 1e6, all_classes, false, &[]).unwrap();
-            let ink = f64::from(ink) * 25.4 / 96.0;
+            let (ink, right) = (f64::from(ink) * 25.4 / 96.0, f64::from(right) * 25.4 / 96.0);
             assert!(w > 0.0 && ink <= h && h - ink < row, "{ink} mm drawn in {h} mm");
+            // The widths in the same units as the drawing: the ink ends within the width measured,
+            // short of it by no more than a glyph's side bearing.
+            assert!(right <= w + 0.3 && right > w - 1.5, "{right} mm drawn across {w} mm");
         }
         assert!((legend_size_mm(&mut map, 1e6, false, false, &[]).unwrap().1 - 2.0 * row).abs() < 1e-9);
         // A layer the legend leaves out (by name, any case) isn't listed, drawn or not.

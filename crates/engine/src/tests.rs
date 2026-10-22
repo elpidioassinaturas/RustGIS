@@ -5558,6 +5558,26 @@ fn a_streamed_layer_whose_file_goes_away_shows_an_error_not_stale_features() {
     assert!(l.source.as_ref().unwrap().error.is_some());
 }
 
+/// `layout.publication` over a streamed layer: the frame's view is read for its legend, which lists
+/// the layer; undone, the layout goes and the layer is streaming from its source as before,
+/// reading a view again when one is drawn.
+#[test]
+fn a_publication_layout_over_a_streamed_layer_is_undone() {
+    let path = grid_fgb("publication", 30);
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path.display().to_string(), "stream": true})).unwrap();
+    let r = s.run("layout.publication", &json!({"extent": [0, 0, 20, 20], "author": ""})).unwrap();
+    assert!(s.project.layouts[0].elements.iter().any(|e| e.name == "Legend"), "the read layer is listed: {r}");
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert!(s.project.layouts.is_empty());
+    let l = &s.map().layers[0];
+    assert!(l.source.as_ref().is_some_and(|src| src.error.is_none()), "still streaming from its source");
+    let v = view_of(&mut s, rustgis_geom::Extent::new(0.0, 0.0, 20.0, 20.0));
+    crate::render::render_png(s.map_mut(), &v).unwrap();
+    assert!(!s.map().layers[0].dataset.features.is_empty(), "it reads the view again");
+    let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn any_command_editing_a_streamed_layer_is_undone() {
     let path = grid_fgb("guarded", 30);
