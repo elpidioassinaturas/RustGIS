@@ -40,11 +40,13 @@ pub const MAX_VALUES: u64 = if cfg!(target_arch = "wasm32") { 16_000_000 } else 
 /// The most pairs of dates a trend compares in all (cells × dates² ⁄ 2), which bounds the time
 /// Sen's slope takes: far fewer in the browser, which works them out on one thread. At the cap a
 /// run can take minutes on the desktop, which the app runs on threads with progress and Cancel;
-/// `cube.trend` called directly (a script, the CLI) takes [`MAX_WAITED_PAIRS`].
+/// `cube.trend` called directly (a script, the assistant, an MCP client) takes
+/// [`MAX_WAITED_PAIRS`], but where only a shell or a script waits on it (`rustgis-cli run`,
+/// Python: [`Session::long_runs`](crate::Session::long_runs)) it takes this.
 pub const MAX_PAIRS: u64 = if cfg!(target_arch = "wasm32") { 50_000_000 } else { 20_000_000_000 };
 /// The most pairs a trend worked out where it's called compares (`cube.trend` without `ran`: a
-/// script, the CLI), which waits for it with no Cancel: a tenth of the app's on the desktop. The
-/// browser works every trend out where it's called, within its own lower cap.
+/// script, the assistant, an MCP client), which waits for it with no Cancel: a tenth of the app's
+/// on the desktop. The browser works every trend out where it's called, within its own lower cap.
 pub const MAX_WAITED_PAIRS: u64 = if cfg!(target_arch = "wasm32") { MAX_PAIRS } else { MAX_PAIRS / 10 };
 /// The most dates a cube is read at.
 pub const MAX_DATES: usize = 2_000;
@@ -930,11 +932,54 @@ fn trend_cmd(s: &mut Session, p: &Value) -> CmdResult {
         let (_, rasters, dates) = s.trend_results.remove(at);
         return add_outputs(s, rasters, dates);
     }
-    // Worked out here, waited for with no Cancel (a script, the CLI): a run of seconds, not minutes.
+    // Worked out here, waited for with no Cancel: in the app (a script, the assistant) a run of
+    // seconds, not minutes; where only a shell or a script waits on it (`rustgis-cli run`,
+    // Python), the panes' bound, its progress told.
     let mut run = trend_start(s, p)?;
-    run.max_pairs = MAX_WAITED_PAIRS;
-    let rasters = run.run(&AtomicBool::new(false), &AtomicUsize::new(0))?;
-    add_outputs(s, rasters, run.steps.len())
+    run.max_pairs = if s.long_runs.is_some() { MAX_PAIRS } else { MAX_WAITED_PAIRS };
+    let dates = run.steps.len();
+    let rasters = match s.long_runs {
+        #[cfg(not(target_arch = "wasm32"))]
+        Some(tell) => run_telling("cube.trend", run.total(), tell, |cancel, done| run.run(cancel, done))?,
+        _ => run.run(&AtomicBool::new(false), &AtomicUsize::new(0))?,
+    };
+    add_outputs(s, rasters, dates)
+}
+
+/// A long run on a thread of its own, its progress told at most every half second, when it has
+/// moved by a percent, and its end (a share of 1) when it succeeds.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_telling<T: Send>(
+    what: &str,
+    total: usize,
+    tell: fn(&str, f64),
+    work: impl FnOnce(&AtomicBool, &AtomicUsize) -> Result<T, String> + Send,
+) -> Result<T, String> {
+    use std::time::{Duration, Instant};
+    let (cancel, done) = (AtomicBool::new(false), AtomicUsize::new(0));
+    let total = total.max(1);
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| work(&cancel, &done));
+        let (mut told, mut last) = (usize::MAX, Instant::now());
+        // Looked at often, so a short run isn't kept waiting; told every half second.
+        while !worker.is_finished() {
+            std::thread::sleep(Duration::from_millis(50));
+            if last.elapsed() < Duration::from_millis(500) {
+                continue;
+            }
+            last = Instant::now();
+            let now = done.load(Ordering::Relaxed).min(total);
+            if now * 100 / total != told {
+                told = now * 100 / total;
+                tell(what, now as f64 / total as f64);
+            }
+        }
+        let r = worker.join().unwrap_or_else(|_| Err(format!("{what} failed unexpectedly")));
+        if r.is_ok() && told != 100 {
+            tell(what, 1.0);
+        }
+        r
+    })
 }
 
 /// Adds a trend's (or a summary's) layers, each as a GeoTIFF the project keeps.
@@ -1304,11 +1349,15 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
     Ok(ReduceRun { cube, steps, stat, min_share, group_of, groups })
 }
 
-/// `cube.reduce`: the summary computed here (blocking), its layers added, each kept in the project
-/// as a GeoTIFF.
+/// `cube.reduce`: the summary computed here (blocking), its progress told where only a shell or a
+/// script waits on it (`rustgis-cli run`), its layers added, each kept in the project as a GeoTIFF.
 fn reduce_cmd(s: &mut Session, p: &Value) -> CmdResult {
     let run = reduce_start(s, p)?;
-    let rasters = run.run(&AtomicBool::new(false), &AtomicUsize::new(0))?;
+    let rasters = match s.long_runs {
+        #[cfg(not(target_arch = "wasm32"))]
+        Some(tell) => run_telling("cube.reduce", run.total(), tell, |cancel, done| run.run(cancel, done))?,
+        _ => run.run(&AtomicBool::new(false), &AtomicUsize::new(0))?,
+    };
     add_outputs(s, rasters, run.dates())
 }
 

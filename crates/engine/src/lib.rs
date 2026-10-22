@@ -598,6 +598,11 @@ pub struct Session {
     /// Trends the app worked out on a thread, waiting for `cube.trend {"ran"}`: the id, the
     /// layers and how many dates (see [`cmd::cube::land`]).
     pub(crate) trend_results: Vec<(u64, Vec<rustgis_data::raster::Raster>, usize)>,
+    /// Set where nothing waits on a command but a shell or a script (`rustgis-cli run`, Python):
+    /// long runs a command works out where it's called (a trend over a state from a data cube)
+    /// take the app's larger bounds, as its panes do on a thread, and tell their progress (a
+    /// share, 0 to 1, and 1 when one succeeds) through this.
+    pub long_runs: Option<fn(&str, f64)>,
 }
 
 /// The most `layer.addUrl` requests kept for the front end at a time.
@@ -731,6 +736,7 @@ impl Session {
             #[cfg(not(target_arch = "wasm32"))]
             sql_results: Vec::new(),
             trend_results: Vec::new(),
+            long_runs: None,
         }
     }
 

@@ -429,7 +429,7 @@ and a **Mann–Kendall** test of whether the trend is significant.
     the map shows one of them. This source is given as parameters (a script, the assistant, the
     command line); `cube.trend` waits for the search and the reads with no Cancel, the app with
     it, as for a Zarr store's address, so keep the area and period small there, or run a large
-    one from the command line.
+    one from the command line (see **Long runs** below).
 
   The rasters have to be on one grid; put them on one first with Raster Functions › Resample.
 - **The test:** NDVI and temperature series are autocorrelated, which makes the plain test report
@@ -458,6 +458,13 @@ and a **Mann–Kendall** test of whether the trend is significant.
   16-day composites (645 × 984 cells × 576 dates) is six pieces. Its area is up to 25 million
   cells. The seasonal test compares only pairs within a season, so its time limit counts those.
   It runs in the background with progress and Cancel.
+- **Long runs:** in the app, a trend run from the Script pane or the assistant waits with no
+  Cancel, so it takes a tenth of the panes' limit on pairs compared (2 billion). `rustgis-cli run`
+  and Python, where nothing but a shell or a script waits on it, take the panes' limit (20
+  billion): Piauí's 576 composites at about 1 km with the seasonal test (about 4.4 billion pairs)
+  run in one call there, and `rustgis-cli run` prints its progress (`cube.trend: 42%`). A STAC
+  collection's search takes up to 10,000 items for a trend or a summary (a state's four MODIS
+  tiles over 25 years are 2,304), where a data cube on the time slider takes 2,000.
 
 ```sh
 rustgis-cli run --cmd 'cube.trend={"layers":["ndvi_2015","ndvi_2016","ndvi_2017","ndvi_2018"],"per":"decade"}'
@@ -485,7 +492,8 @@ over time does for a Zarr variable (see [Data](data.md)).
   outputs hold up to 32 million values (cells times groups; 8 million in the web app). A summary by
   month keeps every month's totals while it reads, up to five times the outputs' memory for
   **std** (three for mean, min, max, sum and countAbove), so a large area by month may need a
-  coarser cell size or a smaller area. The layers
+  coarser cell size or a smaller area. A STAC collection's search takes up to 10,000 items, and
+  `rustgis-cli run` prints a summary's progress (`cube.reduce: 42%`). The layers
   are named after what they hold (`NDVI mean 2001`, `NDVI mean 2001–2025 month 03`, or the
   `"name"` given and the group) and kept in the project as GeoTIFFs.
 

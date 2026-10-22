@@ -247,8 +247,12 @@ fn add_asset(s: &mut Session, p: &Value) -> CmdResult {
     super::layer::add_url(s, &json!({"url": href, "name": name}))
 }
 
-/// The most items a data cube takes (its search is paged up to this).
+/// The most items a data cube on the time slider takes (its search is paged up to this).
 pub const MAX_CUBE_ITEMS: usize = 2000;
+/// The most items a trend or a summary over a STAC collection takes (`cube.trend`, `cube.reduce`):
+/// their reads are bounded by their cells and dates (pieces, pairs), not their files, so a state's
+/// four MODIS tiles over 25 years (2,304) fit.
+pub const MAX_SERIES_ITEMS: usize = 10_000;
 /// The most pages of a search a data cube reads, whatever they hold.
 pub const MAX_CUBE_PAGES: usize = 100;
 
@@ -296,11 +300,11 @@ pub(crate) fn period_after(v: &Value) -> Option<f64> {
     next.and_then(|n| rustgis_data::time::parse_text(&n))
 }
 
-/// Searches a collection over an area and period, every page up to [`MAX_CUBE_ITEMS`], and
+/// Searches a collection over an area and period, every page up to `max_items`, and
 /// groups the items' asset by tile and day: `{"url"?, "collection", "asset", "bbox"? | "view",
 /// "start", "end", "maxCloud"?}`.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn cube_files(s: &Session, p: &Value) -> Result<CubeFiles, String> {
+pub fn cube_files(s: &Session, p: &Value, max_items: usize) -> Result<CubeFiles, String> {
     let api = stac::api(ps(p, "url"))?;
     if stac::catalog::is_static(&api) {
         return Err("a data cube needs a STAC API's search; a static catalog can't be searched".into());
@@ -365,8 +369,8 @@ pub fn cube_files(s: &Session, p: &Value) -> Result<CubeFiles, String> {
             break;
         }
         items.extend(page);
-        if items.len() > MAX_CUBE_ITEMS {
-            return Err(format!("more than {MAX_CUBE_ITEMS} items: take a shorter period or a smaller area"));
+        if items.len() > max_items {
+            return Err(format!("more than {max_items} items: take a shorter period or a smaller area"));
         }
         next = more;
     }
@@ -587,7 +591,7 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
     if let Some(o) = searched.as_object_mut() {
         o.insert("bbox".into(), json!(bbox));
     }
-    let CubeFiles { tiles, scales, nodata, collection, asset, .. } = cube_files(s, &searched)?;
+    let CubeFiles { tiles, scales, nodata, collection, asset, .. } = cube_files(s, &searched, MAX_SERIES_ITEMS)?;
     // Every tile's file for a date, by day.
     let mut by_day: std::collections::BTreeMap<i64, Vec<(String, (f64, f64), Option<f64>)>> = Default::default();
     for days in tiles.values() {
@@ -857,7 +861,7 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
             }
         };
         let CubeFiles { tiles, scale, scales: _, nodata: _, items, named_tiles, without, duplicates, scales_differ, collection, asset } =
-            cube_files(s, p)?;
+            cube_files(s, p, MAX_CUBE_ITEMS)?;
         // One range can't hold if the files store their values alike no longer (a processing
         // change of scale or offset partway).
         if range.is_some() && scales_differ {

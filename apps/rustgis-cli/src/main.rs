@@ -28,6 +28,7 @@
 
 use std::io::Write;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// `println!` that ignores a closed pipe (`rustgis-cli commands | head`).
 macro_rules! out {
@@ -54,10 +55,27 @@ fn print(v: &Value) {
     out!("{}", serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()));
 }
 
+/// Whether a progress line is left without its end (a run that failed partway).
+static PROGRESS_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// A long run's progress on standard error, one line rewritten (`cube.trend: 42%`).
+fn progress(what: &str, share: f64) {
+    eprint!("\r{what}: {:.0}%", (share * 100.0).clamp(0.0, 100.0));
+    let ended = share >= 1.0;
+    if ended {
+        eprintln!();
+    }
+    PROGRESS_OPEN.store(!ended, Ordering::Relaxed);
+}
+
 /// Runs a command; what it said beside its result (the app's status bar) goes to standard error.
 fn run(s: &mut Session, id: &str, p: Value) -> Result<Value, String> {
     let mark = s.notice_mark();
     let r = s.run(id, &p);
+    // A progress line a failure cut short ends here, so what follows starts a line of its own.
+    if PROGRESS_OPEN.swap(false, Ordering::Relaxed) {
+        eprintln!();
+    }
     // A failure is noted too; it's printed once, by the caller.
     for n in s.notices_since(mark).iter().filter(|n| r.as_ref().err() != Some(&n.text)) {
         eprintln!("rustgis-cli: {}{}", if n.error { "error: " } else { "" }, n.text);
@@ -701,6 +719,9 @@ fn main() -> ExitCode {
             mcp(&mut s, &args)
         }
         "run" => {
+            // Nothing waits on `run` but the shell (an assistant or an MCP client does, and has a
+            // timeout): long runs take the app's bounds, their progress on stderr.
+            s.long_runs = Some(progress);
             open_inputs(&mut s, &args)?;
             for (i, a) in args.iter().enumerate() {
                 if a == "--cmd"
