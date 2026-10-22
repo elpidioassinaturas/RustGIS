@@ -657,7 +657,7 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         {
             let n = rustgis_map::raster::Normalizer::new(layer.style.stretch, stats, &r.data_type);
             if n.lo.is_finite() && n.hi.is_finite() && n.lo < n.hi {
-                layer.style.stretch = rustgis_map::raster::Stretch::Custom { min: n.lo, max: n.hi };
+                layer.style.stretch = rustgis_map::raster::Stretch::custom(n.lo, n.hi);
             }
         }
         zt.shown = want;

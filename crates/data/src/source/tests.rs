@@ -1224,3 +1224,82 @@ fn nested_columns_and_vectors_by_address() {
         let _ = vectors_url_blocking(&cut, e, "embedding".into(), (100, 10_000));
     }
 }
+
+#[test]
+fn shapefile_complete_chunks_keep_all_rows_order_attributes_and_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chunks.shp");
+    let mut ds = Dataset::new("chunks", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+    for i in 0..523 {
+        ds.push(Some(Geometry::Point(Coord::new(i as f64 * 0.01, 1.0))), vec![Value::Text(format!("point {i}"))]);
+    }
+    write_shapefile(&ds, &path);
+    let source = shp::ShpSource::open_path(&path, "chunks").unwrap();
+    let expected = source.read(&Request::all()).unwrap();
+    assert!(source.streams_chunks());
+    for budget in [256, 1024, 8192] {
+        let mut rows = Vec::new();
+        let mut calls = 0;
+        let summary = source
+            .visit_chunks(None, budget, &mut |chunk| {
+                calls += 1;
+                assert!(chunk_memory::features_bytes(&chunk) <= budget);
+                rows.extend(chunk);
+                Ok(())
+            })
+            .unwrap();
+        assert!(calls > 1);
+        assert!(summary.complete);
+        assert!(summary.features.is_empty());
+        assert_eq!(summary.matched, 523);
+        assert_eq!(rows, expected.features);
+    }
+    let mut oversized = Vec::new();
+    source
+        .visit_chunks(None, 1, &mut |chunk| {
+            assert_eq!(chunk.len(), 1);
+            oversized.extend(chunk);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(oversized, expected.features, "indivisible rows must remain complete");
+    let mut calls = 0;
+    assert!(
+        source
+            .visit_chunks(None, 256, &mut |_| {
+                calls += 1;
+                Err(DataError::Format("cancelled".into()))
+            })
+            .is_err()
+    );
+    assert_eq!(calls, 1);
+    assert!(source.visit_chunks(None, 0, &mut |_| { panic!("zero-budget traversal must not emit a row") }).is_err());
+    assert!(source.visit_chunks(Some(Extent::EMPTY), 0, &mut |_| panic!("zero budget must not emit")).is_err());
+    let empty_path = dir.path().join("empty.shp");
+    // The production exporter deliberately refuses an empty layer. Build a valid zero-record
+    // fixture from its headers rather than changing that existing export contract.
+    for ext in ["shp", "shx"] {
+        let mut header = std::fs::read(path.with_extension(ext)).unwrap();
+        header.truncate(100);
+        header[24..28].copy_from_slice(&50i32.to_be_bytes());
+        std::fs::write(empty_path.with_extension(ext), header).unwrap();
+    }
+    let mut header = std::fs::read(path.with_extension("dbf")).unwrap();
+    let len = u16::from_le_bytes([header[8], header[9]]) as usize;
+    header.truncate(len);
+    header[4..8].copy_from_slice(&0u32.to_le_bytes());
+    header.push(0x1a);
+    std::fs::write(empty_path.with_extension("dbf"), header).unwrap();
+    let empty = shp::ShpSource::open_path(&empty_path, "empty").unwrap();
+    assert!(empty.visit_chunks(None, 0, &mut |_| panic!("zero budget must not emit")).is_err());
+    let extent = Some(Extent::new(0.02, 0.0, 0.1, 2.0));
+    let expected = source.read(&Request { extent, limit: 1000 }).unwrap();
+    let mut rows = Vec::new();
+    source
+        .visit_chunks(extent, 256, &mut |chunk| {
+            rows.extend(chunk);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(rows, expected.features);
+}

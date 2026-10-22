@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use rustgis_data::raster::{self, Raster};
 use rustgis_geom::Extent;
-use rustgis_map::raster::{RasterLayer, RasterMask, RasterRenderer, RasterStyle, Resampling, Stretch, classify_masked, unique_values};
+use rustgis_map::raster::{
+    Normalizer, RasterLayer, RasterMask, RasterRenderer, RasterStyle, Resampling, Stretch, classify_masked, unique_values,
+};
 use rustgis_map::{ClassMethod, Ramp, RasterDefaults};
 use serde_json::{Value, json};
 
@@ -36,55 +38,9 @@ pub fn commands() -> Vec<C> {
         C::new("raster.symbology", "Symbology", "Style › Rendering", symbology).when(need_raster).params(
             r#"{"layer"?, "type": "stretch"|"rgb"|"classify"|"unique"|"colormap"|"shadedRelief", "band"?: 1.., "ramp"?, "invert"?: bool, "classes"?: 1..32, "method"?, "azimuth"?, "altitude"?, "zFactor"?, "grey"?: bool (shadedRelief without its colour ramp)}"#,
         ),
-        C::new("raster.stretch", "Stretch Type", "Style › Rendering", |s, p| {
-            if let Some(like) = p.get("like").filter(|v| !v.is_null()) {
-                let like = like.as_str().ok_or("like is a raster layer's name")?;
-                let (min, max) = stretch_range(s, like)?;
-                return with(s, p, |rl, _| {
-                    rl.style.stretch = Stretch::Custom { min, max };
-                    Ok(())
-                });
-            }
-            let code = ps(p, "type").ok_or("type is required")?;
-            // A bound that was given but isn't a finite number is refused, not replaced by the layer's own.
-            let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
-            for k in ["min", "max"] {
-                if given(k) && f(p, k).is_none() {
-                    return Err(format!("{k} must be a finite number"));
-                }
-            }
-            let (min, max) = (f(p, "min"), f(p, "max"));
-            with(s, p, |rl, r| {
-                // Only a custom stretch reads the statistics: those of the band being drawn.
-                let band = rl.style.renderer.bands().first().copied().unwrap_or(0);
-                let stats = r.bands.get(band).map(|b| &b.stats);
-                if code.trim().eq_ignore_ascii_case("custom") && stats.is_none() {
-                    return Err("the raster has no bands".into());
-                }
-                let mut st = Stretch::from_code(code, f(p, "low"), f(p, "high"), f(p, "n"), min, max, stats)
-                    .ok_or_else(|| format!("unknown stretch '{code}'"))?;
-                // A band with a single value has no range of its own: open one around it to edit from.
-                if let Stretch::Custom { min: lo, max: hi } = st
-                    && min.is_none()
-                    && max.is_none()
-                    && lo >= hi
-                {
-                    // Padded by the value's magnitude too, or a large value would absorb ±0.5.
-                    let pad = (lo.abs() * 1e-6).max(0.5);
-                    st = Stretch::Custom { min: lo - pad, max: hi + pad };
-                }
-                // Statistics can be NaN or infinite (a band of nodata), which `min >= max` alone misses.
-                if let Stretch::Custom { min, max } = st
-                    && !(min.is_finite() && max.is_finite() && min < max)
-                {
-                    return Err(format!("min {min} must be a finite number less than max {max}"));
-                }
-                rl.style.stretch = st;
-                Ok(())
-            })
-        })
+        C::new("raster.stretch", "Stretch Type", "Style › Rendering", stretch)
         .when(need_raster)
-        .params(r#"{"layer"?, "type": "none"|"minMax"|"custom"|"percentClip"|"standardDeviation"|"histogramEqualize", "low"?: %, "high"?: %, "n"?: deviations, "min"?, "max"?: custom bounds in the data's units (a missing one is the layer's own), "like"?: raster layer (instead of type: that layer's stretch as fixed bounds, so tiles match at their joins)}"#),
+        .params(r#"{"layer"?, "type": "none"|"minMax"|"custom"|"percentClip"|"standardDeviation"|"histogramEqualize", "low"?: %, "high"?: %, "n"?: deviations, "min"?, "max"?: custom bounds in the data's units, a number for every band or [red, green, blue] on an RGB layer, null for a band's own (a missing one is the range now drawn; the layer's own on one band), "like"?: raster layer (instead of type: that layer's stretch as fixed bounds, so tiles match at their joins)}"#),
         C::new("raster.dra", "DRA", "Style › Rendering", |s, p| {
             let on = b(p, "on");
             with(s, p, |rl, _| {
@@ -146,23 +102,149 @@ fn get(s: &Session, p: &Value) -> Result<(u32, Arc<Raster>), String> {
     Ok((id, data))
 }
 
-/// The value range a raster layer's stretch spans on the band it draws, for another layer to share.
-fn stretch_range(s: &Session, name: &str) -> Result<(f64, f64), String> {
+/// A `min`/`max` parameter: one number for every band, or three (red, green, blue) on an RGB
+/// layer, where `null` leaves a band's own.
+#[derive(Clone, Copy)]
+enum Bound {
+    Unset,
+    All(f64),
+    Each([Option<f64>; 3]),
+}
+
+impl Bound {
+    fn at(self, channel: usize) -> Option<f64> {
+        match self {
+            Bound::Unset => None,
+            Bound::All(v) => Some(v),
+            Bound::Each(v) => v.get(channel).copied().flatten(),
+        }
+    }
+}
+
+fn bound(p: &Value, k: &str) -> Result<Bound, String> {
+    let Some(v) = p.get(k).filter(|v| !v.is_null()) else { return Ok(Bound::Unset) };
+    let num = |v: &Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())).filter(|x: &f64| x.is_finite());
+    let Some(a) = v.as_array() else { return num(v).map(Bound::All).ok_or_else(|| format!("{k} must be a finite number")) };
+    if a.len() != 3 {
+        return Err(format!("{k} for each band is [red, green, blue], not {} values", a.len()));
+    }
+    let mut each = [None; 3];
+    for (slot, x) in each.iter_mut().zip(a) {
+        if !x.is_null() {
+            *slot = Some(num(x).ok_or_else(|| format!("{k} must be finite numbers or null"))?);
+        }
+    }
+    Ok(Bound::Each(each))
+}
+
+/// The value range channel `i` (the only one on a single band) is drawn over now, without the
+/// pixels the mask hides.
+fn channel_range(rl: &RasterLayer, r: &Raster, i: usize) -> Option<(f64, f64)> {
+    let band = *rl.style.renderer.bands().get(i)?;
+    let masked = rl.masked_stats();
+    let stats = masked.as_ref().and_then(|m| m.get(i)).or_else(|| r.bands.get(band).map(|b| &b.stats))?;
+    let n = Normalizer::for_channel(rl.style.stretch, i, stats, &r.data_type);
+    Some((n.lo, n.hi))
+}
+
+/// The lowest and highest values of `band`, without the pixels the mask hides.
+fn band_extent(rl: &RasterLayer, r: &Raster, band: usize) -> Option<(f64, f64)> {
+    if rl.style.mask.is_empty() {
+        let s = &r.bands.get(band)?.stats;
+        return Some((s.min, s.max));
+    }
+    let s = rl.style.mask.stats(r, band);
+    Some((s.min, s.max))
+}
+
+fn valid_range(lo: f64, hi: f64) -> bool {
+    lo.is_finite() && hi.is_finite() && lo < hi
+}
+
+/// A raster layer's stretch as fixed bounds (one pair per channel on an RGB layer), for another
+/// layer to share.
+fn like_stretch(s: &Session, name: &str) -> Result<Stretch, String> {
     let rl = s.map().layer_by_name(name).and_then(|l| l.raster.as_ref()).ok_or_else(|| format!("no raster layer '{name}'"))?;
     let r = rl.data.as_ref().ok_or_else(|| format!("{name}: the raster's data couldn't be read"))?;
-    let band = rl.style.renderer.bands().first().copied().unwrap_or(0);
-    // Without the values its mask hides, as its own stretch is drawn.
-    let masked = rl.masked_stats();
-    let stats = masked
-        .as_ref()
-        .and_then(|m| m.first())
-        .or_else(|| r.bands.get(band).map(|b| &b.stats))
-        .ok_or_else(|| format!("{name} has no bands"))?;
-    let n = rustgis_map::raster::Normalizer::new(rl.style.stretch, stats, &r.data_type);
-    if !(n.lo.is_finite() && n.hi.is_finite() && n.lo < n.hi) {
-        return Err(format!("{name} has no range of values to share"));
+    let channels = rl.style.renderer.bands().len().min(3);
+    let mut pairs = [[0.0; 2]; 3];
+    for (i, pair) in pairs.iter_mut().enumerate().take(channels) {
+        let (lo, hi) = channel_range(rl, r, i).ok_or_else(|| format!("{name} has no bands"))?;
+        if !valid_range(lo, hi) {
+            return Err(format!("{name} has no range of values to share"));
+        }
+        *pair = [lo, hi];
     }
-    Ok((n.lo, n.hi))
+    Ok(if channels == 3 { Stretch::custom_bands(pairs) } else { Stretch::custom(pairs[0][0], pairs[0][1]) })
+}
+
+fn stretch(s: &mut Session, p: &Value) -> CmdResult {
+    if let Some(like) = p.get("like").filter(|v| !v.is_null()) {
+        let like = like.as_str().ok_or("like is a raster layer's name")?;
+        let st = like_stretch(s, like)?;
+        return with(s, p, |rl, _| {
+            rl.style.stretch = st;
+            Ok(())
+        });
+    }
+    let code = ps(p, "type").ok_or("type is required")?;
+    // A bound that was given but isn't a finite number is refused, not replaced by the layer's own.
+    let (min_b, max_b) = (bound(p, "min")?, bound(p, "max")?);
+    let custom = code.trim().eq_ignore_ascii_case("custom");
+    with(s, p, |rl, r| {
+        let rgb = matches!(rl.style.renderer, RasterRenderer::Rgb { .. });
+        let each = matches!(min_b, Bound::Each(_)) || matches!(max_b, Bound::Each(_));
+        if custom && each && !rgb {
+            return Err("a bound for each band needs an RGB symbology".into());
+        }
+        // On an RGB layer a bound that isn't a number for every band starts from the range each
+        // band is drawn over now.
+        if custom && rgb && !matches!((min_b, max_b), (Bound::All(_), Bound::All(_))) {
+            let mut pairs = [[0.0; 2]; 3];
+            for (i, pair) in pairs.iter_mut().enumerate() {
+                let (own_lo, own_hi) = channel_range(rl, r, i).ok_or("the raster has no bands")?;
+                let (given_lo, given_hi) = (min_b.at(i), max_b.at(i));
+                let (mut lo, mut hi) = (given_lo.unwrap_or(own_lo), given_hi.unwrap_or(own_hi));
+                if given_lo.is_none() && given_hi.is_none() && lo >= hi {
+                    let pad = (lo.abs() * 1e-6).max(0.5);
+                    (lo, hi) = (lo - pad, hi + pad);
+                }
+                if !valid_range(lo, hi) {
+                    return Err(format!("{} min {lo} must be a finite number less than max {hi}", ["red", "green", "blue"][i]));
+                }
+                *pair = [lo, hi];
+            }
+            rl.style.stretch = Stretch::custom_bands(pairs);
+            return Ok(());
+        }
+        let (min, max) = (min_b.at(0).filter(|_| !each), max_b.at(0).filter(|_| !each));
+        // Only a custom stretch reads the statistics: those of the band being drawn.
+        let band = rl.style.renderer.bands().first().copied().unwrap_or(0);
+        let stats = r.bands.get(band).map(|b| &b.stats);
+        if custom && stats.is_none() {
+            return Err("the raster has no bands".into());
+        }
+        let mut st = Stretch::from_code(code, f(p, "low"), f(p, "high"), f(p, "n"), min, max, stats)
+            .ok_or_else(|| format!("unknown stretch '{code}'"))?;
+        // A band with a single value has no range of its own: open one around it to edit from.
+        if let Stretch::Custom { min: lo, max: hi, .. } = st
+            && min.is_none()
+            && max.is_none()
+            && lo >= hi
+        {
+            // Padded by the value's magnitude too, or a large value would absorb ±0.5.
+            let pad = (lo.abs() * 1e-6).max(0.5);
+            st = Stretch::custom(lo - pad, hi + pad);
+        }
+        // Statistics can be NaN or infinite (a band of nodata), which `min >= max` alone misses.
+        if let Stretch::Custom { min, max, .. } = st
+            && !valid_range(min, max)
+        {
+            return Err(format!("min {min} must be a finite number less than max {max}"));
+        }
+        rl.style.stretch = st;
+        Ok(())
+    })
 }
 
 /// Applies `f` to the raster layer named by `p`.
@@ -622,8 +704,35 @@ fn bands(s: &mut Session, p: &Value) -> CmdResult {
             (band(p, "red", &r)?.unwrap_or(cur.0), band(p, "green", &r)?.unwrap_or(cur.1), band(p, "blue", &r)?.unwrap_or(cur.2))
         }
     };
-    with(s, p, |rl, _| {
+    with(s, p, |rl, r| {
+        let before = match rl.style.renderer {
+            RasterRenderer::Rgb { red, green, blue } => Some([red, green, blue]),
+            _ => None,
+        };
+        // The range each channel is drawn over, read before the bands change.
+        let drawn = before.filter(|_| matches!(rl.style.stretch, Stretch::Custom { .. })).and_then(|b| {
+            let ranges: Vec<_> = (0..3).filter_map(|i| channel_range(rl, r, i)).collect();
+            (ranges.len() == 3).then_some((b, ranges))
+        });
         rl.style.renderer = RasterRenderer::Rgb { red, green, blue };
+        // A channel moved to another band is redrawn over that band's range; the others keep theirs.
+        if let Some((old, ranges)) = drawn {
+            let new = [red, green, blue];
+            if old != new {
+                let mut pairs = [[0.0; 2]; 3];
+                for (i, pair) in pairs.iter_mut().enumerate() {
+                    let kept = ranges.get(i).copied().unwrap_or((0.0, 1.0));
+                    let (lo, hi) = new
+                        .get(i)
+                        .filter(|b| old.get(i) != Some(*b))
+                        .and_then(|b| band_extent(rl, r, *b))
+                        .filter(|(lo, hi)| valid_range(*lo, *hi))
+                        .unwrap_or(kept);
+                    *pair = [lo, hi];
+                }
+                rl.style.stretch = Stretch::custom_bands(pairs);
+            }
+        }
         Ok(())
     })
 }

@@ -1076,6 +1076,8 @@ fn hostile_params_never_panic() {
         json!({"band": -1, "red": 1e12, "green": "x", "blue": f64::MAX, "preset": "", "ramp": "nope", "classes": -5, "n": 1e308, "low": -50, "high": 900, "gamma": 0, "zFactor": -1, "fileName": "a.tif", "data": "!!!"}),
         json!({"fileName": "a.tif", "data": "AAAA", "type": "unique", "on": "maybe"}),
         json!({"type": "custom", "min": 1e308, "max": -1e308}),
+        json!({"type": "custom", "min": [1e308, "x", null, 4], "max": [null, -1e308, 5]}),
+        json!({"type": "custom", "min": [1e308, null, 0], "max": [-1e308, f64::NAN, null], "red": 3}),
         json!({"kind": "colorbar", "ticks": -1e308, "tickSide": 7, "orientation": "x", "layer": "", "reverse": "maybe"}),
         json!({"type": "albers", "lon_0": f64::MAX, "lat_1": "x", "lat_2": -1e308}),
         json!({"kind": "legend", "element": 1, "exclude": [null, 7, "", {"x": 1}]}),
@@ -11303,16 +11305,97 @@ fn buffer_point_adds_only_the_buffer() {
 }
 
 #[test]
+fn raster_stretch_custom_bounds_per_band() {
+    use rustgis_map::Stretch;
+    let mut s = with_raster();
+    let layer = |s: &Session, i: usize| s.map().layers.get(i).and_then(|l| l.raster.as_ref()).unwrap().clone();
+    let stretch = |s: &Session| layer(s, s.map().layers.len() - 1).style.stretch;
+    // Three bands with ranges of their own.
+    let ranges = [[0.0, 100.0], [0.0, 200.0], [10.0, 50.0]];
+    {
+        let rl = s.map_mut().layers.last_mut().and_then(|l| l.raster.as_mut()).unwrap();
+        let mut d = (**rl.data.as_ref().unwrap()).clone();
+        assert!(d.bands.len() >= 3);
+        for (b, [lo, hi]) in d.bands.iter_mut().zip(ranges) {
+            b.stats.min = lo;
+            b.stats.max = hi;
+        }
+        rl.data = Some(std::sync::Arc::new(d));
+    }
+    s.run("raster.symbology", &json!({"type": "rgb"})).unwrap();
+    s.run("raster.stretch", &json!({"type": "minMax"})).unwrap();
+    // Custom starts from the range each band is drawn over now.
+    s.run("raster.stretch", &json!({"type": "custom"})).unwrap();
+    assert_eq!(stretch(&s), Stretch::custom_bands(ranges));
+    // A bound for each band; null keeps that band's current one.
+    s.run("raster.stretch", &json!({"type": "custom", "min": [null, 5, null], "max": [90, null, null]})).unwrap();
+    assert_eq!(stretch(&s), Stretch::custom_bands([[0.0, 90.0], [5.0, 200.0], [10.0, 50.0]]));
+    // A number is for every band.
+    s.run("raster.stretch", &json!({"type": "custom", "min": 1, "max": 99})).unwrap();
+    assert_eq!(stretch(&s), Stretch::custom(1.0, 99.0));
+    s.run("raster.stretch", &json!({"type": "custom", "min": 1})).unwrap();
+    assert_eq!(stretch(&s), Stretch::custom_bands([[1.0, 99.0]; 3]), "the other bound is the range drawn now");
+    // Bad bounds are refused, naming the band, and leave the stretch alone.
+    let before = stretch(&s);
+    for p in [
+        json!({"type": "custom", "min": [300, null, null]}),
+        json!({"type": "custom", "max": [null, null, 1]}),
+        json!({"type": "custom", "min": [1, 2]}),
+        json!({"type": "custom", "min": [1, "x", null]}),
+        json!({"type": "custom", "min": [1, 2, 3, 4]}),
+    ] {
+        assert!(s.run("raster.stretch", &p).is_err(), "{p}");
+        assert_eq!(stretch(&s), before, "{p}");
+    }
+    let e = s.run("raster.stretch", &json!({"type": "custom", "max": [null, null, 1]})).unwrap_err();
+    assert!(e.to_string().contains("blue"), "{e}");
+    // A project round trip keeps them.
+    let json = serde_json::to_string(&stretch(&s)).unwrap();
+    assert_eq!(serde_json::from_str::<Stretch>(&json).unwrap(), stretch(&s));
+    // A channel moved to another band is redrawn over that band's range, the others keep theirs.
+    s.run("raster.stretch", &json!({"type": "custom", "min": [2, 3, 12], "max": [80, 150, 40]})).unwrap();
+    s.run("raster.bands", &json!({"red": 2})).unwrap();
+    assert_eq!(stretch(&s), Stretch::custom_bands([[0.0, 200.0], [3.0, 150.0], [12.0, 40.0]]));
+    s.run("raster.bands", &json!({"red": 2})).unwrap();
+    assert_eq!(stretch(&s), Stretch::custom_bands([[0.0, 200.0], [3.0, 150.0], [12.0, 40.0]]), "same bands, same bounds");
+    // Another stretch type leaves bands alone.
+    s.run("raster.stretch", &json!({"type": "minMax"})).unwrap();
+    s.run("raster.bands", &json!({"red": 3})).unwrap();
+    assert_eq!(stretch(&s), Stretch::MinMax);
+    // One band takes one pair only.
+    s.run("raster.symbology", &json!({"type": "stretch", "band": 1})).unwrap();
+    assert!(s.run("raster.stretch", &json!({"type": "custom", "min": [1, 2, 3]})).is_err());
+    s.run("raster.stretch", &json!({"type": "custom", "min": 3, "max": 7})).unwrap();
+    assert_eq!(stretch(&s), Stretch::custom(3.0, 7.0));
+}
+
+#[test]
+fn raster_stretch_like_copies_each_band() {
+    use rustgis_map::Stretch;
+    let mut s = with_raster();
+    s.run("raster.symbology", &json!({"type": "rgb"})).unwrap();
+    s.run("raster.stretch", &json!({"type": "custom", "min": [1, 2, 3], "max": [10, 20, 30]})).unwrap();
+    s.run("layer.addDataBytes", &json!({"fileName": "scene.tif", "data": utm_tiff_b64()})).unwrap();
+    let (from, to) = ("scene", "scene (2)");
+    s.run("raster.symbology", &json!({"layer": to, "type": "rgb"})).unwrap();
+    s.run("raster.stretch", &json!({"layer": to, "like": from})).unwrap();
+    let st = s.map().layer_by_name(to).and_then(|l| l.raster.as_ref()).unwrap().style.stretch;
+    assert_eq!(st, Stretch::custom_bands([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]]));
+}
+
+#[test]
 fn raster_stretch_custom_bounds() {
     use rustgis_map::Stretch;
     let mut s = with_raster();
+    // One band: a missing bound is that band's own statistic (on RGB it is the range drawn now).
+    s.run("raster.symbology", &json!({"type": "stretch", "band": 1})).unwrap();
     let stretch = |s: &Session| s.map().layers.last().unwrap().raster.as_ref().unwrap().style.stretch;
     let stats = s.map().layers.last().unwrap().raster.as_ref().unwrap().data.as_ref().unwrap().bands[0].stats.clone();
     s.run("raster.stretch", &json!({"type": "custom", "min": 10, "max": 200})).unwrap();
-    assert_eq!(stretch(&s), Stretch::Custom { min: 10.0, max: 200.0 });
+    assert_eq!(stretch(&s), Stretch::custom(10.0, 200.0));
     // A missing bound is the layer's own statistic.
     s.run("raster.stretch", &json!({"type": "custom", "min": 10})).unwrap();
-    assert_eq!(stretch(&s), Stretch::Custom { min: 10.0, max: stats.max });
+    assert_eq!(stretch(&s), Stretch::custom(10.0, stats.max));
     // The bounds survive DRA and a project round trip.
     s.run("raster.dra", &json!({"on": true})).unwrap();
     let kept = serde_json::to_string(&stretch(&s)).unwrap();
@@ -11328,6 +11411,7 @@ fn raster_stretch_custom_bounds() {
     assert_eq!(stretch(&s), before);
     // A band with one value still gets a range to edit from.
     let mut flat = with_raster();
+    flat.run("raster.symbology", &json!({"type": "stretch", "band": 1})).unwrap();
     {
         let rl = flat.map_mut().layers.last_mut().and_then(|l| l.raster.as_mut()).unwrap();
         let mut d = (**rl.data.as_ref().unwrap()).clone();
@@ -11336,7 +11420,7 @@ fn raster_stretch_custom_bounds() {
         rl.data = Some(std::sync::Arc::new(d));
     }
     flat.run("raster.stretch", &json!({"type": "custom"})).unwrap();
-    assert_eq!(stretch(&flat), Stretch::Custom { min: 6.5, max: 7.5 });
+    assert_eq!(stretch(&flat), Stretch::custom(6.5, 7.5));
     // The padding follows the value's size, and statistics that aren't numbers are refused.
     let set_stats = |s: &mut Session, v: f64| {
         let rl = s.map_mut().layers.last_mut().and_then(|l| l.raster.as_mut()).unwrap();
@@ -11347,7 +11431,7 @@ fn raster_stretch_custom_bounds() {
     };
     set_stats(&mut flat, 9007199254740992.0);
     flat.run("raster.stretch", &json!({"type": "custom"})).unwrap();
-    assert!(matches!(stretch(&flat), Stretch::Custom { min, max } if min < 9007199254740992.0 && max > 9007199254740992.0));
+    assert!(matches!(stretch(&flat), Stretch::Custom { min, max, .. } if min < 9007199254740992.0 && max > 9007199254740992.0));
     let before = stretch(&flat);
     for v in [f64::NAN, f64::INFINITY] {
         set_stats(&mut flat, v);
@@ -11773,14 +11857,14 @@ fn dem_tiles_mosaic_clip_by_polygon_share_a_stretch_and_report_overviews() {
     s.run("raster.stretch", &json!({"layer": "west", "type": "custom", "min": 100, "max": 300})).unwrap();
     s.run("raster.stretch", &json!({"layer": "east", "like": "west"})).unwrap();
     let st = |s: &Session, n: &str| s.map().layer_by_name(n).unwrap().raster.as_ref().unwrap().style.stretch;
-    assert_eq!(st(&s, "east"), rustgis_map::Stretch::Custom { min: 100.0, max: 300.0 });
+    assert_eq!(st(&s, "east"), rustgis_map::Stretch::custom(100.0, 300.0));
     s.run("raster.stretch", &json!({"layer": "west", "type": "minMax"})).unwrap();
     s.run("raster.stretch", &json!({"layer": "east", "like": "west"})).unwrap();
-    assert_eq!(st(&s, "east"), rustgis_map::Stretch::Custom { min: 100.0, max: 109.0 });
+    assert_eq!(st(&s, "east"), rustgis_map::Stretch::custom(100.0, 109.0));
     // A mask on the source narrows its range, and the shared one with it.
     s.run("raster.mask", &json!({"layer": "west", "values": [100]})).unwrap();
     s.run("raster.stretch", &json!({"layer": "east", "like": "west"})).unwrap();
-    assert_eq!(st(&s, "east"), rustgis_map::Stretch::Custom { min: 101.0, max: 109.0 });
+    assert_eq!(st(&s, "east"), rustgis_map::Stretch::custom(101.0, 109.0));
     assert!(s.run("raster.stretch", &json!({"layer": "east", "like": "Countries"})).is_err());
 
     // A raster opened from an overview says so in its results, not only in a notice.

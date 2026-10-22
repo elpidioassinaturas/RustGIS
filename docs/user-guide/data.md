@@ -66,8 +66,10 @@ FlatGeobuf with a spatial index in WGS 84 (GDAL reprojects it), kept in the cach
 `%LOCALAPPDATA%\RustGIS\cache\gdal` on Windows, or `RUSTGIS_GDAL_CACHE`). Adding the file again
 reuses the conversion until the file changes, and large layers stream like any large FlatGeobuf
 (below). Every layer of the file is added; a layer mixing geometry types is
-added as one layer per type. Projects remember the original file and convert it again if the
-cached copy is gone.
+added as one layer per type. Curves become straight segments, and 3D surfaces (an Esri
+multipatch, such as the buildings of swissBUILDINGS3D, is read as a TIN) become flat
+polygons, one part per face, without their heights. Projects remember the original file and
+convert it again if the cached copy is gone.
 
 ## SQL queries and DuckDB databases
 
@@ -468,7 +470,7 @@ With a raster layer selected in Layers, the **Style** and **Data** tabs show its
 | Tab › Group | Controls |
 | --- | --- |
 | Style › Visibility Range, Effects | Scale range, transparency |
-| Style › Rendering | **Symbology**: Stretch, RGB, Classify, Unique Values, Colormap, Shaded Relief; **Stretch Type**: None, Minimum Maximum, Custom Min/Max (your own bounds), Percent Clip, Standard Deviation, Histogram Equalize; **DRA** (stretch the pixels in view); **Resampling** (nearest or bilinear); **Band Combination** (natural colour, colour infrared, or any bands) |
+| Style › Rendering | **Symbology**: Stretch, RGB, Classify, Unique Values, Colormap, Shaded Relief; **Stretch Type**: None, Minimum Maximum, Custom Min/Max (your own bounds, one pair per colour channel on an RGB layer), Percent Clip, Standard Deviation, Histogram Equalize; **DRA** (stretch the pixels in view); **Resampling** (nearest or bilinear); **Band Combination** (natural colour, colour infrared, or any bands) |
 | Style › Enhancement | Brightness, contrast, gamma |
 | Data | Raster information (size, bands, statistics, coordinate system) and Export Raster (GeoTIFF) |
 
@@ -599,3 +601,41 @@ map file or project. Data › Layer Templates adds empty layers with ready-made 
 routes, areas, observations…) to draw into. Add Folder connects a folder to the Browser, which
 also lists the project's layouts, styles and tasks. A task's steps each run a command; New Task
 From History turns the geoprocessing history into a task you can replay.
+
+### Complete streamed Shapefile rendering
+
+The CPU renderer traverses a streamed Shapefile in source order instead of painting only
+its interaction sample. Shapes and attributes arrive in chunks targeting 8 MiB of owned
+feature storage; projection and display geometry are temporary copies of one chunk.
+Whole-file imports, loading for editing and other providers retain their existing read APIs.
+An indivisible row exceeding the chunk target is emitted alone, preserving its full geometry.
+A zero budget reports an error.
+
+Styles, definition queries, display filters and label classes use the same painter as an
+in-memory layer. The renderer chooses geometry simplification from statistics over the whole
+layer, accumulates point bins across chunks, applies transparency and blend once per layer,
+and draws selection highlights after the whole layer. Labels share the existing global
+priority, stable tie ordering, collision rules and 20,000-candidate placement limit.
+Screen rendering and PNG/layout exports share this traversal. Live redraws of a streamed
+Shapefile therefore also read the complete source; line/polygon layers currently make an
+additional statistics pass. Interaction windows remain byte-budgeted, but they are not a
+shortcut for this complete painter, so redraws can be I/O intensive on large files.
+
+Native flat extrusions use a private disposable SQLite ordering workspace (2 MiB page-cache
+target, memory mapping disabled, 4 GiB database ceiling), with a global shadow pass followed
+by globally sorted solids. It is removed when rendering finishes. Failure or incomplete
+traversal does not publish a partial successful frame. This workspace is not a reusable index.
+
+This is not a fixed bound on total renderer memory: raster targets, label candidates and the
+existing combined polygon-mask path have separate costs. Upright perspective point markers
+and polygon extrusions retain the complete upstream depth renderer through an isolated
+full-source snapshot. Upright points require a known source total of at most 50,000 rows;
+larger or unknown totals use complete ground-marker traversal, independent of the current
+interaction-window size. Plain fills, lines and mask sources continue complete chunk traversal
+per band, including terrain bands; they do not consume that snapshot's feature budget.
+Retained complete-source feature storage across the snapshot has a separate budget (512 MiB natively, 192 MiB in the browser).
+Exceeding it fails the whole frame with a source diagnostic, without sampling or truncating
+features; raster targets, derived geometry caches and decoding scratch are outside that budget. Flat line/polygon rendering
+makes a statistics pass before painting and currently reads the entire source, so it trades
+additional I/O for complete rendering and predictable chunk storage. Geometry preprocessing
+and GPU preparation are separate optimizations.

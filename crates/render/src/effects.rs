@@ -2,7 +2,7 @@
 //! polygons extruded with lit walls and cast shadows: in an oblique 2.5D view on a flat map, in
 //! perspective on a tilted one.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use rustgis_data::{Dataset, Geometry};
 use rustgis_map::effects::{Aggregation, Extrusion};
@@ -12,67 +12,80 @@ use tiny_skia::{FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixm
 use crate::{Ctx, View, paint};
 
 /// Points binned into hexagons or squares, each bin coloured by its count.
-pub(crate) fn aggregate(pm: &mut Pixmap, ctx: &Ctx, geoms: &[Option<&Geometry>], rows: &[bool], a: Aggregation, base: &Symbol) {
-    let s = (a.size.clamp(4.0, 400.0) * ctx.ppp as f64) as f32;
-    let (w, h) = (pm.width() as f32, pm.height() as f32);
-    let mut bins: HashMap<(i64, i64), u32> = HashMap::new();
-    let sqrt3 = 3f32.sqrt();
-    for (row, g) in geoms.iter().enumerate() {
-        let Some(g) = g else { continue };
-        if rows.get(row) != Some(&true) {
-            continue;
-        }
-        let pts: Vec<rustgis_geom::Coord> = match g {
-            Geometry::Point(c) => vec![*c],
-            Geometry::MultiPoint(v) => v.clone(),
-            _ => continue,
-        };
-        for c in pts {
-            let (x, y) = ctx.px(c);
-            if !(x.is_finite() && y.is_finite()) || x < -s || y < -s || x > w + s || y > h + s {
+#[derive(Default)]
+pub(crate) struct AggregationBins {
+    bins: BTreeMap<(i64, i64), u32>,
+}
+
+impl AggregationBins {
+    pub fn add(&mut self, size: (u32, u32), ctx: &Ctx, geoms: &[Option<&Geometry>], rows: &[bool], a: Aggregation) {
+        let s = (a.size.clamp(4.0, 400.0) * ctx.ppp as f64) as f32;
+        let (w, h) = (size.0 as f32, size.1 as f32);
+        let bins = &mut self.bins;
+        let sqrt3 = 3f32.sqrt();
+        for (row, g) in geoms.iter().enumerate() {
+            let Some(g) = g else { continue };
+            if rows.get(row) != Some(&true) {
                 continue;
             }
-            let key = if a.hexagons {
-                // Pointy-top hexagons in axial coordinates, rounded through cube coordinates.
-                let q = (sqrt3 / 3.0 * x - y / 3.0) / s;
-                let r = (2.0 / 3.0 * y) / s;
-                let (cx, cz) = (q, r);
-                let cy = -cx - cz;
-                let (mut rx, ry, mut rz) = (cx.round(), cy.round(), cz.round());
-                let (dx, dy, dz) = ((rx - cx).abs(), (ry - cy).abs(), (rz - cz).abs());
-                if dx > dy && dx > dz {
-                    rx = -ry - rz;
-                } else if dy <= dz {
-                    rz = -rx - ry;
-                }
-                (rx as i64, rz as i64)
-            } else {
-                ((x / s).floor() as i64, (y / s).floor() as i64)
+            let pts: Vec<rustgis_geom::Coord> = match g {
+                Geometry::Point(c) => vec![*c],
+                Geometry::MultiPoint(v) => v.clone(),
+                _ => continue,
             };
-            *bins.entry(key).or_insert(0) += 1;
+            for c in pts {
+                let (x, y) = ctx.px(c);
+                if !(x.is_finite() && y.is_finite()) || x < -s || y < -s || x > w + s || y > h + s {
+                    continue;
+                }
+                let key = if a.hexagons {
+                    // Pointy-top hexagons in axial coordinates, rounded through cube coordinates.
+                    let q = (sqrt3 / 3.0 * x - y / 3.0) / s;
+                    let r = (2.0 / 3.0 * y) / s;
+                    let (cx, cz) = (q, r);
+                    let cy = -cx - cz;
+                    let (mut rx, ry, mut rz) = (cx.round(), cy.round(), cz.round());
+                    let (dx, dy, dz) = ((rx - cx).abs(), (ry - cy).abs(), (rz - cz).abs());
+                    if dx > dy && dx > dz {
+                        rx = -ry - rz;
+                    } else if dy <= dz {
+                        rz = -rx - ry;
+                    }
+                    (rx as i64, rz as i64)
+                } else {
+                    ((x / s).floor() as i64, (y / s).floor() as i64)
+                };
+                let count = bins.entry(key).or_insert(0);
+                *count = count.saturating_add(1);
+            }
         }
     }
-    let max = bins.values().copied().max().unwrap_or(1).max(1) as f64;
-    let ramp = Ramp::Ember;
-    let stroke = Stroke { width: 0.8 * ctx.ppp, ..Stroke::default() };
-    for ((q, r), n) in bins {
-        let t = if max > 1.0 { (n as f64).ln() / max.ln() } else { 1.0 };
-        let fill = ramp.at(0.15 + 0.85 * t).with_alpha(210);
-        let mut pb = PathBuilder::new();
-        if a.hexagons {
-            let (cx, cy) = (s * sqrt3 * (q as f32 + r as f32 / 2.0), s * 1.5 * r as f32);
-            for k in 0..6 {
-                let ang = (60.0 * k as f32 - 30.0).to_radians();
-                let (x, y) = (cx + s * ang.cos(), cy + s * ang.sin());
-                if k == 0 { pb.move_to(x, y) } else { pb.line_to(x, y) }
+    pub fn draw(&self, pm: &mut Pixmap, ctx: &Ctx, a: Aggregation, base: &Symbol) {
+        let bins = &self.bins;
+        let s = (a.size.clamp(4.0, 400.0) * ctx.ppp as f64) as f32;
+        let sqrt3 = 3f32.sqrt();
+        let max = bins.values().copied().max().unwrap_or(1).max(1) as f64;
+        let ramp = Ramp::Ember;
+        let stroke = Stroke { width: 0.8 * ctx.ppp, ..Stroke::default() };
+        for (&(q, r), &n) in bins {
+            let t = if max > 1.0 { (n as f64).ln() / max.ln() } else { 1.0 };
+            let fill = ramp.at(0.15 + 0.85 * t).with_alpha(210);
+            let mut pb = PathBuilder::new();
+            if a.hexagons {
+                let (cx, cy) = (s * sqrt3 * (q as f32 + r as f32 / 2.0), s * 1.5 * r as f32);
+                for k in 0..6 {
+                    let ang = (60.0 * k as f32 - 30.0).to_radians();
+                    let (x, y) = (cx + s * ang.cos(), cy + s * ang.sin());
+                    if k == 0 { pb.move_to(x, y) } else { pb.line_to(x, y) }
+                }
+                pb.close();
+            } else if let Some(rect) = tiny_skia::Rect::from_xywh(q as f32 * s, r as f32 * s, s, s) {
+                pb.push_rect(rect);
             }
-            pb.close();
-        } else if let Some(rect) = tiny_skia::Rect::from_xywh(q as f32 * s, r as f32 * s, s, s) {
-            pb.push_rect(rect);
-        }
-        if let Some(p) = pb.finish() {
-            pm.fill_path(&p, &paint(fill, 1.0), FillRule::Winding, Transform::identity(), None);
-            pm.stroke_path(&p, &paint(base.stroke.with_alpha(160), 1.0), &stroke, Transform::identity(), None);
+            if let Some(p) = pb.finish() {
+                pm.fill_path(&p, &paint(fill, 1.0), FillRule::Winding, Transform::identity(), None);
+                pm.stroke_path(&p, &paint(base.stroke.with_alpha(160), 1.0), &stroke, Transform::identity(), None);
+            }
         }
     }
 }
@@ -89,9 +102,24 @@ pub(crate) fn extrude(
     px_per_m: f64,
     symbol: impl Fn(usize) -> Symbol,
 ) {
+    let shapes = shapes(ctx, ds, geoms, rows, x, px_per_m, symbol);
+    paint_shapes(pm, ctx, x, &shapes, true, true);
+}
+
+type Shape = (f32, Vec<Vec<(f32, f32)>>, f32, Symbol);
+
+fn shapes(
+    ctx: &Ctx,
+    ds: &Dataset,
+    geoms: &[Option<&Geometry>],
+    rows: &[bool],
+    x: &Extrusion,
+    px_per_m: f64,
+    symbol: impl Fn(usize) -> Symbol,
+) -> Vec<Shape> {
     let fi = x.field.as_deref().and_then(|f| ds.field_index(f));
     // (base centre y, outer rings in pixels, height in pixels, row)
-    let mut shapes: Vec<(f32, Vec<Vec<(f32, f32)>>, f32, usize)> = Vec::new();
+    let mut shapes: Vec<Shape> = Vec::new();
     for (row, g) in geoms.iter().enumerate() {
         let Some(Geometry::Polygon(polys)) = g else { continue };
         if rows.get(row) != Some(&true) {
@@ -108,10 +136,21 @@ pub(crate) fn extrude(
         if rings.is_empty() {
             continue;
         }
-        let cy = rings.iter().flatten().map(|p| p.1).sum::<f32>() / rings.iter().map(Vec::len).sum::<usize>().max(1) as f32;
-        shapes.push((cy, rings, hp, row));
+        let count = rings.iter().map(Vec::len).sum::<usize>().max(1);
+        let sum = rings.iter().flatten().map(|p| p.1).sum::<f32>();
+        // Preserve ordinary painter order exactly; only widen an overflowing sum.
+        let cy = if sum.is_finite() {
+            sum / count as f32
+        } else {
+            (rings.iter().flatten().map(|p| f64::from(p.1)).sum::<f64>() / count as f64) as f32
+        };
+        shapes.push((cy, rings, hp, symbol(row)));
     }
     shapes.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    shapes
+}
+
+fn paint_shapes(pm: &mut Pixmap, ctx: &Ctx, x: &Extrusion, shapes: &[Shape], shadows: bool, solids: bool) {
     let poly_path = |rings: &[Vec<(f32, f32)>], dx: f32, dy: f32| {
         let mut pb = PathBuilder::new();
         for r in rings {
@@ -131,10 +170,10 @@ pub(crate) fn extrude(
         pb.close();
         pb.finish()
     };
-    if x.shadows {
+    if x.shadows && shadows {
         // Light from the north-west casts shadows to the south-east.
         let shade = paint(Rgba::new(0, 0, 0, 70), 1.0);
-        for (_, rings, hp, _) in &shapes {
+        for (_, rings, hp, _) in shapes {
             let (sx, sy) = (hp * 0.7, hp * 0.35);
             for r in rings {
                 for i in 0..r.len() {
@@ -152,8 +191,10 @@ pub(crate) fn extrude(
     }
     let light = (-std::f32::consts::FRAC_1_SQRT_2, -std::f32::consts::FRAC_1_SQRT_2);
     let edge_stroke = Stroke { width: 0.35 * ctx.ppp, ..Stroke::default() };
-    for (_, rings, hp, row) in &shapes {
-        let sym = symbol(*row);
+    if !solids {
+        return;
+    }
+    for (_, rings, hp, sym) in shapes {
         let base = sym.fill.with_alpha(255);
         let up = -hp;
         // Walls: the back ones first (when drawn), then the ones facing the viewer.
@@ -197,6 +238,110 @@ pub(crate) fn extrude(
                 None,
             );
         }
+    }
+}
+
+// Store float bits as integers so JSON cannot turn a non-finite height or symbol into null.
+// This is a disposable internal payload, not a persisted file format.
+#[cfg(not(target_arch = "wasm32"))]
+type StoredShape = (u32, Vec<Vec<(u32, u32)>>, u32, Rgba, Rgba, u32, u32, rustgis_map::Marker);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn encode_shape(shape: &Shape) -> rustgis_data::Result<Vec<u8>> {
+    let (cy, rings, hp, sym) = shape;
+    let stored: StoredShape = (
+        cy.to_bits(),
+        rings.iter().map(|r| r.iter().map(|(x, y)| (x.to_bits(), y.to_bits())).collect()).collect(),
+        hp.to_bits(),
+        sym.fill,
+        sym.stroke,
+        sym.stroke_width.to_bits(),
+        sym.size.to_bits(),
+        sym.marker,
+    );
+    serde_json::to_vec(&stored).map_err(|e| rustgis_data::DataError::Format(e.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_shape(bytes: &[u8]) -> rustgis_data::Result<Shape> {
+    let (cy, rings, hp, fill, stroke, width, size, marker): StoredShape =
+        serde_json::from_slice(bytes).map_err(|e| rustgis_data::DataError::Format(e.to_string()))?;
+    Ok((
+        f32::from_bits(cy),
+        rings.into_iter().map(|r| r.into_iter().map(|(x, y)| (f32::from_bits(x), f32::from_bits(y))).collect()).collect(),
+        f32::from_bits(hp),
+        Symbol { fill, stroke, stroke_width: f32::from_bits(width), size: f32::from_bits(size), marker },
+    ))
+}
+
+/// Global painter ordering and a separate shadow pass, without retaining every feature.
+pub(crate) struct ExtrusionSpool {
+    #[cfg(not(target_arch = "wasm32"))]
+    disk: rustgis_data::source::spill::Ordered,
+    #[cfg(target_arch = "wasm32")]
+    shapes: Vec<Shape>,
+}
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SPOOL_FAILURE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn check_spool_failure(stage: &str) -> rustgis_data::Result<()> {
+    if SPOOL_FAILURE.with(|s| s.get() == Some(stage)) {
+        return Err(rustgis_data::DataError::Format(format!("injected spool {stage} failure")));
+    }
+    Ok(())
+}
+
+impl ExtrusionSpool {
+    pub fn new() -> rustgis_data::Result<Self> {
+        #[cfg(test)]
+        check_spool_failure("create")?;
+        Ok(Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            disk: rustgis_data::source::spill::Ordered::new()?,
+            #[cfg(target_arch = "wasm32")]
+            shapes: Vec::new(),
+        })
+    }
+    pub fn add(
+        &mut self,
+        ctx: &Ctx,
+        ds: &Dataset,
+        geoms: &[Option<&Geometry>],
+        rows: &[bool],
+        x: &Extrusion,
+        px_per_m: f64,
+        symbol: impl Fn(usize) -> Symbol,
+    ) -> rustgis_data::Result<()> {
+        #[cfg(test)]
+        check_spool_failure("insert")?;
+        for shape in shapes(ctx, ds, geoms, rows, x, px_per_m, symbol) {
+            #[cfg(not(target_arch = "wasm32"))]
+            self.disk.insert(f64::from(shape.0), &encode_shape(&shape)?)?;
+            #[cfg(target_arch = "wasm32")]
+            self.shapes.push(shape);
+        }
+        Ok(())
+    }
+    pub fn draw(&mut self, pm: &mut Pixmap, ctx: &Ctx, x: &Extrusion) -> rustgis_data::Result<()> {
+        #[cfg(test)]
+        check_spool_failure("draw")?;
+        #[cfg(not(target_arch = "wasm32"))]
+        for shadows in [true, false].into_iter().filter(|shadow| !*shadow || x.shadows) {
+            self.disk.visit(|bytes| {
+                let shape = decode_shape(bytes)?;
+                paint_shapes(pm, ctx, x, std::slice::from_ref(&shape), shadows, !shadows);
+                Ok(())
+            })?;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.shapes.sort_by(|a, b| a.0.total_cmp(&b.0));
+            paint_shapes(pm, ctx, x, &self.shapes, true, true);
+        }
+        Ok(())
     }
 }
 
@@ -491,5 +636,50 @@ pub(crate) fn extrude_tilted(
             let edge = sym.stroke.lerp(fog, *fogged).with_alpha(110);
             pm.stroke_path(&p, &paint(edge, 1.0), &Stroke { width: 0.6 * ppp, ..Stroke::default() }, Transform::identity(), None);
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod spool_tests {
+    use super::*;
+    #[test]
+    fn spool_payload_preserves_all_float_bits_and_large_finite_centres() {
+        let symbol = Symbol { stroke_width: f32::NAN, size: f32::INFINITY, ..Symbol::default_for(rustgis_data::GeometryType::Polygon, 1) };
+        let shape = (1.0, vec![vec![(f32::MAX, -0.0)]], f32::NAN, symbol);
+        let decoded = decode_shape(&encode_shape(&shape).unwrap()).unwrap();
+        assert_eq!(decoded.0.to_bits(), shape.0.to_bits());
+        assert_eq!(decoded.1[0][0].0.to_bits(), f32::MAX.to_bits());
+        assert_eq!(decoded.1[0][0].1.to_bits(), (-0.0f32).to_bits());
+        assert_eq!(decoded.2.to_bits(), shape.2.to_bits());
+        assert_eq!(decoded.3.stroke_width.to_bits(), symbol.stroke_width.to_bits());
+        assert_eq!(decoded.3.size.to_bits(), symbol.size.to_bits());
+        let view = View {
+            width: 100.0,
+            height: 100.0,
+            pixels_per_point: 1.0,
+            camera: rustgis_map::Camera::new(rustgis_geom::Coord::new(0.0, 0.0), 1.0),
+            sky: false,
+        };
+        let ctx =
+            Ctx { view: &view, ppp: 1.0, wireframe: false, cull: rustgis_geom::Extent::EMPTY, globe: None, sprites: Default::default() };
+        let geom = Geometry::Polygon(vec![vec![vec![
+            rustgis_geom::Coord::new(0.0, -2e38),
+            rustgis_geom::Coord::new(1.0, -2e38),
+            rustgis_geom::Coord::new(1.0, -2e38),
+            rustgis_geom::Coord::new(0.0, -2e38),
+        ]]]);
+        let ds = Dataset::new("large", rustgis_data::GeometryType::Polygon, vec![]);
+        let x = Extrusion { height: 1.0, field: None, factor: 1.0, face_culling: true, lighting: true, shadows: true };
+        let got = shapes(&ctx, &ds, &[Some(&geom)], &[true], &x, 1.0, |_| symbol);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].0.is_finite());
+        let ordered = rustgis_data::source::spill::Ordered::new().unwrap();
+        ordered.insert(f64::from(got[0].0), &encode_shape(&got[0]).unwrap()).unwrap();
+        ordered
+            .visit(|bytes| {
+                decode_shape(bytes)?;
+                Ok(())
+            })
+            .unwrap();
     }
 }
