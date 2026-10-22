@@ -364,8 +364,8 @@ and a **Mann–Kendall** test of whether the trend is significant.
 
   The definitions follow `pymannkendall`'s, ties included.
 - **Options:** the significance level (`"alpha"`, 0.05), the slope per year or per decade (from the
-  real dates, so uneven spacing is handled), a period (`start`, `end`; an end given as a year or a
-  month takes all of it), a season across years
+  real dates, so uneven spacing is handled), a period (`start`, `end`; a whole number from 1000 to
+  9999 is a year, and an end given as a year or a month takes all of it), a season across years
   (`"months": [12, 1, 2]`), and the dates a cell needs (`"minValid"`, by default half of them, at
   least 4). Missing values and no-data are skipped cell by cell.
 - **Outputs:** four 32-bit layers, kept in the project as GeoTIFFs: Sen's slope, the test's Z, the
