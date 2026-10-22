@@ -73,7 +73,10 @@ pub trait TimeCube: Send + Sync {
     fn size(&self) -> Option<(usize, usize)> {
         None
     }
-    /// How many dates are read at once: files read over the network wait mostly on it.
+    /// How many dates are read at once: files read over the network wait mostly on it. Up to
+    /// about twice as many slices are held at a time (one in each reader's hands, as many waiting
+    /// to be placed), so a cube with more than one reader keeps its slices small: a STAC cube's are a
+    /// million pixels at most, about 4 MB each.
     fn readers(&self) -> usize {
         1
     }
