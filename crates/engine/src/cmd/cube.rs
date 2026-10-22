@@ -656,7 +656,9 @@ impl TrendRun {
         } else {
             // Several dates read at once, placed here as they come; a few wait at most, so the
             // slices held stay a handful. An error (or Cancel) drops the receiver, which stops the
-            // readers at their next date.
+            // readers at their next date. A reader in a read when that happens finishes it first:
+            // on a stalled server the scope waits out its timeout (two minutes, `cog`'s blocking
+            // reads have no cancel hook), so Cancel can take that long to return.
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let next = AtomicUsize::new(0);
