@@ -403,7 +403,7 @@ pub fn cube_files(s: &Session, p: &Value) -> Result<CubeFiles, String> {
     // cube of them couldn't be kept in a project or read a day later.
     if tiles.values().flat_map(|by_day| by_day.values()).any(|href| stac::needs_signing(href)) {
         return Err(format!(
-            "{collection}'s files are reached through signed addresses that expire, so they can't make a data cube kept in the project: use an API with public files (Earth Search, the Brazil Data Cube)"
+            "{collection}'s files are reached through signed addresses that expire within hours, so they can't make a data cube (one on the map keeps them in the project; a trend reads them for as long as it runs, unsigned): use an API with public files (Earth Search, the Brazil Data Cube)"
         ));
     }
     Ok(CubeFiles {
