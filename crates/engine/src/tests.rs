@@ -10688,6 +10688,23 @@ fn param_keys_reads_descriptions() {
     }
 }
 
+/// A STAC trend's keys are cube.trend's own: given, none is said to be ignored (they sat inside
+/// the description's "collection" note, where the key reader doesn't look).
+#[test]
+fn a_stac_trends_keys_are_read() {
+    let mut s = world();
+    let keys = s.registry.get("cube.trend").and_then(|c| c.param_keys()).unwrap();
+    for k in ["collection", "url", "asset", "bbox", "maxCloud", "cellSize", "resampling", "start", "end"] {
+        assert!(keys.contains(&k), "{k}: {keys:?}");
+    }
+    let mark = s.notice_mark();
+    // An API on a closed port: refused there, after the keys are read.
+    let p = json!({"collection": "c", "url": "http://127.0.0.1:9/v1", "asset": "NDVI", "bbox": [0, 0, 1, 1], "maxCloud": 20, "cellSize": 1000, "resampling": "average", "start": "2020", "end": "2021"});
+    assert!(s.run("cube.trend", &p).is_err());
+    let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
+    assert!(said.iter().all(|t| !t.contains("ignores")), "{said:?}");
+}
+
 #[test]
 fn unknown_params_are_said() {
     let mut s = world();
