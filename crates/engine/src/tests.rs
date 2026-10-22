@@ -2387,13 +2387,17 @@ fn publication_layouts_fit_their_pages() {
     let r = s
         .run(
             "layout.publication",
-            &json!({"extent": piaui, "sources": "IBGE", "headings": ["Fontes dos dados", "Referência cartográfica na projeção {projection}, a mais longa que se possa imaginar"]}),
+            &json!({"extent": piaui, "sources": "IBGE", "headings": ["Fontes dos dados, {date}", "Referência cartográfica na projeção {projection}, a mais longa que se possa imaginar"]}),
         )
         .unwrap();
     let l = s.project.layouts.last().unwrap();
     let heading = l.elements.iter().find(|e| e.name == "Reference Heading").unwrap();
     let ElementKind::Text { text, .. } = &heading.kind else { panic!() };
     assert!(text.contains("WEB MERCATOR") && !text.contains('{') && text.lines().count() >= 2, "{text}");
+    // A live token in a heading keeps its case, so the layout still fills it when it draws.
+    let sources = l.elements.iter().find(|e| e.name == "Sources Heading").unwrap();
+    let ElementKind::Text { text, .. } = &sources.kind else { panic!() };
+    assert_eq!(text, "FONTES DOS DADOS, {date}");
     assert!(l.elements.iter().any(|e| e.name == "Sources Heading") && l.elements.iter().any(|e| e.name == "Reference"), "{r}");
     let body = l.elements.iter().find(|e| e.name == "Reference").unwrap();
     assert!(body.y >= heading.y + heading.h - 1e-9, "the reference starts under its wrapped heading");

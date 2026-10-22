@@ -410,6 +410,26 @@ fn aspect(s: &Session, e: &Extent) -> Option<f64> {
     (ext.width() > 0.0 && ext.height() > 0.0).then(|| ext.height() / ext.width())
 }
 
+/// `t` in capitals, its `{tokens}` as they are: the layout fills a token (`{date}`) when it draws
+/// only in its own case.
+fn capitals(t: &str) -> String {
+    let mut out = String::with_capacity(t.len());
+    let mut token = false;
+    for c in t.chars() {
+        match c {
+            '{' => token = true,
+            '}' => token = false,
+            _ => {}
+        }
+        if token || c == '}' {
+            out.push(c);
+        } else {
+            out.extend(c.to_uppercase());
+        }
+    }
+    out
+}
+
 /// A text element in a publication layout's style: upright, sans, in `align`.
 fn pub_text(text: String, size: f64, color: Rgba, bold: bool, align: TextAlign) -> ElementKind {
     ElementKind::Text { text, size, color, bold, italic: false, align, letter_spacing: 0.0, font: FontFamily::Sans }
@@ -541,7 +561,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         let columns: Vec<_> = given
             .into_iter()
             .map(|(name, head, texts)| {
-                let head = wrap_as(&fill(&head).to_uppercase(), tw, head_pt, true);
+                // Filled first, so `{projection}` reads in capitals too; the live tokens left keep
+                // their case (wrap_as fills again, which then finds nothing).
+                let head = wrap_as(&capitals(&fill(&head)), tw, head_pt, true);
                 (name, head, texts.iter().flat_map(|t| wrap(t, tw, body_pt)).collect::<Vec<_>>())
             })
             .collect();
