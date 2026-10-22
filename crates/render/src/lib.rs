@@ -4876,3 +4876,6 @@ mod tests {
         assert_eq!(tilt_sky(&m), (space, space));
     }
 }
+
+#[cfg(test)]
+mod budget_tests;

@@ -11,6 +11,7 @@ use crate::geodesic::geodesic_buffer;
 use crate::{Inputs, Output, OutputLayer, ParamKind as K, ParamSpec as P, ToolResult, ToolSpec};
 
 const UNITS: &[&str] = &["Kilometers", "Meters", "Miles"];
+const KRIGING_MODELS: &[&str] = &["Spherical", "Exponential", "Gaussian"];
 const MATCH_OPTIONS: &[&str] = &["Intersects", "Contains", "Within"];
 const JOIN_OPERATIONS: &[&str] = &["Join one to one", "Join one to many"];
 const TARGET_RECORDS: &[&str] = &["Keep all", "Keep only matching"];
@@ -379,6 +380,81 @@ pub static TOOLS: &[ToolSpec] = &[
             P { name: "output", label: "Output Name", kind: K::Text, required: false, default: "", help: "" },
         ],
         run: spatial_join,
+    },
+    ToolSpec {
+        id: "kriging",
+        name: "Ordinary Kriging",
+        toolbox: "Analysis › Interpolation",
+        summary: "Interpolates a 2-band raster surface (Prediction and Variance) from point features using Ordinary Kriging.",
+        params: &[
+            P {
+                name: "input",
+                label: "Vector Layer",
+                kind: K::VectorLayer,
+                required: true,
+                default: "",
+                help: "Points (or bounding-box centres for lines and polygons) with values to interpolate.",
+            },
+            P { name: "field", label: "Interpolation Attribute", kind: K::NumericField, required: true, default: "", help: "" },
+            P {
+                name: "model",
+                label: "Variogram Model",
+                kind: K::Choice(KRIGING_MODELS),
+                required: false,
+                default: "\"Spherical\"",
+                help: "Spatial autocorrelation model: Spherical, Exponential, or Gaussian.",
+            },
+            P {
+                name: "neighbours",
+                label: "Max Neighbors",
+                kind: K::Number,
+                required: false,
+                default: "12",
+                help: "Number of nearest points to solve with (default 12, max 32).",
+            },
+            P {
+                name: "nugget",
+                label: "Nugget",
+                kind: K::Number,
+                required: false,
+                default: "",
+                help: "Micro-scale variance/measurement error at zero distance (default 0).",
+            },
+            P {
+                name: "sill",
+                label: "Sill",
+                kind: K::Number,
+                required: false,
+                default: "",
+                help: "Total asymptotic variance (defaults to sample variance).",
+            },
+            P {
+                name: "range",
+                label: "Range (Degrees)",
+                kind: K::Number,
+                required: false,
+                default: "",
+                help: "Spatial correlation distance in degrees (defaults to 1/3 extent diagonal).",
+            },
+            P {
+                name: "extent",
+                label: "Extent",
+                kind: K::Text,
+                required: false,
+                default: "",
+                help: "xmin,ymin,xmax,ymax in degrees; the input's extent when empty.",
+            },
+            P {
+                name: "pixelSize",
+                label: "Pixel Size (°)",
+                kind: K::Number,
+                required: false,
+                default: "",
+                help: "The output cell size in degrees; up to 250 cells across the extent when empty.",
+            },
+            P { name: "output", label: "Output Name", kind: K::Text, required: false, default: "", help: "" },
+        ],
+        run: kriging_interpolation,
     },
 ];
 
@@ -844,6 +920,151 @@ fn idw_auto_cell(extent: &Extent, n: usize) -> f64 {
     let cells = |c: f64| ((extent.width() / c).ceil().max(1.0) * (extent.height() / c).ceil().max(1.0)) as usize;
     for _ in 0..200 {
         if cells(cell).saturating_mul(n) <= crate::rasterops::MAX_IDW_WORK {
+            break;
+        }
+        cell *= 1.1;
+    }
+    cell
+}
+
+/// Ordinary Kriging interpolation: builds prediction and error surfaces from spatial autocorrelation.
+fn kriging_interpolation(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
+    let ds = input(inp, p, "input")?;
+    if let Some(crs) = ds.crs
+        && crs != rustgis_data::raster::Crs::LonLat
+    {
+        return Err("kriging interpolation expects coordinates in degrees (WGS 84 / EPSG:4326)".into());
+    }
+    let field = s(p, "field");
+    let fi = ds.field_index(field).ok_or_else(|| format!("no field named '{field}'"))?;
+    let mut raw_pts: Vec<(Coord, f64)> = Vec::new();
+    for r in rows(inp, p, "input", ds) {
+        let Some(g) = ds.features.get(r).and_then(|f| f.geometry.as_ref()) else { continue };
+        let Some(v) = ds.value(r, fi).as_f64().filter(|v| v.is_finite()) else { continue };
+        match g {
+            Geometry::Point(c) => {
+                if c.is_finite() {
+                    raw_pts.push((*c, v));
+                }
+            }
+            Geometry::MultiPoint(cs) => {
+                for c in cs {
+                    if c.is_finite() {
+                        raw_pts.push((*c, v));
+                    }
+                }
+            }
+            Geometry::Line(_) | Geometry::Polygon(_) => {
+                let ext = g.extent();
+                if !ext.is_empty() {
+                    let center = Coord::new((ext.min_x + ext.max_x) * 0.5, (ext.min_y + ext.max_y) * 0.5);
+                    if center.is_finite() {
+                        raw_pts.push((center, v));
+                    }
+                }
+            }
+        }
+    }
+    // Deduplicate sample points by coordinate to prevent singular kriging matrix
+    raw_pts.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then_with(|| a.0.y.total_cmp(&b.0.y)));
+    let mut accum: Vec<(Coord, f64, usize)> = Vec::with_capacity(raw_pts.len());
+    for (c, v) in raw_pts {
+        let mut duplicate_idx = None;
+        for (i, (last_c, _, _)) in accum.iter().enumerate().rev() {
+            if c.x - last_c.x >= 1e-9 {
+                break;
+            }
+            if (c.y - last_c.y).abs() < 1e-9 {
+                duplicate_idx = Some(i);
+                break;
+            }
+        }
+        if let Some(i) = duplicate_idx {
+            if let Some((_, sum, count)) = accum.get_mut(i) {
+                *sum += v;
+                *count += 1;
+            }
+            continue;
+        }
+        accum.push((c, v, 1));
+    }
+    let pts: Vec<(Coord, f64)> = accum.into_iter().map(|(c, sum, count)| (c, sum / count as f64)).collect();
+    if pts.len() < 2 {
+        return Err("kriging needs at least two points with values".into());
+    }
+
+    let extent = match s(p, "extent").trim() {
+        "" => {
+            let mut e = Extent::EMPTY;
+            pts.iter().for_each(|(c, _)| e.expand(*c));
+            if e.width() > 0.0 && e.height() > 0.0 { e } else { e.padded(0.05, 0.01) }
+        }
+        t => {
+            let v: Option<Vec<f64>> = t.split(',').map(|x| x.trim().parse().ok().filter(|x: &f64| x.is_finite())).collect();
+            let Some([x0, y0, x1, y1]) = v.as_deref().and_then(|v| <[f64; 4]>::try_from(v).ok()) else {
+                return Err("the extent is xmin,ymin,xmax,ymax".into());
+            };
+            Extent::new(x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1))
+        }
+    };
+    let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|t| !t.trim().is_empty()));
+    let neighbours = match num(p, "neighbours") {
+        Some(n) if n >= 2.0 => (n as usize).min(32),
+        Some(_) => return Err("neighbours must be at least 2".into()),
+        None if given("neighbours") => return Err("neighbours must be a number".into()),
+        None => 12,
+    };
+    let cell = match num(p, "pixelSize") {
+        Some(c) if c > 0.0 => c,
+        _ if given("pixelSize") => return Err("the pixel size must be more than zero".into()),
+        _ => kriging_auto_cell(&extent, pts.len(), neighbours),
+    };
+    let model = match s(p, "model") {
+        "" => crate::kriging::VariogramModel::Spherical,
+        m => m.parse::<crate::kriging::VariogramModel>().map_err(|_| format!("unknown variogram model '{m}'"))?,
+    };
+    let mut params = crate::kriging::auto_variogram(&pts, &extent, model);
+    match num(p, "nugget") {
+        Some(v) if v >= 0.0 => params.nugget = v,
+        Some(_) => return Err("nugget must be a non-negative number".into()),
+        None if given("nugget") => return Err("nugget must be a number".into()),
+        None => {}
+    }
+    match num(p, "sill") {
+        Some(v) if v > 0.0 => params.sill = v,
+        Some(_) => return Err("sill must be a positive number".into()),
+        None if given("sill") => return Err("sill must be a number".into()),
+        None => {}
+    }
+    match num(p, "range") {
+        Some(v) if v > 0.0 => params.range = v,
+        Some(_) => return Err("range must be a positive number".into()),
+        None if given("range") => return Err("range must be a number".into()),
+        None => {}
+    }
+
+    let name = out_name(p, format!("{}_{field}_kriging", ds.name));
+    let r = crate::kriging::kriging(&pts, &extent, cell, &params, neighbours, &name)?;
+    let pred_bytes = rustgis_data::raster::geotiff::write(&r, 0).map_err(|e| e.to_string())?;
+    let var_bytes = rustgis_data::raster::geotiff::write(&r, 1).map_err(|e| e.to_string())?;
+    let var_name = format!("{name}_variance");
+    let msg = format!("Ordinary Kriging ({}): {} × {} cells from {} points", model.as_str(), r.width, r.height, pts.len());
+    Ok(ToolResult {
+        output: Output::Layers(vec![
+            OutputLayer::Raster { file_name: format!("{name}.tif"), name, bytes: pred_bytes },
+            OutputLayer::Raster { file_name: format!("{var_name}.tif"), name: var_name, bytes: var_bytes },
+        ]),
+        messages: vec![msg],
+    })
+}
+
+fn kriging_auto_cell(extent: &Extent, n: usize, neighbours: usize) -> f64 {
+    let k = if neighbours == 0 { 12.min(n) } else { neighbours.clamp(2, n.clamp(2, 32)) };
+    let work_per_cell = n.saturating_add((k * k * k) / 3);
+    let mut cell = (extent.width().max(extent.height()) / 250.0).max(1e-5);
+    let cells = |c: f64| ((extent.width() / c).ceil().max(1.0) * (extent.height() / c).ceil().max(1.0)) as usize;
+    for _ in 0..200 {
+        if cells(cell).saturating_mul(work_per_cell) <= crate::kriging::MAX_KRIGING_WORK {
             break;
         }
         cell *= 1.1;
@@ -1627,6 +1848,124 @@ mod tests {
             let cells = ((3.0 / c).ceil() * (3.0 / c).ceil()) as usize;
             assert!(cells * n <= crate::rasterops::MAX_IDW_WORK, "{n} points: {cells} cells of {c}");
         }
+    }
+
+    #[test]
+    fn kriging_interpolation_writes_prediction_and_variance_rasters() {
+        let m = inputs();
+        let r = crate::run(
+            "kriging",
+            &m,
+            &serde_json::json!({
+                "input": "pts",
+                "field": "v",
+                "model": "Spherical",
+                "extent": "0,0,2,2",
+                "pixelSize": 0.5
+            }),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let Output::Layers(out) = r.output else { panic!("expected layers") };
+        assert_eq!(out.len(), 2, "Expected prediction and variance rasters");
+        let (pred_layer, var_layer) = match (&out[0], &out[1]) {
+            (
+                OutputLayer::Raster { name: p_name, file_name: p_file, bytes: p_bytes },
+                OutputLayer::Raster { name: v_name, file_name: v_file, bytes: v_bytes },
+            ) => {
+                assert_eq!(p_name, "pts_v_kriging");
+                assert_eq!(v_name, "pts_v_kriging_variance");
+                (
+                    rustgis_data::raster::read_bytes(p_file, p_bytes).unwrap_or_else(|e| panic!("{e}")),
+                    rustgis_data::raster::read_bytes(v_file, v_bytes).unwrap_or_else(|e| panic!("{e}")),
+                )
+            }
+            _ => panic!("expected two raster output layers: {out:?}"),
+        };
+        assert_eq!((pred_layer.width, pred_layer.height), (4, 4));
+        assert_eq!((var_layer.width, var_layer.height), (4, 4));
+        // Values in prediction band
+        let d = &pred_layer.bands[0].data;
+        assert!(d.iter().all(|v| (0.5..=3.5).contains(v)), "{d:?}");
+        // Variance in variance raster is non-negative
+        let var = &var_layer.bands[0].data;
+        assert!(var.iter().all(|v| *v >= 0.0), "{var:?}");
+
+        // Invalid models or parameters return errors cleanly
+        assert!(crate::run("kriging", &m, &serde_json::json!({"input": "pts", "field": "v", "model": "UnknownModel"})).is_err());
+        assert!(crate::run("kriging", &m, &serde_json::json!({"input": "pts", "field": "v", "neighbours": 1})).is_err());
+        assert!(crate::run("kriging", &m, &serde_json::json!({"input": "pts", "field": "v", "nugget": -1})).is_err());
+        assert!(crate::run("kriging", &m, &serde_json::json!({"input": "pts", "field": "v", "nugget": "abc"})).is_err());
+        assert!(crate::run("kriging", &m, &serde_json::json!({"input": "pts", "field": "v", "sill": 0})).is_err());
+        assert!(crate::run("kriging", &m, &serde_json::json!({"input": "pts", "field": "v", "sill": "xyz"})).is_err());
+        assert!(crate::run("kriging", &m, &serde_json::json!({"input": "pts", "field": "v", "range": -5})).is_err());
+        assert!(crate::run("kriging", &m, &serde_json::json!({"input": "pts", "field": "v", "range": "none"})).is_err());
+
+        // Projected layer with non-degrees CRS returns error
+        let Some(pts_layer) = m.0.get("pts") else { panic!("missing pts") };
+        let mut proj_pts = pts_layer.clone();
+        proj_pts.crs = Some(rustgis_data::raster::Crs::WebMercator);
+        let m_proj = Map(HashMap::from([("proj_pts".to_string(), proj_pts)]));
+        let err = crate::run("kriging", &m_proj, &serde_json::json!({"input": "proj_pts", "field": "v"})).unwrap_err();
+        assert!(err.contains("degrees"));
+
+        // Datasets with fewer than two points are cleanly rejected
+        let mut single_pt = Dataset::new("single", GeometryType::Point, vec![Field::new("v", FieldType::Double)]);
+        single_pt.push(Some(Geometry::Point(Coord::new(0.5, 0.5))), vec![Value::Float(1.0)]);
+        let m_single = Map(HashMap::from([("single".to_string(), single_pt)]));
+        assert_eq!(
+            crate::run("kriging", &m_single, &serde_json::json!({"input": "single", "field": "v"})).unwrap_err(),
+            "kriging needs at least two points with values"
+        );
+
+        // Deduplication averages coincident points with true arithmetic mean
+        let mut dup_pts = Dataset::new("dup", GeometryType::Point, vec![Field::new("v", FieldType::Double)]);
+        dup_pts.push(Some(Geometry::Point(Coord::new(0.5, 0.5))), vec![Value::Float(10.0)]);
+        dup_pts.push(Some(Geometry::Point(Coord::new(0.5, 0.5))), vec![Value::Float(20.0)]);
+        dup_pts.push(Some(Geometry::Point(Coord::new(0.5, 0.5))), vec![Value::Float(30.0)]);
+        dup_pts.push(Some(Geometry::Point(Coord::new(1.5, 1.5))), vec![Value::Float(20.0)]);
+        let m_dup = Map(HashMap::from([("dup".to_string(), dup_pts)]));
+        let r_dup = crate::run(
+            "kriging",
+            &m_dup,
+            &serde_json::json!({
+                "input": "dup",
+                "field": "v",
+                "extent": "0,0,2,2",
+                "pixelSize": 0.5
+            }),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let Output::Layers(dup_layers) = r_dup.output else { panic!("expected layers") };
+        let pred = match &dup_layers[0] {
+            OutputLayer::Raster { file_name, bytes, .. } => rustgis_data::raster::read_bytes(file_name, bytes).unwrap(),
+            _ => panic!("expected raster"),
+        };
+        assert!(pred.bands[0].data.iter().all(|v| (19.99..=20.01).contains(v)), "{:?}", pred.bands[0].data);
+
+        // Deduplication merges near-duplicate samples across x-windows even when separated by different y
+        let mut inter_pts = Dataset::new("inter", GeometryType::Point, vec![Field::new("v", FieldType::Double)]);
+        inter_pts.push(Some(Geometry::Point(Coord::new(0.5, 0.5))), vec![Value::Float(10.0)]);
+        inter_pts.push(Some(Geometry::Point(Coord::new(0.5 + 5e-13, 10.0))), vec![Value::Float(100.0)]);
+        inter_pts.push(Some(Geometry::Point(Coord::new(0.5 + 9e-13, 0.5))), vec![Value::Float(30.0)]);
+        inter_pts.push(Some(Geometry::Point(Coord::new(1.5, 1.5))), vec![Value::Float(20.0)]);
+        let m_inter = Map(HashMap::from([("inter".to_string(), inter_pts)]));
+        let r_inter = crate::run(
+            "kriging",
+            &m_inter,
+            &serde_json::json!({
+                "input": "inter",
+                "field": "v",
+                "extent": "0.25,0.25,0.75,0.75",
+                "pixelSize": 0.5
+            }),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let Output::Layers(inter_layers) = r_inter.output else { panic!("expected layers") };
+        let pred_inter = match &inter_layers[0] {
+            OutputLayer::Raster { file_name, bytes, .. } => rustgis_data::raster::read_bytes(file_name, bytes).unwrap(),
+            _ => panic!("expected raster"),
+        };
+        assert!((pred_inter.bands[0].data[0] - 20.0).abs() < 1e-4, "expected 20.0 at (0.5, 0.5), got {}", pred_inter.bands[0].data[0]);
     }
 
     #[test]

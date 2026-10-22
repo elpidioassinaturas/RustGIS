@@ -4521,6 +4521,7 @@ dependencies = [
  "roxmltree",
  "rusqlite",
  "rustgis-geom",
+ "rustix 1.1.5",
  "rustls",
  "ruzstd",
  "serde",

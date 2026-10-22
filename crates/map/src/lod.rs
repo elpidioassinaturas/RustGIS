@@ -21,6 +21,40 @@ pub const MIN_SAVING: f64 = 0.25;
 /// How many levels a layer keeps.
 pub const LEVELS_KEPT: usize = 3;
 
+/// Additional geometry retained for display levels per layer, excluding original/projected data.
+pub const CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Heap allocation held by a geometry's vectors (the enum itself is in its containing array).
+fn heap_bytes(g: &Geometry) -> usize {
+    rustgis_data::source::memory::geometry_bytes(g)
+}
+
+pub(crate) fn cache_bytes(geoms: &Vec<Option<Geometry>>) -> usize {
+    geoms
+        .iter()
+        .flatten()
+        .fold(geoms.capacity().saturating_mul(std::mem::size_of::<Option<Geometry>>()), |n, g| n.saturating_add(heap_bytes(g)))
+}
+
+/// Build one level without first allocating a whole window's extra geometry. Running out of
+/// budget discards only this optional display cache; drawing still uses the full projection.
+pub(crate) fn thin_budgeted(geoms: &[Option<Geometry>], tol: f64, budget: usize) -> Option<Vec<Option<Geometry>>> {
+    let mut bytes = geoms.len().checked_mul(std::mem::size_of::<Option<Geometry>>())?;
+    if bytes > budget {
+        return None;
+    }
+    let mut copy = Vec::with_capacity(geoms.len());
+    for g in geoms {
+        let thinned = g.as_ref().map(|g| thin(g, tol));
+        bytes = bytes.checked_add(thinned.as_ref().map_or(0, heap_bytes))?;
+        if bytes > budget {
+            return None;
+        }
+        copy.push(thinned);
+    }
+    Some(copy)
+}
+
 /// The level for a tolerance in projection units: the largest whose tolerance (2^level) is at
 /// most `tol`. `None` for a tolerance that is not a positive number.
 pub fn level(tol: f64) -> Option<i32> {
@@ -98,6 +132,23 @@ pub fn vertices(g: &Geometry) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_levels_respect_heap_budget_and_leave_original_geometry_intact() {
+        let original = vec![Some(Geometry::Polygon(vec![vec![vec![
+            Coord::new(0.0, 0.0),
+            Coord::new(10.0, 0.0),
+            Coord::new(10.0, 10.0),
+            Coord::new(0.0, 0.0),
+        ]]]))];
+        let before = original.clone();
+        assert!(thin_budgeted(&original, 0.1, 0).is_none());
+        assert!(thin_budgeted(&original, 0.1, std::mem::size_of::<Option<Geometry>>()).is_none());
+        let copy = thin_budgeted(&original, 0.1, 1024).unwrap();
+        assert!(cache_bytes(&copy) <= 1024);
+        assert_eq!(copy, before);
+        assert_eq!(original, before);
+    }
 
     #[test]
     fn thinning_keeps_ends_and_far_vertices() {

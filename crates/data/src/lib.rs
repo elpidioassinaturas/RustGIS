@@ -74,6 +74,13 @@ impl Features {
         std::sync::Arc::ptr_eq(&self.0, &other.0)
     }
 
+    /// A non-owning allocation identity for derived caches. Mutable access dissociates weak
+    /// references through `Arc::make_mut`, even without another strong owner, so an identity
+    /// stops matching after any row, geometry or attribute edit. It does not retain the rows.
+    pub fn allocation_key(&self) -> std::sync::Weak<Vec<Feature>> {
+        std::sync::Arc::downgrade(&self.0)
+    }
+
     /// The rows, taking them out of the share (copying them only when another copy holds them).
     pub fn into_vec(self) -> Vec<Feature> {
         std::sync::Arc::unwrap_or_clone(self.0)

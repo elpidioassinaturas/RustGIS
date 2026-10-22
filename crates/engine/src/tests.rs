@@ -1079,6 +1079,7 @@ fn hostile_params_never_panic() {
         json!({"kind": "colorbar", "ticks": -1e308, "tickSide": 7, "orientation": "x", "layer": "", "reverse": "maybe"}),
         json!({"type": "albers", "lon_0": f64::MAX, "lat_1": "x", "lat_2": -1e308}),
         json!({"kind": "legend", "element": 1, "exclude": [null, 7, "", {"x": 1}]}),
+        json!({"kind": "text", "element": 1, "font": {"family": "serif"}, "italic": [], "align": 7}),
         // A STAC trend's source: a valid band and period so the junk after them is reached, and an
         // API on a closed local port, so nothing is read.
         json!({"collection": "c", "asset": "NDVI", "url": "http://127.0.0.1:9/v1", "bbox": "nowhere", "cellSize": -1e308, "resampling": 3, "start": "2020", "end": "2021"}),
@@ -11945,6 +11946,60 @@ fn text_elements_take_italic_alignment_and_spacing() {
         assert!(s.run("layout.addElement", &add).is_err());
     }
     assert_eq!(style(&s, ocean), (false, TextAlign::Center, MAX_LETTER_SPACING));
+}
+
+/// Text elements take a font family (#517): sans by default and not written then, serif when
+/// added or later, kept through a save, sans again on request; a bad value is an error that
+/// changes nothing. Where no serif is installed the text is drawn in the sans, and the command
+/// says so.
+#[test]
+fn text_elements_take_a_font_family() {
+    use rustgis_map::layout::{ElementKind, FontFamily};
+    let mut s = Session::new(sample::world_project());
+    s.run("layout.new", &json!({"name": "Type"})).unwrap();
+    let font = |s: &Session, id: u32| match s.project.layouts[0].element(id).map(|e| &e.kind) {
+        Some(ElementKind::Text { font, .. }) => *font,
+        _ => panic!("a text element"),
+    };
+    let plain = s.run("layout.addElement", &json!({"kind": "text", "text": "Brasil"})).unwrap()["element"].as_u64().unwrap() as u32;
+    assert_eq!(font(&s, plain), FontFamily::Sans);
+    assert!(!serde_json::to_string(&s.project.layouts[0]).unwrap().contains("font"), "the sans isn't written");
+    let r = s.run("layout.addElement", &json!({"kind": "dynamicText", "font": "Serif"})).unwrap();
+    let title = r["element"].as_u64().unwrap() as u32;
+    assert_eq!(font(&s, title), FontFamily::Serif);
+    // Said only where the text can't be drawn as asked.
+    let installed = rustgis_render::fonts::serif_available();
+    assert_eq!(r.get("warning").is_some(), !installed, "{r}");
+    let r = s.run("layout.update", &json!({"element": plain, "font": "serif"})).unwrap();
+    assert_eq!(font(&s, plain), FontFamily::Serif);
+    assert_eq!(r.get("warning").is_some(), !installed, "{r}");
+    // Another change leaves the family, and says nothing of it.
+    let r = s.run("layout.update", &json!({"element": plain, "italic": true})).unwrap();
+    assert_eq!((font(&s, plain), r.get("warning")), (FontFamily::Serif, None));
+    let back: rustgis_map::layout::Layout = serde_json::from_str(&serde_json::to_string(&s.project.layouts[0]).unwrap()).unwrap();
+    assert!(back.element(plain).is_some_and(|e| matches!(&e.kind, ElementKind::Text { font: FontFamily::Serif, .. })));
+    s.run("layout.update", &json!({"element": plain, "font": "sans-serif"})).unwrap();
+    assert_eq!(font(&s, plain), FontFamily::Sans);
+    // Saved as the other layout enums are; the command's lowercase names read too (a layout
+    // written by hand).
+    assert!(serde_json::to_string(&s.project.layouts[0]).unwrap().contains(r#""font":"Serif""#));
+    for (name, f) in [("\"serif\"", FontFamily::Serif), ("\"Serif\"", FontFamily::Serif), ("\"sans\"", FontFamily::Sans)] {
+        assert_eq!(serde_json::from_str::<FontFamily>(name).unwrap(), f);
+    }
+    for bad in [json!("comic"), json!(2)] {
+        let err = s.run("layout.update", &json!({"element": title, "font": bad})).unwrap_err();
+        assert!(err.contains("font"), "{err}");
+        assert!(s.run("layout.addElement", &json!({"kind": "text", "font": bad})).is_err());
+    }
+    assert_eq!(font(&s, title), FontFamily::Serif);
+    // Only a text takes a family: another element refuses it rather than ignore it.
+    let arrow = s.run("layout.addElement", &json!({"kind": "northArrow"})).unwrap()["element"].clone();
+    let err = s.run("layout.update", &json!({"element": arrow, "font": "serif"})).unwrap_err();
+    assert!(err.contains("only text elements"), "{err}");
+    assert!(s.run("layout.addElement", &json!({"kind": "northArrow", "font": "serif"})).unwrap_err().contains("only text elements"));
+    // The page draws either way.
+    assert!(s.run("layout.update", &json!({"element": title, "text": "Mapa do Brasil", "bold": true, "italic": true})).is_ok());
+    assert!(!crate::cmd::layout::layout_bytes(&mut s, 0, false, 72.0, false).unwrap().is_empty());
 }
 
 /// Each undo step remembers who made it, through undo and redo: the user (no actor) or the

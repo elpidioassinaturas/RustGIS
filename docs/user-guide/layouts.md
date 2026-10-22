@@ -89,7 +89,16 @@ the maps; while one is open, its groups lead the Publish tab:
   **Alignment** (left, center or right within the element) and **Letter spacing** in points
   (spaced-out names such as O C E A N O, or a negative value to tighten) are the same form a text
   on the map has in the pane; Enter ends the text and Shift+Enter starts a new line. Scripts set them with `italic`, `align` and
-  `letterSpacing` on `layout.addElement` and `layout.update`. **Picture** places a PNG or JPEG.
+  `letterSpacing` on `layout.addElement` and `layout.update`. A layout's text also takes a **Font**:
+  Sans-serif (the default) or Serif, for a title or a classic atlas look. The serif is one installed
+  on the computer (Georgia or Times New Roman on Windows and macOS, Noto, DejaVu or Liberation Serif
+  on Linux), with its own bold and italic faces, so italic there is a true italic rather than
+  slanted letters (a family with no bold or italic file draws that style from its regular face:
+  italic slanted, bold as the regular); RustGIS bundles no font. The project saves only the family,
+  so it opens anywhere. Where no serif is installed (the web app, a minimal Linux), the text is
+  drawn in the sans-serif and the pane says so, as `layout.addElement` and `layout.update` do in a
+  `warning`. Scripts set it with `"font": "serif"` or `"font": "sans"`. **Picture** places a PNG or
+  JPEG.
 - **Map Series**: one page per feature of an index layer, with the frame zoomed to each feature;
   step through pages, refresh, and export every page into one PDF.
 - Click an element to select it, drag to move, drag its handles to resize, and edit it in the

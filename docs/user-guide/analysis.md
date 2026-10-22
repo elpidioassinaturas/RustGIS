@@ -230,6 +230,11 @@ its 10,000th line; any further are dimmed, as Run doesn't read them. Typing a li
 opens a list of the commands it starts, under the cursor: ↑/↓ to move, Enter or Tab to accept,
 Escape to close, or a click. Beside it, the highlighted command's help: its signature (keys with `?`
 may be left out), its name, its parameters one per line, and where it sits in the interface.
+Accepting a command on a line of its own adds its braces: with its required keys ready for their
+values, the cursor at the first (`map.goToXY {"lon": , "lat": }`), or empty with the cursor inside
+when every key may be left out; a command with no parameters gets none, and a line that has
+parameters keeps them. While you type a command's parameters (the cursor inside its `{…}`), the same help stays by the cursor;
+Escape closes it.
 
 ## ModelBuilder
 

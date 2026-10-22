@@ -22,6 +22,7 @@ pub mod gpkg;
 mod gpkg_blob;
 pub mod gpkg_mem;
 pub mod lidar;
+pub mod memory;
 pub mod msconn;
 pub mod myconn;
 #[cfg(not(target_arch = "wasm32"))]
@@ -175,6 +176,45 @@ pub trait FeatureSource: Send + Sync {
     /// [`remote::NEED`] until the bytes the read needs are fetched: run it with
     /// [`remote::drive`] (see [`FeatureSource::remote`]).
     fn read(&self, req: &Request) -> Result<Batch>;
+    /// A disposable view window bounded by allocated row/geometry/attribute bytes. Providers
+    /// can enforce this during decoding; the fallback probes a small uniform sample before
+    /// sizing the actual read. Full materialization deliberately continues to use `read`.
+    fn read_budgeted(&self, req: &Request, bytes: usize) -> Result<Batch> {
+        let mut request = *req;
+        request.limit = clamp_limit(req.limit).min(128);
+        let mut batch = self.read(&request)?;
+        if req.limit == 0 {
+            batch.features.clear();
+            batch.features.shrink_to_fit();
+            batch.complete = batch.matched == 0;
+            return Ok(batch);
+        }
+        let used = memory::features_bytes(&batch.features);
+        if !batch.complete && used < bytes {
+            // A small probe can hit only unreadable/deleted candidates. An incomplete
+            // empty answer is not proof that the requested extent contains no features.
+            let count = if batch.features.is_empty() {
+                bytes / (std::mem::size_of::<Feature>() * 4)
+            } else {
+                batch.features.len().saturating_mul(bytes / 2) / used.max(1)
+            };
+            let next = clamp_limit(req.limit).min(count).max(1);
+            if next > request.limit {
+                request.limit = next;
+                drop(batch);
+                batch = self.read(&request)?;
+            }
+        }
+        batch.features.shrink_to_fit();
+        while memory::features_bytes(&batch.features) > bytes {
+            if batch.features.len() <= 1 {
+                return Err(DataError::Format("one feature exceeds the view memory budget; load it explicitly for full processing".into()));
+            }
+            memory::halve(&mut batch.features);
+            batch.complete = false;
+        }
+        Ok(batch)
+    }
     /// The file a source reads by its web address, a range at a time.
     fn remote(&self) -> Option<std::sync::Arc<remote::Remote>> {
         None

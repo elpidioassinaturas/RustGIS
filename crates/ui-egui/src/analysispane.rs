@@ -1095,7 +1095,7 @@ fn script(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, fit: bool) {
     let box_id = egui::Id::new("script_text");
     // The suggestion list's keys (#662), taken before the box sees them.
     if let Some((offer, item)) = crate::scriptcomplete::keys(ui, box_id, &app.workflow.script) {
-        crate::scriptcomplete::accept(ui, box_id, &mut app.workflow.script, &offer, &item);
+        crate::scriptcomplete::accept(ui, box_id, &mut app.workflow.script, &offer, &item, &app.session);
     }
     let out = egui::ScrollArea::vertical().id_salt("script_box").max_height(room).auto_shrink([false, true]).show(ui, |ui| {
         egui::TextEdit::multiline(&mut app.workflow.script)
@@ -1109,8 +1109,9 @@ fn script(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, fit: bool) {
             .show(ui)
     });
     let clicked = crate::scriptcomplete::show(ui, box_id, &out.inner, out.inner_rect, &app.workflow.script, &app.session);
+    crate::scriptcomplete::hint(ui, box_id, &out.inner, out.inner_rect, &app.workflow.script, &app.session);
     if let Some((offer, item)) = clicked {
-        crate::scriptcomplete::accept(ui, box_id, &mut app.workflow.script, &offer, &item);
+        crate::scriptcomplete::accept(ui, box_id, &mut app.workflow.script, &offer, &item, &app.session);
     }
     ui.horizontal(|ui| {
         if ui.button(tl!("Run")).clicked() {

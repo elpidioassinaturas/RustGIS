@@ -55,6 +55,10 @@ webpki-roots = { workspace = true }
 # Private temporary workspaces for downloaded JPEG 2000 conversion through GDAL.
 tempfile = "3"
 
+[target.'cfg(all(unix, not(target_arch = "wasm32")))'.dependencies]
+# Safe effective-UID and no-follow operations for private Shapefile index caches.
+rustix = { version = "1.1", features = ["process", "fs"] }
+
 [dev-dependencies]
 # Writing sample GeoParquet files.
 parquet = { workspace = true, features = ["arrow"] }

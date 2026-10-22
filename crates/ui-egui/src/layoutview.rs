@@ -1538,11 +1538,11 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
         );
     });
     // A layout's text: the form a text graphic has too (#516, #535), with the page's dynamic text.
-    if let ElementKind::Text { text, size, color, bold, italic, align, letter_spacing } = &e.kind {
+    if let ElementKind::Text { text, size, color, bold, italic, align, letter_spacing, font } = &e.kind {
         let key = (li, id, "text");
         let mut buf = app.layout.typing.remove(&key).unwrap_or_else(|| text.clone());
         let (mut sz, mut c, mut bb) = (*size, crate::theme::c32(*color), *bold);
-        let (mut it, mut al, mut ls) = (*italic, *align, *letter_spacing);
+        let (mut it, mut al, mut ls, mut fam) = (*italic, *align, *letter_spacing, *font);
         let tokens = [rustgis_engine::map::graphics::TOKENS, rustgis_engine::map::layout::PAGE_TOKENS];
         let fields = crate::textform::Fields {
             text: &mut buf,
@@ -1552,6 +1552,7 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             italic: Some(&mut it),
             align: Some(&mut al),
             letter_spacing: Some(&mut ls),
+            font: Some(&mut fam),
             select: false,
         };
         let settled = crate::textform::section(ui, "Text", |ui| crate::textform::show(ui, ("layout_text", li, id), &tokens, fields))
@@ -1578,6 +1579,9 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
         }
         if settled.letter_spacing {
             update(app, json!({"letterSpacing": ls}));
+        }
+        if settled.font {
+            update(app, json!({"font": fam.code()}));
         }
     }
     // The layers a legend lists: a checkbox for each vector layer of its frame's map, ticked when
@@ -2235,6 +2239,16 @@ mod tests {
             matches!(kind, ElementKind::Text { italic: true, align: TextAlign::Left, letter_spacing, .. } if *letter_spacing == 3.5),
             "{kind:?}"
         );
+        // The family (#517): Serif picked from the Font list is stored.
+        h.get_by_role_and_label(Role::ComboBox, "Font").click();
+        h.run_steps(2);
+        h.get_by_label("Serif").click();
+        h.run_steps(3);
+        let kind = &h.state().session.project.layouts[li].element(title).unwrap().kind;
+        assert!(matches!(kind, ElementKind::Text { font: rustgis_engine::map::layout::FontFamily::Serif, .. }), "{kind:?}");
+        // Said where no serif is installed, and only there.
+        let said = h.query_by_label_contains("No serif font is installed").is_some();
+        assert_eq!(said, !rustgis_engine::render::fonts::serif_available());
     }
 
     /// A number dragged in the Format pane and let go is applied (#607): X moves the element by

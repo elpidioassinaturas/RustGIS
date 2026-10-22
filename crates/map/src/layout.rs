@@ -305,6 +305,52 @@ impl TextAlign {
     }
 }
 
+/// The family a text element is drawn in (#517): a generic one, not a file, so a project opens
+/// anywhere and each machine draws it in a face it has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FontFamily {
+    /// The interface's sans-serif. Saved as the other layout enums are (`Sans`, as `TextAlign`
+    /// saves `Center`); the command's lowercase names are read too, so a layout written by hand
+    /// with `"font": "sans"` imports.
+    #[default]
+    #[serde(alias = "sans", alias = "sans-serif")]
+    Sans,
+    /// An installed serif (Georgia, Times, Noto Serif…); the sans where there is none.
+    #[serde(alias = "serif")]
+    Serif,
+}
+
+impl FontFamily {
+    pub const ALL: [FontFamily; 2] = [FontFamily::Sans, FontFamily::Serif];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            FontFamily::Sans => "sans",
+            FontFamily::Serif => "serif",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FontFamily::Sans => "Sans-serif",
+            FontFamily::Serif => "Serif",
+        }
+    }
+
+    /// `sans` or `serif` (`sans-serif` too), in any case.
+    pub fn from_name(s: &str) -> Option<FontFamily> {
+        let s = s.trim();
+        FontFamily::ALL
+            .into_iter()
+            .find(|v| v.code().eq_ignore_ascii_case(s))
+            .or(s.eq_ignore_ascii_case("sans-serif").then_some(FontFamily::Sans))
+    }
+}
+
+fn is_sans(f: &FontFamily) -> bool {
+    *f == FontFamily::Sans
+}
+
 /// The most letter spacing a text element takes, either way (points).
 pub const MAX_LETTER_SPACING: f64 = 50.0;
 pub const MIN_LETTER_SPACING: f64 = -5.0;
@@ -757,6 +803,9 @@ pub enum ElementKind {
         /// Space added between letters, in points (spaced-out ocean names); negative tightens.
         #[serde(default, skip_serializing_if = "is_zero")]
         letter_spacing: f64,
+        /// Sans-serif or serif; left out when sans, so layouts saved before keep their bytes.
+        #[serde(default, skip_serializing_if = "is_sans")]
+        font: FontFamily,
     },
     Picture {
         /// Base64 PNG or JPEG.
@@ -802,7 +851,16 @@ fn rows() -> usize {
 impl ElementKind {
     /// A text element in the plain style: upright, left-aligned, normally spaced.
     pub fn text(text: impl Into<String>, size: f64, color: Rgba, bold: bool) -> ElementKind {
-        ElementKind::Text { text: text.into(), size, color, bold, italic: false, align: TextAlign::Left, letter_spacing: 0.0 }
+        ElementKind::Text {
+            text: text.into(),
+            size,
+            color,
+            bold,
+            italic: false,
+            align: TextAlign::Left,
+            letter_spacing: 0.0,
+            font: FontFamily::Sans,
+        }
     }
 
     /// A north arrow for `frame`, in the default style.

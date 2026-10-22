@@ -808,7 +808,7 @@ fn shapefile_read_in_place() {
     points_shapefile(&p);
     let src = open_path(&p, None).unwrap();
     assert_eq!(src.info().format, "Shapefile");
-    check(src.as_ref(), false);
+    check(src.as_ref(), true);
     assert_eq!(shp::record_count(&p), Some(600));
 }
 
@@ -873,10 +873,16 @@ fn damaged_shapefiles_are_errors_or_skips_not_panics() {
     let (shp, dbf) = (std::fs::read(&good).unwrap(), std::fs::read(good.with_extension("dbf")).unwrap());
     let p = d.join("cut.shp");
     let read_all = |p: &Path| {
-        if let Ok(s) = open_path(p, None) {
-            let _ = s.read(&Request::all());
-            let _ = s.read(&Request { extent: Some(Extent::new(-10.0, -10.0, 10.0, 10.0)), limit: 1 });
-        }
+        let read = || {
+            if let Ok(s) = open_path(p, None) {
+                let _ = s.read(&Request::all());
+                let _ = s.read(&Request { extent: Some(Extent::new(-10.0, -10.0, 10.0, 10.0)), limit: 1 });
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        shp::with_test_cache(d.join("indexes"), read);
+        #[cfg(target_arch = "wasm32")]
+        read();
     };
     std::fs::write(p.with_extension("dbf"), &dbf).unwrap();
     for n in 0..shp.len() {

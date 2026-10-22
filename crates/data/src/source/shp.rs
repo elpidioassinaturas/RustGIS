@@ -1,8 +1,8 @@
 //! Shapefiles read in place: a large `.shp` with its `.dbf` and `.prj`, a view at a time.
 //!
-//! Opening walks the `.shp` once, keeping each record's place and bounding box (24 bytes a
-//! record); a read picks the records whose boxes meet the request, then reads just those shapes
-//! and `.dbf` rows by their offsets. Smaller Shapefiles are still read whole by `io::read_path`,
+//! Opening builds or reuses a disk-backed R-tree and record directory. Queries use a bounded
+//! SQLite page cache, then read matching shapes and `.dbf` rows by their offsets.
+//! Smaller Shapefiles are still read whole by `io::read_path`,
 //! so they can be edited.
 //!
 //! The files are hostile input: record lengths, part and point counts are checked against the
@@ -12,7 +12,10 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use super::{Batch, FeatureSource, Reproject, Request, SourceInfo, clamp_limit, stride};
+mod cache;
+mod index;
+
+use super::{Batch, FeatureSource, Reproject, Request, SourceInfo, clamp_limit};
 use crate::io::group_rings;
 use crate::{DataError, Feature, Field, FieldType, Geometry, GeometryType, Result, Value};
 use rustgis_geom::{Coord, Extent};
@@ -56,9 +59,7 @@ pub struct ShpSource {
     info: SourceInfo,
     shp: PathBuf,
     dbf: PathBuf,
-    places: Vec<Place>,
-    /// Each record's box in the file's coordinates, rounded outward (NaN for a null shape).
-    boxes: Vec<[f32; 4]>,
+    index: index::Index,
     table: Table,
     reproject: Reproject,
 }
@@ -98,36 +99,10 @@ impl ShpSource {
             le_f64(&header, 52).unwrap_or(0.0),
             le_f64(&header, 60).unwrap_or(0.0),
         );
-        // Walk the records by their headers: each one's place and box.
-        let (mut places, mut boxes) = (Vec::new(), Vec::new());
-        let mut pos = 100u64;
-        let mut head = [0u8; 8 + 36];
-        while pos + 8 <= shp_len {
-            let want = (shp_len - pos).min(head.len() as u64) as usize;
-            let Some(buf) = head.get_mut(..want) else { break };
-            if f.read_exact(buf).is_err() {
-                break;
-            }
-            let len = u64::try_from(be_i32(&head, 4).unwrap_or(-1)).unwrap_or(u64::MAX).saturating_mul(2);
-            let content = pos + 8;
-            if len < 4 || content.saturating_add(len) > shp_len {
-                notes.push(format!("the .shp ends partway through record {}; the rest are left out", places.len() + 1));
-                break;
-            }
-            // Only this record's bytes: a short one (a null shape, or a damaged one) mustn't read
-            // its box from the next record's header.
-            let c = head.get(8..(want as u64).min(8 + len) as usize).unwrap_or(&[]);
-            boxes.push(record_box(c));
-            places.push(Place { offset: content as u32, len: len as u32 });
-            pos = content + len;
-            // On to the next record's header, past what was read of this one.
-            let read = (want as u64).saturating_sub(8);
-            if f.seek_relative(len as i64 - read as i64).is_err() {
-                break;
-            }
-        }
-        if table.rows != places.len() as u64 {
-            notes.push(format!("the .shp holds {} shapes and the .dbf {} rows; rows are matched by position", places.len(), table.rows));
+        drop(f);
+        let index = index::Index::open(path, shp_len, &mut notes)?;
+        if table.rows != index.count {
+            notes.push(format!("the .shp holds {} shapes and the .dbf {} rows; rows are matched by position", index.count, table.rows));
         }
         let reproject = shp_reproject(crate::raster::read_prj(path).as_deref(), &mut notes);
         let extent = if native.is_empty() || !native.min_x.is_finite() { Extent::EMPTY } else { reproject.extent_to_lonlat(&native) };
@@ -144,27 +119,12 @@ impl ShpSource {
             geometry_type,
             fields,
             extent,
-            count: Some(places.len() as u64),
+            count: Some(index.count),
             crs: reproject.label(),
-            indexed: false,
+            indexed: index.indexed(),
             notes,
         };
-        Ok(ShpSource { info, shp: path.to_path_buf(), dbf, places, boxes, table, reproject })
-    }
-
-    /// The records a request matches, in file order: every one without an extent; otherwise
-    /// those whose boxes meet it (null shapes never do).
-    fn matches(&self, req: &Request) -> impl Iterator<Item = u32> + '_ {
-        // Rounded to the nearest f32: never past a box rounded outward that meets the extent.
-        let e = req
-            .extent
-            .map(|e| self.reproject.extent_from_lonlat(&e))
-            .map(|e| (e.is_empty(), [e.min_x as f32, e.min_y as f32, e.max_x as f32, e.max_y as f32]));
-        self.boxes.iter().enumerate().filter_map(move |(i, b)| match e {
-            None => Some(i as u32),
-            Some((true, _)) => None,
-            Some((false, [x0, y0, x1, y1])) => (b[0] <= x1 && b[2] >= x0 && b[1] <= y1 && b[3] >= y0).then_some(i as u32),
-        })
+        Ok(ShpSource { info, shp: path.to_path_buf(), dbf, index, table, reproject })
     }
 }
 
@@ -175,54 +135,55 @@ impl FeatureSource for ShpSource {
 
     fn read(&self, req: &Request) -> Result<Batch> {
         let limit = clamp_limit(req.limit);
-        // Counted first, then the sample taken: no list of every match.
-        let matched = self.matches(req).count();
-        let step = stride(matched as u64, limit).max(1) as usize;
-        let wanted: Vec<u32> = self.matches(req).step_by(step).take(limit).collect();
+        let extent = req.extent.map(|e| self.reproject.extent_from_lonlat(&e));
+        if extent.is_some_and(|e| e.is_empty()) {
+            return Ok(Batch { complete: super::stride(0, limit) == 1, ..Batch::default() });
+        }
+        let bounds = extent.map(|e| [e.min_x as f32, e.min_y as f32, e.max_x as f32, e.max_y as f32]);
         let mut shp = Cursor::open(&self.shp)?;
         let mut dbf = Cursor::open(&self.dbf)?;
         let mut buf = Vec::new();
         let mut row = vec![0u8; self.table.row_len];
-        let mut features = Vec::with_capacity(wanted.len());
+        let mut features = Vec::new();
         let mut skipped = 0;
-        for i in wanted {
-            let Some(place) = self.places.get(i as usize) else { continue };
+        let (matched, complete) = self.index.visit(bounds, limit, |i, place| {
             buf.resize(place.len as usize, 0);
             if shp.read_at(u64::from(place.offset), &mut buf).is_err() {
                 skipped += 1;
-                continue;
+                return Ok(());
             }
             let geometry = match parse_shape(&buf) {
                 Ok(Some(g)) => match self.reproject.geometry(g) {
                     Some(g) => Some(g),
                     None => {
                         skipped += 1;
-                        continue;
+                        return Ok(());
                     }
                 },
                 Ok(None) => None,
                 Err(()) => {
                     skipped += 1;
-                    continue;
+                    return Ok(());
                 }
             };
             let attrs = if u64::from(i) < self.table.rows {
                 let at = self.table.header_len + u64::from(i) * self.table.row_len as u64;
                 if dbf.read_at(at, &mut row).is_err() {
                     skipped += 1;
-                    continue;
+                    return Ok(());
                 }
                 // A deleted row: its shape is left out too.
                 if row.first() == Some(&b'*') {
-                    continue;
+                    return Ok(());
                 }
                 self.table.columns.iter().map(|c| value(c, row.get(1 + c.offset..1 + c.offset + c.len).unwrap_or(&[]))).collect()
             } else {
                 vec![Value::Null; self.table.columns.len()]
             };
             features.push(Feature { id: u64::from(i) + 1, geometry, attrs });
-        }
-        Ok(Batch { features, matched: matched as u64, complete: step == 1, skipped })
+            Ok(())
+        })?;
+        Ok(Batch { features, matched, complete, skipped })
     }
 }
 
@@ -479,4 +440,18 @@ fn shp_reproject(prj: Option<&str>, notes: &mut Vec<String>) -> Reproject {
         }
     };
     Reproject::from_crs(crs, notes)
+}
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+pub(super) fn with_test_cache<T>(root: PathBuf, run: impl FnOnce() -> T) -> T {
+    cache::with_index_dir(root.clone(), || {
+        let result = run();
+        if root.exists() {
+            assert_eq!(cache::maintain(&root, 0).unwrap().remaining_bytes, 0);
+        }
+        result
+    })
 }

@@ -27,6 +27,73 @@ fn font(bold: bool) -> Option<&'static FontRef<'static>> {
     }
 }
 
+/// The family and style a line is drawn in: a layout text's serif (#517), with its bold and
+/// italic, or the label font's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Face {
+    pub bold: bool,
+    pub italic: bool,
+    /// The installed serif; the sans where there is none.
+    pub serif: bool,
+}
+
+/// The installed serif's faces, parsed once: (regular, bold, italic, bold italic).
+type SerifFaces = (FontRef<'static>, Option<FontRef<'static>>, Option<FontRef<'static>>, Option<FontRef<'static>>);
+
+/// The weight a serif's bold faces are drawn at where the file is a variable font (a variable
+/// Noto Serif is one file for every weight); static faces ignore it.
+const SERIF_BOLD_WEIGHT: f32 = 700.0;
+
+fn serif() -> Option<&'static SerifFaces> {
+    static S: OnceLock<Option<SerifFaces>> = OnceLock::new();
+    S.get_or_init(|| {
+        let f = crate::fonts::serif_fonts()?;
+        let parse = |b: Option<&'static [u8]>| b.and_then(|b| FontRef::try_from_slice(b).ok());
+        let heavy = |b: Option<&'static [u8]>| {
+            let mut face = parse(b)?;
+            face.set_variation(b"wght", SERIF_BOLD_WEIGHT);
+            Some(face)
+        };
+        // A variable family's bold faces are its regular and italic bytes parsed again (a
+        // `FontRef` only borrows them), drawn at the bold weight.
+        let (bold, bold_italic) =
+            if f.variable { (Some(f.regular.as_slice()), f.italic.as_deref()) } else { (f.bold.as_deref(), f.bold_italic.as_deref()) };
+        Some((FontRef::try_from_slice(&f.regular).ok()?, heavy(bold), parse(f.italic.as_deref()), heavy(bold_italic)))
+    })
+    .as_ref()
+}
+
+/// The face `face` is drawn in from `serif`'s faces, and whether it is slanted by hand: a real
+/// italic face where the family has one (bold italic, else italic), else the bold or regular
+/// slanted, as the sans always is. Without a serif, the label font.
+fn face_in(face: Face, serif: Option<&'static SerifFaces>) -> Option<(&'static FontRef<'static>, bool)> {
+    let Some((regular, bold, italic, bold_italic)) = serif.filter(|_| face.serif) else {
+        return font(face.bold).map(|f| (f, face.italic));
+    };
+    let upright = if face.bold { bold.as_ref().unwrap_or(regular) } else { regular };
+    let real_italic = if face.bold { bold_italic.as_ref() } else { italic.as_ref() };
+    Some(match real_italic.filter(|_| face.italic) {
+        Some(f) => (f, false),
+        None => (upright, face.italic),
+    })
+}
+
+fn face_font(face: Face) -> Option<(&'static FontRef<'static>, bool)> {
+    face_in(face, serif())
+}
+
+/// The label font of `face`'s weight, for the characters `f` lacks: `None` when `f` is it.
+fn sans_beside(f: &'static FontRef<'static>, face: Face) -> Option<&'static FontRef<'static>> {
+    font(face.bold).filter(|s| !std::ptr::eq(*s, f))
+}
+
+/// Whether a glyph drawn from `g` leans: the whole line does when its face is slanted by hand
+/// (`slanted`), and in a real italic face `f` a glyph taken from another face (the sans or a
+/// CJK face, for a character the italic lacks) is slanted to match it.
+fn leans(face: Face, f: &FontRef<'static>, slanted: bool, g: &FontRef<'static>) -> bool {
+    slanted || (face.italic && !std::ptr::eq(f, g))
+}
+
 /// The scale that draws `f` with an em `px` pixels tall, as CSS sizes a font and the map view
 /// (egui) draws it. (ab_glyph's own pixel scale is the height from descender to ascender,
 /// a good third more than the em in most faces.)
@@ -66,13 +133,19 @@ fn cjk_order(c: char) -> [CjkRegion; 3] {
     }
 }
 
-/// The face and glyph that draw `c`: the label font when it has the glyph, else the first
-/// installed CJK font that does. `None` when nothing covers it, so no missing-glyph box is drawn.
-fn glyph(c: char, bold: bool) -> Option<(&'static FontRef<'static>, GlyphId)> {
-    let f = font(bold)?;
+/// The face and glyph that draw `c`: `f` when it has the glyph, else `sans` (the label font a
+/// serif text falls back to: an arrow or a script the serif lacks), else the first installed CJK
+/// font that does. `None` when nothing covers it, so no missing-glyph box is drawn.
+fn glyph(c: char, f: &'static FontRef<'static>, sans: Option<&'static FontRef<'static>>) -> Option<(&'static FontRef<'static>, GlyphId)> {
     let id = f.glyph_id(c);
     if id.0 != 0 || invisible(c) {
         return (id.0 != 0).then_some((f, id));
+    }
+    if let Some(s) = sans {
+        let id = s.glyph_id(c);
+        if id.0 != 0 {
+            return Some((s, id));
+        }
     }
     cjk_order(c).into_iter().filter_map(cjk).find_map(|f| {
         let id = f.glyph_id(c);
@@ -83,20 +156,24 @@ fn glyph(c: char, bold: bool) -> Option<(&'static FontRef<'static>, GlyphId)> {
 /// Whether the label fonts (`bold` or regular, with the installed CJK fallbacks) have a glyph for
 /// every character of `text`, invisible characters aside.
 pub fn covers(text: &str, bold: bool) -> bool {
-    if font(bold).is_none() {
-        return true;
-    }
-    text.chars().all(|c| invisible(c) || glyph(c, bold).is_some())
+    let Some(f) = font(bold) else { return true };
+    text.chars().all(|c| invisible(c) || glyph(c, f, None).is_some())
 }
 
-/// Lays out `text` at `px` pixels: each drawable glyph with its face and pen position (from 0),
-/// and the total advance. Characters no font covers are left out.
-fn shape(text: &str, px: f32, bold: bool) -> (Vec<(&'static FontRef<'static>, GlyphId, f32)>, f32) {
+/// Lays out `text` at `px` pixels in `face` (with `sans` for the characters it lacks, as
+/// [`glyph`] takes them): each drawable glyph with its face and pen position (from 0), and the
+/// total advance. Characters no font covers are left out.
+fn shape(
+    text: &str,
+    px: f32,
+    face: &'static FontRef<'static>,
+    sans: Option<&'static FontRef<'static>>,
+) -> (Vec<(&'static FontRef<'static>, GlyphId, f32)>, f32) {
     let mut out = Vec::new();
     let mut x = 0.0;
     let mut prev: Option<(&'static FontRef<'static>, GlyphId)> = None;
     for ch in text.chars().take(500) {
-        let Some((f, id)) = glyph(ch, bold) else { continue };
+        let Some((f, id)) = glyph(ch, face, sans) else { continue };
         let sf = f.as_scaled(em(f, px));
         if let Some((pf, pid)) = prev
             && std::ptr::eq(pf, f)
@@ -126,10 +203,10 @@ pub fn line_count(text: &str) -> usize {
 
 /// Text width in points at `size` (font px ≈ size × 1.33 for point sizes), drawn on one line.
 pub fn measure(text: &str, size: f32, bold: bool) -> f32 {
-    if font(bold).is_none() {
+    let Some(f) = font(bold) else {
         return text.chars().count() as f32 * size * 0.6;
-    }
-    shape(text, size * 1.33, bold).1
+    };
+    shape(text, size * 1.33, f, None).1
 }
 
 /// How wide `text` is on one line at `size` with `spacing` points between letters, in points.
@@ -235,7 +312,7 @@ fn line_width(l: &PlacedLabel, line: &str, ppp: f32) -> f32 {
         return advance;
     }
     let letters = match font(l.bold) {
-        Some(_) => shape(line, l.size * 1.33 * ppp, l.bold).0.len(),
+        Some(f) => shape(line, l.size * 1.33 * ppp, f, None).0.len(),
         None => line.chars().count(),
     };
     // Letters drawn tighter than their own width (the most negative spacing) don't make it less
@@ -278,7 +355,7 @@ fn blend(pm: &mut Pixmap, x: i32, y: i32, c: Rgba, cov: f32) {
 fn draw_text(pm: &mut Pixmap, text: &str, cx: f32, cy: f32, px_size: f32, color: Rgba, bold: bool, offset: (f32, f32)) {
     let Some(f) = font(bold) else { return };
     let sf = f.as_scaled(em(f, px_size));
-    let (glyphs, width) = shape(text, px_size, bold);
+    let (glyphs, width) = shape(text, px_size, f, None);
     let x0 = cx - width / 2.0 + offset.0;
     let base = cy + (sf.ascent() + sf.descent()) / 2.0 + offset.1;
     for (f, id, x) in glyphs {
@@ -294,18 +371,20 @@ fn draw_text(pm: &mut Pixmap, text: &str, cx: f32, cy: f32, px_size: f32, color:
 /// slant an oblique.
 const SLANT: f32 = 0.2126;
 
-/// The ink `text` draws at `px` with `spacing` and `italic`, from the pen's start: its leftmost
+/// The ink `text` draws at `px` in `face` with `spacing`, from the pen's start: its leftmost
 /// and rightmost pixel offsets. With a negative spacing the letters can run backwards past the
 /// pen, and a slant moves their tops right and their descenders left; (0, 0) when nothing draws.
-pub fn styled_extent(text: &str, px: f32, bold: bool, italic: bool, spacing: f32) -> (f32, f32) {
-    let Some(f) = font(bold) else { return (0.0, 0.0) };
+pub fn styled_extent(text: &str, px: f32, face: Face, spacing: f32) -> (f32, f32) {
+    let Some((f, slanted)) = face_font(face) else { return (0.0, 0.0) };
     let sf = f.as_scaled(em(f, px));
     let base = (sf.ascent() + sf.descent()) / 2.0;
-    let (glyphs, _) = shape(text, px, bold);
+    let (glyphs, _) = shape(text, px, f, sans_beside(f, face));
     let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-    for (i, (f, id, x)) in glyphs.into_iter().enumerate() {
-        let g = id.with_scale_and_position(em(f, px), ab_glyph::point(x + spacing * i as f32, base));
-        let Some(og) = f.outline_glyph(g) else { continue };
+    for (i, (gf, id, x)) in glyphs.into_iter().enumerate() {
+        // Measured as `styled_at` draws it.
+        let italic = leans(face, f, slanted, gf);
+        let g = id.with_scale_and_position(em(gf, px), ab_glyph::point(x + spacing * i as f32, base));
+        let Some(og) = gf.outline_glyph(g) else { continue };
         let bb = og.px_bounds();
         let (lean_top, lean_bottom) = if italic { (SLANT * (base - bb.min.y), SLANT * (base - bb.max.y)) } else { (0.0, 0.0) };
         lo = lo.min(bb.min.x + lean_top.min(lean_bottom));
@@ -314,21 +393,22 @@ pub fn styled_extent(text: &str, px: f32, bold: bool, italic: bool, spacing: f32
     if lo.is_finite() && hi.is_finite() { (lo, hi) } else { (0.0, 0.0) }
 }
 
-/// Draws `text` from `left` (pixels), its line centred on `cy`, at `px` with `spacing` pixels
-/// between letters, slanted when `italic`. Plain (no spacing, upright) it draws as
-/// [`text_at`] does from the left.
+/// Draws `text` from `left` (pixels), its line centred on `cy`, at `px` in `face` with `spacing`
+/// pixels between letters: italic in the family's italic face where it has one, else slanted.
+/// Plain (sans, no spacing, upright) it draws as [`text_at`] does from the left.
 #[allow(clippy::too_many_arguments)]
-pub fn styled_at(pm: &mut Pixmap, text: &str, left: f32, cy: f32, px: f32, color: Rgba, bold: bool, italic: bool, spacing: f32) {
+pub fn styled_at(pm: &mut Pixmap, text: &str, left: f32, cy: f32, px: f32, color: Rgba, face: Face, spacing: f32) {
     if !(left.is_finite() && cy.is_finite() && px.is_finite() && spacing.is_finite()) || px <= 0.0 {
         return;
     }
-    let Some(f) = font(bold) else { return };
+    let Some((f, slanted)) = face_font(face) else { return };
     let sf = f.as_scaled(em(f, px));
     let base = cy + (sf.ascent() + sf.descent()) / 2.0;
-    let (glyphs, _) = shape(text, px, bold);
-    for (i, (f, id, x)) in glyphs.into_iter().enumerate() {
-        let g = id.with_scale_and_position(em(f, px), ab_glyph::point(left + x + spacing * i as f32, base));
-        let Some(og) = f.outline_glyph(g) else { continue };
+    let (glyphs, _) = shape(text, px, f, sans_beside(f, face));
+    for (i, (gf, id, x)) in glyphs.into_iter().enumerate() {
+        let italic = leans(face, f, slanted, gf);
+        let g = id.with_scale_and_position(em(gf, px), ab_glyph::point(left + x + spacing * i as f32, base));
+        let Some(og) = gf.outline_glyph(g) else { continue };
         let bb = og.px_bounds();
         og.draw(|gx, gy, cov| {
             let (px_x, px_y) = (bb.min.x + gx as f32, bb.min.y + gy as f32);
@@ -408,7 +488,7 @@ fn draw_upright(pm: &mut Pixmap, l: &PlacedLabel, ppp: f32) {
     let (styled, spacing) = (styled(l), l.spacing * 1.33 * ppp);
     let put = |pm: &mut Pixmap, &(line, left, lw, y): &(&str, f32, f32, f32), color: Rgba, (dx, dy): (f32, f32)| {
         if styled {
-            styled_at(pm, line, left + dx, y + dy, px, color, l.bold, l.italic, spacing);
+            styled_at(pm, line, left + dx, y + dy, px, color, Face { bold: l.bold, italic: l.italic, serif: false }, spacing);
         } else {
             draw_text(pm, line, left + lw / 2.0, y, px, color, l.bold, (dx, dy));
         }
@@ -568,5 +648,82 @@ mod coverage_tests {
         let mut pm = tiny_skia::Pixmap::new(80, 40).unwrap();
         super::text_at(&mut pm, &ch.to_string(), 40.0, 20.0, 24.0, rustgis_map::Rgba::rgb(0, 0, 0), false, super::Align::Center, false);
         assert!(pm.pixels().iter().any(|p| p.alpha() > 0), "the fallback glyph was not drawn");
+    }
+
+    /// A text asking for a serif (#517) where none is installed is drawn in the label font, slanted
+    /// as before for italic: nothing goes blank, and the result is the same on every machine.
+    #[test]
+    fn a_missing_serif_draws_in_the_sans() {
+        use super::{Face, face_in, font};
+        for bold in [false, true] {
+            for italic in [false, true] {
+                let (f, slant) = face_in(Face { bold, italic, serif: true }, None).unwrap();
+                assert!(std::ptr::eq(f, font(bold).unwrap()) && slant == italic);
+            }
+        }
+    }
+
+    /// The serif's faces picked for each style, a character it lacks taken from the sans, and that
+    /// glyph slanted in a real italic, with faces of the test's own (egui's bundled Hack as the
+    /// serif's regular, Ubuntu Light as its italic): run on every machine, serif installed or not.
+    #[test]
+    fn serif_faces_are_picked_and_fall_back() {
+        use super::{Face, SerifFaces, face_in, leans, shape};
+        use ab_glyph::{Font, FontRef};
+        let parse = |b: &'static [u8]| FontRef::try_from_slice(b).unwrap();
+        let faces: &'static SerifFaces =
+            Box::leak(Box::new((parse(epaint_default_fonts::HACK_REGULAR), None, Some(parse(epaint_default_fonts::UBUNTU_LIGHT)), None)));
+        let (regular, italic) = (&faces.0, faces.2.as_ref().unwrap());
+        let pick = |bold, it| face_in(Face { bold, italic: it, serif: true }, Some(faces)).unwrap();
+        let is = |(f, slant): (&FontRef, bool), g: &FontRef, s: bool| std::ptr::eq(f, g) && slant == s;
+        assert!(is(pick(false, false), regular, false));
+        assert!(is(pick(false, true), italic, false), "the real italic, not slanted");
+        // No bold file: the regular; no bold italic: the regular, slanted.
+        assert!(is(pick(true, false), regular, false));
+        assert!(is(pick(true, true), regular, true));
+        // A sans text never takes them.
+        assert!(!std::ptr::eq(face_in(Face::default(), Some(faces)).unwrap().0, regular));
+        // A character the serif lacks and the sans has: drawn from the sans.
+        let sans = italic;
+        let c = ('\u{100}'..='\u{2FFF}').find(|&c| regular.glyph_id(c).0 == 0 && sans.glyph_id(c).0 != 0).expect("a character Hack lacks");
+        let (glyphs, _) = shape(&format!("a{c}"), 24.0, regular, Some(sans));
+        assert!(glyphs.len() == 2 && std::ptr::eq(glyphs[1].0, sans), "{c:?} left out");
+        // In a real italic, a glyph from another face leans; the italic's own don't.
+        let it = Face { italic: true, serif: true, ..Face::default() };
+        assert!(!leans(it, italic, false, italic) && leans(it, italic, false, regular));
+        assert!(!leans(Face { serif: true, ..Face::default() }, regular, false, sans), "upright text stays upright");
+    }
+
+    /// With a serif installed (Georgia on Windows, Times on macOS, Noto or DejaVu Serif on Linux),
+    /// a text asking for it is drawn in it, and italic in the family's italic face, not slanted
+    /// by hand; the sans is untouched.
+    #[test]
+    fn an_installed_serif_is_drawn() {
+        use super::{Face, face_font, font};
+        let Some(serif) = super::serif() else { return };
+        let (f, slant) = face_font(Face { serif: true, ..Face::default() }).unwrap();
+        assert!(std::ptr::eq(f, &serif.0) && !slant);
+        let (sans, _) = face_font(Face::default()).unwrap();
+        assert!(std::ptr::eq(sans, font(false).unwrap()));
+        if let Some(italic) = &serif.2 {
+            let (it, slant) = face_font(Face { italic: true, serif: true, ..Face::default() }).unwrap();
+            assert!(std::ptr::eq(it, italic) && !slant);
+        }
+        // The same words in the serif and the sans draw differently.
+        let draw = |face: Face| {
+            let mut pm = tiny_skia::Pixmap::new(300, 40).unwrap();
+            super::styled_at(&mut pm, "Rio Amazonas", 2.0, 20.0, 24.0, rustgis_map::Rgba::rgb(0, 0, 0), face, 0.0);
+            pm.data().to_vec()
+        };
+        assert_ne!(draw(Face { serif: true, ..Face::default() }), draw(Face::default()));
+        // A character the serif lacks and the label font has is drawn from the label font, not
+        // left out.
+        use ab_glyph::Font;
+        let sans = font(false).unwrap();
+        let lacking = ('\u{2190}'..='\u{2BFF}').find(|&c| serif.0.glyph_id(c).0 == 0 && sans.glyph_id(c).0 != 0);
+        if let Some(c) = lacking {
+            let (glyphs, _) = super::shape(&c.to_string(), 24.0, &serif.0, super::sans_beside(&serif.0, Face::default()));
+            assert!(glyphs.len() == 1 && std::ptr::eq(glyphs[0].0, sans), "{c:?} left out");
+        }
     }
 }

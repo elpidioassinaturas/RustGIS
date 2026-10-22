@@ -18,6 +18,11 @@ use rustgis_data::source::{Batch, FeatureSource, Request, SourceInfo};
 use rustgis_geom::Extent;
 use serde::{Deserialize, Serialize};
 
+mod window;
+
+/// Retained streamed rows and geometry caches per map; excludes scratch and render/export copies.
+pub const VIEW_BYTES: usize = if cfg!(target_arch = "wasm32") { 48 * 1024 * 1024 } else { 128 * 1024 * 1024 };
+
 /// Sources with more features than this are streamed when added; smaller ones are loaded whole.
 pub const STREAM_ABOVE: u64 = 100_000;
 
@@ -48,6 +53,26 @@ pub struct SourceLayer {
     window: Option<Window>,
     #[serde(skip)]
     pending: Option<Arc<Pending>>,
+    /// Projection used for this disposable window's geometry cache.
+    #[serde(skip)]
+    pub(crate) projection: Option<crate::Projection>,
+    #[serde(skip)]
+    pub(crate) ready_cache: Option<window::Cache>,
+    /// Allocated row/projection/display bytes; zero selects the standalone default.
+    #[serde(skip)]
+    pub byte_budget: usize,
+    #[serde(skip)]
+    estimated_row_bytes: usize,
+    /// Blocking render/export reads preserve the original row limit rather than the interaction budget.
+    #[serde(skip)]
+    pub(crate) full_read: bool,
+    /// IDs parked only while budget/projection eviction leaves this same source without rows.
+    /// Hidden layers retain them until the next read; success consumes them, failure or an
+    /// explicit source reset discards them. Display-only resets preserve them in `sync_sources`.
+    #[serde(skip)]
+    pub(crate) saved_selection: Vec<u64>,
+    #[serde(skip)]
+    pub(crate) window_fields: Option<usize>,
     /// A source by its web address being opened (its header or footer being fetched).
     #[serde(skip)]
     opening: Option<Opening>,
@@ -282,7 +307,7 @@ pub struct Window {
 /// A read in flight.
 struct Pending {
     extent: Extent,
-    result: Mutex<Option<Result<Batch, String>>>,
+    result: Mutex<Option<Result<(Batch, window::Cache), String>>>,
 }
 
 /// A source being opened off the frame.
@@ -309,6 +334,11 @@ pub enum Polled {
 }
 
 impl SourceLayer {
+    /// Retained interaction bytes assigned by the map, or the standalone default.
+    pub fn budget(&self) -> usize {
+        if self.byte_budget == 0 { VIEW_BYTES } else { self.byte_budget }
+    }
+
     /// A source read from a file on disk.
     pub fn from_path(path: impl Into<String>, table: Option<String>, handle: Box<dyn FeatureSource>) -> Self {
         SourceLayer { path: Some(path.into()), table, handle: Some(Arc::from(handle)), ..SourceLayer::default() }
@@ -552,6 +582,9 @@ impl SourceLayer {
     pub fn reset(&mut self) {
         self.window = None;
         self.pending = None;
+        self.ready_cache = None;
+        self.estimated_row_bytes = 0;
+        self.saved_selection.clear();
     }
 
     /// The extent to read for a view (longitude/latitude), or `None` when the window serves it.
@@ -583,9 +616,15 @@ impl SourceLayer {
 
     /// Starts reading an extent: on a background thread unless `block` (or in the browser).
     pub fn start(&mut self, extent: Extent, block: bool) {
+        self.ready_cache = None;
         let Some(h) = self.handle.clone() else { return };
         let most = if h.remote().is_some() { REMOTE_VIEW_LIMIT } else { VIEW_LIMIT };
         let req = Request { extent: Some(extent), limit: if self.limit == 0 { most } else { self.limit } };
+        let budget = self.budget();
+        let projection = self.projection.clone().unwrap_or(crate::Projection::WebMercator);
+        let estimate = self.estimated_row_bytes;
+        let full_read = self.full_read;
+        let fields = self.window_fields;
         let pending = Arc::new(Pending { extent, result: Mutex::new(None) });
         let p = pending.clone();
         // A source by its web address: the read runs as its bytes land (on the desktop and in
@@ -593,8 +632,10 @@ impl SourceLayer {
         if let Some(file) = h.remote() {
             let (h2, p2) = (h.clone(), p.clone());
             let work = Arc::new(move || {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h2.read(&req)))
-                    .unwrap_or_else(|_| Err(rustgis_data::DataError::Format("the read failed unexpectedly".into())))
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    window::read_mode(h2.as_ref(), &req, budget, &projection, estimate, full_read, fields)
+                }))
+                .unwrap_or_else(|_| Err(rustgis_data::DataError::Format("the read failed unexpectedly".into())))
             });
             rustgis_data::source::remote::drive(
                 file,
@@ -611,9 +652,11 @@ impl SourceLayer {
             return;
         }
         let job = move || {
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.read(&req)))
-                .unwrap_or_else(|_| Err(rustgis_data::DataError::Format("the read failed unexpectedly".into())))
-                .map_err(|e| e.to_string());
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                window::read_mode(h.as_ref(), &req, budget, &projection, estimate, full_read, fields)
+            }))
+            .unwrap_or_else(|_| Err(rustgis_data::DataError::Format("the read failed unexpectedly".into())))
+            .map_err(|e| e.to_string());
             if let Ok(mut slot) = p.result.lock() {
                 *slot = Some(r);
             }
@@ -631,6 +674,7 @@ impl SourceLayer {
                 Ok(_) => self.pending = Some(pending),
                 // No thread to read on: say so, and don't ask again until the view moves on.
                 Err(e) => {
+                    self.saved_selection.clear();
                     self.error = Some(format!("couldn't start reading the layer: {e}"));
                     self.window = Some(Window { extent, complete: true, matched: 0, kept: 0 });
                 }
@@ -649,8 +693,10 @@ impl SourceLayer {
         loop {
             let done = p.result.lock().ok().and_then(|mut r| r.take());
             match done {
-                Some(Ok(b)) => {
+                Some(Ok((b, cache))) => {
                     self.pending = None;
+                    self.estimated_row_bytes = cache.mean_bytes;
+                    self.ready_cache = Some(cache);
                     let w = Window { extent: p.extent, complete: b.complete, matched: b.matched, kept: b.features.len() };
                     self.window = Some(w);
                     self.error = None;
@@ -658,6 +704,8 @@ impl SourceLayer {
                 }
                 Some(Err(e)) => {
                     self.pending = None;
+                    self.ready_cache = None;
+                    self.saved_selection.clear();
                     self.error = Some(e.clone());
                     // Not read again until the view moves past it.
                     self.window = Some(Window { extent: p.extent, complete: true, matched: 0, kept: 0 });
@@ -670,6 +718,7 @@ impl SourceLayer {
                 // there as if it were the view. (The read carries on; the next view takes it.)
                 None if block && cfg!(not(target_arch = "wasm32")) => {
                     let e = "reading the layer took more than a minute".to_string();
+                    self.saved_selection.clear();
                     self.error = Some(e.clone());
                     return Polled::Failed(e);
                 }

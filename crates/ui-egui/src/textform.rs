@@ -1,11 +1,11 @@
 //! The text form shared by a text graphic (Add Text) and a layout's text (the Format pane, #516):
 //! its text, dynamic text, size, colour, boldness, italic, alignment and letter spacing (#535),
 //! laid out and limited the same in both, so the same text can look the same on the map and on
-//! the page. It edits the values it is lent
+//! the page; a layout's text also has its font family (#517). It edits the values it is lent
 //! and says what was settled; each caller runs its own command.
 
 use egui::{Color32, Ui, vec2};
-use rustgis_engine::map::layout::{MAX_LETTER_SPACING, MIN_LETTER_SPACING, TextAlign};
+use rustgis_engine::map::layout::{FontFamily, MAX_LETTER_SPACING, MIN_LETTER_SPACING, TextAlign};
 
 use crate::widgets::Dragged;
 
@@ -20,6 +20,8 @@ pub struct Fields<'a> {
     pub align: Option<&'a mut TextAlign>,
     /// Points between letters, from −5 (tighter) to 50.
     pub letter_spacing: Option<&'a mut f64>,
+    /// Sans-serif or serif: a layout text's (a text graphic is drawn in the map's sans).
+    pub font: Option<&'a mut FontFamily>,
     /// The text is focused and selected whole, so typing replaces it (a text just placed).
     pub select: bool,
 }
@@ -39,6 +41,8 @@ pub struct Settled {
     pub align: bool,
     /// The letter spacing changed and was let go, as the size.
     pub letter_spacing: bool,
+    /// Another family was picked.
+    pub font: bool,
 }
 
 /// A section of the Format pane ("Element", "Text"), folding as its other sections do (a frame's
@@ -149,6 +153,27 @@ pub fn show(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, tokens: &[&
             out.letter_spacing = drag.settled(ui, &r, ls) && (*ls - saved).abs() > 1e-6;
             ui.end_row();
         }
+        if let Some(fam) = f.font {
+            ui.label(tl!("Font"));
+            let list = egui::ComboBox::from_id_salt(id.with("font")).selected_text(tl!(fam.label())).show_ui(ui, |ui| {
+                for v in FontFamily::ALL {
+                    if ui.selectable_label(*fam == v, tl!(v.label())).clicked() && *fam != v {
+                        *fam = v;
+                        out.font = true;
+                    }
+                }
+            });
+            // Named for assistive technology, as its label sits in the other column.
+            list.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, tl!("Font")));
+            ui.end_row();
+            // A serif asked for where none is installed is drawn in the sans: said here, so the
+            // page never differs from what was asked unsaid.
+            if *fam == FontFamily::Serif && !rustgis_engine::render::fonts::serif_available() {
+                ui.label("");
+                ui.label(egui::RichText::new(tl!("No serif font is installed, so this text is drawn in the sans-serif")).weak().small());
+                ui.end_row();
+            }
+        }
     });
     out
 }
@@ -190,6 +215,7 @@ mod tests {
                         italic: f.styled.then_some(&mut f.italic),
                         align: f.styled.then_some(&mut f.align),
                         letter_spacing: f.styled.then_some(&mut spacing),
+                        font: None,
                         select: false,
                     },
                 );
