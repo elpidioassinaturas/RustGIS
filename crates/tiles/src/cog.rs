@@ -1049,6 +1049,10 @@ pub fn probe(url: &str, then: Box<dyn FnOnce(Result<bool, String>) + Send>) {
 #[cfg(not(target_arch = "wasm32"))]
 pub const MAX_VALUE_TILES: usize = 4096;
 
+/// The most values one read returns: 64 million, 256 MB, refused before anything is allocated.
+#[cfg(not(target_arch = "wasm32"))]
+pub const MAX_VALUES_READ: u64 = 64_000_000;
+
 /// A file's header, waiting for it: for an analysis that reads the values (opengeos/RustGIS#579).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn info_blocking(url: &str) -> Result<Arc<Info>, String> {
@@ -1075,13 +1079,17 @@ pub fn read_values_blocking(
     if band >= info.layout.bands.max(1) {
         return Err(format!("the file has {} band(s)", info.layout.bands));
     }
+    // The window's size checked before its values are allocated: a caller's window, not the file.
     let (w, h) = (cols.1.saturating_sub(cols.0) as usize, rows.1.saturating_sub(rows.0) as usize);
-    let mut out = vec![f32::NAN; w.checked_mul(h).ok_or("the window is too large")?];
+    let n = (w as u64).saturating_mul(h as u64);
+    if n > MAX_VALUES_READ {
+        return Err(format!("a window of {w} × {h} values; one read takes {MAX_VALUES_READ} at most"));
+    }
     // The part of the window inside the file.
     let (x0, x1) = (cols.0.min(l.width), cols.1.min(l.width));
     let (y0, y1) = (rows.0.min(l.height), rows.1.min(l.height));
     if x1 <= x0 || y1 <= y0 {
-        return Ok(out);
+        return Ok(vec![f32::NAN; n as usize]);
     }
     let (tw, th, across) = (l.tile_width.max(1), l.tile_height.max(1), l.across().max(1));
     // The tiles the window takes, counted before they are listed, in checked arithmetic: a
@@ -1093,6 +1101,7 @@ pub fn read_values_blocking(
     }
     let tiles: Vec<u32> =
         (r0..=r1).flat_map(|ty| (c0..=c1).filter_map(move |tx| ty.checked_mul(across).and_then(|t| t.checked_add(tx)))).collect();
+    let mut out = vec![f32::NAN; n as usize];
     let (tx, rx) = std::sync::mpsc::channel();
     fetch_bands(info.clone(), url.clone(), level, tiles.clone(), vec![band], Box::new(move |r| tx.send(r).unwrap_or_default()));
     let picked = rx.recv_timeout(Duration::from_secs(600)).map_err(|_| format!("{url}: tiles not read in ten minutes"))??;
