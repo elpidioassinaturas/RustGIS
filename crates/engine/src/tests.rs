@@ -7255,6 +7255,17 @@ fn a_stac_data_cube_on_the_time_slider() {
 /// so every cell grows in a straight line), Sen's slope as worked out by hand; the same outputs
 /// read whole or in pieces of rows; a coarser cell size read from the files' overviews; and the
 /// requests a trend can't take refused.
+/// A search's `"bbox": "view"` is the map's view in any case or spacing, as the trend and the data
+/// cube read it, never no area at all.
+#[test]
+fn a_stac_search_takes_view_in_any_case() {
+    let s = world();
+    let search = |bbox: &str| crate::cmd::stac::search_params(&s, &json!({"bbox": bbox})).unwrap().bbox;
+    assert!(search("view").is_some());
+    assert_eq!(search(" VIEW "), search("view"));
+    assert!(crate::cmd::stac::search_params(&s, &json!({"bbox": "nowhere"})).unwrap().bbox.is_none());
+}
+
 #[test]
 fn a_trend_over_a_stac_collection() {
     use crate::cmd::stac::PIECE_VALUES;

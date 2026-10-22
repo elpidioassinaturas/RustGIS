@@ -34,7 +34,7 @@ pub fn search_params(s: &Session, p: &Value) -> Result<Search, String> {
         _ => Vec::new(),
     };
     let bbox = match p.get("bbox") {
-        Some(Value::String(v)) if v == "view" => Some(view(s)?),
+        Some(Value::String(v)) if v.trim().eq_ignore_ascii_case("view") => Some(view(s)?),
         Some(v @ Value::Array(_)) => {
             let n: Vec<f64> = v.as_array().into_iter().flatten().filter_map(Value::as_f64).collect();
             match n.as_slice() {
@@ -571,7 +571,13 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
             }
         }
     };
-    let CubeFiles { tiles, scales, nodata, collection, asset, .. } = cube_files(s, p)?;
+    // The search covers the area as read here: "view" (in any case or spacing) or none given is
+    // the map's view, resolved, so the search and the grid agree.
+    let mut searched = p.clone();
+    if let Some(o) = searched.as_object_mut() {
+        o.insert("bbox".into(), json!(bbox));
+    }
+    let CubeFiles { tiles, scales, nodata, collection, asset, .. } = cube_files(s, &searched)?;
     // Every tile's file for a date, by day.
     let mut by_day: std::collections::BTreeMap<i64, Vec<(String, (f64, f64), Option<f64>)>> = Default::default();
     for days in tiles.values() {
