@@ -7292,7 +7292,8 @@ fn a_stac_trend_searches_the_view_it_reads() {
     let search = lines.iter().find(|l| l.contains("/search")).unwrap_or_else(|| panic!("{lines:?}"));
     let query = search.split(['?', ' ']).nth(2).unwrap_or_default();
     let bbox = query.split('&').find_map(|kv| kv.strip_prefix("bbox=")).unwrap_or_else(|| panic!("no bbox in {search}"));
-    let asked: Vec<f64> = bbox.replace("%2C", ",").split(',').map(|v| v.parse().unwrap()).collect();
+    // The commas as sent, or percent-encoded in either case.
+    let asked: Vec<f64> = bbox.replace("%2C", ",").replace("%2c", ",").split(',').map(|v| v.parse().unwrap()).collect();
     let view = crate::cmd::stac::search_params(&s, &json!({"bbox": "view"})).unwrap().bbox.unwrap();
     assert_eq!(asked.len(), 4, "{search}");
     for (a, v) in asked.iter().zip(view) {
