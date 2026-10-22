@@ -11,6 +11,36 @@ Home › New Layout adds a page layout (Letter to A0, landscape or portrait) wit
 title, legend, north arrow, scale bar and a dynamic credits line. Layouts open as tabs next to
 the maps; while one is open, its groups lead the Publish tab:
 
+- **Publication layouts**: Home › New Layout › **Publication Layout** builds a finished sheet or
+  figure of the map view in one step, with `layout.publication` behind it:
+  - **Sheets** (A4, A3 or A2, portrait or landscape): a frame and margin, the title and subtitle,
+    the map, and a footer of two boxed columns (sources, and the cartographic reference) with a
+    note and the authorship under them. Text sizes follow the sheet: an A3's are 1.41 times an
+    A4's.
+  - **Figures** for a journal (90, 140 or 190 mm wide, as tall as the map's shape asks) or a
+    thesis (160 × 225 or 160 × 110 mm): the map edge to edge with a line of its projection and
+    datum under it, at 7 pt. A figure's title and sources belong in its caption, so they are
+    left out, and the result says so.
+  - **The map**: the `extent` given (or the view) fitted at a round scale, two significant
+    figures, rounded up so it still fits. A graticule has its step picked from the extent, at
+    most five lines across (2° for a state, 15′ for a city), and labels on every edge of a sheet.
+    The north arrow, the legend (sized to what it lists) and the scale bar with the numeric scale
+    under it sit in the frame's corners, on pale boxes, clear of the graticule's labels.
+  - **Texts**: the footer's lines are measured with the layout's font and wrapped to their box,
+    so none runs past it, and the footer grows to hold them. `{projection}`, `{datum}` and
+    `{grid}` are filled from the map when the layout is made. `{date}` and the other dynamic text
+    tokens stay live. The reference defaults to the projection, datum and graticule, and the
+    authorship to "Made with RustGIS · {date}". `headings` renames the two columns.
+  - Every element is an ordinary one, to move or restyle afterwards. Running it again with
+    another `profile` makes another layout of the same map.
+
+  ```
+  layout.publication={"profile": "a4-portrait", "extent": [-46.8, -11.6, -38.5, -2.2],
+    "title": "PIAUÍ", "subtitle": "Greening and browning of vegetation: NDVI trend, 2001–2025",
+    "sources": ["NDVI: MOD13Q1 v6.1 (NASA LP DAAC), via the Brazil Data Cube (INPE)", "Boundaries: IBGE 2022"],
+    "note": "Only cells with a significant trend (p < 0.05) are coloured."}
+  ```
+
 - **Map frames**: rectangle, circle and ellipse frames, or polygon and lasso frames drawn on the
   page. Each frame shows a map of the project at its own centre and scale. Turn on **Pan/Zoom
   Map** (Map Frames group, or a frame's properties) to drag inside frames to pan their maps and

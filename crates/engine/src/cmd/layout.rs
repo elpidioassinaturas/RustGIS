@@ -28,6 +28,9 @@ pub fn commands() -> Vec<C> {
         C::new("layout.new", "New Layout", "Home › Project", new_layout).params(
             r#"{"name"?: string, "page"?: "letter"|"legal"|"tabloid"|"a5"|"a4"|"a3"|"a2"|"a1"|"a0", "orientation"?: "landscape"|"portrait", "width"?: mm, "height"?: mm, "template"?: "map" (frame, title, legend, north arrow, scale bar; the default)|"blank"}"#,
         ),
+        C::new("layout.publication", "New Publication Layout", "Publish › Layout", publication).params(
+            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"), "headings"?: [the sources' heading, the reference's heading]} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
+        ),
         C::new("layout.activate", "Open Layout", "Browser", |s, p| {
             let i = index(s, &by_name(p))?;
             s.active_layout = Some(i);
@@ -293,6 +296,328 @@ pub(crate) fn new_layout(s: &mut Session, p: &Value) -> CmdResult {
     let i = s.project.layouts.len() - 1;
     s.active_layout = Some(i);
     Ok(json!({"layout": i, "name": name}))
+}
+
+/// `layout.publication`'s profiles: an id, a label, a sheet (a frame, title and boxed footer) or a
+/// figure (the map edge to edge, its title and sources left to the caption), and its size in mm.
+/// A height of 0 follows the map's shape.
+pub const PUBLICATION_PROFILES: &[(&str, &str, bool, f64, f64)] = &[
+    ("a4-portrait", "A4 portrait sheet", true, 210.0, 297.0),
+    ("a4-landscape", "A4 landscape sheet", true, 297.0, 210.0),
+    ("a3-portrait", "A3 portrait sheet", true, 297.0, 420.0),
+    ("a3-landscape", "A3 landscape sheet", true, 420.0, 297.0),
+    ("a2-portrait", "A2 portrait sheet", true, 420.0, 594.0),
+    ("a2-landscape", "A2 landscape sheet", true, 594.0, 420.0),
+    ("figure-1col", "Journal figure, 1 column (90 mm)", false, 90.0, 0.0),
+    ("figure-1.5col", "Journal figure, 1.5 columns (140 mm)", false, 140.0, 0.0),
+    ("figure-2col", "Journal figure, 2 columns (190 mm)", false, 190.0, 0.0),
+    ("thesis-full", "Thesis figure, full page (160 × 225 mm)", false, 160.0, 225.0),
+    ("thesis-half", "Thesis figure, half page (160 × 110 mm)", false, 160.0, 110.0),
+];
+
+/// A figure's text size, in points at its printed size: journals ask for 6 to 8.
+const FIGURE_PT: f64 = 7.0;
+
+/// The graticule steps a publication layout picks from, in degrees.
+const GRID_STEPS: &[f64] = &[0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0];
+
+/// The strips a frame's graticule labels take inside its edges, in mm: beside the left and right
+/// edges (a latitude such as `10°S` across), and along the top and bottom ones.
+const LABEL_ROOM_SIDE: f64 = 9.0;
+const LABEL_ROOM_END: f64 = 6.0;
+
+/// The longest text a publication layout takes in one field, in characters.
+const MAX_PUBLICATION_TEXT: usize = 2000;
+
+/// A scale denominator rounded up to two significant figures (1:1,234,567 to 1:1,300,000), so the
+/// extent fitted at it still fits.
+pub(crate) fn round_scale(scale: f64) -> f64 {
+    if !(scale.is_finite() && scale > 0.0) {
+        return scale;
+    }
+    let unit = 10f64.powf(scale.log10().floor() - 1.0);
+    ((scale / unit) - 1e-9).ceil() * unit
+}
+
+/// The graticule step for an extent: the smallest that draws at most five lines across its longer
+/// side.
+pub(crate) fn grid_step(e: &Extent) -> f64 {
+    let span = e.width().max(e.height());
+    GRID_STEPS.iter().copied().find(|step| span / step <= 5.0).unwrap_or(30.0)
+}
+
+/// A graticule step as printed: degrees, else minutes, else seconds of arc.
+pub(crate) fn step_text(step: f64) -> String {
+    let minutes = step * 60.0;
+    if step >= 1.0 {
+        format!("{step}°")
+    } else if (minutes - minutes.round()).abs() < 1e-9 {
+        format!("{}′", minutes.round())
+    } else {
+        format!("{}″", (step * 3600.0).round())
+    }
+}
+
+/// The map's projection and datum for a layout's texts: an EPSG name's two halves (`SIRGAS 2000 /
+/// UTM zone 23S`), else the projection's name over WGS 84, as the presets take longitudes and
+/// latitudes.
+fn projection_and_datum(s: &Session) -> (String, String) {
+    let label = s.map().projection.label();
+    match label.split_once(" / ") {
+        Some((datum, projection)) => (projection.trim().to_string(), datum.trim().to_string()),
+        None => (label, "WGS 84".to_string()),
+    }
+}
+
+/// Texts given as one or a list (up to 50), each cut to [`MAX_PUBLICATION_TEXT`] characters.
+fn texts_of(p: &Value, k: &str) -> Result<Option<Vec<String>>, String> {
+    let cut = |t: &str| t.chars().take(MAX_PUBLICATION_TEXT).collect::<String>();
+    match p.get(k) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(t)) => Ok(Some(vec![cut(t)])),
+        Some(Value::Array(a)) if a.len() <= 50 => a
+            .iter()
+            .map(|v| v.as_str().map(cut).ok_or_else(|| format!("{k} is a text or a list of texts")))
+            .collect::<Result<_, _>>()
+            .map(Some),
+        Some(_) => Err(format!("{k} is a text or a list of up to 50 texts")),
+    }
+}
+
+/// The extent's height over its width on the active map's projection, along its edges.
+fn aspect(s: &Session, e: &Extent) -> Option<f64> {
+    let flat = s.map().flat();
+    let mut ext = Extent::EMPTY;
+    for i in 0..=32 {
+        let t = f64::from(i) / 32.0;
+        let (x, y) = (e.min_x + e.width() * t, e.min_y + e.height() * t);
+        for c in [Coord::new(x, e.min_y), Coord::new(x, e.max_y), Coord::new(e.min_x, y), Coord::new(e.max_x, y)] {
+            if let Some(q) = flat.forward_checked(c) {
+                ext.expand(q);
+            }
+        }
+    }
+    (ext.width() > 0.0 && ext.height() > 0.0).then(|| ext.height() / ext.width())
+}
+
+/// A text element in a publication layout's style: upright, sans, in `align`.
+fn pub_text(text: String, size: f64, color: Rgba, bold: bool, align: TextAlign) -> ElementKind {
+    ElementKind::Text { text, size, color, bold, italic: false, align, letter_spacing: 0.0, font: FontFamily::Sans }
+}
+
+/// A rectangle with no outline (`width` 0) or no fill (`fill` transparent).
+fn pub_box(fill: Rgba, outline: Rgba, width: f64) -> ElementKind {
+    ElementKind::Rectangle { fill, outline, width }
+}
+
+/// `layout.publication`: a finished sheet or figure of the active map, its extent fitted at a
+/// round scale, with a graticule, legend, scale bar and north arrow; a sheet adds a frame, title,
+/// subtitle and a footer of two boxed columns (sources, cartographic reference) with a note and
+/// authorship under them, each text wrapped to its box with the layout's own font.
+fn publication(s: &mut Session, p: &Value) -> CmdResult {
+    let id = ps(p, "profile").unwrap_or("a4-portrait").trim().to_ascii_lowercase();
+    let &(_, _, sheet, page_w, page_h) = PUBLICATION_PROFILES.iter().find(|(n, ..)| *n == id).ok_or_else(|| {
+        let names: Vec<&str> = PUBLICATION_PROFILES.iter().map(|(n, ..)| *n).collect();
+        format!("unknown profile '{id}': {}", names.join(", "))
+    })?;
+    let extent = match p.get("extent").filter(|v| !v.is_null()) {
+        None => {
+            let e = super::workspace::view_extent(s);
+            Extent::new(e.min_x.max(-180.0), e.min_y.max(-90.0), e.max_x.min(180.0), e.max_y.min(90.0))
+        }
+        Some(v) => {
+            let b: Option<Vec<f64>> =
+                v.as_array().filter(|a| a.len() == 4).and_then(|a| a.iter().map(|x| x.as_f64().filter(|x| x.is_finite())).collect());
+            match b.as_deref() {
+                Some([w, so, e, n]) if w < e && so < n && *w >= -180.0 && *e <= 180.0 && *so >= -90.0 && *n <= 90.0 => {
+                    Extent::new(*w, *so, *e, *n)
+                }
+                _ => return Err("extent is [west, south, east, north] in degrees".into()),
+            }
+        }
+    };
+    if !(extent.width() > 0.0 && extent.height() > 0.0) {
+        return Err("the map's extent isn't known; give extent".into());
+    }
+    let one = |k: &str| texts_of(p, k).map(|t| t.map(|t| t.join(" ")).filter(|t| !t.trim().is_empty()));
+    let (title, subtitle, note) = (one("title")?, one("subtitle")?, one("note")?);
+    let sources = texts_of(p, "sources")?.unwrap_or_default();
+    let reference =
+        texts_of(p, "reference")?.unwrap_or_else(|| vec!["Projection: {projection}".into(), "Datum: {datum} · Graticule: {grid}".into()]);
+    let author = one("author")?.unwrap_or_else(|| "Made with RustGIS · {date}".into());
+    let headings = texts_of(p, "headings")?.unwrap_or_default();
+    let heading = |i: usize, or: &str| headings.get(i).cloned().unwrap_or_else(|| or.to_string());
+    let (projection, datum) = projection_and_datum(s);
+    let step = grid_step(&extent);
+    let fill = |t: &str| t.replace("{projection}", &projection).replace("{datum}", &datum).replace("{grid}", &step_text(step));
+    let wrap = |t: &str, w: f64, pt: f64| crate::render::report::wrap(&fill(t), w.max(1.0), pt as f32);
+    let pitch = crate::render::layout::line_pitch_mm;
+    let ink = Rgba::rgb(0x2B, 0x26, 0x20);
+    let soft = Rgba::rgb(0x5E, 0x55, 0x47);
+    let clear = Rgba::new(0, 0, 0, 0);
+    let mut warnings: Vec<String> = Vec::new();
+    // Texts and boxes around the map, placed while its frame is worked out.
+    let mut around: Vec<(String, (f64, f64, f64, f64), ElementKind)> = Vec::new();
+    // A sheet's sizes follow its short side (A4's 210 mm is 1); a figure keeps its texts at their
+    // printed size, whatever its width.
+    let k = if sheet { page_w.min(page_h) / 210.0 } else { 1.0 };
+    let (w, h, (fx, fy, fw, fh)) = if sheet {
+        let (m, pad) = (10.0 * k, 5.0 * k);
+        let (x0, iw) = (m + pad, page_w - 2.0 * (m + pad));
+        let (title_pt, sub_pt, head_pt, body_pt, small_pt) = (18.0 * k, 10.5 * k, 7.5 * k, 7.0 * k, 6.5 * k);
+        around.push(("Frame".into(), (m, m, page_w - 2.0 * m, page_h - 2.0 * m), pub_box(clear, ink, 0.8)));
+        let mut top = m + pad;
+        if let Some(t) = &title {
+            let th = pitch(title_pt) + 1.5 * k;
+            around.push(("Title".into(), (x0, top, iw, th), pub_text(fill(t), title_pt, ink, true, TextAlign::Center)));
+            top += th;
+        }
+        if let Some(t) = &subtitle {
+            let lines = wrap(t, iw, sub_pt);
+            let sh = lines.len() as f64 * pitch(sub_pt) + 1.0 * k;
+            around.push(("Subtitle".into(), (x0, top, iw, sh), pub_text(lines.join("\n"), sub_pt, soft, false, TextAlign::Center)));
+            top += sh;
+        }
+        // The footer, from the bottom up: authorship, the note, then the two boxes side by side,
+        // as tall as the longer column.
+        let bottom = page_h - m - pad;
+        let author_y = bottom - pitch(small_pt);
+        around.push((
+            "Author".into(),
+            (x0, author_y, iw, pitch(small_pt)),
+            pub_text(fill(&author), small_pt, soft, false, TextAlign::Right),
+        ));
+        let note_lines = note.as_deref().map(|t| wrap(t, iw, body_pt)).unwrap_or_default();
+        let mut foot = author_y;
+        if !note_lines.is_empty() {
+            let nh = note_lines.len() as f64 * pitch(body_pt);
+            foot -= nh + 1.5 * k;
+            around.push(("Note".into(), (x0, foot, iw, nh), pub_text(note_lines.join("\n"), body_pt, soft, false, TextAlign::Left)));
+        }
+        let (gap, inner) = (4.0 * k, 2.5 * k);
+        let cw = (iw - gap) / 2.0;
+        let column = |lines: &[String]| lines.iter().flat_map(|t| wrap(t, cw - 2.0 * inner, body_pt)).collect::<Vec<_>>();
+        let columns = [(heading(0, "Sources"), column(&sources)), (heading(1, "Cartographic reference"), column(&reference))];
+        let rows = columns.iter().map(|(_, l)| l.len()).max().unwrap_or(0);
+        if rows > 0 {
+            let bh = 2.0 * inner + pitch(head_pt) + rows as f64 * pitch(body_pt);
+            foot -= bh + 2.0 * k;
+            for (i, (head, lines)) in columns.into_iter().enumerate() {
+                let bx = x0 + i as f64 * (cw + gap);
+                around.push((format!("{head} Box"), (bx, foot, cw, bh), pub_box(clear, Rgba::new(0x2B, 0x26, 0x20, 140), 0.5)));
+                let (tx, tw) = (bx + inner, cw - 2.0 * inner);
+                around.push((
+                    format!("{head} Heading"),
+                    (tx, foot + inner, tw, pitch(head_pt)),
+                    pub_text(head.to_uppercase(), head_pt, ink, true, TextAlign::Left),
+                ));
+                if !lines.is_empty() {
+                    let body = (tx, foot + inner + pitch(head_pt), tw, lines.len() as f64 * pitch(body_pt));
+                    around.push((head, body, pub_text(lines.join("\n"), body_pt, soft, false, TextAlign::Left)));
+                }
+            }
+        }
+        let (frame_top, frame_bottom) = (top + 3.0 * k, foot - 4.0 * k);
+        if frame_bottom - frame_top < 40.0 * k {
+            return Err("the texts leave the map no room: shorten the footer, the note or the subtitle".into());
+        }
+        (page_w, page_h, (x0, frame_top, iw, frame_bottom - frame_top))
+    } else {
+        // A figure: the map edge to edge, a line of the projection and datum under it.
+        for (k, given) in
+            [("title", title.is_some()), ("subtitle", subtitle.is_some()), ("sources", !sources.is_empty()), ("note", note.is_some())]
+        {
+            if given {
+                warnings.push(format!("{k} goes in the figure's caption, not on it: left out"));
+            }
+        }
+        let line = reference.iter().map(|t| fill(t)).collect::<Vec<_>>().join(" · ");
+        let lines = crate::render::report::wrap(&line, page_w, FIGURE_PT as f32);
+        if lines.len() > 1 {
+            warnings.push("the reference is wider than the figure: it wraps under the map".into());
+        }
+        let note_h = lines.len() as f64 * pitch(FIGURE_PT) + 1.0;
+        let fh = if page_h > 0.0 {
+            page_h - note_h
+        } else {
+            (page_w * aspect(s, &extent).unwrap_or(0.75)).clamp(0.45 * page_w, 1.3 * page_w).round()
+        };
+        let h = if page_h > 0.0 { page_h } else { (fh + note_h).ceil() };
+        around.push((
+            "Reference".into(),
+            (0.0, fh + 1.0, page_w, note_h - 1.0),
+            pub_text(lines.join("\n"), FIGURE_PT, ink, false, TextAlign::Left),
+        ));
+        (page_w, h, (0.0, 0.0, page_w, fh))
+    };
+    let (center, scale) = fit_scale(s.map(), &extent, fw, fh).ok_or("the extent can't be drawn on the map's projection")?;
+    let scale = round_scale(scale);
+    let edges = GridEdges { top: sheet, bottom: true, left: true, right: sheet };
+    let grid = Grid { step, edges, ..Grid::default() };
+    let name = unique_name(s, ps(p, "name").unwrap_or("Publication"));
+    let mut l = Layout::new(name.clone(), w, h);
+    let frame = l.add(
+        "Map Frame",
+        (fx, fy, fw, fh),
+        ElementKind::MapFrame {
+            map: s.map().name.clone(),
+            center,
+            scale,
+            shape: FrameShape::Rectangle,
+            grid: Some(grid),
+            extent_of: None,
+            extent_color: rustgis_map::layout::INDICATOR_COLOR,
+            extent_width: rustgis_map::layout::INDICATOR_WIDTH,
+            bearing: 0.0,
+            pitch: 0.0,
+        },
+    );
+    // Over the map, in its corners, clear of the graticule's labels (drawn inside the frame along
+    // its labelled edges): the north arrow at the top right, the legend at the bottom left sized
+    // to what it lists, the scale bar and the numeric scale under it at the bottom right, each on
+    // a pale box.
+    let paper = Rgba::new(0xFF, 0xFF, 0xFF, 225);
+    let (e, small_pt) = if sheet { (4.0 * k, 6.5 * k) } else { (2.0, 6.0) };
+    let room = |labelled: bool, side: bool| {
+        e + if !labelled {
+            0.0
+        } else if side {
+            LABEL_ROOM_SIDE
+        } else {
+            LABEL_ROOM_END
+        }
+    };
+    let (left, right, top, bottom) = (room(edges.left, true), room(edges.right, true), room(edges.top, false), room(edges.bottom, false));
+    let (aw, ah) = if sheet { (8.0 * k, 12.0 * k) } else { (5.0, 7.5) };
+    l.add("North Arrow", (fx + fw - right - aw, fy + top, aw, ah), ElementKind::north_arrow(frame));
+    let render_scale = crate::render::layout::frame_render_scale(s.map(), center, scale);
+    let (cw, ch) = crate::render::layout::legend_size_mm(s.map(), render_scale, false, false, &[]);
+    if ch > 0.0 {
+        let pad = 2.0;
+        let (lw, lh) = ((cw + 2.0 * pad).min(fw * 0.45), (ch + 2.0 * pad).min(fh * 0.6));
+        if cw + 2.0 * pad > lw || ch + 2.0 * pad > lh {
+            warnings.push("the legend lists more than fits its corner: its last rows or the ends of long labels are left out".into());
+        }
+        let (lx, ly) = (fx + left, fy + fh - bottom - lh);
+        l.add("Legend Box", (lx, ly, lw, lh), pub_box(paper, clear, 0.0));
+        l.add(
+            "Legend",
+            (lx + pad, ly + pad, lw - 2.0 * pad, lh - 2.0 * pad),
+            ElementKind::Legend { frame, title: String::new(), all_classes: false, hide_other: false, exclude: Vec::new() },
+        );
+    }
+    let (sw, sh, nh) = ((fw * 0.3).max(25.0), if sheet { 8.0 * k } else { 6.0 }, pitch(small_pt) + 0.5);
+    let (sx, sy) = (fx + fw - right - sw, fy + fh - bottom - sh - nh);
+    l.add("Scale Box", (sx, sy, sw, sh + nh), pub_box(paper, clear, 0.0));
+    l.add("Scale Bar", (sx, sy, sw, sh), ElementKind::scale_bar(frame));
+    l.add("Scale", (sx, sy + sh, sw, nh), pub_text("{scale}".into(), small_pt, ink, false, TextAlign::Center));
+    for (n, r, kind) in around {
+        l.add(&n, r, kind);
+    }
+    s.project.layouts.push(l);
+    let i = s.project.layouts.len() - 1;
+    s.active_layout = Some(i);
+    Ok(json!({"layout": i, "name": name, "page": [w, h], "scale": scale, "grid": step, "warnings": warnings}))
 }
 
 fn page(s: &mut Session, p: &Value) -> CmdResult {

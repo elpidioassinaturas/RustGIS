@@ -941,6 +941,16 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
                     ui.close();
                 }
             }
+            // A finished sheet or figure of the map view, its texts to fill in on the page.
+            ui.menu_button(tl!("Publication Layout"), |ui| {
+                for (id, label, ..) in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
+                    if ui.button(tl!(*label)).clicked() {
+                        let _ = app.run("layout.publication", json!({"profile": id, "title": app.session.map().name.clone()}));
+                        app.ui.tab = "Publish".into();
+                        ui.close();
+                    }
+                }
+            });
             ui.separator();
             if ui.button(tl!("Blank Letter page")).clicked() {
                 let _ = app.run("layout.new", json!({"template": "blank"}));

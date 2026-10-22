@@ -2260,6 +2260,124 @@ fn layout_colorbars_follow_a_raster() {
     assert_eq!(s.project.layouts[0].element(id).map(|e| e.visible), Some(true), "undo brings it back");
 }
 
+/// `layout.publication` (#682): every profile builds a layout that fits its page, the map frame
+/// at a round scale that still fits the extent, the footer boxed in two columns below the map
+/// with long lines wrapped, the tokens filled from the map; a figure leaves its title to the
+/// caption.
+#[test]
+fn publication_layouts_fit_their_pages() {
+    use rustgis_map::layout::ElementKind;
+    let dir = std::env::temp_dir().join(format!("rustgis-publication-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = world();
+    let piaui = json!([-46.8, -11.6, -38.5, -2.2]);
+    let long =
+        "NDVI: MOD13Q1 v6.1 (NASA LP DAAC), 16-day composites at 250 m, read through the Brazil Data Cube (INPE) and averaged to 1 km";
+    let profiles = [
+        "a4-portrait",
+        "a4-landscape",
+        "a3-portrait",
+        "a3-landscape",
+        "a2-portrait",
+        "a2-landscape",
+        "figure-1col",
+        "figure-1.5col",
+        "figure-2col",
+        "thesis-full",
+        "thesis-half",
+    ];
+    for profile in profiles {
+        let r = s
+            .run(
+                "layout.publication",
+                &json!({"profile": profile, "extent": piaui, "name": profile, "title": "PIAUÍ", "subtitle": "Greening and browning of vegetation: NDVI trend, 2001–2025",
+                        "sources": [long, "Boundaries: IBGE 2022"], "note": "Only cells with a significant trend (p < 0.05) are coloured."}),
+            )
+            .unwrap_or_else(|e| panic!("{profile}: {e}"));
+        let l = s.project.layouts.last().unwrap();
+        assert_eq!(r["name"], profile);
+        let sheet = profile.starts_with('a');
+        for e in &l.elements {
+            assert!(
+                e.x >= -1e-9 && e.y >= -1e-9 && e.x + e.w <= l.width + 1e-6 && e.y + e.h <= l.height + 1e-6,
+                "{profile}: {} at ({}, {}, {}, {}) is off the {} × {} page",
+                e.name,
+                e.x,
+                e.y,
+                e.w,
+                e.h,
+                l.width,
+                l.height
+            );
+        }
+        let frame = l.elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap();
+        let ElementKind::MapFrame { scale, grid: Some(grid), .. } = &frame.kind else { panic!("{profile}: no grid") };
+        // A round scale, two significant figures, at which the extent still fits.
+        let unit = 10f64.powf(scale.log10().floor() - 1.0);
+        assert!(((scale / unit) - (scale / unit).round()).abs() < 1e-6, "{profile}: 1:{scale}");
+        let extent = rustgis_geom::Extent::new(-46.8, -11.6, -38.5, -2.2);
+        let (_, fits) = rustgis_map::layout::fit_scale(s.map(), &extent, frame.w, frame.h).unwrap();
+        assert!(fits <= *scale && *scale < fits * 1.1, "{profile}: 1:{scale} for 1:{fits}");
+        assert_eq!(grid.step, 2.0, "{profile}: Piauí's 9.4° take a 2° graticule");
+        let text = |name: &str| {
+            l.elements.iter().find(|e| e.name == name).map(|e| match &e.kind {
+                ElementKind::Text { text, .. } => text.clone(),
+                _ => panic!("{name} isn't text"),
+            })
+        };
+        if sheet {
+            assert_eq!(text("Title").as_deref(), Some("PIAUÍ"), "{profile}");
+            // The footer under the map, the long source wrapped within its box.
+            let foot = l.elements.iter().find(|e| e.name == "Sources Box").unwrap();
+            assert!(foot.y >= frame.y + frame.h, "{profile}: the footer is under the map");
+            let sources = l.elements.iter().find(|e| e.name == "Sources").unwrap();
+            assert!(sources.x + sources.w <= foot.x + foot.w + 1e-6);
+            let lines = text("Sources").unwrap();
+            assert!(lines.lines().count() >= 3, "{profile}: {lines}");
+            for line in lines.lines() {
+                assert!(
+                    crate::render::report::width_mm(line, 7.0 * l.width.min(l.height) as f32 / 210.0, false) <= sources.w + 1e-6,
+                    "{profile}: {line}"
+                );
+            }
+            // The tokens filled from the map: Web Mercator over WGS 84, the 2° graticule.
+            let reference = text("Cartographic reference").unwrap();
+            assert!(reference.contains("Web Mercator") && reference.contains("WGS 84") && reference.contains("2°"), "{reference}");
+            assert!(text("Author").unwrap().contains("{date}"), "the date stays a token the layout fills");
+            assert!(r["warnings"].as_array().unwrap().is_empty(), "{profile}: {r}");
+        } else {
+            assert!(text("Title").is_none() && text("Sources").is_none(), "{profile}: a figure's texts are its caption's");
+            assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("caption")), "{r}");
+            assert!(text("Reference").unwrap().contains("Datum: WGS 84"), "{profile}");
+            assert_eq!(l.width, r["page"][0].as_f64().unwrap());
+        }
+        let png = dir.join(format!("{profile}.png"));
+        s.run("layout.export", &json!({"path": png.display().to_string(), "dpi": 72})).unwrap();
+        assert!(std::fs::metadata(&png).unwrap().len() > 1000, "{profile}");
+    }
+    assert_eq!(s.project.layouts.len(), profiles.len(), "a layout each, the earlier ones untouched");
+    // A journal figure is as tall as the map's shape asks: Piauí in Web Mercator is taller than wide.
+    let one = s.project.layouts.iter().find(|l| l.name == "figure-1col").unwrap();
+    assert!(one.width == 90.0 && one.height > 90.0, "{} × {}", one.width, one.height);
+    // Graticule steps and round scales.
+    use crate::cmd::layout::{grid_step, round_scale, step_text};
+    assert_eq!(grid_step(&rustgis_geom::Extent::new(10.0, 45.0, 11.0, 46.0)), 0.25);
+    assert_eq!(grid_step(&rustgis_geom::Extent::new(-180.0, -90.0, 180.0, 90.0)), 30.0);
+    assert_eq!((step_text(2.0), step_text(0.25), step_text(0.02)), ("2°".to_string(), "15′".to_string(), "72″".to_string()));
+    assert_eq!((round_scale(1_234_567.0), round_scale(4_500_000.0), round_scale(999.0)), (1_300_000.0, 4_500_000.0, 1_000.0));
+    // Refused: an unknown profile, a malformed extent, a footer that leaves the map no room.
+    for (p, said) in [
+        (json!({"profile": "a5-portrait"}), "unknown profile"),
+        (json!({"extent": [10, 0, 5, 1]}), "extent is"),
+        (json!({"extent": [10, 0, 11], "profile": "a4-portrait"}), "extent is"),
+        (json!({"sources": vec![long; 40], "profile": "a4-landscape", "extent": piaui}), "no room"),
+    ] {
+        let e = s.run("layout.publication", &p).unwrap_err();
+        assert!(e.contains(said), "{p}: {e}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn layouts_compose_export_and_round_trip() {
     use base64::Engine;

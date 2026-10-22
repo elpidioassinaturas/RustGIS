@@ -757,25 +757,26 @@ struct LegendOptions<'a> {
     exclude: &'a [String],
 }
 
-/// The legend of a frame's map. With `drawn` (from [`shown_legends`]) it shows what the frame
-/// draws: only the layers listed there, with their classes. Without, every class of every visible
-/// layer. `opts` leaves out `<all other values>` and the layers it names, either way.
-fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32, Vec<LegendEntry>)]>, opts: LegendOptions, ppp: f64) {
-    let hide_other = opts.hide_other;
+/// A row of a legend: a layer drawn in one symbol (its swatch and name), a layer's name over its
+/// classes, or one of them.
+enum LegendRow<'a> {
+    Plain(&'a rustgis_map::Layer),
+    Head(&'a str),
+    Class(GeometryType, LegendEntry),
+}
+
+/// A legend row's height, in points.
+const LEGEND_ROW: f32 = 15.0;
+/// A legend swatch's width, in points.
+const LEGEND_SWATCH: f32 = 16.0;
+
+/// The rows of the legend of a frame's map. With `drawn` (from [`shown_legends`]) it shows what the
+/// frame draws: only the layers listed there, with their classes. Without, every class of every
+/// visible layer. `opts` leaves out `<all other values>` and the layers it names, either way.
+fn legend_rows<'a>(map: &'a Map, drawn: Option<&[(u32, Vec<LegendEntry>)]>, opts: &LegendOptions) -> Vec<LegendRow<'a>> {
     let excluded = |name: &str| opts.exclude.iter().any(|n| n.eq_ignore_ascii_case(name));
-    let ppp = ppp as f32;
-    let dark = Rgba::rgb(0x22, 0x22, 0x22);
-    let mut y = r.y();
-    let line = 15.0 * ppp;
-    if !title.is_empty() {
-        text::text_at(pm, title, r.x(), y + line / 2.0, 12.0 * 1.33 * ppp, dark, true, text::Align::Left, false);
-        y += line * 1.3;
-    }
-    let sw = 16.0 * ppp;
+    let mut rows = Vec::new();
     for l in map.layers.iter().filter(|l| map.shows(l) && !l.graphics && !l.is_raster() && !excluded(&l.name)) {
-        if y + line > r.y() + r.height() {
-            break;
-        }
         let mut entries = match drawn {
             Some(d) => match d.iter().find(|(id, _)| *id == l.id) {
                 Some((_, entries)) => entries.clone(),
@@ -784,35 +785,92 @@ fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32
             None => l.renderer.legend(),
         };
         // The fallback row only (a class that happens to bear its name stays).
-        if hide_other && entries.iter().any(|e| e.fallback) {
+        if opts.hide_other && entries.iter().any(|e| e.fallback) {
             entries.retain(|e| !e.fallback);
             // Nothing left to show for this layer: leave it out rather than draw its plain swatch.
             if entries.is_empty() {
                 continue;
             }
         }
-        let gt = l.geometry_type();
         if entries.is_empty() {
             // A Unique Values layer that lists nothing draws nothing visible (#207).
-            if matches!(l.renderer, rustgis_map::Renderer::Unique { .. }) {
-                continue;
+            if !matches!(l.renderer, rustgis_map::Renderer::Unique { .. }) {
+                rows.push(LegendRow::Plain(l));
             }
-            swatch(pm, r.x(), y, sw, line, gt, &l.renderer.symbol_for(&l.dataset, 0), ppp);
-            text::text_at(pm, &l.name, r.x() + sw + 6.0 * ppp, y + line / 2.0, 9.0 * 1.33 * ppp, dark, false, text::Align::Left, false);
-            y += line;
             continue;
         }
-        text::text_at(pm, &l.name, r.x(), y + line / 2.0, 9.0 * 1.33 * ppp, dark, true, text::Align::Left, false);
-        y += line;
-        for en in entries {
-            if y + line > r.y() + r.height() {
-                break;
-            }
-            swatch(pm, r.x() + 6.0 * ppp, y, sw, line, gt, &en.symbol, ppp);
-            text::text_at(pm, &en.label, r.x() + sw + 12.0 * ppp, y + line / 2.0, 8.5 * 1.33 * ppp, dark, false, text::Align::Left, false);
-            y += line;
-        }
+        rows.push(LegendRow::Head(&l.name));
+        let gt = l.geometry_type();
+        rows.extend(entries.into_iter().map(|en| LegendRow::Class(gt, en)));
     }
+    rows
+}
+
+/// The legend of a frame's map: its rows ([`legend_rows`]) from the top, as many as fit.
+fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32, Vec<LegendEntry>)]>, opts: LegendOptions, ppp: f64) {
+    let ppp = ppp as f32;
+    let dark = Rgba::rgb(0x22, 0x22, 0x22);
+    let mut y = r.y();
+    let line = LEGEND_ROW * ppp;
+    if !title.is_empty() {
+        text::text_at(pm, title, r.x(), y + line / 2.0, 12.0 * 1.33 * ppp, dark, true, text::Align::Left, false);
+        y += line * 1.3;
+    }
+    let sw = LEGEND_SWATCH * ppp;
+    for row in legend_rows(map, drawn, &opts) {
+        if y + line > r.y() + r.height() {
+            break;
+        }
+        match row {
+            LegendRow::Plain(l) => {
+                swatch(pm, r.x(), y, sw, line, l.geometry_type(), &l.renderer.symbol_for(&l.dataset, 0), ppp);
+                text::text_at(pm, &l.name, r.x() + sw + 6.0 * ppp, y + line / 2.0, 9.0 * 1.33 * ppp, dark, false, text::Align::Left, false);
+            }
+            LegendRow::Head(name) => {
+                text::text_at(pm, name, r.x(), y + line / 2.0, 9.0 * 1.33 * ppp, dark, true, text::Align::Left, false);
+            }
+            LegendRow::Class(gt, en) => {
+                swatch(pm, r.x() + 6.0 * ppp, y, sw, line, gt, &en.symbol, ppp);
+                text::text_at(
+                    pm,
+                    &en.label,
+                    r.x() + sw + 12.0 * ppp,
+                    y + line / 2.0,
+                    8.5 * 1.33 * ppp,
+                    dark,
+                    false,
+                    text::Align::Left,
+                    false,
+                );
+            }
+        }
+        y += line;
+    }
+}
+
+/// The size a legend with no title takes, in mm (width, height): its rows as [`legend`] draws
+/// them, the classes a frame shows at the renderer's scale denominator `scale` (as the layout
+/// finds it for a frame), or every class with `all_classes`. For sizing a legend to its content.
+pub fn legend_size_mm(map: &Map, scale: f64, all_classes: bool, hide_other: bool, exclude: &[String]) -> (f64, f64) {
+    let drawn = (!all_classes).then(|| shown_legends(map, scale));
+    let rows = legend_rows(map, drawn.as_deref(), &LegendOptions { hide_other, exclude });
+    let width = rows
+        .iter()
+        .map(|row| match row {
+            LegendRow::Plain(l) => LEGEND_SWATCH + 6.0 + text::measure(&l.name, 9.0, false),
+            LegendRow::Head(name) => text::measure(name, 9.0, true),
+            LegendRow::Class(_, en) => LEGEND_SWATCH + 12.0 + text::measure(&en.label, 8.5, false),
+        })
+        .fold(0.0f32, f32::max);
+    let mm = 25.4 / 96.0;
+    (f64::from(width) * mm, rows.len() as f64 * f64::from(LEGEND_ROW) * mm)
+}
+
+/// The renderer's scale denominator for a frame showing `map` at paper scale 1:`scale` (the one
+/// [`legend_size_mm`] takes).
+pub fn frame_render_scale(map: &Map, center: Coord, scale: f64) -> f64 {
+    let cam = frame_camera(map, center, scale, 0.0, 0.0);
+    map.ground_res_at(&cam) / rustgis_geom::PIXEL_M
 }
 
 fn swatch(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, gt: GeometryType, s: &rustgis_map::Symbol, ppp: f32) {
@@ -1022,6 +1080,11 @@ struct TextStyle {
     spacing: f32,
 }
 
+/// The distance between two lines of text at `size` points, in mm, as [`text_block`] sets them.
+pub fn line_pitch_mm(size: f64) -> f64 {
+    size.clamp(2.0, 400.0) * 1.33 * 1.25 * 25.4 / 96.0
+}
+
 /// Text in an element: lines split at `\n` from the top, each placed by the style's alignment. A
 /// centred or right-aligned line wider than the element runs out past its left edge, as a
 /// left-aligned one runs past its right.
@@ -1205,6 +1268,15 @@ mod tests {
         // the font and antialiasing don't matter.
         assert!(shown > 0, "the drawn class is listed");
         assert!(all >= 2 * shown, "{shown} px of {all}");
+        // The size a legend takes holds what it draws, to within a row: two rows drawn, six with
+        // every class.
+        let row = f64::from(LEGEND_ROW) * 25.4 / 96.0;
+        for (all_classes, ink) in [(false, shown), (true, all)] {
+            let (w, h) = legend_size_mm(&map, 1e6, all_classes, false, &[]);
+            let ink = f64::from(ink) * 25.4 / 96.0;
+            assert!(w > 0.0 && ink <= h && h - ink < row, "{ink} mm drawn in {h} mm");
+        }
+        assert!((legend_size_mm(&map, 1e6, false, false, &[]).1 - 2.0 * row).abs() < 1e-9);
         // A layer the legend leaves out (by name, any case) isn't listed, drawn or not.
         let name = map.layer(pts).unwrap().name.to_uppercase();
         assert_eq!(depth_without(&map, Some(&drawn), false, std::slice::from_ref(&name)), 0, "its only drawn layer left out");

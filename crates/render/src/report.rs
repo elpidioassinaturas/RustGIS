@@ -47,8 +47,8 @@ pub struct Placed {
     pub lines: Vec<String>,
 }
 
-/// Text width in millimetres.
-fn width_mm(s: &str, pt: f32, bold: bool) -> f64 {
+/// Text width in millimetres at `pt` points, as layouts and reports draw it.
+pub fn width_mm(s: &str, pt: f32, bold: bool) -> f64 {
     text::measure(s, pt, bold) as f64 * 25.4 / 96.0
 }
 
@@ -66,8 +66,9 @@ fn style(b: &Block) -> (f32, bool, f64) {
     }
 }
 
-/// Splits text into lines no wider than `w` millimetres.
-fn wrap(s: &str, w: f64, pt: f32) -> Vec<String> {
+/// Splits text into lines no wider than `w` millimetres at `pt` points: whole words, a word wider
+/// than the line broken across lines.
+pub fn wrap(s: &str, w: f64, pt: f32) -> Vec<String> {
     let mut out = Vec::new();
     for para in s.lines().take(2000) {
         let mut line = String::new();
