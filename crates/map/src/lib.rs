@@ -1291,6 +1291,17 @@ impl Map {
     pub fn adopt_caches(&mut self, other: &Map) {
         for l in &mut self.layers {
             if let Some(o) = other.layer(l.id) {
+                // Complete rendering uses temporary chunk layers, so a failed worker need not
+                // have a projected cache to adopt. Transfer its diagnostic only for the same
+                // source and unchanged owning rows; stale workers must not overwrite edits.
+                if l.dataset.features.shares(&o.dataset.features)
+                    && l.geometry_rev == o.geometry_rev
+                    && let (Some(own), Some(drawn)) = (&mut l.source, &o.source)
+                    && let (Some(a), Some(b)) = (own.chunk_source(), drawn.chunk_source())
+                    && std::sync::Arc::ptr_eq(&a, &b)
+                {
+                    own.error.clone_from(&drawn.error);
+                }
                 l.adopt_cache(o);
             }
         }

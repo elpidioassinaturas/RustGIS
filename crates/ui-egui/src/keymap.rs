@@ -70,6 +70,12 @@ pub struct Chord {
 }
 
 impl Chord {
+    /// Whether a focused text field takes this chord for itself: egui's undo (Mod+Z) and redo
+    /// (Mod+Y, Mod+Shift+Z), matched as egui matches them, an extra Alt or Shift aside.
+    pub fn is_text_undo(self) -> bool {
+        self.command && matches!(self.key, Key::Z | Key::Y)
+    }
+
     /// Reads `Mod+Shift+Z`, `Ctrl+T`, `Home`, `F5`, `Mod++`. `Ctrl`, `Cmd` and `⌘` all mean
     /// `Mod`; letters may be lower case. `None` for anything else.
     pub fn parse(s: &str) -> Option<Chord> {
@@ -274,6 +280,14 @@ pub fn label(app: &RustGisApp, command: &str, params: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Undo and redo are a text field's own, an extra Alt or Shift aside; nothing else is.
+    #[test]
+    fn text_undo_chords_are_undo_and_redo() {
+        let is = |s: &str| Chord::parse(s).unwrap().is_text_undo();
+        assert!(is("Mod+Z") && is("Mod+Shift+Z") && is("Mod+Y") && is("Mod+Alt+Z"));
+        assert!(!is("Mod+S") && !is("Z") && !is("Mod+K"));
+    }
 
     #[test]
     fn chords_read_and_write() {

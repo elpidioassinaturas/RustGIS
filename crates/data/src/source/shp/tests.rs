@@ -236,3 +236,59 @@ fn shapefile_disk_index_benchmark() {
     });
     std::fs::remove_dir_all(folder).unwrap();
 }
+
+#[test]
+fn shapefile_disk_index_complete_chunks_preserve_full_reads_and_file_order() {
+    let fixture = dir();
+    cache::with_index_dir(fixture.join("cache"), || {
+        let path = fixture.join("complete-indexed.shp");
+        points_shapefile(&path);
+        let source = open_path(&path, None).unwrap();
+        assert!(source.info().indexed);
+        assert_eq!(source.read(&Request { extent: None, limit: 1 }).unwrap().features.len(), 1);
+        for extent in [None, Some(Extent::new(10.0, 5.0, 15.0, 10.0)), Some(Extent::EMPTY)] {
+            let expected = source.read(&Request { extent, ..Request::all() }).unwrap();
+            for budget in [1, 256, 8192] {
+                let mut rows = Vec::new();
+                let summary = source
+                    .visit_chunks(extent, budget, &mut |chunk| {
+                        assert!(chunk.len() == 1 || crate::source::chunk_memory::features_bytes(&chunk) <= budget);
+                        rows.extend(chunk);
+                        Ok(())
+                    })
+                    .unwrap();
+                assert!(summary.complete);
+                assert!(summary.features.is_empty());
+                assert_eq!(summary.matched, expected.matched);
+                assert_eq!(summary.skipped, expected.skipped);
+                assert_eq!(rows, expected.features);
+            }
+        }
+        for extent in [None, Some(Extent::EMPTY), Some(Extent::new(-180.0, -90.0, -179.0, -89.0))] {
+            assert!(source.visit_chunks(extent, 0, &mut |_| panic!("zero budget must not emit")).is_err());
+        }
+        let mut reentrant = false;
+        source
+            .visit_chunks(None, 256, &mut |_| {
+                if !reentrant {
+                    assert_eq!(source.read(&Request { extent: None, limit: 1 })?.features.len(), 1);
+                    reentrant = true;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(reentrant);
+        let mut calls = 0;
+        assert!(
+            source
+                .visit_chunks(None, 1, &mut |_| {
+                    calls += 1;
+                    Err(bad("cancelled indexed traversal"))
+                })
+                .is_err()
+        );
+        assert_eq!(calls, 1);
+        assert!(source.read(&Request::all()).unwrap().complete, "cancellation must release the index lock");
+    });
+    std::fs::remove_dir_all(fixture).unwrap();
+}

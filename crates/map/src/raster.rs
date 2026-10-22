@@ -256,10 +256,13 @@ pub enum Stretch {
     /// Values as they are (0–255 for 8-bit data, otherwise minimum to maximum).
     None,
     MinMax,
-    /// Fixed bounds in the data's own units, whatever the layer's statistics.
+    /// Fixed bounds in the data's own units, whatever the layer's statistics. `bands` holds one
+    /// `[min, max]` pair per RGB channel when they differ; `min`/`max` are then the red channel's.
     Custom {
         min: f64,
         max: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bands: Option<[[f64; 2]; 3]>,
     },
     /// Clip the lowest and highest percent of pixels.
     PercentClip {
@@ -281,6 +284,16 @@ impl Default for Stretch {
 }
 
 impl Stretch {
+    /// One pair of bounds for every band.
+    pub fn custom(min: f64, max: f64) -> Stretch {
+        Stretch::Custom { min, max, bands: None }
+    }
+
+    /// A custom stretch with a pair of bounds per RGB channel.
+    pub fn custom_bands(bands: [[f64; 2]; 3]) -> Stretch {
+        Stretch::Custom { min: bands[0][0], max: bands[0][1], bands: Some(bands) }
+    }
+
     pub const KINDS: [(&'static str, &'static str); 6] = [
         ("none", "None"),
         ("minMax", "Minimum Maximum"),
@@ -320,7 +333,7 @@ impl Stretch {
         Some(match code.trim().to_ascii_lowercase().replace([' ', '_', '-'], "").as_str() {
             "none" => Stretch::None,
             "minmax" | "minimummaximum" => Stretch::MinMax,
-            "custom" | "custommin/max" => Stretch::Custom { min: min.or(stats.map(|s| s.min))?, max: max.or(stats.map(|s| s.max))? },
+            "custom" | "custommin/max" => Stretch::custom(min.or(stats.map(|s| s.min))?, max.or(stats.map(|s| s.max))?),
             "percentclip" => Stretch::PercentClip { low: pct(low), high: pct(high) },
             "standarddeviation" | "stddev" => Stretch::StandardDeviation { n: n.unwrap_or(2.0).clamp(0.1, 10.0) },
             "histogramequalize" | "histogramequalization" => Stretch::HistogramEqualize,
@@ -700,11 +713,20 @@ pub struct Normalizer {
 
 impl Normalizer {
     pub fn new(stretch: Stretch, s: &BandStats, data_type: &str) -> Normalizer {
+        Normalizer::for_channel(stretch, 0, s, data_type)
+    }
+
+    /// The normaliser of renderer channel `channel` (red 0, green 1, blue 2): the same as
+    /// [`Normalizer::new`], but a custom stretch with bounds per channel uses that channel's.
+    pub fn for_channel(stretch: Stretch, channel: usize, s: &BandStats, data_type: &str) -> Normalizer {
         let (lo, hi) = match stretch {
             Stretch::None if data_type == "UInt8" => (0.0, 255.0),
             Stretch::None | Stretch::MinMax | Stretch::HistogramEqualize => (s.min, s.max),
             // Fixed bounds ignore the statistics, so DRA's view statistics don't move them.
-            Stretch::Custom { min, max } => (min, max),
+            Stretch::Custom { min, max, bands } => match bands.as_ref().and_then(|b| b.get(channel)) {
+                Some([lo, hi]) => (*lo, *hi),
+                None => (min, max),
+            },
             Stretch::PercentClip { low, high } => (s.percentile(low), s.percentile(100.0 - high)),
             Stretch::StandardDeviation { n } => ((s.mean - n * s.std_dev).max(s.min), (s.mean + n * s.std_dev).min(s.max)),
         };
@@ -773,7 +795,7 @@ impl<'a> Colorizer<'a> {
             .enumerate()
             .map(|(i, b)| {
                 let s = view_stats.and_then(|v| v.get(i)).or_else(|| r.bands.get(*b).map(|b| &b.stats));
-                s.map(|s| Normalizer::new(style.stretch, s, &r.data_type)).unwrap_or(Normalizer { lo: 0.0, hi: 1.0, cdf: None })
+                s.map(|s| Normalizer::for_channel(style.stretch, i, s, &r.data_type)).unwrap_or(Normalizer { lo: 0.0, hi: 1.0, cdf: None })
             })
             .collect();
         let ramp_lut = match &style.renderer {
@@ -1073,7 +1095,7 @@ mod tests {
         }
         // Bounds read from a hand-edited project can be reversed, equal or not numbers.
         for (min, max) in [(5.0, 1.0), (2.0, 2.0), (f64::NAN, 1.0), (0.0, f64::INFINITY)] {
-            let n = Normalizer::new(Stretch::Custom { min, max }, st, "Float32");
+            let n = Normalizer::new(Stretch::custom(min, max), st, "Float32");
             assert!((0.0..=1.0).contains(&n.t(3.0)) && (0.0..=1.0).contains(&n.t(f64::NAN).max(0.0)), "{min} {max}");
         }
         assert_eq!(Stretch::from_code("custom", None, None, None, None, None, None), None);
@@ -1083,6 +1105,68 @@ mod tests {
         let bright = enhancement_lut(50.0, 0.0, 1.0);
         assert!(bright[100] > flat[100]);
         let _ = enhancement_lut(f64::NAN, f64::INFINITY, f64::NAN);
+    }
+
+    fn rgb() -> Raster {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 1.0, pixel_height: -1.0 };
+        let bands = vec![vec![0.0, 100.0], vec![0.0, 200.0], vec![0.0, 50.0]];
+        Raster::new("rgb", 2, 1, bands, gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap()
+    }
+
+    #[test]
+    fn custom_stretch_bounds_per_channel() {
+        let r = rgb();
+        let mut style = RasterStyle::default_for(&r);
+        style.renderer = RasterRenderer::Rgb { red: 0, green: 1, blue: 2 };
+        // One pair for every channel: the same value draws differently only by band, never by bounds.
+        style.stretch = Stretch::custom(0.0, 100.0);
+        let shared = Colorizer::new(&style, &r, None).color(&[50.0, 50.0, 50.0], None).unwrap();
+        assert_eq!(shared[..3], [128, 128, 128]);
+        // A pair per channel: each channel scales by its own bounds.
+        style.stretch = Stretch::custom_bands([[0.0, 100.0], [0.0, 200.0], [0.0, 50.0]]);
+        let c = Colorizer::new(&style, &r, None).color(&[50.0, 50.0, 50.0], None).unwrap();
+        assert_eq!(c[..3], [128, 64, 255]);
+        // The red channel's bounds are the plain pair, so a single band reads them.
+        assert_eq!(style.stretch, Stretch::Custom { min: 0.0, max: 100.0, bands: style_bands(&style) });
+        let n = Normalizer::for_channel(style.stretch, 1, &r.bands[1].stats, "Float32");
+        assert_eq!((n.lo, n.hi), (0.0, 200.0));
+        let n = Normalizer::new(style.stretch, &r.bands[1].stats, "Float32");
+        assert_eq!((n.lo, n.hi), (0.0, 100.0));
+    }
+
+    fn style_bands(style: &RasterStyle) -> Option<[[f64; 2]; 3]> {
+        match style.stretch {
+            Stretch::Custom { bands, .. } => bands,
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn custom_stretch_files_stay_compatible() {
+        // Saved by a version that had one pair of bounds.
+        let old: Stretch = serde_json::from_str(r#"{"Custom":{"min":1.0,"max":2.0}}"#).unwrap();
+        assert_eq!(old, Stretch::custom(1.0, 2.0));
+        assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"Custom":{"min":1.0,"max":2.0}}"#);
+        let per = Stretch::custom_bands([[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]]);
+        let back: Stretch = serde_json::from_str(&serde_json::to_string(&per).unwrap()).unwrap();
+        assert_eq!(back, per);
+        // Read as one pair (an older version ignoring `bands`) it is the red channel's.
+        let json: serde_json::Value = serde_json::to_value(per).unwrap();
+        assert_eq!(json["Custom"]["min"], 0.0);
+        assert_eq!(json["Custom"]["max"], 1.0);
+    }
+
+    #[test]
+    fn hostile_channel_bounds_never_panic() {
+        let r = rgb();
+        let st = &r.bands[0].stats;
+        let bad = [5.0, 1.0];
+        for pair in [bad, [2.0, 2.0], [f64::NAN, 1.0], [0.0, f64::INFINITY]] {
+            for ch in 0..5 {
+                let n = Normalizer::for_channel(Stretch::custom_bands([pair, pair, pair]), ch, st, "Float32");
+                assert!((0.0..=1.0).contains(&n.t(3.0)) && (0.0..=1.0).contains(&n.t(f64::NAN).max(0.0)), "{pair:?} {ch}");
+            }
+        }
     }
 
     #[test]
