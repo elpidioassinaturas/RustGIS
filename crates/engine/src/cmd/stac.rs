@@ -548,8 +548,14 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
     let full = layout.levels.first().ok_or("the file has no image")?;
     let (read, factor) = if average && level > 0 {
         let f = (f64::from(full.width) / f64::from(lv.width.max(1))).round();
-        if !(1.0..=64.0).contains(&f) {
-            return Err(format!("{first}'s overview isn't a whole fraction of its full image"));
+        // Averaging takes `f` × `f` full pixels a cell: the overview has to be exactly the full
+        // image's size divided by `f` (rounded up), or its cells aren't those blocks.
+        let fits = |full: u32, ov: u32| full.div_ceil(f as u32) == ov;
+        if !(1.0..=64.0).contains(&f) || !fits(full.width, lv.width) || !fits(full.height, lv.height) {
+            return Err(format!(
+                "{first}'s overview ({} × {}) isn't its full image ({} × {}) divided by a whole number, so its cells can't be averaged from it: take \"resampling\": \"nearest\"",
+                lv.width, lv.height, full.width, full.height
+            ));
         }
         (0, f as u32)
     } else {

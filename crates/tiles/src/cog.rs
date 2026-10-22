@@ -1065,6 +1065,9 @@ pub fn info_blocking(url: &str) -> Result<Arc<Info>, String> {
 /// Band `band`'s values (0-based) in a window of a level: columns `cols.0..cols.1` and rows
 /// `rows.0..rows.1` of that level's grid, row by row, waiting for the tiles. No-data, and the
 /// window's pixels outside the file, are NaN. The values are as stored (no scale or offset).
+/// A read returns up to [`MAX_VALUES_READ`] values (256 MB): a caller reading on several threads
+/// bounds its windows itself (a STAC trend's slices are a million pixels at most). It waits up to
+/// two minutes for the tiles, as [`info_blocking`] does for the header.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_values_blocking(
     info: &Arc<Info>,
@@ -1104,7 +1107,7 @@ pub fn read_values_blocking(
     let mut out = vec![f32::NAN; n as usize];
     let (tx, rx) = std::sync::mpsc::channel();
     fetch_bands(info.clone(), url.clone(), level, tiles.clone(), vec![band], Box::new(move |r| tx.send(r).unwrap_or_default()));
-    let picked = rx.recv_timeout(Duration::from_secs(600)).map_err(|_| format!("{url}: tiles not read in ten minutes"))??;
+    let picked = rx.recv_timeout(Duration::from_secs(120)).map_err(|_| format!("{url}: tiles not read in two minutes"))??;
     let nodata = info.layout.nodata.map(|v| v as f32);
     for (&t, p) in tiles.iter().zip(&picked) {
         let Some(values) = p.first().and_then(|(chunk, i)| chunk.get(*i)) else { continue };

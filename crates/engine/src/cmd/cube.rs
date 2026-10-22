@@ -537,10 +537,18 @@ impl TrendRun {
         let mut cells_done = 0usize;
         for piece in 0..self.cube.pieces().max(1) {
             let (grid, block, cells) = self.read_piece(piece, cancel, done, whole.is_none().then_some(&too_long))?;
-            if let Some(f) = &first_piece
-                && (f.width, f.crs) != (grid.width, grid.crs)
-            {
-                return Err("the cube's pieces aren't one grid".into());
+            // Stitched under the first piece's georeferencing: every piece on its columns, pixel
+            // size and coordinate system (its rows follow on from the one above).
+            if let Some(f) = &first_piece {
+                let near = |a: f64, b: f64| (a - b).abs() <= f.transform.pixel_width.abs() * 1e-3;
+                let (a, b) = (&f.transform, &grid.transform);
+                if (f.width, f.crs) != (grid.width, grid.crs)
+                    || !near(a.origin_x, b.origin_x)
+                    || !near(a.pixel_width, b.pixel_width)
+                    || !near(a.pixel_height, b.pixel_height)
+                {
+                    return Err("the cube's pieces aren't one grid".into());
+                }
             }
             // Progress through all the cells: a part of the bar every `tick` cells.
             let tick = whole.unwrap_or(cells).div_ceil(CELL_PARTS).max(1);
