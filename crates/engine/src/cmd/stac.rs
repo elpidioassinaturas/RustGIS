@@ -242,6 +242,471 @@ pub const MAX_CUBE_ITEMS: usize = 2000;
 /// The most pages of a search a data cube reads, whatever they hold.
 pub const MAX_CUBE_PAGES: usize = 100;
 
+/// A STAC collection's band as files: by grid tile, then by day, the address of the first item's
+/// asset found (the search's order), with the asset's scale and offset. What `stac.addCube` adds
+/// as tile layers and `cube.trend` reads as a data cube (#559, #579).
+#[cfg(not(target_arch = "wasm32"))]
+pub struct CubeFiles {
+    pub tiles: std::collections::BTreeMap<String, std::collections::BTreeMap<i64, String>>,
+    /// The first asset's (scale, offset), from `raster:bands` or `eo:bands`.
+    pub scale: Option<(f64, f64)>,
+    /// Each file's own (scale, offset), by its address: a trend reads each date's values as its
+    /// own metadata says to (#579).
+    pub scales: std::collections::HashMap<String, (f64, f64)>,
+    /// The items found, and those left out (no date, or no such asset).
+    pub items: usize,
+    pub without: usize,
+    /// Whether any item names its grid tile (otherwise each footprint counts as one).
+    pub named_tiles: bool,
+    /// Items left out because their tile and day already had a file.
+    pub duplicates: usize,
+    /// Whether the assets' scale or offset differ from the first one's.
+    pub scales_differ: bool,
+    pub collection: String,
+    pub asset: String,
+}
+
+/// The first moment after a period given as a year (`"2024"`) or a month (`"2024-03"`), so an
+/// end given so takes all of it; `None` for a date (an end on that day) or anything else.
+pub(crate) fn period_after(v: &Value) -> Option<f64> {
+    let given = v.as_str().map_or_else(|| v.to_string(), |s| s.trim().to_string());
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit());
+    let next = match given.split_once('-') {
+        None if given.len() == 4 && digits(&given) => given.parse::<i32>().ok().map(|y| format!("{}-01-01", y + 1)),
+        Some((y, m)) if y.len() == 4 && m.len() == 2 && digits(y) && digits(m) => match (y.parse::<i32>(), m.parse::<u32>()) {
+            (Ok(y), Ok(12)) => Some(format!("{}-01-01", y + 1)),
+            (Ok(y), Ok(m)) if (1..12).contains(&m) => Some(format!("{y:04}-{:02}-01", m + 1)),
+            _ => None,
+        },
+        _ => None,
+    };
+    next.and_then(|n| rustgis_data::time::parse_text(&n))
+}
+
+/// Searches a collection over an area and period, every page up to [`MAX_CUBE_ITEMS`], and
+/// groups the items' asset by tile and day: `{"url"?, "collection", "asset", "bbox"? | "view",
+/// "start", "end", "maxCloud"?}`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn cube_files(s: &Session, p: &Value) -> Result<CubeFiles, String> {
+    let api = stac::api(ps(p, "url"))?;
+    if stac::catalog::is_static(&api) {
+        return Err("a data cube needs a STAC API's search; a static catalog can't be searched".into());
+    }
+    let collection = ps(p, "collection").map(str::trim).filter(|c| !c.is_empty()).ok_or("collection is required")?;
+    let asset = ps(p, "asset").map(str::trim).filter(|a| !a.is_empty()).ok_or("asset is required (a band, such as NDVI)")?;
+    let date = |k: &str| {
+        p.get(k)
+            .and_then(rustgis_data::time::parse_input)
+            .ok_or_else(|| format!("{k} is a date (2024-06-01, a year, or milliseconds since 1970)"))
+    };
+    let (start, mut end) = (date("start")?, date("end")?);
+    // An end given as a year or a month is the end of it: "end": "2024" takes all of 2024.
+    if let Some(after) = p.get("end").and_then(period_after) {
+        end = after - 86_400_000.0;
+    }
+    if end < start {
+        return Err("end is before start".into());
+    }
+    let day = |ms: f64| rustgis_data::time::format(ms, "YYYY-MM-DD");
+    // RFC 3339, as STAC asks: the whole of the last day included.
+    let mut q = json!({"collections": collection, "datetime": format!("{}T00:00:00Z/{}T23:59:59Z", day(start), day(end)), "limit": 200});
+    for k in ["bbox", "maxCloud"] {
+        if let Some(v) = p.get(k).filter(|v| !v.is_null()) {
+            q[k] = v.clone();
+        }
+    }
+    if q.get("bbox").is_none() {
+        q["bbox"] = json!("view");
+    }
+    let search = search_params(s, &q)?;
+    // Every page of the search, up to the cap.
+    let mut items: Vec<Item> = Vec::new();
+    // An empty page, or a next link back to a page already read, ends it; so does the page cap.
+    let mut next = Some(stac::search_url(&api, &search)?);
+    let mut read: Vec<String> = Vec::new();
+    // Pages are read from the API's own host: a next link elsewhere ends the search.
+    // Scheme, user part, host and port compared: `https://host:443`, never another host or http.
+    let host = |u: &str| {
+        u.split_once("://").map(|(scheme, r)| {
+            let authority = r.split(['/', '?', '#']).next().unwrap_or("");
+            let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h).to_ascii_lowercase();
+            let scheme = scheme.to_ascii_lowercase();
+            // The scheme's own port written out is the same host.
+            let default = if scheme == "https" { ":443" } else { ":80" };
+            format!("{scheme}://{}", host.strip_suffix(default).unwrap_or(&host))
+        })
+    };
+    // An address with no scheme has no host to match: a next link is never taken on it.
+    let api_host = host(&api);
+    while let Some(url) = next.take() {
+        if read.contains(&url) || (!read.is_empty() && (api_host.is_none() || host(&url) != api_host)) {
+            break;
+        }
+        if read.len() >= MAX_CUBE_PAGES {
+            return Err(format!("more than {MAX_CUBE_PAGES} pages of results: take a shorter period or a smaller area"));
+        }
+        let bytes = crate::render::rustgis_tiles::cache::download_blocking(&url)?;
+        let (page, more) = stac::parse_items(&bytes, &url)?;
+        read.push(url);
+        if page.is_empty() {
+            break;
+        }
+        items.extend(page);
+        if items.len() > MAX_CUBE_ITEMS {
+            return Err(format!("more than {MAX_CUBE_ITEMS} items: take a shorter period or a smaller area"));
+        }
+        next = more;
+    }
+    if items.is_empty() {
+        return Err(format!("no item of {collection} in the area and period"));
+    }
+    // By tile, then by day: the first item found for a tile and day (the search's order).
+    let mut tiles: std::collections::BTreeMap<String, std::collections::BTreeMap<i64, String>> = Default::default();
+    let mut scale: Option<(f64, f64)> = None;
+    let mut scales: std::collections::HashMap<String, (f64, f64)> = Default::default();
+    let mut scales_differ = false;
+    let mut duplicates = 0usize;
+    let mut without = 0usize;
+    for i in &items {
+        let Some(ms) = rustgis_data::time::parse_text(&i.datetime) else {
+            without += 1;
+            continue;
+        };
+        let Some(a) = i.assets.iter().find(|a| a.key.eq_ignore_ascii_case(asset)) else {
+            without += 1;
+            continue;
+        };
+        let key = i.tile.clone().unwrap_or_else(|| match i.bbox {
+            Some([w, so, e, n]) => format!("{w:.2},{so:.2},{e:.2},{n:.2}"),
+            None => i.id.clone(),
+        });
+        let d = (ms / 86_400_000.0).floor() as i64;
+        let by_day = tiles.entry(key).or_default();
+        if by_day.contains_key(&d) {
+            // A tile and day already have a file; this one is left out (and counted), its scale too.
+            duplicates += 1;
+            continue;
+        }
+        // The file's address without a fragment of its own, so the range look is the only one.
+        let href = a.href.split('#').next().unwrap_or(&a.href).to_string();
+        // No scale or offset in the metadata reads as 1 and 0, the values as stored.
+        let this = (a.scale.unwrap_or(1.0), a.offset.unwrap_or(0.0));
+        scales.insert(href.clone(), this);
+        by_day.insert(d, href);
+        scales_differ |= scale.is_some_and(|s| s != this);
+        scale.get_or_insert(this);
+    }
+    if tiles.is_empty() {
+        return Err(format!("no item of {collection} has an asset {asset}"));
+    }
+    // Files reached through signed addresses (Planetary Computer's) expire within hours, so a
+    // cube of them couldn't be kept in a project or read a day later.
+    if tiles.values().flat_map(|by_day| by_day.values()).any(|href| stac::needs_signing(href)) {
+        return Err(format!(
+            "{collection}'s files are reached through signed addresses that expire, so they can't make a data cube kept in the project: use an API with public files (Earth Search, the Brazil Data Cube)"
+        ));
+    }
+    Ok(CubeFiles {
+        tiles,
+        scale,
+        scales,
+        items: items.len(),
+        named_tiles: items.iter().any(|i| i.tile.is_some()),
+        without,
+        duplicates,
+        scales_differ,
+        collection: collection.to_string(),
+        asset: asset.to_string(),
+    })
+}
+
+/// The most cells a STAC collection's trend covers: its four outputs take 16 bytes a cell, 400 MB
+/// at the cap (the dates are read in pieces, each within [`super::cube::MAX_VALUES`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub const MAX_TREND_CELLS: usize = 25_000_000;
+
+/// Dates a STAC collection's trend reads at once: its files are read over the network.
+#[cfg(not(target_arch = "wasm32"))]
+const STAC_READERS: usize = 8;
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    /// For tests: the values a piece holds at most, in place of [`super::cube::MAX_VALUES`], so a
+    /// small cube is read in several pieces.
+    #[doc(hidden)]
+    pub static PIECE_VALUES: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// A STAC collection's band as a data cube for `cube.trend` (#579): each date's files (a grid
+/// tile each, MODIS's h13v09 and h13v10 for one date), read in place from their tiled GeoTIFFs
+/// over an area, at one level of their overviews, and put together on one grid. A large area is
+/// read in pieces, bands of rows each within a run's block, so a state's 25 years of 16-day
+/// composites can be worked out whole.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct StacCube {
+    dates: Vec<f64>,
+    /// Each date's files, with their (scale, offset).
+    files: Vec<Vec<(String, (f64, f64))>>,
+    /// The level read (0: the full images), and how many of its pixels a cell's side takes: 1
+    /// when the cells are that level's own pixels (`"resampling": "nearest"`, an overview as the
+    /// file stores it), more when a cell is the mean of the full images' pixels in it.
+    level: usize,
+    factor: u32,
+    /// The area on that level's grid: its georeferencing (from its top-left corner), columns and
+    /// rows, in the files' coordinate system.
+    transform: rustgis_data::raster::GeoTransform,
+    width: u32,
+    height: u32,
+    crs: rustgis_data::raster::Crs,
+    /// Rows a piece reads.
+    rows: u32,
+    label: String,
+}
+
+/// Where a grid's columns and rows fall in a file's: the offsets (in the file's pixels) of the
+/// grid's top-left corner, when both are on one grid of pixels (the same size, corners a whole
+/// number of pixels apart); `None` otherwise.
+#[cfg(not(target_arch = "wasm32"))]
+fn offset_in(grid: &rustgis_data::raster::GeoTransform, file: &rustgis_data::raster::GeoTransform) -> Option<(i64, i64)> {
+    let same = |a: f64, b: f64| (a - b).abs() <= a.abs().max(b.abs()) * 1e-6;
+    if !same(grid.pixel_width, file.pixel_width) || !same(grid.pixel_height, file.pixel_height) {
+        return None;
+    }
+    let dx = (grid.origin_x - file.origin_x) / file.pixel_width;
+    let dy = (grid.origin_y - file.origin_y) / file.pixel_height;
+    let whole = |v: f64| v.is_finite() && (v - v.round()).abs() <= 1e-3 && v.abs() < 1e9;
+    (whole(dx) && whole(dy)).then(|| (dx.round() as i64, dy.round() as i64))
+}
+
+/// The rows a piece reads: as many as `max` values hold over `width` columns and `dates` dates,
+/// a whole number of the files' tile rows when that many fit (so no tile is read for two pieces),
+/// at least one. `None` when a single row is too many.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn piece_rows(width: u32, height: u32, dates: usize, tile_height: u32, max: u64) -> Option<u32> {
+    let per_row = u64::from(width.max(1)).saturating_mul(dates.max(1) as u64);
+    let fit = max / per_row;
+    if fit == 0 {
+        return None;
+    }
+    let fit = u32::try_from(fit).unwrap_or(u32::MAX).min(height.max(1));
+    let th = tile_height.max(1);
+    Some(if fit >= th { fit / th * th } else { fit })
+}
+
+/// Prepares a STAC collection's band as a cube: the search (as `stac.addCube` makes it), the
+/// overview level for `cellSize`, the area's grid, and the pieces it is read in.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
+    use crate::render::rustgis_tiles::cog;
+    let CubeFiles { tiles, scales, collection, asset, .. } = cube_files(s, p)?;
+    // Every tile's file for a date, by day.
+    let mut by_day: std::collections::BTreeMap<i64, Vec<(String, (f64, f64))>> = Default::default();
+    for days in tiles.values() {
+        for (d, href) in days {
+            by_day.entry(*d).or_default().push((href.clone(), scales.get(href).copied().unwrap_or((1.0, 0.0))));
+        }
+    }
+    if by_day.len() > super::cube::MAX_DATES {
+        return Err(format!("{} dates; a trend takes {} at most: take a shorter period", by_day.len(), super::cube::MAX_DATES));
+    }
+    // The first file's header gives the coordinate system, the grid and its overviews.
+    let first = by_day.values().flatten().next().map(|(h, _)| h.clone()).ok_or("no file to read")?;
+    let info = cog::info_blocking(&first)?;
+    let layout = &info.layout;
+    if layout.transform.pixel_height > 0.0 {
+        return Err(format!("{first} is stored bottom up, which a trend doesn't read yet"));
+    }
+    // The level whose cells are nearest the size asked, by ratio (`1000` takes MODIS's 926.6 m
+    // overview, not its 463 m one); the full images by default.
+    let level = match p.get("cellSize").filter(|v| !v.is_null()) {
+        None => 0,
+        Some(v) => {
+            let size =
+                v.as_f64().filter(|c| c.is_finite() && *c > 0.0).ok_or("cellSize is a size in the files' units (metres for most)")?;
+            let off = |l: &rustgis_data::raster::cog::Level| (layout.transform_of(l).pixel_width.abs() / size).ln().abs();
+            (0..layout.levels.len()).min_by(|a, b| off(&layout.levels[*a]).total_cmp(&off(&layout.levels[*b]))).unwrap_or(0)
+        }
+    };
+    let lv = layout.levels.get(level).ok_or("the file has no image")?;
+    let lt = layout.transform_of(lv);
+    // An overview is often made by taking one pixel in each block (the Brazil Data Cube's are,
+    // GDAL's NEAREST), so a cell of it is one of the full images' pixels, which can differ much
+    // from the place's mean: "average" reads the full images and takes the mean of each cell's.
+    let average = match ps(p, "resampling").map(str::trim) {
+        None | Some("") | Some("nearest") => false,
+        Some("average") => true,
+        Some(x) => return Err(format!("resampling is nearest or average, not {x}")),
+    };
+    let full = layout.levels.first().ok_or("the file has no image")?;
+    let (read, factor) = if average && level > 0 {
+        let f = (f64::from(full.width) / f64::from(lv.width.max(1))).round();
+        if !(1.0..=64.0).contains(&f) {
+            return Err(format!("{first}'s overview isn't a whole fraction of its full image"));
+        }
+        (0, f as u32)
+    } else {
+        (level, 1)
+    };
+    let read_tile_rows = layout.levels.get(read).map_or(1, |l| l.tile_height).div_ceil(factor).max(1);
+    // The area, in the files' coordinates: the box's edges, each at 32 points, as a curved grid
+    // (MODIS's sinusoidal) bends them.
+    let bbox = match p.get("bbox").filter(|v| !v.is_null()) {
+        Some(v) if v.as_str().is_some_and(|t| t.trim().eq_ignore_ascii_case("view")) => view(s)?,
+        None => view(s)?,
+        Some(v) => {
+            let b: Option<Vec<f64>> =
+                v.as_array().filter(|a| a.len() == 4).and_then(|a| a.iter().map(|x| x.as_f64().filter(|x| x.is_finite())).collect());
+            match b.as_deref() {
+                Some([w, so, e, n]) if w < e && so < n => [*w, *so, *e, *n],
+                _ => return Err("bbox is [west, south, east, north] in degrees, or \"view\"".into()),
+            }
+        }
+    };
+    let tr = layout.crs.transformer()?;
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let [w, so, e, n] = bbox;
+    for k in 0..=32 {
+        let t = f64::from(k) / 32.0;
+        for (lon, lat) in [(w + (e - w) * t, so), (w + (e - w) * t, n), (w, so + (n - so) * t), (e, so + (n - so) * t)] {
+            if let Some(c) = tr.from_lonlat(rustgis_geom::Coord::new(lon, lat)) {
+                (x0, y0, x1, y1) = (x0.min(c.x), y0.min(c.y), x1.max(c.x), y1.max(c.y));
+            }
+        }
+    }
+    if !(x0 < x1 && y0 < y1) {
+        return Err("the area is outside the files' coordinate system".into());
+    }
+    // Snapped outwards onto the level's pixels.
+    let (pw, ph) = (lt.pixel_width, lt.pixel_height);
+    let c0 = ((x0 - lt.origin_x) / pw).floor();
+    let c1 = ((x1 - lt.origin_x) / pw).ceil();
+    let r0 = ((y1 - lt.origin_y) / ph).floor();
+    let r1 = ((y0 - lt.origin_y) / ph).ceil();
+    let (width, height) = (c1 - c0, r1 - r0);
+    if !(width >= 1.0 && height >= 1.0) || width * height > MAX_TREND_CELLS as f64 {
+        return Err(format!(
+            "the area is {width:.0} × {height:.0} cells at {:.0}-unit cells; a trend covers {MAX_TREND_CELLS} at most: take a smaller area or a larger cellSize",
+            pw.abs()
+        ));
+    }
+    let (width, height) = (width as u32, height as u32);
+    let transform = rustgis_data::raster::GeoTransform { origin_x: lt.origin_x + c0 * pw, origin_y: lt.origin_y + r0 * ph, ..lt };
+    let max = PIECE_VALUES.with(|v| v.get()).unwrap_or(super::cube::MAX_VALUES);
+    let rows = piece_rows(width, height, by_day.len(), read_tile_rows, max).ok_or_else(|| {
+        format!(
+            "a row of {width} cells × {} dates is more than a run's block: take a smaller area, a larger cellSize or fewer dates",
+            by_day.len()
+        )
+    })?;
+    let dates = by_day.keys().map(|d| *d as f64 * 86_400_000.0).collect();
+    let files = by_day.into_values().collect();
+    Ok(StacCube {
+        dates,
+        files,
+        level: read,
+        factor,
+        transform,
+        width,
+        height,
+        crs: layout.crs,
+        rows,
+        label: format!("{collection} {asset}"),
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl super::cube::TimeCube for StacCube {
+    fn dates(&self) -> &[f64] {
+        &self.dates
+    }
+    fn slice(&self, i: usize) -> Result<Option<(std::sync::Arc<rustgis_data::raster::Raster>, usize)>, String> {
+        self.slice_of(i, 0)
+    }
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+    fn pieces(&self) -> usize {
+        self.height.div_ceil(self.rows.max(1)) as usize
+    }
+    fn size(&self) -> Option<(usize, usize)> {
+        Some((self.width as usize, self.height as usize))
+    }
+    fn readers(&self) -> usize {
+        STAC_READERS
+    }
+    /// Rows `piece × rows` on of the area at date `i`: each file's part of them, its values
+    /// scaled as its metadata says, a cell the mean of the pixels read in it (one, or a block of
+    /// the full images'); a cell no file covers (or none has a value for) is NaN.
+    fn slice_of(&self, i: usize, piece: usize) -> Result<Option<(std::sync::Arc<rustgis_data::raster::Raster>, usize)>, String> {
+        use crate::render::rustgis_tiles::cog;
+        let files = self.files.get(i).ok_or_else(|| format!("no date {i}"))?;
+        let top = u32::try_from(piece).ok().and_then(|p| p.checked_mul(self.rows)).filter(|t| *t < self.height).ok_or("no such piece")?;
+        let h = self.rows.min(self.height - top);
+        let w = self.width;
+        let f = self.factor.max(1);
+        // Each cell's sum and count of the pixels read in it.
+        let mut sum = vec![0.0f64; w as usize * h as usize];
+        let mut count = vec![0u32; w as usize * h as usize];
+        // The area's grid at the level read: a cell is `f` × `f` of its pixels.
+        let grid = rustgis_data::raster::GeoTransform {
+            pixel_width: self.transform.pixel_width / f64::from(f),
+            pixel_height: self.transform.pixel_height / f64::from(f),
+            ..self.transform
+        };
+        let (wf, top_f, hf) = (i64::from(w) * i64::from(f), i64::from(top) * i64::from(f), i64::from(h) * i64::from(f));
+        for (href, (k, o)) in files {
+            let info = cog::info_blocking(href)?;
+            if info.layout.crs != self.crs {
+                return Err(format!("{href} is in another coordinate system than the first file"));
+            }
+            let lv = info.layout.levels.get(self.level).ok_or_else(|| format!("{href} has fewer overviews than the first file"))?;
+            let lt = info.layout.transform_of(lv);
+            let (dx, dy) = offset_in(&grid, &lt).ok_or_else(|| format!("{href} is on another grid of pixels than the first file"))?;
+            // The piece's columns and rows in the file's pixels, within the file.
+            let (fc0, fc1) = (dx.max(0), (dx + wf).min(i64::from(lv.width)));
+            let (fr0, fr1) = ((dy + top_f).max(0), (dy + top_f + hf).min(i64::from(lv.height)));
+            if fc1 <= fc0 || fr1 <= fr0 {
+                continue;
+            }
+            let cols = (fc0 as u32, fc1 as u32);
+            let rows = (fr0 as u32, fr1 as u32);
+            let read = cog::read_values_blocking(&info, href, self.level, 0, cols, rows)?;
+            let across = (fc1 - fc0) as usize;
+            for (r, line) in read.chunks(across).enumerate() {
+                let row = ((fr0 - dy - top_f) as usize + r) / f as usize;
+                for (c, v) in line.iter().enumerate() {
+                    let col = ((fc0 - dx) as usize + c) / f as usize;
+                    let cell = row * w as usize + col;
+                    if v.is_finite()
+                        && let (Some(s), Some(n)) = (sum.get_mut(cell), count.get_mut(cell))
+                    {
+                        *s += f64::from(*v) * k + o;
+                        *n += 1;
+                    }
+                }
+            }
+        }
+        let vals: Vec<f32> = sum.iter().zip(&count).map(|(s, n)| if *n > 0 { (s / f64::from(*n)) as f32 } else { f32::NAN }).collect();
+        let transform = rustgis_data::raster::GeoTransform {
+            origin_y: self.transform.origin_y + f64::from(top) * self.transform.pixel_height,
+            ..self.transform
+        };
+        let r = rustgis_data::raster::Raster::new(
+            &self.label,
+            w,
+            h,
+            vec![vals],
+            transform,
+            self.crs,
+            None,
+            rustgis_data::raster::ColorHint::Gray,
+            "Float32",
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Some((std::sync::Arc::new(r), 0)))
+    }
+}
+
 /// `stac.addCube` (opengeos/RustGIS#559): a STAC collection's band as a data cube on the time
 /// slider. The items found are grouped by the grid tile they cover (the tile their properties
 /// name, else their bounding box) and by day; each tile becomes a tile layer that reads a file
@@ -255,36 +720,6 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let api = stac::api(ps(p, "url"))?;
-        if stac::catalog::is_static(&api) {
-            return Err("a data cube needs a STAC API's search; a static catalog can't be searched".into());
-        }
-        let collection = ps(p, "collection").map(str::trim).filter(|c| !c.is_empty()).ok_or("collection is required")?;
-        let asset = ps(p, "asset").map(str::trim).filter(|a| !a.is_empty()).ok_or("asset is required (a band, such as NDVI)")?;
-        let date = |k: &str| {
-            p.get(k)
-                .and_then(rustgis_data::time::parse_input)
-                .ok_or_else(|| format!("{k} is a date (2024-06-01, a year, or milliseconds since 1970)"))
-        };
-        let (start, mut end) = (date("start")?, date("end")?);
-        // An end given as a year or a month is the end of it: "end": "2024" takes all of 2024.
-        let given = p.get("end").map(|v| v.as_str().map_or_else(|| v.to_string(), |s| s.trim().to_string())).unwrap_or_default();
-        let digits = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit());
-        let next = match given.split_once('-') {
-            None if given.len() == 4 && digits(&given) => given.parse::<i32>().ok().map(|y| format!("{}-01-01", y + 1)),
-            Some((y, m)) if y.len() == 4 && m.len() == 2 && digits(y) && digits(m) => match (y.parse::<i32>(), m.parse::<u32>()) {
-                (Ok(y), Ok(12)) => Some(format!("{}-01-01", y + 1)),
-                (Ok(y), Ok(m)) if (1..12).contains(&m) => Some(format!("{y:04}-{:02}-01", m + 1)),
-                _ => None,
-            },
-            _ => None,
-        };
-        if let Some(after) = next.and_then(|n| rustgis_data::time::parse_text(&n)) {
-            end = after - 86_400_000.0;
-        }
-        if end < start {
-            return Err("end is before start".into());
-        }
         let range = match p.get("range").filter(|v| !v.is_null()) {
             None => None,
             Some(v) => {
@@ -297,103 +732,8 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 }
             }
         };
-        let day = |ms: f64| rustgis_data::time::format(ms, "YYYY-MM-DD");
-        // RFC 3339, as STAC asks: the whole of the last day included.
-        let mut q =
-            json!({"collections": collection, "datetime": format!("{}T00:00:00Z/{}T23:59:59Z", day(start), day(end)), "limit": 200});
-        for k in ["bbox", "maxCloud"] {
-            if let Some(v) = p.get(k).filter(|v| !v.is_null()) {
-                q[k] = v.clone();
-            }
-        }
-        if q.get("bbox").is_none() {
-            q["bbox"] = json!("view");
-        }
-        let search = search_params(s, &q)?;
-        // Every page of the search, up to the cap.
-        let mut items: Vec<Item> = Vec::new();
-        // An empty page, or a next link back to a page already read, ends it; so does the page cap.
-        let mut next = Some(stac::search_url(&api, &search)?);
-        let mut read: Vec<String> = Vec::new();
-        // Pages are read from the API's own host: a next link elsewhere ends the search.
-        // Scheme, user part, host and port compared: `https://host:443`, never another host or http.
-        let host = |u: &str| {
-            u.split_once("://").map(|(scheme, r)| {
-                let authority = r.split(['/', '?', '#']).next().unwrap_or("");
-                let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h).to_ascii_lowercase();
-                let scheme = scheme.to_ascii_lowercase();
-                // The scheme's own port written out is the same host.
-                let default = if scheme == "https" { ":443" } else { ":80" };
-                format!("{scheme}://{}", host.strip_suffix(default).unwrap_or(&host))
-            })
-        };
-        // An address with no scheme has no host to match: a next link is never taken on it.
-        let api_host = host(&api);
-        while let Some(url) = next.take() {
-            if read.contains(&url) || (!read.is_empty() && (api_host.is_none() || host(&url) != api_host)) {
-                break;
-            }
-            if read.len() >= MAX_CUBE_PAGES {
-                return Err(format!("more than {MAX_CUBE_PAGES} pages of results: take a shorter period or a smaller area"));
-            }
-            let bytes = crate::render::rustgis_tiles::cache::download_blocking(&url)?;
-            let (page, more) = stac::parse_items(&bytes, &url)?;
-            read.push(url);
-            if page.is_empty() {
-                break;
-            }
-            items.extend(page);
-            if items.len() > MAX_CUBE_ITEMS {
-                return Err(format!("more than {MAX_CUBE_ITEMS} items: take a shorter period or a smaller area"));
-            }
-            next = more;
-        }
-        if items.is_empty() {
-            return Err(format!("no item of {collection} in the area and period"));
-        }
-        // By tile, then by day: the first item found for a tile and day (the search's order).
-        let mut tiles: std::collections::BTreeMap<String, std::collections::BTreeMap<i64, String>> = Default::default();
-        let mut scale: Option<(f64, f64)> = None;
-        let mut scales_differ = false;
-        let mut duplicates = 0usize;
-        let mut without = 0usize;
-        for i in &items {
-            let Some(ms) = rustgis_data::time::parse_text(&i.datetime) else {
-                without += 1;
-                continue;
-            };
-            let Some(a) = i.assets.iter().find(|a| a.key.eq_ignore_ascii_case(asset)) else {
-                without += 1;
-                continue;
-            };
-            let key = i.tile.clone().unwrap_or_else(|| match i.bbox {
-                Some([w, so, e, n]) => format!("{w:.2},{so:.2},{e:.2},{n:.2}"),
-                None => i.id.clone(),
-            });
-            let d = (ms / 86_400_000.0).floor() as i64;
-            let by_day = tiles.entry(key).or_default();
-            if by_day.contains_key(&d) {
-                // A tile and day already have a file; this one is left out (and counted), its scale too.
-                duplicates += 1;
-                continue;
-            }
-            // The file's address without a fragment of its own, so the range look is the only one.
-            by_day.insert(d, a.href.split('#').next().unwrap_or(&a.href).to_string());
-            // No scale or offset in the metadata reads as 1 and 0, the values as stored.
-            let this = (a.scale.unwrap_or(1.0), a.offset.unwrap_or(0.0));
-            scales_differ |= scale.is_some_and(|s| s != this);
-            scale.get_or_insert(this);
-        }
-        if tiles.is_empty() {
-            return Err(format!("no item of {collection} has an asset {asset}"));
-        }
-        // Files reached through signed addresses (Planetary Computer's) expire within hours, so a
-        // cube of them couldn't be kept in a project or read a day later.
-        if tiles.values().flat_map(|by_day| by_day.values()).any(|href| stac::needs_signing(href)) {
-            return Err(format!(
-                "{collection}'s files are reached through signed addresses that expire, so they can't make a data cube kept in the project: use an API with public files (Earth Search, the Brazil Data Cube)"
-            ));
-        }
+        let CubeFiles { tiles, scale, scales: _, items, named_tiles, without, duplicates, scales_differ, collection, asset } =
+            cube_files(s, p)?;
         // One range can't hold if the files store their values alike no longer (a processing
         // change of scale or offset partway).
         if range.is_some() && scales_differ {
@@ -435,7 +775,7 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         let room = rustgis_map::tiles::MAX_TILE_LAYERS.saturating_sub(s.map().tiles.len());
         if tiles.len() > room {
             // Items naming no grid tile are told apart by footprint, which can differ scene by scene.
-            let why = if items.iter().all(|i| i.tile.is_none()) {
+            let why = if !named_tiles {
                 format!("{collection}'s items name no grid tile, so each footprint counts as one")
             } else {
                 "take a smaller area".to_string()
@@ -529,7 +869,7 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
             undo(s);
             return Err(e);
         }
-        let mut out = json!({"items": items.len(), "tiles": tiles.len(), "dates": dates.len(), "layers": added.len()});
+        let mut out = json!({"items": items, "tiles": tiles.len(), "dates": dates.len(), "layers": added.len()});
         if without > 0 {
             out["skipped"] = json!(without);
         }
@@ -537,5 +877,37 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
             out["duplicates"] = json!(duplicates);
         }
         Ok(out)
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use rustgis_data::raster::GeoTransform;
+
+    /// A piece's rows: as many as fit, whole tiles of rows when one fits, at least one; none when
+    /// a single row is too many. Piauí at ~1 km over 25 years of 16-day composites (645 × 984
+    /// cells, 576 dates) takes about a sixth of the rows a piece.
+    #[test]
+    fn pieces_fit_a_block_in_whole_tiles() {
+        assert_eq!(super::piece_rows(512, 512, 6, 256, 512 * 300 * 6), Some(256));
+        assert_eq!(super::piece_rows(512, 512, 6, 256, 512 * 600 * 6), Some(512), "never more than the area's rows");
+        assert_eq!(super::piece_rows(512, 512, 6, 256, 512 * 100 * 6), Some(100), "fewer than a tile's rows: as many as fit");
+        assert_eq!(super::piece_rows(512, 512, 6, 256, 100), None);
+        let rows = super::piece_rows(645, 984, 576, 512, crate::cmd::cube::MAX_VALUES).unwrap();
+        assert!(rows < 984 && (rows.is_multiple_of(512) || rows < 512), "{rows}");
+        assert_eq!(984u32.div_ceil(rows), 6);
+    }
+
+    /// Grids on one lattice of pixels line up by whole pixels (MODIS's tiles on its sinusoidal
+    /// grid); another pixel size, or corners a fraction of a pixel apart, don't.
+    #[test]
+    fn files_line_up_on_one_grid() {
+        let file = GeoTransform { origin_x: -5559752.598, origin_y: 0.0, pixel_width: 926.625433, pixel_height: -926.625433 };
+        let grid = GeoTransform { origin_x: file.origin_x + 10.0 * 926.625433, origin_y: -3.0 * 926.625433, ..file };
+        assert_eq!(super::offset_in(&grid, &file), Some((10, 3)));
+        let above = GeoTransform { origin_y: 2.0 * 926.625433, ..grid };
+        assert_eq!(super::offset_in(&above, &file), Some((10, -2)), "a grid above the file starts before its first row");
+        assert_eq!(super::offset_in(&GeoTransform { origin_x: grid.origin_x + 400.0, ..grid }, &file), None);
+        assert_eq!(super::offset_in(&GeoTransform { pixel_width: 463.3, ..grid }, &file), None);
     }
 }

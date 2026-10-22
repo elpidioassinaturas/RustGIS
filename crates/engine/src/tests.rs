@@ -7245,6 +7245,108 @@ fn a_stac_data_cube_on_the_time_slider() {
     assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
 }
 
+/// A trend over a STAC collection's band (#579), read in place from its files over an area: each
+/// date's values scaled as its own metadata says (here date k's scale is k + 1 ten-thousandths,
+/// so every cell grows in a straight line), Sen's slope as worked out by hand; the same outputs
+/// read whole or in pieces of rows; a coarser cell size read from the files' overviews; and the
+/// requests a trend can't take refused.
+#[test]
+fn a_trend_over_a_stac_collection() {
+    use crate::cmd::stac::PIECE_VALUES;
+    let (cog, _) = serve_ranges(rustgis_data::raster::cog::example(512, 256));
+    let dates = ["2024-01-01", "2024-01-17", "2024-02-02", "2024-02-18", "2024-03-05", "2024-03-21"];
+    let features: Vec<String> = dates
+        .iter()
+        .enumerate()
+        .map(|(k, d)| {
+            format!(
+                r#"{{"type": "Feature", "id": "n{k}", "collection": "mod", "bbox": [10, 45, 11, 46], "geometry": null,
+                   "properties": {{"datetime": "{d}T00:00:00Z", "bdc:tiles": ["h13v09"]}},
+                   "assets": {{"NDVI": {{"href": "{cog}/n{k}.tif", "eo:bands": [{{"scale": {}}}]}}}}}}"#,
+                (k + 1) as f64 * 1e-4
+            )
+        })
+        .collect();
+    let search = format!(r#"{{"type": "FeatureCollection", "features": [{}]}}"#, features.join(","));
+    let base = serve_routes(vec![("/v1/search", search)], 16);
+    let api = format!("{base}/v1");
+    let params = json!({"url": api, "collection": "mod", "asset": "NDVI", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-03", "test": "original"});
+    let mut s = Session::new(Project::default());
+    let run = |s: &mut Session, p: &Value| {
+        let r = s.run("cube.trend", p).unwrap();
+        let ids: Vec<u32> = r["layers"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
+        let raster = |id: u32| s.map().layer(id).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+        (r["dates"].as_u64(), ids.iter().map(|id| raster(*id)).collect::<Vec<_>>())
+    };
+    let (n, whole) = run(&mut s, &params);
+    assert_eq!(n, Some(6));
+    let slope = &whole[0];
+    assert_eq!((slope.width, slope.height), (512, 512), "the area on the full images' grid");
+    // Pixel (x, y) stores (x + y) % 256; its value grows by that many ten-thousandths a date, 16
+    // days apart.
+    let per_year = |x: usize, y: usize| ((x + y) % 256) as f64 * 1e-4 * 365.2425 / 16.0;
+    for (x, y) in [(10, 20), (300, 100), (0, 0), (511, 511)] {
+        let got = f64::from(slope.bands[0].data[y * 512 + x]);
+        assert!((got - per_year(x, y)).abs() < 1e-4, "({x}, {y}): {got} vs {}", per_year(x, y));
+    }
+    // A straight rise over six dates is significant; a flat cell (0, 0) isn't.
+    assert!(whole[3].bands[0].data[20 * 512 + 10].is_finite() && whole[3].bands[0].data[0].is_nan());
+    // Read in two pieces (a quarter of the rows' values each would make four; 256-row tiles make
+    // it two), the outputs are the same, cell for cell.
+    PIECE_VALUES.with(|v| v.set(Some(512 * 300 * 6)));
+    let (_, pieces) = run(&mut s, &params);
+    PIECE_VALUES.with(|v| v.set(None));
+    for (a, b) in whole.iter().zip(&pieces) {
+        assert_eq!((a.width, a.height), (b.width, b.height));
+        assert!(a.bands[0].data.iter().zip(&b.bands[0].data).all(|(x, y)| x == y || (x.is_nan() && y.is_nan())), "{}", a.name);
+        assert!(crate::cmd::cube::same_grid(&a.transform, &b.transform));
+    }
+    // A row too wide for a piece is said.
+    PIECE_VALUES.with(|v| v.set(Some(100)));
+    let e = s.run("cube.trend", &params).unwrap_err();
+    PIECE_VALUES.with(|v| v.set(None));
+    assert!(e.contains("more than a run's block"), "{e}");
+    // A coarser cell size reads the overview nearest it: 256 × 256 cells of 1/256°.
+    let mut coarse = params.clone();
+    coarse["cellSize"] = json!(0.004);
+    let (_, half) = run(&mut s, &coarse);
+    assert_eq!((half[0].width, half[0].height), (256, 256));
+    // Averaged, each 1/256° cell is the mean of its 2 × 2 full pixels, (2x + 2y + 1) where the
+    // overview's (nearest) pixel is 2x + 2y.
+    coarse["resampling"] = json!("average");
+    let (_, mean) = run(&mut s, &coarse);
+    assert_eq!((mean[0].width, mean[0].height), (256, 256));
+    for (x, y) in [(5, 7), (30, 40)] {
+        let (near, avg) = (f64::from(half[0].bands[0].data[y * 256 + x]), f64::from(mean[0].bands[0].data[y * 256 + x]));
+        let unit = 1e-4 * 365.2425 / 16.0;
+        assert!((near - (2 * x + 2 * y) as f64 * unit).abs() < 1e-4, "nearest ({x}, {y}): {near}");
+        assert!((avg - (2 * x + 2 * y + 1) as f64 * unit).abs() < 1e-4, "average ({x}, {y}): {avg}");
+    }
+    coarse["resampling"] = json!("bilinear");
+    assert!(s.run("cube.trend", &coarse).unwrap_err().contains("resampling"));
+    coarse["resampling"] = Value::Null;
+    // The level nearest the size asked: 0.0025 is nearer the full images' 1/512° than 1/256°.
+    coarse["cellSize"] = json!(0.0025);
+    assert_eq!(run(&mut s, &coarse).1[0].width, 512);
+    // What can't be read is refused before anything is added.
+    let layers = s.map().layers.len();
+    for (bad, said) in [
+        (json!({"cellSize": -1}), "cellSize"),
+        (json!({"cellSize": "fine"}), "cellSize"),
+        (json!({"bbox": [11, 45, 10, 46]}), "bbox"),
+        (json!({"asset": null}), "asset"),
+        (json!({"bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-20"}), "dates"),
+    ] {
+        let mut p = params.clone();
+        for (k, v) in bad.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        let e = s.run("cube.trend", &p).unwrap_err();
+        assert!(e.contains(said), "{bad}: {e}");
+    }
+    assert_eq!(s.map().layers.len(), layers);
+}
+
 /// A cloud-optimised GeoTIFF by its address is read in place: its header, then only the tiles a
 /// map tile needs, by range; a GeoTIFF in strips is downloaded whole as a raster layer.
 #[test]

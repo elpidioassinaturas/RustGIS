@@ -1045,6 +1045,71 @@ pub fn probe(url: &str, then: Box<dyn FnOnce(Result<bool, String>) + Send>) {
     );
 }
 
+/// The most tiles of a file one read of values takes.
+#[cfg(not(target_arch = "wasm32"))]
+pub const MAX_VALUE_TILES: usize = 4096;
+
+/// A file's header, waiting for it: for an analysis that reads the values (opengeos/RustGIS#579).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn info_blocking(url: &str) -> Result<Arc<Info>, String> {
+    let url = split(url).0;
+    let (tx, rx) = std::sync::mpsc::channel();
+    with_info(url, Box::new(move |r| tx.send(r).unwrap_or_default()));
+    rx.recv_timeout(Duration::from_secs(120)).map_err(|_| format!("{url}: no answer in two minutes"))?
+}
+
+/// Band `band`'s values (0-based) in a window of a level: columns `cols.0..cols.1` and rows
+/// `rows.0..rows.1` of that level's grid, row by row, waiting for the tiles. No-data, and the
+/// window's pixels outside the file, are NaN. The values are as stored (no scale or offset).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_values_blocking(
+    info: &Arc<Info>,
+    url: &str,
+    level: usize,
+    band: usize,
+    cols: (u32, u32),
+    rows: (u32, u32),
+) -> Result<Vec<f32>, String> {
+    let url = split(url).0.to_string();
+    let l = info.layout.levels.get(level).ok_or("no such overview")?;
+    if band >= info.layout.bands.max(1) {
+        return Err(format!("the file has {} band(s)", info.layout.bands));
+    }
+    let (w, h) = (cols.1.saturating_sub(cols.0) as usize, rows.1.saturating_sub(rows.0) as usize);
+    let mut out = vec![f32::NAN; w.checked_mul(h).ok_or("the window is too large")?];
+    // The part of the window inside the file.
+    let (x0, x1) = (cols.0.min(l.width), cols.1.min(l.width));
+    let (y0, y1) = (rows.0.min(l.height), rows.1.min(l.height));
+    if x1 <= x0 || y1 <= y0 {
+        return Ok(out);
+    }
+    let (tw, th) = (l.tile_width.max(1), l.tile_height.max(1));
+    let tiles: Vec<u32> = (y0 / th..=(y1 - 1) / th).flat_map(|ty| (x0 / tw..=(x1 - 1) / tw).map(move |tx| ty * l.across() + tx)).collect();
+    if tiles.len() > MAX_VALUE_TILES {
+        return Err(format!(
+            "{} tiles of the file for one read; at most {MAX_VALUE_TILES}: take a coarser level or a smaller area",
+            tiles.len()
+        ));
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    fetch_bands(info.clone(), url.clone(), level, tiles.clone(), vec![band], Box::new(move |r| tx.send(r).unwrap_or_default()));
+    let picked = rx.recv_timeout(Duration::from_secs(600)).map_err(|_| format!("{url}: tiles not read in ten minutes"))??;
+    let nodata = info.layout.nodata.map(|v| v as f32);
+    for (&t, p) in tiles.iter().zip(&picked) {
+        let Some(values) = p.first().and_then(|(chunk, i)| chunk.get(*i)) else { continue };
+        let (tx0, ty0) = ((t % l.across()) * tw, (t / l.across()) * th);
+        for py in ty0.max(y0)..(ty0 + th).min(y1) {
+            for px in tx0.max(x0)..(tx0 + tw).min(x1) {
+                let Some(&v) = values.get(((py - ty0) * tw + (px - tx0)) as usize) else { continue };
+                if v.is_finite() && Some(v) != nodata {
+                    out[(py - rows.0) as usize * w + (px - cols.0) as usize] = v;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

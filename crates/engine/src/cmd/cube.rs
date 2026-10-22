@@ -22,7 +22,7 @@ use crate::{CmdResult, CommandSpec as C, Session};
 
 pub fn commands() -> Vec<C> {
     vec![C::new("cube.trend", "Trend Analysis", "Analyze › Image Analysis", trend_cmd).params(
-        r#"{"layers"?: [raster layers, a date each] | "layer"?: a Zarr layer (or "path" | "url", "variable", "index", "crs" as for zarr.reduce) or a raster of several bands, a date each (default: the active layer), "band"?: 1-based (a stack's band), "dates"?: [dates] (a stack's or the bands' dates, in their order; default: read from the layers' names or files, or the bands' names), "start"?, "end"?: dates, "months"?: [1–12] (one season across years), "test"?: "hamedRao" (default) | "yueWang" | "seasonal" | "original", "seasons"?: parts of a year for the seasonal test (default 12), "alpha"?: 0.05 (above 0, below 0.5), "minValid"?: dates a cell needs (default: half of them, at least 4; the seasonal test also needs 4 in seasons of two or more), "per"?: "year" (default) | "decade", "name"?: text, "ran"?: (internal: a trend the app has worked out)} → four raster layers: Sen's slope, the test's Z and p-value, and the slope where p < alpha"#,
+        r#"{"layers"?: [raster layers, a date each] | "layer"?: a Zarr layer (or "path" | "url", "variable", "index", "crs" as for zarr.reduce) or a raster of several bands, a date each (default: the active layer) | "collection": a STAC collection (desktop: "url"?: its API, "asset": a band, "bbox"?: [w, s, e, n] | "view", "start", "end", "maxCloud"? as for stac.addCube, "cellSize"?: in the files' units, the overview level nearest it is read, "resampling"?: "nearest" (default: that overview's pixels as stored) | "average" (each cell the mean of the full images' pixels in it, which reads them); a large area is read in pieces), "band"?: 1-based (a stack's band), "dates"?: [dates] (a stack's or the bands' dates, in their order; default: read from the layers' names or files, or the bands' names), "start"?, "end"?: dates (an end given as a year or a month takes all of it), "months"?: [1–12] (one season across years), "test"?: "hamedRao" (default) | "yueWang" | "seasonal" | "original", "seasons"?: parts of a year for the seasonal test (default 12), "alpha"?: 0.05 (above 0, below 0.5), "minValid"?: dates a cell needs (default: half of them, at least 4; the seasonal test also needs 4 in seasons of two or more), "per"?: "year" (default) | "decade", "name"?: text, "ran"?: (internal: a trend the app has worked out)} → four raster layers: Sen's slope, the test's Z and p-value, and the slope where p < alpha"#,
     )]
 }
 
@@ -56,6 +56,26 @@ pub trait TimeCube: Send + Sync {
     /// The steps taken when no period is asked for (a following Zarr layer's), as a range.
     fn period(&self) -> (usize, usize) {
         (0, self.dates().len())
+    }
+    /// The pieces it is read in, each a band of rows of the whole grid from the top: one for a cube
+    /// read whole. A cube too large for one block of [`MAX_VALUES`] (a STAC collection over a
+    /// state) is worked out piece by piece, each within it.
+    fn pieces(&self) -> usize {
+        1
+    }
+    /// Date `i`'s slice, piece `piece` of it (the whole slice for a cube read whole).
+    fn slice_of(&self, i: usize, piece: usize) -> Result<Option<(Arc<Raster>, usize)>, String> {
+        let _ = piece;
+        self.slice(i)
+    }
+    /// The whole grid's columns and rows, when known before any slice is read (a STAC cube's area),
+    /// so a run too long is refused before it reads.
+    fn size(&self) -> Option<(usize, usize)> {
+        None
+    }
+    /// How many dates are read at once: files read over the network wait mostly on it.
+    fn readers(&self) -> usize {
+        1
     }
 }
 
@@ -255,6 +275,13 @@ pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
         return Ok(Box::new(Stack::new(items, common_label(&label))));
     }
     let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
+    // A STAC collection's band, read from its files over an area (#579): named by its collection.
+    if given("collection") {
+        #[cfg(target_arch = "wasm32")]
+        return Err("in the web app, a STAC collection's trend can't be worked out yet (the desktop app can)".into());
+        #[cfg(not(target_arch = "wasm32"))]
+        return Ok(Box::new(super::stac::stac_cube(s, p)?));
+    }
     let zarr_layer = !given("path") && !given("url") && {
         let id = s.layer_id(p)?;
         // A Zarr layer: one following the slider, or a slice, named by its steps (`t2m[time=3]`);
@@ -378,7 +405,13 @@ pub fn steps(dates: &[f64], period: (usize, usize), p: &Value) -> Result<Vec<usi
         }
     };
     let months = months(p)?;
-    let (start, end) = (date("start")?, date("end")?);
+    // An end given as a year or a month takes all of it, as a STAC search's does: "end": "2024"
+    // keeps 2024's last dates.
+    let end = match p.get("end").filter(|v| !v.is_null()).and_then(super::stac::period_after) {
+        Some(after) => Some(after - 1.0),
+        None => date("end")?,
+    };
+    let start = date("start")?;
     let (lo, hi) = match (start, end) {
         (None, None) => (period.0.min(dates.len()), period.1.min(dates.len())),
         _ => (0, dates.len()),
@@ -435,10 +468,26 @@ pub struct TrendRun {
 }
 
 impl TrendRun {
-    /// The work, for a progress bar: the slices read, then the cells worked out, in
-    /// [`CELL_PARTS`] parts.
+    /// The work, for a progress bar: the slices read (every piece's), then the cells worked out,
+    /// in [`CELL_PARTS`] parts.
     pub fn total(&self) -> usize {
-        self.steps.len() + CELL_PARTS
+        self.steps.len() * self.cube.pieces().max(1) + CELL_PARTS
+    }
+
+    /// The pairs of dates one cell compares: all of them, or for the seasonal test only those of
+    /// a season (`seasons`, a step's season each), which is what bounds its time.
+    fn pairs_per_cell(&self, seasons: &[usize]) -> u64 {
+        let n = self.steps.len() as u64;
+        match self.test {
+            Test::Seasonal(_) => {
+                let mut by: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
+                for s in seasons {
+                    *by.entry(*s).or_default() += 1;
+                }
+                by.values().map(|k| k * k.saturating_sub(1) / 2).sum()
+            }
+            _ => n * n.saturating_sub(1) / 2,
+        }
     }
 
     /// How many dates it reads.
@@ -447,21 +496,95 @@ impl TrendRun {
     }
 
     /// Reads the slices into one block, cell by date, then works each cell's trend out on as
-    /// many threads as there are cores. `done` counts the slices read, and the last unit once
-    /// the cells are done; `cancel` stops it between slices or rows.
+    /// many threads as there are cores; a cube read in pieces ([`TimeCube::pieces`]) does so piece
+    /// by piece, the outputs put together row by row. `done` counts the slices read, and the last
+    /// unit once the cells are done; `cancel` stops it between slices or rows.
     pub fn run(&self, cancel: &AtomicBool, done: &AtomicUsize) -> Result<Vec<Raster>, String> {
+        let n = self.steps.len();
+        // Times in the slope's unit.
+        let year = 365.2425 * 86_400_000.0 * self.per;
+        let date = |i: usize| self.cube.dates().get(i).copied().unwrap_or(f64::NAN);
+        let times: Vec<f64> = self.steps.iter().map(|i| date(*i) / year).collect();
+        // The seasonal test's seasons, from each date's place in its calendar year.
+        let seasons: Vec<usize> = match self.test {
+            Test::Seasonal(m) => self.steps.iter().map(|i| season_of(date(*i), m)).collect(),
+            _ => Vec::new(),
+        };
+        let per_cell = self.pairs_per_cell(&seasons);
+        let too_long = |cells: usize| {
+            let pairs = (cells as u64).saturating_mul(per_cell);
+            (pairs > self.max_pairs).then(|| {
+                let how = if self.max_pairs < MAX_PAIRS { " (or run it from the Workflows pane, which can take more)" } else { "" };
+                format!("{cells} cells × {n} dates is too long a run: take a smaller area, a coarser cell size or fewer dates{how}")
+            })
+        };
+        // A cube that knows its size is refused before it reads anything.
+        let whole = self.cube.size().map(|(w, h)| w.saturating_mul(h));
+        if let Some(e) = whole.and_then(too_long) {
+            return Err(e);
+        }
+        let need = self.min_valid.unwrap_or((n / 2).max(trend::MIN_VALUES)).max(trend::MIN_VALUES);
+        let mut first_piece: Option<Arc<Raster>> = None;
+        let mut rows = 0usize;
+        let mut out: Vec<f32> = Vec::new();
+        for piece in 0..self.cube.pieces().max(1) {
+            let (grid, block, cells) = self.read_piece(piece, cancel, done, whole.is_none().then_some(&too_long))?;
+            if let Some(f) = &first_piece
+                && (f.width, f.crs) != (grid.width, grid.crs)
+            {
+                return Err("the cube's pieces aren't one grid".into());
+            }
+            // Progress through all the cells: a part of the bar every `tick` cells.
+            let tick = whole.unwrap_or(cells).div_ceil(CELL_PARTS).max(1);
+            let part = self.work_out(&block, cells, out.len() / OUTPUTS, tick, need, &times, &seasons, cancel, done)?;
+            // The values are read: their block goes before the next piece's is read.
+            drop(block);
+            out.extend(part);
+            rows += grid.height as usize;
+            first_piece.get_or_insert(grid);
+        }
+        let grid = first_piece.ok_or("no date to read")?;
+        done.store(self.total(), Ordering::Relaxed);
+        let unit = if self.per == 10.0 { "decade" } else { "year" };
+        let names = [
+            format!("{} Sen slope per {unit}", self.name),
+            format!("{} Z ({})", self.name, self.test.code()),
+            format!("{} p-value ({})", self.name, self.test.code()),
+            format!("{} significant slope per {unit} (p < {})", self.name, self.alpha),
+        ];
+        let height = u32::try_from(rows).map_err(|_| "too many rows")?;
+        names
+            .into_iter()
+            .enumerate()
+            .map(|(k, name)| {
+                let band: Vec<f32> = out.chunks(OUTPUTS).map(|o| o.get(k).copied().unwrap_or(f32::NAN)).collect();
+                Raster::new(name, grid.width, height, vec![band], grid.transform, grid.crs, None, raster::ColorHint::Gray, "Float32")
+                    .map_err(|e| e.to_string())
+            })
+            .collect()
+    }
+
+    /// One piece's slices read into a block, cell by date: the piece's first slice (its grid), the
+    /// block, and its cells. Dates are read [`TimeCube::readers`] at a time; `too_long` checks the
+    /// run's length on the first slice when the cube didn't know its size.
+    #[allow(clippy::type_complexity)]
+    fn read_piece(
+        &self,
+        piece: usize,
+        cancel: &AtomicBool,
+        done: &AtomicUsize,
+        too_long: Option<&dyn Fn(usize) -> Option<String>>,
+    ) -> Result<(Arc<Raster>, Vec<f32>, usize), String> {
         let n = self.steps.len();
         let mut grid: Option<Arc<Raster>> = None;
         let mut block: Vec<f32> = Vec::new();
         let mut cells = 0usize;
-        for (k, &i) in self.steps.iter().enumerate() {
-            if cancel.load(Ordering::Relaxed) {
-                return Err("cancelled".into());
-            }
-            // A date with nothing written leaves its cells without a value (the block starts empty).
-            let Some((r, b)) = self.cube.slice(i)? else {
+        // Step `k`'s slice put in the block (a date with nothing written leaves its cells empty).
+        let mut place = |k: usize, slice: Option<(Arc<Raster>, usize)>| -> Result<(), String> {
+            let i = self.steps.get(k).copied().unwrap_or(0);
+            let Some((r, b)) = slice else {
                 done.fetch_add(1, Ordering::Relaxed);
-                continue;
+                return Ok(());
             };
             let vals = &r.bands.get(b).ok_or("the slice has no such band")?.data;
             match &grid {
@@ -473,10 +596,8 @@ impl TrendRun {
                             "{cells} cells × {n} dates is {values} values, more than {MAX_VALUES}: take a smaller area or fewer dates"
                         ));
                     }
-                    let pairs = (cells as u64).saturating_mul((n * n.saturating_sub(1) / 2) as u64);
-                    if pairs > self.max_pairs {
-                        let how = if self.max_pairs < MAX_PAIRS { " (or run it from the Workflows pane, which can take more)" } else { "" };
-                        return Err(format!("{cells} cells × {n} dates is too long a run: take a smaller area or fewer dates{how}"));
+                    if let Some(e) = too_long.and_then(|f| f(cells)) {
+                        return Err(e);
                     }
                     block = vec![f32::NAN; cells * n];
                     grid = Some(r.clone());
@@ -503,27 +624,76 @@ impl TrendRun {
                 }
             }
             done.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        };
+        let readers = self.cube.readers().clamp(1, 16).min(n.max(1));
+        if readers == 1 {
+            for (k, &i) in self.steps.iter().enumerate() {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("cancelled".into());
+                }
+                place(k, self.cube.slice_of(i, piece)?)?;
+            }
+        } else {
+            // Several dates read at once, placed here as they come; a few wait at most, so the
+            // slices held stay a handful. An error (or Cancel) drops the receiver, which stops the
+            // readers at their next date.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let next = AtomicUsize::new(0);
+                std::thread::scope(|scope| -> Result<(), String> {
+                    type Read = Result<Option<(Arc<Raster>, usize)>, String>;
+                    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Read)>(readers);
+                    for _ in 0..readers {
+                        let (tx, next) = (tx.clone(), &next);
+                        scope.spawn(move || {
+                            loop {
+                                let k = next.fetch_add(1, Ordering::Relaxed);
+                                let Some(&i) = self.steps.get(k) else { break };
+                                if cancel.load(Ordering::Relaxed) || tx.send((k, self.cube.slice_of(i, piece))).is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                    drop(tx);
+                    for (k, read) in rx {
+                        if cancel.load(Ordering::Relaxed) {
+                            return Err("cancelled".into());
+                        }
+                        place(k, read?)?;
+                    }
+                    Ok(())
+                })?;
+            }
         }
         let grid = grid.ok_or("no date to read")?;
-        // Times in the slope's unit.
-        let year = 365.2425 * 86_400_000.0 * self.per;
-        let date = |i: usize| self.cube.dates().get(i).copied().unwrap_or(f64::NAN);
-        let times: Vec<f64> = self.steps.iter().map(|i| date(*i) / year).collect();
-        // The seasonal test's seasons, from each date's place in its calendar year.
-        let seasons: Vec<usize> = match self.test {
-            Test::Seasonal(m) => self.steps.iter().map(|i| season_of(date(*i), m)).collect(),
-            _ => Vec::new(),
-        };
-        let need = self.min_valid.unwrap_or((n / 2).max(trend::MIN_VALUES)).max(trend::MIN_VALUES);
+        Ok((grid, block, cells))
+    }
+
+    /// Each cell's trend in `block` (cells × dates), worked out on as many threads as there are
+    /// cores: its four outputs a cell. `first` is the block's first cell among all of the run's,
+    /// so progress is counted over the whole grid.
+    #[allow(clippy::too_many_arguments)]
+    fn work_out(
+        &self,
+        block: &[f32],
+        cells: usize,
+        first: usize,
+        tick: usize,
+        need: usize,
+        times: &[f64],
+        seasons: &[usize],
+        cancel: &AtomicBool,
+        done: &AtomicUsize,
+    ) -> Result<Vec<f32>, String> {
+        let n = self.steps.len();
         let mut out = vec![f32::NAN; cells * OUTPUTS];
         let stopped = AtomicBool::new(false);
-        // A part of the cells, worked out in place.
         // Cancel is looked at after about the same work whatever the dates: a cell compares n²⁄2
         // pairs, so every 4096 cells for a short series, every cell for a long one.
         let every = (4_000_000 / (n * n).max(1)).clamp(1, 4096);
-        // Progress through the cells: a part of the bar every `tick` cells, on whichever thread.
-        let tick = cells.div_ceil(CELL_PARTS).max(1);
-        // `first`: the block's first cell among all of them, so the parts are counted over the
+        // `first`: the part's first cell among all of them, so the parts are counted over the
         // whole grid, not again from 0 on each thread.
         let work = |first: usize, block: &[f32], out: &mut [f32]| {
             let mut ys = vec![0.0f64; n];
@@ -544,8 +714,8 @@ impl TrendRun {
                     continue;
                 }
                 let found = match self.test {
-                    Test::Seasonal(_) => trend::trend_seasonal_with(&times, &ys, &seasons, self.alpha, &mut slopes),
-                    test => trend::trend_with(&times, &ys, test, self.alpha, &mut slopes),
+                    Test::Seasonal(_) => trend::trend_seasonal_with(times, &ys, seasons, self.alpha, &mut slopes),
+                    test => trend::trend_with(times, &ys, test, self.alpha, &mut slopes),
                 };
                 if let Some(t) = found
                     && let [slope, z, p, significant, ..] = o
@@ -566,34 +736,16 @@ impl TrendRun {
             std::thread::scope(|scope| {
                 for (k, (block, out)) in block.chunks(part * n).zip(out.chunks_mut(part * OUTPUTS)).enumerate() {
                     let work = &work;
-                    scope.spawn(move || work(k * part, block, out));
+                    scope.spawn(move || work(first + k * part, block, out));
                 }
             });
         }
         #[cfg(target_arch = "wasm32")]
-        work(0, &block, &mut out);
+        work(first, block, &mut out);
         if stopped.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        // The values are read: their block goes before the outputs are made from `out`.
-        drop(block);
-        done.store(self.total(), Ordering::Relaxed);
-        let unit = if self.per == 10.0 { "decade" } else { "year" };
-        let names = [
-            format!("{} Sen slope per {unit}", self.name),
-            format!("{} Z ({})", self.name, self.test.code()),
-            format!("{} p-value ({})", self.name, self.test.code()),
-            format!("{} significant slope per {unit} (p < {})", self.name, self.alpha),
-        ];
-        names
-            .into_iter()
-            .enumerate()
-            .map(|(k, name)| {
-                let band: Vec<f32> = out.chunks(OUTPUTS).map(|o| o.get(k).copied().unwrap_or(f32::NAN)).collect();
-                Raster::new(name, grid.width, grid.height, vec![band], grid.transform, grid.crs, None, raster::ColorHint::Gray, "Float32")
-                    .map_err(|e| e.to_string())
-            })
-            .collect()
+        Ok(out)
     }
 }
 

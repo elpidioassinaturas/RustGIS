@@ -92,6 +92,9 @@ and band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentin
 - **Saved with the project:** each tile's dates and addresses.
 - **Web app:** a server that doesn't allow the browser to fetch its files (CORS), as the Brazil Data
   Cube's doesn't, works on the desktop only.
+- **Its trend:** the same search, given to Trend Analysis (`cube.trend` with `collection`,
+  `asset`, `bbox`, `start` and `end`), reads the values over the area and works out each cell's
+  trend: see [Trend analysis](analysis.md#trend-analysis).
 
 ```sh
 rustgis-cli run --cmd 'stac.addCube={"url":"https://data.inpe.br/bdc/stac/v1","collection":"S2-16D-2","asset":"NDVI","bbox":[-55.9,-12.6,-55.5,-12.35],"start":"2024-08-01","end":"2025-06-30","range":[0,0.9]}' --cmd 'time.export={"path":"ndvi.gif"}'

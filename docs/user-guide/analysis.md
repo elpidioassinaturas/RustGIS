@@ -337,7 +337,18 @@ and a **Mann–Kendall** test of whether the trend is significant.
   - a Zarr variable along its time dimension, by its layer or its store, as for Summarise over time
     (see [Data](data.md)): `{"path": "air.zarr", "variable": "t2m"}`;
   - a raster of several bands, a date each, as Earth Engine and openEO export, dated by the bands'
-    names or `dates`.
+    names or `dates`;
+  - a STAC collection's band (desktop), read in place from its cloud-optimised GeoTIFFs over an
+    area, as Add as Time Series finds them (see [Web data](web-data.md)): `{"url":
+    "https://data.inpe.br/bdc/stac/v1", "collection": "mod13q1-6.1", "asset": "NDVI", "bbox": [-46,
+    -10.95, -40.35, -2.7], "start": "2001", "end": "2025"}`. Each date's files (a grid tile each,
+    MODIS's h13v09 and h13v10 for Piauí) are put together on one grid, each scaled as its own
+    metadata says (NDVI's 0.0001). `"cellSize"` reads the level of the files' overviews nearest
+    it (`1000` reads MODIS's 926 m one), which reads far fewer bytes; by default the full images.
+    An overview is often one pixel taken from each block (the Brazil Data Cube's are), so a cell is
+    then one 250 m pixel, which can differ much from the place's mean; `"resampling": "average"`
+    makes each cell the mean of the full images' pixels in it, reading those (16 times the bytes
+    at 1 km from 250 m).
 
   The rasters have to be on one grid; put them on one first with Raster Functions › Resample.
 - **The test:** NDVI and temperature series are autocorrelated, which makes the plain test report
@@ -352,17 +363,24 @@ and a **Mann–Kendall** test of whether the trend is significant.
 
   The definitions follow `pymannkendall`'s, ties included.
 - **Options:** the significance level (`"alpha"`, 0.05), the slope per year or per decade (from the
-  real dates, so uneven spacing is handled), a period (`start`, `end`), a season across years
+  real dates, so uneven spacing is handled), a period (`start`, `end`; an end given as a year or a
+  month takes all of it), a season across years
   (`"months": [12, 1, 2]`), and the dates a cell needs (`"minValid"`, by default half of them, at
   least 4). Missing values and no-data are skipped cell by cell.
 - **Outputs:** four 32-bit layers, kept in the project as GeoTIFFs: Sen's slope, the test's Z, the
   p-value, and the slope where p < alpha (no-data elsewhere), the one a map usually shows on a
   diverging ramp centred on 0.
 - **Size:** the cube is read into memory a slice at a time, up to 64 million values (cells times
-  dates; 16 million in the web app) and 2,000 dates. It runs in the background with progress and Cancel.
+  dates; 16 million in the web app) and 2,000 dates. A STAC collection's area is read in **pieces**
+  instead, bands of rows each within that block (whole rows of the files' tiles where they fit),
+  eight dates at a time, and the outputs are put together: Piauí at about 1 km over 25 years of
+  16-day composites (645 × 984 cells × 576 dates) is six pieces. Its area is up to 25 million
+  cells. The seasonal test compares only pairs within a season, so its time limit counts those.
+  It runs in the background with progress and Cancel.
 
 ```sh
 rustgis-cli run --cmd 'cube.trend={"layers":["ndvi_2015","ndvi_2016","ndvi_2017","ndvi_2018"],"per":"decade"}'
+rustgis-cli run --cmd 'cube.trend={"url":"https://data.inpe.br/bdc/stac/v1","collection":"mod13q1-6.1","asset":"NDVI","bbox":[-46,-10.95,-40.35,-2.7],"start":"2001","end":"2025","cellSize":1000,"test":"seasonal","seasons":23,"per":"decade"}' --save piaui.rgis
 ```
 
 ## Deep learning and hosted imagery
