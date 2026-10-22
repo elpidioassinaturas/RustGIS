@@ -2421,7 +2421,8 @@ fn publication_layouts_fit_their_pages() {
     let l = s.project.layouts.last().unwrap();
     let heading = l.elements.iter().find(|e| e.name == "Reference Heading").unwrap();
     let ElementKind::Text { text, .. } = &heading.kind else { panic!() };
-    assert!(text.contains("WEB MERCATOR") && !text.contains('{') && text.lines().count() >= 2, "{text}");
+    // Where the wrap breaks depends on the font found, so the words are read across the lines.
+    assert!(text.replace('\n', " ").contains("WEB MERCATOR") && !text.contains('{') && text.lines().count() >= 2, "{text}");
     // A live token in a heading keeps its case, so the layout still fills it when it draws.
     let sources = l.elements.iter().find(|e| e.name == "Sources Heading").unwrap();
     let ElementKind::Text { text, .. } = &sources.kind else { panic!() };
