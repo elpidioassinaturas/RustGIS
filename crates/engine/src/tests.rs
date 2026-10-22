@@ -2388,6 +2388,12 @@ fn publication_layouts_fit_their_pages() {
     let ids = |m: &rustgis_map::Map| m.layers.iter().map(|l| (l.id, l.name.clone(), l.visible)).collect::<Vec<_>>();
     assert_eq!(ids(s.map()), ids(&map));
     assert_eq!((s.map().projection.code(), s.map().camera.center), (map.projection.code(), map.camera.center));
+    // A figure says it left out an author and headings given to it, as it does a title.
+    let r =
+        s.run("layout.publication", &json!({"profile": "figure-1col", "extent": piaui, "author": "Me", "headings": ["A", "B"]})).unwrap();
+    let said = r["warnings"].to_string();
+    assert!(said.contains("author goes") && said.contains("headings goes"), "{said}");
+    s.project.layouts.pop();
     // An empty author leaves the authorship out.
     for none in [json!(""), json!([]), json!(["  "])] {
         s.run("layout.publication", &json!({"extent": piaui, "author": none})).unwrap();

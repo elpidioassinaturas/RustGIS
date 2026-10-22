@@ -627,9 +627,16 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         (page_w, page_h, (x0, frame_top, iw, frame_bottom - frame_top))
     } else {
         // A figure: the map edge to edge, a line of the projection and datum under it.
-        for (field, given) in
-            [("title", title.is_some()), ("subtitle", subtitle.is_some()), ("sources", !sources.is_empty()), ("note", note.is_some())]
-        {
+        // Every text a figure leaves to its caption, given anyway, is said to be left out.
+        let asked = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
+        for (field, given) in [
+            ("title", title.is_some()),
+            ("subtitle", subtitle.is_some()),
+            ("sources", !sources.is_empty()),
+            ("note", note.is_some()),
+            ("author", asked("author")),
+            ("headings", !headings.is_empty()),
+        ] {
             if given {
                 warnings.push(format!("{field} goes in the figure's caption, not on it: left out"));
             }
