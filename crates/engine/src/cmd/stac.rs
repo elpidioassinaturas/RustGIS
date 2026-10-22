@@ -636,6 +636,26 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
     }
     let (width, height) = (width as u32, height as u32);
     let transform = rustgis_data::raster::GeoTransform { origin_x: lt.origin_x + c0 * pw, origin_y: lt.origin_y + r0 * ph, ..lt };
+    // Some file has to cover part of the area, or every cell would come out empty: each tile's
+    // first file in turn until one does (the first file's header, read already, most often).
+    let span = |a: f64, b: f64| (a.min(b), a.max(b));
+    let (ax, ay) = (span(c0 * pw, c1 * pw), span(r0 * ph, r1 * ph));
+    let (ax, ay) = ((ax.0 + lt.origin_x, ax.1 + lt.origin_x), (ay.0 + lt.origin_y, ay.1 + lt.origin_y));
+    let covers = |i: &cog::Info| {
+        let (t, Some(full)) = (&i.layout.transform, i.layout.levels.first()) else { return false };
+        let x = span(t.origin_x, t.origin_x + f64::from(full.width) * t.pixel_width);
+        let y = span(t.origin_y, t.origin_y + f64::from(full.height) * t.pixel_height);
+        i.layout.crs == layout.crs && x.0 < ax.1 && ax.0 < x.1 && y.0 < ay.1 && ay.0 < y.1
+    };
+    let covered = covers(&info)
+        || tiles
+            .values()
+            .filter_map(|days| days.values().next())
+            .filter(|h| **h != first)
+            .any(|h| cog::info_blocking(h).is_ok_and(|i| covers(&i)));
+    if !covered {
+        return Err(format!("no file of {collection}'s {asset} covers the area, only comes near it: take another bbox"));
+    }
     // Within a run's block, and each slice within what a reader holds.
     let per_slice = (MAX_PIECE_PIXELS / u64::from(factor).pow(2)).max(1);
     #[cfg(test)]

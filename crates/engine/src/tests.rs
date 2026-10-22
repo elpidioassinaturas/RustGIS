@@ -7309,6 +7309,10 @@ fn a_trend_over_a_stac_collection() {
         let got = f64::from(ws.bands[0].data[y * 768 + 256 + x]);
         assert!((got - per_year(x, y)).abs() < 1e-4, "({x}, {y}): {got} vs {}", per_year(x, y));
     }
+    // An area no file covers (the items only near it) is refused, not four empty rasters.
+    let away = json!({"url": api, "collection": "mod", "asset": "NDVI", "bbox": [20, 45, 21, 46], "start": "2024-01-01", "end": "2024-03"});
+    let e = s.run("cube.trend", &away).unwrap_err();
+    assert!(e.contains("covers the area"), "{e}");
     // Read in two pieces (a quarter of the rows' values each would make four; 256-row tiles make
     // it two), the outputs are the same, cell for cell.
     PIECE_VALUES.with(|v| v.set(Some(512 * 300 * 6)));
