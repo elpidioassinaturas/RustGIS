@@ -634,7 +634,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             ("subtitle", subtitle.is_some()),
             ("sources", !sources.is_empty()),
             ("note", note.is_some()),
-            ("author", asked("author")),
+            // An empty author asks for none: nothing left out.
+            ("author", asked("author") && author.is_some()),
             ("headings", !headings.is_empty()),
         ] {
             if given {

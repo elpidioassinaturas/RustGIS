@@ -2394,6 +2394,9 @@ fn publication_layouts_fit_their_pages() {
     let said = r["warnings"].to_string();
     assert!(said.contains("author goes") && said.contains("headings goes"), "{said}");
     s.project.layouts.pop();
+    let r = s.run("layout.publication", &json!({"profile": "figure-1col", "extent": piaui, "author": ""})).unwrap();
+    assert!(!r["warnings"].to_string().contains("author"), "an empty author asks for none: {r}");
+    s.project.layouts.pop();
     // An empty author leaves the authorship out.
     for none in [json!(""), json!([]), json!(["  "])] {
         s.run("layout.publication", &json!({"extent": piaui, "author": none})).unwrap();
