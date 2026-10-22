@@ -7264,8 +7264,9 @@ fn a_trend_over_a_stac_collection() {
             format!(
                 r#"{{"type": "Feature", "id": "n{k}", "collection": "mod", "bbox": [10, 45, 11, 46], "geometry": null,
                    "properties": {{"datetime": "{d}T00:00:00Z", "bdc:tiles": ["h13v09"]}},
-                   "assets": {{"NDVI": {{"href": "{cog}/n{k}.tif", "eo:bands": [{{"scale": {}}}]}}}}}}"#,
-                (k + 1) as f64 * 1e-4
+                   "assets": {{"NDVI": {{"href": "{cog}/n{k}.tif", "eo:bands": [{{"scale": {}, "offset": {}}}]}}}}}}"#,
+                (k + 1) as f64 * 1e-4,
+                k as f64 * 0.01
             )
         })
         .collect();
@@ -7284,15 +7285,16 @@ fn a_trend_over_a_stac_collection() {
     assert_eq!(n, Some(6));
     let slope = &whole[0];
     assert_eq!((slope.width, slope.height), (512, 512), "the area on the full images' grid");
-    // Pixel (x, y) stores (x + y) % 256; its value grows by that many ten-thousandths a date, 16
-    // days apart.
-    let per_year = |x: usize, y: usize| ((x + y) % 256) as f64 * 1e-4 * 365.2425 / 16.0;
+    // Pixel (x, y) stores (x + y) % 256; with date k's scale (k + 1) ten-thousandths and offset
+    // k hundredths, its value grows by that many ten-thousandths and a hundredth a date, 16 days
+    // apart: each file's own scale and offset taken.
+    let per_year = |x: usize, y: usize| (((x + y) % 256) as f64 * 1e-4 + 0.01) * 365.2425 / 16.0;
     for (x, y) in [(10, 20), (300, 100), (0, 0), (511, 511)] {
         let got = f64::from(slope.bands[0].data[y * 512 + x]);
         assert!((got - per_year(x, y)).abs() < 1e-4, "({x}, {y}): {got} vs {}", per_year(x, y));
     }
-    // A straight rise over six dates is significant; a flat cell (0, 0) isn't.
-    assert!(whole[3].bands[0].data[20 * 512 + 10].is_finite() && whole[3].bands[0].data[0].is_nan());
+    // A straight rise over six dates is significant, (0, 0)'s too: its stored 0 rises by the offsets.
+    assert!(whole[3].bands[0].data[20 * 512 + 10].is_finite() && whole[3].bands[0].data[0].is_finite());
     // Read in two pieces (a quarter of the rows' values each would make four; 256-row tiles make
     // it two), the outputs are the same, cell for cell.
     PIECE_VALUES.with(|v| v.set(Some(512 * 300 * 6)));
@@ -7325,12 +7327,14 @@ fn a_trend_over_a_stac_collection() {
     assert_eq!((mean[0].width, mean[0].height), (256, 256));
     for (x, y) in [(5, 7), (30, 40)] {
         let (near, avg) = (f64::from(half[0].bands[0].data[y * 256 + x]), f64::from(mean[0].bands[0].data[y * 256 + x]));
-        let unit = 1e-4 * 365.2425 / 16.0;
-        assert!((near - (2 * x + 2 * y) as f64 * unit).abs() < 1e-4, "nearest ({x}, {y}): {near}");
-        assert!((avg - (2 * x + 2 * y + 1) as f64 * unit).abs() < 1e-4, "average ({x}, {y}): {avg}");
+        let (unit, offsets) = (1e-4 * 365.2425 / 16.0, 0.01 * 365.2425 / 16.0);
+        assert!((near - (2 * x + 2 * y) as f64 * unit - offsets).abs() < 1e-4, "nearest ({x}, {y}): {near}");
+        assert!((avg - (2 * x + 2 * y + 1) as f64 * unit - offsets).abs() < 1e-4, "average ({x}, {y}): {avg}");
     }
     coarse["resampling"] = json!("bilinear");
+    let before = s.map().layers.len();
     assert!(s.run("cube.trend", &coarse).unwrap_err().contains("resampling"));
+    assert_eq!(s.map().layers.len(), before, "refused, nothing added");
     coarse["resampling"] = Value::Null;
     // The level nearest the size asked: 0.0025 is nearer the full images' 1/512° than 1/256°.
     coarse["cellSize"] = json!(0.0025);
@@ -7813,6 +7817,9 @@ fn a_trend_over_a_data_cube() {
     assert_eq!(r["dates"], 8, "{r}");
     let r = s.run("cube.trend", &json!({"layers": names, "end": "2020-06", "name": "toJune"})).unwrap();
     assert_eq!(r["dates"], 7, "a month ends with it: 2020's July date is after June: {r}");
+    // A year given as a number reads the same.
+    let r = s.run("cube.trend", &json!({"layers": names, "end": 2020, "name": "to2020n"})).unwrap();
+    assert_eq!(r["dates"], 8, "{r}");
     let backwards: Vec<String> = (0..12).map(|k| format!("{}-01-01", 2030 - k)).collect();
     let r = s.run("cube.trend", &json!({"layers": names, "dates": backwards, "test": "original"})).unwrap();
     assert!(value(&s, &r["layers"][0], 0) < 0.0, "the dates given are used, in the layers' order");
