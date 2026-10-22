@@ -465,7 +465,10 @@ fn pub_box(fill: Rgba, outline: Rgba, width: f64) -> ElementKind {
 /// subtitle and a footer of two boxed columns (sources, cartographic reference) with a note and
 /// authorship under them, each text wrapped to its box with the layout's own font.
 fn publication(s: &mut Session, p: &Value) -> CmdResult {
-    let id = ps(p, "profile").unwrap_or("a4-portrait").trim().to_ascii_lowercase();
+    let id = match p.get("profile").filter(|v| !v.is_null()) {
+        None => "a4-portrait".to_string(),
+        Some(v) => v.as_str().map(|t| t.trim().to_ascii_lowercase()).ok_or("profile is a profile's name, such as \"a4-portrait\"")?,
+    };
     let profile = PUBLICATION_PROFILES.iter().find(|pr| pr.id == id).ok_or_else(|| {
         let names: Vec<&str> = PUBLICATION_PROFILES.iter().map(|pr| pr.id).collect();
         format!("unknown profile '{id}': {}", names.join(", "))

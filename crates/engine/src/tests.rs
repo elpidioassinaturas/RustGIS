@@ -2433,6 +2433,7 @@ fn publication_layouts_fit_their_pages() {
     // Refused: an unknown profile, a malformed extent, a footer that leaves the map no room.
     for (p, said) in [
         (json!({"profile": "a5-portrait"}), "unknown profile"),
+        (json!({"profile": 5}), "profile is"),
         (json!({"extent": [10, 0, 5, 1]}), "extent is"),
         (json!({"extent": [10, 0, 11], "profile": "a4-portrait"}), "extent is"),
         (json!({"sources": vec![long; 40], "profile": "a4-landscape", "extent": piaui}), "no room"),
