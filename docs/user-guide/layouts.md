@@ -23,7 +23,8 @@ the maps; while one is open, its groups lead the Publish tab:
     datum under it, at 7 pt. A figure's title and sources belong in its caption, so they are
     left out, and the result says so.
   - **The map**: the `extent` given (or the view) fitted at a round scale, two significant
-    figures, rounded up so it still fits. A graticule has its step picked from the extent, at
+    figures, rounded up so it still fits within the strips the graticule's labels take inside
+    the frame. A graticule has its step picked from the extent, at
     most five lines across (2° for a state, 15′ for a city), and labels on every edge of a sheet.
     The north arrow, the legend (sized to what it lists) and the scale bar with the numeric scale
     under it sit in the frame's corners, on pale boxes, clear of the graticule's labels.

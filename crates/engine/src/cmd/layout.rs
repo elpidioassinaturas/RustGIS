@@ -29,7 +29,7 @@ pub fn commands() -> Vec<C> {
             r#"{"name"?: string, "page"?: "letter"|"legal"|"tabloid"|"a5"|"a4"|"a3"|"a2"|"a1"|"a0", "orientation"?: "landscape"|"portrait", "width"?: mm, "height"?: mm, "template"?: "map" (frame, title, legend, north arrow, scale bar; the default)|"blank"}"#,
         ),
         C::new("layout.publication", "New Publication Layout", "Publish › Layout", publication).params(
-            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" for none), "headings"?: [the sources' heading, the reference's heading]} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
+            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading]} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
         ),
         C::new("layout.activate", "Open Layout", "Browser", |s, p| {
             let i = index(s, &by_name(p))?;
@@ -502,9 +502,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let reference =
         texts_of(p, "reference")?.unwrap_or_else(|| vec!["Projection: {projection}".into(), "Datum: {datum} · Graticule: {grid}".into()]);
     // An empty author leaves the line out; none given, the default.
-    let author = match p.get("author") {
-        Some(Value::String(t)) if t.trim().is_empty() => None,
-        _ => Some(one("author")?.unwrap_or_else(|| "Made with RustGIS · {date}".into())),
+    let author = match texts_of(p, "author")? {
+        None => Some("Made with RustGIS · {date}".to_string()),
+        Some(t) => Some(t.join(" ")).filter(|t| !t.trim().is_empty()),
     };
     let headings = texts_of(p, "headings")?.unwrap_or_default();
     let heading = |i: usize, or: &str| headings.get(i).cloned().unwrap_or_else(|| or.to_string());
@@ -660,9 +660,14 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         ));
         (page_w, h, (0.0, 0.0, page_w, fh))
     };
-    let (center, scale) = fit_scale(s.map(), &extent, fw, fh).ok_or("the extent can't be drawn on the map's projection")?;
-    let scale = round_scale(scale);
+    // The extent fits within the graticule's label strips (drawn inside the frame along its
+    // labelled edges), on both sides so it stays centred, and its labels cover none of it.
     let edges = GridEdges { top: sheet, bottom: true, left: true, right: sheet };
+    let strip_w = if edges.left || edges.right { 2.0 * LABEL_ROOM_SIDE } else { 0.0 };
+    let strip_h = if edges.top || edges.bottom { 2.0 * LABEL_ROOM_END } else { 0.0 };
+    let (center, scale) = fit_scale(s.map(), &extent, (fw - strip_w).max(fw / 2.0), (fh - strip_h).max(fh / 2.0))
+        .ok_or("the extent can't be drawn on the map's projection")?;
+    let scale = round_scale(scale);
     let grid = Grid { step, edges, ..Grid::default() };
     let name = unique_name(s, ps(p, "name").unwrap_or("Publication"));
     let mut l = Layout::new(name.clone(), w, h);
@@ -701,7 +706,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let (aw, ah) = if sheet { (8.0 * k, 12.0 * k) } else { (5.0, 7.5) };
     l.add("North Arrow", (fx + fw - right - aw, fy + top, aw, ah), ElementKind::north_arrow(frame));
     // The legend lists what the frame draws: its map synced to the frame's view first, as an
-    // export does, so a streamed layer has its features there. While one is still reading, the
+    // export does, so a streamed layer has its features there. (This changes the session's map,
+    // so it comes after the last refusal: nothing below fails.) While one is still reading, the
     // classes can't be known: the legend gets a fixed size, to fit by hand. Nothing drawn in the
     // frame, no legend.
     let render_scale = crate::render::layout::frame_render_scale(s.map(), center, scale);

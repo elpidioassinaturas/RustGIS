@@ -2321,7 +2321,9 @@ fn publication_layouts_fit_their_pages() {
         let unit = 10f64.powf(scale.log10().floor() - 1.0);
         assert!(((scale / unit) - (scale / unit).round()).abs() < 1e-6, "{profile}: 1:{scale}");
         let extent = rustgis_geom::Extent::new(-46.8, -11.6, -38.5, -2.2);
-        let (_, fits) = rustgis_map::layout::fit_scale(s.map(), &extent, frame.w, frame.h).unwrap();
+        // Fitted within the graticule's label strips (9 mm beside the frame's sides, 6 mm along its
+        // top and bottom), so the labels cover none of the extent.
+        let (_, fits) = rustgis_map::layout::fit_scale(s.map(), &extent, frame.w - 18.0, frame.h - 12.0).unwrap();
         assert!(fits <= *scale && *scale < fits * 1.1, "{profile}: 1:{scale} for 1:{fits}");
         assert_eq!(grid.step, 2.0, "{profile}: Piauí's 9.4° take a 2° graticule");
         let text = |name: &str| {
@@ -2378,9 +2380,11 @@ fn publication_layouts_fit_their_pages() {
     assert!(listed.iter().any(|e| e["name"] == "Map Frame" && e["element"] == frame.id && e["kind"] == "mapFrame"), "{r}");
     s.project.layouts.pop();
     // An empty author leaves the authorship out.
-    s.run("layout.publication", &json!({"extent": piaui, "author": ""})).unwrap();
-    assert!(s.project.layouts.last().unwrap().elements.iter().all(|e| e.name != "Author"));
-    s.project.layouts.pop();
+    for none in [json!(""), json!([]), json!(["  "])] {
+        s.run("layout.publication", &json!({"extent": piaui, "author": none})).unwrap();
+        assert!(s.project.layouts.last().unwrap().elements.iter().all(|e| e.name != "Author"), "{none}");
+        s.project.layouts.pop();
+    }
     // With no sources, the reference alone takes the footer's width; no empty box beside it.
     s.run("layout.publication", &json!({"extent": piaui})).unwrap();
     let l = s.project.layouts.last().unwrap();
