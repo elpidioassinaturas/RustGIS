@@ -927,6 +927,25 @@ fn labeling_group(app: &mut RustGisApp, ui: &mut Ui) {
     });
 }
 
+/// A publication profile's name in the menu: a `tl!` literal each, so the catalogs find it (the
+/// engine's labels, which it matches in English); `None` for a profile added without one.
+fn publication_label(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "a4-portrait" => tl!("A4 portrait sheet"),
+        "a4-landscape" => tl!("A4 landscape sheet"),
+        "a3-portrait" => tl!("A3 portrait sheet"),
+        "a3-landscape" => tl!("A3 landscape sheet"),
+        "a2-portrait" => tl!("A2 portrait sheet"),
+        "a2-landscape" => tl!("A2 landscape sheet"),
+        "figure-1col" => tl!("Journal figure, 1 column (90 mm)"),
+        "figure-1.5col" => tl!("Journal figure, 1.5 columns (140 mm)"),
+        "figure-2col" => tl!("Journal figure, 2 columns (190 mm)"),
+        "thesis-full" => tl!("Thesis figure, full page (160 × 225 mm)"),
+        "thesis-half" => tl!("Thesis figure, half page (160 × 110 mm)"),
+        _ => return None,
+    })
+}
+
 fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Project", |ui| {
         big(ui, app, "new_map", "New\nMap", "Add a new map to the project.", "map.new", Value::Null, false, false);
@@ -944,21 +963,7 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
             // A finished sheet or figure of the map view, its texts to fill in on the page.
             ui.menu_button(tl!("Publication Layout"), |ui| {
                 for profile in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
-                    // Each profile's name a literal here, so the catalogs find it.
-                    let label = match profile.id {
-                        "a4-portrait" => tl!("A4 portrait sheet"),
-                        "a4-landscape" => tl!("A4 landscape sheet"),
-                        "a3-portrait" => tl!("A3 portrait sheet"),
-                        "a3-landscape" => tl!("A3 landscape sheet"),
-                        "a2-portrait" => tl!("A2 portrait sheet"),
-                        "a2-landscape" => tl!("A2 landscape sheet"),
-                        "figure-1col" => tl!("Journal figure, 1 column (90 mm)"),
-                        "figure-1.5col" => tl!("Journal figure, 1.5 columns (140 mm)"),
-                        "figure-2col" => tl!("Journal figure, 2 columns (190 mm)"),
-                        "thesis-full" => tl!("Thesis figure, full page (160 × 225 mm)"),
-                        "thesis-half" => tl!("Thesis figure, half page (160 × 110 mm)"),
-                        _ => tl!(profile.label),
-                    };
+                    let label = publication_label(profile.id).unwrap_or_else(|| tl!(profile.label));
                     if ui.button(label).clicked() {
                         // A sheet is titled with the map's name; a figure's title is its caption's.
                         let mut p = json!({"profile": profile.id});
@@ -4347,6 +4352,15 @@ fn language_menu(app: &mut RustGisApp, ui: &mut Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every publication profile has its literal name in the menu, the engine's label word for word
+    /// (the test runs in English), so neither can be renamed without the other.
+    #[test]
+    fn every_publication_profile_is_named_by_a_literal() {
+        for p in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
+            assert_eq!(publication_label(p.id), Some(p.label), "{}", p.id);
+        }
+    }
 
     #[test]
     fn saved_hidden_tabs_never_hide_the_fixed_tabs() {
