@@ -356,7 +356,9 @@ and a **Mann–Kendall** test of whether the trend is significant.
     at 1 km from 250 m). It needs every file's corner on a cell's corner, as MODIS's tiles are; a
     file on a grid shifted by part of a cell is refused: set `"resampling": "nearest"` and run it
     again. A file's no-data value is skipped, from its header or from its asset's metadata
-    (`raster:bands` `nodata`).
+    (`raster:bands` `nodata`). Where two tiles' files overlap on a date (items without a tile
+    name are told apart by footprint), a cell is the mean of their values, while the data cube on
+    the map shows one of them.
 
   The rasters have to be on one grid; put them on one first with Raster Functions › Resample.
 - **The test:** NDVI and temperature series are autocorrelated, which makes the plain test report
