@@ -2312,6 +2312,9 @@ fn publication_layouts_fit_their_pages() {
         }
         let frame = l.elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap();
         let ElementKind::MapFrame { scale, grid: Some(grid), .. } = &frame.kind else { panic!("{profile}: no grid") };
+        // The legend stops short of the scale bar's box, however narrow the frame.
+        let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap();
+        assert!(named("Legend Box").x + named("Legend Box").w <= named("Scale Box").x, "{profile}: the legend reaches the scale bar");
         // A round scale, two significant figures, at which the extent still fits.
         let unit = 10f64.powf(scale.log10().floor() - 1.0);
         assert!(((scale / unit) - (scale / unit).round()).abs() < 1e-6, "{profile}: 1:{scale}");
@@ -2341,7 +2344,7 @@ fn publication_layouts_fit_their_pages() {
                 );
             }
             // The tokens filled from the map: Web Mercator over WGS 84, the 2° graticule.
-            let reference = text("Cartographic reference").unwrap();
+            let reference = text("Reference").unwrap();
             assert!(reference.contains("Web Mercator") && reference.contains("WGS 84") && reference.contains("2°"), "{reference}");
             assert!(text("Author").unwrap().contains("{date}"), "the date stays a token the layout fills");
             assert!(r["warnings"].as_array().unwrap().is_empty(), "{profile}: {r}");
@@ -2371,6 +2374,21 @@ fn publication_layouts_fit_their_pages() {
     let listed = r["elements"].as_array().unwrap();
     assert_eq!(listed.len(), l.elements.len());
     assert!(listed.iter().any(|e| e["name"] == "Map Frame" && e["element"] == frame.id && e["kind"] == "mapFrame"), "{r}");
+    s.project.layouts.pop();
+    // Headings rename what the columns read, filled and wrapped; their elements keep their names.
+    let r = s
+        .run(
+            "layout.publication",
+            &json!({"extent": piaui, "sources": "IBGE", "headings": ["Fontes dos dados", "Referência cartográfica na projeção {projection}, a mais longa que se possa imaginar"]}),
+        )
+        .unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let heading = l.elements.iter().find(|e| e.name == "Reference Heading").unwrap();
+    let ElementKind::Text { text, .. } = &heading.kind else { panic!() };
+    assert!(text.contains("WEB MERCATOR") && !text.contains('{') && text.lines().count() >= 2, "{text}");
+    assert!(l.elements.iter().any(|e| e.name == "Sources Heading") && l.elements.iter().any(|e| e.name == "Reference"), "{r}");
+    let body = l.elements.iter().find(|e| e.name == "Reference").unwrap();
+    assert!(body.y >= heading.y + heading.h - 1e-9, "the reference starts under its wrapped heading");
     s.project.layouts.pop();
     // A journal figure is as tall as the map's shape asks: Piauí in Web Mercator is taller than wide.
     let one = s.project.layouts.iter().find(|l| l.name == "figure-1col").unwrap();

@@ -943,10 +943,15 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
             }
             // A finished sheet or figure of the map view, its texts to fill in on the page.
             ui.menu_button(tl!("Publication Layout"), |ui| {
-                for (id, label, ..) in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
-                    if ui.button(tl!(*label)).clicked() {
+                for profile in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
+                    if ui.button(tl!(profile.label)).clicked() {
+                        // A sheet is titled with the map's name; a figure's title is its caption's.
+                        let mut p = json!({"profile": profile.id});
+                        if profile.sheet {
+                            p["title"] = json!(app.session.map().name.clone());
+                        }
                         // The view's extent may not be known (an empty map): said, and the tab stays.
-                        match app.run("layout.publication", json!({"profile": id, "title": app.session.map().name.clone()})) {
+                        match app.run("layout.publication", p) {
                             Ok(_) => app.ui.tab = "Publish".into(),
                             Err(e) => app.session.notify(e, true),
                         }

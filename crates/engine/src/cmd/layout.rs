@@ -298,21 +298,31 @@ pub(crate) fn new_layout(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"layout": i, "name": name}))
 }
 
-/// `layout.publication`'s profiles: an id, a label, a sheet (a frame, title and boxed footer) or a
-/// figure (the map edge to edge, its title and sources left to the caption), and its size in mm.
-/// A height of 0 follows the map's shape.
-pub const PUBLICATION_PROFILES: &[(&str, &str, bool, f64, f64)] = &[
-    ("a4-portrait", "A4 portrait sheet", true, 210.0, 297.0),
-    ("a4-landscape", "A4 landscape sheet", true, 297.0, 210.0),
-    ("a3-portrait", "A3 portrait sheet", true, 297.0, 420.0),
-    ("a3-landscape", "A3 landscape sheet", true, 420.0, 297.0),
-    ("a2-portrait", "A2 portrait sheet", true, 420.0, 594.0),
-    ("a2-landscape", "A2 landscape sheet", true, 594.0, 420.0),
-    ("figure-1col", "Journal figure, 1 column (90 mm)", false, 90.0, 0.0),
-    ("figure-1.5col", "Journal figure, 1.5 columns (140 mm)", false, 140.0, 0.0),
-    ("figure-2col", "Journal figure, 2 columns (190 mm)", false, 190.0, 0.0),
-    ("thesis-full", "Thesis figure, full page (160 × 225 mm)", false, 160.0, 225.0),
-    ("thesis-half", "Thesis figure, half page (160 × 110 mm)", false, 160.0, 110.0),
+/// One of `layout.publication`'s profiles.
+pub struct PublicationProfile {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// A sheet (a frame, title and boxed footer), else a figure (the map edge to edge, its title
+    /// and sources left to the caption).
+    pub sheet: bool,
+    /// The page, in mm. A height of 0 follows the map's shape.
+    pub width: f64,
+    pub height: f64,
+}
+
+/// `layout.publication`'s profiles: sheets for printing, figures for a journal or a thesis.
+pub const PUBLICATION_PROFILES: &[PublicationProfile] = &[
+    PublicationProfile { id: "a4-portrait", label: "A4 portrait sheet", sheet: true, width: 210.0, height: 297.0 },
+    PublicationProfile { id: "a4-landscape", label: "A4 landscape sheet", sheet: true, width: 297.0, height: 210.0 },
+    PublicationProfile { id: "a3-portrait", label: "A3 portrait sheet", sheet: true, width: 297.0, height: 420.0 },
+    PublicationProfile { id: "a3-landscape", label: "A3 landscape sheet", sheet: true, width: 420.0, height: 297.0 },
+    PublicationProfile { id: "a2-portrait", label: "A2 portrait sheet", sheet: true, width: 420.0, height: 594.0 },
+    PublicationProfile { id: "a2-landscape", label: "A2 landscape sheet", sheet: true, width: 594.0, height: 420.0 },
+    PublicationProfile { id: "figure-1col", label: "Journal figure, 1 column (90 mm)", sheet: false, width: 90.0, height: 0.0 },
+    PublicationProfile { id: "figure-1.5col", label: "Journal figure, 1.5 columns (140 mm)", sheet: false, width: 140.0, height: 0.0 },
+    PublicationProfile { id: "figure-2col", label: "Journal figure, 2 columns (190 mm)", sheet: false, width: 190.0, height: 0.0 },
+    PublicationProfile { id: "thesis-full", label: "Thesis figure, full page (160 × 225 mm)", sheet: false, width: 160.0, height: 225.0 },
+    PublicationProfile { id: "thesis-half", label: "Thesis figure, half page (160 × 110 mm)", sheet: false, width: 160.0, height: 110.0 },
 ];
 
 /// A figure's text size, in points at its printed size: journals ask for 6 to 8.
@@ -416,10 +426,11 @@ fn pub_box(fill: Rgba, outline: Rgba, width: f64) -> ElementKind {
 /// authorship under them, each text wrapped to its box with the layout's own font.
 fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let id = ps(p, "profile").unwrap_or("a4-portrait").trim().to_ascii_lowercase();
-    let &(_, _, sheet, page_w, page_h) = PUBLICATION_PROFILES.iter().find(|(n, ..)| *n == id).ok_or_else(|| {
-        let names: Vec<&str> = PUBLICATION_PROFILES.iter().map(|(n, ..)| *n).collect();
+    let profile = PUBLICATION_PROFILES.iter().find(|pr| pr.id == id).ok_or_else(|| {
+        let names: Vec<&str> = PUBLICATION_PROFILES.iter().map(|pr| pr.id).collect();
         format!("unknown profile '{id}': {}", names.join(", "))
     })?;
+    let (sheet, page_w, page_h) = (profile.sheet, profile.width, profile.height);
     let extent = match p.get("extent").filter(|v| !v.is_null()) {
         None => {
             let e = super::workspace::view_extent(s);
@@ -500,23 +511,30 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         let (gap, inner) = (4.0 * k, 2.5 * k);
         let cw = (iw - gap) / 2.0;
         let column = |lines: &[String]| lines.iter().flat_map(|t| wrap(t, cw - 2.0 * inner, body_pt)).collect::<Vec<_>>();
-        let columns = [(heading(0, "Sources"), column(&sources)), (heading(1, "Cartographic reference"), column(&reference))];
-        let rows = columns.iter().map(|(_, l)| l.len()).max().unwrap_or(0);
+        // Each column's elements keep their names (`Sources`, `Reference`) whatever its heading
+        // reads, the heading filled and wrapped like the rest.
+        let tw = cw - 2.0 * inner;
+        let titled = |i: usize, or: &str| wrap(&fill(&heading(i, or)).to_uppercase(), tw, head_pt);
+        let columns =
+            [("Sources", titled(0, "Sources"), column(&sources)), ("Reference", titled(1, "Cartographic reference"), column(&reference))];
+        let heads = columns.iter().map(|(_, h, _)| h.len()).max().unwrap_or(1);
+        let rows = columns.iter().map(|(.., l)| l.len()).max().unwrap_or(0);
         if rows > 0 {
-            let bh = 2.0 * inner + pitch(head_pt) + rows as f64 * pitch(body_pt);
+            let head_h = heads as f64 * pitch(head_pt);
+            let bh = 2.0 * inner + head_h + rows as f64 * pitch(body_pt);
             foot -= bh + 2.0 * k;
-            for (i, (head, lines)) in columns.into_iter().enumerate() {
+            for (i, (name, head, lines)) in columns.into_iter().enumerate() {
                 let bx = x0 + i as f64 * (cw + gap);
-                around.push((format!("{head} Box"), (bx, foot, cw, bh), pub_box(clear, Rgba::new(0x2B, 0x26, 0x20, 140), 0.5)));
-                let (tx, tw) = (bx + inner, cw - 2.0 * inner);
+                around.push((format!("{name} Box"), (bx, foot, cw, bh), pub_box(clear, Rgba::new(0x2B, 0x26, 0x20, 140), 0.5)));
+                let tx = bx + inner;
                 around.push((
-                    format!("{head} Heading"),
-                    (tx, foot + inner, tw, pitch(head_pt)),
-                    pub_text(head.to_uppercase(), head_pt, ink, true, TextAlign::Left),
+                    format!("{name} Heading"),
+                    (tx, foot + inner, tw, head.len() as f64 * pitch(head_pt)),
+                    pub_text(head.join("\n"), head_pt, ink, true, TextAlign::Left),
                 ));
                 if !lines.is_empty() {
-                    let body = (tx, foot + inner + pitch(head_pt), tw, lines.len() as f64 * pitch(body_pt));
-                    around.push((head, body, pub_text(lines.join("\n"), body_pt, soft, false, TextAlign::Left)));
+                    let body = (tx, foot + inner + head_h, tw, lines.len() as f64 * pitch(body_pt));
+                    around.push((name.to_string(), body, pub_text(lines.join("\n"), body_pt, soft, false, TextAlign::Left)));
                 }
             }
         }
@@ -616,9 +634,13 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         (cw, ch) = (cw.max(fw * 0.3), ch.max(fh * 0.25));
         warnings.push("the legend's classes aren't known yet (a layer still reading): it has a fixed size to fit by hand".into());
     }
+    // The scale bar's box, at the bottom right: the legend stops short of it (and so of the north
+    // arrow above it, which is narrower), however narrow the frame.
+    let (sw, sh, nh) = ((fw * 0.3).max(25.0), if sheet { 8.0 * k } else { 6.0 }, pitch(small_pt) + 0.5);
     if ch > 0.0 {
         let pad = 2.0;
-        let (lw, lh) = ((cw + 2.0 * pad).min(fw * 0.45), (ch + 2.0 * pad).min(fh * 0.6));
+        let room_w = (fw - left - right - sw - 2.0).max(10.0);
+        let (lw, lh) = ((cw + 2.0 * pad).min(fw * 0.45).min(room_w), (ch + 2.0 * pad).min(fh * 0.6));
         if cw + 2.0 * pad > lw || ch + 2.0 * pad > lh {
             warnings.push("the legend lists more than fits its corner: its last rows or the ends of long labels are left out".into());
         }
@@ -630,7 +652,6 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             ElementKind::Legend { frame, title: String::new(), all_classes: false, hide_other: false, exclude: Vec::new() },
         );
     }
-    let (sw, sh, nh) = ((fw * 0.3).max(25.0), if sheet { 8.0 * k } else { 6.0 }, pitch(small_pt) + 0.5);
     let (sx, sy) = (fx + fw - right - sw, fy + fh - bottom - sh - nh);
     l.add("Scale Box", (sx, sy, sw, sh + nh), pub_box(paper, clear, 0.0));
     l.add("Scale Bar", (sx, sy, sw, sh), ElementKind::scale_bar(frame));
