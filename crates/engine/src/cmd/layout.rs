@@ -643,7 +643,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             }
         }
         let line = reference.iter().map(|t| fill(t)).collect::<Vec<_>>().join(" · ");
-        let lines = wrap(&line, page_w, FIGURE_PT);
+        // A millimetre in from the paper's edges, which a journal may trim.
+        let lines = wrap(&line, page_w - 2.0, FIGURE_PT);
         if lines.len() > 1 {
             warnings.push("the reference is wider than the figure: it wraps under the map".into());
         }
@@ -663,7 +664,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         let h = if page_h > 0.0 { page_h } else { (fh + note_h).ceil() };
         around.push((
             "Reference".into(),
-            (0.0, fh + 1.0, page_w, note_h - 1.0),
+            (1.0, fh + 1.0, page_w - 2.0, note_h - 1.0),
             pub_text(lines.join("\n"), FIGURE_PT, ink, false, TextAlign::Left),
         ));
         (page_w, h, (0.0, 0.0, page_w, fh))
