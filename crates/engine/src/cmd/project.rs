@@ -137,12 +137,18 @@ fn save(s: &mut Session, p: &Value) -> CmdResult {
     write(s, path)
 }
 
+/// Saves with the destination's name, restoring the current name if writing fails.
 fn save_as(s: &mut Session, p: &Value) -> CmdResult {
     let path = PathBuf::from(super::ps(p, "path").ok_or("path is required")?);
-    if let Some(stem) = path.file_stem().and_then(|x| x.to_str()) {
-        s.project.name = stem.to_string();
+    let previous_name = path.file_stem().and_then(|x| x.to_str()).map(|stem| std::mem::replace(&mut s.project.name, stem.to_string()));
+    let result = write(s, path);
+    // Only undoable commands get a Session snapshot; restore this view command's name by hand.
+    if result.is_err()
+        && let Some(name) = previous_name
+    {
+        s.project.name = name;
     }
-    write(s, path)
+    result
 }
 
 fn rename(s: &mut Session, p: &Value) -> CmdResult {

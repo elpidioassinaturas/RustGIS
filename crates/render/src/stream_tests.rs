@@ -44,6 +44,25 @@ fn streamed(layer: &Layer, size: usize) -> Layer {
     streamed_kind(layer, size, false)
 }
 
+/// Lets the streamed layers' background reads of `view` land first, as the screen does between
+/// frames. A render then finds the view read and starts no read of its own, which could land
+/// mid-test (on a busy machine) and replace the owner's rows.
+fn settle(map: &mut Map, view: &View) {
+    for _ in 0..2000 {
+        let pending = if view.camera.pitch > 0.0 {
+            sync_tilted_view(map, view)
+        } else {
+            let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
+            map.sync_sources(&view_lonlat(map, view), scale, false)
+        };
+        if !pending {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("the background reads did not land");
+}
+
 fn streamed_kind(layer: &Layer, size: usize, native: bool) -> Layer {
     let ds = layer.dataset.clone();
     let info = SourceInfo {
@@ -319,11 +338,15 @@ fn perspective_uses_complete_isolated_fallback() {
     for size in [1, 3, 20] {
         let mut actual = base.clone();
         actual.layers[0] = streamed(&base.layers[0], size);
+        settle(&mut actual, &view);
         let before = actual.layers[0].dataset.features.clone();
         let got = render(&mut actual, &view).unwrap();
         assert_eq!(got.labels, expected.labels);
         assert!(got.pixmap.data() == expected.pixmap.data());
-        assert!(actual.layers[0].dataset.features.shares(&before));
+        // The complete chunks never reach the interaction rows. Compared by value, not by
+        // allocation: the layer's background read can finish mid-render and install the same
+        // one-row sample again as a new allocation.
+        assert_eq!(actual.layers[0].dataset.features, before);
         assert_eq!(actual.layers[0].selection, vec![0]);
     }
 }
@@ -400,10 +423,12 @@ fn partial_source_failure_and_incomplete_summary_reach_unchanged_owner() {
     for (size, message) in [(0, "cancelled"), (usize::MAX, "incomplete")] {
         let mut map = base.clone();
         map.layers[0] = streamed(&base.layers[0], size);
-        map.sync_sources(&Extent::WORLD_LONLAT, 1.0, true);
         let view = View { width: 320.0, height: 240.0, pixels_per_point: 1.0, camera: map.camera, sky: false };
+        settle(&mut map, &view);
         let mut worker = map.clone();
         assert!(render(&mut worker, &view).is_none());
+        // The error below can only come from the worker.
+        assert!(map.layers[0].source.as_ref().unwrap().error.is_none());
         map.adopt_caches(&worker);
         assert!(map.layers[0].source.as_ref().unwrap().error.as_ref().unwrap().contains(message));
         map.layers[0].source.as_mut().unwrap().error = None;
@@ -1075,4 +1100,35 @@ fn layout_export_rejects_unopened_local_shapefiles_and_required_masks() {
             "ordinary sources retain upstream best-effort behavior"
         );
     }
+}
+
+#[test]
+fn gpu_mesh_limit_spans_a_streamed_layers_batches() {
+    // 72,900 triangles about a pixel across, streamed in batches that each mesh well under
+    // MAX_LAYER_VERTICES but together pass it: the batches past the limit draw on the CPU.
+    let mut ds = Dataset::new("dense", GeometryType::Polygon, vec![]);
+    for i in 0..270 {
+        for j in 0..270 {
+            let (x, y) = (i as f64 * 0.01, j as f64 * 0.01);
+            let ring = vec![Coord::new(x, y), Coord::new(x + 0.008, y), Coord::new(x, y + 0.008)];
+            ds.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![]);
+        }
+    }
+    let mut map = Map::new("dense");
+    map.add_dataset(ds);
+    map.layers[0] = streamed(&map.layers[0], 72_900 / 8 + 1);
+    let camera = Camera { center: lonlat_to_merc(Coord::new(1.35, 1.35)), res: 1000.0, bearing: 0.0, pitch: 0.0 };
+    let view = View { width: 400.0, height: 400.0, pixels_per_point: 1.0, camera, sky: false };
+    let Some(RenderOutput::Gpu(scene)) = render_backend(&mut map, &view, Backend::Gpu) else { panic!("gpu scene") };
+    let meshed: Vec<usize> = scene
+        .cmds
+        .iter()
+        .filter_map(|c| match c {
+            gpu_scene::DrawCmd::Mesh { vertices, .. } => Some(vertices.len()),
+            _ => None,
+        })
+        .collect();
+    assert!(!meshed.is_empty(), "the first batches still mesh");
+    assert!(meshed.iter().sum::<usize>() <= mesh::MAX_LAYER_VERTICES, "the layer's meshes: {meshed:?}");
+    assert!(scene.cmds.iter().any(|c| matches!(c, gpu_scene::DrawCmd::Image { .. })), "the rest drawn on the CPU");
 }

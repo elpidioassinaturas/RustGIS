@@ -8,6 +8,9 @@ use crate::{CmdResult, CommandSpec as C, Session};
 
 pub fn commands() -> Vec<C> {
     vec![
+        C::new("edit.calculateGeometry", "Calculate Geometry", "Attribute Table", crate::geometry_calc::run)
+            .when(super::design::need_editable)
+            .params(r#"{"layer"?, "field": string, "create": bool, "overwrite": bool, "property": string, "unit": string, "epsg"?: number, "scope": "all"|"selected"}"#),
         C::new("edit.addFeature", "Create Feature", "Edit › Features", add_feature)
             .when(super::design::need_editable)
             .params(r#"{"layer"?, "geometry": GeoJSON geometry (lon/lat), "attributes"?: {field: value}, "template"?: feature template}"#),

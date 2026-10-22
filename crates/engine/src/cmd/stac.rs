@@ -34,16 +34,19 @@ pub fn search_params(s: &Session, p: &Value) -> Result<Search, String> {
         _ => Vec::new(),
     };
     let bbox = match p.get("bbox") {
-        Some(Value::String(v)) if v == "view" => Some(view(s)?),
+        Some(Value::String(v)) if v.trim().eq_ignore_ascii_case("view") => Some(view(s)?),
         Some(v @ Value::Array(_)) => {
-            let n: Vec<f64> = v.as_array().into_iter().flatten().filter_map(Value::as_f64).collect();
-            match n.as_slice() {
-                [w, south, e, n] => Some([*w, *south, *e, *n]),
+            // Four numbers, every one: `[10, 45, 11, 46, "extra"]` is refused, not read without its last.
+            let n: Option<Vec<f64>> = v.as_array().map(|a| a.iter().map(Value::as_f64).collect()).unwrap_or_default();
+            match n.as_deref() {
+                Some([w, south, e, n]) => Some([*w, *south, *e, *n]),
                 _ => return Err("bbox is [west, south, east, north], or \"view\"".into()),
             }
         }
-        _ if b(p, "view").unwrap_or(false) => Some(view(s)?),
-        _ => None,
+        None | Some(Value::Null) if b(p, "view").unwrap_or(false) => Some(view(s)?),
+        None | Some(Value::Null) => None,
+        // Anything else ("nowhere", a number) is refused rather than read as no area at all.
+        Some(_) => return Err("bbox is [west, south, east, north], or \"view\"".into()),
     };
     Ok(Search {
         collections,
@@ -538,7 +541,46 @@ pub fn piece_rows(width: u32, height: u32, dates: usize, tile_height: u32, max: 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
     use crate::render::rustgis_tiles::cog;
-    let CubeFiles { tiles, scales, nodata, collection, asset, .. } = cube_files(s, p)?;
+    // The parameters read here, before the search and the first header are waited for.
+    let size = match p.get("cellSize").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => {
+            Some(v.as_f64().filter(|c| c.is_finite() && *c > 0.0).ok_or("cellSize is a size in the files' units (metres for most)")?)
+        }
+    };
+    // An overview is often made by taking one pixel in each block (the Brazil Data Cube's are,
+    // GDAL's NEAREST), so a cell of it is one of the full images' pixels, which can differ much
+    // from the place's mean: "average" reads the full images and takes the mean of each cell's.
+    let average = match p.get("resampling").filter(|v| !v.is_null()) {
+        None => false,
+        Some(v) => match v.as_str().map(str::trim) {
+            Some("") | Some("nearest") => false,
+            Some("average") => true,
+            Some(x) => return Err(format!("resampling is nearest or average, not {x}")),
+            // A number or anything else isn't read as the default: said.
+            None => return Err("resampling is nearest or average".into()),
+        },
+    };
+    // The area, in degrees.
+    let bbox = match p.get("bbox").filter(|v| !v.is_null()) {
+        Some(v) if v.as_str().is_some_and(|t| t.trim().eq_ignore_ascii_case("view")) => view(s)?,
+        None => view(s)?,
+        Some(v) => {
+            let b: Option<Vec<f64>> =
+                v.as_array().filter(|a| a.len() == 4).and_then(|a| a.iter().map(|x| x.as_f64().filter(|x| x.is_finite())).collect());
+            match b.as_deref() {
+                Some([w, so, e, n]) if w < e && so < n => [*w, *so, *e, *n],
+                _ => return Err("bbox is [west, south, east, north] in degrees, or \"view\"".into()),
+            }
+        }
+    };
+    // The search covers the area as read here: "view" (in any case or spacing) or none given is
+    // the map's view, resolved, so the search and the grid agree.
+    let mut searched = p.clone();
+    if let Some(o) = searched.as_object_mut() {
+        o.insert("bbox".into(), json!(bbox));
+    }
+    let CubeFiles { tiles, scales, nodata, collection, asset, .. } = cube_files(s, &searched)?;
     // Every tile's file for a date, by day.
     let mut by_day: std::collections::BTreeMap<i64, Vec<(String, (f64, f64), Option<f64>)>> = Default::default();
     for days in tiles.values() {
@@ -559,30 +601,15 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
     }
     // The level whose cells are nearest the size asked, by ratio (`1000` takes MODIS's 926.6 m
     // overview, not its 463 m one); the full images by default.
-    let level = match p.get("cellSize").filter(|v| !v.is_null()) {
+    let level = match size {
         None => 0,
-        Some(v) => {
-            let size =
-                v.as_f64().filter(|c| c.is_finite() && *c > 0.0).ok_or("cellSize is a size in the files' units (metres for most)")?;
+        Some(size) => {
             let off = |l: &rustgis_data::raster::cog::Level| (layout.transform_of(l).pixel_width.abs() / size).ln().abs();
             (0..layout.levels.len()).min_by(|a, b| off(&layout.levels[*a]).total_cmp(&off(&layout.levels[*b]))).unwrap_or(0)
         }
     };
     let lv = layout.levels.get(level).ok_or("the file has no image")?;
     let lt = layout.transform_of(lv);
-    // An overview is often made by taking one pixel in each block (the Brazil Data Cube's are,
-    // GDAL's NEAREST), so a cell of it is one of the full images' pixels, which can differ much
-    // from the place's mean: "average" reads the full images and takes the mean of each cell's.
-    let average = match p.get("resampling").filter(|v| !v.is_null()) {
-        None => false,
-        Some(v) => match v.as_str().map(str::trim) {
-            Some("") | Some("nearest") => false,
-            Some("average") => true,
-            Some(x) => return Err(format!("resampling is nearest or average, not {x}")),
-            // A number or anything else isn't read as the default: said.
-            None => return Err("resampling is nearest or average".into()),
-        },
-    };
     let full = layout.levels.first().ok_or("the file has no image")?;
     let (read, factor) = if average && level > 0 {
         let f = (f64::from(full.width) / f64::from(lv.width.max(1))).round();
@@ -602,18 +629,6 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
     let read_tile_rows = layout.levels.get(read).map_or(1, |l| l.tile_height).div_ceil(factor).max(1);
     // The area, in the files' coordinates: the box's edges, each at 32 points, as a curved grid
     // (MODIS's sinusoidal) bends them.
-    let bbox = match p.get("bbox").filter(|v| !v.is_null()) {
-        Some(v) if v.as_str().is_some_and(|t| t.trim().eq_ignore_ascii_case("view")) => view(s)?,
-        None => view(s)?,
-        Some(v) => {
-            let b: Option<Vec<f64>> =
-                v.as_array().filter(|a| a.len() == 4).and_then(|a| a.iter().map(|x| x.as_f64().filter(|x| x.is_finite())).collect());
-            match b.as_deref() {
-                Some([w, so, e, n]) if w < e && so < n => [*w, *so, *e, *n],
-                _ => return Err("bbox is [west, south, east, north] in degrees, or \"view\"".into()),
-            }
-        }
-    };
     let tr = layout.crs.transformer()?;
     let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
     let [w, so, e, n] = bbox;

@@ -27,6 +27,7 @@ mod editpanes;
 mod embeddingsui;
 mod failureui;
 mod geocodeui;
+mod geometrycalc;
 mod globe_drape;
 mod graphicformat;
 pub mod icons;
@@ -753,6 +754,45 @@ pub struct RustGisApp {
 }
 
 impl RustGisApp {
+    /// The Ctrl (⌘) shortcuts the keymap takes, as (Alt, Shift, key), the clipboard's left out:
+    /// in a browser, what the web app keeps from the browser's own shortcuts (⌘D bookmarking
+    /// the page, ⌘Y opening its history, ⌘= zooming it), as design tools in the browser do.
+    pub fn command_keys(&self) -> Vec<(bool, bool, egui::Key)> {
+        let mut keys: Vec<(bool, bool, egui::Key)> = self
+            .ui
+            .keymap
+            .bindings
+            .iter()
+            .map(|b| b.chord)
+            .filter(|c| c.command && !keymap::is_clipboard(*c))
+            .map(|c| (c.alt, c.shift, c.key))
+            .collect();
+        keys.sort_by_key(|k| (k.0, k.1, k.2 as u32));
+        keys.dedup();
+        keys
+    }
+
+    /// A fingerprint of the keymap's key combinations: cheap to take every frame (no
+    /// allocation), it changes when a shortcut is added, removed or rebound, so a caller can
+    /// rebuild [`RustGisApp::command_keys`] only then.
+    pub fn shortcuts_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for b in &self.ui.keymap.bindings {
+            b.chord.hash(&mut h);
+        }
+        self.ui.keymap.bindings.len().hash(&mut h);
+        h.finish()
+    }
+
+    /// Whether a browser key press (its `key` and `code`, Ctrl or ⌘ held, Alt, Shift) is one of
+    /// [`RustGisApp::command_keys`]: as egui matches a shortcut, an extra Alt or Shift doesn't
+    /// stop it (⌘+ is ⌘⇧= on most keyboards).
+    pub fn takes_browser_key(keys: &[(bool, bool, egui::Key)], key: &str, code: &str, command: bool, alt: bool, shift: bool) -> bool {
+        command
+            && keymap::browser_key(key, code).is_some_and(|k| keys.iter().any(|&(a, s, bound)| bound == k && (!a || alt) && (!s || shift)))
+    }
+
     /// egui's wgpu render state from the host (`frame.wgpu_render_state()`), feeding the GPU
     /// map backend. Cheap to call every frame: the state is Arc-backed.
     pub fn set_render_state(&mut self, rs: Option<egui_wgpu::RenderState>) {
@@ -2734,6 +2774,12 @@ impl RustGisApp {
             }
             "ui.dialog" => {
                 let which = p.get("name").and_then(Value::as_str).unwrap_or("");
+                if which == "calculateGeometry" {
+                    let id = self.session.layer_id(p)?;
+                    let form = geometrycalc::Form::new(&self.session, id)?;
+                    self.dialogs = dialogs::Dialogs { open: Some("calculateGeometry"), geometry: Some(form), ..Default::default() };
+                    return Ok(Value::Null);
+                }
                 // A Web Data service opens in the right pane, beside the map it searches.
                 if let Some(name) = panes::web_data_name(which) {
                     // A Web Data panel opened on a search.

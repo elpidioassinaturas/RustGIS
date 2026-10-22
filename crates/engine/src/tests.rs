@@ -7478,6 +7478,57 @@ fn a_stac_data_cube_on_the_time_slider() {
     assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
 }
 
+/// A search's `"bbox": "view"` is the map's view in any case or spacing, as the trend and the data
+/// cube read it; any other text is refused, never read as no area at all.
+#[test]
+fn a_stac_search_takes_view_in_any_case() {
+    let s = world();
+    let search = |bbox: &str| crate::cmd::stac::search_params(&s, &json!({"bbox": bbox})).unwrap().bbox;
+    assert!(search("view").is_some());
+    assert_eq!(search(" VIEW "), search("view"));
+    for bad in [json!("nowhere"), json!(7), json!({"w": 1}), json!([10, 45, 11, 46, "extra"]), json!([10, 45, 11, "46"])] {
+        let e = crate::cmd::stac::search_params(&s, &json!({"bbox": bad})).unwrap_err();
+        assert!(e.contains("bbox is"), "{bad}: {e}");
+    }
+    assert!(crate::cmd::stac::search_params(&s, &json!({})).unwrap().bbox.is_none(), "no bbox, no area");
+}
+
+/// A trend given `"bbox": " VIEW "` searches the map's view: its search request carries the box
+/// the trend reads, not no area at all.
+#[test]
+fn a_stac_trend_searches_the_view_it_reads() {
+    use std::io::{Read, Write};
+    let mut s = world();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let api = format!("http://{}/v1", listener.local_addr().unwrap());
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().take(4).flatten() {
+            let mut buf = [0u8; 8192];
+            let n = c.read(&mut buf).unwrap_or(0);
+            let line = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or("").to_string();
+            seen.lock().unwrap().push(line);
+            let body = r#"{"type": "FeatureCollection", "features": []}"#;
+            let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        }
+    });
+    let p = json!({"url": api, "collection": "mod", "asset": "NDVI", "bbox": " VIEW ", "start": "2024", "end": "2024"});
+    let e = s.run("cube.trend", &p).unwrap_err();
+    assert!(e.contains("no item"), "the search was made and found nothing: {e}");
+    let lines = asked.lock().unwrap().clone();
+    let search = lines.iter().find(|l| l.contains("/search")).unwrap_or_else(|| panic!("{lines:?}"));
+    let query = search.split(['?', ' ']).nth(2).unwrap_or_default();
+    let bbox = query.split('&').find_map(|kv| kv.strip_prefix("bbox=")).unwrap_or_else(|| panic!("no bbox in {search}"));
+    // The commas as sent, or percent-encoded in either case.
+    let asked: Vec<f64> = bbox.replace("%2C", ",").replace("%2c", ",").split(',').map(|v| v.parse().unwrap()).collect();
+    let view = crate::cmd::stac::search_params(&s, &json!({"bbox": "view"})).unwrap().bbox.unwrap();
+    assert_eq!(asked.len(), 4, "{search}");
+    for (a, v) in asked.iter().zip(view) {
+        assert!((a - v).abs() < 1e-6, "{search} against the view {view:?}");
+    }
+}
+
 /// A trend over a STAC collection's band (#579), read in place from its files over an area: each
 /// date's values scaled as its own metadata says (here date k's scale is k + 1 ten-thousandths,
 /// so every cell grows in a straight line), Sen's slope as worked out by hand; the same outputs
@@ -7536,6 +7587,20 @@ fn a_trend_over_a_stac_collection() {
     for (x, y) in [(10, 20), (511, 511)] {
         let got = f64::from(ws.bands[0].data[y * 768 + 256 + x]);
         assert!((got - per_year(x, y)).abs() < 1e-4, "({x}, {y}): {got} vs {}", per_year(x, y));
+    }
+    // The parameters read without the network are refused before the search: an API on a
+    // closed port, never asked.
+    for (bad, said) in [
+        (json!({"bbox": [11, 45, 10, 46]}), "bbox is"),
+        (json!({"cellSize": 0}), "cellSize is"),
+        (json!({"resampling": "bilinear"}), "resampling is"),
+    ] {
+        let mut q = json!({"url": "http://127.0.0.1:9/v1", "collection": "mod", "asset": "NDVI", "bbox": [10, 45, 11, 46], "start": "2024", "end": "2024"});
+        for (k, v) in bad.as_object().unwrap() {
+            q[k] = v.clone();
+        }
+        let e = s.run("cube.trend", &q).unwrap_err();
+        assert!(e.contains(said), "{e}");
     }
     // An area no file covers (the items only near it) is refused, not four empty rasters.
     let away = json!({"url": api, "collection": "mod", "asset": "NDVI", "bbox": [20, 45, 21, 46], "start": "2024-01-01", "end": "2024-03"});

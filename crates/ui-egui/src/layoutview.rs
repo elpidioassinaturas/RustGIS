@@ -93,6 +93,10 @@ pub struct LayoutView {
     /// Where the primary button last went down: egui forgets it on release, and a click is
     /// judged by where it started.
     pressed: Option<Pos2>,
+    /// The map of a frame being panned, with [`PAN_OVERSCAN`] of map past each side: drawn once
+    /// as the pan starts and slid under the pointer, so the map comes into view as it moves; None
+    /// when it couldn't be drawn (it isn't tried again for that pan).
+    pan_preview: Option<(u32, Option<egui::TextureHandle>)>,
     /// The arrow-key nudges so far: how many runs of them there have been, and the last one's
     /// layout, element and time (seconds), for [`LayoutView::nudge_key`].
     nudges: u64,
@@ -129,6 +133,38 @@ pub(crate) fn follow_project(app: &mut RustGisApp) {
         app.layout.typing.clear();
     }
     app.layout.project = Some(opened);
+}
+
+/// How much map a pan's preview draws past each side of the frame, in frame widths and heights.
+const PAN_OVERSCAN: f64 = 1.0;
+/// Most pixels a pan's preview is drawn with: it's drawn on the spot as the pan starts.
+const PAN_PREVIEW_PIXELS: f64 = 6_000_000.0;
+/// Longest side, in pixels, a pan's preview is drawn with, within what the GPU takes.
+const PAN_PREVIEW_SIDE: f64 = 8192.0;
+
+/// A map frame's map with [`PAN_OVERSCAN`] past each side, at the screen's resolution (or less,
+/// within [`PAN_PREVIEW_PIXELS`] and [`PAN_PREVIEW_SIDE`]), for a pan's preview. It doesn't wait
+/// for tiles still on their way, as it's drawn while the pointer moves.
+fn pan_preview(app: &mut RustGisApp, ctx: &egui::Context, layout: &Layout, id: u32, s: f32) -> Option<egui::TextureHandle> {
+    let e = layout.element(id)?;
+    let ElementKind::MapFrame { map, center, scale, bearing, pitch, .. } = &e.kind else { return None };
+    // A tilted view's perspective follows the drawing's height, so a taller drawing wouldn't match
+    // the frame: a pitched frame slides the page as before.
+    if *pitch != 0.0 {
+        return None;
+    }
+    let m = app.session.project.maps.iter_mut().find(|m| m.name.eq_ignore_ascii_case(map))?;
+    let cam = frame_camera(m, *center, *scale, *bearing, *pitch);
+    let k = 1.0 + 2.0 * PAN_OVERSCAN;
+    let (w, h) = (e.w * PT_PER_MM * k, e.h * PT_PER_MM * k);
+    let screen = f64::from(s) / PT_PER_MM * f64::from(ctx.pixels_per_point());
+    // Within the pixel budget, and within the longest side the GPU takes for a texture (a long,
+    // thin frame could pass the first and not the second).
+    let side = (ctx.input(|i| i.max_texture_side) as f64).min(PAN_PREVIEW_SIDE);
+    let ppp = screen.min((PAN_PREVIEW_PIXELS / (w * h).max(1.0)).sqrt()).min(side / w.max(h).max(1.0)).max(0.01);
+    let pm = rustgis_engine::render::layout::frame_map_preview(m, cam, w, h, ppp)?;
+    let img = egui::ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
+    Some(ctx.load_texture("layout_pan_preview", img, egui::TextureOptions::LINEAR))
 }
 
 /// Seconds after the wheel stops before a map frame's zoom is applied.
@@ -549,6 +585,16 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
             app.layout.key = Some(key);
         }
     }
+    // A pan's preview is drawn as the pan starts, and let go when it ends.
+    match app.layout.drag {
+        Some(Drag::PanFrame(id, _)) if app.layout.pan_preview.as_ref().is_none_or(|(p, _)| *p != id) => {
+            let ctx = ui.ctx().clone();
+            let map = pan_preview(app, &ctx, &layout, id, s);
+            app.layout.pan_preview = Some((id, map));
+        }
+        Some(Drag::PanFrame(..)) => {}
+        _ => app.layout.pan_preview = None,
+    }
     // Shadow, page, elements.
     painter.rect_filled(page.translate(vec2(3.0, 4.0)), 2.0, Color32::from_black_alpha(50));
     painter.rect_filled(page, 0.0, Color32::WHITE);
@@ -576,7 +622,19 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
             let uv = Rect::from_min_max(src((e.x, e.y)), src((e.x + e.w, e.y + e.h)));
             let clip = painter.with_clip_rect(frame);
             clip.rect_filled(frame, 0.0, Color32::WHITE);
-            clip.image(tex.id(), frame, uv, Color32::WHITE);
+            match &app.layout.pan_preview {
+                // A pan: the frame's map with the overscan around it, moved with the pointer, so
+                // what comes into view is map, not the page beside the frame.
+                Some((pid, Some(map))) if *pid == id && k == 1.0 => {
+                    let o = PAN_OVERSCAN as f32;
+                    let around = Rect::from_min_max(frame.min - frame.size() * o, frame.max + frame.size() * o);
+                    let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                    clip.image(map.id(), around.translate(vec2(dx as f32, dy as f32) * s), full, Color32::WHITE);
+                }
+                _ => {
+                    clip.image(tex.id(), frame, uv, Color32::WHITE);
+                }
+            }
         }
     }
     let accent = t.accent;
@@ -1772,6 +1830,67 @@ mod tests {
         let old = layout.element(id).unwrap();
         assert!(((e.x + e.w / 2.0) - (old.x + old.w / 2.0)).abs() < 1e-9 && ((e.y + e.h / 2.0) - (old.y + old.h / 2.0)).abs() < 1e-9);
         assert_eq!(app.layout.selected, Some(id), "still selected");
+    }
+
+    /// While a map frame is panned, its map is drawn past the frame's sides and slid with the
+    /// pointer, so what comes into view is map rather than the page beside the frame; the drawing
+    /// is let go when the pan ends, which moves the frame's map as before.
+    #[test]
+    fn a_panned_frame_shows_map_beyond_its_edges() {
+        use rustgis_engine::map::layout::ElementKind;
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Pan"})).unwrap();
+        app.layout.navigate = true;
+        let li = app.session.active_layout.unwrap();
+        let area = Rc::new(Cell::new(Rect::NOTHING));
+        let shown = area.clone();
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1000.0, 760.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                shown.set(ui.available_rect_before_wrap());
+                super::show(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        let layout = h.state().session.project.layouts[li].clone();
+        let id = layout.first_frame().unwrap();
+        let center = |l: &rustgis_engine::map::layout::Layout| match &l.element(id).unwrap().kind {
+            ElementKind::MapFrame { center, .. } => *center,
+            k => panic!("{k:?}"),
+        };
+        let before = center(&layout);
+        let e = layout.element(id).unwrap();
+        let (page, s) = page_rect(&h.state().layout, area.get(), &layout);
+        let from = to_screen(page, s, (e.x + e.w / 2.0, e.y + e.h / 2.0));
+        let to = from + vec2(120.0, 0.0);
+        let button = |pos: Pos2, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.event(Event::PointerMoved(from));
+        h.step();
+        h.event(button(from, true));
+        h.step();
+        for i in 1..=4 {
+            h.event(Event::PointerMoved(from + (to - from) * i as f32 / 4.0));
+            h.step();
+        }
+        // Mid-pan: the frame's map with its overscan is drawn, three frames wide and high.
+        let (pid, map) = h.state().layout.pan_preview.clone().expect("a preview while panning");
+        assert_eq!(pid, id);
+        let size = map.expect("the frame's map was drawn").size();
+        let frame_px = (e.w as f32 * s * h.ctx.pixels_per_point(), e.h as f32 * s * h.ctx.pixels_per_point());
+        assert!(
+            (size[0] as f32 - 3.0 * frame_px.0).abs() < 3.0 && (size[1] as f32 - 3.0 * frame_px.1).abs() < 3.0,
+            "{size:?} for a frame of {frame_px:?} px"
+        );
+        h.event(button(to, false));
+        h.step();
+        assert!(h.state().layout.pan_preview.is_none(), "let go after the pan");
+        assert_ne!(center(&h.state().session.project.layouts[li]), before, "the pan moved the frame's map");
     }
 
     /// Pressing a corner handle and dragging away fast resizes the element, though by the time

@@ -105,6 +105,10 @@ pub fn start() {
         if !embedded && let Err(e) = guard_unload(dirty.clone()) {
             log::error!("no unsaved-changes guard: {e}");
         }
+        let taken: TakenKeys = TakenKeys::default();
+        if let Err(e) = keep_app_shortcuts(taken.clone()) {
+            log::error!("the browser keeps its own shortcuts: {e}");
+        }
         let mut options = eframe::WebOptions::default();
         if query().contains("webgl")
             && let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup
@@ -246,7 +250,7 @@ pub fn start() {
                     } else {
                         None
                     };
-                    Ok(Box::new(WebShell { app, inbox, notes, dirty, embed }))
+                    Ok(Box::new(WebShell { app, inbox, notes, dirty, embed, taken, taken_print: None }))
                 }),
             )
             .await;
@@ -304,7 +308,15 @@ struct WebShell {
     notes: Notes,
     dirty: Rc<Cell<bool>>,
     embed: Option<Embed>,
+    /// The app's Ctrl (⌘) shortcuts, kept current for [`keep_app_shortcuts`].
+    taken: TakenKeys,
+    /// [`RustGisApp::shortcuts_fingerprint`] when `taken` was last filled.
+    taken_print: Option<u64>,
 }
+
+/// The app's Ctrl (⌘) shortcuts as (Alt, Shift, key): [`RustGisApp::command_keys`], shared with
+/// the page's key listener.
+type TakenKeys = Rc<RefCell<Vec<(bool, bool, egui::Key)>>>;
 
 /// The link to the page that embeds the app (`?embed`; see `embed.rs`).
 struct Embed {
@@ -433,6 +445,13 @@ impl eframe::App for WebShell {
         }
         self.app.logic(ctx);
         self.dirty.set(self.app.session.dirty);
+        // The shortcuts can be changed in the app: the key listener follows, rebuilt only when
+        // the keymap changed.
+        let print = self.app.shortcuts_fingerprint();
+        if self.taken_print != Some(print) {
+            self.taken_print = Some(print);
+            *self.taken.borrow_mut() = self.app.command_keys();
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -923,6 +942,29 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
     });
     let window = web_sys::window().ok_or("no window")?;
     window.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 10_000).map_err(err)?;
+    Ok(())
+}
+
+/// Keeps the browser from acting on the app's Ctrl (⌘) shortcuts too: ⌘D duplicating a layout
+/// element mustn't bookmark the page, ⌘Y (redo) open its history, or ⌘= (zoom in) zoom it. eframe
+/// stops only ⌘, ⌘O, ⌘P and ⌘S. Seen first (the capture phase), the default is prevented but the
+/// key still reaches egui. Browsers keep a few for themselves whatever a page does (⌘T, ⌘N, ⌘W).
+fn keep_app_shortcuts(taken: TakenKeys) -> Result<(), String> {
+    let window = web_sys::window().ok_or("no window")?;
+    let on_key = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
+        // AltGr reports as Ctrl+Alt on Windows: it types a character, it isn't a shortcut.
+        if e.get_modifier_state("AltGraph") {
+            return;
+        }
+        // As eframe reads it, Ctrl or ⌘ is egui's command on every platform, so the app's
+        // shortcut runs on either and the browser's is kept from both.
+        let command = e.ctrl_key() || e.meta_key();
+        if RustGisApp::takes_browser_key(&taken.borrow(), &e.key(), &e.code(), command, e.alt_key(), e.shift_key()) {
+            e.prevent_default();
+        }
+    });
+    window.add_event_listener_with_callback_and_bool("keydown", on_key.as_ref().unchecked_ref(), true).map_err(|e| format!("{e:?}"))?;
+    on_key.forget();
     Ok(())
 }
 

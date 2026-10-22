@@ -2282,6 +2282,52 @@ fn help_shortcuts_lists_the_keymap() {
 }
 
 #[test]
+fn geometry_calculator_switching_back_creates_a_unique_field() {
+    use rustgis_ui_egui::rustgis_engine::{
+        data::{Dataset, Field, FieldType, Geometry, GeometryType, Value},
+        geom::Coord,
+    };
+
+    let mut h = harness();
+    h.state_mut().run("ui.language", json!({"code": "en"})).unwrap();
+
+    let mut ds = Dataset::new("Geometry mode test", GeometryType::Point, vec![Field::new("x_deg", FieldType::Double)]);
+    ds.push(Some(Geometry::Point(Coord::new(117.0, 3.0))), vec![Value::Float(99.0)]);
+
+    let id = h.state_mut().session.map_mut().add_dataset(ds);
+    // Another layer is active: the dialog still calculates the table's layer.
+    let mut other = Dataset::new("Active layer", GeometryType::Point, vec![Field::new("x_deg", FieldType::Double)]);
+    other.push(Some(Geometry::Point(Coord::new(10.0, 3.0))), vec![Value::Float(5.0)]);
+    let other = h.state_mut().session.map_mut().add_dataset(other);
+    h.state_mut().session.active_layer = Some(other);
+    h.state_mut().run("ui.dialog", json!({"name": "calculateGeometry", "layer": id})).unwrap();
+    h.step();
+    h.step();
+
+    h.get_by_label("Existing field").click();
+    h.step();
+    h.step();
+
+    h.get_by_label("New field").click();
+    h.step();
+    h.step();
+
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Calculate").click();
+    h.step();
+    h.step();
+
+    assert!(h.state().dialogs.open.is_none(), "calculation should close the dialog");
+    let ds = &h.state().session.map().layer(id).unwrap().dataset;
+    let old = ds.field_index("x_deg").unwrap();
+    let new = ds.field_index("x_deg_2").expect("a unique field should be created");
+    assert_eq!(ds.value(0, old).as_f64(), Some(99.0));
+    assert_eq!(ds.value(0, new).as_f64(), Some(117.0));
+    let active = &h.state().session.map().layer(other).unwrap().dataset;
+    assert!(active.field_index("x_deg_2").is_none(), "the active layer is left alone");
+    assert_eq!(active.value(0, 0).as_f64(), Some(5.0));
+}
+
+#[test]
 fn map_and_layout_tabs_rename_from_their_menus() {
     let mut h = harness();
     h.state_mut().run("ui.language", json!({"code":"en"})).unwrap();

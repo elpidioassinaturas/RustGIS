@@ -459,6 +459,18 @@ pub(crate) fn read_chunk<R: Read + Seek>(dec: &mut Decoder<R>, index: u32) -> Re
     }
 }
 
+/// Turns a JPEG-compressed image's three YCbCr bands into red, green and blue in place, with the
+/// JFIF (full-range) coefficients JPEG-in-TIFF files use.
+fn ycbcr_to_rgb(bands: &mut [Vec<f32>]) {
+    let [y, cb, cr] = bands else { return };
+    for ((y, cb), cr) in y.iter_mut().zip(cb.iter_mut()).zip(cr.iter_mut()) {
+        let (luma, blue, red) = (*y, *cb - 128.0, *cr - 128.0);
+        *y = (luma + 1.402 * red).round().clamp(0.0, 255.0);
+        *cb = (luma - 0.344_136 * blue - 0.714_136 * red).round().clamp(0.0, 255.0);
+        *cr = (luma + 1.772 * blue).round().clamp(0.0, 255.0);
+    }
+}
+
 /// Bits per sample of the current image (the most of any sample).
 fn bits<R: Read + Seek>(dec: &mut Decoder<R>) -> u16 {
     dec.find_tag_unsigned_vec::<u16>(Tag::BitsPerSample).ok().flatten().and_then(|v| v.into_iter().max()).unwrap_or(8)
@@ -932,6 +944,8 @@ pub(super) fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<O
     }
     // From here on, tags (colour type, planar layout) are those of the chosen image.
     let ct = dec.colortype().map_err(err)?;
+    // JPEG-compressed YCbCr, the only YCbCr read (the colour match below rejects the rest).
+    let ycbcr = matches!(ct, ColorType::YCbCr(_)) && dec.find_tag_unsigned::<u16>(Tag::Compression).ok().flatten() == Some(7);
     // A palette image (shown to the decoder as grey) is coloured by its table.
     let ct = match ct {
         ColorType::Gray(bits) if palette && dec.find_tag(Tag::ColorMap).ok().flatten().is_some() => ColorType::Palette(bits),
@@ -941,10 +955,9 @@ pub(super) fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<O
         ColorType::Gray(_) => (1, ColorHint::Gray),
         ColorType::GrayA(_) => (2, ColorHint::GrayAlpha),
         ColorType::RGB(_) => (3, ColorHint::Rgb { alpha: false }),
-        // The decoder turns JPEG-compressed YCbCr into RGB; other YCbCr data would stay YCbCr.
-        ColorType::YCbCr(_) if dec.find_tag_unsigned::<u16>(Tag::Compression).ok().flatten() == Some(7) => {
-            (3, ColorHint::Rgb { alpha: false })
-        }
+        // The decoder leaves JPEG-compressed YCbCr as it is (it turns off the JPEG library's colour
+        // conversion), so it is turned into RGB below (issue #692); other YCbCr data isn't read.
+        ColorType::YCbCr(_) if ycbcr => (3, ColorHint::Rgb { alpha: false }),
         ColorType::RGBA(_) => (4, ColorHint::Rgb { alpha: true }),
         ColorType::Palette(bits) => {
             let map: Vec<u16> = dec.find_tag(Tag::ColorMap).ok().flatten().and_then(|v| v.into_u16_vec().ok()).unwrap_or_default();
@@ -990,7 +1003,7 @@ pub(super) fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<O
             Err(e) => return Err(err(e)),
         }
     };
-    let (bands, data_type) = if let Some(buf) = whole {
+    let (mut bands, data_type) = if let Some(buf) = whole {
         let (values, dt) = to_f32(buf);
         if values.len() < n.saturating_mul(nbands) {
             return Err(err("couldn't read every band"));
@@ -1020,6 +1033,9 @@ pub(super) fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<O
         decimate(&mut dec, iw, ih, nbands, planar, decimate_by, open)?
     };
 
+    if ycbcr {
+        ycbcr_to_rgb(&mut bands);
+    }
     // A scan keeps a stand-in transform, sized to the pixels read.
     if !geo.referenced {
         let mut r = Raster::new(name, w, h, bands, super::unreferenced(w, h), Crs::LonLat, geo.nodata, color, data_type)?;
@@ -2124,6 +2140,135 @@ mod tests {
             }
             let _ = read(std::io::Cursor::new(&junk), "junk");
         }
+    }
+
+    /// One image of [`ycbcr_jpeg_tiff`] to put at byte `base`: `w` × `h` (`w`, `h` and `rows` multiples
+    /// of 16) of four flat colours, one per quarter, each strip of `rows` rows a JPEG, as GDAL writes
+    /// a `COMPRESS=JPEG PHOTOMETRIC=YCBCR` file: JPEG compression, YCbCr photometric, chroma
+    /// subsampled 2×1 (as the `image` crate's encoder does; GDAL's 2×2 was checked by hand on a
+    /// GDAL-made file). With `geo` it has the GeoTIFF tags, as `overview` the reduced-image flag.
+    /// Returns its bytes and where its next-IFD offset is.
+    fn ycbcr_jpeg_image(base: usize, (w, h, rows): (u32, u32, u32), colors: [[u8; 3]; 4], geo: bool, overview: bool) -> (Vec<u8>, usize) {
+        let strips: Vec<Vec<u8>> = (0..h / rows)
+            .map(|s| {
+                let mut rgb = image::RgbImage::new(w, rows);
+                for (x, y, px) in rgb.enumerate_pixels_mut() {
+                    *px = image::Rgb(colors[(x / (w / 2) + 2 * ((s * rows + y) / (h / 2))) as usize]);
+                }
+                let mut jpeg = Vec::new();
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 100).encode_image(&rgb).unwrap();
+                jpeg
+            })
+            .collect();
+        let n = strips.len() as u32;
+        let le16 = |v: &[u16]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+        let le32 = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+        let le64 = |v: &[f64]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+        // (tag, type, count, bytes): values of up to four bytes go in the entry, longer ones after
+        // the entries (the strip offsets are filled in once the entries' size is known).
+        let mut entries: Vec<(u16, u16, u32, Vec<u8>)> = Vec::new();
+        if overview {
+            entries.push((254, 4, 1, le32(&[1])));
+        }
+        entries.extend([
+            (256, 3, 1, le16(&[w as u16])),
+            (257, 3, 1, le16(&[h as u16])),
+            (258, 3, 3, le16(&[8, 8, 8])),
+            (259, 3, 1, le16(&[7])),
+            (262, 3, 1, le16(&[6])),
+            (273, 4, n, vec![0; 4 * n as usize]),
+            (277, 3, 1, le16(&[3])),
+            (278, 3, 1, le16(&[rows as u16])),
+            (279, 4, n, le32(&strips.iter().map(|s| s.len() as u32).collect::<Vec<_>>())),
+            (284, 3, 1, le16(&[1])),
+            (530, 3, 2, le16(&[2, 1])),
+            // ReferenceBlackWhite, the JFIF values, as rationals.
+            (532, 5, 6, le32(&[0, 1, 255, 1, 128, 1, 255, 1, 128, 1, 255, 1])),
+        ]);
+        if geo {
+            entries.push((33550, 12, 3, le64(&[1.0, 1.0, 0.0])));
+            entries.push((33922, 12, 6, le64(&[0.0, 0.0, 0.0, 500_000.0, 5_000_000.0, 0.0])));
+            entries.push((34735, 3, 16, le16(&[1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, 1, 3072, 0, 1, 25832])));
+        }
+        let table_end = base + 2 + 12 * entries.len() + 4;
+        let long: usize = entries.iter().filter(|e| e.3.len() > 4).map(|e| e.3.len()).sum();
+        let mut at = table_end;
+        let mut strip_at = (table_end + long) as u32;
+        let (mut table, mut data) = (Vec::new(), Vec::new());
+        for (tag, kind, count, bytes) in &entries {
+            let mut bytes = bytes.clone();
+            if *tag == 273 {
+                bytes = le32(&strips.iter().map(|s| (strip_at, strip_at += s.len() as u32).0).collect::<Vec<_>>());
+            }
+            table.extend(tag.to_le_bytes());
+            table.extend(kind.to_le_bytes());
+            table.extend(count.to_le_bytes());
+            if bytes.len() > 4 {
+                table.extend((at as u32).to_le_bytes());
+                at += bytes.len();
+                data.extend(bytes);
+            } else {
+                bytes.resize(4, 0);
+                table.extend(bytes);
+            }
+        }
+        let mut out = (entries.len() as u16).to_le_bytes().to_vec();
+        out.extend(table);
+        let next = 2 + 12 * entries.len();
+        out.extend(0u32.to_le_bytes());
+        out.extend(data);
+        out.extend(strips.concat());
+        (out, next)
+    }
+
+    /// A TIFF of [`ycbcr_jpeg_image`]s: the full image with its GeoTIFF tags (unless `!geo`), then
+    /// any overviews.
+    fn ycbcr_jpeg_tiff(sizes: &[(u32, u32, u32)], colors: [[u8; 3]; 4], geo: bool) -> Vec<u8> {
+        let mut out = vec![b'I', b'I', 42, 0, 8, 0, 0, 0];
+        let mut next_at = None;
+        for (i, size) in sizes.iter().enumerate() {
+            let base = out.len();
+            if let Some(at) = next_at {
+                out[at..at + 4].copy_from_slice(&(base as u32).to_le_bytes());
+            }
+            let (bytes, next) = ycbcr_jpeg_image(base, *size, colors, geo && i == 0, i > 0);
+            next_at = Some(base + next);
+            out.extend(bytes);
+        }
+        out
+    }
+
+    #[test]
+    fn ycbcr_jpeg_is_shown_as_rgb() {
+        // Issue #692: the tiff crate leaves JPEG-compressed YCbCr as it is, which drew a COG with
+        // a purple and green cast. Flat colours survive the JPEG within a few levels.
+        let colors = [[200, 30, 30], [30, 160, 40], [20, 40, 220], [230, 230, 60]];
+        let check = |r: &Raster, w: usize, h: usize| {
+            assert_eq!((r.width as usize, r.height as usize, r.bands.len(), r.color.clone()), (w, h, 3, ColorHint::Rgb { alpha: false }));
+            for (i, rgb) in colors.iter().enumerate() {
+                let (x, y) = (w / 4 + w / 2 * (i % 2), h / 4 + h / 2 * (i / 2));
+                for (band, want) in r.bands.iter().zip(rgb) {
+                    let got = band.data[y * w + x];
+                    assert!((got - f32::from(*want)).abs() <= 4.0, "quarter {i}: {got} for {want}");
+                }
+            }
+        };
+        let bytes = ycbcr_jpeg_tiff(&[(32, 32, 32)], colors, true);
+        let mut dec = Decoder::new(std::io::Cursor::new(&bytes)).unwrap();
+        assert!(matches!(dec.colortype().unwrap(), ColorType::YCbCr(8)));
+        check(&read(std::io::Cursor::new(&bytes), "ycc").unwrap(), 32, 32);
+        // Without geo tags (a scan), which returns before the georeferencing.
+        let scan = read(std::io::Cursor::new(ycbcr_jpeg_tiff(&[(32, 32, 32)], colors, false)), "scan").unwrap();
+        assert!(!scan.georeferenced);
+        check(&scan, 32, 32);
+        // A million pixels in 16 strips, read a chunk at a time on several threads.
+        let big = ycbcr_jpeg_tiff(&[(1024, 1024, 64)], colors, true);
+        check(&read_threaded(&big, MAX_SAMPLES).unwrap(), 1024, 1024);
+        // An image too large for the limit is shown by its overview, a JPEG of its own.
+        let cog = ycbcr_jpeg_tiff(&[(64, 64, 64), (32, 32, 32)], colors, true);
+        let r = read_limited(reader(std::io::Cursor::new(&cog)).unwrap(), "cog", 4_000, None).unwrap();
+        assert_eq!(r.overview, Some((64, 64)));
+        check(&r, 32, 32);
     }
 
     #[test]

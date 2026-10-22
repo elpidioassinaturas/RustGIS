@@ -1,9 +1,9 @@
 //! Autocomplete for the Script pane (#662): a floating list of suggestions just under the cursor,
 //! as in a code editor. ↑/↓ move the highlight, Enter or Tab accept it, Escape closes the list, or
-//! a click accepts an item. What to offer at a cursor (`offer`) is worked out apart from the box
-//! and tested on its own; this first step completes command ids (a line's first word). Typing
-//! aids beside it: a command's parameters added on accept (`template`), and braces that close
-//! themselves (`brace`).
+//! a click accepts an item. What to offer at a cursor (`offer_at`) is worked out apart from the
+//! box and tested on its own: command ids (a line's first word), and a command's parameter keys in
+//! its `{…}` (`key_at`). Typing aids beside it: a command's parameters added on accept
+//! (`template`), and braces that close themselves (`brace`).
 
 use egui::text::{CCursor, CCursorRange};
 use egui::widgets::text_edit::{TextEditOutput, TextEditState};
@@ -18,12 +18,13 @@ const MIN_TYPED: usize = 2;
 const MIN_WIDTH: f32 = 220.0;
 
 /// What to offer at a cursor: the word being typed (char indexes, `end` at the cursor) and what
-/// can replace it.
+/// can replace it: command ids, or the keys of command `keys_of`'s parameters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Offer {
     pub start: usize,
     pub end: usize,
     pub items: Vec<String>,
+    pub keys_of: Option<String>,
 }
 
 /// The ids that complete the command id being typed at char `at` of `script`: the cursor at the
@@ -133,7 +134,99 @@ fn complete(start: usize, end: usize, word: &str, ids: &[String]) -> Option<Offe
         .collect();
     items.sort();
     items.truncate(MAX_ITEMS);
-    (!items.is_empty()).then_some(Offer { start, end, items })
+    (!items.is_empty()).then_some(Offer { start, end, items, keys_of: None })
+}
+
+/// The key being typed at char `at` of `script`: the cursor in a quoted word that starts an entry
+/// of its line's object, right after its `{` or a `,` (at the top level: not a value, not a nested
+/// object's key). The command's line (`hint_at`), where the word starts (after its quote, a char
+/// index), and the word.
+pub fn key_at(script: &str, at: usize) -> Option<(Hint, usize, String)> {
+    let h = hint_at(script, at)?;
+    let text = script.get(byte_at(script, h.brace)?..byte_at(script, at)?)?;
+    // What follows the cursor ends the word.
+    let next = script.get(byte_at(script, at)?..)?.chars().next();
+    if next.is_some_and(|c| !c.is_whitespace() && !matches!(c, '"' | ',' | '}')) {
+        return None;
+    }
+    let (mut depth, mut quoted, mut escaped, mut entry, mut start) = (0usize, false, false, false, None);
+    for (i, c) in text.chars().enumerate() {
+        let was_escaped = escaped;
+        escaped = c == '\\' && !was_escaped;
+        if quoted {
+            if c == '"' && !was_escaped {
+                (quoted, start) = (false, None);
+            }
+            continue;
+        }
+        match c {
+            '"' => (quoted, start, entry) = (true, (depth == 1 && entry).then_some(i + 1), false),
+            '{' | '[' | '(' => {
+                depth += 1;
+                entry = c == '{' && depth == 1;
+            }
+            '}' | ']' | ')' => (depth, entry) = (depth.saturating_sub(1), false),
+            ',' => entry = depth == 1,
+            c if c.is_whitespace() => {}
+            _ => entry = false,
+        }
+    }
+    let start = start?;
+    let word: String = text.chars().skip(start).collect();
+    if word.chars().any(|c| c.is_whitespace() || c == '\\') {
+        return None;
+    }
+    let start = h.brace + start;
+    Some((h, start, word))
+}
+
+/// The keys of the parameters `desc` describes, entry by entry, each with its alternatives
+/// (`"lon" | "x"`), and the entry's text as described.
+fn entries(desc: &str) -> Vec<(Vec<String>, String)> {
+    let params = rustgis_engine::param_list(desc).unwrap_or_default();
+    params
+        .iter()
+        .map(|p| {
+            let entry = format!("{{{}}}", p.text);
+            let keys = rustgis_engine::param_keys(&entry).filter(|k| !k.is_empty()).unwrap_or(vec![p.key]);
+            (keys.into_iter().map(str::to_string).collect(), p.text.to_string())
+        })
+        .collect()
+}
+
+/// The keys of command `id`'s parameters (`desc`) that complete `word`, typed from char `start`
+/// to `end`, case aside, in the order described; an entry already given on the line (`line`, from
+/// its `{`: a script's command is one line) isn't offered, nor its alternatives. `line` comes
+/// without the word being typed, so that key, closed or not, doesn't count as given (a key already
+/// closed, `"lat|": 5`, can still be changed), while the same key given elsewhere does.
+fn complete_keys(id: &str, desc: &str, line: &str, start: usize, end: usize, word: &str) -> Option<Offer> {
+    let given = rustgis_engine::param_keys(line).unwrap_or_default();
+    let items: Vec<String> = entries(desc)
+        .into_iter()
+        .filter(|(keys, _)| !keys.iter().any(|k| given.contains(&k.as_str())))
+        .flat_map(|(keys, _)| keys)
+        .filter(|k| k.get(..word.len()).is_some_and(|p| p.eq_ignore_ascii_case(word)))
+        .collect();
+    (!items.is_empty()).then_some(Offer { start, end, items, keys_of: Some(id.to_string()) })
+}
+
+/// What to offer at char `at` of `script`: the command ids for a line's first word, or the keys
+/// of the line's command for a key being typed in its `{…}`.
+fn offer_at(script: &str, at: usize, ids: &[String], session: &rustgis_engine::Session) -> Option<Offer> {
+    if let Some((start, word)) = word_at(script, at) {
+        return complete(start, at, &word, ids);
+    }
+    let (h, start, word) = key_at(script, at)?;
+    // The line from its `{`, the word being typed taken out.
+    let before = script.get(byte_at(script, h.brace)?..byte_at(script, start)?)?;
+    let after = script.get(byte_at(script, at)?..)?.split('\n').next()?;
+    complete_keys(&h.id, &params_of(session, &h.id)?, &format!("{before}{after}"), start, at, &word)
+}
+
+/// The text describing key `key` of command `id`'s parameters (`"size"?: number`), for the help
+/// beside a list of keys.
+fn key_help(session: &rustgis_engine::Session, id: &str, key: &str) -> Option<String> {
+    entries(&params_of(session, id)?).into_iter().find(|(keys, _)| keys.iter().any(|k| k == key)).map(|(_, text)| text)
 }
 
 /// `script_ids`, kept until the loaded plugins or the session's commands change (the built-in
@@ -228,6 +321,14 @@ const HELP_MIN_WIDTH: f32 = 200.0;
 /// The gap between the list and the help, and the popup frame's margins (both sides).
 const GAP: f32 = 12.0;
 const FRAME: f32 = 24.0;
+
+/// Draws a key's parameter `text` beside the list, coloured as the script is.
+fn draw_key_help(ui: &mut Ui, text: &str, width: f32) {
+    let palette = crate::scriptcolor::Palette::of(&crate::theme::Tokens::get(ui.ctx()));
+    let mut job = crate::scriptcolor::help_job(None, text, palette, &egui::TextStyle::Monospace.resolve(ui.style()));
+    job.wrap.max_width = width;
+    ui.label(job);
+}
 
 /// Draws `help` beside the list: the signature and parameters coloured as the script is, in its
 /// monospace font (smaller for the parameters).
@@ -430,10 +531,7 @@ pub fn show(
         match kept {
             Some(offer) => offer,
             None => {
-                // The ids only once there's a word to complete.
-                let offer = at
-                    .and_then(|at| word_at(script, at).map(|w| (at, w)))
-                    .and_then(|(at, (start, word))| complete(start, at, &word, &script_ids_cached(ui, session)));
+                let offer = at.and_then(|at| offer_at(script, at, &script_ids_cached(ui, session), session));
                 list.worked = Some(Worked { at, text, with: plugins, value: offer.clone() });
                 offer
             }
@@ -514,7 +612,13 @@ pub fn show(
             // short description split. Kept, it would need the id and the language as its
             // key (the help is translated), for next to nothing saved.
             let shown = hovered.filter(|_| pointer_leads).unwrap_or(selected);
-            if let Some(help) = offer.items.get(shown).and_then(|id| help(session, id)) {
+            if let Some(id) = &offer.keys_of {
+                // A key: the line describing its parameter.
+                if let Some(text) = offer.items.get(shown).and_then(|key| key_help(session, id, key)) {
+                    ui.add_space(GAP);
+                    draw_key_help(ui, &text, help_width);
+                }
+            } else if let Some(help) = offer.items.get(shown).and_then(|id| help(session, id)) {
                 // A gap, not a separator: in a row, egui's separator takes all the height it
                 // can, and would stretch the list down to the bottom of the screen.
                 ui.add_space(GAP);
@@ -590,9 +694,22 @@ pub fn hint(ui: &Ui, box_id: Id, out: &TextEditOutput, visible: egui::Rect, scri
 /// takes the pick back), and gives the box the focus again.
 pub fn accept(ui: &Ui, box_id: Id, script: &mut String, offer: &Offer, item: &str, session: &rustgis_engine::Session) {
     let chars: Vec<char> = script.chars().collect();
-    let (Some(before), Some(after)) = (chars.get(..offer.start), chars.get(offer.end..)) else { return };
-    let bare = after.iter().take_while(|c| **c != '\n').all(|c| c.is_whitespace());
-    let (tail, at) = if bare { params_of(session, item).map(|d| template(&d)).unwrap_or_default() } else { Default::default() };
+    let (Some(before), Some(mut after)) = (chars.get(..offer.start), chars.get(offer.end..)) else { return };
+    let (tail, at) = if offer.keys_of.is_some() {
+        // A key: closed, its colon and a space after it, ready for the value; a closing quote
+        // already there is taken in, and a key that has its colon keeps it.
+        let quoted = after.first() == Some(&'"');
+        let colon = quoted && after.get(1..).is_some_and(|a| a.iter().find(|c| !c.is_whitespace()) == Some(&':'));
+        if quoted && !colon {
+            after = after.get(1..).unwrap_or_default();
+        }
+        // With its colon, the cursor goes after the quote already there.
+        if colon { (String::new(), 1) } else { ("\": ".to_string(), 3) }
+    } else if after.iter().take_while(|c| **c != '\n').all(|c| c.is_whitespace()) {
+        params_of(session, item).map(|d| template(&d)).unwrap_or_default()
+    } else {
+        Default::default()
+    };
     let mut new: String = before.iter().collect();
     new.push_str(item);
     new.push_str(&tail);
@@ -1260,6 +1377,95 @@ mod tests {
         h.event(egui::Event::Paste("labels.style {".into()));
         h.run();
         assert_eq!(h.state().workflow.script, "labels.style {", "a paste is left as it is");
+    }
+
+    /// A key is being typed in a quoted word that starts an entry of the line's object: right
+    /// after its `{` or a `,`, at the top level; not in a value, a nested object or a comment.
+    #[test]
+    fn key_at_finds_a_key_being_typed() {
+        let at = |s: &str| super::key_at(s, s.chars().count()).map(|(h, start, word)| (h.id, start, word));
+        assert_eq!(at(r#"labels.style {""#), Some(("labels.style".into(), 15, String::new())));
+        assert_eq!(at(r#"labels.style {"layer": "Cities", "si"#).map(|k| k.2), Some("si".into()), "after a comma");
+        assert_eq!(at(r#"x.y {"w": "a\"b", ""#).map(|k| k.2), Some(String::new()), "an escaped quote in a value");
+        assert_eq!(at("# ñ\r\nlabels.style {\"la").map(|k| (k.1, k.2)), Some((20, "la".into())), "chars, CRLF");
+        assert_eq!(at(r#"labels.style {"where": "po"#), None, "a value");
+        assert_eq!(at(r#"x.y {"a": {""#), None, "a nested object");
+        assert_eq!(at(r#"x.y {"a": "#), None, "no quote");
+        assert_eq!(at(r#"x.y {"a" "#), None, "past the key");
+        assert_eq!(at(r#"# x.y {""#), None, "a comment");
+        let s = r#"labels.style {"layer"}"#;
+        assert_eq!(super::key_at(s, 20).map(|k| k.2), Some("layer".into()), "a closing quote after the cursor");
+        assert!(super::key_at(s, 18).is_none(), "a letter after the cursor");
+    }
+
+    /// The keys offered: the command's, in the order described, those typed so far, case aside;
+    /// not an entry already given, nor its alternatives.
+    #[test]
+    fn keys_offered_leave_out_those_given() {
+        let desc = r#"{"lon" | "x": number, "lat" | "y": number, "scale"?: number}"#;
+        let keys = |line: &str, word: &str| super::complete_keys("map.goToXY", desc, line, 0, 0, word).map(|o| o.items).unwrap_or_default();
+        assert_eq!(keys(r#"{""#, ""), ["lon", "x", "lat", "y", "scale"]);
+        assert_eq!(keys(r#"{"lon": 2, ""#, ""), ["lat", "y", "scale"]);
+        assert_eq!(keys(r#"{"x": 2, ""#, ""), ["lat", "y", "scale"], "an alternative given");
+        assert_eq!(keys(r#"{""#, "S"), ["scale"], "case aside");
+        assert!(keys(r#"{""#, "zz").is_empty());
+        assert_eq!(keys(r#"{"lat": 5}"#, ""), ["lon", "x", "scale"], "a key given");
+        let o = super::complete_keys("map.goToXY", desc, r#"{""#, 0, 0, "").unwrap();
+        assert_eq!(o.keys_of.as_deref(), Some("map.goToXY"));
+    }
+
+    /// The key under the cursor, closed or not, doesn't count as given; the same key given
+    /// elsewhere on the line does.
+    #[test]
+    fn the_key_being_typed_is_not_given() {
+        let app = crate::RustGisApp::with_sample();
+        let keys = |s: &str, at: usize| super::offer_at(s, at, &[], &app.session).map(|o| o.items).unwrap_or_default();
+        let s = r#"map.goToXY {"lat": 5}"#;
+        assert_eq!(keys(s, 16), ["lat"], "a closed key can be changed");
+        let s = r#"map.goToXY {"lat": 5, "lat": 6}"#;
+        assert!(keys(s, 26).is_empty(), "the same key closed elsewhere");
+        let s = r#"map.goToXY {"lat": 5, "lat"#;
+        assert!(keys(s, s.chars().count()).is_empty(), "the same key, the cursor's not closed");
+    }
+
+    /// In the pane: a quote in a command's braces offers its keys, the help beside shows the
+    /// highlighted key's parameter, and accepting closes the key with its colon.
+    #[test]
+    fn a_key_is_offered_and_accepted() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = pane();
+        type_in(&mut h, r#"labels.style {""#);
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "layer");
+        type_in(&mut h, "si");
+        h.get_by_label(r#""size"?: number"#);
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(h.state().workflow.script, r#"labels.style {"size": "#);
+    }
+
+    /// A closing quote already there is taken in; a key that has its colon keeps it.
+    #[test]
+    fn accepting_a_key_takes_in_what_follows() {
+        let mut h = pane();
+        type_in(&mut h, r#"map.goToXY {"la"}"#);
+        for _ in 0..2 {
+            h.key_press(egui::Key::ArrowLeft);
+            h.run();
+        }
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(h.state().workflow.script, r#"map.goToXY {"lat": }"#);
+        let mut h = pane();
+        type_in(&mut h, r#"map.goToXY {"la": 5}"#);
+        for _ in 0..5 {
+            h.key_press(egui::Key::ArrowLeft);
+            h.run();
+        }
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(h.state().workflow.script, r#"map.goToXY {"lat": 5}"#);
+        type_in(&mut h, "!");
+        assert_eq!(h.state().workflow.script, r#"map.goToXY {"lat"!: 5}"#, "the cursor after the key's quote");
     }
 
     /// The cursor is in a command's parameters inside its line's `{…}`: not before the brace, not

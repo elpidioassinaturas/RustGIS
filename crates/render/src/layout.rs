@@ -105,18 +105,13 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                 // A frame larger than the page budget is drawn at a lower resolution and scaled up.
                 let fppp = ppp.min((MAX_PIXELS / (fw * fh).max(1.0)).sqrt()).max(0.01);
                 let view = View { width: fw, height: fh, pixels_per_point: fppp, camera: cam, sky: false };
-                let Some(mut img) = crate::render_complete(map, &view) else {
+                let Some(mut frame_pm) = frame_map(map, cam, fw, fh, fppp) else {
                     if frame_requires_complete(map, &view) {
                         return None;
                     }
                     // Preserve upstream's best-effort page export for ordinary maps.
                     continue;
                 };
-                for l in img.unplaced.iter().chain(&img.labels) {
-                    text::draw(&mut img.pixmap, l, fppp as f32);
-                }
-                crate::draw_attribution(&mut img.pixmap, &img.attribution, fppp as f32);
-                let mut frame_pm = img.pixmap;
                 if let Some(g) = grid {
                     draw_grid(&mut frame_pm, map, &view, g);
                 }
@@ -303,6 +298,31 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
         }
     }
     Some(pm)
+}
+
+/// A map frame's map, `w` × `h` points at `ppp` pixels a point, labels and attribution included:
+/// what a frame shows before its grid, indicator and outline. It waits for the map's tiles, as a
+/// page needs them all.
+pub fn frame_map(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp: f64) -> Option<Pixmap> {
+    let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
+    crate::render_complete(map, &view).map(|img| finish_frame_map(img, ppp))
+}
+
+/// [`frame_map`] without waiting for tiles still on their way, for a preview drawn while the
+/// interface waits: a pan's preview, whose size is more than the frame's for the overscan slid
+/// under the pointer.
+pub fn frame_map_preview(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp: f64) -> Option<Pixmap> {
+    let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
+    crate::render(map, &view).map(|img| finish_frame_map(img, ppp))
+}
+
+/// A rendered frame map with its labels and attribution drawn on it.
+fn finish_frame_map(mut img: crate::Rendered, ppp: f64) -> Pixmap {
+    for l in img.unplaced.iter().chain(&img.labels) {
+        text::draw(&mut img.pixmap, l, ppp as f32);
+    }
+    crate::draw_attribution(&mut img.pixmap, &img.attribution, ppp as f32);
+    img.pixmap
 }
 
 /// Expands layout text tokens: the page ones here, the map ones from the first frame.

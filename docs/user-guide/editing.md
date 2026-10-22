@@ -6,8 +6,9 @@
 click each vertex and double-click to finish (++esc++ cancels). **Delete** (++delete++) removes
 the selected features. Edit attributes in the attribute table (++ctrl+t++): double-click a cell
 to change it. **Data › Data Design** (and **Data › Fields**) adds and deletes fields and calculates a
-field from an expression; **Calculate Geometry** fills a field with each feature's area, length or
-coordinates. Every edit is one undo step.
+field from an expression; **Calculate Geometry** (in the attribute table's toolbar) fills a new or
+existing numeric field with each feature's area, perimeter, length or X/Y coordinate, in the units
+you choose, for all features or the selected ones. Every edit is one undo step.
 
 ## Modifying features
 

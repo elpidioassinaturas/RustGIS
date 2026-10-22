@@ -10,6 +10,7 @@ use crate::theme::{Tokens, semibold};
 
 #[derive(Default)]
 pub struct Dialogs {
+    pub geometry: Option<crate::geometrycalc::Form>,
     pub open: Option<&'static str>,
     pub layer: String,
     pub text: String,
@@ -126,6 +127,10 @@ impl Dialogs {
 
 pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
     let Some(which) = app.dialogs.open else { return };
+    if which == "calculateGeometry" {
+        crate::geometrycalc::show(app, ctx);
+        return;
+    }
     let title = match which {
         "selectByAttributes" => "Select By Attributes",
         "goToXY" => "Go To XY",
