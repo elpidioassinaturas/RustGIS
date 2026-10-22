@@ -447,6 +447,11 @@ pub const MAX_TREND_CELLS: usize = 25_000_000;
 #[cfg(not(target_arch = "wasm32"))]
 const STAC_READERS: usize = 8;
 
+/// Tiles' headers a STAC collection's trend reads, beyond the first file's, looking for one that
+/// covers the area: each can take up to two minutes on a stalled server.
+#[cfg(not(target_arch = "wasm32"))]
+const COVER_PROBES: usize = 8;
+
 /// The most pixels of the files one slice of a piece reads: 1 million. A reader holds them (4
 /// bytes each) with its cells' sums, counts and values (16 bytes a cell, as many cells as pixels
 /// at most), about 20 MB, so the [`STAC_READERS`] hold about 160 MB together; the slices read and
@@ -637,7 +642,8 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
     let (width, height) = (width as u32, height as u32);
     let transform = rustgis_data::raster::GeoTransform { origin_x: lt.origin_x + c0 * pw, origin_y: lt.origin_y + r0 * ph, ..lt };
     // Some file has to cover part of the area, or every cell would come out empty: each tile's
-    // first file in turn until one does (the first file's header, read already, most often).
+    // first file in turn until one does (the first file's header, read already, most often), at
+    // most [`COVER_PROBES`] more headers, a header that can't be read ending it as reading would.
     let span = |a: f64, b: f64| (a.min(b), a.max(b));
     let (ax, ay) = (span(c0 * pw, c1 * pw), span(r0 * ph, r1 * ph));
     let (ax, ay) = ((ax.0 + lt.origin_x, ax.1 + lt.origin_x), (ay.0 + lt.origin_y, ay.1 + lt.origin_y));
@@ -647,13 +653,16 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
         let y = span(t.origin_y, t.origin_y + f64::from(full.height) * t.pixel_height);
         i.layout.crs == layout.crs && x.0 < ax.1 && ax.0 < x.1 && y.0 < ay.1 && ay.0 < y.1
     };
-    let covered = covers(&info)
-        || tiles
-            .values()
-            .filter_map(|days| days.values().next())
-            .filter(|h| **h != first)
-            .any(|h| cog::info_blocking(h).is_ok_and(|i| covers(&i)));
-    if !covered {
+    let mut others = tiles.values().filter_map(|days| days.values().next()).filter(|h| **h != first);
+    let mut covered = covers(&info);
+    let mut probed = 0;
+    while !covered && probed < COVER_PROBES {
+        let Some(h) = others.next() else { break };
+        covered = covers(&*cog::info_blocking(h)?);
+        probed += 1;
+    }
+    // Tiles beyond the probes are left to the reading, which leaves what none covers empty.
+    if !covered && others.next().is_none() {
         return Err(format!("no file of {collection}'s {asset} covers the area, only comes near it: take another bbox"));
     }
     // Within a run's block, and each slice within what a reader holds.
