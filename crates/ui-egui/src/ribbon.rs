@@ -944,7 +944,22 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
             // A finished sheet or figure of the map view, its texts to fill in on the page.
             ui.menu_button(tl!("Publication Layout"), |ui| {
                 for profile in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
-                    if ui.button(tl!(profile.label)).clicked() {
+                    // Each profile's name a literal here, so the catalogs find it.
+                    let label = match profile.id {
+                        "a4-portrait" => tl!("A4 portrait sheet"),
+                        "a4-landscape" => tl!("A4 landscape sheet"),
+                        "a3-portrait" => tl!("A3 portrait sheet"),
+                        "a3-landscape" => tl!("A3 landscape sheet"),
+                        "a2-portrait" => tl!("A2 portrait sheet"),
+                        "a2-landscape" => tl!("A2 landscape sheet"),
+                        "figure-1col" => tl!("Journal figure, 1 column (90 mm)"),
+                        "figure-1.5col" => tl!("Journal figure, 1.5 columns (140 mm)"),
+                        "figure-2col" => tl!("Journal figure, 2 columns (190 mm)"),
+                        "thesis-full" => tl!("Thesis figure, full page (160 × 225 mm)"),
+                        "thesis-half" => tl!("Thesis figure, half page (160 × 110 mm)"),
+                        _ => tl!(profile.label),
+                    };
+                    if ui.button(label).clicked() {
                         // A sheet is titled with the map's name; a figure's title is its caption's.
                         let mut p = json!({"profile": profile.id});
                         if profile.sheet {
