@@ -7313,6 +7313,24 @@ fn a_trend_over_a_stac_collection() {
     let away = json!({"url": api, "collection": "mod", "asset": "NDVI", "bbox": [20, 45, 21, 46], "start": "2024-01-01", "end": "2024-03"});
     let e = s.run("cube.trend", &away).unwrap_err();
     assert!(e.contains("covers the area"), "{e}");
+    // Ten tiles, more than the cover probes reach, none covering it: refused once read, not four
+    // empty rasters.
+    let many: Vec<String> = (0..10)
+        .flat_map(|t| {
+            let cog = cog.clone();
+            dates.iter().enumerate().map(move |(k, d)| {
+                format!(
+                    r#"{{"type": "Feature", "id": "t{t}n{k}", "collection": "mod", "bbox": [20, 45, 21, 46], "geometry": null,
+                       "properties": {{"datetime": "{d}T00:00:00Z", "bdc:tiles": ["t{t}"]}},
+                       "assets": {{"NDVI": {{"href": "{cog}/t{t}n{k}.tif"}}}}}}"#
+                )
+            })
+        })
+        .collect();
+    let search = format!(r#"{{"type": "FeatureCollection", "features": [{}]}}"#, many.join(","));
+    let tiles_api = format!("{}/v1", serve_routes(vec![("/v1/search", search)], 16));
+    let e = s.run("cube.trend", &json!({"url": tiles_api, "collection": "mod", "asset": "NDVI", "bbox": [20, 45, 21, 46], "start": "2024-01-01", "end": "2024-03"})).unwrap_err();
+    assert!(e.contains("covers the area"), "{e}");
     // Read in two pieces (a quarter of the rows' values each would make four; 256-row tiles make
     // it two), the outputs are the same, cell for cell.
     PIECE_VALUES.with(|v| v.set(Some(512 * 300 * 6)));

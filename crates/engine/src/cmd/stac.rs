@@ -491,6 +491,8 @@ pub struct StacCube {
     crs: rustgis_data::raster::Crs,
     /// Rows a piece reads.
     rows: u32,
+    /// Whether any file met a piece read: the tiles past the cover probes may all miss the area.
+    met: std::sync::atomic::AtomicBool,
     label: String,
 }
 
@@ -690,6 +692,7 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
         height,
         crs: layout.crs,
         rows,
+        met: Default::default(),
         label: format!("{collection} {asset}"),
     })
 }
@@ -718,6 +721,10 @@ impl super::cube::TimeCube for StacCube {
     }
     fn readers(&self) -> usize {
         STAC_READERS
+    }
+    fn nothing_read(&self) -> Option<String> {
+        let met = self.met.load(std::sync::atomic::Ordering::Relaxed);
+        (!met).then(|| format!("no file of {} covers the area, only comes near it: take another bbox", self.label))
     }
     /// Rows `piece × rows` on of the area at date `i`: each file's part of them, its values
     /// scaled as its metadata says, a cell the mean of the pixels read in it (one, or a block of
@@ -761,6 +768,7 @@ impl super::cube::TimeCube for StacCube {
             if fc1 <= fc0 || fr1 <= fr0 {
                 continue;
             }
+            self.met.store(true, std::sync::atomic::Ordering::Relaxed);
             let cols = (fc0 as u32, fc1 as u32);
             let rows = (fr0 as u32, fr1 as u32);
             let read = cog::read_values_blocking(&info, href, self.level, 0, cols, rows)?;

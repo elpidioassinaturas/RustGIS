@@ -80,6 +80,11 @@ pub trait TimeCube: Send + Sync {
     fn readers(&self) -> usize {
         1
     }
+    /// Why the run read nothing, asked once every slice is read: a cube none of whose files met
+    /// the area (a STAC cube's), so its outputs would be empty. `None` when something was read.
+    fn nothing_read(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A stack of rasters (or a raster's bands), a date each.
@@ -569,6 +574,9 @@ impl TrendRun {
             first_piece.get_or_insert(grid);
         }
         let grid = first_piece.ok_or("no date to read")?;
+        if let Some(e) = self.cube.nothing_read() {
+            return Err(e);
+        }
         done.store(self.total(), Ordering::Relaxed);
         let unit = if self.per == 10.0 { "decade" } else { "year" };
         let names = [

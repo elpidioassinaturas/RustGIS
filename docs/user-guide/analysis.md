@@ -358,7 +358,10 @@ and a **Mann–Kendall** test of whether the trend is significant.
     again. A file's no-data value is skipped, from its header or from its asset's metadata
     (`raster:bands` `nodata`). Where two tiles' files overlap on a date (items without a tile
     name are told apart by footprint), a cell is the mean of their values, while the data cube on
-    the map shows one of them.
+    the map shows one of them. This source is given as parameters (a script, the assistant, the
+    command line); `cube.trend` waits for the search and the reads with no Cancel, the app with
+    it, as for a Zarr store's address, so keep the area and period small there, or run a large
+    one from the command line.
 
   The rasters have to be on one grid; put them on one first with Raster Functions › Resample.
 - **The test:** NDVI and temperature series are autocorrelated, which makes the plain test report
