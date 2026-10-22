@@ -639,7 +639,12 @@ impl super::cube::TimeCube for StacCube {
     fn dates(&self) -> &[f64] {
         &self.dates
     }
+    /// The whole slice, when the area is one piece; read in pieces, a date's whole slice would be
+    /// the block the pieces exist to avoid, so it is refused rather than cut to the top rows.
     fn slice(&self, i: usize) -> Result<Option<(std::sync::Arc<rustgis_data::raster::Raster>, usize)>, String> {
+        if self.pieces() > 1 {
+            return Err(format!("this STAC cube is read in {} pieces: read it piece by piece (slice_of)", self.pieces()));
+        }
         self.slice_of(i, 0)
     }
     fn label(&self) -> String {
@@ -675,6 +680,8 @@ impl super::cube::TimeCube for StacCube {
         };
         let (wf, top_f, hf) = (i64::from(w) * i64::from(f), i64::from(top) * i64::from(f), i64::from(h) * i64::from(f));
         for (href, (k, o)) in files {
+            // Cached per address for the process (`with_info`, a failure too, for a while), so a
+            // file's header is fetched once however many pieces and dates read it.
             let info = cog::info_blocking(href)?;
             if info.layout.crs != self.crs {
                 return Err(format!("{href} is in another coordinate system than the first file"));
