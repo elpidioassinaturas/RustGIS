@@ -253,6 +253,9 @@ pub struct CubeFiles {
     /// Each file's own (scale, offset), by its address: a trend reads each date's values as its
     /// own metadata says to (#579).
     pub scales: std::collections::HashMap<String, (f64, f64)>,
+    /// Each file's no-data value from its asset's metadata, where it names one (MODIS NDVI's
+    /// -3000 at the Brazil Data Cube), skipped as the file's own header no-data is.
+    pub nodata: std::collections::HashMap<String, f64>,
     /// The items found, and those left out (no date, or no such asset).
     pub items: usize,
     pub without: usize,
@@ -364,6 +367,7 @@ pub fn cube_files(s: &Session, p: &Value) -> Result<CubeFiles, String> {
     let mut tiles: std::collections::BTreeMap<String, std::collections::BTreeMap<i64, String>> = Default::default();
     let mut scale: Option<(f64, f64)> = None;
     let mut scales: std::collections::HashMap<String, (f64, f64)> = Default::default();
+    let mut nodata: std::collections::HashMap<String, f64> = Default::default();
     let mut scales_differ = false;
     let mut duplicates = 0usize;
     let mut without = 0usize;
@@ -392,6 +396,9 @@ pub fn cube_files(s: &Session, p: &Value) -> Result<CubeFiles, String> {
         // No scale or offset in the metadata reads as 1 and 0, the values as stored.
         let this = (a.scale.unwrap_or(1.0), a.offset.unwrap_or(0.0));
         scales.insert(href.clone(), this);
+        if let Some(n) = a.nodata {
+            nodata.insert(href.clone(), n);
+        }
         by_day.insert(d, href);
         scales_differ |= scale.is_some_and(|s| s != this);
         scale.get_or_insert(this);
@@ -413,13 +420,14 @@ pub fn cube_files(s: &Session, p: &Value) -> Result<CubeFiles, String> {
     }
     if tiles.values().flat_map(|by_day| by_day.values()).any(|href| stac::needs_signing(href)) {
         return Err(format!(
-            "{collection}'s files are reached through signed addresses that expire within hours, so they can't make a data cube (one on the map keeps them in the project; a trend reads them for as long as it runs, unsigned): use an API with public files (Earth Search, the Brazil Data Cube)"
+            "{collection}'s files are reached through signed addresses that expire within hours, which neither a data cube on the map nor a trend reads: use an API with public files (Earth Search, the Brazil Data Cube)"
         ));
     }
     Ok(CubeFiles {
         tiles,
         scale,
         scales,
+        nodata,
         items: items.len(),
         named_tiles: items.iter().any(|i| i.tile.is_some()),
         without,
@@ -461,8 +469,8 @@ thread_local! {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct StacCube {
     dates: Vec<f64>,
-    /// Each date's files, with their (scale, offset).
-    files: Vec<Vec<(String, (f64, f64))>>,
+    /// Each date's files, with their (scale, offset) and the no-data value their metadata names.
+    files: Vec<Vec<(String, (f64, f64), Option<f64>)>>,
     /// The level read (0: the full images), and how many of its pixels a cell's side takes: 1
     /// when the cells are that level's own pixels (`"resampling": "nearest"`, an overview as the
     /// file stores it), more when a cell is the mean of the full images' pixels in it.
@@ -506,7 +514,12 @@ pub fn piece_rows(width: u32, height: u32, dates: usize, tile_height: u32, max: 
     if fit == 0 {
         return None;
     }
-    let fit = u32::try_from(fit).unwrap_or(u32::MAX).min(height.max(1));
+    // The whole area in one piece when it fits, however its rows fall on the tiles.
+    let height = height.max(1);
+    if fit >= u64::from(height) {
+        return Some(height);
+    }
+    let fit = u32::try_from(fit).unwrap_or(u32::MAX);
     let th = tile_height.max(1);
     Some(if fit >= th { fit / th * th } else { fit })
 }
@@ -516,19 +529,20 @@ pub fn piece_rows(width: u32, height: u32, dates: usize, tile_height: u32, max: 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
     use crate::render::rustgis_tiles::cog;
-    let CubeFiles { tiles, scales, collection, asset, .. } = cube_files(s, p)?;
+    let CubeFiles { tiles, scales, nodata, collection, asset, .. } = cube_files(s, p)?;
     // Every tile's file for a date, by day.
-    let mut by_day: std::collections::BTreeMap<i64, Vec<(String, (f64, f64))>> = Default::default();
+    let mut by_day: std::collections::BTreeMap<i64, Vec<(String, (f64, f64), Option<f64>)>> = Default::default();
     for days in tiles.values() {
         for (d, href) in days {
-            by_day.entry(*d).or_default().push((href.clone(), scales.get(href).copied().unwrap_or((1.0, 0.0))));
+            let scale = scales.get(href).copied().unwrap_or((1.0, 0.0));
+            by_day.entry(*d).or_default().push((href.clone(), scale, nodata.get(href).copied()));
         }
     }
     if by_day.len() > super::cube::MAX_DATES {
         return Err(format!("{} dates; a trend takes {} at most: take a shorter period", by_day.len(), super::cube::MAX_DATES));
     }
     // The first file's header gives the coordinate system, the grid and its overviews.
-    let first = by_day.values().flatten().next().map(|(h, _)| h.clone()).ok_or("no file to read")?;
+    let first = by_day.values().flatten().next().map(|(h, ..)| h.clone()).ok_or("no file to read")?;
     let info = cog::info_blocking(&first)?;
     let layout = &info.layout;
     if layout.transform.pixel_height > 0.0 {
@@ -560,7 +574,7 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
         let f = (f64::from(full.width) / f64::from(lv.width.max(1))).round();
         // Averaging takes `f` × `f` full pixels a cell: the overview has to be exactly the full
         // image's size divided by `f` (rounded up), or its cells aren't those blocks.
-        let fits = |full: u32, ov: u32| full.div_ceil(f as u32) == ov;
+        let fits = |full: u32, ov: u32| ov.checked_mul(f as u32) == Some(full);
         if !(1.0..=64.0).contains(&f) || !fits(full.width, lv.width) || !fits(full.height, lv.height) {
             return Err(format!(
                 "{first}'s overview ({} × {}) isn't its full image ({} × {}) divided by a whole number, so its cells can't be averaged from it: take \"resampling\": \"nearest\"",
@@ -689,7 +703,8 @@ impl super::cube::TimeCube for StacCube {
             ..self.transform
         };
         let (wf, top_f, hf) = (i64::from(w) * i64::from(f), i64::from(top) * i64::from(f), i64::from(h) * i64::from(f));
-        for (href, (k, o)) in files {
+        for (href, (k, o), fill) in files {
+            let fill = fill.map(|v| v as f32);
             // Cached per address for the process (`with_info`, a failure too, for a while), so a
             // file's header is fetched once however many pieces and dates read it.
             let info = cog::info_blocking(href)?;
@@ -720,6 +735,7 @@ impl super::cube::TimeCube for StacCube {
                     let col = ((fc0 - dx) as usize + c) / f as usize;
                     let cell = row * w as usize + col;
                     if v.is_finite()
+                        && Some(*v) != fill
                         && let (Some(s), Some(n)) = (sum.get_mut(cell), count.get_mut(cell))
                     {
                         *s += f64::from(*v) * k + o;
@@ -774,7 +790,7 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 }
             }
         };
-        let CubeFiles { tiles, scale, scales: _, items, named_tiles, without, duplicates, scales_differ, collection, asset } =
+        let CubeFiles { tiles, scale, scales: _, nodata: _, items, named_tiles, without, duplicates, scales_differ, collection, asset } =
             cube_files(s, p)?;
         // One range can't hold if the files store their values alike no longer (a processing
         // change of scale or offset partway).

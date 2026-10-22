@@ -349,7 +349,9 @@ and a **Mann–Kendall** test of whether the trend is significant.
     then one 250 m pixel, which can differ much from the place's mean; `"resampling": "average"`
     makes each cell the mean of the full images' pixels in it, reading those (16 times the bytes
     at 1 km from 250 m). It needs every file's corner on a cell's corner, as MODIS's tiles are; a
-    file on a grid shifted by part of a cell is refused, and is read with `"nearest"`.
+    file on a grid shifted by part of a cell is refused: set `"resampling": "nearest"` and run it
+    again. A file's no-data value is skipped, from its header or from its asset's metadata
+    (`raster:bands` `nodata`).
 
   The rasters have to be on one grid; put them on one first with Raster Functions › Resample.
 - **The test:** NDVI and temperature series are autocorrelated, which makes the plain test report

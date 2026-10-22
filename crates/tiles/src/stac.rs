@@ -51,6 +51,9 @@ pub struct Asset {
     /// `v · scale + offset`.
     pub scale: Option<f64>,
     pub offset: Option<f64>,
+    /// Its first band's stored no-data value (`raster:bands` or `eo:bands` `nodata`), for files
+    /// whose own header doesn't name it.
+    pub nodata: Option<f64>,
 }
 
 /// An item: a scene (or tile) with its footprint, time and assets.
@@ -352,6 +355,7 @@ fn item(f: &Value, from: Option<&str>) -> Option<Item> {
                 title: text(a.get("title")),
                 scale: band_number(a, "scale"),
                 offset: band_number(a, "offset"),
+                nodata: band_number(a, "nodata"),
             })
         })
         .collect();
@@ -409,7 +413,7 @@ fn tile_of(p: &Value) -> Option<String> {
         .map(|t| t.chars().take(64).collect())
 }
 
-/// An asset's first band's number `key` (`scale`, `offset`): from `raster:bands`, else from
+/// An asset's first band's number `key` (`scale`, `offset`, `nodata`): from `raster:bands`, else from
 /// `eo:bands`, where some catalogs (Brazil Data Cube's) put it.
 fn band_number(asset: &Value, key: &str) -> Option<f64> {
     ["raster:bands", "eo:bands"].iter().find_map(|b| asset.get(*b)?.as_array()?.first()?.get(key)?.as_f64()).filter(|v| v.is_finite())
@@ -807,6 +811,7 @@ mod tests {
             title: String::new(),
             scale: None,
             offset: None,
+            nodata: None,
         }];
         // A Planetary Computer asset is added after signing it with its container's token.
         let (_, href) = pc.asset_href(None).unwrap();
@@ -911,5 +916,6 @@ mod tests {
         assert_eq!((band_number(&a, "scale"), band_number(&a, "offset")), (Some(0.0001), Some(-0.1)));
         assert_eq!(band_number(&serde_json::json!({"eo:bands": [{"scale": 0.0001}]}), "scale"), Some(0.0001));
         assert_eq!(band_number(&serde_json::json!({"type": "image/tiff"}), "scale"), None);
+        assert_eq!(band_number(&serde_json::json!({"raster:bands": [{"nodata": -3000.0}]}), "nodata"), Some(-3000.0));
     }
 }
