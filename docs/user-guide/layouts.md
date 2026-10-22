@@ -14,8 +14,9 @@ the maps; while one is open, its groups lead the Publish tab:
 - **Publication layouts**: Home › New Layout › **Publication Layout** builds a finished sheet or
   figure of the map view in one step, with `layout.publication` behind it:
   - **Sheets** (A4, A3 or A2, portrait or landscape): a frame and margin, the title and subtitle,
-    the map, and a footer of two boxed columns (sources, and the cartographic reference) with a
-    note and the authorship under them. Text sizes follow the sheet: an A3's are 1.41 times an
+    the map, and a footer of two boxed columns (sources, and the cartographic reference; one
+    with nothing in it is left out, the other taking the width) with a note and the authorship
+    under them. Text sizes follow the sheet: an A3's are 1.41 times an
     A4's.
   - **Figures** for a journal (90, 140 or 190 mm wide, as tall as the map's shape asks) or a
     thesis (160 × 225 or 160 × 110 mm): the map edge to edge with a line of its projection and

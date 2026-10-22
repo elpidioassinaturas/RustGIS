@@ -69,16 +69,22 @@ fn style(b: &Block) -> (f32, bool, f64) {
 /// Splits text into lines no wider than `w` millimetres at `pt` points: whole words, a word wider
 /// than the line broken across lines.
 pub fn wrap(s: &str, w: f64, pt: f32) -> Vec<String> {
+    wrap_with(s, w, |t| width_mm(t, pt, false))
+}
+
+/// [`wrap`] with the width of a piece of text (in mm) measured by `width`: bold text, or text whose
+/// tokens are filled in only when it is drawn.
+pub fn wrap_with(s: &str, w: f64, width: impl Fn(&str) -> f64) -> Vec<String> {
     let mut out = Vec::new();
     for para in s.lines().take(2000) {
         let mut line = String::new();
         for word in para.split_whitespace().take(5000) {
             // A word wider than the line (a long URL…) is broken across lines.
             let mut word = word.to_string();
-            while width_mm(&word, pt, false) > w && word.chars().count() > 1 {
+            while width(&word) > w && word.chars().count() > 1 {
                 let mut head = String::new();
                 for ch in word.chars() {
-                    if !head.is_empty() && width_mm(&format!("{head}{ch}"), pt, false) > w {
+                    if !head.is_empty() && width(&format!("{head}{ch}")) > w {
                         break;
                     }
                     head.push(ch);
@@ -91,7 +97,7 @@ pub fn wrap(s: &str, w: f64, pt: f32) -> Vec<String> {
             }
             let word = word.as_str();
             let next = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
-            if !line.is_empty() && width_mm(&next, pt, false) > w {
+            if !line.is_empty() && width(&next) > w {
                 out.push(std::mem::take(&mut line));
                 line = word.to_string();
             } else {

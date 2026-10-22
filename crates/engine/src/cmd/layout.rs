@@ -461,7 +461,28 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let (projection, datum) = projection_and_datum(s);
     let step = grid_step(&extent);
     let fill = |t: &str| t.replace("{projection}", &projection).replace("{datum}", &datum).replace("{grid}", &step_text(step));
-    let wrap = |t: &str, w: f64, pt: f64| crate::render::report::wrap(&fill(t), w.max(1.0), pt as f32);
+    // Text is measured as it is drawn: bold as bold, and the tokens the layout fills only when it
+    // draws (`{date}`, `{scale}`…) as wide as a typical value of theirs.
+    let (map_name, crs) = (s.map().name.clone(), s.map().projection.label());
+    let drawn = move |t: &str| {
+        [
+            ("{date}", "0000-00-00"),
+            ("{time}", "00:00"),
+            ("{scale}", "1:10,000,000"),
+            ("{pages}", "00"),
+            ("{page}", "00"),
+            ("{layers}", "00"),
+            ("{center}", "00.000°S, 000.000°W"),
+            ("{map}", map_name.as_str()),
+            ("{crs}", crs.as_str()),
+        ]
+        .iter()
+        .fold(t.to_string(), |t, (token, like)| t.replace(token, like))
+    };
+    let wrap_as = |t: &str, w: f64, pt: f64, bold: bool| {
+        crate::render::report::wrap_with(&fill(t), w.max(1.0), |x| crate::render::report::width_mm(&drawn(x), pt as f32, bold))
+    };
+    let wrap = |t: &str, w: f64, pt: f64| wrap_as(t, w, pt, false);
     let pitch = crate::render::layout::line_pitch_mm;
     let ink = Rgba::rgb(0x2B, 0x26, 0x20);
     let soft = Rgba::rgb(0x5E, 0x55, 0x47);
@@ -479,7 +500,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         around.push(("Frame".into(), (m, m, page_w - 2.0 * m, page_h - 2.0 * m), pub_box(clear, ink, 0.8)));
         let mut top = m + pad;
         if let Some(t) = &title {
-            let lines = wrap(t, iw, title_pt);
+            let lines = wrap_as(t, iw, title_pt, true);
             let th = lines.len() as f64 * pitch(title_pt) + 1.5 * k;
             around.push(("Title".into(), (x0, top, iw, th), pub_text(lines.join("\n"), title_pt, ink, true, TextAlign::Center)));
             top += th;
@@ -508,15 +529,22 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             foot -= nh + 1.5 * k;
             around.push(("Note".into(), (x0, foot, iw, nh), pub_text(note_lines.join("\n"), body_pt, soft, false, TextAlign::Left)));
         }
+        // The columns with something in them, side by side (one alone takes the width). Each one's
+        // elements keep their names (`Sources`, `Reference`) whatever its heading reads, the heading
+        // filled and wrapped like the rest.
         let (gap, inner) = (4.0 * k, 2.5 * k);
-        let cw = (iw - gap) / 2.0;
-        let column = |lines: &[String]| lines.iter().flat_map(|t| wrap(t, cw - 2.0 * inner, body_pt)).collect::<Vec<_>>();
-        // Each column's elements keep their names (`Sources`, `Reference`) whatever its heading
-        // reads, the heading filled and wrapped like the rest.
+        let given = [("Sources", heading(0, "Sources"), &sources), ("Reference", heading(1, "Cartographic reference"), &reference)];
+        let given: Vec<_> = given.into_iter().filter(|(.., texts)| !texts.is_empty()).collect();
+        let n = given.len().max(1) as f64;
+        let cw = (iw - gap * (n - 1.0)) / n;
         let tw = cw - 2.0 * inner;
-        let titled = |i: usize, or: &str| wrap(&fill(&heading(i, or)).to_uppercase(), tw, head_pt);
-        let columns =
-            [("Sources", titled(0, "Sources"), column(&sources)), ("Reference", titled(1, "Cartographic reference"), column(&reference))];
+        let columns: Vec<_> = given
+            .into_iter()
+            .map(|(name, head, texts)| {
+                let head = wrap_as(&fill(&head).to_uppercase(), tw, head_pt, true);
+                (name, head, texts.iter().flat_map(|t| wrap(t, tw, body_pt)).collect::<Vec<_>>())
+            })
+            .collect();
         let heads = columns.iter().map(|(_, h, _)| h.len()).max().unwrap_or(1);
         let rows = columns.iter().map(|(.., l)| l.len()).max().unwrap_or(0);
         if rows > 0 {
@@ -553,7 +581,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             }
         }
         let line = reference.iter().map(|t| fill(t)).collect::<Vec<_>>().join(" · ");
-        let lines = crate::render::report::wrap(&line, page_w, FIGURE_PT as f32);
+        let lines = wrap(&line, page_w, FIGURE_PT);
         if lines.len() > 1 {
             warnings.push("the reference is wider than the figure: it wraps under the map".into());
         }

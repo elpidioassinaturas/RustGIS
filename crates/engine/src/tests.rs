@@ -2367,13 +2367,21 @@ fn publication_layouts_fit_their_pages() {
     let ElementKind::Text { text, size, .. } = &title.kind else { panic!() };
     assert!(text.lines().count() >= 2, "{text}");
     for line in text.lines() {
-        assert!(crate::render::report::width_mm(line, *size as f32, false) <= title.w, "{line}");
+        assert!(crate::render::report::width_mm(line, *size as f32, true) <= title.w, "{line}: measured bold, as drawn");
     }
     let frame = l.elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap();
     assert!(frame.y >= title.y + title.h);
     let listed = r["elements"].as_array().unwrap();
     assert_eq!(listed.len(), l.elements.len());
     assert!(listed.iter().any(|e| e["name"] == "Map Frame" && e["element"] == frame.id && e["kind"] == "mapFrame"), "{r}");
+    s.project.layouts.pop();
+    // With no sources, the reference alone takes the footer's width; no empty box beside it.
+    s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let frame = l.elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap();
+    assert!(l.elements.iter().all(|e| !e.name.starts_with("Sources")));
+    let reference = l.elements.iter().find(|e| e.name == "Reference Box").unwrap();
+    assert!((reference.x - frame.x).abs() < 1e-9 && (reference.w - frame.w).abs() < 1e-9, "{} of {}", reference.w, frame.w);
     s.project.layouts.pop();
     // Headings rename what the columns read, filled and wrapped; their elements keep their names.
     let r = s
