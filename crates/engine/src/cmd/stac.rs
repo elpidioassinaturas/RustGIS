@@ -36,9 +36,10 @@ pub fn search_params(s: &Session, p: &Value) -> Result<Search, String> {
     let bbox = match p.get("bbox") {
         Some(Value::String(v)) if v.trim().eq_ignore_ascii_case("view") => Some(view(s)?),
         Some(v @ Value::Array(_)) => {
-            let n: Vec<f64> = v.as_array().into_iter().flatten().filter_map(Value::as_f64).collect();
-            match n.as_slice() {
-                [w, south, e, n] => Some([*w, *south, *e, *n]),
+            // Four numbers, every one: `[10, 45, 11, 46, "extra"]` is refused, not read without its last.
+            let n: Option<Vec<f64>> = v.as_array().map(|a| a.iter().map(Value::as_f64).collect()).unwrap_or_default();
+            match n.as_deref() {
+                Some([w, south, e, n]) => Some([*w, *south, *e, *n]),
                 _ => return Err("bbox is [west, south, east, north], or \"view\"".into()),
             }
         }

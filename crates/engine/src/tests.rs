@@ -7258,7 +7258,7 @@ fn a_stac_search_takes_view_in_any_case() {
     let search = |bbox: &str| crate::cmd::stac::search_params(&s, &json!({"bbox": bbox})).unwrap().bbox;
     assert!(search("view").is_some());
     assert_eq!(search(" VIEW "), search("view"));
-    for bad in [json!("nowhere"), json!(7), json!({"w": 1})] {
+    for bad in [json!("nowhere"), json!(7), json!({"w": 1}), json!([10, 45, 11, 46, "extra"]), json!([10, 45, 11, "46"])] {
         let e = crate::cmd::stac::search_params(&s, &json!({"bbox": bad})).unwrap_err();
         assert!(e.contains("bbox is"), "{bad}: {e}");
     }

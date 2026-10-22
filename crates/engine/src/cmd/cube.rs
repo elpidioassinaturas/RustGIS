@@ -562,9 +562,9 @@ impl TrendRun {
             drop(block);
             // Their full length when the cube knows it, so they don't grow by doubling: once the
             // first piece is worked out, so a run cancelled or refused before then hasn't taken it.
-            if let (0, Some(cells)) = (piece, whole) {
+            if let (0, Some(total)) = (piece, whole) {
                 for band in &mut bands {
-                    band.reserve_exact(cells);
+                    band.reserve_exact(total);
                 }
             }
             for (k, band) in bands.iter_mut().enumerate() {
