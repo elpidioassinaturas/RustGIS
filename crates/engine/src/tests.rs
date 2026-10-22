@@ -2406,7 +2406,9 @@ fn publication_layouts_fit_their_pages() {
     let one = s.project.layouts.iter().find(|l| l.name == "figure-1col").unwrap();
     assert!(one.width == 90.0 && one.height > 90.0, "{} × {}", one.width, one.height);
     // Graticule steps and round scales.
-    use crate::cmd::layout::{grid_step, round_scale, step_text};
+    use crate::cmd::layout::{capitals, grid_step, round_scale, step_text};
+    assert_eq!(capitals("Fontes, {date} e {pageName}"), "FONTES, {date} E {pageName}");
+    assert_eq!(capitals("Dados {2024 e {só} }"), "DADOS {2024 E {SÓ} }", "a lone or odd brace is text");
     assert_eq!(grid_step(&rustgis_geom::Extent::new(10.0, 45.0, 11.0, 46.0)), 0.25);
     assert_eq!(grid_step(&rustgis_geom::Extent::new(-180.0, -90.0, 180.0, 90.0)), 30.0);
     assert_eq!((step_text(2.0), step_text(0.25), step_text(0.02)), ("2°".to_string(), "15′".to_string(), "72″".to_string()));

@@ -411,20 +411,22 @@ fn aspect(s: &Session, e: &Extent) -> Option<f64> {
 }
 
 /// `t` in capitals, its `{tokens}` as they are: the layout fills a token (`{date}`) when it draws
-/// only in its own case.
-fn capitals(t: &str) -> String {
+/// only in its own case. A token is a closed `{name}` of letters and digits; a lone brace is text.
+pub(crate) fn capitals(t: &str) -> String {
     let mut out = String::with_capacity(t.len());
-    let mut token = false;
-    for c in t.chars() {
-        match c {
-            '{' => token = true,
-            '}' => token = false,
-            _ => {}
-        }
-        if token || c == '}' {
-            out.push(c);
-        } else {
-            out.extend(c.to_uppercase());
+    let mut rest = t;
+    while let Some(c) = rest.chars().next() {
+        let token =
+            (c == '{').then(|| rest.find('}')).flatten().filter(|&end| end > 1 && rest[1..end].chars().all(|c| c.is_ascii_alphanumeric()));
+        match token {
+            Some(end) => {
+                out.push_str(&rest[..=end]);
+                rest = &rest[end + 1..];
+            }
+            None => {
+                out.extend(c.to_uppercase());
+                rest = &rest[c.len_utf8()..];
+            }
         }
     }
     out
