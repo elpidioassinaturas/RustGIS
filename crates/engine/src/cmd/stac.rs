@@ -429,18 +429,18 @@ pub const MAX_TREND_CELLS: usize = 25_000_000;
 #[cfg(not(target_arch = "wasm32"))]
 const STAC_READERS: usize = 8;
 
-/// The most pixels of the files one slice of a piece reads (each of [`STAC_READERS`] holds one,
-/// with its cells' sums): 4 million, 16 MB of values. A trend over few dates would otherwise
-/// make pieces of many cells, and averaging reads `factor²` pixels a cell.
+/// The most pixels of the files one slice of a piece reads: 1 million. A reader holds them (4
+/// bytes each) with its cells' sums, counts and values (16 bytes a cell, as many cells as pixels
+/// at most), about 20 MB, so the [`STAC_READERS`] hold about 160 MB together. A trend over few
+/// dates would otherwise make pieces of many cells, and averaging reads `factor²` pixels a cell.
 #[cfg(not(target_arch = "wasm32"))]
-const MAX_PIECE_PIXELS: u64 = 4_000_000;
+const MAX_PIECE_PIXELS: u64 = 1_000_000;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(test)]
 thread_local! {
     /// For tests: the values a piece holds at most, in place of [`super::cube::MAX_VALUES`], so a
     /// small cube is read in several pieces.
-    #[doc(hidden)]
-    pub static PIECE_VALUES: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    pub(crate) static PIECE_VALUES: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 /// A STAC collection's band as a data cube for `cube.trend` (#579): each date's files (a grid
@@ -599,7 +599,11 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
     let transform = rustgis_data::raster::GeoTransform { origin_x: lt.origin_x + c0 * pw, origin_y: lt.origin_y + r0 * ph, ..lt };
     // Within a run's block, and each slice within what a reader holds.
     let per_slice = (MAX_PIECE_PIXELS / u64::from(factor).pow(2)).max(1);
-    let max = PIECE_VALUES.with(|v| v.get()).unwrap_or(super::cube::MAX_VALUES).min(per_slice.saturating_mul(by_day.len() as u64));
+    #[cfg(test)]
+    let block = PIECE_VALUES.with(|v| v.get()).unwrap_or(super::cube::MAX_VALUES);
+    #[cfg(not(test))]
+    let block = super::cube::MAX_VALUES;
+    let max = block.min(per_slice.saturating_mul(by_day.len() as u64));
     let rows = piece_rows(width, height, by_day.len(), read_tile_rows, max).ok_or_else(|| {
         format!(
             "a row of {width} cells × {} dates is more than a run's block: take a smaller area, a larger cellSize or fewer dates",

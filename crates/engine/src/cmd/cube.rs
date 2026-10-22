@@ -528,6 +528,12 @@ impl TrendRun {
         let mut rows = 0usize;
         // The four outputs, a band each, filled piece by piece (never held interleaved whole).
         let mut bands: [Vec<f32>; OUTPUTS] = Default::default();
+        // Their full length up front when the cube knows it, so they don't grow by doubling.
+        if let Some(cells) = whole {
+            for band in &mut bands {
+                band.reserve_exact(cells);
+            }
+        }
         let mut cells_done = 0usize;
         for piece in 0..self.cube.pieces().max(1) {
             let (grid, block, cells) = self.read_piece(piece, cancel, done, whole.is_none().then_some(&too_long))?;
