@@ -995,13 +995,27 @@ pub struct Layout {
     pub series: Option<MapSeries>,
     #[serde(default, skip_serializing_if = "Guides::is_empty")]
     pub guides: Guides,
+    /// Numbers its surrounds print (graticule, scale bar and colorbar labels, `{scale}`) take a
+    /// decimal comma and a point between thousands (`0,05`, `1:6.300.000`), as maps in Portuguese,
+    /// Spanish, French or German do; off, the other way round.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub decimal_comma: bool,
     #[serde(default)]
     next_id: u32,
 }
 
 impl Layout {
     pub fn new(name: impl Into<String>, width: f64, height: f64) -> Self {
-        Layout { name: name.into(), width, height, elements: Vec::new(), series: None, guides: Guides::default(), next_id: 1 }
+        Layout {
+            name: name.into(),
+            width,
+            height,
+            elements: Vec::new(),
+            series: None,
+            guides: Guides::default(),
+            decimal_comma: false,
+            next_id: 1,
+        }
     }
 
     /// Adds an element and returns its id.

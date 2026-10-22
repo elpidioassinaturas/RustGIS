@@ -26,15 +26,25 @@ the maps; while one is open, its groups lead the Publish tab:
     figures, rounded up so it still fits within the strips the graticule's labels take inside
     the frame. A graticule has its step picked from the extent, at
     most five lines across (2° for a state, 15′ for a city), and labels on every edge of a sheet.
-    The north arrow, the legend (sized to what it lists) and the scale bar with the numeric scale
-    under it sit in the frame's corners, on pale boxes, clear of the graticule's labels.
+    The north arrow, the legend (sized to what it lists), the scale bar with the numeric scale
+    under it and the locator sit in the frame's corners, on pale boxes, clear of the graticule's
+    labels. Each takes the corner where it covers the least of what the map draws (its layers and
+    labels, not the basemap), so a legend leaves a corner the data fills; when it makes no
+    difference they keep theirs: the locator at the top left, the arrow at the top right, the
+    legend at the bottom left and the scale at the bottom right. With more surrounds than free
+    corners, one warning names those left on the data, to move by hand if that matters (data
+    under every corner alike, such as a context layer filling the frame, isn't worth a warning);
+    two that overlap (a frame too small) are said too.
+  - **Decimal comma**: `"decimal": ","` prints the graticule, scale bar and colorbar numbers and
+    `{scale}` with a decimal comma and points between thousands (`0,05`, `1:6.300.000`), as maps
+    in Portuguese, Spanish, French or German expect. `layout.page` sets it on any layout.
   - **Texts**: the title, subtitle, footer lines and authorship are measured with the layout's
     font (the title and headings bold, as drawn) and wrapped to their box, so none runs past it,
     and each box grows to hold them. `{projection}`, `{datum}` and
     `{grid}` are filled from the map when the layout is made. `{date}` and the other dynamic text
     tokens stay live. The reference defaults to the projection, datum and graticule, and the
     authorship to "Made with RustGIS · {date}" (`"author": ""` leaves it out). `headings` renames the two columns.
-  - **The locator**, at the frame's top left: `"locator": "globe"` (a sheet's default) adds a
+  - **The locator** (at the frame's top left unless the data is there): `"locator": "globe"` (a sheet's default) adds a
     map of the map's polygon layers on the globe, unlabelled, in a round frame, the globe nearly
     filling it and the area outlined in red; `"inset"` shows the surrounding region (about four
     times the area across) on the map itself, outlined the same way; `"none"` (a figure's

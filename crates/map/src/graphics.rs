@@ -189,7 +189,8 @@ pub fn expand(text: &str, v: &TokenValues) -> String {
     out
 }
 
-fn thousands(v: f64) -> String {
+/// `v` rounded, its thousands apart with commas (`6,300,000`).
+pub fn thousands(v: f64) -> String {
     let s = format!("{:.0}", v.clamp(0.0, 1e15));
     let mut out = String::new();
     for (i, ch) in s.chars().enumerate() {

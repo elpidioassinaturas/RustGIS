@@ -2361,9 +2361,12 @@ fn publication_layouts_fit_their_pages() {
         }
         let frame = l.elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap();
         let ElementKind::MapFrame { scale, grid: Some(grid), .. } = &frame.kind else { panic!("{profile}: no grid") };
-        // The legend stops short of the scale bar's box, however narrow the frame.
+        // The legend stops short of the scale bar's box, whichever corners they take, however
+        // narrow the frame.
         let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap();
-        assert!(named("Legend Box").x + named("Legend Box").w <= named("Scale Box").x, "{profile}: the legend reaches the scale bar");
+        let (a, b) = (named("Legend Box"), named("Scale Box"));
+        let apart = a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
+        assert!(apart, "{profile}: the legend reaches the scale bar");
         // A round scale, two significant figures, at which the extent still fits.
         let unit = 10f64.powf(scale.log10().floor() - 1.0);
         assert!(((scale / unit) - (scale / unit).round()).abs() < 1e-6, "{profile}: 1:{scale}");
@@ -2398,7 +2401,10 @@ fn publication_layouts_fit_their_pages() {
             let reference = text("Reference").unwrap();
             assert!(reference.contains("Web Mercator") && reference.contains("WGS 84") && reference.contains("2°"), "{reference}");
             assert!(text("Author").unwrap().contains("{date}"), "the date stays a token the layout fills");
-            assert!(r["warnings"].as_array().unwrap().is_empty(), "{profile}: {r}");
+            // Nothing said but, over the sample world's land, the surrounds sharing its one corner
+            // of sea (placement has its own test).
+            let said: Vec<&str> = r["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
+            assert!(said.iter().all(|w| w.contains("on what the map shows")), "{profile}: {r}");
         } else {
             assert!(text("Title").is_none() && text("Sources").is_none(), "{profile}: a figure's texts are its caption's");
             assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("caption")), "{r}");
@@ -2541,10 +2547,20 @@ fn publication_layouts_locate_their_area() {
     let (frame, locator) = (named("Map Frame"), named("Locator"));
     let ElementKind::MapFrame { map, shape, extent_of, scale, .. } = &locator.kind else { panic!() };
     assert_eq!((map.as_str(), shape, *extent_of), (globe.as_str(), &FrameShape::Circle, Some(frame.id)));
-    // Inside the map frame at its top left, above the legend.
-    assert!(locator.x > frame.x && locator.y > frame.y && locator.x + locator.w < frame.x + frame.w / 2.0);
+    // Inside the map frame (in a corner of its own: see publication_surrounds_keep_off_the_data),
+    // clear of the legend.
+    assert!(
+        locator.x > frame.x
+            && locator.y > frame.y
+            && locator.x + locator.w < frame.x + frame.w
+            && locator.y + locator.h < frame.y + frame.h
+    );
     let legend = named("Legend Box");
-    assert!(legend.y >= locator.y + locator.h, "the legend stops short of the locator");
+    let apart = legend.x + legend.w <= locator.x
+        || locator.x + locator.w <= legend.x
+        || legend.y + legend.h <= locator.y
+        || locator.y + locator.h <= legend.y;
+    assert!(apart, "the legend stops short of the locator");
     // The globe nearly fills its frame: drawn, its ink spans most of the frame's width.
     assert!(*scale > 1e7, "1:{scale}");
     let png = dir.join("globe.png");
@@ -2571,6 +2587,75 @@ fn publication_layouts_locate_their_area() {
     assert_eq!(s.project.maps.len(), before + 1);
     s.run("edit.undo", &Value::Null).unwrap();
     assert_eq!(s.project.maps.len(), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A publication layout's surrounds keep off the map's data (#682, part 3): with a polygon filling
+/// the bottom left of the frame, the legend leaves that corner and the smallest surround, the
+/// north arrow, takes it; with data everywhere, each surround says it covers some; with none, they
+/// stay in their own corners. `"decimal": ","` gives the layout a decimal comma, which
+/// `layout.page` also sets.
+#[test]
+fn publication_surrounds_keep_off_the_data() {
+    let dir = std::env::temp_dir().join(format!("rustgis-placement-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let square = |name: &str, (w, so, e, n): (f64, f64, f64, f64)| {
+        let path = dir.join(format!("{name}.geojson"));
+        let ring = format!("[[{w},{so}],[{e},{so}],[{e},{n}],[{w},{n}],[{w},{so}]]");
+        std::fs::write(
+            &path,
+            format!(r#"{{"type": "FeatureCollection", "features": [{{"type": "Feature", "properties": {{"name": "{name}"}}, "geometry": {{"type": "Polygon", "coordinates": [{ring}]}}}}]}}"#),
+        )
+        .unwrap();
+        path.display().to_string()
+    };
+    let corner_of = |s: &Session, name: &str| {
+        let l = s.project.layouts.last().unwrap();
+        let frame = l.elements.iter().find(|e| e.name == "Map Frame").unwrap();
+        let e = l.elements.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("no {name}"));
+        let (right, low) = (e.x + e.w / 2.0 > frame.x + frame.w / 2.0, e.y + e.h / 2.0 > frame.y + frame.h / 2.0);
+        match (low, right) {
+            (false, false) => "top left",
+            (false, true) => "top right",
+            (true, false) => "bottom left",
+            (true, true) => "bottom right",
+        }
+    };
+    let extent = json!([0, 0, 10, 10]);
+    // No data in any corner: each in its own.
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": square("middle", (4.0, 4.0, 6.0, 6.0))})).unwrap();
+    let r = s.run("layout.publication", &json!({"extent": extent, "author": ""})).unwrap();
+    let corners: Vec<_> = ["Locator", "North Arrow", "Legend Box", "Scale Box"].iter().map(|n| corner_of(&s, n)).collect();
+    assert_eq!(corners, ["top left", "top right", "bottom left", "bottom right"], "{r}");
+    assert!(r["warnings"].as_array().unwrap().is_empty(), "{r}");
+    // A polygon filling the bottom left: the legend leaves it, the arrow (smallest) takes it.
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": square("corner", (-20.0, -20.0, 5.0, 5.0))})).unwrap();
+    let r = s.run("layout.publication", &json!({"extent": extent, "author": ""})).unwrap();
+    assert_ne!(corner_of(&s, "Legend Box"), "bottom left", "{r}");
+    assert_eq!(corner_of(&s, "North Arrow"), "bottom left", "{r}");
+    // Four surrounds, three free corners: the arrow says it covers data a freer corner was free of.
+    let said = r["warnings"].to_string();
+    assert!(said.contains("the north arrow sits on what the map shows"), "{said}");
+    s.run("layout.export", &json!({"path": dir.join("corner.png").display().to_string(), "dpi": 72})).unwrap();
+    // Data everywhere (a context layer filling the frame): nowhere better, so nothing said and each
+    // in its own corner.
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": square("all", (-30.0, -30.0, 40.0, 40.0))})).unwrap();
+    let r = s.run("layout.publication", &json!({"extent": extent, "author": "", "decimal": ","})).unwrap();
+    assert!(!r["warnings"].to_string().contains("on what the map shows"), "{r}");
+    assert_eq!(corner_of(&s, "Legend Box"), "bottom left");
+    // A decimal comma, set by the command and by layout.page; anything else refused.
+    assert!(s.project.layouts.last().unwrap().decimal_comma);
+    let r = s.run("layout.page", &json!({"decimal": "."})).unwrap();
+    assert_eq!(r["decimal"], ".");
+    assert!(!s.project.layouts.last().unwrap().decimal_comma);
+    for p in [json!({"decimal": ";"}), json!({"decimal": 1})] {
+        assert!(s.run("layout.page", &p).unwrap_err().contains("decimal is"), "{p}");
+        assert!(s.run("layout.publication", &json!({"extent": extent, "decimal": p["decimal"]})).unwrap_err().contains("decimal is"));
+    }
+    s.run("layout.export", &json!({"path": dir.join("comma.png").display().to_string(), "dpi": 72})).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -29,7 +29,7 @@ pub fn commands() -> Vec<C> {
             r#"{"name"?: string, "page"?: "letter"|"legal"|"tabloid"|"a5"|"a4"|"a3"|"a2"|"a1"|"a0", "orientation"?: "landscape"|"portrait", "width"?: mm, "height"?: mm, "template"?: "map" (frame, title, legend, north arrow, scale bar; the default)|"blank"}"#,
         ),
         C::new("layout.publication", "New Publication Layout", "Publish › Layout", publication).params(
-            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
+            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
         ),
         C::new("layout.activate", "Open Layout", "Browser", |s, p| {
             let i = index(s, &by_name(p))?;
@@ -79,7 +79,7 @@ pub fn commands() -> Vec<C> {
         })
         .params(r#"{"name"?: string, "layout"?: name|index (instead of name; default: the open layout), "newName"?: string (default: "<layout> copy")}"#),
         C::new("layout.page", "Page Size", "Publish › Page Setup", page).params(
-            r#"{"layout"?, "page"?: page id, "orientation"?: "landscape"|"portrait", "width"?: mm, "height"?: mm}"#,
+            r#"{"layout"?, "page"?: page id, "orientation"?: "landscape"|"portrait", "width"?: mm, "height"?: mm, "decimal"?: "."|"," (the decimal mark of the numbers its surrounds print)}"#,
         ),
         C::new("layout.addFrame", "Map Frame", "Publish › Map Frames", add_frame).params(
             r#"{"layout"?, "shape"?: "rectangle"|"circle"|"ellipse"|"polygon"|"lasso", "points"?: [[u, v], …] (polygon/lasso, 0..1 across the frame), "map"?: name, "x"?, "y"?, "w"?, "h"?: mm}"#,
@@ -463,6 +463,31 @@ fn pub_box(fill: Rgba, outline: Rgba, width: f64) -> ElementKind {
     ElementKind::Rectangle { fill, outline, width }
 }
 
+/// The surrounds a publication layout places in the map frame's corners.
+#[derive(Clone, Copy, PartialEq)]
+enum Surround {
+    Locator,
+    Arrow,
+    Legend,
+    Scale,
+}
+
+/// The share of a surround over what the map draws past which, a corner freer by as much having
+/// gone to another surround, the layout says so.
+const OVER_DATA: f64 = 0.25;
+
+/// A `"decimal"` parameter: `","` for a decimal comma, `"."` for a point; `None` when not given.
+fn decimal_mark(p: &Value) -> Result<Option<bool>, String> {
+    match p.get("decimal").filter(|v| !v.is_null()) {
+        None => Ok(None),
+        Some(v) => match v.as_str().map(str::trim) {
+            Some(",") => Ok(Some(true)),
+            Some(".") => Ok(Some(false)),
+            _ => Err("decimal is \".\" or \",\"".into()),
+        },
+    }
+}
+
 /// What a publication layout locates its area on.
 #[derive(Clone, Copy, PartialEq)]
 enum Locator {
@@ -529,6 +554,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         Some(t) => Some(t.join(" ")).filter(|t| !t.trim().is_empty()),
     };
     let headings = texts_of(p, "headings")?.unwrap_or_default();
+    let comma = decimal_mark(p)?.unwrap_or(false);
     let locator = match p.get("locator").filter(|v| !v.is_null()) {
         None => {
             if sheet {
@@ -724,6 +750,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let grid = Grid { step, edges, ..Grid::default() };
     let name = unique_name(s, ps(p, "name").unwrap_or("Publication"));
     let mut l = Layout::new(name.clone(), w, h);
+    l.decimal_comma = comma;
     let frame = l.add(
         "Map Frame",
         (fx, fy, fw, fh),
@@ -740,10 +767,12 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             pitch: 0.0,
         },
     );
-    // Over the map, in its corners, clear of the graticule's labels (drawn inside the frame along
-    // its labelled edges): the north arrow at the top right, the legend at the bottom left sized
-    // to what it lists, the scale bar and the numeric scale under it at the bottom right, each on
-    // a pale box.
+    // Over the map, clear of the graticule's labels (drawn inside the frame along its labelled
+    // edges): the north arrow, the legend sized to what it lists, the scale bar with the numeric
+    // scale under it, and the locator, each on a pale box. Each takes the corner where it covers
+    // the least of what the map draws; by default (and when it makes no difference) the locator at
+    // the top left, the arrow at the top right, the legend at the bottom left and the scale at the
+    // bottom right.
     let paper = Rgba::new(0xFF, 0xFF, 0xFF, 225);
     let (e, small_pt) = if sheet { (4.0 * k, 6.5 * k) } else { (2.0, 6.0) };
     let room = |labelled: bool, side: bool| {
@@ -757,10 +786,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     };
     let (left, right, top, bottom) = (room(edges.left, true), room(edges.right, true), room(edges.top, false), room(edges.bottom, false));
     let (aw, ah) = if sheet { (8.0 * k, 12.0 * k) } else { (5.0, 7.5) };
-    l.add("North Arrow", (fx + fw - right - aw, fy + top, aw, ah), ElementKind::north_arrow(frame));
-    // The locator, at the top left: a globe (a copy of the map's vector layers on the globe, its
-    // diameter nearly the frame's) or the surrounding region on the map itself, the area outlined
-    // on either by the map frame's extent indicator.
+    // The locator: a globe (a copy of the map's polygon layers on the globe, its diameter nearly
+    // the frame's) or the surrounding region on the map itself, the area outlined on either by
+    // the map frame's extent indicator.
     let side = if sheet { (0.24 * fw.min(fh)).clamp(25.0 * k, 70.0 * k) } else { (0.3 * fw.min(fh)).clamp(18.0, 45.0) };
     let locator_map = match locator {
         Locator::None => None,
@@ -783,25 +811,6 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         }
         Locator::Inset => Some((s.map().name.clone(), round_scale(scale * fw / side * 4.0), FrameShape::Rectangle)),
     };
-    if let Some((map, locator_scale, shape)) = &locator_map {
-        l.add(
-            "Locator",
-            (fx + left, fy + top, side, side),
-            ElementKind::MapFrame {
-                map: map.clone(),
-                center,
-                scale: *locator_scale,
-                shape: shape.clone(),
-                grid: None,
-                extent_of: Some(frame),
-                extent_color: rustgis_map::layout::INDICATOR_COLOR,
-                extent_width: rustgis_map::layout::INDICATOR_WIDTH,
-                bearing: 0.0,
-                pitch: 0.0,
-            },
-        );
-    }
-    let below_locator = if locator_map.is_some() { side + e } else { 0.0 };
     // The legend lists what the frame draws: its map synced to the frame's view first, as an
     // export does, so a streamed layer has its features there. (This changes the session's map,
     // so it comes after the last refusal: nothing below fails.) While one is still reading, the
@@ -830,29 +839,154 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         (cw, ch) = (cw.max(fw * 0.3), ch.max(fh * 0.25));
         warnings.push("the legend's classes aren't known yet (a layer still reading): it has a fixed size to fit by hand".into());
     }
-    // The scale bar's box, at the bottom right: the legend stops short of it (and so of the north
-    // arrow above it, which is narrower), however narrow the frame.
     let (sw, sh, nh) = ((fw * 0.3).max(25.0), if sheet { 8.0 * k } else { 6.0 }, pitch(small_pt) + 0.5);
+    let pad = 2.0;
+    // What the map draws where, on a coarse grid of the frame (its basemap left out).
+    let coverage = crate::render::layout::frame_coverage(s.map(), center, scale, fw, fh, 96);
+    // The share of a rectangle (in page mm) over the frame's drawn cells.
+    let covered = |(x, y, w, h): (f64, f64, f64, f64)| -> f64 {
+        let Some((gw, gh, cells)) = &coverage else { return 0.0 };
+        let (gw, gh) = (f64::from(*gw), f64::from(*gh));
+        let col = |v: f64| (((v - fx) / fw * gw).floor().clamp(0.0, gw)) as usize;
+        let row = |v: f64| (((v - fy) / fh * gh).floor().clamp(0.0, gh)) as usize;
+        let (c0, c1, r0, r1) = (col(x), col(x + w).max(col(x) + 1), row(y), row(y + h).max(row(y) + 1));
+        let (mut n, mut drawn) = (0usize, 0usize);
+        for r in r0..r1.min(gh as usize) {
+            for c in c0..c1.min(gw as usize) {
+                n += 1;
+                if cells.get(r * gw as usize + c).copied().unwrap_or(false) {
+                    drawn += 1;
+                }
+            }
+        }
+        if n == 0 { 0.0 } else { drawn as f64 / n as f64 }
+    };
+    // The surrounds to place: what each is, its size and its corner by default (0 top left,
+    // 1 top right, 2 bottom left, 3 bottom right).
+    let mut surrounds: Vec<(Surround, f64, f64, usize)> = Vec::new();
+    if locator_map.is_some() {
+        surrounds.push((Surround::Locator, side, side, 0));
+    }
+    surrounds.push((Surround::Arrow, aw, ah, 1));
     if ch > 0.0 {
-        let pad = 2.0;
-        let room_w = (fw - left - right - sw - 2.0).max(10.0);
-        let room_h = (fh - top - bottom - below_locator).max(10.0);
-        let (lw, lh) = ((cw + 2.0 * pad).min(fw * 0.45).min(room_w), (ch + 2.0 * pad).min(fh * 0.6).min(room_h));
+        surrounds.push((Surround::Legend, (cw + 2.0 * pad).min(fw * 0.45), (ch + 2.0 * pad).min(fh * 0.6), 2));
+    }
+    surrounds.push((Surround::Scale, sw, sh + nh, 3));
+    // A corner's rectangle for a surround `w` × `h`.
+    let at = |corner: usize, w: f64, h: f64| {
+        let x = if corner.is_multiple_of(2) { fx + left } else { fx + fw - right - w };
+        let y = if corner < 2 { fy + top } else { fy + fh - bottom - h };
+        (x, y, w, h)
+    };
+    // Every way of giving the surrounds a corner each: the one covering the least of the map's
+    // drawing (its area in mm²), a surround off its own corner costing a hundredth of its area so
+    // that, all else equal, they stay where they belong.
+    let mut corners: Vec<usize> = surrounds.iter().map(|s| s.3).collect();
+    let mut best = f64::INFINITY;
+    for a in 0..4usize {
+        for b in 0..4usize {
+            for c in 0..4usize {
+                for d in 0..4usize {
+                    let pick = [a, b, c, d];
+                    let pick = &pick[..surrounds.len()];
+                    if (1..pick.len()).any(|i| pick[..i].contains(&pick[i])) || pick.len() < surrounds.len() {
+                        continue;
+                    }
+                    let cost: f64 = surrounds
+                        .iter()
+                        .zip(pick)
+                        .map(|(&(_, w, h, home), &corner)| {
+                            covered(at(corner, w, h)) * w * h + if corner == home { 0.0 } else { 0.01 * w * h }
+                        })
+                        .sum();
+                    if cost < best - 1e-9 {
+                        (best, corners) = (cost, pick.to_vec());
+                    }
+                }
+            }
+        }
+    }
+    // Each surround in its corner; the legend stops short of the others beside and above it.
+    let corner_of =
+        |what: Surround| surrounds.iter().zip(&corners).find(|((kind, ..), _)| *kind == what).map(|(&(_, w, h, _), &c)| (c, w, h));
+    let mut placed: Vec<(&'static str, (f64, f64, f64, f64))> = Vec::new();
+    if let (Some((map, locator_scale, shape)), Some((corner, w, h))) = (&locator_map, corner_of(Surround::Locator)) {
+        let r = at(corner, w, h);
+        placed.push(("locator", r));
+        l.add(
+            "Locator",
+            r,
+            ElementKind::MapFrame {
+                map: map.clone(),
+                center,
+                scale: *locator_scale,
+                shape: shape.clone(),
+                grid: None,
+                extent_of: Some(frame),
+                extent_color: rustgis_map::layout::INDICATOR_COLOR,
+                extent_width: rustgis_map::layout::INDICATOR_WIDTH,
+                bearing: 0.0,
+                pitch: 0.0,
+            },
+        );
+    }
+    if let Some((corner, w, h)) = corner_of(Surround::Arrow) {
+        let r = at(corner, w, h);
+        placed.push(("north arrow", r));
+        l.add("North Arrow", r, ElementKind::north_arrow(frame));
+    }
+    if let Some((corner, w, h)) = corner_of(Surround::Legend) {
+        let other = |c: usize| surrounds.iter().zip(&corners).find(|(_, k)| **k == c).map(|(&(_, w, h, _), _)| (w, h));
+        let room_w = other(corner ^ 1).map_or(f64::INFINITY, |(ow, _)| fw - left - right - ow - 2.0).max(10.0);
+        let room_h = other(corner ^ 2).map_or(f64::INFINITY, |(_, oh)| fh - top - bottom - oh - e).max(10.0);
+        let (lw, lh) = (w.min(room_w), h.min(room_h));
         if cw + 2.0 * pad > lw || ch + 2.0 * pad > lh {
             warnings.push("the legend lists more than fits its corner: its last rows or the ends of long labels are left out".into());
         }
-        let (lx, ly) = (fx + left, fy + fh - bottom - lh);
-        l.add("Legend Box", (lx, ly, lw, lh), pub_box(paper, clear, 0.0));
+        let r = at(corner, lw, lh);
+        placed.push(("legend", r));
+        l.add("Legend Box", r, pub_box(paper, clear, 0.0));
         l.add(
             "Legend",
-            (lx + pad, ly + pad, lw - 2.0 * pad, lh - 2.0 * pad),
+            (r.0 + pad, r.1 + pad, lw - 2.0 * pad, lh - 2.0 * pad),
             ElementKind::Legend { frame, title: String::new(), all_classes: false, hide_other: false, exclude: Vec::new() },
         );
     }
-    let (sx, sy) = (fx + fw - right - sw, fy + fh - bottom - sh - nh);
-    l.add("Scale Box", (sx, sy, sw, sh + nh), pub_box(paper, clear, 0.0));
-    l.add("Scale Bar", (sx, sy, sw, sh), ElementKind::scale_bar(frame));
-    l.add("Scale", (sx, sy + sh, sw, nh), pub_text("{scale}".into(), small_pt, ink, false, TextAlign::Center));
+    if let Some((corner, w, h)) = corner_of(Surround::Scale) {
+        let (sx, sy, ..) = at(corner, w, h);
+        placed.push(("scale bar", (sx, sy, w, h)));
+        l.add("Scale Box", (sx, sy, sw, sh + nh), pub_box(paper, clear, 0.0));
+        l.add("Scale Bar", (sx, sy, sw, sh), ElementKind::scale_bar(frame));
+        l.add("Scale", (sx, sy + sh, sw, nh), pub_text("{scale}".into(), small_pt, ink, false, TextAlign::Center));
+    }
+    // What placing couldn't avoid: a surround over the map's drawing while a clearly freer corner
+    // went to another (more surrounds than free corners), or two overlapping (a frame too small
+    // for them all). Data under every corner alike (a context layer filling the frame) leaves
+    // nothing to move, so it isn't said. One warning names them all.
+    let crowded: Vec<&str> = placed
+        .iter()
+        .filter(|(_, r)| {
+            let share = covered(*r);
+            let freest = (0..4).map(|c| covered(at(c, r.2, r.3))).fold(f64::INFINITY, f64::min);
+            share > OVER_DATA && share - freest > OVER_DATA
+        })
+        .map(|(what, _)| *what)
+        .collect();
+    if let Some((last, rest)) = crowded.split_last() {
+        let (names, verb) = match rest {
+            [] => (format!("the {last}"), "sits"),
+            _ => (format!("the {} and the {last}", rest.join(", the ")), "sit"),
+        };
+        warnings
+            .push(format!("{names} {verb} on what the map shows, the freer corners having gone to the others: move by hand what matters"));
+    }
+    for (i, (a, ra)) in placed.iter().enumerate() {
+        for (b, rb) in placed.iter().skip(i + 1) {
+            if ra.0 < rb.0 + rb.2 && rb.0 < ra.0 + ra.2 && ra.1 < rb.1 + rb.3 && rb.1 < ra.1 + ra.3 {
+                warnings.push(format!("the {a} and the {b} overlap: the frame is too small for both"));
+            }
+        }
+    }
     for (n, r, kind) in around {
         l.add(&n, r, kind);
     }
@@ -871,10 +1005,14 @@ fn page(s: &mut Session, p: &Value) -> CmdResult {
     let i = index(s, p)?;
     let cur = s.project.layouts.get(i).map(|l| (l.width, l.height));
     let (w, h) = page_size(p, cur)?;
+    let comma = decimal_mark(p)?;
     let l = s.project.layouts.get_mut(i).ok_or("no layout")?;
     l.width = w;
     l.height = h;
-    Ok(json!({"width": w, "height": h}))
+    if let Some(comma) = comma {
+        l.decimal_comma = comma;
+    }
+    Ok(json!({"width": w, "height": h, "decimal": if l.decimal_comma { "," } else { "." }}))
 }
 
 /// Sets a layout's ruler guides: the lists given replace those there.
