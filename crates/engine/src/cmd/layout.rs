@@ -613,7 +613,11 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         let fh = if page_h > 0.0 {
             page_h - note_h
         } else {
-            (page_w * aspect(s, &extent).unwrap_or(0.75)).clamp(0.45 * page_w, 1.3 * page_w).round()
+            let shape = aspect(s, &extent).unwrap_or_else(|| {
+                warnings.push("the extent's shape on the map's projection isn't known: the figure is 4 wide by 3 tall".into());
+                0.75
+            });
+            (page_w * shape).clamp(0.45 * page_w, 1.3 * page_w).round()
         };
         if fh < 40.0 {
             return Err("the reference leaves the map no room: shorten it".into());
