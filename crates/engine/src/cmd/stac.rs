@@ -429,6 +429,12 @@ pub const MAX_TREND_CELLS: usize = 25_000_000;
 #[cfg(not(target_arch = "wasm32"))]
 const STAC_READERS: usize = 8;
 
+/// The most pixels of the files one slice of a piece reads (each of [`STAC_READERS`] holds one,
+/// with its cells' sums): 4 million, 16 MB of values. A trend over few dates would otherwise
+/// make pieces of many cells, and averaging reads `factor²` pixels a cell.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_PIECE_PIXELS: u64 = 4_000_000;
+
 #[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     /// For tests: the values a piece holds at most, in place of [`super::cube::MAX_VALUES`], so a
@@ -591,7 +597,9 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
     }
     let (width, height) = (width as u32, height as u32);
     let transform = rustgis_data::raster::GeoTransform { origin_x: lt.origin_x + c0 * pw, origin_y: lt.origin_y + r0 * ph, ..lt };
-    let max = PIECE_VALUES.with(|v| v.get()).unwrap_or(super::cube::MAX_VALUES);
+    // Within a run's block, and each slice within what a reader holds.
+    let per_slice = (MAX_PIECE_PIXELS / u64::from(factor).pow(2)).max(1);
+    let max = PIECE_VALUES.with(|v| v.get()).unwrap_or(super::cube::MAX_VALUES).min(per_slice.saturating_mul(by_day.len() as u64));
     let rows = piece_rows(width, height, by_day.len(), read_tile_rows, max).ok_or_else(|| {
         format!(
             "a row of {width} cells × {} dates is more than a run's block: take a smaller area, a larger cellSize or fewer dates",
