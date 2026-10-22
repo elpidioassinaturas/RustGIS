@@ -31,7 +31,7 @@ the maps; while one is open, its groups lead the Publish tab:
     so none runs past it, and the footer grows to hold them. `{projection}`, `{datum}` and
     `{grid}` are filled from the map when the layout is made. `{date}` and the other dynamic text
     tokens stay live. The reference defaults to the projection, datum and graticule, and the
-    authorship to "Made with RustGIS · {date}". `headings` renames the two columns.
+    authorship to "Made with RustGIS · {date}" (`"author": ""` leaves it out). `headings` renames the two columns.
   - Every element is an ordinary one, to move or restyle afterwards. Running it again with
     another `profile` makes another layout of the same map.
 

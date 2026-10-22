@@ -2377,6 +2377,10 @@ fn publication_layouts_fit_their_pages() {
     assert_eq!(listed.len(), l.elements.len());
     assert!(listed.iter().any(|e| e["name"] == "Map Frame" && e["element"] == frame.id && e["kind"] == "mapFrame"), "{r}");
     s.project.layouts.pop();
+    // An empty author leaves the authorship out.
+    s.run("layout.publication", &json!({"extent": piaui, "author": ""})).unwrap();
+    assert!(s.project.layouts.last().unwrap().elements.iter().all(|e| e.name != "Author"));
+    s.project.layouts.pop();
     // With no sources, the reference alone takes the footer's width; no empty box beside it.
     s.run("layout.publication", &json!({"extent": piaui})).unwrap();
     let l = s.project.layouts.last().unwrap();

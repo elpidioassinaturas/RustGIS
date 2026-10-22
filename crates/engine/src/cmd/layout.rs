@@ -29,7 +29,7 @@ pub fn commands() -> Vec<C> {
             r#"{"name"?: string, "page"?: "letter"|"legal"|"tabloid"|"a5"|"a4"|"a3"|"a2"|"a1"|"a0", "orientation"?: "landscape"|"portrait", "width"?: mm, "height"?: mm, "template"?: "map" (frame, title, legend, north arrow, scale bar; the default)|"blank"}"#,
         ),
         C::new("layout.publication", "New Publication Layout", "Publish › Layout", publication).params(
-            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"), "headings"?: [the sources' heading, the reference's heading]} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
+            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" for none), "headings"?: [the sources' heading, the reference's heading]} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
         ),
         C::new("layout.activate", "Open Layout", "Browser", |s, p| {
             let i = index(s, &by_name(p))?;
@@ -472,6 +472,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     })?;
     let (sheet, page_w, page_h) = (profile.sheet, profile.width, profile.height);
     let extent = match p.get("extent").filter(|v| !v.is_null()) {
+        // The view; on a globe the whole Earth, as geoprocessing takes it (the globe camera's flat
+        // extent means nothing there).
+        None if s.map().projection.is_globe() => Extent::new(-180.0, -90.0, 180.0, 90.0),
         None => {
             let e = super::workspace::view_extent(s);
             Extent::new(e.min_x.max(-180.0), e.min_y.max(-90.0), e.max_x.min(180.0), e.max_y.min(90.0))
@@ -495,7 +498,11 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let sources = texts_of(p, "sources")?.unwrap_or_default();
     let reference =
         texts_of(p, "reference")?.unwrap_or_else(|| vec!["Projection: {projection}".into(), "Datum: {datum} · Graticule: {grid}".into()]);
-    let author = one("author")?.unwrap_or_else(|| "Made with RustGIS · {date}".into());
+    // An empty author leaves the line out; none given, the default.
+    let author = match p.get("author") {
+        Some(Value::String(t)) if t.trim().is_empty() => None,
+        _ => Some(one("author")?.unwrap_or_else(|| "Made with RustGIS · {date}".into())),
+    };
     let headings = texts_of(p, "headings")?.unwrap_or_default();
     let heading = |i: usize, or: &str| headings.get(i).cloned().unwrap_or_else(|| or.to_string());
     let (projection, datum) = projection_and_datum(s);
@@ -554,14 +561,16 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         // The footer, from the bottom up: authorship, the note, then the two boxes side by side,
         // as tall as the longer column.
         let bottom = page_h - m - pad;
-        let author_lines = wrap(&author, iw, small_pt);
+        let author_lines = author.as_deref().map(|t| wrap(t, iw, small_pt)).unwrap_or_default();
         let author_h = author_lines.len() as f64 * pitch(small_pt);
         let author_y = bottom - author_h;
-        around.push((
-            "Author".into(),
-            (x0, author_y, iw, author_h),
-            pub_text(author_lines.join("\n"), small_pt, soft, false, TextAlign::Right),
-        ));
+        if !author_lines.is_empty() {
+            around.push((
+                "Author".into(),
+                (x0, author_y, iw, author_h),
+                pub_text(author_lines.join("\n"), small_pt, soft, false, TextAlign::Right),
+            ));
+        }
         let note_lines = note.as_deref().map(|t| wrap(t, iw, body_pt)).unwrap_or_default();
         let mut foot = author_y;
         if !note_lines.is_empty() {
