@@ -7301,6 +7301,11 @@ fn a_trend_over_a_stac_collection() {
         assert!(a.bands[0].data.iter().zip(&b.bands[0].data).all(|(x, y)| x == y || (x.is_nan() && y.is_nan())), "{}", a.name);
         assert!(crate::cmd::cube::same_grid(&a.transform, &b.transform));
     }
+    // Cancelled, the readers stop early and the run says so, rather than work out a block only
+    // partly read.
+    let job = crate::cmd::cube::trend_start(&s, &params).unwrap();
+    let e = job.run(&std::sync::atomic::AtomicBool::new(true), &std::sync::atomic::AtomicUsize::new(0)).unwrap_err();
+    assert_eq!(e, "cancelled");
     // A row too wide for a piece is said.
     PIECE_VALUES.with(|v| v.set(Some(100)));
     let e = s.run("cube.trend", &params).unwrap_err();

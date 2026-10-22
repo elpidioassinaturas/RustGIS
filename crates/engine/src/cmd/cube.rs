@@ -667,6 +667,11 @@ impl TrendRun {
                 })?;
             }
         }
+        // Cancel stops the readers, which ends their dates early without an error: the block is
+        // only partly read, so the run stops here rather than work out what it has.
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
         let grid = grid.ok_or("no date to read")?;
         Ok((grid, block, cells))
     }

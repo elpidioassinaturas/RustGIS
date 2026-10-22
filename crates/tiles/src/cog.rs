@@ -1083,26 +1083,31 @@ pub fn read_values_blocking(
     if x1 <= x0 || y1 <= y0 {
         return Ok(out);
     }
-    let (tw, th) = (l.tile_width.max(1), l.tile_height.max(1));
-    let tiles: Vec<u32> = (y0 / th..=(y1 - 1) / th).flat_map(|ty| (x0 / tw..=(x1 - 1) / tw).map(move |tx| ty * l.across() + tx)).collect();
-    if tiles.len() > MAX_VALUE_TILES {
-        return Err(format!(
-            "{} tiles of the file for one read; at most {MAX_VALUE_TILES}: take a coarser level or a smaller area",
-            tiles.len()
-        ));
+    let (tw, th, across) = (l.tile_width.max(1), l.tile_height.max(1), l.across().max(1));
+    // The tiles the window takes, counted before they are listed, in checked arithmetic: a
+    // hostile header can't make a long list or a wrapped index.
+    let (c0, c1, r0, r1) = (x0 / tw, (x1 - 1) / tw, y0 / th, (y1 - 1) / th);
+    let count = (u64::from(c1 - c0) + 1) * (u64::from(r1 - r0) + 1);
+    if count > MAX_VALUE_TILES as u64 {
+        return Err(format!("{count} tiles of the file for one read; at most {MAX_VALUE_TILES}: take a coarser level or a smaller area"));
     }
+    let tiles: Vec<u32> =
+        (r0..=r1).flat_map(|ty| (c0..=c1).filter_map(move |tx| ty.checked_mul(across).and_then(|t| t.checked_add(tx)))).collect();
     let (tx, rx) = std::sync::mpsc::channel();
     fetch_bands(info.clone(), url.clone(), level, tiles.clone(), vec![band], Box::new(move |r| tx.send(r).unwrap_or_default()));
     let picked = rx.recv_timeout(Duration::from_secs(600)).map_err(|_| format!("{url}: tiles not read in ten minutes"))??;
     let nodata = info.layout.nodata.map(|v| v as f32);
     for (&t, p) in tiles.iter().zip(&picked) {
         let Some(values) = p.first().and_then(|(chunk, i)| chunk.get(*i)) else { continue };
-        let (tx0, ty0) = ((t % l.across()) * tw, (t / l.across()) * th);
-        for py in ty0.max(y0)..(ty0 + th).min(y1) {
-            for px in tx0.max(x0)..(tx0 + tw).min(x1) {
-                let Some(&v) = values.get(((py - ty0) * tw + (px - tx0)) as usize) else { continue };
-                if v.is_finite() && Some(v) != nodata {
-                    out[(py - rows.0) as usize * w + (px - cols.0) as usize] = v;
+        let (tx0, ty0) = ((t % across).saturating_mul(tw), (t / across).saturating_mul(th));
+        for py in ty0.max(y0)..ty0.saturating_add(th).min(y1) {
+            for px in tx0.max(x0)..tx0.saturating_add(tw).min(x1) {
+                let Some(&v) = values.get((py - ty0) as usize * tw as usize + (px - tx0) as usize) else { continue };
+                if v.is_finite()
+                    && Some(v) != nodata
+                    && let Some(slot) = out.get_mut((py - rows.0) as usize * w + (px - cols.0) as usize)
+                {
+                    *slot = v;
                 }
             }
         }
