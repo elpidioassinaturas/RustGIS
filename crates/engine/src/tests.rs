@@ -7807,6 +7807,12 @@ fn a_trend_over_a_data_cube() {
     let late = r["layers"][0].clone();
     assert_eq!(r["dates"], 9);
     assert!((value(&s, &late, 0) - 0.2).abs() < 1e-2, "{}", value(&s, &late, 0));
+    // An end given as a year takes all of it: 2013 to 2020's July, eight dates (read as 1 January
+    // 2020, it would leave 2020's out).
+    let r = s.run("cube.trend", &json!({"layers": names, "end": "2020", "name": "to2020"})).unwrap();
+    assert_eq!(r["dates"], 8, "{r}");
+    let r = s.run("cube.trend", &json!({"layers": names, "end": "2020-06", "name": "toJune"})).unwrap();
+    assert_eq!(r["dates"], 7, "a month ends with it: 2020's July date is after June: {r}");
     let backwards: Vec<String> = (0..12).map(|k| format!("{}-01-01", 2030 - k)).collect();
     let r = s.run("cube.trend", &json!({"layers": names, "dates": backwards, "test": "original"})).unwrap();
     assert!(value(&s, &r["layers"][0], 0) < 0.0, "the dates given are used, in the layers' order");

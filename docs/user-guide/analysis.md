@@ -372,7 +372,7 @@ and a **Mann–Kendall** test of whether the trend is significant.
   diverging ramp centred on 0.
 - **Size:** the cube is read into memory a slice at a time, up to 64 million values (cells times
   dates; 16 million in the web app) and 2,000 dates. A STAC collection's area is read in **pieces**
-  instead, bands of rows each within that block (whole rows of the files' tiles where they fit),
+  instead, bands of rows each within that block (a whole number of the files' tile rows where they fit),
   eight dates at a time, and the outputs are put together: Piauí at about 1 km over 25 years of
   16-day composites (645 × 984 cells × 576 dates) is six pieces. Its area is up to 25 million
   cells. The seasonal test compares only pairs within a season, so its time limit counts those.

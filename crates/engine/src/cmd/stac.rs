@@ -485,8 +485,8 @@ fn offset_in(grid: &rustgis_data::raster::GeoTransform, file: &rustgis_data::ras
 }
 
 /// The rows a piece reads: as many as `max` values hold over `width` columns and `dates` dates,
-/// a whole number of the files' tile rows when that many fit (so no tile is read for two pieces),
-/// at least one. `None` when a single row is too many.
+/// a whole number of the files' tile rows when that many fit (so a tile is read by at most the two
+/// pieces its rows straddle, the area's top not being on a tile's), at least one. `None` when a single row is too many.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn piece_rows(width: u32, height: u32, dates: usize, tile_height: u32, max: u64) -> Option<u32> {
     let per_row = u64::from(width.max(1)).saturating_mul(dates.max(1) as u64);

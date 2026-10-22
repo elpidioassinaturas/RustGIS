@@ -526,7 +526,9 @@ impl TrendRun {
         let need = self.min_valid.unwrap_or((n / 2).max(trend::MIN_VALUES)).max(trend::MIN_VALUES);
         let mut first_piece: Option<Arc<Raster>> = None;
         let mut rows = 0usize;
-        let mut out: Vec<f32> = Vec::new();
+        // The four outputs, a band each, filled piece by piece (never held interleaved whole).
+        let mut bands: [Vec<f32>; OUTPUTS] = Default::default();
+        let mut cells_done = 0usize;
         for piece in 0..self.cube.pieces().max(1) {
             let (grid, block, cells) = self.read_piece(piece, cancel, done, whole.is_none().then_some(&too_long))?;
             if let Some(f) = &first_piece
@@ -536,10 +538,13 @@ impl TrendRun {
             }
             // Progress through all the cells: a part of the bar every `tick` cells.
             let tick = whole.unwrap_or(cells).div_ceil(CELL_PARTS).max(1);
-            let part = self.work_out(&block, cells, out.len() / OUTPUTS, tick, need, &times, &seasons, cancel, done)?;
+            let part = self.work_out(&block, cells, cells_done, tick, need, &times, &seasons, cancel, done)?;
             // The values are read: their block goes before the next piece's is read.
             drop(block);
-            out.extend(part);
+            for (k, band) in bands.iter_mut().enumerate() {
+                band.extend(part.chunks(OUTPUTS).map(|o| o.get(k).copied().unwrap_or(f32::NAN)));
+            }
+            cells_done += cells;
             rows += grid.height as usize;
             first_piece.get_or_insert(grid);
         }
@@ -555,9 +560,8 @@ impl TrendRun {
         let height = u32::try_from(rows).map_err(|_| "too many rows")?;
         names
             .into_iter()
-            .enumerate()
-            .map(|(k, name)| {
-                let band: Vec<f32> = out.chunks(OUTPUTS).map(|o| o.get(k).copied().unwrap_or(f32::NAN)).collect();
+            .zip(bands)
+            .map(|(name, band)| {
                 Raster::new(name, grid.width, height, vec![band], grid.transform, grid.crs, None, raster::ColorHint::Gray, "Float32")
                     .map_err(|e| e.to_string())
             })
@@ -626,7 +630,8 @@ impl TrendRun {
             done.fetch_add(1, Ordering::Relaxed);
             Ok(())
         };
-        let readers = self.cube.readers().clamp(1, 16).min(n.max(1));
+        // One at a time in the browser, which has no threads to read on.
+        let readers = if cfg!(target_arch = "wasm32") { 1 } else { self.cube.readers().clamp(1, 16).min(n.max(1)) };
         if readers == 1 {
             for (k, &i) in self.steps.iter().enumerate() {
                 if cancel.load(Ordering::Relaxed) {
