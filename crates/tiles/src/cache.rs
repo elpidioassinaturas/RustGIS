@@ -1074,8 +1074,10 @@ mod native {
         }
         let (url, limit) = super::split_download_limit(url);
         let max = limit.unwrap_or(MAX_BYTES);
-        let (url, tail) = super::split_tail(url);
-        let (url, range) = super::split_range(url);
+        let (url, mut tail) = super::split_tail(url);
+        let (url, mut range) = super::split_range(url);
+        // The last bytes asked for, while the file's length is asked for instead (see below).
+        let mut measuring: Option<u64> = None;
         // An `s3://` address becomes its web address, and a request to an S3 connection's
         // endpoint is signed.
         let prepared = crate::s3::prepare(url)?;
@@ -1111,6 +1113,29 @@ mod native {
             // A data host refusing the request (or the token): say what to do.
             if status == 401 && crate::earthdata::is_data_host(&at) {
                 return Err(Failure::without_answer("", crate::earthdata::refused_message(url), Reason::Status(status)));
+            }
+            // A store that serves ranges but not the last bytes by their count (GitHub's release
+            // files, on Azure storage, answer `bytes=-n` with 501): the file's length from a
+            // one-byte range's `Content-Range`, then the last bytes by their place, at the same
+            // address. A server that gives no length goes on as one without ranges.
+            if let Some(n) = tail.filter(|_| status == 501 && range.is_none()) {
+                (measuring, tail, range) = (Some(n), None, Some((0, 0)));
+                continue;
+            }
+            if let Some(n) = measuring.take() {
+                let total = (status == 206)
+                    .then(|| resp.headers().get("content-range").and_then(|v| v.to_str().ok()))
+                    .flatten()
+                    .and_then(|v| v.rsplit_once('/'))
+                    .and_then(|(_, len)| len.trim().parse::<u64>().ok())
+                    .filter(|len| *len > 0);
+                match total {
+                    Some(len) => {
+                        range = Some((len.saturating_sub(n), len - 1));
+                        continue;
+                    }
+                    None => return Err(format!("{url}: {}", super::NO_RANGES).into()),
+                }
             }
             if status >= 400 {
                 return Err(if detail {
@@ -1378,6 +1403,46 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    /// The last bytes from a store that serves ranges but answers `bytes=-n` with 501 (GitHub's
+    /// release files, on Azure storage): the file's length from a one-byte range, then the last
+    /// bytes by their place.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_last_bytes_come_from_a_store_without_suffix_ranges() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = asked.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(3) {
+                let Ok(mut stream) = stream else { return };
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                let range = head.lines().find_map(|l| l.strip_prefix("range: ")).unwrap_or("").trim().to_string();
+                seen.lock().unwrap().push(range.clone());
+                let answer = match range.as_str() {
+                    "bytes=-4" => "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                    "bytes=0-0" => {
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/10\r\nContent-Length: 1\r\nConnection: close\r\n\r\n0"
+                            .to_string()
+                    }
+                    "bytes=6-9" => {
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 6-9/10\r\nContent-Length: 4\r\nConnection: close\r\n\r\n6789"
+                            .to_string()
+                    }
+                    _ => "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                };
+                let _ = stream.write_all(answer.as_bytes());
+            }
+        });
+        let agent = native::agent();
+        let got = native::get_detailed(&agent, &format!("http://{addr}/f.parquet{TAIL}4")).unwrap();
+        assert_eq!(got, b"6789");
+        assert_eq!(*asked.lock().unwrap(), ["bytes=-4", "bytes=0-0", "bytes=6-9"]);
     }
 
     /// A refused request keeps who refused it (#509); the plain error reads as it always has.
