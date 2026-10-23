@@ -813,9 +813,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             // A polygon too small for that (an island) would collapse to a ring of under four
             // points: it keeps its own shape, already small.
             let sketch = |g: &rustgis_data::Geometry| {
-                let s = rustgis_analysis::simplify_geometry(g, tolerance_m);
-                match &s {
-                    rustgis_data::Geometry::Polygon(polys) if polys.iter().flatten().all(|ring| ring.len() >= 4) => s,
+                let simple = rustgis_analysis::simplify_geometry(g, tolerance_m);
+                match &simple {
+                    rustgis_data::Geometry::Polygon(polys) if polys.iter().flatten().all(|ring| ring.len() >= 4) => simple,
                     _ => g.clone(),
                 }
             };
