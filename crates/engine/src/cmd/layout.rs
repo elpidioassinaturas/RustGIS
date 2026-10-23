@@ -975,7 +975,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // belong. There are four surrounds at most (locator, arrow, legend, scale), so 4⁴ = 256 picks.
     const MIN_LEGEND_MM: f64 = 10.0;
     let n = surrounds.len();
-    let mut corners: Vec<usize> = surrounds.iter().map(|s| s.3).collect();
+    let mut corners: Vec<usize> = surrounds.iter().map(|x| x.3).collect();
     let mut best = f64::INFINITY;
     for code in 0..4usize.pow(n as u32) {
         let pick: Vec<usize> = (0..n).map(|i| code / 4usize.pow((n - 1 - i) as u32) % 4).collect();

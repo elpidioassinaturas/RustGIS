@@ -608,14 +608,15 @@ fn utm(name: &str) -> Option<u32> {
 }
 
 /// The datum and zone of a UTM zone's EPSG code on WGS 84, NAD 83, ETRS 89 or SIRGAS 2000, the
-/// codes [`utm`] reads names into: `31983` is `("SIRGAS 2000", 23, false)` (zone 23 south). For
-/// naming a map's projection where its PROJ definition gives only an ellipsoid.
+/// codes [`utm`] reads names into: `31983` is `("SIRGAS 2000", 23, false)` (zone 23 south). Only
+/// the codes EPSG defines (NAD 83 zones 1 to 23, ETRS 89 zones 28 to 38). For naming a map's
+/// projection where its PROJ definition gives only an ellipsoid.
 pub fn utm_of_code(code: u32) -> Option<(&'static str, u32, bool)> {
     Some(match code {
         32601..=32660 => ("WGS 84", code - 32600, true),
         32701..=32760 => ("WGS 84", code - 32700, false),
-        26901..=26960 => ("NAD83", code - 26900, true),
-        25801..=25860 => ("ETRS89", code - 25800, true),
+        26901..=26923 => ("NAD83", code - 26900, true),
+        25828..=25838 => ("ETRS89", code - 25800, true),
         31965..=31976 => ("SIRGAS 2000", code - 31954, true),
         6210 => ("SIRGAS 2000", 23, true),
         6211 => ("SIRGAS 2000", 24, true),
@@ -1133,6 +1134,12 @@ mod tests {
         }
         assert_eq!(utm_of_code(31983), Some(("SIRGAS 2000", 23, false)));
         assert_eq!(utm_of_code(3857), None);
+        // Only the zones EPSG defines: NAD 83 up to zone 23, ETRS 89 from 28 to 38.
+        assert_eq!(utm_of_code(26923), Some(("NAD83", 23, true)));
+        assert_eq!(utm_of_code(25838), Some(("ETRS89", 38, true)));
+        for code in [26924, 26950, 25827, 25839, 25801] {
+            assert_eq!(utm_of_code(code), None, "EPSG:{code}");
+        }
         // A zone without an EPSG code is still read, by its parameters, and without a note.
         let zone_10s = utm_24s.replace("Zone_24S", "Zone_10S").replace("-39.0", "-123.0");
         let (crs, note) = read_wkt(&zone_10s).unwrap();
