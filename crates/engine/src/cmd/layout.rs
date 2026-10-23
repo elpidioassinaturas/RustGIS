@@ -29,7 +29,7 @@ pub fn commands() -> Vec<C> {
             r#"{"name"?: string, "page"?: "letter"|"legal"|"tabloid"|"a5"|"a4"|"a3"|"a2"|"a1"|"a0", "orientation"?: "landscape"|"portrait", "width"?: mm, "height"?: mm, "template"?: "map" (frame, title, legend, north arrow, scale bar; the default)|"blank"}"#,
         ),
         C::new("layout.publication", "New Publication Layout", "Publish › Layout", publication).params(
-            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading, an editorial column's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000), "style"?: "classic" (the default: the title over the map, the footer under it) | "banner" (the title and subtitle in a band of the accent colour across the top) | "panel" (the map at the left, a panel at the right with the title, locator, legend, sources and reference) | "editorial" (the title large in serif, a column at the right with the note, the locator and the legend) (a sheet's arrangement; figures leave it to the caption), "accent"?: a colour as #RRGGBB (the style's colour: its band, panel tint, headings and rules)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
+            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading, an editorial column's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000), "style"?: "classic" (the default: the title over the map, the footer under it) | "banner" (the title and subtitle in a band of the accent colour across the top) | "panel" (the map at the left, a panel at the right with the title, locator, legend, sources and reference) | "editorial" (the title large in serif, a column at the right with the note, the locator and the legend) | "modular" (cards on a light page: the map, the locator and the legend each in one, the sources and reference in tinted ones) | "poster" (the page in the accent colour, the title in light text, the map in a light card, the footer in darker blocks) (a sheet's arrangement; figures leave it to the caption), "accent"?: a colour as #RRGGBB (the style's colour: its band, panel tint, headings and rules, a poster's page)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
         ),
         C::new("layout.activate", "Open Layout", "Browser", |s, p| {
             let i = index(s, &by_name(p))?;
@@ -85,10 +85,10 @@ pub fn commands() -> Vec<C> {
             r#"{"layout"?, "shape"?: "rectangle"|"circle"|"ellipse"|"polygon"|"lasso", "points"?: [[u, v], …] (polygon/lasso, 0..1 across the frame), "map"?: name, "x"?, "y"?, "w"?, "h"?: mm}"#,
         ),
         C::new("layout.addElement", "Add Element", "Publish › Map Surrounds", add_element).params(
-            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"colorbar"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle" (a neatline framing the page unless any of x, y, w, h is given)|"ellipse"|"circle"|"line"|"arrow"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator, which also takes "color" and "width" in points, default red and 2), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA", "bold"?: bool (text), "italic"?: bool, "align"?: "left"|"center"|"right", "letterSpacing"?: points, -5 to 50 (text, dynamicText), "font"?: "sans"|"serif" (text, dynamicText; an installed serif, else the sans with a warning; refused for other kinds), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "hideOther"?: bool (legend: leave out <all other values>), "exclude"?: [layer names] (legend: layers it leaves out though the map draws them), "orientation"?: "horizontal"|"vertical" (colorbar), "ticks"?: 2..21 (colorbar: labelled values, ends included), "tickSide"?: "below"|"above"|"right"|"left" (colorbar), "reverse"?: bool (colorbar: high values first), "fill"?: "#RRGGBBAA" (rectangle, ellipse, circle, northArrow), "width"?: outline width in points (rectangle, ellipse, circle; 0 for none) or line width in points (line, grid), "dir"?: "horizontal"|"vertical"|"falling"|"rising" (line), "head"?: "none"|"end"|"start"|"both" (line; default "end" for an arrow), "angle"?: degrees anticlockwise from pointing right, centred on the page unless x or y is given (line, arrow; it sets the box and the direction, so w, h and dir are not used with it), "length"?: mm (line, arrow), "image"?: base64, "path"?: picture file, "layer"?: (table, chart; colorbar: a raster layer, default the top visible one), "field"?, "label"?, "rows"?, "step"?: degrees (0 picks one), "labels"?: bool, "style"?: "lines"|"ticks"|"linesAndTicks" (grid) or "classic"|"compass"|"triangle"|"star" (northArrow) or "alternating"|"stepped"|"line" (scaleBar), "tickLength"?: mm, "format"?: "decimal"|"dms", "hemisphere"?: bool (N/S/E/W rather than a sign), "edges"?: ["top","bottom","left","right"] (labelled edges), "labelOrientation"?: "horizontal"|"vertical", "off"?: bool (grid; options not given keep the grid's), "outline"?: "#RRGGBB" (northArrow), "units"?: "auto"|"kilometers"|"meters"|"miles"|"feet", "divisions"?: 1..10 (scaleBar), "x"?, "y"?, "w"?, "h"?: mm}"##,
+            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"colorbar"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle" (a neatline framing the page unless any of x, y, w, h is given)|"ellipse"|"circle"|"line"|"arrow"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator, which also takes "color" and "width" in points, default red and 2), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA", "bold"?: bool (text), "italic"?: bool, "align"?: "left"|"center"|"right", "letterSpacing"?: points, -5 to 50 (text, dynamicText), "font"?: "sans"|"serif" (text, dynamicText; an installed serif, else the sans with a warning; refused for other kinds), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "hideOther"?: bool (legend: leave out <all other values>), "exclude"?: [layer names] (legend: layers it leaves out though the map draws them), "orientation"?: "horizontal"|"vertical" (colorbar), "ticks"?: 2..21 (colorbar: labelled values, ends included), "tickSide"?: "below"|"above"|"right"|"left" (colorbar), "reverse"?: bool (colorbar: high values first), "fill"?: "#RRGGBBAA" (rectangle, ellipse, circle, northArrow), "width"?: outline width in points (rectangle, ellipse, circle; 0 for none) or line width in points (line, grid), "radius"?: mm, 0 to 50 (rectangle: rounded corners), "dir"?: "horizontal"|"vertical"|"falling"|"rising" (line), "head"?: "none"|"end"|"start"|"both" (line; default "end" for an arrow), "angle"?: degrees anticlockwise from pointing right, centred on the page unless x or y is given (line, arrow; it sets the box and the direction, so w, h and dir are not used with it), "length"?: mm (line, arrow), "image"?: base64, "path"?: picture file, "layer"?: (table, chart; colorbar: a raster layer, default the top visible one), "field"?, "label"?, "rows"?, "step"?: degrees (0 picks one), "labels"?: bool, "style"?: "lines"|"ticks"|"linesAndTicks" (grid) or "classic"|"compass"|"triangle"|"star" (northArrow) or "alternating"|"stepped"|"line" (scaleBar), "tickLength"?: mm, "format"?: "decimal"|"dms", "hemisphere"?: bool (N/S/E/W rather than a sign), "edges"?: ["top","bottom","left","right"] (labelled edges), "labelOrientation"?: "horizontal"|"vertical", "off"?: bool (grid; options not given keep the grid's), "outline"?: "#RRGGBB" (northArrow), "units"?: "auto"|"kilometers"|"meters"|"miles"|"feet", "divisions"?: 1..10 (scaleBar), "x"?, "y"?, "w"?, "h"?: mm}"##,
         ),
         C::new("layout.update", "Element Properties", "Publish › Element", update).params(
-            r##"{"layout"?, "element": id, "x"?, "y"?, "w"?, "h"?: mm, "name"?, "visible"?, "locked"?: bool (a locked element takes no other change until unlocked; "locked": false unlocks it and may come with changes), "text"?, "size"?, "color"? (text, line), "bold"?, "italic"?, "align"?, "letterSpacing"?, "font"?: "sans"|"serif" (text; refused for other elements), "title"?, "allClasses"?: bool (legend), "hideOther"?: bool (legend), "exclude"?: [layer names] (legend; [] lists every layer again), "orientation"?, "ticks"?, "tickSide"?, "reverse"?: (colorbar), "style"?: (northArrow, scaleBar), "fill"?, "outline"? (northArrow, rectangle, ellipse; for a rectangle or ellipse, color sets it when outline is not given), "width"?: points (rectangle, ellipse, line), "dir"?, "head"?, "angle"?, "length"? (line: turned or sized about its centre, then moved by any x or y; dir does not come with angle or length), "units"?, "divisions"? (scaleBar), "map"?, "scale"?, "center"?: [lon, lat], "bearing"?: degrees clockwise from north, "pitch"?: degrees of tilt (0 to 85), "grid"?: {grid options as in layout.addElement} | false (map frame), "extentIndicator"?: {"color"?, "width"?: points} | false (map frame: its extent indicator's style, or removes it), "layer"?: (colorbar: "" for the top visible raster), "field"?, "rows"?}"##,
+            r##"{"layout"?, "element": id, "x"?, "y"?, "w"?, "h"?: mm, "name"?, "visible"?, "locked"?: bool (a locked element takes no other change until unlocked; "locked": false unlocks it and may come with changes), "text"?, "size"?, "color"? (text, line), "bold"?, "italic"?, "align"?, "letterSpacing"?, "font"?: "sans"|"serif" (text; refused for other elements), "title"?, "allClasses"?: bool (legend), "hideOther"?: bool (legend), "exclude"?: [layer names] (legend; [] lists every layer again), "orientation"?, "ticks"?, "tickSide"?, "reverse"?: (colorbar), "style"?: (northArrow, scaleBar), "fill"?, "outline"? (northArrow, rectangle, ellipse; for a rectangle or ellipse, color sets it when outline is not given), "radius"?: mm (rectangle: rounded corners), "width"?: points (rectangle, ellipse, line), "dir"?, "head"?, "angle"?, "length"? (line: turned or sized about its centre, then moved by any x or y; dir does not come with angle or length), "units"?, "divisions"? (scaleBar), "map"?, "scale"?, "center"?: [lon, lat], "bearing"?: degrees clockwise from north, "pitch"?: degrees of tilt (0 to 85), "grid"?: {grid options as in layout.addElement} | false (map frame), "extentIndicator"?: {"color"?, "width"?: points} | false (map frame: its extent indicator's style, or removes it), "layer"?: (colorbar: "" for the top visible raster), "field"?, "rows"?}"##,
         ),
         C::new("layout.guides", "Guides", "Publish › Page Setup", guides).params(
             r#"{"layout"?, "x"?: [mm] (vertical guides, from the page's left edge), "y"?: [mm] (horizontal guides, from its top edge), "clear"?: bool (remove every guide first)}"#,
@@ -482,6 +482,12 @@ enum Style {
     /// A magazine's page: the title large in serif, a column at the right with the note, the
     /// locator and the legend.
     Editorial,
+    /// Cards on a light page: the map in one, the locator and the legend in one each beside it,
+    /// the sources and the reference in tinted ones under them.
+    Modular,
+    /// The page in the accent colour: the title and subtitle in light text across the top, the
+    /// map in a light card, the footer in darker blocks.
+    Poster,
 }
 
 impl Style {
@@ -491,18 +497,39 @@ impl Style {
             Style::Banner => "banner",
             Style::Panel => "panel",
             Style::Editorial => "editorial",
+            Style::Modular => "modular",
+            Style::Poster => "poster",
         }
     }
 
-    /// The accent colour when none is given: a deep blue, green or brown.
+    /// The accent colour when none is given: a deep blue, green or brown (a poster's page).
     fn accent(self) -> Rgba {
         match self {
             Style::Classic => Rgba::rgb(0x2B, 0x26, 0x20),
             Style::Banner => Rgba::rgb(0x4A, 0x34, 0x26),
             Style::Panel => Rgba::rgb(0x2E, 0x5E, 0x3A),
             Style::Editorial => Rgba::rgb(0x1F, 0x2D, 0x4D),
+            Style::Modular => Rgba::rgb(0x2F, 0x6B, 0x4F),
+            Style::Poster => Rgba::rgb(0x3A, 0x26, 0x18),
         }
     }
+
+    /// Whether its surrounds sit on cards with rounded corners.
+    fn cards(self) -> bool {
+        matches!(self, Style::Modular | Style::Poster)
+    }
+}
+
+/// How a style draws its footer: its boxes' fill, outline and corners, and its texts' colours.
+#[derive(Clone, Copy)]
+struct Look {
+    head: Rgba,
+    body: Rgba,
+    small: Rgba,
+    fill: Rgba,
+    outline: Rgba,
+    width: f64,
+    radius: f64,
 }
 
 /// Where a style sets the locator (and, in a panel, the legend) beside the map rather than over
@@ -519,7 +546,12 @@ struct Column {
 
 /// A rectangle with no outline (`width` 0) or no fill (`fill` transparent).
 fn pub_box(fill: Rgba, outline: Rgba, width: f64) -> ElementKind {
-    ElementKind::Rectangle { fill, outline, width }
+    pub_card(fill, outline, width, 0.0)
+}
+
+/// [`pub_box`] with its corners rounded by `radius` millimetres.
+fn pub_card(fill: Rgba, outline: Rgba, width: f64, radius: f64) -> ElementKind {
+    ElementKind::Rectangle { fill, outline, width, radius }
 }
 
 /// The surrounds a publication layout places in the map frame's corners.
@@ -637,7 +669,11 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         Some("banner") => Style::Banner,
         Some("panel") => Style::Panel,
         Some("editorial") => Style::Editorial,
-        Some(x) => return Err(format!("style is \"classic\", \"banner\", \"panel\" or \"editorial\", not \"{x}\"")),
+        Some("modular") => Style::Modular,
+        Some("poster") => Style::Poster,
+        Some(x) => {
+            return Err(format!("style is \"classic\", \"banner\", \"panel\", \"editorial\", \"modular\" or \"poster\", not \"{x}\""));
+        }
     };
     let accent = color(p, "accent", style.accent())?;
     let heading = |i: usize, or: &str| headings.get(i).cloned().unwrap_or_else(|| or.to_string());
@@ -677,6 +713,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let mut warnings: Vec<String> = Vec::new();
     // Texts and boxes around the map, placed while its frame is worked out.
     let mut around: Vec<(String, (f64, f64, f64, f64), ElementKind)> = Vec::new();
+    // What a style draws under the map and its surrounds: a page's colour, a card or a panel.
+    let mut behind: Vec<(String, (f64, f64, f64, f64), ElementKind)> = Vec::new();
     // A sheet's sizes follow its short side (A4's 210 mm is 1); a figure keeps its texts at their
     // printed size, whatever its width.
     let k = if sheet { page_w.min(page_h) / 210.0 } else { 1.0 };
@@ -684,7 +722,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         let (m, pad) = (10.0 * k, 5.0 * k);
         let (x0, iw) = (m + pad, page_w - 2.0 * (m + pad));
         let (title_pt, sub_pt, head_pt, body_pt, small_pt) = (18.0 * k, 10.5 * k, 7.5 * k, 7.0 * k, 6.5 * k);
-        around.push(("Frame".into(), (m, m, page_w - 2.0 * m, page_h - 2.0 * m), pub_box(clear, ink, 0.8)));
+        // A neatline round the sheet, but on a poster's coloured page or a page of cards.
+        if !style.cards() {
+            around.push(("Frame".into(), (m, m, page_w - 2.0 * m, page_h - 2.0 * m), pub_box(clear, ink, 0.8)));
+        }
         // The sources and the reference that have something in them, each its heading and lines
         // `tw` wide. Each one's elements keep their names (`Sources`, `Reference`) whatever its
         // heading reads, the heading filled and wrapped like the rest.
@@ -704,7 +745,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         // sets it beside the map), then the sources and reference boxed side by side (unless it
         // stacks them in its panel), as tall as the longer column. Its top.
         type Around = Vec<(String, (f64, f64, f64, f64), ElementKind)>;
-        let footer = |around: &mut Around, note_here: bool, boxes_here: bool| -> f64 {
+        let footer = |around: &mut Around, look: &Look, note_here: bool, boxes_here: bool| -> f64 {
             let bottom = page_h - m - pad;
             let author_lines = author.as_deref().map(|t| wrap(t, iw, small_pt)).unwrap_or_default();
             let author_h = author_lines.len() as f64 * pitch(small_pt);
@@ -713,7 +754,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 around.push((
                     "Author".into(),
                     (x0, author_y, iw, author_h),
-                    pub_text(author_lines.join("\n"), small_pt, soft, false, TextAlign::Right),
+                    pub_text(author_lines.join("\n"), small_pt, look.small, false, TextAlign::Right),
                 ));
             }
             let mut foot = author_y;
@@ -721,7 +762,11 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             if !note_lines.is_empty() {
                 let nh = note_lines.len() as f64 * pitch(body_pt);
                 foot -= nh + 1.5 * k;
-                around.push(("Note".into(), (x0, foot, iw, nh), pub_text(note_lines.join("\n"), body_pt, soft, false, TextAlign::Left)));
+                around.push((
+                    "Note".into(),
+                    (x0, foot, iw, nh),
+                    pub_text(note_lines.join("\n"), body_pt, look.small, false, TextAlign::Left),
+                ));
             }
             if !boxes_here {
                 return foot;
@@ -740,16 +785,16 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 foot -= bh + 2.0 * k;
                 for (i, (name, head, lines)) in columns.into_iter().enumerate() {
                     let bx = x0 + i as f64 * (cw + gap);
-                    around.push((format!("{name} Box"), (bx, foot, cw, bh), pub_box(clear, Rgba::new(0x2B, 0x26, 0x20, 140), 0.5)));
+                    around.push((format!("{name} Box"), (bx, foot, cw, bh), pub_card(look.fill, look.outline, look.width, look.radius)));
                     let tx = bx + inner;
                     around.push((
                         format!("{name} Heading"),
                         (tx, foot + inner, tw, head.len() as f64 * pitch(head_pt)),
-                        pub_text(head.join("\n"), head_pt, ink, true, TextAlign::Left),
+                        pub_text(head.join("\n"), head_pt, look.head, true, TextAlign::Left),
                     ));
                     if !lines.is_empty() {
                         let body = (tx, foot + inner + head_h, tw, lines.len() as f64 * pitch(body_pt));
-                        around.push((name.to_string(), body, pub_text(lines.join("\n"), body_pt, soft, false, TextAlign::Left)));
+                        around.push((name.to_string(), body, pub_text(lines.join("\n"), body_pt, look.body, false, TextAlign::Left)));
                     }
                 }
             }
@@ -764,6 +809,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             }
         };
         let white = Rgba::rgb(0xFF, 0xFF, 0xFF);
+        let plain =
+            Look { head: ink, body: soft, small: soft, fill: clear, outline: Rgba::new(0x2B, 0x26, 0x20, 140), width: 0.5, radius: 0.0 };
+        let (card_r, card_pad) = (3.0 * k, 2.5 * k);
+        let card_line = Rgba::new(0x2B, 0x26, 0x20, 60);
         match style {
             Style::Classic => {
                 let mut top = m + pad;
@@ -779,13 +828,18 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     around.push(("Subtitle".into(), (x0, top, iw, sh), pub_text(lines.join("\n"), sub_pt, soft, false, TextAlign::Center)));
                     top += sh;
                 }
-                let foot = footer(&mut around, true, true);
+                let foot = footer(&mut around, &plain, true, true);
                 let (ft, fb) = (top + 3.0 * k, foot - 4.0 * k);
                 (page_w, page_h, (x0, ft, iw, room(ft, fb)?), None)
             }
-            Style::Banner => {
+            Style::Banner | Style::Poster => {
                 // A band in the accent colour across the top: the title at its left in white, the
-                // subtitle beside it past a thin rule. With neither, no band.
+                // subtitle beside it past a thin rule. With neither, no band. A poster's whole page
+                // is that colour, its map in a light card and its footer in darker blocks.
+                let poster = style == Style::Poster;
+                if poster {
+                    behind.push(("Background".into(), (0.0, 0.0, page_w, page_h), pub_box(accent, clear, 0.0)));
+                }
                 let mut top = m + pad;
                 if title.is_some() || subtitle.is_some() {
                     let big = title_pt * 1.2;
@@ -804,7 +858,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     let (t_h, s_h) = (t_lines.len() as f64 * pitch(big), s_lines.len() as f64 * pitch(sub_pt));
                     let band_h = t_h.max(s_h) + 2.0 * pad;
                     let mid = m + band_h / 2.0;
-                    around.push(("Banner".into(), (m, m, page_w - 2.0 * m, band_h), pub_box(accent, clear, 0.0)));
+                    if !poster {
+                        around.push(("Banner".into(), (m, m, page_w - 2.0 * m, band_h), pub_box(accent, clear, 0.0)));
+                    }
                     if !t_lines.is_empty() {
                         around.push((
                             "Title".into(),
@@ -833,9 +889,74 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     }
                     top = m + band_h;
                 }
-                let foot = footer(&mut around, true, true);
+                // A poster's footer: blocks a shade lighter than its page, amber headings, light text.
+                let shade = |c: u8| c.saturating_add(((255 - u16::from(c)) / 8) as u8);
+                let look = if poster {
+                    Look {
+                        head: Rgba::rgb(0xE8, 0xB0, 0x4B),
+                        body: Rgba::rgb(0xED, 0xE6, 0xDA),
+                        small: Rgba::rgb(0xCF, 0xC6, 0xB8),
+                        fill: Rgba::rgb(shade(accent.r()), shade(accent.g()), shade(accent.b())),
+                        outline: clear,
+                        width: 0.0,
+                        radius: card_r,
+                    }
+                } else {
+                    plain
+                };
+                let foot = footer(&mut around, &look, true, true);
                 let (ft, fb) = (top + 4.0 * k, foot - 4.0 * k);
-                (page_w, page_h, (x0, ft, iw, room(ft, fb)?), None)
+                let h = room(ft, fb)?;
+                if poster {
+                    behind.push(("Map Card".into(), (x0, ft, iw, h), pub_card(Rgba::rgb(0xF6, 0xF1, 0xE7), clear, 0.0, card_r)));
+                    (page_w, page_h, (x0 + card_pad, ft + card_pad, iw - 2.0 * card_pad, h - 2.0 * card_pad), None)
+                } else {
+                    (page_w, page_h, (x0, ft, iw, h), None)
+                }
+            }
+            Style::Modular => {
+                // Cards on a light page: the title and subtitle at the top left over a short bar of
+                // the accent colour; the map in a card at the left; at the right the locator and
+                // the legend, each in a card; the sources and reference in tinted cards side by
+                // side under them, the note and authorship under all.
+                let mut y = m + pad;
+                let tw = 0.75 * iw;
+                if let Some(t) = &title {
+                    let big = title_pt * 1.3;
+                    let lines = wrap_as(t, tw, big, true);
+                    let th = lines.len() as f64 * pitch(big);
+                    around.push(("Title".into(), (x0, y, tw, th), pub_text(lines.join("\n"), big, ink, true, TextAlign::Left)));
+                    y += th;
+                }
+                if let Some(t) = &subtitle {
+                    let lines = wrap(t, tw, sub_pt);
+                    let sh = lines.len() as f64 * pitch(sub_pt);
+                    around.push(("Subtitle".into(), (x0, y, tw, sh), pub_text(lines.join("\n"), sub_pt, soft, false, TextAlign::Left)));
+                    y += sh;
+                }
+                if y > m + pad {
+                    around.push(("Title Rule".into(), (x0, y + 1.5 * k, 14.0 * k, 1.2 * k), pub_box(accent, clear, 0.0)));
+                    y += 5.0 * k;
+                }
+                let look = Look {
+                    head: accent,
+                    body: soft,
+                    small: soft,
+                    fill: Rgba::new(accent.r(), accent.g(), accent.b(), 0x1A),
+                    outline: clear,
+                    width: 0.0,
+                    radius: card_r,
+                };
+                let foot = footer(&mut around, &look, true, true);
+                let bottom = foot - 4.0 * k;
+                let h = room(y, bottom)?;
+                let gap = 5.0 * k;
+                let cw = (0.3 * iw).max(48.0 * k).min(0.45 * iw);
+                let (mw, cx) = (iw - cw - gap, x0 + iw - cw);
+                behind.push(("Map Card".into(), (x0, y, mw, h), pub_card(white, card_line, 0.4, card_r)));
+                let frame = (x0 + card_pad, y + card_pad, mw - 2.0 * card_pad, h - 2.0 * card_pad);
+                let column = Column { x: cx + card_pad, y: y + card_pad, w: cw - 2.0 * card_pad, h: h - 2.0 * card_pad, legend: true };
+                (page_w, page_h, frame, Some(column))
             }
             Style::Panel => {
                 // The map at the left, as tall as the sheet allows; a pale panel at the right with
@@ -845,10 +966,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 let pw = (0.3 * iw).max(48.0 * k).min(0.45 * iw);
                 let (mw, px) = (iw - pw - gap, x0 + iw - pw);
                 let top = m + pad;
-                let foot = footer(&mut around, true, false);
+                let foot = footer(&mut around, &plain, true, false);
                 let panel_bottom = foot - 4.0 * k;
                 let tint = Rgba::new(accent.r(), accent.g(), accent.b(), 0x18);
-                around.push(("Panel Box".into(), (px, top, pw, panel_bottom - top), pub_box(tint, clear, 0.0)));
+                behind.push(("Panel Box".into(), (px, top, pw, panel_bottom - top), pub_box(tint, clear, 0.0)));
                 let ip = 3.0 * k;
                 let (ix, tw) = (px + ip, pw - 2.0 * ip);
                 let mut y = top + ip;
@@ -934,7 +1055,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     ));
                     y += sh;
                 }
-                let foot = footer(&mut around, false, true);
+                let foot = footer(&mut around, &plain, false, true);
                 let fb = foot - 4.0 * k;
                 let mut cy = m + pad;
                 around.push((
@@ -1026,6 +1147,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let name = unique_name(s, ps(p, "name").unwrap_or("Publication"));
     let mut l = Layout::new(name.clone(), w, h);
     l.decimal_comma = comma;
+    for (n, r, kind) in behind {
+        l.add(&n, r, kind);
+    }
     let frame = l.add(
         "Map Frame",
         (fx, fy, fw, fh),
@@ -1302,7 +1426,18 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             r
         }),
     };
+    // A page of cards gives the locator in its column a card of the column's width.
+    let card = style == Style::Modular && column.is_some();
+    let (card_r, card_pad) = (3.0 * k, 2.5 * k);
+    let surround_box = |fill: Rgba| if style.cards() { pub_card(fill, clear, 0.0, 2.0 * k) } else { pub_box(fill, clear, 0.0) };
     if let (Some((map, locator_scale, shape)), Some(r)) = (&locator_map, locator_rect) {
+        if let (true, Some(c)) = (card, column) {
+            l.add(
+                "Locator Card",
+                (c.x - card_pad, r.1 - card_pad, c.w + 2.0 * card_pad, r.3 + 2.0 * card_pad),
+                pub_card(Rgba::rgb(0xFF, 0xFF, 0xFF), Rgba::new(0x2B, 0x26, 0x20, 60), 0.4, card_r),
+            );
+        }
         l.add(
             "Locator",
             r,
@@ -1346,13 +1481,15 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // In a panel, the legend under the locator, as tall as it needs within what is left.
     let legend_rect = match column.filter(|c| c.legend) {
         Some(c) if content_h > 0.0 => {
-            let ly = c.y + if locator_map.is_some() { side + 3.0 * k } else { 0.0 };
+            let ly = c.y + if locator_map.is_some() { side + 3.0 * k + if card { 2.0 * card_pad } else { 0.0 } } else { 0.0 };
             let room_h = c.y + c.h - ly;
             if room_h < MIN_LEGEND_MM {
                 warnings.push("the side column leaves the legend no room under the locator, so it is left out: shorten its texts".into());
                 None
             } else {
-                Some((c.x, ly, c.w, (content_h + 2.0 * pad).min(room_h)))
+                // On a page of cards, a card as wide as the locator's.
+                let (x, w) = if card { (c.x - card_pad, c.w + 2.0 * card_pad) } else { (c.x, c.w) };
+                Some((x, ly, w, (content_h + 2.0 * pad).min(room_h)))
             }
         }
         Some(_) => None,
@@ -1364,7 +1501,11 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     };
     if let Some(r) = legend_rect {
         let (lw, lh) = (r.2, r.3);
-        l.add("Legend Box", r, pub_box(paper, clear, 0.0));
+        l.add(
+            "Legend Box",
+            r,
+            if card { pub_card(Rgba::rgb(0xFF, 0xFF, 0xFF), Rgba::new(0x2B, 0x26, 0x20, 60), 0.4, card_r) } else { surround_box(paper) },
+        );
         // The colorbar at the bottom of the box, as tall as the box allows; the legend's rows in
         // what is left above it. Each says when it doesn't fit, rather than one blaming the other.
         let (ix, iy, iw, ih) = (r.0 + pad, r.1 + pad, lw - 2.0 * pad, lh - 2.0 * pad);
@@ -1403,7 +1544,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     if let Some((corner, w, h)) = corner_of(Surround::Scale) {
         let (sx, sy, ..) = at(corner, w, h);
         placed.push(("scale bar", (sx, sy, w, h)));
-        l.add("Scale Box", (sx, sy, sw, sh + nh), pub_box(paper, clear, 0.0));
+        l.add("Scale Box", (sx, sy, sw, sh + nh), surround_box(paper));
         l.add("Scale Bar", (sx, sy, sw, sh), ElementKind::scale_bar(frame));
         l.add("Scale", (sx, sy + sh, sw, nh), pub_text("{scale}".into(), small_pt, ink, false, TextAlign::Center));
     }
@@ -1612,6 +1753,16 @@ fn frame_of(l: &Layout, p: &Value) -> Result<u32, String> {
     }
 }
 
+/// A rectangle's `radius`: its corners rounded by up to 50 mm; `d` when not given.
+fn corner_radius(p: &Value, d: f64) -> Result<f64, String> {
+    match p.get("radius").filter(|v| !v.is_null()) {
+        None => Ok(d),
+        Some(v) => {
+            v.as_f64().filter(|r| r.is_finite() && *r >= 0.0).map(|r| r.min(50.0)).ok_or_else(|| "radius is millimetres, 0 or more".into())
+        }
+    }
+}
+
 pub(crate) fn color(p: &Value, k: &str, d: Rgba) -> Result<Rgba, String> {
     match ps(p, k) {
         Some(c) => Rgba::from_hex(c).ok_or_else(|| format!("{k} must be #RRGGBB or #RRGGBBAA")),
@@ -1736,6 +1887,7 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
                 fill: color(p, "fill", Rgba::new(0, 0, 0, 0))?,
                 outline: color(p, "color", Rgba::rgb(0x22, 0x22, 0x22))?,
                 width: shape_width(p, 1.0)?.clamp(0.0, 50.0),
+                radius: corner_radius(p, 0.0)?,
             };
             // Without a box it frames the page, as a neatline does; with any part of one it's a shape.
             if ["x", "y", "w", "h"].iter().any(|k| p.get(k).is_some_and(|v| !v.is_null())) {
@@ -2063,8 +2215,8 @@ fn restyle(kind: &ElementKind, p: &Value) -> Result<Option<ElementKind>, String>
             };
             Ok(Some(ElementKind::ScaleBar { frame: *frame, units, divisions, style }))
         }
-        ElementKind::Rectangle { fill, outline, width } | ElementKind::Ellipse { fill, outline, width } => {
-            if ["fill", "outline", "color", "width"].iter().all(|k| p.get(k).is_none()) {
+        ElementKind::Rectangle { fill, outline, width, .. } | ElementKind::Ellipse { fill, outline, width } => {
+            if ["fill", "outline", "color", "width", "radius"].iter().all(|k| p.get(k).is_none()) {
                 return Ok(None);
             }
             // The outline's colour is "outline", or "color" as when adding one.
@@ -2072,7 +2224,10 @@ fn restyle(kind: &ElementKind, p: &Value) -> Result<Option<ElementKind>, String>
             let width = shape_width(p, *width)?.clamp(0.0, 50.0);
             Ok(Some(match kind {
                 ElementKind::Ellipse { .. } => ElementKind::Ellipse { fill, outline, width },
-                _ => ElementKind::Rectangle { fill, outline, width },
+                ElementKind::Rectangle { radius, .. } => {
+                    ElementKind::Rectangle { fill, outline, width, radius: corner_radius(p, *radius)? }
+                }
+                _ => return Err("only a rectangle rounds its corners".into()),
             }))
         }
         ElementKind::Line { color: c, width, dir, head } => {

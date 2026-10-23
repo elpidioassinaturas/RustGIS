@@ -284,7 +284,11 @@ pub fn page_layout(s: &Session, pres: &Presentation, page: &Page) -> Layout {
     let text = |text: &str, size: f64, color: Rgba, bold: bool| ElementKind::text(text, size, color, bold);
     match &page.kind {
         PageKind::Blank { text: body, background } => {
-            l.add("Background", (0.0, 0.0, w, h), ElementKind::Rectangle { fill: *background, outline: *background, width: 0.0 });
+            l.add(
+                "Background",
+                (0.0, 0.0, w, h),
+                ElementKind::Rectangle { fill: *background, outline: *background, width: 0.0, radius: 0.0 },
+            );
             // Light text on dark pages.
             let lum = 0.299 * background.r() as f64 + 0.587 * background.g() as f64 + 0.114 * background.b() as f64;
             let fg = if lum < 140.0 { Rgba::rgb(0xFF, 0xFF, 0xFF) } else { dark };
@@ -351,7 +355,7 @@ pub fn page_layout(s: &Session, pres: &Presentation, page: &Page) -> Layout {
             }
             let (bw, bh) = (w - 2.0 * m, h - top - m - h * 0.08);
             let bg = Rgba::rgb(0x11, 0x18, 0x27);
-            l.add("Video", (m, top, bw, bh), ElementKind::Rectangle { fill: bg, outline: bg, width: 0.0 });
+            l.add("Video", (m, top, bw, bh), ElementKind::Rectangle { fill: bg, outline: bg, width: 0.0, radius: 0.0 });
             l.add(
                 "Play",
                 (m + bw * 0.3, top + bh / 2.0 - 6.0, bw * 0.4, 12.0),

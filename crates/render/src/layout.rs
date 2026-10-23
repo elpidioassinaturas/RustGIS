@@ -239,10 +239,10 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                     None => placeholder(&mut pm, r, "Chart", ppp),
                 }
             }
-            ElementKind::Rectangle { fill, outline, width } => {
-                pm.fill_rect(r, &paint(*fill, 1.0), Transform::identity(), None);
+            ElementKind::Rectangle { fill, outline, width, radius } => {
+                let p = rounded_rect(r, (*radius * PT_PER_MM * ppp) as f32).unwrap_or_else(|| PathBuilder::from_rect(r));
+                pm.fill_path(&p, &paint(*fill, 1.0), FillRule::Winding, Transform::identity(), None);
                 if *width > 0.0 {
-                    let p = PathBuilder::from_rect(r);
                     pm.stroke_path(
                         &p,
                         &paint(*outline, 1.0),
@@ -369,6 +369,30 @@ pub fn expand(t: &str, layout: &Layout, info: &PageInfo, frame: Option<(&Map, ru
         },
     };
     rustgis_map::graphics::expand(&t, &v)
+}
+
+/// A rectangle with its corners rounded by `rad` pixels (at most half its shorter side), each a
+/// quarter circle drawn as a cubic; `None` for square corners, drawn as the plain rectangle.
+fn rounded_rect(r: tiny_skia::Rect, rad: f32) -> Option<tiny_skia::Path> {
+    let rad = rad.min(r.width() / 2.0).min(r.height() / 2.0);
+    if rad.is_nan() || rad <= 0.0 {
+        return None;
+    }
+    // The control points' distance that makes a cubic a quarter circle.
+    let c = rad * 0.552_284_8;
+    let (l, t, rt, b) = (r.left(), r.top(), r.right(), r.bottom());
+    let mut pb = PathBuilder::new();
+    pb.move_to(l + rad, t);
+    pb.line_to(rt - rad, t);
+    pb.cubic_to(rt - rad + c, t, rt, t + rad - c, rt, t + rad);
+    pb.line_to(rt, b - rad);
+    pb.cubic_to(rt, b - rad + c, rt - rad + c, b, rt - rad, b);
+    pb.line_to(l + rad, b);
+    pb.cubic_to(l + rad - c, b, l, b - rad + c, l, b - rad);
+    pb.line_to(l, t + rad);
+    pb.cubic_to(l, t + rad - c, l + rad - c, t, l + rad, t);
+    pb.close();
+    pb.finish()
 }
 
 /// A number as printed with a decimal comma when `comma` (`0.05` to `0,05`, `6,300,000` to
@@ -1835,7 +1859,7 @@ mod tests {
         l.add(
             "Rule",
             (5.0, 10.0, 40.0, 0.15),
-            ElementKind::Rectangle { fill: Rgba::rgb(0, 0, 0), outline: Rgba::rgb(0, 0, 0), width: 0.0 },
+            ElementKind::Rectangle { fill: Rgba::rgb(0, 0, 0), outline: Rgba::rgb(0, 0, 0), width: 0.0, radius: 0.0 },
         );
         let pm = render(&l, &mut [], 300.0, &PageInfo::default()).unwrap();
         let x = pm.width() / 2;

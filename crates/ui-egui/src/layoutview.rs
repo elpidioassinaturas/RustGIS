@@ -1536,7 +1536,7 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                         }
                         ui.end_row();
                     }
-                    ElementKind::Rectangle { fill, outline, width } | ElementKind::Ellipse { fill, outline, width } => {
+                    ElementKind::Rectangle { fill, outline, width, .. } | ElementKind::Ellipse { fill, outline, width } => {
                         // A fill with no opacity leaves only the outline; an outline 0 wide, only the fill.
                         for (label, key, current) in [("Fill", "fill", *fill), ("Outline", "outline", *outline)] {
                             ui.label(tl!(label));

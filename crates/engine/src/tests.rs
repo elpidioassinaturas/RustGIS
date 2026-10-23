@@ -2617,11 +2617,55 @@ fn publication_layouts_take_a_style() {
     for n in ["Column Heading", "Note", "Locator", "Legend Box"] {
         assert!(named(n).x >= frame.x + frame.w, "{n} right of the map: {r}");
     }
+    // Modular: the map in a card drawn under it, the locator and the legend each in a card at the
+    // right, the footer's boxes with rounded corners and no neatline.
+    let radius = |e: &rustgis_map::layout::Element| match &e.kind {
+        ElementKind::Rectangle { radius, .. } => *radius,
+        _ => 0.0,
+    };
+    let r = make(&mut s, "modular", json!({}));
+    let l = s.project.layouts.last().unwrap();
+    let at = |n: &str| l.elements.iter().position(|e| e.name == n).unwrap_or_else(|| panic!("no {n}: {r}"));
+    let named = |n: &str| &l.elements[at(n)];
+    assert!(at("Map Card") < at("Map Frame") && inside(named("Map Frame"), named("Map Card")), "{r}");
+    let frame = named("Map Frame");
+    for n in ["Locator Card", "Locator", "Legend Box"] {
+        assert!(named(n).x >= frame.x + frame.w, "{n} right of the map: {r}");
+    }
+    assert!(inside(named("Locator"), named("Locator Card")) && named("Legend Box").y >= named("Locator Card").y + named("Locator Card").h);
+    assert!((named("Legend Box").w - named("Locator Card").w).abs() < 1e-6, "the two cards as wide: {r}");
+    assert!(radius(named("Map Card")) > 0.0 && radius(named("Legend Box")) > 0.0 && radius(named("Sources Box")) > 0.0);
+    assert!(l.elements.iter().all(|e| e.name != "Frame"));
+    // Poster: the page in the accent colour under everything, the title in white, the map in a
+    // light card, the footer in rounded blocks.
+    let r = make(&mut s, "poster", json!({}));
+    let l = s.project.layouts.last().unwrap();
+    let at = |n: &str| l.elements.iter().position(|e| e.name == n).unwrap_or_else(|| panic!("no {n}: {r}"));
+    let named = |n: &str| &l.elements[at(n)];
+    let back = named("Background");
+    assert_eq!((at("Background"), back.w, back.h), (0, l.width, l.height));
+    let ElementKind::Rectangle { fill, .. } = &back.kind else { panic!() };
+    assert_eq!(*fill, rustgis_map::Rgba::rgb(0x3A, 0x26, 0x18));
+    let ElementKind::Text { color, .. } = &named("Title").kind else { panic!() };
+    assert_eq!(*color, rustgis_map::Rgba::rgb(0xFF, 0xFF, 0xFF));
+    assert!(at("Map Card") < at("Map Frame") && inside(named("Map Frame"), named("Map Card")) && radius(named("Sources Box")) > 0.0);
+    assert!(l.elements.iter().all(|e| e.name != "Banner" && e.name != "Frame"));
+    // A rectangle's rounded corners by hand: added, changed, kept when its colour changes, saved only
+    // when rounded.
+    let id = s.run("layout.addElement", &json!({"kind": "rectangle", "x": 10, "y": 10, "w": 40, "h": 20, "radius": 4})).unwrap()["element"]
+        .clone();
+    let rect = |s: &Session| s.project.layouts.last().unwrap().elements.iter().find(|e| json!(e.id) == id).unwrap().kind.clone();
+    assert!(matches!(rect(&s), ElementKind::Rectangle { radius, .. } if radius == 4.0));
+    s.run("layout.update", &json!({"element": id, "fill": "#FFFFFF"})).unwrap();
+    assert!(matches!(rect(&s), ElementKind::Rectangle { radius, .. } if radius == 4.0));
+    s.run("layout.update", &json!({"element": id, "radius": 0})).unwrap();
+    assert!(!serde_json::to_string(&rect(&s)).unwrap().contains("radius"), "square corners aren't saved");
+    assert!(s.run("layout.update", &json!({"element": id, "radius": -1})).is_err());
     // A figure leaves the style to its caption; refused: an unknown style, a bad accent.
     let r = s.run("layout.publication", &json!({"extent": piaui, "profile": "figure-1col", "style": "banner"})).unwrap();
     assert!(r["warnings"].to_string().contains("style \\\"banner\\\""), "{r}");
     let before = s.project.layouts.len();
-    for bad in [json!({"extent": piaui, "style": "poster"}), json!({"extent": piaui, "style": "banner", "accent": "blue"})] {
+    for bad in [json!({"extent": piaui, "style": "magazine"}), json!({"extent": piaui, "style": "banner", "accent": "blue"})] {
         assert!(s.run("layout.publication", &bad).is_err(), "{bad}");
     }
     assert_eq!(s.project.layouts.len(), before);
