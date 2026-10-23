@@ -8509,8 +8509,11 @@ fn a_trend_over_a_stac_collection() {
     mean["by"] = json!("year");
     let by_year = summary(&mut s, &mean);
     PIECE_VALUES.with(|v| v.set(None));
+    // A STAC cube's dates come as read, eight at a time, so the totals' order (and an output's last
+    // bit) can differ from run to run: the same values, within that.
     for other in [&in_pieces, &by_year] {
-        assert!(read_whole.bands[0].data.iter().zip(&other.bands[0].data).all(|(x, y)| x == y || (x.is_nan() && y.is_nan())));
+        let same = |x: &f32, y: &f32| (x - y).abs() <= 1e-6 || (x.is_nan() && y.is_nan());
+        assert!(read_whole.bands[0].data.iter().zip(&other.bands[0].data).all(|(x, y)| same(x, y)));
         assert!(crate::cmd::cube::same_grid(&read_whole.transform, &other.transform));
     }
     // Cancelled, the readers stop early and the run says so, rather than work out a block only
