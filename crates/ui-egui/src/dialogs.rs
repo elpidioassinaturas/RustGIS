@@ -931,6 +931,13 @@ fn add_database(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         ui.add(egui::TextEdit::singleline(&mut app.dialogs.text).hint_text(tl!("of a geometry that doesn't say")).desired_width(280.0));
         ui.end_row();
     });
+    // The tables listed and the one chosen belong to the address they were listed for.
+    if app.dialogs.listed.as_deref().is_some_and(|l| l != database(&app.dialogs.a)) {
+        app.dialogs.listed = None;
+        app.dialogs.list.clear();
+        app.dialogs.c.clear();
+        app.dialogs.info = None;
+    }
     if let Some(c) = pick {
         if let Err(e) = crate::connectionui::open_connection(app, &c) {
             app.dialogs.error = Some(e);
@@ -947,7 +954,10 @@ fn add_database(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                 app.dialogs.info = Some(crate::i18n::fmt("{n} tables with geometry", &[("n", &app.dialogs.list.len().to_string())]));
             }
             Err(e) => {
+                // What a failed listing leaves can't be tied to an address any more, so it goes too.
                 app.dialogs.listed = None;
+                app.dialogs.list.clear();
+                app.dialogs.c.clear();
                 app.dialogs.info = None;
                 app.dialogs.error = Some(e);
             }

@@ -21,9 +21,9 @@ fn cached_pixels_equal_sequential_strokes_including_overlap_and_alpha() {
                 expected.fill(tiny_skia::Color::WHITE);
                 actual.fill(tiny_skia::Color::WHITE);
                 let strokes = [
-                    LineStroke { offset: 2.0, width: Some(3.0), color: Some(Rgba::new(40, 70, 180, 150)), join, cap },
-                    LineStroke { offset: -2.0, width: Some(1.0), color: Some(Rgba::new(220, 30, 40, 200)), join, cap },
-                    LineStroke { offset: 2.0, width: Some(1.0), color: Some(Rgba::rgb(30, 40, 50)), join, cap },
+                    LineStroke { offset: 2.0, width: Some(3.0), color: Some(Rgba::new(40, 70, 180, 150)), join, cap, level: None },
+                    LineStroke { offset: -2.0, width: Some(1.0), color: Some(Rgba::new(220, 30, 40, 200)), join, cap, level: None },
+                    LineStroke { offset: 2.0, width: Some(1.0), color: Some(Rgba::rgb(30, 40, 50)), join, cap, level: None },
                 ];
                 let mut batch = Paths::default();
                 for i in 0..180 {

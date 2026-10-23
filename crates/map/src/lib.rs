@@ -144,6 +144,11 @@ pub struct Layer {
     /// the renderer's stroke alone).
     #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "symbology::de_strokes")]
     pub line_strokes: Vec<symbology::LineStroke>,
+    /// Draws the stacked strokes in levels (symbol levels): every feature's strokes of one
+    /// [`LineStroke::level`] before any of the next, so road casings join under the cores
+    /// instead of cutting across them where lines meet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stroke_levels: bool,
     /// Layers with a higher priority draw above lower ones, whatever their order (the scene's
     /// depth priority).
     #[serde(default)]
@@ -220,6 +225,7 @@ impl Layer {
             aggregation: None,
             extrusion: None,
             line_strokes: Vec::new(),
+            stroke_levels: false,
             priority: 0,
             design: design::Design::default(),
             raster: None,

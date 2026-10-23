@@ -1679,6 +1679,98 @@ fn add_database_picks_and_keeps_connections() {
     assert!(h.query_by_label("Save as Connection").is_none(), "an unlisted endpoint cannot be kept");
 }
 
+/// A blank name connects as "default"; once that endpoint is kept, the form shows it as the
+/// selected saved connection instead of offering to keep it again.
+#[test]
+fn s3_dialog_selects_the_kept_connection_after_a_blank_name_connect() {
+    let mut h = harness();
+    h.state_mut().run("ui.dialog", json!({"name":"s3"})).unwrap();
+    h.step();
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Connect").click();
+    h.step();
+    h.get_by_label("Save as Connection").click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().session.connections.connections.len(), 1);
+    assert!(h.query_by_label("Save as Connection").is_none());
+    assert!(h.query_by_label("Rename it to save it: a connection has this name").is_none());
+    assert!(h.query_all_by_role(egui::accesskit::Role::ComboBox).any(|n| n.value().as_deref() == Some("default")));
+}
+
+/// A table list and the table chosen belong to the address they were listed for: editing the
+/// address by hand drops them, so Add never reads a table name against another database.
+#[test]
+fn add_database_drops_stale_tables_when_the_address_is_edited() {
+    use egui::accesskit::Role;
+    let mut h = harness();
+    let address = "postgres:host=db.example dbname=gis user=me";
+    h.state_mut().run("ui.dialog", json!({"name":"addDatabase"})).unwrap();
+    h.state_mut().dialogs.a = address.into();
+    h.state_mut().dialogs.list = vec!["public.parcels".into()];
+    h.state_mut().dialogs.c = "public.parcels".into();
+    h.state_mut().dialogs.listed = Some(address.into());
+    h.step();
+    h.step();
+    assert_eq!(h.state().dialogs.c, "public.parcels", "an unchanged address keeps its tables");
+    h.query_all_by_role(Role::TextInput).find(|n| n.value().as_deref() == Some(address)).unwrap().focus();
+    h.step();
+    h.key_press(egui::Key::End);
+    h.event(egui::Event::Text("x".into()));
+    h.step();
+    h.step();
+    assert_eq!(h.state().dialogs.a, format!("{address}x"));
+    assert!(h.state().dialogs.list.is_empty());
+    assert!(h.state().dialogs.c.is_empty());
+    assert_eq!(h.state().dialogs.listed, None);
+}
+
+/// A failed re-list can't leave the old tables behind: they would no longer be tied to an address
+/// the stale-listing check can see, and the table chosen could be sent to another database.
+#[test]
+fn add_database_failed_relist_drops_the_old_tables() {
+    let mut h = harness();
+    // Nothing listens on port 9 of the loopback address: listing is refused at once.
+    let address = "postgres:host=127.0.0.1 port=9 dbname=gis user=me";
+    h.state_mut().run("ui.dialog", json!({"name":"addDatabase"})).unwrap();
+    h.state_mut().dialogs.a = address.into();
+    h.state_mut().dialogs.list = vec!["public.parcels".into()];
+    h.state_mut().dialogs.c = "public.parcels".into();
+    h.state_mut().dialogs.listed = Some(address.into());
+    h.step();
+    h.step();
+    h.get_by_label("List Tables").click();
+    h.step();
+    h.step();
+    assert!(h.state().dialogs.error.is_some(), "the listing must have failed");
+    assert_eq!(h.state().dialogs.listed, None);
+    assert!(h.state().dialogs.list.is_empty());
+    assert!(h.state().dialogs.c.is_empty());
+}
+
+/// Collections belong to the API they were listed from: typing another address drops them.
+#[test]
+fn stac_dialog_drops_stale_collections_when_the_address_is_edited() {
+    use egui::accesskit::Role;
+    let mut h = harness();
+    let api = "https://one.example/stac/v1";
+    h.state_mut().run("ui.dialog", json!({"name":"stac"})).unwrap();
+    h.state_mut().ui.stac.api = api.into();
+    h.state_mut().ui.stac.collections = vec![("old-collection".into(), "Old".into())];
+    h.state_mut().ui.stac.collection = "old-collection".into();
+    h.step();
+    h.step();
+    h.query_all_by_role(Role::TextInput).find(|n| n.value().as_deref() == Some(api)).unwrap().focus();
+    h.step();
+    h.key_press(egui::Key::End);
+    h.event(egui::Event::Text("2".into()));
+    h.step();
+    h.step();
+    assert_eq!(h.state().ui.stac.api, format!("{api}2"));
+    assert!(h.state().ui.stac.collections.is_empty());
+    assert!(h.state().ui.stac.collection.is_empty(), "the collection picked belongs to the old API");
+}
+
 #[test]
 fn stac_dialog_keeps_and_picks_connections() {
     use std::io::{Read, Write};

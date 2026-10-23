@@ -2789,6 +2789,10 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                     }
                 } else {
                     let mut stroke_paths = stroke_paths::Paths::default();
+                    // Symbol levels: lines with stacked strokes wait, and go down a level at a time
+                    // after the rest (each batch of a streamed layer on its own).
+                    let levels = layer.stroke_levels && layer.has_strokes();
+                    let mut stacked: Vec<(&[Vec<Coord>], Symbol, &[LineStroke])> = Vec::new();
                     for (row, g) in drawn.iter().enumerate() {
                         let Some(g) = g else { continue };
                         if rows.get(row) != Some(&true) || !visible(&extents.get(row).copied().unwrap_or_else(|| g.extent())) {
@@ -2820,9 +2824,26 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                             continue;
                         }
                         match g {
+                            Geometry::Line(parts) if !strokes.is_empty() && levels => stacked.push((parts, sym, strokes)),
                             Geometry::Line(parts) if !strokes.is_empty() => stroke_paths.draw(&ctx, dest, parts, &sym, strokes),
                             _ => ctx.feature(dest, g, &sym),
                         }
+                    }
+                    // A turn per feature and level it has strokes at, by level and then the features'
+                    // order: a feature is visited only for its own levels, however many the layer has.
+                    let mut turns: Vec<(u8, usize)> = stacked
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(f, (.., st))| st.iter().enumerate().map(move |(i, s)| (s.level_at(i), f)))
+                        .collect();
+                    turns.sort_unstable();
+                    turns.dedup();
+                    let mut one: Vec<LineStroke> = Vec::with_capacity(rustgis_map::symbology::MAX_STROKES);
+                    for (level, f) in turns {
+                        let Some((parts, sym, strokes)) = stacked.get(f) else { continue };
+                        one.clear();
+                        one.extend(strokes.iter().enumerate().filter(|(i, s)| s.level_at(*i) == level).map(|(_, s)| *s));
+                        stroke_paths.draw(&ctx, dest, parts, sym, &one);
                     }
                 }
                 cpu_dirty |= drawn_here;
@@ -5385,6 +5406,39 @@ mod tests {
         assert_eq!(colour(&r, road + 1), (255, 0, 0));
         assert_eq!(colour(&r, road - 2), (0, 0, 0));
         assert!((100..200).all(|y| colour(&r, y) != (0, 160, 0)), "no green left");
+    }
+
+    #[test]
+    fn stroke_levels_join_casings_under_the_cores() {
+        // One road in two segments meeting at the centre, a black casing under a red core. Drawn
+        // a feature at a time, the second segment's round casing covers the end of the first's
+        // core; in levels, every casing goes down first and the core runs through the joint.
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        let mut d = Dataset::new("road", GeometryType::Polyline, vec![]);
+        d.push(Some(Geometry::Line(vec![vec![Coord::new(-1.0, 0.0), Coord::new(0.0, 0.0)]])), vec![]);
+        d.push(Some(Geometry::Line(vec![vec![Coord::new(0.0, 0.0), Coord::new(1.0, 0.0)]])), vec![]);
+        let id = m.add_dataset(d);
+        let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 1500.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
+        let colour = |r: &Rendered, x: u32| {
+            let p = r.pixmap.pixel(x, 100).unwrap();
+            (p.red(), p.green(), p.blue())
+        };
+        let stroke = |c: Rgba, w: f32| rustgis_map::LineStroke { color: Some(c), width: Some(w), ..Default::default() };
+        m.layer_mut(id).unwrap().line_strokes = vec![stroke(Rgba::rgb(0, 0, 0), 12.0), stroke(Rgba::rgb(255, 0, 0), 4.0)];
+        let r = render(&mut m, &view).unwrap();
+        assert_eq!(colour(&r, 96), (0, 0, 0), "the second casing cuts across the first core");
+        assert_eq!(colour(&r, 60), (255, 0, 0));
+        m.layer_mut(id).unwrap().stroke_levels = true;
+        let r = render(&mut m, &view).unwrap();
+        assert!((60..140).all(|x| colour(&r, x) == (255, 0, 0)), "the core runs through the joint");
+        // A level set by hand: the core at level 0 and the casing at 1 bury the cores.
+        let l = m.layer_mut(id).unwrap();
+        l.line_strokes[0].level = Some(1);
+        l.line_strokes[1].level = Some(0);
+        let r = render(&mut m, &view).unwrap();
+        assert_eq!(colour(&r, 60), (0, 0, 0));
     }
 
     #[test]

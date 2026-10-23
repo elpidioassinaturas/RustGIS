@@ -675,11 +675,30 @@ pub fn title(app: &RustGisApp) -> &'static str {
 
 fn switch_api(st: &mut State, url: &str) {
     st.api = url.to_string();
+    drop_listing(st);
+}
+
+/// Forgets what was listed for the last API or catalog, and what is still on its way from it: a
+/// late answer would otherwise land under the new one. An asset being signed or a link being
+/// opened was asked for already and goes on.
+fn drop_listing(st: &mut State) {
     st.collections.clear();
-    // Nothing of the last catalog's browsing is kept.
+    st.items.clear();
+    st.collection.clear();
     (st.node, st.node_title) = (String::new(), String::new());
     st.trail.clear();
     st.children.clear();
+    // What Save as Connection would keep: listed again before it is offered.
+    st.listed.clear();
+    if st.waiting.as_ref().is_some_and(|(a, _)| matches!(a, Asked::Collections(_) | Asked::Search(_) | Asked::Children(_))) {
+        st.waiting = None;
+    }
+    st.walk = None;
+    // The last listing's status ("Showing 10 items") isn't the new API's; an asset being signed
+    // or a link being opened keeps its own.
+    if st.waiting.is_none() {
+        st.info = None;
+    }
 }
 
 /// The dialog.
@@ -725,9 +744,7 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
                 });
             // A catalog typed in is browsed with Browse, from its top.
             if ui.add(egui::TextEdit::singleline(&mut st.api).desired_width(ui.available_width().max(80.0))).changed() {
-                (st.node, st.node_title) = (String::new(), String::new());
-                st.trail.clear();
-                st.children.clear();
+                drop_listing(st);
             }
         });
         ui.end_row();
@@ -825,7 +842,9 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
             keep = crate::connectionui::keep_button(ui);
         }
     });
-    if api_changed && catalog::is_static(&app.ui.stac.api) && !busy {
+    // A listing dropped by the switch no longer holds the new catalog's browsing up.
+    let busy_now = app.ui.stac.waiting.is_some() || app.ui.stac.walk.is_some();
+    if api_changed && catalog::is_static(&app.ui.stac.api) && !busy_now {
         browse(app, None);
     } else if let Some(to) = go_to {
         browse(app, Some(to));
@@ -1143,5 +1162,58 @@ mod tests {
         app.ui.stac.from = "soon".into();
         find_items(&mut app);
         assert!(app.ui.stac.walk.is_none() && app.ui.stac.error.is_some());
+    }
+
+    /// An answer asked of one API that lands after another was picked isn't shown under it; a
+    /// link being opened goes on.
+    #[test]
+    fn a_late_answer_from_the_previous_api_is_dropped() {
+        let mut app = RustGisApp::with_sample();
+        let ctx = egui::Context::default();
+        let late: Answer = Slot::default();
+        app.ui.stac.api = "https://one.example/stac".into();
+        app.ui.stac.waiting = Some((Asked::Collections("https://one.example/stac".into()), late.clone()));
+        switch_api(&mut app.ui.stac, "https://two.example/stac");
+        assert!(app.ui.stac.waiting.is_none());
+        *late.lock().unwrap() = Some(Ok(br#"{"collections":[{"id":"old","title":"Old"}]}"#.to_vec()));
+        poll(&mut app, &ctx);
+        assert!(app.ui.stac.collections.is_empty());
+        assert_eq!(app.ui.stac.api, "https://two.example/stac");
+
+        // Listed, then away and back: Save as Connection waits for a listing of its own, and
+        // the last listing's status goes with it.
+        app.ui.stac.listed = "https://two.example/stac".into();
+        app.ui.stac.info = Some("Showing 10 items".into());
+        switch_api(&mut app.ui.stac, "https://one.example/stac");
+        switch_api(&mut app.ui.stac, "https://two.example/stac");
+        assert!(app.ui.stac.listed.is_empty());
+        assert_eq!(app.ui.stac.info, None);
+
+        app.ui.stac.waiting = Some((Asked::Link("https://two.example/item.json".into()), Slot::default()));
+        switch_api(&mut app.ui.stac, "https://three.example/stac");
+        assert!(matches!(app.ui.stac.waiting, Some((Asked::Link(_), _))), "a link already asked for goes on");
+    }
+
+    /// A static catalog picked while a listing of the last API is pending is browsed at once:
+    /// the dropped listing doesn't hold it up.
+    #[test]
+    fn a_catalog_picked_during_a_pending_listing_is_browsed() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::with_sample();
+        // Nothing listens on port 9 of the loopback address: the browse is refused, harmlessly.
+        app.run("connection.new", json!({"kind":"stac","name":"Local catalog","address":"http://127.0.0.1:9/catalog.json"})).unwrap();
+        app.ui.stac.api = "https://one.example/stac".into();
+        app.ui.stac.waiting = Some((Asked::Collections("https://one.example/stac".into()), Slot::default()));
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(|ui, app: &mut RustGisApp| dialog(app, ui), app);
+        h.step();
+        h.step();
+        h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("Other")).unwrap().click();
+        h.step();
+        h.get_by_label("Local catalog").click();
+        h.step();
+        assert_eq!(h.state().ui.stac.api, "http://127.0.0.1:9/catalog.json");
+        assert!(matches!(&h.state().ui.stac.waiting, Some((Asked::Children(url), _)) if url == "http://127.0.0.1:9/catalog.json"));
     }
 }

@@ -105,6 +105,19 @@ same). By command, name the class as `layer.classStyle` does, with `value`, `ind
 layer.lineStrokes={"layer":"Roads","value":"Motorway","strokes":[{"color":"#5A3A1E","width":7},{"color":"#F28C28","width":5},{"color":"#FFFFFF","width":0.6}]}
 ```
 
+Each feature draws its whole stack in turn, so where two roads meet, the second one's casing
+cuts across the first one's core. **Draw strokes in levels** (symbol levels) draws every
+feature's strokes of one level before any of the next instead, so the casings join underneath
+and the cores run through. A stroke's level is its place in the stack (the bottom one 0) unless
+it is given one: a **Level** row shows on each stroke while levels are on, and strokes of
+different classes that share a level go down together, such as the casings of all road classes
+before any core. A layer read in place from its file draws its levels a batch of features at a
+time. By command (`"level"` on a stroke, `null` for its place in the stack):
+
+```text
+layer.strokeLevels={"layer":"Roads","on":true}
+```
+
 ### Custom color ramps
 
 Besides the built-in color schemes, a project can hold your own color ramps: an organization's

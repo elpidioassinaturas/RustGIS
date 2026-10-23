@@ -29,6 +29,8 @@ pub(crate) const SOURCES: [(&str, &str); 4] = [
 pub struct State {
     /// The saved connection this dialog was opened on, by id (see `connectionui::picked`).
     pub(crate) connection: Option<String>,
+    /// The saved definition the form was last filled from or kept as: a later edit or removal elsewhere is noticed against it.
+    synced: Option<Connection>,
     /// What Connect last connected, as Save as Connection keeps it.
     connected: Option<Value>,
     name: String,
@@ -216,8 +218,49 @@ pub fn open_connection(app: &mut RustGisApp, name: &str) {
     }
 }
 
+/// Forgets what was listed for the endpoint browsed.
+fn reset_browse(st: &mut State) {
+    st.listing = None;
+    st.listing_job = None;
+    st.buckets.clear();
+    st.buckets_job = None;
+    st.bucket.clear();
+    st.prefix.clear();
+}
+
+/// Keeps the form true to the saved connection it stands for. A connection edited elsewhere
+/// (its endpoint, region or login changed, which also ends its session) is filled in again
+/// and what was listed for the old settings dropped; one removed is let go. The first look at
+/// a connection only records it.
+fn sync(app: &mut RustGisApp) {
+    let list = crate::sourcespane::connections_snapshot(app);
+    let st = &mut app.ui.s3;
+    let Some(id) = st.connection.clone() else {
+        st.synced = None;
+        return;
+    };
+    match list.iter().find(|c| c.id == id && c.kind == "s3") {
+        None => {
+            st.connection = None;
+            st.synced = None;
+            reset_browse(st);
+        }
+        Some(c) => match st.synced.as_ref().filter(|s| s.id == c.id) {
+            None => st.synced = Some(c.clone()),
+            Some(s) if (s.name.as_str(), s.address.as_str(), &s.options) != (c.name.as_str(), c.address.as_str(), &c.options) => {
+                let c = c.clone();
+                fill(app, &c);
+                reset_browse(&mut app.ui.s3);
+                app.ui.s3.synced = Some(c);
+            }
+            Some(_) => {}
+        },
+    }
+}
+
 /// The dialog: a connection, then a bucket browsed a level at a time.
 pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
+    sync(app);
     ui.label(egui::RichText::new(tl!("Amazon S3, or an S3-compatible service (MinIO, Cloudflare R2, Wasabi…) by its endpoint. Keys are kept until RustGIS closes; a saved connection keeps its name, endpoint and region, never its secret.")).weak());
     egui::CollapsingHeader::new(tl!("Connection")).default_open(s3::connections().is_empty()).show(ui, |ui| connection_form(app, ui));
     ui.separator();
@@ -230,7 +273,9 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
 fn connection_form(app: &mut RustGisApp, ui: &mut egui::Ui) {
     let list = crate::sourcespane::connections_snapshot(app);
     let st = &app.ui.s3;
-    let current = list.iter().find(|c| c.kind == "s3" && Some(c.id.as_str()) == st.connection.as_deref() && c.name == st.name.trim());
+    // A blank name connects as "default" (see `connect`), so it is that connection's name here too.
+    let shown_name = if st.name.trim().is_empty() { "default" } else { st.name.trim() };
+    let current = list.iter().find(|c| c.kind == "s3" && Some(c.id.as_str()) == st.connection.as_deref() && c.name == shown_name);
     if let Some(c) = crate::connectionui::picker(ui, "s3_saved", &list, &["s3"], current) {
         pick(app, &c);
         return;
@@ -463,5 +508,41 @@ mod tests {
         assert_eq!(app.ui.s3.connected.as_ref().unwrap()["options"]["credentials"], "keys");
         assert_eq!(s3::connection(&c.name).unwrap().name, c.name);
         s3::disconnect(&c.name);
+    }
+
+    #[test]
+    fn editing_or_removing_the_picked_connection_refills_the_form_and_drops_its_listing() {
+        let mut app = RustGisApp::with_sample();
+        let v = app
+            .run(
+                "connection.new",
+                json!({"kind":"s3","name":"edited-s3-test","address":"https://old.example.com",
+            "options":{"region":"eu-west-1","credentials":"none"}}),
+            )
+            .unwrap();
+        let id = v["id"].as_str().unwrap().to_string();
+        let c = app.session.connections.find(&id).unwrap().clone();
+        pick(&mut app, &c);
+        sync(&mut app);
+        app.ui.s3.bucket = "old-bucket".into();
+        app.ui.s3.listing = Some((vec!["old/".into()], Vec::new(), false));
+        // Unchanged: left as it is.
+        sync(&mut app);
+        assert_eq!(app.ui.s3.bucket, "old-bucket");
+
+        let edit = json!({"id": id, "address": "https://new.example.com", "options": {"region":"us-west-2","credentials":"none"}});
+        app.run("connection.edit", edit).unwrap();
+        sync(&mut app);
+        assert_eq!(app.ui.s3.endpoint, "https://new.example.com");
+        assert_eq!(app.ui.s3.region, "us-west-2");
+        assert!(app.ui.s3.listing.is_none() && app.ui.s3.bucket.is_empty(), "nothing listed for the old endpoint is kept");
+        assert_eq!(app.ui.s3.connection.as_deref(), Some(id.as_str()));
+
+        app.ui.s3.bucket = "other".into();
+        app.run("connection.remove", json!({"id": id})).unwrap();
+        sync(&mut app);
+        assert_eq!(app.ui.s3.connection, None);
+        assert!(app.ui.s3.bucket.is_empty());
+        s3::disconnect("edited-s3-test");
     }
 }

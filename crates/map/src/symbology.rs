@@ -183,15 +183,25 @@ pub struct LineStroke {
     pub cap: LineCap,
     #[serde(default)]
     pub join: LineJoin,
+    /// When the layer draws its strokes in levels (`Layer::stroke_levels`), the level this one
+    /// draws at: every feature's strokes of one level go down before any of the next, so casings
+    /// join under the cores. `None` is its place in the stack, the bottom one 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<u8>,
 }
 
 impl Default for LineStroke {
     fn default() -> Self {
-        LineStroke { color: None, width: None, offset: 0.0, cap: LineCap::Round, join: LineJoin::Round }
+        LineStroke { color: None, width: None, offset: 0.0, cap: LineCap::Round, join: LineJoin::Round, level: None }
     }
 }
 
 impl LineStroke {
+    /// The level it draws at as the `i`th stroke of its stack (see [`LineStroke::level`]).
+    pub fn level_at(&self, i: usize) -> u8 {
+        self.level.unwrap_or_else(|| u8::try_from(i).unwrap_or(u8::MAX))
+    }
+
     /// The colour and width it draws a feature whose renderer symbol is `s` with.
     pub fn resolve(&self, s: &Symbol) -> (Rgba, f32) {
         (self.color.unwrap_or(s.stroke), self.width.unwrap_or(s.stroke_width))

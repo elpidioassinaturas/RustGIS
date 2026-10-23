@@ -344,8 +344,22 @@ fn line_strokes_stack_and_survive_save_and_undo() {
     ]);
     s.run("layer.lineStrokes", &json!({"layer": "Rivers", "strokes": strokes})).unwrap();
     let want = vec![
-        LineStroke { color: Some(Rgba::rgb(0, 0, 0)), width: Some(11.5), offset: 8.5, cap: LineCap::Round, join: LineJoin::Round },
-        LineStroke { color: Some(Rgba::rgb(0xFF, 0x8C, 0)), width: Some(7.0), offset: 8.5, cap: LineCap::Butt, join: LineJoin::Miter },
+        LineStroke {
+            color: Some(Rgba::rgb(0, 0, 0)),
+            width: Some(11.5),
+            offset: 8.5,
+            cap: LineCap::Round,
+            join: LineJoin::Round,
+            level: None,
+        },
+        LineStroke {
+            color: Some(Rgba::rgb(0xFF, 0x8C, 0)),
+            width: Some(7.0),
+            offset: 8.5,
+            cap: LineCap::Butt,
+            join: LineJoin::Miter,
+            level: None,
+        },
         LineStroke { offset: -2.0, ..LineStroke::default() },
     ];
     assert_eq!(s.map().layer_by_name("Rivers").unwrap().line_strokes, want);
@@ -469,6 +483,49 @@ fn a_class_stacks_strokes_of_its_own() {
     assert!(s.run("layer.lineStrokes", &json!({"layer": "Rivers", "value": "1", "strokes": pair})).is_err());
     s.run("layer.symbology", &json!({"layer": "Rivers", "type": "single"})).unwrap();
     assert!(s.run("layer.lineStrokes", &json!({"layer": "Rivers", "index": 0, "strokes": pair})).is_err());
+}
+
+#[test]
+fn strokes_draw_in_levels() {
+    let mut s = world();
+    let depth = s.undo_depth();
+    let strokes = json!([{"color": "#000000", "width": 6, "level": 2}, {"color": "#FFFFFF", "width": 2}]);
+    s.run("layer.lineStrokes", &json!({"layer": "Rivers", "strokes": strokes})).unwrap();
+    s.run("layer.strokeLevels", &json!({"layer": "Rivers", "on": true})).unwrap();
+    assert_eq!(s.undo_depth(), depth + 2);
+    let check = |s: &Session| {
+        let l = s.map().layer_by_name("Rivers").unwrap();
+        assert!(l.stroke_levels);
+        assert_eq!(l.line_strokes[0].level, Some(2));
+        // Without a level of its own, a stroke draws at its place in the stack.
+        assert_eq!((l.line_strokes[0].level_at(0), l.line_strokes[1].level_at(1)), (2, 1));
+    };
+    check(&s);
+    let dir = std::env::temp_dir().join(format!("rustgis-stroke-levels-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("levels.rgis");
+    s.run("project.saveAs", &json!({"path": path.display().to_string()})).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.open", &json!({"path": path.display().to_string()})).unwrap();
+    check(&t);
+    t.run("share.exportMap", &json!({"path": dir.join("map.png").display().to_string(), "width": 320, "height": 200})).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    let depth = s.undo_depth();
+    for (id, bad) in [
+        ("layer.lineStrokes", json!({"layer": "Rivers", "strokes": [{"level": 256}]})),
+        ("layer.lineStrokes", json!({"layer": "Rivers", "strokes": [{"level": -1}]})),
+        ("layer.lineStrokes", json!({"layer": "Rivers", "strokes": [{"level": 1.5}]})),
+        ("layer.lineStrokes", json!({"layer": "Rivers", "strokes": [{"level": "top"}]})),
+        ("layer.strokeLevels", json!({"layer": "Rivers"})),
+        ("layer.strokeLevels", json!({"layer": "Cities", "on": true})),
+    ] {
+        assert!(s.run(id, &bad).is_err(), "{id} {bad}");
+    }
+    assert_eq!(s.undo_depth(), depth);
+    s.run("layer.strokeLevels", &json!({"layer": "Rivers", "on": false})).unwrap();
+    assert!(!s.map().layer_by_name("Rivers").unwrap().stroke_levels);
+    s.run("edit.undo", &Value::Null).unwrap();
+    check(&s);
 }
 
 #[test]
