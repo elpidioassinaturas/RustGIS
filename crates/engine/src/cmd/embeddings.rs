@@ -231,6 +231,8 @@ pub(crate) fn style_points(s: &mut Session, id: u32) {
         ramp: Default::default(),
         class_labels: Default::default(),
         other_label: None,
+        class_strokes: Default::default(),
+        other_strokes: Vec::new(),
     };
 }
 

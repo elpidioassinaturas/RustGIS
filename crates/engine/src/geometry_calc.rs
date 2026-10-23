@@ -18,7 +18,14 @@ pub fn properties(kind: GeometryType) -> &'static [(&'static str, &'static str)]
 /// The units `property` can be calculated in, as `(key, label)` pairs.
 pub fn units(property: &str) -> &'static [(&'static str, &'static str)] {
     match property {
-        "area" => &[("m2", "Square metres"), ("km2", "Square kilometres"), ("ha", "Hectares"), ("ac", "Acres")],
+        "area" => &[
+            ("m2", "Square metres"),
+            ("km2", "Square kilometres"),
+            ("ha", "Hectares"),
+            ("ac", "Acres"),
+            ("ft2", "Square feet"),
+            ("mi2", "Square miles"),
+        ],
         "length" | "perimeter" => &[("m", "Metres"), ("km", "Kilometres"), ("ft", "Feet"), ("mi", "Miles")],
         "x" | "y" => &[("deg", "Degrees (WGS84)"), ("projected", "Projected CRS units")],
         _ => &[],
@@ -99,11 +106,13 @@ pub fn run(s: &mut Session, p: &Json) -> CmdResult {
     }
     let divisor = match unit {
         "km" => 1e3,
-        "ft" => 0.3048,
-        "mi" => 1609.344,
+        "ft" => rustgis_geom::METRES_PER_FOOT,
+        "mi" => rustgis_geom::METRES_PER_MILE,
         "km2" => 1e6,
+        "ft2" => rustgis_geom::SQUARE_METRES_PER_SQUARE_FOOT,
+        "mi2" => rustgis_geom::SQUARE_METRES_PER_SQUARE_MILE,
         "ha" => 1e4,
-        "ac" => 4046.8564224,
+        "ac" => rustgis_geom::SQUARE_METRES_PER_ACRE,
         _ => 1.0,
     };
     let mut values = Vec::with_capacity(rows.len());

@@ -1,4 +1,4 @@
-//! Shapefiles read in place: a large `.shp` with its `.dbf` and `.prj`, a view at a time.
+//! Shapefiles read in place: a large `.shp` with its `.dbf`, `.prj` and `.cpg`, a view at a time.
 //!
 //! Opening builds or reuses a disk-backed R-tree and record directory. Queries use a bounded
 //! SQLite page cache, then read matching shapes and `.dbf` rows by their offsets.
@@ -52,6 +52,7 @@ struct Table {
     row_len: usize,
     rows: u64,
     columns: Vec<Column>,
+    ldid: u8,
 }
 
 /// A Shapefile read in place.
@@ -61,6 +62,7 @@ pub struct ShpSource {
     dbf: PathBuf,
     index: index::Index,
     table: Table,
+    encoding: crate::dbf::DbfEncoding,
     reproject: Reproject,
 }
 
@@ -68,7 +70,7 @@ pub struct ShpSource {
 const BUFFER: usize = 1 << 20;
 
 impl ShpSource {
-    /// Opens `path` (the `.shp`) with the `.dbf` and `.prj` beside it.
+    /// Opens `path` (the `.shp`) with the `.dbf` and optional `.prj` and `.cpg` beside it.
     pub fn open_path(path: &Path, name: &str) -> Result<ShpSource> {
         let dbf = path.with_extension("dbf");
         if !dbf.is_file() {
@@ -76,6 +78,8 @@ impl ShpSource {
         }
         let mut notes = Vec::new();
         let table = read_table(&dbf)?;
+        let cpg = crate::dbf::read_cpg(path, &mut notes);
+        let encoding = crate::dbf::encoding(cpg.as_deref(), table.ldid, &mut notes);
         let shp_len = std::fs::metadata(path)?.len();
         if shp_len > u64::from(u32::MAX) {
             return Err(bad("the .shp is larger than the format's 4 GB"));
@@ -112,7 +116,12 @@ impl ShpSource {
         {
             notes.push("coordinates are not longitude/latitude; RustGIS reads them as WGS 84 and they may draw out of place".into());
         }
-        let fields = table.columns.iter().zip(read_names(&dbf, table.columns.len())?).map(|(c, n)| Field::new(n, c.out)).collect();
+        let fields = table
+            .columns
+            .iter()
+            .zip(read_names(&dbf, table.columns.len(), &encoding.decoder())?)
+            .map(|(c, n)| Field::new(n, c.out))
+            .collect();
         let info = SourceInfo {
             name: name.to_string(),
             format: "Shapefile",
@@ -124,7 +133,7 @@ impl ShpSource {
             indexed: index.indexed(),
             notes,
         };
-        Ok(ShpSource { info, shp: path.to_path_buf(), dbf, index, table, reproject })
+        Ok(ShpSource { info, shp: path.to_path_buf(), dbf, index, table, encoding, reproject })
     }
 }
 
@@ -134,6 +143,7 @@ impl FeatureSource for ShpSource {
     }
 
     fn read(&self, req: &Request) -> Result<Batch> {
+        let encoding = self.encoding.decoder();
         let limit = clamp_limit(req.limit);
         let extent = req.extent.map(|e| self.reproject.extent_from_lonlat(&e));
         if extent.is_some_and(|e| e.is_empty()) {
@@ -176,7 +186,7 @@ impl FeatureSource for ShpSource {
                 if row.first() == Some(&b'*') {
                     return Ok(());
                 }
-                self.table.columns.iter().map(|c| value(c, row.get(1 + c.offset..1 + c.offset + c.len).unwrap_or(&[]))).collect()
+                self.table.columns.iter().map(|c| value(c, row.get(1 + c.offset..1 + c.offset + c.len).unwrap_or(&[]), &encoding)).collect()
             } else {
                 vec![Value::Null; self.table.columns.len()]
             };
@@ -189,6 +199,7 @@ impl FeatureSource for ShpSource {
         true
     }
     fn visit_chunks(&self, extent: Option<Extent>, bytes: usize, visit: &mut dyn FnMut(Vec<Feature>) -> Result<()>) -> Result<Batch> {
+        let encoding = self.encoding.decoder();
         if bytes == 0 {
             return Err(bad("the render memory budget is zero"));
         }
@@ -239,7 +250,7 @@ impl FeatureSource for ShpSource {
                 if row.first() == Some(&b'*') {
                     return Ok(());
                 }
-                self.table.columns.iter().map(|c| value(c, row.get(1 + c.offset..1 + c.offset + c.len).unwrap_or(&[]))).collect()
+                self.table.columns.iter().map(|c| value(c, row.get(1 + c.offset..1 + c.offset + c.len).unwrap_or(&[]), &encoding)).collect()
             } else {
                 vec![Value::Null; self.table.columns.len()]
             };
@@ -424,11 +435,11 @@ fn read_table(path: &Path) -> Result<Table> {
     if offset + 1 > row_len {
         return Err(bad("the .dbf's fields are wider than its rows"));
     }
-    Ok(Table { header_len, row_len, rows, columns })
+    Ok(Table { header_len, row_len, rows, columns, ldid: head.get(29).copied().unwrap_or(0) })
 }
 
 /// The `.dbf`'s column names, in order (read again: the layout above keeps only offsets).
-fn read_names(path: &Path, n: usize) -> Result<Vec<String>> {
+fn read_names(path: &Path, n: usize, encoding: &dyn shapefile::dbase::Encoding) -> Result<Vec<String>> {
     let mut f = BufReader::new(File::open(path)?);
     f.seek(SeekFrom::Start(32))?;
     let mut out = Vec::with_capacity(n);
@@ -437,7 +448,8 @@ fn read_names(path: &Path, n: usize) -> Result<Vec<String>> {
         f.read_exact(&mut d)?;
         let name = d.get(..11).unwrap_or(&[]);
         let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
-        out.push(String::from_utf8_lossy(name.get(..end).unwrap_or(&[])).trim().to_string());
+        let name = name.get(..end).unwrap_or(&[]);
+        out.push(encoding.decode(name).unwrap_or_else(|_| String::from_utf8_lossy(name)).trim().to_string());
     }
     Ok(out)
 }
@@ -451,9 +463,8 @@ fn trimmed(b: &[u8]) -> &[u8] {
 }
 
 /// One `.dbf` value, as a Shapefile read whole gives it (blank and unreadable values are null).
-fn value(c: &Column, b: &[u8]) -> Value {
-    let text =
-        || std::str::from_utf8(trimmed(b)).ok().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(trimmed(b)).into_owned());
+fn value(c: &Column, b: &[u8], encoding: &dyn shapefile::dbase::Encoding) -> Value {
+    let text = || encoding.decode(trimmed(b)).unwrap_or_else(|_| String::from_utf8_lossy(trimmed(b))).into_owned();
     let number = || {
         let t = trimmed(b);
         if t.is_empty() || t.iter().all(|c| *c == b'*') {

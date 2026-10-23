@@ -1,10 +1,9 @@
-//! The Data Sources pane: favourites, recent sources, folders, saved services, databases and STAC
-//! APIs, S3 connections and a library of well-known public sources. A source is added (or its
-//! browser dialog opened, connected) through the commands that add it; the lists are the
-//! session's `sources`, kept with the app's preferences (never a secret).
+//! The Data Sources pane: favourites, recent sources, folders, named connections and a library
+//! of public sources. Rows add a source or open its browser through the existing commands.
+//! Sources and connections are kept with the app's preferences, never with secrets.
 
 use egui::{RichText, Sense, Ui, vec2};
-use rustgis_engine::render::rustgis_tiles::s3;
+use rustgis_engine::connections::{Connection, DATABASE_KINDS};
 use rustgis_engine::sources::{Source, library};
 use serde_json::{Value, json};
 
@@ -16,15 +15,13 @@ pub const PREF: &str = "data_sources";
 /// Named connections, separate from the project's data sources.
 pub const CONNECTIONS_PREF: &str = "connections";
 
-/// What the pane's "save" boxes hold.
+/// Preference loading and generation-keyed snapshots for the pane.
 #[derive(Default)]
 pub struct State {
     loaded: bool,
-    service: String,
-    database: String,
-    stac: String,
     /// The sources as last shown, and their generation.
     shown: Option<(u64, std::sync::Arc<rustgis_engine::sources::Sources>)>,
+    connections: Option<(u64, std::sync::Arc<Vec<Connection>>)>,
 }
 
 /// The sources to show this frame: the last snapshot unless they changed since.
@@ -36,6 +33,18 @@ fn snapshot(app: &mut RustGisApp) -> std::sync::Arc<rustgis_engine::sources::Sou
             let s = std::sync::Arc::new(app.session.sources.clone());
             app.ui.sources.shown = Some((generation, s.clone()));
             s
+        }
+    }
+}
+
+pub(crate) fn connections_snapshot(app: &mut RustGisApp) -> std::sync::Arc<Vec<Connection>> {
+    let generation = app.session.connections.generation;
+    match &app.ui.sources.connections {
+        Some((g, list)) if *g == generation => list.clone(),
+        _ => {
+            let list = std::sync::Arc::new(app.session.connections.connections.clone());
+            app.ui.sources.connections = Some((generation, list.clone()));
+            list
         }
     }
 }
@@ -226,31 +235,131 @@ fn empty(ui: &mut Ui, what: &str) {
     ui.label(RichText::new(what).small().weak());
 }
 
-/// A box to save an address as a source of `kind`.
-fn save_box(app: &mut RustGisApp, ui: &mut Ui, kind: &str, hint: &str, field: fn(&mut State) -> &mut String) {
+fn connections(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, list: &[Connection]) {
+    crate::connectiontree::prune(app);
     ui.horizontal(|ui| {
-        let r = ui.add(egui::TextEdit::singleline(field(&mut app.ui.sources)).hint_text(hint).desired_width(ui.available_width() - 52.0));
-        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if (ui.small_button(tl!("Save")).clicked() || enter) && !field(&mut app.ui.sources).trim().is_empty() {
-            let mut address = field(&mut app.ui.sources).trim().to_string();
-            // A bare connection string is a PostgreSQL one (as Add From Database takes it).
-            if kind == "database"
-                && address.contains('=')
-                && !address.contains("://")
-                && !address.to_ascii_lowercase().starts_with("postgres:")
-            {
-                address = format!("postgres:{address}");
+        ui.menu_button(tl!("New Connection ▾"), |ui| {
+            for (kind, label) in crate::connectionui::KINDS {
+                if cfg!(target_arch = "wasm32") && DATABASE_KINDS.contains(&kind) {
+                    continue;
+                }
+                if ui.button(tl!(label)).clicked() {
+                    if let Err(e) = app.run("ui.connection", json!({"kind": kind})) {
+                        app.session.notify(e, true);
+                    }
+                    ui.close();
+                }
             }
-            let mut p = json!({"kind": kind, "address": address});
-            if kind == "stac" {
-                p["extra"] = json!({"api": "true"});
-            }
-            match app.run("sources.save", p) {
-                Ok(_) => field(&mut app.ui.sources).clear(),
-                Err(e) => app.session.notify(e, true),
-            }
+        });
+        if ui.small_button("⟳").on_hover_text(tl!("Refresh every connection's lists")).clicked() {
+            crate::connectiontree::refresh(app, None);
         }
     });
+    if list.is_empty() {
+        empty(ui, tl!("Connections you add are listed here"));
+    }
+    let mut groups = std::collections::BTreeMap::new();
+    for c in list.iter().filter(|c| !c.group.is_empty()) {
+        groups.entry(c.group.to_lowercase()).or_insert(c.group.as_str());
+    }
+    for (lower, group) in groups {
+        egui::CollapsingHeader::new(group).id_salt(("connections", &lower)).default_open(true).show(ui, |ui| {
+            for c in list.iter().filter(|c| c.group.to_lowercase() == lower) {
+                connection_row(app, ui, t, c);
+            }
+        });
+    }
+    for c in list.iter().filter(|c| c.group.is_empty()) {
+        connection_row(app, ui, t, c);
+    }
+}
+
+fn connection_row(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, c: &Connection) {
+    let unavailable = DATABASE_KINDS.contains(&c.kind.as_str()) && cfg!(target_arch = "wasm32");
+    if unavailable {
+        ui.horizontal(|ui| {
+            connection_header(app, ui, t, c, true);
+        });
+        return;
+    }
+    // A click on the name opens the row: the datasets the connection offers are listed under it.
+    let state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), ui.make_persistent_id(("connection", &c.id)), false);
+    let open = state.is_open();
+    let mut clicked = false;
+    let mut header = state.show_header(ui, |ui| clicked = connection_header(app, ui, t, c, false));
+    if clicked {
+        header.set_open(!open);
+    }
+    header.body(|ui| crate::connectiontree::show(app, ui, t, c));
+}
+
+/// A connection's icon, name, kind and menu. True when the name was clicked.
+fn connection_header(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, c: &Connection, unavailable: bool) -> bool {
+    let icon = if DATABASE_KINDS.contains(&c.kind.as_str()) {
+        "table"
+    } else {
+        match c.kind.as_str() {
+            "stac" => "search",
+            "s3" => "package",
+            _ => "globe_view",
+        }
+    };
+    let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+    icons::paint(ui.painter(), r, icon, t.icon, t.accent);
+    let response = if unavailable {
+        ui.link(RichText::new(&c.name).weak()).on_hover_text(tl!("Database connections are used by the desktop app"))
+    } else {
+        ui.link(&c.name).on_hover_text(if c.kind == "s3" && c.address.is_empty() { tl!("Amazon S3") } else { &c.address })
+    };
+    ui.label(RichText::new(tl!(crate::connectionui::label(&c.kind))).small().weak());
+    response.context_menu(|ui| {
+        let mut items = vec![
+            (tl!("Edit…"), "ui.connection", json!({"id":c.id})),
+            (tl!("Test"), "ui.connection", json!({"id":c.id,"test":true})),
+            (tl!("Duplicate"), "connection.duplicate", json!({"id":c.id})),
+        ];
+        if unavailable {
+            items.remove(1);
+        }
+        for (label, command, params) in items {
+            if ui.button(label).clicked() {
+                if let Err(e) = app.run(command, params) {
+                    app.session.notify(e, true);
+                }
+                ui.close();
+            }
+        }
+        if !unavailable {
+            let keys = c.kind == "s3" && c.options.get("credentials").is_some_and(|v| v == "keys");
+            if (DATABASE_KINDS.contains(&c.kind.as_str()) || keys) && ui.button(tl!("Log In…")).clicked() {
+                crate::connectionui::log_in(app, &c.id);
+                ui.close();
+            }
+            if ui.button(tl!("Refresh")).clicked() {
+                crate::connectiontree::refresh(app, Some(&c.id));
+                ui.close();
+            }
+            // The kind's own add dialog, as a click on the connection opened it before.
+            if ui.button(tl!("Add With Options…")).clicked() {
+                if let Err(e) = crate::connectionui::open_connection(app, c) {
+                    app.session.notify(e, true);
+                }
+                ui.close();
+            }
+        }
+        if !c.address.is_empty() && ui.button(tl!("Copy Address")).clicked() {
+            ui.ctx().copy_text(c.address.clone());
+            ui.close();
+        }
+        if ui.button(tl!("Remove")).clicked() {
+            if let Err(e) = app.run("connection.remove", json!({"id":c.id})) {
+                app.session.notify(e, true);
+            }
+            ui.close();
+        }
+    });
+    !unavailable && response.clicked()
 }
 
 pub fn show(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
@@ -299,43 +408,8 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                     }
                 });
             }
-            let saved = |kind: &str| src.saved.iter().filter(|s| s.kind == kind).cloned().collect::<Vec<_>>();
-            header(ui, tl!("Services"), false, |ui| {
-                for s in saved("service") {
-                    row(app, ui, t, &s, Some("saved"));
-                }
-                save_box(app, ui, "service", "https://…/wms, …/FeatureServer", |st| &mut st.service);
-            });
-            if !cfg!(target_arch = "wasm32") {
-                header(ui, tl!("Databases"), false, |ui| {
-                    for s in saved("database") {
-                        row(app, ui, t, &s, Some("saved"));
-                    }
-                    save_box(app, ui, "database", "host=… dbname=… user=…, or a .duckdb file", |st| &mut st.database);
-                });
-            }
-            header(ui, tl!("S3"), false, |ui| {
-                let conns = s3::connections();
-                if conns.is_empty() {
-                    empty(ui, tl!("No connections this session"));
-                }
-                for c in conns {
-                    let s = Source { kind: "s3".into(), name: c.name.clone(), address: c.name.clone(), extra: Value::Null };
-                    row(app, ui, t, &s, None);
-                }
-                if ui.small_button(tl!("Connect…")).clicked() {
-                    let _ = app.run("ui.dialog", json!({"name": "s3"}));
-                }
-            });
-            header(ui, tl!("STAC APIs"), false, |ui| {
-                for (_, s) in library().iter().filter(|(_, s)| s.kind == "stac") {
-                    row(app, ui, t, s, None);
-                }
-                for s in src.saved.iter().filter(|s| s.kind == "stac") {
-                    row(app, ui, t, s, Some("saved"));
-                }
-                save_box(app, ui, "stac", "https://…/stac/v1", |st| &mut st.stac);
-            });
+            let list = connections_snapshot(app);
+            header(ui, tl!("Connections"), true, |ui| connections(app, ui, t, &list));
             header(ui, tl!("Library"), false, |ui| {
                 let mut groups: Vec<&str> = Vec::new();
                 let lib = library();

@@ -1314,22 +1314,25 @@ fn read_shapefile(path: &Path, name: &str) -> Result<(Dataset, ReadReport)> {
         return Err(DataError::Format(format!("Shapefile: {} is missing", dbf.display())));
     }
     let shx = path.with_extension("shx");
+    let mut notes = Vec::new();
     let parts = ShapefileParts {
         shp: std::fs::read(path)?,
         shx: if shx.is_file() { Some(std::fs::read(shx)?) } else { None },
         dbf: std::fs::read(dbf)?,
         prj: crate::raster::read_prj(path),
+        cpg: crate::dbf::read_cpg(path, &mut notes),
     };
-    read_shapefile_parts(parts, name)
+    let (ds, mut report) = read_shapefile_parts(parts, name)?;
+    report.messages.extend(notes);
+    Ok((ds, report))
 }
 
-/// The files of a Shapefile besides its `.shp` that [`gather_shapefiles`] zips with it. The `.cpg`
-/// isn't read (the `.dbf`'s text is decoded without it); it's taken along so it isn't refused on its own.
+/// The files of a Shapefile besides its `.shp` that [`gather_shapefiles`] zips with it.
 const SHAPEFILE_SIDECARS: [&str; 4] = ["dbf", "shx", "prj", "cpg"];
 
 /// Gathers each Shapefile among files given together (several picked at once in the browser, or
 /// dropped at once) into a zip that reads as a zipped Shapefile: a `.shp` with the `.dbf` of the
-/// same base name, ignoring case, and its `.shx`, `.prj` and `.cpg` when they are there (the `.cpg` only so it goes with the rest). The zip,
+/// same base name, ignoring case, and its `.shx`, `.prj` and `.cpg` when they are there. The zip,
 /// named after the `.shp`, takes its place; its parts go. Other files, and a `.shp` without its
 /// `.dbf`, pass through as they came. A Shapefile whose parts are too large to read together (more
 /// than [`MAX_BYTES`], or the zip reader's limit) is left out, and said why in the messages
@@ -1403,7 +1406,7 @@ pub fn read_zip(file_name: &str, bytes: &[u8]) -> Result<Vec<(Dataset, ReadRepor
     let wanted = |n: &str| {
         let e = ext_of(n);
         !is_fork(n)
-            && (matches!(e.as_str(), "shp" | "shx" | "dbf" | "prj" | "mid")
+            && (matches!(e.as_str(), "shp" | "shx" | "dbf" | "prj" | "cpg" | "mid")
                 || (e == "pbf" && lower(n).ends_with(".osm.pbf"))
                 || (!matches!(e.as_str(), "zip" | "txt" | "pbf") && READ_EXTENSIONS.contains(&e.as_str())))
     };
@@ -1429,11 +1432,12 @@ pub fn read_zip(file_name: &str, bytes: &[u8]) -> Result<Vec<(Dataset, ReadRepor
         let shp = take(&mut entries, &base, "shp").map(|(_, b)| b).unwrap_or_default();
         let shx = take(&mut entries, &base, "shx").map(|(_, b)| b);
         let prj = take(&mut entries, &base, "prj").map(|(_, b)| String::from_utf8_lossy(&b).into_owned());
+        let cpg = take(&mut entries, &base, "cpg").map(|(_, b)| b);
         let Some((_, dbf)) = take(&mut entries, &base, "dbf") else {
             skipped.push(format!("{n} (no .dbf beside it)"));
             continue;
         };
-        match read_shapefile_parts(ShapefileParts { shp, shx, dbf, prj }, &name) {
+        match read_shapefile_parts(ShapefileParts { shp, shx, dbf, prj, cpg }, &name) {
             Ok(mut read) => {
                 read.0.source = Some(format!("{file_name}/{n}"));
                 out.push(read);
@@ -1460,8 +1464,11 @@ pub fn read_zip(file_name: &str, bytes: &[u8]) -> Result<Vec<(Dataset, ReadRepor
             Err(e) => skipped.push(format!("{n} ({e})")),
         }
     }
-    let mut others: Vec<(String, Vec<u8>)> =
-        entries.into_iter().flatten().filter(|(n, _)| !matches!(ext_of(n).as_str(), "shp" | "shx" | "dbf" | "prj" | "mid")).collect();
+    let mut others: Vec<(String, Vec<u8>)> = entries
+        .into_iter()
+        .flatten()
+        .filter(|(n, _)| !matches!(ext_of(n).as_str(), "shp" | "shx" | "dbf" | "prj" | "cpg" | "mid"))
+        .collect();
     others.sort_by(|a, b| a.0.cmp(&b.0));
     for (n, b) in others {
         if out.len() >= MAX_ZIP_LAYERS {
@@ -1495,6 +1502,7 @@ struct ShapefileParts {
     shx: Option<Vec<u8>>,
     dbf: Vec<u8>,
     prj: Option<String>,
+    cpg: Option<Vec<u8>>,
 }
 
 fn read_shapefile_parts(parts: ShapefileParts, name: &str) -> Result<(Dataset, ReadReport)> {
@@ -1502,7 +1510,12 @@ fn read_shapefile_parts(parts: ShapefileParts, name: &str) -> Result<(Dataset, R
     use shapefile::dbase::FieldValue;
     use std::io::Cursor;
     let fmt = |e: shapefile::Error| DataError::Format(format!("Shapefile: {e}"));
-    let dbf = shapefile::dbase::Reader::new(Cursor::new(parts.dbf)).map_err(|e| DataError::Format(format!("Shapefile: the .dbf: {e}")))?;
+    let mut encoding_notes = Vec::new();
+    let encoding = crate::dbf::encoding(parts.cpg.as_deref(), parts.dbf.get(29).copied().unwrap_or(0), &mut encoding_notes);
+    let dbf = shapefile::dbase::ReaderBuilder::new()
+        .with_encoding(encoding.decoder())
+        .build(Cursor::new(parts.dbf))
+        .map_err(|e| DataError::Format(format!("Shapefile: the .dbf: {e}")))?;
     // Field order comes from the .dbf header (records are unordered maps).
     let order: Vec<(String, FieldType)> = dbf
         .fields()
@@ -1528,6 +1541,7 @@ fn read_shapefile_parts(parts: ShapefileParts, name: &str) -> Result<(Dataset, R
     let fields: Vec<Field> = order.iter().map(|(n, t)| Field::new(n.clone(), *t)).collect();
     let mut ds = Dataset::new(name, GeometryType::None, fields);
     let mut report = ReadReport::default();
+    report.messages.extend(encoding_notes);
     let to_lonlat = shapefile_crs(parts.prj.as_deref(), &mut report).map(|(crs, t)| {
         ds.crs = Some(crs);
         t

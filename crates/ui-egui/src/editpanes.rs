@@ -9,11 +9,16 @@ use serde_json::{Value, json};
 use crate::RustGisApp;
 use crate::theme::{Tokens, semibold};
 
+pub(crate) const DISTANCE_UNITS: &[&str] = &["Meters", "Feet", "Kilometers", "Miles"];
+pub(crate) const DISTANCE_UNITS_PREF: &str = "editing_distance_units";
+
 /// Text typed into the panes' forms.
 #[derive(Default)]
 pub struct Forms {
     pub dx: String,
     pub dy: String,
+    /// Remembered units for Move and constant elevation.
+    pub distance_units: String,
     pub angle: String,
     pub factor: String,
     pub template: String,
@@ -111,6 +116,24 @@ pub fn editing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         }
     });
 
+    let mut units_changed = false;
+    ui.horizontal(|ui| {
+        let unit_label = ui.label(tl!("Distance units"));
+        let _ = egui::ComboBox::from_id_salt(DISTANCE_UNITS_PREF)
+            .selected_text(tl!(&app.forms.distance_units))
+            .show_ui(ui, |ui| {
+                for &unit in DISTANCE_UNITS {
+                    units_changed |= ui.selectable_value(&mut app.forms.distance_units, unit.to_string(), tl!(unit)).changed();
+                }
+            })
+            .response
+            .labelled_by(unit_label.id);
+    });
+    if units_changed && let Some(save) = &app.services.save_pref {
+        save(DISTANCE_UNITS_PREF, &app.forms.distance_units);
+    }
+    let units = app.forms.distance_units.clone();
+
     heading(ui, "Modify Selected Features");
     // Texts alone (#516): of these tools only Move applies to them (the others turn, scale or cut
     // shapes, and a text is a point); they are formatted in the Format pane.
@@ -120,15 +143,15 @@ pub fn editing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     };
     let not_for_texts = tl!("Not for texts: a text is edited in the Format pane.");
     egui::Grid::new("modify").num_columns(3).spacing(vec2(6.0, 6.0)).show(ui, |ui| {
-        ui.label(tl!("Move (m)"));
+        ui.label(tl!("Move"));
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut app.forms.dx).hint_text("east").desired_width(52.0));
-            ui.add(egui::TextEdit::singleline(&mut app.forms.dy).hint_text("north").desired_width(52.0));
+            ui.add(egui::TextEdit::singleline(&mut app.forms.dx).hint_text(tl!("east")).desired_width(52.0));
+            ui.add(egui::TextEdit::singleline(&mut app.forms.dy).hint_text(tl!("north")).desired_width(52.0));
         });
         if ui.button(tl!("Move")).clicked() {
             let (tx, ty) = (app.forms.dx.clone(), app.forms.dy.clone());
             if let (Some(dx), Some(dy)) = (number(app, &tx, "East"), number(app, &ty, "North")) {
-                run(app, "edit.move", json!({"dx": dx, "dy": dy}));
+                run(app, "edit.move", json!({"dx": dx, "dy": dy, "units": units}));
             }
         }
         ui.end_row();
@@ -240,13 +263,15 @@ pub fn editing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         if ui.radio(mode == "none", tl!("None")).clicked() {
             run(app, "edit.elevation", json!({"mode": "none"}));
         }
-        if ui.radio(mode == "constant", tl!("Constant")).clicked() {
+        let constant = ui.radio(mode == "constant", tl!("Constant")).clicked();
+        ui.add(egui::TextEdit::singleline(&mut app.forms.z).hint_text(tl!("z")).desired_width(60.0));
+        let apply = ui.button(tl!("Apply elevation")).clicked();
+        if constant || apply {
             let t = app.forms.z.clone();
             if let Some(z) = number(app, &t, "Elevation") {
-                run(app, "edit.elevation", json!({"mode": "constant", "z": z}));
+                run(app, "edit.elevation", json!({"mode": "constant", "z": z, "units": units}));
             }
         }
-        ui.add(egui::TextEdit::singleline(&mut app.forms.z).hint_text("z (m)").desired_width(60.0));
         for r in &rasters {
             let on = matches!(&settings.elevation, Elevation::Surface(n) if n == r);
             if ui.radio(on, crate::i18n::fmt("Surface: {layer}", &[("layer", r)])).clicked() {
@@ -254,6 +279,8 @@ pub fn editing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             }
         }
     });
+
+    ui.weak(tl!("The current elevation stays in effect while you edit inputs. Click Apply elevation to apply the value and units."));
 
     heading(ui, "Ground To Grid");
     ui.horizontal(|ui| {

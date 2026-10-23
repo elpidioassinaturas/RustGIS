@@ -91,6 +91,20 @@ layer.lineStrokes={"layer":"Rivers","strokes":[{"color":"#000000","width":11.5,"
 
 A stroke without `color` or `width` takes the renderer's.
 
+A Unique Values or Graduated Colors class can stack strokes of its own, so a motorway gets a
+casing and a centre line while a path stays a single thin line on the same layer. Pick the class
+under **Strokes for** at the top of the Strokes section (**All classes** edits the layer's
+strokes); a class with strokes of its own is marked with •. A class without its own is drawn with
+the layer's strokes, and changing them while it is picked gives it its own copy. **Use the
+Layer's Strokes** gives the class back to the layer's. A class keeps its strokes when the same
+symbology is applied again on the same field (a Graduated Colors class, while its range stays the
+same). By command, name the class as `layer.classStyle` does, with `value`, `index` or
+`"other": true`:
+
+```text
+layer.lineStrokes={"layer":"Roads","value":"Motorway","strokes":[{"color":"#5A3A1E","width":7},{"color":"#F28C28","width":5},{"color":"#FFFFFF","width":0.6}]}
+```
+
 ### Custom color ramps
 
 Besides the built-in color schemes, a project can hold your own color ramps: an organization's
@@ -178,19 +192,22 @@ Turn labels on per layer (View › Labeling › Label, or the Style tab), then:
   text in a `TEXT` field, which you can then edit, move or delete like any other features.
 - **Label classes** label different features differently, such as capitals larger than other
   cities. Each class has a SQL clause (the language of definition queries) choosing its
-  features, and its own field, text symbol, placement and visibility range. A feature is
-  labelled by the first class whose clause it matches; the **Default** class, checked last,
-  labels the rest (or, given a clause of its own, those of the rest it matches). A class that
-  is hidden, or out of its visibility range, leaves its features unlabelled: they don't go on
-  to the next class. For now, classes are made with commands: `labels.class.add={"layer":
-  "Cities", "name": "Capitals", "where": "pop_max > 5000000"}`, then `labels.class.rename`,
-  `labels.class.update` (its `where` or `visible`), `labels.class.move`, `labels.class.remove`
+  features, and its own field, text symbol, placement and visibility range. As in ArcGIS Pro,
+  each class labels every feature its clause matches, the **Default** class too (with no
+  clause, every feature), so a feature two classes match gets a label from each. To label the
+  capitals only once, give the classes clauses that don't overlap: `pop_max > 5000000` for
+  Capitals and `pop_max <= 5000000` for Default. When labels compete for room, the class
+  listed first is placed first, Default last. A class that is hidden, or out of its
+  visibility range, labels nothing; the other classes still label their features. For now,
+  classes are made with commands: `labels.class.add={"layer": "Cities", "name": "Capitals",
+  "where": "pop_max > 5000000"}`, then `labels.class.rename`, `labels.class.update` (its
+  `where` or `visible`), `labels.class.move` (its place in the list), `labels.class.remove`
   and `labels.class.clear` (every class but Default; no error when there are none, so a script
   can start with it). The other label commands take a `class` (`labels.style={"layer":
   "Cities", "class": "Capitals", "size": 14}`), and change Default without one (a renamed
-  Default is named by its new name, or left out). Convert keeps the classes, with a `CLASS`
-  field saying which labelled each point; a web style (Share › Web Style) labels with Default
-  only, and has no labels when Default is hidden.
+  Default is named by its new name, or left out). Convert keeps the classes, with a point for
+  each label and a `CLASS` field saying which class it is; a web style (Share › Web Style)
+  labels with Default only, and has no labels when Default is hidden.
 
 <figure markdown="span">
   ![Europe with the Countries and Cities labelled; the city names sit above and to the right of their points](https://assets.rustgis.app/images/labels.webp)

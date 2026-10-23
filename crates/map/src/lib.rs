@@ -29,7 +29,7 @@ pub use color::{Ramp, RampGroup, Rgba};
 pub use globe::{Globe, Projection};
 pub use raster::{RasterDefaults, RasterLayer, RasterRenderer, RasterStyle, Resampling, Stretch};
 pub use symbology::{
-    ClassMethod, LabelClass, LabelMatcher, LabelPlacement, Labeling, LineCap, LineJoin, LineStroke, Marker, Renderer, Symbol,
+    ClassMethod, LabelClass, LabelKey, LabelMatcher, LabelPlacement, Labeling, LineCap, LineJoin, LineStroke, Marker, Renderer, Symbol,
 };
 pub use tiles::{TileKind, TileLayer};
 
@@ -188,6 +188,14 @@ fn yes() -> bool {
 }
 
 impl Layer {
+    /// The dataset, streamed, raster and time-following Zarr addresses used to read this layer
+    /// again, in that order. Local paths are included; database origins stay password-free.
+    pub fn addresses_mut(&mut self) -> impl Iterator<Item = &mut String> {
+        self.dataset.source.iter_mut().chain(self.source.iter_mut().filter_map(|source| source.path.as_mut())).chain(
+            self.raster.iter_mut().flat_map(|raster| raster.path.iter_mut().chain(raster.time_zarr.iter_mut().map(|zarr| &mut zarr.store))),
+        )
+    }
+
     pub fn new(id: u32, dataset: Dataset) -> Self {
         let renderer = Renderer::Single(Symbol::default_for(dataset.geometry_type, id));
         Layer {
@@ -395,6 +403,35 @@ impl Layer {
     /// The symbol a row draws with.
     pub fn symbol(&self, row: usize) -> Symbol {
         if self.graphics { graphics::symbol(&self.dataset, row) } else { self.renderer.symbol_for(&self.dataset, row) }
+    }
+
+    /// The stacked strokes a line feature row is drawn with: its class's own
+    /// ([`Renderer::strokes_for`]), else the layer's `line_strokes`; none (the single stroke) for
+    /// a graphics layer.
+    pub fn strokes(&self, row: usize) -> &[LineStroke] {
+        if self.graphics {
+            return &[];
+        }
+        // Most layers have no class with strokes of its own: no need to class the feature.
+        if !self.renderer.has_class_strokes() {
+            return &self.line_strokes;
+        }
+        self.renderer.strokes_for(&self.dataset, row).unwrap_or(&self.line_strokes)
+    }
+
+    /// A row's symbol and stacked strokes ([`Layer::symbol`], [`Layer::strokes`]), the feature
+    /// classed once for both.
+    pub fn style(&self, row: usize) -> (Symbol, &[LineStroke]) {
+        if self.graphics || !self.renderer.has_class_strokes() {
+            return (self.symbol(row), self.strokes(row));
+        }
+        let (symbol, strokes) = self.renderer.style_for(&self.dataset, row);
+        (symbol, strokes.unwrap_or(&self.line_strokes))
+    }
+
+    /// Whether some feature may be drawn with stacked strokes ([`Layer::strokes`]).
+    pub fn has_strokes(&self) -> bool {
+        !self.graphics && (!self.line_strokes.is_empty() || self.renderer.has_class_strokes())
     }
 
     pub fn is_raster(&self) -> bool {
@@ -753,10 +790,10 @@ pub struct Map {
     /// Map-wide label display switches.
     #[serde(default)]
     pub label_display: LabelDisplay,
-    /// The features labelled when labels were locked, as (layer id, row): only they are labelled
-    /// while the lock holds, wherever the map moves. Filled by the renderer.
+    /// The labels placed when labels were locked: only they are drawn while the lock holds,
+    /// wherever the map moves. Filled by the renderer.
     #[serde(skip)]
-    pub label_lock: Option<Vec<(u32, usize)>>,
+    pub label_lock: Option<Vec<LabelKey>>,
     /// Relationships, snapping, topology rules and edit settings.
     #[serde(default)]
     pub editing: design::MapEditing,
@@ -874,6 +911,35 @@ impl Map {
             body: earth(),
             next_layer_id: 1,
         }
+    }
+
+    /// Every address the map keeps to read its data again (service groups and their layers'
+    /// sources, tile layers and their dated addresses, terrain tiles, layers' dataset, streamed and
+    /// raster sources, time-following Zarr stores). Local paths come too: callers judge each one.
+    pub fn addresses_mut(&mut self) -> Vec<&mut String> {
+        let mut addresses = Vec::new();
+        for group in &mut self.service_groups {
+            addresses.push(&mut group.url);
+            for child in &mut group.children {
+                addresses.push(&mut child.source_url);
+            }
+        }
+        for tile in &mut self.tiles {
+            addresses.push(&mut tile.url);
+            if let Some(url) = &mut tile.time_url {
+                addresses.push(url);
+            }
+            for (_, url) in &mut tile.time_urls {
+                addresses.push(url);
+            }
+        }
+        if let Some(view::Terrain { source: view::TerrainSource::Tiles { url, .. }, .. }) = &mut self.view.terrain {
+            addresses.push(url);
+        }
+        for layer in &mut self.layers {
+            addresses.extend(layer.addresses_mut());
+        }
+        addresses
     }
 
     /// A nonzero id no layer, service group or layer group has: past the highest in use, or (when ids reach
@@ -1543,6 +1609,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hostile_class_strokes_in_a_project_are_brought_into_range() {
+        // The same for a class's own strokes, Unique Values' (and <all other values>') and
+        // Graduated Colors'; a class listed with none is dropped.
+        let wild = vec![symbology::LineStroke { width: Some(f32::MAX), offset: 1e30, ..Default::default() }; 5000];
+        let tame = |v: &[symbology::LineStroke]| {
+            v.len() == symbology::MAX_STROKES
+                && v.iter().all(|st| st.width == Some(symbology::MAX_STROKE_WIDTH) && st.offset == symbology::MAX_STROKE_OFFSET)
+        };
+        let s = Symbol::default_for(GeometryType::Polyline, 0);
+        let mut l = Layer::new(1, Dataset::new("lines", GeometryType::Polyline, vec![]));
+        l.renderer = Renderer::Unique {
+            field: "k".into(),
+            classes: vec![("a".into(), s), ("b".into(), s)],
+            other: s,
+            ramp: Ramp::Ember,
+            class_labels: Default::default(),
+            other_label: None,
+            class_strokes: [("a".to_string(), wild.clone()), ("b".to_string(), Vec::new())].into_iter().collect(),
+            other_strokes: wild.clone(),
+        };
+        let back: Layer = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        let Renderer::Unique { class_strokes, other_strokes, .. } = &back.renderer else { panic!("unique renderer expected") };
+        assert!(tame(&class_strokes["a"]) && !class_strokes.contains_key("b") && tame(other_strokes));
+        l.renderer = Renderer::Graduated {
+            field: "k".into(),
+            breaks: vec![1.0],
+            symbols: vec![s],
+            ramp: Ramp::Ember,
+            method: ClassMethod::NaturalBreaks,
+            min: 0.0,
+            class_labels: Default::default(),
+            class_strokes: [(0, wild)].into_iter().collect(),
+        };
+        let back: Layer = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        let Renderer::Graduated { class_strokes, .. } = &back.renderer else { panic!("graduated renderer expected") };
+        assert!(tame(&class_strokes[&0]));
+        // A project from before per-class strokes reads with none.
+        let old = r#"{"Unique":{"field":"k","classes":[],"other":{"fill":[0,0,0,255],"stroke":[0,0,0,255],"stroke_width":1,"size":0,"marker":"Circle"},"ramp":"Ember"}}"#;
+        let r: Renderer = serde_json::from_str(old).unwrap();
+        assert!(!r.has_class_strokes());
+    }
+
     /// A layer of one long line along the equator with `n` vertices.
     fn long_line(n: usize) -> Layer {
         let mut d = Dataset::new("line", GeometryType::Polyline, vec![]);
@@ -1749,6 +1858,8 @@ mod tests {
             ramp: Ramp::Ember,
             class_labels: Default::default(),
             other_label: None,
+            class_strokes: Default::default(),
+            other_strokes: Vec::new(),
         };
         let labels = |l: &Layer, scale| l.shown_legend(scale).map(|v| v.into_iter().map(|e| e.label).collect::<Vec<_>>());
         assert_eq!(labels(l, 1e6), Some(vec!["1".to_string(), "2".to_string()]), "no 9, no <all other values>");

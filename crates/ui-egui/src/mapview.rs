@@ -2099,8 +2099,8 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
                 crate::i18n::fmt(
                     "Total {total}   ·   Segment {segment}",
                     &[
-                        ("total", &rustgis_engine::geom::format_distance(geodesic_length_m(&pts))),
-                        ("segment", &rustgis_engine::geom::format_distance(seg)),
+                        ("total", &crate::measure_units::distance(geodesic_length_m(&pts), app.ui.measurement_imperial)),
+                        ("segment", &crate::measure_units::distance(seg, app.ui.measurement_imperial)),
                     ],
                 )
             } else {
@@ -2111,8 +2111,8 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
                 crate::i18n::fmt(
                     "Area {area}   ·   Perimeter {perimeter}",
                     &[
-                        ("area", &rustgis_engine::geom::format_area(geodesic_ring_area_m2(&ring))),
-                        ("perimeter", &rustgis_engine::geom::format_distance(geodesic_length_m(&ring))),
+                        ("area", &crate::measure_units::area(geodesic_ring_area_m2(&ring), app.ui.measurement_imperial)),
+                        ("perimeter", &crate::measure_units::distance(geodesic_length_m(&ring), app.ui.measurement_imperial)),
                     ],
                 )
             };
@@ -2206,7 +2206,7 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
 
 fn scale_bar(app: &RustGisApp, p: &egui::Painter, rect: Rect, t: &Tokens) {
     let m_per_pt = app.session.map().ground_res();
-    let d = rustgis_engine::geom::nice_distance(m_per_pt * 130.0);
+    let d = crate::measure_units::scale_distance(m_per_pt * 130.0, app.ui.measurement_imperial);
     if d <= 0.0 {
         return;
     }
@@ -2221,7 +2221,13 @@ fn scale_bar(app: &RustGisApp, p: &egui::Painter, rect: Rect, t: &Tokens) {
     }
     p.rect_stroke(Rect::from_min_size(pos2(x0, y0), vec2(len, 5.0)), 0.0, Stroke::new(1.0, t.text), egui::StrokeKind::Middle);
     p.text(pos2(x0, y0 - 3.0), Align2::LEFT_BOTTOM, "0", regular(10.5), t.text);
-    p.text(pos2(x0 + len, y0 - 3.0), Align2::RIGHT_BOTTOM, rustgis_engine::geom::format_distance(d), regular(10.5), t.text);
+    p.text(
+        pos2(x0 + len, y0 - 3.0),
+        Align2::RIGHT_BOTTOM,
+        crate::measure_units::distance(d, app.ui.measurement_imperial),
+        regular(10.5),
+        t.text,
+    );
 }
 
 fn north_arrow_rect(rect: Rect) -> Rect {

@@ -1097,7 +1097,7 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
         basemap: rustgis_map::Basemap,
         tiles: Vec<rustgis_map::TileLayer>,
         graticule: bool,
-        lock: Option<Vec<(u32, usize)>>,
+        lock: Option<Vec<rustgis_map::LabelKey>>,
         map: &'a mut Map,
     }
     impl Drop for Aside<'_> {
@@ -1503,6 +1503,8 @@ mod tests {
                 ramp: rustgis_map::Ramp::Ember,
                 class_labels: Default::default(),
                 other_label: None,
+                class_strokes: Default::default(),
+                other_strokes: Vec::new(),
             };
         }
         // How far down the legend draws, in pixels.
@@ -1608,6 +1610,7 @@ mod tests {
                 method: rustgis_map::ClassMethod::NaturalBreaks,
                 min: 0.0,
                 class_labels: Default::default(),
+                class_strokes: Default::default(),
             };
         }
         map.layers.retain(|l| l.id == pts);

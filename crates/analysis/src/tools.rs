@@ -10,7 +10,7 @@ use crate::convert::{from_line, from_multipolygon, from_point, to_geo, to_multil
 use crate::geodesic::geodesic_buffer;
 use crate::{Inputs, Output, OutputLayer, ParamKind as K, ParamSpec as P, ToolResult, ToolSpec};
 
-const UNITS: &[&str] = &["Kilometers", "Meters", "Miles"];
+const UNITS: &[&str] = &["Kilometers", "Meters", "Miles", "Feet"];
 const KRIGING_MODELS: &[&str] = &["Spherical", "Exponential", "Gaussian"];
 const MATCH_OPTIONS: &[&str] = &["Intersects", "Contains", "Within"];
 const JOIN_OPERATIONS: &[&str] = &["Join one to one", "Join one to many"];
@@ -220,7 +220,8 @@ pub static TOOLS: &[ToolSpec] = &[
         params: &[
             P { name: "input", label: "Input Features", kind: K::Layer, required: true, default: "", help: "" },
             P { name: "select", label: "Selecting Features", kind: K::Layer, required: true, default: "", help: "" },
-            P { name: "distance", label: "Search Distance (km)", kind: K::Number, required: false, default: "0", help: "" },
+            P { name: "distance", label: "Search Distance", kind: K::Number, required: false, default: "0", help: "" },
+            P { name: "units", label: "Units", kind: K::Choice(UNITS), required: false, default: "\"Kilometers\"", help: "" },
             P { name: "invert", label: "Invert", kind: K::Choice(&["No", "Yes"]), required: false, default: "\"No\"", help: "" },
         ],
         run: select_by_location,
@@ -507,12 +508,10 @@ fn feature_lat(g: &Geometry) -> f64 {
 /// A distance in `units` (one of [`UNITS`], as `resolve_params` spells it; empty for the default,
 /// kilometres) in metres. Any other unit is an error, never kilometres (#406).
 fn to_metres(d: f64, units: &str) -> Result<f64, String> {
-    match units {
-        "Meters" => Ok(d),
-        "Miles" => Ok(d * 1609.344),
-        "Kilometers" | "" => Ok(d * 1000.0),
-        other => Err(format!("Units must be one of {} (not '{other}')", UNITS.join(", "))),
-    }
+    let unit = if units.is_empty() { "Kilometers" } else { units };
+    rustgis_geom::distance_unit_metres(&unit.to_ascii_lowercase())
+        .map(|factor| d * factor)
+        .ok_or_else(|| format!("Units must be one of {} (not '{units}')", UNITS.join(", ")))
 }
 
 fn result(ds: Dataset, msg: String) -> Result<ToolResult, String> {
@@ -820,7 +819,7 @@ fn simplify(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
 fn select_by_location(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     let ds = input(inp, p, "input")?;
     let sel_ds = input(inp, p, "select")?;
-    let dist = num(p, "distance").unwrap_or(0.0).max(0.0) * 1000.0;
+    let dist = to_metres(num(p, "distance").unwrap_or(0.0).max(0.0), s(p, "units"))?;
     if dist > 5_000_000.0 {
         return Err("Distance is too large (limit 5000 km)".into());
     }
@@ -1497,6 +1496,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn feet_buffer_has_the_requested_ground_radius() {
+        let mut pts = Dataset::new("p", GeometryType::Point, vec![]);
+        let center = Coord::new(-105.9378, 35.687);
+        pts.push(Some(Geometry::Point(center)), vec![]);
+        let m = Map(HashMap::from([("p".to_string(), pts)]));
+        let r = crate::run("buffer", &m, &serde_json::json!({"input": "p", "distance": 500, "units": "feet"})).unwrap();
+        assert_eq!(r.messages, vec!["Buffer: 1 features at 500 Feet"]);
+        let ds = layer(r);
+        let Geometry::Polygon(polys) = ds.features[0].geometry.as_ref().unwrap() else { panic!("expected buffer polygon") };
+        // 500 international feet is exactly 152.4 metres, at every vertex.
+        for vertex in polys.iter().flatten().flatten() {
+            let radius = rustgis_geom::haversine_m(center, *vertex);
+            assert!((radius - 152.4).abs() < 0.05, "radius: {radius}");
+        }
+    }
+
     /// Calculate Geometry stores full-precision values (#513): rounding to 0.01 km² gave every
     /// polygon under half a hectare an area of 0, and lines under 5 m a length of 0.
     #[test]
@@ -1527,7 +1543,7 @@ mod tests {
         let m = Map(HashMap::from([("p".to_string(), pts)]));
         let buffer =
             |units: serde_json::Value| crate::run("buffer", &m, &serde_json::json!({"input": "p", "distance": 500, "units": units}));
-        for bad in ["meter", "Meter", "feet", "m", "km"] {
+        for bad in ["meter", "Meter", "foot", "m", "km"] {
             let e = buffer(serde_json::json!(bad)).err().unwrap_or_default();
             assert!(e.contains("Kilometers, Meters, Miles") && e.contains(bad), "{bad}: {e}");
         }

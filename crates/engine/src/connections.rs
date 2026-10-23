@@ -53,6 +53,37 @@ pub fn database_kind(address: &str) -> Option<&'static str> {
     }
 }
 
+/// The database kind and session-password key, as the driver receives the password-free address.
+/// None for other addresses, and always in the browser.
+pub fn database_key(address: &str) -> Option<(&'static str, String)> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use rustgis_data::source::duckdb::Database;
+        match Database::parse(address) {
+            Database::Postgres(d) => Some(("postgres", d)),
+            Database::Mysql(d) => Some(("mysql", d)),
+            Database::Sqlserver(d) => Some(("sqlserver", d)),
+            Database::File(_) => None,
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = address;
+        None
+    }
+}
+
+/// The kind and database address a streamed layer reads.
+pub fn layer_database(src: &rustgis_map::source::SourceLayer) -> Option<(&'static str, &str)> {
+    if let Some(origin) = &src.postgis {
+        Some(("postgres", origin.database.as_str()))
+    } else if let Some(origin) = &src.mysql {
+        Some(("mysql", origin.database.as_str()))
+    } else {
+        src.sqlserver.as_ref().map(|origin| ("sqlserver", origin.database.as_str()))
+    }
+}
+
 fn same_name(a: &str, b: &str) -> bool {
     a.chars().flat_map(char::to_lowercase).eq(b.chars().flat_map(char::to_lowercase))
 }
@@ -126,6 +157,18 @@ pub fn clean(mut c: Connection) -> Result<(Connection, bool), String> {
 }
 
 impl Connections {
+    /// The first saved connection, in list order, of a database's kind whose address names it.
+    pub fn for_database(&self, kind: &str, database: &str) -> Option<&Connection> {
+        let key = database_key(&sources::redact(database)).filter(|k| k.0 == kind)?;
+        self.connections.iter().find(|c| c.kind == kind && database_key(&c.address).as_ref() == Some(&key))
+    }
+
+    /// The saved connection a layer that reads a database comes from.
+    pub fn for_layer(&self, l: &rustgis_map::Layer) -> Option<&Connection> {
+        let (kind, database) = layer_database(l.source.as_ref()?)?;
+        self.for_database(kind, database)
+    }
+
     pub fn from_json(text: &str) -> Self {
         let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
         let mut s = Self { version: 1, next: v.get("next").and_then(Value::as_u64).unwrap_or(1).max(1), ..Self::default() };

@@ -5,10 +5,13 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use super::ps;
+use super::{b, ps};
 use crate::connections::{Connection, DATABASE_KINDS, DESKTOP_ONLY, KINDS};
-use crate::render::rustgis_tiles::s3;
+use crate::render::rustgis_tiles::{s3, stac};
 use crate::{CmdResult, CommandSpec as C, Session};
+
+#[path = "connection_browse.rs"]
+mod browse;
 
 pub fn commands() -> Vec<C> {
     vec![
@@ -24,10 +27,13 @@ pub fn commands() -> Vec<C> {
         C::new("connection.duplicate", "Duplicate Connection", "Home › Add › Data Sources", duplicate).view().params(r#"{"id": "a connection's id or name", "name"?: text}"#),
         C::new("connection.remove", "Remove Connection", "Home › Add › Data Sources", remove).view().params(r#"{"id": "a connection's id or name"}"#),
         C::new("connection.login", "Log In to Connection", "Home › Add › Data Sources", login_command).view().params(
-            r#"{"id": "a connection's id or name", "password"?: "a database connection's, kept for this session only", "accessKeyId"?: text, "secretAccessKey"?: text, "sessionToken"?: "an S3 connection's keys (credentials: keys), kept for this session only"}"#,
+            r#"{"id": "a connection's id or name", "password"?: "a database connection's, kept for this session only; the project's layers that read its database and couldn't be read open again", "accessKeyId"?: text, "secretAccessKey"?: text, "sessionToken"?: "an S3 connection's keys (credentials: keys), kept for this session only"}"#,
         ),
         C::new("connection.test", "Test Connection", "Home › Add › Data Sources", test).view().params(
-            r#"{"id": "a connection's id or name", "password"?: text, "accessKeyId"?: text, "secretAccessKey"?: text, "sessionToken"?: "as connection.login (logs in first)"}"#,
+            r#"{"id"?: "a connection's id or name", "kind"?: "postgres"|"mysql"|"sqlserver"|"service"|"wms"|"wmts"|"wfs"|"wcs"|"ogcapi"|"arcgis"|"csw"|"stac"|"s3", "name"?: text, "group"?: text, "address"?: text, "options"?: "an unsaved connection, as connection.new (when no id)", "password"?: text, "accessKeyId"?: text, "secretAccessKey"?: text, "sessionToken"?: "as connection.login (logs in first)", "probe"?: "true: only the address the test reads, {fetch} (null for databases, which their driver tests)", "answer"?: "non-database kinds only: what that address returned, when the app fetched it (no network request then); databases ignore answer and test through their driver"}"#,
+        ),
+        C::new("connection.browse", "Browse Connection", "Home › Add › Data Sources", browse::browse).view().params(
+            r#"{"id": "a connection's id or name", "node"?: "a child's node, as a listing gives it (the connection's top level when absent)", "probe"?: "true: only the address this level reads, {fetch} (null: read without a fetch, or by the database driver); an S3 connection logs in first, as connection.test does", "answer"?: "what that address returned, when the app fetched it", "documents"?: [{"url": "a further document a listing asked for (next)", "text": "its answer"}]} → {connection, node, children: [{key, name, what, detail?, node? (browse it), children? (listed already), add? {command, params}: the command that adds it}], truncated?, matched?, notes?, service? {url, type}, next? (fetch it, then ask again with answer and documents)}"#,
         ),
     ]
 }
@@ -53,16 +59,7 @@ fn shown(c: &Connection) -> Value {
     } else {
         false
     };
-    let add_with = match c.kind.as_str() {
-        "postgres" | "mysql" | "sqlserver" => "info.databaseTables {database: address}, then layer.addDatabase {database: address, layer}",
-        "service" => "service.layers {url: address}, then service.add {url, layer}",
-        "wms" | "wmts" | "wfs" | "ogcapi" | "arcgis" => "service.layers {url: address, type: kind}, then service.add {url, type, layer}",
-        "wcs" => "service.layers {url: address, type: wcs}, then service.coverage {url, layer}",
-        "csw" => "catalog.search {url: address, query}",
-        "stac" => "stac.collections {url: address}, then stac.search {url, collections}",
-        "s3" => "connection.login {id} once, then s3.list {connection: name}, then layer.addUrl {url: s3://…}",
-        _ => "",
-    };
+    let add_with = "connection.browse {id}, then {id, node} for a child's node; run a dataset's add {command, params}";
     let mut out = serde_json::to_value(c).unwrap_or(Value::Null);
     out["available"] = json!(available);
     if !available {
@@ -86,6 +83,34 @@ fn options(p: &Value) -> Result<BTreeMap<String, String>, String> {
         .collect()
 }
 
+/// Saved database connections, in list order, with how many project layers wait for their login.
+pub(crate) fn waiting(s: &Session) -> Vec<(Connection, usize)> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut counts = BTreeMap::<String, usize>::new();
+        for layer in s.project.maps.iter().flat_map(|m| &m.layers) {
+            let Some(src) = layer.source.as_ref().filter(|src| src.login) else { continue };
+            let Some((kind, database)) = crate::connections::layer_database(src) else { continue };
+            if let Some(c) = s.connections.for_database(kind, database) {
+                *counts.entry(c.id.clone()).or_default() += 1;
+            }
+        }
+        s.connections.connections.iter().filter_map(|c| counts.get(&c.id).map(|&n| (c.clone(), n))).collect()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = s;
+        Vec::new()
+    }
+}
+
+/// Says, once per connection, which layers wait for its login (a project just opened).
+pub(crate) fn note_waiting(s: &mut Session) {
+    for (c, n) in waiting(s) {
+        s.notify(format!("{n} layer(s) read the database of the connection '{}' and need its password: right-click the connection in Data Sources › Connections, or one of the layers, and choose Log In…", c.name), false);
+    }
+}
+
 fn list(s: &mut Session, p: &Value) -> CmdResult {
     let kind = ps(p, "kind");
     if let Some(k) = kind
@@ -94,9 +119,16 @@ fn list(s: &mut Session, p: &Value) -> CmdResult {
         return Err(format!("unknown kind '{k}' ({})", KINDS.join(", ")));
     }
     let group = ps(p, "group");
+    let waiting: BTreeMap<_, _> = waiting(s).into_iter().map(|(c, n)| (c.id, n)).collect();
     Ok(json!({"connections": s.connections.connections.iter()
         .filter(|c| kind.is_none_or(|k| c.kind == k) && group.is_none_or(|g| c.group.chars().flat_map(char::to_lowercase).eq(g.chars().flat_map(char::to_lowercase))))
-        .map(shown).collect::<Vec<_>>() }))
+        .map(|c| {
+            let mut out = shown(c);
+            if let Some(&n) = waiting.get(&c.id) {
+                out["waiting"] = json!(n);
+            }
+            out
+        }).collect::<Vec<_>>() }))
 }
 
 fn new(s: &mut Session, p: &Value) -> CmdResult {
@@ -167,7 +199,53 @@ fn remove(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"removed": c.id}))
 }
 
-fn login(s: &mut Session, c: &Connection, p: &Value) -> Result<(), String> {
+#[derive(Default)]
+struct Reopened {
+    opened: usize,
+    failed: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn reopen(s: &mut Session, c: &Connection, password: &str) -> Reopened {
+    let Some(key) = crate::connections::database_key(&c.address) else { return Reopened::default() };
+    let mut result = Reopened::default();
+    let mut first_error = None;
+    for layer in s.project.maps.iter_mut().flat_map(|m| m.layers.iter_mut()) {
+        let Some(src) = layer.source.as_mut().filter(|src| src.login) else { continue };
+        let Some((kind, database)) = crate::connections::layer_database(src) else { continue };
+        if kind != key.0 || crate::connections::database_key(&crate::sources::redact(database)).as_ref() != Some(&key) {
+            continue;
+        }
+        if let Some(password_key) = crate::connections::database_key(database) {
+            rustgis_data::source::duckdb::remember_password(&password_key.1, password);
+        }
+        src.error = None;
+        match src.open() {
+            Ok(()) => result.opened += 1,
+            Err(e) => {
+                result.failed += 1;
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    if result.opened > 0 {
+        s.notify(format!("{} layer(s) from the connection '{}' opened again", result.opened, c.name), false);
+    }
+    if result.failed > 0 {
+        s.notify(
+            format!(
+                "{} layer(s) from the connection '{}' still can't be read: {}",
+                result.failed,
+                c.name,
+                first_error.as_deref().unwrap_or("")
+            ),
+            true,
+        );
+    }
+    result
+}
+
+fn login(s: &mut Session, c: &Connection, p: &Value) -> Result<Reopened, String> {
     if DATABASE_KINDS.contains(&c.kind.as_str()) {
         #[cfg(target_arch = "wasm32")]
         {
@@ -177,7 +255,7 @@ fn login(s: &mut Session, c: &Connection, p: &Value) -> Result<(), String> {
         {
             let pw = ps(p, "password").filter(|t| !t.is_empty()).ok_or("password is required")?;
             super::layer::database_param(&json!({"database": c.address, "password": pw}));
-            return Ok(());
+            return Ok(reopen(s, c, pw));
         }
     }
     if c.kind != "s3" {
@@ -208,19 +286,107 @@ fn login(s: &mut Session, c: &Connection, p: &Value) -> Result<(), String> {
         _ => q["anonymous"] = json!(true),
     }
     super::s3::connect(s, &q)?;
-    Ok(())
+    Ok(Reopened::default())
 }
 
 fn login_command(s: &mut Session, p: &Value) -> CmdResult {
     let c = found(s, p)?.clone();
-    login(s, &c, p)?;
-    Ok(shown(&c))
+    let result = login(s, &c, p)?;
+    let mut out = shown(&c);
+    if result.opened + result.failed > 0 {
+        out["reopened"] = json!(result.opened);
+        out["failed"] = json!(result.failed);
+    }
+    Ok(out)
+}
+
+fn tested(s: &Session, p: &Value) -> Result<Connection, String> {
+    if ps(p, "id").is_some() {
+        return Ok(found(s, p)?.clone());
+    }
+    let c = Connection {
+        kind: ps(p, "kind").ok_or_else(|| format!("id, or kind and address, is required ({})", KINDS.join(", ")))?.trim().into(),
+        address: ps(p, "address").unwrap_or("").into(),
+        name: ps(p, "name").unwrap_or("").into(),
+        group: ps(p, "group").unwrap_or("").into(),
+        options: p.get("options").map(options).transpose()?.unwrap_or_default(),
+        ..Connection::default()
+    };
+    Ok(crate::connections::clean(c)?.0)
+}
+
+fn first_bucket(c: &Connection) -> Option<String> {
+    c.options.get("buckets")?.split(',').map(str::trim).find(|b| !b.is_empty()).map(str::to_owned)
+}
+
+fn probe_url(s: &Session, c: &Connection) -> Result<Option<String>, String> {
+    let url = match c.kind.as_str() {
+        "postgres" | "mysql" | "sqlserver" => return Ok(None),
+        "service" => rustgis_data::ogc::capabilities_url(&c.address, None),
+        "wms" | "wmts" | "wfs" | "wcs" | "ogcapi" | "arcgis" => rustgis_data::ogc::capabilities_url(&c.address, Some(&c.kind)),
+        "csw" => super::service::records_request(s, &json!({"url": c.address}))?,
+        "stac" => {
+            let api = stac::api(Some(&c.address))?;
+            if stac::catalog::is_static(&api) { api } else { stac::collections_url(&api) }
+        }
+        "s3" => {
+            let conn = s3::connection(&c.name).ok_or("log in first: connection.login {id, accessKeyId, secretAccessKey}")?;
+            if let Some(bucket) = first_bucket(c) {
+                s3::grant(&conn.name, &bucket);
+                s3::list_url(&bucket, "", None, Some(&conn))
+            } else if conn.credentials.is_some() {
+                s3::buckets_url(&conn)
+            } else {
+                return Err("name a bucket under Buckets to test an anonymous S3 connection".into());
+            }
+        }
+        _ => return Err(format!("unknown kind '{}'", c.kind)),
+    };
+    Ok(Some(url))
+}
+
+fn answered(s: &mut Session, c: &Connection, text: &str) -> CmdResult {
+    match c.kind.as_str() {
+        "service" => super::service::layers(s, &json!({"url": c.address, "text": text})),
+        "wms" | "wmts" | "wfs" | "wcs" | "ogcapi" | "arcgis" => {
+            super::service::layers(s, &json!({"url": c.address, "type": c.kind, "text": text}))
+        }
+        "csw" => super::service::catalog_search(s, &json!({"url": c.address, "text": text})),
+        "stac" => super::stac::collections_json(&stac::api(Some(&c.address))?, text.as_bytes()),
+        "s3" => {
+            if let Some(bucket) = first_bucket(c) {
+                let l = s3::parse_list(text.as_bytes())?;
+                Ok(json!({"bucket": bucket, "count": l.prefixes.len() + l.objects.len(), "truncated": l.next.is_some()}))
+            } else {
+                Ok(json!({"buckets": s3::parse_buckets(text.as_bytes())?}))
+            }
+        }
+        _ => Err(format!("unknown kind '{}'", c.kind)),
+    }
 }
 
 fn test(s: &mut Session, p: &Value) -> CmdResult {
-    let c = found(s, p)?.clone();
-    if ["password", "accessKeyId", "secretAccessKey", "sessionToken"].iter().any(|k| ps(p, k).is_some_and(|v| !v.is_empty())) {
+    let c = tested(s, p)?;
+    let secrets = ["password", "accessKeyId", "secretAccessKey", "sessionToken"].iter().any(|k| ps(p, k).is_some_and(|v| !v.is_empty()));
+    if secrets {
         login(s, &c, p)?;
+    }
+    if c.kind == "s3" && !secrets && c.options.get("credentials").is_none_or(|v| v != "keys") {
+        login(s, &c, &Value::Null)?;
+    }
+    let mut out = json!({});
+    if !c.id.is_empty() {
+        out["connection"] = json!(c.id);
+    }
+    if b(p, "probe").unwrap_or(false) {
+        out["fetch"] = json!(probe_url(s, &c)?);
+        return Ok(out);
+    }
+    if let Some(text) = ps(p, "answer")
+        && !DATABASE_KINDS.contains(&c.kind.as_str())
+    {
+        out["result"] = answered(s, &c, text)?;
+        return Ok(out);
     }
     let result = match c.kind.as_str() {
         "postgres" | "mysql" | "sqlserver" => {
@@ -234,15 +400,15 @@ fn test(s: &mut Session, p: &Value) -> CmdResult {
         "csw" => super::service::catalog_search(s, &json!({"url": c.address}))?,
         "stac" => super::stac::collections(s, &json!({"url": c.address}))?,
         "s3" => {
-            if s3::connection(&c.name).is_none() {
-                if c.options.get("credentials").is_some_and(|v| v == "keys") {
-                    return Err("log in first: connection.login {id, accessKeyId, secretAccessKey}".into());
-                }
-                login(s, &c, &Value::Null)?;
+            s3::connection(&c.name).ok_or("log in first: connection.login {id, accessKeyId, secretAccessKey}")?;
+            let mut q = json!({"connection": c.name, "limit": 100});
+            if let Some(bucket) = first_bucket(&c) {
+                q["bucket"] = json!(bucket);
             }
-            super::s3::list(s, &json!({"connection": c.name, "limit": 100}))?
+            super::s3::list(s, &q)?
         }
         _ => return Err(format!("unknown kind '{}'", c.kind)),
     };
-    Ok(json!({"connection": c.id, "result": result}))
+    out["result"] = result;
+    Ok(out)
 }

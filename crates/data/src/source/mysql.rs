@@ -215,6 +215,7 @@ pub struct Conn {
 fn err(e: mysql::Error) -> DataError {
     // The server's own message (a missing table, a refused password) rather than its code.
     match e {
+        mysql::Error::MySqlError(m) if matches!(m.code, 1045 | 1698) => DataError::Login(m.message),
         mysql::Error::MySqlError(m) => DataError::Format(m.message),
         e => DataError::Format(e.to_string()),
     }
@@ -1025,6 +1026,18 @@ impl FeatureSource for MysqlSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_login_is_not_a_missing_table() {
+        for code in [1045, 1698, 1146] {
+            let e = err(mysql::Error::MySqlError(mysql::MySqlError { state: "28000".into(), message: "Access denied".into(), code }));
+            if code == 1146 {
+                assert!(matches!(e, DataError::Format(_)));
+            } else {
+                assert!(matches!(e, DataError::Login(_)));
+            }
+        }
+    }
 
     #[test]
     fn addresses_take_client_defaults_and_modes() {

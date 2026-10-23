@@ -146,9 +146,12 @@ connection without it. Without one, `PGPASSWORD` or libpq's password file (`~/.p
 `%APPDATA%\postgresql\pgpass.conf`) serve when you add a table. A project keeps a streamed
 table's connection and reads it again when it opens, sending only a password given in this
 session: a project file could name any host, and must never get your own credentials. When the
-server wants a password, connect again with **Add Data › Database…** (the layer reads again when
-the project is next opened). A small table's features are kept in the project as they were when
-added.
+server wants a password and the layer's database matches a saved connection, the project says
+which connection is waiting. Right-click that connection in **Data Sources › Connections**, or a
+waiting layer, and choose **Log In…**. Saving the password reopens every layer from that database.
+Without a matching connection, connect again with **Add Data › Database…** (the layer reads again
+when the project is next opened). A small table's features are kept in the project as they were
+when added.
 
 `layer.addSql` takes a connection as its `"database"` too, through DuckDB's `postgres` extension
 (installed the first time, like DuckDB Spatial), so a query names its tables plainly; the password
@@ -316,8 +319,10 @@ rustgis-cli run --cmd 's3.connect={"name":"minio","endpoint":"https://minio.exam
 ```
 
 Keys are kept until RustGIS closes: never in a project (which keeps the `s3://` address), a
-command's result, a notice or the log. **Remember** keeps a connection's name, endpoint and region
-in the app's settings, never its secret; storing secrets in the system keychain isn't supported.
+command's result, a notice or the log. After **Connect**, **Save as Connection** keeps its name,
+endpoint, region and credential source under **Data Sources › Connections**, never its keys.
+Use **Saved connection** to pick it again; typed keys must be entered again after RustGIS closes.
+Storing secrets in the system keychain isn't supported.
 Keys go only to the endpoint they're for: a signed request that is redirected isn't followed, and
 keys from a profile or the environment are used only with AWS or the profile's own
 `endpoint_url`. In the web app, the bucket's CORS rules must allow the page's origin (and, for a
@@ -331,12 +336,27 @@ places data comes from:
 
 - **Favourites**: any source, right-clicked and added.
 - **Recent**: the last 20 sources added (files, web addresses, tile layers, services, database
-  tables, Zarr variables, STAC assets, sample data), newest first.
+  tables, Zarr variables, STAC assets, sample data), newest first. A dataset added from a
+  connection in the tree is listed under that connection's name rather than one made from its
+  address. Only the name changes: the entry keeps the kind, address and options of the dataset
+  as it was added, and the layer keeps its own name. Clicking it opens it as any Recent entry
+  of that kind opens (a service entry reopens the service's layer list). A source is one entry
+  per kind and address, so every dataset added through one service shares an entry, as do two
+  connections with one address. The name is the connection's when the dataset was added:
+  renaming a connection changes it only when something is added from it again. An add that
+  fails, or is cancelled before it lands, isn't listed.
 - **Folders**: the folders connected to the Browser (**Add Folder…**; desktop).
-- **Services**, **Databases** (desktop) and **STAC APIs**: addresses saved with the box under each.
-  A click opens Add From Service, Add From Database or STAC Search connected to it, which lists
-  its layers, tables or collections.
-- **S3**: this session's connections; a click opens the S3 browser on it.
+- **Connections**: named services, databases, STAC APIs and S3 endpoints, organised by optional
+  groups. **New Connection ▾** opens a kind-specific form. Click a connection to open it: its
+  datasets are listed under it, a level at a time as you open its folders, with **Refresh**
+  (a connection's or a folder's right-click menu; **⟳** refreshes every connection) and an error
+  with **Retry** (and **Log In…** for databases and keyed S3) when it can't be read. Click a
+  dataset to select it (click again to clear it); double-click, or right-click › **Add**, adds
+  one, and right-click › **Add Selected (N)** adds them all (**Clear Selection** empties the
+  selection). Each dataset is added by one command, so each is one undo step. On a table, a
+  service layer or a STAC collection, **Add With Options…** opens the database, service or STAC
+  add dialog on it; on a connection, it opens the kind's add dialog. Right-click a connection to
+  edit, test, duplicate, copy its address or remove it.
 - **Library**: well-known public sources: OpenStreetMap tiles, EOX Sentinel-2 cloudless and
   NASA GIBS (WMTS), USGS imagery, topographic and hydrography maps (ArcGIS), GEBCO bathymetry
   (WMS), swisstopo's maps and imagery (geo.admin.ch, WMTS), Earth Search and Planetary Computer (STAC), and the Natural Earth sample layers.
@@ -349,6 +369,31 @@ database is kept without its password. The commands `sources.list`, `sources.sav
 [AI Assistant](assistant.md). On the command line they last for the run.
 
 ### Named connections
+
+In the pane, **New Connection** and **Edit…** let you set the name, group and address.
+Leave a new connection's name blank to derive it from the address. **Test** checks the form
+without saving it: web-service, catalogue, STAC and S3 requests run in the background on both
+desktop and web; database tests run synchronously on desktop. Database rows remain visible
+but cannot be opened or tested in the web app. Earth Search and Planetary Computer remain
+available under **Library**.
+
+**From Service…** (including **Catalogue search (CSW)**), **From Database…**, **STAC Search**
+and **S3…** can use saved connections directly. Service, database and S3 dialogs offer a
+**Saved connection** picker; STAC includes saved connections in its existing API/catalog list.
+Picking one keeps its identity, not just its address: two connections can point to the same
+server with different names or users.
+
+To keep an endpoint entered by hand, click **Save as Connection** after it connects: after
+**List Tables** for a database, **Collections** or **Browse** for STAC, a catalogue search with
+results, or **Connect** for a service or S3. Nothing is saved automatically. The new connection
+is selected and the button disappears. An endpoint typed by hand can be saved even when another
+connection has the same address; its default name is made unique. S3 uses the session name, so
+choose a different name and connect again if that name is already saved. DuckDB files aren't
+saved database connections. Within an ArcGIS directory, the button keeps the root directory.
+
+Changing a form field clears pending or completed Test feedback; a late response from the
+previous inputs is ignored. PostgreSQL accepts a bare `host=… dbname=… user=…` connection
+string, but a blank address cannot be saved or tested.
 
 The `connection.*` commands keep named, reusable endpoints independently of the project.
 Each has a stable id (`c1`, `c2`, …), a case-insensitively unique name and an optional group.
@@ -371,13 +416,34 @@ Kinds are `postgres`, `mysql` (including MariaDB), `sqlserver`, `service` (detec
 connect), `wms`, `wmts`, `wfs`, `wcs`, `ogcapi`, `arcgis`, `csw`, `stac` and `s3`.
 Database connections are used on the desktop only. S3 options are `region`, `buckets`
 (comma-separated), `credentials` (`keys`, `profile`, `environment` or `none`) and `profile`.
-`connection.test` lists the endpoint's tables, layers, records, collections or buckets;
-the web app's network listings still require the existing add dialogs.
+`connection.test` lists the endpoint's tables, layers, records, collections or buckets.
+It also accepts an unsaved definition (`kind`, `address`, `name`, `group`, `options`) instead
+of `id`. With `probe: true`, it returns the secret-free address to fetch (`fetch: null` for
+databases). For non-database kinds, pass that response text as `answer` with the same definition
+to parse it without a network request. Database kinds ignore `answer` and test through their
+driver. An anonymous S3 test needs at least one named bucket.
+
+`connection.browse` lists what a connection offers, a level at a time: the tables of a database
+(under their schemas), the layers of a service, the records of a catalogue with the services and
+files they link to, the collections of a STAC API and the items and assets of a collection (for a
+static STAC catalog, its catalogs, collections and items, each item opened for its assets), or
+the buckets, folders and files of an S3 connection. Each child has a `key`, a `name` and what it
+is (`what`); a child with a `node` is browsed by asking again with that `node`; one with `add`
+names the command and parameters that add it (`service.add`, `layer.addDatabase`,
+`stac.addAsset`, `layer.addUrl`). A level lists at most 500 children and says `truncated` when
+it left some out. Like `connection.test`, it reads the address itself on the desktop and the
+command line; with `probe: true` it returns the address to fetch, and the app passes what it
+fetched back as `answer` (and further `documents` when a service asks for them, as `next`).
+Browsing never changes the project or the saved connections.
 
 Addresses are saved without passwords or tokens. `connection.login` remembers a database
 `password`, or S3 `accessKeyId`, `secretAccessKey` and optional `sessionToken`, for this session
 only, using the same credential stores as the existing add commands. With login parameters,
-`connection.test` logs in first; a failed listing does not undo that session login.
+`connection.test` logs in first; a failed listing does not undo that session login. A database
+login also reopens project layers that read the same password-free address and were refused for a
+missing or wrong password. `connection.list` gives such waiting layers as `waiting`, and
+`connection.login` gives `reopened` and `failed` when it tries any of them. A server that is down
+or a missing table is not reported as waiting for a login.
 S3 profiles and environment credentials remain subject to the existing endpoint restrictions;
 editing an S3 name, endpoint or options disconnects its session login. S3 shares the name-based
 session registry used by the S3 dialog and `s3.connect`, so editing or removing a saved
@@ -385,8 +451,9 @@ connection also affects a session entry of the same name created there.
 Renaming clears the runtime entries under both the old and new names, so the renamed
 connection cannot inherit an unrelated login at its destination name.
 Web-service logins are not supported. Plugins may list connections but cannot manage, log in
-to or test them. The in-app assistant asks for approval each time for those operations;
-external assistants using MCP cannot run them.
+to, test or browse them. The in-app assistant asks for approval each time for those operations;
+external assistants using MCP cannot run them. Even `probe: true` needs approval: connection
+operations cannot be approved for the whole conversation.
 Database passwords are shared by public DSN for the session, including existing layers and
 other named connections using that DSN. Editing or removing a named connection does not revoke
 that shared login; changing its address does not transfer the old password to the new address.
@@ -394,8 +461,11 @@ that shared login; changing its address does not transfer the old password to th
 Desktop and web apps save connections with their preferences (`connections` in desktop
 `prefs.json`, `rustgis.connections` in web localStorage). The first load imports saved services,
 databases other than DuckDB files, STAC APIs and remembered S3 connections once, without
-changing the old lists. The Data Sources pane and add dialogs are unchanged. CLI and Python
-connections last only for the run.
+changing the old lists. Legacy saved endpoint lists are no longer shown in the pane or the
+S3 dialog; use the imported named connections instead. Testing S3 can register or replace the
+session endpoint and credentials under the form's connection name, including a same-name
+session created in the S3 dialog. Cancel does not disconnect that login or restore the
+previous one. CLI and Python connections last only for the run.
 
 ## Large files
 
@@ -652,6 +722,14 @@ map file or project. Data › Layer Templates adds empty layers with ready-made 
 routes, areas, observations…) to draw into. Add Folder connects a folder to the Browser, which
 also lists the project's layouts, styles and tasks. A task's steps each run a command; New Task
 From History turns the geoprocessing history into a task you can replay.
+
+Saved projects, map and layer files, and packages keep no password, key, token or signature in
+layer web addresses. The open project keeps them for this session. RustGIS remembers the 32 most
+recent distinct saved snapshots whose addresses needed stripping. Opening a plain `.rgis` file
+whose bytes exactly match one of those snapshots restores its secrets; saving more distinct
+snapshots evicts the oldest. Changed files, packages, imports and files saved by another process
+never restore secrets. After a snapshot is evicted or RustGIS closes, add those layers again with
+their credentials.
 
 ### Complete streamed Shapefile rendering
 

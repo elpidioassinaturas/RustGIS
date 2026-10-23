@@ -297,17 +297,18 @@ pub fn commands() -> Vec<C> {
         C::new("edit.snap", "Snap Point", "Edit › Snapping", snap).view().params(r#"{"lon", "lat"}"#),
         // Modify features.
         C::new("edit.move", "Move", "Edit › Features › Modify", |s, p| {
-            let (mut dx, mut dy) = (f(p, "dx").unwrap_or(0.0), f(p, "dy").unwrap_or(0.0));
+            let unit = distance_unit_metres(p)?;
+            let (mut dx, mut dy) = (f(p, "dx").unwrap_or(0.0) * unit, f(p, "dy").unwrap_or(0.0) * unit);
             if let Some((k, rot)) = s.map().editing.settings.ground_to_grid {
                 (dx, dy) = ground_to_grid(dx, dy, k, rot);
             }
             if !(dx.is_finite() && dy.is_finite()) || dx.abs() > 4e7 || dy.abs() > 4e7 {
-                return Err("dx and dy are metres east and north".into());
+                return Err("dx and dy must be finite distances in the command's units (limit: 40,000 km per axis after ground-to-grid)".into());
             }
             modify(s, |g| Some(g.map_coords(&|c: Coord| shift(c, dx, dy))))
         })
         .when(need_editable_selection)
-        .params(r#"{"dx": metres east, "dy": metres north}"#),
+        .params(r#"{"dx": distance east, "dy": distance north, "units"?: "Meters" (default)|"Feet"|"Kilometers"|"Miles"}"#),
         C::new("edit.rotate", "Rotate", "Edit › Features › Modify", |s, p| {
             let deg = f(p, "angle").ok_or("angle is required")?;
             modify(s, |g| {
@@ -361,7 +362,7 @@ pub fn commands() -> Vec<C> {
         C::new("edit.explode", "Explode", "Edit › Features › Modify", explode).when(need_editable_selection),
         C::new("edit.split", "Split", "Edit › Features › Modify", split).when(need_editable_selection).params(r#"{"lon", "lat"}"#),
         C::new("edit.traverse", "Traverse", "Edit › Features › Modify", traverse).when(need_editable).params(
-            r#"{"layer"?, "start": [lon, lat], "legs": [{"distance": metres, "bearing": degrees from north}]} (closed in a polygon layer, open in a line layer)"#,
+            r#"{"layer"?, "start": [lon, lat], "units"?: "Meters" (default)|"Feet"|"Kilometers"|"Miles", "legs": [{"distance": number, "bearing": degrees from north}]} (closed in a polygon layer, open in a line layer)"#,
         ),
         C::new("edit.tools", "Editor Tools", "Edit › Tools", |s, _| {
             let tools: Vec<Json> = s.registry.commands.iter().filter(|c| c.location.starts_with("Edit › Features")).map(|c| json!({"id": c.id, "label": c.label, "params": c.params})).collect();
@@ -373,7 +374,13 @@ pub fn commands() -> Vec<C> {
             let mode = ps(p, "mode").ok_or("mode is required")?;
             let e = match mode {
                 "none" => Elevation::None,
-                "constant" => Elevation::Constant(f(p, "z").ok_or("z is required for a constant elevation")?.clamp(-12_000.0, 100_000.0)),
+                "constant" => {
+                    let z = f(p, "z").ok_or("z is required for a constant elevation")? * distance_unit_metres(p)?;
+                    if !z.is_finite() {
+                        return Err("elevation is too large".into());
+                    }
+                    Elevation::Constant(z.clamp(-12_000.0, 100_000.0))
+                },
                 "surface" => {
                     let n = ps(p, "surface").ok_or("surface (a raster layer) is required")?;
                     let l = s.map().layer_by_name(n).filter(|l| l.is_raster()).ok_or_else(|| format!("no raster layer '{n}'"))?;
@@ -384,7 +391,7 @@ pub fn commands() -> Vec<C> {
             s.map_mut().editing.settings.elevation = e;
             Ok(Json::Null)
         })
-        .params(r#"{"mode": "none"|"constant"|"surface", "z"?: metres, "surface"?: raster layer}"#),
+        .params(r#"{"mode": "none"|"constant"|"surface", "z"?: number, "units"?: "Meters" (default)|"Feet"|"Kilometers"|"Miles", "surface"?: raster layer}"#),
         C::new("edit.groundToGrid", "Ground To Grid", "Edit › Corrections", |s, p| {
             let on = b(p, "on").unwrap_or(true);
             let k = f(p, "scale").unwrap_or(1.0);
@@ -402,6 +409,17 @@ pub fn commands() -> Vec<C> {
         ),
         C::new("topology.validate", "Error Inspector", "Edit › Manage Edits", topology_validate).view().params(r#"{"toleranceM"?: metres (dangles)}"#),
     ]
+}
+
+/// Distance inputs use the Buffer tool's unit names; existing editing scripts default to metres.
+fn distance_unit_metres(p: &Json) -> Result<f64, String> {
+    let units = match p.get("units") {
+        None | Some(Json::Null) => "Meters",
+        Some(Json::String(v)) => v.trim(),
+        _ => return Err("units must be Meters, Feet, Kilometers or Miles".into()),
+    };
+    let unit = if units.is_empty() { "Meters" } else { units };
+    rustgis_geom::distance_unit_metres(&unit.to_ascii_lowercase()).ok_or_else(|| "units must be Meters, Feet, Kilometers or Miles".into())
 }
 
 /// A point moved by metres east and north (Web Mercator stretched to the point's latitude).
@@ -658,14 +676,16 @@ fn traverse(s: &mut Session, p: &Json) -> CmdResult {
     if legs.is_empty() || legs.len() > 10_000 {
         return Err("give 1 to 10,000 legs".into());
     }
+    let unit = distance_unit_metres(p)?;
     let g2g = s.map().editing.settings.ground_to_grid;
     let mut pts = vec![start];
     for leg in legs {
         let d = leg
             .get("distance")
             .and_then(Json::as_f64)
+            .map(|d| d * unit)
             .filter(|d| d.is_finite() && *d >= 0.0 && *d < 2e7)
-            .ok_or("each leg has a distance in metres")?;
+            .ok_or("each leg has a finite, non-negative distance in the command's units (limit: less than 20,000 km)")?;
         let brg = leg.get("bearing").and_then(Json::as_f64).filter(|b| b.is_finite()).ok_or("each leg has a bearing in degrees")?;
         let (mut dx, mut dy) = (d * brg.to_radians().sin(), d * brg.to_radians().cos());
         if let Some((k, rot)) = g2g {

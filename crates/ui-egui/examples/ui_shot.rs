@@ -5,7 +5,8 @@
 //! The script is JSON lines: `{"cmd": id, "params": {...}}` runs a command (ui.* included),
 //! `{"shot": "/abs/out.png"}` saves the window, `{"steps": n}` runs frames, `{"sleep": ms}` runs frames
 //! for that long, `{"click": label}` clicks the first widget whose label contains the text (with
-//! `"exact": true`, whose whole label is the text), `{"type": text}` types into the focused box,
+//! `"exact": true`, whose whole label is the text), `{"combo": text}` opens the combo box showing
+//! that text, `{"type": text}` types into the focused box,
 //! `{"key": "Enter"}` presses a key (egui's key names), `{"dark": true}` switches theme,
 //! `{"drag": [x, y, dx, dy]}` presses the pointer at (x, y) and moves it by (dx, dy), holding
 //! it (shots then catch the map mid-drag; `{"release": true}` lets go; `"button": "secondary"`; `"ctrl": true` holds Ctrl
@@ -150,6 +151,15 @@ fn main() {
             match node {
                 Some(node) => node.click(),
                 None => eprintln!("nothing labelled '{label}'"),
+            }
+            for _ in 0..3 {
+                harness.step();
+            }
+        } else if let Some(shown) = l.get("combo").and_then(|v| v.as_str()) {
+            // A combo box has no label of its own: it is found by what it shows.
+            match harness.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some(shown)) {
+                Some(node) => node.click(),
+                None => eprintln!("no combo box showing '{shown}'"),
             }
             for _ in 0..3 {
                 harness.step();

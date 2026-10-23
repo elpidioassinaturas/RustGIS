@@ -37,7 +37,8 @@ web-time = "1"
 geo = "0.33"
 # A5, the equal-area pentagonal DGGS (opengeos/RustGIS#551)
 a5 = "1"
-shapefile = "0.9"
+shapefile = { version = "0.9", features = ["encoding_rs", "yore"] }
+encoding_rs = "0.8"
 csv = "1"
 tiny-skia = "0.12"
 # GPU map backend: vertex data shared with wgpu in ui-egui (derive only; unsafe stays forbidden).

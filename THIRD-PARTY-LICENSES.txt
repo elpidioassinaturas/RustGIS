@@ -8769,7 +8769,7 @@ SOFTWARE.
 ====================================================================================================
 MIT License
 Used by: block2, bufrw, dispatch, dpi, i_key_sort, libm, objc-sys, objc2, objc2-app-kit, objc2-encode,
-objc2-foundation, rsqlite-vfs
+objc2-foundation, rsqlite-vfs, yore
 ====================================================================================================
 
 MIT License
@@ -9635,7 +9635,7 @@ SOFTWARE.
 
 ====================================================================================================
 MIT License
-Used by: rfd
+Used by: rfd, sctk-adwaita
 ====================================================================================================
 
 MIT License
