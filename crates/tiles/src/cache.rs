@@ -1117,12 +1117,14 @@ mod native {
             // A store that serves ranges but not the last bytes by their count (GitHub's release
             // files, on Azure storage, answer `bytes=-n` with 501): the file's length from a
             // one-byte range's `Content-Range`, then the last bytes by their place, at the same
-            // address. A server that gives no length goes on as one without ranges.
+            // address. A server that gives no length goes on as one without ranges; the one-byte
+            // range redirected is asked for again where it leads, and refused fails as any refusal.
             if let Some(n) = tail.filter(|_| status == 501 && range.is_none()) {
                 (measuring, tail, range) = (Some(n), None, Some((0, 0)));
                 continue;
             }
-            if let Some(n) = measuring.take() {
+            if let Some(n) = measuring.filter(|_| status < 300) {
+                measuring = None;
                 let total = (status == 206)
                     .then(|| resp.headers().get("content-range").and_then(|v| v.to_str().ok()))
                     .flatten()
@@ -1443,6 +1445,28 @@ mod tests {
         let got = native::get_detailed(&agent, &format!("http://{addr}/f.parquet{TAIL}4")).unwrap();
         assert_eq!(got, b"6789");
         assert_eq!(*asked.lock().unwrap(), ["bytes=-4", "bytes=0-0", "bytes=6-9"]);
+    }
+
+    /// The one-byte range asked for a file's length: redirected, it is asked for again where it
+    /// leads; refused, the refusal's status is kept; answered whole, the server has no ranges.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_length_asked_for_follows_redirects_and_keeps_refusals() {
+        let no_suffix = "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string();
+        let agent = native::agent();
+        let base = serve(vec![
+            no_suffix.clone(),
+            "HTTP/1.1 302 Found\r\nLocation: /g.parquet\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/10\r\nContent-Length: 1\r\nConnection: close\r\n\r\n0".into(),
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 6-9/10\r\nContent-Length: 4\r\nConnection: close\r\n\r\n6789".into(),
+        ]);
+        assert_eq!(native::get_detailed(&agent, &format!("{base}/f.parquet{TAIL}4")).unwrap(), b"6789");
+        let base = serve(vec![no_suffix.clone(), "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()]);
+        let f = native::get_detailed(&agent, &format!("{base}/f.parquet{TAIL}4")).unwrap_err();
+        assert_eq!(f.status(), Some(404), "{}", f.message);
+        let base = serve(vec![no_suffix, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789".into()]);
+        let f = native::get_detailed(&agent, &format!("{base}/f.parquet{TAIL}4")).unwrap_err();
+        assert!(f.message.contains(super::NO_RANGES), "{}", f.message);
     }
 
     /// A refused request keeps who refused it (#509); the plain error reads as it always has.
