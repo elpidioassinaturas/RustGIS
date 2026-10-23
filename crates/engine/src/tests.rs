@@ -2581,8 +2581,8 @@ fn publication_layouts_locate_their_area() {
     let ElementKind::MapFrame { map, shape, scale, extent_of, .. } = &inset.kind else { panic!() };
     assert!(map == &main && shape == &FrameShape::Rectangle && *scale > main_scale * 3.0 && extent_of.is_some(), "1:{scale}");
     s.run("layout.export", &json!({"path": dir.join("inset.png").display().to_string(), "dpi": 96})).unwrap();
-    // None asked, or a figure by default: no locator. The legend stays, the narrowest figure
-    // (90 mm) included: only a frame too narrow for it beside the scale bar leaves it out.
+    // None asked, or a figure by default: no locator, and the legend stays, the narrowest
+    // figure (90 mm) included: only a locator takes its room.
     for p in [json!({"extent": piaui, "locator": "none"}), json!({"extent": piaui, "profile": "figure-1col"})] {
         let r = s.run("layout.publication", &p).unwrap();
         let l = s.project.layouts.last().unwrap();
@@ -2602,8 +2602,18 @@ fn publication_layouts_locate_their_area() {
     let r = s.run("layout.publication", &json!({"extent": piaui, "name": "Again"})).unwrap();
     let first = r["locator"].as_str().unwrap().to_string();
     s.run("layout.remove", &json!({"name": "Again"})).unwrap();
+    // Made anew, not kept: a polygon layer hidden meanwhile is gone from the reused map.
+    let (gone, gone_name) =
+        s.map().layers.iter().find(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon).map(|l| (l.id, l.name.clone())).unwrap();
+    let globe_has =
+        |s: &Session, name: &str| s.project.maps.iter().find(|m| m.name == first).unwrap().layers.iter().any(|l| l.name == name);
+    assert!(globe_has(&s, &gone_name));
+    s.map_mut().layer_mut(gone).unwrap().visible = false;
     let r = s.run("layout.publication", &json!({"extent": piaui, "name": "Again"})).unwrap();
     assert_eq!((s.project.maps.len(), r["locator"].as_str()), (before + 1, Some(first.as_str())));
+    assert!(r["warnings"].to_string().contains("which no layout showed, is replaced"), "{r}");
+    assert!(!globe_has(&s, &gone_name), "the reused map is rebuilt");
+    s.map_mut().layer_mut(gone).unwrap().visible = true;
     let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
     assert!(s.project.maps.len() == before + 2 && r["locator"].as_str() != Some(first.as_str()), "{r}");
     // The globe is a new map of what it draws: the polygon layers that show (a hidden one left
@@ -2624,9 +2634,8 @@ fn publication_layouts_locate_their_area() {
     assert!(m.tiles.is_empty() && m.swipe.is_none() && m.groups.is_empty() && m.basemap == s.map().basemap);
     assert!(m.layers.iter().all(|l| !l.labels.enabled && l.selection.is_empty()));
     // Sheets with ever more source lines, so ever smaller frames, down to the smallest a sheet
-    // takes: the legend is never drawn over the locator, whichever corners they take, and once
-    // there's no room for it beside the surrounds, it is left out, said.
-    let mut left_out = false;
+    // takes: the legend is never drawn over the locator, whichever corners they take (the search
+    // keeps them apart), and if the locator leaves it no room it is left out, said.
     for n in 1..80 {
         let sources: Vec<String> = (0..n).map(|i| format!("Source {i}: a line long enough to take a line of its own")).collect();
         let Ok(r) = s.run("layout.publication", &json!({"profile": "a4-landscape", "extent": piaui, "sources": sources})) else { break };
@@ -2646,14 +2655,11 @@ fn publication_layouts_locate_their_area() {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|w| w.as_str().unwrap_or("").contains("the frame leaves the legend no room beside"));
+                    .any(|w| w.as_str().unwrap_or("").contains("the frame leaves the legend no room beside the locator"));
                 assert!(said, "{n} lines: {r}");
-                left_out = true;
-                break;
             }
         }
     }
-    assert!(left_out, "no frame got too small for a legend under the locator");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2758,6 +2764,19 @@ fn a_publication_layouts_raster_gets_a_colorbar() {
         "inside the legend's box"
     );
     s.run("layout.export", &json!({"path": dir.join("colorbar.png").display().to_string(), "dpi": 72})).unwrap();
+    // Smaller boxes (figures, a locator taking room): the colorbar stays wholly inside its box, never
+    // above its top, and a box too small for it says so, not that legend rows were cut.
+    for profile in ["figure-1col", "thesis-half", "a4-landscape"] {
+        let r = s.run("layout.publication", &json!({"extent": [10, 45, 11, 46], "profile": profile, "locator": "globe"})).unwrap();
+        let l = s.project.layouts.last().unwrap();
+        let named = |n: &str| l.elements.iter().find(|e| e.name == n);
+        let (Some(bar), Some(then)) = (named("Colorbar"), named("Legend Box")) else { continue };
+        let inside = bar.x >= then.x - 1e-9
+            && bar.y >= then.y - 1e-9
+            && bar.x + bar.w <= then.x + then.w + 1e-9
+            && bar.y + bar.h <= then.y + then.h + 1e-9;
+        assert!(inside, "{profile}: the colorbar outside its box: {r}");
+    }
     // Vectors only: no colorbar.
     let mut s = world();
     s.run("layout.publication", &json!({"extent": [10, 45, 11, 46]})).unwrap();

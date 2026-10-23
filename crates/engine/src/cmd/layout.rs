@@ -851,7 +851,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             let globe = globe_scale(&m, center, side * 0.92);
             let name = m.name.clone();
             match orphan.and_then(|i| s.project.maps.get_mut(i)) {
-                Some(old) => *old = m,
+                Some(old) => {
+                    *old = m;
+                    warnings.push(format!("the map '{name}', which no layout showed, is replaced by this sheet's globe"));
+                }
                 None => s.project.maps.push(m),
             }
             Some((name, globe, FrameShape::Circle))
@@ -994,48 +997,51 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         placed.push(("north arrow", r));
         l.add("North Arrow", r, ElementKind::north_arrow(frame));
     }
-    // The legend's corner, short of the surrounds beside and above or below it: one too small for
-    // a legend leaves it out, said, rather than drawing it over them.
+    // The legend's corner, short of the surrounds beside and above or below it: one the locator
+    // leaves too small for a legend leaves it out, said, rather than drawing it over the locator.
     const MIN_LEGEND_MM: f64 = 10.0;
     let legend_at = corner_of(Surround::Legend).and_then(|(corner, w, h)| {
         let other = |c: usize| surrounds.iter().zip(&corners).find(|(_, k)| **k == c).map(|(&(kind, w, h, _), _)| (kind, w, h));
         let room_w = other(corner ^ 1).map_or(f64::INFINITY, |(_, ow, _)| fw - left - right - ow - 2.0);
         let room_h = other(corner ^ 2).map_or(f64::INFINITY, |(_, _, oh)| fh - top - bottom - oh - e);
-        let blocked = if room_h < MIN_LEGEND_MM {
-            other(corner ^ 2).map(|o| o.0)
-        } else if room_w < MIN_LEGEND_MM {
-            other(corner ^ 1).map(|o| o.0)
-        } else {
-            return Some((corner, w.min(room_w), h.min(room_h)));
-        };
-        let (by, or) = match blocked {
-            Some(Surround::Locator) => ("the locator", ", or set \"locator\": \"none\""),
-            Some(Surround::Arrow) => ("the north arrow", ""),
-            _ => ("the scale bar", ""),
-        };
-        warnings.push(format!("the frame leaves the legend no room beside {by}, so it is left out: give the map more room{or}"));
-        None
+        // Short of the locator, under 10 mm: left out. Beside the arrow or the scale bar, the
+        // legend keeps 10 mm each way, as a layout without a locator always has.
+        let locator_in_the_way = |room: f64, c: usize| room < MIN_LEGEND_MM && other(c).is_some_and(|o| o.0 == Surround::Locator);
+        if locator_in_the_way(room_h, corner ^ 2) || locator_in_the_way(room_w, corner ^ 1) {
+            warnings.push(
+                "the frame leaves the legend no room beside the locator, so it is left out: give the map more room, or set \"locator\": \"none\""
+                    .into(),
+            );
+            return None;
+        }
+        Some((corner, w.min(room_w.max(MIN_LEGEND_MM)), h.min(room_h.max(MIN_LEGEND_MM))))
     });
     if let Some((corner, lw, lh)) = legend_at {
-        if content_w + 2.0 * pad > lw || content_h + 2.0 * pad > lh {
-            warnings.push("the legend lists more than fits its corner: its last rows or the ends of long labels are left out".into());
-        }
         let r = at(corner, lw, lh);
         placed.push(("legend", r));
         l.add("Legend Box", r, pub_box(paper, clear, 0.0));
-        // The legend's rows at the top, the colorbar at the bottom of the box.
+        // The colorbar at the bottom of the box, as tall as the box allows; the legend's rows in
+        // what is left above it. Each says when it doesn't fit, rather than one blaming the other.
         let (ix, iy, iw, ih) = (r.0 + pad, r.1 + pad, lw - 2.0 * pad, lh - 2.0 * pad);
-        if ch > 0.0 {
+        let bar_fit = if bar.is_some() { bar_h.min(ih) } else { 0.0 };
+        let rows_h = (ih - bar_fit - if bar.is_some() { bar_part - bar_h } else { 0.0 }).max(0.0);
+        if ch > 0.0 && (cw > iw || ch > rows_h) {
+            warnings.push("the legend lists more than fits its corner: its last rows or the ends of long labels are left out".into());
+        }
+        if bar.is_some() && (bar_w > iw || bar_h > ih) {
+            warnings.push("the legend's box is smaller than the colorbar: it is drawn narrower or shorter".into());
+        }
+        if ch > 0.0 && rows_h >= 1.0 {
             l.add(
                 "Legend",
-                (ix, iy, iw, (ih - bar_part).max(1.0)),
+                (ix, iy, iw, rows_h),
                 ElementKind::Legend { frame, title: String::new(), all_classes: false, hide_other: false, exclude: Vec::new() },
             );
         }
         if let Some(layer) = &bar {
             l.add(
                 "Colorbar",
-                (ix, iy + ih - bar_h, iw, bar_h),
+                (ix, iy + ih - bar_fit, iw, bar_fit),
                 ElementKind::Colorbar {
                     frame,
                     layer: Some(layer.clone()),
