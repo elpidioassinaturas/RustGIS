@@ -597,7 +597,7 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
         }
     }
     if by_day.len() > super::cube::MAX_DATES {
-        return Err(format!("{} dates; a trend takes {} at most: take a shorter period", by_day.len(), super::cube::MAX_DATES));
+        return Err(format!("{} dates; a trend or summary takes {} at most: take a shorter period", by_day.len(), super::cube::MAX_DATES));
     }
     // The first file's header gives the coordinate system, the grid and its overviews.
     let first = by_day.values().flatten().next().map(|(h, ..)| h.clone()).ok_or("no file to read")?;

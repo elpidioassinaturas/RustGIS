@@ -9279,6 +9279,20 @@ fn a_short_cube_is_summarised_but_not_trended() {
     assert!(e.contains("trend") && !e.contains("summary"), "{e}");
 }
 
+/// A Zarr axis in decreasing order: a trend refuses it, a summary takes it and names its period from
+/// the earliest date to the latest.
+#[test]
+fn a_summary_over_a_decreasing_zarr_axis_names_its_period_in_order() {
+    let (dir, path) = zarr_store_at("cube-reduce-desc", &[59, 31, 0]);
+    let mut s = Session::new(Project::default());
+    let e = s.run("cube.trend", &json!({"path": path, "variable": "t"})).unwrap_err();
+    assert!(e.contains("increasing order"), "{e}");
+    let r = s.run("cube.reduce", &json!({"path": path, "variable": "t", "stat": "mean"})).unwrap();
+    let name = s.map().layer(r["layers"][0].as_u64().unwrap() as u32).unwrap().name.clone();
+    assert!(name.contains("2001-01-01–2001-03-01"), "{name}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A STAC collection's band summarised over time, read in place as for a trend: each file's own
 /// scale and offset taken, the whole period or a month at a time.
 #[test]

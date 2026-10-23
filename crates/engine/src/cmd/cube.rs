@@ -1270,7 +1270,10 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
     let group_of: Vec<usize> = keys.iter().map(|k| found.binary_search(k).unwrap_or(0)).collect();
     // The outputs' names: the cube's label, the statistic and the period, or the name given.
     let day = |i: usize| rustgis_data::time::format(date(i), "YYYY-MM-DD");
-    let (a, z) = (steps.first().copied().unwrap_or(0), steps.last().copied().unwrap_or(0));
+    // The earliest and the latest date, which a Zarr axis out of order doesn't put first and last.
+    let earliest = steps.iter().copied().min_by(|x, y| date(*x).total_cmp(&date(*y)));
+    let latest = steps.iter().copied().max_by(|x, y| date(*x).total_cmp(&date(*y)));
+    let (a, z) = (earliest.unwrap_or(0), latest.unwrap_or(0));
     let months = months(p)?;
     let season = if months.is_empty() {
         String::new()
