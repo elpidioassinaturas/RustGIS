@@ -10698,9 +10698,11 @@ fn a_stac_trends_keys_are_read() {
         assert!(keys.contains(&k), "{k}: {keys:?}");
     }
     let mark = s.notice_mark();
-    // An API on a closed port: refused there, after the keys are read.
-    let p = json!({"collection": "c", "url": "http://127.0.0.1:9/v1", "asset": "NDVI", "bbox": [0, 0, 1, 1], "maxCloud": 20, "cellSize": 1000, "resampling": "average", "start": "2020", "end": "2021"});
-    assert!(s.run("cube.trend", &p).is_err());
+    // A cell size of 0: refused before any search, so nothing reaches the network, after the keys
+    // are read.
+    let p = json!({"collection": "c", "url": "http://127.0.0.1:9/v1", "asset": "NDVI", "bbox": [0, 0, 1, 1], "maxCloud": 20, "cellSize": 0, "resampling": "average", "start": "2020", "end": "2021"});
+    let e = s.run("cube.trend", &p).unwrap_err();
+    assert!(e.contains("cellSize"), "{e}");
     let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
     assert!(said.iter().all(|t| !t.contains("ignores")), "{said:?}");
 }
