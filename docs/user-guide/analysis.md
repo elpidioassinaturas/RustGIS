@@ -459,7 +459,7 @@ rustgis-cli run --cmd 'cube.trend={"url":"https://data.inpe.br/bdc/stac/v1","col
 
 ### Summarising a data cube over time
 
-**Summarize a Data Cube over Time** (`cube.reduce`) makes rasters of one statistic of each cell
+**Summarise a Data Cube over Time** (`cube.reduce`) makes rasters of one statistic of each cell
 over the dates of any of the series Trend Analysis takes (layers, a raster's bands, a Zarr
 variable, a STAC collection's band): **mean**, **min**, **max**, **sum**, **std** (the population
 standard deviation), **count** of values, or **countAbove** a threshold (`"above"`), as Summarise
