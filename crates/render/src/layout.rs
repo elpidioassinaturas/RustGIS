@@ -1018,16 +1018,22 @@ pub fn frame_render_scale(map: &Map, center: Coord, scale: f64) -> f64 {
 /// the frame's longer side, row by row from the top, each `true` where a layer (or its labels)
 /// drew. The basemap is left out, so the frame's background isn't counted. For keeping a
 /// layout's surrounds off what its map shows. `None` when the frame can't be drawn.
-pub fn frame_coverage(map: &Map, center: Coord, scale: f64, w_mm: f64, h_mm: f64, cells: u32) -> Option<(u32, u32, Vec<bool>)> {
+///
+/// The map itself is drawn, not a copy of it (every layer's features): its basemap is set aside
+/// for the drawing and put back, as is a label lock waiting to be filled, which the coarse drawing
+/// would otherwise fill.
+pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm: f64, cells: u32) -> Option<(u32, u32, Vec<bool>)> {
     if !(w_mm > 0.0 && h_mm > 0.0) {
         return None;
     }
-    let mut m = map.clone();
-    m.basemap = rustgis_map::Basemap::Blank;
     let (w, h) = (w_mm * PT_PER_MM, h_mm * PT_PER_MM);
     let ppp = f64::from(cells.clamp(8, 512)) / w.max(h);
-    let view = View { width: w, height: h, pixels_per_point: ppp, camera: frame_camera(&m, center, scale, 0.0, 0.0), sky: false };
-    let pm = crate::render(&mut m, &view)?.pixmap;
+    let view = View { width: w, height: h, pixels_per_point: ppp, camera: frame_camera(map, center, scale, 0.0, 0.0), sky: false };
+    let basemap = std::mem::replace(&mut map.basemap, rustgis_map::Basemap::Blank);
+    let lock = map.label_lock.take();
+    let drawn = crate::render(map, &view);
+    (map.basemap, map.label_lock) = (basemap, lock);
+    let pm = drawn?.pixmap;
     let (gw, gh) = (pm.width(), pm.height());
     // Anything not the blank basemap's white paper (a translucent fill over it included).
     let drawn = pm.pixels().iter().map(|p| p.alpha() > 0 && (p.red() < 245 || p.green() < 245 || p.blue() < 245)).collect();
