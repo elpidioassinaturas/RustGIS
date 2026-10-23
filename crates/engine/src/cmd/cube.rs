@@ -234,7 +234,8 @@ fn date_list(p: &Value) -> Result<Option<Vec<f64>>, String> {
 }
 
 /// What a run asks of its cube, and its name in what it says: a trend needs a few dates and a
-/// Zarr axis in time order (the test's sign and count follow it); a summary takes any.
+/// Zarr axis in time order (the test's sign and count follow it); a summary takes two dates or more
+/// in any order (a raster of one band is no cube, and one date has nothing to summarise).
 #[derive(Clone, Copy, Debug)]
 pub struct Needs {
     pub what: &'static str,
@@ -245,7 +246,7 @@ pub struct Needs {
 /// What `cube.trend` asks of its cube.
 pub const TREND: Needs = Needs { what: "trend", min_dates: trend::MIN_VALUES, ordered: true };
 /// What `cube.reduce` asks of its cube.
-pub const SUMMARY: Needs = Needs { what: "summary", min_dates: 1, ordered: false };
+pub const SUMMARY: Needs = Needs { what: "summary", min_dates: 2, ordered: false };
 
 /// The cube a command's parameters name: a stack of layers, a Zarr variable, or a raster's bands.
 pub fn cube_from(s: &Session, p: &Value, needs: Needs) -> Result<Box<dyn TimeCube>, String> {
@@ -340,12 +341,12 @@ pub fn cube_from(s: &Session, p: &Value, needs: Needs) -> Result<Box<dyn TimeCub
     let id = s.layer_id(p)?;
     let l = s.map().layer(id).ok_or("no such layer")?;
     let r = l.raster.as_ref().and_then(|r| r.data.clone()).ok_or_else(|| format!("{} isn't a raster", l.name))?;
-    if r.bands.len() < needs.min_dates.max(2) {
+    if r.bands.len() < needs.min_dates {
         return Err(format!(
             "{} has {} band(s): a {what}'s cube is a raster of {} bands or more (a date each), a Zarr variable with a time dimension, or \"layers\"",
             l.name,
             r.bands.len(),
-            needs.min_dates.max(2)
+            needs.min_dates
         ));
     }
     if dates.as_ref().is_some_and(|d| d.len() != r.bands.len()) {

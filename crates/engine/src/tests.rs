@@ -9277,6 +9277,9 @@ fn a_short_cube_is_summarised_but_not_trended() {
     }
     let e = s.run("cube.trend", &json!({"layers": names})).unwrap_err();
     assert!(e.contains("trend") && !e.contains("summary"), "{e}");
+    // One date has nothing to summarise.
+    let e = s.run("cube.reduce", &json!({"layers": [names[0]], "stat": "mean"})).unwrap_err();
+    assert!(e.contains("summary's stack needs 2 layers"), "{e}");
 }
 
 /// A Zarr axis in decreasing order: a trend refuses it, a summary takes it and names its period from
