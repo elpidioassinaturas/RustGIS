@@ -1061,9 +1061,10 @@ impl Totals {
 }
 
 /// The most values a summary's outputs hold (cells × outputs): 32 million on the desktop, 8
-/// million in the browser. Its running totals, up to 20 bytes a cell, are a piece's at a time and
-/// only for the groups whose dates are being read: one year's in a summary by year, every month's
-/// in one by month of the year.
+/// million in the browser, checked before reading when the cube knows its size and as the pieces
+/// are read when it doesn't. Its running totals, up to 20 bytes a cell, are a piece's at a time and
+/// only for the groups whose dates are being read: one year's in a summary by year read one date
+/// at a time (those of the dates in flight with several readers), every month's in one by month.
 pub const MAX_REDUCED: u64 = MAX_VALUES / 2;
 
 /// How a summary groups its dates: one output for them all, one for each calendar year, or one for
@@ -1118,10 +1119,16 @@ impl ReduceRun {
         }
         let mut stitch = Stitch::default();
         let mut bands: Vec<Vec<f32>> = vec![Vec::new(); outputs];
+        // The cells of the pieces read so far, for a cube that didn't know its size.
+        let mut read_cells = 0usize;
         for piece in 0..self.cube.pieces().max(1) {
             let mut grid: Option<Arc<Raster>> = None;
             // A group's totals are made at its first date read and turned into its output at its
-            // last, so a summary by year holds one year's totals at a time (its dates come in order).
+            // last. Dates are asked for in order: read one at a time they come in order, so a
+            // summary by year holds one year's totals at a time; with several readers (a STAC
+            // cube's) they come as read, and the groups open are those of the dates in flight, a
+            // couple of years' for 16-day composites. Totals are f64 and the outputs f32, so the
+            // order of arrival can move an output's last bit at most, and only then.
             let mut totals: Vec<Option<Totals>> = (0..outputs).map(|_| None).collect();
             let mut seen = vec![0usize; outputs];
             let mut finished: Vec<Option<Vec<f32>>> = vec![None; outputs];
@@ -1169,6 +1176,12 @@ impl ReduceRun {
                 }
             }
             let cells = (grid.width as usize).saturating_mul(grid.height as usize);
+            read_cells = read_cells.saturating_add(cells);
+            if whole.is_none()
+                && let Some(e) = too_many(read_cells)
+            {
+                return Err(e);
+            }
             for (g, band) in bands.iter_mut().enumerate() {
                 let dates = self.groups.get(g).map_or(0, |(_, d)| *d);
                 // A group with no data written in this piece: no values, as its totals would give.
