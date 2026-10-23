@@ -2708,7 +2708,8 @@ fn publication_layouts_fit_their_pages() {
 /// subtitle in a band of the accent colour across the top; `panel` the map at the left and a panel
 /// at the right holding the title, the locator, the legend, the sources and the reference;
 /// `editorial` the title large in serif and a column at the right with the note, the locator and
-/// the legend.
+/// the legend; `modular` cards with rounded corners; `poster` the page in the accent colour.
+///
 /// A figure leaves a style to its caption; an unknown style or a bad accent is refused.
 #[test]
 fn publication_layouts_take_a_style() {
