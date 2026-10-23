@@ -765,16 +765,31 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let locator_map = match locator {
         Locator::None => None,
         Locator::Globe => {
-            let mut m = s.map().clone();
-            m.name = numbered(&format!("{} Locator", m.name), |n| s.project.maps.iter().any(|x| x.name.eq_ignore_ascii_case(n)));
-            m.label_lock = None;
-            // On the globe, the map's own polygon layers, unlabelled: the land at a glance, no
+            let src = s.map();
+            let name = numbered(&format!("{} Locator", src.name), |n| s.project.maps.iter().any(|x| x.name.eq_ignore_ascii_case(n)));
+            // A new map of what the globe draws, not a clone of the whole map (every layer's
+            // features): its basemap (the land and borders around the area), graticule and body,
+            // and the map's own polygon layers that show, unlabelled: the land at a glance, no
             // raster or streamed layer (read again) nor points and lines cluttering a small disc.
-            m.layers.retain(|l| !l.is_raster() && l.source.is_none() && l.geometry_type() == rustgis_data::GeometryType::Polygon);
-            for layer in &mut m.layers {
-                layer.selection.clear();
-                layer.labels.enabled = false;
-            }
+            // Not its web tiles (fetched and drawn over the basemap on the disc), swipe, time
+            // slider, layer groups (their hidden layers left out here), bookmarks or animation.
+            let mut m = rustgis_map::Map::new(name);
+            m.basemap = src.basemap;
+            m.graticule = src.graticule;
+            m.body = src.body.clone();
+            m.layers = src
+                .layers
+                .iter()
+                .filter(|l| {
+                    src.shows(l) && !l.is_raster() && l.source.is_none() && l.geometry_type() == rustgis_data::GeometryType::Polygon
+                })
+                .map(|l| {
+                    let mut layer = l.clone();
+                    layer.selection.clear();
+                    layer.labels.enabled = false;
+                    layer
+                })
+                .collect();
             m.set_projection(rustgis_map::Projection::Globe);
             let globe = globe_scale(&m, center, side * 0.92);
             let name = m.name.clone();
@@ -833,10 +848,19 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // The scale bar's box, at the bottom right: the legend stops short of it (and so of the north
     // arrow above it, which is narrower), however narrow the frame.
     let (sw, sh, nh) = ((fw * 0.3).max(25.0), if sheet { 8.0 * k } else { 6.0 }, pitch(small_pt) + 0.5);
-    if ch > 0.0 {
+    // Its corner, under the locator and beside the scale bar: one too small for a legend leaves
+    // it out, said, rather than drawing it over either.
+    const MIN_LEGEND_MM: f64 = 10.0;
+    let (room_w, room_h) = (fw - left - right - sw - 2.0, fh - top - bottom - below_locator);
+    if ch > 0.0 && (room_w < MIN_LEGEND_MM || room_h < MIN_LEGEND_MM) {
+        let (why, or) = match (room_h < MIN_LEGEND_MM, below_locator > 0.0) {
+            (true, true) => ("below the locator", ", or set \"locator\": \"none\""),
+            (true, false) => ("in its height", ""),
+            (false, _) => ("beside the scale bar", ""),
+        };
+        warnings.push(format!("the frame leaves the legend no room {why}, so it is left out: give the map more room{or}"));
+    } else if ch > 0.0 {
         let pad = 2.0;
-        let room_w = (fw - left - right - sw - 2.0).max(10.0);
-        let room_h = (fh - top - bottom - below_locator).max(10.0);
         let (lw, lh) = ((cw + 2.0 * pad).min(fw * 0.45).min(room_w), (ch + 2.0 * pad).min(fh * 0.6).min(room_h));
         if cw + 2.0 * pad > lw || ch + 2.0 * pad > lh {
             warnings.push("the legend lists more than fits its corner: its last rows or the ends of long labels are left out".into());

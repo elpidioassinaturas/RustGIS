@@ -2571,6 +2571,44 @@ fn publication_layouts_locate_their_area() {
     assert_eq!(s.project.maps.len(), before + 1);
     s.run("edit.undo", &Value::Null).unwrap();
     assert_eq!(s.project.maps.len(), before);
+    // The globe is a new map of what it draws: the polygon layers that show (a hidden one left
+    // out) on the map's basemap, without its web tiles, swipe or groups.
+    let polygon = |l: &rustgis_map::Layer| l.geometry_type() == rustgis_data::GeometryType::Polygon;
+    let hidden = s.map().layers.iter().find(|l| polygon(l)).map(|l| (l.id, l.name.clone())).unwrap();
+    s.map_mut().layer_mut(hidden.0).unwrap().visible = false;
+    s.map_mut().tiles.push(rustgis_map::TileLayer::new(
+        "Streets",
+        rustgis_map::TileKind::Raster,
+        "https://tiles.example.com/{z}/{x}/{y}.png",
+    ));
+    s.map_mut().swipe = Some((hidden.0, 0.5));
+    let shown: Vec<String> = s.map().layers.iter().filter(|l| polygon(l) && s.map().shows(l)).map(|l| l.name.clone()).collect();
+    let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    let m = s.project.maps.iter().find(|m| Some(m.name.as_str()) == r["locator"].as_str()).unwrap();
+    assert_eq!(m.layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>(), shown, "not {}", hidden.1);
+    assert!(m.tiles.is_empty() && m.swipe.is_none() && m.groups.is_empty() && m.basemap == s.map().basemap);
+    assert!(m.layers.iter().all(|l| !l.labels.enabled && l.selection.is_empty()));
+    // Sheets with ever more source lines, so ever smaller frames, down to the smallest a sheet
+    // takes: the legend is never drawn over the locator, and once there's no room under it, it is
+    // left out, said.
+    let mut left_out = false;
+    for n in 1..80 {
+        let sources: Vec<String> = (0..n).map(|i| format!("Source {i}: a line long enough to take a line of its own")).collect();
+        let Ok(r) = s.run("layout.publication", &json!({"profile": "a4-landscape", "extent": piaui, "sources": sources})) else { break };
+        let l = s.project.layouts.last().unwrap();
+        let named = |name: &str| l.elements.iter().find(|e| e.name == name);
+        let locator = named("Locator").unwrap();
+        match named("Legend Box") {
+            Some(b) => assert!(b.y >= locator.y + locator.h - 1e-6, "{n} lines: the legend over the locator"),
+            None => {
+                let said = r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap_or("").contains("no room below the locator"));
+                assert!(said, "{n} lines: {r}");
+                left_out = true;
+                break;
+            }
+        }
+    }
+    assert!(left_out, "no frame got too small for a legend under the locator");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -35,11 +35,12 @@ the maps; while one is open, its groups lead the Publish tab:
     tokens stay live. The reference defaults to the projection, datum and graticule, and the
     authorship to "Made with RustGIS · {date}" (`"author": ""` leaves it out). `headings` renames the two columns.
   - **The locator**, at the frame's top left: `"locator": "globe"` (a sheet's default) adds a
-    map of the map's polygon layers on the globe, unlabelled, in a round frame, the globe nearly
-    filling it and the area outlined in red; `"inset"` shows the surrounding region (about four
-    times the area across) on the map itself, outlined the same way; `"none"` (a figure's
-    default) leaves it out. The legend stops short of it. Undo takes the globe's map away with
-    the layout.
+    map of the map's polygon layers that show on the globe, unlabelled, over the map's basemap
+    (not its web tiles), in a round frame, the globe nearly filling it and the area outlined in
+    red; `"inset"` shows the surrounding region (about four times the area across) on the map
+    itself, outlined the same way; `"none"` (a figure's default) leaves it out. The legend stops
+    short of it; a frame with no room for a legend under it leaves the legend out, with a
+    warning. Undo takes the globe's map away with the layout.
   - Every element is an ordinary one, to move or restyle afterwards. Running it again with
     another `profile` makes another layout of the same map.
 
