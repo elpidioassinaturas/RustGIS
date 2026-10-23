@@ -2888,13 +2888,21 @@ fn publication_layouts_take_a_style() {
         let l = s.project.layouts.last().unwrap();
         assert_eq!(l.width > l.height, want.ends_with("landscape"), "{p}");
     }
-    // A figure leaves the style to its caption; refused: an unknown style, a bad accent.
+    // A figure leaves the style to its caption; refused: an unknown style, a bad accent, either not
+    // given as text, and an unknown profile (its message naming the sizes turned to the area).
     let r = s.run("layout.publication", &json!({"extent": piaui, "profile": "figure-1col", "style": "banner"})).unwrap();
     assert!(r["warnings"].to_string().contains("style \\\"banner\\\""), "{r}");
     let before = s.project.layouts.len();
-    for bad in [json!({"extent": piaui, "style": "magazine"}), json!({"extent": piaui, "style": "banner", "accent": "blue"})] {
+    for bad in [
+        json!({"extent": piaui, "style": "magazine"}),
+        json!({"extent": piaui, "style": "banner", "accent": "blue"}),
+        json!({"extent": piaui, "style": 3}),
+        json!({"extent": piaui, "accent": 7}),
+    ] {
         assert!(s.run("layout.publication", &bad).is_err(), "{bad}");
     }
+    let e = s.run("layout.publication", &json!({"extent": piaui, "profile": "a5"})).unwrap_err();
+    assert!(e.contains("a4, a3 or a2") && e.contains("a4-portrait"), "{e}");
     assert_eq!(s.project.layouts.len(), before);
     let _ = std::fs::remove_dir_all(&dir);
 }

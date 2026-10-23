@@ -664,7 +664,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     };
     let profile = PUBLICATION_PROFILES.iter().find(|pr| pr.id == id).ok_or_else(|| {
         let names: Vec<&str> = PUBLICATION_PROFILES.iter().map(|pr| pr.id).collect();
-        format!("unknown profile '{id}': {}", names.join(", "))
+        format!("unknown profile '{id}': a4, a3 or a2 (turned to the area's shape), {}", names.join(", "))
     })?;
     let (sheet, page_w, page_h) = (profile.sheet, profile.width, profile.height);
     let extent = match p.get("extent").filter(|v| !v.is_null()) {
@@ -716,6 +716,12 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             _ => return Err("locator is \"globe\", \"inset\" or \"none\"".into()),
         },
     };
+    // A style or an accent that isn't text is refused, as an unknown one is, rather than left out.
+    for k in ["style", "accent"] {
+        if p.get(k).is_some_and(|v| !v.is_null() && !v.is_string()) {
+            return Err(format!("{k} is text: {}", if k == "style" { "a style's name, such as \"panel\"" } else { "a colour as #RRGGBB" }));
+        }
+    }
     let style = match ps(p, "style").map(str::trim) {
         None | Some("classic") => Style::Classic,
         Some("banner") => Style::Banner,
