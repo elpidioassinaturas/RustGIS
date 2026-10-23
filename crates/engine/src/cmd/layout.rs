@@ -839,6 +839,15 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             // Each polygon simplified to a tenth of a millimetre on the disc (its scale in metres),
             // so the project keeps a sketch of the layers for it, not a second full copy of them.
             let tolerance_m = globe * 1e-4;
+            // A polygon too small for that (an island) would collapse to a ring of under four
+            // points: it keeps its own shape, already small.
+            let sketch = |g: &rustgis_data::Geometry| {
+                let s = rustgis_analysis::simplify_geometry(g, tolerance_m);
+                match &s {
+                    rustgis_data::Geometry::Polygon(polys) if polys.iter().flatten().all(|ring| ring.len() >= 4) => s,
+                    _ => g.clone(),
+                }
+            };
             m.layers = src
                 .layers
                 .iter()
@@ -853,7 +862,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                         .iter()
                         .map(|f| {
                             let mut f = f.clone();
-                            f.geometry = f.geometry.as_ref().map(|g| rustgis_analysis::simplify_geometry(g, tolerance_m));
+                            f.geometry = f.geometry.as_ref().map(sketch);
                             f
                         })
                         .collect();
