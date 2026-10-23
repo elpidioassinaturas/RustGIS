@@ -1263,6 +1263,9 @@ fn hostile_params_never_panic() {
         json!({"type": "albers", "lon_0": f64::MAX, "lat_1": "x", "lat_2": -1e308}),
         json!({"kind": "legend", "element": 1, "exclude": [null, 7, "", {"x": 1}]}),
         json!({"kind": "text", "element": 1, "font": {"family": "serif"}, "italic": [], "align": 7}),
+        // A publication sheet's style, accent and orientation, and a shape's rounded corners.
+        json!({"style": 7, "accent": "#XYZ", "profile": ["a4"], "kind": "ellipse", "element": 1, "radius": f64::NAN}),
+        json!({"style": "", "accent": [], "profile": "a9", "kind": "rectangle", "element": 1, "radius": -1e308}),
         // A STAC trend's source: a valid band and period so the junk after them is reached, and an
         // API on a closed local port, so nothing is read.
         json!({"collection": "c", "asset": "NDVI", "url": "http://127.0.0.1:9/v1", "bbox": "nowhere", "cellSize": -1e308, "resampling": 3, "start": "2020", "end": "2021"}),
@@ -2856,6 +2859,20 @@ fn publication_layouts_take_a_style() {
     s.run("layout.update", &json!({"element": id, "radius": 0})).unwrap();
     assert!(!serde_json::to_string(&rect(&s)).unwrap().contains("radius"), "square corners aren't saved");
     assert!(s.run("layout.update", &json!({"element": id, "radius": -1})).is_err());
+    // Anything but a rectangle refuses rounded corners, rather than taking them as applied.
+    let n = s.project.layouts.last().unwrap().elements.len();
+    let e = s.run("layout.addElement", &json!({"kind": "ellipse", "radius": 4})).unwrap_err();
+    assert!(e.contains("only a rectangle rounds its corners") && s.project.layouts.last().unwrap().elements.len() == n, "{e}");
+    let oval = s.run("layout.addElement", &json!({"kind": "circle"})).unwrap()["element"].clone();
+    let e = s.run("layout.update", &json!({"element": oval, "radius": 4, "fill": "#FF0000"})).unwrap_err();
+    assert!(e.contains("only a rectangle rounds its corners"), "{e}");
+    let fill = |s: &Session| {
+        s.project.layouts.last().unwrap().elements.iter().find(|e| json!(e.id) == oval).and_then(|e| match e.kind {
+            ElementKind::Ellipse { fill, .. } => Some(fill),
+            _ => None,
+        })
+    };
+    assert!(fill(&s).is_some_and(|f| f != rustgis_map::Rgba::rgb(0xFF, 0, 0)), "an ellipse, unchanged");
     // A sheet given its size alone (or none) is turned to the area's shape: portrait for a tall
     // one, landscape for a wide one, the size kept; one given its orientation keeps it.
     let wide = json!([-75.0, -14.0, -35.0, -2.0]);

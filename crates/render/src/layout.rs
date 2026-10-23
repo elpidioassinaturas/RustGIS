@@ -240,8 +240,13 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                 }
             }
             ElementKind::Rectangle { fill, outline, width, radius } => {
-                let p = rounded_rect(r, (*radius * PT_PER_MM * ppp) as f32).unwrap_or_else(|| PathBuilder::from_rect(r));
-                pm.fill_path(&p, &paint(*fill, 1.0), FillRule::Winding, Transform::identity(), None);
+                // Square corners filled as before, so an existing layout draws to the same pixels.
+                let rounded = rounded_rect(r, (*radius * PT_PER_MM * ppp) as f32);
+                match &rounded {
+                    Some(p) => pm.fill_path(p, &paint(*fill, 1.0), FillRule::Winding, Transform::identity(), None),
+                    None => pm.fill_rect(r, &paint(*fill, 1.0), Transform::identity(), None),
+                }
+                let p = rounded.unwrap_or_else(|| PathBuilder::from_rect(r));
                 if *width > 0.0 {
                     pm.stroke_path(
                         &p,

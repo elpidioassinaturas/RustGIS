@@ -1961,6 +1961,9 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
     if !matches!(kind, "text" | "dynamicText") && p.get("font").is_some_and(|v| !v.is_null()) {
         return Err(ONLY_TEXT_FONT.into());
     }
+    if kind != "rectangle" && p.get("radius").is_some_and(|v| !v.is_null()) {
+        return Err(ONLY_RECTANGLE_RADIUS.into());
+    }
     let i = index(s, p)?;
     let image = if kind == "picture" { Some(super::graphics::picture(p)?) } else { None };
     let layer_name = |s: &Session, l: &Layout, frame: u32| -> Result<String, String> {
@@ -2315,6 +2318,10 @@ pub(crate) fn text_style(p: &Value, italic: bool, align: TextAlign, spacing: f64
 /// What a `font` given for an element that isn't a text is told.
 const ONLY_TEXT_FONT: &str = "only text elements take a font";
 
+/// Rounded corners are a rectangle's: refused elsewhere, as a family is, so a script doesn't take
+/// them as applied.
+const ONLY_RECTANGLE_RADIUS: &str = "only a rectangle rounds its corners";
+
 /// A text element's family from `font` in `p`, the current one when not given (#517).
 pub(crate) fn font_family(p: &Value, current: FontFamily) -> Result<FontFamily, String> {
     match ps(p, "font") {
@@ -2404,11 +2411,10 @@ fn restyle(kind: &ElementKind, p: &Value) -> Result<Option<ElementKind>, String>
             let (fill, outline) = (color(p, "fill", *fill)?, color(p, "outline", color(p, "color", *outline)?)?);
             let width = shape_width(p, *width)?.clamp(0.0, 50.0);
             Ok(Some(match kind {
-                ElementKind::Ellipse { .. } => ElementKind::Ellipse { fill, outline, width },
                 ElementKind::Rectangle { radius, .. } => {
                     ElementKind::Rectangle { fill, outline, width, radius: corner_radius(p, *radius)? }
                 }
-                _ => return Err("only a rectangle rounds its corners".into()),
+                _ => ElementKind::Ellipse { fill, outline, width },
             }))
         }
         ElementKind::Line { color: c, width, dir, head } => {
@@ -2589,6 +2595,11 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         _ if p.get("font").is_some_and(|v| !v.is_null()) => return Err(ONLY_TEXT_FONT.into()),
         _ => None,
     };
+    if p.get("radius").is_some_and(|v| !v.is_null())
+        && !matches!(s.project.layouts.get(li).and_then(|l| l.element(id)).map(|e| &e.kind), Some(ElementKind::Rectangle { .. }))
+    {
+        return Err(ONLY_RECTANGLE_RADIUS.into());
+    }
     // A legend's left-out layers, checked against its frame's map before anything changes.
     let new_exclude = {
         let l = s.project.layouts.get(li).ok_or("no layout")?;
