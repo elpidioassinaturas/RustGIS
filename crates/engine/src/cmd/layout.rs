@@ -940,13 +940,13 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // them, the first one's changing slowest; two in one corner passed over): the one covering the
     // least of the map's drawing (its area in mm²) with no surround over another, a surround off
     // its own corner costing a hundredth of its area so that, all else equal, they stay where they
-    // belong.
+    // belong. There are four surrounds at most (locator, arrow, legend, scale), so 4⁴ = 256 picks.
     let n = surrounds.len();
     let mut corners: Vec<usize> = surrounds.iter().map(|s| s.3).collect();
     let mut best = f64::INFINITY;
     for code in 0..4usize.pow(n as u32) {
         let pick: Vec<usize> = (0..n).map(|i| code / 4usize.pow((n - 1 - i) as u32) % 4).collect();
-        if (1..n).any(|i| pick[..i].contains(&pick[i])) {
+        if pick.iter().enumerate().any(|(i, c)| pick.iter().take(i).any(|d| d == c)) {
             continue;
         }
         let rects: Vec<(f64, f64, f64, f64)> = surrounds.iter().zip(&pick).map(|(&(_, w, h, _), &corner)| at(corner, w, h)).collect();
