@@ -802,16 +802,31 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let locator_map = match locator {
         Locator::None => None,
         Locator::Globe => {
-            let mut m = s.map().clone();
-            m.name = numbered(&format!("{} Locator", m.name), |n| s.project.maps.iter().any(|x| x.name.eq_ignore_ascii_case(n)));
-            m.label_lock = None;
-            // On the globe, the map's own polygon layers, unlabelled: the land at a glance, no
+            let src = s.map();
+            let name = numbered(&format!("{} Locator", src.name), |n| s.project.maps.iter().any(|x| x.name.eq_ignore_ascii_case(n)));
+            // A new map of what the globe draws, not a clone of the whole map (every layer's
+            // features): its basemap (the land and borders around the area), graticule and body,
+            // and the map's own polygon layers that show, unlabelled: the land at a glance, no
             // raster or streamed layer (read again) nor points and lines cluttering a small disc.
-            m.layers.retain(|l| !l.is_raster() && l.source.is_none() && l.geometry_type() == rustgis_data::GeometryType::Polygon);
-            for layer in &mut m.layers {
-                layer.selection.clear();
-                layer.labels.enabled = false;
-            }
+            // Not its web tiles (fetched and drawn over the basemap on the disc), swipe, time
+            // slider, layer groups (their hidden layers left out here), bookmarks or animation.
+            let mut m = rustgis_map::Map::new(name);
+            m.basemap = src.basemap;
+            m.graticule = src.graticule;
+            m.body = src.body.clone();
+            m.layers = src
+                .layers
+                .iter()
+                .filter(|l| {
+                    src.shows(l) && !l.is_raster() && l.source.is_none() && l.geometry_type() == rustgis_data::GeometryType::Polygon
+                })
+                .map(|l| {
+                    let mut layer = l.clone();
+                    layer.selection.clear();
+                    layer.labels.enabled = false;
+                    layer
+                })
+                .collect();
             m.set_projection(rustgis_map::Projection::Globe);
             let globe = globe_scale(&m, center, side * 0.92);
             let name = m.name.clone();
@@ -895,32 +910,36 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         let y = if corner < 2 { fy + top } else { fy + fh - bottom - h };
         (x, y, w, h)
     };
-    // Every way of giving the surrounds a corner each: the one covering the least of the map's
-    // drawing (its area in mm²), a surround off its own corner costing a hundredth of its area so
-    // that, all else equal, they stay where they belong.
+    // Every way of giving the surrounds a corner each, each tried once (a corner for each of
+    // them, the first one's changing slowest; two in one corner passed over): the one covering the
+    // least of the map's drawing (its area in mm²) with no surround over another, a surround off
+    // its own corner costing a hundredth of its area so that, all else equal, they stay where they
+    // belong.
+    let n = surrounds.len();
     let mut corners: Vec<usize> = surrounds.iter().map(|s| s.3).collect();
     let mut best = f64::INFINITY;
-    for a in 0..4usize {
-        for b in 0..4usize {
-            for c in 0..4usize {
-                for d in 0..4usize {
-                    let pick = [a, b, c, d];
-                    let pick = &pick[..surrounds.len()];
-                    if (1..pick.len()).any(|i| pick[..i].contains(&pick[i])) || pick.len() < surrounds.len() {
-                        continue;
-                    }
-                    let cost: f64 = surrounds
-                        .iter()
-                        .zip(pick)
-                        .map(|(&(_, w, h, home), &corner)| {
-                            covered(at(corner, w, h)) * w * h + if corner == home { 0.0 } else { 0.01 * w * h }
-                        })
-                        .sum();
-                    if cost < best - 1e-9 {
-                        (best, corners) = (cost, pick.to_vec());
-                    }
-                }
+    for code in 0..4usize.pow(n as u32) {
+        let pick: Vec<usize> = (0..n).map(|i| code / 4usize.pow((n - 1 - i) as u32) % 4).collect();
+        if (1..n).any(|i| pick[..i].contains(&pick[i])) {
+            continue;
+        }
+        let rects: Vec<(f64, f64, f64, f64)> = surrounds.iter().zip(&pick).map(|(&(_, w, h, _), &corner)| at(corner, w, h)).collect();
+        let mut cost: f64 = surrounds
+            .iter()
+            .zip(&pick)
+            .zip(&rects)
+            .map(|((&(_, w, h, home), &corner), &r)| covered(r) * w * h + if corner == home { 0.0 } else { 0.01 * w * h })
+            .sum();
+        // Two surrounds over each other cost ten times their overlap, more than any data under
+        // them: in a frame too small for them all, the corners that keep them apart win.
+        for (i, a) in rects.iter().enumerate() {
+            for b in rects.iter().skip(i + 1) {
+                let (ow, oh) = ((a.0 + a.2).min(b.0 + b.2) - a.0.max(b.0), (a.1 + a.3).min(b.1 + b.3) - a.1.max(b.1));
+                cost += 10.0 * ow.max(0.0) * oh.max(0.0);
             }
+        }
+        if cost < best - 1e-9 {
+            (best, corners) = (cost, pick);
         }
     }
     // Each surround in its corner; the legend stops short of the others beside and above it.
@@ -952,11 +971,29 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         placed.push(("north arrow", r));
         l.add("North Arrow", r, ElementKind::north_arrow(frame));
     }
-    if let Some((corner, w, h)) = corner_of(Surround::Legend) {
-        let other = |c: usize| surrounds.iter().zip(&corners).find(|(_, k)| **k == c).map(|(&(_, w, h, _), _)| (w, h));
-        let room_w = other(corner ^ 1).map_or(f64::INFINITY, |(ow, _)| fw - left - right - ow - 2.0).max(10.0);
-        let room_h = other(corner ^ 2).map_or(f64::INFINITY, |(_, oh)| fh - top - bottom - oh - e).max(10.0);
-        let (lw, lh) = (w.min(room_w), h.min(room_h));
+    // The legend's corner, short of the surrounds beside and above or below it: one too small for
+    // a legend leaves it out, said, rather than drawing it over them.
+    const MIN_LEGEND_MM: f64 = 10.0;
+    let legend_at = corner_of(Surround::Legend).and_then(|(corner, w, h)| {
+        let other = |c: usize| surrounds.iter().zip(&corners).find(|(_, k)| **k == c).map(|(&(kind, w, h, _), _)| (kind, w, h));
+        let room_w = other(corner ^ 1).map_or(f64::INFINITY, |(_, ow, _)| fw - left - right - ow - 2.0);
+        let room_h = other(corner ^ 2).map_or(f64::INFINITY, |(_, _, oh)| fh - top - bottom - oh - e);
+        let blocked = if room_h < MIN_LEGEND_MM {
+            other(corner ^ 2).map(|o| o.0)
+        } else if room_w < MIN_LEGEND_MM {
+            other(corner ^ 1).map(|o| o.0)
+        } else {
+            return Some((corner, w.min(room_w), h.min(room_h)));
+        };
+        let (by, or) = match blocked {
+            Some(Surround::Locator) => ("the locator", ", or set \"locator\": \"none\""),
+            Some(Surround::Arrow) => ("the north arrow", ""),
+            _ => ("the scale bar", ""),
+        };
+        warnings.push(format!("the frame leaves the legend no room beside {by}, so it is left out: give the map more room{or}"));
+        None
+    });
+    if let Some((corner, lw, lh)) = legend_at {
         if content_w + 2.0 * pad > lw || content_h + 2.0 * pad > lh {
             warnings.push("the legend lists more than fits its corner: its last rows or the ends of long labels are left out".into());
         }
