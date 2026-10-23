@@ -2616,6 +2616,17 @@ fn publication_layouts_locate_their_area() {
     s.map_mut().layer_mut(gone).unwrap().visible = true;
     let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
     assert!(s.project.maps.len() == before + 2 && r["locator"].as_str() != Some(first.as_str()), "{r}");
+    // A globe map made by hand under such a name (its layers labelled) is never taken for one.
+    let mut hand = rustgis_map::Map::new(format!("{main} Locator 9"));
+    hand.set_projection(rustgis_map::Projection::Globe);
+    let mut labelled = s.map().layers.iter().find(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon).unwrap().clone();
+    labelled.labels.enabled = true;
+    hand.layers.push(labelled);
+    s.project.maps.push(hand);
+    let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    assert_ne!(r["locator"].as_str(), Some(format!("{main} Locator 9").as_str()), "{r}");
+    let kept = s.project.maps.iter().find(|m| m.name == format!("{main} Locator 9")).unwrap();
+    assert!(kept.layers.iter().all(|l| l.labels.enabled));
     // The globe is a new map of what it draws: the polygon layers that show (a hidden one left
     // out) on the map's basemap, without its web tiles, swipe or groups.
     let polygon = |l: &rustgis_map::Layer| l.geometry_type() == rustgis_data::GeometryType::Polygon;
