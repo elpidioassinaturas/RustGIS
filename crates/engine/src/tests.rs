@@ -2574,6 +2574,15 @@ fn publication_layouts_locate_their_area() {
     assert_eq!(s.project.maps.len(), before + 1);
     s.run("edit.undo", &Value::Null).unwrap();
     assert_eq!(s.project.maps.len(), before);
+    // A sheet made again after its layout was deleted replaces the locator no layout shows any
+    // more, rather than leaving it beside a new one; one still shown is kept.
+    let r = s.run("layout.publication", &json!({"extent": piaui, "name": "Again"})).unwrap();
+    let first = r["locator"].as_str().unwrap().to_string();
+    s.run("layout.remove", &json!({"name": "Again"})).unwrap();
+    let r = s.run("layout.publication", &json!({"extent": piaui, "name": "Again"})).unwrap();
+    assert_eq!((s.project.maps.len(), r["locator"].as_str()), (before + 1, Some(first.as_str())));
+    let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    assert!(s.project.maps.len() == before + 2 && r["locator"].as_str() != Some(first.as_str()), "{r}");
     // The globe is a new map of what it draws: the polygon layers that show (a hidden one left
     // out) on the map's basemap, without its web tiles, swipe or groups.
     let polygon = |l: &rustgis_map::Layer| l.geometry_type() == rustgis_data::GeometryType::Polygon;

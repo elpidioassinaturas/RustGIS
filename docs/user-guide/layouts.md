@@ -42,7 +42,8 @@ the maps; while one is open, its groups lead the Publish tab:
     times the area across) on the map itself, outlined the same way; `"none"` (a figure's
     default) leaves it out. The legend stops short of it; a frame with no room for a legend under
     it (or, under about 60 mm wide, beside the scale bar) leaves the legend out, with a warning.
-    Undo takes the globe's map away with the layout.
+    Undo takes the globe's map away with the layout; a globe map no layout shows any more (its
+    layout deleted) is replaced by the next sheet's rather than left beside it.
   - Every element is an ordinary one, to move or restyle afterwards. Running it again with
     another `profile` makes another layout of the same map.
 

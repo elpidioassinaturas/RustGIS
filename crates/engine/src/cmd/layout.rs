@@ -766,7 +766,27 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         Locator::None => None,
         Locator::Globe => {
             let src = s.map();
-            let name = numbered(&format!("{} Locator", src.name), |n| s.project.maps.iter().any(|x| x.name.eq_ignore_ascii_case(n)));
+            let base = format!("{} Locator", src.name);
+            // A locator an earlier sheet made that no layout shows any more (its layout deleted)
+            // is replaced, so sheets made again and again don't leave a trail of them; one still
+            // shown is kept, and the new one numbered beside it.
+            let shown = |n: &str| {
+                s.project
+                    .layouts
+                    .iter()
+                    .flat_map(|l| &l.elements)
+                    .any(|e| matches!(&e.kind, ElementKind::MapFrame { map, .. } if map.eq_ignore_ascii_case(n)))
+            };
+            let ours = |n: &str| {
+                n.strip_prefix(base.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.strip_prefix(' ').is_some_and(|k| k.parse::<u32>().is_ok()))
+            };
+            let orphan =
+                s.project.maps.iter().position(|x| x.projection.is_globe() && ours(&x.name) && !shown(&x.name) && x.name != src.name);
+            let name = match orphan.and_then(|i| s.project.maps.get(i)) {
+                Some(x) => x.name.clone(),
+                None => numbered(&base, |n| s.project.maps.iter().any(|x| x.name.eq_ignore_ascii_case(n))),
+            };
             // A new map of what the globe draws, not a clone of the whole map (every layer's
             // features): its basemap (the land and borders around the area), graticule and body,
             // and the map's own polygon layers that show, unlabelled: the land at a glance, no
@@ -793,7 +813,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             m.set_projection(rustgis_map::Projection::Globe);
             let globe = globe_scale(&m, center, side * 0.92);
             let name = m.name.clone();
-            s.project.maps.push(m);
+            match orphan.and_then(|i| s.project.maps.get_mut(i)) {
+                Some(old) => *old = m,
+                None => s.project.maps.push(m),
+            }
             Some((name, globe, FrameShape::Circle))
         }
         Locator::Inset => Some((s.map().name.clone(), round_scale(scale * fw / side * 4.0), FrameShape::Rectangle)),
