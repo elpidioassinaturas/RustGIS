@@ -2558,8 +2558,8 @@ fn publication_layouts_locate_their_area() {
     let ElementKind::MapFrame { map, shape, scale, extent_of, .. } = &inset.kind else { panic!() };
     assert!(map == &main && shape == &FrameShape::Rectangle && *scale > main_scale * 3.0 && extent_of.is_some(), "1:{scale}");
     s.run("layout.export", &json!({"path": dir.join("inset.png").display().to_string(), "dpi": 96})).unwrap();
-    // None asked, or a figure by default: no locator. The legend stays, the narrowest figure
-    // (90 mm) included: only a frame too narrow for it beside the scale bar leaves it out.
+    // None asked, or a figure by default: no locator, and the legend stays, the narrowest
+    // figure (90 mm) included: only a locator takes its room.
     for p in [json!({"extent": piaui, "locator": "none"}), json!({"extent": piaui, "profile": "figure-1col"})] {
         let r = s.run("layout.publication", &p).unwrap();
         let l = s.project.layouts.last().unwrap();
@@ -2581,6 +2581,7 @@ fn publication_layouts_locate_their_area() {
     s.run("layout.remove", &json!({"name": "Again"})).unwrap();
     let r = s.run("layout.publication", &json!({"extent": piaui, "name": "Again"})).unwrap();
     assert_eq!((s.project.maps.len(), r["locator"].as_str()), (before + 1, Some(first.as_str())));
+    assert!(r["warnings"].to_string().contains("which no layout showed, is replaced"), "{r}");
     let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
     assert!(s.project.maps.len() == before + 2 && r["locator"].as_str() != Some(first.as_str()), "{r}");
     // The globe is a new map of what it draws: the polygon layers that show (a hidden one left

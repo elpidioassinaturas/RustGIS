@@ -814,7 +814,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             let globe = globe_scale(&m, center, side * 0.92);
             let name = m.name.clone();
             match orphan.and_then(|i| s.project.maps.get_mut(i)) {
-                Some(old) => *old = m,
+                Some(old) => {
+                    *old = m;
+                    warnings.push(format!("the map '{name}', which no layout showed, is replaced by this sheet's globe"));
+                }
                 None => s.project.maps.push(m),
             }
             Some((name, globe, FrameShape::Circle))
@@ -871,18 +874,18 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // The scale bar's box, at the bottom right: the legend stops short of it (and so of the north
     // arrow above it, which is narrower), however narrow the frame.
     let (sw, sh, nh) = ((fw * 0.3).max(25.0), if sheet { 8.0 * k } else { 6.0 }, pitch(small_pt) + 0.5);
-    // Its corner, under the locator and beside the scale bar: one too small for a legend leaves
-    // it out, said, rather than drawing it over either.
+    // Its corner, at least 10 mm each way; under a locator, though, a corner shorter than that
+    // leaves the legend out, said, rather than drawing it over the locator.
     const MIN_LEGEND_MM: f64 = 10.0;
-    let (room_w, room_h) = (fw - left - right - sw - 2.0, fh - top - bottom - below_locator);
-    if ch > 0.0 && (room_w < MIN_LEGEND_MM || room_h < MIN_LEGEND_MM) {
-        let (why, or) = match (room_h < MIN_LEGEND_MM, below_locator > 0.0) {
-            (true, true) => ("below the locator", ", or set \"locator\": \"none\""),
-            (true, false) => ("in its height", ""),
-            (false, _) => ("beside the scale bar", ""),
-        };
-        warnings.push(format!("the frame leaves the legend no room {why}, so it is left out: give the map more room{or}"));
+    let room_w = (fw - left - right - sw - 2.0).max(MIN_LEGEND_MM);
+    let room_h = fh - top - bottom - below_locator;
+    if ch > 0.0 && below_locator > 0.0 && room_h < MIN_LEGEND_MM {
+        warnings.push(
+            "the frame leaves the legend no room below the locator, so it is left out: give the map more room, or set \"locator\": \"none\""
+                .into(),
+        );
     } else if ch > 0.0 {
+        let room_h = room_h.max(MIN_LEGEND_MM);
         let pad = 2.0;
         let (lw, lh) = ((cw + 2.0 * pad).min(fw * 0.45).min(room_w), (ch + 2.0 * pad).min(fh * 0.6).min(room_h));
         if cw + 2.0 * pad > lw || ch + 2.0 * pad > lh {
