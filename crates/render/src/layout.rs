@@ -334,24 +334,26 @@ fn finish_frame_map(mut img: crate::Rendered, ppp: f64) -> Pixmap {
 
 /// Expands layout text tokens: the page ones here, the map ones from the first frame.
 pub fn expand(t: &str, layout: &Layout, info: &PageInfo, frame: Option<(&Map, rustgis_map::Camera)>) -> String {
+    // The frame's scale, worked out once for both its forms below.
+    let scale = frame.map(|(m, cam)| m.ground_res_at(&cam) / rustgis_map::layout::PAPER_M_PER_PT);
+    // A layout with a decimal comma prints its scale with points between thousands: put in first,
+    // so a page or layout name holding "{scale}" isn't read as the token.
+    let t = match scale {
+        Some(scale) if layout.decimal_comma => {
+            t.replace("{scale}", &format!("1:{}", decimal(rustgis_map::graphics::thousands(scale), true)))
+        }
+        _ => t.to_string(),
+    };
     let t = t
         .replace("{page}", &info.page.max(1).to_string())
         .replace("{pages}", &info.pages.max(1).to_string())
         .replace("{pageName}", &info.page_name)
         .replace("{layout}", &layout.name);
     let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    // A layout with a decimal comma prints its scale with points between thousands.
-    let t = match frame {
-        Some((m, cam)) if layout.decimal_comma => {
-            let scale = m.ground_res_at(&cam) / rustgis_map::layout::PAPER_M_PER_PT;
-            t.replace("{scale}", &format!("1:{}", decimal(rustgis_map::graphics::thousands(scale), true)))
-        }
-        _ => t,
-    };
     let v = match frame {
         Some((m, cam)) => rustgis_map::graphics::TokenValues {
             map: m.name.clone(),
-            scale: m.ground_res_at(&cam) / rustgis_map::layout::PAPER_M_PER_PT,
+            scale: scale.unwrap_or(0.0),
             crs: m.projection.label(),
             layers: m.layers.iter().filter(|l| !l.graphics).count(),
             center: m.to_lonlat(cam.center).unwrap_or_default(),
@@ -1019,9 +1021,9 @@ pub fn frame_render_scale(map: &Map, center: Coord, scale: f64) -> f64 {
 /// drew. The basemap is left out, so the frame's background isn't counted. For keeping a
 /// layout's surrounds off what its map shows. `None` when the frame can't be drawn.
 ///
-/// The map itself is drawn, not a copy of it (every layer's features): its basemap is set aside
-/// for the drawing and put back, as is a label lock waiting to be filled, which the coarse drawing
-/// would otherwise fill.
+/// The map itself is drawn, not a copy of it (every layer's features): its basemap and graticule
+/// are set aside for the drawing and put back, however it ends, as is a label lock waiting to be
+/// filled, which the coarse drawing would otherwise fill.
 pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm: f64, cells: u32) -> Option<(u32, u32, Vec<bool>)> {
     if !(w_mm > 0.0 && h_mm > 0.0) {
         return None;
@@ -1029,14 +1031,31 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
     let (w, h) = (w_mm * PT_PER_MM, h_mm * PT_PER_MM);
     let ppp = f64::from(cells.clamp(8, 512)) / w.max(h);
     let view = View { width: w, height: h, pixels_per_point: ppp, camera: frame_camera(map, center, scale, 0.0, 0.0), sky: false };
-    let basemap = std::mem::replace(&mut map.basemap, rustgis_map::Basemap::Blank);
-    let lock = map.label_lock.take();
-    let drawn = crate::render(map, &view);
-    (map.basemap, map.label_lock) = (basemap, lock);
-    let pm = drawn?.pixmap;
+    // Put back when this ends, a panic in the drawing included.
+    struct Aside<'a> {
+        basemap: rustgis_map::Basemap,
+        graticule: bool,
+        lock: Option<Vec<(u32, usize)>>,
+        map: &'a mut Map,
+    }
+    impl Drop for Aside<'_> {
+        fn drop(&mut self) {
+            self.map.basemap = self.basemap;
+            self.map.graticule = self.graticule;
+            self.map.label_lock = self.lock.take();
+        }
+    }
+    let aside = Aside {
+        basemap: std::mem::replace(&mut map.basemap, rustgis_map::Basemap::Blank),
+        graticule: std::mem::replace(&mut map.graticule, false),
+        lock: map.label_lock.take(),
+        map,
+    };
+    let pm = crate::render(&mut *aside.map, &view)?.pixmap;
+    drop(aside);
     let (gw, gh) = (pm.width(), pm.height());
-    // Anything not the blank basemap's paper, which is pure opaque white with no graticule: a pale
-    // or translucent fill counts too (only a fill of that very white, invisible on it, doesn't).
+    // Anything not the blank basemap's paper, pure opaque white (the graticule set aside too): a
+    // pale or translucent fill counts (only a fill of that very white, invisible on it, doesn't).
     let drawn = pm.pixels().iter().map(|p| p.alpha() > 0 && (p.red(), p.green(), p.blue(), p.alpha()) != (255, 255, 255, 255)).collect();
     Some((gw, gh, drawn))
 }

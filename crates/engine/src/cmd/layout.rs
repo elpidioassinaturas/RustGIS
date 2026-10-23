@@ -955,6 +955,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // least of the map's drawing (its area in mm²) with no surround over another, a surround off
     // its own corner costing a hundredth of its area so that, all else equal, they stay where they
     // belong. There are four surrounds at most (locator, arrow, legend, scale), so 4⁴ = 256 picks.
+    const MIN_LEGEND_MM: f64 = 10.0;
     let n = surrounds.len();
     let mut corners: Vec<usize> = surrounds.iter().map(|s| s.3).collect();
     let mut best = f64::INFINITY;
@@ -963,12 +964,27 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         if pick.iter().enumerate().any(|(i, c)| pick.iter().take(i).any(|d| d == c)) {
             continue;
         }
-        let rects: Vec<(f64, f64, f64, f64)> = surrounds.iter().zip(&pick).map(|(&(_, w, h, _), &corner)| at(corner, w, h)).collect();
+        // Each as it will be laid out: the legend short of the surrounds beside and above or
+        // below it in this pick (down to 10 mm), so it isn't moved for an overlap its shortening
+        // avoids.
+        let other = |c: usize| surrounds.iter().zip(&pick).find(|(_, k)| **k == c).map(|(&(_, w, h, _), _)| (w, h));
+        let rects: Vec<(f64, f64, f64, f64)> = surrounds
+            .iter()
+            .zip(&pick)
+            .map(|(&(kind, w, h, _), &corner)| {
+                if kind != Surround::Legend {
+                    return at(corner, w, h);
+                }
+                let room_w = other(corner ^ 1).map_or(f64::INFINITY, |(ow, _)| fw - left - right - ow - 2.0);
+                let room_h = other(corner ^ 2).map_or(f64::INFINITY, |(_, oh)| fh - top - bottom - oh - e);
+                at(corner, w.min(room_w.max(MIN_LEGEND_MM)), h.min(room_h.max(MIN_LEGEND_MM)))
+            })
+            .collect();
         let mut cost: f64 = surrounds
             .iter()
             .zip(&pick)
             .zip(&rects)
-            .map(|((&(_, w, h, home), &corner), &r)| covered(r) * w * h + if corner == home { 0.0 } else { 0.01 * w * h })
+            .map(|((&(.., home), &corner), &r)| (covered(r) + if corner == home { 0.0 } else { 0.01 }) * r.2 * r.3)
             .sum();
         // Two surrounds over each other cost ten times their overlap, more than any data under
         // them: in a frame too small for them all, the corners that keep them apart win.
@@ -1013,7 +1029,6 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     }
     // The legend's corner, short of the surrounds beside and above or below it: one the locator
     // leaves too small for a legend leaves it out, said, rather than drawing it over the locator.
-    const MIN_LEGEND_MM: f64 = 10.0;
     let legend_at = corner_of(Surround::Legend).and_then(|(corner, w, h)| {
         let other = |c: usize| surrounds.iter().zip(&corners).find(|(_, k)| **k == c).map(|(&(kind, w, h, _), _)| (kind, w, h));
         let room_w = other(corner ^ 1).map_or(f64::INFINITY, |(_, ow, _)| fw - left - right - ow - 2.0);
