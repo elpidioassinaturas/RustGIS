@@ -2579,9 +2579,18 @@ fn publication_layouts_locate_their_area() {
     let r = s.run("layout.publication", &json!({"extent": piaui, "name": "Again"})).unwrap();
     let first = r["locator"].as_str().unwrap().to_string();
     s.run("layout.remove", &json!({"name": "Again"})).unwrap();
+    // Made anew, not kept: a polygon layer hidden meanwhile is gone from the reused map.
+    let (gone, gone_name) =
+        s.map().layers.iter().find(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon).map(|l| (l.id, l.name.clone())).unwrap();
+    let globe_has =
+        |s: &Session, name: &str| s.project.maps.iter().find(|m| m.name == first).unwrap().layers.iter().any(|l| l.name == name);
+    assert!(globe_has(&s, &gone_name));
+    s.map_mut().layer_mut(gone).unwrap().visible = false;
     let r = s.run("layout.publication", &json!({"extent": piaui, "name": "Again"})).unwrap();
     assert_eq!((s.project.maps.len(), r["locator"].as_str()), (before + 1, Some(first.as_str())));
     assert!(r["warnings"].to_string().contains("which no layout showed, is replaced"), "{r}");
+    assert!(!globe_has(&s, &gone_name), "the reused map is rebuilt");
+    s.map_mut().layer_mut(gone).unwrap().visible = true;
     let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
     assert!(s.project.maps.len() == before + 2 && r["locator"].as_str() != Some(first.as_str()), "{r}");
     // The globe is a new map of what it draws: the polygon layers that show (a hidden one left
