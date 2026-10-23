@@ -1136,6 +1136,9 @@ mod native {
                 match header.filter(|_| status == 206).and_then(content_range_total) {
                     Some(len) => {
                         range = Some((len.saturating_sub(n), len - 1));
+                        // The probe's byte read, so its connection goes back to the pool for the
+                        // next request; a body that won't read is left, the request goes on.
+                        let _ = resp.body_mut().with_config().limit(64).read_to_vec();
                         continue;
                     }
                     None => return Err(format!("{url}: {}", super::NO_RANGES).into()),
