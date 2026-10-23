@@ -1235,6 +1235,10 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
     let cube = cube_from(s, p)?;
     let steps = steps(cube.dates(), cube.period(), p)?;
     let date = |i: usize| cube.dates().get(i).copied().unwrap_or(f64::NAN);
+    // A date that can't be read would go to no year or month: said, not put in a group of its own.
+    if let Some(&i) = steps.iter().find(|&&i| !date(i).is_finite()) {
+        return Err(format!("the cube's date {} can't be read: give the dates (\"dates\")", i + 1));
+    }
     let part = |i: usize, f: &str| rustgis_data::time::format(date(i), f).parse::<u32>().unwrap_or(0);
     // Each step's group: its calendar year, its month, or the one group.
     let keys: Vec<u32> = steps
