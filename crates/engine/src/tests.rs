@@ -2558,10 +2558,13 @@ fn publication_layouts_locate_their_area() {
     let ElementKind::MapFrame { map, shape, scale, extent_of, .. } = &inset.kind else { panic!() };
     assert!(map == &main && shape == &FrameShape::Rectangle && *scale > main_scale * 3.0 && extent_of.is_some(), "1:{scale}");
     s.run("layout.export", &json!({"path": dir.join("inset.png").display().to_string(), "dpi": 96})).unwrap();
-    // None asked, or a figure by default: no locator.
+    // None asked, or a figure by default: no locator. The legend stays, the narrowest figure
+    // (90 mm) included: only a frame too narrow for it beside the scale bar leaves it out.
     for p in [json!({"extent": piaui, "locator": "none"}), json!({"extent": piaui, "profile": "figure-1col"})] {
         let r = s.run("layout.publication", &p).unwrap();
-        assert!(r["locator"].is_null() && s.project.layouts.last().unwrap().elements.iter().all(|e| e.name != "Locator"), "{p}");
+        let l = s.project.layouts.last().unwrap();
+        assert!(r["locator"].is_null() && l.elements.iter().all(|e| e.name != "Locator"), "{p}");
+        assert!(l.elements.iter().any(|e| e.name == "Legend Box"), "{p}: {r}");
     }
     let e = s.run("layout.publication", &json!({"extent": piaui, "locator": "moon"})).unwrap_err();
     assert!(e.contains("locator is"), "{e}");
