@@ -781,8 +781,16 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 n.strip_prefix(base.as_str())
                     .is_some_and(|rest| rest.is_empty() || rest.strip_prefix(' ').is_some_and(|k| k.parse::<u32>().is_ok()))
             };
-            let orphan =
-                s.project.maps.iter().position(|x| x.projection.is_globe() && ours(&x.name) && !shown(&x.name) && x.name != src.name);
+            // And made as this command makes them: no web tiles, only unlabelled polygon layers,
+            // so a globe map made by hand under that name is left alone.
+            let made_here = |x: &rustgis_map::Map| {
+                x.tiles.is_empty() && x.layers.iter().all(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon && !l.labels.enabled)
+            };
+            let orphan = s
+                .project
+                .maps
+                .iter()
+                .position(|x| x.projection.is_globe() && ours(&x.name) && !shown(&x.name) && x.name != src.name && made_here(x));
             let name = match orphan.and_then(|i| s.project.maps.get(i)) {
                 Some(x) => x.name.clone(),
                 None => numbered(&base, |n| s.project.maps.iter().any(|x| x.name.eq_ignore_ascii_case(n))),
@@ -818,6 +826,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     src.shows(l) && !l.is_raster() && l.source.is_none() && l.geometry_type() == rustgis_data::GeometryType::Polygon
                 })
                 .map(|l| {
+                    // (Sharing the rows: `Features` is copy-on-write, replaced just below.)
                     let mut layer = l.clone();
                     layer.dataset.features = l
                         .dataset
