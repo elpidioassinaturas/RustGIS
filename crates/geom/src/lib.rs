@@ -22,6 +22,29 @@ pub const MAX_LAT: f64 = 85.051_128_78;
 /// Screen pixel size assumed when converting resolution to a map scale (0.28 mm, OGC).
 pub const PIXEL_M: f64 = 0.000_28;
 
+/// Metres per international foot (not a US survey foot).
+pub const METRES_PER_FOOT: f64 = 0.3048;
+/// Metres per international mile.
+pub const METRES_PER_MILE: f64 = 1609.344;
+/// Square metres per international square foot.
+pub const SQUARE_METRES_PER_SQUARE_FOOT: f64 = 0.09290304;
+/// Square metres per international square mile.
+pub const SQUARE_METRES_PER_SQUARE_MILE: f64 = 2_589_988.110336;
+/// Square metres per international acre.
+pub const SQUARE_METRES_PER_ACRE: f64 = 4046.8564224;
+
+/// Metres per unit for a lowercase distance unit name. Callers choose defaults and normalize input.
+/// Feet are international feet, not US survey feet.
+pub fn distance_unit_metres(unit: &str) -> Option<f64> {
+    match unit {
+        "meters" => Some(1.0),
+        "feet" => Some(METRES_PER_FOOT),
+        "kilometers" => Some(1000.0),
+        "miles" => Some(METRES_PER_MILE),
+        _ => None,
+    }
+}
+
 /// A 2-D coordinate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Coord {

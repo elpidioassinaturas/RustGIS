@@ -17,6 +17,7 @@ mod picture;
 pub mod post;
 mod raster;
 pub mod report;
+mod stroke_paths;
 pub mod terrain;
 mod text;
 pub mod tile_mesh;
@@ -580,7 +581,7 @@ impl Ctx<'_> {
         pm.stroke_path(&path, p, &st, Transform::identity(), None);
     }
 
-    /// A line drawn as a layer's stacked strokes (`Layer::line_strokes`), bottom first, each
+    /// A line drawn as its stacked strokes (`Layer::strokes`), bottom first, each
     /// shifted sideways by its offset.
     fn stacked_line(&self, pm: &mut Pixmap, parts: &[Vec<Coord>], s: &Symbol, strokes: &[LineStroke]) {
         let mut pb = PathBuilder::new();
@@ -588,6 +589,10 @@ impl Ctx<'_> {
             self.ring_path(&mut pb, part, false);
         }
         let Some(path) = pb.finish() else { return };
+        self.stacked_path(pm, &path, s, strokes);
+    }
+
+    fn stacked_path(&self, pm: &mut Pixmap, path: &tiny_skia::Path, s: &Symbol, strokes: &[LineStroke]) {
         // Shifted once per offset: a casing and its core usually share one.
         let mut shifted: Vec<(f32, Option<tiny_skia::Path>)> = Vec::new();
         for st in strokes {
@@ -596,10 +601,10 @@ impl Ctx<'_> {
                 continue;
             }
             if st.offset != 0.0 && !shifted.iter().any(|(o, _)| *o == st.offset) {
-                shifted.push((st.offset, offset_path(&path, st.offset * self.ppp)));
+                shifted.push((st.offset, offset_path(path, st.offset * self.ppp)));
             }
             let drawn = match st.offset {
-                0.0 => Some(&path),
+                0.0 => Some(path),
                 o => shifted.iter().find(|(x, _)| *x == o).and_then(|(_, p)| p.as_ref()),
             };
             let Some(drawn) = drawn else { continue };
@@ -803,12 +808,14 @@ fn offset_polyline(pts: &[(f32, f32)], d: f32) -> Vec<(f32, f32)> {
         (-dy / l, dx / l)
     };
     let mut out = Vec::with_capacity(p.len() + 4);
-    let (Some(&[a, b]), Some(&[y, z])) = (p.first_chunk::<2>(), p.last_chunk::<2>()) else { return out };
-    let n = normal(a, b);
+    let (Some(&[a, b]), Some(&z)) = (p.first_chunk::<2>(), p.last()) else { return out };
+    // Carry the previous segment normal forward; each segment is evaluated once.
+    let mut n = normal(a, b);
     out.push((a.0 + n.0 * d, a.1 + n.1 * d));
     for w in p.windows(3) {
-        let [a, v, b] = [w.first(), w.get(1), w.get(2)].map(|x| x.copied().unwrap_or_default());
-        let (na, nb) = (normal(a, v), normal(v, b));
+        let [v, b] = [w.get(1), w.get(2)].map(|x| x.copied().unwrap_or_default());
+        let (na, nb) = (n, normal(v, b));
+        n = nb;
         let (sx, sy) = (na.0 + nb.0, na.1 + nb.1);
         let s2 = sx * sx + sy * sy;
         if s2 >= 0.25 {
@@ -820,7 +827,6 @@ fn offset_polyline(pts: &[(f32, f32)], d: f32) -> Vec<(f32, f32)> {
             out.push((v.0 + nb.0 * d, v.1 + nb.1 * d));
         }
     }
-    let n = normal(y, z);
     out.push((z.0 + n.0 * d, z.1 + n.1 * d));
     out
 }
@@ -1347,8 +1353,8 @@ fn visit_complete(
     Ok(result)
 }
 
-/// A label waiting to be placed: the label, its priority and its (layer id, row).
-type Candidate = (PlacedLabel, f64, (u32, usize));
+/// A label waiting to be placed: the label, its priority and its key.
+type Candidate = (PlacedLabel, f64, rustgis_map::LabelKey);
 
 /// Keep exactly the candidates the upstream placement limit can consider, with stable ties.
 fn compact_label_candidates(candidates: &mut Vec<Candidate>) {
@@ -1760,7 +1766,7 @@ pub fn gpu_may_turn(map: &Map, view: &View) -> bool {
             && map.swipe.is_none_or(|(id, _)| id != l.id)
             && l.aggregation.is_none()
             && !l.graphics
-            && l.line_strokes.is_empty()
+            && !l.has_strokes()
             && (l.extrusion.is_none() || view.camera.pitch != 0.0)
     })
 }
@@ -1785,7 +1791,7 @@ fn raise_labels(map: &Map, view: &View, candidates: &mut [Candidate]) {
     let flat = map.flat();
     let cam = view.camera;
     let (w, h) = (view.width, view.height);
-    for (l, _, (id, row)) in candidates.iter_mut() {
+    for (l, _, (id, row, _)) in candidates.iter_mut() {
         let Some(layer) = map.layer(*id).filter(|l| l.geometry_type() == GeometryType::Polygon) else { continue };
         let Some(x) = &layer.extrusion else { continue };
         let Some(m) = cam.try_to_map(f64::from(l.x), f64::from(l.y), w, h) else { continue };
@@ -2534,7 +2540,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
     if !display.locked {
         map.label_lock = None;
     }
-    let lock: Option<std::collections::HashSet<(u32, usize)>> = map.label_lock.as_ref().map(|v| v.iter().copied().collect());
+    let lock: Option<std::collections::HashSet<rustgis_map::LabelKey>> = map.label_lock.as_ref().map(|v| v.iter().copied().collect());
     let distance = viewing_distance(map.ground_res_at(&view.camera), view.height);
     // Graphics text: always drawn, and other labels keep clear of it.
     let mut fixed_labels: Vec<PlacedLabel> = Vec::new();
@@ -2640,7 +2646,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
         } else {
             Default::default()
         };
-        let mut highlights: Vec<(usize, Geometry, Symbol)> = Vec::new();
+        let mut highlights: Vec<(usize, Geometry, Symbol, Vec<LineStroke>)> = Vec::new();
         // The GPU mesh vertices the layer has left: a streamed layer's batches share them, so
         // one too dense to mesh goes to the CPU however it is split.
         let mut mesh_room = mesh::MAX_LAYER_VERTICES;
@@ -2725,7 +2731,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                 && layer.aggregation.is_none()
                 && layer.extrusion.is_none()
                 && !layer.graphics
-                && layer.line_strokes.is_empty()
+                && !layer.has_strokes()
                 && !upright.contains(&layer.id);
             // Lyon refuses degenerate geometry tiny-skia draws fine, and a layer too dense to mesh
             // (`MAX_LAYER_VERTICES`) is quicker splatted: collect_layer reports both, and the layer
@@ -2782,6 +2788,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                         effects::extrude(dest, &ctx, ds_ptr, &geoms, &rows, x, px_per_m, |r| layer.symbol(r));
                     }
                 } else {
+                    let mut stroke_paths = stroke_paths::Paths::default();
                     for (row, g) in drawn.iter().enumerate() {
                         let Some(g) = g else { continue };
                         if rows.get(row) != Some(&true) || !visible(&extents.get(row).copied().unwrap_or_else(|| g.extent())) {
@@ -2799,22 +2806,21 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                             }
                             continue;
                         }
-                        let sym = layer.symbol(row);
+                        // Its symbol, and the layer's stacked strokes or the feature's class's own.
+                        let (sym, strokes) = layer.style(row);
                         // A feature under a pixel across: blend its coverage into the pixels it touches
                         // (a dense layer seen whole is mostly these, and a path each is slow).
                         // Not stacked strokes: a splat would draw them unshifted, in one colour.
                         if globe.is_none()
                             && !layer.graphics
-                            && layer.line_strokes.is_empty()
+                            && strokes.is_empty()
                             && let Some(e) = extents.get(row)
                             && ctx.splat(dest, e, g, &sym)
                         {
                             continue;
                         }
                         match g {
-                            Geometry::Line(parts) if !layer.line_strokes.is_empty() && !layer.graphics => {
-                                ctx.stacked_line(dest, parts, &sym, &layer.line_strokes)
-                            }
+                            Geometry::Line(parts) if !strokes.is_empty() => stroke_paths.draw(&ctx, dest, parts, &sym, strokes),
                             _ => ctx.feature(dest, g, &sym),
                         }
                     }
@@ -2844,11 +2850,13 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                     // draw over it (the CPU path draws highlights over the layer).
                     if complete_source {
                         let rank = ds_ptr.features.get(*row).and_then(|f| selected_order.get(&f.id)).copied().unwrap_or(usize::MAX);
-                        highlights.push((rank, (**g).clone(), layer.symbol(*row)));
+                        let (symbol, strokes) = layer.style(*row);
+                        highlights.push((rank, (**g).clone(), symbol, strokes.to_vec()));
                     } else if gpu_done && mesh::collect_highlight(&mut cmds, g, &layer.symbol(*row), ctx.ppp, map_per_px).is_ok() {
                         // highlight tessellated into the scene, right after its layer
                     } else {
-                        ctx.highlight(&mut pm, g, &layer.symbol(*row), if layer.graphics { &[] } else { &layer.line_strokes });
+                        let (symbol, strokes) = layer.style(*row);
+                        ctx.highlight(&mut pm, g, &symbol, strokes);
                         cpu_dirty = true;
                     }
                 }
@@ -2885,8 +2893,8 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                     }
                 }
             }
-            // Each feature is labelled by the first label class whose clause takes it, Default last;
-            // that class draws it when shown, in range and on a field the layer has (#618).
+            // Each label class labels every feature its clause takes, as in ArcGIS Pro (#732), when
+            // shown, in range and on a field the layer has (#618).
             let label_fields: Vec<Option<usize>> = if labels.enabled && !display.paused {
                 labels.in_order().map(|c| ds_ptr.field_index(&c.field).filter(|_| c.visible && c.in_range(scale, distance))).collect()
             } else {
@@ -2897,7 +2905,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                 let lid = layer.id;
                 for (row, g) in geoms.iter().enumerate() {
                     let Some(g) = g else { continue };
-                    if rows.get(row) != Some(&true) || lock.as_ref().is_some_and(|k| !k.contains(&(lid, label_row(row)))) {
+                    if rows.get(row) != Some(&true) {
                         continue;
                     }
                     let Some(c) = g.label_point() else { continue };
@@ -2905,24 +2913,10 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                         continue;
                     }
                     let Some((x, y)) = ctx.screen(c) else { continue };
-                    // The clauses are read for the features in view only.
-                    let Some((ci, class)) = classes.class_of(ds_ptr, row) else { continue };
-                    let Some(fi) = label_fields.get(ci).copied().flatten() else { continue };
-                    let v = ds_ptr.value(row, fi);
-                    if v.is_null() {
-                        continue;
-                    }
-                    let text = v.to_string();
                     let is_point = g.kind() == GeometryType::Point;
                     let marker = if is_point { layer.symbol(row).size } else { 0.0 };
-                    let (dx, dy) = class.placement.offset(
-                        text::block_width(&text, class.size, class.bold),
-                        text::block_height(&text, class.size),
-                        marker,
-                        is_point,
-                    );
                     // Bigger polygons get priority.
-                    let pri = match g {
+                    let area = match g {
                         Geometry::Polygon(_) => {
                             let e = g.extent();
                             // (An extent of no number counts as none.)
@@ -2930,28 +2924,51 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                             if a.is_finite() { a.clamp(0.0, 1e8) } else { 0.0 }
                         }
                         _ => 0.0,
-                    } + (n_layers - li) as f64 * 1e9;
-                    label_candidates.push((
-                        PlacedLabel {
-                            text,
-                            x: x as f32 + dx,
-                            y: y as f32 + dy,
-                            size: class.size,
-                            color: class.color,
-                            halo: class.halo.then_some(halo_for(class.color)),
-                            bold: class.bold,
-                            icon: None,
-                            align: 0.0,
-                            framed: false,
-                            italic: false,
-                            spacing: 0.0,
-                            line_align: TextAlign::Left,
-                            angle: None,
-                            collide: Default::default(),
-                        },
-                        pri,
-                        (lid, label_row(row)),
-                    ));
+                    };
+                    // The clauses are read for the features in view only.
+                    for (ci, class) in classes.classes_of(ds_ptr, row) {
+                        // Locked, only the labels placed then: one class's, not every class's.
+                        if lock.as_ref().is_some_and(|k| !k.contains(&(lid, label_row(row), ci))) {
+                            continue;
+                        }
+                        let Some(fi) = label_fields.get(ci).copied().flatten() else { continue };
+                        let v = ds_ptr.value(row, fi);
+                        if v.is_null() {
+                            continue;
+                        }
+                        let text = v.to_string();
+                        let (dx, dy) = class.placement.offset(
+                            text::block_width(&text, class.size, class.bold),
+                            text::block_height(&text, class.size),
+                            marker,
+                            is_point,
+                        );
+                        // Layers above first, then the classes listed first (#732), then bigger
+                        // polygons: a class (ci ≤ MAX_LABEL_CLASSES, 1e9 each) never outweighs a
+                        // layer (1e12), nor an area (≤ 1e8) a class.
+                        let pri = (n_layers - li) as f64 * 1e12 - ci as f64 * 1e9 + area;
+                        label_candidates.push((
+                            PlacedLabel {
+                                text,
+                                x: x as f32 + dx,
+                                y: y as f32 + dy,
+                                size: class.size,
+                                color: class.color,
+                                halo: class.halo.then_some(halo_for(class.color)),
+                                bold: class.bold,
+                                icon: None,
+                                align: 0.0,
+                                framed: false,
+                                italic: false,
+                                spacing: 0.0,
+                                line_align: TextAlign::Left,
+                                angle: None,
+                                collide: Default::default(),
+                            },
+                            pri,
+                            (lid, label_row(row), ci),
+                        ));
+                    }
                 }
             }
             if complete_source && matches!(labels_to, Labels::Own | Labels::Turned(_)) {
@@ -3006,9 +3023,9 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                 composite(&mut pm, &target);
             }
         }
-        highlights.sort_by_key(|(rank, _, _)| *rank);
-        for (_, geometry, symbol) in highlights {
-            ctx.highlight(&mut pm, &geometry, &symbol, if layer.graphics { &[] } else { &layer.line_strokes });
+        highlights.sort_by_key(|(rank, ..)| *rank);
+        for (_, geometry, symbol, strokes) in highlights {
+            ctx.highlight(&mut pm, &geometry, &symbol, &strokes);
             cpu_dirty = true;
         }
     }
@@ -3018,7 +3035,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
     // Tile labels, after every layer's own.
     if lock.is_none() {
         for (i, (l, pri)) in tile_out.labels.into_iter().enumerate() {
-            label_candidates.push((l, pri - 1e13, (u32::MAX, i)));
+            label_candidates.push((l, pri - 1e13, (u32::MAX, i, 0)));
         }
     }
     if let Labels::Tilted(to, out) = &mut labels_to {
@@ -3032,7 +3049,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
             let (sx, sy) = to.camera.try_to_screen(m, tw, th).filter(|_| near)?;
             (sy as f32 > sky_y).then_some((sx as f32, sy as f32))
         };
-        let fixed = fixed_labels.into_iter().map(|l| (l, f64::MAX, (u32::MAX, usize::MAX)));
+        let fixed = fixed_labels.into_iter().map(|l| (l, f64::MAX, (u32::MAX, usize::MAX, 0)));
         for (mut l, pri, key) in fixed.chain(label_candidates) {
             turn_with(&mut l, &at);
             let Some((x, y)) = at(l.x, l.y) else { continue };
@@ -3615,8 +3632,8 @@ fn halo_for(text: Rgba) -> Rgba {
 struct Placement {
     labels: Vec<PlacedLabel>,
     unplaced: Vec<PlacedLabel>,
-    /// (layer id, row) of each placed label.
-    keys: Vec<(u32, usize)>,
+    /// The key of each placed label.
+    keys: Vec<rustgis_map::LabelKey>,
 }
 
 /// Greedy collision-free placement, highest priority first. Locked labels are all placed (they
@@ -3875,9 +3892,9 @@ mod tests {
         };
         // Two icons on the same spot collide even with no text; one far away doesn't.
         let cands = vec![
-            (label("", 50.0, Some(icon(50.0)), 0.0), 2.0, (u32::MAX, 0)),
-            (label("", 52.0, Some(icon(52.0)), 0.0), 1.0, (u32::MAX, 1)),
-            (label("", 150.0, Some(icon(150.0)), 0.0), 0.0, (u32::MAX, 2)),
+            (label("", 50.0, Some(icon(50.0)), 0.0), 2.0, (u32::MAX, 0, 0)),
+            (label("", 52.0, Some(icon(52.0)), 0.0), 1.0, (u32::MAX, 1, 0)),
+            (label("", 150.0, Some(icon(150.0)), 0.0), 0.0, (u32::MAX, 2, 0)),
         ];
         let placed = place_labels(cands, Vec::new(), 200.0, 40.0, false);
         assert_eq!(placed.labels.iter().map(|l| l.x).collect::<Vec<_>>(), vec![50.0, 150.0]);
@@ -3908,12 +3925,13 @@ mod tests {
         let a = PlacedLabel { y: 20.0, ..label("Upper", 100.0, None, 0.0) };
         let gap = text::block_height("Upper", 10.0) + 1.0;
         let b = PlacedLabel { y: 20.0 + gap, ..label("Lower", 100.0, None, 0.0) };
-        let placed = place_labels(vec![(a.clone(), 2.0, (u32::MAX, 0)), (b.clone(), 1.0, (u32::MAX, 1))], Vec::new(), 200.0, 80.0, false);
+        let placed =
+            place_labels(vec![(a.clone(), 2.0, (u32::MAX, 0, 0)), (b.clone(), 1.0, (u32::MAX, 1, 0))], Vec::new(), 200.0, 80.0, false);
         assert_eq!(texts(&placed), ["Upper"]);
         // Without padding they fit.
         let none = rustgis_tiles::Collide { text_padding: 0.0, ..Default::default() };
         let (a, b) = (PlacedLabel { collide: none, ..a }, PlacedLabel { collide: none, ..b });
-        let placed = place_labels(vec![(a, 2.0, (u32::MAX, 0)), (b, 1.0, (u32::MAX, 1))], Vec::new(), 200.0, 80.0, false);
+        let placed = place_labels(vec![(a, 2.0, (u32::MAX, 0, 0)), (b, 1.0, (u32::MAX, 1, 0))], Vec::new(), 200.0, 80.0, false);
         assert_eq!(texts(&placed), ["Upper", "Lower"]);
     }
 
@@ -3921,10 +3939,11 @@ mod tests {
     fn optional_text_and_icons_drop_alone() {
         use rustgis_tiles::Collide;
         // A word in the way of a station's name, not of its icon (to the left of it).
-        let blocker = || (label("Blocker", 100.0, None, 0.0), 9.0, (u32::MAX, 0));
+        let blocker = || (label("Blocker", 100.0, None, 0.0), 9.0, (u32::MAX, 0, 0));
         let station =
             |collide: Collide| PlacedLabel { collide, ..label("Station", 100.0, Some(icon_at(40.0, 20.0, 10.0, 10.0, None)), 0.0) };
-        let run = |collide: Collide| place_labels(vec![blocker(), (station(collide), 1.0, (u32::MAX, 1))], Vec::new(), 200.0, 40.0, false);
+        let run =
+            |collide: Collide| place_labels(vec![blocker(), (station(collide), 1.0, (u32::MAX, 1, 0))], Vec::new(), 200.0, 40.0, false);
         // Neither optional: the station isn't shown at all.
         let p = run(Collide::default());
         assert_eq!(p.labels.len(), 1);
@@ -3934,8 +3953,8 @@ mod tests {
         assert!(p.labels[1].text.is_empty() && p.labels[1].icon.is_some());
         // Its icon optional, and the icon in the way instead: the text shows on its own.
         let icon_blocked = vec![
-            (label("", 40.0, Some(icon_at(40.0, 20.0, 10.0, 10.0, None)), 0.0), 9.0, (u32::MAX, 0)),
-            (station(Collide { icon_optional: true, ..Default::default() }), 1.0, (u32::MAX, 1)),
+            (label("", 40.0, Some(icon_at(40.0, 20.0, 10.0, 10.0, None)), 0.0), 9.0, (u32::MAX, 0, 0)),
+            (station(Collide { icon_optional: true, ..Default::default() }), 1.0, (u32::MAX, 1, 0)),
         ];
         let p = place_labels(icon_blocked, Vec::new(), 200.0, 40.0, false);
         assert_eq!(p.labels.len(), 2);
@@ -3948,7 +3967,7 @@ mod tests {
         let ghost =
             PlacedLabel { collide: Collide { text_ignore_placement: true, ..Default::default() }, ..label("Ghost", 100.0, None, 0.0) };
         let p = place_labels(
-            vec![(ghost, 9.0, (u32::MAX, 0)), (label("Real", 100.0, None, 0.0), 1.0, (u32::MAX, 1))],
+            vec![(ghost, 9.0, (u32::MAX, 0, 0)), (label("Real", 100.0, None, 0.0), 1.0, (u32::MAX, 1, 0))],
             Vec::new(),
             200.0,
             40.0,
@@ -3961,7 +3980,7 @@ mod tests {
     fn labels_reaching_past_the_edge_are_placed() {
         let half_out = label("Edge of the map", 0.0, None, 0.0);
         let gone = label("Gone", -500.0, None, 0.0);
-        let p = place_labels(vec![(half_out, 1.0, (u32::MAX, 0)), (gone, 0.0, (u32::MAX, 1))], Vec::new(), 200.0, 40.0, false);
+        let p = place_labels(vec![(half_out, 1.0, (u32::MAX, 0, 0)), (gone, 0.0, (u32::MAX, 1, 0))], Vec::new(), 200.0, 40.0, false);
         assert_eq!(texts(&p), ["Edge of the map"]);
         assert!(p.unplaced.is_empty(), "a label wholly off the view isn't unplaced either");
     }
@@ -3975,7 +3994,7 @@ mod tests {
         let corner = PlacedLabel { x: 100.0 + w * 0.3, y: 100.0 - w * 0.3, ..label("Hi", 0.0, None, 0.0) };
         let across = PlacedLabel { x: 100.0 + w * 0.3, y: 100.0 + w * 0.3, ..label("Hi", 0.0, None, 0.0) };
         let p = place_labels(
-            vec![(turned, 3.0, (u32::MAX, 0)), (corner, 2.0, (u32::MAX, 1)), (across, 1.0, (u32::MAX, 2))],
+            vec![(turned, 3.0, (u32::MAX, 0, 0)), (corner, 2.0, (u32::MAX, 1, 0)), (across, 1.0, (u32::MAX, 2, 0))],
             Vec::new(),
             400.0,
             400.0,
@@ -3985,6 +4004,20 @@ mod tests {
         assert!(p.labels[1].y < 100.0);
     }
 
+    /// In a tilted view, a candidate the bands repeat (the same layer, row and class) is placed
+    /// once, but two classes' labels of one feature are two labels (#732).
+    #[test]
+    fn tilted_views_keep_each_class_label() {
+        let map = Map::new("Map");
+        let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 5000.0, bearing: 0.0, pitch: 30.0 };
+        let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let (a, b) = (label("Capitals", 100.0, None, 0.0), label("Default", 300.0, None, 0.0));
+        let texts =
+            |c: Vec<Candidate>| -> Vec<String> { place_tilted_labels(&map, &view, c, None).labels.into_iter().map(|l| l.text).collect() };
+        assert_eq!(texts(vec![(a.clone(), 2.0, (1, 0, 0)), (b.clone(), 1.0, (1, 0, 1))]), ["Capitals", "Default"]);
+        assert_eq!(texts(vec![(a, 2.0, (1, 0, 0)), (b, 1.0, (1, 0, 0))]), ["Capitals"], "a band's repeat");
+    }
+
     #[test]
     fn places_many_labels_quickly() {
         // A grid of 20,000 candidates, a third of them fitting: placed without testing each
@@ -3992,7 +4025,7 @@ mod tests {
         let cands: Vec<Candidate> = (0..20_000)
             .map(|i| {
                 let (x, y) = ((i % 200) as f32 * 10.0, (i / 200) as f32 * 10.0);
-                (PlacedLabel { x, y, ..label("ab", x, None, 0.0) }, -f64::from(i), (u32::MAX, i as usize))
+                (PlacedLabel { x, y, ..label("ab", x, None, 0.0) }, -f64::from(i), (u32::MAX, i as usize, 0))
             })
             .collect();
         let start = web_time::Instant::now();
@@ -4227,9 +4260,9 @@ mod tests {
         assert!(starfield(1e9).is_some_and(|t| t.width() == 2048));
     }
 
-    /// Each feature is labelled by the first label class whose clause takes it, Default last; a
-    /// hidden class keeps its features unlabelled, and a clause that no longer reads takes none
-    /// (#618).
+    /// Each label class labels every feature its clause takes, as in ArcGIS Pro (#732): a feature
+    /// two classes take gets a label from each, the class listed first placed first. A hidden
+    /// class labels none, and a clause that no longer reads takes none (#618).
     #[test]
     fn label_classes_label_their_features() {
         let mut m = Map::new("Map");
@@ -4250,17 +4283,38 @@ mod tests {
         let view = View { width: 800.0, height: 600.0, pixels_per_point: 1.0, camera, sky: false };
         let sizes = |m: &mut Map| {
             let mut v: Vec<(String, f32)> = render(m, &view).unwrap().labels.into_iter().map(|l| (l.text, l.size)).collect();
-            v.sort_by(|a, b| a.0.cmp(&b.0));
+            v.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
             v
         };
         let default = m.layer(id).unwrap().labels.default.size;
-        assert_eq!(sizes(&mut m), [("Lyon".to_string(), default), ("Paris".to_string(), 20.0)], "Paris is a capital, Lyon the rest");
-        // Hidden, the class still has Paris: it goes unlabelled, not to Default.
+        assert!(default < 20.0, "so Paris's labels sort Default first");
+        let both = [("Lyon".to_string(), default), ("Paris".to_string(), default)];
+        // Default takes Paris too, but its label sits where Capitals' does: Capitals, listed
+        // first, is placed and Default's collides.
+        assert_eq!(sizes(&mut m), [("Lyon".to_string(), default), ("Paris".to_string(), 20.0)], "Paris is a capital");
+        // Default below, Capitals above: both of Paris's labels fit.
+        m.layer_mut(id).unwrap().labels.default.placement = rustgis_map::LabelPlacement::Below;
+        m.layer_mut(id).unwrap().labels.classes[0].placement = rustgis_map::LabelPlacement::Above;
+        assert_eq!(
+            sizes(&mut m),
+            [("Lyon".to_string(), default), ("Paris".to_string(), default), ("Paris".to_string(), 20.0)],
+            "a feature two classes take gets a label from each"
+        );
+        // Locked with one of Paris's labels placed, it keeps that one only.
+        m.layer_mut(id).unwrap().labels.default.placement = rustgis_map::LabelPlacement::Above;
+        m.label_display.locked = true;
+        let placed = sizes(&mut m);
+        assert_eq!(m.label_lock.as_ref().map(Vec::len), Some(2));
+        m.layer_mut(id).unwrap().labels.default.placement = rustgis_map::LabelPlacement::Below;
+        assert_eq!(sizes(&mut m), placed, "Default's label of Paris wasn't placed when locked");
+        m.label_display.locked = false;
+        m.label_lock = None;
+        // Hidden, the class labels nothing; Default still labels Paris.
         m.layer_mut(id).unwrap().labels.classes[0].visible = false;
-        assert_eq!(sizes(&mut m), [("Lyon".to_string(), default)]);
-        // A clause that doesn't read takes no feature: both go to Default.
+        assert_eq!(sizes(&mut m), both);
+        // A clause that doesn't read takes no feature.
         capitals(m.layer_mut(id).unwrap(), "gone = 1");
-        assert_eq!(sizes(&mut m), [("Lyon".to_string(), default), ("Paris".to_string(), default)]);
+        assert_eq!(sizes(&mut m), both);
     }
 
     #[test]
@@ -4349,7 +4403,7 @@ mod tests {
         let one_line = 20.0 * 1.25;
         let (old_bottom, gap) = (150.0 + one_line, 2.0);
         let below = PlacedLabel { y: old_bottom + gap + one_line / 2.0, ..at("Below", false) };
-        let p = place_labels(vec![(below, 0.0, (1, 0))], vec![at("Atlantic\nOcean", false)], 400.0, 300.0, false);
+        let p = place_labels(vec![(below, 0.0, (1, 0, 0))], vec![at("Atlantic\nOcean", false)], 400.0, 300.0, false);
         assert!(p.labels.iter().all(|l| l.text != "Below"), "placed over the second line");
         // The selection frame goes round both lines.
         let mut pm = Pixmap::new(400, 300).unwrap();
@@ -5284,6 +5338,56 @@ mod tests {
     }
 
     #[test]
+    fn a_class_draws_its_own_stacked_strokes() {
+        // Two lines of two Unique Values classes: "road" has a black casing and a red core of its
+        // own, "path" takes the layer's single green stroke.
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        let mut d = Dataset::new("lines", GeometryType::Polyline, vec![Field::new("kind", FieldType::Text)]);
+        d.push(Some(Geometry::Line(vec![vec![Coord::new(-1.0, 0.3), Coord::new(1.0, 0.3)]])), vec![Value::Text("road".into())]);
+        d.push(Some(Geometry::Line(vec![vec![Coord::new(-1.0, -0.3), Coord::new(1.0, -0.3)]])), vec![Value::Text("path".into())]);
+        let id = m.add_dataset(d);
+        let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 1500.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
+        let colour = |r: &Rendered, y: u32| {
+            let p = r.pixmap.pixel(100, y).unwrap();
+            (p.red(), p.green(), p.blue())
+        };
+        let (black, red, green) = (Rgba::rgb(0, 0, 0), Rgba::rgb(255, 0, 0), Rgba::rgb(0, 160, 0));
+        let stroke = |c: Rgba, w: f32| rustgis_map::LineStroke { color: Some(c), width: Some(w), ..Default::default() };
+        let l = m.layer_mut(id).unwrap();
+        let s = Symbol::default_for(GeometryType::Polyline, 0);
+        l.renderer = rustgis_map::Renderer::Unique {
+            field: "kind".into(),
+            classes: vec![("road".into(), s), ("path".into(), s)],
+            other: s,
+            ramp: rustgis_map::Ramp::Ember,
+            class_labels: Default::default(),
+            other_label: None,
+            class_strokes: [("road".to_string(), vec![stroke(black, 9.0), stroke(red, 3.0)])].into_iter().collect(),
+            other_strokes: Vec::new(),
+        };
+        l.line_strokes = vec![stroke(green, 3.0)];
+        // 0.3° is about 22 px from the centre at this resolution.
+        let r = render(&mut m, &view).unwrap();
+        let (road, path) = ((0..100).find(|y| colour(&r, *y) == (255, 0, 0)), (100..200).find(|y| colour(&r, *y) == (0, 160, 0)));
+        let (Some(road), Some(path)) = (road, path) else { panic!("the road's red core and the path's green stroke draw") };
+        assert_eq!(colour(&r, road - 2), (0, 0, 0), "the road's casing shows around its core");
+        assert!((path - 1..=path + 3).all(|y| colour(&r, y) != (0, 0, 0)), "the path has no casing");
+        // Selected, the road keeps its own stack under the halo.
+        m.layer_mut(id).unwrap().selection = vec![0];
+        let r = render(&mut m, &view).unwrap();
+        assert_eq!(colour(&r, road + 1), (255, 0, 0));
+        // Without the layer's strokes, the path draws its symbol's single line; the road keeps its own.
+        m.layer_mut(id).unwrap().line_strokes.clear();
+        m.layer_mut(id).unwrap().selection.clear();
+        let r = render(&mut m, &view).unwrap();
+        assert_eq!(colour(&r, road + 1), (255, 0, 0));
+        assert_eq!(colour(&r, road - 2), (0, 0, 0));
+        assert!((100..200).all(|y| colour(&r, y) != (0, 160, 0)), "no green left");
+    }
+
+    #[test]
     fn features_under_a_pixel_still_show() {
         // A dense grid of tiny squares seen whole: each is splatted rather than filled as a path,
         // and the area still comes out the colour of their outlines.
@@ -5347,3 +5451,81 @@ mod stream_tests;
 
 #[cfg(test)]
 mod budget_tests;
+
+#[cfg(test)]
+mod offset_normal_tests {
+    use super::offset_polyline;
+
+    /// Reusing a normal must preserve the previous algorithm's exact output, including signed zero.
+    #[test]
+    fn reused_normals_match_reference_bits() {
+        let mut cases = vec![
+            vec![],
+            vec![(1.0, 2.0)],
+            vec![(0.0, 0.0), (0.0, 0.0)],
+            vec![(-0.0, 0.0), (10.0, -0.0)],
+            vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 0.0)],
+            vec![(0.0, 0.0), (0.0, 0.0), (0.00001, 0.0), (3.0, 4.0)],
+            vec![(0.0, 0.0), (0.001, 0.0), (0.00101, 0.0), (3.0, 4.0)],
+            vec![(0.0, 0.0), (10.0, 0.0), (0.01, 0.01), (-5.0, 8.0)],
+            vec![(f32::NAN, 0.0), (0.0, 0.0), (3.0, 4.0), (f32::INFINITY, 0.0)],
+            vec![(40_500_000.0, 3_500_000.0), (40_500_020.0, 3_500_040.0)],
+            vec![(-f32::MAX, 0.0), (f32::MAX, 1.0), (0.0, -f32::MAX)],
+        ];
+        for variant in 0..32 {
+            let path: Vec<_> = (0..80)
+                .map(|i| {
+                    let x = (i as f32 * 0.37 + variant as f32).sin() * 100.0;
+                    let y = (i as f32 * 0.13 - variant as f32).cos() * 100.0;
+                    (x, y)
+                })
+                .collect();
+            cases.push(path.iter().rev().copied().collect());
+            cases.push(path);
+        }
+        for (case, points) in cases.iter().enumerate() {
+            for d in [-12.0, -0.0, 0.0, 0.25, 9.0] {
+                let bits = |p: Vec<(f32, f32)>| p.into_iter().map(|(x, y)| (x.to_bits(), y.to_bits())).collect::<Vec<_>>();
+                assert_eq!(bits(offset_polyline(points, d)), bits(reference_offset_polyline(points, d)), "case={case} offset={d}");
+            }
+        }
+        println!("normal cases: {} paths x 5 offsets", cases.len());
+    }
+
+    /// Frozen pre-optimization oracle; keep independent of the optimized implementation.
+    fn reference_offset_polyline(pts: &[(f32, f32)], d: f32) -> Vec<(f32, f32)> {
+        let mut p: Vec<(f32, f32)> = Vec::with_capacity(pts.len());
+        for &q in pts.iter().filter(|q| q.0.is_finite() && q.1.is_finite()) {
+            if p.last().is_none_or(|l: &(f32, f32)| (l.0 - q.0).hypot(l.1 - q.1) > 1e-3) {
+                p.push(q);
+            }
+        }
+        // The unit normal to the right of a → b.
+        let normal = |a: (f32, f32), b: (f32, f32)| {
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let l = dx.hypot(dy);
+            (-dy / l, dx / l)
+        };
+        let mut out = Vec::with_capacity(p.len() + 4);
+        let (Some(&[a, b]), Some(&[y, z])) = (p.first_chunk::<2>(), p.last_chunk::<2>()) else { return out };
+        let n = normal(a, b);
+        out.push((a.0 + n.0 * d, a.1 + n.1 * d));
+        for w in p.windows(3) {
+            let [a, v, b] = [w.first(), w.get(1), w.get(2)].map(|x| x.copied().unwrap_or_default());
+            let (na, nb) = (normal(a, v), normal(v, b));
+            let (sx, sy) = (na.0 + nb.0, na.1 + nb.1);
+            let s2 = sx * sx + sy * sy;
+            if s2 >= 0.25 {
+                // The mitre: along the bisector, 2d / |na + nb|² times na + nb.
+                let k = 2.0 * d / s2;
+                out.push((v.0 + sx * k, v.1 + sy * k));
+            } else {
+                out.push((v.0 + na.0 * d, v.1 + na.1 * d));
+                out.push((v.0 + nb.0 * d, v.1 + nb.1 * d));
+            }
+        }
+        let n = normal(y, z);
+        out.push((z.0 + n.0 * d, z.1 + n.1 * d));
+        out
+    }
+}

@@ -414,6 +414,7 @@ fn every_tab_pane_and_dialog_renders() {
         ("ui.dialog", json!({"name": "selectByAttributes"})),
         ("ui.dialog", json!({"name": "goToXY"})),
         ("ui.dialog", json!({"name": "calculateField"})),
+        ("ui.connection", json!({"kind": "s3"})),
         ("ui.commandSearch", json!(null)),
         ("ui.about", json!(null)),
         ("ui.shortcuts", json!(null)),
@@ -1489,6 +1490,466 @@ fn a_service_is_listed_when_its_capabilities_land() {
     h.step();
 }
 
+#[test]
+fn connections_section_and_dialog() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let body = br#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink"><Service><Title>Local</Title></Service><Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="http://127.0.0.1/wms?"/></Get></HTTP></DCPType></GetMap></Request><Layer><CRS>EPSG:3857</CRS><Layer><Name>a</Name><Title>A</Title></Layer></Layer></Capability></WMS_Capabilities>"#;
+        for stream in listener.incoming().take(1) {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = s.write_all(body);
+        }
+    });
+    let mut h = harness();
+    h.state_mut().run("connection.new", json!({"kind":"wms","address":"https://w.example/wms","name":"State WMS","group":"Work"})).unwrap();
+    h.state_mut().run("ui.pane.sources", json!({})).unwrap();
+    h.step();
+    h.get_by_label("Work");
+    h.get_by_label("State WMS");
+    assert!(h.query_by_label("STAC APIs").is_none());
+    assert!(h.state_mut().run("ui.dialog", json!({"name":"newConnection"})).is_err());
+    h.state_mut().run("ui.connection", json!({"kind":"wms"})).unwrap();
+    assert_eq!(h.state().dialogs.open, Some("newConnection"));
+    let address = format!("http://{addr}/wms");
+    h.state_mut().ui.connection.name = "Local".into();
+    h.state_mut().ui.connection.address = address.clone();
+    h.step();
+    h.step();
+    h.get_by_label("Test").click();
+    for _ in 0..100 {
+        h.step();
+        if h.state().dialogs.info.as_ref().is_some_and(|s| s.contains("1 layers")) || h.state().dialogs.error.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(h.state().dialogs.error, None);
+    assert!(
+        h.state().dialogs.info.as_ref().is_some_and(|s| s.contains("Local: 1 layers")),
+        "info: {:?}, pending: {}",
+        h.state().dialogs.info,
+        h.state().ui.connection.test.is_some()
+    );
+    assert_eq!(h.state().session.connections.connections.len(), 1);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Save").click();
+    h.step();
+    assert_eq!(h.state().dialogs.open, None);
+    let c = h.state().session.connections.find("Local").unwrap();
+    assert_eq!(c.address, address);
+    let id = c.id.clone();
+    h.state_mut().run("ui.connection", json!({"id":"Local"})).unwrap();
+    assert_eq!(h.state().dialogs.open, Some("editConnection"));
+    assert_eq!(h.state().ui.connection.name, "Local");
+    h.state_mut().ui.connection.group = "Lab".into();
+    h.step();
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Save").click();
+    h.step();
+    let c = h.state().session.connections.find("Local").unwrap();
+    assert_eq!(c.group, "Lab");
+    assert_eq!(c.id, id);
+    h.step();
+    h.step();
+    h.get_by_label("Local").click_secondary();
+    // The menu settles over a few frames; clicking its first layout can miss "Remove".
+    for _ in 0..4 {
+        h.step();
+    }
+    h.get_by_label("Remove").click();
+    h.step();
+    assert!(h.state().session.connections.find("Local").is_none());
+}
+
+#[test]
+fn add_service_keeps_and_picks_connections() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let body = br#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink"><Service><Title>Local</Title></Service><Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="http://127.0.0.1/wms?"/></Get></HTTP></DCPType></GetMap></Request><Layer><CRS>EPSG:3857</CRS><Layer><Name>a</Name><Title>A</Title></Layer></Layer></Capability></WMS_Capabilities>"#;
+        for stream in listener.incoming().take(3) {
+            let mut stream = stream.unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf).unwrap();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            stream.write_all(body).unwrap();
+        }
+    });
+    let wait_for_listing = |h: &mut egui_kittest::Harness<'_, RustGisApp>| {
+        for _ in 0..100 {
+            h.step();
+            if h.state().ui.service.as_ref().is_some_and(|c| c.listing.is_some() || c.error.is_some() || c.failure.is_some()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let conn = h.state().ui.service.as_ref().unwrap();
+        assert_eq!(conn.error, None);
+        assert!(conn.failure.is_none());
+        assert_eq!(conn.listing.as_ref().unwrap()["layers"][0]["name"], "a");
+        h.step();
+    };
+    let mut h = harness();
+    let url = format!("http://{addr}/wms");
+    let other = h.state_mut().run("connection.new", json!({"kind":"wms","address":url,"name":"Other user"})).unwrap();
+    let other_id = other["id"].as_str().unwrap().to_string();
+    h.state_mut().run("ui.addService", json!({"url":url,"type":"wms"})).unwrap();
+    wait_for_listing(&mut h);
+    assert_eq!(h.state().session.connections.connections.len(), 1, "connecting never saves automatically");
+    assert_eq!(h.state().dialogs.connection, None);
+    h.get_by_label("Save as Connection").click();
+    h.step();
+    let same_address: Vec<_> = h.state().session.connections.connections.iter().filter(|c| c.address == url).collect();
+    assert_eq!(same_address.len(), 2, "an existing address is not a connection identity");
+    let saved = same_address.into_iter().find(|c| c.id != other_id).unwrap();
+    let saved_id = saved.id.clone();
+    assert_ne!(saved.name, other["name"].as_str().unwrap(), "the new connection has a unique default name");
+    assert_eq!(saved.kind, "wms");
+    assert_eq!(h.state().dialogs.connection.as_deref(), Some(saved_id.as_str()));
+    h.step();
+    assert!(h.query_by_label("Save as Connection").is_none());
+
+    h.state_mut().ui.service = None;
+    h.state_mut().run("ui.dialog", json!({"name":"addService"})).unwrap();
+    h.step();
+    h.step();
+    h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("Pick one…")).unwrap().click();
+    h.step();
+    h.get_by_label("Other user").click();
+    h.step();
+    assert_eq!(h.state().dialogs.connection.as_deref(), Some(other_id.as_str()));
+    assert_eq!(h.state().dialogs.text, url);
+    wait_for_listing(&mut h);
+    assert!(h.query_by_label("Save as Connection").is_none());
+
+    let edited = format!("{url}?x=1");
+    h.state_mut().dialogs.text = edited.clone();
+    h.state_mut().run("ui.addService", json!({"url":edited,"type":"wms"})).unwrap();
+    wait_for_listing(&mut h);
+    assert_eq!(h.state().dialogs.connection.as_deref(), Some(other_id.as_str()));
+    h.get_by_label("Save as Connection");
+    assert_eq!(h.state().session.connections.connections.len(), 2);
+    server.join().unwrap();
+}
+
+#[test]
+fn add_database_picks_and_keeps_connections() {
+    let mut h = harness();
+    let address = "postgres:host=db.example dbname=gis user=me";
+    let picked = h.state_mut().run("connection.new", json!({"kind":"postgres","address":address,"name":"Picked DB"})).unwrap();
+    let picked_id = picked["id"].as_str().unwrap().to_string();
+    h.state_mut().run("ui.dialog", json!({"name":"addDatabase"})).unwrap();
+    h.step();
+    h.step();
+    h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("Pick one…")).unwrap().click();
+    h.step();
+    h.get_by_label("Picked DB").click();
+    h.step();
+    assert_eq!(h.state().dialogs.a, address);
+    assert_eq!(h.state().dialogs.connection.as_deref(), Some(picked_id.as_str()));
+    assert!(h.state().dialogs.b.is_empty(), "picking a connection never fills the password");
+    // Simulate a successful List Tables without needing a database server.
+    h.state_mut().dialogs.listed = Some(address.into());
+    h.step();
+    assert!(h.query_by_label("Save as Connection").is_none());
+
+    // The same address entered by hand is still a new connection.
+    h.state_mut().dialogs.connection = None;
+    h.step();
+    h.get_by_label("Save as Connection").click();
+    h.step();
+    let same_address: Vec<_> = h.state().session.connections.connections.iter().filter(|c| c.address == address).collect();
+    assert_eq!(same_address.len(), 2);
+    let saved = same_address.into_iter().find(|c| c.id != picked_id).unwrap();
+    let saved_id = saved.id.clone();
+    assert_eq!(saved.kind, "postgres");
+    assert_ne!(saved.name, "Picked DB");
+    assert_eq!(h.state().dialogs.connection.as_deref(), Some(saved_id.as_str()));
+    h.step();
+    assert!(h.query_by_label("Save as Connection").is_none());
+    h.state_mut().dialogs.connection = None;
+    h.state_mut().dialogs.listed = None;
+    h.step();
+    assert!(h.query_by_label("Save as Connection").is_none(), "an unlisted endpoint cannot be kept");
+}
+
+#[test]
+fn stac_dialog_keeps_and_picks_connections() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let body = br#"{"collections":[{"id":"c1","title":"C"}]}"#;
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut buf = [0u8; 2048];
+        let _ = stream.read(&mut buf).unwrap();
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
+            .unwrap();
+        stream.write_all(body).unwrap();
+    });
+    let mut h = harness();
+    let api = format!("http://{addr}/stac");
+    h.state_mut().ui.stac.api = api.clone();
+    h.state_mut().run("ui.dialog", json!({"name":"stac"})).unwrap();
+    h.step();
+    h.get_by_label("Collections").click();
+    for _ in 0..100 {
+        h.step();
+        if !h.state().ui.stac.collections.is_empty() || h.state().ui.stac.error.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(h.state().ui.stac.error, None);
+    assert_eq!(h.state().ui.stac.collections, vec![("c1".to_string(), "C".to_string())]);
+    assert_eq!(h.state().ui.stac.listed, api);
+    assert!(h.state().session.connections.connections.is_empty(), "listing never saves automatically");
+    h.step();
+    h.get_by_label("Save as Connection").click();
+    h.step();
+    assert_eq!(h.state().session.connections.connections.len(), 1);
+    let saved = &h.state().session.connections.connections[0];
+    let saved_id = saved.id.clone();
+    assert_eq!(saved.kind, "stac");
+    assert_eq!(saved.address, api);
+    assert_eq!(h.state().ui.stac.connection.as_deref(), Some(saved_id.as_str()));
+    h.step();
+    assert!(h.query_by_label("Save as Connection").is_none());
+
+    h.state_mut().run("connection.edit", json!({"id":saved_id,"name":"Picked STAC"})).unwrap();
+    h.state_mut().ui.stac.api = "https://other.example/stac".into();
+    h.step();
+    h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("Other")).unwrap().click();
+    h.step();
+    h.get_by_label("Picked STAC").click();
+    h.step();
+    assert_eq!(h.state().ui.stac.api, api);
+    assert!(h.state().ui.stac.collections.is_empty(), "the existing combo resets collections when picking a saved API");
+    assert_eq!(h.state().ui.stac.connection.as_deref(), Some(saved_id.as_str()));
+    server.join().unwrap();
+}
+
+#[test]
+fn connections_postgres_requires_an_address() {
+    use egui::accesskit::Role;
+    let mut h = harness();
+    for address in ["", " \t "] {
+        h.state_mut().run("ui.connection", json!({"kind":"postgres"})).unwrap();
+        h.state_mut().ui.connection.address = address.into();
+        h.step();
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Save").click();
+        h.step();
+        assert_eq!(h.state().dialogs.open, Some("newConnection"));
+        assert!(h.state().dialogs.error.is_some());
+        assert!(h.state().session.connections.connections.is_empty());
+        h.get_by_role_and_label(Role::Button, "Test").click();
+        h.step();
+        assert!(h.state().dialogs.error.as_ref().unwrap().contains("isn't a postgres address"));
+        assert!(h.state().dialogs.info.is_none());
+        assert!(h.state().session.connections.connections.is_empty());
+    }
+    let address = "host=127.0.0.1 port=9 dbname=connection_form user=u";
+    h.state_mut().ui.connection.name = "Bare PostgreSQL".into();
+    h.state_mut().ui.connection.address = address.into();
+    h.step();
+    h.get_by_role_and_label(Role::Button, "Save").click();
+    h.step();
+    assert_eq!(h.state().dialogs.open, None);
+    let connection = h.state().session.connections.find("Bare PostgreSQL").unwrap();
+    let id = connection.id.clone();
+    assert_eq!(connection.address, format!("postgres:{address}"));
+    h.state_mut().run("ui.connection", json!({"id":id})).unwrap();
+    h.state_mut().ui.connection.address = "  ".into();
+    h.step();
+    h.step();
+    h.get_by_role_and_label(Role::Button, "Save").click();
+    h.step();
+    assert_eq!(h.state().dialogs.open, Some("editConnection"));
+    assert!(h.state().dialogs.error.is_some());
+    assert_eq!(h.state().session.connections.find(&id).unwrap().address, format!("postgres:{address}"));
+}
+
+#[test]
+fn connections_test_feedback_tracks_edited_inputs() {
+    use egui::accesskit::Role;
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("http://{}/stac", listener.local_addr().unwrap());
+    let (started, requests) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let bodies: [&[u8]; 3] =
+            [br#"{"collections":[{"id":"old","title":"Old"}]}"#, br#"{"collections":[{"id":"current","title":"Current"}]}"#, b"not JSON"];
+        for body in bodies {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0; 2048];
+            assert!(stream.read(&mut buf).unwrap() > 0, "the client must send a request before the response is released");
+            if started.send(()).is_err() || wait.recv_timeout(Duration::from_secs(5)).is_err() {
+                break;
+            }
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            stream.write_all(body).unwrap();
+        }
+    });
+    let mut h = harness();
+    h.state_mut().run("ui.connection", json!({"kind":"stac"})).unwrap();
+    h.state_mut().ui.connection.name = "Endpoint".into();
+    h.state_mut().ui.connection.address = address.clone();
+    h.step();
+    h.step();
+    h.get_by_role_and_label(Role::Button, "Test").click();
+    h.step();
+    requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    let old = h.state().ui.connection.test.as_ref().unwrap().1.clone();
+    h.query_all_by_role(Role::TextInput).find(|n| n.value().as_deref() == Some(&address)).unwrap().focus();
+    h.step();
+    h.key_press(egui::Key::End);
+    h.event(egui::Event::Text("/changed".into()));
+    h.step();
+    assert_eq!(h.state().ui.connection.address, format!("{address}/changed"));
+    assert!(h.state().ui.connection.test.is_none(), "editing must discard the pending test");
+    assert_eq!(h.state().dialogs.info, None);
+    release.send(()).unwrap();
+    for _ in 0..250 {
+        h.step();
+        if old.lock().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(old.lock().unwrap().is_some(), "the discarded request must actually finish");
+    assert_eq!(h.state().dialogs.info, None);
+    assert_eq!(h.state().dialogs.error, None);
+
+    // A new test can run immediately; editing also clears its completed success or failure.
+    for succeeds in [true, false] {
+        h.get_by_role_and_label(Role::Button, "Test").click();
+        h.step();
+        requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        release.send(()).unwrap();
+        for _ in 0..250 {
+            h.step();
+            if h.state().ui.connection.test.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(h.state().ui.connection.test.is_none());
+        if succeeds {
+            assert!(h.state().dialogs.info.as_ref().unwrap().contains("1 collections"));
+            assert_eq!(h.state().dialogs.error, None);
+        } else {
+            assert!(h.state().dialogs.error.is_some());
+            assert_eq!(h.state().dialogs.info, None);
+        }
+        let name = h.state().ui.connection.name.clone();
+        h.query_all_by_role(Role::TextInput).find(|n| n.value().as_deref() == Some(&name)).unwrap().focus();
+        h.step();
+        h.key_press(egui::Key::End);
+        h.event(egui::Event::Text(" changed".into()));
+        h.step();
+        assert_eq!(h.state().ui.connection.name, format!("{name} changed"));
+        assert_eq!(h.state().dialogs.info, None);
+        assert_eq!(h.state().dialogs.error, None);
+    }
+    server.join().unwrap();
+    assert!(h.state().session.connections.connections.is_empty());
+}
+
+/// Expanding a connection lists its datasets, a click selects and Add Selected adds each as its
+/// own undo step, and Refresh forgets the list.
+#[test]
+fn connections_tree_browses_and_adds() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let body = format!(
+            r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink"><Service><Title>Local</Title></Service><Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="http://{addr}/wms?"/></Get></HTTP></DCPType></GetMap></Request><Layer><CRS>EPSG:3857</CRS><Layer><Name>a</Name><Title>A</Title></Layer><Layer><Name>b</Name><Title>B</Title></Layer></Layer></Capability></WMS_Capabilities>"#
+        );
+        for stream in listener.incoming().take(1) {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = s.write_all(body.as_bytes());
+        }
+    });
+    // Frames 0.05 s apart, so two clicks fall within egui's double-click delay.
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 860.0)).with_max_steps(64).with_step_dt(0.05).build_ui_state(
+        |ui, app: &mut RustGisApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        RustGisApp::with_sample(),
+    );
+    h.state_mut().run("connection.new", json!({"kind":"wms","address":format!("http://{addr}/wms"),"name":"Local"})).unwrap();
+    h.state_mut().run("ui.pane.sources", json!({})).unwrap();
+    h.step();
+    assert!(h.query_by_label("A").is_none(), "nothing is listed before the connection is opened");
+    h.get_by_label("Local").click();
+    for _ in 0..100 {
+        h.step();
+        if h.query_by_label("A").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(h.query_by_label("A").is_some(), "the layers are listed under the connection");
+    let before = h.state().session.map().tiles.len();
+    h.get_by_label("A").click();
+    h.step();
+    h.get_by_label("B").click();
+    h.step();
+    assert_eq!(h.state().ui.connection_tree.picks.len(), 2);
+    // The selection is added from a dataset's menu: each layer is its own undo step.
+    h.get_by_label("B").click_secondary();
+    h.step();
+    h.step();
+    h.get_by_label("Add Selected (2)").click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().session.map().tiles.len(), before + 2);
+    assert!(h.state().ui.connection_tree.picks.is_empty());
+    h.state_mut().run("edit.undo", json!(null)).unwrap();
+    // Each layer was its own step: one undo takes one layer.
+    assert_eq!(h.state().session.map().tiles.len(), before + 1);
+    h.state_mut().run("edit.undo", json!(null)).unwrap();
+    assert_eq!(h.state().session.map().tiles.len(), before);
+    // A double-click adds the one dataset, leaving nothing selected.
+    // (egui counts clicks in a row: let the earlier ones age out of its triple-click window first.)
+    for _ in 0..14 {
+        h.step();
+    }
+    h.get_by_label("A").click();
+    h.step();
+    h.get_by_label("A").click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().session.map().tiles.len(), before + 1);
+    assert!(h.state().ui.connection_tree.picks.is_empty());
+    h.state_mut().run("edit.undo", json!(null)).unwrap();
+    assert_eq!(h.state().session.map().tiles.len(), before);
+    // Recent now lists the added layer under "Local" too, above the connection's own row.
+    h.query_all_by_label("Local").last().unwrap().click_secondary();
+    h.step();
+    h.get_by_label("Refresh").click();
+    h.step();
+    h.step();
+    assert!(h.query_by_label("A").is_none(), "refreshing forgets the list until it is read again");
+}
+
 /// Save in the web app (issue #197): the browser has no save dialog, so the first Save and every
 /// Save As ask for the file name, and Save then downloads under it; an opened file keeps its name.
 #[test]
@@ -2399,4 +2860,39 @@ fn map_and_layout_tabs_rename_from_their_menus() {
     let p = &h.state().session.project;
     assert_eq!(p.maps[0].name, "Renamed Map");
     assert_eq!(p.layouts.last().map(|l| l.name.as_str()), Some("Renamed Layout"));
+}
+
+#[test]
+fn line_strokes_editor_edits_one_class() {
+    use rustgis_engine::map::symbology::ClassRef;
+    let mut h = harness();
+    let app = h.state_mut();
+    app.run("layer.select", json!({"layer": "Rivers"})).unwrap();
+    app.run("layer.symbology", json!({"layer": "Rivers", "type": "unique", "field": "scalerank"})).unwrap();
+    let pair = json!([{"color": "#000000", "width": 6}, {"color": "#FFFFFF", "width": 2}]);
+    app.run("layer.lineStrokes", json!({"layer": "Rivers", "value": "1", "strokes": pair})).unwrap();
+    app.run("ui.pane.symbology", json!({})).unwrap();
+    h.step();
+    h.step();
+    let class_strokes = |h: &egui_kittest::Harness<'_, RustGisApp>, c: &ClassRef| {
+        h.state().session.map().layer_by_name("Rivers").unwrap().renderer.class_strokes(c).unwrap().len()
+    };
+    // The layer's strokes first; class 1 is marked as having its own.
+    h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("All classes")).unwrap().click();
+    h.step();
+    h.get_by_label("1 •").click_accesskit();
+    h.step();
+    h.step();
+    assert!(h.query_by_label("Stroke 2").is_some(), "class 1's two strokes are listed");
+    // Back to the layer's strokes: the class borrows them, and Add Stroke gives it its own again.
+    h.get_by_label("Use the Layer's Strokes").click_accesskit();
+    h.step();
+    h.step();
+    assert_eq!(class_strokes(&h, &ClassRef::Value("1".into())), 0);
+    assert!(h.query_by_label_contains("drawn with the layer's strokes").is_some());
+    h.get_by_label("Add Stroke").click_accesskit();
+    h.step();
+    h.step();
+    assert_eq!(class_strokes(&h, &ClassRef::Value("1".into())), 1);
+    assert!(h.state().session.map().layer_by_name("Rivers").unwrap().line_strokes.is_empty(), "the layer's own are untouched");
 }

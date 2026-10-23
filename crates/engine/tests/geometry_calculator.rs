@@ -162,3 +162,31 @@ fn polygons_across_the_antimeridian_are_measured() {
         assert!(s.map().layer(id).unwrap().dataset.value(0, 0).as_f64().unwrap() > 0.0);
     }
 }
+
+#[test]
+fn area_in_square_feet_is_43560_per_acre() {
+    let ring = vec![Coord::new(0.0, 0.0), Coord::new(0.001, 0.0), Coord::new(0.001, 0.001), Coord::new(0.0, 0.001), Coord::new(0.0, 0.0)];
+    let (mut s, id) = session(GeometryType::Polygon, vec![Some(Geometry::Polygon(vec![vec![ring]]))]);
+    let mut p = json!({"layer": id, "field": "result", "property": "area", "unit": "ac", "scope": "all", "overwrite": true});
+    s.run("edit.calculateGeometry", &p).unwrap();
+    let acres = s.map().layer(id).unwrap().dataset.value(0, 0).as_f64().unwrap();
+    p["unit"] = json!("ft2");
+    s.run("edit.calculateGeometry", &p).unwrap();
+    let feet = s.map().layer(id).unwrap().dataset.value(0, 0).as_f64().unwrap();
+    assert!((feet / acres - 43_560.0).abs() < 1e-8);
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.map().layer(id).unwrap().dataset.value(0, 0).as_f64(), Some(acres));
+}
+
+#[test]
+fn area_in_square_miles_is_one_per_640_acres() {
+    let ring = vec![Coord::new(0.0, 0.0), Coord::new(1.0, 0.0), Coord::new(1.0, 1.0), Coord::new(0.0, 1.0), Coord::new(0.0, 0.0)];
+    let (mut s, id) = session(GeometryType::Polygon, vec![Some(Geometry::Polygon(vec![vec![ring]]))]);
+    let mut p = json!({"layer": id, "field": "result", "property": "area", "unit": "ac", "scope": "all", "overwrite": true});
+    s.run("edit.calculateGeometry", &p).unwrap();
+    let acres = s.map().layer(id).unwrap().dataset.value(0, 0).as_f64().unwrap();
+    p["unit"] = json!("mi2");
+    s.run("edit.calculateGeometry", &p).unwrap();
+    let miles = s.map().layer(id).unwrap().dataset.value(0, 0).as_f64().unwrap();
+    assert!((acres / miles - 640.0).abs() < 1e-10);
+}

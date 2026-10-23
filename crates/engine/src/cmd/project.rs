@@ -14,7 +14,7 @@ pub fn commands() -> Vec<C> {
         C::new("project.new", "New Project", "Project", new).key("Mod+N").view().params(r#"{"name"?: string}"#),
         C::new("project.sample", "World Atlas Sample", "Project", sample).view(),
         C::new("project.open", "Open Project", "Project", open).key("Mod+O").view().params(r#"{"path": string}"#),
-        C::new("project.openText", "Open Project (from text)", "Project", open_text).view().params(r#"{"text": project JSON, "fileName"?: string}"#),
+        C::new("project.openText", "Open Project (from text)", "Project", open_text).view().params(r#"{"text": project JSON, "fileName"?: string, "package"?: "true for package contents: never restore saved layer secrets"}"#),
         C::new("project.save", "Save Project", "Project", save).key("Mod+S").view().params(r#"{"path"?: string}"#),
         C::new("project.saveAs", "Save Project As", "Project", save_as).key("Mod+Shift+S").view().params(r#"{"path": string}"#),
         C::new("project.rename", "Rename Project", "Project", rename).params(r#"{"name": string}"#),
@@ -84,7 +84,7 @@ fn open(s: &mut Session, p: &Value) -> CmdResult {
         if bytes.len() as u64 > MAX_PACKAGE {
             return Err("the package is too large".into());
         }
-        Project::from_json(&super::items::package_text(&bytes)?)?
+        Project::from_import_json(&super::items::package_text(&bytes)?)?
     } else {
         Project::load(&path)?
     };
@@ -95,12 +95,13 @@ fn open(s: &mut Session, p: &Value) -> CmdResult {
     }
     s.path = if is_package { None } else { Some(path) };
     s.notify(format!("Opened {}", s.project.name), false);
+    super::connections::note_waiting(s);
     Ok(Value::Null)
 }
 
 fn open_text(s: &mut Session, p: &Value) -> CmdResult {
     let text = super::ps(p, "text").ok_or("text is required")?;
-    let proj = Project::from_json(text)?;
+    let proj = if super::b(p, "package").unwrap_or(false) { Project::from_import_json(text)? } else { Project::from_json(text)? };
     reset(s, proj);
     // The browser opens files by name and contents: the name still names the project.
     if let Some(file) = super::ps(p, "fileName") {
@@ -108,17 +109,21 @@ fn open_text(s: &mut Session, p: &Value) -> CmdResult {
     }
     s.path = None;
     s.notify(format!("Opened {}", s.project.name), false);
+    super::connections::note_waiting(s);
     Ok(Value::Null)
 }
 
 fn write(s: &mut Session, path: PathBuf) -> CmdResult {
     let path = if path.extension().is_none() { path.with_extension(crate::project::EXTENSION) } else { path };
-    s.project.save(&path)?;
+    let stripped = s.project.save(&path)?;
     s.dirty = false;
     s.edit_counts.clear();
     s.notify(format!("Saved {}", path.display()), false);
+    if stripped > 0 {
+        s.notify(format!("{stripped} layer address(es) were saved without their keys, tokens or passwords: after RustGIS closes, add those layers again to give them"), false);
+    }
     s.path = Some(path.clone());
-    Ok(json!({"path": path.display().to_string()}))
+    Ok(json!({"path": path.display().to_string(), "stripped": stripped}))
 }
 
 /// Names the project after its file, as Save As does, so a renamed or copied file opens under

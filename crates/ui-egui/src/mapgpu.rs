@@ -1648,6 +1648,12 @@ mod tests {
         assert!(star.iter().any(|p| (p[1] + 1.2).abs() < 1e-6), "star top point");
     }
 
+    /// GPU tests run one at a time because Mesa EGL can stall when entered concurrently.
+    fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// A headless wgpu render state (the egui_kittest recipe). `None` on hosts without any
     /// adapter — CI without a GPU skips these tests.
     fn headless_render_state() -> Option<RenderState> {
@@ -1697,6 +1703,7 @@ mod tests {
 
     #[test]
     fn gpu_renderer_constructs_and_uploads_headless() {
+        let _serial = one_at_a_time();
         let Some(rs) = headless_render_state() else { return };
         let r = GpuMapRenderer::new(&rs);
         // A tiny scene uploads: one triangle, one marker instance, one CPU image.
@@ -1863,6 +1870,7 @@ mod tests {
     /// frame is warped from flat bands (resampled, so a thin line's colour spreads), its GPU one
     /// drawn in perspective directly.
     fn assert_parity_within(name: &str, build: impl Fn() -> Map, view: &View, backends: wgpu::Backends, outliers: usize) {
+        let _serial = one_at_a_time();
         let mut gm = build();
         let Some(gpu) = gpu_render_offscreen_on(&mut gm, view, backends) else { return }; // no adapter: skip
         let mut cm = build();
@@ -2314,6 +2322,7 @@ mod tests {
     /// A tile picture is uploaded once, and drawn again from its texture by the next scenes.
     #[test]
     fn tile_textures_are_kept_across_scenes() {
+        let _serial = one_at_a_time();
         let Some(rs) = headless_render_state() else { return };
         let r = GpuMapRenderer::new(&rs);
         let mut pm = rustgis_engine::render::Pixmap::new(4, 4).expect("pixmap");
@@ -2352,6 +2361,7 @@ mod tests {
     /// one the frame draws, and a picture the tile cache lets go frees its layer (#635).
     #[test]
     fn live_tile_pictures_are_pooled_paced_and_bounded() {
+        let _serial = one_at_a_time();
         let Some(rs) = headless_render_state() else { return };
         let picture = |c: u8| {
             let mut pm = rustgis_engine::render::Pixmap::new(256, 256).expect("pixmap");
@@ -2405,6 +2415,7 @@ mod tests {
     /// frame doesn't draw from, rather than drawing nothing (#635).
     #[test]
     fn live_tiles_of_another_size_take_back_budget() {
+        let _serial = one_at_a_time();
         let Some(rs) = headless_render_state() else { return };
         let picture = |side: u32, c: u8| {
             let mut pm = rustgis_engine::render::Pixmap::new(side, side).expect("pixmap");

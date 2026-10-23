@@ -165,6 +165,58 @@ fn connection_management_requires_fresh_approval_but_can_run_in_app() {
 }
 
 #[test]
+fn connection_commands_require_fresh_approval_before_login_or_scripts() {
+    use rustgis_engine::render::rustgis_tiles::s3;
+
+    for command in ["connection.browse", "connection.test", "connection.login"] {
+        for scripted in [false, true] {
+            let mut s = Session::new(Project::default());
+            let name = format!("assistant-approval-{command}-{scripted}");
+            let c = s
+                .run(
+                    "connection.new",
+                    &json!({"kind": "s3", "name": name,
+                "options": {"credentials": "none", "buckets": "approval-bucket"}}),
+                )
+                .unwrap();
+            // Probes need no network, but browse/test still log in before returning the fetch address.
+            let params = json!({"id": c["id"], "probe": true});
+            let (tool, args) = if scripted {
+                ("run", json!({"script": format!("map.rename {{\"name\":\"Approved map\"}}\n{command} {params}")}))
+            } else {
+                ("run_command", json!({"command": command, "params": params}))
+            };
+            let mut a = Agent::new(cfg("openai"), &s);
+            assert!(matches!(a.ask("use this connection", &s), Step::Send(_)));
+            let map_name = s.map().name.clone();
+            assert_eq!(a.receive(a.generation(), ok(call("first", tool, args.clone())), &mut s), Step::Confirm, "{command}/{tool}");
+            assert!(s3::connection(&name).is_none(), "a pending call must not log in");
+            assert_eq!(s.map().name, map_name, "a script's earlier lines must wait too");
+            assert!(!a.pending(&s).unwrap().2, "connection operations cannot be allowed for the whole conversation");
+            assert!(matches!(a.decide(false, false, &mut s), Step::Send(_)));
+            assert!(s3::connection(&name).is_none(), "a declined call must not log in");
+            assert_eq!(s.map().name, map_name, "declining must leave every script line unexecuted");
+
+            assert_eq!(a.receive(a.generation(), ok(call("allowed", tool, args.clone())), &mut s), Step::Confirm);
+            assert!(matches!(a.decide(true, true, &mut s), Step::Send(_)));
+            assert!(s3::connection(&name).is_some(), "a once-approved call must execute");
+            if scripted {
+                assert_eq!(s.map().name, "Approved map");
+            }
+            s3::disconnect(&name);
+            assert_eq!(
+                a.receive(a.generation(), ok(call("again", tool, args)), &mut s),
+                Step::Confirm,
+                "asking to remember an approval must not bypass the next confirmation"
+            );
+            assert!(s3::connection(&name).is_none());
+            assert!(matches!(a.decide(false, false, &mut s), Step::Send(_)));
+            assert!(s3::connection(&name).is_none(), "declining a repeat must leave it disconnected");
+        }
+    }
+}
+
+#[test]
 fn gate_rules() {
     let s = sample();
     let g = |name: &str, args: Value| tools::gate(&s, &ToolCall { id: "x".into(), name: name.into(), args });

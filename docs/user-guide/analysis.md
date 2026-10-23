@@ -49,6 +49,8 @@ result is added to the map, and the run is listed under **Analyze › History**.
 line or a script (`gp.run`), a built-in tool's parameter with a list of choices, such as Buffer's
 units, takes one of them in any letter case (`"meters"` for `Meters`); any other value is an error
 that names the choices (Buffer's units no longer take the abbreviations `m`, `mi` or `metres`).
+Buffer and Select Layer By Location accept **Kilometers**, **Meters**, **Miles** and **Feet**. Feet are international feet
+(exactly 0.3048 metres): a 500-foot notification radius is 152.4 metres on the ground.
 
 The History pane lists each run with when it ran (in UTC). Its **⋯** menu, or a right-click on
 the tool's name, copies a run as code, with the parameters it ran with: **Copy as Python** (a
@@ -236,9 +238,18 @@ when every key may be left out; a command with no parameters gets none, and a li
 parameters keeps them. While you type a command's parameters (the cursor inside its `{…}`), the same help stays by the cursor;
 Escape closes it. A quote that starts a key in a command's braces opens the list of its keys not
 given yet, beside the highlighted key's description; accepting one closes it with its colon
-(`"size": `). A `{` typed closes itself, the cursor inside, unless text follows it or it's in a
-string or a comment; a `}` typed before a `}` steps over it, and Backspace in an empty `{}` deletes
-both. Pasting adds nothing.
+(`"size": `). The same goes in a key's own object, or in each object of its list, for the keys the
+command's description gives it (`topology.rules {"add": {"rule": …}}`). In a `gp.run` line, a
+quote after `"tool": ` opens the list of the tools, beside the highlighted tool's help; accepting
+one closes it. In its `"params": {…}`, the keys offered are those of the tool its `"tool"` names
+(by id or name, before or after `params`), beside the highlighted key's kind, name, default and
+help; there the help by the cursor is the tool's. A `task.addStep` line works the same way: its
+`"command": "` offers the commands, and its `"params"` that command's keys and help. A `{` or `[`
+typed closes itself, the cursor inside, unless text follows it or it's in a string or a comment;
+so does a `"` where a string can start (after a space, `{`, `[`, `,` or `:`). A `}` or `]` typed
+before the same one steps over it, as does a `"` typed before the quote that ends its string, and
+Backspace in an empty `{}`, `[]` or `""` deletes both. The lists open in a quote that closed
+itself, and accepting keeps that quote. Pasting adds nothing.
 
 ## ModelBuilder
 

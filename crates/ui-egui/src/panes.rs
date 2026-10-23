@@ -10,7 +10,7 @@ use rustgis_engine::data::GeometryType;
 use rustgis_engine::map::raster::{Normalizer, RasterLegend, RasterStyle};
 use rustgis_engine::map::symbology::{
     ClassRef, ClassStyle, LineCap, LineJoin, LineStroke, MAX_LABEL, MAX_STROKE_OFFSET, MAX_STROKE_WIDTH, MAX_STROKES, MAX_UNIQUE,
-    normalize_label,
+    OTHER_VALUES, normalize_label,
 };
 use rustgis_engine::map::tiles::{TileKind, TileLayer};
 use rustgis_engine::map::{
@@ -509,6 +509,18 @@ pub fn follow_layer_filter(app: &mut RustGisApp) {
     let q = filter_query(&app.ui.layer_filter);
     // Whether the filter shows layer `id` (None: the map has no such layer).
     let shown = |s: &Session, id: u32| s.map().layer(id).map(|l| filter_shows(&q, &l.name));
+    // Layers picked together are the ones in sight too: a removal must not take one the filter hides.
+    let picked = app.session.selected_layers();
+    if picked.len() > 1 {
+        let active = app.session.active_layer;
+        // The active layer last, so it stays active if the filter shows it.
+        let mut keep: Vec<u32> =
+            picked.iter().copied().filter(|id| shown(&app.session, *id) == Some(true) && Some(*id) != active).collect();
+        keep.extend(active.filter(|id| shown(&app.session, *id) == Some(true)));
+        if keep.len() < picked.len() && !keep.is_empty() {
+            let _ = app.run("layer.select", json!({"layer": keep}));
+        }
+    }
     match (app.session.active_layer, app.ui.layer_filter_hid) {
         (Some(id), _) if shown(&app.session, id) == Some(false) => {
             // No command clears the active layer; it is view state, like a click on an empty row.
@@ -554,6 +566,8 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     ui.add_space(8.0);
     filter_box(app, ui);
     // (Which layer is active as the filter changes: `follow_layer_filter`, every frame.)
+    app.ui.layer_picked = app.session.selected_layers();
+    app.ui.layer_rows.clear();
     let q = filter_query(&app.ui.layer_filter);
     let filtering = !q.is_empty();
     let shows = |name: &str| filter_shows(&q, name);
@@ -667,6 +681,7 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             LayersView::DataSource => source_groups(app, ui, &layers, &tiles, scale, &shows, t),
             LayersView::Selection => selection_groups(app, ui, &layers, &shows, t),
         };
+        resolve_layer_range(app);
         if app.ui.service_import.is_some() {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -969,10 +984,52 @@ fn selection_groups(app: &mut RustGisApp, ui: &mut Ui, layers: &[Layer], shows: 
     n
 }
 
+/// The active layer's row (the one the Style and Data tabs act on) among those picked: a thin
+/// outline, as a file browser marks the item with focus.
+fn active_outline(ui: &Ui, r: Rect, active: bool, t: &Tokens) {
+    if active {
+        let stroke = Stroke::new(1.0, t.accent);
+        ui.painter().rect_stroke(r.shrink2(vec2(4.0, 1.0)), CornerRadius::same(5), stroke, egui::StrokeKind::Inside);
+    }
+}
+
+/// A click on a layer's row: alone makes it the only layer picked, with Ctrl or Command it joins
+/// or leaves the layer selection, with Shift the rows between the last one clicked and this one
+/// are picked (once the pane has drawn them: `resolve_layer_range`).
+fn click_layer(app: &mut RustGisApp, ui: &Ui, id: u32) {
+    let (shift, toggle) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+    if shift {
+        app.ui.layer_range = Some(id);
+        return;
+    }
+    let mode = if toggle { "toggle" } else { "replace" };
+    let _ = app.run("layer.select", json!({"layer": id, "mode": mode}));
+    app.ui.layer_anchor = Some(id);
+}
+
+/// Picks the rows from the anchor to the layer a Shift+click was made on, in the order the pane
+/// lists them (collapsed groups' layers and filtered ones are not listed, so not picked); the
+/// layer clicked ends up active. Without a listed anchor, only that layer.
+fn resolve_layer_range(app: &mut RustGisApp) {
+    let Some(to) = app.ui.layer_range.take() else { return };
+    let rows = &app.ui.layer_rows;
+    let from = app.ui.layer_anchor.or(app.session.active_layer);
+    let span = match (from.and_then(|f| rows.iter().position(|r| *r == f)), rows.iter().position(|r| *r == to)) {
+        (Some(a), Some(b)) if a <= b => rows[a..=b].to_vec(),
+        (Some(a), Some(b)) => rows[b..=a].iter().rev().copied().collect(),
+        _ => vec![to],
+    };
+    let _ = app.run("layer.select", json!({"layer": span}));
+    if app.ui.layer_anchor.is_none() {
+        app.ui.layer_anchor = from;
+    }
+}
+
 /// A layer's row in the Selection view: a box for whether it can be selected
 /// (`layer.selectable`), its name, and how many of its features are selected with a ✕ that clears
 /// them (`select.rows`). A click makes it the active layer; right-click opens its menu.
 fn selection_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
+    app.ui.layer_rows.push(l.id);
     let count = l.selection.len();
     // The name starts at 48 and stops short of the count and its ✕.
     let counted = if count > 0 { 22.0 + 4.0 + crate::widgets::text_w(ui, &count.to_string(), regular(12.0)) + 8.0 } else { 0.0 };
@@ -980,11 +1037,12 @@ fn selection_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
     let name = row_name(ui, l.name.clone(), regular(12.5), ui.available_width() - 48.0 - 8.0 - counted);
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), name.row_h), Sense::click());
     let cy = r.min.y + 13.0;
-    if app.session.active_layer == Some(l.id) {
+    if app.ui.layer_picked.contains(&l.id) {
         ui.painter().rect_filled(r.shrink2(vec2(4.0, 1.0)), CornerRadius::same(5), t.selection);
     } else if resp.hovered() {
         ui.painter().rect_filled(r.shrink2(vec2(4.0, 1.0)), CornerRadius::same(5), t.hover);
     }
+    active_outline(ui, r, app.session.active_layer == Some(l.id), t);
     // Lined up with the other views' checkboxes and names.
     let cb = Rect::from_center_size(pos2(r.min.x + 33.0, cy), vec2(14.0, 14.0));
     let cb_resp = ui.interact(hit(cb), egui::Id::new(("layer_selectable", l.id)), Sense::click());
@@ -1022,7 +1080,7 @@ fn selection_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
         None => resp,
     };
     if resp.clicked() {
-        let _ = app.run("layer.select", json!({"layer": l.id}));
+        click_layer(app, ui, l.id);
     }
     resp.context_menu(|ui| layer_menu(app, ui, l, false));
 }
@@ -1452,7 +1510,9 @@ impl RowName {
 /// A layer's row and, expanded, its legend; returns the rectangle of both. With `reorder` off
 /// (the list is filtered or children are sorted by name) the row can't be dragged.
 fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: bool, t: &Tokens) -> Rect {
+    app.ui.layer_rows.push(l.id);
     let active = app.session.active_layer == Some(l.id);
+    let picked = app.ui.layer_picked.contains(&l.id);
     // The name takes two lines when it must (the tooltip has it whole when cut), leaving room for
     // the selection badge.
     let badge = (!l.selection.is_empty()).then(|| {
@@ -1461,7 +1521,9 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: 
         (text, w)
     });
     let shown = if l.definition_query.is_some() { format!("{}  {}", l.name, tl!("(filtered)")) } else { l.name.clone() };
-    let font = if active { semibold(12.5) } else { regular(12.5) };
+    // Every picked row looks alike; the active one has an outline (`active_outline`), not a
+    // bolder name, which would read as the only one picked.
+    let font = regular(12.5);
     let room = ui.available_width() - NAME_X - badge.as_ref().map_or(8.0, |(_, w)| w + 18.0);
     let name = row_name(ui, shown.clone(), font, room);
     let sense = if reorder { Sense::click_and_drag() } else { Sense::click() };
@@ -1473,11 +1535,12 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: 
         egui::DragAndDrop::set_payload(ui.ctx(), DraggedLayer(l.id));
     }
     let dragging = egui::DragAndDrop::payload::<DraggedLayer>(ui.ctx()).is_some_and(|d| d.0 == l.id);
-    if active {
+    if picked {
         ui.painter().rect_filled(r.shrink2(vec2(4.0, 1.0)), CornerRadius::same(5), t.selection);
     } else if resp.hovered() || dragging {
         ui.painter().rect_filled(r.shrink2(vec2(4.0, 1.0)), CornerRadius::same(5), t.hover);
     }
+    active_outline(ui, r, active, t);
     let mut x = r.min.x + 10.0;
     // Expand arrow.
     let raster_legend = l.raster.as_ref().map(|r| r.legend());
@@ -1543,9 +1606,10 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: 
     } else if ar_resp.clicked() {
         let _ = app.run("layer.expand", json!({"layer": l.id}));
     } else if resp.clicked() {
-        let _ = app.run("layer.select", json!({"layer": l.id}));
+        click_layer(app, ui, l.id);
     }
-    if resp.double_clicked() {
+    // Not with Ctrl, Command or Shift held: that is picking layers, and would drop the others.
+    if resp.double_clicked() && !ui.input(|i| i.modifiers.command || i.modifiers.shift) {
         let _ = app.run("layer.select", json!({"layer": l.id}));
         app.ui.open_right(RightPane::Symbology);
     }
@@ -1628,17 +1692,121 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: 
     Rect::from_min_max(r.min, pos2(r.max.x, ui.min_rect().max.y.max(r.max.y)))
 }
 
+/// Makes a group of layers from a menu, then asks for its name, as the default one says nothing.
+fn new_group(app: &mut RustGisApp, params: Value) {
+    let Ok(made) = app.run("group.add", params) else { return };
+    let Some(id) = made.get("group").and_then(Value::as_u64) else { return };
+    let name = app.session.map().groups.iter().find(|g| u64::from(g.id) == id).map(|g| g.name.clone()).unwrap_or_default();
+    let _ = app.run("ui.dialog", json!({"name": "renameGroup"}));
+    app.dialogs.layer = id.to_string();
+    app.dialogs.text = name;
+}
+
+/// The menu of several layers picked together: what acts on all of them; what needs one layer is
+/// there, dimmed, so it is known why it can't be used.
+fn layers_menu(app: &mut RustGisApp, ui: &mut Ui, picked: &[u32], reorder: bool) {
+    let in_service = picked.iter().any(|id| app.session.map().service_groups.iter().any(|g| g.children.iter().any(|c| c.layer == *id)));
+    let ids = json!(picked);
+    let act = |app: &mut RustGisApp, ui: &mut Ui, id: &str, extra: Value| {
+        let mut p = json!({"layer": ids});
+        if let (Some(p), Some(extra)) = (p.as_object_mut(), extra.as_object()) {
+            p.extend(extra.clone());
+        }
+        let _ = app.run(id, p);
+        ui.close();
+    };
+    if ui.button(tl!("Zoom To Layers")).clicked() {
+        act(app, ui, "layer.zoomTo", Value::Null);
+    }
+    ui.separator();
+    // "Layers", not "Selected": the selection a bare word means is of features, and the next
+    // two items are about that one.
+    if ui.button(tl!("Show Layers")).clicked() {
+        act(app, ui, "layer.visibility", json!({"visible": true}));
+    }
+    if ui.button(tl!("Hide Layers")).clicked() {
+        act(app, ui, "layer.visibility", json!({"visible": false}));
+    }
+    let tip = tl!("Whether the Select tool picks these layers' features on the map");
+    if ui.button(tl!("Allow Feature Selection")).on_hover_text(tip).clicked() {
+        act(app, ui, "layer.selectable", json!({"on": true}));
+    }
+    if ui.button(tl!("Block Feature Selection")).on_hover_text(tip).clicked() {
+        act(app, ui, "layer.selectable", json!({"on": false}));
+    }
+    ui.separator();
+    // Not while the list is filtered: the layers would move among hidden ones.
+    if ui.add_enabled(reorder, egui::Button::new(tl!("Move To Top"))).clicked() {
+        act(app, ui, "layer.move", json!({"to": 0}));
+    }
+    if ui.add_enabled(reorder, egui::Button::new(tl!("Move To Bottom"))).clicked() {
+        act(app, ui, "layer.move", json!({"to": 1_000_000_000u64}));
+    }
+    // As one layer's Group menu; a service's collections stay in their service group.
+    if in_service {
+        ui.add_enabled(false, egui::Button::new(tl!("Group")))
+            .on_disabled_hover_text(tl!("A service's layers stay in their service group."));
+    } else {
+        let groups: Vec<(u32, String)> = app.session.map().groups.iter().map(|g| (g.id, g.name.clone())).collect();
+        let grouped = picked.iter().any(|id| app.session.map().group_of(*id).is_some());
+        ui.menu_button(tl!("Group"), |ui| {
+            if ui.button(tl!("New Group")).clicked() {
+                new_group(app, json!({"layers": picked}));
+                ui.close();
+            }
+            if grouped && ui.button(tl!("Remove From Group")).clicked() {
+                act(app, ui, "layer.group", json!({"group": null}));
+            }
+            if !groups.is_empty() {
+                ui.separator();
+                for (id, name) in &groups {
+                    if ui.button(crate::i18n::fmt("Move To {group}", &[("group", name)])).clicked() {
+                        act(app, ui, "layer.group", json!({"group": id}));
+                    }
+                }
+            }
+        });
+    }
+    ui.separator();
+    for label in ["Attribute Table", "Symbology"] {
+        ui.add_enabled(false, egui::Button::new(tl!(label))).on_disabled_hover_text(tl!("Pick a single layer."));
+    }
+    ui.separator();
+    if ui.button(tl!("Remove")).clicked() {
+        act(app, ui, "layer.remove", Value::Null);
+    }
+}
+
 /// A layer's right-click menu (its row in any Layers view). Move Up and Move Down only with
 /// `reorder` (the drawing order view, unfiltered).
 fn layer_menu(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, reorder: bool) {
     // Once, as the menu opens: a command each frame it stays open would draw the map again each
     // time (a command moves the session's revision).
-    if app.session.active_layer != Some(l.id) {
+    // A layer outside the layer selection becomes the only one picked; one inside keeps it.
+    if !app.session.selected_layers().contains(&l.id) {
         let _ = app.session.run("layer.select", &json!({"layer": l.id}));
+    }
+    let picked = app.session.selected_layers();
+    if picked.len() > 1 {
+        layers_menu(app, ui, &picked, reorder);
+        return;
     }
     let service_child = app.session.map().service_groups.iter().any(|g| g.children.iter().any(|c| c.layer == l.id));
     if service_child && ui.add_enabled(app.ui.service_import.is_none(), egui::Button::new(tl!("Refresh"))).clicked() {
         let _ = app.run("ui.refreshService", json!({"layer":l.id}));
+        ui.close();
+    }
+    let login = l
+        .source
+        .as_ref()
+        .is_some_and(|s| s.login)
+        .then(|| app.session.connections.for_layer(l))
+        .flatten()
+        .map(|c| (c.id.clone(), c.name.clone()));
+    if let Some((id, name)) = login
+        && ui.button(crate::i18n::fmt("Log In to {name}…", &[("name", &name)])).clicked()
+    {
+        crate::connectionui::log_in(app, &id);
         ui.close();
     }
     let items: &[(&str, &str)] = if l.is_raster() {
@@ -1708,7 +1876,7 @@ fn layer_menu(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, reorder: bool) {
         let current = app.session.map().group_of(l.id).map(|g| g.id);
         ui.menu_button(tl!("Group"), |ui| {
             if ui.button(tl!("New Group")).clicked() {
-                let _ = app.run("group.add", json!({"layers": [l.id]}));
+                new_group(app, json!({"layers": [l.id]}));
                 ui.close();
             }
             if current.is_some() && ui.button(tl!("Remove From Group")).clicked() {
@@ -3617,15 +3785,62 @@ fn stroke_json(st: &LineStroke) -> Value {
     })
 }
 
-fn set_strokes(app: &mut RustGisApp, strokes: &[LineStroke]) {
-    let _ = app.run("layer.lineStrokes", json!({"strokes": strokes.iter().map(stroke_json).collect::<Vec<_>>()}));
+/// Sets the layer's stacked strokes, or `class`'s own.
+fn set_strokes(app: &mut RustGisApp, class: Option<&ClassRef>, strokes: &[LineStroke]) {
+    let mut p = json!({"strokes": strokes.iter().map(stroke_json).collect::<Vec<_>>()});
+    match class {
+        Some(ClassRef::Value(v)) => p["value"] = json!(v),
+        Some(ClassRef::Index(i)) => p["index"] = json!(i),
+        Some(ClassRef::Other) => p["other"] = json!(true),
+        None => {}
+    }
+    let _ = app.run("layer.lineStrokes", p);
+}
+
+/// The classes a line layer's strokes can be set for, with their legend labels and symbols.
+fn stroke_classes(r: &Renderer) -> Vec<(ClassRef, String, Symbol)> {
+    match r {
+        Renderer::Unique { classes, other, class_labels, other_label, .. } => {
+            // A value listed twice is drawn with its first class, as the legend shows it.
+            let mut seen = std::collections::HashSet::new();
+            classes
+                .iter()
+                .filter(|(k, _)| seen.insert(k.as_str()))
+                .map(|(k, s)| (ClassRef::Value(k.clone()), class_labels.get(k).cloned().unwrap_or_else(|| k.clone()), *s))
+                .chain(std::iter::once((ClassRef::Other, other_label.clone().unwrap_or_else(|| tl!(OTHER_VALUES).to_string()), *other)))
+                .collect()
+        }
+        Renderer::Graduated { symbols, .. } => {
+            let legend = r.legend();
+            symbols
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (ClassRef::Index(i), legend.get(i).map(|e| e.label.clone()).unwrap_or_else(|| i.to_string()), *s))
+                .collect()
+        }
+        Renderer::Single(_) | Renderer::Proportional { .. } => Vec::new(),
+    }
 }
 
 /// The Strokes section of a line layer's symbology: strokes stacked in one symbol, each with
-/// its own colour, width, sideways offset, cap and join. Listed top first, as they are seen.
+/// its own colour, width, sideways offset, cap and join. Listed top first, as they are seen. A
+/// layer with classes can stack strokes for one class of its own, picked at the top.
 fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::map::Layer, t: &Tokens) {
-    let base = l.renderer.base_symbol();
-    let strokes = l.line_strokes.clone();
+    let classes = stroke_classes(&l.renderer);
+    let picked_id = egui::Id::new(("stroke_class", l.id));
+    // The class being edited, while the renderer still has it; `None` is the layer's own strokes.
+    let picked: Option<ClassRef> =
+        ui.data(|d| d.get_temp::<Option<ClassRef>>(picked_id)).flatten().filter(|c| classes.iter().any(|(k, ..)| k == c));
+    let class = picked.as_ref();
+    let base = class.and_then(|c| classes.iter().find(|(k, ..)| k == c)).map_or_else(|| l.renderer.base_symbol(), |(.., s)| *s);
+    let own = class.and_then(|c| l.renderer.class_strokes(c).ok()).map(<[LineStroke]>::to_vec);
+    // What the class draws: its own strokes, else the layer's.
+    let strokes = match &own {
+        Some(v) if !v.is_empty() => v.clone(),
+        Some(_) | None => l.line_strokes.clone(),
+    };
+    // A class drawn with the layer's strokes edits them as a copy of its own.
+    let borrowed = own.as_ref().is_some_and(Vec::is_empty);
     egui::Frame::NONE.fill(t.pane_header).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -3636,10 +3851,32 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                     let mut next = strokes.clone();
                     // The first stroke stands for the symbol's own; later ones copy the top one.
                     next.push(strokes.last().copied().unwrap_or_default());
-                    set_strokes(app, &next);
+                    set_strokes(app, class, &next);
                 }
             });
         });
+        if !classes.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(tl!("Strokes for")).size(11.5).color(t.text_dim));
+                let name = |c: Option<&ClassRef>| match c.and_then(|c| classes.iter().find(|(k, ..)| k == c)) {
+                    Some((_, label, _)) => label.clone(),
+                    None => tl!("All classes").to_string(),
+                };
+                egui::ComboBox::from_id_salt(("stroke_class_pick", l.id)).selected_text(name(class)).show_ui(ui, |ui| {
+                    if ui.selectable_label(class.is_none(), tl!("All classes")).on_hover_text(tl!("The layer's strokes")).clicked() {
+                        ui.data_mut(|d| d.insert_temp::<Option<ClassRef>>(picked_id, None));
+                    }
+                    for (k, label, _) in &classes {
+                        // A class with strokes of its own is marked.
+                        let has_own = l.renderer.class_strokes(k).is_ok_and(|s| !s.is_empty());
+                        let text = if has_own { format!("{label} •") } else { label.clone() };
+                        if ui.selectable_label(class == Some(k), text).clicked() {
+                            ui.data_mut(|d| d.insert_temp(picked_id, Some(k.clone())));
+                        }
+                    }
+                });
+            });
+        }
         // The composed symbol along a line drawn left to right: a positive offset shows below it.
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
         ui.painter().rect_filled(r, CornerRadius::same(4), t.ribbon);
@@ -3665,6 +3902,13 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
         ui.painter().line_segment([pos2(ax - 10.0, ay), pos2(ax, ay)], Stroke::new(1.0, t.text_dim));
         ui.painter().line_segment([pos2(ax - 3.0, ay - 3.0), pos2(ax, ay)], Stroke::new(1.0, t.text_dim));
         ui.painter().line_segment([pos2(ax - 3.0, ay + 3.0), pos2(ax, ay)], Stroke::new(1.0, t.text_dim));
+        if borrowed {
+            ui.label(
+                egui::RichText::new(tl!("This class is drawn with the layer's strokes. Changing them here gives it its own."))
+                    .size(11.5)
+                    .color(t.text_dim),
+            );
+        }
         if strokes.is_empty() {
             ui.label(
                 egui::RichText::new(tl!("One stroke, from the symbol. Add strokes for casings, parallel lines and offsets."))
@@ -3685,17 +3929,17 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                     if crate::widgets::icon_button(ui, "close", tl!("Remove")).clicked() {
                         let mut next = strokes.clone();
                         next.remove(i);
-                        set_strokes(app, &next);
+                        set_strokes(app, class, &next);
                     }
                     if ui.add_enabled(i > 0, egui::Button::new("↓").small()).on_hover_text(tl!("Move down")).clicked() {
                         let mut next = strokes.clone();
                         next.swap(i, i - 1);
-                        set_strokes(app, &next);
+                        set_strokes(app, class, &next);
                     }
                     if ui.add_enabled(i + 1 < n, egui::Button::new("↑").small()).on_hover_text(tl!("Move up")).clicked() {
                         let mut next = strokes.clone();
                         next.swap(i, i + 1);
-                        set_strokes(app, &next);
+                        set_strokes(app, class, &next);
                     }
                 });
             });
@@ -3704,7 +3948,7 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                 if let Some(slot) = next.get_mut(i) {
                     *slot = new;
                 }
-                set_strokes(app, &next);
+                set_strokes(app, class, &next);
             };
             egui::Grid::new(("stroke_grid", i)).num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
                 let (c, w) = st.resolve(&base);
@@ -3765,8 +4009,17 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
             });
         }
         ui.add_space(4.0);
-        if ui.small_button(tl!("Use a Single Stroke")).on_hover_text(tl!("Remove the strokes and draw the symbol's line alone")).clicked() {
-            set_strokes(app, &[]);
+        if class.is_some() {
+            let back = ui.add_enabled(!borrowed, egui::Button::new(tl!("Use the Layer's Strokes")).small());
+            if back.on_hover_text(tl!("Remove this class's own strokes and draw it with the layer's")).clicked() {
+                set_strokes(app, class, &[]);
+            }
+        } else if ui
+            .small_button(tl!("Use a Single Stroke"))
+            .on_hover_text(tl!("Remove the strokes and draw the symbol's line alone"))
+            .clicked()
+        {
+            set_strokes(app, None, &[]);
         }
     });
 }
@@ -4533,6 +4786,30 @@ mod tests {
             (Some("100"), Some("All"))
         );
         assert_eq!(f.values.get("output").map(String::as_str), Some("kept"), "not given");
+    }
+
+    /// The Strokes for picker lists a value listed twice once, for its first class (the one its
+    /// features draw with), then `<all other values>`.
+    #[test]
+    fn stroke_classes_list_a_repeated_value_once() {
+        let (a, b) = (
+            Symbol { stroke_width: 1.0, ..Symbol::default_for(GeometryType::Polyline, 0) },
+            Symbol { stroke_width: 2.0, ..Symbol::default_for(GeometryType::Polyline, 0) },
+        );
+        let r = Renderer::Unique {
+            field: "kind".into(),
+            classes: vec![("road".into(), a), ("rail".into(), b), ("road".into(), b)],
+            other: b,
+            ramp: Ramp::default(),
+            class_labels: Default::default(),
+            other_label: None,
+            class_strokes: Default::default(),
+            other_strokes: Vec::new(),
+        };
+        let listed = stroke_classes(&r);
+        let refs: Vec<&ClassRef> = listed.iter().map(|(c, ..)| c).collect();
+        assert_eq!(refs, [&ClassRef::Value("road".into()), &ClassRef::Value("rail".into()), &ClassRef::Other]);
+        assert_eq!(listed.first().map(|(.., s)| s.stroke_width), Some(1.0));
     }
 
     fn layer(app: &RustGisApp, name: &str) -> u32 {

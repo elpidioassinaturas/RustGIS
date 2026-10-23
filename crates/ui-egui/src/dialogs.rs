@@ -21,8 +21,12 @@ pub struct Dialogs {
     pub flag: bool,
     pub error: Option<String>,
     pub info: Option<String>,
+    /// The saved connection this dialog was opened on, by id (see `connectionui::picked`).
+    pub connection: Option<String>,
     /// Choices found for the dialog (Add From Database's tables; Add Delimited Text's columns).
     pub list: Vec<String>,
+    /// Add From Database: the database whose tables were last listed (what Save as Connection keeps).
+    pub listed: Option<String>,
     /// Add Delimited Text's file, picked before the dialog opens.
     pub csv: Option<CsvFile>,
 }
@@ -152,6 +156,8 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "addUrl" => "Add Data From URL",
         "addService" => "Add From Service",
         "addDatabase" => "Add From Database",
+        "newConnection" => "New Connection",
+        "editConnection" => "Edit Connection",
         "s3" => "S3 Buckets",
         "zarr" => "Add Zarr Variable",
         "exportLayer" => "Export Features",
@@ -177,6 +183,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         ui.set_width(match which {
             "coordinateSystem" | "zarr" => 660.0,
             "addTiles" | "addUrl" | "addService" | "s3" => 560.0,
+            "newConnection" | "editConnection" => 520.0,
             _ => 440.0,
         });
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
@@ -242,6 +249,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
             "addUrl" => close = add_url(app, ui),
             "addService" => close = add_service(app, ui),
             "addDatabase" => close = add_database(app, ui),
+            "newConnection" | "editConnection" => close = crate::connectionui::dialog(app, ui),
             "s3" => crate::s3ui::dialog(app, ui),
             "zarr" => close = crate::zarrui::dialog(app, ui),
             "exportLayer" => close = export_layer(app, ui),
@@ -612,6 +620,15 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
     if app.dialogs.mode == "new" {
         app.dialogs.mode = "auto";
     }
+    let list = crate::sourcespane::connections_snapshot(app);
+    let address = if app.dialogs.mode == "csw" { &app.ui.csw.url } else { &app.dialogs.text };
+    let current = crate::connectionui::picked(&list, app.dialogs.connection.as_deref(), address);
+    if let Some(c) = crate::connectionui::picker(ui, "service_saved", &list, crate::connectionui::SERVICE_KINDS, current) {
+        if let Err(e) = crate::connectionui::open_connection(app, &c) {
+            app.dialogs.error = Some(e);
+        }
+        return false;
+    }
     let kinds = |app: &mut RustGisApp, ui: &mut egui::Ui| {
         ui.label(tl!("Type"));
         let shown = KINDS.iter().find(|(c, _)| *c == app.dialogs.mode).map(|(_, l)| tl!(*l).to_string()).unwrap_or_default();
@@ -657,6 +674,11 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
     // A directory's folder or service to open, or Back to the directory before.
     let mut open: Option<String> = None;
     let mut back = false;
+    let keepable = app.ui.service.as_ref().and_then(|conn| {
+        let (url, kind) = app.ui.service_browse.back.first().map(|(u, k)| (u.as_str(), *k)).unwrap_or((&conn.url, conn.kind));
+        crate::connectionui::picked(&list, app.dialogs.connection.as_deref(), url).is_none().then(|| (url.to_string(), kind))
+    });
+    let mut keep_root = false;
     if let Some(conn) = &app.ui.service {
         ui.separator();
         if let Some(e) = &conn.error {
@@ -681,13 +703,18 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             let none = Vec::new();
             let layers = v.get("layers").and_then(Value::as_array).unwrap_or(&none);
             let grouped = kind.starts_with("OGC API");
-            ui.label(
-                egui::RichText::new(crate::i18n::fmt(
-                    "{kind} {title}: {count} layers",
-                    &[("kind", kind), ("title", title), ("count", &layers.len().to_string())],
-                ))
-                .strong(),
-            );
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(crate::i18n::fmt(
+                        "{kind} {title}: {count} layers",
+                        &[("kind", kind), ("title", title), ("count", &layers.len().to_string())],
+                    ))
+                    .strong(),
+                );
+                if keepable.is_some() && conn.pending.is_none() && conn.error.is_none() && conn.failure.is_none() {
+                    keep_root = crate::connectionui::keep_button(ui);
+                }
+            });
             for n in v.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
                 ui.label(egui::RichText::new(n).small().weak());
             }
@@ -771,6 +798,13 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             });
         }
     }
+    if keep_root && let Some((url, kind)) = keepable {
+        // "auto" is the dialog's detection mode; saved connections call that kind "service".
+        match crate::connectionui::keep(app, json!({"kind": if kind == "auto" { "service" } else { kind }, "address": url})) {
+            Ok(id) => app.dialogs.connection = Some(id),
+            Err(e) => app.dialogs.error = Some(e),
+        }
+    }
     if let Some(p) = import
         && let Err(e) = app.run("ui.importService", p)
     {
@@ -796,60 +830,17 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         });
     }
     if let (Some(l), Some(conn)) = (add, &app.ui.service) {
-        let (url, kind, text) = (conn.url.clone(), conn.kind, conn.text.clone().unwrap_or_default());
-        let name = l.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-        let title = l.get("title").and_then(Value::as_str).unwrap_or(&name).to_string();
-        let offer = l.get("offer").cloned().unwrap_or_default();
-        // Features are downloaded in the background, as From URL… does; map layers are added now.
-        let r = if offer.get("type").and_then(Value::as_str) == Some("features") {
-            let items = offer.get("url").and_then(Value::as_str).unwrap_or("").to_string();
-            app.run("ui.addUrl", json!({"url": items, "name": title, "service": true})).map(|_| tl!("Downloading…"))
-        } else if offer.get("type").and_then(Value::as_str) == Some("coverage") {
-            // A coverage: its description first, off the frame (poll_describe asks for it).
-            let describe = offer.get("describe").and_then(Value::as_str).unwrap_or("").to_string();
-            let mut p = json!({"url": url, "layer": name, "text": text, "name": title, "documents": conn.documents});
-            if kind != "auto" {
-                p["type"] = json!(kind);
-            }
-            let slot = crate::fetch_into(&describe);
-            if let Some(c) = &mut app.ui.service {
-                c.describing = Some((p, slot));
-            }
-            Ok(tl!("Describing"))
-        } else {
-            let mut p = json!({"url": url, "layer": name, "text": text, "documents": conn.documents, "source_url": l.get("source_url")});
-            if kind != "auto" {
-                p["type"] = json!(kind);
-            }
-            let time = app.ui.service_browse.time.trim();
-            if l.get("time").is_some() && !time.is_empty() {
-                p["time"] = json!(time);
-            }
-            match l.get("tilesets").and_then(Value::as_str) {
-                // An OGC API layer: its tileset's advertised template is read first, off the
-                // frame (poll_tiles_resolve adds the layer).
-                Some(list) => {
-                    p["name"] = json!(title);
-                    let fallback = offer.get("url").and_then(Value::as_str).unwrap_or("").to_string();
-                    let vector = offer.get("type").and_then(Value::as_str) == Some("vectorTiles");
-                    let slot = crate::fetch_into(list);
-                    if let Some(c) = &mut app.ui.service {
-                        c.resolving = Some(crate::TilesResolve {
-                            params: p,
-                            list: list.to_string(),
-                            doc: list.to_string(),
-                            read: 0,
-                            vector,
-                            fallback,
-                            slot,
-                        });
-                    }
-                    Ok(tl!("Reading the tileset of"))
-                }
-                None => app.run("service.add", p).map(|_| tl!("Added")),
-            }
+        let src = crate::serviceui::ServiceSource {
+            url: conn.url.clone(),
+            kind: conn.kind,
+            text: conn.text.clone().unwrap_or_default(),
+            documents: conn.documents.clone(),
         };
-        match r {
+        let name = l.get("name").and_then(Value::as_str).unwrap_or("");
+        let title = l.get("title").and_then(Value::as_str).unwrap_or(name).to_string();
+        // Features are downloaded in the background, as From URL… does; map layers are added now.
+        let time = app.ui.service_browse.time.trim().to_string();
+        match crate::serviceui::add_layer(app, &src, &l, &time, true) {
             Ok(m) => app.dialogs.info = Some(format!("{m} {title}")),
             Err(e) => app.dialogs.error = Some(e),
         }
@@ -901,8 +892,18 @@ fn add_database(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             a.to_string()
         }
     };
+    let connections = crate::sourcespane::connections_snapshot(app);
+    let typed = database(&app.dialogs.a);
+    let current = crate::connectionui::picked(&connections, app.dialogs.connection.as_deref(), &typed);
+    let mut pick = None;
     let mut list = false;
     egui::Grid::new("database").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+        let kinds = rustgis_engine::connections::DATABASE_KINDS;
+        if connections.iter().any(|c| kinds.contains(&c.kind.as_str())) {
+            ui.label(tl!("Saved connection"));
+            pick = crate::connectionui::picker_combo(ui, "database_saved", &connections, kinds, current);
+            ui.end_row();
+        }
         ui.label(tl!("Connection"));
         ui.add(egui::TextEdit::singleline(&mut app.dialogs.a).hint_text("host=localhost dbname=gis user=postgres").desired_width(280.0));
         ui.end_row();
@@ -930,20 +931,41 @@ fn add_database(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         ui.add(egui::TextEdit::singleline(&mut app.dialogs.text).hint_text(tl!("of a geometry that doesn't say")).desired_width(280.0));
         ui.end_row();
     });
+    if let Some(c) = pick {
+        if let Err(e) = crate::connectionui::open_connection(app, &c) {
+            app.dialogs.error = Some(e);
+        }
+        return false;
+    }
     if list {
         let p = json!({"database": database(&app.dialogs.a), "password": app.dialogs.b});
         match app.run("info.databaseTables", p) {
             Ok(v) => {
                 app.dialogs.list = v["layers"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(str::to_string)).collect();
+                app.dialogs.listed = Some(database(&app.dialogs.a));
                 app.dialogs.error = None;
                 app.dialogs.info = Some(crate::i18n::fmt("{n} tables with geometry", &[("n", &app.dialogs.list.len().to_string())]));
             }
             Err(e) => {
+                app.dialogs.listed = None;
                 app.dialogs.info = None;
                 app.dialogs.error = Some(e);
             }
         }
     }
+    ui.horizontal(|ui| {
+        let address = database(&app.dialogs.a);
+        if app.dialogs.listed.as_deref() == Some(address.as_str())
+            && let Some(kind) = rustgis_engine::connections::database_kind(&address)
+            && crate::connectionui::picked(&connections, app.dialogs.connection.as_deref(), &address).is_none()
+            && crate::connectionui::keep_button(ui)
+        {
+            match crate::connectionui::keep(app, json!({"kind": kind, "address": address})) {
+                Ok(id) => app.dialogs.connection = Some(id),
+                Err(e) => app.dialogs.error = Some(e),
+            }
+        }
+    });
     buttons(app, ui, "Add", |app| {
         let mut p = json!({"database": database(&app.dialogs.a), "password": app.dialogs.b});
         for (key, v) in [("layer", &app.dialogs.c), ("crs", &app.dialogs.text)] {

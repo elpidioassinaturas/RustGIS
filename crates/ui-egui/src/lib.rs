@@ -17,6 +17,8 @@ mod bookmarkpane;
 mod catalogsui;
 mod chrome;
 mod comets;
+mod connectiontree;
+mod connectionui;
 #[cfg(not(target_arch = "wasm32"))]
 mod connectui;
 mod cswui;
@@ -39,6 +41,7 @@ mod localagents;
 mod mapgpu;
 mod mapmenu;
 mod mapview;
+mod measure_units;
 mod modelbuilder;
 mod navui;
 mod nldiui;
@@ -290,11 +293,6 @@ pub struct ServiceConn {
     pub error: Option<String>,
     /// A capabilities request that failed, with what the server said (#509).
     pub failure: Option<Failure>,
-    /// An OGC API layer whose advertised tile template is being read before it is added.
-    pub resolving: Option<TilesResolve>,
-    /// A WCS coverage whose description is being read before it is asked for: `service.coverage`'s
-    /// parameters and the description on its way.
-    pub describing: Option<(Value, Slot<Result<Vec<u8>, String>>)>,
 }
 
 /// How Add From Service's list is browsed.
@@ -321,6 +319,17 @@ pub struct TilesResolve {
     /// The usual-path template, when the advertised one can't be read.
     pub fallback: String,
     pub slot: Slot<Result<Vec<u8>, String>>,
+}
+
+/// A service layer waiting on a document before it is added. `dialog` tells whether the add came
+/// from the add-service dialog (its result shows there) or from the Connections tree (a notice);
+/// `origin` is the connection a tree add is for, named in Recent once the layer is added.
+pub enum ServiceStep {
+    /// An OGC API layer whose advertised tile template is being read.
+    Tiles { resolve: TilesResolve, dialog: bool, origin: Option<String> },
+    /// A WCS coverage whose description is being read before it is asked for: `service.coverage`'s
+    /// parameters and the description on its way.
+    Coverage { params: Value, slot: Slot<Result<Vec<u8>, String>>, dialog: bool, origin: Option<String> },
 }
 
 /// Fetches an address into a slot, off the frame.
@@ -364,7 +373,7 @@ pub enum LayersView {
 }
 
 /// Retains the GUI's legacy XML decoding while refusing malformed JSON text.
-fn service_text(bytes: Vec<u8>) -> Result<String, std::string::FromUtf8Error> {
+pub(crate) fn service_text(bytes: Vec<u8>) -> Result<String, std::string::FromUtf8Error> {
     String::from_utf8(bytes).or_else(|error| {
         let bytes = error.as_bytes();
         let without_bom = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
@@ -434,6 +443,8 @@ pub struct UiState {
     /// `panes::web_data_name`).
     pub web_data: &'static str,
     pub dark: bool,
+    /// Live measurement and map scale-bar units, chosen in Home › Measure.
+    pub measurement_imperial: bool,
     /// The theme follows the system's light or dark setting until the user picks one.
     pub dark_follows_system: bool,
     /// Interface language preference: a language code or `auto`.
@@ -484,6 +495,13 @@ pub struct UiState {
     /// The active layer the filter hid (so it stopped being active), selected again once the
     /// filter shows it, unless another layer was picked meanwhile.
     pub layer_filter_hid: Option<u32>,
+    /// The Layers pane's layer selection as the frame began (the rows tint from it), the layers its
+    /// rows list in the order drawn (what a Shift+click spans), the row a Shift+click spans from,
+    /// and the one it was made on, resolved once the rows are all drawn.
+    pub layer_picked: Vec<u32>,
+    pub layer_rows: Vec<u32>,
+    pub layer_anchor: Option<u32>,
+    pub layer_range: Option<u32>,
     /// How the Layers pane lists the layers (#301). Kept for the session, not saved.
     pub layers_view: LayersView,
     /// The command an item picked in the browser opens with (web).
@@ -514,6 +532,9 @@ pub struct UiState {
     /// Add From Service's list: its filter, a time-enabled layer's date, and the directories
     /// opened on the way to the service shown (Back returns to them).
     pub service_browse: ServiceBrowse,
+    /// Service layers added from the dialog or the Connections tree that wait on a document
+    /// (a tileset list, a coverage's description) before they are added.
+    pub service_steps: Vec<ServiceStep>,
     /// The Web Data panels of single services (NASA Earthdata, EnviroAtlas, FEMA NFHL, The
     /// National Map, Fields of the World): their documents, searches and choices.
     pub web_services: webdataui::State,
@@ -525,6 +546,10 @@ pub struct UiState {
     pub stac: stacui::State,
     /// S3…: the connection form, the bucket browsed and the listing under way.
     pub s3: s3ui::State,
+    /// New/Edit Connection: the form and the Test under way.
+    pub connection: connectionui::State,
+    /// The datasets saved connections list under Data Sources › Connections, and the selection.
+    pub connection_tree: connectiontree::State,
     /// OpenStreetMap and Boundaries: their choices and the request under way.
     pub portals: portalsui::State,
     /// Overture Maps and Source Cooperative: choices, results and the request under way.
@@ -614,6 +639,7 @@ impl Default for UiState {
             right_open: Vec::new(),
             web_data: "opendata",
             dark: false,
+            measurement_imperial: false,
             dark_follows_system: true,
             language: i18n::AUTO.into(),
             worldview: i18n::AUTO.into(),
@@ -646,12 +672,15 @@ impl Default for UiState {
             link_zoomed: false,
             service: None,
             service_browse: ServiceBrowse::default(),
+            service_steps: Vec::new(),
             web_services: Default::default(),
             service_import: None,
             service_group_name: "My OGC Layer".into(),
             csw: Default::default(),
             stac: Default::default(),
             s3: Default::default(),
+            connection: Default::default(),
+            connection_tree: Default::default(),
             portals: Default::default(),
             catalogs: Default::default(),
             opendata: Default::default(),
@@ -675,6 +704,10 @@ impl Default for UiState {
             layer_filter: String::new(),
             layer_filter_map: String::new(),
             layer_filter_hid: None,
+            layer_picked: Vec::new(),
+            layer_rows: Vec::new(),
+            layer_anchor: None,
+            layer_range: None,
             layers_view: LayersView::DrawingOrder,
             dynamic_text: None,
             scale_text: None,
@@ -816,7 +849,7 @@ impl RustGisApp {
             table: table::TableState::default(),
             layout: layoutview::LayoutView::default(),
             graphic_format: graphicformat::GraphicFormat::default(),
-            forms: editpanes::Forms::default(),
+            forms: editpanes::Forms { distance_units: "Meters".into(), ..editpanes::Forms::default() },
             workflow: analysispane::Workflow::default(),
             mb: modelbuilder::ModelBuilder::default(),
             ws: workspacepanes::WorkspaceState::default(),
@@ -889,6 +922,17 @@ impl RustGisApp {
             self.session.raster_defaults = d.sanitized();
         }
         self.ui.raster_defaults_saved = self.session.raster_defaults.clone();
+        self.forms.distance_units = self
+            .services
+            .load_pref
+            .as_ref()
+            .and_then(|load| load(editpanes::DISTANCE_UNITS_PREF))
+            .and_then(|value| {
+                editpanes::DISTANCE_UNITS.iter().find(|unit| unit.eq_ignore_ascii_case(value.trim())).map(|unit| (*unit).to_owned())
+            })
+            .unwrap_or_else(|| "Meters".into());
+        self.ui.measurement_imperial =
+            self.services.load_pref.as_ref().and_then(|load| load("measurement_units")).as_deref() == Some("imperial");
         // The GPU map backend: RUSTGIS_GPU forces it on, else the saved preference.
         self.map.gpu_enabled = std::env::var_os("RUSTGIS_GPU").is_some()
             || self.services.load_pref.as_ref().and_then(|load| load("ui.map.gpu")).as_deref() == Some("1");
@@ -1098,7 +1142,7 @@ impl RustGisApp {
         }
         if lower.ends_with(".rgispkg") {
             let text = rustgis_engine::cmd::items::package_text(bytes)?;
-            let r = self.run("project.openText", json!({"text": text}));
+            let r = self.run("project.openText", json!({"text": text, "package": true}));
             self.map.invalidate();
             return r;
         }
@@ -1174,8 +1218,8 @@ impl RustGisApp {
         // Not an undoable edit: saving names the project, as `project.saveAs` does, once the
         // file is written.
         let old = std::mem::replace(&mut self.session.project.name, stem.clone());
-        let text = match serde_json::to_string(&self.session.project) {
-            Ok(text) => text,
+        let (text, stripped) = match self.session.project.saved_text() {
+            Ok(saved) => saved,
             Err(e) => {
                 self.session.project.name = old;
                 return Err(e.to_string());
@@ -1183,6 +1227,15 @@ impl RustGisApp {
         };
         let file = format!("{stem}.rgis");
         self.download(&file, text.into_bytes());
+        if stripped > 0 {
+            self.session.notify(
+                crate::i18n::fmt(
+                    "{n} layer address(es) were saved without their keys, tokens or passwords: after RustGIS closes, add those layers again to give them",
+                    &[("n", &stripped.to_string())],
+                ),
+                false,
+            );
+        }
         self.session.dirty = false;
         self.ui.web_file = Some(file);
         Ok(())
@@ -1622,6 +1675,8 @@ impl RustGisApp {
             "ui.pane.contents" => self.ui.left = if self.ui.left == Some(LeftPane::Contents) { None } else { Some(LeftPane::Contents) },
             "ui.pane.catalog" => self.ui.left = if self.ui.left == Some(LeftPane::Catalog) { None } else { Some(LeftPane::Catalog) },
             "ui.pane.sources" => self.ui.left = if self.ui.left == Some(LeftPane::Sources) { None } else { Some(LeftPane::Sources) },
+            // Unlike `ui.pane.sources` this never closes the pane: a menu entry that opens it.
+            "ui.openSources" => self.ui.left = Some(LeftPane::Sources),
             "ui.pane.geoprocessing" => toggle_right(&mut self.ui, RightPane::Geoprocessing),
             "ui.pane.symbology" => {
                 // Showing its tab already open needs no layer.
@@ -1799,6 +1854,18 @@ impl RustGisApp {
             "ui.theme" => {
                 self.ui.dark = p.get("dark").and_then(Value::as_bool).unwrap_or(!self.ui.dark);
                 self.ui.dark_follows_system = false;
+            }
+            "ui.measurementUnits" => {
+                let imperial = match p.get("units") {
+                    None => !self.ui.measurement_imperial,
+                    Some(Value::String(v)) if v.eq_ignore_ascii_case("metric") => false,
+                    Some(Value::String(v)) if v.eq_ignore_ascii_case("imperial") => true,
+                    _ => return Err(tl!("Measurement units must be metric or imperial").into()),
+                };
+                self.ui.measurement_imperial = imperial;
+                if let Some(save) = &self.services.save_pref {
+                    save("measurement_units", if imperial { "imperial" } else { "metric" });
+                }
             }
             "ui.map.gpu" => {
                 self.map.gpu_enabled = p.get("on").and_then(Value::as_bool).unwrap_or(!self.map.gpu_enabled);
@@ -1986,11 +2053,13 @@ impl RustGisApp {
             // Data by its web address: the dialog, then (with an address) the download, off the
             // frame; it's added when it lands. A PMTiles archive is a tile layer, never downloaded.
             "ui.addUrl" => {
+                // The connection a Connections tree add is for (named in Recent once it is added).
+                let origin = connectiontree::take_origin(self);
                 let Some(url) = p.get("url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()) else {
                     return self.run("ui.dialog", json!({"name": "addUrl"}));
                 };
                 if url.to_ascii_lowercase().split(['?', '#']).next().is_some_and(|u| u.ends_with(".pmtiles")) {
-                    return self.run("layer.addUrl", p.clone());
+                    return connectiontree::run_named(self, "layer.addUrl", p.clone(), origin.as_deref());
                 }
                 // A GeoTIFF, FlatGeobuf or GeoParquet: its header (or footer) first, off the
                 // frame; one that can be read in place is, another is downloaded (see
@@ -2018,7 +2087,14 @@ impl RustGisApp {
                         );
                     }
                     self.session.notify(i18n::fmt("Reading {url}…", &[("url", url)]), false);
-                    self.ui.cog_probes.push((p.clone(), slot));
+                    let mut probe = p.clone();
+                    if let Some(o) = probe.as_object_mut() {
+                        o.remove(connectiontree::ORIGIN);
+                        if let Some(origin) = &origin {
+                            o.insert(connectiontree::ORIGIN.into(), json!(origin));
+                        }
+                    }
+                    self.ui.cog_probes.push((probe, slot));
                     return Ok(Value::Null);
                 }
                 let url = url.to_string();
@@ -2042,9 +2118,22 @@ impl RustGisApp {
                         q[k] = json!(true);
                     }
                 }
+                if let Some(origin) = &origin {
+                    q[connectiontree::ORIGIN] = json!(origin);
+                }
                 self.session.notify(i18n::fmt("Downloading {url}…", &[("url", &url)]), false);
                 let id = self.session.download_started();
                 self.ui.downloads.push((id, url, q, slot));
+            }
+            "ui.connection" => {
+                if let Some(id) = p.get("id").and_then(Value::as_str) {
+                    connectionui::open_edit(self, id)?;
+                } else {
+                    connectionui::open_new(self, p.get("kind").and_then(Value::as_str).unwrap_or("service"))?;
+                }
+                if p.get("test").and_then(Value::as_bool) == Some(true) {
+                    connectionui::start_test(self);
+                }
             }
             // A map or feature service: the dialog, then (with an address) its capabilities,
             // fetched off the frame; the dialog lists its layers when they land.
@@ -2099,8 +2188,6 @@ impl RustGisApp {
                     listing: None,
                     error: None,
                     failure: None,
-                    resolving: None,
-                    describing: None,
                 });
             }
             "ui.addData" => {
@@ -2899,7 +2986,7 @@ impl RustGisApp {
         } else {
             std::str::from_utf8(bytes).map_err(|_| "not a RustGIS project".to_string())?.to_string()
         };
-        let mut p = json!({"text": text});
+        let mut p = json!({"text": text, "package": package});
         if let Some(f) = file.filter(|_| !package) {
             p["fileName"] = json!(f);
         }
@@ -2923,16 +3010,19 @@ impl RustGisApp {
             None => true,
         });
         for (mut p, r) in probed {
+            let origin = connectiontree::take_origin_key(&mut p);
             let url = p.get("url").and_then(Value::as_str).unwrap_or("").to_string();
             match r {
                 Ok(true) => {
+                    let before = self.session.sources.generation;
                     if self.run("layer.addUrl", p).is_ok() {
+                        connectiontree::name_recent(self, before, origin.as_deref());
                         self.map.invalidate();
                     }
                 }
                 Ok(false) => {
                     p["whole"] = json!(true);
-                    let _ = self.run("ui.addUrl", p);
+                    let _ = connectiontree::run_add_url(self, p, origin.as_deref());
                 }
                 Err(e) => self.session.notify(if e.starts_with(&url) { e } else { format!("{url}: {e}") }, true),
             }
@@ -2946,6 +3036,7 @@ impl RustGisApp {
             None => true,
         });
         for (id, url, mut p, r) in landed {
+            let origin = connectiontree::take_origin_key(&mut p);
             match r {
                 Ok(bytes) => {
                     if !self.session.download_landed(id, bytes) {
@@ -2961,8 +3052,10 @@ impl RustGisApp {
                     if zoom && self.ui.link_zoomed {
                         p["zoom"] = json!(false);
                     }
+                    let before = self.session.sources.generation;
                     match self.run("layer.addDownload", p) {
                         Ok(r) => {
+                            connectiontree::name_recent(self, before, origin.as_deref());
                             if r.get("zoomed").and_then(Value::as_bool) == Some(true) {
                                 self.ui.link_zoomed = true;
                             }
@@ -2979,60 +3072,72 @@ impl RustGisApp {
         }
     }
 
-    /// Moves an OGC API layer's template reading along: the list, then the tileset when the list
-    /// doesn't carry the template; the layer is added with the template read, or the usual path.
-    fn poll_tiles_resolve(&mut self) {
-        use rustgis_engine::data::ogc::{TilesStep, resolve_tiles};
-        let Some(conn) = &mut self.ui.service else { return };
-        let Some(res) = &mut conn.resolving else { return };
-        let Some(r) = res.slot.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
-        let step = r.ok().and_then(|body| resolve_tiles(&res.list, &res.doc, &body, res.vector));
-        let template = match step {
-            Some(TilesStep::Next(next)) if res.read < 2 => {
-                res.read += 1;
-                res.doc = next.clone();
-                res.slot = fetch_into(&next);
-                return;
-            }
-            Some(TilesStep::Template(t)) => t,
-            _ => res.fallback.clone(),
-        };
-        let Some(res) = conn.resolving.take() else { return };
-        let mut p = res.params;
-        p["tiles"] = json!(template);
-        let title = p["name"].as_str().unwrap_or("").to_string();
-        match self.run("service.add", p) {
-            Ok(_) => self.dialogs.info = Some(format!("{} {title}", tl!("Added"))),
-            Err(e) => self.dialogs.error = Some(e),
+    /// Tells how a service layer added outside the add-service dialog (or in it) went: in the
+    /// dialog's own line, or as a notice for the Connections tree.
+    fn report_step(&mut self, dialog: bool, r: Result<String, String>) {
+        match (dialog, r) {
+            (true, Ok(m)) => self.dialogs.info = Some(m),
+            (true, Err(e)) => self.dialogs.error = Some(e),
+            (false, Ok(m)) => self.session.notify(m, false),
+            (false, Err(e)) => self.session.notify(e, true),
         }
-        self.map.invalidate();
     }
 
-    /// Asks for a WCS coverage once its description has arrived: its GetCoverage address for the
-    /// view, downloaded as From URL… does.
-    fn poll_describe(&mut self) {
-        let Some(conn) = &mut self.ui.service else { return };
-        let Some((_, slot)) = &conn.describing else { return };
-        let Some(r) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
-        let Some((mut p, _)) = conn.describing.take() else { return };
-        let title = p["name"].as_str().unwrap_or("").to_string();
-        let r = r.and_then(|bytes| {
-            p["describe"] = json!(String::from_utf8_lossy(&bytes));
-            // Not `self.run`: an error belongs in the dialog, not the notices.
-            let c = self.session.run("service.coverage", &p)?;
-            let get = c.get("url").and_then(Value::as_str).unwrap_or("").to_string();
-            self.run("ui.addUrl", json!({"url": get, "name": title, "coverage": true}))
-        });
-        match r {
-            Ok(_) => self.dialogs.info = Some(format!("{} {title}", tl!("Downloading…"))),
-            Err(e) => self.dialogs.error = Some(e),
+    /// Moves the service layers waiting on a document along: an OGC API layer's tile template
+    /// (read from its tileset list, then the tileset when the list doesn't carry it; the layer is
+    /// added with the template read, or the usual path) and a WCS coverage's description (the
+    /// coverage is then asked for the view and downloaded as From URL… does).
+    fn poll_service_steps(&mut self) {
+        use rustgis_engine::data::ogc::{TilesStep, resolve_tiles};
+        for step in std::mem::take(&mut self.ui.service_steps) {
+            match step {
+                ServiceStep::Tiles { mut resolve, dialog, origin } => {
+                    let Some(r) = resolve.slot.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+                        self.ui.service_steps.push(ServiceStep::Tiles { resolve, dialog, origin });
+                        continue;
+                    };
+                    let next = r.ok().and_then(|body| resolve_tiles(&resolve.list, &resolve.doc, &body, resolve.vector));
+                    let template = match next {
+                        Some(TilesStep::Next(next)) if resolve.read < 2 => {
+                            resolve.read += 1;
+                            resolve.doc = next.clone();
+                            resolve.slot = fetch_into(&next);
+                            self.ui.service_steps.push(ServiceStep::Tiles { resolve, dialog, origin });
+                            continue;
+                        }
+                        Some(TilesStep::Template(t)) => t,
+                        _ => resolve.fallback.clone(),
+                    };
+                    let mut p = resolve.params;
+                    p["tiles"] = json!(template);
+                    let title = p["name"].as_str().unwrap_or("").to_string();
+                    let r =
+                        connectiontree::run_named(self, "service.add", p, origin.as_deref()).map(|_| format!("{} {title}", tl!("Added")));
+                    self.report_step(dialog, r);
+                    self.map.invalidate();
+                }
+                ServiceStep::Coverage { mut params, slot, dialog, origin } => {
+                    let Some(r) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+                        self.ui.service_steps.push(ServiceStep::Coverage { params, slot, dialog, origin });
+                        continue;
+                    };
+                    let title = params["name"].as_str().unwrap_or("").to_string();
+                    let r = r.and_then(|bytes| {
+                        params["describe"] = json!(String::from_utf8_lossy(&bytes));
+                        // Not `self.run`: an error belongs where the step reports, not the notices.
+                        let c = self.session.run("service.coverage", &params)?;
+                        let get = c.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+                        connectiontree::run_add_url(self, json!({"url": get, "name": title, "coverage": true}), origin.as_deref())
+                    });
+                    self.report_step(dialog, r.map(|_| format!("{} {title}", tl!("Downloading…"))));
+                }
+            }
         }
     }
 
     /// Lists a service's layers once its capabilities have arrived.
     fn poll_service(&mut self) {
-        self.poll_tiles_resolve();
-        self.poll_describe();
+        self.poll_service_steps();
         let Some(conn) = &mut self.ui.service else { return };
         let Some(r) = conn.slot.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
         let document = conn.pending.take().unwrap_or_else(|| conn.url.clone());
@@ -3155,6 +3260,8 @@ impl RustGisApp {
         cswui::poll(self);
         stacui::poll(self, ctx);
         s3ui::poll(self, ctx);
+        connectionui::poll(self, ctx);
+        connectiontree::poll(self, ctx);
         portalsui::poll(self, ctx);
         catalogsui::poll(self, ctx);
         opendataui::poll(self, ctx);

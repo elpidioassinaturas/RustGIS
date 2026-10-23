@@ -1,6 +1,9 @@
 //! The project: maps, standalone tables and geoprocessing history, saved as JSON (`.rgis`).
 
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use rustgis_data::{Dataset, Feature, Field, GeometryType};
 use rustgis_map::Map;
@@ -37,6 +40,48 @@ pub fn open_command(path: &str) -> &'static str {
 pub const FORMAT: u32 = 1;
 /// Largest project file read (512 MiB).
 const MAX_BYTES: u64 = 512 << 20;
+
+/// The address a saved file keeps. Only web addresses can contain layer credentials.
+fn saved_address(address: &str) -> Option<String> {
+    let inner = address.strip_prefix(crate::render::rustgis_tiles::s3::ANONYMOUS).unwrap_or(address);
+    let (protocol, _) = inner.split_once("://")?;
+    if !["http", "https", "s3"].iter().any(|s| protocol.eq_ignore_ascii_case(s)) {
+        return None;
+    }
+    let (scheme, mut rest) = address.split_once("://")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    if let Some(at) = rest.get(..end).and_then(|authority| authority.rfind('@')) {
+        rest = rest.get(at + 1..)?;
+    }
+    let rest = rest.split('#').next().unwrap_or(rest);
+    let mut out = format!("{scheme}://{rest}");
+    rustgis_data::source::credentials::redact_query(&mut out);
+    (out != address).then_some(out)
+}
+
+/// Strips layer credentials, keeping originals in the visitor's order for the caller to restore.
+/// Packaging calls this without registering the resulting text as a file this process wrote.
+pub(crate) fn strip_addresses(addresses: Vec<&mut String>) -> Vec<Option<String>> {
+    addresses.into_iter().map(|a| saved_address(a).map(|redacted| std::mem::replace(a, redacted))).collect()
+}
+
+struct Written {
+    len: usize,
+    hash: u64,
+    was: Vec<Option<String>>,
+}
+
+const MAX_WRITTEN: usize = 32;
+
+fn kept() -> MutexGuard<'static, Vec<Written>> {
+    static KEPT: OnceLock<Mutex<Vec<Written>>> = OnceLock::new();
+    KEPT.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn identity(text: &str) -> (usize, u64) {
+    static KEY: OnceLock<RandomState> = OnceLock::new();
+    (text.len(), KEY.get_or_init(RandomState::new).hash_one(text.as_bytes()))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
@@ -354,6 +399,23 @@ impl Project {
         }
     }
 
+    /// Every map and offline snapshot's data addresses, followed by standalone tables' sources.
+    pub fn addresses_mut(&mut self) -> Vec<&mut String> {
+        let mut addresses = Vec::new();
+        for map in &mut self.maps {
+            addresses.extend(map.addresses_mut());
+        }
+        for area in &mut self.offline_areas {
+            addresses.extend(area.data.addresses_mut());
+        }
+        for table in &mut self.tables {
+            if let Some(source) = &mut table.dataset.source {
+                addresses.push(source);
+            }
+        }
+        addresses
+    }
+
     /// The standalone table of an id.
     pub fn table(&self, id: u32) -> Option<&Table> {
         self.tables.iter().find(|t| t.id == id)
@@ -548,19 +610,73 @@ impl Project {
         &mut self.maps[i]
     }
 
-    pub fn save(&self, path: &Path) -> Result<(), String> {
-        let text = serde_json::to_string(self).map_err(|e| e.to_string())?;
-        rustgis_data::io::write_atomic(path, text.as_bytes()).map_err(|e| format!("could not save {}: {e}", path.display()))
+    /// The file keeps no passwords, keys, tokens or signatures in layer addresses. The open project
+    /// keeps them. This process remembers the 32 most recent distinct saved snapshots with stripped
+    /// addresses: opening identical plain project text restores them until that snapshot is evicted
+    /// or RustGIS closes. Packages and imports never restore them.
+    pub fn saved_text(&mut self) -> Result<(String, usize), String> {
+        let was = strip_addresses(self.addresses_mut());
+        let n = was.iter().flatten().count();
+        let text = serde_json::to_string(self).map_err(|e| e.to_string());
+        // Serialization can fail: put the live addresses back before handling its result.
+        for (address, original) in self.addresses_mut().into_iter().zip(&was) {
+            if let Some(original) = original {
+                *address = original.clone();
+            }
+        }
+        if let Ok(text) = &text
+            && n > 0
+        {
+            let (len, hash) = identity(text);
+            let mut kept = kept();
+            kept.retain(|entry| (entry.len, entry.hash) != (len, hash));
+            if kept.len() >= MAX_WRITTEN {
+                kept.remove(0);
+            }
+            kept.push(Written { len, hash, was });
+        }
+        text.map(|text| (text, n))
+    }
+
+    fn restore_addresses(&mut self, text: &str) {
+        let id = identity(text);
+        let kept = kept();
+        let Some(entry) = kept.iter().find(|entry| (entry.len, entry.hash) == id) else { return };
+        for (address, original) in self.addresses_mut().into_iter().zip(&entry.was) {
+            if let Some(full) = original
+                && saved_address(full).as_deref() == Some(address.as_str())
+            {
+                *address = full.clone();
+            }
+        }
+    }
+
+    pub fn save(&mut self, path: &Path) -> Result<usize, String> {
+        let (text, stripped) = self.saved_text()?;
+        rustgis_data::io::write_atomic(path, text.as_bytes()).map_err(|e| format!("could not save {}: {e}", path.display()))?;
+        Ok(stripped)
     }
 
     /// Reads a project from its JSON text (a browser upload).
     pub fn from_json(text: &str) -> Result<Project, String> {
+        Self::read_json(text, true)
+    }
+
+    /// Reads imported JSON (including package contents) without restoring a saved file's secrets.
+    pub(crate) fn from_import_json(text: &str) -> Result<Project, String> {
+        Self::read_json(text, false)
+    }
+
+    fn read_json(text: &str, restore: bool) -> Result<Project, String> {
         if text.len() as u64 > MAX_BYTES {
             return Err("the project file is too large".into());
         }
         let mut p: Project = serde_json::from_str(text).map_err(|e| format!("not a RustGIS project: {e}"))?;
         if p.format > FORMAT {
             return Err(format!("this project was saved by a newer RustGIS (format {})", p.format));
+        }
+        if restore {
+            p.restore_addresses(text);
         }
         p.normalize();
         Ok(p)

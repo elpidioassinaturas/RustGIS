@@ -34,6 +34,16 @@ web app reads GeoPackages without SQLite, with a small SQLite file reader writte
 | Esri File Geodatabase | `.gdb` folder (desktop) | A file dialog can't pick a folder: in Add Data pick any `.gdbtable` file inside it; or double-click the `.gdb` in the Browser, or drop the folder on the window | Read without GDAL: every feature class becomes a layer and every table a standalone table, with their fields (dates as text) and coordinate system (by its code, EPSG or Esri; else its WKT). `"layer"` picks one, and `info.fileLayers` lists them. 3D multipatches (such as swissBUILDINGS3D's buildings) are drawn as their footprints, the union of their faces seen from above, with their lowest and highest Z in `z_min` and `z_max` and the difference in `height`, which an extrusion (Style › Extrusion) can stand them up by; one with no face seen from above (only walls) is drawn as the outline of its points. Curves are drawn as straight segments between their ends. Compressed tables, raster fields and some newer row indexes aren't read: with GDAL installed, such a geodatabase opens through GDAL instead (see below). Loaded whole, up to 2 GB a table. |
 | Standalone tables | CSV, or any layer without geometry | Add Data | Listed under the map in Layers; join or relate them to layers. |
 
+Shapefile text uses the encoding in its `.cpg` sidecar first, then the language-driver code in
+the `.dbf` header. Include the `.cpg` when picking or dropping loose files in the web app.
+UTF-8 (including `65001`), DOS code pages such as CP437 and CP850 (numeric, `CP` or `IBM`
+labels), Windows code pages such as `1252`, `CP1252` and `Windows-1252`, ISO-8859 encodings
+and common East Asian encodings are supported. The Esri `0x57` DBF marker
+is read as Windows-1252. An unreadable, empty, invalid, oversized or unsupported `.cpg` gives a notice and
+falls back to the DBF code page; an unsupported DBF code page gives a notice and falls back to
+UTF-8. Files without encoding metadata keep the UTF-8 default. Unsupported characters become
+replacement characters. This applies to zipped files and large files read in place too.
+
 Files with more than 100,000 features (GeoPackage, GeoParquet, FlatGeobuf, and Shapefile on the
 desktop) are read in place, a view
 at a time, rather than loaded whole: see [Large files](data.md#large-files). They draw, label,

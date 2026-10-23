@@ -8,7 +8,8 @@ the selected features. Edit attributes in the attribute table (++ctrl+t++): doub
 to change it. **Data › Data Design** (and **Data › Fields**) adds and deletes fields and calculates a
 field from an expression; **Calculate Geometry** (in the attribute table's toolbar) fills a new or
 existing numeric field with each feature's area, perimeter, length or X/Y coordinate, in the units
-you choose, for all features or the selected ones. Every edit is one undo step.
+you choose, for all features or the selected ones. Length and perimeter include feet and miles;
+area includes square feet (`ft2`), acres (`ac`) and square miles (`mi2`). Every edit is one undo step.
 
 ## Modifying features
 
@@ -18,9 +19,13 @@ you choose, for all features or the selected ones. Every edit is one undo step.
 </figure>
 
 The Edit tab's **Edit** button turns editing on or off for the map; with it off, the map is
-read-only. The Editing pane (Settings, Templates, Status, Modify) holds the rest:
+read-only. The Editing pane (Settings, Templates, Status, Modify) holds the rest. Its **Distance units**
+selector sets the units used for Move and constant elevation. The choice is remembered independently
+of the live map's measurement units. The entered numbers are interpreted in the selected units when
+you click **Move**, **Constant** or **Apply elevation**. The current elevation stays in effect while
+you edit the value or choose units; click **Apply elevation** to apply the new inputs.
 
-- **Modify**: move the selected features by metres east and north, rotate them, scale them,
+- **Modify**: move the selected features by distances east and north, rotate them, scale them,
   merge them (polygons are unioned), explode multipart features, split a line where you click,
   and flip line direction. A single point turns and scales on itself, so Rotate and Scale leave
   points (text graphics included) as they are: with only points selected they change nothing,
@@ -48,6 +53,17 @@ read-only. The Editing pane (Settings, Templates, Status, Modify) holds the rest
 - **Topology**: rules (must not overlap, must not have gaps, must not self-intersect, must not
   have dangles, must be covered by); Validate lists the errors, and clicking one zooms to it.
 - **Status**: features added, changed and deleted per layer since the last save.
+
+### Distance units in commands
+
+`edit.move`, `edit.traverse` and constant `edit.elevation` accept `"units": "Feet"`,
+`"Meters"`, `"Kilometers"` or `"Miles"` (case insensitive). Omitting `units` keeps the
+existing metre default. All traverse legs use the command's units. Conversion to metres
+happens before ground-to-grid corrections and distance limits; stored elevation stays in
+metres. Feet mean international feet (0.3048 m), independently of the source CRS's units.
+
+For example, `edit.move={"dx":500,"dy":0,"units":"Feet"}` moves selected features
+152.4 metres east.
 
 ## Data design
 

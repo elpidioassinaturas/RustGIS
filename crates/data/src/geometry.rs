@@ -3,6 +3,11 @@
 use rustgis_geom::{Coord, Extent};
 use serde::{Deserialize, Serialize};
 
+/// Subdivisions of the label fallback grid; both endpoints are sampled.
+const LABEL_GRID_STEPS: usize = 64;
+// Prefix construction can shift by steps + 1, which must also fit in u128.
+const _: () = assert!(LABEL_GRID_STEPS > 0 && LABEL_GRID_STEPS < (u128::BITS - 1) as usize);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GeometryType {
     Point,
@@ -151,15 +156,20 @@ impl Geometry {
                     outer.iter().for_each(|c| e.expand(*c));
                     e
                 };
-                let steps = 64;
+                let steps = LABEL_GRID_STEPS;
                 let mut best: Option<(f64, Coord)> = None;
                 for i in 1..steps {
                     let y = e.min_y + e.height() * i as f64 / steps as f64;
+                    // Evaluate the same 65 grid points together. Each crossing toggles a
+                    // prefix of x samples, replacing 65 repeated edge walks per scanline.
+                    let mut inside = rings.first().map_or(0, |ring| label_grid_ring(ring, y, &e));
+                    for hole in rings.iter().skip(1) {
+                        inside &= !label_grid_ring(hole, y, &e);
+                    }
                     let mut run_start: Option<f64> = None;
                     for j in 0..=steps {
                         let x = e.min_x + e.width() * j as f64 / steps as f64;
-                        let inside = polygon_contains(rings, Coord::new(x, y));
-                        match (inside, run_start) {
+                        match (inside & (1u128 << j) != 0, run_start) {
                             (true, None) => run_start = Some(x),
                             (false, Some(s)) => {
                                 let w = x - s;
@@ -176,6 +186,34 @@ impl Geometry {
             }
         }
     }
+}
+
+/// Exact even-odd results for the label algorithm's existing 0..=64 x samples.
+/// Search uses the original floating-point expression and strict comparison, preserving boundaries.
+fn label_grid_ring(ring: &[Coord], y: f64, extent: &Extent) -> u128 {
+    if ring.len() < 3 {
+        return 0;
+    }
+    let mut mask = 0u128;
+    let Some(mut previous) = ring.last() else { return 0 };
+    for point in ring {
+        if (point.y > y) != (previous.y > y) {
+            let crossing = (previous.x - point.x) * (y - point.y) / (previous.y - point.y) + point.x;
+            let (mut lo, mut hi) = (0usize, LABEL_GRID_STEPS + 1);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let x = extent.min_x + extent.width() * mid as f64 / LABEL_GRID_STEPS as f64;
+                if x < crossing {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            mask ^= (1u128 << lo) - 1;
+        }
+        previous = point;
+    }
+    mask
 }
 
 /// One vertex of a geometry: its part (a line's part, a polygon's polygon; 0 for points), its
@@ -552,5 +590,198 @@ mod tests {
         assert_eq!(ring_area(&[Coord::new(1.0, 1.0)]), 0.0);
         assert!(Geometry::Polygon(vec![]).label_point().is_none());
         assert!(Geometry::Line(vec![vec![]]).label_point().is_none());
+    }
+}
+
+#[cfg(test)]
+mod label_scanline_tests {
+    use super::*;
+
+    /// Compare every grid sample against the existing even-odd point-in-polygon predicate.
+    #[test]
+    fn label_scanlines_match_every_legacy_grid_test_including_holes_and_large_origins() {
+        for (offset, scale) in [(0.0, 1.0), (41_000_000.0, 1.0), (41_000_000.0, 1e-4), (-80.0, 10000.0)] {
+            for variant in 0..24 {
+                let mut outer = Vec::new();
+                for i in 0..19 {
+                    let a = i as f64 * std::f64::consts::TAU / 19.0;
+                    let r = if (i + variant) % 3 == 0 { 0.23 } else { 1.0 };
+                    outer.push(Coord::new(offset + a.cos() * r * scale, offset + a.sin() * r * scale));
+                }
+                if variant % 2 == 0 {
+                    outer.push(outer[0]);
+                }
+                let hole = |x: f64| {
+                    vec![
+                        Coord::new(offset + x * scale, offset - 0.2 * scale),
+                        Coord::new(offset + (x + 0.3) * scale, offset - 0.2 * scale),
+                        Coord::new(offset + (x + 0.3) * scale, offset + 0.3 * scale),
+                        Coord::new(offset + x * scale, offset + 0.3 * scale),
+                    ]
+                };
+                let rings = vec![outer, hole(-0.2), hole(0.0)];
+                let mut extent = Extent::EMPTY;
+                for p in &rings[0] {
+                    extent.expand(*p);
+                }
+                for i in 1..64 {
+                    let y = extent.min_y + extent.height() * i as f64 / 64.0;
+                    let mut bits = label_grid_ring(&rings[0], y, &extent);
+                    for ring in rings.iter().skip(1) {
+                        bits &= !label_grid_ring(ring, y, &extent);
+                    }
+                    for j in 0..=64 {
+                        let x = extent.min_x + extent.width() * j as f64 / 64.0;
+                        assert_eq!(
+                            bits & (1u128 << j) != 0,
+                            polygon_contains(&rings, Coord::new(x, y)),
+                            "origin={offset} scale={scale} variant={variant} y={i} x={j}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(label_grid_ring(&[], 0.0, &Extent::EMPTY), 0);
+    }
+
+    /// Frozen 64-step oracle; keep its constants independent of the optimized implementation.
+    fn reference_label_point(geometry: &Geometry) -> Option<Coord> {
+        match geometry {
+            Geometry::Point(c) => Some(*c),
+            Geometry::MultiPoint(v) => v.first().copied(),
+            Geometry::Line(parts) => {
+                let part = parts.iter().max_by_key(|p| p.len())?;
+                part.get(part.len() / 2).copied()
+            }
+            Geometry::Polygon(polys) => {
+                let rings = polys.iter().max_by(|a, b| {
+                    let aa = a.first().map(|r| ring_area(r).abs()).unwrap_or(0.0);
+                    let bb = b.first().map(|r| ring_area(r).abs()).unwrap_or(0.0);
+                    aa.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
+                })?;
+                let outer = rings.first()?;
+                let c = ring_centroid(outer)?;
+                if polygon_contains(rings, c) {
+                    return Some(c);
+                }
+                // Scan a horizontal line through the centroid for the widest inside span.
+                let e = {
+                    let mut e = Extent::EMPTY;
+                    outer.iter().for_each(|c| e.expand(*c));
+                    e
+                };
+                let steps = 64;
+                let mut best: Option<(f64, Coord)> = None;
+                for i in 1..steps {
+                    let y = e.min_y + e.height() * i as f64 / steps as f64;
+                    let mut run_start: Option<f64> = None;
+                    for j in 0..=steps {
+                        let x = e.min_x + e.width() * j as f64 / steps as f64;
+                        let inside = polygon_contains(rings, Coord::new(x, y));
+                        match (inside, run_start) {
+                            (true, None) => run_start = Some(x),
+                            (false, Some(s)) => {
+                                let w = x - s;
+                                if best.is_none_or(|(bw, _)| w > bw) {
+                                    best = Some((w, Coord::new((s + x) / 2.0, y)));
+                                }
+                                run_start = None;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                best.map(|(_, c)| c).or(Some(c))
+            }
+        }
+    }
+
+    /// Compare the full public label result, not just the scanline's membership bits.
+    #[test]
+    fn label_points_match_reference_bits() {
+        let ring = |v: &[(f64, f64)]| v.iter().map(|&(x, y)| Coord::new(x, y)).collect::<Vec<_>>();
+        let square = ring(&[(-4.0, -4.0), (4.0, -4.0), (4.0, 4.0), (-4.0, 4.0)]);
+        let hole = ring(&[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]);
+        let concave = ring(&[(0.0, 0.0), (8.0, 0.0), (8.0, 8.0), (6.0, 8.0), (6.0, 2.0), (2.0, 2.0), (2.0, 8.0), (0.0, 8.0)]);
+        assert!(!polygon_contains(std::slice::from_ref(&concave), ring_centroid(&concave).unwrap()));
+        assert!(!polygon_contains(&[square.clone(), hole.clone()], ring_centroid(&square).unwrap()));
+        let mut cases = vec![
+            Geometry::Point(Coord::new(-0.0, 0.0)),
+            Geometry::MultiPoint(vec![]),
+            Geometry::MultiPoint(vec![Coord::new(1.0, 2.0)]),
+            Geometry::Line(vec![]),
+            Geometry::Line(vec![vec![], ring(&[(0.0, 0.0), (1.0, 2.0), (3.0, 4.0)])]),
+            Geometry::Polygon(vec![]),
+            Geometry::Polygon(vec![vec![]]),
+            Geometry::Polygon(vec![vec![vec![]]]),
+        ];
+        let shifted: Vec<_> = square.iter().map(|c| Coord::new(c.x + 20.0, c.y)).collect();
+        cases.push(Geometry::Polygon(vec![vec![square.clone(), hole.clone()], vec![shifted.clone()]]));
+        cases.push(Geometry::Polygon(vec![vec![shifted], vec![square.clone(), hole.clone()]]));
+        let fixtures = vec![
+            vec![square.clone()],
+            vec![concave],
+            vec![square.clone(), hole.clone()],
+            vec![square.clone(), hole.clone(), hole.clone()],
+            vec![square.clone(), square.clone()], // No inside samples: retain the centroid fallback.
+            vec![ring(&[(0.0, 0.0)])],
+            vec![ring(&[(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)])],
+            vec![ring(&[(-0.0, 0.0), (0.0, -0.0), (0.0, 0.0)])],
+        ];
+        for (offset, scale) in [(0.0, 1.0), (41_000_000.0, 1.0), (41_000_000.0, 1e-4), (-80.0, 10000.0)] {
+            for fixture in &fixtures {
+                for reversed in [false, true] {
+                    for closed in [false, true] {
+                        let rings: Vec<Vec<Coord>> = fixture
+                            .iter()
+                            .map(|r| {
+                                let mut r: Vec<_> = r.iter().map(|c| Coord::new(offset + c.x * scale, offset + c.y * scale)).collect();
+                                if reversed {
+                                    r.reverse();
+                                }
+                                if closed && let Some(&first) = r.first() {
+                                    r.push(first);
+                                }
+                                r
+                            })
+                            .collect();
+                        cases.push(Geometry::Polygon(vec![rings.clone()]));
+                        // Equal-area polygons retain the legacy selection order; a smaller polygon precedes them.
+                        cases.push(Geometry::Polygon(vec![vec![hole.clone()], rings.clone(), rings]));
+                    }
+                }
+            }
+        }
+        for variant in 0..24 {
+            let outer: Vec<_> = (0..19)
+                .map(|i| {
+                    let a = i as f64 * std::f64::consts::TAU / 19.0;
+                    let r = if (i + variant) % 3 == 0 { 0.23 } else { 1.0 };
+                    Coord::new(a.cos() * r, a.sin() * r)
+                })
+                .collect();
+            cases.push(Geometry::Polygon(vec![vec![outer, hole.iter().map(|c| Coord::new(c.x * 0.2, c.y * 0.2)).collect()]]));
+        }
+        let mut fast = 0;
+        let mut fallback = 0;
+        for (case, geometry) in cases.iter().enumerate() {
+            if let Geometry::Polygon(polys) = geometry
+                && let Some(rings) = polys.iter().max_by(|a, b| {
+                    let area = |r: &[Vec<Coord>]| r.first().map_or(0.0, |r| ring_area(r).abs());
+                    area(a).partial_cmp(&area(b)).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                && let Some(c) = rings.first().and_then(|r| ring_centroid(r))
+            {
+                if polygon_contains(rings, c) {
+                    fast += 1;
+                } else {
+                    fallback += 1;
+                }
+            }
+            let bits = |c: Option<Coord>| c.map(|c| (c.x.to_bits(), c.y.to_bits()));
+            assert_eq!(bits(geometry.label_point()), bits(reference_label_point(geometry)), "case={case}");
+        }
+        assert!(fast > 0 && fallback > 0, "both centroid and scanline paths must execute");
+        println!("label cases: {}, centroid={fast}, scanline={fallback}", cases.len());
     }
 }

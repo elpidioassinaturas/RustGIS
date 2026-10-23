@@ -51,11 +51,11 @@ pub fn commands() -> Vec<C> {
         .params(
             r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "position": "auto"|"center"|"above"|"below"|"left"|"right"|"aboveRight"|"aboveLeft"|"belowRight"|"belowLeft"}"#,
         ),
-        // Label classes: a feature is labelled by the first class whose clause takes it, Default
-        // last (`Labeling`).
+        // Label classes: each labels every feature its clause takes, as in ArcGIS Pro; the classes
+        // listed first, Default last, are placed first (`Labeling`, #732).
         C::new("labels.class.add", "Add Label Class", "Style › Label Class", add_class)
             .when(need_feature_layer)
-            .params(r#"{"layer"?, "name": string, "where"?: sql (a definition query's language; none takes every feature that reaches it), "from"?: class (whose field and text symbol it starts with; none: the Default class)}"#),
+            .params(r#"{"layer"?, "name": string, "where"?: sql (a definition query's language; none takes every feature), "from"?: class (whose field and text symbol it starts with; none: the Default class)}"#),
         C::new("labels.class.remove", "Remove Label Class", "Style › Label Class", |s, p| {
             let name = s_req(p, "class")?.trim().to_string();
             with_labels(s, p, |labels| {
@@ -106,7 +106,7 @@ pub fn commands() -> Vec<C> {
         .params(r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "where"?: sql|null, "visible"?: bool}"#),
         C::new("labels.class.move", "Move Label Class", "Style › Label Class", |s, p| {
             let name = s_req(p, "class")?.trim().to_string();
-            let to = f(p, "to").filter(|v| v.is_finite()).ok_or("to is required: the class's place, 0 checked first")?;
+            let to = f(p, "to").filter(|v| v.is_finite()).ok_or("to is required: the class's place in the list, 0 first")?;
             with_labels(s, p, |labels| {
                 let i = extra_class(labels, &name)?;
                 let c = labels.classes.remove(i);
@@ -116,7 +116,7 @@ pub fn commands() -> Vec<C> {
             })
         })
         .when(need_feature_layer)
-        .params(r#"{"layer"?, "class": name (not Default), "to": number (its place among the classes checked before Default, 0 first)}"#),
+        .params(r#"{"layer"?, "class": name (not Default), "to": number (its place among the classes listed before Default, 0 first: placed first when labels compete for room)}"#),
     ]
 }
 
@@ -153,15 +153,26 @@ pub(crate) fn with_labels(s: &mut Session, p: &Value, f: impl FnOnce(&mut Labeli
     let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
     let mut labels = l.labels.clone();
     f(&mut labels)?;
+    let relock = !same_class_list(&l.labels, &labels);
     l.labels = labels;
+    if relock {
+        s.map_mut().label_lock = None;
+    }
     Ok(Value::Null)
+}
+
+/// Whether `a` and `b` list the same classes in the same order. A lock names each label by its
+/// class's place in the list (`LabelKey`), so when the list changes the labels are locked again
+/// where they are placed next (`Map::label_lock` emptied, #732).
+pub(crate) fn same_class_list(a: &Labeling, b: &Labeling) -> bool {
+    a.classes.iter().map(|c| &c.name).eq(b.classes.iter().map(|c| &c.name))
 }
 
 /// The place of the class named `name` among those checked before Default (of the
 /// `MAX_LABEL_CLASSES` that count, as `Labeling::class` finds them).
 fn extra_class(labels: &Labeling, name: &str) -> Result<usize, String> {
     if labels.default.name.eq_ignore_ascii_case(name) {
-        return Err(format!("{name} is the Default class: it labels the rest of the features, and stays last"));
+        return Err(format!("{name} is the Default class: it stays last in the list"));
     }
     let mut counted = labels.classes.iter().take(MAX_LABEL_CLASSES);
     counted.position(|c| c.name.eq_ignore_ascii_case(name)).ok_or_else(|| format!("no label class named '{name}'"))
@@ -270,10 +281,10 @@ fn distance_range(s: &mut Session, p: &Value) -> CmdResult {
 }
 
 /// Converts a layer's labels into an annotation layer: one point per label, at the label point,
-/// carrying the label text and drawn with the same text symbol. Each feature takes the text of
-/// the class labelling it (a hidden class's take none); with classes besides Default, a CLASS
-/// field keeps which, and the annotation has the same classes, picking their points by it. The
-/// layer's own labels turn off.
+/// carrying the label text and drawn with the same text symbol. Each class labelling a feature
+/// gives it a point (a hidden class none); with classes besides Default, a CLASS field keeps
+/// which, and the annotation has the same classes, each picking its points by it. The layer's
+/// own labels turn off.
 fn convert(s: &mut Session, p: &Value) -> CmdResult {
     let id = s.layer_id(p)?;
     let l = s.map().layer(id).ok_or("no such layer")?;
@@ -297,18 +308,18 @@ fn convert(s: &mut Session, p: &Value) -> CmdResult {
         if rows.get(row) != Some(&true) {
             continue;
         }
-        let Some((i, class)) = matcher.class_of(&l.dataset, row).filter(|(_, c)| c.visible) else { continue };
-        let Some(fi) = fields.get(i).copied().flatten() else { continue };
-        let v = l.dataset.value(row, fi);
-        if v.is_null() {
-            continue;
-        }
-        if let Some(c) = ft.geometry.as_ref().and_then(Geometry::label_point) {
+        let Some(at) = ft.geometry.as_ref().and_then(Geometry::label_point) else { continue };
+        for (i, class) in matcher.classes_of(&l.dataset, row).filter(|(_, c)| c.visible) {
+            let Some(fi) = fields.get(i).copied().flatten() else { continue };
+            let v = l.dataset.value(row, fi);
+            if v.is_null() {
+                continue;
+            }
             let mut attrs = vec![Attr::Text(v.to_string())];
             if classes {
                 attrs.push(Attr::Text(class.name.clone()));
             }
-            ds.push(Some(Geometry::Point(c)), attrs);
+            ds.push(Some(Geometry::Point(at)), attrs);
         }
     }
     if ds.features.is_empty() {
@@ -322,12 +333,10 @@ fn convert(s: &mut Session, p: &Value) -> CmdResult {
     for c in std::iter::once(&mut labels.default).chain(labels.classes.iter_mut()) {
         c.field = "TEXT".into();
         c.placement = LabelPlacement::Center;
+        // Each class picks the points it labelled, Default too once there are others (#732):
+        // with no clause it would label theirs as well.
+        c.where_ = classes.then(|| format!("\"CLASS\" = '{}'", c.name.replace('\'', "''")));
     }
-    // Each class picks the points it labelled; Default, checked last, takes the rest.
-    for c in &mut labels.classes {
-        c.where_ = Some(format!("\"CLASS\" = '{}'", c.name.replace('\'', "''")));
-    }
-    labels.default.where_ = None;
     let (min_scale, max_scale) = (l.min_scale, l.max_scale);
     if let Some(src) = s.map_mut().layer_mut(id) {
         src.labels.enabled = false;

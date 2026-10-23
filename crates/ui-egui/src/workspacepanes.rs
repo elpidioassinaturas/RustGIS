@@ -428,13 +428,15 @@ pub fn profile(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         return;
     }
     let (lo, hi) = (p["min"].as_f64().unwrap_or(0.0), p["max"].as_f64().unwrap_or(1.0).max(p["min"].as_f64().unwrap_or(0.0) + 1.0));
-    let len = p["length"].as_f64().unwrap_or(1.0).max(1.0);
+    let len = p["length"].as_f64().unwrap_or(1.0);
+    // A degenerate profile still needs a plotting span; its reported length stays unchanged.
+    let plot_len = if len > 0.0 { len } else { 1.0 };
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 150.0), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, t.canvas);
     let to = |(d, z): (f64, f64)| {
         pos2(
-            rect.min.x + 6.0 + (d / len) as f32 * (rect.width() - 12.0),
+            rect.min.x + 6.0 + (d / plot_len) as f32 * (rect.width() - 12.0),
             rect.max.y - 16.0 - ((z - lo) / (hi - lo)) as f32 * (rect.height() - 30.0),
         )
     };
@@ -449,21 +451,21 @@ pub fn profile(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         stroke: egui::epaint::PathStroke::NONE,
     }));
     painter.add(egui::Shape::line(line, egui::Stroke::new(2.0, t.accent)));
-    let fmt = |v: f64| rustgis_engine::map::symbology::fmt_num(v);
-    painter.text(rect.left_top() + vec2(6.0, 4.0), egui::Align2::LEFT_TOP, format!("{} m", fmt(hi)), regular(10.0), t.text_dim);
-    painter.text(rect.left_bottom() + vec2(6.0, -4.0), egui::Align2::LEFT_BOTTOM, format!("{} m", fmt(lo)), regular(10.0), t.text_dim);
+    let fmt = |v: f64| crate::measure_units::elevation(v, app.ui.measurement_imperial);
+    painter.text(rect.left_top() + vec2(6.0, 4.0), egui::Align2::LEFT_TOP, fmt(hi), regular(10.0), t.text_dim);
+    painter.text(rect.left_bottom() + vec2(6.0, -4.0), egui::Align2::LEFT_BOTTOM, fmt(lo), regular(10.0), t.text_dim);
     painter.text(
         rect.right_bottom() + vec2(-6.0, -4.0),
         egui::Align2::RIGHT_BOTTOM,
-        rustgis_engine::geom::format_distance(len),
+        crate::measure_units::distance(len, app.ui.measurement_imperial),
         regular(10.0),
         t.text_dim,
     );
     ui.label(
         egui::RichText::new(crate::i18n::fmt(
-            "Length {length} · gain {gain} m · loss {loss} m",
+            "Length {length} · gain {gain} · loss {loss}",
             &[
-                ("length", &rustgis_engine::geom::format_distance(len)),
+                ("length", &crate::measure_units::distance(len, app.ui.measurement_imperial)),
                 ("gain", &fmt(p["gain"].as_f64().unwrap_or(0.0))),
                 ("loss", &fmt(p["loss"].as_f64().unwrap_or(0.0))),
             ],

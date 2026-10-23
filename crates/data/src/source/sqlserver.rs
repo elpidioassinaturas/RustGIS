@@ -151,6 +151,7 @@ pub struct Conn {
 
 fn err(e: tiberius::error::Error) -> DataError {
     match e {
+        tiberius::error::Error::Server(t) if t.code() == 18456 => DataError::Login(t.message().to_string()),
         tiberius::error::Error::Server(t) => DataError::Format(t.message().to_string()),
         e => DataError::Format(e.to_string()),
     }

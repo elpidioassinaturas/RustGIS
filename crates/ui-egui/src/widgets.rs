@@ -236,6 +236,7 @@ fn small_menu_with(
     let t = Tokens::get(ui.ctx());
     let tw = text_w(ui, label, regular(11.5)) + 20.0;
     let (r, resp) = ui.allocate_exact_size(vec2(26.0 + tw, 22.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), if label.is_empty() { desc } else { label }));
     bg(ui, r, &resp, false, &t);
     icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 13.0, r.center().y), vec2(18.0, 18.0)), icon, t.icon, t.accent);
     ui.painter().text(pos2(r.min.x + 26.0, r.center().y), Align2::LEFT_CENTER, label, regular(11.5), t.text);

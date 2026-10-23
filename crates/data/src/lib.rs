@@ -4,6 +4,7 @@
 //! bad features are skipped and counted in [`ReadReport`].
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod dbf;
 pub mod dirs;
 pub mod dxf;
 pub mod filegdb;
@@ -45,6 +46,9 @@ pub enum DataError {
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Format(String),
+    /// The server refused the login: no password, or a wrong one.
+    #[error("{0}")]
+    Login(String),
     #[error("unsupported file type: {0}")]
     Unsupported(String),
     /// A Zarr slice none of whose chunks is there (the array named): a step never written,

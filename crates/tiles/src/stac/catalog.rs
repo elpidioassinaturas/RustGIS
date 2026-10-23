@@ -69,6 +69,22 @@ pub fn parse_children(bytes: &[u8], from: &str) -> Result<Vec<Child>, String> {
     Ok(out)
 }
 
+/// The items (`item` links) of a catalog's or collection's document fetched from `from`: web
+/// addresses only, in the order the document gives them.
+pub fn parse_item_links(bytes: &[u8], from: &str) -> Result<Vec<Child>, String> {
+    let v = super::json(bytes)?;
+    if !v.is_object() || !matches!(v.get("type").and_then(Value::as_str), Some("Catalog" | "Collection")) {
+        return Err("the answer isn't a STAC catalog or collection".into());
+    }
+    let mut seen = HashSet::new();
+    Ok(links(&v, "item", from)
+        .into_iter()
+        .filter(|(url, _)| is_web(url) && crate::address::check(url, Some(from)).is_ok() && seen.insert(url.clone()))
+        .take(MAX_CHILDREN)
+        .map(|(url, title)| Child { title: if title.is_empty() { label_of(&url) } else { title }, url })
+        .collect())
+}
+
 /// The links of a relation, resolved against `from`: (address, title), the first
 /// [`MAX_LINKS`] of them (counted among that relation's alone).
 fn links(v: &Value, rel: &str, from: &str) -> Vec<(String, String)> {
@@ -499,6 +515,22 @@ mod tests {
         assert_eq!(parse_children(br#"{"type": "Catalog", "links": 7}"#, "https://x.org/c.json"), Ok(vec![]));
         assert_eq!(label_of("https://x.org/events/catalog.json"), "events");
         assert_eq!(label_of("https://x.org/events/a.json"), "a");
+        // A collection lists its items by `item` links, in the order it gives them.
+        let coll = json!({"type": "Collection", "id": "c", "links": [
+            {"rel": "item", "href": "./i2/i2.json", "title": "Second"},
+            {"rel": "item", "href": "./i1/i1.json"},
+            {"rel": "item", "href": "./i2/i2.json"},
+            {"rel": "item", "href": "file:///etc/passwd"},
+            {"rel": "child", "href": "./sub/catalog.json"}]});
+        let i = parse_item_links(coll.to_string().as_bytes(), "https://x.org/c/collection.json").unwrap();
+        assert_eq!(
+            i,
+            vec![
+                Child { title: "Second".into(), url: "https://x.org/c/i2/i2.json".into() },
+                Child { title: "i1".into(), url: "https://x.org/c/i1/i1.json".into() },
+            ]
+        );
+        assert!(parse_item_links(br#"{"type": "Feature"}"#, "https://x.org/c.json").is_err());
     }
 
     #[test]

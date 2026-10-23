@@ -15,6 +15,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 csv = { workspace = true }
 shapefile = { workspace = true }
+encoding_rs = { workspace = true }
 # Zstandard, the usual compression of COGs, is C code that compiles to WebAssembly with clang
 # (on the CI runners), so the browser decodes it too.
 tiff = { workspace = true, features = ["zstd"] }

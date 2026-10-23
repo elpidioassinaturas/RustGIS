@@ -114,19 +114,26 @@ pub(super) fn collections(_s: &mut Session, p: &Value) -> CmdResult {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // A static catalog: its child catalogs and collections, by their addresses.
-        if stac::catalog::is_static(&api) {
+        let url = if stac::catalog::is_static(&api) {
             crate::render::rustgis_tiles::address::check(&api, None)?;
-            let bytes = crate::render::rustgis_tiles::cache::download_blocking(&api)?;
-            let c = stac::catalog::parse_children(&bytes, &api)?;
-            return Ok(
-                json!({"count": c.len(), "static": true, "collections": c.iter().map(|c| json!({"id": c.url, "title": c.title})).collect::<Vec<_>>()}),
-            );
-        }
-        let bytes = crate::render::rustgis_tiles::cache::download_blocking(&stac::collections_url(&api))?;
-        let c = stac::parse_collections(&bytes)?;
-        Ok(json!({"count": c.len(), "collections": c.iter().map(|c| json!({"id": c.id, "title": c.title})).collect::<Vec<_>>()}))
+            api.clone()
+        } else {
+            stac::collections_url(&api)
+        };
+        let bytes = crate::render::rustgis_tiles::cache::download_blocking(&url)?;
+        collections_json(&api, &bytes)
     }
+}
+
+pub(super) fn collections_json(api: &str, bytes: &[u8]) -> CmdResult {
+    if stac::catalog::is_static(api) {
+        let c = stac::catalog::parse_children(bytes, api)?;
+        return Ok(
+            json!({"count": c.len(), "static": true, "collections": c.iter().map(|c| json!({"id": c.url, "title": c.title})).collect::<Vec<_>>()}),
+        );
+    }
+    let c = stac::parse_collections(bytes)?;
+    Ok(json!({"count": c.len(), "collections": c.iter().map(|c| json!({"id": c.id, "title": c.title})).collect::<Vec<_>>()}))
 }
 
 fn search(s: &mut Session, p: &Value) -> CmdResult {

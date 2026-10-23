@@ -139,9 +139,22 @@ pub fn param_list(desc: &str) -> Option<Vec<Param<'_>>> {
 fn param(part: &str) -> Option<Param<'_>> {
     let text = part.trim();
     let rest = text.strip_prefix('"')?;
-    let (key, after) = rest.split_at(rest.find('"')?);
+    let (key, after) = rest.split_at(string_end(rest)?);
     let optional = after.get(1..).is_some_and(|a| a.trim_start().starts_with('?'));
     Some(Param { key, optional, text })
+}
+
+/// Where the string whose text starts `s` ends: the byte index of its closing quote, the first
+/// one not after a backslash (`\"`). None when nothing closes it.
+fn string_end(s: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (i, c) in s.char_indices() {
+        if c == '"' && !escaped {
+            return Some(i);
+        }
+        escaped = c == '\\' && !escaped;
+    }
+    None
 }
 
 /// Whether a parameter description has a required key. Question marks in values do not count.
@@ -169,7 +182,7 @@ fn param_entries<'a>(desc: &'a str, mut visit: impl FnMut(&'a str, bool)) -> Opt
     while let Some(&c) = bytes.get(i) {
         match c {
             b'"' => {
-                let end = bytes.get(i + 1..).and_then(|r| r.iter().position(|&c| c == b'"')).map_or(bytes.len(), |n| i + 1 + n);
+                let end = desc.get(i + 1..).and_then(string_end).map_or(bytes.len(), |n| i + 1 + n);
                 let next = bytes.get(end + 1..).and_then(|r| r.iter().find(|c| !c.is_ascii_whitespace()));
                 let key = match at {
                     At::Entry => matches!(next, Some(b'?' | b':' | b',' | b'}' | b'|')),
@@ -378,6 +391,8 @@ struct PutAside {
     project_starts: u64,
     history_from_file: usize,
     active_layer: Option<u32>,
+    layer_selection: Vec<u32>,
+    layer_selection_of: Option<u32>,
     table_layer: Option<u32>,
     table_standalone: Option<u32>,
     tool: Tool,
@@ -427,6 +442,12 @@ pub struct Session {
     pub tool: Tool,
     /// The layer selected in the Layers pane (the one the Style and Data tabs act on).
     pub active_layer: Option<u32>,
+    /// The layers picked together in the Layers pane, the active layer among them. Read through
+    /// [`Session::selected_layers`]: it holds only while `layer_selection_of` is still the active
+    /// layer, so setting `active_layer` on its own (adding data, a removal) starts over with that
+    /// layer alone.
+    layer_selection: Vec<u32>,
+    layer_selection_of: Option<u32>,
     /// Map view size in logical points (set by the UI each frame).
     pub view_size: (f64, f64),
     /// A MapLibre style tile layer (by its address) whose own view the map goes to once it loads
@@ -620,6 +641,8 @@ impl Session {
             opened: 0,
             tool: Tool::Explore,
             active_layer: None,
+            layer_selection: Vec::new(),
+            layer_selection_of: None,
             view_size: (1200.0, 720.0),
             style_view: None,
             notices: Vec::new(),
@@ -792,8 +815,13 @@ impl Session {
                 self.notify(format!("{id} ignores {} (it reads {reads})", said.join(", ")), false);
             }
         }
-        // Layer conditions apply to the layer the parameters name, falling back to the active one.
-        let named = params.get("layer").and_then(|_| self.layer_id(params).ok());
+        // Layer conditions apply to the layer the parameters name (the first of a list), falling
+        // back to the active one.
+        let named = match params.get("layer") {
+            Some(serde_json::Value::Array(list)) => list.first().and_then(|v| self.layer_id(&serde_json::json!({"layer": v})).ok()),
+            Some(_) => self.layer_id(params).ok(),
+            None => None,
+        };
         let active = self.active_layer;
         if named.is_some() {
             self.active_layer = named;
@@ -981,6 +1009,9 @@ impl Session {
             project_starts: self.project_starts,
             history_from_file: self.history_from_file,
             active_layer: self.active_layer,
+            // Moved, not copied: the next project's layers reuse the same ids.
+            layer_selection: take(&mut self.layer_selection),
+            layer_selection_of: self.layer_selection_of.take(),
             table_layer: self.table_layer,
             table_standalone: self.table_standalone,
             tool: self.tool,
@@ -1023,6 +1054,8 @@ impl Session {
             project_starts,
             history_from_file,
             active_layer,
+            layer_selection,
+            layer_selection_of,
             table_layer,
             table_standalone,
             tool,
@@ -1049,6 +1082,7 @@ impl Session {
         (self.dirty, self.project_starts, self.history_from_file) = (dirty, project_starts, history_from_file);
         (self.trusted_tasks, self.trusted_models, self.trusted_notebooks) = (trusted_tasks, trusted_models, trusted_notebooks);
         (self.active_layer, self.table_layer, self.table_standalone, self.tool) = (active_layer, table_layer, table_standalone, tool);
+        (self.layer_selection, self.layer_selection_of) = (layer_selection, layer_selection_of);
         (self.measurements, self.topology_errors, self.edit_counts) = (measurements, topology_errors, edit_counts);
         (self.path, self.model_run, self.style_view) = (path, model_run, style_view);
         (self.pending, self.plugin_runs, self.plugin_retries) = (pending, plugin_runs, plugin_retries);
@@ -1263,6 +1297,25 @@ impl Session {
         !self.forward.is_empty() && self.map().projection.code() == self.history_projection
     }
 
+    /// The layers picked together in the Layers pane, top of the drawing order first: the layer
+    /// selection if it was made around the current active layer, else that layer alone (none
+    /// when there is no active layer). Layers the map no longer has are left out.
+    pub fn selected_layers(&self) -> Vec<u32> {
+        let map = self.map();
+        let picked: &[u32] = if self.layer_selection_of == self.active_layer { &self.layer_selection } else { &[] };
+        map.layers.iter().map(|l| l.id).filter(|id| picked.contains(id) || self.active_layer == Some(*id)).collect()
+    }
+
+    /// Makes `ids` the layer selection with `active` the active layer (one of them, else none).
+    pub(crate) fn set_layer_selection(&mut self, mut ids: Vec<u32>, active: Option<u32>) {
+        let mut seen = std::collections::HashSet::new();
+        ids.retain(|id| seen.insert(*id));
+        let active = active.filter(|a| ids.contains(a)).or_else(|| ids.last().copied());
+        self.active_layer = active;
+        self.layer_selection = ids;
+        self.layer_selection_of = active;
+    }
+
     /// Keeps `active_layer` pointing at a layer of the active map.
     pub(crate) fn fix_active_layer(&mut self) {
         if self.active_layout.is_some_and(|i| i >= self.project.layouts.len()) {
@@ -1282,6 +1335,12 @@ impl Session {
             && map.layer(id).is_none()
         {
             self.active_layer = map.layers.first().map(|l| l.id);
+        }
+        // A layer selection made around another active layer is over, for good: the active layer
+        // coming back later doesn't bring it back.
+        if self.layer_selection_of != self.active_layer {
+            self.layer_selection.clear();
+            self.layer_selection_of = self.active_layer;
         }
         if let Some(id) = self.table_layer
             && map.layer(id).is_none()

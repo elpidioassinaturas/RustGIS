@@ -392,6 +392,86 @@ fn line_strokes_stack_and_survive_save_and_undo() {
 }
 
 #[test]
+fn a_class_stacks_strokes_of_its_own() {
+    use rustgis_map::symbology::ClassRef;
+    use rustgis_map::{LineStroke, Rgba};
+    let mut s = world();
+    s.run("layer.symbology", &json!({"layer": "Rivers", "type": "unique", "field": "scalerank"})).unwrap();
+    // The layer's one stroke, a casing and core for rivers of rank 1, a thin line for
+    // <all other values>; rank 2 keeps the layer's.
+    s.run("layer.lineStrokes", &json!({"layer": "Rivers", "strokes": [{"offset": 3}]})).unwrap();
+    let depth = s.undo_depth();
+    let pair = json!([{"color": "#000000", "width": 6}, {"color": "#FF8C00", "width": 3}]);
+    s.run("layer.lineStrokes", &json!({"layer": "Rivers", "value": "1", "strokes": pair})).unwrap();
+    s.run("layer.lineStrokes", &json!({"layer": "Rivers", "other": true, "strokes": [{"width": 0.5}]})).unwrap();
+    assert_eq!(s.undo_depth(), depth + 2);
+    let casing = vec![
+        LineStroke { color: Some(Rgba::rgb(0, 0, 0)), width: Some(6.0), ..Default::default() },
+        LineStroke { color: Some(Rgba::rgb(0xFF, 0x8C, 0)), width: Some(3.0), ..Default::default() },
+    ];
+    let layer_own = vec![LineStroke { offset: 3.0, ..Default::default() }];
+    let check = |s: &Session| {
+        let l = s.map().layer_by_name("Rivers").unwrap();
+        let fi = l.dataset.field_index("scalerank").unwrap();
+        assert!(l.has_strokes());
+        for row in 0..l.dataset.features.len() {
+            let want = if l.dataset.value(row, fi).to_string() == "1" { &casing } else { &layer_own };
+            assert_eq!(l.strokes(row), want.as_slice(), "row {row}");
+            // Classed once, the same as asked apart.
+            assert_eq!(l.style(row), (l.symbol(row), want.as_slice()), "row {row}");
+        }
+        assert_eq!(l.renderer.class_strokes(&ClassRef::Other).unwrap().len(), 1);
+    };
+    check(&s);
+    // A number names the class as the data prints it.
+    s.run("layer.lineStrokes", &json!({"layer": "Rivers", "value": 1, "strokes": pair})).unwrap();
+    check(&s);
+    // Kept in the project file, and through applying the same symbology again.
+    let dir = std::env::temp_dir().join(format!("rustgis-class-strokes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("strokes.rgis");
+    s.run("project.saveAs", &json!({"path": path.display().to_string()})).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.open", &json!({"path": path.display().to_string()})).unwrap();
+    check(&t);
+    let png = dir.join("map.png");
+    t.run("share.exportMap", &json!({"path": png.display().to_string(), "width": 320, "height": 200})).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    s.run("layer.symbology", &json!({"layer": "Rivers", "type": "unique", "field": "scalerank", "ramp": "Ember"})).unwrap();
+    check(&s);
+    // Junk, a class that isn't there, or a class on the wrong renderer: refused, nothing changes.
+    let depth = s.undo_depth();
+    for bad in [
+        json!({"layer": "Rivers", "value": "7", "strokes": pair}),
+        json!({"layer": "Rivers", "index": 0, "strokes": pair}),
+        json!({"layer": "Rivers", "value": "1", "index": 0, "strokes": pair}),
+        json!({"layer": "Rivers", "value": [1], "strokes": pair}),
+        json!({"layer": "Rivers", "value": "1", "strokes": vec![json!({}); 17]}),
+        json!({"layer": "Rivers", "value": "1", "strokes": [{"cap": "pointy"}]}),
+        json!({"layer": "Cities", "value": "1", "strokes": []}),
+    ] {
+        assert!(s.run("layer.lineStrokes", &bad).is_err(), "{bad}");
+    }
+    assert_eq!(s.undo_depth(), depth);
+    // [] gives the class back to the layer's strokes; undo brings its own back.
+    s.run("layer.lineStrokes", &json!({"layer": "Rivers", "value": "1", "strokes": []})).unwrap();
+    assert!(s.map().layer_by_name("Rivers").unwrap().strokes(0).iter().all(|st| st.offset == 3.0));
+    s.run("edit.undo", &Value::Null).unwrap();
+    check(&s);
+    // Another field starts fresh.
+    s.run("layer.symbology", &json!({"layer": "Rivers", "type": "unique", "field": "name"})).unwrap();
+    assert!(!s.map().layer_by_name("Rivers").unwrap().renderer.has_class_strokes());
+    // Graduated Colors classes go by index; a single symbol has no classes.
+    s.run("layer.symbology", &json!({"layer": "Rivers", "type": "graduated", "field": "scalerank", "classes": 2})).unwrap();
+    s.run("layer.lineStrokes", &json!({"layer": "Rivers", "index": 0, "strokes": pair})).unwrap();
+    assert_eq!(s.map().layer_by_name("Rivers").unwrap().renderer.class_strokes(&ClassRef::Index(0)).unwrap(), casing.as_slice());
+    assert!(s.run("layer.lineStrokes", &json!({"layer": "Rivers", "index": 9, "strokes": pair})).is_err());
+    assert!(s.run("layer.lineStrokes", &json!({"layer": "Rivers", "value": "1", "strokes": pair})).is_err());
+    s.run("layer.symbology", &json!({"layer": "Rivers", "type": "single"})).unwrap();
+    assert!(s.run("layer.lineStrokes", &json!({"layer": "Rivers", "index": 0, "strokes": pair})).is_err());
+}
+
+#[test]
 fn project_save_and_open_roundtrip() {
     let mut s = world();
     let dir = std::env::temp_dir().join(format!("rustgis-test-{}", std::process::id()));
@@ -1146,6 +1226,9 @@ fn hostile_params_never_panic() {
         // Connections: junk kinds, options and secrets; no connection exists in a fresh session.
         json!({"id": "c1", "kind": "s3", "address": "http://127.0.0.1:9", "name": "\u{7}", "group": 5, "options": {"credentials": "nope", "buckets": "NO_", "region": [1]}, "password": 7, "accessKeyId": "A", "secretAccessKey": 9}),
         json!({"id": "", "kind": "postgres", "address": "postgres:host=127.0.0.1 port=9 password=x", "options": "x"}),
+        json!({"kind": "wms", "address": "http://127.0.0.1:9/wms", "probe": "x", "answer": 7}),
+        json!({"kind": "stac", "address": "http://127.0.0.1:9/stac", "answer": "\u{0}{"}),
+        json!({"id": "c1", "node": "s3:/\u{7}", "probe": true, "answer": 7, "documents": "x"}),
     ];
     let ids: Vec<&str> = Session::new(Project::default()).registry.commands.iter().map(|c| c.id).collect();
     let streamed = grid_fgb("hostile", 20);
@@ -1459,6 +1542,38 @@ fn label_range_placement_lock_and_convert() {
     assert!(!s.map().layer_by_name("Countries").unwrap().labels.enabled);
 }
 
+/// A lock names each label by its class's place in the list: a change to the list (a class added,
+/// moved or removed) locks the labels again on the next frame, a change within a class keeps the
+/// lock (#732).
+#[test]
+fn a_change_to_the_label_classes_locks_the_labels_again() {
+    use crate::render::View;
+    let mut s = world();
+    s.run("labels.enable", &json!({"layer": "Cities", "on": true})).unwrap();
+    s.run("labels.lock", &json!({"on": true})).unwrap();
+    let draw = |s: &mut Session| {
+        let v = View { width: 800.0, height: 600.0, pixels_per_point: 1.0, camera: s.map().camera, sky: false };
+        crate::render::render(s.map_mut(), &v).unwrap();
+    };
+    draw(&mut s);
+    assert!(s.map().label_lock.is_some());
+    s.run("labels.style", &json!({"layer": "Cities", "size": 14})).unwrap();
+    s.run("labels.class.update", &json!({"layer": "Cities", "visible": true})).unwrap();
+    assert!(s.map().label_lock.is_some(), "a change within a class keeps the lock");
+    for (id, p) in [
+        ("labels.class.add", json!({"layer": "Cities", "name": "Big"})),
+        ("labels.class.add", json!({"layer": "Cities", "name": "Small"})),
+        ("labels.class.move", json!({"layer": "Cities", "class": "Small", "to": 0})),
+        ("labels.class.remove", json!({"layer": "Cities", "class": "Big"})),
+        ("labels.class.clear", json!({"layer": "Cities"})),
+    ] {
+        s.run(id, &p).unwrap();
+        assert!(s.map().label_lock.is_none(), "{id} moves the classes: locked again");
+        draw(&mut s);
+        assert!(s.map().label_lock.is_some(), "{id}: locked on the next frame");
+    }
+}
+
 /// Label classes by command (#618): added from Default and checked before it, renamed, given
 /// a clause, moved, styled and removed; refusals change nothing, and Default stays last.
 #[test]
@@ -1563,9 +1678,12 @@ fn label_classes_convert_and_outlive_a_deleted_field() {
     let a = s.map().layer(u32::try_from(r["layer"].as_u64().unwrap()).unwrap()).unwrap();
     let classes: Vec<_> = a.labels.in_order().map(|c| (c.name.clone(), c.where_.clone(), c.field.clone(), c.size)).collect();
     assert_eq!(classes[0], ("Big's".to_string(), Some(r#""CLASS" = 'Big''s'"#.to_string()), "TEXT".to_string(), 18.0));
-    assert_eq!((classes[1].1.as_ref(), classes[1].2.as_str()), (None, "TEXT"), "Default takes the rest");
-    let picked = rustgis_data::query::select(classes[0].1.as_deref().unwrap(), &a.dataset).unwrap().len();
-    assert_eq!(picked, big, "the class's clause picks the points it labelled");
+    assert_eq!((classes[1].1.as_deref(), classes[1].2.as_str()), (Some(r#""CLASS" = 'Default'"#), "TEXT"), "Default picks its own");
+    let picked = |w: &Option<String>| rustgis_data::query::select(w.as_deref().unwrap(), &a.dataset).unwrap().len();
+    assert_eq!(picked(&classes[0].1), big, "the class's clause picks the points it labelled");
+    // Default labels the big cities too (#732): each class gives them a point.
+    assert_eq!(picked(&classes[1].1), a.dataset.features.len() - big);
+    assert!(picked(&classes[1].1) > big, "Default labels every city, the big ones among them");
     // A deleted field: the class labels with Default's field, and is kept.
     s.run("layer.select", &json!({"layer": cities})).unwrap();
     s.run("labels.field", &json!({"class": "Big's", "field": "pop_max"})).unwrap();
@@ -7114,6 +7232,18 @@ fn wcs_coverages_and_catalogue_records() {
     );
     let full = s.run("service.coverage", &json!({"url": url, "layer": "soc", "text": caps, "describe": describe, "bbox": "full"})).unwrap();
     assert_eq!(full["bbox"], json!([5.0, 49.2, 5.8, 50.0]));
+    // The same coverage browsed from a saved connection: the add it lists runs as it is.
+    s.run("connection.new", &json!({"kind": "wcs", "address": url, "name": "Soils"})).unwrap();
+    let browsed = s.run("connection.browse", &json!({"id": "Soils", "answer": caps})).unwrap();
+    let child = &browsed["children"][0];
+    assert_eq!((child["what"].as_str(), child["add"]["command"].as_str()), (Some("coverage"), Some("service.add")), "{browsed}");
+    let mut listed = child["add"]["params"].clone();
+    listed["text"] = json!(caps);
+    listed["describe"] = json!(describe);
+    listed["bbox"] = json!("full");
+    let layers = s.map().layers.len();
+    s.run("service.add", &listed).unwrap();
+    assert_eq!(s.map().layers.len(), layers + 1);
     let (err, _) = serve_file(b"<ows:ExceptionReport>no</ows:ExceptionReport>".to_vec(), false);
     let p = json!({"url": format!("{err}/wcs"), "layer": "soc", "text": caps, "describe": describe, "bbox": "full"});
     assert!(s.run("service.add", &p).unwrap_err().contains("error"));
@@ -9112,6 +9242,248 @@ fn data_sources_recent_favourites_and_saved() {
 }
 
 #[test]
+fn layer_address_redaction_preserves_templates_and_local_paths() {
+    let cases = [
+        ("https://{switch:a,b}.host/{z}/{x}/{y}@2x.png?key=secret&map=m#token", "https://{switch:a,b}.host/{z}/{x}/{y}@2x.png?map=m"),
+        ("HTTPS://u:p@host/data?token=secret&f=json", "HTTPS://host/data?f=json"),
+        ("s3://u:p@bucket/data?X-Amz-Signature=secret", "s3://bucket/data"),
+        ("/tmp/data?key=not-a-web-secret", "/tmp/data?key=not-a-web-secret"),
+        ("upload:map?token=local", "upload:map?token=local"),
+        ("postgres:host=localhost dbname=gis", "postgres:host=localhost dbname=gis"),
+    ];
+    let mut addresses: Vec<String> = cases.iter().map(|(a, _)| a.to_string()).collect();
+    crate::project::strip_addresses(addresses.iter_mut().collect());
+    for (address, (_, expected)) in addresses.iter().zip(cases) {
+        assert_eq!(address, expected);
+    }
+    let prefix = crate::render::rustgis_tiles::s3::ANONYMOUS;
+    let mut anonymous = format!("{prefix}https://bucket.example/a?token=secret");
+    crate::project::strip_addresses(vec![&mut anonymous]);
+    assert_eq!(anonymous, format!("{prefix}https://bucket.example/a"));
+}
+
+#[test]
+fn saved_layer_files_keep_no_address_secrets() {
+    let mut s = world();
+    let feature = s.map().layers[0].id;
+    let dataset_url = "https://user:dataset-password@gis.example/features?access_token=dataset-token&f=json";
+    let source_url = "https://gis.example/roads.fgb?sig=source-signature&sv=1&collection=roads";
+    {
+        let layer = s.map_mut().layer_mut(feature).unwrap();
+        layer.dataset.source = Some(dataset_url.into());
+        layer.source = Some(serde_json::from_value(json!({"path":source_url})).unwrap());
+    }
+    let added = s.run("layer.addDataBytes", &json!({"fileName":"dem.tif","name":"Protected raster","data":dem_b64()})).unwrap();
+    let raster = added["layer"].as_u64().unwrap() as u32;
+    let raster_url = "https://user:raster-password@gis.example/dem.tif?api_key=raster-key&band=1";
+    let zarr_url = "https://gis.example/air.zarr?token=zarr-token&variable=air";
+    {
+        let layer = s.map_mut().layer_mut(raster).unwrap().raster.as_mut().unwrap();
+        layer.path = Some(raster_url.into());
+        layer.time_zarr = Some(rustgis_map::raster::ZarrTime { store: zarr_url.into(), ..Default::default() });
+    }
+    for id in [feature, raster] {
+        let (_, bytes) = crate::cmd::items::item_bytes(&mut s, "layer", &json!({"layer":id})).unwrap();
+        let exported: Value = serde_json::from_slice(&bytes).unwrap();
+        if id == feature {
+            assert_eq!(exported["dataset"]["source"], "https://gis.example/features?f=json");
+            assert_eq!(exported["source"]["path"], "https://gis.example/roads.fgb?collection=roads");
+        } else {
+            assert_eq!(exported["raster"]["path"], "https://gis.example/dem.tif?band=1");
+            assert_eq!(exported["raster"]["time_zarr"]["store"], "https://gis.example/air.zarr?variable=air");
+        }
+    }
+    let layer = s.map().layer(feature).unwrap();
+    assert_eq!(layer.dataset.source.as_deref(), Some(dataset_url));
+    assert_eq!(layer.source.as_ref().unwrap().path.as_deref(), Some(source_url));
+    let layer = s.map().layer(raster).unwrap().raster.as_ref().unwrap();
+    assert_eq!(layer.path.as_deref(), Some(raster_url));
+    assert_eq!(layer.time_zarr.as_ref().unwrap().store, zarr_url);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn database_authorization_failures_do_not_wait_for_password() {
+    use std::io::{Read, Write};
+    for (name, message) in [("HBA blocked", "no pg_hba.conf entry for host"), ("Missing role", "role \"missing\" does not exist")] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut length = [0; 4];
+            stream.read_exact(&mut length).unwrap();
+            let n = u32::from_be_bytes(length);
+            assert!((4..=65536).contains(&n));
+            stream.read_exact(&mut vec![0; (n - 4) as usize]).unwrap();
+            let body = format!("SFATAL\0VFATAL\0C28000\0M{message}\0\0");
+            stream.write_all(b"E").unwrap();
+            stream.write_all(&((body.len() + 4) as u32).to_be_bytes()).unwrap();
+            stream.write_all(body.as_bytes()).unwrap();
+        });
+        let dsn = format!("postgres:host=127.0.0.1 port={port} dbname=review_auth user=missing sslmode=disable");
+        let mut project = world().project;
+        project.map_mut().layers[0].source =
+            Some(serde_json::from_value(json!({"postgis":{"database":dsn,"table":"roads","family":"Lines"}})).unwrap());
+        let mut s = Session::new(Project::default());
+        s.run("connection.new", &json!({"kind":"postgres","name":name,"address":dsn})).unwrap();
+        s.run("project.openText", &json!({"text":serde_json::to_string(&project).unwrap()})).unwrap();
+        server.join().unwrap();
+        let source = s.map().layers[0].source.as_ref().unwrap();
+        assert!(source.error.as_deref().unwrap().contains(message));
+        assert!(!source.login, "{message} cannot be fixed by a password");
+        assert!(!s.notices.iter().any(|n| n.text.contains(name)));
+        assert!(s.run("connection.list", &Value::Null).unwrap()["connections"][0].get("waiting").is_none());
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn database_layers_wait_for_their_connection_login() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().take(16).flatten() {
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut length = [0; 4];
+            if stream.read_exact(&mut length).is_err() {
+                continue;
+            }
+            let n = u32::from_be_bytes(length);
+            if !(4..=65536).contains(&n) {
+                continue;
+            }
+            let mut startup = vec![0; (n - 4) as usize];
+            if stream.read_exact(&mut startup).is_err() || stream.write_all(b"R\0\0\0\x08\0\0\0\x03").is_err() {
+                continue;
+            }
+            let mut kind = [0];
+            if stream.read_exact(&mut kind).is_err() || kind[0] != b'p' || stream.read_exact(&mut length).is_err() {
+                continue;
+            }
+            let n = u32::from_be_bytes(length);
+            if !(4..=65536).contains(&n) {
+                continue;
+            }
+            let mut password = vec![0; (n - 4) as usize];
+            if stream.read_exact(&mut password).is_err() {
+                continue;
+            }
+            let body = b"SFATAL\0VFATAL\0C28P01\0Mpassword authentication failed for user \"me\"\0\0";
+            let _ = stream.write_all(b"E");
+            let _ = stream.write_all(&((body.len() + 4) as u32).to_be_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+    let dsn = format!("postgres:host=127.0.0.1 port={port} dbname=waiting_login user=me sslmode=disable");
+    let down = "postgres:host=127.0.0.1 port=1 dbname=waiting_down user=me sslmode=disable";
+    let mut s = world();
+    for (layer, database) in s.map_mut().layers.iter_mut().zip([dsn.as_str(), dsn.as_str(), down]) {
+        layer.source = Some(serde_json::from_value(json!({"postgis":{"database":database,"table":"roads","family":"Lines"}})).unwrap());
+    }
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("connection.new", &json!({"kind":"postgres","name":"Production GIS","address":dsn})).unwrap();
+    t.run("connection.new", &json!({"kind":"postgres","name":"Down","address":down})).unwrap();
+    t.run("project.openText", &json!({"text":text})).unwrap();
+    for layer in t.map().layers.iter().take(2) {
+        // No password has been given: this exercises tokio-postgres's client-side config error,
+        // before the later login attempts exercise the server's 28P01 response.
+        assert!(layer.source.as_ref().unwrap().error.as_deref().unwrap().contains("password missing"));
+        assert!(layer.source.as_ref().unwrap().login);
+        assert_eq!(t.connections.for_layer(layer).unwrap().name, "Production GIS");
+    }
+    assert!(t.map().layers.iter().skip(3).all(|l| t.connections.for_layer(l).is_none()));
+    let third = t.map().layers[2].source.as_ref().unwrap();
+    assert!(third.error.is_some() && !third.login);
+    assert!(t.notices.iter().any(|n| n.text.contains("2 layer(s)") && n.text.contains("Production GIS")));
+    assert!(!t.notices.iter().any(|n| n.text.contains("Down")));
+    let listed = t.run("connection.list", &Value::Null).unwrap();
+    assert_eq!(listed["connections"][0]["waiting"], 2);
+    assert!(listed["connections"][1].get("waiting").is_none());
+    let result = t.run("connection.login", &json!({"id":"Production GIS","password":"wrong"})).unwrap();
+    assert_eq!(result["reopened"], 0);
+    assert_eq!(result["failed"], 2);
+    assert!(t.map().layers.iter().take(2).all(|l| l.source.as_ref().unwrap().login));
+    assert_eq!(t.run("connection.list", &Value::Null).unwrap()["connections"][0]["waiting"], 2);
+    // Duplicate saved connections use list order for reporting, but either can log in.
+    t.run("connection.new", &json!({"kind":"postgres","name":"Same database","address":dsn})).unwrap();
+    assert_eq!(t.connections.for_layer(&t.map().layers[0]).unwrap().name, "Production GIS");
+    let result = t.run("connection.login", &json!({"id":"Same database","password":"wrong"})).unwrap();
+    assert_eq!(result["failed"], 2);
+}
+
+#[test]
+fn saved_projects_keep_no_layer_tokens() {
+    let mut s = world();
+    let url = "https://gis.example/arcgis/rest/services/a/MapServer/tile/{z}/{y}/{x}?token=s3cret";
+    s.run("map.addTiles", &json!({"url":url,"name":"Secured"})).unwrap();
+    let layer = s.map().layers[0].id;
+    s.map_mut().layers[0].dataset.source = Some("https://u:pw@gis.example/f?f=json&access_token=tok2".into());
+    s.map_mut().service_groups.push(rustgis_map::ServiceGroup {
+        id: 123,
+        name: "Protected service".into(),
+        url: "https://gis.example/wfs?key=k3y&map=m".into(),
+        kind: "wfs".into(),
+        expanded: true,
+        children: vec![rustgis_map::ServiceChild {
+            layer,
+            collection: "roads".into(),
+            source_url: "https://gis.example/roads?sig=x&sv=1".into(),
+        }],
+    });
+    let path = std::env::temp_dir().join(format!("rustgis-token-audit-{}.rgis", std::process::id()));
+    let result = s.run("project.saveAs", &json!({"path":path})).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    for secret in ["s3cret", "pw@", "tok2", "k3y", "sig=x"] {
+        assert!(!text.contains(secret), "{secret} leaked into the file");
+    }
+    assert!(text.contains("MapServer/tile/{z}/{y}/{x}") && text.contains("map=m"));
+    assert!(result["stripped"].as_u64().unwrap() >= 4);
+    assert!(s.notices.iter().any(|n| n.text.contains("saved without their keys")));
+    assert!(s.map().tiles.iter().any(|t| t.url == url));
+    for kind in ["map", "projectPackage", "mapPackage", "mobilePackage"] {
+        let (_, bytes) = crate::cmd::items::item_bytes(&mut s, kind, &Value::Null).unwrap();
+        let packaged =
+            if kind == "map" { String::from_utf8(bytes.clone()).unwrap() } else { crate::cmd::items::package_text(&bytes).unwrap() };
+        for secret in ["s3cret", "pw@", "tok2", "k3y", "sig=x"] {
+            assert!(!packaged.contains(secret), "{kind} leaked {secret}");
+        }
+        if kind == "projectPackage" {
+            // Even a hostile archive carrying the exact registered JSON must not restore it.
+            let hostile = rustgis_data::zip::write(&[("exact.rgis".into(), text.as_bytes().to_vec())]).unwrap();
+            let package_path = path.with_extension("rgispkg");
+            std::fs::write(&package_path, hostile).unwrap();
+            let mut opened = Session::new(Project::default());
+            opened.run("project.open", &json!({"path":package_path})).unwrap();
+            assert!(!serde_json::to_string(&opened.project).unwrap().contains("s3cret"));
+            opened.run("project.openText", &json!({"text":text,"package":true})).unwrap();
+            assert!(!serde_json::to_string(&opened.project).unwrap().contains("s3cret"));
+            std::fs::remove_file(package_path).unwrap();
+        }
+    }
+    let mut t = Session::new(Project::default());
+    t.run("project.open", &json!({"path":path})).unwrap();
+    assert!(t.map().tiles.iter().any(|t| t.url == url));
+    assert!(t.map().layers[0].dataset.source.as_deref().unwrap().contains("tok2"));
+    let modified = text.replace("\"name\":\"Secured\"", "\"name\":\"Secures\"");
+    assert_ne!(text, modified);
+    t.run("project.openText", &json!({"text":modified})).unwrap();
+    let live = serde_json::to_string(&t.project).unwrap();
+    for secret in ["s3cret", "pw@", "tok2", "k3y", "sig=x"] {
+        assert!(!live.contains(secret), "{secret} restored into a modified hostile file");
+    }
+    let public = url.split('?').next().unwrap();
+    let mut hand = world();
+    hand.run("map.addTiles", &json!({"url":public,"name":"Hand made"})).unwrap();
+    t.run("project.openText", &json!({"text":serde_json::to_string(&hand.project).unwrap()})).unwrap();
+    assert!(t.map().tiles.iter().any(|t| t.url == public));
+    assert!(!serde_json::to_string(&t.project).unwrap().contains("s3cret"));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn connections_commands() {
     use crate::render::rustgis_tiles::s3;
     let mut s = Session::new(Project::default());
@@ -9170,7 +9542,15 @@ fn connections_commands() {
     assert_eq!(renamed["name"], "wms (2)");
     assert_ne!(default["id"], renamed["id"]);
     assert!(crate::sources::holds_secret(&json!({"id":"x","password":"p"})));
-    for id in ["connection.new", "connection.edit", "connection.duplicate", "connection.remove", "connection.login", "connection.test"] {
+    for id in [
+        "connection.new",
+        "connection.edit",
+        "connection.duplicate",
+        "connection.remove",
+        "connection.login",
+        "connection.test",
+        "connection.browse",
+    ] {
         assert!(crate::cmd::plugins::user_only(id), "{id}");
     }
     assert!(!crate::cmd::plugins::user_only("connection.list"));
@@ -9233,6 +9613,241 @@ fn connections_s3_rename_cannot_inherit_a_destination_session() {
     s.run("connection.login", &json!({"id":destination,"accessKeyId":"NEWKEY","secretAccessKey":"new-test-secret"})).unwrap();
     assert_eq!(s3::connection(destination).unwrap().endpoint.as_deref(), Some("https://saved.example"));
     s.run("connection.remove", &json!({"id":destination})).unwrap();
+}
+
+#[test]
+fn connection_test_probes_and_answers() {
+    use crate::render::rustgis_tiles::s3;
+    let mut s = Session::new(Project::default());
+    let mut wms = json!({"kind":"wms","address":"https://a.example/wms","probe":true});
+    let v = s.run("connection.test", &wms).unwrap();
+    let fetch = v["fetch"].as_str().unwrap();
+    assert!(fetch.starts_with("https://a.example/wms") && fetch.contains("REQUEST=GetCapabilities"));
+    assert!(v.get("connection").is_none());
+    assert!(s.connections.connections.is_empty());
+    wms.as_object_mut().unwrap().remove("probe");
+    wms["answer"] = json!(
+        r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink"><Service><Title>Local</Title></Service><Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="https://a.example/wms?"/></Get></HTTP></DCPType></GetMap></Request><Layer><CRS>EPSG:3857</CRS><Layer><Name>a</Name><Title>A</Title></Layer></Layer></Capability></WMS_Capabilities>"#
+    );
+    assert_eq!(s.run("connection.test", &wms).unwrap()["result"]["layers"][0]["name"], "a");
+    assert_eq!(
+        s.run("connection.test", &json!({"kind":"stac","address":"https://s.example/v1","probe":true})).unwrap()["fetch"],
+        "https://s.example/v1/collections"
+    );
+    assert_eq!(
+        s.run(
+            "connection.test",
+            &json!({"kind":"stac","address":"https://s.example/v1","answer":r#"{"collections":[{"id":"c1","title":"C"}]}"#})
+        )
+        .unwrap()["result"]["count"],
+        1
+    );
+    let mut p = json!({"kind":"s3","name":"probe-s3","options":{"credentials":"none","buckets":"bkt1"},"probe":true});
+    assert!(s.run("connection.test", &p).unwrap()["fetch"].as_str().unwrap().contains("bkt1"));
+    p.as_object_mut().unwrap().remove("probe");
+    p["answer"] = json!("<ListBucketResult><Contents><Key>a.tif</Key><Size>1</Size></Contents></ListBucketResult>");
+    assert_eq!(s.run("connection.test", &p).unwrap()["result"]["count"], 1);
+    p["options"].as_object_mut().unwrap().remove("buckets");
+    p["probe"] = json!(true);
+    assert!(s.run("connection.test", &p).unwrap_err().contains("name a bucket"));
+    s3::disconnect("probe-s3");
+    #[cfg(not(target_arch = "wasm32"))]
+    assert!(
+        s.run("connection.test", &json!({"kind":"postgres","address":"postgres:host=127.0.0.1 port=9 dbname=x user=u","probe":true}))
+            .unwrap()["fetch"]
+            .is_null()
+    );
+    assert!(s.run("connection.test", &json!({"probe":true})).unwrap_err().contains("id, or kind and address"));
+    assert!(s.connections.connections.is_empty());
+}
+
+/// Browsing a saved connection lists what each kind offers, a level at a time, with the command
+/// that adds each dataset; offline, with the answers supplied. A node that isn't the
+/// connection's is refused, and nothing browsed is saved or undoable.
+#[test]
+fn connection_browse_levels_and_adds() {
+    use crate::render::rustgis_tiles::s3;
+    let mut s = Session::new(Project::default());
+    let new = |s: &mut Session, p: Value| s.run("connection.new", &p).unwrap();
+    let wms_caps = r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink"><Service><Title>Local</Title></Service><Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="https://a.example/wms?"/></Get></HTTP></DCPType></GetMap></Request><Layer><CRS>EPSG:3857</CRS><Layer><Name>a</Name><Title>A</Title></Layer><Layer><Name>b</Name><Title>B</Title></Layer></Layer></Capability></WMS_Capabilities>"#;
+
+    // WMS: the address read, its layers, and the add that adds one.
+    new(&mut s, json!({"kind": "wms", "address": "https://a.example/wms", "name": "W"}));
+    let v = s.run("connection.browse", &json!({"id": "W", "probe": true})).unwrap();
+    assert!(v["fetch"].as_str().is_some_and(|f| f.contains("REQUEST=GetCapabilities")), "{v}");
+    let v = s.run("connection.browse", &json!({"id": "W", "answer": wms_caps})).unwrap();
+    assert_eq!(v["service"], json!({"url": "https://a.example/wms", "type": "wms"}));
+    let first = v["children"][0].clone();
+    assert_eq!(first["what"], "map");
+    assert_eq!(first["name"], "A");
+    assert_eq!(first["add"]["command"], "service.add");
+    assert_eq!(first["add"]["params"]["url"], "https://a.example/wms");
+    assert_eq!(first["add"]["params"]["type"], "wms");
+    assert_eq!(first["add"]["params"]["layer"], "a");
+    assert!(first["add"]["params"].get("source_url").is_some());
+    assert_eq!(v["children"].as_array().unwrap().len(), 2);
+    let before = s.map().tiles.len();
+    let mut add = first["add"]["params"].clone();
+    add["text"] = json!(wms_caps);
+    s.run("service.add", &add).unwrap();
+    assert_eq!(s.map().tiles.len(), before + 1);
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(s.map().tiles.len(), before);
+
+    // ArcGIS: a directory's folder is a node of its own address.
+    new(&mut s, json!({"kind": "arcgis", "address": "https://x.example.org/arcgis/rest/services", "name": "Arc"}));
+    let dir = r#"{"currentVersion": 11, "folders": ["Hydro"], "services": [{"name": "Topo", "type": "MapServer"}]}"#;
+    let v = s.run("connection.browse", &json!({"id": "Arc", "answer": dir})).unwrap();
+    let folder = "service:arcgis:https://x.example.org/arcgis/rest/services/Hydro";
+    let child = v["children"].as_array().unwrap().iter().find(|c| c["node"] == folder).unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(child["what"], "folder");
+    assert_eq!(child["name"], "Hydro");
+    let v = s.run("connection.browse", &json!({"id": "Arc", "node": folder, "probe": true})).unwrap();
+    assert!(v["fetch"].as_str().is_some_and(|f| f.starts_with("https://x.example.org/arcgis/rest/services/Hydro")), "{v}");
+
+    // CSW: a record, the service it links to as a node, and more records than listed.
+    new(&mut s, json!({"kind": "csw", "address": "https://cat.example.org/csw", "name": "Cat"}));
+    let records = r#"<csw:GetRecordsResponse xmlns:csw="http://www.opengis.net/cat/csw/2.0.2" xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <csw:SearchResults numberOfRecordsMatched="3" nextRecord="2"><csw:Record><dc:title>Forests</dc:title>
+          <dc:URI protocol="OGC:WMS">https://geo.example.org/wms</dc:URI><dc:URI protocol="OGC:WFS">http://192.168.1.2/wfs</dc:URI>
+        </csw:Record></csw:SearchResults></csw:GetRecordsResponse>"#;
+    let v = s.run("connection.browse", &json!({"id": "Cat", "answer": records})).unwrap();
+    assert_eq!(v["children"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["children"][0]["what"], "record");
+    assert_eq!(v["children"][0]["children"][0]["node"], "service:wms:https://geo.example.org/wms");
+    assert_eq!((v["matched"].as_u64(), v["truncated"].as_bool()), (Some(3), Some(true)));
+    assert!(v.get("next").is_none());
+
+    // STAC: collections, a collection's search, and an item's asset with the add of it.
+    new(&mut s, json!({"kind": "stac", "address": "https://s.example/v1", "name": "Stac"}));
+    let v = s.run("connection.browse", &json!({"id": "Stac", "probe": true})).unwrap();
+    assert_eq!(v["fetch"], "https://s.example/v1/collections");
+    let v = s.run("connection.browse", &json!({"id": "Stac", "answer": r#"{"collections":[{"id":"c1","title":"C"}]}"#})).unwrap();
+    assert_eq!(v["children"][0]["node"], "collection:c1");
+    assert_eq!(v["children"][0]["options"], true);
+    let v = s.run("connection.browse", &json!({"id": "Stac", "node": "collection:c1", "probe": true})).unwrap();
+    let fetch = v["fetch"].as_str().unwrap();
+    assert!(fetch.contains("/search?") && fetch.contains("collections=c1") && fetch.contains("limit=20"), "{fetch}");
+    let self_link = "https://s.example/v1/collections/c1/items/i1";
+    let items = json!({"type": "FeatureCollection", "numberMatched": 1, "features": [{
+        "type": "Feature", "id": "i1", "collection": "c1", "bbox": [0, 0, 1, 1], "geometry": null,
+        "properties": {"datetime": "2024-01-01T00:00:00Z"},
+        "assets": {"visual": {"href": "https://s.example/a.tif", "type": "image/tiff; application=geotiff"}},
+        "links": [{"rel": "self", "href": self_link}]}]});
+    let v = s.run("connection.browse", &json!({"id": "Stac", "node": "collection:c1", "answer": items.to_string()})).unwrap();
+    assert_eq!(v["children"][0]["what"], "item");
+    assert_eq!(
+        v["children"][0]["children"][0]["add"],
+        json!({"command": "stac.addAsset", "params": {"url": self_link, "asset": "visual", "name": "i1 visual"}})
+    );
+    assert!(v.get("truncated").is_none());
+
+    // A static STAC catalog: catalogs and collections, then a collection's items, each opened
+    // for its assets.
+    new(&mut s, json!({"kind": "stac", "address": "https://s.example/static/catalog.json", "name": "Static"}));
+    let root = json!({"type": "Catalog", "id": "r", "links": [{"rel": "child", "href": "./c1/collection.json", "title": "C1"}]});
+    let v = s.run("connection.browse", &json!({"id": "Static", "answer": root.to_string()})).unwrap();
+    assert_eq!(v["children"][0]["node"], "catalog:https://s.example/static/c1/collection.json");
+    let collection = json!({"type": "Collection", "id": "c1", "links": [
+        {"rel": "item", "href": "./i1/i1.json", "title": "Scene 1"}, {"rel": "child", "href": "./sub/catalog.json", "title": "Sub"}]});
+    let node = "catalog:https://s.example/static/c1/collection.json";
+    let v = s.run("connection.browse", &json!({"id": "Static", "node": node, "answer": collection.to_string()})).unwrap();
+    let kinds: Vec<_> =
+        v["children"].as_array().unwrap().iter().map(|c| (c["what"].as_str().unwrap(), c["node"].as_str().unwrap())).collect();
+    assert_eq!(
+        kinds,
+        [("catalog", "catalog:https://s.example/static/c1/sub/catalog.json"), ("item", "item:https://s.example/static/c1/i1/i1.json")]
+    );
+    let item_node = "item:https://s.example/static/c1/i1/i1.json";
+    let v = s.run("connection.browse", &json!({"id": "Static", "node": item_node, "probe": true})).unwrap();
+    assert_eq!(v["fetch"], "https://s.example/static/c1/i1/i1.json");
+    let item = json!({"type": "Feature", "id": "i1", "collection": "c1", "bbox": [0, 0, 1, 1], "geometry": null,
+        "properties": {"datetime": "2024-01-01T00:00:00Z"},
+        "assets": {"visual": {"href": "https://s.example/static/a.tif", "type": "image/tiff; application=geotiff"}},
+        "links": [{"rel": "self", "href": "https://s.example/static/c1/i1/i1.json"}]});
+    let v = s.run("connection.browse", &json!({"id": "Static", "node": item_node, "answer": item.to_string()})).unwrap();
+    assert_eq!(
+        v["children"][0]["add"],
+        json!({"command": "stac.addAsset", "params": {"url": "https://s.example/static/c1/i1/i1.json", "asset": "visual", "name": "i1 visual"}})
+    );
+    // An asset's key names its item, so the same file under two items is two rows.
+    assert_eq!(v["children"][0]["key"], "https://s.example/static/c1/i1/i1.json#visual");
+    // A relative asset address is resolved against the item's own file.
+    let relative = item.to_string().replace(r#""assets":{"#, r#""assets":{"data":{"href":"./data/b.tif","type":"image/tiff"},"#);
+    let v = s.run("connection.browse", &json!({"id": "Static", "node": item_node, "answer": relative})).unwrap();
+    let hrefs: Vec<&str> = v["children"].as_array().unwrap().iter().filter_map(|c| c["href"].as_str()).collect();
+    assert!(hrefs.contains(&"https://s.example/static/c1/i1/data/b.tif"), "{hrefs:?}");
+    // An item node belongs to a STAC connection, and is judged as its documents are.
+    assert!(s.run("connection.browse", &json!({"id": "W", "node": item_node})).is_err());
+    assert!(s.run("connection.browse", &json!({"id": "Static", "node": "item:http://127.0.0.1:9/i.json"})).is_err());
+    // S3: buckets from the connection's options need no fetch; a bucket's level is read.
+    new(&mut s, json!({"kind": "s3", "name": "BrowseB", "options": {"credentials": "none", "buckets": "bkt1"}}));
+    let v = s.run("connection.browse", &json!({"id": "BrowseB", "probe": true})).unwrap();
+    assert!(v["fetch"].is_null(), "{v}");
+    let v = s.run("connection.browse", &json!({"id": "BrowseB"})).unwrap();
+    assert_eq!(v["children"][0]["node"], "s3:bkt1/");
+    let v = s.run("connection.browse", &json!({"id": "BrowseB", "node": "s3:bkt1/", "probe": true})).unwrap();
+    assert!(v["fetch"].as_str().is_some_and(|f| f.contains("bkt1")), "{v}");
+    let listing = "<ListBucketResult><CommonPrefixes><Prefix>p/</Prefix></CommonPrefixes><Contents><Key>p.tif</Key><Size>5</Size></Contents><Contents><Key>q/</Key><Size>0</Size></Contents></ListBucketResult>";
+    let v = s.run("connection.browse", &json!({"id": "BrowseB", "node": "s3:bkt1/", "answer": listing})).unwrap();
+    assert_eq!(v["children"][0]["node"], "s3:bkt1/p/");
+    assert_eq!(v["children"][0]["name"], "p/");
+    assert_eq!(v["children"][1]["add"]["params"]["url"], "s3://bkt1/p.tif");
+    assert_eq!(v["children"].as_array().unwrap().len(), 2, "{v}");
+    s3::disconnect("BrowseB");
+
+    // Nodes that aren't the connection's, and ones that are hostile.
+    let long = "x".repeat(5000);
+    for (id, node) in [
+        ("W", "collection:x"),
+        ("BrowseB", "s3:BAD_/"),
+        ("W", long.as_str()),
+        ("W", "service:ftp:x"),
+        ("W", "service:wms:http://127.0.0.1:9/wms"),
+        ("Stac", "catalog:http://127.0.0.1:9/c.json"),
+        ("Stac", "s3:bkt1/"),
+        ("W", "nope"),
+        ("W", "a\u{7}b"),
+    ] {
+        let e = s.run("connection.browse", &json!({"id": id, "node": node})).unwrap_err();
+        assert!(!e.is_empty());
+    }
+    assert!(s.run("connection.browse", &json!({"id": "missing"})).unwrap_err().contains("no connection"));
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        new(&mut s, json!({"kind": "postgres", "address": "postgres:host=127.0.0.1 port=9 dbname=x user=u", "name": "Pg"}));
+        assert!(!s.run("connection.browse", &json!({"id": "Pg"})).unwrap_err().is_empty());
+    }
+    // A catalogue's download link too long to be one (the parser keeps addresses to 2000 bytes) is not listed.
+    let long_link = format!("https://files.example.org/{}.tif", "a".repeat(5000));
+    let records = format!(
+        r#"<csw:GetRecordsResponse xmlns:csw="http://www.opengis.net/cat/csw/2.0.2" xmlns:dc="http://purl.org/dc/elements/1.1/"><csw:SearchResults numberOfRecordsMatched="1"><csw:Record><dc:title>Files</dc:title>
+          <dc:URI protocol="WWW:DOWNLOAD">https://files.example.org/a.tif</dc:URI><dc:URI protocol="WWW:DOWNLOAD">{long_link}</dc:URI></csw:Record></csw:SearchResults></csw:GetRecordsResponse>"#
+    );
+    let v = s.run("connection.browse", &json!({"id": "Cat", "answer": records})).unwrap();
+    let links = v["children"][0]["children"].as_array().unwrap();
+    assert_eq!(links.len(), 1, "{v}");
+    assert_eq!(links[0]["add"]["params"]["url"], "https://files.example.org/a.tif");
+    assert!(v.get("truncated").is_none(), "{v}");
+    // An answer larger than a service document may be is refused before it is parsed.
+    let huge = "x".repeat(65 << 20);
+    assert!(s.run("connection.browse", &json!({"id": "W", "answer": huge})).unwrap_err().contains("too large"));
+    assert!(
+        s.run("connection.browse", &json!({"id": "W", "answer": "<x/>", "documents": [{"url": "https://a.example/x", "text": huge}]}))
+            .unwrap_err()
+            .contains("too large")
+    );
+    // An OGC API's feature collections are imported together: listed, with options, not added alone.
+    new(&mut s, json!({"kind": "ogcapi", "address": "https://o.example/collections", "name": "Ogc"}));
+    let collections = r#"{"collections":[{"id":"lakes","title":"Lakes","links":[{"rel":"items","type":"application/geo+json","href":"https://o.example/collections/lakes/items"}]}]}"#;
+    let v = s.run("connection.browse", &json!({"id": "Ogc", "answer": collections})).unwrap();
+    assert_eq!((v["children"][0]["what"].as_str(), v["children"][0]["options"].as_bool()), (Some("features"), Some(true)), "{v}");
+    assert!(v["children"][0].get("add").is_none(), "{v}");
+    let saved = s.connections.connections.len();
+    assert!(saved >= 5);
+    s.run("connection.browse", &json!({"id": "W", "answer": wms_caps})).unwrap();
+    assert_eq!(s.connections.connections.len(), saved);
+    assert!(!s.can_undo());
 }
 
 fn rustgis_engine_sources_roundtrip(text: &str) -> crate::sources::Sources {
@@ -9697,6 +10312,10 @@ fn param_list_splits_a_description_into_entries() {
     // An escaped quote (a plugin's description may have one) doesn't end a value early.
     let escaped = param_list(r#"{"title"?: "a \"quoted, word\"", "n": number}"#).unwrap();
     assert_eq!(escaped.iter().map(|p| p.key).collect::<Vec<_>>(), ["title", "n"]);
+    // Nor a key early: it's the whole key, as `param_keys` reads it.
+    let key = param_list(r#"{"a\"b"?: text}"#).unwrap();
+    assert_eq!(key.iter().map(|p| (p.key, p.optional)).collect::<Vec<_>>(), [(r#"a\"b"#, true)]);
+    assert_eq!(crate::param_keys(r#"{"a\"b"?: text}"#), Some(vec![r#"a\"b"#]));
     assert_eq!(param_list("a GeoJSON text"), None);
     // Every command's description splits into entries, each led by a key `param_keys` finds: one
     // cut in the wrong place (an unclosed bracket or quote in its prose) would lead with another.
@@ -9724,6 +10343,11 @@ fn param_keys_reads_descriptions() {
     assert_eq!(param_keys(r#"{"path": folder | "url": "https://…", "name"?: text}"#), Some(vec!["path", "url", "name"]));
     assert_eq!(param_keys(r#"{"lon" | "x": number, "lat" | "y": number}"#), Some(vec!["lon", "x", "lat", "y"]));
     assert_eq!(param_keys(r##"{"color": "#RRGGBB"|"#RRGGBBAA"}"##), Some(vec!["color"]));
+    // A quote after a backslash doesn't end a string (a Script line's value may have one); one
+    // after an escaped backslash does.
+    assert_eq!(param_keys(r#"{"lon": 2, "note": "a\"b", "lat": 3, ""#), Some(vec!["lon", "note", "lat"]));
+    assert_eq!(param_keys(r#"{"a": "x\\", "b": 1}"#), Some(vec!["a", "b"]));
+    assert_eq!(param_keys(r#"{"a": "x\"#), Some(vec!["a"]), "an unclosed string");
     assert_eq!(param_keys("a GeoJSON text"), None);
     // Every command's description reads as keys, and names a key once.
     for c in &Session::new(Project::default()).registry.commands {
@@ -11775,7 +12399,7 @@ fn ogc_group_refresh_keeps_children_across_rotated_keys_and_rejects_bad_answers(
     let group = added["group"].clone();
     let ids: Vec<u32> = s.map().service_groups[0].children.iter().map(|c| c.layer).collect();
     s.run("layer.rename", &json!({"layer":ids[0], "name":"Renamed"})).unwrap();
-    s.map_mut().label_lock = Some(vec![(ids[0], 0), (ids[1], 0)]);
+    s.map_mut().label_lock = Some(vec![(ids[0], 0, 0), (ids[1], 0, 0)]);
 
     // A rotated key changes every source address but not the collections: the children stay.
     let mut q = doc("rotated-key");
@@ -11899,6 +12523,23 @@ fn layer_color_honours_an_explicit_fill_alpha() {
     s.run("layer.color", &json!({"layer": "Countries", "color": "#33669940"})).unwrap();
     s.run("layer.color", &json!({"layer": "Countries", "color": "#996633"})).unwrap();
     assert_eq!(alpha(&s), 150);
+}
+
+#[test]
+fn layer_color_leaves_the_outline_alone() {
+    let mut s = world();
+    let symbol = |s: &Session| s.map().layer_by_name("Countries").unwrap().renderer.base_symbol();
+    let rgb = |c: rustgis_map::Rgba| (c.r(), c.g(), c.b());
+    // An outline that was never set stays as it was too.
+    let default_stroke = symbol(&s).stroke;
+    s.run("layer.color", &json!({"layer": "Countries", "color": "#336699"})).unwrap();
+    assert_eq!(symbol(&s).stroke, default_stroke, "a default outline is not re-derived from the new fill");
+    // A chosen outline survives a fill change.
+    s.run("layer.outline", &json!({"layer": "Countries", "color": "#00FF00"})).unwrap();
+    let before = symbol(&s).stroke;
+    s.run("layer.color", &json!({"layer": "Countries", "color": "#996633"})).unwrap();
+    assert_eq!(symbol(&s).stroke, before, "changing the fill must not change a chosen outline");
+    assert_eq!(rgb(symbol(&s).fill), (0x99, 0x66, 0x33), "changing the fill must set the requested RGB");
 }
 
 #[test]
@@ -13418,4 +14059,201 @@ fn scans_have_no_coordinates_to_give_away() {
     s.run("raster.georeference", &json!({"layer": "flat", "extent": [10.0, 40.0, 12.0, 41.0]})).unwrap();
     assert!(s.run("share.exportRaster", &json!({"path": out.display().to_string()})).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn layer_selection_replaces_toggles_and_extends() {
+    let mut s = world();
+    let name = |s: &Session, id: u32| s.map().layer(id).map(|l| l.name.clone()).unwrap_or_default();
+    let picked = |s: &Session| s.selected_layers().into_iter().map(|id| name(s, id)).collect::<Vec<_>>();
+    let id = |s: &Session, n: &str| s.map().layer_by_name(n).map(|l| l.id).unwrap();
+    let depth = s.undo_depth();
+    s.run("layer.select", &json!({"layer": "Cities"})).unwrap();
+    assert_eq!(picked(&s), ["Cities"]);
+    // Toggled in, the layer becomes active; toggled out, another of the selection does.
+    s.run("layer.select", &json!({"layer": "Lakes", "mode": "toggle"})).unwrap();
+    assert_eq!(picked(&s), ["Cities", "Lakes"]);
+    assert_eq!(s.active_layer, Some(id(&s, "Lakes")));
+    s.run("layer.select", &json!({"layer": "Lakes", "mode": "toggle"})).unwrap();
+    assert_eq!(picked(&s), ["Cities"]);
+    assert_eq!(s.active_layer, Some(id(&s, "Cities")));
+    // Extended by a list; the last of it is active. A plain select starts over.
+    s.run("layer.select", &json!({"layer": ["Rivers", "Countries", "Rivers"], "mode": "extend"})).unwrap();
+    assert_eq!(picked(&s), ["Cities", "Rivers", "Countries"]);
+    assert_eq!(s.active_layer, Some(id(&s, "Countries")));
+    s.run("layer.select", &json!({"layer": "Rivers"})).unwrap();
+    assert_eq!(picked(&s), ["Rivers"]);
+    // Choosing layers is not an undo step. A bad layer, mode or list changes nothing.
+    assert_eq!(s.undo_depth(), depth);
+    s.run("layer.select", &json!({"layer": ["Cities", "Lakes"]})).unwrap();
+    for p in [
+        json!({"layer": ["Cities", "Nope"]}),
+        json!({"layer": [], "mode": "toggle"}),
+        json!({"layer": [null]}),
+        json!({"layer": [[1]]}),
+        json!({"layer": "Cities", "mode": "sideways"}),
+    ] {
+        assert!(s.run("layer.select", &p).is_err(), "{p}");
+    }
+    assert_eq!(picked(&s), ["Cities", "Lakes"]);
+    // Setting the active layer on its own (adding data, a removal) leaves the selection behind.
+    s.active_layer = Some(id(&s, "Rivers"));
+    assert_eq!(picked(&s), ["Rivers"]);
+}
+
+#[test]
+fn layer_commands_act_on_the_whole_layer_selection() {
+    let mut s = world();
+    let names = |s: &Session| s.map().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&s), ["Cities", "Rivers", "Lakes", "Countries"]);
+    // Hidden and shown layers swap to one state: the opposite of the active layer's (the last
+    // one listed, Rivers, hidden: all are shown).
+    s.run("layer.visibility", &json!({"layer": "Rivers", "visible": false})).unwrap();
+    s.run("layer.select", &json!({"layer": ["Countries", "Rivers"]})).unwrap();
+    s.run("layer.visibility", &Value::Null).unwrap();
+    let shown = |s: &Session, n: &str| s.map().layer_by_name(n).unwrap().visible;
+    assert!(shown(&s, "Rivers") && shown(&s, "Countries"));
+    s.run("layer.visibility", &json!({"visible": false})).unwrap();
+    assert!(!shown(&s, "Rivers") && !shown(&s, "Countries") && shown(&s, "Cities"));
+    // To the top and to the bottom, keeping their order, each one undo step.
+    s.run("layer.move", &json!({"to": 0})).unwrap();
+    assert_eq!(names(&s), ["Rivers", "Countries", "Cities", "Lakes"]);
+    s.run("layer.move", &json!({"to": 1e9})).unwrap();
+    assert_eq!(names(&s), ["Cities", "Lakes", "Rivers", "Countries"]);
+    assert!(s.run("layer.move", &json!({"to": 1})).is_err(), "several layers can't go to the middle");
+    // "to" is where the topmost of them lands, as for one layer: 2 of 4 at 2 is the bottom.
+    s.run("edit.undo", &Value::Null).unwrap();
+    s.run("layer.move", &json!({"to": 2})).unwrap();
+    assert_eq!(names(&s), ["Cities", "Lakes", "Rivers", "Countries"]);
+    s.run("edit.undo", &Value::Null).unwrap();
+    s.run("layer.move", &json!({"to": 3})).unwrap();
+    assert_eq!(names(&s), ["Cities", "Lakes", "Rivers", "Countries"]);
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(names(&s), ["Rivers", "Countries", "Cities", "Lakes"]);
+    // Selectable on all of them.
+    s.run("layer.selectable", &json!({"on": false})).unwrap();
+    assert!(!s.map().layer_by_name("Rivers").unwrap().selectable && !s.map().layer_by_name("Countries").unwrap().selectable);
+    assert!(s.map().layer_by_name("Cities").unwrap().selectable);
+    // Zoom to both: a view command, no undo step.
+    let depth = s.undo_depth();
+    s.run("layer.zoomTo", &Value::Null).unwrap();
+    assert_eq!(s.undo_depth(), depth);
+    // Removing: one undo step; the layer that takes the topmost one's place is active alone.
+    s.run("layer.remove", &Value::Null).unwrap();
+    assert_eq!(names(&s), ["Cities", "Lakes"]);
+    assert_eq!(s.undo_depth(), depth + 1);
+    assert_eq!(s.selected_layers(), vec![s.active_layer.unwrap()]);
+    assert_eq!(s.active_layer, s.map().layer_by_name("Cities").map(|l| l.id));
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(names(&s), ["Rivers", "Countries", "Cities", "Lakes"]);
+    // A list with an unknown layer removes nothing.
+    assert!(s.run("layer.remove", &json!({"layer": ["Rivers", "Nope"]})).is_err());
+    assert_eq!(names(&s).len(), 4);
+}
+
+#[test]
+fn layer_selection_survives_a_failed_project_open() {
+    let mut s = world();
+    s.run("layer.select", &json!({"layer": ["Cities", "Lakes"]})).unwrap();
+    let before = s.selected_layers();
+    // Another project replaces this one and fails: the selection comes back with it.
+    let _ = s.run("project.openText", &json!({"text": "not a project"}));
+    assert_eq!(s.selected_layers(), before);
+}
+
+#[test]
+fn several_layers_move_to_the_top_with_one_in_a_group() {
+    let mut s = world();
+    let names = |s: &Session| s.map().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+    s.run("group.add", &json!({"layers": ["Lakes", "Countries"]})).unwrap();
+    assert_eq!(names(&s), ["Cities", "Rivers", "Lakes", "Countries"]);
+    s.run("layer.select", &json!({"layer": ["Rivers", "Countries"]})).unwrap();
+    // A layer out of a group goes to the map's top; one in a group, to its group's top.
+    let depth = s.undo_depth();
+    s.run("layer.move", &json!({"to": 0})).unwrap();
+    assert_eq!(names(&s), ["Rivers", "Cities", "Countries", "Lakes"]);
+    assert_eq!(s.undo_depth(), depth + 1);
+    s.run("layer.move", &json!({"to": 1e9})).unwrap();
+    assert_eq!(names(&s), ["Cities", "Lakes", "Countries", "Rivers"]);
+    let group = |s: &Session, n: &str| s.map().layer_by_name(n).and_then(|l| s.map().group_of(l.id)).map(|g| g.name.clone());
+    assert_eq!(group(&s, "Countries").as_deref(), Some("New Group"));
+}
+
+#[test]
+fn several_layers_go_into_and_out_of_a_group_in_one_step() {
+    let mut s = world();
+    let group = |s: &Session, n: &str| s.map().layer_by_name(n).and_then(|l| s.map().group_of(l.id)).map(|g| g.name.clone());
+    s.run("group.add", &json!({"name": "Water", "layers": ["Lakes"]})).unwrap();
+    s.run("layer.select", &json!({"layer": ["Cities", "Rivers"]})).unwrap();
+    let depth = s.undo_depth();
+    s.run("layer.group", &json!({"group": "Water"})).unwrap();
+    assert_eq!(group(&s, "Cities").as_deref(), Some("Water"));
+    assert_eq!(group(&s, "Rivers").as_deref(), Some("Water"));
+    assert_eq!(s.undo_depth(), depth + 1);
+    s.run("layer.group", &json!({"layer": ["Cities", "Rivers"], "group": null})).unwrap();
+    assert_eq!(group(&s, "Cities"), None);
+    assert_eq!(group(&s, "Rivers"), None);
+    assert_eq!(group(&s, "Lakes").as_deref(), Some("Water"));
+    // "before" places one layer; an unknown one fails the whole list.
+    assert!(s.run("layer.group", &json!({"layer": ["Cities", "Rivers"], "group": "Water", "before": "Lakes"})).is_err());
+    assert!(s.run("layer.group", &json!({"layer": ["Cities", "Nope"], "group": "Water"})).is_err());
+    assert_eq!(group(&s, "Cities"), None);
+}
+
+#[test]
+fn another_project_starts_with_no_layer_selection() {
+    let mut s = world();
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text})).unwrap();
+    let opened_active = t.active_layer.and_then(|id| t.map().layer(id)).map(|l| l.name.clone()).unwrap();
+    // Picked around the layer the next project starts active on, with the same ids there.
+    let other = if opened_active == "Lakes" { "Cities" } else { "Lakes" };
+    s.run("layer.select", &json!({"layer": [other, opened_active.as_str()]})).unwrap();
+    s.run("project.openText", &json!({"text": text})).unwrap();
+    assert!(s.selected_layers().len() <= 1, "{:?}", s.selected_layers());
+}
+
+#[test]
+fn a_layer_selection_left_behind_stays_gone() {
+    let mut s = world();
+    let id = |s: &Session, n: &str| s.map().layer_by_name(n).map(|l| l.id).unwrap();
+    s.run("layer.select", &json!({"layer": ["Cities", "Lakes"]})).unwrap();
+    let lakes = id(&s, "Lakes");
+    // Another layer becomes active on its own (as adding data does), then Lakes again.
+    s.active_layer = Some(id(&s, "Rivers"));
+    s.run("layer.visibility", &json!({"layer": "Rivers", "visible": true})).unwrap();
+    s.active_layer = Some(lakes);
+    assert_eq!(s.selected_layers(), vec![lakes]);
+}
+
+#[test]
+fn a_one_layer_list_names_that_layer_not_the_active_one() {
+    let mut s = world();
+    let group = |s: &Session, n: &str| s.map().layer_by_name(n).and_then(|l| s.map().group_of(l.id)).map(|g| g.name.clone());
+    s.run("group.add", &json!({"name": "Water", "layers": ["Lakes"]})).unwrap();
+    s.run("layer.select", &json!({"layer": "Rivers"})).unwrap();
+    s.run("layer.group", &json!({"layer": ["Cities"], "group": "Water"})).unwrap();
+    assert_eq!(group(&s, "Cities").as_deref(), Some("Water"));
+    assert_eq!(group(&s, "Rivers"), None);
+}
+
+#[test]
+fn a_layer_list_needs_no_active_layer() {
+    let mut s = world();
+    s.active_layer = None;
+    s.run("layer.visibility", &json!({"layer": ["Cities", "Rivers"], "visible": false})).unwrap();
+    s.run("layer.selectable", &json!({"layer": ["Cities"], "on": false})).unwrap();
+    assert!(!s.map().layer_by_name("Rivers").unwrap().visible);
+    assert!(!s.map().layer_by_name("Cities").unwrap().selectable);
+}
+
+#[test]
+fn toggling_out_the_only_picked_layer_leaves_none_active() {
+    let mut s = world();
+    s.run("layer.select", &json!({"layer": "Cities"})).unwrap();
+    s.run("layer.select", &json!({"layer": "Cities", "mode": "toggle"})).unwrap();
+    assert_eq!(s.active_layer, None);
+    assert!(s.selected_layers().is_empty());
+    assert!(s.run("layer.remove", &Value::Null).is_err(), "nothing picked, nothing removed");
 }
