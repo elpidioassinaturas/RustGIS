@@ -3533,6 +3533,7 @@ const DEFAULTS_TO_ACTIVE_LAYER: &[&str] = &[
     "share.locator",
     "zarr.reduce",
     "cube.trend",
+    "cube.reduce",
 ];
 
 #[cfg(test)]

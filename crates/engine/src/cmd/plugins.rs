@@ -306,6 +306,7 @@ const DATABASES: &[&str] = &[
     "zarr.series",
     "zarr.reduce",
     "cube.trend",
+    "cube.reduce",
 ];
 
 /// What a command reaches beyond the project when run with some parameters.

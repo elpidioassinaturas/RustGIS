@@ -5059,6 +5059,20 @@ fn a_failed_panel_refresh_leaves_the_values() {
     rustgis_plugins::unload("eng-badstate");
 }
 
+/// A data cube can be a Zarr store's folder or a STAC API's address, so a plugin needs both
+/// `files` and `network` to summarise one or work out its trend.
+#[test]
+fn plugin_data_cubes_need_files_and_network() {
+    let mut s = world();
+    plugin("eng-cube-files", &["edit", "files"]);
+    for id in ["cube.reduce", "cube.trend"] {
+        let p = json!({"url": "https://example.com/stac/v1", "collection": "c", "asset": "NDVI", "stat": "mean"});
+        let e = forward(&mut s, "eng-cube-files", id, p).unwrap_err();
+        assert!(e.contains("'files' and 'network' permissions"), "{id}: {e}");
+    }
+    rustgis_plugins::unload("eng-cube-files");
+}
+
 #[test]
 fn plugin_tile_layers_need_network() {
     let mut s = world();
