@@ -8,7 +8,7 @@ description: Make a printable page layout — map frame, title, legend, north ar
 1. Get the map right first: symbology, labels and extent. A layout's map frame shows the map's current view.
 2. For a finished sheet or a figure for a paper in one step, use `layout.publication` with a `"profile"`
    (`"a4-portrait"`, `"a3-landscape"`, … for a sheet; `"figure-1col"`, `"thesis-full"`, … for a figure), the `"extent"`
-   to fit, and the texts: `"title"`, `"subtitle"`, `"sources"`, `"note"`, a `"locator"` (`"globe"`, `"inset"` or `"none"`), and `"decimal": ","` for a map in a language with a decimal comma. Its
+   to fit, and the texts: `"title"`, `"subtitle"`, `"sources"`, `"note"`, a `"locator"` (`"globe"`: the visible polygon layers held in the project, not streamed ones, over the basemap; `"inset"` or `"none"`), and `"decimal": ","` for a map in a language with a decimal comma. Its
    surrounds take the corners where they cover the least data; read its `"warnings"`. It places the frame at a round scale, the
    graticule, legend, scale bar and north arrow, and wraps the footer. Its result lists every element's id and name
    (`"elements"`), so skip to step 5 to adjust them. Otherwise,
