@@ -1065,8 +1065,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // the frame's) or the surrounding region on the map itself, the area outlined on either by
     // the map frame's extent indicator.
     let side = match column {
-        // In a column, its width, leaving a panel's legend most of the height under it.
-        Some(c) => c.w.min(if c.legend { 0.45 * c.h } else { c.h }).max(0.0),
+        // In a column, its width up to an A4 portrait column's (a landscape sheet's wider
+        // column doesn't make it larger), leaving the legend most of the height under it.
+        Some(c) => c.w.min(52.0 * k).min(if c.legend { 0.45 * c.h } else { c.h }).max(0.0),
         None if sheet => (0.24 * fw.min(fh)).clamp(25.0 * k, 70.0 * k),
         None => (0.3 * fw.min(fh)).clamp(18.0, 45.0),
     };
@@ -1292,9 +1293,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let corner_of =
         |what: Surround| surrounds.iter().zip(&corners).find(|((kind, ..), _)| *kind == what).map(|(&(_, w, h, _), &c)| (c, w, h));
     let mut placed: Vec<(&'static str, (f64, f64, f64, f64))> = Vec::new();
-    // In a column, at its top; otherwise in its corner over the map.
+    // In a column, at its top, centred across it; otherwise in its corner over the map.
     let locator_rect = match column {
-        Some(c) => Some((c.x, c.y, side, side)),
+        Some(c) => Some((c.x + (c.w - side) / 2.0, c.y, side, side)),
         None => corner_of(Surround::Locator).map(|(corner, w, h)| {
             let r = at(corner, w, h);
             placed.push(("locator", r));

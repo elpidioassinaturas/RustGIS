@@ -2597,6 +2597,9 @@ fn publication_layouts_take_a_style() {
                 l.elements.iter().filter(|e| e.name == "Locator" || e.name == "Legend Box").all(|e| e.x >= frame.x + frame.w),
                 "{style}: {r}"
             );
+            // The locator no larger than on a portrait sheet, though the column is wider.
+            let locator = l.elements.iter().find(|e| e.name == "Locator").unwrap();
+            assert!(locator.w <= 52.0 + 1e-6, "{style}: {}", locator.w);
         }
     }
     // No locator: the legend takes its place at the top of the panel's free room.
