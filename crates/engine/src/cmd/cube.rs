@@ -27,7 +27,7 @@ pub fn commands() -> Vec<C> {
         r#"{"layers"?: [raster layers, a date each] | "layer"?: a Zarr layer (or "path" | "url", "variable", "index", "crs" as for zarr.reduce) or a raster of several bands, a date each (default: the active layer) | "collection": a STAC collection (desktop; read in place over an area, in pieces when large; with url, asset, bbox, maxCloud, cellSize and resampling below, and "start", "end"), "url"?: the collection's STAC API (as for stac.addCube), "asset"?: the collection's band, such as NDVI, "bbox"?: [w, s, e, n] | "view" (the collection's area), "maxCloud"?: a collection's cloud cover cap, "cellSize"?: a collection's cell size in the files' units (the overview level nearest it is read), "resampling"?: "nearest" (default: that overview's pixels as stored) | "average" (each cell the mean of the full images' pixels in it, which reads them), "band"?: 1-based (a stack's band), "dates"?: [dates] (a stack's or the bands' dates, in their order; default: read from the layers' names or files, or the bands' names), "start"?, "end"?: dates (a whole number from 1000 to 9999 is a year; an end given as a year or a month takes all of it), "months"?: [1–12] (one season across years), "test"?: "hamedRao" (default) | "yueWang" | "seasonal" | "original", "seasons"?: parts of a year for the seasonal test (default 12), "alpha"?: 0.05 (above 0, below 0.5), "minValid"?: dates a cell needs (default: half of them, at least 4; the seasonal test also needs 4 in seasons of two or more), "per"?: "year" (default) | "decade", "name"?: text, "ran"?: (internal: a trend the app has worked out)} → four raster layers: Sen's slope, the test's Z and p-value, and the slope where p < alpha"#,
     ),
     C::new("cube.reduce", "Summarize a Data Cube over Time", "Analyze › Image Analysis", reduce_cmd).params(
-        r#"{"layers"?: [raster layers, a date each] | "layer"?: a Zarr layer or a raster of several bands, a date each (default: the active layer) | "path"?: a Zarr store's folder | "url"?: a Zarr store's address, or a STAC collection's API (as for stac.addCube) | "collection": a STAC collection (desktop; read in place over an area, in pieces when large; with the keys below and "start", "end"), "variable"?, "index"?, "crs"?: a Zarr variable's (as for zarr.reduce), "asset"?: the collection's band, such as NDVI, "bbox"?: [w, s, e, n] | "view" (the collection's area), "maxCloud"?: a collection's cloud cover cap, "cellSize"?: a collection's cell size in the files' units (the overview level nearest it is read), "resampling"?: "nearest" (default) | "average" (as for cube.trend), "band"?: 1-based (a stack's band), "dates"?: [dates] (a stack's or the bands' dates, in their order; default: read from the layers' names or files, or the bands' names), "stat": "mean"|"min"|"max"|"sum"|"std" (the population standard deviation, n)|"count"|"countAbove", "above"?: number (countAbove's threshold), "by"?: "all" (default: one layer) | "year" (a layer for each calendar year) | "month" (a layer for each month of the year, across years), "start"?, "end"?: dates (as for cube.trend), "months"?: [1–12] (a season across years), "minValid"?: 0–1 (a cell with a smaller share of its group's dates is left empty; default 0), "name"?: text} → raster layers of the statistic, one for each group"#,
+        r#"{"layers"?: [raster layers, a date each] | "layer"?: a Zarr layer or a raster of several bands, a date each (default: the active layer) | "path"?: a Zarr store's folder | "url"?: a Zarr store's address, or a STAC collection's API (as for stac.addCube) | "collection": a STAC collection (desktop; read in place over an area, in pieces when large; with url, asset, bbox, maxCloud, cellSize and resampling below, and "start", "end"), "variable"?, "index"?, "crs"?: a Zarr variable's (as for zarr.reduce), "asset"?: the collection's band, such as NDVI, "bbox"?: [w, s, e, n] | "view" (the collection's area), "maxCloud"?: a collection's cloud cover cap, "cellSize"?: a collection's cell size in the files' units (the overview level nearest it is read), "resampling"?: "nearest" (default) | "average" (as for cube.trend), "band"?: 1-based (a stack's band), "dates"?: [dates] (a stack's or the bands' dates, in their order; default: read from the layers' names or files, or the bands' names), "stat": "mean"|"min"|"max"|"sum"|"std" (the population standard deviation, n)|"count"|"countAbove", "above"?: number (countAbove's threshold), "by"?: "all" (default: one layer) | "year" (a layer for each calendar year) | "month" (a layer for each month of the year, across years), "start"?, "end"?: dates (as for cube.trend), "months"?: [1–12] (a season across years), "minValid"?: 0–1 (a cell with a smaller share of its group's dates is left empty; default 0), "name"?: text} → raster layers of the statistic, one for each group"#,
     )]
 }
 
@@ -1061,7 +1061,9 @@ impl Totals {
 }
 
 /// The most values a summary's outputs hold (cells × outputs): 32 million on the desktop, 8
-/// million in the browser. Its running totals, up to 20 bytes a value, are a piece's at a time.
+/// million in the browser. Its running totals, up to 20 bytes a cell, are a piece's at a time and
+/// only for the groups whose dates are being read: one year's in a summary by year, every month's
+/// in one by month of the year.
 pub const MAX_REDUCED: u64 = MAX_VALUES / 2;
 
 /// How a summary groups its dates: one output for them all, one for each calendar year, or one for
@@ -1118,31 +1120,41 @@ impl ReduceRun {
         let mut bands: Vec<Vec<f32>> = vec![Vec::new(); outputs];
         for piece in 0..self.cube.pieces().max(1) {
             let mut grid: Option<Arc<Raster>> = None;
-            let mut totals: Vec<Totals> = Vec::new();
+            // A group's totals are made at its first date read and turned into its output at its
+            // last, so a summary by year holds one year's totals at a time (its dates come in order).
+            let mut totals: Vec<Option<Totals>> = (0..outputs).map(|_| None).collect();
+            let mut seen = vec![0usize; outputs];
+            let mut finished: Vec<Option<Vec<f32>>> = vec![None; outputs];
             let mut place = |k: usize, slice: Option<(Arc<Raster>, usize)>| -> Result<(), String> {
+                let g = self.group_of.get(k).copied().filter(|g| *g < outputs).ok_or("a date in no group")?;
                 // A date with nothing written only lowers the counts.
-                let Some((r, b)) = slice else {
-                    done.fetch_add(1, Ordering::Relaxed);
-                    return Ok(());
-                };
-                let i = self.steps.get(k).copied().unwrap_or(0);
-                let vals = &r.bands.get(b).ok_or("the slice has no such band")?.data;
-                match &grid {
-                    None => {
-                        if let Some(e) = too_many(vals.len()) {
-                            return Err(e);
+                if let Some((r, b)) = slice {
+                    let i = self.steps.get(k).copied().unwrap_or(0);
+                    let vals = &r.bands.get(b).ok_or("the slice has no such band")?.data;
+                    match &grid {
+                        None => {
+                            if let Some(e) = too_many(vals.len()) {
+                                return Err(e);
+                            }
+                            grid = Some(r.clone());
                         }
-                        totals = (0..outputs).map(|_| Totals::new(self.stat, vals.len())).collect();
-                        grid = Some(r.clone());
+                        Some(first) => off_grid(self.cube.as_ref(), i, first, &r)?,
                     }
-                    Some(g) => off_grid(self.cube.as_ref(), i, g, &r)?,
+                    let t = totals.get_mut(g).ok_or("a date in no group")?.get_or_insert_with(|| Totals::new(self.stat, vals.len()));
+                    let nodata = r.nodata.map(|v| v as f32);
+                    for (c, v) in vals.iter().enumerate().take(t.cells()) {
+                        if v.is_finite() && Some(*v) != nodata {
+                            t.add(c, f64::from(*v));
+                        }
+                    }
                 }
-                let t = self.group_of.get(k).and_then(|g| totals.get_mut(*g)).ok_or("a date in no group")?;
-                let nodata = r.nodata.map(|v| v as f32);
-                for (c, v) in vals.iter().enumerate().take(t.cells()) {
-                    if v.is_finite() && Some(*v) != nodata {
-                        t.add(c, f64::from(*v));
-                    }
+                let n = seen.get_mut(g).ok_or("a date in no group")?;
+                *n += 1;
+                let dates = self.groups.get(g).map_or(0, |(_, d)| *d);
+                if *n >= dates
+                    && let (Some(t), Some(out)) = (totals.get_mut(g).and_then(Option::take), finished.get_mut(g))
+                {
+                    *out = Some(t.finish(self.min_share, dates));
                 }
                 done.fetch_add(1, Ordering::Relaxed);
                 Ok(())
@@ -1156,8 +1168,16 @@ impl ReduceRun {
                     band.reserve_exact(total);
                 }
             }
-            for ((band, t), (_, dates)) in bands.iter_mut().zip(&totals).zip(&self.groups) {
-                band.extend(t.finish(self.min_share, *dates));
+            let cells = (grid.width as usize).saturating_mul(grid.height as usize);
+            for (g, band) in bands.iter_mut().enumerate() {
+                let dates = self.groups.get(g).map_or(0, |(_, d)| *d);
+                // A group with no data written in this piece: no values, as its totals would give.
+                let out = match (finished.get_mut(g).and_then(Option::take), totals.get_mut(g).and_then(Option::take)) {
+                    (Some(out), _) => out,
+                    (None, Some(t)) => t.finish(self.min_share, dates),
+                    (None, None) => Totals::new(self.stat, cells).finish(self.min_share, dates),
+                };
+                band.extend(out);
             }
             stitch.add(grid);
         }
