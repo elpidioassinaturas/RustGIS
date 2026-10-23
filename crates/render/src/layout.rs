@@ -1021,9 +1021,10 @@ pub fn frame_render_scale(map: &Map, center: Coord, scale: f64) -> f64 {
 /// drew. The basemap is left out, so the frame's background isn't counted. For keeping a
 /// layout's surrounds off what its map shows. `None` when the frame can't be drawn.
 ///
-/// The map itself is drawn, not a copy of it (every layer's features): its basemap and graticule
-/// are set aside for the drawing and put back, however it ends, as is a label lock waiting to be
-/// filled, which the coarse drawing would otherwise fill.
+/// The map itself is drawn, not a copy of it (every layer's features): its basemap, web tiles
+/// (a background, like the basemap) and graticule are set aside for the drawing and put back,
+/// however it ends, as is a label lock waiting to be filled, which the coarse drawing would
+/// otherwise fill.
 pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm: f64, cells: u32) -> Option<(u32, u32, Vec<bool>)> {
     if !(w_mm > 0.0 && h_mm > 0.0) {
         return None;
@@ -1034,6 +1035,7 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
     // Put back when this ends, a panic in the drawing included.
     struct Aside<'a> {
         basemap: rustgis_map::Basemap,
+        tiles: Vec<rustgis_map::TileLayer>,
         graticule: bool,
         lock: Option<Vec<(u32, usize)>>,
         map: &'a mut Map,
@@ -1041,12 +1043,14 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
     impl Drop for Aside<'_> {
         fn drop(&mut self) {
             self.map.basemap = self.basemap;
+            self.map.tiles = std::mem::take(&mut self.tiles);
             self.map.graticule = self.graticule;
             self.map.label_lock = self.lock.take();
         }
     }
     let aside = Aside {
         basemap: std::mem::replace(&mut map.basemap, rustgis_map::Basemap::Blank),
+        tiles: std::mem::take(&mut map.tiles),
         graticule: std::mem::replace(&mut map.graticule, false),
         lock: map.label_lock.take(),
         map,

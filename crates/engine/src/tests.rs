@@ -2404,7 +2404,7 @@ fn publication_layouts_fit_their_pages() {
             // Nothing said but, over the sample world's land, the surrounds sharing its one corner
             // of sea (placement has its own test).
             let said: Vec<&str> = r["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
-            assert!(said.iter().all(|w| w.contains("on what the map shows")), "{profile}: {r}");
+            assert!(said.len() <= 1 && said.iter().all(|w| w.contains("on what the map shows")), "{profile}: {r}");
         } else {
             assert!(text("Title").is_none() && text("Sources").is_none(), "{profile}: a figure's texts are its caption's");
             assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("caption")), "{r}");
@@ -2750,10 +2750,14 @@ fn publication_surrounds_keep_off_the_data() {
     let mut s = Session::new(Project::default());
     s.run("layer.addData", &json!({"path": square("corner", (-20.0, -20.0, 5.0, 5.0))})).unwrap();
     // The coverage is drawn on the map itself, its basemap set aside meanwhile and put back.
+    // Web tiles, a background like the basemap, are set aside too: they don't make every corner
+    // look covered (a closed port, never asked).
     s.map_mut().basemap = rustgis_map::Basemap::Ocean;
+    s.map_mut().tiles.push(rustgis_map::TileLayer::new("Streets", rustgis_map::TileKind::Raster, "http://127.0.0.1:9/{z}/{x}/{y}.png"));
     let r = s.run("layout.publication", &json!({"extent": extent, "author": ""})).unwrap();
-    assert!(s.map().basemap == rustgis_map::Basemap::Ocean && s.map().label_lock.is_none());
+    assert!(s.map().basemap == rustgis_map::Basemap::Ocean && s.map().label_lock.is_none() && s.map().tiles.len() == 1);
     assert_ne!(corner_of(&s, "Legend Box"), "bottom left", "{r}");
+    s.map_mut().tiles.clear();
     assert_eq!(corner_of(&s, "North Arrow"), "bottom left", "{r}");
     // A pale fill with no outline counts as data too: the legend leaves it the same way.
     let mut pale = Session::new(Project::default());
