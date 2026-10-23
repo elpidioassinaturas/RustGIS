@@ -2904,6 +2904,7 @@ fn publication_layouts_take_a_style() {
         json!({"extent": piaui, "style": "banner", "accent": "blue"}),
         json!({"extent": piaui, "style": 3}),
         json!({"extent": piaui, "accent": 7}),
+        json!({"extent": piaui, "style": "poster", "accent": "#1F2D4D80"}),
     ] {
         assert!(s.run("layout.publication", &bad).is_err(), "{bad}");
     }

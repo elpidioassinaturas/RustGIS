@@ -532,16 +532,14 @@ struct Look {
     radius: f64,
 }
 
-/// Where a style sets the locator (and, in a panel, the legend) beside the map rather than over
-/// it: the room left for them there, in page millimetres.
+/// Where a style sets the locator and the legend (under it) beside the map rather than over it:
+/// the room left for them there, in page millimetres.
 #[derive(Clone, Copy, Debug)]
 struct Column {
     x: f64,
     y: f64,
     w: f64,
     h: f64,
-    /// The legend goes here too, under the locator.
-    legend: bool,
 }
 
 /// A rectangle with no outline (`width` 0) or no fill (`fill` transparent).
@@ -734,6 +732,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         }
     };
     let accent = color(p, "accent", style.accent())?;
+    // A translucent accent would leave a band, a poster's page or the headings faint or unseen.
+    if accent.a() != 255 {
+        return Err("accent is an opaque colour as #RRGGBB".into());
+    }
     // No orientation asked: the one the area's map comes out larger on, from its extents east to
     // west and north to south on the map's projection and the room the style leaves the map.
     let profile = match &auto {
@@ -1072,8 +1074,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                         let (mw, cx) = (iw - cw - gap, x0 + iw - cw);
                         behind.push(("Map Card".into(), (x0, y, mw, h), pub_card(white, card_line, 0.4, card_r)));
                         let frame = (x0 + card_pad, y + card_pad, mw - 2.0 * card_pad, h - 2.0 * card_pad);
-                        let column =
-                            Column { x: cx + card_pad, y: y + card_pad, w: cw - 2.0 * card_pad, h: h - 2.0 * card_pad, legend: true };
+                        let column = Column { x: cx + card_pad, y: y + card_pad, w: cw - 2.0 * card_pad, h: h - 2.0 * card_pad };
                         (page_w, page_h, frame, Some(column))
                     }
                     Style::Panel => {
@@ -1147,7 +1148,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                                 .into(),
                         );
                         }
-                        (page_w, page_h, (x0, top, mw, room(top, panel_bottom)?), Some(Column { x: ix, y, w: tw, h: yb - y, legend: true }))
+                        (page_w, page_h, (x0, top, mw, room(top, panel_bottom)?), Some(Column { x: ix, y, w: tw, h: yb - y }))
                     }
                     Style::Editorial => {
                         // A magazine's page: the title large in serif at the top left in the accent colour,
@@ -1222,12 +1223,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                                 .push("the column's note leaves the locator and the legend little room under it: shorten the note".into());
                         }
                         let ft = y + 4.0 * k;
-                        (
-                            page_w,
-                            page_h,
-                            (x0, ft, mw, room(ft, fb)?),
-                            Some(Column { x: cx, y: cy, w: cw, h: (fb - cy).max(0.0), legend: true }),
-                        )
+                        (page_w, page_h, (x0, ft, mw, room(ft, fb)?), Some(Column { x: cx, y: cy, w: cw, h: (fb - cy).max(0.0) }))
                     }
                 }
             } else {
@@ -1380,7 +1376,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let side = match column {
         // In a column, its width up to an A4 portrait column's (a landscape sheet's wider
         // column doesn't make it larger), leaving the legend most of the height under it.
-        Some(c) => c.w.min(52.0 * k).min(if c.legend { 0.45 * c.h } else { c.h }).max(0.0),
+        Some(c) => c.w.min(52.0 * k).min(0.45 * c.h).max(0.0),
         None if sheet => (0.24 * fw.min(fh)).clamp(25.0 * k, 70.0 * k),
         None => (0.3 * fw.min(fh)).clamp(18.0, 45.0),
     };
@@ -1546,7 +1542,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let (bar_w, bar_h) = (if sheet { 50.0 * k } else { 40.0 }, COLORBAR_MM);
     let bar_part = if bar.is_some() { bar_h + if ch > 0.0 { 2.0 } else { 0.0 } } else { 0.0 };
     let (content_w, content_h) = (if bar.is_some() { cw.max(bar_w) } else { cw }, ch + bar_part);
-    let legend_in_column = column.is_some_and(|c| c.legend);
+    let legend_in_column = column.is_some();
     if content_h > 0.0 && !legend_in_column {
         surrounds.push((Surround::Legend, (content_w + 2.0 * pad).min(fw * 0.45), (content_h + 2.0 * pad).min(fh * 0.6), 2));
     }
@@ -1669,7 +1665,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         fit.map(|(lw, lh)| (corner, lw, lh))
     });
     // In a panel, the legend under the locator, as tall as it needs within what is left.
-    let legend_rect = match column.filter(|c| c.legend) {
+    let legend_rect = match column {
         Some(c) if content_h > 0.0 => {
             let ly = c.y + if locator_map.is_some() { side + 3.0 * k + if card { 2.0 * card_pad } else { 0.0 } } else { 0.0 };
             let room_h = c.y + c.h - ly;
