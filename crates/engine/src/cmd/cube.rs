@@ -233,17 +233,32 @@ fn date_list(p: &Value) -> Result<Option<Vec<f64>>, String> {
     }
 }
 
+/// What a run asks of its cube, and its name in what it says: a trend needs a few dates and a
+/// Zarr axis in time order (the test's sign and count follow it); a summary takes any.
+#[derive(Clone, Copy, Debug)]
+pub struct Needs {
+    pub what: &'static str,
+    pub min_dates: usize,
+    pub ordered: bool,
+}
+
+/// What `cube.trend` asks of its cube.
+pub const TREND: Needs = Needs { what: "trend", min_dates: trend::MIN_VALUES, ordered: true };
+/// What `cube.reduce` asks of its cube.
+pub const SUMMARY: Needs = Needs { what: "summary", min_dates: 1, ordered: false };
+
 /// The cube a command's parameters name: a stack of layers, a Zarr variable, or a raster's bands.
-pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
+pub fn cube_from(s: &Session, p: &Value, needs: Needs) -> Result<Box<dyn TimeCube>, String> {
     let dates = date_list(p)?;
+    let what = needs.what;
     if let Some(list) = p.get("layers").filter(|v| !v.is_null()) {
         let list = list.as_array().ok_or("layers is a list of raster layers")?;
-        if list.len() < trend::MIN_VALUES {
-            return Err(format!("a stack needs {} layers or more, a date each", trend::MIN_VALUES));
+        if list.len() < needs.min_dates {
+            return Err(format!("a {what}'s stack needs {} layers or more, a date each", needs.min_dates));
         }
         // At most a run's dates, refused before each is looked up and checked against the others.
         if list.len() > MAX_DATES {
-            return Err(format!("{} layers; a trend takes {MAX_DATES} dates at most", list.len()));
+            return Err(format!("{} layers; a {what} takes {MAX_DATES} dates at most", list.len()));
         }
         if dates.as_ref().is_some_and(|d| d.len() != list.len()) {
             return Err("dates has a date for each layer, in their order".into());
@@ -291,7 +306,7 @@ pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
     // A STAC collection's band, read from its files over an area (#579): named by its collection.
     if given("collection") {
         #[cfg(target_arch = "wasm32")]
-        return Err("in the web app, a STAC collection's trend can't be worked out yet (the desktop app can)".into());
+        return Err(format!("in the web app, a STAC collection's {what} can't be worked out yet (the desktop app can)"));
         #[cfg(not(target_arch = "wasm32"))]
         return Ok(Box::new(super::stac::stac_cube(s, p)?));
     }
@@ -307,13 +322,13 @@ pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
     if given("path") || given("url") || zarr_layer {
         // The web app reads no Zarr store along its time axis yet: said, not taken for bands.
         #[cfg(target_arch = "wasm32")]
-        return Err("in the web app, a Zarr variable's trend can't be worked out yet (the desktop app can)".into());
+        return Err(format!("in the web app, a Zarr variable's {what} can't be worked out yet (the desktop app can)"));
         #[cfg(not(target_arch = "wasm32"))]
         {
             let cube = super::zarr::zarr_cube(s, p)?;
             // A trend takes the steps in time order: an axis out of order (descending) or with a
-            // date twice would turn the test's sign or count a date twice.
-            if !cube.zt.dates.windows(2).all(|w| w[0] < w[1]) {
+            // date twice would turn the test's sign or count a date twice. A summary doesn't mind.
+            if needs.ordered && !cube.zt.dates.windows(2).all(|w| w[0] < w[1]) {
                 return Err(format!(
                     "{}'s time axis isn't in increasing order without repeats, so a trend can't be read from it",
                     cube.zt.variable
@@ -325,12 +340,12 @@ pub fn cube_from(s: &Session, p: &Value) -> Result<Box<dyn TimeCube>, String> {
     let id = s.layer_id(p)?;
     let l = s.map().layer(id).ok_or("no such layer")?;
     let r = l.raster.as_ref().and_then(|r| r.data.clone()).ok_or_else(|| format!("{} isn't a raster", l.name))?;
-    if r.bands.len() < trend::MIN_VALUES {
+    if r.bands.len() < needs.min_dates.max(2) {
         return Err(format!(
-            "{} has {} band(s): a cube is a raster of {} bands or more (a date each), a Zarr variable with a time dimension, or \"layers\"",
+            "{} has {} band(s): a {what}'s cube is a raster of {} bands or more (a date each), a Zarr variable with a time dimension, or \"layers\"",
             l.name,
             r.bands.len(),
-            trend::MIN_VALUES
+            needs.min_dates.max(2)
         ));
     }
     if dates.as_ref().is_some_and(|d| d.len() != r.bands.len()) {
@@ -860,7 +875,7 @@ pub fn trend_start(s: &Session, p: &Value) -> Result<TrendRun, String> {
         Some("decade") => 10.0,
         Some(x) => return Err(format!("per is year or decade, not {x}")),
     };
-    let cube = cube_from(s, p)?;
+    let cube = cube_from(s, p, TREND)?;
     let period = cube.period();
     let steps = steps(cube.dates(), period, p)?;
     if steps.len() < trend::MIN_VALUES {
@@ -1232,7 +1247,7 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
         Some(x) if x.eq_ignore_ascii_case("month") => By::Month,
         Some(x) => return Err(format!("by is all, year or month, not {x}")),
     };
-    let cube = cube_from(s, p)?;
+    let cube = cube_from(s, p, SUMMARY)?;
     let steps = steps(cube.dates(), cube.period(), p)?;
     let date = |i: usize| cube.dates().get(i).copied().unwrap_or(f64::NAN);
     // A date that can't be read would go to no year or month: said, not put in a group of its own.

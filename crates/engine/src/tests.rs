@@ -9255,6 +9255,30 @@ fn a_data_cube_summarised_over_time() {
     assert_eq!(s.map().layers.len(), before);
 }
 
+/// A summary takes a cube a trend can't: two dates are enough for a mean or a maximum, while a
+/// trend still asks for its few, and each says which it is.
+#[test]
+fn a_short_cube_is_summarised_but_not_trended() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let mut s = Session::new(Project::default());
+    let gt = GeoTransform { origin_x: -44.0, origin_y: -7.0, pixel_width: 0.01, pixel_height: -0.01 };
+    let mut names = Vec::new();
+    for (k, d) in ["2020-03-01", "2021-03-01"].iter().enumerate() {
+        let name = format!("ndvi_{d}");
+        let r = Raster::new(&name, 1, 1, vec![vec![k as f32 * 4.0 + 1.0]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let bytes = geotiff::write(&r, 0).unwrap();
+        crate::cmd::raster::add_raster(&mut s, &name, rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)).unwrap();
+        names.push(name);
+    }
+    for (stat, want) in [("mean", 3.0), ("max", 5.0)] {
+        let r = s.run("cube.reduce", &json!({"layers": names, "stat": stat})).unwrap();
+        let id = r["layers"][0].as_u64().unwrap() as u32;
+        assert_eq!(s.map().layer(id).unwrap().raster.as_ref().unwrap().data.as_ref().unwrap().bands[0].data[0], want, "{stat}");
+    }
+    let e = s.run("cube.trend", &json!({"layers": names})).unwrap_err();
+    assert!(e.contains("trend") && !e.contains("summary"), "{e}");
+}
+
 /// A STAC collection's band summarised over time, read in place as for a trend: each file's own
 /// scale and offset taken, the whole period or a month at a time.
 #[test]
