@@ -866,34 +866,8 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
 
 // --- A summary over time (opengeos/RustGIS#556) ----------------------------------------------------
 
-/// What a summary over time takes from each cell's values.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Stat {
-    Mean,
-    Min,
-    Max,
-    Sum,
-    Std,
-    Count,
-    /// How many of the values are above the threshold.
-    CountAbove(f64),
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Stat {
-    fn code(self) -> &'static str {
-        match self {
-            Stat::Mean => "mean",
-            Stat::Min => "min",
-            Stat::Max => "max",
-            Stat::Sum => "sum",
-            Stat::Std => "std",
-            Stat::Count => "count",
-            Stat::CountAbove(_) => "countAbove",
-        }
-    }
-}
+pub use super::cube::Stat;
 
 /// A summary over time, prepared on the session (`zarr.reduce`'s parameters checked and the
 /// steps chosen) and computed anywhere with [`ReduceRun::run`], which reads one slice at a time:
@@ -926,9 +900,7 @@ impl ReduceRun {
         use std::sync::atomic::Ordering;
         // The first slice's grid (its size, place and coordinate system), all the run keeps of it.
         let mut first: Option<(u32, u32, raster::GeoTransform, Crs)> = None;
-        // Only the totals the statistic needs: each cell's count, one running value (the mean,
-        // the least, the most, the sum or the count above), and for std the squared deviations.
-        let (mut n, mut acc, mut m2) = (Vec::<u32>::new(), Vec::<f64>::new(), Vec::<f64>::new());
+        let mut totals = super::cube::Totals::new(self.stat, 0);
         // Steps never written (no chunk at all), read as having no value.
         let mut unwritten = 0usize;
         for &i in &self.steps {
@@ -958,16 +930,7 @@ impl ReduceRun {
                     if len > MAX_REDUCE_CELLS {
                         return Err(format!("{len} cells, more than a summary takes ({MAX_REDUCE_CELLS})"));
                     }
-                    n = vec![0; len];
-                    acc = match self.stat {
-                        Stat::Count => Vec::new(),
-                        Stat::Min => vec![f64::INFINITY; len],
-                        Stat::Max => vec![f64::NEG_INFINITY; len],
-                        _ => vec![0.0; len],
-                    };
-                    if matches!(self.stat, Stat::Std) {
-                        m2 = vec![0.0; len];
-                    }
+                    totals = super::cube::Totals::new(self.stat, len);
                     first = Some((r.width, r.height, r.transform, r.crs));
                 }
                 // One grid for every step: the same size and coordinate system, its place within a
@@ -975,35 +938,16 @@ impl ReduceRun {
                 Some(f)
                     if (f.0, f.1, f.3) != (r.width, r.height, r.crs)
                         || !super::cube::same_grid(&f.2, &r.transform)
-                        || vals.len() != n.len() =>
+                        || vals.len() != totals.cells() =>
                 {
                     return Err(format!("step {} is {} × {}, unlike the first ({} × {})", i, r.width, r.height, f.0, f.1));
                 }
                 Some(_) => {}
             }
             // The totals are the first slice's length, which every slice is checked to have.
-            for (c, v) in vals.iter().enumerate().take(n.len()) {
-                if !v.is_finite() {
-                    continue;
-                }
-                let v = f64::from(*v);
-                let Some(k) = n.get_mut(c) else { continue };
-                *k += 1;
-                let k = f64::from(*k);
-                let (Some(a), m) = (acc.get_mut(c), m2.get_mut(c)) else { continue };
-                match self.stat {
-                    Stat::Mean | Stat::Std => {
-                        let d = v - *a;
-                        *a += d / k;
-                        if let Some(m) = m {
-                            *m += d * (v - *a);
-                        }
-                    }
-                    Stat::Min => *a = a.min(v),
-                    Stat::Max => *a = a.max(v),
-                    Stat::Sum => *a += v,
-                    Stat::CountAbove(t) if v > t => *a += 1.0,
-                    Stat::CountAbove(_) | Stat::Count => {}
+            for (c, v) in vals.iter().enumerate().take(totals.cells()) {
+                if v.is_finite() {
+                    totals.add(c, f64::from(*v));
                 }
             }
             done.fetch_add(1, Ordering::Relaxed);
@@ -1016,23 +960,7 @@ impl ReduceRun {
             }
         })?;
         // Too few values: empty, unless the statistic is a count.
-        let need = (self.min_valid.clamp(0.0, 1.0) * self.steps.len() as f64 - 1e-9).ceil().max(1.0) as u32;
-        let out: Vec<f32> = n
-            .iter()
-            .enumerate()
-            .map(|(c, k)| {
-                let count = matches!(self.stat, Stat::Count | Stat::CountAbove(_));
-                if *k < need && !(count && self.min_valid == 0.0) {
-                    return f32::NAN;
-                }
-                let a = acc.get(c).copied().unwrap_or(f64::NAN);
-                (match self.stat {
-                    Stat::Std => (m2.get(c).copied().unwrap_or(f64::NAN) / f64::from((*k).max(1))).sqrt(),
-                    Stat::Count => f64::from(*k),
-                    _ => a,
-                }) as f32
-            })
-            .collect();
+        let out = totals.finish(self.min_valid, self.steps.len());
         // One band: a project keeps the result as a GeoTIFF of one band (the count is a statistic of its own).
         let mut r =
             raster::Raster::new(&self.name, first.0, first.1, vec![out], first.2, first.3, None, raster::ColorHint::Gray, "Float32")
@@ -1046,22 +974,8 @@ impl ReduceRun {
 /// asked for. At most the time slider's 20,000 steps.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
-    let stat = match ps(p, "stat").map(str::trim).ok_or("stat is required (mean, min, max, sum, std, count or countAbove)")? {
-        x if x.eq_ignore_ascii_case("mean") => Stat::Mean,
-        x if x.eq_ignore_ascii_case("min") || x.eq_ignore_ascii_case("minimum") => Stat::Min,
-        x if x.eq_ignore_ascii_case("max") || x.eq_ignore_ascii_case("maximum") => Stat::Max,
-        x if x.eq_ignore_ascii_case("sum") => Stat::Sum,
-        x if x.eq_ignore_ascii_case("std") => Stat::Std,
-        x if x.eq_ignore_ascii_case("count") => Stat::Count,
-        x if x.eq_ignore_ascii_case("countAbove") => {
-            Stat::CountAbove(super::f(p, "above").ok_or("countAbove takes \"above\", the threshold")?)
-        }
-        x => return Err(format!("unknown stat '{x}' (mean, min, max, sum, std, count or countAbove)")),
-    };
-    let min_valid = match p.get("minValid").filter(|v| !v.is_null()) {
-        None => 0.0,
-        Some(v) => v.as_f64().filter(|v| (0.0..=1.0).contains(v)).ok_or("minValid is a share from 0 to 1")?,
-    };
+    let stat = Stat::parse(p)?;
+    let min_valid = super::cube::min_share(p)?;
     let ZarrCube { zt, period } = zarr_cube(s, p)?;
     let steps = super::cube::steps(&zt.dates, period, p)?;
     let months = super::cube::months(p)?;

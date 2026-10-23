@@ -457,6 +457,33 @@ rustgis-cli run --cmd 'cube.trend={"layers":["ndvi_2015","ndvi_2016","ndvi_2017"
 rustgis-cli run --cmd 'cube.trend={"url":"https://data.inpe.br/bdc/stac/v1","collection":"mod13q1-6.1","asset":"NDVI","bbox":[-46,-10.95,-40.35,-2.7],"start":"2001","end":"2025","cellSize":1000,"test":"seasonal","seasons":23,"per":"decade"}' --save piaui.rgis
 ```
 
+### Summarising a data cube over time
+
+**Summarize a Data Cube over Time** (`cube.reduce`) makes rasters of one statistic of each cell
+over the dates of any of the series Trend Analysis takes (layers, a raster's bands, a Zarr
+variable, a STAC collection's band): **mean**, **min**, **max**, **sum**, **std** (the population
+standard deviation), **count** of values, or **countAbove** a threshold (`"above"`), as Summarise
+over time does for a Zarr variable (see [Data](data.md)).
+
+- **Groups:** `"by": "all"` (the default) makes one layer of the whole period, `"year"` one for
+  each calendar year (an annual mean NDVI from 16-day composites), `"month"` one for each month of
+  the year across the years (a climatology). `"start"`, `"end"` and `"months"` pick the dates as for
+  a trend.
+- **Missing values:** no-data and missing values are skipped cell by cell. A cell keeps no value
+  where it had fewer values than `"minValid"` (a share of its group's dates, 0 by default: 0.5
+  wants half of a year's composites); with the default, **count** and **countAbove** give 0 where
+  a cell never had a value.
+- **Size:** the slices are folded into running totals as they are read, so a long period takes no
+  more memory than a short one; a STAC collection's area is read in pieces, as for a trend. The
+  outputs hold up to 32 million values (cells times groups; 8 million in the web app). The layers
+  are named after what they hold (`NDVI mean 2001`, `NDVI mean 2001–2025 month 03`, or the
+  `"name"` given and the group) and kept in the project as GeoTIFFs.
+
+```sh
+rustgis-cli run --cmd 'cube.reduce={"layers":["ndvi_2015","ndvi_2016","ndvi_2017","ndvi_2018"],"stat":"max"}'
+rustgis-cli run --cmd 'cube.reduce={"url":"https://data.inpe.br/bdc/stac/v1","collection":"mod13q1-6.1","asset":"NDVI","bbox":[-44.8,-7.5,-44.3,-7.0],"start":"2001","end":"2025","cellSize":1000,"stat":"mean","by":"year","minValid":0.5,"name":"NDVI"}' --save urucui.rgis
+```
+
 ## Deep learning and hosted imagery
 
 **Analyze › Deep Learning Tools** trains a neural network (a multilayer perceptron) on the pixels

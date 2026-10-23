@@ -8468,6 +8468,30 @@ fn a_trend_over_a_stac_collection() {
         assert!(a.bands[0].data.iter().zip(&b.bands[0].data).all(|(x, y)| x == y || (x.is_nan() && y.is_nan())), "{}", a.name);
         assert!(crate::cmd::cube::same_grid(&a.transform, &b.transform));
     }
+    // A summary of the same cube, whole and in pieces: each cell's mean over the six dates, its
+    // stored v times 3.5 ten-thousandths and 0.025, the same cell for cell.
+    let mut mean = json!({"url": api, "collection": "mod", "asset": "NDVI", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-03", "stat": "mean"});
+    let summary = |s: &mut Session, p: &Value| {
+        let r = s.run("cube.reduce", p).unwrap();
+        s.map().layer(r["layers"][0].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap()
+    };
+    let read_whole = summary(&mut s, &mean);
+    assert_eq!((read_whole.width, read_whole.height), (512, 512));
+    for (x, y) in [(10, 20), (300, 100), (511, 511)] {
+        let got = f64::from(read_whole.bands[0].data[y * 512 + x]);
+        let want = ((x + y) % 256) as f64 * 3.5e-4 + 0.025;
+        assert!((got - want).abs() < 1e-5, "({x}, {y}): {got} vs {want}");
+    }
+    PIECE_VALUES.with(|v| v.set(Some(512 * 300 * 6)));
+    let in_pieces = summary(&mut s, &mean);
+    // A year at a time: one year here, the same values.
+    mean["by"] = json!("year");
+    let by_year = summary(&mut s, &mean);
+    PIECE_VALUES.with(|v| v.set(None));
+    for other in [&in_pieces, &by_year] {
+        assert!(read_whole.bands[0].data.iter().zip(&other.bands[0].data).all(|(x, y)| x == y || (x.is_nan() && y.is_nan())));
+        assert!(crate::cmd::cube::same_grid(&read_whole.transform, &other.transform));
+    }
     // Cancelled, the readers stop early and the run says so, rather than work out a block only
     // partly read.
     let job = crate::cmd::cube::trend_start(&s, &params).unwrap();
@@ -9095,6 +9119,119 @@ fn a_trend_over_a_data_cube() {
         assert!((slope - want).abs() < want * 0.05, "{per}: {slope}");
         assert!(value(&s, &r["layers"][2], 0) < 0.01, "{per}: significant");
     }
+}
+
+/// A data cube summarised over time (#579): each statistic over a stack of layers, a year or a
+/// month of the year at a time, a cell needing a share of its group's dates, a raster's bands, and
+/// a Zarr variable as `zarr.reduce` sums it up; each output kept in the project.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_data_cube_summarised_over_time() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let mut s = Session::new(Project::default());
+    let gt = GeoTransform { origin_x: -44.0, origin_y: -7.0, pixel_width: 0.01, pixel_height: -0.01 };
+    // March and September, 2020 to 2022: cell 0 is the date's place (0 to 5), cell 1 has no value
+    // in 2021, cell 2 is the file's no-data value in March, and cell 3 never has a value.
+    let dates = ["2020-03-01", "2020-09-01", "2021-03-01", "2021-09-01", "2022-03-01", "2022-09-01"];
+    let mut names = Vec::new();
+    for (k, d) in dates.iter().enumerate() {
+        let name = format!("ndvi_{d}");
+        let gap = if d.starts_with("2021") { f32::NAN } else { 1.0 };
+        let march = if k % 2 == 0 { -9999.0 } else { 7.0 };
+        let cells = vec![k as f32, gap, march, f32::NAN];
+        let r = Raster::new(&name, 2, 2, vec![cells], gt, Crs::LonLat, Some(-9999.0), ColorHint::Gray, "Float32").unwrap();
+        let bytes = geotiff::write(&r, 0).unwrap();
+        crate::cmd::raster::add_raster(&mut s, &name, rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)).unwrap();
+        names.push(name);
+    }
+    let data = |s: &Session, id: &Value| s.map().layer(id.as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    let name = |s: &Session, id: &Value| s.map().layer(id.as_u64().unwrap() as u32).unwrap().name.clone();
+    let one = |s: &mut Session, p: Value| {
+        let r = s.run("cube.reduce", &p).unwrap();
+        assert_eq!(r["layers"].as_array().map(Vec::len), Some(1), "{r}");
+        data(s, &r["layers"][0]).bands[0].data.clone()
+    };
+    for (stat, want) in [("mean", 2.5), ("min", 0.0), ("max", 5.0), ("sum", 15.0), ("count", 6.0)] {
+        assert_eq!(one(&mut s, json!({"layers": names, "stat": stat}))[0], want, "{stat}");
+    }
+    let std = one(&mut s, json!({"layers": names, "stat": "std"}))[0];
+    assert!((std - 1.707_825).abs() < 1e-4, "{std}");
+    assert_eq!(one(&mut s, json!({"layers": names, "stat": "countAbove", "above": 2.5}))[0], 3.0);
+    // Gaps and no-data are skipped: cell 1 has four values, cell 2 three, cell 3 none (no mean,
+    // a count of 0).
+    assert_eq!(one(&mut s, json!({"layers": names, "stat": "count"})), [6.0, 4.0, 3.0, 0.0]);
+    let mean = one(&mut s, json!({"layers": names, "stat": "mean"}));
+    assert_eq!(&mean[..3], [2.5, 1.0, 7.0]);
+    assert!(mean[3].is_nan());
+    assert!(s.map().layer_by_name("ndvi mean 2020-03-01–2022-09-01").is_some());
+    // A layer a year, named by it, each the mean of its two dates; cell 1 empty in 2021.
+    let r = s.run("cube.reduce", &json!({"layers": names, "stat": "mean", "by": "year"})).unwrap();
+    let ids = r["layers"].as_array().unwrap().clone();
+    assert_eq!(r["dates"], 6);
+    assert_eq!(ids.iter().map(|id| name(&s, id)).collect::<Vec<_>>(), ["ndvi mean 2020", "ndvi mean 2021", "ndvi mean 2022"]);
+    assert_eq!(ids.iter().map(|id| data(&s, id).bands[0].data[0]).collect::<Vec<_>>(), [0.5, 2.5, 4.5]);
+    assert!(data(&s, &ids[1]).bands[0].data[1].is_nan() && data(&s, &ids[2]).bands[0].data[1] == 1.0);
+    // A share of each year's dates: 0.6 of two is two, so cell 2 (one value a year) is empty;
+    // the name given, with the year.
+    let r = s.run("cube.reduce", &json!({"layers": names, "stat": "count", "by": "year", "minValid": 0.6, "name": "anos"})).unwrap();
+    let ids = r["layers"].as_array().unwrap().clone();
+    assert_eq!(name(&s, &ids[0]), "anos 2020");
+    let first = data(&s, &ids[0]).bands[0].data.clone();
+    assert!(first[0] == 2.0 && first[1] == 2.0 && first[2].is_nan() && first[3].is_nan(), "{first:?}");
+    // A layer a month of the year, across the years: March's cell 2 is always no-data.
+    let r = s.run("cube.reduce", &json!({"layers": names, "stat": "mean", "by": "month"})).unwrap();
+    let ids = r["layers"].as_array().unwrap().clone();
+    assert_eq!(ids.iter().map(|id| name(&s, id)).collect::<Vec<_>>(), ["ndvi mean 2020–2022 month 03", "ndvi mean 2020–2022 month 09"]);
+    let (march, september) = (data(&s, &ids[0]).bands[0].data.clone(), data(&s, &ids[1]).bands[0].data.clone());
+    assert!(march[0] == 2.0 && march[2].is_nan() && september[0] == 3.0 && september[2] == 7.0, "{march:?} {september:?}");
+    // A season across the years, a year at a time.
+    let r = s.run("cube.reduce", &json!({"layers": names, "stat": "max", "by": "year", "months": [9]})).unwrap();
+    let ids = r["layers"].as_array().unwrap().clone();
+    assert_eq!(name(&s, &ids[0]), "ndvi max 2020 (months 9)");
+    assert_eq!(ids.iter().map(|id| data(&s, id).bands[0].data[0]).collect::<Vec<_>>(), [1.0, 3.0, 5.0]);
+    // A raster whose bands are the dates.
+    let bands: Vec<Vec<f32>> = (0..6).map(|k| vec![k as f32 * 2.0]).collect();
+    let mut cube = Raster::new("stack", 1, 1, bands, gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    for (b, d) in cube.bands.iter_mut().zip(&dates) {
+        b.name = format!("NDVI {d}");
+    }
+    let bytes = geotiff::write(&cube, 0).unwrap();
+    let id =
+        crate::cmd::raster::add_raster(&mut s, "stack", rustgis_map::RasterLayer::from_bytes(cube, "stack.tif", bytes)).unwrap()["layer"]
+            .clone();
+    assert_eq!(one(&mut s, json!({"layer": id, "stat": "mean"})), [5.0]);
+    // A Zarr variable: the same values as zarr.reduce's, cell for cell.
+    let (dir, path) = zarr_store_over_time("cube-reduce");
+    for stat in ["mean", "std", "max", "count"] {
+        let r = s.run("zarr.reduce", &json!({"path": path, "variable": "t", "stat": stat})).unwrap();
+        let zarr = data(&s, &r["layer"]).bands[0].data.clone();
+        let cube = one(&mut s, json!({"path": path, "variable": "t", "stat": stat}));
+        assert!(zarr.iter().zip(&cube).all(|(a, b)| a == b || (a.is_nan() && b.is_nan())) && zarr.len() == cube.len(), "{stat}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    // Kept in the project as GeoTIFFs, read again.
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text})).unwrap();
+    let again = t.map().layer_by_name("anos 2020").and_then(|l| l.raster.as_ref()).and_then(|r| r.data.clone()).unwrap();
+    assert_eq!(again.bands[0].data[0], 2.0);
+    // Cancelled, it says so.
+    let job = crate::cmd::cube::reduce_start(&s, &json!({"layers": names, "stat": "mean"})).unwrap();
+    let e = job.run(&std::sync::atomic::AtomicBool::new(true), &std::sync::atomic::AtomicUsize::new(0)).unwrap_err();
+    assert_eq!(e, "cancelled");
+    // Refused, nothing added.
+    let before = s.map().layers.len();
+    for bad in [
+        json!({"layers": names}),
+        json!({"layers": names, "stat": "median"}),
+        json!({"layers": names, "stat": "countAbove"}),
+        json!({"layers": names, "stat": "mean", "by": "week"}),
+        json!({"layers": names, "stat": "mean", "minValid": 1.5}),
+        json!({"layers": names, "stat": "mean", "start": "2030"}),
+    ] {
+        assert!(s.run("cube.reduce", &bad).is_err(), "{bad}");
+    }
+    assert_eq!(s.map().layers.len(), before);
 }
 
 /// A Zarr variable follows the time slider (#554): the slice drawn is the step the slider is at,
