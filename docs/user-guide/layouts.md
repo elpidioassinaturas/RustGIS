@@ -54,6 +54,15 @@ the maps; while one is open, its groups lead the Publish tab:
     it leaves the legend out, with a warning. Undo takes the globe's map away with the layout; a
     globe map no layout shows any more (its layout deleted) is replaced by the next sheet's rather
     than left beside it, which a warning says.
+  - **The style** (`"style"`, on any sheet, portrait or landscape): `"classic"` (the default) sets
+    the title over the map and the footer's boxes under it; `"banner"` puts the title and subtitle
+    in a band of the accent colour across the top, the title in white; `"panel"` sets the map at
+    the left and a pale panel at the right with the title, subtitle, locator and legend, and the
+    sources and reference at its foot, the note across the bottom; `"editorial"` sets the title
+    large in serif and a column at the right under a rule, with a heading (the third of
+    `headings`), the note, the locator and the legend. `"accent"` (`#RRGGBB`) colours the band,
+    the panel's tint, headings and rules (a deep brown, green or blue by default). A figure
+    leaves the style to its caption.
   - Every element is an ordinary one, to move or restyle afterwards. Running it again with
     another `profile` makes another layout of the same map.
 

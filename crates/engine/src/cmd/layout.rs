@@ -29,7 +29,7 @@ pub fn commands() -> Vec<C> {
             r#"{"name"?: string, "page"?: "letter"|"legal"|"tabloid"|"a5"|"a4"|"a3"|"a2"|"a1"|"a0", "orientation"?: "landscape"|"portrait", "width"?: mm, "height"?: mm, "template"?: "map" (frame, title, legend, north arrow, scale bar; the default)|"blank"}"#,
         ),
         C::new("layout.publication", "New Publication Layout", "Publish › Layout", publication).params(
-            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
+            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading, an editorial column's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000), "style"?: "classic" (the default: the title over the map, the footer under it) | "banner" (the title and subtitle in a band of the accent colour across the top) | "panel" (the map at the left, a panel at the right with the title, locator, legend, sources and reference) | "editorial" (the title large in serif, a column at the right with the note, the locator and the legend) (a sheet's arrangement; figures leave it to the caption), "accent"?: a colour as #RRGGBB (the style's colour: its band, panel tint, headings and rules)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
         ),
         C::new("layout.activate", "Open Layout", "Browser", |s, p| {
             let i = index(s, &by_name(p))?;
@@ -461,7 +461,60 @@ pub(crate) fn capitals(t: &str) -> String {
 
 /// A text element in a publication layout's style: upright, sans, in `align`.
 fn pub_text(text: String, size: f64, color: Rgba, bold: bool, align: TextAlign) -> ElementKind {
-    ElementKind::Text { text, size, color, bold, italic: false, align, letter_spacing: 0.0, font: FontFamily::Sans }
+    pub_text_in(text, size, color, bold, align, FontFamily::Sans)
+}
+
+/// [`pub_text`] in `font`.
+fn pub_text_in(text: String, size: f64, color: Rgba, bold: bool, align: TextAlign, font: FontFamily) -> ElementKind {
+    ElementKind::Text { text, size, color, bold, italic: false, align, letter_spacing: 0.0, font }
+}
+
+/// How a publication sheet is arranged around its map.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Style {
+    /// The title over the map, the footer's boxes under it.
+    Classic,
+    /// The title and subtitle in a band of the accent colour across the top.
+    Banner,
+    /// The map at the left; a panel at the right with the title, the locator, the legend, the
+    /// sources and the reference.
+    Panel,
+    /// A magazine's page: the title large in serif, a column at the right with the note, the
+    /// locator and the legend.
+    Editorial,
+}
+
+impl Style {
+    fn code(self) -> &'static str {
+        match self {
+            Style::Classic => "classic",
+            Style::Banner => "banner",
+            Style::Panel => "panel",
+            Style::Editorial => "editorial",
+        }
+    }
+
+    /// The accent colour when none is given: a deep blue, green or brown.
+    fn accent(self) -> Rgba {
+        match self {
+            Style::Classic => Rgba::rgb(0x2B, 0x26, 0x20),
+            Style::Banner => Rgba::rgb(0x4A, 0x34, 0x26),
+            Style::Panel => Rgba::rgb(0x2E, 0x5E, 0x3A),
+            Style::Editorial => Rgba::rgb(0x1F, 0x2D, 0x4D),
+        }
+    }
+}
+
+/// Where a style sets the locator (and, in a panel, the legend) beside the map rather than over
+/// it: the room left for them there, in page millimetres.
+#[derive(Clone, Copy, Debug)]
+struct Column {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    /// The legend goes here too, under the locator.
+    legend: bool,
 }
 
 /// A rectangle with no outline (`width` 0) or no fill (`fill` transparent).
@@ -579,6 +632,14 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             _ => return Err("locator is \"globe\", \"inset\" or \"none\"".into()),
         },
     };
+    let style = match ps(p, "style").map(str::trim) {
+        None | Some("classic") => Style::Classic,
+        Some("banner") => Style::Banner,
+        Some("panel") => Style::Panel,
+        Some("editorial") => Style::Editorial,
+        Some(x) => return Err(format!("style is \"classic\", \"banner\", \"panel\" or \"editorial\", not \"{x}\"")),
+    };
+    let accent = color(p, "accent", style.accent())?;
     let heading = |i: usize, or: &str| headings.get(i).cloned().unwrap_or_else(|| or.to_string());
     let (projection, datum) = projection_and_datum(s);
     let step = grid_step(&extent);
@@ -619,89 +680,294 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // A sheet's sizes follow its short side (A4's 210 mm is 1); a figure keeps its texts at their
     // printed size, whatever its width.
     let k = if sheet { page_w.min(page_h) / 210.0 } else { 1.0 };
-    let (w, h, (fx, fy, fw, fh)) = if sheet {
+    let (w, h, (fx, fy, fw, fh), column) = if sheet {
         let (m, pad) = (10.0 * k, 5.0 * k);
         let (x0, iw) = (m + pad, page_w - 2.0 * (m + pad));
         let (title_pt, sub_pt, head_pt, body_pt, small_pt) = (18.0 * k, 10.5 * k, 7.5 * k, 7.0 * k, 6.5 * k);
         around.push(("Frame".into(), (m, m, page_w - 2.0 * m, page_h - 2.0 * m), pub_box(clear, ink, 0.8)));
-        let mut top = m + pad;
-        if let Some(t) = &title {
-            let lines = wrap_as(t, iw, title_pt, true);
-            let th = lines.len() as f64 * pitch(title_pt) + 1.5 * k;
-            around.push(("Title".into(), (x0, top, iw, th), pub_text(lines.join("\n"), title_pt, ink, true, TextAlign::Center)));
-            top += th;
-        }
-        if let Some(t) = &subtitle {
-            let lines = wrap(t, iw, sub_pt);
-            let sh = lines.len() as f64 * pitch(sub_pt) + 1.0 * k;
-            around.push(("Subtitle".into(), (x0, top, iw, sh), pub_text(lines.join("\n"), sub_pt, soft, false, TextAlign::Center)));
-            top += sh;
-        }
-        // The footer, from the bottom up: authorship, the note, then the two boxes side by side,
-        // as tall as the longer column.
-        let bottom = page_h - m - pad;
-        let author_lines = author.as_deref().map(|t| wrap(t, iw, small_pt)).unwrap_or_default();
-        let author_h = author_lines.len() as f64 * pitch(small_pt);
-        let author_y = bottom - author_h;
-        if !author_lines.is_empty() {
-            around.push((
-                "Author".into(),
-                (x0, author_y, iw, author_h),
-                pub_text(author_lines.join("\n"), small_pt, soft, false, TextAlign::Right),
-            ));
-        }
-        let note_lines = note.as_deref().map(|t| wrap(t, iw, body_pt)).unwrap_or_default();
-        let mut foot = author_y;
-        if !note_lines.is_empty() {
-            let nh = note_lines.len() as f64 * pitch(body_pt);
-            foot -= nh + 1.5 * k;
-            around.push(("Note".into(), (x0, foot, iw, nh), pub_text(note_lines.join("\n"), body_pt, soft, false, TextAlign::Left)));
-        }
-        // The columns with something in them, side by side (one alone takes the width). Each one's
-        // elements keep their names (`Sources`, `Reference`) whatever its heading reads, the heading
-        // filled and wrapped like the rest.
-        let (gap, inner) = (4.0 * k, 2.5 * k);
-        let given = [("Sources", heading(0, "Sources"), &sources), ("Reference", heading(1, "Cartographic reference"), &reference)];
-        let given: Vec<_> = given.into_iter().filter(|(.., texts)| !texts.is_empty()).collect();
-        let n = given.len().max(1) as f64;
-        let cw = (iw - gap * (n - 1.0)) / n;
-        let tw = cw - 2.0 * inner;
-        let columns: Vec<_> = given
-            .into_iter()
-            .map(|(name, head, texts)| {
-                // Filled first, so `{projection}` reads in capitals too; the live tokens left keep
-                // their case (wrap_as fills again, which then finds nothing).
-                let head = wrap_as(&capitals(&fill(&head)), tw, head_pt, true);
-                (name, head, texts.iter().flat_map(|t| wrap(t, tw, body_pt)).collect::<Vec<_>>())
-            })
-            .collect();
-        let heads = columns.iter().map(|(_, h, _)| h.len()).max().unwrap_or(1);
-        let rows = columns.iter().map(|(.., l)| l.len()).max().unwrap_or(0);
-        if rows > 0 {
-            let head_h = heads as f64 * pitch(head_pt);
-            let bh = 2.0 * inner + head_h + rows as f64 * pitch(body_pt);
-            foot -= bh + 2.0 * k;
-            for (i, (name, head, lines)) in columns.into_iter().enumerate() {
-                let bx = x0 + i as f64 * (cw + gap);
-                around.push((format!("{name} Box"), (bx, foot, cw, bh), pub_box(clear, Rgba::new(0x2B, 0x26, 0x20, 140), 0.5)));
-                let tx = bx + inner;
+        // The sources and the reference that have something in them, each its heading and lines
+        // `tw` wide. Each one's elements keep their names (`Sources`, `Reference`) whatever its
+        // heading reads, the heading filled and wrapped like the rest.
+        let sections = |tw: f64| -> Vec<(&'static str, Vec<String>, Vec<String>)> {
+            [("Sources", heading(0, "Sources"), &sources), ("Reference", heading(1, "Cartographic reference"), &reference)]
+                .into_iter()
+                .filter(|(.., texts)| !texts.is_empty())
+                .map(|(name, head, texts)| {
+                    // Filled first, so `{projection}` reads in capitals too; the live tokens left
+                    // keep their case (wrap_as fills again, which then finds nothing).
+                    let head = wrap_as(&capitals(&fill(&head)), tw, head_pt, true);
+                    (name, head, texts.iter().flat_map(|t| wrap(t, tw, body_pt)).collect::<Vec<_>>())
+                })
+                .collect()
+        };
+        // The footer, from the bottom up across the sheet: authorship, the note (unless the style
+        // sets it beside the map), then the sources and reference boxed side by side (unless it
+        // stacks them in its panel), as tall as the longer column. Its top.
+        type Around = Vec<(String, (f64, f64, f64, f64), ElementKind)>;
+        let footer = |around: &mut Around, note_here: bool, boxes_here: bool| -> f64 {
+            let bottom = page_h - m - pad;
+            let author_lines = author.as_deref().map(|t| wrap(t, iw, small_pt)).unwrap_or_default();
+            let author_h = author_lines.len() as f64 * pitch(small_pt);
+            let author_y = bottom - author_h;
+            if !author_lines.is_empty() {
                 around.push((
-                    format!("{name} Heading"),
-                    (tx, foot + inner, tw, head.len() as f64 * pitch(head_pt)),
-                    pub_text(head.join("\n"), head_pt, ink, true, TextAlign::Left),
+                    "Author".into(),
+                    (x0, author_y, iw, author_h),
+                    pub_text(author_lines.join("\n"), small_pt, soft, false, TextAlign::Right),
                 ));
-                if !lines.is_empty() {
-                    let body = (tx, foot + inner + head_h, tw, lines.len() as f64 * pitch(body_pt));
-                    around.push((name.to_string(), body, pub_text(lines.join("\n"), body_pt, soft, false, TextAlign::Left)));
+            }
+            let mut foot = author_y;
+            let note_lines = note.as_deref().filter(|_| note_here).map(|t| wrap(t, iw, body_pt)).unwrap_or_default();
+            if !note_lines.is_empty() {
+                let nh = note_lines.len() as f64 * pitch(body_pt);
+                foot -= nh + 1.5 * k;
+                around.push(("Note".into(), (x0, foot, iw, nh), pub_text(note_lines.join("\n"), body_pt, soft, false, TextAlign::Left)));
+            }
+            if !boxes_here {
+                return foot;
+            }
+            // The columns side by side (one alone takes the width).
+            let (gap, inner) = (4.0 * k, 2.5 * k);
+            let n = [!sources.is_empty(), !reference.is_empty()].iter().filter(|x| **x).count().max(1) as f64;
+            let cw = (iw - gap * (n - 1.0)) / n;
+            let tw = cw - 2.0 * inner;
+            let columns = sections(tw);
+            let heads = columns.iter().map(|(_, h, _)| h.len()).max().unwrap_or(1);
+            let rows = columns.iter().map(|(.., l)| l.len()).max().unwrap_or(0);
+            if rows > 0 {
+                let head_h = heads as f64 * pitch(head_pt);
+                let bh = 2.0 * inner + head_h + rows as f64 * pitch(body_pt);
+                foot -= bh + 2.0 * k;
+                for (i, (name, head, lines)) in columns.into_iter().enumerate() {
+                    let bx = x0 + i as f64 * (cw + gap);
+                    around.push((format!("{name} Box"), (bx, foot, cw, bh), pub_box(clear, Rgba::new(0x2B, 0x26, 0x20, 140), 0.5)));
+                    let tx = bx + inner;
+                    around.push((
+                        format!("{name} Heading"),
+                        (tx, foot + inner, tw, head.len() as f64 * pitch(head_pt)),
+                        pub_text(head.join("\n"), head_pt, ink, true, TextAlign::Left),
+                    ));
+                    if !lines.is_empty() {
+                        let body = (tx, foot + inner + head_h, tw, lines.len() as f64 * pitch(body_pt));
+                        around.push((name.to_string(), body, pub_text(lines.join("\n"), body_pt, soft, false, TextAlign::Left)));
+                    }
                 }
             }
+            foot
+        };
+        // The map's frame between `top` and `bottom`, at least 40 mm tall (on A4).
+        let room = |top: f64, bottom: f64| {
+            if bottom - top < 40.0 * k {
+                Err("the texts leave the map no room: shorten the footer, the note or the subtitle".to_string())
+            } else {
+                Ok(bottom - top)
+            }
+        };
+        let white = Rgba::rgb(0xFF, 0xFF, 0xFF);
+        match style {
+            Style::Classic => {
+                let mut top = m + pad;
+                if let Some(t) = &title {
+                    let lines = wrap_as(t, iw, title_pt, true);
+                    let th = lines.len() as f64 * pitch(title_pt) + 1.5 * k;
+                    around.push(("Title".into(), (x0, top, iw, th), pub_text(lines.join("\n"), title_pt, ink, true, TextAlign::Center)));
+                    top += th;
+                }
+                if let Some(t) = &subtitle {
+                    let lines = wrap(t, iw, sub_pt);
+                    let sh = lines.len() as f64 * pitch(sub_pt) + 1.0 * k;
+                    around.push(("Subtitle".into(), (x0, top, iw, sh), pub_text(lines.join("\n"), sub_pt, soft, false, TextAlign::Center)));
+                    top += sh;
+                }
+                let foot = footer(&mut around, true, true);
+                let (ft, fb) = (top + 3.0 * k, foot - 4.0 * k);
+                (page_w, page_h, (x0, ft, iw, room(ft, fb)?), None)
+            }
+            Style::Banner => {
+                // A band in the accent colour across the top: the title at its left in white, the
+                // subtitle beside it past a thin rule. With neither, no band.
+                let mut top = m + pad;
+                if title.is_some() || subtitle.is_some() {
+                    let big = title_pt * 1.2;
+                    let t_max = if subtitle.is_some() { 0.42 * iw } else { iw };
+                    let t_lines = title.as_deref().map(|t| wrap_as(t, t_max, big, true)).unwrap_or_default();
+                    let t_w = t_lines
+                        .iter()
+                        .map(|x| crate::render::report::width_mm(&drawn(x), big as f32, true))
+                        .fold(0.0, f64::max)
+                        .min(t_max)
+                        .ceil();
+                    let rule = if t_lines.is_empty() { 0.0 } else { 6.0 * k };
+                    let s_x = x0 + t_w + rule;
+                    let s_w = (x0 + iw - s_x).max(20.0 * k);
+                    let s_lines = subtitle.as_deref().map(|t| wrap(t, s_w, sub_pt)).unwrap_or_default();
+                    let (t_h, s_h) = (t_lines.len() as f64 * pitch(big), s_lines.len() as f64 * pitch(sub_pt));
+                    let band_h = t_h.max(s_h) + 2.0 * pad;
+                    let mid = m + band_h / 2.0;
+                    around.push(("Banner".into(), (m, m, page_w - 2.0 * m, band_h), pub_box(accent, clear, 0.0)));
+                    if !t_lines.is_empty() {
+                        around.push((
+                            "Title".into(),
+                            (x0, mid - t_h / 2.0, t_w, t_h),
+                            pub_text(t_lines.join("\n"), big, white, true, TextAlign::Left),
+                        ));
+                    }
+                    if !t_lines.is_empty() && !s_lines.is_empty() {
+                        around.push((
+                            "Banner Rule".into(),
+                            (x0 + t_w + rule / 2.0 - 0.5, mid - t_h.max(s_h) / 2.0, 1.0, t_h.max(s_h)),
+                            ElementKind::Line {
+                                color: Rgba::new(0xFF, 0xFF, 0xFF, 170),
+                                width: 0.75,
+                                dir: LineDir::Vertical,
+                                head: LineHead::None,
+                            },
+                        ));
+                    }
+                    if !s_lines.is_empty() {
+                        around.push((
+                            "Subtitle".into(),
+                            (s_x, mid - s_h / 2.0, s_w, s_h),
+                            pub_text(s_lines.join("\n"), sub_pt, Rgba::rgb(0xF2, 0xEE, 0xE6), false, TextAlign::Left),
+                        ));
+                    }
+                    top = m + band_h;
+                }
+                let foot = footer(&mut around, true, true);
+                let (ft, fb) = (top + 4.0 * k, foot - 4.0 * k);
+                (page_w, page_h, (x0, ft, iw, room(ft, fb)?), None)
+            }
+            Style::Panel => {
+                // The map at the left, as tall as the sheet allows; a pale panel at the right with
+                // the title and subtitle, then the locator and the legend, and the sources and the
+                // reference at its foot; the note and authorship across the bottom.
+                let gap = 5.0 * k;
+                let pw = (0.3 * iw).max(48.0 * k).min(0.45 * iw);
+                let (mw, px) = (iw - pw - gap, x0 + iw - pw);
+                let top = m + pad;
+                let foot = footer(&mut around, true, false);
+                let panel_bottom = foot - 4.0 * k;
+                let tint = Rgba::new(accent.r(), accent.g(), accent.b(), 0x18);
+                around.push(("Panel Box".into(), (px, top, pw, panel_bottom - top), pub_box(tint, clear, 0.0)));
+                let ip = 3.0 * k;
+                let (ix, tw) = (px + ip, pw - 2.0 * ip);
+                let mut y = top + ip;
+                if let Some(t) = &title {
+                    let lines = wrap_as(t, tw, title_pt, true);
+                    let th = lines.len() as f64 * pitch(title_pt);
+                    around.push(("Title".into(), (ix, y, tw, th), pub_text(lines.join("\n"), title_pt, ink, true, TextAlign::Left)));
+                    y += th + 1.0 * k;
+                }
+                if let Some(t) = &subtitle {
+                    let lines = wrap(t, tw, sub_pt);
+                    let sh = lines.len() as f64 * pitch(sub_pt);
+                    around.push(("Subtitle".into(), (ix, y, tw, sh), pub_text(lines.join("\n"), sub_pt, soft, false, TextAlign::Left)));
+                    y += sh;
+                }
+                if y > top + ip {
+                    around.push((
+                        "Panel Rule".into(),
+                        (ix, y + 1.5 * k, tw, 1.0),
+                        ElementKind::Line { color: accent, width: 1.0, dir: LineDir::Horizontal, head: LineHead::None },
+                    ));
+                    y += 4.0 * k;
+                }
+                // The sources and the reference, stacked up from the panel's foot.
+                let mut yb = panel_bottom - ip;
+                for (name, head, lines) in sections(tw).into_iter().rev() {
+                    let (hh, bh) = (head.len() as f64 * pitch(head_pt), lines.len() as f64 * pitch(body_pt));
+                    yb -= hh + bh;
+                    around.push((
+                        format!("{name} Heading"),
+                        (ix, yb, tw, hh),
+                        pub_text(head.join("\n"), head_pt, accent, true, TextAlign::Left),
+                    ));
+                    if !lines.is_empty() {
+                        around.push((
+                            name.to_string(),
+                            (ix, yb + hh, tw, bh),
+                            pub_text(lines.join("\n"), body_pt, soft, false, TextAlign::Left),
+                        ));
+                    }
+                    yb -= 3.0 * k;
+                }
+                if yb - y < 30.0 * k {
+                    return Err(
+                        "the panel's texts leave no room for the locator and the legend: shorten the title, the sources or the reference"
+                            .into(),
+                    );
+                }
+                (page_w, page_h, (x0, top, mw, room(top, panel_bottom)?), Some(Column { x: ix, y, w: tw, h: yb - y, legend: true }))
+            }
+            Style::Editorial => {
+                // A magazine's page: the title large in serif at the top left in the accent colour,
+                // the subtitle under it, the map below; a column at the right, under a rule, with
+                // its heading (the third of `headings`), the note (the map's story), the locator
+                // and the legend; the sources and reference boxed under both.
+                let gap = 6.0 * k;
+                let cw = (0.3 * iw).max(45.0 * k).min(0.4 * iw);
+                let (mw, cx) = (iw - cw - gap, x0 + iw - cw);
+                let serif_wrap = |t: &str, w: f64, pt: f64, bold: bool| {
+                    crate::render::report::wrap_with(&fill(t), w.max(1.0), |x| {
+                        crate::render::report::serif_width_mm(&drawn(x), pt as f32, bold)
+                    })
+                };
+                let (big, sub) = (30.0 * k, 13.0 * k);
+                let mut y = m + pad;
+                if let Some(t) = &title {
+                    let lines = serif_wrap(t, mw, big, true);
+                    let th = lines.len() as f64 * pitch(big);
+                    around.push((
+                        "Title".into(),
+                        (x0, y, mw, th),
+                        pub_text_in(lines.join("\n"), big, accent, true, TextAlign::Left, FontFamily::Serif),
+                    ));
+                    y += th + 1.0 * k;
+                }
+                if let Some(t) = &subtitle {
+                    let lines = serif_wrap(t, mw, sub, false);
+                    let sh = lines.len() as f64 * pitch(sub);
+                    around.push((
+                        "Subtitle".into(),
+                        (x0, y, mw, sh),
+                        pub_text_in(lines.join("\n"), sub, soft, false, TextAlign::Left, FontFamily::Serif),
+                    ));
+                    y += sh;
+                }
+                let foot = footer(&mut around, false, true);
+                let fb = foot - 4.0 * k;
+                let mut cy = m + pad;
+                around.push((
+                    "Column Rule".into(),
+                    (cx, cy, cw, 1.0),
+                    ElementKind::Line { color: accent, width: 1.5, dir: LineDir::Horizontal, head: LineHead::None },
+                ));
+                cy += 3.0 * k;
+                if let Some(hd) = headings.get(2).filter(|h| !h.trim().is_empty()) {
+                    let pt = head_pt * 1.2;
+                    let lines = wrap_as(&capitals(&fill(hd)), cw, pt, true);
+                    let hh = lines.len() as f64 * pitch(pt);
+                    around.push(("Column Heading".into(), (cx, cy, cw, hh), pub_text(lines.join("\n"), pt, accent, true, TextAlign::Left)));
+                    cy += hh + 2.0 * k;
+                }
+                if let Some(t) = &note {
+                    let pt = body_pt * 1.15;
+                    let lines = wrap(t, cw, pt);
+                    let nh = lines.len() as f64 * pitch(pt);
+                    around.push(("Note".into(), (cx, cy, cw, nh), pub_text(lines.join("\n"), pt, soft, false, TextAlign::Left)));
+                    cy += nh + 4.0 * k;
+                }
+                if fb - cy < 30.0 * k {
+                    warnings.push("the column's note leaves the locator and the legend little room under it: shorten the note".into());
+                }
+                let ft = y + 4.0 * k;
+                (page_w, page_h, (x0, ft, mw, room(ft, fb)?), Some(Column { x: cx, y: cy, w: cw, h: (fb - cy).max(0.0), legend: true }))
+            }
         }
-        let (frame_top, frame_bottom) = (top + 3.0 * k, foot - 4.0 * k);
-        if frame_bottom - frame_top < 40.0 * k {
-            return Err("the texts leave the map no room: shorten the footer, the note or the subtitle".into());
-        }
-        (page_w, page_h, (x0, frame_top, iw, frame_bottom - frame_top))
     } else {
+        if style != Style::Classic {
+            warnings.push(format!("style \"{}\" arranges a sheet's texts, which a figure leaves to its caption: left out", style.code()));
+        }
         // A figure: the map edge to edge, a line of the projection and datum under it.
         // Every text a figure leaves to its caption, given anyway, is said to be left out.
         let asked = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
@@ -743,7 +1009,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             (1.0, fh + 1.0, page_w - 2.0, note_h - 1.0),
             pub_text(lines.join("\n"), FIGURE_PT, ink, false, TextAlign::Left),
         ));
-        (page_w, h, (0.0, 0.0, page_w, fh))
+        (page_w, h, (0.0, 0.0, page_w, fh), None)
     };
     // The extent fits within the graticule's label strips (drawn inside the frame along its
     // labelled edges), on both sides so it stays centred, and its labels cover none of it.
@@ -798,7 +1064,12 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // The locator: a globe (a copy of the map's polygon layers on the globe, its diameter nearly
     // the frame's) or the surrounding region on the map itself, the area outlined on either by
     // the map frame's extent indicator.
-    let side = if sheet { (0.24 * fw.min(fh)).clamp(25.0 * k, 70.0 * k) } else { (0.3 * fw.min(fh)).clamp(18.0, 45.0) };
+    let side = match column {
+        // In a column, its width, leaving a panel's legend most of the height under it.
+        Some(c) => c.w.min(if c.legend { 0.45 * c.h } else { c.h }).max(0.0),
+        None if sheet => (0.24 * fw.min(fh)).clamp(25.0 * k, 70.0 * k),
+        None => (0.3 * fw.min(fh)).clamp(18.0, 45.0),
+    };
     let locator_map = match locator {
         Locator::None => None,
         Locator::Globe => {
@@ -946,7 +1217,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // The surrounds to place: what each is, its size and its corner by default (0 top left,
     // 1 top right, 2 bottom left, 3 bottom right).
     let mut surrounds: Vec<(Surround, f64, f64, usize)> = Vec::new();
-    if locator_map.is_some() {
+    if locator_map.is_some() && column.is_none() {
         surrounds.push((Surround::Locator, side, side, 0));
     }
     surrounds.push((Surround::Arrow, aw, ah, 1));
@@ -958,7 +1229,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let (bar_w, bar_h) = (if sheet { 50.0 * k } else { 40.0 }, COLORBAR_MM);
     let bar_part = if bar.is_some() { bar_h + if ch > 0.0 { 2.0 } else { 0.0 } } else { 0.0 };
     let (content_w, content_h) = (if bar.is_some() { cw.max(bar_w) } else { cw }, ch + bar_part);
-    if content_h > 0.0 {
+    let legend_in_column = column.is_some_and(|c| c.legend);
+    if content_h > 0.0 && !legend_in_column {
         surrounds.push((Surround::Legend, (content_w + 2.0 * pad).min(fw * 0.45), (content_h + 2.0 * pad).min(fh * 0.6), 2));
     }
     surrounds.push((Surround::Scale, sw, sh + nh, 3));
@@ -1020,9 +1292,16 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let corner_of =
         |what: Surround| surrounds.iter().zip(&corners).find(|((kind, ..), _)| *kind == what).map(|(&(_, w, h, _), &c)| (c, w, h));
     let mut placed: Vec<(&'static str, (f64, f64, f64, f64))> = Vec::new();
-    if let (Some((map, locator_scale, shape)), Some((corner, w, h))) = (&locator_map, corner_of(Surround::Locator)) {
-        let r = at(corner, w, h);
-        placed.push(("locator", r));
+    // In a column, at its top; otherwise in its corner over the map.
+    let locator_rect = match column {
+        Some(c) => Some((c.x, c.y, side, side)),
+        None => corner_of(Surround::Locator).map(|(corner, w, h)| {
+            let r = at(corner, w, h);
+            placed.push(("locator", r));
+            r
+        }),
+    };
+    if let (Some((map, locator_scale, shape)), Some(r)) = (&locator_map, locator_rect) {
         l.add(
             "Locator",
             r,
@@ -1063,9 +1342,27 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         }
         Some((corner, w.min(room_w.max(MIN_LEGEND_MM)), h.min(room_h.max(MIN_LEGEND_MM))))
     });
-    if let Some((corner, lw, lh)) = legend_at {
-        let r = at(corner, lw, lh);
-        placed.push(("legend", r));
+    // In a panel, the legend under the locator, as tall as it needs within what is left.
+    let legend_rect = match column.filter(|c| c.legend) {
+        Some(c) if content_h > 0.0 => {
+            let ly = c.y + if locator_map.is_some() { side + 3.0 * k } else { 0.0 };
+            let room_h = c.y + c.h - ly;
+            if room_h < MIN_LEGEND_MM {
+                warnings.push("the side column leaves the legend no room under the locator, so it is left out: shorten its texts".into());
+                None
+            } else {
+                Some((c.x, ly, c.w, (content_h + 2.0 * pad).min(room_h)))
+            }
+        }
+        Some(_) => None,
+        None => legend_at.map(|(corner, lw, lh)| {
+            let r = at(corner, lw, lh);
+            placed.push(("legend", r));
+            r
+        }),
+    };
+    if let Some(r) = legend_rect {
+        let (lw, lh) = (r.2, r.3);
         l.add("Legend Box", r, pub_box(paper, clear, 0.0));
         // The colorbar at the bottom of the box, as tall as the box allows; the legend's rows in
         // what is left above it. Each says when it doesn't fit, rather than one blaming the other.
@@ -1075,7 +1372,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         if ch > 0.0 && (cw > iw || ch > rows_h) {
             warnings.push("the legend lists more than fits its corner: its last rows or the ends of long labels are left out".into());
         }
-        if bar.is_some() && (bar_w > iw || bar_h > ih) {
+        // In a column the colorbar takes the column's width, as its rows do.
+        if bar.is_some() && ((bar_w > iw && !legend_in_column) || bar_h > ih) {
             warnings.push("the legend's box is smaller than the colorbar: it is drawn narrower or shorter".into());
         }
         if ch > 0.0 && rows_h >= 1.0 {
@@ -1146,7 +1444,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     s.active_layout = Some(i);
     let locator = locator_map.map(|(map, ..)| map);
     Ok(
-        json!({"layout": i, "name": name, "page": [w, h], "scale": scale, "grid": step, "locator": locator, "elements": elements, "warnings": warnings}),
+        json!({"layout": i, "name": name, "page": [w, h], "scale": scale, "grid": step, "locator": locator, "style": style.code(), "elements": elements, "warnings": warnings}),
     )
 }
 

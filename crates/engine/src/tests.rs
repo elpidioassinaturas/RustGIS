@@ -2529,6 +2529,102 @@ fn publication_layouts_fit_their_pages() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A publication sheet's style (#682): `classic` (the default) as before; `banner` the title and
+/// subtitle in a band of the accent colour across the top; `panel` the map at the left and a panel
+/// at the right holding the title, the locator, the legend, the sources and the reference;
+/// `editorial` the title large in serif and a column at the right with the note, the locator and
+/// the legend.
+/// A figure leaves a style to its caption; an unknown style or a bad accent is refused.
+#[test]
+fn publication_layouts_take_a_style() {
+    use rustgis_map::layout::{ElementKind, FontFamily};
+    let dir = std::env::temp_dir().join(format!("rustgis-styles-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = world();
+    let piaui = json!([-46.8, -11.6, -38.5, -2.2]);
+    let texts = json!({"extent": piaui, "title": "PIAUÍ", "subtitle": "Greening and browning of the vegetation, 2001–2025",
+        "sources": ["NDVI: MOD13Q1 v6.1", "Boundaries: IBGE"], "note": "Only the cells with a significant trend are coloured.",
+        "headings": ["Sources", "Reference", "About this map"]});
+    let make = |s: &mut Session, style: &str, extra: Value| {
+        let mut p = texts.clone();
+        p["style"] = json!(style);
+        for (k, v) in extra.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        let r = s.run("layout.publication", &p).unwrap();
+        s.run("layout.export", &json!({"path": dir.join(format!("{style}.png")).display().to_string(), "dpi": 48})).unwrap();
+        r
+    };
+    let inside = |a: &rustgis_map::layout::Element, b: &rustgis_map::layout::Element| {
+        a.x >= b.x - 1e-6 && a.y >= b.y - 1e-6 && a.x + a.w <= b.x + b.w + 1e-6 && a.y + a.h <= b.y + b.h + 1e-6
+    };
+    // Classic, the default: no band, no panel.
+    let r = s.run("layout.publication", &texts).unwrap();
+    assert_eq!(r["style"], "classic");
+    let l = s.project.layouts.last().unwrap();
+    assert!(l.elements.iter().all(|e| !matches!(e.name.as_str(), "Banner" | "Panel Box" | "Column Rule")));
+    // Banner: a band of the accent colour at the top, the title on it in white, the map under it.
+    let r = make(&mut s, "banner", json!({"accent": "#123456"}));
+    let l = s.project.layouts.last().unwrap();
+    let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap_or_else(|| panic!("no {n}: {r}"));
+    let (band, title, frame) = (named("Banner"), named("Title"), named("Map Frame"));
+    let ElementKind::Rectangle { fill, .. } = &band.kind else { panic!() };
+    assert_eq!(*fill, rustgis_map::Rgba::rgb(0x12, 0x34, 0x56));
+    let ElementKind::Text { color, .. } = &title.kind else { panic!() };
+    assert_eq!(*color, rustgis_map::Rgba::rgb(0xFF, 0xFF, 0xFF));
+    assert!(inside(title, band) && inside(named("Subtitle"), band) && frame.y >= band.y + band.h, "{r}");
+    // Panel: the map at the left, the panel at the right holding the texts, the locator and the
+    // legend; no boxed footer.
+    let r = make(&mut s, "panel", json!({}));
+    let l = s.project.layouts.last().unwrap();
+    let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap_or_else(|| panic!("no {n}: {r}"));
+    let (panel, frame) = (named("Panel Box"), named("Map Frame"));
+    assert!(frame.x + frame.w <= panel.x, "the map left of the panel: {r}");
+    for n in ["Title", "Subtitle", "Locator", "Legend Box", "Sources Heading", "Sources", "Reference"] {
+        assert!(inside(named(n), panel), "{n} in the panel: {r}");
+    }
+    assert!(l.elements.iter().all(|e| e.name != "Sources Box"));
+    // The legend under the locator, apart from it.
+    assert!(named("Legend Box").y >= named("Locator").y + named("Locator").h, "{r}");
+    // In landscape too, every style on any sheet: the panel at the right of a wide map.
+    for style in ["banner", "panel", "editorial"] {
+        let r = make(&mut s, style, json!({"profile": "a4-landscape"}));
+        let l = s.project.layouts.last().unwrap();
+        let frame = l.elements.iter().find(|e| e.name == "Map Frame").unwrap();
+        assert!(frame.w > frame.h, "{style}: a wide map on a landscape sheet: {r}");
+        if style != "banner" {
+            assert!(
+                l.elements.iter().filter(|e| e.name == "Locator" || e.name == "Legend Box").all(|e| e.x >= frame.x + frame.w),
+                "{style}: {r}"
+            );
+        }
+    }
+    // No locator: the legend takes its place at the top of the panel's free room.
+    let r = make(&mut s, "panel", json!({"locator": "none"}));
+    let l = s.project.layouts.last().unwrap();
+    assert!(l.elements.iter().all(|e| e.name != "Locator") && l.elements.iter().any(|e| e.name == "Legend Box"), "{r}");
+    // Editorial: the title in serif in the accent colour, a column at the right with its heading,
+    // the note, the locator and the legend.
+    let r = make(&mut s, "editorial", json!({}));
+    let l = s.project.layouts.last().unwrap();
+    let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap_or_else(|| panic!("no {n}: {r}"));
+    let ElementKind::Text { font, color, .. } = &named("Title").kind else { panic!() };
+    assert_eq!((*font, *color), (FontFamily::Serif, rustgis_map::Rgba::rgb(0x1F, 0x2D, 0x4D)));
+    let frame = named("Map Frame");
+    for n in ["Column Heading", "Note", "Locator", "Legend Box"] {
+        assert!(named(n).x >= frame.x + frame.w, "{n} right of the map: {r}");
+    }
+    // A figure leaves the style to its caption; refused: an unknown style, a bad accent.
+    let r = s.run("layout.publication", &json!({"extent": piaui, "profile": "figure-1col", "style": "banner"})).unwrap();
+    assert!(r["warnings"].to_string().contains("style \\\"banner\\\""), "{r}");
+    let before = s.project.layouts.len();
+    for bad in [json!({"extent": piaui, "style": "poster"}), json!({"extent": piaui, "style": "banner", "accent": "blue"})] {
+        assert!(s.run("layout.publication", &bad).is_err(), "{bad}");
+    }
+    assert_eq!(s.project.layouts.len(), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A publication layout's locator (#682, part 2): on a sheet, by default, a globe (a new map of
 /// the vector layers on the globe, its diameter nearly the frame's) in a round frame at the map's
 /// top left, the area outlined by the map frame's extent indicator; `"inset"` the surrounding

@@ -52,6 +52,13 @@ pub fn width_mm(s: &str, pt: f32, bold: bool) -> f64 {
     text::measure(s, pt, bold) as f64 * 25.4 / 96.0
 }
 
+/// [`width_mm`] in the serif a layout draws a `"font": "serif"` text in (the sans where no serif is
+/// installed): the ink's width, which the line has to hold.
+pub fn serif_width_mm(s: &str, pt: f32, bold: bool) -> f64 {
+    let (lo, hi) = text::styled_extent(s, pt * 1.33, text::Face { bold, italic: false, serif: true }, 0.0);
+    f64::from((hi - lo).max(0.0)) * 25.4 / 96.0
+}
+
 /// Point size and line height (mm) of each kind of block.
 fn style(b: &Block) -> (f32, bool, f64) {
     match b {
