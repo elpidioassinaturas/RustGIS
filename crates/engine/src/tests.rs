@@ -9238,6 +9238,56 @@ fn a_data_cube_summarised_over_time() {
     assert_eq!(s.map().layers.len(), before);
 }
 
+/// A STAC collection's band summarised over time, read in place as for a trend: each file's own
+/// scale and offset taken, the whole period or a month at a time.
+#[test]
+fn a_stac_collection_summarised_over_time() {
+    let (cog, _) = serve_ranges(rustgis_data::raster::cog::example(512, 256));
+    let dates = ["2024-01-01", "2024-01-17", "2024-02-02", "2024-02-18", "2024-03-05", "2024-03-21"];
+    let features: Vec<String> = dates
+        .iter()
+        .enumerate()
+        .map(|(k, d)| {
+            format!(
+                r#"{{"type": "Feature", "id": "n{k}", "collection": "mod", "bbox": [10, 45, 11, 46], "geometry": null,
+                   "properties": {{"datetime": "{d}T00:00:00Z"}},
+                   "assets": {{"NDVI": {{"href": "{cog}/n{k}.tif", "eo:bands": [{{"scale": {}, "offset": {}}}]}}}}}}"#,
+                (k + 1) as f64 * 1e-4,
+                k as f64 * 0.01
+            )
+        })
+        .collect();
+    let search = format!(r#"{{"type": "FeatureCollection", "features": [{}]}}"#, features.join(","));
+    let api = format!("{}/v1", serve_routes(vec![("/v1/search", search)], 8));
+    let mut s = Session::new(Project::default());
+    let mut run = |by: &str| {
+        let p = json!({"url": api, "collection": "mod", "asset": "NDVI", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-03", "stat": "mean", "by": by});
+        let r = s.run("cube.reduce", &p).unwrap();
+        let ids: Vec<u32> = r["layers"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
+        ids.iter().map(|id| s.map().layer(*id).unwrap().raster.as_ref().unwrap().data.clone().unwrap()).collect::<Vec<_>>()
+    };
+    // Pixel (x, y) stores (x + y) % 256; date k reads it at a scale of k + 1 ten-thousandths and
+    // an offset of k hundredths, so dates k0 to k1 average to (k0 + k1 + 2) / 2 ten-thousandths
+    // of it plus (k0 + k1) / 2 hundredths.
+    let mean = |x: usize, y: usize, k0: usize, k1: usize| {
+        ((x + y) % 256) as f64 * (k0 + k1 + 2) as f64 / 2.0 * 1e-4 + (k0 + k1) as f64 / 2.0 * 0.01
+    };
+    let whole = run("all");
+    assert_eq!(whole.len(), 1);
+    assert_eq!((whole[0].width, whole[0].height), (512, 512), "the area on the full images' grid");
+    let months = run("month");
+    assert_eq!(months.len(), 3, "January, February and March");
+    for (x, y) in [(10, 20), (300, 100), (0, 0), (511, 511)] {
+        let at = y * 512 + x;
+        let got = f64::from(whole[0].bands[0].data[at]);
+        assert!((got - mean(x, y, 0, 5)).abs() < 1e-4, "({x}, {y}): {got} vs {}", mean(x, y, 0, 5));
+        for (m, (k0, k1)) in [(0, 1), (2, 3), (4, 5)].into_iter().enumerate() {
+            let got = f64::from(months[m].bands[0].data[at]);
+            assert!((got - mean(x, y, k0, k1)).abs() < 1e-4, "month {m} ({x}, {y}): {got} vs {}", mean(x, y, k0, k1));
+        }
+    }
+}
+
 /// A Zarr variable follows the time slider (#554): the slice drawn is the step the slider is at,
 /// the stretch is the same at every step, and the project keeps the layer by its store.
 #[cfg(not(target_arch = "wasm32"))]
