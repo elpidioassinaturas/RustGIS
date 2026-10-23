@@ -1060,6 +1060,13 @@ mod native {
         fetch_answer(agent, url, true).map_err(|f| Failure { url: url.to_string(), ..f })
     }
 
+    /// A file's length from a `Content-Range` header (`bytes 0-0/1234`); none when the server
+    /// doesn't know it (`*`), the file is empty or the header can't be read.
+    pub(super) fn content_range_total(header: &str) -> Option<u64> {
+        let (_, len) = header.rsplit_once('/')?;
+        len.trim().parse::<u64>().ok().filter(|len| *len > 0)
+    }
+
     /// The answer to `url`; a refusal keeps the server's answer only when `detail` asks for it,
     /// as tiles a server doesn't have are routine and only their status is read.
     fn fetch_answer(agent: &ureq::Agent, url: &str, detail: bool) -> Result<Vec<u8>, Failure> {
@@ -1125,13 +1132,8 @@ mod native {
             }
             if let Some(n) = measuring.filter(|_| status < 300) {
                 measuring = None;
-                let total = (status == 206)
-                    .then(|| resp.headers().get("content-range").and_then(|v| v.to_str().ok()))
-                    .flatten()
-                    .and_then(|v| v.rsplit_once('/'))
-                    .and_then(|(_, len)| len.trim().parse::<u64>().ok())
-                    .filter(|len| *len > 0);
-                match total {
+                let header = resp.headers().get("content-range").and_then(|v| v.to_str().ok());
+                match header.filter(|_| status == 206).and_then(content_range_total) {
                     Some(len) => {
                         range = Some((len.saturating_sub(n), len - 1));
                         continue;
@@ -1467,6 +1469,19 @@ mod tests {
         let base = serve(vec![no_suffix, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789".into()]);
         let f = native::get_detailed(&agent, &format!("{base}/f.parquet{TAIL}4")).unwrap_err();
         assert!(f.message.contains(super::NO_RANGES), "{}", f.message);
+        // More last bytes asked for than the file holds: the whole file.
+        let base = serve(vec![
+            "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/3\r\nContent-Length: 1\r\nConnection: close\r\n\r\na".into(),
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-2/3\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc".into(),
+        ]);
+        assert_eq!(native::get_detailed(&agent, &format!("{base}/f.parquet{TAIL}4")).unwrap(), b"abc");
+        // The length as a Content-Range gives it, when it does.
+        assert_eq!(native::content_range_total("bytes 0-0/1234"), Some(1234));
+        assert_eq!(native::content_range_total("bytes 0-0/ 10 "), Some(10));
+        for unknown in ["bytes 0-0/*", "bytes 0-0/0", "bytes 0-0", "bytes 0-0/-5", ""] {
+            assert_eq!(native::content_range_total(unknown), None, "{unknown}");
+        }
     }
 
     /// A refused request keeps who refused it (#509); the plain error reads as it always has.
