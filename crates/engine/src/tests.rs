@@ -2618,6 +2618,31 @@ fn publication_layouts_locate_their_area() {
         assert_eq!(g.dataset.features.len(), l.dataset.features.len());
         assert!(vertices(g) * 2 < vertices(l), "{}: {} of {} vertices", g.name, vertices(g), vertices(l));
     }
+    // An island far smaller than the tolerance keeps its own ring rather than collapsing; no ring
+    // on the globe has under four points.
+    let island = dir.join("island.geojson");
+    std::fs::write(
+        &island,
+        r#"{"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [[[-40, -5], [-39.999, -5], [-39.999, -4.999], [-40, -4.999], [-40, -5]]]}}]}"#,
+    )
+    .unwrap();
+    s.run("layer.addData", &json!({"path": island.display().to_string()})).unwrap();
+    let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    let m = s.project.maps.iter().find(|m| Some(m.name.as_str()) == r["locator"].as_str()).unwrap();
+    let rings = |name: &str| -> Vec<usize> {
+        m.layers
+            .iter()
+            .filter(|l| l.name == name || name.is_empty())
+            .flat_map(|l| l.dataset.features.iter())
+            .filter_map(|f| match &f.geometry {
+                Some(rustgis_data::Geometry::Polygon(polys)) => Some(polys.iter().flatten().map(Vec::len).collect::<Vec<_>>()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    };
+    assert_eq!(rings("island"), [5]);
+    assert!(rings("").iter().all(|n| *n >= 4));
     // Sheets with ever more source lines, so ever smaller frames, down to the smallest a sheet
     // takes: the legend is never drawn over the locator, and once there's no room under it, it is
     // left out, said.
