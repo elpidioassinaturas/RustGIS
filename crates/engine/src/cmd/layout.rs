@@ -1154,6 +1154,12 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                         // the subtitle under it, the map below; a column at the right, under a rule, with
                         // its heading (the third of `headings`), the note (the map's story), the locator
                         // and the legend; the sources and reference boxed under both.
+                        // Its title and subtitle are serif: with none installed, drawn in the sans, said.
+                        if (title.is_some() || subtitle.is_some())
+                            && let Some(w) = no_serif()
+                        {
+                            warnings.push(format!("the editorial title and subtitle: {w}"));
+                        }
                         let gap = 6.0 * k;
                         let cw = (0.3 * iw).max(45.0 * k).min(0.4 * iw);
                         let (mw, cx) = (iw - cw - gap, x0 + iw - cw);

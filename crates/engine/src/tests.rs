@@ -1264,8 +1264,10 @@ fn hostile_params_never_panic() {
         json!({"kind": "legend", "element": 1, "exclude": [null, 7, "", {"x": 1}]}),
         json!({"kind": "text", "element": 1, "font": {"family": "serif"}, "italic": [], "align": 7}),
         // A publication sheet's style, accent and orientation, and a shape's rounded corners.
-        json!({"style": 7, "accent": "#XYZ", "profile": ["a4"], "kind": "ellipse", "element": 1, "radius": f64::NAN}),
-        json!({"style": "", "accent": [], "profile": "a9", "kind": "rectangle", "element": 1, "radius": -1e308}),
+        // (The profile left out or valid, so the style and accent are reached.)
+        json!({"style": 7, "accent": "#XYZ", "kind": "ellipse", "element": 1, "radius": "x"}),
+        json!({"style": "", "accent": [], "kind": "rectangle", "element": 1, "radius": -1e308}),
+        json!({"profile": "a3", "style": "poster", "accent": "#ZZZZZZ", "kind": "rectangle", "radius": 1e308}),
         // A STAC trend's source: a valid band and period so the junk after them is reached, and an
         // API on a closed local port, so nothing is read.
         json!({"collection": "c", "asset": "NDVI", "url": "http://127.0.0.1:9/v1", "bbox": "nowhere", "cellSize": -1e308, "resampling": 3, "start": "2020", "end": "2021"}),
@@ -2811,6 +2813,9 @@ fn publication_layouts_take_a_style() {
     let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap_or_else(|| panic!("no {n}: {r}"));
     let ElementKind::Text { font, color, .. } = &named("Title").kind else { panic!() };
     assert_eq!((*font, *color), (FontFamily::Serif, rustgis_map::Rgba::rgb(0x1F, 0x2D, 0x4D)));
+    // Drawn in the sans where no serif is installed, said.
+    let said = r["warnings"].to_string().contains("the editorial title and subtitle: no serif font");
+    assert_eq!(said, !crate::render::fonts::serif_available(), "{r}");
     let frame = named("Map Frame");
     for n in ["Column Heading", "Note", "Locator", "Legend Box"] {
         assert!(named(n).x >= frame.x + frame.w, "{n} right of the map: {r}");
@@ -2859,6 +2864,7 @@ fn publication_layouts_take_a_style() {
     s.run("layout.update", &json!({"element": id, "radius": 0})).unwrap();
     assert!(!serde_json::to_string(&rect(&s)).unwrap().contains("radius"), "square corners aren't saved");
     assert!(s.run("layout.update", &json!({"element": id, "radius": -1})).is_err());
+    assert!(s.run("layout.addElement", &json!({"kind": "rectangle", "radius": "x"})).is_err());
     // Anything but a rectangle refuses rounded corners, rather than taking them as applied.
     let n = s.project.layouts.last().unwrap().elements.len();
     let e = s.run("layout.addElement", &json!({"kind": "ellipse", "radius": 4})).unwrap_err();
