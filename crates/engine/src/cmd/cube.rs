@@ -1078,9 +1078,13 @@ impl Totals {
 
 /// The most values a summary's outputs hold (cells × outputs): 32 million on the desktop, 8
 /// million in the browser, checked before reading when the cube knows its size and as the pieces
-/// are read when it doesn't. Its running totals, up to 20 bytes a cell, are a piece's at a time and
-/// only for the groups whose dates are being read: one year's in a summary by year read one date
-/// at a time (those of the dates in flight with several readers), every month's in one by month.
+/// are read when it doesn't. Its running totals are a piece's at a time and only for the groups
+/// whose dates are being read: one year's in a summary by year read one date at a time (those of
+/// the dates in flight with several readers), but every month's in one by month. They take 4 bytes
+/// a cell for count, 12 for mean, min, max, sum and countAbove, and 20 for std, so a summary by
+/// month at the cap holds up to five times its outputs' 4 bytes a value: some 640 MB for std on the
+/// desktop. A STAC cube is read in pieces whose cells × dates stay within [`MAX_VALUES`], so a long
+/// series keeps each piece's totals small.
 pub const MAX_REDUCED: u64 = MAX_VALUES / 2;
 
 /// How a summary groups its dates: one output for them all, one for each calendar year, or one for

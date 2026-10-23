@@ -475,7 +475,10 @@ over time does for a Zarr variable (see [Data](data.md)).
   a cell never had a value.
 - **Size:** the slices are folded into running totals as they are read, so a long period takes no
   more memory than a short one; a STAC collection's area is read in pieces, as for a trend. The
-  outputs hold up to 32 million values (cells times groups; 8 million in the web app). The layers
+  outputs hold up to 32 million values (cells times groups; 8 million in the web app). A summary by
+  month keeps every month's totals while it reads, up to five times the outputs' memory for
+  **std** (three for mean, min, max, sum and countAbove), so a large area by month may need a
+  coarser cell size or a smaller area. The layers
   are named after what they hold (`NDVI mean 2001`, `NDVI mean 2001–2025 month 03`, or the
   `"name"` given and the group) and kept in the project as GeoTIFFs.
 
