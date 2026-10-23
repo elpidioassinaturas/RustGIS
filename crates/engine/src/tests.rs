@@ -2542,7 +2542,9 @@ fn publication_layouts_take_a_style() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut s = world();
     let piaui = json!([-46.8, -11.6, -38.5, -2.2]);
-    let texts = json!({"extent": piaui, "title": "PIAUÍ", "subtitle": "Greening and browning of the vegetation, 2001–2025",
+    // On a portrait sheet (the arrangement is what is checked; the orientation chosen for an area
+    // has its own check below).
+    let texts = json!({"extent": piaui, "profile": "a4-portrait", "title": "PIAUÍ", "subtitle": "Greening and browning of the vegetation, 2001–2025",
         "sources": ["NDVI: MOD13Q1 v6.1", "Boundaries: IBGE"], "note": "Only the cells with a significant trend are coloured.",
         "headings": ["Sources", "Reference", "About this map"]});
     let make = |s: &mut Session, style: &str, extra: Value| {
