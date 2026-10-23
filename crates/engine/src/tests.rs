@@ -2999,6 +2999,15 @@ fn publication_layouts_locate_their_area() {
             }
         }
     }
+    // The sheets above may never leave the legend that little room (the search keeps it off the
+    // locator's side), so the rule itself: short of the arrow or the scale bar it keeps 10 mm, short
+    // of the locator under 10 mm it is left out.
+    use crate::cmd::layout::{Surround, legend_room};
+    assert_eq!(legend_room(40.0, 30.0, 100.0, 80.0, None, None), Some((40.0, 30.0)));
+    assert_eq!(legend_room(40.0, 30.0, 100.0, 80.0, Some((Surround::Arrow, 70.0)), Some((Surround::Locator, 60.0))), Some((30.0, 20.0)));
+    assert_eq!(legend_room(40.0, 30.0, 100.0, 80.0, Some((Surround::Arrow, 95.0)), Some((Surround::Scale, 75.0))), Some((10.0, 10.0)));
+    assert_eq!(legend_room(40.0, 30.0, 100.0, 80.0, None, Some((Surround::Locator, 75.0))), None);
+    assert_eq!(legend_room(40.0, 30.0, 100.0, 80.0, Some((Surround::Locator, 95.0)), None), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

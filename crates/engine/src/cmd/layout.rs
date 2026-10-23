@@ -556,11 +556,39 @@ fn pub_card(fill: Rgba, outline: Rgba, width: f64, radius: f64) -> ElementKind {
 
 /// The surrounds a publication layout places in the map frame's corners.
 #[derive(Clone, Copy, PartialEq)]
-enum Surround {
+pub(crate) enum Surround {
     Locator,
     Arrow,
     Legend,
     Scale,
+}
+
+/// The least a publication layout's legend is cut to, each way, by the surrounds beside and above
+/// or below it, in mm.
+const MIN_LEGEND_MM: f64 = 10.0;
+
+/// A publication layout's legend, `w` × `h` in its corner, cut short of the surround beside it
+/// (`beside`: what it is and its width) and the one above or below it (`over`: what it is and its
+/// height), in a frame with `across` and `down` mm of room (its margins and the gap between
+/// surrounds taken off). Beside the arrow or the scale bar the legend keeps [`MIN_LEGEND_MM`] each
+/// way, as a layout without a locator always has; the locator leaving it less, `None`: left out,
+/// rather than drawn over the locator.
+pub(crate) fn legend_room(
+    w: f64,
+    h: f64,
+    across: f64,
+    down: f64,
+    beside: Option<(Surround, f64)>,
+    over: Option<(Surround, f64)>,
+) -> Option<(f64, f64)> {
+    let room = |other: Option<(Surround, f64)>, total: f64| other.map_or(f64::INFINITY, |(_, size)| total - size);
+    let (room_w, room_h) = (room(beside, across), room(over, down));
+    let locator_in_the_way =
+        |room: f64, other: Option<(Surround, f64)>| room < MIN_LEGEND_MM && other.is_some_and(|(kind, _)| kind == Surround::Locator);
+    if locator_in_the_way(room_w, beside) || locator_in_the_way(room_h, over) {
+        return None;
+    }
+    Some((w.min(room_w.max(MIN_LEGEND_MM)), h.min(room_h.max(MIN_LEGEND_MM))))
 }
 
 /// A publication layout's colorbar's height, in mm: its title, the bar and its labels.
@@ -1429,7 +1457,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     }
     let (sw, sh, nh) = ((fw * 0.3).max(25.0), if sheet { 8.0 * k } else { 6.0 }, pitch(small_pt) + 0.5);
     let pad = 2.0;
-    // What the map draws where, on a coarse grid of the frame (its basemap left out).
+    // What the map draws where, on a coarse grid of the frame (its basemap left out). The map
+    // itself is drawn for it, on purpose, as the screen draws it: a grid of 96 cells, a small part
+    // of what exporting the sheet draws; a streamed layer draws what it holds and starts reading
+    // the frame's area in the background (which the export reads anyway); web tiles aren't fetched.
     let coverage = crate::render::layout::frame_coverage(s.map_mut(), center, scale, fw, fh, 96);
     // The share of a rectangle (in page mm) over the frame's drawn cells.
     let covered = |(x, y, w, h): (f64, f64, f64, f64)| -> f64 {
@@ -1480,7 +1511,6 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // least of the map's drawing (its area in mm²) with no surround over another, a surround off
     // its own corner costing a hundredth of its area so that, all else equal, they stay where they
     // belong. There are four surrounds at most (locator, arrow, legend, scale), so 4⁴ = 256 picks.
-    const MIN_LEGEND_MM: f64 = 10.0;
     let n = surrounds.len();
     let mut corners: Vec<usize> = surrounds.iter().map(|x| x.3).collect();
     let mut best = f64::INFINITY;
@@ -1574,19 +1604,16 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // leaves too small for a legend leaves it out, said, rather than drawing it over the locator.
     let legend_at = corner_of(Surround::Legend).and_then(|(corner, w, h)| {
         let other = |c: usize| surrounds.iter().zip(&corners).find(|(_, k)| **k == c).map(|(&(kind, w, h, _), _)| (kind, w, h));
-        let room_w = other(corner ^ 1).map_or(f64::INFINITY, |(_, ow, _)| fw - left - right - ow - 2.0);
-        let room_h = other(corner ^ 2).map_or(f64::INFINITY, |(_, _, oh)| fh - top - bottom - oh - e);
-        // Short of the locator, under 10 mm: left out. Beside the arrow or the scale bar, the
-        // legend keeps 10 mm each way, as a layout without a locator always has.
-        let locator_in_the_way = |room: f64, c: usize| room < MIN_LEGEND_MM && other(c).is_some_and(|o| o.0 == Surround::Locator);
-        if locator_in_the_way(room_h, corner ^ 2) || locator_in_the_way(room_w, corner ^ 1) {
+        let beside = other(corner ^ 1).map(|(kind, ow, _)| (kind, ow));
+        let over = other(corner ^ 2).map(|(kind, _, oh)| (kind, oh));
+        let fit = legend_room(w, h, fw - left - right - 2.0, fh - top - bottom - e, beside, over);
+        if fit.is_none() {
             warnings.push(
                 "the frame leaves the legend no room beside the locator, so it is left out: give the map more room, or set \"locator\": \"none\""
                     .into(),
             );
-            return None;
         }
-        Some((corner, w.min(room_w.max(MIN_LEGEND_MM)), h.min(room_h.max(MIN_LEGEND_MM))))
+        fit.map(|(lw, lh)| (corner, lw, lh))
     });
     // In a panel, the legend under the locator, as tall as it needs within what is left.
     let legend_rect = match column.filter(|c| c.legend) {
