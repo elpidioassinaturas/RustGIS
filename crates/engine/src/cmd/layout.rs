@@ -834,6 +834,11 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             m.basemap = src.basemap;
             m.graticule = src.graticule;
             m.body = src.body.clone();
+            m.set_projection(rustgis_map::Projection::Globe);
+            let globe = globe_scale(&m, center, side * 0.92);
+            // Each polygon simplified to a tenth of a millimetre on the disc (its scale in metres),
+            // so the project keeps a sketch of the layers for it, not a second full copy of them.
+            let tolerance_m = globe * 1e-4;
             m.layers = src
                 .layers
                 .iter()
@@ -842,13 +847,22 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 })
                 .map(|l| {
                     let mut layer = l.clone();
+                    layer.dataset.features = l
+                        .dataset
+                        .features
+                        .iter()
+                        .map(|f| {
+                            let mut f = f.clone();
+                            f.geometry = f.geometry.as_ref().map(|g| rustgis_analysis::simplify_geometry(g, tolerance_m));
+                            f
+                        })
+                        .collect();
+                    layer.touch_geometry();
                     layer.selection.clear();
                     layer.labels.enabled = false;
                     layer
                 })
                 .collect();
-            m.set_projection(rustgis_map::Projection::Globe);
-            let globe = globe_scale(&m, center, side * 0.92);
             let name = m.name.clone();
             match orphan.and_then(|i| s.project.maps.get_mut(i)) {
                 Some(old) => {
