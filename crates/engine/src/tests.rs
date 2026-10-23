@@ -2705,6 +2705,13 @@ fn publication_surrounds_keep_off_the_data() {
     assert!(s.map().basemap == rustgis_map::Basemap::Ocean && s.map().label_lock.is_none());
     assert_ne!(corner_of(&s, "Legend Box"), "bottom left", "{r}");
     assert_eq!(corner_of(&s, "North Arrow"), "bottom left", "{r}");
+    // A pale fill with no outline counts as data too: the legend leaves it the same way.
+    let mut pale = Session::new(Project::default());
+    pale.run("layer.addData", &json!({"path": square("pale", (-20.0, -20.0, 5.0, 5.0))})).unwrap();
+    pale.run("layer.color", &json!({"layer": "pale", "color": "#FAFAF5"})).unwrap();
+    pale.run("layer.outline", &json!({"layer": "pale", "color": "#00000000", "width": 0})).unwrap();
+    let rp = pale.run("layout.publication", &json!({"extent": extent, "author": ""})).unwrap();
+    assert_ne!(corner_of(&pale, "Legend Box"), "bottom left", "{rp}");
     // Four surrounds, three free corners: the arrow says it covers data a freer corner was free of.
     let said = r["warnings"].to_string();
     assert!(said.contains("the north arrow sits on what the map shows"), "{said}");

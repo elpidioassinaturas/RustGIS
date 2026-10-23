@@ -1035,8 +1035,9 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
     (map.basemap, map.label_lock) = (basemap, lock);
     let pm = drawn?.pixmap;
     let (gw, gh) = (pm.width(), pm.height());
-    // Anything not the blank basemap's white paper (a translucent fill over it included).
-    let drawn = pm.pixels().iter().map(|p| p.alpha() > 0 && (p.red() < 245 || p.green() < 245 || p.blue() < 245)).collect();
+    // Anything not the blank basemap's paper, which is pure opaque white with no graticule: a pale
+    // or translucent fill counts too (only a fill of that very white, invisible on it, doesn't).
+    let drawn = pm.pixels().iter().map(|p| p.alpha() > 0 && (p.red(), p.green(), p.blue(), p.alpha()) != (255, 255, 255, 255)).collect();
     Some((gw, gh, drawn))
 }
 
