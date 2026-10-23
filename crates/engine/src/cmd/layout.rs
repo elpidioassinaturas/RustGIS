@@ -481,8 +481,8 @@ enum Surround {
 /// A publication layout's colorbar's height, in mm: its title, the bar and its labels.
 const COLORBAR_MM: f64 = 15.0;
 
-/// The share of a surround over what the map draws past which, a corner freer by as much having
-/// gone to another surround, the layout says so.
+/// The share of what the map draws a surround may cover before the layout warns about it, when a
+/// corner freer by at least as much went to another surround.
 const OVER_DATA: f64 = 0.25;
 
 /// A `"decimal"` parameter: `","` for a decimal comma, `"."` for a point; `None` when not given.
