@@ -8475,7 +8475,11 @@ fn a_trend_over_a_stac_collection() {
         let r = s.run("cube.reduce", p).unwrap();
         s.map().layer(r["layers"][0].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap()
     };
+    // Every key a summary of a collection takes is read, none said to be ignored.
+    let mark = s.notice_mark();
     let read_whole = summary(&mut s, &mean);
+    let ignored: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains("ignores")).collect();
+    assert!(ignored.is_empty(), "{ignored:?}");
     assert_eq!((read_whole.width, read_whole.height), (512, 512));
     for (x, y) in [(10, 20), (300, 100), (511, 511)] {
         let got = f64::from(read_whole.bands[0].data[y * 512 + x]);
