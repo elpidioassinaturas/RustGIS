@@ -29,7 +29,7 @@ pub fn commands() -> Vec<C> {
             r#"{"name"?: string, "page"?: "letter"|"legal"|"tabloid"|"a5"|"a4"|"a3"|"a2"|"a1"|"a0", "orientation"?: "landscape"|"portrait", "width"?: mm, "height"?: mm, "template"?: "map" (frame, title, legend, north arrow, scale bar; the default)|"blank"}"#,
         ),
         C::new("layout.publication", "New Publication Layout", "Publish › Layout", publication).params(
-            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading, an editorial column's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000), "style"?: "classic" (the default: the title over the map, the footer under it) | "banner" (the title and subtitle in a band of the accent colour across the top) | "panel" (the map at the left, a panel at the right with the title, locator, legend, sources and reference) | "editorial" (the title large in serif, a column at the right with the note, the locator and the legend) | "modular" (cards on a light page: the map, the locator and the legend each in one, the sources and reference in tinted ones) | "poster" (the page in the accent colour, the title in light text, the map in a light card, the footer in darker blocks) (a sheet's arrangement; figures leave it to the caption), "accent"?: a colour as #RRGGBB (the style's colour: its band, panel tint, headings and rules, a poster's page)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
+            r#"{"profile"?: "a4" (the default) | "a3" | "a2" (a sheet turned to portrait or landscape, whichever the area's map comes out larger on: its extent east to west against north to south, on the map's projection) | "a4-portrait"|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading, an editorial column's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000), "style"?: "classic" (the default: the title over the map, the footer under it) | "banner" (the title and subtitle in a band of the accent colour across the top) | "panel" (the map at the left, a panel at the right with the title, locator, legend, sources and reference) | "editorial" (the title large in serif, a column at the right with the note, the locator and the legend) | "modular" (cards on a light page: the map, the locator and the legend each in one, the sources and reference in tinted ones) | "poster" (the page in the accent colour, the title in light text, the map in a light card, the footer in darker blocks) (a sheet's arrangement; figures leave it to the caption), "accent"?: a colour as #RRGGBB (the style's colour: its band, panel tint, headings and rules, a poster's page)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
         ),
         C::new("layout.activate", "Open Layout", "Browser", |s, p| {
             let i = index(s, &by_name(p))?;
@@ -601,14 +601,38 @@ fn globe_scale(map: &rustgis_map::Map, center: Coord, d_mm: f64) -> f64 {
     if radius.is_finite() && radius > 0.0 { (PROBE * 2.0 * radius / side).clamp(100.0, 1e10) } else { PROBE }
 }
 
+/// Whether a sheet `short` × `long` mm suits an area `aspect` times as tall as it is wide better
+/// turned to landscape: the map comes out clearly wider there (by more than 3 %, portrait winning
+/// a near tie), as near as the sheet's texts can be told before they are laid out (a header and a
+/// footer of about 70 mm on A4 between them, a panel's title in its panel; a style with a column
+/// leaves the map two thirds of the width).
+fn landscape_suits(aspect: f64, short: f64, long: f64, style: Style) -> bool {
+    let k = short / 210.0;
+    let map_w = |w: f64, h: f64| {
+        let texts = if style == Style::Panel { 50.0 } else { 100.0 } * k;
+        let (iw, ih) = (w - 30.0 * k, h - texts);
+        let fw = if matches!(style, Style::Panel | Style::Editorial | Style::Modular) { 0.68 * iw } else { iw };
+        let (fw, fh) = (fw - 2.0 * LABEL_ROOM_SIDE, ih - 2.0 * LABEL_ROOM_END);
+        fw.min(fh / aspect.max(1e-6))
+    };
+    map_w(long, short) > 1.03 * map_w(short, long)
+}
+
 /// `layout.publication`: a finished sheet or figure of the active map, its extent fitted at a
 /// round scale, with a graticule, legend, scale bar and north arrow; a sheet adds a frame, title,
 /// subtitle and a footer of two boxed columns (sources, cartographic reference) with a note and
 /// authorship under them, each text wrapped to its box with the layout's own font.
 fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let id = match p.get("profile").filter(|v| !v.is_null()) {
-        None => "a4-portrait".to_string(),
+        None => "a4".to_string(),
         Some(v) => v.as_str().map(|t| t.trim().to_ascii_lowercase()).ok_or("profile is a profile's name, such as \"a4-portrait\"")?,
+    };
+    // A sheet's size alone ("a4", the default): its orientation chosen below, from the area's
+    // shape, portrait until then.
+    let auto = matches!(id.as_str(), "a4" | "a3" | "a2").then(|| id.clone());
+    let id = match &auto {
+        Some(size) => format!("{size}-portrait"),
+        None => id,
     };
     let profile = PUBLICATION_PROFILES.iter().find(|pr| pr.id == id).ok_or_else(|| {
         let names: Vec<&str> = PUBLICATION_PROFILES.iter().map(|pr| pr.id).collect();
@@ -676,6 +700,16 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         }
     };
     let accent = color(p, "accent", style.accent())?;
+    // No orientation asked: the one the area's map comes out larger on, from its extents east to
+    // west and north to south on the map's projection and the room the style leaves the map.
+    let profile = match &auto {
+        Some(size) if aspect(s, &extent).is_some_and(|a| landscape_suits(a, page_w.min(page_h), page_w.max(page_h), style)) => {
+            let id = format!("{size}-landscape");
+            PUBLICATION_PROFILES.iter().find(|pr| pr.id == id).unwrap_or(profile)
+        }
+        _ => profile,
+    };
+    let (page_w, page_h) = (profile.width, profile.height);
     let heading = |i: usize, or: &str| headings.get(i).cloned().unwrap_or_else(|| or.to_string());
     let (projection, datum) = projection_and_datum(s);
     let step = grid_step(&extent);
@@ -1662,7 +1696,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     s.active_layout = Some(i);
     let locator = locator_map.map(|(map, ..)| map);
     Ok(
-        json!({"layout": i, "name": name, "page": [w, h], "scale": scale, "grid": step, "locator": locator, "style": style.code(), "elements": elements, "warnings": warnings}),
+        json!({"layout": i, "name": name, "profile": profile.id, "page": [w, h], "scale": scale, "grid": step, "locator": locator, "style": style.code(), "elements": elements, "warnings": warnings}),
     )
 }
 

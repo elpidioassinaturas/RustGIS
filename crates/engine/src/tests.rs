@@ -2678,6 +2678,21 @@ fn publication_layouts_take_a_style() {
     s.run("layout.update", &json!({"element": id, "radius": 0})).unwrap();
     assert!(!serde_json::to_string(&rect(&s)).unwrap().contains("radius"), "square corners aren't saved");
     assert!(s.run("layout.update", &json!({"element": id, "radius": -1})).is_err());
+    // A sheet given its size alone (or none) is turned to the area's shape: portrait for a tall
+    // one, landscape for a wide one, the size kept; one given its orientation keeps it.
+    let wide = json!([-75.0, -14.0, -35.0, -2.0]);
+    for (p, want) in [
+        (json!({"extent": piaui}), "a4-portrait"),
+        (json!({"extent": wide}), "a4-landscape"),
+        (json!({"extent": wide, "profile": "a3"}), "a3-landscape"),
+        (json!({"extent": wide, "profile": "a4-portrait"}), "a4-portrait"),
+        (json!({"extent": piaui, "profile": "a4-landscape"}), "a4-landscape"),
+    ] {
+        let r = s.run("layout.publication", &p).unwrap();
+        assert_eq!(r["profile"], want, "{p}");
+        let l = s.project.layouts.last().unwrap();
+        assert_eq!(l.width > l.height, want.ends_with("landscape"), "{p}");
+    }
     // A figure leaves the style to its caption; refused: an unknown style, a bad accent.
     let r = s.run("layout.publication", &json!({"extent": piaui, "profile": "figure-1col", "style": "banner"})).unwrap();
     assert!(r["warnings"].to_string().contains("style \\\"banner\\\""), "{r}");

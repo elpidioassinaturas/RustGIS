@@ -17,7 +17,11 @@ the maps; while one is open, its groups lead the Publish tab:
     the map, and a footer of two boxed columns (sources, and the cartographic reference; one
     with nothing in it is left out, the other taking the width) with a note and the authorship
     under them. Text sizes follow the sheet: an A3's are 1.41 times an
-    A4's.
+    A4's. Given its size alone (`"a4"`, the default, `"a3"` or `"a2"`), a sheet is turned to
+    portrait or landscape, whichever the map comes out larger on: the area's extent east to west
+    against north to south, on the map's projection, with the room the style leaves the map. The
+    result names the profile chosen (`"profile": "a4-landscape"`); give it with its orientation
+    (`"a4-portrait"`) to have the other.
   - **Figures** for a journal (90, 140 or 190 mm wide, as tall as the map's shape asks) or a
     thesis (160 × 225 or 160 × 110 mm): the map edge to edge with a line of its projection and
     datum under it, at 7 pt. A figure's title and sources belong in its caption, so they are
