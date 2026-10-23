@@ -2610,6 +2610,14 @@ fn publication_layouts_locate_their_area() {
     assert_eq!(m.layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>(), shown, "not {}", hidden.1);
     assert!(m.tiles.is_empty() && m.swipe.is_none() && m.groups.is_empty() && m.basemap == s.map().basemap);
     assert!(m.layers.iter().all(|l| !l.labels.enabled && l.selection.is_empty()));
+    // A sketch of each layer for the small disc: every feature kept, far fewer vertices.
+    for g in &m.layers {
+        let l = s.map().layers.iter().find(|l| l.name == g.name).unwrap();
+        let vertices =
+            |l: &rustgis_map::Layer| l.dataset.features.iter().filter_map(|f| f.geometry.as_ref()).map(|g| g.coord_count()).sum::<usize>();
+        assert_eq!(g.dataset.features.len(), l.dataset.features.len());
+        assert!(vertices(g) * 2 < vertices(l), "{}: {} of {} vertices", g.name, vertices(g), vertices(l));
+    }
     // Sheets with ever more source lines, so ever smaller frames, down to the smallest a sheet
     // takes: the legend is never drawn over the locator, and once there's no room under it, it is
     // left out, said.
