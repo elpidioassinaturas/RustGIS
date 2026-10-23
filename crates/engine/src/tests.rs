@@ -2575,7 +2575,10 @@ fn publication_layouts_take_a_style() {
     assert!(inside(title, band) && inside(named("Subtitle"), band) && frame.y >= band.y + band.h, "{r}");
     // Panel: the map at the left, the panel at the right holding the texts, the locator and the
     // legend; no boxed footer.
-    let r = make(&mut s, "panel", json!({}));
+    // An area as tall as the map's narrow column (its frame filled, not cut): everything in the
+    // panel.
+    let tall = json!([-46.0, -34.0, -40.0, 4.0]);
+    let r = make(&mut s, "panel", json!({"extent": tall}));
     let l = s.project.layouts.last().unwrap();
     let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap_or_else(|| panic!("no {n}: {r}"));
     let (panel, frame) = (named("Panel Box"), named("Map Frame"));
@@ -2586,6 +2589,20 @@ fn publication_layouts_take_a_style() {
     assert!(l.elements.iter().all(|e| e.name != "Sources Box"));
     // The legend under the locator, apart from it.
     assert!(named("Legend Box").y >= named("Locator").y + named("Locator").h, "{r}");
+    let full = frame.h;
+    // A less tall area (Piauí) on that narrow column: the frame cut to its shape (a seventh more of its
+    // surroundings), the sources and reference boxed under the map, and all of it in the middle of
+    // the page; the neatline still round the whole sheet.
+    let r = make(&mut s, "panel", json!({}));
+    let l = s.project.layouts.last().unwrap();
+    let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap_or_else(|| panic!("no {n}: {r}"));
+    let (panel, frame, sources) = (named("Panel Box"), named("Map Frame"), named("Sources Box"));
+    assert!(frame.h < 0.9 * full && (panel.h - frame.h).abs() < 1e-6, "{} of {full}: {r}", frame.h);
+    assert!(sources.y >= frame.y + frame.h && inside(named("Legend Box"), panel), "{r}");
+    let (top, bottom) = (frame.y, l.height - named("Author").y - named("Author").h);
+    assert!((top - bottom).abs() < 1.0, "the content in the middle: {top} above, {bottom} below");
+    let neat = named("Frame");
+    assert!((neat.y + neat.h - (l.height - neat.y)).abs() < 1e-6, "the neatline round the sheet");
     // In landscape too, every style on any sheet: the panel at the right of a wide map.
     for style in ["banner", "panel", "editorial"] {
         let r = make(&mut s, style, json!({"profile": "a4-landscape"}));
