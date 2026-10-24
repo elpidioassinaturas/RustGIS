@@ -26,7 +26,8 @@ pub const SCHEME: &str = "cog:";
 
 /// The first read of a file: enough for a COG's IFDs, as GDAL writes them, in one request.
 const HEAD: u64 = 64 << 10;
-/// More of the header, when it's longer, is read in steps at least this large.
+/// More of the header, when it's longer, is read in steps this large at first, doubling each
+/// round ([`header_read`]).
 const STEP: u64 = 256 << 10;
 /// The most header reads before giving up.
 const MAX_ROUNDS: usize = 12;
@@ -336,11 +337,10 @@ fn step(url: String, have: Sparse, rounds: usize, done: Box<dyn FnOnce(Result<Ar
         Ok(Parse::Done(layout)) => stats(url, have, *layout, done),
         Ok(Parse::NotTiled(why)) => done(Err(format!("{NOT_COG}: {why}"))),
         Ok(Parse::Need(a, b)) => {
-            if rounds >= MAX_ROUNDS || have.held() >= cog::MAX_HEADER || a >= cog::MAX_HEADER.saturating_mul(64) {
+            let Some(len) = header_read(&have, a, b, rounds) else {
                 done(Err(format!("{url}: the GeoTIFF's header is too large or too scattered to read in place")));
                 return;
-            }
-            let len = b.saturating_sub(a).max(STEP).min(MAX_BYTES as u64);
+            };
             let u = url.clone();
             read(
                 &url,
@@ -356,6 +356,19 @@ fn step(url: String, have: Sparse, rounds: usize, done: Box<dyn FnOnce(Result<Ar
         }
         Err(e) => done(Err(format!("{url}: {e}"))),
     }
+}
+
+/// How many bytes of the header to read next, from `a`, when the layout stopped for `a..b`
+/// after `rounds` reads; `None` past [`MAX_ROUNDS`] or [`cog::MAX_HEADER`]. The TIFF decoder
+/// reads a tag's values 512 bytes at a time, so `a..b` is no longer than that even inside a long
+/// array (a large image's tile index, 4 MB for MapBiomas's 346,092 tiles): the step doubles each
+/// round, from [`STEP`] up to [`MAX_BYTES`], so such an index takes a few rounds, not one per
+/// 256 KB.
+fn header_read(have: &Sparse, a: u64, b: u64, rounds: usize) -> Option<u64> {
+    if rounds >= MAX_ROUNDS || have.held() >= cog::MAX_HEADER || a >= cog::MAX_HEADER.saturating_mul(64) {
+        return None;
+    }
+    Some(b.saturating_sub(a).max(STEP << rounds).min(MAX_BYTES as u64))
 }
 
 /// What a file that isn't a cloud-optimised GeoTIFF says (it is read whole instead).
@@ -1145,6 +1158,84 @@ mod tests {
         // Overviews down to 64 pixels: the 256-pixel one is read.
         assert_eq!(l.levels.last().map(|l| l.width), Some(64));
         assert_eq!(l.levels[stats_level(&l)].width, 256);
+    }
+
+    /// Reads `file`'s layout as [`load`] and [`step`] do, a range at a time: the layout and how
+    /// many reads past the first it took, or the reads made when it gave up.
+    fn layout_by_ranges(file: &[u8]) -> Result<(Box<Layout>, usize), usize> {
+        let part = |a: u64, len: u64| file.get(a as usize..file.len().min((a + len) as usize)).unwrap_or_default().to_vec();
+        let mut have = Sparse::default().with(0, part(0, HEAD));
+        let mut rounds = 0;
+        loop {
+            match cog::layout(&have) {
+                Ok(Parse::Done(layout)) => return Ok((layout, rounds)),
+                Ok(Parse::Need(a, b)) => {
+                    let len = header_read(&have, a, b, rounds).ok_or(rounds)?;
+                    have = have.with(a, part(a, len));
+                    rounds += 1;
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// The header alone of a tiled GeoTIFF, `side` pixels a side in 256-pixel tiles, laid out as
+    /// MapBiomas's: the tiles' byte counts and offsets right after the IFD, its georeferencing
+    /// after them. The tiles themselves aren't there.
+    fn big_index(side: u32) -> Vec<u8> {
+        let n = side.div_ceil(256).pow(2);
+        let counts_at = 8 + 2 + 12 * 14 + 4;
+        let offsets_at = counts_at + 4 * n;
+        let scale_at = offsets_at + 4 * n;
+        let (tie_at, keys_at) = (scale_at + 24, scale_at + 72);
+        // (tag, type, count, value or where the values are); 3 short, 4 long, 12 double.
+        let entries: [(u16, u16, u32, u32); 14] = [
+            (256, 4, 1, side),
+            (257, 4, 1, side),
+            (258, 3, 1, 8),
+            (259, 3, 1, 1),
+            (262, 3, 1, 1),
+            (277, 3, 1, 1),
+            (284, 3, 1, 1),
+            (322, 3, 1, 256),
+            (323, 3, 1, 256),
+            (324, 4, n, offsets_at),
+            (325, 4, n, counts_at),
+            (33550, 12, 3, scale_at),
+            (33922, 12, 6, tie_at),
+            (34735, 3, 12, keys_at),
+        ];
+        let mut out = b"II*\0".to_vec();
+        out.extend(8u32.to_le_bytes());
+        out.extend(14u16.to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            out.extend(tag.to_le_bytes());
+            out.extend(kind.to_le_bytes());
+            out.extend(count.to_le_bytes());
+            out.extend(value.to_le_bytes());
+        }
+        out.extend(0u32.to_le_bytes());
+        let data_at = keys_at + 24;
+        out.extend((0..n).flat_map(|_| 1u32.to_le_bytes()));
+        out.extend((0..n).flat_map(|i| (data_at + i).to_le_bytes()));
+        let px = 1.0 / 3600.0;
+        out.extend([px, px, 0.0, 0.0, 0.0, 0.0, 0.0, -74.0, 6.0, 0.0].iter().flat_map(|v: &f64| v.to_le_bytes()));
+        out.extend([1u16, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326].iter().flat_map(|v| v.to_le_bytes()));
+        out
+    }
+
+    /// A tile index of 3.9 MB (490,000 tiles) is read within the rounds allowed: the decoder asks
+    /// for 512 bytes at a time, and steps of a fixed 256 KB stopped at about 3 MB.
+    #[test]
+    fn a_large_tile_index_is_read_in_a_few_rounds() {
+        let file = big_index(700 * 256);
+        let (layout, rounds) = layout_by_ranges(&file).unwrap_or_else(|r| panic!("gave up after {r} reads"));
+        assert_eq!(layout.levels.len(), 1);
+        assert_eq!(layout.levels[0].offsets.len(), 490_000);
+        assert_eq!(layout.levels[0].width, 179_200);
+        assert!(rounds <= 6, "{rounds} reads");
+        // A cloud-optimised file's header is in its first read, as before.
+        assert_eq!(layout_by_ranges(&rustgis_data::raster::cog::example(1024, 64)).map(|(_, r)| r), Ok(0));
     }
 
     #[test]
