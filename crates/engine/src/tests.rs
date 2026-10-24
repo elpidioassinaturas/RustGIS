@@ -1316,6 +1316,11 @@ fn hostile_params_never_panic() {
         // A summary over time: a statistic given, so its threshold, groups and share are reached.
         json!({"stat": "countAbove", "above": "x", "by": 7, "minValid": -1e308, "months": [13, "x", null], "name": {"a": 1}}),
         json!({"stat": "std", "by": "month", "minValid": f64::NAN, "dates": ["x", 7, null]}),
+        // A categorical summary: countIn's classes, and a mode by groups with a share out of range.
+        json!({"stat": "countIn", "classes": [1e308, -1, "x", null, 3.5, {"a": 1}]}),
+        json!({"stat": "countIn", "classes": "all", "by": "year"}),
+        json!({"stat": "mode", "by": "month", "minValid": 2, "months": []}),
+        json!({"stat": "frequency", "by": "year", "minValid": -1, "name": []}),
         // MySQL addresses that can't be read, so nothing connects.
         json!({"database": "mysql://u:p#@[::1/x?ssl-mode=nope", "password": 7, "layer": ":", "crs": "EPSG:-1"}),
         json!({"database": "MARIADB://u@h:99999999/%zz?ssl-mode=VERIFY_CA&ssl-ca=/nonexistent", "sql": "SELECT 1"}),
@@ -9325,6 +9330,167 @@ fn a_short_cube_is_summarised_but_not_trended() {
     // One date has nothing to summarise.
     let e = s.run("cube.reduce", &json!({"layers": [names[0]], "stat": "mean"})).unwrap_err();
     assert!(e.contains("summary's stack needs 2 layers"), "{e}");
+}
+
+/// A stack of land-cover maps summarised as classes: each cell's most frequent class (the least
+/// of those tied) and how many dates had it, how many classes it had, how many times its class
+/// changed and the class and length of its longest run, in date order (the layers added out of it), how many
+/// dates it was in some classes, and a layer for each class with its count of dates. A cell left
+/// without a class at a date (no data) is skipped. What isn't a class, too many classes, and a categorical
+/// statistic asked of zarr.reduce are refused.
+#[test]
+fn a_categorical_stack_summarised_over_time() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let gt = GeoTransform { origin_x: -44.0, origin_y: -7.0, pixel_width: 0.01, pixel_height: -0.01 };
+    let add = |s: &mut Session, name: &str, cells: Vec<f32>| {
+        let r = Raster::new(name, cells.len() as u32, 1, vec![cells], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let bytes = geotiff::write(&r, 0).unwrap();
+        crate::cmd::raster::add_raster(s, name, rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)).unwrap();
+    };
+    let nan = f32::NAN;
+    // Four cells over six years: 3 3 4 3 4 4; always 15; 21 21 33 with no data between; and
+    // 5 7 7 7 5 5, whose mode (5, the least of two tied) isn't its longest run's class (7).
+    let years: [(u32, [f32; 4]); 6] = [
+        (2000, [3.0, 15.0, nan, 5.0]),
+        (2001, [3.0, 15.0, 21.0, 7.0]),
+        (2002, [4.0, 15.0, nan, 7.0]),
+        (2003, [3.0, 15.0, 21.0, 7.0]),
+        (2004, [4.0, 15.0, 33.0, 5.0]),
+        (2005, [4.0, 15.0, nan, 5.0]),
+    ];
+    let mut s = Session::new(Project::default());
+    let mut names = Vec::new();
+    // Added out of date order: changes go by the dates, not the layers' order.
+    for k in [3, 0, 5, 1, 4, 2] {
+        let (y, cells) = years[k];
+        let name = format!("cobertura_{y}");
+        add(&mut s, &name, cells.to_vec());
+        names.push(name);
+    }
+    let run = |s: &mut Session, p: Value| {
+        let r = s.run("cube.reduce", &p).unwrap();
+        let id = r["layers"][0].as_u64().unwrap() as u32;
+        let l = s.map().layer(id).unwrap();
+        (l.name.clone(), l.raster.as_ref().unwrap().data.as_ref().unwrap().bands[0].data.clone())
+    };
+    let (name, mode) = run(&mut s, json!({"layers": names, "stat": "mode"}));
+    assert_eq!(mode, vec![3.0, 15.0, 21.0, 5.0]);
+    assert_eq!(name, "cobertura mode 2000-01-01–2005-01-01");
+    assert_eq!(run(&mut s, json!({"layers": names, "stat": "majority"})).1, mode);
+    assert_eq!(run(&mut s, json!({"layers": names, "stat": "modeCount"})).1, vec![3.0, 6.0, 2.0, 3.0]);
+    assert_eq!(run(&mut s, json!({"layers": names, "stat": "variety"})).1, vec![2.0, 1.0, 2.0, 2.0]);
+    assert_eq!(run(&mut s, json!({"layers": names, "stat": "changes"})).1, vec![3.0, 0.0, 1.0, 2.0]);
+    // Runs of 2 in 3 and in 4 (the least), 6 in 15, 21 through its gap, 3 in 7.
+    assert_eq!(run(&mut s, json!({"layers": names, "stat": "longestRun"})).1, vec![3.0, 15.0, 21.0, 7.0]);
+    assert_eq!(run(&mut s, json!({"layers": names, "stat": "longestRunLength"})).1, vec![2.0, 6.0, 2.0, 3.0]);
+    assert_eq!(run(&mut s, json!({"layers": names, "stat": "countIn", "classes": [4, 33]})).1, vec![3.0, 0.0, 1.0, 0.0]);
+    // A share of the dates: the third cell has a class at half of them, so it's left out at 0.6.
+    let (_, half) = run(&mut s, json!({"layers": names, "stat": "mode", "minValid": 0.6}));
+    assert_eq!((half[0], half[1], half[3]), (3.0, 15.0, 5.0));
+    assert!(half[2].is_nan(), "{half:?}");
+    // Frequency: a layer for each class met, each cell's count of dates in it.
+    let layers = |s: &Session, r: &Value| -> Vec<(String, Vec<f32>)> {
+        r["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| {
+                let l = s.map().layer(id.as_u64().unwrap() as u32).unwrap();
+                (l.name.clone(), l.raster.as_ref().unwrap().data.as_ref().unwrap().bands[0].data.clone())
+            })
+            .collect()
+    };
+    let r = s.run("cube.reduce", &json!({"layers": names, "stat": "frequency"})).unwrap();
+    let got = layers(&s, &r);
+    let want: Vec<(String, Vec<f32>)> = [
+        (3, [3.0, 0.0, 0.0, 0.0]),
+        (4, [3.0, 0.0, 0.0, 0.0]),
+        (5, [0.0, 0.0, 0.0, 3.0]),
+        (7, [0.0, 0.0, 0.0, 3.0]),
+        (15, [0.0, 6.0, 0.0, 0.0]),
+        (21, [0.0, 0.0, 2.0, 0.0]),
+        (33, [0.0, 0.0, 1.0, 0.0]),
+    ]
+    .iter()
+    .map(|(c, n)| (format!("cobertura frequency 2000-01-01–2005-01-01 class {c}"), n.to_vec()))
+    .collect();
+    assert_eq!(got, want);
+    // With a share, a cell with too few values is left out of every class's layer.
+    let r = s.run("cube.reduce", &json!({"layers": names, "stat": "frequency", "minValid": 0.6, "name": "freq"})).unwrap();
+    let got = layers(&s, &r);
+    assert_eq!(got.len(), 7);
+    assert!(got.iter().all(|(_, n)| n[2].is_nan()), "{got:?}");
+    assert_eq!(got[0].0, "freq class 3");
+    assert_eq!((got[0].1[0], got[0].1[1], got[0].1[3]), (3.0, 0.0, 0.0));
+    // A raster whose bands are the years out of order, their dates given in the bands' order:
+    // changes still go by the dates.
+    let order = [3, 0, 5, 1, 4, 2];
+    let bands: Vec<Vec<f32>> = order.iter().map(|&k| years[k].1.to_vec()).collect();
+    let dates: Vec<String> = order.iter().map(|&k| format!("{}-01-01", years[k].0)).collect();
+    let r = Raster::new("bandas", 4, 1, bands, gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    let bytes = geotiff::write(&r, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "bandas", rustgis_map::RasterLayer::from_bytes(r, "bandas.tif".to_string(), bytes)).unwrap();
+    assert_eq!(run(&mut s, json!({"layer": "bandas", "dates": dates, "stat": "changes"})).1, vec![3.0, 0.0, 1.0, 2.0]);
+    assert_eq!(run(&mut s, json!({"layer": "bandas", "dates": dates, "stat": "longestRun"})).1, vec![3.0, 15.0, 21.0, 7.0]);
+    assert_eq!(run(&mut s, json!({"layer": "bandas", "dates": dates, "stat": "longestRunLength"})).1, vec![2.0, 6.0, 2.0, 3.0]);
+    // By year, a change is one within the year: none, with one date a year.
+    let r = s.run("cube.reduce", &json!({"layers": names, "stat": "changes", "by": "year"})).unwrap();
+    assert_eq!(r["layers"].as_array().unwrap().len(), 6);
+    // Every key a categorical summary takes is read, none said to be ignored.
+    let mark = s.notice_mark();
+    run(&mut s, json!({"layers": names, "stat": "countIn", "classes": [3], "minValid": 0.5, "name": "floresta"}));
+    let ignored: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains("ignores")).collect();
+    assert!(ignored.is_empty(), "{ignored:?}");
+    // Refused, nothing added.
+    let before = s.map().layers.len();
+    for (bad, said) in [
+        (json!({"layers": names, "stat": "countIn"}), "countIn takes \"classes\""),
+        (json!({"layers": names, "stat": "countIn", "classes": []}), "countIn takes \"classes\""),
+        (json!({"layers": names, "stat": "countIn", "classes": [3.5]}), "whole numbers from 0 to 255"),
+        (json!({"layers": names, "stat": "countIn", "classes": [256]}), "whole numbers from 0 to 255"),
+        (json!({"layers": names, "stat": "countIn", "classes": "3"}), "countIn takes \"classes\""),
+    ] {
+        let e = s.run("cube.reduce", &bad).unwrap_err();
+        assert!(e.contains(said), "{bad}: {e}");
+    }
+    // Values that aren't classes (an NDVI): said, with the value.
+    let ndvi = ["ndvi_2020", "ndvi_2021"];
+    for (k, name) in ndvi.iter().enumerate() {
+        add(&mut s, name, vec![0.25 + k as f32 * 0.5]);
+    }
+    let before_ndvi = s.map().layers.len();
+    for stat in ["mode", "variety", "changes", "countIn"] {
+        let e = s.run("cube.reduce", &json!({"layers": ndvi, "stat": stat, "classes": [0]})).unwrap_err();
+        assert!(e.contains("0.25 isn't a class") && e.contains(stat), "{stat}: {e}");
+    }
+    assert_eq!(s.map().layers.len(), before_ndvi);
+    // More classes than a land-cover map has: refused, not a count for each.
+    let many = ["muitas_2020", "muitas_2021"];
+    for name in many {
+        add(&mut s, name, (0..1001).map(|c| c as f32).collect());
+    }
+    let after_many = s.map().layers.len();
+    let e = s.run("cube.reduce", &json!({"layers": many, "stat": "variety"})).unwrap_err();
+    assert!(e.contains("more than 1000 classes") && e.contains("variety"), "{e}");
+    assert_eq!(s.map().layers.len(), after_many);
+    assert_eq!(before_ndvi - before, ndvi.len());
+    // A Zarr axis out of date order (days 31, 0, 59) whose classes are 2, 1, 2 along it: in date
+    // order they are 1, 2, 2, one change, not the axis's two, and a longest run in 2, where the
+    // axis's runs are all of one date (and the least class, 1, would win).
+    let (dir, path) = zarr_store_at("cube-reduce-classes-order", &[31, 0, 59]);
+    for (t, class) in [(0, 2.0f32), (1, 1.0), (2, 2.0)] {
+        let chunk: Vec<u8> = std::iter::repeat_n(class, 12).flat_map(|x| x.to_le_bytes()).collect();
+        std::fs::write(std::path::Path::new(&path).join(format!("t/{t}.0.0")), chunk).unwrap();
+    }
+    assert_eq!(run(&mut s, json!({"path": path, "variable": "t", "stat": "changes"})).1, vec![1.0; 12]);
+    assert_eq!(run(&mut s, json!({"path": path, "variable": "t", "stat": "longestRun"})).1, vec![2.0; 12]);
+    assert_eq!(run(&mut s, json!({"path": path, "variable": "t", "stat": "longestRunLength"})).1, vec![2.0; 12]);
+    let _ = std::fs::remove_dir_all(dir);
+    // zarr.reduce doesn't take them: it points to cube.reduce.
+    let (dir, path) = zarr_store_over_time("cube-reduce-classes");
+    let e = s.run("zarr.reduce", &json!({"path": path, "variable": "t", "stat": "mode"})).unwrap_err();
+    assert!(e.contains("cube.reduce"), "{e}");
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A Zarr axis in decreasing order: a trend refuses it, a summary takes it and names its period from

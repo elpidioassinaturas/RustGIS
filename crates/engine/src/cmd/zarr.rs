@@ -975,6 +975,13 @@ impl ReduceRun {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
     let stat = Stat::parse(p)?;
+    // A variable of classes is summarised by cube.reduce, which reads its dates in order.
+    if stat.categorical() {
+        return Err(format!(
+            "zarr.reduce takes mean, min, max, sum, std, count or countAbove: {} is cube.reduce's (give it this layer or store)",
+            stat.code()
+        ));
+    }
     let min_valid = super::cube::min_share(p)?;
     let ZarrCube { zt, period } = zarr_cube(s, p)?;
     let steps = super::cube::steps(&zt.dates, period, p)?;

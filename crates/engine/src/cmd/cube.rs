@@ -27,7 +27,7 @@ pub fn commands() -> Vec<C> {
         r#"{"layers"?: [raster layers, a date each] | "layer"?: a Zarr layer (or "path" | "url", "variable", "index", "crs" as for zarr.reduce) or a raster of several bands, a date each (default: the active layer) | "collection": a STAC collection (desktop; read in place over an area, in pieces when large; with url, asset, bbox, maxCloud, cellSize and resampling below, and "start", "end"), "url"?: the collection's STAC API (as for stac.addCube), "asset"?: the collection's band, such as NDVI, "bbox"?: [w, s, e, n] | "view" (the collection's area), "maxCloud"?: a collection's cloud cover cap, "cellSize"?: a collection's cell size in the files' units (the overview level nearest it is read), "resampling"?: "nearest" (default: that overview's pixels as stored) | "average" (each cell the mean of the full images' pixels in it, which reads them), "band"?: 1-based (a stack's band), "dates"?: [dates] (a stack's or the bands' dates, in their order; default: read from the layers' names or files, or the bands' names), "start"?, "end"?: dates (a whole number from 1000 to 9999 is a year; an end given as a year or a month takes all of it), "months"?: [1–12] (one season across years), "test"?: "hamedRao" (default) | "yueWang" | "seasonal" | "original", "seasons"?: parts of a year for the seasonal test (default 12), "alpha"?: 0.05 (above 0, below 0.5), "minValid"?: dates a cell needs (default: half of them, at least 4; the seasonal test also needs 4 in seasons of two or more), "per"?: "year" (default) | "decade", "name"?: text, "ran"?: (internal: a trend the app has worked out)} → four raster layers: Sen's slope, the test's Z and p-value, and the slope where p < alpha"#,
     ),
     C::new("cube.reduce", "Summarise a Data Cube over Time", "Analyze › Image Analysis", reduce_cmd).params(
-        r#"{"layers"?: [raster layers, a date each] | "layer"?: a Zarr layer or a raster of several bands, a date each (default: the active layer) | "path"?: a Zarr store's folder | "url"?: a Zarr store's address, or a STAC collection's API (as for stac.addCube) | "collection": a STAC collection (desktop; read in place over an area, in pieces when large; with url, asset, bbox, maxCloud, cellSize and resampling below, and "start", "end"), "variable"?, "index"?, "crs"?: a Zarr variable's (as for zarr.reduce), "asset"?: the collection's band, such as NDVI, "bbox"?: [w, s, e, n] | "view" (the collection's area), "maxCloud"?: a collection's cloud cover cap, "cellSize"?: a collection's cell size in the files' units (the overview level nearest it is read), "resampling"?: "nearest" (default) | "average" (as for cube.trend), "band"?: 1-based (a stack's band), "dates"?: [dates] (a stack's or the bands' dates, in their order; default: read from the layers' names or files, or the bands' names), "stat": "mean"|"min"|"max"|"sum"|"std" (the population standard deviation, n)|"count"|"countAbove", "above"?: number (countAbove's threshold), "by"?: "all" (default: one layer) | "year" (a layer for each calendar year) | "month" (a layer for each month of the year, across years), "start"?, "end"?: dates (as for cube.trend), "months"?: [1–12] (a season across years), "minValid"?: 0–1 (a cell with a smaller share of its group's dates is left empty; default 0), "name"?: text} → raster layers of the statistic, one for each group"#,
+        r#"{"layers"?: [raster layers, a date each] | "layer"?: a Zarr layer or a raster of several bands, a date each (default: the active layer) | "path"?: a Zarr store's folder | "url"?: a Zarr store's address, or a STAC collection's API (as for stac.addCube) | "collection": a STAC collection (desktop; read in place over an area, in pieces when large; with url, asset, bbox, maxCloud, cellSize and resampling below, and "start", "end"), "variable"?, "index"?, "crs"?: a Zarr variable's (as for zarr.reduce), "asset"?: the collection's band, such as NDVI, "bbox"?: [w, s, e, n] | "view" (the collection's area), "maxCloud"?: a collection's cloud cover cap, "cellSize"?: a collection's cell size in the files' units (the overview level nearest it is read), "resampling"?: "nearest" (default) | "average" (as for cube.trend), "band"?: 1-based (a stack's band), "dates"?: [dates] (a stack's or the bands' dates, in their order; default: read from the layers' names or files, or the bands' names), "stat": "mean"|"min"|"max"|"sum"|"std" (the population standard deviation, n)|"count"|"countAbove"|"mode" (a categorical cube's most frequent class; the least of those tied)|"modeCount" (how many dates had the mode)|"variety" (how many classes)|"changes" (how many times the class changed from one valued date to the next)|"longestRun" (the class of the longest run of dates in one class; the least of those tied)|"longestRunLength" (how many dates that run lasted)|"frequency" (a layer for each class met: its count of dates)|"countIn" (how many dates in the classes given), "above"?: number (countAbove's threshold), "classes"?: [whole numbers 0–255] (countIn's classes), "by"?: "all" (default: one layer) | "year" (a layer for each calendar year) | "month" (a layer for each month of the year, across years), "start"?, "end"?: dates (as for cube.trend), "months"?: [1–12] (a season across years), "minValid"?: 0–1 (a cell with a smaller share of its group's dates is left empty; default 0), "name"?: text} → raster layers of the statistic, one for each group (frequency: one for each class of each group)"#,
     )]
 }
 
@@ -652,7 +652,7 @@ impl TrendRun {
             done.fetch_add(1, Ordering::Relaxed);
             Ok(())
         };
-        read_slices(self.cube.as_ref(), &self.steps, piece, cancel, &mut place)?;
+        read_slices(self.cube.as_ref(), &self.steps, piece, cancel, false, &mut place)?;
         let grid = grid.ok_or("no date to read")?;
         Ok((grid, block, cells))
     }
@@ -743,10 +743,13 @@ fn read_slices(
     steps: &[usize],
     piece: usize,
     cancel: &AtomicBool,
+    in_order: bool,
     place: &mut dyn FnMut(usize, Option<(Arc<Raster>, usize)>) -> Result<(), String>,
 ) -> Result<(), String> {
-    // One at a time in the browser, which has no threads to read on.
-    let readers = if cfg!(target_arch = "wasm32") { 1 } else { cube.readers().clamp(1, 16).min(steps.len().max(1)) };
+    // One at a time in the browser, which has no threads to read on, and where the slices must come
+    // in their order (`in_order`): several readers place them as they are read, and one slow read
+    // lets the others run ahead of it.
+    let readers = if cfg!(target_arch = "wasm32") || in_order { 1 } else { cube.readers().clamp(1, 16).min(steps.len().max(1)) };
     if readers == 1 {
         for (k, &i) in steps.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
@@ -964,6 +967,23 @@ pub enum Stat {
     Count,
     /// How many of the values are above the threshold.
     CountAbove(f64),
+    /// A categorical cube's most frequent class (the least of those tied).
+    Mode,
+    /// How many classes a cell had.
+    Variety,
+    /// How many times a cell's class changed from one valued date to the next, in date order.
+    Changes,
+    /// How many of the values are one of these classes, 0 to 255 (a bit each).
+    CountIn([u64; 4]),
+    /// How many dates had the most frequent class (the mode's count).
+    ModeCount,
+    /// The class of the longest run of dates with one class, in date order (the least of those
+    /// tied).
+    LongestRun,
+    /// How many dates the longest run lasted.
+    LongestRunLength,
+    /// How many dates had each class: an output for each class met.
+    Frequency,
 }
 
 impl Stat {
@@ -976,12 +996,52 @@ impl Stat {
             Stat::Std => "std",
             Stat::Count => "count",
             Stat::CountAbove(_) => "countAbove",
+            Stat::Mode => "mode",
+            Stat::Variety => "variety",
+            Stat::Changes => "changes",
+            Stat::CountIn(_) => "countIn",
+            Stat::ModeCount => "modeCount",
+            Stat::LongestRun => "longestRun",
+            Stat::LongestRunLength => "longestRunLength",
+            Stat::Frequency => "frequency",
         }
     }
 
-    /// The statistic asked for: `stat`, and countAbove's threshold, `above`.
+    /// Whether it takes the values as classes (whole numbers), as of a land-cover map.
+    pub(crate) fn categorical(self) -> bool {
+        matches!(
+            self,
+            Stat::Mode
+                | Stat::Variety
+                | Stat::Changes
+                | Stat::CountIn(_)
+                | Stat::ModeCount
+                | Stat::LongestRun
+                | Stat::LongestRunLength
+                | Stat::Frequency
+        )
+    }
+
+    /// Whether it compares each date with the one before, so its dates must come in date order.
+    pub(crate) fn in_order(self) -> bool {
+        matches!(self, Stat::Changes | Stat::LongestRun | Stat::LongestRunLength)
+    }
+
+    /// Whether it follows each cell's runs of dates in one class.
+    fn runs(self) -> bool {
+        matches!(self, Stat::LongestRun | Stat::LongestRunLength)
+    }
+
+    /// Whether it counts each class met in each cell.
+    fn counts_classes(self) -> bool {
+        matches!(self, Stat::Mode | Stat::Variety | Stat::ModeCount | Stat::Frequency)
+    }
+
+    /// The statistic asked for: `stat`, countAbove's threshold (`above`) and countIn's classes
+    /// (`classes`).
     pub(crate) fn parse(p: &Value) -> Result<Stat, String> {
-        Ok(match ps(p, "stat").map(str::trim).ok_or("stat is required (mean, min, max, sum, std, count or countAbove)")? {
+        const STATS: &str = "mean, min, max, sum, std, count, countAbove, mode, modeCount, variety, changes, longestRun, longestRunLength, frequency or countIn";
+        Ok(match ps(p, "stat").map(str::trim).ok_or_else(|| format!("stat is required ({STATS})"))? {
             x if x.eq_ignore_ascii_case("mean") => Stat::Mean,
             x if x.eq_ignore_ascii_case("min") || x.eq_ignore_ascii_case("minimum") => Stat::Min,
             x if x.eq_ignore_ascii_case("max") || x.eq_ignore_ascii_case("maximum") => Stat::Max,
@@ -991,10 +1051,35 @@ impl Stat {
             x if x.eq_ignore_ascii_case("countAbove") => {
                 Stat::CountAbove(super::f(p, "above").ok_or("countAbove takes \"above\", the threshold")?)
             }
-            x => return Err(format!("unknown stat '{x}' (mean, min, max, sum, std, count or countAbove)")),
+            x if x.eq_ignore_ascii_case("mode") || x.eq_ignore_ascii_case("majority") => Stat::Mode,
+            x if x.eq_ignore_ascii_case("variety") => Stat::Variety,
+            x if x.eq_ignore_ascii_case("changes") => Stat::Changes,
+            x if x.eq_ignore_ascii_case("countIn") => Stat::CountIn(classes(p)?),
+            x if x.eq_ignore_ascii_case("modeCount") => Stat::ModeCount,
+            x if x.eq_ignore_ascii_case("longestRun") => Stat::LongestRun,
+            x if x.eq_ignore_ascii_case("longestRunLength") => Stat::LongestRunLength,
+            x if x.eq_ignore_ascii_case("frequency") => Stat::Frequency,
+            x => return Err(format!("unknown stat '{x}' ({STATS})")),
         })
     }
 }
+
+/// countIn's classes (`classes`): whole numbers from 0 to 255, as a land-cover map's codes are.
+fn classes(p: &Value) -> Result<[u64; 4], String> {
+    const NEED: &str = "countIn takes \"classes\", the classes to count: [whole numbers from 0 to 255]";
+    let list = p.get("classes").and_then(Value::as_array).filter(|l| !l.is_empty()).ok_or(NEED)?;
+    let mut set = [0u64; 4];
+    for v in list.iter().take(256) {
+        let c = v.as_f64().filter(|c| c.fract() == 0.0 && (0.0..=255.0).contains(c)).ok_or(NEED)? as usize;
+        if let Some(word) = set.get_mut(c / 64) {
+            *word |= 1 << (c % 64);
+        }
+    }
+    Ok(set)
+}
+
+/// The most classes a categorical summary tells apart in a run of cells: more is no land-cover map.
+pub const MAX_CLASSES: usize = 1000;
 
 /// The share of its dates a cell needs for a summary's value (`minValid`, 0 to 1; 0 by default).
 pub(crate) fn min_share(p: &Value) -> Result<f64, String> {
@@ -1005,25 +1090,50 @@ pub(crate) fn min_share(p: &Value) -> Result<f64, String> {
 }
 
 /// A summary's running totals over a run of cells, only those its statistic needs: each cell's
-/// count of values, one running value (the mean, the least, the most, the sum or the count above)
-/// and, for std, the squared deviations (Welford's method). 4 to 20 bytes a cell.
+/// count of values, one running value (the mean, the least, the most, the sum, a count, or the
+/// changes so far) and, for std, the squared deviations (Welford's method); for changes, each
+/// cell's last class; for the longest run (its class or length), its last class, the run it is
+/// in and the longest so far; for mode, modeCount, variety and frequency, each class's count in each cell. 4 to 20 bytes
+/// a cell, and 2 more for each class those four have met.
 pub(crate) struct Totals {
     stat: Stat,
     n: Vec<u32>,
     acc: Vec<f64>,
     m2: Vec<f64>,
+    /// Changes and the longest run: each cell's class at its last valued date.
+    last: Vec<f32>,
+    /// The longest run: each cell's run of dates in its last class, and its longest run's class
+    /// and length so far.
+    run: Vec<u16>,
+    longest: Vec<(f32, u16)>,
+    /// Mode, modeCount, variety and frequency: the classes met, in order, and each one's count in
+    /// each cell.
+    classes: Vec<f32>,
+    counts: Vec<Vec<u16>>,
+    /// Why the values can't be summarised as classes, at the first that can't.
+    refused: Option<String>,
 }
 
 impl Totals {
     pub(crate) fn new(stat: Stat, cells: usize) -> Totals {
         let acc = match stat {
-            Stat::Count => Vec::new(),
+            Stat::Count | Stat::Mode | Stat::Variety | Stat::ModeCount | Stat::LongestRun | Stat::LongestRunLength | Stat::Frequency => {
+                Vec::new()
+            }
             Stat::Min => vec![f64::INFINITY; cells],
             Stat::Max => vec![f64::NEG_INFINITY; cells],
             _ => vec![0.0; cells],
         };
         let m2 = if matches!(stat, Stat::Std) { vec![0.0; cells] } else { Vec::new() };
-        Totals { stat, n: vec![0; cells], acc, m2 }
+        let last = if stat.in_order() { vec![f32::NAN; cells] } else { Vec::new() };
+        let (run, longest) = if stat.runs() { (vec![0; cells], vec![(f32::NAN, 0); cells]) } else { (Vec::new(), Vec::new()) };
+        Totals { stat, n: vec![0; cells], acc, m2, last, run, longest, classes: Vec::new(), counts: Vec::new(), refused: None }
+    }
+
+    /// Why the values can't be summarised as classes: one that isn't a whole number, or more
+    /// classes than [`MAX_CLASSES`] or than the run's cells × classes cap ([`MAX_VALUES`]).
+    pub(crate) fn refused(&self) -> Option<&str> {
+        self.refused.as_deref()
     }
 
     /// How many cells it totals.
@@ -1031,10 +1141,24 @@ impl Totals {
         self.n.len()
     }
 
-    /// Cell `c`'s next value, a finite one.
+    /// Cell `c`'s next value, a finite one; a categorical statistic's in date order.
     pub(crate) fn add(&mut self, c: usize, v: f64) {
+        if self.refused.is_some() || c >= self.n.len() {
+            return;
+        }
+        if self.stat.categorical() && v.fract() != 0.0 {
+            self.refused = Some(format!("{v} isn't a class: {} takes whole numbers, as a land-cover map's", self.stat.code()));
+            return;
+        }
+        if self.stat.counts_classes() && !self.count_class(c, v as f32) {
+            return;
+        }
         let Some(k) = self.n.get_mut(c) else { return };
         *k += 1;
+        if self.stat.runs() {
+            self.extend_run(c, v as f32);
+            return;
+        }
         let k = f64::from(*k);
         let (Some(a), m) = (self.acc.get_mut(c), self.m2.get_mut(c)) else { return };
         match self.stat {
@@ -1049,15 +1173,72 @@ impl Totals {
             Stat::Max => *a = a.max(v),
             Stat::Sum => *a += v,
             Stat::CountAbove(t) if v > t => *a += 1.0,
-            Stat::CountAbove(_) | Stat::Count => {}
+            Stat::CountIn(set) if in_classes(&set, v) => *a += 1.0,
+            Stat::Changes => {
+                if let Some(last) = self.last.get_mut(c) {
+                    if last.is_finite() && *last != v as f32 {
+                        *a += 1.0;
+                    }
+                    *last = v as f32;
+                }
+            }
+            Stat::CountAbove(_)
+            | Stat::CountIn(_)
+            | Stat::Count
+            | Stat::Mode
+            | Stat::Variety
+            | Stat::ModeCount
+            | Stat::LongestRun
+            | Stat::LongestRunLength
+            | Stat::Frequency => {}
         }
+    }
+
+    /// Cell `c`'s run of dates in one class, with class `v` next: one date longer in the same class,
+    /// a new run of one in another; the longest so far kept, the least class of those tied.
+    fn extend_run(&mut self, c: usize, v: f32) {
+        let (Some(last), Some(run), Some((class, length))) = (self.last.get_mut(c), self.run.get_mut(c), self.longest.get_mut(c)) else {
+            return;
+        };
+        *run = if *last == v { run.saturating_add(1) } else { 1 };
+        *last = v;
+        if *run > *length || (*run == *length && v < *class) {
+            (*class, *length) = (v, *run);
+        }
+    }
+
+    /// Counts class `v` in cell `c`, a class met for the first time taking a count for every
+    /// cell; false, and said, past the classes' caps.
+    fn count_class(&mut self, c: usize, v: f32) -> bool {
+        let at = match self.classes.binary_search_by(|x| x.total_cmp(&v)) {
+            Ok(at) => at,
+            Err(at) => {
+                let cells = self.n.len();
+                let held = (self.classes.len() as u64 + 1).saturating_mul(cells as u64);
+                if self.classes.len() >= MAX_CLASSES || held > MAX_VALUES {
+                    self.refused = Some(format!(
+                        "more than {} classes in {cells} cells: {} takes a categorical raster (a land-cover map), up to {MAX_CLASSES} classes and {MAX_VALUES} cells × classes; take a smaller area",
+                        self.classes.len(),
+                        self.stat.code()
+                    ));
+                    return false;
+                }
+                self.classes.insert(at, v);
+                self.counts.insert(at, vec![0; cells]);
+                at
+            }
+        };
+        if let Some(n) = self.counts.get_mut(at).and_then(|counts| counts.get_mut(c)) {
+            *n = n.saturating_add(1);
+        }
+        true
     }
 
     /// Each cell's statistic over `dates` dates: empty with fewer values than `min_share` of them,
     /// except that with no share asked for a count is 0 where a cell never had a value.
     pub(crate) fn finish(&self, min_share: f64, dates: usize) -> Vec<f32> {
         let need = (min_share.clamp(0.0, 1.0) * dates as f64 - 1e-9).ceil().max(1.0) as u32;
-        let count = matches!(self.stat, Stat::Count | Stat::CountAbove(_));
+        let count = self.counts_zero();
         self.n
             .iter()
             .enumerate()
@@ -1069,11 +1250,70 @@ impl Totals {
                 (match self.stat {
                     Stat::Std => (self.m2.get(c).copied().unwrap_or(f64::NAN) / f64::from((*k).max(1))).sqrt(),
                     Stat::Count => f64::from(*k),
+                    Stat::Variety => self.counts.iter().filter(|n| n.get(c).is_some_and(|n| *n > 0)).count() as f64,
+                    Stat::Mode => self.mode(c).map_or(f64::NAN, |(_, class)| f64::from(class)),
+                    Stat::ModeCount => self.mode(c).map_or(0.0, |(n, _)| f64::from(n)),
+                    Stat::LongestRun => self.longest.get(c).map_or(f64::NAN, |(class, _)| f64::from(*class)),
+                    Stat::LongestRunLength => self.longest.get(c).map_or(0.0, |(_, length)| f64::from(*length)),
                     _ => a,
                 }) as f32
             })
             .collect()
     }
+
+    /// Whether a cell with no value counts 0 (with no share asked for) rather than none: a count's.
+    fn counts_zero(&self) -> bool {
+        matches!(
+            self.stat,
+            Stat::Count
+                | Stat::CountAbove(_)
+                | Stat::CountIn(_)
+                | Stat::Changes
+                | Stat::Variety
+                | Stat::ModeCount
+                | Stat::LongestRunLength
+                | Stat::Frequency
+        )
+    }
+
+    /// Cell `c`'s most frequent class and its count: the least of the classes tied, as they are in
+    /// order.
+    fn mode(&self, c: usize) -> Option<(u16, f32)> {
+        let mut best: Option<(u16, f32)> = None;
+        for (class, counts) in self.classes.iter().zip(&self.counts) {
+            let n = counts.get(c).copied().unwrap_or(0);
+            if n > 0 && best.is_none_or(|(most, _)| n > most) {
+                best = Some((n, *class));
+            }
+        }
+        best
+    }
+
+    /// The outputs, as columns of cells: one for the statistic (keyed `None`), or, for frequency,
+    /// one for each class met, in order, each cell's count of dates in it.
+    pub(crate) fn columns(&self, min_share: f64, dates: usize) -> Vec<(Option<f32>, Vec<f32>)> {
+        if self.stat != Stat::Frequency {
+            return vec![(None, self.finish(min_share, dates))];
+        }
+        let mask = self.mask(min_share, dates);
+        self.classes
+            .iter()
+            .zip(&self.counts)
+            .map(|(class, counts)| (Some(*class), mask.iter().zip(counts).map(|(m, n)| m + f32::from(*n)).collect()))
+            .collect()
+    }
+
+    /// Each cell's value in a class's column where it never had that class: 0, or none where it
+    /// has fewer values than `min_share` of its dates (a count's rule).
+    pub(crate) fn mask(&self, min_share: f64, dates: usize) -> Vec<f32> {
+        let need = (min_share.clamp(0.0, 1.0) * dates as f64 - 1e-9).ceil().max(1.0) as u32;
+        self.n.iter().map(|k| if *k < need && min_share != 0.0 { f32::NAN } else { 0.0 }).collect()
+    }
+}
+
+/// Whether class `v` is one of countIn's.
+fn in_classes(set: &[u64; 4], v: f64) -> bool {
+    (0.0..=255.0).contains(&v) && set.get(v as usize / 64).is_some_and(|w| w >> (v as usize % 64) & 1 == 1)
 }
 
 /// The most values a summary's outputs hold (cells × outputs): 32 million on the desktop, 8
@@ -1081,9 +1321,12 @@ impl Totals {
 /// are read when it doesn't. Its running totals are a piece's at a time and only for the groups
 /// whose dates are being read: one year's in a summary by year read one date at a time (those of
 /// the dates in flight with several readers), but every month's in one by month. They take 4 bytes
-/// a cell for count, 12 for mean, min, max, sum and countAbove, and 20 for std, so a summary by
-/// month at the cap holds up to five times its outputs' 4 bytes a value: some 640 MB for std on the
-/// desktop. A STAC cube is read in pieces whose cells × dates stay within [`MAX_VALUES`], so a long
+/// a cell for count, 12 for mean, min, max, sum, countAbove and countIn, 16 for changes and the
+/// longest run (its class or length) and 20 for std, so a summary by month at the cap holds up to five times its outputs'
+/// 4 bytes a value: some 640 MB for std on the desktop. Mode, modeCount, variety and frequency take
+/// 4 bytes a cell and 2 more for each class met, a run's cells × classes at most [`MAX_VALUES`]
+/// (128 MB of counts). Frequency's outputs are a column for each class of each group, all within
+/// this cap. A STAC cube is read in pieces whose cells × dates stay within [`MAX_VALUES`], so a long
 /// series keeps each piece's totals small.
 pub const MAX_REDUCED: u64 = MAX_VALUES / 2;
 
@@ -1122,8 +1365,9 @@ impl ReduceRun {
     }
 
     /// Reads the slices piece by piece ([`TimeCube::pieces`]), each folded into its group's
-    /// running totals, and puts the pieces' outputs together row by row: a raster for each group.
-    /// `done` counts the slices read; `cancel` stops it between slices.
+    /// running totals, and puts the pieces' outputs together row by row: a raster for each group
+    /// (for frequency, one for each class of each group). `done` counts the slices read; `cancel`
+    /// stops it between slices.
     pub fn run(&self, cancel: &AtomicBool, done: &AtomicUsize) -> Result<Vec<Raster>, String> {
         let outputs = self.groups.len();
         let too_many = |cells: usize| {
@@ -1138,7 +1382,11 @@ impl ReduceRun {
             return Err(e);
         }
         let mut stitch = Stitch::default();
-        let mut bands: Vec<Vec<f32>> = vec![Vec::new(); outputs];
+        // Each group's columns so far, by class for frequency; and for frequency each group's
+        // value where a class is missing, for a class met first in a later piece.
+        let mut bands: Vec<Columns> = vec![Vec::new(); outputs];
+        let mut masks: Vec<Vec<f32>> = vec![Vec::new(); outputs];
+        let frequency = self.stat == Stat::Frequency;
         // The cells of the pieces read so far, for a cube that didn't know its size.
         let mut read_cells = 0usize;
         for piece in 0..self.cube.pieces().max(1) {
@@ -1151,7 +1399,7 @@ impl ReduceRun {
             // order of arrival can move an output's last bit at most, and only then.
             let mut totals: Vec<Option<Totals>> = (0..outputs).map(|_| None).collect();
             let mut seen = vec![0usize; outputs];
-            let mut finished: Vec<Option<Vec<f32>>> = vec![None; outputs];
+            let mut finished: Vec<Option<(Columns, Vec<f32>)>> = vec![None; outputs];
             let mut place = |k: usize, slice: Option<(Arc<Raster>, usize)>| -> Result<(), String> {
                 let g = self.group_of.get(k).copied().filter(|g| *g < outputs).ok_or("a date in no group")?;
                 // A date with nothing written only lowers the counts.
@@ -1174,6 +1422,9 @@ impl ReduceRun {
                             t.add(c, f64::from(*v));
                         }
                     }
+                    if let Some(e) = t.refused() {
+                        return Err(e.to_string());
+                    }
                 }
                 let n = seen.get_mut(g).ok_or("a date in no group")?;
                 *n += 1;
@@ -1181,20 +1432,15 @@ impl ReduceRun {
                 if *n >= dates
                     && let (Some(t), Some(out)) = (totals.get_mut(g).and_then(Option::take), finished.get_mut(g))
                 {
-                    *out = Some(t.finish(self.min_share, dates));
+                    *out = Some(finish(&t, self.min_share, dates, frequency));
                 }
                 done.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             };
-            read_slices(self.cube.as_ref(), &self.steps, piece, cancel, &mut place)?;
+            // Changes and the longest run compare each date with the one before: read in date order.
+            read_slices(self.cube.as_ref(), &self.steps, piece, cancel, self.stat.in_order(), &mut place)?;
             let grid = grid.ok_or("none of the dates in the period has data written")?;
             stitch.check(&grid)?;
-            // Their full length when the cube knows it, so they don't grow by doubling.
-            if let (0, Some(total)) = (piece, whole) {
-                for band in &mut bands {
-                    band.reserve_exact(total);
-                }
-            }
             let cells = (grid.width as usize).saturating_mul(grid.height as usize);
             read_cells = read_cells.saturating_add(cells);
             if whole.is_none()
@@ -1202,15 +1448,30 @@ impl ReduceRun {
             {
                 return Err(e);
             }
-            for (g, band) in bands.iter_mut().enumerate() {
+            for (g, (band, mask)) in bands.iter_mut().zip(&mut masks).enumerate() {
                 let dates = self.groups.get(g).map_or(0, |(_, d)| *d);
                 // A group with no data written in this piece: no values, as its totals would give.
-                let out = match (finished.get_mut(g).and_then(Option::take), totals.get_mut(g).and_then(Option::take)) {
+                let (columns, piece_mask) = match (finished.get_mut(g).and_then(Option::take), totals.get_mut(g).and_then(Option::take)) {
                     (Some(out), _) => out,
-                    (None, Some(t)) => t.finish(self.min_share, dates),
-                    (None, None) => Totals::new(self.stat, cells).finish(self.min_share, dates),
+                    (None, Some(t)) => finish(&t, self.min_share, dates, frequency),
+                    (None, None) => finish(&Totals::new(self.stat, cells), self.min_share, dates, frequency),
                 };
-                band.extend(out);
+                stack_columns(band, mask, columns, &piece_mask);
+                mask.extend(piece_mask);
+                // Their full length when the cube knows it, so they don't grow by doubling.
+                if let (0, Some(total)) = (piece, whole) {
+                    for (_, b) in band.iter_mut() {
+                        b.reserve_exact(total.saturating_sub(b.len()));
+                    }
+                }
+            }
+            // Frequency's columns are known as they are met: their values within the outputs' cap.
+            let columns: usize = bands.iter().map(Vec::len).sum();
+            let values = (read_cells as u64).saturating_mul(columns as u64);
+            if values > MAX_REDUCED {
+                return Err(format!(
+                    "{read_cells} cells × {columns} classes and groups is {values} values, more than {MAX_REDUCED}: take a smaller area, a coarser cell size or fewer groups"
+                ));
             }
             stitch.add(grid);
         }
@@ -1218,25 +1479,63 @@ impl ReduceRun {
         if let Some(e) = self.cube.nothing_read() {
             return Err(e);
         }
+        if bands.iter().all(Vec::is_empty) {
+            return Err("none of the dates in the period has a class".into());
+        }
         done.store(self.total(), Ordering::Relaxed);
+        let grid = &grid;
         self.groups
             .iter()
             .zip(bands)
-            .map(|((name, _), band)| {
-                Raster::new(
-                    name.clone(),
-                    grid.width,
-                    height,
-                    vec![band],
-                    grid.transform,
-                    grid.crs,
-                    None,
-                    raster::ColorHint::Gray,
-                    "Float32",
-                )
-                .map_err(|e| e.to_string())
+            .flat_map(|((name, _), columns)| {
+                columns.into_iter().map(move |(class, band)| {
+                    let name = match class {
+                        Some(class) => format!("{name} class {class}"),
+                        None => name.clone(),
+                    };
+                    Raster::new(name, grid.width, height, vec![band], grid.transform, grid.crs, None, raster::ColorHint::Gray, "Float32")
+                        .map_err(|e| e.to_string())
+                })
             })
             .collect()
+    }
+}
+
+/// A group's outputs, as columns of cells: one keyed `None`, or frequency's one for each class.
+type Columns = Vec<(Option<f32>, Vec<f32>)>;
+
+/// A group's columns from its totals, and for frequency the value of a class it didn't meet.
+fn finish(t: &Totals, min_share: f64, dates: usize, frequency: bool) -> (Columns, Vec<f32>) {
+    let mask = if frequency { t.mask(min_share, dates) } else { Vec::new() };
+    (t.columns(min_share, dates), mask)
+}
+
+/// Puts a piece's columns under a group's so far, by key: a class the piece didn't meet gets the
+/// piece's `piece_mask`, and one met first in this piece the pieces' before it (`mask`).
+fn stack_columns(outs: &mut Columns, mask: &[f32], columns: Columns, piece_mask: &[f32]) {
+    let order = |a: &Option<f32>, b: &Option<f32>| match (a, b) {
+        (Some(a), Some(b)) => a.total_cmp(b),
+        _ => a.is_some().cmp(&b.is_some()),
+    };
+    let before = outs.first().map_or(mask.len(), |(_, b)| b.len());
+    for (key, column) in columns {
+        match outs.binary_search_by(|(k, _)| order(k, &key)) {
+            Ok(at) => {
+                if let Some((_, b)) = outs.get_mut(at) {
+                    b.extend(column);
+                }
+            }
+            Err(at) => {
+                let mut b = mask.to_vec();
+                b.extend(column);
+                outs.insert(at, (key, b));
+            }
+        }
+    }
+    for (_, b) in outs.iter_mut() {
+        if b.len() == before {
+            b.extend_from_slice(piece_mask);
+        }
     }
 }
 
@@ -1253,8 +1552,13 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
         Some(x) => return Err(format!("by is all, year or month, not {x}")),
     };
     let cube = cube_from(s, p, SUMMARY)?;
-    let steps = steps(cube.dates(), cube.period(), p)?;
+    let mut steps = steps(cube.dates(), cube.period(), p)?;
     let date = |i: usize| cube.dates().get(i).copied().unwrap_or(f64::NAN);
+    // Changes and runs are counted from each date to the next: the dates in order, which a Zarr
+    // axis out of order doesn't give.
+    if stat.in_order() {
+        steps.sort_by(|x, y| date(*x).total_cmp(&date(*y)));
+    }
     // A date that can't be read would go to no year or month: said, not put in a group of its own.
     if let Some(&i) = steps.iter().find(|&&i| !date(i).is_finite()) {
         return Err(format!("the cube's date {} can't be read: give the dates (\"dates\")", i + 1));
@@ -1345,5 +1649,64 @@ mod tests {
         let half = GeoTransform { origin_x: -60.125, ..a };
         assert!(super::same_grid(&a, &hair));
         assert!(!super::same_grid(&a, &half));
+    }
+
+    /// Several readers place a cube's slices as they are read; in order, one reads them, in the
+    /// steps' order, however long each read takes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn slices_asked_in_order_come_in_order() {
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        struct Slow(Vec<f64>);
+        impl super::TimeCube for Slow {
+            fn dates(&self) -> &[f64] {
+                &self.0
+            }
+            fn slice(&self, i: usize) -> Result<Option<(Arc<Raster>, usize)>, String> {
+                // The early dates the slowest, so readers that place as they read finish them last.
+                std::thread::sleep(std::time::Duration::from_millis(((12 - i.min(12)) * 3) as u64));
+                let gt = GeoTransform { origin_x: 0.0, origin_y: 0.0, pixel_width: 1.0, pixel_height: -1.0 };
+                let r = Raster::new("s", 1, 1, vec![vec![i as f32]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32")
+                    .map_err(|e| e.to_string())?;
+                Ok(Some((Arc::new(r), 0)))
+            }
+            fn label(&self) -> String {
+                "slow".into()
+            }
+            fn readers(&self) -> usize {
+                8
+            }
+        }
+        let cube = Slow((0..12).map(f64::from).collect());
+        let steps: Vec<usize> = (0..12).collect();
+        let mut came = Vec::new();
+        let read = super::read_slices(&cube, &steps, 0, &AtomicBool::new(false), true, &mut |k, _| {
+            came.push(k);
+            Ok(())
+        });
+        assert!(read.is_ok(), "{read:?}");
+        assert_eq!(came, steps);
+    }
+
+    /// Frequency's columns over pieces: a class met first in a later piece gets the earlier
+    /// pieces' mask (0, or none where a cell had too few values), and a class a piece didn't meet
+    /// gets that piece's.
+    #[test]
+    fn a_class_met_in_a_later_piece_is_counted_0_before() {
+        let nan = f32::NAN;
+        let mut outs = Vec::new();
+        let mut mask = Vec::new();
+        super::stack_columns(&mut outs, &mask, vec![(Some(3.0), vec![1.0, nan])], &[0.0, nan]);
+        mask.extend([0.0, nan]);
+        super::stack_columns(&mut outs, &mask, vec![(Some(5.0), vec![4.0])], &[0.0]);
+        let got: Vec<(Option<f32>, String)> = outs.iter().map(|(k, b)| (*k, format!("{b:?}"))).collect();
+        assert_eq!(got, vec![(Some(3.0), "[1.0, NaN, 0.0]".to_string()), (Some(5.0), "[0.0, NaN, 4.0]".to_string())]);
+        // One output, keyed None, is extended piece after piece.
+        let mut one = Vec::new();
+        super::stack_columns(&mut one, &[], vec![(None, vec![1.0])], &[]);
+        super::stack_columns(&mut one, &[], vec![(None, vec![2.0, 3.0])], &[]);
+        assert_eq!(one, vec![(None, vec![1.0, 2.0, 3.0])]);
     }
 }

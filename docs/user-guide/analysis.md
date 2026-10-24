@@ -472,14 +472,41 @@ variable, a STAC collection's band): **mean**, **min**, **max**, **sum**, **std*
 standard deviation), **count** of values, or **countAbove** a threshold (`"above"`), as Summarise
 over time does for a Zarr variable (see [Data](data.md)).
 
+- **Classes:** a series of categorical rasters, such as yearly land-cover maps (MapBiomas, ESA
+  WorldCover), is summarised as classes with eight more statistics:
+  - **mode**, each cell's most frequent class, the least of those tied (`"majority"` too);
+  - **modeCount**, at how many dates it had that class;
+  - **variety**, how many classes it had;
+  - **changes**, how many times its class changed from one date with a class to the next, in date
+    order. A date with no data is skipped, so A, no data, B is one change. Within each group, so by
+    year a change is one within the year;
+  - **longestRun**, the class it kept for the most dates in a row, in date order, the least of those
+    tied. A date with no data neither breaks a run nor adds to it, so A, no data, A is a run of two;
+  - **longestRunLength**, how many dates that run lasted;
+  - **frequency**, a layer for each class met (`… frequency 1985–2023 class 3`), each cell's count of
+    dates in that class. By year or month, a layer for each class of each group;
+  - **countIn**, at how many dates it was one of the classes given (`"classes": [3, 4, 5]`, whole
+    numbers from 0 to 255), such as the years a cell was forest.
+
+  They take the values as classes: a value that isn't a whole number (an NDVI) is refused with the
+  value, as is a run with more than 1,000 classes, or more than 64 million cells × classes (16
+  million in the web app). Frequency's layers, a cell's value for each class, count towards the
+  outputs' 32 million values. These are the data cube summary's only: Summarise over time for a
+  Zarr variable refuses them and points here. Mode, modeCount, variety and frequency keep a count
+  of each class in each cell while they read, 2 bytes a class, for each group being read: by
+  month, every month's at once, so a large area by month may need a smaller area. **changes**,
+  **longestRun** and **longestRunLength** read a STAC collection one date at a time, in order, so
+  they are slower there than the other statistics, which read several dates at once.
+
 - **Groups:** `"by": "all"` (the default) makes one layer of the whole period, `"year"` one for
   each calendar year (an annual mean NDVI from 16-day composites), `"month"` one for each month of
   the year across the years (a climatology). `"start"`, `"end"` and `"months"` pick the dates as for
   a trend.
 - **Missing values:** no-data and missing values are skipped cell by cell. A cell keeps no value
   where it had fewer values than `"minValid"` (a share of its group's dates, 0 by default: 0.5
-  wants half of a year's composites); with the default, **count** and **countAbove** give 0 where
-  a cell never had a value.
+  wants half of a year's composites); with the default, **count**, **countAbove**, **countIn**,
+  **modeCount**, **variety**, **changes**, **longestRunLength** and **frequency** give 0 where a cell
+  never had a value, and **mode** and **longestRun** give none.
 - **Size:** the slices are folded into running totals as they are read, so a long period takes no
   more memory than a short one; a STAC collection's area is read in pieces, as for a trend. The
   outputs hold up to 32 million values (cells times groups; 8 million in the web app). A summary by
@@ -491,6 +518,7 @@ over time does for a Zarr variable (see [Data](data.md)).
 
 ```sh
 rustgis-cli run --cmd 'cube.reduce={"layers":["ndvi_2015","ndvi_2016","ndvi_2017","ndvi_2018"],"stat":"max"}'
+rustgis-cli run --data cobertura_1985.tif --data cobertura_1986.tif --data cobertura_1987.tif --cmd 'cube.reduce={"layers":["cobertura_1985","cobertura_1986","cobertura_1987"],"stat":"changes"}'
 rustgis-cli run --cmd 'cube.reduce={"url":"https://data.inpe.br/bdc/stac/v1","collection":"mod13q1-6.1","asset":"NDVI","bbox":[-44.8,-7.5,-44.3,-7.0],"start":"2001","end":"2025","cellSize":1000,"stat":"mean","by":"year","minValid":0.5,"name":"NDVI"}' --save urucui.rgis
 ```
 
