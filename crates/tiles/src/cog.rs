@@ -363,12 +363,14 @@ fn step(url: String, have: Sparse, rounds: usize, done: Box<dyn FnOnce(Result<Ar
 /// reads a tag's values 512 bytes at a time, so `a..b` is no longer than that even inside a long
 /// array (a large image's tile index, 4 MB for MapBiomas's 346,092 tiles): the step doubles each
 /// round, from [`STEP`] up to [`MAX_BYTES`], so such an index takes a few rounds, not one per
-/// 256 KB.
+/// 256 KB. A read never takes what is held past [`cog::MAX_HEADER`].
 fn header_read(have: &Sparse, a: u64, b: u64, rounds: usize) -> Option<u64> {
     if rounds >= MAX_ROUNDS || have.held() >= cog::MAX_HEADER || a >= cog::MAX_HEADER.saturating_mul(64) {
         return None;
     }
-    Some(b.saturating_sub(a).max(STEP << rounds).min(MAX_BYTES as u64))
+    let room = cog::MAX_HEADER - have.held();
+    // `rounds` is below MAX_ROUNDS here, so the shift stays far from overflowing.
+    Some(b.saturating_sub(a).max(STEP << rounds).min(MAX_BYTES as u64).min(room))
 }
 
 /// What a file that isn't a cloud-optimised GeoTIFF says (it is read whole instead).
@@ -1236,6 +1238,10 @@ mod tests {
         assert!(rounds <= 6, "{rounds} reads");
         // A cloud-optimised file's header is in its first read, as before.
         assert_eq!(layout_by_ranges(&rustgis_data::raster::cog::example(1024, 64)).map(|(_, r)| r), Ok(0));
+        // A read stops at the header's cap, however large the step has grown.
+        let near = Sparse::default().with(0, vec![0; cog::MAX_HEADER as usize - 1000]);
+        assert_eq!(header_read(&near, cog::MAX_HEADER, cog::MAX_HEADER + 512, 8), Some(1000));
+        assert_eq!(header_read(&near.with(cog::MAX_HEADER, vec![0; 1000]), cog::MAX_HEADER + 1000, cog::MAX_HEADER + 1512, 9), None);
     }
 
     #[test]
