@@ -9020,9 +9020,10 @@ fn a_zarr_variable_summarised_over_time() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Where nothing but a shell waits on them (`rustgis-cli run`: `long_runs` set), a trend and a summary tell their progress up to its end and give what they give anywhere
-/// else; and there a STAC trend's or summary's search takes more items than in the app (a
-/// state's four MODIS tiles over 25 years are 2,304).
+/// Where nothing but a shell waits on them (`rustgis-cli run`: `long_runs` set), a trend and a
+/// summary tell their progress up to its end and give what they give anywhere else; and there a
+/// STAC trend's or summary's search takes more items than in the app (a state's four MODIS tiles
+/// over 25 years are 2,304).
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_trend_where_nothing_waits_tells_its_progress() {

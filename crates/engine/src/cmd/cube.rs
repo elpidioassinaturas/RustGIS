@@ -995,7 +995,7 @@ fn run_telling<T: Send>(
         // Waited for, not polled, so a short run returns as soon as it ends.
         let r = loop {
             match ended.recv_timeout(std::time::Duration::from_millis(500)) {
-                Ok(r) => break r,
+                Ok(r) => break Some(r),
                 Err(RecvTimeoutError::Timeout) => {
                     let percent = (done.load(Ordering::Relaxed).min(total) * 100 / total).min(99);
                     if percent != told {
@@ -1004,11 +1004,21 @@ fn run_telling<T: Send>(
                     }
                 }
                 // The worker panicked before it sent anything.
-                Err(RecvTimeoutError::Disconnected) => break Err(format!("{what} failed unexpectedly")),
+                Err(RecvTimeoutError::Disconnected) => break None,
             }
         };
-        let _ = worker.join();
-        r
+        // Joined here, so its panic is taken and said, not raised again when the scope ends.
+        match (r, worker.join()) {
+            (Some(r), _) => r,
+            (None, Err(panic)) => {
+                let why = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned());
+                Err(match why {
+                    Some(why) => format!("{what} failed unexpectedly: {why}"),
+                    None => format!("{what} failed unexpectedly"),
+                })
+            }
+            (None, Ok(())) => Err(format!("{what} failed unexpectedly")),
+        }
     })
 }
 
@@ -1410,6 +1420,21 @@ mod tests {
         assert_eq!(super::date_in_text("NDVI 2015"), day("2015-01-01"));
         assert_eq!(super::date_in_text("ndvi_v2015"), None);
         assert_eq!(super::date_in_text("MOD13Q1.A2024153"), day("2024-06-01"));
+    }
+
+    /// A long run's thread that panics gives an error naming the command and the cause, and its
+    /// end is never told.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[allow(clippy::panic)]
+    fn a_long_run_that_panics_says_why() {
+        fn tell(_: &str, share: f64) {
+            assert!(share < 1.0, "a run that panicked is told as done");
+        }
+        let e = super::run_telling::<()>("cube.trend", 10, tell, |_, _| panic!("a band out of range")).unwrap_err();
+        assert_eq!(e, "cube.trend failed unexpectedly: a band out of range");
+        let e = super::run_telling::<()>("cube.reduce", 10, tell, |_, _| std::panic::panic_any(7u8)).unwrap_err();
+        assert_eq!(e, "cube.reduce failed unexpectedly");
     }
 
     /// Slices an ulp apart are one grid; half a pixel apart, another.

@@ -55,6 +55,8 @@ fn print(v: &Value) {
     out!("{}", serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()));
 }
 
+// The progress line's state, for the one command `run` runs at a time (and resets after it).
+
 /// Whether a progress line is left without its end (a run that failed partway).
 static PROGRESS_OPEN: AtomicBool = AtomicBool::new(false);
 /// The tenth of a run last told where standard error isn't a terminal (a log, CI).
