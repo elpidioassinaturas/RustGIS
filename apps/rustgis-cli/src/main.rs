@@ -26,9 +26,9 @@
 //! be run with `--cmd`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// `println!` that ignores a closed pipe (`rustgis-cli commands | head`).
 macro_rules! out {
@@ -57,11 +57,22 @@ fn print(v: &Value) {
 
 /// Whether a progress line is left without its end (a run that failed partway).
 static PROGRESS_OPEN: AtomicBool = AtomicBool::new(false);
+/// The tenth of a run last told where standard error isn't a terminal (a log, CI).
+static TOLD_TENTH: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-/// A long run's progress on standard error, one line rewritten (`cube.trend: 42%`).
+/// A long run's progress on standard error, one line rewritten (`cube.trend: 42%`); in a log, a
+/// line every tenth and at the end.
 fn progress(what: &str, share: f64) {
-    eprint!("\r{what}: {:.0}%", (share * 100.0).clamp(0.0, 100.0));
+    let percent = (share * 100.0).clamp(0.0, 100.0);
     let ended = share >= 1.0;
+    if !std::io::stderr().is_terminal() {
+        let tenth = (percent / 10.0) as usize;
+        if TOLD_TENTH.swap(if ended { usize::MAX } else { tenth }, Ordering::Relaxed) != tenth || ended {
+            eprintln!("{what}: {percent:.0}%");
+        }
+        return;
+    }
+    eprint!("\r{what}: {percent:.0}%");
     if ended {
         eprintln!();
     }
@@ -76,6 +87,7 @@ fn run(s: &mut Session, id: &str, p: Value) -> Result<Value, String> {
     if PROGRESS_OPEN.swap(false, Ordering::Relaxed) {
         eprintln!();
     }
+    TOLD_TENTH.store(usize::MAX, Ordering::Relaxed);
     // A failure is noted too; it's printed once, by the caller.
     for n in s.notices_since(mark).iter().filter(|n| r.as_ref().err() != Some(&n.text)) {
         eprintln!("rustgis-cli: {}{}", if n.error { "error: " } else { "" }, n.text);

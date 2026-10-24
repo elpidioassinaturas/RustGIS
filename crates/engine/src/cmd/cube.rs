@@ -938,17 +938,43 @@ fn trend_cmd(s: &mut Session, p: &Value) -> CmdResult {
     let mut run = trend_start(s, p)?;
     run.max_pairs = if s.long_runs.is_some() { MAX_PAIRS } else { MAX_WAITED_PAIRS };
     let dates = run.steps.len();
-    let rasters = match s.long_runs {
-        #[cfg(not(target_arch = "wasm32"))]
-        Some(tell) => run_telling("cube.trend", run.total(), tell, |cancel, done| run.run(cancel, done))?,
-        _ => run.run(&AtomicBool::new(false), &AtomicUsize::new(0))?,
-    };
-    add_outputs(s, rasters, dates)
+    let rasters = run_here(s.long_runs, "cube.trend", run.total(), |cancel, done| run.run(cancel, done))?;
+    let added = add_outputs(s, rasters, dates);
+    told_end(s.long_runs, "cube.trend", added)
+}
+
+/// A run worked out where it's called: on a thread of its own telling its progress where only a
+/// shell or a script waits on it ([`Session::long_runs`](crate::Session::long_runs)), here
+/// otherwise (and always in the browser, which has no threads). Its end is told by
+/// [`told_end`], once the command has added what it made.
+fn run_here<T: Send>(
+    long_runs: Option<fn(&str, f64)>,
+    what: &str,
+    total: usize,
+    work: impl FnOnce(&AtomicBool, &AtomicUsize) -> Result<T, String> + Send,
+) -> Result<T, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(tell) = long_runs {
+        return run_telling(what, total, tell, work);
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = (long_runs, what, total);
+    work(&AtomicBool::new(false), &AtomicUsize::new(0))
+}
+
+/// A long command's result, its end (a share of 1) told first when it succeeded: after its layers
+/// were added, so a failure to add them isn't told as done.
+fn told_end(long_runs: Option<fn(&str, f64)>, what: &str, r: CmdResult) -> CmdResult {
+    if r.is_ok()
+        && let Some(tell) = long_runs
+    {
+        tell(what, 1.0);
+    }
+    r
 }
 
 /// A long run on a thread of its own, its progress told every half second when it has moved by a
-/// percent, up to 99% while it runs (its outputs are still being made when every slice is read),
-/// and its end (a share of 1) once it has succeeded.
+/// percent, up to 99% (its outputs are still being made, and added, when every slice is read).
 #[cfg(not(target_arch = "wasm32"))]
 fn run_telling<T: Send>(
     what: &str,
@@ -982,9 +1008,6 @@ fn run_telling<T: Send>(
             }
         };
         let _ = worker.join();
-        if r.is_ok() {
-            tell(what, 1.0);
-        }
         r
     })
 }
@@ -1360,12 +1383,9 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
 /// script waits on it (`rustgis-cli run`), its layers added, each kept in the project as a GeoTIFF.
 fn reduce_cmd(s: &mut Session, p: &Value) -> CmdResult {
     let run = reduce_start(s, p)?;
-    let rasters = match s.long_runs {
-        #[cfg(not(target_arch = "wasm32"))]
-        Some(tell) => run_telling("cube.reduce", run.total(), tell, |cancel, done| run.run(cancel, done))?,
-        _ => run.run(&AtomicBool::new(false), &AtomicUsize::new(0))?,
-    };
-    add_outputs(s, rasters, run.dates())
+    let rasters = run_here(s.long_runs, "cube.reduce", run.total(), |cancel, done| run.run(cancel, done))?;
+    let added = add_outputs(s, rasters, run.dates());
+    told_end(s.long_runs, "cube.reduce", added)
 }
 
 #[cfg(test)]

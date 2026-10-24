@@ -462,11 +462,10 @@ and a **Mann–Kendall** test of whether the trend is significant.
   Cancel, so it takes a tenth of the panes' limit on pairs compared (2 billion). `rustgis-cli run`
   and Python, where nothing but a shell or a script waits on it, take the panes' limit (20
   billion): Piauí's 576 composites at about 1 km with the seasonal test (about 4.4 billion pairs)
-  run in one call there, and `rustgis-cli run` prints its progress (`cube.trend: 42%`). A STAC
-  collection's search takes up to 10,000 items for a trend or a summary (a state's four MODIS
-  tiles over 25 years are 2,304), where a data cube on the time slider takes 2,000. That holds
-  wherever the trend or summary runs, the Script pane and the assistant too, which wait for the
-  search with no Cancel: it is read 200 items a page, so 10,000 items are 50 pages.
+  run in one call there, and `rustgis-cli run` prints its progress (`cube.trend: 42%`). There, a
+  STAC collection's search also takes up to 10,000 items for a trend or a summary (a state's four
+  MODIS tiles over 25 years are 2,304). In the app, whose Script pane and assistant wait for the
+  search with no Cancel, it takes 2,000, as a data cube on the time slider does.
 
 ```sh
 rustgis-cli run --cmd 'cube.trend={"layers":["ndvi_2015","ndvi_2016","ndvi_2017","ndvi_2018"],"per":"decade"}'
@@ -494,8 +493,9 @@ over time does for a Zarr variable (see [Data](data.md)).
   outputs hold up to 32 million values (cells times groups; 8 million in the web app). A summary by
   month keeps every month's totals while it reads, up to five times the outputs' memory for
   **std** (three for mean, min, max, sum and countAbove), so a large area by month may need a
-  coarser cell size or a smaller area. A STAC collection's search takes up to 10,000 items, and
-  `rustgis-cli run` prints a summary's progress (`cube.reduce: 42%`). The layers
+  coarser cell size or a smaller area. `rustgis-cli run` and Python take a STAC collection's
+  search up to 10,000 items, as for a trend (the app 2,000), and `rustgis-cli run` prints a
+  summary's progress (`cube.reduce: 42%`). The layers
   are named after what they hold (`NDVI mean 2001`, `NDVI mean 2001–2025 month 03`, or the
   `"name"` given and the group) and kept in the project as GeoTIFFs.
 

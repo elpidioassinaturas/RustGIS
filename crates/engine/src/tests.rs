@@ -9022,8 +9022,8 @@ fn a_zarr_variable_summarised_over_time() {
 
 /// Where nothing but a shell or a script waits on them (`rustgis-cli run`, Python: `long_runs`
 /// set), a trend and a summary tell their progress up to its end and give what they give anywhere
-/// else; and a STAC trend's or summary's search takes more items than a data cube on the time
-/// slider (a state's four MODIS tiles over 25 years are 2,304).
+/// else; and there a STAC trend's or summary's search takes more items than in the app (a
+/// state's four MODIS tiles over 25 years are 2,304).
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_trend_where_nothing_waits_tells_its_progress() {
@@ -9071,8 +9071,9 @@ fn a_trend_where_nothing_waits_tells_its_progress() {
     assert!((mean_a[0] - 0.41).abs() < 1e-5 && (mean_a[1] - 0.5).abs() < 1e-6, "{mean_a:?}");
     assert_eq!(ended("cube.trend"), Some(1.0), "the trend's progress is told to its end");
     assert_eq!(ended("cube.reduce"), Some(1.0), "the summary's progress is told to its end");
-    // 2,100 items (a tile each, one day) in eleven pages of 200: too many for the time slider,
-    // not for a trend or a summary, which go on to read their first file (here on a closed port).
+    // 2,100 items (a tile each, one day) in eleven pages of 200: too many for the time slider and
+    // for a trend in the app, not for a trend or a summary where nothing waits, which go on to
+    // read their first file (here on a closed port).
     let item = |k: usize| {
         format!(
             r#"{{"type": "Feature", "id": "i{k}", "collection": "c", "bbox": [10, 45, 11, 46], "geometry": null, "properties": {{"datetime": "2024-01-01T00:00:00Z", "bdc:tiles": ["t{k}"]}}, "assets": {{"NDVI": {{"href": "http://127.0.0.1:9/i{k}.tif"}}}}}}"#
@@ -9102,17 +9103,20 @@ fn a_trend_where_nothing_waits_tells_its_progress() {
     ];
     let mut routes: Vec<(&'static str, String)> = MARKS.iter().enumerate().map(|(i, m)| (*m, page(i + 1))).collect();
     routes.push(("/v1/search", page(0)));
-    // Eleven pages for each of the three searches, with room to spare.
+    // Eleven pages for each of the four searches, with room to spare.
     let api = format!("{}/v1", serve_routes(routes, 60));
     let p = json!({"url": api, "collection": "c", "asset": "NDVI", "bbox": [10, 45, 11, 46], "start": "2024", "end": "2024"});
     let e = plain.run("stac.addCube", &p).unwrap_err();
     assert!(e.contains("more than 2000 items"), "{e}");
     let e = plain.run("cube.trend", &p).unwrap_err();
-    assert!(!e.contains("items"), "a trend takes them: {e}");
+    assert!(e.contains("more than 2000 items"), "the app's trend doesn't take them: {e}");
+    // Taken, they go on to the first file, which can't be read.
+    let e = told.run("cube.trend", &p).unwrap_err();
+    assert!(e.contains("127.0.0.1:9/i") && !e.contains("items"), "a trend takes them: {e}");
     let mut summary = p.clone();
     summary["stat"] = json!("mean");
-    let e = plain.run("cube.reduce", &summary).unwrap_err();
-    assert!(!e.contains("items"), "a summary takes them: {e}");
+    let e = told.run("cube.reduce", &summary).unwrap_err();
+    assert!(e.contains("127.0.0.1:9/i") && !e.contains("items"), "a summary takes them: {e}");
 }
 
 /// A trend over a data cube (#579), from the three kinds of cube: a stack of raster layers dated

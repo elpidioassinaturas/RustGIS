@@ -249,9 +249,11 @@ fn add_asset(s: &mut Session, p: &Value) -> CmdResult {
 
 /// The most items a data cube on the time slider takes (its search is paged up to this).
 pub const MAX_CUBE_ITEMS: usize = 2000;
-/// The most items a trend or a summary over a STAC collection takes (`cube.trend`, `cube.reduce`):
-/// their reads are bounded by their cells and dates (pieces, pairs), not their files, so a state's
-/// four MODIS tiles over 25 years (2,304) fit.
+/// The most items a trend or a summary over a STAC collection takes (`cube.trend`, `cube.reduce`)
+/// where only a shell or a script waits on it ([`Session::long_runs`]): their reads are bounded by
+/// their cells and dates (pieces, pairs), not their files, so a state's four MODIS tiles over 25
+/// years (2,304) fit. In the app, which waits for the search with no Cancel, they take
+/// [`MAX_CUBE_ITEMS`].
 pub const MAX_SERIES_ITEMS: usize = 10_000;
 /// The most pages of a search a data cube reads, whatever they hold.
 pub const MAX_CUBE_PAGES: usize = 100;
@@ -591,7 +593,8 @@ pub fn stac_cube(s: &Session, p: &Value) -> Result<StacCube, String> {
     if let Some(o) = searched.as_object_mut() {
         o.insert("bbox".into(), json!(bbox));
     }
-    let CubeFiles { tiles, scales, nodata, collection, asset, .. } = cube_files(s, &searched, MAX_SERIES_ITEMS)?;
+    let CubeFiles { tiles, scales, nodata, collection, asset, .. } =
+        cube_files(s, &searched, if s.long_runs.is_some() { MAX_SERIES_ITEMS } else { MAX_CUBE_ITEMS })?;
     // Every tile's file for a date, by day.
     let mut by_day: std::collections::BTreeMap<i64, Vec<(String, (f64, f64), Option<f64>)>> = Default::default();
     for days in tiles.values() {

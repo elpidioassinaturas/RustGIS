@@ -119,6 +119,12 @@ both (keyword arguments win). It returns the decoded command result and raises
 `rustgis.RustGISError` when the command fails. UI-only commands (`ui.*`) need
 `Map.run_in_app`, as in the notebook example above.
 
+A command runs to its end before `run` returns. A long one, such as a trend over a state from a
+data cube (`cube.trend`, which takes the app's larger bounds here, as on the
+[command line](cli.md)), holds Python's interpreter lock meanwhile: other Python threads, and
+calls to the session from them, wait their turn, and Ctrl+C (`KeyboardInterrupt`) is raised only
+once the command has ended.
+
 ```python
 s.commands()                                        # every command, with its parameters
 s.tools()                                           # the geoprocessing tools
