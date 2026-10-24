@@ -946,8 +946,9 @@ fn trend_cmd(s: &mut Session, p: &Value) -> CmdResult {
     add_outputs(s, rasters, dates)
 }
 
-/// A long run on a thread of its own, its progress told at most every half second, when it has
-/// moved by a percent, and its end (a share of 1) when it succeeds.
+/// A long run on a thread of its own, its progress told every half second when it has moved by a
+/// percent, up to 99% while it runs (its outputs are still being made when every slice is read),
+/// and its end (a share of 1) once it has succeeded.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_telling<T: Send>(
     what: &str,
@@ -955,27 +956,33 @@ fn run_telling<T: Send>(
     tell: fn(&str, f64),
     work: impl FnOnce(&AtomicBool, &AtomicUsize) -> Result<T, String> + Send,
 ) -> Result<T, String> {
-    use std::time::{Duration, Instant};
+    use std::sync::mpsc::{RecvTimeoutError, channel};
     let (cancel, done) = (AtomicBool::new(false), AtomicUsize::new(0));
     let total = total.max(1);
     std::thread::scope(|scope| {
-        let worker = scope.spawn(|| work(&cancel, &done));
-        let (mut told, mut last) = (usize::MAX, Instant::now());
-        // Looked at often, so a short run isn't kept waiting; told every half second.
-        while !worker.is_finished() {
-            std::thread::sleep(Duration::from_millis(50));
-            if last.elapsed() < Duration::from_millis(500) {
-                continue;
+        let (sent, ended) = channel();
+        let (c, d) = (&cancel, &done);
+        let worker = scope.spawn(move || {
+            let _ = sent.send(work(c, d));
+        });
+        let mut told = usize::MAX;
+        // Waited for, not polled, so a short run returns as soon as it ends.
+        let r = loop {
+            match ended.recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok(r) => break r,
+                Err(RecvTimeoutError::Timeout) => {
+                    let percent = (done.load(Ordering::Relaxed).min(total) * 100 / total).min(99);
+                    if percent != told {
+                        told = percent;
+                        tell(what, percent as f64 / 100.0);
+                    }
+                }
+                // The worker panicked before it sent anything.
+                Err(RecvTimeoutError::Disconnected) => break Err(format!("{what} failed unexpectedly")),
             }
-            last = Instant::now();
-            let now = done.load(Ordering::Relaxed).min(total);
-            if now * 100 / total != told {
-                told = now * 100 / total;
-                tell(what, now as f64 / total as f64);
-            }
-        }
-        let r = worker.join().unwrap_or_else(|_| Err(format!("{what} failed unexpectedly")));
-        if r.is_ok() && told != 100 {
+        };
+        let _ = worker.join();
+        if r.is_ok() {
             tell(what, 1.0);
         }
         r

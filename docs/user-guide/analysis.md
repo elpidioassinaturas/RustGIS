@@ -464,7 +464,9 @@ and a **Mann–Kendall** test of whether the trend is significant.
   billion): Piauí's 576 composites at about 1 km with the seasonal test (about 4.4 billion pairs)
   run in one call there, and `rustgis-cli run` prints its progress (`cube.trend: 42%`). A STAC
   collection's search takes up to 10,000 items for a trend or a summary (a state's four MODIS
-  tiles over 25 years are 2,304), where a data cube on the time slider takes 2,000.
+  tiles over 25 years are 2,304), where a data cube on the time slider takes 2,000. That holds
+  wherever the trend or summary runs, the Script pane and the assistant too, which wait for the
+  search with no Cancel: it is read 200 items a page, so 10,000 items are 50 pages.
 
 ```sh
 rustgis-cli run --cmd 'cube.trend={"layers":["ndvi_2015","ndvi_2016","ndvi_2017","ndvi_2018"],"per":"decade"}'

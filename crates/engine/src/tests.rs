@@ -9029,13 +9029,19 @@ fn a_zarr_variable_summarised_over_time() {
 fn a_trend_where_nothing_waits_tells_its_progress() {
     use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
     use std::sync::Mutex;
+    // What was told, by this test alone: no other test sets `long_runs` with this `tell`.
     static TOLD: Mutex<Vec<(String, f64)>> = Mutex::new(Vec::new());
     fn tell(what: &str, share: f64) {
         assert!((0.0..=1.0).contains(&share), "{what}: {share}");
         TOLD.lock().unwrap().push((what.to_string(), share));
     }
-    // The last share each run told: its end, 1, however soon it finished.
-    let ended = |what: &str| TOLD.lock().unwrap().iter().rev().find(|(w, _)| w == what).map(|(_, x)| *x);
+    // The last share each run told: its end, 1, however soon it finished, and told only then.
+    let ended = |what: &str| {
+        let told = TOLD.lock().unwrap();
+        let ends = told.iter().filter(|(w, x)| w == what && *x >= 1.0).count();
+        assert!(ends <= 1, "{what} told its end {ends} times");
+        told.iter().rev().find(|(w, _)| w == what).map(|(_, x)| *x)
+    };
     let gt = GeoTransform { origin_x: -56.0, origin_y: -12.0, pixel_width: 0.01, pixel_height: -0.01 };
     let slope = |s: &mut Session| {
         let mut names = Vec::new();
