@@ -369,6 +369,10 @@ fn header_read(have: &Sparse, a: u64, b: u64, rounds: usize) -> Option<u64> {
         return None;
     }
     let room = cog::MAX_HEADER - have.held();
+    // What the layout stopped for has to fit in what is left, or the read would be wasted.
+    if b.saturating_sub(a) > room {
+        return None;
+    }
     // `rounds` is below MAX_ROUNDS here, so the shift stays far from overflowing.
     Some(b.saturating_sub(a).max(STEP << rounds).min(MAX_BYTES as u64).min(room))
 }
@@ -1241,6 +1245,7 @@ mod tests {
         // A read stops at the header's cap, however large the step has grown.
         let near = Sparse::default().with(0, vec![0; cog::MAX_HEADER as usize - 1000]);
         assert_eq!(header_read(&near, cog::MAX_HEADER, cog::MAX_HEADER + 512, 8), Some(1000));
+        assert_eq!(header_read(&near, cog::MAX_HEADER, cog::MAX_HEADER + 1001, 8), None, "more than is left");
         assert_eq!(header_read(&near.with(cog::MAX_HEADER, vec![0; 1000]), cog::MAX_HEADER + 1000, cog::MAX_HEADER + 1512, 9), None);
     }
 
