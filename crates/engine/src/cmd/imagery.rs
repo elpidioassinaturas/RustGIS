@@ -41,6 +41,9 @@ pub fn commands() -> Vec<C> {
         C::new("raster.georeference", "Georeference", "Analyze › Alignment", georeference).params(
             r#"{"layer": raster, "points"?: [[column, row, lon, lat], …] (two or more; with "transform": [column, row, x, y, on?]), "extent"?: [minLon, minLat, maxLon, maxLat], "transform"?: "similarity"|"affine"|"projective"|"polynomial2"|"polynomial3"|"spline" (fits the points and warps the raster onto a north-up grid covering the warped image; without it the points and extent only shift and scale the grid), "pointsCrs"?: EPSG code or "EPSG:n" of the points' x and y (default 4326), "crs"?: the output's (default pointsCrs), "resampling"?: "nearest"|"bilinear"|"cubic" (default bilinear), "cellSize"?: output units (default about the source pixel's size on the ground), "name"?: new layer for the result (default replaces the layer's raster), "path"?: "*.tif" (also writes the warp as a cloud-optimised GeoTIFF)}"#,
         ),
+        C::new("raster.project", "Project Raster", "Analyze › Alignment", project_raster).params(
+            r#"{"layer": raster, "crs"?: EPSG code or "EPSG:n" of the output (default the layer's), "cellSize"?: number or [x, y] in the output's units (default about the layer's pixel there), "origin"?: [x, y] a cell corner falls on (default [0, 0], so grids of the same cellSize line up), "extent"?: polygon layer (its selected or all features' bounds) | [west, south, east, north] in degrees | "view" (default the layer's footprint), "grid"?: raster layer whose coordinate system, cells and extent are taken exactly (instead of crs, cellSize, origin and extent), "resampling"?: "nearest" (default) | "bilinear" | "cubic" | "average" (the mean of the pixels whose centres fall in a cell) | "mode" (their most frequent value, the least of those tied), "name"?: new layer (default "<layer> projected"), "path"?: GeoTIFF to write it to}"#,
+        ),
         // A fit is a measurement of the points, not a project change: no undo step.
         C::new("raster.gcpFit", "Control Point Fit", "Analyze › Alignment", gcp_fit).view().params(
             r#"{"points": [[column, row, x, y, on?], …] (on: 1/0 or true/false, default on), "transform"?: "similarity"|"affine"|"projective"|"polynomial2"|"polynomial3"|"spline" (default: similarity under 3 points, else affine), "compare"?: bool (fit every transform and recommend one; transform and leaveOneOut are then ignored), "leaveOneOut"?: bool (default true)}"#,
@@ -313,6 +316,114 @@ fn warp_to_fit(s: &mut Session, p: &Value, layer: &str, r: &Raster) -> CmdResult
         Some(n) => super::raster::add_raster(s, &n, rl)?,
         None => replace_layer(s, layer, rl)?,
     };
+    if let (Some(o), Some(i)) = (info.as_object_mut(), v.as_object()) {
+        for (k, val) in i {
+            o.entry(k.clone()).or_insert_with(|| val.clone());
+        }
+    }
+    Ok(info)
+}
+
+/// `raster.project`: the layer on a grid of another coordinate system, cell size, origin and
+/// extent, or on another raster's grid, each cell sampled at its centre or taken from every
+/// pixel whose centre falls in it (see `rustgis_analysis::warp::project`). A new layer.
+fn project_raster(s: &mut Session, p: &Value) -> CmdResult {
+    let r = raster(s, p)?;
+    r.require_coordinates()?;
+    let method = match p.get("resampling") {
+        None | Some(Value::Null) => warp::Method::Sample(warp::Resampling::Nearest),
+        Some(v) => v.as_str().and_then(warp::Method::parse).ok_or("resampling is nearest, bilinear, cubic, average or mode")?,
+    };
+    let grid = match ps(p, "grid") {
+        Some(template) => {
+            if ["crs", "cellSize", "origin", "extent"].iter().any(|k| p.get(*k).is_some_and(|v| !v.is_null())) {
+                return Err(
+                    "grid takes that raster's coordinate system, cells and extent: leave out crs, cellSize, origin and extent".into()
+                );
+            }
+            let t = raster_named(s, template)?;
+            t.require_coordinates()?;
+            warp::Grid::of(&t)
+        }
+        None => {
+            let crs = crs_param(p, "crs")?.unwrap_or(r.crs);
+            let (footprint, pixel) = warp::footprint_in(&r, crs)?;
+            let positive = |v: &Value| v.as_f64().filter(|c| c.is_finite() && *c > 0.0);
+            let bad_cell = "cellSize is a positive number, or [x, y], in the output's units";
+            let cell = match p.get("cellSize") {
+                None | Some(Value::Null) => (pixel, pixel),
+                Some(Value::Array(a)) => match a.as_slice() {
+                    [x, y] => (positive(x).ok_or(bad_cell)?, positive(y).ok_or(bad_cell)?),
+                    _ => return Err(bad_cell.into()),
+                },
+                Some(v) => positive(v).map(|c| (c, c)).ok_or(bad_cell)?,
+            };
+            let origin = match p.get("origin") {
+                None | Some(Value::Null) => (0.0, 0.0),
+                Some(v) => {
+                    let n: Vec<f64> = v.as_array().map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
+                    match n.as_slice() {
+                        [x, y] if x.is_finite() && y.is_finite() => (*x, *y),
+                        _ => return Err("origin is [x, y] in the output's units".into()),
+                    }
+                }
+            };
+            let bounds = match p.get("extent") {
+                None | Some(Value::Null) => footprint,
+                Some(Value::String(l)) if l != "view" => {
+                    let layer = s.map().layer_by_name(l).filter(|l| l.raster.is_none()).ok_or_else(|| format!("no vector layer '{l}'"))?;
+                    let rows: Vec<usize> =
+                        if layer.selection.is_empty() { (0..layer.dataset.features.len()).collect() } else { layer.selection.clone() };
+                    let e = rows
+                        .iter()
+                        .filter_map(|row| layer.dataset.features.get(*row).and_then(|f| f.geometry.as_ref()))
+                        .fold(Extent::EMPTY, |e, g| e.union(&g.extent()));
+                    if e.is_empty() {
+                        return Err(format!("{l} has no features to take an extent from"));
+                    }
+                    warp::bounds_in([e.min_x, e.min_y, e.max_x, e.max_y], crs)?
+                }
+                Some(v) => {
+                    let area = super::catalogs::area(s, &json!({"bbox": v}))?;
+                    if area[0] > area[2] {
+                        return Err("an extent across the antimeridian: give it one side at a time".into());
+                    }
+                    warp::bounds_in(area, crs)?
+                }
+            };
+            warp::Grid::snapped(crs, bounds, cell, origin)?
+        }
+    };
+    let path = match p.get("path") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_str().filter(|t| is_tif(t)).ok_or("path is a *.tif or *.tiff file")?.to_string()),
+    };
+    let out_name = name(p, format!("{} projected", r.name));
+    let out = warp::project(&r, &grid, method, out_name.clone())?;
+    let mut info = json!({
+        "name": out_name, "crs": grid.crs.label(), "resampling": method.id(), "width": out.width, "height": out.height, "bands": out.band_count(),
+        "cellSize": [grid.cell_x, grid.cell_y], "corner": [grid.min_x, grid.max_y],
+    });
+    if let Some((fw, fh)) = r.overview {
+        let note =
+            format!("{}: projected at reduced resolution, from its {} × {} overview of the {fw} × {fh} raster", r.name, r.width, r.height);
+        s.notify(note, false);
+        info["projectedFromOverview"] = json!({"width": r.width, "height": r.height, "of": [fw, fh]});
+    }
+    let e = out.extent();
+    info["extent"] = json!([e.min_x, e.min_y, e.max_x, e.max_y]);
+    // A file written is the layer's source; without one the pixels are kept in the project.
+    let rl = match &path {
+        Some(path) => {
+            let cog =
+                rustgis_data::raster::cogwrite::write_file(&out, 0, std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
+            info["path"] = json!(path);
+            info["cog"] = json!({"overviews": cog.levels.len().saturating_sub(1), "bigTiff": cog.big, "bytes": cog.bytes});
+            RasterLayer::from_path(out, path.clone())
+        }
+        None => layer_of(out)?,
+    };
+    let v = super::raster::add_raster(s, &out_name, rl)?;
     if let (Some(o), Some(i)) = (info.as_object_mut(), v.as_object()) {
         for (k, val) in i {
             o.entry(k.clone()).or_insert_with(|| val.clone());

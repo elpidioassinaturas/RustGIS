@@ -325,7 +325,8 @@ honour it, this restricts an unselected main feature input by bounding-box inter
 clipping its geometry; an existing selection takes precedence and overlay inputs stay whole.
 The Geostatistical Wizard uses the environment's extent and raster cell size (degrees).
 IDW Interpolation and Ordinary Kriging instead use their own `extent` and `pixelSize` parameters;
-the environment does not set their output grids. Raster Functions › Resample matches a target
+the environment does not set their output grids. Project Raster (`raster.project`) puts a raster
+on a grid of any coordinate system, cell size and extent; Raster Functions › Resample matches a target
 raster's grid.
 
 The **Script** pane runs commands from text, one per line (`id {json}`); its box grows with the script down to the bottom of the pane,
@@ -462,6 +463,36 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
   coordinate systems or cell sizes, or opened from an overview, are refused rather than quietly
   resampled, as are tiles whose cells don't line up; the mosaic has to fit in memory (120 million
   values: cells times bands).
+- **Project Raster** (`raster.project`) puts a raster on a grid of your choosing, so rasters from
+  different sources line up cell for cell (for map algebra, the Suitability Modeler, a series for
+  Trend Analysis, or the inputs of a model): `{"layer": "ndvi", "crs": 31983, "cellSize": 100,
+  "extent": "Study area", "resampling": "average", "path": "ndvi_100m.tif"}`. It has no pane yet:
+  run it from the Script pane, the AI Assistant, the command line or Python. The result is a new
+  layer (`name`, by default the layer's name with "projected"), and with `path` a cloud-optimised
+  GeoTIFF too.
+  - **The grid:** `crs` (by default the layer's), `cellSize` in its units (one number, or
+    `[x, y]`; by default about the layer's pixel there), `origin`, a point a cell corner falls on
+    (`[0, 0]` by default, so cell corners are whole multiples of the cell size and any two rasters
+    projected with the same `crs` and `cellSize` line up), and `extent`: a polygon layer (its
+    selected features' bounds, or all of them), `[west, south, east, north]` in degrees or
+    `"view"`, by default the layer's footprint. The extent is widened to whole cells.
+  - **Another raster's grid:** `"grid": "dem_100m"` takes its coordinate system, cells and extent
+    exactly, instead of `crs`, `cellSize`, `origin` and `extent`.
+  - **Resampling:** `nearest` (the default: it never invents a value, which is right for classes),
+    `bilinear` or `cubic` sample each cell at its centre. `average` and `mode` take every pixel whose
+    centre falls in the cell (no-data skipped), its mean or its most frequent value (the least of
+    those tied), which is what a coarser grid of elevation or land-cover classes should hold. A
+    cell no pixel centre falls in, on a grid finer than the raster, takes the pixel under its
+    centre. Classes take `nearest` or `mode`, continuous values `bilinear` or `cubic`, or `average`
+    going coarser. A whole-number pixel type keeps its type, so its mean is rounded.
+  - Cells off the raster are its no-data value. A raster without one keeps its bands as they are,
+    with NaN there in a floating-point type and 0 in a whole-number one, as GDAL leaves them; a
+    colour image gains an alpha band instead, so they are see-through.
+  - Datums are shifted as everywhere in RustGIS, through each system's transformation to WGS 84
+    (a Helmert step for SAD69 or Córrego Alegre, a few metres from the IBGE's grid shifts).
+  - The result has to fit in memory (120 million values, cells times bands; 32 million in the
+    web app): a grid past that is refused, naming the limit. A raster read from its overview is
+    projected at that resolution, and the result says so.
 - **Classification Wizard** (unsupervised k-means) and **Classification Tools** (minimum distance
   from training polygons).
 - **Mensuration**: distances along the surface, heights between two points, areas, and volumes
@@ -511,6 +542,10 @@ and a **Mann–Kendall** test of whether the trend is significant.
     "bdc-mod13q1-ndvi", "bbox": [-46, -10.95, -40.35, -2.7], "start": "2001", "end": "2025"}`
     fills in the collection's API, band, cell size and cloud cap, or a Zarr entry's store and
     variable.
+
+  For the mean of a finer layer's pixels in each cell, or for a grid of your own, put the rasters
+  on one grid first with Project Raster (`"grid"`, the first one's, and `"resampling":
+  "average"`).
 - **The test:** NDVI and temperature series are autocorrelated, which makes the plain test report
   too many significant cells, so the default is the **modified Mann–Kendall** test of **Hamed &
   Rao (1998)**: the variance of S is corrected by the autocorrelation of the detrended series'

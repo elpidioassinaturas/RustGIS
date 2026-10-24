@@ -16757,8 +16757,9 @@ fn scans_have_no_coordinates_to_give_away() {
     let e = s.run("share.exportRaster", &json!({"path": out.display().to_string(), "cog": true})).unwrap_err();
     assert!(e.contains("georeference it first") && !out.exists(), "as a COG: {e}");
     let before = s.map().layer_by_name("flat").unwrap().raster.clone().unwrap().placement;
-    let tools: [(&str, Value); 14] = [
+    let tools: [(&str, Value); 15] = [
         ("raster.function", json!({"layer": "flat", "function": "hillshade"})),
+        ("raster.project", json!({"layer": "flat", "crs": 32613})),
         ("raster.editPixels", json!({"layer": "flat", "polygon": [[0.0, 0.0], [0.1, 0.0], [0.0, 0.1]], "value": 1})),
         ("raster.process", json!({"layer": "flat", "operation": "resample", "factor": 2})),
         ("raster.process", json!({"layer": "flat", "operation": "clip"})),
@@ -17617,4 +17618,85 @@ fn calculate_geometry_updates_ellipsoidal_lengths_in_one_undo_step() {
     assert!(s.redo());
     let out = &s.map().layer_by_name("routes").unwrap().dataset;
     assert!((out.value(0, length).as_f64().unwrap() - 111.31949079327356).abs() < 1e-6);
+}
+
+/// `raster.project` puts a raster on a grid of another coordinate system, cell size, origin and
+/// extent, or on another raster's grid: grids of the same cell and origin line up, a polygon
+/// layer's selection gives the extent, and bad parameters are refused before anything is made.
+#[test]
+fn a_raster_projected_onto_a_chosen_grid() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+    let mut s = world();
+    // 40 × 40 pixels of 0.001° near Teresina, value = column + 100 · row.
+    let gt = GeoTransform { origin_x: -42.82, origin_y: -5.08, pixel_width: 0.001, pixel_height: -0.001 };
+    let v: Vec<f32> = (0..1600).map(|i| (i % 40 + 100 * (i / 40)) as f32).collect();
+    let r = Raster::new("the", 40, 40, vec![v], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    let bytes = rustgis_data::raster::geotiff::write(&r, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "the", rustgis_map::RasterLayer::from_bytes(r, "the.tif", bytes)).unwrap();
+
+    // SIRGAS 2000 / UTM 23S, 200 m cells averaged: about 22 × 22 cells, means within the values.
+    let v = s.run("raster.project", &json!({"layer": "the", "crs": 31983, "cellSize": 200, "resampling": "average"})).unwrap();
+    assert_eq!(
+        (v["crs"].as_str(), v["resampling"].as_str(), v["name"].as_str()),
+        (Some("EPSG:31983"), Some("average"), Some("the projected"))
+    );
+    let out = out_raster(&s, &v);
+    assert!((22..=24).contains(&out.width) && (22..=24).contains(&out.height), "{} × {}", out.width, out.height);
+    let mid = out.value(0, i64::from(out.width) / 2, i64::from(out.height) / 2).unwrap();
+    assert!((0.0..=3939.0).contains(&mid) && mid.fract() != 0.0, "a mean of several pixels: {mid}");
+    // Cell corners on whole multiples of the cell (origin [0, 0]), here and over a part of it.
+    let on_grid = |v: &Value| {
+        let c = &v["corner"];
+        (c[0].as_f64().unwrap() / 200.0).fract() == 0.0 && (c[1].as_f64().unwrap() / 200.0).fract() == 0.0
+    };
+    assert!(on_grid(&v));
+    let part = s
+        .run(
+            "raster.project",
+            &json!({"layer": "the", "crs": "EPSG:31983", "cellSize": 200, "extent": [-42.81, -5.11, -42.79, -5.09], "name": "part"}),
+        )
+        .unwrap();
+    assert!(on_grid(&part) && part["width"].as_u64() < v["width"].as_u64(), "{part}");
+    // Another origin moves the corners with it.
+    let moved =
+        s.run("raster.project", &json!({"layer": "the", "crs": 31983, "cellSize": 200, "origin": [50, 50], "name": "moved"})).unwrap();
+    assert_eq!((moved["corner"][0].as_f64().unwrap() - 50.0).rem_euclid(200.0), 0.0, "{moved}");
+
+    // Onto that grid exactly, by nearest neighbour (the default).
+    let again = s.run("raster.project", &json!({"layer": "the", "grid": "the projected", "name": "again"})).unwrap();
+    let a = out_raster(&s, &again);
+    assert_eq!((a.width, a.height, a.transform, a.crs), (out.width, out.height, out.transform, out.crs));
+    assert_eq!(again["resampling"], "nearest");
+
+    // The extent of a polygon layer's selection: Brazil, in 50 km cells.
+    s.run("select.byAttributes", &json!({"layer": "Countries", "where": "name = 'Brazil'"})).unwrap();
+    let br =
+        s.run("raster.project", &json!({"layer": "the", "crs": 31983, "cellSize": 50_000, "extent": "Countries", "name": "br"})).unwrap();
+    let (w, h) = (br["width"].as_u64().unwrap(), br["height"].as_u64().unwrap());
+    assert!((70..=130).contains(&w) && (70..=130).contains(&h), "{w} × {h}");
+
+    // Refused: a grid with its own settings, bad cells, origins, extents and methods, a grid too
+    // large to hold, and a file that isn't a GeoTIFF.
+    let bad = [
+        json!({"layer": "the", "grid": "the projected", "crs": 31983}),
+        json!({"layer": "the", "grid": "Countries"}),
+        json!({"layer": "the", "cellSize": -1}),
+        json!({"layer": "the", "cellSize": [1, 0]}),
+        json!({"layer": "the", "cellSize": "x"}),
+        json!({"layer": "the", "origin": "x"}),
+        json!({"layer": "the", "origin": [1, f64::NAN]}),
+        json!({"layer": "the", "extent": [170.0, -10.0, -170.0, 10.0]}),
+        json!({"layer": "the", "extent": "Nowhere"}),
+        json!({"layer": "the", "resampling": "lanczos"}),
+        json!({"layer": "the", "crs": 31983, "cellSize": 0.001}),
+        json!({"layer": "the", "crs": "nonsense"}),
+        json!({"layer": "the", "path": "out.png"}),
+    ];
+    let before = s.map().layers.len();
+    for p in bad {
+        assert!(s.run("raster.project", &p).is_err(), "{p}");
+    }
+    assert_eq!(s.map().layers.len(), before, "nothing added by a refused run");
+    let e = s.run("raster.project", &json!({"layer": "the", "crs": 31983, "cellSize": 0.001})).unwrap_err();
+    assert!(e.contains("give a larger cellSize"), "{e}");
 }
