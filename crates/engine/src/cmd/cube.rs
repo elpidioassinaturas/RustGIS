@@ -41,8 +41,8 @@ pub const MAX_VALUES: u64 = if cfg!(target_arch = "wasm32") { 16_000_000 } else 
 /// Sen's slope takes: far fewer in the browser, which works them out on one thread. At the cap a
 /// run can take minutes on the desktop, which the app runs on threads with progress and Cancel;
 /// `cube.trend` called directly (a script, the assistant, an MCP client) takes
-/// [`MAX_WAITED_PAIRS`], but where only a shell or a script waits on it (`rustgis-cli run`,
-/// Python: [`Session::long_runs`](crate::Session::long_runs)) it takes this.
+/// [`MAX_WAITED_PAIRS`], but where only a shell waits on it (`rustgis-cli run`:
+/// [`Session::long_runs`](crate::Session::long_runs)) it takes this.
 pub const MAX_PAIRS: u64 = if cfg!(target_arch = "wasm32") { 50_000_000 } else { 20_000_000_000 };
 /// The most pairs a trend worked out where it's called compares (`cube.trend` without `ran`: a
 /// script, the assistant, an MCP client), which waits for it with no Cancel: a tenth of the app's
@@ -932,9 +932,9 @@ fn trend_cmd(s: &mut Session, p: &Value) -> CmdResult {
         let (_, rasters, dates) = s.trend_results.remove(at);
         return add_outputs(s, rasters, dates);
     }
-    // Worked out here, waited for with no Cancel: in the app (a script, the assistant) a run of
-    // seconds, not minutes; where only a shell or a script waits on it (`rustgis-cli run`,
-    // Python), the panes' bound, its progress told.
+    // Worked out here, waited for with no Cancel: in the app (a script, the assistant) and Python a
+    // run of seconds, not minutes; where only a shell waits on it (`rustgis-cli run`), the panes'
+    // bound, its progress told.
     let mut run = trend_start(s, p)?;
     run.max_pairs = if s.long_runs.is_some() { MAX_PAIRS } else { MAX_WAITED_PAIRS };
     let dates = run.steps.len();
@@ -944,7 +944,7 @@ fn trend_cmd(s: &mut Session, p: &Value) -> CmdResult {
 }
 
 /// A run worked out where it's called: on a thread of its own telling its progress where only a
-/// shell or a script waits on it ([`Session::long_runs`](crate::Session::long_runs)), here
+/// shell waits on it ([`Session::long_runs`](crate::Session::long_runs)), here
 /// otherwise (and always in the browser, which has no threads). Its end is told by
 /// [`told_end`], once the command has added what it made.
 fn run_here<T: Send>(
@@ -1379,8 +1379,8 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
     Ok(ReduceRun { cube, steps, stat, min_share, group_of, groups })
 }
 
-/// `cube.reduce`: the summary computed here (blocking), its progress told where only a shell or a
-/// script waits on it (`rustgis-cli run`), its layers added, each kept in the project as a GeoTIFF.
+/// `cube.reduce`: the summary computed here (blocking), its progress told where only a shell waits
+/// on it (`rustgis-cli run`), its layers added, each kept in the project as a GeoTIFF.
 fn reduce_cmd(s: &mut Session, p: &Value) -> CmdResult {
     let run = reduce_start(s, p)?;
     let rasters = run_here(s.long_runs, "cube.reduce", run.total(), |cancel, done| run.run(cancel, done))?;

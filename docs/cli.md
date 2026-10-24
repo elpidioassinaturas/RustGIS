@@ -51,8 +51,9 @@ Nothing waits on `run` the way a window does, so a long run takes the bounds the
 it on a thread: a trend over a data cube (`cube.trend`) may compare up to 20 billion pairs, ten
 times what the Script pane allows, and a trend's or a summary's STAC search up to 10,000 items,
 where the app takes 2,000. A trend or a summary over time (`cube.reduce`) prints its progress to
-standard error (`cube.trend: 42%`; a line every tenth when standard error isn't a terminal). `ask` and `mcp` keep the Script pane's bounds, as
-an assistant or an MCP client waits on them. See [Trend analysis](user-guide/analysis.md).
+standard error (`cube.trend: 42%`; a line every tenth when standard error isn't a terminal).
+`ask` and `mcp` keep the Script pane's bounds, as an assistant or an MCP client waits on them, and
+so does Python. See [Trend analysis](user-guide/analysis.md).
 
 Installed [plugins](plugins.md) load first (`--no-plugins` skips them), and `--plugin <file or
 folder>` (repeatable) loads one more for this run only. Their commands and tools have ids like

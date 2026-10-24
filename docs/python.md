@@ -119,11 +119,11 @@ both (keyword arguments win). It returns the decoded command result and raises
 `rustgis.RustGISError` when the command fails. UI-only commands (`ui.*`) need
 `Map.run_in_app`, as in the notebook example above.
 
-A command runs to its end before `run` returns. A long one, such as a trend over a state from a
-data cube (`cube.trend`, which takes the app's larger bounds here, as on the
-[command line](cli.md)), holds Python's interpreter lock meanwhile: other Python threads, and
-calls to the session from them, wait their turn, and Ctrl+C (`KeyboardInterrupt`) is raised only
-once the command has ended.
+A command runs to its end before `run` returns, holding Python's interpreter lock: other Python
+threads, and calls to the session from them, wait their turn, and Ctrl+C (`KeyboardInterrupt`) is
+raised only once the command has ended. So a trend over a data cube (`cube.trend`) keeps the Script
+pane's bounds here (2 billion pairs compared, a STAC search of 2,000 items); run a larger one, such
+as a trend over a state, with `rustgis-cli run` (see [the command line](cli.md)).
 
 ```python
 s.commands()                                        # every command, with its parameters

@@ -250,9 +250,9 @@ fn add_asset(s: &mut Session, p: &Value) -> CmdResult {
 /// The most items a data cube on the time slider takes (its search is paged up to this).
 pub const MAX_CUBE_ITEMS: usize = 2000;
 /// The most items a trend or a summary over a STAC collection takes (`cube.trend`, `cube.reduce`)
-/// where only a shell or a script waits on it ([`Session::long_runs`]): their reads are bounded by
-/// their cells and dates (pieces, pairs), not their files, so a state's four MODIS tiles over 25
-/// years (2,304) fit. In the app, which waits for the search with no Cancel, they take
+/// where only a shell waits on it ([`Session::long_runs`]): their reads are bounded by their
+/// cells and dates (pieces, pairs), not their files, so a state's four MODIS tiles over 25 years
+/// (2,304) fit. In the app, which waits for the search with no Cancel, and in Python, they take
 /// [`MAX_CUBE_ITEMS`].
 pub const MAX_SERIES_ITEMS: usize = 10_000;
 /// The most pages of a search a data cube reads, whatever they hold.

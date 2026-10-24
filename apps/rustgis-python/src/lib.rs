@@ -36,10 +36,7 @@ struct Engine {
 impl Engine {
     #[new]
     fn new() -> Self {
-        let mut session = Session::new(Project::default());
-        // Nothing waits on a script: long runs take the app's bounds (their progress untold).
-        session.long_runs = Some(|_, _| {});
-        Engine { session }
+        Engine { session: Session::new(Project::default()) }
     }
 
     /// Runs command `id` with `params` (JSON text) and returns its result as JSON text.

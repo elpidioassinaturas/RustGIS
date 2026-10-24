@@ -459,13 +459,13 @@ and a **Mann–Kendall** test of whether the trend is significant.
   cells. The seasonal test compares only pairs within a season, so its time limit counts those.
   It runs in the background with progress and Cancel.
 - **Long runs:** in the app, a trend run from the Script pane or the assistant waits with no
-  Cancel, so it takes a tenth of the panes' limit on pairs compared (2 billion). `rustgis-cli run`
-  and Python, where nothing but a shell or a script waits on it, take the panes' limit (20
-  billion): Piauí's 576 composites at about 1 km with the seasonal test (about 4.4 billion pairs)
+  Cancel, so it takes a tenth of the panes' limit on pairs compared (2 billion), as Python does.
+  `rustgis-cli run`, where nothing but a shell waits on it, takes the panes' limit (20 billion):
+  Piauí's 576 composites at about 1 km with the seasonal test (about 4.4 billion pairs)
   run in one call there, and `rustgis-cli run` prints its progress (`cube.trend: 42%`). There, a
   STAC collection's search also takes up to 10,000 items for a trend or a summary (a state's four
   MODIS tiles over 25 years are 2,304). In the app, whose Script pane and assistant wait for the
-  search with no Cancel, it takes 2,000, as a data cube on the time slider does.
+  search with no Cancel, and in Python, it takes 2,000, as a data cube on the time slider does.
 
 ```sh
 rustgis-cli run --cmd 'cube.trend={"layers":["ndvi_2015","ndvi_2016","ndvi_2017","ndvi_2018"],"per":"decade"}'
@@ -493,9 +493,9 @@ over time does for a Zarr variable (see [Data](data.md)).
   outputs hold up to 32 million values (cells times groups; 8 million in the web app). A summary by
   month keeps every month's totals while it reads, up to five times the outputs' memory for
   **std** (three for mean, min, max, sum and countAbove), so a large area by month may need a
-  coarser cell size or a smaller area. `rustgis-cli run` and Python take a STAC collection's
-  search up to 10,000 items, as for a trend (the app 2,000), and `rustgis-cli run` prints a
-  summary's progress (`cube.reduce: 42%`). The layers
+  coarser cell size or a smaller area. `rustgis-cli run` takes a STAC collection's search up to
+  10,000 items, as for a trend (the app and Python 2,000), and prints a summary's progress
+  (`cube.reduce: 42%`). The layers
   are named after what they hold (`NDVI mean 2001`, `NDVI mean 2001–2025 month 03`, or the
   `"name"` given and the group) and kept in the project as GeoTIFFs.
 
