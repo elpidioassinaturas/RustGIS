@@ -363,7 +363,8 @@ fn step(url: String, have: Sparse, rounds: usize, done: Box<dyn FnOnce(Result<Ar
 /// reads a tag's values 512 bytes at a time, so `a..b` is no longer than that even inside a long
 /// array (a large image's tile index, 4 MB for MapBiomas's 346,092 tiles): the step doubles each
 /// round, from [`STEP`] up to [`MAX_BYTES`], so such an index takes a few rounds, not one per
-/// 256 KB. A read never takes what is held past [`cog::MAX_HEADER`].
+/// 256 KB. A read never takes what is held past [`cog::MAX_HEADER`], and stops where a part
+/// already read starts, so no byte is held twice.
 fn header_read(have: &Sparse, a: u64, b: u64, rounds: usize) -> Option<u64> {
     if rounds >= MAX_ROUNDS || have.held() >= cog::MAX_HEADER || a >= cog::MAX_HEADER.saturating_mul(64) {
         return None;
@@ -373,8 +374,11 @@ fn header_read(have: &Sparse, a: u64, b: u64, rounds: usize) -> Option<u64> {
     if b.saturating_sub(a) > room {
         return None;
     }
+    // A part read after `a` (a round that went past it, or the tags at the header's end) isn't
+    // read again.
+    let gap = have.next_start(a).map_or(u64::MAX, |next| next - a);
     // `rounds` is below MAX_ROUNDS here, so the shift stays far from overflowing.
-    Some(b.saturating_sub(a).max(STEP << rounds).min(MAX_BYTES as u64).min(room))
+    Some(b.saturating_sub(a).max(STEP << rounds).min(MAX_BYTES as u64).min(room).min(gap))
 }
 
 /// What a file that isn't a cloud-optimised GeoTIFF says (it is read whole instead).
@@ -1166,15 +1170,15 @@ mod tests {
         assert_eq!(l.levels[stats_level(&l)].width, 256);
     }
 
-    /// Reads `file`'s layout as [`load`] and [`step`] do, a range at a time: the layout and how
-    /// many reads past the first it took, or the reads made when it gave up.
-    fn layout_by_ranges(file: &[u8]) -> Result<(Box<Layout>, usize), usize> {
+    /// Reads `file`'s layout as [`load`] and [`step`] do, a range at a time: the layout, how many
+    /// reads past the first it took and the bytes held, or the reads made when it gave up.
+    fn layout_by_ranges(file: &[u8]) -> Result<(Box<Layout>, usize, u64), usize> {
         let part = |a: u64, len: u64| file.get(a as usize..file.len().min((a + len) as usize)).unwrap_or_default().to_vec();
         let mut have = Sparse::default().with(0, part(0, HEAD));
         let mut rounds = 0;
         loop {
             match cog::layout(&have) {
-                Ok(Parse::Done(layout)) => return Ok((layout, rounds)),
+                Ok(Parse::Done(layout)) => return Ok((layout, rounds, have.held())),
                 Ok(Parse::Need(a, b)) => {
                     let len = header_read(&have, a, b, rounds).ok_or(rounds)?;
                     have = have.with(a, part(a, len));
@@ -1235,13 +1239,15 @@ mod tests {
     #[test]
     fn a_large_tile_index_is_read_in_a_few_rounds() {
         let file = big_index(700 * 256);
-        let (layout, rounds) = layout_by_ranges(&file).unwrap_or_else(|r| panic!("gave up after {r} reads"));
+        let (layout, rounds, held) = layout_by_ranges(&file).unwrap_or_else(|r| panic!("gave up after {r} reads"));
         assert_eq!(layout.levels.len(), 1);
         assert_eq!(layout.levels[0].offsets.len(), 490_000);
         assert_eq!(layout.levels[0].width, 179_200);
         assert!(rounds <= 6, "{rounds} reads");
+        // No byte is read twice: a read stops where a part already read starts.
+        assert!(held <= file.len() as u64, "{held} bytes held of a {}-byte header", file.len());
         // A cloud-optimised file's header is in its first read, as before.
-        assert_eq!(layout_by_ranges(&rustgis_data::raster::cog::example(1024, 64)).map(|(_, r)| r), Ok(0));
+        assert_eq!(layout_by_ranges(&rustgis_data::raster::cog::example(1024, 64)).map(|(_, r, _)| r), Ok(0));
         // A read stops at the header's cap, however large the step has grown.
         let near = Sparse::default().with(0, vec![0; cog::MAX_HEADER as usize - 1000]);
         assert_eq!(header_read(&near, cog::MAX_HEADER, cog::MAX_HEADER + 512, 8), Some(1000));
