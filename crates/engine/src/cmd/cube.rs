@@ -27,7 +27,7 @@ pub fn commands() -> Vec<C> {
         r#"{"layers"?: [raster layers, a date each] | "layer"?: a Zarr layer (or "path" | "url", "variable", "index", "crs" as for zarr.reduce) or a raster of several bands, a date each (default: the active layer) | "collection": a STAC collection (desktop; read in place over an area, in pieces when large; with url, asset, bbox, maxCloud, cellSize and resampling below, and "start", "end"), "url"?: the collection's STAC API (as for stac.addCube), "asset"?: the collection's band, such as NDVI, "bbox"?: [w, s, e, n] | "view" (the collection's area), "maxCloud"?: a collection's cloud cover cap, "cellSize"?: a collection's cell size in the files' units (the overview level nearest it is read), "resampling"?: "nearest" (default: that overview's pixels as stored) | "average" (each cell the mean of the full images' pixels in it, which reads them), "band"?: 1-based (a stack's band), "dates"?: [dates] (a stack's or the bands' dates, in their order; default: read from the layers' names or files, or the bands' names), "start"?, "end"?: dates (a whole number from 1000 to 9999 is a year; an end given as a year or a month takes all of it), "months"?: [1–12] (one season across years), "test"?: "hamedRao" (default) | "yueWang" | "seasonal" | "original", "seasons"?: parts of a year for the seasonal test (default 12), "alpha"?: 0.05 (above 0, below 0.5), "minValid"?: dates a cell needs (default: half of them, at least 4; the seasonal test also needs 4 in seasons of two or more), "per"?: "year" (default) | "decade", "name"?: text, "ran"?: (internal: a trend the app has worked out)} → four raster layers: Sen's slope, the test's Z and p-value, and the slope where p < alpha"#,
     ),
     C::new("cube.reduce", "Summarise a Data Cube over Time", "Analyze › Image Analysis", reduce_cmd).params(
-        r#"{"layers"?: [raster layers, a date each] | "layer"?: a Zarr layer or a raster of several bands, a date each (default: the active layer) | "path"?: a Zarr store's folder | "url"?: a Zarr store's address, or a STAC collection's API (as for stac.addCube) | "collection": a STAC collection (desktop; read in place over an area, in pieces when large; with url, asset, bbox, maxCloud, cellSize and resampling below, and "start", "end"), "variable"?, "index"?, "crs"?: a Zarr variable's (as for zarr.reduce), "asset"?: the collection's band, such as NDVI, "bbox"?: [w, s, e, n] | "view" (the collection's area), "maxCloud"?: a collection's cloud cover cap, "cellSize"?: a collection's cell size in the files' units (the overview level nearest it is read), "resampling"?: "nearest" (default) | "average" (as for cube.trend), "band"?: 1-based (a stack's band), "dates"?: [dates] (a stack's or the bands' dates, in their order; default: read from the layers' names or files, or the bands' names), "stat": "mean"|"min"|"max"|"sum"|"std" (the population standard deviation, n)|"count"|"countAbove"|"mode" (a categorical cube's most frequent class; the least of those tied)|"modeCount" (how many dates had the mode)|"variety" (how many classes)|"changes" (how many times the class changed from one valued date to the next)|"longestRun" (the class of the longest run of dates in one class; the least of those tied)|"longestRunLength" (how many dates that run lasted)|"frequency" (a layer for each class met: its count of dates)|"countIn" (how many dates in the classes given), "above"?: number (countAbove's threshold), "classes"?: [whole numbers 0–255] (countIn's classes), "by"?: "all" (default: one layer) | "year" (a layer for each calendar year) | "month" (a layer for each month of the year, across years), "start"?, "end"?: dates (as for cube.trend), "months"?: [1–12] (a season across years), "minValid"?: 0–1 (a cell with a smaller share of its group's dates is left empty; default 0), "name"?: text} → raster layers of the statistic, one for each group (frequency: one for each class of each group)"#,
+        r#"{"layers"?: [raster layers, a date each] | "layer"?: a Zarr layer or a raster of several bands, a date each (default: the active layer) | "path"?: a Zarr store's folder | "url"?: a Zarr store's address, or a STAC collection's API (as for stac.addCube) | "collection": a STAC collection (desktop; read in place over an area, in pieces when large; with url, asset, bbox, maxCloud, cellSize and resampling below, and "start", "end"), "variable"?, "index"?, "crs"?: a Zarr variable's (as for zarr.reduce), "asset"?: the collection's band, such as NDVI, "bbox"?: [w, s, e, n] | "view" (the collection's area), "maxCloud"?: a collection's cloud cover cap, "cellSize"?: a collection's cell size in the files' units (the overview level nearest it is read), "resampling"?: "nearest" (default) | "average" (as for cube.trend), "band"?: 1-based (a stack's band), "dates"?: [dates] (a stack's or the bands' dates, in their order; default: read from the layers' names or files, or the bands' names), "stat": "mean"|"min"|"max"|"sum"|"std" (the population standard deviation, n)|"count"|"countAbove"|"mode" or "majority" (a categorical cube's most frequent class; the least of those tied)|"modeCount" (how many dates had the mode)|"variety" (how many classes)|"changes" (how many times the class changed from one valued date to the next)|"longestRun" (the class of the longest run of dates in one class; the least of those tied)|"longestRunLength" (how many dates that run lasted)|"frequency" (a layer for each class met: its count of dates)|"countIn" (how many dates in the classes given), "above"?: number (countAbove's threshold), "classes"?: [whole numbers 0–255, at most 256] (countIn's classes), "by"?: "all" (default: one layer) | "year" (a layer for each calendar year) | "month" (a layer for each month of the year, across years), "start"?, "end"?: dates (as for cube.trend), "months"?: [1–12] (a season across years), "minValid"?: 0–1 (a cell with a smaller share of its group's dates is left empty; default 0), "name"?: text} → raster layers of the statistic, one for each group (frequency: one for each class of each group)"#,
     )]
 }
 
@@ -1040,7 +1040,7 @@ impl Stat {
     /// The statistic asked for: `stat`, countAbove's threshold (`above`) and countIn's classes
     /// (`classes`).
     pub(crate) fn parse(p: &Value) -> Result<Stat, String> {
-        const STATS: &str = "mean, min, max, sum, std, count, countAbove, mode, modeCount, variety, changes, longestRun, longestRunLength, frequency or countIn";
+        const STATS: &str = "mean, min, max, sum, std, count, countAbove, mode (or majority), modeCount, variety, changes, longestRun, longestRunLength, frequency or countIn";
         Ok(match ps(p, "stat").map(str::trim).ok_or_else(|| format!("stat is required ({STATS})"))? {
             x if x.eq_ignore_ascii_case("mean") => Stat::Mean,
             x if x.eq_ignore_ascii_case("min") || x.eq_ignore_ascii_case("minimum") => Stat::Min,
@@ -1069,7 +1069,10 @@ fn classes(p: &Value) -> Result<[u64; 4], String> {
     const NEED: &str = "countIn takes \"classes\", the classes to count: [whole numbers from 0 to 255]";
     let list = p.get("classes").and_then(Value::as_array).filter(|l| !l.is_empty()).ok_or(NEED)?;
     let mut set = [0u64; 4];
-    for v in list.iter().take(256) {
+    if list.len() > 256 {
+        return Err(NEED.into());
+    }
+    for v in list {
         let c = v.as_f64().filter(|c| c.fract() == 0.0 && (0.0..=255.0).contains(c)).ok_or(NEED)? as usize;
         if let Some(word) = set.get_mut(c / 64) {
             *word |= 1 << (c % 64);
@@ -1128,6 +1131,11 @@ impl Totals {
         let last = if stat.in_order() { vec![f32::NAN; cells] } else { Vec::new() };
         let (run, longest) = if stat.runs() { (vec![0; cells], vec![(f32::NAN, 0); cells]) } else { (Vec::new(), Vec::new()) };
         Totals { stat, n: vec![0; cells], acc, m2, last, run, longest, classes: Vec::new(), counts: Vec::new(), refused: None }
+    }
+
+    /// How many class counts it holds: its cells × the classes it has met.
+    pub(crate) fn held(&self) -> u64 {
+        (self.classes.len() as u64).saturating_mul(self.n.len() as u64)
     }
 
     /// Why the values can't be summarised as classes: one that isn't a whole number, or more
@@ -1215,9 +1223,10 @@ impl Totals {
             Err(at) => {
                 let cells = self.n.len();
                 let held = (self.classes.len() as u64 + 1).saturating_mul(cells as u64);
-                if self.classes.len() >= MAX_CLASSES || held > MAX_VALUES {
+                let cap = class_cap(self.stat);
+                if self.classes.len() >= MAX_CLASSES || held > cap {
                     self.refused = Some(format!(
-                        "more than {} classes in {cells} cells: {} takes a categorical raster (a land-cover map), up to {MAX_CLASSES} classes and {MAX_VALUES} cells × classes; take a smaller area",
+                        "more than {} classes in {cells} cells: {} takes a categorical raster (a land-cover map), up to {MAX_CLASSES} classes and {cap} cells × classes; take a smaller area",
                         self.classes.len(),
                         self.stat.code()
                     ));
@@ -1324,8 +1333,9 @@ fn in_classes(set: &[u64; 4], v: f64) -> bool {
 /// a cell for count, 12 for mean, min, max, sum, countAbove and countIn, 16 for changes and the
 /// longest run (its class or length) and 20 for std, so a summary by month at the cap holds up to five times its outputs'
 /// 4 bytes a value: some 640 MB for std on the desktop. Mode, modeCount, variety and frequency take
-/// 4 bytes a cell and 2 more for each class met, a run's cells × classes at most [`MAX_VALUES`]
-/// (128 MB of counts). Frequency's outputs are a column for each class of each group, all within
+/// 4 bytes a cell and 2 more for each class met, the cells × classes of the groups being read at
+/// most [`MAX_VALUES`] in all (128 MB of counts; for frequency [`MAX_REDUCED`], its outputs' cap),
+/// checked as each slice is placed. Frequency's outputs are a column for each class of each group, all within
 /// this cap. A STAC cube is read in pieces whose cells × dates stay within [`MAX_VALUES`], so a long
 /// series keeps each piece's totals small.
 pub const MAX_REDUCED: u64 = MAX_VALUES / 2;
@@ -1425,6 +1435,10 @@ impl ReduceRun {
                     if let Some(e) = t.refused() {
                         return Err(e.to_string());
                     }
+                    // The groups being read at once (every month's, by month) share the cap.
+                    if let Some(e) = classes_over(&totals, class_cap(self.stat)) {
+                        return Err(e);
+                    }
                 }
                 let n = seen.get_mut(g).ok_or("a date in no group")?;
                 *n += 1;
@@ -1456,14 +1470,14 @@ impl ReduceRun {
                     (None, Some(t)) => finish(&t, self.min_share, dates, frequency),
                     (None, None) => finish(&Totals::new(self.stat, cells), self.min_share, dates, frequency),
                 };
-                stack_columns(band, mask, columns, &piece_mask);
-                mask.extend(piece_mask);
                 // Their full length when the cube knows it, so they don't grow by doubling.
-                if let (0, Some(total)) = (piece, whole) {
-                    for (_, b) in band.iter_mut() {
-                        b.reserve_exact(total.saturating_sub(b.len()));
-                    }
+                stack_columns(band, mask, columns, &piece_mask, whole);
+                if let (0, Some(total)) = (piece, whole)
+                    && frequency
+                {
+                    mask.reserve_exact(total);
                 }
+                mask.extend(piece_mask);
             }
             // Frequency's columns are known as they are met: their values within the outputs' cap.
             let columns: usize = bands.iter().map(Vec::len).sum();
@@ -1510,9 +1524,28 @@ fn finish(t: &Totals, min_share: f64, dates: usize, frequency: bool) -> (Columns
     (t.columns(min_share, dates), mask)
 }
 
+/// The most cells × classes the groups being read count at once: [`MAX_VALUES`], or for frequency,
+/// whose classes are each an output column, the outputs' cap [`MAX_REDUCED`], so it is refused
+/// before its counts and columns are made rather than after.
+fn class_cap(stat: Stat) -> u64 {
+    if stat == Stat::Frequency { MAX_REDUCED } else { MAX_VALUES }
+}
+
+/// Why the class counts of the groups being read (`totals`) are too many: more than `cap` cells ×
+/// classes in all.
+fn classes_over(totals: &[Option<Totals>], cap: u64) -> Option<String> {
+    let held = totals.iter().flatten().map(Totals::held).fold(0u64, u64::saturating_add);
+    (held > cap).then(|| {
+        format!(
+            "{held} cells × classes across the groups being read, more than {cap}: take a smaller area, a coarser cell size, or a group by year rather than by month"
+        )
+    })
+}
+
 /// Puts a piece's columns under a group's so far, by key: a class the piece didn't meet gets the
-/// piece's `piece_mask`, and one met first in this piece the pieces' before it (`mask`).
-fn stack_columns(outs: &mut Columns, mask: &[f32], columns: Columns, piece_mask: &[f32]) {
+/// piece's `piece_mask`, and one met first in this piece the pieces' before it (`mask`). A column
+/// made here takes its full length, `whole` cells, when the cube knows it.
+fn stack_columns(outs: &mut Columns, mask: &[f32], columns: Columns, piece_mask: &[f32], whole: Option<usize>) {
     let order = |a: &Option<f32>, b: &Option<f32>| match (a, b) {
         (Some(a), Some(b)) => a.total_cmp(b),
         _ => a.is_some().cmp(&b.is_some()),
@@ -1526,7 +1559,8 @@ fn stack_columns(outs: &mut Columns, mask: &[f32], columns: Columns, piece_mask:
                 }
             }
             Err(at) => {
-                let mut b = mask.to_vec();
+                let mut b = Vec::with_capacity(whole.unwrap_or(0).max(mask.len() + column.len()));
+                b.extend_from_slice(mask);
                 b.extend(column);
                 outs.insert(at, (key, b));
             }
@@ -1698,15 +1732,34 @@ mod tests {
         let nan = f32::NAN;
         let mut outs = Vec::new();
         let mut mask = Vec::new();
-        super::stack_columns(&mut outs, &mask, vec![(Some(3.0), vec![1.0, nan])], &[0.0, nan]);
+        super::stack_columns(&mut outs, &mask, vec![(Some(3.0), vec![1.0, nan])], &[0.0, nan], None);
         mask.extend([0.0, nan]);
-        super::stack_columns(&mut outs, &mask, vec![(Some(5.0), vec![4.0])], &[0.0]);
+        super::stack_columns(&mut outs, &mask, vec![(Some(5.0), vec![4.0])], &[0.0], Some(3));
         let got: Vec<(Option<f32>, String)> = outs.iter().map(|(k, b)| (*k, format!("{b:?}"))).collect();
         assert_eq!(got, vec![(Some(3.0), "[1.0, NaN, 0.0]".to_string()), (Some(5.0), "[0.0, NaN, 4.0]".to_string())]);
         // One output, keyed None, is extended piece after piece.
         let mut one = Vec::new();
-        super::stack_columns(&mut one, &[], vec![(None, vec![1.0])], &[]);
-        super::stack_columns(&mut one, &[], vec![(None, vec![2.0, 3.0])], &[]);
+        super::stack_columns(&mut one, &[], vec![(None, vec![1.0])], &[], Some(3));
+        assert!(one.first().is_some_and(|(_, b)| b.capacity() >= 3), "made at its full length");
+        super::stack_columns(&mut one, &[], vec![(None, vec![2.0, 3.0])], &[], Some(3));
         assert_eq!(one, vec![(None, vec![1.0, 2.0, 3.0])]);
+    }
+
+    /// The class counts of the groups being read share one cap: two groups each within it can be
+    /// over it together.
+    #[test]
+    fn groups_being_read_share_the_class_cap() {
+        let group = |classes: &[f64]| {
+            let mut t = super::Totals::new(super::Stat::Mode, 10);
+            for (c, v) in classes.iter().enumerate() {
+                t.add(c, *v);
+            }
+            t
+        };
+        // 10 cells × 3 classes and 10 × 2: 30 and 20 counts, 50 in all.
+        let totals = vec![Some(group(&[1.0, 2.0, 3.0])), None, Some(group(&[1.0, 2.0]))];
+        assert!(super::classes_over(&totals, 50).is_none());
+        let e = super::classes_over(&totals, 49).unwrap_or_default();
+        assert!(e.contains("50 cells × classes across the groups being read, more than 49"), "{e}");
     }
 }

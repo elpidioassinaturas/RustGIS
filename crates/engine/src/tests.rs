@@ -9338,6 +9338,7 @@ fn a_short_cube_is_summarised_but_not_trended() {
 /// dates it was in some classes, and a layer for each class with its count of dates. A cell left
 /// without a class at a date (no data) is skipped. What isn't a class, too many classes, and a categorical
 /// statistic asked of zarr.reduce are refused.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_categorical_stack_summarised_over_time() {
     use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
@@ -9449,6 +9450,7 @@ fn a_categorical_stack_summarised_over_time() {
         (json!({"layers": names, "stat": "countIn", "classes": [3.5]}), "whole numbers from 0 to 255"),
         (json!({"layers": names, "stat": "countIn", "classes": [256]}), "whole numbers from 0 to 255"),
         (json!({"layers": names, "stat": "countIn", "classes": "3"}), "countIn takes \"classes\""),
+        (json!({"layers": names, "stat": "countIn", "classes": vec![3; 257]}), "countIn takes \"classes\""),
     ] {
         let e = s.run("cube.reduce", &bad).unwrap_err();
         assert!(e.contains(said), "{bad}: {e}");

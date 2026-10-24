@@ -483,18 +483,19 @@ over time does for a Zarr variable (see [Data](data.md)).
   - **longestRun**, the class it kept for the most dates in a row, in date order, the least of those
     tied. A date with no data neither breaks a run nor adds to it, so A, no data, A is a run of two;
   - **longestRunLength**, how many dates that run lasted;
-  - **frequency**, a layer for each class met (`… frequency 1985–2023 class 3`), each cell's count of
-    dates in that class. By year or month, a layer for each class of each group;
+  - **frequency**, a layer for each class met (`… frequency 1985–2023 class 3`), each cell's count
+    of dates in that class. By year or month, a layer for each class of each group;
   - **countIn**, at how many dates it was one of the classes given (`"classes": [3, 4, 5]`, whole
     numbers from 0 to 255), such as the years a cell was forest.
 
   They take the values as classes: a value that isn't a whole number (an NDVI) is refused with the
-  value, as is a run with more than 1,000 classes, or more than 64 million cells × classes (16
-  million in the web app). Frequency's layers, a cell's value for each class, count towards the
-  outputs' 32 million values. These are the data cube summary's only: Summarise over time for a
+  value, as is a run with more than 1,000 classes, or more than 64 million cells × classes in the
+  groups being read at once (16 million in the web app; for frequency, whose classes are each a
+  layer, the outputs' 32 million values). These are the data cube summary's only: Summarise over time for a
   Zarr variable refuses them and points here. Mode, modeCount, variety and frequency keep a count
   of each class in each cell while they read, 2 bytes a class, for each group being read: by
-  month, every month's at once, so a large area by month may need a smaller area. **changes**,
+  month, every month's at once, so a large area by month may need a smaller area or a group by
+  year. **changes**,
   **longestRun** and **longestRunLength** read a STAC collection one date at a time, in order, so
   they are slower there than the other statistics, which read several dates at once.
 
