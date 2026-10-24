@@ -1436,7 +1436,7 @@ impl ReduceRun {
                         return Err(e.to_string());
                     }
                     // The groups being read at once (every month's, by month) share the cap.
-                    if let Some(e) = classes_over(&totals, class_cap(self.stat)) {
+                    if let Some(e) = classes_over(&totals, &finished, class_cap(self.stat)) {
                         return Err(e);
                     }
                 }
@@ -1447,6 +1447,9 @@ impl ReduceRun {
                     && let (Some(t), Some(out)) = (totals.get_mut(g).and_then(Option::take), finished.get_mut(g))
                 {
                     *out = Some(finish(&t, self.min_share, dates, frequency));
+                    if let Some(e) = classes_over(&totals, &finished, class_cap(self.stat)) {
+                        return Err(e);
+                    }
                 }
                 done.fetch_add(1, Ordering::Relaxed);
                 Ok(())
@@ -1532,9 +1535,15 @@ fn class_cap(stat: Stat) -> u64 {
 }
 
 /// Why the class counts of the groups being read (`totals`) are too many: more than `cap` cells ×
-/// classes in all.
-fn classes_over(totals: &[Option<Totals>], cap: u64) -> Option<String> {
-    let held = totals.iter().flatten().map(Totals::held).fold(0u64, u64::saturating_add);
+/// classes in all, including columns retained by completed groups.
+fn classes_over(totals: &[Option<Totals>], finished: &[Option<(Columns, Vec<f32>)>], cap: u64) -> Option<String> {
+    let completed = finished
+        .iter()
+        .flatten()
+        .flat_map(|(columns, _)| columns.iter())
+        .map(|(_, values)| values.len() as u64)
+        .fold(0u64, u64::saturating_add);
+    let held = totals.iter().flatten().map(Totals::held).fold(completed, u64::saturating_add);
     (held > cap).then(|| {
         format!(
             "{held} cells × classes across the groups being read, more than {cap}: take a smaller area, a coarser cell size, or a group by year rather than by month"
@@ -1758,8 +1767,11 @@ mod tests {
         };
         // 10 cells × 3 classes and 10 × 2: 30 and 20 counts, 50 in all.
         let totals = vec![Some(group(&[1.0, 2.0, 3.0])), None, Some(group(&[1.0, 2.0]))];
-        assert!(super::classes_over(&totals, 50).is_none());
-        let e = super::classes_over(&totals, 49).unwrap_or_default();
+        assert!(super::classes_over(&totals, &[], 50).is_none());
+        let finished = vec![Some((vec![(Some(1.0), vec![0.0; 20])], Vec::new()))];
+        assert!(super::classes_over(&totals, &finished, 70).is_none());
+        assert!(super::classes_over(&totals, &finished, 69).is_some(), "finished groups still consume the shared cap");
+        let e = super::classes_over(&totals, &[], 49).unwrap_or_default();
         assert!(e.contains("50 cells × classes across the groups being read, more than 49"), "{e}");
     }
 }
