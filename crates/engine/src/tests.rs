@@ -3509,6 +3509,17 @@ fn publication_layouts_fit_their_pages() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Each sheet style the New Layout menu offers is one `layout.publication` takes, by its name.
+#[test]
+fn every_publication_style_in_the_menu_is_taken() {
+    let mut s = world();
+    for (style, _) in crate::cmd::layout::PUBLICATION_STYLES {
+        let r =
+            s.run("layout.publication", &json!({"extent": [-46.8, -11.6, -38.5, -2.2], "profile": "a4-portrait", "style": style})).unwrap();
+        assert_eq!(r["style"], *style);
+    }
+}
+
 /// A publication sheet's style (#682): `classic` (the default) as before; `banner` the title and
 /// subtitle in a band of the accent colour across the top; `panel` the map at the left and a panel
 /// at the right holding the title, the locator, the legend, the sources and the reference;

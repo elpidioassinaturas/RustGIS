@@ -325,6 +325,17 @@ pub const PUBLICATION_PROFILES: &[PublicationProfile] = &[
     PublicationProfile { id: "thesis-half", label: "Thesis figure, half page (160 × 110 mm)", sheet: false, width: 160.0, height: 110.0 },
 ];
 
+/// `layout.publication`'s styles for a sheet, by the name `"style"` takes, with their names in
+/// English: the default first.
+pub const PUBLICATION_STYLES: &[(&str, &str)] = &[
+    ("classic", "Classic"),
+    ("banner", "Banner"),
+    ("panel", "Panel"),
+    ("editorial", "Editorial"),
+    ("modular", "Modular"),
+    ("poster", "Poster"),
+];
+
 /// A figure's text size, in points at its printed size: journals ask for 6 to 8.
 const FIGURE_PT: f64 = 7.0;
 

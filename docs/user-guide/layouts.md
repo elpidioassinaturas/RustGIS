@@ -76,7 +76,9 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     the title and subtitle in light text across the top, the map in a light card and the footer
     in darker blocks with amber headings. `"accent"` (`#RRGGBB`) colours the band, the panel's
     tint, the headings and rules, and a poster's page (a deep brown, green or blue by default).
-    A figure leaves the style to its caption.
+    A figure leaves the style to its caption. In the menu, each sheet opens a list of the six
+    styles, each saying what it looks like, in its default accent (`"accent"` in the command
+    picks another).
   - Every element is an ordinary one, to move or restyle afterwards. The command returns element
     IDs for `layout.update`, and `warnings`. Running it again with another `profile` makes
     another layout of the same map.
