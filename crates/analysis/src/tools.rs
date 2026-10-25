@@ -3142,6 +3142,37 @@ mod tests {
         assert!(crate::run("spatialJoin", &m, &serde_json::json!({"target": "homes", "join": "stops", "distance": " "})).is_ok());
     }
 
+    /// Within a distance through the join's grid index (more than 16 join features), at the edge
+    /// of 10 km due north of the equator (#888): 0.0904369° is 9,999.995 m on WGS 84 but 10,056 m
+    /// on the mean sphere, so a search worked out on that sphere left it out; 0.0905° is
+    /// 10,006.972 m and stays out.
+    #[test]
+    fn spatial_join_within_a_distance_at_the_ellipsoids_edge() {
+        let point = |x: f64, y: f64| Some(Geometry::Point(Coord::new(x, y)));
+        let mut stops = Dataset::new("stops", GeometryType::Point, vec![Field::new("stop", FieldType::Text)]);
+        stops.push(point(0.0, 0.090_436_9), vec![Value::Text("edge".into())]);
+        stops.push(point(0.0, 0.0905), vec![Value::Text("past".into())]);
+        // More stops, all over 124 km away, so the join indexes them.
+        for k in 0..18 {
+            stops.push(point(1.0 + f64::from(k) * 0.1, 0.5 + f64::from(k) * 0.02), vec![Value::Text(format!("far {k}"))]);
+        }
+        let mut homes = Dataset::new("homes", GeometryType::Point, vec![]);
+        homes.push(point(0.0, 0.0), vec![]);
+        let m = Map(HashMap::from([("stops".to_string(), stops), ("homes".to_string(), homes)]));
+        let within = layer(
+            crate::run(
+                "spatialJoin",
+                &m,
+                &serde_json::json!({"target": "homes", "join": "stops", "match": "Within a distance", "distance": 10_000, "units": "Meters", "operation": "Join one to many", "distanceField": "d"}),
+            )
+            .unwrap(),
+        );
+        let names: Vec<_> = (0..within.features.len()).filter_map(|r| text_at(&within, r, "join_stop")).collect();
+        assert_eq!(names, ["edge"]);
+        let d = within.value(0, within.field_index("d").unwrap()).as_f64().unwrap();
+        assert!((d - 9_999.994_808).abs() < 1e-5, "{d}");
+    }
+
     #[test]
     fn spatial_join_merge_rules() {
         let mut districts = Dataset::new("districts", GeometryType::Polygon, vec![Field::new("d", FieldType::Text)]);

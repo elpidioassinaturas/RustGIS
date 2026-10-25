@@ -116,6 +116,9 @@ projection. Each feature is buffered in an azimuthal equidistant projection on t
 centred on it, so a point's buffer is exact; long lines and large polygon outlines are
 buffered in stretches of a few hundred kilometres to limit projection error. Negative Buffer
 distances shrink polygons. Buffer and Select Layer By Location limit distances to 5,000 km.
+Lengths and areas (Calculate Geometry Attributes, and Spatial Join's **Largest overlap**) are
+still measured on a sphere of radius 6,371 km, which differs from the ellipsoid by up to about
+0.5 %.
 
 **IDW Interpolation** works like the QGIS tool of the same name: every point weighs on every
 cell by 1/distanceᴾ, where P is the distance coefficient (2 by default). Lines and polygons
