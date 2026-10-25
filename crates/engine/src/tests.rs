@@ -10275,6 +10275,15 @@ fn a_trend_over_stacked_and_multiband_geotiffs() {
     with_scan.push("scan_2030-07-01".into());
     let e = s.run("cube.trend", &json!({"layers": with_scan})).unwrap_err();
     assert!(e.contains("no coordinates"), "{e}");
+    // A layer away from the first's area would give its date no value: refused.
+    let gt_away = GeoTransform { origin_x: x0 + 10.0, origin_y: y0, pixel_width: px, pixel_height: -px };
+    let away = Raster::new("away_2030-07-01", 3, 3, vec![vec![0.5; 9]], gt_away, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    let bytes = geotiff::write(&away, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "away_2030-07-01", rustgis_map::RasterLayer::from_bytes(away, "away.tif", bytes)).unwrap();
+    let mut with_away = names.clone();
+    with_away.push("away_2030-07-01".into());
+    let e = s.run("cube.trend", &json!({"layers": with_away})).unwrap_err();
+    assert!(e.contains("outside the first layer's area"), "{e}");
     // A multi-band file, a date a band, its bands named by the descriptions in it.
     let bands: Vec<Vec<f32>> = (0..12).map(cells).collect();
     let described: Vec<String> = years.iter().map(|y| format!("NDVI {y}-07-01")).collect();

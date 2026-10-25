@@ -307,6 +307,10 @@ pub fn cube_from(s: &Session, p: &Value, needs: Needs) -> Result<Box<dyn TimeCub
                 Some(g) if !one_grid(g, &r) => {
                     g.require_coordinates()?;
                     r.require_coordinates()?;
+                    // One that misses the first's area entirely would be a date with no value.
+                    if !g.extent().intersects(&r.extent()) {
+                        return Err(format!("{} lies outside the first layer's area, whose grid the stack is put on", l.name));
+                    }
                     grids = true;
                 }
                 Some(_) => {}
