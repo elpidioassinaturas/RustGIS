@@ -276,8 +276,12 @@ impl Aeqd {
     }
 
     /// Metres from the centre → lon/lat (degrees). The longitude is within 180° of the centre's,
-    /// not folded into −180..180, so a shape across the antimeridian stays in one piece.
+    /// not folded into −180..180, so a shape across the antimeridian stays in one piece. Metres
+    /// that aren't finite give no place (both coordinates NaN).
     pub fn inverse(&self, p: Coord) -> Coord {
+        if !(p.x.is_finite() && p.y.is_finite()) {
+            return Coord::new(f64::NAN, f64::NAN);
+        }
         // At a pole the azimuth is taken from the meridian `lon0`, as `forward` gives it.
         let (lat, lon): (f64, f64) = WGS84.direct(self.lat0, self.lon0, p.x.atan2(p.y).to_degrees(), p.x.hypot(p.y));
         Coord::new(self.lon0 + wrap_lon(lon - self.lon0), lat)
@@ -401,6 +405,11 @@ mod tests {
         let (a, b) = (Coord::new(0.0, 0.0), Coord::new(0.0, 0.1));
         assert!(wgs84_distance_m(a, b) < haversine_m(a, b));
         assert!(wgs84_distance_m(a, b) >= haversine_m(a, b) * WGS84_MIN_RADIUS_M / EARTH_RADIUS_M);
+        // Metres that aren't finite are no place, not half of one.
+        for m in [Coord::new(f64::NAN, 0.0), Coord::new(f64::INFINITY, 0.0), Coord::new(0.0, f64::NEG_INFINITY)] {
+            let c = Aeqd::new(Coord::new(10.0, 45.0)).inverse(m);
+            assert!(c.x.is_nan() && c.y.is_nan(), "{m:?} → {c:?}");
+        }
         // The inverse stays next to the centre's longitude rather than folding into −180..180.
         assert!((Aeqd::new(Coord::new(179.0, 0.0)).inverse(Coord::new(300_000.0, 0.0)).x - 181.694_945_852_359).abs() < 1e-9);
         // Centred on a pole, the azimuth is taken from the centre's meridian, both ways.
