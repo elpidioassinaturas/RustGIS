@@ -429,7 +429,9 @@ and a **Mann–Kendall** test of whether the trend is significant.
     `A2024153`, `2024-06`, a year) or by the `dates` given: `{"layers": ["ndvi_2015", "ndvi_2016",
     …]}`. A layer on another grid than the first one listed is resampled onto it (nearest
     neighbour, as Raster Functions › Resample does) as it is read, so a scene with another cell size
-    or coordinate system takes part; cells it doesn't cover are empty that date;
+    or coordinate system takes part. The first layer sets the cell size: a finer layer gives one of
+    its pixels to each cell, not their mean. Cells a layer doesn't cover are empty that date. The
+    Workflows pane's Dates field takes the dates separated by commas;
   - a Zarr variable along its time dimension, by its layer or its store, as for Summarise over time
     (see [Data](data.md)): `{"path": "air.zarr", "variable": "t2m"}`;
   - a raster of several bands, a date each, as Earth Engine and openEO export, dated by the bands'

@@ -1055,9 +1055,9 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
             p[k] = json!(v.trim());
         }
     }
-    // Dates typed, a layer's or band's each in their order: checked by the command, which says
-    // which one it can't read.
-    let dates: Vec<&str> = f.dates.split(|c: char| c == ',' || c == ';' || c.is_whitespace()).filter(|d| !d.is_empty()).collect();
+    // Dates typed, a layer's or band's each in their order, apart by commas or semicolons (a date
+    // can hold a space before its time): checked by the command, which says which it can't read.
+    let dates: Vec<&str> = f.dates.split([',', ';']).map(str::trim).filter(|d| !d.is_empty()).collect();
     if !dates.is_empty() {
         p["dates"] = json!(dates);
     }
