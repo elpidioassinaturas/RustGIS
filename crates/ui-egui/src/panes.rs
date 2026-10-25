@@ -200,9 +200,10 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
 
 /// The Web Data services shown in the Web Data pane, by the `ui.dialog` name that opens them, and
 /// their titles.
-const WEB_DATA: [(&str, &str); 15] = [
+const WEB_DATA: [(&str, &str); 16] = [
     ("opendata", "Search Open Data"),
     ("stac", "STAC Search"),
+    ("dataCubes", "Data Cubes"),
     ("osm", "OpenStreetMap"),
     ("boundaries", "Administrative Boundaries"),
     ("overture", "Overture Maps"),
@@ -237,6 +238,7 @@ fn web_data(app: &mut RustGisApp, ui: &mut Ui) {
     ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
     match app.ui.web_data {
         "stac" => crate::stacui::dialog(app, ui),
+        "dataCubes" => crate::cubesui::pane(app, ui),
         "osm" => crate::portalsui::osm(app, ui),
         "boundaries" => crate::portalsui::boundaries(app, ui),
         "overture" => crate::catalogsui::overture(app, ui),

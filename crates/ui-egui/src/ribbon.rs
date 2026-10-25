@@ -617,6 +617,7 @@ fn web_data_menu(ui: &mut Ui, app: &mut RustGisApp) {
     let pane = |name: &str| json!({"name": name});
     menu_item(ui, app, "", "ArcGIS Portal…", "ui.searchOpenData", svc("arcgis-portal"));
     menu_item(ui, app, "", "Boundaries…", "ui.dialog", pane("boundaries"));
+    menu_item(ui, app, "", "Data Cubes…", "ui.dialog", pane("dataCubes"));
     menu_item(ui, app, "", "Dynamical…", "ui.searchOpenData", svc("dynamical"));
     menu_item(ui, app, "", "Earthdata GIS…", "ui.searchOpenData", svc("earthdata-gis"));
     menu_item(ui, app, "", "Fields of the World…", "ui.dialog", pane("fieldsOfTheWorld"));

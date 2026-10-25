@@ -118,7 +118,21 @@ rustgis-cli run --cmd 'stac.addCube={"url":"https://data.inpe.br/bdc/stac/v1","c
 A data cube needs more than an API's address: the right collection and band, and often a range
 to show it with and a cell size to read it at. The catalog of data cubes lists cubes ready to
 open, each with those filled in, so none of them has to be looked up in a provider's catalog.
-There is no window for it yet; it is used from commands, scripts and the assistant.
+
+**Home › Add › Web Data › Data Cubes** lists them, filtered by theme, by words, and (ticked to
+begin with) to those with data where the map is. Each shows its provider, period, step,
+resolution, source and licence, with a link to the provider's page, and two buttons:
+
+- **Add to Time Slider** (desktop) adds it where the map is, as `cube.open` does (below), over the
+  period typed in **From** and **To**, or its last full calendar year when both are empty.
+- **Trend Analysis…** (desktop) opens Trend Analysis on it, with the period typed: the cube is
+  read where the map is, and **Use layers instead** goes back to the map's layers. A trend over a
+  cube needs its period.
+
+The list is kept up to date between releases with the app's other assets, so a cube can be added,
+or an address fixed, without a new version: the app reads it the first time the pane opens, and
+uses the copy built into it until then, offline, or when the list doesn't read whole. Commands,
+scripts and the assistant use the same list.
 
 - **Finding a cube** (`cube.catalog`): by `"theme"` (vegetation, land cover, water, climate, ocean,
   atmosphere or elevation), by area (`"bbox"`, or `"view"`: the entries with data there; with
@@ -155,7 +169,8 @@ Only cubes RustGIS reads today are listed. Collections whose files sit behind si
 a firewall that may ask a program making many requests in a row for a browser check for a while;
 its searches then fail until it lets them through again.
 
-An entry, as the list (`crates/tiles/src/cubes.json`) holds it; a cube is proposed by adding one:
+An entry, as the list holds it (built in from `crates/tiles/src/cubes.json`, and kept with the app's
+assets); a cube is proposed by adding one:
 
 ```json
 {"id": "bdc-mod13q1-ndvi", "name": "MODIS NDVI, 16-day composites (MOD13Q1 v6.1)",

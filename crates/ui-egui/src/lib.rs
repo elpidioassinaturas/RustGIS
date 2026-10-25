@@ -26,6 +26,7 @@ mod connectionui;
 #[cfg(not(target_arch = "wasm32"))]
 mod connectui;
 mod cswui;
+mod cubesui;
 mod dialogs;
 mod docpanes;
 mod earthaccessui;
@@ -666,6 +667,8 @@ pub struct UiState {
     pub opendata: opendataui::State,
     /// Satellite Embeddings: the dataset, its choices, the read under way and the tiles found.
     pub embeddings: embeddingsui::State,
+    /// Data Cubes: the filters, the period, and what the last action said.
+    pub cubes: cubesui::State,
     /// NASA Earthaccess: the dataset, the granules found and the request under way.
     pub earthaccess: earthaccessui::State,
     /// Add From Service › Sign in to ArcGIS.
@@ -805,6 +808,7 @@ impl Default for UiState {
             catalogs: Default::default(),
             opendata: Default::default(),
             embeddings: Default::default(),
+            cubes: Default::default(),
             earthaccess: Default::default(),
             arcgis: Default::default(),
             nldi: Default::default(),

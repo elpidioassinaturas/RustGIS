@@ -10433,7 +10433,7 @@ fn a_catalog_entry_opens_as_its_command_would() {
     };
     let features = [item("a1", "2024-01-01"), item("a2", "2024-01-17")].join(",");
     let base = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{features}]}}"#))], 6);
-    let mut entry = cubes::find("bdc-mod13q1-ndvi").unwrap().clone();
+    let mut entry = cubes::find("bdc-mod13q1-ndvi").unwrap();
     entry.url = format!("{base}/v1");
     entry.source = cubes::Source::Stac { collection: "cube".into(), asset: "NDVI".into() };
     entry.bbox = [0.0, 40.0, 20.0, 50.0];
@@ -10484,7 +10484,7 @@ fn a_catalog_entry_opens_as_its_command_would() {
 
     // A Zarr entry: its variable following the slider over the period, named after the entry.
     let (dir, path) = zarr_store_over_time("catalog");
-    let mut zarr = cubes::find("era5-2m-temperature").unwrap().clone();
+    let mut zarr = cubes::find("era5-2m-temperature").unwrap();
     zarr.url = path;
     zarr.start = "2001-01-01".into();
     zarr.source = cubes::Source::Zarr { variable: "t".into() };

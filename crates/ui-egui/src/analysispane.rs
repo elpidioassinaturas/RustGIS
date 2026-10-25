@@ -62,6 +62,8 @@ pub struct ScriptRun {
 pub struct TrendForm {
     /// The cube: a stack of layers (`true`), or one layer (a Zarr variable, or a raster of bands).
     pub stack: bool,
+    /// A cube of the catalog of data cubes instead (#683), where the map is: its id and name.
+    pub cube: Option<(String, String)>,
     /// The layers ticked for a stack.
     pub ticked: Vec<String>,
     pub test: String,
@@ -932,16 +934,28 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     if f.test.is_empty() {
         (f.test, f.seasons, f.alpha) = ("hamedRao".into(), 12, "0.05".into());
     }
-    let was_stack = f.stack;
-    ui.horizontal(|ui| {
-        ui.radio_value(&mut f.stack, true, tl!("Layers, a date each"));
-        ui.radio_value(&mut f.stack, false, tl!("One layer: a Zarr variable or a raster's bands"));
-    });
-    // Dates typed for one kind of series don't carry over to the other.
-    if f.stack != was_stack {
-        f.dates.clear();
+    if let Some((_, name)) = f.cube.clone() {
+        // A catalog's cube (Home › Web Data › Data Cubes), read where the map is.
+        ui.horizontal_wrapped(|ui| {
+            ui.label(crate::i18n::fmt("Data cube: {name}, where the map is", &[("name", &name)]));
+            if ui.small_button(tl!("Use layers instead")).clicked() {
+                f.cube = None;
+            }
+        });
+    } else {
+        let was_stack = f.stack;
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut f.stack, true, tl!("Layers, a date each"));
+            ui.radio_value(&mut f.stack, false, tl!("One layer: a Zarr variable or a raster's bands"));
+        });
+        // Dates typed for one kind of series don't carry over to the other.
+        if f.stack != was_stack {
+            f.dates.clear();
+        }
     }
-    if f.stack {
+    if f.cube.is_some() {
+        // Read from the catalog's cube: no layers to pick.
+    } else if f.stack {
         f.ticked.retain(|n| rasters.contains(n));
         ui.horizontal(|ui| {
             if ui.small_button(tl!("All")).clicked() {
@@ -970,9 +984,13 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     }
     let f = &mut app.workflow.trend;
     egui::Grid::new("trend_grid").num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-        let input_label = ui.label(tl!("Dates"));
-        ui.add(egui::TextEdit::singleline(&mut f.dates).hint_text(tl!("from the names")).desired_width(240.0)).labelled_by(input_label.id);
-        ui.end_row();
+        // A catalog's cube takes its dates from its items or its store.
+        if f.cube.is_none() {
+            let input_label = ui.label(tl!("Dates"));
+            ui.add(egui::TextEdit::singleline(&mut f.dates).hint_text(tl!("from the names")).desired_width(240.0))
+                .labelled_by(input_label.id);
+            ui.end_row();
+        }
         let input_label = ui.label(tl!("Test"));
         let tests = [
             ("hamedRao", "Modified Mann–Kendall (Hamed & Rao)"),
@@ -1028,7 +1046,19 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
         return;
     }
     let mut p = json!({"test": f.test, "per": if f.decade { "decade" } else { "year" }});
-    if f.stack {
+    if let Some((id, _)) = &f.cube {
+        // Its area is the map's (a Zarr variable is read whole), its period the one typed.
+        p["cube"] = json!(id);
+        let stac = rustgis_engine::render::rustgis_tiles::cubes::find(id)
+            .is_ok_and(|e| matches!(e.source, rustgis_engine::render::rustgis_tiles::cubes::Source::Stac { .. }));
+        if stac {
+            p["bbox"] = json!("view");
+        }
+        if f.start.trim().is_empty() || f.end.trim().is_empty() {
+            app.workflow.error = Some(tl!("A data cube's trend needs its period: fill in From and To").to_string());
+            return;
+        }
+    } else if f.stack {
         // In the list's order, not the order they were ticked: the dates typed go with them in
         // that order, and the first gives the grid.
         let ticked: Vec<&String> = rasters.iter().filter(|n| f.ticked.contains(n)).collect();
@@ -1062,7 +1092,8 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     }
     // Dates typed, a layer's or band's each in their order, apart by commas or semicolons (a date
     // can hold a space before its time): checked by the command, which says which it can't read.
-    let parts: Vec<&str> = f.dates.split([',', ';']).map(str::trim).collect();
+    let typed_dates = if f.cube.is_some() { "" } else { f.dates.as_str() };
+    let parts: Vec<&str> = typed_dates.split([',', ';']).map(str::trim).collect();
     // An empty one before the last would move the dates after it onto other layers; a comma at
     // the end is let be.
     if parts.iter().rev().skip(1).any(|d| d.is_empty()) {

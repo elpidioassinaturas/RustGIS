@@ -800,6 +800,7 @@ fn search_action(id: &str) -> Option<SearchAction> {
         "overture.add" => Dialog("overture"),
         "boundaries.add" => Dialog("boundaries"),
         "embeddings.add" | "embeddings.search" => Dialog("embeddings"),
+        "cube.catalog" | "cube.open" => Dialog("dataCubes"),
         "nationalMap.add" => Dialog("nationalMap"),
         "fieldsOfTheWorld.add" => Dialog("fieldsOfTheWorld"),
         "portal.add" | "portal.search" => Command("ui.searchOpenData"),
