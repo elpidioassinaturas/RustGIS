@@ -128,7 +128,7 @@ There is no window for it yet; it is used from commands, scripts and the assista
   `stac.addCube` adds a cube, over the map's extent (or `"bbox"`), with the entry's collection,
   band, range and cloud cover cap (`"range"` and `"maxCloud"` override the last two). A Zarr entry
   is added as `layer.addZarr` adds a variable that follows the time slider; its variable is read
-  whole, whatever the area. The period is `"start"` and `"end"`, given together; with neither, it
+  whole, but an area given must meet the entry's. The period is `"start"` and `"end"`, given together; with neither, it
   is the entry's last full calendar year (the year before this one while the cube is kept up to
   date). An end given as a day, a month or a year takes all of it, so an hourly variable's last day
   is read whole. An area the entry has no data in, or a period outside its dates, is refused,
@@ -144,7 +144,7 @@ The entries, all public and read in place:
 | Provider | Cubes |
 |---|---|
 | [Brazil Data Cube](https://data.inpe.br/bdc/) (INPE) | MODIS NDVI and EVI (MOD13Q1 v6.1, 232 m, from 2000); the 16-day NDVI cubes of Sentinel-2 (10 m, from 2017), Landsat (30 m) and CBERS-4 WFI (64 m, from 2016) |
-| [Earth Search](https://element84.com/earth-search/) (Element 84) | Sentinel-2 L2A scenes' red and near-infrared bands (10 m, from 2015), searched with at most 20% cloud cover; the Copernicus DEM GLO-30 (one date) |
+| [Earth Search](https://element84.com/earth-search/) (Element 84) | Sentinel-2 L2A Collection 1 scenes' red and near-infrared bands (10 m, from 2015), searched with at most 20% cloud cover; the Copernicus DEM GLO-30 (one date) |
 | [Digital Earth Australia](https://www.dea.ga.gov.au/) and [Digital Earth Africa](https://www.digitalearthafrica.org/) | the yearly frequency of water seen by Landsat (30 m, from 1986 and 1984) |
 | [ARCO-ERA5](https://cloud.google.com/storage/docs/public-datasets/era5) (Google Cloud, ECMWF) | hourly air temperature at 2 m, total precipitation and top-layer soil moisture (0.25°, from 1940), as a Zarr store the desktop reads |
 

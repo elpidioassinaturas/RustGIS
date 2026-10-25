@@ -441,19 +441,30 @@ pub fn public_url(url: &str, region: Option<&str>) -> Result<String, String> {
 /// The region an S3 refusal says a bucket is in, when it was asked at the wrong endpoint: a bucket
 /// in a region AWS opts in (af-south-1, Digital Earth Africa's) asked at the global endpoint
 /// ("The af-south-1 location constraint is incompatible…"), or an endpoint named in a redirect
-/// (`bucket.s3.eu-west-1.amazonaws.com`).
+/// (`bucket.s3.eu-west-1.amazonaws.com`). Only a region's form is taken (a two-letter area, words
+/// and a number: `us-east-1`, `ap-southeast-2`, `us-gov-west-1`), so a server's text steers the
+/// address to no other host.
 pub fn region_in(text: &str) -> Option<String> {
     let region = |r: &str| {
         let r = r.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-        (r.len() <= 30 && r.matches('-').count() >= 2 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
-            .then(|| r.to_string())
+        let parts: Vec<&str> = r.split('-').collect();
+        let (number, words) = parts.split_last()?;
+        let word = |w: &&str| !w.is_empty() && w.bytes().all(|b| b.is_ascii_lowercase());
+        (r.len() <= 30
+            && words.len() >= 2
+            && words.first().is_some_and(|a| a.len() == 2)
+            && words.iter().all(word)
+            && (1..=2).contains(&number.len())
+            && number.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| r.to_string())
     };
     let constraint = text.split_once(" location constraint").and_then(|(before, _)| before.rsplit(' ').next()).and_then(region);
     constraint.or_else(|| text.split(".s3.").skip(1).find_map(|after| after.split_once(".amazonaws.com").and_then(|(r, _)| region(r))))
 }
 
 /// Where a public bucket's objects are read anonymously, found by reading one object's first byte
-/// (`probe`, at most twice): `None` for AWS's global endpoint, else the bucket's region, when AWS
+/// (`probe`; a read that got no answer, such as a timeout, is tried once more): `None` for AWS's
+/// global endpoint, else the bucket's region, when AWS
 /// answers that the bucket is in a region the global endpoint doesn't reach. A bucket that refuses
 /// anonymous reads (a private or requester-pays one, such as Landsat's) is refused, naming it.
 pub fn public_region(url: &str, probe: impl Fn(&str) -> Result<(), crate::failure::Failure>) -> Result<Option<String>, String> {
@@ -464,6 +475,8 @@ pub fn public_region(url: &str, probe: impl Fn(&str) -> Result<(), crate::failur
         ),
         _ => format!("s3://{bucket}: {}", f.message),
     };
+    // One timeout doesn't fail the cube's thousands of files.
+    let probe = |u: &str| probe(u).or_else(|f| if f.status().is_none() && f.excerpt().is_none() { probe(u) } else { Err(f) });
     match probe(&public_url(url, None)?) {
         Ok(()) => Ok(None),
         Err(f) => {
@@ -1082,6 +1095,12 @@ mod tests {
         assert_eq!(region_in(redirect).as_deref(), Some("eu-west-1"));
         assert_eq!(region_in("AccessDenied Access Denied"), None);
         assert_eq!(region_in("The <script> location constraint"), None);
+        for not in ["evil-host-1.attacker", "e-x-1", "us-east-x", "us-east-123", "u5-east-1", "us--1"] {
+            assert_eq!(region_in(&format!("The {not} location constraint")), None, "{not}");
+        }
+        for r in ["us-gov-west-1", "ap-southeast-2", "il-central-1"] {
+            assert_eq!(region_in(&format!("x.s3.{r}.amazonaws.com")).as_deref(), Some(r));
+        }
         let refusal = |status: u16, text: &str| Failure::answered("", status, &[], text.as_bytes());
         // Read at the global endpoint: no region.
         assert_eq!(public_region(url, |_| Ok(())).unwrap(), None);
@@ -1093,6 +1112,13 @@ mod tests {
         });
         assert_eq!(r.unwrap().as_deref(), Some("af-south-1"));
         assert_eq!(asked.lock().unwrap().len(), 2);
+        // A read that got no answer (a timeout) is tried once more.
+        let tries = std::sync::atomic::AtomicUsize::new(0);
+        let r = public_region(url, |u| match tries.fetch_add(1, std::sync::atomic::Ordering::Relaxed) {
+            0 => Err(Failure::new(u, "timed out")),
+            _ => Ok(()),
+        });
+        assert_eq!((r.unwrap(), tries.into_inner()), (None, 2));
         // Requester pays (Landsat's) or private: refused, naming the bucket.
         let e = public_region("s3://usgs-landsat/a.tif", |_| Err(refusal(403, "AccessDenied Access Denied"))).unwrap_err();
         assert!(e.contains("s3://usgs-landsat") && e.contains("anonymously"), "{e}");

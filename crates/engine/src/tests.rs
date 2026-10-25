@@ -9193,7 +9193,10 @@ fn a_catalog_entry_opens_as_its_command_would() {
     assert_eq!(modis["cubes"][0]["range"], json!([0.0, 0.9]));
     // No area given is anywhere, not the map's extent.
     assert!(!ids(&s.run("cube.catalog", &json!({"query": "era5"})).unwrap()).is_empty());
-    for bad in [json!({"theme": "forests"}), json!({"bbox": [1, 2]}), json!({"bbox": "here"})] {
+    // A filter of another kind is refused, not dropped (which would list every entry).
+    for bad in
+        [json!({"theme": "forests"}), json!({"theme": ["water"]}), json!({"query": 5}), json!({"bbox": [1, 2]}), json!({"bbox": "here"})]
+    {
         assert!(s.run("cube.catalog", &bad).is_err(), "{bad}");
     }
     assert!(crate::cmd::tiles::NETWORK.contains(&"cube.open"), "a plugin needs the network permission to open a cube");
@@ -9282,10 +9285,16 @@ fn a_catalog_entry_opens_as_its_command_would() {
     let mut year = Session::new(Project::default());
     crate::cmd::cube_catalog::open_entry(&mut year, &zarr, &json!({"start": "2001-01-01", "end": "2001"})).unwrap();
     assert_eq!(year.run("time.info", &Value::Null).unwrap()["steps"], 3);
+    // A STAC entry's key is refused first, before a period outside the entry's dates.
     for k in ["range", "maxCloud"] {
-        let e = crate::cmd::cube_catalog::open_entry(&mut z, &zarr, &json!({k: 1})).unwrap_err();
+        let e = crate::cmd::cube_catalog::open_entry(&mut z, &zarr, &json!({k: 1, "start": "1990", "end": "1990"})).unwrap_err();
         assert!(e.contains("STAC entry's"), "{e}");
     }
+    // An area given for a Zarr entry is checked, as for a STAC entry.
+    let mut far = zarr.clone();
+    far.bbox = [0.0, 0.0, 1.0, 1.0];
+    let e = crate::cmd::cube_catalog::open_entry(&mut z, &far, &json!({"bbox": [100, 0, 101, 1]})).unwrap_err();
+    assert!(e.contains("has data in"), "{e}");
     let _ = std::fs::remove_dir_all(dir);
 
     // cube.open by id: an unknown one, none.

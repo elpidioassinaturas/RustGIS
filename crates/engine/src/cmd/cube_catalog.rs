@@ -18,7 +18,7 @@ pub fn commands() -> Vec<C> {
             r#"{"theme"?: "vegetation"|"land cover"|"water"|"climate"|"ocean"|"atmosphere"|"elevation", "bbox"?: [west, south, east, north] | "view" (entries with data there; default: anywhere), "query"?: "words, all of them in an entry's name, provider or id"} → the data cubes ready to open (cube.open), each with its provider, themes, area, period, step, resolution, source (a STAC collection and band, or a Zarr variable) and licence"#,
         ),
         C::new("cube.open", "Open a Data Cube", "Home › Add › Web Data", open).params(
-            r#"{"id": an entry of cube.catalog, "bbox"?: [west, south, east, north] | "view" (a STAC entry's area, default the map's extent; a Zarr entry's variable is read whole), "start"?, "end"?: dates, both or neither (default: the entry's last full calendar year), "maxCloud"?: percent (a STAC entry's cloud cover cap; default the entry's), "range"?: [low, high] (a STAC entry's values shown from black to white, in the band's units; default the entry's), "name"?: text} → the cube on the map, following the time slider, as stac.addCube or layer.addZarr adds it (desktop)"#,
+            r#"{"id": an entry of cube.catalog, "bbox"?: [west, south, east, north] | "view" (a STAC entry's area, default the map's extent; a Zarr entry's variable is read whole, but an area given must meet the entry's), "start"?, "end"?: dates, both or neither (default: the entry's last full calendar year), "maxCloud"?: percent (a STAC entry's cloud cover cap; default the entry's), "range"?: [low, high] (a STAC entry's values shown from black to white, in the band's units; default the entry's), "name"?: text} → the cube on the map, following the time slider, as stac.addCube or layer.addZarr adds it (desktop)"#,
         ),
     ]
 }
@@ -29,6 +29,10 @@ fn catalog(s: &mut Session, p: &Value) -> CmdResult {
         None => None,
         Some(_) => Some(super::catalogs::area(s, p)?),
     };
+    // A filter of another kind is refused, not dropped, which would list every entry.
+    if let Some(k) = ["theme", "query"].into_iter().find(|k| p.get(*k).is_some_and(|v| !v.is_null() && !v.is_string())) {
+        return Err(format!("{k} is text"));
+    }
     let list = cubes::select(cubes::built_in(), ps(p, "theme"), area, ps(p, "query"))?;
     Ok(json!({"count": list.len(), "cubes": list.iter().map(|e| e.json()).collect::<Vec<_>>(), "themes": cubes::THEMES}))
 }
@@ -40,16 +44,23 @@ fn open(s: &mut Session, p: &Value) -> CmdResult {
 
 /// Adds `e` to the map, with the area, period and options of `p` (as `cube.open` takes them).
 pub(crate) fn open_entry(s: &mut Session, e: &Entry, p: &Value) -> CmdResult {
-    let (start, end) = period(e, p)?;
     let given = |k: &str| p.get(k).filter(|v| !v.is_null());
+    let zarr = matches!(e.source, Source::Zarr { .. });
+    // A band's range and a scene collection's cloud cap don't apply to a Zarr variable.
+    if let Some(k) = ["range", "maxCloud"].into_iter().find(|k| zarr && given(k).is_some()) {
+        return Err(format!("{k} is a STAC entry's; {} is a Zarr variable", e.id));
+    }
+    let (start, end) = period(e, p)?;
+    // A STAC entry's area, the map's extent by default. A Zarr entry's variable is read whole,
+    // but an area given is checked all the same.
+    let area = if zarr && given("bbox").is_none() { None } else { Some(super::catalogs::area(s, p)?) };
+    if area.is_some_and(|a| !e.overlaps(a)) {
+        let [w, so, ea, n] = e.bbox;
+        return Err(format!("{} has data in [{w}, {so}, {ea}, {n}] only, which the area doesn't meet", e.name));
+    }
     let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty());
     let mut r = match &e.source {
         Source::Stac { collection, asset } => {
-            let area = super::catalogs::area(s, p)?;
-            if !e.overlaps(area) {
-                let [w, so, ea, n] = e.bbox;
-                return Err(format!("{} has data in [{w}, {so}, {ea}, {n}] only, which the area doesn't meet", e.name));
-            }
             let mut q = json!({"url": e.url, "collection": collection, "asset": asset, "bbox": area, "start": start, "end": end});
             if let Some(r) = given("range").cloned().or_else(|| e.range.map(|r| json!(r))) {
                 q["range"] = r;
@@ -63,10 +74,6 @@ pub(crate) fn open_entry(s: &mut Session, e: &Entry, p: &Value) -> CmdResult {
             s.run("stac.addCube", &q)?
         }
         Source::Zarr { variable } => {
-            // A band's range and a scene collection's cloud cap don't apply to a Zarr variable.
-            if let Some(k) = ["range", "maxCloud"].into_iter().find(|k| given(k).is_some()) {
-                return Err(format!("{k} is a STAC entry's; {} is a Zarr variable", e.id));
-            }
             let mut q = json!({"url": e.url, "variable": variable, "time": true, "start": start, "end": through(&end)});
             q["name"] = json!(name.map_or_else(|| e.name.clone(), str::to_string));
             s.run("layer.addZarr", &q)?
@@ -76,7 +83,7 @@ pub(crate) fn open_entry(s: &mut Session, e: &Entry, p: &Value) -> CmdResult {
         o.insert("cube".into(), json!(e.id));
         o.insert("start".into(), start);
         o.insert("end".into(), end);
-        if matches!(e.source, Source::Zarr { .. }) && given("bbox").is_some() {
+        if zarr && area.is_some() {
             o.insert("note".into(), json!("a Zarr entry's variable is read whole; bbox was left aside"));
         }
     }
