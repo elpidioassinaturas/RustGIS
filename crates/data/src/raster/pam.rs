@@ -118,6 +118,36 @@ pub fn parse(text: &str) -> Option<Pam> {
     Some(pam)
 }
 
+/// The band descriptions a GeoTIFF holds itself, in GDAL's metadata tag (`GDAL_METADATA`, 42112),
+/// where GDAL and rasterio write them: `None` when it isn't such a document or describes no band.
+/// Its `sample` counts from 0.
+///
+/// ```xml
+/// <GDALMetadata>
+///   <Item name="DESCRIPTION" sample="0" role="description">NDVI 2024-06-01</Item>
+/// </GDALMetadata>
+/// ```
+pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
+    let opts = ParsingOptions { allow_dtd: false, nodes_limit: crate::io::XML_NODES, ..ParsingOptions::default() };
+    let doc = crate::xml::parse(text, opts).ok()?;
+    let root = doc.root_element();
+    if root.tag_name().name() != "GDALMetadata" {
+        return None;
+    }
+    let mut pam = Pam::default();
+    for item in root.children().filter(|n| n.has_tag_name("Item") && n.attribute("role") == Some("description")) {
+        let band = item.attribute("sample").and_then(|v| v.trim().parse::<usize>().ok()).map(|s| s + 1).filter(|n| *n <= MAX_BANDS);
+        let description = item.text().map(str::trim).filter(|d| !d.is_empty()).map(|d| d.chars().take(256).collect::<String>());
+        // A band's first description, if it is given twice.
+        if let (Some(band), Some(description)) = (band, description)
+            && pam.band(band).is_none()
+        {
+            pam.bands.push(PamBand { band, description: Some(description), ..PamBand::default() });
+        }
+    }
+    (!pam.bands.is_empty()).then_some(pam)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +192,27 @@ mod tests {
         }
         let deep = format!("<PAMDataset>{}{}</PAMDataset>", "<a>".repeat(100_000), "</a>".repeat(100_000));
         assert!(parse(&deep).is_none());
+    }
+
+    #[test]
+    fn reads_band_descriptions_from_gdal_metadata() {
+        let xml = r#"<GDALMetadata>
+  <Item name="AREA_OR_POINT">Area</Item>
+  <Item name="DESCRIPTION" sample="1" role="description"> NDVI 2024-07-01 </Item>
+  <Item name="DESCRIPTION" sample="0" role="description">NDVI 2024-06-01</Item>
+  <Item name="DESCRIPTION" sample="0" role="description">again</Item>
+  <Item name="SCALE" sample="0" role="scale">0.0001</Item>
+  <Item name="DESCRIPTION" sample="x" role="description">no band</Item>
+  <Item name="DESCRIPTION" sample="2" role="description"></Item>
+</GDALMetadata>"#;
+        let pam = parse_gdal_metadata(xml).unwrap();
+        assert_eq!(pam.bands.len(), 2, "{pam:?}");
+        assert_eq!(pam.band(1).unwrap().description.as_deref(), Some("NDVI 2024-06-01"));
+        assert_eq!(pam.band(2).unwrap().description.as_deref(), Some("NDVI 2024-07-01"));
+        assert_eq!(pam.nodata(), None);
+        for text in ["", "not xml", "<GDALMetadata/>", "<PAMDataset/>", "<GDALMetadata><Item name=\"A\">1</Item></GDALMetadata>"] {
+            assert!(parse_gdal_metadata(text).is_none(), "{text}");
+        }
     }
 
     #[test]

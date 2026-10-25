@@ -10028,12 +10028,7 @@ fn a_trend_over_a_data_cube() {
     let r = s.run("cube.trend", &json!({"path": gap, "variable": "t", "test": "original"})).unwrap();
     assert!(value(&s, &r["layers"][0], 0) > 1000.0, "{}", value(&s, &r["layers"][0], 0));
     let _ = std::fs::remove_dir_all(gap_dir);
-    // Refused: too few layers, no dates, dates of another length, unknown options, another grid.
-    let other = Raster::new("ndvi_2030-01-01", 3, 3, vec![vec![0.0; 9]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
-    let bytes = geotiff::write(&other, 0).unwrap();
-    crate::cmd::raster::add_raster(&mut s, "ndvi_2030-01-01", rustgis_map::RasterLayer::from_bytes(other, "o.tif", bytes)).unwrap();
-    let mut mixed = names.clone();
-    mixed.push("ndvi_2030-01-01".into());
+    // Refused: too few layers, no dates, dates of another length, unknown options.
     for bad in [
         json!({"layers": &names[..3]}),
         json!({"layers": names, "dates": ["2001", "2002"]}),
@@ -10041,7 +10036,6 @@ fn a_trend_over_a_data_cube() {
         json!({"layers": names, "alpha": 0.7}),
         json!({"layers": names, "per": "week"}),
         json!({"layers": names, "start": "2030"}),
-        json!({"layers": mixed}),
         json!({"layer": names[0]}),
     ] {
         assert!(s.run("cube.trend", &bad).is_err(), "{bad}");
@@ -10102,6 +10096,185 @@ fn a_trend_over_a_data_cube() {
         assert!((slope - want).abs() < want * 0.05, "{per}: {slope}");
         assert!(value(&s, &r["layers"][2], 0) < 0.01, "{per}: significant");
     }
+}
+
+/// A multi-band Float32 GeoTIFF in longitude/latitude, its bands' values interleaved, as GDAL
+/// writes it: `descriptions` in its GDAL_METADATA tag when given, and -9999 for no-data.
+#[cfg(not(target_arch = "wasm32"))]
+fn multiband_tiff(w: u32, h: u32, bands: &[Vec<f32>], origin: (f64, f64), px: f64, descriptions: Option<&[String]>) -> Vec<u8> {
+    let n = bands.len() as u16;
+    let mut out = vec![b'I', b'I', 42, 0, 0, 0, 0, 0];
+    for p in 0..(w * h) as usize {
+        for b in bands {
+            out.extend(b[p].to_le_bytes());
+        }
+    }
+    let bytes = out.len() as u32 - 8;
+    let shorts = |v: &[u16]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    let longs = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    let doubles = |v: &[f64]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    let ascii = |s: &str| s.bytes().chain([0]).collect::<Vec<u8>>();
+    let mut e: Vec<(u16, u16, u32, Vec<u8>)> = vec![
+        (256, 4, 1, longs(&[w])),
+        (257, 4, 1, longs(&[h])),
+        (258, 3, u32::from(n), shorts(&vec![32; n as usize])),
+        (259, 3, 1, shorts(&[1])),
+        (262, 3, 1, shorts(&[1])),
+        (273, 4, 1, longs(&[8])),
+        (277, 3, 1, shorts(&[n])),
+        (278, 4, 1, longs(&[h])),
+        (279, 4, 1, longs(&[bytes])),
+        (284, 3, 1, shorts(&[1])),
+        (339, 3, u32::from(n), shorts(&vec![3; n as usize])),
+        (33550, 12, 3, doubles(&[px, px, 0.0])),
+        (33922, 12, 6, doubles(&[0.0, 0.0, 0.0, origin.0, origin.1, 0.0])),
+        (34735, 3, 12, shorts(&[1, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326])),
+    ];
+    if let Some(d) = descriptions {
+        let items: String =
+            d.iter().enumerate().map(|(k, d)| format!(r#"<Item name="DESCRIPTION" sample="{k}" role="description">{d}</Item>"#)).collect();
+        let xml = ascii(&format!("<GDALMetadata>{items}</GDALMetadata>"));
+        e.push((42112, 2, xml.len() as u32, xml));
+    }
+    let nodata = ascii("-9999");
+    e.push((42113, 2, nodata.len() as u32, nodata));
+    let ifd_at = out.len() + out.len() % 2;
+    out.resize(ifd_at, 0);
+    let values_at = ifd_at + 2 + 12 * e.len() + 4;
+    let mut values: Vec<u8> = Vec::new();
+    let mut dir = (e.len() as u16).to_le_bytes().to_vec();
+    for (tag, ty, count, bytes) in &mut e {
+        dir.extend(tag.to_le_bytes());
+        dir.extend(ty.to_le_bytes());
+        dir.extend(count.to_le_bytes());
+        if bytes.len() <= 4 {
+            bytes.resize(4, 0);
+            dir.extend(bytes.iter());
+        } else {
+            dir.extend(((values_at + values.len()) as u32).to_le_bytes());
+            values.extend(bytes.iter());
+            // Each value on a word boundary.
+            if values.len() % 2 == 1 {
+                values.push(0);
+            }
+        }
+    }
+    out[4..8].copy_from_slice(&(ifd_at as u32).to_le_bytes());
+    out.extend(dir);
+    out.extend([0; 4]);
+    out.extend(values);
+    out
+}
+
+/// A trend over GeoTIFF files (#579, step 3): a stack of files dated by their names (ISO and MODIS
+/// dates), two of them on other grids, resampled onto the first's; and a multi-band file, a date a
+/// band, dated by the band descriptions GDAL writes in it or by the dates given. The cells with a
+/// planted trend have a significant slope; the noisy ones have a slope but no significant one.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_trend_over_stacked_and_multiband_geotiffs() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let mut s = Session::new(Project::default());
+    let dir = std::env::temp_dir().join(format!("rustgis-cube-files-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (x0, y0, px) = (-56.0, -12.0, 0.01);
+    // Twelve years on a grid of 4 × 2 cells: 0 and 5 rise 0.02 a year, 3 and 7 fall 0.01 a year,
+    // 1, 2 and 6 are noise (the same noise turned over or around, never significant), and 4 has
+    // three values only, the file's no-data value on the other dates.
+    let noise = [0.03, -0.02, 0.05, -0.04, 0.01, 0.0, -0.05, 0.04, -0.01, 0.02, -0.03, 0.03];
+    let cells = |k: usize| -> Vec<f32> {
+        let rise = 0.3 + 0.02 * k as f32;
+        let fall = 0.8 - 0.01 * k as f32;
+        let wobble = (0.001 * noise[k]) as f32;
+        vec![
+            rise + wobble,
+            0.5 + noise[k] as f32,
+            0.5 - noise[k] as f32,
+            fall - wobble,
+            if k < 3 { 0.4 } else { -9999.0 },
+            rise - wobble,
+            0.5 + noise[11 - k] as f32,
+            fall + wobble,
+        ]
+    };
+    let years: Vec<i32> = (2013..2025).collect();
+    let mut names = Vec::new();
+    for (k, y) in years.iter().enumerate() {
+        // Named by a date, or as MODIS names its files (1 July is day 182, 183 in a leap year).
+        let name = if k % 2 == 0 { format!("ndvi_{y}-07-01") } else { format!("MOD13Q1.A{y}{}", if y % 4 == 0 { 183 } else { 182 }) };
+        let v = cells(k);
+        let (w, h, gt, data) = match k {
+            // Cells half as wide: each value four times.
+            5 => {
+                let fine = (0..32).map(|i| v[(i / 16) * 4 + (i % 8) / 2]).collect();
+                (8, 4, GeoTransform { origin_x: x0, origin_y: y0, pixel_width: px / 2.0, pixel_height: -px / 2.0 }, fine)
+            }
+            // A larger area, the grid's cells two columns and a row in from its corner.
+            8 => {
+                let inside = |i: usize| (2..6).contains(&(i % 7)) && (1..3).contains(&(i / 7));
+                let wide = (0..28).map(|i| if inside(i) { v[(i / 7 - 1) * 4 + i % 7 - 2] } else { 9.0 }).collect();
+                (7, 4, GeoTransform { origin_x: x0 - 2.0 * px, origin_y: y0 + px, pixel_width: px, pixel_height: -px }, wide)
+            }
+            _ => (4, 2, GeoTransform { origin_x: x0, origin_y: y0, pixel_width: px, pixel_height: -px }, v),
+        };
+        let r = Raster::new(&name, w, h, vec![data], gt, Crs::LonLat, Some(-9999.0), ColorHint::Gray, "Float32").unwrap();
+        let path = dir.join(format!("{name}.tif"));
+        std::fs::write(&path, geotiff::write(&r, 0).unwrap()).unwrap();
+        s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+        names.push(name);
+    }
+    let band = |s: &Session, id: &Value| {
+        s.map().layer(id.as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap().bands[0].data.clone()
+    };
+    // The planted trends are found; the noise, and the cell with three values, are left empty.
+    let found = |s: &Session, r: &Value| {
+        let (slope, p, significant) = (band(s, &r["layers"][0]), band(s, &r["layers"][2]), band(s, &r["layers"][3]));
+        for (cell, want) in [(0, 0.02), (5, 0.02), (3, -0.01), (7, -0.01)] {
+            assert!((significant[cell] - want).abs() < 1e-3, "cell {cell}: {} (p {})", significant[cell], p[cell]);
+        }
+        for cell in [1, 2, 6] {
+            assert!(slope[cell].is_finite() && p[cell] > 0.05 && significant[cell].is_nan(), "cell {cell}: p {}", p[cell]);
+        }
+        assert!(slope[4].is_nan() && significant[4].is_nan());
+    };
+    let r = s.run("cube.trend", &json!({"layers": names})).unwrap();
+    assert_eq!(r["dates"], 12, "{r}");
+    found(&s, &r);
+    let name = |s: &Session, id: &Value| s.map().layer(id.as_u64().unwrap() as u32).unwrap().name.clone();
+    assert_eq!(name(&s, &r["layers"][0]), "ndvi 2013-07-01–2024-07-01 Sen slope per year");
+    // Every date counts in every cell, the two resampled ones included, and cell 4 has its three;
+    // the larger file's cells outside the grid are left out.
+    let count = s.run("cube.reduce", &json!({"layers": names, "stat": "count"})).unwrap();
+    assert_eq!(band(&s, &count["layers"][0]), [12.0, 12.0, 12.0, 12.0, 3.0, 12.0, 12.0, 12.0]);
+    let max = s.run("cube.reduce", &json!({"layers": names, "stat": "max"})).unwrap();
+    assert!(band(&s, &max["layers"][0]).iter().all(|v| *v < 1.0), "{:?}", band(&s, &max["layers"][0]));
+    // The first layer listed gives the grid: listed first, the finer file gives its 8 × 4 cells.
+    let mut fine_first = names.clone();
+    fine_first.swap(0, 5);
+    let r = s.run("cube.trend", &json!({"layers": fine_first, "name": "fine"})).unwrap();
+    let fine = s.map().layer(r["layers"][0].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    assert_eq!((fine.width, fine.height), (8, 4));
+    // A multi-band file, a date a band, its bands named by the descriptions in it.
+    let bands: Vec<Vec<f32>> = (0..12).map(cells).collect();
+    let described: Vec<String> = years.iter().map(|y| format!("NDVI {y}-07-01")).collect();
+    let path = dir.join("ndvi_bands.tif");
+    std::fs::write(&path, multiband_tiff(4, 2, &bands, (x0, y0), px, Some(&described))).unwrap();
+    s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    let file = s.map().layer_by_name("ndvi_bands").unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    assert_eq!((file.bands.len(), file.bands[0].name.as_str()), (12, "NDVI 2013-07-01"));
+    let r = s.run("cube.trend", &json!({"layer": "ndvi_bands"})).unwrap();
+    assert_eq!(r["dates"], 12, "{r}");
+    found(&s, &r);
+    // Without descriptions, the dates are given.
+    let path = dir.join("ndvi_plain.tif");
+    std::fs::write(&path, multiband_tiff(4, 2, &bands, (x0, y0), px, None)).unwrap();
+    s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    let e = s.run("cube.trend", &json!({"layer": "ndvi_plain"})).unwrap_err();
+    assert!(e.contains("give \"dates\""), "{e}");
+    let typed: Vec<String> = years.iter().map(|y| format!("{y}-07-01")).collect();
+    let r = s.run("cube.trend", &json!({"layer": "ndvi_plain", "dates": typed, "name": "typed"})).unwrap();
+    found(&s, &r);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A data cube summarised over time (#579): each statistic over a stack of layers, a year or a

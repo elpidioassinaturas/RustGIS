@@ -694,7 +694,9 @@ A TIFF or PNG without coordinates opens as a scan to place with **Georeference**
 file next to it (as a Shapefile does); otherwise, and always for uploads, it must be in
 longitude/latitude degrees. On the desktop, a GDAL `.aux.xml` file next to a raster (`dem.tif.aux.xml`
 or `dem.aux.xml`) names its bands from their descriptions, gives the no-data value when the file
-has none, and supplies the band statistics when only an overview of the raster is read.
+has none, and supplies the band statistics when only an overview of the raster is read. The band
+descriptions GDAL and rasterio write inside a GeoTIFF (its `GDAL_METADATA` tag) name its bands
+too, a sidecar's taking precedence.
 Exporting a raster opened from an overview writes that overview; the results of adding and of
 exporting it (`layer.addData`, `share.exportRaster`) give the full size as `overviewOf`, so scripts
 and the MCP server see it too.

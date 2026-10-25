@@ -72,6 +72,9 @@ pub struct TrendForm {
     pub end: String,
     pub months: String,
     pub min_valid: String,
+    /// The dates typed, a layer's (or band's) each in their order; empty to read them from the
+    /// names.
+    pub dates: String,
     #[cfg(not(target_arch = "wasm32"))]
     pub running: Option<Trending>,
 }
@@ -946,7 +949,7 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
         egui::ScrollArea::vertical().id_salt("trend_layers").max_height(160.0).show(ui, |ui| {
             for n in rasters {
                 let mut on = f.ticked.contains(n);
-                let date = rustgis_engine::cmd::cube::date_in_text(n)
+                let date = rustgis_engine::cmd::cube::layer_date(&app.session, n)
                     .map_or_else(|| tl!("no date in the name").to_string(), |d| rustgis_engine::data::time::format(d, "YYYY-MM-DD"));
                 if ui.checkbox(&mut on, format!("{n}  ({date})")).changed() {
                     if on {
@@ -962,6 +965,9 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     }
     let f = &mut app.workflow.trend;
     egui::Grid::new("trend_grid").num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
+        let input_label = ui.label(tl!("Dates"));
+        ui.add(egui::TextEdit::singleline(&mut f.dates).hint_text(tl!("from the names")).desired_width(240.0)).labelled_by(input_label.id);
+        ui.end_row();
         let input_label = ui.label(tl!("Test"));
         let tests = [
             ("hamedRao", "Modified Mann–Kendall (Hamed & Rao)"),
@@ -1045,6 +1051,12 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
         if !v.trim().is_empty() {
             p[k] = json!(v.trim());
         }
+    }
+    // Dates typed, a layer's or band's each in their order: checked by the command, which says
+    // which one it can't read.
+    let dates: Vec<&str> = f.dates.split(|c: char| c == ',' || c == ';' || c.is_whitespace()).filter(|d| !d.is_empty()).collect();
+    if !dates.is_empty() {
+        p["dates"] = json!(dates);
     }
     let typed: Vec<&str> = f.months.split([',', ' ']).map(str::trim).filter(|m| !m.is_empty()).collect();
     let months: Vec<Value> = typed.iter().filter_map(|m| m.parse::<u64>().ok()).map(|m| json!(m)).collect();

@@ -425,12 +425,16 @@ between every two dates, which holds up against outliers such as a cloud left in
 and a **Mann–Kendall** test of whether the trend is significant.
 
 - **The series** (a data cube) is any of:
-  - raster layers, a date each, dated by their names (`ndvi_2024-06-01`, MODIS's `A2024153`,
-    `2024-06`, a year) or by the `dates` given: `{"layers": ["ndvi_2015", "ndvi_2016", …]}`;
+  - raster layers, a date each, dated by their names or their files' (`ndvi_2024-06-01`, MODIS's
+    `A2024153`, `2024-06`, a year) or by the `dates` given: `{"layers": ["ndvi_2015", "ndvi_2016",
+    …]}`. A layer on another grid than the first one listed is resampled onto it (nearest
+    neighbour, as Raster Functions › Resample does) as it is read, so a scene with another cell size
+    or coordinate system takes part; cells it doesn't cover are empty that date;
   - a Zarr variable along its time dimension, by its layer or its store, as for Summarise over time
     (see [Data](data.md)): `{"path": "air.zarr", "variable": "t2m"}`;
   - a raster of several bands, a date each, as Earth Engine and openEO export, dated by the bands'
-    names or `dates`;
+    names (the descriptions GDAL writes in the file, or in an `.aux.xml` next to it: `NDVI
+    2024-06-01`) or `dates`: `{"layer": "ndvi_2015_2024", "dates": ["2015", "2016", …]}`;
   - a STAC collection's band (desktop), read in place from its cloud-optimised GeoTIFFs over an
     area, as Add as Time Series finds them (see [Web data](web-data.md)): `{"url":
     "https://data.inpe.br/bdc/stac/v1", "collection": "mod13q1-6.1", "asset": "NDVI", "bbox": [-46,
@@ -450,8 +454,6 @@ and a **Mann–Kendall** test of whether the trend is significant.
     command line); `cube.trend` waits for the search and the reads with no Cancel, the app with
     it, as for a Zarr store's address, so keep the area and period small there, or run a large
     one from the command line (see **Long runs** below).
-
-  The rasters have to be on one grid; put them on one first with Raster Functions › Resample.
 - **The test:** NDVI and temperature series are autocorrelated, which makes the plain test report
   too many significant cells, so the default is the **modified Mann–Kendall** test of **Hamed &
   Rao (1998)**: the variance of S is corrected by the autocorrelation of the detrended series'

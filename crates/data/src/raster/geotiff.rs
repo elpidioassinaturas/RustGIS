@@ -878,6 +878,13 @@ pub(super) fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<O
     let mut dec = Decoder::new(r).map_err(err)?.with_limits(limits.clone());
     let (full_w, full_h) = dec.dimensions().map_err(err)?;
     let geo = geo_tags(&mut dec)?;
+    // The bands' descriptions GDAL keeps in the file (an `.aux.xml` sidecar's are applied after).
+    let described = dec
+        .find_tag(Tag::Unknown(42112))
+        .ok()
+        .flatten()
+        .and_then(|v| v.into_string().ok())
+        .and_then(|t| super::pam::parse_gdal_metadata(&t));
     let spp = samples(&mut dec);
     let bytes = sample_bytes(&mut dec);
     // The decoded image is held at its own pixel size before conversion to f32, so bound bytes
@@ -1041,6 +1048,9 @@ pub(super) fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<O
         let mut r = Raster::new(name, w, h, bands, super::unreferenced(w, h), Crs::LonLat, geo.nodata, color, data_type)?;
         r.georeferenced = false;
         r.overview = overview;
+        if let Some(p) = &described {
+            r.apply_pam(p);
+        }
         return Ok(r);
     }
     let mut transform = geo.transform;
@@ -1087,6 +1097,9 @@ pub(super) fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<O
     };
     let mut r = Raster::new(name, w, h, bands, transform, crs, geo.nodata, color, data_type)?;
     r.overview = overview;
+    if let Some(p) = &described {
+        r.apply_pam(p);
+    }
     Ok(r)
 }
 
@@ -1904,6 +1917,29 @@ mod tests {
         let bytes = planar_tiled(40, 32, (16, 16), 4, |_, _, _| 0);
         let read = read(std::io::Cursor::new(&bytes), "planar");
         assert!(read.as_ref().err().is_none_or(|e| !e.to_string().contains("fewer than 8 bits")), "{read:?}");
+    }
+
+    #[test]
+    fn band_descriptions_in_the_file_name_its_bands() {
+        // GDAL and rasterio keep band descriptions in the GDAL_METADATA tag (42112).
+        use tiff::encoder::{TiffEncoder, colortype};
+        let mut out = std::io::Cursor::new(Vec::new());
+        {
+            let mut enc = TiffEncoder::new(&mut out).unwrap();
+            let mut img = enc.new_image::<colortype::Gray32Float>(2, 2).unwrap();
+            let e = img.encoder();
+            e.write_tag(Tag::ModelPixelScaleTag, &[0.5f64, 0.5, 0.0][..]).unwrap();
+            e.write_tag(Tag::ModelTiepointTag, &[0.0f64, 0.0, 0.0, 10.0, 50.0, 0.0][..]).unwrap();
+            e.write_tag(Tag::GeoKeyDirectoryTag, &[1u16, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326][..]).unwrap();
+            let xml = r#"<GDALMetadata><Item name="DESCRIPTION" sample="0" role="description">NDVI 2024-06-01</Item></GDALMetadata>"#;
+            e.write_tag(Tag::Unknown(42112), xml).unwrap();
+            img.write_data(&[0.1f32, 0.2, 0.3, 0.4]).unwrap();
+        }
+        let r = read(std::io::Cursor::new(out.into_inner()), "ndvi").unwrap();
+        assert_eq!(r.bands[0].name, "NDVI 2024-06-01");
+        // Without the tag, the band keeps its number.
+        let plain = read(std::io::Cursor::new(grey8(2, 2, &[1, 2, 3, 4], None)), "plain").unwrap();
+        assert_ne!(plain.bands[0].name, "NDVI 2024-06-01");
     }
 
     #[test]
