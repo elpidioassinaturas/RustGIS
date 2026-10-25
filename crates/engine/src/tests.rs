@@ -10284,6 +10284,21 @@ fn a_trend_over_stacked_and_multiband_geotiffs() {
     with_away.push("away_2030-07-01".into());
     let e = s.run("cube.trend", &json!({"layers": with_away})).unwrap_err();
     assert!(e.contains("outside the first layer's area"), "{e}");
+    // A layer in another coordinate system (Web Mercator, 500 m cells) over the grid is resampled
+    // onto it too, through longitude/latitude: every cell gets its date.
+    let merc = |lon: f64, lat: f64| {
+        (6_378_137.0 * lon.to_radians(), 6_378_137.0 * (std::f64::consts::FRAC_PI_4 + lat.to_radians() / 2.0).tan().ln())
+    };
+    let (mx, my) = merc(x0 - 0.05, y0 + 0.03);
+    let gt_merc = GeoTransform { origin_x: mx, origin_y: my, pixel_width: 500.0, pixel_height: -500.0 };
+    let m =
+        Raster::new("merc_2030-07-01", 40, 40, vec![vec![0.5; 1600]], gt_merc, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+    let bytes = geotiff::write(&m, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "merc_2030-07-01", rustgis_map::RasterLayer::from_bytes(m, "merc.tif", bytes)).unwrap();
+    let mut with_merc = names.clone();
+    with_merc.push("merc_2030-07-01".into());
+    let count = s.run("cube.reduce", &json!({"layers": with_merc, "stat": "count", "name": "merc"})).unwrap();
+    assert_eq!(band(&s, &count["layers"][0]), [13.0, 13.0, 13.0, 13.0, 4.0, 13.0, 13.0, 13.0]);
     // A multi-band file, a date a band, its bands named by the descriptions in it.
     let bands: Vec<Vec<f32>> = (0..12).map(cells).collect();
     let described: Vec<String> = years.iter().map(|y| format!("NDVI {y}-07-01")).collect();
