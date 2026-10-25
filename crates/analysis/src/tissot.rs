@@ -208,7 +208,8 @@ pub fn run(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustgis_geom::{haversine_m, lonlat_to_merc};
+    use geo::{Distance, Geodesic, Point};
+    use rustgis_geom::lonlat_to_merc;
 
     /// No map: no projection, no view.
     struct NoMap;
@@ -271,7 +272,9 @@ mod tests {
             assert_eq!(ring.len(), VERTICES + 1);
             assert_eq!(ring.first(), ring.last());
             for v in ring {
-                assert!((haversine_m(centre, *v) - 500_000.0).abs() < 1.0, "{centre:?} → {v:?}");
+                // 500 km on the WGS 84 ellipsoid, as GeographicLib measures it through `geo`.
+                let d = Geodesic.distance(Point::new(centre.x, centre.y), Point::new(v.x, v.y));
+                assert!((d - 500_000.0).abs() < 1e-3, "{centre:?} → {v:?}");
             }
         }
     }

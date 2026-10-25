@@ -35,6 +35,8 @@ web-time = "1"
 
 # geo / formats / rendering
 geo = "0.33"
+# Geodesics on the WGS 84 ellipsoid (already in the tree through geo; opengeos/RustGIS#888)
+geographiclib-rs = { version = "0.2", default-features = false }
 # A5, the equal-area pentagonal DGGS (opengeos/RustGIS#551)
 a5 = "1"
 shapefile = { version = "0.9", features = ["encoding_rs", "yore"] }

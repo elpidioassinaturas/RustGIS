@@ -2,12 +2,12 @@
 //! rules out features too far away to matter, the overlap a feature has with a polygon, and the
 //! rules that roll the values of several matches up into one.
 //!
-//! Distances are on the sphere buffers use. The nearest points of two features are found in an
-//! azimuthal equidistant plane, centred first between the features and then between the points
-//! found, and measured along the great circle between them.
+//! Distances are on the WGS 84 ellipsoid, as buffers' are. The nearest points of two features are
+//! found in an azimuthal equidistant plane, centred first between the features and then between
+//! the points found, and measured along the geodesic between them.
 
 use rustgis_data::{Coord, Dataset, FieldType, Geometry, Value};
-use rustgis_geom::{Aeqd, EARTH_RADIUS_M, Extent, geodesic_interpolate, geodesic_length_m, geodesic_ring_area_m2, haversine_m};
+use rustgis_geom::{Aeqd, Extent, WGS84_MIN_RADIUS_M, geodesic_interpolate, geodesic_length_m, geodesic_ring_area_m2, wgs84_distance_m};
 use serde_json::Value as Json;
 
 /// Whether a coordinate is a place on the Earth in lon/lat: finite, with a latitude of ±90° at most
@@ -39,7 +39,7 @@ pub fn distance_m(a: &Geometry, b: &Geometry) -> Option<f64> {
     let (fa, fb) = (first_coord(a)?, first_coord(b)?);
     let (p, q) = nearest_pair(a, b, &Aeqd::new(geodesic_interpolate(fa, fb, 0.5)), Some((fa, fb)))?;
     let (p, q) = nearest_pair(a, b, &Aeqd::new(geodesic_interpolate(p, q, 0.5)), Some((p, q))).unwrap_or((p, q));
-    let d = haversine_m(p, q);
+    let d = wgs84_distance_m(p, q);
     d.is_finite().then_some(d)
 }
 
@@ -131,10 +131,11 @@ fn closest_on(p: Coord, a: Coord, b: Coord) -> Coord {
 /// other can be when one is no further than `lat` degrees from the equator. The longitude is
 /// `None` when they can reach a pole, so any longitudes can be that close. Two points whose
 /// longitudes differ by Δλ, both no further from the equator than φ, are at least
-/// 2R·asin(cos φ·sin(Δλ/2)) apart.
+/// 2R·asin(cos φ·sin(Δλ/2)) apart, with R the ellipsoid's smallest radius of curvature, so the
+/// ellipsoid's shorter distances near the equator are never ruled out.
 fn spread(lat: f64, metres: f64) -> (f64, Option<f64>) {
     // A little slack, so a feature exactly at the distance isn't ruled out by rounding.
-    let r = (metres.max(0.0) * (1.0 + 1e-9) + 1e-3) / EARTH_RADIUS_M;
+    let r = (metres.max(0.0) * (1.0 + 1e-9) + 1e-3) / WGS84_MIN_RADIUS_M;
     let dlat = r.to_degrees();
     let phi = (lat.abs() + dlat).to_radians();
     let reach = (r / 2.0).min(std::f64::consts::FRAC_PI_2).sin() / phi.cos();
@@ -346,12 +347,32 @@ pub fn parse_merge(join: &Dataset, v: Option<&Json>) -> Result<Vec<Merge>, Strin
 mod tests {
     use super::*;
 
+    use rustgis_geom::haversine_m;
+
     /// The ground distance from `p` to a line, by sampling each edge finely along its great circle.
+    /// Only the samples within 1.2% of the nearest on the sphere are measured on the ellipsoid,
+    /// whose distances are within 0.6% of the sphere's.
     fn brute(p: Coord, line: &[Coord]) -> f64 {
-        line.windows(2)
+        let samples: Vec<(Coord, f64)> = line
+            .windows(2)
             .flat_map(|w| (0..=400).map(move |k| geodesic_interpolate(w[0], w[1], f64::from(k) / 400.0)))
-            .map(|c| haversine_m(p, c))
-            .fold(f64::INFINITY, f64::min)
+            .map(|c| (c, haversine_m(p, c)))
+            .collect();
+        let nearest = samples.iter().map(|(_, d)| *d).fold(f64::INFINITY, f64::min);
+        samples.iter().filter(|(_, d)| *d <= nearest * 1.012 + 1.0).map(|(c, _)| wgs84_distance_m(p, *c)).fold(f64::INFINITY, f64::min)
+    }
+
+    #[test]
+    fn distances_are_on_the_wgs84_ellipsoid() {
+        // 0.0904369° north of the equator is 10,000 m on WGS 84 (GeographicLib) but 10,056 m on the
+        // mean sphere: within 10 km in the measure, and not ruled out before it (#888).
+        let (a, b) = (Coord::new(0.0, 0.0), Coord::new(0.0, 0.090_436_9));
+        assert!(haversine_m(a, b) > 10_050.0);
+        let d = distance_m(&Geometry::Point(a), &Geometry::Point(b)).unwrap();
+        assert!((d - 9_999.994_808).abs() < 1e-5, "{d}");
+        let (ea, eb) = (Extent::new(a.x, a.y, a.x, a.y), Extent::new(b.x, b.y, b.x, b.y));
+        assert!(may_be_within(&ea, &eb, 10_000.0));
+        assert!(search_box(&ea, 10_000.0).is_some_and(|e| e.max_y >= b.y));
     }
 
     #[test]
@@ -370,7 +391,7 @@ mod tests {
         // between the two real vertices, past the point between them.
         let line = Geometry::Line(vec![vec![Coord::new(0.0, 0.0), Coord::new(600.0, 80.0), Coord::new(10.0, 0.0)]]);
         let d = distance_m(&Geometry::Point(Coord::new(5.0, 0.0)), &line).unwrap();
-        let truth = haversine_m(Coord::new(5.0, 0.0), Coord::new(0.0, 0.0));
+        let truth = wgs84_distance_m(Coord::new(5.0, 0.0), Coord::new(0.0, 0.0));
         assert!((d - truth).abs() < 1e-6 * truth, "{d} vs {truth}");
         // Nor does a ring close across the gap.
         let ring = Geometry::Polygon(vec![vec![vec![
@@ -393,7 +414,7 @@ mod tests {
         let a = Geometry::MultiPoint(vec![Coord::new(f64::MAX, 0.0), origin]);
         for pts in [vec![Coord::new(-f64::MAX, 0.0), near], vec![near, Coord::new(-f64::MAX, 0.0)]] {
             let d = distance_m(&a, &Geometry::MultiPoint(pts.clone()));
-            let truth = haversine_m(origin, near);
+            let truth = wgs84_distance_m(origin, near);
             assert!(d.is_some_and(|d| (d - truth).abs() < 1e-6 * truth), "{pts:?}: {d:?} vs {truth}");
         }
     }

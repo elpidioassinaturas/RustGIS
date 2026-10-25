@@ -111,8 +111,9 @@ Calculate Geometry Attributes updates **all** rows. A built-in tool's `output` i
 the project, never a file path.
 
 **Buffer** distances, and the distance of **Select Layer By Location**, are measured on the Earth
-(a sphere of radius 6,371 km), not in the map's display projection. Each feature is buffered in
-an azimuthal equidistant projection centred on it; long lines and large polygon outlines are
+(the WGS 84 ellipsoid, as PROJ and GeographicLib measure it), not in the map's display
+projection. Each feature is buffered in an azimuthal equidistant projection on the ellipsoid
+centred on it, so a point's buffer is exact; long lines and large polygon outlines are
 buffered in stretches of a few hundred kilometres to limit projection error. Negative Buffer
 distances shrink polygons. Buffer and Select Layer By Location limit distances to 5,000 km.
 
@@ -150,10 +151,11 @@ stored in longitude/latitude before the join. `match` is one of:
   one, every target gets its nearest feature. Ties keep the join layer's order.
 - **Within a distance**: every join feature within `distance` (required), nearest first.
 
-Distances are on the ground, between the features' nearest points (edges and vertices alike),
-and are zero for features that intersect. `distanceField` names a field added for the distance
-to the joined feature, in `units`; it applies to **Closest** and **Within a distance** only, as
-`distance` does, and the Tools pane shows them only for those.
+Distances are on the ground (the WGS 84 ellipsoid, as for Buffer), between the features' nearest
+points (edges and vertices alike), and are zero for features that intersect. `distanceField`
+names a field added for the distance to the joined feature, in `units`; it applies to
+**Closest** and **Within a distance** only, as `distance` does, and the Tools pane shows them
+only for those.
 
 **Join one to one** (the default `operation`) copies the first matching feature's attributes;
 **Join one to many** makes a row for each match. Both add `join_count`, the total matches for

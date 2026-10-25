@@ -9,4 +9,5 @@ description = "RustGIS L0: coordinates, extents, projections, geodesic measureme
 workspace = true
 
 [dependencies]
+geographiclib-rs = { workspace = true }
 serde = { workspace = true }

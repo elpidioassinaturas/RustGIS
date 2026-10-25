@@ -4784,6 +4784,7 @@ dependencies = [
 name = "rustgis-geom"
 version = "0.4.0"
 dependencies = [
+ "geographiclib-rs",
  "serde",
 ]
 

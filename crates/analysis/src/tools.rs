@@ -2124,8 +2124,8 @@ mod tests {
         let Geometry::Polygon(polys) = ds.features[0].geometry.as_ref().unwrap() else { panic!("expected buffer polygon") };
         // 500 international feet is exactly 152.4 metres, at every vertex.
         for vertex in polys.iter().flatten().flatten() {
-            let radius = rustgis_geom::haversine_m(center, *vertex);
-            assert!((radius - 152.4).abs() < 0.05, "radius: {radius}");
+            let radius = on_wgs84_m(center, *vertex);
+            assert!((radius - 152.4).abs() < 1e-6, "radius: {radius}");
         }
     }
 
@@ -2349,15 +2349,31 @@ mod tests {
         }
     }
 
-    /// The great-circle distance (km) from `c` to a line, sampled every 500 m along it.
-    fn km_to(c: Coord, line: &[Coord]) -> f64 {
-        line.windows(2)
+    /// The geodesic distance on the WGS 84 ellipsoid (metres), from GeographicLib through `geo`.
+    fn on_wgs84_m(a: Coord, b: Coord) -> f64 {
+        use geo::{Distance, Geodesic, Point};
+        Geodesic.distance(Point::new(a.x, a.y), Point::new(b.x, b.y))
+    }
+
+    /// The distance on WGS 84 (km) from `c` to a line, sampled every `step` metres along it.
+    /// Only the samples within 1.2% of the nearest on the sphere are measured on the ellipsoid,
+    /// whose distances are within 0.6% of the sphere's.
+    fn km_to_every(c: Coord, line: &[Coord], step: f64) -> f64 {
+        let samples: Vec<(Coord, f64)> = line
+            .windows(2)
             .flat_map(|w| {
-                let n = (rustgis_geom::haversine_m(w[0], w[1]) / 500.0).ceil().max(1.0) as usize;
+                let n = (rustgis_geom::haversine_m(w[0], w[1]) / step).ceil().max(1.0) as usize;
                 (0..=n).map(move |i| rustgis_geom::geodesic_interpolate(w[0], w[1], i as f64 / n as f64))
             })
-            .map(|p| rustgis_geom::haversine_m(c, p) / 1000.0)
-            .fold(f64::INFINITY, f64::min)
+            .map(|p| (p, rustgis_geom::haversine_m(c, p)))
+            .collect();
+        let nearest = samples.iter().map(|(_, d)| *d).fold(f64::INFINITY, f64::min);
+        samples.iter().filter(|(_, d)| *d <= nearest * 1.012 + 1.0).map(|(p, _)| on_wgs84_m(c, *p) / 1000.0).fold(f64::INFINITY, f64::min)
+    }
+
+    /// The distance on WGS 84 (km) from `c` to a line, sampled every 500 m along it.
+    fn km_to(c: Coord, line: &[Coord]) -> f64 {
+        km_to_every(c, line, 500.0)
     }
 
     /// Every vertex of every ring is `km` from `line`, within 0.2%. Where the arcs of two pieces
@@ -2371,6 +2387,28 @@ mod tests {
         }
     }
 
+    /// Buffers are geodesic on the WGS 84 ellipsoid, not on a sphere (#888): on a sphere of the
+    /// mean radius a 10 km buffer reached 9,944 to 10,011 m at the equator and 9,997 to 10,029 m
+    /// at 46.5°N, and a 1 km buffer of a 2 km line 999.7 to 1,002.9 m.
+    #[test]
+    fn buffers_keep_their_distance_on_the_ellipsoid() {
+        for centre in [Coord::new(0.0, 0.0), Coord::new(10.5, 46.5), Coord::new(30.0, 60.0), Coord::new(-70.0, -33.4)] {
+            for c in buffered(Geometry::Point(centre), 10.0).iter().flatten().flatten() {
+                let d = on_wgs84_m(centre, *c);
+                assert!((d - 10_000.0).abs() < 1e-3, "{centre:?}: {c:?} is {d} m away");
+            }
+        }
+        let a = Coord::new(10.5, 46.5);
+        for azimuth in [90.0, 0.0, 45.0] {
+            let line = [a, rustgis_geom::geodesic_destination(a, azimuth, 2_000.0)];
+            for c in buffered(Geometry::Line(vec![line.to_vec()]), 1.0).iter().flatten().flatten() {
+                // Sampled every 0.5 m along the line, the nearest sample is at most 0.03 mm further.
+                let d = km_to_every(*c, &line, 0.5) * 1000.0;
+                assert!((d - 1_000.0).abs() < 1e-3, "{azimuth}: {c:?} is {d} m away");
+            }
+        }
+    }
+
     /// Buffers are geodesic (#394): Web Mercator's scale changes with latitude, so one scale for
     /// the whole feature made a 1000 km circle at 60°N reach 872 km north and 1142 km south, and a
     /// 50 km buffer of a line from 5°S to 33°S 59 km wide at one end and 50 km at the other.
@@ -2381,7 +2419,9 @@ mod tests {
         all_at(&circle, &[centre, centre], 1000.0);
         let north = circle.iter().flatten().flatten().map(|c| c.y).fold(f64::MIN, f64::max);
         let south = circle.iter().flatten().flatten().map(|c| c.y).fold(f64::MAX, f64::min);
-        assert!((north - 60.0 - (60.0 - south)).abs() < 0.01, "as far north as south: {north} {south}");
+        // As far north as south, where GeographicLib puts 1000 km on WGS 84 (a degree of
+        // latitude grows towards the pole, so 8.970° north and 8.982° south).
+        assert!((north - 68.969_947_795_748).abs() < 1e-9 && (south - 51.017_861_794_779).abs() < 1e-9, "{north} {south}");
 
         let line = [Coord::new(-45.0, -5.0), Coord::new(-45.0, -33.0)];
         all_at(&buffered(Geometry::Line(vec![line.to_vec()]), 50.0), &line, 50.0);
@@ -2972,7 +3012,8 @@ mod tests {
         ]));
         let run = |params: serde_json::Value| layer(crate::run("spatialJoin", &m, &params).unwrap_or_else(|e| panic!("{e}")));
         let num_at = |ds: &Dataset, row: usize, f: &str| ds.value(row, ds.field_index(f).unwrap()).as_f64();
-        let hav = |a: (f64, f64), b: (f64, f64)| rustgis_geom::haversine_m(Coord::new(a.0, a.1), Coord::new(b.0, b.1));
+        // Distances on WGS 84, as the join measures them (#888).
+        let hav = |a: (f64, f64), b: (f64, f64)| rustgis_geom::wgs84_distance_m(Coord::new(a.0, a.1), Coord::new(b.0, b.1));
 
         // Closest, unlimited: the nearest stop, across the antimeridian and over the pole too.
         let closest =
@@ -2996,7 +3037,7 @@ mod tests {
         );
         assert!((num_at(&feet, 0, "ft").unwrap() - s0 / 0.3048).abs() < 1e-3);
         // A line's nearest point can be between its vertices: north of the home, 2° of longitude
-        // from the vertices. The edge is a great circle, a little poleward of latitude 1 midway.
+        // from the vertices. The edge is a geodesic, a little poleward of latitude 1 midway.
         let to_road =
             run(serde_json::json!({"target": "homes", "join": "road", "match": "Closest", "units": "Meters", "distanceField": "d"}));
         let (north, bulge) = (hav((0.004, 0.0), (0.004, 1.0)), hav((0.004, 0.0), (0.004, 1.000_153)));
@@ -3046,7 +3087,7 @@ mod tests {
         }
         let brute = |x: f64, y: f64| {
             let d = |f: &rustgis_data::Feature| match &f.geometry {
-                Some(Geometry::Point(c)) => rustgis_geom::haversine_m(Coord::new(x, y), *c),
+                Some(Geometry::Point(c)) => rustgis_geom::wgs84_distance_m(Coord::new(x, y), *c),
                 _ => f64::INFINITY,
             };
             let best = many.features.iter().min_by(|a, b| d(a).total_cmp(&d(b))).map(|f| f.attrs[0].clone());

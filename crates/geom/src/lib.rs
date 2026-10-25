@@ -11,10 +11,17 @@ pub mod triangulate;
 pub use body::{BODIES, Body};
 pub use sinusoidal::Sinusoidal;
 
+use std::sync::LazyLock;
+
+use geographiclib_rs::{DirectGeodesic, Geodesic, InverseGeodesic};
 use serde::{Deserialize, Serialize};
 
 /// Mean Earth radius used by the haversine formula (metres).
 pub const EARTH_RADIUS_M: f64 = 6_371_008.8;
+/// The smallest radius of curvature of the WGS 84 ellipsoid, b²/a, along the meridian at the
+/// equator (metres). Every path on the ellipsoid is at least as long as on a sphere of this radius
+/// through the same longitudes and latitudes, so a reach worked out on that sphere is never short.
+pub const WGS84_MIN_RADIUS_M: f64 = 6_335_439.327_293;
 /// Web Mercator sphere radius (metres).
 pub const MERCATOR_R: f64 = 6_378_137.0;
 /// Latitude limit of Web Mercator.
@@ -226,60 +233,54 @@ pub fn spherical_centre(pts: &[Coord]) -> Option<Coord> {
     from_vector(s)
 }
 
-/// The point `dist_m` metres from `c` along the great circle leaving it at `azimuth_deg`
-/// (clockwise from north): the direct geodesic problem on the sphere.
+/// The point `dist_m` metres from `c` along the geodesic leaving it at `azimuth_deg` (clockwise
+/// from north): the direct geodesic problem on the WGS 84 ellipsoid.
 pub fn geodesic_destination(c: Coord, azimuth_deg: f64, dist_m: f64) -> Coord {
     let (s, co) = azimuth_deg.to_radians().sin_cos();
     Aeqd::new(c).inverse(Coord::new(dist_m * s, dist_m * co))
 }
 
-/// The azimuthal equidistant projection on the sphere, centred on a lon/lat point: distances
-/// and directions from the centre are true, so a buffer drawn in it is geodesic near the centre.
-/// Coordinates are metres east and north of the centre.
+/// The geodesic distance between two lon/lat points on the WGS 84 ellipsoid (metres): the inverse
+/// geodesic problem, solved by GeographicLib.
+pub fn wgs84_distance_m(a: Coord, b: Coord) -> f64 {
+    let (s12, _): (f64, f64) = WGS84.inverse(a.y.clamp(-90.0, 90.0), a.x, b.y.clamp(-90.0, 90.0), b.x);
+    s12
+}
+
+/// The WGS 84 ellipsoid's geodesic solver.
+static WGS84: LazyLock<Geodesic> = LazyLock::new(Geodesic::wgs84);
+
+/// The azimuthal equidistant projection on the WGS 84 ellipsoid, centred on a lon/lat point:
+/// distances and directions from the centre are true, so a buffer drawn in it is geodesic near
+/// the centre. Coordinates are metres east and north of the centre.
+///
+/// It is Karney's ellipsoidal form (Karney 2013, "Algorithms for geodesics"): a point's
+/// distance and azimuth from the centre are the inverse geodesic problem, and back again the
+/// direct one, both solved by GeographicLib to a few nanometres.
 #[derive(Clone, Copy, Debug)]
 pub struct Aeqd {
     lon0: f64,
-    sin0: f64,
-    cos0: f64,
+    lat0: f64,
 }
 
 impl Aeqd {
     pub fn new(centre: Coord) -> Self {
-        let lat0 = centre.y.clamp(-90.0, 90.0).to_radians();
-        Aeqd { lon0: centre.x, sin0: lat0.sin(), cos0: lat0.cos() }
+        Aeqd { lon0: centre.x, lat0: centre.y.clamp(-90.0, 90.0) }
     }
 
     /// Lon/lat (degrees) → metres from the centre.
     pub fn forward(&self, c: Coord) -> Coord {
-        let lat = c.y.clamp(-90.0, 90.0).to_radians();
-        let dlon = (c.x - self.lon0).to_radians();
-        let (sl, cl) = lat.sin_cos();
-        let east = cl * dlon.sin();
-        let north = self.cos0 * sl - self.sin0 * cl * dlon.cos();
-        let cos_c = self.sin0 * sl + self.cos0 * cl * dlon.cos();
-        let sin_c = east.hypot(north);
-        if sin_c < 1e-15 {
-            return Coord::new(0.0, 0.0);
-        }
-        let k = EARTH_RADIUS_M * sin_c.atan2(cos_c) / sin_c;
-        Coord::new(k * east, k * north)
+        let (s12, azi1, _, _): (f64, f64, f64, f64) = WGS84.inverse(self.lat0, self.lon0, c.y.clamp(-90.0, 90.0), c.x);
+        let (sa, ca) = azi1.to_radians().sin_cos();
+        Coord::new(s12 * sa, s12 * ca)
     }
 
     /// Metres from the centre → lon/lat (degrees). The longitude is within 180° of the centre's,
     /// not folded into −180..180, so a shape across the antimeridian stays in one piece.
     pub fn inverse(&self, p: Coord) -> Coord {
-        let rho = p.x.hypot(p.y);
-        let c = rho / EARTH_RADIUS_M;
-        let (sc, cc) = c.sin_cos();
-        let (sa, ca) = if rho > 0.0 { (p.x / rho, p.y / rho) } else { (0.0, 1.0) };
-        let lat = (self.sin0 * cc + self.cos0 * sc * ca).clamp(-1.0, 1.0).asin();
-        // At a pole every direction is south (or north): the azimuth is the meridian.
-        let dlon = if self.cos0 < 1e-9 {
-            if self.sin0 > 0.0 { p.x.atan2(-p.y) } else { p.x.atan2(p.y) }
-        } else {
-            (sa * sc * self.cos0).atan2(cc - self.sin0 * lat.sin())
-        };
-        Coord::new(self.lon0 + dlon.to_degrees(), lat.to_degrees())
+        // At a pole the azimuth is taken from the meridian `lon0`, as `forward` gives it.
+        let (lat, lon): (f64, f64) = WGS84.direct(self.lat0, self.lon0, p.x.atan2(p.y).to_degrees(), p.x.hypot(p.y));
+        Coord::new(self.lon0 + wrap_lon(lon - self.lon0), lat)
     }
 }
 
@@ -377,28 +378,61 @@ mod tests {
 
     #[test]
     fn azimuthal_equidistant_keeps_distances_from_its_centre() {
-        let centre = Coord::new(10.0, 60.0);
-        let p = Aeqd::new(centre);
-        for (x, y) in [(10.0, 70.0), (-170.0, 80.0), (40.0, 20.0), (10.0, 60.0), (179.5, -30.0)] {
-            let c = Coord::new(x, y);
+        // Distances and azimuths on WGS 84 from GeographicLib (pyproj.Geod(ellps="WGS84").inv).
+        for (centre, (x, y), s12, azi1) in [
+            ((10.0, 60.0), (10.0, 70.0), 1_114_907.908_280, 0.0),
+            ((10.0, 60.0), (-170.0, 80.0), 4_464_718.767_198, 0.0),
+            ((10.0, 60.0), (40.0, 20.0), 5_037_117.406_299, 138.557_618_275_686),
+            ((10.0, 60.0), (179.5, -30.0), 16_578_966.423_682, 17.827_025_777_178),
+            ((2.3522, 48.8566), (-0.1276, 51.5072), 343_896.891_267, -30.048_593_801_903),
+        ] {
+            let (centre, c) = (Coord::new(centre.0, centre.1), Coord::new(x, y));
+            let p = Aeqd::new(centre);
             let m = p.forward(c);
-            assert!((m.x.hypot(m.y) - haversine_m(centre, c)).abs() < 1e-3, "{c:?}");
+            assert!((m.x.hypot(m.y) - s12).abs() < 1e-5, "{c:?}: {m:?}");
+            assert!((m.x.atan2(m.y).to_degrees() - azi1).abs() < 1e-9, "{c:?}: {m:?}");
             let back = p.inverse(m);
             assert!((back.x - x).abs() < 1e-9 && (back.y - y).abs() < 1e-9, "{c:?} → {back:?}");
         }
+        assert_eq!(Aeqd::new(Coord::new(10.0, 60.0)).forward(Coord::new(10.0, 60.0)), Coord::new(0.0, 0.0));
+        assert!((wgs84_distance_m(Coord::new(2.3522, 48.8566), Coord::new(-0.1276, 51.5072)) - 343_896.891_267).abs() < 1e-5);
+        // A tenth of a degree north from the equator is shorter than on the mean sphere, but not
+        // than on the sphere of the smallest radius of curvature.
+        let (a, b) = (Coord::new(0.0, 0.0), Coord::new(0.0, 0.1));
+        assert!(wgs84_distance_m(a, b) < haversine_m(a, b));
+        assert!(wgs84_distance_m(a, b) >= haversine_m(a, b) * WGS84_MIN_RADIUS_M / EARTH_RADIUS_M);
         // The inverse stays next to the centre's longitude rather than folding into −180..180.
-        assert!((Aeqd::new(Coord::new(179.0, 0.0)).inverse(Coord::new(300_000.0, 0.0)).x - 181.698).abs() < 1e-3);
+        assert!((Aeqd::new(Coord::new(179.0, 0.0)).inverse(Coord::new(300_000.0, 0.0)).x - 181.694_945_852_359).abs() < 1e-9);
+        // Centred on a pole, the azimuth is taken from the centre's meridian, both ways.
+        for pole in [90.0, -90.0] {
+            let p = Aeqd::new(Coord::new(25.0, pole));
+            for c in [Coord::new(25.0, pole * 0.9), Coord::new(-100.0, pole * 0.8), Coord::new(170.0, pole * 0.95)] {
+                let back = p.inverse(p.forward(c));
+                assert!((wrap_lon(back.x - c.x)).abs() < 1e-9 && (back.y - c.y).abs() < 1e-9, "{c:?} → {back:?}");
+            }
+        }
     }
 
     #[test]
     fn geodesic_destination_and_interpolation() {
-        let start = Coord::new(10.0, 60.0);
-        for az in [0.0, 45.0, 90.0, 180.0, 300.0] {
-            let d = geodesic_destination(start, az, 1_000_000.0);
-            assert!((haversine_m(start, d) - 1_000_000.0).abs() < 1e-3, "{az}: {d:?}");
+        // Destinations on WGS 84 from GeographicLib (pyproj.Geod(ellps="WGS84").fwd): 10 km from
+        // the equator and from 46.5° and 60°N (#888), 1,000 km from 60°N, and from either pole.
+        for (lon, lat, az, d, lon2, lat2) in [
+            (0.0, 0.0, 0.0, 10_000.0, 0.0, 0.090_436_946_951),
+            (0.0, 0.0, 90.0, 10_000.0, 0.089_831_528_412, 0.0),
+            (10.5, 46.5, 0.0, 10_000.0, 10.5, 46.589_958_829_711),
+            (10.5, 46.5, 90.0, 10_000.0, 10.630_271_666_436, 46.499_925_816_591),
+            (10.5, 46.5, 225.0, 10_000.0, 10.407_991_242_765, 46.436_351_607_689),
+            (30.0, 60.0, 90.0, 10_000.0, 30.179_211_026_165, 59.999_878_434_646),
+            (10.0, 60.0, 0.0, 1_000_000.0, 10.0, 68.969_947_795_748),
+            (10.0, 60.0, 300.0, 1_000_000.0, -7.552_217_029_942, 63.435_692_055_327),
+            (0.0, 90.0, 0.0, 1_000_000.0, 180.0, 81.046_232_815_951),
+            (0.0, -90.0, 90.0, 1_000_000.0, 90.0, -81.046_232_815_951),
+        ] {
+            let p = geodesic_destination(Coord::new(lon, lat), az, d);
+            // 1e-11° is about a micrometre.
+            assert!(wrap_lon(p.x - lon2).abs() < 1e-11 && (p.y - lat2).abs() < 1e-11, "{lon} {lat} {az}: {p:?}");
         }
-        let north = geodesic_destination(start, 0.0, 1_000_000.0);
-        assert!((north.x - 10.0).abs() < 1e-9 && north.y > 68.9, "{north:?}");
         let (a, b) = (Coord::new(2.3522, 48.8566), Coord::new(-0.1276, 51.5072));
         let mid = geodesic_interpolate(a, b, 0.5);
         assert!((haversine_m(a, mid) - haversine_m(mid, b)).abs() < 1e-3);
@@ -433,10 +467,12 @@ mod tests {
         let from = Coord::new(10.0, 60.0);
         for az in [0.0, 45.0, 90.0, 180.0, 270.0, 333.0] {
             let to = geodesic_destination(from, az, 500_000.0);
-            assert!((haversine_m(from, to) - 500_000.0).abs() < 1e-3, "{az}: {to:?}");
+            let m = Aeqd::new(from).forward(to);
+            assert!((m.x.hypot(m.y) - 500_000.0).abs() < 1e-6, "{az}: {to:?}");
+            assert!(wrap_lon(m.x.atan2(m.y).to_degrees() - az).abs() < 1e-9, "{az}: {to:?}");
         }
-        // North and east go where they say.
-        assert!((geodesic_destination(from, 0.0, 111_195.0).y - 61.0).abs() < 1e-3);
+        // North and east go where they say: 60° to 61°N is 111,420.728 m on WGS 84 (GeographicLib).
+        assert!((geodesic_destination(from, 0.0, 111_420.727_870).y - 61.0).abs() < 1e-9);
         assert!(geodesic_destination(from, 90.0, 1000.0).x > 10.0);
         // Longitudes stay continuous across the antimeridian, so the points around one centre
         // form one shape (Tissot's indicatrix draws its circles with them).
