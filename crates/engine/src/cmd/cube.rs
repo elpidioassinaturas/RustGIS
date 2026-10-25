@@ -134,6 +134,11 @@ impl TimeCube for Stack {
     fn label(&self) -> String {
         self.label.clone()
     }
+    /// The grid the slices are put on, known before any is read (or resampled).
+    fn size(&self) -> Option<(usize, usize)> {
+        let g = self.grid.as_ref().or_else(|| self.items.first().map(|(_, r, _)| r))?;
+        Some((g.width as usize, g.height as usize))
+    }
 }
 
 /// A Zarr variable along its time dimension.
@@ -589,9 +594,14 @@ impl TrendRun {
                 format!("{cells} cells × {n} dates is too long a run: take a smaller area, a coarser cell size or fewer dates{how}")
             })
         };
-        // A cube that knows its size is refused before it reads anything.
+        // A cube that knows its size is refused before it reads anything; one read whole (a stack,
+        // whose slices may be resampled) by its values too, which a cube read in pieces checks
+        // piece by piece.
         let whole = self.cube.size().map(|(w, h)| w.saturating_mul(h));
         if let Some(e) = whole.and_then(too_long) {
+            return Err(e);
+        }
+        if let Some(e) = whole.filter(|_| self.cube.pieces() <= 1).and_then(|cells| too_many_values(cells, n)) {
             return Err(e);
         }
         let need = self.min_valid.unwrap_or((n / 2).max(trend::MIN_VALUES)).max(trend::MIN_VALUES);
@@ -668,11 +678,8 @@ impl TrendRun {
             match &grid {
                 None => {
                     cells = vals.len();
-                    let values = (cells as u64).saturating_mul(n as u64);
-                    if values > MAX_VALUES {
-                        return Err(format!(
-                            "{cells} cells × {n} dates is {values} values, more than {MAX_VALUES}: take a smaller area or fewer dates"
-                        ));
+                    if let Some(e) = too_many_values(cells, n) {
+                        return Err(e);
                     }
                     if let Some(e) = too_long.and_then(|f| f(cells)) {
                         return Err(e);
@@ -775,6 +782,13 @@ impl TrendRun {
         }
         Ok(out)
     }
+}
+
+/// Why a block of `cells` × `n` dates is too large to read at once ([`MAX_VALUES`]), if it is.
+fn too_many_values(cells: usize, n: usize) -> Option<String> {
+    let values = (cells as u64).saturating_mul(n as u64);
+    (values > MAX_VALUES)
+        .then(|| format!("{cells} cells × {n} dates is {values} values, more than {MAX_VALUES}: take a smaller area or fewer dates"))
 }
 
 /// Reads piece `piece` of each of `steps`' slices and hands it to `place` with its place among the
@@ -1848,6 +1862,24 @@ mod tests {
         let half = GeoTransform { origin_x: -60.125, ..a };
         assert!(super::same_grid(&a, &hair));
         assert!(!super::same_grid(&a, &half));
+    }
+
+    /// A stack knows its size before any slice is read: the grid it is put on when its layers' grids
+    /// differ, whatever the earliest date's layer is; its first date's otherwise.
+    #[test]
+    fn a_stack_knows_its_size_before_reading() {
+        use super::TimeCube;
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        use std::sync::Arc;
+        let gt = GeoTransform { origin_x: -56.0, origin_y: -12.0, pixel_width: 0.01, pixel_height: -0.01 };
+        let raster = |w: u32, h: u32| {
+            Arc::new(Raster::new("r", w, h, vec![vec![0.0; (w * h) as usize]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap())
+        };
+        let (grid, early) = (raster(3, 2), raster(6, 4));
+        let mut stack = super::Stack::new(vec![(2.0, grid.clone(), 0), (1.0, early, 0)], "r".into());
+        assert_eq!(stack.size(), Some((6, 4)), "one grid: the first date's");
+        stack.grid = Some(grid);
+        assert_eq!(stack.size(), Some((3, 2)), "the grid the slices are put on");
     }
 
     /// Several readers place a cube's slices as they are read; in order, one reads them, in the
