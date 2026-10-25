@@ -9173,6 +9173,151 @@ fn a_stac_data_cube_on_the_time_slider() {
     assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
 }
 
+/// The data cube catalog (#683): its entries listed by theme, area and words; one opened as typing
+/// its values into `stac.addCube` would (its collection, band, range and cloud cap filled in, its
+/// last full year by default), or into `layer.addZarr` following the slider; `cube.trend` and
+/// `cube.reduce` taking one by `"cube"`; wrong requests refused before anything is added.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_catalog_entry_opens_as_its_command_would() {
+    use crate::render::rustgis_tiles::cubes;
+    let mut s = Session::new(Project::default());
+    let ids = |r: &Value| r["cubes"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let all = s.run("cube.catalog", &json!({})).unwrap();
+    assert_eq!(all["count"].as_u64(), Some(cubes::built_in().len() as u64));
+    assert_eq!(all["themes"].as_array().map(Vec::len), Some(cubes::THEMES.len()));
+    // MODIS over Piauí: the Brazil Data Cube's NDVI and EVI, each as the list holds it.
+    let modis = s.run("cube.catalog", &json!({"theme": "vegetation", "bbox": [-46, -11, -40, -2.5], "query": "MODIS"})).unwrap();
+    assert_eq!(ids(&modis), ["bdc-mod13q1-ndvi", "bdc-mod13q1-evi"]);
+    assert_eq!(modis["cubes"][0]["collection"], "mod13q1-6.1");
+    assert_eq!(modis["cubes"][0]["range"], json!([0.0, 0.9]));
+    // No area given is anywhere, not the map's extent.
+    assert!(!ids(&s.run("cube.catalog", &json!({"query": "era5"})).unwrap()).is_empty());
+    for bad in [json!({"theme": "forests"}), json!({"bbox": [1, 2]}), json!({"bbox": "here"})] {
+        assert!(s.run("cube.catalog", &bad).is_err(), "{bad}");
+    }
+    assert!(crate::cmd::tiles::NETWORK.contains(&"cube.open"), "a plugin needs the network permission to open a cube");
+    // A Zarr entry reaches as layer.addZarr does (a plugin needs files and network); the catalog
+    // itself is built in.
+    use crate::cmd::plugins::{Reach, reaches};
+    let spec = |id: &str| crate::cmd::all().into_iter().find(|c| c.id == id).unwrap();
+    assert_eq!(reaches(&spec("cube.open"), &json!({"id": "bdc-mod13q1-ndvi"})), Some(Reach::Network));
+    assert_eq!(reaches(&spec("cube.open"), &json!({"id": "era5-2m-temperature"})), Some(Reach::Files));
+    assert_eq!(reaches(&spec("cube.catalog"), &json!({"query": "ndvi"})), None);
+
+    // An entry over a local STAC API: opened, it makes the cube stac.addCube makes from its values.
+    let (cog, _) = serve_ranges(rustgis_data::raster::cog::example(512, 256));
+    let item = |id: &str, date: &str| {
+        format!(
+            r#"{{"type": "Feature", "id": "{id}", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+               "properties": {{"datetime": "{date}T00:00:00Z", "bdc:tiles": ["T1"]}},
+               "assets": {{"NDVI": {{"href": "{cog}/{id}.tif", "eo:bands": [{{"scale": 0.0001}}]}}}}}}"#
+        )
+    };
+    let features = [item("a1", "2024-01-01"), item("a2", "2024-01-17")].join(",");
+    let base = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{features}]}}"#))], 6);
+    let mut entry = cubes::find("bdc-mod13q1-ndvi").unwrap().clone();
+    entry.url = format!("{base}/v1");
+    entry.source = cubes::Source::Stac { collection: "cube".into(), asset: "NDVI".into() };
+    entry.bbox = [0.0, 40.0, 20.0, 50.0];
+    entry.start = "2023-05-01".into();
+    entry.end = Some("2024-12-31".into());
+    let area = json!({"bbox": [10, 45, 11, 46]});
+    let mut by_entry = Session::new(Project::default());
+    let r = crate::cmd::cube_catalog::open_entry(&mut by_entry, &entry, &area).unwrap();
+    // By default, the entry's last full year: 2024, as it ended that year.
+    assert_eq!(
+        (r["cube"].as_str(), r["start"].as_str(), r["end"].as_str()),
+        (Some("bdc-mod13q1-ndvi"), Some("2024-01-01"), Some("2024-12-31"))
+    );
+    assert_eq!((r["dates"].as_u64(), r["layers"].as_u64()), (Some(2), Some(1)), "{r}");
+    let mut typed = Session::new(Project::default());
+    typed
+        .run(
+            "stac.addCube",
+            &json!({"url": entry.url, "collection": "cube", "asset": "NDVI", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-12-31", "range": [0, 0.9]}),
+        )
+        .unwrap();
+    let urls = |s: &Session| s.map().tiles.iter().map(|t| t.time_urls.clone()).collect::<Vec<_>>();
+    assert_eq!(urls(&by_entry), urls(&typed), "the same files, the entry's range in stored values");
+    assert!(urls(&by_entry)[0].iter().all(|(_, u)| u.ends_with("#range=0,9000")));
+    // As one step: undone, the cube goes.
+    by_entry.run("edit.undo", &Value::Null).unwrap();
+    assert!(by_entry.map().tiles.is_empty());
+    // A range and a name given take the entry's place.
+    let r =
+        crate::cmd::cube_catalog::open_entry(&mut by_entry, &entry, &json!({"bbox": [10, 45, 11, 46], "range": [0, 0.5], "name": "NDVI"}))
+            .unwrap();
+    assert_eq!(r["layers"], 1);
+    assert!(by_entry.map().tiles[0].time_urls.iter().all(|(_, u)| u.ends_with("#range=0,5000")));
+    assert_eq!(by_entry.map().tiles[0].name, "NDVI");
+    // Refused before anything is added: an area the entry has no data in, a period outside its
+    // dates, one end of the period alone.
+    let tiles = by_entry.map().tiles.len();
+    for (bad, why) in [
+        (json!({"bbox": [100, 0, 101, 1]}), "has data in"),
+        (json!({"bbox": [10, 45, 11, 46], "start": "2020-01-01", "end": "2022"}), "runs from 2023-05-01 to 2024-12-31"),
+        (json!({"bbox": [10, 45, 11, 46], "start": "2025-01-01", "end": "2025-03-01"}), "runs from"),
+        (json!({"bbox": [10, 45, 11, 46], "start": "2024-01-01"}), "together"),
+    ] {
+        let e = crate::cmd::cube_catalog::open_entry(&mut by_entry, &entry, &bad).unwrap_err();
+        assert!(e.contains(why), "{bad}: {e}");
+    }
+    assert_eq!(by_entry.map().tiles.len(), tiles);
+
+    // A Zarr entry: its variable following the slider over the period, named after the entry.
+    let (dir, path) = zarr_store_over_time("catalog");
+    let mut zarr = cubes::find("era5-2m-temperature").unwrap().clone();
+    zarr.url = path;
+    zarr.start = "2001-01-01".into();
+    zarr.source = cubes::Source::Zarr { variable: "t".into() };
+    let mut z = Session::new(Project::default());
+    let r =
+        crate::cmd::cube_catalog::open_entry(&mut z, &zarr, &json!({"start": "2001-01-15", "end": "2001-12-31", "bbox": "view"})).unwrap();
+    let layer = z.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap();
+    assert_eq!(layer.name, zarr.name);
+    assert!(r["note"].as_str().unwrap().contains("read whole"), "{r}");
+    assert_eq!(z.run("time.info", &Value::Null).unwrap()["steps"], 2, "the two steps in the period");
+    // An end given as a year reaches its last moment, as for a STAC entry: all three steps of 2001.
+    let mut year = Session::new(Project::default());
+    crate::cmd::cube_catalog::open_entry(&mut year, &zarr, &json!({"start": "2001-01-01", "end": "2001"})).unwrap();
+    assert_eq!(year.run("time.info", &Value::Null).unwrap()["steps"], 3);
+    for k in ["range", "maxCloud"] {
+        let e = crate::cmd::cube_catalog::open_entry(&mut z, &zarr, &json!({k: 1})).unwrap_err();
+        assert!(e.contains("STAC entry's"), "{e}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+
+    // cube.open by id: an unknown one, none.
+    assert!(s.run("cube.open", &json!({"id": "nothing"})).unwrap_err().contains("cube.catalog"));
+    assert!(s.run("cube.open", &json!({})).is_err());
+
+    // cube.trend and cube.reduce take an entry by "cube": its values filled in, a cell size or
+    // cloud cap given kept; data named alongside it refused.
+    let p = json!({"cube": "bdc-s2-16d-ndvi", "cellSize": 100, "start": "2020"});
+    let q = crate::cmd::cube_catalog::with_entry(&p).unwrap();
+    assert_eq!(
+        (q["url"].as_str(), q["collection"].as_str(), q["asset"].as_str(), q["cellSize"].as_f64(), q["start"].as_str(), q.get("cube")),
+        (Some("https://data.inpe.br/bdc/stac/v1/"), Some("S2-16D-2"), Some("NDVI"), Some(100.0), Some("2020"), None)
+    );
+    let p = json!({"cube": "earth-search-s2-nir"});
+    let q = crate::cmd::cube_catalog::with_entry(&p).unwrap();
+    assert_eq!((q["cellSize"].as_f64(), q["maxCloud"].as_f64()), (Some(10.0), Some(20.0)));
+    let p = json!({"cube": "era5-soil-moisture"});
+    let q = crate::cmd::cube_catalog::with_entry(&p).unwrap();
+    assert_eq!(q["variable"], "volumetric_soil_water_layer_1");
+    assert!(q.get("collection").is_none() && q.get("cellSize").is_none());
+    for (cmd, extra) in [("cube.trend", json!({})), ("cube.reduce", json!({"stat": "mean"}))] {
+        for k in ["layer", "url", "collection"] {
+            let mut p = json!({"cube": "bdc-mod13q1-ndvi", k: "x"});
+            p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let e = s.run(cmd, &p).unwrap_err();
+            assert!(e.contains(&format!("leave out {k}")), "{cmd} {k}: {e}");
+        }
+        assert!(s.run(cmd, &json!({"cube": "nothing", "stat": "mean"})).unwrap_err().contains("cube.catalog"));
+    }
+}
+
 /// A search's `"bbox": "view"` is the map's view in any case or spacing, as the trend and the data
 /// cube read it; any other text is refused, never read as no area at all.
 #[test]

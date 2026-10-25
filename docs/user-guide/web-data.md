@@ -105,6 +105,66 @@ and band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentin
 rustgis-cli run --cmd 'stac.addCube={"url":"https://data.inpe.br/bdc/stac/v1","collection":"S2-16D-2","asset":"NDVI","bbox":[-55.9,-12.6,-55.5,-12.35],"start":"2024-08-01","end":"2025-06-30","range":[0,0.9]}' --cmd 'time.export={"path":"ndvi.gif"}'
 ```
 
+### A catalog of data cubes
+
+A data cube needs more than an API's address: the right collection and band, and often a range
+to show it with and a cell size to read it at. The catalog of data cubes lists cubes ready to
+open, each with those filled in, so none of them has to be looked up in a provider's catalog.
+There is no window for it yet; it is used from commands, scripts and the assistant.
+
+- **Finding a cube** (`cube.catalog`): by `"theme"` (vegetation, land cover, water, climate, ocean,
+  atmosphere or elevation), by area (`"bbox"`, or `"view"`: the entries with data there; with
+  neither, anywhere) and by words in the name, provider or id (`"query"`). Each entry gives its
+  provider, themes, area, period, step, resolution, source and licence, with a link to the
+  provider's page.
+- **Opening one** (desktop; `cube.open` with the entry's `"id"`): a STAC entry is added as
+  `stac.addCube` adds a cube, over the map's extent (or `"bbox"`), with the entry's collection,
+  band, range and cloud cover cap (`"range"` and `"maxCloud"` override the last two). A Zarr entry
+  is added as `layer.addZarr` adds a variable that follows the time slider; its variable is read
+  whole, whatever the area. The period is `"start"` and `"end"`, given together; with neither, it
+  is the entry's last full calendar year (the year before this one while the cube is kept up to
+  date). An end given as a day, a month or a year takes all of it, so an hourly variable's last day
+  is read whole. An area the entry has no data in, or a period outside its dates, is refused,
+  naming them. **Undo** takes the whole cube away.
+- **Its trend or summary:** Trend Analysis and the summary over time take an entry too
+  (`cube.trend` or `cube.reduce` with `"cube"`), filling in the collection's API, band, cell size
+  and cloud cap (a `"cellSize"` or `"maxCloud"` given is kept), or the Zarr store and variable.
+  Data named alongside it (`layer`, `url`, `collection`…) is refused, since the entry would take its
+  place.
+
+The entries, all public and read in place:
+
+| Provider | Cubes |
+|---|---|
+| [Brazil Data Cube](https://data.inpe.br/bdc/) (INPE) | MODIS NDVI and EVI (MOD13Q1 v6.1, 232 m, from 2000); the 16-day NDVI cubes of Sentinel-2 (10 m, from 2017), Landsat (30 m) and CBERS-4 WFI (64 m, from 2016) |
+| [Earth Search](https://element84.com/earth-search/) (Element 84) | Sentinel-2 L2A scenes' red and near-infrared bands (10 m, from 2015), searched with at most 20% cloud cover |
+| [ARCO-ERA5](https://cloud.google.com/storage/docs/public-datasets/era5) (Google Cloud, ECMWF) | hourly air temperature at 2 m, total precipitation and top-layer soil moisture (0.25°, from 1940), as a Zarr store the desktop reads |
+
+Only cubes RustGIS reads today are listed. Collections whose files sit behind signed addresses
+(Planetary Computer), need a sign-in (Copernicus Data Space, NASA Earthdata) or are only given as
+`s3://` addresses (Digital Earth Africa, Digital Earth Australia, the Copernicus DEM and Landsat on
+Earth Search) are left out until they can be read.
+
+An entry, as the list (`crates/tiles/src/cubes.json`) holds it; a cube is proposed by adding one:
+
+```json
+{"id": "bdc-mod13q1-ndvi", "name": "MODIS NDVI, 16-day composites (MOD13Q1 v6.1)",
+ "provider": "Brazil Data Cube (INPE)", "theme": ["vegetation"], "bbox": [-100, -60, -21.3, 20],
+ "start": "2000-02-18", "end": null, "step": "16 days", "resolution": "232 m",
+ "format": "stac", "url": "https://data.inpe.br/bdc/stac/v1/", "collection": "mod13q1-6.1",
+ "asset": "NDVI", "range": [0, 0.9], "cellSize": 232,
+ "license": "NASA LP DAAC: no restrictions on use", "about": "https://data.inpe.br/bdc/"}
+```
+
+A Zarr entry has `"format": "zarr"` and `"variable"` in place of `"collection"` and `"asset"`, and
+no `"range"`, `"cellSize"` or `"maxCloud"`. `"end"` is `null` while a cube is kept up to date. Every
+address is a web address (https or http), the dates are `YYYY-MM-DD`, and each id is in the list
+once; the list is checked when it is read.
+
+```sh
+rustgis-cli run --cmd 'cube.catalog={"theme":"vegetation","bbox":[-43,-6,-42.5,-5.5]}' --cmd 'cube.open={"id":"bdc-mod13q1-ndvi","bbox":[-43,-6,-42.5,-5.5]}'
+```
+
 ### Saved connections
 
 Once you have a STAC connection (Data Sources › Connections), its name appears in the API list at the top of STAC Search below the built-in APIs: picking it fills in the address and clears the collections and items of the previous one. Add From Service, Add From Database and S3 Buckets have the same **Saved connection** list for their kinds. An API you typed in by hand stays usable; once its collections are listed, **Save as Connection** keeps it under Data Sources › Connections (nothing is saved unless you click it, and never a password or key). Editing the address by hand drops the collections and items listed for the old one.

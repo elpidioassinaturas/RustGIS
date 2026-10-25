@@ -29,6 +29,8 @@ pub const NETWORK: &[&str] = &[
     "stac.search",
     "stac.addAsset",
     "stac.addCube",
+    // From the catalog entry's address (a Zarr entry also as `layer.addZarr`: plugins.rs).
+    "cube.open",
     "map.findPlace",
     "layer.geocode",
     "osm.download",

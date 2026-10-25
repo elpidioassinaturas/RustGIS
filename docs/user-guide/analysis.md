@@ -450,6 +450,10 @@ and a **Mann–Kendall** test of whether the trend is significant.
     command line); `cube.trend` waits for the search and the reads with no Cancel, the app with
     it, as for a Zarr store's address, so keep the area and period small there, or run a large
     one from the command line (see **Long runs** below).
+  - an entry of the catalog of data cubes (see [Web data](web-data.md)), by its id: `{"cube":
+    "bdc-mod13q1-ndvi", "bbox": [-46, -10.95, -40.35, -2.7], "start": "2001", "end": "2025"}`
+    fills in the collection's API, band, cell size and cloud cap, or a Zarr entry's store and
+    variable.
 
   The rasters have to be on one grid; put them on one first with Raster Functions › Resample.
 - **The test:** NDVI and temperature series are autocorrelated, which makes the plain test report
