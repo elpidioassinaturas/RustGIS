@@ -1062,7 +1062,13 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     }
     // Dates typed, a layer's or band's each in their order, apart by commas or semicolons (a date
     // can hold a space before its time): checked by the command, which says which it can't read.
-    let dates: Vec<&str> = f.dates.split([',', ';']).map(str::trim).filter(|d| !d.is_empty()).collect();
+    let parts: Vec<&str> = f.dates.split([',', ';']).map(str::trim).collect();
+    // An empty one before the last would move the dates after it onto other layers; a comma at
+    // the end is let be.
+    if parts.iter().rev().skip(1).any(|d| d.is_empty()) {
+        bad = Some(tl!("A date is missing between two commas").to_string());
+    }
+    let dates: Vec<&str> = parts.into_iter().filter(|d| !d.is_empty()).collect();
     if !dates.is_empty() {
         p["dates"] = json!(dates);
     }
