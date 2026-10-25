@@ -343,6 +343,10 @@ pub fn reaches(spec: &C, params: &Value) -> Option<Reach> {
     if spec.id == "gp.run" && ps(params, "tool").and_then(rustgis_analysis::tool).is_some_and(super::gp::reads_files) {
         return Some(Reach::Files);
     }
+    // A catalog's Zarr entry is opened as `layer.addZarr` is, a database's way.
+    if spec.id == "cube.open" && super::cube_catalog::opens_zarr(params) {
+        return Some(Reach::Files);
+    }
     // Commands that fetch from an address read and write no files, so `files` doesn't come into
     // it (their addresses would look like paths to the check below).
     if super::tiles::NETWORK.contains(&spec.id) {
@@ -369,7 +373,8 @@ fn refused(plugin: &Plugin, spec: &C, params: &Value) -> Option<String> {
         return Some(format!("plugins can't run '{}'", spec.id));
     }
     // An SQL query reads files and web addresses alike, and a database is a file or a server.
-    if DATABASES.contains(&spec.id) && !(m.has(Permission::Files) && m.has(Permission::Network)) {
+    let database = DATABASES.contains(&spec.id) || (spec.id == "cube.open" && super::cube_catalog::opens_zarr(params));
+    if database && !(m.has(Permission::Files) && m.has(Permission::Network)) {
         return Some(format!("{} needs the 'files' and 'network' permissions to run '{}'", m.name, spec.id));
     }
     match reaches(spec, params) {

@@ -420,3 +420,155 @@ fn what_rustgis_has_no_place_for_is_noted() {
     assert_eq!(report.notes.iter().find(|n| n.text.contains("draw effects")).map(|n| n.count), Some(1));
     assert!(!said("A", "repeated"), "a repeat distance of 0 is none");
 }
+
+/// A raster style file with `renderer` as its renderer and `pipe` after it in the pipe.
+fn raster_qml(renderer: &str, pipe: &str) -> String {
+    format!(
+        r#"<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'><qgis version="4.2.3" layerType="Raster"><pipe>{renderer}{pipe}</pipe><blendMode>0</blendMode></qgis>"#
+    )
+}
+
+#[test]
+fn raster_renderers_read_as_rustgis_raster_styles() {
+    use crate::raster::{RasterRenderer, Resampling, Stretch};
+    let read = |renderer: &str, pipe: &str| {
+        let mut report = Report::default();
+        let s = read_style(&raster_qml(renderer, pipe), "R", &mut report).unwrap();
+        (s, report)
+    };
+    // Pseudocolour, interpolated (SMV25's rock): a ramp from transparent white to grey over 0 to 1.
+    let (s, report) = read(
+        r##"<rasterrenderer type="singlebandpseudocolor" band="1" opacity="0.5" alphaBand="-1"><rastershader>
+          <colorrampshader colorRampType="INTERPOLATED" clip="0" minimumValue="0" maximumValue="1">
+            <item value="0" color="#ffffff" alpha="0" label="0"/><item value="1" color="#3f3f3f" alpha="255" label="1"/>
+          </colorrampshader></rastershader></rasterrenderer>"##,
+        r#"<brightnesscontrast brightness="51" contrast="-10" gamma="2"/><huesaturation saturation="0" grayscaleMode="0" colorizeOn="0" invertColors="0"/>
+           <provider><resampling enabled="true" zoomedInResamplingMethod="bilinear" zoomedOutResamplingMethod="nearestNeighbour"/></provider>"#,
+    );
+    let r = s.raster.unwrap();
+    let RasterRenderer::Stretch { band: 0, ramp, invert: false } = &r.renderer else { panic!("{:?}", r.renderer) };
+    assert_eq!((ramp.at(0.0).a(), ramp.at(1.0)), (0, Rgba::rgb(0x3f, 0x3f, 0x3f)));
+    assert_eq!(r.stretch, Stretch::custom(0.0, 1.0));
+    assert_eq!((r.brightness, r.contrast, r.gamma, r.resampling), (20.0, -10.0, 2.0, Resampling::Bilinear));
+    assert_eq!(s.transparency, Some(50.0));
+    assert!(report.notes.is_empty(), "{:?}", report.notes);
+
+    // Discrete: classes up to each entry's value, the last open-ended; values outside clipped.
+    let (s, _) = read(
+        r##"<rasterrenderer type="singlebandpseudocolor" band="2"><rastershader><colorrampshader colorRampType="DISCRETE" clip="1" minimumValue="400" maximumValue="600">
+            <item value="450" color="#ff0000"/><item value="500" color="#00ff00"/><item value="inf" color="#0000ff"/></colorrampshader></rastershader></rasterrenderer>"##,
+        "",
+    );
+    let r = s.raster.unwrap();
+    let RasterRenderer::Classify { band: 1, ramp, breaks, .. } = &r.renderer else { panic!("{:?}", r.renderer) };
+    assert_eq!((breaks.len(), breaks[0], breaks[1]), (3, 450.0, 500.0));
+    assert!(breaks[2].is_finite() && breaks[2] > 1e30, "inf kept as a number a project can hold");
+    assert_eq!((ramp.pick(0, 3), ramp.pick(2, 3)), (Rgba::rgb(255, 0, 0), Rgba::rgb(0, 0, 255)));
+    assert_eq!((r.mask.min, r.mask.max), (Some(400.0), Some(600.0)));
+
+    // Exact and paletted: a colour per value, sorted.
+    for renderer in [
+        r##"<rasterrenderer type="singlebandpseudocolor" band="1"><rastershader><colorrampshader colorRampType="EXACT">
+            <item value="7" color="#00ff00"/><item value="3" color="#ff0000"/></colorrampshader></rastershader></rasterrenderer>"##,
+        r##"<rasterrenderer type="paletted" band="1"><colorPalette><paletteEntry value="7" color="#00ff00" alpha="255"/><paletteEntry value="3" color="#ff0000" alpha="255"/></colorPalette></rasterrenderer>"##,
+    ] {
+        let (s, _) = read(renderer, "");
+        let r = s.raster.unwrap();
+        let RasterRenderer::UniqueValues { band: 0, values, .. } = &r.renderer else { panic!("{:?}", r.renderer) };
+        assert_eq!(values, &[(3.0, Rgba::rgb(255, 0, 0)), (7.0, Rgba::rgb(0, 255, 0))]);
+    }
+
+    // Grey: black to white, stretched to its enhancement's bounds; a value made transparent and
+    // a user no-data value hide those values.
+    let gray = r#"<rasterrenderer type="singlebandgray" grayBand="1" gradient="BlackToWhite"><rasterTransparency><singleValuePixelList>
+          <pixelListEntry min="-9999" max="-9999" percentTransparent="100"/><pixelListEntry min="1" max="5" percentTransparent="50"/></singleValuePixelList></rasterTransparency>
+          <contrastEnhancement><minValue>10</minValue><maxValue>200</maxValue><algorithm>StretchToMinimumMaximum</algorithm></contrastEnhancement></rasterrenderer>"#;
+    let qml = raster_qml(gray, "").replace(
+        "</qgis>",
+        r#"<noData><noDataList bandNo="1" useSrcNoData="1"><noDataRange min="0" max="0"/></noDataList></noData></qgis>"#,
+    );
+    let mut report = Report::default();
+    let r = read_style(&qml, "R", &mut report).unwrap().raster.unwrap();
+    let RasterRenderer::Stretch { ramp, .. } = &r.renderer else { panic!() };
+    assert_eq!((ramp.at(0.0), ramp.at(1.0)), (Rgba::rgb(0, 0, 0), Rgba::rgb(255, 255, 255)));
+    assert_eq!(r.stretch, Stretch::custom(10.0, 200.0));
+    assert_eq!(r.mask.values, [-9999.0, 0.0]);
+    assert!(report.notes.iter().any(|n| n.text.contains("in part")), "{:?}", report.notes);
+
+    // Multiband: RGB from 1-based bands, a stretch per band; a canvas-wide cut follows the view.
+    let (s, _) = read(
+        r#"<rasterrenderer type="multibandcolor" redBand="3" greenBand="2" blueBand="1">
+          <redContrastEnhancement><minValue>1</minValue><maxValue>2</maxValue><algorithm>StretchToMinimumMaximum</algorithm></redContrastEnhancement>
+          <greenContrastEnhancement><minValue>3</minValue><maxValue>4</maxValue><algorithm>StretchToMinimumMaximum</algorithm></greenContrastEnhancement>
+          <blueContrastEnhancement><minValue>5</minValue><maxValue>6</maxValue><algorithm>StretchToMinimumMaximum</algorithm></blueContrastEnhancement></rasterrenderer>"#,
+        "",
+    );
+    let r = s.raster.unwrap();
+    assert_eq!(r.renderer, RasterRenderer::Rgb { red: 2, green: 1, blue: 0 });
+    assert_eq!(r.stretch, Stretch::custom_bands([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]));
+    let (s, _) = read(
+        r#"<rasterrenderer type="singlebandgray" grayBand="1"><minMaxOrigin><limits>CumulativeCut</limits><extent>UpdatedCanvas</extent><cumulativeCutLower>0.02</cumulativeCutLower><cumulativeCutUpper>0.98</cumulativeCutUpper></minMaxOrigin>
+          <contrastEnhancement><minValue>10</minValue><maxValue>200</maxValue><algorithm>StretchToMinimumMaximum</algorithm></contrastEnhancement></rasterrenderer>"#,
+        "",
+    );
+    let r = s.raster.unwrap();
+    assert!(
+        r.dra && matches!(r.stretch, Stretch::PercentClip { low, high } if (low - 2.0).abs() < 1e-9 && (high - 2.0).abs() < 1e-9),
+        "{r:?}"
+    );
+
+    // Hillshade as shaded relief; hue and saturation and contours are noted.
+    let (s, report) = read(
+        r#"<rasterrenderer type="hillshade" band="1" azimuth="300" angle="35" zfactor="2" multidirection="0"/>"#,
+        r#"<huesaturation saturation="-30" grayscaleMode="0" colorizeOn="0" invertColors="0"/>"#,
+    );
+    assert_eq!(
+        s.raster.unwrap().renderer,
+        RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 300.0, altitude: 35.0, z_factor: 2.0 }
+    );
+    assert!(report.notes.iter().any(|n| n.text.contains("saturation")));
+    let (s, report) = read(r#"<rasterrenderer type="contour" band="1"/>"#, "");
+    assert!(s.raster.is_none() && report.notes.iter().any(|n| n.text.contains("contour")));
+    // Nonsense bands and values: nothing, without a crash, and noted.
+    for bad in [r#"<rasterrenderer type="singlebandgray" grayBand="0"/>"#, r#"<rasterrenderer type="paletted" band="99999999999"/>"#] {
+        let (s, report) = read(bad, "");
+        assert!(s.raster.is_none() && report.notes.iter().any(|n| n.text.contains("couldn't read")), "{bad}: {report:?}");
+    }
+}
+
+/// Every generated style and project in `testdata/qgis` reads, each project with its layers.
+#[test]
+fn every_corpus_file_reads() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/qgis");
+    let files = |dir: &str, extensions: &[&str]| {
+        let mut paths: Vec<_> = std::fs::read_dir(root.join(dir)).unwrap().map(|e| e.unwrap().path()).collect();
+        paths.retain(|path| path.is_file() && path.extension().and_then(|e| e.to_str()).is_some_and(|e| extensions.contains(&e)));
+        paths.sort();
+        paths
+    };
+    // Pin the corpus sizes so a regeneration cannot silently drop fixtures.
+    let styles = files("generated/qml", &["qml"]);
+    assert_eq!(styles.len(), 90, "style corpus changed: {styles:?}");
+    for path in &styles {
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut report = Report::default();
+        read_style(&text, "layer", &mut report).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    }
+    let projects = files("generated/qgs", &["qgs", "qgz"]);
+    assert_eq!(projects.len(), 21, "project corpus changed: {projects:?}");
+    for path in &projects {
+        let bytes = std::fs::read(path).unwrap();
+        let text = if path.extension().is_some_and(|e| e == "qgz") {
+            let entries = rustgis_data::zip::read_matching_within(&bytes, |n| n.ends_with(".qgs"), 64 << 20).unwrap();
+            String::from_utf8(entries.into_iter().next().unwrap().1).unwrap()
+        } else {
+            String::from_utf8(bytes).unwrap()
+        };
+        let dir = path.parent().unwrap().to_string_lossy().to_string();
+        let mut report = Report::default();
+        let project = read_project(&text, &dir, &mut report).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert!(!project.layers.is_empty(), "{}: no layers", path.display());
+        // The PostGIS and SQL Server projects' made-up password reaches neither the layers nor the notes.
+        assert!(!format!("{project:?} {report:?}").contains("secret"), "{}: the password came through", path.display());
+    }
+}

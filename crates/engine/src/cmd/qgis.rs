@@ -7,7 +7,7 @@ use rustgis_geom::{Coord, Extent};
 use rustgis_map::qgis::{self, NoteKind, Report, Source};
 use serde_json::{Value, json};
 
-use super::{need_feature_layer, ps};
+use super::{need_layer, ps};
 use crate::{CmdResult, CommandSpec as C, Session};
 
 pub fn commands() -> Vec<C> {
@@ -15,7 +15,7 @@ pub fn commands() -> Vec<C> {
         C::new("project.importQgis", "Import QGIS Project", "Project › Import", import_project).params(
             r#"{"path"?: "*.qgs|*.qgz", "text"?: "a .qgs file's text", "data"?: "a .qgs or .qgz file, base64", "dir"?: "the folder its relative paths start from (default: the file's)"} → the layers added and notes on what wasn't carried over"#,
         ),
-        C::new("style.importQgis", "Import QGIS Style", "Style › Styles", import_style).when(need_feature_layer).params(
+        C::new("style.importQgis", "Import QGIS Style", "Style › Styles", import_style).when(need_layer).params(
             r#"{"layer"?, "path"?: "*.qml", "text"?: "a .qml file's text", "data"?: "a .qml file, base64"} → notes on what wasn't carried over"#,
         ),
     ]
@@ -198,20 +198,13 @@ fn add_layer(s: &mut Session, layer: &qgis::ProjectLayer, has_dir: bool, report:
     let Some(l) = s.map_mut().layer_mut(id) else { return Err("the layer wasn't added".into()) };
     let added_name = l.name.clone();
     l.visible = layer.visible;
-    if l.is_raster() {
-        // A raster takes its opacity, visibility and scale range; its colouring is noted.
-        let st = &layer.style;
-        let t = st.transparency;
-        let (min, max) = (st.min_scale, st.max_scale);
-        if let Some(t) = t {
-            l.transparency = t;
+    if l.raster.is_some() {
+        // A raster takes its opacity, blending, scale range and colouring (when its bands are
+        // there).
+        if let Some(why) = l.raster.as_ref().and_then(|r| layer.style.raster_misfit(r)) {
+            report.skipped(name, why);
         }
-        if let Some(m) = min {
-            l.min_scale = m;
-        }
-        if let Some(m) = max {
-            l.max_scale = m;
-        }
+        layer.style.apply(l);
         return Ok(Some(added_name));
     }
     layer.style.apply(l);
@@ -336,7 +329,33 @@ fn import_style(s: &mut Session, p: &Value) -> CmdResult {
     let mut report = Report::default();
     let style = qgis::read_style(&text, &name, &mut report)?;
     let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
-    style.apply(l);
-    check_fields(l, &name, &mut report);
+    if l.raster.is_some() {
+        // A style that doesn't fit leaves the raster as it was, its opacity and scale range too.
+        if let Some(why) = l.raster.as_ref().and_then(|r| style.raster_misfit(r)) {
+            report.skipped(&name, why);
+        } else {
+            // Pixels still on their way (a remote raster) can't be checked: the style is applied,
+            // and a band it reads that the file hasn't is drawn from the file's last band.
+            if style.raster.is_some() && l.raster.as_ref().is_some_and(|r| r.data.is_none()) {
+                report.approximated(
+                    &name,
+                    "its raster colouring, applied before the raster's bands could be checked (a band the file hasn't is drawn from its last)",
+                );
+            }
+            if style.raster.is_none() && style.renderer.is_some() {
+                report.skipped(
+                    &name,
+                    "a feature layer's symbols and labels, which a raster hasn't (only its opacity and scale range are taken)",
+                );
+            }
+            style.apply(l);
+        }
+    } else {
+        if style.raster.is_some() && style.renderer.is_none() {
+            report.skipped(&name, "a raster's colouring, which a feature layer hasn't (only its opacity and scale range are taken)");
+        }
+        style.apply(l);
+        check_fields(l, &name, &mut report);
+    }
     Ok(json!({"notes": report.notes.iter().map(note_json).collect::<Vec<_>>()}))
 }

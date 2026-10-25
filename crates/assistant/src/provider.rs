@@ -165,8 +165,9 @@ impl std::fmt::Debug for Config {
 }
 
 impl Config {
-    /// The preset's defaults, with a key and base URL from the environment where set (for a
-    /// sign-in provider, the account signed in on this computer).
+    /// The preset's defaults, with a key and base URL from the environment where set. A sign-in
+    /// provider's account is not read here: its tokens are in the system keychain, which may block
+    /// (`chatgpt::load_any`, then [`Config::sign_in`]).
     pub fn from_env(provider: &str) -> Config {
         let p = preset(provider).unwrap_or(&PRESETS[0]);
         let env = |name: &str| std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
@@ -176,7 +177,7 @@ impl Config {
         if p.id == "ollama" && !base_url.trim_end_matches('/').ends_with("/v1") {
             base_url = format!("{}/v1", base_url.trim_end_matches('/'));
         }
-        let cfg = Config {
+        Config {
             provider: p.id.to_string(),
             base_url,
             model: p.model.to_string(),
@@ -189,26 +190,13 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .filter(|n| *n > 0)
                 .unwrap_or(crate::tools::DEFAULT_OUTPUT_TOKENS),
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut cfg = cfg;
-            if p.login
-                && let Some(t) = crate::chatgpt::load_any()
-            {
-                cfg.sign_in(&t);
-            }
-            cfg
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            cfg
         }
     }
 
-    /// Uses a signed-in account's access token.
+    /// Uses a signed-in account. The key only says that it is signed in, never a token:
+    /// `chatgpt::send` puts the current access token on each request.
     pub fn sign_in(&mut self, c: &crate::chatgpt::Credentials) {
-        self.key = if c.plan_allowed() { c.access_token.clone() } else { String::new() };
+        self.key = if c.plan_allowed() && c.signed_in() { crate::chatgpt::SIGNED_IN.to_string() } else { String::new() };
         self.client_id = c.client_id.clone();
         self.account = c.subject.clone();
         self.session = c.session.clone();

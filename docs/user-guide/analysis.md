@@ -136,13 +136,45 @@ named by `output`, and `<output>_variance`.
 
 **Spatial Join** (`spatialJoin`, also `gp.spatialJoin`) copies attributes from `join` features
 to `target` features. Layers may have different source coordinate systems: their geometry is
-stored in longitude/latitude before the join. `match` is **Intersects** (default),
-**Contains** (target contains join) or **Within** (target lies within join).
-**Join one to one** (the default `operation`) copies the first matching feature's attributes,
-not their sum or mean; **Join one to many** makes a row for each match. Both add `join_count`,
-the total matches for that target, and prefix joined fields with `join_` (change `prefix` to
-override it). `keepAll` defaults to **Keep all**, leaving unmatched joined values null; choose
-**Keep only matching** to drop those targets. Selections in both layers are honoured.
+stored in longitude/latitude before the join. `match` is one of:
+
+- **Intersects** (default), **Contains** (target contains join) or **Within** (target lies within
+  join).
+- **Have their center in**: the join features holding the target's interior point, the point
+  Feature To Point gives. A parcel a zone boundary crosses goes with the zone its point falls in.
+- **Largest overlap**: the one join polygon covering most of the target, by ground area for a
+  polygon target and ground length for a line. Polygons that only touch don't overlap. Equal
+  overlaps keep the join layer's order.
+- **Closest**: the one nearest join feature. A `distance` (in `units`, as for Buffer; Kilometers
+  by default) limits how far it looks, leaving targets with nothing that near unmatched; without
+  one, every target gets its nearest feature. Ties keep the join layer's order.
+- **Within a distance**: every join feature within `distance` (required), nearest first.
+
+Distances are on the ground, between the features' nearest points (edges and vertices alike),
+and are zero for features that intersect. `distanceField` names a field added for the distance
+to the joined feature, in `units`; it applies to **Closest** and **Within a distance** only, as
+`distance` does, and the Tools pane shows them only for those.
+
+**Join one to one** (the default `operation`) copies the first matching feature's attributes;
+**Join one to many** makes a row for each match. Both add `join_count`, the total matches for
+that target (one at most for Largest overlap and Closest), and prefix joined fields with `join_`
+(change `prefix` to override it). `keepAll` defaults to **Keep all**, leaving unmatched joined
+values null; choose **Keep only matching** to drop those targets. Selections in both layers are
+honoured.
+
+In a one-to-one join, `merge` combines the values of all the matches instead of taking the
+first: a list such as `[{"field": "units", "rule": "sum"}, {"field": "name", "rule": "join",
+"delimiter": "; "}]` naming join fields. The rules are `first` (the default for fields without a
+rule), `last`, `sum` and `mean` (numeric fields), `min` and `max` (numbers or text), `count` (the
+matches with a value) and `join` (the values as text, separated by `delimiter`, `, ` by default).
+Every rule but `first` and `last` skips empty values. A target without matches gets empty
+values, except a `count` of 0. `mean` writes a decimal field, `count` a whole number and `join`
+text. The `sum` of a whole-number field adds its whole numbers, and is empty when too large to
+hold. For example, the total units permitted in each district:
+
+```text
+gp.run={"tool":"spatialJoin","params":{"target":"districts","join":"permits","merge":[{"field":"units","rule":"sum"}]}}
+```
 
 <figure markdown="span">
   ![Tissot's indicatrix on the Robinson projection: circles of 800 km every 30°, stretched and sheared toward the poles](https://assets.rustgis.app/images/tissot.webp)
@@ -456,6 +488,10 @@ and a **Mann–Kendall** test of whether the trend is significant.
     command line); `cube.trend` waits for the search and the reads with no Cancel, the app with
     it, as for a Zarr store's address, so keep the area and period small there, or run a large
     one from the command line (see **Long runs** below).
+  - an entry of the catalog of data cubes (see [Web data](web-data.md)), by its id: `{"cube":
+    "bdc-mod13q1-ndvi", "bbox": [-46, -10.95, -40.35, -2.7], "start": "2001", "end": "2025"}`
+    fills in the collection's API, band, cell size and cloud cap, or a Zarr entry's store and
+    variable.
 - **The test:** NDVI and temperature series are autocorrelated, which makes the plain test report
   too many significant cells, so the default is the **modified Mann–Kendall** test of **Hamed &
   Rao (1998)**: the variance of S is corrected by the autocorrelation of the detrended series'

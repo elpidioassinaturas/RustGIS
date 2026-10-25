@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 rustgis-engine = { workspace = true, features = ["geolibre"] }
 rustgis-ui-egui = { workspace = true }
+# The ChatGPT sign-in, given the keychain at start-up.
+rustgis-assistant = { workspace = true }
 eframe = { workspace = true, features = ["clipboard", "default_fonts", "links", "wgpu", "accesskit", "wayland", "x11"] }
 egui = { workspace = true }
 serde_json = { workspace = true }

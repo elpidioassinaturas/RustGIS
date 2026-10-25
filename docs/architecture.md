@@ -74,6 +74,22 @@ browser and the CLI, where callers keep a secret for the session only, as before
   the requested bucket's explicit-grant status. Copy only that login and grant boolean, not
   the grant list; parse and validate addresses and prepare signatures outside the lock.
   Keychain calls and network I/O never run under the registry lock.
+- **ChatGPT sign-in.** The desktop app gives its store to `chatgpt::set_secret_store` at start.
+  The keychain keeps only each registration's refresh token, `chatgpt/<client_id>/<subject>`,
+  with the `rev` its entry in `chatgpt-auth.json` names (any other is out of date and never
+  used), without the access and id tokens, to stay within Windows Credential Manager's 2560 bytes
+  of UTF-16 (a real refresh token's length is not verified yet). Access and id
+  tokens stay with the process that got them; a process without one renews first. The keychain
+  is read only to renew, sign out or remove, under the file's `store-lock` (and, to renew, the
+  `renewal-lock`), so a rotating refresh token is never used twice. The entry's `keychain` flag is
+  set before the first keychain write and cleared after a delete, so removal never strands an
+  item. Tokens the keychain couldn't keep stay in memory for the session, with an empty `rev`; a
+  new sign-in never replaces one the keychain holds. Tokens from an earlier version's file leave it
+  only after the keychain has taken them. `Config::from_env` never reads the sign-in, and a
+  configuration's key is a marker (`chatgpt::SIGNED_IN`), never a token: `chatgpt::send`
+  authorizes each request. The Assistant reads the sign-in on a worker (startup, switching to the
+  provider, after a failed request) bound to the selection that started it, and requests wait for
+  it.
 - **macOS.** The system asks again for access when the app's code signature changes, which
   happens with unsigned or re-signed builds.
 - **Tests.** Use `MemorySecrets`, and `MemorySecrets::failing(..)` for error paths. The desktop

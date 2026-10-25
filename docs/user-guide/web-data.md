@@ -95,6 +95,14 @@ and band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentin
   scale and offset turn it into the files' stored values. Without one, each file is stretched on
   its own, between its 2nd and 98th percentiles.
 - **Saved with the project:** each tile's dates and addresses.
+- **Files in public buckets:** a collection whose items give their files as `s3://` addresses
+  (Digital Earth Australia, Digital Earth Africa, the Copernicus DEM on Earth Search) is read
+  from AWS at the files' web addresses. Reads are anonymous unless an S3 connection explicitly
+  names the bucket, in which case its credentials are used, as for other S3 reads. A
+  bucket in a region AWS's global endpoint doesn't reach (Digital Earth Africa's, in Cape Town) is
+  read at its own region's, found by reading one byte of its first file. Without a matching
+  connection, a bucket that refuses anonymous reads (a private one, or one that charges the
+  reader, as Landsat's does) is refused, naming it.
 - **Web app:** creating a cube with **Add as Time Series** is desktop-only. Saved cube tile
   layers can draw in the web app when their servers allow browser requests (CORS).
 - **Its trend:** the same search, given to Trend Analysis (`cube.trend` with `collection`,
@@ -103,6 +111,68 @@ and band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentin
 
 ```sh
 rustgis-cli run --cmd 'stac.addCube={"url":"https://data.inpe.br/bdc/stac/v1","collection":"S2-16D-2","asset":"NDVI","bbox":[-55.9,-12.6,-55.5,-12.35],"start":"2024-08-01","end":"2025-06-30","range":[0,0.9]}' --cmd 'time.export={"path":"ndvi.gif"}'
+```
+
+### A catalog of data cubes
+
+A data cube needs more than an API's address: the right collection and band, and often a range
+to show it with and a cell size to read it at. The catalog of data cubes lists cubes ready to
+open, each with those filled in, so none of them has to be looked up in a provider's catalog.
+There is no window for it yet; it is used from commands, scripts and the assistant.
+
+- **Finding a cube** (`cube.catalog`): by `"theme"` (vegetation, land cover, water, climate, ocean,
+  atmosphere or elevation), by area (`"bbox"`, or `"view"`: the entries with data there; with
+  neither, anywhere) and by words in the name, provider or id (`"query"`). Each entry gives its
+  provider, themes, area, period, step, resolution, source and licence, with a link to the
+  provider's page.
+- **Opening one** (desktop; `cube.open` with the entry's `"id"`): a STAC entry is added as
+  `stac.addCube` adds a cube, over the map's extent (or `"bbox"`), with the entry's collection,
+  band, range and cloud cover cap (`"range"` and `"maxCloud"` override the last two). A Zarr entry
+  is added as `layer.addZarr` adds a variable that follows the time slider; its variable is read
+  whole, but an area given must meet the entry's. The period is `"start"` and `"end"`, given together; with neither, it
+  is the entry's last full calendar year (the year before this one while the cube is kept up to
+  date). An end given as a day, a month or a year takes all of it, so an hourly variable's last day
+  is read whole. An area the entry has no data in, or a period outside its dates, is refused,
+  naming them. **Undo** takes the whole cube away.
+- **Its trend or summary:** Trend Analysis and the summary over time take an entry too
+  (`cube.trend` or `cube.reduce` with `"cube"`), filling in the collection's API, band, cell size
+  and cloud cap (a `"cellSize"` or `"maxCloud"` given is kept), or the Zarr store and variable.
+  Data named alongside it (`layer`, `url`, `collection`…) is refused, since the entry would take its
+  place.
+
+The entries, all public and read in place:
+
+| Provider | Cubes |
+|---|---|
+| [Brazil Data Cube](https://data.inpe.br/bdc/) (INPE) | MODIS NDVI and EVI (MOD13Q1 v6.1, 232 m, from 2000); the 16-day NDVI cubes of Sentinel-2 (10 m, from 2017), Landsat (30 m) and CBERS-4 WFI (64 m, from 2016) |
+| [Earth Search](https://element84.com/earth-search/) (Element 84) | Sentinel-2 L2A Collection 1 scenes' red and near-infrared bands (10 m, from 2015), searched with at most 20% cloud cover; the Copernicus DEM GLO-30 (one date) |
+| [Digital Earth Australia](https://www.dea.ga.gov.au/) and [Digital Earth Africa](https://www.digitalearthafrica.org/) | the yearly frequency of water seen by Landsat (30 m, from 1986 and 1984) |
+| [ARCO-ERA5](https://cloud.google.com/storage/docs/public-datasets/era5) (Google Cloud, ECMWF) | hourly air temperature at 2 m, total precipitation and top-layer soil moisture (0.25°, from 1940), as a Zarr store the desktop reads |
+
+Only cubes RustGIS reads today are listed. Collections whose files sit behind signed addresses
+(Planetary Computer), need a sign-in (Copernicus Data Space, NASA Earthdata) or charge the reader
+(Landsat Collection 2 on Earth Search) are left out. Digital Earth Australia's catalog sits behind
+a firewall that may ask a program making many requests in a row for a browser check for a while;
+its searches then fail until it lets them through again.
+
+An entry, as the list (`crates/tiles/src/cubes.json`) holds it; a cube is proposed by adding one:
+
+```json
+{"id": "bdc-mod13q1-ndvi", "name": "MODIS NDVI, 16-day composites (MOD13Q1 v6.1)",
+ "provider": "Brazil Data Cube (INPE)", "theme": ["vegetation"], "bbox": [-100, -60, -21.3, 20],
+ "start": "2000-02-18", "end": null, "step": "16 days", "resolution": "232 m",
+ "format": "stac", "url": "https://data.inpe.br/bdc/stac/v1/", "collection": "mod13q1-6.1",
+ "asset": "NDVI", "range": [0, 0.9], "cellSize": 232,
+ "license": "NASA LP DAAC: no restrictions on use", "about": "https://data.inpe.br/bdc/"}
+```
+
+A Zarr entry has `"format": "zarr"` and `"variable"` in place of `"collection"` and `"asset"`, and
+no `"range"`, `"cellSize"` or `"maxCloud"`. `"end"` is `null` while a cube is kept up to date. Every
+address is a web address (https or http), the dates are `YYYY-MM-DD`, and each id is in the list
+once; the list is checked when it is read.
+
+```sh
+rustgis-cli run --cmd 'cube.catalog={"theme":"vegetation","bbox":[-43,-6,-42.5,-5.5]}' --cmd 'cube.open={"id":"bdc-mod13q1-ndvi","bbox":[-43,-6,-42.5,-5.5]}'
 ```
 
 ### Saved connections

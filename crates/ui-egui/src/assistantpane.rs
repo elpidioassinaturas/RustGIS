@@ -72,6 +72,10 @@ pub struct AssistantState {
     /// A sign-out's revocation at OpenAI, under way (desktop only).
     #[cfg(not(target_arch = "wasm32"))]
     signout: Option<Slot<Result<(), rustgis_assistant::Error>>>,
+    /// The ChatGPT sign-in, being read on a worker: its tokens are in the system keychain, which
+    /// may block or ask (desktop only).
+    #[cfg(not(target_arch = "wasm32"))]
+    sign_in_read: Option<SignInRead>,
     /// The first sign-in's confirmation that the ChatGPT plan is in use, until dismissed.
     welcome: bool,
     /// A failed request to send again: its generation and when.
@@ -175,7 +179,11 @@ fn ensure_loaded(app: &mut RustGisApp, ctx: &egui::Context) {
         cfg.model = m.trim().to_string();
     }
     #[cfg(not(target_arch = "wasm32"))]
-    let loading = app.assistant.keys.loading(&provider);
+    if cfg.login() {
+        read_sign_in(app, None, ctx);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let loading = reading(app, &provider);
     #[cfg(target_arch = "wasm32")]
     let loading = false;
     if !loading {
@@ -185,10 +193,6 @@ fn ensure_loaded(app: &mut RustGisApp, ctx: &egui::Context) {
     if loading {
         app.assistant.settings_pending = Some(provider);
     }
-    if cfg.login() && !cfg.key.is_empty() {
-        app.assistant.account = signed_in_account();
-    }
-    app.assistant.catalog_pending = cfg.login() && !cfg.key.is_empty();
     let mut agent = Agent::new(cfg, &app.session);
     app.assistant.local_agents = pref(app, "assistant_local_agents").as_deref() == Some("on");
     #[cfg(not(target_arch = "wasm32"))]
@@ -256,16 +260,78 @@ fn sync_skills(app: &mut RustGisApp, force: bool) {
     }
 }
 
-/// The ChatGPT account signed in on this computer, as its verified id token named it.
-fn signed_in_account() -> Option<chatgpt::Account> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        chatgpt::account()
+/// A sign-in read under way: the account it checks (`None`: take whichever is selected) and
+/// where the worker leaves what it read.
+#[cfg(not(target_arch = "wasm32"))]
+type SignInRead = (Option<chatgpt::Binding>, Slot<Option<chatgpt::Credentials>>);
+
+/// Starts reading the selected ChatGPT sign-in on a worker; [`poll_sign_in`] applies it. With
+/// `checking`, it only says whether that sign-in is still there (after a failed request).
+#[cfg(not(target_arch = "wasm32"))]
+fn read_sign_in(app: &mut RustGisApp, checking: Option<chatgpt::Binding>, ctx: &egui::Context) {
+    let slot: Slot<Option<chatgpt::Credentials>> = Slot::default();
+    let (out, ctx) = (slot.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let c = chatgpt::load_any();
+        if let Ok(mut s) = out.lock() {
+            *s = Some(c);
+        }
+        ctx.request_repaint();
+    });
+    app.assistant.sign_in_read = Some((checking, slot));
+}
+
+/// Applies a finished sign-in read, if the sign-in provider is still the one chosen (account
+/// actions drop a read begun before them). A check after a failed request never takes another
+/// account; when its sign-in is gone (expired, revoked, signed out elsewhere) the key is cleared
+/// and the settings open to sign in again. A read taking the selected account goes through
+/// [`apply_config`], which stops work bound to another account, and loads the new catalog.
+#[cfg(not(target_arch = "wasm32"))]
+fn poll_sign_in(app: &mut RustGisApp, ctx: &egui::Context) {
+    let Some((checking, slot)) = app.assistant.sign_in_read.as_ref() else { return };
+    let Some(read) = slot.lock().ok().and_then(|mut s| s.take()) else { return };
+    let checking = checking.clone();
+    app.assistant.sign_in_read = None;
+    let Some(cfg) = app.assistant.agent.as_ref().map(|a| a.config.clone()).filter(Config::login) else { return };
+    let usable = read.filter(|c| c.signed_in() && c.plan_allowed());
+    if let Some(binding) = checking {
+        // Still signed in, or another account selected and signed in (requests for this one
+        // then fail with "the account changed", and the user chooses): nothing to clear.
+        let signed_in_somewhere = usable.is_some();
+        if signed_in_somewhere || cfg.binding() != binding || cfg.key.is_empty() {
+            return;
+        }
+        // The same as signing out here: no key, account or catalog, and a model list still on
+        // its way is dropped.
+        let mut next = cfg;
+        forget_sign_in(app, &mut next);
+        apply_config(app, next);
+        app.assistant.settings = true;
+        return;
     }
-    #[cfg(target_arch = "wasm32")]
-    {
-        None
+    let mut next = cfg.clone();
+    match &usable {
+        Some(c) => next.sign_in(c),
+        None => next.key.clear(),
     }
+    if next == cfg {
+        return;
+    }
+    apply_config(app, next.clone());
+    app.assistant.account = usable.map(|c| c.account());
+    app.assistant.models.clear();
+    app.assistant.catalog.clear();
+    app.assistant.models_error = None;
+    app.assistant.models_slot = None;
+    if !next.key.is_empty() {
+        list_models(app, &next, ctx);
+    }
+}
+
+/// Whether the provider's key or sign-in is still being read (off the frame).
+#[cfg(not(target_arch = "wasm32"))]
+fn reading(app: &RustGisApp, provider: &str) -> bool {
+    app.assistant.keys.loading(provider) || (provider::preset(provider).is_some_and(|p| p.login) && app.assistant.sign_in_read.is_some())
 }
 
 /// Persists ordinary settings; desktop secrets are queued for the keychain worker.
@@ -323,7 +389,7 @@ fn poll_keys(app: &mut RustGisApp, ctx: &egui::Context) {
         agent.config.key = key.to_string();
     }
     if let Some(provider) = app.assistant.settings_pending.as_deref()
-        && !app.assistant.keys.loading(provider)
+        && !reading(app, provider)
     {
         let cfg = app.assistant.agent.as_ref().filter(|a| a.config.provider == provider).map(|a| a.config.clone());
         app.assistant.settings_pending = None;
@@ -418,6 +484,7 @@ fn apply_config(app: &mut RustGisApp, cfg: Config) {
 /// A ChatGPT account signed in: the assistant uses its plan from now on.
 #[cfg(not(target_arch = "wasm32"))]
 fn signed_in(app: &mut RustGisApp, c: &chatgpt::Credentials, ctx: &egui::Context) {
+    app.assistant.sign_in_read = None;
     app.assistant.account = Some(c.account());
     app.assistant.login_error = None;
     let saved = chatgpt::accounts().unwrap_or_default();
@@ -446,22 +513,15 @@ fn signed_in(app: &mut RustGisApp, c: &chatgpt::Credentials, ctx: &egui::Context
 }
 
 /// After a failed request: when the sign-in on this computer no longer has tokens (they expired
-/// or were revoked), the settings say so and offer to sign in again.
-fn sync_sign_in(app: &mut RustGisApp) {
+/// or were revoked), the settings say so and offer to sign in again (read off the frame).
+fn sync_sign_in(app: &mut RustGisApp, ctx: &egui::Context) {
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(a) = app.assistant.agent.as_mut()
-        && a.config.login()
-        && !a.config.key.is_empty()
-        && chatgpt::load().is_none()
+    if let Some(binding) = app.assistant.agent.as_ref().filter(|a| a.config.login() && !a.config.key.is_empty()).map(|a| a.config.binding())
     {
-        a.config.key.clear();
-        app.assistant.account = None;
-        app.assistant.welcome = false;
-        app.assistant.settings = true;
-        app.assistant.accounts = None;
+        read_sign_in(app, Some(binding), ctx);
     }
     #[cfg(target_arch = "wasm32")]
-    let _ = app;
+    let _ = (app, ctx);
 }
 
 fn take(slot: &Reply) -> Option<Result<HttpResponse, rustgis_assistant::Error>> {
@@ -515,6 +575,8 @@ fn with_agent(app: &mut RustGisApp, f: impl FnOnce(&mut Agent, &mut rustgis_engi
 pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
     #[cfg(not(target_arch = "wasm32"))]
     poll_keys(app, ctx);
+    #[cfg(not(target_arch = "wasm32"))]
+    poll_sign_in(app, ctx);
     if app.assistant.catalog_pending
         && let Some(cfg) = app.assistant.agent.as_ref().map(|a| a.config.clone())
     {
@@ -556,7 +618,7 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
             follow(app, step, ctx);
         }
         if failed {
-            sync_sign_in(app);
+            sync_sign_in(app, ctx);
         }
     }
     // Agent threads on this computer: what they did, asked and reported.
@@ -609,7 +671,7 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
             }
             Err(e) => {
                 app.assistant.models_error = Some(e);
-                sync_sign_in(app);
+                sync_sign_in(app, ctx);
             }
         }
     }
@@ -656,7 +718,7 @@ fn send(app: &mut RustGisApp, text: String, ctx: &egui::Context) {
 fn key_loading(app: &RustGisApp) -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        app.assistant.agent.as_ref().is_some_and(|a| app.assistant.keys.loading(&a.config.provider))
+        app.assistant.agent.as_ref().is_some_and(|a| reading(app, &a.config.provider))
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -765,6 +827,8 @@ fn composer_panel(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, busy: bool, ctx
 
 /// Edits provider settings and invalidates pending key reads as soon as a key changes.
 fn settings(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    #[cfg(not(target_arch = "wasm32"))]
+    poll_sign_in(app, ui.ctx());
     let Some(mut cfg) = app.assistant.agent.as_ref().map(|a| a.config.clone()) else { return };
     let before = (cfg.clone(), app.assistant.remember_key);
     let open = !app.assistant.provider_closed;
@@ -850,10 +914,9 @@ fn provider_settings(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, cfg: &mut Co
                         app.assistant.catalog.clear();
                         app.assistant.models_error = None;
                         app.assistant.login_error = None;
-                        if cfg.login() && !cfg.key.is_empty() {
-                            app.assistant.account = signed_in_account();
-                            let ctx = ui.ctx().clone();
-                            list_models(app, cfg, &ctx);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if cfg.login() {
+                            read_sign_in(app, None, ui.ctx());
                         }
                     }
                 }
@@ -942,9 +1005,7 @@ fn provider_settings(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, cfg: &mut Co
     let preset = provider::preset(&cfg.provider);
     let mut notes = Vec::new();
     if cfg.login() {
-        notes.push(
-            tl!("The sign-in is kept in the app's settings folder, for your user account only, and never in a project file.").to_string(),
-        );
+        notes.push(sign_in_storage_note(app.assistant.account.as_ref().filter(|_| !cfg.key.is_empty())));
         notes.push(tl!("Requests go to the OpenAI API and use your ChatGPT plan.").to_string());
     } else {
         ui.checkbox(&mut app.assistant.remember_key, tl!("Remember the key on this computer"));
@@ -971,6 +1032,20 @@ fn provider_settings(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, cfg: &mut Co
     if let Some(e) = &app.assistant.login_error {
         show_error(ui, e, t);
     }
+}
+
+/// Where the ChatGPT sign-in is kept, as truthfully as is known.
+fn sign_in_storage_note(account: Option<&chatgpt::Account>) -> String {
+    match account.map(|a| a.kept) {
+        Some(chatgpt::Kept::SettingsFile) => tl!(
+            "The sign-in is still kept in the app's settings folder, readable by your user account: the system keychain is unavailable, so it hasn't been moved there yet."
+        ),
+        Some(chatgpt::Kept::Session) => tl!(
+            "The system keychain is unavailable, so this sign-in won't be remembered: it lasts until RustGIS closes."
+        ),
+        _ => tl!("The sign-in is kept in the system keychain, never in the app's settings or a project file."),
+    }
+    .to_string()
 }
 
 /// Describes actual storage, including a legacy key retained after a failed migration.
@@ -1042,6 +1117,8 @@ fn account_row(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, cfg: &mut Config) 
             if ui.selectable_label(selected, account.label()).clicked() {
                 app.assistant.accounts = None;
                 app.assistant.duplicate = false;
+                // A read begun before this choice must not undo it.
+                app.assistant.sign_in_read = None;
                 match chatgpt::select(&account.client_id, &account.subject) {
                     Ok(c) => {
                         cfg.sign_in(&c);
@@ -1072,24 +1149,38 @@ fn account_row(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, cfg: &mut Config) 
         start_login(app, cfg, true);
         return;
     }
+    let selected = active.map(|c| (c.client_id.clone(), c.subject.clone()));
+    if let Some((client_id, subject)) = selected
+        && ui
+            .small_button(tl!("Remove account"))
+            .on_hover_text(tl!("Signs this account out and forgets it on this computer, with its saved sign-in."))
+            .clicked()
+    {
+        match chatgpt::remove(&client_id, &subject) {
+            Ok(revocation) => {
+                revoke_later(app, revocation, ui.ctx());
+                forget_sign_in(app, cfg);
+                cfg.client_id.clear();
+                cfg.account.clear();
+                cfg.session.clear();
+            }
+            Err(e) => app.assistant.login_error = Some(e.auth_context()),
+        }
+        return;
+    }
     if !cfg.key.is_empty() {
         let who = app.assistant.account.as_ref().map(|a| a.email.clone()).filter(|e| !e.is_empty());
         ui.label(RichText::new(who.unwrap_or_else(|| tl!("signed in").to_string())).small());
         if ui.small_button(tl!("Sign out")).clicked() {
             match chatgpt::sign_out_selected(&cfg.binding()) {
-                Ok(revocation) => {
-                    // Revoking the session at OpenAI is network I/O: off the frame.
-                    if let Some(r) = revocation {
-                        let slot: Slot<Result<(), rustgis_assistant::Error>> = Slot::default();
-                        let (out, ctx) = (slot.clone(), ui.ctx().clone());
-                        std::thread::spawn(move || {
-                            let result = chatgpt::revoke(&r);
-                            if let Ok(mut s) = out.lock() {
-                                *s = Some(result);
-                            }
-                            ctx.request_repaint();
-                        });
-                        app.assistant.signout = Some(slot);
+                Ok(out) => {
+                    revoke_later(app, out.revocation, ui.ctx());
+                    forget_sign_in(app, cfg);
+                    if out.unrevoked.is_some() {
+                        app.assistant.login_error = Some(
+                            tl!("Signed out on this computer, but the system keychain couldn't be read, so OpenAI wasn't asked to end the session. You can disconnect RustGIS in ChatGPT's settings.")
+                                .into(),
+                        );
                     }
                 }
                 Err(e) => {
@@ -1097,13 +1188,6 @@ fn account_row(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, cfg: &mut Config) 
                     return;
                 }
             }
-            app.assistant.models_slot = None;
-            cfg.key.clear();
-            app.assistant.account = None;
-            app.assistant.models.clear();
-            app.assistant.catalog.clear();
-            app.assistant.welcome = false;
-            app.assistant.accounts = None;
         }
         if app.assistant.duplicate {
             ui.label(
@@ -1119,6 +1203,40 @@ fn account_row(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, cfg: &mut Config) 
     }
 }
 
+/// Revokes a signed-out session at OpenAI: network I/O, off the frame.
+#[cfg(not(target_arch = "wasm32"))]
+fn revoke_later(app: &mut RustGisApp, revocation: Option<chatgpt::Revocation>, ctx: &egui::Context) {
+    let Some(r) = revocation else { return };
+    let slot: Slot<Result<(), rustgis_assistant::Error>> = Slot::default();
+    let (out, ctx) = (slot.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let result = chatgpt::revoke(&r);
+        if let Ok(mut s) = out.lock() {
+            *s = Some(result);
+        }
+        ctx.request_repaint();
+    });
+    app.assistant.signout = Some(slot);
+}
+
+/// After signing out or removing the account: no tokens, no catalog, and nothing waiting to be
+/// sent with them (a queued message goes back to the input box, not to the provider).
+#[cfg(not(target_arch = "wasm32"))]
+fn forget_sign_in(app: &mut RustGisApp, cfg: &mut Config) {
+    app.assistant.sign_in_read = None;
+    app.assistant.models_slot = None;
+    app.assistant.catalog_pending = false;
+    if let Some(text) = app.assistant.queued.take() {
+        app.assistant.input = text;
+    }
+    cfg.key.clear();
+    app.assistant.account = None;
+    app.assistant.models.clear();
+    app.assistant.catalog.clear();
+    app.assistant.welcome = false;
+    app.assistant.accounts = None;
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn waiting_for_browser(ui: &mut Ui, t: &Tokens, url: &str) -> (bool, bool) {
     ui.spinner();
@@ -1132,6 +1250,7 @@ fn waiting_for_browser(ui: &mut Ui, t: &Tokens, url: &str) -> (bool, bool) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn start_login(app: &mut RustGisApp, cfg: &mut Config, another: bool) {
+    app.assistant.sign_in_read = None;
     if !another && !cfg.client_id.is_empty() {
         match chatgpt::select(&cfg.client_id, &cfg.account) {
             Ok(c) => cfg.sign_in(&c),
@@ -2284,20 +2403,32 @@ mod tests {
         let b = chatgpt::Credentials { client_id: "test-workspace".into(), ..a.clone() };
         let path = chatgpt::auth_path().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // As versions before the keychain saved them, with their tokens; this run has no keychain,
+        // so they stay there.
+        let saved = |c: &chatgpt::Credentials| {
+            let mut v = c.to_json();
+            v["access_token"] = c.access_token.clone().into();
+            v
+        };
         std::fs::write(
             &path,
             serde_json::json!({"version":2, "active":{"client_id":a.client_id,"subject":a.subject},
-            "accounts":[a.to_json(),b.to_json()]})
+            "accounts":[saved(&a),saved(&b)]})
             .to_string(),
         )
         .unwrap();
         let mut app = RustGisApp::with_sample();
         app.services.load_pref = Some(Box::new(|key| (key == "assistant_provider").then(|| "chatgpt".into())));
         ensure_loaded(&mut app, &egui::Context::default());
-        assert!(app.assistant.catalog_pending);
+        // The sign-in is read on a worker; the catalog request follows once it arrives.
         let ctx = egui::Context::default();
-        poll(&mut app, &ctx);
-        assert!(app.assistant.models_slot.is_some() || app.assistant.models_error.is_some());
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while app.assistant.models_slot.is_none() && app.assistant.models_error.is_none() {
+            assert!(std::time::Instant::now() < end, "the sign-in read never finished");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            poll(&mut app, &ctx);
+        }
+        assert_eq!(app.assistant.account.as_ref().map(|a| a.kept), Some(chatgpt::Kept::SettingsFile));
         app.run("ui.pane.assistant", serde_json::Value::Null).unwrap();
         app.assistant.settings = true;
         // Draw settings without polling, so each click's catalog request remains observable.
@@ -2326,16 +2457,89 @@ mod tests {
         h.get_by_value("Ollama (local)").click();
         h.run_steps(4);
         h.get_by_label("ChatGPT (sign in)").click();
-        h.run_steps(4);
-        assert!(h.state().assistant.models_slot.is_some());
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while h.state().assistant.models_slot.is_none() {
+            assert!(std::time::Instant::now() < end, "the sign-in read never finished");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            h.run_steps(1);
+        }
         h.state_mut().assistant.models_slot = None;
+        // A read begun before choosing an account must not undo the choice when it finishes.
+        let stale: Slot<Option<chatgpt::Credentials>> = Slot::default();
+        h.state_mut().assistant.sign_in_read = Some((None, stale.clone()));
         h.get_by_value(&a.label()).click();
         h.run_steps(4);
         h.get_by_label(&b.label()).click();
         h.run_steps(4);
+        *stale.lock().unwrap() = Some(Some(a.clone()));
+        h.run_steps(4);
         assert!(h.state().assistant.models_slot.is_some());
         assert_eq!(h.state().assistant.agent.as_ref().unwrap().config.client_id, b.client_id);
         assert_eq!(chatgpt::load_any().unwrap().client_id, b.client_id);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_sign_in_check_never_switches_accounts_and_a_switch_stops_work() {
+        if !in_isolated_settings("assistantpane::tests::a_sign_in_check_never_switches_accounts_and_a_switch_stops_work") {
+            return;
+        }
+        let ctx = egui::Context::default();
+        let creds = |client: &str| chatgpt::Credentials {
+            client_id: client.into(),
+            subject: "user".into(),
+            session: "session".into(),
+            access_token: "synthetic-token".into(),
+            scopes: vec![chatgpt::PLAN_SCOPE.into()],
+            ..Default::default()
+        };
+        let finish = |app: &mut RustGisApp, checking: Option<chatgpt::Binding>, read: Option<chatgpt::Credentials>| {
+            let slot: Slot<Option<chatgpt::Credentials>> = Slot::default();
+            *slot.lock().unwrap() = Some(read);
+            app.assistant.sign_in_read = Some((checking, slot));
+            poll_sign_in(app, &ctx);
+        };
+        let mut app = plan_app();
+        let mut first = app.assistant.agent.as_ref().unwrap().config.clone();
+        first.sign_in(&creds("first"));
+        apply_config(&mut app, first.clone());
+        // A check after a failed request that finds another account selected changes nothing:
+        // the user chooses.
+        app.assistant.retry = Some((1, web_time::Instant::now()));
+        finish(&mut app, Some(first.binding()), Some(creds("second")));
+        assert_eq!(app.assistant.agent.as_ref().unwrap().config, first);
+        assert!(app.assistant.retry.is_some());
+        // One that finds the sign-in gone clears it and stops the work bound to it, and a model
+        // list still on its way can't bring its catalog back.
+        let late: Reply = Slot::default();
+        app.assistant.models_slot = Some(late.clone());
+        app.assistant.models = vec!["first-model".into()];
+        // A message typed while the check was under way, and a catalog request it deferred.
+        app.assistant.queued = Some("synthetic question".into());
+        app.assistant.catalog_pending = true;
+        finish(&mut app, Some(first.binding()), None);
+        assert!(app.assistant.agent.as_ref().unwrap().config.key.is_empty());
+        assert!(app.assistant.retry.is_none() && app.assistant.settings);
+        assert!(app.assistant.models.is_empty() && app.assistant.models_slot.is_none());
+        *late.lock().unwrap() = Some(Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: serde_json::json!({"models": [{"slug": "late", "visibility": "list"}]}).to_string().into_bytes(),
+        }));
+        poll(&mut app, &ctx);
+        assert!(app.assistant.models.is_empty() && app.assistant.catalog.is_empty());
+        // Neither goes out after the sign-out; the message is back in the input box.
+        assert!(app.assistant.queued.is_none() && !app.assistant.catalog_pending);
+        assert!(app.assistant.inflight.is_none() && app.assistant.models_slot.is_none());
+        assert_eq!(app.assistant.input, "synthetic question");
+        // Taking the selected account: another one stops work for the first and drops its catalog.
+        apply_config(&mut app, first.clone());
+        app.assistant.retry = Some((2, web_time::Instant::now()));
+        app.assistant.models = vec!["first-model".into()];
+        finish(&mut app, None, Some(creds("second")));
+        assert_eq!(app.assistant.agent.as_ref().unwrap().config.client_id, "second");
+        assert!(app.assistant.retry.is_none());
+        assert!(!app.assistant.models.contains(&"first-model".to_string()));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

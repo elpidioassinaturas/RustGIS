@@ -11,6 +11,7 @@ pub mod address;
 pub mod boundaries;
 pub mod cache;
 pub mod cog;
+pub mod cubes;
 pub mod draw;
 pub mod earthdata;
 pub mod embeddings;

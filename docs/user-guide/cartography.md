@@ -286,10 +286,11 @@ Turn labels on per layer (View › Labeling › Label, or the Style tab), then:
   `pop_max <= 5000000` for Default. Classes are placed in list order, Default last; a hidden
   class or one outside its visibility range labels nothing without excluding features from
   other classes. There can be up to 64 classes besides Default. In the Labeling pane, the
-  **Class** list chooses the class every section shows and edits; **New** adds one with the
-  chosen class's field, text symbol, placement and range, listed before Default, and
-  **Rename**, **Move Up** / **Move Down**, **Remove** and **Visible** act on the chosen class
-  (Default can be renamed or hidden, not moved or removed). The ribbon's label groups edit the
+  **Class** list at the top chooses the class every section shows and edits, and **Visible**
+  under it hides or shows that class. The row under the list has **New**, which adds a class
+  with the chosen class's field, text symbol, placement and range, listed before Default;
+  **Rename** and **Move Up** / **Move Down** (the arrows) for the chosen class; and, at its far
+  end, **Remove** (Default can be renamed or hidden, not moved or removed). The ribbon's label groups edit the
   same chosen class, and **Style › Label Class › Class** chooses it as the pane's list does. By
   command, make them with
   `labels.class.add` (a new class copies Default's field, text symbol, placement and range, or

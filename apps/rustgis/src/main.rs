@@ -37,6 +37,10 @@ mod prefs {
     }
 
     pub fn services() -> Services {
+        let secrets: std::sync::Arc<dyn rustgis_engine::data::secrets::SecretStore> =
+            std::sync::Arc::new(crate::keychain::Keychain::default());
+        // The ChatGPT sign-in's tokens go to the same keychain (its accounts stay in the file).
+        rustgis_assistant::chatgpt::set_secret_store(Some(secrets.clone()));
         Services {
             load_pref: Some(Box::new(|key: &str| read().get(key).and_then(Value::as_str).map(str::to_string))),
             save_pref: Some(Box::new(|key: &str, value: &str| {
@@ -54,7 +58,7 @@ mod prefs {
                     log::warn!("could not save preferences: {e}");
                 }
             })),
-            secrets: Some(std::sync::Arc::new(crate::keychain::Keychain::default())),
+            secrets: Some(secrets),
             ..Services::default()
         }
     }

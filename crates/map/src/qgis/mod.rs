@@ -11,6 +11,7 @@
 
 mod expr;
 mod labels;
+mod raster;
 mod renderer;
 mod source;
 mod symbol;
@@ -108,6 +109,8 @@ pub struct Style {
     /// 0 opaque to 100 invisible.
     pub transparency: Option<f32>,
     pub blend: Option<Blend>,
+    /// A raster's colouring, stretch, resampling, brightness, contrast and mask.
+    pub raster: Option<crate::raster::RasterStyle>,
     /// Drawn between these scales (RustGIS's, see [`QGIS_SCALE`]): zoomed in beyond 1:`min_scale`
     /// and out beyond 1:`max_scale`. `Some(None)` clears a limit.
     pub min_scale: Option<Option<f64>>,
@@ -117,6 +120,26 @@ pub struct Style {
 impl Style {
     /// Gives `layer` this style's parts (those it sets).
     pub fn apply(&self, layer: &mut crate::Layer) {
+        if let Some(t) = self.transparency {
+            layer.transparency = t;
+        }
+        if let Some(b) = self.blend {
+            layer.blend = b;
+        }
+        if let Some(s) = self.min_scale {
+            layer.min_scale = s;
+        }
+        if let Some(s) = self.max_scale {
+            layer.max_scale = s;
+        }
+        // A raster takes its raster style (when its bands are there), and none of a feature
+        // layer's parts.
+        if let Some(r) = layer.raster.as_mut() {
+            if let Some(st) = self.raster.as_ref().filter(|_| self.raster_misfit(r).is_none()) {
+                r.style = st.clone();
+            }
+            return;
+        }
         if let Some(r) = &self.renderer {
             layer.renderer = r.clone();
         }
@@ -132,18 +155,15 @@ impl Style {
         if let Some(l) = &self.labels {
             layer.labels = l.clone();
         }
-        if let Some(t) = self.transparency {
-            layer.transparency = t;
-        }
-        if let Some(b) = self.blend {
-            layer.blend = b;
-        }
-        if let Some(s) = self.min_scale {
-            layer.min_scale = s;
-        }
-        if let Some(s) = self.max_scale {
-            layer.max_scale = s;
-        }
+    }
+
+    /// Why this style's raster colouring doesn't fit the raster `r` (it reads a band the file
+    /// hasn't), or `None` when it fits or there is none.
+    pub fn raster_misfit(&self, r: &crate::raster::RasterLayer) -> Option<String> {
+        let st = self.raster.as_ref()?;
+        let count = r.data.as_ref()?.band_count();
+        let band = st.renderer.bands().into_iter().find(|b| *b >= count)?;
+        Some(format!("its raster colouring, which reads band {} of a raster with {count}", band + 1))
     }
 }
 
@@ -305,12 +325,12 @@ fn read_style_node(node: Node, layer: &str, report: &mut Report) -> Style {
     if let Some(r) = child(node, "renderer-v2") {
         renderer::read(r, layer, &mut style, report);
     }
-    // A raster's renderer: its opacity carried over, its colouring not yet.
+    // A raster's renderer: its opacity, and its colouring as RustGIS's raster style.
     if let Some(r) = child(node, "pipe").and_then(|p| child(p, "rasterrenderer")) {
         if let Some(o) = r.attribute("opacity").and_then(|o| o.trim().parse::<f32>().ok()).filter(|o| o.is_finite() && *o < 1.0) {
             style.transparency = Some(((1.0 - o.clamp(0.0, 1.0)) * 100.0).round());
         }
-        report.skipped(layer, format!("its raster colouring ({} renderer)", r.attribute("type").unwrap_or("unknown")));
+        style.raster = raster::read(node, layer, report);
     }
     if let Some(l) = child(node, "labeling") {
         // Set up but switched off: carried over, switched off.

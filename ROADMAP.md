@@ -59,8 +59,8 @@ Correct, robust and recoverable, with the foundations other themes stand on.
   for a file that moved or was renamed.
 - Signed Windows builds (no SmartScreen warning), then in-place updates; settings an
   administrator can fix for a managed install (no AI Assistant, plugins or web services).
-- Extend the OS keychain secret store to service connections (database passwords, S3 keys and
-  AI provider keys can already be remembered).
+- Extend the OS keychain secret store to service connections (database passwords, S3 keys,
+  AI provider keys and the ChatGPT sign-in's tokens are already kept there).
 - Overlay tools beside Clip and Erase: intersect, union, identity and near _(open)_.
 - Spatial Join by distance, closest, centre in and largest overlap, with merge rules (sum, mean,
   first…) for one-to-one joins ([#851](https://github.com/opengeos/RustGIS/issues/851)).
@@ -233,7 +233,8 @@ Open questions rather than plans; discuss before building.
   documentation built in.
 - The AI Assistant's skills, subagents and ACP clients; MCP over HTTP, an audited loopback
   relay and a file bridge, which let external AI clients drive the app. Database passwords, S3
-  keys and AI provider keys optionally remembered in the desktop OS keychain.
+  keys and AI provider keys optionally remembered in the desktop OS keychain, where the ChatGPT
+  sign-in keeps its tokens.
 - Sandboxed WebAssembly plugins with a registry at plugins.rustgis.app; process plugins that
   run as programs (with Python environments RustGIS makes), in the background with progress and
   Cancel.

@@ -68,7 +68,8 @@ what RustGIS uses or disconnect it. **Sign out** clears local tokens and attempt
 remote session. If OpenAI does not confirm revocation, RustGIS says so; disconnect RustGIS in
 ChatGPT settings to ensure that remote access ends. The registration remains for signing in again.
 The account picker retains separate registrations, even when their emails match. **Use another
-account** adds a registration; choose an existing one to reuse its issued client ID. From the command line:
+account** adds a registration; choose an existing one to reuse its issued client ID. **Remove
+account** signs the selected one out and forgets it. From the command line:
 
 ```sh
 rustgis-cli ask --login                 # continue with ChatGPT in the browser
@@ -77,6 +78,7 @@ rustgis-cli ask --sample --provider chatgpt "Zoom to Tokyo"
 rustgis-cli ask --accounts              # list saved registrations
 rustgis-cli ask --account oaiapp_...      # select one by its issued client id
 rustgis-cli ask --login --account oaiapp_... # reauthorize that registration
+rustgis-cli ask --remove-account oaiapp_...  # sign out and forget it
 rustgis-cli ask --logout
 ```
 
@@ -285,11 +287,26 @@ is cleared only after the keychain key is read or the old key is saved successfu
 operation fails, the old preference is retained and the unencrypted-storage
 warning stays visible. In the web app, **Remember** still saves the key unencrypted in the
 browser's storage, with a note in settings.
-A ChatGPT sign-in is kept in `chatgpt-auth.json` in the app's settings folder (owner-only on
-macOS and Linux; on Windows, protected like the rest of your user profile), never in the
-preferences or a project file, and its tokens are never logged; RustGIS renews them as they expire.
-The ChatGPT provider's address is fixed, so only the OpenAI API receives them. Renewals are
-serialized across RustGIS processes (a refresh token can be used only once).
+A ChatGPT sign-in's refresh token is kept in the system keychain, never in the preferences or a
+project file, and no token is ever logged. The short-lived access token stays in the memory of the
+RustGIS window that got it, so each time RustGIS starts it renews the sign-in once before its first
+request; after a restart, the browser may ask you to choose the account again when you sign in.
+`chatgpt-auth.json` in the app's settings folder keeps only the saved accounts (their client id,
+account, email, permissions, when the tokens expire, and which one is selected), no token. A
+sign-in from an earlier version, whose tokens are in that file, keeps working: they move to the
+keychain the first time they are used, and leave the file only once the keychain has taken them.
+If the keychain is unavailable, they stay in the file until it is, and the settings say so. A new
+sign-in the keychain can't take lasts until RustGIS closes and is never written to the file; the
+settings say it won't be remembered, and it never replaces a sign-in the keychain still holds for
+that account. **Sign out** revokes the session at OpenAI and deletes its token; if the keychain
+can't be read, you are still signed out on this computer, and the settings say the session
+couldn't be ended at OpenAI. **Remove account** also forgets the account, once any keychain item it
+had is deleted: while the keychain can't be read or can't delete it, removal refuses, so no token
+is left behind in it. The command line has no keychain (it uses a sign-in from an earlier version still
+in the file), so its sign-ins last for the command only, and it can't use, sign out or remove an
+account whose token is in the keychain. The ChatGPT provider's address is fixed, so only the
+OpenAI API receives the tokens. Renewals are serialized across RustGIS processes (a refresh token
+can be used only once), and the keychain is read under the same lock.
 Plain HTTP is only used for servers on your computer or local network.
 
 In the web app, the browser calls the provider directly. Anthropic, OpenAI, Gemini and

@@ -1,0 +1,12 @@
+QGIS 4.2.3-Belém do Pará
+Marker symbol layers: AnimatedMarker, EllipseMarker, FilledMarker, FontMarker, GeometryGenerator, MaskMarker, RasterMarker, SimpleMarker, SvgMarker, VectorField
+Line symbol layers: ArrowLine, FilledLine, GeometryGenerator, HashLine, InterpolatedLine, LinearReferencing, Lineburst, MarkerLine, RasterLine, SimpleLine
+Fill symbol layers: CentroidFill, GeometryGenerator, GradientFill, LinePatternFill, PointPatternFill, RandomMarkerFill, RasterFill, SVGFill, ShapeburstFill, SimpleFill
+renderers: 25dRenderer, RuleRenderer, categorizedSymbol, embeddedSymbol, graduatedSymbol, heatmapRenderer, invertedPolygonRenderer, mergedFeatureRenderer, nullSymbol, pointCluster, pointDisplacement, singleSymbol
+raster renderers: singlebandgray, singlebandpseudocolor, multibandcolor, paletted, hillshade, contour, singlecolor
+providers: OAPIF, WFS, arcgisfeatureserver, arcgisimageserver, arcgismapserver, arcgisvectortileservice, cesiumtiles, copc, delimitedtext, ept, esrii3s, gdal, gpx, mbtilesvectortiles, mdal, memory, mesh_memory, mssql, ogr, pdal, postgres, postgresraster, quantizedmesh, sensorthings, spatialite, tiledscene, vectortile, virtual, virtualraster, vpc, vtpkvectortiles, wcs, wms, xyzvectortiles
+label placements: AroundPoint, OverPoint, Line, Curved, Horizontal, Free, OrderedPositionsAroundPoint, PerimeterCurved, OutsidePolygons
+callouts: balloon, curved, manhattan, simple
+annotation items: linestring, linetext, marker, picture, pointtext, polygon, recttext
+layout items: Group, Page, Map, Picture, Label, Legend, Shape, Polygon, Polyline, Scalebar, Frame, HTML, Attribute Table, Text Table, Fixed Table, Marker, Elevation Profile, Chart
+paint effects: blur, color, drawSource, dropShadow, effectStack, innerGlow, innerShadow, outerGlow, transform

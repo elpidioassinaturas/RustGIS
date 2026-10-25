@@ -12,6 +12,7 @@
 //!     [--provider anthropic|openai|chatgpt|gemini|openrouter|ollama|custom] [--model M] [--base-url URL] [--yes] [--save out.rgis] [--trace log.txt]
 //! rustgis-cli ask --models [--provider P]                # list the provider's models
 //! rustgis-cli ask --accounts | --account CLIENT_ID       # list or select a saved registration
+//! rustgis-cli ask --remove-account CLIENT_ID             # sign out and forget a saved registration
 //! rustgis-cli ask --login [--another-account]            # sign in with ChatGPT to use your ChatGPT plan
 //! rustgis-cli ask --logout
 //! rustgis-cli mcp [--sample | --project p.rgis | --data f.geojson …] [--yes]   # an MCP server on stdio
@@ -42,7 +43,7 @@ use serde_json::{Value, json};
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  rustgis-cli commands | tools\n  rustgis-cli plugins [install <file|folder> | uninstall <id> | enable <id> | disable <id> | browse | get <id> | prepare <id>] [--registry URL]\n  rustgis-cli skills [add <SKILL.md|folder|.zip> | remove <name> | enable <name> | disable <name>]\n  rustgis-cli info <data>\n  rustgis-cli logo <out.png|out.ico|out.bmp> [--size N] [--canvas WxH --at X,Y (.bmp only)]\n  rustgis-cli render <data|project> <out.png> [--basemap NAME] [--tiles URL] [--width N] [--height N] [--dpi N] [--worldview auto|default|china]\n  rustgis-cli run [--sample] [--project P] [--data F]… --cmd 'id={{json}}'… [--save P] [--worldview auto|default|china]\n  rustgis-cli ask [--sample] [--project P] [--data F]… \"request\" [--provider P] [--model M] [--base-url URL] [--yes] [--save P]\n  rustgis-cli ask --models [--provider P]\n  rustgis-cli ask --login [--another-account] [--account CLIENT_ID] | --logout\n  rustgis-cli ask --accounts | --account CLIENT_ID\n  rustgis-cli mcp [--sample] [--project P] [--data F]… [--yes] [--attach [PORT] [--token-file FILE] [--timeout SECONDS (5-600)]]\n  rustgis-cli mcp-register [--client claude] [--name NAME] [--port PORT]"
+        "usage:\n  rustgis-cli commands | tools\n  rustgis-cli plugins [install <file|folder> | uninstall <id> | enable <id> | disable <id> | browse | get <id> | prepare <id>] [--registry URL]\n  rustgis-cli skills [add <SKILL.md|folder|.zip> | remove <name> | enable <name> | disable <name>]\n  rustgis-cli info <data>\n  rustgis-cli logo <out.png|out.ico|out.bmp> [--size N] [--canvas WxH --at X,Y (.bmp only)]\n  rustgis-cli render <data|project> <out.png> [--basemap NAME] [--tiles URL] [--width N] [--height N] [--dpi N] [--worldview auto|default|china]\n  rustgis-cli run [--sample] [--project P] [--data F]… --cmd 'id={{json}}'… [--save P] [--worldview auto|default|china]\n  rustgis-cli ask [--sample] [--project P] [--data F]… \"request\" [--provider P] [--model M] [--base-url URL] [--yes] [--save P]\n  rustgis-cli ask --models [--provider P]\n  rustgis-cli ask --login [--another-account] [--account CLIENT_ID] | --logout\n  rustgis-cli ask --accounts | --account CLIENT_ID | --remove-account CLIENT_ID\n  rustgis-cli mcp [--sample] [--project P] [--data F]… [--yes] [--attach [PORT] [--token-file FILE] [--timeout SECONDS (5-600)]]\n  rustgis-cli mcp-register [--client claude] [--name NAME] [--port PORT]"
     );
     ExitCode::from(2)
 }
@@ -197,6 +198,7 @@ fn ask(s: &mut Session, args: &[String]) -> Result<(), String> {
         "--registry",
         "--worldview",
         "--account",
+        "--remove-account",
     ];
     let prompt = args
         .iter()
@@ -235,7 +237,30 @@ fn ask(s: &mut Session, args: &[String]) -> Result<(), String> {
             return Ok(());
         }
     }
+    if let Some(id) = opt(args, "--remove-account") {
+        use rustgis_assistant::chatgpt;
+        let accounts = chatgpt::accounts()?;
+        let matches: Vec<_> = accounts.iter().filter(|c| c.client_id == id).collect();
+        let [c] = matches.as_slice() else {
+            return Err("--remove-account needs an unambiguous client id from --accounts".into());
+        };
+        if let Some(r) = chatgpt::remove(&c.client_id, &c.subject)?
+            && let Err(e) = chatgpt::revoke(&r)
+        {
+            eprintln!(
+                "removed on this computer, but OpenAI didn't confirm the sign-out ({e}); disconnect RustGIS in ChatGPT's settings if needed"
+            );
+            return Ok(());
+        }
+        eprintln!("removed {}", c.label());
+        return Ok(());
+    }
     let mut cfg = Config::from_env(&provider);
+    if cfg.login()
+        && let Some(c) = rustgis_assistant::chatgpt::load_any()
+    {
+        cfg.sign_in(&c);
+    }
     if let Some(m) = opt(args, "--model").map(str::to_string).or_else(|| std::env::var("RUSTGIS_ASSISTANT_MODEL").ok()) {
         cfg.model = m;
     }
@@ -244,9 +269,19 @@ fn ask(s: &mut Session, args: &[String]) -> Result<(), String> {
     }
     if args.iter().any(|a| a == "--logout") {
         use rustgis_assistant::chatgpt;
-        if let Some(r) = chatgpt::sign_out()?
-            && let Err(e) = chatgpt::revoke(&r)
-        {
+        let out = chatgpt::sign_out()?;
+        if let Some(e) = &out.unrevoked {
+            eprintln!(
+                "signed out on this computer, but OpenAI wasn't asked to end the session ({e}); disconnect RustGIS in ChatGPT's settings if needed"
+            );
+            return Ok(());
+        }
+        let Some(r) = out.revocation else {
+            // No token here to end a session with (none, or a command-line sign-in that has ended).
+            eprintln!("signed out on this computer; no session could be ended at OpenAI from here");
+            return Ok(());
+        };
+        if let Err(e) = chatgpt::revoke(&r) {
             eprintln!(
                 "signed out on this computer, but OpenAI didn't confirm it ({e}); disconnect RustGIS in ChatGPT's settings if needed"
             );
@@ -270,6 +305,9 @@ fn ask(s: &mut Session, args: &[String]) -> Result<(), String> {
         }
         let who = if c.email.is_empty() { "your ChatGPT account" } else { c.email.as_str() };
         eprintln!("signed in as {who}; RustGIS now uses your ChatGPT plan (manage usage at {})", chatgpt::USAGE_URL);
+        if c.kept == chatgpt::Kept::Session {
+            eprintln!("this sign-in isn't remembered: the command line can't use the system keychain, so it lasts for this command only");
+        }
         return Ok(());
     }
     // A signed-in account's requests renew its tokens as needed.

@@ -1309,8 +1309,13 @@ fn layer_drop(app: &mut RustGisApp, ui: &Ui, rows: &[DropRow], t: &Tokens) {
     let m = app.session.map();
     let moving_group = m.group(dragged.0).is_some();
     let current = m.group_of(dragged.0).map(|g| g.id);
-    // The topmost layer of a group, in drawing order.
-    let top_of = |g: u32| m.group(g).and_then(|g| m.layers.iter().find(|l| g.children.contains(&l.id)).map(|l| l.id));
+    // The topmost layer of a group, excluding the dragged layer itself. When its only child
+    // leaves, place it before the next layer instead of targeting itself.
+    let top_of = |g: u32| {
+        let group = m.group(g)?;
+        let start = m.layers.iter().position(|l| group.children.contains(&l.id))?;
+        m.layers.iter().skip(start).find(|l| l.id != dragged.0).map(|l| l.id)
+    };
     // Onto the middle of another group's row: into that group, at its end nearest the layer; onto
     // its own group's row, nothing.
     if !moving_group
@@ -1332,7 +1337,7 @@ fn layer_drop(app: &mut RustGisApp, ui: &Ui, rows: &[DropRow], t: &Tokens) {
         }
         return;
     }
-    // The gap above the first row whose middle is below the pointer, or the one after the last.
+    // The entire block, including its expanded legend, has balanced above/below halves.
     let gap = rows.iter().position(|r| pointer.y < r.rect.center().y).unwrap_or(rows.len());
     let below = rows.get(gap);
     // Above one of a group's layers is in that group; anywhere else, in none.
@@ -3018,7 +3023,16 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let first_layer = first_layer(spec).map(|p| p.name);
     // The file parameter whose Browse was pressed: picked once the form is drawn.
     let mut browse_for = None;
+    // A parameter that doesn't apply to the options picked (Spatial Join's search distance with
+    // Intersects) is hidden, and left out of the run.
+    let applies = |app: &RustGisApp, name: &str| {
+        let value = |n: &str| app.gp.values.get(n).cloned().unwrap_or_default();
+        rustgis_engine::analysis::param_applies(spec.id, name, &value)
+    };
     for p in spec.params {
+        if !applies(app, p.name) {
+            continue;
+        }
         let label = ui.label(egui::RichText::new(format!("{}{}", tl!(p.label), if p.required { " *" } else { "" })).size(12.0));
         if !p.help.is_empty() {
             label.on_hover_text(p.help);
@@ -3193,7 +3207,7 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             // every parameter, so it gets only those it declares.
             let builtin = rustgis_engine::analysis::external_source(spec).is_none();
             let plugin = spec.id.starts_with(rustgis_engine::plugins::PREFIX);
-            for p in spec.params {
+            for p in spec.params.iter().filter(|p| applies(app, p.name)) {
                 if let Some(v) = app.gp.values.get(p.name).filter(|v| !v.trim().is_empty()) {
                     let val = match (p.kind, app.gp.tables.get(p.name)) {
                         // A table goes by its id: a number, which no name is taken for. Its name
@@ -5334,6 +5348,131 @@ mod tests {
 
     fn layer(app: &RustGisApp, name: &str) -> u32 {
         app.session.map().layer_by_name(name).map(|l| l.id).unwrap_or_default()
+    }
+
+    fn drag_layer(h: &mut egui_kittest::Harness<'_, RustGisApp>, from: egui::Pos2, to: egui::Pos2) {
+        use egui::{Event, Modifiers, PointerButton};
+        let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.event(Event::PointerMoved(from));
+        h.step();
+        h.event(button(from, true));
+        h.step();
+        h.event(Event::PointerMoved(from + vec2(10.0, 0.0)));
+        h.step();
+        h.event(Event::PointerMoved(to));
+        h.step();
+        h.event(button(to, false));
+        h.step();
+    }
+
+    /// #836: both halves of the whole visible block accept drops, including multi-class
+    /// legends and the first/last layers. Group membership and one-step undo follow the drop.
+    #[test]
+    fn layer_drop_uses_whole_block_halves() {
+        use egui_kittest::kittest::Queryable;
+        for position in [0, 2, 3] {
+            for grouped in [false, true] {
+                for (expanded, fraction) in [(false, 0.25), (false, 0.75), (true, 0.25), (true, 0.49), (true, 0.51), (true, 0.75)] {
+                    let mut app = RustGisApp::with_sample();
+                    let source = if position == 0 { "Lakes" } else { "Cities" };
+                    let (moved, countries) = (layer(&app, source), layer(&app, "Countries"));
+                    if position != 3 {
+                        app.run("layer.move", json!({"layer": countries, "to": position})).unwrap();
+                    }
+                    app.run("layer.symbology", json!({"layer": countries, "type": "unique", "field": "income_grp"})).unwrap();
+                    app.session.map_mut().layer_mut(countries).unwrap().expanded = expanded;
+                    if grouped {
+                        app.run("group.add", json!({"layers": [countries], "name": "Base"})).unwrap();
+                    }
+                    let original: Vec<_> = app.session.map().layers.iter().map(|l| l.id).collect();
+                    let undo = app.session.undo_depth();
+                    let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).with_max_steps(64).build_ui_state(
+                        |ui, app: &mut RustGisApp| {
+                            let ctx = ui.ctx().clone();
+                            app.logic(&ctx);
+                            app.ui(ui);
+                        },
+                        app,
+                    );
+                    h.run_steps(6);
+                    let from = h.get_by_label(source).rect().center();
+                    let mut block = h.get_by_label("Countries").rect();
+                    if expanded {
+                        let legend = h.state().session.map().layer(countries).unwrap().shown_legend(h.state().session.scale()).unwrap();
+                        for entry in legend {
+                            block.max.y = block.max.y.max(h.get_by_label(&entry.label).rect().max.y);
+                        }
+                    }
+                    let to = pos2(block.center().x, block.min.y + block.height() * fraction);
+                    drag_layer(&mut h, from, to);
+                    let mut expected: Vec<_> = original.iter().copied().filter(|id| *id != moved).collect();
+                    let target = expected.iter().position(|id| *id == countries).unwrap() + usize::from(fraction >= 0.5);
+                    expected.insert(target, moved);
+                    let map = h.state().session.map();
+                    assert_eq!(
+                        map.layers.iter().map(|l| l.id).collect::<Vec<_>>(),
+                        expected,
+                        "position={position}, grouped={grouped}, expanded={expanded}, fraction={fraction}"
+                    );
+                    assert_eq!(map.group_of(moved).is_some(), grouped && fraction < 0.5);
+                    assert_eq!(h.state().session.undo_depth(), undo + 1);
+                    h.state_mut().run("edit.undo", Value::Null).unwrap();
+                    assert_eq!(h.state().session.map().layers.iter().map(|l| l.id).collect::<Vec<_>>(), original);
+                    assert!(h.state().session.map().group_of(moved).is_none());
+                }
+            }
+        }
+    }
+
+    /// The first visible row's upper half moves layers out of groups and moves groups whole.
+    #[test]
+    fn layers_and_groups_drop_above_the_first_row() {
+        use egui_kittest::kittest::Queryable;
+        for case in 0..4 {
+            let mut app = RustGisApp::with_sample();
+            if case != 0 {
+                let members = if case == 2 { ["Lakes", "Countries"] } else { ["Cities", "Rivers"] };
+                app.run("group.add", json!({"name": "Base", "layers": members})).unwrap();
+            }
+            let source = if case == 2 {
+                "Base"
+            } else if case == 3 {
+                "Cities"
+            } else {
+                "Countries"
+            };
+            let original: Vec<_> = app.session.map().layers.iter().map(|l| l.id).collect();
+            let members: Vec<_> = app.session.map().groups.iter().map(|g| g.children.clone()).collect();
+            let moved: Vec<_> = if case == 2 { members.concat() } else { vec![layer(&app, source)] };
+            let undo = app.session.undo_depth();
+            let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).with_max_steps(64).build_ui_state(
+                |ui, app: &mut RustGisApp| {
+                    let ctx = ui.ctx().clone();
+                    app.logic(&ctx);
+                    app.ui(ui);
+                },
+                app,
+            );
+            h.run_steps(6);
+            let from = h.get_by_label(source).rect().center();
+            let first = h.get_by_label(if case == 1 || case == 3 { "Base" } else { "Cities" }).rect();
+            let to = pos2(first.center().x, first.min.y + first.height() * 0.125);
+            drag_layer(&mut h, from, to);
+            let expected: Vec<_> = original
+                .iter()
+                .copied()
+                .filter(|id| moved.contains(id))
+                .chain(original.iter().copied().filter(|id| !moved.contains(id)))
+                .collect();
+            assert_eq!(h.state().session.map().layers.iter().map(|l| l.id).collect::<Vec<_>>(), expected, "case={case}");
+            if case != 2 {
+                assert!(h.state().session.map().group_of(moved[0]).is_none());
+            }
+            assert_eq!(h.state().session.undo_depth(), undo + 1);
+            h.state_mut().run("edit.undo", Value::Null).unwrap();
+            assert_eq!(h.state().session.map().layers.iter().map(|l| l.id).collect::<Vec<_>>(), original);
+            assert_eq!(h.state().session.map().groups.iter().map(|g| g.children.clone()).collect::<Vec<_>>(), members);
+        }
     }
 
     /// The Data Source view (#301) names a group by a file's name (its path on hover) or a web

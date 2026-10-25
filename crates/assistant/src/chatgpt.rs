@@ -11,9 +11,11 @@
 //! (`https://api.openai.com/v1`), renewed with its rotating refresh token, and revoked on sign-out.
 //!
 //! The pure parts (the authorization page, the token requests and replies, the credentials file's
-//! shape, deciding when to renew) are plain data for the tests; the files, the id token's
-//! signature and the callback server are desktop only. Tokens are never logged, and the `Debug`
-//! form of [`Credentials`] hides them.
+//! shape, deciding when to renew) are plain data for the tests; the files, the system keychain,
+//! the id token's signature and the callback server are desktop only. The settings folder's
+//! `chatgpt-auth.json` keeps the registrations; their tokens go to the system keychain
+//! ([`set_secret_store`]). Tokens are never logged, and the `Debug` form of [`Credentials`] hides
+//! them.
 
 use base64::Engine;
 use serde_json::{Value, json};
@@ -46,6 +48,25 @@ pub const USAGE_URL: &str = "https://chatgpt.com/settings/usage?tab=overview";
 pub const REFRESH_MARGIN: i64 = 5 * 60;
 /// The clock skew allowed when checking an id token's expiry.
 pub const CLOCK_SKEW: i64 = 5 * 60;
+/// A signed-in configuration's key: a marker, not a credential (`send` authorizes each request
+/// with the current access token).
+pub const SIGNED_IN: &str = "chatgpt-sign-in";
+
+/// Where a sign-in's tokens are kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Kept {
+    /// There are none.
+    #[default]
+    Nowhere,
+    /// In the system keychain: the refresh token is there; the access and id tokens stay with
+    /// the process that got them (a process without one renews first).
+    Keychain,
+    /// Still in the settings folder's file, from before the keychain: they move to the keychain
+    /// the next time it's available.
+    SettingsFile,
+    /// In memory only, for this session: the keychain wasn't available to remember them.
+    Session,
+}
 
 /// The registration of RustGIS for a ChatGPT account and, while signed in, its tokens.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -73,6 +94,14 @@ pub struct Credentials {
     /// Changes with each sign-in and sign-out (not renewal or selection): work begun before
     /// either is refused after it.
     pub session: String,
+    /// Names the refresh token in the keychain: the keychain's must carry the same, or it is out
+    /// of date. Empty when the keychain holds no current one for this registration.
+    pub rev: String,
+    /// The keychain may hold an item for this registration (set before each keychain write,
+    /// cleared once one is deleted), so removing it must delete that item first.
+    pub in_keychain: bool,
+    /// Where the tokens are kept (never saved).
+    pub kept: Kept,
 }
 
 impl std::fmt::Debug for Credentials {
@@ -82,6 +111,7 @@ impl std::fmt::Debug for Credentials {
             .field("signed_in", &self.signed_in())
             .field("scopes", &self.scopes)
             .field("saved_at", &self.saved_at)
+            .field("kept", &self.kept)
             .finish_non_exhaustive()
     }
 }
@@ -93,6 +123,8 @@ pub struct Account {
     pub email: String,
     /// The id token's subject.
     pub subject: String,
+    /// Where the sign-in's tokens are kept.
+    pub kept: Kept,
 }
 
 /// The registration a request is for: its issued client id, the verified subject, and the
@@ -110,9 +142,10 @@ impl Credentials {
         Binding { client_id: self.client_id.clone(), subject: self.subject.clone(), session: self.session.clone() }
     }
 
-    /// Whether there are tokens to send.
+    /// Whether there are tokens to use: an access token, or a refresh token here or in the
+    /// keychain to get one.
     pub fn signed_in(&self) -> bool {
-        !self.access_token.is_empty()
+        !self.access_token.is_empty() || !self.refresh_token.is_empty() || self.kept == Kept::Keychain
     }
 
     /// Whether the grant lets RustGIS use the plan.
@@ -128,6 +161,7 @@ impl Credentials {
             email: self.email.clone(),
             plan_declined: self.plan_declined,
             session: self.session.clone(),
+            in_keychain: self.in_keychain,
             ..Default::default()
         }
     }
@@ -140,13 +174,29 @@ impl Credentials {
 
     /// The verified identity for display.
     pub fn account(&self) -> Account {
-        Account { email: self.email.clone(), subject: self.subject.clone() }
+        Account { email: self.email.clone(), subject: self.subject.clone(), kept: self.kept }
     }
 
-    /// Reads a saved registration.
+    /// Whether there are tokens worth keeping (an access or refresh token).
+    pub fn has_tokens(&self) -> bool {
+        !(self.access_token.is_empty() && self.refresh_token.is_empty())
+    }
+
+    /// The registration without its tokens.
+    pub fn without_tokens(&self) -> Credentials {
+        Credentials {
+            id_token: String::new(),
+            access_token: String::new(),
+            refresh_token: String::new(),
+            kept: Kept::Nowhere,
+            ..self.clone()
+        }
+    }
+
+    /// Reads a saved registration. Tokens are read too: older versions saved them in the file.
     pub fn from_json(v: &Value) -> Result<Credentials, String> {
         let field = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
-        let c = Credentials {
+        let mut c = Credentials {
             client_id: field("client_id"),
             subject: field("subject"),
             email: field("email"),
@@ -158,29 +208,35 @@ impl Credentials {
             plan_declined: v.get("plan_declined").and_then(Value::as_bool).unwrap_or(false),
             saved_at: field("saved_at"),
             session: field("session"),
+            rev: field("rev"),
+            in_keychain: v.get("keychain").and_then(Value::as_bool).unwrap_or(false),
+            kept: Kept::Nowhere,
         };
         if c.client_id.is_empty() || c.client_id == REGISTER {
             return Err("the sign-in has no registration".into());
         }
+        // Older versions kept the tokens in the file.
+        if c.has_tokens() {
+            c.kept = Kept::SettingsFile;
+        }
         Ok(c)
     }
 
-    /// Serializes credentials; never log this value.
+    /// The registration as saved in the settings folder: never a token.
     pub fn to_json(&self) -> Value {
         json!({
             "issuer": ISSUER,
             "client_id": self.client_id,
             "subject": self.subject,
             "email": self.email,
-            "id_token": self.id_token,
-            "access_token": self.access_token,
-            "refresh_token": self.refresh_token,
             "token_type": "Bearer",
             "expires_at": self.expires_at,
             "scopes": self.scopes,
             "plan_declined": self.plan_declined,
             "saved_at": self.saved_at,
             "session": self.session,
+            "rev": self.rev,
+            "keychain": self.in_keychain,
         })
     }
 
@@ -233,7 +289,7 @@ pub fn check_id_claims(claims: &Value, client_id: &str, nonce: &str, now: i64) -
     if s("sub").is_empty() {
         return Err("the id token names no account".into());
     }
-    Ok(Account { email: s("email").to_string(), subject: s("sub").to_string() })
+    Ok(Account { email: s("email").to_string(), subject: s("sub").to_string(), kept: Kept::Nowhere })
 }
 
 /// What a token endpoint gave.
@@ -334,6 +390,9 @@ pub fn signed_in(client_id: &str, account: &Account, g: &Grant, now: i64) -> Cre
         scopes,
         saved_at: rfc3339(now),
         session: String::new(),
+        rev: String::new(),
+        in_keychain: false,
+        kept: Kept::Nowhere,
     }
 }
 
@@ -602,13 +661,16 @@ mod native {
     use serde_json::Value;
 
     use super::{
-        Account, Authorization, Binding, Credentials, DISCOVERY_URL, GrantError, PORT, REGISTER, authorize_url, callback_client_id,
+        Account, Authorization, Binding, Credentials, DISCOVERY_URL, GrantError, Kept, PORT, REGISTER, authorize_url, callback_client_id,
         check_id_claims, discovered, exchange_request, host_id_from, jwt_payload, parse_grant, query_params, refresh_request, renewed,
         revoke_request, valid_host_id,
     };
     use crate::provider::{HttpRequest, HttpResponse};
     use crate::{Error, Recovery, http};
     use rustgis_engine::data::dirs::config_dir;
+    use rustgis_engine::data::secrets::{Secret, SecretStore};
+    use std::collections::BTreeMap;
+    use std::sync::{LazyLock, MutexGuard};
 
     /// The credentials' file name, in the app's settings folder.
     const FILE: &str = "chatgpt-auth.json";
@@ -644,29 +706,138 @@ mod native {
         Ok(file)
     }
 
+    // The store lock covers every read, compare and write of the file and of the keychain. Only
+    // a renewal, a sign-out and a removal read the keychain, under the store lock and (for a
+    // renewal) the renewal lock, so two processes never both use a refresh token that rotates.
     fn store(path: &Path) -> Result<std::fs::File, Error> {
         file_lock(path, "store-lock")
     }
 
+    // Where a registration's tokens are, from its file entry (`rev`, `keychain`) and this
+    // process's `held` tokens:
+    //
+    // | file entry                     | refresh token          | access and id tokens  | Kept         |
+    // |--------------------------------|------------------------|-----------------------|--------------|
+    // | tokens in it (older version)   | the file               | the file              | SettingsFile |
+    // | `rev` set                      | keychain, same `rev`   | held (same session)   | Keychain     |
+    // | no `rev`, held for the session | held                   | held                  | Session      |
+    // | no `rev`, nothing held         | none: signed out       | none                  | Nowhere      |
+    //
+    // `keychain` says an item may exist (set before the first write, cleared after a delete), so
+    // removal deletes it even when `rev` no longer names it.
+
+    /// The system keychain, and the tokens this process holds by account (see the table above).
+    pub(crate) struct Vault {
+        store: Mutex<Option<Arc<dyn SecretStore>>>,
+        held: Mutex<BTreeMap<(String, String), Held>>,
+    }
+
+    /// Tokens this process holds for one sign-in session.
+    struct Held {
+        session: String,
+        kept: Kept,
+        id_token: String,
+        access_token: String,
+        /// Only for [`Kept::Session`]: the keychain keeps the others'.
+        refresh_token: String,
+        expires_at: i64,
+    }
+
+    impl Held {
+        fn of(c: &Credentials) -> Held {
+            Held {
+                session: c.session.clone(),
+                kept: c.kept,
+                id_token: c.id_token.clone(),
+                access_token: c.access_token.clone(),
+                refresh_token: if c.kept == Kept::Session { c.refresh_token.clone() } else { String::new() },
+                expires_at: c.expires_at,
+            }
+        }
+
+        fn apply(&self, entry: &Credentials) -> Credentials {
+            Credentials {
+                id_token: self.id_token.clone(),
+                access_token: self.access_token.clone(),
+                refresh_token: self.refresh_token.clone(),
+                expires_at: self.expires_at,
+                kept: self.kept,
+                ..entry.clone()
+            }
+        }
+    }
+
+    impl Vault {
+        pub(crate) fn new(store: Option<Arc<dyn SecretStore>>) -> Vault {
+            Vault { store: Mutex::new(store), held: Mutex::default() }
+        }
+
+        fn store(&self) -> Option<Arc<dyn SecretStore>> {
+            self.store.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+
+        fn held(&self) -> MutexGuard<'_, BTreeMap<(String, String), Held>> {
+            self.held.lock().unwrap_or_else(|e| e.into_inner())
+        }
+    }
+
+    static VAULT: LazyLock<Vault> = LazyLock::new(|| Vault::new(None));
+
+    fn vault() -> &'static Vault {
+        &VAULT
+    }
+
+    /// Gives the system keychain that keeps the sign-in's refresh tokens (the desktop app's).
+    /// Without one (the command line), a sign-in from before the keychain keeps working from the
+    /// settings folder, and a new one lasts for the session only.
+    pub fn set_secret_store(store: Option<Arc<dyn SecretStore>>) {
+        *vault().store.lock().unwrap_or_else(|e| e.into_inner()) = store;
+    }
+
+    /// Why a keychain sign-in can't be used, signed out or removed here.
+    const KEYCHAIN_ELSEWHERE: &str =
+        "this ChatGPT sign-in is kept in the system keychain, which isn't available here; use, sign out or remove it in the RustGIS app";
+
+    /// The keychain account of a registration's refresh token.
+    fn secret_name(client_id: &str, subject: &str) -> String {
+        format!("chatgpt/{client_id}/{subject}")
+    }
+
+    fn id(c: &Credentials) -> (String, String) {
+        (c.client_id.clone(), c.subject.clone())
+    }
+
+    /// The keychain's value: the refresh token and the `rev` it is for, without the much longer
+    /// access and id tokens, for Windows Credential Manager's 2560 bytes of UTF-16 (a real refresh
+    /// token's length is not verified here).
+    fn secret(c: &Credentials) -> Secret {
+        Secret::new(serde_json::json!({"rev": c.rev, "refresh_token": c.refresh_token}).to_string())
+    }
+
+    fn keychain_error(what: &str, e: &rustgis_engine::data::secrets::SecretError) -> Error {
+        Error::new(Recovery::Auth, format!("{what}: {e}"))
+    }
+
     #[derive(Default)]
     struct Accounts {
+        /// The registrations. Only those from before the keychain ([`Kept::SettingsFile`]) carry
+        /// tokens: the file's own.
         entries: Vec<Credentials>,
         active: Option<(String, String)>,
     }
 
     impl Accounts {
         fn selected(&self) -> Option<&Credentials> {
-            self.entries.iter().find(|c| self.active.as_ref() == Some(&(c.client_id.clone(), c.subject.clone())))
+            self.entries.iter().find(|c| self.active.as_ref() == Some(&id(c)))
         }
 
         fn put(&mut self, c: &Credentials) {
             self.entries.retain(|old| old.client_id != c.client_id || old.subject != c.subject);
             self.entries.push(c.clone());
-            self.active = Some((c.client_id.clone(), c.subject.clone()));
+            self.active = Some(id(c));
         }
     }
 
-    // Callers hold the store lock for the entire read/compare/write transaction.
     fn read_accounts(path: &Path) -> Result<Accounts, Error> {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
@@ -688,44 +859,206 @@ mod native {
 
     fn write_accounts(path: &Path, accounts: &Accounts) -> Result<(), Error> {
         let active = accounts.active.as_ref().map(|(client, subject)| serde_json::json!({"client_id": client, "subject": subject}));
+        let entry = |c: &Credentials| {
+            let mut v = c.to_json();
+            // Tokens from before the keychain stay until it takes them.
+            if c.kept == Kept::SettingsFile {
+                v["id_token"] = c.id_token.clone().into();
+                v["access_token"] = c.access_token.clone().into();
+                v["refresh_token"] = c.refresh_token.clone().into();
+            }
+            v
+        };
         write_private(
             path,
-            &serde_json::json!({"version": 2, "active": active,
-            "accounts": accounts.entries.iter().map(Credentials::to_json).collect::<Vec<_>>()})
-            .to_string(),
+            &serde_json::json!({"version": 2, "active": active, "accounts": accounts.entries.iter().map(entry).collect::<Vec<_>>()})
+                .to_string(),
         )
     }
 
-    fn read_credentials(path: &Path) -> Result<Credentials, Error> {
-        read_accounts(path)?.selected().cloned().ok_or_else(|| "not signed in to ChatGPT".into())
+    /// A file entry with the tokens this process can use (see the table above), without reading
+    /// the keychain: a keychain sign-in's refresh token is read when needed ([`load_refresh`]).
+    /// Tokens still in the file (from before the keychain) move to the keychain if it takes
+    /// them; the file changes only then. Under the store lock.
+    fn with_tokens(v: &Vault, path: &Path, accounts: &mut Accounts, entry: Credentials) -> Result<Credentials, Error> {
+        if entry.kept == Kept::SettingsFile {
+            // Without a refresh token there is nothing the keychain could renew it with: the
+            // file's access token keeps working until it expires.
+            let Some(store) = v.store().filter(|_| !entry.refresh_token.is_empty()) else { return Ok(entry) };
+            let moved = Credentials { rev: random_token()?, in_keychain: true, kept: Kept::Keychain, ..entry.clone() };
+            if let Err(e) = store.save(&secret_name(&entry.client_id, &entry.subject), &secret(&moved)) {
+                log::warn!("the ChatGPT sign-in stays in the settings folder: {e}");
+                return Ok(entry);
+            }
+            // Out of the file only now that the keychain has them.
+            let mut after = Accounts { entries: accounts.entries.clone(), active: accounts.active.clone() };
+            if let Some(e) = after.entries.iter_mut().find(|e| id(e) == id(&moved)) {
+                *e = moved.without_tokens();
+            }
+            if let Err(e) = write_accounts(path, &after) {
+                // The keychain's copy is the file's own token; the next use moves it again.
+                log::warn!("the ChatGPT sign-in stays in the settings folder: {e}");
+                return Ok(entry);
+            }
+            *accounts = after;
+            v.held().insert(id(&moved), Held::of(&moved));
+            return Ok(moved);
+        }
+        let held = v.held();
+        let mine = held.get(&id(&entry)).filter(|h| h.session == entry.session);
+        if entry.rev.is_empty() {
+            return Ok(match mine.filter(|h| h.kept == Kept::Session) {
+                Some(h) => h.apply(&entry),
+                None => entry,
+            });
+        }
+        // Another process's renewal rotates the refresh token, not this process's access token.
+        Ok(match mine.filter(|h| h.kept == Kept::Keychain) {
+            Some(h) => h.apply(&entry),
+            None => Credentials { expires_at: 0, kept: Kept::Keychain, ..entry },
+        })
     }
 
-    /// The selected registration, including signed-out accounts.
+    /// The refresh token of `c`: the keychain's for a keychain sign-in (none when it is out of
+    /// date or missing). Under the store lock.
+    fn load_refresh(v: &Vault, c: &Credentials) -> Result<String, Error> {
+        if c.kept != Kept::Keychain {
+            return Ok(c.refresh_token.clone());
+        }
+        let store = v.store().ok_or_else(|| Error::new(Recovery::Auth, KEYCHAIN_ELSEWHERE))?;
+        let saved =
+            store.load(&secret_name(&c.client_id, &c.subject)).map_err(|e| keychain_error("the ChatGPT sign-in can't be read", &e))?;
+        let saved = saved.and_then(|s| serde_json::from_str::<Value>(s.expose()).ok());
+        let field = |k: &str| saved.as_ref().and_then(|s| s.get(k)).and_then(Value::as_str).unwrap_or("").to_string();
+        Ok(if field("rev") == c.rev { field("refresh_token") } else { String::new() })
+    }
+
+    /// Keeps a registration and its tokens, selects it and writes the file: the refresh token
+    /// goes to the keychain, and the file names it (and the item) before the keychain is written.
+    /// If the keychain doesn't take it (or there is none to take), tokens renewed from the file's
+    /// own go back there, others last for this session; a new sign-in (`new`) over an account the
+    /// keychain still holds is refused instead. Without tokens, any in the keychain are deleted.
+    /// Gives the credentials as kept. Under the store lock.
+    fn keep_tokens(v: &Vault, path: &Path, accounts: &mut Accounts, c: &Credentials, new: bool) -> Result<Credentials, Error> {
+        let name = secret_name(&c.client_id, &c.subject);
+        let store = v.store();
+        let existing = accounts.entries.iter().find(|e| id(e) == id(c)).cloned();
+        let mut in_keychain = c.in_keychain || existing.as_ref().is_some_and(|e| e.in_keychain);
+        if !c.has_tokens() {
+            v.held().remove(&id(c));
+            // The empty `rev` already makes an item left behind unusable; `keychain` remembers it.
+            match store.map(|s| s.delete(&name)) {
+                Some(Ok(())) => in_keychain = false,
+                Some(Err(e)) if in_keychain => log::warn!("the ChatGPT sign-in couldn't be deleted from the system keychain: {e}"),
+                _ => {}
+            }
+            let entry = Credentials { rev: String::new(), in_keychain, ..c.without_tokens() };
+            accounts.put(&entry);
+            write_accounts(path, accounts)?;
+            return Ok(entry);
+        }
+        // Only tokens renewed from the file's own may go back there; a new sign-in never does.
+        let from_file = c.kept == Kept::SettingsFile && existing.as_ref().is_some_and(|e| e.kept == Kept::SettingsFile);
+        let before = Accounts { entries: accounts.entries.clone(), active: accounts.active.clone() };
+        let mut kept = Credentials { rev: random_token()?, in_keychain: true, kept: Kept::Keychain, ..c.clone() };
+        let attempted = store.is_some() && !c.refresh_token.is_empty();
+        let saved = match &store {
+            None => Err("no system keychain here".to_string()),
+            // Nothing outlasts the access token: nothing to keep.
+            Some(_) if !attempted => Err("the sign-in has no refresh token".to_string()),
+            Some(store) => {
+                // Written first, so a failure after the keychain's write never leaves a token the
+                // file can't name. Tokens from the file stay in it until the keychain has them.
+                accounts.put(&if from_file { Credentials { kept: Kept::SettingsFile, ..kept.clone() } } else { kept.without_tokens() });
+                write_accounts(path, accounts)?;
+                store.save(&name, &secret(&kept)).map_err(|e| e.to_string())
+            }
+        };
+        if saved.is_ok() {
+            v.held().insert(id(c), Held::of(&kept));
+            if from_file {
+                accounts.put(&kept.without_tokens());
+                write_accounts(path, accounts)?;
+            }
+            return Ok(kept);
+        }
+        if let Err(why) = saved {
+            log::warn!("the system keychain didn't keep the ChatGPT sign-in: {why}");
+        }
+        // Replacing it would sign the account out where the keychain holds it, unrevoked.
+        if new && existing.as_ref().is_some_and(|e| !e.rev.is_empty()) {
+            if attempted {
+                write_accounts(path, &before)?;
+            }
+            *accounts = before;
+            return Err(Error::new(
+                Recovery::Auth,
+                "the system keychain didn't keep the new sign-in, and it holds this account's earlier one; sign in again where the keychain is available",
+            ));
+        }
+        kept.kept = if from_file { Kept::SettingsFile } else { Kept::Session };
+        kept.rev = String::new();
+        kept.in_keychain = in_keychain || attempted;
+        if from_file {
+            v.held().remove(&id(c));
+            accounts.put(&kept);
+        } else {
+            v.held().insert(id(c), Held::of(&kept));
+            accounts.put(&kept.without_tokens());
+        }
+        write_accounts(path, accounts)?;
+        Ok(kept)
+    }
+
+    /// The selected registration with its tokens. Under the store lock.
+    fn selected_at(path: &Path, v: &Vault) -> Result<Option<Credentials>, Error> {
+        let mut accounts = read_accounts(path)?;
+        let Some(entry) = accounts.selected().cloned() else { return Ok(None) };
+        with_tokens(v, path, &mut accounts, entry).map(Some)
+    }
+
+    /// Saves `c` and selects it. Under the store lock.
+    fn write_credentials(path: &Path, v: &Vault, c: &Credentials) -> Result<Credentials, Error> {
+        keep_tokens(v, path, &mut read_accounts(path)?, c, false)
+    }
+
+    /// The selected registration, including signed-out accounts. Reads the keychain only to move
+    /// an older version's tokens into it (once); otherwise only the file.
     pub fn load_any() -> Option<Credentials> {
         let path = auth_path()?;
         let _guard = store(&path).ok()?;
-        read_credentials(&path).ok()
+        load_any_at(&path, vault())
     }
 
-    /// Saved registrations, including those signed out.
+    fn load_any_at(path: &Path, v: &Vault) -> Option<Credentials> {
+        match selected_at(path, v) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("{e}");
+                read_accounts(path).ok()?.selected().map(Credentials::without_tokens)
+            }
+        }
+    }
+
+    /// Saved registrations, including those signed out (without tokens).
     pub fn accounts() -> Result<Vec<Credentials>, Error> {
         let path = auth_path().ok_or("no settings folder")?;
         let _guard = store(&path)?;
-        Ok(read_accounts(&path)?.entries)
+        Ok(read_accounts(&path)?.entries.iter().map(Credentials::without_tokens).collect())
     }
 
     /// Selects an existing registration without signing it in.
     pub fn select(client_id: &str, subject: &str) -> Result<Credentials, Error> {
-        select_at(&auth_path().ok_or("no settings folder")?, client_id, subject)
+        select_at(&auth_path().ok_or("no settings folder")?, vault(), client_id, subject)
     }
 
-    fn select_at(path: &Path, client_id: &str, subject: &str) -> Result<Credentials, Error> {
+    fn select_at(path: &Path, v: &Vault, client_id: &str, subject: &str) -> Result<Credentials, Error> {
         let _guard = store(path)?;
         let mut accounts = read_accounts(path)?;
         accounts.active = Some((client_id.to_string(), subject.to_string()));
-        let c = accounts.selected().cloned().ok_or("the saved account wasn't found")?;
+        let entry = accounts.selected().cloned().ok_or("the saved account wasn't found")?;
         write_accounts(path, &accounts)?;
-        Ok(c)
+        with_tokens(v, path, &mut accounts, entry)
     }
 
     /// The account signed in on this computer with the plan's use allowed, if any.
@@ -749,12 +1082,6 @@ mod native {
         tmp.write_all(text.as_bytes()).and_then(|_| tmp.as_file().sync_all()).map_err(|e| format!("{}: {e}", path.display()))?;
         tmp.persist(path).map_err(|e| format!("{}: {}", path.display(), e.error))?;
         Ok(())
-    }
-
-    fn write_credentials(path: &Path, c: &Credentials) -> Result<(), Error> {
-        let mut accounts = read_accounts(path)?;
-        accounts.put(c);
-        write_accounts(path, &accounts)
     }
 
     /// This computer's host id, created the first time.
@@ -823,30 +1150,40 @@ mod native {
         check_id_claims(&claims, client_id, nonce, now()).map_err(Error::auth)
     }
 
-    /// Renews the tokens with `send` and keeps the result. An unusable refresh token is cleared
-    /// (the registration stays for the next sign-in).
-    fn refresh(path: &Path, c: &Credentials, send: Send) -> Result<Credentials, Error> {
-        if c.refresh_token.is_empty() {
-            return Err(Error::new(Recovery::SignIn, "the sign-in can't be renewed; sign in again"));
-        }
-        let resp = send(&refresh_request(c))?;
+    /// Renews the tokens with `send` and keeps the result; the caller holds the renewal lock, so
+    /// no other process uses the refresh token until the rotated one is kept. An unusable or
+    /// missing refresh token signs the account out (the registration stays for the next sign-in).
+    fn refresh(path: &Path, v: &Vault, c: &Credentials, send: Send) -> Result<Credentials, Error> {
+        let current = {
+            let _guard = store(path)?;
+            let current = selected_at(path, v)?
+                .filter(|now| now.binding() == c.binding())
+                .ok_or_else(|| Error::new(Recovery::AccountChanged, "the ChatGPT sign-in changed; try again"))?;
+            // Another request of this process renewed it meanwhile.
+            if current.access_token != c.access_token && !current.access_token.is_empty() && !current.expires_soon(now()) {
+                return Ok(current);
+            }
+            let refresh_token = load_refresh(v, &current)?;
+            if refresh_token.is_empty() {
+                // A keychain sign-in whose token is gone or out of date can't be used again here.
+                if current.kept == Kept::Keychain {
+                    write_credentials(path, v, &current.registration())?;
+                }
+                return Err(Error::new(Recovery::SignIn, "the sign-in can't be renewed; sign in again"));
+            }
+            Credentials { refresh_token, ..current }
+        };
+        let resp = send(&refresh_request(&current))?;
         let grant = parse_grant(&resp);
         let _guard = store(path)?;
         // A user can sign out or sign into another account while the grant is in flight.
-        if read_credentials(path).ok().as_ref() != Some(c) {
+        if selected_at(path, v).ok().flatten().map(|now| (now.binding(), now.rev)) != Some((current.binding(), current.rev.clone())) {
             return Err(Error::new(Recovery::AccountChanged, "the ChatGPT sign-in changed; try again"));
         }
         match grant {
-            Ok(g) => {
-                let fresh = renewed(c, &g, now());
-                write_credentials(path, &fresh)?;
-                Ok(fresh)
-            }
+            Ok(g) => write_credentials(path, v, &renewed(&current, &g, now())),
             Err(GrantError::Unusable) => {
-                // Not a sign-out: the id token stays to skip choosing the account next time.
-                let mut registration = c.registration();
-                registration.id_token = c.id_token.clone();
-                write_credentials(path, &registration)?;
+                write_credentials(path, v, &current.registration())?;
                 Err(Error::token(&resp, GrantError::Unusable))
             }
             Err(e) => Err(Error::token(&resp, e)),
@@ -861,21 +1198,18 @@ mod native {
     pub fn fresh(send: Send) -> Result<Credentials, Error> {
         let path = auth_path().ok_or("no settings folder")?;
         let _guard = renewal_lock(&path)?;
-        fresh_at(&path, send)
+        fresh_at(&path, vault(), send)
     }
 
-    fn fresh_at(path: &Path, send: Send) -> Result<Credentials, Error> {
+    fn fresh_at(path: &Path, v: &Vault, send: Send) -> Result<Credentials, Error> {
         let c = {
             let _guard = store(path)?;
-            read_credentials(path)
-                .ok()
-                .filter(Credentials::signed_in)
-                .ok_or_else(|| Error::new(Recovery::SignIn, "not signed in to ChatGPT"))?
+            selected_at(path, v)?.filter(Credentials::signed_in).ok_or_else(|| Error::new(Recovery::SignIn, "not signed in to ChatGPT"))?
         };
         if !c.plan_allowed() {
             return Err(Error::new(Recovery::Consent, "RustGIS isn't allowed to use your ChatGPT plan; sign in again and allow it"));
         }
-        if c.expires_soon(now()) { refresh(path, &c, send) } else { Ok(c) }
+        if c.expires_soon(now()) { refresh(path, v, &c, send) } else { Ok(c) }
     }
 
     /// Sends a request as `account` (blocking): refused if another account is now selected or it
@@ -895,7 +1229,7 @@ mod native {
         if !super::api_url(&req.url) {
             return Err(Error::new(Recovery::Configuration, "a ChatGPT sign-in can only be used with the OpenAI API"));
         }
-        send_at(req, account, &auth_path().ok_or("no settings folder")?, &mut |req| {
+        send_at(req, account, &auth_path().ok_or("no settings folder")?, vault(), &mut |req| {
             if req.url == super::TOKEN_URL {
                 http::send_timeout(req, Duration::from_secs(30)).map_err(Error::auth_context)
             } else if let Some(f) = on_chunk.as_mut() {
@@ -906,17 +1240,17 @@ mod native {
         })
     }
 
-    fn send_at(req: &HttpRequest, account: &Binding, path: &Path, transport: Send) -> Result<HttpResponse, Error> {
+    fn send_at(req: &HttpRequest, account: &Binding, path: &Path, v: &Vault, transport: Send) -> Result<HttpResponse, Error> {
         let c = {
             let _guard = renewal_lock(path)?;
             {
                 let _store = store(path)?;
                 // No saved sign-in at all reads as signed out.
-                check_account(account, &read_credentials(path).unwrap_or_default())?;
+                check_account(account, &selected_at(path, v)?.unwrap_or_default())?;
             }
-            fresh_at(path, transport)?
+            fresh_at(path, v, transport)?
         };
-        check_final(path, account, &c)?;
+        check_final(path, v, account, &c)?;
         let resp = transport(&c.authorize(req.clone()))?;
         if resp.status != 401 {
             return Ok(resp);
@@ -925,8 +1259,7 @@ mod native {
             let _guard = renewal_lock(path)?;
             let current = {
                 let _store = store(path)?;
-                read_credentials(path)
-                    .ok()
+                selected_at(path, v)?
                     .filter(Credentials::signed_in)
                     .ok_or_else(|| Error::new(Recovery::SignIn, "not signed in to ChatGPT"))?
             };
@@ -935,9 +1268,9 @@ mod native {
             if current.binding() != c.binding() {
                 return Err(Error::new(Recovery::AccountChanged, "the ChatGPT account changed; try again"));
             }
-            if current.access_token != c.access_token { current } else { refresh(path, &current, transport)? }
+            if current.access_token != c.access_token { current } else { refresh(path, v, &current, transport)? }
         };
-        check_final(path, account, &c)?;
+        check_final(path, v, account, &c)?;
         transport(&c.authorize(req.clone()))
     }
 
@@ -952,9 +1285,9 @@ mod native {
         Ok(())
     }
 
-    fn check_final(path: &Path, account: &Binding, c: &Credentials) -> Result<(), Error> {
+    fn check_final(path: &Path, v: &Vault, account: &Binding, c: &Credentials) -> Result<(), Error> {
         let _guard = store(path)?;
-        let saved = read_credentials(path)?;
+        let saved = selected_at(path, v)?.unwrap_or_default();
         check_account(account, &saved)?;
         if !c.plan_allowed() || !saved.plan_allowed() {
             return Err(Error::new(Recovery::Consent, "RustGIS isn't allowed to use your ChatGPT plan; sign in again and allow it"));
@@ -977,37 +1310,94 @@ mod native {
         }
     }
 
-    /// Signs out on this computer at once: the tokens are cleared (the registration and host id
-    /// stay for the next sign-in). Revoke the session with what it gives ([`revoke`]), off the
-    /// UI thread.
-    pub fn sign_out() -> Result<Option<Revocation>, Error> {
+    /// What a sign-out leaves to do.
+    #[derive(Debug, Default)]
+    pub struct SignedOut {
+        /// The session to end at OpenAI ([`revoke`], off the UI thread).
+        pub revocation: Option<Revocation>,
+        /// Why it can't be ended from here: the keychain couldn't give its refresh token.
+        pub unrevoked: Option<Error>,
+    }
+
+    /// Signs out on this computer at once: the tokens are deleted (the registration and host id
+    /// stay for the next sign-in). Revoke the session with what it gives.
+    pub fn sign_out() -> Result<SignedOut, Error> {
         match auth_path() {
-            Some(path) => sign_out_at(&path),
-            None => Ok(None),
+            Some(path) => sign_out_at(&path, vault()),
+            None => Ok(SignedOut::default()),
         }
     }
 
     /// Signs out only if the displayed registration is still selected.
-    pub fn sign_out_selected(account: &Binding) -> Result<Option<Revocation>, Error> {
+    pub fn sign_out_selected(account: &Binding) -> Result<SignedOut, Error> {
         let path = auth_path().ok_or("no settings folder")?;
-        sign_out_checked(&path, Some(account))
+        sign_out_checked(&path, vault(), Some(account))
     }
 
-    fn sign_out_at(path: &Path) -> Result<Option<Revocation>, Error> {
-        sign_out_checked(path, None)
+    fn sign_out_at(path: &Path, v: &Vault) -> Result<SignedOut, Error> {
+        sign_out_checked(path, v, None)
     }
 
-    fn sign_out_checked(path: &Path, expected: Option<&Binding>) -> Result<Option<Revocation>, Error> {
+    fn sign_out_checked(path: &Path, v: &Vault, expected: Option<&Binding>) -> Result<SignedOut, Error> {
         let _guard = store(path)?;
-        let accounts = read_accounts(path)?;
-        let Some(c) = accounts.selected() else { return Ok(None) };
-        if expected.is_some_and(|e| *e != c.binding()) {
+        let mut accounts = read_accounts(path)?;
+        let Some(entry) = accounts.selected().cloned() else { return Ok(SignedOut::default()) };
+        if expected.is_some_and(|e| *e != entry.binding()) {
             return Err(Error::new(Recovery::AccountChanged, "the ChatGPT sign-in changed; select the account again"));
         }
+        let c = with_tokens(v, path, &mut accounts, entry)?;
+        let (refresh_token, unrevoked) = match load_refresh(v, &c) {
+            Ok(r) => (r, None),
+            // Without a keychain here (the command line), the app can still revoke it.
+            Err(e) if v.store().is_none() => return Err(e),
+            // A keychain that can't give it doesn't keep anyone signed in: the session can't be
+            // ended at OpenAI from here, which the caller says.
+            Err(e) => (String::new(), Some(e)),
+        };
         let mut registration = c.registration();
         registration.session = random_token()?;
-        write_credentials(path, &registration)?;
-        Ok((!c.refresh_token.is_empty()).then_some(Revocation { client_id: c.client_id.clone(), refresh_token: c.refresh_token.clone() }))
+        keep_tokens(v, path, &mut accounts, &registration, false)?;
+        Ok(SignedOut { revocation: revocation(&c.client_id, refresh_token), unrevoked })
+    }
+
+    fn revocation(client_id: &str, refresh_token: String) -> Option<Revocation> {
+        (!refresh_token.is_empty()).then(|| Revocation { client_id: client_id.to_string(), refresh_token })
+    }
+
+    /// Removes a saved registration, with its tokens (signing it out first when signed in).
+    /// Revoke the session with what it gives ([`revoke`]), off the UI thread.
+    pub fn remove(client_id: &str, subject: &str) -> Result<Option<Revocation>, Error> {
+        remove_at(&auth_path().ok_or("no settings folder")?, vault(), client_id, subject)
+    }
+
+    fn remove_at(path: &Path, v: &Vault, client_id: &str, subject: &str) -> Result<Option<Revocation>, Error> {
+        let _guard = store(path)?;
+        let mut accounts = read_accounts(path)?;
+        let who = (client_id.to_string(), subject.to_string());
+        let Some(entry) = accounts.entries.iter().find(|e| id(e) == who).cloned() else { return Ok(None) };
+        let c = with_tokens(v, path, &mut accounts, entry)?;
+        // The refresh token to revoke, and the keychain item go first: a registration whose item
+        // may still exist is never forgotten, or the item would be left behind for good.
+        let refresh_token = load_refresh(v, &c)?;
+        let item = c.in_keychain || !c.rev.is_empty();
+        match v.store() {
+            Some(store) => {
+                if let Err(e) = store.delete(&secret_name(client_id, subject))
+                    && item
+                {
+                    return Err(keychain_error("the ChatGPT account can't be removed", &e));
+                }
+            }
+            None if item => return Err(Error::new(Recovery::Auth, KEYCHAIN_ELSEWHERE)),
+            None => {}
+        }
+        v.held().remove(&who);
+        accounts.entries.retain(|e| id(e) != who);
+        if accounts.active.as_ref() == Some(&who) {
+            accounts.active = None;
+        }
+        write_accounts(path, &accounts)?;
+        Ok(revocation(client_id, refresh_token))
     }
 
     /// Ends a signed-out session at OpenAI (blocking; retried a few times on network and server
@@ -1216,7 +1606,7 @@ mod native {
             let result = exchanged.and_then(|(client_id, grant)| {
                 let kept = finish(p, &client_id, &grant, &mut |req| auth_send(req, cancel, deadline))
                     .and_then(|c| check_attempt(cancel, deadline).map(|()| c))
-                    .and_then(|c| save_if_active(cancel, &c, &mut |c| save(c, p.expected.as_ref())).map(|()| c));
+                    .and_then(|c| save_if_active(cancel, &c, &mut |c| save(c, p.expected.as_ref())));
                 if kept.is_err() && !grant.refresh_token.is_empty() {
                     let _ = revoke(&Revocation { client_id, refresh_token: grant.refresh_token.clone() });
                 }
@@ -1295,29 +1685,30 @@ mod native {
         Ok(c)
     }
 
-    /// Keeps a verified sign-in, with plan permission recorded separately.
-    fn save(c: &Credentials, expected: Option<&Credentials>) -> Result<(), Error> {
+    /// Keeps a verified sign-in, with plan permission recorded separately. Gives it as kept.
+    fn save(c: &Credentials, expected: Option<&Credentials>) -> Result<Credentials, Error> {
         let path = auth_path().ok_or("no settings folder")?;
-        save_at(&path, c, expected)
+        save_at(&path, vault(), c, expected)
     }
 
-    fn save_at(path: &Path, c: &Credentials, expected: Option<&Credentials>) -> Result<(), Error> {
+    fn save_at(path: &Path, v: &Vault, c: &Credentials, expected: Option<&Credentials>) -> Result<Credentials, Error> {
         let _guard = store(path)?;
-        let current = read_accounts(path)?.selected().cloned();
-        // Who, and whether signed in: a sign-out or another sign-in meanwhile is not undone.
-        let identity = |c: &Credentials| (c.binding(), c.signed_in());
-        if current.as_ref().map(identity) != expected.map(identity) {
+        let mut accounts = read_accounts(path)?;
+        // Who, and whether it had tokens (from the file alone: a locked keychain still compares):
+        // a sign-out or another sign-in meanwhile is not undone.
+        let identity = |c: &Credentials| (c.binding(), !c.rev.is_empty() || c.kept == Kept::SettingsFile);
+        if accounts.selected().map(identity) != expected.map(identity) {
             return Err(Error::new(Recovery::AccountChanged, "the ChatGPT sign-in changed; select the account again"));
         }
         // Keep valid identity even when plan permission was declined.
-        write_credentials(path, c)
+        keep_tokens(v, path, &mut accounts, c, true)
     }
 
     fn save_if_active(
         cancel: &Mutex<bool>,
         c: &Credentials,
-        persist: &mut dyn FnMut(&Credentials) -> Result<(), Error>,
-    ) -> Result<(), Error> {
+        persist: &mut dyn FnMut(&Credentials) -> Result<Credentials, Error>,
+    ) -> Result<Credentials, Error> {
         let cancelled = cancel.lock().map_err(|_| "the sign-in was cancelled")?;
         if *cancelled {
             return Err(Error::new(Recovery::Cancelled, "the sign-in was cancelled"));
@@ -1390,6 +1781,7 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use rustgis_engine::data::secrets::{MemorySecrets, SecretError};
 
         fn access(exp: i64) -> String {
             let payload = serde_json::json!({"client_id": "oaiapp_synthetic", "sub": "user-1", "exp": exp});
@@ -1409,8 +1801,56 @@ mod native {
                 plan_declined: false,
                 saved_at: String::new(),
                 session: "session-1".into(),
+                rev: String::new(),
+                in_keychain: false,
+                kept: Kept::Nowhere,
             }
         }
+
+        /// A process's vault, on a keychain of its own.
+        fn keychain() -> Vault {
+            Vault::new(Some(Arc::new(MemorySecrets::new())))
+        }
+
+        /// A process's vault, on a keychain other processes share.
+        fn sharing(store: &Arc<MemorySecrets>) -> Vault {
+            Vault::new(Some(store.clone() as Arc<dyn SecretStore>))
+        }
+
+        fn failing() -> Vault {
+            Vault::new(Some(Arc::new(MemorySecrets::failing(SecretError::Denied))))
+        }
+
+        fn read_credentials(path: &Path, v: &Vault) -> Result<Credentials, Error> {
+            selected_at(path, v)?.ok_or_else(|| "nothing selected".into())
+        }
+
+        /// The credentials without where and as which revision they are kept, nor the refresh
+        /// token (a keychain sign-in's is read only when needed).
+        fn plain(c: Credentials) -> Credentials {
+            Credentials { rev: String::new(), in_keychain: false, kept: Kept::Nowhere, refresh_token: String::new(), ..c }
+        }
+
+        /// An entry as versions before the keychain saved it, tokens and all.
+        fn legacy_json(c: &Credentials) -> Value {
+            let mut v = c.to_json();
+            v["id_token"] = c.id_token.clone().into();
+            v["access_token"] = c.access_token.clone().into();
+            v["refresh_token"] = c.refresh_token.clone().into();
+            v
+        }
+
+        fn file_has_tokens(path: &Path) -> bool {
+            let text = std::fs::read_to_string(path).unwrap();
+            ["synthetic-id", "synthetic-refresh", "rotated", "e30."].iter().any(|t| text.contains(t))
+        }
+
+        fn entry_json(path: &Path) -> Value {
+            let json: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            json["accounts"][0].clone()
+        }
+
+        const NAME: &str = "chatgpt/oaiapp_synthetic/user-1";
 
         fn grant(expires_at: i64, refresh: &str) -> HttpResponse {
             let body = serde_json::json!({"access_token": access(expires_at), "refresh_token": refresh, "expires_in": expires_at - now()});
@@ -1427,9 +1867,288 @@ mod native {
         }
 
         #[test]
+        fn the_refresh_token_goes_to_the_keychain_and_no_token_to_the_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            let store = Arc::new(MemorySecrets::new());
+            let v = sharing(&store);
+            let c = synthetic(now() + 100_000);
+            assert_eq!(write_credentials(&path, &v, &c).unwrap().kept, Kept::Keychain);
+            assert!(!file_has_tokens(&path));
+            let entry = entry_json(&path);
+            for k in ["client_id", "subject", "email", "scopes", "expires_at"] {
+                assert!(!entry[k].is_null(), "{k} stays in the file");
+            }
+            assert_eq!(entry["keychain"], true);
+            // The keychain keeps the refresh token alone, not the access and id tokens, to stay
+            // within Windows' limit (a real refresh token's length is not verified by this test).
+            let saved = store.load(NAME).unwrap().unwrap();
+            assert!(
+                saved.expose().contains("synthetic-refresh")
+                    && !saved.expose().contains("e30.")
+                    && !saved.expose().contains("synthetic-id")
+            );
+            // This process keeps using its access token.
+            assert_eq!(plain(read_credentials(&path, &v).unwrap()), plain(c.clone()));
+            // Another process, on the same keychain, is signed in and renews first.
+            let (other, process) = (read_credentials(&path, &sharing(&store)).unwrap(), sharing(&store));
+            assert!(other.signed_in() && other.kept == Kept::Keychain && other.access_token.is_empty() && other.expires_soon(now()));
+            assert_eq!(load_refresh(&process, &other).unwrap(), "synthetic-refresh");
+            // Without the keychain's refresh token, renewing signs out, without any request.
+            store.delete(NAME).unwrap();
+            let e = send_at(&test_request(), &c.binding(), &path, &process, &mut |_| panic!("nothing may be sent")).unwrap_err();
+            assert_eq!(e.recovery, Recovery::SignIn);
+            assert!(!read_credentials(&path, &process).unwrap().signed_in());
+        }
+
+        #[test]
+        fn tokens_from_the_file_move_to_the_keychain_once_it_takes_them() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            let old = synthetic(now() + 100_000);
+            let text = serde_json::json!({"version": 2, "active": {"client_id": old.client_id, "subject": old.subject},
+                "accounts": [legacy_json(&old)]})
+            .to_string();
+            std::fs::write(&path, &text).unwrap();
+            // Without a keychain, or with one that refuses, the file stays as it is and works.
+            for v in [Vault::new(None), failing()] {
+                let c = read_credentials(&path, &v).unwrap();
+                assert_eq!((c.refresh_token.as_str(), c.kept), ("synthetic-refresh", Kept::SettingsFile));
+                assert_eq!(plain(c), plain(old.clone()));
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+            }
+            // Renewing such a sign-in without the keychain keeps the rotated token in the file:
+            // the old one is used up.
+            std::fs::write(&path, legacy_json(&synthetic(0)).to_string()).unwrap();
+            send_at(&test_request(), &old.binding(), &path, &failing(), &mut |req| {
+                Ok(if req.url == super::super::TOKEN_URL {
+                    grant(now() + 100_000, "rotated")
+                } else {
+                    HttpResponse { status: 200, body: vec![], headers: vec![] }
+                })
+            })
+            .unwrap();
+            let renewed = read_credentials(&path, &Vault::new(None)).unwrap();
+            assert_eq!((renewed.refresh_token.as_str(), renewed.kept), ("rotated", Kept::SettingsFile));
+            // The keychain takes them: out of the file.
+            let store = Arc::new(MemorySecrets::new());
+            let moved = read_credentials(&path, &sharing(&store)).unwrap();
+            assert_eq!(moved.kept, Kept::Keychain);
+            assert!(!file_has_tokens(&path));
+            assert!(store.load(NAME).unwrap().unwrap().expose().contains("rotated"));
+            let other = sharing(&store);
+            assert_eq!(load_refresh(&other, &read_credentials(&path, &other).unwrap()).unwrap(), "rotated");
+        }
+
+        #[test]
+        fn a_sign_in_the_keychain_refuses_lasts_for_the_session_only() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            for (v, legacy) in [(Vault::new(None), false), (failing(), false), (Vault::new(None), true), (failing(), true)] {
+                let _ = std::fs::remove_file(&path);
+                if legacy {
+                    // Signing in again to an account whose old tokens are still in the file.
+                    std::fs::write(&path, legacy_json(&synthetic(now() + 100_000)).to_string()).unwrap();
+                }
+                let expected = load_any_at(&path, &v);
+                let mut new = synthetic(now() + 100_000);
+                new.session = "session-2".into();
+                new.refresh_token = "rotated".into();
+                assert_eq!(save_at(&path, &v, &new, expected.as_ref()).unwrap().kept, Kept::Session);
+                assert!(!file_has_tokens(&path), "never written to the file instead");
+                assert_eq!(entry_json(&path)["rev"], "", "no keychain token to look for");
+                let c = read_credentials(&path, &v).unwrap();
+                assert!(c.signed_in() && c.kept == Kept::Session && c.refresh_token == "rotated");
+                // Another process (or the next run) isn't signed in, and can sign out and remove
+                // the account without a keychain: there is nothing in it.
+                let next = Vault::new(None);
+                assert!(!read_credentials(&path, &next).unwrap().signed_in());
+                assert!(sign_out_at(&path, &next).is_ok());
+                if v.store().is_none() {
+                    assert!(remove_at(&path, &next, "oaiapp_synthetic", "user-1").is_ok());
+                }
+            }
+        }
+
+        #[test]
+        fn a_sign_in_without_the_keychain_never_replaces_one_it_holds() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            let store = Arc::new(MemorySecrets::new());
+            write_credentials(&path, &sharing(&store), &synthetic(now() + 100_000)).unwrap();
+            let before = (entry_json(&path)["rev"].clone(), store.load(NAME).unwrap());
+            for v in [Vault::new(None), failing()] {
+                let expected = load_any_at(&path, &v);
+                let mut new = synthetic(now() + 100_000);
+                new.session = "session-2".into();
+                assert!(save_at(&path, &v, &new, expected.as_ref()).is_err());
+                assert_eq!((entry_json(&path)["rev"].clone(), store.load(NAME).unwrap()), before);
+            }
+        }
+
+        #[test]
+        fn sign_out_and_removal_delete_the_stored_tokens() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            let store = Arc::new(MemorySecrets::new());
+            let v = sharing(&store);
+            write_credentials(&path, &v, &synthetic(now() + 100_000)).unwrap();
+            // Without the keychain (the command line), its token is out of reach: neither signing
+            // out nor removing forgets it unrevoked.
+            let none = Vault::new(None);
+            assert!(sign_out_at(&path, &none).is_err());
+            assert!(remove_at(&path, &none, "oaiapp_synthetic", "user-1").is_err());
+            assert!(read_credentials(&path, &v).unwrap().signed_in());
+            let out = sign_out_at(&path, &v).unwrap();
+            assert_eq!(out.revocation.unwrap().refresh_token, "synthetic-refresh");
+            assert!(out.unrevoked.is_none());
+            assert_eq!(store.load(NAME).unwrap(), None);
+            assert_eq!(entry_json(&path)["keychain"], false);
+            // Removing: the tokens and the registration.
+            let mut other = synthetic(now() + 100_000);
+            other.client_id = "oaiapp_other".into();
+            write_credentials(&path, &v, &synthetic(now() + 100_000)).unwrap();
+            write_credentials(&path, &v, &other).unwrap();
+            // A keychain that refuses keeps the account: its item would be left behind.
+            assert!(remove_at(&path, &failing(), "oaiapp_synthetic", "user-1").is_err());
+            assert_eq!(read_accounts(&path).unwrap().entries.len(), 2);
+            let r = remove_at(&path, &v, "oaiapp_synthetic", "user-1").unwrap().unwrap();
+            assert_eq!((r.client_id.as_str(), r.refresh_token.as_str()), ("oaiapp_synthetic", "synthetic-refresh"));
+            assert_eq!(store.load(NAME).unwrap(), None);
+            let accounts = read_accounts(&path).unwrap();
+            assert_eq!(accounts.entries.iter().map(|e| e.client_id.as_str()).collect::<Vec<_>>(), ["oaiapp_other"]);
+            assert_eq!(read_credentials(&path, &v).unwrap().client_id, "oaiapp_other", "the other account stays selected");
+            remove_at(&path, &v, "oaiapp_other", "user-1").unwrap();
+            assert!(read_accounts(&path).unwrap().selected().is_none());
+            assert!(remove_at(&path, &v, "oaiapp_other", "user-1").unwrap().is_none());
+        }
+
+        #[test]
+        fn an_unreadable_keychain_signs_out_here_and_keeps_its_item_noted() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            let store = Arc::new(MemorySecrets::new());
+            write_credentials(&path, &sharing(&store), &synthetic(now() + 100_000)).unwrap();
+            let out = sign_out_at(&path, &failing()).unwrap();
+            assert!(out.revocation.is_none() && out.unrevoked.is_some(), "the caller says it wasn't revoked");
+            assert!(!read_credentials(&path, &sharing(&store)).unwrap().signed_in());
+            // The item couldn't be deleted: it stays noted, so removal still deletes it first.
+            assert_eq!(entry_json(&path)["keychain"], true);
+            assert!(remove_at(&path, &failing(), "oaiapp_synthetic", "user-1").is_err());
+            assert!(remove_at(&path, &Vault::new(None), "oaiapp_synthetic", "user-1").is_err());
+            remove_at(&path, &sharing(&store), "oaiapp_synthetic", "user-1").unwrap();
+            assert_eq!(store.load(NAME).unwrap(), None);
+            assert!(read_accounts(&path).unwrap().entries.is_empty());
+        }
+
+        #[test]
+        fn an_account_without_a_keychain_item_is_removed_whatever_the_keychain() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            std::fs::write(&path, synthetic(0).registration().to_json().to_string()).unwrap();
+            remove_at(&path, &failing(), "oaiapp_synthetic", "user-1").unwrap();
+            assert!(read_accounts(&path).unwrap().entries.is_empty());
+        }
+
+        /// A keychain that checks the file already names each item, and its revision, before the
+        /// item is written: a failed file write after it can't leave a token the file can't name.
+        struct Noting {
+            inner: MemorySecrets,
+            path: std::path::PathBuf,
+        }
+
+        impl SecretStore for Noting {
+            fn load(&self, account: &str) -> Result<Option<Secret>, SecretError> {
+                self.inner.load(account)
+            }
+            fn save(&self, account: &str, value: &Secret) -> Result<(), SecretError> {
+                let saved: Value = serde_json::from_str(value.expose()).unwrap();
+                let entry = entry_json(&self.path);
+                assert_eq!((entry["keychain"].clone(), entry["rev"].clone()), (Value::Bool(true), saved["rev"].clone()));
+                self.inner.save(account, value)
+            }
+            fn delete(&self, account: &str) -> Result<(), SecretError> {
+                self.inner.delete(account)
+            }
+        }
+
+        #[test]
+        fn the_file_names_a_keychain_item_before_it_is_written() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            let v = Vault::new(Some(Arc::new(Noting { inner: MemorySecrets::new(), path: path.clone() })));
+            // A sign-in, then a renewal of it.
+            save_at(&path, &v, &synthetic(0), None).unwrap();
+            send_at(&test_request(), &synthetic(0).binding(), &path, &v, &mut |req| {
+                Ok(if req.url == super::super::TOKEN_URL {
+                    grant(now() + 100_000, "rotated")
+                } else {
+                    HttpResponse { status: 200, body: vec![], headers: vec![] }
+                })
+            })
+            .unwrap();
+            let c = read_credentials(&path, &v).unwrap();
+            assert_eq!((c.kept, load_refresh(&v, &c).unwrap().as_str()), (Kept::Keychain, "rotated"));
+        }
+
+        #[test]
+        fn a_file_sign_in_without_a_refresh_token_stays_in_the_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            let mut old = synthetic(now() + 100_000);
+            old.refresh_token.clear();
+            let text = legacy_json(&old).to_string();
+            std::fs::write(&path, &text).unwrap();
+            let store = Arc::new(MemorySecrets::new());
+            let c = read_credentials(&path, &sharing(&store)).unwrap();
+            assert!(c.signed_in() && c.kept == Kept::SettingsFile);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "its access token keeps working");
+            assert_eq!(store.load(NAME).unwrap(), None);
+        }
+
+        #[test]
+        fn keychain_tokens_of_another_revision_are_never_used() {
+            // A renewal whose token the keychain took but whose file write failed: the rotated
+            // refresh token is the keychain's, the file still names the previous revision.
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            let store = Arc::new(MemorySecrets::new());
+            write_credentials(&path, &sharing(&store), &synthetic(0)).unwrap();
+            store.save(NAME, &Secret::new(serde_json::json!({"rev": "another", "refresh_token": "rotated"}).to_string())).unwrap();
+            let v = sharing(&store);
+            let e = send_at(&test_request(), &synthetic(0).binding(), &path, &v, &mut |_| panic!("no token may be used")).unwrap_err();
+            assert_eq!(e.recovery, Recovery::SignIn);
+            assert!(!read_credentials(&path, &v).unwrap().signed_in());
+        }
+
+        #[test]
+        fn processes_renew_in_turn_with_the_latest_refresh_token() {
+            // Each process renews once for its own access token; the renewal lock and the
+            // keychain read under it mean each uses the refresh token the last one kept.
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            let store = Arc::new(MemorySecrets::new());
+            write_credentials(&path, &sharing(&store), &synthetic(now() + 100_000)).unwrap();
+            let mut used = Vec::new();
+            for (i, process) in [sharing(&store), sharing(&store)].iter().enumerate() {
+                send_at(&test_request(), &synthetic(0).binding(), &path, process, &mut |req| {
+                    if req.url == super::super::TOKEN_URL {
+                        let body = req.body.clone().unwrap_or_default();
+                        used.push(body.split('&').find_map(|p| p.strip_prefix("refresh_token=")).unwrap_or("").to_string());
+                        return Ok(grant(now() + 100_000, &format!("rotated-{i}")));
+                    }
+                    Ok(HttpResponse { status: 200, body: vec![], headers: vec![] })
+                })
+                .unwrap();
+            }
+            assert_eq!(used, ["synthetic-refresh", "rotated-0"]);
+        }
+
+        #[test]
         fn requests_for_another_registration_or_after_sign_out_are_refused() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("auth.json");
+            let v = keychain();
             for change in ["client", "subject", "signed-out"] {
                 let mut c = synthetic(now() + 100_000);
                 match change {
@@ -1437,8 +2156,8 @@ mod native {
                     "subject" => c.subject = "other-user".into(),
                     _ => c = c.registration(),
                 }
-                write_credentials(&path, &c).unwrap();
-                let e = send_at(&test_request(), &synthetic(0).binding(), &path, &mut |_| panic!("must refuse before any network I/O"))
+                write_credentials(&path, &v, &c).unwrap();
+                let e = send_at(&test_request(), &synthetic(0).binding(), &path, &v, &mut |_| panic!("must refuse before any network I/O"))
                     .unwrap_err();
                 assert!(e.to_string().contains(if change == "signed-out" { "not signed in" } else { "changed" }), "{change}: {e}");
             }
@@ -1448,42 +2167,44 @@ mod native {
         fn work_from_before_a_sign_out_is_refused_after_signing_in_again() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("auth.json");
+            let v = keychain();
             let old = synthetic(now() + 100_000);
-            write_credentials(&path, &old).unwrap();
+            write_credentials(&path, &v, &old).unwrap();
             // Another window signs out and back into the same registration.
-            sign_out_at(&path).unwrap();
+            sign_out_at(&path, &v).unwrap();
             let mut again = old.clone();
             again.session = "session-2".into();
-            write_credentials(&path, &again).unwrap();
-            let e = send_at(&test_request(), &old.binding(), &path, &mut |_| panic!("must refuse before any network I/O")).unwrap_err();
+            write_credentials(&path, &v, &again).unwrap();
+            let e = send_at(&test_request(), &old.binding(), &path, &v, &mut |_| panic!("must refuse before any network I/O")).unwrap_err();
             assert!(e.to_string().contains("changed"), "{e}");
             // A sign-in begun before another process signs out is not kept, even when the account
             // was already signed out.
-            sign_out_at(&path).unwrap();
-            let started = read_credentials(&path).unwrap();
-            sign_out_at(&path).unwrap();
+            sign_out_at(&path, &v).unwrap();
+            let started = read_credentials(&path, &v).unwrap();
+            sign_out_at(&path, &v).unwrap();
             let mut late = old.clone();
             late.session = "session-3".into();
-            assert!(save_at(&path, &late, Some(&started)).is_err());
-            assert!(!read_credentials(&path).unwrap().signed_in());
+            assert!(save_at(&path, &v, &late, Some(&started)).is_err());
+            assert!(!read_credentials(&path, &v).unwrap().signed_in());
             // Renewal and selection keep the session.
-            write_credentials(&path, &again).unwrap();
-            assert_eq!(select_at(&path, &again.client_id, &again.subject).unwrap().binding(), again.binding());
+            write_credentials(&path, &v, &again).unwrap();
+            assert_eq!(select_at(&path, &v, &again.client_id, &again.subject).unwrap().binding(), again.binding());
         }
 
         #[test]
         fn renewed_scope_is_checked_before_initial_send_and_retry() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("auth.json");
+            let v = keychain();
             for retry in [false, true] {
-                write_credentials(&path, &synthetic(if retry { now() + 100_000 } else { 0 })).unwrap();
+                write_credentials(&path, &v, &synthetic(if retry { now() + 100_000 } else { 0 })).unwrap();
                 let mut inference = 0;
-                let e = send_at(&test_request(), &synthetic(0).binding(), &path, &mut |req| {
+                let e = send_at(&test_request(), &synthetic(0).binding(), &path, &v, &mut |req| {
                     if req.url == super::super::TOKEN_URL {
                         let mut r = grant(now() + 100_000, "rotated");
-                        let mut v: Value = serde_json::from_slice(&r.body).unwrap();
-                        v["scope"] = serde_json::json!("openid email");
-                        r.body = v.to_string().into_bytes();
+                        let mut body: Value = serde_json::from_slice(&r.body).unwrap();
+                        body["scope"] = serde_json::json!("openid email");
+                        r.body = body.to_string().into_bytes();
                         return Ok(r);
                     }
                     inference += 1;
@@ -1492,7 +2213,7 @@ mod native {
                 .unwrap_err();
                 assert!(e.to_string().contains("plan"));
                 assert_eq!(inference, usize::from(retry));
-                assert!(!read_credentials(&path).unwrap().plan_allowed());
+                assert!(!read_credentials(&path, &v).unwrap().plan_allowed());
             }
         }
 
@@ -1500,21 +2221,22 @@ mod native {
         fn separate_store_handles_serialize_compare_and_write() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("auth.json");
-            write_credentials(&path, &synthetic(0)).unwrap();
+            let v = keychain();
+            write_credentials(&path, &v, &synthetic(0)).unwrap();
             let held = store(&path).unwrap();
             let other = std::fs::OpenOptions::new().read(true).write(true).open(path.with_extension("store-lock")).unwrap();
             assert!(other.try_lock().is_err());
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::scope(|scope| {
                 scope.spawn(|| {
-                    let r = sign_out_at(&path);
+                    let r = sign_out_at(&path, &v);
                     tx.send(r).unwrap();
                 });
                 assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
                 drop(held);
                 assert!(rx.recv_timeout(Duration::from_secs(2)).unwrap().is_ok());
             });
-            assert!(!read_credentials(&path).unwrap().signed_in());
+            assert!(!read_credentials(&path, &v).unwrap().signed_in());
             assert!(other.try_lock().is_ok());
         }
 
@@ -1522,19 +2244,22 @@ mod native {
         fn independent_process_changes_survive_inflight_renewal_and_login() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("auth.json");
+            let store = Arc::new(MemorySecrets::new());
+            let (v, other) = (sharing(&store), sharing(&store));
             for signout in [false, true] {
                 let old = synthetic(0);
-                write_credentials(&path, &old).unwrap();
-                let result = send_at(&test_request(), &synthetic(0).binding(), &path, &mut |_| {
+                write_credentials(&path, &v, &old).unwrap();
+                let result = send_at(&test_request(), &synthetic(0).binding(), &path, &v, &mut |_| {
                     std::thread::scope(|scope| {
                         scope
                             .spawn(|| {
                                 if signout {
-                                    sign_out_at(&path).unwrap();
+                                    sign_out_at(&path, &other).unwrap();
                                 } else {
+                                    let current = read_credentials(&path, &other).unwrap();
                                     let mut new = old.clone();
                                     new.subject = "new-account".into();
-                                    save_at(&path, &new, Some(&old)).unwrap();
+                                    save_at(&path, &other, &new, Some(&current)).unwrap();
                                 }
                             })
                             .join()
@@ -1543,9 +2268,9 @@ mod native {
                     Ok(grant(now() + 100_000, "late-refresh"))
                 });
                 assert!(result.is_err());
-                assert!(save_at(&path, &old, Some(&old)).is_err(), "late login must not undo the change");
-                let current = read_credentials(&path).unwrap();
-                assert_ne!(current.refresh_token, "late-refresh");
+                assert!(save_at(&path, &v, &old, Some(&old)).is_err(), "late login must not undo the change");
+                let current = read_credentials(&path, &v).unwrap();
+                assert!(!store.load(NAME).unwrap().is_some_and(|s| s.expose().contains("late-refresh")));
                 assert_eq!(current.signed_in(), !signout);
             }
         }
@@ -1554,23 +2279,24 @@ mod native {
         fn accounts_migrate_select_and_keep_distinct_registrations() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("auth.json");
+            let v = keychain();
             let a = synthetic(now() + 100_000);
-            std::fs::write(&path, a.to_json().to_string()).unwrap();
-            assert_eq!(read_credentials(&path).unwrap(), a);
+            std::fs::write(&path, legacy_json(&a).to_string()).unwrap();
+            let read = read_credentials(&path, &v).unwrap();
+            assert_eq!(plain(read.clone()), plain(a.clone()));
             let mut b = a.clone();
             b.client_id = "oaiapp_workspace".into();
             assert_ne!(a.label(), b.label());
-            save_at(&path, &b, Some(&a)).unwrap();
-            let selected = select_at(&path, &a.client_id, &a.subject).unwrap();
-            assert_eq!(selected, a, "selecting changes nothing but the selection");
-            assert_eq!(selected.client_id, a.client_id);
-            sign_out_at(&path).unwrap();
+            save_at(&path, &v, &b, Some(&read)).unwrap();
+            let selected = select_at(&path, &v, &a.client_id, &a.subject).unwrap();
+            assert_eq!(plain(selected), plain(a.clone()), "selecting changes nothing but the selection");
+            sign_out_at(&path, &v).unwrap();
             let accounts = read_accounts(&path).unwrap();
             assert_eq!(accounts.entries.len(), 2);
-            assert!(!accounts.selected().unwrap().signed_in());
-            let selected = select_at(&path, &b.client_id, &b.subject).unwrap();
+            assert!(!read_credentials(&path, &v).unwrap().signed_in());
+            let selected = select_at(&path, &v, &b.client_id, &b.subject).unwrap();
             assert!(selected.signed_in());
-            assert_eq!(selected.refresh_token, b.refresh_token);
+            assert_eq!(load_refresh(&v, &selected).unwrap(), b.refresh_token);
             let json: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(json["version"], 2);
         }
@@ -1620,19 +2346,20 @@ mod native {
 
         #[test]
         fn simultaneous_401_responses_rotate_only_once() {
+            // Two requests of one process: the second uses the first's renewal.
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("test-auth.json");
             let far = now() + 100_000;
-            write_credentials(&path, &synthetic(far)).unwrap();
-            let barrier = Arc::new(std::sync::Barrier::new(2));
-            let rotations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let v = keychain();
+            write_credentials(&path, &v, &synthetic(far)).unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            let rotations = std::sync::atomic::AtomicUsize::new(0);
             std::thread::scope(|scope| {
                 let workers: Vec<_> = (0..2)
                     .map(|_| {
-                        let (barrier, rotations, path) = (barrier.clone(), rotations.clone(), path.clone());
-                        scope.spawn(move || {
+                        scope.spawn(|| {
                             let mut inference = 0;
-                            send_at(&test_request(), &synthetic(0).binding(), &path, &mut |req| {
+                            send_at(&test_request(), &synthetic(0).binding(), &path, &v, &mut |req| {
                                 if req.url == super::super::TOKEN_URL {
                                     rotations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                     return Ok(grant(far + 1, "synthetic-rotated"));
@@ -1656,31 +2383,32 @@ mod native {
                 }
             });
             assert_eq!(rotations.load(std::sync::atomic::Ordering::SeqCst), 1);
-            assert_eq!(read_credentials(&path).unwrap().refresh_token, "synthetic-rotated");
+            assert_eq!(load_refresh(&v, &read_credentials(&path, &v).unwrap()).unwrap(), "synthetic-rotated");
         }
 
         #[test]
         fn late_401_does_not_restore_a_signed_out_or_different_account() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("test-auth.json");
+            let v = keychain();
             for switch_account in [false, true] {
-                write_credentials(&path, &synthetic(now() + 100_000)).unwrap();
+                write_credentials(&path, &v, &synthetic(now() + 100_000)).unwrap();
                 let mut requests = 0;
-                let result = send_at(&test_request(), &synthetic(0).binding(), &path, &mut |_| {
+                let result = send_at(&test_request(), &synthetic(0).binding(), &path, &v, &mut |_| {
                     requests += 1;
                     let _guard = store(&path).unwrap();
                     if switch_account {
                         let mut other = synthetic(now() + 100_001);
                         other.subject = "user-2".into();
-                        write_credentials(&path, &other).unwrap();
+                        write_credentials(&path, &v, &other).unwrap();
                     } else {
-                        write_credentials(&path, &synthetic(0).registration()).unwrap();
+                        write_credentials(&path, &v, &synthetic(0).registration()).unwrap();
                     }
                     Ok(HttpResponse { status: 401, body: vec![], headers: vec![] })
                 });
                 assert!(result.is_err());
                 assert_eq!(requests, 1, "a late response must not renew or resend");
-                assert_eq!(read_credentials(&path).unwrap().signed_in(), switch_account);
+                assert_eq!(read_credentials(&path, &v).unwrap().signed_in(), switch_account);
             }
         }
 
@@ -1688,51 +2416,54 @@ mod native {
         fn sign_out_during_refresh_does_not_wait_for_network_or_restore_tokens() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("test-auth.json");
-            write_credentials(&path, &synthetic(0)).unwrap();
-            let result = send_at(&test_request(), &synthetic(0).binding(), &path, &mut |req| {
+            let v = keychain();
+            write_credentials(&path, &v, &synthetic(0)).unwrap();
+            let result = send_at(&test_request(), &synthetic(0).binding(), &path, &v, &mut |req| {
                 assert_eq!(req.url, super::super::TOKEN_URL);
                 // An independent handle can sign out while renewal waits for the network.
-                sign_out_at(&path).unwrap();
+                sign_out_at(&path, &v).unwrap();
                 Ok(grant(now() + 100_000, "synthetic-rotated"))
             });
             assert!(result.is_err());
-            assert!(!read_credentials(&path).unwrap().signed_in());
+            assert!(!read_credentials(&path, &v).unwrap().signed_in());
         }
 
         #[test]
         fn an_unusable_refresh_token_is_cleared_and_the_registration_kept() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("test-auth.json");
-            write_credentials(&path, &synthetic(0)).unwrap();
-            let e = send_at(&test_request(), &synthetic(0).binding(), &path, &mut |_| {
+            let v = keychain();
+            write_credentials(&path, &v, &synthetic(0)).unwrap();
+            let e = send_at(&test_request(), &synthetic(0).binding(), &path, &v, &mut |_| {
                 Ok(HttpResponse { status: 400, body: br#"{"error":"refresh_token_reused"}"#.to_vec(), headers: vec![] })
             })
             .unwrap_err();
             assert!(e.to_string().contains("sign in again"), "{e}");
-            let left = read_credentials(&path).unwrap();
+            let left = read_credentials(&path, &v).unwrap();
             assert!(!left.signed_in() && left.refresh_token.is_empty());
             assert_eq!(left.client_id, "oaiapp_synthetic");
             // A passing failure keeps the tokens.
-            write_credentials(&path, &synthetic(0)).unwrap();
+            write_credentials(&path, &v, &synthetic(0)).unwrap();
             assert!(
-                send_at(&test_request(), &synthetic(0).binding(), &path, &mut |_| Ok(HttpResponse {
+                send_at(&test_request(), &synthetic(0).binding(), &path, &v, &mut |_| Ok(HttpResponse {
                     status: 503,
                     body: vec![],
                     headers: vec![]
                 }))
                 .is_err()
             );
-            assert!(read_credentials(&path).unwrap().signed_in());
+            assert!(read_credentials(&path, &v).unwrap().signed_in());
         }
 
         #[test]
         fn without_the_plan_nothing_is_sent() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("test-auth.json");
+            let v = keychain();
             let mut c = synthetic(now() + 100_000);
             c.scopes.retain(|s| s != super::super::PLAN_SCOPE);
-            write_credentials(&path, &c).unwrap();
-            let e = send_at(&test_request(), &synthetic(0).binding(), &path, &mut |_| panic!("nothing may be sent")).unwrap_err();
+            write_credentials(&path, &v, &c).unwrap();
+            let e = send_at(&test_request(), &synthetic(0).binding(), &path, &v, &mut |_| panic!("nothing may be sent")).unwrap_err();
             assert!(e.to_string().contains("plan"), "{e}");
         }
 
@@ -1740,16 +2471,18 @@ mod native {
         fn sign_out_keeps_the_registration_and_gives_the_session_to_revoke() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("test-auth.json");
-            write_credentials(&path, &synthetic(now() + 100_000)).unwrap();
-            let r = sign_out_at(&path).unwrap().unwrap();
+            let v = keychain();
+            write_credentials(&path, &v, &synthetic(now() + 100_000)).unwrap();
+            let out = sign_out_at(&path, &v).unwrap();
+            let r = out.revocation.unwrap();
             assert_eq!((r.client_id.as_str(), r.refresh_token.as_str()), ("oaiapp_synthetic", "synthetic-refresh"));
             assert!(!format!("{r:?}").contains("synthetic-refresh"));
-            let left = read_credentials(&path).unwrap();
+            let left = read_credentials(&path, &v).unwrap();
             assert!(!left.signed_in() && left.id_token.is_empty() && left.refresh_token.is_empty());
             assert_eq!((left.client_id.as_str(), left.subject.as_str()), ("oaiapp_synthetic", "user-1"));
             // Again: nothing more to revoke. A missing file is no error.
-            assert!(sign_out_at(&path).unwrap().is_none());
-            assert!(sign_out_at(&dir.path().join("missing.json")).unwrap().is_none());
+            assert!(sign_out_at(&path, &v).unwrap().revocation.is_none());
+            assert!(sign_out_at(&dir.path().join("missing.json"), &v).unwrap().revocation.is_none());
         }
 
         #[test]
@@ -1805,9 +2538,9 @@ mod native {
         fn cancellation_prevents_persistence() {
             let cancelled = Mutex::new(true);
             let mut writes = 0;
-            let result = save_if_active(&cancelled, &Credentials::default(), &mut |_| {
+            let result = save_if_active(&cancelled, &Credentials::default(), &mut |c| {
                 writes += 1;
-                Ok(())
+                Ok(c.clone())
             });
             assert!(result.is_err());
             assert_eq!(writes, 0);
@@ -1819,11 +2552,12 @@ mod native {
         fn credentials_file_replaces_atomically_and_cleans_failed_writes() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("test-auth.json");
+            let v = keychain();
             let first = synthetic(1);
-            let next = synthetic(2);
-            write_credentials(&path, &first).unwrap();
-            write_credentials(&path, &next).unwrap();
-            assert_eq!(read_credentials(&path).unwrap(), next);
+            let next = plain(synthetic(2));
+            write_credentials(&path, &v, &first).unwrap();
+            write_credentials(&path, &v, &synthetic(2)).unwrap();
+            assert_eq!(plain(read_credentials(&path, &v).unwrap()), next);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -1831,12 +2565,12 @@ mod native {
             }
             let destination_dir = dir.path().join("directory");
             std::fs::create_dir(&destination_dir).unwrap();
-            assert!(write_credentials(&destination_dir, &next).is_err());
-            assert_eq!(read_credentials(&path).unwrap(), next);
-            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2, "failed writes leave no token-bearing tempfiles");
+            assert!(write_credentials(&destination_dir, &v, &next).is_err());
+            assert_eq!(plain(read_credentials(&path, &v).unwrap()), next);
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2, "failed writes leave no tempfiles");
             // A byte-order mark (Windows editors) is no reason to lose the sign-in.
-            std::fs::write(&path, format!("\u{feff}{}", next.to_json())).unwrap();
-            assert_eq!(read_credentials(&path).unwrap(), next);
+            std::fs::write(&path, format!("\u{feff}{}", legacy_json(&next))).unwrap();
+            assert_eq!(plain(read_credentials(&path, &v).unwrap()), next);
         }
     }
 }
