@@ -429,6 +429,51 @@ pub fn https_url(url: &str) -> Result<String, String> {
     Ok(object_url(&bucket, &key, conn.as_ref()))
 }
 
+/// AWS's web address for an object read anonymously, as a public `s3://` address named by a
+/// catalog is (a STAC item's asset): never through the user's connections, at the global endpoint,
+/// or at `region`'s for a bucket in a region the global one doesn't reach.
+pub fn public_url(url: &str, region: Option<&str>) -> Result<String, String> {
+    let (bucket, key) = parse(url)?;
+    let at = region.map(|r| Connection { name: String::new(), endpoint: None, region: r.into(), buckets: Vec::new(), credentials: None });
+    Ok(object_url(&bucket, &key, at.as_ref()))
+}
+
+/// The region an S3 refusal says a bucket is in, when it was asked at the wrong endpoint: a bucket
+/// in a region AWS opts in (af-south-1, Digital Earth Africa's) asked at the global endpoint
+/// ("The af-south-1 location constraint is incompatible…"), or an endpoint named in a redirect
+/// (`bucket.s3.eu-west-1.amazonaws.com`).
+pub fn region_in(text: &str) -> Option<String> {
+    let region = |r: &str| {
+        let r = r.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        (r.len() <= 30 && r.matches('-').count() >= 2 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
+            .then(|| r.to_string())
+    };
+    let constraint = text.split_once(" location constraint").and_then(|(before, _)| before.rsplit(' ').next()).and_then(region);
+    constraint.or_else(|| text.split(".s3.").skip(1).find_map(|after| after.split_once(".amazonaws.com").and_then(|(r, _)| region(r))))
+}
+
+/// Where a public bucket's objects are read anonymously, found by reading one object's first byte
+/// (`probe`, at most twice): `None` for AWS's global endpoint, else the bucket's region, when AWS
+/// answers that the bucket is in a region the global endpoint doesn't reach. A bucket that refuses
+/// anonymous reads (a private or requester-pays one, such as Landsat's) is refused, naming it.
+pub fn public_region(url: &str, probe: impl Fn(&str) -> Result<(), crate::failure::Failure>) -> Result<Option<String>, String> {
+    let (bucket, _) = parse(url)?;
+    let refused = |f: &crate::failure::Failure| match f.status() {
+        Some(401 | 403) => format!(
+            "s3://{bucket} doesn't let its files be read anonymously (a private or requester-pays bucket), so RustGIS can't read them"
+        ),
+        _ => format!("s3://{bucket}: {}", f.message),
+    };
+    match probe(&public_url(url, None)?) {
+        Ok(()) => Ok(None),
+        Err(f) => {
+            let Some(region) = f.excerpt().and_then(region_in) else { return Err(refused(&f)) };
+            probe(&public_url(url, Some(&region))?).map_err(|f| refused(&f))?;
+            Ok(Some(region))
+        }
+    }
+}
+
 /// The canonical endpoint a saved connection's address (empty: AWS) stands for.
 pub fn canonical(address: &str) -> Result<Option<String>, String> {
     let a = address.trim();
@@ -1016,6 +1061,45 @@ pub fn profile(credentials_ini: &str, config_ini: &str, name: &str) -> Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A public `s3://` address from a catalog: read anonymously at AWS's global endpoint, or at
+    /// the region its refusal names (Digital Earth Africa's af-south-1); a bucket refusing anonymous
+    /// reads is refused by name.
+    #[test]
+    fn public_buckets_are_read_at_their_region() {
+        use crate::failure::Failure;
+        let url = "s3://deafrica-services/wofs/x211/a b.tif";
+        assert_eq!(public_url(url, None).unwrap(), "https://deafrica-services.s3.amazonaws.com/wofs/x211/a%20b.tif");
+        assert_eq!(
+            public_url(url, Some("af-south-1")).unwrap(),
+            "https://deafrica-services.s3.af-south-1.amazonaws.com/wofs/x211/a%20b.tif"
+        );
+        assert!(public_url("https://x.org/a.tif", None).is_err());
+        // What AWS says, as the excerpt of its refusal keeps it.
+        let constraint = "IllegalLocationConstraintException The af-south-1 location constraint is incompatible for the region specific endpoint this request was sent to. XJBV";
+        assert_eq!(region_in(constraint).as_deref(), Some("af-south-1"));
+        let redirect = "PermanentRedirect The bucket you are attempting to access must be addressed using the specified endpoint. b.s3.eu-west-1.amazonaws.com";
+        assert_eq!(region_in(redirect).as_deref(), Some("eu-west-1"));
+        assert_eq!(region_in("AccessDenied Access Denied"), None);
+        assert_eq!(region_in("The <script> location constraint"), None);
+        let refusal = |status: u16, text: &str| Failure::answered("", status, &[], text.as_bytes());
+        // Read at the global endpoint: no region.
+        assert_eq!(public_region(url, |_| Ok(())).unwrap(), None);
+        // Refused there with the region named: read again there, once.
+        let asked = std::sync::Mutex::new(Vec::new());
+        let r = public_region(url, |u| {
+            asked.lock().unwrap().push(u.to_string());
+            if u.contains(".s3.amazonaws.com") { Err(refusal(400, &format!("<Error>{constraint}</Error>"))) } else { Ok(()) }
+        });
+        assert_eq!(r.unwrap().as_deref(), Some("af-south-1"));
+        assert_eq!(asked.lock().unwrap().len(), 2);
+        // Requester pays (Landsat's) or private: refused, naming the bucket.
+        let e = public_region("s3://usgs-landsat/a.tif", |_| Err(refusal(403, "AccessDenied Access Denied"))).unwrap_err();
+        assert!(e.contains("s3://usgs-landsat") && e.contains("anonymously"), "{e}");
+        // The region named, but refused there too.
+        let e = public_region(url, |u| Err(refusal(if u.contains("af-south-1") { 403 } else { 400 }, constraint))).unwrap_err();
+        assert!(e.contains("anonymously"), "{e}");
+    }
 
     #[test]
     fn bucket_paths_at_custom_endpoints_are_case_sensitive() {

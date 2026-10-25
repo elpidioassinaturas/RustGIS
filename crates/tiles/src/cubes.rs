@@ -336,6 +336,9 @@ mod tests {
         assert!(piaui.contains(&"bdc-s2-16d-ndvi".to_string()) && piaui.contains(&"era5-2m-temperature".to_string()), "{piaui:?}");
         let europe = ids(select(list, None, Some([5.0, 45.0, 15.0, 50.0]), None).unwrap());
         assert!(!europe.iter().any(|i| i.starts_with("bdc")) && europe.contains(&"earth-search-s2-nir".to_string()), "{europe:?}");
+        // Water over Lake Victoria: Digital Earth Africa's, not Australia's.
+        let victoria = ids(select(list, Some("water"), Some([32.6, -0.9, 32.8, -0.7]), Some("water observations")).unwrap());
+        assert_eq!(victoria, ["deafrica-water-observations-annual"]);
         // A box across the antimeridian meets an entry on either side of it.
         let e = list.iter().find(|e| e.id == "bdc-mod13q1-ndvi").unwrap();
         assert!(e.overlaps([170.0, -10.0, -90.0, 0.0]) && !e.overlaps([170.0, -10.0, -150.0, 0.0]));

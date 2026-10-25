@@ -95,6 +95,13 @@ and band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentin
   scale and offset turn it into the files' stored values. Without one, each file is stretched on
   its own, between its 2nd and 98th percentiles.
 - **Saved with the project:** each tile's dates and addresses.
+- **Files in public buckets:** a collection whose items give their files as `s3://` addresses
+  (Digital Earth Australia, Digital Earth Africa, the Copernicus DEM on Earth Search) is read
+  anonymously from AWS, at the files' web addresses, never with the keys of an S3 connection. A
+  bucket in a region AWS's global endpoint doesn't reach (Digital Earth Africa's, in Cape Town) is
+  read at its own region's, found by reading one byte of its first file. A bucket that refuses
+  anonymous reads (a private one, or one that charges the reader, as Landsat's does) is refused,
+  naming it.
 - **Web app:** creating a cube with **Add as Time Series** is desktop-only. Saved cube tile
   layers can draw in the web app when their servers allow browser requests (CORS).
 - **Its trend:** the same search, given to Trend Analysis (`cube.trend` with `collection`,
@@ -137,13 +144,15 @@ The entries, all public and read in place:
 | Provider | Cubes |
 |---|---|
 | [Brazil Data Cube](https://data.inpe.br/bdc/) (INPE) | MODIS NDVI and EVI (MOD13Q1 v6.1, 232 m, from 2000); the 16-day NDVI cubes of Sentinel-2 (10 m, from 2017), Landsat (30 m) and CBERS-4 WFI (64 m, from 2016) |
-| [Earth Search](https://element84.com/earth-search/) (Element 84) | Sentinel-2 L2A scenes' red and near-infrared bands (10 m, from 2015), searched with at most 20% cloud cover |
+| [Earth Search](https://element84.com/earth-search/) (Element 84) | Sentinel-2 L2A scenes' red and near-infrared bands (10 m, from 2015), searched with at most 20% cloud cover; the Copernicus DEM GLO-30 (one date) |
+| [Digital Earth Australia](https://www.dea.ga.gov.au/) and [Digital Earth Africa](https://www.digitalearthafrica.org/) | the yearly frequency of water seen by Landsat (30 m, from 1986 and 1984) |
 | [ARCO-ERA5](https://cloud.google.com/storage/docs/public-datasets/era5) (Google Cloud, ECMWF) | hourly air temperature at 2 m, total precipitation and top-layer soil moisture (0.25°, from 1940), as a Zarr store the desktop reads |
 
 Only cubes RustGIS reads today are listed. Collections whose files sit behind signed addresses
-(Planetary Computer), need a sign-in (Copernicus Data Space, NASA Earthdata) or are only given as
-`s3://` addresses (Digital Earth Africa, Digital Earth Australia, the Copernicus DEM and Landsat on
-Earth Search) are left out until they can be read.
+(Planetary Computer), need a sign-in (Copernicus Data Space, NASA Earthdata) or charge the reader
+(Landsat Collection 2 on Earth Search) are left out. Digital Earth Australia's catalog sits behind
+a firewall that may ask a program making many requests in a row for a browser check for a while;
+its searches then fail until it lets them through again.
 
 An entry, as the list (`crates/tiles/src/cubes.json`) holds it; a cube is proposed by adding one:
 

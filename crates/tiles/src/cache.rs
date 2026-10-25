@@ -597,6 +597,15 @@ pub fn download_public_within(url: &str, max: usize, timeout: std::time::Duratio
     native::get(&native::public_agent(timeout), &download_address(url, max))
 }
 
+/// Reads an address's first byte, connecting only to internet addresses (as
+/// [`download_public_within`]), telling what is known of a failure: whether and how a server
+/// serves a file, without reading it ([`crate::s3::public_region`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn probe_blocking(url: &str) -> Result<(), Failure> {
+    crate::address::check(url, None).map_err(|e| Failure::new(url, e))?;
+    native::get_detailed(&native::public_agent(BLOCKING_TIMEOUT), &format!("{url}{RANGE}0-0")).map(|_| ())
+}
+
 /// How a JSON document is POSTed and its answer read (the browser's `fetch`): the address, the
 /// body and what to call once, as [`set_poster`] installs it.
 pub type Poster = Box<dyn Fn(String, String, Done) + Send + Sync>;

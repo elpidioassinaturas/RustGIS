@@ -4,6 +4,8 @@
 use serde_json::{Value, json};
 
 use super::{b, f, ps};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::render::rustgis_tiles::s3;
 use crate::render::rustgis_tiles::stac::{self, Item, Search};
 use crate::{CmdResult, CommandSpec as C, Session};
 
@@ -387,6 +389,8 @@ pub fn cube_files(s: &Session, p: &Value, max_items: usize) -> Result<CubeFiles,
     let mut scales_differ = false;
     let mut duplicates = 0usize;
     let mut without = 0usize;
+    // Each public bucket's region, found once ([`public_web`]).
+    let mut regions: std::collections::HashMap<String, Option<String>> = Default::default();
     for i in &items {
         let Some(ms) = rustgis_data::time::parse_text(&i.datetime) else {
             without += 1;
@@ -409,6 +413,9 @@ pub fn cube_files(s: &Session, p: &Value, max_items: usize) -> Result<CubeFiles,
         }
         // The file's address without a fragment of its own, so the range look is the only one.
         let href = a.href.split('#').next().unwrap_or(&a.href).to_string();
+        // A public bucket's `s3://` file (Digital Earth Australia's, the Copernicus DEM's) is read
+        // anonymously at its web address, as a cube's files are kept.
+        let href = if s3::is_s3(&href) { public_web(&href, &mut regions)? } else { href };
         // No scale or offset in the metadata reads as 1 and 0, the values as stored.
         let this = (a.scale.unwrap_or(1.0), a.offset.unwrap_or(0.0));
         scales.insert(href.clone(), this);
@@ -452,6 +459,24 @@ pub fn cube_files(s: &Session, p: &Value, max_items: usize) -> Result<CubeFiles,
         collection: collection.to_string(),
         asset: asset.to_string(),
     })
+}
+
+/// The web address a public bucket's `s3://` file is read at, anonymously: AWS's global endpoint,
+/// or the bucket's region's when the global one doesn't reach it (Digital Earth Africa's
+/// af-south-1), found by reading one byte of the bucket's first file. `regions` keeps each
+/// bucket's, so a cube's thousands of files cost one read a bucket.
+#[cfg(not(target_arch = "wasm32"))]
+fn public_web(href: &str, regions: &mut std::collections::HashMap<String, Option<String>>) -> Result<String, String> {
+    let (bucket, _) = s3::parse(href)?;
+    let region = match regions.get(&bucket) {
+        Some(r) => r.clone(),
+        None => {
+            let r = s3::public_region(href, crate::render::rustgis_tiles::cache::probe_blocking)?;
+            regions.insert(bucket, r.clone());
+            r
+        }
+    };
+    s3::public_url(href, region.as_deref())
 }
 
 /// The most cells a STAC collection's trend covers: its four outputs take 16 bytes a cell, 400 MB
