@@ -135,12 +135,18 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
         return None;
     }
     let mut pam = Pam::default();
+    // The bands described so far, so a long document isn't searched again for each item.
+    let mut seen = std::collections::HashSet::new();
     for item in root.children().filter(|n| n.has_tag_name("Item") && n.attribute("role") == Some("description")) {
-        let band = item.attribute("sample").and_then(|v| v.trim().parse::<usize>().ok()).map(|s| s + 1).filter(|n| *n <= MAX_BANDS);
+        let band = item
+            .attribute("sample")
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .and_then(|s| s.checked_add(1))
+            .filter(|n| *n <= MAX_BANDS);
         let description = item.text().map(str::trim).filter(|d| !d.is_empty()).map(|d| d.chars().take(256).collect::<String>());
         // A band's first description, if it is given twice.
         if let (Some(band), Some(description)) = (band, description)
-            && pam.band(band).is_none()
+            && seen.insert(band)
         {
             pam.bands.push(PamBand { band, description: Some(description), ..PamBand::default() });
         }
@@ -203,6 +209,8 @@ mod tests {
   <Item name="DESCRIPTION" sample="0" role="description">again</Item>
   <Item name="SCALE" sample="0" role="scale">0.0001</Item>
   <Item name="DESCRIPTION" sample="x" role="description">no band</Item>
+  <Item name="DESCRIPTION" sample="18446744073709551615" role="description">past the last band</Item>
+  <Item name="DESCRIPTION" sample="65536" role="description">past the last band</Item>
   <Item name="DESCRIPTION" sample="2" role="description"></Item>
 </GDALMetadata>"#;
         let pam = parse_gdal_metadata(xml).unwrap();
