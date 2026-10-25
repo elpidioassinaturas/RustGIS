@@ -88,7 +88,8 @@ impl<B: AsRef<[u8]>> Db<B> {
             return Err(bad("a page number past the end of the file"));
         }
         let start = (n as usize - 1).checked_mul(self.page_size).ok_or_else(|| bad("page offset"))?;
-        self.bytes.as_ref().get(start..start + self.page_size).ok_or_else(|| bad("a truncated page"))
+        let end = start.checked_add(self.page_size).ok_or_else(|| bad("page offset"))?;
+        self.bytes.as_ref().get(start..end).ok_or_else(|| bad("a truncated page"))
     }
 
     /// Calls `f` with the rowid and values of every row of the table b-tree rooted at `root`, in
@@ -682,6 +683,12 @@ fn tokens(s: &str) -> Vec<Token> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_end_overflow_returns_an_error() {
+        let db = Db { bytes: Vec::<u8>::new(), page_size: usize::MAX, usable: 480, pages: 2 };
+        assert_eq!(db.page(2).unwrap_err(), bad("page offset"));
+    }
 
     #[test]
     fn create_table_columns() {

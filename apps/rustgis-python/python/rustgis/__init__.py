@@ -589,6 +589,36 @@ class _Api:
             params["name"] = name
         return self.run("map.addTiles", url=url, **params)
 
+    def add_pmtiles(
+        self,
+        url: PathLike,
+        name: Optional[str] = None,
+        source_layers: Optional[List[str]] = None,
+        style: Optional[Union[List[Dict[str, Any]], str]] = None,
+        **params: Any,
+    ) -> Any:
+        """Adds a raster or vector PMTiles archive through ``map.addTiles``.
+
+        Args:
+            url: A web address or local file path. Local archives are not embedded in the
+                notebook app; use a web address accessible to the browser there.
+            name: The tile layer's name (the archive's file name when left out).
+            source_layers: Vector source-layer names for the default look; omitted for all.
+            style: An array of MapLibre style layers, or its JSON text. Each style layer's
+                source is the archive itself, and its ``source-layer`` chooses what it draws
+                instead of ``source_layers``. Omit for the default look.
+            **params: More ``map.addTiles`` parameters, e.g. ``opacity`` or ``attribution``.
+
+        Returns:
+            The tile layer's position, kind and name, as for :meth:`add_tiles`.
+        """
+        params["kind"] = "pmtiles"
+        if source_layers is not None:
+            params["layers"] = source_layers
+        if style is not None:
+            params["styleLayers"] = style
+        return self.add_tiles(os.fspath(url), name=name, **params)
+
     def remove_layer(self, layer: Union[str, int, Layer]) -> None:
         """Removes a layer from the map (``undo`` brings it back).
 

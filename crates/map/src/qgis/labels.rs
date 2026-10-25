@@ -5,7 +5,7 @@
 
 use roxmltree::Node;
 
-use super::{QGIS_SCALE, Report, child, color, expr};
+use super::{QGIS_SCALE, Report, child, color, data_defined_on, expr, prop, props};
 use crate::Rgba;
 use crate::symbology::{DEFAULT_LABEL_CLASS, LABEL_SIZE, LabelClass, LabelPlacement, Labeling, MAX_LABEL_CLASSES};
 
@@ -191,6 +191,12 @@ fn class(
         report.approximated(layer, "label letter spacing, left out");
     }
     let halo = child(text, "text-buffer").is_some_and(|b| b.attribute("bufferDraw") == Some("1"));
+    if halo {
+        report.approximated(
+            layer,
+            "label halos in their own colour and width, drawn as RustGIS's (thin, white or dark by the text's colour)",
+        );
+    }
     if child(text, "background").is_some_and(|b| b.attribute("shapeDraw") == Some("1")) {
         report.approximated(layer, "label backgrounds (shapes behind the text), left out");
     }
@@ -198,6 +204,7 @@ fn class(
         report.approximated(layer, "label shadows, left out");
     }
     let placement = child(settings, "placement").map_or(LabelPlacement::Auto, |p| placement(p, layer, report));
+    unread(settings, layer, report);
     // The settings' own scale range, else the rule's.
     let rendering = child(settings, "rendering");
     let (mut min_scale, mut max_scale) = scales;
@@ -222,6 +229,36 @@ fn class(
         italic,
         font,
     })
+}
+
+/// Notes the label settings RustGIS has no place for, where they are set off QGIS's defaults.
+fn unread(settings: Node, layer: &str, report: &mut Report) {
+    let num =
+        |n: Option<Node>, k: &str| n.and_then(|n| n.attribute(k)).and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite());
+    let p = child(settings, "placement");
+    if num(p, "dist").is_some_and(|d| d != 0.0) {
+        report.approximated(layer, "label distances from their features, left out");
+    }
+    if num(p, "xOffset").is_some_and(|d| d != 0.0) || num(p, "yOffset").is_some_and(|d| d != 0.0) {
+        report.approximated(layer, "label offsets, left out");
+    }
+    if num(p, "repeatDistance").is_some_and(|d| d > 0.0) {
+        report.approximated(layer, "labels repeated along lines, drawn once");
+    }
+    if num(p, "priority").is_some_and(|d| d != 5.0) {
+        report.approximated(layer, "label priorities, left out");
+    }
+    let format = child(settings, "text-format");
+    if format.and_then(|f| f.attribute("wrapChar")).is_some_and(|w| !w.is_empty()) || num(format, "autoWrapLength").is_some_and(|w| w > 0.0)
+    {
+        report.approximated(layer, "wrapped labels, drawn on one line");
+    }
+    if child(settings, "callout").is_some_and(|c| prop(&props(c), "enabled") == Some("1")) {
+        report.skipped(layer, "label callouts (lines from a label to its feature)");
+    }
+    if data_defined_on(settings) {
+        report.skipped(layer, "data-defined label settings (from fields or expressions)");
+    }
 }
 
 /// QGIS's label placement, as RustGIS's.

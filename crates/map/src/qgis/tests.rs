@@ -271,3 +271,304 @@ fn paths_on_a_drive_are_told_apart_from_absolute_ones() {
     }
     assert!(is_relative("./data/x.shp") && is_relative("data/x.shp") && !is_drive_relative("data/x.shp"));
 }
+
+#[test]
+fn merged_categories_and_dashes_carry_over() {
+    // QGIS 4 writes a category of several values as <val>s; an empty value is all the others.
+    let qml = r#"<qgis version="4.2.3"><renderer-v2 type="categorizedSymbol" attr="kind">
+      <categories>
+        <category value="a" symbol="0" render="true"/>
+        <category label="c or d" symbol="1" render="true"><val type="string" value="c"/><val type="string" value="d"/></category>
+        <category value="" symbol="2" label="other" render="true"/>
+      </categories>
+      <symbols>
+        <symbol type="line" name="0" alpha="1"><layer class="SimpleLine" enabled="1"><Option type="Map">
+          <Option name="line_color" value="10,0,0,255"/><Option name="line_width" value="1"/><Option name="capstyle" value="flat"/>
+          <Option name="use_custom_dash" value="1"/><Option name="customdash" value="2.5;0.5;0"/><Option name="customdash_unit" value="MM"/></Option></layer></symbol>
+        <symbol type="line" name="1" alpha="1"><layer class="SimpleLine" enabled="1"><Option type="Map">
+          <Option name="line_color" value="20,0,0,255"/><Option name="line_width" value="3"/><Option name="line_width_unit" value="Pixel"/><Option name="line_style" value="dot"/></Option></layer></symbol>
+        <symbol type="line" name="2" alpha="1"><layer class="SimpleLine" enabled="1"><Option type="Map"><Option name="line_color" value="30,0,0,255"/></Option></layer></symbol>
+      </symbols></renderer-v2></qgis>"#;
+    let mut report = Report::default();
+    let s = read_style(qml, "Paths", &mut report).unwrap();
+    let Some(Renderer::Unique { classes, class_strokes, class_labels, other, .. }) = &s.renderer else { panic!("{:?}", s.renderer) };
+    let values: Vec<&str> = classes.iter().map(|c| c.0.as_str()).collect();
+    assert_eq!(values, ["a", "c", "d"], "both values of the merged category, not \"all others\"");
+    assert_eq!((classes[1].1.stroke, classes[2].1.stroke), (Rgba::rgb(20, 0, 0), Rgba::rgb(20, 0, 0)));
+    assert_eq!(other.stroke, Rgba::rgb(30, 0, 0));
+    assert_eq!(class_labels.get("c").map(String::as_str), Some("c or d"));
+    // A custom dash in millimetres (its odd trailing step of nothing dropped); Qt's dots in widths.
+    let mm = 96.0 / 25.4;
+    let dash = class_strokes["a"][0].dash.unwrap();
+    assert_eq!(dash.steps().len(), 2);
+    assert!((dash.steps()[0] - 2.5 * mm).abs() < 1e-3 && (dash.steps()[1] - 0.5 * mm).abs() < 1e-3, "{:?}", dash.steps());
+    assert_eq!(class_strokes["c"][0].dash.unwrap().steps(), &[3.0, 6.0]);
+    assert!(!report.notes.iter().any(|n| n.text.contains("dash")), "{:?}", report.notes);
+}
+
+#[test]
+fn files_of_qgis_1_and_2_read_by_their_old_names() {
+    // Before QGIS 3: no layer tree but a legend, the canvas's coordinate system, scale limits named
+    // the other way round, opacity as transparency, and QGIS 2's names for line and fill settings.
+    let qgs = r#"<qgis projectname="" version="2.14.6-Essen"><title>Old</title>
+      <mapcanvas><units>meters</units><extent><xmin>0</xmin><ymin>0</ymin><xmax>10</xmax><ymax>10</ymax></extent>
+        <destinationsrs><spatialrefsys><authid>EPSG:21781</authid></spatialrefsys></destinationsrs></mapcanvas>
+      <legend updateDrawingOrder="true">
+        <legendlayer checked="Qt::Checked" name="roads"><filegroup><legendlayerfile layerid="roads1" visible="1"/></filegroup></legendlayer>
+        <legendgroup checked="Qt::Unchecked" name="base">
+          <legendlayer checked="Qt::Checked" name="land"><filegroup><legendlayerfile layerid="land1" visible="1"/></filegroup></legendlayer>
+        </legendgroup>
+      </legend>
+      <projectlayers>
+        <maplayer type="vector" minimumScale="1000" maximumScale="50000" hasScaleBasedVisibilityFlag="1">
+          <id>land1</id><datasource>/d/land.shp</datasource><layername>land</layername><provider>ogr</provider>
+          <renderer-v2 type="singleSymbol"><symbols><symbol type="fill" name="0" alpha="1" outputUnit="MM"><layer class="SimpleFill" pass="0" locked="0">
+            <prop k="color" v="200,200,150,255"/><prop k="color_border" v="10,20,30,255"/><prop k="style" v="solid"/><prop k="style_border" v="dash"/><prop k="width_border" v="0.5"/>
+          </layer></symbol></symbols></renderer-v2>
+          <layerTransparency>40</layerTransparency>
+          <customproperties><property key="labeling/enabled" value="true"/><property key="labeling/fieldName" value="name"/></customproperties>
+        </maplayer>
+        <maplayer type="vector">
+          <id>roads1</id><datasource>/d/roads.shp</datasource><layername>roads</layername><provider>ogr</provider>
+          <renderer-v2 type="singleSymbol"><symbols><symbol type="line" name="0" alpha="1" outputUnit="Pixel"><layer class="SimpleLine" pass="0" locked="0">
+            <prop k="color" v="40,40,40,255"/><prop k="width" v="2"/><prop k="penstyle" v="dash"/><prop k="capstyle" v="flat"/>
+          </layer></symbol></symbols></renderer-v2>
+          <transparencyLevelInt>255</transparencyLevelInt>
+        </maplayer>
+      </projectlayers></qgis>"#;
+    let mut report = Report::default();
+    let p = read_project(qgs, "", &mut report).unwrap();
+    assert_eq!(p.crs.as_deref(), Some("EPSG:21781"), "the canvas's");
+    let names: Vec<(&str, bool)> = p.layers.iter().map(|l| (l.name.as_str(), l.visible)).collect();
+    assert_eq!(names, [("roads", true), ("land", false)], "the legend's order; land's group is unchecked");
+    let (roads, land) = (&p.layers[0].style, &p.layers[1].style);
+    // maximumScale was the out-beyond limit, minimumScale the in-beyond.
+    let (min, max) = (land.min_scale.flatten().unwrap(), land.max_scale.flatten().unwrap());
+    assert!((min - 50_000.0 * QGIS_SCALE).abs() < 1e-6 && (max - 1000.0 * QGIS_SCALE).abs() < 1e-6);
+    assert_eq!((land.transparency, roads.transparency), (Some(40.0), Some(0.0)));
+    let Some(Renderer::Single(fill)) = &land.renderer else { panic!() };
+    assert_eq!((fill.fill, fill.stroke), (Rgba::rgb(200, 200, 150), Rgba::rgb(10, 20, 30)));
+    assert!((fill.stroke_width - 0.5 * 96.0 / 25.4).abs() < 1e-4);
+    // The line, in the symbol's unit (pixels), dashed as Qt dashes: 4 and 2 widths.
+    let Some(Renderer::Single(line)) = &roads.renderer else { panic!() };
+    assert_eq!((line.stroke, line.stroke_width), (Rgba::rgb(40, 40, 40), 2.0));
+    let strokes = roads.line_strokes.as_deref().unwrap();
+    assert_eq!((strokes.len(), strokes[0].dash.map(|d| d.steps().to_vec())), (1, Some(vec![8.0, 4.0])));
+    let said = |layer: &str, part: &str| report.notes.iter().any(|n| n.layer == layer && n.text.contains(part));
+    assert!(said("land", "dashed polygon outlines"));
+    assert!(said("land", "format of QGIS 2"));
+}
+
+#[test]
+fn what_rustgis_has_no_place_for_is_noted() {
+    let effect = r#"<effect enabled="1" type="effectStack"><effect type="drawSource"><Option type="Map"><Option name="enabled" value="1"/></Option></effect>
+        <effect type="dropShadow"><Option type="Map"><Option name="enabled" value="1"/></Option></effect></effect>"#;
+    let plain = r#"<effect enabled="1" type="effectStack"><effect type="drawSource"><Option type="Map"><Option name="enabled" value="1"/></Option></effect>
+        <effect type="outerGlow"><Option type="Map"><Option name="enabled" value="0"/></Option></effect></effect>"#;
+    let qgs = format!(
+        r#"<qgis version="3.42.0">
+      <projectlayers>
+        <maplayer type="vector" labelsEnabled="1"><id>a</id><datasource>/d/a.shp</datasource><layername>A</layername><provider>ogr</provider>
+          <temporal enabled="1" mode="1" startField="day"/>
+          <map-layer-style-manager current="default"><map-layer-style name="default"/><map-layer-style name="night"/></map-layer-style-manager>
+          <vectorjoins><join joinLayerId="b"/></vectorjoins>
+          <expressionfields><field name="twice" expression="&quot;v&quot; * 2"/></expressionfields>
+          <SingleCategoryDiagramRenderer diagramType="Pie"><DiagramCategory enabled="1"/></SingleCategoryDiagramRenderer>
+          <renderer-v2 type="singleSymbol" enableorderby="1">{effect}<symbols><symbol type="marker" name="0" alpha="1">
+            <layer class="SimpleMarker" enabled="1"><Option type="Map"><Option name="color" value="1,2,3,255"/></Option>{plain}</layer></symbol></symbols></renderer-v2>
+          <labeling type="simple"><settings calloutType="simple">
+            <text-style fieldName="name"><text-buffer bufferDraw="1" bufferSize="1" bufferColor="255,255,255,255"/></text-style>
+            <text-format wrapChar="" autoWrapLength="12"/>
+            <placement placement="1" dist="2" xOffset="1" yOffset="0" repeatDistance="0" priority="8"/>
+            <dd_properties><Option type="Map"><Option name="properties" type="Map"><Option name="Size" type="Map"><Option name="active" value="true"/><Option name="field" value="size"/></Option></Option></Option></dd_properties>
+            <callout type="simple"><Option type="Map"><Option name="enabled" value="1"/></Option></callout>
+          </settings></labeling>
+        </maplayer>
+      </projectlayers>
+      <main-annotation-layer><items><item type="pointtext"/><item type="linetext"/></items></main-annotation-layer>
+      <Layouts><Layout name="One"/></Layouts>
+      <Bookmarks><Bookmark name="Here"/></Bookmarks>
+      <visibility-presets><visibility-preset name="Only points"/></visibility-presets>
+      <relations><relation id="r"/></relations>
+    </qgis>"#
+    );
+    let mut report = Report::default();
+    read_project(&qgs, "", &mut report).unwrap();
+    let said = |layer: &str, part: &str| report.notes.iter().any(|n| n.layer == layer && n.text.contains(part));
+    for part in ["print layouts (1)", "annotations (2", "bookmarks (1)", "map themes (1)", "relations between layers (1)"] {
+        assert!(said("", part), "{part}: {:?}", report.notes);
+    }
+    for part in [
+        "time settings",
+        "other styles (night)",
+        "joins",
+        "virtual fields",
+        "diagrams",
+        "order-by",
+        "draw effects",
+        "label halos",
+        "wrapped labels",
+        "label distances",
+        "label offsets",
+        "label priorities",
+        "callouts",
+        "data-defined label settings",
+    ] {
+        assert!(said("A", part), "{part}: {:?}", report.notes);
+    }
+    // The renderer's effect is noted once; the symbol layer's, only plain drawing, isn't an effect.
+    assert_eq!(report.notes.iter().find(|n| n.text.contains("draw effects")).map(|n| n.count), Some(1));
+    assert!(!said("A", "repeated"), "a repeat distance of 0 is none");
+}
+
+/// A raster style file with `renderer` as its renderer and `pipe` after it in the pipe.
+fn raster_qml(renderer: &str, pipe: &str) -> String {
+    format!(
+        r#"<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'><qgis version="4.2.3" layerType="Raster"><pipe>{renderer}{pipe}</pipe><blendMode>0</blendMode></qgis>"#
+    )
+}
+
+#[test]
+fn raster_renderers_read_as_rustgis_raster_styles() {
+    use crate::raster::{RasterRenderer, Resampling, Stretch};
+    let read = |renderer: &str, pipe: &str| {
+        let mut report = Report::default();
+        let s = read_style(&raster_qml(renderer, pipe), "R", &mut report).unwrap();
+        (s, report)
+    };
+    // Pseudocolour, interpolated (SMV25's rock): a ramp from transparent white to grey over 0 to 1.
+    let (s, report) = read(
+        r##"<rasterrenderer type="singlebandpseudocolor" band="1" opacity="0.5" alphaBand="-1"><rastershader>
+          <colorrampshader colorRampType="INTERPOLATED" clip="0" minimumValue="0" maximumValue="1">
+            <item value="0" color="#ffffff" alpha="0" label="0"/><item value="1" color="#3f3f3f" alpha="255" label="1"/>
+          </colorrampshader></rastershader></rasterrenderer>"##,
+        r#"<brightnesscontrast brightness="51" contrast="-10" gamma="2"/><huesaturation saturation="0" grayscaleMode="0" colorizeOn="0" invertColors="0"/>
+           <provider><resampling enabled="true" zoomedInResamplingMethod="bilinear" zoomedOutResamplingMethod="nearestNeighbour"/></provider>"#,
+    );
+    let r = s.raster.unwrap();
+    let RasterRenderer::Stretch { band: 0, ramp, invert: false } = &r.renderer else { panic!("{:?}", r.renderer) };
+    assert_eq!((ramp.at(0.0).a(), ramp.at(1.0)), (0, Rgba::rgb(0x3f, 0x3f, 0x3f)));
+    assert_eq!(r.stretch, Stretch::custom(0.0, 1.0));
+    assert_eq!((r.brightness, r.contrast, r.gamma, r.resampling), (20.0, -10.0, 2.0, Resampling::Bilinear));
+    assert_eq!(s.transparency, Some(50.0));
+    assert!(report.notes.is_empty(), "{:?}", report.notes);
+
+    // Discrete: classes up to each entry's value, the last open-ended; values outside clipped.
+    let (s, _) = read(
+        r##"<rasterrenderer type="singlebandpseudocolor" band="2"><rastershader><colorrampshader colorRampType="DISCRETE" clip="1" minimumValue="400" maximumValue="600">
+            <item value="450" color="#ff0000"/><item value="500" color="#00ff00"/><item value="inf" color="#0000ff"/></colorrampshader></rastershader></rasterrenderer>"##,
+        "",
+    );
+    let r = s.raster.unwrap();
+    let RasterRenderer::Classify { band: 1, ramp, breaks, .. } = &r.renderer else { panic!("{:?}", r.renderer) };
+    assert_eq!((breaks.len(), breaks[0], breaks[1]), (3, 450.0, 500.0));
+    assert!(breaks[2].is_finite() && breaks[2] > 1e30, "inf kept as a number a project can hold");
+    assert_eq!((ramp.pick(0, 3), ramp.pick(2, 3)), (Rgba::rgb(255, 0, 0), Rgba::rgb(0, 0, 255)));
+    assert_eq!((r.mask.min, r.mask.max), (Some(400.0), Some(600.0)));
+
+    // Exact and paletted: a colour per value, sorted.
+    for renderer in [
+        r##"<rasterrenderer type="singlebandpseudocolor" band="1"><rastershader><colorrampshader colorRampType="EXACT">
+            <item value="7" color="#00ff00"/><item value="3" color="#ff0000"/></colorrampshader></rastershader></rasterrenderer>"##,
+        r##"<rasterrenderer type="paletted" band="1"><colorPalette><paletteEntry value="7" color="#00ff00" alpha="255"/><paletteEntry value="3" color="#ff0000" alpha="255"/></colorPalette></rasterrenderer>"##,
+    ] {
+        let (s, _) = read(renderer, "");
+        let r = s.raster.unwrap();
+        let RasterRenderer::UniqueValues { band: 0, values, .. } = &r.renderer else { panic!("{:?}", r.renderer) };
+        assert_eq!(values, &[(3.0, Rgba::rgb(255, 0, 0)), (7.0, Rgba::rgb(0, 255, 0))]);
+    }
+
+    // Grey: black to white, stretched to its enhancement's bounds; a value made transparent and
+    // a user no-data value hide those values.
+    let gray = r#"<rasterrenderer type="singlebandgray" grayBand="1" gradient="BlackToWhite"><rasterTransparency><singleValuePixelList>
+          <pixelListEntry min="-9999" max="-9999" percentTransparent="100"/><pixelListEntry min="1" max="5" percentTransparent="50"/></singleValuePixelList></rasterTransparency>
+          <contrastEnhancement><minValue>10</minValue><maxValue>200</maxValue><algorithm>StretchToMinimumMaximum</algorithm></contrastEnhancement></rasterrenderer>"#;
+    let qml = raster_qml(gray, "").replace(
+        "</qgis>",
+        r#"<noData><noDataList bandNo="1" useSrcNoData="1"><noDataRange min="0" max="0"/></noDataList></noData></qgis>"#,
+    );
+    let mut report = Report::default();
+    let r = read_style(&qml, "R", &mut report).unwrap().raster.unwrap();
+    let RasterRenderer::Stretch { ramp, .. } = &r.renderer else { panic!() };
+    assert_eq!((ramp.at(0.0), ramp.at(1.0)), (Rgba::rgb(0, 0, 0), Rgba::rgb(255, 255, 255)));
+    assert_eq!(r.stretch, Stretch::custom(10.0, 200.0));
+    assert_eq!(r.mask.values, [-9999.0, 0.0]);
+    assert!(report.notes.iter().any(|n| n.text.contains("in part")), "{:?}", report.notes);
+
+    // Multiband: RGB from 1-based bands, a stretch per band; a canvas-wide cut follows the view.
+    let (s, _) = read(
+        r#"<rasterrenderer type="multibandcolor" redBand="3" greenBand="2" blueBand="1">
+          <redContrastEnhancement><minValue>1</minValue><maxValue>2</maxValue><algorithm>StretchToMinimumMaximum</algorithm></redContrastEnhancement>
+          <greenContrastEnhancement><minValue>3</minValue><maxValue>4</maxValue><algorithm>StretchToMinimumMaximum</algorithm></greenContrastEnhancement>
+          <blueContrastEnhancement><minValue>5</minValue><maxValue>6</maxValue><algorithm>StretchToMinimumMaximum</algorithm></blueContrastEnhancement></rasterrenderer>"#,
+        "",
+    );
+    let r = s.raster.unwrap();
+    assert_eq!(r.renderer, RasterRenderer::Rgb { red: 2, green: 1, blue: 0 });
+    assert_eq!(r.stretch, Stretch::custom_bands([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]));
+    let (s, _) = read(
+        r#"<rasterrenderer type="singlebandgray" grayBand="1"><minMaxOrigin><limits>CumulativeCut</limits><extent>UpdatedCanvas</extent><cumulativeCutLower>0.02</cumulativeCutLower><cumulativeCutUpper>0.98</cumulativeCutUpper></minMaxOrigin>
+          <contrastEnhancement><minValue>10</minValue><maxValue>200</maxValue><algorithm>StretchToMinimumMaximum</algorithm></contrastEnhancement></rasterrenderer>"#,
+        "",
+    );
+    let r = s.raster.unwrap();
+    assert!(
+        r.dra && matches!(r.stretch, Stretch::PercentClip { low, high } if (low - 2.0).abs() < 1e-9 && (high - 2.0).abs() < 1e-9),
+        "{r:?}"
+    );
+
+    // Hillshade as shaded relief; hue and saturation and contours are noted.
+    let (s, report) = read(
+        r#"<rasterrenderer type="hillshade" band="1" azimuth="300" angle="35" zfactor="2" multidirection="0"/>"#,
+        r#"<huesaturation saturation="-30" grayscaleMode="0" colorizeOn="0" invertColors="0"/>"#,
+    );
+    assert_eq!(
+        s.raster.unwrap().renderer,
+        RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 300.0, altitude: 35.0, z_factor: 2.0 }
+    );
+    assert!(report.notes.iter().any(|n| n.text.contains("saturation")));
+    let (s, report) = read(r#"<rasterrenderer type="contour" band="1"/>"#, "");
+    assert!(s.raster.is_none() && report.notes.iter().any(|n| n.text.contains("contour")));
+    // Nonsense bands and values: nothing, without a crash, and noted.
+    for bad in [r#"<rasterrenderer type="singlebandgray" grayBand="0"/>"#, r#"<rasterrenderer type="paletted" band="99999999999"/>"#] {
+        let (s, report) = read(bad, "");
+        assert!(s.raster.is_none() && report.notes.iter().any(|n| n.text.contains("couldn't read")), "{bad}: {report:?}");
+    }
+}
+
+/// Every generated style and project in `testdata/qgis` reads, each project with its layers.
+#[test]
+fn every_corpus_file_reads() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/qgis");
+    let files = |dir: &str, extensions: &[&str]| {
+        let mut paths: Vec<_> = std::fs::read_dir(root.join(dir)).unwrap().map(|e| e.unwrap().path()).collect();
+        paths.retain(|path| path.is_file() && path.extension().and_then(|e| e.to_str()).is_some_and(|e| extensions.contains(&e)));
+        paths.sort();
+        paths
+    };
+    // Pin the corpus sizes so a regeneration cannot silently drop fixtures.
+    let styles = files("generated/qml", &["qml"]);
+    assert_eq!(styles.len(), 90, "style corpus changed: {styles:?}");
+    for path in &styles {
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut report = Report::default();
+        read_style(&text, "layer", &mut report).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    }
+    let projects = files("generated/qgs", &["qgs", "qgz"]);
+    assert_eq!(projects.len(), 21, "project corpus changed: {projects:?}");
+    for path in &projects {
+        let bytes = std::fs::read(path).unwrap();
+        let text = if path.extension().is_some_and(|e| e == "qgz") {
+            let entries = rustgis_data::zip::read_matching_within(&bytes, |n| n.ends_with(".qgs"), 64 << 20).unwrap();
+            String::from_utf8(entries.into_iter().next().unwrap().1).unwrap()
+        } else {
+            String::from_utf8(bytes).unwrap()
+        };
+        let dir = path.parent().unwrap().to_string_lossy().to_string();
+        let mut report = Report::default();
+        let project = read_project(&text, &dir, &mut report).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert!(!project.layers.is_empty(), "{}: no layers", path.display());
+        // The PostGIS and SQL Server projects' made-up password reaches neither the layers nor the notes.
+        assert!(!format!("{project:?} {report:?}").contains("secret"), "{}: the password came through", path.display());
+    }
+}

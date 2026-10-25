@@ -689,6 +689,10 @@ fn a_qgis_project_opens_as_a_map_and_a_qgis_style_styles_a_layer() {
     s.run("style.importQgis", &json!({"layer": "Rivers", "text": qml})).unwrap();
     let rivers = s.map().layer_by_name("Rivers").unwrap();
     assert_eq!((rivers.line_strokes.len(), rivers.transparency), (2, 50.0));
+    // A raster's style on a feature layer says its colouring is left out.
+    let qml = r#"<qgis version="4.2.3" layerType="Raster"><pipe><rasterrenderer type="singlebandgray" grayBand="1"/></pipe></qgis>"#;
+    let out = s.run("style.importQgis", &json!({"layer": "Rivers", "text": qml})).unwrap();
+    assert!(serde_json::to_string(&out["notes"]).unwrap().contains("a raster's colouring"), "{out}");
     assert!(s.run("style.importQgis", &json!({"layer": "Rivers", "text": "<nonsense"})).is_err());
     // A style saved from another layer: classes and labels by fields Rivers hasn't are noted, and
     // the label class that has nothing to label from is switched off.
@@ -715,6 +719,11 @@ fn a_qgis_project_opens_as_a_map_and_a_qgis_style_styles_a_layer() {
     let t = s.map().tiles.iter().find(|t| t.name == "Tiles").unwrap();
     assert!(t.overlay);
     assert_eq!(t.blend, rustgis_map::effects::Blend::Multiply);
+    // A layer of no provider (QGIS's annotation layer) is noted by its kind.
+    let qgs = r#"<qgis version="3.42.0"><title>Notes</title><projectlayers><maplayer type="annotation"><id>a</id><layername>Notes</layername></maplayer></projectlayers></qgis>"#;
+    let out = s.run("project.importQgis", &json!({"text": qgs})).unwrap();
+    let text = serde_json::to_string(&out["notes"]).unwrap();
+    assert!(text.contains("doesn't read QGIS's annotation layers"), "{text}");
     // A project given as text with no folder: a relative path is noted, not looked for in the
     // working directory.
     let rel = r#"<qgis version="3.42.0"><projectlayers><maplayer type="vector"><id>a</id><datasource>./data/roads.geojson</datasource><layername>Rel</layername><provider>ogr</provider></maplayer></projectlayers></qgis>"#;
@@ -942,6 +951,35 @@ fn with_raster() -> Session {
     let mut s = world();
     s.run("layer.addDataBytes", &json!({"fileName": "scene.tif", "data": utm_tiff_b64()})).unwrap();
     s
+}
+
+/// A QGIS raster style colours a raster layer; one reading a band the raster hasn't is noted and
+/// leaves it as it was.
+#[test]
+fn a_qgis_raster_style_colours_a_raster() {
+    let mut s = with_raster();
+    let qml = r#"<qgis version="4.2.3" layerType="Raster"><pipe><rasterrenderer type="multibandcolor" redBand="3" greenBand="2" blueBand="1" opacity="0.5"/>
+        <brightnesscontrast brightness="0" contrast="25" gamma="1"/></pipe></qgis>"#;
+    let out = s.run("style.importQgis", &json!({"layer": "scene", "text": qml})).unwrap();
+    assert_eq!(out["notes"], json!([]));
+    let l = s.map().layer_by_name("scene").unwrap();
+    let st = &l.raster.as_ref().unwrap().style;
+    assert_eq!(
+        (&st.renderer, st.contrast, l.transparency),
+        (&rustgis_map::raster::RasterRenderer::Rgb { red: 2, green: 1, blue: 0 }, 25.0, 50.0)
+    );
+    let before = st.clone();
+    // A style that reads a band the raster hasn't leaves it as it was, its opacity too.
+    let qml = r#"<qgis version="4.2.3" layerType="Raster"><pipe><rasterrenderer type="singlebandgray" grayBand="5"/></pipe><layerOpacity>0.2</layerOpacity></qgis>"#;
+    let out = s.run("style.importQgis", &json!({"layer": "scene", "text": qml})).unwrap();
+    assert!(serde_json::to_string(&out["notes"]).unwrap().contains("band 5 of a raster with 3"), "{out}");
+    let l = s.map().layer_by_name("scene").unwrap();
+    assert_eq!((&l.raster.as_ref().unwrap().style, l.transparency), (&before, 50.0));
+    // Pixels not there yet (a remote raster still loading): applied, and noted as unchecked.
+    let id = s.map().layer_by_name("scene").unwrap().id;
+    s.map_mut().layer_mut(id).unwrap().raster.as_mut().unwrap().data = None;
+    let out = s.run("style.importQgis", &json!({"layer": "scene", "text": qml})).unwrap();
+    assert!(serde_json::to_string(&out["notes"]).unwrap().contains("before the raster's bands could be checked"), "{out}");
 }
 
 /// The parts of a large GeoTIFF the web app reads (#140), opened and kept in a project: a
@@ -3507,6 +3545,17 @@ fn publication_layouts_fit_their_pages() {
         assert!(e.contains(said), "{p}: {e}");
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Each sheet style the New Layout menu offers is one `layout.publication` takes, by its name.
+#[test]
+fn every_publication_style_in_the_menu_is_taken() {
+    let mut s = world();
+    for (style, _) in crate::cmd::layout::PUBLICATION_STYLES {
+        let r =
+            s.run("layout.publication", &json!({"extent": [-46.8, -11.6, -38.5, -2.2], "profile": "a4-portrait", "style": style})).unwrap();
+        assert_eq!(r["style"], *style);
+    }
 }
 
 /// A publication sheet's style (#682): `classic` (the default) as before; `banner` the title and
@@ -14939,6 +14988,32 @@ fn a_layer_drops_into_and_out_of_a_group_at_a_place() {
     assert!(s.run("layer.group", &json!({"layer": "Rivers", "group": g, "before": "Cities"})).is_err());
     assert!(s.run("layer.group", &json!({"layer": "Rivers", "group": null, "before": "Rivers"})).is_err());
     assert_eq!(members(&s), ["Countries"]);
+}
+
+#[test]
+fn a_layer_drops_at_the_end_with_explicit_null_before() {
+    for in_group in [false, true] {
+        let mut s = world();
+        let names = |s: &Session| s.map().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+        let g = s.run("group.add", &json!({"name": "Water", "layers": ["Rivers", "Lakes"]})).unwrap()["group"].clone();
+        let group = if in_group { g } else { Value::Null };
+        let original = names(&s);
+        // Omitting before keeps the nearest-end behavior used by the group's context menu.
+        s.run("layer.group", &json!({"layer": "Cities", "group": group})).unwrap();
+        assert_eq!(names(&s), original);
+        let members = s.map().groups[0].children.clone();
+        let depth = s.undo_depth();
+        s.run("layer.group", &json!({"layer": "Cities", "group": group, "before": null})).unwrap();
+        let expected = if in_group { ["Rivers", "Lakes", "Cities", "Countries"] } else { ["Rivers", "Lakes", "Countries", "Cities"] };
+        assert_eq!(names(&s), expected);
+        assert_eq!(s.undo_depth(), depth + 1);
+        s.run("edit.undo", &Value::Null).unwrap();
+        assert_eq!(names(&s), original);
+        assert_eq!(s.map().groups[0].children, members);
+        s.run("edit.redo", &Value::Null).unwrap();
+        assert_eq!(names(&s), expected);
+        assert!(s.run("layer.group", &json!({"layer": ["Cities", "Countries"], "group": group, "before": null})).is_err());
+    }
 }
 
 #[test]

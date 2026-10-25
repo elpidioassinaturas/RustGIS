@@ -273,8 +273,8 @@ pub fn big_menu(ui: &mut Ui, app: &mut RustGisApp, icon: &str, label: &str, desc
     });
 }
 
-/// A large button that opens a menu holding a text box: a click inside it (into the box) keeps it
-/// open, so its buttons close it themselves (`ui.close()`).
+/// A large button that opens a menu with editable controls (text boxes, checkboxes, sliders).
+/// Clicks inside keep it open; action buttons close it themselves (`ui.close()`).
 pub fn big_form_menu(ui: &mut Ui, app: &mut RustGisApp, icon: &str, label: &str, desc: &str, menu: impl FnOnce(&mut Ui, &mut RustGisApp)) {
     let resp = big(ui, app, icon, label, desc, "ui.menu", Value::Null, false, true);
     egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
@@ -288,7 +288,7 @@ pub fn small_menu(ui: &mut Ui, app: &mut RustGisApp, icon: &str, label: &str, de
     small_menu_with(ui, app, icon, label, desc, egui::PopupCloseBehavior::CloseOnClick, menu);
 }
 
-/// A small button that opens a menu holding a text box, kept open by clicks inside it (see
+/// A small button that opens a menu with editable controls, kept open by clicks inside it (see
 /// [`big_form_menu`]).
 pub fn small_form_menu(
     ui: &mut Ui,

@@ -97,11 +97,12 @@ and band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentin
 - **Saved with the project:** each tile's dates and addresses.
 - **Files in public buckets:** a collection whose items give their files as `s3://` addresses
   (Digital Earth Australia, Digital Earth Africa, the Copernicus DEM on Earth Search) is read
-  anonymously from AWS, at the files' web addresses, never with the keys of an S3 connection. A
+  from AWS at the files' web addresses. Reads are anonymous unless an S3 connection explicitly
+  names the bucket, in which case its credentials are used, as for other S3 reads. A
   bucket in a region AWS's global endpoint doesn't reach (Digital Earth Africa's, in Cape Town) is
-  read at its own region's, found by reading one byte of its first file. A bucket that refuses
-  anonymous reads (a private one, or one that charges the reader, as Landsat's does) is refused,
-  naming it.
+  read at its own region's, found by reading one byte of its first file. Without a matching
+  connection, a bucket that refuses anonymous reads (a private one, or one that charges the
+  reader, as Landsat's does) is refused, naming it.
 - **Web app:** creating a cube with **Add as Time Series** is desktop-only. Saved cube tile
   layers can draw in the web app when their servers allow browser requests (CORS).
 - **Its trend:** the same search, given to Trend Analysis (`cube.trend` with `collection`,

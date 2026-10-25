@@ -92,6 +92,51 @@ def test_data_files(tmp_path):
     assert s.layers()[0]["features"] == 2
 
 
+@pytest.mark.parametrize("as_text", [False, True])
+def test_pmtiles_options_survive_a_project_round_trip(as_text):
+    """The Python names reach the engine, including JSON-text styles and extensionless URLs."""
+    style = [{"id": "water", "type": "fill", "source-layer": "water", "paint": {"fill-color": "#336699"}}]
+    s = rustgis.Session()
+    result = s.add_pmtiles(
+        "http://127.0.0.1:9/archive", name="Water", source_layers=["water"],
+        style=json.dumps(style) if as_text else style, opacity=0.5,
+    )
+    assert result == {"name": "Water", "kind": "pmtiles", "index": 0}
+    other = rustgis.Session()
+    other.run("project.openText", text=s.project_json())
+    tile = json.loads(other.project_json())["maps"][0]["tiles"][0]
+    assert tile["url"] == "http://127.0.0.1:9/archive"
+    assert tile["layers"] == ["water"] and tile["opacity"] == 0.5
+    assert json.loads(tile["styleLayers"]) == style
+
+
+def test_pmtiles_local_path_defaults_and_undo(tmp_path):
+    """A generated, tile-less archive works as a Path without a server or committed fixture."""
+    import struct
+
+    path = tmp_path / "Iceland.pmtiles"
+    header = b"PMTiles\x03" + struct.pack("<11Q", 127, 1, 128, 0, 128, 0, 128, 0, 0, 0, 0)
+    header += bytes([1, 1, 1, 1, 0, 6])
+    header += struct.pack("<4i", -245000000, 633000000, -135000000, 666000000)
+    path.write_bytes(header + bytes(10))
+    s = rustgis.Session()
+    assert s.add_pmtiles(path) == {"name": "Iceland", "kind": "pmtiles", "index": 0}
+    tile = json.loads(s.project_json())["maps"][0]["tiles"][0]
+    assert tile["url"] == str(path) and "layers" not in tile and "styleLayers" not in tile
+    assert s.run("map.zoomToTiles", name="Iceland")["bounds"] == [-24.5, 63.3, -13.5, 66.6]
+    s.undo()
+    assert s.run("map.tiles") == []
+
+
+@pytest.mark.parametrize("style", [{"not": "a style array"}, "not JSON"])
+def test_pmtiles_keeps_the_engines_style_validation(style):
+    """Bad styles raise the usual command error and leave the project unchanged."""
+    s = rustgis.Session()
+    with pytest.raises(rustgis.RustGISError, match="style"):
+        s.add_pmtiles("http://127.0.0.1:9/archive", style=style)
+    assert s.run("map.tiles") == []
+
+
 def test_geopandas_round_trip(sample):
     gpd = pytest.importorskip("geopandas")
     gdf = sample.layer("Cities").to_geopandas()

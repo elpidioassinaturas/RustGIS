@@ -446,7 +446,7 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
         );
     });
     group(ui, "Add", |ui| {
-        big_menu(ui, app, "basemap", "Basemap", "Change the map's backdrop.", basemap_gallery);
+        big_form_menu(ui, app, "basemap", "Basemap", "Change the map's backdrop.", basemap_gallery);
         big_menu(ui, app, "add_data", "Add\nData", "Add GeoJSON, CSV or Shapefile data to the map.", |ui, app| {
             menu_item(ui, app, "", "Data…", "ui.addData", Value::Null);
             menu_item(ui, app, "", "Delimited Text…", "ui.addDelimited", Value::Null);
@@ -713,6 +713,7 @@ fn planet_basemaps(ui: &mut Ui, app: &mut RustGisApp) {
             let tip = tl!("Measure on this body, with one of its basemaps.");
             if ui.add(egui::Button::selectable(b.id == body.id, tl!(b.name))).on_hover_text(tip).clicked() {
                 let _ = app.run("map.body", json!({"name": b.id}));
+                ui.close();
             }
         }
     });
@@ -855,12 +856,15 @@ fn tile_layers(ui: &mut Ui, app: &mut RustGisApp, t: &Tokens) {
             }
             if ui.add_enabled(i > 0, egui::Button::new("▲").small()).on_hover_text(tl!("Move up")).clicked() {
                 action = Some(("map.setTiles", json!({"index": i, "move": "up"})));
+                ui.close();
             }
             if ui.add_enabled(i + 1 < tiles.len(), egui::Button::new("▼").small()).on_hover_text(tl!("Move down")).clicked() {
                 action = Some(("map.setTiles", json!({"index": i, "move": "down"})));
+                ui.close();
             }
             if crate::widgets::icon_button(ui, "close", tl!("Remove")).clicked() {
                 action = Some(("map.removeTiles", json!({"index": i})));
+                ui.close();
             }
         });
     }
@@ -875,9 +879,11 @@ fn tile_layers(ui: &mut Ui, app: &mut RustGisApp, t: &Tokens) {
         if !tiles.is_empty() && ui.button(tl!("Reload")).on_hover_text(tl!("Fetch the tiles and styles of the web layers again.")).clicked()
         {
             let _ = app.run("map.reloadWebLayers", json!({}));
+            ui.close();
         }
         if !tiles.is_empty() && ui.button(tl!("Remove All")).clicked() {
             let _ = app.run("map.removeTiles", json!({}));
+            ui.close();
         }
     });
 }
@@ -994,6 +1000,44 @@ fn labeling_group(app: &mut RustGisApp, ui: &mut Ui) {
     });
 }
 
+/// Runs `layout.publication` for `profile` from the New Layout menu, in `style` on a sheet: a sheet
+/// is titled with the map's name, a figure's title being its caption's.
+fn publication_layout(app: &mut RustGisApp, profile: &rustgis_engine::cmd::layout::PublicationProfile, style: Option<&str>) {
+    let mut p = json!({"profile": profile.id});
+    if profile.sheet {
+        p["title"] = json!(app.session.map().name.clone());
+    }
+    if let Some(style) = style {
+        p["style"] = json!(style);
+    }
+    // The view's extent may not be known (an empty map): said, and the tab stays.
+    match app.run("layout.publication", p) {
+        Ok(r) => {
+            // What the layout couldn't do as asked (a legend clipped, a layer still reading).
+            let said: Vec<&str> = r["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).collect();
+            if !said.is_empty() {
+                app.session.notify(said.join("\n"), false);
+            }
+            app.ui.tab = "Publish".into();
+        }
+        Err(e) => app.session.notify(e, true),
+    }
+}
+
+/// A sheet style's name in the menu and what it looks like, `tl!` literals (as
+/// [`publication_label`]); `None` for a style added without them.
+fn publication_style(id: &str) -> Option<(&'static str, &'static str)> {
+    Some(match id {
+        "classic" => (tl!("Classic"), tl!("The title over the map, the sources and the reference in boxes under it.")),
+        "banner" => (tl!("Banner"), tl!("The title and subtitle in a band of colour across the top.")),
+        "panel" => (tl!("Panel"), tl!("The map at the left; the title, locator, legend, sources and reference in a panel at the right.")),
+        "editorial" => (tl!("Editorial"), tl!("A large serif title; the note, the locator and the legend in a column at the right.")),
+        "modular" => (tl!("Modular"), tl!("Cards on a light page: the map, the locator and the legend each in one.")),
+        "poster" => (tl!("Poster"), tl!("The page in colour, the title in light text and the map in a light card.")),
+        _ => return None,
+    })
+}
+
 /// A publication profile's name in the menu: a `tl!` literal each, so the catalogs find it (the
 /// engine's labels, which it matches in English); `None` for a profile added without one.
 fn publication_label(id: &str) -> Option<&'static str> {
@@ -1031,24 +1075,19 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
             ui.menu_button(tl!("Publication Layout"), |ui| {
                 for profile in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
                     let label = publication_label(profile.id).unwrap_or_else(|| tl!(profile.label));
-                    if ui.button(label).clicked() {
-                        // A sheet is titled with the map's name; a figure's title is its caption's.
-                        let mut p = json!({"profile": profile.id});
-                        if profile.sheet {
-                            p["title"] = json!(app.session.map().name.clone());
-                        }
-                        // The view's extent may not be known (an empty map): said, and the tab stays.
-                        match app.run("layout.publication", p) {
-                            Ok(r) => {
-                                // What the layout couldn't do as asked (a legend clipped, a layer still reading).
-                                let said: Vec<&str> = r["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).collect();
-                                if !said.is_empty() {
-                                    app.session.notify(said.join("\n"), false);
+                    if profile.sheet {
+                        // A sheet is arranged in one of the styles; a figure leaves that to its caption.
+                        ui.menu_button(label, |ui| {
+                            for (style, name) in rustgis_engine::cmd::layout::PUBLICATION_STYLES {
+                                let (name, about) = publication_style(style).unwrap_or_else(|| (tl!(*name), ""));
+                                if ui.button(name).on_hover_text(about).clicked() {
+                                    publication_layout(app, profile, Some(style));
+                                    ui.close();
                                 }
-                                app.ui.tab = "Publish".into();
                             }
-                            Err(e) => app.session.notify(e, true),
-                        }
+                        });
+                    } else if ui.button(label).clicked() {
+                        publication_layout(app, profile, None);
                         ui.close();
                     }
                 }
@@ -1813,7 +1852,7 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
         col(ui, |ui| {
             let (vig, edges, tilt, grain) = (v.effects.vignette, v.effects.edges, v.effects.tilt_shift, v.effects.grain);
             let stars = v.effects.stars;
-            small_menu(ui, app, "eye", "Visual Effect", "Vignette, edge outlines and the stars around the globe.", move |ui, app| {
+            small_form_menu(ui, app, "eye", "Visual Effect", "Vignette, edge outlines and the stars around the globe.", move |ui, app| {
                 if ui.checkbox(&mut vig.clone(), tl!("Vignette")).clicked() {
                     let _ = app.run("map.effects", json!({"vignette": !vig}));
                 }
@@ -1824,7 +1863,7 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
                     let _ = app.run("map.effects", json!({"stars": !stars}));
                 }
             });
-            small_menu(ui, app, "zoom_box", "Camera Effect", "Tilt-shift blur and film grain.", move |ui, app| {
+            small_form_menu(ui, app, "zoom_box", "Camera Effect", "Tilt-shift blur and film grain.", move |ui, app| {
                 if ui.checkbox(&mut tilt.clone(), tl!("Tilt-shift")).clicked() {
                     let _ = app.run("map.effects", json!({"tiltShift": !tilt}));
                 }
@@ -3162,7 +3201,7 @@ fn settings_tab(app: &mut RustGisApp, ui: &mut Ui) {
         let mut all: Vec<(String, String)> =
             TABS.iter().filter(|t| !FIXED_TABS.contains(*t)).map(|t| (t.to_string(), tl!(*t).to_string())).collect();
         all.extend(plugin_tabs(app));
-        big_menu(ui, app, "settings", "Ribbon", "Choose which tabs the ribbon shows.", move |ui, app| {
+        big_form_menu(ui, app, "settings", "Ribbon", "Choose which tabs the ribbon shows.", move |ui, app| {
             for (tab, caption) in &all {
                 let mut on = !hidden.iter().any(|h| h == tab);
                 if ui.checkbox(&mut on, caption.as_str()).clicked() {
@@ -3171,7 +3210,7 @@ fn settings_tab(app: &mut RustGisApp, ui: &mut Ui) {
             }
         });
         let qa = app.ui.quick_access.clone();
-        big_menu(ui, app, "command", "Quick\nAccess", "Choose extra buttons for the Quick Access Toolbar.", move |ui, app| {
+        big_form_menu(ui, app, "command", "Quick\nAccess", "Choose extra buttons for the Quick Access Toolbar.", move |ui, app| {
             for (id, label) in QUICK {
                 let mut on = qa.iter().any(|c| c == id);
                 if ui.checkbox(&mut on, tl!(*label)).clicked() {
@@ -4864,6 +4903,66 @@ mod tests {
         for p in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
             assert_eq!(publication_label(p.id), Some(p.label), "{}", p.id);
         }
+    }
+
+    /// Every sheet style has its literal name in the menu, the engine's name word for word, and
+    /// says what it looks like.
+    #[test]
+    fn every_publication_style_is_named_by_a_literal() {
+        for (id, name) in rustgis_engine::cmd::layout::PUBLICATION_STYLES {
+            let (label, about) = publication_style(id).unwrap_or_else(|| panic!("{id}"));
+            assert_eq!(label, *name, "{id}");
+            assert!(!about.is_empty(), "{id}");
+        }
+    }
+
+    /// New Layout › Publication Layout › a sheet › a style makes that sheet in that style, titled
+    /// with the map's name; a figure has no styles to pick and is made at once.
+    #[test]
+    fn a_publication_sheet_is_made_in_the_style_picked() {
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1600.0, 1000.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                ui.horizontal(|ui| project_group(app, ui));
+            },
+            cities(),
+        );
+        h.run();
+        let open = |h: &mut egui_kittest::Harness<'static, RustGisApp>, path: &[&str]| {
+            h.get_by_label("New Layout").click();
+            h.run();
+            for row in path {
+                h.get_by_label(row).hover();
+                h.run();
+            }
+        };
+        let before = h.state().session.project.layouts.len();
+        open(&mut h, &["Publication Layout", "A4 portrait sheet"]);
+        h.get_by_label("Panel").click();
+        h.run();
+        let app = h.state();
+        assert_eq!(app.session.project.layouts.len(), before + 1);
+        let l = app.session.project.layouts.last().unwrap();
+        assert!(l.elements.iter().any(|e| e.name == "Panel Box"), "the panel style");
+        let title = app.session.map().name.clone();
+        assert!(
+            l.elements.iter().any(|e| matches!(&e.kind, rustgis_engine::map::layout::ElementKind::Text { text, .. } if *text == title)),
+            "titled with the map's name"
+        );
+        assert_eq!(app.ui.tab, "Publish");
+        assert!(h.query_by_label("Banner").is_none(), "the menu closed");
+        // A figure: no styles under it.
+        open(&mut h, &["Publication Layout"]);
+        h.get_by_label("Journal figure, 1 column (90 mm)").click();
+        h.run();
+        assert_eq!(h.state().session.project.layouts.len(), before + 2);
+        let l = h.state().session.project.layouts.last().unwrap();
+        assert!(l.elements.iter().all(|e| e.name != "Panel Box" && e.name != "Title"), "a figure, its title left to the caption");
     }
 
     #[test]

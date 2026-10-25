@@ -1,7 +1,7 @@
 //! Zip archives (Deflate or stored): packages bundle a project or map with its data files.
 
-/// Most entries read from an archive.
-const MAX_ENTRIES: usize = 10_000;
+/// Most entries read from an archive (plain zip holds at most 65,535; ZIP64 isn't read).
+const MAX_ENTRIES: usize = 65_535;
 /// Largest entry inflated (1 GiB).
 const MAX_ENTRY: usize = 1 << 30;
 /// Most bytes inflated from one archive, all entries together (less in the browser).
@@ -102,6 +102,25 @@ fn u32_at(b: &[u8], i: usize) -> Option<usize> {
     usize::try_from(u32::from_le_bytes([*s.first()?, *s.get(1)?, *s.get(2)?, *s.get(3)?])).ok()
 }
 
+fn u64_at(b: &[u8], i: usize) -> Option<usize> {
+    let s = b.get(i..i.checked_add(8)?)?;
+    usize::try_from(u64::from_le_bytes(s.try_into().ok()?)).ok()
+}
+
+/// The ZIP64 end record referenced by a valid locator just before `eocd`.
+fn zip64_end(bytes: &[u8], eocd: usize) -> Option<usize> {
+    let locator = eocd.checked_sub(20)?;
+    if u32_at(bytes, locator) != Some(0x0706_4B50)
+        || u32_at(bytes, add(&[locator, 4])?) != Some(0)
+        || u32_at(bytes, add(&[locator, 16])?) != Some(1)
+    {
+        return None;
+    }
+    let record = u64_at(bytes, add(&[locator, 8])?)?;
+    let size = u64_at(bytes, add(&[record, 4])?)?;
+    (u32_at(bytes, record) == Some(0x0606_4B50) && size >= 44 && add(&[record, 12, size]) == Some(locator)).then_some(record)
+}
+
 /// `a + b + …` of offsets read from the archive, `None` on overflow.
 fn add(parts: &[usize]) -> Option<usize> {
     parts.iter().try_fold(0usize, |acc, x| acc.checked_add(*x))
@@ -128,6 +147,15 @@ pub fn read_matching_within(bytes: &[u8], want: impl Fn(&str) -> bool, budget: u
         .rev()
         .find(|&i| bytes.get(i..i.saturating_add(4)) == Some(&[0x50, 0x4B, 0x05, 0x06]))
         .ok_or_else(bad)?;
+    // ZIP64 puts its 20-byte locator immediately before the ordinary end record.
+    // Its count may be a sentinel even when all individual entries fit plain ZIP.
+    let zip64_locator = zip64_end(bytes, eocd).is_some();
+    if zip64_locator
+        || u32_at(bytes, add(&[eocd, 12]).ok_or_else(bad)?) == Some(0xFFFF_FFFF)
+        || u32_at(bytes, add(&[eocd, 16]).ok_or_else(bad)?) == Some(0xFFFF_FFFF)
+    {
+        return Err("the archive uses ZIP64, which can't be read yet".into());
+    }
     let count = u16_at(bytes, add(&[eocd, 10]).ok_or_else(bad)?).ok_or_else(bad)?;
     if count > MAX_ENTRIES {
         return Err(format!("the archive holds {count} entries; at most {MAX_ENTRIES} can be read"));
@@ -140,6 +168,7 @@ pub fn read_matching_within(bytes: &[u8], want: impl Fn(&str) -> bool, budget: u
         }
         let at = |off: usize| add(&[p, off]).ok_or_else(bad);
         let method = u16_at(bytes, at(10)?).ok_or_else(bad)?;
+        let flags = u16_at(bytes, at(8)?).ok_or_else(bad)?;
         let crc = u32_at(bytes, at(16)?).ok_or_else(bad)?;
         let csize = u32_at(bytes, at(20)?).ok_or_else(bad)?;
         let usize_ = u32_at(bytes, at(24)?).ok_or_else(bad)?;
@@ -150,6 +179,13 @@ pub fn read_matching_within(bytes: &[u8], want: impl Fn(&str) -> bool, budget: u
         p = add(&[p, 46, nl, xl, cl]).ok_or_else(bad)?;
         if name.ends_with('/') || !want(&name) {
             continue;
+        }
+        // Say what's wrong first: an encrypted entry or a ZIP64 one isn't damaged data.
+        if flags & 1 != 0 {
+            return Err(format!("{name} is encrypted; its contents can't be read"));
+        }
+        if csize == 0xFFFF_FFFF || usize_ == 0xFFFF_FFFF || local == 0xFFFF_FFFF {
+            return Err("the archive uses ZIP64, which can't be read yet".into());
         }
         let lnl = u16_at(bytes, add(&[local, 26]).ok_or_else(bad)?).ok_or_else(bad)?;
         let lxl = u16_at(bytes, add(&[local, 28]).ok_or_else(bad)?).ok_or_else(bad)?;
@@ -206,5 +242,85 @@ mod tests {
         let eocd = far.len() - 22;
         far[eocd + 16..eocd + 20].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(read(&far).is_err());
+    }
+
+    #[test]
+    fn encrypted_and_zip64_entries_say_what_they_are() {
+        assert_eq!(MAX_ENTRIES, u16::MAX as usize, "plain zip's own entry limit");
+        let z = write(&[("a.txt".to_string(), b"hi".to_vec())]).unwrap();
+        // The central directory starts where the end-of-central-directory record says, and each
+        // entry's header holds the general-purpose flags at +8, sizes at +20/+24 and its local
+        // header's offset at +42.
+        let central = |z: &[u8]| {
+            let e = z.len() - 22;
+            u32::from_le_bytes(z[e + 16..e + 20].try_into().unwrap()) as usize
+        };
+        let mut encrypted = z.clone();
+        let fl = central(&encrypted) + 8;
+        let f0 = u16::from_le_bytes(encrypted[fl..fl + 2].try_into().unwrap());
+        encrypted[fl..fl + 2].copy_from_slice(&(f0 | 1).to_le_bytes());
+        assert!(read(&encrypted).err().is_some_and(|e| e.contains("encrypted")));
+
+        let mut zip64 = z.clone();
+        let p = central(&zip64);
+        zip64[p + 24..p + 28].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(read(&zip64).err().is_some_and(|e| e.contains("ZIP64")));
+
+        let mut offset64 = z.clone();
+        let p = central(&offset64);
+        offset64[p + 42..p + 46].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(read(&offset64).err().is_some_and(|e| e.contains("ZIP64")));
+    }
+
+    #[test]
+    fn plain_zip_entry_limit_is_read_but_zip64_count_is_rejected() {
+        let entries = vec![("a".to_string(), Vec::new()); MAX_ENTRIES];
+        let mut z = write(&entries).unwrap();
+        assert_eq!(read(&z).unwrap(), entries);
+
+        // Add one central entry referencing the same empty local entry, taking the
+        // count beyond plain ZIP. No entry needs ZIP64 sizes or offsets.
+        let eocd = z.len() - 22;
+        let central = u32_at(&z, eocd + 16).unwrap();
+        let extra = z[central..central + 47].to_vec();
+        z.splice(eocd..eocd, extra);
+        let zip64_offset = eocd + 47;
+        let central_size = (zip64_offset - central) as u64;
+        let mut end = Vec::new();
+        end.extend_from_slice(&0x0606_4B50u32.to_le_bytes());
+        end.extend_from_slice(&44u64.to_le_bytes());
+        end.extend_from_slice(&45u16.to_le_bytes());
+        end.extend_from_slice(&45u16.to_le_bytes());
+        end.extend_from_slice(&[0; 8]); // disk numbers
+        end.extend_from_slice(&65_536u64.to_le_bytes());
+        end.extend_from_slice(&65_536u64.to_le_bytes());
+        end.extend_from_slice(&central_size.to_le_bytes());
+        end.extend_from_slice(&(central as u64).to_le_bytes());
+        end.extend_from_slice(&0x0706_4B50u32.to_le_bytes());
+        end.extend_from_slice(&0u32.to_le_bytes());
+        end.extend_from_slice(&(zip64_offset as u64).to_le_bytes());
+        end.extend_from_slice(&1u32.to_le_bytes());
+        z.splice(zip64_offset..zip64_offset, end);
+        let eocd = z.len() - 22;
+        z[eocd + 12..eocd + 16].copy_from_slice(&(central_size as u32).to_le_bytes());
+        assert!(read(&z).unwrap_err().contains("ZIP64"));
+        assert!(read_matching(&z, |_| false).unwrap_err().contains("ZIP64"));
+    }
+
+    #[test]
+    fn entry_comment_with_zip64_locator_signature_is_plain_zip() {
+        let entries = vec![("a".to_string(), Vec::new())];
+        let mut z = write(&entries).unwrap();
+        let eocd = z.len() - 22;
+        let central = u32_at(&z, eocd + 16).unwrap();
+        z[central + 32..central + 34].copy_from_slice(&20u16.to_le_bytes());
+        let mut comment = vec![0; 20];
+        comment[..4].copy_from_slice(&0x0706_4B50u32.to_le_bytes());
+        // Even plausible disk fields do not make a comment into a locator.
+        comment[16..20].copy_from_slice(&1u32.to_le_bytes());
+        z.splice(eocd..eocd, comment);
+        let size = (eocd - central + 20) as u32;
+        z[eocd + 20 + 12..eocd + 20 + 16].copy_from_slice(&size.to_le_bytes());
+        assert_eq!(read(&z).unwrap(), entries);
     }
 }

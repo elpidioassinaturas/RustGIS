@@ -97,8 +97,13 @@ fn period(e: &Entry, p: &Value) -> Result<(Value, Value), String> {
     let (start, end) = match (given("start"), given("end")) {
         (Some(a), Some(b)) => (a, b),
         (None, None) => {
-            let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64);
-            let this_year = rustgis_data::time::format(now, "YYYY").parse::<i32>().unwrap_or(2026);
+            let now = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
+                .map_err(|_| "the system clock is before 1970; give start and end explicitly")?
+                .as_millis() as f64;
+            let this_year = rustgis_data::time::format(now, "YYYY")
+                .parse::<i32>()
+                .map_err(|_| "the system clock's year could not be read; give start and end explicitly")?;
             let y = e.last_year(this_year);
             (json!(format!("{y}-01-01")), json!(format!("{y}-12-31")))
         }

@@ -35,6 +35,16 @@ def test_python_changes_reach_the_app():
     assert m._project != before
 
 
+def test_pmtiles_changes_reach_the_app():
+    """The shared helper sends the archive and source layers to the notebook app."""
+    m = rustgis.Map()
+    result = m.add_pmtiles("http://127.0.0.1:9/archive", name="Water", source_layers=["water"])
+    project = json.loads(m._project)
+    tile = project["maps"][project["active_map"]]["tiles"][0]
+    assert result["kind"] == tile["kind"] == "pmtiles"
+    assert tile["name"] == "Water" and tile["layers"] == ["water"]
+
+
 def test_app_changes_reach_the_session():
     m = rustgis.Map()
     other = rustgis.Session()

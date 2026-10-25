@@ -315,7 +315,8 @@ fn header(app: &mut RustGisApp, ui: &mut Ui, t: &TimeSlider, steps: &[f64], tk: 
 fn layers_menu(app: &mut RustGisApp, ui: &mut Ui) {
     let m = app.session.map();
     let n = m.layers.iter().filter(|l| l.time.is_some()).count() + m.tiles.iter().filter(|t| t.time_url.is_some()).count();
-    ui.menu_button(crate::i18n::fmt("Layers ({n})", &[("n", &n.to_string())]), |ui| {
+    let button = ui.button(crate::i18n::fmt("Layers ({n})", &[("n", &n.to_string())]));
+    egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         // Read only while the menu is open: finding date fields reads every field's values.
         let layers: Vec<(u32, String, Option<String>, Vec<(String, f64)>)> = app
             .session

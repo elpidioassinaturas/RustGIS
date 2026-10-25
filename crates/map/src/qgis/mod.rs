@@ -11,6 +11,7 @@
 
 mod expr;
 mod labels;
+mod raster;
 mod renderer;
 mod source;
 mod symbol;
@@ -108,6 +109,8 @@ pub struct Style {
     /// 0 opaque to 100 invisible.
     pub transparency: Option<f32>,
     pub blend: Option<Blend>,
+    /// A raster's colouring, stretch, resampling, brightness, contrast and mask.
+    pub raster: Option<crate::raster::RasterStyle>,
     /// Drawn between these scales (RustGIS's, see [`QGIS_SCALE`]): zoomed in beyond 1:`min_scale`
     /// and out beyond 1:`max_scale`. `Some(None)` clears a limit.
     pub min_scale: Option<Option<f64>>,
@@ -117,6 +120,26 @@ pub struct Style {
 impl Style {
     /// Gives `layer` this style's parts (those it sets).
     pub fn apply(&self, layer: &mut crate::Layer) {
+        if let Some(t) = self.transparency {
+            layer.transparency = t;
+        }
+        if let Some(b) = self.blend {
+            layer.blend = b;
+        }
+        if let Some(s) = self.min_scale {
+            layer.min_scale = s;
+        }
+        if let Some(s) = self.max_scale {
+            layer.max_scale = s;
+        }
+        // A raster takes its raster style (when its bands are there), and none of a feature
+        // layer's parts.
+        if let Some(r) = layer.raster.as_mut() {
+            if let Some(st) = self.raster.as_ref().filter(|_| self.raster_misfit(r).is_none()) {
+                r.style = st.clone();
+            }
+            return;
+        }
         if let Some(r) = &self.renderer {
             layer.renderer = r.clone();
         }
@@ -132,18 +155,15 @@ impl Style {
         if let Some(l) = &self.labels {
             layer.labels = l.clone();
         }
-        if let Some(t) = self.transparency {
-            layer.transparency = t;
-        }
-        if let Some(b) = self.blend {
-            layer.blend = b;
-        }
-        if let Some(s) = self.min_scale {
-            layer.min_scale = s;
-        }
-        if let Some(s) = self.max_scale {
-            layer.max_scale = s;
-        }
+    }
+
+    /// Why this style's raster colouring doesn't fit the raster `r` (it reads a band the file
+    /// hasn't), or `None` when it fits or there is none.
+    pub fn raster_misfit(&self, r: &crate::raster::RasterLayer) -> Option<String> {
+        let st = self.raster.as_ref()?;
+        let count = r.data.as_ref()?.band_count();
+        let band = st.renderer.bands().into_iter().find(|b| *b >= count)?;
+        Some(format!("its raster colouring, which reads band {} of a raster with {count}", band + 1))
     }
 }
 
@@ -169,6 +189,8 @@ pub struct ProjectLayer {
     pub source: Source,
     /// Its coordinate system (`EPSG:…`), when QGIS records one.
     pub crs: Option<String>,
+    /// QGIS's kind of layer (`vector`, `raster`, `vector-tile`, `annotation`, `mesh`, …).
+    pub kind: String,
     /// A vector layer (`false`: raster, mesh, point cloud and the like).
     pub vector: bool,
     /// Checked in the layer tree, and every group holding it too.
@@ -186,21 +208,30 @@ pub fn read_project(text: &str, dir: &str, report: &mut Report) -> Result<Projec
     if !root.has_tag_name("qgis") {
         return Err("not a QGIS project (.qgs): its root element isn't <qgis>".into());
     }
+    // The main map canvas: its view, and (before QGIS 3) the project's coordinate system.
+    let canvas = root.children().find(|c| c.has_tag_name("mapcanvas") && c.attribute("name").is_none_or(|n| n == "theMapCanvas"));
+    let crs = child(root, "projectCrs")
+        .and_then(crs_of)
+        .or_else(|| canvas.and_then(|c| child(c, "destinationsrs")).and_then(crs_of))
+        .or_else(|| {
+            let p = child(root, "properties").and_then(|p| child(p, "SpatialRefSys")).and_then(|s| child(s, "ProjectCrs"))?;
+            p.text().map(str::trim).filter(|t| t.contains(':')).map(str::to_string)
+        });
     let mut project = Project {
         title: child(root, "title").and_then(|t| t.text()).map(str::trim).unwrap_or_default().to_string(),
-        crs: child(root, "projectCrs").and_then(crs_of),
-        extent: None,
+        crs,
+        extent: canvas.and_then(|c| child(c, "extent")).and_then(extent_of),
         layers: Vec::new(),
     };
-    // The main map canvas's view.
-    let canvas = root.children().find(|c| c.has_tag_name("mapcanvas") && c.attribute("name").is_none_or(|n| n == "theMapCanvas"));
-    project.extent = canvas.and_then(|c| child(c, "extent")).and_then(extent_of);
-    // The layer tree: the order layers draw in (top first) and which are checked.
-    let tree = child(root, "layer-tree-group");
+    // The layer tree (QGIS 2's legend before it): the order layers draw in (top first) and which
+    // are checked.
     let mut order: Vec<(String, bool)> = Vec::new();
-    if let Some(t) = tree {
+    if let Some(t) = child(root, "layer-tree-group") {
         tree_layers(t, true, &mut order, 0);
+    } else if let Some(l) = child(root, "legend") {
+        legend_layers(l, true, &mut order, 0);
     }
+    project_notes(root, report);
     let maplayers: Vec<Node> =
         child(root, "projectlayers").map(|p| p.children().filter(|c| c.has_tag_name("maplayer")).collect()).unwrap_or_default();
     if maplayers.len() > MAX_LAYERS {
@@ -216,7 +247,8 @@ pub fn read_project(text: &str, dir: &str, report: &mut Report) -> Result<Projec
         let provider = child(ml, "provider").and_then(|n| n.text()).unwrap_or_default().trim().to_string();
         let datasource = child(ml, "datasource").and_then(|n| n.text()).unwrap_or_default().trim().to_string();
         let source = source::read(&provider, &datasource, dir);
-        let vector = ml.attribute("type") == Some("vector");
+        let kind = ml.attribute("type").unwrap_or_default().to_string();
+        let vector = kind == "vector";
         let definition_query = match &source {
             Source::File { subset: Some(q), .. } => match expr::to_sql(q) {
                 Some(sql) => Some(sql),
@@ -236,6 +268,7 @@ pub fn read_project(text: &str, dir: &str, report: &mut Report) -> Result<Projec
                 provider,
                 source,
                 crs: child(ml, "srs").and_then(crs_of),
+                kind,
                 vector,
                 visible: checked,
                 definition_query,
@@ -262,8 +295,12 @@ pub fn read_style(text: &str, layer: &str, report: &mut Report) -> Result<Style,
 /// A layer's style from its `<maplayer>` (a project's) or a style file's `<qgis>` root.
 fn read_style_node(node: Node, layer: &str, report: &mut Report) -> Style {
     let mut style = Style::default();
-    let opacity = child(node, "layerOpacity").and_then(|n| n.text()).and_then(|t| t.trim().parse::<f32>().ok());
-    if let Some(o) = opacity.filter(|o| o.is_finite()) {
+    let number = |tag: &str| child(node, tag).and_then(|n| n.text()).and_then(|t| t.trim().parse::<f32>().ok()).filter(|v| v.is_finite());
+    // Its opacity: 0 to 1; QGIS 2's transparency 0 to 100; QGIS 1's opacity 0 to 255.
+    let opacity = number("layerOpacity")
+        .or_else(|| number("layerTransparency").map(|t| 1.0 - t / 100.0))
+        .or_else(|| number("transparencyLevelInt").map(|o| o / 255.0));
+    if let Some(o) = opacity {
         style.transparency = Some(((1.0 - o.clamp(0.0, 1.0)) * 100.0).round());
     }
     if let Some(mode) = child(node, "blendMode").and_then(|n| n.text()).and_then(|t| t.trim().parse::<i32>().ok()) {
@@ -273,20 +310,27 @@ fn read_style_node(node: Node, layer: &str, report: &mut Report) -> Style {
         }));
     }
     if node.attribute("hasScaleBasedVisibilityFlag") == Some("1") {
-        // QGIS's minScale is the out-beyond limit (the larger number), maxScale the in-beyond.
+        // QGIS's minScale is the out-beyond limit (the larger number), maxScale the in-beyond;
+        // before QGIS 3 they were maximumScale and minimumScale.
         let scale = |k: &str| node.attribute(k).and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite() && *v > 0.0);
-        style.min_scale = Some(scale("minScale").map(|s| s * QGIS_SCALE));
-        style.max_scale = Some(scale("maxScale").map(|s| s * QGIS_SCALE));
+        let (out, inside) = if node.attribute("minScale").is_some() || node.attribute("maxScale").is_some() {
+            (scale("minScale"), scale("maxScale"))
+        } else {
+            (scale("maximumScale"), scale("minimumScale"))
+        };
+        style.min_scale = Some(out.map(|s| s * QGIS_SCALE));
+        style.max_scale = Some(inside.map(|s| s * QGIS_SCALE));
     }
+    layer_notes(node, layer, report);
     if let Some(r) = child(node, "renderer-v2") {
         renderer::read(r, layer, &mut style, report);
     }
-    // A raster's renderer: its opacity carried over, its colouring not yet.
+    // A raster's renderer: its opacity, and its colouring as RustGIS's raster style.
     if let Some(r) = child(node, "pipe").and_then(|p| child(p, "rasterrenderer")) {
         if let Some(o) = r.attribute("opacity").and_then(|o| o.trim().parse::<f32>().ok()).filter(|o| o.is_finite() && *o < 1.0) {
             style.transparency = Some(((1.0 - o.clamp(0.0, 1.0)) * 100.0).round());
         }
-        report.skipped(layer, format!("its raster colouring ({} renderer)", r.attribute("type").unwrap_or("unknown")));
+        style.raster = raster::read(node, layer, report);
     }
     if let Some(l) = child(node, "labeling") {
         // Set up but switched off: carried over, switched off.
@@ -295,8 +339,106 @@ fn read_style_node(node: Node, layer: &str, report: &mut Report) -> Style {
             l.enabled &= !off;
             l
         });
+    } else if old_labels(node) {
+        report.skipped(layer, "its labels, in the format of QGIS 2 and before");
     }
     style
+}
+
+/// Whether a layer has labels switched on in QGIS 2's way (its custom properties) or QGIS 1's
+/// (`<label>1</label>`).
+fn old_labels(node: Node) -> bool {
+    let custom = child(node, "customproperties").is_some_and(|c| {
+        c.children()
+            .any(|p| p.has_tag_name("property") && p.attribute("key") == Some("labeling/enabled") && p.attribute("value") == Some("true"))
+    });
+    custom || child(node, "label").and_then(|n| n.text()).is_some_and(|t| t.trim() == "1")
+}
+
+/// Notes a layer's settings RustGIS has no place for (a project's `<maplayer>` or a style's root).
+fn layer_notes(node: Node, layer: &str, report: &mut Report) {
+    if child(node, "temporal").is_some_and(|t| t.attribute("enabled") == Some("1")) {
+        report.skipped(layer, "its time settings");
+    }
+    let diagrams = node
+        .children()
+        .filter(|c| c.tag_name().name().ends_with("DiagramRenderer"))
+        .any(|r| r.descendants().any(|d| d.has_tag_name("DiagramCategory") && d.attribute("enabled") == Some("1")));
+    if diagrams {
+        report.skipped(layer, "its diagrams");
+    }
+    if let Some(m) = child(node, "map-layer-style-manager") {
+        let current = m.attribute("current").unwrap_or_default();
+        let others: Vec<&str> = m
+            .children()
+            .filter(|s| s.has_tag_name("map-layer-style"))
+            .filter_map(|s| s.attribute("name"))
+            .filter(|n| *n != current)
+            .take(8)
+            .collect();
+        if !others.is_empty() {
+            report.skipped(layer, format!("its other styles ({}): only the current one is carried over", others.join(", ")));
+        }
+    }
+    let count = |list: &str, item: &str| child(node, list).map_or(0, |l| l.children().filter(|c| c.has_tag_name(item)).count());
+    if count("vectorjoins", "join") > 0 {
+        report.skipped(layer, "its joins to other layers' fields");
+    }
+    if count("expressionfields", "field") > 0 {
+        report.skipped(layer, "its virtual fields (fields computed from an expression)");
+    }
+    if node.attribute("type") == Some("vector-tile") && child(node, "renderer").is_some() {
+        report.approximated(layer, "its vector tile style, drawn in RustGIS's own");
+    }
+}
+
+/// Notes the project's parts RustGIS has no place for: print layouts, annotations, bookmarks,
+/// map themes and relations.
+fn project_notes(root: Node, report: &mut Report) {
+    let count = |list: &str, item: &str| child(root, list).map_or(0, |l| l.children().filter(|c| c.has_tag_name(item)).count());
+    let layouts = count("Layouts", "Layout") + root.children().filter(|c| c.has_tag_name("Composer")).count();
+    if layouts > 0 {
+        report.skipped("", format!("its print layouts ({layouts})"));
+    }
+    let items = child(root, "main-annotation-layer")
+        .and_then(|a| child(a, "items"))
+        .map_or(0, |i| i.children().filter(|c| c.has_tag_name("item")).count());
+    if items > 0 {
+        report.skipped("", format!("its annotations ({items}: text, shapes and pictures on the map)"));
+    }
+    let bookmarks = count("Bookmarks", "Bookmark");
+    if bookmarks > 0 {
+        report.skipped("", format!("its bookmarks ({bookmarks})"));
+    }
+    let themes = count("visibility-presets", "visibility-preset");
+    if themes > 0 {
+        report.skipped("", format!("its map themes ({themes})"));
+    }
+    let relations = count("relations", "relation");
+    if relations > 0 {
+        report.skipped("", format!("its relations between layers ({relations})"));
+    }
+}
+
+/// Whether `node` (a symbol layer, a renderer) has a draw effect on: a shadow, glow, blur or the
+/// like, not only the plain drawing QGIS's effect stack starts with.
+pub(crate) fn has_effect(node: Node) -> bool {
+    let Some(top) = node.children().find(|c| c.has_tag_name("effect")) else { return false };
+    if top.attribute("enabled") != Some("1") {
+        return false;
+    }
+    top.descendants().filter(|e| e.has_tag_name("effect")).any(|e| {
+        let kind = e.attribute("type").unwrap_or_default();
+        kind != "effectStack" && kind != "drawSource" && prop(&props(e), "enabled").is_none_or(|on| on == "1")
+    })
+}
+
+/// Whether `node` (a symbol layer, label settings) has a data-defined setting switched on: one
+/// taken from a field or an expression.
+pub(crate) fn data_defined_on(node: Node) -> bool {
+    node.children().filter(|c| c.has_tag_name("data_defined_properties") || c.has_tag_name("dd_properties")).any(|dd| {
+        dd.descendants().any(|o| o.has_tag_name("Option") && o.attribute("name") == Some("active") && o.attribute("value") == Some("true"))
+    })
 }
 
 /// The layers in a layer tree group, top first, each with whether it is checked (and every
@@ -313,6 +455,26 @@ fn tree_layers(group: Node, checked: bool, out: &mut Vec<(String, bool)>, depth:
             }
         } else if c.has_tag_name("layer-tree-group") {
             tree_layers(c, checked && on(c), out, depth + 1);
+        }
+    }
+}
+
+/// The layers in QGIS 2's legend (`<legend>`, before the layer tree), top first, each with
+/// whether it is checked (and its group). Groups are walked to a bounded depth.
+fn legend_layers(group: Node, checked: bool, out: &mut Vec<(String, bool)>, depth: usize) {
+    if depth > 64 || out.len() > MAX_LAYERS * 4 {
+        return;
+    }
+    let on = |n: Node| n.attribute("checked").is_none_or(|c| c == "Qt::Checked" || c == "Qt::PartiallyChecked");
+    for c in group.children().filter(Node::is_element) {
+        if c.has_tag_name("legendlayer") {
+            for f in c.descendants().filter(|f| f.has_tag_name("legendlayerfile")) {
+                if let Some(id) = f.attribute("layerid") {
+                    out.push((id.to_string(), checked && on(c)));
+                }
+            }
+        } else if c.has_tag_name("legendgroup") {
+            legend_layers(c, checked && on(c), out, depth + 1);
         }
     }
 }

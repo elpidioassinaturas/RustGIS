@@ -28,7 +28,7 @@ pub fn commands() -> Vec<C> {
         C::new("group.remove", "Remove Group", "Layers", remove).params(r#"{"group": name|id} (and its layers)"#),
         C::new("layer.group", "Move To Group", "Layers", move_to_group)
             .when(super::need_layer)
-            .params(r#"{"layer"?: name|id | [name|id] (default: the layer selection), "group": name|id|null (null takes it out of its group), "before"?: name|id (the layer it goes just above: one of the group's, or out of a group any other; without it, next to the group's layers, or where it is when taken out)}"#),
+            .params(r#"{"layer"?: name|id | [name|id] (default: the layer selection), "group": name|id|null (null takes it out of its group), "before"?: name|id|null (places a single layer just above this layer; null puts it at the group's end, or the bottom out of a group; omitted: next to the group's layers, or where it is when taken out)}"#),
     ]
 }
 
@@ -191,7 +191,7 @@ fn move_to_group(s: &mut Session, p: &Value) -> CmdResult {
     // Several (a list, or the layer selection): each in or out of the group, one undo step.
     let ids = super::layer::layer_ids(s, p)?;
     if ids.len() > 1 {
-        if p.get("before").is_some_and(|v| !v.is_null()) {
+        if p.get("before").is_some() {
             return Err("\"before\" places one layer: give a single layer with it".into());
         }
         if group.is_some() {
@@ -212,11 +212,12 @@ fn move_to_group(s: &mut Session, p: &Value) -> CmdResult {
         groupable(s, layer)?;
     }
     match p.get("before") {
-        Some(v) if !v.is_null() => {
+        Some(Value::Null) => s.map_mut().place_layer(layer, group, None)?,
+        Some(v) => {
             let before = s.layer_id(&json!({"layer": v}))?;
             s.map_mut().place_layer(layer, group, Some(before))?;
         }
-        _ => s.map_mut().set_group(layer, group),
+        None => s.map_mut().set_group(layer, group),
     }
     Ok(json!({"layer": layer, "group": group}))
 }

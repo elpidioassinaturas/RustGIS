@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use roxmltree::Node;
 
 use super::symbol::{self, Converted};
-use super::{QGIS_SCALE, Report, Style, child, expr};
+use super::{QGIS_SCALE, Report, Style, child, expr, has_effect};
 use crate::color::Ramp;
 use crate::symbology::{ClassMethod, LineStroke, Renderer, Symbol};
 
@@ -29,6 +29,12 @@ fn read_depth(r: Node, layer: &str, style: &mut Style, report: &mut Report, dept
     }
     if r.attribute("symbollevels") == Some("1") {
         style.stroke_levels = Some(true);
+    }
+    if r.attribute("enableorderby") == Some("1") {
+        report.approximated(layer, "features drawn in the order QGIS's order-by sets, drawn in the data's order");
+    }
+    if has_effect(r) {
+        report.skipped(layer, "draw effects (shadows, glows, blurs and the like)");
     }
     // The symbols the renderer names, by name.
     let symbols: BTreeMap<String, Node> = child(r, "symbols")
@@ -103,10 +109,11 @@ fn categorized(r: Node, layer: &str, style: &mut Style, report: &mut Report, sym
         if cat.attribute("render") == Some("false") {
             c = Converted { symbol: symbol::hidden(), strokes: Vec::new() };
         }
-        // A category of several values (QGIS's merged categories) lists them as <val>s.
+        // A category of several values (QGIS's merged categories) lists them as <val>s, or as a
+        // list <Option>.
         let mut values: Vec<String> = cat
             .descendants()
-            .filter(|v| v.has_tag_name("Option") && v.attribute("type") == Some("QString"))
+            .filter(|v| v.has_tag_name("val") || (v.has_tag_name("Option") && v.attribute("type") == Some("QString")))
             .filter_map(|v| v.attribute("value").map(str::to_string))
             .collect();
         if values.is_empty() {

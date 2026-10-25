@@ -65,10 +65,10 @@ pub fn commands() -> Vec<C> {
         ),
         // Label classes: each labels every feature its clause takes, as in ArcGIS Pro; the classes
         // listed first, Default last, are placed first (`Labeling`, #732).
-        C::new("labels.class.add", "Add Label Class", "Style › Label Class", add_class)
+        C::new("labels.class.add", "Add Label Class", "View › Windows › Labeling", add_class)
             .when(need_feature_layer)
             .params(r#"{"layer"?, "name": string, "where"?: sql (a definition query's language; none takes every feature), "from"?: class (whose field and text symbol it starts with; none: the Default class)}"#),
-        C::new("labels.class.remove", "Remove Label Class", "Style › Label Class", |s, p| {
+        C::new("labels.class.remove", "Remove Label Class", "View › Windows › Labeling", |s, p| {
             let name = s_req(p, "class")?.trim().to_string();
             with_labels(s, p, |labels| {
                 let i = extra_class(labels, &name)?;
@@ -79,7 +79,7 @@ pub fn commands() -> Vec<C> {
         .when(need_feature_layer)
         .params(r#"{"layer"?, "class": name (not Default)}"#),
         // Every class but Default; none to remove is no error, so a script can start with it.
-        C::new("labels.class.clear", "Remove All Label Classes", "Style › Label Class", |s, p| {
+        C::new("labels.class.clear", "Remove All Label Classes", "View › Windows › Labeling", |s, p| {
             let mut removed = 0;
             with_labels(s, p, |labels| {
                 removed = labels.classes.len();
@@ -90,7 +90,7 @@ pub fn commands() -> Vec<C> {
         })
         .when(need_feature_layer)
         .params(r#"{"layer"?}"#),
-        C::new("labels.class.rename", "Rename Label Class", "Style › Label Class", |s, p| {
+        C::new("labels.class.rename", "Rename Label Class", "View › Windows › Labeling", |s, p| {
             let class = s_req(p, "class")?.trim().to_string();
             let name = s_req(p, "name")?.to_string();
             with_labels(s, p, |labels| {
@@ -101,7 +101,7 @@ pub fn commands() -> Vec<C> {
         })
         .when(need_feature_layer)
         .params(r#"{"layer"?, "class": name, "name": string}"#),
-        C::new("labels.class.update", "Update Label Class", "Style › Label Class", |s, p| {
+        C::new("labels.class.update", "Update Label Class", "View › Windows › Labeling", |s, p| {
             let id = s.layer_id(p)?;
             let clause = s.map().layer(id).map(|l| clause(p, &l.dataset)).transpose()?.flatten();
             let visible = b(p, "visible");
@@ -116,7 +116,7 @@ pub fn commands() -> Vec<C> {
         })
         .when(need_feature_layer)
         .params(r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "where"?: sql|null, "visible"?: bool}"#),
-        C::new("labels.class.move", "Move Label Class", "Style › Label Class", |s, p| {
+        C::new("labels.class.move", "Move Label Class", "View › Windows › Labeling", |s, p| {
             let name = s_req(p, "class")?.trim().to_string();
             let to = f(p, "to").filter(|v| v.is_finite()).ok_or("to is required: the class's place in the list, 0 first")?;
             with_labels(s, p, |labels| {

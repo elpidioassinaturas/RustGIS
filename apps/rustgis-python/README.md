@@ -35,6 +35,7 @@ ways (`pip install "rustgis[jupyter]"`):
 ```python
 m = rustgis.Map(sample=True)
 m.add_geopandas(gdf, name="Big cities")           # appears in the app
+m.add_pmtiles("https://example.org/atlas.pmtiles", name="Atlas")
 m                                                 # pan, edit, style there...
 m.info()["center"]                                # ...and read it back here
 ```

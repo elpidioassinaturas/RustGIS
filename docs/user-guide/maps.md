@@ -206,7 +206,8 @@ Ocean, Atlas, Blank), which need no network, and web tile layers over them:
 The gallery's **Web Basemaps** need no API key: the OpenFreeMap vector maps (Liberty, Bright,
 Positron, Dark, Fiord) and USGS Imagery. Choosing one replaces the other web basemaps; tick
 **Stack on the current basemaps** above them to add it over the others instead (clicking one
-that already shows then takes it off). For many
+that already shows then takes it off). Toggling the checkbox keeps the gallery open so you can
+choose a basemap; choosing one closes it. For many
 more (OpenStreetMap, Esri, NASA and others), follow **Install the Basemaps plugin** under them,
 which opens the Plugin Manager at the
 [Basemaps plugin](https://plugins.rustgis.app/catalog/basemaps/); it adds a tab of public
@@ -247,9 +248,9 @@ are instead discarded, leaving the project and tile layer usable without that co
 A map can be on the Moon, Mars or another body instead of the Earth. Pick the body from the
 planet button at the top of the Layers pane, or under **Celestial Bodies** in the Basemap
 gallery: Earth, Moon, Mars, Callisto, Charon, Europa, Ganymede, Io, Mercury, Pluto, Titan and
-Venus. Choosing one puts one of its basemaps under the map (the gallery lists the others: Viking,
-MOLA elevation and hillshade mosaics for Mars, LOLA albedo for the Moon, and the USGS
-Astrogeology mosaics of the rest) and measures on that body: the Measure tools, the scale bar,
+Venus. Choosing one closes the gallery and puts one of its basemaps under the map (reopen the
+gallery for the others: Viking, MOLA elevation and hillshade mosaics for Mars, LOLA albedo for
+the Moon, and the USGS Astrogeology mosaics of the rest) and measures on that body: the Measure tools, the scale bar,
 the map scale and layout scale bars use its radius. Coordinates stay longitude and latitude, and
 the map stays a Web Mercator sphere, the size of the body. Off the Earth there is no atmosphere:
 the globe has no glow around it, and a tilted view's sky is the black of space, with no haze
