@@ -932,10 +932,15 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     if f.test.is_empty() {
         (f.test, f.seasons, f.alpha) = ("hamedRao".into(), 12, "0.05".into());
     }
+    let was_stack = f.stack;
     ui.horizontal(|ui| {
         ui.radio_value(&mut f.stack, true, tl!("Layers, a date each"));
         ui.radio_value(&mut f.stack, false, tl!("One layer: a Zarr variable or a raster's bands"));
     });
+    // Dates typed for one kind of series don't carry over to the other.
+    if f.stack != was_stack {
+        f.dates.clear();
+    }
     if f.stack {
         f.ticked.retain(|n| rasters.contains(n));
         ui.horizontal(|ui| {
