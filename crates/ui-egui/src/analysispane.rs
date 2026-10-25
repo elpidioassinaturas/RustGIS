@@ -1024,7 +1024,10 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     }
     let mut p = json!({"test": f.test, "per": if f.decade { "decade" } else { "year" }});
     if f.stack {
-        p["layers"] = json!(f.ticked);
+        // In the list's order, not the order they were ticked: the dates typed go with them in
+        // that order, and the first gives the grid.
+        let ticked: Vec<&String> = rasters.iter().filter(|n| f.ticked.contains(n)).collect();
+        p["layers"] = json!(ticked);
     } else {
         p["layer"] = json!(app.workflow.layer);
     }
