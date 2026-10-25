@@ -10254,6 +10254,27 @@ fn a_trend_over_stacked_and_multiband_geotiffs() {
     let r = s.run("cube.trend", &json!({"layers": fine_first, "name": "fine"})).unwrap();
     let fine = s.map().layer(r["layers"][0].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
     assert_eq!((fine.width, fine.height), (8, 4));
+    // A scan not yet georeferenced, on another grid, can't be resampled: refused before the run.
+    let placed = Raster::new(
+        "scan",
+        3,
+        3,
+        vec![vec![0.5; 9]],
+        GeoTransform { origin_x: x0, origin_y: y0, pixel_width: px, pixel_height: -px },
+        Crs::LonLat,
+        None,
+        ColorHint::Gray,
+        "Float32",
+    )
+    .unwrap();
+    let bytes = geotiff::write(&placed, 0).unwrap();
+    let mut scan = placed;
+    scan.georeferenced = false;
+    crate::cmd::raster::add_raster(&mut s, "scan_2030-07-01", rustgis_map::RasterLayer::from_bytes(scan, "scan.tif", bytes)).unwrap();
+    let mut with_scan = names.clone();
+    with_scan.push("scan_2030-07-01".into());
+    let e = s.run("cube.trend", &json!({"layers": with_scan})).unwrap_err();
+    assert!(e.contains("no coordinates"), "{e}");
     // A multi-band file, a date a band, its bands named by the descriptions in it.
     let bands: Vec<Vec<f32>> = (0..12).map(cells).collect();
     let described: Vec<String> = years.iter().map(|y| format!("NDVI {y}-07-01")).collect();
@@ -10265,6 +10286,14 @@ fn a_trend_over_stacked_and_multiband_geotiffs() {
     let r = s.run("cube.trend", &json!({"layer": "ndvi_bands"})).unwrap();
     assert_eq!(r["dates"], 12, "{r}");
     found(&s, &r);
+    // An `.aux.xml` next to the file names the bands it describes, the file's own tag the others.
+    let path = dir.join("ndvi_side.tif");
+    std::fs::write(&path, multiband_tiff(4, 2, &bands, (x0, y0), px, Some(&described))).unwrap();
+    let sidecar = r#"<PAMDataset><PAMRasterBand band="1"><Description>NDVI 2012-07-01</Description></PAMRasterBand></PAMDataset>"#;
+    std::fs::write(dir.join("ndvi_side.tif.aux.xml"), sidecar).unwrap();
+    s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    let side = s.map().layer_by_name("ndvi_side").unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    assert_eq!((side.bands[0].name.as_str(), side.bands[1].name.as_str()), ("NDVI 2012-07-01", "NDVI 2014-07-01"));
     // Without descriptions, the dates are given.
     let path = dir.join("ndvi_plain.tif");
     std::fs::write(&path, multiband_tiff(4, 2, &bands, (x0, y0), px, None)).unwrap();
