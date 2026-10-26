@@ -17868,14 +17868,28 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let lines: Vec<LogEntry> = std::fs::read_to_string(&jsonl).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
     assert_eq!(lines.len() + 1, s.project.log.len(), "every entry but the export's own");
     let _ = std::fs::remove_dir_all(&dir);
-    // Cleared, it says so; off, nothing goes in; on again, it does.
+    // Cleared, it says so; off, nothing goes in; on again, it does. Clearing and switching change
+    // the project (an assistant is told so) but take no undo step, which would restore nothing.
+    for id in ["project.clearLog", "project.logCommands"] {
+        let spec = s.registry.get(id).unwrap();
+        assert!(spec.mutates && !spec.undoable, "{id}");
+    }
+    let steps = s.undo.len();
+    s.dirty = false;
     assert!(s.run("project.clearLog", &Value::Null).unwrap()["cleared"].as_u64().unwrap() > 5);
     assert_eq!(commands(&s), ["project.clearLog"]);
+    assert!(s.dirty && s.undo.len() == steps, "changed, with no undo step");
     s.run("project.logCommands", &json!({"on": false})).unwrap();
     s.run("project.rename", &json!({"name": "Quiet"})).unwrap();
     assert_eq!(commands(&s), ["project.clearLog", "project.logCommands"], "turned off, and said so");
     s.run("project.logCommands", &json!({"on": true})).unwrap();
     assert_eq!(commands(&s), ["project.clearLog", "project.logCommands", "project.logCommands"]);
+    // A log that would take a project past what a project file opens with is refused at saving;
+    // a project over it by itself is not the log's doing.
+    let max = crate::project::MAX_BYTES as usize;
+    assert!(crate::project::log_fits(max - 10, max).is_ok());
+    assert!(crate::project::log_fits(max - 10, max + 1).unwrap_err().contains("project.clearLog"));
+    assert!(crate::project::log_fits(max + 1, max + 50).is_ok());
     // A file's log is read keeping its last entries, each bounded.
     let entries: Vec<Value> = (0..LOG_LIMIT + 3)
         .map(|i| json!({"at": i, "command": "x".repeat(if i == LOG_LIMIT + 2 { 1000 } else { 1 }), "ok": true, "params": {"a": "y".repeat(if i == LOG_LIMIT + 2 { 20_000 } else { 1 })}}))

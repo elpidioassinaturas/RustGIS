@@ -347,6 +347,9 @@ pub struct LogEntry {
     pub relative: Vec<String>,
 }
 
+/// The longest saved log text kept for the next save ([`LogState::written`]).
+const WRITTEN_KEPT_BYTES: usize = 1 << 20;
+
 /// A log as it is held, written by [`ProjectLog::write_json`] (its paths made portable) and read
 /// back through its own `Deserialize`.
 #[derive(Debug, Default)]
@@ -358,7 +361,8 @@ struct LogState {
     /// Moved on by each change, so a text written earlier is known to be the log as it is.
     generation: u64,
     /// The text the last save wrote, with the generation it was written from and the folder it
-    /// was written for: a save or autosave with nothing logged since writes it as it is.
+    /// was written for: a save or autosave with nothing logged since writes it as it is. Up to
+    /// [`WRITTEN_KEPT_BYTES`] only.
     written: Option<(u64, Option<String>, std::sync::Arc<str>)>,
 }
 
@@ -642,9 +646,11 @@ impl ProjectLog {
             }
         }
         out.push_str("]}");
-        // Kept for the next save, unless something was logged while this one wrote.
+        // Kept for the next save, unless something was logged while this one wrote, or the text
+        // is long enough (a log near its limit runs to tens of MB) that holding a second copy of
+        // it until the next change costs more than writing it again.
         let mut s = self.state();
-        if s.generation == generation {
+        if s.generation == generation && out.len() - start <= WRITTEN_KEPT_BYTES {
             s.written = Some((generation, dir.map(str::to_string), out.get(start..).unwrap_or("").into()));
         }
         Ok(())

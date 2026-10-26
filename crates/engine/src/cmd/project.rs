@@ -31,18 +31,17 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"tool": "explore"|"select"|"selectPolygon"|"selectLasso"|"selectRadius"|"zoomIn"|"measure"|"measureArea"|"createPoint"|"createLine"|"createPolygon"|"editVertices"|"graphicPoint"|"graphicText"|"graphicLine"|"graphicCurve"|"graphicFreehand"|"graphicPolygon"|"graphicLasso"|"graphicRectangle"|"graphicCircle"|"graphicEllipse"|"graphicPicture"}"#),
         C::new("info.project", "Project Info", "Project", info).view().params(r#"{"nameFilter"?: string, "includeFields"?: bool}"#),
         C::new("info.commands", "List Commands", "Help", list).view(),
-        // The project log (#797): read, written out, emptied, turned on or off. Built with
-        // `.view()` though clearing and switching change what is saved (they mark the project as
-        // changed themselves): the log sits outside the undo history, so an undo step would
-        // restore nothing of it.
+        // The project log (#797): read, written out, emptied, turned on or off. Clearing and
+        // switching change what is saved, but take no undo step: the log sits outside the undo
+        // history, so one would restore nothing of it.
         C::new("project.log", "Project Log", "Project", log).view().params(
             r#"{"since"?: milliseconds since 1970 (UTC), "until"?: milliseconds, "command"?: "a command id, or the start of one (layer.)", "failed"?: bool (true: only those that failed; false: only those that succeeded), "limit"?: entries (default 100, the newest; 1 to 1000)} → {"entries": [{"at", "command", "params", "ok", "error"?, "millis"}], "count": matching, "total": in the log, "on": bool}"#,
         ),
         C::new("project.exportLog", "Export Project Log", "Project", export_log)
             .view()
             .params(r#"{"path": ".csv or .jsonl file", "format"?: "csv"|"jsonl" (default from the extension)}"#),
-        C::new("project.clearLog", "Clear Project Log", "Project", clear_log).view(),
-        C::new("project.logCommands", "Log Commands", "Project", log_commands).view().params(r#"{"on"?: bool (default: turn it the other way)}"#),
+        C::new("project.clearLog", "Clear Project Log", "Project", clear_log).outside_undo(),
+        C::new("project.logCommands", "Log Commands", "Project", log_commands).outside_undo().params(r#"{"on"?: bool (default: turn it the other way)}"#),
     ]
 }
 

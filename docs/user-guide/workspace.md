@@ -70,8 +70,9 @@ end goes into it alike: the app, scripts, the AI Assistant, the command line, Py
 - **Each entry:** `at` (when it started, in milliseconds since 1970, UTC; for a plugin's command
   that waited for its downloads, when its last run started), `command`, `params`, `ok`, `error`
   when it failed, and `millis`, how long it took.
-- **Outside undo:** undoing a command doesn't take its entry back. Steps that undo takes back
-  as one (a held arrow key nudging an element) are one entry, with the last one's parameters.
+- **Outside undo:** undoing a command doesn't take its entry back, and clearing the log or
+  turning it on or off is no undo step. Steps that undo takes back as one (a held arrow key
+  nudging an element) are one entry, with the last one's parameters.
 - **No secrets:** the parameters lose passwords, keys and tokens as History's Copy as code does,
   and so does an error's text; a document given as text (a map, a project) is kept as its size
   only, and an SQL `CREATE SECRET`'s options as `(…)`. A secret written as plain words, with no
@@ -82,10 +83,11 @@ end goes into it alike: the app, scripts, the AI Assistant, the command line, Py
 - **Saved with the project:** a shared `.rgis` carries its log (a package, `.rgispkg`, or a
   template doesn't). Clear it first if that isn't wanted (`project.clearLog`, which leaves its
   own entry), or turn logging off for a project (`project.logCommands {"on": false}`; what is
-  there stays). A project with no log saves as before. Saved into a folder, the local paths in
-  its parameters and errors are written relative to it, as the project's sources are; a path
-  with spaces in it that an error names is found whole when it is one of the entry's parameters,
-  and otherwise by its words.
+  there stays). A project with no log saves as before. A save that the log would take past
+  the 512 MB a project file opens with is refused, saying so: export the log, then clear it.
+  Saved into a folder, the local paths in its parameters and errors are written relative to
+  it, as the project's sources are; a path with spaces in it that an error names is found whole
+  when it is one of the entry's parameters, and otherwise by its words.
 
 From scripts: `project.log {"since"?, "until"?, "command"?, "failed"?, "limit"?}` lists entries,
 newest last (`command` is an id, or the start of one ending in a dot, `layer.`; `limit` is 100

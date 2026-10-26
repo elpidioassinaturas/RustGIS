@@ -47,8 +47,11 @@ pub struct CommandSpec {
     pub shortcut: &'static str,
     /// Parameter description for scripts and agents.
     pub params: &'static str,
-    /// Whether it changes the project (and so takes an undo snapshot).
+    /// Whether it changes the project (and so takes an undo snapshot, unless `undoable` is off).
     pub mutates: bool,
+    /// Whether its change is an undo step: off for one outside the undo history, which marks the
+    /// project as changed itself ([`CommandSpec::outside_undo`]).
+    pub undoable: bool,
     /// `None` = enabled; `Some(reason)` = disabled.
     pub enabled: fn(&Session) -> Option<&'static str>,
     pub run: fn(&mut Session, &Value) -> CmdResult,
@@ -71,7 +74,7 @@ impl CommandSpec {
     }
 
     pub const fn new(id: &'static str, label: &'static str, location: &'static str, run: fn(&mut Session, &Value) -> CmdResult) -> Self {
-        CommandSpec { id, label, location, shortcut: "", params: "{}", mutates: true, enabled: always, run }
+        CommandSpec { id, label, location, shortcut: "", params: "{}", mutates: true, undoable: true, enabled: always, run }
     }
     pub const fn key(mut self, s: &'static str) -> Self {
         self.shortcut = s;
@@ -84,6 +87,12 @@ impl CommandSpec {
     /// Doesn't change the project (no undo snapshot, not dirtying).
     pub const fn view(mut self) -> Self {
         self.mutates = false;
+        self
+    }
+    /// Changes the project, but outside its undo history (the project log, #797): no undo step,
+    /// which would restore nothing; the command marks the project as changed itself.
+    pub const fn outside_undo(mut self) -> Self {
+        self.undoable = false;
         self
     }
     pub const fn when(mut self, f: fn(&Session) -> Option<&'static str>) -> Self {
@@ -902,13 +911,19 @@ impl Session {
         // With logging off, only its own switching and clearing go in: nothing else is clipped
         // or redacted for nothing.
         let wanted = self.project.log.on() || matches!(id, "project.logCommands" | "project.clearLog");
-        if !pending && wanted && project_log::logs(self, id, params) {
-            let params = match step {
-                Some(label) => serde_json::json!({"step": label}),
-                None => project_log::kept_params(params),
-            };
-            let e = project_log::entry(id, params, &res, at, start.elapsed());
-            if joins && res.is_ok() { self.project.log.join_last(e) } else { self.project.log.push(e) }
+        if !pending && wanted {
+            // Outside `guarded`'s catch: logging is best-effort, so a panic in it leaves the
+            // command's result as it was, without an entry.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if project_log::logs(self, id, params) {
+                    let params = match step {
+                        Some(label) => serde_json::json!({"step": label}),
+                        None => project_log::kept_params(params),
+                    };
+                    let e = project_log::entry(id, params, &res, at, start.elapsed());
+                    if joins && res.is_ok() { self.project.log.join_last(e) } else { self.project.log.push(e) }
+                }
+            }));
         }
         res
     }
@@ -964,7 +979,7 @@ impl Session {
             return Err(e);
         }
         self.merge = merge;
-        let res = self.guarded(label, mutates, |s| run(s, params));
+        let res = self.guarded(label, mutates && spec.undoable, |s| run(s, params));
         // What was added, for the Data Sources pane's Recent list.
         if res.is_ok()
             && let Some(src) = sources::added_by(id, params)

@@ -746,7 +746,12 @@ impl Project {
         } else {
             Vec::new()
         };
-        let text = serde_json::to_string(self).map_err(|e| e.to_string()).and_then(|t| with_log(t, &self.log, dir.and_then(Path::to_str)));
+        let text = serde_json::to_string(self).map_err(|e| e.to_string()).and_then(|t| {
+            let bare = t.len();
+            let t = with_log(t, &self.log, dir.and_then(Path::to_str))?;
+            log_fits(bare, t.len())?;
+            Ok(t)
+        });
         if !originals.is_empty() {
             for ((p, _), original) in self.file_paths_mut().into_iter().zip(originals) {
                 if let Some(original) = original {
@@ -880,4 +885,18 @@ fn unique_names<'a>(names: impl Iterator<Item = &'a mut String>) {
             }
         }
     }
+}
+
+/// Refuses a project text that its log (#797) takes past [`MAX_BYTES`], which would save but not
+/// open again; `bare` is the text's length without the log. A project over it by itself is not
+/// the log's doing, and saves as before.
+pub(crate) fn log_fits(bare: usize, with_log: usize) -> Result<(), String> {
+    if bare as u64 > MAX_BYTES || with_log as u64 <= MAX_BYTES {
+        return Ok(());
+    }
+    Err(format!(
+        "with its log the project comes to {} MB, more than a project file opens with ({} MB): export the log (project.exportLog), then clear it (project.clearLog)",
+        with_log.div_ceil(1 << 20),
+        MAX_BYTES >> 20
+    ))
 }
