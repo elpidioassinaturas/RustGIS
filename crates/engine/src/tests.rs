@@ -17758,6 +17758,8 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let kept = crate::project_log::kept_params(&json!({"sql": sql}));
     assert_eq!(kept["sql"], json!("CREATE OR REPLACE SECRET s3 (…); SELECT 1 / 2"));
     assert_eq!(crate::project_log::sql_secrets_removed("create table t (a int)"), "create table t (a int)");
+    assert_eq!(crate::project_log::sql_secrets_removed("create table secret (a int)"), "create table secret (a int)");
+    assert_eq!(crate::project_log::sql_secrets_removed("CREATE PERSISTENT SECRET (TYPE s3, SECRET 'x')"), "CREATE PERSISTENT SECRET (…)");
     // Steps merged into one undo step (a held arrow key) are one entry, with the last parameters.
     let n = s.project.log.len();
     for name in ["Nudged 1", "Nudged 2", "Nudged 3"] {

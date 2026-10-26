@@ -202,7 +202,10 @@ pub(crate) fn sql_secrets_removed(t: &str) -> String {
         // The statement's head, to its `(`: `create [or replace] [persistent] secret [name] (`.
         let Some(open) = lower.get(after..).and_then(|r| r.find(['(', ';'])).map(|i| i + after) else { break };
         let head = lower.get(after..open).unwrap_or("");
-        if !lower.get(open..).is_some_and(|r| r.starts_with('(')) || !head.split_whitespace().any(|w| w == "secret") {
+        // The object's kind comes first (`SECRET`, after `OR REPLACE`, `PERSISTENT` or
+        // `TEMPORARY`): a table named `secret` isn't one.
+        let kind = head.split_whitespace().find(|w| !matches!(*w, "or" | "replace" | "persistent" | "temporary" | "temp"));
+        if !lower.get(open..).is_some_and(|r| r.starts_with('(')) || kind != Some("secret") {
             out.push_str(t.get(from..after).unwrap_or(""));
             from = after;
             continue;
