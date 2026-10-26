@@ -428,7 +428,7 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 if p.get("bbox").is_some_and(|b| !b.is_null() && *b != "full") && asked.is_none() {
-                    let why = if area.is_none() { "an area across the antimeridian" } else { "the service can't be asked for an area" };
+                    let why = if area.is_none() { "an area across the antimeridian" } else { "its request can't carry an area" };
                     s.notify(format!("{name}: {why}, so the whole layer is asked for"), false);
                 }
                 let max = crate::render::rustgis_tiles::cache::MAX_DOWNLOAD;

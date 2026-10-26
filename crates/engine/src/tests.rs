@@ -8761,7 +8761,7 @@ fn service_features_asked_for_over_an_area() {
     assert_eq!(&boxes[2..], [None, None, None, None]);
     let notes: Vec<&str> = s.notices.iter().map(|n| n.text.as_str()).collect();
     assert!(notes.iter().any(|n| n.starts_with("M4: an area across the antimeridian")), "{notes:?}");
-    assert!(notes.iter().any(|n| n.starts_with("M5: the service can't be asked for an area")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.starts_with("M5: its request can't carry an area")), "{notes:?}");
     // Asked for the box given, the map goes to it, not to the whole layer's bounds.
     s.run("service.add", &json!({"url": url, "layer": "CGMAT:munic", "text": caps("2.0.0"), "name": "Piauí", "bbox": piaui})).unwrap();
     let v = view_lonlat(&s);

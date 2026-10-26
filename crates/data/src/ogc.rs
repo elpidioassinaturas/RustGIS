@@ -743,7 +743,7 @@ pub fn features_in_area(url: &str, area: [f64; 4]) -> Option<String> {
         }
     } else if is_arcgis_query(url) {
         format!("geometry={w},{s},{e},{n}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects")
-    } else if base(url).trim_end_matches('/').ends_with("/items") {
+    } else if base(url).trim_end_matches('/').to_ascii_lowercase().ends_with("/items") {
         format!("bbox={w},{s},{e},{n}")
     } else {
         return None;

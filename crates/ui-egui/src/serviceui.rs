@@ -82,7 +82,7 @@ pub(crate) fn add_layer_from(
         let asked = area.and_then(|a| ogc::features_in_area(items, a));
         if area.is_some() && asked.is_none() {
             app.session.notify(
-                crate::i18n::fmt("{name}: the service can't be asked for an area, so the whole layer is asked for", &[("name", &title)]),
+                crate::i18n::fmt("{name}: its request can't carry an area, so the whole layer is asked for", &[("name", &title)]),
                 false,
             );
         }
