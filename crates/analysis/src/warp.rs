@@ -341,6 +341,10 @@ impl Grid {
         let max_x = origin.0 + ((x1 - origin.0) / cx).ceil() * cx;
         let min_y = origin.1 + ((y0 - origin.1) / cy).floor() * cy;
         let max_y = origin.1 + ((y1 - origin.1) / cy).ceil() * cy;
+        // An origin or a cell so far from the area that the snapped corners overflow.
+        if !([min_x, max_x, min_y, max_y].iter().all(|v| v.is_finite()) && min_x < max_x && min_y < max_y) {
+            return Err("the origin and cellSize can't make a grid over this area".into());
+        }
         let (w, h) = (((max_x - min_x) / cx).round().max(1.0), ((max_y - min_y) / cy).round().max(1.0));
         if w * h > MAX_SAMPLES as f64 {
             return Err(format!(
@@ -634,6 +638,9 @@ fn aggregated(
     let mut bottom: Vec<Option<(f64, f64)>> = vec![None; ow + 1];
     row_positions(&x_at, g.max_y, source, &mut nodes, &mut top);
     let mut values: Vec<Vec<f32>> = vec![Vec::new(); canvas.nb];
+    // Each value's weight: a colour counts as much as its pixel is opaque, as bilinear weighs it.
+    let mut weights: Vec<Vec<f32>> = vec![Vec::new(); canvas.nb];
+    let alpha = canvas.alpha_src;
     let mut cell = vec![f32::NAN; canvas.nb];
     for oy in 0..oh {
         row_positions(&x_at, g.max_y - (oy + 1) as f64 * g.cell_y, source, &mut nodes, &mut bottom);
@@ -651,6 +658,7 @@ fn aggregated(
             let past = |hi: f64, n: usize| ((hi - 0.5).floor() + 1.0).clamp(0.0, n as f64) as usize;
             let (i0, i1, j0, j1) = (first(c0), past(c1, w), first(r0), past(r1, h));
             values.iter_mut().for_each(Vec::clear);
+            weights.iter_mut().for_each(Vec::clear);
             let mut inside = false;
             for j in j0..j1 {
                 for i in i0..i1 {
@@ -659,17 +667,19 @@ fn aggregated(
                     }
                     inside = true;
                     let idx = j * w + i;
-                    for (b, v) in values.iter_mut().enumerate() {
+                    let opacity = alpha.and_then(|a| r.bands.get(a)).and_then(|band| band.data.get(idx)).copied().unwrap_or(0.0);
+                    for (b, (v, k)) in values.iter_mut().zip(weights.iter_mut()).enumerate() {
                         if let Some(x) = r.bands.get(b).and_then(|band| band.data.get(idx)).filter(|x| r.is_valid(**x)) {
                             v.push(*x);
+                            k.push(if alpha.is_some_and(|a| a != b) { opacity } else { 1.0 });
                         }
                     }
                 }
             }
             let at = oy * ow + ox;
             if inside {
-                for (o, v) in cell.iter_mut().zip(values.iter_mut()) {
-                    *o = if mode { mode_of(v) } else { mean_of(v, round) };
+                for ((o, v), k) in cell.iter_mut().zip(values.iter_mut()).zip(&weights) {
+                    *o = if mode { mode_of(v) } else { mean_of(v, k, round) };
                 }
             } else {
                 // A grid finer than the raster: the pixel under the cell's centre.
@@ -701,12 +711,14 @@ fn holds(q: &[(f64, f64); 4], p: (f64, f64)) -> bool {
     side(a, b) >= 0.0 && side(b, c) > 0.0 && side(c, d) > 0.0 && side(d, a) >= 0.0
 }
 
-/// The mean of `v`, rounded for a whole-number pixel type; NaN when it is empty.
-fn mean_of(v: &[f32], round: bool) -> f32 {
-    if v.is_empty() {
+/// The mean of `v`, each value weighed by its `k` (a colour by its pixel's alpha), rounded for a
+/// whole-number pixel type; NaN when nothing weighs (empty, or all see-through).
+fn mean_of(v: &[f32], k: &[f32], round: bool) -> f32 {
+    let (sum, weight) = v.iter().zip(k).fold((0.0f64, 0.0f64), |(s, w), (x, k)| (s + f64::from(*x) * f64::from(*k), w + f64::from(*k)));
+    if weight <= 1e-12 {
         return f32::NAN;
     }
-    let m = (v.iter().map(|x| f64::from(*x)).sum::<f64>() / v.len() as f64) as f32;
+    let m = (sum / weight) as f32;
     if round { m.round() } else { m }
 }
 
@@ -716,7 +728,7 @@ fn mode_of(v: &mut [f32]) -> f32 {
     let (mut best, mut best_n) = (f32::NAN, 0usize);
     let mut k = 0;
     while let Some(x) = v.get(k).copied() {
-        let n = v.get(k..).map_or(0, |rest| rest.iter().take_while(|y| **y == x).count()).max(1);
+        let n = v.iter().skip(k).take_while(|y| **y == x).count();
         // Sorted ascending: a later value only wins with more.
         if n > best_n {
             (best, best_n) = (x, n);
@@ -942,6 +954,21 @@ mod tests {
         assert_eq!(values(&avg)[..2], [Some(4.0), Some(6.0)]);
     }
 
+    /// Average weighs a colour image's colours by alpha, as bilinear does: a see-through pixel
+    /// takes no colour into its cell; the alpha itself is the plain mean.
+    #[test]
+    fn average_weighs_colours_by_alpha() {
+        // 2 × 2 pixels into one cell: opaque red on the left, see-through black on the right.
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 2.0, pixel_width: 1.0, pixel_height: -1.0 };
+        let half = |a: f32, b: f32| vec![a, b, a, b];
+        let bands = vec![half(255.0, 0.0), half(0.0, 0.0), half(0.0, 0.0), half(255.0, 0.0)];
+        let crs = Crs::from_epsg(32613).unwrap();
+        let r = Raster::new("rgba", 2, 2, bands, gt, crs, None, ColorHint::Rgb { alpha: true }, "UInt8").unwrap();
+        let g = Grid::snapped(r.crs, [0.0, 0.0, 2.0, 2.0], (2.0, 2.0), (0.0, 0.0)).unwrap();
+        let out = project(&r, &g, Method::Average, "a".into()).unwrap();
+        assert_eq!([0, 1, 2, 3].map(|b| out.value(b, 0, 0)), [Some(255.0), Some(0.0), Some(0.0), Some(128.0)]);
+    }
+
     /// A pixel centre on the edge between cells is in exactly one of them, and a grid finer than
     /// the raster takes the pixel under each cell's centre.
     #[test]
@@ -996,6 +1023,9 @@ mod tests {
             assert!(Grid::snapped(crs, [0.0, 0.0, 10.0, 10.0], bad, (0.0, 0.0)).is_err(), "{bad:?}");
         }
         assert!(Grid::snapped(crs, [10.0, 0.0, 0.0, 10.0], (1.0, 1.0), (0.0, 0.0)).is_err());
+        // An origin so far away that the snapped corners overflow is refused, not a 1 × 1 grid.
+        let far = Grid::snapped(crs, [-1e308, 0.0, 0.0, 10.0], (1e300, 1.0), (1e308, 0.0)).unwrap_err();
+        assert!(far.contains("can't make a grid"), "{far}");
         assert!(Grid::snapped(crs, [0.0, 0.0, 10.0, 10.0], (1.0, 1.0), (f64::NAN, 0.0)).is_err());
     }
 

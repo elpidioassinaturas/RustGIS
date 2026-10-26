@@ -361,8 +361,9 @@ fn project_raster(s: &mut Session, p: &Value) -> CmdResult {
             let origin = match p.get("origin") {
                 None | Some(Value::Null) => (0.0, 0.0),
                 Some(v) => {
-                    let n: Vec<f64> = v.as_array().map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
-                    match n.as_slice() {
+                    // Every entry a number: one that isn't refuses the origin rather than drop out.
+                    let n: Option<Vec<f64>> = v.as_array().map(|a| a.iter().map(Value::as_f64).collect()).unwrap_or_default();
+                    match n.as_deref().unwrap_or_default() {
                         [x, y] if x.is_finite() && y.is_finite() => (*x, *y),
                         _ => return Err("origin is [x, y] in the output's units".into()),
                     }

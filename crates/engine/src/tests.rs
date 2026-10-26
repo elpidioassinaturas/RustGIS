@@ -17660,6 +17660,10 @@ fn a_raster_projected_onto_a_chosen_grid() {
     // Another origin moves the corners with it.
     let moved =
         s.run("raster.project", &json!({"layer": "the", "crs": 31983, "cellSize": 200, "origin": [50, 50], "name": "moved"})).unwrap();
+    // An origin with anything but two numbers is refused, not read from the numbers left.
+    for bad in [json!(["x", 1, 2]), json!([0, 0, "EPSG"]), json!([1])] {
+        assert!(s.run("raster.project", &json!({"layer": "the", "crs": 31983, "cellSize": 200, "origin": bad})).is_err(), "{bad}");
+    }
     assert_eq!((moved["corner"][0].as_f64().unwrap() - 50.0).rem_euclid(200.0), 0.0, "{moved}");
 
     // Onto that grid exactly, by nearest neighbour (the default).
