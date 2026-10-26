@@ -695,12 +695,14 @@ fn aggregated(
             }
             let at = oy * ow + ox;
             if inside {
-                for ((o, v), k) in cell.iter_mut().zip(values.iter_mut()).zip(&weights) {
+                for (b, ((o, v), k)) in cell.iter_mut().zip(values.iter_mut()).zip(&weights).enumerate() {
                     *o = if mode {
-                        // The most frequent colour among the pixels that show: see-through ones
-                        // count for nothing, as in the mean.
-                        let mut shown: Vec<f32> = v.iter().zip(k).filter(|(_, k)| **k > 0.0).map(|(x, _)| *x).collect();
-                        mode_of(&mut shown)
+                        // The most frequent colour, and alpha, among the pixels that show:
+                        // see-through ones count for nothing, as in the mean. A cell where none
+                        // shows takes the mode of all (see-through, alpha 0).
+                        let shows = |(x, k): (&f32, &f32)| if alpha == Some(b) { *x > 0.0 } else { *k > 0.0 };
+                        let mut shown: Vec<f32> = v.iter().zip(k).filter(|p| shows(*p)).map(|(x, _)| *x).collect();
+                        if shown.is_empty() { mode_of(v) } else { mode_of(&mut shown) }
                     } else {
                         mean_of(v, k, round)
                     };
@@ -998,7 +1000,7 @@ mod tests {
         let r = Raster::new("rgba", 4, 1, bands, wide, crs, None, ColorHint::Rgb { alpha: true }, "UInt8").unwrap();
         let g = Grid::snapped(r.crs, [0.0, 0.0, 4.0, 1.0], (4.0, 1.0), (0.0, 0.0)).unwrap();
         let out = project(&r, &g, Method::Mode, "m".into()).unwrap();
-        assert_eq!([0, 1, 2].map(|b| out.value(b, 0, 0)), [Some(255.0), Some(0.0), Some(0.0)]);
+        assert_eq!([0, 1, 2, 3].map(|b| out.value(b, 0, 0)), [Some(255.0), Some(0.0), Some(0.0), Some(255.0)], "red, and showing");
     }
 
     /// A pixel centre on the edge between cells is in exactly one of them, and a grid finer than
