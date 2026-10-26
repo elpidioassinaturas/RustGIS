@@ -705,9 +705,9 @@ fn wfs(url: &str, root: &Node) -> Service {
 // ---------------------------------------------------------------------------------------------
 // Features over an area
 
-/// Query parameters that already filter a request by place or by feature: an address carrying
-/// one is left as it is.
-const SPATIAL_KEYS: [&str; 6] = ["bbox", "filter", "cql_filter", "featureid", "resourceid", "geometry"];
+/// Query parameters that already filter a request by place or by feature, or that name another
+/// coordinate system for a box (OGC API's `bbox-crs`): an address carrying one is left as it is.
+const SPATIAL_KEYS: [&str; 7] = ["bbox", "bbox-crs", "filter", "cql_filter", "featureid", "resourceid", "geometry"];
 
 /// An [`Offer::Features`] address that asks only for the features crossing a longitude/latitude
 /// `area` (west, south, east, north), in each service's own terms:
@@ -2413,6 +2413,8 @@ mod tests {
         assert_eq!(features_in_area("https://api.example.org/collections/a/items", [170.0, -20.0, -170.0, -10.0]), None);
         assert_eq!(features_in_area("https://api.example.org/collections/a/items", [-200.0, -20.0, 10.0, 95.0]), None);
         assert_eq!(features_in_area("https://api.example.org/collections/a/items?bbox=1,2,3,4", piaui), None);
+        let other_crs = "https://api.example.org/collections/a/items?bbox-crs=http://www.opengis.net/def/crs/EPSG/0/31983";
+        assert_eq!(features_in_area(other_crs, piaui), None);
         assert_eq!(features_in_area(&format!("{}&CQL_FILTER=uf%3D'PI'", offered("https://x.org/wfs", v11)), piaui), None);
         assert_eq!(features_in_area("https://x.org/data.geojson", piaui), None);
     }
