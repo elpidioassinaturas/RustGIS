@@ -64,7 +64,8 @@ end goes into it alike: the app, scripts, the AI Assistant, the command line, Py
   reading features, moving the view) is left out. A command run by another (a script's lines, a
   model's steps) is inside its parent's entry. Opening or making a project goes into the log of
   the project it opens or makes; one that fails to open stays in the log of the project open.
-  A plugin can't empty the log or turn it off.
+  A plugin can't empty the log or turn it off; it can read it (`project.log`), whose
+  entries hold no secrets.
 - **Each entry:** `at` (when it started, in milliseconds since 1970, UTC), `command`, `params`,
   `ok`, `error` when it failed, and `millis`, how long it took.
 - **Outside undo:** undoing a command doesn't take its entry back.

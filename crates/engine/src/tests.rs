@@ -17774,6 +17774,11 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let mut made = world();
     made.run("project.new", &json!({"name": "Fresh"})).unwrap();
     assert_eq!(made.project.log.entries().iter().map(|e| e.command.as_str()).collect::<Vec<_>>(), ["project.new"]);
+    // Cleared while off, it still says so.
+    s.run("project.logCommands", &json!({"on": false})).unwrap();
+    s.run("project.clearLog", &Value::Null).unwrap();
+    assert_eq!(commands(&s), ["project.clearLog"]);
+    s.run("project.logCommands", &json!({"on": true})).unwrap();
     // Capped: the oldest go first.
     for i in 0..LOG_LIMIT + 5 {
         s.project.log.push(LogEntry { at: i as u64, command: "x".into(), params: Value::Null, ok: true, error: None, millis: 0 });

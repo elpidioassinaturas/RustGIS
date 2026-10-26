@@ -891,7 +891,10 @@ impl Session {
         };
         let (at, start) = (project_log::now_ms(), web_time::Instant::now());
         let res = self.run_command(id, params);
-        if project_log::logs(self, id, params) {
+        // A plugin's command waiting for its fetches answers `pending` and runs again when they
+        // land: logged then, once.
+        let pending = res.as_ref().is_ok_and(|v| v.get("pending").and_then(Value::as_bool) == Some(true));
+        if !pending && project_log::logs(self, id, params) {
             let params = match step {
                 Some(label) => serde_json::json!({"step": label}),
                 None => project_log::kept_params(params),
