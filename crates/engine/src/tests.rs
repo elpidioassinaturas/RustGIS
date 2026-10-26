@@ -17731,6 +17731,20 @@ fn the_project_log_records_each_command_run_on_the_project() {
         "{}",
         last.command.len()
     );
+    // Nothing in a file's log keeps the project from opening: a bad entry is skipped, a log that
+    // isn't one is empty; a secret it holds is taken out as it is read.
+    let log: crate::project::ProjectLog = serde_json::from_value(json!({"entries": [7, {"at": "x"}, {"at": 1, "command": "a", "ok": true, "params": {"url": "https://x.org/a?token=S3CRET"}, "error": "https://x.org/b?token=S3CRET: refused"}]})).unwrap();
+    let read = log.entries();
+    assert_eq!(read.len(), 1);
+    assert!(!serde_json::to_string(&read).unwrap().contains("S3CRET"), "{read:?}");
+    for odd in [json!(7), json!("x"), json!([1, 2]), json!({"entries": 7, "off": "yes"}), json!(null)] {
+        let log: crate::project::ProjectLog = serde_json::from_value(odd.clone()).unwrap();
+        assert!(log.is_empty() && log.on(), "{odd}");
+    }
+    let opened = Project::from_json(r#"{"name": "A", "maps": [], "active_map": 0, "log": {"entries": [{"at": "never"}]}}"#).unwrap();
+    assert!(opened.log.is_empty());
+    // A .json path is refused: JSON Lines isn't one JSON document.
+    assert!(s.run("project.exportLog", &json!({"path": "log.json"})).is_err());
     // Capped: the oldest go first.
     for i in 0..LOG_LIMIT + 5 {
         s.project.log.push(LogEntry { at: i as u64, command: "x".into(), params: Value::Null, ok: true, error: None, millis: 0 });

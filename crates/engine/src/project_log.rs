@@ -46,19 +46,27 @@ pub(crate) fn kept_params(params: &Value) -> Value {
     Value::String(format!("{}…", text.chars().take(LOG_PARAMS_BYTES / 2).collect::<String>()))
 }
 
-/// An entry read from a file, bounded as a new one is: its command, parameters and error clipped
-/// (its secrets were taken out when it was written).
+/// An entry read from a file, kept as a new one is: its command clipped, its parameters and error
+/// clipped and without secrets (a file may hold what RustGIS never wrote, and a plugin may read
+/// the log).
 pub(crate) fn bounded(mut e: LogEntry) -> LogEntry {
     if e.command.chars().nth(200).is_some() {
         e.command = e.command.chars().take(200).collect();
     }
-    if serde_json::to_vec(&e.params).map_or(0, |b| b.len()) > LOG_PARAMS_BYTES {
-        e.params = kept_params(&e.params);
-    }
-    if let Some(t) = e.error.as_mut().filter(|t| t.chars().nth(LOG_ERROR_CHARS).is_some()) {
-        *t = format!("{}…", t.chars().take(LOG_ERROR_CHARS).collect::<String>());
-    }
+    e.params = kept_params(&e.params);
+    e.error = e.error.as_deref().map(kept_error);
     e
+}
+
+/// An error as the log keeps it: clipped to [`LOG_ERROR_CHARS`] before its secrets are taken out,
+/// so a long one costs little (a secret cut short still follows its name).
+fn kept_error(e: &str) -> String {
+    let e = if e.chars().nth(LOG_ERROR_CHARS).is_some() {
+        format!("{}…", e.chars().take(LOG_ERROR_CHARS).collect::<String>())
+    } else {
+        e.to_string()
+    };
+    crate::cmd::history::redacted_text(&e)
 }
 
 /// The longest text kept as it is that reads as a document (it starts with `{`, `[` or `<`).
@@ -72,7 +80,7 @@ fn clip(v: &Value, chars: usize, depth: usize) -> Value {
         Value::String(t) if t.trim_start().starts_with(['{', '[', '<']) && t.chars().nth(DOCUMENT_CHARS).is_some() => {
             Value::String(format!("(a document of {} characters)", t.chars().count()))
         }
-        Value::String(t) if t.chars().count() > chars => Value::String(format!("{}…", t.chars().take(chars).collect::<String>())),
+        Value::String(t) if t.chars().nth(chars).is_some() => Value::String(format!("{}…", t.chars().take(chars).collect::<String>())),
         Value::Array(a) if depth < 8 => {
             let mut out: Vec<Value> = a.iter().take(LOG_LIST_ITEMS).map(|x| clip(x, chars, depth + 1)).collect();
             if a.len() > LOG_LIST_ITEMS {
@@ -91,16 +99,7 @@ fn clip(v: &Value, chars: usize, depth: usize) -> Value {
 /// The entry of command `id`, which started at `at` and took `took`; its error without secrets,
 /// clipped to [`LOG_ERROR_CHARS`].
 pub(crate) fn entry(id: &str, params: Value, res: &CmdResult, at: u64, took: std::time::Duration) -> LogEntry {
-    // Clipped before its secrets are taken out, so a long error costs little; a secret cut short
-    // still follows its name.
-    let error = res.as_ref().err().map(|e| {
-        let e = if e.chars().count() > LOG_ERROR_CHARS {
-            format!("{}…", e.chars().take(LOG_ERROR_CHARS).collect::<String>())
-        } else {
-            e.clone()
-        };
-        crate::cmd::history::redacted_text(&e)
-    });
+    let error = res.as_ref().err().map(|e| kept_error(e));
     LogEntry {
         at,
         command: id.chars().take(200).collect(),

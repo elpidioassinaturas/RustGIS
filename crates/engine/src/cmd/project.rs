@@ -31,8 +31,10 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"tool": "explore"|"select"|"selectPolygon"|"selectLasso"|"selectRadius"|"zoomIn"|"measure"|"measureArea"|"createPoint"|"createLine"|"createPolygon"|"editVertices"|"graphicPoint"|"graphicText"|"graphicLine"|"graphicCurve"|"graphicFreehand"|"graphicPolygon"|"graphicLasso"|"graphicRectangle"|"graphicCircle"|"graphicEllipse"|"graphicPicture"}"#),
         C::new("info.project", "Project Info", "Project", info).view().params(r#"{"nameFilter"?: string, "includeFields"?: bool}"#),
         C::new("info.commands", "List Commands", "Help", list).view(),
-        // The project log (#797): read, written out, emptied, turned on or off. Not undoable
-        // edits of the project: the log sits outside its undo history.
+        // The project log (#797): read, written out, emptied, turned on or off. Built with
+        // `.view()` though clearing and switching change what is saved (they mark the project as
+        // changed themselves): the log sits outside the undo history, so an undo step would
+        // restore nothing of it.
         C::new("project.log", "Project Log", "Project", log).view().params(
             r#"{"since"?: milliseconds since 1970 (UTC), "until"?: milliseconds, "command"?: "a command id, or the start of one (layer.)", "failed"?: bool (only those that failed, or succeeded), "limit"?: entries (default 100, the newest; at most 10000)} → {"entries": [{"at", "command", "params", "ok", "error"?, "millis"}], "count": matching, "total": in the log, "on": bool}"#,
         ),
@@ -94,8 +96,8 @@ fn export_log(s: &mut Session, p: &Value) -> CmdResult {
     let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
     let format = match ps(p, "format").map(str::to_ascii_lowercase).or(ext).as_deref() {
         Some("csv") => "csv",
-        Some("jsonl") | Some("ndjson") | Some("json") => "jsonl",
-        _ => return Err("format is csv or jsonl (or give a .csv or .jsonl path)".into()),
+        Some("jsonl") | Some("ndjson") => "jsonl",
+        _ => return Err("format is csv or jsonl (or give a .csv or .jsonl path: JSON Lines isn't one JSON document)".into()),
     };
     let mut text = String::new();
     let mut n = 0usize;

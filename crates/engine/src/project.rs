@@ -203,38 +203,110 @@ pub struct LogEntry {
     pub millis: u64,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize)]
 struct LogState {
     /// Logging turned off (`project.logCommands`); on by default.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     off: bool,
-    /// Oldest first; the oldest go first past [`LOG_LIMIT`], without moving the rest. Read from a
-    /// file one entry at a time, keeping its last [`LOG_LIMIT`], each bounded as a new one is.
-    #[serde(default, deserialize_with = "last_entries")]
+    /// Oldest first; the oldest go first past [`LOG_LIMIT`], without moving the rest.
     entries: std::collections::VecDeque<LogEntry>,
 }
 
-/// A file's log entries, read one at a time (a project file is hostile input): only the last
-/// [`LOG_LIMIT`] are kept, each clipped as a new entry is ([`crate::project_log::bounded`]).
-fn last_entries<'de, D: serde::Deserializer<'de>>(d: D) -> Result<std::collections::VecDeque<LogEntry>, D::Error> {
-    struct Last;
-    impl<'de> serde::de::Visitor<'de> for Last {
-        type Value = std::collections::VecDeque<LogEntry>;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a list of log entries")
+/// Values a file's log can hold that aren't what it should be: read as nothing (an empty log, no
+/// entries), so that nothing in the log keeps a project from opening.
+macro_rules! anything_else_is_default {
+    () => {
+        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(Default::default())
         }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-            let mut out = std::collections::VecDeque::new();
-            while let Some(e) = seq.next_element::<LogEntry>()? {
-                out.push_back(crate::project_log::bounded(e));
-                if out.len() > LOG_LIMIT {
-                    out.pop_front();
-                }
+        fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+    };
+}
+
+impl<'de> Deserialize<'de> for LogState {
+    /// A file's log (a project file is hostile input), read so that nothing in it keeps the
+    /// project from opening: its entries one at a time ([`LogEntries`]); anything but an object
+    /// is an empty log.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct State;
+        impl<'de> serde::de::Visitor<'de> for State {
+            type Value = LogState;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a project log")
             }
-            Ok(out)
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<LogState, A::Error> {
+                let mut s = LogState::default();
+                while let Some(k) = map.next_key::<String>()? {
+                    match k.as_str() {
+                        "off" => s.off = map.next_value::<serde_json::Value>()?.as_bool().unwrap_or(false),
+                        "entries" => s.entries = map.next_value_seed(LogEntries)?,
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(s)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<LogState, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(LogState::default())
+            }
+            anything_else_is_default!();
         }
+        d.deserialize_any(State)
     }
-    d.deserialize_seq(Last)
+}
+
+/// A file's log entries, read one at a time: only the last [`LOG_LIMIT`] are kept, each bounded
+/// and without secrets as a new entry is ([`crate::project_log::bounded`]); one that doesn't read
+/// as an entry (a file edited by hand, another version's) is skipped.
+struct LogEntries;
+
+impl<'de> serde::de::DeserializeSeed<'de> for LogEntries {
+    type Value = std::collections::VecDeque<LogEntry>;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for LogEntries {
+    type Value = std::collections::VecDeque<LogEntry>;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a list of log entries")
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut out = std::collections::VecDeque::new();
+        while let Some(v) = seq.next_element::<serde_json::Value>()? {
+            let Ok(e) = serde_json::from_value::<LogEntry>(v) else { continue };
+            out.push_back(crate::project_log::bounded(e));
+            if out.len() > LOG_LIMIT {
+                out.pop_front();
+            }
+        }
+        Ok(out)
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        while map.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
+        Ok(Default::default())
+    }
+    anything_else_is_default!();
 }
 
 /// A project's log (#797): one entry for each command run on it, from any front end, kept in
@@ -344,7 +416,7 @@ impl Serialize for ProjectLog {
 }
 
 impl<'de> Deserialize<'de> for ProjectLog {
-    /// A file's log, its last [`LOG_LIMIT`] entries ([`last_entries`]).
+    /// A file's log, its last [`LOG_LIMIT`] entries ([`LogEntries`]).
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         Ok(ProjectLog(std::sync::Arc::new(Mutex::new(LogState::deserialize(d)?))))
     }
