@@ -16264,7 +16264,7 @@ fn text_elements_take_a_font_family() {
     for (name, f) in [("\"serif\"", FontFamily::Serif), ("\"Serif\"", FontFamily::Serif), ("\"sans\"", FontFamily::Sans)] {
         assert_eq!(serde_json::from_str::<FontFamily>(name).unwrap(), f);
     }
-    for bad in [json!("comic"), json!(2)] {
+    for bad in [json!("  "), json!(2), json!(["serif"])] {
         let err = s.run("layout.update", &json!({"element": title, "font": bad})).unwrap_err();
         assert!(err.contains("font"), "{err}");
         assert!(s.run("layout.addElement", &json!({"kind": "text", "font": bad})).is_err());
@@ -16278,6 +16278,70 @@ fn text_elements_take_a_font_family() {
     // The page draws either way.
     assert!(s.run("layout.update", &json!({"element": title, "text": "Mapa do Brasil", "bold": true, "italic": true})).is_ok());
     assert!(!crate::cmd::layout::layout_bytes(&mut s, 0, false, 72.0, false).unwrap().is_empty());
+}
+
+/// A text element takes any installed font family by name (#762), kept by name with a generic
+/// fallback: drawn in the family where it is installed, else in the fallback, and said so. The
+/// name is written only when set; sans or serif clears it; a fallback goes with a name only.
+#[test]
+fn text_elements_take_an_installed_font_family_by_name() {
+    use rustgis_map::layout::{ElementKind, FontFamily};
+    let mut s = Session::new(sample::world_project());
+    s.run("layout.new", &json!({"name": "Type"})).unwrap();
+    let font = |s: &Session, id: u32| match s.project.layouts[0].element(id).map(|e| &e.kind) {
+        Some(ElementKind::Text { font, font_name, .. }) => (*font, font_name.clone()),
+        _ => panic!("a text element"),
+    };
+    // A family this computer hasn't: kept as given, drawn in its fallback (the sans unless asked),
+    // and said.
+    let r = s.run("layout.addElement", &json!({"kind": "text", "text": "Brasil", "font": " No Such Family 762 "})).unwrap();
+    let id = r["element"].as_u64().unwrap() as u32;
+    assert_eq!(font(&s, id), (FontFamily::Sans, Some("No Such Family 762".to_string())));
+    assert!(
+        r["warning"].as_str().is_some_and(|w| w.starts_with("No Such Family 762 is not installed") && w.ends_with("sans-serif")),
+        "{r}"
+    );
+    let r = s.run("layout.update", &json!({"element": id, "fallback": "serif"})).unwrap();
+    assert_eq!(font(&s, id), (FontFamily::Serif, Some("No Such Family 762".to_string())));
+    let drawn = if rustgis_render::fonts::serif_available() { "drawn in the serif" } else { "drawn in the sans-serif" };
+    assert!(r["warning"].as_str().is_some_and(|w| w.ends_with(drawn)), "{r}");
+    // Named again, it keeps that fallback; another change says nothing of it.
+    s.run("layout.update", &json!({"element": id, "font": "No Such Family 762"})).unwrap();
+    assert_eq!(font(&s, id).0, FontFamily::Serif);
+    assert_eq!(s.run("layout.update", &json!({"element": id, "bold": true})).unwrap(), Value::Null);
+    // Kept through a save, as a name; a layout saved before has none.
+    let saved = serde_json::to_string(&s.project.layouts[0]).unwrap();
+    assert!(saved.contains(r#""font_name":"No Such Family 762""#) && saved.contains(r#""font":"Serif""#), "{saved}");
+    let back: rustgis_map::layout::Layout = serde_json::from_str(&saved).unwrap();
+    assert!(back.element(id).is_some_and(|e| matches!(&e.kind, ElementKind::Text { font_name: Some(n), .. } if n == "No Such Family 762")));
+    let old = saved.replace(r#","font_name":"No Such Family 762""#, "");
+    let back: rustgis_map::layout::Layout = serde_json::from_str(&old).unwrap();
+    assert!(back.element(id).is_some_and(|e| matches!(&e.kind, ElementKind::Text { font_name: None, .. })));
+    // The page draws in the fallback, and the SVG names the family first.
+    assert!(!crate::cmd::layout::layout_bytes(&mut s, 0, false, 72.0, false).unwrap().is_empty());
+    let svg = rustgis_render::svg::layout_svg(&s.project.layouts[0], &mut s.project.maps, 72.0, &Default::default()).unwrap();
+    assert!(svg.contains(r#"font-family="&apos;No Such Family 762&apos;, serif""#), "{svg}");
+    // A generic family clears the name; a fallback then has nothing to fall back from.
+    s.run("layout.update", &json!({"element": id, "font": "sans"})).unwrap();
+    assert_eq!(font(&s, id), (FontFamily::Sans, None));
+    assert!(!serde_json::to_string(&s.project.layouts[0]).unwrap().contains("font"), "nothing written for the sans");
+    for bad in [json!({"fallback": "serif"}), json!({"font": "serif", "fallback": "sans"}), json!({"font": "Arial", "fallback": "mono"})] {
+        let mut p = bad.clone();
+        p["element"] = json!(id);
+        assert!(s.run("layout.update", &p).is_err(), "{bad}");
+    }
+    assert_eq!(font(&s, id), (FontFamily::Sans, None), "a refused call changes nothing");
+    let arrow = s.run("layout.addElement", &json!({"kind": "northArrow"})).unwrap()["element"].clone();
+    assert!(s.run("layout.update", &json!({"element": arrow, "fallback": "serif"})).unwrap_err().contains("only text elements"));
+    // An installed family, where this computer has one: kept as the font names it, its fallback
+    // its own class, and nothing said.
+    if let Some(f) = rustgis_render::families::installed().iter().find(|f| f.listed) {
+        let r = s.run("layout.update", &json!({"element": id, "font": f.name.to_uppercase()})).unwrap();
+        let class = if f.serif { FontFamily::Serif } else { FontFamily::Sans };
+        assert_eq!(font(&s, id), (class, Some(f.name.clone())));
+        assert_eq!(r, Value::Null, "an installed family draws as asked");
+        assert!(!crate::cmd::layout::layout_bytes(&mut s, 0, false, 72.0, false).unwrap().is_empty());
+    }
 }
 
 /// Each undo step remembers who made it, through undo and redo: the user (no actor) or the

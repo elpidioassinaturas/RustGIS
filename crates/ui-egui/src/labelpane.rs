@@ -411,7 +411,7 @@ fn new_name(labels: &Labeling) -> String {
 
 /// A list's search box, as its first row: the text kept for `id` while the list is reopened,
 /// lowercased to match names by. The Field and Font boxes share it, so they search alike.
-fn list_search(ui: &mut Ui, id: egui::Id, hint: &str) -> String {
+pub(crate) fn list_search(ui: &mut Ui, id: egui::Id, hint: &str) -> String {
     let mut text = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_default();
     if ui.add(egui::TextEdit::singleline(&mut text).hint_text(hint)).changed() {
         ui.data_mut(|d| d.insert_temp(id, text.clone()));
@@ -420,7 +420,7 @@ fn list_search(ui: &mut Ui, id: egui::Id, hint: &str) -> String {
 }
 
 /// A pick ends the search: the list opens whole next time.
-fn end_search(ui: &Ui, id: egui::Id) {
+pub(crate) fn end_search(ui: &Ui, id: egui::Id) {
     ui.data_mut(|d| d.remove::<String>(id));
 }
 

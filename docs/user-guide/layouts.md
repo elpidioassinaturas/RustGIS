@@ -179,8 +179,18 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   italic slanted, bold as the regular); RustGIS bundles no font. The project saves only the family,
   so it opens anywhere. Where no serif is installed (the web app, a minimal Linux), the text is
   drawn in the sans-serif and the pane says so, as `layout.addElement` and `layout.update` do in a
-  `warning`. Scripts set it with `"font": "serif"` or `"font": "sans"`. **Picture** places a PNG or
-  JPEG.
+  `warning`. Scripts set it with `"font": "serif"` or `"font": "sans"`.
+
+  The Font list also has **every font family installed on the computer**, after Sans-serif and
+  Serif, so a figure can match the typeface a journal or a series names (Times New Roman, Arial,
+  Garamond, a condensed face for long names). Type part of a name to find one. Its bold and italic
+  come from the family's own faces, as for the serif, and characters it lacks from the sans. A
+  named family keeps a **Fallback**, Sans-serif or Serif, for a computer that doesn't have it (a
+  project opened elsewhere, the web app): there the text is drawn in the fallback, and the pane
+  and the commands say so. The fallback starts as the family's own class (a serif's is Serif).
+  Scripts give the family's name: `"font": "Garamond"`, with `"fallback": "serif"` if wanted;
+  `labels.fonts` lists the installed families. The project keeps the name, never a file, and no
+  font goes into a PNG or PDF export (their pages are pictures). **Picture** places a PNG or JPEG.
 - **Map Series**: one page per feature of an index layer, with the frame zoomed to each feature;
   step through pages, refresh, and export every page into one PDF.
 - Click an element to select it, drag to move, drag its handles to resize, and edit it in the
@@ -207,7 +217,7 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   In SVG each element is a group (an Inkscape layer) named after it: text stays text and rectangles,
   ellipses and lines stay shapes, while map frames and the other surrounds are pictures at the export
   resolution, so the page can be finished in a vector editor. SVG text uses the viewer's
-  serif or sans-serif font, so its alignment and line widths can differ from PNG/PDF and can
+  font (a named family where the viewer has it, else its serif or sans-serif), so its alignment and line widths can differ from PNG/PDF and can
   change when edited. Embedded pictures are clipped to their element boxes;
   `layout.export` accepts `dpi` and `"allPages": false` for just the current PDF
   page. **Print** opens the PDF in the system viewer on desktop; **Save Layout File** and

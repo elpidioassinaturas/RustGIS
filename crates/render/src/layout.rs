@@ -237,11 +237,14 @@ fn draw_page(
                     None => placeholder(&mut pm, r, "Colorbar", ppp),
                 }
             }
-            ElementKind::Text { text: t, size, color, bold, italic, align, letter_spacing, font } => {
+            ElementKind::Text { text: t, size, color, bold, italic, align, letter_spacing, font, font_name } => {
                 let first = layout.first_frame().and_then(frame);
                 let s = expand(t, layout, info, first.and_then(|f| maps.get(f.1).map(|m| (m, f.2))));
-                let face =
-                    text::Face { bold: *bold, italic: *italic, serif: *font == rustgis_map::layout::FontFamily::Serif, family: None };
+                // An installed family by name (#762), else its generic one. The app doesn't wait
+                // for the font index while it is being built; a script or the command line builds
+                // it now (`families::find_ready`).
+                let family = font_name.as_deref().and_then(crate::families::find_ready);
+                let face = text::Face { bold: *bold, italic: *italic, serif: *font == rustgis_map::layout::FontFamily::Serif, family };
                 let style = TextStyle { face, align: *align, spacing: *letter_spacing as f32 };
                 text_block(&mut pm, r, &s, *size as f32, *color, style, ppp);
             }

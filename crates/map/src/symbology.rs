@@ -1649,7 +1649,7 @@ pub fn font_name(name: &str) -> Option<String> {
 
 /// A label class's font as a project has it, kept as [`font_name`] keeps it: a name, or none for
 /// anything else (a number, a list), so a damaged font doesn't make the project unreadable.
-fn de_font<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+pub(crate) fn de_font<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Font {

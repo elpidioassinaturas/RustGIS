@@ -813,9 +813,15 @@ pub enum ElementKind {
         /// Space added between letters, in points (spaced-out ocean names); negative tightens.
         #[serde(default, skip_serializing_if = "is_zero")]
         letter_spacing: f64,
-        /// Sans-serif or serif; left out when sans, so layouts saved before keep their bytes.
+        /// Sans-serif or serif; left out when sans, so layouts saved before keep their bytes. With
+        /// `font_name`, the family drawn where that one isn't installed.
         #[serde(default, skip_serializing_if = "is_sans")]
         font: FontFamily,
+        /// An installed font family, by the name the font gives it ("Garamond", #762): drawn in
+        /// it where it is installed, else in `font`. Left out when none; kept as a label's font is
+        /// (trimmed, bounded, none when not a name).
+        #[serde(default, deserialize_with = "crate::symbology::de_font", skip_serializing_if = "Option::is_none")]
+        font_name: Option<String>,
     },
     Picture {
         /// Base64 PNG or JPEG.
@@ -877,6 +883,7 @@ impl ElementKind {
             align: TextAlign::Left,
             letter_spacing: 0.0,
             font: FontFamily::Sans,
+            font_name: None,
         }
     }
 

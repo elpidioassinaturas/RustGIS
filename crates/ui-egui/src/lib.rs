@@ -3543,12 +3543,14 @@ impl RustGisApp {
         } else {
             labelfonts::install_pending(ctx);
         }
-        // Labels in a named family draw in the label font until the installed fonts are
-        // indexed (`families::warm_up`); then the map is drawn again in theirs.
+        // Labels and layout texts in a named family draw in the label font, or the text's
+        // fallback, until the installed fonts are indexed (`families::warm_up`); then the map and
+        // the layout page are drawn again in theirs.
         if !self.label_fonts_indexed {
             if rustgis_engine::render::families::installed_now().is_some() {
                 self.label_fonts_indexed = true;
                 self.map.invalidate();
+                self.layout.redraw();
             } else {
                 ctx.request_repaint_after(std::time::Duration::from_millis(250));
             }

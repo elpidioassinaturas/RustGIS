@@ -172,6 +172,12 @@ fn pan_preview(app: &mut RustGisApp, ctx: &egui::Context, layout: &Layout, id: u
 const FRAME_ZOOM_SETTLE: f64 = 0.35;
 
 impl LayoutView {
+    /// Draws the page again on the next frame, though the project hasn't changed (the installed
+    /// fonts a text names have just been indexed).
+    pub fn redraw(&mut self) {
+        self.key = None;
+    }
+
     /// Stops drawing a polygon or lasso frame, or navigating map frames (Esc).
     pub fn cancel_tool(&mut self) {
         self.navigate = false;
@@ -1648,11 +1654,11 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
         );
     });
     // A layout's text: the form a text graphic has too (#516, #535), with the page's dynamic text.
-    if let ElementKind::Text { text, size, color, bold, italic, align, letter_spacing, font } = &e.kind {
+    if let ElementKind::Text { text, size, color, bold, italic, align, letter_spacing, font, font_name } = &e.kind {
         let key = (li, id, "text");
         let mut buf = app.layout.typing.remove(&key).unwrap_or_else(|| text.clone());
         let (mut sz, mut c, mut bb) = (*size, crate::theme::c32(*color), *bold);
-        let (mut it, mut al, mut ls, mut fam) = (*italic, *align, *letter_spacing, *font);
+        let (mut it, mut al, mut ls, mut fam, mut named) = (*italic, *align, *letter_spacing, *font, font_name.clone());
         let tokens = [rustgis_engine::map::graphics::TOKENS, rustgis_engine::map::layout::PAGE_TOKENS];
         let fields = crate::textform::Fields {
             text: &mut buf,
@@ -1663,6 +1669,8 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             align: Some(&mut al),
             letter_spacing: Some(&mut ls),
             font: Some(&mut fam),
+            font_name: Some(&mut named),
+            named_fonts: true,
             select: false,
         };
         let settled = crate::textform::section(ui, "Text", |ui| crate::textform::show(ui, ("layout_text", li, id), &tokens, fields))
@@ -1691,7 +1699,15 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             update(app, json!({"letterSpacing": ls}));
         }
         if settled.font {
-            update(app, json!({"font": fam.code()}));
+            // A named family with its fallback (#762), else the generic one.
+            match &named {
+                Some(n) => {
+                    update(app, json!({"font": n, "fallback": fam.code()}));
+                }
+                None => {
+                    update(app, json!({"font": fam.code()}));
+                }
+            }
         }
     }
     // The layers a legend lists: a checkbox for each vector layer of its frame's map, ticked when

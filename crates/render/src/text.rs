@@ -864,7 +864,12 @@ mod coverage_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Hack-Regular.ttf");
         std::fs::write(&path, epaint_default_fonts::HACK_REGULAR).unwrap();
-        let fam = Family { name: "Hack".into(), listed: true, faces: vec![InstalledFace { path, index: 0, weight: 400, italic: false }] };
+        let fam = Family {
+            name: "Hack".into(),
+            listed: true,
+            faces: vec![InstalledFace { path, index: 0, weight: 400, italic: false }],
+            serif: false,
+        };
         let (f, slanted) = family_font(&fam, Face::default()).unwrap();
         assert_eq!(shape("iiii", 20.0, f, None).1, shape("MMMM", 20.0, f, None).1);
         assert!(std::ptr::eq(f, family_font(&fam, Face::default()).unwrap().0), "parsed once");
