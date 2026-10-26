@@ -427,13 +427,15 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
-                if p.get("bbox").is_some_and(|b| !b.is_null() && *b != "full") && asked.is_none() {
+                // An area asked for, whether or not the request could carry it: a slow whole layer
+                // then says so, and doesn't suggest the `bbox` already given.
+                let given = p.get("bbox").is_some_and(|b| !b.is_null() && *b != "full");
+                if given && asked.is_none() {
                     let why = if area.is_none() { "an area across the antimeridian" } else { "its request can't carry an area" };
                     s.notify(format!("{name}: {why}, so the whole layer is asked for"), false);
                 }
                 let max = crate::render::rustgis_tiles::cache::MAX_DOWNLOAD;
-                let bytes = download_features(s, &name, asked.as_deref().unwrap_or(items), max)
-                    .map_err(|e| slow_whole_layer(e, asked.is_some()))?;
+                let bytes = download_features(s, &name, asked.as_deref().unwrap_or(items), max).map_err(|e| slow_whole_layer(e, given))?;
                 let bytes = features_answer(s, &name, bytes);
                 let mut r = super::raster::add_named_bytes(s, &json!({"name": name}), format!("{name}.geojson"), bytes)?;
                 // Over an area, the features crossing it: the view stays, or goes to a box given
@@ -464,10 +466,10 @@ fn features_area(s: &Session, p: &Value) -> Result<Option<[f64; 4]>, String> {
 }
 
 /// A whole layer too slow to download while a command waits: the error says an area can be asked
-/// for instead.
+/// for instead, unless one was (`area_given`).
 #[cfg(not(target_arch = "wasm32"))]
-fn slow_whole_layer(e: String, over_area: bool) -> String {
-    if !over_area && (e.contains("timeout") || e.contains("timed out")) {
+fn slow_whole_layer(e: String, area_given: bool) -> String {
+    if !area_given && (e.contains("timeout") || e.contains("timed out")) {
         format!("{e}; or ask for the features in an area only, with \"bbox\": [west, south, east, north] or \"view\"")
     } else {
         e
