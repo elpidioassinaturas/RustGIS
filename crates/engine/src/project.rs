@@ -399,8 +399,24 @@ impl ProjectLog {
                 _ => {}
             }
         }
+        // An error's words written as relative paths (`./data/a.tif:`), as `portable_text` wrote them.
+        let words = |t: &str| -> String {
+            t.split_inclusive(char::is_whitespace)
+                .map(|word| {
+                    let core = word.trim_end().trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']' | ',' | ';'));
+                    let core = core.strip_suffix(':').unwrap_or(core);
+                    match (core.starts_with("./") || core.starts_with("../")).then(|| rustgis_map::paths::resolve(dir, core)).flatten() {
+                        Some(abs) => word.replacen(core, &abs, 1),
+                        None => word.to_string(),
+                    }
+                })
+                .collect()
+        };
         for e in &mut self.state().entries {
             resolved(&mut e.params, dir, 0);
+            if let Some(err) = e.error.as_mut() {
+                *err = words(err);
+            }
         }
     }
 

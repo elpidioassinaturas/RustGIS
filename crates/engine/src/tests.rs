@@ -17680,6 +17680,11 @@ fn the_project_log_records_each_command_run_on_the_project() {
     assert!(!kept.contains("S3CRET") && kept.contains("s3.connect"), "{kept}");
     let _ = s.run("script.run", &json!({"script": "# keep {name} as it is"}));
     assert!(s.project.log.entries().last().unwrap().params.to_string().contains("{name}"));
+    // A long list keeps its count when its texts are cut again to fit.
+    let long: Vec<String> = (0..5_000).map(|i| format!("{i}{}", "y".repeat(100))).collect();
+    let _ = s.run("project.rename", &json!({"name": "Long", "tags": long}));
+    let tags = s.project.log.entries().last().unwrap().params.to_string();
+    assert_eq!(s.project.log.entries().last().unwrap().params, json!({"name": "Long", "tags": "…"}), "{tags}");
     // Large values clipped.
     s.run("project.rename", &json!({"name": "x".repeat(20_000), "note": vec![1; 5_000]})).ok();
     let big = s.project.log.entries().last().cloned().unwrap();
@@ -17710,6 +17715,8 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let reopened = Project::load(&file).unwrap();
     let path = reopened.log.entries().last().unwrap().params["path"].as_str().unwrap().to_string();
     assert!(std::path::Path::new(&path).is_absolute() && path.ends_with("a.tif"), "{path}");
+    let error = reopened.log.entries().last().unwrap().error.clone().unwrap();
+    assert!(error.ends_with(": not found") && !error.starts_with("./"), "{error}");
     let _ = std::fs::remove_dir_all(&folder);
     // Read by filter, newest last.
     let r = s.run("project.log", &json!({"command": "project.rename", "failed": true})).unwrap();

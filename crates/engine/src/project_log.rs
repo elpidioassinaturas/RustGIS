@@ -49,22 +49,27 @@ pub(crate) fn logs(s: &Session, id: &str, params: &Value) -> bool {
 /// without secrets (as History's Copy as code takes them out), to about [`LOG_PARAMS_BYTES`] of
 /// JSON. A secret cut short is still taken out: what is left of it follows its name.
 pub(crate) fn kept_params(params: &Value) -> Value {
-    let v = redacted(&clip(params, LOG_PARAMS_BYTES, 0));
+    let v = redacted(&clip(params, LOG_PARAMS_BYTES, LOG_LIST_ITEMS, 0));
     if serde_json::to_vec(&v).map_or(0, |b| b.len()) <= LOG_PARAMS_BYTES {
         return v;
     }
-    let clipped = clip(&v, 512, 0);
+    // Texts shorter; lists as they are (already cut, their "… N items in all" kept).
+    let clipped = clip(&v, 512, usize::MAX, 0);
     if serde_json::to_vec(&clipped).map_or(0, |b| b.len()) <= LOG_PARAMS_BYTES {
         return clipped;
     }
-    // Still too large (many keys, deep nesting): its start, as text, cut at a character's edge
-    // within half the bound's bytes.
-    let text = serde_json::to_string(&clipped).unwrap_or_default();
-    let mut end = text.len().min(LOG_PARAMS_BYTES / 2);
-    while !text.is_char_boundary(end) {
-        end -= 1;
+    // Still too large (many keys, long lists): its first keys with their short values only (a
+    // number, a flag, a text of up to 64 characters with no brace), the rest as "…". Nothing in
+    // it is cut JSON, so it reads back as it was written.
+    let short = |v: &Value| match v {
+        Value::String(t) if t.chars().nth(64).is_none() && !t.contains('{') => v.clone(),
+        Value::Number(_) | Value::Bool(_) | Value::Null => v.clone(),
+        _ => Value::String("…".into()),
+    };
+    match clipped {
+        Value::Object(o) => Value::Object(o.iter().take(40).map(|(k, v)| (k.chars().take(64).collect(), short(v))).collect()),
+        other => short(&other),
     }
-    Value::String(format!("{}…", text.get(..end).unwrap_or_default()))
 }
 
 /// An entry read from a file, kept as a new one is: its command clipped, its parameters and error
@@ -74,9 +79,10 @@ pub(crate) fn bounded(mut e: LogEntry) -> LogEntry {
     if e.command.chars().nth(200).is_some() {
         e.command = e.command.chars().take(200).collect();
     }
-    // One that fits, as written, keeps its clipped lists' counts: only its secrets are taken out.
+    // One that fits, as written, keeps its clipped lists' counts: only the document rule applies,
+    // then its secrets are taken out.
     let fits = serde_json::to_vec(&e.params).is_ok_and(|b| b.len() <= LOG_PARAMS_BYTES);
-    e.params = if fits { redacted(&e.params) } else { kept_params(&e.params) };
+    e.params = if fits { redacted(&clip(&e.params, usize::MAX, usize::MAX, 0)) } else { kept_params(&e.params) };
     e.error = e.error.as_deref().map(kept_error);
     e
 }
@@ -145,8 +151,8 @@ const DOCUMENT_CHARS: usize = 200;
 
 /// `v` with each text cut to `chars` characters (a key to 200), a text that reads as a document
 /// (JSON or XML past [`DOCUMENT_CHARS`]) given as its size, and each list cut to its first
-/// [`LOG_LIST_ITEMS`] (and how many there were); nesting past eight levels is left out.
-fn clip(v: &Value, chars: usize, depth: usize) -> Value {
+/// `items` (and how many there were); nesting past eight levels is left out.
+fn clip(v: &Value, chars: usize, items: usize, depth: usize) -> Value {
     match v {
         // A byte-order mark before it is still a document's start.
         Value::String(t)
@@ -156,14 +162,14 @@ fn clip(v: &Value, chars: usize, depth: usize) -> Value {
         }
         Value::String(t) if t.chars().nth(chars).is_some() => Value::String(format!("{}…", t.chars().take(chars).collect::<String>())),
         Value::Array(a) if depth < 8 => {
-            let mut out: Vec<Value> = a.iter().take(LOG_LIST_ITEMS).map(|x| clip(x, chars, depth + 1)).collect();
-            if a.len() > LOG_LIST_ITEMS {
+            let mut out: Vec<Value> = a.iter().take(items).map(|x| clip(x, chars, items, depth + 1)).collect();
+            if a.len() > items {
                 out.push(Value::String(format!("… {} items in all", a.len())));
             }
             Value::Array(out)
         }
         Value::Object(o) if depth < 8 => {
-            Value::Object(o.iter().map(|(k, x)| (k.chars().take(200).collect(), clip(x, chars, depth + 1))).collect())
+            Value::Object(o.iter().map(|(k, x)| (k.chars().take(200).collect(), clip(x, chars, items, depth + 1))).collect())
         }
         Value::Array(_) | Value::Object(_) => Value::String("…".into()),
         other => other.clone(),
