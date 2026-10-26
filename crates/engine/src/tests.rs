@@ -17745,6 +17745,40 @@ fn the_project_log_records_each_command_run_on_the_project() {
         let back: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(back["log"]["entries"].as_array().unwrap().last().unwrap()["error"], json!(saved), "{error}");
     }
+    // A save with nothing logged since writes the same text; one after a change, or into
+    // another folder, writes it again.
+    let (a, _) = s.project.saved_text(Some(&folder)).unwrap();
+    let (b, _) = s.project.saved_text(Some(&folder)).unwrap();
+    assert_eq!(a, b);
+    assert_ne!(s.project.saved_text(None).unwrap().0, a);
+    s.project.log.push(LogEntry {
+        at: 4,
+        command: "y".into(),
+        params: Value::Null,
+        ok: true,
+        error: None,
+        millis: 0,
+        relative: Vec::new(),
+    });
+    assert!(s.project.saved_text(Some(&folder)).unwrap().0.contains(r#""command":"y""#));
+    // The project's own folder is written as `.`, and read back as that folder.
+    let entry = LogEntry {
+        at: 5,
+        command: "z".into(),
+        params: json!({"path": folder.to_string_lossy()}),
+        ok: true,
+        error: None,
+        millis: 0,
+        relative: Vec::new(),
+    };
+    s.project.log.push(entry);
+    let (text, _) = s.project.saved_text(Some(&folder)).unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("p.rgis"), &text).unwrap();
+    let reopened = Project::load(&folder.join("p.rgis")).unwrap();
+    let path = reopened.log.entries().last().unwrap().params["path"].as_str().unwrap().to_string();
+    assert!(std::path::Path::new(&path).is_absolute(), "{path}");
+    let _ = std::fs::remove_dir_all(&folder);
     // Read by filter, newest last.
     let r = s.run("project.log", &json!({"command": "project.rename", "failed": true})).unwrap();
     assert_eq!((r["count"].as_u64(), r["entries"][0]["command"].as_str()), (Some(1), Some("project.rename")));
@@ -17757,10 +17791,12 @@ fn the_project_log_records_each_command_run_on_the_project() {
     assert_eq!(kept["…"], json!("40 keys in all"));
     // Keys alike in their first 64 characters: the first stays, the other counted as left out.
     let mut alike: serde_json::Map<String, Value> = (0..40).map(|i| (format!("{i:02}{}", "k".repeat(62)), json!("v".repeat(64)))).collect();
-    alike.insert(format!("{}a", "z".repeat(64)), json!(1));
-    alike.insert(format!("{}b", "z".repeat(64)), json!(2));
+    // Sorts right after the first key, and is the same once cut to 64 characters.
+    alike.insert(format!("00{}a", "k".repeat(62)), json!(2));
     let kept = crate::project_log::kept_params(&Value::Object(alike));
-    assert_eq!(kept["…"], json!("42 keys in all"));
+    assert_eq!(kept["…"], json!("41 keys in all"));
+    assert_eq!(kept[format!("00{}", "k".repeat(62))], json!("v".repeat(64)), "the first stays");
+    assert!(kept.as_object().is_some_and(|o| !o.values().any(|v| *v == json!(2))), "{kept}");
     // A crafted text costs its length, not its braces times its length: 200,000 braces are
     // milliseconds once, and would be hours if each `{` scanned the rest (a bound far from both).
     let crafted = "{1".repeat(200_000);
