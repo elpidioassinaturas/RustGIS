@@ -12,19 +12,24 @@ pub(crate) fn now_ms() -> u64 {
 }
 
 /// Whether command `id`, run by itself with `params`, goes into the log: one that changes the
-/// project (all but those built with `.view()`), a plugin's, undo and redo, a save, the log's own
-/// clearing and switching, and a view command whose parameters name a file, folder, address or
-/// connection (an export), as the plugin permission gate reads them. Reading and looking around
-/// (listing, describing, moving the view) is left out: agents and scripts call those hundreds of
-/// times.
+/// project (all but those built with `.view()`, a plugin's as it declares), undo and redo, a save,
+/// the log's own clearing and switching, and a command whose parameters name a file, folder,
+/// address or connection (an export), as the plugin permission gate reads them. Reading and
+/// looking around (listing, describing, moving the view) is left out: agents, scripts and plugins
+/// call those hundreds of times, and they would push the changes out of the log.
 pub(crate) fn logs(s: &Session, id: &str, params: &Value) -> bool {
-    if id.starts_with(rustgis_plugins::PREFIX)
-        || matches!(id, "edit.undo" | "edit.redo" | "project.save" | "project.clearLog" | "project.logCommands")
-    {
+    if matches!(id, "edit.undo" | "edit.redo" | "project.save" | "project.clearLog" | "project.logCommands") {
         return true;
     }
-    let Some(spec) = s.registry.get(id) else { return false };
-    spec.mutates || crate::cmd::items::names_place(params, crate::cmd::plugins::PLACE_KEYS, 0)
+    let mutates = if id.starts_with(rustgis_plugins::PREFIX) {
+        rustgis_plugins::command(id).is_some_and(|c| c.mutates())
+    } else {
+        match s.registry.get(id) {
+            Some(spec) => spec.mutates,
+            None => return false,
+        }
+    };
+    mutates || crate::cmd::items::names_place(params, crate::cmd::plugins::PLACE_KEYS, 0)
 }
 
 /// `params` as the log keeps them: a document given as text (a map, a project, a capabilities
@@ -33,7 +38,7 @@ pub(crate) fn logs(s: &Session, id: &str, params: &Value) -> bool {
 /// without secrets (as History's Copy as code takes them out), to about [`LOG_PARAMS_BYTES`] of
 /// JSON. A secret cut short is still taken out: what is left of it follows its name.
 pub(crate) fn kept_params(params: &Value) -> Value {
-    let v = crate::cmd::history::redacted(&clip(params, LOG_PARAMS_BYTES, 0));
+    let v = redacted(&clip(params, LOG_PARAMS_BYTES, 0));
     if serde_json::to_vec(&v).map_or(0, |b| b.len()) <= LOG_PARAMS_BYTES {
         return v;
     }
@@ -53,7 +58,9 @@ pub(crate) fn bounded(mut e: LogEntry) -> LogEntry {
     if e.command.chars().nth(200).is_some() {
         e.command = e.command.chars().take(200).collect();
     }
-    e.params = kept_params(&e.params);
+    // One that fits, as written, keeps its clipped lists' counts: only its secrets are taken out.
+    let fits = serde_json::to_vec(&e.params).is_ok_and(|b| b.len() <= LOG_PARAMS_BYTES);
+    e.params = if fits { redacted(&e.params) } else { kept_params(&e.params) };
     e.error = e.error.as_deref().map(kept_error);
     e
 }
@@ -67,6 +74,47 @@ fn kept_error(e: &str) -> String {
         e.to_string()
     };
     crate::cmd::history::redacted_text(&e)
+}
+
+/// `v` without secrets: as History's Copy as code takes them out (`history::redacted`), and,
+/// first, inside the JSON a text holds (a script's command lines: `s3.connect {"secret": …}`),
+/// whose objects are redacted in place.
+fn redacted(v: &Value) -> Value {
+    crate::cmd::history::redacted(&embedded_redacted(v, 0))
+}
+
+fn embedded_redacted(v: &Value, depth: usize) -> Value {
+    match v {
+        Value::String(t) if t.contains('{') => Value::String(json_in_text_redacted(t)),
+        Value::Array(a) if depth < 8 => Value::Array(a.iter().map(|x| embedded_redacted(x, depth + 1)).collect()),
+        Value::Object(o) if depth < 8 => Value::Object(o.iter().map(|(k, x)| (k.clone(), embedded_redacted(x, depth + 1))).collect()),
+        other => other.clone(),
+    }
+}
+
+/// `t` with each JSON object it holds (from a `{` to where the object ends) redacted. Texts are
+/// clipped before this, so trying each `{` stays cheap.
+fn json_in_text_redacted(t: &str) -> String {
+    let mut out = String::with_capacity(t.len());
+    let mut rest = t;
+    while let Some(at) = rest.find('{') {
+        let (before, from) = rest.split_at(at);
+        out.push_str(before);
+        let mut objects = serde_json::Deserializer::from_str(from).into_iter::<Value>();
+        match objects.next() {
+            Some(Ok(v @ Value::Object(_))) => {
+                let end = objects.byte_offset();
+                out.push_str(&serde_json::to_string(&crate::cmd::history::redacted(&v)).unwrap_or_default());
+                rest = from.get(end..).unwrap_or("");
+            }
+            _ => {
+                out.push('{');
+                rest = from.get(1..).unwrap_or("");
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The longest text kept as it is that reads as a document (it starts with `{`, `[` or `<`).

@@ -17655,6 +17655,11 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let _ = s.run("project.importQgis", &json!({"text": qgs}));
     let doc = s.project.log.entries().last().cloned().unwrap();
     assert_eq!(doc.params["text"], json!(format!("(a document of {} characters)", qgs.chars().count())), "{doc:?}");
+    // A secret in the JSON a text holds (a script's command line) is taken out too.
+    let line = r#"s3.connect {"accessKeyId": "AKIA", "secretAccessKey": "S3CRETKEY", "region": "x"}"#;
+    let _ = s.run("script.run", &json!({"script": line}));
+    let script = s.project.log.entries().last().cloned().unwrap();
+    assert!(!script.params.to_string().contains("S3CRETKEY") && script.params.to_string().contains("s3.connect"), "{script:?}");
     // Large values clipped.
     s.run("project.rename", &json!({"name": "x".repeat(20_000), "note": vec![1; 5_000]})).ok();
     let big = s.project.log.entries().last().cloned().unwrap();
@@ -17715,9 +17720,9 @@ fn the_project_log_records_each_command_run_on_the_project() {
     assert_eq!(commands(&s), ["project.clearLog"]);
     s.run("project.logCommands", &json!({"on": false})).unwrap();
     s.run("project.rename", &json!({"name": "Quiet"})).unwrap();
-    assert_eq!(commands(&s), ["project.clearLog"]);
+    assert_eq!(commands(&s), ["project.clearLog", "project.logCommands"], "turned off, and said so");
     s.run("project.logCommands", &json!({"on": true})).unwrap();
-    assert_eq!(commands(&s), ["project.clearLog", "project.logCommands"]);
+    assert_eq!(commands(&s), ["project.clearLog", "project.logCommands", "project.logCommands"]);
     // A file's log is read keeping its last entries, each bounded.
     let entries: Vec<Value> = (0..LOG_LIMIT + 3)
         .map(|i| json!({"at": i, "command": "x".repeat(if i == LOG_LIMIT + 2 { 1000 } else { 1 }), "ok": true, "params": {"a": "y".repeat(if i == LOG_LIMIT + 2 { 20_000 } else { 1 })}}))

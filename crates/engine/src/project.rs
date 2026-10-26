@@ -336,10 +336,11 @@ impl ProjectLog {
         self.state().off = !on;
     }
 
-    /// Adds `e` when logging is on, the oldest entries dropped past [`LOG_LIMIT`].
+    /// Adds `e` when logging is on, the oldest entries dropped past [`LOG_LIMIT`]; turning the log
+    /// off (`project.logCommands`) is recorded too, so the log says why it stops.
     pub fn push(&self, e: LogEntry) {
         let mut s = self.state();
-        if s.off {
+        if s.off && e.command != "project.logCommands" {
             return;
         }
         s.entries.push_back(e);
