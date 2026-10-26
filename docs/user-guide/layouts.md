@@ -217,7 +217,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   In SVG each element is a group (an Inkscape layer) named after it: text stays text and rectangles,
   ellipses and lines stay shapes, while map frames and the other surrounds are pictures at the export
   resolution, so the page can be finished in a vector editor. SVG text uses the viewer's
-  font (a named family where the viewer has it, else its serif or sans-serif), so its alignment and line widths can differ from PNG/PDF and can
+  font (a named family where the viewer has it, else its serif or sans-serif), so its alignment
+  and line widths can differ from PNG/PDF and can
   change when edited. Embedded pictures are clipped to their element boxes;
   `layout.export` accepts `dpi` and `"allPages": false` for just the current PDF
   page. **Print** opens the PDF in the system viewer on desktop; **Save Layout File** and

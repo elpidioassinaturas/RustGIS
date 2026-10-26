@@ -2399,15 +2399,36 @@ pub(crate) fn text_font(p: &Value, current: (FontFamily, Option<String>)) -> Res
         };
     }
     let name = rustgis_map::symbology::font_name(n).ok_or("font must be sans, serif or an installed font family's name")?;
-    let installed = rustgis_render::families::find_ready(&name)
-        .and_then(|i| rustgis_render::families::available()?.get(usize::from(i)))
-        .filter(|f| f.name.eq_ignore_ascii_case(&name));
-    let class = installed.map(|f| if f.serif { FontFamily::Serif } else { FontFamily::Sans });
+    // With no fallback given, its class decides one, so the installed fonts are waited for if the
+    // app is still indexing them (once, as it starts; its own Font list always gives one).
+    let installed = if fallback.is_some() { installed_family(&name, false) } else { installed_family(&name, true) };
     let kept = installed.map_or(name, |f| f.name.clone());
-    // The same family named again keeps the fallback it has.
-    let same = current.1.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(&kept));
-    let default = if same { Some(current.0) } else { class };
-    Ok((fallback.or(default).unwrap_or(FontFamily::Sans), Some(kept)))
+    let fallback = fallback.unwrap_or_else(|| default_fallback(installed, &kept, &current));
+    Ok((fallback, Some(kept)))
+}
+
+/// The installed family named `name` (in any case), waiting for the font index when `wait`, or
+/// none while the app is still building it.
+fn installed_family(name: &str, wait: bool) -> Option<&'static rustgis_render::families::Family> {
+    use rustgis_render::families;
+    let i = if wait { families::find(name) } else { families::find_ready(name) }?;
+    families::installed_now()?.get(usize::from(i)).filter(|f| f.name.eq_ignore_ascii_case(name))
+}
+
+/// A named family's fallback when none is given: the one it has when it is named again, else its
+/// own class (a serif's is the serif), else the sans.
+fn default_fallback(
+    installed: Option<&rustgis_render::families::Family>,
+    name: &str,
+    current: &(FontFamily, Option<String>),
+) -> FontFamily {
+    if current.1.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(name)) {
+        return current.0;
+    }
+    match installed {
+        Some(f) if f.serif => FontFamily::Serif,
+        _ => FontFamily::Sans,
+    }
 }
 
 /// What a text is told when it isn't drawn as asked: a named family this computer hasn't is drawn
