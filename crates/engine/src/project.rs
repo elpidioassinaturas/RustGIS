@@ -172,9 +172,10 @@ pub struct Project {
     #[serde(default)]
     pub data_stores: Vec<crate::cmd::sharing::DataStore>,
     /// Every command run on the project (#797), outside its undo history: see [`ProjectLog`].
-    /// Read from the file, and written only by [`Project::saved_text`] (left out while it is
-    /// empty and on, so a project that never logged saves as before): the project's own JSON
-    /// (undo checks, comparisons, packages) doesn't carry it.
+    /// Read from the file, and written only by [`Project::saved_text`] and the autosaved
+    /// [`Project::recovery_text`] (left out while it is empty and on, so a project that never
+    /// logged saves as before): the project's own JSON (undo checks, comparisons, packages)
+    /// doesn't carry it.
     #[serde(default, skip_serializing)]
     pub log: ProjectLog,
 }
@@ -320,7 +321,7 @@ impl<'de> serde::de::Visitor<'de> for LogEntries {
 /// the `.rgis`. It sits outside the undo history: the project's undo snapshots share it (a clone
 /// is the same log), so undoing a command never takes its entry back, and a snapshot copies
 /// nothing of it. A project opened, made new or from a template has a log of its own. It is read
-/// in place, under its lock: nothing copies it whole.
+/// in place, under its lock; only saving copies its entries, once ([`ProjectLog::write_json`]).
 #[derive(Clone, Debug, Default)]
 pub struct ProjectLog(std::sync::Arc<Mutex<LogState>>);
 
@@ -368,7 +369,7 @@ impl ProjectLog {
     pub fn select(&self, keep: impl Fn(&LogEntry) -> bool, limit: usize) -> (Vec<LogEntry>, usize, usize) {
         let s = self.state();
         let matching: Vec<&LogEntry> = s.entries.iter().filter(|e| keep(e)).collect();
-        let tail = matching[matching.len().saturating_sub(limit)..].iter().map(|e| (*e).clone()).collect();
+        let tail = matching.get(matching.len().saturating_sub(limit)..).unwrap_or_default().iter().map(|e| (*e).clone()).collect();
         (tail, matching.len(), s.entries.len())
     }
 

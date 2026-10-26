@@ -36,7 +36,7 @@ pub fn commands() -> Vec<C> {
         // changed themselves): the log sits outside the undo history, so an undo step would
         // restore nothing of it.
         C::new("project.log", "Project Log", "Project", log).view().params(
-            r#"{"since"?: milliseconds since 1970 (UTC), "until"?: milliseconds, "command"?: "a command id, or the start of one (layer.)", "failed"?: bool (true: only those that failed; false: only those that succeeded), "limit"?: entries (default 100, the newest; at most 1000)} → {"entries": [{"at", "command", "params", "ok", "error"?, "millis"}], "count": matching, "total": in the log, "on": bool}"#,
+            r#"{"since"?: milliseconds since 1970 (UTC), "until"?: milliseconds, "command"?: "a command id, or the start of one (layer.)", "failed"?: bool (true: only those that failed; false: only those that succeeded), "limit"?: entries (default 100, the newest; 1 to 1000)} → {"entries": [{"at", "command", "params", "ok", "error"?, "millis"}], "count": matching, "total": in the log, "on": bool}"#,
         ),
         C::new("project.exportLog", "Export Project Log", "Project", export_log)
             .view()
@@ -71,7 +71,8 @@ fn log(s: &mut Session, p: &Value) -> CmdResult {
     // At most a thousand (some 4 MB at the most), so one answer can't fill an assistant's
     // context or a script's memory; `count` still says how many match.
     let limit = match num("limit")? {
-        Some(n) => usize::try_from(n).unwrap_or(usize::MAX).clamp(1, 1_000),
+        Some(0) => return Err("limit must be 1 or more".into()),
+        Some(n) => usize::try_from(n).unwrap_or(usize::MAX).min(1_000),
         None => 100,
     };
     let keep = |e: &crate::project::LogEntry| {

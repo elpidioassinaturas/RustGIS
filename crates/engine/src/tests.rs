@@ -17737,13 +17737,17 @@ fn the_project_log_records_each_command_run_on_the_project() {
     alike.insert(format!("{}b", "z".repeat(64)), json!(2));
     let kept = crate::project_log::kept_params(&Value::Object(alike));
     assert_eq!(kept["…"], json!("42 keys in all"));
-    // A file of crafted texts opens quickly: each text's secret names are looked for once.
-    let crafted = "{1".repeat(2_000);
+    // A crafted text costs its length, not its braces times its length: 200,000 braces are
+    // milliseconds once, and would be hours if each `{` scanned the rest (a bound far from both).
+    let crafted = "{1".repeat(200_000);
     let started = std::time::Instant::now();
-    for _ in 0..200 {
-        crate::project_log::kept_params(&json!({"script": crafted}));
-    }
-    assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+    assert_eq!(crate::project_log::json_in_text_redacted(&crafted).len(), crafted.len());
+    assert!(started.elapsed() < std::time::Duration::from_secs(60), "{:?}", started.elapsed());
+    // A key cut short keeps no value: a secret's name may be past the cut.
+    let long_key = format!("{}secretAccessKey", "x".repeat(195));
+    let kept = crate::project_log::kept_params(&json!({long_key: "S3CRET"}));
+    assert!(!kept.to_string().contains("S3CRET"), "{kept}");
+    assert!(s.run("project.log", &json!({"limit": 0})).is_err());
     // An unquoted secret key in an object that doesn't parse goes, with the rest of the text;
     // a format string's braces stay.
     let line = crate::project_log::kept_params(&json!({"script": "s3.connect {secretAccessKey: \"S3CRET\"}\nprint(f\"{x:.2f}\")"}));

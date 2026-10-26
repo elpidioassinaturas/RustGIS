@@ -13,11 +13,11 @@ pub(crate) fn now_ms() -> u64 {
 
 /// Whether command `id`, run by itself with `params`, goes into the log: one that changes the
 /// project (all but those built with `.view()`; a plugin's when its manifest asks for the Edit
-/// permission), undo and redo, a save,
-/// the log's own clearing and switching, and a command whose parameters name a file, folder,
-/// address or connection (an export), as the plugin permission gate reads them. Reading and
-/// looking around (listing, describing, moving the view) is left out: agents, scripts and plugins
-/// call those hundreds of times, and they would push the changes out of the log.
+/// permission), undo and redo, a save, the log's own clearing and switching, and a command whose
+/// parameters name a file, folder, address or connection (an export), as the plugin permission
+/// gate reads them. Reading and looking around (listing, describing, moving the view) is left
+/// out: agents, scripts and plugins call those hundreds of times, and they would push the changes
+/// out of the log.
 pub(crate) fn logs(s: &Session, id: &str, params: &Value) -> bool {
     // Making or opening a project from text names no place: it is logged as the open from a file is.
     if matches!(
@@ -146,7 +146,7 @@ fn embedded_redacted(v: &Value, depth: usize) -> Value {
 
 /// `t` with each JSON object it holds (from a `{` to where the object ends) redacted. Texts are
 /// clipped before this, so trying each `{` stays cheap; the secret names are looked for once.
-fn json_in_text_redacted(t: &str) -> String {
+pub(crate) fn json_in_text_redacted(t: &str) -> String {
     let mut out = String::with_capacity(t.len());
     let last_secret = last_secret_name(t);
     let mut rest = t;
@@ -225,10 +225,13 @@ fn clip(v: &Value, chars: usize, items: usize, depth: usize) -> Value {
             Value::Array(out)
         }
         Value::Object(o) if depth < 8 => {
-            // Two keys alike in their first 200 characters: the first stays.
+            // Two keys alike in their first 200 characters: the first stays. A key cut short may
+            // hide a secret's name past the cut (redaction reads the names after this): its value
+            // goes.
             let mut out = serde_json::Map::new();
             for (k, x) in o {
-                out.entry(k.chars().take(200).collect::<String>()).or_insert_with(|| clip(x, chars, items, depth + 1));
+                let value = || if k.chars().nth(200).is_some() { Value::String("…".into()) } else { clip(x, chars, items, depth + 1) };
+                out.entry(k.chars().take(200).collect::<String>()).or_insert_with(value);
             }
             Value::Object(out)
         }
