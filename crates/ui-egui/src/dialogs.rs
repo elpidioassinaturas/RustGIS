@@ -934,7 +934,11 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         let title = l.get("title").and_then(Value::as_str).unwrap_or(name).to_string();
         // Features are downloaded in the background, as From URL… does; map layers are added now.
         let time = app.ui.service_browse.time.trim().to_string();
-        let area = app.ui.service_browse.area.then(|| rustgis_engine::cmd::catalogs::area(&app.session, &Value::Null)).transpose();
+        // The view's area, for a feature layer only: a map layer never asks for one, so an
+        // unknown view can't stop it.
+        let features = l["offer"]["type"] == "features";
+        let area =
+            (features && app.ui.service_browse.area).then(|| rustgis_engine::cmd::catalogs::area(&app.session, &Value::Null)).transpose();
         match area.and_then(|area| crate::serviceui::add_layer(app, &src, &l, &time, area, true)) {
             Ok(m) => app.dialogs.info = Some(format!("{m} {title}")),
             Err(e) => app.dialogs.error = Some(e),
