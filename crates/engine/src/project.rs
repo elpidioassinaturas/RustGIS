@@ -382,6 +382,28 @@ impl ProjectLog {
         self.state().entries.is_empty()
     }
 
+    /// The relative paths a file's log was saved with (`./data/a.tif`), made absolute again from
+    /// `dir`, the folder it was read from, as the project's sources are; so a later Save As
+    /// elsewhere writes them relative to that folder. Only texts written as relative paths
+    /// (`./`, `../`) are read as such.
+    fn resolve_paths(&self, dir: &str) {
+        fn resolved(v: &mut serde_json::Value, dir: &str, depth: usize) {
+            match v {
+                serde_json::Value::String(t) if t.starts_with("./") || t.starts_with("../") => {
+                    if let Some(abs) = rustgis_map::paths::resolve(dir, t) {
+                        *t = abs;
+                    }
+                }
+                serde_json::Value::Array(a) if depth < 16 => a.iter_mut().for_each(|x| resolved(x, dir, depth + 1)),
+                serde_json::Value::Object(o) if depth < 16 => o.values_mut().for_each(|x| resolved(x, dir, depth + 1)),
+                _ => {}
+            }
+        }
+        for e in &mut self.state().entries {
+            resolved(&mut e.params, dir, 0);
+        }
+    }
+
     /// Empties the log; how many entries it had.
     pub fn clear(&self) -> usize {
         std::mem::take(&mut self.state().entries).len()
@@ -736,6 +758,7 @@ impl Project {
 
     fn resolve_paths(&mut self, dir: &str) {
         resolve_file_paths(dir, self.file_paths_mut());
+        self.log.resolve_paths(dir);
     }
 
     pub fn new(name: impl Into<String>) -> Self {

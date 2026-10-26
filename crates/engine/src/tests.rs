@@ -17703,6 +17703,14 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let last = saved["log"]["entries"].as_array().unwrap().last().unwrap().clone();
     assert_eq!((last["params"]["path"].as_str(), last["error"].as_str()), (Some("./data/a.tif"), Some("./data/a.tif: not found")));
     assert_eq!(s.project.log.entries().last().unwrap().params["path"], json!(inside.to_string_lossy()), "the open project keeps them");
+    // Read back from that folder, they are absolute again, so a Save As elsewhere keeps them right.
+    std::fs::create_dir_all(&folder).unwrap();
+    let file = folder.join("p.rgis");
+    std::fs::write(&file, &text).unwrap();
+    let reopened = Project::load(&file).unwrap();
+    let path = reopened.log.entries().last().unwrap().params["path"].as_str().unwrap().to_string();
+    assert!(std::path::Path::new(&path).is_absolute() && path.ends_with("a.tif"), "{path}");
+    let _ = std::fs::remove_dir_all(&folder);
     // Read by filter, newest last.
     let r = s.run("project.log", &json!({"command": "project.rename", "failed": true})).unwrap();
     assert_eq!((r["count"].as_u64(), r["entries"][0]["command"].as_str()), (Some(1), Some("project.rename")));
