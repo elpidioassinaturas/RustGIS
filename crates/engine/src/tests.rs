@@ -17660,6 +17660,12 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let _ = s.run("script.run", &json!({"script": line}));
     let script = s.project.log.entries().last().cloned().unwrap();
     assert!(!script.params.to_string().contains("S3CRETKEY") && script.params.to_string().contains("s3.connect"), "{script:?}");
+    // Nor where the clip cuts the object short: what follows its `{` goes.
+    // The secret comes first and a long field after it, past the cut.
+    let long = format!(r#"s3.connect {{"secretAccessKey": "S3CRETKEY", "notes": "{}"}}"#, "x".repeat(5000));
+    let _ = s.run("script.run", &json!({"script": long}));
+    let cut = s.project.log.entries().last().cloned().unwrap();
+    assert!(!cut.params.to_string().contains("S3CRET"), "{}", cut.params);
     // Large values clipped.
     s.run("project.rename", &json!({"name": "x".repeat(20_000), "note": vec![1; 5_000]})).ok();
     let big = s.project.log.entries().last().cloned().unwrap();

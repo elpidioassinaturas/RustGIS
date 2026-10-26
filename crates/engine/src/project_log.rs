@@ -107,6 +107,11 @@ fn json_in_text_redacted(t: &str) -> String {
                 out.push_str(&serde_json::to_string(&crate::cmd::history::redacted(&v)).unwrap_or_default());
                 rest = from.get(end..).unwrap_or("");
             }
+            // Cut short by the clip: what follows its `{` may hold a secret, so none of it stays.
+            Some(Err(e)) if e.is_eof() => {
+                out.push('…');
+                return out;
+            }
             _ => {
                 out.push('{');
                 rest = from.get(1..).unwrap_or("");
