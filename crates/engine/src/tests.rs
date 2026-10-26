@@ -17726,6 +17726,25 @@ fn the_project_log_records_each_command_run_on_the_project() {
     assert_eq!(reopened.log.entries().last().unwrap().params["name"], json!("./Maps and data"));
     assert!(reopened.log.entries().iter().all(|e| e.relative.is_empty()));
     let _ = std::fs::remove_dir_all(&folder);
+    // A text that starts with a path but holds more is read word by word, not as one path.
+    for (error, saved) in [
+        ("/mnt/x/a.tif: cannot open /mnt/y/b.tif", "a.tif: cannot open b.tif"),
+        ("/mnt/x/a.tif and /mnt/y/b.tif are missing", "a.tif and b.tif are missing"),
+    ] {
+        let entry = LogEntry {
+            at: 3,
+            command: "x".into(),
+            params: Value::Null,
+            ok: false,
+            error: Some(error.into()),
+            millis: 0,
+            relative: Vec::new(),
+        };
+        s.project.log.push(entry);
+        let (text, _) = s.project.saved_text(Some(&folder)).unwrap();
+        let back: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(back["log"]["entries"].as_array().unwrap().last().unwrap()["error"], json!(saved), "{error}");
+    }
     // Read by filter, newest last.
     let r = s.run("project.log", &json!({"command": "project.rename", "failed": true})).unwrap();
     assert_eq!((r["count"].as_u64(), r["entries"][0]["command"].as_str()), (Some(1), Some("project.rename")));

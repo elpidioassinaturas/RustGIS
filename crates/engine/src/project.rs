@@ -742,7 +742,7 @@ fn make_portable(
         Value::String(t) => {
             let portable = portable_text(t, dir, changed);
             if portable != *t {
-                if rustgis_map::paths::is_absolute_local(t) {
+                if one_path(t) {
                     swaps.push((t.clone(), portable.clone()));
                 }
                 *t = portable;
@@ -798,12 +798,7 @@ fn portable_text(t: &str, dir: &str, wrote: &mut Vec<String>) -> String {
         made.borrow_mut().push(r.clone());
         r
     };
-    // The root alone (`/`) is no file's path.
-    let out = if t.len() > 1 && rustgis_map::paths::is_absolute_local(t) {
-        portable(t)
-    } else {
-        path_words(t, |p| rustgis_map::paths::is_absolute_local(p).then(|| portable(p)))
-    };
+    let out = if one_path(t) { portable(t) } else { path_words(t, |p| rustgis_map::paths::is_absolute_local(p).then(|| portable(p))) };
     for r in made.into_inner() {
         if (r.starts_with("./") || r.starts_with("../")) && !wrote.contains(&r) {
             wrote.push(r);
@@ -812,16 +807,33 @@ fn portable_text(t: &str, dir: &str, wrote: &mut Vec<String>) -> String {
     out
 }
 
+/// Whether `t` is one absolute local path as a whole (spaces in its folders' names and all), not
+/// a text that starts with one: no other word of it is a path, and no `: ` follows the first
+/// (`/data/a.tif: not found`). The root alone (`/`) is no file's path.
+fn one_path(t: &str) -> bool {
+    let path_word = |w: &str| {
+        let core = word_core(w);
+        core.get(1..).is_some_and(|r| r.contains(['/', '\\'])) && rustgis_map::paths::is_absolute_local(core)
+    };
+    t.len() > 1
+        && rustgis_map::paths::is_absolute_local(t)
+        && (!t.contains(char::is_whitespace) || (!t.contains(": ") && !t.split_whitespace().skip(1).any(path_word)))
+}
+
+/// A word without the quotes, brackets and trailing `,`, `;` or `:` around it.
+fn word_core(word: &str) -> &str {
+    let core = word.trim_end().trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']' | ',' | ';'));
+    core.strip_suffix(':').unwrap_or(core)
+}
+
 /// `t` with each word (quotes, brackets, a trailing `,`, `;` or `:` aside) replaced by what `f`
 /// makes of it, where `f` gives something: how a path among a text's words is found when it is
-/// made portable on saving. Only a word with a separator past its
-/// first character is tried (`/data/a.tif`, `C:\a.tif`, `./a.tif`): a division's `/` or a
+/// made portable on saving. Only a word with a separator past its first character is tried (`/data/a.tif`, `C:\a.tif`, `./a.tif`): a division's `/` or a
 /// `/home` among other words is left as written.
 fn path_words(t: &str, f: impl Fn(&str) -> Option<String>) -> String {
     t.split_inclusive(char::is_whitespace)
         .map(|word| {
-            let core = word.trim_end().trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']' | ',' | ';'));
-            let core = core.strip_suffix(':').unwrap_or(core);
+            let core = word_core(word);
             let path_like = core.get(1..).is_some_and(|r| r.contains(['/', '\\']));
             match path_like.then(|| f(core)).flatten() {
                 Some(new) => word.replacen(core, &new, 1),
