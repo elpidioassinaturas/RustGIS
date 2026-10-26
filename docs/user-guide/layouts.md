@@ -187,7 +187,9 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   come from the family's own faces, as for the serif, and characters it lacks from the sans. A
   named family keeps a **Fallback**, Sans-serif or Serif, for a computer that doesn't have it (a
   project opened elsewhere, the web app): there the text is drawn in the fallback, and the pane
-  and the commands say so. The fallback starts as the family's own class (a serif's is Serif).
+  and the commands say so. A family that is installed but whose file can't be read (too large,
+  damaged) is drawn in the fallback too, and the command that names it says so. The fallback
+  starts as the family's own class (a serif's is Serif).
   Scripts give the family's name: `"font": "Garamond"`, with `"fallback": "serif"` if wanted;
   `labels.fonts` lists the installed families. The project keeps the name, never a file, and no
   font goes into a PNG or PDF export (their pages are pictures). **Picture** places a PNG or JPEG.

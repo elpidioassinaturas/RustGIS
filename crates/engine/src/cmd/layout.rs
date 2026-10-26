@@ -1172,7 +1172,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                         // and the legend; the sources and reference boxed under both.
                         // Its title and subtitle are serif: with none installed, drawn in the sans, said.
                         if (title.is_some() || subtitle.is_some())
-                            && let Some(w) = font_warning(FontFamily::Serif, None, false)
+                            && let Some(w) = font_warning(FontFamily::Serif, None, false, (false, false))
                         {
                             warnings.push(format!("the editorial title and subtitle: {w}"));
                         }
@@ -2209,8 +2209,8 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
         o => return Err(format!("unknown element kind '{o}'")),
     };
     let warning = match &k {
-        ElementKind::Text { font, font_name, .. } => {
-            font_warning(*font, font_name.as_deref(), p.get("fallback").is_some_and(|v| !v.is_null()))
+        ElementKind::Text { font, font_name, bold, italic, .. } => {
+            font_warning(*font, font_name.as_deref(), p.get("fallback").is_some_and(|v| !v.is_null()), (*bold, *italic))
         }
         _ => None,
     };
@@ -2414,11 +2414,12 @@ fn installed_family(name: &str) -> Option<&'static rustgis_render::families::Fam
     families::available()?.get(usize::from(families::find_ready(name)?))
 }
 
-/// Whether `family`'s regular face can be read and drawn (a file past the size RustGIS reads, or
-/// a damaged one, can't): read once and kept, as drawing it would.
-fn readable(family: &rustgis_render::families::Family) -> bool {
+/// Whether the face of `family` a text in `style` (bold, italic) draws in can be read (a file past
+/// the size RustGIS reads, or a damaged one, can't): that face only, read once and kept, as
+/// drawing it would.
+fn readable(family: &rustgis_render::families::Family, (bold, italic): (bool, bool)) -> bool {
     use rustgis_render::families;
-    families::pick(family, false, false).and_then(|(face, _)| families::bytes(face)).is_some()
+    families::pick(family, bold, italic).and_then(|(face, _)| families::bytes(face)).is_some()
 }
 
 /// A named family's fallback when none is given: the one it has when it is named again, else its
@@ -2446,7 +2447,7 @@ fn default_fallback(
 /// in the sans, so an export never differs from what was asked unsaid. While the app is still
 /// indexing the installed fonts (its first seconds), a family named with no `fallback` given is
 /// told that its fallback came from its name, not the font.
-fn font_warning(font: FontFamily, name: Option<&str>, fallback_given: bool) -> Option<String> {
+fn font_warning(font: FontFamily, name: Option<&str>, fallback_given: bool, style: (bool, bool)) -> Option<String> {
     let serif = rustgis_render::fonts::serif_available();
     let drawn = if font == FontFamily::Serif && serif { "serif" } else { "sans-serif" };
     let indexed = rustgis_render::families::available().is_some();
@@ -2455,7 +2456,7 @@ fn font_warning(font: FontFamily, name: Option<&str>, fallback_given: bool) -> O
             "the installed fonts are still being read, so {n}'s fallback ({drawn}) comes from its name, not the font: give \"fallback\" to choose it"
         )),
         // Installed, but its file can't be read (too large, damaged): drawn in its fallback too.
-        Some(n) if indexed && installed_family(n).is_some_and(|f| !readable(f)) => {
+        Some(n) if indexed && installed_family(n).is_some_and(|f| !readable(f, style)) => {
             Some(format!("{n} is installed but its font file can't be read, so the text is drawn in the {drawn}"))
         }
         Some(n) if indexed && rustgis_render::families::find_ready(n).is_none() => {
@@ -2729,8 +2730,14 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
     // A family asked for that isn't drawn as asked: said whenever the call asks for one (again
     // too, as `layout.addElement` says it), so a script is told what it gets; a call that changes
     // something else on such a text isn't told again.
+    let bold_now = match s.project.layouts.get(li).and_then(|l| l.element(id)).map(|e| &e.kind) {
+        Some(ElementKind::Text { bold, .. }) => b(p, "bold").unwrap_or(*bold),
+        _ => false,
+    };
     let font_told = match &new_text_style {
-        Some((_, (f, n))) if gives_font(p) => font_warning(*f, n.as_deref(), p.get("fallback").is_some_and(|v| !v.is_null())),
+        Some(((italic, _, _), (f, n))) if gives_font(p) => {
+            font_warning(*f, n.as_deref(), p.get("fallback").is_some_and(|v| !v.is_null()), (bold_now, *italic))
+        }
         _ => None,
     };
     if p.get("radius").is_some_and(|v| !v.is_null())
