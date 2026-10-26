@@ -17718,6 +17718,9 @@ fn the_project_log_records_each_command_run_on_the_project() {
         use crate::cmd::plugins::{Reach, reaches};
         let export = crate::cmd::all().into_iter().find(|c| c.id == "project.exportLog").unwrap();
         assert_eq!(reaches(&export, &json!({"path": "log.csv"})), Some(Reach::Files));
+        // Reading it too: it names the files and addresses the user's commands used.
+        let read = crate::cmd::all().into_iter().find(|c| c.id == "project.log").unwrap();
+        assert_eq!(reaches(&read, &json!({})), Some(Reach::Files));
     }
     // An error that starts as a spreadsheet formula is written as text in the CSV.
     let formula = LogEntry { at: 2, command: "x".into(), params: Value::Null, ok: false, error: Some("=HYPERLINK(1)".into()), millis: 0 };

@@ -203,10 +203,11 @@ pub struct LogEntry {
     pub millis: u64,
 }
 
-#[derive(Debug, Default, Serialize)]
+/// A log as it is held, written by [`ProjectLog::saved_json`] (its paths made portable) and read
+/// back through its own `Deserialize`.
+#[derive(Debug, Default)]
 struct LogState {
     /// Logging turned off (`project.logCommands`); on by default.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     off: bool,
     /// Oldest first; the oldest go first past [`LOG_LIMIT`], without moving the rest.
     entries: std::collections::VecDeque<LogEntry>,
@@ -389,9 +390,14 @@ impl ProjectLog {
     /// The log as a project file keeps it, each entry written in turn; saved into a folder
     /// (`dir`), its local paths made portable ([`portable_value`]).
     fn saved_json(&self, dir: Option<&str>) -> Result<String, String> {
-        let s = self.state();
-        let mut out = String::from(if s.off { r#"{"off":true,"entries":["# } else { r#"{"entries":["# });
-        for (i, e) in s.entries.iter().enumerate() {
+        // Copied under the lock and written after it is let go, so a command logged meanwhile
+        // (the interface thread, while an autosave writes) doesn't wait on the writing.
+        let (off, entries) = {
+            let s = self.state();
+            (s.off, s.entries.clone())
+        };
+        let mut out = String::from(if off { r#"{"off":true,"entries":["# } else { r#"{"entries":["# });
+        for (i, e) in entries.iter().enumerate() {
             if i > 0 {
                 out.push(',');
             }
@@ -408,12 +414,6 @@ impl ProjectLog {
         }
         out.push_str("]}");
         Ok(out)
-    }
-}
-
-impl Serialize for ProjectLog {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        self.state().serialize(s)
     }
 }
 

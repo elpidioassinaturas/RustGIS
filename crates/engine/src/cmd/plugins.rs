@@ -292,8 +292,9 @@ const NEVER: &[&str] = &[
     "project.logCommands",
 ];
 
-/// Commands that write files without naming one in their parameters.
-const WRITES_FILES: &[&str] = &["project.save", "project.saveAs"];
+/// Commands that write files without naming one in their parameters, or read what the user's
+/// commands named (the project log's paths, addresses and SQL).
+const WRITES_FILES: &[&str] = &["project.save", "project.saveAs", "project.log"];
 
 /// Parameter keys that name a file, folder or address. (`data` and `text` carry content, which
 /// plugins may pass: `layer.addDataBytes`, `map.import` from text.)

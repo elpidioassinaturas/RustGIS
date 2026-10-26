@@ -58,19 +58,23 @@ A project keeps a **log** of the commands run on it: what was done, when, with w
 it worked, for reproducing an analysis, reviewing work or writing a methods section. Every front
 end goes into it alike: the app, scripts, the AI Assistant, the command line, Python and MCP.
 
-- **What goes in:** each command that changes the project, and each that reaches a file, folder,
-  address or connection (an export, a download, a save), plus undo and redo, with the step they
-  took back or brought back. Reading and looking around (listing layers, describing a tool,
-  reading features, moving the view) is left out. A command run by another (a script's lines, a
+- **What goes in:** each command that changes the project, and each that names a file, folder,
+  address or connection, reads included (an export, a download, a save, opening a file), plus
+  undo and redo, with the step they took back or brought back. Reading and looking around within
+  the project (listing layers, describing a tool, reading features, moving the view) is left out. A command run by another (a script's lines, a
   model's steps) is inside its parent's entry. Opening or making a project goes into the log of
   the project it opens or makes; one that fails to open stays in the log of the project open.
-  A plugin can't empty the log or turn it off; it can read it (`project.log`), whose
-  entries hold no secrets.
-- **Each entry:** `at` (when it started, in milliseconds since 1970, UTC), `command`, `params`,
-  `ok`, `error` when it failed, and `millis`, how long it took.
+  A plugin can't empty the log or turn it off, and reading it (`project.log`) takes the file
+  permission, since it names the files and addresses the user's commands used.
+- **Each entry:** `at` (when it started, in milliseconds since 1970, UTC; for a plugin's command
+  that waited for its downloads, when its last run started), `command`, `params`, `ok`, `error`
+  when it failed, and `millis`, how long it took.
 - **Outside undo:** undoing a command doesn't take its entry back.
 - **No secrets:** the parameters lose passwords, keys and tokens as History's Copy as code does,
-  and so does an error's text. Each entry's parameters are clipped to about 4 KB of JSON (a long
+  and so does an error's text; a document given as text (a map, a project) is kept as its size
+  only. A secret written as plain words, with no name or address form (an SQL `CREATE SECRET`'s
+  values), isn't recognised: clear the log before sharing a project that used one. Each entry's
+  parameters are clipped to about 4 KB of JSON (a long
   text is cut, a list keeps its first 100 items), its error to 500 characters, and the log keeps
   its last 10,000 entries, the oldest dropped first.
 - **Saved with the project:** a shared `.rgis` carries its log (a package, `.rgispkg`, or a
