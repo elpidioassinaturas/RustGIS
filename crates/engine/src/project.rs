@@ -203,7 +203,7 @@ pub struct LogEntry {
     pub millis: u64,
 }
 
-/// A log as it is held, written by [`ProjectLog::saved_json`] (its paths made portable) and read
+/// A log as it is held, written by [`ProjectLog::write_json`] (its paths made portable) and read
 /// back through its own `Deserialize`.
 #[derive(Debug, Default)]
 struct LogState {
@@ -399,23 +399,14 @@ impl ProjectLog {
                 _ => {}
             }
         }
-        // An error's words written as relative paths (`./data/a.tif:`), as `portable_text` wrote them.
-        let words = |t: &str| -> String {
-            t.split_inclusive(char::is_whitespace)
-                .map(|word| {
-                    let core = word.trim_end().trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']' | ',' | ';'));
-                    let core = core.strip_suffix(':').unwrap_or(core);
-                    match (core.starts_with("./") || core.starts_with("../")).then(|| rustgis_map::paths::resolve(dir, core)).flatten() {
-                        Some(abs) => word.replacen(core, &abs, 1),
-                        None => word.to_string(),
-                    }
-                })
-                .collect()
-        };
         for e in &mut self.state().entries {
             resolved(&mut e.params, dir, 0);
+            // An error's words written as relative paths (`./data/a.tif:`), as `portable_text`
+            // wrote them.
             if let Some(err) = e.error.as_mut() {
-                *err = words(err);
+                *err = path_words(err, |p| {
+                    (p.starts_with("./") || p.starts_with("../")).then(|| rustgis_map::paths::resolve(dir, p)).flatten()
+                });
             }
         }
     }
@@ -425,30 +416,29 @@ impl ProjectLog {
         std::mem::take(&mut self.state().entries).len()
     }
 
-    /// The log as a project file keeps it, each entry written in turn; saved into a folder
-    /// (`dir`), its local paths made portable ([`portable_value`]).
-    fn saved_json(&self, dir: Option<&str>) -> Result<String, String> {
+    /// The log as a project file keeps it, written at the end of `out`, each entry in turn; saved
+    /// into a folder (`dir`), its local paths made portable ([`make_portable`]).
+    fn write_json(&self, out: &mut String, dir: Option<&str>) -> Result<(), String> {
         // Copied under the lock and written after it is let go, so a command logged meanwhile
-        // (the interface thread, while an autosave writes) doesn't wait on the writing.
+        // (the interface thread, while an autosave writes) doesn't wait on the writing. That copy
+        // is the only one: each entry is made portable in place and written into `out`.
         let (off, entries) = {
             let s = self.state();
             (s.off, s.entries.clone())
         };
-        let mut out = String::from(if off { r#"{"off":true,"entries":["# } else { r#"{"entries":["# });
-        // That copy is the only one: each entry is made portable in place.
+        out.push_str(if off { r#"{"off":true,"entries":["# } else { r#"{"entries":["# });
         for (i, mut e) in entries.into_iter().enumerate() {
             if i > 0 {
                 out.push(',');
             }
             if let Some(d) = dir {
-                e.params = portable_value(&e.params, d, 0);
+                make_portable(&mut e.params, d, 0);
                 e.error = e.error.as_deref().map(|t| portable_text(t, d));
             }
-            let text = serde_json::to_string(&e);
-            out.push_str(&text.map_err(|e| e.to_string())?);
+            out.push_str(&serde_json::to_string(&e).map_err(|e| e.to_string())?);
         }
         out.push_str("]}");
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -689,22 +679,21 @@ fn with_log(mut text: String, log: &ProjectLog, dir: Option<&str>) -> Result<Str
     if log.nothing_to_save() || !text.ends_with('}') {
         return Ok(text);
     }
-    let log = log.saved_json(dir)?;
     text.pop();
     text.push_str(",\"log\":");
-    text.push_str(&log);
+    log.write_json(&mut text, dir)?;
     text.push('}');
     Ok(text)
 }
 
-/// `v` with its texts' local paths made portable ([`portable_text`]).
-fn portable_value(v: &serde_json::Value, dir: &str, depth: usize) -> serde_json::Value {
+/// `v`'s texts with their local paths made portable ([`portable_text`]), in place.
+fn make_portable(v: &mut serde_json::Value, dir: &str, depth: usize) {
     use serde_json::Value;
     match v {
-        Value::String(t) => Value::String(portable_text(t, dir)),
-        Value::Array(a) if depth < 16 => Value::Array(a.iter().map(|x| portable_value(x, dir, depth + 1)).collect()),
-        Value::Object(o) if depth < 16 => Value::Object(o.iter().map(|(k, x)| (k.clone(), portable_value(x, dir, depth + 1))).collect()),
-        other => other.clone(),
+        Value::String(t) => *t = portable_text(t, dir),
+        Value::Array(a) if depth < 16 => a.iter_mut().for_each(|x| make_portable(x, dir, depth + 1)),
+        Value::Object(o) if depth < 16 => o.values_mut().for_each(|x| make_portable(x, dir, depth + 1)),
+        _ => {}
     }
 }
 
@@ -719,14 +708,20 @@ fn portable_text(t: &str, dir: &str) -> String {
     if rustgis_map::paths::is_absolute_local(t) {
         return portable(t);
     }
+    path_words(t, |p| rustgis_map::paths::is_absolute_local(p).then(|| portable(p)))
+}
+
+/// `t` with each word (quotes, brackets, a trailing `,`, `;` or `:` aside) replaced by what `f`
+/// makes of it, where `f` gives something: how a path among an error's words is found, both
+/// ways (made portable on save, absolute again on load).
+fn path_words(t: &str, f: impl Fn(&str) -> Option<String>) -> String {
     t.split_inclusive(char::is_whitespace)
         .map(|word| {
             let core = word.trim_end().trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']' | ',' | ';'));
             let core = core.strip_suffix(':').unwrap_or(core);
-            if !core.is_empty() && rustgis_map::paths::is_absolute_local(core) {
-                word.replacen(core, &portable(core), 1)
-            } else {
-                word.to_string()
+            match (!core.is_empty()).then(|| f(core)).flatten() {
+                Some(new) => word.replacen(core, &new, 1),
+                None => word.to_string(),
             }
         })
         .collect()

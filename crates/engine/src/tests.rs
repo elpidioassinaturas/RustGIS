@@ -17722,6 +17722,17 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let r = s.run("project.log", &json!({"command": "project.rename", "failed": true})).unwrap();
     assert_eq!((r["count"].as_u64(), r["entries"][0]["command"].as_str()), (Some(1), Some("project.rename")));
     assert_eq!(s.run("project.log", &json!({"limit": 2})).unwrap()["entries"].as_array().map(Vec::len), Some(2));
+    // Many keys with short values still fit the bound.
+    let wide: serde_json::Map<String, Value> = (0..40).map(|i| (format!("{i:02}{}", "k".repeat(62)), json!("é".repeat(64)))).collect();
+    let kept = crate::project_log::kept_params(&Value::Object(wide));
+    assert!(serde_json::to_vec(&kept).unwrap().len() <= crate::project::LOG_PARAMS_BYTES, "{kept}");
+    assert!(kept.as_object().is_some_and(|o| !o.is_empty() && o.len() < 40));
+    // An unquoted secret key in an object that doesn't parse goes, with the rest of the text;
+    // a format string's braces stay.
+    let line = crate::project_log::kept_params(&json!({"script": "s3.connect {secretAccessKey: \"S3CRET\"}\nprint(f\"{x:.2f}\")"}));
+    assert!(!line.to_string().contains("S3CRET"), "{line}");
+    let fmt = crate::project_log::kept_params(&json!({"script": "print(f\"{x:.2f}\")"}));
+    assert_eq!(fmt["script"], json!("print(f\"{x:.2f}\")"));
     // Times as decimals too; a negative time, or a filter that isn't true or false, is refused.
     assert_eq!(s.run("project.log", &json!({"since": 1.7e12, "limit": 1})).unwrap()["entries"].as_array().map(Vec::len), Some(1));
     assert!(s.run("project.log", &json!({"since": -1})).is_err());

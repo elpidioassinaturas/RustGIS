@@ -12,7 +12,8 @@ pub(crate) fn now_ms() -> u64 {
 }
 
 /// Whether command `id`, run by itself with `params`, goes into the log: one that changes the
-/// project (all but those built with `.view()`, a plugin's as it declares), undo and redo, a save,
+/// project (all but those built with `.view()`; a plugin's when its manifest asks for the Edit
+/// permission), undo and redo, a save,
 /// the log's own clearing and switching, and a command whose parameters name a file, folder,
 /// address or connection (an export), as the plugin permission gate reads them. Reading and
 /// looking around (listing, describing, moving the view) is left out: agents, scripts and plugins
@@ -59,15 +60,33 @@ pub(crate) fn kept_params(params: &Value) -> Value {
         return clipped;
     }
     // Still too large (many keys, long lists): its first keys with their short values only (a
-    // number, a flag, a text of up to 64 characters with no brace), the rest as "…". Nothing in
-    // it is cut JSON, so it reads back as it was written.
+    // number, a flag, a text of up to 64 characters with no brace), the rest as "…", as many as
+    // fit within the bound. Nothing in it is cut JSON, so it reads back as it was written.
     let short = |v: &Value| match v {
         Value::String(t) if t.chars().nth(64).is_none() && !t.contains('{') => v.clone(),
         Value::Number(_) | Value::Bool(_) | Value::Null => v.clone(),
         _ => Value::String("…".into()),
     };
     match clipped {
-        Value::Object(o) => Value::Object(o.iter().take(40).map(|(k, v)| (k.chars().take(64).collect(), short(v))).collect()),
+        Value::Object(o) => {
+            // Each key and value is short, but forty of them can still add up (escaped or
+            // multi-byte text): each pair counts its bytes, a colon and a comma.
+            let mut room = LOG_PARAMS_BYTES.saturating_sub(2);
+            let mut out = serde_json::Map::new();
+            for (k, v) in o.iter().take(40) {
+                let (k, v): (String, Value) = (k.chars().take(64).collect(), short(v));
+                let size = serde_json::to_vec(&k)
+                    .map_or(usize::MAX, |b| b.len())
+                    .saturating_add(serde_json::to_vec(&v).map_or(usize::MAX, |b| b.len()))
+                    .saturating_add(2);
+                if size > room {
+                    break;
+                }
+                room -= size;
+                out.insert(k, v);
+            }
+            Value::Object(out)
+        }
         other => short(&other),
     }
 }
@@ -130,9 +149,12 @@ fn json_in_text_redacted(t: &str) -> String {
                 rest = from.get(end..).unwrap_or("");
             }
             // Cut short by the clip, or an object that doesn't parse (a trailing comma, single
-            // quotes) though a key starts it: what follows its `{` may hold a secret, so none of it
-            // stays. Text such as `{name}` stays as it is.
-            Some(Err(e)) if e.is_eof() || from.get(1..).is_some_and(|r| r.trim_start().starts_with(['"', '\''])) => {
+            // quotes) though a key starts it, or whose keys aren't quoted but one is a secret's
+            // (`{secretAccessKey: …}`): what follows its `{` may hold a secret, so none of it
+            // stays. Text such as `{name}` or `{x:.2f}` stays as it is.
+            Some(Err(e))
+                if e.is_eof() || from.get(1..).is_some_and(|r| r.trim_start().starts_with(['"', '\'']) || secret_name_follows(r)) =>
+            {
                 out.push('…');
                 return out;
             }
@@ -144,6 +166,23 @@ fn json_in_text_redacted(t: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Whether `t` holds a secret's name (`credentials::secret_key`) as a key, unquoted, before a
+/// `:` or `=` (`secretAccessKey: "…"`, `token = …`).
+fn secret_name_follows(t: &str) -> bool {
+    let name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.');
+    let mut rest = t;
+    while let Some(at) = rest.find(name) {
+        let from = rest.get(at..).unwrap_or("");
+        let end = from.find(|c: char| !name(c)).unwrap_or(from.len());
+        let (key, after) = from.split_at(end);
+        if after.trim_start().starts_with([':', '=']) && rustgis_data::source::credentials::secret_key(key) {
+            return true;
+        }
+        rest = after;
+    }
+    false
 }
 
 /// The longest text kept as it is that reads as a document (it starts with `{`, `[` or `<`).
