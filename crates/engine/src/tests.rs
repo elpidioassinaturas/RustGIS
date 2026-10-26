@@ -17686,6 +17686,7 @@ fn the_project_log_records_each_command_run_on_the_project() {
     assert_eq!(s.run("project.log", &json!({"since": 1.7e12, "limit": 1})).unwrap()["entries"].as_array().map(Vec::len), Some(1));
     assert!(s.run("project.log", &json!({"since": -1})).is_err());
     assert!(s.run("project.log", &json!({"failed": "true"})).is_err());
+    assert!(s.run("project.log", &json!({"command": 7})).is_err());
     // A plugin never empties the log or turns it off; writing it out is reaching a file.
     assert!(crate::cmd::plugins::user_only("project.clearLog") && crate::cmd::plugins::user_only("project.logCommands"));
     {
@@ -17717,6 +17718,19 @@ fn the_project_log_records_each_command_run_on_the_project() {
     assert_eq!(commands(&s), ["project.clearLog"]);
     s.run("project.logCommands", &json!({"on": true})).unwrap();
     assert_eq!(commands(&s), ["project.clearLog", "project.logCommands"]);
+    // A file's log is read keeping its last entries, each bounded.
+    let entries: Vec<Value> = (0..LOG_LIMIT + 3)
+        .map(|i| json!({"at": i, "command": "x".repeat(if i == LOG_LIMIT + 2 { 1000 } else { 1 }), "ok": true, "params": {"a": "y".repeat(if i == LOG_LIMIT + 2 { 20_000 } else { 1 })}}))
+        .collect();
+    let log: crate::project::ProjectLog = serde_json::from_value(json!({"entries": entries})).unwrap();
+    let read = log.entries();
+    assert_eq!((read.len(), read[0].at), (LOG_LIMIT, 3));
+    let last = read.last().unwrap();
+    assert!(
+        last.command.chars().count() == 200 && serde_json::to_vec(&last.params).unwrap().len() <= LOG_PARAMS_BYTES,
+        "{}",
+        last.command.len()
+    );
     // Capped: the oldest go first.
     for i in 0..LOG_LIMIT + 5 {
         s.project.log.push(LogEntry { at: i as u64, command: "x".into(), params: Value::Null, ok: true, error: None, millis: 0 });

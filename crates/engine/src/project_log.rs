@@ -46,6 +46,21 @@ pub(crate) fn kept_params(params: &Value) -> Value {
     Value::String(format!("{}…", text.chars().take(LOG_PARAMS_BYTES / 2).collect::<String>()))
 }
 
+/// An entry read from a file, bounded as a new one is: its command, parameters and error clipped
+/// (its secrets were taken out when it was written).
+pub(crate) fn bounded(mut e: LogEntry) -> LogEntry {
+    if e.command.chars().nth(200).is_some() {
+        e.command = e.command.chars().take(200).collect();
+    }
+    if serde_json::to_vec(&e.params).map_or(0, |b| b.len()) > LOG_PARAMS_BYTES {
+        e.params = kept_params(&e.params);
+    }
+    if let Some(t) = e.error.as_mut().filter(|t| t.chars().nth(LOG_ERROR_CHARS).is_some()) {
+        *t = format!("{}…", t.chars().take(LOG_ERROR_CHARS).collect::<String>());
+    }
+    e
+}
+
 /// The longest text kept as it is that reads as a document (it starts with `{`, `[` or `<`).
 const DOCUMENT_CHARS: usize = 200;
 

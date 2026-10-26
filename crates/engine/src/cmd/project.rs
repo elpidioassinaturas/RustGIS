@@ -58,7 +58,10 @@ fn log(s: &mut Session, p: &Value) -> CmdResult {
         }
     };
     let (since, until) = (num("since")?, num("until")?);
-    let command = ps(p, "command").map(str::trim).filter(|c| !c.is_empty());
+    let command = match p.get("command") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_str().ok_or("command must be a command id, or the start of one")?.trim()).filter(|c| !c.is_empty()),
+    };
     let failed = match p.get("failed") {
         None | Some(Value::Null) => None,
         Some(v) => Some(v.as_bool().ok_or("failed must be true or false")?),

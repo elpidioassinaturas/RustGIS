@@ -208,9 +208,33 @@ struct LogState {
     /// Logging turned off (`project.logCommands`); on by default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     off: bool,
-    /// Oldest first; the oldest go first past [`LOG_LIMIT`], without moving the rest.
-    #[serde(default)]
+    /// Oldest first; the oldest go first past [`LOG_LIMIT`], without moving the rest. Read from a
+    /// file one entry at a time, keeping its last [`LOG_LIMIT`], each bounded as a new one is.
+    #[serde(default, deserialize_with = "last_entries")]
     entries: std::collections::VecDeque<LogEntry>,
+}
+
+/// A file's log entries, read one at a time (a project file is hostile input): only the last
+/// [`LOG_LIMIT`] are kept, each clipped as a new entry is ([`crate::project_log::bounded`]).
+fn last_entries<'de, D: serde::Deserializer<'de>>(d: D) -> Result<std::collections::VecDeque<LogEntry>, D::Error> {
+    struct Last;
+    impl<'de> serde::de::Visitor<'de> for Last {
+        type Value = std::collections::VecDeque<LogEntry>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a list of log entries")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut out = std::collections::VecDeque::new();
+            while let Some(e) = seq.next_element::<LogEntry>()? {
+                out.push_back(crate::project_log::bounded(e));
+                if out.len() > LOG_LIMIT {
+                    out.pop_front();
+                }
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_seq(Last)
 }
 
 /// A project's log (#797): one entry for each command run on it, from any front end, kept in
@@ -320,13 +344,9 @@ impl Serialize for ProjectLog {
 }
 
 impl<'de> Deserialize<'de> for ProjectLog {
-    /// A file's log, its last [`LOG_LIMIT`] entries (a project file is hostile input).
+    /// A file's log, its last [`LOG_LIMIT`] entries ([`last_entries`]).
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let mut state = LogState::deserialize(d)?;
-        while state.entries.len() > LOG_LIMIT {
-            state.entries.pop_front();
-        }
-        Ok(ProjectLog(std::sync::Arc::new(Mutex::new(state))))
+        Ok(ProjectLog(std::sync::Arc::new(Mutex::new(LogState::deserialize(d)?))))
     }
 }
 
