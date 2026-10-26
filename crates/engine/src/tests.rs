@@ -17664,6 +17664,13 @@ fn a_raster_projected_onto_a_chosen_grid() {
     for bad in [json!(["x", 1, 2]), json!([0, 0, "EPSG"]), json!([1])] {
         assert!(s.run("raster.project", &json!({"layer": "the", "crs": 31983, "cellSize": 200, "origin": bad})).is_err(), "{bad}");
     }
+    // An extent or a grid of the wrong kind is refused, not read as the view or left out.
+    for bad in [json!({"extent": 5}), json!({"extent": {}}), json!({"extent": true}), json!({"grid": 5}), json!({"grid": ["the"]})] {
+        let mut p = bad.clone();
+        p["layer"] = json!("the");
+        let e = s.run("raster.project", &p).unwrap_err();
+        assert!(e.contains("extent is") || e.contains("grid is"), "{bad}: {e}");
+    }
     assert_eq!((moved["corner"][0].as_f64().unwrap() - 50.0).rem_euclid(200.0), 0.0, "{moved}");
 
     // Onto that grid exactly, by nearest neighbour (the default).

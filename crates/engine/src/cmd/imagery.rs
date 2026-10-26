@@ -327,6 +327,9 @@ fn warp_to_fit(s: &mut Session, p: &Value, layer: &str, r: &Raster) -> CmdResult
 /// `raster.project`: the layer on a grid of another coordinate system, cell size, origin and
 /// extent, or on another raster's grid, each cell sampled at its centre or taken from every
 /// pixel whose centre falls in it (see `rustgis_analysis::warp::project`). A new layer.
+/// What an `extent` that isn't one is told.
+const EXTENT: &str = "extent is a polygon layer's name, [west, south, east, north] in degrees, or \"view\"";
+
 fn project_raster(s: &mut Session, p: &Value) -> CmdResult {
     let r = raster(s, p)?;
     r.require_coordinates()?;
@@ -334,7 +337,12 @@ fn project_raster(s: &mut Session, p: &Value) -> CmdResult {
         None | Some(Value::Null) => warp::Method::Sample(warp::Resampling::Nearest),
         Some(v) => v.as_str().and_then(warp::Method::parse).ok_or("resampling is nearest, bilinear, cubic, average or mode")?,
     };
-    let grid = match ps(p, "grid") {
+    // A grid named as anything but a raster layer's name is refused rather than ignored.
+    let template = match p.get("grid") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_str().ok_or("grid is a raster layer's name")?),
+    };
+    let grid = match template {
         Some(template) => {
             if ["crs", "cellSize", "origin", "extent"].iter().any(|k| p.get(*k).is_some_and(|v| !v.is_null())) {
                 return Err(
@@ -384,13 +392,15 @@ fn project_raster(s: &mut Session, p: &Value) -> CmdResult {
                     }
                     warp::bounds_in([e.min_x, e.min_y, e.max_x, e.max_y], crs)?
                 }
-                Some(v) => {
-                    let area = super::catalogs::area(s, &json!({"bbox": v}))?;
+                Some(v @ (Value::Array(_) | Value::String(_))) => {
+                    let area = super::catalogs::area(s, &json!({"bbox": v})).map_err(|_| EXTENT)?;
                     if area[0] > area[2] {
                         return Err("an extent across the antimeridian: give it one side at a time".into());
                     }
                     warp::bounds_in(area, crs)?
                 }
+                // A number, a flag or an object isn't an extent: refused, not read as the view.
+                Some(_) => return Err(EXTENT.into()),
             };
             warp::Grid::snapped(crs, bounds, cell, origin)?
         }
@@ -402,7 +412,7 @@ fn project_raster(s: &mut Session, p: &Value) -> CmdResult {
     let out_name = name(p, format!("{} projected", r.name));
     let out = warp::project(&r, &grid, method, out_name.clone())?;
     let mut info = json!({
-        "name": out_name, "crs": grid.crs.label(), "resampling": method.id(), "width": out.width, "height": out.height, "bands": out.band_count(),
+        "name": out_name, "crs": grid.crs.label(), "resampling": method.used_on(&r).id(), "width": out.width, "height": out.height, "bands": out.band_count(),
         "cellSize": [grid.cell_x, grid.cell_y], "corner": [grid.min_x, grid.max_y],
     });
     if let Some((fw, fh)) = r.overview {

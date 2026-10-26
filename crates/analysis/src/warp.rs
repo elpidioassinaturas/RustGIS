@@ -413,6 +413,16 @@ impl Method {
             Method::Mode => "mode",
         }
     }
+
+    /// The method `r` is projected with: a palette image's classes are never mixed, so it is
+    /// sampled at the nearest pixel, or takes the mode, whatever was asked.
+    pub fn used_on(self, r: &Raster) -> Method {
+        match (self, &r.color) {
+            (Method::Average | Method::Mode, ColorHint::Palette(_)) => Method::Mode,
+            (Method::Sample(_), ColorHint::Palette(_)) => Method::Sample(Resampling::Nearest),
+            (m, _) => m,
+        }
+    }
 }
 
 /// Projects `r` onto the grid `g`, through longitude/latitude when their coordinate systems
@@ -679,7 +689,14 @@ fn aggregated(
             let at = oy * ow + ox;
             if inside {
                 for ((o, v), k) in cell.iter_mut().zip(values.iter_mut()).zip(&weights) {
-                    *o = if mode { mode_of(v) } else { mean_of(v, k, round) };
+                    *o = if mode {
+                        // The most frequent colour among the pixels that show: see-through ones
+                        // count for nothing, as in the mean.
+                        let mut shown: Vec<f32> = v.iter().zip(k).filter(|(_, k)| **k > 0.0).map(|(x, _)| *x).collect();
+                        mode_of(&mut shown)
+                    } else {
+                        mean_of(v, k, round)
+                    };
                 }
             } else {
                 // A grid finer than the raster: the pixel under the cell's centre.
@@ -967,6 +984,14 @@ mod tests {
         let g = Grid::snapped(r.crs, [0.0, 0.0, 2.0, 2.0], (2.0, 2.0), (0.0, 0.0)).unwrap();
         let out = project(&r, &g, Method::Average, "a".into()).unwrap();
         assert_eq!([0, 1, 2, 3].map(|b| out.value(b, 0, 0)), [Some(255.0), Some(0.0), Some(0.0), Some(128.0)]);
+        // Mode counts the pixels that show: three see-through black ones lose to one opaque red.
+        let wide = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 1.0, pixel_height: -1.0 };
+        let px = |a: f32, b: f32| vec![a, b, b, b];
+        let bands = vec![px(255.0, 0.0), px(0.0, 0.0), px(0.0, 0.0), px(255.0, 0.0)];
+        let r = Raster::new("rgba", 4, 1, bands, wide, crs, None, ColorHint::Rgb { alpha: true }, "UInt8").unwrap();
+        let g = Grid::snapped(r.crs, [0.0, 0.0, 4.0, 1.0], (4.0, 1.0), (0.0, 0.0)).unwrap();
+        let out = project(&r, &g, Method::Mode, "m".into()).unwrap();
+        assert_eq!([0, 1, 2].map(|b| out.value(b, 0, 0)), [Some(255.0), Some(0.0), Some(0.0)]);
     }
 
     /// A pixel centre on the edge between cells is in exactly one of them, and a grid finer than
