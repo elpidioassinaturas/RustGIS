@@ -61,11 +61,12 @@ end goes into it alike: the app, scripts, the AI Assistant, the command line, Py
 - **What goes in:** each command that changes the project, and each that names a file, folder,
   address or connection, reads included (an export, a download, a save, opening a file), plus
   undo and redo, with the step they took back or brought back. Reading and looking around within
-  the project (listing layers, describing a tool, reading features, moving the view) is left out. A command run by another (a script's lines, a
-  model's steps) is inside its parent's entry. Opening or making a project goes into the log of
-  the project it opens or makes; one that fails to open stays in the log of the project open.
-  A plugin can't empty the log or turn it off, and reading it (`project.log`) takes the file
-  permission, since it names the files and addresses the user's commands used.
+  the project (listing layers, describing a tool, reading features, moving the view) is left
+  out. A command run by another (a script's lines, a model's steps) is inside its parent's
+  entry. Opening or making a project goes into the log of the project it opens or makes; one
+  that fails to open stays in the log of the project open. A plugin can't empty the log or turn
+  it off, and reading it (`project.log`) takes the file permission, since it names the files and
+  addresses the user's commands used.
 - **Each entry:** `at` (when it started, in milliseconds since 1970, UTC; for a plugin's command
   that waited for its downloads, when its last run started), `command`, `params`, `ok`, `error`
   when it failed, and `millis`, how long it took.
@@ -74,21 +75,23 @@ end goes into it alike: the app, scripts, the AI Assistant, the command line, Py
   and so does an error's text; a document given as text (a map, a project) is kept as its size
   only. A secret written as plain words, with no name or address form (an SQL `CREATE SECRET`'s
   values), isn't recognised: clear the log before sharing a project that used one. Each entry's
-  parameters are clipped to about 4 KB of JSON (a long
-  text is cut, a list keeps its first 100 items), its error to 500 characters, and the log keeps
-  its last 10,000 entries, the oldest dropped first.
+  parameters are clipped to about 4 KB of JSON (a long text is cut, a list keeps its first 100
+  items), its error to 500 characters, and the log keeps its last 10,000 entries, the oldest
+  dropped first.
 - **Saved with the project:** a shared `.rgis` carries its log (a package, `.rgispkg`, or a
-  template doesn't). Clear it first if that isn't
-  wanted (`project.clearLog`, which leaves its own entry), or turn logging off for a project
-  (`project.logCommands {"on": false}`; what is there stays). A project with no log saves as
-  before.
+  template doesn't). Clear it first if that isn't wanted (`project.clearLog`, which leaves its
+  own entry), or turn logging off for a project (`project.logCommands {"on": false}`; what is
+  there stays). A project with no log saves as before. Saved into a folder, the local paths in
+  its parameters and errors are written relative to it, as the project's sources are; a path
+  with spaces in it that an error names is found whole when it is one of the entry's parameters,
+  and otherwise by its words.
 
 From scripts: `project.log {"since"?, "until"?, "command"?, "failed"?, "limit"?}` lists entries,
-newest last (`command` is an id, or the start of one ending in a dot, `layer.`; `limit` is 100 by
-default and at most 1,000, with `count` saying how many match), and
-`project.exportLog {"path": "log.csv"}` writes it out as CSV (one row an entry, the parameters as
-a JSON column) or JSON Lines (`.jsonl`). The History pane still keeps geoprocessing runs with their
-outputs and Copy as code; the log is a plain record and runs nothing again.
+newest last (`command` is an id, or the start of one ending in a dot, `layer.`; `limit` is 100
+by default and at most 1,000, with `count` saying how many match), and `project.exportLog
+{"path": "log.csv"}` writes it out as CSV (one row an entry, the parameters as a JSON column) or
+JSON Lines (`.jsonl`). The History pane still keeps geoprocessing runs with their outputs and
+Copy as code; the log is a plain record and runs nothing again.
 
 ### QGIS projects and styles
 

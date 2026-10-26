@@ -17699,14 +17699,14 @@ fn the_project_log_records_each_command_run_on_the_project() {
     assert!(!Project::default().saved_text(None).unwrap().0.contains("\"log\""));
     // Saved into a folder, its paths are written relative to it, as the project's sources are.
     let folder = std::env::temp_dir().join(format!("rustgis-log-portable-{}", std::process::id()));
-    let inside = folder.join("data").join("a.tif");
+    let inside = folder.join("My Data").join("a.tif");
     let error = Some(format!("{}: not found", inside.display()));
     let params = json!({"path": inside.to_string_lossy(), "name": "./Maps and data"});
     s.project.log.push(LogEntry { at: 1, command: "layer.addData".into(), params, ok: false, error, millis: 0, relative: Vec::new() });
     let (text, _) = s.project.saved_text(Some(&folder)).unwrap();
     let saved: Value = serde_json::from_str(&text).unwrap();
     let last = saved["log"]["entries"].as_array().unwrap().last().unwrap().clone();
-    assert_eq!((last["params"]["path"].as_str(), last["error"].as_str()), (Some("./data/a.tif"), Some("./data/a.tif: not found")));
+    assert_eq!((last["params"]["path"].as_str(), last["error"].as_str()), (Some("./My Data/a.tif"), Some("./My Data/a.tif: not found")));
     assert_eq!(s.project.log.entries().last().unwrap().params["path"], json!(inside.to_string_lossy()), "the open project keeps them");
     // Read back from that folder, they are absolute again, so a Save As elsewhere keeps them right.
     std::fs::create_dir_all(&folder).unwrap();
@@ -17716,7 +17716,7 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let path = reopened.log.entries().last().unwrap().params["path"].as_str().unwrap().to_string();
     assert!(std::path::Path::new(&path).is_absolute() && path.ends_with("a.tif"), "{path}");
     let error = reopened.log.entries().last().unwrap().error.clone().unwrap();
-    assert!(error.ends_with(": not found") && !error.starts_with("./"), "{error}");
+    assert_eq!(error, format!("{}: not found", path), "the error names the path whole again");
     // A text given as relative is read back as it was run, not against the project's folder.
     assert_eq!(reopened.log.entries().last().unwrap().params["name"], json!("./Maps and data"));
     assert!(reopened.log.entries().iter().all(|e| e.relative.is_empty()));
@@ -17731,6 +17731,19 @@ fn the_project_log_records_each_command_run_on_the_project() {
     assert!(serde_json::to_vec(&kept).unwrap().len() <= crate::project::LOG_PARAMS_BYTES, "{kept}");
     assert!(kept.as_object().is_some_and(|o| o.len() > 1 && o.len() < 40));
     assert_eq!(kept["…"], json!("40 keys in all"));
+    // Keys alike in their first 64 characters: the first stays, the other counted as left out.
+    let mut alike: serde_json::Map<String, Value> = (0..40).map(|i| (format!("{i:02}{}", "k".repeat(62)), json!("v".repeat(64)))).collect();
+    alike.insert(format!("{}a", "z".repeat(64)), json!(1));
+    alike.insert(format!("{}b", "z".repeat(64)), json!(2));
+    let kept = crate::project_log::kept_params(&Value::Object(alike));
+    assert_eq!(kept["…"], json!("42 keys in all"));
+    // A file of crafted texts opens quickly: each text's secret names are looked for once.
+    let crafted = "{1".repeat(2_000);
+    let started = std::time::Instant::now();
+    for _ in 0..200 {
+        crate::project_log::kept_params(&json!({"script": crafted}));
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
     // An unquoted secret key in an object that doesn't parse goes, with the rest of the text;
     // a format string's braces stay.
     let line = crate::project_log::kept_params(&json!({"script": "s3.connect {secretAccessKey: \"S3CRET\"}\nprint(f\"{x:.2f}\")"}));

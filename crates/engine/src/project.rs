@@ -301,12 +301,13 @@ impl<'de> serde::de::Visitor<'de> for LogEntries {
         let mut out = std::collections::VecDeque::new();
         while let Some(v) = seq.next_element::<serde_json::Value>()? {
             let Ok(e) = serde_json::from_value::<LogEntry>(v) else { continue };
-            out.push_back(crate::project_log::bounded(e));
+            out.push_back(e);
             if out.len() > LOG_LIMIT {
                 out.pop_front();
             }
         }
-        Ok(out)
+        // Clipped and redacted once kept: an entry dropped for the cap costs nothing more.
+        Ok(out.into_iter().map(crate::project_log::bounded).collect())
     }
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         while map.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
@@ -394,15 +395,22 @@ impl ProjectLog {
     fn resolve_paths(&self, dir: &str) {
         let word = |p: &str| (p.starts_with("./") || p.starts_with("../")).then(|| rustgis_map::paths::resolve(dir, p)).flatten();
         for e in &mut self.state().entries {
-            for at in std::mem::take(&mut e.relative) {
-                if at == "/error" {
-                    if let Some(err) = e.error.as_mut() {
-                        *err = path_words(err, word);
+            let relative = std::mem::take(&mut e.relative);
+            // The parameters' whole paths, as they were saved and as they are now, so the error
+            // that names one (spaces and all) gets it back whole.
+            let mut swaps = Vec::new();
+            for at in relative.iter().filter(|at| *at != "/error") {
+                if let Some(serde_json::Value::String(t)) = at.strip_prefix("/params").and_then(|p| e.params.pointer_mut(p)) {
+                    match word(t) {
+                        Some(abs) => swaps.push((std::mem::replace(t, abs.clone()), abs)),
+                        None => *t = path_words(t, word),
                     }
-                } else if let Some(serde_json::Value::String(t)) = at.strip_prefix("/params").and_then(|p| e.params.pointer_mut(p)) {
-                    // The whole text, as `portable_text` made it (spaces and all), or its words.
-                    *t = word(t).unwrap_or_else(|| path_words(t, word));
                 }
+            }
+            if relative.iter().any(|at| at == "/error")
+                && let Some(err) = e.error.as_mut()
+            {
+                *err = path_words(&swapped(err, &swaps), word);
             }
         }
     }
@@ -431,9 +439,12 @@ impl ProjectLog {
             // file that wasn't resolved keeps its own).
             let mut relative = std::mem::take(&mut e.relative);
             if let Some(d) = dir {
-                make_portable(&mut e.params, d, "/params", 0, &mut relative);
+                let mut swaps = Vec::new();
+                make_portable(&mut e.params, d, "/params", 0, &mut relative, &mut swaps);
                 if let Some(err) = e.error.as_mut() {
-                    let portable = portable_text(err, d);
+                    // The parameters' paths first, whole (a folder may have spaces in its name),
+                    // then any other word that is one.
+                    let portable = portable_text(&swapped(err, &swaps), d);
                     if portable != *err {
                         *err = portable;
                         relative.push("/error".into());
@@ -701,29 +712,61 @@ fn with_log(mut text: String, log: &ProjectLog, dir: Option<&str>) -> Result<Str
 }
 
 /// `v`'s texts with their local paths made portable ([`portable_text`]), in place; each one
-/// changed noted in `changed` by its JSON pointer, `at` being `v`'s.
-fn make_portable(v: &mut serde_json::Value, dir: &str, at: &str, depth: usize, changed: &mut Vec<String>) {
+/// changed noted in `changed` by its JSON pointer, `at` being `v`'s, and each whole-text path
+/// in `swaps`, as it was and as it is written.
+fn make_portable(
+    v: &mut serde_json::Value,
+    dir: &str,
+    at: &str,
+    depth: usize,
+    changed: &mut Vec<String>,
+    swaps: &mut Vec<(String, String)>,
+) {
     use serde_json::Value;
     match v {
         Value::String(t) => {
             let portable = portable_text(t, dir);
             if portable != *t {
+                if rustgis_map::paths::is_absolute_local(t) {
+                    swaps.push((t.clone(), portable.clone()));
+                }
                 *t = portable;
                 changed.push(at.to_string());
             }
         }
         Value::Array(a) if depth < 16 => {
             for (i, x) in a.iter_mut().enumerate() {
-                make_portable(x, dir, &format!("{at}/{i}"), depth + 1, changed);
+                make_portable(x, dir, &format!("{at}/{i}"), depth + 1, changed, swaps);
             }
         }
         Value::Object(o) if depth < 16 => {
             for (k, x) in o.iter_mut() {
-                make_portable(x, dir, &format!("{at}/{}", k.replace('~', "~0").replace('/', "~1")), depth + 1, changed);
+                make_portable(x, dir, &format!("{at}/{}", k.replace('~', "~0").replace('/', "~1")), depth + 1, changed, swaps);
             }
         }
         _ => {}
     }
+}
+
+/// `t` with each text of `swaps` that starts a word (the text's start, or after a space, quote
+/// or bracket) as its other half, the longest first: a path with spaces in it, known whole.
+fn swapped(t: &str, swaps: &[(String, String)]) -> String {
+    let mut swaps: Vec<&(String, String)> = swaps.iter().filter(|(from, _)| !from.is_empty()).collect();
+    swaps.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+    let mut t = t.to_string();
+    for (from, to) in swaps {
+        let mut out = String::with_capacity(t.len());
+        let mut rest = t.as_str();
+        while let Some(at) = rest.find(from.as_str()) {
+            out.push_str(rest.get(..at).unwrap_or(""));
+            let edge = out.chars().next_back().is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '(' | '['));
+            out.push_str(if edge { to } else { from });
+            rest = rest.get(at + from.len()..).unwrap_or("");
+        }
+        out.push_str(rest);
+        t = out;
+    }
+    t
 }
 
 /// `t` with each absolute local path in it (the whole text, or a word of it, quotes and trailing

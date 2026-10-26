@@ -76,6 +76,10 @@ pub(crate) fn kept_params(params: &Value) -> Value {
             let mut out = serde_json::Map::new();
             for (k, v) in o.iter().take(40) {
                 let (k, v): (String, Value) = (k.chars().take(64).collect(), short(v));
+                // Two keys alike in their first 64 characters: the first stays.
+                if out.contains_key(&k) {
+                    continue;
+                }
                 let size = serde_json::to_vec(&k)
                     .map_or(usize::MAX, |b| b.len())
                     .saturating_add(serde_json::to_vec(&v).map_or(usize::MAX, |b| b.len()))
@@ -141,11 +145,14 @@ fn embedded_redacted(v: &Value, depth: usize) -> Value {
 }
 
 /// `t` with each JSON object it holds (from a `{` to where the object ends) redacted. Texts are
-/// clipped before this, so trying each `{` stays cheap.
+/// clipped before this, so trying each `{` stays cheap; the secret names are looked for once.
 fn json_in_text_redacted(t: &str) -> String {
     let mut out = String::with_capacity(t.len());
+    let last_secret = last_secret_name(t);
     let mut rest = t;
     while let Some(at) = rest.find('{') {
+        // Where this `{` is in `t`: a secret's name after it is one at a later offset.
+        let brace = t.len() - rest.len() + at;
         let (before, from) = rest.split_at(at);
         out.push_str(before);
         let mut objects = serde_json::Deserializer::from_str(from).into_iter::<Value>();
@@ -160,7 +167,9 @@ fn json_in_text_redacted(t: &str) -> String {
             // (`{secretAccessKey: …}`): what follows its `{` may hold a secret, so none of it
             // stays. Text such as `{name}` or `{x:.2f}` stays as it is.
             Some(Err(e))
-                if e.is_eof() || from.get(1..).is_some_and(|r| r.trim_start().starts_with(['"', '\'']) || secret_name_follows(r)) =>
+                if e.is_eof()
+                    || from.get(1..).is_some_and(|r| r.trim_start().starts_with(['"', '\'']))
+                    || last_secret.is_some_and(|s| s > brace) =>
             {
                 out.push('…');
                 return out;
@@ -175,21 +184,22 @@ fn json_in_text_redacted(t: &str) -> String {
     out
 }
 
-/// Whether `t` holds a secret's name (`credentials::secret_key`) as a key, unquoted, before a
-/// `:` or `=` (`secretAccessKey: "…"`, `token = …`).
-fn secret_name_follows(t: &str) -> bool {
+/// Where in `t` the last secret's name (`credentials::secret_key`) written as a key, unquoted,
+/// before a `:` or `=` (`secretAccessKey: "…"`, `token = …`) starts: one pass over the text.
+fn last_secret_name(t: &str) -> Option<usize> {
     let name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.');
+    let mut last = None;
     let mut rest = t;
     while let Some(at) = rest.find(name) {
         let from = rest.get(at..).unwrap_or("");
         let end = from.find(|c: char| !name(c)).unwrap_or(from.len());
         let (key, after) = from.split_at(end);
         if after.trim_start().starts_with([':', '=']) && rustgis_data::source::credentials::secret_key(key) {
-            return true;
+            last = Some(t.len() - from.len());
         }
         rest = after;
     }
-    false
+    last
 }
 
 /// The longest text kept as it is that reads as a document (it starts with `{`, `[` or `<`).
@@ -215,7 +225,12 @@ fn clip(v: &Value, chars: usize, items: usize, depth: usize) -> Value {
             Value::Array(out)
         }
         Value::Object(o) if depth < 8 => {
-            Value::Object(o.iter().map(|(k, x)| (k.chars().take(200).collect(), clip(x, chars, items, depth + 1))).collect())
+            // Two keys alike in their first 200 characters: the first stays.
+            let mut out = serde_json::Map::new();
+            for (k, x) in o {
+                out.entry(k.chars().take(200).collect::<String>()).or_insert_with(|| clip(x, chars, items, depth + 1));
+            }
+            Value::Object(out)
         }
         Value::Array(_) | Value::Object(_) => Value::String("…".into()),
         other => other.clone(),
