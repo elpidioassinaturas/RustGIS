@@ -125,7 +125,7 @@ fn kept_error(e: &str) -> String {
     } else {
         e.to_string()
     };
-    crate::cmd::history::redacted_text(&e)
+    crate::cmd::history::redacted_text(&sql_secrets_removed(&e))
 }
 
 /// `v` without secrets: as History's Copy as code takes them out (`history::redacted`), and,
@@ -137,7 +137,10 @@ fn redacted(v: &Value) -> Value {
 
 fn embedded_redacted(v: &Value, depth: usize) -> Value {
     match v {
-        Value::String(t) if t.contains('{') => Value::String(json_in_text_redacted(t)),
+        Value::String(t) => {
+            let t = if t.contains('{') { json_in_text_redacted(t) } else { t.clone() };
+            Value::String(sql_secrets_removed(&t))
+        }
         Value::Array(a) if depth < 8 => Value::Array(a.iter().map(|x| embedded_redacted(x, depth + 1)).collect()),
         Value::Object(o) if depth < 8 => Value::Object(o.iter().map(|(k, x)| (k.clone(), embedded_redacted(x, depth + 1))).collect()),
         other => other.clone(),
@@ -181,6 +184,56 @@ pub(crate) fn json_in_text_redacted(t: &str) -> String {
         }
     }
     out.push_str(rest);
+    out
+}
+
+/// `t` with each SQL `CREATE … SECRET`'s options (`CREATE SECRET s3 (TYPE s3, KEY_ID 'a',
+/// SECRET 'b')`, DuckDB's form, `OR REPLACE` and `PERSISTENT` too) as `(…)`: their values are
+/// written as plain words, which no name or address form finds. With no `)`, the rest goes.
+pub(crate) fn sql_secrets_removed(t: &str) -> String {
+    // ASCII lowercase keeps every byte where it was.
+    let lower = t.to_ascii_lowercase();
+    let mut out = String::with_capacity(t.len());
+    let mut from = 0;
+    while let Some(at) = lower.get(from..).and_then(|r| r.find("create")).map(|i| i + from) {
+        let after = at + "create".len();
+        // The statement's head, to its `(`: `create [or replace] [persistent] secret [name] (`.
+        let Some(open) = lower.get(after..).and_then(|r| r.find(['(', ';'])).map(|i| i + after) else { break };
+        let head = lower.get(after..open).unwrap_or("");
+        if !lower.get(open..).is_some_and(|r| r.starts_with('(')) || !head.split_whitespace().any(|w| w == "secret") {
+            out.push_str(t.get(from..after).unwrap_or(""));
+            from = after;
+            continue;
+        }
+        out.push_str(t.get(from..open).unwrap_or(""));
+        out.push_str("(…");
+        // Its `)`, quotes and nested brackets aside.
+        let (mut depth, mut quote, mut close) = (0usize, None, None);
+        for (i, c) in t.get(open..).unwrap_or("").char_indices() {
+            match (quote, c) {
+                (Some(q), c) if c == q => quote = None,
+                (Some(_), _) => {}
+                (None, '\'' | '"') => quote = Some(c),
+                (None, '(') => depth += 1,
+                (None, ')') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match close {
+            Some(c) => {
+                out.push(')');
+                from = c + 1;
+            }
+            None => return out,
+        }
+    }
+    out.push_str(t.get(from..).unwrap_or(""));
     out
 }
 

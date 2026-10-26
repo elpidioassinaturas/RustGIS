@@ -795,7 +795,8 @@ fn portable_text(t: &str, dir: &str) -> String {
             .filter(|r| rustgis_map::paths::is_local(r))
             .unwrap_or_else(|| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string())
     };
-    if rustgis_map::paths::is_absolute_local(t) {
+    // The root alone (`/`) is no file's path.
+    if t.len() > 1 && rustgis_map::paths::is_absolute_local(t) {
         return portable(t);
     }
     path_words(t, |p| rustgis_map::paths::is_absolute_local(p).then(|| portable(p)))
@@ -803,13 +804,16 @@ fn portable_text(t: &str, dir: &str) -> String {
 
 /// `t` with each word (quotes, brackets, a trailing `,`, `;` or `:` aside) replaced by what `f`
 /// makes of it, where `f` gives something: how a path among an error's words is found, both
-/// ways (made portable on save, absolute again on load).
+/// ways (made portable on save, absolute again on load). Only a word with a separator past its
+/// first character is tried (`/data/a.tif`, `C:\a.tif`, `./a.tif`): a division's `/` or a
+/// `/home` among other words is left as written.
 fn path_words(t: &str, f: impl Fn(&str) -> Option<String>) -> String {
     t.split_inclusive(char::is_whitespace)
         .map(|word| {
             let core = word.trim_end().trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']' | ',' | ';'));
             let core = core.strip_suffix(':').unwrap_or(core);
-            match (!core.is_empty()).then(|| f(core)).flatten() {
+            let path_like = core.get(1..).is_some_and(|r| r.contains(['/', '\\']));
+            match path_like.then(|| f(core)).flatten() {
                 Some(new) => word.replacen(core, &new, 1),
                 None => word.to_string(),
             }

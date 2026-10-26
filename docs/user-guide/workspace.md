@@ -74,11 +74,11 @@ end goes into it alike: the app, scripts, the AI Assistant, the command line, Py
   as one (a held arrow key nudging an element) are one entry, with the last one's parameters.
 - **No secrets:** the parameters lose passwords, keys and tokens as History's Copy as code does,
   and so does an error's text; a document given as text (a map, a project) is kept as its size
-  only. A secret written as plain words, with no name or address form (an SQL `CREATE SECRET`'s
-  values), isn't recognised: clear the log before sharing a project that used one. Each entry's
-  parameters are clipped to about 4 KB of JSON (a long text is cut, a list keeps its first 100
-  items), its error to 500 characters, and the log keeps its last 10,000 entries, the oldest
-  dropped first.
+  only, and an SQL `CREATE SECRET`'s options as `(…)`. A secret written as plain words, with no
+  name or address form (a password typed into a note), isn't recognised: clear the log before
+  sharing a project that used one. Each entry's parameters are clipped to about 4 KB of JSON (a
+  long text is cut, a list keeps its first 100 items), its error to 500 characters and a `…`,
+  and the log keeps its last 10,000 entries, the oldest dropped first.
 - **Saved with the project:** a shared `.rgis` carries its log (a package, `.rgispkg`, or a
   template doesn't). Clear it first if that isn't wanted (`project.clearLog`, which leaves its
   own entry), or turn logging off for a project (`project.logCommands {"on": false}`; what is

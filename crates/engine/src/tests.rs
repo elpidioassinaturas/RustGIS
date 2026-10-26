@@ -1805,6 +1805,7 @@ fn hostile_params_never_panic() {
             id,
             "project.save"
                 | "project.saveAs"
+                | "project.exportLog"
                 | "share.exportMap"
                 | "time.export"
                 | "share.exportLayer"
@@ -17701,13 +17702,14 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let folder = std::env::temp_dir().join(format!("rustgis-log-portable-{}", std::process::id()));
     let inside = folder.join("My Data").join("a.tif");
     let error = Some(format!("{}: not found", inside.display()));
-    let params = json!({"path": inside.to_string_lossy(), "name": "./Maps and data"});
+    let params = json!({"path": inside.to_string_lossy(), "name": "./Maps and data", "sql": "SELECT a / b FROM t -- /home", "root": "/"});
     s.project.log.push(LogEntry { at: 1, command: "layer.addData".into(), params, ok: false, error, millis: 0, relative: Vec::new() });
     let (text, _) = s.project.saved_text(Some(&folder)).unwrap();
     let saved: Value = serde_json::from_str(&text).unwrap();
     let last = saved["log"]["entries"].as_array().unwrap().last().unwrap().clone();
     assert_eq!((last["params"]["path"].as_str(), last["error"].as_str()), (Some("./My Data/a.tif"), Some("./My Data/a.tif: not found")));
     assert_eq!(s.project.log.entries().last().unwrap().params["path"], json!(inside.to_string_lossy()), "the open project keeps them");
+    assert_eq!((last["params"]["sql"].as_str(), last["params"]["root"].as_str()), (Some("SELECT a / b FROM t -- /home"), Some("/")));
     // Read back from that folder, they are absolute again, so a Save As elsewhere keeps them right.
     std::fs::create_dir_all(&folder).unwrap();
     let file = folder.join("p.rgis");
@@ -17748,6 +17750,11 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let kept = crate::project_log::kept_params(&json!({long_key: "S3CRET"}));
     assert!(!kept.to_string().contains("S3CRET"), "{kept}");
     assert!(s.run("project.log", &json!({"limit": 0})).is_err());
+    // An SQL secret's options, written as plain words, go; the statement's shape stays.
+    let sql = "CREATE OR REPLACE SECRET s3 (TYPE s3, KEY_ID 'AKIA1', SECRET 'S3CRET'); SELECT 1 / 2";
+    let kept = crate::project_log::kept_params(&json!({"sql": sql}));
+    assert_eq!(kept["sql"], json!("CREATE OR REPLACE SECRET s3 (…); SELECT 1 / 2"));
+    assert_eq!(crate::project_log::sql_secrets_removed("create table t (a int)"), "create table t (a int)");
     // Steps merged into one undo step (a held arrow key) are one entry, with the last parameters.
     let n = s.project.log.len();
     for name in ["Nudged 1", "Nudged 2", "Nudged 3"] {
