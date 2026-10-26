@@ -889,6 +889,9 @@ impl Session {
             "edit.redo" => self.redo_label(),
             _ => None,
         };
+        // A step that joins the last one (a held arrow key nudging an element: `merge_undo`) is
+        // one entry too, as it is one step to undo.
+        let joins = self.merge.is_some() && self.merge == self.merged && !self.undo.is_empty();
         let (at, start) = (project_log::now_ms(), web_time::Instant::now());
         let res = self.run_command(id, params);
         // A plugin's command waiting for its fetches answers `pending` and runs again when they
@@ -904,7 +907,8 @@ impl Session {
                 Some(label) => serde_json::json!({"step": label}),
                 None => project_log::kept_params(params),
             };
-            self.project.log.push(project_log::entry(id, params, &res, at, start.elapsed()));
+            let e = project_log::entry(id, params, &res, at, start.elapsed());
+            if joins && res.is_ok() { self.project.log.join_last(e) } else { self.project.log.push(e) }
         }
         res
     }

@@ -294,7 +294,7 @@ const NEVER: &[&str] = &[
 
 /// Commands that write files without naming one in their parameters, or read what the user's
 /// commands named (the project log's paths, addresses and SQL).
-const WRITES_FILES: &[&str] = &["project.save", "project.saveAs", "project.log"];
+const REACHES_FILES: &[&str] = &["project.save", "project.saveAs", "project.log"];
 
 /// Parameter keys that name a file, folder or address. (`data` and `text` carry content, which
 /// plugins may pass: `layer.addDataBytes`, `map.import` from text.)
@@ -365,7 +365,7 @@ pub fn reaches(spec: &C, params: &Value) -> Option<Reach> {
     }
     let files = super::items::names_place(params, PLACE_KEYS, 0)
         || PLACE_KEYS.iter().any(|k| spec.params.contains(&format!("\"{k}\"")))
-        || WRITES_FILES.contains(&spec.id)
+        || REACHES_FILES.contains(&spec.id)
         || ["share.", "offline.", "cache.", "notebook."].iter().any(|p| spec.id.starts_with(p));
     files.then_some(Reach::Files)
 }

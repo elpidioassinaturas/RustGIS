@@ -281,9 +281,10 @@ impl<'de> Deserialize<'de> for LogState {
     }
 }
 
-/// A file's log entries, read one at a time: only the last [`LOG_LIMIT`] are kept, each bounded
-/// and without secrets as a new entry is ([`crate::project_log::bounded`]); one that doesn't read
-/// as an entry (a file edited by hand, another version's) is skipped.
+/// A file's log entries, each read in turn as a JSON value (the file is in memory already) and
+/// only the last [`LOG_LIMIT`] kept as they come; those are then bounded and without secrets as a
+/// new entry is ([`crate::project_log::bounded`]). One that doesn't read as an entry (a file
+/// edited by hand, another version's) is skipped.
 struct LogEntries;
 
 impl<'de> serde::de::DeserializeSeed<'de> for LogEntries {
@@ -356,6 +357,22 @@ impl ProjectLog {
         while s.entries.len() > LOG_LIMIT {
             s.entries.pop_front();
         }
+    }
+
+    /// Adds `e` as part of the last entry when that is the same command, run well: a step merged
+    /// into the last undo step ([`crate::Session::merge_undo`]). The entry keeps when the first
+    /// started, takes the last one's parameters, and adds up how long they took.
+    pub fn join_last(&self, mut e: LogEntry) {
+        {
+            let mut s = self.state();
+            if let Some(last) = s.entries.back_mut().filter(|l| l.ok && l.command == e.command) {
+                e.at = last.at;
+                e.millis = last.millis.saturating_add(e.millis);
+                *last = e;
+                return;
+            }
+        }
+        self.push(e);
     }
 
     /// Every entry, oldest first (a copy: for tests and small logs; [`ProjectLog::select`] and

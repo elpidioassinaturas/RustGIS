@@ -17748,6 +17748,14 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let kept = crate::project_log::kept_params(&json!({long_key: "S3CRET"}));
     assert!(!kept.to_string().contains("S3CRET"), "{kept}");
     assert!(s.run("project.log", &json!({"limit": 0})).is_err());
+    // Steps merged into one undo step (a held arrow key) are one entry, with the last parameters.
+    let n = s.project.log.len();
+    for name in ["Nudged 1", "Nudged 2", "Nudged 3"] {
+        s.merge_undo("nudge");
+        s.run("project.rename", &json!({"name": name})).unwrap();
+    }
+    assert_eq!(s.project.log.len(), n + 1);
+    assert_eq!(s.project.log.entries().last().unwrap().params["name"], json!("Nudged 3"));
     // An unquoted secret key in an object that doesn't parse goes, with the rest of the text;
     // a format string's braces stay.
     let line = crate::project_log::kept_params(&json!({"script": "s3.connect {secretAccessKey: \"S3CRET\"}\nprint(f\"{x:.2f}\")"}));

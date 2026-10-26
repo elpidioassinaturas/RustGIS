@@ -70,7 +70,8 @@ end goes into it alike: the app, scripts, the AI Assistant, the command line, Py
 - **Each entry:** `at` (when it started, in milliseconds since 1970, UTC; for a plugin's command
   that waited for its downloads, when its last run started), `command`, `params`, `ok`, `error`
   when it failed, and `millis`, how long it took.
-- **Outside undo:** undoing a command doesn't take its entry back.
+- **Outside undo:** undoing a command doesn't take its entry back. Steps that undo takes back
+  as one (a held arrow key nudging an element) are one entry, with the last one's parameters.
 - **No secrets:** the parameters lose passwords, keys and tokens as History's Copy as code does,
   and so does an error's text; a document given as text (a map, a project) is kept as its size
   only. A secret written as plain words, with no name or address form (an SQL `CREATE SECRET`'s
