@@ -435,19 +435,16 @@ impl ProjectLog {
             (s.off, s.entries.clone())
         };
         let mut out = String::from(if off { r#"{"off":true,"entries":["# } else { r#"{"entries":["# });
-        for (i, e) in entries.iter().enumerate() {
+        // That copy is the only one: each entry is made portable in place.
+        for (i, mut e) in entries.into_iter().enumerate() {
             if i > 0 {
                 out.push(',');
             }
-            let text = match dir {
-                Some(d) => {
-                    let mut e = e.clone();
-                    e.params = portable_value(&e.params, d, 0);
-                    e.error = e.error.as_deref().map(|t| portable_text(t, d));
-                    serde_json::to_string(&e)
-                }
-                None => serde_json::to_string(e),
-            };
+            if let Some(d) = dir {
+                e.params = portable_value(&e.params, d, 0);
+                e.error = e.error.as_deref().map(|t| portable_text(t, d));
+            }
+            let text = serde_json::to_string(&e);
             out.push_str(&text.map_err(|e| e.to_string())?);
         }
         out.push_str("]}");
