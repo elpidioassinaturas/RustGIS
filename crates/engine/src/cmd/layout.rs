@@ -2455,10 +2455,11 @@ fn font_warning(font: FontFamily, name: Option<&str>, fallback_given: bool, styl
         Some(n) if !indexed && !fallback_given => Some(format!(
             "the installed fonts are still being read, so {n}'s fallback ({drawn}) comes from its name, not the font: give \"fallback\" to choose it"
         )),
-        // Installed, but its file can't be read (too large, damaged): drawn in its fallback too.
-        Some(n) if indexed && installed_family(n).is_some_and(|f| !readable(f, style)) => {
-            Some(format!("{n} is installed but its font file can't be read, so the text is drawn in the {drawn}"))
-        }
+        // Installed, but its face can't be loaded (a file too large or damaged, or past the font
+        // bytes RustGIS keeps in a session): drawn in its fallback too.
+        Some(n) if indexed && installed_family(n).is_some_and(|f| !readable(f, style)) => Some(format!(
+            "{n} is installed but its font can't be loaded (a file too large or damaged, or past the fonts RustGIS keeps in memory), so the text is drawn in the {drawn}"
+        )),
         Some(n) if indexed && rustgis_render::families::find_ready(n).is_none() => {
             Some(format!("{n} is not installed on this computer, so the text is drawn in the {drawn}"))
         }

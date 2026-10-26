@@ -16342,9 +16342,12 @@ fn text_elements_take_an_installed_font_family_by_name() {
     assert_eq!(font(&s, id), (FontFamily::Sans, None), "a refused call changes nothing");
     let arrow = s.run("layout.addElement", &json!({"kind": "northArrow"})).unwrap()["element"].clone();
     assert!(s.run("layout.update", &json!({"element": arrow, "fallback": "serif"})).unwrap_err().contains("only text elements"));
-    // An installed family, where this computer has one: kept as the font names it, its fallback
-    // its own class, and nothing said.
-    if let Some(f) = rustgis_render::families::installed().iter().find(|f| f.listed) {
+    // An installed family, where this computer has a small one (its file read whatever the
+    // session's budget): kept as the font names it, its fallback its own class, and nothing said.
+    let small = |f: &&rustgis_render::families::Family| {
+        f.listed && f.faces.iter().all(|face| std::fs::metadata(&face.path).is_ok_and(|m| m.len() < 4 << 20))
+    };
+    if let Some(f) = rustgis_render::families::installed().iter().find(small) {
         let r = s.run("layout.update", &json!({"element": id, "font": f.name.to_uppercase()})).unwrap();
         let class = if f.serif { FontFamily::Serif } else { FontFamily::Sans };
         assert_eq!(font(&s, id), (class, Some(f.name.clone())));
