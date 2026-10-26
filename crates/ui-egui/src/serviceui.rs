@@ -46,9 +46,18 @@ pub(crate) fn kind_of(t: &str) -> &'static str {
 
 /// Adds one of a service's layers (as `service.layers` lists it): features are downloaded in the
 /// background as From URL… does, map layers are added now, and an OGC API layer or a WCS coverage
-/// waits on a document (a step the app moves along). `dialog` tells where the result is reported.
-pub(crate) fn add_layer(app: &mut RustGisApp, src: &ServiceSource, l: &Value, time: &str, dialog: bool) -> Result<&'static str, String> {
-    add_layer_from(app, src, l, time, dialog, None)
+/// waits on a document (a step the app moves along). A feature layer is asked only for the
+/// features crossing `area` (longitude/latitude) when given, whole otherwise. `dialog` tells where
+/// the result is reported.
+pub(crate) fn add_layer(
+    app: &mut RustGisApp,
+    src: &ServiceSource,
+    l: &Value,
+    time: &str,
+    area: Option<[f64; 4]>,
+    dialog: bool,
+) -> Result<&'static str, String> {
+    add_layer_from(app, src, l, time, area, dialog, None)
 }
 
 /// [`add_layer`] for a layer of the connection named `origin` (the Connections tree): once the
@@ -59,6 +68,7 @@ pub(crate) fn add_layer_from(
     src: &ServiceSource,
     l: &Value,
     time: &str,
+    area: Option<[f64; 4]>,
     dialog: bool,
     origin: Option<&str>,
 ) -> Result<&'static str, String> {
@@ -66,7 +76,17 @@ pub(crate) fn add_layer_from(
     let title = l.get("title").and_then(Value::as_str).unwrap_or(&name).to_string();
     let offer = l.get("offer").cloned().unwrap_or_default();
     if offer.get("type").and_then(Value::as_str) == Some("features") {
-        let items = offer.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+        let items = offer.get("url").and_then(Value::as_str).unwrap_or("");
+        // Over an area when its request can carry one (not a WFS 1.0's, nor across the
+        // antimeridian): whole otherwise, as `service.add` does.
+        let asked = area.and_then(|a| ogc::features_in_area(items, a));
+        if area.is_some() && asked.is_none() {
+            app.session.notify(
+                crate::i18n::fmt("{name}: the service can't be asked for an area, so the whole layer is asked for", &[("name", &title)]),
+                false,
+            );
+        }
+        let items = asked.as_deref().unwrap_or(items);
         return crate::connectiontree::run_add_url(app, json!({"url": items, "name": title, "service": true}), origin)
             .map(|_| tl!("Downloading…"));
     }

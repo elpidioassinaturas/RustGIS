@@ -703,6 +703,55 @@ fn wfs(url: &str, root: &Node) -> Service {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Features over an area
+
+/// Query parameters that already filter a request by place or by feature: an address carrying
+/// one is left as it is.
+const SPATIAL_KEYS: [&str; 6] = ["bbox", "filter", "cql_filter", "featureid", "resourceid", "geometry"];
+
+/// An [`Offer::Features`] address that asks only for the features crossing a longitude/latitude
+/// `area` (west, south, east, north), in each service's own terms:
+/// - a WFS 1.1 or 2.0 GetFeature: `BBOX` in CRS84 (longitude first) when its `SRSNAME` is
+///   CRS84, else in `urn:ogc:def:crs:EPSG::4326`, latitude first as that URN fixes (a bare
+///   `EPSG:4326` is read either way by different servers);
+/// - an ArcGIS layer's query: an envelope in EPSG:4326 that the features intersect;
+/// - an OGC API collection's items: `bbox`, longitude first by the standard (its `next` links
+///   keep it).
+///
+/// `None` when the request can't carry the box: a WFS 1.0 GetFeature (its `BBOX` is in the
+/// type's own coordinate system, which its capabilities may not give as longitude/latitude), an
+/// address that already filters, or an area across the antimeridian or off the globe.
+pub fn features_in_area(url: &str, area: [f64; 4]) -> Option<String> {
+    let [w, s, e, n] = area;
+    let lon = |x: f64| (-180.0..=180.0).contains(&x);
+    let lat = |y: f64| (-90.0..=90.0).contains(&y);
+    if !(lon(w) && lon(e) && lat(s) && lat(n) && w <= e && s <= n) {
+        return None;
+    }
+    if SPATIAL_KEYS.iter().any(|k| query_value(url, k).is_some()) {
+        return None;
+    }
+    let is = |key: &str, value: &str| query_value(url, key).is_some_and(|v| v.eq_ignore_ascii_case(value));
+    let q = if is("service", "wfs") && is("request", "getfeature") {
+        if query_value(url, "version").is_none_or(|v| v.starts_with("1.0")) {
+            return None;
+        }
+        if query_value(url, "srsname").is_some_and(is_crs84) {
+            format!("BBOX={w},{s},{e},{n},urn:ogc:def:crs:OGC:1.3:CRS84")
+        } else {
+            format!("BBOX={s},{w},{n},{e},urn:ogc:def:crs:EPSG::4326")
+        }
+    } else if is_arcgis_query(url) {
+        format!("geometry={w},{s},{e},{n}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects")
+    } else if base(url).trim_end_matches('/').ends_with("/items") {
+        format!("bbox={w},{s},{e},{n}")
+    } else {
+        return None;
+    };
+    Some(with_query(url, &q))
+}
+
+// ---------------------------------------------------------------------------------------------
 // WCS
 
 /// The largest side, in pixels, of a coverage asked for (GetCoverage scales it to fit).
@@ -2319,6 +2368,53 @@ mod tests {
             s.layers[0].offer
         );
         assert!(s.notes.iter().any(|n| n.contains("1 collections")));
+    }
+
+    #[test]
+    fn features_asked_for_over_an_area() {
+        let piaui = [-45.99, -10.93, -40.37, -2.74];
+        let offered = |caps: &str, body: &str| {
+            let s = parse(caps, body.as_bytes()).unwrap();
+            let Offer::Features { url } = &s.layers[0].offer else { panic!("{:?}", s.layers[0].offer) };
+            url.clone()
+        };
+        // WFS 2.0 offering CRS84: the box in CRS84, longitude first.
+        let v20 = r#"<WFS_Capabilities version="2.0.0"><FeatureTypeList><FeatureType><Name>CGMAT:munic</Name><DefaultCRS>urn:ogc:def:crs:EPSG::4674</DefaultCRS><OtherCRS>urn:ogc:def:crs:OGC:1.3:CRS84</OtherCRS></FeatureType></FeatureTypeList></WFS_Capabilities>"#;
+        let url = offered("https://x.org/geoserver/wfs", v20);
+        assert_eq!(features_in_area(&url, piaui).unwrap(), format!("{url}&BBOX=-45.99,-10.93,-40.37,-2.74,urn:ogc:def:crs:OGC:1.3:CRS84"));
+        // WFS 1.1 without CRS84: latitude first, as urn:ogc:def:crs:EPSG::4326 fixes.
+        let v11 = r#"<WFS_Capabilities version="1.1.0"><FeatureTypeList><FeatureType><Name>a</Name><DefaultSRS>urn:ogc:def:crs:EPSG::4326</DefaultSRS></FeatureType></FeatureTypeList></WFS_Capabilities>"#;
+        let url = offered("https://x.org/wfs", v11);
+        assert_eq!(features_in_area(&url, piaui).unwrap(), format!("{url}&BBOX=-10.93,-45.99,-2.74,-40.37,urn:ogc:def:crs:EPSG::4326"));
+        // WFS 1.0 reads its box in the type's own coordinate system: not asked.
+        let v10 = r#"<WFS_Capabilities version="1.0.0"><FeatureTypeList><FeatureType><Name>roads</Name><SRS>EPSG:4326</SRS></FeatureType></FeatureTypeList></WFS_Capabilities>"#;
+        assert_eq!(features_in_area(&offered("https://old.example.org/wfs", v10), piaui), None);
+        // ArcGIS: an envelope in EPSG:4326, kept by the pages that follow (they add to the query).
+        let arcgis = r#"{"currentVersion": 11.1, "layers": [{"id": 0, "name": "Parcels"}]}"#;
+        let url = offered("https://x.org/arcgis/rest/services/A/FeatureServer", arcgis);
+        let asked = features_in_area(&url, piaui).unwrap();
+        assert_eq!(
+            asked,
+            format!(
+                "{url}&geometry=-45.99,-10.93,-40.37,-2.74&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects"
+            )
+        );
+        assert!(arcgis_page_url(&asked, 2, 2, Some("FID")).contains("&geometry=-45.99,-10.93,-40.37,-2.74&"));
+        // OGC API Features: bbox, longitude first, before a fragment.
+        assert_eq!(
+            features_in_area("https://api.example.org/collections/a/items?limit=10000&f=json#x", piaui).unwrap(),
+            "https://api.example.org/collections/a/items?limit=10000&f=json&bbox=-45.99,-10.93,-40.37,-2.74#x"
+        );
+        assert_eq!(
+            features_in_area("https://api.example.org/collections/a/items", [-1.5, 0.0, 2.0, 1e-7]).unwrap(),
+            "https://api.example.org/collections/a/items?bbox=-1.5,0,2,0.0000001"
+        );
+        // Across the antimeridian, off the globe, already filtered, or not a feature request.
+        assert_eq!(features_in_area("https://api.example.org/collections/a/items", [170.0, -20.0, -170.0, -10.0]), None);
+        assert_eq!(features_in_area("https://api.example.org/collections/a/items", [-200.0, -20.0, 10.0, 95.0]), None);
+        assert_eq!(features_in_area("https://api.example.org/collections/a/items?bbox=1,2,3,4", piaui), None);
+        assert_eq!(features_in_area(&format!("{}&CQL_FILTER=uf%3D'PI'", offered("https://x.org/wfs", v11)), piaui), None);
+        assert_eq!(features_in_area("https://x.org/data.geojson", piaui), None);
     }
 
     #[test]

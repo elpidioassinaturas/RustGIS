@@ -190,6 +190,30 @@ format and bounds; `service.coverage` gives the GetCoverage address alone). Movi
 ask for it again: add it again for another area. The server reprojects it to EPSG:4326 (WCS 2.0
 through its CRS extension); one that can't answers with an error, which is shown.
 
+A WFS, OGC API Features or ArcGIS feature layer comes whole, as in other GIS programs. A large
+one (a country's municipalities, hundreds of megabytes) can be asked for over an area instead:
+tick **Only the map's area** in the dialog, or give `service.add` a `"bbox"`
+(`[west, south, east, north]` in longitude/latitude, or `"view"`). The service then sends only
+the features that cross the area, whole, not clipped. `service.add` then zooms to the box given
+(not to the whole layer's bounds), and leaves the view as it is for `"view"`. The box is asked in
+each service's own terms:
+
+- **WFS 1.1 and 2.0:** `BBOX`, in CRS84 when the feature type offers it, else in
+  `urn:ogc:def:crs:EPSG::4326`, latitude first as that name fixes.
+- **OGC API Features:** `bbox`, longitude first; the `next` pages keep it.
+- **ArcGIS:** an envelope in EPSG:4326 the features intersect; the pages past the record limit
+  keep it.
+
+A WFS 1.0 service reads its box in the feature type's own coordinate system, so it is asked for
+the whole layer, as is an area across the antimeridian; a note says so. When a whole layer takes
+longer than `service.add` waits (a minute), the error suggests `"bbox"`:
+
+```sh
+rustgis-cli run --cmd 'service.add={"url":"https://geoservicos.ibge.gov.br/geoserver/wfs","layer":"CGMAT:qg_2024_030_munic","bbox":[-45.99,-10.93,-40.37,-2.74]}'
+```
+
+The layer holds the features of the area it was added for: moving the map doesn't ask for more.
+
 For callers that fetch documents themselves (including the web app), `service.layers` accepts
 `text` for the initial document and `documents: [{"url": "…", "text": "…"}]` for subsequent
 responses. It returns `next` while another collections document is needed; supplied documents

@@ -8591,6 +8591,62 @@ fn arcgis_features_read_past_the_record_limit() {
     );
 }
 
+/// A feature layer comes whole unless an area is asked for (#819): then only the features that
+/// cross it, a WFS 1.1 or 2.0 asked with `BBOX` latitude first in urn:ogc:def:crs:EPSG::4326. A
+/// WFS 1.0, or an area across the antimeridian, is asked whole, and says so.
+#[test]
+fn service_features_asked_for_over_an_area() {
+    use ogc_server::{Route, Server};
+    let features = r#"{"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"n": 1}, "geometry": {"type": "Point", "coordinates": [-42.8, -5.1]}}]}"#;
+    let server = Server::new(vec![Route::new("/wfs", features)]);
+    let caps = |version: &str| {
+        format!(
+            r#"<WFS_Capabilities version="{version}"><OperationsMetadata><Operation name="GetFeature"><DCP><HTTP><Get href="{}/wfs?"/></HTTP></DCP></Operation></OperationsMetadata>
+<FeatureTypeList><FeatureType><Name>CGMAT:munic</Name><Title>Municipalities</Title><DefaultSRS>EPSG:4674</DefaultSRS></FeatureType></FeatureTypeList></WFS_Capabilities>"#,
+            server.base
+        )
+    };
+    let url = format!("{}/wfs", server.base);
+    let piaui = json!([-45.99, -10.93, -40.37, -2.74]);
+    let mut s = Session::new(Project::default());
+    let add = |s: &mut Session, version: &str, bbox: Option<Value>| {
+        let mut p = json!({"url": url, "layer": "CGMAT:munic", "text": caps(version), "name": format!("M{}", s.map().layers.len())});
+        if let Some(b) = bbox {
+            p["bbox"] = b;
+        }
+        s.run("service.add", &p).unwrap()
+    };
+    let r = add(&mut s, "1.1.0", Some(piaui.clone()));
+    assert_eq!(r["features"], 1);
+    assert_eq!(r["area"], piaui);
+    let r = add(&mut s, "2.0.0", Some(json!("view")));
+    assert!(r["area"].is_array(), "{r}");
+    let r = add(&mut s, "2.0.0", None);
+    assert!(r.get("area").is_none(), "{r}");
+    add(&mut s, "2.0.0", Some(json!("full")));
+    add(&mut s, "2.0.0", Some(json!([170.0, -20.0, -170.0, -10.0])));
+    add(&mut s, "1.0.0", Some(piaui.clone()));
+    let boxes: Vec<Option<String>> =
+        server.requests().iter().map(|r| r.query.iter().find(|(k, _)| k == "BBOX").map(|(_, v)| v.clone())).collect();
+    assert_eq!(boxes.len(), 6);
+    assert_eq!(boxes[0].as_deref(), Some("-10.93,-45.99,-2.74,-40.37,urn:ogc:def:crs:EPSG::4326"));
+    assert!(boxes[1].as_deref().is_some_and(|b| b.ends_with(",urn:ogc:def:crs:EPSG::4326")), "{boxes:?}");
+    assert_eq!(&boxes[2..], [None, None, None, None]);
+    let notes: Vec<&str> = s.notices.iter().map(|n| n.text.as_str()).collect();
+    assert!(notes.iter().any(|n| n.starts_with("M4: an area across the antimeridian")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.starts_with("M5: the service can't be asked for an area")), "{notes:?}");
+    // Asked for the box given, the map goes to it, not to the whole layer's bounds.
+    s.run("service.add", &json!({"url": url, "layer": "CGMAT:munic", "text": caps("2.0.0"), "name": "Piauí", "bbox": piaui})).unwrap();
+    let v = view_lonlat(&s);
+    assert!(v[0] < -45.0 && v[2] > -41.0 && v[1] < -10.0 && v[3] > -3.0 && v[2] - v[0] < 20.0, "{v:?}");
+}
+
+/// The map's view in longitude/latitude, as `bbox: "view"` reads it.
+fn view_lonlat(s: &Session) -> [f64; 4] {
+    let e = crate::cmd::workspace::view_extent(s);
+    [e.min_x, e.min_y, e.max_x, e.max_y]
+}
+
 /// A WCS coverage (from a local server) becomes a raster of the view, asked for in EPSG:4326 within
 /// its bounds; an error answer is refused. A catalogue's records come with the links RustGIS can
 /// follow, those pointing inward left out.

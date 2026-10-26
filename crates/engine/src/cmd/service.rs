@@ -1,6 +1,7 @@
 //! Web map and feature services: connect to a WMS, WMTS, WFS, WCS, OGC API Features or ArcGIS
 //! REST service, list what it offers (from its capabilities), and add a layer — map layers as
-//! tile layers, feature types and collections as data downloaded as GeoJSON, coverages as rasters
+//! tile layers, feature types and collections as data downloaded as GeoJSON (the whole layer, or
+//! the features crossing an area), coverages as rasters
 //! (a GeoTIFF of the view from GetCoverage). And search a catalogue (CSW) for records and the
 //! services and files they link to.
 //!
@@ -26,7 +27,7 @@ pub fn commands() -> Vec<C> {
             r#"{"url": "a WMS, WMTS or WFS address (GetCapabilities is added), an OGC API collections address or landing page (its map tiles and linked collections), or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer, or an ArcGIS services directory or folder (its folders and services, each listed by its own url)", "type"?: "wms"|"wmts"|"wfs"|"ogcapi"|"arcgis" (guessed from the address), "text"?: "the capabilities document, when already fetched", "documents"?: [{"url": "a discovered document address", "text": "its fetched JSON"}]} → layers with source_url, and next when supplied documents need another fetch"#,
         ),
         C::new("service.add", "Add Service Layer", "Home › Add", add).params(
-            r#"{"url": "as service.layers", "type"?, "layer": "the layer's name (service.layers lists them)", "name"?: text, "time"?: "a time-enabled WMTS layer's date (2024-06-01; its default otherwise)", "text"?: "the capabilities document, when already fetched", "documents"?: "additional fetched documents, as service.layers", "source_url"?: "the listed layer's source_url", "describe"?: "a WCS coverage's DescribeCoverage document, when already fetched", "tiles"?: "an OGC API layer's tile template, when already read from its tileset (the app's)", "bbox"?: [west, south, east, north] | "view" (the default) | "full" (a WCS coverage's area)}"#,
+            r#"{"url": "as service.layers", "type"?, "layer": "the layer's name (service.layers lists them)", "name"?: text, "time"?: "a time-enabled WMTS layer's date (2024-06-01; its default otherwise)", "text"?: "the capabilities document, when already fetched", "documents"?: "additional fetched documents, as service.layers", "source_url"?: "the listed layer's source_url", "describe"?: "a WCS coverage's DescribeCoverage document, when already fetched", "tiles"?: "an OGC API layer's tile template, when already read from its tileset (the app's)", "bbox"?: [west, south, east, north] | "view" | "full": a WCS coverage's area (the view by default); for a WFS, OGC API or ArcGIS feature layer, only the features that cross it (the whole layer, "full", by default)}"#,
         ),
         C::new("service.coverage", "WCS Coverage Request", "Home › Add", coverage).view().params(
             r#"{"url": "a WCS address", "type"?: "wcs", "layer": "the coverage's name", "text"?: "the capabilities document, when already fetched", "documents"?: "additional fetched documents, as service.layers", "source_url"?: "the listed coverage's source_url", "describe"?: "its DescribeCoverage answer, when already fetched", "bbox"?: [west, south, east, north] | "view" (the default) | "full"} → the GetCoverage address of a GeoTIFF (layer.addUrl adds it)"#,
@@ -417,21 +418,59 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             }
         }
         Offer::Features { url: items } => {
+            let area = features_area(s, p)?;
+            let asked = area.and_then(|a| rustgis_data::ogc::features_in_area(items, a));
             #[cfg(target_arch = "wasm32")]
             {
-                let _ = items;
+                let _ = (items, asked);
                 Err(format!("{url}: in the web app, Home › Add Data › From Service downloads the features"))
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
+                if p.get("bbox").is_some_and(|b| !b.is_null() && *b != "full") && asked.is_none() {
+                    let why = if area.is_none() { "an area across the antimeridian" } else { "the service can't be asked for an area" };
+                    s.notify(format!("{name}: {why}, so the whole layer is asked for"), false);
+                }
                 let max = crate::render::rustgis_tiles::cache::MAX_DOWNLOAD;
-                let bytes = download_features(s, &name, items, max)?;
+                let bytes = download_features(s, &name, asked.as_deref().unwrap_or(items), max)
+                    .map_err(|e| slow_whole_layer(e, asked.is_some()))?;
                 let bytes = features_answer(s, &name, bytes);
-                let r = super::raster::add_named_bytes(s, &json!({"name": name}), format!("{name}.geojson"), bytes)?;
-                zoom(s);
+                let mut r = super::raster::add_named_bytes(s, &json!({"name": name}), format!("{name}.geojson"), bytes)?;
+                // Over an area, the features crossing it: the view stays, or goes to a box given
+                // (the whole layer's bounds would show a country to fill one state).
+                match (asked.is_some(), area, p.get("bbox")) {
+                    (true, Some([w, so, e, n]), Some(Value::Array(_))) => s.zoom_to(&rustgis_geom::Extent::new(w, so, e, n)),
+                    (true, ..) => {}
+                    _ => zoom(s),
+                }
+                if let (Some(_), Some(out)) = (&asked, r.as_object_mut()) {
+                    out.insert("area".into(), json!(area));
+                }
                 Ok(r)
             }
         }
+    }
+}
+
+/// The area a service's features are asked for over: a `bbox` given (`[west, south, east,
+/// north]`, or `"view"`, the map's), else none, for the whole layer (`"full"` says so). A box
+/// across the antimeridian asks for the whole layer too, as `catalog.search` does.
+fn features_area(s: &Session, p: &Value) -> Result<Option<[f64; 4]>, String> {
+    match p.get("bbox") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(f)) if f == "full" => Ok(None),
+        Some(_) => Ok(Some(super::catalogs::area(s, p)?).filter(|a| a[0] <= a[2])),
+    }
+}
+
+/// A whole layer too slow to download while a command waits: the error says an area can be asked
+/// for instead.
+#[cfg(not(target_arch = "wasm32"))]
+fn slow_whole_layer(e: String, over_area: bool) -> String {
+    if !over_area && (e.contains("timeout") || e.contains("timed out")) {
+        format!("{e}; or ask for the features in an area only, with \"bbox\": [west, south, east, north] or \"view\"")
+    } else {
+        e
     }
 }
 

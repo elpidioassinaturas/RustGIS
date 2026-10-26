@@ -320,6 +320,9 @@ pub struct ServiceBrowse {
     pub filter: String,
     /// The date time-enabled layers are added at (their default when empty).
     pub time: String,
+    /// Feature layers are asked only for the features crossing the map's view (Only the map's
+    /// area), not whole.
+    pub area: bool,
     /// The directories (and their types) opened before the one shown, the last most recent.
     pub back: Vec<(String, &'static str)>,
 }

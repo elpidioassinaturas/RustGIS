@@ -828,6 +828,11 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                     ui.label(egui::RichText::new(tl!("YYYY-MM-DD, for the layers that change with time")).small().weak());
                 });
             }
+            // Feature layers come whole, or only the features crossing the map's view.
+            if !grouped && layers.iter().any(|l| l["offer"]["type"] == "features") {
+                ui.checkbox(&mut browse.area, tl!("Only the map's area"))
+                    .on_hover_text(tl!("Feature layers: ask the service only for the features that cross the map's view"));
+            }
             if grouped && layers.iter().any(|l| l["offer"]["type"] == "features") {
                 ui.horizontal(|ui| {
                     ui.label(tl!("Name"));
@@ -929,7 +934,8 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         let title = l.get("title").and_then(Value::as_str).unwrap_or(name).to_string();
         // Features are downloaded in the background, as From URL… does; map layers are added now.
         let time = app.ui.service_browse.time.trim().to_string();
-        match crate::serviceui::add_layer(app, &src, &l, &time, true) {
+        let area = app.ui.service_browse.area.then(|| rustgis_engine::cmd::catalogs::area(&app.session, &Value::Null)).transpose();
+        match area.and_then(|area| crate::serviceui::add_layer(app, &src, &l, &time, area, true)) {
             Ok(m) => app.dialogs.info = Some(format!("{m} {title}")),
             Err(e) => app.dialogs.error = Some(e),
         }

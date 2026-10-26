@@ -258,7 +258,7 @@ fn add_from(app: &mut RustGisApp, child: &Value, source: Option<&ServiceSource>,
     let params = add["params"].clone();
     match (source, child.get("layer").filter(|l| l.is_object())) {
         (Some(source), Some(layer)) => {
-            serviceui::add_layer_from(app, source, layer, "", false, origin)?;
+            serviceui::add_layer_from(app, source, layer, "", None, false, origin)?;
         }
         _ => match command {
             "layer.addUrl" => {
