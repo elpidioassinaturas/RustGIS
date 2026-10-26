@@ -31,7 +31,101 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"tool": "explore"|"select"|"selectPolygon"|"selectLasso"|"selectRadius"|"zoomIn"|"measure"|"measureArea"|"createPoint"|"createLine"|"createPolygon"|"editVertices"|"graphicPoint"|"graphicText"|"graphicLine"|"graphicCurve"|"graphicFreehand"|"graphicPolygon"|"graphicLasso"|"graphicRectangle"|"graphicCircle"|"graphicEllipse"|"graphicPicture"}"#),
         C::new("info.project", "Project Info", "Project", info).view().params(r#"{"nameFilter"?: string, "includeFields"?: bool}"#),
         C::new("info.commands", "List Commands", "Help", list).view(),
+        // The project log (#797): read, written out, emptied, turned on or off. Not undoable
+        // edits of the project: the log sits outside its undo history.
+        C::new("project.log", "Project Log", "Project", log).view().params(
+            r#"{"since"?: milliseconds since 1970 (UTC), "until"?: milliseconds, "command"?: "a command id, or the start of one (layer.)", "failed"?: bool (only those that failed, or succeeded), "limit"?: entries (default 100, the newest; at most 10000)} → {"entries": [{"at", "command", "params", "ok", "error"?, "millis"}], "count": matching, "total": in the log, "on": bool}"#,
+        ),
+        C::new("project.exportLog", "Export Project Log", "Project", export_log)
+            .view()
+            .params(r#"{"path": ".csv or .jsonl file", "format"?: "csv"|"jsonl" (default from the extension)}"#),
+        C::new("project.clearLog", "Clear Project Log", "Project", clear_log).view(),
+        C::new("project.logCommands", "Log Commands", "Project", log_commands).view().params(r#"{"on"?: bool (default: turn it the other way)}"#),
     ]
+}
+
+/// `project.log`: the log's entries that match, newest last.
+fn log(s: &mut Session, p: &Value) -> CmdResult {
+    let num = |k: &str| -> Result<Option<u64>, String> {
+        match p.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v.as_u64().map(Some).ok_or_else(|| format!("{k} is milliseconds since 1970")),
+        }
+    };
+    let (since, until) = (num("since")?, num("until")?);
+    let command = ps(p, "command").map(str::trim).filter(|c| !c.is_empty());
+    let failed = p.get("failed").and_then(Value::as_bool);
+    let limit = match num("limit")? {
+        Some(n) => usize::try_from(n).unwrap_or(usize::MAX).clamp(1, crate::project::LOG_LIMIT),
+        None => 100,
+    };
+    let all = s.project.log.entries();
+    let matching: Vec<&crate::project::LogEntry> = all
+        .iter()
+        .filter(|e| since.is_none_or(|t| e.at >= t) && until.is_none_or(|t| e.at <= t))
+        .filter(|e| command.is_none_or(|c| e.command == c || (c.ends_with('.') && e.command.starts_with(c))))
+        .filter(|e| failed.is_none_or(|f| e.ok != f))
+        .collect();
+    let shown = &matching[matching.len().saturating_sub(limit)..];
+    Ok(json!({"entries": shown, "count": matching.len(), "total": all.len(), "on": s.project.log.on()}))
+}
+
+/// `project.exportLog`: the log written out, as CSV (one row an entry, the parameters as a JSON
+/// column) or JSON Lines (one entry a line).
+fn export_log(s: &mut Session, p: &Value) -> CmdResult {
+    let path = PathBuf::from(ps(p, "path").ok_or("path is required")?);
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+    let format = match ps(p, "format").map(str::to_ascii_lowercase).or(ext).as_deref() {
+        Some("csv") => "csv",
+        Some("jsonl") | Some("ndjson") | Some("json") => "jsonl",
+        _ => return Err("format is csv or jsonl (or give a .csv or .jsonl path)".into()),
+    };
+    let entries = s.project.log.entries();
+    let mut text = String::new();
+    if format == "csv" {
+        let quote = |t: &str| format!("\"{}\"", t.replace('"', "\"\""));
+        text.push_str("time_utc,at,command,ok,millis,error,params\n");
+        for e in &entries {
+            let (date, time) = rustgis_map::graphics::civil(e.at / 1000);
+            text.push_str(&format!(
+                "{date} {time}:{:02},{},{},{},{},{},{}\n",
+                (e.at / 1000) % 60,
+                e.at,
+                quote(&e.command),
+                e.ok,
+                e.millis,
+                quote(e.error.as_deref().unwrap_or("")),
+                quote(&e.params.to_string())
+            ));
+        }
+    } else {
+        for e in &entries {
+            text.push_str(&serde_json::to_string(e).map_err(|e| e.to_string())?);
+            text.push('\n');
+        }
+    }
+    rustgis_data::io::write_atomic(&path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
+    s.notify(format!("Exported the project log ({} entries) to {}", entries.len(), path.display()), false);
+    Ok(json!({"path": path.display().to_string(), "entries": entries.len(), "format": format}))
+}
+
+/// `project.clearLog`: empties the log, which then holds this command's own entry, so a cleared
+/// log says it was cleared.
+fn clear_log(s: &mut Session, _: &Value) -> CmdResult {
+    let n = s.project.log.clear();
+    s.dirty = true;
+    Ok(json!({"cleared": n}))
+}
+
+/// `project.logCommands`: turns the log on or off; off, nothing more goes in (what is there stays).
+fn log_commands(s: &mut Session, p: &Value) -> CmdResult {
+    let on = match p.get("on") {
+        None | Some(Value::Null) => !s.project.log.on(),
+        Some(v) => v.as_bool().ok_or("on must be true or false")?,
+    };
+    s.project.log.set_on(on);
+    s.dirty = true;
+    Ok(json!({"on": on}))
 }
 
 /// Replaces the project, clearing history and per-project state.

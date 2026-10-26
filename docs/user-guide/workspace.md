@@ -52,6 +52,36 @@ one's copy; it says so as it starts. Nor does RustGIS autosave when its settings
 files (some network or synced folders), where it can't tell a second copy apart. The browser app
 doesn't autosave yet; it warns before you leave a page with unsaved changes.
 
+### Project log
+
+A project keeps a **log** of the commands run on it: what was done, when, with what, and whether
+it worked, for reproducing an analysis, reviewing work or writing a methods section. Every front
+end goes into it alike: the app, scripts, the AI Assistant, the command line, Python and MCP.
+
+- **What goes in:** each command that changes the project, and each that reaches a file, folder,
+  address or connection (an export, a download, a save), plus undo and redo, with the step they
+  took back or brought back. Reading and looking around (listing layers, describing a tool,
+  reading features, moving the view) is left out. A command run by another (a script's lines, a
+  model's steps) is inside its parent's entry.
+- **Each entry:** `at` (when it started, in milliseconds since 1970, UTC), `command`, `params`,
+  `ok`, `error` when it failed, and `millis`, how long it took.
+- **Outside undo:** undoing a command doesn't take its entry back.
+- **No secrets:** the parameters lose passwords, keys and tokens as History's Copy as code does,
+  and so does an error's text. Each entry's parameters are clipped to about 4 KB of JSON (a long
+  text is cut, a list keeps its first 100 items), its error to 500 characters, and the log keeps
+  its last 10,000 entries, the oldest dropped first.
+- **Saved with the project:** a shared `.rgis` carries its log (a package, `.rgispkg`, or a
+  template doesn't). Clear it first if that isn't
+  wanted (`project.clearLog`, which leaves its own entry), or turn logging off for a project
+  (`project.logCommands {"on": false}`; what is there stays). A project with no log saves as
+  before.
+
+From scripts: `project.log {"since"?, "until"?, "command"?, "failed"?, "limit"?}` lists entries,
+newest last (`command` is an id, or the start of one ending in a dot, `layer.`), and
+`project.exportLog {"path": "log.csv"}` writes it out as CSV (one row an entry, the parameters as
+a JSON column) or JSON Lines (`.jsonl`). The History pane still keeps geoprocessing runs with their
+outputs and Copy as code; the log is a plain record and runs nothing again.
+
 ### QGIS projects and styles
 
 A QGIS project (`.qgs`, or a `.qgz` archive) opens as a new map of the current project: **Open**

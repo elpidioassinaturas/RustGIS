@@ -17618,3 +17618,94 @@ fn calculate_geometry_updates_ellipsoidal_lengths_in_one_undo_step() {
     let out = &s.map().layer_by_name("routes").unwrap().dataset;
     assert!((out.value(0, length).as_f64().unwrap() - 111.31949079327356).abs() < 1e-6);
 }
+
+/// The project log (#797): a command run by itself that changes the project, or reaches a file
+/// or a service, is logged once (a script's lines inside it), with its outcome; reading isn't.
+/// Undo keeps the entries and is logged with the step it took back. Secrets are taken out and
+/// large values clipped; the log is capped, saved with the project and read back; it can be
+/// read by filter, written out, cleared and turned off.
+#[test]
+fn the_project_log_records_each_command_run_on_the_project() {
+    use crate::project::{LOG_LIMIT, LOG_PARAMS_BYTES, LogEntry};
+    let mut s = world();
+    let commands = |s: &Session| s.project.log.entries().iter().map(|e| e.command.clone()).collect::<Vec<_>>();
+    s.run("project.rename", &json!({"name": "Atlas"})).unwrap();
+    s.run("info.project", &Value::Null).unwrap();
+    s.run("map.zoomIn", &Value::Null).unwrap();
+    s.run("script.run", &json!({"script": "project.rename {\"name\": \"A\"}\nproject.rename {\"name\": \"B\"}"})).unwrap();
+    assert_eq!(commands(&s), ["project.rename", "script.run"], "reading and moving the view aren't logged, nor a script's lines");
+    let first = &s.project.log.entries()[0];
+    assert!(first.ok && first.error.is_none() && first.at > 1_700_000_000_000, "{first:?}");
+    assert_eq!(first.params, json!({"name": "Atlas"}));
+    // Undone: the entries stay, and the undo says what it took back.
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(s.project.name, "Atlas");
+    assert_eq!(commands(&s), ["project.rename", "script.run", "edit.undo"]);
+    assert_eq!(s.project.log.entries()[2].params, json!({"step": "Run Script"}));
+    // A failure is logged with its error; a service's address without its token.
+    assert!(s.run("project.rename", &json!({"name": " "})).is_err());
+    let failed = s.project.log.entries().last().cloned().unwrap();
+    assert!(!failed.ok && failed.error.as_deref().is_some_and(|e| e.contains("name")), "{failed:?}");
+    let _ = s.run("service.layers", &json!({"url": "https://x.org/wms?token=S3CRET&layers=a", "text": "not a capabilities document"}));
+    let service = s.project.log.entries().last().cloned().unwrap();
+    assert_eq!(service.command, "service.layers");
+    assert!(!service.params.to_string().contains("S3CRET"), "{service:?}");
+    // A document given as text is kept as its size only: it may hold secrets no redaction finds.
+    let qgs = format!("<qgis version=\"3.42.0\"><title>{}</title></qgis>", "rustgis-s3:TOKEN:s3://b/k ".repeat(20));
+    let _ = s.run("project.importQgis", &json!({"text": qgs}));
+    let doc = s.project.log.entries().last().cloned().unwrap();
+    assert_eq!(doc.params["text"], json!(format!("(a document of {} characters)", qgs.chars().count())), "{doc:?}");
+    // Large values clipped.
+    s.run("project.rename", &json!({"name": "x".repeat(20_000), "note": vec![1; 5_000]})).ok();
+    let big = s.project.log.entries().last().cloned().unwrap();
+    assert!(serde_json::to_vec(&big.params).unwrap().len() <= LOG_PARAMS_BYTES, "{}", big.params.to_string().len());
+    // Saved with the project and read back; a project that never logged saves without it.
+    let (text, _) = s.project.saved_text(None).unwrap();
+    let back = Project::from_json(&text).unwrap();
+    assert_eq!(back.log.entries(), s.project.log.entries());
+    // So is the autosaved recovery copy.
+    let recovered = Project::from_json(&s.project.clone().recovery_text().unwrap()).unwrap();
+    assert_eq!(recovered.log.entries(), s.project.log.entries());
+    assert!(!serde_json::to_string(&Project::default()).unwrap().contains("\"log\""));
+    // Saved into a folder, its paths are written relative to it, as the project's sources are.
+    let folder = std::env::temp_dir().join(format!("rustgis-log-portable-{}", std::process::id()));
+    let inside = folder.join("data").join("a.tif");
+    let error = Some(format!("{}: not found", inside.display()));
+    let params = json!({"path": inside.to_string_lossy()});
+    s.project.log.push(LogEntry { at: 1, command: "layer.addData".into(), params, ok: false, error, millis: 0 });
+    let (text, _) = s.project.saved_text(Some(&folder)).unwrap();
+    let saved: Value = serde_json::from_str(&text).unwrap();
+    let last = saved["log"]["entries"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!((last["params"]["path"].as_str(), last["error"].as_str()), (Some("./data/a.tif"), Some("./data/a.tif: not found")));
+    assert_eq!(s.project.log.entries().last().unwrap().params["path"], json!(inside.to_string_lossy()), "the open project keeps them");
+    // Read by filter, newest last.
+    let r = s.run("project.log", &json!({"command": "project.rename", "failed": true})).unwrap();
+    assert_eq!((r["count"].as_u64(), r["entries"][0]["command"].as_str()), (Some(1), Some("project.rename")));
+    assert_eq!(s.run("project.log", &json!({"limit": 2})).unwrap()["entries"].as_array().map(Vec::len), Some(2));
+    // Written out as CSV and JSON Lines.
+    let dir = std::env::temp_dir().join(format!("rustgis-project-log-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let csv = dir.join("log.csv");
+    s.run("project.exportLog", &json!({"path": csv.to_string_lossy()})).unwrap();
+    let csv_text = std::fs::read_to_string(&csv).unwrap();
+    assert!(csv_text.starts_with("time_utc,at,command,ok,millis,error,params\n") && csv_text.contains("\"edit.undo\""), "{csv_text}");
+    let jsonl = dir.join("log.jsonl");
+    s.run("project.exportLog", &json!({"path": jsonl.to_string_lossy()})).unwrap();
+    let lines: Vec<LogEntry> = std::fs::read_to_string(&jsonl).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len() + 1, s.project.log.len(), "every entry but the export's own");
+    let _ = std::fs::remove_dir_all(&dir);
+    // Cleared, it says so; off, nothing goes in; on again, it does.
+    assert!(s.run("project.clearLog", &Value::Null).unwrap()["cleared"].as_u64().unwrap() > 5);
+    assert_eq!(commands(&s), ["project.clearLog"]);
+    s.run("project.logCommands", &json!({"on": false})).unwrap();
+    s.run("project.rename", &json!({"name": "Quiet"})).unwrap();
+    assert_eq!(commands(&s), ["project.clearLog"]);
+    s.run("project.logCommands", &json!({"on": true})).unwrap();
+    assert_eq!(commands(&s), ["project.clearLog", "project.logCommands"]);
+    // Capped: the oldest go first.
+    for i in 0..LOG_LIMIT + 5 {
+        s.project.log.push(LogEntry { at: i as u64, command: "x".into(), params: Value::Null, ok: true, error: None, millis: 0 });
+    }
+    assert_eq!(s.project.log.len(), LOG_LIMIT);
+    assert_eq!(s.project.log.entries()[0].at, 5);
+}

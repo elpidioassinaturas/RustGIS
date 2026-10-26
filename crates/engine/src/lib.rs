@@ -10,6 +10,7 @@ pub mod connections;
 pub mod geometry_calc;
 pub mod model;
 pub mod project;
+mod project_log;
 pub mod s3_connections;
 pub mod s3_keys;
 #[cfg(test)]
@@ -876,8 +877,31 @@ impl Session {
     }
 
     /// Runs a command by id. Mutating commands snapshot the project for undo; an error or a
-    /// panic restores it.
+    /// panic restores it. A command run by itself (not as a part of another) that changes the
+    /// project, or reaches a file or a service, goes into the project's log (#797).
     pub fn run(&mut self, id: &str, params: &Value) -> CmdResult {
+        if self.depth > 0 {
+            return self.run_command(id, params);
+        }
+        // Undo and redo are logged with the step they take back or bring back.
+        let step = match id {
+            "edit.undo" => self.undo_label(),
+            "edit.redo" => self.redo_label(),
+            _ => None,
+        };
+        let (at, start) = (project_log::now_ms(), web_time::Instant::now());
+        let res = self.run_command(id, params);
+        if project_log::logs(self, id, params) {
+            let params = match step {
+                Some(label) => serde_json::json!({"step": label}),
+                None => project_log::kept_params(params),
+            };
+            self.project.log.push(project_log::entry(id, params, &res, at, start.elapsed()));
+        }
+        res
+    }
+
+    fn run_command(&mut self, id: &str, params: &Value) -> CmdResult {
         // The merge key asked for ([`Session::merge_undo`]) goes to this command if it runs, and is
         // gone if it's refused first, so it can't merge a later command into the last step.
         let merge = if self.depth == 0 { self.merge.take() } else { None };

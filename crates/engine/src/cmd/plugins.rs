@@ -294,7 +294,7 @@ const WRITES_FILES: &[&str] = &["project.save", "project.saveAs"];
 
 /// Parameter keys that name a file, folder or address. (`data` and `text` carry content, which
 /// plugins may pass: `layer.addDataBytes`, `map.import` from text.)
-const PLACE_KEYS: &[&str] = &["path", "folder", "dir", "file", "url", "uri", "source", "output", "connection", "database"];
+pub(crate) const PLACE_KEYS: &[&str] = &["path", "folder", "dir", "file", "url", "uri", "source", "output", "connection", "database"];
 
 /// The command running an SQL query through DuckDB, which can read any file and web address.
 pub const SQL: &str = "layer.addSql";

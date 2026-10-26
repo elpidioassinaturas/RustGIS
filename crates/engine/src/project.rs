@@ -171,6 +171,112 @@ pub struct Project {
     pub shared: Vec<crate::cmd::sharing::SharedItem>,
     #[serde(default)]
     pub data_stores: Vec<crate::cmd::sharing::DataStore>,
+    /// Every command run on the project (#797), outside its undo history: see [`ProjectLog`].
+    /// Read from the file, and written only by [`Project::saved_text`] (left out while it is
+    /// empty and on, so a project that never logged saves as before): the project's own JSON
+    /// (undo checks, comparisons, packages) doesn't carry it.
+    #[serde(default, skip_serializing)]
+    pub log: ProjectLog,
+}
+
+/// Most entries a project's log keeps; past it, the oldest go first.
+pub const LOG_LIMIT: usize = 10_000;
+/// Most bytes of JSON an entry's parameters keep (a long text is cut, a long list keeps its first
+/// [`LOG_LIST_ITEMS`]), and most characters of its error.
+pub const LOG_PARAMS_BYTES: usize = 4096;
+pub const LOG_LIST_ITEMS: usize = 100;
+pub const LOG_ERROR_CHARS: usize = 500;
+
+/// One command run on a project: when it started (UTC, milliseconds since 1970), its id, its
+/// parameters (secrets taken out, large values clipped), whether it succeeded, its error, and how
+/// long it took.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub at: u64,
+    pub command: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub millis: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct LogState {
+    /// Logging turned off (`project.logCommands`); on by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    off: bool,
+    #[serde(default)]
+    entries: Vec<LogEntry>,
+}
+
+/// A project's log (#797): one entry for each command run on it, from any front end, kept in
+/// the `.rgis`. It sits outside the undo history: the project's undo snapshots share it (a clone
+/// is the same log), so undoing a command never takes its entry back, and a snapshot copies
+/// nothing of it. A project opened, made new or from a template has a log of its own.
+#[derive(Clone, Debug, Default)]
+pub struct ProjectLog(std::sync::Arc<Mutex<LogState>>);
+
+impl ProjectLog {
+    fn state(&self) -> MutexGuard<'_, LogState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// No entries, and logging on: nothing to save.
+    pub fn is_empty(&self) -> bool {
+        let s = self.state();
+        s.entries.is_empty() && !s.off
+    }
+
+    pub fn on(&self) -> bool {
+        !self.state().off
+    }
+
+    pub fn set_on(&self, on: bool) {
+        self.state().off = !on;
+    }
+
+    /// Adds `e` when logging is on, the oldest entries dropped past [`LOG_LIMIT`].
+    pub fn push(&self, e: LogEntry) {
+        let mut s = self.state();
+        if s.off {
+            return;
+        }
+        s.entries.push(e);
+        let over = s.entries.len().saturating_sub(LOG_LIMIT);
+        s.entries.drain(..over);
+    }
+
+    pub fn entries(&self) -> Vec<LogEntry> {
+        self.state().entries.clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.state().entries.len()
+    }
+
+    /// Empties the log; how many entries it had.
+    pub fn clear(&self) -> usize {
+        std::mem::take(&mut self.state().entries).len()
+    }
+}
+
+impl Serialize for ProjectLog {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.state().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectLog {
+    /// A file's log, its last [`LOG_LIMIT`] entries (a project file is hostile input).
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let mut state = LogState::deserialize(d)?;
+        let over = state.entries.len().saturating_sub(LOG_LIMIT);
+        state.entries.drain(..over);
+        Ok(ProjectLog(std::sync::Arc::new(Mutex::new(state))))
+    }
 }
 
 /// A standalone table: a dataset without geometry, under an id that stays with it. Names can
@@ -395,6 +501,64 @@ fn format() -> u32 {
     FORMAT
 }
 
+/// A project's saved JSON with its log (#797) as its last member, when there is one to keep. Saved
+/// into a folder (`dir`), the local paths in the log's parameters and errors are written relative
+/// to it, as the project's own sources are, or as their file names where they can't be, so a
+/// project moved with its data keeps no trace of the folder it was in.
+fn with_log(mut text: String, log: &ProjectLog, dir: Option<&str>) -> Result<String, String> {
+    if log.is_empty() || !text.ends_with('}') {
+        return Ok(text);
+    }
+    let mut entries = log.entries();
+    if let Some(d) = dir {
+        for e in &mut entries {
+            e.params = portable_value(&e.params, d, 0);
+            e.error = e.error.as_deref().map(|t| portable_text(t, d));
+        }
+    }
+    let log = serde_json::to_string(&LogState { off: !log.on(), entries }).map_err(|e| e.to_string())?;
+    text.pop();
+    text.push_str(",\"log\":");
+    text.push_str(&log);
+    text.push('}');
+    Ok(text)
+}
+
+/// `v` with its texts' local paths made portable ([`portable_text`]).
+fn portable_value(v: &serde_json::Value, dir: &str, depth: usize) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::String(t) => Value::String(portable_text(t, dir)),
+        Value::Array(a) if depth < 16 => Value::Array(a.iter().map(|x| portable_value(x, dir, depth + 1)).collect()),
+        Value::Object(o) if depth < 16 => Value::Object(o.iter().map(|(k, x)| (k.clone(), portable_value(x, dir, depth + 1))).collect()),
+        other => other.clone(),
+    }
+}
+
+/// `t` with each absolute local path in it (the whole text, or a word of it, quotes and trailing
+/// punctuation aside) relative to `dir`, or its file name where it can't be.
+fn portable_text(t: &str, dir: &str) -> String {
+    let portable = |p: &str| {
+        rustgis_map::paths::relative_to(dir, p)
+            .filter(|r| rustgis_map::paths::is_local(r))
+            .unwrap_or_else(|| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string())
+    };
+    if rustgis_map::paths::is_absolute_local(t) {
+        return portable(t);
+    }
+    t.split_inclusive(char::is_whitespace)
+        .map(|word| {
+            let core = word.trim_end().trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']' | ',' | ';'));
+            let core = core.strip_suffix(':').unwrap_or(core);
+            if !core.is_empty() && rustgis_map::paths::is_absolute_local(core) {
+                word.replacen(core, &portable(core), 1)
+            } else {
+                word.to_string()
+            }
+        })
+        .collect()
+}
+
 impl Default for Project {
     fn default() -> Self {
         Project::new("Untitled")
@@ -463,6 +627,7 @@ impl Project {
             dl_models: Vec::new(),
             shared: Vec::new(),
             data_stores: Vec::new(),
+            log: ProjectLog::default(),
         }
     }
 
@@ -735,7 +900,7 @@ impl Project {
         } else {
             Vec::new()
         };
-        let text = serde_json::to_string(self).map_err(|e| e.to_string());
+        let text = serde_json::to_string(self).map_err(|e| e.to_string()).and_then(|t| with_log(t, &self.log, dir.and_then(Path::to_str)));
         if !originals.is_empty() {
             for ((p, _), original) in self.file_paths_mut().into_iter().zip(originals) {
                 if let Some(original) = original {
@@ -772,7 +937,8 @@ impl Project {
     /// Text too large to open again is refused.
     pub fn recovery_text(mut self) -> Result<String, String> {
         strip_addresses(self.addresses_mut());
-        let text = serde_json::to_string(&self).map_err(|e| e.to_string())?;
+        // With its log (#797), its paths as the open project holds them.
+        let text = serde_json::to_string(&self).map_err(|e| e.to_string()).and_then(|t| with_log(t, &self.log, None))?;
         if text.len() as u64 > MAX_BYTES {
             return Err("the project is too large to keep a recovery copy".into());
         }

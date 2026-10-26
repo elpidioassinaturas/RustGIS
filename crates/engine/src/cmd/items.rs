@@ -521,6 +521,8 @@ fn import_styles(s: &mut Session, p: &Value) -> CmdResult {
 fn template(p: &Project) -> Project {
     let mut t = p.clone();
     t.gp_history.clear();
+    // A template starts a log of its own (a clone shares the project's).
+    t.log = crate::project::ProjectLog::default();
     for m in &mut t.maps {
         for l in &mut m.layers {
             l.dataset.features.clear();
