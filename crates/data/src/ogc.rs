@@ -705,6 +705,12 @@ fn wfs(url: &str, root: &Node) -> Service {
 // ---------------------------------------------------------------------------------------------
 // Features over an area
 
+/// Whether an address's path ends in `/items` (an OGC API collection's), in any case.
+fn ends_with_items(path: &str) -> bool {
+    let p = path.trim_end_matches('/');
+    p.len() >= 6 && p.get(p.len() - 6..).is_some_and(|tail| tail.eq_ignore_ascii_case("/items"))
+}
+
 /// Query parameters that already filter a request by place or by feature, or that name another
 /// coordinate system for a box (OGC API's `bbox-crs`): an address carrying one is left as it is.
 const SPATIAL_KEYS: [&str; 7] = ["bbox", "bbox-crs", "filter", "cql_filter", "featureid", "resourceid", "geometry"];
@@ -743,7 +749,7 @@ pub fn features_in_area(url: &str, area: [f64; 4]) -> Option<String> {
         }
     } else if is_arcgis_query(url) {
         format!("geometry={w},{s},{e},{n}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects")
-    } else if base(url).trim_end_matches('/').to_ascii_lowercase().ends_with("/items") {
+    } else if ends_with_items(base(url)) {
         format!("bbox={w},{s},{e},{n}")
     } else {
         return None;
@@ -2409,6 +2415,12 @@ mod tests {
             features_in_area("https://api.example.org/collections/a/items", [-1.5, 0.0, 2.0, 1e-7]).unwrap(),
             "https://api.example.org/collections/a/items?bbox=-1.5,0,2,0.0000001"
         );
+        // An items path in any case, and with a trailing slash.
+        assert_eq!(
+            features_in_area("https://api.example.org/Collections/A/Items/", piaui).unwrap(),
+            "https://api.example.org/Collections/A/Items/?bbox=-45.99,-10.93,-40.37,-2.74"
+        );
+        assert!(!ends_with_items("/items-old") && !ends_with_items("tems") && ends_with_items("/x/ITEMS"));
         // Across the antimeridian, off the globe, already filtered, or not a feature request.
         assert_eq!(features_in_area("https://api.example.org/collections/a/items", [170.0, -20.0, -170.0, -10.0]), None);
         assert_eq!(features_in_area("https://api.example.org/collections/a/items", [-200.0, -20.0, 10.0, 95.0]), None);

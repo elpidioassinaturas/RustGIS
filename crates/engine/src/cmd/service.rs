@@ -605,3 +605,16 @@ fn fetch_records(url: &str, request: &str) -> Result<rustgis_data::ogc::RecordPa
 fn fetch_records(url: &str, _: &str) -> Result<rustgis_data::ogc::RecordPage, String> {
     Err(format!("{url}: in the web app, use Home › Add Data › From Service › Search Catalogue"))
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    /// A whole layer past the wait is pointed to `bbox`, unless a `bbox` was given (one the request
+    /// couldn't carry, a WFS 1.0's or across the antimeridian); other errors are left as they are.
+    #[test]
+    fn a_slow_whole_layer_suggests_bbox_only_when_none_was_given() {
+        let slow = "https://x.org/wfs: timed out reading the answer".to_string();
+        assert!(super::slow_whole_layer(slow.clone(), false).ends_with("with \"bbox\": [west, south, east, north] or \"view\""));
+        assert_eq!(super::slow_whole_layer(slow.clone(), true), slow);
+        assert_eq!(super::slow_whole_layer("404 Not Found".into(), false), "404 Not Found");
+    }
+}
