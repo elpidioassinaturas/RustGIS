@@ -2414,6 +2414,13 @@ fn installed_family(name: &str) -> Option<&'static rustgis_render::families::Fam
     families::available()?.get(usize::from(families::find_ready(name)?))
 }
 
+/// Whether `family`'s regular face can be read and drawn (a file past the size RustGIS reads, or
+/// a damaged one, can't): read once and kept, as drawing it would.
+fn readable(family: &rustgis_render::families::Family) -> bool {
+    use rustgis_render::families;
+    families::pick(family, false, false).and_then(|(face, _)| families::bytes(face)).is_some()
+}
+
 /// A named family's fallback when none is given: the one it has when it is named again, else its
 /// own class (a serif's is the serif), else, where the family isn't known (not installed, or
 /// the fonts not indexed yet), a name that says "Serif" without "Sans" (Noto Serif), else the
@@ -2447,6 +2454,10 @@ fn font_warning(font: FontFamily, name: Option<&str>, fallback_given: bool) -> O
         Some(n) if !indexed && !fallback_given => Some(format!(
             "the installed fonts are still being read, so {n}'s fallback ({drawn}) comes from its name, not the font: give \"fallback\" to choose it"
         )),
+        // Installed, but its file can't be read (too large, damaged): drawn in its fallback too.
+        Some(n) if indexed && installed_family(n).is_some_and(|f| !readable(f)) => {
+            Some(format!("{n} is installed but its font file can't be read, so the text is drawn in the {drawn}"))
+        }
         Some(n) if indexed && rustgis_render::families::find_ready(n).is_none() => {
             Some(format!("{n} is not installed on this computer, so the text is drawn in the {drawn}"))
         }
@@ -3053,18 +3064,22 @@ fn series_page(s: &mut Session, p: &Value) -> CmdResult {
 }
 
 /// Renders a layout to PNG or PDF bytes. `all` renders every map series page (PDF only).
-/// An export of a layout whose texts name installed families waits for the font index (the app
-/// builds it in its first seconds), so the page is drawn in them, as a map export waits for its
-/// labels' fonts; the page on screen doesn't wait.
-fn wait_for_named_fonts(layout: &Layout) {
-    if layout.elements.iter().any(|e| matches!(&e.kind, ElementKind::Text { font_name: Some(_), .. })) {
-        let _ = rustgis_render::families::installed();
-    }
+/// What an export of a layout whose texts name installed families is told while the app is still
+/// indexing the fonts (its first seconds; an export runs on its interface thread, which mustn't
+/// wait): those texts are drawn in their fallbacks. A script or the command line indexes them at
+/// once.
+fn named_fonts_unread(layout: &Layout) -> Option<&'static str> {
+    let named = layout.elements.iter().any(|e| matches!(&e.kind, ElementKind::Text { font_name: Some(_), .. }));
+    (named && rustgis_render::families::available().is_none()).then_some(
+        "the installed fonts are still being read, so texts in a named font family are drawn in their fallback: export again in a moment",
+    )
 }
 
 pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) -> Result<Vec<u8>, String> {
     let saved = s.project.layouts.get(li).ok_or("no layout")?.clone();
-    wait_for_named_fonts(&saved);
+    if let Some(note) = named_fonts_unread(&saved) {
+        s.notify(note, false);
+    }
     let dpi = if dpi.is_finite() { dpi.clamp(36.0, 600.0) } else { 150.0 };
     let current = saved.series.as_ref().map_or(0, |sr| sr.page);
     // Only a whole-series PDF names every page.
@@ -3158,7 +3173,6 @@ fn layout_svg(s: &mut Session, li: usize, dpi: f64) -> Result<String, String> {
     };
     // Rendering borrows the current layout; it does not step or modify the series page.
     let layout = s.project.layouts.get(li).ok_or("no layout")?;
-    wait_for_named_fonts(layout);
     rustgis_render::svg::layout_svg(layout, &mut s.project.maps, dpi, &info)
         .ok_or_else(|| "could not draw the page; check its map sources and export size".into())
 }
