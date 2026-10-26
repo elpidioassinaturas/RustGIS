@@ -201,6 +201,11 @@ pub struct LogEntry {
     pub error: Option<String>,
     #[serde(default)]
     pub millis: u64,
+    /// In a saved file, where the paths made portable on saving are (`/params/path`, `/error`):
+    /// only those are made absolute again on reading, so a text given as relative (`./a.tif`, a
+    /// name such as `./Maps`) reads back as it was run. Taken once read; never shown.
+    #[serde(default, skip_serializing)]
+    pub relative: Vec<String>,
 }
 
 /// A log as it is held, written by [`ProjectLog::write_json`] (its paths made portable) and read
@@ -382,31 +387,22 @@ impl ProjectLog {
         self.state().entries.is_empty()
     }
 
-    /// The relative paths a file's log was saved with (`./data/a.tif`), made absolute again from
-    /// `dir`, the folder it was read from, as the project's sources are; so a later Save As
-    /// elsewhere writes them relative to that folder. Only texts written as relative paths
-    /// (`./`, `../`) are read as such.
+    /// The paths a file's log was saved with relative to its folder (`./data/a.tif`), made
+    /// absolute again from `dir`, the folder it was read from, as the project's sources are; so
+    /// a later Save As elsewhere writes them relative to that folder. Only the texts the save
+    /// made portable (an entry's `relative`) are read as such: one given as relative stays so.
     fn resolve_paths(&self, dir: &str) {
-        fn resolved(v: &mut serde_json::Value, dir: &str, depth: usize) {
-            match v {
-                serde_json::Value::String(t) if t.starts_with("./") || t.starts_with("../") => {
-                    if let Some(abs) = rustgis_map::paths::resolve(dir, t) {
-                        *t = abs;
-                    }
-                }
-                serde_json::Value::Array(a) if depth < 16 => a.iter_mut().for_each(|x| resolved(x, dir, depth + 1)),
-                serde_json::Value::Object(o) if depth < 16 => o.values_mut().for_each(|x| resolved(x, dir, depth + 1)),
-                _ => {}
-            }
-        }
+        let word = |p: &str| (p.starts_with("./") || p.starts_with("../")).then(|| rustgis_map::paths::resolve(dir, p)).flatten();
         for e in &mut self.state().entries {
-            resolved(&mut e.params, dir, 0);
-            // An error's words written as relative paths (`./data/a.tif:`), as `portable_text`
-            // wrote them.
-            if let Some(err) = e.error.as_mut() {
-                *err = path_words(err, |p| {
-                    (p.starts_with("./") || p.starts_with("../")).then(|| rustgis_map::paths::resolve(dir, p)).flatten()
-                });
+            for at in std::mem::take(&mut e.relative) {
+                if at == "/error" {
+                    if let Some(err) = e.error.as_mut() {
+                        *err = path_words(err, word);
+                    }
+                } else if let Some(serde_json::Value::String(t)) = at.strip_prefix("/params").and_then(|p| e.params.pointer_mut(p)) {
+                    // The whole text, as `portable_text` made it (spaces and all), or its words.
+                    *t = word(t).unwrap_or_else(|| path_words(t, word));
+                }
             }
         }
     }
@@ -431,11 +427,29 @@ impl ProjectLog {
             if i > 0 {
                 out.push(',');
             }
+            // Where its paths were made portable: those read back as such (an entry read from a
+            // file that wasn't resolved keeps its own).
+            let mut relative = std::mem::take(&mut e.relative);
             if let Some(d) = dir {
-                make_portable(&mut e.params, d, 0);
-                e.error = e.error.as_deref().map(|t| portable_text(t, d));
+                make_portable(&mut e.params, d, "/params", 0, &mut relative);
+                if let Some(err) = e.error.as_mut() {
+                    let portable = portable_text(err, d);
+                    if portable != *err {
+                        *err = portable;
+                        relative.push("/error".into());
+                    }
+                }
             }
-            out.push_str(&serde_json::to_string(&e).map_err(|e| e.to_string())?);
+            let text = serde_json::to_string(&e).map_err(|e| e.to_string())?;
+            match text.strip_suffix('}').filter(|_| !relative.is_empty()) {
+                Some(open) => {
+                    out.push_str(open);
+                    out.push_str(",\"relative\":");
+                    out.push_str(&serde_json::to_string(&relative).map_err(|e| e.to_string())?);
+                    out.push('}');
+                }
+                None => out.push_str(&text),
+            }
         }
         out.push_str("]}");
         Ok(())
@@ -686,13 +700,28 @@ fn with_log(mut text: String, log: &ProjectLog, dir: Option<&str>) -> Result<Str
     Ok(text)
 }
 
-/// `v`'s texts with their local paths made portable ([`portable_text`]), in place.
-fn make_portable(v: &mut serde_json::Value, dir: &str, depth: usize) {
+/// `v`'s texts with their local paths made portable ([`portable_text`]), in place; each one
+/// changed noted in `changed` by its JSON pointer, `at` being `v`'s.
+fn make_portable(v: &mut serde_json::Value, dir: &str, at: &str, depth: usize, changed: &mut Vec<String>) {
     use serde_json::Value;
     match v {
-        Value::String(t) => *t = portable_text(t, dir),
-        Value::Array(a) if depth < 16 => a.iter_mut().for_each(|x| make_portable(x, dir, depth + 1)),
-        Value::Object(o) if depth < 16 => o.values_mut().for_each(|x| make_portable(x, dir, depth + 1)),
+        Value::String(t) => {
+            let portable = portable_text(t, dir);
+            if portable != *t {
+                *t = portable;
+                changed.push(at.to_string());
+            }
+        }
+        Value::Array(a) if depth < 16 => {
+            for (i, x) in a.iter_mut().enumerate() {
+                make_portable(x, dir, &format!("{at}/{i}"), depth + 1, changed);
+            }
+        }
+        Value::Object(o) if depth < 16 => {
+            for (k, x) in o.iter_mut() {
+                make_portable(x, dir, &format!("{at}/{}", k.replace('~', "~0").replace('/', "~1")), depth + 1, changed);
+            }
+        }
         _ => {}
     }
 }

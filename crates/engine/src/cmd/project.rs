@@ -36,7 +36,7 @@ pub fn commands() -> Vec<C> {
         // changed themselves): the log sits outside the undo history, so an undo step would
         // restore nothing of it.
         C::new("project.log", "Project Log", "Project", log).view().params(
-            r#"{"since"?: milliseconds since 1970 (UTC), "until"?: milliseconds, "command"?: "a command id, or the start of one (layer.)", "failed"?: bool (only those that failed, or succeeded), "limit"?: entries (default 100, the newest; at most 1000)} → {"entries": [{"at", "command", "params", "ok", "error"?, "millis"}], "count": matching, "total": in the log, "on": bool}"#,
+            r#"{"since"?: milliseconds since 1970 (UTC), "until"?: milliseconds, "command"?: "a command id, or the start of one (layer.)", "failed"?: bool (true: only those that failed; false: only those that succeeded), "limit"?: entries (default 100, the newest; at most 1000)} → {"entries": [{"at", "command", "params", "ok", "error"?, "millis"}], "count": matching, "total": in the log, "on": bool}"#,
         ),
         C::new("project.exportLog", "Export Project Log", "Project", export_log)
             .view()

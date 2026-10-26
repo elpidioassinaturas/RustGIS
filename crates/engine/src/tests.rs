@@ -17701,8 +17701,8 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let folder = std::env::temp_dir().join(format!("rustgis-log-portable-{}", std::process::id()));
     let inside = folder.join("data").join("a.tif");
     let error = Some(format!("{}: not found", inside.display()));
-    let params = json!({"path": inside.to_string_lossy()});
-    s.project.log.push(LogEntry { at: 1, command: "layer.addData".into(), params, ok: false, error, millis: 0 });
+    let params = json!({"path": inside.to_string_lossy(), "name": "./Maps and data"});
+    s.project.log.push(LogEntry { at: 1, command: "layer.addData".into(), params, ok: false, error, millis: 0, relative: Vec::new() });
     let (text, _) = s.project.saved_text(Some(&folder)).unwrap();
     let saved: Value = serde_json::from_str(&text).unwrap();
     let last = saved["log"]["entries"].as_array().unwrap().last().unwrap().clone();
@@ -17717,6 +17717,9 @@ fn the_project_log_records_each_command_run_on_the_project() {
     assert!(std::path::Path::new(&path).is_absolute() && path.ends_with("a.tif"), "{path}");
     let error = reopened.log.entries().last().unwrap().error.clone().unwrap();
     assert!(error.ends_with(": not found") && !error.starts_with("./"), "{error}");
+    // A text given as relative is read back as it was run, not against the project's folder.
+    assert_eq!(reopened.log.entries().last().unwrap().params["name"], json!("./Maps and data"));
+    assert!(reopened.log.entries().iter().all(|e| e.relative.is_empty()));
     let _ = std::fs::remove_dir_all(&folder);
     // Read by filter, newest last.
     let r = s.run("project.log", &json!({"command": "project.rename", "failed": true})).unwrap();
@@ -17726,7 +17729,8 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let wide: serde_json::Map<String, Value> = (0..40).map(|i| (format!("{i:02}{}", "k".repeat(62)), json!("é".repeat(64)))).collect();
     let kept = crate::project_log::kept_params(&Value::Object(wide));
     assert!(serde_json::to_vec(&kept).unwrap().len() <= crate::project::LOG_PARAMS_BYTES, "{kept}");
-    assert!(kept.as_object().is_some_and(|o| !o.is_empty() && o.len() < 40));
+    assert!(kept.as_object().is_some_and(|o| o.len() > 1 && o.len() < 40));
+    assert_eq!(kept["…"], json!("40 keys in all"));
     // An unquoted secret key in an object that doesn't parse goes, with the rest of the text;
     // a format string's braces stay.
     let line = crate::project_log::kept_params(&json!({"script": "s3.connect {secretAccessKey: \"S3CRET\"}\nprint(f\"{x:.2f}\")"}));
@@ -17749,7 +17753,15 @@ fn the_project_log_records_each_command_run_on_the_project() {
         assert_eq!(reaches(&read, &json!({})), Some(Reach::Files));
     }
     // An error that starts as a spreadsheet formula is written as text in the CSV.
-    let formula = LogEntry { at: 2, command: "x".into(), params: Value::Null, ok: false, error: Some("=HYPERLINK(1)".into()), millis: 0 };
+    let formula = LogEntry {
+        at: 2,
+        command: "x".into(),
+        params: Value::Null,
+        ok: false,
+        error: Some("=HYPERLINK(1)".into()),
+        millis: 0,
+        relative: Vec::new(),
+    };
     s.project.log.push(formula);
     // Written out as CSV and JSON Lines.
     let dir = std::env::temp_dir().join(format!("rustgis-project-log-{}", std::process::id()));
@@ -17810,7 +17822,15 @@ fn the_project_log_records_each_command_run_on_the_project() {
     s.run("project.logCommands", &json!({"on": true})).unwrap();
     // Capped: the oldest go first.
     for i in 0..LOG_LIMIT + 5 {
-        s.project.log.push(LogEntry { at: i as u64, command: "x".into(), params: Value::Null, ok: true, error: None, millis: 0 });
+        s.project.log.push(LogEntry {
+            at: i as u64,
+            command: "x".into(),
+            params: Value::Null,
+            ok: true,
+            error: None,
+            millis: 0,
+            relative: Vec::new(),
+        });
     }
     assert_eq!(s.project.log.len(), LOG_LIMIT);
     assert_eq!(s.project.log.entries()[0].at, 5);

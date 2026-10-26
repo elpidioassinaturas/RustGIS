@@ -70,8 +70,9 @@ pub(crate) fn kept_params(params: &Value) -> Value {
     match clipped {
         Value::Object(o) => {
             // Each key and value is short, but forty of them can still add up (escaped or
-            // multi-byte text): each pair counts its bytes, a colon and a comma.
-            let mut room = LOG_PARAMS_BYTES.saturating_sub(2);
+            // multi-byte text): each pair counts its bytes, a colon and a comma. Room is kept for
+            // the note of how many keys there were, when some are left out.
+            let mut room = LOG_PARAMS_BYTES.saturating_sub(2 + 48);
             let mut out = serde_json::Map::new();
             for (k, v) in o.iter().take(40) {
                 let (k, v): (String, Value) = (k.chars().take(64).collect(), short(v));
@@ -84,6 +85,9 @@ pub(crate) fn kept_params(params: &Value) -> Value {
                 }
                 room -= size;
                 out.insert(k, v);
+            }
+            if out.len() < o.len() {
+                out.insert("…".into(), Value::String(format!("{} keys in all", o.len())));
             }
             Value::Object(out)
         }
@@ -103,6 +107,9 @@ pub(crate) fn bounded(mut e: LogEntry) -> LogEntry {
     let fits = serde_json::to_vec(&e.params).is_ok_and(|b| b.len() <= LOG_PARAMS_BYTES);
     e.params = if fits { redacted(&clip(&e.params, usize::MAX, usize::MAX, 0)) } else { kept_params(&e.params) };
     e.error = e.error.as_deref().map(kept_error);
+    // Pointers into the entry, as many as its texts at most.
+    e.relative.truncate(1_000);
+    e.relative.retain(|p| p.len() <= 1_024);
     e
 }
 
@@ -226,5 +233,6 @@ pub(crate) fn entry(id: &str, params: Value, res: &CmdResult, at: u64, took: std
         ok: res.is_ok(),
         error,
         millis: u64::try_from(took.as_millis()).unwrap_or(u64::MAX),
+        relative: Vec::new(),
     }
 }

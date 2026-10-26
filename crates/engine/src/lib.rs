@@ -896,7 +896,10 @@ impl Session {
         // logged as it is asked for: nothing runs it again.)
         let pending =
             id.starts_with(rustgis_plugins::PREFIX) && res.as_ref().is_ok_and(|v| v.get("pending").and_then(Value::as_bool) == Some(true));
-        if !pending && project_log::logs(self, id, params) {
+        // With logging off, only its own switching and clearing go in: nothing else is clipped
+        // or redacted for nothing.
+        let wanted = self.project.log.on() || matches!(id, "project.logCommands" | "project.clearLog");
+        if !pending && wanted && project_log::logs(self, id, params) {
             let params = match step {
                 Some(label) => serde_json::json!({"step": label}),
                 None => project_log::kept_params(params),
