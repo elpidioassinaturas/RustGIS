@@ -17701,13 +17701,16 @@ fn the_project_log_records_each_command_run_on_the_project() {
     // Saved into a folder, its paths are written relative to it, as the project's sources are.
     let folder = std::env::temp_dir().join(format!("rustgis-log-portable-{}", std::process::id()));
     let inside = folder.join("My Data").join("a.tif");
-    let error = Some(format!("{}: not found", inside.display()));
+    let error = Some(format!("{}: not found (see ./x)", inside.display()));
     let params = json!({"path": inside.to_string_lossy(), "name": "./Maps and data", "sql": "SELECT a / b FROM t -- /home", "root": "/"});
     s.project.log.push(LogEntry { at: 1, command: "layer.addData".into(), params, ok: false, error, millis: 0, relative: Vec::new() });
     let (text, _) = s.project.saved_text(Some(&folder)).unwrap();
     let saved: Value = serde_json::from_str(&text).unwrap();
     let last = saved["log"]["entries"].as_array().unwrap().last().unwrap().clone();
-    assert_eq!((last["params"]["path"].as_str(), last["error"].as_str()), (Some("./My Data/a.tif"), Some("./My Data/a.tif: not found")));
+    assert_eq!(
+        (last["params"]["path"].as_str(), last["error"].as_str()),
+        (Some("./My Data/a.tif"), Some("./My Data/a.tif: not found (see ./x)"))
+    );
     assert_eq!(s.project.log.entries().last().unwrap().params["path"], json!(inside.to_string_lossy()), "the open project keeps them");
     assert_eq!((last["params"]["sql"].as_str(), last["params"]["root"].as_str()), (Some("SELECT a / b FROM t -- /home"), Some("/")));
     // Read back from that folder, they are absolute again, so a Save As elsewhere keeps them right.
@@ -17718,7 +17721,7 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let path = reopened.log.entries().last().unwrap().params["path"].as_str().unwrap().to_string();
     assert!(std::path::Path::new(&path).is_absolute() && path.ends_with("a.tif"), "{path}");
     let error = reopened.log.entries().last().unwrap().error.clone().unwrap();
-    assert_eq!(error, format!("{}: not found", path), "the error names the path whole again");
+    assert_eq!(error, format!("{}: not found (see ./x)", path), "the error names the path whole again, and ./x as given");
     // A text given as relative is read back as it was run, not against the project's folder.
     assert_eq!(reopened.log.entries().last().unwrap().params["name"], json!("./Maps and data"));
     assert!(reopened.log.entries().iter().all(|e| e.relative.is_empty()));

@@ -202,9 +202,12 @@ pub struct LogEntry {
     pub error: Option<String>,
     #[serde(default)]
     pub millis: u64,
-    /// In a saved file, where the paths made portable on saving are (`/params/path`, `/error`):
-    /// only those are made absolute again on reading, so a text given as relative (`./a.tif`, a
-    /// name such as `./Maps`) reads back as it was run. Taken once read; never shown.
+    /// In a saved file, what saving made portable: the parameters' texts it changed, by their
+    /// JSON pointers (`/params/path`, always starting with `/`), and each relative path it wrote
+    /// (`./My Data/a.tif`, always starting with `.`). Reading makes those very paths absolute
+    /// again, in those texts and in the error, and nothing else: a text or a word given as
+    /// relative (`./a.tif`, a name such as `./Maps`) reads back as it was run. Taken once read;
+    /// never shown.
     #[serde(default, skip_serializing)]
     pub relative: Vec<String>,
 }
@@ -413,22 +416,20 @@ impl ProjectLog {
     fn resolve_paths(&self, dir: &str) {
         let word = |p: &str| (p.starts_with("./") || p.starts_with("../")).then(|| rustgis_map::paths::resolve(dir, p)).flatten();
         for e in &mut self.state().entries {
-            let relative = std::mem::take(&mut e.relative);
-            // The parameters' whole paths, as they were saved and as they are now, so the error
-            // that names one (spaces and all) gets it back whole.
-            let mut swaps = Vec::new();
-            for at in relative.iter().filter(|at| *at != "/error") {
+            let (pointers, wrote): (Vec<String>, Vec<String>) =
+                std::mem::take(&mut e.relative).into_iter().partition(|r| r.starts_with('/'));
+            // The paths the save wrote, each back to absolute, found whole (spaces and all).
+            let swaps: Vec<(String, String)> = wrote.into_iter().filter_map(|w| word(&w).map(|abs| (w, abs))).collect();
+            if swaps.is_empty() {
+                continue;
+            }
+            for at in &pointers {
                 if let Some(serde_json::Value::String(t)) = at.strip_prefix("/params").and_then(|p| e.params.pointer_mut(p)) {
-                    match word(t) {
-                        Some(abs) => swaps.push((std::mem::replace(t, abs.clone()), abs)),
-                        None => *t = path_words(t, word),
-                    }
+                    *t = swapped(t, &swaps);
                 }
             }
-            if relative.iter().any(|at| at == "/error")
-                && let Some(err) = e.error.as_mut()
-            {
-                *err = path_words(&swapped(err, &swaps), word);
+            if let Some(err) = e.error.as_mut() {
+                *err = swapped(err, &swaps);
             }
         }
     }
@@ -462,11 +463,7 @@ impl ProjectLog {
                 if let Some(err) = e.error.as_mut() {
                     // The parameters' paths first, whole (a folder may have spaces in its name),
                     // then any other word that is one.
-                    let portable = portable_text(&swapped(err, &swaps), d);
-                    if portable != *err {
-                        *err = portable;
-                        relative.push("/error".into());
-                    }
+                    *err = portable_text(&swapped(err, &swaps), d, &mut relative);
                 }
             }
             let text = serde_json::to_string(&e).map_err(|e| e.to_string())?;
@@ -743,7 +740,7 @@ fn make_portable(
     use serde_json::Value;
     match v {
         Value::String(t) => {
-            let portable = portable_text(t, dir);
+            let portable = portable_text(t, dir, changed);
             if portable != *t {
                 if rustgis_map::paths::is_absolute_local(t) {
                     swaps.push((t.clone(), portable.clone()));
@@ -766,8 +763,9 @@ fn make_portable(
     }
 }
 
-/// `t` with each text of `swaps` that starts a word (the text's start, or after a space, quote
-/// or bracket) as its other half, the longest first: a path with spaces in it, known whole.
+/// `t` with each text of `swaps` that is a word of its own (from the text's start or a space,
+/// quote or bracket, to its end or a space, quote, bracket or punctuation) as its other half,
+/// the longest first: a path with spaces in it, known whole.
 fn swapped(t: &str, swaps: &[(String, String)]) -> String {
     let mut swaps: Vec<&(String, String)> = swaps.iter().filter(|(from, _)| !from.is_empty()).collect();
     swaps.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
@@ -777,9 +775,10 @@ fn swapped(t: &str, swaps: &[(String, String)]) -> String {
         let mut rest = t.as_str();
         while let Some(at) = rest.find(from.as_str()) {
             out.push_str(rest.get(..at).unwrap_or(""));
-            let edge = out.chars().next_back().is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '(' | '['));
-            out.push_str(if edge { to } else { from });
+            let starts = out.chars().next_back().is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '(' | '['));
             rest = rest.get(at + from.len()..).unwrap_or("");
+            let ends = rest.chars().next().is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ')' | ']' | ',' | ';' | ':'));
+            out.push_str(if starts && ends { to } else { from });
         }
         out.push_str(rest);
         t = out;
@@ -788,23 +787,34 @@ fn swapped(t: &str, swaps: &[(String, String)]) -> String {
 }
 
 /// `t` with each absolute local path in it (the whole text, or a word of it, quotes and trailing
-/// punctuation aside) relative to `dir`, or its file name where it can't be.
-fn portable_text(t: &str, dir: &str) -> String {
+/// punctuation aside) relative to `dir`, or its file name where it can't be; each relative path
+/// written noted in `wrote` (once), for reading to make absolute again.
+fn portable_text(t: &str, dir: &str, wrote: &mut Vec<String>) -> String {
+    let made = std::cell::RefCell::new(Vec::new());
     let portable = |p: &str| {
-        rustgis_map::paths::relative_to(dir, p)
+        let r = rustgis_map::paths::relative_to(dir, p)
             .filter(|r| rustgis_map::paths::is_local(r))
-            .unwrap_or_else(|| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string())
+            .unwrap_or_else(|| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string());
+        made.borrow_mut().push(r.clone());
+        r
     };
     // The root alone (`/`) is no file's path.
-    if t.len() > 1 && rustgis_map::paths::is_absolute_local(t) {
-        return portable(t);
+    let out = if t.len() > 1 && rustgis_map::paths::is_absolute_local(t) {
+        portable(t)
+    } else {
+        path_words(t, |p| rustgis_map::paths::is_absolute_local(p).then(|| portable(p)))
+    };
+    for r in made.into_inner() {
+        if (r.starts_with("./") || r.starts_with("../")) && !wrote.contains(&r) {
+            wrote.push(r);
+        }
     }
-    path_words(t, |p| rustgis_map::paths::is_absolute_local(p).then(|| portable(p)))
+    out
 }
 
 /// `t` with each word (quotes, brackets, a trailing `,`, `;` or `:` aside) replaced by what `f`
-/// makes of it, where `f` gives something: how a path among an error's words is found, both
-/// ways (made portable on save, absolute again on load). Only a word with a separator past its
+/// makes of it, where `f` gives something: how a path among a text's words is found when it is
+/// made portable on saving. Only a word with a separator past its
 /// first character is tried (`/data/a.tif`, `C:\a.tif`, `./a.tif`): a division's `/` or a
 /// `/home` among other words is left as written.
 fn path_words(t: &str, f: impl Fn(&str) -> Option<String>) -> String {

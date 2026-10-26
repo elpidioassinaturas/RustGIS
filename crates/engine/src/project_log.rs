@@ -47,8 +47,10 @@ pub(crate) fn logs(s: &Session, id: &str, params: &Value) -> bool {
 /// `params` as the log keeps them: a document given as text (a map, a project, a capabilities
 /// answer, GeoJSON) as its size only, since one may hold secrets no redaction finds in it (an S3
 /// source's token inside a map's JSON); the rest clipped (so a long script costs little), then
-/// without secrets (as History's Copy as code takes them out), to about [`LOG_PARAMS_BYTES`] of
-/// JSON. A secret cut short is still taken out: what is left of it follows its name.
+/// without secrets (as History's Copy as code takes them out). A secret cut short is still taken
+/// out: what is left of it follows its name. Within [`LOG_PARAMS_BYTES`] of JSON in three tries,
+/// each giving up more: texts at that bound and lists at their first [`LOG_LIST_ITEMS`]; then
+/// texts at 512 characters; then the first keys with their short values only.
 pub(crate) fn kept_params(params: &Value) -> Value {
     let v = redacted(&clip(params, LOG_PARAMS_BYTES, LOG_LIST_ITEMS, 0));
     if serde_json::to_vec(&v).map_or(0, |b| b.len()) <= LOG_PARAMS_BYTES {
