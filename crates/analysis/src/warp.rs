@@ -449,7 +449,8 @@ pub fn project(r: &Raster, g: &Grid, method: Method, name: String) -> Result<Ras
         let (c, row) = t.to_pixel(Coord::new(px, py));
         (c.is_finite() && row.is_finite()).then_some((c, row))
     };
-    match method {
+    // The method that runs, as the result reports it (a palette image's classes are never mixed).
+    match method.used_on(r) {
         Method::Sample(m) => sampled(r, g, canvas, m, &source, name),
         Method::Average | Method::Mode => aggregated(r, g, canvas, method == Method::Mode, &source, name),
     }
@@ -677,7 +678,13 @@ fn aggregated(
                     }
                     inside = true;
                     let idx = j * w + i;
-                    let opacity = alpha.and_then(|a| r.bands.get(a)).and_then(|band| band.data.get(idx)).copied().unwrap_or(0.0);
+                    // An alpha with no value (the raster's no-data) or below 0 weighs nothing.
+                    let opacity = alpha
+                        .and_then(|a| r.bands.get(a))
+                        .and_then(|band| band.data.get(idx))
+                        .copied()
+                        .filter(|a| r.is_valid(*a) && *a > 0.0)
+                        .unwrap_or(0.0);
                     for (b, (v, k)) in values.iter_mut().zip(weights.iter_mut()).enumerate() {
                         if let Some(x) = r.bands.get(b).and_then(|band| band.data.get(idx)).filter(|x| r.is_valid(**x)) {
                             v.push(*x);

@@ -324,12 +324,12 @@ fn warp_to_fit(s: &mut Session, p: &Value, layer: &str, r: &Raster) -> CmdResult
     Ok(info)
 }
 
-/// `raster.project`: the layer on a grid of another coordinate system, cell size, origin and
-/// extent, or on another raster's grid, each cell sampled at its centre or taken from every
-/// pixel whose centre falls in it (see `rustgis_analysis::warp::project`). A new layer.
 /// What an `extent` that isn't one is told.
 const EXTENT: &str = "extent is a polygon layer's name, [west, south, east, north] in degrees, or \"view\"";
 
+/// `raster.project`: the layer on a grid of another coordinate system, cell size, origin and
+/// extent, or on another raster's grid, each cell sampled at its centre or taken from every
+/// pixel whose centre falls in it (see `rustgis_analysis::warp::project`). A new layer.
 fn project_raster(s: &mut Session, p: &Value) -> CmdResult {
     let r = raster(s, p)?;
     r.require_coordinates()?;
@@ -393,7 +393,7 @@ fn project_raster(s: &mut Session, p: &Value) -> CmdResult {
                     warp::bounds_in([e.min_x, e.min_y, e.max_x, e.max_y], crs)?
                 }
                 Some(v @ (Value::Array(_) | Value::String(_))) => {
-                    let area = super::catalogs::area(s, &json!({"bbox": v})).map_err(|_| EXTENT)?;
+                    let area = super::catalogs::area(s, &json!({"bbox": v})).map_err(|e| e.replacen("bbox", "extent", 1))?;
                     if area[0] > area[2] {
                         return Err("an extent across the antimeridian: give it one side at a time".into());
                     }

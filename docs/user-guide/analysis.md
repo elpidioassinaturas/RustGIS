@@ -484,7 +484,9 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
     those tied), which is what a coarser grid of elevation or land-cover classes should hold. A
     cell no pixel centre falls in, on a grid finer than the raster, takes the pixel under its
     centre. Classes take `nearest` or `mode`, continuous values `bilinear` or `cubic`, or `average`
-    going coarser. A whole-number pixel type keeps its type, so its mean is rounded.
+    going coarser. A whole-number pixel type keeps its type, so its mean is rounded. On a colour
+    image the colours count as much as their pixels are opaque, and `mode` is taken band by band
+    (each channel's most frequent value among the pixels that show).
   - Cells off the raster are its no-data value. A raster without one keeps its bands as they are,
     with NaN there in a floating-point type and 0 in a whole-number one, as GDAL leaves them; a
     colour image gains an alpha band instead, so they are see-through.
