@@ -18,7 +18,18 @@ pub(crate) fn now_ms() -> u64 {
 /// looking around (listing, describing, moving the view) is left out: agents, scripts and plugins
 /// call those hundreds of times, and they would push the changes out of the log.
 pub(crate) fn logs(s: &Session, id: &str, params: &Value) -> bool {
-    if matches!(id, "edit.undo" | "edit.redo" | "project.save" | "project.clearLog" | "project.logCommands") {
+    // Making or opening a project from text names no place: it is logged as the open from a file is.
+    if matches!(
+        id,
+        "edit.undo"
+            | "edit.redo"
+            | "project.save"
+            | "project.clearLog"
+            | "project.logCommands"
+            | "project.new"
+            | "project.sample"
+            | "project.openText"
+    ) {
         return true;
     }
     let mutates = if id.starts_with(rustgis_plugins::PREFIX) {
@@ -130,7 +141,10 @@ const DOCUMENT_CHARS: usize = 200;
 /// [`LOG_LIST_ITEMS`] (and how many there were); nesting past eight levels is left out.
 fn clip(v: &Value, chars: usize, depth: usize) -> Value {
     match v {
-        Value::String(t) if t.trim_start().starts_with(['{', '[', '<']) && t.chars().nth(DOCUMENT_CHARS).is_some() => {
+        // A byte-order mark before it is still a document's start.
+        Value::String(t)
+            if t.trim_start_matches('\u{feff}').trim_start().starts_with(['{', '[', '<']) && t.chars().nth(DOCUMENT_CHARS).is_some() =>
+        {
             Value::String(format!("(a document of {} characters)", t.chars().count()))
         }
         Value::String(t) if t.chars().nth(chars).is_some() => Value::String(format!("{}…", t.chars().take(chars).collect::<String>())),

@@ -17628,6 +17628,8 @@ fn calculate_geometry_updates_ellipsoidal_lengths_in_one_undo_step() {
 fn the_project_log_records_each_command_run_on_the_project() {
     use crate::project::{LOG_LIMIT, LOG_PARAMS_BYTES, LogEntry};
     let mut s = world();
+    // The sample project's making is its first entry: counted from after it.
+    assert_eq!(s.project.log.clear(), 1);
     let commands = |s: &Session| s.project.log.entries().iter().map(|e| e.command.clone()).collect::<Vec<_>>();
     s.run("project.rename", &json!({"name": "Atlas"})).unwrap();
     s.run("info.project", &Value::Null).unwrap();
@@ -17655,6 +17657,11 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let _ = s.run("project.importQgis", &json!({"text": qgs}));
     let doc = s.project.log.entries().last().cloned().unwrap();
     assert_eq!(doc.params["text"], json!(format!("(a document of {} characters)", qgs.chars().count())), "{doc:?}");
+    // So is one after a byte-order mark (a QGIS project read from a file that has one).
+    let marked = format!("\u{feff}{qgs}");
+    let _ = s.run("project.importQgis", &json!({"text": marked}));
+    let doc = s.project.log.entries().last().cloned().unwrap();
+    assert!(doc.params["text"].as_str().is_some_and(|t| t.starts_with("(a document of")), "{doc:?}");
     // A secret in the JSON a text holds (a script's command line) is taken out too.
     let line = r#"s3.connect {"accessKeyId": "AKIA", "secretAccessKey": "S3CRETKEY", "region": "x"}"#;
     let _ = s.run("script.run", &json!({"script": line}));
@@ -17756,6 +17763,10 @@ fn the_project_log_records_each_command_run_on_the_project() {
     assert!(opened.log.is_empty());
     // A .json path is refused: JSON Lines isn't one JSON document.
     assert!(s.run("project.exportLog", &json!({"path": "log.json"})).is_err());
+    // Making a project, or opening one from text, starts its log.
+    let mut made = world();
+    made.run("project.new", &json!({"name": "Fresh"})).unwrap();
+    assert_eq!(made.project.log.entries().iter().map(|e| e.command.as_str()).collect::<Vec<_>>(), ["project.new"]);
     // Capped: the oldest go first.
     for i in 0..LOG_LIMIT + 5 {
         s.project.log.push(LogEntry { at: i as u64, command: "x".into(), params: Value::Null, ok: true, error: None, millis: 0 });
