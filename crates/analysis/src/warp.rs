@@ -652,6 +652,8 @@ fn aggregated(
     // Each value's weight: a colour counts as much as its pixel is opaque, as bilinear weighs it.
     let mut weights: Vec<Vec<f32>> = vec![Vec::new(); canvas.nb];
     let mut sums: Vec<(f64, f64)> = vec![(0.0, 0.0); canvas.nb];
+    // Mode's values among the pixels that show, one buffer for every cell and band.
+    let mut shown: Vec<f32> = Vec::new();
     let alpha = canvas.alpha_src;
     let mut cell = vec![f32::NAN; canvas.nb];
     for oy in 0..oh {
@@ -709,7 +711,8 @@ fn aggregated(
                         // see-through ones count for nothing, as in the mean. A cell where none
                         // shows takes the mode of all (see-through, alpha 0).
                         let shows = |(x, k): (&f32, &f32)| if alpha == Some(b) { *x > 0.0 } else { *k > 0.0 };
-                        let mut shown: Vec<f32> = v.iter().zip(k).filter(|p| shows(*p)).map(|(x, _)| *x).collect();
+                        shown.clear();
+                        shown.extend(v.iter().zip(k).filter(|p| shows(*p)).map(|(x, _)| *x));
                         match (shown.is_empty(), alpha) {
                             (false, _) => mode_of(&mut shown),
                             // No pixel that shows has a colour here: none is taken from one that
