@@ -57,9 +57,14 @@ pub(crate) fn kept_params(params: &Value) -> Value {
     if serde_json::to_vec(&clipped).map_or(0, |b| b.len()) <= LOG_PARAMS_BYTES {
         return clipped;
     }
-    // Still too large (many keys, deep nesting): its start, as text.
+    // Still too large (many keys, deep nesting): its start, as text, cut at a character's edge
+    // within half the bound's bytes.
     let text = serde_json::to_string(&clipped).unwrap_or_default();
-    Value::String(format!("{}…", text.chars().take(LOG_PARAMS_BYTES / 2).collect::<String>()))
+    let mut end = text.len().min(LOG_PARAMS_BYTES / 2);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    Value::String(format!("{}…", text.get(..end).unwrap_or_default()))
 }
 
 /// An entry read from a file, kept as a new one is: its command clipped, its parameters and error
