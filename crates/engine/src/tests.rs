@@ -17664,6 +17664,13 @@ fn a_raster_projected_onto_a_chosen_grid() {
     for bad in [json!(["x", 1, 2]), json!([0, 0, "EPSG"]), json!([1])] {
         assert!(s.run("raster.project", &json!({"layer": "the", "crs": 31983, "cellSize": 200, "origin": bad})).is_err(), "{bad}");
     }
+    // Projected again with the default name: the name reported is the one the layer got.
+    let first = s.run("raster.project", &json!({"layer": "the", "crs": 31983, "cellSize": 500})).unwrap();
+    let again = s.run("raster.project", &json!({"layer": "the", "crs": 31983, "cellSize": 500})).unwrap();
+    assert_ne!(first["name"], again["name"]);
+    for r in [&first, &again] {
+        assert!(s.map().layer_by_name(r["name"].as_str().unwrap()).is_some(), "{r}");
+    }
     // An extent or a grid of the wrong kind is refused, not read as the view or left out.
     for bad in [json!({"extent": 5}), json!({"extent": {}}), json!({"extent": true}), json!({"grid": 5}), json!({"grid": ["the"]})] {
         let mut p = bad.clone();

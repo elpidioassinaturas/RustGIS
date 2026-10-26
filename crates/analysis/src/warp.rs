@@ -702,7 +702,13 @@ fn aggregated(
                         // shows takes the mode of all (see-through, alpha 0).
                         let shows = |(x, k): (&f32, &f32)| if alpha == Some(b) { *x > 0.0 } else { *k > 0.0 };
                         let mut shown: Vec<f32> = v.iter().zip(k).filter(|p| shows(*p)).map(|(x, _)| *x).collect();
-                        if shown.is_empty() { mode_of(v) } else { mode_of(&mut shown) }
+                        match (shown.is_empty(), alpha) {
+                            (false, _) => mode_of(&mut shown),
+                            // No pixel that shows has a colour here: none is taken from one that
+                            // doesn't.
+                            (true, Some(a)) if a != b => f32::NAN,
+                            (true, _) => mode_of(v),
+                        }
                     } else {
                         mean_of(v, k, round)
                     };
@@ -752,14 +758,12 @@ fn mean_of(v: &[f32], k: &[f32], round: bool) -> f32 {
 fn mode_of(v: &mut [f32]) -> f32 {
     v.sort_unstable_by(f32::total_cmp);
     let (mut best, mut best_n) = (f32::NAN, 0usize);
-    let mut k = 0;
-    while let Some(x) = v.get(k).copied() {
-        let n = v.iter().skip(k).take_while(|y| **y == x).count();
-        // Sorted ascending: a later value only wins with more.
-        if n > best_n {
-            (best, best_n) = (x, n);
+    // Sorted ascending: a later run only wins with more, so ties keep the least value. Each run
+    // holds one value at least (a NaN is a run of its own), so this always moves on.
+    for run in v.chunk_by(|a, b| a == b) {
+        if run.len() > best_n {
+            (best, best_n) = (run[0], run.len());
         }
-        k += n;
     }
     best
 }
@@ -1001,6 +1005,12 @@ mod tests {
         let g = Grid::snapped(r.crs, [0.0, 0.0, 4.0, 1.0], (4.0, 1.0), (0.0, 0.0)).unwrap();
         let out = project(&r, &g, Method::Mode, "m".into()).unwrap();
         assert_eq!([0, 1, 2, 3].map(|b| out.value(b, 0, 0)), [Some(255.0), Some(0.0), Some(0.0), Some(255.0)], "red, and showing");
+        // The opaque pixel has no red: the see-through pixels' red isn't taken instead.
+        let bands = vec![px(-1.0, 90.0), px(0.0, 0.0), px(0.0, 0.0), px(255.0, 0.0)];
+        let r = Raster::new("rgba", 4, 1, bands, wide, crs, Some(-1.0), ColorHint::Rgb { alpha: true }, "Int16").unwrap();
+        let out = project(&r, &g, Method::Mode, "m".into()).unwrap();
+        // (A cell without a value is cleared to 0 in an image with alpha, as outside the raster.)
+        assert_eq!([0, 3].map(|b| out.value(b, 0, 0)), [Some(0.0), Some(255.0)], "not the see-through 90");
     }
 
     /// A pixel centre on the edge between cells is in exactly one of them, and a grid finer than

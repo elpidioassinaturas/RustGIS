@@ -440,6 +440,11 @@ fn project_raster(s: &mut Session, p: &Value) -> CmdResult {
             o.entry(k.clone()).or_insert_with(|| val.clone());
         }
     }
+    // The name the layer got (another may hold the one asked for: "… projected (2)").
+    let id = v.get("layer").and_then(Value::as_u64).and_then(|id| u32::try_from(id).ok());
+    if let Some(name) = id.and_then(|id| s.map().layer(id)).map(|l| l.name.clone()) {
+        info["name"] = json!(name);
+    }
     Ok(info)
 }
 
