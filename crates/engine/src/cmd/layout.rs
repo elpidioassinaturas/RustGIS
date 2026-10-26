@@ -2394,13 +2394,15 @@ pub(crate) fn text_font(p: &Value, current: (FontFamily, Option<String>)) -> Res
         };
     };
     let n = font.as_str().ok_or("font must be sans, serif or an installed font family's name")?;
-    if let Some(generic) = FontFamily::from_name(n) {
+    // Kept as a label's font is (trimmed, control characters out), then read as a generic name
+    // or a family's.
+    let name = rustgis_map::symbology::font_name(n).ok_or("font must be sans, serif or an installed font family's name")?;
+    if let Some(generic) = FontFamily::from_name(&name) {
         return match fallback {
             Some(_) => Err("fallback goes with a font family's name, not sans or serif".into()),
             None => Ok((generic, None)),
         };
     }
-    let name = rustgis_map::symbology::font_name(n).ok_or("font must be sans, serif or an installed font family's name")?;
     let installed = installed_family(&name);
     let kept = installed.map_or(name, |f| f.name.clone());
     let fallback = fallback.unwrap_or_else(|| default_fallback(installed, &kept, &current));

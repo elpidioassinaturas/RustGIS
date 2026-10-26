@@ -16330,6 +16330,9 @@ fn text_elements_take_an_installed_font_family_by_name() {
     s.run("layout.update", &json!({"element": id, "font": r"O'Brien\Sans", "fallback": "sans"})).unwrap();
     let svg = rustgis_render::svg::layout_svg(&s.project.layouts[0], &mut s.project.maps, 72.0, &Default::default()).unwrap();
     assert!(svg.contains(r#"font-family="&apos;O\&apos;Brien\\Sans&apos;, sans-serif""#), "{svg}");
+    // A generic name with control characters around it is still the generic family.
+    s.run("layout.update", &json!({"element": id, "font": "serif\u{0}"})).unwrap();
+    assert_eq!(font(&s, id), (FontFamily::Serif, None));
     // A generic family clears the name; a fallback then has nothing to fall back from.
     s.run("layout.update", &json!({"element": id, "font": "sans"})).unwrap();
     assert_eq!(font(&s, id), (FontFamily::Sans, None));
