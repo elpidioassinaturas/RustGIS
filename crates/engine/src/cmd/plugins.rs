@@ -287,6 +287,9 @@ const NEVER: &[&str] = &[
     "s3.disconnect",
     "earthdata.login",
     "earthdata.logout",
+    // The project log records what was done (#797): a plugin never empties it or turns it off.
+    "project.clearLog",
+    "project.logCommands",
 ];
 
 /// Commands that write files without naming one in their parameters.

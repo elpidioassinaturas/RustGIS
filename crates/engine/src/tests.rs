@@ -17666,7 +17666,7 @@ fn the_project_log_records_each_command_run_on_the_project() {
     // So is the autosaved recovery copy.
     let recovered = Project::from_json(&s.project.clone().recovery_text().unwrap()).unwrap();
     assert_eq!(recovered.log.entries(), s.project.log.entries());
-    assert!(!serde_json::to_string(&Project::default()).unwrap().contains("\"log\""));
+    assert!(!Project::default().saved_text(None).unwrap().0.contains("\"log\""));
     // Saved into a folder, its paths are written relative to it, as the project's sources are.
     let folder = std::env::temp_dir().join(format!("rustgis-log-portable-{}", std::process::id()));
     let inside = folder.join("data").join("a.tif");
@@ -17682,6 +17682,20 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let r = s.run("project.log", &json!({"command": "project.rename", "failed": true})).unwrap();
     assert_eq!((r["count"].as_u64(), r["entries"][0]["command"].as_str()), (Some(1), Some("project.rename")));
     assert_eq!(s.run("project.log", &json!({"limit": 2})).unwrap()["entries"].as_array().map(Vec::len), Some(2));
+    // Times as decimals too; a negative time, or a filter that isn't true or false, is refused.
+    assert_eq!(s.run("project.log", &json!({"since": 1.7e12, "limit": 1})).unwrap()["entries"].as_array().map(Vec::len), Some(1));
+    assert!(s.run("project.log", &json!({"since": -1})).is_err());
+    assert!(s.run("project.log", &json!({"failed": "true"})).is_err());
+    // A plugin never empties the log or turns it off; writing it out is reaching a file.
+    assert!(crate::cmd::plugins::user_only("project.clearLog") && crate::cmd::plugins::user_only("project.logCommands"));
+    {
+        use crate::cmd::plugins::{Reach, reaches};
+        let export = crate::cmd::all().into_iter().find(|c| c.id == "project.exportLog").unwrap();
+        assert_eq!(reaches(&export, &json!({"path": "log.csv"})), Some(Reach::Files));
+    }
+    // An error that starts as a spreadsheet formula is written as text in the CSV.
+    let formula = LogEntry { at: 2, command: "x".into(), params: Value::Null, ok: false, error: Some("=HYPERLINK(1)".into()), millis: 0 };
+    s.project.log.push(formula);
     // Written out as CSV and JSON Lines.
     let dir = std::env::temp_dir().join(format!("rustgis-project-log-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -17689,6 +17703,7 @@ fn the_project_log_records_each_command_run_on_the_project() {
     s.run("project.exportLog", &json!({"path": csv.to_string_lossy()})).unwrap();
     let csv_text = std::fs::read_to_string(&csv).unwrap();
     assert!(csv_text.starts_with("time_utc,at,command,ok,millis,error,params\n") && csv_text.contains("\"edit.undo\""), "{csv_text}");
+    assert!(csv_text.contains("\"'=HYPERLINK(1)\"") && !csv_text.contains(",\"=HYPERLINK"), "{csv_text}");
     let jsonl = dir.join("log.jsonl");
     s.run("project.exportLog", &json!({"path": jsonl.to_string_lossy()})).unwrap();
     let lines: Vec<LogEntry> = std::fs::read_to_string(&jsonl).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();

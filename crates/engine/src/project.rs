@@ -208,14 +208,16 @@ struct LogState {
     /// Logging turned off (`project.logCommands`); on by default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     off: bool,
+    /// Oldest first; the oldest go first past [`LOG_LIMIT`], without moving the rest.
     #[serde(default)]
-    entries: Vec<LogEntry>,
+    entries: std::collections::VecDeque<LogEntry>,
 }
 
 /// A project's log (#797): one entry for each command run on it, from any front end, kept in
 /// the `.rgis`. It sits outside the undo history: the project's undo snapshots share it (a clone
 /// is the same log), so undoing a command never takes its entry back, and a snapshot copies
-/// nothing of it. A project opened, made new or from a template has a log of its own.
+/// nothing of it. A project opened, made new or from a template has a log of its own. It is read
+/// in place, under its lock: nothing copies it whole.
 #[derive(Clone, Debug, Default)]
 pub struct ProjectLog(std::sync::Arc<Mutex<LogState>>);
 
@@ -224,8 +226,8 @@ impl ProjectLog {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// No entries, and logging on: nothing to save.
-    pub fn is_empty(&self) -> bool {
+    /// No entries, and logging on: nothing for a project file to keep.
+    pub fn nothing_to_save(&self) -> bool {
         let s = self.state();
         s.entries.is_empty() && !s.off
     }
@@ -244,22 +246,70 @@ impl ProjectLog {
         if s.off {
             return;
         }
-        s.entries.push(e);
-        let over = s.entries.len().saturating_sub(LOG_LIMIT);
-        s.entries.drain(..over);
+        s.entries.push_back(e);
+        while s.entries.len() > LOG_LIMIT {
+            s.entries.pop_front();
+        }
     }
 
+    /// Every entry, oldest first (a copy: for tests and small logs; [`ProjectLog::select`] and
+    /// [`ProjectLog::each`] read in place).
     pub fn entries(&self) -> Vec<LogEntry> {
-        self.state().entries.clone()
+        self.state().entries.iter().cloned().collect()
+    }
+
+    /// The last `limit` entries that `keep` keeps, oldest first, with how many it keeps and how
+    /// many there are: only those are copied.
+    pub fn select(&self, keep: impl Fn(&LogEntry) -> bool, limit: usize) -> (Vec<LogEntry>, usize, usize) {
+        let s = self.state();
+        let matching: Vec<&LogEntry> = s.entries.iter().filter(|e| keep(e)).collect();
+        let tail = matching[matching.len().saturating_sub(limit)..].iter().map(|e| (*e).clone()).collect();
+        (tail, matching.len(), s.entries.len())
+    }
+
+    /// Calls `f` with each entry, oldest first, under the log's lock.
+    pub fn each(&self, mut f: impl FnMut(&LogEntry)) {
+        for e in &self.state().entries {
+            f(e);
+        }
     }
 
     pub fn len(&self) -> usize {
         self.state().entries.len()
     }
 
+    /// No entries (logging may still be off: see [`ProjectLog::nothing_to_save`]).
+    pub fn is_empty(&self) -> bool {
+        self.state().entries.is_empty()
+    }
+
     /// Empties the log; how many entries it had.
     pub fn clear(&self) -> usize {
         std::mem::take(&mut self.state().entries).len()
+    }
+
+    /// The log as a project file keeps it, each entry written in turn; saved into a folder
+    /// (`dir`), its local paths made portable ([`portable_value`]).
+    fn saved_json(&self, dir: Option<&str>) -> Result<String, String> {
+        let s = self.state();
+        let mut out = String::from(if s.off { r#"{"off":true,"entries":["# } else { r#"{"entries":["# });
+        for (i, e) in s.entries.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            let text = match dir {
+                Some(d) => {
+                    let mut e = e.clone();
+                    e.params = portable_value(&e.params, d, 0);
+                    e.error = e.error.as_deref().map(|t| portable_text(t, d));
+                    serde_json::to_string(&e)
+                }
+                None => serde_json::to_string(e),
+            };
+            out.push_str(&text.map_err(|e| e.to_string())?);
+        }
+        out.push_str("]}");
+        Ok(out)
     }
 }
 
@@ -273,8 +323,9 @@ impl<'de> Deserialize<'de> for ProjectLog {
     /// A file's log, its last [`LOG_LIMIT`] entries (a project file is hostile input).
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut state = LogState::deserialize(d)?;
-        let over = state.entries.len().saturating_sub(LOG_LIMIT);
-        state.entries.drain(..over);
+        while state.entries.len() > LOG_LIMIT {
+            state.entries.pop_front();
+        }
         Ok(ProjectLog(std::sync::Arc::new(Mutex::new(state))))
     }
 }
@@ -506,17 +557,10 @@ fn format() -> u32 {
 /// to it, as the project's own sources are, or as their file names where they can't be, so a
 /// project moved with its data keeps no trace of the folder it was in.
 fn with_log(mut text: String, log: &ProjectLog, dir: Option<&str>) -> Result<String, String> {
-    if log.is_empty() || !text.ends_with('}') {
+    if log.nothing_to_save() || !text.ends_with('}') {
         return Ok(text);
     }
-    let mut entries = log.entries();
-    if let Some(d) = dir {
-        for e in &mut entries {
-            e.params = portable_value(&e.params, d, 0);
-            e.error = e.error.as_deref().map(|t| portable_text(t, d));
-        }
-    }
-    let log = serde_json::to_string(&LogState { off: !log.on(), entries }).map_err(|e| e.to_string())?;
+    let log = log.saved_json(dir)?;
     text.pop();
     text.push_str(",\"log\":");
     text.push_str(&log);

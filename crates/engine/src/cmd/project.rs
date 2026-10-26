@@ -46,28 +46,42 @@ pub fn commands() -> Vec<C> {
 
 /// `project.log`: the log's entries that match, newest last.
 fn log(s: &mut Session, p: &Value) -> CmdResult {
+    // Milliseconds as a whole number or not (1.7e12), never below 0.
     let num = |k: &str| -> Result<Option<u64>, String> {
         match p.get(k) {
             None | Some(Value::Null) => Ok(None),
-            Some(v) => v.as_u64().map(Some).ok_or_else(|| format!("{k} is milliseconds since 1970")),
+            Some(v) => v
+                .as_f64()
+                .filter(|n| n.is_finite() && *n >= 0.0)
+                .map(|n| Some(n as u64))
+                .ok_or_else(|| format!("{k} must be a number, 0 or more")),
         }
     };
     let (since, until) = (num("since")?, num("until")?);
     let command = ps(p, "command").map(str::trim).filter(|c| !c.is_empty());
-    let failed = p.get("failed").and_then(Value::as_bool);
+    let failed = match p.get("failed") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_bool().ok_or("failed must be true or false")?),
+    };
     let limit = match num("limit")? {
         Some(n) => usize::try_from(n).unwrap_or(usize::MAX).clamp(1, crate::project::LOG_LIMIT),
         None => 100,
     };
-    let all = s.project.log.entries();
-    let matching: Vec<&crate::project::LogEntry> = all
-        .iter()
-        .filter(|e| since.is_none_or(|t| e.at >= t) && until.is_none_or(|t| e.at <= t))
-        .filter(|e| command.is_none_or(|c| e.command == c || (c.ends_with('.') && e.command.starts_with(c))))
-        .filter(|e| failed.is_none_or(|f| e.ok != f))
-        .collect();
-    let shown = &matching[matching.len().saturating_sub(limit)..];
-    Ok(json!({"entries": shown, "count": matching.len(), "total": all.len(), "on": s.project.log.on()}))
+    let keep = |e: &crate::project::LogEntry| {
+        since.is_none_or(|t| e.at >= t)
+            && until.is_none_or(|t| e.at <= t)
+            && command.is_none_or(|c| e.command == c || (c.ends_with('.') && e.command.starts_with(c)))
+            && failed.is_none_or(|f| e.ok != f)
+    };
+    let (shown, count, total) = s.project.log.select(keep, limit);
+    Ok(json!({"entries": shown, "count": count, "total": total, "on": s.project.log.on()}))
+}
+
+/// A CSV cell: quoted, and kept from being read as a formula where it starts as one does (`=`,
+/// `+`, `-`, `@`, or a tab or carriage return before them), as spreadsheets would.
+fn csv_cell(t: &str) -> String {
+    let lead = if t.starts_with(['=', '+', '-', '@', '\t', '\r']) { "'" } else { "" };
+    format!("\"{lead}{}\"", t.replace('"', "\"\""))
 }
 
 /// `project.exportLog`: the log written out, as CSV (one row an entry, the parameters as a JSON
@@ -80,33 +94,42 @@ fn export_log(s: &mut Session, p: &Value) -> CmdResult {
         Some("jsonl") | Some("ndjson") | Some("json") => "jsonl",
         _ => return Err("format is csv or jsonl (or give a .csv or .jsonl path)".into()),
     };
-    let entries = s.project.log.entries();
     let mut text = String::new();
+    let mut n = 0usize;
+    let mut failed = None;
     if format == "csv" {
-        let quote = |t: &str| format!("\"{}\"", t.replace('"', "\"\""));
         text.push_str("time_utc,at,command,ok,millis,error,params\n");
-        for e in &entries {
+    }
+    s.project.log.each(|e| {
+        n += 1;
+        if format == "csv" {
             let (date, time) = rustgis_map::graphics::civil(e.at / 1000);
             text.push_str(&format!(
                 "{date} {time}:{:02},{},{},{},{},{},{}\n",
                 (e.at / 1000) % 60,
                 e.at,
-                quote(&e.command),
+                csv_cell(&e.command),
                 e.ok,
                 e.millis,
-                quote(e.error.as_deref().unwrap_or("")),
-                quote(&e.params.to_string())
+                csv_cell(e.error.as_deref().unwrap_or("")),
+                csv_cell(&e.params.to_string())
             ));
+        } else {
+            match serde_json::to_string(e) {
+                Ok(line) => {
+                    text.push_str(&line);
+                    text.push('\n');
+                }
+                Err(err) => failed = Some(err.to_string()),
+            }
         }
-    } else {
-        for e in &entries {
-            text.push_str(&serde_json::to_string(e).map_err(|e| e.to_string())?);
-            text.push('\n');
-        }
+    });
+    if let Some(e) = failed {
+        return Err(e);
     }
     rustgis_data::io::write_atomic(&path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
-    s.notify(format!("Exported the project log ({} entries) to {}", entries.len(), path.display()), false);
-    Ok(json!({"path": path.display().to_string(), "entries": entries.len(), "format": format}))
+    s.notify(format!("Exported the project log ({n} entries) to {}", path.display()), false);
+    Ok(json!({"path": path.display().to_string(), "entries": n, "format": format}))
 }
 
 /// `project.clearLog`: empties the log, which then holds this command's own entry, so a cleared
