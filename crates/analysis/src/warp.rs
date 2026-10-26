@@ -651,6 +651,7 @@ fn aggregated(
     let mut values: Vec<Vec<f32>> = vec![Vec::new(); canvas.nb];
     // Each value's weight: a colour counts as much as its pixel is opaque, as bilinear weighs it.
     let mut weights: Vec<Vec<f32>> = vec![Vec::new(); canvas.nb];
+    let mut sums: Vec<(f64, f64)> = vec![(0.0, 0.0); canvas.nb];
     let alpha = canvas.alpha_src;
     let mut cell = vec![f32::NAN; canvas.nb];
     for oy in 0..oh {
@@ -670,6 +671,8 @@ fn aggregated(
             let (i0, i1, j0, j1) = (first(c0), past(c1, w), first(r0), past(r1, h));
             values.iter_mut().for_each(Vec::clear);
             weights.iter_mut().for_each(Vec::clear);
+            // The mean is summed as the pixels come (no copy of the cell's values); mode keeps them.
+            sums.iter_mut().for_each(|s| *s = (0.0, 0.0));
             let mut inside = false;
             for j in j0..j1 {
                 for i in i0..i1 {
@@ -685,17 +688,22 @@ fn aggregated(
                         .copied()
                         .filter(|a| r.is_valid(*a) && *a > 0.0)
                         .unwrap_or(0.0);
-                    for (b, (v, k)) in values.iter_mut().zip(weights.iter_mut()).enumerate() {
+                    for (b, ((v, k), sum)) in values.iter_mut().zip(weights.iter_mut()).zip(sums.iter_mut()).enumerate() {
                         if let Some(x) = r.bands.get(b).and_then(|band| band.data.get(idx)).filter(|x| r.is_valid(**x)) {
-                            v.push(*x);
-                            k.push(if alpha.is_some_and(|a| a != b) { opacity } else { 1.0 });
+                            let weight = if alpha.is_some_and(|a| a != b) { opacity } else { 1.0 };
+                            if mode {
+                                v.push(*x);
+                                k.push(weight);
+                            } else {
+                                *sum = (sum.0 + f64::from(*x) * f64::from(weight), sum.1 + f64::from(weight));
+                            }
                         }
                     }
                 }
             }
             let at = oy * ow + ox;
             if inside {
-                for (b, ((o, v), k)) in cell.iter_mut().zip(values.iter_mut()).zip(&weights).enumerate() {
+                for (b, (((o, v), k), sum)) in cell.iter_mut().zip(values.iter_mut()).zip(&weights).zip(&sums).enumerate() {
                     *o = if mode {
                         // The most frequent colour, and alpha, among the pixels that show:
                         // see-through ones count for nothing, as in the mean. A cell where none
@@ -710,7 +718,7 @@ fn aggregated(
                             (true, _) => mode_of(v),
                         }
                     } else {
-                        mean_of(v, k, round)
+                        mean_of(*sum, round)
                     };
                 }
             } else {
@@ -743,10 +751,10 @@ fn holds(q: &[(f64, f64); 4], p: (f64, f64)) -> bool {
     side(a, b) >= 0.0 && side(b, c) > 0.0 && side(c, d) > 0.0 && side(d, a) >= 0.0
 }
 
-/// The mean of `v`, each value weighed by its `k` (a colour by its pixel's alpha), rounded for a
-/// whole-number pixel type; NaN when nothing weighs (empty, or all see-through).
-fn mean_of(v: &[f32], k: &[f32], round: bool) -> f32 {
-    let (sum, weight) = v.iter().zip(k).fold((0.0f64, 0.0f64), |(s, w), (x, k)| (s + f64::from(*x) * f64::from(*k), w + f64::from(*k)));
+/// The mean of a cell's values from their weighed sum and total weight (a colour weighs as its
+/// pixel's alpha), rounded for a whole-number pixel type; NaN when nothing weighs (no value, or
+/// all see-through).
+fn mean_of((sum, weight): (f64, f64), round: bool) -> f32 {
     if weight <= 1e-12 {
         return f32::NAN;
     }
@@ -761,8 +769,8 @@ fn mode_of(v: &mut [f32]) -> f32 {
     // Sorted ascending: a later run only wins with more, so ties keep the least value. Each run
     // holds one value at least (a NaN is a run of its own), so this always moves on.
     for run in v.chunk_by(|a, b| a == b) {
-        if run.len() > best_n {
-            (best, best_n) = (run[0], run.len());
+        if let Some(&x) = run.first().filter(|_| run.len() > best_n) {
+            (best, best_n) = (x, run.len());
         }
     }
     best
