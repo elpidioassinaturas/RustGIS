@@ -2407,12 +2407,12 @@ pub(crate) fn text_font(p: &Value, current: (FontFamily, Option<String>)) -> Res
     Ok((fallback, Some(kept)))
 }
 
-/// The installed family named `name` (in any case), waiting for the font index when `wait`, or
-/// none while the app is still building it.
+/// The installed family named `name` (in any case, as the index compares names), waiting for the
+/// font index when `wait`, or none while the app is still building it.
 fn installed_family(name: &str, wait: bool) -> Option<&'static rustgis_render::families::Family> {
     use rustgis_render::families;
     let i = if wait { families::find(name) } else { families::find_ready(name) }?;
-    families::installed_now()?.get(usize::from(i)).filter(|f| f.name.eq_ignore_ascii_case(name))
+    families::installed_now()?.get(usize::from(i))
 }
 
 /// A named family's fallback when none is given: the one it has when it is named again, else its
