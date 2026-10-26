@@ -118,8 +118,10 @@ fn json_in_text_redacted(t: &str) -> String {
                 out.push_str(&serde_json::to_string(&crate::cmd::history::redacted(&v)).unwrap_or_default());
                 rest = from.get(end..).unwrap_or("");
             }
-            // Cut short by the clip: what follows its `{` may hold a secret, so none of it stays.
-            Some(Err(e)) if e.is_eof() => {
+            // Cut short by the clip, or an object that doesn't parse (a trailing comma, single
+            // quotes) though a key starts it: what follows its `{` may hold a secret, so none of it
+            // stays. Text such as `{name}` stays as it is.
+            Some(Err(e)) if e.is_eof() || from.get(1..).is_some_and(|r| r.trim_start().starts_with(['"', '\''])) => {
                 out.push('…');
                 return out;
             }

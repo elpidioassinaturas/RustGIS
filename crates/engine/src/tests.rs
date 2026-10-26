@@ -17673,6 +17673,13 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let _ = s.run("script.run", &json!({"script": long}));
     let cut = s.project.log.entries().last().cloned().unwrap();
     assert!(!cut.params.to_string().contains("S3CRET"), "{}", cut.params);
+    // Nor in an object that doesn't parse (a trailing comma), while text such as `{name}` stays.
+    let broken = r#"s3.connect {"secretAccessKey": "S3CRETKEY", "region": "x",} # see {name}"#;
+    let _ = s.run("script.run", &json!({"script": broken}));
+    let kept = s.project.log.entries().last().cloned().unwrap().params.to_string();
+    assert!(!kept.contains("S3CRET") && kept.contains("s3.connect"), "{kept}");
+    let _ = s.run("script.run", &json!({"script": "# keep {name} as it is"}));
+    assert!(s.project.log.entries().last().unwrap().params.to_string().contains("{name}"));
     // Large values clipped.
     s.run("project.rename", &json!({"name": "x".repeat(20_000), "note": vec![1; 5_000]})).ok();
     let big = s.project.log.entries().last().cloned().unwrap();
