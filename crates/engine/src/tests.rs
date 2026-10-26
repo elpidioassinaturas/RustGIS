@@ -16321,6 +16321,10 @@ fn text_elements_take_an_installed_font_family_by_name() {
     assert!(!crate::cmd::layout::layout_bytes(&mut s, 0, false, 72.0, false).unwrap().is_empty());
     let svg = rustgis_render::svg::layout_svg(&s.project.layouts[0], &mut s.project.maps, 72.0, &Default::default()).unwrap();
     assert!(svg.contains(r#"font-family="&apos;No Such Family 762&apos;, serif""#), "{svg}");
+    // A name's own quote and backslash are escaped for CSS, not dropped.
+    s.run("layout.update", &json!({"element": id, "font": r"O'Brien\Sans", "fallback": "sans"})).unwrap();
+    let svg = rustgis_render::svg::layout_svg(&s.project.layouts[0], &mut s.project.maps, 72.0, &Default::default()).unwrap();
+    assert!(svg.contains(r#"font-family="&apos;O\&apos;Brien\\Sans&apos;, sans-serif""#), "{svg}");
     // A generic family clears the name; a fallback then has nothing to fall back from.
     s.run("layout.update", &json!({"element": id, "font": "sans"})).unwrap();
     assert_eq!(font(&s, id), (FontFamily::Sans, None));

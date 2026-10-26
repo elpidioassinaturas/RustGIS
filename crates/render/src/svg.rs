@@ -60,11 +60,11 @@ pub fn layout_svg(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) 
                     .map(|(i, l)| (y + em * (0.6 + 1.25 * i as f64), l))
                     .take_while(|(ly, _)| *ly <= y + h + em)
                     .collect();
-                // A named family first (#762), quoted as CSS has it (its own quotes and
-                // backslashes left out), then the generic one, for a viewer without it.
+                // A named family first (#762), quoted as CSS has it (its own backslashes and
+                // quotes escaped), then the generic one, for a viewer without it.
                 let generic = if *font == FontFamily::Serif { "serif" } else { "sans-serif" };
                 let family = match font_name {
-                    Some(n) => format!("'{}', {generic}", n.replace(['\'', '\\'], "")),
+                    Some(n) => format!("'{}', {generic}", n.replace('\\', "\\\\").replace('\'', "\\'")),
                     None => generic.to_string(),
                 };
                 let _ = write!(
