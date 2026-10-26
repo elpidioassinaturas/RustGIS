@@ -16305,6 +16305,11 @@ fn text_elements_take_an_installed_font_family_by_name() {
     assert_eq!(font(&s, id), (FontFamily::Serif, Some("No Such Family 762".to_string())));
     let drawn = if rustgis_render::fonts::serif_available() { "drawn in the serif" } else { "drawn in the sans-serif" };
     assert!(r["warning"].as_str().is_some_and(|w| w.ends_with(drawn)), "{r}");
+    // A family not installed whose name says it is a serif falls back to the serif.
+    let other =
+        s.run("layout.addElement", &json!({"kind": "text", "font": "No Such Serif 762"})).unwrap()["element"].as_u64().unwrap() as u32;
+    assert_eq!(font(&s, other).0, FontFamily::Serif);
+    s.run("layout.update", &json!({"element": other, "font": "sans"})).unwrap();
     // Named again, it keeps that fallback; another change says nothing of it.
     s.run("layout.update", &json!({"element": id, "font": "No Such Family 762"})).unwrap();
     assert_eq!(font(&s, id).0, FontFamily::Serif);

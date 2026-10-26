@@ -1172,7 +1172,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                         // and the legend; the sources and reference boxed under both.
                         // Its title and subtitle are serif: with none installed, drawn in the sans, said.
                         if (title.is_some() || subtitle.is_some())
-                            && let Some(w) = font_warning(FontFamily::Serif, None)
+                            && let Some(w) = font_warning(FontFamily::Serif, None, false)
                         {
                             warnings.push(format!("the editorial title and subtitle: {w}"));
                         }
@@ -2209,7 +2209,9 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
         o => return Err(format!("unknown element kind '{o}'")),
     };
     let warning = match &k {
-        ElementKind::Text { font, font_name, .. } => font_warning(*font, font_name.as_deref()),
+        ElementKind::Text { font, font_name, .. } => {
+            font_warning(*font, font_name.as_deref(), p.get("fallback").is_some_and(|v| !v.is_null()))
+        }
         _ => None,
     };
     let l = s.project.layouts.get_mut(i).ok_or("no layout")?;
@@ -2399,24 +2401,23 @@ pub(crate) fn text_font(p: &Value, current: (FontFamily, Option<String>)) -> Res
         };
     }
     let name = rustgis_map::symbology::font_name(n).ok_or("font must be sans, serif or an installed font family's name")?;
-    // With no fallback given, its class decides one, so the installed fonts are waited for if the
-    // app is still indexing them (once, as it starts; its own Font list always gives one).
-    let installed = if fallback.is_some() { installed_family(&name, false) } else { installed_family(&name, true) };
+    let installed = installed_family(&name);
     let kept = installed.map_or(name, |f| f.name.clone());
     let fallback = fallback.unwrap_or_else(|| default_fallback(installed, &kept, &current));
     Ok((fallback, Some(kept)))
 }
 
-/// The installed family named `name` (in any case, as the index compares names), waiting for the
-/// font index when `wait`, or none while the app is still building it.
-fn installed_family(name: &str, wait: bool) -> Option<&'static rustgis_render::families::Family> {
+/// The installed family named `name` (in any case, as the index compares names): none while the
+/// app is still indexing them (a command runs on its interface thread, which mustn't wait).
+fn installed_family(name: &str) -> Option<&'static rustgis_render::families::Family> {
     use rustgis_render::families;
-    let i = if wait { families::find(name) } else { families::find_ready(name) }?;
-    families::installed_now()?.get(usize::from(i))
+    families::available()?.get(usize::from(families::find_ready(name)?))
 }
 
 /// A named family's fallback when none is given: the one it has when it is named again, else its
-/// own class (a serif's is the serif), else the sans.
+/// own class (a serif's is the serif), else, where the family isn't known (not installed, or
+/// the fonts not indexed yet), a name that says "Serif" without "Sans" (Noto Serif), else the
+/// sans.
 fn default_fallback(
     installed: Option<&rustgis_render::families::Family>,
     name: &str,
@@ -2425,21 +2426,28 @@ fn default_fallback(
     if current.1.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(name)) {
         return current.0;
     }
+    let lower = name.to_lowercase();
     match installed {
         Some(f) if f.serif => FontFamily::Serif,
+        None if lower.contains("serif") && !lower.contains("sans") => FontFamily::Serif,
         _ => FontFamily::Sans,
     }
 }
 
 /// What a text is told when it isn't drawn as asked: a named family this computer hasn't is drawn
-/// in its fallback (said only once the installed fonts are indexed: the app indexes them as it
-/// starts), and a serif asked for where none is installed (the web app, a bare Linux box) in the
-/// sans, so an export never differs from what was asked unsaid.
-fn font_warning(font: FontFamily, name: Option<&str>) -> Option<String> {
+/// in its fallback, and a serif asked for where none is installed (the web app, a bare Linux box)
+/// in the sans, so an export never differs from what was asked unsaid. While the app is still
+/// indexing the installed fonts (its first seconds), a family named with no `fallback` given is
+/// told that its fallback came from its name, not the font.
+fn font_warning(font: FontFamily, name: Option<&str>, fallback_given: bool) -> Option<String> {
     let serif = rustgis_render::fonts::serif_available();
     let drawn = if font == FontFamily::Serif && serif { "serif" } else { "sans-serif" };
+    let indexed = rustgis_render::families::available().is_some();
     match name {
-        Some(n) if rustgis_render::families::available().is_some() && rustgis_render::families::find_ready(n).is_none() => {
+        Some(n) if !indexed && !fallback_given => Some(format!(
+            "the installed fonts are still being read, so {n}'s fallback ({drawn}) comes from its name, not the font: give \"fallback\" to choose it"
+        )),
+        Some(n) if indexed && rustgis_render::families::find_ready(n).is_none() => {
             Some(format!("{n} is not installed on this computer, so the text is drawn in the {drawn}"))
         }
         Some(_) => None,
@@ -2711,7 +2719,7 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
     // too, as `layout.addElement` says it), so a script is told what it gets; a call that changes
     // something else on such a text isn't told again.
     let font_told = match &new_text_style {
-        Some((_, (f, n))) if gives_font(p) => font_warning(*f, n.as_deref()),
+        Some((_, (f, n))) if gives_font(p) => font_warning(*f, n.as_deref(), p.get("fallback").is_some_and(|v| !v.is_null())),
         _ => None,
     };
     if p.get("radius").is_some_and(|v| !v.is_null())
@@ -3045,8 +3053,18 @@ fn series_page(s: &mut Session, p: &Value) -> CmdResult {
 }
 
 /// Renders a layout to PNG or PDF bytes. `all` renders every map series page (PDF only).
+/// An export of a layout whose texts name installed families waits for the font index (the app
+/// builds it in its first seconds), so the page is drawn in them, as a map export waits for its
+/// labels' fonts; the page on screen doesn't wait.
+fn wait_for_named_fonts(layout: &Layout) {
+    if layout.elements.iter().any(|e| matches!(&e.kind, ElementKind::Text { font_name: Some(_), .. })) {
+        let _ = rustgis_render::families::installed();
+    }
+}
+
 pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) -> Result<Vec<u8>, String> {
     let saved = s.project.layouts.get(li).ok_or("no layout")?.clone();
+    wait_for_named_fonts(&saved);
     let dpi = if dpi.is_finite() { dpi.clamp(36.0, 600.0) } else { 150.0 };
     let current = saved.series.as_ref().map_or(0, |sr| sr.page);
     // Only a whole-series PDF names every page.
@@ -3140,6 +3158,7 @@ fn layout_svg(s: &mut Session, li: usize, dpi: f64) -> Result<String, String> {
     };
     // Rendering borrows the current layout; it does not step or modify the series page.
     let layout = s.project.layouts.get(li).ok_or("no layout")?;
+    wait_for_named_fonts(layout);
     rustgis_render::svg::layout_svg(layout, &mut s.project.maps, dpi, &info)
         .ok_or_else(|| "could not draw the page; check its map sources and export size".into())
 }

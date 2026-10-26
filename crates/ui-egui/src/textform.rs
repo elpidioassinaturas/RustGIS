@@ -204,8 +204,12 @@ pub fn show(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, tokens: &[&
                     }
                     let Some(installed) = installed else { return };
                     ui.separator();
-                    let mut matching =
-                        installed.iter().filter(|f| f.listed && (search.is_empty() || f.name.to_lowercase().contains(&search)));
+                    // A family named as a generic one ("Serif") is the generic one: not listed again.
+                    let mut matching = installed.iter().filter(|f| {
+                        f.listed
+                            && FontFamily::from_name(&f.name).is_none()
+                            && (search.is_empty() || f.name.to_lowercase().contains(&search))
+                    });
                     for v in matching.by_ref().take(MAX_FONTS_SHOWN) {
                         let on = name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&v.name));
                         if ui.selectable_label(on, &v.name).clicked() {

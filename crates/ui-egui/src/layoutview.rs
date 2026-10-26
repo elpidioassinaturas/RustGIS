@@ -1700,14 +1700,11 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
         }
         if settled.font {
             // A named family with its fallback (#762), else the generic one.
-            match &named {
-                Some(n) => {
-                    update(app, json!({"font": n, "fallback": fam.code()}));
-                }
-                None => {
-                    update(app, json!({"font": fam.code()}));
-                }
-            }
+            let font = match &named {
+                Some(n) => json!({"font": n, "fallback": fam.code()}),
+                None => json!({"font": fam.code()}),
+            };
+            update(app, font);
         }
     }
     // The layers a legend lists: a checkbox for each vector layer of its frame's map, ticked when
