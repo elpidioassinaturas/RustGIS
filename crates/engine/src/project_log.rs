@@ -565,11 +565,10 @@ impl ProjectLog {
         (tail, matching.len(), s.entries.len())
     }
 
-    /// Calls `f` with each entry, oldest first, under the log's lock.
-    pub fn each(&self, mut f: impl FnMut(&LogEntry)) {
-        for e in &self.state().entries {
-            f(e);
-        }
+    /// Up to `n` entries from the `from`th, oldest first: copied under the log's lock, so the
+    /// caller writes them after letting it go.
+    pub fn chunk(&self, from: usize, n: usize) -> Vec<LogEntry> {
+        self.state().entries.iter().skip(from).take(n).cloned().collect()
     }
 
     pub fn len(&self) -> usize {
@@ -837,8 +836,9 @@ fn word_core(word: &str) -> &str {
 
 /// `t` with each word (quotes, brackets, a trailing `,`, `;` or `:` aside) replaced by what `f`
 /// makes of it, where `f` gives something: how a path among a text's words is found when it is
-/// made portable on saving. Only a word with a separator past its first character is tried (`/data/a.tif`, `C:\a.tif`, `./a.tif`): a division's `/` or a
-/// `/home` among other words is left as written.
+/// made portable on saving. Only a word with a separator past its first character is tried
+/// (`/data/a.tif`, `C:\a.tif`, `./a.tif`): a division's `/` or a `/home` among other words is
+/// left as written.
 fn path_words(t: &str, f: impl Fn(&str) -> Option<String>) -> String {
     t.split_inclusive(char::is_whitespace)
         .map(|word| {

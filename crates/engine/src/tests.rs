@@ -17835,6 +17835,13 @@ fn the_project_log_records_each_command_run_on_the_project() {
     }
     let kept = log.entries();
     assert_eq!((kept.len(), kept[0].command.as_str()), (crate::project_log::LOG_PLUGIN_LIMIT + 1, "layer.rename"));
+    // Read in chunks (as the export writes it), every entry comes once, in order.
+    let mut read = Vec::new();
+    while let Some(part) = Some(log.chunk(read.len(), 256)).filter(|p| !p.is_empty()) {
+        read.extend(part);
+    }
+    assert_eq!(read.len(), kept.len());
+    assert!(read.iter().zip(&kept).all(|(a, b)| a.command == b.command && a.at == b.at));
     // An SQL secret's options, written as plain words, go; the statement's shape stays.
     let sql = "CREATE OR REPLACE SECRET s3 (TYPE s3, KEY_ID 'AKIA1', SECRET 'S3CRET'); SELECT 1 / 2";
     let kept = crate::project_log::kept_params(&json!({"sql": sql}));

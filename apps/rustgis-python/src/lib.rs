@@ -90,7 +90,7 @@ impl Engine {
     }
 
     /// The project as `.rgis` JSON text, as `project.saveAs` writes it (what `project.openText`
-    /// opens).
+    /// opens), without its project log.
     fn project_json(&self) -> PyResult<String> {
         serde_json::to_string(&self.session.project).map_err(|e| RustGISError::new_err(e.to_string()))
     }
