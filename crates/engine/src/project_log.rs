@@ -302,7 +302,7 @@ fn clip(v: &Value, chars: usize, items: usize, depth: usize) -> Value {
 
 /// The entry of command `id`, which started at `at` and took `took`; its error without secrets,
 /// clipped to [`LOG_ERROR_CHARS`].
-pub(crate) fn entry(id: &str, params: Value, res: &CmdResult, at: u64, took: std::time::Duration) -> LogEntry {
+pub(crate) fn entry(id: &str, params: Value, res: &CmdResult, at: u64, took: web_time::Duration) -> LogEntry {
     let error = res.as_ref().err().map(|e| kept_error(e));
     LogEntry {
         at,

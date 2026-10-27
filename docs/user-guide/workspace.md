@@ -93,8 +93,9 @@ From scripts: `project.log {"since"?, "until"?, "command"?, "failed"?, "limit"?}
 newest last (`command` is an id, or the start of one ending in a dot, `layer.`; `limit` is 100
 by default and at most 1,000, with `count` saying how many match), and `project.exportLog
 {"path": "log.csv"}` writes it out as CSV (one row an entry, the parameters as a JSON column) or
-JSON Lines (`.jsonl`). The History pane still keeps geoprocessing runs with their outputs and
-Copy as code; the log is a plain record and runs nothing again.
+JSON Lines (`.jsonl`), as the path's extension says; any other extension (a `.json`, a project)
+is refused, whatever `format` is given. The History pane still keeps geoprocessing runs with
+their outputs and Copy as code; the log is a plain record and runs nothing again.
 
 ### QGIS projects and styles
 

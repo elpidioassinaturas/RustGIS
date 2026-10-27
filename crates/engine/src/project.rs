@@ -106,6 +106,8 @@ fn identity(text: &str) -> (usize, u64) {
     (text.len(), KEY.get_or_init(RandomState::new).hash_one(text.as_bytes()))
 }
 
+/// A project. A clone shares its log ([`ProjectLog`]), as the undo snapshots that are clones of
+/// it must; a copy that is a project of its own (a template) is made with [`Project::own_copy`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     #[serde(default = "format")]
@@ -423,6 +425,14 @@ pub(crate) fn resolve_file_paths<'a>(dir: &str, paths: impl IntoIterator<Item = 
 }
 
 impl Project {
+    /// A copy that is a project of its own, with a log of its own: a clone would write into
+    /// this project's.
+    pub fn own_copy(&self) -> Project {
+        let mut p = self.clone();
+        p.log = ProjectLog::default();
+        p
+    }
+
     fn file_paths_mut(&mut self) -> Vec<(&mut String, bool)> {
         let mut paths = Vec::new();
         for map in &mut self.maps {

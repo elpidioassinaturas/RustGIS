@@ -39,7 +39,7 @@ pub fn commands() -> Vec<C> {
         ),
         C::new("project.exportLog", "Export Project Log", "Project", export_log)
             .view()
-            .params(r#"{"path": ".csv or .jsonl file", "format"?: "csv"|"jsonl" (default from the extension)}"#),
+            .params(r#"{"path": ".csv or .jsonl file", "format"?: "csv"|"jsonl" (for a path with no extension; one given must match the extension)}"#),
         C::new("project.clearLog", "Clear Project Log", "Project", clear_log).outside_undo(),
         C::new("project.logCommands", "Log Commands", "Project", log_commands).outside_undo().params(r#"{"on"?: bool (default: turn it the other way)}"#),
     ]
@@ -95,11 +95,32 @@ fn csv_cell(t: &str) -> String {
 /// column) or JSON Lines (one entry a line).
 fn export_log(s: &mut Session, p: &Value) -> CmdResult {
     let path = PathBuf::from(ps(p, "path").ok_or("path is required")?);
+    let kind = |f: &str| match f {
+        "csv" => Some("csv"),
+        "jsonl" | "ndjson" => Some("jsonl"),
+        _ => None,
+    };
+    // The path's extension, when it has one, is the format's whatever `format` says: the log
+    // never goes over a project, a JSON document or any other kind of file.
     let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
-    let format = match ps(p, "format").map(str::to_ascii_lowercase).or(ext).as_deref() {
-        Some("csv") => "csv",
-        Some("jsonl") | Some("ndjson") => "jsonl",
-        _ => return Err("format is csv or jsonl (or give a .csv or .jsonl path: JSON Lines isn't one JSON document)".into()),
+    let by_ext =
+        match ext.as_deref() {
+            None => None,
+            Some(e) => Some(kind(e).ok_or_else(|| {
+                format!("the log is written to a .csv or .jsonl file, not a .{e} one (JSON Lines isn't one JSON document)")
+            })?),
+        };
+    let asked = ps(p, "format").map(str::to_ascii_lowercase);
+    let format = match (asked.as_deref(), by_ext) {
+        (Some(f), by_ext) => {
+            let f = kind(f).ok_or("format is csv or jsonl")?;
+            if by_ext.is_some_and(|e| e != f) {
+                return Err(format!("format {f} doesn't match the path's .{}", ext.as_deref().unwrap_or_default()));
+            }
+            f
+        }
+        (None, Some(e)) => e,
+        (None, None) => return Err("give a .csv or .jsonl path, or a format (csv or jsonl)".into()),
     };
     let mut text = String::new();
     let mut n = 0usize;
@@ -153,8 +174,10 @@ fn log_commands(s: &mut Session, p: &Value) -> CmdResult {
         None | Some(Value::Null) => !s.project.log.on(),
         Some(v) => v.as_bool().ok_or("on must be true or false")?,
     };
-    s.project.log.set_on(on);
-    s.dirty = true;
+    if on != s.project.log.on() {
+        s.project.log.set_on(on);
+        s.dirty = true;
+    }
     Ok(json!({"on": on}))
 }
 

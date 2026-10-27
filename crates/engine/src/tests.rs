@@ -17915,8 +17915,18 @@ fn the_project_log_records_each_command_run_on_the_project() {
     }
     let opened = Project::from_json(r#"{"name": "A", "maps": [], "active_map": 0, "log": {"entries": [{"at": "never"}]}}"#).unwrap();
     assert!(opened.log.is_empty());
-    // A .json path is refused: JSON Lines isn't one JSON document.
+    // A .json path is refused: JSON Lines isn't one JSON document. A format given doesn't let
+    // the log go over another kind of file, nor disagree with the path's extension.
     assert!(s.run("project.exportLog", &json!({"path": "log.json"})).is_err());
+    for (path, format) in [("log.json", "jsonl"), ("map.rgis", "csv"), ("log.csv", "jsonl"), ("log", "xml")] {
+        let e = s.run("project.exportLog", &json!({"path": path, "format": format})).unwrap_err();
+        assert!(e.contains("not a .") || e.contains("doesn't match") || e.contains("format is"), "{path}: {e}");
+    }
+    assert!(s.run("project.exportLog", &json!({"path": "log"})).unwrap_err().contains("give a .csv"));
+    // Switching to what it already is changes nothing.
+    s.dirty = false;
+    s.run("project.logCommands", &json!({"on": true})).unwrap();
+    assert!(!s.dirty, "no change, nothing to save");
     // Making a project, or opening one from text, starts its log.
     let mut made = world();
     made.run("project.new", &json!({"name": "Fresh"})).unwrap();
