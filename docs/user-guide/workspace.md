@@ -98,7 +98,9 @@ end goes into it alike: the app, scripts, the AI Assistant, the command line, Py
   it, as the project's sources are; a path with spaces in it that an error names is found whole
   when it is one of the entry's parameters, and otherwise by its words. An entry whose text
   already holds, as a word, the relative form one of its paths would take (`./data/a.tif`) has
-  its paths written as file names instead, so every text reads back as it was written.
+  its paths written as file names instead, so every text reads back as it was written. An
+  earlier RustGIS opens a project that has a log as it opens any other, ignoring the log, and
+  saves it without one.
 
 From scripts: `project.log {"since"?, "until"?, "command"?, "failed"?, "limit"?}` lists entries,
 newest last (`command` is an id, or the start of one ending in a dot, `layer.`; `limit` is a whole

@@ -17841,6 +17841,10 @@ fn the_project_log_records_each_command_run_on_the_project() {
     assert_eq!(kept["sql"], json!("CREATE OR REPLACE SECRET s3 (…); SELECT 1 / 2"));
     assert_eq!(crate::project_log::sql_secrets_removed("create table t (a int)"), "create table t (a int)");
     assert_eq!(crate::project_log::sql_secrets_removed("create table secret (a int)"), "create table secret (a int)");
+    // A path written by its name keeps a folder's name, not the nothing after its last separator.
+    for (path, name) in [("/data/My Data/", "My Data"), ("C:\\data\\a.tif", "a.tif"), ("/data/a.tif", "a.tif"), ("/", "/")] {
+        assert_eq!(crate::project_log::last_name(path), name, "{path}");
+    }
     // `create` inside another word starts no statement.
     for t in ["recreate secret s (key 'a')", "created secret (key 'a')"] {
         assert_eq!(crate::project_log::sql_secrets_removed(t), t);

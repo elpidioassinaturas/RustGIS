@@ -793,7 +793,7 @@ fn swapped(t: &str, swaps: &[(String, String)]) -> String {
 fn portable_text(t: &str, dir: &str, names: bool, wrote: &mut Vec<String>) -> String {
     let made = std::cell::RefCell::new(Vec::new());
     let portable = |p: &str| {
-        let name = || p.rsplit(['/', '\\']).next().unwrap_or(p).to_string();
+        let name = || last_name(p).to_string();
         if names {
             return name();
         }
@@ -808,6 +808,12 @@ fn portable_text(t: &str, dir: &str, names: bool, wrote: &mut Vec<String>) -> St
         }
     }
     out
+}
+
+/// The last part of path `p`, its file's name, or its folder's for one that ends in a separator
+/// (`/data/My Data/`); the root as it is.
+pub(crate) fn last_name(p: &str) -> &str {
+    p.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().filter(|n| !n.is_empty()).unwrap_or(p)
 }
 
 /// Whether `t` is one absolute local path as a whole (spaces in its folders' names and all), not
