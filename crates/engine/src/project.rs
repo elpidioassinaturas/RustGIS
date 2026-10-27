@@ -832,8 +832,11 @@ impl Project {
     }
 
     /// Reads imported JSON (including package contents) without restoring a saved file's secrets.
+    /// A template or a package starts a log of its own (#797), whatever log its file holds.
     pub(crate) fn from_import_json(text: &str, dir: Option<&Path>) -> Result<Project, String> {
-        Self::read_json(text, false, dir)
+        let mut p = Self::read_json(text, false, dir)?;
+        p.log = ProjectLog::default();
+        Ok(p)
     }
 
     fn read_json(text: &str, restore: bool, dir: Option<&Path>) -> Result<Project, String> {

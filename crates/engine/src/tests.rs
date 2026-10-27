@@ -18514,17 +18514,21 @@ fn the_project_log_writes_its_paths_relative_to_the_project_folder() {
     let last = Project::load(&file).unwrap().log.entries().last().unwrap().clone();
     assert_eq!((last.params["path"].as_str(), last.error.as_deref()), (Some("a.tif"), Some("not found; see ./My Data/a.tif")), "{text}");
     let _ = std::fs::remove_dir_all(&folder);
-    // A text that starts with a path but holds more is read word by word, not as one path.
+    // A text that starts with a path but holds more is read word by word, not as one path. (Paths
+    // in the folder: one elsewhere is written relative too where it can be, `../../mnt/…` on
+    // Linux, or as its name where it can't, another drive on Windows.)
+    let (a, b) = (folder.join("x").join("a.tif"), folder.join("y").join("b.tif"));
+    let (a, b) = (a.display(), b.display());
     for (error, saved) in [
-        ("/mnt/x/a.tif: cannot open /mnt/y/b.tif", "a.tif: cannot open b.tif"),
-        ("/mnt/x/a.tif and /mnt/y/b.tif are missing", "a.tif and b.tif are missing"),
+        (format!("{a}: cannot open {b}"), "./x/a.tif: cannot open ./y/b.tif"),
+        (format!("{a} and {b} are missing"), "./x/a.tif and ./y/b.tif are missing"),
     ] {
         let entry = LogEntry {
             at: 3,
             command: "x".into(),
             params: Value::Null,
             ok: false,
-            error: Some(error.into()),
+            error: Some(error.clone()),
             millis: 0,
             relative: Vec::new(),
         };
@@ -18690,6 +18694,10 @@ fn a_files_project_log_is_read_bounded_and_never_keeps_the_project_from_opening(
     }
     let opened = Project::from_json(r#"{"name": "A", "maps": [], "active_map": 0, "log": {"entries": [{"at": "never"}]}}"#).unwrap();
     assert!(opened.log.is_empty());
+    // A template or a package starts a log of its own, even when its file holds one.
+    let seeded = r#"{"name": "A", "maps": [], "active_map": 0, "log": {"entries": [{"at": 1, "command": "a", "ok": true}]}}"#;
+    assert_eq!(Project::from_json(seeded).unwrap().log.len(), 1);
+    assert!(Project::from_import_json(seeded, None).unwrap().log.is_empty());
 }
 
 /// `raster.project` puts a raster on a grid of another coordinate system, cell size, origin and
