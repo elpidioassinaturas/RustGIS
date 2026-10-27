@@ -916,9 +916,10 @@ impl Session {
             // command's result as it was, without an entry.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if project_log::logs(self, id, params) {
+                    // The step only when it was taken back or brought back.
                     let params = match step {
-                        Some(label) => serde_json::json!({"step": label}),
-                        None => project_log::kept_params(params),
+                        Some(label) if res.is_ok() => serde_json::json!({"step": label}),
+                        _ => project_log::kept_params(params),
                     };
                     let e = project_log::entry(id, params, &res, at, start.elapsed());
                     if joins && res.is_ok() { self.project.log.join_last(e) } else { self.project.log.push(e) }
