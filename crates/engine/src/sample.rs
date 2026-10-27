@@ -46,7 +46,7 @@ fn countries_in(w: Worldview) -> &'static str {
 /// that is unsaved, unchanged and has nothing to undo, and only a layer named `Countries` holding
 /// exactly the built-in countries of `from`. Returns whether a layer was swapped.
 pub fn swap_countries(s: &mut crate::Session, from: Worldview, to: Worldview) -> bool {
-    if from == to || s.dirty || s.path.is_some() || s.can_undo() {
+    if from == to || s.dirty() || s.path.is_some() || s.can_undo() {
         return false;
     }
     let read = |w| read_geojson(countries_in(w), "Countries").ok().map(|(ds, _)| ds);

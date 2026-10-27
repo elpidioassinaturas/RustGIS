@@ -40,7 +40,7 @@ pub fn commands() -> Vec<C> {
         C::new("map.zoomToExtent", "Zoom To Extent", "Home › Navigate", zoom_to_extent)
             .view()
             .params(r#"{"extent": [minLon, minLat, maxLon, maxLat]}"#),
-        C::new("map.goToXY", "Go To XY", "Home › Navigate", go_to_xy)
+        C::new("map.goToXY", "By Coordinates…", "Home › Navigate › Locate", go_to_xy)
             .view()
             .params(r#"{"lon" | "x": number, "lat" | "y": number, "scale"?: number, "bearing"?: degrees clockwise from north, "pitch"?: degrees of tilt (0 to 85)}"#),
         C::new("map.goToLink", "Go To Map Link", "Home › Navigate", go_to_link)

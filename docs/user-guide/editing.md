@@ -67,6 +67,36 @@ you edit the value or choose units; click **Apply elevation** to apply the new i
   have dangles, must be covered by); Validate lists the errors, and clicking one zooms to it.
 - **Status**: features added, changed and deleted per layer since the last save.
 
+### Moving shared polygon vertices
+
+**Edit › Features › Shared Vertices** opts polygon moves into linked editing. It starts off,
+lasts only for the current app session, and is not saved in projects or preferences. With it on,
+dragging a polygon vertex moves every polygon vertex in that layer stored at exactly the same
+original coordinate, including unselected and filtered-out rows, point-only contacts, other
+polygon parts and holes. Unrelated polygons touching by chance at that point move together too;
+turn the switch off to move just the source feature. Inserting and deleting vertices, and moving
+line or point vertices, keep their existing behaviour. Changing the switch cancels a held drag.
+
+The command uses row positions and the same vertex addresses as `edit.vertex`:
+
+```json
+{"layer":"Parcels","row":0,"part":0,"ring":0,"index":3,"lon":12.5,"lat":41.9}
+```
+
+Run these parameters with `edit.moveSharedVertex`. It returns the source `part`, `ring` and
+`index`, plus `modified`: the number of features whose geometry or attributes actually changed.
+Every matched feature runs through attribute rules and archiving in one transaction; a rejection
+rolls back the whole edit. A successful command is one undo step. As with `edit.vertex`, a direct
+same-position command still runs the rules and records an edit, even if `modified` is zero.
+Undo retains cumulative edit counts. Streamed layers require **Load All Features** first.
+
+This moves coincident **vertices**, not every shared boundary. For a boundary stored as P–Q
+on one polygon and P–R–Q on its neighbour, moving Q moves the two stored Q vertices but leaves
+R in place. It does not remap intermediate vertices, insert missing ones or refuse the edit
+because vertex densities differ; the two boundaries can separate. There is no tolerance or
+nearby-coordinate matching. Use the `mustNotOverlap` and `mustNotHaveGaps` topology rules, then
+**Edit › Manage Edits › Topology › Error Inspector (validate)** (`topology.validate`) to inspect a coverage.
+
 ### Distance units in commands
 
 `edit.move`, `edit.traverse` and constant `edit.elevation` accept `"units": "Feet"`,
@@ -111,9 +141,25 @@ Pop-ups (Home › Navigate) choose which layers a click with Explore identifies:
 under the click, every visible layer, only selectable layers, only the layer selected in Layers, or
 nothing. The pop-up lists every feature under the click in those layers, overlapping ones included
 (up to 100): step through them with ‹ ›. The feature shown is the one selected. The magnifier in
-the pop-up's header zooms to it.
+the pop-up's header zooms to it. Long feature titles and layer names are shortened with an
+ellipsis to leave room for the header controls; hover over either name to read it in full.
 
 The topmost and visible modes also identify the features of vector tile layers under the click:
 PMTiles and MBTiles archives and vector tiles added as data (not catalog basemaps or MapLibre
 styles), beneath the map's own layers. Each shows its tile layer and source layer (`firenze ›
 buildings`) and its attributes; tile features can't be selected or zoomed to.
+
+They ask WMS layers too (WMS tile layers that are shown and, as far as their service's
+capabilities say, queryable): RustGIS sends the service a standard GetFeatureInfo request for the
+point (WMS 1.3.0 or 1.1.1, as in the layer's address), asking for GeoJSON when it offers it, else
+GML, other XML, plain text or HTML, and the features it answers join the pop-up as they arrive.
+When the service answers with an error in that format (swisstopo's MapServer can't write some of
+its layers as GeoJSON, but answers them in GML), RustGIS asks again in the next format it offers,
+and keeps asking that layer in it for the rest of the session.
+Topmost asks only the highest WMS layer that can be asked at the point (one that covers it and is
+queryable), and only when no feature of the map's own layers or of its vector tile layers is under
+the click. A project doesn't save the request: a WMS layer from a project reads its service's
+capabilities again on its first click (once for all the map's layers from that service), so until
+then Topmost takes it as one that can be asked.
+`identify` lists the requests in `featureInfo`, and `identify.featureInfo` reads an answer (or, on
+the command line, asks the service and waits).

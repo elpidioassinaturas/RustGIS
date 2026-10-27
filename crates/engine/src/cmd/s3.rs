@@ -165,7 +165,7 @@ pub(super) fn list(_s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (bucket, prefix, named, limit);
-        Err("in the web app, browse buckets with Home › Add Data › S3…".into())
+        Err("in the web app, browse buckets with Home › Add › Add Data › S3…".into())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

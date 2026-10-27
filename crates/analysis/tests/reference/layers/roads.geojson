@@ -114,6 +114,25 @@
      ]
     ]
    }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "id": "r7"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      10.25,
+      46.375
+     ],
+     [
+      11.125,
+      46.375
+     ]
+    ]
+   }
   }
  ]
 }

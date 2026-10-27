@@ -36,7 +36,7 @@ pub fn layout_svg(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) 
         let _ = writeln!(s, r#"<g id="element-{}" inkscape:label="{}" inkscape:groupmode="layer">"#, e.id, esc(&e.name));
         let (x, y, w, h) = (e.x, e.y, e.w, e.h);
         match &e.kind {
-            ElementKind::Text { text: t, size, color, bold, italic, align, letter_spacing, font } => {
+            ElementKind::Text { text: t, size, color, bold, italic, align, letter_spacing, font, font_name } => {
                 let first = layout.first_frame().and_then(|id| layout.element(id)).and_then(|f| match &f.kind {
                     ElementKind::MapFrame { map, center, scale, bearing, pitch, .. } => {
                         let m = maps.iter().find(|m| m.name.eq_ignore_ascii_case(map))?;
@@ -60,12 +60,19 @@ pub fn layout_svg(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) 
                     .map(|(i, l)| (y + em * (0.6 + 1.25 * i as f64), l))
                     .take_while(|(ly, _)| *ly <= y + h + em)
                     .collect();
+                // A named family first (#762), quoted as CSS has it (its own backslashes and
+                // quotes escaped), then the generic one, for a viewer without it.
+                let generic = if *font == FontFamily::Serif { "serif" } else { "sans-serif" };
+                let family = match font_name {
+                    Some(n) => format!("'{}', {generic}", n.replace('\\', "\\\\").replace('\'', "\\'")),
+                    None => generic.to_string(),
+                };
                 let _ = write!(
                     s,
                     r#"<text x="{}" y="{}" font-family="{}" font-size="{}" font-weight="{}" font-style="{}" text-anchor="{anchor}" letter-spacing="{}"{} xml:space="preserve">"#,
                     num(tx),
                     num(lines.first().map_or(y + em * 0.6, |l| l.0)),
-                    if *font == FontFamily::Serif { "serif" } else { "sans-serif" },
+                    esc(&family),
                     num(em),
                     if *bold { "bold" } else { "normal" },
                     if *italic { "italic" } else { "normal" },

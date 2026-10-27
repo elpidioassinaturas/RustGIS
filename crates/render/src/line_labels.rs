@@ -154,12 +154,15 @@ pub(super) fn parallel(line: &[(f32, f32)], len: f32, overrun: f32) -> Option<(f
     a_to_b.is_finite().then_some(((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0, a_to_b))
 }
 
-/// Characters `advances` wide (points), in turn along `line` at its middle: the label's centre,
-/// and each character's centre relative to it and angle (radians, clockwise, upright). `None`
-/// when the line (with `overrun` past each end) is shorter than the text, or turns more than
+/// Characters `advances` wide, `gap` apart (letter spacing; both in the label's units, points ×
+/// 1.33, as its text's size), in turn along `line`
+/// at its middle: the label's centre, and each character's centre relative to it and angle
+/// (radians, clockwise, upright). `None` when the line (with `overrun` past each end) is shorter than the text, or turns more than
 /// [`MAX_TURN`] from one character to the next.
-pub(super) fn curved(line: &[(f32, f32)], advances: &[f32], overrun: f32) -> Option<((f32, f32), Vec<(f32, f32, f32)>)> {
-    let len: f32 = advances.iter().sum();
+pub(super) fn curved(line: &[(f32, f32)], advances: &[f32], gap: f32, overrun: f32) -> Option<((f32, f32), Vec<(f32, f32, f32)>)> {
+    // Each step from a character to the next: its advance and the letter spacing (never back).
+    let step = |adv: f32| (adv + gap).max(0.0);
+    let len: f32 = advances.iter().map(|a| step(*a)).sum::<f32>() - advances.last().map_or(0.0, |a| step(*a) - a);
     let path = upright(line, len, overrun)?;
     let total = path.length();
     let centre = path.at(total / 2.0)?;
@@ -184,7 +187,7 @@ pub(super) fn curved(line: &[(f32, f32)], advances: &[f32], overrun: f32) -> Opt
         }
         last = Some(turn);
         out.push((p.0 - centre.0, p.1 - centre.1, turn));
-        d += adv;
+        d += step(*adv);
     }
     Some((centre, out))
 }
@@ -217,10 +220,24 @@ mod tests {
         {
             let (_, _, a) = parallel(&line, 40.0, 0.0).unwrap();
             assert!((a - down).abs() < 1e-3, "{line:?}: {a}");
-            let (_, glyphs) = curved(&line, &[10.0; 4], 0.0).unwrap();
+            let (_, glyphs) = curved(&line, &[10.0; 4], 0.0, 0.0).unwrap();
             assert!(glyphs.iter().all(|g| (g.2 - down).abs() < 1e-3), "{line:?}: {glyphs:?}");
             assert!(glyphs.windows(2).all(|w| w[1].1 > w[0].1), "first character at the top: {glyphs:?}");
         }
+    }
+
+    #[test]
+    fn letter_spacing_sets_curved_characters_apart_and_needs_more_line() {
+        let line = [(0.0, 50.0), (100.0, 50.0)];
+        let (_, tight) = curved(&line, &[10.0; 3], 0.0, 0.0).unwrap();
+        let (_, spaced) = curved(&line, &[10.0; 3], 5.0, 0.0).unwrap();
+        assert!((tight[1].0 - tight[0].0 - 10.0).abs() < 1e-3 && (spaced[1].0 - spaced[0].0 - 15.0).abs() < 1e-3);
+        assert!(spaced[1].0.abs() < 1e-3, "still centred: {spaced:?}");
+        // 3 × 10 and two gaps of 40: longer than the line.
+        assert!(curved(&line, &[10.0; 3], 40.0, 0.0).is_none());
+        // Spacing tighter than a letter doesn't step back.
+        let (_, back) = curved(&line, &[10.0; 3], -20.0, 0.0).unwrap();
+        assert!(back.windows(2).all(|w| w[1].0 >= w[0].0), "{back:?}");
     }
 
     #[test]
@@ -245,11 +262,11 @@ mod tests {
                 (200.0 * t.sin() + 200.0, 200.0 - 200.0 * t.cos())
             })
             .collect();
-        let (_, glyphs) = curved(&arc, &[10.0; 8], 0.0).unwrap();
+        let (_, glyphs) = curved(&arc, &[10.0; 8], 0.0, 0.0).unwrap();
         assert_eq!(glyphs.len(), 8);
         assert!(glyphs.windows(2).all(|w| w[1].2 > w[0].2), "turning steadily clockwise");
         assert!(glyphs.windows(2).all(|w| w[1].0 > w[0].0), "left to right");
         // A right angle at the middle: too sharp for the text.
-        assert!(curved(&[(0.0, 100.0), (100.0, 100.0), (100.0, 0.0)], &[10.0; 6], 0.0).is_none());
+        assert!(curved(&[(0.0, 100.0), (100.0, 100.0), (100.0, 0.0)], &[10.0; 6], 0.0, 0.0).is_none());
     }
 }

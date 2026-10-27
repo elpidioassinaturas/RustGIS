@@ -15,6 +15,23 @@ templates, packages and files for individual items.
 command line. A package opens as a new, unsaved project; Save writes a plain `.rgis` file.
 Opening or creating a project clears undo history; saving does not.
 
+A `•` after the project's name in the title bar means it has unsaved changes. Undoing or redoing
+back to the state you last saved clears it. Before the desktop app discards unsaved changes, it
+asks **Save changes to…?** That happens when you quit or close the window, and when New, Open, the
+World Atlas sample, a template or a project dropped on the window would replace the project:
+
+- **Save** saves first and then goes on. A project that was never saved asks where to write it.
+  If you cancel that, or the save fails, nothing is discarded.
+- **Don't Save** goes on without saving.
+- **Cancel** (or Escape) goes back to the project.
+
+Commands don't ask: `project.new`, `project.open` and the rest replace the project as they always
+have when a script, a task, the AI Assistant, the command line or an attached agent runs them.
+The browser app doesn't ask yet; it warns before you leave a page with unsaved changes. On macOS,
+**Quit RustGIS** (⌘Q) and the Dock's **Quit** don't ask yet either. With autosave on (the
+default), RustGIS keeps your changes as a [recovery copy](#autosave-and-recovery) and offers them
+back the next time it starts; with autosave off, they are lost, so save before you quit.
+
 Saved layer addresses omit passwords, access keys, tokens and signatures. The open session
 keeps them, but after restarting RustGIS a protected source may need you to sign in to its
 connection again or add it again with credentials.
@@ -35,7 +52,7 @@ the last one. Choose how often, or turn it off, in **Settings › Autosave**
 project doesn't hold up the app. It leaves out layer passwords, keys and tokens, as a saved project
 does. It is kept in the `recovery` folder of the app's
 [data folder](../installation.md#settings-data-and-cache-folders), not beside your project.
-Saving, opening or starting another project, and quitting RustGIS remove it.
+Saving, opening or starting another project, and choosing **Don't Save** when you quit remove it.
 
 If RustGIS crashes, is closed by the system or loses power, the next launch asks **Recover unsaved
 work?** and says how old the copy is.
@@ -53,11 +70,13 @@ that has unsaved changes of its own: save it first.
 The same choices are commands: `ui.recover` opens the copy, and `ui.recover={"discard": true}`
 deletes it. `ui.autosave` reports the interval and any copy waiting.
 
-Quitting doesn't ask about unsaved changes, and their copy is removed: save before you quit. A
-second copy of RustGIS running alongside the first doesn't autosave, so it can't replace the first
-one's copy; it says so as it starts. Nor does RustGIS autosave when its settings folder can't lock
-files (some network or synced folders), where it can't tell a second copy apart. The browser app
-doesn't autosave yet; it warns before you leave a page with unsaved changes.
+Quitting asks about unsaved changes first (see [Projects](#projects)). If RustGIS is quit without
+that answer (on macOS, **Quit** doesn't ask yet), it keeps a last copy of the work instead, and
+the next launch offers it back, saying RustGIS was quit without saving. With autosave off, nothing
+is kept. A second copy of RustGIS running alongside the first doesn't autosave, so it can't
+replace the first one's copy; it says so as it starts. Nor does RustGIS autosave when its settings
+folder can't lock files (some network or synced folders), where it can't tell a second copy apart.
+The browser app doesn't autosave yet; it warns before you leave a page with unsaved changes.
 
 ### Project log
 
@@ -149,9 +168,12 @@ Each layer keeps its look:
   transparency, clipping and no-data settings hide as the raster's mask.
 - **Labels**: simple and rule-based, each rule a label class whose SQL clause is its filter and
   its parents' (an else rule's: none of its siblings'), with the text's field, size, colour,
-  bold and italic, its font family (drawn in it where it is installed, else in RustGIS's label
-  font), its buffer as a halo, its placement (Parallel and Curved along lines,
-  around and over points) and its scale range.
+  bold, italic and letter spacing, its font family (drawn in it where it is installed, else in
+  RustGIS's label font), its buffer as a halo of its colour, opacity and size, its background as
+  a rectangle (filled and outlined as its fill symbol says, padded by its size, its corners
+  rounded), its placement (Parallel and Curved along lines, around and over points), its offset
+  from a point (and on a point layer, its distance around the point, as an offset upwards) and
+  its scale range.
 
 Projects and styles from QGIS 1 and 2 read too: their legend gives the layers' order, and the
 older names of the same settings are read.
@@ -160,8 +182,9 @@ QGIS expressions carry over where they are SQL: fields compared with values, `LI
 `IS NULL`, joined by `AND`, `OR` and `NOT`. What RustGIS doesn't draw as QGIS does is drawn as
 near as it can, or left out, and said: the import's notes list, layer by layer, what was
 approximated (pattern fills drawn as a tint of their colour, SVG markers as circles,
-dashed polygon outlines solid, label halos in RustGIS's own colour and width, label offsets and
-wrapping, values outside a graduated renderer's ranges in its first or last class, file options
+dashed polygon outlines solid, label halos with sharp corners drawn round and blended ones drawn
+over the map, label backgrounds of other shapes drawn as rectangles, label distances from lines
+and polygons, a distance around points moved straight up, and wrapping, values outside a graduated renderer's ranges in its first or last class, file options
 such as `layerid` that RustGIS doesn't read) and what was skipped (arrow lines, other data-defined
 settings, draw effects, label callouts, labels from expressions, contours and other raster
 renderers RustGIS has no match for, PostGIS, WFS
@@ -213,12 +236,11 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
 - **Pane Sets** (View › Workspace) save the left pane, open right-hand pane tabs, active pane
   and ribbon tab and bring them back. The **Workflow Manager** tracks jobs (new, in progress,
   on hold, done) with the area each covers.
-- **Connections** (Home › Add Data › **Connections…**) opens the Data Sources pane on its saved
-  connections; it only ever opens the pane, so it is safe to choose when the pane is already open
-  (**View › Windows › Data Sources** still shows or hides it). **Add Data › New Connection** lists
-  each kind of connection (PostgreSQL/PostGIS, MySQL/MariaDB and SQL Server are left out in the web
-  app) and opens its form. Saved connections are listed in the pane, not in the menu. Command
-  Search finds **Connections…** by name.
+- **Data Sources** (Home › Add › **Data Sources**) opens the Data Sources pane; **View › Windows ›
+  Data Sources** still shows or hides it. **Home › Add › Add Data › New Connection** lists each
+  kind of connection (PostgreSQL/PostGIS, MySQL/MariaDB and SQL Server are left out in the web
+  app) and opens its form. Saved connections are listed in the pane, not in the Add Data menu.
+  Command Search finds the pane as **Data Sources**.
 - **Tasks** (Analyze › Tasks, or View › Tasks) steps through a task's instructions: read the current step and do it
   yourself, with **Show Me** to find where, or click **Run** to have it done.
     - **Show Me** points at the step's command:
@@ -276,8 +298,8 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
       cloud-optimised GeoTIFF a file per date with `layer.addUrl`, giving its `start` and `end`.
       For example NASA GIBS daily MODIS imagery:
       `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/{date:YYYY-MM-DD}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`.
-    - A Zarr variable added with **Follow the time slider** (Add Data › Zarr…) shows the step the
-      slider is at; see [Zarr stores](data.md#zarr-stores).
+    - A Zarr variable added with **Follow the time slider** (Home › Add › Add Data › Zarr…) shows
+      the step the slider is at; see [Zarr stores](data.md#zarr-stores).
     - From scripts: `time.bind` (`"layer"`, `"field"`, `"start"`, `"end"`, `"unit"`, `"interval"`, `"show"`), `time.set` (the
       window: `"start"`, `"end"`, `"unit"`, `"interval"`, `"show"`, `"speed"`, `"loop"`,
       `"format"`…), `time.goTo` (`"date"`, or `"step"` from 0), `time.step` (`"by"`, negative goes

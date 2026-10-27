@@ -15,7 +15,8 @@ rustgis-cli skills                    # the AI Assistant's skills (also: add, re
 ```
 
 `commands` lists the engine commands and their JSON parameters; `tools` lists geoprocessing
-tools and their parameters. See [Installation](installation.md) for the CLI packages.
+tools and their parameters. See [Installation](installation.md) for the CLI packages, and
+[The command line in Docker](installation.md#the-command-line-in-docker) for its image.
 
 ## Rendering
 

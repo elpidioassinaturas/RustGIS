@@ -116,6 +116,7 @@ use rustgis_geom::{Coord, Extent, extent_to_merc, lonlat_to_merc};
 use rustgis_map::globe::{V3, densify};
 use rustgis_map::layout::TextAlign;
 use rustgis_map::{Camera, Globe, LabelPlacement, LineStroke, Map, Marker, Rgba, Symbol};
+pub use text::halo_reach;
 /// The image type pages and maps are drawn into.
 pub use tiny_skia::Pixmap;
 use tiny_skia::{
@@ -178,6 +179,9 @@ pub struct PlacedLabel {
     pub size: f32,
     pub color: Rgba,
     pub halo: Option<Rgba>,
+    /// How far the halo reaches beyond the letters (points), as a label class sets it; `None` is
+    /// the thin halo every label had before.
+    pub halo_width: Option<f32>,
     pub bold: bool,
     /// An icon placed with the label (a tile style's `icon-image`), drawn into the map.
     pub icon: Option<PlacedIcon>,
@@ -207,6 +211,9 @@ pub struct PlacedLabel {
     /// Curved along a line: its characters one by one, each placed and turned where the line
     /// takes it (`text` is all of them). Empty for a label drawn as one block.
     pub glyphs: Vec<LabelGlyph>,
+    /// A rectangle behind the text (a label class's background, its sizes in points as the
+    /// class's grown by a reference scale); none draws the text alone. A curved label has none.
+    pub background: Option<rustgis_map::LabelBackground>,
 }
 
 /// One character of a label curved along a line: its text, and its centre and angle (radians,
@@ -3227,6 +3234,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                             size: rustgis_map::graphics::font_size(ds_ptr, row),
                             color,
                             halo: Some(halo_for(color)),
+                            halo_width: None,
                             bold: rustgis_map::graphics::bold(ds_ptr, row),
                             icon: None,
                             align: 0.0,
@@ -3238,6 +3246,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                             angle: None,
                             collide: Default::default(),
                             glyphs: Vec::new(),
+                            background: None,
                         });
                     }
                 }
@@ -3261,6 +3270,17 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                 // view, wherever its label point is.
                 let along_line = |placement: LabelPlacement, g: &Geometry| placement.along_line() && matches!(g, Geometry::Line(_));
                 let any_along = labels.in_order().zip(&label_fields).any(|(c, f)| f.is_some() && c.placement.along_line());
+                // How far a class moves its labels at most (points, as placed below): a point that
+                // far out of view may still have its label in it.
+                let offset_reach = labels
+                    .in_order()
+                    .zip(&label_fields)
+                    .filter(|(_, f)| f.is_some())
+                    .map(|(c, _)| c.offset[0].abs().max(c.offset[1].abs()) * 1.33 * label_factor)
+                    .filter(|r| r.is_finite())
+                    .fold(0.0, f32::max);
+                let offset_reach = f64::from(offset_reach);
+                let (vw, vh) = (ctx.view.width, ctx.view.height);
                 for (row, g) in geoms.iter().enumerate() {
                     let Some(g) = g else { continue };
                     if rows.get(row) != Some(&true) {
@@ -3270,7 +3290,14 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                     // Where the label point is on the screen, `None` when it is out of view (or
                     // behind the globe): then only a line labelled along it can be, on its
                     // stretch in view.
-                    let point = if globe.is_some() || ctx.cull.contains(c) { ctx.screen(c) } else { None };
+                    let point = if globe.is_some() || ctx.cull.contains(c) {
+                        ctx.screen(c)
+                    } else if offset_reach > 0.0 {
+                        let r = offset_reach;
+                        ctx.screen(c).filter(|&(x, y)| x >= -r && y >= -r && x <= vw + r && y <= vh + r)
+                    } else {
+                        None
+                    };
                     let line_in_view = || globe.is_some() || ctx.cull.intersects(&extents.get(row).copied().unwrap_or_else(|| g.extent()));
                     if point.is_none() && !(any_along && matches!(g, Geometry::Line(_)) && line_in_view()) {
                         continue;
@@ -3312,13 +3339,15 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                         let size = class.size * label_factor;
                         let font = class_fonts.get(ci).copied().flatten();
                         let face = text::Face { bold: class.bold, italic: class.italic, serif: false, family: font };
+                        let spacing = class.spacing * label_factor;
                         let (dx, dy) = class.placement.offset(
-                            text::block_width(&text, class.size, face),
+                            text::spaced_block_width(&text, class.size, face, class.spacing),
                             text::block_height(&text, class.size),
                             marker,
                             is_point,
                         );
-                        let (dx, dy) = (dx * label_factor, dy * label_factor);
+                        // Moved as its class says (points, as the text's size), unless along a line.
+                        let (dx, dy) = ((dx + class.offset[0] * 1.33) * label_factor, (dy + class.offset[1] * 1.33) * label_factor);
                         let (mut lx, mut ly, mut angle, mut glyphs) = (x as f32 + dx, y as f32 + dy, None, Vec::new());
                         if let (LabelPlacement::Parallel | LabelPlacement::Curved, Geometry::Line(parts)) = (class.placement, g) {
                             let line = screen_line.get_or_insert_with(|| longest_on_screen(ctx, parts));
@@ -3329,14 +3358,14 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                             let curved = class.placement == LabelPlacement::Curved
                                 && text.graphemes(true).nth(line_labels::MAX_CURVED_CHARS).is_none();
                             if !curved {
-                                let width = text::block_width(&text, size, face);
+                                let width = text::spaced_block_width(&text, size, face, spacing);
                                 let Some((cx, cy, a)) = line_labels::parallel(line, width, overrun) else { continue };
                                 (lx, ly, angle) = (cx, cy, Some(a));
                             } else {
                                 // Each character with its accents, drawn as one.
                                 let chars: Vec<String> = text.graphemes(true).map(String::from).collect();
                                 let advances: Vec<f32> = chars.iter().map(|c| text::measure_in(c, size, face)).collect();
-                                let Some(((cx, cy), at)) = line_labels::curved(line, &advances, overrun) else { continue };
+                                let Some(((cx, cy), at)) = line_labels::curved(line, &advances, spacing * 1.33, overrun) else { continue };
                                 (lx, ly) = (cx, cy);
                                 glyphs =
                                     chars.into_iter().zip(at).map(|(text, (dx, dy, angle))| LabelGlyph { text, dx, dy, angle }).collect();
@@ -3353,17 +3382,24 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                                 y: ly,
                                 size,
                                 color: class.color,
-                                halo: class.halo.then_some(halo_for(class.color)),
+                                halo: class.halo.then_some(class.halo_color_for(class.color)),
+                                halo_width: class.halo_width.map(|w| w * label_factor),
                                 bold: class.bold,
                                 icon: None,
                                 align: 0.0,
                                 framed: false,
                                 italic: class.italic,
-                                spacing: 0.0,
+                                spacing,
                                 font,
                                 line_align: TextAlign::Left,
                                 angle,
                                 collide: Default::default(),
+                                // (Not behind characters curved one by one.)
+                                background: class
+                                    .background
+                                    .as_ref()
+                                    .filter(|b| b.draws() && glyphs.is_empty())
+                                    .map(|b| b.scaled(label_factor)),
                                 glyphs,
                             },
                             pri,
@@ -4089,8 +4125,7 @@ fn read_back(l: &mut PlacedLabel) {
 
 /// A halo that contrasts with the text colour.
 fn halo_for(text: Rgba) -> Rgba {
-    let lum = 0.299 * text.r() as f32 + 0.587 * text.g() as f32 + 0.114 * text.b() as f32;
-    if lum < 140.0 { Rgba::new(255, 255, 255, 225) } else { Rgba::new(20, 22, 26, 210) }
+    rustgis_map::symbology::auto_halo(text)
 }
 
 struct Placement {
@@ -4173,7 +4208,13 @@ fn label_boxes(l: &PlacedLabel) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
     if !l.text.is_empty() {
         let tw = text::label_width(l);
         let th = text::block_height(&l.text, l.size);
-        let p = l.collide.text_padding.clamp(0.0, 100.0);
+        // A halo drawn at a width of its own reaches past the letters (points × 1.33, as the text's
+        // size and the drawing have it): another label's text must not fall under it. A width
+        // kept with the halo turned off reserves nothing. A background reaches as far as its
+        // padding across, and up and down.
+        let halo = text::drawn_halo_reach(l);
+        let [across, up_down] = text::background_reach(l).map(|r| l.collide.text_padding.clamp(0.0, 100.0) + halo.max(r));
+        let p = across.max(up_down);
         let cx = l.center_x();
         if !l.glyphs.is_empty() {
             // A curved label: a square round each character, as tall as the text.
@@ -4199,7 +4240,7 @@ fn label_boxes(l: &PlacedLabel) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
                     text.push([x - r, y - r, x + r, y + r]);
                 }
             }
-            None => text.push([cx - tw / 2.0 - p, l.y - th / 2.0 - p, cx + tw / 2.0 + p, l.y + th / 2.0 + p]),
+            None => text.push([cx - tw / 2.0 - across, l.y - th / 2.0 - up_down, cx + tw / 2.0 + across, l.y + th / 2.0 + up_down]),
         }
     }
     let icon = l
@@ -4320,6 +4361,7 @@ pub(crate) fn draw_attribution(pm: &mut Pixmap, attribution: &[String], ppp: f32
         size,
         color: Rgba::rgb(0x33, 0x33, 0x33),
         halo: Some(Rgba::rgb(0xFF, 0xFF, 0xFF)),
+        halo_width: None,
         bold: false,
         icon: None,
         align: 0.0,
@@ -4331,6 +4373,7 @@ pub(crate) fn draw_attribution(pm: &mut Pixmap, attribution: &[String], ppp: f32
         angle: None,
         collide: Default::default(),
         glyphs: Vec::new(),
+        background: None,
     };
     text::draw(pm, &label, ppp);
 }
@@ -4346,6 +4389,7 @@ mod tests {
             size: 10.0,
             color: Rgba::rgb(0, 0, 0),
             halo: None,
+            halo_width: None,
             bold: false,
             icon,
             align,
@@ -4357,7 +4401,40 @@ mod tests {
             angle: None,
             collide: Default::default(),
             glyphs: Vec::new(),
+            background: None,
         }
+    }
+
+    /// A halo of its own width reaches past the letters, so its label's collision box grows by it:
+    /// another label's text never falls under it. The thin halo and none leave the box as it was.
+    #[test]
+    fn a_wide_halo_keeps_other_labels_out_of_its_reach() {
+        let plain = label("Rhein", 50.0, None, 0.0);
+        let mut haloed = plain.clone();
+        (haloed.halo, haloed.halo_width) = (Some(Rgba::rgb(255, 255, 255)), Some(5.0));
+        // As far as the halo is drawn: 5 points, at the 1.33 the text's size is drawn at.
+        let reach = 5.0 * 1.33;
+        let (a, b) = (label_boxes(&plain).0[0], label_boxes(&haloed).0[0]);
+        assert!((a[0] - b[0] - reach).abs() < 1e-4 && (b[2] - a[2] - reach).abs() < 1e-4, "{a:?} {b:?}");
+        assert!((a[1] - b[1] - reach).abs() < 1e-4 && (b[3] - a[3] - reach).abs() < 1e-4, "{a:?} {b:?}");
+        haloed.halo_width = None;
+        assert_eq!(label_boxes(&haloed).0[0], a);
+        // A width kept with the halo turned off, or a fully see-through halo: nothing drawn,
+        // nothing reserved.
+        let off = PlacedLabel { halo: None, halo_width: Some(5.0), ..plain.clone() };
+        assert_eq!(label_boxes(&off).0[0], a);
+        let clear = PlacedLabel { halo: Some(Rgba::new(255, 255, 255, 0)), halo_width: Some(5.0), ..plain.clone() };
+        assert_eq!(label_boxes(&clear).0[0], a);
+        // A halo grown at a reference scale reserves all it reaches: labels are placed once for
+        // every pixel density, and only drawing holds a halo to MAX_HALO_PX pixels.
+        let grown = PlacedLabel { halo_width: Some(300.0), ..haloed.clone() };
+        let g = label_boxes(&grown).0[0];
+        assert!((a[0] - g[0] - 300.0 * 1.33).abs() < 1e-2, "{g:?}");
+        // Turned and curved labels' squares grow by it too.
+        haloed.halo_width = Some(5.0);
+        let turned = |l: &PlacedLabel| PlacedLabel { angle: Some(0.5), ..l.clone() };
+        let (a, b) = (label_boxes(&turned(&plain)).0[0], label_boxes(&turned(&haloed)).0[0]);
+        assert!(((b[2] - b[0]) - (a[2] - a[0]) - 2.0 * reach).abs() < 1e-4, "{a:?} {b:?}");
     }
 
     #[test]
@@ -4867,7 +4944,7 @@ mod tests {
         let (_, alone) = ink(&at("Atlantic", false));
         assert!(cols.first().zip(alone.first()).is_some_and(|(a, b)| a.abs_diff(*b) <= 2), "the longer line keeps its place");
         // As wide as the widest line, as tall as its lines; a trailing newline is an empty line.
-        assert_eq!(text::block_width("ab\ncdef", 10.0, text::Face::default()), text::measure("cdef", 10.0, false));
+        assert_eq!(text::spaced_block_width("ab\ncdef", 10.0, text::Face::default(), 0.0), text::measure("cdef", 10.0, false));
         // Text drawn on one line (a table cell, a chart's name) is still measured whole, so it is
         // cut to its column as it is drawn.
         assert_eq!(text::measure("ab\ncdef", 10.0, false), text::measure("abcdef", 10.0, false));
@@ -6425,6 +6502,7 @@ mod tests {
             size: 10.0,
             color: Rgba::rgb(0, 0, 0),
             halo: None,
+            halo_width: None,
             bold: false,
             icon: None,
             align: 0.0,
@@ -6436,6 +6514,7 @@ mod tests {
             angle: None,
             collide: Default::default(),
             glyphs: vec![glyph("A", -5.0), glyph("B", 5.0)],
+            background: None,
         };
         turn_with(&mut l, &|x, y| Some((200.0 - x, 200.0 - y)));
         let order: Vec<(&str, f32)> = l.glyphs.iter().map(|g| (g.text.as_str(), g.dx)).collect();
@@ -6465,6 +6544,7 @@ mod tests {
             size: 30.0,
             color: Rgba::rgb(0, 0, 0),
             halo,
+            halo_width: None,
             bold: false,
             icon: None,
             align: 0.0,
@@ -6476,6 +6556,7 @@ mod tests {
             angle: None,
             collide: Default::default(),
             glyphs,
+            background: None,
         };
         let drawn = |halo, glyphs| {
             let mut pm = Pixmap::new(60, 80).unwrap();
@@ -6526,6 +6607,222 @@ mod tests {
         m.layer_mut(id).unwrap().reference_scale = Some(scale * 2.0);
         let (dx2, size2) = label(&mut m);
         assert!((size2 - size * 2.0).abs() < 1e-3 && (dx2 - dx * 2.0).abs() < 0.5, "{dx} {size} → {dx2} {size2}");
+        // A halo's own colour and width, and the letter spacing, grow with the label too.
+        let c = &mut m.layer_mut(id).unwrap().labels.default;
+        (c.halo_color, c.halo_width, c.spacing) = (Some(Rgba::rgb(255, 0, 0)), Some(1.5), 1.0);
+        let r = render(&mut m, &view).unwrap();
+        let l = r.labels.first().expect("placed");
+        assert_eq!((l.halo, l.halo_width, l.spacing), (Some(Rgba::rgb(255, 0, 0)), Some(3.0), 2.0));
+        // Without them, as every label was drawn before: the automatic colour, thin, unspaced.
+        let c = &mut m.layer_mut(id).unwrap().labels.default;
+        (c.halo_color, c.halo_width, c.spacing) = (None, None, 0.0);
+        let r = render(&mut m, &view).unwrap();
+        let l = r.labels.first().expect("placed");
+        assert_eq!((l.halo, l.halo_width, l.spacing), (Some(halo_for(c_color(&m, id))), None, 0.0));
+    }
+
+    fn c_color(m: &Map, id: u32) -> Rgba {
+        m.layer(id).unwrap().labels.default.color
+    }
+
+    #[test]
+    fn a_halo_of_its_own_width_spreads_round_the_letters_in_one_coat() {
+        let label = |halo: Rgba, halo_width: Option<f32>| PlacedLabel {
+            text: "H".into(),
+            x: 50.0,
+            y: 50.0,
+            size: 20.0,
+            color: Rgba::rgb(0, 0, 0),
+            halo: Some(halo),
+            halo_width,
+            bold: false,
+            icon: None,
+            align: 0.0,
+            framed: false,
+            italic: false,
+            spacing: 0.0,
+            font: None,
+            line_align: TextAlign::Left,
+            angle: None,
+            collide: Default::default(),
+            glyphs: Vec::new(),
+            background: None,
+        };
+        let drawn = |l: &PlacedLabel| {
+            let mut pm = Pixmap::new(100, 100).unwrap();
+            pm.fill(tiny_skia::Color::from_rgba8(128, 128, 128, 255));
+            text::draw(&mut pm, l, 1.0);
+            pm
+        };
+        // The leftmost column with a pixel matching `f`.
+        let left = |pm: &Pixmap, f: &dyn Fn(tiny_skia::PremultipliedColorU8) -> bool| {
+            (0..100).find(|&x| (0..100).any(|y| pm.pixel(x, y).is_some_and(f))).unwrap() as i32
+        };
+        let red = Rgba::new(255, 0, 0, 128);
+        let thin = drawn(&label(red, None));
+        let wide = drawn(&label(red, Some(3.0)));
+        let ink = left(&wide, &|p| p.red() < 40 && p.green() < 40);
+        let reach = ink - left(&wide, &|p| p.red() > 160 && p.green() < 100);
+        // 3 pt beyond the letters: 4 pixels, as a 20 pt text is 26.6 pixels tall.
+        assert!((3..=5).contains(&reach), "{reach}");
+        assert!(ink - left(&thin, &|p| p.red() > 160 && p.green() < 100) <= 2, "the thin halo as before");
+        // One coat of the see-through red over the grey: nowhere redder than one coat makes.
+        let one_coat = (255.0 * 0.5 + 128.0 * 0.5_f32).round() as u8 + 2;
+        assert!(wide.pixels().iter().all(|p| p.red() <= one_coat), "a pixel coated twice");
+        // A width grown with its label at a reference scale isn't cut back, whatever the text's
+        // size (a 10 pt halo on 9 pt text at twice the size: 20 pt); past the most a reference
+        // scale grows a 10 pt width, and for no number, it is held.
+        assert_eq!(
+            (text::halo_reach(20.0), text::halo_reach(1e9), text::halo_reach(f32::NAN), text::halo_reach(-3.0)),
+            (20.0, 320.0, 0.0, 0.0)
+        );
+        // No width, no halo: not even round the letters' edges.
+        assert_eq!(drawn(&label(red, Some(0.0))).data(), drawn(&PlacedLabel { halo: None, ..label(red, None) }).data());
+        // A spaced label is drawn with its letters farther apart.
+        let two = |spacing: f32| drawn(&PlacedLabel { text: "II".into(), spacing, halo: None, ..label(red, None) });
+        let span = |pm: &Pixmap| {
+            let cols: Vec<u32> = (0..100).filter(|&x| (0..100).any(|y| pm.pixel(x, y).is_some_and(|p| p.red() < 40))).collect();
+            cols.last().unwrap() - cols.first().unwrap()
+        };
+        let (tight, spaced) = (span(&two(0.0)), span(&two(4.0)));
+        assert!(spaced >= tight + 4, "{tight} → {spaced}");
+    }
+
+    #[test]
+    fn a_background_fills_behind_the_text_and_keeps_other_labels_off() {
+        let bg = rustgis_map::LabelBackground {
+            fill: Some(Rgba::rgb(255, 255, 0)),
+            stroke: Some(Rgba::rgb(0, 0, 255)),
+            stroke_width: 1.5,
+            padding: [6.0, 3.0],
+            radius: 0.0,
+        };
+        let label = |background: Option<rustgis_map::LabelBackground>| PlacedLabel {
+            text: "HH".into(),
+            x: 60.0,
+            y: 50.0,
+            size: 12.0,
+            color: Rgba::rgb(0, 0, 0),
+            halo: None,
+            halo_width: None,
+            bold: false,
+            icon: None,
+            align: 0.0,
+            framed: false,
+            italic: false,
+            spacing: 0.0,
+            font: None,
+            line_align: TextAlign::Left,
+            angle: None,
+            collide: Default::default(),
+            glyphs: Vec::new(),
+            background,
+        };
+        let drawn = |l: &PlacedLabel| {
+            let mut pm = Pixmap::new(120, 100).unwrap();
+            pm.fill(tiny_skia::Color::from_rgba8(128, 128, 128, 255));
+            text::draw(&mut pm, l, 1.0);
+            pm
+        };
+        let yellow = |p: tiny_skia::PremultipliedColorU8| p.red() > 230 && p.green() > 230 && p.blue() < 40;
+        let blue = |p: tiny_skia::PremultipliedColorU8| p.blue() > 200 && p.red() < 60;
+        let l = label(Some(bg.clone()));
+        let [x0, y0, x1, y1] = text::background_box(&l).unwrap();
+        // The text's block grown by the padding (points × 1.33, as the text's size).
+        let w = text::label_width(&l);
+        assert!((x1 - x0 - (w + 2.0 * 6.0 * 1.33)).abs() < 0.01, "{x0} {x1} {w}");
+        assert!(y1 - y0 > 12.0 * 1.33 + 2.0 * 3.0 * 1.33);
+        let pm = drawn(&l);
+        // Filled between the text's end and its edge, outlined at the edge, the text over it.
+        let inside = pm.pixel((x1 - 4.0) as u32, 50).unwrap();
+        assert!(yellow(inside), "{inside:?}");
+        assert!(blue(pm.pixel(x1.round() as u32, 50).unwrap()), "{:?}", pm.pixel(x1.round() as u32, 50));
+        assert!(pm.pixels().iter().any(|p| p.red() < 100 && p.green() < 100 && p.blue() < 100), "the text over it");
+        // None, and one that draws nothing: the text alone, as before.
+        let plain = drawn(&label(None));
+        assert!(!plain.pixels().iter().any(|p| yellow(*p)));
+        let nothing = rustgis_map::LabelBackground { fill: None, stroke: None, ..bg.clone() };
+        assert_eq!(drawn(&label(Some(nothing.clone()))).data(), plain.data());
+        assert_eq!(text::background_reach(&label(Some(nothing))), [0.0; 2]);
+        // Turned along a line, it turns with the text.
+        let turned = drawn(&PlacedLabel { angle: Some(0.6), ..l.clone() });
+        assert!(turned.pixel(60, 50).is_some_and(|p| yellow(p) || p.red() < 40), "{:?}", turned.pixel(60, 50));
+        assert!(turned.pixels().iter().filter(|p| yellow(**p)).count() > 100);
+        // Curved character by character: none.
+        let glyph = LabelGlyph { text: "H".into(), dx: 0.0, dy: 0.0, angle: 0.0 };
+        let curved = PlacedLabel { glyphs: vec![glyph.clone(), LabelGlyph { dx: 10.0, ..glyph }], ..l.clone() };
+        assert!(text::background_box(&curved).is_none());
+        assert!(!drawn(&curved).pixels().iter().any(|p| yellow(*p)));
+        // Its reach widens the box other labels keep off: a label just past the text but on the
+        // background is placed beside the plain one, not beside the one with a background.
+        let [reach, up_down] = text::background_reach(&l);
+        assert!((reach - (6.0 * 1.33 + 0.75 * 1.33)).abs() < 0.01, "{reach}");
+        let (plain_box, _) = label_boxes(&label(None));
+        let (bg_box, _) = label_boxes(&l);
+        assert!((plain_box[0][0] - bg_box[0][0] - reach).abs() < 0.01, "{plain_box:?} {bg_box:?}");
+        // Up and down only as far as it reaches there: less padding than across, less kept off.
+        assert!(up_down < reach && (plain_box[0][1] - bg_box[0][1] - up_down).abs() < 0.01, "{up_down} {plain_box:?} {bg_box:?}");
+        let beside = |first: PlacedLabel| {
+            // A point clear of the two labels' padding (2 points each), not on its edge, where
+            // fonts' rounding decides.
+            let next = PlacedLabel { x: first.x + w + 5.0, ..label(None) };
+            place_labels(vec![(first, 2.0, (0, 0, 0)), (next, 1.0, (0, 1, 0))], Vec::new(), 400.0, 100.0, false).labels.len()
+        };
+        assert_eq!((beside(label(None)), beside(l.clone())), (2, 1));
+    }
+
+    #[test]
+    fn an_offset_moves_a_point_label_but_not_one_along_a_line() {
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        let mut d = Dataset::new("towns", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        d.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![Value::Text("Winterthur".into())]);
+        let id = m.add_dataset(d);
+        let mut d = Dataset::new("rivers", GeometryType::Polyline, vec![Field::new("name", FieldType::Text)]);
+        d.push(Some(Geometry::Line(vec![vec![Coord::new(-1.0, 0.5), Coord::new(1.0, 0.5)]])), vec![Value::Text("Töss".into())]);
+        let line = m.add_dataset(d);
+        let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 1500.0, bearing: 0.0, pitch: 0.0 };
+        m.camera = camera;
+        let view = View { width: 400.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
+        for (layer, placement) in [(id, rustgis_map::LabelPlacement::Right), (line, rustgis_map::LabelPlacement::Parallel)] {
+            let l = m.layer_mut(layer).unwrap();
+            l.labels.enabled = true;
+            l.labels.default.field = "name".into();
+            l.labels.default.placement = placement;
+        }
+        let at = |m: &mut Map| {
+            let r = render(m, &view).unwrap();
+            let find = |t: &str| r.labels.iter().find(|l| l.text == t).map(|l| (l.x, l.y)).unwrap();
+            (find("Winterthur"), find("Töss"))
+        };
+        let (town, river) = at(&mut m);
+        for layer in [id, line] {
+            m.layer_mut(layer).unwrap().labels.default.offset = [6.0, -3.0];
+        }
+        let (town2, river2) = at(&mut m);
+        // Points × 1.33, as the text's size: right and up.
+        assert!((town2.0 - town.0 - 6.0 * 1.33).abs() < 0.01 && (town2.1 - town.1 + 3.0 * 1.33).abs() < 0.01, "{town:?} → {town2:?}");
+        assert_eq!(river, river2, "along a line, not moved");
+        // A reference scale grows it with the label.
+        let scale = m.scale();
+        m.layer_mut(id).unwrap().reference_scale = Some(scale * 2.0);
+        m.layer_mut(id).unwrap().labels.default.offset = [0.0; 2];
+        let (big, _) = at(&mut m);
+        m.layer_mut(id).unwrap().labels.default.offset = [6.0, -3.0];
+        let (big2, _) = at(&mut m);
+        assert!((big2.0 - big.0 - 2.0 * 6.0 * 1.33).abs() < 0.01, "{big:?} → {big2:?}");
+        // A point 30 points left of the view (past the culling margin) is labelled when its offset
+        // brings the label into it.
+        let mut d = Dataset::new("edge", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        d.push(Some(Geometry::Point(Coord::new(-3.1, 0.0))), vec![Value::Text("Elgg".into())]);
+        let edge = m.add_dataset(d);
+        let l = m.layer_mut(edge).unwrap();
+        l.labels.enabled = true;
+        l.labels.default.field = "name".into();
+        let shown = |m: &mut Map| render(m, &view).unwrap().labels.iter().find(|l| l.text == "Elgg").map(|l| l.x);
+        assert_eq!(shown(&mut m), None);
+        m.layer_mut(edge).unwrap().labels.default.offset = [100.0, 0.0];
+        assert!(shown(&mut m).is_some_and(|x| x > 0.0 && x < 400.0), "{:?}", shown(&mut m));
     }
 
     #[test]

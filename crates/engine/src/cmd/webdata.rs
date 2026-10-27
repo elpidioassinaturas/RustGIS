@@ -1,4 +1,4 @@
-//! Home › Web Data services that are a fixed set of web addresses rather than a service to
+//! Home › Add › Web Data services that are a fixed set of web addresses rather than a service to
 //! browse: USGS The National Map's map services (a catalog by category, each added as its
 //! ArcGIS tiles or exported images) and Fields of the World's field boundaries (PMTiles archives
 //! on Source Cooperative, one a year, drawn by score). The others (NASA GIBS, EnviroAtlas, FEMA's

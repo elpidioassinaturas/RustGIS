@@ -203,7 +203,7 @@ pub fn header(app: &mut RustGisApp, ui: &mut Ui) {
                 }
                 // Title: centred when it fits, otherwise in the free gap; the map name and then the
                 // project name drop out when there is no room.
-                let title = format!("{}{}", app.session.project.name, if app.session.dirty { " •" } else { "" });
+                let title = format!("{}{}", app.session.project.name, if app.session.dirty() { " •" } else { "" });
                 let sub = format!("  —  {}", app.session.map().name);
                 let (title_w, sub_w) = (text_w(ui, &title, semibold(12.5)), text_w(ui, &sub, regular(12.0)));
                 let (a, b) = (qat_end + 8.0, sr.min.x - 16.0);
@@ -486,6 +486,12 @@ fn parse_scale(text: &str) -> Option<f64> {
 
 /// Global keyboard shortcuts.
 pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
+    // Behind a dialog (Save changes?, Recover unsaved work?, Command Search…) the keys are the
+    // dialog's: Escape answers it rather than switching tools, and Ctrl+N can't start what it
+    // asks about.
+    if ctx.memory(|m| m.top_modal_layer()).is_some() {
+        return;
+    }
     crate::modelbuilder::shortcuts(app, ctx);
     // The search box was typed in until egui took its focus away on Escape: that Escape clears
     // the box, not the tool.
@@ -548,10 +554,6 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
         if id == "tool.set" {
             app.map.cancel_sketch();
             app.layout.cancel_tool();
-            if app.ui.command_search.is_some() {
-                app.ui.command_search = None;
-                continue;
-            }
         }
         // An arrow key nudged the selected layout element (unless it's locked): a held key, or
         // taps close together, are one step to undo.
@@ -626,25 +628,24 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
             }
             continue;
         }
-        let _ = app.run(id, p);
+        let _ = app.run_by_user(id, p);
     }
 }
 
 /// The `ui.*` commands Command Search lists: (id, label, ribbon location).
 pub(crate) const UI_COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.addData", "Add Data…", "Home › Add"),
-    ("ui.addDelimited", "Add Delimited Text…", "Home › Add"),
-    ("ui.addUrl", "Add Data From URL…", "Home › Add"),
-    ("ui.addZarr", "Add Zarr Variable…", "Home › Add"),
-    ("ui.addService", "Add From Service…", "Home › Add"),
-    ("ui.openSources", "Connections…", "Home › Add Data"),
-    ("ui.searchOpenData", "Search Open Data…", "Home › Web Data"),
-    ("ui.stac.planet", "Planet Open Data…", "Home › Web Data"),
-    ("ui.stac.portolan", "Portolan…", "Home › Web Data"),
-    ("ui.stac.sentinel2", "Sentinel-2 Explorer…", "Home › Web Data"),
-    ("ui.stac.vantor", "Vantor…", "Home › Web Data"),
-    ("ui.stac.usgsLidar", "USGS LiDAR…", "Home › Web Data › United States"),
-    ("ui.pane.sources", "Data Sources Pane", "View › Windows"),
+    ("ui.addDelimited", "Add Delimited Text…", "Home › Add › Add Data"),
+    ("ui.addUrl", "Add Data From URL…", "Home › Add › Add Data"),
+    ("ui.addZarr", "Add Zarr Variable…", "Home › Add › Add Data"),
+    ("ui.addService", "Add From Service…", "Home › Add › Add Data"),
+    ("ui.searchOpenData", "Search Open Data…", "Home › Add › Web Data"),
+    ("ui.stac.planet", "Planet Open Data…", "Home › Add › Web Data"),
+    ("ui.stac.portolan", "Portolan…", "Home › Add › Web Data"),
+    ("ui.stac.sentinel2", "Sentinel-2 Explorer…", "Home › Add › Web Data"),
+    ("ui.stac.vantor", "Vantor…", "Home › Add › Web Data"),
+    ("ui.stac.usgsLidar", "USGS LiDAR…", "Home › Add › Web Data › United States"),
+    ("ui.pane.sources", "Data Sources", "Home › Add"),
     ("ui.plugins", "Plugin Manager…", "Plugins"),
     ("ui.mcpRelay", "MCP Relay", "Help › Help"),
     ("ui.pane.geoprocessing", "Tools Pane", "View › Windows"),
@@ -658,6 +659,7 @@ pub(crate) const UI_COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.map.gpu", "Toggle GPU Rendering", "View"),
     ("ui.importShapefile", "Import Shapefile with Projection…", "Home › Add"),
     ("ui.measurementUnits", "Toggle Imperial Measurements", "Home › Inspect › Measure"),
+    ("ui.moveSharedVertices", "Shared Vertices", "Edit › Features"),
     ("ui.exportMap", "Export Map…", "Publish › Output"),
     ("ui.checkUpdate", "Check for Updates…", "Help › Help"),
 ];
@@ -690,6 +692,7 @@ fn search_action(id: &str) -> Option<SearchAction> {
         "map.package" => SaveItem("mapPackage"),
         "map.rename" => Dialog("renameMap"),
         "map.goToXY" => Dialog("goToXY"),
+        "map.findPlace" => Dialog("findPlace"),
         "map.camera" | "map.setScale" => Dialog("camera"),
         "map.basemap" => Dialog("basemap"),
         "map.body" => Dialog("body"),
@@ -802,6 +805,18 @@ fn search_action(id: &str) -> Option<SearchAction> {
     })
 }
 
+/// Desktop-only interactive actions stay visible but disabled in web Command Search.
+fn search_platform_disabled(id: &str, web: bool) -> Option<&'static str> {
+    if !web {
+        return None;
+    }
+    match id {
+        "project.addFolder" => Some("folder connections need the desktop app"),
+        "layer.addDatabase" => Some("databases are read through DuckDB, a program the browser can't run"),
+        _ => None,
+    }
+}
+
 /// Availability of the interactive entry point, not the parameterized engine operation.
 fn search_disabled(app: &RustGisApp, id: &str) -> Option<&'static str> {
     if id.starts_with("gp:") || id.starts_with("panel:") || id.starts_with("pane:") {
@@ -810,9 +825,8 @@ fn search_disabled(app: &RustGisApp, id: &str) -> Option<&'static str> {
     if matches!(search_action(id), Some(SearchAction::Workflow(_))) {
         return None; // The workflow lets the user choose its inputs, including the layer.
     }
-    // The ribbon hides the Database dialog in the browser for the same reason.
-    if id == "layer.addDatabase" && cfg!(target_arch = "wasm32") {
-        return Some("databases are read through DuckDB, a program the browser can't run");
+    if let Some(reason) = search_platform_disabled(id, cfg!(target_arch = "wasm32")) {
+        return Some(reason);
     }
     why_disabled(app, id).or_else(|| {
         (search_action(id).is_none() && app.session.registry.get(id).is_some_and(rustgis_engine::CommandSpec::needs_input))
@@ -991,7 +1005,7 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
             let _ = app.run("ui.pane.workflows", json!({"section": section}));
         } else if let Some(action) = search_action(&id) {
             let _ = match action {
-                SearchAction::Command(command) => app.run(command, Value::Null),
+                SearchAction::Command(command) => app.run_by_user(command, Value::Null),
                 SearchAction::Dialog(name) => app.run("ui.dialog", json!({"name": name})),
                 SearchAction::OpenItem(kind) => app.run("ui.openItem", json!({"kind": kind})),
                 SearchAction::SaveItem(kind) => app.run("ui.saveItem", json!({"kind": kind})),
@@ -1002,7 +1016,7 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
                 }
             };
         } else {
-            let _ = app.run(&id, Value::Null);
+            let _ = app.run_by_user(&id, Value::Null);
         }
     }
     if keep {
@@ -1181,6 +1195,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn desktop_only_search_actions_are_disabled_only_on_the_web() {
+        for id in ["project.addFolder", "layer.addDatabase"] {
+            assert!(search_platform_disabled(id, true).is_some(), "{id} must explain its web restriction");
+            assert_eq!(search_platform_disabled(id, false), None, "{id} stays available on desktop");
+        }
+        assert_eq!(search_platform_disabled("ui.addData", true), None, "browser file uploads remain available");
+    }
+
+    #[test]
     fn typed_scales_read_as_people_write_them() {
         for (text, want) in [
             ("1:12,345", 12_345.0),
@@ -1297,23 +1320,6 @@ mod tests {
             assert!(l.left_pad.is_finite() && (10.0..=120.0).contains(&l.left_pad), "{l:?}");
             assert!(l.height.is_finite() && (34.0..=80.0).contains(&l.height), "{l:?}");
         }
-    }
-
-    #[test]
-    fn connections_entry_opens_sources_without_ever_closing_it() {
-        let mut app = RustGisApp::with_sample();
-        app.run("ui.pane.sources", serde_json::Value::Null).unwrap();
-        app.run("ui.pane.sources", serde_json::Value::Null).unwrap();
-        assert_eq!(app.ui.left, None, "the View entry still toggles");
-        app.run("ui.openSources", serde_json::Value::Null).unwrap();
-        assert_eq!(app.ui.left, Some(crate::LeftPane::Sources), "opens from closed");
-        app.run("ui.openSources", serde_json::Value::Null).unwrap();
-        assert_eq!(app.ui.left, Some(crate::LeftPane::Sources), "idempotent when already open");
-        app.ui.left = Some(crate::LeftPane::Catalog);
-        app.run("ui.openSources", serde_json::Value::Null).unwrap();
-        assert_eq!(app.ui.left, Some(crate::LeftPane::Sources), "replaces another left pane");
-        app.run("ui.pane.sources", serde_json::Value::Null).unwrap();
-        assert_eq!(app.ui.left, None, "toggle closes it again");
     }
 
     #[test]

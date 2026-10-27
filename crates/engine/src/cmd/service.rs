@@ -188,7 +188,7 @@ fn capabilities(p: &Value) -> Result<Discovery, String> {
 
 #[cfg(target_arch = "wasm32")]
 fn fetch_capabilities(url: &str, _caps: &str) -> Result<Service, String> {
-    Err(format!("{url}: in the web app, use Home › Add Data › From Service"))
+    Err(format!("{url}: in the web app, use Home › Add › Add Data › From Service"))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -382,7 +382,19 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
                 Some(t) => template.replace("{Time}", t),
                 None => template.to_string(),
             };
-            let r = super::tiles::add(s, &json!({"url": template, "kind": "raster", "name": name, "overlay": true, "bounds": layer.bbox}))?;
+            // With its legends, as its service gives them (none: no key, as before).
+            let mut add = json!({"url": template, "kind": "raster", "name": name, "overlay": true, "bounds": layer.bbox});
+            // (Those the layer wouldn't keep, an address too long, are left out, not refused.)
+            let legends = rustgis_map::tiles::checked_legends(layer.legends.iter().cloned());
+            if !legends.is_empty() {
+                add["legend"] = json!(legends);
+            }
+            let r = super::tiles::add(s, &add)?;
+            // A WMS layer's GetFeatureInfo request, for identify.
+            let added = r["index"].as_u64().and_then(|i| usize::try_from(i).ok());
+            if let Some(t) = added.and_then(|i| s.map_mut().tiles.get_mut(i)) {
+                t.feature_info = layer.feature_info.clone();
+            }
             zoom(s);
             Ok(r)
         }
@@ -408,7 +420,7 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             #[cfg(target_arch = "wasm32")]
             {
                 let _ = get;
-                Err(format!("{url}: in the web app, Home › Add Data › From Service downloads the coverage"))
+                Err(format!("{url}: in the web app, Home › Add › Add Data › From Service downloads the coverage"))
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -423,17 +435,19 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             #[cfg(target_arch = "wasm32")]
             {
                 let _ = (items, asked);
-                Err(format!("{url}: in the web app, Home › Add Data › From Service downloads the features"))
+                Err(format!("{url}: in the web app, Home › Add › Add Data › From Service downloads the features"))
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
-                if p.get("bbox").is_some_and(|b| !b.is_null() && *b != "full") && asked.is_none() {
-                    let why = if area.is_none() { "an area across the antimeridian" } else { "the service can't be asked for an area" };
+                // An area asked for, whether or not the request could carry it: a slow whole layer
+                // then says so, and doesn't suggest the `bbox` already given.
+                let given = p.get("bbox").is_some_and(|b| !b.is_null() && *b != "full");
+                if given && asked.is_none() {
+                    let why = if area.is_none() { "an area across the antimeridian" } else { "its request can't carry an area" };
                     s.notify(format!("{name}: {why}, so the whole layer is asked for"), false);
                 }
                 let max = crate::render::rustgis_tiles::cache::MAX_DOWNLOAD;
-                let bytes = download_features(s, &name, asked.as_deref().unwrap_or(items), max)
-                    .map_err(|e| slow_whole_layer(e, asked.is_some()))?;
+                let bytes = download_features(s, &name, asked.as_deref().unwrap_or(items), max).map_err(|e| slow_whole_layer(e, given))?;
                 let bytes = features_answer(s, &name, bytes);
                 let mut r = super::raster::add_named_bytes(s, &json!({"name": name}), format!("{name}.geojson"), bytes)?;
                 // Over an area, the features crossing it: the view stays, or goes to a box given
@@ -464,10 +478,10 @@ fn features_area(s: &Session, p: &Value) -> Result<Option<[f64; 4]>, String> {
 }
 
 /// A whole layer too slow to download while a command waits: the error says an area can be asked
-/// for instead.
+/// for instead, unless one was (`area_given`).
 #[cfg(not(target_arch = "wasm32"))]
-fn slow_whole_layer(e: String, over_area: bool) -> String {
-    if !over_area && (e.contains("timeout") || e.contains("timed out")) {
+fn slow_whole_layer(e: String, area_given: bool) -> String {
+    if !area_given && (e.contains("timeout") || e.contains("timed out")) {
         format!("{e}; or ask for the features in an area only, with \"bbox\": [west, south, east, north] or \"view\"")
     } else {
         e
@@ -601,5 +615,18 @@ fn fetch_records(url: &str, request: &str) -> Result<rustgis_data::ogc::RecordPa
 
 #[cfg(target_arch = "wasm32")]
 fn fetch_records(url: &str, _: &str) -> Result<rustgis_data::ogc::RecordPage, String> {
-    Err(format!("{url}: in the web app, use Home › Add Data › From Service › Search Catalogue"))
+    Err(format!("{url}: in the web app, use Home › Add › Add Data › From Service › Search Catalogue"))
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    /// A whole layer past the wait is pointed to `bbox`, unless a `bbox` was given (one the request
+    /// couldn't carry, a WFS 1.0's or across the antimeridian); other errors are left as they are.
+    #[test]
+    fn a_slow_whole_layer_suggests_bbox_only_when_none_was_given() {
+        let slow = "https://x.org/wfs: timed out reading the answer".to_string();
+        assert!(super::slow_whole_layer(slow.clone(), false).ends_with("with \"bbox\": [west, south, east, north] or \"view\""));
+        assert_eq!(super::slow_whole_layer(slow.clone(), true), slow);
+        assert_eq!(super::slow_whole_layer("404 Not Found".into(), false), "404 Not Found");
+    }
 }

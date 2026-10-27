@@ -1,4 +1,4 @@
-//! Home › Web Data panels for single services, laid out after GeoLibre's: Fields of the World (a
+//! Home › Add › Web Data panels for single services, laid out after GeoLibre's: Fields of the World (a
 //! year and a score threshold), NASA Earthdata (GIBS layers by category, with a date), EnviroAtlas
 //! (its folders, services and their layers as a tree, with search), FEMA NFHL (the flood hazard
 //! layers, filtered) and The National Map (its services by category, with search). Each item is a

@@ -65,13 +65,13 @@ fn task_reentry_failure_rolls_back_outer_project_transaction() {
         ]),
     );
     let undo = s.undo_depth();
-    s.dirty = false;
+    s.mark_saved();
     let before = serde_json::to_value(&s.project).unwrap();
     assert!(s.run("task.run", &json!({"task":"Loop"})).unwrap_err().contains("already running"));
     assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
     assert_eq!(s.undo_depth(), undo);
     assert!(s.edit_counts.is_empty());
-    assert!(!s.dirty && !s.task_running);
+    assert!(!s.dirty() && !s.task_running);
 }
 
 /// Invalid parameters and imported/direct-step refusals leave the guard usable and trust intact.

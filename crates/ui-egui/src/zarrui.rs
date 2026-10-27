@@ -1,4 +1,4 @@
-//! Add Data › Zarr…: a store's variables, a slice picked by its other dimensions (a slider for
+//! Home › Add › Add Data › Zarr…: a store's variables, a slice picked by its other dimensions (a slider for
 //! time), added as a raster layer. A store by web address is read off the frame through the tile
 //! cache's downloads (a thread natively, fetch on the web), a few files at a time; a folder (the
 //! desktop) through the commands.

@@ -20,9 +20,11 @@
 //! --plugin` does), and `{"testPlugin": "panel"}` the plugin tests use, with a panel,
 //! `{"titlebar": {"left_inset": 80, "height": 34}}`
 //! draws the header as a macOS unified title bar (`null` turns it off), and
-//! `{"width": w, "height": h}` on the first line sets the size (default
-//! 1480×900 at 2×; `"dt": seconds` there sets each frame's length, default 0.25, and a
-//! short one such as 0.016 catches the map mid-motion). The window opens the World Atlas sample.
+//! `{"width": w, "height": h}` on the first line sets the size (default 1480×900),
+//! and `"pixelsPerPoint": scale` sets the output scale (default 2). The scale must be finite and
+//! positive, with physical dimensions from 1 pixel through the GPU's maximum 2D texture size.
+//! `"dt": seconds` sets each frame's length, default 0.25; a short one such as 0.016 catches the map mid-motion.
+//! The window opens the World Atlas sample.
 //! `"recovery": "/abs/dir"` on the first line gives the run that recovery folder, as the desktop
 //! app has one (Settings › Autosave; a copy left there is offered by the recovery dialog).
 //!
@@ -121,6 +123,19 @@ impl RibbonSplitShowcase {
     }
 }
 
+/// Matches the renderer's rounded physical target size and the active device's texture limit.
+fn screenshot_scale(size: egui::Vec2, value: f64, max_dimension: u32) -> Result<f32, String> {
+    let scale = value as f32;
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err("pixelsPerPoint must be finite, positive, and representable as f32".into());
+    }
+    let physical = size * scale;
+    if [physical.x, physical.y].into_iter().any(|v| !v.is_finite() || v.round() < 1.0 || v.round() > max_dimension as f32) {
+        return Err(format!("scaled width and height must each round to 1..={max_dimension} pixels"));
+    }
+    Ok(scale)
+}
+
 fn main() {
     let path = std::env::args().nth(1).expect("usage: ui_shot script.jsonl");
     let script = std::fs::read_to_string(&path).expect("read script");
@@ -128,6 +143,7 @@ fn main() {
         script.lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str(l).expect("json line")).collect();
     let w = lines.iter().find_map(|l| l.get("width").and_then(|v| v.as_f64())).unwrap_or(1480.0) as f32;
     let h = lines.iter().find_map(|l| l.get("height").and_then(|v| v.as_f64())).unwrap_or(900.0) as f32;
+    let pixels_per_point = lines.iter().find_map(|l| l.get("pixelsPerPoint").and_then(|v| v.as_f64())).unwrap_or(2.0);
     let dt = lines.iter().find_map(|l| l.get("dt").and_then(|v| v.as_f64())).unwrap_or(0.25) as f32;
     let ribbon_split = lines.first().and_then(|l| l.get("ribbonSplit")).and_then(Value::as_bool).unwrap_or(false);
     let mut split_showcase = RibbonSplitShowcase::default();
@@ -149,10 +165,17 @@ fn main() {
         ))
         .expect("render state")
     };
+    let pixels_per_point = match screenshot_scale(egui::vec2(w, h), pixels_per_point, rs.device.limits().max_texture_dimension_2d) {
+        Ok(scale) => scale,
+        Err(error) => {
+            eprintln!("invalid screenshot settings: {error}");
+            std::process::exit(2);
+        }
+    };
     app.set_render_state(Some(rs.clone()));
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(w, h))
-        .with_pixels_per_point(2.0)
+        .with_pixels_per_point(pixels_per_point)
         .with_max_steps(10_000)
         .with_step_dt(dt)
         .renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(rs))
@@ -390,5 +413,29 @@ fn main() {
                 harness.step();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::screenshot_scale;
+    use egui::vec2;
+
+    #[test]
+    fn screenshot_scale_rejects_invalid_values_and_target_sizes() {
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX, 1e-300, 1e-30, 8.01] {
+            assert!(screenshot_scale(vec2(1024.0, 512.0), scale, 8192).is_err(), "{scale}");
+        }
+        assert!(screenshot_scale(vec2(512.0, 1024.0), 8.01, 8192).is_err());
+    }
+
+    #[test]
+    fn screenshot_scale_accepts_default_and_rounded_renderer_boundaries() {
+        assert_eq!(screenshot_scale(vec2(1366.0, 768.0), 2.0, 8192), Ok(2.0));
+        assert_eq!(screenshot_scale(vec2(1024.0, 512.0), 8.0, 8192), Ok(8.0));
+        assert_eq!(screenshot_scale(vec2(1.0, 1.0), 0.5, 8192), Ok(0.5));
+        assert!(screenshot_scale(vec2(1.0, 1.0), 0.49, 8192).is_err());
+        assert_eq!(screenshot_scale(vec2(8192.25, 512.0), 1.0, 8192), Ok(1.0));
+        assert!(screenshot_scale(vec2(8192.5, 512.0), 1.0, 8192).is_err());
     }
 }

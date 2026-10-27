@@ -16,7 +16,7 @@ use crate::widgets::{
 };
 use crate::{RightPane, RustGisApp, icons};
 
-pub const TABS: [&str; 10] = ["Home", "Data", "Style", "Edit", "Analyze", "View", "Publish", "Plugins", "Settings", "Help"];
+pub const TABS: [&str; 11] = ["Home", "Data", "Style", "Labeling", "Edit", "Analyze", "View", "Publish", "Plugins", "Settings", "Help"];
 
 /// Tabs that always show: Settings holds Customize › Ribbon, the way to show hidden tabs again.
 pub const FIXED_TABS: [&str; 2] = ["Settings", "Help"];
@@ -27,7 +27,7 @@ pub fn current_tab(name: &str) -> &str {
     let tab = match name {
         "Map" => "Home",
         "Insert" | "Raster Data" => "Data",
-        "Feature Layer" | "Labeling" | "Raster Layer" => "Style",
+        "Feature Layer" | "Raster Layer" => "Style",
         "Analysis" | "Imagery" => "Analyze",
         "Share" | "Layout" => "Publish",
         _ => name,
@@ -104,6 +104,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
                         t if t.starts_with("plugin:") => plugin_tab(app, ui, t.trim_start_matches("plugin:")),
                         "Data" => data_tab(app, ui),
                         "Style" => style_tab(app, ui),
+                        "Labeling" => labeling_tab(app, ui),
                         "Edit" => edit_tab(app, ui),
                         "Analyze" => analyze_tab(app, ui),
                         "View" => view_tab(app, ui),
@@ -338,7 +339,7 @@ fn clipboard_group(app: &mut RustGisApp, ui: &mut Ui) {
 }
 
 fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
-    // New maps and layouts and the project's items first: where work starts (#328).
+    // New maps and layouts first: where work starts (#328).
     project_group(app, ui);
     group(ui, "Navigate", |ui| {
         tool_btn(
@@ -391,7 +392,16 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
         col(ui, |ui| {
             small(ui, app, "prev_extent", "Previous", "Go back to the previous extent.", "map.prevExtent", Value::Null, false);
             small(ui, app, "next_extent", "Next", "Go forward to the next extent.", "map.nextExtent", Value::Null, false);
-            small(ui, app, "goto_xy", "Go To XY", "Pan to a longitude/latitude.", "ui.dialog", json!({"name": "goToXY"}), false);
+            small(
+                ui,
+                app,
+                "zoom_box",
+                "Zoom Box",
+                "Drag a box to zoom into.",
+                "tool.set",
+                json!({"tool": "zoomIn"}),
+                app.session.tool == Tool::ZoomIn,
+            );
         });
         col(ui, |ui| {
             let fp = app.session.map().view.first_person;
@@ -421,16 +431,10 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
                     }
                 }
             });
-            small(
-                ui,
-                app,
-                "search",
-                "Find Place",
-                "Find a place or an address by name (OpenStreetMap).",
-                "ui.dialog",
-                json!({"name": "findPlace"}),
-                false,
-            );
+            small_menu(ui, app, "search", "Locate", "Find a place by coordinates, name, or address.", |ui, app| {
+                menu_item(ui, app, "goto_xy", "By Coordinates…", "ui.dialog", json!({"name": "goToXY"}));
+                menu_item(ui, app, "search", "By Place or Address…", "ui.dialog", json!({"name": "findPlace"}));
+            });
         });
         let on = app.ui.right == Some(crate::RightPane::Directions);
         big(
@@ -447,33 +451,66 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
     });
     group(ui, "Add", |ui| {
         big_form_menu(ui, app, "basemap", "Basemap", "Change the map's backdrop.", basemap_gallery);
-        big_menu(ui, app, "add_data", "Add\nData", "Add GeoJSON, CSV or Shapefile data to the map.", |ui, app| {
-            menu_item(ui, app, "", "Data…", "ui.addData", Value::Null);
-            menu_item(ui, app, "", "Delimited Text…", "ui.addDelimited", Value::Null);
-            menu_item(ui, app, "", "Geocode Addresses…", "ui.dialog", json!({"name": "geocode"}));
-            menu_item(ui, app, "", "From URL…", "ui.addUrl", Value::Null);
-            menu_item(ui, app, "", "From Service…", "ui.addService", Value::Null);
-            menu_item(ui, app, "", "Zarr…", "ui.dialog", json!({"name": "zarr"}));
-            // Databases are read through DuckDB, a program the browser can't run.
-            #[cfg(not(target_arch = "wasm32"))]
-            menu_item(ui, app, "", "Database…", "ui.dialog", json!({"name": "addDatabase"}));
-            menu_item(ui, app, "", "S3…", "ui.dialog", json!({"name": "s3"}));
-            // Saved connections live in the Data Sources pane, not here: one entry opens the pane
-            // (never closes it), and New Connection starts the form for a kind.
-            menu_item(ui, app, "", "Connections…", "ui.openSources", Value::Null);
-            submenu_row(ui, "", tl!("New Connection"), |ui| {
-                for (kind, label) in crate::connectionui::KINDS {
-                    // Database drivers aren't built for the browser.
-                    if cfg!(target_arch = "wasm32") && rustgis_engine::connections::DATABASE_KINDS.contains(&kind) {
-                        continue;
+        big_split_menu(
+            ui,
+            app,
+            "add_data",
+            "Add\nData",
+            "Add a data file to the map.",
+            "ui.addData",
+            Value::Null,
+            false,
+            "Add Data options",
+            "Add data from another source or use a data-adding option.",
+            true,
+            |ui, app| {
+                menu_item(ui, app, "", "Delimited Text…", "ui.addDelimited", Value::Null);
+                menu_item(ui, app, "", "Geocode Addresses…", "ui.dialog", json!({"name": "geocode"}));
+                menu_item(ui, app, "", "From URL…", "ui.addUrl", Value::Null);
+                menu_item(ui, app, "", "From Service…", "ui.addService", Value::Null);
+                menu_item(ui, app, "", "Zarr…", "ui.dialog", json!({"name": "zarr"}));
+                // Databases are read through DuckDB, a program the browser can't run.
+                #[cfg(not(target_arch = "wasm32"))]
+                menu_item(ui, app, "", "Database…", "ui.dialog", json!({"name": "addDatabase"}));
+                menu_item(ui, app, "", "S3…", "ui.dialog", json!({"name": "s3"}));
+                submenu_row(ui, "", tl!("New Connection"), |ui| {
+                    for (kind, label) in crate::connectionui::KINDS {
+                        // Database drivers aren't built for the browser.
+                        if cfg!(target_arch = "wasm32") && rustgis_engine::connections::DATABASE_KINDS.contains(&kind) {
+                            continue;
+                        }
+                        menu_item(ui, app, "", label, "ui.connection", json!({"kind": kind}));
                     }
-                    menu_item(ui, app, "", label, "ui.connection", json!({"kind": kind}));
+                });
+                menu_item(ui, app, "graphics_layer", "Graphics Layer", "graphics.newLayer", Value::Null);
+                #[cfg(not(target_arch = "wasm32"))]
+                menu_item(ui, app, "add_folder", "Add Folder…", "ui.addFolder", Value::Null);
+                // A file with several layers (a geodatabase, a GeoPackage) asks which to add.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let mut ask = app.ui.ask_layers;
+                    let resp = ui
+                        .checkbox(&mut ask, tl!("Ask Which Layers to Add"))
+                        .on_hover_text(tl!("When a file holds several layers, choose the ones to add instead of adding them all."));
+                    if resp.clicked() {
+                        let _ = app.run("ui.askLayers", json!({"on": ask}));
+                    }
                 }
-            });
-            menu_item(ui, app, "graphics_layer", "Graphics Layer", "graphics.newLayer", Value::Null);
-            ui.separator();
-            sample_data_gallery(ui, app);
-        });
+                ui.separator();
+                sample_data_gallery(ui, app);
+            },
+        );
+        big(
+            ui,
+            app,
+            "web_map",
+            "Data\nSources",
+            "Show or hide the Data Sources pane.",
+            "ui.pane.sources",
+            Value::Null,
+            app.ui.left == Some(crate::LeftPane::Sources),
+            false,
+        );
         big_menu(ui, app, "web_data", "Web\nData", "Add data from public web services and catalogs.", web_data_menu);
     });
     group(ui, "Selection", |ui| {
@@ -559,29 +596,16 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 }
             }
         });
-        col(ui, |ui| {
-            small(ui, app, "locate", "Locate", "Find a place by coordinates.", "ui.dialog", json!({"name": "goToXY"}), false);
-            small(
-                ui,
-                app,
-                "zoom_box",
-                "Zoom Box",
-                "Drag a box to zoom into.",
-                "tool.set",
-                json!({"tool": "zoomIn"}),
-                app.session.tool == Tool::ZoomIn,
-            );
-            small(
-                ui,
-                app,
-                "chart",
-                "Infographics",
-                "Counts, totals and top categories of what's in view.",
-                "ui.pane.infographics",
-                Value::Null,
-                app.ui.right == Some(RightPane::Infographics),
-            );
-        });
+        small(
+            ui,
+            app,
+            "chart",
+            "Infographics",
+            "Counts, totals and top categories of what's in view.",
+            "ui.pane.infographics",
+            Value::Null,
+            app.ui.right == Some(RightPane::Infographics),
+        );
     });
 }
 
@@ -948,20 +972,10 @@ fn feature_cache_group(app: &mut RustGisApp, ui: &mut Ui) {
     });
 }
 
-fn labeling_group(app: &mut RustGisApp, ui: &mut Ui) {
-    group(ui, "Labeling", |ui| {
-        let on = app.session.active_layer.and_then(|id| app.session.map().layer(id)).is_some_and(|l| l.labels.enabled);
-        big(
-            ui,
-            app,
-            if on { "label" } else { "label_off" },
-            "Label",
-            "Turn labels on or off for the selected layer.",
-            "labels.enable",
-            Value::Null,
-            on,
-            false,
-        );
+/// The label settings of the whole map (#897): they work without a layer, so the Labeling tab
+/// shows them whatever is selected.
+fn map_labeling_group(app: &mut RustGisApp, ui: &mut Ui) {
+    group(ui, "Map Labeling", |ui| {
         let d = app.session.map().label_display;
         col(ui, |ui| {
             small(
@@ -1060,8 +1074,6 @@ fn publication_label(id: &str) -> Option<&'static str> {
 fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Project", |ui| {
         big(ui, app, "new_map", "New\nMap", "Add a new map to the project.", "map.new", Value::Null, false, false);
-        big(ui, app, "toolbox", "Toolbox", "Browse the geoprocessing toolbox.", "ui.pane.geoprocessing", Value::Null, false, false);
-        big(ui, app, "open", "Import\nProject", "Open a RustGIS project.", "ui.open", Value::Null, false, false);
         big_menu(ui, app, "new_layout", "New\nLayout", "Add a page layout for printing and exporting the map.", |ui, app| {
             for (id, label, w, h) in rustgis_engine::map::layout::PAGES {
                 let text = format!("{} ({w:.0} × {h:.0} mm)", tl!(*label));
@@ -1099,27 +1111,6 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
                 ui.close();
             }
             menu_item(ui, app, "open", "Import Layout…", "ui.importLayout", Value::Null);
-        });
-        col(ui, |ui| {
-            small(ui, app, "catalog", "Browser", "Browse the project's maps, tables and folders.", "ui.pane.catalog", Value::Null, false);
-            small(ui, app, "add_data", "Add Data", "Add vector data.", "ui.addData", Value::Null, false);
-            small(ui, app, "add_folder", "Add Folder", "Connect a folder to the Browser.", "ui.addFolder", Value::Null, false);
-        });
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "open",
-                "Import",
-                "Add the maps of a map file, map package, project or project package.",
-                "ui.openItem",
-                json!({"kind": "map"}),
-                false,
-            );
-            small_menu(ui, app, "save_as", "Templates", "Project templates: start projects from a saved setup.", |ui, app| {
-                menu_item(ui, app, "save_as", "New Custom Template…", "ui.saveItem", json!({"kind": "template"}));
-                menu_item(ui, app, "open", "Open Custom Template…", "ui.openItem", json!({"kind": "template"}));
-            });
         });
     });
 }
@@ -1519,6 +1510,7 @@ const GALLERY: &[(&str, &str, &str)] = &[
     ("buffer", "buffer", "Buffer"),
     ("clip", "clip", "Clip"),
     ("erase", "erase", "Erase"),
+    ("intersect", "intersect", "Intersect"),
     ("dissolve", "dissolve", "Dissolve"),
     ("countPoints", "count", "Summarize\nWithin"),
     ("convexHull", "hull", "Bounding\nGeometry"),
@@ -2095,7 +2087,6 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
             app.session.table_layer.is_some(),
         );
     });
-    labeling_group(app, ui);
     group(ui, "Navigation", |ui| {
         big(ui, app, "zoom_world", "World", "Zoom to the whole world.", "map.zoomWorld", Value::Null, false, false);
         col(ui, |ui| {
@@ -2297,19 +2288,29 @@ fn data_source_group(app: &mut RustGisApp, ui: &mut Ui) {
 fn style_tab(app: &mut RustGisApp, ui: &mut Ui) {
     match active_layer(app) {
         Some(l) if l.is_raster() => raster_style_groups(app, ui),
-        Some(l) if l.geometry_type() != GeometryType::None => {
-            feature_style_groups(app, ui);
-            label_groups(app, ui);
-        }
-        _ => group(ui, "Layer", |ui| {
-            let t = Tokens::get(ui.ctx());
-            ui.add_sized(
-                vec2(220.0, CONTENT_H),
-                egui::Label::new(egui::RichText::new(tl!("Select a layer in Layers to style it.")).color(t.text_dim)).wrap(),
-            );
-        }),
+        Some(l) if l.geometry_type() != GeometryType::None => feature_style_groups(app, ui),
+        _ => layer_hint(ui, "Select a layer in Layers to style it."),
     }
     styles_group(app, ui);
+}
+
+/// The Labeling tab (#897): how the map is labelled. The selected feature layer's groups, in the
+/// order of the Labeling pane's tabs, then the settings of the whole map, which need no layer.
+fn labeling_tab(app: &mut RustGisApp, ui: &mut Ui) {
+    match active_layer(app) {
+        Some(l) if l.is_raster() => layer_hint(ui, "Labels are drawn for feature layers, not rasters."),
+        Some(l) if l.geometry_type() != GeometryType::None => label_groups(app, ui),
+        _ => layer_hint(ui, "Select a feature layer in Layers to label it."),
+    }
+    map_labeling_group(app, ui);
+}
+
+/// What a layer-dependent tab shows in place of its layer's groups: why there are none.
+fn layer_hint(ui: &mut Ui, text: &str) {
+    group(ui, "Layer", |ui| {
+        let t = Tokens::get(ui.ctx());
+        ui.add_sized(vec2(220.0, CONTENT_H), egui::Label::new(egui::RichText::new(tl!(text)).color(t.text_dim)).wrap());
+    });
 }
 
 /// The Analyze tab: geoprocessing, workflows, imagery and notebooks.
@@ -2334,6 +2335,7 @@ fn active_layer(app: &RustGisApp) -> Option<&rustgis_engine::map::Layer> {
     app.session.active_layer.and_then(|id| app.session.map().layer(id))
 }
 
+/// Keeps edit commands and transient vertex modes together, with deeper settings in Editing.
 fn edit_tab(app: &mut RustGisApp, ui: &mut Ui) {
     let editing = app.session.map().editing.clone();
     let pane = app.ui.right == Some(RightPane::Editing);
@@ -2428,6 +2430,18 @@ fn edit_tab(app: &mut RustGisApp, ui: &mut Ui) {
             pane,
             false,
         );
+        col(ui, |ui| {
+            small(
+                ui,
+                app,
+                "vertices",
+                "Shared Vertices",
+                "Move polygon vertices stored at the same coordinate in this layer, including point-only contacts.",
+                "ui.moveSharedVertices",
+                Value::Null,
+                app.map.move_shared_vertices,
+            );
+        });
     });
     group(ui, "Tools", |ui| {
         big_menu(ui, app, "tools", "Editor\nTools", "Every editing tool.", |ui, app| {
@@ -4301,69 +4315,6 @@ fn label_groups(app: &mut RustGisApp, ui: &mut Ui) {
             false,
         );
     });
-    group(ui, "Label Range", |ui| {
-        ui.vertical(|ui| {
-            ui.add_space(6.0);
-            for (label, cur, key) in [("Out Beyond", c.it.min_scale, "min"), ("In Beyond", c.it.max_scale, "max")] {
-                ui.horizontal(|ui| {
-                    let input_label = ui.label(egui::RichText::new(tl!(label)).size(11.5));
-                    egui::ComboBox::from_id_salt(format!("label_scale_{key}"))
-                        .selected_text(scale_label(cur))
-                        .width(118.0)
-                        .show_ui(ui, |ui| {
-                            let mut choices: Vec<Option<f64>> = vec![None];
-                            choices.extend(SCALES.iter().map(|s| Some(*s)));
-                            for s in choices {
-                                if ui.selectable_label(s == cur, scale_label(s)).clicked() {
-                                    let _ = app.run("labels.scaleRange", c.params(json!({key: s})));
-                                }
-                            }
-                        })
-                        .response
-                        .labelled_by(input_label.id);
-                });
-            }
-        });
-        col(ui, |ui| {
-            for (label, cur, key, desc) in [
-                ("Closest", c.it.closest, "closest", "Hide labels when the viewer is closer than this."),
-                ("Farthest", c.it.farthest, "farthest", "Hide labels when the viewer is farther than this."),
-            ] {
-                small_menu(ui, app, "eye", label, desc, |ui, app| {
-                    for d in [None, Some(1_000.0), Some(10_000.0), Some(100_000.0), Some(1_000_000.0), Some(10_000_000.0)] {
-                        let text = d
-                            .map(|d| crate::measure_units::distance(d, app.ui.measurement_imperial))
-                            .unwrap_or_else(|| tl!("<None>").to_string());
-                        if ui.radio(cur == d, text).clicked() {
-                            let _ = app.run("labels.distanceRange", c.params(json!({key: d})));
-                            ui.close();
-                        }
-                    }
-                });
-            }
-            small(
-                ui,
-                app,
-                "scale_label",
-                "Clear Limits",
-                "Draw labels at every scale and distance.",
-                "labels.scaleRange",
-                c.params(json!({"clear": true})),
-                false,
-            );
-        });
-    });
-    group(ui, "Label Placement", |ui| {
-        let cur = c.it.placement;
-        big_menu(ui, app, "placement", "Placement", "Where labels sit relative to their features.", |ui, app| {
-            for pl in rustgis_engine::map::LabelPlacement::ALL {
-                if ui.radio(cur == pl, tl!(pl.label())).clicked() {
-                    let _ = app.run("labels.placement", c.params(json!({"position": pl.code()})));
-                    ui.close();
-                }
-            }
-        });
-    });
     group(ui, "Label Class", |ui| {
         ui.vertical(|ui| {
             ui.add_space(6.0);
@@ -4414,6 +4365,69 @@ fn label_groups(app: &mut RustGisApp, ui: &mut Ui) {
                 "labels.style",
                 c.params(json!({"halo": !c.it.halo})),
                 c.it.halo,
+            );
+        });
+    });
+    group(ui, "Label Placement", |ui| {
+        let cur = c.it.placement;
+        big_menu(ui, app, "placement", "Placement", "Where labels sit relative to their features.", |ui, app| {
+            for pl in rustgis_engine::map::LabelPlacement::ALL {
+                if ui.radio(cur == pl, tl!(pl.label())).clicked() {
+                    let _ = app.run("labels.placement", c.params(json!({"position": pl.code()})));
+                    ui.close();
+                }
+            }
+        });
+    });
+    group(ui, "Label Range", |ui| {
+        ui.vertical(|ui| {
+            ui.add_space(6.0);
+            for (label, cur, key) in [("Out Beyond", c.it.min_scale, "min"), ("In Beyond", c.it.max_scale, "max")] {
+                ui.horizontal(|ui| {
+                    let input_label = ui.label(egui::RichText::new(tl!(label)).size(11.5));
+                    egui::ComboBox::from_id_salt(format!("label_scale_{key}"))
+                        .selected_text(scale_label(cur))
+                        .width(118.0)
+                        .show_ui(ui, |ui| {
+                            let mut choices: Vec<Option<f64>> = vec![None];
+                            choices.extend(SCALES.iter().map(|s| Some(*s)));
+                            for s in choices {
+                                if ui.selectable_label(s == cur, scale_label(s)).clicked() {
+                                    let _ = app.run("labels.scaleRange", c.params(json!({key: s})));
+                                }
+                            }
+                        })
+                        .response
+                        .labelled_by(input_label.id);
+                });
+            }
+        });
+        col(ui, |ui| {
+            for (label, cur, key, desc) in [
+                ("Closest", c.it.closest, "closest", "Hide labels when the viewer is closer than this."),
+                ("Farthest", c.it.farthest, "farthest", "Hide labels when the viewer is farther than this."),
+            ] {
+                small_menu(ui, app, "eye", label, desc, |ui, app| {
+                    for d in [None, Some(1_000.0), Some(10_000.0), Some(100_000.0), Some(1_000_000.0), Some(10_000_000.0)] {
+                        let text = d
+                            .map(|d| crate::measure_units::distance(d, app.ui.measurement_imperial))
+                            .unwrap_or_else(|| tl!("<None>").to_string());
+                        if ui.radio(cur == d, text).clicked() {
+                            let _ = app.run("labels.distanceRange", c.params(json!({key: d})));
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            small(
+                ui,
+                app,
+                "scale_label",
+                "Clear Limits",
+                "Draw labels at every scale and distance.",
+                "labels.scaleRange",
+                c.params(json!({"clear": true})),
+                false,
             );
         });
     });
@@ -4598,6 +4612,42 @@ mod tests {
         app
     }
 
+    /// One tab's groups on `app`, as the ribbon draws them.
+    fn tab_harness(app: RustGisApp, tab: fn(&mut RustGisApp, &mut Ui)) -> egui_kittest::Harness<'static, RustGisApp> {
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(2400.0, 300.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                ui.horizontal(|ui| tab(app, ui));
+            },
+            app,
+        );
+        h.run();
+        h
+    }
+
+    /// The Labeling tab holds every label group (#897): a feature layer's, then the map's, which
+    /// show with no layer too; Style and View have none left.
+    #[test]
+    fn the_labeling_tab_holds_the_label_groups() {
+        let has = |h: &egui_kittest::Harness<'static, RustGisApp>, label: &str| {
+            h.query_by_role_and_label(egui::accesskit::Role::Button, label).is_some()
+        };
+        let h = tab_harness(cities(), labeling_tab);
+        assert!(has(&h, "Closest") && has(&h, "View Unplaced"), "a feature layer's groups and the map's");
+        let mut app = cities();
+        app.session.active_layer = None;
+        let h = tab_harness(app, labeling_tab);
+        assert!(h.query_by_label("Select a feature layer in Layers to label it.").is_some());
+        assert!(!has(&h, "Closest") && has(&h, "View Unplaced"), "the map's settings need no layer");
+        assert!(!has(&tab_harness(cities(), style_tab), "Closest"), "Style keeps no label groups");
+        assert!(!has(&tab_harness(cities(), view_tab), "View Unplaced"), "View keeps no label groups");
+    }
+
     /// Isolates the label controls; the interrupted-gesture test below checks full-frame wiring.
     fn label_harness() -> egui_kittest::Harness<'static, RustGisApp> {
         label_harness_with(cities(), false)
@@ -4706,7 +4756,7 @@ mod tests {
         for hide_ribbon in [false, true] {
             let mut app = RustGisApp::with_sample();
             app.session.run("layer.select", &json!({"layer": "Cities"})).unwrap();
-            app.ui.tab = "Style".into();
+            app.ui.tab = "Labeling".into();
             let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 800.0)).with_max_steps(64).build_ui_state(
                 |ui, app: &mut RustGisApp| {
                     let ctx = ui.ctx().clone();
@@ -4716,16 +4766,12 @@ mod tests {
                 app,
             );
             h.run();
-            for _ in 0..2 {
-                h.get_by_label("Scroll the ribbon right").click();
-                h.run();
-            }
             h.state_mut().ws.recording = Some(Vec::new());
             let id = h.state().session.active_layer.unwrap();
             let size = |app: &RustGisApp| app.session.map().layer(id).unwrap().labels.default.size;
             let before = size(h.state());
             let undo = h.state().session.undo_depth();
-            // Text Symbol follows the Drawing group's numeric controls in the Style ribbon.
+            // Text Symbol's size is the Labeling tab's numeric control, drawn after any other.
             let at = h.query_all_by_role(egui::accesskit::Role::SpinButton).last().unwrap().rect().center();
             h.hover_at(at);
             h.drag_at(at);

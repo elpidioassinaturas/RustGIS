@@ -6,8 +6,13 @@
 
 use egui::{Color32, Ui, vec2};
 use rustgis_engine::map::layout::{FontFamily, MAX_LETTER_SPACING, MIN_LETTER_SPACING, TextAlign};
+use rustgis_engine::render::families;
 
 use crate::widgets::Dragged;
+
+/// The most installed families the Font list shows at once, as the Labeling pane's; the rest are
+/// found by typing part of a name.
+const MAX_FONTS_SHOWN: usize = 200;
 
 /// What the form edits. A style is left out where the text doesn't have it.
 pub struct Fields<'a> {
@@ -20,8 +25,13 @@ pub struct Fields<'a> {
     pub align: Option<&'a mut TextAlign>,
     /// Points between letters, from −5 (tighter) to 50.
     pub letter_spacing: Option<&'a mut f64>,
-    /// Sans-serif or serif: a layout text's (a text graphic is drawn in the map's sans).
+    /// Sans-serif or serif: a layout text's (a text graphic is drawn in the map's sans); with
+    /// `font_name`, the family drawn where that one isn't installed.
     pub font: Option<&'a mut FontFamily>,
+    /// An installed family by name (#762), a layout text's: listed after the generic ones when
+    /// `named_fonts`.
+    pub font_name: Option<&'a mut Option<String>>,
+    pub named_fonts: bool,
     /// The text is focused and selected whole, so typing replaces it (a text just placed).
     pub select: bool,
 }
@@ -161,15 +171,59 @@ pub fn show(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, tokens: &[&
             ui.end_row();
         }
         if let Some(fam) = f.font {
+            let mut no_name = None;
+            let name = f.font_name.unwrap_or(&mut no_name);
+            // The installed families (#762) once indexed, on a thread of their own; until then the
+            // two generic ones.
+            let installed = if f.named_fonts { families::installed_now() } else { None };
+            if f.named_fonts && installed.is_none() {
+                families::warm_up();
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            }
+            let missing = name.as_deref().is_some_and(|n| installed.is_some() && families::find_ready(n).is_none());
+            let shown = match name.as_deref() {
+                Some(n) if missing => crate::i18n::fmt("{name} (not installed)", &[("name", n)]),
+                Some(n) => n.to_string(),
+                None => tl!(fam.label()).to_string(),
+            };
             let input_label = ui.label(tl!("Font"));
+            let search_id = id.with("font_search");
             let list = egui::ComboBox::from_id_salt(id.with("font"))
-                .selected_text(tl!(fam.label()))
+                .selected_text(shown)
+                .height(320.0)
                 .show_ui(ui, |ui| {
+                    // Sans-serif and Serif first, then the installed families, found by typing.
+                    let search =
+                        if installed.is_some() { crate::labelpane::list_search(ui, search_id, tl!("Search fonts")) } else { String::new() };
                     for v in FontFamily::ALL {
-                        if ui.selectable_label(*fam == v, tl!(v.label())).clicked() && *fam != v {
-                            *fam = v;
+                        if ui.selectable_label(name.is_none() && *fam == v, tl!(v.label())).clicked() && (name.is_some() || *fam != v) {
+                            (*fam, *name) = (v, None);
                             out.font = true;
+                            crate::labelpane::end_search(ui, search_id);
                         }
+                    }
+                    let Some(installed) = installed else { return };
+                    ui.separator();
+                    // A family named as a generic one ("Serif") is the generic one: not listed again.
+                    let mut matching = installed.iter().filter(|f| {
+                        f.listed
+                            && FontFamily::from_name(&f.name).is_none()
+                            && (search.is_empty() || f.name.to_lowercase().contains(&search))
+                    });
+                    for v in matching.by_ref().take(MAX_FONTS_SHOWN) {
+                        let on = name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&v.name));
+                        if ui.selectable_label(on, &v.name).clicked() {
+                            if !on {
+                                // Its fallback, from its class, as `layout.update` gives it.
+                                (*fam, *name) = (if v.serif { FontFamily::Serif } else { FontFamily::Sans }, Some(v.name.clone()));
+                                out.font = true;
+                            }
+                            crate::labelpane::end_search(ui, search_id);
+                        }
+                    }
+                    let more = matching.count();
+                    if more > 0 {
+                        ui.weak(crate::i18n::fmt("{count} more: type part of a name", &[("count", &more.to_string())]));
                     }
                 })
                 .response
@@ -177,11 +231,43 @@ pub fn show(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, tokens: &[&
             // Named for assistive technology, as its label sits in the other column.
             list.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, tl!("Font")));
             ui.end_row();
-            // A serif asked for where none is installed is drawn in the sans: said here, so the
-            // page never differs from what was asked unsaid.
-            if *fam == FontFamily::Serif && !rustgis_engine::render::fonts::serif_available() {
+            // A named family is drawn in its fallback where it isn't installed (a project from
+            // another computer): which one, chosen here.
+            if name.is_some() {
+                let input_label = ui.label(tl!("Fallback"));
+                let list = egui::ComboBox::from_id_salt(id.with("fallback"))
+                    .selected_text(tl!(fam.label()))
+                    .show_ui(ui, |ui| {
+                        for v in FontFamily::ALL {
+                            if ui.selectable_label(*fam == v, tl!(v.label())).clicked() && *fam != v {
+                                *fam = v;
+                                out.font = true;
+                            }
+                        }
+                    })
+                    .response
+                    .labelled_by(input_label.id)
+                    .on_hover_text(tl!("Where the font isn't installed, the text is drawn in this family"));
+                list.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, tl!("Fallback")));
+                ui.end_row();
+            }
+            // A text not drawn as asked says so here, so the page never differs from what was
+            // asked unsaid: a family this computer hasn't, or a serif where none is installed.
+            let serif_drawn = *fam == FontFamily::Serif && rustgis_engine::render::fonts::serif_available();
+            let note = if missing {
+                Some(if serif_drawn {
+                    tl!("This font isn't installed here, so the text is drawn in the serif")
+                } else {
+                    tl!("This font isn't installed here, so the text is drawn in the sans-serif")
+                })
+            } else if name.is_none() && *fam == FontFamily::Serif && !serif_drawn {
+                Some(tl!("No serif font is installed, so this text is drawn in the sans-serif"))
+            } else {
+                None
+            };
+            if let Some(note) = note {
                 ui.label("");
-                ui.label(egui::RichText::new(tl!("No serif font is installed, so this text is drawn in the sans-serif")).weak().small());
+                ui.label(egui::RichText::new(note).weak().small());
                 ui.end_row();
             }
         }
@@ -227,6 +313,8 @@ mod tests {
                         align: f.styled.then_some(&mut f.align),
                         letter_spacing: f.styled.then_some(&mut spacing),
                         font: None,
+                        font_name: None,
+                        named_fonts: false,
                         select: false,
                     },
                 );

@@ -21,27 +21,27 @@ pub fn commands() -> Vec<C> {
         C::new("info.fileLayers", "List Layers in File", "Home › Add › Add Data", file_layers)
             .view()
             .params(r#"{"path": string}"#),
-        C::new("info.fileColumns", "List Columns in File", "Home › Add › Delimited Text", file_columns).view().params(
+        C::new("info.fileColumns", "List Columns in File", "Home › Add › Add Data › Delimited Text", file_columns).view().params(
             r#"{"path": "a delimited text file (CSV, TSV, TXT) or a spreadsheet", "delimiter"?: ","|";"|"\\t"|"|", "layer"?: "a spreadsheet's sheet (the first by default)"}"#,
         ),
         C::new("layer.addSql", "Add Data From SQL", "Home › Add", add_sql).params(
             r#"{"sql": "one DuckDB SELECT; DuckDB Spatial's ST_ functions, read_parquet('…'), web addresses", "name"?: string, "database"?: "a .duckdb file or a PostgreSQL connection (postgres:host=… dbname=…) whose tables the query names", "password"?: "the connection's, kept for this session only", "crs"?: "EPSG:… of a geometry that doesn't say", "stream"?: bool, "ran"?: "a result the app ran (the SQL pane)"}"#,
         ),
-        C::new("layer.addDatabase", "Add Data From Database", "Home › Add", add_database).params(
+        C::new("layer.addDatabase", "Add Data From Database", "Home › Add › Add Data", add_database).params(
             r#"{"database": "postgres:host=… dbname=… user=… (or a postgresql:// address; PostGIS tables are read live), a mysql://user@host:port/database address (MySQL or MariaDB, read live; mariadb:// too), an mssql://user@host:1433/database address (SQL Server or Azure SQL, read live; ?encrypt=strict|false, ?trust-server-certificate=true for a self-signed certificate, ?instance=NAME; on Windows DOMAIN\\user or no user signs in with Windows), or a .duckdb file", "password"?: "kept for this session only, never saved", "layer"?: "a table, as table or schema.table (table:column for one of several geometry columns; default: every table with a geometry column)", "crs"?: "EPSG:… of a geometry that doesn't say", "name"?: string, "stream"?: bool}"#,
         ),
-        C::new("info.databaseTables", "List Database Tables", "Home › Add › Add Data From Database", database_tables)
+        C::new("info.databaseTables", "List Database Tables", "Home › Add › Add Data › Database", database_tables)
             .view()
             .params(r#"{"database": "as layer.addDatabase", "password"?: string}"#),
         C::new("layer.defineProjection", "Define Projection", "Layers", define_projection)
             .when(need_feature_layer)
             .params(r#"{"layer"?: name|id, "crs": "EPSG:… or WKT; reinterpret native coordinates, without rewriting the source file"}"#),
         C::new("layer.loadAll", "Load All Features", "Layers", load_all).when(need_streamed).params(r#"{"layer"?: name|id}"#),
-        C::new("layer.addUrl", "Add Data From URL", "Home › Add", add_url).params(
+        C::new("layer.addUrl", "Add Data From URL", "Home › Add › Add Data", add_url).params(
             r#"{"url": "https://…/data.geojson|.csv|.parquet|.fgb|.gpkg|.zip|.kml|.kmz|.gpx|.tif|.jp2 (JPEG 2000: desktop, through GDAL) (the format from the address, else the contents) | a .pmtiles archive", "name"?: text, "layer"?: "one layer of a zip, KML or GPX", "zoom"?: "bool: true zooms to what was added; false keeps the view of a GeoParquet or FlatGeobuf read in place (zoomed to only when the map was empty)", "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "whole"?: "bool: download a cloud-optimised GeoTIFF whole (as a raster layer) instead of reading it in place", "start"?, "end"?, "unit"?, "interval"?, "dates"?: "a GeoTIFF address with date placeholders ({date:YYYY}, {YYYY}{MM}{DD}), one file per date: the dates it spans and steps through (as time.set), turning the time slider on"}"#,
         ),
         C::new("layer.addDownload", "Add Downloaded Data", "Home › Add", add_download)
-            .params(r#"{"id": a download the app finished (Add Data › From URL), "url": its address, "name"?: text, "layer"?: text, "zoom"?: bool, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "service"?: bool (a service's features: their axes and paging are checked), "coverage"?: bool (a WCS coverage: a GeoTIFF, else the service's error)}"#),
+            .params(r#"{"id": a download the app finished (Home › Add › Add Data › From URL), "url": its address, "name"?: text, "layer"?: text, "zoom"?: bool, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "service"?: bool (a service's features: their axes and paging are checked), "coverage"?: bool (a WCS coverage: a GeoTIFF, else the service's error)}"#),
         C::new("layer.addEncodedPolyline", "Add Encoded Polyline", "Home › Add", add_encoded_polyline).params(
             r#"{"polyline": "encoded polyline text" | [texts] (one line each), "precision"?: 5 (Google) | 6 (OSRM, Valhalla), "name"?: text}"#,
         ),
@@ -109,7 +109,7 @@ pub fn commands() -> Vec<C> {
         .when(need_layer),
         C::new("layer.symbology", "Symbology", "Style › Drawing", symbology)
             .when(need_feature_layer)
-            .params(r#"{"layer"?, "type": "single"|"unique"|"graduated"|"proportional", "field"?, "classes"?: 1..12, "method"?: "naturalBreaks"|"equalInterval"|"quantile"|"geometricInterval"|"standardDeviation"|"manual", "breaks"?: [numbers] (manual: the classes' upper bounds, closed by the field's largest value), "ramp"?: string}"#),
+            .params(r#"{"layer"?, "type": "single"|"unique"|"graduated"|"proportional", "field"?, "classes"?: 1..12, "method"?: "naturalBreaks"|"equalInterval"|"quantile"|"geometricInterval"|"standardDeviation"|"arithmeticProgression"|"headTailBreaks"|"manual", "breaks"?: [numbers] (manual: the classes' upper bounds, closed by the field's largest value), "ramp"?: string}"#),
         C::new("layer.ramp", "Color Scheme", "Style › Drawing", |s, p| {
             let r = s.ramp(s_req(p, "ramp")?)?;
             with(s, p, |l| match &mut l.raster {
@@ -308,13 +308,13 @@ pub fn commands() -> Vec<C> {
         }).params(r#"{"layer"?, "on"?: bool (toggles when omitted)}"#)
         .view()
         .when(need_layer),
-        C::new("labels.enable", "Label", "Style › Labels", |s, p| {
+        C::new("labels.enable", "Label", "Labeling › Labels", |s, p| {
             let on = b(p, "on");
             with(s, p, |l| l.labels.enabled = on.unwrap_or(!l.labels.enabled))
         })
         .when(need_feature_layer)
         .params(r#"{"layer"?, "on"?: bool}"#),
-        C::new("labels.field", "Label Field", "Style › Label Class", |s, p| {
+        C::new("labels.field", "Label Field", "Labeling › Label Class", |s, p| {
             let name = s_req(p, "field")?.to_string();
             let id = s.layer_id(p)?;
             let fname = s.map().layer(id).and_then(|l| l.dataset.field_index(&name).and_then(|i| l.dataset.fields.get(i)).map(|f| f.name.clone()));
@@ -326,14 +326,52 @@ pub fn commands() -> Vec<C> {
             })
         }).params(r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "field": name}"#)
         .when(need_feature_layer),
-        C::new("labels.style", "Text Symbol", "Style › Text Symbol", |s, p| {
+        C::new("labels.style", "Text Symbol", "Labeling › Text Symbol", |s, p| {
             let size = f(p, "size").map(|v| v.clamp(*LABEL_SIZE.start(), *LABEL_SIZE.end()) as f32);
             let color = s.get_color(p, "color")?;
             let (halo, bold, italic) = (b(p, "halo"), b(p, "bold"), b(p, "italic"));
             // A family by name, whether or not this machine has it: the project may be drawn on
             // one that does. Blank goes back to the label font.
             let font = ps(p, "font").map(rustgis_map::symbology::font_name);
+            // A halo's own colour ("" or null: one standing out from the text), its width in points
+            // (null: the thin halo), and the letter spacing.
+            let halo_color = match p.get("haloColor") {
+                None => None,
+                Some(Value::Null) => Some(None),
+                Some(Value::String(c)) if c.trim().is_empty() => Some(None),
+                Some(_) => Some(Some(s.get_color(p, "haloColor")?.ok_or("haloColor must be #RRGGBB or #RRGGBBAA")?)),
+            };
+            let hw = rustgis_map::symbology::HALO_WIDTH;
+            let sp = (rustgis_map::layout::MIN_LETTER_SPACING, rustgis_map::layout::MAX_LETTER_SPACING);
+            let halo_width = match p.get("haloWidth") {
+                None => None,
+                Some(Value::Null) => Some(None),
+                Some(_) => {
+                    let w = f(p, "haloWidth").ok_or("haloWidth must be a number of points, or null")?;
+                    Some(Some(w.clamp(*hw.start(), *hw.end()) as f32))
+                }
+            };
+            let spacing = match p.get("spacing") {
+                None => None,
+                Some(_) => Some(f(p, "spacing").ok_or("spacing must be a number of points")?.clamp(sp.0, sp.1) as f32),
+            };
+            let background = match p.get("background") {
+                None => None,
+                Some(v) => Some(super::labels::background_change(v)?),
+            };
             super::labels::with_class(s, p, |c| {
+                if let Some(change) = &background {
+                    c.background = change(c.background.clone());
+                }
+                if let Some(v) = halo_color {
+                    c.halo_color = v;
+                }
+                if let Some(v) = halo_width {
+                    c.halo_width = v;
+                }
+                if let Some(v) = spacing {
+                    c.spacing = v;
+                }
                 if let Some(name) = font.clone() {
                     c.font = name;
                 }
@@ -355,7 +393,7 @@ pub fn commands() -> Vec<C> {
             })
         })
         .when(need_feature_layer)
-        .params(r##"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "size"?: number, "color"?: "#RRGGBB"|"#RRGGBBAA", "halo"?: bool, "bold"?: bool, "italic"?: bool, "font"?: installed family name (labels.fonts lists them; "" is the label font)}"##),
+        .params(r##"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "size"?: number, "color"?: "#RRGGBB"|"#RRGGBBAA", "halo"?: bool, "haloColor"?: "#RRGGBB"|"#RRGGBBAA"|"" (""/null: white or dark, whichever stands out from the text), "haloWidth"?: points 0-10|null (null: the thin halo), "spacing"?: points between letters (-5 to 50), "bold"?: bool, "italic"?: bool, "font"?: installed family name (labels.fonts lists them; "" is the label font), "background"?: false|null (none) | true (white, a thin dark outline) | {"fill"?: "#RRGGBB"|"#RRGGBBAA"|"" ("": none), "stroke"?: colour|"" (the outline; "": none), "strokeWidth"?: points 0-10, "padding"?: [across, up and down] points 0-50, "radius"?: corner radius in points 0-50} (a rectangle behind the text; what isn't given is kept, or the default's)}"##),
         C::new("layer.definitionQuery", "Definition Query", "Data › Definition Query", |s, p| {
             let q = ps(p, "where").map(str::trim).unwrap_or("").to_string();
             let id = s.layer_id(p)?;
@@ -900,7 +938,7 @@ fn add_data(s: &mut Session, p: &Value) -> CmdResult {
     // So is an MBTiles archive, read in place a tile at a time.
     if rustgis_data::mbtiles::is_mbtiles_name(path) {
         if cfg!(target_arch = "wasm32") {
-            return Err(format!("{path}: in the web app, add the MBTiles file from this computer (Home › Add Data)"));
+            return Err(format!("{path}: in the web app, add the MBTiles file from this computer (Home › Add › Add Data)"));
         }
         let full = std::path::absolute(path).map(|p| p.display().to_string()).map_err(|e| format!("{path}: {e}"))?;
         // Read now, so a file that isn't an archive is said at once rather than when it draws.
@@ -1554,7 +1592,8 @@ pub fn database_param(p: &Value) -> Option<rustgis_data::source::duckdb::Databas
 pub fn sql_database_param(p: &Value) -> Result<Option<rustgis_data::source::duckdb::Database>, String> {
     match database_param(p) {
         Some(rustgis_data::source::duckdb::Database::Mysql(_) | rustgis_data::source::duckdb::Database::Sqlserver(_)) => {
-            Err("SQL queries don't run on MySQL, MariaDB or SQL Server databases: add their tables with Add Data › Database…".into())
+            Err("SQL queries don't run on MySQL, MariaDB or SQL Server databases: add their tables with Home › Add › Add Data › Database…"
+                .into())
         }
         db => Ok(db),
     }
@@ -2327,7 +2366,7 @@ pub fn url_file_name(url: &str, bytes: &[u8]) -> Result<String, String> {
 /// Downloads data from a web address and adds it (the command line, MCP and the assistant; the
 /// app downloads off the frame and adds the bytes). In the browser, where nothing may wait, the
 /// request is kept for the app ([`Session::request_url`]), which downloads and adds it as its own
-/// Add Data › From URL does, so a plugin, a script or the assistant can add data by address too.
+/// Home › Add › Add Data › From URL does, so a plugin, a script or the assistant can add data by address too.
 pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
     let url = ps(p, "url").map(str::trim).filter(|u| !u.is_empty()).ok_or("url is required")?;
     // An address read through a saved S3 connection is judged by the address it wraps; the whole

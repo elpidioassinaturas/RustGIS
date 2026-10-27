@@ -211,7 +211,7 @@ fn rerun(d: &DuckdbOrigin) -> rustgis_data::Result<std::path::PathBuf> {
         // own PostgreSQL credentials (PGPASSWORD, ~/.pgpass) to whatever host the file says.
         (Some(_), Some(duckdb::Database::Postgres(_))) => {
             return Err(rustgis_data::DataError::Format(
-                "the table's result is no longer in the cache: add it again (Add Data › Database…)".into(),
+                "the table's result is no longer in the cache: add it again (Home › Add › Add Data › Database…)".into(),
             ));
         }
         (Some(t), Some(db)) => duckdb::convert_table_of(&db, &duckdb::find_table_of(&db, t)?, d.crs.as_deref())?,
@@ -233,9 +233,9 @@ fn rerun(d: &DuckdbOrigin) -> rustgis_data::Result<std::path::PathBuf> {
 fn database_open_error(e: rustgis_data::DataError) -> rustgis_data::DataError {
     match e {
         rustgis_data::DataError::Login(message) => {
-            rustgis_data::DataError::Login(format!("{message} (connect again with Add Data › Database…, giving its password)"))
+            rustgis_data::DataError::Login(format!("{message} (connect again with Home › Add › Add Data › Database…, giving its password)"))
         }
-        e => rustgis_data::DataError::Format(format!("{e} (connect again with Add Data › Database…, giving its password)")),
+        e => rustgis_data::DataError::Format(format!("{e} (connect again with Home › Add › Add Data › Database…, giving its password)")),
     }
 }
 

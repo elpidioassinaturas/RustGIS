@@ -5,8 +5,8 @@ platforms people most often ask about: **QGIS**, **ArcGIS Pro** and **ArcGIS Onl
 
 RustGIS is not trying to replace any of these. It fills a narrower spot: a **free and
 open-source desktop GIS compiled to a single native program**, with a ribbon interface familiar
-from desktop GIS, every action available as a scriptable command, and the same app running in a
-browser tab through WebAssembly.
+from desktop GIS, almost every action available as a scriptable command, and the same app running
+in a browser tab through WebAssembly.
 
 !!! note "How to read this"
     Comparisons like this age quickly and are written by an interested party. The RustGIS
@@ -38,10 +38,11 @@ They differ in how they are built and who they suit:
   out in the order of the work, and an engine whose commands run the
   same way from the ribbon, `rustgis-cli`, Python, notebooks, models and the AI Assistant.
 
-If you want the widest data access and the most platforms, choose GeoLibre. If you want a
-compact native desktop GIS with a classic ribbon workflow and a scriptable command
-engine, choose RustGIS. Both work on local files on your machine; remote features, such as web
-data and AI providers, send requests over the network. See
+They complement each other rather than compete: GeoLibre is web and mobile first, RustGIS
+desktop first and built for automation and AI agents. If you want the widest data access and the
+most platforms, choose GeoLibre. If you want a compact native desktop GIS with a classic ribbon
+workflow and a scriptable command engine, choose RustGIS. Both work on local files on your
+machine; remote features, such as web data and AI providers, send requests over the network. See
 [RustGIS and GeoLibre](geolibre.md) for a closer look.
 
 ## At a glance
@@ -67,7 +68,7 @@ data and AI providers, send requests over the network. See
 | **Cloud-native data** | GeoParquet, FlatGeobuf, PMTiles and cloud-optimised GeoTIFF read in place, large files and web addresses alike (by address, over HTTP byte ranges: a COG reads only the tiles the view needs, a FlatGeobuf only its index and the features in view, a GeoParquet its footer and the row groups in view, desktop and web), Zarr 2 and 3 stores (the chunks of the step picked, desktop and web), from `s3://` buckets too (private ones signed with a connection's keys, S3-compatible services by endpoint) | GeoParquet, FlatGeobuf, PMTiles, COG, Zarr, streamed over HTTP | GeoParquet, FlatGeobuf, PMTiles, COG, Zarr | GeoParquet, COG, Zarr | Hosted layers |
 | **Web maps and tiles** | XYZ/TMS/WMS raster tiles, WMTS, OGC API Tiles, Mapbox Vector Tiles, MapLibre styles | XYZ, WMS/WFS/WMTS, OGC API, vector tiles, MapLibre styles | Full OGC support, vector tiles | Full OGC support | Yes |
 | **Coordinate systems** | Rasters in any EPSG code, reprojected on the fly; the map in presets or projected EPSG and ESRI codes | Reprojects on import, EPSG catalog | Full PROJ support | Full support | Web Mercator focus |
-| **Geocoding** | Find Place and address tables through Nominatim or Photon (OSM's public servers or your own) | Geocoding search and batch geocoding | Through plugins | ArcGIS World Geocoder (credits) | Yes |
+| **Geocoding** | Place/address search and address tables through Nominatim or Photon (OSM's public servers or your own) | Geocoding search and batch geocoding | Through plugins | ArcGIS World Geocoder (credits) | Yes |
 | **Open-data portals** | OpenStreetMap by area (Overpass), administrative boundaries (geoBoundaries), and datasets searched by text on data.gov and CKAN sites, Socrata and ArcGIS Hub | ArcGIS Hub, Socrata, CKAN, US portals, geoBoundaries, Overpass, Natural Earth | Through plugins (QuickOSM) | Living Atlas | Living Atlas |
 | **STAC, databases, Esri services** | STAC search (Earth Search, Planetary Computer or any STAC API, and `?stac=` links), footprints, assets and time-series cubes; Overture Maps, Source Cooperative and NASA Earthdata discovery; PostgreSQL/PostGIS, MySQL/MariaDB and SQL Server/Azure SQL read live (desktop), and DuckDB databases through DuckDB (desktop); WMS, WMTS, WFS, WCS, OGC API Features and Tiles, and ArcGIS REST services; CSW catalogue search; Planetary Computer assets signed; Data Sources with favourites, recent sources, grouped named connections and a public-service library | STAC browser, PostGIS, DuckDB, Iceberg, ArcGIS services, File Geodatabase (desktop) | STAC, PostGIS, SpatiaLite, Oracle, SQL Server, ArcGIS services | Enterprise geodatabases, Esri services | Hosted only |
 | **3D** | A 3D globe; tilted views draped over terrain from a DEM layer or elevation tiles; 2.5D extrusion with lighting and shadows; glTF scene export; LiDAR (LAS/LAZ/COPC) as point layers; geotagged photos as points with thumbnails | Cesium globe, 3D Tiles, I3S, LiDAR, Gaussian splats | Point clouds, 3D map view | **Deepest 3D**: scenes, I3S, mesh, LAS | Scene Viewer |
@@ -78,7 +79,7 @@ data and AI providers, send requests over the network. See
 |---|---|---|---|---|---|
 | **Geoprocessing tools** | Built-in tools plus the optional **1,000+** GeoLibre/Whitebox suite (the available list comes from the runner) | **1,000+** (GeoLibre and Whitebox) | **1,000+** (native, GDAL, GRASS, SAGA) | **Most mature and complete**, plus paid extensions | A useful subset, credit-metered |
 | **Where analysis runs** | Your machine; in the browser on WebAssembly | Your browser (WASM); optional Python sidecar on desktop | Your machine | Your machine, or a server | Vendor cloud |
-| **Vector analysis** | Geodesic buffer, clip, erase, dissolve, spatial join, summarize within, statistics, selection by location, A5 grids and aggregation; optional GeoLibre vector tools | Buffer, overlay, dissolve, joins, topology checks | Comprehensive | Comprehensive | Common tools |
+| **Vector analysis** | Geodesic buffer, clip, erase, intersect, dissolve, spatial join, summarize within, statistics, selection by location, A5 grids and aggregation; optional GeoLibre vector tools | Buffer, overlay, dissolve, joins, topology checks | Comprehensive | Comprehensive | Common tools |
 | **Raster analysis** | Raster functions, band math, indices, change detection, classification, viewshed, IDW and ordinary kriging; time-series summaries and trends; optional GeoLibre terrain and hydrology tools | Hillshade, slope, zonal stats, raster calculator, reclassify | Comprehensive (GDAL/GRASS/SAGA) | Comprehensive; Spatial Analyst | Limited |
 | **Query language** | SQL `WHERE` clauses for selection and definition queries; DuckDB Spatial queries over files, web addresses and databases in an SQL pane (desktop) | DuckDB Spatial, PGlite/PostGIS, Sedona, all in the browser | Virtual layers, PostGIS | SQL against geodatabases | — |
 | **Model / batch chaining** | ModelBuilder (a node canvas; models from history), tasks, scripts | Visual Model Builder, batch runner | Graphical Model Designer | ModelBuilder | — |
@@ -105,7 +106,7 @@ data and AI providers, send requests over the network. See
 | **Plugins** | Permission-controlled WebAssembly plugins on desktop, CLI and web; unsandboxed process/Python plugins on desktop and CLI; a registry, custom ribbon tabs and panels, assistant skills | TypeScript plugin API, a registry | **Largest**: thousands of Python plugins | .NET add-ins, Python toolboxes | App templates |
 | **AI assistant** | Acts through engine commands, with undo for project edits; Anthropic, OpenAI, Gemini, OpenRouter, Ollama or any OpenAI-compatible model; bring your own key or sign in with ChatGPT; also on the command line; MCP for external agents | Natural-language assistant with undoable operations; bring your own key | Via plugins | Copilot features | AI assistants |
 | **Collaboration** | — | Real-time (MVP), review comments | No | No | Shared hosted layers |
-| **Self-hosting** | Serve the static web build anywhere | Docker image or static build | QGIS Server | ArcGIS Enterprise (paid) | — |
+| **Self-hosting** | Dockerfile or static build of the web app | Docker image or static build | QGIS Server | ArcGIS Enterprise (paid) | — |
 
 ## Where each one is the right choice
 
@@ -142,8 +143,8 @@ Stated plainly, so the tables above are worth trusting:
 - **Coordinate systems.** Vector data is stored in longitude/latitude; there is no full PROJ.
 - **Editing depth.** Vertex move, insert and delete are supported, but not versioned or
   multi-user database editing. Edits are kept in the project and exported, not written back to databases.
-- **Specialized analysis.** Built-in spatial joins and shortest paths on line networks are
-  available, but full network datasets, overlay union/intersect tools and advanced spatial
+- **Specialized analysis.** Built-in spatial joins, intersect and shortest paths on line networks
+  are available, but full network datasets, overlay union and identity tools and advanced spatial
   statistics depend on the external suite or another GIS.
 - **Python.** The [`rustgis` package](../python.md) runs commands headlessly, but there is no
   Python console inside the app. Python process plugins are supported on desktop and CLI, without a sandbox.

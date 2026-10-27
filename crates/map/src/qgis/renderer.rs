@@ -228,6 +228,7 @@ fn graduated(r: Node, layer: &str, style: &mut Style, report: &mut Report, sym: 
         ramp: Ramp::default(),
         method: ClassMethod::default(),
         min,
+        classes: ranges.len(),
         class_labels,
         class_strokes,
     });

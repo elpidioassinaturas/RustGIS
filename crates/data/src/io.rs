@@ -662,13 +662,114 @@ pub fn read_geojson(text: &str, name: &str) -> Result<(Dataset, ReadReport)> {
     let mut features = Collector::default();
     match stream_features(text, &mut features) {
         Ok(rest) => match rest.get("type").and_then(Json::as_str) {
-            Some("FeatureCollection") => Ok(features.finish(name)),
+            Some("FeatureCollection") => Ok(features.finish(name, &rest)),
             Some(_) => read_geojson_value(Json::Object(rest), name),
             None => Err(DataError::Format("GeoJSON: missing \"type\"".into())),
         },
         // Not an object, or "features" not an array: read whole, as before.
         Err(_) => read_geojson_value(serde_json::from_str(text).map_err(|e| DataError::Format(format!("GeoJSON: {e}")))?, name),
     }
+}
+
+/// The longest `crs` name looked at; a longer one is reported, not parsed.
+const CRS_NAME_MAX: usize = 256;
+
+/// At most 80 characters of `s`, for a message.
+fn clip(s: &str) -> String {
+    let mut out: String = s.chars().take(80).collect();
+    if out.len() < s.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// The coordinate system a FeatureCollection declares with the legacy (GeoJSON 2008) `crs` member,
+/// `{"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::28992"}}`, with the transformer
+/// to longitude/latitude: `None` for longitude/latitude (no member, `null`, `EPSG:4326`, `CRS84`)
+/// and for a declaration that isn't understood, which is said in `messages`: coordinates are then
+/// read as longitude/latitude, but never without saying so.
+///
+/// Only named EPSG codes and CRS84 are honoured (not links, WKT or PROJ strings in the name, nor
+/// codes RustGIS doesn't know). The coordinates are x/y (easting/northing, longitude/latitude)
+/// whatever the axis order of the EPSG definition, as the legacy GeoJSON text says.
+pub(crate) fn declared_crs(root: &Map<String, Json>, messages: &mut Vec<String>) -> Option<(Crs, crate::raster::Transformer)> {
+    let decl = root.get("crs").filter(|v| !v.is_null())?;
+    match legacy_crs(decl) {
+        Ok(found) => found,
+        Err(why) => {
+            let shown = match decl.get("properties").and_then(|p| p.get("name")).and_then(Json::as_str) {
+                Some(name) => format!("\"{}\"", clip(name)),
+                None => match decl.get("type").and_then(Json::as_str) {
+                    Some(kind) => format!("of type \"{}\"", clip(kind)),
+                    None => "of an unknown shape".to_string(),
+                },
+            };
+            messages.push(format!("GeoJSON crs {shown}: {why}; coordinates are read as longitude/latitude"));
+            None
+        }
+    }
+}
+
+fn legacy_crs(decl: &Json) -> std::result::Result<Option<(Crs, crate::raster::Transformer)>, String> {
+    if decl.get("type").and_then(Json::as_str) != Some("name") {
+        return Err("only named coordinate systems are supported".into());
+    }
+    let name = decl.get("properties").and_then(|p| p.get("name")).and_then(Json::as_str).ok_or("it has no properties.name")?;
+    // Only the forms below, anchored (not any text holding "EPSG"), and no other text for
+    // `Crs::parse`, which also takes WKT and PROJ strings (and registers a system for them).
+    if name.len() > CRS_NAME_MAX || !is_epsg_or_crs84_name(name) {
+        return Err("only EPSG codes and CRS84 are supported".into());
+    }
+    let crs = Crs::parse(name)?;
+    if crs == Crs::LonLat {
+        return Ok(None);
+    }
+    let t = crs.transformer()?;
+    Ok(Some((crs, t)))
+}
+
+/// Whether a `crs` name is `EPSG:N`, `urn:ogc:def:crs:EPSG:<version, maybe empty>:N`,
+/// `http(s)://www.opengis.net/def/crs/EPSG/<version>/N`, or CRS84 as `CRS84`, `OGC:CRS84`,
+/// `urn:ogc:def:crs:OGC:<version, maybe empty>:CRS84` or
+/// `http(s)://www.opengis.net/def/crs/OGC/<version>/CRS84` (any case, whitespace around).
+fn is_epsg_or_crs84_name(name: &str) -> bool {
+    let up = name.trim().to_ascii_uppercase();
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let version = |s: &str| s.bytes().all(|b| b.is_ascii_digit() || b == b'.');
+    // `<version><sep><last>`: a version (maybe empty), then what's after the last separator.
+    let tail = |rest: &str, sep: char| {
+        rest.split_once(sep).filter(|(v, last)| version(v) && !last.contains(sep)).map(|(_, last)| last.to_string())
+    };
+    fn url(rest: &str) -> Option<&str> {
+        rest.strip_prefix("HTTP://").or_else(|| rest.strip_prefix("HTTPS://")).and_then(|r| r.strip_prefix("WWW.OPENGIS.NET/DEF/CRS/"))
+    }
+    if let Some(code) = up.strip_prefix("EPSG:") {
+        return digits(code);
+    }
+    if let Some(rest) = up.strip_prefix("URN:OGC:DEF:CRS:EPSG:") {
+        return tail(rest, ':').is_some_and(|c| digits(&c));
+    }
+    if let Some(rest) = up.strip_prefix("URN:OGC:DEF:CRS:OGC:") {
+        return tail(rest, ':').is_some_and(|c| c == "CRS84");
+    }
+    if let Some(rest) = url(&up).and_then(|r| r.strip_prefix("EPSG/")) {
+        return tail(rest, '/').is_some_and(|c| digits(&c));
+    }
+    if let Some(rest) = url(&up).and_then(|r| r.strip_prefix("OGC/")) {
+        return tail(rest, '/').is_some_and(|c| c == "CRS84");
+    }
+    // The shorthands: `CRS84`, `OGC:CRS84`, `OGC::CRS84`, `OGC:1.3:CRS84`.
+    up == "CRS84" || up == "OGC:CRS84" || up.strip_prefix("OGC:").and_then(|rest| tail(rest, ':')).is_some_and(|c| c == "CRS84")
+}
+
+/// A geometry in longitude/latitude from the coordinates `t` converts: `None` when a coordinate
+/// can't be converted or comes out beyond longitude/latitude (a declared system that doesn't match
+/// the coordinates).
+pub(crate) fn geometry_to_lonlat(g: &Geometry, t: &crate::raster::Transformer) -> Option<Geometry> {
+    let mut ok = true;
+    let out = g.map_coords(&|c| t.to_lonlat(c).unwrap_or(Coord::new(f64::NAN, f64::NAN)));
+    out.for_each_coord(|c: Coord| ok &= c.is_finite() && c.x.abs() <= 180.5 && c.y.abs() <= 90.5);
+    ok.then_some(out)
 }
 
 /// What takes a FeatureCollection's features as they're read.
@@ -842,41 +943,73 @@ impl Collector {
         }
     }
 
-    fn finish(self, name: &str) -> (Dataset, ReadReport) {
+    /// The dataset; `root` is the document's top level (for its `crs`, see [`declared_crs`]).
+    fn finish(self, name: &str, root: &Map<String, Json>) -> (Dataset, ReadReport) {
         let mut report = ReadReport { skipped: self.skipped, ..ReadReport::default() };
         let mut ds = Dataset::new(name, GeometryType::None, self.schema.fields());
         ds.features.reserve(self.features.len());
-        for (geom, values) in self.features {
+        if report.skipped > 0 {
+            report.messages.push(format!("{} features had unreadable geometry", report.skipped));
+        }
+        let declared = declared_crs(root, &mut report.messages);
+        let mut unconverted = 0usize;
+        for (n, (geom, values)) in self.features.into_iter().enumerate() {
+            // A feature that can't be converted is dropped, and its id is not reused, as when the
+            // file is read in place.
+            let geom = match (&declared, geom) {
+                (Some((_, t)), Some(g)) => match geometry_to_lonlat(&g, t) {
+                    Some(g) => Some(g),
+                    None => {
+                        unconverted += 1;
+                        continue;
+                    }
+                },
+                (_, g) => g,
+            };
             let mut attrs = vec![Value::Null; ds.fields.len()];
             for (i, v) in values {
                 if let (Some(slot), Some(field)) = (attrs.get_mut(i), ds.fields.get(i)) {
                     *slot = coerce(v, field.ty);
                 }
             }
-            ds.push_next(geom, attrs);
+            ds.features.push(crate::Feature { id: n as u64 + 1, geometry: geom, attrs });
         }
         ds.geometry_type = dominant_type(&ds);
-        if report.skipped > 0 {
-            report.messages.push(format!("{} features had unreadable geometry", report.skipped));
+        if let Some((crs, _)) = &declared {
+            ds.crs = Some(*crs);
+            if unconverted > 0 {
+                report.skipped += unconverted;
+                report.messages.push(format!(
+                    "{unconverted} features couldn't be converted from {} to longitude/latitude and were skipped",
+                    crs.label()
+                ));
+            }
+            // What couldn't be converted can't come back by defining the projection again.
+            ds.crs_incomplete = unconverted > 0;
         }
         (ds, report)
     }
 }
 
-/// Reads a GeoJSON document already parsed: a FeatureCollection, Feature or bare geometry.
+/// Reads a GeoJSON document already parsed: a FeatureCollection, Feature or bare geometry. Only a
+/// FeatureCollection's `crs` is read (a Feature's or a geometry's isn't part of the legacy text).
 fn read_geojson_value(root: Json, name: &str) -> Result<(Dataset, ReadReport)> {
     let mut features = Collector::default();
+    let mut top = Map::new();
     match root.get("type").and_then(Json::as_str) {
         Some("FeatureCollection") => {
             for f in root.get("features").and_then(Json::as_array).into_iter().flatten() {
                 features.add(f);
+            }
+            if let Some(crs) = root.get("crs") {
+                top.insert("crs".to_string(), crs.clone());
             }
         }
         Some("Feature") => features.add(&root),
         Some(_) => features.add(&json!({"type": "Feature", "geometry": &root, "properties": {}})),
         None => return Err(DataError::Format("GeoJSON: missing \"type\"".into())),
     }
-    Ok(features.finish(name))
+    Ok(features.finish(name, &top))
 }
 
 fn json_type(v: &Json) -> Option<FieldType> {
@@ -2368,6 +2501,22 @@ mod tests {
     fn hostile_geojson_is_an_error_not_a_panic() {
         for t in ["", "{", "[]", "{\"type\":5}", "{\"type\":\"FeatureCollection\",\"features\":7}"] {
             let _ = read_geojson(t, "x");
+        }
+        // A `crs` of any shape, anywhere in the document: read, never a panic.
+        let deep = "[".repeat(5000) + &"]".repeat(5000);
+        for crs in
+            ["null", "7", "-1e308", "\"\"", "[]", "{}", "{\"type\":\"name\"}", "{\"type\":\"name\",\"properties\":{\"name\":{}}}", &deep]
+        {
+            for t in [
+                format!(
+                    "{{\"crs\":{crs},\"type\":\"FeatureCollection\",\"features\":[{{\"type\":\"Feature\",\"geometry\":{{\"type\":\"Point\",\"coordinates\":[1,2]}}}}]}}"
+                ),
+                format!("{{\"type\":\"FeatureCollection\",\"features\":7,\"crs\":{crs}}}"),
+                format!("{{\"type\":\"Feature\",\"crs\":{crs},\"geometry\":null}}"),
+                format!("{{\"type\":\"Point\",\"coordinates\":[1,2],\"crs\":{crs}}}"),
+            ] {
+                let _ = read_geojson(&t, "x");
+            }
         }
     }
 

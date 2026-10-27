@@ -108,18 +108,19 @@ ribbon, arrows at its ends scroll it.
 
 | Tab | Groups |
 | --- | --- |
-| **Home** | Project (New Map, Toolbox, Import Project, New Layout, Browser, Add Data, Add Folder, Import, Templates), Navigate (Pan, Bookmarks, Full Extent, Zoom In/Out, Previous/Next, Go To XY, Planar/First-Person, Identify, Find Place, Directions), Add (Basemap, Add Data, [Web Data](web-data.md)), Selection (Select, Select By Attributes, Select By Location, Clear, Zoom To, Attributes), Inspect (Measure, Locate, Zoom Box, Infographics) |
+| **Home** | Project (New Map, New Layout), Navigate (Pan, Bookmarks, Full Extent, Zoom In/Out, Previous/Next, Zoom Box, Planar/First-Person, Identify, Locate [By Coordinates, By Place or Address], Directions), Add (Basemap, Add Data, Data Sources, [Web Data](web-data.md)), Selection (Select, Select By Attributes, Select By Location, Clear, Zoom To, Attributes), Inspect (Measure, Infographics) |
 | **Data** | Layer Templates, Data Source (Repair Source); for a feature layer: Definition Query, Table, Selection, Data Design, Archiving, Relationship and Export; for a raster layer: Information and Export; then Offline and Feature Cache |
-| **Style** | For the layer selected in Layers. A feature layer: Visibility Range, Effects, Drawing, Drawing Effects, Extrusion for polygons (with Faces and Light and Shadow once on), Layer, Labels, Label Range, Label Placement, Label Class and Text Symbol. A raster layer: Visibility Range, Effects, Compare, Raster Effects, Rendering, Enhancement and Layer. Both: Styles |
+| **Style** | For the layer selected in Layers. A feature layer: Visibility Range, Effects, Drawing, Drawing Effects, Extrusion for polygons (with Faces and Light and Shadow once on) and Layer. A raster layer: Visibility Range, Effects, Compare, Raster Effects, Rendering, Enhancement and Layer. Both: Styles |
+| **Labeling** | For the feature layer selected in Layers: Labels (Label, Properties), Label Class (Class, Field), Text Symbol (Size, Color, Bold, Halo), Label Placement and Label Range. Whatever is selected: Map Labeling (Lock, Pause, View Unplaced, Convert) |
 | **Edit** | Manage Edits (Edit, Save, Undo, Redo, Status, Settings, Templates, Topology), Snapping, Features (Create, Delete, Edit Vertices, Modify), Tools, Elevation, Corrections, Graphics, Graphics and Text, Clipboard |
 | **Analyze** | Geoprocessing (History, Tools, Model Builder, Script, SQL, Environments), Tasks (the Tasks pane; Task: Record Task, New Task From History, Import Task, run a task), AI (AI Assistant), Portal (Feature Analysis, Raster Analysis), Workflows, Raster (Raster Functions, Function Editor), Tools (the tool gallery), Selection, Notebook, the imagery groups (Ortho Mapping, Reality Mapping, Alignment, Image Analysis, Image Classification, Imagery Sharing, Mensuration, Imagery Tools) |
-| **View** | Display (Graticule, Dark Mode, GPU Rendering), View (Globe, Projection, Global; Local on the desktop), Effects, Scene, Windows, Labeling, Navigation, Link, Workspace, Animation, Time (Time Slider), Profile (Profile; Time Series on the desktop) |
+| **View** | Display (Graticule, Dark Mode, GPU Rendering), View (Globe, Projection, Global; Local on the desktop), Effects, Scene, Windows, Navigation, Link, Workspace, Animation, Time (Time Slider), Profile (Profile; Time Series on the desktop) |
 | **Publish** | While a layout is open, its groups first (Page, Map Frames, Map Surrounds, Shapes, Text, Export); then Report, Presentation, Output (Export Map, Export Features, Print Map, Capture To Clipboard, Report, Presentation, Export To 3D), Package, Share As, Layout, Save As, Thumbnail |
 | **Plugins** | Plugins (Plugin Manager, Install From File, Browse Plugins), plus a group for each enabled [plugin](../plugins.md) with commands or tools; a plugin with its own tab adds that tab instead |
 | **Settings** | Customize (Ribbon, Quick Access), Language (interface language and worldview), Start-up (Start With, Projection, Extent), Autosave on the desktop |
 | **Help** | Performance (Diagnostic Monitor), Learn (Learning Resources), Help (About, Check for Updates on the desktop, Command Search, Shortcuts) |
 
-The tabs stay the same whatever is selected: Style and Data act on the layer selected in Layers.
+The tabs stay the same whatever is selected: Style, Labeling and Data act on the layer selected in Layers.
 
 Menus with checkboxes stay open while you change options: stack or show web basemaps, combine
 Visual and Camera Effects, or customize Ribbon tabs and Quick Access buttons. Click outside

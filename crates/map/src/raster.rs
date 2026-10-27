@@ -1026,6 +1026,8 @@ impl RasterLayer {
     pub fn legend(&self) -> Vec<RasterLegend> {
         let Some(r) = &self.data else { return Vec::new() };
         let band_name = |b: usize| r.bands.get(b).map(|b| b.name.clone()).unwrap_or_default();
+        // A class's name in the file (GDAL's category names), or else its value.
+        let class_label = |b: usize, v: f64| r.bands.get(b).and_then(|b| b.class_name(v)).map_or_else(|| fmt_num(v), str::to_owned);
         // The first renderer band's statistics, without the masked pixels.
         let masked = self.masked_stats();
         let stats = |band: usize| masked.as_ref().and_then(|m| m.first()).or_else(|| r.bands.get(band).map(|b| &b.stats));
@@ -1060,17 +1062,17 @@ impl RasterLayer {
                     })
                     .collect()
             }
-            RasterRenderer::UniqueValues { values, .. } => values
+            RasterRenderer::UniqueValues { band, values, .. } => values
                 .iter()
                 .filter(|(v, _)| !mask.hides(*v as f32))
-                .map(|(v, c)| RasterLegend::Class { color: *c, label: fmt_num(*v) })
+                .map(|(v, c)| RasterLegend::Class { color: *c, label: class_label(*band, *v) })
                 .collect(),
             RasterRenderer::Colormap => {
                 let ColorHint::Palette(p) = &r.color else { return Vec::new() };
                 let cats = r.bands.first().and_then(|b| b.stats.categories.clone()).unwrap_or_default();
                 cats.iter()
                     .filter(|v| !mask.hides(**v as f32))
-                    .filter_map(|v| p.get(*v as usize).map(|c| RasterLegend::Class { color: Rgba(*c), label: fmt_num(*v) }))
+                    .filter_map(|v| p.get(*v as usize).map(|c| RasterLegend::Class { color: Rgba(*c), label: class_label(0, *v) }))
                     .collect()
             }
         }
@@ -1082,6 +1084,34 @@ mod tests {
     use rustgis_data::raster::{Crs, GeoTransform};
 
     use super::*;
+
+    /// The legend names a class as the file does (#889), and gives the value of one it doesn't.
+    #[test]
+    fn legend_labels_classes_with_their_names() {
+        let gt = GeoTransform { origin_x: 10.0, origin_y: 50.0, pixel_width: 0.5, pixel_height: -0.5 };
+        let mut palette = vec![[0, 0, 0, 0]; 256];
+        palette[1..4].copy_from_slice(&[[239, 235, 221, 255], [255, 231, 160, 255], [253, 190, 110, 255]]);
+        let mut r =
+            Raster::new("slope", 3, 1, vec![vec![1.0, 2.0, 3.0]], gt, Crs::LonLat, None, ColorHint::Palette(palette), "UInt8").unwrap();
+        r.bands[0].classes = vec!["no data".into(), "0-5 %".into(), String::new(), "15-30 %".into()];
+        let labels = |rl: &RasterLayer| -> Vec<String> {
+            rl.legend()
+                .into_iter()
+                .map(|e| match e {
+                    RasterLegend::Class { label, .. } => label,
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        let mut rl = RasterLayer::from_path(r.clone(), "slope.tif");
+        rl.style.renderer = RasterRenderer::Colormap;
+        assert_eq!(labels(&rl), ["0-5 %", "2", "15-30 %"]);
+        rl.style.renderer = unique_values(&r, 0, Ramp::Harbour);
+        assert_eq!(labels(&rl), ["0-5 %", "2", "15-30 %"]);
+        r.bands[0].classes.clear();
+        rl.data = Some(Arc::new(r));
+        assert_eq!(labels(&rl), ["1", "2", "3"], "no names: the values, as before");
+    }
 
     /// A following layer's dates are its steps from `offset` on, one each: repair keeps them as
     /// they are when they are in order, and follows none rather than the wrong step otherwise.

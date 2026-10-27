@@ -9,7 +9,7 @@ description: Style a layer by its data (graduated colours, categories, proportio
    field suits graduated or proportional symbols; text or a few distinct values suit unique values.
 2. Style it with `run_command` `layer.symbology`:
    - Numbers: `{"layer": L, "type": "graduated", "field": F, "classes": 5, "method": "naturalBreaks"}` (or
-     `quantile`, `equalInterval`, `geometricInterval`, `standardDeviation`, or `"breaks": [upper bounds]` for classes set by hand), with an optional `"ramp"`.
+     `quantile`, `equalInterval`, `geometricInterval`, `standardDeviation`, `arithmeticProgression`, `headTailBreaks` (a few very large values among many small ones), or `"breaks": [upper bounds]` for classes set by hand), with an optional `"ramp"`.
      For counts or sizes, `"type": "proportional"` usually reads better than colour.
    - Categories: `{"layer": L, "type": "unique", "field": F}`. More than about 12 categories is hard to read, so
      suggest grouping first.

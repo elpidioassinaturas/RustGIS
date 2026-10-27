@@ -45,18 +45,16 @@ sample again. **Settings › Start-up › Start With** chooses what opens next t
 
 ## Your own data
 
-**Home › Add Data › Data…** (or drop files on the window) opens GeoJSON, GeoPackage,
-GeoParquet, FlatGeobuf, KML/KMZ, GPX, GeoTIFF, ASCII grids and more. Shapefiles work in the
-browser too: pick or drop the `.shp` and `.dbf` together, with `.shx` and `.prj` if available,
-or use a ZIP containing them. Use **Add Data › Delimited Text…** to choose a CSV's coordinate
-columns or WKT geometry and coordinate system.
+**Home › Add › Add Data** opens data files directly; its arrow offers other ways to add data,
+including delimited text, URLs and services. Shapefiles work in the browser too: pick or drop
+the `.shp` and `.dbf` together, with `.shx` and `.prj` if available, or use a ZIP containing
+them. **Home › Add › Data Sources** opens saved data connections and recent sources.
 
-**Project › New › Map** starts a blank project. **Home › Web Data** finds public satellite
-imagery, Overture Maps, OpenStreetMap, NASA Earthdata, open-data portals and more
-(see [Web Data](user-guide/web-data.md)). **Home › Add Data › Connections…** opens saved data
-connections; desktop database connections include PostGIS, MySQL/MariaDB and SQL Server/Azure SQL.
-See [Data](user-guide/data.md) and [Supported Data Formats](user-guide/data-formats.md) for
-format and platform limits.
+**Project › New › Map** starts a blank project. **Home › Add › Web Data** finds public satellite imagery,
+Overture Maps, OpenStreetMap, NASA Earthdata, open-data portals and more
+(see [Web Data](user-guide/web-data.md)). Desktop database connections include PostGIS,
+MySQL/MariaDB and SQL Server/Azure SQL. See [Data](user-guide/data.md) and
+[Supported Data Formats](user-guide/data-formats.md) for format and platform limits.
 
 ## Ask the AI Assistant
 

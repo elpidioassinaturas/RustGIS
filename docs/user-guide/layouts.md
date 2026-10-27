@@ -116,6 +116,21 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   `layout.addElement={"kind":"grid","step":0.5,"style":"ticks","format":"dms","edges":["top","bottom","left","right"],"labelOrientation":"vertical"}`
   (given again, it changes only the options it names), or `layout.update` with
   `"grid": {…}` (`false` removes the grid).
+- **Measured grids**: a grid's **Type** is a **Graticule** (latitudes and longitudes, as above)
+  or a **Measured grid**, as ArcGIS Pro has them: eastings and northings in a projected coordinate
+  system, for maps read with UTM or national grid coordinates (a hiking map at 1:25,000 with a
+  line every kilometre). Its **Coordinate system** is the one typed (`EPSG:25832`, WKT or a PROJ
+  string); left empty, the map's own when the map is in a projected system, else the UTM zone
+  (WGS 84) at the frame's centre. Its **Interval** is in that system's units, metres for UTM
+  (**Auto** picks 1, 2 or 5 times a power of ten that suits the frame; one too fine for the frame
+  is widened to about 50 lines). Its lines are drawn through the coordinate system onto the map,
+  so on a map in another projection they lean or bend as they do there; eastings are labelled
+  along the top and bottom and northings along the sides, whole (`543000`) or, with **Short
+  labels**, as topographic maps print them, the kilometres' last two digits (`43`). Style, ticks,
+  colour, width, edges and side label orientation are as for a graticule. A system that isn't
+  projected (a latitude/longitude one) is refused: that is a graticule's job. From a command:
+  `layout.update={"element":1,"grid":{"type":"measured","crs":"EPSG:25832","step":1000,"short":true}}`;
+  a change of type without a step picks one, as degrees and metres don't carry over.
 - **Map surrounds**: north arrow, scale bar, legend, colorbar, table frame (a layer's attribute table) and
   chart frame (a bar chart of a numeric field), plus a neatline or backdrop. A north arrow's
   properties pick its **Style** (classic arrow, compass rose, triangle or star) and its **Fill**
@@ -179,8 +194,20 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   italic slanted, bold as the regular); RustGIS bundles no font. The project saves only the family,
   so it opens anywhere. Where no serif is installed (the web app, a minimal Linux), the text is
   drawn in the sans-serif and the pane says so, as `layout.addElement` and `layout.update` do in a
-  `warning`. Scripts set it with `"font": "serif"` or `"font": "sans"`. **Picture** places a PNG or
-  JPEG.
+  `warning`. Scripts set it with `"font": "serif"` or `"font": "sans"`.
+
+  The Font list also has **every font family installed on the computer**, after Sans-serif and
+  Serif, so a figure can match the typeface a journal or a series names (Times New Roman, Arial,
+  Garamond, a condensed face for long names). Type part of a name to find one. Its bold and italic
+  come from the family's own faces, as for the serif, and characters it lacks from the sans. A
+  named family keeps a **Fallback**, Sans-serif or Serif, for a computer that doesn't have it (a
+  project opened elsewhere, the web app): there the text is drawn in the fallback, and the pane
+  and the commands say so. A family that is installed but whose file can't be read (too large,
+  damaged) is drawn in the fallback too, and the command that names it says so. The fallback
+  starts as the family's own class (a serif's is Serif).
+  Scripts give the family's name: `"font": "Garamond"`, with `"fallback": "serif"` if wanted;
+  `labels.fonts` lists the installed families. The project keeps the name, never a file, and no
+  font goes into a PNG or PDF export (their pages are pictures). **Picture** places a PNG or JPEG.
 - **Map Series**: one page per feature of an index layer, with the frame zoomed to each feature;
   step through pages, refresh, and export every page into one PDF.
 - Click an element to select it, drag to move, drag its handles to resize, and edit it in the
@@ -190,6 +217,11 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   Mac) deletes the selected element, and **Ctrl+D** (**⌘D** on a Mac) duplicates it: the copy is
   placed 5 mm down and to the right, on top, and selected. The **arrow keys** nudge it 1 mm, or
   10 mm with **Shift**, and keep it moving while held; a run of nudges is one step to undo.
+- **Arrange**: elements later in the layout are drawn over earlier ones, and a click picks the one
+  on top. Under Duplicate and Delete, **Bring to Front** and **Send to Back** put the selected
+  element over or under every other, and **Bring Forward** and **Send Backward** move it one
+  place, to put a legend over a map frame, say. A locked element keeps its place. From a command:
+  `layout.arrange={"element":4,"to":"front"}` (`front`, `forward`, `backward` or `back`).
 - **Locked**, at the top of the Format pane, keeps a finished element from being changed by
   mistake: it can still be selected (a lock marks its corner, and it has no handles), but not
   moved, resized, deleted or edited, and a locked map frame's map isn't panned or zoomed. A map
@@ -207,7 +239,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   In SVG each element is a group (an Inkscape layer) named after it: text stays text and rectangles,
   ellipses and lines stay shapes, while map frames and the other surrounds are pictures at the export
   resolution, so the page can be finished in a vector editor. SVG text uses the viewer's
-  serif or sans-serif font, so its alignment and line widths can differ from PNG/PDF and can
+  font (a named family where the viewer has it, else its serif or sans-serif), so its alignment
+  and line widths can differ from PNG/PDF and can
   change when edited. Embedded pictures are clipped to their element boxes;
   `layout.export` accepts `dpi` and `"allPages": false` for just the current PDF
   page. **Print** opens the PDF in the system viewer on desktop; **Save Layout File** and

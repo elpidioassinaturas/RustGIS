@@ -204,10 +204,10 @@ fn fetch_post(url: &str, body: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(target_arch = "wasm32")]
 fn fetch(_url: &str) -> Result<Vec<u8>, String> {
-    Err("in the web app, use Home › Web Data › United States › USGS NLDI".into())
+    Err("in the web app, use Home › Add › Web Data › United States › USGS NLDI".into())
 }
 
 #[cfg(target_arch = "wasm32")]
 fn fetch_post(_url: &str, _body: &str) -> Result<Vec<u8>, String> {
-    Err("in the web app, use Home › Web Data › United States › USGS NLDI".into())
+    Err("in the web app, use Home › Add › Web Data › United States › USGS NLDI".into())
 }

@@ -34,6 +34,8 @@ pub struct Dialogs {
     pub listed: Option<String>,
     /// Add Delimited Text's file, picked before the dialog opens.
     pub csv: Option<CsvFile>,
+    /// Reset collapsed then closed dialogs when reopening
+    pub reset_collapse: bool,
 }
 
 /// A file picked for Add Delimited Text.
@@ -99,7 +101,7 @@ impl Dialogs {
         if name == "selectByAttributes" && s.map().layers.is_empty() {
             return Err("the map has no layers".into());
         }
-        *self = Dialogs { open: Some(name), mode: "new", ..Dialogs::default() };
+        *self = Dialogs { open: Some(name), mode: "new", reset_collapse: true, ..Dialogs::default() };
         self.layer = active.or_else(|| s.map().layers.first()).map(|l| l.name.clone()).unwrap_or_default();
         match name {
             "defineProjection" => {
@@ -161,7 +163,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
     }
     let title = match which {
         "selectByAttributes" => "Select By Attributes",
-        "goToXY" => "Go To XY",
+        "goToXY" => "By Coordinates",
         "bookmark" => "New Bookmark",
         "addField" => "Add Field",
         "calculateField" => "Calculate Field",
@@ -177,7 +179,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "layerTemplate" => "Layer Template",
         "addPolyline" => "Add Encoded Polyline",
         "addCsv" => "Add Delimited Text",
-        "findPlace" => "Find Place",
+        "findPlace" => "By Place or Address",
         "geocode" => "Geocode Addresses",
         "addUrl" => "Add Data From URL",
         "addService" => "Add From Service",
@@ -196,14 +198,29 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "renameGroup" => "Rename Group",
         _ => "Rename Layer",
     };
+
+    // list of dialogs which should allow collapse feature
+    let collapsible_windows = ["addService"];
+    let should_be_collapsible = collapsible_windows.contains(&which);
+
     let t = Tokens::get(ctx);
     let mut open = true;
     let mut close = false;
+
+    let window_id = egui::Id::unique(("dialog", which));
+
+    if app.dialogs.reset_collapse {
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ctx, window_id.with("collapsing"), true);
+        state.set_open(true);
+        state.store(ctx);
+        app.dialogs.reset_collapse = false;
+    }
+
     // Opens centred and can be moved; each dialog remembers where it was put.
     egui::Window::new(tl!(title))
-        .id(egui::Id::unique(("dialog", which)))
+        .id(window_id)
         .open(&mut open)
-        .collapsible(false)
+        .collapsible(should_be_collapsible)
         .resizable(false)
         .pivot(Align2::CENTER_CENTER)
         .default_pos(ctx.content_rect().center() + vec2(0.0, -40.0))
@@ -858,32 +875,47 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                     egui::RichText::new(crate::i18n::fmt("The first {n} are listed.", &[("n", &SHOWN_LAYERS.to_string())])).small().weak(),
                 );
             }
-            egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
-                for l in matching.into_iter().take(SHOWN_LAYERS) {
-                    ui.horizontal(|ui| {
-                        let kind = l.get("offer").and_then(|o| o.get("type")).and_then(Value::as_str);
-                        if kind == Some("service") {
-                            if ui.small_button(tl!("Open")).clicked() {
-                                open = l.get("offer").and_then(|o| o.get("url")).and_then(Value::as_str).map(str::to_string);
-                            }
-                        } else if !(grouped && kind == Some("features")) && ui.small_button(tl!("Add")).clicked() {
-                            add = Some(l.clone());
+            let ui_width = ui.available_width();
+            egui::Resize::default()
+                .id_salt("add_service_layers")
+                .default_height(280.0)
+                .min_height(100.0)
+                .max_height(350.0)
+                .resizable(true)
+                .max_width(ui_width)
+                .min_width(ui_width)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for l in matching.into_iter().take(SHOWN_LAYERS) {
+                            ui.horizontal(|ui| {
+                                let kind = l.get("offer").and_then(|o| o.get("type")).and_then(Value::as_str);
+
+                                if kind == Some("service") {
+                                    if ui.small_button(tl!("Open")).clicked() {
+                                        open = l.get("offer").and_then(|o| o.get("url")).and_then(Value::as_str).map(str::to_string);
+                                    }
+                                } else if !(grouped && kind == Some("features")) && ui.small_button(tl!("Add")).clicked() {
+                                    add = Some(l.clone());
+                                }
+
+                                let name = l.get("name").and_then(Value::as_str).unwrap_or("");
+                                ui.label(l.get("title").and_then(Value::as_str).unwrap_or(name)).on_hover_text(name);
+
+                                let what = match kind {
+                                    Some("features") => tl!("features"),
+                                    Some("style") => tl!("style"),
+                                    Some("coverage") => tl!("coverage"),
+                                    Some("service") if name.ends_with('/') => tl!("folder"),
+                                    Some("service") => tl!("service"),
+                                    _ if l.get("time").is_some() => tl!("map by date"),
+                                    _ => tl!("map"),
+                                };
+
+                                ui.label(egui::RichText::new(what).small().weak());
+                            });
                         }
-                        let name = l.get("name").and_then(Value::as_str).unwrap_or("");
-                        ui.label(l.get("title").and_then(Value::as_str).unwrap_or(name)).on_hover_text(name);
-                        let what = match kind {
-                            Some("features") => tl!("features"),
-                            Some("style") => tl!("style"),
-                            Some("coverage") => tl!("coverage"),
-                            Some("service") if name.ends_with('/') => tl!("folder"),
-                            Some("service") => tl!("service"),
-                            _ if l.get("time").is_some() => tl!("map by date"),
-                            _ => tl!("map"),
-                        };
-                        ui.label(egui::RichText::new(what).small().weak());
                     });
-                }
-            });
+                });
         }
         if let Some(pending) = &conn.pending {
             ui.horizontal(|ui| {
@@ -1299,7 +1331,9 @@ fn select_by_attributes(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) -> 
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// Asks for a file to open with the system's dialog, offering `exts` under `label` (and all
+/// files); `None` when cancelled.
+#[cfg(all(not(target_arch = "wasm32"), not(test)))]
 pub fn pick_open(exts: &[&str], label: &str) -> Option<String> {
     let dialog = rfd::FileDialog::new();
     let dialog = if exts.is_empty() { dialog } else { dialog.add_filter(label, exts) };
@@ -1311,9 +1345,29 @@ pub fn pick_folder() -> Option<String> {
     rfd::FileDialog::new().pick_folder().map(|p| p.display().to_string())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// Asks where to save, suggesting file `name`, with the system's dialog; `None` when cancelled.
+#[cfg(all(not(target_arch = "wasm32"), not(test)))]
 pub fn pick_save(name: &str, exts: &[&str], label: &str) -> Option<String> {
     rfd::FileDialog::new().set_file_name(name).add_filter(label, exts).save_file().map(|p| p.display().to_string())
+}
+
+// Unit tests can't answer the system's file dialogs: a picker answers what the test put in
+// `PICKED` instead, once, and is cancelled when it holds nothing.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PICKED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// In a unit test: the path the test put in [`PICKED`], or cancelled.
+#[cfg(all(not(target_arch = "wasm32"), test))]
+pub fn pick_open(_: &[&str], _: &str) -> Option<String> {
+    PICKED.with(|p| p.borrow_mut().take())
+}
+
+/// In a unit test: the path the test put in [`PICKED`], or cancelled.
+#[cfg(all(not(target_arch = "wasm32"), test))]
+pub fn pick_save(_: &str, _: &[&str], _: &str) -> Option<String> {
+    PICKED.with(|p| p.borrow_mut().take())
 }
 
 #[cfg(target_arch = "wasm32")]

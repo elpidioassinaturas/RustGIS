@@ -50,7 +50,7 @@ fn script(s: &mut Session, _: &Value) -> CmdResult {
     // there until the project is saved again.
     if s.path.is_none() {
         text.push_str("# The project hasn't been saved yet: save it as this file first.\n");
-    } else if s.dirty {
+    } else if s.dirty() {
         text.push_str("# The project has changes that aren't saved: save it first, so its layers are there.\n");
     }
     text.push_str(&format!("import rustgis\n\ns = rustgis.Session({})\n", quoted(&project_file(s))));

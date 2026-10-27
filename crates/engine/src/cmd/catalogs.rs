@@ -163,5 +163,5 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(target_arch = "wasm32")]
 fn fetch(_url: &str) -> Result<Vec<u8>, String> {
-    Err("in the web app, use Home › Web Data › Overture Maps… or Source Cooperative…".into())
+    Err("in the web app, use Home › Add › Web Data › Overture Maps… or Source Cooperative…".into())
 }

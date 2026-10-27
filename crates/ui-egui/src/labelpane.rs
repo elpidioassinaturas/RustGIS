@@ -7,7 +7,9 @@
 //! View Unplaced) are on the ribbon only, and Convert on the ribbon and the layer's menu.
 
 use egui::{Align2, CornerRadius, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
-use rustgis_engine::map::symbology::{DEFAULT_LABEL_CLASS, LABEL_SIZE, LabelClass, Labeling, MAX_LABEL_CLASSES, label_class_name};
+use rustgis_engine::map::symbology::{
+    DEFAULT_LABEL_CLASS, HALO_WIDTH, LABEL_SIZE, LabelClass, Labeling, MAX_LABEL_CLASSES, label_class_name,
+};
 use rustgis_engine::map::{LabelPlacement, Layer, Rgba};
 use rustgis_engine::render::families;
 use serde_json::{Value, json};
@@ -411,7 +413,7 @@ fn new_name(labels: &Labeling) -> String {
 
 /// A list's search box, as its first row: the text kept for `id` while the list is reopened,
 /// lowercased to match names by. The Field and Font boxes share it, so they search alike.
-fn list_search(ui: &mut Ui, id: egui::Id, hint: &str) -> String {
+pub(crate) fn list_search(ui: &mut Ui, id: egui::Id, hint: &str) -> String {
     let mut text = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_default();
     if ui.add(egui::TextEdit::singleline(&mut text).hint_text(hint)).changed() {
         ui.data_mut(|d| d.insert_temp(id, text.clone()));
@@ -420,7 +422,7 @@ fn list_search(ui: &mut Ui, id: egui::Id, hint: &str) -> String {
 }
 
 /// A pick ends the search: the list opens whole next time.
-fn end_search(ui: &Ui, id: egui::Id) {
+pub(crate) fn end_search(ui: &Ui, id: egui::Id) {
     ui.data_mut(|d| d.remove::<String>(id));
 }
 
@@ -471,18 +473,19 @@ fn field(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
 /// none takes every feature.
 fn sql(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class, t: &Tokens) {
     let labels = &l.labels;
+    // One note, about what decides the labels first: labels off, then a hidden class, then
+    // other visible classes (those the map draws, Default included). Each is a whole sentence,
+    // as joined ones would read in the wrong order right to left.
     if !labels.enabled {
         ui.label(RichText::new(tl!("Labels are off for this layer: the clause applies once they are on.")).small().color(t.text_dim));
-    }
-    if !c.it.visible {
+    } else if !c.it.visible {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(tl!("This class is hidden, so it labels nothing.")).small().color(t.text_dim));
             if ui.small_button(tl!("Show labels")).clicked() {
                 run(app, "labels.class.update", c.params(json!({"visible": true})));
             }
         });
-    }
-    if !labels.classes.is_empty() {
+    } else if labels.in_order().filter(|k| k.visible).count() > 1 {
         let said = tl!("Each class labels the features its own clause matches, so a feature can get a label from more than one.");
         ui.label(RichText::new(said).small().color(t.text_dim));
     }
@@ -555,7 +558,164 @@ fn text_symbol(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
             }
         });
         ui.end_row();
+        letter_spacing(app, ui, l, c);
+        ui.end_row();
+        if c.it.halo {
+            halo_style(app, ui, l, c);
+        }
+        background(app, ui, l, c);
     });
+}
+
+/// A rectangle behind the text: its fill and outline (each may be none), the outline's width, how
+/// far it reaches past the text, and its corners' radius.
+fn background(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
+    ui.label("");
+    let mut on = c.it.background.is_some();
+    if ui.checkbox(&mut on, tl!("Background")).on_hover_text(tl!("A rectangle behind the text.")).changed() {
+        run(app, "labels.style", c.params(json!({"background": on})));
+    }
+    ui.end_row();
+    let Some(b) = c.it.background.clone() else { return };
+    for (label, part, cur) in [("Fill", Part::Fill, b.fill), ("Outline", Part::Outline, b.stroke)] {
+        ui.label(tl!(label));
+        ui.horizontal(|ui| {
+            let mut none = cur.is_none();
+            if ui.checkbox(&mut none, tl!("None")).changed() {
+                // Back on in the default's colour (and an outline as wide, if it had none).
+                let d = rustgis_engine::map::LabelBackground::default();
+                let change = match (part, none) {
+                    (Part::Fill, true) => json!({"fill": ""}),
+                    (Part::Fill, false) => json!({"fill": d.fill.map(|f| f.hex())}),
+                    (_, true) => json!({"stroke": ""}),
+                    (_, false) => json!({"stroke": d.stroke.map(|f| f.hex()), "strokeWidth": b.stroke_width.max(d.stroke_width)}),
+                };
+                run(app, "labels.style", c.params(json!({"background": change})));
+            }
+            if let Some(cur) = cur {
+                let mut color = c32(cur);
+                if crate::widgets::color_button(ui, &mut color).changed() {
+                    pick_drag(app, ui, l, c.name, part, rgba(color));
+                }
+            }
+        });
+        ui.end_row();
+    }
+    let id = l.id;
+    // A number of the background's, dragged live and set by `labels.style` once let go.
+    let number = |app: &mut RustGisApp, ui: &mut Ui, label: &str, cur: f32, range: std::ops::RangeInclusive<f64>, key: &'static str| {
+        let input_label = ui.label(tl!(label));
+        let mut v = f64::from(cur);
+        let r = ui.add(egui::DragValue::new(&mut v).range(range.clone()).speed(0.05).suffix(" pt")).labelled_by(input_label.id);
+        crate::ribbon::live_drag(
+            app,
+            ui,
+            &r,
+            f64::from(cur),
+            v,
+            |app, x| {
+                let x = x.clamp(*range.start(), *range.end()) as f32;
+                if let Some(b) =
+                    app.session.map_mut().layer_mut(id).and_then(|l| class_mut(&mut l.labels, c.name)).and_then(|k| k.background.as_mut())
+                {
+                    match key {
+                        "strokeWidth" => b.stroke_width = x,
+                        "radius" => b.radius = x,
+                        "across" => b.padding[0] = x,
+                        _ => b.padding[1] = x,
+                    }
+                }
+            },
+            |app, x| {
+                let change = match key {
+                    "across" => json!({"padding": [x, b.padding[1]]}),
+                    "upDown" => json!({"padding": [b.padding[0], x]}),
+                    other => json!({other: x}),
+                };
+                run(app, "labels.style", c.params(json!({"background": change})));
+            },
+        );
+        ui.end_row();
+    };
+    use rustgis_engine::map::symbology::{BACKGROUND_PADDING, BACKGROUND_STROKE};
+    if b.stroke.is_some() {
+        number(app, ui, "Outline width", b.stroke_width, BACKGROUND_STROKE, "strokeWidth");
+    }
+    number(app, ui, "Padding across", b.padding[0], BACKGROUND_PADDING, "across");
+    number(app, ui, "Padding up and down", b.padding[1], BACKGROUND_PADDING, "upDown");
+    number(app, ui, "Corner radius", b.radius, BACKGROUND_PADDING, "radius");
+}
+
+/// The space between the letters, in points (negative: tighter).
+fn letter_spacing(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
+    let input_label = ui.label(tl!("Letter spacing"));
+    let (lo, hi) = (rustgis_engine::map::layout::MIN_LETTER_SPACING, rustgis_engine::map::layout::MAX_LETTER_SPACING);
+    let mut spacing = f64::from(c.it.spacing);
+    let r = ui.add(egui::DragValue::new(&mut spacing).range(lo..=hi).speed(0.05).suffix(" pt")).labelled_by(input_label.id);
+    let id = l.id;
+    crate::ribbon::live_drag(
+        app,
+        ui,
+        &r,
+        f64::from(c.it.spacing),
+        spacing,
+        |app, x| {
+            if let Some(k) = app.session.map_mut().layer_mut(id).and_then(|l| class_mut(&mut l.labels, c.name)) {
+                k.spacing = x.clamp(lo, hi) as f32;
+            }
+        },
+        |app, x| {
+            run(app, "labels.style", c.params(json!({"spacing": x})));
+        },
+    );
+}
+
+/// The halo's colour (automatic: white or dark, whichever stands out from the text) and width:
+/// the thin halo, or one of its own width in points.
+fn halo_style(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
+    ui.label(tl!("Halo color"));
+    ui.horizontal(|ui| {
+        let mut auto = c.it.halo_color.is_none();
+        if ui.checkbox(&mut auto, tl!("Automatic")).on_hover_text(tl!("White behind dark text, dark behind light.")).changed() {
+            let v = if auto { json!("") } else { json!(c.it.halo_color_for(c.it.color).hex()) };
+            run(app, "labels.style", c.params(json!({"haloColor": v})));
+        }
+        if !auto {
+            let mut color = c32(c.it.halo_color_for(c.it.color));
+            if crate::widgets::color_button(ui, &mut color).changed() {
+                pick_drag(app, ui, l, c.name, Part::Halo, rgba(color));
+            }
+        }
+    });
+    ui.end_row();
+    let input_label = ui.label(tl!("Halo width"));
+    ui.horizontal(|ui| {
+        let mut thin = c.it.halo_width.is_none();
+        if ui.checkbox(&mut thin, tl!("Thin")).changed() {
+            let v = if thin { json!(null) } else { json!(1.0) };
+            run(app, "labels.style", c.params(json!({"haloWidth": v})));
+        }
+        let Some(width) = c.it.halo_width else { return };
+        let mut w = f64::from(width);
+        let r = ui.add(egui::DragValue::new(&mut w).range(HALO_WIDTH).speed(0.05).suffix(" pt")).labelled_by(input_label.id);
+        let id = l.id;
+        crate::ribbon::live_drag(
+            app,
+            ui,
+            &r,
+            f64::from(width),
+            w,
+            |app, x| {
+                if let Some(k) = app.session.map_mut().layer_mut(id).and_then(|l| class_mut(&mut l.labels, c.name)) {
+                    k.halo_width = Some(x.clamp(*HALO_WIDTH.start(), *HALO_WIDTH.end()) as f32);
+                }
+            },
+            |app, x| {
+                run(app, "labels.style", c.params(json!({"haloWidth": x})));
+            },
+        );
+    });
+    ui.end_row();
 }
 
 /// The most installed families the font list shows at once (a machine can have thousands); the
@@ -656,6 +816,47 @@ fn position(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
             pick(app, ui, LabelPlacement::Curved);
         });
     }
+    ui.add_space(6.0);
+    offset(app, ui, l, c);
+}
+
+/// How far the label moves from where its placement puts it, right and down, in points.
+fn offset(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
+    use rustgis_engine::map::symbology::LABEL_OFFSET;
+    let id = l.id;
+    let cur = c.it.offset;
+    grid(ui, "offset", |ui| {
+        for (i, label) in [(0, "Offset right"), (1, "Offset down")] {
+            let input_label = ui.label(tl!(label));
+            let mut v = f64::from(cur.get(i).copied().unwrap_or(0.0));
+            let r = ui
+                .add(egui::DragValue::new(&mut v).range(LABEL_OFFSET).speed(0.1).suffix(" pt"))
+                .labelled_by(input_label.id)
+                .on_hover_text(tl!("A label along a line isn't moved."));
+            crate::ribbon::live_drag(
+                app,
+                ui,
+                &r,
+                f64::from(cur.get(i).copied().unwrap_or(0.0)),
+                v,
+                |app, x| {
+                    if let Some(k) = app.session.map_mut().layer_mut(id).and_then(|l| class_mut(&mut l.labels, c.name))
+                        && let Some(o) = k.offset.get_mut(i)
+                    {
+                        *o = x.clamp(*LABEL_OFFSET.start(), *LABEL_OFFSET.end()) as f32;
+                    }
+                },
+                |app, x| {
+                    let mut o = cur.map(f64::from);
+                    if let Some(slot) = o.get_mut(i) {
+                        *slot = x;
+                    }
+                    run(app, "labels.placement", c.params(json!({"offset": o})));
+                },
+            );
+            ui.end_row();
+        }
+    });
 }
 
 fn visibility(app: &mut RustGisApp, ui: &mut Ui, c: &Class) {
@@ -716,27 +917,73 @@ struct ColorDrag {
     layer: u32,
     /// The class picked on: `None` for Default.
     class: Option<String>,
-    before: Rgba,
+    /// Which of its colours.
+    part: Part,
+    /// (A halo's `None` is its automatic colour; a background's, none.)
+    before: Option<Rgba>,
     color: Rgba,
+}
+
+/// Which of a label class's colours a pick changes.
+#[derive(Clone, Copy, PartialEq)]
+enum Part {
+    Text,
+    Halo,
+    /// Its background's fill and outline.
+    Fill,
+    Outline,
+}
+
+/// The colour a pick changes on a class: the text's, the halo's own (`None`: automatic), or its
+/// background's (`None`: none, or no background).
+fn picked(k: &LabelClass, part: Part) -> Option<Rgba> {
+    match part {
+        Part::Text => Some(k.color),
+        Part::Halo => k.halo_color,
+        Part::Fill => k.background.as_ref().and_then(|b| b.fill),
+        Part::Outline => k.background.as_ref().and_then(|b| b.stroke),
+    }
+}
+
+fn set_picked(k: &mut LabelClass, part: Part, c: Option<Rgba>) {
+    match (part, c) {
+        (Part::Text, Some(c)) => k.color = c,
+        (Part::Text, None) => {}
+        (Part::Halo, c) => k.halo_color = c,
+        (Part::Fill, c) => {
+            if let Some(b) = &mut k.background {
+                b.fill = c;
+            }
+        }
+        (Part::Outline, c) => {
+            if let Some(b) = &mut k.background {
+                b.stroke = c;
+            }
+        }
+    }
 }
 
 /// Previews a colour pick on its layer's class (`None`: Default) until `finish_color_drag` commits
 /// the completed gesture.
 pub(crate) fn color_drag(app: &mut RustGisApp, ui: &Ui, l: &Layer, class: Option<&str>, color: Rgba) {
+    pick_drag(app, ui, l, class, Part::Text, color);
+}
+
+fn pick_drag(app: &mut RustGisApp, ui: &Ui, l: &Layer, class: Option<&str>, part: Part, color: Rgba) {
     let key = egui::Id::unique(COLOR_DRAG);
     let mut pending = ui.data(|d| d.get_temp::<ColorDrag>(key));
-    // One left pending on another layer or class (the selection changed mid-pick, from the
-    // Assistant or a shortcut) is finished first rather than dropped with its preview in place.
-    if let Some(other) = pending.take_if(|d| d.layer != l.id || d.class.as_deref() != class) {
+    // One left pending on another layer, class or colour (the selection changed mid-pick, from
+    // the Assistant or a shortcut) is finished first rather than dropped with its preview in place.
+    if let Some(other) = pending.take_if(|d| d.layer != l.id || d.class.as_deref() != class || d.part != part) {
         ui.data_mut(|d| d.remove::<ColorDrag>(key));
         apply_color_drag(app, other);
     }
-    let Some(now) = class.map_or(Some(&l.labels.default), |n| l.labels.class(n)).map(|k| k.color) else { return };
+    let Some(now) = class.map_or(Some(&l.labels.default), |n| l.labels.class(n)).map(|k| picked(k, part)) else { return };
     // The colour before the first frame of this pick, kept while it goes on.
     let before = pending.map_or(now, |d| d.before);
-    ui.data_mut(|d| d.insert_temp(key, ColorDrag { layer: l.id, class: class.map(String::from), before, color }));
+    ui.data_mut(|d| d.insert_temp(key, ColorDrag { layer: l.id, class: class.map(String::from), part, before, color }));
     if let Some(k) = app.session.map_mut().layer_mut(l.id).and_then(|l| class_mut(&mut l.labels, class)) {
-        k.color = color;
+        set_picked(k, part, Some(color));
     }
     app.session.revision = app.session.revision.wrapping_add(1);
 }
@@ -769,14 +1016,21 @@ fn apply_color_drag(app: &mut RustGisApp, drag: ColorDrag) {
     let Some(k) = app.session.map_mut().layer_mut(drag.layer).and_then(|l| class_mut(&mut l.labels, drag.class.as_deref())) else {
         return;
     };
-    k.color = drag.before;
-    if drag.before != drag.color {
+    set_picked(k, drag.part, drag.before);
+    if drag.before != Some(drag.color) {
         // On the layer the pick was made on, as the active one: the command reaches it by id
         // (a name two layers share would reach the first), and a recorded step names it, as
         // for the pane's other commands. The selection, if it moved mid-pick, is put back (as
         // `Session::run` does to check a named layer's conditions).
         let selected = app.session.active_layer.replace(drag.layer);
-        run(app, "labels.style", named(json!({"color": drag.color.hex()}), "class", drag.class.as_deref()));
+        let hex = drag.color.hex();
+        let change = match drag.part {
+            Part::Text => json!({"color": hex}),
+            Part::Halo => json!({"haloColor": hex}),
+            Part::Fill => json!({"background": {"fill": hex}}),
+            Part::Outline => json!({"background": {"stroke": hex}}),
+        };
+        run(app, "labels.style", named(change, "class", drag.class.as_deref()));
         app.session.active_layer = selected;
     }
 }
@@ -853,6 +1107,76 @@ mod tests {
         h.run();
         assert_eq!(h.state().session.map().layer_by_name("Cities").unwrap().labels.default.field, "pop_max");
         assert!(h.query_by_label("+ New expression").is_some(), "the SQL query is beside the field");
+    }
+
+    #[test]
+    fn the_halos_colour_and_width_and_the_letter_spacing_are_set_in_the_pane() {
+        use egui::accesskit::Role;
+        let mut h = harness(with_cities());
+        h.run();
+        open_tab(&mut h, "Symbol");
+        assert!(h.query_by_role_and_label(Role::SpinButton, "Letter spacing").is_some());
+        assert!(h.query_by_role_and_label(Role::SpinButton, "Halo width").is_none(), "thin: no width to set");
+        let class = |h: &egui_kittest::Harness<'_, RustGisApp>| {
+            let c = &h.state().session.map().layer_by_name("Cities").unwrap().labels.default;
+            (c.halo_color, c.halo_width)
+        };
+        assert_eq!(class(&h), (None, None));
+        // Off Automatic: the colour it had, now its own; off Thin: a width of its own.
+        h.get_by_label("Automatic").click();
+        h.run();
+        h.get_by_label("Thin").click();
+        h.run();
+        assert_eq!(class(&h), (Some(Rgba::new(255, 255, 255, 225)), Some(1.0)));
+        assert!(h.query_by_role_and_label(Role::SpinButton, "Halo width").is_some());
+        h.get_by_label("Thin").click();
+        h.run();
+        assert_eq!(class(&h).1, None);
+        // Without a halo, neither row.
+        h.get_by_label("Halo").click();
+        h.run();
+        assert!(h.query_by_label("Automatic").is_none() && h.query_by_label("Thin").is_none());
+    }
+
+    #[test]
+    fn the_background_and_the_offset_are_set_in_the_pane() {
+        use egui::accesskit::Role;
+        let mut h = harness(with_cities());
+        h.run();
+        open_tab(&mut h, "Symbol");
+        let background = |h: &egui_kittest::Harness<'_, RustGisApp>| {
+            h.state().session.map().layer_by_name("Cities").unwrap().labels.default.background.clone()
+        };
+        assert_eq!(background(&h), None);
+        assert!(h.query_by_role_and_label(Role::SpinButton, "Padding across").is_none(), "no background: no rows");
+        h.get_by_label("Background").click();
+        h.run();
+        assert_eq!(background(&h), Some(rustgis_engine::map::LabelBackground::default()));
+        for row in ["Outline width", "Padding across", "Padding up and down", "Corner radius"] {
+            assert!(h.query_by_role_and_label(Role::SpinButton, row).is_some(), "{row}");
+        }
+        // A colour picked for its fill is one labels.style, the pre-pick colour undone to.
+        let app = h.state_mut();
+        let layer = app.session.map().layer_by_name("Cities").unwrap().id;
+        let pick = super::ColorDrag {
+            layer,
+            class: None,
+            part: super::Part::Fill,
+            before: Some(Rgba::rgb(255, 255, 255)),
+            color: Rgba::rgb(1, 2, 3),
+        };
+        super::apply_color_drag(app, pick);
+        assert_eq!(background(&h).and_then(|b| b.fill), Some(Rgba::rgb(1, 2, 3)));
+        h.state_mut().session.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(background(&h).and_then(|b| b.fill), Some(Rgba::rgb(255, 255, 255)));
+        h.run();
+        h.get_by_label("Background").click();
+        h.run();
+        assert_eq!(background(&h), None);
+        assert!(h.query_by_role_and_label(Role::SpinButton, "Corner radius").is_none());
+        open_tab(&mut h, "Position");
+        assert!(h.query_by_role_and_label(Role::SpinButton, "Offset right").is_some());
+        assert!(h.query_by_role_and_label(Role::SpinButton, "Offset down").is_some());
     }
 
     #[test]
@@ -1115,8 +1439,8 @@ mod tests {
         h.get_by_label("There is no expression defined.");
     }
 
-    /// The SQL tab says that every class labels what its clause matches, and that a hidden Default
-    /// labels nothing; Show labels shows Default again.
+    /// The SQL Query section of the Content tab has one note, on what decides the labels first:
+    /// labels off, then a hidden Default (Show labels shows it again), then other visible classes.
     #[test]
     fn the_sql_tab_says_what_else_decides_the_labels() {
         let mut app = with_cities();
@@ -1124,11 +1448,22 @@ mod tests {
         app.run("labels.class.update", json!({"visible": false})).unwrap();
         let mut h = harness(app);
         h.run();
-        assert!(h.query_by_label_contains("Each class labels the features its own clause matches").is_some());
+        let rule = "Each class labels the features its own clause matches";
+        assert!(h.query_by_label_contains("Labels are off for this layer").is_some());
+        assert!(h.query_by_label("Show labels").is_none(), "no hidden-class note while labels are off");
+        assert!(h.query_by_label_contains(rule).is_none(), "no rule note while labels are off");
+        h.state_mut().run("labels.enable", json!({"on": true})).unwrap();
+        h.run();
+        assert!(h.query_by_label_contains(rule).is_none(), "no rule note while Default is hidden");
         h.get_by_label("Show labels").click();
         h.run();
         let l = &h.state().session.map().layer(h.state().session.active_layer.unwrap()).unwrap().labels;
         assert!(l.default.visible);
+        assert!(h.query_by_label_contains(rule).is_some());
+        // A hidden extra class labels nothing, so only Default labels: no rule either.
+        h.state_mut().run("labels.class.update", json!({"class": "Big", "visible": false})).unwrap();
+        h.run();
+        assert!(h.query_by_label_contains(rule).is_none(), "no rule note with one visible class");
     }
 
     /// A draft belongs to its layer in its project: another project, though it reuses the

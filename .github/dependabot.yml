@@ -49,6 +49,22 @@ updates:
           - minor
           - patch
 
+  # The base images of the Docker images (the web app's Dockerfile at the root, the command line's
+  # in packaging/docker), pinned by tag and digest.
+  - package-ecosystem: docker
+    directories:
+      - "/"
+      - "/packaging/docker"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
   # GitHub Actions used by the workflows in .github/workflows/.
   - package-ecosystem: github-actions
     directory: "/"

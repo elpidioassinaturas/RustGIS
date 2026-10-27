@@ -4,8 +4,11 @@ _Last reviewed: 2026-10-24 (v0.4.0). Reviewed weekly; if this date is old, trust
 over this page._
 
 This page says where RustGIS is heading and where help is most useful. Details live in the linked
-issues; feature-by-feature comparison with GeoLibre is tracked in
-[GEOLIBRE_PARITY.md](GEOLIBRE_PARITY.md).
+issues. RustGIS and GeoLibre complement each other
+([#951](https://github.com/opengeos/RustGIS/discussions/951)): GeoLibre is web and mobile first,
+RustGIS desktop first and built for automation and AI agents.
+[GEOLIBRE_PARITY.md](GEOLIBRE_PARITY.md) compares the two feature by feature as a reference, not a
+plan: not every GeoLibre feature suits RustGIS.
 
 ## Goals
 - **What exists works.** A feature that crashes, misreads data or is undocumented costs more
@@ -60,7 +63,8 @@ Correct, robust and recoverable, with the foundations other themes stand on.
   administrator can fix for a managed install (no AI Assistant, plugins or web services).
 - Extend the OS keychain secret store to service connections (database passwords, S3 keys,
   AI provider keys and the ChatGPT sign-in's tokens are already kept there).
-- Overlay tools beside Clip and Erase: intersect, union, identity and near _(open)_.
+- Overlay tools beside Clip, Erase and Intersect: union, identity and near
+  ([#959](https://github.com/opengeos/RustGIS/issues/959)).
 - Spatial Join by distance, closest, centre in and largest overlap, with merge rules (sum, mean,
   first…) for one-to-one joins ([#851](https://github.com/opengeos/RustGIS/issues/851)).
 - Vector tools, each writing a new layer: join field (a one-off attribute join), merge (append
@@ -96,6 +100,9 @@ And alongside it:
 ### Data at the source
 - Write edits back to GeoPackage and PostGIS (edits stay in the project today). _Coordinate
   first._
+- Open GeoLibre `.geolibre` projects as maps, the way supported QGIS projects open
+  ([#962](https://github.com/opengeos/RustGIS/issues/962)). GeoLibre opening
+  `.rgis` projects comes later, once RustGIS's project format and supported data types settle.
 - A date and date-time field type, read and written as dates (they are text today)
   ([#853](https://github.com/opengeos/RustGIS/issues/853)). _Coordinate first_ (it changes
   `FieldType`).
@@ -103,7 +110,9 @@ And alongside it:
 - Export into an existing GeoPackage as an added or replaced table, leaving its other tables
   ([#852](https://github.com/opengeos/RustGIS/issues/852); export refuses an existing file today).
 - Polygon editing: cut a polygon, reshape and trace _(open)_; then shared edges, where moving one
-  boundary moves its neighbour's too.
+  boundary moves its neighbour's too. Coincident polygon vertices can already move together
+  with Shared Vertices (`edit.moveSharedVertex`); different vertex densities and linked
+  insertion/deletion remain open.
 - Editor tracking fields (created/edited by and at).
 - Attribute table columns: rename, hide and reorder _(open)_.
 - Persistent attribute joins and virtual fields. _Coordinate first_ (they change `Feature`).
@@ -119,8 +128,7 @@ And alongside it:
   a line layer).
 - Hot-spot statistics (Getis-Ord Gi\*), and emerging hot spots on the time slider.
 - Charts linked to the selection: histogram, scatter, bar and box plots of a layer's fields.
-- Tabulate intersection: one layer's counts and totals shared out to another by area overlap,
-  once intersect exists.
+- Tabulate intersection: one layer's counts and totals shared out to another by area overlap.
 - Reverse geocoding, and the US Census geocoder beside Nominatim and Photon; a DEM downloader so
   viewshed works without a loaded elevation raster _(open)_.
 
@@ -147,7 +155,6 @@ built-in version must justify itself on one of those.
   only used by tests ([#557](https://github.com/opengeos/RustGIS/issues/557)).
 - A catalog of data cubes for the time slider
   ([#683](https://github.com/opengeos/RustGIS/issues/683)).
-- A Dockerfile for self-hosting the web app.
 - Rebindable keyboard shortcuts ([#562](https://github.com/opengeos/RustGIS/issues/562)).
 
 ## Exploratory
@@ -157,25 +164,20 @@ Open questions rather than plans; discuss before building.
   and point cloud I/O library: which of its drivers, coordinate transformations and GDAL-style
   operations could back or replace RustGIS's own readers, or stand in for the GDAL program, and
   which of them build for the web app.
-- Collaboration: shared projects, review comments, accounts and a server.
-- Mobile and field work: touch layout, GPS, data collection, QFieldCloud
-  ([#665](https://github.com/opengeos/RustGIS/issues/665)).
 - Native NetCDF-4/HDF5 without GDAL ([#396](https://github.com/opengeos/RustGIS/issues/396)),
   kerchunk and Icechunk.
-- An SQL engine in the web app.
 - Broader QGIS project compatibility and opening ArcGIS Pro projects (supported QGIS projects
   already open as maps).
 - An in-app Python console; an R package.
-- AI segmentation and detection (SAM, ONNX models).
 
 ## Done
 - Projects that survive a move: local data paths relative to the project and undoable Repair
   Data Source for layers and tile archives ([#879](https://github.com/opengeos/RustGIS/issues/879)).
 - Layered workspace, command registry with undo, project files (`.rgis`), `rustgis-cli`, the
   web app (WebAssembly, installable with offline start, opened with a project or data by its
-  web address), 18 interface languages; a ribbon laid out in the order of the work (Home, Data,
-  Style, Edit, Analyze, View, Publish), start-up preferences, Check for Updates, autosave and
-  crash recovery in the desktop app.
+  web address, self-hostable with the `Dockerfile`), 18 interface languages; a ribbon laid out in
+  the order of the work (Home, Data, Style, Edit, Analyze, View, Publish), start-up preferences,
+  Check for Updates, autosave and crash recovery in the desktop app.
 - Data: files by their web address; GeoJSON, CSV/TSV (x/y in any EPSG system, or WKT), Excel
   and OpenDocument spreadsheets, GeoRSS, LandXML, encoded polylines, Shapefile (zipped too,
   with the coordinate system in its `.prj`), GeoPackage, GeoParquet, FlatGeobuf, KML/KMZ
@@ -218,11 +220,11 @@ Open questions rather than plans; discuss before building.
   templates, elevation, topology; domains, subtypes, attribute rules, contingent values,
   relationships, archiving.
 - Analysis: selection by attributes and location; polygon, lasso and radius on the map; overlay
-  (clip, erase), proximity (buffer) and summary tools, spatial join, zonal statistics, A5 grids,
-  kriging and Calculate Geometry with metric or imperial units; guided workflows (viewshed, line
-  of sight, IDW, shortest path, suitability); ModelBuilder on a node canvas, scripts with command,
-  parameter and value completion, and history copied as code; the GeoLibre and Whitebox suite
-  (1,000+ tools) natively and in the browser.
+  (clip, erase, intersect), proximity (buffer) and summary tools, spatial join, zonal statistics,
+  A5 grids, kriging and Calculate Geometry with metric or imperial units; guided workflows
+  (viewshed, line of sight, IDW, shortest path, suitability); ModelBuilder on a node canvas,
+  scripts with command, parameter and value completion, and history copied as code; the GeoLibre
+  and Whitebox suite (1,000+ tools) natively and in the browser.
 - Layouts (map frames, surrounds, map series, publication sheets and figures in one command,
   format panes, guides, snapping, element locking and PDF), reports, presentations and
   notebooks; the web app embeddable in a page (`?embed`).

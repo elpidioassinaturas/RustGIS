@@ -64,7 +64,7 @@ impl FgbSource {
     }
 
     fn new<R: Read + Seek>(r: R, input: Input, name: &str) -> Result<Self> {
-        let reader = FgbReader::open(r).map_err(err)?;
+        let reader = open_reader(r)?;
         let h = reader.header();
         let mut notes = Vec::new();
         // The code is an EPSG one only when the organization is EPSG (or not given, which means EPSG).
@@ -121,7 +121,7 @@ impl FgbSource {
     /// Reads a request; `scan` ignores the index.
     fn read_with<R: Read + Seek>(&self, open: &impl Fn() -> Result<R>, req: &Request, scan: bool) -> Result<Batch> {
         let limit = clamp_limit(req.limit);
-        let reader = FgbReader::open(open()?).map_err(err)?;
+        let reader = open_reader(open()?)?;
         let native = req.extent.map(|e| self.reproject.extent_from_lonlat(&e));
         let indexed = native.filter(|_| self.info.indexed && !scan);
         // Feature numbers in the file, for ids that stay put between reads: the index search's
@@ -179,7 +179,7 @@ impl FgbSource {
     /// read that stops there, not a pass over the file.
     fn peek_kind(&self) -> GeometryType {
         let first = |r: Box<dyn ReadSeek>| -> Option<GeometryType> {
-            let mut iter = FgbReader::open(r).ok()?.select_all().ok()?;
+            let mut iter = open_reader(r).ok()?.select_all().ok()?;
             for _ in 0..16 {
                 let f = iter.next().ok()??;
                 if let Some(g) = f.to_wkb(CoordDimensions::xy()).ok().as_deref().and_then(wkb::decode) {
@@ -421,7 +421,7 @@ impl FgbSource {
             at.insert(pos, Arc::new(bytes));
         }
         let stand_ins = Arc::new(remote::StandIns { at });
-        let reader = FgbReader::open(remote::Reader::with_stand_ins(f.clone(), stand_ins)).map_err(err)?;
+        let reader = open_reader(remote::Reader::with_stand_ins(f.clone(), stand_ins))?;
         let mut iter = reader.select_bbox(native.min_x, native.min_y, native.max_x, native.max_y).map_err(err)?;
         // The crate's search must find what this one did (it reads the nodes fetched for it).
         if iter.features_count() != Some(n) {
@@ -480,6 +480,21 @@ impl FeatureSource for FgbSource {
             _ => None,
         }
     }
+}
+
+/// FlatBuffers verifies the header's layout, not the index arithmetic it advertises.
+fn open_reader<R: Read>(r: R) -> Result<FgbReader<R>> {
+    let reader = FgbReader::open(r).map_err(err)?;
+    let h = reader.header();
+    if h.index_node_size() > 0 && h.features_count() > 0 {
+        let bytes = level_bounds(h.features_count(), u64::from(h.index_node_size()))
+            // The dependency includes a root even when there is just one leaf.
+            .and_then(|levels| levels.first().and_then(|(_, end)| (*end).max(2).checked_mul(NODE)));
+        if bytes.and_then(|n| usize::try_from(n).ok()).is_none() {
+            return Err(DataError::Format("FlatGeobuf: an impossible spatial index size".into()));
+        }
+    }
+    Ok(reader)
 }
 
 fn err(e: flatgeobuf::Error) -> DataError {

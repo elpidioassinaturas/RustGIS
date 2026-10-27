@@ -546,7 +546,10 @@ mod local {
         let mut all = Vec::new();
         for index in 0..zip.len() {
             let entry = zip.by_index_raw(index).map_err(|e| format!("{}: {e}", path.display()))?;
-            let name = entry.name().replace('\\', "/");
+            // zip decodes names that are not UTF-8 as CP437, so a name fails only when corrupt;
+            // such an entry cannot be a SKILL.md and is skipped.
+            let Ok(name) = entry.name() else { continue };
+            let name = name.replace('\\', "/");
             if name.rsplit('/').next().is_none_or(|n| !n.eq_ignore_ascii_case("SKILL.md")) {
                 continue;
             }

@@ -211,6 +211,19 @@ pub struct Band {
     pub name: String,
     pub data: Vec<f32>,
     pub stats: BandStats,
+    /// The names of the band's classes, by value, from GDAL's `.aux.xml` sidecar (see
+    /// [`Band::class_name`]). Empty when the band names no class.
+    pub classes: Vec<String>,
+}
+
+impl Band {
+    /// The name of the class of value `v`: `None` when `v` isn't a whole number or has no name.
+    pub fn class_name(&self, v: f64) -> Option<&str> {
+        if v < 0.0 || v.fract() != 0.0 {
+            return None;
+        }
+        self.classes.get(v as usize).map(String::as_str).filter(|s| !s.is_empty())
+    }
 }
 
 /// How a raster's bands were meant to be shown, from the file.
@@ -292,7 +305,7 @@ impl Raster {
         let bands = bands
             .into_iter()
             .enumerate()
-            .map(|(i, data)| Band { name: format!("Band {}", i + 1), stats: BandStats::compute(&data, valid), data })
+            .map(|(i, data)| Band { name: format!("Band {}", i + 1), stats: BandStats::compute(&data, valid), data, classes: Vec::new() })
             .collect();
         let mut r = Raster {
             name: name.into(),
@@ -318,8 +331,9 @@ impl Raster {
     }
 
     /// Applies what GDAL's `.aux.xml` sidecar says about the bands: their descriptions name them,
-    /// its no-data value applies when the file has none, and its statistics stand in for those of
-    /// a reduced overview (the whole band's, where the overview's only approximate them).
+    /// their category names name their classes, its no-data value applies when the file has none,
+    /// and its statistics stand in for those of a reduced overview (the whole band's, where the
+    /// overview's only approximate them).
     pub fn apply_pam(&mut self, pam: &pam::Pam) {
         let mut recompute = false;
         if self.nodata.is_none() {
@@ -333,6 +347,9 @@ impl Raster {
             let p = pam.band(i + 1);
             if let Some(d) = p.and_then(|p| p.description.as_ref()) {
                 band.name = d.clone();
+            }
+            if let Some(p) = p.filter(|p| !p.categories.is_empty()) {
+                band.classes = p.categories.clone();
             }
             let stored = p.and_then(|p| p.stats).filter(|_| overview);
             if recompute || stored.is_some() {
@@ -884,6 +901,29 @@ pub(crate) mod tests {
         // A broken sidecar is ignored.
         std::fs::write(dir.join("dem.tif.aux.xml"), "<PAMDataset><PAMRasterBand").unwrap();
         assert_eq!(read_path(&tif).unwrap().bands[0].name, "Band 1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gdal_sidecars_name_classes() {
+        let dir = std::env::temp_dir().join(format!("rustgis-pam-classes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gt = GeoTransform { origin_x: 10.0, origin_y: 50.0, pixel_width: 0.5, pixel_height: -0.5 };
+        let r = Raster::new("slope", 2, 2, vec![vec![1.0, 2.0, 3.0, 1.0]], gt, Crs::LonLat, None, ColorHint::Gray, "UInt8").unwrap();
+        let tif = dir.join("slope.tif");
+        std::fs::write(&tif, geotiff::write(&r, 0).unwrap()).unwrap();
+        let xml = r#"<PAMDataset><PAMRasterBand band="1"><CategoryNames>
+<Category>no data</Category><Category>0-5 % flat</Category><Category></Category><Category>over 100 %</Category>
+</CategoryNames></PAMRasterBand></PAMDataset>"#;
+        std::fs::write(dir.join("slope.tif.aux.xml"), xml).unwrap();
+        let back = read_path(&tif).unwrap();
+        let b = &back.bands[0];
+        assert_eq!(b.classes, ["no data", "0-5 % flat", "", "over 100 %"]);
+        assert_eq!((b.class_name(1.0), b.class_name(3.0)), (Some("0-5 % flat"), Some("over 100 %")));
+        for v in [2.0, 4.0, 1.5, -1.0, f64::NAN] {
+            assert_eq!(b.class_name(v), None, "{v}");
+        }
+        assert!(small().bands[0].classes.is_empty(), "no sidecar, no names");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

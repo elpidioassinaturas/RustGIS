@@ -19,6 +19,12 @@ A maintainer's `automerge` label approves and squash-merges a pull request after
 checks pass. Pushing again removes the label and disables auto-merge; removing the label also
 disables it.
 
+A maintainer's `claude-autofix` label has Claude bring a pull request up to date: it merges the base
+branch and resolves any conflicts, then fixes the open review comments it agrees with, replies to
+each and resolves the ones it fixed or found already fixed, and pushes the commits to the branch (a
+fork's too, when edits by maintainers are allowed). The label comes off when it's done; add it again
+for another round.
+
 ## Developer checks
 
 `cargo xtask ci` runs `cargo fmt --all --check`,
@@ -56,7 +62,7 @@ is space. Agree on that purpose before reorganising a tab.
 | Home | The basics of working with a map: starting a map or layout, adding data, moving around, and selecting and inspecting features. |
 | Data | Working with the content and structure of data: looking at records, changing fields and values, connecting tables, and bringing data in and out. Exports here produce data, such as features and rasters. |
 | Style | Deciding how a layer looks on the map: how its features are drawn and shown at different scales. |
-| Labeling (planned) | How the map is labelled: what gets a label, with which text, where, and at which scales, plus the label settings for the whole map. |
+| Labeling | How the map is labelled: what gets a label, with which text, where, and at which scales, plus the label settings for the whole map. |
 | Edit | Creating and changing features and graphics on the map, and managing those edits. |
 | Analyze | Turning existing data into new results, from single tools to repeatable workflows, scripts and automation. |
 | View | How the map and workspace are displayed: map appearance and view configuration, and which panes and windows are open. Basic navigation stays on Home. |
@@ -65,11 +71,10 @@ is space. Agree on that purpose before reorganising a tab.
 | Settings | Preferences that apply to every project, such as language, appearance and start-up. |
 | Help | Learning RustGIS, finding commands and shortcuts, and getting information about the app. |
 
-Until the Labeling tab lands, Style still holds the layer's label controls. Keep Data, Style and
-Labeling fixed, rather than making the tab strip change with the selected layer. Their target
-should be explicit: a layer chooser at the left of each layer-dependent tab (for example,
-“Styling: Countries ▾”) is planned, with a useful hint when no suitable layer is selected. Where
-a class chooser is needed, the layer comes first, then the class.
+Keep Data, Style and Labeling fixed, rather than making the tab strip change with the selected
+layer. Their target should be explicit: a layer chooser at the left of each layer-dependent tab
+(for example, “Styling: Countries ▾”) is planned, with a useful hint when no suitable layer is
+selected. Where a class chooser is needed, the layer comes first, then the class.
 
 If a control seems to fit two tabs, or none, clarify its task and destination before placing
 it. Home is not a catch-all for anything described as “frequently used”. Data exports data;
@@ -90,8 +95,9 @@ is reorganised, is an interim exception: record it in the issue that tracks the 
   appears: ribbon, panes and Command Search. Do not give one tool different names, or expose
   one setting as two differently named toggles.
 - **Labels say what happens.** Name a control for what it does, not for a similar feature
-  elsewhere. Go To XY pans to coordinates; “Locate” would suggest it also finds addresses, as
-  Find Place does. End a label with “…” when it opens a dialog or file picker that asks for input.
+  elsewhere. A coordinates-only action should say “By Coordinates”; the “Locate” menu covers
+  both coordinates and place/address search. End a label with “…” when it opens a dialog or
+  file picker that asks for input.
 - **Keep a route to every feature.** Removing a ribbon control must not remove access to its
   action. Name and check the remaining route, including for UI-only actions.
 

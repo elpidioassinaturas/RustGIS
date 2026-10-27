@@ -257,7 +257,7 @@ impl Conn {
                 // A connection that was encrypted isn't continued in the clear.
                 if plain && !self.plain {
                     return Err(DataError::Format(
-                        "the server no longer offers TLS: connect again with Add Data › Database… to accept that".into(),
+                        "the server no longer offers TLS: connect again with Home › Add › Add Data › Database… to accept that".into(),
                     ));
                 }
                 *guard = Some(client);

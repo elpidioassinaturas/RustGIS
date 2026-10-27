@@ -153,7 +153,7 @@ fn info(_s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = p;
-        Err("in the web app, open Zarr stores with Home › Add Data › Zarr…".into())
+        Err("in the web app, open Zarr stores with Home › Add › Add Data › Zarr…".into())
     }
     #[cfg(not(target_arch = "wasm32"))]
     match source(p)? {
@@ -231,7 +231,7 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (crs_parsed, src);
-        Err("in the web app, add Zarr variables with Home › Add Data › Zarr…".into())
+        Err("in the web app, add Zarr variables with Home › Add › Add Data › Zarr…".into())
     }
     #[cfg(not(target_arch = "wasm32"))]
     match src {

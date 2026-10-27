@@ -1,11 +1,16 @@
 //! GDAL's auxiliary metadata (PAM): the `.aux.xml` file GDAL writes next to a raster to hold what
-//! the file itself doesn't, such as band descriptions, no-data values and computed statistics.
+//! the file itself doesn't, such as band descriptions, no-data values, class names and computed
+//! statistics.
 //!
 //! ```xml
 //! <PAMDataset>
 //!   <PAMRasterBand band="1">
 //!     <Description>Blue</Description>
 //!     <NoDataValue>0</NoDataValue>
+//!     <CategoryNames>
+//!       <Category>no data</Category>
+//!       <Category>water</Category>
+//!     </CategoryNames>
 //!     <Metadata>
 //!       <MDI key="STATISTICS_MINIMUM">12</MDI>
 //!       <MDI key="STATISTICS_MAXIMUM">2400</MDI>
@@ -22,6 +27,8 @@ use roxmltree::ParsingOptions;
 const MAX_BYTES: u64 = 16 << 20;
 /// Most bands described.
 const MAX_BANDS: usize = 65_536;
+/// Most class names read for a band: one for each value of a 16-bit band.
+const MAX_CATEGORIES: usize = 65_536;
 
 /// Statistics GDAL stored for a band (`STATISTICS_*`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -40,6 +47,9 @@ pub struct PamBand {
     pub description: Option<String>,
     pub nodata: Option<f64>,
     pub stats: Option<Stats>,
+    /// The names of the band's classes, by value (GDAL's category names): `categories[v]` names
+    /// value `v`, and is empty when that value has none. Empty when the band names no class.
+    pub categories: Vec<String>,
 }
 
 /// What a sidecar says about a raster's bands.
@@ -113,7 +123,19 @@ pub fn parse(text: &str) -> Option<Pam> {
             }
             _ => None,
         };
-        pam.bands.push(PamBand { band, description, nodata, stats });
+        let mut categories: Vec<String> = b
+            .children()
+            .find(|n| n.has_tag_name("CategoryNames"))
+            .into_iter()
+            .flat_map(|c| c.children().filter(|n| n.has_tag_name("Category")))
+            .take(MAX_CATEGORIES)
+            .map(|n| n.text().map(str::trim).unwrap_or_default().chars().take(256).collect())
+            .collect();
+        // Values past the last named one have no name either.
+        while categories.last().is_some_and(String::is_empty) {
+            categories.pop();
+        }
+        pam.bands.push(PamBand { band, description, nodata, stats, categories });
     }
     Some(pam)
 }
@@ -189,6 +211,34 @@ mod tests {
         let mut differ = pam.clone();
         differ.bands.push(PamBand { band: 4, nodata: Some(0.0), ..Default::default() });
         assert_eq!(differ.nodata(), None, "bands disagree");
+    }
+
+    #[test]
+    fn reads_class_names() {
+        // As GDAL writes them (SetCategoryNames): one per value from 0, empty for a value with no
+        // name.
+        let xml = r#"<PAMDataset>
+  <PAMRasterBand band="1">
+    <CategoryNames>
+      <Category>no data</Category>
+      <Category> 0-5 % flat </Category>
+      <Category></Category>
+      <Category>over 100 % (over 45°)</Category>
+      <Category/>
+    </CategoryNames>
+  </PAMRasterBand>
+  <PAMRasterBand band="2"><CategoryNames><Category></Category></CategoryNames></PAMRasterBand>
+  <PAMRasterBand band="3"><Description>none</Description></PAMRasterBand>
+</PAMDataset>"#;
+        let pam = parse(xml).unwrap();
+        assert_eq!(pam.band(1).unwrap().categories, ["no data", "0-5 % flat", "", "over 100 % (over 45°)"]);
+        assert!(pam.band(2).unwrap().categories.is_empty(), "no value is named");
+        assert!(pam.band(3).unwrap().categories.is_empty());
+        let long = format!(
+            "<PAMDataset><PAMRasterBand band=\"1\"><CategoryNames><Category>{}</Category></CategoryNames></PAMRasterBand></PAMDataset>",
+            "x".repeat(1000)
+        );
+        assert_eq!(parse(&long).unwrap().band(1).unwrap().categories[0].len(), 256);
     }
 
     #[test]

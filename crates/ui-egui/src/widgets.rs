@@ -136,7 +136,7 @@ pub fn big(
     let resp = tooltip(app, resp, &label.replace('\n', " "), desc, id, &params);
     crate::showme::ring(ui, app, r, id, &params);
     if resp.clicked() && on && !menu {
-        let _ = app.run(id, params);
+        let _ = app.run_by_user(id, params);
     }
     resp
 }
@@ -225,7 +225,7 @@ pub fn big_split_menu(
     let arrow = tooltip(app, arrow, menu_label, menu_desc, "ui.menu", &Value::Null);
     crate::showme::ring(ui, app, primary.rect, id, &params);
     if primary.clicked() {
-        let _ = app.run(id, params);
+        let _ = app.run_by_user(id, params);
     }
     egui::Popup::menu(&arrow).show(|ui| {
         ui.set_min_width(200.0);
@@ -259,7 +259,7 @@ pub fn small(ui: &mut Ui, app: &mut RustGisApp, icon: &str, label: &str, desc: &
     let resp = tooltip(app, resp, title, if label.is_empty() { "" } else { desc }, id, &params);
     crate::showme::ring(ui, app, r, id, &params);
     if resp.clicked() && on {
-        let _ = app.run(id, params);
+        let _ = app.run_by_user(id, params);
     }
     resp
 }
@@ -347,7 +347,7 @@ pub fn menu_item(ui: &mut Ui, app: &mut RustGisApp, icon: &str, label: &str, id:
     let on = enabled(app, id);
     let shortcut = crate::keymap::shortcut_text(ui.ctx(), app, id, &params);
     if menu_row(ui, icon, tl!(label), &shortcut, on).clicked() {
-        let _ = app.run(id, params);
+        let _ = app.run_by_user(id, params);
         ui.close();
     }
 }

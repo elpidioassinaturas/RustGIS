@@ -72,6 +72,7 @@ pub(crate) fn tile_label(l: rustgis_tiles::Label) -> Option<(PlacedLabel, f64)> 
             size,
             color: Rgba(l.color),
             halo: l.halo.map(Rgba),
+            halo_width: None,
             bold: l.bold,
             icon,
             align: -l.anchor[0],
@@ -83,6 +84,7 @@ pub(crate) fn tile_label(l: rustgis_tiles::Label) -> Option<(PlacedLabel, f64)> 
             angle: l.angle,
             collide: l.collide,
             glyphs: Vec::new(),
+            background: None,
         },
         l.priority,
     ))

@@ -6,8 +6,8 @@ send searches, coordinates, data or assistant context to those services, as desc
 
 ## Online services
 
-- **Find Place** and place search send your query to OpenStreetMap's Nominatim by default.
-  Find Place and **Geocode Addresses** can also use Komoot's Photon or a server you specify;
+- **Locate › By Place or Address** and place search send your query to OpenStreetMap's Nominatim by default.
+  **By Place or Address** and **Geocode Addresses** can also use Komoot's Photon or a server you specify;
   geocoding sends the address values you choose from your table or layer.
 - **Directions** sends the route's start, stops and destination to FOSSGIS's public Valhalla
   server by default. The Directions pane asks for consent before sending places and remembers

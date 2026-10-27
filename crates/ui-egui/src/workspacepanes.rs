@@ -657,7 +657,7 @@ pub fn time_series(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         .map(|l| l.name.clone())
         .collect();
     if layers.is_empty() {
-        ui.label(egui::RichText::new(tl!("Add a Zarr variable first (Add Data › Zarr…).")).weak());
+        ui.label(egui::RichText::new(tl!("Add a Zarr variable first (Home › Add › Add Data › Zarr…).")).weak());
         return;
     }
     if !layers.contains(&app.ws.series_layer) {

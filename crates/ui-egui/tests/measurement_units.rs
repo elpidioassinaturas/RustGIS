@@ -244,7 +244,7 @@ fn distance_controls_follow_display_units_and_keep_metre_command_values() {
     assert!(text.iter().any(|s| s == "3281 ft") && text.iter().any(|s| s == "62.1 mi"), "{text:?}");
 
     h.state_mut().run("ui.pane.labeling", json!({})).unwrap();
-    h.state_mut().run("ui.tab", json!({"tab": "Style"})).unwrap();
+    h.state_mut().run("ui.tab", json!({"tab": "Labeling"})).unwrap();
     for _ in 0..3 {
         h.step();
     }

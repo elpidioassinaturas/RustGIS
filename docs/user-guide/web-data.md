@@ -1,6 +1,6 @@
 # Web Data
 
-**Home › Web Data** gathers public web services and catalogs: the ones that cover the whole world
+**Home › Add › Web Data** gathers public web services and catalogs: the ones that cover the whole world
 in one alphabetical list, and those that cover one country in a submenu named after it. Each
 opens in the Web Data pane on the right, beside the map it searches. Unless a section says
 otherwise, the panes work in the web app too, provided the servers allow browser requests
@@ -42,7 +42,7 @@ Data added by its address, from a web server or an S3 bucket, is described in
 
 ## STAC catalogs
 
-**Home › Web Data › STAC Search…** searches a [STAC](https://stacspec.org) API for imagery and
+**Home › Add › Web Data › STAC Search…** searches a [STAC](https://stacspec.org) API for imagery and
 other assets: by collection, dates, the most cloud cover and (by default) where the map is. The
 default API is Element 84's [Earth Search](https://earth-search.aws.element84.com/v1);
 Microsoft's [Planetary Computer](https://planetarycomputer.microsoft.com/api/stac/v1) is offered
@@ -210,7 +210,7 @@ start from), `"phase"` and `"search": true` (find items at once).
 
 ### Planet Open Data
 
-**Home › Web Data › Planet Open Data…** browses Planet's [disaster data
+**Home › Add › Web Data › Planet Open Data…** browses Planet's [disaster data
 releases](https://source.coop/planet/disasterdata) on Source Cooperative: imagery of earthquakes,
 floods, fires and storms from PlanetScope, SkySat and Pelican, before and after the event, licensed
 CC BY-NC 4.0. Pick an event (and, below it, its pre-event or post-event imagery or one collection),
@@ -218,7 +218,7 @@ then **Find Items**; **Add** adds a scene's `visual` image.
 
 ### Portolan
 
-**Home › Web Data › Portolan…** opens the [Portolan
+**Home › Add › Web Data › Portolan…** opens the [Portolan
 registry](https://github.com/portolan-sdi/portolan-registry), a catalog of the open data catalogs
 published with Portolan (cities, regions and agencies, most in Europe). Pick a publisher's catalog,
 then a theme or collection, then **Find Items**: each collection's files (GeoParquet, PMTiles and
@@ -231,7 +231,7 @@ others) are listed, and **Add** adds the one chosen (`visual` first, often a PMT
   <figcaption>The Sentinel-2 Explorer: the clearest recent scenes where the map is, with their footprints.</figcaption>
 </figure>
 
-**Home › Web Data › Sentinel-2 Explorer…** searches Earth Search's Sentinel-2 Collection 1 Level-2A
+**Home › Add › Web Data › Sentinel-2 Explorer…** searches Earth Search's Sentinel-2 Collection 1 Level-2A
 scenes (`sentinel-2-c1-l2a`) where the map is, over the last 90 days and with at most 20 % cloud
 cover, clearest first (sorted by cloud cover). **Add** adds the true colour image (`visual`);
 the asset list beside each scene offers its bands (`red`, `nir`, `swir16`, `scl`…), each a
@@ -240,14 +240,14 @@ cloud-optimised GeoTIFF read in place. `stac.search` sorts with `"sortby"`
 
 ### Vantor
 
-**Home › Web Data › Vantor…** browses [Vantor](https://vantor.com)'s open data (formerly Maxar's
+**Home › Add › Web Data › Vantor…** browses [Vantor](https://vantor.com)'s open data (formerly Maxar's
 Open Data program): very high resolution imagery of disasters, one collection per event. Pick an
 event and a phase (before or after the event), then **Find Items**; **Add** adds a scene's
 `visual` cloud-optimised GeoTIFF.
 
 ### USGS LiDAR
 
-**Home › Web Data › United States › USGS LiDAR…** searches the USGS 3D Elevation Program's LiDAR
+**Home › Add › Web Data › United States › USGS LiDAR…** searches the USGS 3D Elevation Program's LiDAR
 point clouds on the Planetary Computer (`3dep-lidar-copc`) where the map is: zoom to a town first.
 Each tile's `data` asset is a COPC file, signed with the Planetary Computer's token and added as a
 LiDAR point cloud (an evenly spread sample of its points, see [Formats](data.md#formats)). A tile is
@@ -255,7 +255,7 @@ downloaded whole, often tens of megabytes, so adding one takes a while.
 
 ## Overture Maps
 
-**Home › Web Data › Overture Maps…** adds [Overture Maps](https://overturemaps.org)' open data:
+**Home › Add › Web Data › Overture Maps…** adds [Overture Maps](https://overturemaps.org)' open data:
 buildings, places, transportation (segments and connectors), administrative divisions, base
 layers (land use, land, land cover, water, infrastructure, bathymetry) and addresses, from the
 latest release (or one named with `"release"`). Two ways:
@@ -281,7 +281,7 @@ places); the layer says which.
 
 ## Source Cooperative
 
-**Home › Web Data › Source Cooperative…** lists [Source Cooperative](https://source.coop)'s
+**Home › Add › Web Data › Source Cooperative…** lists [Source Cooperative](https://source.coop)'s
 featured products (or an account's), browses a product's folders and adds a file by its address on
 the data proxy (`https://data.source.coop/<account>/<product>/…`): GeoParquet, FlatGeobuf,
 cloud-optimised GeoTIFFs and PMTiles are read in place, other files downloaded.
@@ -292,7 +292,7 @@ plugins need the network permission.
 
 ## Natural Earth
 
-**Home › Web Data › Natural Earth…** is the Source Cooperative browser locked to
+**Home › Add › Web Data › Natural Earth…** is the Source Cooperative browser locked to
 [Natural Earth](https://www.naturalearthdata.com)'s public domain map data as Source Cooperative
 holds it (`opengeos/natural-earth`): countries, states, coastlines, land, ocean, rivers, lakes,
 glaciers, urban areas, airports, railways and more. It opens on the `pmtiles/` folder, whose
@@ -303,7 +303,7 @@ archives are added as tile layers read in place; the `geoparquet/`, `geojson/`, 
 
 ## Fields of the World
 
-**Home › Web Data › Fields of the World…** adds the agricultural field boundaries the
+**Home › Add › Web Data › Fields of the World…** adds the agricultural field boundaries the
 [Fields of the World](https://fieldsofthe.world) model found in Sentinel-2 imagery, worldwide, one
 year at a time (2017 to 2025; 2nd Edition, CC BY 4.0). Each year is a PMTiles archive on Source
 Cooperative read in place. Fields are drawn from zoom 9, filled and outlined by the model's score
@@ -322,7 +322,7 @@ The look is the tile layer's own style layers (`map.addTiles` takes MapLibre sty
 
 ## OpenStreetMap and administrative boundaries
 
-**Home › Web Data › OpenStreetMap…** (`osm.download`) downloads OpenStreetMap data where the map
+**Home › Add › Web Data › OpenStreetMap…** (`osm.download`) downloads OpenStreetMap data where the map
 is from an [Overpass](https://overpass-api.de) server: a preset (buildings, roads, railways, water,
 land use, parks, points of interest or administrative boundaries) or tag filters such as
 `amenity=cafe, shop`. The answer becomes up to three layers, points, lines and polygons: closed
@@ -333,7 +333,7 @@ degrees (about 50 × 50 km), and an answer up to 50,000 elements: the public ser
 a larger area is better read from an extract (`.osm.pbf`). `"url"` names another Overpass server
 when the public one is busy.
 
-**Home › Web Data › Boundaries…** (`boundaries.add`) adds a country's administrative boundaries from
+**Home › Add › Web Data › Boundaries…** (`boundaries.add`) adds a country's administrative boundaries from
 [geoBoundaries](https://www.geoboundaries.org) (CC BY 4.0): the country itself (`ADM0`), its states
 or provinces (`ADM1`) and finer divisions down to `ADM5` where they exist, simplified for the map.
 `boundaries.countries` lists the countries.
@@ -353,7 +353,7 @@ NASA's data comes two ways: **NASA Earthdata…** adds imagery that NASA serves 
 
 ### NASA Earthdata
 
-**Home › Web Data › NASA Earthdata…** lists the layers of NASA's
+**Home › Add › Web Data › NASA Earthdata…** lists the layers of NASA's
 [Global Imagery Browse Services](https://www.earthdata.nasa.gov/engage/open-data-services-software/earthdata-developer-portal/gibs-api)
 (GIBS) in Web Mercator: more than a thousand layers of satellite imagery and science data (MODIS,
 VIIRS, Landsat, sea surface temperature, aerosols, fires…), grouped by mission or instrument (the
@@ -376,7 +376,7 @@ rustgis-cli run --cmd 'service.add={"url":"https://wmts.geo.admin.ch/EPSG/3857/1
 
 ### NASA Earthaccess
 
-**Home › Web Data › NASA Earthaccess…** searches [NASA Earthdata](https://www.earthdata.nasa.gov)
+**Home › Add › Web Data › NASA Earthaccess…** searches [NASA Earthdata](https://www.earthdata.nasa.gov)
 as GeoLibre's Earthaccess panel does, through NASA's Common Metadata Repository (CMR):
 
 1. **Dataset**: pick one of the **Popular datasets** (ICESat-2 ATL03/ATL06/ATL08, GEDI L2A/L2B/L4A,
@@ -413,7 +413,7 @@ rustgis-cli run --sample --cmd 'earthdata.login={"token":"…"}' --cmd 'layer.ad
 
 ## Open-data portals
 
-**Home › Web Data › Search Open Data…** (`portal.search`) finds datasets by text in an open-data
+**Home › Add › Web Data › Search Open Data…** (`portal.search`) finds datasets by text in an open-data
 portal and lists, for each, the resources RustGIS can add, the best format first:
 
 - **data.gov and CKAN catalogues**: [catalog.data.gov](https://catalog.data.gov) by default,
@@ -445,7 +445,7 @@ and plugins need the network permission. A dataset's licence is the portal's: it
 
 ### Web services
 
-Several **Home › Web Data** entries open the same search on one service, with its own choices
+Several **Home › Add › Web Data** entries open the same search on one service, with its own choices
 (`portal.search` with the `"portal"` in brackets):
 
 | Entry | What it finds | Added as |
@@ -484,7 +484,7 @@ rustgis-cli run --sample --cmd 'portal.add={"url":"https://data.geopf.fr/telecha
 
 ## United States
 
-**Home › Web Data › United States** holds services covering the United States: the
+**Home › Add › Web Data › United States** holds services covering the United States: the
 portals in the [Web services](#web-services) table (Tennessee GIS, US Federal, State and Local GIS,
 USGS 3DEP DEM), [USGS LiDAR](#usgs-lidar), and the panels below.
 
@@ -519,7 +519,7 @@ rustgis-cli run --cmd 'nationalMap.add={"service":"basemap/USGSTopo"}' --cmd 'na
 
 ### USGS NLDI
 
-**Home › Web Data › United States › USGS NLDI…** uses the USGS
+**Home › Add › Web Data › United States › USGS NLDI…** uses the USGS
 [Network-Linked Data Index](https://api.water.usgs.gov/nldi) on the NHDPlus river network, as
 GeoLibre's NLDI panel does. Each result is a layer:
 
@@ -544,7 +544,7 @@ rustgis-cli run --sample --cmd 'nldi.flowline={"lon":-89.36083,"lat":43.08944}' 
 
 ## Satellite embeddings
 
-**Home › Web Data › Satellite Embeddings…** shows pre-computed satellite embeddings: vectors a
+**Home › Add › Web Data › Satellite Embeddings…** shows pre-computed satellite embeddings: vectors a
 geospatial foundation model made for every pixel or image patch, so that places alike have values
 alike. Pick a dataset (its provider, model, resolution, years, coverage, licence and links are
 shown), a year, and **Search where the map is**; the results are cards with **Zoom** and **Add**,

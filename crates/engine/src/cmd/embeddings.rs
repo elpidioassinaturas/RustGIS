@@ -1,4 +1,4 @@
-//! Satellite embeddings (Home › Web Data › Satellite Embeddings): the catalog of embedding
+//! Satellite embeddings (Home › Add › Web Data › Satellite Embeddings): the catalog of embedding
 //! datasets, a search for a dataset's tiles where the map is, and a tile shown on the map —
 //! AlphaEarth's as a cloud-optimised GeoTIFF of three bands, Earth Index's as points coloured by
 //! their vectors' principal components, Tessera's as a raster of three bands of the view.
@@ -100,7 +100,7 @@ fn search(s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (year, area);
-        Err("in the web app, search with Home › Web Data › Satellite Embeddings".into())
+        Err("in the web app, search with Home › Add › Web Data › Satellite Embeddings".into())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -192,7 +192,7 @@ fn add_points(s: &mut Session, p: &Value, name: Option<String>) -> CmdResult {
             #[cfg(target_arch = "wasm32")]
             {
                 let _ = url;
-                return Err("in the web app, add Earth Index with Home › Web Data › Satellite Embeddings".into());
+                return Err("in the web app, add Earth Index with Home › Add › Web Data › Satellite Embeddings".into());
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -251,7 +251,7 @@ fn add_tessera(s: &mut Session, p: &Value, d: &emb::EmbeddingDataset, name: Opti
             #[cfg(target_arch = "wasm32")]
             {
                 let _ = area;
-                return Err("in the web app, add Tessera with Home › Web Data › Satellite Embeddings".into());
+                return Err("in the web app, add Tessera with Home › Add › Web Data › Satellite Embeddings".into());
             }
             #[cfg(not(target_arch = "wasm32"))]
             {

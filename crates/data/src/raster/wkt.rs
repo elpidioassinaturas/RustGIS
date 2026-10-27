@@ -777,7 +777,9 @@ fn national_datum(datum: Option<&Node>) -> Option<&'static str> {
     let datum = datum?;
     let name = norm(datum.title());
     let code = match name.strip_prefix("D_").unwrap_or(&name) {
-        "MONTE_MARIO" => 4265,
+        // Monte Mario (Rome), EPSG:6806, is the same datum measured from the Rome meridian: it
+        // takes Monte Mario's shift, and `earth` keeps the file's prime meridian as `+pm`.
+        "MONTE_MARIO" | "MONTE_MARIO_ROME" => 4265,
         "EUROPEAN_1950" | "EUROPEAN_DATUM_1950" | "ED50" => 4230,
         "OSGB_1936" | "OSGB36" | "ORDNANCE_SURVEY_OF_GREAT_BRITAIN_1936" => 4277,
         "DEUTSCHES_HAUPTDREIECKSNETZ" | "DHDN" => 4314,
@@ -1320,6 +1322,21 @@ mod tests {
         }
     }
 
+    /// Monte Mario (Rome), EPSG:4806, as GDAL writes it to a `.prj` (`Monte_Mario_(Rome)`) and as
+    /// WKT2 names it (`Monte Mario (Rome)`): Monte Mario's shift, with the Rome prime meridian.
+    #[test]
+    fn monte_mario_rome_takes_the_monte_mario_shift() {
+        let shift = epsg_proj4(4265).unwrap().split_whitespace().find(|p| p.starts_with("+towgs84=")).unwrap();
+        let esri = include_str!("esri_datum_corpus.tsv").lines().find(|l| l.starts_with("4806\t")).unwrap();
+        let wkt2 = include_str!("wkt2_corpus.tsv").lines().find(|l| l.starts_with("EPSG:4806\t")).unwrap();
+        for wkt in [esri, wkt2].map(|l| l.split('\t').nth(5).unwrap()) {
+            let (crs, note) = read_wkt(wkt).unwrap();
+            assert!(note.is_none(), "{note:?}");
+            let proj4 = &crs.custom_def().unwrap().proj4;
+            assert!(proj4.contains(shift) && proj4.contains("+pm=12.4523333333333"), "{proj4}");
+        }
+    }
+
     #[test]
     fn italian_datums_require_their_ellipsoid() {
         for datum in ["D_Rete_Dinamica_Nazionale_2008", "D_IGM_1995", "Istituto_Geografico_Militaire_1995"] {
@@ -1398,7 +1415,7 @@ mod tests {
         // WKT1.
         let by_code_only = ["EPSG:2056", "EPSG:5514", "EPSG:3375", "EPSG:3168", "EPSG:2066", "ESRI:54008"];
         let rows = corpus();
-        assert_eq!(rows.len(), 60);
+        assert_eq!(rows.len(), 84);
         for (code, [x, y, lon, lat], wkt) in rows {
             if let Some(n) = code.strip_prefix("EPSG:") {
                 let with_id = format!("{},ID[\"EPSG\",{n}]]", wkt.strip_suffix(']').unwrap());

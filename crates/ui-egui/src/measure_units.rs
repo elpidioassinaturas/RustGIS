@@ -20,7 +20,7 @@ fn whole_or_small(value: f64) -> String {
 /// Format a distance supplied in metres, using feet/miles or the metric formatter.
 /// Positive sub-foot values that would round to zero retain significant digits.
 pub fn distance(m: f64, imperial: bool) -> String {
-    if !imperial {
+    if !imperial || !m.is_finite() {
         return geom::format_distance(m);
     }
     let ft = m / geom::METRES_PER_FOOT;
@@ -43,7 +43,7 @@ pub fn elevation(m: f64, imperial: bool) -> String {
 /// Format square metres as square feet, acres or square miles, or use metric units.
 /// Positive sub-square-foot values that would round to zero retain significant digits.
 pub fn area(m2: f64, imperial: bool) -> String {
-    if !imperial {
+    if !imperial || !m2.is_finite() {
         return geom::format_area(m2);
     }
     if m2 < geom::SQUARE_METRES_PER_ACRE {
@@ -65,4 +65,23 @@ pub fn scale_distance(max_m: f64, imperial: bool) -> f64 {
         geom::METRES_PER_MILE
     };
     geom::nice_distance(max_m / unit) * unit
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nonfinite_measurements_are_unavailable_in_both_unit_systems() {
+        for imperial in [false, true] {
+            for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                assert_eq!(distance(value, imperial), "—");
+                assert_eq!(area(value, imperial), "—");
+            }
+        }
+        assert_eq!(distance(0.0, true), "0 ft");
+        assert_eq!(area(0.0, true), "0 ft²");
+        assert_eq!(distance(geom::METRES_PER_FOOT, true), "1 ft");
+        assert_eq!(area(geom::SQUARE_METRES_PER_SQUARE_FOOT, true), "1 ft²");
+    }
 }

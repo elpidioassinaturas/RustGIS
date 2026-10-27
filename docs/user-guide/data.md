@@ -31,11 +31,22 @@ Formats](data-formats.md).
 | Web tiles: XYZ/TMS/WMS rasters, Mapbox Vector Tiles, MapLibre styles, PMTiles and MBTiles archives | Yes | Yes (Analyze › Create Hosted Imagery) |
 | RustGIS project (`.rgis`; older `.rgisx` files open too) | Yes | Yes |
 
-Add data with **Home › Add Data** (**From URL…** adds a file by its web address, reading a
-cloud-optimised GeoTIFF, GeoParquet or FlatGeobuf in place, a view at a time, and downloading
-others; see [Files on the web](data-formats.md#files-on-the-web)), by dropping files on the window, or by
-passing them on the command line (`rustgis places.geojson`). **Home › Add Data › Delimited
-Text…** asks for a CSV or a spreadsheet first, then lists its columns to pick the x and y (or WKT)
+Add data with **Home › Add › Add Data**: its main button opens the file picker, and its menu offers
+other ways to add data, including **Delimited Text…**, **From URL…** and **From Service…**. Files
+can also be dropped on the window or passed on the command line (`rustgis places.geojson`). The
+file picker opens formats listed on [Supported Data Formats](data-formats.md), including
+cloud-optimised GeoTIFF, GeoParquet and FlatGeobuf (read in place, a view at a time; see [Files
+on the web](data-formats.md#files-on-the-web)). **Home › Add › Data Sources** opens the pane with
+saved connections, favourites, recent data and the public-source library.
+On the desktop, a file that holds several layers (a File Geodatabase, a GeoPackage, a DuckDB
+database or a file read through GDAL) asks which to add when it is picked, dropped or
+double-clicked in the Browser: **Choose Layers** lists them, all ticked, with **Select All**,
+**Select None** and a filter for a long list. Turn **Ask Which Layers to Add** off in the Add Data
+menu to add every layer, as before. Scripts pick one with `layer.addData`'s `"layer"`;
+`info.fileLayers` lists them.
+On the desktop, **Home › Add › Add Data › Add Folder…** connects a folder to the Browser; the web
+app does not offer folder connections.
+**Home › Add › Add Data › Delimited Text…** asks for a CSV or a spreadsheet first, then lists its columns to pick the x and y (or WKT)
 ones from, with the coordinate system (such as `EPSG:2263`) and the separator (changing it reads
 the columns again); `info.fileColumns` lists them for scripts. Add Data finds them itself
 (columns named like longitude/latitude, easting/northing or geometry, and EWKT's `SRID=`) and
@@ -48,7 +59,7 @@ the table's name beside it (`input_name`). The **XY Table To Point** tool
 ([Geoprocessing](analysis.md), and a table's right-click menu) makes points of a table already in
 the project, from two fields of coordinates and their coordinate system. In a text field a single comma is the decimal separator
 (`1,234` is 1.234); thousands separators are not read.
-**Home › Add Data › Graphics Layer** adds a layer for [drawn graphics](cartography.md#graphics),
+**Home › Add › Add Data › Graphics Layer** adds a layer for [drawn graphics](cartography.md#graphics),
 and **Data › Layer Templates** adds empty layers with ready-made schemas to draw into.
 
 Vector geometry is stored as WGS 84 longitude/latitude. Data in another supported coordinate
@@ -58,12 +69,13 @@ coordinate system and are reprojected as they draw. The map uses Web Mercator by
 **View › Projection** can change it; see [Maps](maps.md).
 
 ESRI `.prj` files without an EPSG code use their projection parameters and, for ED50,
-Monte Mario, OSGB36, DHDN, Amersfoort, GGRS87, CH1903/CH1903+ and S-JTSK, the same built-in
-Helmert datum transformation as the EPSG definition. A `TOWGS84` transformation in the file
-takes precedence. RDN2008 and IGM95 are treated as WGS 84-like datums. These transformations
-do not replace regional grid corrections for survey accuracy. An unrecognized datum keeps
-its ellipsoid and produces a notice when no transformation is available. Swiss oblique
-Mercator and the standard Krovak East/North variant are supported from their parameters.
+Monte Mario (from Greenwich or from Rome), OSGB36, DHDN, Amersfoort, GGRS87, CH1903/CH1903+
+and S-JTSK, the same built-in Helmert datum transformation as the EPSG definition. A `TOWGS84`
+transformation in the file takes precedence. RDN2008 and IGM95 are treated as WGS 84-like
+datums. These transformations do not replace regional grid corrections for survey accuracy. An
+unrecognized datum keeps its ellipsoid and produces a notice when no transformation is
+available. Swiss oblique Mercator and the standard Krovak East/North variant are supported from
+their parameters.
 
 Shapefile text uses a supported `.cpg` encoding, otherwise the `.dbf` code page, with UTF-8 as
 the fallback. Keep the sidecar files together.
@@ -139,12 +151,12 @@ result mixing geometry types becomes a layer per type, and rows without a geomet
 `"database"` opens a DuckDB database (read only) so the query names its tables plainly; the
 database is trusted like the query, since its views run as part of it.
 
-**Home › Add Data** opens a DuckDB database file (`.duckdb`, `.ddb`): every table with a geometry
+**Home › Add › Add Data** opens a DuckDB database file (`.duckdb`, `.ddb`): every table with a geometry
 column becomes a layer (`"layer"` picks one).
 
 ### PostgreSQL and PostGIS
 
-**Home › Add Data › Database…** (`layer.addDatabase`, desktop) connects to a PostgreSQL database with
+**Home › Add › Add Data › Database…** (`layer.addDatabase`, desktop) connects to a PostgreSQL database with
 PostGIS and reads its tables live. The dialog takes a saved connection or a typed one, a password,
 a table (**List Tables**, or all tables with geometry) and a coordinate system for geometry that
 doesn't say its own. RustGIS talks to the server itself (nothing else to install;
@@ -177,7 +189,7 @@ opt-in to the operating system's password store; see [Named connections](#named-
 for reconnect, selection and forgetting rules. Opening a project can use a remembered password
 only for a unique, exact saved-address match, or an explicit session selection. Otherwise a
 waiting layer offers **Log In…**, or a chooser when several remembered connections match.
-Without a matching connection, connect again with **Add Data › Database…**.
+Without a matching connection, connect again with **Home › Add › Add Data › Database…**.
 `PGPASSWORD` or libpq's password file (`~/.pgpass`, or
 `%APPDATA%\postgresql\pgpass.conf`) can serve when you explicitly add a table without a password;
 opening a project never newly authorizes these ambient credentials. A small table's features
@@ -207,7 +219,7 @@ plugins need both the files and network permissions.
 
 ## MySQL and MariaDB
 
-**Home › Add Data › Database…** (`layer.addDatabase`) also connects to a MySQL (8 or later) or
+**Home › Add › Add Data › Database…** (`layer.addDatabase`) also connects to a MySQL (8 or later) or
 MariaDB (10.2 or later) database and reads its spatial columns live, as it does PostGIS tables:
 RustGIS talks to the server itself, with nothing else to install. The connection is an address,
 `mysql://user@host:3306/database` (or `mariadb://…`); what it leaves out is, as with the
@@ -247,7 +259,7 @@ SQL queries (`layer.addSql`, the SQL pane) don't run on MySQL or MariaDB databas
 
 ## SQL Server and Azure SQL
 
-**Home › Add Data › Database…** (`layer.addDatabase`) reads the `geometry` and `geography`
+**Home › Add › Add Data › Database…** (`layer.addDatabase`) reads the `geometry` and `geography`
 columns of SQL Server 2012 or later and Azure SQL tables and views directly, on the desktop.
 Use `mssql://user@host:1433/database`; an empty host means `localhost`, and omitting the database
 uses the login's default database. **List Tables** (`info.databaseTables`) lists spatial columns.
@@ -294,18 +306,18 @@ remembered reconnects and explicit selection. Secret-named query values such as 
 `access_token` are removed from saved connection addresses. `SQLCMDPASSWORD` serves only when
 explicitly adding a database, not when opening a project. Windows integrated sign-in still
 requires that same address to have been added this session: opening a project does not
-authorize Windows identity. Reconnect with **Add Data › Database…** when needed. SQL queries
+authorize Windows identity. Reconnect with **Home › Add › Add Data › Database…** when needed. SQL queries
 (`layer.addSql`, the SQL pane) do not run on SQL Server connections.
 
 ## Web Data
 
-**Home › Web Data** gathers public web services and catalogs: STAC imagery catalogs, Overture
+**Home › Add › Web Data** gathers public web services and catalogs: STAC imagery catalogs, Overture
 Maps, OpenStreetMap, NASA Earthdata, open-data portals, satellite embeddings and more. They have a
 page of their own: [Web Data](web-data.md).
 
 ## Geocoding addresses
 
-**Home › Add Data › Geocode Addresses…** (`layer.geocode`) turns a standalone table's or a
+**Home › Add › Add Data › Geocode Addresses…** (`layer.geocode`) turns a standalone table's or a
 layer's addresses into points: a CSV of addresses without coordinates is added as a standalone table, then each row's address
 fields (`"address"`: a field, or several such as street, city and country, joined with commas)
 are looked up, each distinct address once. The result is a new point layer holding every field
@@ -328,12 +340,12 @@ it geocodes, and plugins need the network permission.
 
 ## S3 buckets
 
-An `s3://bucket/key` address works wherever data is added by its address: **Add Data › From
-URL…** and `layer.addUrl` (a cloud-optimised GeoTIFF is read in place by range, other files are
+An `s3://bucket/key` address works wherever data is added by its address: **Home › Add › Add Data ›
+From URL…** and `layer.addUrl` (a cloud-optimised GeoTIFF is read in place by range, other files are
 downloaded), PMTiles archives, `?data=` links, and STAC assets whose address is an `s3://` one.
 A public bucket needs nothing more: it is read anonymously from AWS.
 
-**Home › Add Data › S3…** (`s3.connect`) connects to a private bucket, or to an S3-compatible
+**Home › Add › Add Data › S3…** (`s3.connect`) connects to a private bucket, or to an S3-compatible
 service (MinIO, Cloudflare R2, Wasabi, source.coop…) by its endpoint, and browses a bucket a
 folder at a time (`s3.list`), adding an object with **Add**. A connection names its endpoint (AWS
 when empty), its region and the buckets it serves: the ones it is given (`"buckets"`) and the ones
@@ -409,8 +421,8 @@ before it connects or lists; plugins can't connect, and need the network permiss
 
 ## Data Sources
 
-The **Data Sources** pane (**View › Windows › Data Sources**, `ui.pane.sources`; **Home › Add
-Data › Connections…** also opens it) gathers the places data comes from:
+The **Data Sources** pane (**View › Windows › Data Sources**, `ui.pane.sources`; **Home › Add ›
+Data Sources** also opens it) gathers the places data comes from:
 
 - **Favourites**: any source, right-clicked and added.
 - **Recent**: the last 20 sources added (files, web addresses, tile layers, services, database
@@ -449,7 +461,7 @@ database is kept without its password. The commands `sources.list`, `sources.sav
 ### Named connections
 
 In the pane, **New Connection ▾** and **Edit…** let you set the name, group and address;
-**Home › Add Data › New Connection** opens the same form for a chosen kind. Leave a new
+**Home › Add › Add Data › New Connection** opens the same form for a chosen kind. Leave a new
 connection's name blank to derive it from the address. **Test** checks the form without saving
 it: web-service, catalogue, STAC and S3 requests run in the background on both desktop and web;
 database tests run synchronously on desktop. The web app doesn't offer database kinds for new
@@ -694,7 +706,9 @@ A TIFF or PNG without coordinates opens as a scan to place with **Georeference**
 file next to it (as a Shapefile does); otherwise, and always for uploads, it must be in
 longitude/latitude degrees. On the desktop, a GDAL `.aux.xml` file next to a raster (`dem.tif.aux.xml`
 or `dem.aux.xml`) names its bands from their descriptions, gives the no-data value when the file
-has none, and supplies the band statistics when only an overview of the raster is read. The band
+has none, and supplies the band statistics when only an overview of the raster is read. Its
+category names (GDAL's `SetCategoryNames`, one per value) label the classes in the legend of a
+Colormap or Unique Values layer; a value without a name shows the value itself. The band
 descriptions GDAL and rasterio write inside a GeoTIFF (its `GDAL_METADATA` tag) name its bands
 too, a sidecar's taking precedence.
 Exporting a raster opened from an overview writes that overview; the results of adding and of
@@ -768,7 +782,7 @@ path relative to the project and reopen it; rasters added in the browser are sto
 
 ### Zarr stores
 
-**Home › Add Data › Zarr…** (`layer.addZarr`) adds a variable of a [Zarr](https://zarr.dev) store
+**Home › Add › Add Data › Zarr…** (`layer.addZarr`) adds a variable of a [Zarr](https://zarr.dev) store
 (format 2 or 3), the multidimensional arrays climate and Earth-observation data are kept in: give
 the store's web address, or (on the desktop) its folder, and **Connect** lists its variables
 (`raster.zarrInfo`). A variable's map is its latitude/longitude (or y/x) dimensions; its other
@@ -849,13 +863,13 @@ RustGIS saves pieces of a project as files you can share and reuse:
 
 | Item | Extension | Made with | Opened with |
 | --- | --- | --- | --- |
-| Map file (a map with its data) | `.rgismap` | Publish › Save As › Map File | Home › Import |
+| Map file (a map with its data) | `.rgismap` | Publish › Save As › Map File | Command Search (`map.import`), or drop it on the window |
 | Layer file (a layer with its symbology) | `.rgislyr` | Publish › Save As › Layer File | Add Data |
 | Styles (saved symbology) | `.rgisstyle` | Style › Styles › New Style, then Publish › Save As › Style Items | Style › Styles › Add Style File |
 | [Color ramps](cartography.md#custom-color-ramps) | `.rgisramp` (also reads QGIS `.xml`/`.qml`, GDAL color `.txt` and GMT `.cpt`) | Publish › Save As › Color Ramps, or by hand | Style › Styles › Add Color Ramp File |
-| Project template (the setup without features) | `.rgistemplate` | Home › Templates, or Publish › Save As | Home › Templates › Open Custom Template |
+| Project template (the setup without features) | `.rgistemplate` | Publish › Save As, or Command Search (`project.saveTemplate`) | Command Search (`project.fromTemplate`) |
 | Project package (the project, with linked raster files embedded while they fit) | `.rgispkg` | Publish › Package › Project | Project › Open, or drop it on the window |
-| Map package / mobile map package | `.rgismpk` | Publish › Package › Map or Mobile Map | Home › Import |
+| Map package / mobile map package | `.rgismpk` | Publish › Package › Map or Mobile Map | Open the package as a project, or drop it on the window |
 | Results package (geoprocessing history and outputs) | `.rgisgpk` | Publish › Package › Results | any zip tool |
 | Task (guided command steps) | `.rgistask` | Analyze › Task, Publish › Save As › Task Item | Analyze › Task › Import Task |
 | Bookmarks (as longitude, latitude and scale) | `.rgisbookmarks` | Home › Navigate › Bookmarks › Export Bookmarks | Home › Navigate › Bookmarks › Import Bookmarks |

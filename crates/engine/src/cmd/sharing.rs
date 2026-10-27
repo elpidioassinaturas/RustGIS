@@ -644,9 +644,23 @@ pub fn web_style(l: &Layer) -> Value {
         }
     }
     if l.labels.enabled && l.labels.default.visible && !l.labels.default.field.is_empty() {
-        layers.push(json!({"id": format!("{src}-labels"), "type": "symbol", "source": src,
-            "layout": {"text-field": ["to-string", prop(&l.labels.default.field)], "text-size": l.labels.default.size},
-            "paint": {"text-color": l.labels.default.color.hex(), "text-halo-color": "#ffffff", "text-halo-width": if l.labels.default.halo { 1.5 } else { 0.0 }}}));
+        let c = &l.labels.default;
+        // A halo of the class's own colour and width (points, as pixels: as the text's size), else
+        // the one the map draws (light behind dark text, dark behind light) and thin.
+        let halo_color = css(c.halo_color_for(c.color));
+        let halo_width = if c.halo { c.halo_width.map_or(1.5, f64::from) } else { 0.0 };
+        let mut layout = json!({"text-field": ["to-string", prop(&c.field)], "text-size": c.size});
+        // Letter spacing in ems, as MapLibre has it.
+        if c.spacing != 0.0 && c.size > 0.0 {
+            layout["text-letter-spacing"] = json!(f64::from(c.spacing) / f64::from(c.size));
+        }
+        // Its offset in ems too, unless along a line, which the map doesn't move (a background
+        // has no MapLibre equivalent: left out).
+        if c.offset != [0.0; 2] && c.size > 0.0 && !(c.placement.along_line() && gt == GeometryType::Polyline) {
+            layout["text-offset"] = json!(c.offset.map(|o| f64::from(o) / f64::from(c.size)));
+        }
+        layers.push(json!({"id": format!("{src}-labels"), "type": "symbol", "source": src, "layout": layout,
+            "paint": {"text-color": c.color.hex(), "text-halo-color": halo_color, "text-halo-width": halo_width}}));
     }
     let (minzoom, maxzoom) = zoom_range(l);
     for layer in &mut layers {

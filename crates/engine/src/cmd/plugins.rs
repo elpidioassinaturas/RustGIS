@@ -359,8 +359,9 @@ pub fn reaches(spec: &C, params: &Value) -> Option<Reach> {
     if DATABASES.contains(&spec.id) {
         return Some(Reach::Files);
     }
-    // Georeferencing writes a file only when it is given a `path`; the rest of it stays in the project.
-    if spec.id == "raster.georeference" {
+    // Georeferencing and projecting write a file only when given a `path`; the rest of them stays
+    // in the project.
+    if spec.id == "raster.georeference" || spec.id == "raster.project" {
         return super::items::names_place(params, PLACE_KEYS, 0).then_some(Reach::Files);
     }
     let files = super::items::names_place(params, PLACE_KEYS, 0)

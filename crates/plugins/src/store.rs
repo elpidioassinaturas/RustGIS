@@ -194,7 +194,7 @@ fn extract(bytes: &[u8], to: &Path) -> Result<(), String> {
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).map_err(|e| e.to_string())?;
         // `enclosed_name` refuses absolute paths and `..`: nothing lands outside `to`.
-        let Some(name) = f.enclosed_name() else { return Err(format!("the package has an unsafe path: {}", f.name())) };
+        let Some(name) = f.enclosed_name() else { return Err(format!("the package has an unsafe path: {}", f.name().unwrap_or_default())) };
         let Ok(rel) = name.strip_prefix(&root) else { continue };
         if rel.as_os_str().is_empty() {
             continue;

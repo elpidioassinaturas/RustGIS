@@ -43,3 +43,7 @@ rustgis-plugins = { workspace = true, features = ["testing"] }
 egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }
 image = { workspace = true }
 pollster = { workspace = true }
+
+[[example]]
+name = "ui_shot"
+test = true

@@ -391,7 +391,7 @@ fn main() -> eframe::Result {
     for e in open_files(&mut app, &files) {
         eprintln!("rustgis: {e}");
     }
-    app.session.dirty = false;
+    app.session.mark_saved();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("RustGIS")
         .with_app_id("org.rustgis.RustGIS")

@@ -65,15 +65,31 @@ fn json_text(v: &Json) -> Option<String> {
     }
 }
 
-/// The features of a layer by key: the `key` field, or one entry `"all"` when there is no key.
-fn by_key(ds: &Dataset, key: Option<&str>) -> BTreeMap<String, Vec<Geometry>> {
+/// A feature's key: its key fields' values as text, joined by `|` as `generate.py` writes a key of
+/// several fields ("P1|Z1"); `"all"` when there are no key fields.
+fn key_text(ds: &Dataset, row: usize, fields: Option<&[String]>) -> String {
+    match fields {
+        Some(fields) => fields.iter().map(|f| text(ds, row, f).unwrap_or_default()).collect::<Vec<_>>().join("|"),
+        None => "all".into(),
+    }
+}
+
+/// The fields a case's output is keyed by: its `key`, one field or a list; `id` without one; none
+/// when it is null.
+fn key_fields(expect: &Json) -> Option<Vec<String>> {
+    match expect.get("key") {
+        Some(Json::Null) => None,
+        Some(Json::Array(fields)) => Some(fields.iter().filter_map(|f| f.as_str().map(String::from)).collect()),
+        Some(Json::String(field)) => Some(vec![field.clone()]),
+        _ => Some(vec!["id".into()]),
+    }
+}
+
+/// The features of a layer by key (see [`key_text`]).
+fn by_key(ds: &Dataset, key: Option<&[String]>) -> BTreeMap<String, Vec<Geometry>> {
     let mut out: BTreeMap<String, Vec<Geometry>> = BTreeMap::new();
     for (row, f) in ds.features.iter().enumerate() {
-        let k = match key {
-            Some(key) => text(ds, row, key).unwrap_or_default(),
-            None => "all".into(),
-        };
-        out.entry(k).or_default().extend(f.geometry.clone());
+        out.entry(key_text(ds, row, key)).or_default().extend(f.geometry.clone());
     }
     out
 }
@@ -146,9 +162,11 @@ fn check(case: &Json, layers: &Layers) -> Vec<String> {
 
     if let Some(path) = expect["features"].as_str() {
         let Some(ds) = layer_of(result.output) else { return vec!["no layer came out".into()] };
-        let key = if expect.get("key").is_some_and(Json::is_null) { None } else { Some(expect["key"].as_str().unwrap_or("id")) };
-        let want = by_key(&read_layer(&dir().join(path), "expected"), key.map(|_| "id"));
-        let got = by_key(&ds, key);
+        let key = key_fields(expect);
+        // The reference writes every key, of however many fields, as its `id`.
+        let id = ["id".to_string()];
+        let want = by_key(&read_layer(&dir().join(path), "expected"), key.as_ref().map(|_| id.as_slice()));
+        let got = by_key(&ds, key.as_deref());
         for (k, w) in &want {
             match got.get(k) {
                 None => problems.push(format!("{k}: missing (the reference has it)")),
@@ -161,10 +179,7 @@ fn check(case: &Json, layers: &Layers) -> Vec<String> {
         if let Some(counts) = expect["counts"].as_object() {
             for (row, _) in ds.features.iter().enumerate() {
                 // The same key as `by_key` gives the feature.
-                let k = match key {
-                    Some(key) => text(&ds, row, key).unwrap_or_default(),
-                    None => "all".into(),
-                };
+                let k = key_text(&ds, row, key.as_deref());
                 let (n, want) = (text(&ds, row, "count"), counts.get(&k).and_then(json_text));
                 if n != want {
                     problems.push(format!("{k}: count {n:?}, the reference {want:?}"));
@@ -175,11 +190,17 @@ fn check(case: &Json, layers: &Layers) -> Vec<String> {
         let want: Vec<String> = ids.iter().filter_map(json_text).collect();
         let got: Vec<String> = match result.output {
             Output::Selection { layer, rows } => match layers.0.get(&layer) {
-                Some(ds) => rows.iter().filter_map(|r| text(ds, *r, "id")).collect(),
+                Some(ds) => {
+                    let key = key_fields(expect);
+                    rows.iter().map(|r| key_text(ds, *r, key.as_deref())).collect()
+                }
                 None => return vec![format!("a selection in '{layer}', which isn't a reference layer")],
             },
             other => match layer_of(other) {
-                Some(ds) => (0..ds.features.len()).filter_map(|r| text(&ds, r, "id")).collect(),
+                Some(ds) => {
+                    let key = key_fields(expect);
+                    (0..ds.features.len()).map(|r| key_text(&ds, r, key.as_deref())).collect()
+                }
                 None => return vec!["neither a selection nor a layer came out".into()],
             },
         };

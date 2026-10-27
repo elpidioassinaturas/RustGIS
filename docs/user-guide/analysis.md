@@ -78,7 +78,7 @@ written some other way (a token typed into a SQL query, say) can still be there:
 before sharing it. A point buffered where the
 map was clicked is copied as the command that buffered it, with the point.
 
-There are 20 built-in tools; GeoLibre and plugin tools join them when available.
+There are 22 built-in tools; GeoLibre and plugin tools join them when available.
 Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available tools and their parameters):
 
 | Tool | Id | Toolbox |
@@ -86,6 +86,7 @@ Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available too
 | Buffer | `buffer` | Analysis › Proximity |
 | Clip | `clip` | Analysis › Extract |
 | Erase | `erase` | Analysis › Overlay |
+| Intersect | `intersect` | Analysis › Overlay |
 | Spatial Join | `spatialJoin` | Analysis › Overlay |
 | Dissolve | `dissolve` | Data Management › Generalization |
 | Minimum Bounding Geometry | `convexHull` | Data Management › Features |
@@ -101,6 +102,7 @@ Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available too
 | Summarize Within | `countPoints` | Analysis › Summarize |
 | Summary Statistics | `summaryStatistics` | Analysis › Statistics |
 | Export Features | `exportFeatures` | Conversion |
+| Zonal Statistics | `zonalStats` | Analysis › Raster |
 | IDW Interpolation | `idwInterpolation` | Analysis › Interpolation |
 | Ordinary Kriging | `kriging` | Analysis › Interpolation |
 
@@ -151,6 +153,23 @@ third of the extent's diagonal. Coordinates, `range`, `extent` and `pixelSize` a
 lines and polygons contribute their bounding-box centres. At least two distinct locations with
 numeric values are needed. It adds **two separate Float32 GeoTIFF layers**: the prediction,
 named by `output`, and `<output>_variance`.
+
+**Intersect** (`intersect`) splits `input` features by the polygons of `overlay`: each part of an
+input feature inside an overlay polygon becomes a feature with the attributes of both, the input's
+first. A parcel crossed by two flood zones gives two features, one for each zone, and a point in two
+overlapping polygons gives two. Input features outside every overlay polygon are left out. An
+overlay polygon's edge counts as inside it, as for Clip: a point on the edge and a stretch of line
+along it are kept, but polygons that only share an edge or a corner, and a line that only touches
+one, give nothing. The input can be points, lines or polygons and keeps its geometry type; the
+overlay must be polygons. An overlay field whose name the input already has gets a suffix (`id_2`).
+Overlapping features within one layer are not split against each other. Like Clip and Erase, the
+overlay works on the map's Web Mercator coordinates, so the parts' edges are straight on the map.
+Selections in both layers are honoured. To measure each part, run Calculate Geometry Attributes on
+the result:
+
+```text
+gp.run={"tool":"intersect","params":{"input":"parcels","overlay":"floodplain","output":"parcels_in_floodplain"}}
+```
 
 **Spatial Join** (`spatialJoin`, also `gp.spatialJoin`) copies attributes from `join` features
 to `target` features. Layers may have different source coordinate systems: their geometry is
@@ -325,7 +344,8 @@ honour it, this restricts an unselected main feature input by bounding-box inter
 clipping its geometry; an existing selection takes precedence and overlay inputs stay whole.
 The Geostatistical Wizard uses the environment's extent and raster cell size (degrees).
 IDW Interpolation and Ordinary Kriging instead use their own `extent` and `pixelSize` parameters;
-the environment does not set their output grids. Raster Functions › Resample matches a target
+the environment does not set their output grids. Project Raster (`raster.project`) puts a raster
+on a grid of any coordinate system, cell size and extent; Raster Functions › Resample matches a target
 raster's grid.
 
 The **Script** pane runs commands from text, one per line (`id {json}`); its box grows with the script down to the bottom of the pane,
@@ -462,6 +482,39 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
   coordinate systems or cell sizes, or opened from an overview, are refused rather than quietly
   resampled, as are tiles whose cells don't line up; the mosaic has to fit in memory (120 million
   values: cells times bands).
+- **Project Raster** (`raster.project`) puts a raster on a grid of your choosing, so rasters from
+  different sources line up cell for cell (for map algebra, the Suitability Modeler, a series for
+  Trend Analysis, or the inputs of a model): `{"layer": "ndvi", "crs": 31983, "cellSize": 100,
+  "extent": "Study area", "resampling": "average", "path": "ndvi_100m.tif"}`. It has no pane yet:
+  run it from the Script pane, the AI Assistant, the command line or Python. The result is a new
+  layer (`name`, by default the layer's name with "projected"), and with `path` a cloud-optimised
+  GeoTIFF too.
+  - **The grid:** `crs` (by default the layer's), `cellSize` in its units (one number, or
+    `[x, y]`; by default about the layer's pixel there), `origin`, a point a cell corner falls on
+    (`[0, 0]` by default, so cell corners are whole multiples of the cell size and any two rasters
+    projected with the same `crs` and `cellSize` line up), and `extent`: a polygon layer (its
+    selected features' bounds, or all of them), `[west, south, east, north]` in degrees or
+    `"view"`, by default the layer's footprint. The extent is widened to whole cells.
+  - **Another raster's grid:** `"grid": "dem_100m"` takes its coordinate system, cells and extent
+    exactly, instead of `crs`, `cellSize`, `origin` and `extent`.
+  - **Resampling:** `nearest` (the default: it never invents a value, which is right for classes),
+    `bilinear` or `cubic` sample each cell at its centre. `average` and `mode` take every pixel whose
+    centre falls in the cell (no-data skipped), its mean or its most frequent value (of those
+    tied, the one that reaches the top count first, the pixels taken row by row, as in GDAL), which
+    is what a coarser grid of elevation or land-cover classes should hold. A
+    cell no pixel centre falls in, on a grid finer than the raster, takes the pixel under its
+    centre. Classes take `nearest` or `mode`, continuous values `bilinear` or `cubic`, or `average`
+    going coarser. A whole-number pixel type keeps its type, so its mean is rounded. On a colour
+    image the colours count as much as their pixels are opaque, and `mode` is taken band by band
+    (each channel's most frequent value among the pixels that show).
+  - Cells off the raster are its no-data value. A raster without one keeps its bands as they are,
+    with NaN there in a floating-point type and 0 in a whole-number one, as GDAL leaves them; a
+    colour image gains an alpha band instead, so they are see-through.
+  - Datums are shifted as everywhere in RustGIS, through each system's transformation to WGS 84
+    (a Helmert step for SAD69 or Córrego Alegre, a few metres from the IBGE's grid shifts).
+  - The result has to fit in memory (120 million values, cells times bands; 32 million in the
+    web app): a grid past that is refused, naming the limit. A raster read from its overview is
+    projected at that resolution, and the result says so.
 - **Classification Wizard** (unsupervised k-means) and **Classification Tools** (minimum distance
   from training polygons).
 - **Mensuration**: distances along the surface, heights between two points, areas, and volumes
@@ -511,6 +564,10 @@ and a **Mann–Kendall** test of whether the trend is significant.
     "bdc-mod13q1-ndvi", "bbox": [-46, -10.95, -40.35, -2.7], "start": "2001", "end": "2025"}`
     fills in the collection's API, band, cell size and cloud cap, or a Zarr entry's store and
     variable.
+
+  For the mean of a finer layer's pixels in each cell, or for a grid of your own, put the rasters
+  on one grid first with Project Raster (`"grid"`, the first one's, and `"resampling":
+  "average"`).
 - **The test:** NDVI and temperature series are autocorrelated, which makes the plain test report
   too many significant cells, so the default is the **modified Mann–Kendall** test of **Hamed &
   Rao (1998)**: the variance of S is corrected by the autocorrelation of the detrended series'

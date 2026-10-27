@@ -558,7 +558,7 @@ pub fn download_detailed(url: &str, max: usize, done: DoneDetailed) {
 }
 
 /// How long a download the caller waits for may take: commands run where the app waits too (the
-/// AI Assistant's), so a large file comes through Add Data › From URL, which downloads off the
+/// AI Assistant's), so a large file comes through Home › Add › Add Data › From URL, which downloads off the
 /// frame.
 #[cfg(not(target_arch = "wasm32"))]
 pub const BLOCKING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -574,7 +574,7 @@ pub fn download_blocking(url: &str) -> Result<Vec<u8>, String> {
 pub fn download_blocking_limited(url: &str, max: usize) -> Result<Vec<u8>, String> {
     download_blocking_within(url, max, BLOCKING_TIMEOUT).map_err(|e| {
         if e.contains("timeout") || e.contains("timed out") {
-            format!("{e} (a large file: add it with Add Data › From URL, which downloads in the background)")
+            format!("{e} (a large file: add it with Home › Add › Add Data › From URL, which downloads in the background)")
         } else {
             e
         }

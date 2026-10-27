@@ -1,6 +1,6 @@
 //! Project items: folder connections, map and layer files, styles, project templates, packages,
-//! layer templates, tasks, and 3D export (Home › Project; Data › Layer Templates and Styles; Share ›
-//! Package, Save As and Output).
+//! layer templates, tasks, and 3D export (Home › Add; Data › Layer Templates and Styles; Publish ›
+//! Package, Save As and Output; Command Search for map/template imports).
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -21,7 +21,7 @@ const MAX_FILE: u64 = 512 << 20;
 pub fn commands() -> Vec<C> {
     vec![
         // Folder connections.
-        C::new("project.addFolder", "Add Folder", "Home › Project", |s, p| {
+        C::new("project.addFolder", "Add Folder", "Home › Add › Add Data", |s, p| {
             let path = ps(p, "path").map(str::trim).filter(|p| !p.is_empty()).ok_or("path is required")?;
             if !cfg!(target_arch = "wasm32") && !Path::new(path).is_dir() {
                 return Err(format!("{path} isn't a folder"));
@@ -56,7 +56,7 @@ pub fn commands() -> Vec<C> {
         C::new("map.save", "Save Map File", "Publish › Save As", |s, p| save_item(s, "map", p))
         .view()
         .params(r#"{"path": "*.rgismap", "map"?: name}"#),
-        C::new("map.import", "Import", "Home › Project", import_maps).params(r#"{"path": "*.rgismap|*.rgis|*.rgispkg" | "text": map file JSON | "data": base64 file}"#),
+        C::new("map.import", "Import", "Command Search", import_maps).params(r#"{"path": "*.rgismap|*.rgis|*.rgispkg" | "text": map file JSON | "data": base64 file}"#),
         C::new("layer.save", "Save Layer File", "Publish › Save As", |s, p| save_item(s, "layer", p))
         .view()
         .when(need_layer)
@@ -172,10 +172,10 @@ pub fn commands() -> Vec<C> {
         C::new("project.saveTemplate", "Save Project Template", "Publish › Save As", |s, p| save_item(s, "template", p))
         .view()
         .params(r#"{"path": "*.rgistemplate", "name"?: template name}"#),
-        C::new("project.newTemplate", "New Custom Template", "Home › Project", |s, p| save_item(s, "template", p))
+        C::new("project.newTemplate", "New Custom Template", "Publish › Save As", |s, p| save_item(s, "template", p))
         .view()
         .params(r#"{"path": "*.rgistemplate", "name"?: template name}"#),
-        C::new("project.fromTemplate", "Open Custom Template", "Home › Project", |s, p| {
+        C::new("project.fromTemplate", "Open Custom Template", "Command Search", |s, p| {
             let text = read_text(p)?;
             super::connections::clear_active();
             let mut proj = match Project::from_import_json(&text, None) {

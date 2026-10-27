@@ -426,8 +426,9 @@ pub struct Notice {
 
 const UNDO_LIMIT: usize = 40;
 
-/// An undo or redo step: the project before it, the layout open then, its label and who made it.
-type Step = (Project, Option<usize>, &'static str, Option<String>);
+/// An undo or redo step: the project before it, the layout open then, its label, who made it,
+/// and which state of the project it is ([`Session::dirty`]).
+type Step = (Project, Option<usize>, &'static str, Option<String>, u64);
 
 /// What a project holds in the session beside itself: what [`Session::clear_history`] forgets
 /// when another project starts, and what opening one sets (its file, layer, tool…). When another
@@ -446,7 +447,8 @@ struct PutAside {
     /// The projection those cameras are in: without it, the extent history given back would be
     /// taken for another projection's and cleared.
     history_projection: String,
-    dirty: bool,
+    state: u64,
+    saved: Option<u64>,
     trusted_tasks: std::collections::HashSet<String>,
     trusted_models: std::collections::HashSet<String>,
     trusted_notebooks: std::collections::HashSet<String>,
@@ -485,7 +487,13 @@ struct PutAside {
 pub struct Session {
     pub project: Project,
     pub path: Option<PathBuf>,
-    pub dirty: bool,
+    /// Which state of the project is open: a new one after each change, an earlier one again
+    /// after undo. Each is given once in a session (`states` counts them).
+    state: u64,
+    states: u64,
+    /// The state last saved, or opened from its file; `None` when no state of the open project is
+    /// (recovered work). The project has unsaved changes while another is open ([`Session::dirty`]).
+    saved: Option<u64>,
     /// Favourite, recent and saved data sources (kept with the app's preferences, not the
     /// project).
     pub sources: sources::Sources,
@@ -613,7 +621,7 @@ pub struct Session {
     /// them (it keeps nothing between calls). Not saved with the project: a plugin's state
     /// command reads what it needs from the map when the panel opens.
     pub plugin_panels: std::collections::BTreeMap<String, rustgis_plugins::PanelState>,
-    /// Data downloads of this project under way (Add Data › From URL), by id.
+    /// Data downloads of this project under way (Home › Add › Add Data › From URL), by id.
     downloading: Vec<u64>,
     /// Downloads that landed, waiting for `layer.addDownload`.
     pub(crate) downloaded: Vec<(u64, Vec<u8>)>,
@@ -713,7 +721,9 @@ impl Session {
         Session {
             project,
             path: None,
-            dirty: false,
+            state: 0,
+            states: 0,
+            saved: Some(0),
             sources: sources::Sources::default(),
             connections: connections::Connections::default(),
             s3_bindings: std::collections::BTreeMap::new(),
@@ -1009,6 +1019,7 @@ impl Session {
     /// and restored if `f` fails or panics.
     pub(crate) fn guarded(&mut self, label: &'static str, mutates: bool, f: impl FnOnce(&mut Session) -> CmdResult) -> CmdResult {
         let snapshot = mutates.then(|| self.project.clone());
+        let state = self.state;
         // The merge key asked for applies to this command only, whatever it does; and to a
         // command run by itself, not to those it runs.
         let merge = if self.depth == 0 { self.merge.take() } else { None };
@@ -1069,7 +1080,7 @@ impl Session {
                 // back to before the first of them. Only a command run by itself merges.
                 let key = merge;
                 if key.is_none() || key != self.merged || self.undo.is_empty() {
-                    self.undo.push((snap, open_layout, label, self.actor.clone()));
+                    self.undo.push((snap, open_layout, label, self.actor.clone(), state));
                     if self.undo.len() > UNDO_LIMIT {
                         self.undo.remove(0);
                     }
@@ -1078,7 +1089,7 @@ impl Session {
                     self.merged = key;
                 }
                 self.redo.clear();
-                self.dirty = true;
+                self.state = self.new_state();
             }
             (Err(_), Some(snap)) => {
                 // The project as it was before the command, so the layout open then, whatever
@@ -1091,6 +1102,7 @@ impl Session {
                     self.give_back(opened);
                 }
                 self.opened = opened;
+                self.state = state;
                 if let Some(c) = counts {
                     self.edit_counts = c;
                 }
@@ -1147,7 +1159,8 @@ impl Session {
             forward: take(&mut self.forward),
             last_camera: self.last_camera.take(),
             history_projection: self.history_projection.clone(),
-            dirty: std::mem::replace(&mut self.dirty, false),
+            state: self.state,
+            saved: self.saved,
             trusted_tasks: take(&mut self.trusted_tasks),
             trusted_models: take(&mut self.trusted_models),
             trusted_notebooks: take(&mut self.trusted_notebooks),
@@ -1192,7 +1205,8 @@ impl Session {
             forward,
             last_camera,
             history_projection,
-            dirty,
+            state,
+            saved,
             trusted_tasks,
             trusted_models,
             trusted_notebooks,
@@ -1224,7 +1238,8 @@ impl Session {
         } = *a;
         (self.undo, self.redo, self.back, self.forward, self.last_camera) = (undo, redo, back, forward, last_camera);
         self.history_projection = history_projection;
-        (self.dirty, self.project_starts, self.history_from_file) = (dirty, project_starts, history_from_file);
+        (self.state, self.saved) = (state, saved);
+        (self.project_starts, self.history_from_file) = (project_starts, history_from_file);
         (self.trusted_tasks, self.trusted_models, self.trusted_notebooks) = (trusted_tasks, trusted_models, trusted_notebooks);
         (self.active_layer, self.table_layer, self.table_standalone, self.tool) = (active_layer, table_layer, table_standalone, tool);
         (self.layer_selection, self.layer_selection_of) = (layer_selection, layer_selection_of);
@@ -1298,30 +1313,63 @@ impl Session {
     pub fn clear_history(&mut self) {
         drop(self.take_project_state());
         self.project_starts = self.project_starts.wrapping_add(1);
+        // A state of its own: undo back past a replacement made within a command (a task's step)
+        // reaches a state of the project before, which isn't this one's saved state.
+        self.state = self.new_state();
+        self.saved = Some(self.state);
+    }
+
+    /// Whether the project has changes that aren't saved: it is in another state than the one
+    /// last saved or opened. Undo or redo back to that state leaves none.
+    pub fn dirty(&self) -> bool {
+        self.saved != Some(self.state)
+    }
+
+    /// Which state the project is in: another after each change, an earlier one after undo. A
+    /// front end compares it to tell whether the project changed since it last looked.
+    pub fn state(&self) -> u64 {
+        self.state
+    }
+
+    /// The project as it is now is saved (written to its file, or downloaded in the browser).
+    pub fn mark_saved(&mut self) {
+        self.saved = Some(self.state);
+    }
+
+    /// The project has changes that aren't saved, whatever undo does (work recovered after a
+    /// crash: no state of it is in a file).
+    pub fn mark_unsaved(&mut self) {
+        self.saved = None;
+    }
+
+    /// A state of the project not given before in this session, for a change just made.
+    fn new_state(&mut self) -> u64 {
+        self.states = self.states.wrapping_add(1);
+        self.states
     }
 
     pub(crate) fn undo(&mut self) -> bool {
         self.merged = None;
-        let Some((p, saved, label, actor)) = self.undo.pop() else { return false };
+        let Some((p, saved, label, actor, state)) = self.undo.pop() else { return false };
         let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);
         self.project.keep_table_ids(&cur);
         self.reopen_layout(open, saved);
         self.keep_time_position(&cur);
-        self.redo.push((cur, was, label, actor));
+        self.redo.push((cur, was, label, actor, std::mem::replace(&mut self.state, state)));
         self.touch_all_geometry();
         true
     }
 
     pub(crate) fn redo(&mut self) -> bool {
         self.merged = None;
-        let Some((p, saved, label, actor)) = self.redo.pop() else { return false };
+        let Some((p, saved, label, actor, state)) = self.redo.pop() else { return false };
         let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);
         self.project.keep_table_ids(&cur);
         self.reopen_layout(open, saved);
         self.keep_time_position(&cur);
-        self.undo.push((cur, was, label, actor));
+        self.undo.push((cur, was, label, actor, std::mem::replace(&mut self.state, state)));
         self.touch_all_geometry();
         true
     }

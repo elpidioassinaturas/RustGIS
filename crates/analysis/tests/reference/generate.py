@@ -75,6 +75,8 @@ ROADS = [
     ("r4", LineString([(12, 46.5), (12.5, 46.5)])),
     ("r5", LineString([(15, 49), (15.5, 49.5)])),
     ("r6", LineString([(10.875, 46.875), (11.875, 47.625)])),
+    # Along Z1's top edge, and on into Z6.
+    ("r7", LineString([(10.25, 46.375), (11.125, 46.375)])),
 ]
 STATIONS = [
     ("s1", Point(10.75, 46.0)),
@@ -229,6 +231,26 @@ def main():
          {"ids": [i for i, g in POINTS if zones_m.intersects(m(g))]})
     case("erase", "erase", {"input": "parcels", "erase": "zones"},
          {"features": overlay("erase_parcels", parcels, lambda g: polygonal(g.difference(zones_m)))})
+
+    # Intersect: each input feature's part in each zone, keyed by both ids ("P1|Z1"), in input
+    # order, then zone order. Parts that only touch (a shared edge or corner) are left out. The
+    # zones' `id` is taken by the parcels', so it comes out as `id_2`.
+    def pieces(name, rows, part):
+        out = []
+        for i, g in rows:
+            for zi, z in ZONES:
+                r = part(m(g).intersection(m(z)))
+                if r is not None and not r.is_empty:
+                    out.append((f"{i}|{zi}", ll(r)))
+        return write_expected(name, out)
+
+    both = ["id", "id_2"]
+    case("intersect polygons", "intersect", {"input": "parcels", "overlay": "zones"},
+         {"features": pieces("intersect_parcels", parcels, polygonal), "key": both})
+    case("intersect lines", "intersect", {"input": "roads", "overlay": "zones"},
+         {"features": pieces("intersect_roads", ROADS, linear), "key": both})
+    case("intersect points", "intersect", {"input": "points", "overlay": "zones"},
+         {"ids": [f"{i}|{zi}" for i, g in POINTS for zi, z in ZONES if m(z).intersects(m(g))], "key": both})
 
     # Dissolve: one feature per code, the union of its parcels.
     codes = sorted({c for _, c, _ in PARCELS})

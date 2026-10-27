@@ -118,5 +118,5 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(target_arch = "wasm32")]
 fn fetch(_url: &str) -> Result<Vec<u8>, String> {
-    Err("in the web app, search NASA Earthdata with Home › Web Data › NASA Earthaccess".into())
+    Err("in the web app, search NASA Earthdata with Home › Add › Web Data › NASA Earthaccess".into())
 }

@@ -11,8 +11,11 @@ use serde_json::{Value, json};
 use super::{f, need_layer, need_layers, need_selection, ps};
 use crate::{CmdResult, CommandSpec as C, Session};
 
+#[path = "select_info.rs"]
+mod info;
+
 pub fn commands() -> Vec<C> {
-    vec![
+    let mut commands = vec![
         C::new("select.byAttributes", "Select By Attributes", "Home › Selection", by_attributes)
             .when(need_layers)
             .params(r#"{"layer"?, "where": "SQL clause", "mode"?: "new"|"add"|"remove"|"subset"}"#),
@@ -81,11 +84,13 @@ pub fn commands() -> Vec<C> {
         }).params(r#"{"layer"?: name|id (default: the active layer, which need not be the layer last selected in)}"#)
         .when(need_selection),
         C::new("identify", "Identify", "Home › Inspect", identify).view().params(
-            r#"{"lon", "lat", "tolerancePx"?, "mode"?: "topmost"|"visible"|"selectable"|"selectedInContents"|"none" (the map's pop-up mode when omitted; the mode picks the layers, and every feature under the point in them, up to 100, is in "results"; topmost and visible take vector tile layers' features too, with "tileLayer" and "sourceLayer", from the tiles drawn there: one not loaded yet is asked for, and its features come on a later identify)}"#,
+            r#"{"lon", "lat", "tolerancePx"?, "mode"?: "topmost"|"visible"|"selectable"|"selectedInContents"|"none" (the map's pop-up mode when omitted; the mode picks the layers, and every feature under the point in them, up to 100, is in "results"; topmost and visible take vector tile layers' features too, with "tileLayer" and "sourceLayer", from the tiles drawn there: one not loaded yet is asked for, and its features come on a later identify; and they list in "featureInfo" the WMS layers drawn there to ask, each {tileLayer, url} (its GetFeatureInfo request) or {tileLayer, capabilities} (its service's, when the layer doesn't know its request): identify.featureInfo reads what they answer)}"#,
         ),
         C::new("map.popupMode", "Pop-up Mode", "Home › Navigate", popup_mode)
             .params(r#"{"mode": "topmost"|"visible"|"selectable"|"selectedInContents"|"none"}"#),
-    ]
+    ];
+    commands.extend(info::commands());
+    commands
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -321,16 +326,31 @@ fn identify(s: &mut Session, p: &Value) -> CmdResult {
         let room = MAX_IDENTIFIED.saturating_sub(results.len());
         results.extend(tile_features(s, lon, lat, tol_px, first_layer, room));
     }
-    let Some(first) = results.first().cloned() else {
+    // And the WMS layers drawn there are asked (their answers come later).
+    let asks = if matches!(mode, PopupMode::Topmost | PopupMode::Visible) && (!first_layer || results.is_empty()) {
+        info::requests(s, lon, lat, first_layer)
+    } else {
+        Vec::new()
+    };
+    let mut out = match results.first().cloned() {
+        Some(first) => first,
         // No feature: report the pixel of the topmost raster instead.
-        if mode == PopupMode::SelectedInContents && active.and_then(|id| map.layer(id)).is_some_and(|l| !l.is_raster()) {
+        None if mode == PopupMode::SelectedInContents && active.and_then(|id| map.layer(id)).is_some_and(|l| !l.is_raster()) => {
             return Ok(Value::Null);
         }
-        return Ok(super::raster::identify(s, lon, lat).unwrap_or(Value::Null));
+        None => match super::raster::identify(s, lon, lat) {
+            Some(pixel) => pixel,
+            None if asks.is_empty() => return Ok(Value::Null),
+            None => json!({}),
+        },
     };
-    let mut out = first;
     if let Value::Object(o) = &mut out {
-        o.insert("results".into(), Value::Array(results));
+        if !results.is_empty() {
+            o.insert("results".into(), Value::Array(results));
+        }
+        if !asks.is_empty() {
+            o.insert("featureInfo".into(), Value::Array(asks));
+        }
     }
     Ok(out)
 }
@@ -342,20 +362,7 @@ fn tile_features(s: &Session, lon: f64, lat: f64, tol_px: f64, first_layer: bool
     use rustgis_map::tiles::TileKind;
     use rustgis_render::rustgis_tiles::{draw, mvt};
     let map = s.map();
-    if !(lon.is_finite() && lat.is_finite()) || limit == 0 {
-        return Vec::new();
-    }
-    let at = rustgis_geom::lonlat_to_merc(Coord::new(lon, lat.clamp(-85.06, 85.06)));
-    // Web Mercator metres per point at the click, as tiles are drawn in other projections (in
-    // Web Mercator, the camera's resolution).
-    let res = map.camera.res;
-    let m_per_px = map
-        .to_map(Coord::new(lon, lat))
-        .and_then(|m| map.to_lonlat(Coord::new(m.x + res, m.y)))
-        .map(|c| rustgis_geom::lonlat_to_merc(Coord::new(c.x, c.y.clamp(-85.06, 85.06))))
-        .map(|b| (b.x - at.x).hypot(b.y - at.y))
-        .filter(|d| d.is_finite() && *d > 0.0)
-        .unwrap_or(res);
+    let Some((at, m_per_px)) = info::merc_at(s, lon, lat).filter(|_| limit > 0) else { return Vec::new() };
     let mut out = Vec::new();
     for t in &map.tiles {
         let data = matches!(t.kind, TileKind::PmTiles | TileKind::MbTiles | TileKind::Vector) && (t.id.is_empty() || t.overlay);

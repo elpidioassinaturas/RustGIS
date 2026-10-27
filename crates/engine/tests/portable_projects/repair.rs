@@ -83,7 +83,7 @@ fn renamed_raster_repairs_with_its_renderer_and_data_intact() {
     assert!(raster.error.is_none());
     assert_eq!(raster.data.as_ref().unwrap().band_count(), 3);
     assert_eq!(serde_json::to_value(&raster.style).unwrap(), style);
-    assert!(s.dirty);
+    assert!(s.dirty());
 }
 
 #[test]

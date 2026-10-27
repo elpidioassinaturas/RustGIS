@@ -83,6 +83,17 @@ fn file(dir: &Path, name: &str) -> PathBuf {
     dir.join("recovery").join(name)
 }
 
+/// Quits as the user does, with unsaved work: the window's close is asked for, the save prompt
+/// answered Don't Save, and the app ends cleanly (`on_exit`).
+fn quit_without_saving(h: &mut egui_kittest::Harness<'_, RustGisApp>) {
+    h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+    frames(h, 3);
+    h.get_by_role_and_label(Role::Button, "Don't Save").click();
+    frames(h, 3);
+    assert!(h.state().quit_requested);
+    h.state_mut().end_autosave();
+}
+
 /// An edit to the project: a new layer.
 fn edit(h: &mut egui_kittest::Harness<'_, RustGisApp>, name: &str) {
     h.state_mut().run("layer.template", json!({"template": "points", "name": name})).unwrap();
@@ -126,7 +137,7 @@ fn unsaved_work_is_kept_and_offered_back_after_a_crash() {
     let app = h.state();
     assert!(app.session.map().layer_by_name("Inspections").is_some());
     assert_eq!(app.session.path.as_deref(), Some(std::path::absolute(&project).unwrap().as_path()), "Save writes back to its file");
-    assert!(app.session.dirty, "recovered work is unsaved");
+    assert!(app.session.dirty(), "recovered work is unsaved");
     // The copy is this run's now, unchanged, until the work is saved.
     assert!(!file(&dir.0, PENDING).exists() && file(&dir.0, LIVE).is_file());
     h.state_mut().run("project.save", json!({})).unwrap();
@@ -143,13 +154,46 @@ fn a_clean_exit_leaves_nothing_to_recover() {
     edit(&mut h, "Unsaved");
     settle(&mut h);
     assert!(file(&dir.0, LIVE).is_file());
-    h.state_mut().end_autosave();
+    quit_without_saving(&mut h);
     assert!(!file(&dir.0, LIVE).exists());
     drop(h);
     let mut h = launch(&dir.0, &prefs);
     h.step();
     assert!(h.query_by_label("Recover unsaved work?").is_none());
     assert!(h.state_mut().run("ui.recover", json!({})).is_err(), "nothing to recover");
+}
+
+/// The app ended with unsaved work and the save prompt never answered (macOS's Quit, which
+/// skips the window's close request): the work is kept, though the exit was clean, and the next
+/// start offers it back, saying it was quit. With autosave off nothing is kept.
+#[test]
+fn quitting_unasked_keeps_the_work() {
+    let dir = TempDir::new("unasked");
+    let prefs = Prefs::default();
+    let mut h = launch(&dir.0, &prefs);
+    frames(&mut h, 2);
+    // Edited after the last copy: the one kept is the work as it was at the end.
+    edit(&mut h, "Early");
+    settle(&mut h);
+    edit(&mut h, "Last");
+    h.state_mut().end_autosave();
+    drop(h);
+    let mut h = launch(&dir.0, &prefs);
+    h.step();
+    h.get_by_label("RustGIS was quit last time without saving your changes.");
+    assert!(h.query_by_label("RustGIS didn't close properly last time.").is_none());
+    h.get_by_role_and_label(Role::Button, "Recover").click();
+    settle(&mut h);
+    assert!(h.state().session.map().layer_by_name("Last").is_some() && h.state().session.dirty());
+    // Autosave off: no copy to keep.
+    h.state_mut().run("project.new", json!({})).unwrap();
+    h.state_mut().run("ui.autosave", json!({"minutes": 0})).unwrap();
+    edit(&mut h, "Gone");
+    h.state_mut().end_autosave();
+    drop(h);
+    let mut h = launch(&dir.0, &prefs);
+    h.step();
+    assert!(h.query_by_label("Recover unsaved work?").is_none());
 }
 
 #[test]
@@ -170,7 +214,7 @@ fn later_offers_it_again_and_discard_deletes_it() {
     assert!(h.state().session.map().layer_by_name("Kept").is_none());
     edit(&mut h, "Other");
     settle(&mut h);
-    h.state_mut().end_autosave();
+    quit_without_saving(&mut h);
     drop(h);
     let mut h = launch(&dir.0, &prefs);
     assert!(std::fs::read_to_string(file(&dir.0, PENDING)).unwrap().contains("Kept"));
@@ -279,7 +323,7 @@ fn copies_from_two_crashes_are_both_offered_in_turn() {
     settle(&mut h);
     assert!(h.state().session.map().layer_by_name("Second").is_some(), "the newest first");
     assert!(h.query_by_label("Recover unsaved work?").is_none(), "the other waits for the next start");
-    h.state_mut().end_autosave();
+    quit_without_saving(&mut h);
     drop(h);
 
     let mut h = launch(&dir.0, &prefs);

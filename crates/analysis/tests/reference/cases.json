@@ -55,6 +55,57 @@
    }
   },
   {
+   "name": "intersect polygons",
+   "tool": "intersect",
+   "params": {
+    "input": "parcels",
+    "overlay": "zones"
+   },
+   "expect": {
+    "features": "expected/intersect_parcels.geojson",
+    "key": [
+     "id",
+     "id_2"
+    ]
+   }
+  },
+  {
+   "name": "intersect lines",
+   "tool": "intersect",
+   "params": {
+    "input": "roads",
+    "overlay": "zones"
+   },
+   "expect": {
+    "features": "expected/intersect_roads.geojson",
+    "key": [
+     "id",
+     "id_2"
+    ]
+   }
+  },
+  {
+   "name": "intersect points",
+   "tool": "intersect",
+   "params": {
+    "input": "points",
+    "overlay": "zones"
+   },
+   "expect": {
+    "ids": [
+     "b|Z1",
+     "d|Z4",
+     "e|Z1",
+     "e|Z4",
+     "j|Z5"
+    ],
+    "key": [
+     "id",
+     "id_2"
+    ]
+   }
+  },
+  {
    "name": "dissolve by field",
    "tool": "dissolve",
    "params": {
@@ -151,7 +202,8 @@
      "r1",
      "r2",
      "r4",
-     "r6"
+     "r6",
+     "r7"
     ]
    }
   },
@@ -187,7 +239,8 @@
      "r1",
      "r2",
      "r3",
-     "r6"
+     "r6",
+     "r7"
     ]
    }
   },
@@ -428,6 +481,18 @@
      [
       "r6",
       "P8"
+     ],
+     [
+      "r7",
+      "P1"
+     ],
+     [
+      "r7",
+      "P2"
+     ],
+     [
+      "r7",
+      "P6"
      ]
     ]
    }
@@ -555,6 +620,11 @@
       28983.146568103246
      ],
      [
+      "a",
+      "r7",
+      29413.348290383856
+     ],
+     [
       "b",
       "r2",
       0.0
@@ -565,9 +635,19 @@
       14084.263048419794
      ],
      [
+      "b",
+      "r7",
+      27864.913213951313
+     ],
+     [
       "c",
       "r2",
       6947.529600616946
+     ],
+     [
+      "c",
+      "r7",
+      13819.003210362416
      ],
      [
       "c",
@@ -583,6 +663,11 @@
       "e",
       "r3",
       7906.554524361339
+     ],
+     [
+      "e",
+      "r7",
+      28851.844441780486
      ],
      [
       "f",

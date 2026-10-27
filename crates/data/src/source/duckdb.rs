@@ -251,7 +251,7 @@ pub fn available() -> bool {
 /// A live-only database named for a query: add its tables instead.
 fn live_not_here() -> DataError {
     DataError::Unsupported(
-        "SQL queries don't run on MySQL, MariaDB or SQL Server databases: add their tables with Add Data › Database…".into(),
+        "SQL queries don't run on MySQL, MariaDB or SQL Server databases: add their tables with Home › Add › Add Data › Database…".into(),
     )
 }
 

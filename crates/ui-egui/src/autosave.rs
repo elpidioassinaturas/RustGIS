@@ -38,6 +38,11 @@ pub struct Recovery {
     /// When the copy was made, in seconds since 1970 (UTC).
     #[serde(default)]
     pub time: u64,
+    /// Kept as the app was quit without its question about unsaved changes answered (macOS's
+    /// Quit, which closes without asking the window), not left by a run that didn't close.
+    /// Copies written before it was known read as `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quit: bool,
 }
 
 /// Where a shell keeps the recovery copy. Writing and clearing may happen in the background, but
@@ -126,7 +131,7 @@ fn now_secs() -> u64 {
 /// a lossy spelling of the name.
 fn about(app: &RustGisApp) -> Recovery {
     let path = app.session.path.as_ref().and_then(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone()).to_str().map(str::to_string));
-    Recovery { name: app.session.project.name.clone(), path, time: now_secs() }
+    Recovery { name: app.session.project.name.clone(), path, time: now_secs(), quit: false }
 }
 
 /// Reads the interval preference and the copy an earlier run left (from [`RustGisApp::with_services`]).
@@ -186,7 +191,7 @@ pub(crate) fn tick(app: &mut RustGisApp, ctx: &egui::Context) {
             app.session.notify(text, true);
         }
     }
-    if app.autosave.minutes == 0 || !app.session.dirty {
+    if app.autosave.minutes == 0 || !app.session.dirty() {
         if app.autosave.written.take().is_some() {
             store.clear();
         }
@@ -215,9 +220,18 @@ pub(crate) fn tick(app: &mut RustGisApp, ctx: &egui::Context) {
 
 /// A clean exit: this run's copy goes, and what was asked of the store is done before the
 /// process ends. The copy an earlier run left stays until it is recovered or discarded.
+///
+/// Unless the work in it would be lost unasked: the app was quit with unsaved changes and the
+/// save prompt never answered (macOS's Quit, which ends the app without asking the window to
+/// close). Then a last copy is written and kept, and the next start offers it back. With
+/// autosave off there is no copy to keep.
 pub(crate) fn end(app: &mut RustGisApp) {
     if let Some(store) = &app.services.recovery {
-        store.clear();
+        if app.autosave.minutes > 0 && crate::saveprompt::unanswered(app) {
+            store.write(app.session.project.clone(), Recovery { quit: true, ..about(app) });
+        } else {
+            store.clear();
+        }
         store.flush();
     }
     app.autosave.written = None;
@@ -260,13 +274,13 @@ pub(crate) fn recover(app: &mut RustGisApp, p: &Value) -> Result<Value, String> 
     }
     // Opening it replaces the open project: never one with work of its own not saved (after
     // Later), which it would lose with its recovery copy.
-    if app.session.dirty {
+    if app.session.dirty() {
         return Err("the open project has unsaved changes: save them before recovering other work".into());
     }
     let text = store.read_pending()?;
     app.run("project.openText", json!({"text": text}))?;
     app.session.path = offered.path.as_ref().map(std::path::PathBuf::from);
-    app.session.dirty = true;
+    app.session.mark_unsaved();
     // The copy becomes this run's as it is: a crash now loses nothing, and nothing is written.
     if let Some(store) = &app.services.recovery {
         store.adopt_pending();
@@ -287,20 +301,16 @@ pub(crate) fn recover(app: &mut RustGisApp, p: &Value) -> Result<Value, String> 
     Ok(json!({"name": app.session.project.name, "path": offered.path, "waiting": waiting}))
 }
 
-/// The dialog's first line: what was kept, and how long ago (`then`, seconds since 1970). Whole
-/// sentences, one per unit, so each translates as a sentence; only data is filled in.
+/// The dialog's second line: what was kept, and how long ago (`then`, seconds since 1970).
+/// Whole sentences, one per unit, so each translates as a sentence; only data is filled in.
 fn kept_line(name: &str, then: u64) -> String {
     let secs = now_secs().saturating_sub(then);
     let (template, n) = match secs {
-        0..60 => ("RustGIS didn't close properly last time. A copy of {name} with unsaved changes was kept less than a minute ago.", 0),
-        60..120 => ("RustGIS didn't close properly last time. A copy of {name} with unsaved changes was kept a minute ago.", 1),
-        120..7_200 => {
-            ("RustGIS didn't close properly last time. A copy of {name} with unsaved changes was kept {n} minutes ago.", secs / 60)
-        }
-        7_200..172_800 => {
-            ("RustGIS didn't close properly last time. A copy of {name} with unsaved changes was kept {n} hours ago.", secs / 3_600)
-        }
-        _ => ("RustGIS didn't close properly last time. A copy of {name} with unsaved changes was kept {n} days ago.", secs / 86_400),
+        0..60 => ("A copy of {name} with unsaved changes was kept less than a minute ago.", 0),
+        60..120 => ("A copy of {name} with unsaved changes was kept a minute ago.", 1),
+        120..7_200 => ("A copy of {name} with unsaved changes was kept {n} minutes ago.", secs / 60),
+        7_200..172_800 => ("A copy of {name} with unsaved changes was kept {n} hours ago.", secs / 3_600),
+        _ => ("A copy of {name} with unsaved changes was kept {n} days ago.", secs / 86_400),
     };
     crate::i18n::fmt(template, &[("name", name), ("n", &n.to_string())])
 }
@@ -320,6 +330,12 @@ pub(crate) fn offer(app: &mut RustGisApp, ctx: &egui::Context) {
         ui.set_width(420.0);
         ui.label(egui::RichText::new(tl!("Recover unsaved work?")).font(semibold(15.0)));
         ui.add_space(4.0);
+        // Why there is a copy, then what it is.
+        ui.label(if r.quit {
+            tl!("RustGIS was quit last time without saving your changes.")
+        } else {
+            tl!("RustGIS didn't close properly last time.")
+        });
         ui.label(kept_line(&name, r.time));
         ui.add_space(4.0);
         match &file {
@@ -340,7 +356,7 @@ pub(crate) fn offer(app: &mut RustGisApp, ctx: &egui::Context) {
         }
         // Recovering replaces the open project: not one with unsaved work of its own (an edit
         // made before answering). Recover comes back once that work is saved.
-        let blocked = app.session.dirty;
+        let blocked = app.session.dirty();
         if blocked {
             ui.add_space(4.0);
             ui.label(

@@ -284,7 +284,7 @@ fn gate_rules() {
     assert!(g("list_layers", json!({})).is_none());
     assert!(g("run_command", json!({"command": "info.fileLayers", "params": {"path": "/etc/passwd"}})).is_some());
     assert!(g("run_command", json!({"command": "info.fileColumns", "params": {"path": "/etc/passwd"}})).is_some());
-    // Georeferencing is a file command only when it writes a file.
+    // Georeferencing and projecting are file commands only when they write a file.
     let extent = json!({"layer": "r", "extent": [10.0, 45.0, 10.04, 45.04]});
     assert!(g("run_command", json!({"command": "raster.georeference", "params": extent})).is_none());
     let pts = json!({"layer": "r", "points": [[0, 0, 1, 1], [1, 0, 2, 1], [0, 1, 1, 2]], "transform": "affine", "crs": 32613});
@@ -292,6 +292,12 @@ fn gate_rules() {
     let mut file = pts.clone();
     file["path"] = json!("/tmp/x.tif");
     assert!(g("run_command", json!({"command": "raster.georeference", "params": file})).is_some());
+    // So is projecting a raster.
+    let project = json!({"layer": "r", "crs": 31983, "cellSize": 100, "extent": "Countries"});
+    assert!(g("run_command", json!({"command": "raster.project", "params": project})).is_none());
+    let mut file = project.clone();
+    file["path"] = json!("/tmp/x.tif");
+    assert!(g("run_command", json!({"command": "raster.project", "params": file})).is_some());
 }
 
 /// What a command says beside its result reaches the model (issue #85).

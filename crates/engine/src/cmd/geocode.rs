@@ -10,7 +10,7 @@ use crate::{CmdResult, CommandSpec as C, Session};
 
 pub fn commands() -> Vec<C> {
     vec![
-        C::new("map.findPlace", "Find Place", "Home › Navigate", find_place).params(
+        C::new("map.findPlace", "By Place or Address…", "Home › Navigate › Locate", find_place).params(
             r#"{"query": "a place or an address", "provider"?: "nominatim" (OpenStreetMap, default) | "photon", "url"?: "a geocoding server of your own", "limit"?: 1–20, "go"?: bool (zooms to the first, default true)}"#,
         ),
         C::new("layer.geocode", "Geocode Addresses", "Home › Add › Add Data", geocode).params(
@@ -46,7 +46,7 @@ fn find_place(s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (s, query, g, limit);
-        Err("in the web app, find places with Home › Navigate › Find Place".into())
+        Err("in the web app, find places with Home › Navigate › Locate › By Place or Address…".into())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -272,5 +272,5 @@ fn lookup(g: &Geocoder, distinct: &[String]) -> Result<Lookup, String> {
 
 #[cfg(target_arch = "wasm32")]
 fn lookup(_: &Geocoder, _: &[String]) -> Result<Lookup, String> {
-    Err("in the web app, geocode addresses with Home › Add Data › Geocode Addresses".into())
+    Err("in the web app, geocode addresses with Home › Add › Add Data › Geocode Addresses".into())
 }

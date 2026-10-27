@@ -1,5 +1,7 @@
 //! Writers for exchange formats: KML, GPX and CSV with WKT geometry.
 
+use std::fmt::Write as _;
+
 use rustgis_geom::Coord;
 
 use crate::{Dataset, Geometry};
@@ -116,25 +118,87 @@ pub fn to_gpx(ds: &Dataset, name_field: Option<usize>) -> String {
 
 /// Well-known text for a geometry.
 pub fn wkt(g: &Geometry) -> String {
-    let c = |p: &Coord| format!("{} {}", p.x, p.y);
-    let list = |v: &[Coord]| v.iter().map(c).collect::<Vec<_>>().join(", ");
+    fn coord(out: &mut String, p: &Coord) {
+        let _ = write!(out, "{} {}", p.x, p.y);
+    }
+    fn list(out: &mut String, v: &[Coord]) {
+        for (i, p) in v.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            coord(out, p);
+        }
+    }
+    fn rings(out: &mut String, rs: &[Vec<Coord>]) {
+        for (i, r) in rs.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push('(');
+            list(out, r);
+            out.push(')');
+        }
+    }
+    let mut out = String::new();
     match g {
-        Geometry::Point(p) => format!("POINT ({})", c(p)),
-        Geometry::MultiPoint(v) => format!("MULTIPOINT ({})", v.iter().map(|p| format!("({})", c(p))).collect::<Vec<_>>().join(", ")),
-        Geometry::Line(parts) if parts.len() == 1 => format!("LINESTRING ({})", parts.first().map(|p| list(p)).unwrap_or_default()),
+        Geometry::Point(p) => {
+            out.push_str("POINT (");
+            coord(&mut out, p);
+            out.push(')');
+        }
+        Geometry::MultiPoint(v) => {
+            out.push_str("MULTIPOINT (");
+            for (i, p) in v.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push('(');
+                coord(&mut out, p);
+                out.push(')');
+            }
+            out.push(')');
+        }
+        Geometry::Line(parts) if parts.len() == 1 => {
+            out.push_str("LINESTRING (");
+            if let Some(p) = parts.first() {
+                list(&mut out, p);
+            }
+            out.push(')');
+        }
         Geometry::Line(parts) => {
-            format!("MULTILINESTRING ({})", parts.iter().map(|p| format!("({})", list(p))).collect::<Vec<_>>().join(", "))
+            out.push_str("MULTILINESTRING (");
+            for (i, p) in parts.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push('(');
+                list(&mut out, p);
+                out.push(')');
+            }
+            out.push(')');
         }
         Geometry::Polygon(polys) => {
-            let poly =
-                |rings: &Vec<Vec<Coord>>| format!("({})", rings.iter().map(|r| format!("({})", list(r))).collect::<Vec<_>>().join(", "));
             if polys.len() == 1 {
-                format!("POLYGON {}", polys.first().map(poly).unwrap_or_default())
+                out.push_str("POLYGON (");
+                if let Some(rs) = polys.first() {
+                    rings(&mut out, rs);
+                }
+                out.push(')');
             } else {
-                format!("MULTIPOLYGON ({})", polys.iter().map(poly).collect::<Vec<_>>().join(", "))
+                out.push_str("MULTIPOLYGON (");
+                for (i, rs) in polys.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push('(');
+                    rings(&mut out, rs);
+                    out.push(')');
+                }
+                out.push(')');
             }
         }
     }
+    out
 }
 
 /// Decodes an encoded polyline (Google's algorithm; `precision` 5, or 6 as OSRM and Valhalla
@@ -291,23 +355,26 @@ impl WktParser {
 
     /// `x y [z [m]]`.
     fn coord(&mut self) -> Result<Coord, String> {
-        let mut v = Vec::with_capacity(4);
+        let mut nums = [0.0f64; 4];
+        let mut len = 0usize;
         while let Some(WktTok::Num(n)) = self.peek() {
             // Two to four numbers: a fifth is already wrong, so stop there.
-            if v.len() == 4 {
+            if len == nums.len() {
                 return Err("a coordinate needs two to four numbers".into());
             }
-            v.push(*n);
+            nums[len] = *n;
+            len += 1;
             self.at += 1;
         }
         self.coords += 1;
         if self.coords > MAX_WKT_COORDS {
             return Err("too many coordinates".into());
         }
-        match v.as_slice() {
-            [x, y, ..] if v.len() <= 4 && x.is_finite() && y.is_finite() => Ok(Coord::new(*x, *y)),
-            _ => Err("a coordinate needs two to four numbers".into()),
+        let (x, y) = (nums[0], nums[1]);
+        if len < 2 || !x.is_finite() || !y.is_finite() {
+            return Err("a coordinate needs two to four numbers".into());
         }
+        Ok(Coord::new(x, y))
     }
 
     /// `( a, b, … )`, each item read by `item`.
@@ -351,12 +418,11 @@ impl WktParser {
         if matches!(self.peek(), Some(WktTok::Word(w)) if matches!(w.as_str(), "Z" | "M" | "ZM")) {
             self.at += 1;
         }
-        let kind =
-            kind.strip_suffix("ZM").or_else(|| kind.strip_suffix('Z')).or_else(|| kind.strip_suffix('M')).unwrap_or(&kind).to_string();
+        let kind = kind.strip_suffix("ZM").or_else(|| kind.strip_suffix('Z')).or_else(|| kind.strip_suffix('M')).unwrap_or(&kind);
         if self.empty() {
             return Ok(None);
         }
-        Ok(Some(match kind.as_str() {
+        Ok(Some(match kind {
             "POINT" => {
                 self.expect(WktTok::Open)?;
                 let c = self.coord()?;

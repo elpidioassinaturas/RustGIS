@@ -59,6 +59,18 @@ pub static TOOLS: &[ToolSpec] = &[
         run: erase,
     },
     ToolSpec {
+        id: "intersect",
+        name: "Intersect",
+        toolbox: "Analysis › Overlay",
+        summary: "Splits input features where they overlap overlay polygons, keeping both layers' attributes.",
+        params: &[
+            P { name: "input", label: "Input Features", kind: K::Layer, required: true, default: "", help: "" },
+            P { name: "overlay", label: "Overlay Features", kind: K::PolygonLayer, required: true, default: "", help: "" },
+            P { name: "output", label: "Output Name", kind: K::Text, required: false, default: "", help: "" },
+        ],
+        run: intersect,
+    },
+    ToolSpec {
         id: "dissolve",
         name: "Dissolve",
         toolbox: "Data Management › Generalization",
@@ -679,37 +691,43 @@ fn union_of(inp: &dyn Inputs, p: &Json, k: &str) -> Result<MultiPolygon<f64>, St
     Ok(union_all(polys.iter().flat_map(|m| m.0.iter())))
 }
 
+/// The part of a feature inside `mask` (polygons in Web Mercator, oriented as `union_all` leaves
+/// them): a polygon's overlap with it, a line's stretches in it, the points in it or on its edge.
+/// `None` when nothing is left, or only a shared edge or corner.
+fn part_in(g: &Geometry, mask: &MultiPolygon<f64>) -> Option<Geometry> {
+    match g {
+        Geometry::Polygon(_) => to_multipolygon(g).and_then(|m| from_multipolygon(&m.intersection(mask))),
+        Geometry::Line(_) => to_multiline(g).and_then(|m| from_line(&mask.clip(&m, false))),
+        Geometry::Point(_) | Geometry::MultiPoint(_) => {
+            let pts: &[Coord] = match g {
+                Geometry::Point(c) => std::slice::from_ref(c),
+                Geometry::MultiPoint(v) => v,
+                _ => &[],
+            };
+            let inside: Vec<Coord> = pts
+                .iter()
+                .copied()
+                .filter(|c| {
+                    let m = rustgis_geom::lonlat_to_merc(*c);
+                    mask.intersects(&geo::Point::new(m.x, m.y))
+                })
+                .collect();
+            match inside.len() {
+                0 => None,
+                1 => inside.first().map(|c| Geometry::Point(*c)),
+                _ => Some(Geometry::MultiPoint(inside)),
+            }
+        }
+    }
+}
+
 fn clip(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     let ds = input(inp, p, "input")?;
     let mask = union_of(inp, p, "clip")?;
     let mut out = copy_schema(ds, out_name(p, format!("{}_Clip", ds.name)), ds.geometry_type);
     for r in rows(inp, p, "input", ds) {
         let Some(f) = ds.features.get(r) else { continue };
-        let Some(g) = &f.geometry else { continue };
-        let clipped = match g {
-            Geometry::Polygon(_) => to_multipolygon(g).and_then(|m| from_multipolygon(&m.intersection(&mask))),
-            Geometry::Line(_) => to_multiline(g).and_then(|m| from_line(&mask.clip(&m, false))),
-            Geometry::Point(_) | Geometry::MultiPoint(_) => {
-                let pts: Vec<Coord> = match g {
-                    Geometry::Point(c) => vec![*c],
-                    Geometry::MultiPoint(v) => v.clone(),
-                    _ => vec![],
-                };
-                let inside: Vec<Coord> = pts
-                    .into_iter()
-                    .filter(|c| {
-                        let m = rustgis_geom::lonlat_to_merc(*c);
-                        mask.intersects(&geo::Point::new(m.x, m.y))
-                    })
-                    .collect();
-                match inside.len() {
-                    0 => None,
-                    1 => inside.first().map(|c| Geometry::Point(*c)),
-                    _ => Some(Geometry::MultiPoint(inside)),
-                }
-            }
-        };
-        if let Some(c) = clipped {
+        if let Some(c) = f.geometry.as_ref().and_then(|g| part_in(g, &mask)) {
             out.push(Some(c), f.attrs.clone());
         }
     }
@@ -729,6 +747,81 @@ fn erase(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     }
     let n = out.features.len();
     result(out, format!("Erase: {n} features remain"))
+}
+
+/// An overlay polygon: its row in the overlay layer, its extent and its polygons in Web Mercator,
+/// oriented for the overlay.
+struct Zone {
+    row: usize,
+    ext: Extent,
+    poly: MultiPolygon<f64>,
+}
+
+/// The overlay layer of an overlay tool (its `overlay` parameter), which must be polygons, and its
+/// (selected) features with geometry as [`Zone`]s, in order.
+fn overlay_zones<'a>(inp: &'a dyn Inputs, p: &Json) -> Result<(&'a Dataset, Vec<Zone>), String> {
+    let ov = input(inp, p, "overlay")?;
+    if ov.geometry_type != GeometryType::Polygon {
+        return Err(format!("'{}' is not a polygon layer", ov.name));
+    }
+    let zones = rows(inp, p, "overlay", ov)
+        .into_iter()
+        .filter_map(|row| {
+            let g = ov.features.get(row)?.geometry.as_ref()?;
+            Some(Zone { row, ext: g.extent(), poly: to_multipolygon(g)?.orient(Direction::Default) })
+        })
+        .collect();
+    Ok((ov, zones))
+}
+
+/// An overlay tool's output layer: the input's fields, then the overlay's, an overlay field whose
+/// name is taken getting a suffix (`name_2`). It keeps the input's source CRS for export.
+fn overlay_schema(ds: &Dataset, ov: &Dataset, name: String, g: GeometryType) -> Dataset {
+    let mut out = copy_schema(ds, name, g);
+    out.crs = ds.crs;
+    for f in &ov.fields {
+        let name = unique_field(&out, &f.name);
+        out.fields.push(Field { name, ..f.clone() });
+    }
+    out
+}
+
+/// A row of an overlay tool's output: the input feature's values, then the overlay feature's, each
+/// padded to its layer's fields (all empty for a side with no feature).
+fn overlay_row(ds: &Dataset, a: Option<&[Value]>, ov: &Dataset, b: Option<&[Value]>) -> Vec<Value> {
+    let mut row = Vec::with_capacity(ds.fields.len() + ov.fields.len());
+    for (values, n) in [(a, ds.fields.len()), (b, ov.fields.len())] {
+        row.extend((0..n).map(|i| values.and_then(|v| v.get(i)).cloned().unwrap_or(Value::Null)));
+    }
+    row
+}
+
+/// Intersect: a feature for each part of an input feature inside an overlay polygon, with the
+/// attributes of both, in input order and then overlay order. Parts that only touch are left out.
+fn intersect(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
+    let ds = input(inp, p, "input")?;
+    if ds.geometry_type == GeometryType::None {
+        return Err(format!("'{}' has no geometry", ds.name));
+    }
+    let (ov, zones) = overlay_zones(inp, p)?;
+    let index = ExtentIndex::new(zones.iter().map(|z| z.ext));
+    let mut out = overlay_schema(ds, ov, out_name(p, format!("{}_Intersect", ds.name)), ds.geometry_type);
+    for r in rows(inp, p, "input", ds) {
+        let Some(f) = ds.features.get(r) else { continue };
+        let Some(g) = &f.geometry else { continue };
+        let ext = g.extent();
+        for z in index.candidates(&ext).into_iter().filter_map(|i| zones.get(i)) {
+            if !ext.intersects(&z.ext) {
+                continue;
+            }
+            if let Some(part) = part_in(g, &z.poly) {
+                let attrs = overlay_row(ds, Some(&f.attrs), ov, ov.features.get(z.row).map(|o| o.attrs.as_slice()));
+                out.push_next(Some(part), attrs);
+            }
+        }
+    }
+    let n = out.features.len();
+    result(out, format!("Intersect: {n} features"))
 }
 
 fn dissolve(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
@@ -1472,6 +1565,98 @@ fn unique_field(out: &Dataset, base: &str) -> String {
     name
 }
 
+/// Features' extents on a grid, to find those whose extents may meet another extent without
+/// testing every one. Up to 16 features, or when the grid would hold more than a million
+/// references (large features on a fine grid), there is no grid and every feature is a candidate.
+struct ExtentIndex {
+    /// The union of the extents.
+    total: Extent,
+    cell_w: f64,
+    cell_h: f64,
+    /// The features each cell meets, in order; `None` without a grid.
+    grid: Option<std::collections::HashMap<(i64, i64), Vec<usize>>>,
+    /// How many features there are.
+    len: usize,
+}
+
+impl ExtentIndex {
+    /// The most cell references the grid may hold.
+    const MAX_REFERENCES: usize = 1_000_000;
+
+    /// An index of these extents, numbered in order from 0.
+    fn new(extents: impl Iterator<Item = Extent>) -> Self {
+        let extents: Vec<Extent> = extents.collect();
+        let total = extents.iter().fold(Extent::EMPTY, |t, e| t.union(e));
+        let n_cells = (extents.len() as f64).sqrt().clamp(4.0, 256.0);
+        let mut index = ExtentIndex {
+            total,
+            cell_w: (total.width() / n_cells).max(1e-9),
+            cell_h: (total.height() / n_cells).max(1e-9),
+            grid: None,
+            len: extents.len(),
+        };
+        if extents.len() <= 16 || total.is_empty() {
+            return index;
+        }
+        let mut references = 0usize;
+        for e in &extents {
+            let ((x0, y0), (x1, y1)) = (index.key(e.min_x, e.min_y), index.key(e.max_x, e.max_y));
+            references = references.saturating_add(((x1 - x0 + 1) as usize).saturating_mul((y1 - y0 + 1) as usize));
+            if references > Self::MAX_REFERENCES {
+                return index;
+            }
+        }
+        let mut grid: std::collections::HashMap<(i64, i64), Vec<usize>> = std::collections::HashMap::new();
+        for (i, e) in extents.iter().enumerate() {
+            let ((x0, y0), (x1, y1)) = (index.key(e.min_x, e.min_y), index.key(e.max_x, e.max_y));
+            for x in x0..=x1 {
+                for y in y0..=y1 {
+                    grid.entry((x, y)).or_default().push(i);
+                }
+            }
+        }
+        index.grid = Some(grid);
+        index
+    }
+
+    /// The cell holding a position, clamped to the grid (a non-finite one goes in the first).
+    fn key(&self, x: f64, y: f64) -> (i64, i64) {
+        let kx = if x.is_finite() { ((x - self.total.min_x) / self.cell_w).floor() } else { 0.0 };
+        let ky = if y.is_finite() { ((y - self.total.min_y) / self.cell_h).floor() } else { 0.0 };
+        (kx.clamp(0.0, 512.0) as i64, ky.clamp(0.0, 512.0) as i64)
+    }
+
+    /// The larger side of a cell in degrees, when there is a grid.
+    fn cell_size(&self) -> Option<f64> {
+        self.grid.as_ref().map(|_| self.cell_w.max(self.cell_h))
+    }
+
+    /// The features whose extents may meet `ext`, in order and once each: every feature without a
+    /// grid. Each still needs its own test.
+    fn candidates(&self, ext: &Extent) -> Vec<usize> {
+        let Some(grid) = &self.grid else { return (0..self.len).collect() };
+        if !ext.intersects(&self.total) {
+            return Vec::new();
+        }
+        // Only the part of `ext` over the grid: a feature far larger than the indexed layer would
+        // otherwise reach cells up to the clamp, past the grid's own.
+        let t = &self.total;
+        let (min_x, min_y, max_x, max_y) = (ext.min_x.max(t.min_x), ext.min_y.max(t.min_y), ext.max_x.min(t.max_x), ext.max_y.min(t.max_y));
+        let ((x0, y0), (x1, y1)) = (self.key(min_x, min_y), self.key(max_x, max_y));
+        let mut found = Vec::new();
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                if let Some(indices) = grid.get(&(x, y)) {
+                    found.extend_from_slice(indices);
+                }
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        found
+    }
+}
+
 /// Joins normalized lon/lat geometries, retaining the target's source CRS for export.
 fn spatial_join(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     let target = input(inp, p, "target")?;
@@ -1561,71 +1746,9 @@ fn spatial_join(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     let target_fields_len = target.fields.len();
     let join_fields_len = join.fields.len();
 
-    // Spatial grid index over join geometries for efficient candidate pruning
-    let mut total_ext = Extent::EMPTY;
-    for j in &join_geoms {
-        total_ext = total_ext.union(&j.ext);
-    }
-    let mut use_grid = join_geoms.len() > 16 && !total_ext.is_empty();
-    let n_cells = (join_geoms.len() as f64).sqrt().clamp(4.0, 256.0);
-    let cell_w = (total_ext.width() / n_cells).max(1e-9);
-    let cell_h = (total_ext.height() / n_cells).max(1e-9);
-    let key = |x: f64, y: f64| -> (i64, i64) {
-        let kx = if x.is_finite() { ((x - total_ext.min_x) / cell_w).floor() } else { 0.0 };
-        let ky = if y.is_finite() { ((y - total_ext.min_y) / cell_h).floor() } else { 0.0 };
-        (kx.clamp(0.0, 512.0) as i64, ky.clamp(0.0, 512.0) as i64)
-    };
-
-    const MAX_GRID_REFERENCES: usize = 1_000_000;
-    if use_grid {
-        let mut projected_refs = 0usize;
-        for j in &join_geoms {
-            let (gx0, gy0) = key(j.ext.min_x, j.ext.min_y);
-            let (gx1, gy1) = key(j.ext.max_x, j.ext.max_y);
-            let cells = ((gx1 - gx0 + 1) as usize).saturating_mul((gy1 - gy0 + 1) as usize);
-            projected_refs = projected_refs.saturating_add(cells);
-            if projected_refs > MAX_GRID_REFERENCES {
-                use_grid = false;
-                break;
-            }
-        }
-    }
-
-    let mut grid: std::collections::HashMap<(i64, i64), Vec<usize>> = std::collections::HashMap::new();
-    if use_grid {
-        for (idx, j) in join_geoms.iter().enumerate() {
-            let (gx0, gy0) = key(j.ext.min_x, j.ext.min_y);
-            let (gx1, gy1) = key(j.ext.max_x, j.ext.max_y);
-            for gx in gx0..=gx1 {
-                for gy in gy0..=gy1 {
-                    grid.entry((gx, gy)).or_default().push(idx);
-                }
-            }
-        }
-    }
-
+    let index = ExtentIndex::new(join_geoms.iter().map(|j| j.ext));
     // The join features whose extents may meet `ext`, in join order.
-    let candidates = |ext: &Extent| -> Vec<usize> {
-        if !use_grid {
-            return (0..join_geoms.len()).collect();
-        }
-        if !ext.intersects(&total_ext) {
-            return Vec::new();
-        }
-        let (tx0, ty0) = key(ext.min_x, ext.min_y);
-        let (tx1, ty1) = key(ext.max_x, ext.max_y);
-        let mut found = Vec::new();
-        for gx in tx0..=tx1 {
-            for gy in ty0..=ty1 {
-                if let Some(indices) = grid.get(&(gx, gy)) {
-                    found.extend_from_slice(indices);
-                }
-            }
-        }
-        found.sort_unstable();
-        found.dedup();
-        found
-    };
+    let candidates = |ext: &Extent| index.candidates(ext);
 
     let mut total_matches = 0usize;
     let mut written_features = 0usize;
@@ -1712,8 +1835,8 @@ fn spatial_join(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
                         // (A grid of coincident features has cells of no size: the first search
                         // reaches at least `MIN_REACH_M`.)
                         _ => {
-                            let mut reach = if use_grid {
-                                (cell_w.max(cell_h).to_radians() * rustgis_geom::EARTH_RADIUS_M).max(MIN_REACH_M)
+                            let mut reach = if let Some(cell) = index.cell_size() {
+                                (cell.to_radians() * rustgis_geom::EARTH_RADIUS_M).max(MIN_REACH_M)
                             } else {
                                 f64::INFINITY
                             };
@@ -3013,6 +3136,9 @@ mod tests {
             serde_json::json!({"target": "polys", "join": "pts", "match": "Within a distance", "distance": 1e308, "units": "Feet", "merge": "[{\"field\": 7}]"}),
             serde_json::json!({"target": "pts", "join": "polys", "match": "Largest overlap", "merge": [{"field": "k", "rule": "sum"}, null, "x"]}),
             serde_json::json!({"target": "polys", "join": "polys", "match": "Have their center in", "merge": [{"field": "k", "rule": "join", "delimiter": null}], "distanceField": ""}),
+            serde_json::json!({"input": "polys", "overlay": "polys"}),
+            serde_json::json!({"input": "pts", "overlay": "pts", "output": ""}),
+            serde_json::json!({"input": 3, "overlay": ["polys"]}),
         ];
         for t in TOOLS {
             for p in &junk {
@@ -3021,6 +3147,105 @@ mod tests {
                 assert!(!matches!(&r, Err(e) if e.ends_with("failed unexpectedly")), "{} panicked on {p}", t.id);
             }
         }
+    }
+
+    /// Parcels and zones for Intersect: `p1` is a 2° square that zone `z1` covers the right half of;
+    /// `z2` overlaps `z1` but only touches `p1` along its right edge, and `p2` along its left.
+    /// Both layers have an `id` field.
+    fn parcels_and_zones() -> Map {
+        let text = |t: &str| Value::Text(t.into());
+        let fields = |second: &str| vec![Field::new("id", FieldType::Text), Field::new(second, FieldType::Text)];
+        let mut parcels = Dataset::new("parcels", GeometryType::Polygon, fields("use"));
+        parcels.push(Some(sq(0.0, 0.0, 2.0)), vec![text("p1"), text("home")]);
+        parcels.push(Some(sq(4.0, 0.0, 1.0)), vec![text("p2"), text("shop")]);
+        let mut zones = Dataset::new("zones", GeometryType::Polygon, fields("zone"));
+        zones.push(Some(sq(1.0, 0.0, 2.0)), vec![text("z1"), text("R1")]);
+        zones.push(Some(sq(2.0, 0.0, 2.0)), vec![text("z2"), text("C2")]);
+        Map(HashMap::from([("parcels".to_string(), parcels), ("zones".to_string(), zones)]))
+    }
+
+    #[test]
+    fn intersect_keeps_the_overlap_with_both_layers_attributes() {
+        let m = parcels_and_zones();
+        let out = layer(crate::run("intersect", &m, &serde_json::json!({"input": "parcels", "overlay": "zones"})).unwrap());
+        assert_eq!(out.name, "parcels_Intersect");
+        assert_eq!(out.geometry_type, GeometryType::Polygon);
+        let names: Vec<&str> = out.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["id", "use", "id_2", "zone"], "the zones' id is taken");
+        // Only p1 and z1 overlap; touching along an edge makes no feature.
+        assert_eq!(out.features.len(), 1);
+        let f = &out.features[0];
+        let text = |v: &[&str]| v.iter().map(|t| Value::Text((*t).into())).collect::<Vec<_>>();
+        assert_eq!(f.attrs, text(&["p1", "home", "z1", "R1"]));
+        let e = f.geometry.as_ref().unwrap().extent();
+        for (got, want) in [(e.min_x, 1.0), (e.max_x, 2.0), (e.min_y, 0.0), (e.max_y, 2.0)] {
+            assert!((got - want).abs() < 1e-9, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn intersect_splits_points_by_each_polygon_they_fall_in() {
+        let m = inputs();
+        let out = layer(crate::run("intersect", &m, &serde_json::json!({"input": "pts", "overlay": "polys"})).unwrap());
+        assert_eq!(out.geometry_type, GeometryType::Point);
+        // (0.5, 0.5) is in the first square only, (1.5, 1.5) in both overlapping ones, (50, 50) in none.
+        let rows: Vec<(f64, &str)> = out
+            .features
+            .iter()
+            .map(|f| (f.attrs[0].as_f64().unwrap(), if let Value::Text(t) = &f.attrs[1] { t.as_str() } else { "" }))
+            .collect();
+        assert_eq!(rows, [(1.0, "a"), (2.0, "a"), (2.0, "a")]);
+    }
+
+    #[test]
+    fn extent_index_looks_only_at_its_own_cells() {
+        // 20 small extents in a 1° row: a grid of about 4 cells a side.
+        let index = ExtentIndex::new((0..20).map(|i| Extent::new(f64::from(i) * 0.05, 0.0, f64::from(i) * 0.05 + 0.01, 0.01)));
+        assert!(index.cell_size().is_some());
+        // A query far larger than the layer finds every feature once, in order.
+        assert_eq!(index.candidates(&Extent::new(-170.0, -80.0, 170.0, 80.0)), (0..20).collect::<Vec<_>>());
+        // A small one finds the features of its cell, not the whole row.
+        let near_start = index.candidates(&Extent::new(0.0, 0.0, 0.02, 0.005));
+        assert!(near_start.first() == Some(&0) && near_start.len() < 20, "{near_start:?}");
+        assert!(index.candidates(&Extent::new(5.0, 5.0, 6.0, 6.0)).is_empty());
+    }
+
+    #[test]
+    fn intersect_needs_an_overlay_of_polygons_and_an_input_with_geometry() {
+        let mut m = inputs();
+        let e = crate::run("intersect", &m, &serde_json::json!({"input": "polys", "overlay": "pts"})).unwrap_err();
+        assert!(e.contains("not a polygon layer"), "{e}");
+        m.0.insert("table".into(), Dataset::new("table", GeometryType::None, vec![]));
+        let e = crate::run("intersect", &m, &serde_json::json!({"input": "table", "overlay": "polys"})).unwrap_err();
+        assert!(e.contains("no geometry"), "{e}");
+    }
+
+    /// Layers with a selection in each, as the Tools pane passes them.
+    struct Selected(Map, HashMap<String, Vec<usize>>);
+    impl Inputs for Selected {
+        fn dataset(&self, layer: &str) -> Option<&Dataset> {
+            self.0.dataset(layer)
+        }
+        fn selection(&self, layer: &str) -> &[usize] {
+            self.1.get(layer).map_or(&[], Vec::as_slice)
+        }
+    }
+
+    #[test]
+    fn intersect_honours_both_layers_selections() {
+        let mut parcels_and_zones = parcels_and_zones();
+        // A zone covering p2, which only the selection would leave out.
+        let z3 = Some(sq(4.0, 0.0, 1.0));
+        parcels_and_zones.0.get_mut("zones").unwrap().push(z3, vec![Value::Text("z3".into()), Value::Null]);
+        let m = Selected(parcels_and_zones, HashMap::from([("parcels".to_string(), vec![0]), ("zones".to_string(), vec![1, 2])]));
+        let out = layer(crate::run("intersect", &m, &serde_json::json!({"input": "parcels", "overlay": "zones"})).unwrap());
+        // p1 meets only z1 (not selected); p2 meets z3 but isn't selected.
+        assert!(out.features.is_empty(), "{:?}", out.features);
+        // Selecting p2 too gives its part in z3, and only that.
+        let m = Selected(m.0, HashMap::from([("parcels".to_string(), vec![0, 1]), ("zones".to_string(), vec![1, 2])]));
+        let out = layer(crate::run("intersect", &m, &serde_json::json!({"input": "parcels", "overlay": "zones"})).unwrap());
+        let ids: Vec<&Value> = out.features.iter().flat_map(|f| [&f.attrs[0], &f.attrs[2]]).collect();
+        assert_eq!(ids, [&Value::Text("p2".into()), &Value::Text("z3".into())]);
     }
 
     #[test]

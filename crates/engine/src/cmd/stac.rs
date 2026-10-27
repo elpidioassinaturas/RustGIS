@@ -112,7 +112,7 @@ pub(super) fn collections(_s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = api;
-        Err("in the web app, browse STAC with Home › Web Data › STAC Search".into())
+        Err("in the web app, browse STAC with Home › Add › Web Data › STAC Search".into())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -147,7 +147,7 @@ fn search(s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (s, url);
-        Err("in the web app, search STAC with Home › Web Data › STAC Search".into())
+        Err("in the web app, search STAC with Home › Add › Web Data › STAC Search".into())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -191,7 +191,7 @@ fn search_static(s: &mut Session, p: &Value, root: &str) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (s, filter, root, note);
-        Err("in the web app, search STAC with Home › Web Data › STAC Search".into())
+        Err("in the web app, search STAC with Home › Add › Web Data › STAC Search".into())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -228,7 +228,7 @@ fn item(p: &Value) -> Result<Item, String> {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = url;
-        Err("in the web app, add STAC assets with Home › Web Data › STAC Search".into())
+        Err("in the web app, add STAC assets with Home › Add › Web Data › STAC Search".into())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

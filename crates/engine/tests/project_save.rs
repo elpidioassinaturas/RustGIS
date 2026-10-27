@@ -23,7 +23,11 @@ fn failed_save_as_preserves_project_state_and_a_later_save_succeeds() -> Result<
             s.run("project.rename", &json!({"name": "pending"}))?;
             s.run("project.rename", &json!({"name": "redo name"}))?;
             s.run("edit.undo", &Value::Null)?;
-            s.dirty = dirty;
+            if dirty {
+                s.mark_unsaved()
+            } else {
+                s.mark_saved()
+            }
             s.edit_counts.insert(1, EditCounts { added: 2, modified: 3, deleted: 1 });
             let before = serde_json::to_value(&s.project).map_err(|e| e.to_string())?;
             let path = s.path.clone();
@@ -35,7 +39,7 @@ fn failed_save_as_preserves_project_state_and_a_later_save_succeeds() -> Result<
                 assert!(s.run("project.saveAs", &json!({"path": target})).is_err());
                 assert_eq!(serde_json::to_value(&s.project).map_err(|e| e.to_string())?, before);
                 assert_eq!(s.path, path);
-                assert_eq!(s.dirty, dirty);
+                assert_eq!(s.dirty(), dirty);
                 assert_eq!(s.undo_depth(), depth);
                 assert_eq!(s.edit_counts, counts);
                 assert_eq!((s.undo_label(), s.redo_label()), history);
@@ -57,7 +61,7 @@ fn failed_save_as_preserves_project_state_and_a_later_save_succeeds() -> Result<
             assert_eq!(s.project.name, "renamed");
             assert_eq!(Project::load(&expected)?.name, "renamed");
             assert_eq!(s.path.as_ref(), Some(&expected));
-            assert!(!s.dirty);
+            assert!(!s.dirty());
             assert!(s.edit_counts.is_empty());
             assert_eq!(s.undo_depth(), depth);
             assert!(s.can_redo());

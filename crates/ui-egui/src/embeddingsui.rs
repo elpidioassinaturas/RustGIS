@@ -1,4 +1,4 @@
-//! Home › Web Data › Satellite Embeddings: a dataset picked from the catalog (its provider, model,
+//! Home › Add › Web Data › Satellite Embeddings: a dataset picked from the catalog (its provider, model,
 //! resolution, years and links), its tiles found where the map is (footprints drawn), and one
 //! shown on the map: AlphaEarth's three chosen bands as red, green and blue with a stretch,
 //! Earth Index's points coloured by their vectors' principal components, Tessera's three bands of

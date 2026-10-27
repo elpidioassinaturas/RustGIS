@@ -185,9 +185,18 @@ fn gallery(_: &mut Session, p: &Value) -> CmdResult {
 pub fn gallery_list(kind: &str) -> CmdResult {
     let ids: &[&str] = match kind {
         "ready" => &["buffer", "dissolve", "countPoints", "clip", "summaryStatistics", "selectByLocation"],
-        "feature" => {
-            &["buffer", "clip", "erase", "dissolve", "convexHull", "featureToPoint", "simplify", "countPoints", "calculateGeometry"]
-        }
+        "feature" => &[
+            "buffer",
+            "clip",
+            "erase",
+            "intersect",
+            "dissolve",
+            "convexHull",
+            "featureToPoint",
+            "simplify",
+            "countPoints",
+            "calculateGeometry",
+        ],
         "raster" => &[],
         k => return Err(format!("unknown gallery '{k}'")),
     };

@@ -56,17 +56,17 @@ unicode-segmentation = "1.13"
 # Zstandard decoder `rustgis-data` turns on, C that clang compiles for the browser build too).
 tiff = "0.11"
 # LZW chunks the tiff crate fails on (issue #350), decoded with the version it uses.
-weezl = "0.1"
+weezl = "0.2"
 # The tests' Zstandard-compressed GeoTIFFs (the version the tiff crate decodes with).
 zstd = { version = "0.14", default-features = false }
 proj4rs = { version = "0.2", default-features = false }
 crs-definitions = { version = "0.6", default-features = false, features = ["proj4"] }
 base64 = "0.23"
 # Deflate for PDF image streams.
-miniz_oxide = "0.8"
+miniz_oxide = "0.9"
 roxmltree = "0.21"
 url = "2.5.8"
-epaint_default_fonts = "0.36"
+epaint_default_fonts = "0.37"
 # Vector data providers: GeoParquet (pure Rust, so the browser reads it too), FlatGeobuf and
 # GeoPackage (SQLite, desktop only).
 # Read without Arrow, which would make the web app's WebAssembly far larger (Arrow is only used
@@ -90,7 +90,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "net", "tim
 tokio-util = { version = "0.7", default-features = false, features = ["compat"] }
 webpki-roots = "1"
 # Excel and OpenDocument spreadsheets, in pure Rust (the browser too).
-calamine = { version = "0.36", default-features = false }
+calamine = { version = "0.37", default-features = false }
 laz = { version = "0.13", default-features = false }
 # Zarr chunk codecs, in pure Rust (the browser too): LZ4 (blosc's usual codec; already in the
 # build through parquet) and a zstd decoder.
@@ -106,7 +106,7 @@ egui_extras = { version = "0.37", default-features = false }
 eframe = { version = "0.37", default-features = false }
 egui_kittest = "0.37"
 rfd = "0.17"
-pollster = "0.4"
+pollster = "1.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

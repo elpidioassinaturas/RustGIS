@@ -296,10 +296,12 @@ fn open_text(s: &mut Session, p: &Value) -> CmdResult {
     Ok(Value::Null)
 }
 
+/// Saves the project to `path` (`.rgis` added when it has no extension) and makes it the
+/// project's file. The project as it is now is the saved state undo can return to.
 fn write(s: &mut Session, path: PathBuf) -> CmdResult {
     let path = if path.extension().is_none() { path.with_extension(crate::project::EXTENSION) } else { path };
     let stripped = s.project.save(&path)?;
-    s.dirty = false;
+    s.mark_saved();
     s.edit_counts.clear();
     s.notify(format!("Saved {}", path.display()), false);
     if stripped > 0 {
@@ -451,7 +453,7 @@ fn info(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({
         "name": s.project.name,
         "path": s.path.as_ref().map(|p| p.display().to_string()),
-        "unsaved": s.dirty,
+        "unsaved": s.dirty(),
         "maps": s.project.maps.iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
         "activeMap": m.name,
         "basemap": m.basemap.code(),

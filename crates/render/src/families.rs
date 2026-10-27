@@ -23,12 +23,14 @@ pub struct InstalledFace {
 
 /// An installed family: its name, and its faces. A face is listed under its typographic family
 /// ("Noto Sans") and under its legacy one ("Noto Sans Light") when they differ, so either name
-/// finds it; only the first kind is `listed` in a font picker.
+/// finds it; only the first kind is `listed` in a font picker. `serif` says whether its first
+/// face is classed as a serif (see [`FaceInfo`]), for the generic family it falls back to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Family {
     pub name: String,
     pub listed: bool,
     pub faces: Vec<InstalledFace>,
+    pub serif: bool,
 }
 
 /// The longest family name kept (characters): longer ones are from broken files.
@@ -220,8 +222,12 @@ fn index(dirs: &[PathBuf]) -> Vec<Family> {
             let Ok(index) = u32::try_from(index) else { continue };
             let installed = InstalledFace { path: path.clone(), index, weight: face.weight, italic: face.italic };
             for (n, name) in face.names.iter().enumerate() {
-                let fam =
-                    by_name.entry(name.to_lowercase()).or_insert_with(|| Family { name: name.clone(), listed: false, faces: Vec::new() });
+                let fam = by_name.entry(name.to_lowercase()).or_insert_with(|| Family {
+                    name: name.clone(),
+                    listed: false,
+                    faces: Vec::new(),
+                    serif: face.serif,
+                });
                 fam.listed |= n == 0;
                 // One face per weight and slope: the first file's.
                 if !fam.faces.iter().any(|f| f.weight == installed.weight && f.italic == installed.italic) {
@@ -264,13 +270,16 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, seen: &mut HashSet<Pat
     }
 }
 
-/// What indexing reads of a face: its family names (the typographic one first), weight and
-/// slope.
+/// What indexing reads of a face: its family names (the typographic one first), weight, slope,
+/// and whether it is a serif: its `OS/2` `sFamilyClass` is one of the serif classes (oldstyle,
+/// transitional, modern, Clarendon, slab or freeform serifs), or, unclassed, its name says
+/// "Serif" without "Sans".
 #[derive(Debug, PartialEq, Eq)]
 struct FaceInfo {
     names: Vec<String>,
     weight: u16,
     italic: bool,
+    serif: bool,
 }
 
 /// The faces of the font file at `path` (one, or a collection's), each `None` where it can't be
@@ -307,22 +316,24 @@ fn face_info(r: &mut (impl Read + Seek), start: u32) -> Option<FaceInfo> {
     let family = read_name(1)?;
     let typographic = read_name(16);
     let style = read_name(17).or_else(|| read_name(2)).unwrap_or_default().to_lowercase();
-    let (weight, selection) = match table(b"OS/2") {
+    let (weight, selection, class) = match table(b"OS/2") {
         Some((at, len)) => {
             // An unreadable `OS/2` (cut short, past the end) keeps the face, at the defaults.
             let os2 = read_at(r, at, len.min(64)).unwrap_or_default();
-            (u16_at(&os2, 4).unwrap_or(400), u16_at(&os2, 62).unwrap_or(0))
+            (u16_at(&os2, 4).unwrap_or(400), u16_at(&os2, 62).unwrap_or(0), u16_at(&os2, 30).map_or(0, |c| c >> 8))
         }
-        None => (400, 0),
+        None => (400, 0, 0),
     };
     // fsSelection's ITALIC or OBLIQUE bit, or a style that says so.
     let italic = selection & 0x0201 != 0 || style.contains("italic") || style.contains("oblique");
+    let lower = family.to_lowercase();
+    let serif = matches!(class, 1..=5 | 7) || (class == 0 && lower.contains("serif") && !lower.contains("sans"));
     let mut names = Vec::with_capacity(2);
     names.extend(typographic);
     if !names.iter().any(|n: &String| n.eq_ignore_ascii_case(&family)) {
         names.push(family);
     }
-    Some(FaceInfo { names, weight: weight.clamp(1, 1000), italic })
+    Some(FaceInfo { names, weight: weight.clamp(1, 1000), italic, serif })
 }
 
 /// Name `id` of a `name` table, in English where it has it: a Windows (UTF-16) record first, then
@@ -408,6 +419,15 @@ mod tests {
         let ubuntu = fams.iter().find(|f| f.name.to_lowercase().starts_with("ubuntu")).expect("ubuntu indexed");
         assert_eq!(ubuntu.faces.len(), 1);
         assert!(ubuntu.faces[0].weight < 400 && !ubuntu.faces[0].italic, "{ubuntu:?}");
+        // Neither is classed as a serif (a layout text in either falls back to the sans).
+        assert!(fams.iter().all(|f| !f.serif), "{fams:?}");
+        // A face its OS/2 table classes as a serif (sFamilyClass 1, oldstyle serifs) is one.
+        let mut serif = epaint_default_fonts::HACK_REGULAR.to_vec();
+        let tables = usize::from(u16_at(&serif, 4).unwrap());
+        let os2 = (0..tables).map(|i| 12 + i * 16).find(|r| serif.get(*r..r + 4) == Some(b"OS/2")).unwrap();
+        let at = u32_at(&serif, os2 + 8).unwrap() as usize;
+        serif[at + 30] = 1;
+        assert!(faces_of(&mut std::io::Cursor::new(serif))[0].as_ref().unwrap().serif);
         // Found in any case; the face it draws in, its bytes read once.
         let i = find_in(&fams, &ubuntu.name.to_uppercase()).unwrap();
         let fam = &fams[i as usize];
@@ -458,8 +478,12 @@ mod tests {
     #[test]
     fn a_family_draws_in_its_nearest_face() {
         let face = |weight, italic| InstalledFace { path: PathBuf::from(format!("{weight}{italic}")), index: 0, weight, italic };
-        let fam =
-            Family { name: "F".into(), listed: true, faces: vec![face(300, false), face(500, false), face(800, false), face(400, true)] };
+        let fam = Family {
+            name: "F".into(),
+            listed: true,
+            faces: vec![face(300, false), face(500, false), face(800, false), face(400, true)],
+            serif: false,
+        };
         let w = |bold, italic| pick(&fam, bold, italic).map(|(f, s)| (f.weight, f.italic, s)).unwrap();
         // 300 and 500 are as near 400: the regular takes the lighter.
         assert_eq!(w(false, false), (300, false, false));

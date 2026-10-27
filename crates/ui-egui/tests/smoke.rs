@@ -462,7 +462,7 @@ fn every_tab_pane_and_dialog_renders() {
     for _ in 0..4 {
         h.step();
     }
-    for tab in ["Home", "Data", "Style", "Edit", "Analyze", "View", "Publish", "Plugins", "Settings", "Help"] {
+    for tab in ["Home", "Data", "Style", "Labeling", "Edit", "Analyze", "View", "Publish", "Plugins", "Settings", "Help"] {
         h.state_mut().ui.tab = tab.into();
         h.run();
     }
@@ -801,7 +801,7 @@ fn start_up_preferences() {
     app.start(&Default::default()).unwrap();
     assert!(app.session.map().layers.is_empty());
     assert_eq!(app.session.map().projection.code(), "EPSG:3010");
-    assert!(!app.session.dirty && !app.session.can_undo());
+    assert!(!app.session.dirty() && !app.session.can_undo());
 
     // The web app's `?projection=robinson` without `?blank`: the sample still goes when the
     // preference says blank; an explicit `Some(false)` keeps it.
@@ -929,7 +929,7 @@ fn start_with_a_project_file_or_the_last_one() {
     assert_eq!(started.session.path.as_deref(), Some(a.as_path()));
     assert_eq!(started.session.map().projection.code(), "EPSG:3010");
     assert!(started.ui.start_view.is_none(), "the Start-up extent isn't applied");
-    assert!(!started.session.dirty && !started.session.can_undo());
+    assert!(!started.session.dirty() && !started.session.can_undo());
     // A shell's blank wins: a file on the command line (true) or --sample (false).
     for (blank, sample) in [(true, false), (false, true)] {
         let mut shell = RustGisApp::with_sample().with_services(services());
@@ -1236,7 +1236,14 @@ fn show_me_points_at_where_a_steps_command_is() {
 #[test]
 fn old_and_unknown_tab_names_open_a_current_tab() {
     let mut h = harness();
-    for (asked, opened) in [("Imagery", "Analyze"), ("Feature Layer", "Style"), ("Share", "Publish"), ("Map", "Home"), ("nope", "Home")] {
+    for (asked, opened) in [
+        ("Imagery", "Analyze"),
+        ("Feature Layer", "Style"),
+        ("Labeling", "Labeling"),
+        ("Share", "Publish"),
+        ("Map", "Home"),
+        ("nope", "Home"),
+    ] {
         let _ = h.state_mut().run("ui.tab", json!({"tab": asked}));
         assert_eq!(h.state().ui.tab, opened, "{asked}");
         h.step();
@@ -2212,7 +2219,7 @@ fn web_save_asks_for_the_file_name() {
     assert_eq!(h.state().dialogs.open, None);
     assert_eq!(names(&got), ["Trip plan.rgis"]);
     assert_eq!(h.state().session.project.name, "Trip plan");
-    assert!(!h.state().session.dirty);
+    assert!(!h.state().session.dirty());
     // Saved once: Save downloads under that name again without asking; Save As asks.
     h.state_mut().run("ui.save", json!(null)).unwrap();
     assert_eq!(h.state().dialogs.open, None);
@@ -2254,7 +2261,7 @@ fn save_project_dialog_needs_downloads() {
     h.step();
     assert!(h.state().dialogs.error.is_some());
     assert_eq!(h.state().session.project.name, "World Atlas");
-    assert!(h.state().session.dirty);
+    assert!(h.state().session.dirty());
 }
 
 #[test]
@@ -2915,6 +2922,53 @@ fn dynamic_text_is_a_menu_of_values_that_starts_the_text() {
     // Choosing Text again by command (Command Search, a script) starts plain text.
     h.state_mut().run("tool.set", json!({"tool": "graphicText"})).unwrap();
     assert_eq!(h.state().ui.dynamic_text, None);
+}
+
+#[test]
+fn popup_titles_leave_room_for_controls() {
+    use egui::accesskit::Role;
+
+    for title in ["Oak".to_string(), "HIDDEN INTERSECTION Tab Sign (Oversized) ".repeat(4), "長い地物名".repeat(30)] {
+        for count in [1, 2] {
+            let mut h = harness();
+            h.ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
+            let features: Vec<_> = (0..count)
+                .map(|_| json!({"type": "Feature", "properties": {"name": title}, "geometry": {"type": "Point", "coordinates": [0, 0]}}))
+                .collect();
+            h.state_mut()
+                .run(
+                    "layer.addDataText",
+                    json!({
+                        "fileName": "popup.geojson",
+                        "name": "A layer with a name much longer than the popup header can hold",
+                        "text": json!({"type": "FeatureCollection", "features": features}).to_string()
+                    }),
+                )
+                .unwrap();
+            h.state_mut().run("map.zoomToExtent", json!({"extent": [-5, -4, 5, 4]})).unwrap();
+            h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("identify_popup_limit"), egui::vec2(240.0, 360.0)));
+            h.state_mut().run("ui.identify", json!({"lon": 0, "lat": 0})).unwrap();
+            h.run_steps(6);
+
+            let title_rect = h.query_all_by_label(&title).map(|n| n.rect()).min_by(|a, b| a.min.y.total_cmp(&b.min.y)).unwrap();
+            let close = h.get_by_role_and_label(Role::Button, "×").rect();
+            assert!(close.max.x <= title_rect.min.x - 12.0 + 240.0, "close must stay inside the popup");
+            assert!(title_rect.max.x < close.min.x, "title must leave room for close");
+            if count > 1 {
+                let previous = h.get_by_role_and_label(Role::Button, "‹").rect();
+                assert!(title_rect.max.x < previous.min.x, "title must leave room for all navigation controls");
+                h.get_by_role_and_label(Role::Button, "›").click();
+                h.run_steps(3);
+                assert_eq!(h.state().map.popup.as_ref().unwrap().index, 1);
+                h.get_by_role_and_label(Role::Button, "‹").click();
+                h.run_steps(3);
+                assert_eq!(h.state().map.popup.as_ref().unwrap().index, 0);
+            }
+            h.get_by_role_and_label(Role::Button, "×").click();
+            h.run_steps(3);
+            assert!(h.state().map.popup.is_none(), "close must remain clickable");
+        }
+    }
 }
 
 #[test]

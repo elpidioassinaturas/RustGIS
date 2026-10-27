@@ -225,6 +225,34 @@ fn geoparquet_with_and_without_a_covering() {
 }
 
 #[test]
+fn flatgeobuf_refuses_impossible_index_counts() {
+    let path = dir().join("impossible-index.fgb");
+    write_fgb(&path);
+    let original = std::fs::read(&path).unwrap();
+    let header = flatgeobuf::size_prefixed_root_as_header(&original[8..]).unwrap();
+    let slot = header._tab.vtable().get(flatgeobuf::Header::VT_FEATURES_COUNT) as usize;
+    assert_ne!(slot, 0);
+    let offset = 8 + header._tab.loc() + slot;
+    for count in [1u64 << 63, u64::MAX, (1u64 << 40) + 1] {
+        let mut bytes = original.clone();
+        bytes[offset..offset + 8].copy_from_slice(&count.to_le_bytes());
+        assert!(matches!(open_bytes("impossible.fgb", bytes.clone(), None), Err(DataError::Format(_))));
+        assert!(crate::io::read_layers("impossible.fgb", &bytes).is_err());
+        std::fs::write(&path, &original).unwrap();
+        let opened = open_path(&path, None).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(matches!(open_path(&path, None), Err(DataError::Format(_))));
+        // A path is reopened on every request: validate again if its file changed.
+        for extent in [None, Some(Extent::WORLD_LONLAT)] {
+            assert!(matches!(opened.read(&Request { extent, ..Request::all() }), Err(DataError::Format(_))));
+        }
+        let url = format!("https://test.example/impossible-index-{count}.fgb");
+        remote::testing::serve(&url, bytes);
+        assert!(matches!(open_url_blocking(&url), Err(DataError::Format(_))));
+    }
+}
+
+#[test]
 fn flatgeobuf() {
     let p = dir().join("grid.fgb");
     write_fgb(&p);
@@ -1138,6 +1166,286 @@ fn geojson_in_place_matches_one_read_whole() {
         std::fs::write(&p, text).unwrap();
         assert!(open_path(&p, None).is_err() && geojson::GeoJsonSource::open_with(&p, "x", 0).is_err(), "{file}");
     }
+}
+
+/// A GeoJSON FeatureCollection of Arnhem's municipal outline's box and a point in RD New
+/// (EPSG:28992), `crs` being what the file declares (left out for `None`).
+fn rd_geojson(crs: Option<&str>) -> String {
+    let crs = crs.map(|c| format!(r#""crs":{c},"#)).unwrap_or_default();
+    format!(
+        r#"{{"type":"FeatureCollection","name":"arnhem",{crs}"features":[
+        {{"type":"Feature","properties":{{"n":"area"}},"geometry":{{"type":"Polygon","coordinates":[[[183548,438459],[196442,438459],[196442,454549],[183548,454549],[183548,438459]]]}}}},
+        {{"type":"Feature","properties":{{"n":"point"}},"geometry":{{"type":"Point","coordinates":[188000,445000]}}}}]}}"#
+    )
+}
+
+fn named(name: &str) -> String {
+    format!(r#"{{"type":"name","properties":{{"name":"{name}"}}}}"#)
+}
+
+/// What a GeoJSON text reads as through every path: whole, and in place scanned in memory and
+/// through a buffer; the paths must agree. Returns the dataset, its messages and the source's
+/// `info.crs`.
+fn geojson_paths(file: &str, text: &str) -> (Dataset, Vec<String>, String) {
+    let d = dir().join("geojson-crs");
+    std::fs::create_dir_all(&d).unwrap();
+    let p = d.join(file);
+    std::fs::write(&p, text).unwrap();
+    let (whole, report) = crate::io::read_geojson(text, "x").unwrap();
+    for in_memory in [crate::io::MAX_BYTES, 0] {
+        let src = geojson::GeoJsonSource::open_with(&p, "x", in_memory).unwrap();
+        let (inplace, in_report) = materialize(&src).unwrap();
+        assert_eq!(inplace.features, whole.features, "{file}");
+        assert_eq!(inplace.crs, whole.crs, "{file}");
+        assert_eq!(inplace.crs_incomplete, whole.crs_incomplete, "{file}");
+        assert_eq!(inplace.geometry_type, whole.geometry_type, "{file}");
+        assert_eq!(report.skipped, in_report.skipped, "{file}");
+        let strip = |m: &Vec<String>| m.iter().map(|m| m.trim_start_matches("x: ").to_string()).collect::<Vec<_>>();
+        assert_eq!(strip(&report.messages), strip(&in_report.messages), "{file}");
+        // The extent a source says is that of the features it reads (those that convert).
+        assert_eq!(src.info().extent, whole.extent(), "{file}");
+        assert_eq!(src.info().count, Some(whole.features.len() as u64), "{file}");
+        assert_eq!(src.info().coordinate_system(), whole.crs, "{file}");
+    }
+    let src = geojson::GeoJsonSource::open_with(&p, "x", crate::io::MAX_BYTES).unwrap();
+    (whole, report.messages, src.info().crs.clone())
+}
+
+fn in_arnhem(e: &Extent) -> bool {
+    (5.8..6.0).contains(&e.min_x) && (5.8..6.0).contains(&e.max_x) && (51.9..52.1).contains(&e.min_y) && (51.9..52.1).contains(&e.max_y)
+}
+
+#[test]
+fn geojson_legacy_crs_is_honoured_by_both_paths() {
+    // The issue #930 declaration, and the other ways EPSG:28992 is named.
+    for name in [
+        "urn:ogc:def:crs:EPSG::28992",
+        "urn:ogc:def:crs:EPSG:6.6:28992",
+        "EPSG:28992",
+        "epsg:28992",
+        "http://www.opengis.net/def/crs/EPSG/0/28992",
+    ] {
+        let (ds, messages, info_crs) = geojson_paths("rd.geojson", &rd_geojson(Some(&named(name))));
+        assert!(in_arnhem(&ds.extent()), "{name}: {:?}", ds.extent());
+        assert_eq!(ds.crs, Some(crate::raster::Crs::Epsg(28992)), "{name}");
+        assert_eq!(info_crs, "EPSG:28992", "{name}");
+        assert!(messages.is_empty(), "{name}: {messages:?}");
+        assert!(!ds.crs_incomplete);
+        assert_eq!(ds.geometry_type, GeometryType::Polygon);
+    }
+    // Reads in place go by the layer's own coordinates: a window of longitude/latitude finds the
+    // features, one elsewhere finds none.
+    let p = dir().join("geojson-crs").join("rd.geojson");
+    for in_memory in [crate::io::MAX_BYTES, 0] {
+        let src = geojson::GeoJsonSource::open_with(&p, "x", in_memory).unwrap();
+        let at = |e: Extent| src.read(&Request { extent: Some(e), limit: 100 }).unwrap().features.len();
+        assert_eq!(at(Extent::new(5.85, 51.95, 5.86, 51.96)), 1, "the polygon only");
+        assert_eq!(at(Extent::new(5.95, 52.02, 5.96, 52.03)), 1, "the polygon only");
+        assert_eq!(at(Extent::new(5.8, 51.9, 6.0, 52.1)), 2);
+        assert_eq!(at(Extent::new(0.0, 0.0, 1.0, 1.0)), 0);
+        assert_eq!(at(Extent::new(500000.0, 438459.0, 600000.0, 454549.0)), 0, "the file's coordinates aren't lon/lat");
+    }
+}
+
+#[test]
+fn geojson_without_a_crs_or_in_lonlat_is_unchanged() {
+    let fc = |crs: &str| {
+        format!(
+            r#"{{"type":"FeatureCollection",{crs}"features":[{{"type":"Feature","properties":{{}},"geometry":{{"type":"Polygon","coordinates":[[[5.8,51.9],[6.0,51.9],[6.0,52.1],[5.8,52.1],[5.8,51.9]]]}}}},
+            {{"type":"Feature","properties":{{}},"geometry":{{"type":"Point","coordinates":[-122.5,37.75]}}}}]}}"#
+        )
+    };
+    let wgs84 = [
+        String::new(),
+        r#""crs":null,"#.to_string(),
+        format!(r#""crs":{},"#, named("urn:ogc:def:crs:OGC:1.3:CRS84")),
+        format!(r#""crs":{},"#, named("urn:ogc:def:crs:OGC::CRS84")),
+        format!(r#""crs":{},"#, named("OGC::CRS84")),
+        format!(r#""crs":{},"#, named("OGC:1.3:CRS84")),
+        format!(r#""crs":{},"#, named("OGC:CRS84")),
+        format!(r#""crs":{},"#, named("CRS84")),
+        format!(r#""crs":{},"#, named("http://www.opengis.net/def/crs/OGC/1.3/CRS84")),
+        format!(r#""crs":{},"#, named("EPSG:4326")),
+        format!(r#""crs":{},"#, named("urn:ogc:def:crs:EPSG::4326")),
+    ];
+    let (base, _, _) = geojson_paths("plain.geojson", &fc(""));
+    assert_eq!(base.extent(), Extent::new(-122.5, 37.75, 6.0, 52.1));
+    for crs in &wgs84 {
+        let (ds, messages, info_crs) = geojson_paths("wgs84.geojson", &fc(crs));
+        assert_eq!(ds.features, base.features, "{crs}: not a coordinate moved");
+        assert_eq!(ds.crs, None, "{crs}");
+        assert_eq!(info_crs, "EPSG:4326", "{crs}");
+        assert!(messages.is_empty(), "{crs}: {messages:?}");
+        assert!(!ds.crs_incomplete);
+    }
+}
+
+#[test]
+fn geojson_geographic_crs_keeps_x_y_order() {
+    // ETRS89 (EPSG:4258) is latitude/longitude in EPSG, but a legacy GeoJSON crs still gives
+    // longitude, latitude: the point stays in the Netherlands, not at 52 E 5.9 N.
+    let text = r#"{"type":"FeatureCollection","crs":{"type":"name","properties":{"name":"urn:ogc:def:crs:EPSG::4258"}},
+        "features":[{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[5.9,52.0]}}]}"#;
+    let (ds, messages, info_crs) = geojson_paths("etrs89.geojson", text);
+    assert!(messages.is_empty(), "{messages:?}");
+    assert_eq!(ds.crs, Some(crate::raster::Crs::Epsg(4258)));
+    assert_eq!(info_crs, "EPSG:4258");
+    let Some(Geometry::Point(c)) = ds.features.first().and_then(|f| f.geometry.clone()) else { panic!("a point") };
+    assert!((c.x - 5.9).abs() < 1e-3 && (c.y - 52.0).abs() < 1e-3, "{c:?}");
+}
+
+#[test]
+fn geojson_crs_not_understood_is_said_and_coordinates_kept() {
+    let long = "x".repeat(100_000);
+    let declared = [
+        (r#"{"type":"link","properties":{"href":"http://example.com/crs","type":"proj4"}}"#.to_string(), "of type \"link\""),
+        (named("urn:ogc:def:crs:OGC:1.3:CRS83"), "CRS83"),
+        (named("EPSG:1"), "EPSG:1"),
+        (named("EPSG:99999999999"), "EPSG:99999999999"),
+        (named("EPSG:abc"), "EPSG:abc"),
+        (named("Amersfoort / RD New"), "Amersfoort"),
+        (named("VN-2000 / UTM zone 48N EPSG:28992"), "VN-2000"),
+        (named("OGC:CRS84:EPSG"), "OGC:CRS84:EPSG"),
+        (named("x:EPSG:28992"), "x:EPSG:28992"),
+        (named("urn:ogc:def:crs:EPSG::28992:extra"), "extra"),
+        (named("urn:x:EPSG:6.6:28992"), "urn:x"),
+        (named("http://example.com/def/crs/EPSG/0/28992"), "example.com"),
+        (named("EPSG:28992:28992"), "EPSG:28992:28992"),
+        (named("+proj=utm +zone=31 +datum=WGS84 EPSG"), "+proj=utm"),
+        (named("PROJCS[\\\"RD\\\",EPSG]"), "PROJCS"),
+        (named(&format!("EPSG:28992{long}")), "…"),
+        (r#"{"type":"name","properties":{"name":28992}}"#.to_string(), "of type \"name\""),
+        (r#"{"type":"name","properties":{}}"#.to_string(), "of type \"name\""),
+        (r#"{"type":"name"}"#.to_string(), "of type \"name\""),
+        (r#"{"type":5}"#.to_string(), "of an unknown shape"),
+        (r#"{}"#.to_string(), "of an unknown shape"),
+        (r#""EPSG:28992""#.to_string(), "of an unknown shape"),
+        (r#"28992"#.to_string(), "of an unknown shape"),
+        (r#"true"#.to_string(), "of an unknown shape"),
+        (r#"["EPSG:28992"]"#.to_string(), "of an unknown shape"),
+        (r#"[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]"#.to_string(), "of an unknown shape"),
+        (format!(r#"{{"type":"{long}"}}"#), "…"),
+    ];
+    for (crs, shown) in &declared {
+        let (ds, messages, info_crs) = geojson_paths("odd.geojson", &rd_geojson(Some(crs)));
+        // Not taken as WGS 84 without saying so: one message naming the declaration.
+        assert_eq!(messages.len(), 1, "{crs:.60}: {messages:?}");
+        assert!(messages[0].starts_with("GeoJSON crs ") && messages[0].contains(shown), "{crs:.60}: {}", messages[0]);
+        assert!(messages[0].contains("longitude/latitude"), "{}", messages[0]);
+        assert!(messages[0].len() < 400, "a declaration is clipped in a message: {}", messages[0].len());
+        // Read as they are, nothing converted or lost.
+        assert_eq!(ds.features.len(), 2, "{crs:.60}");
+        assert_eq!(ds.extent(), Extent::new(183548.0, 438459.0, 196442.0, 454549.0), "{crs:.60}");
+        assert_eq!(ds.crs, None);
+        assert_eq!(info_crs, "EPSG:4326");
+    }
+}
+
+#[test]
+fn geojson_crs_is_read_only_from_the_feature_collection() {
+    // Not part of the legacy text: on a feature, a geometry or a lone Feature. Ignored, quietly.
+    let crs = named("EPSG:28992");
+    let docs = [
+        format!(
+            r#"{{"type":"FeatureCollection","features":[{{"type":"Feature","crs":{crs},"properties":{{}},"geometry":{{"type":"Point","coordinates":[188000,445000]}}}}]}}"#
+        ),
+        format!(
+            r#"{{"type":"FeatureCollection","features":[{{"type":"Feature","properties":{{}},"geometry":{{"type":"Point","coordinates":[188000,445000],"crs":{crs}}}}}]}}"#
+        ),
+        format!(r#"{{"type":"Feature","crs":{crs},"properties":{{}},"geometry":{{"type":"Point","coordinates":[188000,445000]}}}}"#),
+        format!(r#"{{"type":"Point","coordinates":[188000,445000],"crs":{crs}}}"#),
+    ];
+    for text in &docs {
+        let (ds, report) = crate::io::read_geojson(text, "x").unwrap();
+        assert!(report.messages.is_empty(), "{text}");
+        assert_eq!(ds.crs, None, "{text}");
+        assert_eq!(ds.extent(), Extent::new(188000.0, 445000.0, 188000.0, 445000.0), "{text}");
+    }
+    // A FeatureCollection whose features aren't an array is read whole, its crs still honoured.
+    let (ds, report) = crate::io::read_geojson(&format!(r#"{{"type":"FeatureCollection","crs":{crs},"features":7}}"#), "x").unwrap();
+    assert!(ds.features.is_empty() && report.messages.is_empty());
+}
+
+#[test]
+fn geojson_features_that_cant_be_converted_are_skipped_and_counted() {
+    // A coordinate the declared system can't convert (UTM 1e9 m east), or converts to beyond
+    // longitude/latitude (Web Mercator 1e9 m east is longitude 8983°): the feature is dropped.
+    for (crs, good, bad) in [("EPSG:32617", "[500000,4649776]", "[1e9,0]"), ("EPSG:3857", "[1000000,6000000]", "[1e9,0]")] {
+        let text = format!(
+            r#"{{"type":"FeatureCollection","crs":{},"features":[
+            {{"type":"Feature","properties":{{"n":1}},"geometry":{{"type":"Point","coordinates":{good}}}}},
+            {{"type":"Feature","properties":{{"n":2}},"geometry":{{"type":"Point","coordinates":{bad}}}}},
+            {{"type":"Feature","properties":{{"n":3}},"geometry":{{"type":"Point","coordinates":{good}}}}}]}}"#,
+            named(crs)
+        );
+        let (ds, messages, info_crs) = geojson_paths("far.geojson", &text);
+        assert_eq!(ds.features.len(), 2, "{crs}");
+        assert_eq!(ds.features.iter().map(|f| f.id).collect::<Vec<_>>(), [1, 3], "{crs}: ids are the features' places in the file");
+        assert_eq!(messages.len(), 1, "{crs}: {messages:?}");
+        assert!(messages[0].contains(&format!("1 features couldn't be converted from {crs}")), "{}", messages[0]);
+        assert_eq!(info_crs, crs);
+        assert!(ds.crs_incomplete, "{crs}: a projection can't be defined again over lost features");
+        let Some(Geometry::Point(c)) = ds.features.first().and_then(|f| f.geometry.clone()) else { panic!("a point") };
+        assert!(c.x.abs() < 180.0 && c.y.abs() < 90.0, "{crs}: {c:?}");
+        if crs == "EPSG:32617" {
+            assert!((c.x + 81.0).abs() < 1e-6 && (c.y - 42.0).abs() < 1e-3, "{c:?}");
+        }
+    }
+}
+
+/// A point in Web Mercator that converts, one that doesn't (longitude 8983°), and a polygon.
+const MERC_OK: &str = r#"{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[1000000,6000000]}}"#;
+const MERC_BAD: &str = r#"{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[1e9,0]}}"#;
+const MERC_POLY: &str = r#"{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[1000000,6000000],[1100000,6000000],[1100000,6100000],[1000000,6000000]]]}}"#;
+
+fn merc_collection(features: &[&str]) -> String {
+    format!(r#"{{"type":"FeatureCollection","crs":{},"features":[{}]}}"#, named("EPSG:3857"), features.join(","))
+}
+
+#[test]
+fn geojson_dropped_features_do_not_set_the_geometry_type() {
+    // Two points that can't be placed and one polygon that can: a polygon layer, as read whole.
+    let (ds, _, _) = geojson_paths("kinds.geojson", &merc_collection(&[MERC_BAD, MERC_POLY, MERC_BAD]));
+    assert_eq!(ds.geometry_type, GeometryType::Polygon);
+    assert_eq!(ds.features.len(), 1);
+    // Nothing that can be placed: no geometry type at all, both ways.
+    let (ds, messages, _) = geojson_paths("none.geojson", &merc_collection(&[MERC_BAD, MERC_BAD]));
+    assert_eq!(ds.geometry_type, GeometryType::None);
+    assert!(ds.features.is_empty() && ds.crs_incomplete);
+    assert_eq!(messages.len(), 1, "{messages:?}");
+}
+
+#[test]
+fn geojson_sampling_skips_dropped_features() {
+    // Unplaceable features at every other place must not use up the sample: a read asking for
+    // two of the three placeable ones gets two, and says it matched three.
+    let text = merc_collection(&[MERC_BAD, MERC_OK, MERC_BAD, MERC_OK, MERC_BAD, MERC_OK]);
+    let p = dir().join("geojson-crs").join("alternating.geojson");
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, &text).unwrap();
+    for in_memory in [crate::io::MAX_BYTES, 0] {
+        let src = geojson::GeoJsonSource::open_with(&p, "x", in_memory).unwrap();
+        assert_eq!(src.info().count, Some(3));
+        let all = src.read(&Request { extent: None, limit: 100 }).unwrap();
+        assert_eq!((all.features.len(), all.matched, all.skipped, all.complete), (3, 3, 0, true));
+        let some = src.read(&Request { extent: None, limit: 2 }).unwrap();
+        assert_eq!((some.features.len(), some.matched, some.skipped, some.complete), (2, 3, 0, false));
+        assert!(some.features.iter().all(|f| f.geometry.is_some()));
+        let ids: Vec<u64> = all.features.iter().map(|f| f.id).collect();
+        assert_eq!(ids, [2, 4, 6]);
+    }
+}
+
+#[test]
+fn geojson_unreadable_feature_alone_does_not_make_the_layer_incomplete() {
+    // A declared system, one feature with geometry that can't be read, and all the others
+    // placed: nothing was lost to the system, so Define Projection stays available, both ways.
+    let bad = r#"{"type":"Feature","properties":{},"geometry":{"type":"Nope"}}"#;
+    let (ds, messages, _) = geojson_paths("unreadable.geojson", &merc_collection(&[MERC_OK, bad]));
+    assert_eq!(ds.features.len(), 1);
+    assert!(!ds.crs_incomplete);
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("unreadable geometry"), "{}", messages[0]);
 }
 
 #[test]

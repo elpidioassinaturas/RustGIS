@@ -261,7 +261,7 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(target_arch = "wasm32")]
 fn fetch(_url: &str) -> Result<Vec<u8>, String> {
-    Err("in the web app, use Home › Web Data › OpenStreetMap…, Boundaries… or Search Open Data…".into())
+    Err("in the web app, use Home › Add › Web Data › OpenStreetMap…, Boundaries… or Search Open Data…".into())
 }
 
 #[cfg(test)]

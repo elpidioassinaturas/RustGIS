@@ -1422,11 +1422,25 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, reorder: 
     let shown = if tile.overlay { format!("{} · {}", tile.name, tl!("overlay")) } else { tile.name.clone() };
     let name = row_name(ui, shown.clone(), regular(12.5), ui.available_width() - NAME_X - 8.0);
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), name.row_h), Sense::click());
+    // Named for screen readers as a layer's row is.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &tile.name));
     if resp.hovered() {
         ui.painter().rect_filled(r.shrink2(vec2(4.0, 1.0)), CornerRadius::same(5), t.hover);
     }
-    // Lined up with the layer rows' checkboxes, icons and names.
+    // Lined up with the layer rows' arrows, checkboxes, icons and names.
     let cy = r.min.y + 13.0;
+    // A WMS or WMTS layer's legend opens under it, as a feature layer's classes do.
+    let has_legend = !tile.legends.is_empty();
+    let ar = Rect::from_center_size(pos2(r.min.x + 16.0, cy), vec2(14.0, 14.0));
+    if has_legend {
+        icons::paint(ui.painter(), ar, if tile.expanded { "chevron_down" } else { "chevron_right" }, t.text_dim, t.accent);
+    }
+    let ar_resp = has_legend.then(|| {
+        let r = ui.interact(hit(ar), egui::Id::unique(("tile_expand", i)), Sense::click());
+        let what = if tile.expanded { tl!("Hide legend") } else { tl!("Show legend") };
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, what));
+        r
+    });
     let mut x = r.min.x + 26.0;
     let cb = Rect::from_center_size(pos2(x + 7.0, cy), vec2(14.0, 14.0));
     let cb_resp = ui.interact(hit(cb), egui::Id::unique(("tile_vis", i)), Sense::click()).on_hover_text(tl!("Show or hide"));
@@ -1448,6 +1462,8 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, reorder: 
     let mut action: Option<(&str, Value)> = None;
     if cb_resp.clicked() {
         action = Some(("map.setTiles", json!({"index": i, "visible": !tile.visible})));
+    } else if ar_resp.is_some_and(|a| a.clicked()) {
+        action = Some(("map.expandTiles", json!({"index": i})));
     }
     let mut hover = if elided { format!("{shown}\n{}", tile.url) } else { tile.url.clone() };
     if let Some(error) = &tile.error {
@@ -1500,6 +1516,9 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, reorder: 
             ui.close();
         }
     });
+    if has_legend && tile.expanded {
+        crate::tilelegend::show(app, ui, i, tile, t);
+    }
     if let Some((cmd, p)) = action {
         let _ = app.run(cmd, p);
     }
@@ -2254,6 +2273,10 @@ fn folder_browser(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                         "asc",
                         // A File Geodatabase's folder, listed as data above.
                         "gdb",
+                        // Databases holding several layers, which ask which to add (#934).
+                        "gpkg",
+                        "duckdb",
+                        "ddb",
                         "rgis",
                         "rgisx",
                         "rgispkg",
@@ -2284,7 +2307,7 @@ fn folder_browser(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 if is_dir {
                     app.table.folder = Some(path.clone());
                 } else if rustgis_engine::project::opens_as_project(&name) {
-                    let _ = app.run("project.open", json!({"path": path.display().to_string()}));
+                    let _ = app.run_by_user("project.open", json!({"path": path.display().to_string()}));
                     app.map.invalidate();
                 } else if name.ends_with(".rgismap") || name.ends_with(".rgismpk") {
                     let _ = app.run("map.import", json!({"path": path.display().to_string()}));
@@ -2292,7 +2315,7 @@ fn folder_browser(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 } else if name.ends_with(".rgislayout") {
                     let _ = app.run("layout.import", json!({"path": path.display().to_string()}));
                 } else {
-                    let _ = app.run("layer.addData", json!({"path": path.display().to_string()}));
+                    let _ = crate::layerchooser::add_file(app, &path.display().to_string());
                 }
             }
         });
@@ -3389,6 +3412,7 @@ pub fn tool_icon(id: &str) -> &'static str {
         "buffer" => "buffer",
         "clip" => "clip",
         "erase" => "erase",
+        "intersect" => "intersect",
         "dissolve" => "dissolve",
         "convexHull" => "hull",
         "featureToPoint" => "centroid",
@@ -3638,13 +3662,15 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             legend_list(app, ui, &l, t);
         }
         Renderer::Graduated { field, breaks, ramp, method, min, .. } => {
+            // Re-classing keeps the classes asked for, not the fewer some methods found.
+            let asked = l.renderer.classes_asked();
             field_combo(app, ui, "Field", field, &numeric, "graduated");
             ui.horizontal(|ui| {
                 let input_label = ui.label(tl!("Method"));
                 egui::ComboBox::from_id_salt("sym_method").selected_text(tl!(method.label())).width(180.0).show_ui(ui, |ui| {
-                    for m in ClassMethod::ALL {
+                    for m in methods_by_name() {
                         if ui.selectable_label(m == *method, tl!(m.label())).clicked() {
-                            let _ = app.run("layer.symbology", json!({"type": "graduated", "field": field, "method": format!("{m:?}"), "classes": breaks.len(), "ramp": ramp.name()}));
+                            let _ = app.run("layer.symbology", json!({"type": "graduated", "field": field, "method": format!("{m:?}"), "classes": asked, "ramp": ramp.name()}));
                         }
                     }
                 }).response.labelled_by(input_label.id);
@@ -3654,7 +3680,7 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             } else {
                 ui.horizontal(|ui| {
                     let input_label = ui.label(tl!("Classes"));
-                    let mut k = breaks.len();
+                    let mut k = asked;
                     if ui.add(egui::DragValue::new(&mut k).range(1..=12)).labelled_by(input_label.id).changed() {
                         let _ = app.run(
                             "layer.symbology",
@@ -3751,6 +3777,13 @@ fn transparency_drag(app: &mut RustGisApp, ui: &Ui, r: &egui::Response, l: &Laye
             let _ = app.run("layer.transparency", json!({"value": x}));
         },
     );
+}
+
+/// The classification methods in alphabetical order of their names in the interface language.
+fn methods_by_name() -> Vec<ClassMethod> {
+    let mut m = ClassMethod::ALL.to_vec();
+    m.sort_by_cached_key(|m| crate::i18n::t_raw(m.label()).to_lowercase());
+    m
 }
 
 fn field_combo(app: &mut RustGisApp, ui: &mut Ui, label: &str, cur: &str, fields: &[String], kind: &str) {
@@ -5056,7 +5089,7 @@ fn save_history_script(app: &mut RustGisApp) {
                 return;
             }
             // The script opens the project's saved file, which lacks what changed since.
-            if app.session.dirty || app.session.path.is_none() {
+            if app.session.dirty() || app.session.path.is_none() {
                 app.session.notify(tl!("Save the project too: the script opens its saved file, without changes made since."), false);
             }
         }
@@ -5364,7 +5397,7 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     .width(180.0)
                     .show_ui(ui, |ui| {
                         // Manual bounds are for Graduated Colors; a raster's are worked out.
-                        for mm in ClassMethod::ALL.into_iter().filter(|m| *m != ClassMethod::Manual) {
+                        for mm in methods_by_name().into_iter().filter(|m| *m != ClassMethod::Manual) {
                             if ui.selectable_label(mm == m, tl!(mm.label())).clicked() {
                                 let _ = app.run(
                                     "raster.symbology",

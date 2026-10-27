@@ -8,7 +8,7 @@ use crate::{DataError, Result};
 pub fn read(text: &str, name: &str, crs: Option<Crs>) -> Result<Raster> {
     let bad = |m: &str| DataError::Format(format!("ASCII grid: {m}"));
     let mut tokens = text.split_ascii_whitespace().peekable();
-    let (mut ncols, mut nrows, mut x, mut y, mut cell, mut nodata) = (None, None, None, None, None, None);
+    let (mut ncols, mut nrows, mut x, mut y, mut cell, mut dx, mut dy, mut nodata) = (None, None, None, None, None, None, None, None);
     let (mut centre_x, mut centre_y) = (false, false);
     let mut entries = 0;
     while let Some(key) = tokens.peek().map(|k| k.to_ascii_lowercase()) {
@@ -35,7 +35,9 @@ pub fn read(text: &str, name: &str, crs: Option<Crs>) -> Result<Raster> {
                 y = Some(value);
                 centre_y = true;
             }
-            "cellsize" | "dx" | "dy" => cell = Some(value),
+            "cellsize" => cell = Some(value),
+            "dx" => dx = Some(value),
+            "dy" => dy = Some(value),
             "nodata_value" => nodata = Some(value),
             _ => {}
         }
@@ -46,13 +48,16 @@ pub fn read(text: &str, name: &str, crs: Option<Crs>) -> Result<Raster> {
     };
     let (w, h) = (size(ncols, "ncols")?, size(nrows, "nrows")?);
     let n = (w as usize).checked_mul(h as usize).filter(|n| *n <= MAX_SAMPLES).ok_or_else(|| bad("too large"))?;
-    let cell = cell.filter(|c| c.is_finite() && *c > 0.0).ok_or_else(|| bad("missing cellsize"))?;
+    // CELLSIZE takes precedence over DX/DY, as in GDAL's ASCII grid reader.
+    let (dx, dy) = if let Some(cell) = cell { (Some(cell), Some(cell)) } else { (dx, dy) };
+    let dx = dx.filter(|c| c.is_finite() && *c > 0.0).ok_or_else(|| bad("missing or invalid cell width"))?;
+    let dy = dy.filter(|c| c.is_finite() && *c > 0.0).ok_or_else(|| bad("missing or invalid cell height"))?;
     let (mut x, mut y) = (x.ok_or_else(|| bad("missing xllcorner"))?, y.ok_or_else(|| bad("missing yllcorner"))?);
     if centre_x {
-        x -= cell / 2.0;
+        x -= dx / 2.0;
     }
     if centre_y {
-        y -= cell / 2.0;
+        y -= dy / 2.0;
     }
     // Each value takes at least two characters, so the text bounds what to reserve.
     let mut data = Vec::with_capacity(n.min(text.len() / 2 + 1));
@@ -64,19 +69,59 @@ pub fn read(text: &str, name: &str, crs: Option<Crs>) -> Result<Raster> {
     if data.len() != n {
         return Err(bad("fewer values than ncols × nrows"));
     }
-    let top = y + cell * h as f64;
+    let top = y + dy * h as f64;
     let crs = match crs {
         Some(c) => c,
-        None if x >= -180.0 && x + cell * w as f64 <= 180.0 && y >= -90.0 && top <= 90.0 => Crs::LonLat,
+        None if x >= -180.0 && x + dx * w as f64 <= 180.0 && y >= -90.0 && top <= 90.0 => Crs::LonLat,
         None => return Err(bad("unknown coordinate system: put a .prj file next to it")),
     };
-    let gt = GeoTransform { origin_x: x, origin_y: top, pixel_width: cell, pixel_height: -cell };
+    let gt = GeoTransform { origin_x: x, origin_y: top, pixel_width: dx, pixel_height: -dy };
     Raster::new(name, w, h, vec![data], gt, crs, nodata, ColorHint::Gray, "Float32")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_rectangular_pixels_and_rejects_incomplete_sizes() {
+        let corner = "ncols 1\nnrows 2\nxllcorner 10\nyllcorner 20\n{}\n1\n2\n";
+        for spacing in ["dx 2\ndy 3", "dy 3\ndx 2"] {
+            let r = read(&corner.replace("{}", spacing), "g", None).unwrap();
+            assert_eq!((r.transform.origin_x, r.transform.origin_y), (10.0, 26.0));
+            assert_eq!((r.transform.pixel_width, r.transform.pixel_height), (2.0, -3.0));
+            assert_eq!(r.value(0, 0, 0), Some(1.0));
+            assert_eq!(r.value(0, 0, 1), Some(2.0));
+            assert_eq!(r.cell_size(), (2.0, 3.0));
+            assert_eq!(r.pixel_at(rustgis_geom::Coord::new(11.0, 24.0)), Some((0, 0)));
+            let upload = super::super::read_bytes("g.asc", corner.replace("{}", spacing).as_bytes()).unwrap();
+            assert_eq!(upload.cell_size(), (2.0, 3.0));
+        }
+        let center = "ncols 1\nnrows 2\nxllcenter 10\nyllcenter 20\ndx 2\ndy 3\n1\n2\n";
+        let r = read(center, "g", None).unwrap();
+        assert_eq!((r.transform.origin_x, r.transform.origin_y), (9.0, 24.5));
+        assert_eq!((r.transform.pixel_width, r.transform.pixel_height), (2.0, -3.0));
+        let mixed = center.replace("yllcenter", "yllcorner");
+        let r = read(&mixed, "g", None).unwrap();
+        assert_eq!((r.transform.origin_x, r.transform.origin_y), (9.0, 26.0));
+        // When both forms are present, CELLSIZE takes precedence, as in GDAL.
+        for spacing in ["cellsize 4\ndx 2\ndy 3", "dy 3\ndx 2\ncellsize 4"] {
+            let r = read(&corner.replace("{}", spacing), "g", None).unwrap();
+            assert_eq!((r.transform.pixel_width, r.transform.pixel_height, r.transform.origin_y), (4.0, -4.0, 28.0));
+        }
+        for spacing in ["dx 2", "dy 3", "dx 0\ndy 3", "dx 2\ndy -3", "dx NaN\ndy 3", "dx 2\ndy inf", "cellsize 0", "cellsize NaN"] {
+            assert!(read(&corner.replace("{}", spacing), "g", None).is_err(), "{spacing}");
+        }
+        // An unprojected grid extending beyond longitude 180 cannot be inferred as WGS 84.
+        let beyond = "ncols 2\nnrows 1\nxllcorner 177\nyllcorner 0\ndx 2\ndy 1\n1 2\n";
+        assert!(read(beyond, "g", None).is_err());
+        assert!(read(beyond, "g", Some(Crs::WebMercator)).is_ok());
+        let at_edge = beyond.replace("177", "176");
+        assert!(read(&at_edge, "g", None).is_ok());
+        let north = "ncols 1\nnrows 1\nxllcorner 0\nyllcorner 89\ndx 1\ndy 2\n1\n";
+        assert!(read(north, "g", None).is_err());
+        assert!(read(&north.replace("89", "88"), "g", None).is_ok());
+    }
 
     #[test]
     fn reads_grid() {

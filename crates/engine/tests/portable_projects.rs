@@ -183,7 +183,7 @@ fn missing_stream_can_be_repaired_undone_redone_and_saved() {
     std::fs::rename(&old, &replacement).unwrap();
     let project = f.file("survey/map.rgis");
     let mut s = open(&project);
-    assert!(!s.dirty);
+    assert!(!s.dirty());
     let l = s.map().layer(layers.cities).unwrap();
     let name = l.name.clone();
     let error = l.source.as_ref().unwrap().error.clone();
@@ -195,7 +195,7 @@ fn missing_stream_can_be_repaired_undone_redone_and_saved() {
     let result = s.run("layer.repairSource", &json!({"layer": layers.cities, "path": replacement})).unwrap();
     assert_eq!(result["layer"], layers.cities);
     assert_eq!(result["path"], replacement.to_str().unwrap());
-    assert!(s.dirty);
+    assert!(s.dirty());
     assert_stream(&s, layers.cities, &replacement);
     assert_eq!(s.map().layer(layers.cities).unwrap().name, name);
     assert_eq!(configuration(&s), config);

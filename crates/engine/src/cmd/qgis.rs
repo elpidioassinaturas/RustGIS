@@ -188,7 +188,7 @@ fn add_layer(s: &mut Session, layer: &qgis::ProjectLayer, has_dir: bool, report:
             return Ok(Some(name.to_string()));
         }
         Source::Wfs { url, layer: typename } => {
-            report.skipped(name, format!("the WFS layer {typename} at {url} (add it with Add Data › Web Data)"));
+            report.skipped(name, format!("the WFS layer {typename} at {url} (add it with Home › Add › Web Data)"));
             return Ok(None);
         }
         Source::Postgres { connection, table } => {

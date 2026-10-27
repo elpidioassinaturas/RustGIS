@@ -444,7 +444,7 @@ impl eframe::App for WebShell {
             embed.exchange(&mut self.app, ctx);
         }
         self.app.logic(ctx);
-        self.dirty.set(self.app.session.dirty);
+        self.dirty.set(self.app.session.dirty());
         // The shortcuts can be changed in the app: the key listener follows, rebuilt only when
         // the keymap changed.
         let print = self.app.shortcuts_fingerprint();
