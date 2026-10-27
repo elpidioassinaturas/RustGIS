@@ -18404,10 +18404,10 @@ fn the_project_log_records_each_command_run_on_the_project() {
         assert!(spec.mutates && !spec.undoable, "{id}");
     }
     let steps = s.undo.len();
-    s.dirty = false;
+    s.mark_saved();
     assert!(s.run("project.clearLog", &Value::Null).unwrap()["cleared"].as_u64().unwrap() > 5);
     assert_eq!(commands(&s), ["project.clearLog"]);
-    assert!(s.dirty && s.undo.len() == steps, "changed, with no undo step");
+    assert!(s.dirty() && s.undo.len() == steps, "changed, with no undo step");
     s.run("project.logCommands", &json!({"on": false})).unwrap();
     s.run("project.rename", &json!({"name": "Quiet"})).unwrap();
     assert_eq!(commands(&s), ["project.clearLog", "project.logCommands"], "turned off, and said so");
@@ -18422,9 +18422,9 @@ fn the_project_log_records_each_command_run_on_the_project() {
     }
     assert!(s.run("project.exportLog", &json!({"path": "log"})).unwrap_err().contains("give a .csv"));
     // Switching to what it already is changes nothing.
-    s.dirty = false;
+    s.mark_saved();
     s.run("project.logCommands", &json!({"on": true})).unwrap();
-    assert!(!s.dirty, "no change, nothing to save");
+    assert!(!s.dirty(), "no change, nothing to save");
     // Making a project, or opening one from text, starts its log.
     let mut made = world();
     made.run("project.new", &json!({"name": "Fresh"})).unwrap();

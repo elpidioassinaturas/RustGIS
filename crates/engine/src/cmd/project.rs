@@ -173,7 +173,8 @@ fn write_entry(w: &mut dyn std::io::Write, e: &crate::project::LogEntry, format:
 /// log says it was cleared.
 fn clear_log(s: &mut Session, _: &Value) -> CmdResult {
     let n = s.project.log.clear();
-    s.dirty = true;
+    // Unsaved whatever undo does: no undo step brings the log back.
+    s.mark_unsaved();
     Ok(json!({"cleared": n}))
 }
 
@@ -185,7 +186,7 @@ fn log_commands(s: &mut Session, p: &Value) -> CmdResult {
     };
     if on != s.project.log.on() {
         s.project.log.set_on(on);
-        s.dirty = true;
+        s.mark_unsaved();
     }
     Ok(json!({"on": on}))
 }
