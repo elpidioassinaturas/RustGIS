@@ -18276,6 +18276,20 @@ fn calculate_geometry_updates_ellipsoidal_lengths_in_one_undo_step() {
     assert!((out.value(0, length).as_f64().unwrap() - 111.31949079327356).abs() < 1e-6);
 }
 
+/// A log read without its folder (`openText`) forgets the relative markers a save into a folder
+/// left in it: saved again, its paths are written as they are, with no markers to resolve later.
+#[test]
+fn a_log_read_without_its_folder_forgets_its_relative_markers() {
+    let mut doc: Value = serde_json::from_str(&Project::new("Log").saved_text(None).unwrap().0).unwrap();
+    let entry = json!({"at": 1, "command": "gp.run", "params": {"path": "./a.tif"}, "ok": true, "relative": ["/params/path"]});
+    doc["log"] = json!({"entries": [entry]});
+    let mut back = Project::from_json(&doc.to_string()).unwrap();
+    assert_eq!(back.log.entries()[0].params, json!({"path": "./a.tif"}));
+    let again: Value = serde_json::from_str(&back.saved_text(None).unwrap().0).unwrap();
+    assert_eq!(again["log"]["entries"][0]["params"], json!({"path": "./a.tif"}));
+    assert!(again["log"]["entries"][0].get("relative").is_none(), "{again}");
+}
+
 /// The project log (#797): a command run by itself that changes the project, or reaches a file
 /// or a service, is logged once (a script's lines inside it), with its outcome; reading isn't.
 /// Undo keeps the entries and is logged with the step it took back (not when there is none).

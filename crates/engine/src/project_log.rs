@@ -611,6 +611,15 @@ impl ProjectLog {
         }
     }
 
+    /// Forgets the relative markers of a log read without a folder (`openText`, a package): its
+    /// texts stay as they are, and a save writes them as they are, so a copy saved into a folder
+    /// isn't resolved against that folder later.
+    pub(crate) fn drop_relative(&self) {
+        for e in &mut self.changing().entries {
+            e.relative.clear();
+        }
+    }
+
     /// Empties the log; how many entries it had.
     pub fn clear(&self) -> usize {
         std::mem::take(&mut self.changing().entries).len()

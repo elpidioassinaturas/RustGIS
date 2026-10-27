@@ -105,13 +105,12 @@ fn export_log(s: &mut Session, p: &Value) -> CmdResult {
     // The path's extension, when it has one, is the format's whatever `format` says: the log
     // never goes over a project, a JSON document or any other kind of file.
     let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
-    let by_ext =
-        match ext.as_deref() {
-            None => None,
-            Some(e) => Some(kind(e).ok_or_else(|| {
-                format!("the log is written to a .csv or .jsonl file, not a .{e} one (JSON Lines isn't one JSON document)")
-            })?),
-        };
+    let by_ext = match ext.as_deref() {
+        None => None,
+        Some(e) => Some(kind(e).ok_or_else(|| {
+            format!("the log is written to a .csv or .jsonl file, not a .{e} one (JSON Lines isn't one JSON document)")
+        })?),
+    };
     let asked = ps(p, "format").map(str::to_ascii_lowercase);
     let format = match (asked.as_deref(), by_ext) {
         (Some(f), by_ext) => {

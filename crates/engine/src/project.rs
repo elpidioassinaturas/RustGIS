@@ -852,6 +852,8 @@ impl Project {
         crate::s3_connections::clear_bindings(p.addresses_mut());
         if let Some(d) = dir.and_then(Path::to_str) {
             p.resolve_paths(d);
+        } else {
+            p.log.drop_relative();
         }
         p.normalize();
         Ok(p)
