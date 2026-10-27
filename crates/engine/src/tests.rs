@@ -18703,6 +18703,20 @@ fn a_files_project_log_is_read_bounded_and_never_keeps_the_project_from_opening(
     }
     let opened = Project::from_json(r#"{"name": "A", "maps": [], "active_map": 0, "log": {"entries": [{"at": "never"}]}}"#).unwrap();
     assert!(opened.log.is_empty());
+    // A file's plugins' entries are held to their cap too, their oldest going first; the user's
+    // entries stay, in order.
+    let plugin_limit = crate::project_log::LOG_PLUGIN_LIMIT;
+    let entries: Vec<Value> = (0..plugin_limit + 10)
+        .map(|i| json!({"at": i, "command": if i % 2 == 0 { "plugin:p/a" } else { "layer.rename" }, "ok": true}))
+        .chain((0..plugin_limit).map(|i| json!({"at": 100_000 + i, "command": "plugin:p/b", "ok": true})))
+        .collect();
+    let log: crate::project::ProjectLog = serde_json::from_value(json!({"entries": entries})).unwrap();
+    let read = log.entries();
+    let plugins: Vec<&crate::project::LogEntry> = read.iter().filter(|e| e.command.starts_with("plugin:")).collect();
+    assert_eq!(plugins.len(), plugin_limit);
+    assert!(plugins.iter().all(|e| e.command == "plugin:p/b"), "the newest kept");
+    assert_eq!(read.iter().filter(|e| e.command == "layer.rename").count(), (plugin_limit + 10) / 2);
+    assert!(read.windows(2).all(|w| w[0].at < w[1].at), "in order");
     // A template or a package starts a log of its own, even when its file holds one.
     let seeded = r#"{"name": "A", "maps": [], "active_map": 0, "log": {"entries": [{"at": 1, "command": "a", "ok": true}]}}"#;
     assert_eq!(Project::from_json(seeded).unwrap().log.len(), 1);

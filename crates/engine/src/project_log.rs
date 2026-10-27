@@ -452,9 +452,21 @@ impl<'de> Deserialize<'de> for LogState {
 
 /// A file's log entries, each read in turn as a JSON value (the file is in memory already),
 /// bounded and without secrets as a new entry is ([`bounded`]) as it comes, and only the last
-/// [`LOG_LIMIT`] kept. One that doesn't read as an entry (a file edited by hand, another
-/// version's) is skipped.
+/// [`LOG_LIMIT`] kept, of which plugins' commands' last [`LOG_PLUGIN_LIMIT`]. One that doesn't
+/// read as an entry (a file edited by hand, another version's) is skipped.
 struct LogEntries;
+
+/// `entries` without the oldest of plugins' commands' past [`LOG_PLUGIN_LIMIT`], in one pass: a
+/// file's log is held to the cap a running log keeps.
+fn cap_plugins(entries: &mut std::collections::VecDeque<LogEntry>) {
+    let plugin = |e: &LogEntry| e.command.starts_with(rustgis_plugins::PREFIX);
+    let mut over = entries.iter().filter(|e| plugin(e)).count().saturating_sub(LOG_PLUGIN_LIMIT);
+    entries.retain(|e| {
+        let drop = over > 0 && plugin(e);
+        over -= usize::from(drop);
+        !drop
+    });
+}
 
 impl<'de> serde::de::DeserializeSeed<'de> for LogEntries {
     type Value = std::collections::VecDeque<LogEntry>;
@@ -479,6 +491,7 @@ impl<'de> serde::de::Visitor<'de> for LogEntries {
                 out.pop_front();
             }
         }
+        cap_plugins(&mut out);
         Ok(out)
     }
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
