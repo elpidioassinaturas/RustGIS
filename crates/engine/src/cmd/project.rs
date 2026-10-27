@@ -35,11 +35,11 @@ pub fn commands() -> Vec<C> {
         // switching change what is saved, but take no undo step: the log sits outside the undo
         // history, so one would restore nothing of it.
         C::new("project.log", "Project Log", "Project", log).view().params(
-            r#"{"since"?: milliseconds since 1970 (UTC), "until"?: milliseconds, "command"?: "a command id, or the start of one (layer.)", "failed"?: bool (true: only those that failed; false: only those that succeeded), "limit"?: entries (default 100, the newest; 1 to 1000)} → {"entries": [{"at", "command", "params", "ok", "error"?, "millis"}], "count": matching, "total": in the log, "on": bool}"#,
+            r#"{"since"?: milliseconds since 1970 (UTC), "until"?: milliseconds, "command"?: "a command id, or the start of one (layer.)", "failed"?: bool (true: only those that failed; false: only those that succeeded), "limit"?: entries, a whole number (default 100, the newest; 1 to 1000)} → {"entries": [{"at", "command", "params", "ok", "error"?, "millis"}], "count": matching, "total": in the log, "on": bool}"#,
         ),
         C::new("project.exportLog", "Export Project Log", "Project", export_log)
             .view()
-            .params(r#"{"path": ".csv or .jsonl file", "format"?: "csv"|"jsonl" (for a path with no extension; one given must match the extension)}"#),
+            .params(r#"{"path": ".csv, .jsonl or .ndjson file", "format"?: "csv"|"jsonl" (for a path with no extension; one given must match the extension)}"#),
         C::new("project.clearLog", "Clear Project Log", "Project", clear_log).outside_undo(),
         C::new("project.logCommands", "Log Commands", "Project", log_commands).outside_undo().params(r#"{"on"?: bool (default: turn it the other way)}"#),
     ]
@@ -69,10 +69,12 @@ fn log(s: &mut Session, p: &Value) -> CmdResult {
     };
     // At most a thousand (some 4 MB at the most), so one answer can't fill an assistant's
     // context or a script's memory; `count` still says how many match.
-    let limit = match num("limit")? {
-        Some(0) => return Err("limit must be 1 or more".into()),
-        Some(n) => usize::try_from(n).unwrap_or(usize::MAX).min(1_000),
-        None => 100,
+    let limit = match p.get("limit") {
+        None | Some(Value::Null) => 100,
+        Some(v) => match v.as_f64().filter(|n| n.is_finite() && *n >= 1.0 && n.fract() == 0.0) {
+            Some(n) => n.min(1_000.0) as usize,
+            None => return Err("limit must be a whole number, 1 or more".into()),
+        },
     };
     let keep = |e: &crate::project::LogEntry| {
         since.is_none_or(|t| e.at >= t)
@@ -122,40 +124,39 @@ fn export_log(s: &mut Session, p: &Value) -> CmdResult {
         (None, Some(e)) => e,
         (None, None) => return Err("give a .csv or .jsonl path, or a format (csv or jsonl)".into()),
     };
-    let mut text = String::new();
+    // Written entry by entry as the log is read (under its lock), so a long log isn't held as
+    // text first; a failure part way leaves an existing file as it was.
     let mut n = 0usize;
-    let mut failed = None;
-    if format == "csv" {
-        text.push_str("time_utc,at,command,ok,millis,error,params\n");
-    }
-    s.project.log.each(|e| {
-        n += 1;
+    rustgis_data::io::write_atomic_with(&path, |w| {
         if format == "csv" {
-            let (date, time) = rustgis_map::graphics::civil(e.at / 1000);
-            text.push_str(&format!(
-                "{date} {time}:{:02},{},{},{},{},{},{}\n",
-                (e.at / 1000) % 60,
-                e.at,
-                csv_cell(&e.command),
-                e.ok,
-                e.millis,
-                csv_cell(e.error.as_deref().unwrap_or("")),
-                csv_cell(&e.params.to_string())
-            ));
-        } else {
-            match serde_json::to_string(e) {
-                Ok(line) => {
-                    text.push_str(&line);
-                    text.push('\n');
-                }
-                Err(err) => failed = Some(err.to_string()),
-            }
+            w.write_all(b"time_utc,at,command,ok,millis,error,params\n")?;
         }
-    });
-    if let Some(e) = failed {
-        return Err(e);
-    }
-    rustgis_data::io::write_atomic(&path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut res = Ok(());
+        s.project.log.each(|e| {
+            if res.is_err() {
+                return;
+            }
+            n += 1;
+            res = if format == "csv" {
+                let (date, time) = rustgis_map::graphics::civil(e.at / 1000);
+                writeln!(
+                    w,
+                    "{date} {time}:{:02},{},{},{},{},{},{}",
+                    (e.at / 1000) % 60,
+                    e.at,
+                    csv_cell(&e.command),
+                    e.ok,
+                    e.millis,
+                    csv_cell(e.error.as_deref().unwrap_or("")),
+                    csv_cell(&e.params.to_string())
+                )
+            } else {
+                serde_json::to_writer(&mut *w, e).map_err(std::io::Error::other).and_then(|()| w.write_all(b"\n"))
+            };
+        });
+        res
+    })
+    .map_err(|e| format!("{}: {e}", path.display()))?;
     s.notify(format!("Exported the project log ({n} entries) to {}", path.display()), false);
     Ok(json!({"path": path.display().to_string(), "entries": n, "format": format}))
 }

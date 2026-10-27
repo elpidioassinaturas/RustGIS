@@ -19,6 +19,13 @@ Saved layer addresses omit passwords, access keys, tokens and signatures. The op
 keeps them, but after restarting RustGIS a protected source may need you to sign in to its
 connection again or add it again with credentials.
 
+A saved `.rgis` also carries its [project log](#project-log), which is on by default: the paths,
+SQL and addresses of the commands run on it. Passwords, keys and tokens are taken out where a
+name or an address shows them, but not a secret typed as plain words (in SQL, a note or a
+parameter with an unusual name). Before sharing a project, look at its log (`project.log`), or
+clear it (`project.clearLog`) or turn it off for that project. A package (`.rgispkg`) or a
+template carries no log.
+
 ### Autosave and recovery
 
 The desktop app keeps a recovery copy of unsaved work. While the project has changes that aren't
@@ -79,7 +86,9 @@ end goes into it alike: the app, scripts, the AI Assistant, the command line, Py
   name or address form (a password typed into a note), isn't recognised: clear the log before
   sharing a project that used one. Each entry's parameters are clipped to about 4 KB of JSON (a
   long text is cut, a list keeps its first 100 items), its error to 500 characters and a `…`,
-  and the log keeps its last 10,000 entries, the oldest dropped first.
+  and the log keeps its last 10,000 entries, the oldest dropped first. Plugins' commands keep
+  at most 1,000 of them (their own oldest go first past that), so a plugin can't push the
+  user's own entries out.
 - **Saved with the project:** a shared `.rgis` carries its log (a package, `.rgispkg`, or a
   template doesn't). Clear it first if that isn't wanted (`project.clearLog`, which leaves its
   own entry), or turn logging off for a project (`project.logCommands {"on": false}`; what is
@@ -92,8 +101,8 @@ end goes into it alike: the app, scripts, the AI Assistant, the command line, Py
   its paths written as file names instead, so every text reads back as it was written.
 
 From scripts: `project.log {"since"?, "until"?, "command"?, "failed"?, "limit"?}` lists entries,
-newest last (`command` is an id, or the start of one ending in a dot, `layer.`; `limit` is 100
-by default and at most 1,000, with `count` saying how many match), and `project.exportLog
+newest last (`command` is an id, or the start of one ending in a dot, `layer.`; `limit` is a whole
+number, 100 by default and at most 1,000, with `count` saying how many match), and `project.exportLog
 {"path": "log.csv"}` writes it out as CSV (one row an entry, the parameters as a JSON column) or
 JSON Lines (`.jsonl` or `.ndjson`), as the path's extension says; any other extension (a `.json`, a project)
 is refused, whatever `format` is given. The History pane still keeps geoprocessing runs with

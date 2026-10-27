@@ -325,6 +325,9 @@ pub(crate) fn entry(id: &str, params: Value, res: &CmdResult, at: u64, took: web
 
 /// Most entries a project's log keeps; past it, the oldest go first.
 pub const LOG_LIMIT: usize = 10_000;
+/// The most entries of plugins' commands the log keeps, their oldest going first past it: a
+/// plugin run many times can't push the user's own entries out of the log.
+pub const LOG_PLUGIN_LIMIT: usize = 1_000;
 /// Most bytes of JSON an entry's parameters keep (a long text is cut, a long list keeps its first
 /// [`LOG_LIST_ITEMS`]), and most characters of its error.
 pub const LOG_PARAMS_BYTES: usize = 4096;
@@ -509,13 +512,21 @@ impl ProjectLog {
         self.changing().off = !on;
     }
 
-    /// Adds `e` when logging is on, the oldest entries dropped past [`LOG_LIMIT`]; turning the log
-    /// off (`project.logCommands`), and clearing it while off, are recorded too, so the log says
-    /// why it stops or is empty.
+    /// Adds `e` when logging is on, the oldest entries dropped past [`LOG_LIMIT`], and a plugin's
+    /// command's past [`LOG_PLUGIN_LIMIT`] the oldest of those; turning the log off
+    /// (`project.logCommands`), and clearing it while off, are recorded too, so the log says why
+    /// it stops or is empty.
     pub fn push(&self, e: LogEntry) {
         let mut s = self.changing();
         if s.off && !matches!(e.command.as_str(), "project.logCommands" | "project.clearLog") {
             return;
+        }
+        let plugin = |e: &LogEntry| e.command.starts_with(rustgis_plugins::PREFIX);
+        if plugin(&e)
+            && s.entries.iter().filter(|x| plugin(x)).count() >= LOG_PLUGIN_LIMIT
+            && let Some(oldest) = s.entries.iter().position(plugin)
+        {
+            s.entries.remove(oldest);
         }
         s.entries.push_back(e);
         while s.entries.len() > LOG_LIMIT {

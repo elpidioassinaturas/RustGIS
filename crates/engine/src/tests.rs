@@ -17817,6 +17817,24 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let kept = crate::project_log::kept_params(&json!({long_key: "S3CRET"}));
     assert!(!kept.to_string().contains("S3CRET"), "{kept}");
     assert!(s.run("project.log", &json!({"limit": 0})).is_err());
+    assert!(s.run("project.log", &json!({"limit": 0.5})).unwrap_err().contains("whole number"));
+    // Plugins' commands keep at most their own share of the log: the user's entries stay.
+    let log = crate::project::ProjectLog::default();
+    let entry = |command: &str| LogEntry {
+        at: 1,
+        command: command.into(),
+        params: Value::Null,
+        ok: true,
+        error: None,
+        millis: 0,
+        relative: Vec::new(),
+    };
+    log.push(entry("layer.rename"));
+    for _ in 0..crate::project_log::LOG_PLUGIN_LIMIT + 5 {
+        log.push(entry("plugin:p/flood"));
+    }
+    let kept = log.entries();
+    assert_eq!((kept.len(), kept[0].command.as_str()), (crate::project_log::LOG_PLUGIN_LIMIT + 1, "layer.rename"));
     // An SQL secret's options, written as plain words, go; the statement's shape stays.
     let sql = "CREATE OR REPLACE SECRET s3 (TYPE s3, KEY_ID 'AKIA1', SECRET 'S3CRET'); SELECT 1 / 2";
     let kept = crate::project_log::kept_params(&json!({"sql": sql}));
