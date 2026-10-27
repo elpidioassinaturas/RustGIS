@@ -911,20 +911,25 @@ impl Session {
         // With logging off, only its own switching and clearing go in: nothing else is clipped
         // or redacted for nothing.
         let wanted = self.project.log.on() || matches!(id, "project.logCommands" | "project.clearLog");
-        if !pending && wanted {
+        // Undo and redo go in when they take a step back or bring one back: pressed with nothing
+        // to undo, they change nothing, and each press would be an entry.
+        let stepped = !matches!(id, "edit.undo" | "edit.redo") || res.is_ok();
+        if !pending && wanted && stepped {
             // Outside `guarded`'s catch: logging is best-effort, so a panic in it leaves the
-            // command's result as it was, without an entry.
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if project_log::logs(self, id, params) {
-                    // The step only when it was taken back or brought back.
+            // command's result as it was, without an entry, and says so in the app's log.
+            let logged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if project_log::is_logged(self, id, params) {
                     let params = match step {
-                        Some(label) if res.is_ok() => serde_json::json!({"step": label}),
-                        _ => project_log::kept_params(params),
+                        Some(label) => serde_json::json!({"step": label}),
+                        None => project_log::kept_params(params),
                     };
                     let e = project_log::entry(id, params, &res, at, start.elapsed());
                     if joins && res.is_ok() { self.project.log.join_last(e) } else { self.project.log.push(e) }
                 }
             }));
+            if logged.is_err() {
+                log::warn!("the project log has no entry for {id}: writing it failed unexpectedly");
+            }
         }
         res
     }

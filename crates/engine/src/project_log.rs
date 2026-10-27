@@ -20,7 +20,7 @@ pub(crate) fn now_ms() -> u64 {
 /// gate reads them. Reading and looking around (listing, describing, moving the view) is left
 /// out: agents, scripts and plugins call those hundreds of times, and they would push the changes
 /// out of the log.
-pub(crate) fn logs(s: &Session, id: &str, params: &Value) -> bool {
+pub(crate) fn is_logged(s: &Session, id: &str, params: &Value) -> bool {
     // Making or opening a project from text names no place: it is logged as the open from a file is.
     if matches!(
         id,

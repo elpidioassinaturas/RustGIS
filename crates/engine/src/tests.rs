@@ -17622,9 +17622,9 @@ fn calculate_geometry_updates_ellipsoidal_lengths_in_one_undo_step() {
 
 /// The project log (#797): a command run by itself that changes the project, or reaches a file
 /// or a service, is logged once (a script's lines inside it), with its outcome; reading isn't.
-/// Undo keeps the entries and is logged with the step it took back. Secrets are taken out and
-/// large values clipped; the log is capped, saved with the project and read back; it can be
-/// read by filter, written out, cleared and turned off.
+/// Undo keeps the entries and is logged with the step it took back (not when there is none).
+/// Secrets are taken out and large values clipped; the log is capped, saved with the project
+/// and read back; it can be read by filter, written out, cleared and turned off.
 #[test]
 fn the_project_log_records_each_command_run_on_the_project() {
     use crate::project::{LOG_LIMIT, LOG_PARAMS_BYTES, LogEntry};
@@ -17698,165 +17698,12 @@ fn the_project_log_records_each_command_run_on_the_project() {
     let recovered = Project::from_json(&s.project.clone().recovery_text().unwrap()).unwrap();
     assert_eq!(recovered.log.entries(), s.project.log.entries());
     assert!(!Project::default().saved_text(None).unwrap().0.contains("\"log\""));
-    // Saved into a folder, its paths are written relative to it, as the project's sources are.
-    let folder = std::env::temp_dir().join(format!("rustgis-log-portable-{}", std::process::id()));
-    let inside = folder.join("My Data").join("a.tif");
-    let error = Some(format!("{}: not found (see ./x)", inside.display()));
-    let params = json!({"path": inside.to_string_lossy(), "name": "./Maps and data", "sql": "SELECT a / b FROM t -- /home", "root": "/"});
-    s.project.log.push(LogEntry { at: 1, command: "layer.addData".into(), params, ok: false, error, millis: 0, relative: Vec::new() });
-    let (text, _) = s.project.saved_text(Some(&folder)).unwrap();
-    let saved: Value = serde_json::from_str(&text).unwrap();
-    let last = saved["log"]["entries"].as_array().unwrap().last().unwrap().clone();
-    assert_eq!(
-        (last["params"]["path"].as_str(), last["error"].as_str()),
-        (Some("./My Data/a.tif"), Some("./My Data/a.tif: not found (see ./x)"))
-    );
-    assert_eq!(s.project.log.entries().last().unwrap().params["path"], json!(inside.to_string_lossy()), "the open project keeps them");
-    assert_eq!((last["params"]["sql"].as_str(), last["params"]["root"].as_str()), (Some("SELECT a / b FROM t -- /home"), Some("/")));
-    // Read back from that folder, they are absolute again, so a Save As elsewhere keeps them right.
-    std::fs::create_dir_all(&folder).unwrap();
-    let file = folder.join("p.rgis");
-    std::fs::write(&file, &text).unwrap();
-    let reopened = Project::load(&file).unwrap();
-    let path = reopened.log.entries().last().unwrap().params["path"].as_str().unwrap().to_string();
-    assert!(std::path::Path::new(&path).is_absolute() && path.ends_with("a.tif"), "{path}");
-    let error = reopened.log.entries().last().unwrap().error.clone().unwrap();
-    assert_eq!(error, format!("{}: not found (see ./x)", path), "the error names the path whole again, and ./x as given");
-    // A text given as relative is read back as it was run, not against the project's folder.
-    assert_eq!(reopened.log.entries().last().unwrap().params["name"], json!("./Maps and data"));
-    assert!(reopened.log.entries().iter().all(|e| e.relative.is_empty()));
-    // A text that already holds, as a word, the relative form a path would be written as: the
-    // entry's paths are written as file names, and every text reads back as it was written.
-    let error = Some("not found; see ./My Data/a.tif".to_string());
-    let params = json!({"path": inside.to_string_lossy()});
-    s.project.log.push(LogEntry { at: 2, command: "layer.addData".into(), params, ok: false, error, millis: 0, relative: Vec::new() });
-    let (text, _) = s.project.saved_text(Some(&folder)).unwrap();
-    std::fs::write(&file, &text).unwrap();
-    let last = Project::load(&file).unwrap().log.entries().last().unwrap().clone();
-    assert_eq!((last.params["path"].as_str(), last.error.as_deref()), (Some("a.tif"), Some("not found; see ./My Data/a.tif")), "{text}");
-    let _ = std::fs::remove_dir_all(&folder);
-    // A text that starts with a path but holds more is read word by word, not as one path.
-    for (error, saved) in [
-        ("/mnt/x/a.tif: cannot open /mnt/y/b.tif", "a.tif: cannot open b.tif"),
-        ("/mnt/x/a.tif and /mnt/y/b.tif are missing", "a.tif and b.tif are missing"),
-    ] {
-        let entry = LogEntry {
-            at: 3,
-            command: "x".into(),
-            params: Value::Null,
-            ok: false,
-            error: Some(error.into()),
-            millis: 0,
-            relative: Vec::new(),
-        };
-        s.project.log.push(entry);
-        let (text, _) = s.project.saved_text(Some(&folder)).unwrap();
-        let back: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(back["log"]["entries"].as_array().unwrap().last().unwrap()["error"], json!(saved), "{error}");
-    }
-    // A save with nothing logged since writes the same text; one after a change, or into
-    // another folder, writes it again.
-    let (a, _) = s.project.saved_text(Some(&folder)).unwrap();
-    let (b, _) = s.project.saved_text(Some(&folder)).unwrap();
-    assert_eq!(a, b);
-    assert_ne!(s.project.saved_text(None).unwrap().0, a);
-    s.project.log.push(LogEntry {
-        at: 4,
-        command: "y".into(),
-        params: Value::Null,
-        ok: true,
-        error: None,
-        millis: 0,
-        relative: Vec::new(),
-    });
-    assert!(s.project.saved_text(Some(&folder)).unwrap().0.contains(r#""command":"y""#));
-    // The project's own folder is written as `.`, and read back as that folder.
-    let entry = LogEntry {
-        at: 5,
-        command: "z".into(),
-        params: json!({"path": folder.to_string_lossy()}),
-        ok: true,
-        error: None,
-        millis: 0,
-        relative: Vec::new(),
-    };
-    s.project.log.push(entry);
-    let (text, _) = s.project.saved_text(Some(&folder)).unwrap();
-    std::fs::create_dir_all(&folder).unwrap();
-    std::fs::write(folder.join("p.rgis"), &text).unwrap();
-    let reopened = Project::load(&folder.join("p.rgis")).unwrap();
-    let path = reopened.log.entries().last().unwrap().params["path"].as_str().unwrap().to_string();
-    assert!(std::path::Path::new(&path).is_absolute(), "{path}");
-    let _ = std::fs::remove_dir_all(&folder);
     // Read by filter, newest last.
     let r = s.run("project.log", &json!({"command": "project.rename", "failed": true})).unwrap();
     assert_eq!((r["count"].as_u64(), r["entries"][0]["command"].as_str()), (Some(1), Some("project.rename")));
     assert_eq!(s.run("project.log", &json!({"limit": 2})).unwrap()["entries"].as_array().map(Vec::len), Some(2));
-    // Many keys with short values still fit the bound.
-    let wide: serde_json::Map<String, Value> = (0..40).map(|i| (format!("{i:02}{}", "k".repeat(62)), json!("é".repeat(64)))).collect();
-    let kept = crate::project_log::kept_params(&Value::Object(wide));
-    assert!(serde_json::to_vec(&kept).unwrap().len() <= crate::project::LOG_PARAMS_BYTES, "{kept}");
-    assert!(kept.as_object().is_some_and(|o| o.len() > 1 && o.len() < 40));
-    assert_eq!(kept["…"], json!("40 keys in all"));
-    // Keys alike in their first 64 characters: the first stays, the other counted as left out.
-    let mut alike: serde_json::Map<String, Value> = (0..40).map(|i| (format!("{i:02}{}", "k".repeat(62)), json!("v".repeat(64)))).collect();
-    // Sorts right after the first key, and is the same once cut to 64 characters.
-    alike.insert(format!("00{}a", "k".repeat(62)), json!(2));
-    let kept = crate::project_log::kept_params(&Value::Object(alike));
-    assert_eq!(kept["…"], json!("41 keys in all"));
-    assert_eq!(kept[format!("00{}", "k".repeat(62))], json!("v".repeat(64)), "the first stays");
-    assert!(kept.as_object().is_some_and(|o| !o.values().any(|v| *v == json!(2))), "{kept}");
-    // A crafted text costs its length, not its braces times its length: 200,000 braces are
-    // milliseconds once, and would be hours if each `{` scanned the rest (a bound far from both).
-    let crafted = "{1".repeat(200_000);
-    let started = std::time::Instant::now();
-    assert_eq!(crate::project_log::json_in_text_redacted(&crafted).len(), crafted.len());
-    assert!(started.elapsed() < std::time::Duration::from_secs(60), "{:?}", started.elapsed());
-    // A key cut short keeps no value: a secret's name may be past the cut.
-    let long_key = format!("{}secretAccessKey", "x".repeat(195));
-    let kept = crate::project_log::kept_params(&json!({long_key: "S3CRET"}));
-    assert!(!kept.to_string().contains("S3CRET"), "{kept}");
     assert!(s.run("project.log", &json!({"limit": 0})).is_err());
     assert!(s.run("project.log", &json!({"limit": 0.5})).unwrap_err().contains("whole number"));
-    // Plugins' commands keep at most their own share of the log: the user's entries stay.
-    let log = crate::project::ProjectLog::default();
-    let entry = |command: &str| LogEntry {
-        at: 1,
-        command: command.into(),
-        params: Value::Null,
-        ok: true,
-        error: None,
-        millis: 0,
-        relative: Vec::new(),
-    };
-    log.push(entry("layer.rename"));
-    for _ in 0..crate::project_log::LOG_PLUGIN_LIMIT + 5 {
-        log.push(entry("plugin:p/flood"));
-    }
-    let kept = log.entries();
-    assert_eq!((kept.len(), kept[0].command.as_str()), (crate::project_log::LOG_PLUGIN_LIMIT + 1, "layer.rename"));
-    // Read in chunks (as the export writes it), every entry comes once, in order.
-    let mut read = Vec::new();
-    while let Some(part) = Some(log.chunk(read.len(), 256)).filter(|p| !p.is_empty()) {
-        read.extend(part);
-    }
-    assert_eq!(read.len(), kept.len());
-    assert!(read.iter().zip(&kept).all(|(a, b)| a.command == b.command && a.at == b.at));
-    // An SQL secret's options, written as plain words, go; the statement's shape stays.
-    let sql = "CREATE OR REPLACE SECRET s3 (TYPE s3, KEY_ID 'AKIA1', SECRET 'S3CRET'); SELECT 1 / 2";
-    let kept = crate::project_log::kept_params(&json!({"sql": sql}));
-    assert_eq!(kept["sql"], json!("CREATE OR REPLACE SECRET s3 (…); SELECT 1 / 2"));
-    assert_eq!(crate::project_log::sql_secrets_removed("create table t (a int)"), "create table t (a int)");
-    assert_eq!(crate::project_log::sql_secrets_removed("create table secret (a int)"), "create table secret (a int)");
-    // A path written by its name keeps a folder's name, not the nothing after its last separator.
-    for (path, name) in [("/data/My Data/", "My Data"), ("C:\\data\\a.tif", "a.tif"), ("/data/a.tif", "a.tif"), ("/", "/")] {
-        assert_eq!(crate::project_log::last_name(path), name, "{path}");
-    }
-    // `create` inside another word starts no statement.
-    for t in ["recreate secret s (key 'a')", "created secret (key 'a')"] {
-        assert_eq!(crate::project_log::sql_secrets_removed(t), t);
-    }
-    assert_eq!(crate::project_log::sql_secrets_removed("CREATE PERSISTENT SECRET (TYPE s3, SECRET 'x')"), "CREATE PERSISTENT SECRET (…)");
     // Steps merged into one undo step (a held arrow key) are one entry, with the last parameters.
     let n = s.project.log.len();
     for name in ["Nudged 1", "Nudged 2", "Nudged 3"] {
@@ -17865,27 +17712,11 @@ fn the_project_log_records_each_command_run_on_the_project() {
     }
     assert_eq!(s.project.log.len(), n + 1);
     assert_eq!(s.project.log.entries().last().unwrap().params["name"], json!("Nudged 3"));
-    // An unquoted secret key in an object that doesn't parse goes, with the rest of the text;
-    // a format string's braces stay.
-    let line = crate::project_log::kept_params(&json!({"script": "s3.connect {secretAccessKey: \"S3CRET\"}\nprint(f\"{x:.2f}\")"}));
-    assert!(!line.to_string().contains("S3CRET"), "{line}");
-    let fmt = crate::project_log::kept_params(&json!({"script": "print(f\"{x:.2f}\")"}));
-    assert_eq!(fmt["script"], json!("print(f\"{x:.2f}\")"));
     // Times as decimals too; a negative time, or a filter that isn't true or false, is refused.
     assert_eq!(s.run("project.log", &json!({"since": 1.7e12, "limit": 1})).unwrap()["entries"].as_array().map(Vec::len), Some(1));
     assert!(s.run("project.log", &json!({"since": -1})).is_err());
     assert!(s.run("project.log", &json!({"failed": "true"})).is_err());
     assert!(s.run("project.log", &json!({"command": 7})).is_err());
-    // A plugin never empties the log or turns it off; writing it out is reaching a file.
-    assert!(crate::cmd::plugins::user_only("project.clearLog") && crate::cmd::plugins::user_only("project.logCommands"));
-    {
-        use crate::cmd::plugins::{Reach, reaches};
-        let export = crate::cmd::all().into_iter().find(|c| c.id == "project.exportLog").unwrap();
-        assert_eq!(reaches(&export, &json!({"path": "log.csv"})), Some(Reach::Files));
-        // Reading it too: it names the files and addresses the user's commands used.
-        let read = crate::cmd::all().into_iter().find(|c| c.id == "project.log").unwrap();
-        assert_eq!(reaches(&read, &json!({})), Some(Reach::Files));
-    }
     // An error that starts as a spreadsheet formula is written as text in the CSV.
     let formula = LogEntry {
         at: 2,
@@ -17926,37 +17757,6 @@ fn the_project_log_records_each_command_run_on_the_project() {
     assert_eq!(commands(&s), ["project.clearLog", "project.logCommands"], "turned off, and said so");
     s.run("project.logCommands", &json!({"on": true})).unwrap();
     assert_eq!(commands(&s), ["project.clearLog", "project.logCommands", "project.logCommands"]);
-    // A log that would take a project past what a project file opens with is refused at saving;
-    // a project over it by itself is not the log's doing.
-    let max = crate::project::MAX_BYTES as usize;
-    assert!(crate::project::log_fits(max - 10, max).is_ok());
-    assert!(crate::project::log_fits(max - 10, max + 1).unwrap_err().contains("project.clearLog"));
-    assert!(crate::project::log_fits(max + 1, max + 50).is_ok());
-    // A file's log is read keeping its last entries, each bounded.
-    let entries: Vec<Value> = (0..LOG_LIMIT + 3)
-        .map(|i| json!({"at": i, "command": "x".repeat(if i == LOG_LIMIT + 2 { 1000 } else { 1 }), "ok": true, "params": {"a": "y".repeat(if i == LOG_LIMIT + 2 { 20_000 } else { 1 })}}))
-        .collect();
-    let log: crate::project::ProjectLog = serde_json::from_value(json!({"entries": entries})).unwrap();
-    let read = log.entries();
-    assert_eq!((read.len(), read[0].at), (LOG_LIMIT, 3));
-    let last = read.last().unwrap();
-    assert!(
-        last.command.chars().count() == 200 && serde_json::to_vec(&last.params).unwrap().len() <= LOG_PARAMS_BYTES,
-        "{}",
-        last.command.len()
-    );
-    // Nothing in a file's log keeps the project from opening: a bad entry is skipped, a log that
-    // isn't one is empty; a secret it holds is taken out as it is read.
-    let log: crate::project::ProjectLog = serde_json::from_value(json!({"entries": [7, {"at": "x"}, {"at": 1, "command": "a", "ok": true, "params": {"url": "https://x.org/a?token=S3CRET"}, "error": "https://x.org/b?token=S3CRET: refused"}]})).unwrap();
-    let read = log.entries();
-    assert_eq!(read.len(), 1);
-    assert!(!serde_json::to_string(&read).unwrap().contains("S3CRET"), "{read:?}");
-    for odd in [json!(7), json!("x"), json!([1, 2]), json!({"entries": 7, "off": "yes"}), json!(null)] {
-        let log: crate::project::ProjectLog = serde_json::from_value(odd.clone()).unwrap();
-        assert!(log.is_empty() && log.on(), "{odd}");
-    }
-    let opened = Project::from_json(r#"{"name": "A", "maps": [], "active_map": 0, "log": {"entries": [{"at": "never"}]}}"#).unwrap();
-    assert!(opened.log.is_empty());
     // A .json path is refused: JSON Lines isn't one JSON document. A format given doesn't let
     // the log go over another kind of file, nor disagree with the path's extension.
     assert!(s.run("project.exportLog", &json!({"path": "log.json"})).is_err());
@@ -17992,4 +17792,232 @@ fn the_project_log_records_each_command_run_on_the_project() {
     }
     assert_eq!(s.project.log.len(), LOG_LIMIT);
     assert_eq!(s.project.log.entries()[0].at, 5);
+    // Undo or redo with nothing to take back changes nothing, and isn't logged.
+    s.clear_history();
+    let n = s.project.log.len();
+    assert!(s.run("edit.undo", &Value::Null).is_err() && s.run("edit.redo", &Value::Null).is_err());
+    assert_eq!(s.project.log.len(), n, "nothing to undo or redo: not logged");
+}
+
+/// Saved into a folder, the log's local paths are written relative to it, as the project's
+/// sources are, and read back absolute; a text given as relative reads back as it was run. A
+/// save with nothing logged since reuses its text. A log that would take a project past what a
+/// project file opens with is refused.
+#[test]
+fn the_project_log_writes_its_paths_relative_to_the_project_folder() {
+    use crate::project::LogEntry;
+    let mut p = Project::default();
+    // Saved into a folder, its paths are written relative to it, as the project's sources are.
+    let folder = std::env::temp_dir().join(format!("rustgis-log-portable-{}", std::process::id()));
+    let inside = folder.join("My Data").join("a.tif");
+    let error = Some(format!("{}: not found (see ./x)", inside.display()));
+    let params = json!({"path": inside.to_string_lossy(), "name": "./Maps and data", "sql": "SELECT a / b FROM t -- /home", "root": "/"});
+    p.log.push(LogEntry { at: 1, command: "layer.addData".into(), params, ok: false, error, millis: 0, relative: Vec::new() });
+    let (text, _) = p.saved_text(Some(&folder)).unwrap();
+    let saved: Value = serde_json::from_str(&text).unwrap();
+    let last = saved["log"]["entries"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(
+        (last["params"]["path"].as_str(), last["error"].as_str()),
+        (Some("./My Data/a.tif"), Some("./My Data/a.tif: not found (see ./x)"))
+    );
+    assert_eq!(p.log.entries().last().unwrap().params["path"], json!(inside.to_string_lossy()), "the open project keeps them");
+    assert_eq!((last["params"]["sql"].as_str(), last["params"]["root"].as_str()), (Some("SELECT a / b FROM t -- /home"), Some("/")));
+    // Read back from that folder, they are absolute again, so a Save As elsewhere keeps them right.
+    std::fs::create_dir_all(&folder).unwrap();
+    let file = folder.join("p.rgis");
+    std::fs::write(&file, &text).unwrap();
+    let reopened = Project::load(&file).unwrap();
+    let path = reopened.log.entries().last().unwrap().params["path"].as_str().unwrap().to_string();
+    assert!(std::path::Path::new(&path).is_absolute() && path.ends_with("a.tif"), "{path}");
+    let error = reopened.log.entries().last().unwrap().error.clone().unwrap();
+    assert_eq!(error, format!("{}: not found (see ./x)", path), "the error names the path whole again, and ./x as given");
+    // A text given as relative is read back as it was run, not against the project's folder.
+    assert_eq!(reopened.log.entries().last().unwrap().params["name"], json!("./Maps and data"));
+    assert!(reopened.log.entries().iter().all(|e| e.relative.is_empty()));
+    // A text that already holds, as a word, the relative form a path would be written as: the
+    // entry's paths are written as file names, and every text reads back as it was written.
+    let error = Some("not found; see ./My Data/a.tif".to_string());
+    let params = json!({"path": inside.to_string_lossy()});
+    p.log.push(LogEntry { at: 2, command: "layer.addData".into(), params, ok: false, error, millis: 0, relative: Vec::new() });
+    let (text, _) = p.saved_text(Some(&folder)).unwrap();
+    std::fs::write(&file, &text).unwrap();
+    let last = Project::load(&file).unwrap().log.entries().last().unwrap().clone();
+    assert_eq!((last.params["path"].as_str(), last.error.as_deref()), (Some("a.tif"), Some("not found; see ./My Data/a.tif")), "{text}");
+    let _ = std::fs::remove_dir_all(&folder);
+    // A text that starts with a path but holds more is read word by word, not as one path.
+    for (error, saved) in [
+        ("/mnt/x/a.tif: cannot open /mnt/y/b.tif", "a.tif: cannot open b.tif"),
+        ("/mnt/x/a.tif and /mnt/y/b.tif are missing", "a.tif and b.tif are missing"),
+    ] {
+        let entry = LogEntry {
+            at: 3,
+            command: "x".into(),
+            params: Value::Null,
+            ok: false,
+            error: Some(error.into()),
+            millis: 0,
+            relative: Vec::new(),
+        };
+        p.log.push(entry);
+        let (text, _) = p.saved_text(Some(&folder)).unwrap();
+        let back: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(back["log"]["entries"].as_array().unwrap().last().unwrap()["error"], json!(saved), "{error}");
+    }
+    // A save with nothing logged since writes the same text; one after a change, or into
+    // another folder, writes it again.
+    let (a, _) = p.saved_text(Some(&folder)).unwrap();
+    let (b, _) = p.saved_text(Some(&folder)).unwrap();
+    assert_eq!(a, b);
+    assert_ne!(p.saved_text(None).unwrap().0, a);
+    p.log.push(LogEntry { at: 4, command: "y".into(), params: Value::Null, ok: true, error: None, millis: 0, relative: Vec::new() });
+    assert!(p.saved_text(Some(&folder)).unwrap().0.contains(r#""command":"y""#));
+    // The project's own folder is written as `.`, and read back as that folder.
+    let entry = LogEntry {
+        at: 5,
+        command: "z".into(),
+        params: json!({"path": folder.to_string_lossy()}),
+        ok: true,
+        error: None,
+        millis: 0,
+        relative: Vec::new(),
+    };
+    p.log.push(entry);
+    let (text, _) = p.saved_text(Some(&folder)).unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("p.rgis"), &text).unwrap();
+    let reopened = Project::load(&folder.join("p.rgis")).unwrap();
+    let path = reopened.log.entries().last().unwrap().params["path"].as_str().unwrap().to_string();
+    assert!(std::path::Path::new(&path).is_absolute(), "{path}");
+    let _ = std::fs::remove_dir_all(&folder);
+    // A log that would take a project past what a project file opens with is refused at saving;
+    // a project over it by itself is not the log's doing.
+    let max = crate::project::MAX_BYTES as usize;
+    assert!(crate::project::log_fits(max - 10, max).is_ok());
+    assert!(crate::project::log_fits(max - 10, max + 1).unwrap_err().contains("project.clearLog"));
+    assert!(crate::project::log_fits(max + 1, max + 50).is_ok());
+}
+
+/// What the project log keeps of a command's parameters: bounded in bytes, keys and time, and
+/// without secrets, those in JSON a text holds and in SQL `CREATE … SECRET` options included.
+#[test]
+fn the_project_log_keeps_parameters_bounded_and_without_secrets() {
+    // Many keys with short values still fit the bound.
+    let wide: serde_json::Map<String, Value> = (0..40).map(|i| (format!("{i:02}{}", "k".repeat(62)), json!("é".repeat(64)))).collect();
+    let kept = crate::project_log::kept_params(&Value::Object(wide));
+    assert!(serde_json::to_vec(&kept).unwrap().len() <= crate::project::LOG_PARAMS_BYTES, "{kept}");
+    assert!(kept.as_object().is_some_and(|o| o.len() > 1 && o.len() < 40));
+    assert_eq!(kept["…"], json!("40 keys in all"));
+    // Keys alike in their first 64 characters: the first stays, the other counted as left out.
+    let mut alike: serde_json::Map<String, Value> = (0..40).map(|i| (format!("{i:02}{}", "k".repeat(62)), json!("v".repeat(64)))).collect();
+    // Sorts right after the first key, and is the same once cut to 64 characters.
+    alike.insert(format!("00{}a", "k".repeat(62)), json!(2));
+    let kept = crate::project_log::kept_params(&Value::Object(alike));
+    assert_eq!(kept["…"], json!("41 keys in all"));
+    assert_eq!(kept[format!("00{}", "k".repeat(62))], json!("v".repeat(64)), "the first stays");
+    assert!(kept.as_object().is_some_and(|o| !o.values().any(|v| *v == json!(2))), "{kept}");
+    // A crafted text costs its length, not its braces times its length: 200,000 braces are
+    // milliseconds once, and would be hours if each `{` scanned the rest (a bound far from both).
+    let crafted = "{1".repeat(200_000);
+    let started = std::time::Instant::now();
+    assert_eq!(crate::project_log::json_in_text_redacted(&crafted).len(), crafted.len());
+    assert!(started.elapsed() < std::time::Duration::from_secs(60), "{:?}", started.elapsed());
+    // A key cut short keeps no value: a secret's name may be past the cut.
+    let long_key = format!("{}secretAccessKey", "x".repeat(195));
+    let kept = crate::project_log::kept_params(&json!({long_key: "S3CRET"}));
+    assert!(!kept.to_string().contains("S3CRET"), "{kept}");
+    // An SQL secret's options, written as plain words, go; the statement's shape stays.
+    let sql = "CREATE OR REPLACE SECRET s3 (TYPE s3, KEY_ID 'AKIA1', SECRET 'S3CRET'); SELECT 1 / 2";
+    let kept = crate::project_log::kept_params(&json!({"sql": sql}));
+    assert_eq!(kept["sql"], json!("CREATE OR REPLACE SECRET s3 (…); SELECT 1 / 2"));
+    assert_eq!(crate::project_log::sql_secrets_removed("create table t (a int)"), "create table t (a int)");
+    assert_eq!(crate::project_log::sql_secrets_removed("create table secret (a int)"), "create table secret (a int)");
+    // A path written by its name keeps a folder's name, not the nothing after its last separator.
+    for (path, name) in [("/data/My Data/", "My Data"), ("C:\\data\\a.tif", "a.tif"), ("/data/a.tif", "a.tif"), ("/", "/")] {
+        assert_eq!(crate::project_log::last_name(path), name, "{path}");
+    }
+    // `create` inside another word starts no statement.
+    for t in ["recreate secret s (key 'a')", "created secret (key 'a')"] {
+        assert_eq!(crate::project_log::sql_secrets_removed(t), t);
+    }
+    assert_eq!(crate::project_log::sql_secrets_removed("CREATE PERSISTENT SECRET (TYPE s3, SECRET 'x')"), "CREATE PERSISTENT SECRET (…)");
+    // An unquoted secret key in an object that doesn't parse goes, with the rest of the text;
+    // a format string's braces stay.
+    let line = crate::project_log::kept_params(&json!({"script": "s3.connect {secretAccessKey: \"S3CRET\"}\nprint(f\"{x:.2f}\")"}));
+    assert!(!line.to_string().contains("S3CRET"), "{line}");
+    let fmt = crate::project_log::kept_params(&json!({"script": "print(f\"{x:.2f}\")"}));
+    assert_eq!(fmt["script"], json!("print(f\"{x:.2f}\")"));
+}
+
+/// Plugins can neither empty the project log nor turn it off, nor push the user's entries out of
+/// it; writing the log out, or reading it, reaches a file. The log reads in chunks, as the
+/// export writes it.
+#[test]
+fn plugins_can_neither_clear_the_project_log_nor_crowd_out_the_users_entries() {
+    use crate::project::LogEntry;
+    // Plugins' commands keep at most their own share of the log: the user's entries stay.
+    let log = crate::project::ProjectLog::default();
+    let entry = |command: &str| LogEntry {
+        at: 1,
+        command: command.into(),
+        params: Value::Null,
+        ok: true,
+        error: None,
+        millis: 0,
+        relative: Vec::new(),
+    };
+    log.push(entry("layer.rename"));
+    for _ in 0..crate::project_log::LOG_PLUGIN_LIMIT + 5 {
+        log.push(entry("plugin:p/flood"));
+    }
+    let kept = log.entries();
+    assert_eq!((kept.len(), kept[0].command.as_str()), (crate::project_log::LOG_PLUGIN_LIMIT + 1, "layer.rename"));
+    // Read in chunks (as the export writes it), every entry comes once, in order.
+    let mut read = Vec::new();
+    while let Some(part) = Some(log.chunk(read.len(), 256)).filter(|p| !p.is_empty()) {
+        read.extend(part);
+    }
+    assert_eq!(read.len(), kept.len());
+    assert!(read.iter().zip(&kept).all(|(a, b)| a.command == b.command && a.at == b.at));
+    // A plugin never empties the log or turns it off; writing it out is reaching a file.
+    assert!(crate::cmd::plugins::user_only("project.clearLog") && crate::cmd::plugins::user_only("project.logCommands"));
+    {
+        use crate::cmd::plugins::{Reach, reaches};
+        let export = crate::cmd::all().into_iter().find(|c| c.id == "project.exportLog").unwrap();
+        assert_eq!(reaches(&export, &json!({"path": "log.csv"})), Some(Reach::Files));
+        // Reading it too: it names the files and addresses the user's commands used.
+        let read = crate::cmd::all().into_iter().find(|c| c.id == "project.log").unwrap();
+        assert_eq!(reaches(&read, &json!({})), Some(Reach::Files));
+    }
+}
+
+/// A file's project log is read keeping its last entries, each bounded and without secrets, and
+/// nothing in it keeps the project from opening.
+#[test]
+fn a_files_project_log_is_read_bounded_and_never_keeps_the_project_from_opening() {
+    use crate::project::{LOG_LIMIT, LOG_PARAMS_BYTES};
+    // A file's log is read keeping its last entries, each bounded.
+    let entries: Vec<Value> = (0..LOG_LIMIT + 3)
+        .map(|i| json!({"at": i, "command": "x".repeat(if i == LOG_LIMIT + 2 { 1000 } else { 1 }), "ok": true, "params": {"a": "y".repeat(if i == LOG_LIMIT + 2 { 20_000 } else { 1 })}}))
+        .collect();
+    let log: crate::project::ProjectLog = serde_json::from_value(json!({"entries": entries})).unwrap();
+    let read = log.entries();
+    assert_eq!((read.len(), read[0].at), (LOG_LIMIT, 3));
+    let last = read.last().unwrap();
+    assert!(
+        last.command.chars().count() == 200 && serde_json::to_vec(&last.params).unwrap().len() <= LOG_PARAMS_BYTES,
+        "{}",
+        last.command.len()
+    );
+    // Nothing in a file's log keeps the project from opening: a bad entry is skipped, a log that
+    // isn't one is empty; a secret it holds is taken out as it is read.
+    let log: crate::project::ProjectLog = serde_json::from_value(json!({"entries": [7, {"at": "x"}, {"at": 1, "command": "a", "ok": true, "params": {"url": "https://x.org/a?token=S3CRET"}, "error": "https://x.org/b?token=S3CRET: refused"}]})).unwrap();
+    let read = log.entries();
+    assert_eq!(read.len(), 1);
+    assert!(!serde_json::to_string(&read).unwrap().contains("S3CRET"), "{read:?}");
+    for odd in [json!(7), json!("x"), json!([1, 2]), json!({"entries": 7, "off": "yes"}), json!(null)] {
+        let log: crate::project::ProjectLog = serde_json::from_value(odd.clone()).unwrap();
+        assert!(log.is_empty() && log.on(), "{odd}");
+    }
+    let opened = Project::from_json(r#"{"name": "A", "maps": [], "active_map": 0, "log": {"entries": [{"at": "never"}]}}"#).unwrap();
+    assert!(opened.log.is_empty());
 }
