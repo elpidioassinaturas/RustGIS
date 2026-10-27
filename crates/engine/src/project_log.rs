@@ -252,8 +252,9 @@ pub(crate) fn sql_secrets_removed(t: &str) -> String {
     out
 }
 
-/// Where in `t` the last secret's name (`credentials::secret_key`) written as a key, unquoted,
-/// before a `:` or `=` (`secretAccessKey: "…"`, `token = …`) starts: one pass over the text.
+/// Where in `t` the last secret's name (`credentials::secret_key`) written as a key, quoted or
+/// not, before a `:` or `=` (`secretAccessKey: "…"`, `"token": …`, `token = …`) starts: one pass
+/// over the text.
 fn last_secret_name(t: &str) -> Option<usize> {
     let name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.');
     let mut last = None;
@@ -262,7 +263,8 @@ fn last_secret_name(t: &str) -> Option<usize> {
         let from = rest.get(at..).unwrap_or("");
         let end = from.find(|c: char| !name(c)).unwrap_or(from.len());
         let (key, after) = from.split_at(end);
-        if after.trim_start().starts_with([':', '=']) && rustgis_data::source::credentials::secret_key(key) {
+        let separator = after.trim_start_matches(['"', '\'']).trim_start();
+        if separator.starts_with([':', '=']) && rustgis_data::source::credentials::secret_key(key) {
             last = Some(t.len() - from.len());
         }
         rest = after;
@@ -380,6 +382,9 @@ struct LogState {
     off: bool,
     /// Oldest first; the oldest go first past [`LOG_LIMIT`], without moving the rest.
     entries: std::collections::VecDeque<LogEntry>,
+    /// How many of `entries` are plugins' commands', kept in step with them so a push doesn't
+    /// count them.
+    plugin_entries: usize,
     /// Moved on by each change, so a text written earlier is known to be the log as it is.
     generation: u64,
     /// The text the last save wrote, with the generation it was written from and the folder it
@@ -432,7 +437,11 @@ impl<'de> Deserialize<'de> for LogState {
                 while let Some(k) = map.next_key::<String>()? {
                     match k.as_str() {
                         "off" => s.off = map.next_value::<serde_json::Value>()?.as_bool().unwrap_or(false),
-                        "entries" => s.entries = map.next_value_seed(LogEntries)?,
+                        "entries" => {
+                            let entries = map.next_value_seed(LogEntries)?;
+                            s.plugin_entries = entries.iter().filter(|e| e.command.starts_with(rustgis_plugins::PREFIX)).count();
+                            s.entries = entries;
+                        }
                         _ => {
                             map.next_value::<serde::de::IgnoredAny>()?;
                         }
@@ -547,14 +556,20 @@ impl ProjectLog {
         }
         let plugin = |e: &LogEntry| e.command.starts_with(rustgis_plugins::PREFIX);
         if plugin(&e)
-            && s.entries.iter().filter(|x| plugin(x)).count() >= LOG_PLUGIN_LIMIT
+            && s.plugin_entries >= LOG_PLUGIN_LIMIT
             && let Some(oldest) = s.entries.iter().position(plugin)
         {
             s.entries.remove(oldest);
+            s.plugin_entries = s.plugin_entries.saturating_sub(1);
+        }
+        if plugin(&e) {
+            s.plugin_entries += 1;
         }
         s.entries.push_back(e);
         while s.entries.len() > LOG_LIMIT {
-            s.entries.pop_front();
+            if s.entries.pop_front().is_some_and(|x| plugin(&x)) {
+                s.plugin_entries = s.plugin_entries.saturating_sub(1);
+            }
         }
     }
 
@@ -646,7 +661,9 @@ impl ProjectLog {
 
     /// Empties the log; how many entries it had.
     pub fn clear(&self) -> usize {
-        std::mem::take(&mut self.changing().entries).len()
+        let mut s = self.changing();
+        s.plugin_entries = 0;
+        std::mem::take(&mut s.entries).len()
     }
 
     /// The log as a project file keeps it, written at the end of `out`, each entry in turn; saved

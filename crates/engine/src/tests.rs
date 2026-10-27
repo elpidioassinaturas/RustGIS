@@ -19275,6 +19275,11 @@ fn the_project_log_keeps_parameters_bounded_and_without_secrets() {
     assert!(!line.to_string().contains("S3CRET"), "{line}");
     let fmt = crate::project_log::kept_params(&json!({"script": "print(f\"{x:.2f}\")"}));
     assert_eq!(fmt["script"], json!("print(f\"{x:.2f}\")"));
+    // A quoted secret key in such an object goes too, its value with it, double or single quotes.
+    for line in [r#"s3.connect {a: "x", "secretAccessKey": "S3CRET",}"#, "s3.connect {a: 'x', 'secretAccessKey': 'S3CRET',}"] {
+        let kept = crate::project_log::kept_params(&json!({"script": line}));
+        assert!(!kept.to_string().contains("S3CRET") && kept.to_string().contains("s3.connect"), "{kept}");
+    }
 }
 
 /// Plugins can neither empty the project log nor turn it off, nor push the user's entries out of
