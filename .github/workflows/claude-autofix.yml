@@ -231,7 +231,8 @@ jobs:
                 }
               }' \
             --jq '.data.repository.pullRequest.reviewThreads.nodes[]' > "$RUNNER_TEMP/nodes.json"
-          jq -s --argjson writers "$WRITERS" '
+          # A quoted heredoc, so the program is not shell-quoted: it may hold any character.
+          cat > "$RUNNER_TEMP/threads.jq" <<'EOF'
             def trusted: (.author.__typename == "Bot") or (.author.login as $l | $writers | index($l));
             # A thread whose last comment is an autofix reply was answered in an earlier round;
             # it comes back once a reviewer replies to it.
@@ -244,10 +245,11 @@ jobs:
                   comments: (.comments.totalCount as $n | .starter.nodes[0] as $s
                              | [ $s, (.comments.nodes[] | select(.id != $s.id)) ]
                              | map(select(trusted) | { author: (.author.login // "ghost"), body })
-                             # The starter is always first (it's trusted, or the thread was dropped).
+                             # The starter is always first (it is trusted, or the thread was dropped).
                              | if $n > 51 then .[:1] + [{ note: "\($n - 51) earlier comments are not shown" }] + .[1:]
                                else . end) } ]
-          ' "$RUNNER_TEMP/nodes.json" > .autofix/threads.json
+          EOF
+          jq -s --argjson writers "$WRITERS" -f "$RUNNER_TEMP/threads.jq" "$RUNNER_TEMP/nodes.json" > .autofix/threads.json
           count=$(jq length .autofix/threads.json)
           echo "count=$count" >> "$GITHUB_OUTPUT"
           # The reply and resolve steps take their ids from here, not from the files Claude can edit.
@@ -436,7 +438,11 @@ jobs:
             [ "$rc" != 0 ] || { echo "::error::Claude left conflicts for a person: $(printf %q "$f")"; exit 1; }
             [ "$rc" = 1 ] || { echo "::error::Couldn't check $(printf %q "$f") for conflict markers."; exit 1; }
           done < "$RUNNER_TEMP/left.z"
-          git add -A -- . ':!.autofix'
+          # .autofix is excluded in .git/info/exclude; a pathspec naming it (even ':!.autofix') makes
+          # git add fail on the ignored path, so it is unstaged afterwards instead: reset restores the
+          # index from HEAD, so the commit neither adds .autofix nor deletes it if it were ever tracked.
+          git add -A -- .
+          git reset -q -- .autofix
           test -z "$(git diff --cached --name-only --diff-filter=U)"
           git commit -q --no-edit --cleanup=strip
           git log -1 --stat
@@ -527,7 +533,8 @@ jobs:
             exit 0
           fi
           echo "reported=true" >> "$GITHUB_OUTPUT"
-          git add -A -- . ':!.autofix'
+          git add -A -- .
+          git reset -q -- .autofix
           if git diff --cached --quiet; then
             echo "No code changes."
             exit 0

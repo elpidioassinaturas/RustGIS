@@ -290,6 +290,10 @@ const NEVER: &[&str] = &[
     // The project log records what was done (#797): a plugin never empties it or turns it off.
     "project.clearLog",
     "project.logCommands",
+    "pg.connect",
+    "pg.disconnect",
+    // Writes to a database: the user's to do, asked each time.
+    "pg.saveEdits",
 ];
 
 /// Commands that write files without naming one in their parameters, or read what the user's
@@ -313,6 +317,9 @@ const DATABASES: &[&str] = &[
     "sql.schema",
     "raster.zarrInfo",
     "layer.addZarr",
+    "pg.tables",
+    "pg.addLayer",
+    "pg.discardEdits",
     "zarr.series",
     "zarr.reduce",
     "cube.trend",

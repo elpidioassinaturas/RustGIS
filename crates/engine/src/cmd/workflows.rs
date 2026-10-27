@@ -187,9 +187,12 @@ pub fn gallery_list(kind: &str) -> CmdResult {
         "ready" => &["buffer", "dissolve", "countPoints", "clip", "summaryStatistics", "selectByLocation"],
         "feature" => &[
             "buffer",
+            "near",
             "clip",
             "erase",
             "intersect",
+            "identity",
+            "union",
             "dissolve",
             "convexHull",
             "featureToPoint",
