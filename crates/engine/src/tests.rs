@@ -18609,6 +18609,15 @@ fn the_project_log_keeps_parameters_bounded_and_without_secrets() {
     for (path, name) in [("/data/My Data/", "My Data"), ("C:\\data\\a.tif", "a.tif"), ("/data/a.tif", "a.tif"), ("/", "/")] {
         assert_eq!(crate::project_log::last_name(path), name, "{path}");
     }
+    // A file's contents in base64 (`layer.addDataBytes`) are kept as their size: a secret's name
+    // can't be seen in them. A long text that isn't base64 is clipped as before.
+    let encoded = "eyJ0b2tlbiI6ICJTM0NSRVQifQ==".repeat(20);
+    for data in [encoded.clone(), format!("data:application/json;base64,{encoded}")] {
+        let kept = crate::project_log::kept_params(&json!({"fileName": "a.geojson", "data": data}));
+        assert_eq!(kept["data"], json!(format!("(file contents of {} characters, base64)", data.len())), "{kept}");
+    }
+    let prose = crate::project_log::kept_params(&json!({"note": "word ".repeat(100)}));
+    assert!(prose["note"].as_str().is_some_and(|n| n.starts_with("word word")), "{prose}");
     // `create` inside another word starts no statement.
     for t in ["recreate secret s (key 'a')", "created secret (key 'a')"] {
         assert_eq!(crate::project_log::sql_secrets_removed(t), t);

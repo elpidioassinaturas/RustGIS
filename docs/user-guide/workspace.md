@@ -99,14 +99,14 @@ end goes into it alike: the app, scripts, the AI Assistant, the command line, Py
 - **Outside undo:** undoing a command doesn't take its entry back, and clearing the log or
   turning it on or off is no undo step. Steps that undo takes back as one (a held arrow key
   nudging an element) are one entry, with the last one's parameters.
-- **No secrets:** the parameters lose passwords, keys and tokens as History's Copy as code does,
-  and so does an error's text; a document given as text (a map, a project) is kept as its size
-  only, and an SQL `CREATE SECRET`'s options as `(…)`. A secret written as plain words, with no
-  name or address form (a password typed into a note), isn't recognised: clear the log before
-  sharing a project that used one. Each entry's parameters are clipped to about 4 KB of JSON (a
-  long text is cut, a list keeps its first 100 items), its error to 500 characters and a `…`,
-  and the log keeps its last 10,000 entries, the oldest dropped first. Plugins' commands keep
-  at most 1,000 of them (their own oldest go first past that), so a plugin can't push the
+- **No secrets:** the parameters lose passwords, keys and tokens as History's Copy as code does, and
+  so does an error's text; a document given as text (a map, a project), or a file's contents in
+  base64, is kept as its size only, and an SQL `CREATE SECRET`'s options as `(…)`. A secret written
+  as plain words, with no name or address form (a password typed into a note), isn't recognised:
+  clear the log before sharing a project that used one. Each entry's parameters are clipped to about
+  4 KB of JSON (a long text is cut, a list keeps its first 100 items), its error to 500 characters
+  and a `…`, and the log keeps its last 10,000 entries, the oldest dropped first. Plugins' commands
+  keep at most 1,000 of them (their own oldest go first past that), so a plugin can't push the
   user's own entries out.
 - **Saved with the project:** a shared `.rgis` carries its log (a package, `.rgispkg`, or a
   template doesn't). Clear it first if that isn't wanted (`project.clearLog`, which leaves its

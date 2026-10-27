@@ -273,9 +273,19 @@ fn last_secret_name(t: &str) -> Option<usize> {
 /// The longest text kept as it is that reads as a document (it starts with `{`, `[` or `<`).
 const DOCUMENT_CHARS: usize = 200;
 
+/// Whether `t`, past [`DOCUMENT_CHARS`], is a file's contents in base64 (`layer.addDataBytes`'s
+/// `data`, or a `data:` address): only base64's characters after any `data:…;base64,` head. A
+/// secret's name can't be seen in it, so none of it is kept.
+fn is_base64(t: &str) -> bool {
+    let body = t.strip_prefix("data:").and_then(|r| r.split_once(";base64,")).map_or(t, |(_, b)| b);
+    body.len() > DOCUMENT_CHARS
+        && body.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_' | b'\n' | b'\r'))
+}
+
 /// `v` with each text cut to `chars` characters (a key to 200), a text that reads as a document
-/// (JSON or XML past [`DOCUMENT_CHARS`]) given as its size, and each list cut to its first
-/// `items` (and how many there were); nesting past eight levels is left out.
+/// (JSON or XML past [`DOCUMENT_CHARS`]) or as a file's contents in base64 given as its size, and
+/// each list cut to its first `items` (and how many there were); nesting past eight levels is
+/// left out.
 fn clip(v: &Value, chars: usize, items: usize, depth: usize) -> Value {
     match v {
         // A byte-order mark before it is still a document's start.
@@ -284,6 +294,7 @@ fn clip(v: &Value, chars: usize, items: usize, depth: usize) -> Value {
         {
             Value::String(format!("(a document of {} characters)", t.chars().count()))
         }
+        Value::String(t) if is_base64(t) => Value::String(format!("(file contents of {} characters, base64)", t.len())),
         Value::String(t) if t.chars().nth(chars).is_some() => Value::String(format!("{}…", t.chars().take(chars).collect::<String>())),
         Value::Array(a) if depth < 8 => {
             let mut out: Vec<Value> = a.iter().take(items).map(|x| clip(x, chars, items, depth + 1)).collect();
