@@ -17725,6 +17725,15 @@ fn the_project_log_records_each_command_run_on_the_project() {
     // A text given as relative is read back as it was run, not against the project's folder.
     assert_eq!(reopened.log.entries().last().unwrap().params["name"], json!("./Maps and data"));
     assert!(reopened.log.entries().iter().all(|e| e.relative.is_empty()));
+    // A text that already holds, as a word, the relative form a path would be written as: the
+    // entry's paths are written as file names, and every text reads back as it was written.
+    let error = Some("not found; see ./My Data/a.tif".to_string());
+    let params = json!({"path": inside.to_string_lossy()});
+    s.project.log.push(LogEntry { at: 2, command: "layer.addData".into(), params, ok: false, error, millis: 0, relative: Vec::new() });
+    let (text, _) = s.project.saved_text(Some(&folder)).unwrap();
+    std::fs::write(&file, &text).unwrap();
+    let last = Project::load(&file).unwrap().log.entries().last().unwrap().clone();
+    assert_eq!((last.params["path"].as_str(), last.error.as_deref()), (Some("a.tif"), Some("not found; see ./My Data/a.tif")), "{text}");
     let _ = std::fs::remove_dir_all(&folder);
     // A text that starts with a path but holds more is read word by word, not as one path.
     for (error, saved) in [
@@ -17814,6 +17823,10 @@ fn the_project_log_records_each_command_run_on_the_project() {
     assert_eq!(kept["sql"], json!("CREATE OR REPLACE SECRET s3 (…); SELECT 1 / 2"));
     assert_eq!(crate::project_log::sql_secrets_removed("create table t (a int)"), "create table t (a int)");
     assert_eq!(crate::project_log::sql_secrets_removed("create table secret (a int)"), "create table secret (a int)");
+    // `create` inside another word starts no statement.
+    for t in ["recreate secret s (key 'a')", "created secret (key 'a')"] {
+        assert_eq!(crate::project_log::sql_secrets_removed(t), t);
+    }
     assert_eq!(crate::project_log::sql_secrets_removed("CREATE PERSISTENT SECRET (TYPE s3, SECRET 'x')"), "CREATE PERSISTENT SECRET (…)");
     // Steps merged into one undo step (a held arrow key) are one entry, with the last parameters.
     let n = s.project.log.len();

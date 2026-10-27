@@ -87,13 +87,15 @@ end goes into it alike: the app, scripts, the AI Assistant, the command line, Py
   the 512 MB a project file opens with is refused, saying so: export the log, then clear it.
   Saved into a folder, the local paths in its parameters and errors are written relative to
   it, as the project's sources are; a path with spaces in it that an error names is found whole
-  when it is one of the entry's parameters, and otherwise by its words.
+  when it is one of the entry's parameters, and otherwise by its words. An entry whose text
+  already holds, as a word, the relative form one of its paths would take (`./data/a.tif`) has
+  its paths written as file names instead, so every text reads back as it was written.
 
 From scripts: `project.log {"since"?, "until"?, "command"?, "failed"?, "limit"?}` lists entries,
 newest last (`command` is an id, or the start of one ending in a dot, `layer.`; `limit` is 100
 by default and at most 1,000, with `count` saying how many match), and `project.exportLog
 {"path": "log.csv"}` writes it out as CSV (one row an entry, the parameters as a JSON column) or
-JSON Lines (`.jsonl`), as the path's extension says; any other extension (a `.json`, a project)
+JSON Lines (`.jsonl` or `.ndjson`), as the path's extension says; any other extension (a `.json`, a project)
 is refused, whatever `format` is given. The History pane still keeps geoprocessing runs with
 their outputs and Copy as code; the log is a plain record and runs nothing again.
 

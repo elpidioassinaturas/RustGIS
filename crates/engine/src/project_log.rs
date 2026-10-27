@@ -201,6 +201,14 @@ pub(crate) fn sql_secrets_removed(t: &str) -> String {
     let mut from = 0;
     while let Some(at) = lower.get(from..).and_then(|r| r.find("create")).map(|i| i + from) {
         let after = at + "create".len();
+        // `create` as a word of its own (not `recreate` or `created`).
+        let word = lower.get(..at).and_then(|b| b.chars().next_back()).is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+            && lower.get(after..).is_some_and(|r| r.starts_with(char::is_whitespace));
+        if !word {
+            out.push_str(t.get(from..after).unwrap_or(""));
+            from = after;
+            continue;
+        }
         // The statement's head, to its `(`: `create [or replace] [persistent] secret [name] (`.
         let Some(open) = lower.get(after..).and_then(|r| r.find(['(', ';'])).map(|i| i + after) else { break };
         let head = lower.get(after..open).unwrap_or("");
@@ -428,10 +436,10 @@ impl<'de> Deserialize<'de> for LogState {
     }
 }
 
-/// A file's log entries, each read in turn as a JSON value (the file is in memory already) and
-/// only the last [`LOG_LIMIT`] kept as they come; those are then bounded and without secrets as a
-/// new entry is ([`bounded`]). One that doesn't read as an entry (a file
-/// edited by hand, another version's) is skipped.
+/// A file's log entries, each read in turn as a JSON value (the file is in memory already),
+/// bounded and without secrets as a new entry is ([`bounded`]) as it comes, and only the last
+/// [`LOG_LIMIT`] kept. One that doesn't read as an entry (a file edited by hand, another
+/// version's) is skipped.
 struct LogEntries;
 
 impl<'de> serde::de::DeserializeSeed<'de> for LogEntries {
@@ -450,13 +458,14 @@ impl<'de> serde::de::Visitor<'de> for LogEntries {
         let mut out = std::collections::VecDeque::new();
         while let Some(v) = seq.next_element::<serde_json::Value>()? {
             let Ok(e) = serde_json::from_value::<LogEntry>(v) else { continue };
-            out.push_back(e);
+            // Bounded at once, so what is held is at most the cap's worth of bounded entries,
+            // whatever the file holds.
+            out.push_back(bounded(e));
             if out.len() > LOG_LIMIT {
                 out.pop_front();
             }
         }
-        // Clipped and redacted once kept: an entry dropped for the cap costs nothing more.
-        Ok(out.into_iter().map(bounded).collect())
+        Ok(out)
     }
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         while map.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
@@ -626,12 +635,16 @@ impl ProjectLog {
             // file that wasn't resolved keeps its own).
             let mut relative = std::mem::take(&mut e.relative);
             if let Some(d) = dir {
-                let mut swaps = Vec::new();
-                make_portable(&mut e.params, d, "/params", 0, &mut relative, &mut swaps);
-                if let Some(err) = e.error.as_mut() {
-                    // The parameters' paths first, whole (a folder may have spaces in its name),
-                    // then any other word that is one.
-                    *err = portable_text(&swapped(err, &swaps), d, &mut relative);
+                let kept = relative.len();
+                let (params, error) = (e.params.clone(), e.error.clone());
+                portable_entry(&mut e, d, &mut relative, false);
+                // A text that already held, as a word, a relative path this save wrote would read
+                // back with that word made absolute too: the entry's paths are written as their
+                // file names instead, which read back as they are.
+                if collides(&params, error.as_deref(), relative.get(kept..).unwrap_or_default()) {
+                    (e.params, e.error) = (params, error);
+                    relative.truncate(kept);
+                    portable_entry(&mut e, d, &mut relative, true);
                 }
             }
             let text = serde_json::to_string(&e).map_err(|e| e.to_string())?;
@@ -679,21 +692,45 @@ pub(crate) fn with_log(mut text: String, log: &ProjectLog, dir: Option<&str>) ->
     Ok(text)
 }
 
-/// `v`'s texts with their local paths made portable ([`portable_text`]), in place; each one
-/// changed noted in `changed` by its JSON pointer, `at` being `v`'s, and each whole-text path
-/// in `swaps`, as it was and as it is written.
+/// `e`'s parameters and error with their local paths made portable, in place, each change noted
+/// in `relative` ([`make_portable`]); as file names only with `names`.
+fn portable_entry(e: &mut LogEntry, dir: &str, relative: &mut Vec<String>, names: bool) {
+    let mut swaps = Vec::new();
+    make_portable(&mut e.params, dir, "/params", 0, names, relative, &mut swaps);
+    if let Some(err) = e.error.as_mut() {
+        // The parameters' paths first, whole (a folder may have spaces in its name), then any
+        // other word that is one.
+        *err = portable_text(&swapped(err, &swaps), dir, names, relative);
+    }
+}
+
+/// Whether reading back what a save noted (`noted`: the pointers of the parameters it changed
+/// and the relative paths it wrote) would change more than it wrote: one of those paths was
+/// already a word of a text read back as such (a changed parameter's, as `params` held it, or
+/// the error).
+fn collides(params: &serde_json::Value, error: Option<&str>, noted: &[String]) -> bool {
+    let (pointers, wrote): (Vec<&String>, Vec<&String>) = noted.iter().partition(|r| r.starts_with('/'));
+    let texts = pointers.iter().filter_map(|p| p.strip_prefix("/params").and_then(|p| params.pointer(p))?.as_str()).chain(error);
+    // `swapped` changes a text only where the path stands as a word of it.
+    texts.into_iter().any(|t| wrote.iter().any(|w| swapped(t, &[((*w).clone(), String::new())]) != t))
+}
+
+/// `v`'s texts with their local paths made portable ([`portable_text`]; as file names only with
+/// `names`), in place; each one changed noted in `changed` by its JSON pointer, `at` being `v`'s,
+/// and each whole-text path in `swaps`, as it was and as it is written.
 fn make_portable(
     v: &mut serde_json::Value,
     dir: &str,
     at: &str,
     depth: usize,
+    names: bool,
     changed: &mut Vec<String>,
     swaps: &mut Vec<(String, String)>,
 ) {
     use serde_json::Value;
     match v {
         Value::String(t) => {
-            let portable = portable_text(t, dir, changed);
+            let portable = portable_text(t, dir, names, changed);
             if portable != *t {
                 if one_path(t) {
                     swaps.push((t.clone(), portable.clone()));
@@ -704,12 +741,12 @@ fn make_portable(
         }
         Value::Array(a) if depth < 16 => {
             for (i, x) in a.iter_mut().enumerate() {
-                make_portable(x, dir, &format!("{at}/{i}"), depth + 1, changed, swaps);
+                make_portable(x, dir, &format!("{at}/{i}"), depth + 1, names, changed, swaps);
             }
         }
         Value::Object(o) if depth < 16 => {
             for (k, x) in o.iter_mut() {
-                make_portable(x, dir, &format!("{at}/{}", k.replace('~', "~0").replace('/', "~1")), depth + 1, changed, swaps);
+                make_portable(x, dir, &format!("{at}/{}", k.replace('~', "~0").replace('/', "~1")), depth + 1, names, changed, swaps);
             }
         }
         _ => {}
@@ -740,14 +777,16 @@ fn swapped(t: &str, swaps: &[(String, String)]) -> String {
 }
 
 /// `t` with each absolute local path in it (the whole text, or a word of it, quotes and trailing
-/// punctuation aside) relative to `dir`, or its file name where it can't be; each relative path
-/// written noted in `wrote` (once), for reading to make absolute again.
-fn portable_text(t: &str, dir: &str, wrote: &mut Vec<String>) -> String {
+/// punctuation aside) relative to `dir`, or its file name where it can't be or with `names`;
+/// each relative path written noted in `wrote` (once), for reading to make absolute again.
+fn portable_text(t: &str, dir: &str, names: bool, wrote: &mut Vec<String>) -> String {
     let made = std::cell::RefCell::new(Vec::new());
     let portable = |p: &str| {
-        let r = rustgis_map::paths::relative_to(dir, p)
-            .filter(|r| rustgis_map::paths::is_local(r))
-            .unwrap_or_else(|| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string());
+        let name = || p.rsplit(['/', '\\']).next().unwrap_or(p).to_string();
+        if names {
+            return name();
+        }
+        let r = rustgis_map::paths::relative_to(dir, p).filter(|r| rustgis_map::paths::is_local(r)).unwrap_or_else(name);
         made.borrow_mut().push(r.clone());
         r
     };
