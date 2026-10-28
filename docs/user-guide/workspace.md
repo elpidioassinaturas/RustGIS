@@ -270,6 +270,19 @@ Use scripts or the assistant for parameterized commands without an interactive e
 
 ## Keyboard shortcuts
 
+**Settings › Customize › Keyboard Shortcuts** assigns multiple keys to commands and map tools.
+Click **Add…** and press the desired key combination. Escape cancels; **Assign Escape** binds Escape.
+If the combination is already in use, choose **Replace** or **Cancel**.
+Tab, Enter, Space and arrow key bindings can override their usual keyboard navigation actions.
+Click a displayed key to remove it, **Reset {key}** (for example, **Reset Ctrl+T**) to restore a default key, or **Reset All** to restore
+all defaults. These changes are saved as a user preference on this device. Copy, Cut and Paste stay
+fixed. While typing, shortcuts without Ctrl/⌘ are paused, including Shift and Alt combinations. During
+first-person navigation, unmodified shortcuts are paused except Escape, Home and Delete. Browsers may
+reserve some shortcuts. In Command Search, right-click a command and choose **Keyboard Shortcuts**
+to open it in the editor. If saved preferences are unreadable or exceed the supported limits, the
+original value is preserved and edits apply only to the current session. **Reset All** explicitly
+replaces the saved shortcuts with the defaults.
+
 See the [keyboard shortcut reference](index.md#keyboard-shortcuts) for project, map and editing
 shortcuts, macOS bindings and text-field undo behavior. **Help › Shortcuts** lists the active
 bindings in the app. Feature editing is described in [Editing](editing.md); layout deletion,
@@ -349,6 +362,10 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
       `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/{date:YYYY-MM-DD}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`.
     - A Zarr variable added with **Follow the time slider** (Home › Add › Add Data › Zarr…) shows
       the step the slider is at; see [Zarr stores](data.md#zarr-stores).
+    - So does a WMS or WMTS layer with a time dimension added with **Follow the time slider**
+      (Web Data's service dialog; `service.add` with `"time": "slider"`): its requests take the
+      step's time, and a slider that is off starts with the layer's times; see
+      [Web services](web-data.md#web-services).
     - From scripts: `time.bind` (`"layer"`, `"field"`, `"start"`, `"end"`, `"unit"`, `"interval"`, `"show"`), `time.set` (the
       window: `"start"`, `"end"`, `"unit"`, `"interval"`, `"show"`, `"speed"`, `"loop"`,
       `"format"`…), `time.goTo` (`"date"`, or `"step"` from 0), `time.step` (`"by"`, negative goes

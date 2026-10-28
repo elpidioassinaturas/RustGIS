@@ -297,11 +297,15 @@ const NEVER: &[&str] = &[
     "pg.disconnect",
     // Writes to a database: the user's to do, asked each time.
     "pg.saveEdits",
+    "gpkg.saveEdits",
 ];
 
 /// Commands that write files without naming one in their parameters, or read what the user's
 /// commands named (the project log's paths, addresses and SQL).
 const REACHES_FILES: &[&str] = &["project.save", "project.saveAs", "project.log"];
+
+/// Commands that read a file a layer names, not their parameters.
+const READS_FILES: &[&str] = &["gpkg.discardEdits"];
 
 /// Parameter keys that name a file, folder or address. (`data` and `text` carry content, which
 /// plugins may pass: `layer.addDataBytes`, `map.import` from text.)
@@ -354,7 +358,9 @@ pub fn reaches(spec: &C, params: &Value) -> Option<Reach> {
         return Some(Reach::Files);
     }
     // So do tools with a file parameter (a plugin's `file`): they're handed the file.
-    if spec.id == "gp.run" && ps(params, "tool").and_then(rustgis_analysis::tool).is_some_and(super::gp::reads_files) {
+    if spec.id == "gp.run"
+        && ps(params, "tool").and_then(super::gp::tool_id).and_then(rustgis_analysis::tool).is_some_and(super::gp::reads_files)
+    {
         return Some(Reach::Files);
     }
     if spec.id == "gp.run"
@@ -382,6 +388,7 @@ pub fn reaches(spec: &C, params: &Value) -> Option<Reach> {
     let files = super::items::names_place(params, PLACE_KEYS, 0)
         || PLACE_KEYS.iter().any(|k| spec.params.contains(&format!("\"{k}\"")))
         || REACHES_FILES.contains(&spec.id)
+        || READS_FILES.contains(&spec.id)
         || ["share.", "offline.", "cache.", "notebook."].iter().any(|p| spec.id.starts_with(p));
     files.then_some(Reach::Files)
 }

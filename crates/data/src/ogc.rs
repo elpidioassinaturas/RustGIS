@@ -12,7 +12,10 @@ use std::rc::Rc;
 
 #[path = "ogc_info.rs"]
 mod info;
-pub use info::{FeatureInfo, InfoFeature, MAX_INFO_BYTES, answer_text, may_answer_in_another_format, read_feature_info, wms_layer_of};
+pub use info::{
+    FeatureInfo, InfoFeature, MAX_INFO_BYTES, answer_text, at_map_time, map_time, may_answer_in_another_format, read_feature_info,
+    wms_layer_of,
+};
 
 /// What a layer of a service becomes.
 #[derive(Clone, Debug, PartialEq)]
@@ -34,18 +37,180 @@ pub enum Offer {
     Service { url: String },
 }
 
-/// A layer's time dimension (a WMTS `Dimension` named `Time`): its tile template has `{Time}`,
-/// which takes the default unless a time is asked for.
+/// A layer's time dimension (a WMTS `Dimension` named `Time`, a WMS `Dimension` named `time`):
+/// its tile template has `{Time}`, which takes the default unless a time is asked for.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayerTime {
     /// The time the service draws when none is given (`default` is GIBS's latest day).
     pub default: String,
     /// The times or ranges it lists (`2000-02-24/2026-10-19/P1D`), the first few.
     pub values: Vec<String>,
+    /// Whether several times may be asked for at once: a list or an interval (a WMS layer's
+    /// `multipleValues`, WMS 1.3.0 Annex C.2); otherwise one time.
+    pub multiple: bool,
 }
 
-/// Most time values kept for a layer.
-const MAX_TIME_VALUES: usize = 64;
+/// Most time values kept for a layer: enough for every year of a century and more (swisstopo's
+/// aerial photos list 92), as the time slider steps through them.
+const MAX_TIME_VALUES: usize = 1000;
+
+/// Most time values of a layer's dimension read for its default and latest, the last it lists
+/// (each a few bytes of the document, whose size is capped).
+const MAX_TIMES_READ: usize = 20_000;
+
+/// The last `n` of `values` (lists of times run from the earliest to the latest).
+fn last(mut values: Vec<String>, n: usize) -> Vec<String> {
+    values.drain(..values.len().saturating_sub(n));
+    values
+}
+
+/// Most time values kept for all of a WMS document's layers together (swisstopo's 56 list about
+/// 2,000).
+const MAX_DOCUMENT_TIME_VALUES: usize = 50_000;
+
+/// The most steps the time slider takes (`rustgis_map::time::MAX_STEPS`).
+const MAX_SLIDER_STEPS: usize = 20_000;
+
+/// The date formats a layer's times may be written in, as `{date:…}` takes them: years, compact
+/// dates (swisstopo's `19951231`), months, dates, date-times (with milliseconds, as GeoServer and
+/// ncWMS write them, always zero there).
+const DATE_FORMATS: [&str; 9] = [
+    "YYYY",
+    "YYYYMMDD",
+    "YYYY-MM",
+    "YYYY-MM-DD",
+    "YYYY-MM-DD[T]HH:mm:ss[Z]",
+    "YYYY-MM-DD[T]HH:mm:ss[.000Z]",
+    "YYYY-MM-DD[T]HH:mm[Z]",
+    "YYYY-MM-DD[T]HH:mm:ss",
+    "YYYY-MM-DD[T]HH:mm",
+];
+
+/// The start of the year 3000 (milliseconds since 1970): times past it stand for the latest
+/// (swisstopo's `9999`, `99991231`), no time the slider steps to.
+const LATEST_STAND_IN: f64 = 32_503_680_000_000.0;
+
+/// How a layer's times go on the time slider: the format they are written in (`{date:…}`'s), the
+/// slider's steps, and the time it starts at (the layer's default, else its latest).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SliderTime {
+    pub format: &'static str,
+    pub steps: SliderSteps,
+    pub at: Option<f64>,
+}
+
+/// The time slider's steps for a layer: the times it lists, or every so often between two (one
+/// period it lists, `1952/2026/P1Y`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum SliderSteps {
+    Dates(Vec<f64>),
+    Every { start: f64, end: f64, unit: crate::time::Unit, interval: u32 },
+}
+
+/// A time written in `format` (and no stand-in for the latest), as milliseconds since 1970.
+fn written_as(v: &str, format: &str) -> Option<f64> {
+    let t = crate::time::parse_input(&serde_json::Value::String(v.to_string()))?;
+    (t < LATEST_STAND_IN && crate::time::format(t, format) == v).then_some(t)
+}
+
+/// An ISO 8601 period the slider steps by: years, months, weeks, days or hours (`P1Y`, `PT6H`).
+fn period_step(p: &str) -> Option<(crate::time::Unit, u32)> {
+    use crate::time::Unit;
+    let (body, hours) = match p.strip_prefix("PT") {
+        Some(b) => (b, true),
+        None => (p.strip_prefix('P')?, false),
+    };
+    let n: u32 = body.get(..body.len().checked_sub(1)?)?.parse().ok().filter(|n| *n > 0)?;
+    match (hours, body.chars().last()?) {
+        (true, 'H') => Some((Unit::Hour, n)),
+        (false, 'Y') => Some((Unit::Year, n)),
+        (false, 'M') => Some((Unit::Month, n)),
+        (false, 'W') => Some((Unit::Day, n.checked_mul(7)?)),
+        (false, 'D') => Some((Unit::Day, n)),
+        _ => None,
+    }
+}
+
+impl SliderTime {
+    /// Whether `t` is one of its steps (each counted from the start, as the slider counts them).
+    pub fn has(&self, t: f64) -> bool {
+        match &self.steps {
+            SliderSteps::Dates(dates) => dates.contains(&t),
+            SliderSteps::Every { start, end, unit, interval } => {
+                crate::time::steps(*start, *end, *unit, *interval, MAX_SLIDER_STEPS).contains(&t)
+            }
+        }
+    }
+}
+
+impl LayerTime {
+    /// Its times on the time slider; `None` when they aren't dates it can step to (`current`
+    /// alone, or written in no format of [`DATE_FORMATS`]).
+    pub fn slider(&self) -> Option<SliderTime> {
+        use crate::time::Unit;
+        // The format: the first time listed (or a range's start) that reads as a date in one.
+        let first =
+            self.values.iter().flat_map(|v| v.split('/').take(2)).find(|v| DATE_FORMATS.iter().any(|f| written_as(v, f).is_some()))?;
+        let format = DATE_FORMATS.iter().copied().find(|f| written_as(first, f).is_some())?;
+        // A range without a period steps by the finest unit its times name.
+        let finest = match format {
+            "YYYY" => Unit::Year,
+            "YYYY-MM" => Unit::Month,
+            "YYYYMMDD" | "YYYY-MM-DD" => Unit::Day,
+            _ => Unit::Hour,
+        };
+        let range = |v: &str| -> Option<(f64, f64, Unit, u32)> {
+            let pieces: Vec<&str> = v.split('/').collect();
+            let (a, z) = (written_as(pieces.first()?, format)?, written_as(pieces.get(1)?, format)?);
+            let (unit, n) = match pieces.get(2) {
+                Some(p) => period_step(p)?,
+                None => (finest, 1),
+            };
+            (a <= z).then_some((a, z, unit, n))
+        };
+        let steps = match self.values.as_slice() {
+            [one] if one.contains('/') => {
+                let (start, end, unit, mut interval) = range(one)?;
+                // Within the slider's steps, every second, fourth… of the period's: still times the
+                // layer lists, from its start to (about) its end.
+                while crate::time::steps(start, end, unit, interval, MAX_SLIDER_STEPS + 1).len() > MAX_SLIDER_STEPS {
+                    interval = interval.checked_mul(2)?;
+                }
+                SliderSteps::Every { start, end, unit, interval }
+            }
+            values => {
+                let mut dates = Vec::new();
+                for v in values {
+                    if v.contains('/') {
+                        let Some((a, z, unit, n)) = range(v) else { continue };
+                        // Each step from the start, as the slider counts them: a month-end range keeps
+                        // to month ends (31 January, 29 February, 31 March), not one day earlier
+                        // after February.
+                        dates.extend(crate::time::steps(a, z, unit, n, (MAX_SLIDER_STEPS + 1).saturating_sub(dates.len())));
+                    } else if let Some(t) = written_as(v, format) {
+                        dates.push(t);
+                    }
+                    if dates.len() > MAX_SLIDER_STEPS {
+                        return None;
+                    }
+                }
+                dates.sort_by(f64::total_cmp);
+                dates.dedup();
+                if dates.is_empty() {
+                    return None;
+                }
+                SliderSteps::Dates(dates)
+            }
+        };
+        // At its default; one that isn't a date (`current`, swisstopo's `99991231`), its latest.
+        let latest = match &steps {
+            SliderSteps::Dates(dates) => dates.last().copied(),
+            SliderSteps::Every { end, .. } => Some(*end),
+        };
+        let at = written_as(&self.default, format).or(latest);
+        Some(SliderTime { format, steps, at })
+    }
+}
 
 /// A time given for a layer's `{Time}`: an ISO 8601 date or date-time (or `default`, or OGC's
 /// `current`), never anything else, since it goes into tile addresses.
@@ -61,6 +226,123 @@ pub fn checked_time(t: &str) -> Result<String, String> {
     } else {
         Err(format!("'{}': a time is a date like 2024-06-01", t.chars().take(60).collect::<String>()))
     }
+}
+
+/// Whether `p` is an ISO 8601 duration, as a WMS interval's resolution is: `P`, then numbers each
+/// with its designator in order (`Y`, `M`, `W`, `D`; after `T`, `H`, `M`, `S`, seconds with a
+/// fraction too), at least one (`P1Y`, `P1DT12H`, `PT30M`, `PT0.5S`).
+fn is_duration(p: &str) -> bool {
+    let Some(rest) = p.strip_prefix('P').filter(|r| !r.is_empty() && p.len() <= 40) else { return false };
+    let (date, time) = match rest.split_once('T') {
+        Some((d, t)) if !t.is_empty() => (d, Some(t)),
+        Some(_) => return false,
+        None => (rest, None),
+    };
+    // Each part a number and a designator, in the order given; only seconds take a fraction.
+    let parts = |s: &str, order: &[u8]| -> Option<usize> {
+        let (mut at, mut next, mut count) = (0, 0, 0);
+        let b = s.as_bytes();
+        while at < b.len() {
+            let start = at;
+            while b.get(at).is_some_and(|c| c.is_ascii_digit() || *c == b'.') {
+                at += 1;
+            }
+            let number = s.get(start..at)?;
+            let designator = *b.get(at)?;
+            let place = order.iter().skip(next).position(|d| *d == designator)? + next;
+            let fraction = number.contains('.');
+            if number.matches('.').count() > 1
+                || number.is_empty()
+                || number.starts_with('.')
+                || number.ends_with('.')
+                || (fraction && designator != b'S')
+            {
+                return None;
+            }
+            (next, count, at) = (place + 1, count + 1, at + 1);
+        }
+        Some(count)
+    };
+    let dated = parts(date, b"YMWD");
+    let timed = time.map_or(Some(0), |t| parts(t, b"HMS"));
+    matches!((dated, timed), (Some(d), Some(t)) if d + t > 0)
+}
+
+/// Most characters of a WMS layer's time asked for (a list or interval of times).
+const MAX_WMS_TIME: usize = 1000;
+
+/// A time given for a WMS layer's `TIME` (WMS 1.3.0 Annex C, Table C.2): one time, a
+/// comma-separated list of times, or an interval `start/end`, with its resolution or not
+/// (`1952/2026/P1Y`); each time as [`checked_time`] takes it. It goes into a query, encoded.
+pub fn checked_wms_time(t: &str) -> Result<String, String> {
+    let t = t.trim();
+    let error = || {
+        format!(
+            "'{}': a time is a date like 2024-06-01, a list (1990,2000) or an interval (1990/2000/P1Y)",
+            t.chars().take(60).collect::<String>()
+        )
+    };
+    if t.is_empty() || t.len() > MAX_WMS_TIME {
+        return Err(error());
+    }
+    let one = |v: &str| checked_time(v).is_ok();
+    // Each item and each part of an interval as `checked_time` takes it, trimmed.
+    let parts: Vec<String> = t.split(',').map(|part| part.split('/').map(str::trim).collect::<Vec<_>>().join("/")).collect();
+    let valid = |part: &String| {
+        let pieces: Vec<&str> = part.split('/').collect();
+        match pieces.as_slice() {
+            [v] => one(v),
+            [start, end] => one(start) && one(end),
+            [start, end, p] => one(start) && one(end) && is_duration(p),
+            _ => false,
+        }
+    };
+    if parts.iter().all(valid) { Ok(parts.join(",")) } else { Err(error()) }
+}
+
+/// A tile template with its `{Time}` filled with `t` (a [`checked_time`], or for a WMS layer a
+/// [`checked_wms_time`]): percent-encoded where
+/// it is a query value (`TIME={Time}`, a WMS layer's or a WMTS one asked by key), as it is in a
+/// path (a checked time has no `/`).
+pub fn with_time(template: &str, t: &str) -> String {
+    template.replace("={Time}", &format!("={}", encode(t))).replace("{Time}", t)
+}
+
+/// A time dimension from its default (`None` when the service gives none) and the values it
+/// lists: the default when `check` takes it, else the latest time listed (a range's end); with
+/// neither, none. Every value read is looked through for the latest; the last few are kept.
+fn layer_time(default: Option<&str>, all: Vec<String>, check: fn(&str) -> Result<String, String>, multiple: bool) -> Option<LayerTime> {
+    let all: Vec<String> = all.into_iter().filter(|v| v.len() <= 100).collect();
+    let listed = all.iter().rev().find_map(|v| {
+        let mut parts = v.split('/');
+        let first = parts.next().unwrap_or("");
+        checked_time(parts.next().unwrap_or(first)).ok()
+    });
+    let default = default.and_then(|t| check(t).ok()).or(listed)?;
+    // The latest few: those the default and the latest are among.
+    let skip = all.len().saturating_sub(MAX_TIME_VALUES);
+    let values = all.into_iter().skip(skip).collect();
+    Some(LayerTime { default, values, multiple })
+}
+
+/// A WMS layer's own time dimension: its `Dimension` named `time` with its values (WMS 1.3.0
+/// Annex C), or its `Extent` of that name (WMS 1.1.1, whose `Dimension` only declares it): a
+/// comma-separated list of times and ranges (`1990,2000`, `1952/2026/P1Y`). Its default may be any
+/// time `TIME` takes, a range too (`2005/2025`, swisstopo's strips of aerial photos).
+/// `None` when the layer declares none of its own; `Some(None)` when it declares one that gives no
+/// time to draw it at (in WMS 1.3.0, `v13`, an empty one too; a WMS 1.1.1 `Dimension` without its
+/// `Extent` only declares the one it inherits).
+fn wms_time(layer: &Node, v13: bool) -> Option<Option<LayerTime>> {
+    let is_time = |n: &Node| n.attribute("name").is_some_and(|a| a.trim().eq_ignore_ascii_case("time"));
+    let d = children(layer, "Dimension")
+        .filter(is_time)
+        .find(|d| !text_of(d).is_empty())
+        .or_else(|| children(layer, "Extent").find(is_time))
+        .or_else(|| children(layer, "Dimension").filter(|_| v13).find(is_time))?;
+    let all: Vec<String> = text_of(&d).split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect();
+    let all = last(all, MAX_TIMES_READ);
+    let multiple = d.attribute("multipleValues").is_some_and(|m| m.trim() == "1" || m.trim().eq_ignore_ascii_case("true"));
+    Some(layer_time(d.attribute("default").map(str::trim), all, checked_wms_time, multiple))
 }
 
 /// A layer a service offers.
@@ -448,6 +730,8 @@ fn wms(url: &str, root: &Node) -> Service {
         .and_then(|g| child(&g, "OnlineResource"))
         .and_then(|o| href(&o))
         .filter(|h| is_web(h))
+        // The request's own parameters replace any the advertised address carries (a `TIME`).
+        .map(|h| info::without_wms_keys(&h))
         .unwrap_or_else(|| endpoint(url));
     let formats: Vec<String> = root
         .descendants()
@@ -463,21 +747,22 @@ fn wms(url: &str, root: &Node) -> Service {
     let info_request = info::request_of(root, url, version, format);
     let mut service = Service { kind: "WMS".into(), title, ..Service::default() };
     let mut skipped = 0;
-    // Layers inherit their parents' coordinate systems, nearest valid geographic bounds and
-    // queryable attribute.
+    let mut time_budget = MAX_DOCUMENT_TIME_VALUES;
+    // Layers inherit their parents' coordinate systems, nearest valid geographic bounds, queryable
+    // attribute and time dimension.
     // The SLD profile's GetLegendGraphic (WMS 1.3.0 with SLD 1.1, 1.1.1 with SLD 1.0), when the
     // service offers it in a format RustGIS shows: a layer's legend, drawn from its default style.
     let legend_graphic = wms_legend_graphic(root, url, &get_map, version);
     // (What a layer passes on is shared by its sublayers, not copied for each: a hostile document
     // may give one layer a great many.)
-    type Inherited<'a, 'i> = (Node<'a, 'i>, Rc<[String]>, Option<[f64; 4]>, bool, Rc<[Node<'a, 'i>]>);
+    type Inherited<'a, 'i> = (Node<'a, 'i>, Rc<[String]>, Option<[f64; 4]>, bool, Rc<[Node<'a, 'i>]>, Option<Rc<LayerTime>>);
     let mut stack: Vec<Inherited<'_, '_>> = root
         .descendants()
         .filter(|n| n.is_element() && local(n) == "Capability")
         .flat_map(|c| children(&c, "Layer").collect::<Vec<_>>())
-        .map(|l| (l, Rc::from([]), None, false, Rc::from([])))
+        .map(|l| (l, Rc::from([]), None, false, Rc::from([]), None))
         .collect();
-    while let Some((layer, inherited_crs, inherited_bbox, inherited_queryable, inherited_styles)) = stack.pop() {
+    while let Some((layer, inherited_crs, inherited_bbox, inherited_queryable, inherited_styles, inherited_time)) = stack.pop() {
         if service.layers.len() >= MAX_LAYERS {
             break;
         }
@@ -499,8 +784,14 @@ fn wms(url: &str, root: &Node) -> Service {
             layer.attribute("queryable").map_or(inherited_queryable, |q| q.trim() == "1" || q.trim().eq_ignore_ascii_case("true"));
         // Its own styles first, then those it inherits (a few: its parents' are each kept).
         let styles: Rc<[Node]> = children(&layer, "Style").chain(inherited_styles.iter().copied()).take(MAX_STYLES).collect();
+        // Its own time dimension replaces the one it inherits (WMS 1.3.0 §7.2.4.8), even one it
+        // can't be drawn at.
+        let time = match wms_time(&layer, v13) {
+            Some(own) => own.map(Rc::new),
+            None => inherited_time,
+        };
         for sub in children(&layer, "Layer") {
-            stack.push((sub, Rc::clone(&crs), bbox, queryable, Rc::clone(&styles)));
+            stack.push((sub, Rc::clone(&crs), bbox, queryable, Rc::clone(&styles), time.clone()));
         }
         let Some(name) = child_text(&layer, "Name") else { continue };
         if !crs.iter().any(|c| c.split_whitespace().any(is_web_mercator)) {
@@ -516,6 +807,8 @@ fn wms(url: &str, root: &Node) -> Service {
                 encode(format)
             ),
         );
+        // At its time: the service's default, unless another is asked for when it is added.
+        let template = if time.is_some() { with_query(&template, "TIME={Time}") } else { template };
         let title = child_text(&layer, "Title").unwrap_or_else(|| name.clone());
         // A service without GetFeatureInfo still gives each layer one, never asked, so Identify
         // doesn't fetch the capabilities again to find out.
@@ -539,7 +832,14 @@ fn wms(url: &str, root: &Node) -> Service {
             offer: Offer::Tiles { template },
             bbox,
             tilesets: None,
-            time: None,
+            // (The values listed for the whole document are capped: a parent's many, inherited by
+            // a great many layers, aren't copied to each.)
+            time: time.as_deref().map(|t| {
+                let keep = t.values.len().min(time_budget);
+                let values: Vec<String> = t.values.iter().skip(t.values.len() - keep).cloned().collect();
+                time_budget -= values.len();
+                LayerTime { values, default: t.default.clone(), multiple: t.multiple }
+            }),
             feature_info,
             legends,
         });
@@ -692,16 +992,12 @@ fn wmts(url: &str, root: &Node) -> Service {
         let time = children(&layer, "Dimension")
             .find(|d| child_text(d, "Identifier").is_some_and(|i| i.eq_ignore_ascii_case("time")))
             .and_then(|d| {
-                // Every listed value is read for the latest; the first few are kept.
-                let all: Vec<String> = children(&d, "Value").take(MAX_LAYERS).map(|v| text_of(&v)).filter(|v| v.len() <= 100).collect();
-                let listed = all.iter().rev().find_map(|v| {
-                    let mut parts = v.split('/');
-                    let first = parts.next().unwrap_or("");
-                    checked_time(parts.next().unwrap_or(first)).ok()
-                });
-                let default = child_text(&d, "Default").and_then(|t| checked_time(&t).ok()).or(listed)?;
-                let values = all.into_iter().take(MAX_TIME_VALUES).collect();
-                Some(LayerTime { default, values })
+                layer_time(
+                    child_text(&d, "Default").as_deref(),
+                    last(children(&d, "Value").map(|v| text_of(&v)).collect(), MAX_TIMES_READ),
+                    checked_time,
+                    false,
+                )
             });
         let templates: Vec<String> = children(&layer, "ResourceURL")
             .filter(|r| r.attribute("resourceType") == Some("tile"))
@@ -3242,15 +3538,228 @@ mod tests {
         let s = parse("https://gibs.example.org/wmts/1.0.0/WMTSCapabilities.xml", listed.as_bytes()).unwrap();
         assert_eq!(s.layers[2].time.as_ref().map(|t| t.default.as_str()), Some("2020-02-01"));
         // The latest of many listed times, past the few kept.
-        let many: String = (0..100).map(|i| format!("<Value>{}-01-01</Value>", 1900 + i)).collect();
+        let many: String = (0..MAX_TIME_VALUES + 100).map(|i| format!("<Value>{}-01-01</Value>", 1000 + i)).collect();
         let late = GIBS.replace("<Default>../../x?y</Default>", &many);
         let s = parse("https://gibs.example.org/wmts/1.0.0/WMTSCapabilities.xml", late.as_bytes()).unwrap();
         let t = s.layers[2].time.as_ref().unwrap();
-        assert_eq!((t.default.as_str(), t.values.len()), ("1999-01-01", MAX_TIME_VALUES));
+        assert_eq!((t.default.as_str(), t.values.len()), ("2099-01-01", MAX_TIME_VALUES));
         assert!(checked_time("2024-06-01").is_ok() && checked_time("2024-06-01T10:00:00Z").is_ok());
         assert!(checked_time("default").is_ok() && checked_time("current").is_ok());
         for bad in ["", "..", ".", "../x", "2024-06-01/../..", "a b", "x?y=1", "latest", &"9".repeat(50)] {
             assert!(checked_time(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// WMS layers with a time dimension (WMS 1.3.0 Annex C, as swisstopo's: years listed, a range
+    /// by years, `99991231` for the latest): its GetMap template takes `{Time}`, at the default
+    /// given (any value `TIME` takes, a range too), else the latest listed; a sublayer inherits
+    /// its parent's.
+    #[test]
+    fn wms_time_dimensions() {
+        let layer = |name: &str, dim: &str| {
+            format!(r#"<Layer queryable="1"><Name>{name}</Name><Title>{name}</Title><CRS>EPSG:3857</CRS>{dim}</Layer>"#)
+        };
+        let dim = |attributes: &str, values: &str| format!(r#"<Dimension name="time" units="ISO8601" {attributes}>{values}</Dimension>"#);
+        let parent = format!(
+            "<Layer><Name>series</Name><Title>Series</Title><CRS>EPSG:3857</CRS>{}{}</Layer>",
+            dim(r#"default="2020""#, "2000,2010,2020"),
+            layer("part", "")
+        );
+        let layers = [
+            layer("population", &dim(r#"default="2025" nearestValue="0""#, "1990, 2000,2025")),
+            layer("strips", &dim(r#"default="2005/2025""#, "2005/2025")),
+            layer("oblique", &dim("", "1927,1950,2004")),
+            layer("photos", &dim(r#"default="99991231""#, "19291231,19341231,99991231")),
+            layer("several", &dim(r#"default="2010" multipleValues="1""#, "1990/2020/P10Y")),
+            layer("bad", &dim(r#"default="../x""#, "")),
+            layer("plain", ""),
+            parent,
+        ]
+        .concat();
+        let caps = format!(
+            r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms"><Service><Title>Maps</Title></Service><Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="https://maps.example.org/wms?"/></Get></HTTP></DCPType></GetMap></Request><Layer><Title>Root</Title>{layers}</Layer></Capability></WMS_Capabilities>"#
+        );
+        let url = "https://maps.example.org/wms?SERVICE=WMS&REQUEST=GetCapabilities";
+        let s = parse(url, caps.as_bytes()).unwrap();
+        let time = |name: &str| {
+            let l = s.layers.iter().find(|l| l.name == name).unwrap_or_else(|| panic!("{name}: {:?}", s.layers));
+            let Offer::Tiles { template } = &l.offer else { panic!("{name}") };
+            assert_eq!(template.ends_with("&TIME={Time}"), l.time.is_some(), "{name}: {template}");
+            l.time.clone()
+        };
+        let population = time("population").unwrap();
+        assert_eq!(
+            (population.default.as_str(), population.values.as_slice(), population.multiple),
+            ("2025", &["1990", "2000", "2025"].map(String::from)[..], false)
+        );
+        // The service's default as it gives it, a range too.
+        assert_eq!(time("strips").map(|t| t.default), Some("2005/2025".into()));
+        // No default: the latest listed.
+        assert_eq!(time("oblique").map(|t| t.default), Some("2004".into()));
+        assert_eq!(time("photos").map(|t| t.default), Some("99991231".into()));
+        assert!(time("several").unwrap().multiple);
+        // A default that isn't a time, and no time listed: no time, as for WMTS.
+        assert_eq!(time("bad"), None);
+        assert_eq!(time("plain"), None);
+        assert_eq!(time("series").map(|t| t.default), Some("2020".into()));
+        assert_eq!(time("part"), time("series"), "inherited");
+        // WMS 1.1.1: the parent declares the dimension, the layer gives its extent.
+        let old = caps.replace(r#"version="1.3.0""#, r#"version="1.1.1""#).replace("<CRS>", "<SRS>").replace("</CRS>", "</SRS>").replace(
+            r#"<Dimension name="time" units="ISO8601" default="2025" nearestValue="0">1990, 2000,2025</Dimension>"#,
+            r#"<Dimension name="time" units="ISO8601"/><Extent name="time" default="2000">1990,2000</Extent>"#,
+        );
+        let s = parse(url, old.as_bytes()).unwrap();
+        let population = s.layers.iter().find(|l| l.name == "population").unwrap();
+        assert_eq!(population.time.as_ref().map(|t| t.default.as_str()), Some("2000"));
+        // What TIME takes (WMS 1.3.0 Table C.2): a time, a list, an interval with its resolution or
+        // not; never a path or another parameter.
+        for good in ["2024-06-01", "1990, 2000", "1990/2020", "1952/2026/P1Y", "2017-08-31T23:59:59Z/current/P1M", "1990,2000/2010"] {
+            assert!(checked_wms_time(good).is_ok(), "{good}");
+        }
+        assert_eq!(checked_wms_time(" 1990, 2000 "), Ok("1990,2000".into()));
+        assert_eq!(checked_wms_time("1990/ 2000 / P1Y, 2010"), Ok("1990/2000/P1Y,2010".into()));
+        for good in ["P1DT12H", "PT30M", "PT0.5S", "P2W", "P1Y2M3D"] {
+            assert!(is_duration(good), "{good}");
+        }
+        for bad in ["Pfoo", "P", "PT", "P1YT", "P1D1Y", "P1.5Y", "P.5D", "PT1H1H", "P1Q", "PT1..2S", "PT1.2.3S"] {
+            assert!(!is_duration(bad), "{bad}");
+        }
+        for bad in [
+            "",
+            "1990,",
+            "/",
+            "1990/",
+            "1990/2000/2010",
+            "1990/2000/P",
+            "1990/2000/Pfoo",
+            "1990/2000/P1Y/x",
+            "../x",
+            "1990&LAYERS=x",
+            &"1990,".repeat(300),
+        ] {
+            assert!(checked_wms_time(bad).is_err(), "{bad}");
+        }
+        // A sublayer's own dimension replaces its parent's, even one that gives no time.
+        let broken = caps.replace(
+            "<Name>part</Name><Title>part</Title><CRS>EPSG:3857</CRS>",
+            r#"<Name>part</Name><Title>part</Title><CRS>EPSG:3857</CRS><Dimension name="time" units="ISO8601" default="../x">..</Dimension>"#,
+        );
+        let s = parse(url, broken.as_bytes()).unwrap();
+        assert_eq!(s.layers.iter().find(|l| l.name == "part").unwrap().time, None);
+        // An empty one too (WMS 1.3.0); in WMS 1.1.1 a `Dimension` alone declares the one inherited.
+        let empty = caps.replace(
+            "<Name>part</Name><Title>part</Title><CRS>EPSG:3857</CRS>",
+            r#"<Name>part</Name><Title>part</Title><CRS>EPSG:3857</CRS><Dimension name="time" units="ISO8601"/>"#,
+        );
+        assert_eq!(parse(url, empty.as_bytes()).unwrap().layers.iter().find(|l| l.name == "part").unwrap().time, None);
+        let declared = empty.replace(r#"version="1.3.0""#, r#"version="1.1.1""#).replace("<CRS>", "<SRS>").replace("</CRS>", "</SRS>");
+        let s = parse(url, declared.as_bytes()).unwrap();
+        assert_eq!(s.layers.iter().find(|l| l.name == "part").unwrap().time.as_ref().map(|t| t.default.as_str()), Some("2020"));
+        // A parent's many times, inherited by a great many layers, aren't kept for each.
+        let many: String = (0..1000).map(|i| format!("{},", 1000 + i)).collect();
+        let children: String = (0..1500).map(|i| layer(&format!("child{i}"), "")).collect();
+        let crowd = format!(
+            r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms"><Capability><Layer><Title>Root</Title><CRS>EPSG:3857</CRS>{}{children}</Layer></Capability></WMS_Capabilities>"#,
+            dim(r#"default="1999""#, many.trim_end_matches(','))
+        );
+        let s = parse(url, crowd.as_bytes()).unwrap();
+        let kept: usize = s.layers.iter().filter_map(|l| l.time.as_ref()).map(|t| t.values.len()).sum();
+        assert!(s.layers.len() == 1500 && kept == MAX_DOCUMENT_TIME_VALUES, "{} layers, {kept} values", s.layers.len());
+        assert!(s.layers.iter().all(|l| l.time.as_ref().is_some_and(|t| t.default == "1999")));
+        // A GetMap address that carries a TIME of its own (or other GetMap parameters) gives the
+        // template one TIME, the layer's.
+        let carried = caps.replace("https://maps.example.org/wms?", "https://maps.example.org/wms?map=m&amp;TIME=2000&amp;");
+        let s = parse(url, carried.as_bytes()).unwrap();
+        let Offer::Tiles { template } = &s.layers.iter().find(|l| l.name == "population").unwrap().offer else { panic!() };
+        assert!(template.starts_with("https://maps.example.org/wms?map=m&SERVICE=WMS&"), "{template}");
+        assert_eq!(template.matches("TIME=").count(), 1, "{template}");
+        // GetFeatureInfo at the template's time; none for a layer without one, and before a fragment.
+        let request = "https://maps.example.org/wms?REQUEST=GetFeatureInfo".to_string();
+        assert_eq!(
+            at_map_time(request.clone(), "https://maps.example.org/wms?LAYERS=x&TIME=1990%2F2000"),
+            format!("{request}&TIME=1990%2F2000")
+        );
+        assert_eq!(at_map_time(request.clone(), "https://maps.example.org/wms?LAYERS=x"), request);
+        assert_eq!(at_map_time(request.clone(), "https://maps.example.org/wms?LAYERS=x&TIME=../x"), request);
+        assert_eq!(at_map_time(format!("{request}#v"), "https://maps.example.org/wms?TIME=1990"), format!("{request}&TIME=1990#v"));
+        // Filled where `{Time}` is a query value, encoded; in a path, as it is.
+        assert_eq!(
+            with_time("https://a.example/wms?LAYERS=x&TIME={Time}", "2024-06-01T10:00:00+02:00/2024-06-02"),
+            "https://a.example/wms?LAYERS=x&TIME=2024-06-01T10:00:00%2B02:00%2F2024-06-02"
+        );
+        assert_eq!(with_time("https://a.example/{Time}/{z}/{x}/{y}.png", "2024-06-01"), "https://a.example/2024-06-01/{z}/{x}/{y}.png");
+    }
+
+    /// A layer's times on the time slider, in the forms swisstopo's WMS and NASA's WMTS list them:
+    /// the format they are written in (filled back to the very text listed), and steps: a period
+    /// regular ones, a list (ranges in it too) dated ones, the latest's stand-ins left out.
+    #[test]
+    fn layer_times_on_the_time_slider() {
+        use crate::time::{Unit, fill_template, parse_text};
+        let lt = |default: &str, values: &[&str]| LayerTime {
+            default: default.into(),
+            values: values.iter().map(|v| v.to_string()).collect(),
+            multiple: false,
+        };
+        let ms = |t: &str| parse_text(t).unwrap();
+        let every = |start: &str, end: &str, unit, interval| SliderSteps::Every { start: ms(start), end: ms(end), unit, interval };
+        // swisstopo's national map, a year at a time.
+        let map = lt("2026", &["1952/2026/P1Y"]).slider().unwrap();
+        assert_eq!((map.format, &map.steps, map.at), ("YYYY", &every("1952-01-01", "2026-01-01", Unit::Year, 1), Some(ms("2026-01-01"))));
+        // A range without a period: by the unit its times name.
+        assert_eq!(lt("1915", &["1870/1949"]).slider().unwrap().steps, every("1870-01-01", "1949-01-01", Unit::Year, 1));
+        // NASA GIBS, day by day.
+        let gibs = lt("2024-06-02", &["2000-02-24/2024-06-02/P1D"]).slider().unwrap();
+        assert_eq!((gibs.format, gibs.steps), ("YYYY-MM-DD", every("2000-02-24", "2024-06-02", Unit::Day, 1)));
+        // Years listed, a range among them.
+        let settled = lt("2025", &["1919", "1950", "2019/2025"]).slider().unwrap();
+        let years = |ys: &[i32]| SliderSteps::Dates(ys.iter().map(|y| ms(&format!("{y}-01-01"))).collect());
+        assert_eq!(settled.steps, years(&[1919, 1950, 2019, 2020, 2021, 2022, 2023, 2024, 2025]));
+        // Aerial photos by compact dates, the latest's stand-in left out (and no default to start at).
+        let photos = lt("99991231", &["19291231", "19341231", "99991231"]).slider().unwrap();
+        assert_eq!(
+            (photos.format, &photos.steps, photos.at),
+            ("YYYYMMDD", &SliderSteps::Dates(vec![ms("1929-12-31"), ms("1934-12-31")]), Some(ms("1934-12-31")))
+        );
+        // Date-times, filled back to exactly the times listed (the service takes no other).
+        let ndvi = lt("2026-08-31T23:59:59Z", &["2025-08-31T23:59:59Z", "2026-08-31T23:59:59Z"]).slider().unwrap();
+        assert_eq!(ndvi.format, "YYYY-MM-DD[T]HH:mm:ss[Z]");
+        for (st, listed) in [(&ndvi, "2026-08-31T23:59:59Z"), (&photos, "19341231"), (&map, "2026")] {
+            let at = match &st.steps {
+                SliderSteps::Dates(d) => *d.last().unwrap(),
+                SliderSteps::Every { end, .. } => *end,
+            };
+            assert_eq!(
+                fill_template(&format!("https://wms.example.org/?TIME={{date:{}}}", st.format), at),
+                format!("https://wms.example.org/?TIME={listed}")
+            );
+        }
+        // Month ends in a list stay month ends; times with milliseconds (GeoServer's, ncWMS's).
+        let months = lt("2024-04-30", &["2023-12-31", "2024-01-31/2024-04-30/P1M"]).slider().unwrap();
+        let days = |ds: &[&str]| SliderSteps::Dates(ds.iter().map(|d| ms(d)).collect());
+        assert_eq!(months.steps, days(&["2023-12-31", "2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30"]));
+        let geoserver = lt("2024-01-03T00:00:00.000Z", &["2024-01-01T00:00:00.000Z/2024-01-03T00:00:00.000Z/P1D"]).slider().unwrap();
+        assert_eq!(geoserver.format, "YYYY-MM-DD[T]HH:mm:ss[.000Z]");
+        assert_eq!(geoserver.steps, every("2024-01-01", "2024-01-03", Unit::Day, 1));
+        assert_eq!(fill_template("TIME={date:YYYY-MM-DD[T]HH:mm:ss[.000Z]}", ms("2024-01-02")), "TIME=2024-01-02T00:00:00.000Z");
+        // A range longer than the slider's steps: every second (fourth…) day of it, to its end.
+        let long = lt("2025-01-01", &["1950-01-01/2025-01-01/P1D"]).slider().unwrap();
+        assert_eq!(long.steps, every("1950-01-01", "2025-01-01", Unit::Day, 2));
+        // Of a list longer than is read, the latest (and the default) still.
+        let read: Vec<String> = (0..MAX_TIMES_READ + 500).map(|i| format!("{}", 1000 + i)).collect();
+        assert_eq!(last(read, MAX_TIMES_READ).last().map(String::as_str), Some("21499"));
+        // Of a long list, the latest are kept, those the default is among.
+        let all: Vec<String> = (0..1500).map(|i| format!("{}", 1000 + i)).collect();
+        let listed = layer_time(None, all, checked_wms_time, false).unwrap();
+        assert_eq!((listed.default.as_str(), listed.values.len(), listed.values[0].as_str()), ("2499", MAX_TIME_VALUES, "1500"));
+        // No dates to step to.
+        assert_eq!(lt("current", &["current"]).slider(), None);
+        assert_eq!(lt("2024", &[]).slider(), None);
+        assert_eq!(lt("2024", &["2024/2020"]).slider(), None);
+        assert_eq!(period_step("PT6H"), Some((Unit::Hour, 6)));
+        assert_eq!(period_step("P2W"), Some((Unit::Day, 14)));
+        for bad in ["P", "PT", "P0Y", "P1S", "PT1D", "1Y", "P1.5Y"] {
+            assert_eq!(period_step(bad), None, "{bad}");
         }
     }
 

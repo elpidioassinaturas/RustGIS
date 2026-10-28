@@ -9,7 +9,7 @@
 //! here as `"text"`; the command line, MCP and the desktop assistant let these commands fetch
 //! (waiting for the answer).
 
-use rustgis_data::ogc::{Coverage, Offer, Service};
+use rustgis_data::ogc::{Coverage, Offer, Service, SliderSteps};
 use serde_json::{Value, json};
 
 use super::ps;
@@ -27,7 +27,7 @@ pub fn commands() -> Vec<C> {
             r#"{"url": "a WMS, WMTS or WFS address (GetCapabilities is added), an OGC API collections address or landing page (its map tiles and linked collections), or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer, or an ArcGIS services directory or folder (its folders and services, each listed by its own url)", "type"?: "wms"|"wmts"|"wfs"|"ogcapi"|"arcgis" (guessed from the address), "text"?: "the capabilities document, when already fetched", "documents"?: [{"url": "a discovered document address", "text": "its fetched JSON"}]} → layers with source_url, and next when supplied documents need another fetch"#,
         ),
         C::new("service.add", "Add Service Layer", "Home › Add", add).params(
-            r#"{"url": "as service.layers", "type"?, "layer": "the layer's name (service.layers lists them)", "name"?: text, "time"?: "a time-enabled WMTS layer's date (2024-06-01; its default otherwise)", "text"?: "the capabilities document, when already fetched", "documents"?: "additional fetched documents, as service.layers", "source_url"?: "the listed layer's source_url", "describe"?: "a WCS coverage's DescribeCoverage document, when already fetched", "tiles"?: "an OGC API layer's tile template, when already read from its tileset (the app's)", "bbox"?: [west, south, east, north] | "view" | "full": a WCS coverage's area (the view by default); for a WFS, OGC API or ArcGIS feature layer, only the features that cross it (the whole layer, "full", by default)}"#,
+            r#"{"url": "as service.layers", "type"?, "layer": "the layer's name (service.layers lists them)", "name"?: text, "time"?: "a time-enabled WMS or WMTS layer's date (2024-06-01; its default otherwise), or \"slider\" (or true): following the time slider (turned on with the layer's times when it is off)", "text"?: "the capabilities document, when already fetched", "documents"?: "additional fetched documents, as service.layers", "source_url"?: "the listed layer's source_url", "describe"?: "a WCS coverage's DescribeCoverage document, when already fetched", "tiles"?: "an OGC API layer's tile template, when already read from its tileset (the app's)", "bbox"?: [west, south, east, north] | "view" | "full": a WCS coverage's area (the view by default); for a WFS, OGC API or ArcGIS feature layer, only the features that cross it (the whole layer, "full", by default)}"#,
         ),
         C::new("service.coverage", "WCS Coverage Request", "Home › Add", coverage).view().params(
             r#"{"url": "a WCS address", "type"?: "wcs", "layer": "the coverage's name", "text"?: "the capabilities document, when already fetched", "documents"?: "additional fetched documents, as service.layers", "source_url"?: "the listed coverage's source_url", "describe"?: "its DescribeCoverage answer, when already fetched", "bbox"?: [west, south, east, north] | "view" (the default) | "full"} → the GetCoverage address of a GeoTIFF (layer.addUrl adds it)"#,
@@ -296,6 +296,9 @@ fn advertised_template(_: &str, _: bool) -> Option<String> {
     None
 }
 
+/// Of a layer's times, those `service.layers` lists from each end of a long list.
+const SHOWN_TIMES: usize = 12;
+
 /// A service as the app and other callers see it.
 pub fn service_json(svc: &Service) -> Value {
     let layers: Vec<Value> = svc
@@ -312,7 +315,12 @@ pub fn service_json(svc: &Service) -> Value {
             };
             let mut layer = json!({"name": l.name, "title": l.title, "bbox": l.bbox, "offer": offer, "tilesets": l.tilesets});
             if let Some(t) = &l.time {
-                layer["time"] = json!({"default": t.default, "values": t.values});
+                // The first and last few of a long list, and how many (the slider takes them all).
+                let values: Vec<&String> = match t.values.len() {
+                    n if n > 2 * SHOWN_TIMES => t.values.iter().take(SHOWN_TIMES).chain(t.values.iter().skip(n - SHOWN_TIMES)).collect(),
+                    _ => t.values.iter().collect(),
+                };
+                layer["time"] = json!({"default": t.default, "values": values, "count": t.values.len(), "multiple": t.multiple});
             }
             layer
         })
@@ -350,10 +358,29 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         .find(|(l, _)| l.name == want)
         .or_else(|| candidates().find(|(l, _)| l.name.eq_ignore_ascii_case(want) || l.title.eq_ignore_ascii_case(want)))
         .ok_or_else(|| format!("{url}: no layer '{want}' (service.layers lists them)"))?;
-    // A time-enabled layer at the time asked for (its default otherwise), named with it.
-    let asked = ps(p, "time").map(str::trim).filter(|t| !t.is_empty());
+    // A time-enabled layer at the time asked for (its default otherwise), named with it; or
+    // following the time slider, at each of its steps.
+    // (`"time": true` as for a Zarr variable, `layer.addZarr`'s.)
+    let asked = match p.get("time") {
+        Some(Value::Bool(true)) => Some("slider"),
+        _ => ps(p, "time").map(str::trim).filter(|t| !t.is_empty()),
+    };
+    let slider = match (&layer.time, asked) {
+        (Some(t), Some(a)) if a.eq_ignore_ascii_case("slider") => Some(
+            t.slider()
+                .ok_or_else(|| format!("{}: its times aren't dates the time slider can step to (give one of them as time)", layer.title))?,
+        ),
+        (None, Some(a)) if a.eq_ignore_ascii_case("slider") => {
+            return Err(format!("{}: the layer has no time to follow the time slider with", layer.title));
+        }
+        _ => None,
+    };
+    let asked = asked.filter(|_| slider.is_none());
     let time = match (&layer.time, asked) {
+        // A WMS layer's: a list of times or an interval when it takes several (WMS 1.3.0 Annex C).
+        (Some(l), Some(t)) if l.multiple => Some(rustgis_data::ogc::checked_wms_time(t)?),
         (Some(_), Some(t)) => Some(rustgis_data::ogc::checked_time(t)?),
+        (Some(_), None) if slider.is_some() => None,
         (Some(t), None) => Some(t.default.clone()),
         (None, Some(_)) => return Err(format!("{}: the layer has no time to pick (leave time out)", layer.title)),
         (None, None) => None,
@@ -378,22 +405,57 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
     match &layer.offer {
         Offer::Tiles { template } => {
             let template = advertised.as_deref().unwrap_or(template);
-            let template = match &time {
-                Some(t) => template.replace("{Time}", t),
-                None => template.to_string(),
+            let template = match (&time, &slider) {
+                // Its time written as the layer writes its times, filled at each step.
+                (_, Some(st)) => template.replace("{Time}", &format!("{{date:{}}}", st.format)),
+                (Some(t), None) => rustgis_data::ogc::with_time(template, t),
+                (None, None) => template.to_string(),
             };
             // With its legends, as its service gives them (none: no key, as before).
             let mut add = json!({"url": template, "kind": "raster", "name": name, "overlay": true, "bounds": layer.bbox});
+            // The time slider, when it is off, turned on with the layer's steps (one that is on
+            // keeps its own); it starts at the layer's default.
+            let fresh = s.map().time.is_none();
+            if let Some(st) = slider.as_ref().filter(|_| fresh) {
+                match &st.steps {
+                    SliderSteps::Dates(dates) => add["dates"] = json!(dates),
+                    SliderSteps::Every { start, end, unit, interval } => {
+                        add["start"] = json!(start);
+                        add["end"] = json!(end);
+                        add["unit"] = json!(unit.code());
+                        add["interval"] = json!(interval);
+                    }
+                }
+            }
             // (Those the layer wouldn't keep, an address too long, are left out, not refused.)
             let legends = rustgis_map::tiles::checked_legends(layer.legends.iter().cloned());
             if !legends.is_empty() {
                 add["legend"] = json!(legends);
             }
-            let r = super::tiles::add(s, &add)?;
+            let mut r = super::tiles::add(s, &add)?;
             // A WMS layer's GetFeatureInfo request, for identify.
             let added = r["index"].as_u64().and_then(|i| usize::try_from(i).ok());
             if let Some(t) = added.and_then(|i| s.map_mut().tiles.get_mut(i)) {
                 t.feature_info = layer.feature_info.clone();
+            }
+            if let Some(at) = slider.as_ref().filter(|_| fresh).and_then(|st| st.at) {
+                super::time::set(s, &json!({"date": at}))?;
+                // Its address at the step the slider went to.
+                if let Some(t) = added.and_then(|i| s.map().tiles.get(i)) {
+                    r["url"] = json!(t.url);
+                }
+            }
+            // A slider already on keeps its steps: the service may have no map for some of them.
+            let current = s.map().time.as_ref().map(|t| t.current);
+            if let (Some(st), Some(now), false) = (&slider, current, fresh)
+                && !st.has(now)
+            {
+                s.notify(
+                    format!(
+                        "{name}: follows the time slider's steps, and its service lists other times, so it may draw nothing at some of them"
+                    ),
+                    false,
+                );
             }
             zoom(s);
             Ok(r)

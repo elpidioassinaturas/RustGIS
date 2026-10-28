@@ -39,6 +39,8 @@ comment on its issue or pull request and open a draft pull request early.
 - Georeferencer: side-by-side window, transform picker, more formats
   ([#609](https://github.com/opengeos/RustGIS/issues/609)).
 
+- Rebindable keyboard shortcuts ([#562](https://github.com/opengeos/RustGIS/issues/562)).
+
 ## Next
 
 ### Fixes and quick wins
@@ -65,8 +67,7 @@ Correct, robust and recoverable, with the foundations other themes stand on.
   AI provider keys and the ChatGPT sign-in's tokens are already kept there).
 - Spatial Join by distance, closest, centre in and largest overlap, with merge rules (sum, mean,
   first…) for one-to-one joins ([#851](https://github.com/opengeos/RustGIS/issues/851)).
-- Vector tools, each writing a new layer: join field (a one-off attribute join), merge (append
-  layers), points along lines, check and fix geometry _(open)_; summary fields
+- Vector tools, each writing a new layer: join field (a one-off attribute join), points along lines, check and fix geometry _(open)_; summary fields
   (sum, mean, first…) on Dissolve and Summarize Within _(open)_.
 - Batch runs: one tool over many layers or a folder of files.
 
@@ -96,8 +97,6 @@ And alongside it:
 - A histogram for raster stretches; raster attribute tables.
 
 ### Data at the source
-- Write edits back to GeoPackage and PostGIS (edits stay in the project today). _Coordinate
-  first._
 - GeoLibre opening RustGIS `.rgis` projects, once RustGIS's project format and supported
   data types settle. RustGIS imports GeoLibre projects; combined colour and size rendering
   is tracked in [#1017](https://github.com/opengeos/RustGIS/issues/1017).
@@ -151,7 +150,6 @@ built-in version must justify itself on one of those.
 - Auto-refresh for web service layers.
 - A catalog of data cubes for the time slider
   ([#683](https://github.com/opengeos/RustGIS/issues/683)).
-- Rebindable keyboard shortcuts ([#562](https://github.com/opengeos/RustGIS/issues/562)).
 
 ## Exploratory
 Open questions rather than plans; discuss before building.
@@ -167,6 +165,8 @@ Open questions rather than plans; discuss before building.
 - An in-app Python console; an R package.
 
 ## Done
+- Save edits back to existing GeoPackage and PostGIS tables on desktop, with atomic saves,
+  conflict detection and discard/reload ([#1041](https://github.com/opengeos/RustGIS/issues/1041)).
 - Projects that survive a move: local data paths relative to the project and undoable Repair
   Data Source for layers and tile archives ([#879](https://github.com/opengeos/RustGIS/issues/879)).
 - Layered workspace, command registry with undo, project files (`.rgis`), `rustgis-cli`, the
@@ -212,6 +212,8 @@ Open questions rather than plans; discuss before building.
   placement, installed font families and annotation; stacked and dashed line strokes, symbol
   levels, reference scales, polygon outlines without fill; custom colour ramps (and QGIS, GDAL
   and GMT palette files); masking, display filters, blend modes, aggregation, extrusion; graphics.
+- Merge vector layers: append matching geometry types, union attributes without type conversion,
+  honor selections and complete streamed inputs ([#1061](https://github.com/opengeos/RustGIS/issues/1061)).
 - Editing: create, move, rotate, scale, merge, split, explode, vertex editing; snapping,
   templates, elevation, topology; domains, subtypes, attribute rules, contingent values,
   relationships, archiving.

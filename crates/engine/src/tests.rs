@@ -313,6 +313,27 @@ fn geoprocessing_adds_layers_and_history() {
     assert_eq!(s.project.gp_history.len(), 2, "a failed run restores the project");
 }
 
+/// Pivot Table adds a standalone table in one undo step: a row for each continent and a field for
+/// each income group, holding the population summed over that continent's countries in the group.
+#[test]
+fn pivot_table_adds_a_table_in_one_undo_step() {
+    let mut s = world();
+    let countries = s.map().layer_by_name("Countries").map(|l| l.dataset.clone()).unwrap();
+    let total: f64 =
+        (0..countries.features.len()).filter_map(|r| countries.value(r, countries.field_index("pop_est").unwrap()).as_f64()).sum();
+    let params = json!({"input": "Countries", "fields": "continent", "pivot": "income_grp", "value": "pop_est", "statistic": "SUM"});
+    s.run("gp.run", &json!({"tool": "pivotTable", "params": params})).unwrap();
+    let t = s.project.tables.last().unwrap();
+    assert_eq!(t.name, "Countries_Pivot");
+    assert_eq!(t.fields.first().map(|f| f.name.as_str()), Some("continent"));
+    assert!(t.fields.len() > 2 && t.fields.iter().skip(1).all(|f| f.name.starts_with("income_grp")), "{:?}", t.fields);
+    let cells: f64 = (0..t.features.len()).flat_map(|r| (1..t.fields.len()).filter_map(move |c| t.value(r, c).as_f64())).sum();
+    assert!((cells - total).abs() < 1.0, "{cells} != {total}");
+    assert_eq!(s.project.gp_history.len(), 1);
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert!(s.project.tables.is_empty());
+}
+
 #[test]
 fn spatial_join_command_joins_layers_and_records_history() {
     let mut s = world();
@@ -6814,6 +6835,24 @@ fn plugin_file_parameters_reach_files_and_stay_out_of_the_history() {
     rustgis_plugins::unload("eng-file-edit");
 }
 
+#[test]
+fn geopackage_plugin_writes_are_user_only_and_reload_needs_files() {
+    use crate::cmd::plugins::{Reach, reaches};
+    let mut s = world();
+    plugin("eng-gpkg-edit", &["edit"]);
+    for id in ["gpkg.addLayer", "gpkg.discardEdits"] {
+        let spec = s.registry.get(id).copied().unwrap();
+        assert_eq!(reaches(&spec, &json!({})), Some(Reach::Files));
+        let e = forward(&mut s, "eng-gpkg-edit", id, json!({})).unwrap_err();
+        assert!(e.contains("'files' permission"), "{id}: {e}");
+    }
+    rustgis_plugins::unload("eng-gpkg-edit");
+    plugin("eng-gpkg-all", &["edit", "files", "network"]);
+    let e = forward(&mut s, "eng-gpkg-all", "gpkg.saveEdits", json!({})).unwrap_err();
+    assert!(e.contains("plugins can't run"), "{e}");
+    rustgis_plugins::unload("eng-gpkg-all");
+}
+
 /// This test binary, started as the process test plugin, answers one request and exits.
 #[test]
 fn plugin_process_child() {
@@ -8553,7 +8592,9 @@ pub(crate) fn serve(body: &'static [u8], n: usize) -> String {
 #[test]
 fn data_from_a_web_address() {
     const GEOJSON: &[u8] = br#"{"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"n": 1}, "geometry": {"type": "Point", "coordinates": [10, 20]}}]}"#;
-    let base = serve(GEOJSON, 3);
+    // Five requests: an address without a file name is asked for its headers and its first
+    // bytes (is it a GeoTIFF?) before it is downloaded.
+    let base = serve(GEOJSON, 5);
     let mut s = Session::new(Project::default());
     let r = s.run("layer.addUrl", &json!({"url": format!("{base}/places.geojson")})).unwrap();
     assert_eq!(r["features"], 1);
@@ -8563,7 +8604,7 @@ fn data_from_a_web_address() {
     assert!(s.map().layer_by_name("Api").is_some());
     let e = s.run("layer.addUrl", &json!({"url": format!("{base}/missing.geojson")})).unwrap_err();
     assert!(e.contains("404"), "{e}");
-    let page = serve(b"<!doctype html><html>not data</html>", 1);
+    let page = serve(b"<!doctype html><html>not data</html>", 3);
     let e = s.run("layer.addUrl", &json!({"url": format!("{page}/index")})).unwrap_err();
     assert!(e.contains("not a data format"), "{e}");
     for bad in ["file:///etc/passwd", "/tmp/x.geojson", "http://169.254.169.254/latest.geojson", ""] {
@@ -8595,7 +8636,7 @@ fn jpeg2000_from_a_web_address() {
     assert_eq!(named("https://x.org/", &codestream).unwrap(), "data.j2k");
     assert!(named("https://x.org/api/tile", br#"<VRTDataset></VRTDataset>"#).unwrap_err().contains("not a data format"));
     if !rustgis_data::raster::gdal::available() {
-        let jp2 = serve(jp2_box, 2);
+        let jp2 = serve(jp2_box, 4);
         for path in ["TCI.jp2", "api/tile"] {
             let e = s.run("layer.addUrl", &json!({"url": format!("{jp2}/{path}")})).unwrap_err();
             assert!(e.contains("needs GDAL"), "{path}: {e}");
@@ -8629,7 +8670,7 @@ fn jpeg2000_from_a_web_address() {
     // stays valid for the server thread's lifetime.
     let bytes = Vec::leak(std::fs::read(&jp2).unwrap());
     let uploaded = base64::engine::general_purpose::STANDARD.encode(&*bytes);
-    let base = serve(bytes, 2);
+    let base = serve(bytes, 4);
     let r = s.run("layer.addUrl", &json!({"url": format!("{base}/tiles/33/T/XN/TCI.jp2")})).unwrap();
     let l = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap();
     assert_eq!(l.name, "TCI");
@@ -9090,6 +9131,109 @@ fn tile_layers_take_their_services_legends() {
         assert!(s.run("map.addTiles", &json!({"url": "https://other.example.com/{z}/{x}/{y}.png", "legend": bad})).is_err(), "{bad}");
     }
     assert_eq!(legends(&s, "Topo").0, Vec::<String>::new(), "a refusal changes nothing");
+}
+
+/// A WMS layer with a time dimension (WMS 1.3.0 Annex C) is added at its default or the time
+/// asked for, named with it: one time where the layer takes single values, a list or interval
+/// where it takes several; GetFeatureInfo asks at the same time, its project's layer too.
+#[test]
+fn wms_layers_with_time() {
+    const WMS: &str = r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink">
+<Service><Title>Test WMS</Title></Service>
+<Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="https://maps.example.com/wms?"/></Get></HTTP></DCPType></GetMap>
+<GetFeatureInfo><Format>application/geo+json</Format><DCPType><HTTP><Get><OnlineResource xlink:href="https://maps.example.com/wms?"/></Get></HTTP></DCPType></GetFeatureInfo></Request>
+<Layer queryable="1"><Title>Root</Title><CRS>EPSG:3857</CRS>
+<Layer><Name>population</Name><Title>Population</Title><Dimension name="time" units="ISO8601" default="2025" nearestValue="0">1990,2000,2025</Dimension></Layer>
+<Layer><Name>decades</Name><Title>Decades</Title><Dimension name="time" units="ISO8601" default="2020" multipleValues="1">1990/2020/P10Y</Dimension></Layer>
+<Layer><Name>roads</Name><Title>Roads</Title></Layer>
+</Layer></Capability></WMS_Capabilities>"#;
+    let mut s = Session::new(Project::default());
+    let url = "https://maps.example.com/wms";
+    let listed = s.run("service.layers", &json!({"url": url, "text": WMS})).unwrap();
+    let population = listed["layers"].as_array().unwrap().iter().find(|l| l["name"] == "population").unwrap();
+    assert_eq!(population["time"], json!({"default": "2025", "values": ["1990", "2000", "2025"], "count": 3, "multiple": false}));
+    s.run("service.add", &json!({"url": url, "layer": "population", "text": WMS})).unwrap();
+    s.run("service.add", &json!({"url": url, "layer": "population", "text": WMS, "time": "1990"})).unwrap();
+    let tile = |s: &Session, name: &str| s.map().tiles.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("{name}")).url.clone();
+    assert!(tile(&s, "Population").ends_with("&TIME=2025"), "{}", tile(&s, "Population"));
+    assert!(tile(&s, "Population 1990").ends_with("&TIME=1990"), "{}", tile(&s, "Population 1990"));
+    // One time for a layer that takes single values; a list or interval for one that takes several.
+    let e = s.run("service.add", &json!({"url": url, "layer": "population", "text": WMS, "time": "1990,2000"})).unwrap_err();
+    assert!(e.contains("a time is a date"), "{e}");
+    s.run("service.add", &json!({"url": url, "layer": "decades", "text": WMS, "time": "1990/2010"})).unwrap();
+    assert!(tile(&s, "Decades 1990/2010").ends_with("&TIME=1990%2F2010"), "{}", tile(&s, "Decades 1990/2010"));
+    // GetFeatureInfo asks at the layer's time, a project's layer (without its request) too.
+    s.run("map.goToXY", &json!({"lon": 8.5, "lat": 47.4, "scale": 10000})).unwrap();
+    let asked = |s: &mut Session| -> Vec<String> {
+        let v = s.run("identify", &json!({"lon": 8.5, "lat": 47.4, "mode": "visible"})).unwrap();
+        v["featureInfo"].as_array().unwrap().iter().filter_map(|a| a["url"].as_str().map(str::to_string)).collect()
+    };
+    let requests = asked(&mut s);
+    for (name, time) in [("Population", "2025"), ("Population 1990", "1990"), ("Decades 1990/2010", "1990%2F2010")] {
+        let layer = tile(&s, name);
+        assert!(
+            requests.iter().any(|r| r.contains("REQUEST=GetFeatureInfo")
+                && r.ends_with(&format!("&TIME={time}"))
+                && r.contains(if name.starts_with('D') { "LAYERS=decades" } else { "LAYERS=population" })),
+            "{name} ({layer}): {requests:?}"
+        );
+    }
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut reopened = Session::new(serde_json::from_str(&text).unwrap());
+    assert!(reopened.map().tiles.iter().all(|t| t.feature_info.is_none()));
+    let p = json!({"layer": "Population 1990", "lon": 8.5, "lat": 47.4, "capabilities": WMS, "request": true});
+    let r = reopened.run("identify.featureInfo", &p).unwrap();
+    let request = r["url"].as_str().unwrap();
+    assert!(request.contains("REQUEST=GetFeatureInfo") && request.ends_with("&TIME=1990"), "{request}");
+
+    // Following the time slider: it turns on with the layer's times, at its default, and each of
+    // its steps draws (and asks) the layer at that time.
+    let mut s = Session::new(Project::default());
+    let added = s.run("service.add", &json!({"url": url, "layer": "population", "text": WMS, "time": "slider"})).unwrap();
+    assert!(added["url"].as_str().is_some_and(|u| u.ends_with("&TIME=2025")), "{added}");
+    let year = |y: i32| rustgis_data::time::parse_text(&format!("{y}-01-01")).unwrap();
+    let slider = s.map().time.clone().unwrap();
+    assert_eq!((slider.steps(), slider.current), (vec![year(1990), year(2000), year(2025)], year(2025)));
+    let population = s.map().tiles.iter().find(|t| t.name == "Population").unwrap();
+    assert!(population.time_url.as_deref().is_some_and(|u| u.ends_with("&TIME={date:YYYY}")), "{:?}", population.time_url);
+    assert!(population.url.ends_with("&TIME=2025"), "{}", population.url);
+    s.run("time.goTo", &json!({"date": "1990"})).unwrap();
+    assert!(tile(&s, "Population").ends_with("&TIME=1990"), "{}", tile(&s, "Population"));
+    s.run("map.goToXY", &json!({"lon": 8.5, "lat": 47.4, "scale": 10000})).unwrap();
+    let requests = asked(&mut s);
+    assert!(requests.len() == 1 && requests[0].ends_with("&TIME=1990"), "{requests:?}");
+    // A second layer follows the slider that is on (`"time": true`, as for Zarr): its steps stay,
+    // and it says the service may have no map at some of them.
+    let mark = s.notice_mark();
+    s.run("service.add", &json!({"url": url, "layer": "decades", "text": WMS, "time": true})).unwrap();
+    assert_eq!(s.map().time.as_ref().unwrap().steps(), slider.steps());
+    assert!(s.notices_since(mark).is_empty(), "1990 is one of its times: {:?}", s.notices_since(mark));
+    assert!(tile(&s, "Decades").ends_with("&TIME=1990"), "{}", tile(&s, "Decades"));
+    // Kept with the project, still following.
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut reopened = Session::new(serde_json::from_str(&text).unwrap());
+    reopened.run("time.goTo", &json!({"date": "2000"})).unwrap();
+    assert!(tile(&reopened, "Population").ends_with("&TIME=2000"), "{}", tile(&reopened, "Population"));
+    // One period: a regular slider, by its period, at the layer's default.
+    let mut every = Session::new(Project::default());
+    every.run("service.add", &json!({"url": url, "layer": "decades", "text": WMS, "time": "slider"})).unwrap();
+    let t = every.map().time.clone().unwrap();
+    assert_eq!((t.start, t.end, t.unit.code(), t.interval, t.current), (year(1990), year(2020), "year", 10, year(2020)));
+    assert_eq!(t.steps().len(), 4);
+    assert!(tile(&every, "Decades").ends_with("&TIME=2020"), "{}", tile(&every, "Decades"));
+    // A slider on at a time the layer doesn't list: the layer says so.
+    let mut other = Session::new(Project::default());
+    other.run("time.set", &json!({"start": "2025", "end": "2026", "unit": "year"})).unwrap();
+    let mark = other.notice_mark();
+    other.run("service.add", &json!({"url": url, "layer": "decades", "text": WMS, "time": "slider"})).unwrap();
+    assert!(
+        other.notices_since(mark).iter().any(|n| n.text.contains("Decades: follows the time slider's steps")),
+        "{:?}",
+        other.notices_since(mark)
+    );
+    // A layer without times has none to follow it with.
+    let e = s.run("service.add", &json!({"url": url, "layer": "roads", "text": WMS, "time": "slider"})).unwrap_err();
+    assert!(e.contains("no time to follow"), "{e}");
 }
 
 /// Identify asks a WMS layer what is at the point (GetFeatureInfo): the request from the
@@ -10197,6 +10341,11 @@ fn serve_gated(
                 }
             }
             let req = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
+            // A HEAD request is answered with the length alone.
+            if req.starts_with("head ") {
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                continue;
+            }
             let range = req.lines().filter(|_| ranges).find_map(|l| l.strip_prefix("range: bytes=")).and_then(|r| {
                 let (a, b) = r.trim().split_once('-')?;
                 // A suffix (`-n`): the last n bytes.
@@ -10434,7 +10583,7 @@ fn a_catalog_entry_opens_as_its_command_would() {
     };
     let features = [item("a1", "2024-01-01"), item("a2", "2024-01-17")].join(",");
     let base = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{features}]}}"#))], 6);
-    let mut entry = cubes::find("bdc-mod13q1-ndvi").unwrap().clone();
+    let mut entry = cubes::find("bdc-mod13q1-ndvi").unwrap();
     entry.url = format!("{base}/v1");
     entry.source = cubes::Source::Stac { collection: "cube".into(), asset: "NDVI".into() };
     entry.bbox = [0.0, 40.0, 20.0, 50.0];
@@ -10485,7 +10634,7 @@ fn a_catalog_entry_opens_as_its_command_would() {
 
     // A Zarr entry: its variable following the slider over the period, named after the entry.
     let (dir, path) = zarr_store_over_time("catalog");
-    let mut zarr = cubes::find("era5-2m-temperature").unwrap().clone();
+    let mut zarr = cubes::find("era5-2m-temperature").unwrap();
     zarr.url = path;
     zarr.start = "2001-01-01".into();
     zarr.source = cubes::Source::Zarr { variable: "t".into() };
@@ -10862,6 +11011,145 @@ fn cloud_optimised_geotiffs_are_read_in_place() {
     assert!(r.get("inPlace").is_none(), "{r}");
     let id = r["layer"].as_u64().unwrap() as u32;
     assert!(s.map().layer(id).is_some_and(|l| l.is_raster()), "{r}");
+    // So is one at an address without a file name, its first bytes saying GeoTIFF.
+    let r = s.run("layer.addUrl", &json!({"url": format!("{base}/raster/geotiff?id=1")})).unwrap();
+    assert!(r.get("inPlace").is_none(), "{r}");
+    let id = r["layer"].as_u64().unwrap() as u32;
+    assert!(s.map().layer(id).is_some_and(|l| l.is_raster()), "{r}");
+}
+
+/// A cloud-optimised GeoTIFF from an API whose address names no file (Vantor's
+/// `…/ortho-with-overviews/geotiff?…`) is read in place, as one named `.tif` is, not downloaded
+/// whole; an address the app has probed (`"cog"`) is read in place without the name either.
+#[test]
+fn unnamed_cloud_optimised_geotiffs_are_read_in_place() {
+    use crate::cmd::layer::is_unnamed_url;
+    assert!(is_unnamed_url(
+        "https://api.vantor.com/analytics/v1/raster/ortho-with-overviews/geotiff?function=pansharp_ortho&p=crs%3D%22EPSG%3A3857%22"
+    ));
+    assert!(is_unnamed_url("https://x.org/api/tile/"));
+    for named in
+        ["https://x.org/a/scene.tif?sig=1", "https://x.org/a.b/data.geojson", "https://x.org", "https://x.org/", "/tmp/geotiff", "geotiff"]
+    {
+        assert!(!is_unnamed_url(named), "{named}");
+    }
+    let file = rustgis_data::raster::cog::example(2048, 256);
+    let total = file.len();
+    let (base, sent) = serve_ranges(file);
+    let url =
+        format!("{base}/analytics/v1/raster/ortho-with-overviews/geotiff?function=pansharp_ortho&p=bands%3D%22red%2Cgreen%2Cblue%22&key=k");
+    let mut s = Session::new(Project::default());
+    let r = s.run("layer.addUrl", &json!({"url": url, "name": "Ortho"})).unwrap();
+    assert_eq!(r["inPlace"], true, "{r}");
+    let t = s.map().tiles.last().unwrap().clone();
+    assert_eq!((t.kind, t.name.as_str(), t.url.as_str()), (rustgis_map::TileKind::Cog, "Ortho", url.as_str()));
+    let read = sent.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(read < total / 4, "{read} of {total} bytes read: only the header, not the whole file");
+    let r = s.run("layer.addUrl", &json!({"url": url, "name": "Probed", "cog": true})).unwrap();
+    assert_eq!(r["inPlace"], true, "{r}");
+    // `"cog"` holds whatever the name says: a GeoTIFF at a FlatGeobuf's name is read as one,
+    // where without it the FlatGeobuf reader refuses it.
+    let fgb = format!("{base}/scene.fgb");
+    assert!(s.run("layer.addUrl", &json!({"url": fgb, "name": "AsFgb"})).is_err());
+    let r = s.run("layer.addUrl", &json!({"url": fgb, "name": "Flagged", "cog": true})).unwrap();
+    assert_eq!(r["inPlace"], true, "{r}");
+    // Asked to, it is downloaded whole, named by its contents.
+    let r = s.run("layer.addUrl", &json!({"url": url, "whole": true, "name": "Whole"})).unwrap();
+    assert!(r.get("inPlace").is_none(), "{r}");
+    // Anything else at such an address is downloaded as before, and said not to be data.
+    let (text, _) = serve_file(b"Unauthorized".to_vec(), false);
+    let e = s.run("layer.addUrl", &json!({"url": format!("{text}/api/geotiff?key=bad")})).unwrap_err();
+    assert!(e.contains("not a data format"), "{e}");
+}
+
+/// A server answering every request with `body`, logging each as `HEAD`, `GET` or `GET <range>`.
+/// Its HEAD answers carry `announce` as `X-TIFF-Header-Length`, `kind` as `Content-Type` and,
+/// with `ranges`, `Accept-Ranges: bytes`.
+fn serve_logged(
+    body: Vec<u8>,
+    announce: Option<&'static str>,
+    kind: Option<&'static str>,
+    ranges: bool,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kept = log.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 4096];
+            let read = s.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
+            let mut headers = String::new();
+            if let Some(k) = kind {
+                headers.push_str(&format!("Content-Type: {k}\r\n"));
+            }
+            if req.starts_with("head ") {
+                kept.lock().unwrap().push("HEAD".to_string());
+                if let Some(n) = announce {
+                    headers.push_str(&format!("X-TIFF-Header-Length: {n}\r\n"));
+                }
+                if ranges {
+                    headers.push_str("Accept-Ranges: bytes\r\n");
+                }
+                let _ = write!(s, "HTTP/1.1 200 OK\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                continue;
+            }
+            let range = req.lines().find_map(|l| l.strip_prefix("range: bytes=")).map(|r| r.trim().to_string());
+            kept.lock().unwrap().push(range.as_ref().map_or("GET".to_string(), |r| format!("GET {r}")));
+            let bounds = range.as_deref().and_then(|r| {
+                let (a, b) = r.split_once('-')?;
+                let a = a.parse::<usize>().ok()?;
+                Some((a, if b.is_empty() { body.len().saturating_sub(1) } else { b.parse::<usize>().ok()? }))
+            });
+            let (status, part) = match bounds {
+                Some((a, b)) if a < body.len() => ("206 Partial Content", &body[a..=b.min(body.len() - 1)]),
+                _ => ("200 OK", &body[..]),
+            };
+            let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", part.len());
+            let _ = s.write_all(part);
+        }
+    });
+    (format!("http://{addr}"), log)
+}
+
+/// A GeoTIFF made on request (Vantor's Transform API) says how long its header is in its HEAD
+/// answer (`X-TIFF-Header-Length`): the header is read in that one request. Without a usable
+/// length, the first 64 KiB are read as for any file; a HEAD answer saying JSON skips the
+/// GeoTIFF read and downloads it.
+#[test]
+fn announced_tiff_header_lengths_read_the_header_in_one_request() {
+    let file = rustgis_data::raster::cog::example(2048, 256);
+    let mut s = Session::new(Project::default());
+    let (base, log) = serve_logged(file.clone(), Some("8192"), Some("image/tiff"), true);
+    let r = s.run("layer.addUrl", &json!({"url": format!("{base}/transform/geotiff?id=1"), "name": "Announced"})).unwrap();
+    assert_eq!(r["inPlace"], true, "{r}");
+    let asked = log.lock().unwrap().clone();
+    assert_eq!(asked.first().map(String::as_str), Some("HEAD"), "{asked:?}");
+    assert_eq!(asked.get(1).map(String::as_str), Some("GET 0-8191"), "the header in one read of its announced length: {asked:?}");
+    // A length that isn't one: the usual first read.
+    let (base, log) = serve_logged(file.clone(), Some("lots"), None, true);
+    let r = s.run("layer.addUrl", &json!({"url": format!("{base}/transform/geotiff?id=2"), "name": "Unannounced"})).unwrap();
+    assert_eq!(r["inPlace"], true, "{r}");
+    assert_eq!(log.lock().unwrap().get(1).map(String::as_str), Some("GET 0-65535"));
+    // A file named .tif isn't asked for its headers.
+    let (base, log) = serve_logged(file.clone(), Some("8192"), None, true);
+    s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "name": "Named"})).unwrap();
+    assert!(!log.lock().unwrap().iter().any(|r| r == "HEAD"), "{:?}", log.lock().unwrap());
+    // A GeoTIFF labelled as text by a server that answers ranges is still read in place.
+    let (base, log) = serve_logged(file, None, Some("text/plain"), true);
+    let r = s.run("layer.addUrl", &json!({"url": format!("{base}/transform/geotiff?id=3"), "name": "Mislabelled"})).unwrap();
+    assert_eq!(r["inPlace"], true, "{r}");
+    assert_eq!(log.lock().unwrap().get(1).map(String::as_str), Some("GET 0-65535"));
+    // JSON by its HEAD answer, from a server that doesn't say it answers ranges: no GeoTIFF
+    // read, downloaded and added.
+    let geojson = br#"{"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [1, 2]}}"#.to_vec();
+    let (base, log) = serve_logged(geojson, None, Some("application/geo+json"), false);
+    let r = s.run("layer.addUrl", &json!({"url": format!("{base}/api/feature"), "name": "Feature"})).unwrap();
+    assert_eq!(r["features"], 1, "{r}");
+    assert_eq!(*log.lock().unwrap(), ["HEAD", "GET"], "no GeoTIFF read, then the download");
 }
 
 /// OpenStreetMap data for an area through an Overpass server (a local one): a layer per geometry
@@ -13867,6 +14155,33 @@ fn line_of_points_shp(name: &str, n: usize) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!("rustgis-engine-{}-{name}.shp", std::process::id()));
     rustgis_data::io::write_path(&ds, &p).unwrap();
     p
+}
+
+#[test]
+fn shapefiles_too_large_to_load_whole_still_open() {
+    // Few records, but a .shp or .dbf past what the whole-file reader takes (#1055): opened and
+    // kept in place, so it never has to fit in memory whole, rather than refused as too large.
+    // Grown sparse where the file system allows.
+    for grown in ["dbf", "shp"] {
+        let p = line_of_points_shp(&format!("wide-{grown}"), 20);
+        std::fs::OpenOptions::new().write(true).open(p.with_extension(grown)).unwrap().set_len(rustgis_data::io::MAX_BYTES + 1).unwrap();
+        let path = p.display().to_string();
+        // With and without a coordinate system given for it.
+        for params in [json!({"path": path}), json!({"path": path, "crs": "EPSG:4326"})] {
+            let mut s = Session::new(Project::default());
+            let r = s.run("layer.addData", &params).unwrap();
+            assert_eq!(r["features"], 20, "{grown}: {r}");
+            assert_eq!(r["streamed"], true, "{grown}: {r}");
+            assert!(s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().is_streamed());
+        }
+        // "stream": false still asks for the whole-file reader, which refuses it.
+        let mut s = Session::new(Project::default());
+        let e = s.run("layer.addData", &json!({"path": path, "stream": false})).unwrap_err();
+        assert!(e.contains("too large"), "{grown}: {e}");
+        for ext in ["shp", "shx", "dbf", "prj", "cpg"] {
+            let _ = std::fs::remove_file(p.with_extension(ext));
+        }
+    }
 }
 
 #[test]
@@ -17105,6 +17420,34 @@ fn model_graphs(s: &mut Session) {
     }
 }
 
+/// A model from a file, saved as steps, has each step checked with its tool: a tool that writes a
+/// file without naming it (vectorToPmtiles with no `output`) is refused, and a built-in tool's
+/// step that only names its output layer runs (#1043).
+#[test]
+fn a_model_from_a_file_checks_each_step_with_its_tool() {
+    let mut s = Session::new(sample::world_project());
+    s.queue_gp_files = true;
+    let export = json!([{"tool": "vectorToPmtiles", "params": {"input": "Cities", "minZoom": 0, "maxZoom": 0}}]);
+    s.run("model.new", &json!({"name": "Export", "steps": export, "imported": true})).unwrap();
+    let e = s.run("model.run", &json!({"name": "Export"})).unwrap_err();
+    assert!(e.contains("step 1 (vectorToPmtiles)") && e.contains("from a file"), "{e}");
+    assert!(s.take_gp_files().is_empty(), "nothing was exported");
+    // Made here, the same model runs.
+    s.run("model.new", &json!({"name": "Export here", "steps": export})).unwrap();
+    s.run("model.run", &json!({"name": "Export here"})).unwrap();
+    assert_eq!(s.take_gp_files().len(), 1);
+
+    let named = json!([{"tool": "buffer", "params": {"input": "Cities", "distance": 100, "output": "Near cities"}}]);
+    s.run("model.new", &json!({"name": "Buffer", "steps": named, "imported": true})).unwrap();
+    s.run("model.run", &json!({"name": "Buffer"})).unwrap();
+    assert!(s.map().layer_by_name("Near cities").is_some());
+    // A path through the output stays refused.
+    let path = json!([{"tool": "buffer", "params": {"input": "Cities", "distance": 100, "output": "/tmp/near.shp"}}]);
+    s.run("model.new", &json!({"name": "Buffer to a file", "steps": path, "imported": true})).unwrap();
+    let e = s.run("model.run", &json!({"name": "Buffer to a file"})).unwrap_err();
+    assert!(e.contains("from a file"), "{e}");
+}
+
 fn rustgis_engine_graph(v: &Value) -> crate::project::ModelGraph {
     crate::model::graph_from_json(v).unwrap()
 }
@@ -18160,14 +18503,14 @@ fn postgis_edits_are_counted_and_checked() {
     // Back on rows a save wrote over (undone past it): its edits, new rows too, aren't written
     // again, and no database is asked.
     let read = s.map().layer(id).unwrap().postgis.as_ref().unwrap().versions.clone();
-    s.pg_saved_over.push(read.clone());
+    s.saved_over.push(read.clone());
     let e = s.run("pg.saveEdits", &p).unwrap_err();
     assert!(e.contains("back before an edit saved to roads"), "{e}");
     // Rows read again are a baseline of their own.
     s.map_mut().layer_mut(id).unwrap().postgis.as_mut().unwrap().versions = read.iter().collect();
     let e = s.run("pg.saveEdits", &p).unwrap_err();
     assert!(e.starts_with("gis: "), "{e}");
-    s.pg_saved_over.clear();
+    s.saved_over.clear();
     // A layer not from PostGIS has no edits to save there.
     crate::cmd::layer::add_dataset(&mut s, Dataset::new("plain", GeometryType::Point, Vec::new()));
     let e = s.run("pg.saveEdits", &json!({"layer": "plain"})).unwrap_err();
@@ -18298,6 +18641,969 @@ fn postgis_edits_live() {
     assert_eq!(s.run("pg.saveEdits", &json!({"layer": "K"})).unwrap()["keys"][0], 7);
     let n: i64 = db.query_one(format!("SELECT count(*) FROM public.{keyed} WHERE id = 7 AND name = 'seven'").as_str(), &[]).unwrap().get(0);
     assert_eq!(n, 1);
+}
+
+/// Edits go back to one local GeoPackage table atomically, without replacing the file or
+/// losing columns RustGIS doesn't edit. No external database or program is needed.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_edits_save_back() {
+    use rusqlite::functions::FunctionFlags;
+    use rusqlite::types::ValueRef;
+    use rustgis_data::raster::Crs;
+    use rustgis_data::source::{Request, gpkg, open_path};
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType};
+
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            // Also clean up if an assertion fails during the read-only check.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(self.0.join("roads.gpkg"), std::fs::Permissions::from_mode(0o600));
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let serial = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("rustgis-gpkg-edits-{}-{serial}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let _cleanup = Cleanup(dir.clone());
+    let path = dir.join("roads.gpkg");
+    let mut roads =
+        Dataset::new("roads", GeometryType::Polyline, vec![Field::new("name", FieldType::Text), Field::new("lanes", FieldType::Integer)]);
+    for (i, name) in ["a", "b", "c"].iter().enumerate() {
+        let x = 1_000_000.0 + i as f64 * 10_000.0;
+        roads.push(
+            Some(Geometry::Line(vec![vec![Coord::new(x, 2_000_000.0), Coord::new(x + 1_000.0, 2_002_000.0)]])),
+            vec![rustgis_data::Value::Text((*name).into()), rustgis_data::Value::Int(i as i64 + 1)],
+        );
+    }
+    gpkg::write_in(&roads, &path, Crs::from_epsg(3857).unwrap()).unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    // Even attribute-only external UPDATEs compile the file's R-tree triggers. Supply their
+    // functions on this independent connection too; these fixture blobs all have XY envelopes.
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC | FunctionFlags::SQLITE_INNOCUOUS;
+    db.create_scalar_function("ST_IsEmpty", 1, flags, |ctx| {
+        Ok(match ctx.get_raw(0) {
+            ValueRef::Blob(b) => b.get(3).map(|f| i64::from(f & 0x10 != 0)),
+            _ => None,
+        })
+    })
+    .unwrap();
+    for (name, offset) in [("ST_MinX", 8), ("ST_MaxX", 16), ("ST_MinY", 24), ("ST_MaxY", 32)] {
+        db.create_scalar_function(name, 1, flags, move |ctx| {
+            Ok(match ctx.get_raw(0) {
+                ValueRef::Blob(b) => b.get(offset..offset + 8).and_then(|v| v.try_into().ok()).map(f64::from_le_bytes),
+                _ => None,
+            })
+        })
+        .unwrap();
+    }
+    db.execute_batch(
+        "ALTER TABLE roads ADD COLUMN photo BLOB;
+         UPDATE roads SET photo = x'00ff' WHERE fid = 1;
+         CREATE TABLE other (id INTEGER PRIMARY KEY, v TEXT);
+         INSERT INTO other VALUES (1, 'keep');
+         CREATE TRIGGER no_bad BEFORE INSERT ON roads WHEN NEW.name = 'bad'
+             BEGIN SELECT RAISE(ABORT, 'bad name'); END;
+         UPDATE gpkg_contents SET last_change = '2000-01-01T00:00:00.000Z' WHERE table_name = 'roads';",
+    )
+    .unwrap();
+    let name_of = |key: i64| -> String { db.query_row("SELECT name FROM roads WHERE fid = ?1", [key], |r| r.get(0)).unwrap() };
+    let count = || -> i64 { db.query_row("SELECT count(*) FROM roads", [], |r| r.get(0)).unwrap() };
+    let changed_at =
+        || -> String { db.query_row("SELECT last_change FROM gpkg_contents WHERE table_name = 'roads'", [], |r| r.get(0)).unwrap() };
+    let counts = |s: &mut Session| {
+        let r = s.run("gpkg.pendingEdits", &json!({"layer": "R"})).unwrap();
+        (r["inserts"].as_u64().unwrap(), r["updates"].as_u64().unwrap(), r["deletes"].as_u64().unwrap())
+    };
+    let p = json!({"layer": "R"});
+    let mut s = Session::new(Project::default());
+    let loaded = s.run("gpkg.addLayer", &json!({"path": path, "table": "roads", "name": "R"})).unwrap();
+    assert_eq!((loaded["features"].as_u64(), loaded["matched"].as_u64(), loaded["skipped"].as_u64()), (Some(3), Some(3), Some(0)));
+    assert_eq!(loaded["writable"], true);
+    let id = loaded["layer"].as_u64().unwrap() as u32;
+    let row_of = |s: &Session, key: u64| s.map().layer(id).unwrap().dataset.features.iter().position(|f| f.id == key).unwrap();
+    let ids: Vec<_> = s.map().layer(id).unwrap().dataset.features.iter().map(|f| f.id).collect();
+    assert_eq!(ids, vec![1, 2, 3]);
+    assert_eq!(s.map().layer(id).unwrap().dataset.crs, Some(Crs::from_epsg(3857).unwrap()));
+    assert_eq!(counts(&mut s), (0, 0, 0));
+    assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["saved"], false);
+    s.map_mut().editing.settings.enabled = true;
+
+    let r1 = row_of(&s, 1);
+    s.run("edit.setValue", &json!({"layer": "R", "row": r1, "field": "name", "value": "renamed"})).unwrap();
+    let moved = vec![Coord::new(15.0, 25.0), Coord::new(15.2, 25.3)];
+    {
+        let r2 = row_of(&s, 2);
+        let l = s.map_mut().layer_mut(id).unwrap();
+        l.dataset.features[r2].geometry = Some(Geometry::Line(vec![moved.clone()]));
+        l.touch_geometry();
+    }
+    let r3 = row_of(&s, 3);
+    s.map_mut().layer_mut(id).unwrap().selection = vec![r3];
+    s.active_layer = Some(id);
+    s.run("edit.delete", &json!({})).unwrap();
+    let new_line = |name: &str| {
+        json!({"layer": "R", "geometry": {"type": "LineString", "coordinates": [[13, 22], [13.1, 22.1]]},
+            "attributes": {"name": name, "lanes": 4}})
+    };
+    s.run("edit.addFeature", &new_line("new")).unwrap();
+    // Deleting the highest loaded key must not make the new feature reuse its baseline id.
+    let l = s.map().layer(id).unwrap();
+    assert_eq!(l.dataset.features.len(), 3);
+    assert!(l.dataset.features.iter().any(|f| f.id > 3));
+    assert!(!l.dataset.features.iter().any(|f| f.id == 3));
+    assert_eq!(counts(&mut s), (1, 2, 1));
+
+    // Saving the project keeps pending edits, not database writes, and stores the file beside
+    // it relatively. Reopening restores both the absolute source path and the baseline.
+    let project = dir.join("edit.rgis");
+    s.run("project.saveAs", &json!({"path": project})).unwrap();
+    let saved: Project = serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+    assert!(std::path::Path::new(&saved.maps[0].layers[0].gpkg.as_ref().unwrap().path).is_relative());
+    assert_eq!(name_of(1), "a");
+    assert_eq!(count(), 3);
+    {
+        let mut reopened = Session::new(Project::default());
+        reopened.run("project.open", &json!({"path": project})).unwrap();
+        let edit = reopened.map().layer_by_name("R").unwrap().gpkg.as_ref().unwrap();
+        assert_eq!(std::fs::canonicalize(&edit.path).unwrap(), std::fs::canonicalize(&path).unwrap());
+        assert_eq!(counts(&mut reopened), (1, 2, 1));
+    }
+
+    let before = changed_at();
+    let r = s.run("gpkg.saveEdits", &p).unwrap();
+    assert_eq!((r["inserted"].as_u64(), r["updated"].as_u64(), r["deleted"].as_u64()), (Some(1), Some(2), Some(1)), "{r}");
+    assert_eq!(r["keys"], json!([4]));
+    assert!(s.map().layer(id).unwrap().dataset.features.iter().any(|f| f.id == 4));
+    assert_eq!(counts(&mut s), (0, 0, 0));
+    let row: (String, i64, Vec<u8>) =
+        db.query_row("SELECT name, lanes, photo FROM roads WHERE fid = 1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+    assert_eq!(row, ("renamed".into(), 1, vec![0, 255]));
+    assert_eq!(db.query_row("SELECT count(*) FROM roads WHERE fid = 3", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(name_of(4), "new");
+    assert_eq!(db.query_row("SELECT v FROM other WHERE id = 1", [], |r| r.get::<_, String>(0)).unwrap(), "keep");
+    assert_ne!(changed_at(), before);
+    let native: Vec<_> = moved.iter().copied().map(rustgis_geom::lonlat_to_merc).collect();
+    let expected = rustgis_geom::Extent::from_points(native[0], native[1]);
+    let indexed: (f64, f64, f64, f64) = db
+        .query_row("SELECT minx, maxx, miny, maxy FROM rtree_roads_geom WHERE id = 2", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .unwrap();
+    for (actual, wanted) in
+        [(indexed.0, expected.min_x), (indexed.1, expected.max_x), (indexed.2, expected.min_y), (indexed.3, expected.max_y)]
+    {
+        // SQLite's R-tree stores outward-rounded float32 bounds.
+        assert!((actual - wanted).abs() < wanted.abs() * 1e-6, "{actual} != {wanted}");
+    }
+    assert_eq!(db.query_row("SELECT count(*) FROM rtree_roads_geom", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+    let bounds: (f64, f64) =
+        db.query_row("SELECT max_x, max_y FROM gpkg_contents WHERE table_name = 'roads'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert!(bounds.0 >= expected.max_x && bounds.1 >= expected.max_y, "{bounds:?}");
+    {
+        let source = open_path(&path, Some("roads")).unwrap();
+        assert_eq!(source.info().crs, "EPSG:3857");
+        let batch = source.read(&Request::all()).unwrap();
+        assert_eq!(batch.features.len(), 3);
+        let f = batch.features.iter().find(|f| f.id == 2).unwrap();
+        let Some(Geometry::Line(parts)) = &f.geometry else { panic!("reopened line: {:?}", f.geometry) };
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].len(), moved.len());
+        for (a, b) in parts[0].iter().zip(&moved) {
+            assert!((a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6, "{a:?} != {b:?}");
+        }
+    }
+    assert!(s.undo());
+    let e = s.run("gpkg.saveEdits", &p).unwrap_err();
+    assert!(e.contains("back before an edit saved"), "{e}");
+    assert!(s.redo());
+    assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["saved"], false);
+
+    // Fingerprints include unchanged attributes, not just the name edited in the layer.
+    db.execute("UPDATE roads SET lanes = 9 WHERE fid = 1", []).unwrap();
+    let r1 = row_of(&s, 1);
+    s.run("edit.setValue", &json!({"layer": "R", "row": r1, "field": "name", "value": "mine"})).unwrap();
+    let e = s.run("gpkg.saveEdits", &p).unwrap_err();
+    assert!(e.contains("row 1 was changed") && e.contains("roads.gpkg"), "{e}");
+    assert_eq!(name_of(1), "renamed");
+    assert_eq!(counts(&mut s), (0, 1, 0));
+    s.run("gpkg.discardEdits", &p).unwrap();
+    db.execute("DELETE FROM roads WHERE fid = 2", []).unwrap();
+    let r2 = row_of(&s, 2);
+    s.run("edit.setValue", &json!({"layer": "R", "row": r2, "field": "name", "value": "gone"})).unwrap();
+    let e = s.run("gpkg.saveEdits", &p).unwrap_err();
+    assert!(e.contains("row 2 was deleted"), "{e}");
+    assert_eq!(counts(&mut s), (0, 1, 0));
+
+    // An insert rejected by a file-owned trigger rolls back an earlier UPDATE as well.
+    s.run("gpkg.discardEdits", &p).unwrap();
+    let r1 = row_of(&s, 1);
+    s.run("edit.setValue", &json!({"layer": "R", "row": r1, "field": "name", "value": "partial"})).unwrap();
+    s.run("edit.addFeature", &new_line("bad")).unwrap();
+    let before = changed_at();
+    let e = s.run("gpkg.saveEdits", &p).unwrap_err();
+    assert!(e.contains("bad name"), "{e}");
+    assert_eq!(name_of(1), "renamed");
+    assert_eq!(count(), 2);
+    assert_eq!(changed_at(), before);
+    assert_eq!(counts(&mut s), (1, 1, 0));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let original = std::fs::metadata(&path).unwrap().permissions();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let result = s.run("gpkg.saveEdits", &p);
+        std::fs::set_permissions(&path, original).unwrap();
+        let e = result.unwrap_err();
+        assert!(e.contains("read-only"), "{e}");
+        assert_eq!(counts(&mut s), (1, 1, 0));
+    }
+    s.run("gpkg.discardEdits", &p).unwrap();
+
+    // A limit scopes the baseline: rows not loaded are never treated as deletions.
+    let one = s.run("gpkg.addLayer", &json!({"path": path, "table": "roads", "limit": 1, "name": "One"})).unwrap();
+    assert_eq!((one["features"].as_u64(), one["matched"].as_u64()), (Some(1), Some(2)));
+    s.run("edit.setValue", &json!({"layer": "One", "row": 0, "field": "name", "value": "limited"})).unwrap();
+    assert_eq!(s.run("gpkg.saveEdits", &json!({"layer": "One"})).unwrap()["updated"], 1);
+    assert_eq!(count(), 2);
+    assert_eq!(name_of(4), "new");
+    assert_eq!(s.run("gpkg.discardEdits", &json!({"layer": "One"})).unwrap()["features"], 1);
+
+    // Required Z and M dimensions forbid changed/new geometry, not attribute-only saves.
+    for (sql, name) in [
+        ("UPDATE gpkg_geometry_columns SET z = 1, m = 0", "attributes with Z"),
+        ("UPDATE gpkg_geometry_columns SET z = 0, m = 1", "attributes with M"),
+    ] {
+        db.execute(sql, []).unwrap();
+        s.run("gpkg.discardEdits", &p).unwrap();
+        let r1 = row_of(&s, 1);
+        {
+            let l = s.map_mut().layer_mut(id).unwrap();
+            l.dataset.features[r1].geometry = Some(Geometry::Line(vec![moved.clone()]));
+            l.touch_geometry();
+        }
+        let blob: Vec<u8> = db.query_row("SELECT geom FROM roads WHERE fid = 1", [], |r| r.get(0)).unwrap();
+        let e = s.run("gpkg.saveEdits", &p).unwrap_err();
+        assert!(e.contains("Z or M"), "{e}");
+        assert_eq!(db.query_row("SELECT geom FROM roads WHERE fid = 1", [], |r| r.get::<_, Vec<u8>>(0)).unwrap(), blob);
+        s.run("gpkg.discardEdits", &p).unwrap();
+        s.run("edit.addFeature", &new_line("needs dimensions")).unwrap();
+        let e = s.run("gpkg.saveEdits", &p).unwrap_err();
+        assert!(e.contains("Z or M"), "{e}");
+        assert_eq!(count(), 2);
+        s.run("gpkg.discardEdits", &p).unwrap();
+        let r1 = row_of(&s, 1);
+        s.run("edit.setValue", &json!({"layer": "R", "row": r1, "field": "name", "value": name})).unwrap();
+        assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["updated"], 1);
+        assert_eq!(name_of(1), name);
+        assert_eq!(db.query_row("SELECT geom FROM roads WHERE fid = 1", [], |r| r.get::<_, Vec<u8>>(0)).unwrap(), blob);
+    }
+    for _ in 0..2 {
+        let discarded = s.run("gpkg.discardEdits", &p).unwrap();
+        assert_eq!((discarded["features"].as_u64(), discarded["matched"].as_u64()), (Some(2), Some(2)));
+        assert_eq!(counts(&mut s), (0, 0, 0));
+    }
+    assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["saved"], false);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct GpkgRegressionFixture {
+    dir: std::path::PathBuf,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl GpkgRegressionFixture {
+    fn new(name: &str) -> Self {
+        let serial = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("rustgis-gpkg-{name}-{}-{serial}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let fixture = Self { dir };
+        let db = rusqlite::Connection::open(fixture.path()).unwrap();
+        // No AUTOINCREMENT or R-tree triggers: external deletion and column renames exercise
+        // ordinary INTEGER PRIMARY KEY tables, not the export writer's schema.
+        db.execute_batch(
+            "CREATE TABLE gpkg_spatial_ref_sys (srs_name TEXT, srs_id INTEGER PRIMARY KEY, organization TEXT,
+                 organization_coordsys_id INTEGER, definition TEXT, description TEXT);
+             INSERT INTO gpkg_spatial_ref_sys VALUES ('WGS 84', 4326, 'EPSG', 4326, '', '');
+             CREATE TABLE gpkg_contents (table_name TEXT PRIMARY KEY, data_type TEXT, identifier TEXT,
+                 description TEXT, last_change TEXT, min_x DOUBLE, min_y DOUBLE, max_x DOUBLE, max_y DOUBLE, srs_id INTEGER);
+             INSERT INTO gpkg_contents (table_name, data_type, srs_id, last_change) VALUES ('roads', 'features', 4326, '2000-01-01T00:00:00.000Z');
+             CREATE TABLE gpkg_geometry_columns (table_name TEXT, column_name TEXT, geometry_type_name TEXT,
+                 srs_id INTEGER, z TINYINT, m TINYINT);
+             INSERT INTO gpkg_geometry_columns VALUES ('roads', 'geom', 'POINT', 4326, 0, 0);
+             CREATE TABLE roads (fid INTEGER PRIMARY KEY, geom BLOB, name TEXT, lanes INTEGER DEFAULT 2);",
+        )
+        .unwrap();
+        for (key, name) in [(1, "a"), (2, "b"), (3, "c")] {
+            db.execute(
+                "INSERT INTO roads (fid, geom, name) VALUES (?1, ?2, ?3)",
+                rusqlite::params![key, Self::point_blob(f64::from(key), 20.0), name],
+            )
+            .unwrap();
+        }
+        fixture
+    }
+
+    fn path(&self) -> std::path::PathBuf {
+        self.dir.join("roads.gpkg")
+    }
+
+    fn point_blob(x: f64, y: f64) -> Vec<u8> {
+        let mut blob = b"GP\x00\x03".to_vec();
+        blob.extend_from_slice(&4326i32.to_le_bytes());
+        for ordinate in [x, x, y, y] {
+            blob.extend_from_slice(&ordinate.to_le_bytes());
+        }
+        blob.push(1);
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        blob.extend_from_slice(&x.to_le_bytes());
+        blob.extend_from_slice(&y.to_le_bytes());
+        blob
+    }
+
+    fn session(&self) -> Session {
+        let mut s = Session::new(Project::default());
+        let loaded = s.run("gpkg.addLayer", &json!({"path": self.path(), "table": "roads", "name": "R"})).unwrap();
+        assert_eq!(loaded["features"], 3);
+        s.map_mut().editing.settings.enabled = true;
+        s
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for GpkgRegressionFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_gpkg_regression_clean(s: &mut Session) {
+    let pending = s.run("gpkg.pendingEdits", &json!({"layer": "R"})).unwrap();
+    assert_eq!((pending["inserts"].as_u64(), pending["updates"].as_u64(), pending["deletes"].as_u64()), (Some(0), Some(0), Some(0)));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_delete_trigger_restored_rows_rejoin_the_saved_baseline() {
+    use rustgis_data::{Coord, Geometry, Value};
+    let fixture = GpkgRegressionFixture::new("restored-delete");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER restore_deleted AFTER DELETE ON roads WHEN OLD.fid=1 BEGIN
+         INSERT INTO roads(fid,geom,name,lanes) VALUES(OLD.fid,OLD.geom,'restored',9); END;",
+    )
+    .unwrap();
+    let mut s = fixture.session();
+    s.run("select.rows", &json!({"layer":"R","rows":[0,1]})).unwrap();
+    s.run("edit.delete", &json!({})).unwrap();
+    let result = s.run("gpkg.saveEdits", &json!({"layer":"R"})).unwrap();
+    assert_eq!(result["deleted"], 1, "only key 2 remained deleted after triggers");
+    let layer = s.map().layer_by_name("R").unwrap();
+    let mut keys: Vec<_> = layer.dataset.features.iter().map(|f| f.id).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec![1, 3]);
+    let row = layer.dataset.features.iter().position(|f| f.id == 1).unwrap();
+    assert_eq!(layer.dataset.value(row, layer.dataset.field_index("name").unwrap()), &Value::Text("restored".into()));
+    assert_eq!(layer.dataset.value(row, layer.dataset.field_index("lanes").unwrap()), &Value::Int(9));
+    assert_eq!(layer.dataset.features[row].geometry, Some(Geometry::Point(Coord::new(1.0, 20.0))));
+    assert_gpkg_regression_clean(&mut s);
+    s.run("edit.setValue", &json!({"layer":"R","row":row,"field":"name","value":"next"})).unwrap();
+    assert_eq!(s.run("gpkg.saveEdits", &json!({"layer":"R"})).unwrap()["updated"], 1);
+    let stored: (String, i64) = db.query_row("SELECT name,lanes FROM roads WHERE fid=1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!(stored, ("next".into(), 9));
+    assert_eq!(db.query_row("SELECT count(*) FROM roads", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+    assert_gpkg_regression_clean(&mut s);
+    let project = fixture.dir.join("restored.rgis");
+    s.run("project.saveAs", &json!({"path":project})).unwrap();
+    let mut reopened = Session::new(Project::default());
+    reopened.run("project.open", &json!({"path":project})).unwrap();
+    assert_gpkg_regression_clean(&mut reopened);
+    assert_eq!(reopened.run("gpkg.saveEdits", &json!({"layer":"R"})).unwrap()["saved"], false);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_cross_row_triggers_refresh_residents_without_expanding_scope() {
+    use rustgis_data::{Coord, Geometry, Value};
+    for deleted in [false, true] {
+        let fixture = GpkgRegressionFixture::new("resident-triggers");
+        let db = rusqlite::Connection::open(fixture.path()).unwrap();
+        let mut s = fixture.session();
+        let p = json!({"layer":"R"});
+        s.run("edit.addField", &json!({"layer":"R","name":"local","type":"text"})).unwrap();
+        for row in 0..3 {
+            s.run("edit.setValue", &json!({"layer":"R","row":row,"field":"local","value":format!("local {row}")})).unwrap();
+        }
+        s.run("gpkg.saveEdits", &p).unwrap();
+        assert_gpkg_regression_clean(&mut s);
+        s.run("gpkg.addLayer", &json!({"path":fixture.path(),"table":"roads","name":"Other"})).unwrap();
+        let action = if deleted {
+            "DELETE FROM roads WHERE fid=2;"
+        } else {
+            "UPDATE roads SET name='intermediate',lanes=8 WHERE fid=2;
+             UPDATE roads SET name='trigger result',lanes=9,geom=(SELECT geom FROM roads WHERE fid=3) WHERE fid=2;"
+        };
+        db.execute_batch(&format!(
+            "CREATE TRIGGER affect_resident AFTER UPDATE OF name ON roads WHEN NEW.fid=1 AND NEW.name='save row1' BEGIN
+             {action}
+             INSERT INTO roads(fid,geom,name) VALUES(4,NEW.geom,'trigger only');
+             END;"
+        ))
+        .unwrap();
+        s.run("edit.setValue", &json!({"layer":"R","row":0,"field":"name","value":"save row1"})).unwrap();
+        s.run(
+            "edit.addFeature",
+            &json!({"layer":"R","geometry":{"type":"Point","coordinates":[10,20]},
+                "attributes":{"name":"synthetic","local":"new local"}}),
+        )
+        .unwrap();
+        // A surviving selected row follows its identity when an earlier resident disappears.
+        s.run("select.rows", &json!({"layer":"R","rows":[2]})).unwrap();
+        let saved = s.run("gpkg.saveEdits", &p).unwrap();
+        assert_eq!(saved["deleted"], 0, "trigger-only deletions are not submitted deletions");
+        let key = saved["keys"][0].as_u64().unwrap();
+        assert!(key > 4);
+        let layer = s.map().layer_by_name("R").unwrap();
+        let ds = &layer.dataset;
+        let row_of = |key| ds.features.iter().position(|f| f.id == key).unwrap();
+        assert!(!ds.features.iter().any(|f| f.id == 4), "trigger-only inserts must not replace a pending synthetic feature");
+        assert_eq!(ds.value(row_of(key), ds.field_index("name").unwrap()), &Value::Text("synthetic".into()));
+        assert_eq!(ds.value(row_of(key), ds.field_index("local").unwrap()), &Value::Text("new local".into()));
+        assert_eq!(layer.selection, vec![row_of(3)]);
+        if deleted {
+            assert!(!ds.features.iter().any(|f| f.id == 2));
+            assert_eq!(ds.features.len(), 3);
+        } else {
+            assert_eq!(ds.features.len(), 4);
+            assert_eq!(ds.value(row_of(2), ds.field_index("name").unwrap()), &Value::Text("trigger result".into()));
+            assert_eq!(ds.value(row_of(2), ds.field_index("lanes").unwrap()), &Value::Int(9));
+            assert_eq!(ds.value(row_of(2), ds.field_index("local").unwrap()), &Value::Text("local 1".into()));
+            assert_eq!(ds.features[row_of(2)].geometry, Some(Geometry::Point(Coord::new(3.0, 20.0))));
+        }
+        let other = &s.map().layer_by_name("Other").unwrap().dataset;
+        assert_eq!(other.value(1, other.field_index("name").unwrap()), &Value::Text("b".into()));
+        assert_eq!(other.features.len(), 3, "saving one copy must not refresh another");
+        let next_key = if deleted { 3 } else { 2 };
+        let next_row = row_of(next_key);
+        assert_gpkg_regression_clean(&mut s);
+        s.run("edit.setValue", &json!({"layer":"R","row":next_row,"field":"name","value":"next edit"})).unwrap();
+        assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["updated"], 1);
+        let stored: (String, i64) =
+            db.query_row("SELECT name,lanes FROM roads WHERE fid=?1", [next_key as i64], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(stored, ("next edit".into(), if deleted { 2 } else { 9 }));
+        assert_gpkg_regression_clean(&mut s);
+        let project = fixture.dir.join("residents.rgis");
+        s.run("project.saveAs", &json!({"path":project})).unwrap();
+        let mut reopened = Session::new(Project::default());
+        reopened.run("project.open", &json!({"path":project})).unwrap();
+        assert_gpkg_regression_clean(&mut reopened);
+        assert_eq!(reopened.run("gpkg.saveEdits", &p).unwrap()["saved"], false);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_trigger_snapshots_respect_partial_loaded_scope() {
+    let fixture = GpkgRegressionFixture::new("partial-residents");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER affect_unloaded AFTER UPDATE OF name ON roads WHEN NEW.fid=1 BEGIN
+         UPDATE roads SET name='outside scope' WHERE fid=2;
+         DELETE FROM roads WHERE fid=3;
+         INSERT INTO roads(fid,name) VALUES(9,'trigger insert');
+         END;",
+    )
+    .unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("gpkg.addLayer", &json!({"path":fixture.path(),"table":"roads","name":"R","limit":1})).unwrap();
+    s.map_mut().editing.settings.enabled = true;
+    s.run("edit.setValue", &json!({"layer":"R","row":0,"field":"name","value":"limited"})).unwrap();
+    let saved = s.run("gpkg.saveEdits", &json!({"layer":"R"})).unwrap();
+    assert_eq!(saved["deleted"], 0);
+    let keys: Vec<_> = s.map().layer_by_name("R").unwrap().dataset.features.iter().map(|f| f.id).collect();
+    assert_eq!(keys, vec![1]);
+    let stored: Vec<(i64, String)> = db
+        .prepare("SELECT fid,name FROM roads ORDER BY fid")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(stored, vec![(1, "limited".into()), (2, "outside scope".into()), (9, "trigger insert".into())]);
+    assert_gpkg_regression_clean(&mut s);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_trigger_rebuild_rejects_a_valid_envelope_with_unreadable_wkb() {
+    use rustgis_data::{Coord, Geometry};
+    let fixture = GpkgRegressionFixture::new("unreadable-enveloped-body");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    let mut bad = GpkgRegressionFixture::point_blob(3.0, 20.0);
+    bad.truncate(40);
+    bad.push(0);
+    db.execute("UPDATE roads SET geom=?1 WHERE fid=3", [&bad]).unwrap();
+    db.execute_batch(
+        "CREATE VIRTUAL TABLE rtree_roads_geom USING rtree(id,minx,maxx,miny,maxy);
+         INSERT INTO rtree_roads_geom VALUES(1,1,1,20,20),(2,2,2,20,20),(3,3,3,20,20);",
+    )
+    .unwrap();
+    let index = || {
+        db.prepare("SELECT id,minx,maxx,miny,maxy FROM rtree_roads_geom ORDER BY id")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?, r.get::<_, f64>(3)?, r.get::<_, f64>(4)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let mut s = Session::new(Project::default());
+    let loaded = s.run("gpkg.addLayer", &json!({"path":fixture.path(),"table":"roads","name":"R"})).unwrap();
+    assert_eq!((loaded["features"].as_u64(), loaded["skipped"].as_u64()), (Some(2), Some(1)));
+    let id = loaded["layer"].as_u64().unwrap() as u32;
+    // Ordinary saves leave the skipped row and its existing index entry untouched.
+    s.map_mut().layer_mut(id).unwrap().dataset.features[0].geometry = Some(Geometry::Point(Coord::new(10.0, 20.0)));
+    s.run("gpkg.saveEdits", &json!({"layer":"R"})).unwrap();
+    assert_eq!(index().last(), Some(&(3, 3.0, 3.0, 20.0, 20.0)));
+    db.execute_batch(
+        "CREATE TRIGGER force_rebuild AFTER UPDATE OF name ON roads WHEN NEW.fid=1
+         BEGIN UPDATE roads SET lanes=9 WHERE fid=2; END;",
+    )
+    .unwrap();
+    let before_index = index();
+    let before_revision: String = db.query_row("SELECT last_change FROM gpkg_contents", [], |r| r.get(0)).unwrap();
+    s.map_mut().editing.settings.enabled = true;
+    s.run("edit.setValue", &json!({"layer":"R","row":0,"field":"name","value":"must roll back"})).unwrap();
+    let error = s.run("gpkg.saveEdits", &json!({"layer":"R"})).unwrap_err();
+    assert!(error.contains("stored geometry can't be read"), "{error}");
+    assert_eq!(index(), before_index);
+    assert_eq!(db.query_row("SELECT last_change FROM gpkg_contents", [], |r| r.get::<_, String>(0)).unwrap(), before_revision);
+    assert_eq!(db.query_row("SELECT name FROM roads WHERE fid=1", [], |r| r.get::<_, String>(0)).unwrap(), "a");
+    assert_eq!(db.query_row("SELECT lanes FROM roads WHERE fid=2", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+    assert_eq!(db.query_row("SELECT geom FROM roads WHERE fid=3", [], |r| r.get::<_, Vec<u8>>(0)).unwrap(), bad);
+    assert_eq!(s.run("gpkg.pendingEdits", &json!({"layer":"R"})).unwrap()["updates"], 1);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_template_drops_edit_binding() {
+    let fixture = GpkgRegressionFixture::new("template");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    let rows = || {
+        db.prepare("SELECT fid, name, lanes, geom FROM roads ORDER BY fid")
+            .unwrap()
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, Vec<u8>>(3)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let before = rows();
+    let mut s = fixture.session();
+    let template = fixture.dir.join("roads.rgistemplate");
+    s.run("project.saveTemplate", &json!({"path": template})).unwrap();
+    let mut restored = Session::new(Project::default());
+    restored.run("project.fromTemplate", &json!({"path": template, "name": "Road setup"})).unwrap();
+    let layer = restored.map().layer_by_name("R").unwrap();
+    assert!(layer.dataset.features.is_empty());
+    assert!(layer.gpkg.is_none());
+    let error = restored.run("gpkg.saveEdits", &json!({"layer": "R"})).unwrap_err();
+    assert!(error.contains("not a GeoPackage layer loaded for editing"), "{error}");
+    assert_eq!(rows(), before, "saving a feature-less template must not delete or modify its original source");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_stale_project_insert_replay_is_refused() {
+    for undo_before_project_save in [false, true] {
+        let fixture = GpkgRegressionFixture::new("stale-insert");
+        let db = rusqlite::Connection::open(fixture.path()).unwrap();
+        let mut s = fixture.session();
+        let project = fixture.dir.join("pending.rgis");
+        s.run(
+            "edit.addFeature",
+            &json!({
+                "layer": "R", "geometry": {"type": "Point", "coordinates": [10, 20]},
+                "attributes": {"name": "one new row"}
+            }),
+        )
+        .unwrap();
+        if undo_before_project_save {
+            s.run("gpkg.saveEdits", &json!({"layer": "R"})).unwrap();
+            assert!(s.undo());
+            s.run("project.saveAs", &json!({"path": project})).unwrap();
+        } else {
+            s.run("project.saveAs", &json!({"path": project})).unwrap();
+            // Pending inserts from a project are safe before their source revision changes.
+            let mut fresh = Session::new(Project::default());
+            fresh.run("project.open", &json!({"path": project})).unwrap();
+            assert_eq!(fresh.run("gpkg.saveEdits", &json!({"layer": "R"})).unwrap()["inserted"], 1);
+        }
+        let mut reopened = Session::new(Project::default());
+        reopened.run("project.open", &json!({"path": project})).unwrap();
+        assert!(reopened.run("gpkg.saveEdits", &json!({"layer": "R"})).is_err());
+        assert_eq!(db.query_row("SELECT count(*) FROM roads", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
+        assert_eq!(reopened.run("gpkg.pendingEdits", &json!({"layer": "R"})).unwrap()["inserts"], 1);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_project_requires_a_baseline_but_allows_an_empty_loaded_table() {
+    let fixture = GpkgRegressionFixture::new("required-baseline");
+    let mut s = fixture.session();
+    let project = fixture.dir.join("missing.rgis");
+    s.run("project.saveAs", &json!({"path": project})).unwrap();
+    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&project).unwrap()).unwrap();
+    saved["maps"][0]["layers"][0]["gpkg"].as_object_mut().unwrap().remove("versions");
+    std::fs::write(&project, serde_json::to_vec(&saved).unwrap()).unwrap();
+    assert!(Session::new(Project::default()).run("project.open", &json!({"path": project})).is_err());
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    assert_eq!(db.query_row("SELECT count(*) FROM roads", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+
+    db.execute("DELETE FROM roads", []).unwrap();
+    let mut empty = Session::new(Project::default());
+    empty.run("gpkg.addLayer", &json!({"path": fixture.path(), "table": "roads", "name": "R"})).unwrap();
+    empty.map_mut().editing.settings.enabled = true;
+    empty
+        .run(
+            "edit.addFeature",
+            &json!({
+                "layer": "R", "geometry": {"type": "Point", "coordinates": [10, 20]}, "attributes": {"name": "first"}
+            }),
+        )
+        .unwrap();
+    empty.run("project.saveAs", &json!({"path": project})).unwrap();
+    let mut reopened = Session::new(Project::default());
+    reopened.run("project.open", &json!({"path": project})).unwrap();
+    assert_eq!(reopened.run("gpkg.saveEdits", &json!({"layer": "R"})).unwrap()["inserted"], 1);
+    assert_eq!(db.query_row("SELECT name FROM roads", [], |r| r.get::<_, String>(0)).unwrap(), "first");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_srs_change_refuses_attribute_save_until_discard() {
+    let fixture = GpkgRegressionFixture::new("changed-srs");
+    let mut s = fixture.session();
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    let before: Vec<u8> = db.query_row("SELECT geom FROM roads WHERE fid = 1", [], |r| r.get(0)).unwrap();
+    db.execute("UPDATE gpkg_geometry_columns SET srs_id = 3857", []).unwrap();
+    s.run("edit.setValue", &json!({"layer": "R", "row": 0, "field": "name", "value": "pending"})).unwrap();
+    assert!(s.run("gpkg.saveEdits", &json!({"layer": "R"})).is_err());
+    assert_eq!(db.query_row("SELECT geom FROM roads WHERE fid = 1", [], |r| r.get::<_, Vec<u8>>(0)).unwrap(), before);
+    assert_eq!(db.query_row("SELECT name FROM roads WHERE fid = 1", [], |r| r.get::<_, String>(0)).unwrap(), "a");
+    assert_eq!(s.run("gpkg.pendingEdits", &json!({"layer": "R"})).unwrap()["updates"], 1);
+    s.run("gpkg.discardEdits", &json!({"layer": "R"})).unwrap();
+    s.run("edit.setValue", &json!({"layer": "R", "row": 0, "field": "name", "value": "after reload"})).unwrap();
+    assert_eq!(s.run("gpkg.saveEdits", &json!({"layer": "R"})).unwrap()["updated"], 1);
+    assert_eq!(db.query_row("SELECT geom FROM roads WHERE fid = 1", [], |r| r.get::<_, Vec<u8>>(0)).unwrap(), before);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_discard_refreshes_geometry_family_and_visible_point_symbols() {
+    let fixture = GpkgRegressionFixture::new("changed-geometry-family");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    db.execute_batch("UPDATE gpkg_geometry_columns SET geometry_type_name = 'LINESTRING'; UPDATE roads SET geom = NULL;").unwrap();
+    let mut s = fixture.session();
+    db.execute("UPDATE gpkg_geometry_columns SET geometry_type_name = 'POINT'", []).unwrap();
+    db.execute("UPDATE roads SET geom = ?1 WHERE fid = 1", [GpkgRegressionFixture::point_blob(10.0, 20.0)]).unwrap();
+    s.run("gpkg.discardEdits", &json!({"layer": "R"})).unwrap();
+    let layer = s.map().layer_by_name("R").unwrap();
+    assert_eq!(layer.geometry_type(), rustgis_data::GeometryType::Point);
+    assert!(layer.renderer.base_symbol().size > 0.0, "reloaded point features need visible markers");
+    s.run(
+        "edit.addFeature",
+        &json!({
+            "layer": "R", "geometry": {"type": "Point", "coordinates": [11, 21]}, "attributes": {"name": "new point"}
+        }),
+    )
+    .unwrap();
+    assert_eq!(s.run("gpkg.saveEdits", &json!({"layer": "R"})).unwrap()["inserted"], 1);
+    let stored: Vec<u8> = db.query_row("SELECT geom FROM roads WHERE name = 'new point'", [], |r| r.get(0)).unwrap();
+    assert_eq!(rustgis_data::wkb::decode(&stored[40..]), Some(rustgis_data::Geometry::Point(rustgis_data::Coord::new(11.0, 21.0))));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_saved_defaults_and_trigger_values_become_baseline() {
+    use rustgis_data::source::{Request, open_path};
+    use rustgis_data::{Coord, Geometry, Value};
+
+    let fixture = GpkgRegressionFixture::new("stored-values");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    let mut s = fixture.session();
+    let p = json!({"layer": "R"});
+    let add = |name: &str| json!({"layer": "R", "geometry": {"type": "Point", "coordinates": [10, 20]}, "attributes": {"name": name}});
+    let row_of = |s: &Session, key: u64| s.map().layer_by_name("R").unwrap().dataset.features.iter().position(|f| f.id == key).unwrap();
+    let lanes_of = |s: &Session, key: u64| {
+        let dataset = &s.map().layer_by_name("R").unwrap().dataset;
+        dataset.value(row_of(s, key), dataset.field_index("lanes").unwrap()).clone()
+    };
+    let name_of = |s: &Session, key: u64| {
+        let dataset = &s.map().layer_by_name("R").unwrap().dataset;
+        dataset.value(row_of(s, key), dataset.field_index("name").unwrap()).clone()
+    };
+    let geometry_of = |s: &Session, key: u64| s.map().layer_by_name("R").unwrap().dataset.features[row_of(s, key)].geometry.clone();
+    let stored_lanes = |key: u64| -> i64 { db.query_row("SELECT lanes FROM roads WHERE fid = ?1", [key as i64], |r| r.get(0)).unwrap() };
+
+    s.run("edit.addFeature", &add("default")).unwrap();
+    let saved = s.run("gpkg.saveEdits", &p).unwrap();
+    let default_key = saved["keys"][0].as_u64().unwrap();
+    assert_eq!(lanes_of(&s, default_key), Value::Int(2), "omitted attributes must reflect SQLite defaults after saving");
+    assert_eq!(stored_lanes(default_key), 2);
+    assert_gpkg_regression_clean(&mut s);
+    let row = row_of(&s, default_key);
+    s.run("edit.setValue", &json!({"layer": "R", "row": row, "field": "name", "value": "default renamed"})).unwrap();
+    assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["updated"], 1);
+    assert_eq!(stored_lanes(default_key), 2, "a later name edit must not replace the stored default with NULL");
+    assert_gpkg_regression_clean(&mut s);
+
+    db.execute_batch("CREATE TABLE normalized_shapes (kind TEXT PRIMARY KEY, geom BLOB);").unwrap();
+    for (kind, x, y) in [("insert", 30.0, 40.0), ("update", 31.0, 41.0)] {
+        db.execute("INSERT INTO normalized_shapes VALUES (?1, ?2)", rusqlite::params![kind, GpkgRegressionFixture::point_blob(x, y)])
+            .unwrap();
+    }
+    db.execute_batch(
+        "CREATE TRIGGER normalize_insert AFTER INSERT ON roads BEGIN
+             UPDATE roads SET name = upper(trim(NEW.name)), lanes = 7,
+                 geom = (SELECT geom FROM normalized_shapes WHERE kind = 'insert') WHERE fid = NEW.fid;
+         END;
+         CREATE TRIGGER normalize_update AFTER UPDATE OF name ON roads
+             WHEN NEW.name != upper(trim(NEW.name)) BEGIN
+             UPDATE roads SET name = upper(trim(NEW.name)), lanes = NEW.lanes + 1,
+                 geom = (SELECT geom FROM normalized_shapes WHERE kind = 'update') WHERE fid = NEW.fid;
+         END;",
+    )
+    .unwrap();
+    s.run("edit.addFeature", &add(" inserted ")).unwrap();
+    let key = s.run("gpkg.saveEdits", &p).unwrap()["keys"][0].as_u64().unwrap();
+    assert_eq!(name_of(&s, key), Value::Text("INSERTED".into()));
+    assert_eq!(lanes_of(&s, key), Value::Int(7));
+    assert_eq!(geometry_of(&s, key), Some(Geometry::Point(Coord::new(30.0, 40.0))));
+    assert_gpkg_regression_clean(&mut s);
+
+    let row = row_of(&s, key);
+    s.run("edit.setValue", &json!({"layer": "R", "row": row, "field": "name", "value": " updated "})).unwrap();
+    assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["updated"], 1);
+    assert_eq!(name_of(&s, key), Value::Text("UPDATED".into()));
+    assert_eq!(lanes_of(&s, key), Value::Int(8));
+    assert_eq!(geometry_of(&s, key), Some(Geometry::Point(Coord::new(31.0, 41.0))));
+    assert_gpkg_regression_clean(&mut s);
+
+    let row = row_of(&s, key);
+    s.run("edit.setValue", &json!({"layer": "R", "row": row, "field": "name", "value": "NEXT"})).unwrap();
+    assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["updated"], 1);
+    let stored: (String, i64) =
+        db.query_row("SELECT name, lanes FROM roads WHERE fid = ?1", [key as i64], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!(stored, ("NEXT".into(), 8), "an ordinary later edit must retain trigger-normalized attributes");
+    let batch = open_path(&fixture.path(), Some("roads")).unwrap().read(&Request::all()).unwrap();
+    assert_eq!(
+        batch.features.iter().find(|f| f.id == key).unwrap().geometry,
+        Some(Geometry::Point(Coord::new(31.0, 41.0))),
+        "an ordinary later edit must retain trigger-normalized geometry",
+    );
+    assert_gpkg_regression_clean(&mut s);
+    assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["saved"], false);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_insert_reserves_externally_deleted_loaded_keys() {
+    use rustgis_data::Value;
+
+    let fixture = GpkgRegressionFixture::new("reserved-keys");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    let mut s = fixture.session();
+    let p = json!({"layer": "R"});
+    db.execute("DELETE FROM roads WHERE fid = 3", []).unwrap();
+    s.run("edit.addFeature", &json!({"layer": "R", "geometry": {"type": "Point", "coordinates": [10, 20]}, "attributes": {"name": "new"}}))
+        .unwrap();
+    let saved = s.run("gpkg.saveEdits", &p).unwrap();
+    let key = saved["keys"][0].as_u64().unwrap();
+    assert!(key > 3, "a newly committed row must not alias the externally deleted loaded key: {saved}");
+    {
+        let dataset = &s.map().layer_by_name("R").unwrap().dataset;
+        assert_eq!(dataset.features.len(), 4);
+        let ids: std::collections::HashSet<_> = dataset.features.iter().map(|f| f.id).collect();
+        assert_eq!(ids.len(), 4, "the unchanged stale feature and inserted feature must remain distinguishable");
+        let name = dataset.field_index("name").unwrap();
+        assert_eq!(dataset.features.iter().find(|f| f.id == 3).unwrap().attrs[name], Value::Text("c".into()));
+        assert_eq!(dataset.features.iter().find(|f| f.id == key).unwrap().attrs[name], Value::Text("new".into()));
+    }
+    assert_gpkg_regression_clean(&mut s);
+    for _ in 0..2 {
+        assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["saved"], false, "saving again must not insert a phantom duplicate");
+    }
+    let rows: Vec<(i64, String)> = db
+        .prepare("SELECT fid, name FROM roads ORDER BY fid")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows, vec![(1, "a".into()), (2, "b".into()), (key as i64, "new".into())]);
+    assert_eq!(s.run("gpkg.discardEdits", &p).unwrap()["features"], 3);
+    let features = &s.map().layer_by_name("R").unwrap().dataset.features;
+    assert!(!features.iter().any(|f| f.id == 3));
+    assert!(features.iter().any(|f| f.id == key));
+    assert_gpkg_regression_clean(&mut s);
+}
+
+/// The declaration is compared with the one loaded, not with a table reopened just before saving.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_command_save_refuses_a_declaration_changed_since_loading() {
+    for (mutation, label) in [
+        ("UPDATE gpkg_geometry_columns SET geometry_type_name = 'MULTIPOINT'", "type"),
+        ("UPDATE gpkg_geometry_columns SET z = 1", "z"),
+        ("UPDATE gpkg_geometry_columns SET m = 1", "m"),
+    ] {
+        let fixture = GpkgRegressionFixture::new(&format!("declaration-{label}"));
+        let db = rusqlite::Connection::open(fixture.path()).unwrap();
+        let name_of = || -> String { db.query_row("SELECT name FROM roads WHERE fid = 1", [], |r| r.get(0)).unwrap() };
+        let mut s = fixture.session();
+        let p = json!({"layer": "R"});
+        db.execute(mutation, []).unwrap();
+        s.run("edit.setValue", &json!({"layer": "R", "row": 0, "field": "name", "value": "must not save"})).unwrap();
+        let e = s.run("gpkg.saveEdits", &p).unwrap_err();
+        assert!(e.contains("changed shape"), "{label}: {e}");
+        assert_eq!(name_of(), "a", "{label}");
+        // Discard reloads the current declaration, after which attribute saves work again.
+        s.run("gpkg.discardEdits", &p).unwrap();
+        s.run("edit.setValue", &json!({"layer": "R", "row": 0, "field": "name", "value": "after reload"})).unwrap();
+        assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["updated"], 1, "{label}");
+        assert_eq!(name_of(), "after reload", "{label}");
+    }
+}
+
+/// Reopened projects keep exact coordinates (no edits appear, nothing is rewritten), and the
+/// globe locator's simplified sketches can't be saved over the source.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_reopened_polygons_stay_clean_and_locator_sketches_are_unbound() {
+    use rustgis_data::raster::Crs;
+    use rustgis_data::source::gpkg;
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value};
+
+    let fixture = GpkgRegressionFixture::new("locator-sketch");
+    let path = fixture.dir.join("parcels.gpkg");
+    let mut data = Dataset::new("parcels", GeometryType::Polygon, vec![Field::new("name", FieldType::Text)]);
+    for k in 1..=3 {
+        let centre = 10.0 * f64::from(k);
+        // Many irregular vertices: coordinates whose shortest decimal form needs exact parsing.
+        let ring = (0..=64)
+            .map(|i| {
+                let j = i % 64;
+                let a = std::f64::consts::TAU * f64::from(j) / 64.0;
+                Coord::new(centre + 5.0 * a.cos() + 0.01 * f64::from(j % 3), centre + 5.0 * a.sin())
+            })
+            .collect();
+        data.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Value::Text(format!("p{k}"))]);
+    }
+    gpkg::write_in(&data, &path, Crs::LonLat).unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let blobs = || -> Vec<Vec<u8>> {
+        db.prepare("SELECT geom FROM parcels ORDER BY fid").unwrap().query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+    };
+    let before = blobs();
+    let mut s = Session::new(Project::default());
+    s.run("gpkg.addLayer", &json!({"path": path, "table": "parcels", "name": "P"})).unwrap();
+    let project = fixture.dir.join("parcels.rgis");
+    s.run("project.saveAs", &json!({"path": project})).unwrap();
+
+    let mut s = Session::new(Project::default());
+    s.run("project.open", &json!({"path": project})).unwrap();
+    s.map_mut().editing.settings.enabled = true;
+    let p = json!({"layer": "P"});
+    let pending = s.run("gpkg.pendingEdits", &p).unwrap();
+    assert_eq!((pending["inserts"].as_u64(), pending["updates"].as_u64(), pending["deletes"].as_u64()), (Some(0), Some(0), Some(0)));
+    assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["saved"], false);
+    assert_eq!(blobs(), before, "reopening a project must not rewrite untouched rows");
+
+    let locator = s.run("layout.publication", &json!({"locator": "globe"})).unwrap()["locator"].as_str().unwrap().to_string();
+    let sketch = s.project.maps.iter().find(|m| m.name == locator).unwrap();
+    let layer = sketch.layer_by_name("P").unwrap();
+    assert!(layer.gpkg.is_none() && layer.postgis.is_none(), "a simplified sketch must not keep the source binding");
+    s.run("map.activate", &json!({"name": locator})).unwrap();
+    let e = s.run("gpkg.saveEdits", &p).unwrap_err();
+    assert!(e.contains("not a GeoPackage layer loaded for editing"), "{e}");
+    assert_eq!(blobs(), before);
+}
+
+/// A layer bound to both sources (a hand-made project) reserves both baselines' keys.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_new_features_avoid_keys_of_either_bound_baseline() {
+    let fixture = GpkgRegressionFixture::new("dual-binding");
+    let mut s = fixture.session();
+    let id = s.map().layer_by_name("R").unwrap().id;
+    s.map_mut().layer_mut(id).unwrap().postgis = Some(rustgis_map::source::PostgisEdit {
+        origin: rustgis_map::source::PostgisOrigin {
+            database: "postgres:host=127.0.0.1 port=1 dbname=gis".into(),
+            table: "roads".into(),
+            family: None,
+            crs: None,
+        },
+        key: "fid".into(),
+        srid: 4326,
+        writable: false,
+        condition: None,
+        limit: 0,
+        versions: Default::default(),
+    });
+    let r3 = s.map().layer(id).unwrap().dataset.features.iter().position(|f| f.id == 3).unwrap();
+    s.map_mut().layer_mut(id).unwrap().selection = vec![r3];
+    s.active_layer = Some(id);
+    s.run("edit.delete", &json!({})).unwrap();
+    s.run("edit.addFeature", &json!({"layer": "R", "geometry": {"type": "Point", "coordinates": [10, 20]}})).unwrap();
+    let ids: Vec<u64> = s.map().layer(id).unwrap().dataset.features.iter().map(|f| f.id).collect();
+    assert!(!ids.contains(&3), "a new feature must not take the GeoPackage key it deleted: {ids:?}");
+    assert!(ids.iter().any(|&k| k > 3), "{ids:?}");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_discard_refreshes_renamed_key_and_geometry() {
+    use rustgis_data::source::{Request, open_path};
+    use rustgis_data::{Coord, Geometry};
+
+    let fixture = GpkgRegressionFixture::new("renamed-columns");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    let mut s = fixture.session();
+    let p = json!({"layer": "R"});
+    db.execute_batch(
+        "ALTER TABLE roads RENAME COLUMN fid TO id;
+         ALTER TABLE roads RENAME COLUMN geom TO shape;
+         UPDATE gpkg_geometry_columns SET column_name = 'shape' WHERE table_name = 'roads';",
+    )
+    .unwrap();
+    assert_eq!(s.run("gpkg.discardEdits", &p).unwrap()["features"], 3);
+    let layer = s.map().layer_by_name("R").unwrap();
+    let binding = layer.gpkg.as_ref().unwrap();
+    assert_eq!(binding.key, "id");
+    assert_eq!(binding.geometry, "shape");
+    let id = layer.id;
+    let row = layer.dataset.features.iter().position(|f| f.id == 1).unwrap();
+    s.run("edit.setValue", &json!({"layer": "R", "row": row, "field": "name", "value": "renamed columns work"})).unwrap();
+    let moved = Geometry::Point(Coord::new(15.0, 25.0));
+    {
+        let layer = s.map_mut().layer_mut(id).unwrap();
+        layer.dataset.features[row].geometry = Some(moved.clone());
+        layer.touch_geometry();
+    }
+    assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["updated"], 1);
+    assert_eq!(db.query_row("SELECT name FROM roads WHERE id = 1", [], |r| r.get::<_, String>(0)).unwrap(), "renamed columns work");
+    let batch = open_path(&fixture.path(), Some("roads")).unwrap().read(&Request::all()).unwrap();
+    assert_eq!(batch.features.iter().find(|f| f.id == 1).unwrap().geometry, Some(moved));
+    assert_eq!(batch.features.len(), 3);
+    assert_gpkg_regression_clean(&mut s);
+    assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["saved"], false);
 }
 
 #[test]
@@ -20196,4 +21502,86 @@ fn geolibre_offline_snapshots_cannot_persist_or_restore_pending_downloads() {
     let recovered: crate::project::Project = serde_json::from_str(&s.project.clone().recovery_text().unwrap()).unwrap();
     assert!(recovered.offline_areas[0].data.layers.iter().all(|l| l.dataset.source.as_deref() != Some("geolibre-pending:offline-test")));
     assert!(!recovered.offline_areas[0].data.layers.is_empty());
+}
+
+#[test]
+fn merge_reads_complete_streamed_inputs_and_supports_undo() {
+    let path = grid_fgb("merge", 3);
+    let mut s = Session::new(Project::default());
+    let loaded = s.run("layer.addData", &json!({"path":path,"stream":true})).unwrap();
+    let id = loaded["layer"].as_u64().unwrap() as u32;
+    let name = s.map().layer(id).unwrap().name.clone();
+    let total = s.map().layer(id).unwrap().load_all().unwrap().features.len();
+    assert_eq!(total, 9);
+    // A streamed map layer only holds its current window, not every source feature.
+    s.map_mut().layer_mut(id).unwrap().dataset.features.truncate(1);
+    assert!(s.map().layer(id).unwrap().dataset.features.len() < total);
+    let mut other = rustgis_data::Dataset::new("Other", rustgis_data::GeometryType::Point, vec![]);
+    other.push_next(Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(0.0, 0.0))), vec![]);
+    s.map_mut().add_dataset(other);
+    for inputs in [json!(format!("{name};Other")), json!([name, "Other"]), json!([path.to_string_lossy(), "Other"])] {
+        let before = s.map().layers.len();
+        s.run("gp.run", &json!({"tool":"merge","params":{"inputs":inputs,"output":"Merged"}})).unwrap();
+        assert_eq!(s.map().layer_by_name("Merged").unwrap().dataset.features.len(), total + 1);
+        assert_eq!(s.map().layers.len(), before + 1);
+        assert!(s.undo());
+        assert!(s.map().layer_by_name("Merged").is_none());
+        assert!(s.map().layer(id).unwrap().is_streamed());
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn merge_file_inputs_use_the_existing_file_access_check() {
+    let s = Session::new(Project::default());
+    for tool in ["merge", "Merge"] {
+        let reach = crate::cmd::plugins::reaches(
+            s.registry.get("gp.run").unwrap(),
+            &json!({"tool":tool,"params":{"inputs":["survey.geojson","observations.geojson"]}}),
+        );
+        assert_eq!(reach, Some(crate::cmd::plugins::Reach::Files));
+    }
+}
+
+#[test]
+fn merge_keeps_import_warnings_from_direct_file_inputs() {
+    let path = std::env::temp_dir().join(format!("rustgis-merge-warnings-{}.geojson", std::process::id()));
+    std::fs::write(&path, r#"{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{}},{"type":"Feature","geometry":{"type":"Point","coordinates":["bad",2]},"properties":{}}]}"#).unwrap();
+    let mut s = Session::new(Project::default());
+    let mut ds = rustgis_data::Dataset::new("Other", rustgis_data::GeometryType::Point, vec![]);
+    ds.push_next(Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(0.0, 0.0))), vec![]);
+    s.map_mut().add_dataset(ds);
+    let mark = s.notice_mark();
+    let result = s.run("gp.run", &json!({"tool":"merge","params":{"inputs":[path.to_string_lossy(),"Other"]}})).unwrap();
+    let id = result["layer"].as_u64().unwrap() as u32;
+    assert_eq!(s.map().layer(id).unwrap().dataset.features.len(), 2);
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("unreadable geometry")));
+    assert!(s.project.gp_history.last().unwrap().messages.iter().any(|s| s.contains("unreadable geometry")));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn merge_distinguishes_case_sensitive_file_paths() {
+    let dir = std::env::temp_dir().join(format!("rustgis-merge-case-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = dir.join("a.geojson");
+    let b = dir.join("A.geojson");
+    for (path, x) in [(&a, 1), (&b, 2)] {
+        std::fs::write(path, json!({"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[x,0]},"properties":{}}]}).to_string()).unwrap();
+    }
+    let mut s = world();
+    let result = s.run("gp.run", &json!({"tool":"merge","params":{"inputs":[a.to_string_lossy(),b.to_string_lossy()]}})).unwrap();
+    let id = result["layer"].as_u64().unwrap() as u32;
+    let ds = &s.map().layer(id).unwrap().dataset;
+    let coordinates: Vec<f64> = ds
+        .features
+        .iter()
+        .map(|f| match f.geometry.as_ref().unwrap() {
+            rustgis_data::Geometry::Point(c) => c.x,
+            _ => panic!("expected point"),
+        })
+        .collect();
+    assert_eq!(coordinates, [1.0, 2.0]);
+    std::fs::remove_dir_all(dir).unwrap();
 }

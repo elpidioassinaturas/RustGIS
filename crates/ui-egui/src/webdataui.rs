@@ -53,6 +53,8 @@ pub struct State {
     search: HashMap<&'static str, String>,
     /// The date NASA's time-enabled layers are added at (their latest when empty).
     pub date: String,
+    /// NASA's time-enabled layers follow the time slider instead, at each of its steps.
+    pub slider: bool,
     /// Layers to add once their service's document is read: (service, its type, `service.add`'s
     /// layer, the name).
     adding: Vec<(String, &'static str, String, String, String)>,
@@ -111,8 +113,8 @@ fn forget_failed_under(app: &mut RustGisApp, prefix: &str) {
 
 /// Adds a service's layer now, or once its document is read.
 fn add_layer(app: &mut RustGisApp, url: &str, kind: &'static str, layer: &str, name: &str) {
-    // The date as it was when Add was clicked.
-    let date = app.ui.web_services.date.trim().to_string();
+    // The date as it was when Add was clicked, or the time slider's (`service.add`'s "slider").
+    let date = if app.ui.web_services.slider { "slider".to_string() } else { app.ui.web_services.date.trim().to_string() };
     app.ui.web_services.adding.push((url.to_string(), kind, layer.to_string(), name.to_string(), date));
     poll(app);
 }
@@ -125,10 +127,11 @@ fn poll(app: &mut RustGisApp) {
             Look::Loading => app.ui.web_services.adding.push((url, kind, layer, name, date)),
             Look::Failed(e) => app.ui.web_services.note = Some((false, e)),
             Look::Ready(doc, v) => {
-                // The date goes only to a layer that changes with time, and names it.
+                // The date goes only to a layer that changes with time, and names it (one following
+                // the time slider has no date of its own).
                 let timed = layers_of(&v).iter().any(|l| text(l, "name") == layer && l.get("time").is_some());
                 let dated = kind == "wmts" && timed && !date.is_empty();
-                let name = if dated { format!("{name} {date}") } else { name };
+                let name = if dated && date != "slider" { format!("{name} {date}") } else { name };
                 let mut p = json!({"url": url, "type": kind, "layer": layer, "name": name, "text": doc.as_str()});
                 if dated {
                     p["time"] = json!(date);
@@ -252,9 +255,14 @@ pub fn nasa_earthdata(app: &mut RustGisApp, ui: &mut egui::Ui) {
     ui.label(RichText::new(tl!("NASA's Global Imagery Browse Services (GIBS): over a thousand layers of satellite imagery and science data, most of them daily.")).weak());
     let words = search_box(app, ui, "gibs", tl!("Search layers (e.g. temperature)"));
     ui.horizontal(|ui| {
+        ui.checkbox(&mut app.ui.web_services.slider, tl!("Follow the time slider"))
+            .on_hover_text(tl!("Step through the days with the time slider (View › Time), which starts with the layer's"));
         let input_label = ui.label(tl!("Date"));
-        ui.add(egui::TextEdit::singleline(&mut app.ui.web_services.date).hint_text(tl!("latest")).desired_width(110.0))
-            .labelled_by(input_label.id);
+        ui.add_enabled(
+            !app.ui.web_services.slider,
+            egui::TextEdit::singleline(&mut app.ui.web_services.date).hint_text(tl!("latest")).desired_width(110.0),
+        )
+        .labelled_by(input_label.id);
         ui.label(RichText::new(tl!("YYYY-MM-DD, for time layers")).small().weak());
     });
     let look = listing(app, NASA_GIBS, "wmts");

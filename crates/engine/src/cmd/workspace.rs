@@ -223,6 +223,7 @@ pub fn commands() -> Vec<C> {
                 // Reading a project checks only maps' layers, not offline snapshots', so their
                 // selections are put right here.
                 for l in &mut m.layers {
+                    l.renew_instance_id();
                     l.normalize_selection();
                 }
                 s.project.maps.push(m);
