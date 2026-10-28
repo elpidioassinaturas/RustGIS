@@ -830,11 +830,12 @@ fn wfs(url: &str, root: &Node) -> Service {
                 let f = |k: &str| b.attribute(k).and_then(|t| t.parse::<f64>().ok());
                 lonlat_box(f("minx")?, f("miny")?, f("maxx")?, f("maxy")?)
             });
-        // CRS84 when the type offers it: longitude first by definition. Otherwise EPSG:4326, which
-        // every server tried answers longitude first (#1053); MapServer refuses a CRS84 the type
-        // doesn't list. The `crs` an answer names doesn't tell the order (GeoServer names its
-        // longitude-first GeoJSON `urn:ogc:def:crs:EPSG::4326`), so an answer is turned round only
-        // when its positions miss the type's bounds and fit them turned (`fix_axes`).
+        // CRS84 when the type offers it: longitude first by definition. Otherwise EPSG:4326 (MapServer
+        // refuses a CRS84 the type doesn't list), which every server tried in #1053 answered
+        // longitude first; deegree answers latitude first when asked in the URN form instead. The
+        // `crs` an answer names doesn't tell the order (GeoServer names its longitude-first GeoJSON
+        // `urn:ogc:def:crs:EPSG::4326`), so an answer is turned round only when its positions miss
+        // the type's bounds and fit them turned (`fix_axes`).
         let crs84 = ft.children().any(|c| {
             c.is_element() && matches!(local(&c), "DefaultCRS" | "OtherCRS" | "DefaultSRS" | "OtherSRS" | "SRS") && is_crs84(&text_of(&c))
         });
@@ -1656,9 +1657,14 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
         let Some(id) = c.get("id").and_then(|i| i.as_str()) else { continue };
         let links = c.get("links").and_then(|l| l.as_array()).cloned().unwrap_or_default();
         let title = c.get("title").and_then(|t| t.as_str()).unwrap_or(id).to_string();
-        let bbox = c.pointer("/extent/spatial/bbox/0").and_then(|b| b.as_array()).and_then(|b| {
+        // Its extent in CRS84, the standard's default: a box in another system it names isn't
+        // read as longitude/latitude (its features' axes are judged against it, `fix_axes`). Four
+        // numbers, or six with heights.
+        let lonlat = c.pointer("/extent/spatial/crs").and_then(|v| v.as_str()).is_none_or(is_crs84);
+        let bbox = c.pointer("/extent/spatial/bbox/0").and_then(|b| b.as_array()).filter(|_| lonlat).and_then(|b| {
             let f = |i: usize| b.get(i).and_then(|v| v.as_f64());
-            lonlat_box(f(0)?, f(1)?, f(2)?, f(3)?)
+            let (e, n) = if b.len() == 6 { (3, 4) } else { (2, 3) };
+            lonlat_box(f(0)?, f(1)?, f(e)?, f(n)?)
         });
         // OGC API Tiles: the collection's map and vector tiles in WebMercatorQuad. Its vector
         // tiles' layer is named after the collection, as the standard has it.
@@ -2817,8 +2823,9 @@ mod tests {
         let brazil = Some([-71.99, -30.51, -34.12, 1.10]);
         assert!(fix_axes(ibge, brazil).is_none());
 
-        // deegree asked in the URN form: latitude first, no crs. Turned round, a GeometryCollection
-        // too; a null geometry and a property holding numbers are no positions.
+        // Latitude first with no crs, as deegree answers when asked in the URN form (RustGIS asks
+        // EPSG:4326). Turned round, a GeometryCollection too; a null geometry and a property
+        // holding numbers are no positions.
         let hamburg = Some([8.41, 53.40, 10.33, 53.96]);
         let deegree = br#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"at":[0,0]},"geometry":{"type":"LineString","coordinates":[[53.55,9.99],[53.6,10.1]]}},{"type":"Feature","properties":{},"geometry":{"type":"GeometryCollection","geometries":[{"type":"Point","coordinates":[53.45,8.5]}]}},{"type":"Feature","properties":{},"geometry":null}]}"#;
         let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(deegree, hamburg).unwrap()).unwrap();
@@ -2855,6 +2862,23 @@ mod tests {
         // Nothing to judge from: no features, not JSON.
         assert!(fix_axes(br#"{"type":"FeatureCollection","features":[]}"#, hamburg).is_none());
         assert!(fix_axes(b"urn:ogc:def:crs:EPSG::4326 not json", hamburg).is_none());
+    }
+
+    /// An OGC API collection's extent is its longitude/latitude bounds only in CRS84 (named, or
+    /// by default), with or without heights: a box in EPSG:4326's latitude-first order would turn
+    /// longitude-first features round (#1053).
+    #[test]
+    fn ogc_api_extent_read_only_in_crs84() {
+        let doc = br#"{"collections": [
+            {"id": "a", "extent": {"spatial": {"bbox": [[8.41, 53.39, 10.34, 53.97]]}}, "links": [{"rel": "items", "href": "https://x.org/collections/a/items"}]},
+            {"id": "b", "extent": {"spatial": {"bbox": [[8.41, 53.39, 10.34, 53.97]], "crs": "http://www.opengis.net/def/crs/OGC/1.3/CRS84"}}, "links": [{"rel": "items", "href": "https://x.org/collections/b/items"}]},
+            {"id": "c", "extent": {"spatial": {"bbox": [[8.41, 53.39, -5, 10.34, 53.97, 120]], "crs": "http://www.opengis.net/def/crs/OGC/0/CRS84h"}}, "links": [{"rel": "items", "href": "https://x.org/collections/c/items"}]},
+            {"id": "d", "extent": {"spatial": {"bbox": [[53.39, 8.41, 53.97, 10.34]], "crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}}, "links": [{"rel": "items", "href": "https://x.org/collections/d/items"}]}]}"#;
+        let s = parse("https://x.org/collections", doc).unwrap();
+        let bbox = |id: &str| s.layers.iter().find(|l| l.name == id).map(|l| l.bbox);
+        let hamburg = Some(Some([8.41, 53.39, 10.34, 53.97]));
+        assert_eq!((bbox("a"), bbox("b"), bbox("c")), (hamburg, hamburg, hamburg));
+        assert_eq!(bbox("d"), Some(None));
     }
 
     #[test]

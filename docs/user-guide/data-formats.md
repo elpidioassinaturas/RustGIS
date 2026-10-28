@@ -190,12 +190,15 @@ format and bounds; `service.coverage` gives the GetCoverage address alone). Movi
 ask for it again: add it again for another area. The server reprojects it to EPSG:4326 (WCS 2.0
 through its CRS extension); one that can't answers with an error, which is shown.
 
-A feature type is asked for in CRS84 when it offers it, else in `EPSG:4326`; every server tried
-answers either longitude first. The `crs` a GeoJSON answer names doesn't tell the order (GeoServer
-names its longitude-first answers `urn:ogc:def:crs:EPSG::4326`), so the features' positions are
-turned round only when they miss the layer's longitude/latitude bounds from the capabilities and
-fit them turned (give or take a tenth of the bounds' size, or half a degree). A layer listed
-without bounds, or whose features fit both ways, is read as it comes.
+A feature type is asked for in CRS84 when it offers it, else in `EPSG:4326`. Every server tried
+answered those requests longitude first, but a server may answer latitude first (deegree does
+when asked in the URN form, `urn:ogc:def:crs:EPSG::4326`). The `crs` a GeoJSON answer names
+doesn't tell the order (GeoServer names its longitude-first answers `urn:ogc:def:crs:EPSG::4326`),
+so the features' positions are turned round only when they miss the layer's longitude/latitude
+bounds from the capabilities and fit them turned (give or take a tenth of the bounds' size, or
+half a degree). An OGC API collection's extent counts as such bounds only in CRS84, the
+standard's default. A layer listed without bounds, or whose features fit both ways, is read as it
+comes.
 
 A WFS, OGC API Features or ArcGIS feature layer comes whole, as in other GIS programs. A large
 one (a country's municipalities, hundreds of megabytes) can be asked for over an area instead:

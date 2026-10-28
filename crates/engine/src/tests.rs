@@ -9573,9 +9573,10 @@ fn view_lonlat(s: &Session) -> [f64; 4] {
 }
 
 /// #1053: a WFS answering like GeoServer (longitude first, named urn:ogc:def:crs:EPSG::4326) is
-/// read as it comes; one answering latitude first (deegree, asked in the URN form) is turned
-/// round, judged against the type's `WGS84BoundingBox`. The app's download (`layer.addDownload`
-/// with `service` and `bounds`) is judged the same way, and left alone without bounds.
+/// read as it comes; one answering latitude first (as deegree does when asked in the URN form) is
+/// turned round, judged against the type's `WGS84BoundingBox`. The app's download
+/// (`layer.addDownload` with `service` and `bounds`) is judged the same way, and left alone
+/// without bounds.
 #[test]
 fn wfs_axes_judged_against_the_type_bounds() {
     use ogc_server::{Route, Server};
