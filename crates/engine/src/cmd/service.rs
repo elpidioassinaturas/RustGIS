@@ -217,13 +217,26 @@ fn vet(mut svc: Service, caps: &str) -> Service {
     svc
 }
 
-/// A service's GeoJSON answer made ready to read: latitude-first coordinates turned round, and a
-/// cut-off answer pointed out.
-pub fn features_answer(s: &mut Session, name: &str, bytes: Vec<u8>) -> Vec<u8> {
+/// A service's GeoJSON answer made ready to read: latitude-first coordinates turned round, judged
+/// against the layer's longitude/latitude `bounds` from its capabilities (see
+/// [`fix_axes`](rustgis_data::ogc::fix_axes); none: left as they come), and a cut-off answer
+/// pointed out.
+pub fn features_answer(s: &mut Session, name: &str, bytes: Vec<u8>, bounds: Option<[f64; 4]>) -> Vec<u8> {
     if let Some(note) = rustgis_data::ogc::partial_note(&bytes) {
         s.notify(format!("{name}: {note}"), false);
     }
-    rustgis_data::ogc::fix_axes(&bytes).unwrap_or(bytes)
+    rustgis_data::ogc::fix_axes(&bytes, bounds).unwrap_or(bytes)
+}
+
+/// A layer's longitude/latitude bounds as a listing or a parameter gives them (`[west, south,
+/// east, north]`), for [`features_answer`]: none when absent or null.
+pub(crate) fn bounds_of(v: Option<&Value>) -> Result<Option<[f64; 4]>, String> {
+    let Some(v) = v.filter(|v| !v.is_null()) else { return Ok(None) };
+    let b: [f64; 4] = serde::Deserialize::deserialize(v).map_err(|_| "bounds must be [west, south, east, north]")?;
+    if !rustgis_map::tiles::valid_bounds(&b) {
+        return Err("bounds must be a finite, ordered geographic rectangle".into());
+    }
+    Ok(Some(b))
 }
 
 /// A service's features at `url`, with the pages that follow (its `next` links, or an ArcGIS
@@ -448,7 +461,7 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
                 }
                 let max = crate::render::rustgis_tiles::cache::MAX_DOWNLOAD;
                 let bytes = download_features(s, &name, asked.as_deref().unwrap_or(items), max).map_err(|e| slow_whole_layer(e, given))?;
-                let bytes = features_answer(s, &name, bytes);
+                let bytes = features_answer(s, &name, bytes, layer.bbox);
                 let mut r = super::raster::add_named_bytes(s, &json!({"name": name}), format!("{name}.geojson"), bytes)?;
                 // Over an area, the features crossing it: the view stays, or goes to a box given
                 // (the whole layer's bounds would show a country to fill one state).

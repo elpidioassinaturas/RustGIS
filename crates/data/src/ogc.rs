@@ -831,8 +831,10 @@ fn wfs(url: &str, root: &Node) -> Service {
                 lonlat_box(f("minx")?, f("miny")?, f("maxx")?, f("maxy")?)
             });
         // CRS84 when the type offers it: longitude first by definition. Otherwise EPSG:4326, which
-        // WFS 1.0 answers longitude first; a 1.1 or 2.0 server answering latitude first says so
-        // with a `urn:…EPSG::4326` crs in its GeoJSON, which is turned round (`fix_axes`).
+        // every server tried answers longitude first (#1053); MapServer refuses a CRS84 the type
+        // doesn't list. The `crs` an answer names doesn't tell the order (GeoServer names its
+        // longitude-first GeoJSON `urn:ogc:def:crs:EPSG::4326`), so an answer is turned round only
+        // when its positions miss the type's bounds and fit them turned (`fix_axes`).
         let crs84 = ft.children().any(|c| {
             c.is_element() && matches!(local(&c), "DefaultCRS" | "OtherCRS" | "DefaultSRS" | "OtherSRS" | "SRS") && is_crs84(&text_of(&c))
         });
@@ -2307,11 +2309,174 @@ impl Pages {
     }
 }
 
-/// Whether a GeoJSON answer names, as its `crs`, EPSG:4326 in the URN form that puts latitude
-/// first (as GeoServer does for WFS 1.1 and 2.0).
-fn lat_first(crs: &str) -> bool {
-    let c = crs.to_ascii_lowercase();
-    c.starts_with("urn:") && (c.ends_with("epsg::4326") || c.ends_with("epsg:6.6:4326") || c.ends_with("epsg:4326"))
+/// How far past a layer's bounds an answer's positions may reach and still fit them: a tenth of
+/// the bounds' size along that axis, or half a degree when that is more.
+fn margin(lo: f64, hi: f64) -> f64 {
+    ((hi - lo) / 10.0).max(0.5)
+}
+
+/// Whether the extent `[west, south, east, north]` lies within `bounds`, give or take [`margin`].
+fn fits(extent: [f64; 4], bounds: [f64; 4]) -> bool {
+    let [w, s, e, n] = bounds;
+    let (mx, my) = (margin(w, e), margin(s, n));
+    extent[0] >= w - mx && extent[2] <= e + mx && extent[1] >= s - my && extent[3] <= n + my
+}
+
+/// The extent of the positions in a GeoJSON answer (a collection, a feature or a geometry), read
+/// without keeping them: `[min x, min y, max x, max y]`, or `None` for an answer that isn't JSON
+/// or has no position.
+fn positions_extent(bytes: &[u8]) -> Option<[f64; 4]> {
+    use serde::de::DeserializeSeed;
+    let mut extent = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    Members { extent: &mut extent, depth: 0 }.deserialize(&mut de).ok()?;
+    (extent[0] <= extent[2] && extent[1] <= extent[3]).then_some(extent)
+}
+
+/// A GeoJSON object (or an array of them) whose `features`, `geometry`, `geometries` and
+/// `coordinates` are walked for [`positions_extent`]; its other members are skipped.
+struct Members<'a> {
+    extent: &'a mut [f64; 4],
+    depth: usize,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for Members<'_> {
+    type Value = ();
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for Members<'_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a GeoJSON value")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "features" | "geometry" | "geometries" if self.depth < 16 => {
+                    map.next_value_seed(Members { extent: &mut *self.extent, depth: self.depth + 1 })?;
+                }
+                "coordinates" => {
+                    map.next_value_seed(Positions { extent: &mut *self.extent, depth: 0 })?;
+                }
+                _ => {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        while seq.next_element_seed(Members { extent: &mut *self.extent, depth: self.depth + 1 })?.is_some() {}
+        Ok(())
+    }
+
+    // A null geometry, or a member of an unexpected kind: nothing to read.
+    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<(), E> {
+        Ok(())
+    }
+}
+
+/// A geometry's `coordinates`, nested arrays whose innermost hold positions: an array whose first
+/// two elements are numbers, as [`swap_positions`] takes one (and as deep as it goes). Gives the
+/// number it is, or `None` for an array or anything else.
+struct Positions<'a> {
+    extent: &'a mut [f64; 4],
+    depth: usize,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for Positions<'_> {
+    type Value = Option<f64>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Option<f64>, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for Positions<'_> {
+    type Value = Option<f64>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("GeoJSON coordinates")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Option<f64>, A::Error> {
+        if self.depth > 8 {
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            return Ok(None);
+        }
+        let mut first = [None, None];
+        let mut i = 0;
+        while let Some(v) = seq.next_element_seed(Positions { extent: &mut *self.extent, depth: self.depth + 1 })? {
+            if let Some(slot) = first.get_mut(i) {
+                *slot = v;
+            }
+            i += 1;
+        }
+        if let [Some(x), Some(y)] = first
+            && x.is_finite()
+            && y.is_finite()
+        {
+            let e = &mut *self.extent;
+            *e = [e[0].min(x), e[1].min(y), e[2].max(x), e[3].max(y)];
+        }
+        Ok(None)
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Option<f64>, E> {
+        Ok(Some(v))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Option<f64>, E> {
+        Ok(Some(v as f64))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Option<f64>, E> {
+        Ok(Some(v as f64))
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Option<f64>, E> {
+        Ok(None)
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Option<f64>, E> {
+        Ok(None)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Option<f64>, E> {
+        Ok(None)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Option<f64>, A::Error> {
+        while map.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
 }
 
 fn swap_positions(v: &mut serde_json::Value, depth: usize) {
@@ -2342,20 +2507,22 @@ fn swap_geometry(g: &mut serde_json::Value, depth: usize) {
     }
 }
 
-/// A service's GeoJSON answer with latitude-first coordinates (see [`lat_first`]) turned round to
-/// longitude first, and its `crs` dropped; `None` when it is longitude first already.
-pub fn fix_axes(bytes: &[u8]) -> Option<Vec<u8>> {
-    let (head, tail) = edges(bytes);
-    let mentions =
-        |t: &str| t.to_ascii_lowercase().contains("urn:ogc:def:crs:epsg:") || t.to_ascii_lowercase().contains("urn:x-ogc:def:crs:epsg:");
-    if !(mentions(&head) || mentions(&tail)) {
+/// A service's GeoJSON answer with latitude-first coordinates turned round to longitude first, and
+/// its `crs` dropped; `None` when it is left as it came.
+///
+/// The data decide, not the `crs` name: GeoServer names longitude-first answers
+/// `urn:ogc:def:crs:EPSG::4326`, and deegree's one latitude-first answer has no `crs` at all
+/// (#1053). The positions are turned round only when their extent misses the layer's
+/// longitude/latitude `bounds` from the capabilities (west, south, east, north) and the turned
+/// extent fits them, give or take a tenth of their size or half a degree. With no bounds, or an
+/// answer that fits both ways (or neither), it can't tell, and nothing is turned.
+pub fn fix_axes(bytes: &[u8], bounds: Option<[f64; 4]>) -> Option<Vec<u8>> {
+    let bounds = bounds?;
+    let [x0, y0, x1, y1] = positions_extent(bytes)?;
+    if fits([x0, y0, x1, y1], bounds) || !fits([y0, x0, y1, x1], bounds) {
         return None;
     }
     let mut v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let crs = v.pointer("/crs/properties/name").and_then(|n| n.as_str())?;
-    if !lat_first(crs) {
-        return None;
-    }
     if let Some(o) = v.as_object_mut() {
         o.remove("crs");
     }
@@ -2639,17 +2806,55 @@ mod tests {
             "{:?}",
             s.layers[0].offer
         );
-        // An answer that says latitude comes first is turned round; others are left alone.
-        let lat_lon = br#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[46.5,7.1],[47.0,8.2]]}},{"type":"Feature","properties":{},"geometry":{"type":"GeometryCollection","geometries":[{"type":"Point","coordinates":[45,6]}]}}],"crs":{"type":"name","properties":{"name":"urn:ogc:def:crs:EPSG::4326"}}}"#;
-        let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(lat_lon).unwrap()).unwrap();
-        assert_eq!(fixed.pointer("/features/0/geometry/coordinates/0").unwrap(), &serde_json::json!([7.1, 46.5]));
-        assert_eq!(fixed.pointer("/features/1/geometry/geometries/0/coordinates").unwrap(), &serde_json::json!([6, 45]));
+    }
+
+    /// #1053: an answer's axes are judged from its positions against the layer's bounds, never
+    /// from the `crs` it names.
+    #[test]
+    fn axes_judged_against_the_layer_bounds() {
+        // IBGE (GeoServer): longitude first, named urn:ogc:def:crs:EPSG::4326. Left alone.
+        let ibge = br#"{"type":"FeatureCollection","features":[{"type":"Feature","id":"v.1","geometry":{"type":"MultiPolygon","coordinates":[[[[-61.9307472,-11.9734947],[-62.8940789,-13.1189419],[-61.886511,-11.827457],[-61.9307472,-11.9734947]]]]},"properties":{"nome":"Rondonia"}},{"type":"Feature","id":"v.2","geometry":{"type":"Point","coordinates":[-35.2,-5.8]},"properties":{}}],"crs":{"type":"name","properties":{"name":"urn:ogc:def:crs:EPSG::4326"}},"bbox":[-62.8940789,-13.1189419,-35.2,-5.8]}"#;
+        let brazil = Some([-71.99, -30.51, -34.12, 1.10]);
+        assert!(fix_axes(ibge, brazil).is_none());
+
+        // deegree asked in the URN form: latitude first, no crs. Turned round, a GeometryCollection
+        // too; a null geometry and a property holding numbers are no positions.
+        let hamburg = Some([8.41, 53.40, 10.33, 53.96]);
+        let deegree = br#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"at":[0,0]},"geometry":{"type":"LineString","coordinates":[[53.55,9.99],[53.6,10.1]]}},{"type":"Feature","properties":{},"geometry":{"type":"GeometryCollection","geometries":[{"type":"Point","coordinates":[53.45,8.5]}]}},{"type":"Feature","properties":{},"geometry":null}]}"#;
+        let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(deegree, hamburg).unwrap()).unwrap();
+        assert_eq!(fixed.pointer("/features/0/geometry/coordinates/0").unwrap(), &serde_json::json!([9.99, 53.55]));
+        assert_eq!(fixed.pointer("/features/1/geometry/geometries/0/coordinates").unwrap(), &serde_json::json!([8.5, 53.45]));
+        assert_eq!(fixed.pointer("/features/0/properties/at").unwrap(), &serde_json::json!([0, 0]));
+        // A crs naming the latitude-first order is dropped with the turn.
+        let named = br#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[53.55,9.99]}}],"crs":{"type":"name","properties":{"name":"urn:ogc:def:crs:EPSG::4326"}}}"#;
+        let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(named, hamburg).unwrap()).unwrap();
         assert!(fixed.get("crs").is_none());
-        assert!(
-            fix_axes(br#"{"type":"FeatureCollection","features":[],"crs":{"type":"name","properties":{"name":"EPSG:4326"}}}"#).is_none()
-        );
-        assert!(fix_axes(br#"{"type":"FeatureCollection","features":[]}"#).is_none());
-        assert!(fix_axes(b"urn:ogc:def:crs:EPSG::4326 not json").is_none());
+        // A lone feature and a bare geometry.
+        let feature = br#"{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[53.55,9.99]}}"#;
+        let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(feature, hamburg).unwrap()).unwrap();
+        assert_eq!(fixed.pointer("/geometry/coordinates").unwrap(), &serde_json::json!([9.99, 53.55]));
+        let geometry = br#"{"type":"Point","coordinates":[53.55,9.99,12.5]}"#;
+        let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(geometry, hamburg).unwrap()).unwrap();
+        assert_eq!(fixed.pointer("/coordinates").unwrap(), &serde_json::json!([9.99, 53.55, 12.5]));
+
+        // No bounds: it can't tell, and nothing is turned.
+        assert!(fix_axes(deegree, None).is_none());
+
+        // Fits both ways (near 10°E 10°N, or a layer covering the world): left alone.
+        let both = br#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[9.8,10.1],[10.2,9.9]]}}]}"#;
+        assert!(fix_axes(both, Some([9.5, 9.5, 10.5, 10.5])).is_none());
+        assert!(fix_axes(deegree, Some([-180.0, -90.0, 180.0, 90.0])).is_none());
+        // Fits neither way: left alone.
+        assert!(fix_axes(deegree, brazil).is_none());
+
+        // Slightly past the bounds, within the margin (a tenth of their size, or half a degree):
+        // it fits as it comes, though only the turned point lies strictly inside.
+        let past = br#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[12.3,11.0]}}]}"#;
+        assert!(fix_axes(past, Some([10.0, 10.0, 12.0, 14.0])).is_none());
+
+        // Nothing to judge from: no features, not JSON.
+        assert!(fix_axes(br#"{"type":"FeatureCollection","features":[]}"#, hamburg).is_none());
+        assert!(fix_axes(b"urn:ogc:def:crs:EPSG::4326 not json", hamburg).is_none());
     }
 
     #[test]

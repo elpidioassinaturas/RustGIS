@@ -2417,6 +2417,10 @@ impl RustGisApp {
                         q[key] = value.clone();
                     }
                 }
+                // A service layer's bounds, which its features' axes are checked against.
+                if let Some(b) = p.get("bounds").filter(|b| b.is_array()) {
+                    q["bounds"] = b.clone();
+                }
                 if let Some(origin) = &origin {
                     q[connectiontree::ORIGIN] = json!(origin);
                 }

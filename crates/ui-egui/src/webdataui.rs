@@ -581,7 +581,10 @@ pub fn fema_nfhl(app: &mut RustGisApp, ui: &mut egui::Ui) {
                         .on_hover_text(tl!("Download its features in the view (up to the server's limit)"))
                         .clicked()
                 {
-                    features = f.pointer("/offer/url").and_then(Value::as_str).map(|u| (u.to_string(), format!("FEMA NFHL {title}")));
+                    features = f
+                        .pointer("/offer/url")
+                        .and_then(Value::as_str)
+                        .map(|u| (u.to_string(), format!("FEMA NFHL {title}"), f.get("bbox").cloned().unwrap_or_default()));
                 }
             });
         }
@@ -589,8 +592,9 @@ pub fn fema_nfhl(app: &mut RustGisApp, ui: &mut egui::Ui) {
     if let Some((layer, name)) = add {
         add_layer(app, FEMA_NFHL, "arcgis", &layer, &name);
     }
-    if let Some((url, name)) = features {
-        let r = app.run("ui.addUrl", json!({"url": url, "name": name, "service": true}));
+    if let Some((url, name, bounds)) = features {
+        // The layer's bounds go along, for its features' axes (#1053).
+        let r = app.run("ui.addUrl", json!({"url": url, "name": name, "service": true, "bounds": bounds}));
         // Not added yet: on its way.
         app.ui.web_services.note = Some(match r {
             Ok(_) => (true, tl!("Downloading…").to_string()),
