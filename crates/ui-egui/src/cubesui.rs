@@ -47,7 +47,9 @@ fn period(e: &Entry) -> String {
 
 /// The pane.
 pub fn pane(app: &mut RustGisApp, ui: &mut egui::Ui) {
-    // The hosted list, asked for once a run of the app.
+    // The hosted list, asked for once a run of the app; not in tests, which keep to the built-in
+    // one.
+    #[cfg(not(test))]
     cubes::fetch_hosted();
     let t = crate::theme::Tokens::get(ui.ctx());
     ui.label(
@@ -114,9 +116,22 @@ pub fn pane(app: &mut RustGisApp, ui: &mut egui::Ui) {
                 // trend over a collection.
                 let desktop = !cfg!(target_arch = "wasm32");
                 let why = tl!("The desktop app adds data cubes");
+                // A STAC cube is read where the map is; a Zarr variable whole.
+                let stac = matches!(e.source, Source::Stac { .. });
+                let (add_tip, trend_tip) = if stac {
+                    (
+                        tl!("Adds the cube where the map is, following the time slider through its dates"),
+                        tl!("Opens Trend Analysis with this cube, where the map is"),
+                    )
+                } else {
+                    (
+                        tl!("Adds the whole cube, following the time slider through its dates"),
+                        tl!("Opens Trend Analysis with this cube, read whole"),
+                    )
+                };
                 if ui
                     .add_enabled(desktop, egui::Button::new(tl!("Add to Time Slider")))
-                    .on_hover_text(tl!("Adds the cube where the map is, following the time slider through its dates"))
+                    .on_hover_text(add_tip)
                     .on_disabled_hover_text(why)
                     .clicked()
                 {
@@ -124,7 +139,7 @@ pub fn pane(app: &mut RustGisApp, ui: &mut egui::Ui) {
                 }
                 if ui
                     .add_enabled(desktop, egui::Button::new(tl!("Trend Analysis…")))
-                    .on_hover_text(tl!("Opens Trend Analysis with this cube, where the map is"))
+                    .on_hover_text(trend_tip)
                     .on_disabled_hover_text(why)
                     .clicked()
                 {
@@ -151,8 +166,9 @@ fn typed_period(app: &RustGisApp) -> Result<Option<(String, String)>, String> {
     }
 }
 
-/// Adds a cube where the map is (`cube.open`).
+/// Adds a cube (`cube.open`): a STAC cube where the map is, a Zarr variable whole.
 fn add(app: &mut RustGisApp, e: &Entry) {
+    app.ui.cubes.info = None;
     let mut p = json!({"id": e.id});
     if matches!(e.source, Source::Stac { .. }) {
         p["bbox"] = json!("view");
@@ -190,6 +206,7 @@ fn add(app: &mut RustGisApp, e: &Entry) {
 
 /// Takes a cube to Trend Analysis, with the period typed (a trend needs one).
 fn trend(app: &mut RustGisApp, e: &Entry) {
+    app.ui.cubes.info = None;
     let period = match typed_period(app) {
         Ok(p) => p,
         Err(why) => {
@@ -255,9 +272,12 @@ mod tests {
         // Half a period is refused, the cube not added.
         let app = h.state_mut();
         app.ui.cubes.start = "2024-01-01".into();
+        app.ui.cubes.info = Some("an earlier add".into());
         let e = cubes::find("era5-2m-temperature").unwrap();
         add(app, &e);
         assert!(app.ui.cubes.error.as_deref().is_some_and(|e| e.contains("both ends")));
+        // What an earlier add said goes with a failed one.
+        assert!(app.ui.cubes.info.is_none());
         assert!(app.session.map().layers.iter().all(|l| l.name != e.name));
     }
 
@@ -289,5 +309,11 @@ mod tests {
         h.run();
         assert!(h.query_by_label("Layers, a date each").is_some());
         assert!(h.query_by_label("Dates").is_some());
+        // A Zarr cube is read whole, and the form says so.
+        let e = cubes::find("era5-2m-temperature").unwrap();
+        trend(h.state_mut(), &e);
+        h.run();
+        assert!(h.query_by_label(&format!("Data cube: {}, read whole", e.name)).is_some());
+        assert!(h.query_by_label_contains("where the map is").is_none());
     }
 }

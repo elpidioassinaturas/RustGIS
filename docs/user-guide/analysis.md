@@ -658,7 +658,7 @@ and a **Mann–Kendall** test of whether the trend is significant.
     "bdc-mod13q1-ndvi", "bbox": [-46, -10.95, -40.35, -2.7], "start": "2001", "end": "2025"}`
     fills in the collection's API, band, cell size and cloud cap, or a Zarr entry's store and
     variable. In the app, **Trend Analysis…** on a cube of Home › Add › Web Data › Data Cubes opens
-    this section on it, read where the map is.
+    this section on it: a STAC cube is read where the map is, a Zarr cube whole.
 
   For the mean of a finer layer's pixels in each cell, or for a grid of your own, put the rasters
   on one grid first with Project Raster (`"grid"`, the first one's, and `"resampling":

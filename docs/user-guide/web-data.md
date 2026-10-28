@@ -123,11 +123,12 @@ open, each with those filled in, so none of them has to be looked up in a provid
 begin with) to those with data where the map is. Each shows its provider, period, step,
 resolution, source and licence, with a link to the provider's page, and two buttons:
 
-- **Add to Time Slider** (desktop) adds it where the map is, as `cube.open` does (below), over the
-  period typed in **From** and **To**, or its last full calendar year when both are empty.
-- **Trend Analysis…** (desktop) opens Trend Analysis on it, with the period typed: the cube is
-  read where the map is, and **Use layers instead** goes back to the map's layers. A trend over a
-  cube needs its period.
+- **Add to Time Slider** (desktop) adds it as `cube.open` does (below): a STAC cube where the map
+  is, a Zarr cube whole. It is added over the period typed in **From** and **To**, or its last
+  full calendar year when both are empty.
+- **Trend Analysis…** (desktop) opens Trend Analysis on it, with the period typed: a STAC cube is
+  read where the map is, a Zarr cube whole, and **Use layers instead** goes back to the map's
+  layers. A trend over a cube needs its period.
 
 The list is kept up to date between releases with the app's other assets, so a cube can be added,
 or an address fixed, without a new version: the app reads it the first time the pane opens, and

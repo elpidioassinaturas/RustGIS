@@ -62,7 +62,8 @@ pub struct ScriptRun {
 pub struct TrendForm {
     /// The cube: a stack of layers (`true`), or one layer (a Zarr variable, or a raster of bands).
     pub stack: bool,
-    /// A cube of the catalog of data cubes instead (#683), where the map is: its id and name.
+    /// A cube of the catalog of data cubes instead (#683): its id and name. A STAC cube is read
+    /// where the map is, a Zarr variable whole.
     pub cube: Option<(String, String)>,
     /// The layers ticked for a stack.
     pub ticked: Vec<String>,
@@ -921,6 +922,13 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
 }
 
+/// Whether the catalog's cube `id` is a STAC collection, read where the map is (a Zarr variable is
+/// read whole).
+fn stac_cube(id: &str) -> bool {
+    use rustgis_engine::render::rustgis_tiles::cubes;
+    cubes::find(id).is_ok_and(|e| matches!(e.source, cubes::Source::Stac { .. }))
+}
+
 /// The Trend Analysis section (opengeos/RustGIS#579): a cube (raster layers a date each, a Zarr
 /// variable, or a raster's bands), Sen's slope and the modified Mann–Kendall test, worked out on a
 /// thread with progress and Cancel, and added as four layers.
@@ -934,10 +942,15 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     if f.test.is_empty() {
         (f.test, f.seasons, f.alpha) = ("hamedRao".into(), 12, "0.05".into());
     }
-    if let Some((_, name)) = f.cube.clone() {
-        // A catalog's cube (Home › Web Data › Data Cubes), read where the map is.
+    if let Some((id, name)) = f.cube.clone() {
+        // A catalog's cube (Home › Web Data › Data Cubes).
         ui.horizontal_wrapped(|ui| {
-            ui.label(crate::i18n::fmt("Data cube: {name}, where the map is", &[("name", &name)]));
+            let args = [("name", name.as_str())];
+            ui.label(if stac_cube(&id) {
+                crate::i18n::fmt("Data cube: {name}, where the map is", &args)
+            } else {
+                crate::i18n::fmt("Data cube: {name}, read whole", &args)
+            });
             if ui.small_button(tl!("Use layers instead")).clicked() {
                 f.cube = None;
             }
@@ -1049,9 +1062,7 @@ fn trend(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     if let Some((id, _)) = &f.cube {
         // Its area is the map's (a Zarr variable is read whole), its period the one typed.
         p["cube"] = json!(id);
-        let stac = rustgis_engine::render::rustgis_tiles::cubes::find(id)
-            .is_ok_and(|e| matches!(e.source, rustgis_engine::render::rustgis_tiles::cubes::Source::Stac { .. }));
-        if stac {
+        if stac_cube(id) {
             p["bbox"] = json!("view");
         }
         if f.start.trim().is_empty() || f.end.trim().is_empty() {
