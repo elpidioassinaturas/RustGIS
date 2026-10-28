@@ -364,6 +364,12 @@ fn gate_rules() {
     let mut file = project.clone();
     file["path"] = json!("/tmp/x.tif");
     assert!(g("run_command", json!({"command": "raster.project", "params": file})).is_some());
+    // And rasterizing polygons.
+    let burn = json!({"layer": "Countries", "crs": 31983, "cellSize": 100});
+    assert!(g("run_command", json!({"command": "raster.rasterize", "params": burn})).is_none());
+    let mut file = burn.clone();
+    file["path"] = json!("/tmp/x.tif");
+    assert!(g("run_command", json!({"command": "raster.rasterize", "params": file})).is_some());
 }
 
 /// What a command says beside its result reaches the model (issue #85).

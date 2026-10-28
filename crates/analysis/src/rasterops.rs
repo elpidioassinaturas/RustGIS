@@ -893,17 +893,16 @@ pub fn parse_bands_str(s: &str, total_bands: usize) -> Result<Vec<usize>, String
 }
 
 /// Projects a complete ring to the raster grid without dropping failed vertices.
-fn project_ring(r: &Raster, ring: &[Coord]) -> Option<Vec<(f64, f64)>> {
+fn project_ring(tr: &Transformer, t: &GeoTransform, ring: &[Coord]) -> Option<Vec<(f64, f64)>> {
     if ring.len() < 3 {
         return None;
     }
-    let tr = r.transformer();
     ring.iter()
         .map(|&c| {
             if !c.is_finite() {
                 return None;
             }
-            let pt = r.transform.to_pixel(tr.from_lonlat(c)?);
+            let pt = t.to_pixel(tr.from_lonlat(c)?);
             (pt.0.is_finite() && pt.1.is_finite()).then_some(pt)
         })
         .collect()
@@ -928,12 +927,25 @@ pub fn polygon_mask_with_failures(
     polygons: &[Vec<Vec<Coord>>],
     failed_parts: &mut Vec<usize>,
 ) -> Result<Option<(Range<u32>, Range<u32>, Vec<bool>)>, String> {
+    polygon_mask_on(r.transformer(), &r.transform, (r.width, r.height), polygons, failed_parts)
+}
+
+/// [`polygon_mask_with_failures`] on a grid of `size` (columns, rows) cells placed by `t` in the
+/// coordinate system of `tr`, with no raster on it yet.
+pub(crate) fn polygon_mask_on(
+    tr: &Transformer,
+    t: &GeoTransform,
+    size: (u32, u32),
+    polygons: &[Vec<Vec<Coord>>],
+    failed_parts: &mut Vec<usize>,
+) -> Result<Option<(Range<u32>, Range<u32>, Vec<bool>)>, String> {
+    let (width, height) = size;
     let projected: Vec<Vec<Vec<(f64, f64)>>> = polygons
         .iter()
         .enumerate()
         .filter_map(|(index, rings)| {
             // Reject a complete part if any ring fails, so a lost hole cannot enlarge it.
-            let part = if rings.is_empty() { None } else { rings.iter().map(|ring| project_ring(r, ring)).collect::<Option<Vec<_>>>() };
+            let part = if rings.is_empty() { None } else { rings.iter().map(|ring| project_ring(tr, t, ring)).collect::<Option<Vec<_>>>() };
             if part.is_none() {
                 failed_parts.push(index);
             }
@@ -948,8 +960,8 @@ pub fn polygon_mask_with_failures(
         return Ok(None);
     }
     let clamp = |v: f64, n: u32| v.clamp(0.0, f64::from(n)) as u32;
-    let cols = clamp(c0.floor(), r.width)..clamp(c1.ceil(), r.width);
-    let rows = clamp(r0.floor(), r.height)..clamp(r1.ceil(), r.height);
+    let cols = clamp(c0.floor(), width)..clamp(c1.ceil(), width);
+    let rows = clamp(r0.floor(), height)..clamp(r1.ceil(), height);
     if cols.is_empty() || rows.is_empty() {
         return Ok(None);
     }
@@ -973,8 +985,8 @@ pub fn polygon_mask_with_failures(
             xs.sort_by(f64::total_cmp);
             for &[x0, x1] in xs.as_chunks::<2>().0 {
                 // Cells whose centre (col + 0.5) lies in [x0, x1).
-                let a = clamp((x0 - 0.5).ceil(), r.width).max(cols.start);
-                let b = clamp((x1 - 0.5).ceil(), r.width).min(cols.end);
+                let a = clamp((x0 - 0.5).ceil(), width).max(cols.start);
+                let b = clamp((x1 - 0.5).ceil(), width).min(cols.end);
                 for col in a..b {
                     if let Some(m) = line.get_mut((col - cols.start) as usize) {
                         *m = true;

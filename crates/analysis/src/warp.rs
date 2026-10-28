@@ -379,7 +379,7 @@ impl Grid {
     }
 
     /// The top left corner's transform.
-    fn transform(&self) -> GeoTransform {
+    pub fn transform(&self) -> GeoTransform {
         GeoTransform { origin_x: self.min_x, origin_y: self.max_y, pixel_width: self.cell_x, pixel_height: -self.cell_y }
     }
 }
@@ -485,6 +485,74 @@ fn project_on(threads: Option<usize>, r: &Raster, g: &Grid, method: Method, name
         Method::Sample(m) => sampled(threads, r, g, canvas, m, &source, name),
         Method::Average | Method::Mode => aggregated(threads, r, g, canvas, method == Method::Mode, &source, name),
     }
+}
+
+/// A polygon [`rasterize`] burns: its parts, each an exterior ring and its holes in
+/// longitude/latitude, and the value its cells take.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shape {
+    pub parts: Vec<Vec<Vec<Coord>>>,
+    pub value: f32,
+}
+
+/// What [`rasterize`] made.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Burned {
+    /// The band, row by row.
+    pub data: Vec<f32>,
+    /// The cells that took a value.
+    pub cells: usize,
+    /// The shapes that held a cell centre.
+    pub burned: usize,
+    /// The shapes with a part that couldn't be placed on the grid (their other parts are burned).
+    pub unplaced: Vec<usize>,
+    /// The shapes, all of them placed, that hold no cell centre: narrower than a cell, or off the grid.
+    pub missed: usize,
+}
+
+/// Burns `shapes` onto `g` as one band: a cell whose centre falls inside a shape (its holes cut
+/// out) takes the shape's value, a later shape over an earlier one, as GDAL burns; a cell under
+/// none is `nodata`. Each shape is filled by scanline over its own window of the grid (as
+/// [`crate::rasterops::polygon_mask`]), so a polygon narrower than a cell may hold no cell centre
+/// and be missed (and counted). The band and one shape's window, as filled and as trimmed, are held
+/// at once: at most 6 bytes a cell.
+pub fn rasterize(g: &Grid, shapes: &[Shape], nodata: f32) -> Result<Burned, String> {
+    let max = max_samples();
+    let too_big =
+        || format!("{} × {} cells are more than this computer's {max}: give a larger cellSize or a smaller extent", g.width, g.height);
+    if g.width.checked_mul(g.height).is_none_or(|n| n > max) {
+        return Err(too_big());
+    }
+    let size = (u32::try_from(g.width).map_err(|_| too_big())?, u32::try_from(g.height).map_err(|_| too_big())?);
+    let tr = g.crs.transformer()?;
+    let t = g.transform();
+    let mut data = crate::rasterops::new_band(g.width, g.height, nodata)?;
+    let mut unplaced = Vec::new();
+    let (mut burned, mut missed) = (0, 0);
+    let mut failed = Vec::new();
+    for (i, shape) in shapes.iter().enumerate() {
+        failed.clear();
+        let mask = crate::rasterops::polygon_mask_on(&tr, &t, size, &shape.parts, &mut failed)?;
+        if !failed.is_empty() {
+            unplaced.push(i);
+        }
+        let Some((cols, rows, mask)) = mask else {
+            missed += usize::from(failed.is_empty());
+            continue;
+        };
+        burned += 1;
+        let w = (cols.end - cols.start) as usize;
+        for (line, row) in mask.chunks_exact(w).zip(rows) {
+            let start = row as usize * g.width + cols.start as usize;
+            for (cell, inside) in data.get_mut(start..start + w).unwrap_or_default().iter_mut().zip(line) {
+                if *inside {
+                    *cell = shape.value;
+                }
+            }
+        }
+    }
+    let cells = data.iter().filter(|v| !(**v == nodata || (v.is_nan() && nodata.is_nan()))).count();
+    Ok(Burned { data, cells, burned, unplaced, missed })
 }
 
 /// How an output raster holds a source's bands.
@@ -1425,5 +1493,34 @@ mod tests {
         // A longitude/latitude box placed in the projection covers its corners.
         let b = bounds_in([-42.82, -5.12, -42.78, -5.08], utm23s).unwrap();
         assert!((b[0] - bounds[0]).abs() < 1.0 && (b[3] - bounds[3]).abs() < 1.0, "{b:?} {bounds:?}");
+    }
+
+    /// Burned by cell centre: holes cut out, a later shape over an earlier one, a sliver between
+    /// centres missed, a part that can't be placed reported, and a grid too large refused.
+    #[test]
+    fn rasterize_burns_by_cell_centre_with_holes_and_overlaps() {
+        let ring = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![Coord::new(x0, y0), Coord::new(x1, y0), Coord::new(x1, y1), Coord::new(x0, y1), Coord::new(x0, y0)]
+        };
+        let g = Grid { crs: Crs::LonLat, min_x: 0.0, max_y: 10.0, cell_x: 1.0, cell_y: 1.0, width: 10, height: 10 };
+        let shapes = [
+            Shape { parts: vec![vec![ring(0.0, 0.0, 8.0, 8.0), ring(3.0, 3.0, 5.0, 5.0)]], value: 1.0 },
+            Shape { parts: vec![vec![ring(5.0, 5.0, 7.0, 7.0)]], value: 2.0 },
+            // Narrower than a cell, between two columns of centres.
+            Shape { parts: vec![vec![ring(8.6, 0.0, 8.9, 10.0)]], value: 3.0 },
+            // One part placed, one not.
+            Shape { parts: vec![vec![ring(9.0, 9.0, 10.0, 10.0)], vec![vec![Coord::new(f64::NAN, 0.0); 4]]], value: 4.0 },
+        ];
+        let b = rasterize(&g, &shapes, -1.0).unwrap();
+        let at = |x: f64, y: f64| b.data[(10.0 - y).floor() as usize * 10 + x.floor() as usize];
+        assert_eq!((at(0.5, 0.5), at(7.5, 7.5), at(8.5, 8.5)), (1.0, 1.0, -1.0));
+        assert_eq!((at(3.5, 3.5), at(4.5, 4.5)), (-1.0, -1.0), "the hole stays out");
+        assert_eq!((at(5.5, 5.5), at(6.5, 6.5), at(4.5, 5.5)), (2.0, 2.0, 1.0), "the later shape wins where they overlap");
+        assert!(!b.data.contains(&3.0) && (b.burned, b.missed) == (3, 1), "a sliver between cell centres is missed, and counted");
+        assert_eq!((at(9.5, 9.5), b.unplaced.clone()), (4.0, vec![3]));
+        // 64 cells less the hole's 4, and the corner.
+        assert_eq!(b.cells, 64 - 4 + 1);
+        let huge = Grid { width: max_samples(), height: 2, ..g };
+        assert!(rasterize(&huge, &shapes, -1.0).unwrap_err().contains("give a larger cellSize"));
     }
 }

@@ -2741,6 +2741,9 @@ fn hostile_params_never_panic(shard: usize) {
         json!({"transform": "spline", "crs": "EPSG:999999999", "pointsCrs": [7], "resampling": 1, "cellSize": -1e308, "path": 5, "points": [[0, 0, 1, 1]]}),
         json!({"transform": "affine", "crs": 32613, "pointsCrs": 4326, "cellSize": 1e-300, "path": "/nonexistent/x.tif", "points": [[0, 0, 1, 1], [1, 0, 2, 1], [0, 1, 1, 2]]}),
         json!({"points": [[0, 0, f64::MAX, f64::MAX], [1, 0, -f64::MAX, f64::MAX], [0, 1, f64::MAX, -f64::MAX]], "compare": true}),
+        // Polygons burned: a layer, a value and a no-data that pass, then a grid that can't be made.
+        json!({"layer": "Countries", "value": 3, "nodata": -1e30, "cellSize": [1e-300, 1e300], "origin": [1e308, -1e308]}),
+        json!({"layer": "Countries", "field": "name", "nodata": f64::MAX, "grid": [], "extent": "view", "path": 7}),
         // Connections: junk kinds, options and secrets; no connection exists in a fresh session.
         json!({"id": "c1", "kind": "s3", "address": "http://127.0.0.1:9", "name": "\u{7}", "group": 5, "options": {"credentials": "nope", "buckets": "NO_", "region": [1]}, "password": 7, "remember": [true], "accessKeyId": "A", "secretAccessKey": 9}),
         json!({"id": "", "kind": "postgres", "address": "postgres:host=127.0.0.1 port=9 password=x", "options": "x"}),
@@ -25661,4 +25664,181 @@ fn analysis_workflows_run_on_another_thread() {
     s.run("project.new", &Value::Null).unwrap();
     assert_eq!(raster_land(&mut s, id, made), Ok(false));
     assert!(raster_start(&mut s, "analysis.lineOfSight", &p).is_err());
+}
+
+/// `raster.rasterize` burns a polygon layer onto a grid given as `raster.project`'s is: holes cut
+/// out, a later polygon over an earlier one, a text field's codes in a table, numbers in the
+/// smallest pixel type that holds them, the selection alone, another raster's grid exactly, and
+/// bad parameters refused before anything is made.
+#[test]
+fn polygons_burned_onto_a_chosen_grid() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_geom::Coord;
+    let mut s = world();
+    let ring = |x0: f64, y0: f64, x1: f64, y1: f64| {
+        vec![Coord::new(x0, y0), Coord::new(x1, y0), Coord::new(x1, y1), Coord::new(x0, y1), Coord::new(x0, y0)]
+    };
+    let fields = vec![Field::new("unit", FieldType::Text), Field::new("clay", FieldType::Double), Field::new("code", FieldType::Integer)];
+    let mut soils = Dataset::new("soils", GeometryType::Polygon, fields.clone());
+    // A square with a hole, a second square over part of it, and a polygon with no unit.
+    let holed = Geometry::Polygon(vec![vec![ring(0.0, 0.0, 8.0, 8.0), ring(3.0, 3.0, 5.0, 5.0)]]);
+    soils.push(Some(holed), vec![V::Text("Latossolo".into()), V::Float(35.5), V::Int(2)]);
+    soils.push(
+        Some(Geometry::Polygon(vec![vec![ring(4.0, 4.0, 10.0, 10.0)]])),
+        vec![V::Text("Argissolo".into()), V::Float(20.25), V::Int(7)],
+    );
+    soils.push(Some(Geometry::Polygon(vec![vec![ring(20.0, 0.0, 21.0, 1.0)]])), vec![V::Null, V::Null, V::Null]);
+    crate::cmd::layer::add_dataset(&mut s, soils);
+    // The value of the cell whose centre is (x, y) on a raster of 1° cells whose top is at 10°.
+    let at = |r: &Raster, x: f64, y: f64| r.value(0, x.floor() as i64, (10.0 - y).floor() as i64);
+
+    // A text field: codes 1 and 2 in sorted order, listed in a table; the polygon with no unit
+    // is skipped, so the grid covers the other two (10 × 10 cells of 1°).
+    let mark = s.notice_mark();
+    let v = s.run("raster.rasterize", &json!({"layer": "soils", "field": "unit", "cellSize": 1})).unwrap();
+    assert_eq!(
+        (v["name"].as_str(), v["crs"].as_str(), v["dataType"].as_str()),
+        (Some("soils raster"), Some("EPSG:4326"), Some("UInt8")),
+        "{v}"
+    );
+    assert_eq!((v["width"].as_u64(), v["height"].as_u64(), v["corner"].clone()), (Some(10), Some(10), json!([0.0, 10.0])), "{v}");
+    assert_eq!(v["classes"], json!([{"code": 1, "value": "Argissolo"}, {"code": 2, "value": "Latossolo"}]));
+    assert_eq!((v["features"].as_u64(), v["skipped"].clone()), (Some(2), json!({"noValue": 1})));
+    assert!(s.notices_since(mark).iter().any(|n| n.text == "soils: features skipped: 1 with no value"), "lossy input is said");
+    // 60 cells of the holed square and 36 of the other, 15 of them in both.
+    assert_eq!(v["cells"].as_u64(), Some(81));
+    let r = out_raster(&s, &v);
+    assert_eq!(at(&r, 1.5, 1.5), Some(2.0));
+    assert_eq!(at(&r, 3.5, 3.5), None, "the hole stays out");
+    assert_eq!((at(&r, 4.5, 4.5), at(&r, 6.5, 6.5), at(&r, 9.5, 9.5)), (Some(1.0), Some(1.0), Some(1.0)), "the later polygon wins");
+    assert_eq!(at(&r, 9.5, 0.5), None, "no polygon there");
+    let table = s.project.tables.iter().find(|t| t.name == "soils raster classes").expect("the codes' table");
+    assert_eq!((table.features.len(), table.value(1, 0), table.value(1, 1)), (2, &V::Int(2), &V::Text("Latossolo".into())));
+    assert!(matches!(
+        s.map().layer(v["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().style.renderer,
+        rustgis_map::RasterRenderer::UniqueValues { .. }
+    ));
+
+    // A floating-point field keeps its values; a whole-number one fits in bytes; one value gives
+    // a mask.
+    let clay = s.run("raster.rasterize", &json!({"layer": "soils", "field": "clay", "cellSize": 1, "name": "clay"})).unwrap();
+    let r = out_raster(&s, &clay);
+    assert_eq!((clay["dataType"].as_str(), at(&r, 1.5, 1.5), at(&r, 9.5, 9.5)), (Some("Float32"), Some(35.5), Some(20.25)));
+    let code =
+        s.run("raster.rasterize", &json!({"layer": "soils", "field": "code", "cellSize": 1, "nodata": 300, "name": "code"})).unwrap();
+    let r = out_raster(&s, &code);
+    assert_eq!((code["dataType"].as_str(), at(&r, 1.5, 1.5), at(&r, 3.5, 3.5)), (Some("UInt16"), Some(2.0), None), "{code}");
+    let mask = s.run("raster.rasterize", &json!({"layer": "soils", "cellSize": 1, "name": "mask"})).unwrap();
+    let r = out_raster(&s, &mask);
+    // With no field, the polygon with no unit is burned too: the grid reaches it.
+    assert_eq!((mask["dataType"].as_str(), mask["width"].as_u64(), at(&r, 20.5, 0.5)), (Some("UInt8"), Some(21), Some(1.0)), "{mask}");
+
+    // The selection alone: the second square, 6 × 6 cells.
+    s.run("select.byAttributes", &json!({"layer": "soils", "where": "unit = 'Argissolo'"})).unwrap();
+    let mark = s.notice_mark();
+    let sel = s.run("raster.rasterize", &json!({"layer": "soils", "field": "unit", "cellSize": 1, "name": "selected"})).unwrap();
+    assert_eq!(
+        (sel["width"].as_u64(), sel["cells"].as_u64(), sel["classes"].clone()),
+        (Some(6), Some(36), json!([{"code": 1, "value": "Argissolo"}]))
+    );
+    assert!(s.notices_since(mark).is_empty() && sel.get("skipped").is_none(), "clean input says nothing: {sel}");
+    s.run("select.clear", &json!({})).unwrap();
+
+    // On a grid projected from a raster: exactly that grid, and the cells in place there.
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 10.0, pixel_width: 0.5, pixel_height: -0.5 };
+    let dem = Raster::new("dem", 20, 20, vec![vec![1.0; 400]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    let bytes = rustgis_data::raster::geotiff::write(&dem, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "dem", rustgis_map::RasterLayer::from_bytes(dem, "dem.tif", bytes)).unwrap();
+    let merc = s.run("raster.project", &json!({"layer": "dem", "crs": 3857, "cellSize": 50_000, "name": "dem merc"})).unwrap();
+    let on = s.run("raster.rasterize", &json!({"layer": "soils", "field": "unit", "grid": "dem merc", "name": "on dem"})).unwrap();
+    let (t, r) = (out_raster(&s, &merc), out_raster(&s, &on));
+    assert_eq!((r.width, r.height, r.transform, r.crs), (t.width, t.height, t.transform, t.crs));
+    let cell = |lon: f64, lat: f64| {
+        let p = r.transform.to_pixel(r.transformer().from_lonlat(Coord::new(lon, lat)).unwrap());
+        r.value(0, p.0.floor() as i64, p.1.floor() as i64)
+    };
+    assert_eq!((cell(1.5, 1.5), cell(9.0, 9.0), cell(3.8, 3.8)), (Some(2.0), Some(1.0), None), "{on}");
+    // The same crs and cellSize as a projection line up with it, without the template.
+    let same = s.run("raster.rasterize", &json!({"layer": "soils", "crs": 3857, "cellSize": 50_000, "name": "same"})).unwrap();
+    assert_eq!((same["corner"][0].as_f64().unwrap() / 50_000.0).fract(), 0.0, "{same}");
+
+    // Written to a file, as bytes with 0 for no-data.
+    let dir = std::env::temp_dir().join(format!("rustgis-rasterize-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("soils.tif");
+    let _ = std::fs::remove_file(&path);
+    let f = s
+        .run(
+            "raster.rasterize",
+            &json!({"layer": "soils", "field": "unit", "cellSize": 1, "path": path.display().to_string(), "name": "file"}),
+        )
+        .unwrap();
+    assert!(f["cog"]["bytes"].as_u64().is_some_and(|b| b > 0), "{f}");
+    let back = rustgis_data::raster::read_bytes("soils.tif", &std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!((back.data_type.as_str(), back.nodata, at(&back, 1.5, 1.5), at(&back, 3.5, 3.5)), ("UInt8", Some(0.0), Some(2.0), None));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A whole number past what a pixel holds exactly is refused; a decimal one is rounded, and
+    // said, and one that would round to the no-data value is refused. A polygon that holds no cell
+    // centre is said too.
+    let mut big = Dataset::new("big", GeometryType::Polygon, fields);
+    big.push(Some(Geometry::Polygon(vec![vec![ring(0.0, 0.0, 1.0, 1.0)]])), vec![V::Null, V::Float(35.1), V::Int(20_000_001)]);
+    big.push(Some(Geometry::Polygon(vec![vec![ring(5.6, 5.6, 5.7, 5.7)]])), vec![V::Null, V::Float(1e-50), V::Null]);
+    crate::cmd::layer::add_dataset(&mut s, big);
+    let e = s.run("raster.rasterize", &json!({"layer": "big", "field": "code", "cellSize": 1})).unwrap_err();
+    assert!(e.contains("text field"), "{e}");
+    let e = s.run("raster.rasterize", &json!({"layer": "big", "field": "clay", "cellSize": 1})).unwrap_err();
+    assert!(e.contains("no-data value"), "{e}");
+    let mark = s.notice_mark();
+    let v = s.run("raster.rasterize", &json!({"layer": "big", "field": "clay", "nodata": -1, "cellSize": 1, "name": "rounded"})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert_eq!((v["features"].as_u64(), v["skipped"].clone()), (Some(1), json!({"noCell": 1})), "{v}");
+    assert!(said.iter().any(|n| n == "big: 2 value(s) of clay rounded to the raster's 32-bit pixels"), "{said:?}");
+    assert!(
+        said.iter().any(|n| n == "big: features skipped: 1 that hold no cell centre (narrower than a cell, or off the grid)"),
+        "{said:?}"
+    );
+    // A template read from its overview: its grid is taken, and said.
+    let mut over = Raster::new("over", 20, 20, vec![vec![1.0; 400]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    over.overview = Some((80, 80));
+    let bytes = rustgis_data::raster::geotiff::write(&over, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "over", rustgis_map::RasterLayer::from_bytes(over, "over.tif", bytes)).unwrap();
+    let mark = s.notice_mark();
+    s.run("raster.rasterize", &json!({"layer": "soils", "field": "unit", "grid": "over", "name": "on over"})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|n| n == "over: the grid is its 20 × 20 overview's, of the 80 × 80 raster"), "{said:?}");
+
+    // Refused before anything is made.
+    let bad = [
+        json!({"cellSize": 1}),
+        json!({"layer": "dem", "cellSize": 1}),
+        json!({"layer": "Cities", "cellSize": 1}),
+        json!({"layer": "soils", "field": "unit", "value": 3, "cellSize": 1}),
+        json!({"layer": "soils", "field": "nope", "cellSize": 1}),
+        json!({"layer": "soils", "field": 5, "cellSize": 1}),
+        json!({"layer": "soils", "value": "x", "cellSize": 1}),
+        json!({"layer": "soils", "value": 1e300, "cellSize": 1}),
+        json!({"layer": "soils", "nodata": "x", "cellSize": 1}),
+        json!({"layer": "soils", "nodata": 1, "cellSize": 1}),
+        json!({"layer": "soils", "field": "code", "nodata": 7, "cellSize": 1}),
+        json!({"layer": "soils"}),
+        json!({"layer": "soils", "grid": "dem merc", "cellSize": 1}),
+        json!({"layer": "soils", "grid": "Countries"}),
+        json!({"layer": "soils", "cellSize": -1}),
+        json!({"layer": "soils", "cellSize": 1e-9}),
+        json!({"layer": "soils", "cellSize": 1, "extent": 5}),
+        json!({"layer": "soils", "cellSize": 1, "path": "out.png"}),
+        // No cell centre falls in any polygon.
+        json!({"layer": "soils", "cellSize": 1, "extent": [-30.0, -30.0, -29.0, -29.0]}),
+    ];
+    let (layers, tables) = (s.map().layers.len(), s.project.tables.len());
+    for p in bad {
+        assert!(s.run("raster.rasterize", &p).is_err(), "{p}");
+    }
+    assert_eq!((s.map().layers.len(), s.project.tables.len()), (layers, tables), "nothing added by a refused run");
+    let e = s.run("raster.rasterize", &json!({"layer": "soils"})).unwrap_err();
+    assert!(e.contains("cellSize is required"), "{e}");
+    let e = s.run("raster.rasterize", &json!({"layer": "soils", "nodata": 1, "cellSize": 1})).unwrap_err();
+    assert!(e.contains("no-data value"), "{e}");
 }
