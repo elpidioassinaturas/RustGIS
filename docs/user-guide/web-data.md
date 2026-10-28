@@ -64,7 +64,7 @@ and `stac.addAsset` with an item returned by `stac.search` (`"item"`) or an item
 (`"url"`) and `"asset"`. API searches return one page and a `"next"` address when there is another:
 
 ```sh
-rustgis-cli run --cmd 'stac.search={"collections":"sentinel-2-l2a","bbox":[7.4,46.9,7.5,47],"datetime":"2024-07-01/2024-07-31","maxCloud":20}' --cmd 'stac.addAsset={"url":"https://earth-search.aws.element84.com/v1/collections/sentinel-2-l2a/items/S2B_32TLS_20240727_0_L2A","asset":"scl"}'
+rustgis-cli run --cmd 'stac.search={"collections":"sentinel-2-c1-l2a","bbox":[7.4,46.9,7.5,47],"datetime":"2024-07-01/2024-07-31","maxCloud":20}' --cmd 'stac.addAsset={"url":"https://earth-search.aws.element84.com/v1/collections/sentinel-2-c1-l2a/items/S2B_T32TLS_20240727T103439_L2A","asset":"scl"}'
 ```
 
 Assets can use HTTP(S) or `s3://` addresses. S3 assets use the saved connection serving their
