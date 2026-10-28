@@ -132,6 +132,45 @@ extension (a `.json`, a project) is refused, whatever `format` is given. The His
 keeps geoprocessing runs with their outputs and Copy as code; the log is a plain record and runs
 nothing again.
 
+### GeoLibre projects
+
+**Open** on desktop or **Project › New › GeoLibre Project…** opens a `.geolibre` or legacy
+`.geolibre.json` file as a new map in the current project. Existing maps stay in place.
+The same import is available to scripts:
+
+```text
+project.importGeolibre={"path":"watershed.geolibre"}
+project.importGeolibre={"url":"https://example.org/watershed.geolibre"}
+```
+
+The command also accepts JSON `text`, base64 `data`, and `dir` for moved local data files.
+An absolute data path is tried first, then its filename under `dir` (the project's folder by
+default). A desktop project may reference files outside that folder; import projects you trust
+to select those files. Browser imports can use inline GeoJSON and web addresses; local paths need desktop.
+A web app link such as `?project=https://example.org/watershed.geolibre` imports the same map.
+This startup link takes precedence over other data/style links so download timing cannot change
+which map receives them.
+
+The map keeps its view, bookmarks, background, layer visibility and opacity, and supported vector
+styles and field labels. The result includes `map`, `layers` and per-layer `notes`, distinguishing
+approximated presentation from skipped sources. Newer format versions are read as far as possible
+with a note. Unsupported layer kinds and project sections are reported rather than silently lost.
+
+Colour classes and proportional sizes are supported separately. Combined colour-and-size styles
+keep colour and use a fixed size; graduated colour class boundaries are retained; proportional
+sizes use RustGIS's area scaling. Label halos use RustGIS defaults. Tile overlays draw above feature
+layers, and nested groups become flat folders with inherited visibility and opacity retained.
+Local data paths require a locally opened project or an explicit `dir`; URL and pasted-text imports cannot read local files without that folder.
+URL data downloaded in the browser fills its reserved layer position when it arrives; wait for
+those downloads before saving. Saving is refused while imported layers are still downloading. Recovery copies retain completed work and omit unfinished layers. A browser import can queue at most 16 whole-file downloads
+(fewer if other downloads are queued, active, or awaiting completion); a larger batch is refused before creating its map.
+Split that project into smaller imports or use the desktop app. Streaming tiles and COGs do
+not consume those download slots. Desktop GeoLibre URL imports wait for each download on the calling thread, which can pause the interface.
+Each request, including a remote MBTiles archive, has a 60-second timeout; download larger archives locally before importing. Zarr sources use their saved variable and dimension indices,
+or the first supported variable when those choices are absent. Imported Zarr stores are read
+one at a time with a 128 MiB download-buffer limit; larger slices must be reduced or opened
+through the desktop data workflow.
+
 ### QGIS projects and styles
 
 A QGIS project (`.qgs`, or a `.qgz` archive) opens as a new map of the current project: **Open**

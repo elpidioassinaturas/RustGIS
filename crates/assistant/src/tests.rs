@@ -264,6 +264,15 @@ fn gate_rules() {
     assert!(g("run_command", json!({"command": "edit.undo"})).is_none());
     assert!(g("run_command", json!({"command": "layer.addData", "params": {"path": "/etc/passwd"}})).is_some());
     assert!(g("run_command", json!({"command": "project.new"})).is_some());
+    // File-producing built-ins need approval even with a plain name or a default filename.
+    for output in [None, Some("archive"), Some("cities.pmtiles")] {
+        let mut params = json!({"input": "Cities", "minZoom": 0, "maxZoom": 0});
+        if let Some(output) = output {
+            params["output"] = json!(output);
+        }
+        assert!(g("run_tool", json!({"tool": "vectorToPmtiles", "params": params})).is_some());
+        assert!(g("run_command", json!({"command": "gp.run", "params": {"tool": "vectorToPmtiles", "params": params}})).is_some());
+    }
     // A QGIS project given as text names its files and addresses inside: asked, as with a path.
     let qgis = g("run_command", json!({"command": "project.importQgis", "params": {"text": "<qgis/>"}}));
     assert!(qgis.as_deref().is_some_and(|w| w.contains("QGIS project")), "{qgis:?}");
@@ -385,6 +394,100 @@ fn map_switch_and_remove_do_not_report_layers_added() {
     assert!(added.is_some_and(|a| !a.is_empty()), "buffer must name the layer it added: {buffered}");
 }
 
+/// A tool's output table is read back by the name `run_tool` gives, as `table` or as `layer` (the
+/// name a model passes as readily), without a layer's location columns; a table has no selection,
+/// and a map layer keeps its name over a table sharing it.
+#[test]
+fn read_features_reads_a_tools_output_table() {
+    let mut s = sample();
+    let t = |name: &str, args: Value| ToolCall { id: "x".into(), name: name.into(), args };
+    let stats = json!({"tool": "summaryStatistics", "params": {"input": "Countries", "field": "pop_est", "case": "continent"}});
+    let ran: Value = serde_json::from_str(&tools::run(&mut s, &t("run_tool", stats)).unwrap()).unwrap();
+    let name = ran["table"].as_str().map(str::to_string).unwrap_or_default();
+    assert!(!name.is_empty(), "run_tool must name the table it added: {ran}");
+    let groups = s.project.tables.last().map(|t| t.features.len()).unwrap_or_default();
+    assert!(groups > 1);
+    let id = s.project.tables.last().map(|t| t.id).unwrap_or_default();
+    for args in [
+        json!({"table": name}),
+        json!({"table": id}),
+        json!({"layer": name.to_uppercase()}),
+        json!({"layer": name, "where": "COUNT_pop_est > 0", "order_by": "SUM_pop_est DESC"}),
+    ] {
+        let read: Value = serde_json::from_str(&tools::run(&mut s, &t("read_features", args.clone())).unwrap()).unwrap();
+        assert_eq!(read["table"], json!(name), "{args}: {read}");
+        assert!(read.get("layer").is_none(), "{read}");
+        assert_eq!(read["total"].as_u64(), Some(groups as u64), "{read}");
+        let rows = read["rows"].as_array().cloned().unwrap_or_default();
+        assert!(!rows.is_empty() && rows.iter().all(|r| r.get("_lon").is_none() && r["continent"].is_string()), "{read}");
+    }
+    let sorted: Value =
+        serde_json::from_str(&tools::run(&mut s, &t("read_features", json!({"table": name, "order_by": "SUM_pop_est DESC"}))).unwrap())
+            .unwrap();
+    let sums: Vec<f64> = sorted["rows"].as_array().unwrap().iter().filter_map(|r| r["SUM_pop_est"].as_f64()).collect();
+    assert!(sums.windows(2).all(|w| w[0] >= w[1]), "{sums:?}");
+    let sel = tools::run(&mut s, &t("read_features", json!({"table": name, "selected": true})));
+    assert!(sel.as_ref().is_err_and(|e| e.contains("no selection")), "{sel:?}");
+    let missing = tools::run(&mut s, &t("read_features", json!({"layer": "No such thing"})));
+    assert!(missing.as_ref().is_err_and(|e| e.contains("no layer or standalone table named")), "{missing:?}");
+    assert!(tools::run(&mut s, &t("read_features", json!({"table": "Countries"}))).is_err(), "a layer is not a table");
+    assert!(tools::run(&mut s, &t("read_features", json!({}))).is_err());
+    // An unused `table` sent as null or empty text leaves `layer` in charge.
+    for unused in [json!(null), json!(""), json!("  ")] {
+        let read: Value = serde_json::from_str(
+            &tools::run(&mut s, &t("read_features", json!({"layer": "Cities", "table": unused, "limit": 1}))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read["layer"], json!("Cities"), "{unused}: {read}");
+    }
+    // `layer` finds a table by name as `table` does, exact case first, but not by id.
+    for (file, v) in [("stats.csv", 1), ("Stats.csv", 2)] {
+        s.run("layer.addDataText", &json!({"fileName": file, "text": format!("k,v\na,{v}\n")})).unwrap();
+    }
+    for name in ["stats", "Stats"] {
+        let by_layer = tools::run(&mut s, &t("read_features", json!({"layer": name}))).unwrap();
+        assert_eq!(by_layer, tools::run(&mut s, &t("read_features", json!({"table": name}))).unwrap(), "{name}");
+        assert!(by_layer.contains(&format!("\"table\":\"{name}\"")), "{by_layer}");
+    }
+    // Names are matched as written, by `layer` as by `table`: `stats ` and ` Stats` are tables of
+    // their own beside `stats` and `Stats`, and a name with a space nothing has is neither.
+    for (name, v) in [("stats ", 3), (" Stats", 4)] {
+        use rustgis_engine::data::{Dataset, Field, FieldType, GeometryType, Value as V};
+        let mut ds = Dataset::new(name, GeometryType::None, vec![Field::new("v", FieldType::Integer)]);
+        ds.push(None, vec![V::Int(v)]);
+        s.project.add_table(ds);
+    }
+    for (name, v) in [("stats", 1.0), ("Stats", 2.0), ("stats ", 3.0), (" Stats", 4.0)] {
+        for arg in ["layer", "table"] {
+            let args = Value::Object([(arg.to_string(), json!(name))].into_iter().collect());
+            let read: Value = serde_json::from_str(&tools::run(&mut s, &t("read_features", args)).unwrap()).unwrap();
+            assert_eq!((read["table"].as_str(), read["rows"][0]["v"].as_f64()), (Some(name), Some(v)), "{arg} {name:?}: {read}");
+        }
+    }
+    for name in ["stats  ", "  Stats"] {
+        let by_layer = tools::run(&mut s, &t("read_features", json!({"layer": name})));
+        assert!(by_layer.as_ref().is_err_and(|e| e.contains("no layer or standalone table named")), "{name:?}: {by_layer:?}");
+        let by_table = tools::run(&mut s, &t("read_features", json!({"table": name})));
+        assert!(by_table.as_ref().is_err_and(|e| e.contains("no standalone table named")), "{name:?}: {by_table:?}");
+    }
+    let id = s.project.tables.last().map(|t| t.id).unwrap_or_default();
+    // A layer with that id reads; otherwise it's an error, never the table.
+    let by_id = tools::run(&mut s, &t("read_features", json!({"layer": id.to_string()})));
+    let read_a_layer = match &by_id {
+        Ok(r) => r.contains("\"layer\"") && !r.contains("\"table\""),
+        Err(e) => e.contains("no layer or standalone table named"),
+    };
+    assert!(read_a_layer, "{by_id:?}");
+    assert!(tools::run(&mut s, &t("read_features", json!({"table": id.to_string()}))).is_ok());
+    // A table named like a layer: `layer` reads the layer.
+    s.run("layer.addDataText", &json!({"fileName": "Cities.csv", "text": "k,v\na,1\n"})).unwrap();
+    let city: Value =
+        serde_json::from_str(&tools::run(&mut s, &t("read_features", json!({"layer": "Cities", "limit": 1}))).unwrap()).unwrap();
+    assert_eq!(city["layer"], json!("Cities"), "{city}");
+    let tab: Value = serde_json::from_str(&tools::run(&mut s, &t("read_features", json!({"table": "Cities"}))).unwrap()).unwrap();
+    assert_eq!((tab["table"].as_str(), tab["total"].as_u64()), (Some("Cities"), Some(1)), "{tab}");
+}
+
 #[test]
 fn geoprocessing_and_reading_data() {
     let mut s = sample();
@@ -428,6 +531,11 @@ fn hostile_arguments_never_panic() {
         json!({"tool": "nope", "params": {"input": "Nope"}}),
         json!({"layer": "Cities", "where": "pop_max >", "limit": 1e20, "order_by": "", "fields": [1, null]}),
         json!({"layer": 99999, "selected": true}),
+        json!({"table": {"a": 1}, "layer": [1], "limit": 1e20}),
+        json!({"table": 1e20, "where": "x > 1"}),
+        json!({"table": [1], "selected": true, "order_by": 3}),
+        json!({"table": true, "layer": "  "}),
+        json!({"table": -1, "fields": [{"a": 1}]}),
         json!({"query": "∑≈ç√ 🙂 a b c d e f g h i j k l m n o p", "limit": 100000}),
         json!({"tool": "buffer", "params": {"input": "Cities", "distance": "far"}}),
     ];
@@ -4072,4 +4180,22 @@ fn list_layers_includes_web_tile_layers() {
     }
     let ctx = tools::context(&s);
     assert!(ctx.contains("characters in all)\" (index ") && ctx.contains("raster, overlay, over \"Cities\", hidden)"), "{ctx}");
+}
+
+/// Callback completion and a forged UI project-download request disclose their file reach.
+#[test]
+fn geolibre_download_callbacks_require_import_approval() {
+    let s = Session::new(rustgis_engine::project::Project::default());
+    for (command, params) in
+        [("layer.addDownload", json!({"id":1})), ("ui.addUrl", json!({"url":"https://example.org/map.geolibre","geolibreProject":true}))]
+    {
+        let call = ToolCall { id: "callback".into(), name: "run_command".into(), args: json!({"command":command,"params":params}) };
+        assert!(tools::gate(&s, &call).is_some(), "{command}");
+    }
+    for key in ["geolibreProject", "geolibreLayer", "geolibreZarr"] {
+        let mut params = json!({"url":"https://example.org/data"});
+        params[key] = json!(true);
+        let call = ToolCall { id: key.into(), name: "run_command".into(), args: json!({"command":"ui.addUrl","params":params}) };
+        assert!(tools::gate(&s, &call).is_some(), "{key}");
+    }
 }

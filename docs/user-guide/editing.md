@@ -163,3 +163,9 @@ capabilities again on its first click (once for all the map's layers from that s
 then Topmost takes it as one that can be asked.
 `identify` lists the requests in `featureInfo`, and `identify.featureInfo` reads an answer (or, on
 the command line, asks the service and waits).
+
+A tile layer's row in Layers can be clicked to select it, as a map layer's can (`map.selectTiles`;
+no map layer is active then, and clicking one ends it). With **Selected in Layers**, a click on
+the map then identifies that tile layer alone: a WMS layer is asked as above, and a vector tile
+layer, archive or MapLibre style lists its features. This works for catalog basemaps and MapLibre
+styles too, which the topmost and visible modes leave out.

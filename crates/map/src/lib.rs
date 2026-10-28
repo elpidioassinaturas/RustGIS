@@ -7,6 +7,7 @@ pub mod color;
 pub mod design;
 pub mod effects;
 pub mod fills;
+pub mod geolibre;
 pub mod globe;
 pub mod graphics;
 pub mod layout;
@@ -737,6 +738,16 @@ impl Layer {
     /// Marks geometry as changed.
     pub fn touch_geometry(&mut self) {
         self.geometry_rev = self.geometry_rev.wrapping_add(1);
+    }
+
+    /// Puts the selection in range, in order and with each row once: the state selecting leaves
+    /// it in. A selection read from a file goes through this too, or a repeated row would be
+    /// counted, and run, twice.
+    pub fn normalize_selection(&mut self) {
+        let n = self.dataset.features.len();
+        self.selection.retain(|r| *r < n);
+        self.selection.sort_unstable();
+        self.selection.dedup();
     }
 
     /// Whether the layer draws at a scale denominator.

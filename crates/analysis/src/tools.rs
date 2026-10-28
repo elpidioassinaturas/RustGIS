@@ -5,6 +5,7 @@ use rustgis_data::raster::Crs;
 use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value};
 use rustgis_geom::Extent;
 use serde_json::Value as Json;
+use std::collections::TryReserveError;
 
 use crate::convert::{from_line, from_multipolygon, from_point, to_geo, to_multiline, to_multipolygon};
 use crate::geodesic::geodesic_buffer;
@@ -149,6 +150,17 @@ pub static TOOLS: &[ToolSpec] = &[
             P { name: "output", label: "Output Name", kind: K::Text, required: false, default: "", help: "" },
         ],
         run: feature_to_point,
+    },
+    ToolSpec {
+        id: "featureVerticesToPoints",
+        name: "Feature Vertices To Points",
+        toolbox: "Data Management › Features",
+        summary: "Creates a point at each vertex of the input features.",
+        params: &[
+            P { name: "input", label: "Input Features", kind: K::VectorLayer, required: true, default: "", help: "" },
+            P { name: "output", label: "Output Name", kind: K::Text, required: false, default: "", help: "" },
+        ],
+        run: feature_vertices_to_points,
     },
     ToolSpec {
         id: "xyTableToPoint",
@@ -592,6 +604,48 @@ pub static TOOLS: &[ToolSpec] = &[
         ],
         run: zonal_stats,
     },
+    ToolSpec {
+        id: "vectorToPmtiles",
+        name: "Vector to PMTiles",
+        toolbox: "Analyze › Tools",
+        summary: "Exports a vector layer as a Web Mercator vector-tile PMTiles archive.",
+        params: &[
+            P { name: "input", label: "Input Layer", kind: K::VectorLayer, required: true, default: "", help: "" },
+            P {
+                name: "minZoom",
+                label: "Minimum Zoom",
+                kind: K::Number,
+                required: true,
+                default: "",
+                help: "Minimum tile zoom, an integer from 0 to 16.",
+            },
+            P {
+                name: "maxZoom",
+                label: "Maximum Zoom",
+                kind: K::Number,
+                required: true,
+                default: "",
+                help: "Maximum tile zoom, an integer from minZoom to 16.",
+            },
+            P {
+                name: "sourceLayer",
+                label: "Source-layer Name",
+                kind: K::Text,
+                required: false,
+                default: "",
+                help: "Name inside the vector-tile archive; defaults to the input layer name.",
+            },
+            P {
+                name: "output",
+                label: "Output",
+                kind: K::SaveFile { ext: "pmtiles" },
+                required: false,
+                default: "",
+                help: "Write a .pmtiles archive.",
+            },
+        ],
+        run: vector_to_pmtiles,
+    },
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -621,11 +675,36 @@ fn rows(inp: &dyn Inputs, p: &Json, k: &str, ds: &Dataset) -> Vec<usize> {
     if sel.is_empty() { (0..ds.features.len()).collect() } else { sel.iter().copied().filter(|r| *r < ds.features.len()).collect() }
 }
 
-/// The name of a tool's new layer, from its `output` parameter. Every built-in tool names its
-/// output layer through here, and an `output` is only ever a layer name in the session, never a
-/// file: `touches_files` in rustgis-engine relies on this to let tasks, models and notebooks from
-/// files name their outputs. A built-in tool that writes a file must take its path under another
-/// parameter (`path`), which stays refused.
+fn vector_to_pmtiles(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
+    let ds = input(inp, p, "input")?;
+    let zoom = |name: &str| -> Result<u8, String> {
+        let value = p.get(name).ok_or_else(|| format!("{name} is required"))?;
+        let parsed = match value {
+            Json::Number(n) => n.as_f64().filter(|n| n.is_finite() && (0.0..=16.0).contains(n) && n.fract() == 0.0).map(|n| n as u8),
+            Json::String(s) => s.trim().parse::<u8>().ok().filter(|n| *n <= 16),
+            _ => None,
+        };
+        parsed.ok_or_else(|| format!("{name} must be an integer from 0 to 16"))
+    };
+    let min_zoom = zoom("minZoom")?;
+    let max_zoom = zoom("maxZoom")?;
+    if min_zoom > max_zoom {
+        return Err("minZoom must not exceed maxZoom".into());
+    }
+    let source_layer = {
+        let name = s(p, "sourceLayer").trim();
+        if name.is_empty() { &ds.name } else { name }
+    };
+    let output = s(p, "output").trim();
+    let default_name = ds.name.rsplit(['/', '\\']).find(|name| !name.is_empty()).unwrap_or("output");
+    let file_name = if output.is_empty() { format!("{default_name}.pmtiles") } else { output.to_string() };
+    let selected = inp.selection(s(p, "input"));
+    let (bytes, messages) = inp.vector_to_pmtiles(ds, selected, min_zoom, max_zoom, source_layer)?;
+    Ok(ToolResult { output: Output::File { file_name, bytes }, messages })
+}
+
+/// The name of a tool's new layer, from its `output` parameter.
+/// File-producing tools use `ParamKind::SaveFile` and `Output::File` instead.
 fn out_name(p: &Json, default: String) -> String {
     let n = s(p, "output").trim();
     if n.is_empty() { default } else { n.to_string() }
@@ -1073,6 +1152,190 @@ fn feature_to_point(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     }
     let n = out.features.len();
     result(out, format!("Feature To Point: {n} points"))
+}
+
+/// The fields Feature Vertices To Points adds: a point's feature's OID, linking the two as
+/// ArcGIS's tool of the same name does, and where in the feature the vertex lies, named as QGIS's
+/// Extract Vertices names them.
+const VERTEX_FIELDS: [&str; 4] = ["orig_fid", "vertex_part", "vertex_part_ring", "vertex_part_index"];
+
+/// An allocation's overhead in the allocator, as estimated: its header and rounding.
+const ALLOCATION_OVERHEAD: u64 = 16;
+
+/// The memory a point takes once drawn, copying `own` into `width` attributes: the row, its
+/// values, its copy of `own`'s text, each allocation's overhead, and the map's cache of a drawn
+/// feature (its projected geometry and extent).
+fn vertex_point_bytes(own: &[Value], width: usize) -> u64 {
+    let u = |x: usize| u64::try_from(x).unwrap_or(u64::MAX);
+    let (mut text, mut allocations) = (0u64, 1u64);
+    for v in own {
+        if let Value::Text(t) = v
+            && !t.is_empty()
+        {
+            text += u(t.len());
+            allocations += 1;
+        }
+    }
+    let fixed = size_of::<rustgis_data::Feature>() + size_of::<Option<Geometry>>() + size_of::<Extent>();
+    u(fixed)
+        .saturating_add(u(width).saturating_mul(u(size_of::<Value>())))
+        .saturating_add(text)
+        .saturating_add(allocations.saturating_mul(ALLOCATION_OVERHEAD))
+}
+
+/// How many points the vertices of `feats` make and, when `estimate`, the memory they take (see
+/// [`vertex_point_bytes`]), each point copying `kept` of its feature's attributes into `width`.
+/// The memory is `None` when it isn't estimated.
+fn size_vertex_points<'a>(
+    feats: impl IntoIterator<Item = &'a rustgis_data::Feature>,
+    kept: usize,
+    width: usize,
+    estimate: bool,
+) -> (usize, Option<u64>) {
+    let (mut n, mut need) = (0usize, 0u64);
+    for f in feats {
+        let Some(g) = &f.geometry else { continue };
+        let mut k = 0usize;
+        g.for_each_vertex(|_, _| k += 1);
+        // Saturating, as sizes from input are. A row repeated in the selection (a project can
+        // restore one) is counted again, and its points are written twice.
+        n = n.saturating_add(k);
+        if estimate {
+            let own = f.attrs.get(..kept).unwrap_or(&f.attrs);
+            let k = u64::try_from(k).unwrap_or(u64::MAX);
+            need = need.saturating_add(k.saturating_mul(vertex_point_bytes(own, width)));
+        }
+    }
+    (n, estimate.then_some(need))
+}
+
+/// Whether the browser can give the web app `need` bytes now, and a quarter more as a margin for
+/// what the estimate leaves out, such as the renderer's buffers. The allocator is asked for them
+/// in one block, freed at once, so the free space inside memory counts. On wasm32 a single block
+/// can't exceed `isize::MAX` (2 GiB), so the probe can't confirm more than that: a larger estimate
+/// is refused even where the browser could give more. Elsewhere the system manages memory, so this
+/// is `true`.
+fn web_has_room(need: u64) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Ok(want) = usize::try_from(need.saturating_add(need / 4)) else { return false };
+        let mut probe = Vec::<u8>::new();
+        let room = probe.try_reserve_exact(want).is_ok();
+        // Kept in sight of the optimizer, which could otherwise drop an allocation never used.
+        std::hint::black_box(&probe);
+        room
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = need;
+        true
+    }
+}
+
+/// Refuses `n` points needing `need` bytes when `has_room` says the memory isn't there.
+fn check_room(n: usize, need: u64, has_room: impl FnOnce(u64) -> bool) -> Result<(), String> {
+    if has_room(need) {
+        return Ok(());
+    }
+    Err(format!(
+        "Feature Vertices To Points: {n} points would need about {} MiB, more than the browser can give now: select fewer features, or simplify ones with many vertices",
+        need.div_ceil(1 << 20)
+    ))
+}
+
+/// A copy of `v` whose allocation (a text's) fails into an error rather than aborting the process.
+/// The variants are listed, so one that owns memory can't be added without deciding how.
+fn try_clone_value(v: &Value) -> Result<Value, TryReserveError> {
+    Ok(match v {
+        Value::Text(t) => {
+            let mut s = String::new();
+            s.try_reserve_exact(t.len())?;
+            s.push_str(t);
+            Value::Text(s)
+        }
+        Value::Null | Value::Int(_) | Value::Float(_) | Value::Bool(_) => v.clone(),
+    })
+}
+
+/// A point's attributes: its feature's `own` (padded to `kept`), then `extra`, each allocation
+/// fallible.
+fn vertex_row(own: &[Value], kept: usize, extra: [Value; 4]) -> Result<Vec<Value>, TryReserveError> {
+    let mut attrs = Vec::new();
+    attrs.try_reserve_exact(kept + extra.len())?;
+    for v in own {
+        attrs.push(try_clone_value(v)?);
+    }
+    attrs.resize(kept, Value::Null);
+    attrs.extend(extra);
+    Ok(attrs)
+}
+
+/// A point at each vertex, with its feature's attributes and OID and where it lies: the part, the
+/// ring (a polygon's; 0 otherwise) and the place along it. A closed ring's repeated last point is
+/// not a vertex of its own; a point layer's points are their own vertices.
+fn feature_vertices_to_points(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
+    let ds = input(inp, p, "input")?;
+    if ds.geometry_type == GeometryType::None {
+        return Err("Feature Vertices To Points needs a layer with geometry".into());
+    }
+    let mut out = copy_schema(ds, out_name(p, format!("{}_Vertices", ds.name)), GeometryType::Point);
+    out.crs = ds.crs;
+    // A name the input already has keeps its field, and the new one gets a suffix, as Intersect's
+    // and Spatial Join's do.
+    for name in VERTEX_FIELDS {
+        let field = Field::new(unique_field(&out, name), FieldType::Integer);
+        out.fields.push(field);
+    }
+    let (kept, width) = (ds.fields.len(), out.fields.len());
+    // The selected features, or all of them, walked in place rather than listed as `rows` does:
+    // nothing is allocated before the memory is checked.
+    let sel = inp.selection(s(p, "input"));
+    let all = 0..if sel.is_empty() { ds.features.len() } else { 0 };
+    let feats = || sel.iter().copied().chain(all.clone()).filter_map(|r| ds.features.get(r));
+    // Counted first, so the points are allocated once at their final size: growing the list would
+    // copy it and briefly hold it twice. In the browser, whose memory has a ceiling, the points'
+    // memory is also estimated and asked for before anything is built.
+    let web = cfg!(target_arch = "wasm32");
+    let (n, need) = size_vertex_points(feats(), kept, width, web);
+    if let Some(need) = need {
+        check_room(n, need, web_has_room)?;
+    }
+    // The point list and each point's attributes are allocated fallibly, so running out of memory
+    // while they're built stops the tool with a message. (A desktop system that overcommits memory
+    // may instead close the app when it runs out.)
+    let no_memory = |e: TryReserveError| format!("Feature Vertices To Points: not enough memory for {n} points: {e}");
+    let mut points = Vec::new();
+    points.try_reserve_exact(n).map_err(no_memory)?;
+    let int = |k: usize| Value::Int(i64::try_from(k).unwrap_or(i64::MAX));
+    let (mut id, mut failed) = (0u64, None);
+    for f in feats() {
+        let Some(g) = &f.geometry else { continue };
+        let own = f.attrs.get(..kept).unwrap_or(&f.attrs);
+        // An id a reader wrapped from a negative key (a GeoPackage's) is that key again.
+        let fid = Value::Int(f.id.cast_signed());
+        // A multipoint's points are its parts, as QGIS numbers them.
+        let multipoint = matches!(g, Geometry::MultiPoint(_));
+        g.for_each_vertex(|v, c| {
+            if failed.is_some() {
+                return;
+            }
+            let (part, index) = if multipoint { (v.index, 0) } else { (v.part, v.index) };
+            match vertex_row(own, kept, [fid.clone(), int(part), int(v.ring), int(index)]) {
+                Ok(attrs) => {
+                    id += 1;
+                    points.push(rustgis_data::Feature { id, geometry: Some(Geometry::Point(c)), attrs });
+                }
+                Err(e) => failed = Some(e),
+            }
+        });
+        if let Some(e) = failed.take() {
+            // Freed first, so that there is memory to say so.
+            drop(points);
+            return Err(no_memory(e));
+        }
+    }
+    out.features = points.into();
+    result(out, format!("Feature Vertices To Points: {n} points"))
 }
 
 /// A coordinate from a table cell: a number, or text holding one, written with a decimal point
@@ -2613,7 +2876,7 @@ mod tests {
     fn layer(r: ToolResult) -> Dataset {
         match r.output {
             Output::Layer(d) | Output::Table(d) | Output::Update { dataset: d, .. } => d,
-            Output::Selection { .. } | Output::Layers(_) => panic!("expected a dataset"),
+            Output::Selection { .. } | Output::Layers(_) | Output::File { .. } => panic!("expected a dataset"),
         }
     }
 
@@ -2718,10 +2981,132 @@ mod tests {
         assert_eq!(sj.value(0, sj.field_index("join_count").unwrap()), &Value::Int(1));
         assert_eq!(sj.value(0, sj.field_index("join_k").unwrap()), &Value::Text("a".into()));
         assert_eq!(sj.value(2, sj.field_index("join_count").unwrap()), &Value::Int(0));
-        for id in ["convexHull", "featureToPoint", "simplify", "calculateGeometry", "exportFeatures", "erase"] {
+        for id in ["convexHull", "featureToPoint", "featureVerticesToPoints", "simplify", "calculateGeometry", "exportFeatures", "erase"] {
             let r = crate::run(id, &m, &j(serde_json::json!({"input": "polys", "erase": "polys"})));
             assert!(r.is_ok(), "{id}: {r:?}");
         }
+    }
+
+    #[test]
+    fn feature_vertices_to_points_numbers_each_vertex_and_keeps_attributes() {
+        // A selection on one layer only, so looking it up under another name finds none.
+        struct Sel(Map, &'static str, Vec<usize>);
+        impl Inputs for Sel {
+            fn dataset(&self, layer: &str) -> Option<&Dataset> {
+                self.0.dataset(layer)
+            }
+            fn selection(&self, layer: &str) -> &[usize] {
+                if layer == self.1 { &self.2 } else { &[] }
+            }
+        }
+        let c = Coord::new;
+        let mut polys = Dataset::new("polys", GeometryType::Polygon, vec![Field::new("k", FieldType::Text)]);
+        polys.crs = Some(Crs::WebMercator);
+        // A square with a triangular hole, then a second polygon whose ring isn't closed: a
+        // closing point is not a vertex of its own, and an open ring loses none.
+        let outer = vec![c(0.0, 0.0), c(4.0, 0.0), c(4.0, 4.0), c(0.0, 4.0), c(0.0, 0.0)];
+        let hole = vec![c(1.0, 1.0), c(1.0, 2.0), c(2.0, 2.0), c(1.0, 1.0)];
+        let open = vec![c(9.0, 9.0), c(9.5, 9.0), c(9.0, 9.5)];
+        polys.push(Some(Geometry::Polygon(vec![vec![outer, hole], vec![open]])), vec![Value::Text("a".into())]);
+        polys.push(None, vec![Value::Text("no geometry".into())]);
+        let mut lines = Dataset::new("lines", GeometryType::Polyline, vec![]);
+        lines.push(Some(Geometry::Line(vec![vec![c(0.0, 0.0), c(1.0, 1.0)], vec![c(5.0, 5.0), c(6.0, 6.0), c(7.0, 7.0)]])), vec![]);
+        lines.push(Some(Geometry::Line(vec![vec![c(8.0, 8.0), c(9.0, 9.0)]])), vec![]);
+        let mut pts = Dataset::new("pts", GeometryType::Point, vec![]);
+        pts.push(Some(Geometry::Point(c(0.0, 0.0))), vec![]);
+        pts.push(Some(Geometry::MultiPoint(vec![c(1.0, 1.0), c(2.0, 2.0)])), vec![]);
+        let table = Dataset::new("table", GeometryType::None, vec![]);
+        let m = Map(HashMap::from([
+            ("polys".to_string(), polys),
+            ("lines".to_string(), lines),
+            ("pts".to_string(), pts),
+            ("table".to_string(), table),
+        ]));
+        // A point's [orig_fid, vertex_part, vertex_part_ring, vertex_part_index].
+        let place = |v: &Dataset, row: usize| VERTEX_FIELDS.map(|f| v.value(row, v.field_index(f).unwrap()).clone());
+        let ints = |a: [i64; 4]| a.map(Value::Int);
+
+        let r = crate::run("featureVerticesToPoints", &m, &serde_json::json!({"input": "polys"})).unwrap();
+        assert_eq!(r.messages, vec!["Feature Vertices To Points: 10 points"]);
+        let v = layer(r);
+        assert_eq!((v.name.as_str(), v.geometry_type, v.crs), ("polys_Vertices", GeometryType::Point, Some(Crs::WebMercator)));
+        assert!(v.features.iter().map(|f| f.id).eq(1..=10));
+        // The hole's last vertex: part 0, ring 1, third along, with its feature's attribute.
+        assert_eq!(v.features[6].geometry, Some(Geometry::Point(c(2.0, 2.0))));
+        assert_eq!(place(&v, 6), ints([1, 0, 1, 2]));
+        assert_eq!(v.value(6, v.field_index("k").unwrap()), &Value::Text("a".into()));
+        // The open ring's last vertex, in the second polygon.
+        assert_eq!(place(&v, 9), ints([1, 1, 0, 2]));
+
+        let v = layer(crate::run("featureVerticesToPoints", &m, &serde_json::json!({"input": "lines", "output": "nodes"})).unwrap());
+        assert_eq!((v.name.as_str(), v.features.len()), ("nodes", 7));
+        assert_eq!((place(&v, 4), place(&v, 6)), (ints([1, 1, 0, 2]), ints([2, 0, 0, 1])));
+        // A point layer's points are their own vertices; a table has none.
+        let v = layer(crate::run("featureVerticesToPoints", &m, &serde_json::json!({"input": "pts"})).unwrap());
+        // A multipoint's points are its parts.
+        assert_eq!((v.features.len(), place(&v, 1), place(&v, 2)), (3, ints([2, 0, 0, 0]), ints([2, 1, 0, 0])));
+        assert!(crate::run("featureVerticesToPoints", &m, &serde_json::json!({"input": "table"})).is_err());
+        // Only the selected feature's vertices.
+        let v = layer(crate::run("featureVerticesToPoints", &Sel(m, "lines", vec![1]), &serde_json::json!({"input": "lines"})).unwrap());
+        assert_eq!(
+            v.features.iter().map(|f| f.geometry.clone()).collect::<Vec<_>>(),
+            [Some(Geometry::Point(c(8.0, 8.0))), Some(Geometry::Point(c(9.0, 9.0)))]
+        );
+        assert_eq!(place(&v, 0), ints([2, 0, 0, 0]));
+    }
+
+    #[test]
+    fn feature_vertices_to_points_keeps_same_named_fields() {
+        let c = Coord::new;
+        let old = Field { name: "VERTEX_PART_INDEX".into(), ty: FieldType::Text, alias: Some("Old".into()) };
+        let mut clash = Dataset::new("clash", GeometryType::Polyline, vec![old.clone(), Field::new("vertex_part", FieldType::Integer)]);
+        clash.push(Some(Geometry::Line(vec![vec![c(0.0, 0.0), c(1.0, 1.0)]])), vec![Value::Text("old".into()), Value::Int(9)]);
+        let m = Map(HashMap::from([("clash".to_string(), clash)]));
+
+        // The input's fields stay as they were; the new ones of a name it has get a number.
+        let v = layer(crate::run("featureVerticesToPoints", &m, &serde_json::json!({"input": "clash"})).unwrap());
+        let names: Vec<_> = v.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["VERTEX_PART_INDEX", "vertex_part", "orig_fid", "vertex_part_2", "vertex_part_ring", "vertex_part_index_2"]);
+        assert_eq!(v.fields[0], old);
+        // The second point: the input's values, then orig_fid 1, part 0, ring 0, index 1.
+        let row = [Value::Text("old".into()), Value::Int(9), Value::Int(1), Value::Int(0), Value::Int(0), Value::Int(1)];
+        assert_eq!(v.features[1].attrs, row);
+    }
+
+    #[test]
+    fn feature_vertices_to_points_keeps_a_wrapped_negative_id() {
+        // A GeoPackage feature with fid -2 is read with the id -2 wraps to; its points say -2.
+        let c = Coord::new;
+        let mut gpkg = Dataset::new("gpkg", GeometryType::Polyline, vec![]);
+        let line = Some(Geometry::Line(vec![vec![c(0.0, 0.0), c(1.0, 1.0)]]));
+        gpkg.features = vec![Feature { id: (-2i64).cast_unsigned(), geometry: line, attrs: vec![] }].into();
+        let m = Map(HashMap::from([("gpkg".to_string(), gpkg)]));
+        let v = layer(crate::run("featureVerticesToPoints", &m, &serde_json::json!({"input": "gpkg"})).unwrap());
+        assert_eq!(v.value(1, v.field_index("orig_fid").unwrap()), &Value::Int(-2));
+    }
+
+    #[test]
+    fn feature_vertices_to_points_estimates_and_asks_for_memory() {
+        let own = [Value::Text("abc".into()), Value::Int(1)];
+        // A point with no attributes is the base: its fixed part and the row's allocation. On top
+        // of it, each of the 6 values, the text (3 B) and its allocation (16 B).
+        let base = vertex_point_bytes(&[], 0);
+        assert_eq!(vertex_point_bytes(&own, 6), base + u64::try_from(6 * size_of::<Value>() + 3 + 16).unwrap());
+        // An empty text allocates nothing, so it costs what a null does.
+        assert_eq!(vertex_point_bytes(&[Value::Text(String::new())], 6), vertex_point_bytes(&[Value::Null], 6));
+        // Every vertex is counted; the memory only when asked, for the attributes copied.
+        let c = Coord::new;
+        let line = Geometry::Line(vec![vec![c(0.0, 0.0), c(1.0, 1.0), c(2.0, 2.0)]]);
+        let mut attrs = own.to_vec();
+        attrs.push(Value::Text("not copied".into()));
+        let a = Feature { id: 1, geometry: Some(line), attrs };
+        let b = Feature { id: 2, geometry: None, attrs: vec![] };
+        assert_eq!(size_vertex_points([&a, &b], 2, 6, false), (3, None));
+        assert_eq!(size_vertex_points([&a, &b], 2, 6, true), (3, Some(3 * vertex_point_bytes(&own, 6))));
+        // Refused when the memory isn't there, saying what the points would need.
+        assert!(check_room(3, 1 << 20, |_| true).is_ok());
+        let e = check_room(3, (1 << 20) + 1, |need| need < 1 << 20).unwrap_err();
+        assert!(e.contains("3 points would need about 2 MiB, more than the browser can give now"), "{e}");
     }
 
     #[test]
@@ -2975,15 +3360,15 @@ mod tests {
     }
 
     /// `touches_files` in rustgis-engine lets tasks, models and notebooks from files set a built-in
-    /// tool's `output`, because it only names the new layer (`out_name`). Hold every built-in tool
-    /// to that: an `output` parameter is plain text, a run names its layer after it, and no tool
-    /// here writes a file at all (it hands back layers; the engine adds them), so `output` can't
-    /// be made a place by a tool's body either.
+    /// tool's `output` when it names a new layer. Layer outputs remain plain text; the explicit
+    /// `vectorToPmtiles` file output is handled separately by the engine.
     #[test]
-    fn a_built_in_tools_output_only_names_its_layer() {
+    fn built_in_tool_outputs_have_explicit_contracts() {
         for spec in TOOLS {
             for p in spec.params.iter().filter(|p| p.name.eq_ignore_ascii_case("output")) {
-                assert!(matches!(p.kind, K::Text), "{}: output must be a layer name (Text), not {:?}", spec.id, p.kind);
+                let valid =
+                    if spec.id == "vectorToPmtiles" { matches!(p.kind, K::SaveFile { ext: "pmtiles" }) } else { matches!(p.kind, K::Text) };
+                assert!(valid, "{}: unexpected output kind {:?}", spec.id, p.kind);
             }
         }
         let m = inputs();
@@ -3042,18 +3427,22 @@ mod tests {
         assert!(cfg!(target_arch = "wasm32") || scanned > 5, "the sources were read");
     }
 
-    /// The runtime side of the guard above: every built-in tool, run with `output` set to a path
-    /// in an empty folder (other parameters from their defaults, layers from `inputs`), leaves
-    /// that folder empty. A tool that can't run on these inputs fails before writing anything,
-    /// so this catches a tool that writes its output wherever it runs.
+    /// The runtime side of the guard above: layer-producing tools, run with `output` set to a path
+    /// in an empty folder (other parameters from their defaults, layers from `inputs`), leave
+    /// that folder empty. File outputs are intentionally excluded.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn no_built_in_tool_writes_its_output_as_a_file() {
+    fn no_layer_tool_writes_its_output_as_a_file() {
         let dir = std::env::temp_dir().join(format!("rustgis-tool-output-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let m = inputs();
+        let mut tested = 0;
         let mut ran = 0;
         for spec in TOOLS {
+            if !spec.params.iter().any(|p| p.name.eq_ignore_ascii_case("output") && matches!(p.kind, K::Text)) {
+                continue;
+            }
+            tested += 1;
             let mut p = serde_json::Map::new();
             for param in spec.params {
                 let value = match serde_json::from_str::<serde_json::Value>(param.default) {
@@ -3082,7 +3471,7 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir(&dir);
-        assert!(ran * 2 >= TOOLS.len(), "only {ran} of {} tools ran on these inputs", TOOLS.len());
+        assert!(ran * 2 >= tested, "only {ran} of {tested} layer tools ran on these inputs");
     }
 
     #[test]

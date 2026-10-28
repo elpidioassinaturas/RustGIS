@@ -432,6 +432,10 @@ fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
     super::connections::clear_active();
     let maps: Vec<Map> = match serde_json::from_str::<Map>(&text) {
         Ok(mut m) => {
+            if crate::project::ensure_map_imports_complete(&m).is_err() {
+                super::connections::restore_active(s);
+                return Err("a map file cannot contain runtime GeoLibre download reservations".into());
+            }
             if let Some(d) = dir.as_deref().and_then(Path::to_str) {
                 crate::project::resolve_file_paths(d, m.file_paths_mut());
             }
@@ -541,7 +545,9 @@ fn template(p: &Project) -> Project {
     t
 }
 
+/// Packages only completed imports; runtime download reservations cannot be reopened.
 fn package_project(s: &Session) -> Result<Vec<u8>, String> {
+    s.project.ensure_imports_complete()?;
     let mut p = s.project.clone();
     let mut budget = MAX_EMBED;
     for m in &mut p.maps {
@@ -583,6 +589,7 @@ fn package_map(s: &Session, mobile: bool, tol: f64) -> Result<Vec<u8>, String> {
             l.touch_geometry();
         }
     }
+    crate::project::ensure_map_imports_complete(&m)?;
     crate::project::strip_addresses(m.addresses_mut());
     let text = serde_json::to_string(&m).map_err(|e| e.to_string())?;
     let kind = if mobile { "mobile map package" } else { "map package" };
@@ -695,6 +702,8 @@ fn run_task_steps(s: &mut Session, p: &Value) -> CmdResult {
         None => t.steps.iter().cloned().enumerate().collect(),
     };
     let mut done = Vec::new();
+    let mut edited = false;
+    let mut requested = false;
     for (i, st) in steps {
         if st.command.starts_with("task.") {
             return Err(format!("step {} would run another task", i + 1));
@@ -708,7 +717,7 @@ fn run_task_steps(s: &mut Session, p: &Value) -> CmdResult {
             ));
         }
         let spec = s.registry.get(&st.command).ok_or_else(|| format!("step {} runs an unknown command '{}'", i + 1, st.command))?;
-        let (run, enabled) = (spec.run, spec.enabled);
+        let (run, enabled, mutates) = (spec.run, spec.enabled, spec.mutates);
         // As when run directly, a step naming a layer is checked against that layer.
         if st.params.get("layer").is_some()
             && let Ok(id) = s.layer_id(&st.params)
@@ -718,12 +727,18 @@ fn run_task_steps(s: &mut Session, p: &Value) -> CmdResult {
         if let Some(why) = enabled(s) {
             return Err(format!("step {} ({}): {why}", i + 1, st.title));
         }
+        // These handlers share the task's one outer transaction. A final request must not
+        // erase the undo step for earlier edits.
+        s.request_only = false;
         // A step that panics fails the task instead of the app (the whole task is one undo step).
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(s, &st.params)))
             .unwrap_or_else(|_| Err("failed unexpectedly".into()))
             .map_err(|e| format!("step {} ({}): {e}", i + 1, st.title))?;
+        requested |= s.request_only;
+        edited |= mutates && !s.request_only;
         done.push(json!({"step": i, "title": st.title, "result": r}));
     }
+    s.request_only = requested && !edited;
     Ok(json!({"task": t.name, "ran": done}))
 }
 
@@ -740,6 +755,8 @@ pub(crate) fn touches_files(command: &str, params: &Value) -> bool {
         || ["import", "export", "open", "save", "add", "package", "upload", "download"].iter().any(|w| verb.starts_with(w))
         // Its inputs may be bare file names, which don't look like paths.
         || id == "raster.mosaic"
+        || (id == "gp.run" && params.get("tool").and_then(Value::as_str).and_then(super::gp::tool_id)
+            .and_then(rustgis_analysis::tool).is_some_and(super::gp::writes_files))
         || reaches(params)
 }
 
@@ -758,7 +775,7 @@ fn layer_name_left_out<'a>(command: &str, params: &'a Value) -> std::borrow::Cow
             .get("tool")
             .and_then(Value::as_str)
             .and_then(rustgis_analysis::tool)
-            .is_some_and(|spec| rustgis_analysis::TOOLS.iter().any(|b| std::ptr::eq(b, spec)))
+            .is_some_and(|spec| !super::gp::writes_files(spec) && rustgis_analysis::TOOLS.iter().any(|b| std::ptr::eq(b, spec)))
     };
     let plain = |t: &str| !t.trim().is_empty() && !t.contains(['/', '\\', '.', ':']) && !looks_like_path(t);
     let named = || params.pointer("/params/output").and_then(Value::as_str).is_some_and(plain);
@@ -991,6 +1008,7 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
                 Some(n) => s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(n)).ok_or_else(|| format!("no map '{n}'"))?,
                 None => s.map(),
             };
+            crate::project::ensure_map_imports_complete(map)?;
             let mut map = embedded_map(map, &mut MAX_EMBED.clone());
             crate::project::strip_addresses(map.addresses_mut());
             (map.name.clone(), to_json(&map)?)
@@ -998,6 +1016,9 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
         "layer" => {
             let id = s.layer_id(p)?;
             let l = s.map().layer(id).ok_or("no such layer")?.clone();
+            if l.dataset.source.as_deref().is_some_and(|source| source.starts_with("geolibre-pending:")) {
+                return Err("this layer is still downloading; wait for it to finish before saving".into());
+            }
             let mut layer = embed_layer(l, &mut MAX_EMBED.clone());
             crate::project::strip_addresses(layer.addresses_mut().collect());
             (layer.name.clone(), to_json(&layer)?)
@@ -1015,6 +1036,7 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
             ("ramps".to_string(), to_json(&s.project.ramps)?)
         }
         "template" => {
+            s.project.ensure_imports_complete()?;
             let mut t = template(&s.project);
             if let Some(n) = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()) {
                 t.name = n.chars().take(200).collect();

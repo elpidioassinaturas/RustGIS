@@ -270,6 +270,9 @@ const NEVER: &[&str] = &[
     // A QGIS project names the files and web addresses its layers come from, and the import
     // adds them without each one passing a plugin's permissions.
     "project.importQgis",
+    "project.importGeolibre",
+    // Completion callbacks can finish project imports; plugins never supply their state.
+    "layer.addDownload",
     "edit.undo",
     "edit.redo",
     // Credentials: a plugin never sets where the user's are sent.
@@ -352,6 +355,11 @@ pub fn reaches(spec: &C, params: &Value) -> Option<Reach> {
     }
     // So do tools with a file parameter (a plugin's `file`): they're handed the file.
     if spec.id == "gp.run" && ps(params, "tool").and_then(rustgis_analysis::tool).is_some_and(super::gp::reads_files) {
+        return Some(Reach::Files);
+    }
+    if spec.id == "gp.run"
+        && ps(params, "tool").and_then(super::gp::tool_id).and_then(rustgis_analysis::tool).is_some_and(super::gp::writes_files)
+    {
         return Some(Reach::Files);
     }
     // A catalog's Zarr entry is opened as `layer.addZarr` is, a database's way.

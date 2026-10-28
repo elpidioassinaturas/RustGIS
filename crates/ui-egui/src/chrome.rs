@@ -737,6 +737,7 @@ fn search_action(id: &str) -> Option<SearchAction> {
         "style.add" => OpenItem("styles"),
         "style.import" => OpenItem("importStyles"),
         "style.importQgis" => OpenItem("qgisStyle"),
+        "project.importGeolibre" => OpenItem("geolibreProject"),
         "project.importQgis" => OpenItem("qgisProject"),
         "style.save" => SaveItem("styles"),
         "ramp.add" => OpenItem("ramps"),

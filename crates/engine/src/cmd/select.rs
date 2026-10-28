@@ -84,7 +84,7 @@ pub fn commands() -> Vec<C> {
         }).params(r#"{"layer"?: name|id (default: the active layer, which need not be the layer last selected in)}"#)
         .when(need_selection),
         C::new("identify", "Identify", "Home › Inspect", identify).view().params(
-            r#"{"lon", "lat", "tolerancePx"?, "mode"?: "topmost"|"visible"|"selectable"|"selectedInContents"|"none" (the map's pop-up mode when omitted; the mode picks the layers, and every feature under the point in them, up to 100, is in "results"; topmost and visible take vector tile layers' features too, with "tileLayer" and "sourceLayer", from the tiles drawn there: one not loaded yet is asked for, and its features come on a later identify; and they list in "featureInfo" the WMS layers drawn there to ask, each {tileLayer, url} (its GetFeatureInfo request) or {tileLayer, capabilities} (its service's, when the layer doesn't know its request): identify.featureInfo reads what they answer)}"#,
+            r#"{"lon", "lat", "tolerancePx"?, "mode"?: "topmost"|"visible"|"selectable"|"selectedInContents"|"none" (the map's pop-up mode when omitted; the mode picks the layers, and every feature under the point in them, up to 100, is in "results"; topmost and visible take vector tile layers' features too, with "tileLayer" and "sourceLayer", from the tiles drawn there: one not loaded yet is asked for, and its features come on a later identify; and they list in "featureInfo" the WMS layers drawn there to ask, each {tileLayer, url} (its GetFeatureInfo request) or {tileLayer, capabilities} (its service's, when the layer doesn't know its request): identify.featureInfo reads what they answer; selectedInContents does both for the tile layer picked in the Layers pane (map.selectTiles) alone, whichever it is, a basemap or MapLibre style too)}"#,
         ),
         C::new("map.popupMode", "Pop-up Mode", "Home › Navigate", popup_mode)
             .params(r#"{"mode": "topmost"|"visible"|"selectable"|"selectedInContents"|"none"}"#),
@@ -142,8 +142,7 @@ pub fn set(s: &mut Session, id: u32, rows: Vec<usize>, m: Mode) {
         Mode::Remove => l.selection.retain(|r| !rows.contains(r)),
         Mode::Subset => l.selection.retain(|r| rows.contains(r)),
     }
-    l.selection.sort_unstable();
-    l.selection.dedup();
+    l.normalize_selection();
 }
 
 fn by_attributes(s: &mut Session, p: &Value) -> CmdResult {
@@ -328,12 +327,15 @@ fn identify(s: &mut Session, p: &Value) -> CmdResult {
         .iter()
         .filter_map(|(id, row)| Some((place(rustgis_map::Drawn::Layer(map.layer_index(*id)?)), feature_json(map, *id, *row)?)))
         .collect();
-    let web = matches!(mode, PopupMode::Topmost | PopupMode::Visible);
+    // A tile layer picked in the Layers pane is the one Selected in Layers asks (no map layer is
+    // active then, so none of theirs was found).
+    let picked = if mode == PopupMode::SelectedInContents { s.selected_tile() } else { None };
+    let web = matches!(mode, PopupMode::Topmost | PopupMode::Visible) || picked.is_some();
     if web {
         // Topmost reads only those drawn over the feature found, up to the first with any.
         let found = ranked.iter().map(|(at, _)| *at).min().unwrap_or(usize::MAX);
         let keep = |i: usize| !first_layer || place(rustgis_map::Drawn::Tile(i)) < found;
-        let tiles = tile_features(s, lon, lat, tol_px, MAX_IDENTIFIED, first_layer, keep);
+        let tiles = tile_features(s, lon, lat, tol_px, MAX_IDENTIFIED, first_layer, picked, keep);
         ranked.extend(tiles.into_iter().map(|(i, v)| (place(rustgis_map::Drawn::Tile(i)), v)));
     }
     ranked.sort_by_key(|(at, _)| *at);
@@ -349,12 +351,15 @@ fn identify(s: &mut Session, p: &Value) -> CmdResult {
     let over_top =
         |i: usize| map.tiles.get(i).is_some_and(|t| t.over.is_some()) && top.is_some_and(|top| place(rustgis_map::Drawn::Tile(i)) < top);
     let asks = if web && (!first_layer || results.is_empty() || info::topmost(s, lon, lat).is_some_and(over_top)) {
-        info::requests(s, lon, lat, first_layer)
+        info::requests(s, lon, lat, first_layer, picked)
     } else {
         Vec::new()
     };
     let mut out = match results.first().cloned() {
         Some(first) => first,
+        // Only the tile layer picked is asked, not a raster's pixel.
+        None if picked.is_some() && asks.is_empty() => return Ok(Value::Null),
+        None if picked.is_some() => json!({}),
         // No feature: report the pixel of the topmost raster instead.
         None if mode == PopupMode::SelectedInContents && active.and_then(|id| map.layer(id)).is_some_and(|l| !l.is_raster()) => {
             return Ok(Value::Null);
@@ -376,10 +381,22 @@ fn identify(s: &mut Session, p: &Value) -> CmdResult {
     Ok(out)
 }
 
+/// Whether identify lists a tile layer's features: archives, vector tiles and overlays added as
+/// data, not basemaps from the catalog or MapLibre styles, so a click on empty map doesn't list a
+/// basemap's roads; one `picked` in the Layers pane whichever it is, a style too.
+fn lists_features(t: &rustgis_map::tiles::TileLayer, picked: bool) -> bool {
+    use rustgis_map::tiles::TileKind;
+    match t.kind {
+        TileKind::PmTiles | TileKind::MbTiles | TileKind::Vector => picked || t.id.is_empty() || t.overlay,
+        TileKind::Style => picked,
+        TileKind::Raster | TileKind::Cog => false,
+    }
+}
+
 /// The features of the vector tile layers drawn under a point, topmost layer first, each with
 /// its tile layer's index (only those `keep` takes; only the first layer with any when
-/// `first_layer`): archives, vector tiles and overlays added as data, not basemaps from the
-/// catalog or MapLibre styles. The tiles looked at are those drawn there.
+/// `first_layer`): those [`lists_features`] takes, or with `picked` (the tile layer picked in the
+/// Layers pane) only that one. The tiles looked at are those drawn there.
 fn tile_features(
     s: &Session,
     lon: f64,
@@ -387,15 +404,15 @@ fn tile_features(
     tol_px: f64,
     limit: usize,
     first_layer: bool,
+    picked: Option<usize>,
     keep: impl Fn(usize) -> bool,
 ) -> Vec<(usize, Value)> {
-    use rustgis_map::tiles::TileKind;
     use rustgis_render::rustgis_tiles::{draw, mvt};
     let map = s.map();
     let Some((at, m_per_px)) = info::merc_at(s, lon, lat).filter(|_| limit > 0) else { return Vec::new() };
     let mut out = Vec::new();
     for (i, t) in map.tiles.iter().enumerate() {
-        let data = matches!(t.kind, TileKind::PmTiles | TileKind::MbTiles | TileKind::Vector) && (t.id.is_empty() || t.overlay);
+        let data = picked.is_none_or(|p| p == i) && lists_features(t, picked.is_some());
         if !data || !t.draws() || t.opacity <= 0.0 || !keep(i) {
             continue;
         }
@@ -695,6 +712,25 @@ mod tests {
                 .collect();
             assert_eq!(s.run("select.byPolygon", &json!({"points": points})).unwrap(), json!({"selected": 3}), "{projection}");
             assert_eq!(selected(&s, id), [0, 2, 3], "{projection}");
+        }
+    }
+
+    /// Identify lists the features of tile layers added as data, not basemaps or MapLibre styles,
+    /// unless picked in the Layers pane; raster tiles have none.
+    #[test]
+    fn identify_lists_tile_features_of_data_and_of_the_layer_picked() {
+        use rustgis_map::tiles::{TileKind, TileLayer};
+        let tile = |kind, id: &str, overlay| TileLayer { id: id.into(), overlay, ..TileLayer::new("t", kind, "https://example.com/t") };
+        for kind in [TileKind::PmTiles, TileKind::MbTiles, TileKind::Vector] {
+            assert!(lists_features(&tile(kind, "", false), false), "{kind:?} added as data");
+            assert!(lists_features(&tile(kind, "base", true), false), "{kind:?} overlay");
+            assert!(!lists_features(&tile(kind, "base", false), false), "{kind:?} basemap");
+            assert!(lists_features(&tile(kind, "base", false), true), "{kind:?} basemap picked");
+        }
+        assert!(!lists_features(&tile(TileKind::Style, "", false), false));
+        assert!(lists_features(&tile(TileKind::Style, "", false), true));
+        for kind in [TileKind::Raster, TileKind::Cog] {
+            assert!(!lists_features(&tile(kind, "", false), true), "{kind:?}");
         }
     }
 }

@@ -41,7 +41,7 @@ pub fn commands() -> Vec<C> {
             r#"{"url": "https://…/data.geojson|.csv|.parquet|.fgb|.gpkg|.zip|.kml|.kmz|.gpx|.tif|.jp2 (JPEG 2000: desktop, through GDAL) (the format from the address, else the contents) | a .pmtiles archive", "name"?: text, "layer"?: "one layer of a zip, KML or GPX", "zoom"?: "bool: true zooms to what was added; false keeps the view of a GeoParquet or FlatGeobuf read in place (zoomed to only when the map was empty)", "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "whole"?: "bool: download a cloud-optimised GeoTIFF whole (as a raster layer) instead of reading it in place", "start"?, "end"?, "unit"?, "interval"?, "dates"?: "a GeoTIFF address with date placeholders ({date:YYYY}, {YYYY}{MM}{DD}), one file per date: the dates it spans and steps through (as time.set), turning the time slider on"}"#,
         ),
         C::new("layer.addDownload", "Add Downloaded Data", "Home › Add", add_download)
-            .params(r#"{"id": a download the app finished (Home › Add › Add Data › From URL), "url": its address, "name"?: text, "layer"?: text, "zoom"?: bool, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "service"?: bool (a service's features: their axes and paging are checked), "coverage"?: bool (a WCS coverage: a GeoTIFF, else the service's error)}"#),
+            .params(r#"{"id": a download the app finished (Home › Add › Add Data › From URL), "url": its address, "name"?: text, "layer"?: text, "zoom"?: bool, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "service"?: bool (a service's features: their axes and paging are checked), "coverage"?: bool (a WCS coverage: a GeoTIFF, else the service's error), "geolibreProject"?: bool (internal: downloaded project JSON), "geolibreLayer"?: {"token", "record"} (internal: reserved imported layer and its saved style), "geolibreZarr"?: bool (internal: an imported Zarr slice as GeoTIFF)}"#),
         C::new("layer.addEncodedPolyline", "Add Encoded Polyline", "Home › Add", add_encoded_polyline).params(
             r#"{"polyline": "encoded polyline text" | [texts] (one line each), "precision"?: 5 (Google) | 6 (OSRM, Valhalla), "name"?: text}"#,
         ),
@@ -1102,7 +1102,10 @@ fn add_data(s: &mut Session, p: &Value) -> CmdResult {
             return Err(format!("{path} is too large to open"));
         }
         let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-        return add_sheet(s, p, path, &bytes);
+        // Read from disk: the table keeps the workbook's path, so an export can't replace it.
+        let mut read = read_sheet(p, path, &bytes)?;
+        read.0.source = Some(std::path::absolute(path).map_or_else(|_| path.to_string(), |a| a.display().to_string()));
+        return add_read(s, p, read);
     }
     #[cfg(not(target_arch = "wasm32"))]
     if large_osm(path) {
@@ -2288,6 +2291,9 @@ fn add_layer_file(s: &mut Session, path: &str) -> CmdResult {
 /// Adds a layer from a layer file's JSON.
 pub(crate) fn add_layer_text(s: &mut Session, text: &str) -> CmdResult {
     let mut layer: rustgis_map::Layer = serde_json::from_str(text).map_err(|e| format!("not a RustGIS layer file: {e}"))?;
+    if layer.dataset.source.as_deref().is_some_and(|source| source.starts_with("geolibre-pending:")) {
+        return Err("a layer file cannot contain runtime GeoLibre download reservations".into());
+    }
     // A binding in a file is no authority to use a login here.
     crate::s3_connections::clear_bindings(layer.addresses_mut());
     // A fresh id and a unique name in this map; the rest goes through project repair.
@@ -2346,11 +2352,15 @@ fn add_encoded_polyline(s: &mut Session, p: &Value) -> CmdResult {
 /// Adds a sheet of a spreadsheet (`"layer"` names it; the first by default), read like delimited
 /// text with the same options.
 pub(crate) fn add_sheet(s: &mut Session, p: &Value, file_name: &str, bytes: &[u8]) -> CmdResult {
+    let read = read_sheet(p, file_name, bytes)?;
+    add_read(s, p, read)
+}
+
+fn read_sheet(p: &Value, file_name: &str, bytes: &[u8]) -> Result<(rustgis_data::Dataset, rustgis_data::ReadReport), String> {
     let stem = Path::new(file_name).file_stem().and_then(|s| s.to_str()).unwrap_or("sheet");
     let opts = csv_options(p)?.unwrap_or_default();
     let sheet = ps(p, "layer").map(str::trim).filter(|l| !l.is_empty());
-    let read = rustgis_data::sheets::read(bytes, stem, sheet, &opts).map_err(|e| format!("{file_name}: {e}"))?;
-    add_read(s, p, read)
+    rustgis_data::sheets::read(bytes, stem, sheet, &opts).map_err(|e| format!("{file_name}: {e}"))
 }
 
 /// The `x`, `y`, `wkt`, `crs` and `delimiter` parameters for a delimited text file, when any is
@@ -2504,6 +2514,9 @@ pub fn url_file_name(url: &str, bytes: &[u8]) -> Result<String, String> {
 /// request is kept for the app ([`Session::request_url`]), which downloads and adds it as its own
 /// Home › Add › Add Data › From URL does, so a plugin, a script or the assistant can add data by address too.
 pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
+    if ["geolibreProject", "geolibreLayer", "geolibreZarr"].iter().any(|key| p.get(key).is_some()) {
+        return Err("GeoLibre download state is internal; use project.importGeolibre".into());
+    }
     let url = ps(p, "url").map(str::trim).filter(|u| !u.is_empty()).ok_or("url is required")?;
     // An address read through a saved S3 connection is judged by the address it wraps; the whole
     // address stays what is fetched and kept.
@@ -2684,6 +2697,17 @@ fn add_download(s: &mut Session, p: &Value) -> CmdResult {
     let url = ps(p, "url").unwrap_or("data").to_string();
     let i = s.downloaded.iter().position(|(d, _)| *d == id).ok_or("no such download (it was dropped when another project opened)")?;
     let (_, bytes) = s.downloaded.remove(i);
+    if p.get("geolibreProject").and_then(Value::as_bool) == Some(true) {
+        if bytes.len() > rustgis_map::geolibre::MAX_TEXT {
+            return Err("GeoLibre project exceeds 64 MiB".into());
+        }
+        let text = String::from_utf8(bytes).map_err(|_| "GeoLibre project must be UTF-8 JSON")?;
+        return s.run_part("project.importGeolibre", &json!({"text":text}));
+    }
+    if p.get("geolibreLayer").is_some() {
+        let name = if b(p, "geolibreZarr") == Some(true) { "zarr.tif".into() } else { url_file_name(&url, &bytes)? };
+        return super::geolibre::finish_layer(s, p, name, bytes);
+    }
     // A service's features (Add From Service): its answer's axes and paging.
     let bytes = if super::b(p, "service").unwrap_or(false) {
         let label = ps(p, "name").unwrap_or(&url).to_string();

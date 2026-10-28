@@ -83,6 +83,10 @@ pub fn commands() -> Vec<C> {
         })
         .params(r#"{"name"?: text | "index"?: number (0 = top) | "id"?: catalog id, "on"?: bool (toggles when omitted)} — shows or hides a tile layer's legend under it in the Layers pane"#)
         .view(),
+        // As `layer.select` for a map layer: what the pane shows, not an edit to undo.
+        C::new("map.selectTiles", "Select Tile Layer", "Layers", select_tiles)
+            .params(r#"{"name"?: text | "index"?: number (0 = top) | "id"?: catalog id} — picks a tile layer in the Layers pane, leaving no map layer active (picking one ends it): the Selected in Layers pop-up mode identifies it"#)
+            .view(),
         C::new("map.zoomToTiles", "Zoom To Tile Layer", "Home › Add", zoom_to)
             .params(r#"{"name"?: text | "index"?: number (0 = top) | "id"?: catalog id} (advertised service bounds, or the bounds in a PMTiles archive or cloud-optimised GeoTIFF header)"#)
             .view(),
@@ -144,6 +148,7 @@ fn body(s: &mut Session, p: &Value) -> CmdResult {
 /// The map's tile layers (index 0 on top), as `map.tiles` and `info.project` list them; `redact`
 /// drops the credentials from their addresses.
 pub(crate) fn list(s: &Session, redact: bool) -> Value {
+    let picked = s.selected_tile();
     Value::Array(
         s.map()
             .tiles
@@ -164,6 +169,10 @@ pub(crate) fn list(s: &Session, redact: bool) -> Value {
                         .collect();
                     o["legends"] = json!(legends);
                     o["expanded"] = json!(t.expanded);
+                }
+                // Picked in the Layers pane (`map.selectTiles`).
+                if picked == Some(i) {
+                    o["selected"] = json!(true);
                 }
                 o
             })
@@ -459,6 +468,16 @@ pub(crate) fn find(s: &Session, p: &Value) -> Result<Option<usize>, String> {
         return tiles.iter().position(|t| t.id == id).map(Some).ok_or_else(|| format!("no tile layer '{id}'"));
     }
     Ok(None)
+}
+
+/// Picks a tile layer in the Layers pane: the only one picked, with no map layer active.
+fn select_tiles(s: &mut Session, p: &Value) -> CmdResult {
+    let i = find(s, p)?.ok_or("name or index is required")?;
+    s.set_layer_selection(Vec::new(), None);
+    for (j, t) in s.map_mut().tiles.iter_mut().enumerate() {
+        t.selected = j == i;
+    }
+    Ok(json!({"index": i}))
 }
 
 fn remove(s: &mut Session, p: &Value) -> CmdResult {

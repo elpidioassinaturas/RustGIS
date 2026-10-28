@@ -47,7 +47,7 @@ The bugs users hit, the docs and a few quick wins: good first pull requests.
   ([#707](https://github.com/opengeos/RustGIS/issues/707)), Load Off-Map Data
   ([#661](https://github.com/opengeos/RustGIS/issues/661)).
 - A pass over the user guide, the comparison pages and the README against what the app does
-  today (no page says layout PDFs are pictures of each page; the built-in tool count), and short
+  today (no page says layout PDFs are pictures of each page), and short
   task tutorials for newcomers: buffer, select and export a list; edit a layer and save the
   result; a print layout _(open)_.
 
@@ -66,7 +66,7 @@ Correct, robust and recoverable, with the foundations other themes stand on.
 - Spatial Join by distance, closest, centre in and largest overlap, with merge rules (sum, mean,
   first…) for one-to-one joins ([#851](https://github.com/opengeos/RustGIS/issues/851)).
 - Vector tools, each writing a new layer: join field (a one-off attribute join), merge (append
-  layers), extract vertices, points along lines, check and fix geometry _(open)_; summary fields
+  layers), points along lines, check and fix geometry _(open)_; summary fields
   (sum, mean, first…) on Dissolve and Summarize Within _(open)_.
 - Batch runs: one tool over many layers or a folder of files.
 
@@ -98,9 +98,9 @@ And alongside it:
 ### Data at the source
 - Write edits back to GeoPackage and PostGIS (edits stay in the project today). _Coordinate
   first._
-- Open GeoLibre `.geolibre` projects as maps, the way supported QGIS projects open
-  ([#962](https://github.com/opengeos/RustGIS/issues/962)). GeoLibre opening
-  `.rgis` projects comes later, once RustGIS's project format and supported data types settle.
+- GeoLibre opening RustGIS `.rgis` projects, once RustGIS's project format and supported
+  data types settle. RustGIS imports GeoLibre projects; combined colour and size rendering
+  is tracked in [#1017](https://github.com/opengeos/RustGIS/issues/1017).
 - A date and date-time field type, read and written as dates (they are text today)
   ([#853](https://github.com/opengeos/RustGIS/issues/853)). _Coordinate first_ (it changes
   `FieldType`).
@@ -149,8 +149,6 @@ built-in version must justify itself on one of those.
 - An on-map right-click menu: copy the coordinate, run a buffer or viewshed from the point.
 - More than two synced maps side by side.
 - Auto-refresh for web service layers.
-- Vector to PMTiles export: the PMTiles writer and MVT encoder in `rustgis-tiles` exist but are
-  only used by tests ([#557](https://github.com/opengeos/RustGIS/issues/557)).
 - A catalog of data cubes for the time slider
   ([#683](https://github.com/opengeos/RustGIS/issues/683)).
 - Rebindable keyboard shortcuts ([#562](https://github.com/opengeos/RustGIS/issues/562)).
@@ -188,8 +186,8 @@ Open questions rather than plans; discuss before building.
   standalone tables; geotagged photos and KML ground overlays; geocoding (Find Place, address
   tables); a Data Sources pane (favourites, recent, saved services, a library, reusable
   connections and dataset browsing) and an SQL pane (DuckDB Spatial); layer, map, style,
-  template, task and package files; supported QGIS `.qgs`/`.qgz` projects opened as maps, with
-  layer styles.
+  template, task and package files; supported QGIS `.qgs`/`.qgz` and GeoLibre `.geolibre` projects opened as maps,
+  with supported layer styles and notes on import differences.
 - Open data: STAC search (Planetary Computer assets), NASA Earthdata (desktop), Hugging Face,
   Overture Maps, Source Cooperative, OpenStreetMap by area (Overpass), geoBoundaries, CKAN,
   Socrata and ArcGIS Hub portals, and S3 buckets with signed connections and a bucket browser.
@@ -219,10 +217,11 @@ Open questions rather than plans; discuss before building.
   relationships, archiving.
 - Analysis: selection by attributes and location; polygon, lasso and radius on the map; overlay
   (clip, erase, intersect, identity, union), proximity (buffer, near) and summary tools, spatial
-  join, zonal statistics, A5 grids, kriging and Calculate Geometry with metric or imperial units;
-  guided workflows (viewshed, line of sight, IDW, shortest path, suitability); ModelBuilder on a
-  node canvas, scripts with command, parameter and value completion, and history copied as code;
-  the GeoLibre and Whitebox suite (1,000+ tools) natively and in the browser.
+  join, feature vertices to points, zonal statistics, A5 grids, kriging, Calculate Geometry with
+  metric or imperial units, and Vector to PMTiles export (#557); guided workflows (viewshed, line
+  of sight, IDW, shortest path, suitability); ModelBuilder on a node canvas, scripts with command,
+  parameter and value completion, and history copied as code; the GeoLibre and Whitebox suite
+  (1,000+ tools) natively and in the browser.
 - Layouts (map frames, surrounds, map series, publication sheets and figures in one command,
   format panes, guides, snapping, element locking and PDF), reports, presentations and
   notebooks; the web app embeddable in a page (`?embed`).

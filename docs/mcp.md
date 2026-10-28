@@ -332,8 +332,8 @@ These behavioral tests in `crates/assistant/src/relay.rs` check the requirements
 | `run` | Runs several commands in one call, as one undo step: a script in the `script.run` format (one `command-id {json}` per line, `#` comments). A failing line stops it, nothing it did to the project is kept, and the error names the line; files an earlier line wrote (an export) stay written. Answers `{success, result, lines, layersAdded, notices, error, duration_s}`, where `result` is the last command's. Each line follows `run_command`'s rules, checked before any line runs |
 | `search_tools` | Finds geoprocessing tools by words |
 | `describe_tool` | A geoprocessing tool's parameters |
-| `run_tool` | Runs a geoprocessing tool; its output is added to the map as a new layer (with `layersAdded` and `notices` as for `run_command`) |
-| `read_features` | A vector layer's attribute rows: `layer` (name or id), optional `where`, `fields`, `order_by`, `descending` and `selected`; `limit` defaults to 20, capped at 200. Returns the matching count and rows with `_row`, `_lon` and `_lat` |
+| `run_tool` | Runs a geoprocessing tool; its output is added to the map as a new layer (with `layersAdded` and `notices` as for `run_command`), or to the project as a standalone table, which the result names (`table`) |
+| `read_features` | A vector layer's or a standalone table's attribute rows: `layer` (name or id) or `table` (a standalone table's name or id; a `layer` name that no layer has reads the table of that name), optional `where`, `fields`, `order_by`, `descending` and `selected` (layers only); `limit` defaults to 20, capped at 200. Returns the matching count and rows with `_row`, and a layer's `_lon` and `_lat` |
 | `search_docs` | Searches this documentation and returns the best matching sections |
 | `read_doc` | Reads a documentation page or section as Markdown; `offset` (1-based line) and `limit` (default 2000 lines) page through long results using `next_offset` |
 

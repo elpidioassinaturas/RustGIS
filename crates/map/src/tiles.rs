@@ -174,6 +174,10 @@ pub struct TileLayer {
     /// Expanded in the Layers pane, its legend showing.
     #[serde(default, skip_serializing_if = "is_false")]
     pub expanded: bool,
+    /// Picked in the Layers pane (`map.selectTiles`), for the session only: it holds while no
+    /// map layer is active (the engine's `Session::selected_tile`).
+    #[serde(skip)]
+    pub selected: bool,
 }
 
 /// The longest legend address kept.
@@ -307,6 +311,7 @@ impl TileLayer {
             feature_info: None,
             legends: Vec::new(),
             expanded: false,
+            selected: false,
         }
     }
 

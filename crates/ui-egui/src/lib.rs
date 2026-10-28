@@ -35,6 +35,7 @@ mod failureui;
 mod fieldmenu;
 mod fill_editor;
 mod geocodeui;
+mod geolibreui;
 mod geometrycalc;
 mod globe_drape;
 mod graphicformat;
@@ -100,6 +101,29 @@ pub use chrome::{DoubleClick, TitlebarMetrics};
 pub use rustgis_assistant;
 pub use rustgis_engine;
 pub use widgets::big_split_menu;
+
+/// Reconciles only command-result wrappers, not parameters or other arbitrary JSON.
+/// Script and model results retain their structure while file results become completed.
+fn complete_gp_file(result: Result<Value, String>, id: u64, completed: &Result<Value, String>) -> Result<Value, String> {
+    fn visit(result: &mut Value, id: u64, completed: &Result<Value, String>) -> Result<(), String> {
+        if result.get("download").and_then(Value::as_u64) == Some(id) {
+            *result = completed.as_ref().map_err(Clone::clone)?.clone();
+            return Ok(());
+        }
+        if let Some(ran) = result.get_mut("ran").and_then(Value::as_array_mut) {
+            for step in ran {
+                visit(step, id, completed)?;
+            }
+        }
+        if let Some(result) = result.get_mut("result") {
+            visit(result, id, completed)?;
+        }
+        Ok(())
+    }
+    let mut result = result?;
+    visit(&mut result, id, completed)?;
+    Ok(result)
+}
 
 /// Files read asynchronously (browser uploads, drops) waiting to be opened: (file name, bytes).
 pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
@@ -226,8 +250,9 @@ pub struct Services {
     /// Opens a file picker for `"data"`, `"project"`, or `"shapefile"`; results land in `inbox`.
     /// Shapefile picks carry [`SHAPEFILE_PICK`] after sidecars are gathered into ZIPs.
     pub open_async: Option<Box<dyn Fn(&str)>>,
-    /// Hands bytes to the user as a download named `file_name`.
-    pub download: Option<Box<dyn Fn(&str, Vec<u8>)>>,
+    /// Offers bytes as a download named `file_name`; success means submission to the host's
+    /// download mechanism. Browsers do not expose confirmation that the file was saved.
+    pub download: Option<Box<dyn Fn(&str, Vec<u8>) -> Result<(), String>>>,
     pub inbox: Option<Inbox>,
     /// Reads a saved preference (`language`, …).
     pub load_pref: Option<Box<dyn Fn(&str) -> Option<String>>>,
@@ -666,6 +691,8 @@ pub struct UiState {
     pub raster_defaults_saved: rustgis_engine::map::RasterDefaults,
     /// Home › Add › Add Data › Zarr…: its store, choices and fetches.
     pub zarr: zarrui::State,
+    /// Independent Zarr reads for imported GeoLibre layers; does not share the picker state.
+    pub geolibre_zarr: Vec<geolibreui::Read>,
     /// A layout picture waiting for its image file (web).
     pub pending_layout_picture: bool,
     /// The corners of a picture graphic waiting for its image file.
@@ -717,6 +744,7 @@ impl UiState {
 }
 
 impl Default for UiState {
+    /// Starts on Home with no pending picker or download, keeping transient imports out of saved state.
     fn default() -> Self {
         UiState {
             tab: "Home".into(),
@@ -794,6 +822,7 @@ impl Default for UiState {
             connections_saved: 0,
             raster_defaults_saved: Default::default(),
             zarr: Default::default(),
+            geolibre_zarr: Vec::new(),
             hidden_tabs: Vec::new(),
             quick_access: Vec::new(),
             titlebar: None,
@@ -1248,6 +1277,8 @@ impl RustGisApp {
         }
         // Project items picked or dropped in the browser.
         let item = [
+            (".geolibre", "project.importGeolibre"),
+            (".geolibre.json", "project.importGeolibre"),
             (".rgismap", "map.import"),
             (".rgismpk", "map.import"),
             (".rgislyr", "layer.addLayerFile"),
@@ -1378,7 +1409,11 @@ impl RustGisApp {
             }
         };
         let file = format!("{stem}.rgis");
-        self.download(&file, text.into_bytes());
+        if let Err(e) = self.services.download.as_ref().ok_or(tl!("no download service"))?(&file, text.into_bytes()) {
+            self.session.project.name = old;
+            return Err(e);
+        }
+        self.session.notify(crate::i18n::fmt("Downloaded {name}", &[("name", &file)]), false);
         if stripped > 0 {
             self.session.notify(
                 crate::i18n::fmt(
@@ -1402,12 +1437,40 @@ impl RustGisApp {
     fn download(&mut self, name: &str, bytes: Vec<u8>) -> bool {
         match &self.services.download {
             Some(d) => {
-                d(name, bytes);
+                if let Err(e) = d(name, bytes) {
+                    self.session.notify(e, true);
+                    return false;
+                }
                 self.session.notify(crate::i18n::fmt("Downloaded {name}", &[("name", name)]), false);
                 true
             }
             None => false,
         }
+    }
+
+    /// Delivers exports from all command entry points, including scripts and the assistant.
+    /// The engine records success only after the service submits the file to the host.
+    fn deliver_gp_files(&mut self, mut requested: Result<Value, String>) -> Result<Value, String> {
+        for (id, name, bytes) in self.session.take_gp_files() {
+            let delivered = match &self.services.download {
+                Some(download) => download(&name, bytes),
+                None => Err(tl!("this build has no download service").into()),
+            };
+            let mut params = json!({"id": id});
+            if let Err(error) = &delivered {
+                params["error"] = json!(error);
+            }
+            let completed = self.session.run("gp.fileDelivered", &params);
+            let result = delivered.and(completed);
+            self.gp.last = Some(match &result {
+                Ok(_) => (true, self.session.project.gp_history.last().map(|h| h.messages.clone()).unwrap_or_default()),
+                Err(error) => (false, vec![error.clone()]),
+            });
+            // gp.fileDelivered reports delivery failures from the history record and its
+            // own acknowledgment errors through Session::run; neither needs a second notice.
+            requested = complete_gp_file(requested, id, &result);
+        }
+        requested
     }
 
     /// The RustGIS logo as a texture (rasterised once from `rustgis_render::logo`).
@@ -1599,7 +1662,8 @@ impl RustGisApp {
         // of another, so it ends when the open layout changes (or layouts come and go).
         let open_layout = |app: &Self| (app.session.active_layout, app.session.project.layouts.len());
         let layout_before = open_layout(self);
-        let r = if id.starts_with("ui.") { self.run_ui(id, &params) } else { self.session.run(id, &params) };
+        let mut r = if id.starts_with("ui.") { self.run_ui(id, &params) } else { self.session.run(id, &params) };
+        r = self.deliver_gp_files(r);
         if r.is_ok() && id == "tool.set" {
             self.map.cancel_sketch();
         }
@@ -2224,13 +2288,20 @@ impl RustGisApp {
                 }
             }
             // A project by its web address (a `?project=` link): downloaded off the frame, opened
-            // when it lands, in place of the open project (see `poll_downloads`).
+            // when it lands: native projects replace it; GeoLibre imports add a map (see `poll_downloads`).
             "ui.openUrl" => {
                 let url = p.get("url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()).ok_or("url is required")?;
+                let url = rustgis_engine::map::geolibre::download_url(url);
+                let url = url.as_str();
                 let slot: Slot<Result<Vec<u8>, String>> = Slot::default();
                 let land = slot.clone();
-                rustgis_engine::render::rustgis_tiles::cache::download(
+                rustgis_engine::render::rustgis_tiles::cache::download_limited(
                     url,
+                    if rustgis_engine::map::geolibre::is_project_file(url) {
+                        rustgis_engine::map::geolibre::MAX_TEXT
+                    } else {
+                        rustgis_engine::render::rustgis_tiles::cache::MAX_DOWNLOAD
+                    },
                     Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r)),
                 );
                 self.session.notify(i18n::fmt("Opening {url}…", &[("url", url)]), false);
@@ -2262,6 +2333,13 @@ impl RustGisApp {
             // Data by its web address: the dialog, then (with an address) the download, off the
             // frame; it's added when it lands. A PMTiles archive is a tile layer, never downloaded.
             "ui.addUrl" => {
+                if p.get("geolibreZarr").and_then(Value::as_bool) == Some(true) {
+                    if let Err(e) = geolibreui::start(self, p) {
+                        rustgis_engine::cmd::geolibre::discard_pending(&mut self.session, p);
+                        return Err(e);
+                    }
+                    return Ok(Value::Null);
+                }
                 // The connection a Connections tree add is for (named in Recent once it is added).
                 let origin = connectiontree::take_origin(self);
                 let Some(url) = p.get("url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()) else {
@@ -2311,8 +2389,13 @@ impl RustGisApp {
                 let url = url.to_string();
                 let slot: Slot<Result<Vec<u8>, String>> = Slot::default();
                 let land = slot.clone();
-                rustgis_engine::render::rustgis_tiles::cache::download(
+                rustgis_engine::render::rustgis_tiles::cache::download_limited(
                     &url,
+                    if p.get("geolibreProject").and_then(Value::as_bool) == Some(true) {
+                        rustgis_engine::map::geolibre::MAX_TEXT
+                    } else {
+                        rustgis_engine::render::rustgis_tiles::cache::MAX_DOWNLOAD
+                    },
                     Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r)),
                 );
                 let mut q = json!({});
@@ -2327,6 +2410,11 @@ impl RustGisApp {
                 for k in ["service", "coverage"] {
                     if p.get(k).and_then(Value::as_bool) == Some(true) {
                         q[k] = json!(true);
+                    }
+                }
+                for key in ["geolibreProject", "geolibreLayer"] {
+                    if let Some(value) = p.get(key) {
+                        q[key] = value.clone();
                     }
                 }
                 if let Some(origin) = &origin {
@@ -2493,11 +2581,17 @@ impl RustGisApp {
                     self.ui.pending_open = None;
                     open("project");
                     self.ui.backstage = false;
-                } else if let Some(path) = dialogs::pick_open(&["rgis", "rgisx", "rgispkg", "qgs", "qgz"], tl!("Projects (RustGIS, QGIS)"))
-                {
+                } else if let Some(path) = dialogs::pick_open(
+                    &["rgis", "rgisx", "rgispkg", "qgs", "qgz", "geolibre", "json"],
+                    tl!("Projects and JSON data (RustGIS, QGIS, GeoLibre)"),
+                ) {
                     // A QGIS project opens as a new map of this one.
                     let lower = path.to_ascii_lowercase();
-                    let cmd = if lower.ends_with(".qgs") || lower.ends_with(".qgz") { "project.importQgis" } else { "project.open" };
+                    let cmd = if lower.ends_with(".qgs") || lower.ends_with(".qgz") {
+                        "project.importQgis"
+                    } else {
+                        rustgis_engine::project::open_command(&path)
+                    };
                     let r = self.run_by_user(cmd, json!({"path": path}));
                     // Asking to save first: the Project tab stays until the answer, so Cancel
                     // goes back to it.
@@ -2513,7 +2607,11 @@ impl RustGisApp {
             "ui.save" | "ui.saveAs" if self.services.download.is_some() => {
                 let name = format!("{}.rgis", self.session.project.name);
                 if id == "ui.save" && self.ui.web_file.as_deref() == Some(name.as_str()) {
-                    self.save_download(&name)?;
+                    // The keyboard caller discards the result, so the failure is shown here too.
+                    if let Err(error) = self.save_download(&name) {
+                        self.session.notify(error.clone(), true);
+                        return Err(error);
+                    }
                 } else {
                     self.dialogs.open("saveProject", &self.session)?;
                 }
@@ -2648,6 +2746,7 @@ impl RustGisApp {
                     "styles" => ("style.add", &["rgisstyle"], "RustGIS styles"),
                     "ramps" => ("ramp.add", &["rgisramp", "xml", "qml", "txt", "clr", "cpt"], "Colour ramps (RustGIS, QGIS, GDAL, GMT)"),
                     "importStyles" => ("style.import", &["rgislyr", "rgismap", "rgis", "rgisx"], "RustGIS layers, maps and projects"),
+                    "geolibreProject" => ("project.importGeolibre", &["geolibre", "json"], "GeoLibre project"),
                     "qgisProject" => ("project.importQgis", &["qgs", "qgz"], "QGIS project"),
                     "qgisStyle" => ("style.importQgis", &["qml"], "QGIS layer style"),
                     "template" => ("project.fromTemplate", &["rgistemplate"], "RustGIS project template"),
@@ -2663,6 +2762,7 @@ impl RustGisApp {
                     self.ui.pending_open = Some(cmd);
                     open(match kind {
                         "ramps" => "ramp",
+                        "geolibreProject" => "project",
                         "qgisProject" => "qgisProject",
                         _ => "item",
                     });
@@ -3256,6 +3356,12 @@ impl RustGisApp {
     /// keeping its own name when the address has none). Unlike [`Self::open_bytes`], it never takes
     /// a picker's pending item: the download isn't the file the user is picking.
     fn open_project_bytes(&mut self, file: Option<&str>, bytes: &[u8]) -> Result<Value, String> {
+        if file.is_some_and(rustgis_engine::map::geolibre::is_project_file) {
+            let text = std::str::from_utf8(bytes).map_err(|_| tl!("Not a GeoLibre project").to_string())?;
+            let result = self.run("project.importGeolibre", json!({"text":text}));
+            self.map.invalidate();
+            return result;
+        }
         let package = file.is_some_and(|f| f.to_ascii_lowercase().ends_with(".rgispkg"));
         let text = if package {
             rustgis_engine::cmd::items::package_text(bytes)?
@@ -3274,6 +3380,8 @@ impl RustGisApp {
         r
     }
 
+    /// Consumes completed probes and downloads on the app frame, finalizing imports in their
+    /// reserved map or discarding failed reservations even when another map is active.
     fn poll_data_downloads(&mut self) {
         // GeoTIFFs, FlatGeobufs and GeoParquets whose headers are in: read in place, or
         // downloaded whole.
@@ -3321,6 +3429,7 @@ impl RustGisApp {
                 Ok(bytes) => self.add_landed(serviceui::Landed { id, url, params: p, origin }, bytes),
                 Err(e) => {
                     self.session.download_failed(id);
+                    rustgis_engine::cmd::geolibre::discard_pending(&mut self.session, &p);
                     self.session.notify(if e.starts_with(&url) { e } else { format!("{url}: {e}") }, true);
                 }
             }
@@ -3342,6 +3451,7 @@ impl RustGisApp {
             p["zoom"] = json!(false);
         }
         let before = self.session.sources.generation;
+        let pending = p.clone();
         match self.run("layer.addDownload", p) {
             Ok(r) => {
                 connectiontree::name_recent(self, before, origin.as_deref());
@@ -3350,7 +3460,10 @@ impl RustGisApp {
                 }
                 self.map.invalidate();
             }
-            Err(e) => self.session.notify(if e.starts_with(&url) { e } else { format!("{url}: {e}") }, true),
+            Err(e) => {
+                rustgis_engine::cmd::geolibre::discard_pending(&mut self.session, &pending);
+                self.session.notify(if e.starts_with(&url) { e } else { format!("{url}: {e}") }, true);
+            }
         }
     }
 
@@ -3506,6 +3619,7 @@ impl RustGisApp {
         panes::poll_geolibre(self, ctx);
         panes::poll_plugin_run(self, ctx);
         self.poll_downloads();
+        let _ = self.deliver_gp_files(Ok(Value::Null));
         // A value picked under Dynamic Text lasts while the text tool does, however the tool
         // changes (Esc, another tool, a text placed without Keep Tool, a command).
         if self.session.tool != rustgis_engine::Tool::Graphic("text") {
@@ -3556,6 +3670,7 @@ impl RustGisApp {
         geocodeui::poll(self, ctx);
         navui::poll(self, ctx);
         zarrui::poll(self, ctx);
+        geolibreui::poll(self, ctx);
         pluginsui::poll(self, ctx);
         assistantpane::poll(self, ctx);
         // A project the MCP relay, the assistant or a plugin opened or saved this frame (they run
@@ -3775,7 +3890,7 @@ impl RustGisApp {
 fn project_file_name(url: &str) -> Option<&str> {
     let path = url.split(['?', '#']).next().unwrap_or("");
     let last = path.rsplit('/').next().unwrap_or("");
-    rustgis_engine::project::opens_as_project(last).then_some(last)
+    (rustgis_engine::project::opens_as_project(last) || rustgis_engine::map::geolibre::is_project_file(last)).then_some(last)
 }
 
 #[cfg(test)]
@@ -4031,5 +4146,87 @@ mod vertex_undo_tests {
         app.map.vertex = Some((id, row, VertexId::new(0, 0, 1)));
         app.run("edit.redo", Value::Null).unwrap();
         assert_eq!(app.map.vertex, None, "redo");
+    }
+}
+
+#[cfg(test)]
+mod download_service_tests {
+    use super::{RustGisApp, Services, complete_gp_file};
+    use serde_json::json;
+
+    #[test]
+    fn rejected_download_does_not_announce_success_or_rename_project() {
+        let mut app = RustGisApp::with_sample()
+            .with_services(Services { download: Some(Box::new(|_, _| Err("browser rejected download".into()))), ..Default::default() });
+        let name = app.session.project.name.clone();
+        let saved_name = app.ui.web_file.clone();
+        assert!(app.save_download("renamed.rgis").is_err());
+        assert_eq!(app.session.project.name, name);
+        assert_eq!(app.ui.web_file, saved_name);
+        assert!(!app.session.notices.iter().any(|n| n.text.contains("Downloaded")));
+        assert!(!app.download("archive.pmtiles", vec![1, 2, 3]));
+        assert!(app.session.notices.iter().any(|n| n.error && n.text.contains("browser rejected download")));
+        assert!(!app.session.notices.iter().any(|n| n.text.contains("Downloaded")));
+    }
+
+    #[test]
+    fn direct_file_result_reports_delivery_instead_of_pending() {
+        let pending = json!({"pending": true, "download": 7, "file": "cities.pmtiles"});
+        let completed = json!({"file": "cities.pmtiles", "delivered": true, "messages": ["Exported cities"]});
+        assert_eq!(complete_gp_file(Ok(pending.clone()), 7, &Ok(completed.clone())), Ok(completed));
+        assert_eq!(complete_gp_file(Ok(pending), 7, &Err("browser rejected download".into())), Err("browser rejected download".into()));
+    }
+
+    #[test]
+    fn delivered_script_and_model_results_keep_their_wrappers_and_other_outputs() {
+        let script = json!({
+            "ran": [
+                {"line": 1, "command": "model.run", "result": {
+                    "model": "Export cities",
+                    "ran": [
+                        {"step": 1, "node": "export", "tool": "vectorToPmtiles",
+                            "result": {"pending": true, "download": 7, "file": "cities.pmtiles"}},
+                        {"step": 2, "node": "buffer", "tool": "buffer", "result": {"layer": 42}}
+                    ],
+                    "outputs": [{"node": "buffer", "layer": 42}]
+                }},
+                {"line": 2, "command": "map.zoom", "result": {"zoom": 5}}
+            ]
+        });
+        let completed = json!({"file": "cities.pmtiles", "delivered": true, "messages": ["Exported cities"]});
+        let mut expected = script.clone();
+        expected["ran"][0]["result"]["ran"][0]["result"] = completed.clone();
+        assert_eq!(complete_gp_file(Ok(script), 7, &Ok(completed)), Ok(expected));
+    }
+
+    #[test]
+    fn any_matching_failed_export_fails_the_compound_command() {
+        let script = json!({"ran": [
+            {"line": 1, "command": "gp.run", "result": {"pending": true, "download": 7, "file": "cities.pmtiles"}},
+            {"line": 2, "command": "gp.run", "result": {"pending": true, "download": 8, "file": "roads.pmtiles"}}
+        ]});
+        let cities = Ok(json!({"file": "cities.pmtiles", "delivered": true, "messages": []}));
+        let after_first = complete_gp_file(Ok(script), 7, &cities);
+        assert_eq!(complete_gp_file(after_first, 8, &Err("roads download rejected".into())), Err("roads download rejected".into()));
+    }
+
+    #[test]
+    fn unrelated_delivery_failures_do_not_change_the_command_result() {
+        let script = json!({"ran": [
+            {"line": 1, "command": "gp.run", "result": {"pending": true, "download": 7, "file": "cities.pmtiles"}},
+            {"line": 2, "command": "layer.color", "params": {"download": 8}, "result": {"layer": 42}}
+        ]});
+        assert_eq!(complete_gp_file(Ok(script.clone()), 8, &Err("unrelated download failed".into())), Ok(script));
+        assert_eq!(
+            complete_gp_file(Err("script command failed".into()), 7, &Err("download failed".into())),
+            Err("script command failed".into())
+        );
+    }
+
+    #[test]
+    fn acknowledgment_errors_still_have_one_error_notice() {
+        let mut app = RustGisApp::with_sample();
+        assert_eq!(app.run("gp.fileDelivered", json!({"id": u64::MAX})), Err("no pending file with that id".into()));
+        assert_eq!(app.session.notices.iter().filter(|n| n.error && n.text == "no pending file with that id").count(), 1);
     }
 }

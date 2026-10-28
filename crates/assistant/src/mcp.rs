@@ -35,8 +35,8 @@ const SNAPSHOT_WAIT: f64 = 5.0;
 const INSTRUCTIONS: &str = "RustGIS is a desktop GIS. This server holds one RustGIS project in memory and acts on it.\n\
 - list_layers shows the map. view_map shows it as an image: look after changing it. snapshot adds the view's extent and scale, and can save the image.\n\
 - Every action is a command: search_commands finds one, run_command runs it (navigation, layers, symbology, labels, selection, editing, layouts, export…). run runs several commands at once, as one undo step.\n\
-- Geoprocessing: search_tools, then describe_tool for its parameters, then run_tool; its output is a new layer.\n\
-- read_features reads attribute rows, with a where clause.\n\
+- Geoprocessing: search_tools, then describe_tool for its parameters, then run_tool; its output is a new layer, or a standalone table.\n\
+- read_features reads attribute rows of a layer or a standalone table, with a where clause.\n\
 - search_docs and read_doc look things up in the RustGIS documentation.\n\
 Open data with the layer.addData command ({\"path\": …}) and save with project.saveAs ({\"path\": \"*.rgis\"}); \
 file and network access works only when the server was started with --yes.";

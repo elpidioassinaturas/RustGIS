@@ -231,7 +231,9 @@ their credits are shown in the corner of the map and drawn on exports.
 
 Use Explore to click features in vector PMTiles, MBTiles or MVT layers added as data and see
 their source-layer names and attributes in a pop-up. This works with **Topmost Layer** or
-**Visible Layers** pop-up mode, not with catalog basemaps or MapLibre styles. Tiles are not
+**Visible Layers** pop-up mode, not with catalog basemaps or MapLibre styles; with **Selected in
+Layers**, click a tile layer's row to select it and a click on the map identifies that layer
+alone, whichever it is (a WMS layer too). Tiles are not
 selectable or editable; a tile not yet loaded may need another click once it arrives.
 **Reload** in the Basemap gallery (`map.reloadWebLayers`) clears cached tiles and styles and
 fetches them again.
