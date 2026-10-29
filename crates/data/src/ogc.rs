@@ -1663,7 +1663,11 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
         let lonlat = c.pointer("/extent/spatial/crs").and_then(|v| v.as_str()).is_none_or(is_crs84);
         let bbox = c.pointer("/extent/spatial/bbox/0").and_then(|b| b.as_array()).filter(|_| lonlat).and_then(|b| {
             let f = |i: usize| b.get(i).and_then(|v| v.as_f64());
-            let (e, n) = if b.len() == 6 { (3, 4) } else { (2, 3) };
+            let (e, n) = match b.len() {
+                4 => (2, 3),
+                6 => (3, 4),
+                _ => return None,
+            };
             lonlat_box(f(0)?, f(1)?, f(e)?, f(n)?)
         });
         // OGC API Tiles: the collection's map and vector tiles in WebMercatorQuad. Its vector
@@ -2379,6 +2383,10 @@ impl<'de> serde::de::Visitor<'de> for Members<'_> {
     }
 
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        if self.depth >= 16 {
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            return Ok(());
+        }
         while seq.next_element_seed(Members { extent: &mut *self.extent, depth: self.depth + 1 })?.is_some() {}
         Ok(())
     }
@@ -2862,6 +2870,9 @@ mod tests {
         // Nothing to judge from: no features, not JSON.
         assert!(fix_axes(br#"{"type":"FeatureCollection","features":[]}"#, hamburg).is_none());
         assert!(fix_axes(b"urn:ogc:def:crs:EPSG::4326 not json", hamburg).is_none());
+        // Positions under arrays nested deeper than a GeoJSON answer goes aren't read.
+        let deep = format!("{}{{\"type\":\"Point\",\"coordinates\":[53.55,9.99]}}{}", "[".repeat(20), "]".repeat(20));
+        assert!(fix_axes(deep.as_bytes(), hamburg).is_none());
     }
 
     /// An OGC API collection's extent is its longitude/latitude bounds only in CRS84 (named, or
@@ -2873,12 +2884,14 @@ mod tests {
             {"id": "a", "extent": {"spatial": {"bbox": [[8.41, 53.39, 10.34, 53.97]]}}, "links": [{"rel": "items", "href": "https://x.org/collections/a/items"}]},
             {"id": "b", "extent": {"spatial": {"bbox": [[8.41, 53.39, 10.34, 53.97]], "crs": "http://www.opengis.net/def/crs/OGC/1.3/CRS84"}}, "links": [{"rel": "items", "href": "https://x.org/collections/b/items"}]},
             {"id": "c", "extent": {"spatial": {"bbox": [[8.41, 53.39, -5, 10.34, 53.97, 120]], "crs": "http://www.opengis.net/def/crs/OGC/0/CRS84h"}}, "links": [{"rel": "items", "href": "https://x.org/collections/c/items"}]},
-            {"id": "d", "extent": {"spatial": {"bbox": [[53.39, 8.41, 53.97, 10.34]], "crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}}, "links": [{"rel": "items", "href": "https://x.org/collections/d/items"}]}]}"#;
+            {"id": "d", "extent": {"spatial": {"bbox": [[53.39, 8.41, 53.97, 10.34]], "crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}}, "links": [{"rel": "items", "href": "https://x.org/collections/d/items"}]},
+            {"id": "e", "extent": {"spatial": {"bbox": [[8.41, 9.0, 53.39, 10.34, 53.97]]}}, "links": [{"rel": "items", "href": "https://x.org/collections/e/items"}]}]}"#;
         let s = parse("https://x.org/collections", doc).unwrap();
         let bbox = |id: &str| s.layers.iter().find(|l| l.name == id).map(|l| l.bbox);
         let hamburg = Some(Some([8.41, 53.39, 10.34, 53.97]));
         assert_eq!((bbox("a"), bbox("b"), bbox("c")), (hamburg, hamburg, hamburg));
-        assert_eq!(bbox("d"), Some(None));
+        // A box in another system, or of neither four nor six numbers: no bounds.
+        assert_eq!((bbox("d"), bbox("e")), (Some(None), Some(None)));
     }
 
     #[test]
