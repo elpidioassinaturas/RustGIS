@@ -97,7 +97,8 @@ front end goes into it alike: the app, scripts, the AI Assistant, the command li
   desktop app, a browser tab, a Python program) keeps its own.
 - **No secrets:** the parameters lose passwords, keys and tokens as History's Copy as code does, and
   so does an error's text; a document given as text (a map, a project) or a file's contents in
-  base64, past 200 characters, is kept as its size only (a shorter one is kept, its secrets taken
+  base64 (any text made only of base64's characters, so a long path with no dot too), past 200
+  characters, is kept as its size only (a shorter one is kept, its secrets taken
   out as any other text's), and an SQL `CREATE SECRET`'s options as `(…)`. A secret written
   as plain words, with no name or address form (a password typed into a note), isn't recognised:
   look at an exported log before sharing it. Each entry's parameters are clipped to about 4 KB of

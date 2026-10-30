@@ -20491,7 +20491,7 @@ fn the_session_log_records_each_command_run_in_the_session() {
     assert!(!kept.contains("S3CRET") && kept.contains("s3.connect"), "{kept}");
     let _ = s.run("script.run", &json!({"script": "# keep {name} as it is"}));
     assert!(last(&s).params.to_string().contains("{name}"));
-    // A long list keeps its count when its texts are cut again to fit.
+    // A long list is "…" once its texts are cut to fit, its count with it.
     let long: Vec<String> = (0..5_000).map(|i| format!("{i}{}", "y".repeat(100))).collect();
     let _ = s.run("project.rename", &json!({"name": "Long", "tags": long}));
     let tags = last(&s).params.to_string();
