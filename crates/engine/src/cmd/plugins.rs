@@ -290,7 +290,7 @@ const NEVER: &[&str] = &[
     "s3.disconnect",
     "earthdata.login",
     "earthdata.logout",
-    // The project log records what was done (#797): a plugin never empties it or turns it off.
+    // The session log records what was done (#797): a plugin never empties it or turns it off.
     "project.clearLog",
     "project.logCommands",
     "pg.connect",
@@ -301,7 +301,7 @@ const NEVER: &[&str] = &[
 ];
 
 /// Commands that write files without naming one in their parameters, or read what the user's
-/// commands named (the project log's paths, addresses and SQL).
+/// commands named (the session log's paths, addresses and SQL).
 const REACHES_FILES: &[&str] = &["project.save", "project.saveAs", "project.log"];
 
 /// Commands that read a file a layer names, not their parameters.

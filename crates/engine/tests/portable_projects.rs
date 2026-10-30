@@ -215,14 +215,7 @@ fn missing_stream_can_be_repaired_undone_redone_and_saved() {
     assert_eq!(paths(&mut s), before);
     let text = std::fs::read_to_string(&project).unwrap();
     assert!(text.contains("./data/towns.fgb"));
-    // The layers no longer link the missing file; the project's log (#797) still records the
-    // commands that once named it.
-    let mut saved: Value = serde_json::from_str(&text).unwrap();
-    // Its paths are written relative to the project's folder too, and said to be.
-    let log = saved.as_object_mut().unwrap().remove("log").unwrap().to_string();
-    assert_no_root(&log, &f.root);
-    assert!(log.contains("towns.fgb") && log.contains("\"relative\""), "{log}");
-    assert!(!saved.to_string().contains("./data/cities.fgb"));
+    assert!(!text.contains("./data/cities.fgb"));
     let reopened = open(&project);
     assert_stream(&reopened, layers.cities, &replacement);
     assert_other_sources(&reopened, &layers, &f.root);

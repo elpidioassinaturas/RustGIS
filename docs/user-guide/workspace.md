@@ -36,13 +36,6 @@ Saved layer addresses omit passwords, access keys, tokens and signatures. The op
 keeps them, but after restarting RustGIS a protected source may need you to sign in to its
 connection again or add it again with credentials.
 
-A saved `.rgis` also carries its [project log](#project-log), which is on by default: the paths,
-SQL and addresses of the commands run on it. Passwords, keys and tokens are taken out where a
-name or an address shows them, but not a secret typed as plain words (in SQL, a note or a
-parameter with an unusual name). Before sharing a project, look at its log (`project.log`), or
-clear it (`project.clearLog`) or turn it off for that project. A package (`.rgispkg`) or a
-template carries no log.
-
 ### Autosave and recovery
 
 The desktop app keeps a recovery copy of unsaved work. While the project has changes that aren't
@@ -78,59 +71,47 @@ replace the first one's copy; it says so as it starts. Nor does RustGIS autosave
 folder can't lock files (some network or synced folders), where it can't tell a second copy apart.
 The browser app doesn't autosave yet; it warns before you leave a page with unsaved changes.
 
-### Project log
+### Session log
 
-A project keeps a **log** of the commands run on it: what was done, when, with what, and whether
-it worked, for reproducing an analysis, reviewing work or writing a methods section. Every front
-end goes into it alike: the app, scripts, the AI Assistant, the command line, Python and MCP.
+RustGIS keeps a **log** of the commands run in the session: what was done, when, with what, and
+whether it worked. It is an audit trail of the session, for reviewing work or recalling what was
+run; it runs nothing again (History's Copy as code and recorded tasks do that). Every
+front end goes into it alike: the app, scripts, the AI Assistant, the command line, Python and MCP.
 
 - **What goes in:** each command that changes the project, and each that names a file, folder,
   address or connection, reads included (an export, a download, a save, opening a file), plus
   undo and redo, with the step they took back or brought back. Reading and looking around within
   the project (listing layers, describing a tool, reading features, moving the view) is left
   out. A command run by another (a script's lines, a model's steps) is inside its parent's
-  entry. Opening or making a project goes into the log of the project it opens or makes; one
-  that fails to open stays in the log of the project open. A plugin can't empty the log or turn
-  it off, and reading it (`project.log`) takes the file permission, since it names the files and
-  addresses the user's commands used.
+  entry. A plugin can't empty the log or turn it off, and reading it (`project.log`) takes the
+  file permission, since it names the files and addresses the user's commands used.
 - **Each entry:** `at` (when it started, in milliseconds since 1970, UTC; for a plugin's command
   that waited for its downloads, when its last run started), `command`, `params`, `ok`, `error`
   when it failed, and `millis`, how long it took.
-- **Outside undo:** undoing a command doesn't take its entry back, and clearing the log or
-  turning it on or off is no undo step. Steps that undo takes back as one (a held arrow key
-  nudging an element) are one entry, with the last one's parameters.
+- **For the session only:** the log is kept in memory, across the projects opened or made in the
+  session, until RustGIS closes or the log is cleared. A saved project, its recovery copy, a
+  package or a template carries none of it, so sharing a project shares no log. Reading, writing
+  out, clearing or switching the log doesn't change the project and is no undo step; undoing a
+  command doesn't take its entry back. Steps that undo takes back as one (a held arrow key
+  nudging an element) are one entry, with the last one's parameters. Each copy of RustGIS (the
+  desktop app, a browser tab, a Python program) keeps its own.
 - **No secrets:** the parameters lose passwords, keys and tokens as History's Copy as code does, and
   so does an error's text; a document given as text (a map, a project), or a file's contents in
   base64, is kept as its size only, and an SQL `CREATE SECRET`'s options as `(…)`. A secret written
   as plain words, with no name or address form (a password typed into a note), isn't recognised:
-  clear the log before sharing a project that used one. Each entry's parameters are clipped to about
-  4 KB of JSON (a long text is cut, a list keeps its first 100 items), its error to 500 characters
-  and a `…`, and the log keeps its last 10,000 entries, the oldest dropped first. Plugins' commands
-  take at most 1,000 of those places, also in a log read from a file: past that, a plugin's new
-  entry pushes out an older plugin entry, not one of the user's.
-- **Saved with the project:** a shared `.rgis` carries its log (a package, `.rgispkg`, or a
-  template doesn't). Clear it first if that isn't wanted (`project.clearLog`, which leaves its
-  own entry), or turn logging off for a project (`project.logCommands {"on": false}`; what is
-  there stays). A project with no log saves as before. A save that the log would take past
-  the 512 MB a project file opens with is refused, saying so: export the log, then clear it.
-  Saved into a folder, the local paths in its parameters and errors are written relative to
-  it, as the project's sources are; a path with spaces in it that an error names is found whole
-  when it is one of the entry's parameters, and otherwise by its words. An entry whose text
-  already holds, as a word, the relative form one of its paths would take (`./data/a.tif`) has
-  its paths written as file names instead, so every text reads back as it was written. An
-  earlier RustGIS opens a project that has a log as it opens any other, ignoring the log, and
-  saves it without one. The project JSON that the web app sends to a page embedding it, and
-  `project_json()` in Python, leave the log out: a project kept that way and opened again
-  (`project.openText`) starts a log of its own.
+  look at an exported log before sharing it. Each entry's parameters are clipped to about 4 KB of
+  JSON (a long text is cut, a list keeps its first 100 items), its error to 500 characters and a
+  `…`, and the log keeps its last 10,000 entries, the oldest dropped first. Plugins' commands take
+  at most 1,000 of those places: past that, a plugin's new entry pushes out an older plugin entry,
+  not one of the user's.
 
 From scripts: `project.log {"since"?, "until"?, "command"?, "failed"?, "limit"?}` lists entries,
 newest last (`command` is an id, or the start of one ending in a dot, `layer.`; `limit` is a whole
 number, 100 by default and at most 1,000, with `count` saying how many match), and
 `project.exportLog {"path": "log.csv"}` writes it out as CSV (one row an entry, the parameters as a
 JSON column) or JSON Lines (`.jsonl` or `.ndjson`), as the path's extension says; any other
-extension (a `.json`, a project) is refused, whatever `format` is given. The History pane still
-keeps geoprocessing runs with their outputs and Copy as code; the log is a plain record and runs
-nothing again.
+extension (a `.json`, a project) is refused, whatever `format` is given. `project.clearLog` empties
+it (leaving its own entry) and `project.logCommands {"on": false}` stops it (what is there stays).
 
 ### GeoLibre projects
 

@@ -12,7 +12,7 @@ pub mod model;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod prefs;
 pub mod project;
-mod project_log;
+pub mod project_log;
 pub mod s3_connections;
 pub mod s3_keys;
 #[cfg(test)]
@@ -49,11 +49,8 @@ pub struct CommandSpec {
     pub shortcut: &'static str,
     /// Parameter description for scripts and agents.
     pub params: &'static str,
-    /// Whether it changes the project (and so takes an undo snapshot, unless `undoable` is off).
+    /// Whether it changes the project (and so takes an undo snapshot).
     pub mutates: bool,
-    /// Whether its change is an undo step: off for one outside the undo history, which marks the
-    /// project as changed itself ([`CommandSpec::outside_undo`]).
-    pub undoable: bool,
     /// `None` = enabled; `Some(reason)` = disabled.
     pub enabled: fn(&Session) -> Option<&'static str>,
     pub run: fn(&mut Session, &Value) -> CmdResult,
@@ -76,7 +73,7 @@ impl CommandSpec {
     }
 
     pub const fn new(id: &'static str, label: &'static str, location: &'static str, run: fn(&mut Session, &Value) -> CmdResult) -> Self {
-        CommandSpec { id, label, location, shortcut: "", params: "{}", mutates: true, undoable: true, enabled: always, run }
+        CommandSpec { id, label, location, shortcut: "", params: "{}", mutates: true, enabled: always, run }
     }
     pub const fn key(mut self, s: &'static str) -> Self {
         self.shortcut = s;
@@ -89,12 +86,6 @@ impl CommandSpec {
     /// Doesn't change the project (no undo snapshot, not dirtying).
     pub const fn view(mut self) -> Self {
         self.mutates = false;
-        self
-    }
-    /// Changes the project, but outside its undo history (the project log, #797): no undo step,
-    /// which would restore nothing; the command marks the project as changed itself.
-    pub const fn outside_undo(mut self) -> Self {
-        self.undoable = false;
         self
     }
     pub const fn when(mut self, f: fn(&Session) -> Option<&'static str>) -> Self {
@@ -499,6 +490,9 @@ struct PutAside {
 pub struct Session {
     pub project: Project,
     pub path: Option<PathBuf>,
+    /// What was run in this session (#797), whatever project was open: kept in memory only, so
+    /// a saved or shared project carries none of it.
+    pub log: project_log::SessionLog,
     /// Package this project was opened from, protected as an input without making it the save
     /// destination. Kept after Save As; cleared when a different project starts.
     opened_package: Option<PathBuf>,
@@ -796,6 +790,7 @@ impl Session {
         Session {
             project,
             path: None,
+            log: project_log::SessionLog::default(),
             opened_package: None,
             file_identity: 0,
             state: 0,
@@ -987,7 +982,7 @@ impl Session {
 
     /// Runs a command by id. Mutating commands snapshot the project for undo; an error or a
     /// panic restores it. A command run by itself (not as a part of another) that changes the
-    /// project, or reaches a file or a service, goes into the project's log (#797).
+    /// project, or reaches a file or a service, goes into the session's log (#797).
     pub fn run(&mut self, id: &str, params: &Value) -> CmdResult {
         if self.depth > 0 {
             return self.run_command(id, params);
@@ -1010,7 +1005,7 @@ impl Session {
             id.starts_with(rustgis_plugins::PREFIX) && res.as_ref().is_ok_and(|v| v.get("pending").and_then(Value::as_bool) == Some(true));
         // With logging off, only its own switching and clearing go in: nothing else is clipped
         // or redacted for nothing.
-        let wanted = self.project.log.on() || matches!(id, "project.logCommands" | "project.clearLog");
+        let wanted = self.log.on() || matches!(id, "project.logCommands" | "project.clearLog");
         // Undo and redo go in when they take a step back or bring one back: pressed with nothing
         // to undo, they change nothing, and each press would be an entry.
         let stepped = !matches!(id, "edit.undo" | "edit.redo") || res.is_ok();
@@ -1024,11 +1019,11 @@ impl Session {
                         None => project_log::kept_params(params),
                     };
                     let e = project_log::entry(id, params, &res, at, start.elapsed());
-                    if joins && res.is_ok() { self.project.log.join_last(e) } else { self.project.log.push(e) }
+                    if joins && res.is_ok() { self.log.join_last(e) } else { self.log.push(e) }
                 }
             }));
             if logged.is_err() {
-                log::warn!("the project log has no entry for {id}: writing it failed unexpectedly");
+                log::warn!("the session log has no entry for {id}: writing it failed unexpectedly");
             }
         }
         res
@@ -1085,7 +1080,7 @@ impl Session {
             return Err(e);
         }
         self.merge = merge;
-        let res = self.guarded(label, mutates && spec.undoable, |s| run(s, params));
+        let res = self.guarded(label, mutates, |s| run(s, params));
         if id == "layer.addDownload"
             && res.is_ok()
             && let Some(token) = params.get("geolibreLayer").and_then(|v| v.get("token")).and_then(serde_json::Value::as_str)

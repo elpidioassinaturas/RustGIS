@@ -283,9 +283,8 @@ last view in memory; run `layer.loadAll` on it before `to_geojson` or `to_geopan
 of them.
 
 Open an existing project with `Session(project="atlas.rgis")` or `s.open("atlas.rgis")`.
-`s.project_json()` returns its JSON text, without its
-[project log](user-guide/workspace.md#project-log); `s.run("project.openText", text=...)` opens
-project JSON without an intermediate file. `to_png()` returns PNG bytes even when it also writes a
+`s.project_json()` returns its JSON text; `s.run("project.openText", text=...)` opens project
+JSON without an intermediate file. `to_png()` returns PNG bytes even when it also writes a
 file; omit the path to keep the image in memory.
 
 ## From source

@@ -177,7 +177,7 @@ impl Engine {
     }
 
     /// The project as `.rgis` JSON text, as `project.saveAs` writes it (what `project.openText`
-    /// opens), without its project log.
+    /// opens).
     fn project_json(&self, py: Python<'_>) -> PyResult<String> {
         let result = self.with_session(py, |session| serde_json::to_string(&session.project).map_err(|e| e.to_string()));
         self.flush(py);

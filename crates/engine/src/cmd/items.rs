@@ -523,7 +523,7 @@ fn import_styles(s: &mut Session, p: &Value) -> CmdResult {
 
 /// The project without its features (layer schemas, symbology, layouts and styles stay).
 fn template(p: &Project) -> Project {
-    let mut t = p.own_copy();
+    let mut t = p.clone();
     t.gp_history.clear();
     for m in &mut t.maps {
         for l in &mut m.layers {

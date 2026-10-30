@@ -1,7 +1,5 @@
-//! The project log (#797): the log a project keeps ([`ProjectLog`]), which commands go in, what
-//! of them is kept, and how its paths are written portable into a project file and read back.
-
-use std::sync::{Mutex, MutexGuard};
+//! The session log (#797): what was run in a session ([`SessionLog`]), which commands go in and
+//! what of them is kept. It is held in memory only: a saved or shared project carries none of it.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -101,24 +99,6 @@ pub(crate) fn kept_params(params: &Value) -> Value {
         }
         other => short(&other),
     }
-}
-
-/// An entry read from a file, kept as a new one is: its command clipped, its parameters and error
-/// clipped and without secrets (a file may hold what RustGIS never wrote, and a plugin may read
-/// the log).
-pub(crate) fn bounded(mut e: LogEntry) -> LogEntry {
-    if e.command.chars().nth(200).is_some() {
-        e.command = e.command.chars().take(200).collect();
-    }
-    // One that fits, as written, keeps its clipped lists' counts: only the document rule applies,
-    // then its secrets are taken out.
-    let fits = serde_json::to_vec(&e.params).is_ok_and(|b| b.len() <= LOG_PARAMS_BYTES);
-    e.params = if fits { redacted(&clip(&e.params, usize::MAX, usize::MAX, 0)) } else { kept_params(&e.params) };
-    e.error = e.error.as_deref().map(kept_error);
-    // Pointers into the entry, as many as its texts at most.
-    e.relative.truncate(1_000);
-    e.relative.retain(|p| p.len() <= 1_024);
-    e
 }
 
 /// An error as the log keeps it: clipped to [`LOG_ERROR_CHARS`] before its secrets are taken out,
@@ -332,11 +312,10 @@ pub(crate) fn entry(id: &str, params: Value, res: &CmdResult, at: u64, took: web
         ok: res.is_ok(),
         error,
         millis: u64::try_from(took.as_millis()).unwrap_or(u64::MAX),
-        relative: Vec::new(),
     }
 }
 
-/// Most entries a project's log keeps; past it, the oldest go first.
+/// Most entries the log keeps; past it, the oldest go first.
 pub const LOG_LIMIT: usize = 10_000;
 /// The most entries of plugins' commands the log keeps, their oldest going first past it: a
 /// plugin run many times can't push the user's own entries out of the log.
@@ -347,7 +326,7 @@ pub const LOG_PARAMS_BYTES: usize = 4096;
 pub const LOG_LIST_ITEMS: usize = 100;
 pub const LOG_ERROR_CHARS: usize = 500;
 
-/// One command run on a project: when it started (UTC, milliseconds since 1970), its id, its
+/// One command run in the session: when it started (UTC, milliseconds since 1970), its id, its
 /// parameters (secrets taken out, large values clipped), whether it succeeded, its error, and how
 /// long it took.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -361,23 +340,14 @@ pub struct LogEntry {
     pub error: Option<String>,
     #[serde(default)]
     pub millis: u64,
-    /// In a saved file, what saving made portable: the parameters' texts it changed, by their
-    /// JSON pointers (`/params/path`, always starting with `/`), and each relative path it wrote
-    /// (`./My Data/a.tif`, always starting with `.`). Reading makes those very paths absolute
-    /// again, in those texts and in the error, and nothing else: a text or a word given as
-    /// relative (`./a.tif`, a name such as `./Maps`) reads back as it was run. Taken once read;
-    /// never shown.
-    #[serde(default, skip_serializing)]
-    pub relative: Vec<String>,
 }
 
-/// The longest saved log text kept for the next save ([`LogState::written`]).
-const WRITTEN_KEPT_BYTES: usize = 1 << 20;
-
-/// A log as it is held, written by [`ProjectLog::write_json`] (its paths made portable) and read
-/// back through its own `Deserialize`.
+/// The session's log (#797): one entry for each command run in the session, from any front end
+/// and in whatever project was open, oldest first. It sits outside the project and its undo
+/// history: undoing a command doesn't take its entry back, and saving, sharing or packaging a
+/// project carries none of it. It lasts until RustGIS closes, or until it is cleared.
 #[derive(Debug, Default)]
-struct LogState {
+pub struct SessionLog {
     /// Logging turned off (`project.logCommands`); on by default.
     off: bool,
     /// Oldest first; the oldest go first past [`LOG_LIMIT`], without moving the rest.
@@ -385,190 +355,40 @@ struct LogState {
     /// How many of `entries` are plugins' commands', kept in step with them so a push doesn't
     /// count them.
     plugin_entries: usize,
-    /// Moved on by each change, so a text written earlier is known to be the log as it is.
-    generation: u64,
-    /// The text the last save wrote, with the generation it was written from and the folder it
-    /// was written for: a save or autosave with nothing logged since writes it as it is. Up to
-    /// [`WRITTEN_KEPT_BYTES`] only.
-    written: Option<(u64, Option<String>, std::sync::Arc<str>)>,
 }
 
-/// Values a file's log can hold that aren't what it should be: read as nothing (an empty log, no
-/// entries), so that nothing in the log keeps a project from opening.
-macro_rules! anything_else_is_default {
-    () => {
-        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
-            Ok(Default::default())
-        }
-        fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
-            Ok(Default::default())
-        }
-        fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
-            Ok(Default::default())
-        }
-        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
-            Ok(Default::default())
-        }
-        fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
-            Ok(Default::default())
-        }
-        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-            Ok(Default::default())
-        }
-        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-            Ok(Default::default())
-        }
-    };
-}
-
-impl<'de> Deserialize<'de> for LogState {
-    /// A file's log (a project file is hostile input), read so that nothing in it keeps the
-    /// project from opening: its entries one at a time ([`LogEntries`]); anything but an object
-    /// is an empty log.
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct State;
-        impl<'de> serde::de::Visitor<'de> for State {
-            type Value = LogState;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a project log")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<LogState, A::Error> {
-                let mut s = LogState::default();
-                while let Some(k) = map.next_key::<String>()? {
-                    match k.as_str() {
-                        "off" => s.off = map.next_value::<serde_json::Value>()?.as_bool().unwrap_or(false),
-                        "entries" => {
-                            let entries = map.next_value_seed(LogEntries)?;
-                            s.plugin_entries = entries.iter().filter(|e| e.command.starts_with(rustgis_plugins::PREFIX)).count();
-                            s.entries = entries;
-                        }
-                        _ => {
-                            map.next_value::<serde::de::IgnoredAny>()?;
-                        }
-                    }
-                }
-                Ok(s)
-            }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<LogState, A::Error> {
-                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
-                Ok(LogState::default())
-            }
-            anything_else_is_default!();
-        }
-        d.deserialize_any(State)
-    }
-}
-
-/// A file's log entries, each read in turn as a JSON value (the file is in memory already),
-/// bounded and without secrets as a new entry is ([`bounded`]) as it comes, and only the last
-/// [`LOG_LIMIT`] kept, of which plugins' commands' last [`LOG_PLUGIN_LIMIT`]. One that doesn't
-/// read as an entry (a file edited by hand, another version's) is skipped.
-struct LogEntries;
-
-/// `entries` without the oldest of plugins' commands' past [`LOG_PLUGIN_LIMIT`], in one pass: a
-/// file's log is held to the cap a running log keeps.
-fn cap_plugins(entries: &mut std::collections::VecDeque<LogEntry>) {
-    let plugin = |e: &LogEntry| e.command.starts_with(rustgis_plugins::PREFIX);
-    let mut over = entries.iter().filter(|e| plugin(e)).count().saturating_sub(LOG_PLUGIN_LIMIT);
-    entries.retain(|e| {
-        let drop = over > 0 && plugin(e);
-        over -= usize::from(drop);
-        !drop
-    });
-}
-
-impl<'de> serde::de::DeserializeSeed<'de> for LogEntries {
-    type Value = std::collections::VecDeque<LogEntry>;
-    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        d.deserialize_any(self)
-    }
-}
-
-impl<'de> serde::de::Visitor<'de> for LogEntries {
-    type Value = std::collections::VecDeque<LogEntry>;
-    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("a list of log entries")
-    }
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        let mut out = std::collections::VecDeque::new();
-        while let Some(v) = seq.next_element::<serde_json::Value>()? {
-            let Ok(e) = serde_json::from_value::<LogEntry>(v) else { continue };
-            // Bounded at once, so what is held is at most the cap's worth of bounded entries,
-            // whatever the file holds.
-            out.push_back(bounded(e));
-            if out.len() > LOG_LIMIT {
-                out.pop_front();
-            }
-        }
-        cap_plugins(&mut out);
-        Ok(out)
-    }
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        while map.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
-        Ok(Default::default())
-    }
-    anything_else_is_default!();
-}
-
-/// A project's log (#797): one entry for each command run on it, from any front end, kept in
-/// the `.rgis`. It sits outside the undo history: the project's undo snapshots share it (a clone
-/// is the same log), so undoing a command never takes its entry back, and a snapshot copies
-/// nothing of it. A project opened, made new or from a template has a log of its own. It is read
-/// in place, under its lock; only saving copies its entries, once ([`ProjectLog::write_json`]).
-#[derive(Clone, Debug, Default)]
-pub struct ProjectLog(std::sync::Arc<Mutex<LogState>>);
-
-impl ProjectLog {
-    fn state(&self) -> MutexGuard<'_, LogState> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// The state, to change: what a save wrote of it is no longer the log.
-    fn changing(&self) -> MutexGuard<'_, LogState> {
-        let mut s = self.state();
-        s.generation = s.generation.wrapping_add(1);
-        s.written = None;
-        s
-    }
-
-    /// No entries, and logging on: nothing for a project file to keep.
-    pub fn nothing_to_save(&self) -> bool {
-        let s = self.state();
-        s.entries.is_empty() && !s.off
-    }
-
+impl SessionLog {
     pub fn on(&self) -> bool {
-        !self.state().off
+        !self.off
     }
 
-    pub fn set_on(&self, on: bool) {
-        self.changing().off = !on;
+    pub fn set_on(&mut self, on: bool) {
+        self.off = !on;
     }
 
     /// Adds `e` when logging is on, the oldest entries dropped past [`LOG_LIMIT`], and a plugin's
     /// command's past [`LOG_PLUGIN_LIMIT`] the oldest of those; turning the log off
     /// (`project.logCommands`), and clearing it while off, are recorded too, so the log says why
     /// it stops or is empty.
-    pub fn push(&self, e: LogEntry) {
-        let mut s = self.changing();
-        if s.off && !matches!(e.command.as_str(), "project.logCommands" | "project.clearLog") {
+    pub fn push(&mut self, e: LogEntry) {
+        if self.off && !matches!(e.command.as_str(), "project.logCommands" | "project.clearLog") {
             return;
         }
         let plugin = |e: &LogEntry| e.command.starts_with(rustgis_plugins::PREFIX);
         if plugin(&e)
-            && s.plugin_entries >= LOG_PLUGIN_LIMIT
-            && let Some(oldest) = s.entries.iter().position(plugin)
+            && self.plugin_entries >= LOG_PLUGIN_LIMIT
+            && let Some(oldest) = self.entries.iter().position(plugin)
         {
-            s.entries.remove(oldest);
-            s.plugin_entries = s.plugin_entries.saturating_sub(1);
+            self.entries.remove(oldest);
+            self.plugin_entries = self.plugin_entries.saturating_sub(1);
         }
         if plugin(&e) {
-            s.plugin_entries += 1;
+            self.plugin_entries += 1;
         }
-        s.entries.push_back(e);
-        while s.entries.len() > LOG_LIMIT {
-            if s.entries.pop_front().is_some_and(|x| plugin(&x)) {
-                s.plugin_entries = s.plugin_entries.saturating_sub(1);
+        self.entries.push_back(e);
+        while self.entries.len() > LOG_LIMIT {
+            if self.entries.pop_front().is_some_and(|x| plugin(&x)) {
+                self.plugin_entries = self.plugin_entries.saturating_sub(1);
             }
         }
     }
@@ -576,328 +396,40 @@ impl ProjectLog {
     /// Adds `e` as part of the last entry when that is the same command, run well: a step merged
     /// into the last undo step ([`crate::Session::merge_undo`]). The entry keeps when the first
     /// started, takes the last one's parameters, and adds up how long they took.
-    pub fn join_last(&self, mut e: LogEntry) {
-        {
-            let mut s = self.changing();
-            if let Some(last) = s.entries.back_mut().filter(|l| l.ok && l.command == e.command) {
-                e.at = last.at;
-                e.millis = last.millis.saturating_add(e.millis);
-                *last = e;
-                return;
-            }
+    pub fn join_last(&mut self, mut e: LogEntry) {
+        if let Some(last) = self.entries.back_mut().filter(|l| l.ok && l.command == e.command) {
+            e.at = last.at;
+            e.millis = last.millis.saturating_add(e.millis);
+            *last = e;
+            return;
         }
         self.push(e);
     }
 
-    /// Every entry, oldest first (a copy: for tests and small logs; [`ProjectLog::select`] and
-    /// [`ProjectLog::each`] read in place).
-    pub fn entries(&self) -> Vec<LogEntry> {
-        self.state().entries.iter().cloned().collect()
+    /// The entries, oldest first.
+    pub fn entries(&self) -> impl ExactSizeIterator<Item = &LogEntry> {
+        self.entries.iter()
     }
 
     /// The last `limit` entries that `keep` keeps, oldest first, with how many it keeps and how
     /// many there are: only those are copied.
     pub fn select(&self, keep: impl Fn(&LogEntry) -> bool, limit: usize) -> (Vec<LogEntry>, usize, usize) {
-        let s = self.state();
-        let matching: Vec<&LogEntry> = s.entries.iter().filter(|e| keep(e)).collect();
+        let matching: Vec<&LogEntry> = self.entries.iter().filter(|e| keep(e)).collect();
         let tail = matching.get(matching.len().saturating_sub(limit)..).unwrap_or_default().iter().map(|e| (*e).clone()).collect();
-        (tail, matching.len(), s.entries.len())
-    }
-
-    /// Up to `n` entries from the `from`th, oldest first: copied under the log's lock, so the
-    /// caller writes them after letting it go.
-    pub fn chunk(&self, from: usize, n: usize) -> Vec<LogEntry> {
-        self.state().entries.iter().skip(from).take(n).cloned().collect()
+        (tail, matching.len(), self.entries.len())
     }
 
     pub fn len(&self) -> usize {
-        self.state().entries.len()
+        self.entries.len()
     }
 
-    /// No entries (logging may still be off: see [`ProjectLog::nothing_to_save`]).
     pub fn is_empty(&self) -> bool {
-        self.state().entries.is_empty()
-    }
-
-    /// The paths a file's log was saved with relative to its folder (`./data/a.tif`), made
-    /// absolute again from `dir`, the folder it was read from, as the project's sources are; so
-    /// a later Save As elsewhere writes them relative to that folder. Only the texts the save
-    /// made portable (an entry's `relative`) are read as such: one given as relative stays so.
-    pub(crate) fn resolve_paths(&self, dir: &str) {
-        // The folder itself is written as `.`.
-        let word = |p: &str| {
-            if p == "." {
-                return Some(dir.to_string());
-            }
-            (p.starts_with("./") || p.starts_with("../")).then(|| rustgis_map::paths::resolve(dir, p)).flatten()
-        };
-        for e in &mut self.changing().entries {
-            let (pointers, wrote): (Vec<String>, Vec<String>) =
-                std::mem::take(&mut e.relative).into_iter().partition(|r| r.starts_with('/'));
-            // The paths the save wrote, each back to absolute, found whole (spaces and all).
-            let swaps: Vec<(String, String)> = wrote.into_iter().filter_map(|w| word(&w).map(|abs| (w, abs))).collect();
-            if swaps.is_empty() {
-                continue;
-            }
-            for at in &pointers {
-                if let Some(serde_json::Value::String(t)) = at.strip_prefix("/params").and_then(|p| e.params.pointer_mut(p)) {
-                    *t = swapped(t, &swaps);
-                }
-            }
-            if let Some(err) = e.error.as_mut() {
-                *err = swapped(err, &swaps);
-            }
-        }
-    }
-
-    /// Forgets the relative markers of a log read without a folder (`openText`, a package): its
-    /// texts stay as they are, and a save writes them as they are, so a copy saved into a folder
-    /// isn't resolved against that folder later.
-    pub(crate) fn drop_relative(&self) {
-        for e in &mut self.changing().entries {
-            e.relative.clear();
-        }
+        self.entries.is_empty()
     }
 
     /// Empties the log; how many entries it had.
-    pub fn clear(&self) -> usize {
-        let mut s = self.changing();
-        s.plugin_entries = 0;
-        std::mem::take(&mut s.entries).len()
+    pub fn clear(&mut self) -> usize {
+        self.plugin_entries = 0;
+        std::mem::take(&mut self.entries).len()
     }
-
-    /// The log as a project file keeps it, written at the end of `out`, each entry in turn; saved
-    /// into a folder (`dir`), its local paths made portable ([`make_portable`]).
-    fn write_json(&self, out: &mut String, dir: Option<&str>) -> Result<(), String> {
-        // Nothing logged since the last save into the same folder: its text as it was.
-        let written = {
-            let s = self.state();
-            s.written.as_ref().filter(|(g, d, _)| *g == s.generation && d.as_deref() == dir).map(|(_, _, t)| t.clone())
-        };
-        if let Some(text) = written {
-            out.push_str(&text);
-            return Ok(());
-        }
-        // Copied under the lock and written after it is let go, so a command logged meanwhile
-        // (the interface thread, while an autosave writes) doesn't wait on the writing. That copy
-        // is the only one: each entry is made portable in place and written into `out`.
-        let (off, entries, generation) = {
-            let s = self.state();
-            (s.off, s.entries.clone(), s.generation)
-        };
-        let start = out.len();
-        out.push_str(if off { r#"{"off":true,"entries":["# } else { r#"{"entries":["# });
-        for (i, mut e) in entries.into_iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            // Where its paths were made portable: those read back as such (an entry read from a
-            // file that wasn't resolved keeps its own).
-            let mut relative = std::mem::take(&mut e.relative);
-            if let Some(d) = dir {
-                let kept = relative.len();
-                let (params, error) = (e.params.clone(), e.error.clone());
-                portable_entry(&mut e, d, &mut relative, false);
-                // A text that already held, as a word, a relative path this save wrote would read
-                // back with that word made absolute too: the entry's paths are written as their
-                // file names instead, which read back as they are.
-                if collides(&params, error.as_deref(), relative.get(kept..).unwrap_or_default()) {
-                    (e.params, e.error) = (params, error);
-                    relative.truncate(kept);
-                    portable_entry(&mut e, d, &mut relative, true);
-                }
-            }
-            let text = serde_json::to_string(&e).map_err(|e| e.to_string())?;
-            match text.strip_suffix('}').filter(|_| !relative.is_empty()) {
-                Some(open) => {
-                    out.push_str(open);
-                    out.push_str(",\"relative\":");
-                    out.push_str(&serde_json::to_string(&relative).map_err(|e| e.to_string())?);
-                    out.push('}');
-                }
-                None => out.push_str(&text),
-            }
-        }
-        out.push_str("]}");
-        // Kept for the next save, unless something was logged while this one wrote, or the text
-        // is long enough (a log near its limit runs to tens of MB) that holding a second copy of
-        // it until the next change costs more than writing it again.
-        let mut s = self.state();
-        if s.generation == generation && out.len() - start <= WRITTEN_KEPT_BYTES {
-            s.written = Some((generation, dir.map(str::to_string), out.get(start..).unwrap_or("").into()));
-        }
-        Ok(())
-    }
-}
-
-impl<'de> Deserialize<'de> for ProjectLog {
-    /// A file's log, its last [`LOG_LIMIT`] entries ([`LogEntries`]).
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(ProjectLog(std::sync::Arc::new(Mutex::new(LogState::deserialize(d)?))))
-    }
-}
-
-/// A project's saved JSON with its log (#797) as its last member, when there is one to keep. Saved
-/// into a folder (`dir`), the local paths in the log's parameters and errors are written relative
-/// to it, as the project's own sources are, or as their file names where they can't be, so a
-/// project moved with its data keeps no trace of the folder it was in.
-pub(crate) fn with_log(mut text: String, log: &ProjectLog, dir: Option<&str>) -> Result<String, String> {
-    if log.nothing_to_save() || !text.ends_with('}') {
-        return Ok(text);
-    }
-    text.pop();
-    text.push_str(",\"log\":");
-    log.write_json(&mut text, dir)?;
-    text.push('}');
-    Ok(text)
-}
-
-/// `e`'s parameters and error with their local paths made portable, in place, each change noted
-/// in `relative` ([`make_portable`]); as file names only with `names`.
-fn portable_entry(e: &mut LogEntry, dir: &str, relative: &mut Vec<String>, names: bool) {
-    let mut swaps = Vec::new();
-    make_portable(&mut e.params, dir, "/params", 0, names, relative, &mut swaps);
-    if let Some(err) = e.error.as_mut() {
-        // The parameters' paths first, whole (a folder may have spaces in its name), then any
-        // other word that is one.
-        *err = portable_text(&swapped(err, &swaps), dir, names, relative);
-    }
-}
-
-/// Whether reading back what a save noted (`noted`: the pointers of the parameters it changed
-/// and the relative paths it wrote) would change more than it wrote: one of those paths was
-/// already a word of a text read back as such (a changed parameter's, as `params` held it, or
-/// the error).
-fn collides(params: &serde_json::Value, error: Option<&str>, noted: &[String]) -> bool {
-    let (pointers, wrote): (Vec<&String>, Vec<&String>) = noted.iter().partition(|r| r.starts_with('/'));
-    let texts = pointers.iter().filter_map(|p| p.strip_prefix("/params").and_then(|p| params.pointer(p))?.as_str()).chain(error);
-    // `swapped` changes a text only where the path stands as a word of it.
-    texts.into_iter().any(|t| wrote.iter().any(|w| swapped(t, &[((*w).clone(), String::new())]) != t))
-}
-
-/// `v`'s texts with their local paths made portable ([`portable_text`]; as file names only with
-/// `names`), in place; each one changed noted in `changed` by its JSON pointer, `at` being `v`'s,
-/// and each whole-text path in `swaps`, as it was and as it is written.
-fn make_portable(
-    v: &mut serde_json::Value,
-    dir: &str,
-    at: &str,
-    depth: usize,
-    names: bool,
-    changed: &mut Vec<String>,
-    swaps: &mut Vec<(String, String)>,
-) {
-    use serde_json::Value;
-    match v {
-        Value::String(t) => {
-            let portable = portable_text(t, dir, names, changed);
-            if portable != *t {
-                if one_path(t) {
-                    swaps.push((t.clone(), portable.clone()));
-                }
-                *t = portable;
-                changed.push(at.to_string());
-            }
-        }
-        Value::Array(a) if depth < 16 => {
-            for (i, x) in a.iter_mut().enumerate() {
-                make_portable(x, dir, &format!("{at}/{i}"), depth + 1, names, changed, swaps);
-            }
-        }
-        Value::Object(o) if depth < 16 => {
-            for (k, x) in o.iter_mut() {
-                make_portable(x, dir, &format!("{at}/{}", k.replace('~', "~0").replace('/', "~1")), depth + 1, names, changed, swaps);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// `t` with each text of `swaps` that is a word of its own (from the text's start or a space,
-/// quote or bracket, to its end or a space, quote, bracket or punctuation) as its other half,
-/// the longest first: a path with spaces in it, known whole.
-fn swapped(t: &str, swaps: &[(String, String)]) -> String {
-    let mut swaps: Vec<&(String, String)> = swaps.iter().filter(|(from, _)| !from.is_empty()).collect();
-    swaps.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
-    let mut t = t.to_string();
-    for (from, to) in swaps {
-        let mut out = String::with_capacity(t.len());
-        let mut rest = t.as_str();
-        while let Some(at) = rest.find(from.as_str()) {
-            out.push_str(rest.get(..at).unwrap_or(""));
-            let starts = out.chars().next_back().is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '(' | '['));
-            rest = rest.get(at + from.len()..).unwrap_or("");
-            let ends = rest.chars().next().is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ')' | ']' | ',' | ';' | ':'));
-            out.push_str(if starts && ends { to } else { from });
-        }
-        out.push_str(rest);
-        t = out;
-    }
-    t
-}
-
-/// `t` with each absolute local path in it (the whole text, or a word of it, quotes and trailing
-/// punctuation aside) relative to `dir`, or its file name where it can't be or with `names`;
-/// each relative path written noted in `wrote` (once), for reading to make absolute again.
-fn portable_text(t: &str, dir: &str, names: bool, wrote: &mut Vec<String>) -> String {
-    let made = std::cell::RefCell::new(Vec::new());
-    let portable = |p: &str| {
-        let name = || last_name(p).to_string();
-        if names {
-            return name();
-        }
-        let r = rustgis_map::paths::relative_to(dir, p).filter(|r| rustgis_map::paths::is_local(r)).unwrap_or_else(name);
-        made.borrow_mut().push(r.clone());
-        r
-    };
-    let out = if one_path(t) { portable(t) } else { path_words(t, |p| rustgis_map::paths::is_absolute_local(p).then(|| portable(p))) };
-    for r in made.into_inner() {
-        if (r == "." || r.starts_with("./") || r.starts_with("../")) && !wrote.contains(&r) {
-            wrote.push(r);
-        }
-    }
-    out
-}
-
-/// The last part of path `p`, its file's name, or its folder's for one that ends in a separator
-/// (`/data/My Data/`); the root as it is.
-pub(crate) fn last_name(p: &str) -> &str {
-    p.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().filter(|n| !n.is_empty()).unwrap_or(p)
-}
-
-/// Whether `t` is one absolute local path as a whole (spaces in its folders' names and all), not
-/// a text that starts with one: no other word of it is a path, and no `: ` follows the first
-/// (`/data/a.tif: not found`). The root alone (`/`) is no file's path.
-fn one_path(t: &str) -> bool {
-    let path_word = |w: &str| {
-        let core = word_core(w);
-        core.get(1..).is_some_and(|r| r.contains(['/', '\\'])) && rustgis_map::paths::is_absolute_local(core)
-    };
-    t.len() > 1
-        && rustgis_map::paths::is_absolute_local(t)
-        && (!t.contains(char::is_whitespace) || (!t.contains(": ") && !t.split_whitespace().skip(1).any(path_word)))
-}
-
-/// A word without the quotes, brackets and trailing `,`, `;` or `:` around it.
-fn word_core(word: &str) -> &str {
-    let core = word.trim_end().trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']' | ',' | ';'));
-    core.strip_suffix(':').unwrap_or(core)
-}
-
-/// `t` with each word (quotes, brackets, a trailing `,`, `;` or `:` aside) replaced by what `f`
-/// makes of it, where `f` gives something: how a path among a text's words is found when it is
-/// made portable on saving. Only a word with a separator past its first character is tried
-/// (`/data/a.tif`, `C:\a.tif`, `./a.tif`): a division's `/` or a `/home` among other words is
-/// left as written.
-fn path_words(t: &str, f: impl Fn(&str) -> Option<String>) -> String {
-    t.split_inclusive(char::is_whitespace)
-        .map(|word| {
-            let core = word_core(word);
-            let path_like = core.get(1..).is_some_and(|r| r.contains(['/', '\\']));
-            match path_like.then(|| f(core)).flatten() {
-                Some(new) => word.replacen(core, &new, 1),
-                None => word.to_string(),
-            }
-        })
-        .collect()
 }

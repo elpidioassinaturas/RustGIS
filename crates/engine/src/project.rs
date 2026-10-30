@@ -10,8 +10,6 @@ use rustgis_map::Map;
 use serde::{Deserialize, Serialize};
 
 use crate::GpRecord;
-use crate::project_log::with_log;
-pub use crate::project_log::{LOG_ERROR_CHARS, LOG_LIMIT, LOG_LIST_ITEMS, LOG_PARAMS_BYTES, LogEntry, ProjectLog};
 
 /// A map export cannot keep runtime-only download reservations, even in a larger project.
 pub(crate) fn ensure_map_imports_complete(map: &Map) -> Result<(), String> {
@@ -123,8 +121,6 @@ fn identity(text: &str) -> (usize, u64) {
     (text.len(), KEY.get_or_init(RandomState::new).hash_one(text.as_bytes()))
 }
 
-/// A project. A clone shares its log ([`ProjectLog`]), as the undo snapshots that are clones of
-/// it must; a copy that is a project of its own (a template) is made with [`Project::own_copy`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     #[serde(default = "format")]
@@ -192,13 +188,6 @@ pub struct Project {
     pub shared: Vec<crate::cmd::sharing::SharedItem>,
     #[serde(default)]
     pub data_stores: Vec<crate::cmd::sharing::DataStore>,
-    /// Every command run on the project (#797), outside its undo history: see [`ProjectLog`].
-    /// Read from the file, and written only by [`Project::saved_text`] and the autosaved
-    /// [`Project::recovery_text`] (left out while it is empty and on, so a project that never
-    /// logged saves as before): the project's own JSON (undo checks, comparisons, packages)
-    /// doesn't carry it.
-    #[serde(default, skip_serializing)]
-    pub log: ProjectLog,
 }
 
 /// A standalone table: a dataset without geometry, under an id that stays with it. Names can
@@ -442,14 +431,6 @@ pub(crate) fn resolve_file_paths<'a>(dir: &str, paths: impl IntoIterator<Item = 
 }
 
 impl Project {
-    /// A copy that is a project of its own, with a log of its own: a clone would write into
-    /// this project's.
-    pub fn own_copy(&self) -> Project {
-        let mut p = self.clone();
-        p.log = ProjectLog::default();
-        p
-    }
-
     fn file_paths_mut(&mut self) -> Vec<(&mut String, bool)> {
         let mut paths = Vec::new();
         for map in &mut self.maps {
@@ -470,7 +451,6 @@ impl Project {
 
     fn resolve_paths(&mut self, dir: &str) {
         resolve_file_paths(dir, self.file_paths_mut());
-        self.log.resolve_paths(dir);
     }
 
     pub fn new(name: impl Into<String>) -> Self {
@@ -500,7 +480,6 @@ impl Project {
             dl_models: Vec::new(),
             shared: Vec::new(),
             data_stores: Vec::new(),
-            log: ProjectLog::default(),
         }
     }
 
@@ -794,12 +773,7 @@ impl Project {
         } else {
             Vec::new()
         };
-        let text = serde_json::to_string(self).map_err(|e| e.to_string()).and_then(|t| {
-            let bare = t.len();
-            let t = with_log(t, &self.log, dir.and_then(Path::to_str))?;
-            log_fits(bare, t.len())?;
-            Ok(t)
-        });
+        let text = serde_json::to_string(self).map_err(|e| e.to_string());
         if !originals.is_empty() {
             for ((p, _), original) in self.file_paths_mut().into_iter().zip(originals) {
                 if let Some(original) = original {
@@ -851,8 +825,7 @@ impl Project {
             map.tiles.retain(|tile| !tile.id.starts_with("geolibre-pending:"));
         }
         strip_addresses(self.addresses_mut());
-        // With its log (#797), its paths as the open project holds them.
-        let text = serde_json::to_string(&self).map_err(|e| e.to_string()).and_then(|t| with_log(t, &self.log, None))?;
+        let text = serde_json::to_string(&self).map_err(|e| e.to_string())?;
         if text.len() as u64 > MAX_BYTES {
             return Err("the project is too large to keep a recovery copy".into());
         }
@@ -885,11 +858,8 @@ impl Project {
     }
 
     /// Reads imported JSON (including package contents) without restoring a saved file's secrets.
-    /// A template or a package starts a log of its own (#797), whatever log its file holds.
     pub(crate) fn from_import_json(text: &str, dir: Option<&Path>) -> Result<Project, String> {
-        let mut p = Self::read_json(text, false, dir)?;
-        p.log = ProjectLog::default();
-        Ok(p)
+        Self::read_json(text, false, dir)
     }
 
     fn read_json(text: &str, restore: bool, dir: Option<&Path>) -> Result<Project, String> {
@@ -909,8 +879,6 @@ impl Project {
         crate::s3_connections::clear_bindings(p.addresses_mut());
         if let Some(d) = dir.and_then(Path::to_str) {
             p.resolve_paths(d);
-        } else {
-            p.log.drop_relative();
         }
         p.normalize();
         Ok(p)
@@ -954,18 +922,4 @@ fn unique_names<'a>(names: impl Iterator<Item = &'a mut String>) {
             }
         }
     }
-}
-
-/// Refuses a project text that its log (#797) takes past [`MAX_BYTES`], which would save but not
-/// open again; `bare` is the text's length without the log. A project over it by itself is not
-/// the log's doing, and saves as before.
-pub(crate) fn log_fits(bare: usize, with_log: usize) -> Result<(), String> {
-    if bare as u64 > MAX_BYTES || with_log as u64 <= MAX_BYTES {
-        return Ok(());
-    }
-    Err(format!(
-        "with its log the project comes to {} MB, more than a project file opens with ({} MB): export the log (project.exportLog), then clear it (project.clearLog)",
-        with_log.div_ceil(1 << 20),
-        MAX_BYTES >> 20
-    ))
 }
