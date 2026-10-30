@@ -342,6 +342,14 @@ pub struct LogEntry {
     pub millis: u64,
 }
 
+impl LogEntry {
+    /// When it started, as `2026-10-30 14:05:09` (UTC).
+    pub fn time_utc(&self) -> String {
+        let (date, time) = rustgis_map::graphics::civil(self.at / 1000);
+        format!("{date} {time}:{:02}", (self.at / 1000) % 60)
+    }
+}
+
 /// The session's log (#797): one entry for each command run in the session, from any front end
 /// and in whatever project was open, oldest first. It sits outside the project and its undo
 /// history: undoing a command doesn't take its entry back, and saving, sharing or packaging a
@@ -427,9 +435,46 @@ impl SessionLog {
         self.entries.is_empty()
     }
 
+    /// Writes the log to `w`, oldest first: as CSV (`csv`: a header, then one row an entry, a
+    /// readable UTC time first and the parameters as a JSON column) or as JSON Lines (one entry a
+    /// line). Entry by entry, so a long log isn't held as text first.
+    pub fn write(&self, w: &mut dyn std::io::Write, csv: bool) -> std::io::Result<()> {
+        if csv {
+            w.write_all(b"time_utc,at,command,ok,millis,error,params\n")?;
+        }
+        self.entries.iter().try_for_each(|e| write_entry(w, e, csv))
+    }
+
     /// Empties the log; how many entries it had.
     pub fn clear(&mut self) -> usize {
         self.plugin_entries = 0;
         std::mem::take(&mut self.entries).len()
+    }
+}
+
+/// A CSV cell: quoted, and kept from being read as a formula where it starts as one does (`=`,
+/// `+`, `-`, `@`, or a tab or carriage return before them), as spreadsheets would.
+fn csv_cell(t: &str) -> String {
+    let lead = if t.starts_with(['=', '+', '-', '@', '\t', '\r']) { "'" } else { "" };
+    format!("\"{lead}{}\"", t.replace('"', "\"\""))
+}
+
+/// Entry `e` as a CSV row (`csv`) or a JSON line, written to `w`.
+fn write_entry(w: &mut dyn std::io::Write, e: &LogEntry, csv: bool) -> std::io::Result<()> {
+    if csv {
+        writeln!(
+            w,
+            "{},{},{},{},{},{},{}",
+            e.time_utc(),
+            e.at,
+            csv_cell(&e.command),
+            e.ok,
+            e.millis,
+            csv_cell(e.error.as_deref().unwrap_or("")),
+            csv_cell(&e.params.to_string())
+        )
+    } else {
+        serde_json::to_writer(&mut *w, e).map_err(std::io::Error::other)?;
+        w.write_all(b"\n")
     }
 }
