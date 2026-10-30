@@ -3196,6 +3196,10 @@ fn swap_geometry(g: &mut serde_json::Value, depth: usize) {
     if depth > 8 {
         return;
     }
+    // A box written in the old order would be wrong after the turn; it is optional, so it goes.
+    if let Some(o) = g.as_object_mut() {
+        o.remove("bbox");
+    }
     if let Some(c) = g.get_mut("coordinates") {
         swap_positions(c, 0);
     }
@@ -3207,7 +3211,8 @@ fn swap_geometry(g: &mut serde_json::Value, depth: usize) {
 }
 
 /// A service's GeoJSON answer with latitude-first coordinates turned round to longitude first, and
-/// its `crs` dropped; `None` when it is left as it came.
+/// its `crs` and boxes (`bbox`, on the answer, its features and geometries) dropped; `None` when it
+/// is left as it came.
 ///
 /// The data decide, not the `crs` name: GeoServer names longitude-first answers
 /// `urn:ogc:def:crs:EPSG::4326`, and deegree's one latitude-first answer has no `crs` at all
@@ -3222,12 +3227,16 @@ pub fn fix_axes(bytes: &[u8], bounds: Option<[f64; 4]>) -> Option<Vec<u8>> {
         return None;
     }
     let mut v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    if let Some(o) = v.as_object_mut() {
-        o.remove("crs");
-    }
+    // A GeoJSON answer is one object; anything else (a list of features) is left as it came.
+    let o = v.as_object_mut()?;
+    o.remove("crs");
+    o.remove("bbox");
     match v.get("type").and_then(|t| t.as_str()) {
         Some("FeatureCollection") => {
             for f in v.get_mut("features").and_then(|f| f.as_array_mut()).into_iter().flatten() {
+                if let Some(f) = f.as_object_mut() {
+                    f.remove("bbox");
+                }
                 if let Some(g) = f.get_mut("geometry") {
                     swap_geometry(g, 0);
                 }
@@ -3581,6 +3590,14 @@ mod tests {
         let named = br#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[53.55,9.99]}}],"crs":{"type":"name","properties":{"name":"urn:ogc:def:crs:EPSG::4326"}}}"#;
         let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(named, hamburg).unwrap()).unwrap();
         assert!(fixed.get("crs").is_none());
+        // Boxes in the latitude-first order are dropped with it: the answer's, a feature's and a
+        // geometry's, within a collection too.
+        let boxed = br#"{"type":"FeatureCollection","bbox":[53.55,9.99,53.6,10.1],"features":[{"type":"Feature","bbox":[53.55,9.99,53.6,10.1],"properties":{"bbox":"kept"},"geometry":{"type":"GeometryCollection","bbox":[53.55,9.99,53.6,10.1],"geometries":[{"type":"LineString","bbox":[53.55,9.99,53.6,10.1],"coordinates":[[53.55,9.99],[53.6,10.1]]}]}}]}"#;
+        let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(boxed, hamburg).unwrap()).unwrap();
+        for at in ["", "/features/0", "/features/0/geometry", "/features/0/geometry/geometries/0"] {
+            assert!(fixed.pointer(at).unwrap().get("bbox").is_none(), "{at}");
+        }
+        assert_eq!(fixed.pointer("/features/0/properties/bbox").unwrap(), "kept");
         // A lone feature and a bare geometry.
         let feature = br#"{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[53.55,9.99]}}"#;
         let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(feature, hamburg).unwrap()).unwrap();
@@ -3607,6 +3624,9 @@ mod tests {
         // Nothing to judge from: no features, not JSON.
         assert!(fix_axes(br#"{"type":"FeatureCollection","features":[]}"#, hamburg).is_none());
         assert!(fix_axes(b"urn:ogc:def:crs:EPSG::4326 not json", hamburg).is_none());
+        // A list of features isn't a GeoJSON answer: judged, but left as it came.
+        let listed = br#"[{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[53.55,9.99]}}]"#;
+        assert!(fix_axes(listed, hamburg).is_none());
         // Positions under arrays nested deeper than a GeoJSON answer goes aren't read.
         let deep = format!("{}{{\"type\":\"Point\",\"coordinates\":[53.55,9.99]}}{}", "[".repeat(20), "]".repeat(20));
         assert!(fix_axes(deep.as_bytes(), hamburg).is_none());
