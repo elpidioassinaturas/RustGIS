@@ -3234,8 +3234,8 @@ pub fn fix_axes(bytes: &[u8], bounds: Option<[f64; 4]>) -> Option<Vec<u8>> {
     match v.get("type").and_then(|t| t.as_str()) {
         Some("FeatureCollection") => {
             for f in v.get_mut("features").and_then(|f| f.as_array_mut()).into_iter().flatten() {
-                if let Some(f) = f.as_object_mut() {
-                    f.remove("bbox");
+                if let Some(obj) = f.as_object_mut() {
+                    obj.remove("bbox");
                 }
                 if let Some(g) = f.get_mut("geometry") {
                     swap_geometry(g, 0);
