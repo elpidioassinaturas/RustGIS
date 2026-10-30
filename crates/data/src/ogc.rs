@@ -3598,10 +3598,16 @@ mod tests {
             assert!(fixed.pointer(at).unwrap().get("bbox").is_none(), "{at}");
         }
         assert_eq!(fixed.pointer("/features/0/properties/bbox").unwrap(), "kept");
+        assert_eq!(
+            fixed.pointer("/features/0/geometry/geometries/0/coordinates").unwrap(),
+            &serde_json::json!([[9.99, 53.55], [10.1, 53.6]])
+        );
         // A lone feature and a bare geometry.
-        let feature = br#"{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[53.55,9.99]}}"#;
+        let feature =
+            br#"{"type":"Feature","bbox":[53.55,9.99,53.55,9.99],"properties":{},"geometry":{"type":"Point","coordinates":[53.55,9.99]}}"#;
         let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(feature, hamburg).unwrap()).unwrap();
         assert_eq!(fixed.pointer("/geometry/coordinates").unwrap(), &serde_json::json!([9.99, 53.55]));
+        assert!(fixed.get("bbox").is_none());
         let geometry = br#"{"type":"Point","coordinates":[53.55,9.99,12.5]}"#;
         let fixed: serde_json::Value = serde_json::from_slice(&fix_axes(geometry, hamburg).unwrap()).unwrap();
         assert_eq!(fixed.pointer("/coordinates").unwrap(), &serde_json::json!([9.99, 53.55, 12.5]));
