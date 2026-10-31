@@ -2888,7 +2888,11 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     };
     let info = cog::info_blocking(url).map_err(named)?;
     let layout = &info.layout;
-    if layout.transform.pixel_height > 0.0 || layout.transform.pixel_width < 0.0 {
+    let (pw, ph) = (layout.transform.pixel_width, layout.transform.pixel_height);
+    if !(pw.is_finite() && ph.is_finite() && pw != 0.0 && ph != 0.0) {
+        return Err(named("its header gives no pixel size, so no window can be placed in it".into()));
+    }
+    if ph > 0.0 || pw < 0.0 {
         return Err(named("it isn't stored north up, which a window doesn't read yet".into()));
     }
     // The box in the file's coordinates: its edges, each at 32 points, as a projected file bends them.
@@ -2974,10 +2978,16 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     if let Some(described) = &layout.described {
         r.apply_pam(described);
     }
-    // Kept in the project as a GeoTIFF of the window (a cloud-optimised one keeps a colour table).
-    let bytes = rustgis_data::raster::cogwrite::write(&r, 0)
-        .or_else(|_| rustgis_data::raster::geotiff::write(&r, 0))
-        .map_err(|e| named(e.to_string()))?;
+    // Kept in the project as a GeoTIFF of the window: a cloud-optimised one, which keeps a colour
+    // table; one it can't write (a palette with no index left for no-data) is kept plain, and said so.
+    let bytes = match rustgis_data::raster::cogwrite::write(&r, 0) {
+        Ok(bytes) => bytes,
+        Err(why) => {
+            let bytes = rustgis_data::raster::geotiff::write(&r, 0).map_err(|e| named(e.to_string()))?;
+            s.notify(format!("{name}: kept in the project as a plain GeoTIFF, without a colour table ({why})"), false);
+            bytes
+        }
+    };
     let (width, height, size) = (r.width, r.height, size_of(lv));
     let layer = rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes);
     let mut out = super::raster::add_raster(s, &name, layer)?;
@@ -3021,7 +3031,8 @@ fn window_box(s: &Session, p: &Value) -> Result<[f64; 4], String> {
         }
         _ => return Err(NEED.into()),
     };
-    if w < e && so < n && (-90.0..=90.0).contains(&so) && (-90.0..=90.0).contains(&n) { Ok([w, so, e, n]) } else { Err(NEED.into()) }
+    let (lon, lat) = (|x: f64| (-180.0..=180.0).contains(&x), |y: f64| (-90.0..=90.0).contains(&y));
+    if w < e && so < n && lon(w) && lon(e) && lat(so) && lat(n) { Ok([w, so, e, n]) } else { Err(NEED.into()) }
 }
 
 /// A GeoTIFF's name from its address: the file name without its extension, or for a dated

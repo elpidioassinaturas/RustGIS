@@ -1187,8 +1187,9 @@ pub fn write(r: &Raster, band: usize) -> Result<Vec<u8>> {
             .then(|| band.data.iter().map(|v| if r.is_valid(*v) { v.clamp(0.0, 255.0) as u8 } else { nodata.unwrap_or(0) }).collect())
     };
     let rgb = matches!(r.color, ColorHint::Rgb { .. }) && r.bands.len() >= 3;
-    // A grey band's class names, in GDAL's metadata tag, read back on open.
-    let classes = r.bands.get(band).filter(|_| !rgb).and_then(|b| super::pam::class_metadata(&b.classes));
+    // The class names of the band written first (the red one of a colour file), in GDAL's
+    // metadata tag, read back on open as band 1's.
+    let classes = r.bands.get(if rgb { 0 } else { band }).and_then(|b| super::pam::class_metadata(&b.classes));
     macro_rules! tags {
         ($img:expr) => {{
             let e = $img.encoder();

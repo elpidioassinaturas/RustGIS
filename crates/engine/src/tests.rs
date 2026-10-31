@@ -22049,6 +22049,7 @@ fn a_cog_window_comes_in_as_a_raster() {
         (json!([10.5, 45.5, 10.25, 45.75]), "bbox is"),
         (json!([10, 45, 11]), "bbox is"),
         (json!("everywhere"), "bbox is"),
+        (json!([10.0, 45.0, 500.0, 46.0]), "bbox is"),
     ] {
         let e = s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "bbox": bbox})).unwrap_err();
         assert!(e.contains(want), "{e}");
@@ -22075,6 +22076,10 @@ fn a_cog_window_comes_in_as_a_raster() {
     assert_eq!(r["zoomed"], true, "{r}");
     let c = rustgis_geom::merc_to_lonlat(s.map().camera.center);
     assert!((c.x - 10.375).abs() < 0.05 && (c.y - 45.625).abs() < 0.05, "{c:?}");
+    // Framed, not only centred: the view takes the window in and is not much wider.
+    let v = crate::cmd::workspace::view_extent(&s);
+    assert!(v.min_x <= 10.25 && v.max_x >= 10.5 && v.min_y <= 45.5 && v.max_y >= 45.75, "{v:?}");
+    assert!(v.width() < 1.0 && v.height() < 1.0, "{v:?}");
     // Each band is read: two bands, and no colour table for them.
     let (two, _) = serve_ranges(example_with(&Example { size: 512, tile: 256, bands: 2, ..Example::default() }));
     s.run("layer.addUrl", &json!({"url": format!("{two}/two.tif"), "bbox": [10.0, 45.0, 10.5, 45.5], "name": "Two"})).unwrap();
