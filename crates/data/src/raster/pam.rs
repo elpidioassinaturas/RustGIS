@@ -167,12 +167,10 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
     let mut pam = Pam::default();
     // What is left out or cut, counted.
     let (mut odd_bands, mut twice, mut cut) = (0usize, 0usize, 0usize);
-    let mut text = |item: roxmltree::Node| {
+    // An item's text, and whether it is longer than is kept (counted only once it is kept).
+    let text = |item: roxmltree::Node| {
         let t = item.text().map(str::trim).filter(|d| !d.is_empty())?;
-        if t.chars().nth(MAX_NAME).is_some() {
-            cut += 1;
-        }
-        Some(t.chars().take(MAX_NAME).collect::<String>())
+        Some((t.chars().take(MAX_NAME).collect::<String>(), t.chars().nth(MAX_NAME).is_some()))
     };
     // The bands described so far, so a long document isn't searched again for each item.
     let mut seen = std::collections::HashSet::new();
@@ -182,7 +180,7 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
             .and_then(|v| v.trim().parse::<usize>().ok())
             .and_then(|s| s.checked_add(1))
             .filter(|n| *n <= MAX_BANDS);
-        let Some(description) = text(item) else { continue };
+        let Some((description, long)) = text(item) else { continue };
         let Some(band) = band else {
             odd_bands += 1;
             continue;
@@ -190,6 +188,7 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
         // A band's first description, if it is given twice.
         if seen.insert(band) {
             pam.bands.push(PamBand { band, description: Some(description), ..PamBand::default() });
+            cut += usize::from(long);
         } else {
             twice += 1;
         }
@@ -199,7 +198,7 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
     for item in root.children().filter(|n| n.has_tag_name("Item") && n.attribute("sample").is_none() && n.attribute("role").is_none()) {
         // Other dataset items (AREA_OR_POINT, a file's own keys) aren't class names.
         let Some(value) = item.attribute("name").and_then(|n| n.strip_prefix("CLASS_")) else { continue };
-        let Some(name) = text(item) else { continue };
+        let Some((name, long)) = text(item) else { continue };
         let Some(value) = value.parse::<usize>().ok().filter(|v| *v < MAX_CATEGORIES) else {
             odd_classes += 1;
             continue;
@@ -208,7 +207,10 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
             classes.resize(value + 1, String::new());
         }
         match classes.get_mut(value).filter(|s| s.is_empty()) {
-            Some(slot) => *slot = name,
+            Some(slot) => {
+                *slot = name;
+                cut += usize::from(long);
+            }
             None => twice += 1,
         }
     }
@@ -237,6 +239,8 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
 /// it back: each named band's description (`sample` from 0, in the order given), and the first
 /// band's classes as dataset items `CLASS_<value>`. `None` when there is nothing to say. Names
 /// are written whole, in plain ASCII (other characters as XML references), as the tag's type is.
+/// A character XML can't hold (a control character other than a tab or a line break) is written
+/// as a space: names read from GDAL's metadata never hold one, since XML can't.
 pub fn gdal_metadata(descriptions: &[Option<&str>], classes: &[String]) -> Option<String> {
     let mut items = String::new();
     let mut put = |open: String, name: &str| {
@@ -247,6 +251,7 @@ pub fn gdal_metadata(descriptions: &[Option<&str>], classes: &[String]) -> Optio
                 '<' => items.push_str("&lt;"),
                 '>' => items.push_str("&gt;"),
                 c if c.is_ascii() && !c.is_ascii_control() => items.push(c),
+                c if (c < ' ' && !matches!(c, '\t' | '\n' | '\r')) || matches!(c, '\u{FFFE}' | '\u{FFFF}') => items.push(' '),
                 c => items.push_str(&format!("&#{};", u32::from(c))),
             }
         }
@@ -280,6 +285,9 @@ mod tests {
         assert!(pam.band(2).is_none() && pam.lost.is_empty(), "{pam:?}");
         // Nothing named, no document.
         assert_eq!(gdal_metadata(&[None, Some(" ")], &[String::new(), " ".into()]), None);
+        // A character XML can't hold is written as a space, so the document still reads.
+        let xml = gdal_metadata(&[Some("a\u{1}b")], &[]).unwrap();
+        assert_eq!(parse_gdal_metadata(&xml).unwrap().band(1).unwrap().description.as_deref(), Some("a b"));
     }
 
     #[test]
@@ -289,8 +297,9 @@ mod tests {
             parse_gdal_metadata(r#"<GDALMetadata><Item name="CLASS_1">Forest</Item><Item name="AREA_OR_POINT">Area</Item></GDALMetadata>"#);
         assert!(clean.unwrap().lost.is_empty());
         let long = "x".repeat(300);
+        // The long name on an item left out is counted as left out, not as cut too.
         let xml = format!(
-            r#"<GDALMetadata><Item name="CLASS_1">Forest</Item><Item name="CLASS_1">Woods</Item><Item name="CLASS_70000">Far</Item><Item name="CLASS_x">Odd</Item><Item name="CLASS_2">{long}</Item><Item name="DESCRIPTION" sample="x" role="description">Odd</Item></GDALMetadata>"#
+            r#"<GDALMetadata><Item name="CLASS_1">Forest</Item><Item name="CLASS_1">Woods</Item><Item name="CLASS_70000">Far</Item><Item name="CLASS_x">Odd</Item><Item name="CLASS_2">{long}</Item><Item name="DESCRIPTION" sample="x" role="description">{long}</Item></GDALMetadata>"#
         );
         let pam = parse_gdal_metadata(&xml).unwrap();
         assert_eq!(pam.band(1).unwrap().categories[1], "Forest");

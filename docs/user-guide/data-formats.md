@@ -128,7 +128,8 @@ tile), without a STAC catalogue:
 - A window holds 64 million values at most, all bands together (256 MB), and 4,096 of the file's
   tiles a band. A window over the first limit is refused, naming the cell size that fits when an
   overview does, or asking for a smaller box; one over the second asks for a coarser level or a
-  smaller box. Tiles are waited for up to two minutes for each band.
+  smaller box. Tiles are waited for up to two minutes for each band. A window near the limit
+  takes several hundred MB of memory while it is read and kept.
 - The file's no-data, colour table (a palette file draws in its colours) and band names come
   with it, and class names given as `CLASS_<value>` items in GDAL's metadata tag, as the MapBiomas
   files on Source Cooperative give theirs.

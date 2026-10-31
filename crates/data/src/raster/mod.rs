@@ -261,6 +261,9 @@ pub struct Raster {
     /// `false` for a scan (a TIFF with no GeoTIFF tags, a PNG, a JPEG): `transform` is then only
     /// a stand-in until the picture is placed or georeferenced, and says nothing about the ground.
     pub georeferenced: bool,
+    /// What reading it left out or cut (a colour table, names), one line a kind with a count,
+    /// for whoever adds it to the map to say (AGENTS.md, Never silent). Empty when read whole.
+    pub lost: Vec<String>,
     transformer: Transformer,
     extent: Extent,
 }
@@ -326,6 +329,7 @@ impl Raster {
             source: None,
             overview: None,
             georeferenced: true,
+            lost: Vec::new(),
             transformer,
             extent: Extent::EMPTY,
         };
@@ -341,6 +345,16 @@ impl Raster {
     /// and its statistics stand in for those of a reduced overview (the whole band's, where the
     /// overview's only approximate them).
     pub fn apply_pam(&mut self, pam: &pam::Pam) {
+        self.lost.extend(pam.lost.iter().map(|l| format!("its GDAL metadata: {l}")));
+        // Names for bands the raster doesn't have have nowhere to go.
+        let beyond = pam
+            .bands
+            .iter()
+            .filter(|b| (b.band == 0 || b.band > self.bands.len()) && (b.description.is_some() || !b.categories.is_empty()))
+            .count();
+        if beyond > 0 {
+            self.lost.push(format!("names for {beyond} band(s) it doesn't have (it has {}) left out", self.bands.len()));
+        }
         let mut recompute = false;
         if self.nodata.is_none() {
             self.nodata = pam.nodata();
@@ -953,6 +967,13 @@ pub(crate) mod tests {
             assert_eq!(b.class_name(v), None, "{v}");
         }
         assert!(small().bands[0].classes.is_empty(), "no sidecar, no names");
+        // Names for a band the raster doesn't have are said, not dropped.
+        let mut one = small();
+        one.apply_pam(&pam::Pam {
+            bands: vec![pam::PamBand { band: 2, description: Some("NIR".into()), ..Default::default() }],
+            ..Default::default()
+        });
+        assert!(one.lost.iter().any(|l| l.contains("names for 1 band(s) it doesn't have")), "{:?}", one.lost);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

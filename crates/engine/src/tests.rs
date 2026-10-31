@@ -22060,6 +22060,10 @@ fn a_cog_window_comes_in_as_a_raster() {
         .run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "bbox": [10, 45, 11, 46], "crs": "EPSG:3857", "x": "lon"}))
         .unwrap_err();
     assert!(e.contains("doesn't read x, crs"), "{e}");
+    let e = s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "cellSize": 100})).unwrap_err();
+    assert!(e.contains("\"cellSize\" goes with \"bbox\""), "{e}");
+    let e = s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "bbox": [10, 45, 11, 46], "dates": ["2024"]})).unwrap_err();
+    assert!(e.contains("doesn't read dates"), "{e}");
     let e = s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "bbox": [10, 45, 11, 46], "cellSize": 0})).unwrap_err();
     assert!(e.contains("cellSize"), "{e}");
     // A window over the most values (300,000 under test) is refused, naming the overview that

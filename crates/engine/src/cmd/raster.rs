@@ -347,11 +347,16 @@ pub fn add_raster(s: &mut Session, name: &str, mut layer: RasterLayer) -> CmdRes
         unique = format!("{name} ({i})");
     }
     let (w, h, n, overview) = layer.data.as_ref().map(|d| (d.width, d.height, d.band_count(), d.overview)).unwrap_or_default();
+    // What reading it left out (a colour table, names), said once the layer has its name.
+    let lost = layer.data.as_ref().map(|d| d.lost.clone()).unwrap_or_default();
     let empty_before = s.map().layers.is_empty();
     let id = s.map_mut().add_raster(unique.clone(), layer);
     s.active_layer = Some(id);
     if let Some((fw, fh)) = overview {
         s.notify(format!("{unique}: showing a {w} × {h} overview of the {fw} × {fh} raster"), false);
+    }
+    for l in lost {
+        s.notify(format!("{unique}: {l}"), false);
     }
     if empty_before && let Some(e) = s.map().layer(id).map(|l| l.extent()) {
         s.zoom_to(&e);

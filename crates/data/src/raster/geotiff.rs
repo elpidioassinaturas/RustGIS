@@ -1189,7 +1189,16 @@ pub fn write(r: &Raster, band: usize) -> Result<Vec<u8>> {
     let rgb = matches!(r.color, ColorHint::Rgb { .. }) && r.bands.len() >= 3;
     // The written bands' names and the first one's class names (the red band's, for a colour
     // file), in GDAL's metadata tag, read back on open.
-    let written: Vec<usize> = if rgb { (0..r.bands.len().min(4)).collect() } else { vec![band] };
+    // The samples each branch below writes: colour bytes with alpha when a fourth band fits
+    // bytes, colour floats with alpha when the raster says it has one, else the one band.
+    let four = |alpha: bool| (0..if r.bands.len() >= 4 && alpha { 4 } else { 3 }).collect::<Vec<usize>>();
+    let written: Vec<usize> = if !rgb {
+        vec![band]
+    } else if (0..3).all(|b| fits_bytes(r, b)) {
+        four(fits_bytes(r, 3))
+    } else {
+        four(matches!(r.color, ColorHint::Rgb { alpha: true }))
+    };
     let names: Vec<Option<&str>> = written.iter().map(|b| super::band_name_of(r, *b)).collect();
     let first = r.bands.get(written[0]).map_or(&[][..], |b| &b.classes[..]);
     let classes = super::pam::gdal_metadata(&names, first);
@@ -1949,6 +1958,22 @@ mod tests {
         // Without the tag, the band keeps its number.
         let plain = read(std::io::Cursor::new(grey8(2, 2, &[1, 2, 3, 4], None)), "plain").unwrap();
         assert_ne!(plain.bands[0].name, "NDVI 2024-06-01");
+    }
+
+    #[test]
+    fn what_a_files_metadata_leaves_out_is_kept_to_be_said() {
+        use crate::raster::cog::{Example, example_with};
+        // Read whole, a file with a class item past a band's values says so; a clean one doesn't.
+        let lossy = read(
+            std::io::Cursor::new(example_with(&Example { size: 256, tile: 256, classes: true, lossy: true, ..Example::default() })),
+            "lossy",
+        )
+        .unwrap();
+        assert!(lossy.lost.iter().any(|l| l.starts_with("its GDAL metadata: 1 CLASS_ item(s)")), "{:?}", lossy.lost);
+        let clean =
+            read(std::io::Cursor::new(example_with(&Example { size: 256, tile: 256, classes: true, ..Example::default() })), "clean")
+                .unwrap();
+        assert!(clean.lost.is_empty(), "{:?}", clean.lost);
     }
 
     #[test]

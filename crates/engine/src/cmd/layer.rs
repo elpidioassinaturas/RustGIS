@@ -2695,7 +2695,11 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
     // read as one (`add_named_bytes` checks it is an image), never read in place.
     let scan = super::raster::as_scan(p)?;
     // A window of a cloud-optimised GeoTIFF, read as a raster (opengeos/RustGIS#1204).
-    if p.get("bbox").is_some_and(|v| !v.is_null()) {
+    let window = p.get("bbox").is_some_and(|v| !v.is_null());
+    if !window && p.get("cellSize").is_some_and(|v| !v.is_null()) {
+        return Err(format!("{url}: \"cellSize\" goes with \"bbox\": give a box, or leave it out"));
+    }
+    if window {
         if scan || b(p, "whole") == Some(true) || rustgis_data::time::is_template(url) {
             return Err(format!(
                 "{url}: \"bbox\" reads a window of one cloud-optimised GeoTIFF with its coordinates: leave out \"as\" and \"whole\", and give a single file's address"
@@ -2871,8 +2875,8 @@ pub(crate) fn add_cog(s: &mut Session, p: &Value, url: &str) -> CmdResult {
 const MAX_WINDOW_VALUES: u64 = if cfg!(test) { 300_000 } else { crate::render::rustgis_tiles::cog::MAX_VALUES_READ };
 
 /// `layer.addUrl` keys for other kinds of address, which a window (`"bbox"`) doesn't read.
-const WINDOW_UNREAD: [&str; 12] =
-    ["layer", "x", "y", "wkt", "crs", "delimiter", "paperSpace", "stream", "start", "end", "unit", "interval"];
+const WINDOW_UNREAD: [&str; 13] =
+    ["layer", "x", "y", "wkt", "crs", "delimiter", "paperSpace", "stream", "start", "end", "unit", "interval", "dates"];
 
 /// Metres in a degree, to compare a cell size in metres with a longitude/latitude file's pixels.
 #[cfg(not(target_arch = "wasm32"))]
@@ -2904,16 +2908,54 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     if ph > 0.0 || pw < 0.0 {
         return Err(named("it isn't stored north up, which a window doesn't read yet".into()));
     }
-    // The box in the file's coordinates: its edges, each at 32 points, as a projected file bends them.
+    // The box in the file's coordinates: its edges at 32 points each, and each piece halved until
+    // it is straight in the file to within a quarter of its pixel. A projected file bends them (a
+    // parallel in a conic projection is an arc whose lowest point can fall between two points).
     let tr = layout.crs.transformer()?;
+    let place = |lon: f64, lat: f64| tr.from_lonlat(rustgis_geom::Coord::new(lon, lat));
+    let tolerance = layout.transform.pixel_width.abs().min(layout.transform.pixel_height.abs()) / 4.0;
     let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    // Edge points the file's coordinate system has no place for, said once the window is in.
+    let (mut points, mut unplaced) = (0usize, 0usize);
+    let mut pieces = Vec::new();
+    for k in 0..32 {
+        let (t, u) = (f64::from(k) / 32.0, f64::from(k + 1) / 32.0);
+        let (lon, lat) = (|t: f64| west + (east - west) * t, |t: f64| south + (north - south) * t);
+        pieces.extend([
+            ((lon(t), south), (lon(u), south), 0u32),
+            ((lon(t), north), (lon(u), north), 0),
+            ((west, lat(t)), (west, lat(u)), 0),
+            ((east, lat(t)), (east, lat(u)), 0),
+        ]);
+    }
+    // The pieces' ends, 33 an edge.
     for k in 0..=32 {
         let t = f64::from(k) / 32.0;
         let (lon, lat) = (west + (east - west) * t, south + (north - south) * t);
         for (x, y) in [(lon, south), (lon, north), (west, lat), (east, lat)] {
-            if let Some(c) = tr.from_lonlat(rustgis_geom::Coord::new(x, y)) {
-                (x0, y0, x1, y1) = (x0.min(c.x), y0.min(c.y), x1.max(c.x), y1.max(c.y));
+            points += 1;
+            match place(x, y) {
+                Some(c) => (x0, y0, x1, y1) = (x0.min(c.x), y0.min(c.y), x1.max(c.x), y1.max(c.y)),
+                None => unplaced += 1,
             }
+        }
+    }
+    // Each piece's middle is placed, and the piece halved while the middle strays from the
+    // straight line between its ends.
+    while let Some((a, b, depth)) = pieces.pop() {
+        let m = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+        points += 1;
+        let Some(c) = place(m.0, m.1) else {
+            unplaced += 1;
+            continue;
+        };
+        (x0, y0, x1, y1) = (x0.min(c.x), y0.min(c.y), x1.max(c.x), y1.max(c.y));
+        if let (Some(pa), Some(pb)) = (place(a.0, a.1), place(b.0, b.1))
+            && depth < 12
+            && points < 200_000
+            && (c.x - (pa.x + pb.x) / 2.0).hypot(c.y - (pa.y + pb.y) / 2.0) > tolerance
+        {
+            pieces.extend([(a, m, depth + 1), (m, b, depth + 1)]);
         }
     }
     if !(x0 < x1 && y0 < y1) {
@@ -2984,6 +3026,8 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     let mut r =
         rustgis_data::raster::Raster::new(&name, c1 - c0, r1 - r0, bands, transform, layout.crs, layout.nodata, color, layout.data_type)
             .map_err(|e| named(e.to_string()))?;
+    // What the header holds but isn't read (a colour table, names): said when the layer is added.
+    r.lost.extend(layout.lost.iter().cloned());
     if let Some(described) = &layout.described {
         r.apply_pam(described);
     }
@@ -3003,10 +3047,11 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     let of = if level == 0 { "the full image".to_string() } else { format!("overview {level} of {}", layout.levels.len() - 1) };
     let added = s.active_layer.and_then(|id| s.map().layer(id)).map(|l| l.name.clone()).unwrap_or(name);
     s.notify(format!("{added}: a {width} × {height} window of {of}, cells of {size:.1}{unit}, read by range from its address"), false);
-    // What the file's header holds but wasn't read (a colour table, names), one notice each.
-    let described_lost = layout.described.iter().flat_map(|d| d.lost.iter().map(|l| format!("its GDAL metadata: {l}")));
-    for lost in layout.lost.iter().cloned().chain(described_lost) {
-        s.notify(format!("{added}: {lost}"), false);
+    if unplaced > 0 {
+        s.notify(
+            format!("{added}: {unplaced} of the box's {points} edge points have no place in the file's coordinate system: the window is placed from the others"),
+            false,
+        );
     }
     out["window"] = json!({"columns": [c0, c1], "rows": [r0, r1], "level": level, "cellSize": size});
     // `"zoom": true` zooms to the window whatever the map held, as for any other address.
