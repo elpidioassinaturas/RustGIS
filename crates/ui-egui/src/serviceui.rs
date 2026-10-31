@@ -313,7 +313,9 @@ pub fn poll_pages(app: &mut RustGisApp, ctx: &egui::Context) {
     for read in std::mem::take(&mut app.ui.service_pages) {
         if !app.session.download_is_pending(read.landed.id) {
             let url = &read.landed.url;
-            app.session.notify(i18n::fmt("{url}: downloaded after its project was closed, so it wasn't added", &[("url", url)]), false);
+            let said = i18n::fmt("{url}: downloaded after its project was closed, so it wasn't added", &[("url", url)]);
+            app.session.request_failed(&read.landed.params, &said);
+            app.session.notify(said, false);
             continue;
         }
         let answer = read.slot.lock().unwrap_or_else(|e| e.into_inner()).take();

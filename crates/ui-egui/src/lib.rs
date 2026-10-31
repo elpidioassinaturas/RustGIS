@@ -2571,6 +2571,11 @@ impl RustGisApp {
                 if p.get("zoom").and_then(Value::as_bool) == Some(true) {
                     q["zoom"] = json!(true);
                 }
+                // A plugin command's request: its number goes to the command that adds it, for
+                // the plugin command to run again with what it answered (#1202).
+                if let Some(n) = p.get("request").filter(|v| v.is_u64()) {
+                    q["request"] = n.clone();
+                }
                 for k in ["service", "coverage"] {
                     if p.get(k).and_then(Value::as_bool) == Some(true) {
                         q[k] = json!(true);
@@ -3586,9 +3591,14 @@ impl RustGisApp {
                 }
                 Ok(false) => {
                     p["whole"] = json!(true);
-                    let _ = connectiontree::run_add_url(self, p, origin.as_deref());
+                    if let Err(e) = connectiontree::run_add_url(self, p.clone(), origin.as_deref()) {
+                        self.session.request_failed(&p, &e);
+                    }
                 }
-                Err(e) => self.session.notify(if e.starts_with(&url) { e } else { format!("{url}: {e}") }, true),
+                Err(e) => {
+                    self.session.request_failed(&p, &e);
+                    self.session.notify(if e.starts_with(&url) { e } else { format!("{url}: {e}") }, true);
+                }
             }
         }
         let mut landed = Vec::new();
@@ -3610,6 +3620,7 @@ impl RustGisApp {
                 Err(e) => {
                     self.session.download_failed(id);
                     rustgis_engine::cmd::geolibre::discard_pending(&mut self.session, &p);
+                    self.session.request_failed(&p, &e);
                     self.session.notify(if e.starts_with(&url) { e } else { format!("{url}: {e}") }, true);
                 }
             }
@@ -3621,7 +3632,9 @@ impl RustGisApp {
     pub(crate) fn add_landed(&mut self, landed: serviceui::Landed, bytes: Vec<u8>) {
         let serviceui::Landed { id, url, params: mut p, origin } = landed;
         if !self.session.download_landed(id, bytes) {
-            self.session.notify(i18n::fmt("{url}: downloaded after its project was closed, so it wasn't added", &[("url", &url)]), false);
+            let said = i18n::fmt("{url}: downloaded after its project was closed, so it wasn't added", &[("url", &url)]);
+            self.session.request_failed(&p, &said);
+            self.session.notify(said, false);
             return;
         }
         p["id"] = json!(id);
@@ -3811,7 +3824,8 @@ impl RustGisApp {
         // Addresses commands asked for where they couldn't download themselves (the browser):
         // fetched off the frame and added when they land, as Home › Add › Add Data › From URL does.
         for p in self.session.take_url_requests() {
-            if let Err(e) = self.run("ui.addUrl", p) {
+            if let Err(e) = self.run("ui.addUrl", p.clone()) {
+                self.session.request_failed(&p, &e);
                 self.session.notify(e, true);
             }
         }

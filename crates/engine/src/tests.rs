@@ -7526,11 +7526,15 @@ fn plugin_downloads_are_left_to_the_app() {
     // Nothing answers there: a download that waited fails.
     let url = "http://127.0.0.1:9/places.csv";
     let p = json!({"op": "layer.addUrl", "params": {"url": url, "name": "Places", "x": "lon", "y": "lat"}});
-    assert_eq!(s.run_leaving_downloads("plugin:eng-url/f", &p).unwrap(), json!({"pending": true, "url": url}));
+    // The command waits for the download, to run again once it is added (#1202).
+    assert_eq!(s.run_leaving_downloads("plugin:eng-url/f", &p).unwrap(), json!({"pending": true, "downloading": [url]}));
     assert_eq!((s.undo.len(), s.map().layers.len()), (undo, layers));
     let asked = s.take_url_requests();
     assert_eq!(asked.len(), 1);
     assert_eq!((asked[0]["name"].as_str(), asked[0]["x"].as_str(), asked[0]["y"].as_str()), (Some("Places"), Some("lon"), Some("lat")));
+    assert!(asked[0]["request"].is_u64(), "{}", asked[0]);
+    s.request_failed(&asked[0], "dropped");
+    s.poll_plugin_retries();
     assert!(s.run("plugin:eng-url/f", &p).is_err(), "run otherwise, it waits");
     assert!(s.take_url_requests().is_empty());
     // An edit run that way is an undo step still.
@@ -7538,6 +7542,63 @@ fn plugin_downloads_are_left_to_the_app() {
     s.run_leaving_downloads("plugin:eng-url/f", &p).unwrap();
     assert_eq!(s.undo.len(), undo + 1);
     rustgis_plugins::unload("eng-url");
+}
+
+/// A plugin command whose `layer.addUrl` left a download to the app runs again once the app
+/// has added it, and that call then answers the layer added, so the command goes on with it
+/// (#1202). A failed download is the call's error then; a command clicked twice waits for the
+/// one download.
+#[test]
+fn a_plugin_command_runs_again_when_its_download_is_added() {
+    let mut s = world();
+    plugin("eng-rerun", &["edit", "network"]);
+    let layers = s.map().layers.len();
+    let url = "https://x.org/places.csv";
+    let p = json!({"op": "layer.addUrl", "params": {"url": url, "name": "Places", "x": "lon", "y": "lat"}});
+    assert_eq!(s.run_leaving_downloads("plugin:eng-rerun/f", &p).unwrap()["downloading"], json!([url]));
+    let asked = s.take_url_requests();
+    assert_eq!(asked.len(), 1);
+    // Clicked again while it downloads: the same download, not a second one.
+    s.run_leaving_downloads("plugin:eng-rerun/f", &p).unwrap();
+    assert!(s.take_url_requests().is_empty(), "one download");
+    assert!(s.poll_plugin_retries().is_empty(), "nothing landed yet");
+    // The app downloads it and adds it, with the request's number, as its own step.
+    let id = s.download_started();
+    assert!(
+        s.download_landed(
+            id,
+            b"name,lon,lat
+A,10,50
+B,11,51
+"
+            .to_vec()
+        )
+    );
+    let mut add = asked[0].clone();
+    add["id"] = json!(id);
+    s.run("layer.addDownload", &add).unwrap();
+    assert_eq!(s.map().layers.len(), layers + 1);
+    let added = s.map().layer_by_name("Places").unwrap().id;
+    // The command runs again: its `layer.addUrl` answers the layer added, and adds nothing (nor
+    // an undo step of its own, having changed nothing).
+    let undo = s.undo.len();
+    let ran = s.poll_plugin_retries();
+    assert_eq!(ran.len(), 1, "{ran:?}");
+    let (cmd, answer) = &ran[0];
+    assert_eq!(cmd, "plugin:eng-rerun/f");
+    assert_eq!(answer.as_ref().unwrap()["layer"], json!(added), "{answer:?}");
+    assert_eq!((s.map().layers.len(), s.undo.len()), (layers + 1, undo), "added once");
+    assert!(s.take_url_requests().is_empty() && !s.plugin_retries_waiting());
+    assert!(s.poll_plugin_retries().is_empty(), "run once");
+    // A download that fails: the command runs again, and its `layer.addUrl` answers the error.
+    let q = json!({"op": "layer.addUrl", "params": {"url": "https://x.org/gone.csv"}});
+    s.run_leaving_downloads("plugin:eng-rerun/f", &q).unwrap();
+    let asked = s.take_url_requests();
+    s.request_failed(&asked[0], "https://x.org/gone.csv: 404 Not Found");
+    let ran = s.poll_plugin_retries();
+    assert!(ran[0].1.as_ref().unwrap_err().contains("404"), "{ran:?}");
+    assert!(!s.plugin_retries_waiting());
+    rustgis_plugins::unload("eng-rerun");
 }
 
 #[test]

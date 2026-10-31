@@ -640,14 +640,20 @@ impl Session {
         // could change the project, it is no undo step. Other commands keep theirs.
         let state_command = panel.as_ref().is_some_and(|d| !d.state.is_empty() && d.state == cmd.decl.id);
         let mut pending = Vec::new();
+        let mut requested = Vec::new();
+        // The downloads this call leaves to the app: its own, apart from a calling command's.
+        let outer = self.call_requests.replace(Vec::new());
         let res = self.guarded(label, mutates, |s| {
             let fetches = fetch::Calls::for_plugin(&plugin.manifest.id);
             let mut bridge = Bridge { s, plugin, fetches, changed: false, requested: false };
             let res = rustgis_plugins::run_command_with_panel(&cmd, &mut bridge, params, request);
-            if !bridge.fetches.pending.is_empty() {
-                // Waiting for a fetch (the browser): whatever the call did is undone, quietly,
-                // and the command runs again from the start once the answers are in.
+            let asked = bridge.s.call_requests.as_mut().map(std::mem::take).unwrap_or_default();
+            if !bridge.fetches.pending.is_empty() || !asked.is_empty() {
+                // Waiting for a fetch (the browser) or a download left to the app: whatever the
+                // call did is undone, quietly, and the command runs again from the start once
+                // the answers are in and the downloads added (#1202).
                 pending = std::mem::take(&mut bridge.fetches.pending);
+                requested = asked;
                 bridge.s.quiet_failure = true;
                 return Err(String::new());
             }
@@ -671,11 +677,21 @@ impl Session {
                 _ => {}
             }
         }
-        if pending.is_empty() {
+        self.call_requests = outer;
+        if pending.is_empty() && requested.is_empty() {
             return res;
         }
+        // The undone call took its download requests with it: they go to the app still, once.
+        for (n, asked) in &requested {
+            let taken = self.url_requests.iter().any(|q| q["request"].as_u64() == Some(*n));
+            if !taken && !self.url_waits.has(*n) {
+                let mut q = asked.clone();
+                q["request"] = json!(n);
+                self.url_requests.push(q);
+            }
+        }
         // The panel's values went back with the failed call: the run again sets them again.
-        let res = self.retry_plugin(id, given, pending);
+        let res = self.retry_plugin(id, given, pending, requested);
         if let Err(e) = &res {
             self.notify(e.clone(), true);
         }

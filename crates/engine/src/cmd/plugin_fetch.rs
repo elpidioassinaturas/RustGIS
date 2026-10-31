@@ -12,6 +12,11 @@
 //! request answers `{"pending": true, "url"}`, and once every pending answer has landed the
 //! plugin command runs again from the start ([`Session::poll_plugin_retries`]), when the cache
 //! answers at once.
+//!
+//! A plugin command whose `layer.addUrl` left a download to the app (the browser, and the
+//! desktop app since #1170) runs again the same way once the app has added it (#1202): its
+//! `layer.addUrl` then answers what adding the download answered, so the command goes on with
+//! the layer (clips, renames or styles it).
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -272,18 +277,90 @@ impl Calls {
     }
 }
 
-/// A plugin command waiting for its fetches before it runs again (the browser).
+/// How long a plugin command waits for a download it left to the app before it runs again
+/// with an error: one the app lost track of doesn't keep it waiting for ever.
+pub const REQUEST_WAIT: Duration = Duration::from_secs(10 * 60);
+
+/// A plugin command waiting for its fetches, or its downloads, before it runs again.
 pub(crate) struct Retry {
     id: String,
     params: Value,
     urls: Vec<String>,
+    /// The downloads it left to the app ([`Session::request_url`]), by request number.
+    requests: Vec<u64>,
     tries: u32,
 }
 
+/// The downloads plugin commands wait for (#1202): those the app is making, with what was
+/// asked and since when, and those added, with what adding them answered, until the command
+/// waiting for them runs again.
+#[derive(Default)]
+pub(crate) struct UrlWaits {
+    in_flight: Vec<(u64, Value, Instant)>,
+    landed: Vec<(u64, Value, CmdResult)>,
+}
+
+impl UrlWaits {
+    /// The number of a download being made for `asked`.
+    pub(crate) fn in_flight(&self, asked: &Value) -> Option<u64> {
+        self.in_flight.iter().find(|(_, q, _)| same_request(q, asked)).map(|(n, ..)| *n)
+    }
+
+    /// Whether request `n` is waited for (being made, or landed).
+    pub(crate) fn has(&self, n: u64) -> bool {
+        self.in_flight.iter().any(|(m, ..)| *m == n) || self.landed.iter().any(|(m, ..)| *m == n)
+    }
+
+    /// Request `n` landed, as `answer`: kept when a plugin command waits for it.
+    pub(crate) fn land(&mut self, n: u64, answer: CmdResult) {
+        if let Some(i) = self.in_flight.iter().position(|(m, ..)| *m == n) {
+            let (_, asked, _) = self.in_flight.remove(i);
+            self.landed.push((n, asked, answer));
+        }
+    }
+
+    /// Waits for request `n`, which asked for `asked`.
+    fn wait(&mut self, n: u64, asked: Value) {
+        if !self.has(n) {
+            self.in_flight.push((n, asked, Instant::now()));
+        }
+    }
+
+    /// Downloads waited for past [`REQUEST_WAIT`] land as failed.
+    fn expire(&mut self) {
+        let late: Vec<u64> = self.in_flight.iter().filter(|(.., at)| at.elapsed() >= REQUEST_WAIT).map(|(n, ..)| *n).collect();
+        for n in late {
+            self.land(n, Err(format!("no download in {} minutes", REQUEST_WAIT.as_secs() / 60)));
+        }
+    }
+
+    /// Only what `waiting` still waits for is kept.
+    fn keep_only(&mut self, waiting: &[Retry]) {
+        let wanted = |n: &u64| waiting.iter().any(|r| r.requests.contains(n));
+        self.in_flight.retain(|(n, ..)| wanted(n));
+        self.landed.retain(|(n, ..)| wanted(n));
+    }
+}
+
+/// A download request without its number: what a command asked for.
+pub(crate) fn without_request(p: &Value) -> Value {
+    let mut p = p.clone();
+    if let Some(o) = p.as_object_mut() {
+        o.remove("request");
+    }
+    p
+}
+
+/// Whether two download requests ask for the same thing, whatever their numbers.
+pub(crate) fn same_request(a: &Value, b: &Value) -> bool {
+    without_request(a) == without_request(b)
+}
+
 impl Session {
-    /// Keeps plugin command `id` to run again once `urls` (cache keys) have landed: its answer,
-    /// which says so.
-    pub(super) fn retry_plugin(&mut self, id: &str, params: &Value, urls: Vec<String>) -> CmdResult {
+    /// Keeps plugin command `id` to run again once `urls` (cache keys) have landed, and the
+    /// downloads it left to the app (`requests`: their numbers and what was asked) have been
+    /// added: its answer, which says so.
+    pub(super) fn retry_plugin(&mut self, id: &str, params: &Value, urls: Vec<String>, requests: Vec<(u64, Value)>) -> CmdResult {
         let tries = self.retry_tries;
         if tries >= MAX_RETRIES {
             return Err(format!("{id}: gave up after fetching {MAX_RETRIES} times"));
@@ -300,37 +377,62 @@ impl Session {
         // `urls` are cache keys (`<plugin> <url>`; plugin ids have no spaces): the answer names
         // the addresses.
         let fetching: Vec<&str> = urls.iter().map(|k| k.split_once(' ').map_or(k.as_str(), |(_, u)| u)).collect();
-        let answer = json!({"pending": true, "fetching": fetching});
-        self.plugin_retries.push(Retry { id: id.to_string(), params: params.clone(), urls, tries: tries + 1 });
+        let mut answer = json!({"pending": true});
+        if !fetching.is_empty() {
+            answer["fetching"] = json!(fetching);
+        }
+        if !requests.is_empty() {
+            answer["downloading"] = json!(requests.iter().map(|(_, q)| q["url"].clone()).collect::<Vec<_>>());
+        }
+        let numbers = requests.iter().map(|(n, _)| *n).collect();
+        for (n, asked) in requests {
+            self.url_waits.wait(n, asked);
+        }
+        self.plugin_retries.push(Retry { id: id.to_string(), params: params.clone(), urls, requests: numbers, tries: tries + 1 });
         Ok(answer)
     }
 
-    /// Whether plugin commands are waiting for their fetches, so the front end keeps polling.
+    /// Whether plugin commands are waiting for their fetches or downloads, so the front end
+    /// keeps polling.
     pub fn plugin_retries_waiting(&self) -> bool {
         !self.plugin_retries.is_empty()
     }
 
-    /// Runs again the plugin commands whose fetches have all landed (the browser: see
-    /// `host.fetch` in `docs/plugins.md`): each command and what it answered this time. Errors
-    /// are also given as notices, as for any command.
+    /// Runs again the plugin commands whose fetches have all landed and whose downloads the app
+    /// has all added (see `host.fetch` and `layer.addUrl` in `docs/plugins.md`): each command and
+    /// what it answered this time. Its `layer.addUrl` calls answer what adding each download
+    /// answered. Errors are also given as notices, as for any command.
     pub fn poll_plugin_retries(&mut self) -> Vec<(String, CmdResult)> {
         if self.plugin_retries.is_empty() {
             return Vec::new();
         }
+        self.url_waits.expire();
         let (ready, waiting): (Vec<Retry>, Vec<Retry>) = std::mem::take(&mut self.plugin_retries).into_iter().partition(|r| {
             let c = cache();
-            r.urls.iter().all(|u| c.landed(u))
+            r.urls.iter().all(|u| c.landed(u)) && r.requests.iter().all(|n| self.url_waits.landed.iter().any(|(m, ..)| m == n))
         });
         self.plugin_retries = waiting;
-        ready
+        let ran = ready
             .into_iter()
             .map(|r| {
+                // What its downloads answered, for its `layer.addUrl` calls (each answers once).
+                let landed = std::mem::take(&mut self.url_waits.landed);
+                let (mine, others): (Vec<_>, Vec<_>) = landed.into_iter().partition(|(n, ..)| r.requests.contains(n));
+                self.url_waits.landed = others;
+                self.rerun_landed = mine.into_iter().map(|(_, asked, answer)| (asked, answer)).collect();
                 self.retry_tries = r.tries;
-                let res = self.run(&r.id, &r.params);
+                // Run as the app runs a plugin's command: what it asks for now is left to the app.
+                let res = self.run_leaving_downloads(&r.id, &r.params);
                 self.retry_tries = 0;
+                self.rerun_landed.clear();
                 (r.id, res)
             })
-            .collect()
+            .collect();
+        // Downloads no command waits for any more (it was run again, replaced or dropped).
+        let waiting = std::mem::take(&mut self.plugin_retries);
+        self.url_waits.keep_only(&waiting);
+        self.plugin_retries = waiting;
+        ran
     }
 }
 

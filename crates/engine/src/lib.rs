@@ -479,6 +479,7 @@ struct PutAside {
     downloaded: Vec<(u64, Vec<u8>)>,
     url_requests: Vec<serde_json::Value>,
     plugin_retries: Vec<cmd::plugins::fetch::Retry>,
+    url_waits: cmd::plugins::fetch::UrlWaits,
     /// A style of the project still loading, which mustn't move the next one's view.
     style_view: Option<(String, Camera)>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -663,8 +664,19 @@ pub struct Session {
     /// Set by [`Session::run_leaving_downloads`]: `layer.addUrl` leaves what it would wait for
     /// to the front end ([`Session::request_url`]), as in the browser.
     leave_downloads: bool,
-    /// Plugin commands waiting for their `host.fetch` answers to run again (the browser).
+    /// Plugin commands waiting for their `host.fetch` answers, or the downloads their
+    /// `layer.addUrl` left to the app, to run again.
     pub(crate) plugin_retries: Vec<cmd::plugins::fetch::Retry>,
+    /// The downloads plugin commands wait for: being made by the app, or landed (#1202).
+    pub(crate) url_waits: cmd::plugins::fetch::UrlWaits,
+    /// The number of the last download request ([`Session::request_url`]).
+    next_request: u64,
+    /// The download requests of the plugin call running now (none outside one): each one's
+    /// number, and what was asked.
+    pub(crate) call_requests: Option<Vec<(u64, serde_json::Value)>>,
+    /// While a plugin command runs again for its downloads: what each one asked for, and what
+    /// adding it answered, for its `layer.addUrl` to answer once.
+    pub(crate) rerun_landed: Vec<(serde_json::Value, CmdResult)>,
     /// How many times the plugin command running now has been run again for its fetches.
     pub(crate) retry_tries: u32,
     /// Set for [`Session::guarded`] by a command whose failure is no news (a plugin command
@@ -909,6 +921,10 @@ impl Session {
             request_only: false,
             leave_downloads: false,
             plugin_retries: Vec::new(),
+            url_waits: cmd::plugins::fetch::UrlWaits::default(),
+            next_request: 0,
+            call_requests: None,
+            rerun_landed: Vec::new(),
             retry_tries: 0,
             quiet_failure: false,
             #[cfg(not(target_arch = "wasm32"))]
@@ -972,16 +988,45 @@ impl Session {
     /// so. A request made again while it waits is made once (the same address read another way,
     /// as another layer or with other columns, is another request), and past a few waiting
     /// requests the next is refused rather than silently dropping one already promised.
+    ///
+    /// Each request has a number (`"request"` in what the front end takes), which it hands on to
+    /// the command that adds the download; a plugin command waiting for it runs again with what
+    /// that command answered (#1202). A request made again while a plugin command waits for it
+    /// (clicked twice) is that one, not a second download.
     pub fn request_url(&mut self, p: &serde_json::Value) -> Result<serde_json::Value, String> {
         let url = p.get("url").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-        if !self.url_requests.iter().any(|q| q == p) {
+        let asked = cmd::plugins::fetch::without_request(p);
+        let waiting = self.url_requests.iter().find(|q| cmd::plugins::fetch::same_request(q, &asked)).and_then(|q| q["request"].as_u64());
+        let number = match p.get("request").and_then(serde_json::Value::as_u64).or(waiting).or_else(|| self.url_waits.in_flight(&asked)) {
+            Some(n) => n,
+            None => {
+                self.next_request += 1;
+                self.next_request
+            }
+        };
+        if waiting.is_none() && !self.url_waits.has(number) {
             if self.url_requests.len() >= MAX_URL_REQUESTS {
                 return Err(format!("{url}: {MAX_URL_REQUESTS} downloads are already waiting; try again when they have landed"));
             }
-            self.url_requests.push(p.clone());
+            let mut q = asked.clone();
+            q["request"] = serde_json::json!(number);
+            self.url_requests.push(q);
+        }
+        if let Some(asked_now) = self.call_requests.as_mut() {
+            asked_now.push((number, asked));
         }
         self.request_only = true;
         Ok(serde_json::json!({"pending": true, "url": url}))
+    }
+
+    /// Says a download the front end was asked for ([`Session::request_url`]) failed before
+    /// anything could add it (it didn't download, or its project was closed): a plugin command
+    /// waiting for it runs again, and its `layer.addUrl` answers this error. `p` is the request
+    /// the front end took.
+    pub fn request_failed(&mut self, p: &serde_json::Value, error: &str) {
+        if let Some(n) = p.get("request").and_then(serde_json::Value::as_u64) {
+            self.url_waits.land(n, Err(error.to_string()));
+        }
     }
 
     /// Runs a command as [`Session::run`] does, except that the downloads `layer.addUrl` would
@@ -1062,6 +1107,14 @@ impl Session {
             let joins = self.merge.is_some() && self.merge == self.merged && !self.undo.is_empty();
             let (at, start) = (project_log::now_ms(), web_time::Instant::now());
             let res = self.run_command(id, params);
+            // A download a plugin command left to the app, added: what it answered is kept for the
+            // command to run again with (#1202).
+            if matches!(id, "layer.addUrl" | "layer.addDownload")
+                && let Some(n) = params.get("request").and_then(Value::as_u64)
+                && !res.as_ref().is_ok_and(|v| v.get("pending").and_then(Value::as_bool) == Some(true))
+            {
+                self.url_waits.land(n, res.clone());
+            }
             // A plugin's command waiting for its fetches answers `pending` and runs again when they
             // land: logged then, once. (Another command's `pending`, a download the web app makes, is
             // logged as it is asked for: nothing runs it again.)
@@ -1408,6 +1461,7 @@ impl Session {
             downloaded: take(&mut self.downloaded),
             url_requests: take(&mut self.url_requests),
             plugin_retries: take(&mut self.plugin_retries),
+            url_waits: take(&mut self.url_waits),
             style_view: self.style_view.take(),
             #[cfg(not(target_arch = "wasm32"))]
             sql_results: take(&mut self.sql_results),
@@ -1456,6 +1510,7 @@ impl Session {
             downloaded,
             url_requests,
             plugin_retries,
+            url_waits,
             style_view,
             #[cfg(not(target_arch = "wasm32"))]
             sql_results,
@@ -1473,7 +1528,7 @@ impl Session {
         (self.path, self.model_run, self.style_view) = (path, model_run, style_view);
         self.opened_package = opened_package;
         self.file_identity = file_identity;
-        (self.pending, self.plugin_runs, self.plugin_retries) = (pending, plugin_runs, plugin_retries);
+        (self.pending, self.plugin_runs, self.plugin_retries, self.url_waits) = (pending, plugin_runs, plugin_retries, url_waits);
         self.file_outputs = file_outputs;
         (self.downloading, self.downloaded, self.url_requests) = (downloading, downloaded, url_requests);
         self.trend_results = trend_results;

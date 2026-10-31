@@ -445,6 +445,25 @@ downloads wait at a time: a request past 16 fails, and if the command then fails
 downloads start. Run by
 `rustgis-cli`, a script or a task, the command waits and answers what was added.
 
+The command then runs again, as for a [fetch](#fetching-a-document): RustGIS undoes what the call
+did to the project and, once every download it left has been added (or failed), runs it again with
+the same parameters. In that run the same `layer.addUrl` call answers what adding the download
+answered (`{"layer", …}`, or its error) and adds nothing, so the command goes on with the layer:
+clips it, renames it or styles it. The added layer stays its own undo step, and what the command
+does with it is another. So a command can be written as if `layer.addUrl` waited:
+
+```rust
+let added = host::call("layer.addUrl", json!({"url": url, "name": "Rivers"}))?;
+if added.get("pending").is_some() {
+    return Ok(json!({}));           // runs again once the layer is in
+}
+host::call("gp.run", json!({"tool": "clip", "params": {"input": "Rivers", "clip": "Area"}}))?;
+```
+
+A call asked again while its download is under way (the button clicked twice) waits for that
+download, not another. A command runs again at most 64 times, and a download not added within 10
+minutes runs it again with an error.
+
 `rustgis-cli commands` lists every command id and its parameters.
 
 #### Fetching a document
