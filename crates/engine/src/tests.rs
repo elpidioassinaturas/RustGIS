@@ -22010,7 +22010,7 @@ fn merge_distinguishes_case_sensitive_file_paths() {
 
 /// `layer.addUrl` with `"bbox"` (#1204): a window of a cloud-optimised GeoTIFF, read by range as a
 /// raster layer, at full resolution or at the overview a cell size asks for; a palette file's
-/// colours and class names come with it; the window is kept in a saved project.
+/// colours and class names come with it; the window is kept in a saved project, class names too.
 #[test]
 fn a_cog_window_comes_in_as_a_raster() {
     use rustgis_data::raster::ColorHint;
@@ -22057,6 +22057,30 @@ fn a_cog_window_comes_in_as_a_raster() {
     assert!(e.contains("leave out"), "{e}");
     let e = s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "bbox": [10, 45, 11, 46], "cellSize": 0})).unwrap_err();
     assert!(e.contains("cellSize"), "{e}");
+    // A window over the most values (300,000 under test) is refused, naming the overview that
+    // fits: the 512-pixel one, cells of 217.4 m; asked for, it comes in.
+    let e = s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "bbox": [10, 45, 11, 46]})).unwrap_err();
+    assert!(e.contains("1024 × 1024 cells") && e.contains("take \"cellSize\": 218 or more"), "{e}");
+    let r = s
+        .run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "bbox": [10, 45, 11, 46], "cellSize": 218, "name": "Whole"}))
+        .unwrap();
+    assert_eq!((r["window"]["level"].clone(), raster(&s, "Whole").width), (json!(1), 512));
+    // "zoom": true frames the window, though the map held layers already.
+    let r = s
+        .run(
+            "layer.addUrl",
+            &json!({"url": format!("{base}/scene.tif"), "bbox": [10.25, 45.5, 10.5, 45.75], "name": "Zoomed", "zoom": true}),
+        )
+        .unwrap();
+    assert_eq!(r["zoomed"], true, "{r}");
+    let c = rustgis_geom::merc_to_lonlat(s.map().camera.center);
+    assert!((c.x - 10.375).abs() < 0.05 && (c.y - 45.625).abs() < 0.05, "{c:?}");
+    // Each band is read: two bands, and no colour table for them.
+    let (two, _) = serve_ranges(example_with(&Example { size: 512, tile: 256, bands: 2, ..Example::default() }));
+    s.run("layer.addUrl", &json!({"url": format!("{two}/two.tif"), "bbox": [10.0, 45.0, 10.5, 45.5], "name": "Two"})).unwrap();
+    let w2 = raster(&s, "Two");
+    assert_eq!((w2.band_count(), w2.value(0, 10, 5), w2.value(1, 10, 5)), (2, Some(15.0), Some(25.0)));
+    assert!(!matches!(w2.color, ColorHint::Palette(_)), "{:?}", w2.color);
     // A palette file, as MapBiomas's: its colour table and class names come with the window.
     let (classes, _) = serve_ranges(example_with(&Example { size: 512, tile: 256, classes: true, ..Example::default() }));
     s.run("layer.addUrl", &json!({"url": format!("{classes}/cover.tif"), "bbox": [10.0, 45.0, 10.5, 45.5], "name": "Cover"})).unwrap();
@@ -22069,5 +22093,7 @@ fn a_cog_window_comes_in_as_a_raster() {
     s.run("project.openText", &json!({"text": text})).unwrap();
     let w = raster(&s, "Window");
     assert_eq!((w.width, w.value(0, 10, 5)), (256, Some(15.0)));
-    assert!(matches!(raster(&s, "Cover").color, ColorHint::Palette(_)));
+    let cover = raster(&s, "Cover");
+    assert!(matches!(cover.color, ColorHint::Palette(_)));
+    assert_eq!(cover.bands[0].class_name(15.0), Some("Pasture"));
 }

@@ -1187,6 +1187,8 @@ pub fn write(r: &Raster, band: usize) -> Result<Vec<u8>> {
             .then(|| band.data.iter().map(|v| if r.is_valid(*v) { v.clamp(0.0, 255.0) as u8 } else { nodata.unwrap_or(0) }).collect())
     };
     let rgb = matches!(r.color, ColorHint::Rgb { .. }) && r.bands.len() >= 3;
+    // A grey band's class names, in GDAL's metadata tag, read back on open.
+    let classes = r.bands.get(band).filter(|_| !rgb).and_then(|b| super::pam::class_metadata(&b.classes));
     macro_rules! tags {
         ($img:expr) => {{
             let e = $img.encoder();
@@ -1200,6 +1202,9 @@ pub fn write(r: &Raster, band: usize) -> Result<Vec<u8>> {
                 if !d.ascii.is_empty() {
                     e.write_tag(Tag::Unknown(34737), d.ascii.as_str()).map_err(err)?;
                 }
+            }
+            if let Some(xml) = &classes {
+                e.write_tag(Tag::Unknown(42112), xml.as_str()).map_err(err)?;
             }
             if let Some(nd) = r.nodata {
                 e.write_tag(Tag::GdalNodata, nd.to_string().as_str()).map_err(err)?;
@@ -1940,6 +1945,17 @@ mod tests {
         // Without the tag, the band keeps its number.
         let plain = read(std::io::Cursor::new(grey8(2, 2, &[1, 2, 3, 4], None)), "plain").unwrap();
         assert_ne!(plain.bands[0].name, "NDVI 2024-06-01");
+    }
+
+    #[test]
+    fn class_names_are_written_back() {
+        // In GDAL's metadata tag, as a window of MapBiomas keeps its classes in a saved project.
+        let mut r = read(std::io::Cursor::new(grey8(2, 2, &[3, 15, 3, 0], None)), "cover").unwrap();
+        r.bands[0].classes = vec![String::new(); 16];
+        r.bands[0].classes[3] = "Formação Florestal".into();
+        r.bands[0].classes[15] = "Pastagem".into();
+        let back = read(std::io::Cursor::new(write(&r, 0).unwrap()), "back").unwrap();
+        assert_eq!((back.bands[0].class_name(3.0), back.bands[0].class_name(15.0)), (Some("Formação Florestal"), Some("Pastagem")));
     }
 
     #[test]

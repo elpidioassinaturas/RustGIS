@@ -2861,9 +2861,9 @@ pub(crate) fn add_cog(s: &mut Session, p: &Value, url: &str) -> CmdResult {
 }
 
 /// The most values a window of a cloud-optimised GeoTIFF holds, all its bands together: one read's
-/// most (256 MB of 32-bit values).
+/// most (256 MB of 32-bit values). Under test, 300,000, so the refusal is tried on a small file.
 #[cfg(not(target_arch = "wasm32"))]
-const MAX_WINDOW_VALUES: u64 = crate::render::rustgis_tiles::cog::MAX_VALUES_READ;
+const MAX_WINDOW_VALUES: u64 = if cfg!(test) { 300_000 } else { crate::render::rustgis_tiles::cog::MAX_VALUES_READ };
 
 /// Metres in a degree, to compare a cell size in metres with a longitude/latitude file's pixels.
 #[cfg(not(target_arch = "wasm32"))]
@@ -2906,10 +2906,11 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     if !(x0 < x1 && y0 < y1) {
         return Err(named("the box is outside the file's coordinate system".into()));
     }
-    // A level's cell size, in metres for a longitude/latitude file.
+    // A level's cell size, its longer side, in metres for a longitude/latitude file.
     let geographic = layout.crs.is_geographic();
     let size_of = |l: &Level| {
-        let px = layout.transform_of(l).pixel_width.abs();
+        let lt = layout.transform_of(l);
+        let px = lt.pixel_width.abs().max(lt.pixel_height.abs());
         if geographic { px * METRES_PER_DEGREE } else { px }
     };
     // A level's window: its columns and rows, snapped outwards and kept within the file.
@@ -2924,7 +2925,7 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     };
     let values = |l: &Level| {
         let (c0, c1, r0, r1) = window(l);
-        u64::from(c1 - c0) * u64::from(r1 - r0) * layout.bands.max(1) as u64
+        u64::from(c1 - c0).saturating_mul(u64::from(r1 - r0)).saturating_mul(layout.bands.max(1) as u64)
     };
     // The full image, or the coarsest overview whose cells are no larger than the size asked.
     let level = match cell {
@@ -2984,6 +2985,10 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     let added = s.active_layer.and_then(|id| s.map().layer(id)).map(|l| l.name.clone()).unwrap_or(name);
     s.notify(format!("{added}: a {width} × {height} window of {of}, cells of {size:.1}{unit}, read by range from its address"), false);
     out["window"] = json!({"columns": [c0, c1], "rows": [r0, r1], "level": level, "cellSize": size});
+    // `"zoom": true` zooms to the window whatever the map held, as for any other address.
+    if b(p, "zoom") == Some(true) {
+        out["zoomed"] = json!(zoom_to_added(s, &out));
+    }
     Ok(out)
 }
 

@@ -142,9 +142,9 @@ pub fn parse(text: &str) -> Option<Pam> {
 
 /// The band descriptions a GeoTIFF holds itself, in GDAL's metadata tag (`GDAL_METADATA`, 42112),
 /// where GDAL and rasterio write them: `None` when it isn't such a document or describes no band.
-/// Its `sample` counts from 0. A single-band file's class names may be dataset items named
-/// `CLASS_<value>`, as the MapBiomas files on Source Cooperative have them: they name band 1's
-/// classes.
+/// Its `sample` counts from 0. Class names may be dataset items named `CLASS_<value>`, as the
+/// MapBiomas files on Source Cooperative have them: they name band 1's classes, however many
+/// bands the file has.
 ///
 /// ```xml
 /// <GDALMetadata>
@@ -203,9 +203,45 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
     (!pam.bands.is_empty()).then_some(pam)
 }
 
+/// GDAL's metadata document naming a band's classes as dataset items `CLASS_<value>`, as
+/// [`parse_gdal_metadata`] reads them back: `None` when no class is named. It is plain ASCII
+/// (other characters as XML references), as the tag's type is.
+pub fn class_metadata(classes: &[String]) -> Option<String> {
+    let mut items = String::new();
+    for (value, name) in classes.iter().enumerate().take(MAX_CATEGORIES) {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        items.push_str(&format!("<Item name=\"CLASS_{value}\">"));
+        for c in name.chars().take(256) {
+            match c {
+                '&' => items.push_str("&amp;"),
+                '<' => items.push_str("&lt;"),
+                '>' => items.push_str("&gt;"),
+                c if c.is_ascii() && !c.is_ascii_control() => items.push(c),
+                c => items.push_str(&format!("&#{};", u32::from(c))),
+            }
+        }
+        items.push_str("</Item>");
+    }
+    (!items.is_empty()).then(|| format!("<GDALMetadata>{items}</GDALMetadata>"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn class_names_written_are_read_back() {
+        let classes = vec![String::new(), "Floresta & savana".into(), String::new(), "Formação <campestre>".into()];
+        let xml = class_metadata(&classes).unwrap();
+        assert!(xml.is_ascii(), "{xml}");
+        let pam = parse_gdal_metadata(&xml).unwrap();
+        assert_eq!(pam.band(1).unwrap().categories, classes);
+        // No class named, no document.
+        assert_eq!(class_metadata(&[String::new(), " ".into()]), None);
+    }
 
     #[test]
     fn reads_band_descriptions_nodata_and_statistics() {

@@ -414,6 +414,10 @@ fn entries(r: &Raster, plan: &Plan, lv: &Level, first: bool, geo: &GeoKeys, big:
                 plan.bands.iter().any(|b| r.bands.get(*b).is_some_and(|b| b.stats.count < n)).then(|| "nan".to_string())
             }
         };
+        // The written band's class names, so a reopened window keeps its legend's labels.
+        if let Some(xml) = plan.bands.first().and_then(|b| r.bands.get(*b)).and_then(|b| super::pam::class_metadata(&b.classes)) {
+            e.push(ascii(42112, &xml));
+        }
         if let Some(nd) = nodata {
             e.push(ascii(42113, &nd));
         }
