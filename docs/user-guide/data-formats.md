@@ -111,6 +111,30 @@ A GeoTIFF in strips, a rotated image or an unsupported tiled image downloads who
 GeoTIFF added with `"whole": true` (for raster tools and symbology). The web app needs the server
 to allow range requests (CORS with the `Range` header).
 
+On the desktop and the command line, `"bbox"` reads just an area of a cloud-optimised GeoTIFF as
+a raster layer, for files too large to download whole (a national land-cover map, a 1° elevation
+tile), without a STAC catalogue:
+
+```json
+{"url": "https://…/mapbiomas_brazil_2024.tif", "bbox": [-42.971, -5.587, -42.599, -4.786], "name": "MapBiomas 2024"}
+```
+
+- The box is `[west, south, east, north]` in degrees (or `"view"`). It is turned into the file's
+  coordinate system and snapped outwards onto its pixels, within the file; the raster stays in the
+  file's coordinate system.
+- Only the tiles the window crosses are read, at full resolution. `"cellSize"` reads the coarsest
+  overview whose cells are no larger, in the file's units (metres for a longitude/latitude file, a
+  degree taken as 111.32 km); overviews are never read unasked.
+- A window holds 64 million values at most, all bands together (256 MB), and 4,096 of the file's
+  tiles a band. A larger one is refused, naming the cell size that fits. Tiles are waited for up
+  to two minutes.
+- The file's no-data, colour table (a palette file draws in its colours) and band names come
+  with it, and class names given as `CLASS_<value>` items in GDAL's metadata tag, as the MapBiomas
+  files on Source Cooperative give theirs.
+- The window is kept in the project as a GeoTIFF, not read again from the address. Files stored
+  bottom up aren't read this way yet. In the web app, `"bbox"` is refused for now: the file is
+  drawn in place without it.
+
 A GeoParquet or FlatGeobuf file by its address is read in place too, a view at a time, however
 large: the layer is streamed like a large local file, and the view's features are fetched in the
 background by HTTP range requests and drawn as they land. A FlatGeobuf's header and packed R-tree

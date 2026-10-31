@@ -38,7 +38,7 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"layer"?: name|id, "crs": "EPSG:… or WKT; reinterpret native coordinates, without rewriting the source file"}"#),
         C::new("layer.loadAll", "Load All Features", "Layers", load_all).when(need_streamed).params(r#"{"layer"?: name|id}"#),
         C::new("layer.addUrl", "Add Data From URL", "Home › Add › Add Data", add_url).params(
-            r#"{"url": "https://…/data.geojson|.csv|.parquet|.fgb|.gpkg|.zip|.kml|.kmz|.gpx|.tif|.jp2 (JPEG 2000: desktop, through GDAL) (the format from the address, else the contents) | a .pmtiles archive", "name"?: text, "layer"?: "one layer of a zip, KML or GPX", "zoom"?: "bool: true zooms to what was added; false keeps the view of a GeoParquet or FlatGeobuf read in place (zoomed to only when the map was empty)", "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "whole"?: "bool: download a cloud-optimised GeoTIFF whole (as a raster layer) instead of reading it in place (an address without a file name is read in place when its first bytes are a cloud-optimised GeoTIFF)", "cog"?: "bool: the address is a cloud-optimised GeoTIFF whatever its name says (the app's probe found it so)", "start"?, "end"?, "unit"?, "interval"?, "dates"?: "a GeoTIFF address with date placeholders ({date:YYYY}, {YYYY}{MM}{DD}), one file per date: the dates it spans and steps through (as time.set), turning the time slider on"}"#,
+            r#"{"url": "https://…/data.geojson|.csv|.parquet|.fgb|.gpkg|.zip|.kml|.kmz|.gpx|.tif|.jp2 (JPEG 2000: desktop, through GDAL) (the format from the address, else the contents) | a .pmtiles archive", "name"?: text, "layer"?: "one layer of a zip, KML or GPX", "zoom"?: "bool: true zooms to what was added; false keeps the view of a GeoParquet or FlatGeobuf read in place (zoomed to only when the map was empty)", "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "whole"?: "bool: download a cloud-optimised GeoTIFF whole (as a raster layer) instead of reading it in place (an address without a file name is read in place when its first bytes are a cloud-optimised GeoTIFF)", "cog"?: "bool: the address is a cloud-optimised GeoTIFF whatever its name says (the app's probe found it so)", "bbox"?: "[west, south, east, north] in degrees | \"view\": a cloud-optimised GeoTIFF's window as a raster layer (desktop and command line), read by range at full resolution, in the file's coordinate system, with its colour table and class names; at most 64 million values (all bands)", "cellSize"?: "with bbox: the coarsest overview whose cells are at most this size is read (the file's units; metres for longitude/latitude, a degree taken as 111.32 km)", "start"?, "end"?, "unit"?, "interval"?, "dates"?: "a GeoTIFF address with date placeholders ({date:YYYY}, {YYYY}{MM}{DD}), one file per date: the dates it spans and steps through (as time.set), turning the time slider on"}"#,
         ),
         C::new("layer.addDownload", "Add Downloaded Data", "Home › Add", add_download)
             .params(r#"{"id": a download the app finished (Home › Add › Add Data › From URL), "url": its address, "name"?: text, "layer"?: text, "zoom"?: bool, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData), "service"?: bool (a service's features: their axes and paging are checked), "bounds"?: [west, south, east, north] (with service: the layer's longitude/latitude bounds from its capabilities, which its axes are checked against; without bounds they are left as they come; ignored without service), "coverage"?: bool (a WCS coverage: a GeoTIFF, else the service's error), "geolibreProject"?: bool (internal: downloaded project JSON), "geolibreLayer"?: {"token", "record"} (internal: reserved imported layer and its saved style), "geolibreZarr"?: bool (internal: an imported Zarr slice as GeoTIFF)}"#),
@@ -2694,6 +2694,15 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
     // A scan (`"as"`) keeps the pixels and none of the coordinates: the file is downloaded whole and
     // read as one (`add_named_bytes` checks it is an image), never read in place.
     let scan = super::raster::as_scan(p)?;
+    // A window of a cloud-optimised GeoTIFF, read as a raster (opengeos/RustGIS#1204).
+    if p.get("bbox").is_some_and(|v| !v.is_null()) {
+        if scan || b(p, "whole") == Some(true) || rustgis_data::time::is_template(url) {
+            return Err(format!(
+                "{url}: \"bbox\" reads a window of one cloud-optimised GeoTIFF with its coordinates: leave out \"as\" and \"whole\", and give a single file's address"
+            ));
+        }
+        return add_cog_window(s, p, url);
+    }
     // A PMTiles archive is read a tile at a time, never downloaded whole.
     if lower.split(['?', '#']).next().is_some_and(|p| p.ends_with(".pmtiles")) {
         if scan {
@@ -2849,6 +2858,165 @@ pub(crate) fn add_cog(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     }
     r["inPlace"] = json!(true);
     Ok(r)
+}
+
+/// The most values a window of a cloud-optimised GeoTIFF holds, all its bands together: one read's
+/// most (256 MB of 32-bit values).
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_WINDOW_VALUES: u64 = crate::render::rustgis_tiles::cog::MAX_VALUES_READ;
+
+/// Metres in a degree, to compare a cell size in metres with a longitude/latitude file's pixels.
+#[cfg(not(target_arch = "wasm32"))]
+const METRES_PER_DEGREE: f64 = 111_320.0;
+
+/// `layer.addUrl` with `"bbox"` (opengeos/RustGIS#1204): a window of a cloud-optimised GeoTIFF,
+/// read by range as a raster layer. The box (longitude/latitude, or the view) is turned into the
+/// file's coordinate system and snapped outwards onto the pixels of the level read: the full image,
+/// or with `"cellSize"` the coarsest overview whose cells are no larger. Only the tiles the window
+/// takes are read, with the reader the data cubes use. The raster keeps the file's coordinate
+/// system, no-data, colour table and band and class names, and is kept in the project (as a
+/// GeoTIFF of the window), not read again from the address.
+#[cfg(not(target_arch = "wasm32"))]
+fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
+    use crate::render::rustgis_tiles::cog;
+    use rustgis_data::raster::cog::Level;
+    let named = |e: String| if e.starts_with(url) { e } else { format!("{url}: {e}") };
+    let [west, south, east, north] = window_box(s, p)?;
+    let cell = match p.get("cellSize").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(v.as_f64().filter(|c| c.is_finite() && *c > 0.0).ok_or("cellSize is a size above 0")?),
+    };
+    let info = cog::info_blocking(url).map_err(named)?;
+    let layout = &info.layout;
+    if layout.transform.pixel_height > 0.0 || layout.transform.pixel_width < 0.0 {
+        return Err(named("it isn't stored north up, which a window doesn't read yet".into()));
+    }
+    // The box in the file's coordinates: its edges, each at 32 points, as a projected file bends them.
+    let tr = layout.crs.transformer()?;
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for k in 0..=32 {
+        let t = f64::from(k) / 32.0;
+        let (lon, lat) = (west + (east - west) * t, south + (north - south) * t);
+        for (x, y) in [(lon, south), (lon, north), (west, lat), (east, lat)] {
+            if let Some(c) = tr.from_lonlat(rustgis_geom::Coord::new(x, y)) {
+                (x0, y0, x1, y1) = (x0.min(c.x), y0.min(c.y), x1.max(c.x), y1.max(c.y));
+            }
+        }
+    }
+    if !(x0 < x1 && y0 < y1) {
+        return Err(named("the box is outside the file's coordinate system".into()));
+    }
+    // A level's cell size, in metres for a longitude/latitude file.
+    let geographic = layout.crs.is_geographic();
+    let size_of = |l: &Level| {
+        let px = layout.transform_of(l).pixel_width.abs();
+        if geographic { px * METRES_PER_DEGREE } else { px }
+    };
+    // A level's window: its columns and rows, snapped outwards and kept within the file.
+    let window = |l: &Level| {
+        let lt = layout.transform_of(l);
+        let at = |v: f64, most: u32| v.clamp(0.0, f64::from(most)) as u32;
+        let (c0, c1) =
+            (at(((x0 - lt.origin_x) / lt.pixel_width).floor(), l.width), at(((x1 - lt.origin_x) / lt.pixel_width).ceil(), l.width));
+        let (r0, r1) =
+            (at(((y1 - lt.origin_y) / lt.pixel_height).floor(), l.height), at(((y0 - lt.origin_y) / lt.pixel_height).ceil(), l.height));
+        (c0, c1, r0, r1)
+    };
+    let values = |l: &Level| {
+        let (c0, c1, r0, r1) = window(l);
+        u64::from(c1 - c0) * u64::from(r1 - r0) * layout.bands.max(1) as u64
+    };
+    // The full image, or the coarsest overview whose cells are no larger than the size asked.
+    let level = match cell {
+        None => 0,
+        Some(c) => (0..layout.levels.len()).rev().find(|i| size_of(&layout.levels[*i]) <= c * (1.0 + 1e-9)).unwrap_or(0),
+    };
+    let lv = layout.levels.get(level).ok_or_else(|| named("the file has no image".into()))?;
+    let (c0, c1, r0, r1) = window(lv);
+    if c1 <= c0 || r1 <= r0 {
+        return Err(named("the box is outside the file".into()));
+    }
+    let unit = if geographic { " m" } else { " (the file's units)" };
+    if values(lv) > MAX_WINDOW_VALUES {
+        // The finest overview the window fits in, offered, never read unasked.
+        let take = match (level..layout.levels.len()).find(|i| values(&layout.levels[*i]) <= MAX_WINDOW_VALUES) {
+            Some(i) => format!("take \"cellSize\": {} or more, or a smaller box", size_of(&layout.levels[i]).ceil()),
+            None => "take a smaller box".into(),
+        };
+        return Err(named(format!(
+            "the window is {} × {} cells of {:.1}{unit}, {} band(s); a window holds {MAX_WINDOW_VALUES} values at most: {take}",
+            c1 - c0,
+            r1 - r0,
+            size_of(lv),
+            layout.bands.max(1)
+        )));
+    }
+    let mut bands = Vec::with_capacity(layout.bands.max(1));
+    for band in 0..layout.bands.max(1) {
+        bands.push(cog::read_values_blocking(&info, url, level, band, (c0, c1), (r0, r1)).map_err(named)?);
+    }
+    let lt = layout.transform_of(lv);
+    let transform = rustgis_data::raster::GeoTransform {
+        origin_x: lt.origin_x + f64::from(c0) * lt.pixel_width,
+        origin_y: lt.origin_y + f64::from(r0) * lt.pixel_height,
+        ..lt
+    };
+    let color = match &layout.palette {
+        Some(table) if bands.len() == 1 => rustgis_data::raster::ColorHint::Palette(table.clone()),
+        _ => layout.color.clone(),
+    };
+    let stem = cog_name(url);
+    let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or(&stem).to_string();
+    let mut r =
+        rustgis_data::raster::Raster::new(&name, c1 - c0, r1 - r0, bands, transform, layout.crs, layout.nodata, color, layout.data_type)
+            .map_err(|e| named(e.to_string()))?;
+    if let Some(described) = &layout.described {
+        r.apply_pam(described);
+    }
+    // Kept in the project as a GeoTIFF of the window (a cloud-optimised one keeps a colour table).
+    let bytes = rustgis_data::raster::cogwrite::write(&r, 0)
+        .or_else(|_| rustgis_data::raster::geotiff::write(&r, 0))
+        .map_err(|e| named(e.to_string()))?;
+    let (width, height, size) = (r.width, r.height, size_of(lv));
+    let layer = rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes);
+    let mut out = super::raster::add_raster(s, &name, layer)?;
+    let of = if level == 0 { "the full image".to_string() } else { format!("overview {level} of {}", layout.levels.len() - 1) };
+    let added = s.active_layer.and_then(|id| s.map().layer(id)).map(|l| l.name.clone()).unwrap_or(name);
+    s.notify(format!("{added}: a {width} × {height} window of {of}, cells of {size:.1}{unit}, read by range from its address"), false);
+    out["window"] = json!({"columns": [c0, c1], "rows": [r0, r1], "level": level, "cellSize": size});
+    Ok(out)
+}
+
+/// A window can't be read in the web app yet: nothing there may wait for the tiles.
+#[cfg(target_arch = "wasm32")]
+fn add_cog_window(_: &mut Session, _: &Value, url: &str) -> CmdResult {
+    Err(format!(
+        "{url}: a window of a cloud-optimised GeoTIFF (\"bbox\") is read on the desktop and the command line for now; here, leave out \"bbox\" to draw the file in place"
+    ))
+}
+
+/// A window's box: `[west, south, east, north]` in degrees, or `"view"`, the map's extent.
+#[cfg(not(target_arch = "wasm32"))]
+fn window_box(s: &Session, p: &Value) -> Result<[f64; 4], String> {
+    const NEED: &str = "bbox is [west, south, east, north] in degrees, or \"view\"";
+    let [w, so, e, n] = match p.get("bbox") {
+        Some(Value::String(v)) if v.trim().eq_ignore_ascii_case("view") => {
+            let e = super::workspace::view_extent(s);
+            if e.is_empty() {
+                return Err("the map's extent isn't known; give bbox".into());
+            }
+            [e.min_x.max(-180.0), e.min_y.max(-90.0), e.max_x.min(180.0), e.max_y.min(90.0)]
+        }
+        Some(Value::Array(a)) => {
+            let v: Option<Vec<f64>> = a.iter().map(|x| x.as_f64().filter(|x| x.is_finite())).collect();
+            match v.as_deref() {
+                Some([w, so, e, n]) => [*w, *so, *e, *n],
+                _ => return Err(NEED.into()),
+            }
+        }
+        _ => return Err(NEED.into()),
+    };
+    if w < e && so < n && (-90.0..=90.0).contains(&so) && (-90.0..=90.0).contains(&n) { Ok([w, so, e, n]) } else { Err(NEED.into()) }
 }
 
 /// A GeoTIFF's name from its address: the file name without its extension, or for a dated
