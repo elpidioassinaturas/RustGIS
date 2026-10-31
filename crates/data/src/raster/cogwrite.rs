@@ -414,8 +414,11 @@ fn entries(r: &Raster, plan: &Plan, lv: &Level, first: bool, geo: &GeoKeys, big:
                 plan.bands.iter().any(|b| r.bands.get(*b).is_some_and(|b| b.stats.count < n)).then(|| "nan".to_string())
             }
         };
-        // The written band's class names, so a reopened window keeps its legend's labels.
-        if let Some(xml) = plan.bands.first().and_then(|b| r.bands.get(*b)).and_then(|b| super::pam::class_metadata(&b.classes)) {
+        // The written bands' names and the first one's class names, so a reopened window keeps
+        // them (a band keeping its number has no name to write).
+        let names: Vec<Option<&str>> = plan.bands.iter().map(|b| super::band_name_of(r, *b)).collect();
+        let classes = plan.bands.first().and_then(|b| r.bands.get(*b)).map_or(&[][..], |b| &b.classes[..]);
+        if let Some(xml) = super::pam::gdal_metadata(&names, classes) {
             e.push(ascii(42112, &xml));
         }
         if let Some(nd) = nodata {

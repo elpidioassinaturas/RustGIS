@@ -1187,9 +1187,12 @@ pub fn write(r: &Raster, band: usize) -> Result<Vec<u8>> {
             .then(|| band.data.iter().map(|v| if r.is_valid(*v) { v.clamp(0.0, 255.0) as u8 } else { nodata.unwrap_or(0) }).collect())
     };
     let rgb = matches!(r.color, ColorHint::Rgb { .. }) && r.bands.len() >= 3;
-    // The class names of the band written first (the red one of a colour file), in GDAL's
-    // metadata tag, read back on open as band 1's.
-    let classes = r.bands.get(if rgb { 0 } else { band }).and_then(|b| super::pam::class_metadata(&b.classes));
+    // The written bands' names and the first one's class names (the red band's, for a colour
+    // file), in GDAL's metadata tag, read back on open.
+    let written: Vec<usize> = if rgb { (0..r.bands.len().min(4)).collect() } else { vec![band] };
+    let names: Vec<Option<&str>> = written.iter().map(|b| super::band_name_of(r, *b)).collect();
+    let first = r.bands.get(written[0]).map_or(&[][..], |b| &b.classes[..]);
+    let classes = super::pam::gdal_metadata(&names, first);
     macro_rules! tags {
         ($img:expr) => {{
             let e = $img.encoder();
@@ -1955,8 +1958,13 @@ mod tests {
         r.bands[0].classes = vec![String::new(); 16];
         r.bands[0].classes[3] = "Formação Florestal".into();
         r.bands[0].classes[15] = "Pastagem".into();
+        r.bands[0].name = "classe_mapbiomas".into();
         let back = read(std::io::Cursor::new(write(&r, 0).unwrap()), "back").unwrap();
         assert_eq!((back.bands[0].class_name(3.0), back.bands[0].class_name(15.0)), (Some("Formação Florestal"), Some("Pastagem")));
+        assert_eq!(back.bands[0].name, "classe_mapbiomas");
+        // The same through the cloud-optimised writer.
+        let cog = read(std::io::Cursor::new(super::super::cogwrite::write(&r, 0).unwrap()), "cog").unwrap();
+        assert_eq!((cog.bands[0].name.as_str(), cog.bands[0].class_name(3.0)), ("classe_mapbiomas", Some("Formação Florestal")));
     }
 
     #[test]

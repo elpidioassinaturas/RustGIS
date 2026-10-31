@@ -119,9 +119,9 @@ tile), without a STAC catalogue:
 {"url": "https://…/mapbiomas_brazil_2024.tif", "bbox": [-42.971, -5.587, -42.599, -4.786], "name": "MapBiomas 2024"}
 ```
 
-- The box is `[west, south, east, north]` in degrees (or `"view"`). It is turned into the file's
-  coordinate system and snapped outwards onto its pixels, within the file; the raster stays in the
-  file's coordinate system.
+- The box is `[west, south, east, north]` in degrees, or `"view"` (refused when the view reaches
+  past 180°). It is turned into the file's coordinate system and snapped outwards onto its pixels,
+  within the file; the raster stays in the file's coordinate system.
 - Only the tiles the window crosses are read, at full resolution. `"cellSize"` reads the coarsest
   overview whose cells are no larger, in the file's units (metres for a longitude/latitude file, a
   degree taken as 111.32 km); overviews are never read unasked.

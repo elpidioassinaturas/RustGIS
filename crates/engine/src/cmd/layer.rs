@@ -2701,6 +2701,11 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
                 "{url}: \"bbox\" reads a window of one cloud-optimised GeoTIFF with its coordinates: leave out \"as\" and \"whole\", and give a single file's address"
             ));
         }
+        // What a window doesn't read is refused, not dropped: it keeps the file's coordinate system.
+        let unread: Vec<&str> = WINDOW_UNREAD.iter().copied().filter(|k| p.get(*k).is_some_and(|v| !v.is_null())).collect();
+        if !unread.is_empty() {
+            return Err(format!("{url}: a window (\"bbox\") doesn't read {}: leave it out", unread.join(", ")));
+        }
         return add_cog_window(s, p, url);
     }
     // A PMTiles archive is read a tile at a time, never downloaded whole.
@@ -2865,6 +2870,10 @@ pub(crate) fn add_cog(s: &mut Session, p: &Value, url: &str) -> CmdResult {
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_WINDOW_VALUES: u64 = if cfg!(test) { 300_000 } else { crate::render::rustgis_tiles::cog::MAX_VALUES_READ };
 
+/// `layer.addUrl` keys for other kinds of address, which a window (`"bbox"`) doesn't read.
+const WINDOW_UNREAD: [&str; 12] =
+    ["layer", "x", "y", "wkt", "crs", "delimiter", "paperSpace", "stream", "start", "end", "unit", "interval"];
+
 /// Metres in a degree, to compare a cell size in metres with a longitude/latitude file's pixels.
 #[cfg(not(target_arch = "wasm32"))]
 const METRES_PER_DEGREE: f64 = 111_320.0;
@@ -2984,7 +2993,7 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
         Ok(bytes) => bytes,
         Err(why) => {
             let bytes = rustgis_data::raster::geotiff::write(&r, 0).map_err(|e| named(e.to_string()))?;
-            s.notify(format!("{name}: kept in the project as a plain GeoTIFF, without a colour table ({why})"), false);
+            s.notify(format!("{name}: saved in the project as a plain GeoTIFF without its colour table ({why}): drawn in its colours now, it opens grey once the project is reopened"), false);
             bytes
         }
     };
@@ -2994,6 +3003,11 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     let of = if level == 0 { "the full image".to_string() } else { format!("overview {level} of {}", layout.levels.len() - 1) };
     let added = s.active_layer.and_then(|id| s.map().layer(id)).map(|l| l.name.clone()).unwrap_or(name);
     s.notify(format!("{added}: a {width} × {height} window of {of}, cells of {size:.1}{unit}, read by range from its address"), false);
+    // What the file's header holds but wasn't read (a colour table, names), one notice each.
+    let described_lost = layout.described.iter().flat_map(|d| d.lost.iter().map(|l| format!("its GDAL metadata: {l}")));
+    for lost in layout.lost.iter().cloned().chain(described_lost) {
+        s.notify(format!("{added}: {lost}"), false);
+    }
     out["window"] = json!({"columns": [c0, c1], "rows": [r0, r1], "level": level, "cellSize": size});
     // `"zoom": true` zooms to the window whatever the map held, as for any other address.
     if b(p, "zoom") == Some(true) {
@@ -3020,7 +3034,12 @@ fn window_box(s: &Session, p: &Value) -> Result<[f64; 4], String> {
             if e.is_empty() {
                 return Err("the map's extent isn't known; give bbox".into());
             }
-            [e.min_x.max(-180.0), e.min_y.max(-90.0), e.max_x.min(180.0), e.max_y.min(90.0)]
+            // A view past 180° (across the antimeridian, or the world more than once) isn't cut
+            // to fit: what it shows past there would be left out.
+            if e.min_x < -180.0 || e.max_x > 180.0 {
+                return Err("the view reaches past 180° of longitude; give bbox".into());
+            }
+            [e.min_x, e.min_y.max(-90.0), e.max_x, e.max_y.min(90.0)]
         }
         Some(Value::Array(a)) => {
             let v: Option<Vec<f64>> = a.iter().map(|x| x.as_f64().filter(|x| x.is_finite())).collect();

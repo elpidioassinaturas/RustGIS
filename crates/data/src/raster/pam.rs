@@ -29,6 +29,8 @@ const MAX_BYTES: u64 = 16 << 20;
 const MAX_BANDS: usize = 65_536;
 /// Most class names read for a band: one for each value of a 16-bit band.
 const MAX_CATEGORIES: usize = 65_536;
+/// Longest band description or class name read from GDAL's metadata tag, in characters.
+const MAX_NAME: usize = 256;
 
 /// Statistics GDAL stored for a band (`STATISTICS_*`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -56,6 +58,9 @@ pub struct PamBand {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Pam {
     pub bands: Vec<PamBand>,
+    /// What [`parse_gdal_metadata`] left out or cut, one line a kind with a count, for the caller
+    /// to say (AGENTS.md, Never silent). Empty when the document is read whole.
+    pub lost: Vec<String>,
 }
 
 impl Pam {
@@ -160,6 +165,15 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
         return None;
     }
     let mut pam = Pam::default();
+    // What is left out or cut, counted.
+    let (mut odd_bands, mut twice, mut cut) = (0usize, 0usize, 0usize);
+    let mut text = |item: roxmltree::Node| {
+        let t = item.text().map(str::trim).filter(|d| !d.is_empty())?;
+        if t.chars().nth(MAX_NAME).is_some() {
+            cut += 1;
+        }
+        Some(t.chars().take(MAX_NAME).collect::<String>())
+    };
     // The bands described so far, so a long document isn't searched again for each item.
     let mut seen = std::collections::HashSet::new();
     for item in root.children().filter(|n| n.has_tag_name("Item") && n.attribute("role") == Some("description")) {
@@ -168,31 +182,47 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
             .and_then(|v| v.trim().parse::<usize>().ok())
             .and_then(|s| s.checked_add(1))
             .filter(|n| *n <= MAX_BANDS);
-        let description = item.text().map(str::trim).filter(|d| !d.is_empty()).map(|d| d.chars().take(256).collect::<String>());
+        let Some(description) = text(item) else { continue };
+        let Some(band) = band else {
+            odd_bands += 1;
+            continue;
+        };
         // A band's first description, if it is given twice.
-        if let (Some(band), Some(description)) = (band, description)
-            && seen.insert(band)
-        {
+        if seen.insert(band) {
             pam.bands.push(PamBand { band, description: Some(description), ..PamBand::default() });
+        } else {
+            twice += 1;
         }
     }
     // Class names, by value: dataset items (no band, no role) named CLASS_ and a whole number.
-    let mut classes: Vec<String> = Vec::new();
+    let (mut classes, mut odd_classes): (Vec<String>, usize) = (Vec::new(), 0);
     for item in root.children().filter(|n| n.has_tag_name("Item") && n.attribute("sample").is_none() && n.attribute("role").is_none()) {
-        let value = item
-            .attribute("name")
-            .and_then(|n| n.strip_prefix("CLASS_"))
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|v| *v < MAX_CATEGORIES);
-        let name = item.text().map(str::trim).filter(|d| !d.is_empty()).map(|d| d.chars().take(256).collect::<String>());
-        if let (Some(value), Some(name)) = (value, name) {
-            if classes.len() <= value {
-                classes.resize(value + 1, String::new());
-            }
-            if let Some(slot) = classes.get_mut(value).filter(|s| s.is_empty()) {
-                *slot = name;
-            }
+        // Other dataset items (AREA_OR_POINT, a file's own keys) aren't class names.
+        let Some(value) = item.attribute("name").and_then(|n| n.strip_prefix("CLASS_")) else { continue };
+        let Some(name) = text(item) else { continue };
+        let Some(value) = value.parse::<usize>().ok().filter(|v| *v < MAX_CATEGORIES) else {
+            odd_classes += 1;
+            continue;
+        };
+        if classes.len() <= value {
+            classes.resize(value + 1, String::new());
         }
+        match classes.get_mut(value).filter(|s| s.is_empty()) {
+            Some(slot) => *slot = name,
+            None => twice += 1,
+        }
+    }
+    if odd_bands > 0 {
+        pam.lost.push(format!("{odd_bands} band description(s) for no band from 1 to {MAX_BANDS} left out"));
+    }
+    if odd_classes > 0 {
+        pam.lost.push(format!("{odd_classes} CLASS_ item(s) whose value isn't a whole number below {MAX_CATEGORIES} left out"));
+    }
+    if twice > 0 {
+        pam.lost.push(format!("{twice} band or class name(s) given again left out (the first is kept)"));
+    }
+    if cut > 0 {
+        pam.lost.push(format!("{cut} band or class name(s) cut to {MAX_NAME} characters"));
     }
     if !classes.is_empty() {
         match pam.bands.iter_mut().find(|b| b.band == 1) {
@@ -200,21 +230,18 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
             None => pam.bands.push(PamBand { band: 1, categories: classes, ..PamBand::default() }),
         }
     }
-    (!pam.bands.is_empty()).then_some(pam)
+    (!pam.bands.is_empty() || !pam.lost.is_empty()).then_some(pam)
 }
 
-/// GDAL's metadata document naming a band's classes as dataset items `CLASS_<value>`, as
-/// [`parse_gdal_metadata`] reads them back: `None` when no class is named. It is plain ASCII
-/// (other characters as XML references), as the tag's type is.
-pub fn class_metadata(classes: &[String]) -> Option<String> {
+/// GDAL's metadata document for the bands a GeoTIFF holds, as [`parse_gdal_metadata`] reads
+/// it back: each named band's description (`sample` from 0, in the order given), and the first
+/// band's classes as dataset items `CLASS_<value>`. `None` when there is nothing to say. Names
+/// are written whole, in plain ASCII (other characters as XML references), as the tag's type is.
+pub fn gdal_metadata(descriptions: &[Option<&str>], classes: &[String]) -> Option<String> {
     let mut items = String::new();
-    for (value, name) in classes.iter().enumerate().take(MAX_CATEGORIES) {
-        let name = name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        items.push_str(&format!("<Item name=\"CLASS_{value}\">"));
-        for c in name.chars().take(256) {
+    let mut put = |open: String, name: &str| {
+        items.push_str(&open);
+        for c in name.chars() {
             match c {
                 '&' => items.push_str("&amp;"),
                 '<' => items.push_str("&lt;"),
@@ -224,6 +251,16 @@ pub fn class_metadata(classes: &[String]) -> Option<String> {
             }
         }
         items.push_str("</Item>");
+    };
+    for (sample, d) in descriptions.iter().enumerate() {
+        if let Some(d) = d.map(str::trim).filter(|d| !d.is_empty()) {
+            put(format!("<Item name=\"DESCRIPTION\" sample=\"{sample}\" role=\"description\">"), d);
+        }
+    }
+    for (value, name) in classes.iter().enumerate() {
+        if !name.trim().is_empty() {
+            put(format!("<Item name=\"CLASS_{value}\">"), name.trim());
+        }
     }
     (!items.is_empty()).then(|| format!("<GDALMetadata>{items}</GDALMetadata>"))
 }
@@ -233,14 +270,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn class_names_written_are_read_back() {
+    fn band_and_class_names_written_are_read_back() {
         let classes = vec![String::new(), "Floresta & savana".into(), String::new(), "Formação <campestre>".into()];
-        let xml = class_metadata(&classes).unwrap();
+        let xml = gdal_metadata(&[Some("classe_mapbiomas"), None], &classes).unwrap();
         assert!(xml.is_ascii(), "{xml}");
         let pam = parse_gdal_metadata(&xml).unwrap();
         assert_eq!(pam.band(1).unwrap().categories, classes);
-        // No class named, no document.
-        assert_eq!(class_metadata(&[String::new(), " ".into()]), None);
+        assert_eq!(pam.band(1).unwrap().description.as_deref(), Some("classe_mapbiomas"));
+        assert!(pam.band(2).is_none() && pam.lost.is_empty(), "{pam:?}");
+        // Nothing named, no document.
+        assert_eq!(gdal_metadata(&[None, Some(" ")], &[String::new(), " ".into()]), None);
+    }
+
+    #[test]
+    fn what_gdal_metadata_leaves_out_is_said() {
+        // A clean document says nothing.
+        let clean =
+            parse_gdal_metadata(r#"<GDALMetadata><Item name="CLASS_1">Forest</Item><Item name="AREA_OR_POINT">Area</Item></GDALMetadata>"#);
+        assert!(clean.unwrap().lost.is_empty());
+        let long = "x".repeat(300);
+        let xml = format!(
+            r#"<GDALMetadata><Item name="CLASS_1">Forest</Item><Item name="CLASS_1">Woods</Item><Item name="CLASS_70000">Far</Item><Item name="CLASS_x">Odd</Item><Item name="CLASS_2">{long}</Item><Item name="DESCRIPTION" sample="x" role="description">Odd</Item></GDALMetadata>"#
+        );
+        let pam = parse_gdal_metadata(&xml).unwrap();
+        assert_eq!(pam.band(1).unwrap().categories[1], "Forest");
+        assert_eq!(pam.band(1).unwrap().categories[2].chars().count(), 256);
+        let said = pam.lost.join("; ");
+        for want in
+            ["1 band description(s) for no band", "2 CLASS_ item(s)", "1 band or class name(s) given again", "1 band or class name(s) cut"]
+        {
+            assert!(said.contains(want), "{want}: {said}");
+        }
+        // Only what is lost: a document of nothing but bad items still says so.
+        assert!(!parse_gdal_metadata(r#"<GDALMetadata><Item name="CLASS_99999">Far</Item></GDALMetadata>"#).unwrap().lost.is_empty());
     }
 
     #[test]

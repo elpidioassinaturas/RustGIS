@@ -276,6 +276,11 @@ impl std::fmt::Debug for Raster {
     }
 }
 
+/// A band's own name, for a file's metadata: `None` while it keeps its number (`Band 3`).
+pub(crate) fn band_name_of(r: &Raster, band: usize) -> Option<&str> {
+    r.bands.get(band).map(|b| b.name.as_str()).filter(|n| !n.trim().is_empty() && *n != format!("Band {}", band + 1))
+}
+
 impl Raster {
     /// Builds a raster from bands of `width × height` pixels and computes statistics.
     #[allow(clippy::too_many_arguments)]
@@ -959,6 +964,7 @@ pub(crate) mod tests {
                 stats: Some(pam::Stats { min: -50.0, max: 900.0, mean: Some(300.0), std_dev: Some(40.0) }),
                 ..Default::default()
             }],
+            ..Default::default()
         };
         let mut full = small();
         full.apply_pam(&pam);
