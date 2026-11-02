@@ -503,6 +503,19 @@ impl Raster {
         if self.nodata.is_none() {
             self.nodata = pam.nodata_within(self.bands.len());
             recompute = self.nodata.is_some();
+            // Bands that disagree give none: their no-data pixels are read as values, and said.
+            let mut given: Vec<f64> =
+                pam.bands.iter().filter(|b| (1..=self.bands.len()).contains(&b.band)).filter_map(|b| b.nodata).collect();
+            given.sort_by(f64::total_cmp);
+            given.dedup();
+            if self.nodata.is_none() && given.len() > 1 {
+                let values: Vec<String> = given.iter().take(4).map(|v| v.to_string()).collect();
+                let more = if given.len() > 4 { ", …" } else { "" };
+                self.lost.push(format!(
+                    "{from}: its bands give different no-data values ({}{more}): none is applied, so those pixels are read as values",
+                    values.join(", ")
+                ));
+            }
         }
         let nd = self.nodata.map(|v| v as f32);
         let valid = move |v: f32| v.is_finite() && nd.is_none_or(|d| v != d);
@@ -1137,6 +1150,26 @@ pub(crate) mod tests {
             pam::SIDECAR,
         );
         assert_eq!(zero.nodata, None);
+        // Bands that disagree give none, and say so; bands that agree give theirs.
+        let mut two = small();
+        two.nodata = None;
+        let both = |a: f64, b: f64| pam::Pam {
+            bands: vec![
+                pam::PamBand { band: 1, nodata: Some(a), ..Default::default() },
+                pam::PamBand { band: 1, nodata: Some(b), ..Default::default() },
+            ],
+            lost: Vec::new(),
+        };
+        two.apply_pam(&both(0.0, 255.0), pam::SIDECAR);
+        assert_eq!(two.nodata, None);
+        assert_eq!(
+            two.lost,
+            ["its .aux.xml sidecar: its bands give different no-data values (0, 255): none is applied, so those pixels are read as values"]
+        );
+        let mut same = small();
+        same.nodata = None;
+        same.apply_pam(&both(0.0, 0.0), pam::SIDECAR);
+        assert!(same.nodata == Some(0.0) && same.lost.is_empty(), "{:?}", same.lost);
         assert_eq!(zero.lost, ["its .aux.xml sidecar: a no-data value for 1 band(s) it doesn't have (it has 1) left out"]);
         // What the document left out is said as the sidecar's, not the GDAL tag's.
         assert!(

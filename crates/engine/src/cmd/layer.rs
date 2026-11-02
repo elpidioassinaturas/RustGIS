@@ -2823,6 +2823,15 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
                 "{url}: \"bbox\" reads a window of one cloud-optimised GeoTIFF with its coordinates: leave out \"as\" and \"whole\", and give a single file's address"
             ));
         }
+        // An address naming another kind of file is refused before anything is fetched (one
+        // with no extension, or a GeoTIFF's, is read; `"cog": true` says it is one).
+        if b(p, "cog") != Some(true)
+            && let Some(ext) = address_extension(url).filter(|e| !matches!(e.as_str(), "tif" | "tiff" | "geotiff"))
+        {
+            return Err(format!(
+                "{url}: \"bbox\" reads a window of a cloud-optimised GeoTIFF, and this address names a .{ext} file: leave out \"bbox\" (or give \"cog\": true for a GeoTIFF by another name)"
+            ));
+        }
         // What a window doesn't read is refused, not dropped: it keeps the file's coordinate system.
         let unread: Vec<&str> = WINDOW_UNREAD.iter().copied().filter(|k| p.get(*k).is_some_and(|v| !v.is_null())).collect();
         if !unread.is_empty() {
@@ -3055,6 +3064,16 @@ const MAX_WINDOW_BANDS: usize = if cfg!(test) { 8 } else { 256 };
 /// How long a window's bands are read for, all together: past it, no band more is asked for.
 #[cfg(not(target_arch = "wasm32"))]
 const WINDOW_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The extension an address's file name has (lowercase, without the dot), if it has one: the
+/// query and fragment aside.
+pub(crate) fn address_extension(url: &str) -> Option<String> {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let file = path.rsplit('/').next().filter(|f| !f.is_empty() && !path.ends_with("://"))?;
+    let (stem, ext) = file.rsplit_once('.')?;
+    (!stem.is_empty() && !ext.is_empty() && ext.len() <= 10 && ext.bytes().all(|c| c.is_ascii_alphanumeric()))
+        .then(|| ext.to_ascii_lowercase())
+}
 
 /// `layer.addUrl` keys for other kinds of address, which a window (`"bbox"`) doesn't read.
 const WINDOW_UNREAD: [&str; 13] =

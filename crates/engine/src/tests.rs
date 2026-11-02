@@ -23680,6 +23680,18 @@ fn a_cog_window_comes_in_as_a_raster() {
     let e =
         s.run("layer.addUrl", &json!({"url": format!("{five}/five.tif"), "bbox": [10.0, 45.0, 10.5, 45.5], "name": "Five"})).unwrap_err();
     assert!(e.contains("the window is 256 × 256 cells") && e.contains("5 band(s); a window holds 300000 values at most"), "{e}");
+    // An address that names another kind of file is refused before anything is fetched.
+    let before = sent.load(std::sync::atomic::Ordering::Relaxed);
+    for (url, ext) in
+        [(format!("{base}/roads.geojson"), "geojson"), (format!("{base}/a.FGB?x=1"), "fgb"), (format!("{base}/t.pmtiles"), "pmtiles")]
+    {
+        let e = s.run("layer.addUrl", &json!({"url": url, "bbox": [10.25, 45.5, 10.5, 45.75]})).unwrap_err();
+        assert!(e.contains(&format!("this address names a .{ext} file")), "{e}");
+    }
+    assert_eq!(sent.load(std::sync::atomic::Ordering::Relaxed), before, "nothing fetched");
+    assert_eq!(crate::cmd::layer::address_extension("https://x.org/data/scene.TIF?sig=a.b"), Some("tif".into()));
+    assert_eq!(crate::cmd::layer::address_extension("https://x.org/download"), None);
+    assert_eq!(crate::cmd::layer::address_extension("https://x.org/"), None);
     // A plugin's command run by the app doesn't wait for a window: refused, and said.
     s.leave_downloads = true;
     let e = s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "bbox": [10.25, 45.5, 10.5, 45.75]})).unwrap_err();
