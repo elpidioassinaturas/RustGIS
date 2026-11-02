@@ -15,7 +15,8 @@ use crate::theme::{Tokens, semibold};
 pub const SHOWN: usize = 200;
 
 /// What the listed rows were picked from: the log's length and newest entry (which change with
-/// each entry, a clear, or the oldest going past the log's limit) and the filters.
+/// each entry, a clear, or the oldest going past the log's limit) and the filters, the query as
+/// typed (trimmed).
 type Key = (usize, Option<LogEntry>, String, bool);
 
 /// Which list the History pane shows, and the log's filters.
@@ -61,11 +62,14 @@ pub fn pane(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             .on_hover_text(tl!("Words in the command's id, such as layer. or export"));
         ui.checkbox(&mut s.failed, tl!("Failed only"));
     });
-    let query = app.ui.session_log.query.trim().to_lowercase();
-    let failed = app.ui.session_log.failed;
-    let key: Key = (app.session.log.len(), app.session.log.newest().cloned(), query, failed);
-    if app.ui.session_log.cache.as_ref().is_none_or(|c| c.0 != key) {
-        let (shown, count, total) = app.session.log.select(|e| kept(e, &key.2, key.3), SHOWN);
+    // Compared in place, so a repaint that changes nothing allocates and clones nothing; the
+    // rows are picked again only when the key changed.
+    let (log, State { query, failed, cache, .. }) = (&app.session.log, &mut app.ui.session_log);
+    let raw = query.trim();
+    let same = cache.as_ref().is_some_and(|(k, ..)| k.0 == log.len() && k.1.as_ref() == log.newest() && k.2 == raw && k.3 == *failed);
+    if !same {
+        let lower = raw.to_lowercase();
+        let (shown, count, total) = log.select(|e| kept(e, &lower, *failed), SHOWN);
         let rows = shown
             .into_iter()
             .map(|e| {
@@ -73,9 +77,9 @@ pub fn pane(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 (e, params)
             })
             .collect();
-        app.ui.session_log.cache = Some((key, rows, count, total));
+        *cache = Some(((log.len(), log.newest().cloned(), raw.to_string(), *failed), rows, count, total));
     }
-    let (count, total, listed) = app.ui.session_log.cache.as_ref().map_or((0, 0, 0), |(_, rows, c, t)| (*c, *t, rows.len()));
+    let (count, total, listed) = cache.as_ref().map_or((0, 0, 0), |(_, rows, matched, all)| (*matched, *all, rows.len()));
     let note = if total == 0 {
         tl!("Commands that change the project, or that name a file, folder or address, appear here.").to_string()
     } else if count == 0 {
