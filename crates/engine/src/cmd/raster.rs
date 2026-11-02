@@ -833,6 +833,11 @@ fn export(s: &mut Session, p: &Value) -> CmdResult {
         let (values, verb) = values_were(written);
         note.push_str(&format!("; {values} in it {verb} rounded to 32-bit floats when {} was read", r.name));
     }
+    // The bands the writer leaves out (it writes `band`, or a colour raster's colour bands) are
+    // said, names and all.
+    if bands.len() < r.bands.len() {
+        note.push_str(&format!("; {} of its {} bands written (give \"band\" for another)", bands.len(), r.bands.len()));
+    }
     // The file keeps the first written band's class names only (as dataset `CLASS_` items).
     let unnamed: Vec<String> =
         bands.iter().skip(1).filter(|b| r.bands.get(**b).is_some_and(|b| !b.classes.is_empty())).map(|b| (b + 1).to_string()).collect();

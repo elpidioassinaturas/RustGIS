@@ -1158,11 +1158,12 @@ pub fn read_values_blocking(
     cols: (u32, u32),
     rows: (u32, u32),
 ) -> Result<Vec<f32>, String> {
-    read_values_counted_blocking(info, url, level, band, cols, rows).map(|(values, _)| values)
+    read_values_counted_blocking(info, url, level, band, cols, rows).map(|(values, _, _)| values)
 }
 
 /// [`read_values_blocking`], with how many of the window's values `f32` rounded (32- and 64-bit
-/// whole numbers and 64-bit floats it doesn't hold exactly; no-data isn't counted).
+/// whole numbers and 64-bit floats it doesn't hold exactly; no-data isn't counted), and how many
+/// it can't hold at all (past its range: left out, NaN).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_values_counted_blocking(
     info: &Arc<Info>,
@@ -1171,7 +1172,7 @@ pub fn read_values_counted_blocking(
     band: usize,
     cols: (u32, u32),
     rows: (u32, u32),
-) -> Result<(Vec<f32>, u64), String> {
+) -> Result<(Vec<f32>, u64, u64), String> {
     let url = split(url).0.to_string();
     let l = info.layout.levels.get(level).ok_or("no such overview")?;
     if band >= info.layout.bands.max(1) {
@@ -1187,7 +1188,7 @@ pub fn read_values_counted_blocking(
     let (x0, x1) = (cols.0.min(l.width), cols.1.min(l.width));
     let (y0, y1) = (rows.0.min(l.height), rows.1.min(l.height));
     if x1 <= x0 || y1 <= y0 {
-        return Ok((vec![f32::NAN; n as usize], 0));
+        return Ok((vec![f32::NAN; n as usize], 0, 0));
     }
     let (tw, th, across) = (l.tile_width.max(1), l.tile_height.max(1), l.across().max(1));
     // The tiles the window takes, counted before they are listed, in checked arithmetic: a
@@ -1199,7 +1200,7 @@ pub fn read_values_counted_blocking(
     }
     let tiles: Vec<u32> =
         (r0..=r1).flat_map(|ty| (c0..=c1).filter_map(move |tx| ty.checked_mul(across).and_then(|t| t.checked_add(tx)))).collect();
-    let (mut out, mut rounded) = (vec![f32::NAN; n as usize], 0u64);
+    let (mut out, mut rounded, mut overflowed) = (vec![f32::NAN; n as usize], 0u64, 0u64);
     let (tx, rx) = std::sync::mpsc::channel();
     fetch_bands(info.clone(), url.clone(), level, tiles.clone(), vec![band], Box::new(move |r| tx.send(r).unwrap_or_default()));
     let picked = rx.recv_timeout(Duration::from_secs(120)).map_err(|_| format!("{url}: tiles not read in two minutes"))??;
@@ -1212,9 +1213,11 @@ pub fn read_values_counted_blocking(
             for px in tx0.max(x0)..tx0.saturating_add(tw).min(x1) {
                 let i = (py - ty0) as usize * tw as usize + (px - tx0) as usize;
                 let Some(&v) = values.get(i) else { continue };
-                // Counted before the finite check: a value past `f32`'s range is infinite, and
-                // left out as no value. No-data isn't marked.
-                rounded += u64::from(chunk.rounded_at(*b, i));
+                // A marked value past `f32`'s range is infinite: left out as no value, and
+                // counted apart from those rounded. No-data isn't marked.
+                if chunk.rounded_at(*b, i) {
+                    if v.is_infinite() { overflowed += 1 } else { rounded += 1 }
+                }
                 if v.is_finite()
                     && Some(v) != nodata
                     && let Some(slot) = out.get_mut((py - rows.0) as usize * w + (px - cols.0) as usize)
@@ -1224,7 +1227,7 @@ pub fn read_values_counted_blocking(
             }
         }
     }
-    Ok((out, rounded))
+    Ok((out, rounded, overflowed))
 }
 
 #[cfg(test)]

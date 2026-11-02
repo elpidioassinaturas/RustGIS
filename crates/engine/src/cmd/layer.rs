@@ -3030,13 +3030,14 @@ pub(crate) fn add_cog(s: &mut Session, p: &Value, url: &str) -> CmdResult {
         let l = &info.layout;
         let named = l.described.as_ref().is_some_and(|d| d.bands.iter().any(|b| b.description.is_some() || !b.categories.is_empty()));
         let mut said: Vec<String> = l.lost.clone();
-        if l.palette.is_some() || named {
-            let what = match (l.palette.is_some(), named) {
-                (true, true) => "its colour table and band or class names",
-                (true, false) => "its colour table",
-                _ => "its band or class names",
-            };
-            said.push(format!("drawn in place in grey, without {what}: a window (\"bbox\") reads them"));
+        // Grey only for a palette file: an RGB file with band names is drawn in its colours.
+        match (l.palette.is_some(), named) {
+            (true, true) => {
+                said.push("drawn in place in grey, without its colour table and band or class names: a window (\"bbox\") reads them".into())
+            }
+            (true, false) => said.push("drawn in place in grey, without its colour table: a window (\"bbox\") reads it".into()),
+            (false, true) => said.push("drawn in place without its band or class names: a window (\"bbox\") reads them".into()),
+            (false, false) => {}
         }
         // A tile layer's own name, as added.
         let shown = r.get("name").and_then(Value::as_str).unwrap_or(name).to_string();
@@ -3251,12 +3252,14 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     // up (the header's read counted), so the last one started may run two minutes more.
     // The values `f32` rounded (32- and 64-bit whole numbers and floats), a count a band, are said
     // when the layer is added, as for a file read whole.
-    let (mut bands, mut rounded) = (Vec::with_capacity(count), Vec::with_capacity(count));
+    // Those past its range can't be held: left out (no value), and said apart.
+    let (mut bands, mut rounded, mut overflowed) = (Vec::with_capacity(count), Vec::with_capacity(count), 0u64);
     for band in 0..count {
         band_in_time(band, count, started.elapsed(), WINDOW_WAIT).map_err(named)?;
-        let (values, changed) = cog::read_values_counted_blocking(&info, url, level, band, (c0, c1), (r0, r1)).map_err(named)?;
+        let (values, changed, past) = cog::read_values_counted_blocking(&info, url, level, band, (c0, c1), (r0, r1)).map_err(named)?;
         bands.push(values);
         rounded.push(changed);
+        overflowed += past;
     }
     let lt = layout.transform_of(lv);
     let transform = rustgis_data::raster::GeoTransform {
@@ -3278,6 +3281,9 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
             .map_err(|e| named(e.to_string()))?;
     if rounded.iter().any(|n| *n > 0) {
         r.rounded = rounded;
+    }
+    if overflowed > 0 {
+        r.lost.push(format!("{overflowed} value(s) past the range of 32-bit floats left out: those cells have no value"));
     }
     // What the header holds but isn't read (a colour table, names): said when the layer is added.
     r.lost.extend(layout.lost.iter().cloned());

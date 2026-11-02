@@ -1084,22 +1084,17 @@ pub(super) fn read_limited_with_nodata(
     let ycbcr = matches!(ct, ColorType::YCbCr(_)) && dec.find_tag_unsigned::<u16>(Tag::Compression).ok().flatten() == Some(7);
     // A palette image (shown to the decoder as grey) is coloured by its table. One whose table
     // doesn't decode, or is too short, is drawn grey, and says so (`Raster::lost`).
-    let mut table_lost = None;
-    let colour_map = if palette {
+    let (colour_map, map_why) = if palette {
         match dec.find_tag(Tag::ColorMap) {
-            Ok(Some(v)) => Some(v),
-            Ok(None) => {
-                table_lost = Some("it is a palette image with no colour table: drawn grey".to_string());
-                None
-            }
-            Err(e) => {
-                table_lost = Some(format!("its colour table doesn't decode ({e}): it is left out"));
-                None
-            }
+            Ok(Some(v)) => (Some(v), None),
+            Ok(None) => (None, Some("it is a palette image with no colour table: drawn grey".to_string())),
+            Err(e) => (None, Some(format!("its colour table doesn't decode ({e}): it is left out"))),
         }
     } else {
-        None
+        (None, None)
     };
+    // Said for a grey image, which a table would colour (an RGB overview of a palette file isn't).
+    let mut table_lost = map_why.filter(|_| matches!(ct, ColorType::Gray(_)));
     let ct = match ct {
         ColorType::Gray(bits) if colour_map.is_some() => ColorType::Palette(bits),
         other => other,
@@ -1862,6 +1857,7 @@ mod tests {
         set_photometric(&mut none, 3);
         let none = read(std::io::Cursor::new(&none), "none").unwrap();
         assert_eq!(none.lost, ["it is a palette image with no colour table: drawn grey"]);
+        assert!(matches!(none.color, ColorHint::Gray), "{:?}", none.color);
         // Every truncation of a palette file is an error, not a panic.
         for n in (0..bytes.len()).step_by(11) {
             let _ = read(std::io::Cursor::new(&bytes[..n]), "x");

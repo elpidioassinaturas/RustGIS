@@ -23726,14 +23726,22 @@ fn a_cog_window_comes_in_as_a_raster() {
     s.run("share.exportRaster", &json!({"layer": "Named", "path": out.display().to_string()})).unwrap();
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
     assert!(said.iter().any(|n| n.ends_with("the class names of band(s) 2 aren't written: a GeoTIFF keeps the first band's")), "{said:?}");
+    assert!(said.iter().all(|n| !n.contains("bands written")), "all three colour bands are written: {said:?}");
+    // A raster of two grey bands writes one, and says so.
+    let mark = s.notice_mark();
+    s.run("share.exportRaster", &json!({"layer": "Paired", "path": out.display().to_string()})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|n| n.contains("; 1 of its 2 bands written (give \"band\" for another)")), "{said:?}");
     let _ = std::fs::remove_file(&out);
     assert_eq!(
         (ids.rounded.as_slice(), ids.value(0, 0, 0), ids.value(0, 1, 0)),
         ([32768u64].as_slice(), Some(16_777_216.0), Some(16_777_216.0))
     );
-    // Drawn in place, the palette file says it is grey, without its colour table and names.
+    // Drawn in place, a palette file added for the first time says it is grey, without its
+    // colour table and names (the header is read before it is added).
+    let (fresh, _) = serve_ranges(example_with(&Example { size: 512, tile: 256, classes: true, ..Example::default() }));
     let mark = s.notice_mark();
-    s.run("layer.addUrl", &json!({"url": format!("{classes}/cover.tif"), "name": "In place"})).unwrap();
+    s.run("layer.addUrl", &json!({"url": format!("{fresh}/cover.tif"), "name": "In place"})).unwrap();
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
     assert!(
         said.iter()
@@ -23743,7 +23751,7 @@ fn a_cog_window_comes_in_as_a_raster() {
     );
     let mark = s.notice_mark();
     s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "name": "Plain"})).unwrap();
-    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("drawn in place in grey")), "a grey file says nothing");
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("drawn in place")), "a grey file says nothing");
     let cover = raster(&s, "Cover");
     let ColorHint::Palette(table) = &cover.color else { panic!("{:?}", cover.color) };
     assert_eq!(table[3], [3, 252, 0, 255]);
