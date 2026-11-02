@@ -83,7 +83,12 @@ impl Pam {
     /// The no-data value the bands that give one agree on. A raster holds one no-data value for
     /// all its bands, so bands giving different ones give none.
     pub fn nodata(&self) -> Option<f64> {
-        let mut values = self.bands.iter().filter_map(|b| b.nodata);
+        self.nodata_within(usize::MAX)
+    }
+
+    /// [`Pam::nodata`] of the bands from 1 to `bands`: those a raster of `bands` bands has.
+    pub fn nodata_within(&self, bands: usize) -> Option<f64> {
+        let mut values = self.bands.iter().filter(|b| (1..=bands).contains(&b.band)).filter_map(|b| b.nodata);
         let first = values.next()?;
         values.all(|v| v == first).then_some(first)
     }

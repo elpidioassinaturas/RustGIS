@@ -13417,6 +13417,19 @@ fn a_trend_over_stacked_and_multiband_geotiffs() {
     let opened = s.notices_since(mark);
     assert_eq!(opened.iter().filter(|n| n.text == said).count(), 1, "{opened:?}");
     assert!(!opened.iter().any(|n| n.text.starts_with("ndvi_side:") || n.text.starts_with("ndvi_bands:")), "{opened:?}");
+    // A layer file keeps the file's bytes, not its sidecar: a band name the file's own tag holds
+    // past 256 characters is cut as it is added again from one, and said then too.
+    let mut long = described.clone();
+    long[0] = "n".repeat(300);
+    let path = dir.join("ndvi_long.tif");
+    std::fs::write(&path, multiband_tiff(4, 2, &bands, (x0, y0), px, Some(&long))).unwrap();
+    s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    let lyr = dir.join("long.rgislyr");
+    s.run("layer.save", &json!({"layer": "ndvi_long", "path": lyr.display().to_string()})).unwrap();
+    let mark = s.notice_mark();
+    s.run("layer.addData", &json!({"path": lyr.display().to_string()})).unwrap();
+    let again = s.notices_since(mark);
+    assert!(again.iter().any(|n| n.text == "ndvi_long (2): its GDAL metadata: 1 band or class name(s) cut to 256 characters"), "{again:?}");
     // Without descriptions, the dates are given.
     let path = dir.join("ndvi_plain.tif");
     std::fs::write(&path, multiband_tiff(4, 2, &bands, (x0, y0), px, None)).unwrap();
@@ -23667,6 +23680,11 @@ fn a_cog_window_comes_in_as_a_raster() {
     let e =
         s.run("layer.addUrl", &json!({"url": format!("{five}/five.tif"), "bbox": [10.0, 45.0, 10.5, 45.5], "name": "Five"})).unwrap_err();
     assert!(e.contains("the window is 256 × 256 cells") && e.contains("5 band(s); a window holds 300000 values at most"), "{e}");
+    // A plugin's command run by the app doesn't wait for a window: refused, and said.
+    s.leave_downloads = true;
+    let e = s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "bbox": [10.25, 45.5, 10.5, 45.75]})).unwrap_err();
+    s.leave_downloads = false;
+    assert!(e.contains("a plugin's command can't do in the app yet"), "{e}");
     // Byte windows round nothing, and say nothing of it; an Int32 window of 16,777,216 plus the
     // byte value says how many `f32` rounded: the odd ones, half of its 65,536 cells.
     assert!(s.notices_since(mark0).iter().all(|n| !n.text.contains("rounded")), "{:?}", s.notices_since(mark0));
@@ -23677,6 +23695,21 @@ fn a_cog_window_comes_in_as_a_raster() {
     assert!(said.iter().any(|n| n.starts_with("Ids: 32768 values were rounded as the file was read")), "{said:?}");
     // Pixel (1, 0) is 16,777,217, held as 16,777,216, as pixel (0, 0) is.
     let ids = raster(&s, "Ids");
+    // Exported, a raster whose second band has class names says the file keeps only the first's.
+    let gt = rustgis_data::raster::GeoTransform { origin_x: 10.0, origin_y: 46.0, pixel_width: 0.25, pixel_height: -0.25 };
+    let rgb = ColorHint::Rgb { alpha: false };
+    let mut named =
+        rustgis_data::raster::Raster::new("Named", 4, 4, vec![vec![1.0; 16]; 3], gt, rustgis_data::raster::Crs::LonLat, None, rgb, "Byte")
+            .unwrap();
+    named.bands[1].classes = vec![String::new(), "Water".into()];
+    let named_bytes = rustgis_data::raster::geotiff::write(&named, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "Named", rustgis_map::RasterLayer::from_bytes(named, "named.tif", named_bytes)).unwrap();
+    let out = std::env::temp_dir().join(format!("rustgis-named-{}.tif", std::process::id()));
+    let mark = s.notice_mark();
+    s.run("share.exportRaster", &json!({"layer": "Named", "path": out.display().to_string()})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|n| n.ends_with("the class names of band(s) 2 aren't written: a GeoTIFF keeps the first band's")), "{said:?}");
+    let _ = std::fs::remove_file(&out);
     assert_eq!(
         (ids.rounded.as_slice(), ids.value(0, 0, 0), ids.value(0, 1, 0)),
         ([32768u64].as_slice(), Some(16_777_216.0), Some(16_777_216.0))

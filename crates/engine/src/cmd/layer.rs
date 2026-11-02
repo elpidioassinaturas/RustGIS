@@ -2587,6 +2587,17 @@ pub(crate) fn add_layer_text(s: &mut Session, text: &str) -> CmdResult {
     crate::s3_connections::resolve_project_s3(s);
     super::connections::note_waiting(s);
     s.active_layer = Some(id);
+    // What reading its raster left out is said, as for a raster added (one still read in the
+    // background isn't here yet).
+    let lost: Vec<String> = s
+        .map()
+        .layer(id)
+        .and_then(|l| Some((&l.name, l.raster.as_ref()?.data.as_ref()?)))
+        .map(|(name, d)| d.lost.iter().map(|l| format!("{name}: {l}")).collect())
+        .unwrap_or_default();
+    for l in lost {
+        s.notify(l, false);
+    }
     Ok(json!({"layer": id}))
 }
 
@@ -2816,6 +2827,14 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
         let unread: Vec<&str> = WINDOW_UNREAD.iter().copied().filter(|k| p.get(*k).is_some_and(|v| !v.is_null())).collect();
         if !unread.is_empty() {
             return Err(format!("{url}: a window (\"bbox\") doesn't read {}: leave it out", unread.join(", ")));
+        }
+        // A plugin's command run by the app leaves what would wait to the app, off the frame; a
+        // window waits for its header and tiles, which the app doesn't take over yet.
+        #[cfg(not(target_arch = "wasm32"))]
+        if s.leave_downloads {
+            return Err(format!(
+                "{url}: a window (\"bbox\") waits for its tiles, which a plugin's command can't do in the app yet: run layer.addUrl from the command line or a script, or leave out \"bbox\" to draw the file in place"
+            ));
         }
         return add_cog_window(s, p, url);
     }

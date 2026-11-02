@@ -833,6 +833,12 @@ fn export(s: &mut Session, p: &Value) -> CmdResult {
         let (values, verb) = values_were(written);
         note.push_str(&format!("; {values} in it {verb} rounded to 32-bit floats when {} was read", r.name));
     }
+    // The file keeps the first written band's class names only (as dataset `CLASS_` items).
+    let unnamed: Vec<String> =
+        bands.iter().skip(1).filter(|b| r.bands.get(**b).is_some_and(|b| !b.classes.is_empty())).map(|b| (b + 1).to_string()).collect();
+    if !unnamed.is_empty() {
+        note.push_str(&format!("; the class names of band(s) {} aren't written: a GeoTIFF keeps the first band's", unnamed.join(", ")));
+    }
     s.notify(format!("Exported {path}{note}"), false);
     let mut v = match r.overview {
         Some((fw, fh)) => json!({"path": path, "width": r.width, "height": r.height, "overviewOf": [fw, fh]}),

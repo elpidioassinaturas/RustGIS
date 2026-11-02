@@ -494,9 +494,14 @@ impl Raster {
         if beyond > 0 {
             self.lost.push(format!("{from}: names for {beyond} band(s) it doesn't have (it has {}) left out", self.bands.len()));
         }
+        // So is a no-data value: it isn't the raster's.
+        let outside = pam.bands.iter().filter(|b| (b.band == 0 || b.band > self.bands.len()) && b.nodata.is_some()).count();
+        if outside > 0 {
+            self.lost.push(format!("{from}: a no-data value for {outside} band(s) it doesn't have (it has {}) left out", self.bands.len()));
+        }
         let mut recompute = false;
         if self.nodata.is_none() {
-            self.nodata = pam.nodata();
+            self.nodata = pam.nodata_within(self.bands.len());
             recompute = self.nodata.is_some();
         }
         let nd = self.nodata.map(|v| v as f32);
@@ -1124,6 +1129,15 @@ pub(crate) mod tests {
             "{:?}",
             one.lost
         );
+        // A no-data value for a band it doesn't have isn't its own, and is said.
+        let mut zero = small();
+        zero.nodata = None;
+        zero.apply_pam(
+            &pam::Pam { bands: vec![pam::PamBand { band: 2, nodata: Some(0.0), ..Default::default() }], lost: Vec::new() },
+            pam::SIDECAR,
+        );
+        assert_eq!(zero.nodata, None);
+        assert_eq!(zero.lost, ["its .aux.xml sidecar: a no-data value for 1 band(s) it doesn't have (it has 1) left out"]);
         // What the document left out is said as the sidecar's, not the GDAL tag's.
         assert!(
             one.lost.iter().any(|l| l == "its .aux.xml sidecar: 1 band record(s) for no band from 1 to 65536 left out"),
