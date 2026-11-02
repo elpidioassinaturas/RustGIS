@@ -2826,7 +2826,8 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
         // An address naming another kind of file is refused before anything is fetched (one
         // with no extension, or a GeoTIFF's, is read; `"cog": true` says it is one).
         if b(p, "cog") != Some(true)
-            && let Some(ext) = address_extension(url).filter(|e| !matches!(e.as_str(), "tif" | "tiff" | "geotiff"))
+            && let Some(ext) =
+                address_extension(rustgis_data::s3_address::inner(url)).filter(|e| !matches!(e.as_str(), "tif" | "tiff" | "geotiff"))
         {
             return Err(format!(
                 "{url}: \"bbox\" reads a window of a cloud-optimised GeoTIFF, and this address names a .{ext} file: leave out \"bbox\" (or give \"cog\": true for a GeoTIFF by another name)"

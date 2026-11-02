@@ -657,6 +657,13 @@ pub(crate) fn reader<'a>(r: impl Read + Seek + 'a) -> std::io::Result<Reader<'a>
     Unpaletted::new(Box::new(r))
 }
 
+impl<R> Unpaletted<R> {
+    /// Whether the file has palette images (PhotometricInterpretation 3), shown as grey.
+    pub(crate) fn has_palette(&self) -> bool {
+        !self.patches.is_empty()
+    }
+}
+
 impl<R: Read + Seek> Unpaletted<R> {
     fn new(mut inner: R) -> std::io::Result<Self> {
         let patches = palette_patches(&mut inner);

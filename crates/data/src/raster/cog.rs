@@ -323,7 +323,11 @@ pub fn layout(bytes: &Sparse) -> Result<Parse> {
 fn read_layout(r: Sparse) -> Result<Parse> {
     // The same bytes, to tell a tag not read yet from one that is broken.
     let seen = r.clone();
-    let mut dec = Decoder::new(super::geotiff::reader(r).map_err(err)?).map_err(err)?.with_limits(limits());
+    let rd = super::geotiff::reader(r).map_err(err)?;
+    // A palette image says so (PhotometricInterpretation 3, shown to the decoder as grey): only
+    // then is a colour table read, as the whole-file read does; a grey image's stray one isn't.
+    let palette_image = rd.has_palette();
+    let mut dec = Decoder::new(rd).map_err(err)?.with_limits(limits());
     let Some(geo) = super::geotiff::cog_geo(&mut dec)? else {
         return Ok(Parse::NotTiled("a rotated image, or one without coordinates, is read whole".into()));
     };
@@ -367,8 +371,11 @@ fn read_layout(r: Sparse) -> Result<Parse> {
     };
     let mut lost = Vec::new();
     let palette = match color {
-        ColorHint::Gray => match tag(&mut dec, Tag::ColorMap)? {
-            Ok(None) => None,
+        ColorHint::Gray if palette_image => match tag(&mut dec, Tag::ColorMap)? {
+            Ok(None) => {
+                lost.push("it is a palette image with no colour table: drawn grey".to_string());
+                None
+            }
             Ok(Some(v)) => match v.into_u16_vec() {
                 Ok(map) => {
                     let table = colour_table(&map, bits);
@@ -610,6 +617,11 @@ pub struct Example {
     pub wide: bool,
     /// 64-bit float samples of the byte value, but 1e39 (past `f32`'s range) for 255.
     pub huge: bool,
+    /// With `classes`: a grey image (PhotometricInterpretation 1) that has the colour table
+    /// anyway, which isn't a palette.
+    pub stray: bool,
+    /// With `classes`: a palette image with no colour table.
+    pub no_table: bool,
 }
 
 impl Default for Example {
@@ -625,6 +637,8 @@ impl Default for Example {
             lossy: false,
             wide: false,
             huge: false,
+            stray: false,
+            no_table: false,
         }
     }
 }
@@ -717,7 +731,7 @@ pub fn example_with(e: &Example) -> Vec<u8> {
                 ]),
             ),
             (259, V::S(vec![1])),
-            (262, V::S(vec![if e.classes { 3 } else { 1 }])),
+            (262, V::S(vec![if e.classes && !e.stray { 3 } else { 1 }])),
             (277, V::S(vec![nb as u16])),
             (284, V::S(vec![if e.planar { 2 } else { 1 }])),
             (322, V::L(vec![tile])),
@@ -755,7 +769,7 @@ pub fn example_with(e: &Example) -> Vec<u8> {
         if e.int8 {
             t.push((42113, V::A(b"-128\0".to_vec())));
         }
-        if e.classes {
+        if e.classes && !e.no_table {
             let n = if e.lossy { 128 } else { 256 };
             let red: Vec<u16> = (0..n).map(|i| i * 257).collect();
             let green: Vec<u16> = (0..n).map(|i| (255 - i) * 257).collect();
@@ -965,6 +979,13 @@ pub(crate) mod tests {
         let described = lossy.described.as_ref().unwrap();
         assert_eq!(described.band(1).unwrap().categories[3], "Forest Formation");
         assert!(described.lost.iter().any(|n| n.contains("1 CLASS_ item(s)")), "{:?}", described.lost);
+        // A grey image's stray colour table isn't a palette (as the whole-file read has it), and a
+        // palette image with no table is drawn grey and says so.
+        let (_, stray) = layout_of(&example_with(&Example { size: 512, tile: 256, classes: true, stray: true, ..Example::default() }));
+        assert!(stray.palette.is_none() && stray.lost.is_empty(), "{:?}", stray.lost);
+        let (_, bare) = layout_of(&example_with(&Example { size: 512, tile: 256, classes: true, no_table: true, ..Example::default() }));
+        assert!(bare.palette.is_none(), "{:?}", bare.palette);
+        assert_eq!(bare.lost, ["it is a palette image with no colour table: drawn grey"]);
     }
 
     #[test]

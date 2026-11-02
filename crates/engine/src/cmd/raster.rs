@@ -440,15 +440,59 @@ pub(crate) fn as_scan(p: &Value) -> Result<bool, String> {
 
 /// Says what reading several rasters left out, each `(raster, line)`: one notice a kind (the same
 /// line), naming the rasters that share it (three, then a count), as AGENTS.md's Never silent asks.
+///
+/// Lines that differ only in their numbers ("1 scale…", "2 scale…") are one kind: each number
+/// that differs is said as the range the rasters give ("1–2 scale…"), never summed (a size limit
+/// isn't a count).
 pub(crate) fn say_losses(s: &mut Session, losses: Vec<(String, String)>) {
-    let mut kinds: Vec<(String, Vec<String>)> = Vec::new();
+    // A line's kind: its text with each run of digits taken out, and those numbers.
+    fn kind_of(line: &str) -> (Vec<&str>, Vec<u64>) {
+        let (mut parts, mut numbers, mut from) = (Vec::new(), Vec::new(), 0);
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i].is_ascii_digit() {
+                let start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                match line[start..i].parse::<u64>() {
+                    Ok(n) => {
+                        parts.push(&line[from..start]);
+                        numbers.push(n);
+                        from = i;
+                    }
+                    Err(_) => continue,
+                }
+            } else {
+                i += 1;
+            }
+        }
+        parts.push(&line[from..]);
+        (parts, numbers)
+    }
+    // Each kind: its text parts, each number's lowest and highest, and the rasters.
+    let mut kinds: Vec<(Vec<String>, Vec<(u64, u64)>, Vec<String>)> = Vec::new();
     for (name, line) in losses {
-        match kinds.iter_mut().find(|(l, _)| *l == line) {
-            Some((_, names)) => names.push(name),
-            None => kinds.push((line, vec![name])),
+        let (parts, numbers) = kind_of(&line);
+        match kinds.iter_mut().find(|(p, n, _)| p.iter().map(String::as_str).eq(parts.iter().copied()) && n.len() == numbers.len()) {
+            Some((_, ranges, names)) => {
+                for (r, n) in ranges.iter_mut().zip(&numbers) {
+                    *r = (r.0.min(*n), r.1.max(*n));
+                }
+                names.push(name);
+            }
+            None => kinds.push((parts.iter().map(|p| p.to_string()).collect(), numbers.iter().map(|n| (*n, *n)).collect(), vec![name])),
         }
     }
-    for (line, names) in kinds {
+    for (parts, ranges, names) in kinds {
+        let mut line = String::new();
+        for (i, part) in parts.iter().enumerate() {
+            line.push_str(part);
+            if let Some((lo, hi)) = ranges.get(i) {
+                line.push_str(&if lo == hi { lo.to_string() } else { format!("{lo}–{hi}") });
+            }
+        }
         let who = match names.as_slice() {
             [one] => one.clone(),
             _ => {

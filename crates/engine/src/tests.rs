@@ -23711,6 +23711,12 @@ fn a_cog_window_comes_in_as_a_raster() {
     assert_eq!(crate::cmd::layer::address_extension("https://x.org/"), None);
     assert_eq!(crate::cmd::layer::address_extension("https://data.example.com"), None, "a host isn't a file");
     assert_eq!(crate::cmd::layer::address_extension("https://data.example.com?x=a.tif"), None);
+    // Through a saved S3 connection, the address it wraps is the one judged.
+    let wrapped = |inner: &str| rustgis_data::s3_address::bind("", "", inner).unwrap();
+    let e = s.run("layer.addUrl", &json!({"url": wrapped("https://x.org/roads.geojson"), "bbox": [10.25, 45.5, 10.5, 45.75]})).unwrap_err();
+    assert!(e.contains("names a .geojson file"), "{e}");
+    let e = s.run("layer.addUrl", &json!({"url": wrapped("https://data.example.com"), "bbox": [10.25, 45.5, 10.5, 45.75]})).unwrap_err();
+    assert!(!e.contains("names a .com file"), "{e}");
     // A plugin's command run by the app doesn't wait for a window: refused, and said.
     s.leave_downloads = true;
     let e = s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "bbox": [10.25, 45.5, 10.5, 45.75]})).unwrap_err();
