@@ -21828,6 +21828,11 @@ fn the_session_log_records_each_command_run_in_the_session() {
     let _ = std::fs::remove_file(&out);
     s.log.clear();
     assert_eq!(s.log.dropped(), 0);
+    // A clean export says nothing of it.
+    let mark = s.notice_mark();
+    s.run("project.exportLog", &json!({"path": out.display().to_string()})).unwrap();
+    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("were dropped past")), "{:?}", s.notices_since(mark));
+    let _ = std::fs::remove_file(&out);
     // Undo or redo with nothing to take back changes nothing, and isn't logged.
     s.clear_history();
     let n = s.log.len();

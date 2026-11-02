@@ -198,7 +198,19 @@ fn save(app: &mut RustGisApp) {
     if app.services.download.is_some() {
         let mut bytes = Vec::new();
         match app.session.log.write(&mut bytes, true) {
-            Ok(()) => app.download_bytes("session-log.csv", bytes),
+            Ok(()) => {
+                app.download_bytes("session-log.csv", bytes);
+                // Entries dropped past the log's limits aren't in the file: said, as an export
+                // says it on the desktop.
+                let dropped = app.session.log.dropped();
+                if dropped > 0 {
+                    let said = crate::i18n::fmt(
+                        "session-log.csv: the {n} oldest entries were dropped past the log's limits before it",
+                        &[("n", &dropped.to_string())],
+                    );
+                    app.session.notify(said, false);
+                }
+            }
             Err(e) => app.session.notify(e.to_string(), true),
         }
         return;
@@ -352,5 +364,14 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("\"map.new\",true"), "{text}");
+        let dropped = |app: &RustGisApp| app.session.notices.iter().any(|n| n.text.contains("dropped past the log's limits"));
+        assert!(!dropped(&app), "nothing dropped, nothing said");
+        // Past the log's limit, the download says how many it lacks.
+        for i in 0..rustgis_engine::project_log::LOG_LIMIT + 3 {
+            app.session.log.push(LogEntry { at: i as u64, command: "x".into(), params: Value::Null, ok: true, error: None, millis: 0 });
+        }
+        save(&mut app);
+        assert!(got.borrow_mut().take().is_some());
+        assert!(dropped(&app), "{:?}", app.session.notices);
     }
 }
