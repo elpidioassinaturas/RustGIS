@@ -845,22 +845,27 @@ fn mosaic_name(v: &Value) -> Result<&str, &'static str> {
 }
 
 /// The raster layer a mosaic input names, with its cells in memory. An error means the input isn't
-/// one: [`raster_mosaic`] then reads it as a file if it is a raster file name. It and
-/// [`mosaic_stays_in_project`] both go by this, so they can't disagree.
+/// one.
 fn mosaic_layer(s: &Session, v: &Value) -> Result<Arc<Raster>, String> {
     raster_named(s, mosaic_name(v)?)
 }
 
-/// Whether a mosaic stays in the project: no input is read from a file, and nothing else names a
-/// place (no `path`, nor a name that looks like one). An input is read from a file exactly when
-/// [`raster_mosaic`] reads it: it isn't a [`mosaic_layer`] and it is a raster file name. Any other
-/// input that isn't one (a typo, a vector layer, a tile still downloading) fails in the command
-/// with "no raster layer", touching no file, as does a call over the input limit, which is
-/// refused before any lookup. A layer named like a path (`~dem`, `a/../b`) counts as a place:
-/// that errs towards asking for `files`.
+/// Whether [`raster_mosaic`] reads a mosaic input from a file: it isn't a [`mosaic_layer`] and it
+/// is a raster file name. The command and [`mosaic_stays_in_project`] both ask this, so the
+/// permission check can't fall out of step with what the command reads.
+fn mosaic_reads_file(s: &Session, v: &Value) -> bool {
+    mosaic_layer(s, v).is_err() && mosaic_name(v).is_ok_and(rustgis_data::raster::is_raster_name)
+}
+
+/// Whether a mosaic stays in the project: no input is read from a file ([`mosaic_reads_file`]),
+/// and nothing else names a place (no `path`, nor a name that looks like one). Any other input
+/// that isn't a layer (a typo, a vector layer, a tile still downloading) fails in the command with
+/// "no raster layer", touching no file, as does a call over the input limit, which is refused
+/// before any lookup. A layer named like a path (`~dem`, `a/../b`) counts as a place: that errs
+/// towards asking for `files`.
 pub(crate) fn mosaic_stays_in_project(s: &Session, p: &Value) -> bool {
-    let read_from_file = |v: &Value| mosaic_layer(s, v).is_err() && mosaic_name(v).is_ok_and(rustgis_data::raster::is_raster_name);
-    let inputs = p.get("inputs").and_then(Value::as_array).is_none_or(|a| a.len() > MAX_MOSAIC_INPUTS || !a.iter().any(read_from_file));
+    let inputs =
+        p.get("inputs").and_then(Value::as_array).is_none_or(|a| a.len() > MAX_MOSAIC_INPUTS || !a.iter().any(|v| mosaic_reads_file(s, v)));
     inputs && !super::items::names_place(p, super::plugins::PLACE_KEYS, 0)
 }
 
@@ -883,12 +888,10 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
     // rest are loaded.
     for v in inputs {
         let n = mosaic_name(v)?;
-        let r = match mosaic_layer(s, v) {
-            Ok(r) => r,
-            Err(_) if rustgis_data::raster::is_raster_name(n) => {
-                Arc::new(rustgis_data::raster::read_path(std::path::Path::new(n)).map_err(|e| format!("{n}: {e}"))?)
-            }
-            Err(e) => return Err(e),
+        let r = if mosaic_reads_file(s, v) {
+            Arc::new(rustgis_data::raster::read_path(std::path::Path::new(n)).map_err(|e| format!("{n}: {e}"))?)
+        } else {
+            mosaic_layer(s, v)?
         };
         // An overview would quietly coarsen the whole mosaic.
         if let Some((fw, fh)) = r.overview {
