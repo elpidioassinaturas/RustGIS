@@ -3731,6 +3731,107 @@ fn terrain_is_set_from_a_dem_or_tiles() {
     assert_eq!(back.terrain, s.map().view.terrain);
     s.run("map.terrain", &json!({"off": true})).unwrap();
     assert!(s.map().view.terrain.is_none());
+    // Nothing named: the active layer, when it is a raster, is the DEM; a vector one is refused,
+    // saying to make a DEM the active layer.
+    s.active_layer = s.map().layer_by_name("Countries").map(|l| l.id);
+    assert!(s.run("map.terrain", &json!({})).unwrap_err().contains("make a DEM raster layer the active layer"));
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).unwrap();
+    let (id, name) = (dem.id, dem.name.clone());
+    s.active_layer = Some(id);
+    let v = s.run("map.terrain", &json!({"exaggeration": 3})).unwrap();
+    assert_eq!((v["source"]["layer"].as_str(), v["exaggeration"].as_f64()), (Some(name.as_str()), Some(3.0)));
+    // On a map looked at straight down, a notice names the layer picked and says to tilt it.
+    let said = s.notices.last().unwrap().text.clone();
+    assert!(said.contains(&format!("heights from '{name}'")) && said.contains("tilt the map"), "{said}");
+    // A change of exaggeration alone says nothing again.
+    let mark = s.notice_mark();
+    s.run("map.terrain", &json!({"exaggeration": 2})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("Terrain is on")), "{:?}", s.notices_since(mark));
+    // Two layers of the DEM's name: refused, since the terrain keeps it by name.
+    s.run("map.terrain", &json!({"off": true})).unwrap();
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let second = s.map().layers.iter().filter(|l| l.is_raster()).map(|l| l.id).max().unwrap();
+    s.active_layer = Some(second);
+    s.run("layer.rename", &json!({"name": name})).unwrap();
+    let e = s.run("map.terrain", &json!({})).unwrap_err();
+    assert!(e.contains("two layers are called"), "{e}");
+    s.run("layer.rename", &json!({"name": "dem 2"})).unwrap();
+    s.active_layer = Some(id);
+    s.run("map.terrain", &json!({})).unwrap();
+    // A project saved with a terrain on a shared DEM name says so as it opens.
+    {
+        let mut saved = s.project.clone();
+        let m = &mut saved.maps[0];
+        let first = m.layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone()).unwrap();
+        if let Some(l) = m.layers.iter_mut().filter(|l| l.is_raster()).nth(1) {
+            l.name = first.clone();
+        }
+        m.view.terrain = Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer(first), exaggeration: 1.0 });
+        let mut opened = Session::new(Project::default());
+        crate::cmd::project::reset_to(&mut opened, saved);
+        assert!(opened.notices.iter().any(|n| n.text.contains("is shared by two layers")), "{:?}", opened.notices);
+    }
+    // Renaming another layer leaves the terrain as it is.
+    s.run("layer.rename", &json!({"layer": "Countries", "name": "Paises"})).unwrap();
+    assert!(s.map().view.terrain.is_some());
+    s.run("layer.rename", &json!({"layer": "Paises", "name": "Countries"})).unwrap();
+    // Renaming the DEM onto another layer's name turns the terrain off, said.
+    s.active_layer = Some(id);
+    s.run("layer.rename", &json!({"name": "dem 2"})).unwrap();
+    assert!(s.map().view.terrain.is_none());
+    assert!(s.notices.last().unwrap().text.contains("two layers are now called 'dem 2'"), "{:?}", s.notices.last());
+    s.run("layer.rename", &json!({"name": name})).unwrap();
+    s.run("map.terrain", &json!({"layer": name})).unwrap();
+    // Removing the DEM turns the terrain off, said.
+    {
+        let mut t = Session::new(Project::default());
+        t.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+        t.run("map.terrain", &json!({})).unwrap();
+        t.run("layer.remove", &json!({})).unwrap();
+        assert!(t.map().view.terrain.is_none());
+        assert!(t.notices.last().unwrap().text.contains("was removed"), "{:?}", t.notices.last());
+        // A mobile map package keeps a hidden DEM, which still gives the heights.
+        t.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+        t.run("map.terrain", &json!({})).unwrap();
+        t.run("layer.visibility", &json!({})).unwrap();
+        assert!(t.map().layers.iter().any(|l| l.is_raster() && !l.visible));
+        let pkg = std::env::temp_dir().join(format!("rustgis-terrain-{}.rgismpk", std::process::id()));
+        t.run("map.package", &json!({"path": pkg.display().to_string(), "mobile": true})).unwrap();
+        t.run("map.import", &json!({"path": pkg.display().to_string()})).unwrap();
+        let _ = std::fs::remove_file(&pkg);
+        let packaged = t.project.maps.last().unwrap();
+        assert!(packaged.layers.iter().any(|l| l.is_raster()), "the hidden DEM is in the package");
+        assert!(packaged.view.terrain.is_some());
+        t.run("layer.remove", &json!({"layer": t.map().layers.iter().find(|l| l.is_raster()).map(|l| l.id).unwrap()})).unwrap();
+        // So does removing a group that holds it.
+        t.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+        let dem = t.map().layers.iter().find(|l| l.is_raster()).map(|l| l.id).unwrap();
+        let group = t.run("group.add", &json!({"name": "Relevo", "layers": [dem]})).unwrap()["group"].clone();
+        t.active_layer = Some(dem);
+        t.run("map.terrain", &json!({})).unwrap();
+        t.run("group.remove", &json!({"group": group})).unwrap();
+        assert!(t.map().view.terrain.is_none());
+        assert!(t.notices.last().unwrap().text.contains("was removed"), "{:?}", t.notices.last());
+    }
+    // Renaming the DEM keeps the terrain on it.
+    s.run("layer.rename", &json!({"name": "Relevo"})).unwrap();
+    assert_eq!(s.run("map.terrain", &json!({"exaggeration": 1})).unwrap()["source"]["layer"], "Relevo");
+    // A second layer renamed to the DEM's name: the terrain, now ambiguous, is turned off, and
+    // said.
+    s.active_layer = Some(second);
+    s.run("layer.rename", &json!({"name": "relevo"})).unwrap();
+    assert!(s.map().view.terrain.is_none());
+    assert!(s.notices.last().unwrap().text.contains("Terrain turned off: two layers are now called"), "{:?}", s.notices.last());
+    s.run("layer.rename", &json!({"name": "dem 2"})).unwrap();
+    s.active_layer = Some(id);
+    s.run("map.terrain", &json!({"layer": "Relevo"})).unwrap();
+    let name = "Relevo".to_string();
+    // Once on, nothing named changes nothing but what is given: the active layer doesn't replace it.
+    s.active_layer = s.map().layer_by_name("Countries").map(|l| l.id);
+    let v = s.run("map.terrain", &json!({})).unwrap();
+    assert_eq!(v["source"]["layer"].as_str(), Some(name.as_str()));
+    s.run("map.terrain", &json!({"off": true})).unwrap();
 }
 
 #[test]
@@ -11108,6 +11209,75 @@ fn dropped_z_values_are_said_on_import_and_export() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A standalone table can hold geometry whose Z values were dropped when it was read (a plugin's
+/// output, a project file): exporting it says so, to every format, once the file is written, as
+/// `share.exportLayer` does. A table read without Z, and a write that fails, say nothing of it.
+#[test]
+fn exporting_a_table_says_its_dropped_z_values() {
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-table-zm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("wells.geojson");
+    std::fs::write(
+        &src,
+        r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"depth":30},"geometry":{"type":"Point","coordinates":[1,2,30]}}]}"#,
+    )
+    .unwrap();
+    isolate_plugins();
+    let mut s = Session::new(Project::default());
+    let (wells, report) = rustgis_data::io::read_path(&src).unwrap();
+    assert!(wells.zm_dropped && report.messages.iter().any(|m| m.contains("Z or M")), "premise: the reader dropped Z");
+    s.project.add_table(wells);
+    let said = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("Z or M")).map(|n| n.text.clone()).collect()
+    };
+    for ext in ["geojson", "csv", "shp", "zip"] {
+        let out = dir.join(format!("wells.{ext}")).display().to_string();
+        let mark = s.notice_mark();
+        s.run("share.exportTable", &json!({"table": "wells", "path": out})).unwrap();
+        assert_eq!(said(&s, mark), [format!("{out}: its geometry has no Z or M values, which were dropped when wells was read")], ".{ext}");
+    }
+    // The file holds x and y only.
+    assert!(std::fs::read_to_string(dir.join("wells.geojson")).unwrap().contains("[1.0,2.0]"));
+    // A project file keeps what the table's read lost, as it does a layer's (the Z or M values,
+    // the coordinate system, geometry lost to it), so a table opened from one says it too.
+    let crs = rustgis_data::raster::Crs::parse("EPSG:3857").unwrap();
+    {
+        let wells = s.project.tables.last_mut().unwrap();
+        wells.crs = Some(crs);
+        wells.crs_incomplete = true;
+    }
+    let project = dir.join("wells.rgis");
+    s.run("project.saveAs", &json!({"path": project.display().to_string()})).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.open", &json!({"path": project.display().to_string()})).unwrap();
+    let opened = &t.project.tables.get(t.table_index(&json!({"table": "wells"})).unwrap()).unwrap().dataset;
+    assert!(opened.zm_dropped && opened.crs_incomplete && opened.crs == Some(crs), "{opened:?}");
+    let out = dir.join("opened.geojson").display().to_string();
+    let mark = t.notice_mark();
+    t.run("share.exportTable", &json!({"table": "wells", "path": out})).unwrap();
+    assert_eq!(said(&t, mark), [format!("{out}: its geometry has no Z or M values, which were dropped when wells was read")]);
+    // A write that fails says nothing of what the file would have lacked.
+    let missing = dir.join("missing").join("wells.geojson").display().to_string();
+    let mark = s.notice_mark();
+    assert!(s.run("share.exportTable", &json!({"table": "wells", "path": missing})).is_err());
+    assert!(said(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
+    // A table read without Z: no notice.
+    std::fs::write(
+        dir.join("flat.geojson"),
+        r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"depth":30},"geometry":{"type":"Point","coordinates":[1,2]}}]}"#,
+    )
+    .unwrap();
+    let (flat, _) = rustgis_data::io::read_path(&dir.join("flat.geojson")).unwrap();
+    assert!(!flat.zm_dropped, "premise");
+    s.project.add_table(flat);
+    for ext in ["geojson", "shp"] {
+        let mark = s.notice_mark();
+        s.run("share.exportTable", &json!({"table": "flat", "path": dir.join(format!("flat.{ext}"))})).unwrap();
+        assert!(said(&s, mark).is_empty(), ".{ext}: {:?}", s.notices_since(mark));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// What an import says about positions, an export says again: a NAD 27 Shapefile whose `.prj`
 /// has no shift to WGS 84 (read whole or in place, and after the project is saved and opened)
 /// exported to GeoJSON, but not written back to a Shapefile in NAD 27; and a Shapefile without a
@@ -17787,6 +17957,136 @@ fn mixed_geometry_no_fill_preserves_other_symbols_classes_and_undo() {
     }
 }
 
+/// After No Fill, a new symbology or a fill in the symbol's colour draws fills again (#1301), on
+/// a layer read into memory (its symbols' fills made transparent) and on a streamed or mixed one
+/// (a transparent fill over symbols that points and lines share) alike. Gradient fills, with
+/// colours of their own, always did.
+#[test]
+fn fills_come_back_after_no_fill() {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as Attr};
+    let square = |x: f64| {
+        Geometry::Polygon(vec![vec![vec![
+            Coord::new(x, 0.0),
+            Coord::new(x + 1.0, 0.0),
+            Coord::new(x + 1.0, 1.0),
+            Coord::new(x, 1.0),
+            Coord::new(x, 0.0),
+        ]]])
+    };
+    let dataset = |mixed: bool| {
+        let mut ds =
+            Dataset::new("parcels", GeometryType::Polygon, vec![Field::new("kind", FieldType::Text), Field::new("n", FieldType::Integer)]);
+        for (i, kind) in ["a", "b", "a"].into_iter().enumerate() {
+            ds.push(Some(square(i as f64 * 2.0)), vec![Attr::Text(kind.into()), Attr::Int(i as i64)]);
+        }
+        if mixed {
+            ds.push(Some(Geometry::Point(Coord::new(10.0, 0.5))), vec![Attr::Text("a".into()), Attr::Int(9)]);
+        }
+        ds
+    };
+    // Whether the polygons draw a fill: each of them, or, with none loaded (a streamed layer
+    // away from its features), the layer's own fills over its symbol.
+    let filled = |s: &Session| {
+        let l = s.map().layer(s.active_layer.unwrap()).unwrap();
+        let draws = |fills: &[rustgis_map::fills::FillLayer], fill: rustgis_map::Rgba| {
+            if fills.is_empty() { fill.a() > 0 } else { fills.iter().any(|f| f.draws(fill)) }
+        };
+        let polygons: Vec<usize> =
+            (0..l.dataset.features.len()).filter(|r| matches!(l.dataset.features[*r].geometry, Some(Geometry::Polygon(_)))).collect();
+        if polygons.is_empty() {
+            draws(&l.fill_layers, l.renderer.base_symbol().fill)
+        } else {
+            polygons.iter().all(|r| draws(l.fills(*r), l.symbol(*r).fill))
+        }
+    };
+    for case in ["memory", "mixed", "streamed"] {
+        let mut s = Session::new(Project::default());
+        if case == "streamed" {
+            let path = std::env::temp_dir().join(format!("rustgis-engine-{}-fill-after-no-fill.geojson", std::process::id()));
+            std::fs::write(&path, rustgis_data::io::to_geojson(&dataset(false)).to_string()).unwrap();
+            s.run("layer.addData", &json!({"path": path.to_string_lossy(), "stream": true})).unwrap();
+            let _ = std::fs::remove_file(path);
+            let id = s.active_layer.unwrap();
+            let l = s.map_mut().layer_mut(id).unwrap();
+            assert!(l.is_streamed());
+            l.dataset.features.clear();
+        } else {
+            let id = s.map_mut().add_dataset(dataset(case == "mixed"));
+            s.active_layer = Some(id);
+        }
+        let id = s.active_layer.unwrap();
+        assert!(filled(&s), "{case}: filled to begin with");
+        let steps = [
+            json!({"command": "layer.symbology", "params": {"type": "single"}}),
+            json!({"command": "layer.symbology", "params": {"type": "unique", "field": "kind"}}),
+            // Again on the same field and scheme, which carries the classes over.
+            json!({"command": "layer.symbology", "params": {"type": "unique", "field": "kind"}}),
+            json!({"command": "layer.symbology", "params": {"type": "graduated", "field": "n", "classes": 2}}),
+            json!({"command": "layer.symbology", "params": {"type": "graduated", "field": "n", "classes": 2}}),
+            json!({"command": "layer.ramp", "params": {"ramp": "Harbour"}}),
+            json!({"command": "layer.color", "params": {"color": "#336699"}}),
+            json!({"command": "layer.fillLayers", "params": {"fills": [{"pattern": "solid"}]}}),
+            json!({"command": "layer.fillLayers", "params": {"fills": [{"pattern": "hatch", "angle": 45}]}}),
+            json!({"command": "layer.fillLayers", "params": {"fills": []}}),
+            json!({"command": "layer.fillLayers", "params": {"fills": [{"pattern": "gradient", "color": "#336699"}]}}),
+        ];
+        // Graduated classes need values, which the streamed layer hasn't loaded.
+        for step in steps.into_iter().filter(|st| case != "streamed" || st["params"]["type"] != "graduated") {
+            s.run("layer.noFill", &Value::Null).unwrap();
+            assert!(!filled(&s), "{case}: No Fill hides the fills before {step}");
+            // The path each layer takes: a transparent fill over the symbols of a streamed or
+            // mixed layer, the symbols' own fills made transparent on the other.
+            let l = s.map().layer(id).unwrap();
+            let over = matches!(l.fill_layers.as_slice(), [f] if f.color.is_some_and(|c| c.a() == 0));
+            assert_eq!(over, case != "memory", "{case}: No Fill's path");
+            assert_eq!(l.no_fill, Some(if over { rustgis_map::NoFill::Override } else { rustgis_map::NoFill::Symbols }));
+            s.run(step["command"].as_str().unwrap(), &step["params"]).unwrap();
+            assert!(filled(&s), "{case}: {step} after No Fill draws fills");
+        }
+        // A fill given its own transparent colour leaves the polygons unfilled.
+        for colour in ["#11223300", "#00000000"] {
+            s.run("layer.symbology", &json!({"type": "single"})).unwrap();
+            s.run("layer.noFill", &Value::Null).unwrap();
+            s.run("layer.fillLayers", &json!({"fills": [{"pattern": "solid", "color": colour}]})).unwrap();
+            assert!(!filled(&s), "{case}: a transparent fill {colour} stays transparent");
+            // A new symbology then keeps that fill and turns No Fill off, showing the symbols'
+            // fills under it.
+            s.run("layer.symbology", &json!({"type": "single"})).unwrap();
+            let l = s.map().layer(id).unwrap();
+            assert!(
+                matches!(l.fill_layers.as_slice(), [f] if f.color.is_some_and(|c| c.a() == 0)),
+                "{case}: the chosen fill {colour} stays"
+            );
+            assert_eq!(l.no_fill, None, "{case}: No Fill is off");
+            assert!(l.renderer.base_symbol().fill.a() > 0, "{case}: the symbol's fill is shown");
+        }
+        // One class's fills after No Fill show that class alone: a hatch, or its symbol's own
+        // fill ([]). The streamed layer has no rows loaded to look at.
+        if case != "streamed" {
+            // Without the transparent layer fill chosen above, which a class without fills takes.
+            s.run("layer.fillLayers", &json!({"fills": []})).unwrap();
+            for fills in [json!([{"pattern": "hatch"}]), json!([])] {
+                s.run("layer.symbology", &json!({"type": "unique", "field": "kind"})).unwrap();
+                s.run("layer.noFill", &Value::Null).unwrap();
+                s.run("layer.fillLayers", &json!({"value": "a", "fills": fills})).unwrap();
+                let l = s.map().layer(id).unwrap();
+                let shows = |row: usize| {
+                    l.fills(row).iter().any(|f| f.draws(l.symbol(row).fill)) || (l.fills(row).is_empty() && l.symbol(row).fill.a() > 0)
+                };
+                assert!(shows(0) && shows(2), "{case}: class a shows with {fills}");
+                assert!(!shows(1), "{case}: class b keeps No Fill with {fills}");
+            }
+        }
+    }
+    // A fill colour chosen transparent isn't No Fill: a new symbology keeps it.
+    let mut s = Session::new(Project::default());
+    let id = s.map_mut().add_dataset(dataset(false));
+    s.active_layer = Some(id);
+    s.run("layer.color", &json!({"color": "#33669900"})).unwrap();
+    s.run("layer.symbology", &json!({"type": "unique", "field": "kind"})).unwrap();
+    assert!(!filled(&s), "a chosen transparent fill stays");
+}
+
 /// Other families can be outside a streamed polygon layer's current view when No Fill runs.
 #[test]
 fn mixed_geometry_no_fill_preserves_unloaded_point_symbols() {
@@ -23351,4 +23651,95 @@ fn a_cog_window_comes_in_as_a_raster() {
     let cover = raster(&s, "Cover");
     assert!(matches!(cover.color, ColorHint::Palette(_)));
     assert_eq!(cover.bands[0].class_name(15.0), Some("Pasture"));
+}
+
+/// Exporting to a Shapefile says which field names it changed to fit dBase's 10 bytes, as the
+/// file has them, from a layer read whole or in place; names that fit, and other formats, give no
+/// such notice.
+#[test]
+fn shapefile_exports_say_which_field_names_they_changed() {
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-shp-names-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("sites.geojson");
+    std::fs::write(
+        &src,
+        r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"population_2020":1,"Population_2021":2,"id":3},"geometry":{"type":"Point","coordinates":[1,2]}}]}"#,
+    )
+    .unwrap();
+    isolate_plugins();
+    let mut s = Session::new(Project::default());
+    let changed = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("changed to fit a Shapefile")).map(|n| n.text.clone()).collect()
+    };
+    for stream in [false, true] {
+        let id = s.run("layer.addData", &json!({"path": src, "stream": stream})).unwrap()["layer"].as_u64().unwrap();
+        for ext in ["shp", "zip"] {
+            let out = dir.join(format!("out-{stream}.{ext}")).display().to_string();
+            let mark = s.notice_mark();
+            s.run("share.exportLayer", &json!({"layer": id, "path": out})).unwrap();
+            assert_eq!(
+                changed(&s, mark),
+                [format!(
+                    "{out}: 2 field names were changed to fit a Shapefile (10 bytes at most, unique ignoring case): \
+                     'Population_2021' → 'Population', 'population_2020' → 'populati_1'"
+                )],
+                "stream {stream}, .{ext}"
+            );
+            // The names the notice gives are the file's.
+            let back = s.run("layer.addData", &json!({"path": out})).unwrap()["layer"].as_u64().unwrap() as u32;
+            let names: Vec<&str> = s.map().layer(back).unwrap().dataset.fields.iter().map(|f| f.name.as_str()).collect();
+            // The reader orders the fields by name, capitals first.
+            assert_eq!(names, ["Population", "id", "populati_1"], "stream {stream}, .{ext}");
+        }
+        // Other formats keep the names and say nothing of them.
+        let mark = s.notice_mark();
+        s.run("share.exportLayer", &json!({"layer": id, "path": dir.join(format!("out-{stream}.geojson"))})).unwrap();
+        assert!(changed(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
+    }
+    // Names that fit: no notice.
+    let mut s = world();
+    let mark = s.notice_mark();
+    s.run("share.exportLayer", &json!({"layer": "Countries", "path": dir.join("countries.shp")})).unwrap();
+    assert!(changed(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
+    // A standalone table can hold geometry (a plugin's output table is read from GeoJSON whole,
+    // and a project file keeps a table's geometry), so `share.exportTable` can write a Shapefile
+    // too, and says the same of its names.
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType};
+    use rustgis_geom::Coord;
+    let table = |name: &str, field: &str| {
+        let mut ds = Dataset::new(name, GeometryType::Point, vec![Field::new(field, FieldType::Integer)]);
+        ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![rustgis_data::Value::Int(1)]);
+        ds
+    };
+    s.project.add_table(table("Sites", "population_2020"));
+    for ext in ["shp", "zip"] {
+        let out = dir.join(format!("sites.{ext}")).display().to_string();
+        let mark = s.notice_mark();
+        s.run("share.exportTable", &json!({"table": "Sites", "path": out})).unwrap();
+        assert_eq!(
+            changed(&s, mark),
+            [format!(
+                "{out}: 1 field name was changed to fit a Shapefile (10 bytes at most, unique ignoring case): \
+                 'population_2020' → 'population'"
+            )],
+            ".{ext}"
+        );
+        let back = s.run("layer.addData", &json!({"path": out})).unwrap()["layer"].as_u64().unwrap() as u32;
+        let names: Vec<&str> = s.map().layer(back).unwrap().dataset.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["population"], ".{ext}");
+    }
+    // To another format, or with names that fit: no notice.
+    s.project.add_table(table("Fits", "population"));
+    for (table, ext) in [("Sites", "geojson"), ("Fits", "shp")] {
+        let mark = s.notice_mark();
+        s.run("share.exportTable", &json!({"table": table, "path": dir.join(format!("{table}.{ext}"))})).unwrap();
+        assert!(changed(&s, mark).is_empty(), "{table}.{ext}: {:?}", s.notices_since(mark));
+    }
+    // A table without geometry is never a Shapefile: an error, and nothing said of its names.
+    s.run("gp.run", &json!({"tool": "summaryStatistics", "params": {"input": "Countries", "field": "pop_est"}})).unwrap();
+    let stats = s.project.tables.last().unwrap().name.clone();
+    let mark = s.notice_mark();
+    assert!(s.run("share.exportTable", &json!({"table": stats, "path": dir.join("stats.shp")})).is_err());
+    assert!(changed(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
+    std::fs::remove_dir_all(dir).unwrap();
 }

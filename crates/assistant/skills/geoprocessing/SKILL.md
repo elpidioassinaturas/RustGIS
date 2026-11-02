@@ -21,11 +21,15 @@ Based on the RustGIS user guide, Analysis › Geoprocessing tools
      or field value)
    - generalization: `dissolve` (`input`, `field`), `simplify` (`input`, `tolerance`)
    - geometry: `convexHull`, `featureToPoint`, `featureVerticesToPoints`, `xyTableToPoint`
-     (`input`, `x`, `y`, `crs`), `calculateGeometry`
+     (`input`, `x`, `y`, `crs`), `calculateGeometry`; `polygonToLine`, `splitLineAtVertices`,
+     `featureEnvelopeToPolygon`, `unsplitLine` (`input`, optional `output`; see the user guide
+     for envelope axes and endpoint-joining rules)
    - selection: `selectByLocation` (`input`, `select`, `distance`, `invert`), `selectByAttributes`
      (`input`, `where`)
    - statistics: `countPoints` (Summarize Within: `polygons`, `points`), `summaryStatistics`
-     (`input`, `statistics`, `case`), `pivotTable` (`input`, `fields`, `pivot`, `value`, `statistic`)
+     (`input`, `statistics`, `case`), `pivotTable` (`input`, `fields`, `pivot`, `value`, `statistic`),
+     `tabulateIntersection` (`zones`, `zoneFields`, `classes`, `classFields`, `sumFields`: class
+     areas and totals shared out to zones by overlap)
    - joins: `spatialJoin` (`target`, `join`, `match`), `joinField` (`target`, `targetField`,
      `joinTable`, `joinField`, `fields`, `prefix`, `duplicates`)
    - conversion: `exportFeatures` (`input`, `where`)
