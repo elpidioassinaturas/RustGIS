@@ -23743,7 +23743,11 @@ fn a_cog_window_comes_in_as_a_raster() {
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
     assert!(said.iter().any(|n| n == "Far: 256 value(s) past the range of 32-bit floats left out: those cells have no value"), "{said:?}");
     assert!(said.iter().all(|n| !n.contains("rounded")), "{said:?}");
-    assert!(raster(&s, "Far").rounded.is_empty());
+    let far = raster(&s, "Far");
+    assert!(far.rounded.is_empty());
+    // Column 0, row 255 of the window is a 255 (1e39): no value, kept out of the stretch; the cell
+    // above it is 254.
+    assert_eq!((far.value(0, 0, 255), far.value(0, 0, 254)), (None, Some(254.0)));
     // Pixel (1, 0) is 16,777,217, held as 16,777,216, as pixel (0, 0) is.
     let ids = raster(&s, "Ids");
     // Exported, a raster whose second band has class names says the file keeps only the first's.
