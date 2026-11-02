@@ -163,8 +163,13 @@ fn row(ui: &mut Ui, item: &Row, t: &Tokens) {
     let r = frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+            // Worked or failed, said in words too (on hover, and to a screen reader), not by its
+            // colour alone.
+            let (r, dot) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
             ui.painter().circle_filled(r.center(), 4.5, if e.ok { t.green } else { t.red });
+            let worked = if e.ok { tl!("Worked") } else { tl!("Failed") };
+            dot.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, worked));
+            dot.on_hover_text(worked);
             ui.label(egui::RichText::new(&e.command).font(semibold(12.5)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(egui::RichText::new(&item.took).size(11.0).color(t.text_dim));
@@ -303,6 +308,23 @@ mod tests {
         assert!(h.query_by_label(&format!("The newest {SHOWN} of {} entries", SHOWN + 5)).is_some());
         assert!(h.query_by_label(&format!(r#"{{"name":"Map {}"}}"#, SHOWN + 4)).is_some());
         assert!(h.query_by_label(r#"{"name":"Map 4"}"#).is_none());
+        // Nothing dropped, nothing said; each entry says whether it worked, in words.
+        assert!(h.query_by_label_contains("dropped past the log's limits").is_none());
+        assert!(h.query_all_by_label("Worked").next().is_some());
+    }
+
+    /// Past the log's limit, the pane says how many of the oldest entries it dropped.
+    #[test]
+    fn a_log_past_its_limit_says_what_it_dropped() {
+        let mut app = RustGisApp::with_sample();
+        app.session.log.clear();
+        for i in 0..rustgis_engine::project_log::LOG_LIMIT + 7 {
+            app.session.log.push(LogEntry { at: i as u64, command: "x".into(), params: Value::Null, ok: true, error: None, millis: 0 });
+        }
+        app.ui.session_log.open = true;
+        let mut h = harness(app);
+        h.run();
+        assert!(h.query_by_label("The 7 oldest entries were dropped past the log's limits").is_some());
     }
 
     /// Save Log As… writes the log where the user picks, as CSV or JSON Lines by the name's
