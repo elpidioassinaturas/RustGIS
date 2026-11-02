@@ -1116,6 +1116,7 @@ impl Session {
                 if let Some(d) = params.get("id").and_then(Value::as_u64) {
                     self.downloaded.retain(|(k, _)| *k != d);
                 }
+                self.url_waits.refused(n);
                 return Err("a download that came after its plugin command stopped waiting wasn't added".to_string());
             }
             let res = self.run_command(id, params);

@@ -1801,8 +1801,11 @@ impl RustGisApp {
                 self.session.notify(text, true);
             }
             // A probe still under way is for an address added to the old project: dropped, so
-            // its layer never lands in the new one.
-            self.ui.cog_probes.clear();
+            // its layer never lands in the new one. A plugin command waiting for it runs again
+            // with that, rather than after the whole wait.
+            for (p, _) in std::mem::take(&mut self.ui.cog_probes) {
+                self.session.request_failed(&p, "another project was opened before it was read");
+            }
         }
         // Undo and redo can move vertices: an index chosen before may now name another vertex.
         // A step moved or deleted, from the pane, Command Search, the assistant or a script: the

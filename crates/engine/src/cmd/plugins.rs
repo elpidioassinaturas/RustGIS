@@ -517,9 +517,10 @@ impl Bridge<'_> {
             return Err("plugins can't run other plugins' commands".into());
         }
         // A download's number (`"request"`) is the app's own: a plugin's is taken out, so it can't
-        // land another command's wait, or share one it didn't ask for.
+        // land another command's wait, or share one it didn't ask for. (Other commands' `request`
+        // is theirs: `identify.featureInfo`'s asks for the request instead of the answer.)
         let unnumbered;
-        let params = if params.get("request").is_some() {
+        let params = if matches!(id, "layer.addUrl" | "layer.addDownload") && params.get("request").is_some() {
             unnumbered = fetch::without_request(params);
             &unnumbered
         } else {
@@ -777,13 +778,18 @@ mod tests {
     /// the same address asked twice isn't downloaded again (#1202).
     #[test]
     fn a_rerun_answers_a_download_asked_twice() {
-        let mut s = Session::new(crate::Project::default());
+        let mut s = Session::new(crate::sample::world_project());
+        let l7 = u64::from(s.map().layers[0].id);
         s.leave_downloads = true;
         let asked = json!({"url": "https://x.org/a.geojson"});
-        s.rerun_landed = vec![(asked.clone(), Ok(json!({"layer": 7})))];
+        s.rerun_landed = vec![(asked.clone(), Ok(json!({"layer": l7})))];
         for _ in 0..2 {
-            assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": 7}));
+            assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": l7}));
         }
         assert!(s.take_url_requests().is_empty(), "nothing asked again");
+        // A layer undone while the command waited: said, not named.
+        s.rerun_landed = vec![(asked.clone(), Ok(json!({"layer": 4_000_000})))];
+        let e = s.run("layer.addUrl", &asked).unwrap_err();
+        assert!(e.contains("taken away (undone)"), "{e}");
     }
 }

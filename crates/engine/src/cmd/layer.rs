@@ -2805,6 +2805,13 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
         && let Some((_, answer)) = s.rerun_landed.iter().find(|(asked, _)| super::plugins::fetch::same_request(asked, p))
     {
         s.request_only = true;
+        // The layer it added may have been undone while the command waited: said, not named.
+        if let Ok(v) = answer
+            && let Some(id) = v.get("layer").and_then(Value::as_u64)
+            && u32::try_from(id).ok().and_then(|id| s.map().layer(id)).is_none()
+        {
+            return Err(format!("{url}: the layer its download added was taken away (undone) before the command ran again"));
+        }
         return answer.clone();
     }
     // An address read through a saved S3 connection is judged by the address it wraps; the whole
@@ -2851,7 +2858,11 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
     // probe, a download) is left to the app, which does it off the frame, as in the browser.
     #[cfg(not(target_arch = "wasm32"))]
     if s.leave_downloads {
-        return s.request_url(p);
+        // The address as the app downloads it (trimmed): the request, its download and the
+        // command run again all name it the same.
+        let mut asked = p.clone();
+        asked["url"] = json!(url);
+        return s.request_url(&asked);
     }
     // An address the app found to be a GeoTIFF (`"cog"`) is one whatever its name says.
     if rustgis_data::source::is_remote_name(url) && !super::b(p, "whole").unwrap_or(false) && !super::b(p, "cog").unwrap_or(false) {

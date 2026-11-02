@@ -308,8 +308,21 @@ pub(crate) struct UrlWaits {
     expired: Vec<(u64, Value)>,
 }
 
-/// The most given-up requests remembered.
-const MAX_EXPIRED: usize = 64;
+/// The most given-up requests remembered: each is forgotten once its late download is refused,
+/// so this bounds only those that never land.
+const MAX_EXPIRED: usize = 1024;
+
+/// Whether `params` (a front end's `layer.addUrl` or `layer.addDownload`) are what `asked`
+/// asked for: every key it gave, with the same value (the address with spaces around it set
+/// aside). What the app adds of its own (`id`, `cog`, `whole`) doesn't count; another import of
+/// the same address (other columns, another name) isn't it.
+fn asked_by(asked: &Value, params: &Value) -> bool {
+    let Some(o) = asked.as_object() else { return false };
+    o.iter().filter(|(k, _)| k.as_str() != "request").all(|(k, v)| match k.as_str() {
+        "url" => v.as_str().map(str::trim) == params["url"].as_str().map(str::trim),
+        _ => params.get(k) == Some(v),
+    })
+}
 
 impl UrlWaits {
     /// The number of a download being made for `asked`, or made and added while its command
@@ -323,7 +336,7 @@ impl UrlWaits {
     /// `n`) are what request `n` asked for: the same address. A number given with another address
     /// matches nothing, so no caller can land another command's wait.
     pub(crate) fn holds(&self, n: u64, params: &Value) -> bool {
-        self.in_flight.iter().any(|(m, q, _)| *m == n && q["url"] == params["url"])
+        self.in_flight.iter().any(|(m, q, _)| *m == n && asked_by(q, params))
     }
 
     /// Whether request `n` is waited for (being made, or landed).
@@ -374,7 +387,12 @@ impl UrlWaits {
 
     /// Whether `params` land a request that was given up: its command no longer waits for it.
     pub(crate) fn given_up(&self, n: u64, params: &Value) -> bool {
-        self.expired.iter().any(|(m, q)| *m == n && q["url"] == params["url"])
+        self.expired.iter().any(|(m, q)| *m == n && asked_by(q, params))
+    }
+
+    /// A given-up request's late download was refused: nothing more to remember of it.
+    pub(crate) fn refused(&mut self, n: u64) {
+        self.expired.retain(|(m, _)| *m != n);
     }
 
     /// Only what `waiting` still waits for is kept.
@@ -448,6 +466,8 @@ impl Session {
         for n in &gone.requests {
             if !keeps.contains(n) && !self.plugin_retries.iter().any(|r| r.requests.contains(n)) {
                 self.url_waits.give_up(*n);
+                // Not yet taken by the front end: not downloaded at all.
+                self.url_requests.retain(|q| q["request"].as_u64() != Some(*n));
             }
         }
     }
@@ -511,36 +531,59 @@ mod tests {
     /// added (#1202).
     #[test]
     fn landed_downloads_answer_every_waiting_run() {
-        use crate::{Project, Session};
+        use crate::Session;
         for id in ["eng-share-a", "eng-share-b"] {
             let pkg = rustgis_plugins::Package::from_zip(&rustgis_plugins::testing::package(id, &["edit", "network"])).unwrap();
             rustgis_plugins::load(pkg, "test").unwrap();
         }
-        let mut s = Session::new(Project::default());
+        // Answers name layers that are on the map (the sample's), as a rerun checks.
+        let mut s = Session::new(crate::sample::world_project());
+        let (l7, l8) = (u64::from(s.map().layers[0].id), u64::from(s.map().layers[1].id));
         let asked = json!({"url": "https://x.org/a.csv"});
         let p = json!({"op": "layer.addUrl", "params": asked});
         // Two commands wait for one download (request 900): both get what adding it answered.
         for id in ["plugin:eng-share-a/f", "plugin:eng-share-b/f"] {
             s.retry_plugin(id, &p, Vec::new(), vec![(900, asked.clone())]).unwrap();
         }
-        s.url_waits.land(900, Ok(json!({"layer": 7})));
+        s.url_waits.land(900, Ok(json!({"layer": l7})));
         let ran = s.poll_plugin_retries();
         assert_eq!(ran.len(), 2, "{ran:?}");
-        assert!(ran.iter().all(|(_, r)| r.as_ref().is_ok_and(|v| v["layer"] == 7)), "{ran:?}");
+        assert!(ran.iter().all(|(_, r)| r.as_ref().is_ok_and(|v| v["layer"] == l7)), "{ran:?}");
         assert!(s.take_url_requests().is_empty(), "nothing asked again");
         // A rerun that waits again for another download keeps what it had: a.csv isn't asked again.
-        s.rerun_landed = vec![(asked.clone(), Ok(json!({"layer": 7})))];
+        s.rerun_landed = vec![(asked.clone(), Ok(json!({"layer": l7})))];
         s.retry_plugin("plugin:eng-share-a/f", &p, Vec::new(), vec![(901, json!({"url": "https://x.org/b.csv"}))]).unwrap();
         s.rerun_landed.clear();
-        s.url_waits.land(901, Ok(json!({"layer": 8})));
+        s.url_waits.land(901, Ok(json!({"layer": l8})));
         let ran = s.poll_plugin_retries();
         assert_eq!(ran.len(), 1, "{ran:?}");
-        assert_eq!(ran[0].1.as_ref().unwrap()["layer"], 7, "{ran:?}");
+        assert_eq!(ran[0].1.as_ref().unwrap()["layer"], l7, "{ran:?}");
         assert!(s.take_url_requests().is_empty(), "nothing asked again");
-        // Given up past the wait: a late landing isn't added.
-        s.url_waits.expired.push((902, json!({"url": "https://x.org/c.csv"})));
-        let e = s.run("layer.addUrl", &json!({"url": "https://x.org/c.csv", "request": 902})).unwrap_err();
-        assert!(e.contains("stopped waiting"), "{e}");
+        // The download it waited for answers too, for a run that asks for it.
+        let b = json!({"url": "https://x.org/b.csv"});
+        s.rerun_landed = vec![(asked.clone(), Ok(json!({"layer": l7})))];
+        s.retry_plugin("plugin:eng-share-a/f", &json!({"op": "layer.addUrl", "params": b}), Vec::new(), vec![(904, b.clone())]).unwrap();
+        s.rerun_landed.clear();
+        s.url_waits.land(904, Ok(json!({"layer": l8})));
+        let ran = s.poll_plugin_retries();
+        assert_eq!(ran[0].1.as_ref().unwrap()["layer"], l8, "{ran:?}");
+        // The same address asked another way (other columns) doesn't land a wait.
+        s.retry_plugin("plugin:eng-share-a/f", &p, Vec::new(), vec![(905, json!({"url": "https://x.org/f.csv", "x": "lon"}))]).unwrap();
+        assert!(!s.url_waits.holds(905, &json!({"url": "https://x.org/f.csv", "x": "lng", "id": 3})));
+        assert!(s.url_waits.holds(905, &json!({"url": "https://x.org/f.csv", "x": "lon", "id": 3, "cog": true})));
+        // Given up past the wait (`expire`): each late landing is refused, once.
+        let long_ago = Instant::now().checked_sub(REQUEST_WAIT + Duration::from_secs(1)).unwrap();
+        for (n, file) in [(902, "c.csv"), (903, "c2.csv")] {
+            s.url_waits.in_flight.push((n, json!({"url": format!("https://x.org/{file}")}), long_ago));
+        }
+        s.url_waits.expire();
+        for (n, file) in [(902, "c.csv"), (903, "c2.csv")] {
+            let late = json!({"url": format!(" https://x.org/{file} "), "request": n});
+            assert!(s.url_waits.given_up(n, &late), "{n}");
+            let e = s.run("layer.addUrl", &late).unwrap_err();
+            assert!(e.contains("stopped waiting"), "{e}");
+            assert!(!s.url_waits.given_up(n, &late), "{n}: forgotten once refused");
+        }
         // A run replaced by another gives up the download only it waited for.
         s.retry_plugin("plugin:eng-share-b/f", &p, Vec::new(), vec![(950, json!({"url": "https://x.org/d.csv"}))]).unwrap();
         s.retry_plugin("plugin:eng-share-b/f", &p, Vec::new(), vec![(951, json!({"url": "https://x.org/e.csv"}))]).unwrap();
@@ -550,7 +593,7 @@ mod tests {
         let _ = s.run("layer.addDownload", &json!({"url": "https://x.org/other.csv", "request": 951, "id": 424242}));
         assert!(s.url_waits.holds(951, &json!({"url": "https://x.org/e.csv"})), "951 still waits for e.csv");
         // Asked again once made, while the command waits: that one, not another download.
-        s.url_waits.land(951, Ok(json!({"layer": 9})));
+        s.url_waits.land(951, Ok(json!({"layer": l7})));
         s.request_url(&json!({"url": "https://x.org/e.csv"})).unwrap();
         assert!(s.take_url_requests().is_empty(), "made already");
         for id in ["eng-share-a", "eng-share-b"] {
