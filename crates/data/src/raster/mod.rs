@@ -446,6 +446,14 @@ pub(crate) fn gdal_metadata_of(r: &Raster, bands: &[usize]) -> Option<String> {
     pam::gdal_metadata(&names, first)
 }
 
+/// How many of the names [`gdal_metadata_of`] writes for `bands` hold a character XML can't (a
+/// control character), which is written as a space: for a writer to say.
+pub fn gdal_metadata_changed(r: &Raster, bands: &[usize]) -> usize {
+    let names = bands.iter().filter_map(|b| band_name_of(r, *b));
+    let first = bands.first().and_then(|b| r.bands.get(*b)).map_or(&[][..], |b| &b.classes[..]);
+    names.chain(first.iter().map(String::as_str)).filter(|n| n.chars().any(pam::xml_cannot_hold)).count()
+}
+
 impl Raster {
     /// Builds a raster from bands of `width × height` pixels and computes statistics.
     #[allow(clippy::too_many_arguments)]
@@ -756,24 +764,29 @@ pub fn read_path(path: &Path) -> Result<Raster> {
         }
         other => return Err(DataError::Unsupported(format!(".{other}"))),
     };
-    // `apply_pam` takes the no-data of the bands the raster has. When a record for a band it lacks
-    // disagreed, the decoder left none out of the rounded count: the file is read again with it,
-    // so its no-data pixels aren't counted as rounded (only when some value was counted).
-    if let Some(p) = &pam
+    // `apply_pam` takes the no-data of the bands the raster has, which the decoder may not have
+    // left out of the rounded count: it left out the sidecar's no-data for all bands. When the two
+    // differ (a record for a band the raster lacks, or one only some bands give), the file is read
+    // again with the one applied (none, when the bands it has give none), so the rounded count
+    // leaves out just its pixels. Only an ASCII grid, or a GeoTIFF of a type `f32` can round, is read again.
+    let applied = pam.as_ref().map(|p| p.nodata_within(r.bands.len()));
+    if let Some(nd) = applied
+        && nd != sidecar_nodata
         && r.nodata.is_none()
-        && !r.rounded.is_empty()
-        && let Some(nd) = p.nodata_within(r.bands.len()).filter(|nd| Some(*nd) != sidecar_nodata)
+        && (ext == "asc"
+            || (matches!(ext.as_str(), "tif" | "tiff")
+                && matches!(r.data_type.as_str(), "UInt32" | "Int32" | "UInt64" | "Int64" | "Float64")))
     {
-        r = match ext.as_str() {
-            "tif" | "tiff" => {
-                #[cfg(not(target_arch = "wasm32"))]
-                let again = geotiff::read_file_with_nodata(path, &name, Some(nd))?;
-                #[cfg(target_arch = "wasm32")]
-                let again = geotiff::read_with_nodata(std::io::BufReader::new(std::fs::File::open(path)?), &name, Some(nd))?;
-                again
-            }
-            "asc" => ascii::read_with_nodata(&std::fs::read_to_string(path)?, &name, sidecar_crs(path), Some(nd))?,
-            _ => r,
+        // The second read gives all the first did: the first goes before it, so two aren't held.
+        drop(r);
+        r = if ext == "asc" {
+            ascii::read_with_nodata(&std::fs::read_to_string(path)?, &name, sidecar_crs(path), nd)?
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            let again = geotiff::read_file_with_nodata(path, &name, nd)?;
+            #[cfg(target_arch = "wasm32")]
+            let again = geotiff::read_with_nodata(std::io::BufReader::new(std::fs::File::open(path)?), &name, nd)?;
+            again
         };
     }
     if let Some(p) = &pam {

@@ -996,6 +996,13 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(matches!(whole.color, super::super::ColorHint::Gray) && whole.lost.is_empty(), "{:?}", whole.lost);
+        // So has a whole-file read that takes one of its (palette) overviews, the full image being
+        // too large.
+        let bytes = example_with(&Example { size: 512, tile: 256, classes: true, stray: true, ..Example::default() });
+        let reader = super::super::geotiff::reader(std::io::Cursor::new(bytes.as_slice())).unwrap();
+        let small = super::super::geotiff::read_limited(reader, "stray", 100_000, None).unwrap();
+        assert!(small.overview.is_some(), "an overview read");
+        assert!(matches!(small.color, super::super::ColorHint::Gray) && small.lost.is_empty(), "{:?}", small.lost);
         let (_, bare) = layout_of(&example_with(&Example { size: 512, tile: 256, classes: true, no_table: true, ..Example::default() }));
         assert!(bare.palette.is_none(), "{:?}", bare.palette);
         assert_eq!(bare.lost, ["it is a palette image with no colour table: drawn grey"]);

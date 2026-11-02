@@ -391,6 +391,12 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
     (!pam.bands.is_empty() || !pam.lost.is_empty()).then_some(pam)
 }
 
+/// Whether XML can't hold `c` (a control character other than a tab or a line break, or a
+/// noncharacter): [`gdal_metadata`] writes it as a space.
+pub fn xml_cannot_hold(c: char) -> bool {
+    (c < ' ' && !matches!(c, '\t' | '\n' | '\r')) || matches!(c, '\u{FFFE}' | '\u{FFFF}')
+}
+
 /// GDAL's metadata document for the bands a GeoTIFF holds, as [`parse_gdal_metadata`] reads
 /// it back: each named band's description (`sample` from 0, in the order given), and the first
 /// band's classes as dataset items `CLASS_<value>`. `None` when there is nothing to say. Names
@@ -407,7 +413,7 @@ pub fn gdal_metadata(descriptions: &[Option<&str>], classes: &[String]) -> Optio
                 '<' => items.push_str("&lt;"),
                 '>' => items.push_str("&gt;"),
                 c if c.is_ascii() && !c.is_ascii_control() => items.push(c),
-                c if (c < ' ' && !matches!(c, '\t' | '\n' | '\r')) || matches!(c, '\u{FFFE}' | '\u{FFFF}') => items.push(' '),
+                c if xml_cannot_hold(c) => items.push(' '),
                 c => items.push_str(&format!("&#{};", u32::from(c))),
             }
         }

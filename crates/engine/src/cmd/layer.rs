@@ -3395,16 +3395,22 @@ pub(crate) fn box_in_file_longitudes(x0: f64, x1: f64, fx0: f64, fx1: f64) -> Re
         return Ok((fx0, fx0 + 360.0));
     }
     let over = |a: f64, b: f64| (b.min(fx1) - a.max(fx0)).max(0.0);
+    // The whole turns that bring the box nearest the file (its columns may start a turn or more
+    // away, at 720°), and one either side of them.
+    let near = (((fx0 + fx1) - (x0 + x1)) / 720.0).round() * 360.0;
+    let turns = [0.0, near - 360.0, near, near + 360.0];
     let mut best = (x0, x1);
-    for k in [360.0, -360.0] {
+    for k in turns {
         if over(x0 + k, x1 + k) > over(best.0, best.1) {
             best = (x0 + k, x1 + k);
         }
     }
     let (a, b) = best;
-    let both = over(x0, x1) > 0.0 && [360.0, -360.0].iter().any(|k| over(x0 + k, x1 + k) > 0.0);
+    let mut on: Vec<f64> = turns.iter().filter(|k| over(x0 + **k, x1 + **k) > 0.0).map(|k| x0 + k).collect();
+    on.dedup_by(|p, q| (*p - *q).abs() < 1e-9);
+    let both = on.len() > 1;
     if both || (fx1 - fx0 >= 360.0 - 1e-6 && (a < fx0 - 1e-9 || b > fx1 + 1e-9)) {
-        let seam = if x0.min(a) < fx0 { fx0 } else { fx1 };
+        let seam = if on.iter().copied().fold(a, f64::min) < fx0 { fx0 } else { fx1 };
         return Err(format!("the box crosses the file's seam at {seam}° of longitude: give one box on each side of it"));
     }
     Ok(best)

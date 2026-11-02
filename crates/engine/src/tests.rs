@@ -24275,6 +24275,10 @@ fn a_window_box_takes_the_files_longitudes() {
     assert_eq!(fit(-180.0, 180.0, 0.0, 360.0).unwrap(), (0.0, 360.0));
     assert_eq!(fit(-180.0, 180.0, -180.0, 180.0).unwrap(), (-180.0, 180.0));
     assert_eq!(fit(-180.0, 180.0, 0.0, 358.4).unwrap(), (0.0, 360.0), "past the east edge: cut, and said");
+    // A file whose columns start two turns away (720° to 1080°): the box is taken there too, and
+    // its seam is the file's.
+    assert_eq!(fit(-10.0, -1.0, 720.0, 1080.0).unwrap(), (1070.0, 1079.0));
+    assert!(fit(-10.0, 10.0, 720.0, 1080.0).unwrap_err().contains("seam at 720°"));
 }
 
 /// A window's bands are started within one wait for them all: the first always, the others
