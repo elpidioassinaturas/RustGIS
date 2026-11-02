@@ -690,8 +690,10 @@ impl Session {
         if pending.is_empty() && requested.is_empty() {
             return res;
         }
-        // The undone call took its download requests with it: they go to the app still, once.
-        for (n, asked) in &requested {
+        // The undone call took its download requests with it: they go to the app still, once,
+        // unless the command gives up now (it has run again too often): then nothing waits for them.
+        let giving_up = self.retry_tries >= fetch::MAX_RETRIES;
+        for (n, asked) in requested.iter().filter(|_| !giving_up) {
             let taken = self.url_requests.iter().any(|q| q["request"].as_u64() == Some(*n));
             if !taken && !self.url_waits.has(*n) {
                 let mut q = asked.clone();

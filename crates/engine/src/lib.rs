@@ -1110,18 +1110,20 @@ impl Session {
             // that error) isn't added: no command is left to go on with it (#1202).
             if matches!(id, "layer.addUrl" | "layer.addDownload")
                 && let Some(n) = params.get("request").and_then(Value::as_u64)
-                && self.url_waits.given_up(n)
+                && self.url_waits.given_up(n, params)
             {
-                let mins = cmd::plugins::fetch::REQUEST_WAIT.as_secs() / 60;
-                let e = format!("a download that came after its plugin command stopped waiting ({mins} minutes) wasn't added");
-                self.notify(e.clone(), true);
-                return Err(e);
+                // Its bytes go too; the front end says the refusal, once.
+                if let Some(d) = params.get("id").and_then(Value::as_u64) {
+                    self.downloaded.retain(|(k, _)| *k != d);
+                }
+                return Err("a download that came after its plugin command stopped waiting wasn't added".to_string());
             }
             let res = self.run_command(id, params);
             // A download a plugin command left to the app, added: what it answered is kept for the
             // command to run again with (#1202).
             if matches!(id, "layer.addUrl" | "layer.addDownload")
                 && let Some(n) = params.get("request").and_then(Value::as_u64)
+                && self.url_waits.holds(n, params)
                 && !res.as_ref().is_ok_and(|v| v.get("pending").and_then(Value::as_bool) == Some(true))
             {
                 self.url_waits.land(n, res.clone());

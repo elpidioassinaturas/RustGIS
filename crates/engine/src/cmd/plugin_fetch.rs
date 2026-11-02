@@ -302,18 +302,28 @@ pub(crate) struct Retry {
 pub(crate) struct UrlWaits {
     in_flight: Vec<(u64, Value, Instant)>,
     landed: Vec<(u64, Value, CmdResult)>,
-    /// Requests given up past [`REQUEST_WAIT`] (the latest [`MAX_EXPIRED`]): one that lands
-    /// after is refused, not added with no command left to go on with it.
-    expired: Vec<u64>,
+    /// Requests given up (past [`REQUEST_WAIT`], or their command replaced or dropped), with their
+    /// addresses (the latest [`MAX_EXPIRED`]): one that lands after is refused, not added with no
+    /// command left to go on with it.
+    expired: Vec<(u64, Value)>,
 }
 
 /// The most given-up requests remembered.
 const MAX_EXPIRED: usize = 64;
 
 impl UrlWaits {
-    /// The number of a download being made for `asked`.
+    /// The number of a download being made for `asked`, or made and added while its command
+    /// waits to run again: a request made again then is that one, not another download.
     pub(crate) fn in_flight(&self, asked: &Value) -> Option<u64> {
-        self.in_flight.iter().find(|(_, q, _)| same_request(q, asked)).map(|(n, ..)| *n)
+        let made = self.landed.iter().find(|(_, q, _)| same_request(q, asked)).map(|(n, ..)| *n);
+        self.in_flight.iter().find(|(_, q, _)| same_request(q, asked)).map(|(n, ..)| *n).or(made)
+    }
+
+    /// Whether a front end's `params` (a `layer.addUrl` or `layer.addDownload` carrying number
+    /// `n`) are what request `n` asked for: the same address. A number given with another address
+    /// matches nothing, so no caller can land another command's wait.
+    pub(crate) fn holds(&self, n: u64, params: &Value) -> bool {
+        self.in_flight.iter().any(|(m, q, _)| *m == n && q["url"] == params["url"])
     }
 
     /// Whether request `n` is waited for (being made, or landed).
@@ -338,18 +348,33 @@ impl UrlWaits {
 
     /// Downloads waited for past [`REQUEST_WAIT`] land as failed, and are remembered as given up.
     fn expire(&mut self) {
-        let late: Vec<u64> = self.in_flight.iter().filter(|(.., at)| at.elapsed() >= REQUEST_WAIT).map(|(n, ..)| *n).collect();
-        for n in late {
+        let late: Vec<(u64, Value)> =
+            self.in_flight.iter().filter(|(.., at)| at.elapsed() >= REQUEST_WAIT).map(|(n, q, _)| (*n, q.clone())).collect();
+        for (n, asked) in late {
             self.land(n, Err(format!("no download in {} minutes", REQUEST_WAIT.as_secs() / 60)));
-            self.expired.push(n);
+            self.remember_given_up(n, asked);
         }
+    }
+
+    /// Request `n`, no command waiting for it any more, is given up: forgotten, and remembered
+    /// so a late landing is refused.
+    fn give_up(&mut self, n: u64) {
+        if let Some(i) = self.in_flight.iter().position(|(m, ..)| *m == n) {
+            let (_, asked, _) = self.in_flight.remove(i);
+            self.remember_given_up(n, asked);
+        }
+        self.landed.retain(|(m, ..)| *m != n);
+    }
+
+    fn remember_given_up(&mut self, n: u64, asked: Value) {
+        self.expired.push((n, asked));
         let over = self.expired.len().saturating_sub(MAX_EXPIRED);
         self.expired.drain(..over);
     }
 
-    /// Whether request `n` was given up: its command already ran again without it.
-    pub(crate) fn given_up(&self, n: u64) -> bool {
-        self.expired.contains(&n)
+    /// Whether `params` land a request that was given up: its command no longer waits for it.
+    pub(crate) fn given_up(&self, n: u64, params: &Value) -> bool {
+        self.expired.iter().any(|(m, q)| *m == n && q["url"] == params["url"])
     }
 
     /// Only what `waiting` still waits for is kept.
@@ -383,13 +408,18 @@ impl Session {
         if tries >= MAX_RETRIES {
             return Err(format!("{id}: gave up after fetching {MAX_RETRIES} times"));
         }
-        // One waiting run per command: the latest call's, which replaces an earlier one.
+        // One waiting run per command: the latest call's, which replaces an earlier one. The
+        // downloads a replaced or dropped run alone waited for are given up, so they aren't added
+        // with no command to go on with them.
+        let keeps: Vec<u64> = requests.iter().map(|(n, _)| *n).collect();
         if let Some(i) = self.plugin_retries.iter().position(|r| r.id == id) {
-            self.plugin_retries.remove(i);
+            let old = self.plugin_retries.remove(i);
+            self.give_up_requests(&old, &keeps);
             self.notify(format!("{id}: an earlier run still waiting for the web was replaced by this one"), false);
         }
         if self.plugin_retries.len() >= MAX_WAITING {
             let dropped = self.plugin_retries.remove(0);
+            self.give_up_requests(&dropped, &keeps);
             self.notify(format!("{}: dropped while waiting for the web (too many plugin commands waiting)", dropped.id), true);
         }
         // `urls` are cache keys (`<plugin> <url>`; plugin ids have no spaces): the answer names
@@ -410,6 +440,16 @@ impl Session {
         let answered = self.rerun_landed.clone();
         self.plugin_retries.push(Retry { id: id.to_string(), params: params.clone(), urls, requests: numbers, answered, tries: tries + 1 });
         Ok(answer)
+    }
+
+    /// Gives up the downloads `gone` waited for that neither `keeps` (the run replacing it) nor
+    /// another waiting run still waits for.
+    fn give_up_requests(&mut self, gone: &Retry, keeps: &[u64]) {
+        for n in &gone.requests {
+            if !keeps.contains(n) && !self.plugin_retries.iter().any(|r| r.requests.contains(n)) {
+                self.url_waits.give_up(*n);
+            }
+        }
     }
 
     /// Whether plugin commands are waiting for their fetches or downloads, so the front end
@@ -498,9 +538,21 @@ mod tests {
         assert_eq!(ran[0].1.as_ref().unwrap()["layer"], 7, "{ran:?}");
         assert!(s.take_url_requests().is_empty(), "nothing asked again");
         // Given up past the wait: a late landing isn't added.
-        s.url_waits.expired.push(902);
+        s.url_waits.expired.push((902, json!({"url": "https://x.org/c.csv"})));
         let e = s.run("layer.addUrl", &json!({"url": "https://x.org/c.csv", "request": 902})).unwrap_err();
         assert!(e.contains("stopped waiting"), "{e}");
+        // A run replaced by another gives up the download only it waited for.
+        s.retry_plugin("plugin:eng-share-b/f", &p, Vec::new(), vec![(950, json!({"url": "https://x.org/d.csv"}))]).unwrap();
+        s.retry_plugin("plugin:eng-share-b/f", &p, Vec::new(), vec![(951, json!({"url": "https://x.org/e.csv"}))]).unwrap();
+        let e = s.run("layer.addUrl", &json!({"url": "https://x.org/d.csv", "request": 950})).unwrap_err();
+        assert!(e.contains("stopped waiting"), "{e}");
+        // A number given with another address lands nothing.
+        let _ = s.run("layer.addDownload", &json!({"url": "https://x.org/other.csv", "request": 951, "id": 424242}));
+        assert!(s.url_waits.holds(951, &json!({"url": "https://x.org/e.csv"})), "951 still waits for e.csv");
+        // Asked again once made, while the command waits: that one, not another download.
+        s.url_waits.land(951, Ok(json!({"layer": 9})));
+        s.request_url(&json!({"url": "https://x.org/e.csv"})).unwrap();
+        assert!(s.take_url_requests().is_empty(), "made already");
         for id in ["eng-share-a", "eng-share-b"] {
             rustgis_plugins::unload(id);
         }
