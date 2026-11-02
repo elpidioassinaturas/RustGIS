@@ -6864,8 +6864,9 @@ fn plugin_data_cubes_need_files_and_network() {
 }
 
 /// A mosaic of the project's raster layers, written to no file, stays in the project: a plugin
-/// with `edit` alone may make one, and none without it. Writing it to a `path`, or an input that
-/// isn't a raster layer in memory (a file name, read from disk), needs `files`.
+/// with `edit` alone may make one, and none without it. Writing it to a `path`, or an input read
+/// from disk (a raster file name that isn't a layer), needs `files`; inputs the command reads no
+/// file for fail in the command instead.
 #[test]
 fn plugin_mosaics_of_project_layers_need_no_files() {
     use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
@@ -6887,28 +6888,33 @@ fn plugin_mosaics_of_project_layers_need_no_files() {
     // The layer comes before a file of its name.
     forward(&mut s, "eng-mosaic", "raster.mosaic", json!({"inputs": ["east", "north.tif"], "name": "East and north"})).unwrap();
     assert!(s.map().layer_by_name("East and north").is_some());
+    // Writing a file, an input read from one (a raster file name that isn't a layer), and a name
+    // that looks like a place need `files`.
     for params in [
         json!({"inputs": ["west", "east"], "name": "Elevation", "path": "elevation.tif"}),
         json!({"inputs": ["west", "east.tif"]}),
         json!({"inputs": ["west", "../east.tif"]}),
-        json!({"inputs": ["west", "Countries"]}),
         json!({"inputs": ["west", "east"], "name": "../elevation"}),
-        json!({"inputs": vec!["west"; 10_001]}),
-        json!({"inputs": ["west", 3]}),
     ] {
         let e = forward(&mut s, "eng-mosaic", "raster.mosaic", params.clone()).unwrap_err();
         assert!(e.contains("'files' permission"), "{params}: {e}");
     }
-    // With `files`, the mosaic's own limit says why.
-    plugin("eng-mosaic-files", &["edit", "files"]);
-    let e = forward(&mut s, "eng-mosaic-files", "raster.mosaic", json!({"inputs": vec!["west"; 10_001]})).unwrap_err();
-    assert!(e.contains("at most 10000 inputs"), "{e}");
-    rustgis_plugins::unload("eng-mosaic-files");
-    // A raster layer whose cells aren't in memory isn't one to mosaic, so the plugin needs `files`.
+    // Inputs the command would read no file for fail in the command, as they would with `files`:
+    // a typo, a vector layer, a non-text input, a call over the input limit.
+    for (params, why) in [
+        (json!({"inputs": ["west", "esat"]}), "no raster layer 'esat'"),
+        (json!({"inputs": ["west", "Countries"]}), "no raster layer 'Countries'"),
+        (json!({"inputs": ["west", 3]}), "each input is a raster layer's name or a file path"),
+        (json!({"inputs": vec!["west"; 10_001]}), "at most 10000 inputs"),
+    ] {
+        let e = forward(&mut s, "eng-mosaic", "raster.mosaic", params.clone()).unwrap_err();
+        assert!(e.contains(why) && !e.contains("permission"), "{params}: {e}");
+    }
+    // So does a raster layer whose cells aren't in memory yet (a tile still downloading).
     let east = s.map().layer_by_name("east").unwrap().id;
     s.map_mut().layer_mut(east).unwrap().raster.as_mut().unwrap().data = None;
     let e = forward(&mut s, "eng-mosaic", "raster.mosaic", json!({"inputs": ["west", "east"]})).unwrap_err();
-    assert!(e.contains("'files' permission"), "{e}");
+    assert!(e.contains("no raster layer 'east'") && !e.contains("permission"), "{e}");
     rustgis_plugins::unload("eng-mosaic");
 }
 

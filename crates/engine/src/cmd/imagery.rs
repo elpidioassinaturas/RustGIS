@@ -851,15 +851,17 @@ fn mosaic_layer(s: &Session, v: &Value) -> Result<Arc<Raster>, String> {
     raster_named(s, mosaic_name(v)?)
 }
 
-/// Whether a mosaic stays in the project: it has inputs, no more than it takes, each a
-/// [`mosaic_layer`], and nothing else names a place (no `path`, nor a name that looks like one).
-/// A layer named like a path (`~dem`, `a/../b`) counts as a place too: that errs towards asking
-/// for `files`.
+/// Whether a mosaic stays in the project: no input is read from a file, and nothing else names a
+/// place (no `path`, nor a name that looks like one). An input is read from a file exactly when
+/// [`raster_mosaic`] reads it: it isn't a [`mosaic_layer`] and it is a raster file name. Any other
+/// input that isn't one (a typo, a vector layer, a tile still downloading) fails in the command
+/// with "no raster layer", touching no file, as does a call over the input limit, which is
+/// refused before any lookup. A layer named like a path (`~dem`, `a/../b`) counts as a place:
+/// that errs towards asking for `files`.
 pub(crate) fn mosaic_stays_in_project(s: &Session, p: &Value) -> bool {
-    let in_memory = |v: &Value| mosaic_layer(s, v).is_ok();
-    let layers =
-        p.get("inputs").and_then(Value::as_array).is_some_and(|a| !a.is_empty() && a.len() <= MAX_MOSAIC_INPUTS && a.iter().all(in_memory));
-    layers && !super::items::names_place(p, super::plugins::PLACE_KEYS, 0)
+    let read_from_file = |v: &Value| mosaic_layer(s, v).is_err() && mosaic_name(v).is_ok_and(rustgis_data::raster::is_raster_name);
+    let inputs = p.get("inputs").and_then(Value::as_array).is_none_or(|a| a.len() > MAX_MOSAIC_INPUTS || !a.iter().any(read_from_file));
+    inputs && !super::items::names_place(p, super::plugins::PLACE_KEYS, 0)
 }
 
 /// Merges rasters on one grid (tiles of an elevation model, say) into one, keeping their
