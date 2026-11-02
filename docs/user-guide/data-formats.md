@@ -139,7 +139,9 @@ tile), without a STAC catalogue:
   while it is read and kept.
 - The file's no-data, colour table (a palette file draws in its colours) and band names come
   with it, and class names given as `CLASS_<value>` items in GDAL's metadata tag, as the MapBiomas
-  files on Source Cooperative give theirs.
+  files on Source Cooperative give theirs. These come from the file's own tags: an `.aux.xml`
+  sidecar beside the address isn't read, so a no-data value set only there (as `gdal_edit` may
+  set it) doesn't apply; give the file one, or a local copy with its sidecar.
 - The window is kept in the project as a GeoTIFF, with its colour table and class names, not
   read again from the address. A window of several bands that aren't colour (or grey and alpha)
   keeps only its first band once the project is reopened, with a notice. Files stored bottom up

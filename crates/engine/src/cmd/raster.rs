@@ -445,8 +445,10 @@ pub(crate) fn as_scan(p: &Value) -> Result<bool, String> {
 /// that differs is said as the range the rasters give ("1–2 scale…"), never summed (a size limit
 /// isn't a count).
 pub(crate) fn say_losses(s: &mut Session, losses: Vec<(String, String)>) {
-    // A line's kind: its text with each run of digits taken out, and those numbers.
+    // A line's kind: its text with each number taken out, and those numbers. A number is a run of
+    // digits standing as a word of its own: one inside a name (`scene2024.tif`) stays text.
     fn kind_of(line: &str) -> (Vec<&str>, Vec<u64>) {
+        let apart = |c: Option<char>| c.is_none_or(|c| c.is_whitespace() || matches!(c, '(' | ')' | ',' | ';' | ':'));
         let (mut parts, mut numbers, mut from) = (Vec::new(), Vec::new(), 0);
         let bytes = line.as_bytes();
         let mut i = 0;
@@ -455,6 +457,11 @@ pub(crate) fn say_losses(s: &mut Session, losses: Vec<(String, String)>) {
                 let start = i;
                 while i < bytes.len() && bytes[i].is_ascii_digit() {
                     i += 1;
+                }
+                let before = line[..start].chars().next_back();
+                let after = line[i..].chars().next();
+                if !(apart(before) && apart(after)) {
+                    continue;
                 }
                 match line[start..i].parse::<u64>() {
                     Ok(n) => {

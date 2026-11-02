@@ -566,6 +566,8 @@ pub(crate) struct Unpaletted<R> {
     inner: R,
     /// Where each palette image's PhotometricInterpretation value is, and what to show there.
     patches: Vec<(u64, [u8; 2])>,
+    /// Whether the first image (the full one) is a palette image.
+    first_palette: bool,
     pos: u64,
 }
 
@@ -575,9 +577,11 @@ const MAX_ENTRIES: u64 = 4096;
 
 /// Where the palette images' PhotometricInterpretation values are, walking the IFD chain
 /// (classic and BigTIFF). A file it can't walk has none: the decoder reports what's wrong.
-fn palette_patches<R: Read + Seek>(r: &mut R) -> Vec<(u64, [u8; 2])> {
+fn palette_patches<R: Read + Seek>(r: &mut R) -> (Vec<(u64, [u8; 2])>, bool) {
     use std::io::SeekFrom;
     let mut patches = Vec::new();
+    // Whether the first image is one of them.
+    let mut first = false;
     let mut walk = || -> Option<()> {
         let mut head = [0u8; 16];
         r.seek(SeekFrom::Start(0)).ok()?;
@@ -611,7 +615,7 @@ fn palette_patches<R: Read + Seek>(r: &mut R) -> Vec<(u64, [u8; 2])> {
             u64::from(u32_(head.get(4..)?)?)
         };
         let (count_len, entry_len, next_len) = if big { (8u64, 20u64, 8usize) } else { (2, 12, 4) };
-        for _ in 0..MAX_IFDS {
+        for k in 0..MAX_IFDS {
             if ifd == 0 {
                 break;
             }
@@ -631,6 +635,7 @@ fn palette_patches<R: Read + Seek>(r: &mut R) -> Vec<(u64, [u8; 2])> {
                     if u16_(e.get(value_at..)?)? == 3 {
                         let at = ifd + count_len + i as u64 * entry_len + value_at as u64;
                         patches.push((at, if little { [1, 0] } else { [0, 1] }));
+                        first |= k == 0;
                     }
                 }
             }
@@ -641,7 +646,7 @@ fn palette_patches<R: Read + Seek>(r: &mut R) -> Vec<(u64, [u8; 2])> {
         Some(())
     };
     let _ = walk();
-    patches
+    (patches, first)
 }
 
 /// Any reader, boxed: the decoder is compiled once for every kind of source (a file, bytes in
@@ -658,17 +663,18 @@ pub(crate) fn reader<'a>(r: impl Read + Seek + 'a) -> std::io::Result<Reader<'a>
 }
 
 impl<R> Unpaletted<R> {
-    /// Whether the file has palette images (PhotometricInterpretation 3), shown as grey.
-    pub(crate) fn has_palette(&self) -> bool {
-        !self.patches.is_empty()
+    /// Whether the file's first image (the full one) is a palette image (PhotometricInterpretation
+    /// 3), shown as grey.
+    pub(crate) fn first_is_palette(&self) -> bool {
+        self.first_palette
     }
 }
 
 impl<R: Read + Seek> Unpaletted<R> {
     fn new(mut inner: R) -> std::io::Result<Self> {
-        let patches = palette_patches(&mut inner);
+        let (patches, first_palette) = palette_patches(&mut inner);
         inner.seek(std::io::SeekFrom::Start(0))?;
-        Ok(Unpaletted { inner, patches, pos: 0 })
+        Ok(Unpaletted { inner, patches, first_palette, pos: 0 })
     }
 }
 

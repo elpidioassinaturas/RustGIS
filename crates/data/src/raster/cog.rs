@@ -58,6 +58,11 @@ impl Sparse {
         self
     }
 
+    /// Whether the file's length is known ([`Sparse::with_len`]).
+    pub fn len_known(&self) -> bool {
+        self.len.is_some()
+    }
+
     /// Where the next part held after `at` starts, if any.
     pub fn next_start(&self, at: u64) -> Option<u64> {
         self.chunks.range(at.saturating_add(1)..).next().map(|(a, _)| *a)
@@ -326,7 +331,8 @@ fn read_layout(r: Sparse) -> Result<Parse> {
     let rd = super::geotiff::reader(r).map_err(err)?;
     // A palette image says so (PhotometricInterpretation 3, shown to the decoder as grey): only
     // then is a colour table read, as the whole-file read does; a grey image's stray one isn't.
-    let palette_image = rd.has_palette();
+    // The full image's word, which the window and the drawing read.
+    let palette_image = rd.first_is_palette();
     let mut dec = Decoder::new(rd).map_err(err)?.with_limits(limits());
     let Some(geo) = super::geotiff::cog_geo(&mut dec)? else {
         return Ok(Parse::NotTiled("a rotated image, or one without coordinates, is read whole".into()));
@@ -617,8 +623,8 @@ pub struct Example {
     pub wide: bool,
     /// 64-bit float samples of the byte value, but 1e39 (past `f32`'s range) for 255.
     pub huge: bool,
-    /// With `classes`: a grey image (PhotometricInterpretation 1) that has the colour table
-    /// anyway, which isn't a palette.
+    /// With `classes`: the full image grey (PhotometricInterpretation 1) with the colour table
+    /// anyway, which isn't a palette; its overviews stay palette images.
     pub stray: bool,
     /// With `classes`: a palette image with no colour table.
     pub no_table: bool,
@@ -731,7 +737,7 @@ pub fn example_with(e: &Example) -> Vec<u8> {
                 ]),
             ),
             (259, V::S(vec![1])),
-            (262, V::S(vec![if e.classes && !e.stray { 3 } else { 1 }])),
+            (262, V::S(vec![if e.classes && !(e.stray && i == 0) { 3 } else { 1 }])),
             (277, V::S(vec![nb as u16])),
             (284, V::S(vec![if e.planar { 2 } else { 1 }])),
             (322, V::L(vec![tile])),
@@ -986,6 +992,16 @@ pub(crate) mod tests {
         let (_, bare) = layout_of(&example_with(&Example { size: 512, tile: 256, classes: true, no_table: true, ..Example::default() }));
         assert!(bare.palette.is_none(), "{:?}", bare.palette);
         assert_eq!(bare.lost, ["it is a palette image with no colour table: drawn grey"]);
+        // GDAL's metadata tag pointing past the end of a file of known length: the layout is read,
+        // the tag left out and said, as the whole-file read has it.
+        let mut bad = example_with(&Example { size: 512, tile: 256, classes: true, ..Example::default() });
+        let n = usize::from(u16::from_le_bytes([bad[8], bad[9]]));
+        let len = u32::try_from(bad.len()).unwrap();
+        let entry = (0..n).map(|k| 10 + k * 12).find(|&e| bad[e..e + 2] == [0x80, 0xA4]).unwrap();
+        bad[entry + 8..entry + 12].copy_from_slice(&(len + 1000).to_le_bytes());
+        let Parse::Done(l) = layout(&Sparse::default().with_len(u64::from(len)).with(0, bad)).unwrap() else { panic!("not read") };
+        let said: Vec<&String> = l.lost.iter().chain(l.described.iter().flat_map(|d| d.lost.iter())).collect();
+        assert!(said.iter().any(|x| x.contains("band and class names are left out")), "{said:?}");
     }
 
     #[test]

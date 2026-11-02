@@ -403,7 +403,11 @@ fn step(url: String, have: Sparse, rounds: usize, done: Box<dyn FnOnce(Result<Ar
                 a,
                 len,
                 Box::new(move |r| match r {
-                    // Nothing more to read: the file ends before what its header points at.
+                    // Nothing more to read: the file ends at or before `a`. Read again knowing so, a
+                    // tag that points past the end (an optional one, GDAL's metadata or a colour
+                    // table) is left out and said, as the whole-file read does; one the image needs
+                    // fails to decode. Once only: a file whose length is known isn't asked past it.
+                    Ok(more) if more.is_empty() && !have.len_known() => step(u, have.with_len(a), rounds + 1, done),
                     Ok(more) if more.is_empty() => done(Err(format!("{u}: the GeoTIFF is cut short"))),
                     Ok(more) => step(u, have.with(a, more), rounds + 1, done),
                     Err(e) => done(Err(format!("{u}: {e}"))),
