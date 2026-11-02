@@ -63,14 +63,14 @@ Correct, robust and recoverable, with the foundations other themes stand on.
   administrator can fix for a managed install (no AI Assistant, plugins or web services).
 - Extend the OS keychain secret store to service connections (database passwords, S3 keys,
   AI provider keys and the ChatGPT sign-in's tokens are already kept there).
-- Vector tools, each writing a new layer: points along lines, check and fix geometry _(open)_; summary fields
-  (sum, mean, first…) on Dissolve and Summarize Within _(open)_.
+- Vector tools, each writing a new layer: points along lines, check and fix geometry _(open)_.
 - Batch runs: one tool over many layers or a folder of files.
 
 ### Expressions and cartography
 Next on top of the expression language:
 - Expression labels, with rotation, case, priority and number formats.
-- Rule-based renderer: ordered rules with an expression, symbol and scale range.
+- Rule-based renderer: ordered rules with an expression, symbol and scale range, edited as such
+  (QGIS's rules import as Unique Values by expression).
 - Quick filters in the attribute table; pop-up templates (chosen fields, formats for dates, links
   and images, a title).
 
@@ -154,6 +154,8 @@ Open questions rather than plans; discuss before building.
 
 - Geometry conversions: Polygon To Line, Split Line At Vertices, Feature Envelope To Polygon
   and Unsplit Line, available in the Tools pane and through `gp.run`.
+- Summary fields (sum, mean, first… — every Summary Statistics statistic) on Dissolve, over each
+  dissolved group's records, and on Summarize Within, over the points in each polygon.
 - Customizable keyboard shortcuts with portable JSON import/export ([#562](https://github.com/opengeos/RustGIS/issues/562)).
 - Save edits back to existing GeoPackage and PostGIS tables on desktop, with atomic saves,
   conflict detection and discard/reload ([#1041](https://github.com/opengeos/RustGIS/issues/1041)).
@@ -203,8 +205,8 @@ Open questions rather than plans; discuss before building.
   gallery (OpenFreeMap, USGS Imagery), worldviews.
 - Cartography: single, unique values, graduated colours (natural breaks, equal interval,
   quantile, geometric interval, standard deviation, manual, arithmetic progression, head/tail
-  breaks) and proportional symbols; symbol size, colours, outline width and angle by expression;
-  nested layer groups; label classes with SQL queries, managed in the Labeling pane; straight and
+  breaks) and proportional symbols; Unique Values by expression; symbol size, colours, outline width and angle by expression;
+  label text, size, colour and angle by expression; nested layer groups; label classes with SQL queries, managed in the Labeling pane; straight and
   curved line placement, offsets, backgrounds, halos, wrapping, repeats, other positions round a
   point, installed font families and annotation; stacked and dashed line strokes, markers and hash
   marks along lines, stacked, shifted and turned point marks, font markers, hatch, marker, gradient

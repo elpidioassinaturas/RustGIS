@@ -138,7 +138,7 @@ pub fn commands() -> Vec<C> {
         .when(need_layer),
         C::new("layer.symbology", "Symbology", "Style › Drawing", symbology)
             .when(need_feature_layer)
-            .params(r#"{"layer"?, "type": "single"|"unique"|"graduated"|"proportional", "field"?, "classes"?: 1..12, "method"?: "naturalBreaks"|"equalInterval"|"quantile"|"geometricInterval"|"standardDeviation"|"arithmeticProgression"|"headTailBreaks"|"manual", "breaks"?: [numbers] (manual: the classes' upper bounds, closed by the field's largest value), "ramp"?: string}"#),
+            .params(r#"{"layer"?, "type": "single"|"unique"|"graduated"|"proportional", "field"?, "expression"?: text|null (unique: class by this expression's values instead of a field; blank or null: by a field; with neither key, Unique Values keep the layer's expression), "classes"?: 1..12, "method"?: "naturalBreaks"|"equalInterval"|"quantile"|"geometricInterval"|"standardDeviation"|"arithmeticProgression"|"headTailBreaks"|"manual", "breaks"?: [numbers] (manual: the classes' upper bounds, closed by the field's largest value), "ramp"?: string}"#),
         C::new("layer.ramp", "Color Scheme", "Style › Drawing", |s, p| {
             let r = s.ramp(s_req(p, "ramp")?)?;
             with(s, p, |l| match &mut l.raster {
@@ -1622,6 +1622,7 @@ fn apply_styles(s: &mut Session, id: u32, styles: &[(String, rustgis_data::kml::
         other_strokes: Vec::new(),
         class_fills: Default::default(),
         other_fills: Vec::new(),
+        expression: None,
     };
 }
 
@@ -2713,12 +2714,15 @@ pub fn columns_of(name: &str, bytes: &[u8], p: &Value) -> CmdResult {
     } else if is_delimited_name(name) {
         let bytes = bytes.get(..COLUMNS_PREFIX).unwrap_or(bytes);
         let text = match std::str::from_utf8(bytes) {
-            Ok(text) => text,
+            Ok(text) => text.into(),
             // The part read may end inside a character.
-            Err(e) if e.error_len().is_none() => std::str::from_utf8(bytes.get(..e.valid_up_to()).unwrap_or_default()).unwrap_or_default(),
-            Err(_) => return Err(format!("{name} is not UTF-8 text")),
+            Err(e) if e.error_len().is_none() => {
+                std::str::from_utf8(bytes.get(..e.valid_up_to()).unwrap_or_default()).unwrap_or_default().into()
+            }
+            // Another encoding (Latin-1, UTF-16), as reading the file takes it.
+            Err(_) => rustgis_data::io::delimited_text(name, bytes).map_err(err)?.0,
         };
-        rustgis_data::io::csv_columns(text, parse_delimiter(ps(p, "delimiter"))?).map_err(err)?
+        rustgis_data::io::csv_columns(&text, parse_delimiter(ps(p, "delimiter"))?).map_err(err)?
     } else {
         return Err(format!("{name}: not delimited text (CSV, TSV, TXT) or a spreadsheet"));
     };
@@ -2749,9 +2753,11 @@ fn read_delimited(
     }
     let Some(opts) = csv_options(p)? else { return Ok(None) };
     let bytes = bytes()?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| format!("{name} is not UTF-8 text"))?;
+    let (text, note) = rustgis_data::io::delimited_text(name, &bytes).map_err(|e| e.to_string())?;
     let stem = Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or("layer");
-    rustgis_data::io::read_csv_with(text, stem, &opts).map(Some).map_err(|e| format!("{name}: {e}"))
+    let (ds, mut report) = rustgis_data::io::read_csv_with(&text, stem, &opts).map_err(|e| format!("{name}: {e}"))?;
+    report.messages.extend(note);
+    Ok(Some((ds, report)))
 }
 
 /// The file name for data downloaded from `url`: its last path segment when that has an extension
@@ -3862,12 +3868,17 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
         Some(NoFill::Symbols) if base.fill.a() == 0 => rustgis_map::Symbol { fill: base.fill.with_alpha(shown_fill_alpha()), ..base },
         _ => base,
     };
+    // The field it classes by, or classed by before an expression (kept to come back to).
+    let last_field = match &l.renderer {
+        Renderer::Unique { field, .. } => Some(field.as_str()),
+        r => r.field(),
+    }
+    .filter(|f| l.dataset.field_index(f).is_some());
     let field = |numeric_only: bool| -> Result<String, String> {
         if let Some(x) = ps(p, "field") {
             return Ok(x.to_string());
         }
-        l.renderer
-            .field()
+        last_field
             .filter(|name| {
                 !numeric_only || l.dataset.field_index(name).and_then(|i| l.dataset.fields.get(i)).is_some_and(|f| f.ty.is_numeric())
             })
@@ -3890,9 +3901,47 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
         }
         Ok(rows)
     };
+    // Unique Values by expression: the one given, or with no field given, the layer's own.
+    let expression = match p.get("expression") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(t)) if t.trim().is_empty() => None,
+        Some(Value::String(t)) => Some(t.trim().to_string()),
+        Some(_) => return Err("expression is text".into()),
+    };
+    if expression.is_some() && ps(p, "field").is_some() {
+        return Err("give a field or an expression, not both".into());
+    }
+    if expression.is_some() && !matches!(kind.as_str(), "unique" | "uniquevalues") {
+        return Err("only Unique Values class by an expression".into());
+    }
+    // Applied again by the layer's own expression, as many classes as it has (an imported rule
+    // style's may pass the first MAX_UNIQUE values).
+    let mut keep = rustgis_map::symbology::MAX_UNIQUE;
+    let expression = match (p.get("expression"), p.get("field")) {
+        (None, None) => {
+            if let Renderer::Unique { classes, expression: Some(_), .. } = &l.renderer {
+                keep = keep.max(classes.len()).min(rustgis_map::symbology::MAX_EXPRESSION_CLASSES);
+            }
+            l.renderer.expression().map(str::to_string)
+        }
+        _ => expression,
+    };
+    // Features past the first values an expression's classes keep.
+    let mut rest = 0;
     let mut r = match kind.as_str() {
         "single" | "singlesymbol" => Renderer::Single(base),
-        "unique" | "uniquevalues" => Renderer::unique(&l.dataset, &rows()?, &field(false)?, ramp.unwrap_or(Ramp::Harbour), base)?,
+        "unique" | "uniquevalues" => match &expression {
+            Some(e) => {
+                let (mut r, n) = Renderer::unique_by_up_to(&l.dataset, &rows()?, e, ramp.unwrap_or(Ramp::Harbour), base, keep)?;
+                rest = n;
+                // (Clearing the expression goes back to the field it had.)
+                if let (Renderer::Unique { field, .. }, Some(last)) = (&mut r, last_field) {
+                    *field = last.to_string();
+                }
+                r
+            }
+            None => Renderer::unique(&l.dataset, &rows()?, &field(false)?, ramp.unwrap_or(Ramp::Harbour), base)?,
+        },
         "graduated" | "graduatedcolors" => {
             let (field, ramp) = (field(true)?, ramp.unwrap_or(Ramp::Ember));
             // Manual with no bounds keeps the layer's current ones on the same field, so switching
@@ -3921,10 +3970,30 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
     if hidden == Some(NoFill::Symbols) {
         r.map_symbols(show_fill);
     }
-    with(s, p, |l| {
+    let name = l.name.clone();
+    // Classes are the values given with no map scale: one given only at some scales never is.
+    let by_scale = r.expression().is_some_and(rustgis_map::qgis::reads_scale);
+    let out = with(s, p, |l| {
         l.renderer = r;
         take_no_fill(l);
-    })
+    })?;
+    if rest > 0 {
+        s.notify(
+            format!(
+                "{name}: {rest} features whose value is past the first {keep} values the expression gives (in text order) are drawn as <all other values>"
+            ),
+            false,
+        );
+    }
+    if by_scale {
+        s.notify(
+            format!(
+                "{name}: its classes are the values the expression gives without a map scale; values it gives only at some scales, if any, are drawn as <all other values>"
+            ),
+            false,
+        );
+    }
+    Ok(out)
 }
 
 /// The class `value`, `index` or `other: true` name in a command's parameters, or `None` when
