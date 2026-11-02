@@ -14,10 +14,34 @@ use crate::theme::{Tokens, semibold};
 /// Most entries the pane lists, the newest: it says how many more match.
 pub const SHOWN: usize = 200;
 
-/// What the listed rows were picked from: the log's length and newest entry (which change with
-/// each entry, a clear, or the oldest going past the log's limit) and the filters, the query as
-/// typed (trimmed).
-type Key = (usize, Option<LogEntry>, String, bool);
+/// What the listed rows were picked from: the log's [`changes`](rustgis_engine::project_log::SessionLog::changes)
+/// and the filters, the query as typed (trimmed).
+type Key = (u64, String, bool);
+
+/// An entry as the pane draws it: its texts made once, when the rows are picked.
+struct Row {
+    e: LogEntry,
+    /// Its parameters as one line of JSON (none for no parameters), and that line as listed.
+    params: String,
+    line: String,
+    /// How long it took, and when it started.
+    took: String,
+    at: String,
+}
+
+impl Row {
+    fn of(e: LogEntry) -> Row {
+        let params = params_text(&e);
+        // One line in the list; the whole of it (up to the log's 4 KB) on hover.
+        let mut line: String = params.chars().take(120).collect();
+        if line.len() < params.len() {
+            line.push('…');
+        }
+        let took = crate::i18n::fmt("{ms} ms", &[("ms", &e.millis.to_string())]);
+        let at = crate::i18n::fmt("{time} UTC", &[("time", &e.time_utc())]);
+        Row { e, params, line, took, at }
+    }
+}
 
 /// Which list the History pane shows, and the log's filters.
 #[derive(Default)]
@@ -28,10 +52,9 @@ pub struct State {
     pub query: String,
     /// Only the commands that failed.
     pub failed: bool,
-    /// The rows last listed (entries with their parameters as one line of text) and how many
-    /// match and are in the log, kept while their [`Key`] holds: the pane is drawn each frame,
-    /// and picking them goes through the whole log.
-    cache: Option<(Key, Vec<(LogEntry, String)>, usize, usize)>,
+    /// The rows last listed and how many match and are in the log, kept while their [`Key`]
+    /// holds: the pane is drawn each frame, and picking them goes through the whole log.
+    cache: Option<(Key, Vec<Row>, usize, usize)>,
 }
 
 /// The switch at the top of the History pane, between its two records (named as Mavrick-F
@@ -62,22 +85,16 @@ pub fn pane(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             .on_hover_text(tl!("Words in the command's id, such as layer. or export"));
         ui.checkbox(&mut s.failed, tl!("Failed only"));
     });
-    // Compared in place, so a repaint that changes nothing allocates and clones nothing; the
-    // rows are picked again only when the key changed.
+    // Compared in place, so a repaint that changes nothing picks, formats and clones nothing;
+    // the rows (and their texts) are made again only when the key changed.
     let (log, State { query, failed, cache, .. }) = (&app.session.log, &mut app.ui.session_log);
     let raw = query.trim();
-    let same = cache.as_ref().is_some_and(|(k, ..)| k.0 == log.len() && k.1.as_ref() == log.newest() && k.2 == raw && k.3 == *failed);
+    let same = cache.as_ref().is_some_and(|(k, ..)| k.0 == log.changes() && k.1 == raw && k.2 == *failed);
     if !same {
         let lower = raw.to_lowercase();
         let (shown, count, total) = log.select(|e| kept(e, &lower, *failed), SHOWN);
-        let rows = shown
-            .into_iter()
-            .map(|e| {
-                let params = params_text(&e);
-                (e, params)
-            })
-            .collect();
-        *cache = Some(((log.len(), log.newest().cloned(), raw.to_string(), *failed), rows, count, total));
+        let rows = shown.into_iter().map(Row::of).collect();
+        *cache = Some(((log.changes(), raw.to_string(), *failed), rows, count, total));
     }
     let (count, total, listed) = cache.as_ref().map_or((0, 0, 0), |(_, rows, matched, all)| (*matched, *all, rows.len()));
     let note = if total == 0 {
@@ -97,8 +114,8 @@ pub fn pane(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     ui.add_space(4.0);
     if let Some((_, rows, ..)) = &app.ui.session_log.cache {
-        for (e, params) in rows.iter().rev() {
-            row(ui, e, params, t);
+        for r in rows.iter().rev() {
+            row(ui, r, t);
             ui.add_space(4.0);
         }
     }
@@ -132,8 +149,9 @@ fn params_text(e: &LogEntry) -> String {
 }
 
 /// One entry: whether it worked, its command, how long it took, when it started, its error and
-/// its parameters, `params` (all of them on hover; right-click copies them).
-fn row(ui: &mut Ui, e: &LogEntry, params: &str, t: &Tokens) {
+/// its parameters (all of them on hover; right-click copies them).
+fn row(ui: &mut Ui, item: &Row, t: &Tokens) {
+    let (e, params) = (&item.e, item.params.as_str());
     let frame =
         egui::Frame::NONE.stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::same(8));
     let r = frame.show(ui, |ui| {
@@ -143,20 +161,15 @@ fn row(ui: &mut Ui, e: &LogEntry, params: &str, t: &Tokens) {
             ui.painter().circle_filled(r.center(), 4.5, if e.ok { t.green } else { t.red });
             ui.label(egui::RichText::new(&e.command).font(semibold(12.5)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let took = crate::i18n::fmt("{ms} ms", &[("ms", &e.millis.to_string())]);
-                ui.label(egui::RichText::new(took).size(11.0).color(t.text_dim));
+                ui.label(egui::RichText::new(&item.took).size(11.0).color(t.text_dim));
             });
         });
-        let at = crate::i18n::fmt("{time} UTC", &[("time", &e.time_utc())]);
-        ui.label(egui::RichText::new(at).size(11.0).color(t.text_dim));
+        ui.label(egui::RichText::new(&item.at).size(11.0).color(t.text_dim));
         if let Some(err) = &e.error {
             ui.label(egui::RichText::new(err).size(11.0).color(t.red));
         }
         if !params.is_empty() {
-            // One line in the list; the whole of it (up to the log's 4 KB) on hover.
-            let line: String = params.chars().take(120).collect();
-            let more = if line.len() < params.len() { "…" } else { "" };
-            ui.add(egui::Label::new(egui::RichText::new(format!("{line}{more}")).monospace().size(10.5).color(t.text_dim)).truncate())
+            ui.add(egui::Label::new(egui::RichText::new(&item.line).monospace().size(10.5).color(t.text_dim)).truncate())
                 .on_hover_text(egui::RichText::new(params).monospace());
         }
     });

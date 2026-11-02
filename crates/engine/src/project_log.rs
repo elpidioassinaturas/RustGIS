@@ -363,6 +363,9 @@ pub struct SessionLog {
     /// How many of `entries` are plugins' commands', kept in step with them so a push doesn't
     /// count them.
     plugin_entries: usize,
+    /// Counts each change to `entries` (an entry added, the log cleared), so a view of it knows
+    /// when to read it again ([`SessionLog::changes`]).
+    changes: u64,
 }
 
 impl SessionLog {
@@ -393,6 +396,7 @@ impl SessionLog {
         if plugin(&e) {
             self.plugin_entries += 1;
         }
+        self.changes = self.changes.wrapping_add(1);
         self.entries.push_back(e);
         while self.entries.len() > LOG_LIMIT {
             if self.entries.pop_front().is_some_and(|x| plugin(&x)) {
@@ -431,9 +435,10 @@ impl SessionLog {
         self.entries.len()
     }
 
-    /// The last entry recorded.
-    pub fn newest(&self) -> Option<&LogEntry> {
-        self.entries.back()
+    /// How many times the entries have changed (one added, the log cleared): the same number
+    /// means the same entries.
+    pub fn changes(&self) -> u64 {
+        self.changes
     }
 
     pub fn is_empty(&self) -> bool {
@@ -453,6 +458,7 @@ impl SessionLog {
     /// Empties the log; how many entries it had.
     pub fn clear(&mut self) -> usize {
         self.plugin_entries = 0;
+        self.changes = self.changes.wrapping_add(1);
         std::mem::take(&mut self.entries).len()
     }
 }
