@@ -2799,12 +2799,13 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
     }
     let url = ps(p, "url").map(str::trim).filter(|u| !u.is_empty()).ok_or("url is required")?;
     // A plugin command run again once the download it left to the app was added (#1202): what
-    // adding it answered, once. Answering it changes nothing (the layer is its own undo step).
+    // adding it answered, as often as the run asks for it (the app downloaded and added it once).
+    // Answering it changes nothing (the layer is its own undo step).
     if s.leave_downloads
-        && let Some(i) = s.rerun_landed.iter().position(|(asked, _)| super::plugins::fetch::same_request(asked, p))
+        && let Some((_, answer)) = s.rerun_landed.iter().find(|(asked, _)| super::plugins::fetch::same_request(asked, p))
     {
         s.request_only = true;
-        return s.rerun_landed.remove(i).1;
+        return answer.clone();
     }
     // An address read through a saved S3 connection is judged by the address it wraps; the whole
     // address stays what is fetched and kept.

@@ -516,6 +516,15 @@ impl Bridge<'_> {
         if id.starts_with(rustgis_plugins::PREFIX) {
             return Err("plugins can't run other plugins' commands".into());
         }
+        // A download's number (`"request"`) is the app's own: a plugin's is taken out, so it can't
+        // land another command's wait, or share one it didn't ask for.
+        let unnumbered;
+        let params = if params.get("request").is_some() {
+            unnumbered = fetch::without_request(params);
+            &unnumbered
+        } else {
+            params
+        };
         let spec = self.s.registry.get(id).ok_or_else(|| format!("unknown command '{id}'"))?;
         if let Some(why) = refused(&self.plugin, spec, params) {
             return Err(why);
@@ -743,5 +752,36 @@ mod tests {
         assert!(!bridge.s.request_only, "the bridge took the flag");
         assert_eq!(s.take_url_requests().len(), 2);
         rustgis_plugins::unload("eng-bridge");
+    }
+
+    /// A plugin can't choose a download's number: the app gives it, so one plugin can't land or
+    /// share another command's wait (#1202).
+    #[test]
+    fn a_plugin_cant_choose_a_downloads_number() {
+        let pkg = rustgis_plugins::Package::from_zip(&rustgis_plugins::testing::package("eng-number", &["edit", "network"])).unwrap();
+        rustgis_plugins::load(pkg, "test").unwrap();
+        let plugin = rustgis_plugins::get("eng-number").unwrap();
+        let mut s = Session::new(crate::Project::default());
+        s.leave_downloads = true;
+        let fetches = fetch::Calls::for_plugin("eng-number");
+        let mut bridge = Bridge { s: &mut s, plugin, fetches, changed: false, requested: false };
+        bridge.call("layer.addUrl", &json!({"url": "https://x.org/a.geojson", "request": 99})).unwrap();
+        let taken = s.take_url_requests();
+        assert!(taken.len() == 1 && taken[0]["request"] != json!(99), "{taken:?}");
+        rustgis_plugins::unload("eng-number");
+    }
+
+    /// A command run again answers one landed download as often as it asks for it in that run:
+    /// the same address asked twice isn't downloaded again (#1202).
+    #[test]
+    fn a_rerun_answers_a_download_asked_twice() {
+        let mut s = Session::new(crate::Project::default());
+        s.leave_downloads = true;
+        let asked = json!({"url": "https://x.org/a.geojson"});
+        s.rerun_landed = vec![(asked.clone(), Ok(json!({"layer": 7})))];
+        for _ in 0..2 {
+            assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": 7}));
+        }
+        assert!(s.take_url_requests().is_empty(), "nothing asked again");
     }
 }

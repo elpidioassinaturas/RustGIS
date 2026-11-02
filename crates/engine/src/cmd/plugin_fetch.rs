@@ -288,6 +288,10 @@ pub(crate) struct Retry {
     urls: Vec<String>,
     /// The downloads it left to the app ([`Session::request_url`]), by request number.
     requests: Vec<u64>,
+    /// What the downloads added for its earlier runs answered (what was asked, and the answer):
+    /// a run that waits again for another download keeps them, so the next run doesn't ask for
+    /// those again.
+    answered: Vec<(Value, CmdResult)>,
     tries: u32,
 }
 
@@ -298,7 +302,13 @@ pub(crate) struct Retry {
 pub(crate) struct UrlWaits {
     in_flight: Vec<(u64, Value, Instant)>,
     landed: Vec<(u64, Value, CmdResult)>,
+    /// Requests given up past [`REQUEST_WAIT`] (the latest [`MAX_EXPIRED`]): one that lands
+    /// after is refused, not added with no command left to go on with it.
+    expired: Vec<u64>,
 }
+
+/// The most given-up requests remembered.
+const MAX_EXPIRED: usize = 64;
 
 impl UrlWaits {
     /// The number of a download being made for `asked`.
@@ -326,12 +336,20 @@ impl UrlWaits {
         }
     }
 
-    /// Downloads waited for past [`REQUEST_WAIT`] land as failed.
+    /// Downloads waited for past [`REQUEST_WAIT`] land as failed, and are remembered as given up.
     fn expire(&mut self) {
         let late: Vec<u64> = self.in_flight.iter().filter(|(.., at)| at.elapsed() >= REQUEST_WAIT).map(|(n, ..)| *n).collect();
         for n in late {
             self.land(n, Err(format!("no download in {} minutes", REQUEST_WAIT.as_secs() / 60)));
+            self.expired.push(n);
         }
+        let over = self.expired.len().saturating_sub(MAX_EXPIRED);
+        self.expired.drain(..over);
+    }
+
+    /// Whether request `n` was given up: its command already ran again without it.
+    pub(crate) fn given_up(&self, n: u64) -> bool {
+        self.expired.contains(&n)
     }
 
     /// Only what `waiting` still waits for is kept.
@@ -388,7 +406,9 @@ impl Session {
         for (n, asked) in requests {
             self.url_waits.wait(n, asked);
         }
-        self.plugin_retries.push(Retry { id: id.to_string(), params: params.clone(), urls, requests: numbers, tries: tries + 1 });
+        // What this run already had answered (it is a rerun waiting again): kept for the next.
+        let answered = self.rerun_landed.clone();
+        self.plugin_retries.push(Retry { id: id.to_string(), params: params.clone(), urls, requests: numbers, answered, tries: tries + 1 });
         Ok(answer)
     }
 
@@ -415,11 +435,17 @@ impl Session {
         let ran = ready
             .into_iter()
             .map(|r| {
-                // What its downloads answered, for its `layer.addUrl` calls (each answers once).
-                let landed = std::mem::take(&mut self.url_waits.landed);
-                let (mine, others): (Vec<_>, Vec<_>) = landed.into_iter().partition(|(n, ..)| r.requests.contains(n));
-                self.url_waits.landed = others;
-                self.rerun_landed = mine.into_iter().map(|(_, asked, answer)| (asked, answer)).collect();
+                // What its downloads answered, for its `layer.addUrl` calls: those of its earlier
+                // runs, and the ones it waited for. These stay in `landed` until no command waits
+                // for them (`keep_only`, below), so another command waiting for the same download
+                // gets the answer too.
+                let mine = self
+                    .url_waits
+                    .landed
+                    .iter()
+                    .filter(|(n, ..)| r.requests.contains(n))
+                    .map(|(_, asked, answer)| (asked.clone(), answer.clone()));
+                self.rerun_landed = r.answered.iter().cloned().chain(mine).collect();
                 self.retry_tries = r.tries;
                 // Run as the app runs a plugin's command: what it asks for now is left to the app.
                 let res = self.run_leaving_downloads(&r.id, &r.params);
@@ -439,6 +465,46 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Plugin commands waiting for the same download each get its answer, a rerun that waits
+    /// again keeps the answers it had, and a download that lands after its command gave up isn't
+    /// added (#1202).
+    #[test]
+    fn landed_downloads_answer_every_waiting_run() {
+        use crate::{Project, Session};
+        for id in ["eng-share-a", "eng-share-b"] {
+            let pkg = rustgis_plugins::Package::from_zip(&rustgis_plugins::testing::package(id, &["edit", "network"])).unwrap();
+            rustgis_plugins::load(pkg, "test").unwrap();
+        }
+        let mut s = Session::new(Project::default());
+        let asked = json!({"url": "https://x.org/a.csv"});
+        let p = json!({"op": "layer.addUrl", "params": asked});
+        // Two commands wait for one download (request 900): both get what adding it answered.
+        for id in ["plugin:eng-share-a/f", "plugin:eng-share-b/f"] {
+            s.retry_plugin(id, &p, Vec::new(), vec![(900, asked.clone())]).unwrap();
+        }
+        s.url_waits.land(900, Ok(json!({"layer": 7})));
+        let ran = s.poll_plugin_retries();
+        assert_eq!(ran.len(), 2, "{ran:?}");
+        assert!(ran.iter().all(|(_, r)| r.as_ref().is_ok_and(|v| v["layer"] == 7)), "{ran:?}");
+        assert!(s.take_url_requests().is_empty(), "nothing asked again");
+        // A rerun that waits again for another download keeps what it had: a.csv isn't asked again.
+        s.rerun_landed = vec![(asked.clone(), Ok(json!({"layer": 7})))];
+        s.retry_plugin("plugin:eng-share-a/f", &p, Vec::new(), vec![(901, json!({"url": "https://x.org/b.csv"}))]).unwrap();
+        s.rerun_landed.clear();
+        s.url_waits.land(901, Ok(json!({"layer": 8})));
+        let ran = s.poll_plugin_retries();
+        assert_eq!(ran.len(), 1, "{ran:?}");
+        assert_eq!(ran[0].1.as_ref().unwrap()["layer"], 7, "{ran:?}");
+        assert!(s.take_url_requests().is_empty(), "nothing asked again");
+        // Given up past the wait: a late landing isn't added.
+        s.url_waits.expired.push(902);
+        let e = s.run("layer.addUrl", &json!({"url": "https://x.org/c.csv", "request": 902})).unwrap_err();
+        assert!(e.contains("stopped waiting"), "{e}");
+        for id in ["eng-share-a", "eng-share-b"] {
+            rustgis_plugins::unload(id);
+        }
+    }
 
     #[test]
     fn checks_addresses() {

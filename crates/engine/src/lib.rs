@@ -1106,6 +1106,17 @@ impl Session {
             // one entry too, as it is one step to undo.
             let joins = self.merge.is_some() && self.merge == self.merged && !self.undo.is_empty();
             let (at, start) = (project_log::now_ms(), web_time::Instant::now());
+            // A download that lands after its plugin command gave up waiting (it ran again with
+            // that error) isn't added: no command is left to go on with it (#1202).
+            if matches!(id, "layer.addUrl" | "layer.addDownload")
+                && let Some(n) = params.get("request").and_then(Value::as_u64)
+                && self.url_waits.given_up(n)
+            {
+                let mins = cmd::plugins::fetch::REQUEST_WAIT.as_secs() / 60;
+                let e = format!("a download that came after its plugin command stopped waiting ({mins} minutes) wasn't added");
+                self.notify(e.clone(), true);
+                return Err(e);
+            }
             let res = self.run_command(id, params);
             // A download a plugin command left to the app, added: what it answered is kept for the
             // command to run again with (#1202).
