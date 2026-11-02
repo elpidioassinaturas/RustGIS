@@ -6481,6 +6481,35 @@ mod tests {
         h.step();
     }
 
+    /// #1321: double-clicking a layer opens its Symbology pane even at 4 frames a second (CPU
+    /// rendering of a large map), where egui's default 0.3 s missed the second click.
+    #[test]
+    fn double_clicking_a_layer_opens_symbology_at_a_slow_frame_rate() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::with_sample();
+        app.ui.right_open.clear();
+        app.ui.right = None;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).with_max_steps(64).with_step_dt(0.25).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run_steps(6);
+        h.get_by_label("Rivers").click();
+        h.step();
+        h.get_by_label("Rivers").click();
+        h.run_steps(3);
+        assert_eq!(h.state().session.active_layer, h.state().session.map().layer_by_name("Rivers").map(|l| l.id));
+        assert_eq!(h.state().ui.right, Some(RightPane::Symbology));
+        // The delay follows the frames: the Windows default when they are fast, up to 1.2 s.
+        assert_eq!(crate::double_click_delay(1.0 / 60.0), 0.5);
+        assert!((crate::double_click_delay(0.33) - 0.96).abs() < 1e-6);
+        assert_eq!(crate::double_click_delay(2.0), 1.2);
+    }
+
     /// #808: a web tile layer is listed at its place among the map's layers, moves past them
     /// from its menu, and is dragged to another place.
     #[test]

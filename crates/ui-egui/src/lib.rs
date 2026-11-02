@@ -3718,6 +3718,10 @@ impl RustGisApp {
 
     /// Per-frame work that doesn't draw (theme, fonts, files that arrived).
     pub fn logic(&mut self, ctx: &egui::Context) {
+        // egui times clicks by the frame they arrive in: at a slow frame rate the two clicks of a
+        // double-click land too far apart for its default delay (#1321).
+        let dt = ctx.input(|i| i.stable_dt);
+        ctx.options_mut(|o| o.input_options.max_double_click_delay = double_click_delay(dt));
         // The MCP relay: what attached agents sent runs here, on this session, before the frame
         // draws (Session lives on this thread; the listener only queues messages).
         #[cfg(not(target_arch = "wasm32"))]
@@ -4038,6 +4042,14 @@ fn project_file_name(url: &str) -> Option<&str> {
     let path = url.split(['?', '#']).next().unwrap_or("");
     let last = path.rsplit('/').next().unwrap_or("");
     (rustgis_engine::project::opens_as_project(last) || rustgis_engine::map::geolibre::is_project_file(last)).then_some(last)
+}
+
+/// The longest gap between the two clicks of a double-click, in seconds, for frames `dt` seconds
+/// long. egui times a click by the frame it arrives in, so a gap of 0.3 s can be measured as up to
+/// two frames more. At least 0.5 s, the Windows default; at most 1.2 s, so two separate clicks
+/// still read as two.
+fn double_click_delay(dt: f32) -> f64 {
+    (0.3 + 2.0 * f64::from(dt)).clamp(0.5, 1.2)
 }
 
 /// Tests that fetch through the tile cache take turns: it has one fetcher for the whole process,
