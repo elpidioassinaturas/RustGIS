@@ -366,6 +366,9 @@ pub struct SessionLog {
     /// Counts each change to `entries` (an entry added, the log cleared), so a view of it knows
     /// when to read it again ([`SessionLog::changes`]).
     changes: u64,
+    /// How many entries were dropped past [`LOG_LIMIT`] or [`LOG_PLUGIN_LIMIT`] since the log
+    /// was last cleared ([`SessionLog::dropped`]), so a view or a saved file can say so.
+    dropped: u64,
 }
 
 impl SessionLog {
@@ -392,6 +395,7 @@ impl SessionLog {
         {
             self.entries.remove(oldest);
             self.plugin_entries = self.plugin_entries.saturating_sub(1);
+            self.dropped = self.dropped.saturating_add(1);
         }
         if plugin(&e) {
             self.plugin_entries += 1;
@@ -402,6 +406,7 @@ impl SessionLog {
             if self.entries.pop_front().is_some_and(|x| plugin(&x)) {
                 self.plugin_entries = self.plugin_entries.saturating_sub(1);
             }
+            self.dropped = self.dropped.saturating_add(1);
         }
     }
 
@@ -443,6 +448,11 @@ impl SessionLog {
         self.changes
     }
 
+    /// How many entries were dropped past the log's limits since it was last cleared.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -460,6 +470,7 @@ impl SessionLog {
     /// Empties the log; how many entries it had.
     pub fn clear(&mut self) -> usize {
         self.plugin_entries = 0;
+        self.dropped = 0;
         self.changes = self.changes.wrapping_add(1);
         std::mem::take(&mut self.entries).len()
     }

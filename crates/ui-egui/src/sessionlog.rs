@@ -109,6 +109,12 @@ pub fn pane(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         crate::i18n::fmt("{count} entries", &[("count", &count.to_string())])
     };
     ui.label(egui::RichText::new(note).size(11.0).color(t.text_dim));
+    // Entries dropped past the log's limits aren't listed, nor saved: said.
+    let dropped = app.session.log.dropped();
+    if dropped > 0 {
+        let said = crate::i18n::fmt("The {n} oldest entries were dropped past the log's limits", &[("n", &dropped.to_string())]);
+        ui.label(egui::RichText::new(said).size(11.0).color(t.text_dim));
+    }
     if !app.session.log.on() {
         ui.label(egui::RichText::new(tl!("Logging is off: commands run now aren't recorded.")).size(11.0).color(t.red));
     }
