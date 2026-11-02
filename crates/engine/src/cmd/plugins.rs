@@ -782,13 +782,17 @@ mod tests {
         let l7 = u64::from(s.map().layers[0].id);
         s.leave_downloads = true;
         let asked = json!({"url": "https://x.org/a.geojson"});
-        s.rerun_landed = vec![(asked.clone(), Ok(json!({"layer": l7})))];
+        s.rerun_landed = vec![(asked.clone(), Ok(json!({"layer": l7})), Default::default())];
         for _ in 0..2 {
             assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": l7}));
         }
         assert!(s.take_url_requests().is_empty(), "nothing asked again");
+        // Asked with spaces around the address (kept trimmed): the same answer.
+        let padded = json!({"url": "  https://x.org/a.geojson "});
+        assert_eq!(s.run("layer.addUrl", &padded).unwrap(), json!({"layer": l7}));
+        assert!(s.take_url_requests().is_empty(), "nothing asked again");
         // A layer undone while the command waited: said, not named.
-        s.rerun_landed = vec![(asked.clone(), Ok(json!({"layer": 4_000_000})))];
+        s.rerun_landed = vec![(asked.clone(), Ok(json!({"layer": 4_000_000})), Default::default())];
         let e = s.run("layer.addUrl", &asked).unwrap_err();
         assert!(e.contains("taken away (undone)"), "{e}");
     }

@@ -2802,14 +2802,18 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
     // adding it answered, as often as the run asks for it (the app downloaded and added it once).
     // Answering it changes nothing (the layer is its own undo step).
     if s.leave_downloads
-        && let Some((_, answer)) = s.rerun_landed.iter().find(|(asked, _)| super::plugins::fetch::same_request(asked, p))
+        && let Some((_, answer, added)) = s.rerun_landed.iter().find(|(asked, ..)| super::plugins::fetch::same_request(asked, p))
     {
         s.request_only = true;
-        // The layer it added may have been undone while the command waited: said, not named.
-        if let Ok(v) = answer
-            && let Some(id) = v.get("layer").and_then(Value::as_u64)
-            && u32::try_from(id).ok().and_then(|id| s.map().layer(id)).is_none()
-        {
+        // What it added (a layer, a tile layer) may have been undone while the command waited,
+        // and a layer added since may have its id: said, not named.
+        let missing = answer
+            .as_ref()
+            .ok()
+            .and_then(|v| v.get("layer"))
+            .and_then(Value::as_u64)
+            .is_some_and(|id| u32::try_from(id).ok().and_then(|id| s.map().layer(id)).is_none());
+        if missing || added.gone(s.map()) {
             return Err(format!("{url}: the layer its download added was taken away (undone) before the command ran again"));
         }
         return answer.clone();

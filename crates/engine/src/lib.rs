@@ -676,7 +676,7 @@ pub struct Session {
     pub(crate) call_requests: Option<Vec<(u64, serde_json::Value)>>,
     /// While a plugin command runs again for its downloads: what each one asked for, and what
     /// adding it answered, for its `layer.addUrl` to answer once.
-    pub(crate) rerun_landed: Vec<(serde_json::Value, CmdResult)>,
+    pub(crate) rerun_landed: Vec<(serde_json::Value, CmdResult, cmd::plugins::fetch::Added)>,
     /// How many times the plugin command running now has been run again for its fetches.
     pub(crate) retry_tries: u32,
     /// Set for [`Session::guarded`] by a command whose failure is no news (a plugin command
@@ -1025,7 +1025,9 @@ impl Session {
     /// the front end took.
     pub fn request_failed(&mut self, p: &serde_json::Value, error: &str) {
         if let Some(n) = p.get("request").and_then(serde_json::Value::as_u64) {
-            self.url_waits.land(n, Err(error.to_string()));
+            self.url_waits.land(n, Err(error.to_string()), cmd::plugins::fetch::Added::default());
+            // One given up won't land now: nothing left to refuse.
+            self.url_waits.refused(n);
         }
     }
 
@@ -1127,7 +1129,9 @@ impl Session {
                 && self.url_waits.holds(n, params)
                 && !res.as_ref().is_ok_and(|v| v.get("pending").and_then(Value::as_bool) == Some(true))
             {
-                self.url_waits.land(n, res.clone());
+                // What it added, to tell on the command's next run whether it is still there.
+                let added = cmd::plugins::fetch::Added::of(self.map(), &res);
+                self.url_waits.land(n, res.clone(), added);
             }
             // A plugin's command waiting for its fetches answers `pending` and runs again when they
             // land: logged then, once. (Another command's `pending`, a download the web app makes, is
