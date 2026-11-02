@@ -1325,13 +1325,19 @@ pub fn delimited_text<'a>(file_name: &str, bytes: &'a [u8]) -> Result<(std::borr
         return Ok((text.into(), None));
     }
     if let Some((enc, _)) = encoding_rs::Encoding::for_bom(bytes).filter(|(enc, _)| *enc != encoding_rs::UTF_8) {
-        let (text, _) = enc.decode_with_bom_removal(bytes);
-        return Ok((text, Some(format!("{file_name} was read as {} text", enc.name()))));
+        let (text, malformed) = enc.decode_with_bom_removal(bytes);
+        let mut note = format!("{file_name} was read as {} text", enc.name());
+        if malformed {
+            note.push_str("; bytes that weren't valid in it became the replacement character (U+FFFD)");
+        }
+        return Ok((text, Some(note)));
     }
     if bytes.contains(&0) {
         return Err(DataError::Format(format!("{file_name} is not text")));
     }
-    let (text, _) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes);
+    // A UTF-8 byte-order mark before a stray Latin-1 byte (Excel's "CSV UTF-8" edited elsewhere)
+    // would become "ï»¿" at the start of the first header.
+    let (text, _) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes));
     Ok((text, Some(format!("{file_name} isn't UTF-8 text: it was read as Windows-1252 (Latin-1)"))))
 }
 
@@ -2859,7 +2865,15 @@ mod tests {
         let utf16: Vec<u8> = [0xff, 0xfe].into_iter().chain("nome,n\nJosé,1\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
         let (ds, rep) = read_bytes("t.csv", &utf16).unwrap();
         assert_eq!(ds.value(0, 0), &Value::Text("José".into()));
-        assert!(rep.messages.iter().any(|m| m.contains("UTF-16")), "{:?}", rep.messages);
+        assert!(rep.messages.iter().any(|m| m.contains("UTF-16") && !m.contains("replacement")), "{:?}", rep.messages);
+        // An odd last byte isn't UTF-16: replaced, and said.
+        let mut odd = utf16.clone();
+        odd.push(b'x');
+        let (_, rep) = read_bytes("t.csv", &odd).unwrap();
+        assert!(rep.messages.iter().any(|m| m.contains("UTF-16") && m.contains("replacement")), "{:?}", rep.messages);
+        // A UTF-8 byte-order mark before a Latin-1 byte doesn't end up in the first header.
+        let (ds, _) = read_bytes("t.csv", b"\xef\xbb\xbfnome;n\nS\xe3o;1\n").unwrap();
+        assert_eq!((ds.fields[0].name.as_str(), ds.value(0, 0)), ("nome", &Value::Text("São".into())));
         // UTF-8 says nothing; binary data named .csv is refused.
         assert!(read_bytes("t.csv", "nome,n\nJosé,1\n".as_bytes()).unwrap().1.messages.is_empty());
         assert!(read_bytes("t.csv", b"a,b\n\x00\xff\x01,2\n").is_err());
