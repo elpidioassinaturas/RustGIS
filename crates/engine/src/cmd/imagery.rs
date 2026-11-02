@@ -861,8 +861,9 @@ fn mosaic_reads_file(s: &Session, v: &Value) -> bool {
 /// and nothing else names a place (no `path`, nor a name that looks like one). Any other input
 /// that isn't a layer (a typo, a vector layer, a tile still downloading) fails in the command with
 /// "no raster layer", touching no file, as does a call over the input limit, which is refused
-/// before any lookup. A layer named like a path (`~dem`, `a/../b`) counts as a place: that errs
-/// towards asking for `files`.
+/// before any lookup. So do absent, empty or non-list `inputs`: the command rejects them before
+/// reading anything, with its own error. A layer named like a path (`~dem`, `a/../b`) counts as a
+/// place: that errs towards asking for `files`.
 pub(crate) fn mosaic_stays_in_project(s: &Session, p: &Value) -> bool {
     let inputs =
         p.get("inputs").and_then(Value::as_array).is_none_or(|a| a.len() > MAX_MOSAIC_INPUTS || !a.iter().any(|v| mosaic_reads_file(s, v)));
