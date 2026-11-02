@@ -3016,6 +3016,24 @@ pub(crate) fn add_cog(s: &mut Session, p: &Value, url: &str) -> CmdResult {
         let [w, so, e, n] = info.bounds;
         s.zoom_to(&rustgis_geom::Extent::new(w, so, e, n));
         r["bounds"] = json!(info.bounds);
+        // Drawn in place, the tiles are drawn as values: what the header holds beside them (a
+        // colour table, band and class names) comes only with a window, and is said.
+        let l = &info.layout;
+        let named = l.described.as_ref().is_some_and(|d| d.bands.iter().any(|b| b.description.is_some() || !b.categories.is_empty()));
+        let mut said: Vec<String> = l.lost.clone();
+        if l.palette.is_some() || named {
+            let what = match (l.palette.is_some(), named) {
+                (true, true) => "its colour table and band or class names",
+                (true, false) => "its colour table",
+                _ => "its band or class names",
+            };
+            said.push(format!("drawn in place in grey, without {what}: a window (\"bbox\") reads them"));
+        }
+        // A tile layer's own name, as added.
+        let shown = r.get("name").and_then(Value::as_str).unwrap_or(name).to_string();
+        for line in said {
+            s.notify(format!("{shown}: {line}"), false);
+        }
     } else if r.get("dated").is_some() {
         // Added, but its first date's file couldn't be read: the view stays where it was.
         r["warning"] = json!(format!("{url} couldn't be read yet, so the map wasn't moved to it"));
@@ -3253,18 +3271,18 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     // Neither writes more bands than colour (or grey and alpha) takes: the others are said.
     let left_out = rustgis_data::raster::cogwrite::bands_written(&r, 0).map_or(0, |b| r.bands.len().saturating_sub(b.len()));
     let band_count = r.bands.len();
+    let mut plain = None;
     let bytes = match rustgis_data::raster::cogwrite::write(&r, 0) {
         Ok(bytes) => bytes,
         Err(why) => {
             let bytes = rustgis_data::raster::geotiff::write(&r, 0).map_err(|e| named(e.to_string()))?;
-            let said = if matches!(r.color, rustgis_data::raster::ColorHint::Palette(_)) {
+            plain = Some(if matches!(r.color, rustgis_data::raster::ColorHint::Palette(_)) {
                 format!(
-                    "{name}: saved in the project as a plain GeoTIFF without its colour table ({why}): drawn in its colours now, it opens grey once the project is reopened"
+                    "saved in the project as a plain GeoTIFF without its colour table ({why}): drawn in its colours now, it opens grey once the project is reopened"
                 )
             } else {
-                format!("{name}: saved in the project as a plain GeoTIFF, not a cloud-optimised one ({why})")
-            };
-            s.notify(said, false);
+                format!("saved in the project as a plain GeoTIFF, not a cloud-optimised one ({why})")
+            });
             bytes
         }
     };
@@ -3274,6 +3292,9 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     let of = if level == 0 { "the full image".to_string() } else { format!("overview {level} of {}", layout.levels.len() - 1) };
     let added = s.active_layer.and_then(|id| s.map().layer(id)).map(|l| l.name.clone()).unwrap_or(name);
     s.notify(format!("{added}: a {width} × {height} window of {of}, cells of {size:.1}{unit}, read by range from its address"), false);
+    if let Some(plain) = plain {
+        s.notify(format!("{added}: {plain}"), false);
+    }
     if let Some(c) = finer {
         s.notify(format!("{added}: cellSize {c} is finer than the file's finest cells ({size:.1}{unit}): the full image is read"), false);
     }

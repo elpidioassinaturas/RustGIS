@@ -1212,12 +1212,14 @@ pub fn read_values_counted_blocking(
             for px in tx0.max(x0)..tx0.saturating_add(tw).min(x1) {
                 let i = (py - ty0) as usize * tw as usize + (px - tx0) as usize;
                 let Some(&v) = values.get(i) else { continue };
+                // Counted before the finite check: a value past `f32`'s range is infinite, and
+                // left out as no value. No-data isn't marked.
+                rounded += u64::from(chunk.rounded_at(*b, i));
                 if v.is_finite()
                     && Some(v) != nodata
                     && let Some(slot) = out.get_mut((py - rows.0) as usize * w + (px - cols.0) as usize)
                 {
                     *slot = v;
-                    rounded += u64::from(chunk.rounded_at(*b, i));
                 }
             }
         }

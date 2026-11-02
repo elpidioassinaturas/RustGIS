@@ -1087,7 +1087,11 @@ pub(super) fn read_limited_with_nodata(
     let mut table_lost = None;
     let colour_map = if palette {
         match dec.find_tag(Tag::ColorMap) {
-            Ok(v) => v,
+            Ok(Some(v)) => Some(v),
+            Ok(None) => {
+                table_lost = Some("it is a palette image with no colour table: drawn grey".to_string());
+                None
+            }
             Err(e) => {
                 table_lost = Some(format!("its colour table doesn't decode ({e}): it is left out"));
                 None
@@ -1854,6 +1858,10 @@ mod tests {
         let grey = read(std::io::Cursor::new(&short), "short").unwrap();
         assert!(matches!(grey.color, ColorHint::Gray), "{:?}", grey.color);
         assert_eq!(grey.lost, ["its colour table has 384 entries, short of the 768 a palette of 8-bit pixels needs: it is left out"]);
+        let mut none = grey8(8, 8, &data, None);
+        set_photometric(&mut none, 3);
+        let none = read(std::io::Cursor::new(&none), "none").unwrap();
+        assert_eq!(none.lost, ["it is a palette image with no colour table: drawn grey"]);
         // Every truncation of a palette file is an error, not a panic.
         for n in (0..bytes.len()).step_by(11) {
             let _ = read(std::io::Cursor::new(&bytes[..n]), "x");

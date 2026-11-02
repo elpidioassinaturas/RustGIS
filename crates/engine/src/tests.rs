@@ -23693,6 +23693,11 @@ fn a_cog_window_comes_in_as_a_raster() {
     s.run("layer.addUrl", &json!({"url": format!("{wide}/ids.tif"), "bbox": [10.0, 45.0, 10.5, 45.5], "name": "Ids"})).unwrap();
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
     assert!(said.iter().any(|n| n.starts_with("Ids: 32768 values were rounded as the file was read")), "{said:?}");
+    // Across tiles, only the window's own cells are counted (the four tiles hold 131,072 odd
+    // values; the 256 × 256 window, half of its own).
+    let mark = s.notice_mark();
+    s.run("layer.addUrl", &json!({"url": format!("{wide}/ids.tif"), "bbox": [10.25, 45.25, 10.75, 45.75], "name": "Across"})).unwrap();
+    assert_eq!(raster(&s, "Across").rounded, [32768], "{:?}", s.notices_since(mark));
     // Pixel (1, 0) is 16,777,217, held as 16,777,216, as pixel (0, 0) is.
     let ids = raster(&s, "Ids");
     // Exported, a raster whose second band has class names says the file keeps only the first's.
@@ -23714,6 +23719,19 @@ fn a_cog_window_comes_in_as_a_raster() {
         (ids.rounded.as_slice(), ids.value(0, 0, 0), ids.value(0, 1, 0)),
         ([32768u64].as_slice(), Some(16_777_216.0), Some(16_777_216.0))
     );
+    // Drawn in place, the palette file says it is grey, without its colour table and names.
+    let mark = s.notice_mark();
+    s.run("layer.addUrl", &json!({"url": format!("{classes}/cover.tif"), "name": "In place"})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(
+        said.iter()
+            .any(|n| n
+                == "In place: drawn in place in grey, without its colour table and band or class names: a window (\"bbox\") reads them"),
+        "{said:?}"
+    );
+    let mark = s.notice_mark();
+    s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "name": "Plain"})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("drawn in place in grey")), "a grey file says nothing");
     let cover = raster(&s, "Cover");
     let ColorHint::Palette(table) = &cover.color else { panic!("{:?}", cover.color) };
     assert_eq!(table[3], [3, 252, 0, 255]);
