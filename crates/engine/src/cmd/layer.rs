@@ -2746,8 +2746,9 @@ fn read_delimited(
 
 /// The file name for data downloaded from `url`: its last path segment when that has an extension
 /// RustGIS reads, else `<segment or "data">.<ext>` with the extension its contents suggest
-/// (an error when they suggest none). JPEG 2000 named or recognised by its contents is refused
-/// where GDAL can't run (the browser).
+/// (an error when they suggest none). The name is cut to 120 characters, keeping its extension; a
+/// `.shp` address whose download is a zip of its parts is named `<stem>.zip`. JPEG 2000 named or
+/// recognised by its contents is refused where GDAL can't run (the browser).
 pub fn url_file_name(url: &str, bytes: &[u8]) -> Result<String, String> {
     let path = url.split(['?', '#']).next().unwrap_or(url);
     let path = path.split_once("://").map_or(path, |(_, rest)| rest.split_once('/').map_or("", |(_, p)| p));
