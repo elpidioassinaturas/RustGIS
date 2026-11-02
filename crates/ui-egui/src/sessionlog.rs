@@ -14,6 +14,10 @@ use crate::theme::{Tokens, semibold};
 /// Most entries the pane lists, the newest: it says how many more match.
 pub const SHOWN: usize = 200;
 
+/// What the listed rows were picked from: the log's length and newest entry (which change with
+/// each entry, a clear, or the oldest going past the log's limit) and the filters.
+type Key = (usize, Option<LogEntry>, String, bool);
+
 /// Which list the History pane shows, and the log's filters.
 #[derive(Default)]
 pub struct State {
@@ -23,6 +27,10 @@ pub struct State {
     pub query: String,
     /// Only the commands that failed.
     pub failed: bool,
+    /// The rows last listed (entries with their parameters as one line of text) and how many
+    /// match and are in the log, kept while their [`Key`] holds: the pane is drawn each frame,
+    /// and picking them goes through the whole log.
+    cache: Option<(Key, Vec<(LogEntry, String)>, usize, usize)>,
 }
 
 /// The switch at the top of the History pane, between its two records (named as Mavrick-F
@@ -55,13 +63,25 @@ pub fn pane(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     });
     let query = app.ui.session_log.query.trim().to_lowercase();
     let failed = app.ui.session_log.failed;
-    let (shown, count, total) = app.session.log.select(|e| kept(e, &query, failed), SHOWN);
+    let key: Key = (app.session.log.len(), app.session.log.newest().cloned(), query, failed);
+    if app.ui.session_log.cache.as_ref().is_none_or(|c| c.0 != key) {
+        let (shown, count, total) = app.session.log.select(|e| kept(e, &key.2, key.3), SHOWN);
+        let rows = shown
+            .into_iter()
+            .map(|e| {
+                let params = params_text(&e);
+                (e, params)
+            })
+            .collect();
+        app.ui.session_log.cache = Some((key, rows, count, total));
+    }
+    let (count, total, listed) = app.ui.session_log.cache.as_ref().map_or((0, 0, 0), |(_, rows, c, t)| (*c, *t, rows.len()));
     let note = if total == 0 {
         tl!("Commands that change the project, or that name a file, folder or address, appear here.").to_string()
     } else if count == 0 {
         tl!("No command matches").to_string()
-    } else if count > shown.len() {
-        crate::i18n::fmt("The newest {shown} of {count} entries", &[("shown", &shown.len().to_string()), ("count", &count.to_string())])
+    } else if count > listed {
+        crate::i18n::fmt("The newest {shown} of {count} entries", &[("shown", &listed.to_string()), ("count", &count.to_string())])
     } else if count < total {
         crate::i18n::fmt("{count} of {total} entries", &[("count", &count.to_string()), ("total", &total.to_string())])
     } else {
@@ -72,9 +92,11 @@ pub fn pane(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         ui.label(egui::RichText::new(tl!("Logging is off: commands run now aren't recorded.")).size(11.0).color(t.red));
     }
     ui.add_space(4.0);
-    for e in shown.iter().rev() {
-        row(ui, e, t);
-        ui.add_space(4.0);
+    if let Some((_, rows, ..)) = &app.ui.session_log.cache {
+        for (e, params) in rows.iter().rev() {
+            row(ui, e, params, t);
+            ui.add_space(4.0);
+        }
     }
     ui.horizontal_wrapped(|ui| {
         let tip = tl!("The whole log, as CSV or JSON Lines (.jsonl): it may name files and addresses, so look at it before sharing it");
@@ -96,14 +118,18 @@ pub fn pane(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     });
 }
 
-/// One entry: whether it worked, its command, how long it took, when it started, its error and
-/// its parameters (all of them on hover; right-click copies them).
-fn row(ui: &mut Ui, e: &LogEntry, t: &Tokens) {
-    let params = match &e.params {
+/// An entry's parameters as one line of JSON: none for no parameters.
+fn params_text(e: &LogEntry) -> String {
+    match &e.params {
         Value::Null => String::new(),
         Value::Object(m) if m.is_empty() => String::new(),
         p => p.to_string(),
-    };
+    }
+}
+
+/// One entry: whether it worked, its command, how long it took, when it started, its error and
+/// its parameters, `params` (all of them on hover; right-click copies them).
+fn row(ui: &mut Ui, e: &LogEntry, params: &str, t: &Tokens) {
     let frame =
         egui::Frame::NONE.stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::same(8));
     let r = frame.show(ui, |ui| {
@@ -113,10 +139,12 @@ fn row(ui: &mut Ui, e: &LogEntry, t: &Tokens) {
             ui.painter().circle_filled(r.center(), 4.5, if e.ok { t.green } else { t.red });
             ui.label(egui::RichText::new(&e.command).font(semibold(12.5)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(format!("{} ms", e.millis)).size(11.0).color(t.text_dim));
+                let took = crate::i18n::fmt("{ms} ms", &[("ms", &e.millis.to_string())]);
+                ui.label(egui::RichText::new(took).size(11.0).color(t.text_dim));
             });
         });
-        ui.label(egui::RichText::new(format!("{} UTC", e.time_utc())).size(11.0).color(t.text_dim));
+        let at = crate::i18n::fmt("{time} UTC", &[("time", &e.time_utc())]);
+        ui.label(egui::RichText::new(at).size(11.0).color(t.text_dim));
         if let Some(err) = &e.error {
             ui.label(egui::RichText::new(err).size(11.0).color(t.red));
         }
@@ -125,12 +153,12 @@ fn row(ui: &mut Ui, e: &LogEntry, t: &Tokens) {
             let line: String = params.chars().take(120).collect();
             let more = if line.len() < params.len() { "…" } else { "" };
             ui.add(egui::Label::new(egui::RichText::new(format!("{line}{more}")).monospace().size(10.5).color(t.text_dim)).truncate())
-                .on_hover_text(egui::RichText::new(&params).monospace());
+                .on_hover_text(egui::RichText::new(params).monospace());
         }
     });
     r.response.interact(Sense::click()).context_menu(|ui| {
         if ui.add_enabled(!params.is_empty(), egui::Button::new(tl!("Copy Parameters"))).clicked() {
-            ui.ctx().copy_text(params.clone());
+            ui.ctx().copy_text(params.to_string());
             ui.close();
         }
         if ui.button(tl!("Copy Command")).clicked() {
@@ -141,7 +169,8 @@ fn row(ui: &mut Ui, e: &LogEntry, t: &Tokens) {
 }
 
 /// Saves the log: downloaded as CSV in the browser, where `project.exportLog` can't write a
-/// file; else to the CSV or JSON Lines file the user picks, through `project.exportLog`.
+/// file (so the download isn't itself an entry in the log, said in the user guide); else to the
+/// CSV or JSON Lines file the user picks, through `project.exportLog`, which the log records.
 fn save(app: &mut RustGisApp) {
     if app.services.download.is_some() {
         let mut bytes = Vec::new();

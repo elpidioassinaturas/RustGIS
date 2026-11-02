@@ -431,6 +431,11 @@ impl SessionLog {
         self.entries.len()
     }
 
+    /// The last entry recorded.
+    pub fn newest(&self) -> Option<&LogEntry> {
+        self.entries.back()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

@@ -84,8 +84,9 @@ command with whether it worked, when it started (UTC), how long it took, its err
 parameters (on one line; all of them on hover, and a right-click copies them). It lists the newest
 200 that match and says how many there are; type part of a command's id (`layer.`, `export`) to
 filter, or tick **Failed only**. **Save Log As…** writes the whole log as CSV or JSON Lines, as
-the name's extension says (CSV without one; in the browser it is downloaded as CSV). **Clear Log**
-empties it and **Log Commands** turns it off or on.
+the name's extension says (CSV without one; in the browser it is downloaded as CSV, and the
+download isn't itself an entry in the log, as a saved file is). **Clear Log** empties it and
+**Log Commands** turns it off or on.
 
 - **What goes in:** each command that changes the project, and each that names a file, folder,
   address or connection, reads included (an export, a download, a save, opening a file), plus
