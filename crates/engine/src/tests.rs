@@ -23692,6 +23692,8 @@ fn a_cog_window_comes_in_as_a_raster() {
     assert_eq!(crate::cmd::layer::address_extension("https://x.org/data/scene.TIF?sig=a.b"), Some("tif".into()));
     assert_eq!(crate::cmd::layer::address_extension("https://x.org/download"), None);
     assert_eq!(crate::cmd::layer::address_extension("https://x.org/"), None);
+    assert_eq!(crate::cmd::layer::address_extension("https://data.example.com"), None, "a host isn't a file");
+    assert_eq!(crate::cmd::layer::address_extension("https://data.example.com?x=a.tif"), None);
     // A plugin's command run by the app doesn't wait for a window: refused, and said.
     s.leave_downloads = true;
     let e = s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "bbox": [10.25, 45.5, 10.5, 45.75]})).unwrap_err();
@@ -23710,6 +23712,15 @@ fn a_cog_window_comes_in_as_a_raster() {
     let mark = s.notice_mark();
     s.run("layer.addUrl", &json!({"url": format!("{wide}/ids.tif"), "bbox": [10.25, 45.25, 10.75, 45.75], "name": "Across"})).unwrap();
     assert_eq!(raster(&s, "Across").rounded, [32768], "{:?}", s.notices_since(mark));
+    // A Float64 file whose 255s are 1e39: those cells are left out, said apart, and not counted
+    // as rounded (its other values are whole numbers `f32` holds). One a row-column diagonal: 256.
+    let (huge, _) = serve_ranges(example_with(&Example { size: 512, tile: 256, huge: true, ..Example::default() }));
+    let mark = s.notice_mark();
+    s.run("layer.addUrl", &json!({"url": format!("{huge}/far.tif"), "bbox": [10.0, 45.0, 10.5, 45.5], "name": "Far"})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|n| n == "Far: 256 value(s) past the range of 32-bit floats left out: those cells have no value"), "{said:?}");
+    assert!(said.iter().all(|n| !n.contains("rounded")), "{said:?}");
+    assert!(raster(&s, "Far").rounded.is_empty());
     // Pixel (1, 0) is 16,777,217, held as 16,777,216, as pixel (0, 0) is.
     let ids = raster(&s, "Ids");
     // Exported, a raster whose second band has class names says the file keeps only the first's.

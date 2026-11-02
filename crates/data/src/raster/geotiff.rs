@@ -2703,6 +2703,15 @@ mod tests {
         std::fs::write(&tif, typed::<Gray64Float>(2, 2, &px, Some("nan"))).unwrap();
         let nan = crate::raster::read_path(&tif).unwrap();
         assert_eq!((nan.nodata, nan.rounded.as_slice()), (Some(0.1), &[2u64][..]));
+        // A record for a band the file lacks, with another no-data value, doesn't stop band 1's
+        // from applying, nor from being left out of the count: 0.1 isn't counted, 0.1234… is.
+        let px = [0.1, 0.5, 0.123_456_789_012_345, 2.0];
+        std::fs::write(&tif, typed::<Gray64Float>(2, 2, &px, None)).unwrap();
+        let xml = r#"<PAMDataset><PAMRasterBand band="1"><NoDataValue>0.1</NoDataValue></PAMRasterBand>
+            <PAMRasterBand band="2"><NoDataValue>5</NoDataValue></PAMRasterBand></PAMDataset>"#;
+        std::fs::write(dir.path().join("s.tif.aux.xml"), xml).unwrap();
+        let other = crate::raster::read_path(&tif).unwrap();
+        assert_eq!((other.nodata, other.rounded.as_slice()), (Some(0.1), &[1u64][..]), "{:?}", other.lost);
         // 64-bit whole numbers are compared as integers: 2^60 + 1 changes, 2^60 doesn't.
         let big = read(std::io::Cursor::new(typed::<GrayI64>(2, 1, &[(1 << 60) + 1, 1 << 60], None)), "i64").unwrap();
         assert_eq!(big.rounded, vec![1]);

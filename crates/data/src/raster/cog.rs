@@ -608,11 +608,24 @@ pub struct Example {
     pub lossy: bool,
     /// Signed 32-bit samples of 16,777,216 plus the byte value: the odd ones `f32` rounds.
     pub wide: bool,
+    /// 64-bit float samples of the byte value, but 1e39 (past `f32`'s range) for 255.
+    pub huge: bool,
 }
 
 impl Default for Example {
     fn default() -> Self {
-        Example { size: 1024, tile: 256, bands: 1, planar: false, int8: false, bottom_up: false, classes: false, lossy: false, wide: false }
+        Example {
+            size: 1024,
+            tile: 256,
+            bands: 1,
+            planar: false,
+            int8: false,
+            bottom_up: false,
+            classes: false,
+            lossy: false,
+            wide: false,
+            huge: false,
+        }
     }
 }
 
@@ -652,6 +665,8 @@ pub fn example_with(e: &Example) -> Vec<u8> {
                             let v = if x < s && y < s { value(x * k, y * k, band) } else { 0 };
                             if e.wide {
                                 c.extend_from_slice(&(16_777_216 + i32::from(v)).to_le_bytes());
+                            } else if e.huge {
+                                c.extend_from_slice(&(if v == 255 { 1e39 } else { f64::from(v) }).to_le_bytes());
                             } else {
                                 c.push(v);
                             }
@@ -671,7 +686,16 @@ pub fn example_with(e: &Example) -> Vec<u8> {
         D(Vec<f64>),
     }
     let header_len = 8u32;
-    let chunk_len = tile * tile * per_chunk * if e.wide { 4 } else { 1 };
+    let chunk_len = tile
+        * tile
+        * per_chunk
+        * if e.huge {
+            8
+        } else if e.wide {
+            4
+        } else {
+            1
+        };
     let mut ifds: Vec<Vec<(u16, V)>> = Vec::new();
     for (i, &s) in sizes.iter().enumerate() {
         let n = (s.div_ceil(tile) * s.div_ceil(tile) * planes) as usize;
@@ -679,7 +703,19 @@ pub fn example_with(e: &Example) -> Vec<u8> {
             (254u16, V::L(vec![if i == 0 { 0 } else { 1 }])),
             (256, V::L(vec![s])),
             (257, V::L(vec![s])),
-            (258, V::S(vec![if e.wide { 32 } else { 8 }; nb as usize])),
+            (
+                258,
+                V::S(vec![
+                    if e.huge {
+                        64
+                    } else if e.wide {
+                        32
+                    } else {
+                        8
+                    };
+                    nb as usize
+                ]),
+            ),
             (259, V::S(vec![1])),
             (262, V::S(vec![if e.classes { 3 } else { 1 }])),
             (277, V::S(vec![nb as u16])),
@@ -694,6 +730,9 @@ pub fn example_with(e: &Example) -> Vec<u8> {
         }
         if e.int8 || e.wide {
             t.push((339, V::S(vec![2; nb as usize])));
+        }
+        if e.huge {
+            t.push((339, V::S(vec![3; nb as usize])));
         }
         if i == 0 {
             let px = 1.0 / f64::from(size);

@@ -731,6 +731,26 @@ pub fn read_path(path: &Path) -> Result<Raster> {
         }
         other => return Err(DataError::Unsupported(format!(".{other}"))),
     };
+    // `apply_pam` takes the no-data of the bands the raster has. When a record for a band it lacks
+    // disagreed, the decoder left none out of the rounded count: the file is read again with it,
+    // so its no-data pixels aren't counted as rounded (only when some value was counted).
+    if let Some(p) = &pam
+        && r.nodata.is_none()
+        && !r.rounded.is_empty()
+        && let Some(nd) = p.nodata_within(r.bands.len()).filter(|nd| Some(*nd) != sidecar_nodata)
+    {
+        r = match ext.as_str() {
+            "tif" | "tiff" => {
+                #[cfg(not(target_arch = "wasm32"))]
+                let again = geotiff::read_file_with_nodata(path, &name, Some(nd))?;
+                #[cfg(target_arch = "wasm32")]
+                let again = geotiff::read_with_nodata(std::io::BufReader::new(std::fs::File::open(path)?), &name, Some(nd))?;
+                again
+            }
+            "asc" => ascii::read_with_nodata(&std::fs::read_to_string(path)?, &name, sidecar_crs(path), Some(nd))?,
+            _ => r,
+        };
+    }
     if let Some(p) = &pam {
         r.apply_pam(p, pam::SIDECAR);
     }

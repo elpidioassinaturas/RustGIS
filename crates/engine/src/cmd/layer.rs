@@ -3030,6 +3030,7 @@ pub(crate) fn add_cog(s: &mut Session, p: &Value, url: &str) -> CmdResult {
         let l = &info.layout;
         let named = l.described.as_ref().is_some_and(|d| d.bands.iter().any(|b| b.description.is_some() || !b.categories.is_empty()));
         let mut said: Vec<String> = l.lost.clone();
+        said.extend(l.described.iter().flat_map(|d| d.lost.iter().map(|x| format!("{}: {x}", rustgis_data::raster::pam::GDAL_METADATA))));
         // Grey only for a palette file: an RGB file with band names is drawn in its colours.
         match (l.palette.is_some(), named) {
             (true, true) => {
@@ -3070,7 +3071,9 @@ const WINDOW_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 /// query and fragment aside.
 pub(crate) fn address_extension(url: &str) -> Option<String> {
     let path = url.split(['?', '#']).next().unwrap_or(url);
-    let file = path.rsplit('/').next().filter(|f| !f.is_empty() && !path.ends_with("://"))?;
+    // The host isn't a file name (`https://data.example.com`): only what follows it is.
+    let after_host = path.split_once("://").map_or(path, |(_, rest)| rest).split_once('/')?.1;
+    let file = after_host.rsplit('/').next().filter(|f| !f.is_empty())?;
     let (stem, ext) = file.rsplit_once('.')?;
     (!stem.is_empty() && !ext.is_empty() && ext.len() <= 10 && ext.bytes().all(|c| c.is_ascii_alphanumeric()))
         .then(|| ext.to_ascii_lowercase())
