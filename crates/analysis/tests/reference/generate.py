@@ -504,16 +504,12 @@ def main():
         return write_expected(name, out)
 
     tol = 1e-3
-    # Arcs are drawn with 32 edges, and long edges come back from the plane as straight lines in
-    # lon/lat: a 2 km buffer of a 96 km road is up to 190 m off.
-    # Until then each must still agree within 10 %, so a buffer that breaks further fails the test.
-    known = {"issue": "#1159: Buffer outlines sit up to 10 % of the distance off", "tolerance": 0.1}
     case("buffer points", "buffer", {"input": "points", "distance": 1, "units": "Kilometers"},
-         {"features": buffered("buffer_points_1km", POINTS, 1000.0), "tolerance": tol}, known)
+         {"features": buffered("buffer_points_1km", POINTS, 1000.0), "tolerance": tol})
     case("buffer points far", "buffer", {"input": "stations", "distance": 120, "units": "Kilometers"},
-         {"features": buffered("buffer_stations_120km", STATIONS, 120_000.0), "tolerance": tol}, known)
+         {"features": buffered("buffer_stations_120km", STATIONS, 120_000.0), "tolerance": tol})
     case("buffer lines", "buffer", {"input": "roads", "distance": 2000, "units": "Meters"},
-         {"features": buffered("buffer_roads_2km", ROADS, 2000.0), "tolerance": tol}, known)
+         {"features": buffered("buffer_roads_2km", ROADS, 2000.0), "tolerance": tol})
     case("buffer a long line", "buffer", {"input": "long", "distance": 5, "units": "Kilometers"},
          {"features": buffered("buffer_long_5km", LONG, 5000.0), "tolerance": tol})
     case("buffer polygons", "buffer", {"input": "parcels", "distance": 1, "units": "Kilometers"},

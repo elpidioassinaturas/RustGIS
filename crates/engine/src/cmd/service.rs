@@ -375,7 +375,15 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
     let (layer, source) = candidates()
         .find(|(l, _)| l.name == want)
         .or_else(|| candidates().find(|(l, _)| l.name.eq_ignore_ascii_case(want) || l.title.eq_ignore_ascii_case(want)))
-        .ok_or_else(|| format!("{url}: no layer '{want}' (service.layers lists them)"))?;
+        .ok_or_else(|| {
+            // A layer the listing left out, and why (a collection of 3D Tiles, say).
+            let quoted = format!("'{}'", want.to_lowercase());
+            let left_out = |n: &&String| n.contains(rustgis_data::ogc::LEFT_OUT_3D) && n.to_lowercase().contains(&quoted);
+            match found.service.notes.iter().find(left_out) {
+                Some(why) => format!("{url}: no layer '{want}': {why}"),
+                None => format!("{url}: no layer '{want}' (service.layers lists them)"),
+            }
+        })?;
     // A time-enabled layer follows the time slider, at each of its steps, unless a time is asked
     // for: one of its times (the layer named with it), or "default" (`false`), the service's.
     // (`"time": true`, the slider, as for a Zarr variable, `layer.addZarr`'s.)

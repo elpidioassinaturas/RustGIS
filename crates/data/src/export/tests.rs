@@ -66,6 +66,7 @@ impl Runs {
             crs: "EPSG:4326".into(),
             indexed: false,
             notes: Vec::new(),
+            zm_dropped: false,
         };
         Runs {
             info,

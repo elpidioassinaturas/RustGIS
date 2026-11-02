@@ -23,6 +23,7 @@ use parquet::file::reader::{FileReader, RowGroupReader, SerializedFileReader};
 use parquet::file::statistics::Statistics;
 use parquet::schema::types::ColumnDescPtr;
 use rustgis_geom::Extent;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -130,6 +131,8 @@ fn remote_reader(file: &Arc<Remote>) -> Result<Arc<RemoteFile>> {
 }
 
 impl ParquetSource {
+    /// Opens a GeoParquet from its `geo` metadata: geometry column, types, bbox and coordinate
+    /// system, noting Z or M values (which reading drops).
     fn new(reader: Arc<dyn FileReader>, name: &str, remote: Option<Arc<Remote>>) -> Result<Self> {
         let md = reader.metadata();
         let schema = md.file_metadata().schema_descr();
@@ -175,16 +178,44 @@ impl ParquetSource {
 
         let mut fields = Vec::new();
         let mut field_cols = Vec::new();
+        // Dates and times, read as the whole numbers they're stored as.
+        let mut as_numbers = Vec::new();
         for i in 0..schema.num_columns() {
             if i == geom_col || covering.is_some_and(|c| c.contains(&i)) {
                 continue;
             }
             let Some(name) = top(i) else { continue };
-            if let Some(ty) = field_type(&schema.column(i)) {
+            let c = schema.column(i);
+            if let Some(ty) = field_type(&c) {
+                if let Some(unit) = time_unit(&c) {
+                    as_numbers.push((name.clone(), unit));
+                }
                 fields.push(Field::new(name, ty));
                 field_cols.push(i);
             }
         }
+        // Top-level columns not read: those holding a leaf that is neither a field, the geometry
+        // nor its covering's box (whose struct may also hold zmin and zmax, bounds of the geometry).
+        let read: HashSet<usize> = field_cols.iter().chain([&geom_col]).chain(covering.iter().flatten()).copied().collect();
+        let box_root = covering.and_then(|[x, ..]| schema.column(x).path().parts().first().cloned());
+        let unread: HashSet<String> = (0..schema.num_columns())
+            .filter(|i| !read.contains(i))
+            .filter_map(|i| match schema.column(i).path().parts() {
+                [r, bound] if Some(r) == box_root.as_ref() && matches!(bound.as_str(), "zmin" | "zmax") => None,
+                parts => parts.first().cloned(),
+            })
+            .collect();
+        let geometries = geo.as_ref().and_then(|g| g.get("columns")).and_then(|c| c.as_object());
+        let left_out: Vec<(String, String)> = schema
+            .root_schema()
+            .get_fields()
+            .iter()
+            .filter(|t| unread.contains(t.name()))
+            .map(|t| {
+                let kind = if geometries.is_some_and(|g| g.contains_key(t.name())) { "geometry" } else { column_kind(t) };
+                (t.name().to_string(), kind.to_string())
+            })
+            .collect();
         let geometry_type = col_meta
             .and_then(|c| c.get("geometry_types"))
             .and_then(|t| t.as_array())
@@ -202,8 +233,20 @@ impl ParquetSource {
             Some(e) => reproject.extent_to_lonlat(&e),
             None => covering.map(|c| reproject.extent_to_lonlat(&groups_extent(md, c))).unwrap_or(Extent::EMPTY),
         };
+        // Types such as "Point Z" (every geometry has Z or M values when every type does), or a bbox
+        // with Z bounds. Without types (any geometry), the first rows are looked at below.
+        let types: Vec<&str> = col_meta
+            .and_then(|c| c.get("geometry_types"))
+            .and_then(|t| t.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .collect();
+        let has_zm = |v: &&str| v.ends_with(" Z") || v.ends_with(" M") || v.ends_with(" ZM");
+        let all_zm = !types.is_empty() && types.iter().all(has_zm);
+        let zm = types.iter().any(has_zm) || col_meta.and_then(|c| c.get("bbox")).and_then(|b| b.as_array()).is_some_and(|b| b.len() == 6);
         let count = u64::try_from(md.file_metadata().num_rows()).ok();
-        let info = SourceInfo {
+        let mut info = SourceInfo {
             name: name.to_string(),
             format: "GeoParquet",
             geometry_type,
@@ -213,13 +256,49 @@ impl ParquetSource {
             crs: reproject.label(),
             indexed: covering.is_some(),
             notes,
+            zm_dropped: false,
         };
+        info.note_columns(
+            &left_out,
+            ["of a type RustGIS has no field for was left out", "of types RustGIS has no field for were left out"],
+        );
+        info.note_columns(&as_numbers, ["of dates or times was read as whole numbers", "of dates or times were read as whole numbers"]);
+        // An empty file loses nothing.
+        if zm && count != Some(0) {
+            info.drop_zm(if all_zm { count } else { None });
+        }
+        let untyped = types.is_empty() && !zm;
         let mut src =
             ParquetSource { info, reader, geom_col, field_cols, covering, reproject, remote, exact: false, group_rows: MAX_GROUP_ROWS };
+        if untyped {
+            match src.peek_zm() {
+                Some(true) => src.info.drop_zm(None),
+                Some(false) => {}
+                None => src.info.notes.push("couldn't tell whether it has Z or M values, which RustGIS doesn't keep".into()),
+            }
+        }
         if src.info.geometry_type == GeometryType::None {
             src.info.geometry_type = super::peek_kind(&src);
         }
         Ok(src)
+    }
+
+    /// Whether any of the first 16 geometries has Z or M values; `None` when they can't be read
+    /// here (a remote file's first row group not fetched yet).
+    fn peek_zm(&self) -> Option<bool> {
+        let md = self.reader.metadata();
+        if md.num_row_groups() == 0 {
+            return Some(false);
+        }
+        if let Some(file) = &self.remote
+            && !want_chunks(file, md, &[0], &[self.geom_col]).ok()?
+        {
+            return None;
+        }
+        let rows = usize::try_from(md.row_group(0).num_rows()).unwrap_or(0).min(16);
+        let rg = self.reader.get_row_group(0).ok()?;
+        let geoms = read_bytes(rg.as_ref(), self.geom_col, &vec![true; rows]).ok()?;
+        Some(geoms.iter().filter_map(|b| b.as_deref()).any(wkb::has_zm))
     }
 }
 
@@ -678,6 +757,51 @@ fn decimal_scale(c: &ColumnDescPtr) -> Option<i32> {
         _ if c.converted_type() == ConvertedType::DECIMAL => Some(c.type_scale()),
         _ => None,
     }
+}
+
+/// What a top-level column not read as a field holds, for the note saying it was left out: a
+/// list, map or struct, or a decimal, geometry, INT96 timestamp or binary value.
+fn column_kind(t: &parquet::schema::types::Type) -> &'static str {
+    let info = t.get_basic_info();
+    let logical = info.logical_type_ref();
+    if info.has_repetition() && info.repetition() == parquet::basic::Repetition::REPEATED {
+        return "list";
+    }
+    if t.is_group() {
+        return match (logical, info.converted_type()) {
+            (Some(LogicalType::List), _) | (_, ConvertedType::LIST) => "list",
+            (Some(LogicalType::Map), _) | (_, ConvertedType::MAP | ConvertedType::MAP_KEY_VALUE) => "map",
+            _ => "struct",
+        };
+    }
+    match (t.get_physical_type(), logical, info.converted_type()) {
+        (_, Some(LogicalType::Decimal(_)), _) | (_, _, ConvertedType::DECIMAL) => "decimal",
+        (_, Some(LogicalType::Geometry(_) | LogicalType::Geography(_)), _) => "geometry",
+        (Physical::INT96, ..) => "INT96 timestamp",
+        _ => "binary",
+    }
+}
+
+/// What a date or time column's whole numbers count ("days since 1970-01-01"); `None` for other
+/// columns.
+fn time_unit(c: &ColumnDescPtr) -> Option<String> {
+    use parquet::basic::TimeUnit;
+    let unit = |u: &TimeUnit| match u {
+        TimeUnit::MILLIS => "milliseconds",
+        TimeUnit::MICROS => "microseconds",
+        TimeUnit::NANOS => "nanoseconds",
+    };
+    let (count, since) = match (c.logical_type_ref(), c.converted_type()) {
+        (Some(LogicalType::Timestamp(t)), _) => (unit(&t.unit), "1970-01-01"),
+        (Some(LogicalType::Time(t)), _) => (unit(&t.unit), "midnight"),
+        (Some(LogicalType::Date), _) | (None, ConvertedType::DATE) => ("days", "1970-01-01"),
+        (None, ConvertedType::TIMESTAMP_MILLIS) => ("milliseconds", "1970-01-01"),
+        (None, ConvertedType::TIMESTAMP_MICROS) => ("microseconds", "1970-01-01"),
+        (None, ConvertedType::TIME_MILLIS) => ("milliseconds", "midnight"),
+        (None, ConvertedType::TIME_MICROS) => ("microseconds", "midnight"),
+        _ => return None,
+    };
+    Some(format!("{count} since {since}"))
 }
 
 /// A field type for a top-level column; `None` for types not read (binary, INT96, fixed-length).

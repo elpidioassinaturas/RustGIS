@@ -769,6 +769,37 @@ fn fresh_source_ids(before: &Project, after: &mut Project) {
     }
 }
 
+/// A lock names each label by its feature's id, and [`rustgis_data::Dataset::push`] hands the
+/// largest id out again once its feature is deleted: the new feature would take the lock's place
+/// without having been placed (#1135). So a command that removes features removes their entries,
+/// whichever way it removes them. Undo brings them back with the rest of the project. A streamed
+/// layer holds only the window in view, so its other features aren't gone. It compares ids, so an
+/// id a single command both removes and hands out stays locked: only restoring from an archive can.
+fn forget_locks_of_removed_features(before: &Project, after: &mut Project) {
+    for (i, m) in after.maps.iter_mut().enumerate() {
+        let was = before.maps.get(i).filter(|o| o.name == m.name);
+        let Some(lock) = m.label_lock.as_mut() else { continue };
+        for l in m.layers.iter().filter(|l| !l.is_streamed()) {
+            if was.and_then(|o| o.layers.iter().find(|o| o.id == l.id)).is_some_and(|o| o.dataset.features.shares(&l.dataset.features)) {
+                continue;
+            }
+            // The lock's ids for this layer, less those it still has: sized by the lock, not the layer.
+            let mut gone: std::collections::HashSet<u64> =
+                lock.iter().filter(|((layer, ..), _)| *layer == l.id).map(|((_, id, ..), _)| *id).collect();
+            if gone.is_empty() {
+                continue;
+            }
+            for f in l.dataset.features.iter() {
+                gone.remove(&f.id);
+                if gone.is_empty() {
+                    break;
+                }
+            }
+            lock.retain(|((layer, id, ..), _)| *layer != l.id || !gone.contains(id));
+        }
+    }
+}
+
 /// Why command `label` can't edit streamed layer `layer`, refused up front or undone after.
 fn streamed_refusal(label: &str, layer: &str) -> String {
     format!("{label}: {layer} is read in place from its file; Load All Features (layer.loadAll) to edit it")
@@ -784,6 +815,9 @@ fn edits_features(id: &str) -> bool {
 
 impl Session {
     pub fn new(project: Project) -> Self {
+        // The engine's tests never add Shapefile indexes to the user's cache (#1230).
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        rustgis_data::source::shp::use_temporary_index_dir();
         // Cheap: the suite's tools load the first time a tool list is needed.
         #[cfg(feature = "geolibre")]
         rustgis_geolibre::register();
@@ -1177,6 +1211,7 @@ impl Session {
             (Ok(_), Some(_)) if std::mem::take(&mut self.request_only) => {}
             (Ok(_), Some(mut snap)) => {
                 fresh_source_ids(&snap, &mut self.project);
+                forget_locks_of_removed_features(&snap, &mut self.project);
                 // An edit may change the dates the time slider's window filters on: bound layers
                 // whose features or fields the command changed (features are shared with the
                 // snapshot until written) take the window again.

@@ -2299,7 +2299,7 @@ fn raise_labels(map: &Map, view: &View, candidates: &mut [Candidate]) {
     let cam = view.camera;
     let (w, h) = (view.width, view.height);
     // Each extruded layer's rows by feature id, the label keys naming features by id (#1046).
-    let mut rows: std::collections::HashMap<u32, std::collections::HashMap<usize, usize>> = std::collections::HashMap::new();
+    let mut rows: std::collections::HashMap<u32, std::collections::HashMap<u64, usize>> = std::collections::HashMap::new();
     for Candidate { label: l, key: (id, fid, _, _), alternatives, row: offered, .. } in candidates.iter_mut() {
         let Some(layer) = map.layer(*id).filter(|l| l.geometry_type() == GeometryType::Polygon) else { continue };
         let Some(x) = &layer.extrusion else { continue };
@@ -2307,9 +2307,9 @@ fn raise_labels(map: &Map, view: &View, candidates: &mut [Candidate]) {
         // The row it was offered from while its feature is there, else looked up by id; one not
         // among them, as a streamed layer's, rises by the height no field gives.
         let row = Some(*offered)
-            .filter(|&r| features.get(r).is_some_and(|f| f.id as usize == *fid))
+            .filter(|&r| features.get(r).is_some_and(|f| f.id == *fid))
             .or_else(|| {
-                let by_id = rows.entry(*id).or_insert_with(|| features.iter().enumerate().map(|(r, f)| (f.id as usize, r)).collect());
+                let by_id = rows.entry(*id).or_insert_with(|| features.iter().enumerate().map(|(r, f)| (f.id, r)).collect());
                 by_id.get(fid).copied()
             })
             .unwrap_or(usize::MAX);
@@ -3099,7 +3099,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
     }
     let lock: Option<std::collections::HashMap<rustgis_map::LabelKey, u8>> = map.label_lock.as_ref().map(|v| v.iter().copied().collect());
     // The classes of features with a label locked (any of its repeats), to pass the rest over early.
-    let locked_classes: Option<std::collections::HashSet<(u32, usize, usize)>> =
+    let locked_classes: Option<std::collections::HashSet<(u32, u64, usize)>> =
         lock.as_ref().map(|k| k.keys().map(|&(l, r, c, _)| (l, r, c)).collect());
     let distance = viewing_distance(map.ground_res_at(&view.camera), view.height);
     // Graphics text: always drawn, and other labels keep clear of it.
@@ -3304,7 +3304,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
             let styler = layer.styler(Some(scale));
             // A label is named by its feature's id, not its row: a lock holds through edits that
             // move rows (#1046).
-            let label_id = |row: usize| layer.dataset.features.get(row).map_or(row, |f| f.id as usize);
+            let label_id = |row: usize| layer.dataset.features.get(row).map_or(row as u64, |f| f.id);
             let (labels, selection, ds_ptr) = (&layer.labels, &layer.selection, &layer.dataset);
             // The globe draws the lon/lat geometry itself; the flat map its Web Mercator copy.
             let geoms: Vec<Option<&Geometry>> = if globe.is_some() {
@@ -3862,7 +3862,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
     // Tile labels, after every layer's own.
     if lock.is_none() {
         for (i, (l, pri)) in tile_out.labels.into_iter().enumerate() {
-            label_candidates.push((l, pri - 1e13, (u32::MAX, i, 0, 0)).into());
+            label_candidates.push((l, pri - 1e13, (u32::MAX, i as u64, 0, 0)).into());
         }
     }
     if let Labels::Tilted(to, out) = &mut labels_to {
@@ -3876,7 +3876,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
             let (sx, sy) = to.camera.try_to_screen(m, tw, th).filter(|_| near)?;
             (sy as f32 > sky_y).then_some((sx as f32, sy as f32))
         };
-        let fixed = fixed_labels.into_iter().map(|l| Candidate::from((l, f64::MAX, (u32::MAX, usize::MAX, 0, 0))));
+        let fixed = fixed_labels.into_iter().map(|l| Candidate::from((l, f64::MAX, (u32::MAX, u64::MAX, 0, 0))));
         for c in fixed.chain(label_candidates) {
             out.extend(tilt_candidate(c, &at));
         }
@@ -5121,7 +5121,7 @@ mod tests {
                     let (x, y) = ((i % 200) as f32 * 10.0, (i / 200) as f32 * 10.0);
                     let l = PlacedLabel { x, y, ..label("ab", x, None, 0.0) };
                     let alternatives = if others { round.map(|(dx, dy)| (x + dx, y + dy)).to_vec() } else { Vec::new() };
-                    Candidate { label: l, priority: -f64::from(i), key: (u32::MAX, i as usize, 0, 0), alternatives, row: usize::MAX }
+                    Candidate { label: l, priority: -f64::from(i), key: (u32::MAX, i as u64, 0, 0), alternatives, row: usize::MAX }
                 })
                 .collect()
         };
@@ -5414,6 +5414,40 @@ mod tests {
         // A clause that doesn't read takes no feature.
         capitals(m.layer_mut(id).unwrap(), "gone = 1");
         assert_eq!(sizes(&mut m), both);
+    }
+
+    /// A lock keeps source ids wider than a wasm32 pointer distinct, including when a label
+    /// that collided at lock time later has room to draw (#1135).
+    #[test]
+    fn locked_labels_keep_full_width_feature_ids() {
+        let mut m = Map::new("Map");
+        let mut d = Dataset::new("pts", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        for (name, lon) in [("Alpha", -0.1), ("Beta", 0.1)] {
+            d.push(Some(Geometry::Point(Coord::new(lon, 0.0))), vec![Value::Text(name.into())]);
+        }
+        d.features[0].id = 1;
+        d.features[1].id = (1_u64 << 32) + 1;
+        let id = m.add_dataset(d);
+        m.layer_mut(id).unwrap().labels.enabled = true;
+        m.label_display.locked = true;
+        let mut view = View {
+            width: 800.0,
+            height: 600.0,
+            pixels_per_point: 1.0,
+            camera: Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 5000.0, bearing: 0.0, pitch: 0.0 },
+            sky: false,
+        };
+        let texts = |m: &mut Map, view: &View| render(m, view).unwrap().labels.into_iter().map(|l| l.text).collect::<Vec<_>>();
+        assert_eq!(texts(&mut m, &view), ["Alpha"]);
+        view.camera.res /= 16.0;
+        assert_eq!(texts(&mut m, &view), ["Alpha"], "Beta was not placed when the lock was taken");
+        m.label_display.locked = false;
+        assert_eq!(texts(&mut m, &view), ["Alpha", "Beta"]);
+        m.label_display.locked = true;
+        assert_eq!(texts(&mut m, &view), ["Alpha", "Beta"]);
+        let mut ids: Vec<u64> = m.label_lock.as_ref().unwrap().iter().map(|((_, f, ..), _)| *f).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [1, (1_u64 << 32) + 1]);
     }
 
     /// A point's label whose place another takes goes round the point when its class says so

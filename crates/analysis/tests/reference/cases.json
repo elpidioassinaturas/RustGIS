@@ -912,10 +912,6 @@
    "expect": {
     "features": "expected/buffer_points_1km.geojson",
     "tolerance": 0.001
-   },
-   "known": {
-    "issue": "#1159: Buffer outlines sit up to 10 % of the distance off",
-    "tolerance": 0.1
    }
   },
   {
@@ -929,10 +925,6 @@
    "expect": {
     "features": "expected/buffer_stations_120km.geojson",
     "tolerance": 0.001
-   },
-   "known": {
-    "issue": "#1159: Buffer outlines sit up to 10 % of the distance off",
-    "tolerance": 0.1
    }
   },
   {
@@ -946,10 +938,6 @@
    "expect": {
     "features": "expected/buffer_roads_2km.geojson",
     "tolerance": 0.001
-   },
-   "known": {
-    "issue": "#1159: Buffer outlines sit up to 10 % of the distance off",
-    "tolerance": 0.1
    }
   },
   {

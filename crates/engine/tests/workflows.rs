@@ -348,3 +348,45 @@ fn shelby_county_tract_areas_match_the_census() {
     reopened.run("share.exportLayer", &json!({"layer": "shelby", "path": gpkg})).unwrap();
     check(&io::read_path(&gpkg).unwrap().0);
 }
+
+#[test]
+fn network_routes_report_invalid_segments_but_clean_networks_are_quiet() {
+    use rustgis_engine::data::{Geometry, GeometryType};
+    use rustgis_engine::geom::Coord;
+    for invalid in [false, true] {
+        let mut s = Session::new(Project::default());
+        let mut ds = Dataset::new("roads", GeometryType::Polyline, vec![]);
+        ds.push(
+            Some(Geometry::Line(vec![
+                vec![Coord::new(0.0, 0.0), Coord::new(0.01, 0.0)],
+                vec![Coord::new(0.02, 0.0), Coord::new(0.03, 0.0)],
+            ])),
+            vec![],
+        );
+        if invalid {
+            ds.push(Some(Geometry::Line(vec![vec![Coord::new(f64::NAN, 0.0), Coord::new(0.02, 0.0)]])), vec![]);
+            ds.push(Some(Geometry::Line(vec![vec![Coord::new(0.0, 95.0), Coord::new(0.02, 95.0)]])), vec![]);
+        }
+        let id = s.map_mut().add_dataset(ds);
+        let mark = s.notice_mark();
+        s.run("analysis.route", &json!({"layer":id, "from":[0.0,0.0], "to":[0.01,0.0], "snapDistance":1})).unwrap();
+        let notices = s.notices_since(mark);
+        if invalid {
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            assert!(notices[0].text.contains("2 segments") && notices[0].text.contains("roads"), "{notices:?}");
+            assert!(!notices[0].error);
+        } else {
+            assert!(notices.is_empty(), "{notices:?}");
+        }
+        for (to, expected) in
+            [(0.03, "the two points aren't connected by the network"), (0.1, "a route end is more than 1 m from the network")]
+        {
+            let error = s.run("analysis.route", &json!({"layer":id, "from":[0.0,0.0], "to":[to,0.0], "snapDistance":1})).unwrap_err();
+            if invalid {
+                assert!(error.contains("2 segments") && error.contains("roads"), "{error}");
+            } else {
+                assert_eq!(error, expected);
+            }
+        }
+    }
+}

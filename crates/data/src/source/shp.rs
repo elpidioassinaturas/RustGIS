@@ -15,6 +15,10 @@ use std::path::{Path, PathBuf};
 mod cache;
 mod index;
 
+#[doc(hidden)]
+pub use cache::use_temporary_index_dir;
+pub use cache::{Emptied, empty_index_cache};
+
 use super::{Batch, FeatureSource, Reproject, Request, SourceInfo, clamp_limit};
 use crate::io::group_rings;
 use crate::{DataError, Feature, Field, FieldType, Geometry, GeometryType, Result, Value};
@@ -138,17 +142,24 @@ impl ShpSource {
             .zip(read_names(&dbf, table.columns.len(), &encoding.decoder())?)
             .map(|(c, n)| Field::new(n, c.out))
             .collect();
-        let info = SourceInfo {
+        let mut info = SourceInfo {
             name: name.to_string(),
             format: "Shapefile",
             geometry_type,
             fields,
             extent,
             count: Some(index.count),
-            crs: crs.and_then(|c| c.custom_def()).map(|d| d.proj4.clone()).unwrap_or_else(|| reproject.label()),
+            // A system the .prj defines, as one given, by its PROJ definition, so the layer keeps it
+            // (`SourceInfo::coordinate_system`) as a whole read does.
+            crs: reproject.crs.custom_def().map(|d| d.proj4.clone()).unwrap_or_else(|| reproject.label()),
             indexed: index.indexed(),
             notes,
+            zm_dropped: false,
         };
+        // PointZ … MultiPointM: the header's type says every shape carries Z or M values.
+        if matches!(shape_type, 11 | 13 | 15 | 18 | 21 | 23 | 25 | 28) {
+            info.drop_zm(Some(index.count));
+        }
         Ok(ShpSource { info, shp: path.to_path_buf(), dbf, index, table, encoding, reproject })
     }
 }
@@ -354,7 +365,7 @@ fn record_box(c: &[u8]) -> [f32; 4] {
 const MAX_PARTS: usize = 1 << 24;
 
 /// A record's shape: `Ok(None)` for a null shape, `Err` for one that doesn't parse or isn't
-/// supported (a multipatch). Z and M values are dropped.
+/// supported (a multipatch). Z and M values are dropped (opening notes it, from the header).
 fn parse_shape(c: &[u8]) -> std::result::Result<Option<Geometry>, ()> {
     let pt = |at: usize| -> std::result::Result<Coord, ()> { Ok(Coord::new(le_f64(c, at).ok_or(())?, le_f64(c, at + 8).ok_or(())?)) };
     match le_i32(c, 0).ok_or(())? {

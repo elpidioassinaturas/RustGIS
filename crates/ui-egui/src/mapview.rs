@@ -8,7 +8,7 @@ use rustgis_engine::analysis::{
     network::{radius_boundary_point, radius_distance_m},
     selection::MAX_POINTS,
 };
-use rustgis_engine::geom::{Coord, Extent, geodesic_length_m, geodesic_ring_area_m2};
+use rustgis_engine::geom::{Coord, Extent, geodesic_length_m, geodesic_ring_area_m2, wgs84_length_m, wgs84_ring_perimeter_area_m2};
 use rustgis_engine::map::layout::TextAlign;
 use rustgis_engine::map::projection::Flat;
 use rustgis_engine::map::{Camera, Globe, Projection};
@@ -2639,6 +2639,7 @@ pub fn finish_graphic(app: &mut RustGisApp, shape: &str, pts: Vec<Coord>) {
     }
 }
 
+/// Paints map decorations and interactive readouts, including measurements on the map's body.
 fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t: &Tokens) {
     let accent = t.accent;
     // Box drag.
@@ -2838,16 +2839,26 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
             p.circle_stroke(*s, 3.5, Stroke::new(1.5, color));
         }
         if matches!(tool, Tool::Measure | Tool::MeasureArea) && pts.len() >= 2 {
-            // On the map's body.
+            // On the map's body: the Earth measures on the WGS 84 ellipsoid, so the panel agrees
+            // with the geoprocessing tools (#939); another body measures on its sphere and scales.
             let body = app.session.map().body();
-            let geodesic_length_m = |pts: &[Coord]| body.length(geodesic_length_m(pts));
-            let geodesic_ring_area_m2 = |ring: &[Coord]| body.area(geodesic_ring_area_m2(ring));
+            let measure_length = |pts: &[Coord]| {
+                if body.is_earth() { wgs84_length_m(pts) } else { body.length(geodesic_length_m(pts)) }
+            };
+            // Perimeter and area in the map body's measurement model.
+            let measure_ring = |ring: &[Coord]| {
+                if body.is_earth() {
+                    wgs84_ring_perimeter_area_m2(ring)
+                } else {
+                    (body.length(geodesic_length_m(ring)), body.area(geodesic_ring_area_m2(ring)))
+                }
+            };
             let text = if tool == Tool::Measure {
-                let seg = pts.len().checked_sub(2).and_then(|i| pts.get(i..)).map(geodesic_length_m).unwrap_or(0.0);
+                let seg = pts.len().checked_sub(2).and_then(|i| pts.get(i..)).map(measure_length).unwrap_or(0.0);
                 crate::i18n::fmt(
                     "Total {total}   ·   Segment {segment}",
                     &[
-                        ("total", &crate::measure_units::distance(geodesic_length_m(&pts), app.ui.measurement_imperial)),
+                        ("total", &crate::measure_units::distance(measure_length(&pts), app.ui.measurement_imperial)),
                         ("segment", &crate::measure_units::distance(seg, app.ui.measurement_imperial)),
                     ],
                 )
@@ -2856,11 +2867,12 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
                 if let Some(f) = ring.first().copied() {
                     ring.push(f);
                 }
+                let (perimeter, area) = measure_ring(&ring);
                 crate::i18n::fmt(
                     "Area {area}   ·   Perimeter {perimeter}",
                     &[
-                        ("area", &crate::measure_units::area(geodesic_ring_area_m2(&ring), app.ui.measurement_imperial)),
-                        ("perimeter", &crate::measure_units::distance(geodesic_length_m(&ring), app.ui.measurement_imperial)),
+                        ("area", &crate::measure_units::area(area, app.ui.measurement_imperial)),
+                        ("perimeter", &crate::measure_units::distance(perimeter, app.ui.measurement_imperial)),
                     ],
                 )
             };

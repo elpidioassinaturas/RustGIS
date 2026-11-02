@@ -168,6 +168,7 @@ impl GpkgMemSource {
             crs: reproject.label(),
             indexed: false,
             notes,
+            zm_dropped: false,
         };
         let mut src = GpkgMemSource { info, db, table, geom_col, field_cols, reproject };
         // The extent the file declares, else the envelopes in the geometry headers.
@@ -179,7 +180,36 @@ impl GpkgMemSource {
         if src.info.geometry_type == GeometryType::None {
             src.info.geometry_type = src.peek_kind();
         }
+        // Z and M are 0 (none), 1 (every geometry) or 2 (optional: looked for in the first rows).
+        let (z, m) = (int(get(gc, "z")).unwrap_or(0), int(get(gc, "m")).unwrap_or(0));
+        if (z == 1 || m == 1) && src.info.count != Some(0) {
+            // Every geometry has them; how many rows have one isn't known without a scan (an empty
+            // table has none).
+            src.info.drop_zm(None);
+        } else if z == 2 || m == 2 {
+            match src.peek_zm() {
+                Some(true) => src.info.drop_zm(None),
+                Some(false) => {}
+                None => src.info.notes.push("couldn't tell whether it has Z or M values, which RustGIS doesn't keep".into()),
+            }
+        }
         Ok(src)
+    }
+
+    /// Whether any of the first few geometries has Z or M values (the scan stops there); `None`
+    /// when they can't be read.
+    fn peek_zm(&self) -> Option<bool> {
+        let mut found = false;
+        let mut looked = 0;
+        let read = self.db.rows(&self.table, |_, r| {
+            // Every row counts, so a table of empty geometries isn't read to its end.
+            looked += 1;
+            if let Some(Val::Blob(b)) = r.get(self.geom_col) {
+                found |= super::gpkg_blob::split_blob(b).is_some_and(|(_, body)| wkb::has_zm(body));
+            }
+            if found || looked >= 16 { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+        });
+        read.ok().map(|()| found)
     }
 
     /// The geometry type of a table declared as plain `GEOMETRY`, from its first few geometries

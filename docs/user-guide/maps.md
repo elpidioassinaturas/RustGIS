@@ -72,8 +72,10 @@ ground's heights, labels and point markers stand on it, and nearer slopes hide w
 them. The heights come from a DEM raster layer of the project (heights in metres; the layer can
 stay hidden) or from elevation tiles: Terrarium (`terrarium`, as the free
 `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`) or Mapbox
-Terrain-RGB (`mapbox`, also MapTiler's). `map.terrain` sets it: `{"layer": "DEM"}` or
-`{"tiles": "https://…/{z}/{x}/{y}.png", "encoding": "terrarium"}`, with `"exaggeration"`
+Terrain-RGB (`mapbox`, also MapTiler's). **View › Scene › Terrain** turns it on from the active
+layer (make the DEM the active layer first) and off again; a notice names the layer and says to
+tilt the map. `map.terrain` sets it: `{"layer": "DEM"}`, or `{}` for the active raster layer when
+no terrain is on, or `{"tiles": "https://…/{z}/{x}/{y}.png", "encoding": "terrarium"}`, with `"exaggeration"`
 (0 to 20, default 1) to stretch the heights; `{"exaggeration": 2}` alone changes only that, and
 `{"off": true}` flattens the map again. Terrain is saved with the project and shows in exported
 maps; a flat (untilted) view, the globe and other projections stay flat, extruded layers are
@@ -192,16 +194,24 @@ Ocean, Atlas, Blank), which need no network, and web tile layers over them:
   the desktop read in place a tile at a time (**Tile Archive File…**, Add Data, or drop it on the
   window); in the web app added with Add Data and held in memory for the session (a project keeps
   the layer, and asks for the file again).
-- **Map styles**: a MapLibre style document (`style.json`), with its vector and raster sources.
+- **Map styles**: a MapLibre style document (`style.json`), with its vector, raster and
+  elevation (`raster-dem`: Terrarium, Mapbox or custom encoding) sources.
   RustGIS draws background, fill, line, circle and raster layers, labels with their icons from
   the style's sprite (SDF icons in their `icon-color`), and fill patterns; it evaluates the
-  style's expressions and zoom functions. Labels are placed as MapLibre places them: at points,
+  style's expressions and zoom functions. From elevation it draws `color-relief` layers (a
+  `color-relief-color` that is an `interpolate` or `step` on `["elevation"]`) and `hillshade`
+  layers (each `hillshade-method`, lit as the map is drawn, north up; slopes are steepened at
+  small scales so relief stays visible). Its shading follows the style's colours, exaggeration
+  and light rather than matching MapLibre's pixel for pixel. Other `color-relief-color`
+  expressions aren't drawn. If a style's elevation source can't be read, its relief and
+  hillshade layers are left out with a notice saying why, and the rest is drawn. Labels are placed
+  as MapLibre places them: at points,
   in the middle of areas, and along lines (street names every `symbol-spacing`, turned to the
   street, where it bends less than `text-max-angle`; shields and one-way arrows), wrapped to
   `text-max-width`, the style's later layers first and then by `symbol-sort-key`, kept apart by
   `text-padding` and the `*-optional`, `*-allow-overlap` and `*-ignore-placement` rules. Text
-  along a line is drawn straight rather than curved round its bends. Line patterns, hillshade
-  and 3D extrusion are not drawn (extrusions draw flat). A label shows the lines of its text
+  along a line is drawn straight rather than curved round its bends. Line patterns and 3D
+  extrusion are not drawn (extrusions draw flat). A label shows the lines of its text
   that the map's font can draw: a style's "Syria / سوريا" shows as "Syria".
   A style's root `center`, `zoom`, `bearing` and `pitch` say where it opens: `map.addTiles` with
   `"view": true` takes the map there once the style has loaded.

@@ -80,6 +80,7 @@ fn streamed_kind(layer: &Layer, size: usize, native: bool) -> Layer {
         crs: if native { "EPSG:3857".into() } else { "EPSG:4326".into() },
         indexed: true,
         notes: Vec::new(),
+        zm_dropped: false,
     };
     let mut l = layer.clone();
     l.dataset.features = ds.features.iter().take(1).cloned().collect::<Vec<_>>().into();
@@ -424,6 +425,8 @@ fn perspective_uses_complete_isolated_fallback() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn actual_shapefile_export_is_complete_despite_one_row_interaction_limit() {
+    // Keep this Shapefile's index out of the user's cache (#1230).
+    rustgis_data::source::shp::use_temporary_index_dir();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("complete.shp");
     let mut ds =

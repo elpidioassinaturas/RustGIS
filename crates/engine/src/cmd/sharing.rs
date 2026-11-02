@@ -319,6 +319,7 @@ fn share(s: &mut Session, p: &Value, kind: &str) -> CmdResult {
     s.notify(format!("Shared {name} to {path}"), false);
     // After it, so the status bar, which shows the last notice, keeps saying it.
     note_label_classes(s, kind, p);
+    note_export(s, kind, p, &path);
     Ok(json!({"item": id, "path": path, "bytes": bytes.len()}))
 }
 
@@ -547,6 +548,37 @@ onresize=draw;draw();
         res = if m.camera.res.is_finite() && m.camera.res > 0.0 { m.camera.res } else { 40_000.0 },
         bg = bg
     ))
+}
+
+/// Says, when a shared web map, web layer or OGC API Features item has layers that lost Z or M
+/// values on import, or whose positions are approximate or aren't longitude/latitude, what
+/// `target` lacks: one notice per kind, counting them ([`rustgis_data::export_notes`]). Run once
+/// the item is made, as [`note_label_classes`] is.
+pub(crate) fn note_export(s: &mut Session, kind: &str, p: &Value, target: &str) {
+    // Shared items are GeoJSON, longitude/latitude.
+    let notes = match kind {
+        "webLayer" => s
+            .layer_id(p)
+            .ok()
+            .and_then(|id| s.map().layer(id))
+            .map(|l| rustgis_data::export_notes([(&l.dataset, l.extent())], target, rustgis_data::raster::Crs::LonLat))
+            .unwrap_or_default(),
+        "webMap" | "geodataService" => map_of(s, p)
+            .ok()
+            .map(|m| {
+                let shared = |l: &&Layer| if kind == "webMap" { l.visible } else { !l.is_raster() && !l.graphics };
+                rustgis_data::export_notes(
+                    m.layers.iter().filter(shared).map(|l| (&l.dataset, l.extent())),
+                    target,
+                    rustgis_data::raster::Crs::LonLat,
+                )
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    for note in notes {
+        s.notify(note, false);
+    }
 }
 
 /// Says what a web layer or style (`kind`) leaves out of the labels: it labels every feature with
