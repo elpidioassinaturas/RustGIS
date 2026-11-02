@@ -23667,6 +23667,20 @@ fn a_cog_window_comes_in_as_a_raster() {
     let e =
         s.run("layer.addUrl", &json!({"url": format!("{five}/five.tif"), "bbox": [10.0, 45.0, 10.5, 45.5], "name": "Five"})).unwrap_err();
     assert!(e.contains("the window is 256 × 256 cells") && e.contains("5 band(s); a window holds 300000 values at most"), "{e}");
+    // Byte windows round nothing, and say nothing of it; an Int32 window of 16,777,216 plus the
+    // byte value says how many `f32` rounded: the odd ones, half of its 65,536 cells.
+    assert!(s.notices_since(mark0).iter().all(|n| !n.text.contains("rounded")), "{:?}", s.notices_since(mark0));
+    let (wide, _) = serve_ranges(example_with(&Example { size: 512, tile: 256, wide: true, ..Example::default() }));
+    let mark = s.notice_mark();
+    s.run("layer.addUrl", &json!({"url": format!("{wide}/ids.tif"), "bbox": [10.0, 45.0, 10.5, 45.5], "name": "Ids"})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|n| n.starts_with("Ids: 32768 values were rounded as the file was read")), "{said:?}");
+    // Pixel (1, 0) is 16,777,217, held as 16,777,216, as pixel (0, 0) is.
+    let ids = raster(&s, "Ids");
+    assert_eq!(
+        (ids.rounded.as_slice(), ids.value(0, 0, 0), ids.value(0, 1, 0)),
+        ([32768u64].as_slice(), Some(16_777_216.0), Some(16_777_216.0))
+    );
     let cover = raster(&s, "Cover");
     let ColorHint::Palette(table) = &cover.color else { panic!("{:?}", cover.color) };
     assert_eq!(table[3], [3, 252, 0, 255]);

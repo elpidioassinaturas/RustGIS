@@ -3193,10 +3193,14 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     }
     // One read a band, each waiting up to two minutes; no band is started once five minutes are
     // up (the header's read counted), so the last one started may run two minutes more.
-    let mut bands = Vec::with_capacity(count);
+    // The values `f32` rounded (32- and 64-bit whole numbers and floats), a count a band, are said
+    // when the layer is added, as for a file read whole.
+    let (mut bands, mut rounded) = (Vec::with_capacity(count), Vec::with_capacity(count));
     for band in 0..count {
         band_in_time(band, count, started.elapsed(), WINDOW_WAIT).map_err(named)?;
-        bands.push(cog::read_values_blocking(&info, url, level, band, (c0, c1), (r0, r1)).map_err(named)?);
+        let (values, changed) = cog::read_values_counted_blocking(&info, url, level, band, (c0, c1), (r0, r1)).map_err(named)?;
+        bands.push(values);
+        rounded.push(changed);
     }
     let lt = layout.transform_of(lv);
     let transform = rustgis_data::raster::GeoTransform {
@@ -3216,6 +3220,9 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     let mut r =
         rustgis_data::raster::Raster::new(&name, c1 - c0, r1 - r0, bands, transform, layout.crs, layout.nodata, color, layout.data_type)
             .map_err(|e| named(e.to_string()))?;
+    if rounded.iter().any(|n| *n > 0) {
+        r.rounded = rounded;
+    }
     // What the header holds but isn't read (a colour table, names): said when the layer is added.
     r.lost.extend(layout.lost.iter().cloned());
     r.lost.extend(palette_lost);

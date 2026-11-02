@@ -217,6 +217,8 @@ pub struct Layout {
     /// The full image's georeferencing.
     pub transform: GeoTransform,
     pub nodata: Option<f64>,
+    /// The no-data value as the file writes it, whose samples aren't counted as rounded.
+    pub(crate) nodata_exact: Option<super::Exact>,
     pub bands: usize,
     pub color: ColorHint,
     pub data_type: &'static str,
@@ -452,7 +454,8 @@ fn read_layout(r: Sparse) -> Result<Parse> {
         levels,
         crs: geo.0,
         transform: geo.1,
-        nodata: geo.2,
+        nodata: geo.2.map(super::Exact::wide),
+        nodata_exact: geo.2,
         bands,
         color,
         data_type,
@@ -465,22 +468,61 @@ fn read_layout(r: Sparse) -> Result<Parse> {
 
 /// A TIFF colour map (`ColorMap`: every red, then every green, then every blue, 16 bits each) as
 /// RGBA bytes: `None` when it is shorter than the `bits` it indexes.
-fn colour_table(map: &[u16], bits: u16) -> Option<Vec<[u8; 4]>> {
+pub(super) fn colour_table(map: &[u16], bits: u16) -> Option<Vec<[u8; 4]>> {
     let n = 1usize << bits.min(16);
     let c = |i: usize| (map.get(i).copied().unwrap_or(0) / 257) as u8;
     (map.len() >= 3 * n).then(|| (0..n).map(|i| [c(i), c(n + i), c(2 * n + i), 255]).collect())
+}
+
+/// A decoded chunk: its bands' values, and which of them `f32` rounded.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Tile {
+    /// Each band's `tile_width × tile_height` samples, row by row (NaN past the image's edge and
+    /// for no-data).
+    pub bands: Vec<Vec<f32>>,
+    /// For each band, a bit a sample (as `bands` lays them out) that `f32` doesn't hold exactly
+    /// (32- and 64-bit whole numbers and 64-bit floats, by the rule the whole-file reader counts
+    /// with): empty when none is.
+    pub rounded: Vec<Vec<u64>>,
+}
+
+impl Tile {
+    /// Whether sample `i` of band `b` was rounded.
+    pub fn rounded_at(&self, b: usize, i: usize) -> bool {
+        self.rounded.get(b).and_then(|bits| bits.get(i / 64)).is_some_and(|w| w >> (i % 64) & 1 == 1)
+    }
+}
+
+impl From<Vec<Vec<f32>>> for Tile {
+    fn from(bands: Vec<Vec<f32>>) -> Tile {
+        Tile { bands, rounded: Vec::new() }
+    }
+}
+
+impl std::ops::Deref for Tile {
+    type Target = Vec<Vec<f32>>;
+    fn deref(&self) -> &Vec<Vec<f32>> {
+        &self.bands
+    }
 }
 
 /// Decodes one chunk (a tile, or one band of a tile when the bands are stored apart, see
 /// [`Layout::chunk`]): its bands, each `tile_width × tile_height` samples (row by row; NaN past
 /// the image's edge). `header` holds the file's IFDs, `bytes` the chunk's own bytes.
 pub fn decode_tile(header: &Sparse, layout: &Layout, level: usize, index: u32, bytes: Vec<u8>) -> Result<Vec<Vec<f32>>> {
+    decode_tile_counted(header, layout, level, index, bytes).map(|t| t.bands)
+}
+
+/// [`decode_tile`], with the samples `f32` rounded marked ([`Tile::rounded`]).
+pub fn decode_tile_counted(header: &Sparse, layout: &Layout, level: usize, index: u32, bytes: Vec<u8>) -> Result<Tile> {
     let l = layout.levels.get(level).ok_or_else(|| err("no such level"))?;
     let at = *l.offsets.get(index as usize).ok_or_else(|| err("no such tile"))?;
     let r = header.clone().with(at, bytes).reader();
     let mut dec = Decoder::new(super::geotiff::reader(r).map_err(err)?).map_err(err)?.with_limits(limits());
     dec.seek_to_image(l.ifd).map_err(err)?;
-    let values = match super::geotiff::read_chunk(&mut dec, index)? {
+    let buf = super::geotiff::read_chunk(&mut dec, index)?;
+    let changed = super::geotiff::rounded_bits(&buf, super::Uncounted::new(layout.nodata_exact, None));
+    let values = match buf {
         DecodingResult::U8(v) => v.into_iter().map(f32::from).collect::<Vec<f32>>(),
         DecodingResult::I8(v) => v.into_iter().map(f32::from).collect(),
         DecodingResult::U16(v) => v.into_iter().map(f32::from).collect(),
@@ -503,12 +545,20 @@ pub fn decode_tile(header: &Sparse, layout: &Layout, level: usize, index: u32, b
     let cols_cropped = (l.width - (col * l.tile_width).min(l.width)).min(l.tile_width) as usize;
     let stride = if values.len() >= tw * th * nb { tw } else { cols_cropped.max(1) };
     let mut out = vec![vec![f32::NAN; tw * th]; nb];
+    let mut rounded = if changed.is_some() { vec![vec![0u64; (tw * th).div_ceil(64)]; nb] } else { Vec::new() };
+    let was_rounded = |j: usize| changed.as_ref().and_then(|c| c.get(j / 64)).is_some_and(|w| w >> (j % 64) & 1 == 1);
     for y in 0..rows.min(th) {
         for x in 0..stride.min(tw) {
             let src = (y * stride + x) * nb;
             for (b, band) in out.iter_mut().enumerate() {
                 if let (Some(v), Some(slot)) = (values.get(src + b), band.get_mut(y * tw + x)) {
                     *slot = *v;
+                    let i = y * tw + x;
+                    if was_rounded(src + b)
+                        && let Some(w) = rounded.get_mut(b).and_then(|bits| bits.get_mut(i / 64))
+                    {
+                        *w |= 1 << (i % 64);
+                    }
                 }
             }
         }
@@ -521,7 +571,7 @@ pub fn decode_tile(header: &Sparse, layout: &Layout, level: usize, index: u32, b
             }
         }
     }
-    Ok(out)
+    Ok(Tile { bands: out, rounded })
 }
 
 /// A small cloud-optimised GeoTIFF, for tests and examples: tiled, uncompressed, single-band
@@ -556,11 +606,13 @@ pub struct Example {
     /// With `classes`: a colour table of 128 colours (too short for bytes) and a class item past
     /// the values a band holds (`CLASS_70000`), for what a reader leaves out.
     pub lossy: bool,
+    /// Signed 32-bit samples of 16,777,216 plus the byte value: the odd ones `f32` rounds.
+    pub wide: bool,
 }
 
 impl Default for Example {
     fn default() -> Self {
-        Example { size: 1024, tile: 256, bands: 1, planar: false, int8: false, bottom_up: false, classes: false, lossy: false }
+        Example { size: 1024, tile: 256, bands: 1, planar: false, int8: false, bottom_up: false, classes: false, lossy: false, wide: false }
     }
 }
 
@@ -597,7 +649,12 @@ pub fn example_with(e: &Example) -> Vec<u8> {
                         let (x, y) = (tx * tile + p % tile, ty * tile + p / tile);
                         for b in 0..per_chunk {
                             let band = if e.planar { plane } else { b };
-                            c.push(if x < s && y < s { value(x * k, y * k, band) } else { 0 });
+                            let v = if x < s && y < s { value(x * k, y * k, band) } else { 0 };
+                            if e.wide {
+                                c.extend_from_slice(&(16_777_216 + i32::from(v)).to_le_bytes());
+                            } else {
+                                c.push(v);
+                            }
                         }
                     }
                     chunks.push(c);
@@ -614,7 +671,7 @@ pub fn example_with(e: &Example) -> Vec<u8> {
         D(Vec<f64>),
     }
     let header_len = 8u32;
-    let chunk_len = tile * tile * per_chunk;
+    let chunk_len = tile * tile * per_chunk * if e.wide { 4 } else { 1 };
     let mut ifds: Vec<Vec<(u16, V)>> = Vec::new();
     for (i, &s) in sizes.iter().enumerate() {
         let n = (s.div_ceil(tile) * s.div_ceil(tile) * planes) as usize;
@@ -622,7 +679,7 @@ pub fn example_with(e: &Example) -> Vec<u8> {
             (254u16, V::L(vec![if i == 0 { 0 } else { 1 }])),
             (256, V::L(vec![s])),
             (257, V::L(vec![s])),
-            (258, V::S(vec![8; nb as usize])),
+            (258, V::S(vec![if e.wide { 32 } else { 8 }; nb as usize])),
             (259, V::S(vec![1])),
             (262, V::S(vec![if e.classes { 3 } else { 1 }])),
             (277, V::S(vec![nb as u16])),
@@ -635,7 +692,7 @@ pub fn example_with(e: &Example) -> Vec<u8> {
         if nb > 1 {
             t.push((338, V::S(vec![0; nb as usize - 1])));
         }
-        if e.int8 {
+        if e.int8 || e.wide {
             t.push((339, V::S(vec![2; nb as usize])));
         }
         if i == 0 {
@@ -807,7 +864,7 @@ pub(crate) mod tests {
     fn bands_stored_apart_signed_bytes_bottom_up() {
         // As AlphaEarth's embeddings are: planar, Int8 with no-data −128, a positive Y pixel size;
         // 600 pixels in tiles of 256, so the right and bottom tiles are cut by the image's edge.
-        let e = Example { size: 600, tile: 256, bands: 4, planar: true, int8: true, bottom_up: true, classes: false, lossy: false };
+        let e = Example { size: 600, tile: 256, bands: 4, planar: true, int8: true, bottom_up: true, ..Example::default() };
         let file = example_with(&e);
         let (s, l) = layout_of(&file);
         assert!(l.planar && l.bands == 4 && l.data_type == "Int8" && l.chunk_bands() == 1);

@@ -145,7 +145,7 @@ fn geo_tags<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Geo> {
 /// A cloud-optimised GeoTIFF's coordinate system, georeferencing and no-data value, from its first
 /// image (as [`read`] finds them); `None` for a rotated or skewed image, or one with no GeoTIFF
 /// tags (a scan), which is read whole.
-pub(crate) fn cog_geo<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Option<(Crs, GeoTransform, Option<f64>)>> {
+pub(crate) fn cog_geo<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Option<(Crs, GeoTransform, Option<Exact>)>> {
     let geo = geo_tags(dec)?;
     if geo.affine.is_some() || !geo.referenced {
         return Ok(None);
@@ -163,7 +163,7 @@ pub(crate) fn cog_geo<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Option<(Cr
             }
         },
     };
-    Ok(Some((crs, geo.transform, geo.nodata)))
+    Ok(Some((crs, geo.transform, geo.nodata_exact)))
 }
 
 #[cfg(test)]
@@ -485,7 +485,7 @@ fn can_round(buf: &DecodingResult) -> bool {
 
 /// The samples of `buf` that `f32` doesn't hold (see [`held_exactly`]), a bit each: `None` for a type
 /// that holds every value, or when none changed.
-fn rounded_bits(buf: &DecodingResult, nodata: Uncounted) -> Option<Vec<u64>> {
+pub(crate) fn rounded_bits(buf: &DecodingResult, nodata: Uncounted) -> Option<Vec<u64>> {
     if !can_round(buf) {
         return None;
     }
@@ -1082,9 +1082,22 @@ pub(super) fn read_limited_with_nodata(
     let ct = dec.colortype().map_err(err)?;
     // JPEG-compressed YCbCr, the only YCbCr read (the colour match below rejects the rest).
     let ycbcr = matches!(ct, ColorType::YCbCr(_)) && dec.find_tag_unsigned::<u16>(Tag::Compression).ok().flatten() == Some(7);
-    // A palette image (shown to the decoder as grey) is coloured by its table.
+    // A palette image (shown to the decoder as grey) is coloured by its table. One whose table
+    // doesn't decode, or is too short, is drawn grey, and says so (`Raster::lost`).
+    let mut table_lost = None;
+    let colour_map = if palette {
+        match dec.find_tag(Tag::ColorMap) {
+            Ok(v) => v,
+            Err(e) => {
+                table_lost = Some(format!("its colour table doesn't decode ({e}): it is left out"));
+                None
+            }
+        }
+    } else {
+        None
+    };
     let ct = match ct {
-        ColorType::Gray(bits) if palette && dec.find_tag(Tag::ColorMap).ok().flatten().is_some() => ColorType::Palette(bits),
+        ColorType::Gray(bits) if colour_map.is_some() => ColorType::Palette(bits),
         other => other,
     };
     let (nbands, color) = match ct {
@@ -1096,11 +1109,25 @@ pub(super) fn read_limited_with_nodata(
         ColorType::YCbCr(_) if ycbcr => (3, ColorHint::Rgb { alpha: false }),
         ColorType::RGBA(_) => (4, ColorHint::Rgb { alpha: true }),
         ColorType::Palette(bits) => {
-            let map: Vec<u16> = dec.find_tag(Tag::ColorMap).ok().flatten().and_then(|v| v.into_u16_vec().ok()).unwrap_or_default();
-            let n = 1usize << bits.min(16);
-            let c = |i: usize| (map.get(i).copied().unwrap_or(0) / 257) as u8;
-            let table = if map.len() >= 3 * n { (0..n).map(|i| [c(i), c(n + i), c(2 * n + i), 255]).collect() } else { Vec::new() };
-            (1, if table.is_empty() { ColorHint::Gray } else { ColorHint::Palette(table) })
+            let table = match colour_map.map(|v| v.into_u16_vec()) {
+                Some(Ok(map)) => {
+                    let table = super::cog::colour_table(&map, u16::from(bits));
+                    if table.is_none() {
+                        table_lost = Some(format!(
+                            "its colour table has {} entries, short of the {} a palette of {bits}-bit pixels needs: it is left out",
+                            map.len(),
+                            3usize << bits.min(16)
+                        ));
+                    }
+                    table
+                }
+                Some(Err(e)) => {
+                    table_lost = Some(format!("its colour table doesn't decode ({e}): it is left out"));
+                    None
+                }
+                None => None,
+            };
+            (1, table.map_or(ColorHint::Gray, ColorHint::Palette))
         }
         ColorType::Multiband { num_samples, .. } => (num_samples.max(1) as usize, multiband_color(&mut dec, num_samples)),
         other => return Err(err(format!("{other:?} images aren't supported"))),
@@ -1191,6 +1218,7 @@ pub(super) fn read_limited_with_nodata(
         r.georeferenced = false;
         r.overview = overview;
         r.rounded = rounded;
+        r.lost.extend(table_lost);
         if let Some(p) = &described {
             r.apply_pam(p, super::pam::GDAL_METADATA);
         }
@@ -1241,6 +1269,7 @@ pub(super) fn read_limited_with_nodata(
     let mut r = Raster::new(name, w, h, bands, transform, crs, geo.nodata, color, data_type)?;
     r.overview = overview;
     r.rounded = rounded;
+    r.lost.extend(table_lost);
     if let Some(p) = &described {
         r.apply_pam(p, super::pam::GDAL_METADATA);
     }
@@ -1818,6 +1847,13 @@ mod tests {
         }
         assert_eq!(r.value(0, 1, 0), Some(1.0));
         assert_eq!(r.value(0, 2, 0), Some(2.0));
+        assert!(r.lost.is_empty(), "{:?}", r.lost);
+        // A table too short for its bytes: drawn grey, and said.
+        let mut short = grey8(8, 8, &data, Some(&map[..384]));
+        set_photometric(&mut short, 3);
+        let grey = read(std::io::Cursor::new(&short), "short").unwrap();
+        assert!(matches!(grey.color, ColorHint::Gray), "{:?}", grey.color);
+        assert_eq!(grey.lost, ["its colour table has 384 entries, short of the 768 a palette of 8-bit pixels needs: it is left out"]);
         // Every truncation of a palette file is an error, not a panic.
         for n in (0..bytes.len()).step_by(11) {
             let _ = read(std::io::Cursor::new(&bytes[..n]), "x");
