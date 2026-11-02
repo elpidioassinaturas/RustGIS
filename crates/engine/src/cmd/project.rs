@@ -206,17 +206,15 @@ fn reset(s: &mut Session, p: Project) {
     crate::s3_connections::resolve_project_s3(s);
     // What reading a raster left out (a colour table, names, a sidecar's scale) is said again as
     // the project opens, as when it was added. One still read in the background isn't here yet.
-    let lost: Vec<String> = s
+    let lost: Vec<(String, String)> = s
         .project
         .maps
         .iter()
         .flat_map(|m| &m.layers)
         .filter_map(|l| Some((&l.name, l.raster.as_ref()?.data.as_ref()?)))
-        .flat_map(|(name, d)| d.lost.iter().map(move |l| format!("{name}: {l}")))
+        .flat_map(|(name, d)| d.lost.iter().map(move |l| (name.clone(), l.clone())))
         .collect();
-    for l in lost {
-        s.notify(l, false);
-    }
+    super::raster::say_losses(s, lost);
     // A terrain saved on a DEM name two layers share draws the first of them: said, as the
     // project opens (its layers keep their names).
     let shared: Vec<(String, String)> = s

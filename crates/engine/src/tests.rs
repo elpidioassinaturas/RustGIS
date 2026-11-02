@@ -13417,6 +13417,23 @@ fn a_trend_over_stacked_and_multiband_geotiffs() {
     let opened = s.notices_since(mark);
     assert_eq!(opened.iter().filter(|n| n.text == said).count(), 1, "{opened:?}");
     assert!(!opened.iter().any(|n| n.text.starts_with("ndvi_side:") || n.text.starts_with("ndvi_bands:")), "{opened:?}");
+    // Two rasters that leave out the same thing are said in one notice that names them both.
+    let twin = dir.join("ndvi_twin.tif");
+    std::fs::write(&twin, multiband_tiff(4, 2, &bands, (x0, y0), px, Some(&described))).unwrap();
+    std::fs::write(dir.join("ndvi_twin.tif.aux.xml"), scaled).unwrap();
+    s.run("layer.addData", &json!({"path": twin.display().to_string()})).unwrap();
+    s.run("project.saveAs", &json!({"path": project.display().to_string()})).unwrap();
+    let mark = s.notice_mark();
+    s.run("project.open", &json!({"path": project.display().to_string()})).unwrap();
+    let both: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|n| n.contains("scale or offset")).collect();
+    assert!(
+        both.len() == 1
+            && both[0].starts_with("2 rasters (")
+            && both[0].contains("ndvi_scaled")
+            && both[0].contains("ndvi_twin")
+            && both[0].ends_with("): its .aux.xml sidecar: 1 scale or offset(s) not applied: the values are as stored"),
+        "{both:?}"
+    );
     // A layer file keeps the file's bytes, not its sidecar: a band name the file's own tag holds
     // past 256 characters is cut as it is added again from one, and said then too.
     let mut long = described.clone();

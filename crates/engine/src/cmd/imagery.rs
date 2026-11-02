@@ -854,17 +854,15 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
     let mut places: Vec<(i64, i64)> = Vec::with_capacity(inputs.len());
     let (mut c0, mut r0, mut c1, mut r1) = (0i64, 0i64, 0i64, 0i64);
     // Each input is checked as it is read, so a mismatched or oversized set fails before the
-    // rest are loaded.
+    // rest are loaded. What reading a file left out is said once they are all read.
+    let mut lost: Vec<(String, String)> = Vec::new();
     for v in inputs {
         let n = v.as_str().map(str::trim).filter(|n| !n.is_empty()).ok_or("each input is a raster layer's name or a file path")?;
         let r = match raster_named(s, n) {
             Ok(r) => r,
             Err(_) if rustgis_data::raster::is_raster_name(n) => {
                 let r = rustgis_data::raster::read_path(std::path::Path::new(n)).map_err(|e| format!("{n}: {e}"))?;
-                // What reading the file left out is said, as for a file added to the map.
-                for l in &r.lost {
-                    s.notify(format!("{n}: {l}"), false);
-                }
+                lost.extend(r.lost.iter().map(|l| (n.to_string(), l.clone())));
                 Arc::new(r)
             }
             Err(e) => return Err(e),
@@ -901,6 +899,7 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
         places.push((pc, pr));
         rs.push(r);
     }
+    super::raster::say_losses(s, lost);
     let first = rs.first().ok_or("a mosaic needs two or more rasters")?;
     let (w, h) = (c1 - c0, r1 - r0);
     if w <= 0 || h <= 0 {

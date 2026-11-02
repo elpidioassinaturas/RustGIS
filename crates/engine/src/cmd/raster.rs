@@ -438,6 +438,28 @@ pub(crate) fn as_scan(p: &Value) -> Result<bool, String> {
     }
 }
 
+/// Says what reading several rasters left out, each `(raster, line)`: one notice a kind (the same
+/// line), naming the rasters that share it (three, then a count), as AGENTS.md's Never silent asks.
+pub(crate) fn say_losses(s: &mut Session, losses: Vec<(String, String)>) {
+    let mut kinds: Vec<(String, Vec<String>)> = Vec::new();
+    for (name, line) in losses {
+        match kinds.iter_mut().find(|(l, _)| *l == line) {
+            Some((_, names)) => names.push(name),
+            None => kinds.push((line, vec![name])),
+        }
+    }
+    for (line, names) in kinds {
+        let who = match names.as_slice() {
+            [one] => one.clone(),
+            _ => {
+                let more = if names.len() > 3 { ", …" } else { "" };
+                format!("{} rasters ({}{more})", names.len(), names[..names.len().min(3)].join(", "))
+            }
+        };
+        s.notify(format!("{who}: {line}"), false);
+    }
+}
+
 /// Opens a raster file by path.
 pub fn add_path(s: &mut Session, path: &str, name: Option<&str>, scan: bool) -> CmdResult {
     let mut r = raster::read_path(Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
