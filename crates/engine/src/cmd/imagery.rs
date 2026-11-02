@@ -860,7 +860,12 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
         let r = match raster_named(s, n) {
             Ok(r) => r,
             Err(_) if rustgis_data::raster::is_raster_name(n) => {
-                Arc::new(rustgis_data::raster::read_path(std::path::Path::new(n)).map_err(|e| format!("{n}: {e}"))?)
+                let r = rustgis_data::raster::read_path(std::path::Path::new(n)).map_err(|e| format!("{n}: {e}"))?;
+                // What reading the file left out is said, as for a file added to the map.
+                for l in &r.lost {
+                    s.notify(format!("{n}: {l}"), false);
+                }
+                Arc::new(r)
             }
             Err(e) => return Err(e),
         };
