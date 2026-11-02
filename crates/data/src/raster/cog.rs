@@ -989,6 +989,13 @@ pub(crate) mod tests {
         // palette image with no table is drawn grey and says so.
         let (_, stray) = layout_of(&example_with(&Example { size: 512, tile: 256, classes: true, stray: true, ..Example::default() }));
         assert!(stray.palette.is_none() && stray.lost.is_empty(), "{:?}", stray.lost);
+        // The whole-file read of that file, whose overviews are palette images, has it so too.
+        let whole = super::super::read_bytes(
+            "stray.tif",
+            &example_with(&Example { size: 512, tile: 256, classes: true, stray: true, ..Example::default() }),
+        )
+        .unwrap();
+        assert!(matches!(whole.color, super::super::ColorHint::Gray) && whole.lost.is_empty(), "{:?}", whole.lost);
         let (_, bare) = layout_of(&example_with(&Example { size: 512, tile: 256, classes: true, no_table: true, ..Example::default() }));
         assert!(bare.palette.is_none(), "{:?}", bare.palette);
         assert_eq!(bare.lost, ["it is a palette image with no colour table: drawn grey"]);

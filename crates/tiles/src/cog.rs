@@ -1281,12 +1281,31 @@ mod tests {
                 Ok(Parse::Done(layout)) => return Ok((layout, rounds, have.held())),
                 Ok(Parse::Need(a, b)) => {
                     let len = header_read(&have, a, b, rounds).ok_or(rounds)?;
-                    have = have.with(a, part(a, len));
+                    let more = part(a, len);
+                    // An empty read past the end of a file whose length isn't known: read again
+                    // knowing it, as `step` does (once).
+                    have = if more.is_empty() && !have.len_known() { have.with_len(a) } else { have.with(a, more) };
                     rounds += 1;
                 }
                 other => panic!("{other:?}"),
             }
         }
+    }
+
+    /// GDAL's metadata tag pointing past the end of a file whose length isn't known: the empty
+    /// read that comes back gives the length, as in [`step`], and the layout is read with the tag
+    /// left out and said.
+    #[test]
+    fn a_tag_past_the_end_of_a_file_of_unknown_length_is_left_out() {
+        use rustgis_data::raster::cog::{Example, example_with};
+        let mut bad = example_with(&Example { size: 512, tile: 256, classes: true, ..Example::default() });
+        let n = usize::from(u16::from_le_bytes([bad[8], bad[9]]));
+        let len = u32::try_from(bad.len()).unwrap();
+        let entry = (0..n).map(|k| 10 + k * 12).find(|&e| bad[e..e + 2] == [0x80, 0xA4]).unwrap();
+        bad[entry + 8..entry + 12].copy_from_slice(&(len + 1000).to_le_bytes());
+        let (l, ..) = layout_by_ranges(&bad).expect("read");
+        let said: Vec<&String> = l.lost.iter().chain(l.described.iter().flat_map(|d| d.lost.iter())).collect();
+        assert!(said.iter().any(|x| x.contains("band and class names are left out")), "{said:?}");
     }
 
     /// The header alone of a tiled GeoTIFF, `side` pixels a side in 256-pixel tiles, laid out as

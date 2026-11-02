@@ -102,10 +102,11 @@ pub fn sidecar_paths(path: &Path) -> Vec<PathBuf> {
 }
 
 /// The sidecar next to `path`: the first that parses. When one is there but none parses (can't be
-/// looked at, too large, not text, not GDAL's), it names nothing and says why ([`Pam::losing`]);
-/// when the first doesn't and the other does, the other is read and says the first was left out.
+/// looked at, too large, not text, not GDAL's), it names nothing and says why ([`Pam::losing`]):
+/// each one's reason, named, when both are there; when the first doesn't and the other does, the
+/// other is read and says the first was left out.
 pub fn read(path: &Path) -> Option<Pam> {
-    let mut why: Option<(String, String)> = None;
+    let mut whys: Vec<(String, String)> = Vec::new();
     for p in sidecar_paths(path) {
         let read = match std::fs::metadata(&p) {
             // No sidecar by that name (or none can be, the name being too long).
@@ -118,17 +119,20 @@ pub fn read(path: &Path) -> Option<Pam> {
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         match read {
             Ok(mut pam) => {
-                if let Some((skipped, e)) = why {
+                if let Some((skipped, e)) = whys.first() {
                     pam.lost.insert(0, format!("{skipped}: {e}: left out, {name} read instead"));
                 }
                 return Some(pam);
             }
-            Err(e) => {
-                why.get_or_insert((name, e));
-            }
+            Err(e) => whys.push((name, e)),
         }
     }
-    why.map(|(_, e)| Pam::losing(format!("{e}: its statistics, no-data and band names are left out")))
+    let reason = match whys.as_slice() {
+        [] => return None,
+        [(_, e)] => e.clone(),
+        all => all.iter().map(|(name, e)| format!("{name}: {e}")).collect::<Vec<_>>().join("; "),
+    };
+    Some(Pam::losing(format!("{reason}: its statistics, no-data and band names are left out")))
 }
 
 /// Parses a sidecar's text. One that doesn't read as XML, or isn't a PAM document, names nothing:
@@ -637,6 +641,17 @@ mod tests {
                 && other.lost[0].starts_with("x.tif.aux.xml: it isn't UTF-8 text")
                 && other.lost[0].ends_with(": left out, x.aux.xml read instead"),
             "{other:?}"
+        );
+        // Neither reads: both are named, each with its reason.
+        std::fs::write(dir.join("x.aux.xml"), "not xml").unwrap();
+        let both = read(&tif).unwrap();
+        assert!(
+            both.bands.is_empty()
+                && both.lost.len() == 1
+                && both.lost[0].starts_with("x.tif.aux.xml: it isn't UTF-8 text")
+                && both.lost[0].contains("; x.aux.xml: ")
+                && both.lost[0].ends_with(": its statistics, no-data and band names are left out"),
+            "{both:?}"
         );
         // A sidecar that parses first says nothing of the other.
         std::fs::write(dir.join("x.tif.aux.xml"), "<PAMDataset/>").unwrap();

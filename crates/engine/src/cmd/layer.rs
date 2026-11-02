@@ -3119,7 +3119,7 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
     // The box in the file's coordinates: its edges at 32 points each, and each piece halved until
     // it is straight in the file to within a quarter of its pixel. A projected file bends them (a
     // parallel in a conic projection is an arc whose lowest point can fall between two points).
-    let tr = layout.crs.transformer()?;
+    let tr = layout.crs.transformer().map_err(named)?;
     let place = |lon: f64, lat: f64| tr.from_lonlat(rustgis_geom::Coord::new(lon, lat));
     let tolerance = layout.transform.pixel_width.abs().min(layout.transform.pixel_height.abs()) / 4.0;
     let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);

@@ -566,8 +566,8 @@ pub(crate) struct Unpaletted<R> {
     inner: R,
     /// Where each palette image's PhotometricInterpretation value is, and what to show there.
     patches: Vec<(u64, [u8; 2])>,
-    /// Whether the first image (the full one) is a palette image.
-    first_palette: bool,
+    /// Which images (by their place in the file, 0 the full one) are palette images.
+    palette_images: Vec<usize>,
     pos: u64,
 }
 
@@ -577,11 +577,11 @@ const MAX_ENTRIES: u64 = 4096;
 
 /// Where the palette images' PhotometricInterpretation values are, walking the IFD chain
 /// (classic and BigTIFF). A file it can't walk has none: the decoder reports what's wrong.
-fn palette_patches<R: Read + Seek>(r: &mut R) -> (Vec<(u64, [u8; 2])>, bool) {
+fn palette_patches<R: Read + Seek>(r: &mut R) -> (Vec<(u64, [u8; 2])>, Vec<usize>) {
     use std::io::SeekFrom;
     let mut patches = Vec::new();
-    // Whether the first image is one of them.
-    let mut first = false;
+    // Which images they are.
+    let mut images = Vec::new();
     let mut walk = || -> Option<()> {
         let mut head = [0u8; 16];
         r.seek(SeekFrom::Start(0)).ok()?;
@@ -635,7 +635,7 @@ fn palette_patches<R: Read + Seek>(r: &mut R) -> (Vec<(u64, [u8; 2])>, bool) {
                     if u16_(e.get(value_at..)?)? == 3 {
                         let at = ifd + count_len + i as u64 * entry_len + value_at as u64;
                         patches.push((at, if little { [1, 0] } else { [0, 1] }));
-                        first |= k == 0;
+                        images.push(k);
                     }
                 }
             }
@@ -646,7 +646,7 @@ fn palette_patches<R: Read + Seek>(r: &mut R) -> (Vec<(u64, [u8; 2])>, bool) {
         Some(())
     };
     let _ = walk();
-    (patches, first)
+    (patches, images)
 }
 
 /// Any reader, boxed: the decoder is compiled once for every kind of source (a file, bytes in
@@ -666,15 +666,15 @@ impl<R> Unpaletted<R> {
     /// Whether the file's first image (the full one) is a palette image (PhotometricInterpretation
     /// 3), shown as grey.
     pub(crate) fn first_is_palette(&self) -> bool {
-        self.first_palette
+        self.palette_images.contains(&0)
     }
 }
 
 impl<R: Read + Seek> Unpaletted<R> {
     fn new(mut inner: R) -> std::io::Result<Self> {
-        let (patches, first_palette) = palette_patches(&mut inner);
+        let (patches, palette_images) = palette_patches(&mut inner);
         inner.seek(std::io::SeekFrom::Start(0))?;
-        Ok(Unpaletted { inner, patches, first_palette, pos: 0 })
+        Ok(Unpaletted { inner, patches, palette_images, pos: 0 })
     }
 }
 
@@ -1004,7 +1004,7 @@ pub(super) fn read_limited_with_nodata(
     open: Option<Opener<'_>>,
     sidecar_nodata: Option<f64>,
 ) -> Result<Raster> {
-    let palette = !r.patches.is_empty();
+    let palette_images = r.palette_images.clone();
     let limits = {
         let mut l = Limits::default();
         l.decoding_buffer_size = MAX_SAMPLES.saturating_mul(4);
@@ -1093,6 +1093,10 @@ pub(super) fn read_limited_with_nodata(
     }
     // From here on, tags (colour type, planar layout) are those of the chosen image.
     let ct = dec.colortype().map_err(err)?;
+    // Whether it is read as a palette image: it is one, or it is an overview of one. A grey full
+    // image's stray colour table colours nothing, whatever its overviews are (as a COG window
+    // reads it, `first_is_palette`).
+    let palette = palette_images.contains(&image) || (image != 0 && palette_images.contains(&0));
     // JPEG-compressed YCbCr, the only YCbCr read (the colour match below rejects the rest).
     let ycbcr = matches!(ct, ColorType::YCbCr(_)) && dec.find_tag_unsigned::<u16>(Tag::Compression).ok().flatten() == Some(7);
     // A palette image (shown to the decoder as grey) is coloured by its table. One whose table
