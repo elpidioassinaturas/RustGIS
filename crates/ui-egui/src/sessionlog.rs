@@ -248,10 +248,9 @@ mod tests {
                     fonts = true;
                     return;
                 }
+                // The History pane as the app draws it: its two views.
                 let t = crate::theme::Tokens::light();
-                if tabs(app, ui) {
-                    pane(app, ui, &t);
-                }
+                crate::panes::history(app, ui, &t);
             },
             app,
         )
@@ -288,10 +287,11 @@ mod tests {
         h.state_mut().ui.session_log.query = "no such command".into();
         h.run();
         assert!(h.query_by_label("No command matches").is_some());
-        // Tool runs shows the tools run instead.
+        // Tool runs shows the tools run instead (none here).
         h.state_mut().ui.session_log.open = false;
         h.run();
         assert!(h.query_by_label("Filter by command").is_none());
+        assert!(h.query_by_label("Tools you run appear here.").is_some());
     }
 
     /// Past [`SHOWN`] entries the pane lists the newest and says how many match.
@@ -378,13 +378,7 @@ mod tests {
         save(&mut app);
         let (name, text) = got.borrow_mut().take().expect("downloaded");
         assert_eq!(name, "session-log.csv");
-        assert!(
-            text.starts_with(
-                "time_utc,at,command,ok,millis,error,params
-"
-            ),
-            "{text}"
-        );
+        assert!(text.starts_with("time_utc,at,command,ok,millis,error,params\n"), "{text}");
         assert!(text.contains("\"map.new\",true"), "{text}");
         let dropped = |app: &RustGisApp| app.session.notices.iter().any(|n| n.text.contains("dropped past the log's limits"));
         assert!(!dropped(&app), "nothing dropped, nothing said");
