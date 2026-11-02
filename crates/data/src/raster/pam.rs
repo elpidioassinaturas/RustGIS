@@ -151,7 +151,7 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
     // from 1 to `MAX_BANDS`, a band's records after its first, and the scale, offset, units and
     // other band metadata items and colour tables that aren't read, counted.
     let (mut cut, mut beyond, mut odd_bands, mut unscaled, mut units) = (0usize, 0usize, 0usize, 0usize, 0usize);
-    let (mut items, mut tables) = (0usize, 0usize);
+    let (mut items, mut tables, mut odd_nodata) = (0usize, 0usize, 0usize);
     let (mut seen, mut twice) = (std::collections::HashSet::new(), 0usize);
     let mut kept = |t: &str| {
         cut += usize::from(t.chars().nth(MAX_NAME).is_some());
@@ -184,7 +184,11 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
         // A colour table here isn't read (only the file's own is): one with entries is counted.
         tables += usize::from(b.children().any(|n| n.has_tag_name("ColorTable") && n.children().any(|e| e.has_tag_name("Entry"))));
         let description = text_of("Description").filter(|d| !d.is_empty()).map(&mut kept);
-        let nodata = text_of("NoDataValue").and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
+        // A no-data value that isn't a number is counted (NaN, already no-data, and an infinity,
+        // which no pixel equals once read, aren't).
+        let given = text_of("NoDataValue").filter(|v| !v.is_empty());
+        odd_nodata += usize::from(given.is_some_and(|v| v.parse::<f64>().is_err()));
+        let nodata = given.and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
         // Only the default (unnamed) metadata domain holds the statistics.
         let mdi = |key: &str| {
             b.children()
@@ -233,6 +237,9 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
     }
     if tables > 0 {
         pam.lost.push(format!("{tables} band colour table(s) not read: left out (only the file's own is drawn)"));
+    }
+    if odd_nodata > 0 {
+        pam.lost.push(format!("{odd_nodata} no-data value(s) that aren't numbers left out: those pixels are read as values"));
     }
     if beyond > 0 {
         pam.lost.push(format!("{beyond} class name(s) past the first {MAX_CATEGORIES} of a band left out"));
@@ -564,12 +571,14 @@ mod tests {
             <PAMRasterBand band="2"><Scale>1</Scale><Offset>0</Offset><UnitType></UnitType>
             <Metadata domain="x"><MDI key="SOURCE">y</MDI><MDI key="STATISTICS_MEAN">1</MDI></Metadata>
             <ColorTable><Entry c1="0" c2="0" c3="0" c4="255"/></ColorTable><ColorTable/></PAMRasterBand>
-            <PAMRasterBand band="3"><ColorTable/></PAMRasterBand>
+            <PAMRasterBand band="3"><ColorTable/><NoDataValue>-9.999,0</NoDataValue></PAMRasterBand>
+            <PAMRasterBand band="4"><NoDataValue>nan</NoDataValue></PAMRasterBand>
             <PAMRasterBand band="1"><Description>again</Description></PAMRasterBand></PAMDataset>"#,
         )
         .unwrap();
         // A band given again keeps its first record.
-        assert!(odd.bands.len() == 3 && odd.band(1).unwrap().description.is_none(), "{odd:?}");
+        assert!(odd.bands.len() == 4 && odd.band(1).unwrap().description.is_none(), "{odd:?}");
+        assert_eq!((odd.band(3).unwrap().nodata, odd.band(4).unwrap().nodata), (None, None));
         assert_eq!(
             odd.lost,
             [
@@ -579,6 +588,7 @@ mod tests {
                 "1 band unit(s) not read: left out".to_string(),
                 "1 band metadata item(s) not read: left out".to_string(),
                 "1 band colour table(s) not read: left out (only the file's own is drawn)".to_string(),
+                "1 no-data value(s) that aren't numbers left out: those pixels are read as values".to_string(),
             ]
         );
     }
