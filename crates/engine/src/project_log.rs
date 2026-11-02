@@ -413,6 +413,8 @@ impl SessionLog {
             e.at = last.at;
             e.millis = last.millis.saturating_add(e.millis);
             *last = e;
+            // The newest entry changed: a view of the log reads it again.
+            self.changes = self.changes.wrapping_add(1);
             return;
         }
         self.push(e);
