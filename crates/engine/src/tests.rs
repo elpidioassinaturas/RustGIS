@@ -5852,6 +5852,10 @@ fn best_picks_by_area_moved_then_area_over_the_data() {
     assert_eq!(pick_arrangement(&[(f64::NAN, 1.0), (5.0, 5.0)]), Some(1));
     assert_eq!(pick_arrangement(&[(f64::NAN, f64::NAN)]), None);
     assert_eq!(pick_arrangement(&[]), None);
+    // Surrounds left over each other count ten times their overlap in the area moved.
+    use crate::cmd::layout::overlap_area;
+    assert_eq!(overlap_area(&[(0.0, 0.0, 10.0, 10.0), (5.0, 5.0, 10.0, 10.0), (30.0, 0.0, 5.0, 5.0)]), 25.0);
+    assert_eq!(overlap_area(&[(0.0, 0.0, 10.0, 10.0), (10.0, 0.0, 10.0, 10.0)]), 0.0);
 }
 
 /// The legend is placed first (#1379): with data everywhere but the top right, it leaves its own

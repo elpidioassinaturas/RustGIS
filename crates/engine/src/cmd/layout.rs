@@ -762,6 +762,18 @@ pub fn parse_arrangement(v: &Value) -> Result<Homes, String> {
     }
 }
 
+/// The area (mm²) the rectangles cover twice, pair by pair.
+pub(crate) fn overlap_area(rects: &[Rect]) -> f64 {
+    let mut total = 0.0;
+    for (i, a) in rects.iter().enumerate() {
+        for b in &rects[i + 1..] {
+            let (w, h) = ((a.0 + a.2).min(b.0 + b.2) - a.0.max(b.0), (a.1 + a.3).min(b.1 + b.3) - a.1.max(b.1));
+            total += w.max(0.0) * h.max(0.0);
+        }
+    }
+    total
+}
+
 /// Which arrangement `best` takes, from each one's (area moved, area left over the data) in mm², in
 /// the order tried (#1379): of those moving within a square millimetre of the least, the one
 /// leaving the least over the data by more than a square millimetre, the first tried on a tie.
@@ -1858,7 +1870,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         // A legend left out costs the whole frame, more than any move, so an arrangement that keeps
         // it always wins over one that drops it.
         let dropped = if surrounds.iter().any(|x| x.0 == Surround::Legend) && legend_at.is_none() { fw * fh } else { 0.0 };
-        (legend_at, spots, moved, (shifted + dropped, over))
+        // Surrounds left over each other (nowhere clear for one a larger one's corner took) cost ten
+        // times their overlap, so an arrangement that keeps them apart wins.
+        let clash = 10.0 * overlap_area(&spots.iter().map(|(_, r)| *r).collect::<Vec<_>>());
+        (legend_at, spots, moved, (shifted + dropped + clash, over))
     };
     // Each arrangement tried laid out, and one picked ([`pick_arrangement`]): the least area moved
     // off its corners (so a north arrow moved costs less than a legend), then the least left over
