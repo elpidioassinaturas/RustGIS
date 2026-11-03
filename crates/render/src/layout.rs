@@ -61,10 +61,15 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
 /// [`render`] kept as vectors (for a vector PDF): text, shapes, surrounds and flat, north-up map
 /// frames as paths and glyphs, what is pixels by nature (rasters, tiles, pictures, a tilted or
 /// globe frame) as pictures drawn at `dpi`, in the drawing's pixels at that resolution. With it,
-/// the names of the frames drawn as pictures because their vectors passed
+/// the frames (id and name) drawn as pictures because their vectors passed
 /// [`crate::vector::MAX_COST`]. A drawing that overflowed all the same (its surrounds) is
 /// incomplete: [`crate::vector::Drawing::overflowed`] says so.
-pub fn render_drawing(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Option<(crate::vector::Drawing, Vec<String>)> {
+pub fn render_drawing(
+    layout: &Layout,
+    maps: &mut [Map],
+    dpi: f64,
+    info: &PageInfo,
+) -> Option<(crate::vector::Drawing, Vec<(u32, String)>)> {
     let (w, h, k) = page_geometry(layout, dpi);
     let bounds = tiny_skia::IntRect::from_xywh(0, 0, w, h)?;
     let mut pictured = Vec::new();
@@ -84,17 +89,38 @@ pub(crate) fn page_geometry(layout: &Layout, dpi: f64) -> (u32, u32, f64) {
 /// One element on transparency, allocating only its on-page pixel bounds.
 /// Outer `None` means rendering failed; inner `None` means the element is off-page.
 pub(crate) fn render_element(layout: &Layout, id: u32, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Option<Option<(Pixmap, [f64; 4])>> {
+    let Some((bounds, k, mm)) = element_bounds(layout, id, dpi)? else { return Some(None) };
+    let pm = draw_page(layout, maps, info, k, bounds, Some(id), None)?.into_pixmap();
+    Some(Some((pm, mm)))
+}
+
+/// [`render_element`] kept as vectors (see [`render_drawing`]): the element alone, recorded in
+/// the pixels of its on-page bounds at `dpi`, those bounds in millimetres, and the pixels a
+/// millimetre. The frames drawn as pictures (past the budget) go to `pictured`.
+pub(crate) fn record_element(
+    layout: &Layout,
+    id: u32,
+    maps: &mut [Map],
+    dpi: f64,
+    info: &PageInfo,
+    pictured: &mut Vec<(u32, String)>,
+) -> Option<Option<(crate::vector::Drawing, [f64; 4], f64)>> {
+    let Some((bounds, k, mm)) = element_bounds(layout, id, dpi)? else { return Some(None) };
+    let drawing = draw_page(layout, maps, info, k, bounds, Some(id), Some(pictured))?.into_drawing()?;
+    Some(Some((drawing, mm, k)))
+}
+
+/// Element `id`'s on-page bounds in whole pixels at `dpi`, the pixels a millimetre, and the bounds
+/// in millimetres; inner `None` for an element off the page.
+fn element_bounds(layout: &Layout, id: u32, dpi: f64) -> Option<Option<(tiny_skia::IntRect, f64, [f64; 4])>> {
     let e = layout.element(id)?;
     let (w, h, k) = page_geometry(layout, dpi);
     let x0 = (e.x * k).floor().clamp(0.0, f64::from(w));
     let y0 = (e.y * k).floor().clamp(0.0, f64::from(h));
     let x1 = ((e.x + e.w) * k).ceil().clamp(0.0, f64::from(w));
     let y1 = ((e.y + e.h) * k).ceil().clamp(0.0, f64::from(h));
-    let Some(bounds) = tiny_skia::IntRect::from_xywh(x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32) else {
-        return Some(None);
-    };
-    let pm = draw_page(layout, maps, info, k, bounds, Some(id), None)?.into_pixmap();
-    Some(Some((pm, [x0 / k, y0 / k, (x1 - x0) / k, (y1 - y0) / k])))
+    let bounds = tiny_skia::IntRect::from_xywh(x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32);
+    Some(bounds.map(|b| (b, k, [x0 / k, y0 / k, (x1 - x0) / k, (y1 - y0) / k])))
 }
 
 /// Draws the selected region with the full layout's frame and dynamic-text context, recorded
@@ -107,7 +133,7 @@ fn draw_page(
     k: f64,
     bounds: tiny_skia::IntRect,
     element: Option<u32>,
-    mut record: Option<&mut Vec<String>>,
+    mut record: Option<&mut Vec<(u32, String)>>,
 ) -> Option<Canvas> {
     let ppp = k / PT_PER_MM;
     let mut pm =
@@ -178,7 +204,7 @@ fn draw_page(
                 {
                     frame_pm = pixels;
                     if let Some(list) = record.as_deref_mut() {
-                        list.push(e.name.clone());
+                        list.push((e.id, e.name.clone()));
                     }
                 }
                 if let Some(g) = grid {
@@ -1524,6 +1550,7 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
         tiles: Vec<rustgis_map::TileLayer>,
         graticule: bool,
         lock: Option<Vec<(rustgis_map::LabelKey, u8)>>,
+        anchors: std::collections::HashMap<rustgis_map::LabelKey, Coord>,
         map: &'a mut Map,
     }
     impl Drop for Aside<'_> {
@@ -1532,6 +1559,7 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
             self.map.tiles = std::mem::take(&mut self.tiles);
             self.map.graticule = self.graticule;
             self.map.label_lock = self.lock.take();
+            self.map.label_lock_line_anchors = std::mem::take(&mut self.anchors);
         }
     }
     let aside = Aside {
@@ -1539,6 +1567,7 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
         tiles: std::mem::take(&mut map.tiles),
         graticule: std::mem::replace(&mut map.graticule, false),
         lock: map.label_lock.take(),
+        anchors: std::mem::take(&mut map.label_lock_line_anchors),
         map,
     };
     let pm = crate::render(&mut *aside.map, &view)?.pixmap;
@@ -1986,7 +2015,7 @@ mod tests {
         let result = render_drawing(&layout, &mut maps, 72.0, &PageInfo::default());
         TEST_MAX_COST.with(|l| l.set(None));
         let (drawing, pictured) = result.unwrap();
-        assert_eq!(pictured, ["World"]);
+        assert_eq!(pictured.iter().map(|p| p.1.as_str()).collect::<Vec<_>>(), ["World"]);
         let (_, _, items) = drawing.finish();
         assert!(items.iter().any(|i| matches!(i, Item::Image(_))), "the frame as a picture");
     }
