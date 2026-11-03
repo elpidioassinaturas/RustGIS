@@ -663,7 +663,7 @@ pub(crate) fn free_spot(home: Rect, area: (f64, f64, f64, f64), others: &[Rect],
         return None;
     }
     let mut gx = vec![x0, x1, (x0 + x1) / 2.0];
-    let mut gy = vec![y0, y1];
+    let mut gy = vec![y0, y1, (y0 + y1) / 2.0];
     for o in others {
         gx.extend([o.0, o.0 + o.2]);
         gy.extend([o.1, o.1 + o.3]);
