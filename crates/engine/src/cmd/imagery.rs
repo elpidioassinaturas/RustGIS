@@ -838,6 +838,40 @@ fn process(s: &mut Session, p: &Value) -> CmdResult {
     }
 }
 
+/// Most inputs a mosaic takes.
+const MAX_MOSAIC_INPUTS: usize = 10_000;
+
+/// A mosaic input's name, trimmed.
+fn mosaic_name(v: &Value) -> Result<&str, &'static str> {
+    v.as_str().map(str::trim).filter(|n| !n.is_empty()).ok_or("each input is a raster layer's name or a file path")
+}
+
+/// The raster layer a mosaic input names, with its cells in memory. An error means the input isn't
+/// one.
+fn mosaic_layer(s: &Session, v: &Value) -> Result<Arc<Raster>, String> {
+    raster_named(s, mosaic_name(v)?)
+}
+
+/// Whether [`raster_mosaic`] reads a mosaic input from a file: it isn't a [`mosaic_layer`] and it
+/// is a raster file name. The command and [`mosaic_stays_in_project`] both ask this, so the
+/// permission check can't fall out of step with what the command reads.
+fn mosaic_reads_file(s: &Session, v: &Value) -> bool {
+    mosaic_layer(s, v).is_err() && mosaic_name(v).is_ok_and(rustgis_data::raster::is_raster_name)
+}
+
+/// Whether a mosaic stays in the project: no input is read from a file ([`mosaic_reads_file`]),
+/// and nothing else names a place (no `path`, nor a name that looks like one). Any other input
+/// that isn't a layer (a typo, a vector layer, a tile still downloading) fails in the command with
+/// "no raster layer", touching no file, as does a call over the input limit, which is refused
+/// before any lookup. So do absent, empty or non-list `inputs`: the command rejects them before
+/// reading anything, with its own error. A layer named like a path (`~dem`, `a/../b`) counts as a
+/// place: that errs towards asking for `files`.
+pub(crate) fn mosaic_stays_in_project(s: &Session, p: &Value) -> bool {
+    let inputs =
+        p.get("inputs").and_then(Value::as_array).is_none_or(|a| a.len() > MAX_MOSAIC_INPUTS || !a.iter().any(|v| mosaic_reads_file(s, v)));
+    inputs && !super::items::names_place(p, super::plugins::PLACE_KEYS, 0)
+}
+
 /// Merges rasters on one grid (tiles of an elevation model, say) into one, keeping their
 /// coordinate system and cell size; where they overlap, the first input with data wins.
 fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
@@ -845,8 +879,8 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
     if inputs.len() < 2 {
         return Err("a mosaic needs two or more rasters".into());
     }
-    if inputs.len() > 10_000 {
-        return Err("a mosaic takes at most 10000 inputs".into());
+    if inputs.len() > MAX_MOSAIC_INPUTS {
+        return Err(format!("a mosaic takes at most {MAX_MOSAIC_INPUTS} inputs"));
     }
     let max = rustgis_data::raster::MAX_SAMPLES as i64;
     let mut rs: Vec<Arc<Raster>> = Vec::with_capacity(inputs.len());
@@ -854,15 +888,16 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
     let mut places: Vec<(i64, i64)> = Vec::with_capacity(inputs.len());
     let (mut c0, mut r0, mut c1, mut r1) = (0i64, 0i64, 0i64, 0i64);
     // Each input is checked as it is read, so a mismatched or oversized set fails before the
-    // rest are loaded.
+    // rest are loaded. What reading a file left out is said once they are all read.
+    let mut lost: Vec<(String, String)> = Vec::new();
     for v in inputs {
-        let n = v.as_str().map(str::trim).filter(|n| !n.is_empty()).ok_or("each input is a raster layer's name or a file path")?;
-        let r = match raster_named(s, n) {
-            Ok(r) => r,
-            Err(_) if rustgis_data::raster::is_raster_name(n) => {
-                Arc::new(rustgis_data::raster::read_path(std::path::Path::new(n)).map_err(|e| format!("{n}: {e}"))?)
-            }
-            Err(e) => return Err(e),
+        let n = mosaic_name(v)?;
+        let r = if mosaic_reads_file(s, v) {
+            let r = rustgis_data::raster::read_path(std::path::Path::new(n)).map_err(|e| format!("{n}: {e}"))?;
+            lost.extend(r.lost.iter().map(|l| (n.to_string(), l.clone())));
+            Arc::new(r)
+        } else {
+            mosaic_layer(s, v)?
         };
         // An overview would quietly coarsen the whole mosaic.
         if let Some((fw, fh)) = r.overview {
@@ -896,6 +931,7 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
         places.push((pc, pr));
         rs.push(r);
     }
+    super::raster::say_losses(s, lost);
     let first = rs.first().ok_or("a mosaic needs two or more rasters")?;
     let (w, h) = (c1 - c0, r1 - r0);
     if w <= 0 || h <= 0 {
@@ -938,7 +974,21 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
         first.data_type.clone(),
     )
     .map_err(|e| e.to_string())?;
-    out.bands.iter_mut().zip(&first.bands).for_each(|(o, i)| o.name = i.name.clone());
+    // Band and class names are the first input's, as its cells are where they overlap; an input
+    // naming its bands or classes otherwise is said.
+    out.bands.iter_mut().zip(&first.bands).for_each(|(o, i)| {
+        o.name = i.name.clone();
+        o.classes = i.classes.clone();
+    });
+    let other: Vec<&str> = rs
+        .iter()
+        .skip(1)
+        .filter(|r| r.bands.iter().zip(&first.bands).any(|(b, f)| b.name != f.name || b.classes != f.classes))
+        .map(|r| r.name.as_str())
+        .collect();
+    if !other.is_empty() {
+        s.notify(format!("{}: band or class names other than {}'s, which the mosaic keeps", other.join(", "), first.name), false);
+    }
     let path = ps(p, "path").map(str::trim).filter(|p| !p.is_empty()).map(str::to_string);
     if let Some(path) = &path {
         let bytes = rustgis_data::raster::geotiff::write(&out, 0).map_err(|e| e.to_string())?;
