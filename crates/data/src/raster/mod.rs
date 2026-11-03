@@ -512,8 +512,8 @@ impl Raster {
     }
 
     /// Applies what GDAL's `.aux.xml` sidecar says about the bands: their descriptions name them,
-    /// their category names name their classes, its no-data value applies when the file has none,
-    /// and its statistics stand in for those of a reduced overview (the whole band's, where the
+    /// their category names name their classes, its no-data value applies when the file has none
+    /// (the file's own is kept, as GDAL keeps it, and one it gives otherwise said), and its statistics stand in for those of a reduced overview (the whole band's, where the
     /// overview's only approximate them). What it left out is said as `from`'s ("its GDAL
     /// metadata", "its .aux.xml sidecar").
     pub fn apply_pam(&mut self, pam: &pam::Pam, from: &str) {
@@ -548,6 +548,23 @@ impl Raster {
                     "{from}: its bands give different no-data values ({}{more}): none is applied, so those pixels are read as values",
                     values.join(", ")
                 ));
+            }
+        } else if let Some(own) = self.nodata {
+            // The file's own no-data value is kept; a sidecar's other one for its bands is said.
+            let mut other: Vec<f64> = pam
+                .bands
+                .iter()
+                .filter(|b| (1..=self.bands.len()).contains(&b.band))
+                .filter_map(|b| b.nodata)
+                .filter(|v| !(v == &own || (v.is_nan() && own.is_nan())))
+                .collect();
+            other.sort_by(f64::total_cmp);
+            other.dedup();
+            if !other.is_empty() {
+                let values: Vec<String> = other.iter().take(4).map(|v| v.to_string()).collect();
+                let more = if other.len() > 4 { ", …" } else { "" };
+                self.lost
+                    .push(format!("{from}: its no-data value ({}{more}) isn't the file's own ({own}), which is kept", values.join(", ")));
             }
         }
         let nd = self.nodata.map(|v| v as f32);
@@ -1243,6 +1260,17 @@ pub(crate) mod tests {
         same.nodata = None;
         same.apply_pam(&both(0.0, 0.0), pam::SIDECAR);
         assert!(same.nodata == Some(0.0) && same.lost.is_empty(), "{:?}", same.lost);
+        // A file with its own no-data value keeps it; a sidecar giving another says so, one giving
+        // the same says nothing.
+        let mut own = small();
+        own.nodata = Some(-9999.0);
+        own.apply_pam(&both(0.0, -9999.0), pam::SIDECAR);
+        assert_eq!(own.nodata, Some(-9999.0));
+        assert_eq!(own.lost, ["its .aux.xml sidecar: its no-data value (0) isn't the file's own (-9999), which is kept"]);
+        let mut agreed = small();
+        agreed.nodata = Some(-9999.0);
+        agreed.apply_pam(&both(-9999.0, -9999.0), pam::SIDECAR);
+        assert!(agreed.lost.is_empty(), "{:?}", agreed.lost);
         assert_eq!(zero.lost, ["its .aux.xml sidecar: a no-data value for 1 band(s) it doesn't have (it has 1) left out"]);
         // What the document left out is said as the sidecar's, not the GDAL tag's.
         assert!(
