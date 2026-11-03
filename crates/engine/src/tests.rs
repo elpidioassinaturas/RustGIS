@@ -10402,6 +10402,8 @@ fn shapefile_by_its_shp_address() {
     files.push(("/spa/sem_dbf.dbf".into(), page.clone()));
     files.extend(parts.iter().filter(|(e, _)| *e == "shp").map(|(e, b)| (format!("/spa/tk.{e}?token=1"), b.clone())));
     files.push(("/spa/tk.dbf?token=1".into(), page.clone()));
+    files.extend(parts.iter().filter(|(e, _)| *e == "shp").map(|(e, b)| (format!("/bad/tk.{e}?token=1"), b.clone())));
+    files.push(("/bad/tk.dbf?token=1".into(), b"not a dbf".to_vec()));
     files.push(("/spa/pagina.shp".into(), page.clone()));
     files.extend(parts.iter().filter(|(e, _)| *e == "shp").map(|(e, b)| (format!("/s3/sem_dbf.{e}"), b.clone())));
     let shp = parts.iter().find(|(e, _)| *e == "shp").unwrap().1.clone();
@@ -10475,6 +10477,9 @@ fn shapefile_by_its_shp_address() {
     // A keyed address is named once, without its token.
     let e = s.run("layer.addUrl", &json!({"url": format!("{base}/spa/tk.shp?token=1")})).unwrap_err();
     assert!(e.matches("/spa/tk.dbf").count() == 1 && e.contains("a web page answered") && !e.contains("token=1"), "{e}");
+    // One whose parts download but don't read is named without its token too.
+    let e = s.run("layer.addUrl", &json!({"url": format!("{base}/bad/tk.shp?token=1")})).unwrap_err();
+    assert!(e.contains("/bad/tk.shp") && !e.contains("token=1"), "{e}");
     // Its .dbf answered so is refused, saying what the 403 may mean.
     let e = s.run("layer.addUrl", &json!({"url": format!("{base}/s3/sem_dbf.shp")})).unwrap_err();
     assert!(e.contains("/s3/sem_dbf.dbf") && e.contains("S3 also answers this for a file that isn't there"), "{e}");

@@ -3001,8 +3001,13 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // Errors about the address itself name it already.
-        let named = |e: String| if e.starts_with(url) { e } else { format!("{url}: {e}") };
+        // Errors name the address without its keys; those about the address itself name it already.
+        let shown = crate::sources::redact(url);
+        let named = |e: String| match e.strip_prefix(url) {
+            Some(rest) => format!("{shown}{rest}"),
+            None if e.starts_with(&shown) => e,
+            None => format!("{shown}: {e}"),
+        };
         // An address without a file name may be a GeoTIFF too: its first bytes are read to see,
         // and anything that doesn't answer as one is downloaded whole, as before.
         let unnamed = !tiff && is_unnamed_url(url);
