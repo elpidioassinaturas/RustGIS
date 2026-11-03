@@ -692,6 +692,9 @@ pub struct Session {
     /// While a plugin command runs again for its downloads: what each one asked for, and what
     /// adding it answered, for its `layer.addUrl` to answer once.
     pub(crate) rerun_landed: Vec<(serde_json::Value, CmdResult, cmd::plugins::fetch::Added)>,
+    /// While plugin commands whose downloads are in run again: the downloads they wait for, still
+    /// theirs though the commands are out of `plugin_retries` until each has run.
+    pub(crate) rerun_requests: Vec<u64>,
     /// How many times the plugin command running now has been run again for its fetches.
     pub(crate) retry_tries: u32,
     /// Set for [`Session::guarded`] by a command whose failure is no news (a plugin command
@@ -940,6 +943,7 @@ impl Session {
             next_request: 0,
             call_requests: None,
             rerun_landed: Vec::new(),
+            rerun_requests: Vec::new(),
             retry_tries: 0,
             quiet_failure: false,
             #[cfg(not(target_arch = "wasm32"))]

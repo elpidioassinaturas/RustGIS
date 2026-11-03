@@ -568,7 +568,7 @@ impl Session {
     /// another waiting run still waits for.
     fn give_up_requests(&mut self, gone: &Retry, keeps: &[u64]) {
         for n in &gone.requests {
-            if !keeps.contains(n) && !self.plugin_retries.iter().any(|r| r.requests.contains(n)) {
+            if !keeps.contains(n) && !self.rerun_requests.contains(n) && !self.plugin_retries.iter().any(|r| r.requests.contains(n)) {
                 // Not yet taken by the front end: not downloaded at all, so nothing will land it.
                 let queued = self.url_requests.iter().any(|q| q["request"].as_u64() == Some(*n));
                 self.url_waits.give_up(*n, !queued);
@@ -597,6 +597,9 @@ impl Session {
             r.urls.iter().all(|u| c.landed(u)) && r.requests.iter().all(|n| self.url_waits.landed.iter().any(|(m, ..)| m == n))
         });
         self.plugin_retries = waiting;
+        // A command run before them may drop or replace one waiting for the same download: still
+        // theirs, not given up.
+        self.rerun_requests = ready.iter().flat_map(|r| r.requests.iter().copied()).collect();
         let ran = ready
             .into_iter()
             .map(|r| {
@@ -619,6 +622,7 @@ impl Session {
                 (r.id, res)
             })
             .collect();
+        self.rerun_requests.clear();
         // Downloads no command waits for any more (it was run again, replaced or dropped).
         let waiting = std::mem::take(&mut self.plugin_retries);
         self.url_waits.keep_only(&waiting);
@@ -815,6 +819,16 @@ mod tests {
         assert!(s.take_url_requests().is_empty(), "under way");
         s.request_url(&json!({"url": "https://x.org/g.csv", "request": 952})).unwrap();
         assert_eq!(s.take_url_requests(), [json!({"url": "https://x.org/g.csv", "request": 952, "whole": true})]);
+        // A run replaced gives up the download only it waits for, unless a command running again
+        // in the same poll (out of the list until it has run) waits for it too.
+        for (n, ready) in [(953, false), (954, true)] {
+            let h = json!({"url": format!("https://x.org/{n}.csv")});
+            s.retry_plugin("plugin:eng-share-g/f", &p, Vec::new(), vec![(n, h.clone())]).unwrap();
+            s.rerun_requests = if ready { vec![n] } else { Vec::new() };
+            s.retry_plugin("plugin:eng-share-g/f", &p, Vec::new(), Vec::new()).unwrap();
+            s.rerun_requests.clear();
+            assert_eq!(s.url_waits.given_up(n, &h), !ready, "{n}");
+        }
         for id in ["eng-share-a", "eng-share-b"] {
             rustgis_plugins::unload(id);
         }
