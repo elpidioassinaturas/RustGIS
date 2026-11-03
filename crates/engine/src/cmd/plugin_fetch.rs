@@ -797,6 +797,14 @@ mod tests {
         s.url_waits.land(951, Ok(json!({"layer": l7})), Added::default());
         s.request_url(&json!({"url": "https://x.org/e.csv"})).unwrap();
         assert!(s.take_url_requests().is_empty(), "made already");
+        // Handed back by the front end that took it (the browser found it must be downloaded
+        // whole): queued again, whole. Asked again by its address alone, it is that one.
+        let g = json!({"url": "https://x.org/g.csv"});
+        s.retry_plugin("plugin:eng-share-f/f", &p, Vec::new(), vec![(952, g.clone())]).unwrap();
+        s.request_url(&g).unwrap();
+        assert!(s.take_url_requests().is_empty(), "under way");
+        s.request_url(&json!({"url": "https://x.org/g.csv", "request": 952})).unwrap();
+        assert_eq!(s.take_url_requests(), [json!({"url": "https://x.org/g.csv", "request": 952, "whole": true})]);
         for id in ["eng-share-a", "eng-share-b"] {
             rustgis_plugins::unload(id);
         }

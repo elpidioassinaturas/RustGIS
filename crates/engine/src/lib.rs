@@ -1019,12 +1019,19 @@ impl Session {
                 self.next_request
             }
         };
-        if waiting.is_none() && !self.url_waits.has(number) {
+        // A number the front end took and hands back (in the browser, a file it found must be
+        // downloaded whole after all) isn't being downloaded: queued again, whole, so it isn't
+        // probed again.
+        let handed_back = p.get("request").and_then(serde_json::Value::as_u64).is_some_and(|n| self.url_waits.holds(n, &asked));
+        if waiting.is_none() && (handed_back || !self.url_waits.has(number)) {
             if self.url_requests.len() >= MAX_URL_REQUESTS {
                 return Err(format!("{url}: {MAX_URL_REQUESTS} downloads are already waiting; try again when they have landed"));
             }
             let mut q = asked.clone();
             q["request"] = serde_json::json!(number);
+            if handed_back {
+                q["whole"] = serde_json::json!(true);
+            }
             self.url_requests.push(q);
         }
         if let Some(asked_now) = self.call_requests.as_mut() {
