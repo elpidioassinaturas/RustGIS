@@ -365,25 +365,25 @@ const MAX_EXPIRED: usize = 1024;
 
 /// Whether `params` (a front end's `layer.addUrl` or `layer.addDownload`) are what `asked`
 /// asked for: the same address (spaces around it set aside), and every other key it gave that
-/// the front end passes on, with the same value. The front end passes on only what adding the
-/// bytes takes (no `whole`, `cog` or `dates`; `zoom`, `service` and `coverage` only when true)
-/// and sets `zoom` itself, so a key it left out, and `zoom`, don't count; what the app adds of
-/// its own (`id`) doesn't either. Another import of the same address (other columns, another
-/// name) isn't it.
+/// the front end passes on, with the same value. What the front end leaves out or sets itself,
+/// and what the app adds of its own (`id`), don't count. Another import of the same address
+/// (other columns, another name) isn't it.
 fn asked_by(asked: &Value, params: &Value) -> bool {
     let Some(o) = asked.as_object() else { return false };
-    // What the front end leaves out of a download's own `layer.addUrl`: keys adding the bytes
-    // doesn't take, flags it passes on only when true, and empty values.
-    let dropped = |k: &str, v: &Value| {
-        matches!(k, "whole" | "cog" | "dates" | "start" | "end" | "unit" | "interval")
-            || (matches!(k, "service" | "coverage") && v != &json!(true))
-            || v.is_null()
-            || v.as_str().is_some_and(|s| s.trim().is_empty())
+    // What the front end passes on to a download's own `layer.addUrl` (the desktop app's
+    // `ui.addUrl`): only these come back, and must come back the same. Any other key (`whole`,
+    // `cog`, `dates`, a `name` that isn't text…) it leaves out, and `zoom` it sets itself.
+    let passed_on = |k: &str, v: &Value| match k {
+        "name" | "layer" | "crs" => v.as_str().is_some_and(|s| !s.trim().is_empty()),
+        "x" | "y" | "wkt" | "delimiter" | "paperSpace" | "stream" | "as" => !v.is_null(),
+        "service" | "coverage" => v == &json!(true),
+        "bounds" => v.is_array(),
+        _ => false,
     };
-    o.iter().filter(|(k, _)| !matches!(k.as_str(), "request" | "zoom")).all(|(k, v)| match (k.as_str(), params.get(k)) {
-        ("url", _) => v.as_str().map(str::trim) == params["url"].as_str().map(str::trim),
-        (_, Some(got)) => got == v,
-        (_, None) => dropped(k, v),
+    o.iter().all(|(k, v)| match k.as_str() {
+        "url" => v.as_str().map(str::trim) == params["url"].as_str().map(str::trim),
+        _ if passed_on(k, v) => params.get(k) == Some(v),
+        _ => true,
     })
 }
 
@@ -704,9 +704,10 @@ mod tests {
         s.retry_plugin("plugin:eng-share-a/f", &p, Vec::new(), vec![(905, json!({"url": "https://x.org/f.csv", "x": "lon"}))]).unwrap();
         assert!(!s.url_waits.holds(905, &json!({"url": "https://x.org/f.csv", "x": "lng", "id": 3})));
         assert!(s.url_waits.holds(905, &json!({"url": "https://x.org/f.csv", "x": "lon", "id": 3, "cog": true})));
-        // What the front end doesn't pass on (`whole`, `zoom: false`), or sets itself (`zoom`),
-        // doesn't stop a landing.
-        let asked = json!({"url": "https://x.org/g.csv", "x": "lon", "whole": true, "zoom": false, "dates": ["2020"]});
+        // What the front end doesn't pass on (`whole`, `zoom: false`, a `name` that isn't text,
+        // `bounds` that aren't a list), or sets itself (`zoom`), doesn't stop a landing.
+        let asked =
+            json!({"url": "https://x.org/g.csv", "x": "lon", "whole": true, "zoom": false, "dates": ["2020"], "name": 5, "bounds": "x"});
         s.retry_plugin("plugin:eng-share-a/f", &p, Vec::new(), vec![(906, asked)]).unwrap();
         assert!(s.url_waits.holds(906, &json!({"url": "https://x.org/g.csv", "x": "lon", "id": 4})));
         assert!(s.url_waits.holds(906, &json!({"url": "https://x.org/g.csv", "x": "lon", "zoom": true})));
