@@ -920,10 +920,11 @@ fn export(s: &mut Session, p: &Value) -> CmdResult {
         let (values, verb) = values_were(written);
         note.push_str(&format!("; {values} in it {verb} rounded to 32-bit floats when {} was read", r.name));
     }
-    // The bands the writer leaves out (it writes `band`, or a colour raster's colour bands) are
-    // said, names and all.
+    // The bands the writer leaves out (it writes `band`, or a colour raster's colour bands, which
+    // `band` doesn't change) are said, names and all.
     if bands.len() < r.bands.len() {
-        note.push_str(&format!("; {} of its {} bands written (give \"band\" for another)", bands.len(), r.bands.len()));
+        let which = if bands == [bi] { "give \"band\" for another" } else { "its colour bands" };
+        note.push_str(&format!("; {} of its {} bands written ({which})", bands.len(), r.bands.len()));
     }
     // The file keeps the first written band's class names only (as dataset `CLASS_` items).
     let unnamed: Vec<String> =
