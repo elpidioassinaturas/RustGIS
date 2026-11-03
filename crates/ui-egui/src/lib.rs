@@ -1180,6 +1180,7 @@ impl RustGisApp {
                 Err(why) => {
                     // Notices are shown as written, and the language is set only in `start`.
                     i18n::set_current(self.chosen_lang());
+                    self.session.layout_favourite = Value::String("classic".into());
                     self.session.notify(
                         crate::i18n::fmt(
                             "The saved favourite arrangement of publication layouts can't be used ({why}), so \"classic\" is used.",

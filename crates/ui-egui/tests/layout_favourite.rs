@@ -34,9 +34,11 @@ fn the_favourite_arrangement_is_saved_and_restored() {
         .with_services(Services { load_pref: Some(Box::new(|k| (k == KEY).then(|| "null".to_string()))), ..Services::default() });
     assert_eq!(restored.session.layout_favourite, json!("classic"));
     assert!(!restored.session.notices.iter().any(|n| n.text.contains("favourite arrangement")));
-    // One no longer valid is passed over: the default stays.
+    // One no longer valid is passed over, said, and classic used, whatever the session held.
     for bad in ["\"tidy\"", "not json", "{\"locator\": \"top-left\"}"] {
-        let restored = RustGisApp::new(Session::new(Project::default()))
+        let mut session = Session::new(Project::default());
+        session.layout_favourite = json!("mirrored");
+        let restored = RustGisApp::new(session)
             .with_services(Services { load_pref: Some(Box::new(move |k| (k == KEY).then(|| bad.to_string()))), ..Services::default() });
         assert_eq!(restored.session.layout_favourite, json!("classic"), "{bad}");
         // ... and says so.
