@@ -19950,6 +19950,26 @@ fn dem_tiles_mosaic_clip_by_polygon_share_a_stretch_and_report_overviews() {
     assert_eq!((m.value(0, 0, 0), m.value(0, 9, 9), m.value(0, 19, 9)), (Some(100.0), Some(909.0), None));
     let written = rustgis_data::raster::read_path(std::path::Path::new(&path)).unwrap();
     assert_eq!((written.width, written.height, written.crs), (20, 10, utm));
+    // An input naming its band otherwise than the first is said; the mosaic keeps the first's.
+    let over = s.map().layer_by_name("over").unwrap().id;
+    let named = |s: &mut Session, band: &str| {
+        let data = s.map_mut().layer_mut(over).unwrap().raster.as_mut().unwrap().data.as_mut().unwrap();
+        std::sync::Arc::make_mut(data).bands[0].name = band.into();
+    };
+    let band_of = |s: &Session, layer: &str| {
+        s.map().layer_by_name(layer).unwrap().raster.as_ref().unwrap().data.as_ref().unwrap().bands[0].name.clone()
+    };
+    let (west_band, over_band) = (band_of(&s, "west"), band_of(&s, "over"));
+    named(&mut s, "Altitude");
+    let mark = s.notice_mark();
+    let v = s.run("raster.mosaic", &json!({"inputs": ["west", "over"], "name": "renamed"})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|n| n == "over: band or class names other than west's, which the mosaic keeps"), "{said:?}");
+    assert_eq!(raster(&s, &v).bands[0].name, west_band);
+    let mark = s.notice_mark();
+    s.run("raster.mosaic", &json!({"inputs": ["west", "east"], "name": "same"})).unwrap();
+    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("band or class names")));
+    named(&mut s, &over_band);
     // A file given by path says what its reading left out (here a sidecar's scale); one read whole
     // says nothing.
     let file = dir.join("west.tif");
