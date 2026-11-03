@@ -5810,6 +5810,32 @@ fn publication_arrangements_and_the_favourite() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `best` never wins by leaving the legend out (#1379): on sheets ever smaller, once classic's
+/// locator leaves the legend under it no room, the default still keeps a legend, in an arrangement
+/// that has room for it.
+#[test]
+fn best_keeps_the_legend_an_arrangement_would_leave_out() {
+    let mut s = world();
+    let piaui = json!([-46.8, -11.6, -38.5, -2.2]);
+    let dropped = "the frame leaves the legend no room beside the locator";
+    let mut checked = false;
+    for n in 1..80 {
+        let sources: Vec<String> = (0..n).map(|i| format!("Source {i}: a line long enough to take a line of its own")).collect();
+        let p = json!({"profile": "a4-landscape", "extent": piaui, "sources": sources, "arrangement": "classic"});
+        let Ok(r) = s.run("layout.publication", &p) else { break };
+        if !r["warnings"].to_string().contains(dropped) {
+            continue;
+        }
+        let best = s.run("layout.publication", &json!({"profile": "a4-landscape", "extent": piaui, "sources": sources})).unwrap();
+        let l = s.project.layouts.last().unwrap();
+        assert!(l.elements.iter().any(|e| e.name == "Legend Box"), "{n} lines: {best}");
+        assert!(!best["warnings"].to_string().contains(dropped), "{n} lines: {best}");
+        checked = true;
+        break;
+    }
+    assert!(checked, "no sheet left classic's legend out");
+}
+
 /// The legend is placed first (#1379): with data everywhere but the top right, it leaves its own
 /// covered corner for the free quarter, the north arrow's, and the two don't overlap.
 #[test]

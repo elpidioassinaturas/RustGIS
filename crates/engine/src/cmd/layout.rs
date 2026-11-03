@@ -683,15 +683,17 @@ pub(crate) fn free_spot(home: Rect, area: (f64, f64, f64, f64), others: &[Rect],
             r.0 >= o.0 + o.2 + CLEAR_MM || o.0 >= r.0 + r.2 + CLEAR_MM || r.1 >= o.1 + o.3 + CLEAR_MM || o.1 >= r.1 + r.3 + CLEAR_MM
         })
     };
-    let (xs, ys) = (along(x0, xmax, w, &gx), along(y0, ymax, h, &gy));
+    // Each place along an axis with how far it is off the nearest line, worked out once per axis.
+    let xs: Vec<(f64, f64)> = along(x0, xmax, w, &gx).into_iter().map(|x| (x, off(x, w, &gx))).collect();
+    let ys: Vec<(f64, f64)> = along(y0, ymax, h, &gy).into_iter().map(|y| (y, off(y, h, &gy))).collect();
     let mut best: Option<(f64, Rect)> = None;
-    for &y in &ys {
-        for &x in &xs {
+    for &(y, off_y) in &ys {
+        for &(x, off_x) in &xs {
             let r = (x, y, w, h);
             if !clear(r) {
                 continue;
             }
-            let cost = 1000.0 * covered(r) + 0.05 * (x - hx).hypot(y - hy) + 0.25 * (off(x, w, &gx) + off(y, h, &gy));
+            let cost = 1000.0 * covered(r) + 0.05 * (x - hx).hypot(y - hy) + 0.25 * (off_x + off_y);
             if best.is_none_or(|(c, _)| cost < c - 1e-9) {
                 best = Some((cost, r));
             }
@@ -1841,7 +1843,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         moved.sort_by_key(|m| spots.iter().position(|(kind, _)| named(*kind) == *m));
         let shifted: f64 = spots.iter().filter(|(kind, _)| moved.contains(&named(*kind))).map(|(_, r)| r.2 * r.3).sum();
         let over: f64 = spots.iter().map(|(_, r)| covered(*r) * r.2 * r.3).sum();
-        (legend_at, spots, moved, (shifted, over))
+        // A legend left out costs the whole frame, more than any move, so an arrangement that keeps
+        // it always wins over one that drops it.
+        let dropped = if surrounds.iter().any(|x| x.0 == Surround::Legend) && legend_at.is_none() { fw * fh } else { 0.0 };
+        (legend_at, spots, moved, (shifted + dropped, over))
     };
     // Each arrangement tried laid out: the one moving the least off its corners wins (by area, so a
     // north arrow moved costs less than a legend), then the one leaving the least over the drawing,

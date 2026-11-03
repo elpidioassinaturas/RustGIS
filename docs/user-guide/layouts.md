@@ -33,7 +33,7 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     with labels on every edge of a sheet.
     The north arrow, the legend (sized to what it lists), the scale bar with the numeric scale
     under it and the locator sit in the frame's corners, clear of the graticule's
-    labels. The **arrangement** says which corner is each one's. `classic` (the first favourite) puts the
+    labels. The **arrangement** says which corner is each one's. `classic` (the default favourite) puts the
     locator at the top left, the arrow at the top right, the legend at the bottom left and the
     scale at the bottom right. `mirrored` swaps left and right, `legendRight` swaps the legend and
     the scale, and `legendTop` swaps the legend and the locator. `"arrangement"` also takes a
@@ -50,10 +50,11 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     (by area, so moving the north arrow costs less than moving the legend), then the one leaving
     the least over the data; the favourite wins a tie. `"favourite"` always takes the favourite.
     The answer names the arrangement taken (`"arrangement"`) and the surrounds
-    moved off their corners (`"moved"`). Where nowhere is freer, a surround stays, and one warning
-    names those left on the data, to move by hand if that matters (data under every corner alike,
-    such as a context layer filling the frame, isn't worth a warning); two that overlap (a frame
-    too small) are said too.
+    moved off their corners (`"moved"`). Where nowhere is freer, a surround stays. One warning
+    names those left with more than a quarter of their area on the data while a corner of their
+    size had at least a quarter less, to move by hand if that matters (data under every corner
+    alike, such as a context layer filling the frame, isn't worth a warning); two that overlap (a
+    frame too small) are said too.
     The top visible raster gets a colorbar beneath the vector legend if its renderer has a colour
     scale; RGB and untinted hillshade do not. If the legend or colorbar cannot fit, the result
     warns about clipping or resizing. A streamed layer still loading gets a fixed-size legend

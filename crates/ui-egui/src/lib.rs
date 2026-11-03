@@ -2059,7 +2059,6 @@ impl RustGisApp {
         });
     }
 
-    /// Keeps the default raster style with the preferences when it changed.
     /// Saves the favourite arrangement of publication layouts when `layout.arrangement` changed it.
     fn save_layout_favourite(&mut self) {
         if self.session.layout_favourite == self.ui.layout_favourite_saved {
@@ -2071,6 +2070,7 @@ impl RustGisApp {
         }
     }
 
+    /// Keeps the default raster style with the preferences when it changed.
     fn save_raster_defaults(&mut self) {
         if self.session.raster_defaults == self.ui.raster_defaults_saved {
             return;
