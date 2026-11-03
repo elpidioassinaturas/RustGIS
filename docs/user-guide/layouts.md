@@ -52,7 +52,7 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     The answer names the arrangement taken (`"arrangement"`) and the surrounds
     moved off their corners (`"moved"`). Where nowhere is freer, a surround stays. One warning
     names those left with more than a quarter of their area on the data while a corner of their
-    size had at least a quarter less, to move by hand if that matters (data under every corner
+    size had more than a quarter less, to move by hand if that matters (data under every corner
     alike, such as a context layer filling the frame, isn't worth a warning); two that overlap (a
     frame too small) are said too.
     The top visible raster gets a colorbar beneath the vector legend if its renderer has a colour
