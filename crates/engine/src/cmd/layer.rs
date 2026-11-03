@@ -2751,9 +2751,9 @@ fn read_delimited(
 
 /// The file name for data downloaded from `url`: its last path segment when that has an extension
 /// RustGIS reads, else `<segment or "data">.<ext>` with the extension its contents suggest
-/// (an error when they suggest none). The name is cut to 120 characters, keeping its extension; a
-/// `.shp` address whose download is a zip of its parts is named `<stem>.zip`. JPEG 2000 named or
-/// recognised by its contents is refused where GDAL can't run (the browser).
+/// (an error when they suggest none). The name is cut to 120 characters, keeping an extension
+/// shorter than 60; a `.shp` address whose download is a zip of its parts is named `<stem>.zip`.
+/// JPEG 2000 named or recognised by its contents is refused where GDAL can't run (the browser).
 pub fn url_file_name(url: &str, bytes: &[u8]) -> Result<String, String> {
     let path = url.split(['?', '#']).next().unwrap_or(url);
     let path = path.split_once("://").map_or(path, |(_, rest)| rest.split_once('/').map_or("", |(_, p)| p));
@@ -2761,7 +2761,7 @@ pub fn url_file_name(url: &str, bytes: &[u8]) -> Result<String, String> {
         path.rsplit('/').find(|p| !p.is_empty()).unwrap_or("").chars().filter(|c| !c.is_control() && !matches!(c, '\\' | ':')).collect();
     let raw_ext = Path::new(&full).extension().and_then(|e| e.to_str());
     let ext = raw_ext.map(str::to_ascii_lowercase).unwrap_or_default();
-    // At most 120 characters, keeping the extension (a long `.shp` name is still one).
+    // At most 120 characters, keeping an extension shorter than 60 (a long `.shp` name is still one).
     let last: String = match raw_ext {
         Some(e) if full.chars().count() > 120 && e.chars().count() < 60 => {
             format!("{}.{e}", full.chars().take(119 - e.chars().count()).collect::<String>())
