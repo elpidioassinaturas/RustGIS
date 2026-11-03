@@ -1174,14 +1174,20 @@ impl RustGisApp {
                 .map_err(|e| e.to_string())
                 .and_then(|v| rustgis_engine::cmd::layout::parse_arrangement(&v).map(|_| v));
             match read {
+                // A saved null is the default, named.
+                Ok(v) if v.is_null() => self.session.layout_favourite = Value::String("classic".into()),
                 Ok(v) => self.session.layout_favourite = v,
-                Err(why) => self.session.notify(
-                    crate::i18n::fmt(
-                        "The saved favourite arrangement of publication layouts can't be used ({why}), so \"classic\" is used.",
-                        &[("why", &why)],
-                    ),
-                    false,
-                ),
+                Err(why) => {
+                    // Notices are shown as written, and the language is set only in `start`.
+                    i18n::set_current(self.chosen_lang());
+                    self.session.notify(
+                        crate::i18n::fmt(
+                            "The saved favourite arrangement of publication layouts can't be used ({why}), so \"classic\" is used.",
+                            &[("why", &why)],
+                        ),
+                        false,
+                    );
+                }
             }
         }
         self.ui.layout_favourite_saved = self.session.layout_favourite.clone();

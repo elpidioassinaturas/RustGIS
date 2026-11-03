@@ -29,6 +29,11 @@ fn the_favourite_arrangement_is_saved_and_restored() {
         // A valid one says nothing.
         assert!(!restored.session.notices.iter().any(|n| n.text.contains("favourite arrangement")));
     }
+    // A saved null is the default, named, with nothing to say.
+    let restored = RustGisApp::new(Session::new(Project::default()))
+        .with_services(Services { load_pref: Some(Box::new(|k| (k == KEY).then(|| "null".to_string()))), ..Services::default() });
+    assert_eq!(restored.session.layout_favourite, json!("classic"));
+    assert!(!restored.session.notices.iter().any(|n| n.text.contains("favourite arrangement")));
     // One no longer valid is passed over: the default stays.
     for bad in ["\"tidy\"", "not json", "{\"locator\": \"top-left\"}"] {
         let restored = RustGisApp::new(Session::new(Project::default()))
