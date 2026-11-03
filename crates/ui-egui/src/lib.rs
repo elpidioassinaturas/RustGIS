@@ -3608,6 +3608,7 @@ impl RustGisApp {
                     p["whole"] = json!(true);
                     if let Err(e) = connectiontree::run_add_url(self, p.clone(), origin.as_deref()) {
                         self.session.request_failed(&p, &e);
+                        self.session.notify(if e.starts_with(&url) { e } else { format!("{url}: {e}") }, true);
                     }
                 }
                 Err(e) => {

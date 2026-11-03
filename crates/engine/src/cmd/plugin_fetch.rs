@@ -317,14 +317,15 @@ pub(crate) struct Added {
     layers: Vec<(u32, Option<String>)>,
     /// The tile layers (a GeoTIFF read in place), by address.
     tiles: Vec<String>,
-    /// The project's map it was added to (its place in the list), which may not be the one shown
-    /// when the command runs again.
-    pub(crate) map: usize,
+    /// The map it was added to (its instance id, which stays with it as maps are removed or
+    /// moved), which may not be the one shown when the command runs again.
+    pub(crate) map: u64,
 }
 
 impl Added {
-    /// What `answer` (adding a download) added to `map`, the project's map at `at`, just after.
-    pub(crate) fn of(at: usize, map: &crate::map::Map, answer: &CmdResult) -> Added {
+    /// What `answer` (adding a download) added to `map`, just after.
+    pub(crate) fn of(map: &crate::map::Map, answer: &CmdResult) -> Added {
+        let at = map.instance_id();
         let Ok(v) = answer else { return Added { map: at, ..Added::default() } };
         let ids = v.get("layers").and_then(Value::as_array).into_iter().flatten().chain(v.get("layer"));
         let mut layers: Vec<(u32, Option<String>)> = Vec::new();
@@ -640,7 +641,7 @@ mod tests {
         let asked = json!({"url": "https://x.org/a.geojson"});
         let id = s.map().layers[0].id;
         let answer: CmdResult = Ok(json!({"layer": id}));
-        let added = Added::of(s.project.active_map, s.map(), &answer);
+        let added = Added::of(s.map(), &answer);
         assert!(added.layers.len() == 1 && !added.gone(s.map()), "{added:?}");
         s.rerun_landed = vec![(asked.clone(), answer.clone(), added)];
         assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": id}));
@@ -654,23 +655,32 @@ mod tests {
         // A download that failed added nothing: its own error, whichever map is shown.
         let failed: CmdResult = Err("https://x.org/a.geojson: 404 Not Found".into());
         let landed = s.rerun_landed.clone();
-        s.rerun_landed = vec![(asked.clone(), failed.clone(), Added::of(0, &s.project.maps[0], &failed))];
+        s.rerun_landed = vec![(asked.clone(), failed.clone(), Added::of(&s.project.maps[0], &failed))];
         assert_eq!(s.run("layer.addUrl", &asked).unwrap_err(), "https://x.org/a.geojson: 404 Not Found");
         s.rerun_landed = landed;
+        // A map put before it: still known as the map it was added to, not by its place.
+        s.project.maps.insert(0, crate::map::Map::new("Before"));
+        s.project.active_map = 1;
+        assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": id}));
+        s.project.active_map = 0;
+        let e = s.run("layer.addUrl", &asked).unwrap_err();
+        assert!(e.contains(&format!("added to map '{first}', not the map shown now")), "{e}");
+        s.project.maps.remove(0);
         s.run("map.activate", &json!({"name": first})).unwrap();
         assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": id}));
         // Renamed while the command waited: still it.
         s.run("layer.rename", &json!({"layer": id, "name": "Renamed"})).unwrap();
         assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": id}));
         // Another layer has its id now.
-        let other = Added { layers: vec![(id, Some("https://x.org/other.geojson".into()))], ..Added::default() };
+        let other =
+            Added { layers: vec![(id, Some("https://x.org/other.geojson".into()))], map: s.map().instance_id(), ..Added::default() };
         s.rerun_landed = vec![(asked.clone(), answer, other)];
         let e = s.run("layer.addUrl", &asked).unwrap_err();
         assert!(e.contains("taken away (undone)"), "{e}");
         // A tile layer (a GeoTIFF read in place answers its place in the list), then taken away.
         let tiles = json!({"url": "https://x.org/{z}/{x}/{y}.png", "name": "T"});
         let answer = s.run("map.addTiles", &tiles);
-        let added = Added::of(s.project.active_map, s.map(), &answer);
+        let added = Added::of(s.map(), &answer);
         assert!(added.tiles.len() == 1 && !added.gone(s.map()), "{added:?}");
         s.rerun_landed = vec![(asked.clone(), answer.clone(), added)];
         let at = answer.as_ref().unwrap()["index"].clone();

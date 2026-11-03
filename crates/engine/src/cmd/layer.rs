@@ -2818,8 +2818,13 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
         s.request_only = true;
         // Added to another map than the one shown now: the command's next steps would act on this
         // one, where the layer's id isn't it. (A failed download added nothing: its error stands.)
-        if added.added_any() && added.map != s.project.active_map {
-            let on = s.project.maps.get(added.map).map_or_else(|| "a map since taken away".to_string(), |m| format!("map '{}'", m.name));
+        if added.added_any() && added.map != s.map().instance_id() {
+            let on = s
+                .project
+                .maps
+                .iter()
+                .find(|m| m.instance_id() == added.map)
+                .map_or_else(|| "a map since taken away".to_string(), |m| format!("map '{}'", m.name));
             return Err(format!("{url}: its download was added to {on}, not the map shown now: show that map and run the command again"));
         }
         // What it added (a layer, a tile layer) may have been undone while the command waited,
