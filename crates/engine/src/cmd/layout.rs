@@ -762,6 +762,18 @@ pub fn parse_arrangement(v: &Value) -> Result<Homes, String> {
     }
 }
 
+/// Which arrangement `best` takes, from each one's (area moved, area left over the data) in mm², in
+/// the order tried (#1379): of those moving within a square millimetre of the least, the one
+/// leaving the least over the data by more than a square millimetre, the first tried on a tie.
+/// Both bands are measured from the best value, so they don't add up across tries. `None` when no
+/// score is a number.
+pub(crate) fn pick_arrangement(scores: &[(f64, f64)]) -> Option<usize> {
+    let least = scores.iter().map(|s| s.0).fold(f64::INFINITY, f64::min);
+    let near: Vec<usize> = (0..scores.len()).filter(|&i| scores[i].0 <= least + 1.0).collect();
+    let fewest = near.iter().map(|&i| scores[i].1).fold(f64::INFINITY, f64::min);
+    near.into_iter().find(|&i| scores[i].1 <= fewest + 1.0)
+}
+
 /// The name of an arrangement, or `"custom"` for one given corner by corner.
 fn arrangement_name(homes: Homes) -> &'static str {
     ARRANGEMENTS.iter().find(|(_, h)| *h == homes).map_or("custom", |(n, _)| n)
@@ -1848,20 +1860,13 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         let dropped = if surrounds.iter().any(|x| x.0 == Surround::Legend) && legend_at.is_none() { fw * fh } else { 0.0 };
         (legend_at, spots, moved, (shifted + dropped, over))
     };
-    // Each arrangement tried laid out: the one moving the least off its corners wins (by area, so a
-    // north arrow moved costs less than a legend), then the one leaving the least over the drawing,
-    // each by more than a square millimetre; the first tried (the favourite) on a tie. Every
-    // arrangement fills the same four corners, so it is what goes where that differs. A single
-    // arrangement asked for is the one laid out.
-    let mut chosen: Option<(Homes, Laid)> = None;
-    for homes in &tries {
-        let laid = lay_out(*homes);
-        let (shifted, over) = laid.3;
-        let better = chosen.as_ref().is_none_or(|(_, (.., (s0, o0)))| shifted < s0 - 1.0 || (shifted <= s0 + 1.0 && over < o0 - 1.0));
-        if better {
-            chosen = Some((*homes, laid));
-        }
-    }
+    // Each arrangement tried laid out, and one picked ([`pick_arrangement`]): the least area moved
+    // off its corners (so a north arrow moved costs less than a legend), then the least left over
+    // the drawing, the first tried (the favourite) on a tie. Every arrangement fills the same four
+    // corners, so it is what goes where that differs. A single arrangement asked for is the one
+    // laid out.
+    let mut laid: Vec<(Homes, Laid)> = tries.iter().map(|h| (*h, lay_out(*h))).collect();
+    let chosen = pick_arrangement(&laid.iter().map(|(_, l)| l.3).collect::<Vec<_>>()).map(|i| laid.swap_remove(i));
     let (homes, (legend_at, spots, moved, _)) = chosen.unwrap_or_else(|| (ARRANGEMENTS[0].1, lay_out(ARRANGEMENTS[0].1)));
     if surrounds.iter().any(|x| x.0 == Surround::Legend) && legend_at.is_none() {
         warnings.push(

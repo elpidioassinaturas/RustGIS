@@ -5836,6 +5836,24 @@ fn best_keeps_the_legend_an_arrangement_would_leave_out() {
     assert!(checked, "no sheet left classic's legend out");
 }
 
+/// How `best` picks among the arrangements tried (#1379): the least area moved, within a square
+/// millimetre, then the least left over the data, within one, the first tried on a tie; the bands
+/// are measured from the best value, so they don't add up from one try to the next.
+#[test]
+fn best_picks_by_area_moved_then_area_over_the_data() {
+    use crate::cmd::layout::pick_arrangement;
+    // Each moves under a millimetre more than the one before, and leaves less over the data: the
+    // third moves 1.8 mm² more than the first, out of the band, so the second wins.
+    assert_eq!(pick_arrangement(&[(10.0, 50.0), (10.9, 40.0), (11.8, 30.0)]), Some(1));
+    // Clearly less moved wins whatever it leaves over the data.
+    assert_eq!(pick_arrangement(&[(100.0, 0.0), (20.0, 90.0)]), Some(1));
+    // Ties go to the first tried (the favourite), within a millimetre either way.
+    assert_eq!(pick_arrangement(&[(10.0, 20.0), (10.5, 19.5), (9.8, 20.4)]), Some(0));
+    assert_eq!(pick_arrangement(&[(f64::NAN, 1.0), (5.0, 5.0)]), Some(1));
+    assert_eq!(pick_arrangement(&[(f64::NAN, f64::NAN)]), None);
+    assert_eq!(pick_arrangement(&[]), None);
+}
+
 /// The legend is placed first (#1379): with data everywhere but the top right, it leaves its own
 /// covered corner for the free quarter, the north arrow's, and the two don't overlap.
 #[test]
