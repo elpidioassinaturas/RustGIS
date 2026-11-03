@@ -4,11 +4,13 @@
 //! bad features are skipped and counted in [`ReadReport`].
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod cityjson;
 pub mod color;
 mod dbf;
 pub mod diagnostics;
 pub mod dirs;
 pub mod dxf;
+pub mod esripbf;
 pub mod export;
 pub mod filegdb;
 mod footprint;
@@ -23,6 +25,7 @@ pub mod landxml;
 pub mod lidar;
 pub mod mapinfo;
 pub mod mbtiles;
+pub mod memory;
 pub mod ogc;
 pub mod osm;
 pub mod photo;

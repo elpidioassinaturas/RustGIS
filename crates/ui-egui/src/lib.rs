@@ -4017,6 +4017,8 @@ impl RustGisApp {
         {
             self.ui.dark = system == egui::Theme::Dark;
         }
+        widgets::let_go_on_panel_press(ctx);
+        widgets::note_escape(ctx);
         if self.applied_dark != Some(self.ui.dark) {
             let t = if self.ui.dark { theme::Tokens::dark() } else { theme::Tokens::light() };
             theme::apply(ctx, &t);
@@ -4261,6 +4263,7 @@ mod record_tests {
             "layer.addUrl",
             "layer.addDownload",
             "layer.addDataBytes",
+            "layer.addDataText",
             "portal.add",
             "graphics.add",
             "layout.addElement",
