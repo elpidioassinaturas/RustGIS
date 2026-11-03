@@ -354,6 +354,12 @@ impl Added {
         now
     }
 
+    /// Whether it holds anything: a failed download, or one whose answer names nothing, added
+    /// nothing.
+    pub(crate) fn added_any(&self) -> bool {
+        !(self.layers.is_empty() && self.tiles.is_empty())
+    }
+
     /// Whether any of it is no longer in `map` (or another layer has its id).
     pub(crate) fn gone(&self, map: &crate::map::Map) -> bool {
         self.layers.iter().any(|(id, source)| map.layer(*id).is_none_or(|l| l.dataset.source != *source))
@@ -645,6 +651,12 @@ mod tests {
         let e = s.run("layer.addUrl", &asked).unwrap_err();
         let first = s.project.maps[0].name.clone();
         assert!(e.contains(&format!("added to map '{first}', not the map shown now")), "{e}");
+        // A download that failed added nothing: its own error, whichever map is shown.
+        let failed: CmdResult = Err("https://x.org/a.geojson: 404 Not Found".into());
+        let landed = s.rerun_landed.clone();
+        s.rerun_landed = vec![(asked.clone(), failed.clone(), Added::of(0, &s.project.maps[0], &failed))];
+        assert_eq!(s.run("layer.addUrl", &asked).unwrap_err(), "https://x.org/a.geojson: 404 Not Found");
+        s.rerun_landed = landed;
         s.run("map.activate", &json!({"name": first})).unwrap();
         assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": id}));
         // Renamed while the command waited: still it.
