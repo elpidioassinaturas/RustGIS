@@ -1176,7 +1176,10 @@ impl RustGisApp {
             match read {
                 Ok(v) => self.session.layout_favourite = v,
                 Err(why) => self.session.notify(
-                    format!("the saved favourite arrangement of publication layouts can't be used ({why}), so \"classic\" is used"),
+                    crate::i18n::fmt(
+                        "The saved favourite arrangement of publication layouts can't be used ({why}), so \"classic\" is used.",
+                        &[("why", &why)],
+                    ),
                     false,
                 ),
             }

@@ -5796,8 +5796,8 @@ fn publication_arrangements_and_the_favourite() {
     }
     assert_eq!((s.project.layouts.len(), s.layout_favourite.as_str()), (layouts, Some("mirrored")));
     // Best: data filling the top right, where the favourite (mirrored) has the locator at home;
-    // classic, whose small north arrow is at home there, keeps every surround in its corner, so it
-    // wins. "favourite" keeps mirrored, the locator off the data.
+    // classic has its small north arrow there and moves only that, less than mirrored's locator, so
+    // it wins. "favourite" keeps mirrored, the locator off the data.
     let mut s = Session::new(Project::default());
     s.run("layer.addData", &json!({"path": square("corner", (5.0, 5.0, 30.0, 30.0))})).unwrap();
     s.run("layout.arrangement", &json!({"favourite": "mirrored"})).unwrap();
