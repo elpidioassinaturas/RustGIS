@@ -1151,7 +1151,7 @@ impl Session {
                 && !res.as_ref().is_ok_and(|v| v.get("pending").and_then(Value::as_bool) == Some(true))
             {
                 // What it added, to tell on the command's next run whether it is still there.
-                let added = cmd::plugins::fetch::Added::of(self.map(), &res);
+                let added = cmd::plugins::fetch::Added::of(self.project.active_map, self.map(), &res);
                 self.url_waits.land(n, res.clone(), added);
             }
             // A plugin's command waiting for its fetches answers `pending` and runs again when they

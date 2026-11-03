@@ -2816,6 +2816,12 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
         && let Some((_, answer, added)) = s.rerun_landed.iter().find(|(asked, ..)| super::plugins::fetch::same_request(asked, p))
     {
         s.request_only = true;
+        // Added to another map than the one shown now: the command's next steps would act on this
+        // one, where the layer's id isn't it.
+        if added.map != s.project.active_map {
+            let on = s.project.maps.get(added.map).map_or_else(|| "a map since taken away".to_string(), |m| format!("map '{}'", m.name));
+            return Err(format!("{url}: its download was added to {on}, not the map shown now: show that map and run the command again"));
+        }
         // What it added (a layer, a tile layer) may have been undone while the command waited,
         // and a layer added since may have its id: said, not named.
         let missing = answer

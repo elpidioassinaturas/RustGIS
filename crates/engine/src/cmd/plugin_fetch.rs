@@ -317,12 +317,15 @@ pub(crate) struct Added {
     layers: Vec<(u32, Option<String>)>,
     /// The tile layers (a GeoTIFF read in place), by address.
     tiles: Vec<String>,
+    /// The project's map it was added to (its place in the list), which may not be the one shown
+    /// when the command runs again.
+    pub(crate) map: usize,
 }
 
 impl Added {
-    /// What `answer` (adding a download) added to `map`, just after.
-    pub(crate) fn of(map: &crate::map::Map, answer: &CmdResult) -> Added {
-        let Ok(v) = answer else { return Added::default() };
+    /// What `answer` (adding a download) added to `map`, the project's map at `at`, just after.
+    pub(crate) fn of(at: usize, map: &crate::map::Map, answer: &CmdResult) -> Added {
+        let Ok(v) = answer else { return Added { map: at, ..Added::default() } };
         let ids = v.get("layers").and_then(Value::as_array).into_iter().flatten().chain(v.get("layer"));
         let mut layers: Vec<(u32, Option<String>)> = Vec::new();
         for id in ids.filter_map(Value::as_u64).filter_map(|id| u32::try_from(id).ok()) {
@@ -335,7 +338,7 @@ impl Added {
             (None, Some(i)) => usize::try_from(i).ok().and_then(|i| map.tiles.get(i)).map(|t| t.url.clone()).into_iter().collect(),
             _ => Vec::new(),
         };
-        Added { layers, tiles }
+        Added { layers, tiles, map: at }
     }
 
     /// `answer` as it stands in `map` now: a tile layer's place in the list, which moves as others
@@ -631,22 +634,31 @@ mod tests {
         let asked = json!({"url": "https://x.org/a.geojson"});
         let id = s.map().layers[0].id;
         let answer: CmdResult = Ok(json!({"layer": id}));
-        let added = Added::of(s.map(), &answer);
+        let added = Added::of(s.project.active_map, s.map(), &answer);
         assert!(added.layers.len() == 1 && !added.gone(s.map()), "{added:?}");
         s.rerun_landed = vec![(asked.clone(), answer.clone(), added)];
+        assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": id}));
+        // Another map shown while the command waited: it would act on that one, and says so;
+        // shown again, it is answered.
+        s.run("map.new", &json!({"name": "Second"})).unwrap();
+        s.run("map.activate", &json!({"name": "Second"})).unwrap();
+        let e = s.run("layer.addUrl", &asked).unwrap_err();
+        let first = s.project.maps[0].name.clone();
+        assert!(e.contains(&format!("added to map '{first}', not the map shown now")), "{e}");
+        s.run("map.activate", &json!({"name": first})).unwrap();
         assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": id}));
         // Renamed while the command waited: still it.
         s.run("layer.rename", &json!({"layer": id, "name": "Renamed"})).unwrap();
         assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": id}));
         // Another layer has its id now.
-        let other = Added { layers: vec![(id, Some("https://x.org/other.geojson".into()))], tiles: Vec::new() };
+        let other = Added { layers: vec![(id, Some("https://x.org/other.geojson".into()))], ..Added::default() };
         s.rerun_landed = vec![(asked.clone(), answer, other)];
         let e = s.run("layer.addUrl", &asked).unwrap_err();
         assert!(e.contains("taken away (undone)"), "{e}");
         // A tile layer (a GeoTIFF read in place answers its place in the list), then taken away.
         let tiles = json!({"url": "https://x.org/{z}/{x}/{y}.png", "name": "T"});
         let answer = s.run("map.addTiles", &tiles);
-        let added = Added::of(s.map(), &answer);
+        let added = Added::of(s.project.active_map, s.map(), &answer);
         assert!(added.tiles.len() == 1 && !added.gone(s.map()), "{added:?}");
         s.rerun_landed = vec![(asked.clone(), answer.clone(), added)];
         let at = answer.as_ref().unwrap()["index"].clone();
