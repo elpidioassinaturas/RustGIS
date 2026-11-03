@@ -505,6 +505,21 @@ impl Session {
         if tries >= MAX_RETRIES {
             return Err(format!("{id}: gave up after fetching {MAX_RETRIES} times"));
         }
+        // Past the given-up downloads that can still land, no more are asked for: each must be
+        // remembered until it lands, to be refused then. Those not yet taken by the front end
+        // aren't downloaded. It is refused before any wait changes, so the command's earlier run
+        // and the others still wait.
+        let fresh = |s: &Self, n: &u64| !s.url_waits.has(*n) && !s.plugin_retries.iter().any(|r| r.requests.contains(n));
+        if requests.iter().any(|(n, _)| fresh(self, n)) && self.url_waits.given_up_full() {
+            for (n, _) in &requests {
+                if fresh(self, n) {
+                    self.url_requests.retain(|q| q["request"].as_u64() != Some(*n));
+                }
+            }
+            return Err(format!(
+                "{id}: {MAX_EXPIRED} downloads plugin commands stopped waiting for are still under way; run it again once they have come in"
+            ));
+        }
         // One waiting run per command: the latest call's, which replaces an earlier one. The
         // downloads a replaced or dropped run alone waited for are given up, so they aren't added
         // with no command to go on with them.
@@ -528,20 +543,6 @@ impl Session {
         }
         if !requests.is_empty() {
             answer["downloading"] = json!(requests.iter().map(|(_, q)| q["url"].clone()).collect::<Vec<_>>());
-        }
-        // Past the given-up downloads that can still land, no more are asked for: each must be
-        // remembered until it lands, to be refused then. Those not yet taken by the front end
-        // aren't downloaded.
-        let fresh = |s: &Self, n: &u64| !s.url_waits.has(*n) && !s.plugin_retries.iter().any(|r| r.requests.contains(n));
-        if requests.iter().any(|(n, _)| fresh(self, n)) && self.url_waits.given_up_full() {
-            for (n, _) in &requests {
-                if fresh(self, n) {
-                    self.url_requests.retain(|q| q["request"].as_u64() != Some(*n));
-                }
-            }
-            return Err(format!(
-                "{id}: {MAX_EXPIRED} downloads plugin commands stopped waiting for are still under way; run it again once they have come in"
-            ));
         }
         let numbers = requests.iter().map(|(n, _)| *n).collect();
         for (n, asked) in requests {
@@ -731,14 +732,19 @@ mod tests {
         // forgotten, which frees a place.
         let first = json!({"url": "https://x.org/out.csv"});
         s.url_waits.expired.clear();
+        s.retry_plugin("plugin:eng-share-c/f", &p, Vec::new(), vec![(959, json!({"url": "https://x.org/old.csv"}))]).unwrap();
         s.url_waits.remember_given_up(800, first.clone());
         for n in 1..MAX_EXPIRED as u64 {
             s.url_waits.remember_given_up(10_000 + n, json!({"url": format!("https://x.org/{n}.csv")}));
         }
+        let mark = s.notice_mark();
         s.url_requests.push(json!({"url": "https://x.org/new.csv", "request": 960}));
         let e = s.retry_plugin("plugin:eng-share-c/f", &p, Vec::new(), vec![(960, json!({"url": "https://x.org/new.csv"}))]).unwrap_err();
         assert!(e.contains("still under way"), "{e}");
         assert!(s.take_url_requests().is_empty(), "not downloaded");
+        // Refused, it changed nothing: the command's earlier run still waits.
+        assert!(s.plugin_retries.iter().any(|r| r.id == "plugin:eng-share-c/f" && r.requests == [959]));
+        assert!(s.url_waits.has(959) && !s.notices_since(mark).iter().any(|n| n.text.contains("replaced by this one")));
         // One another command already waits for starts no download: it is shared, not refused.
         let shared = json!({"url": "https://x.org/shared.csv"});
         s.url_waits.wait(961, shared.clone());
