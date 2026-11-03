@@ -201,7 +201,7 @@ pub fn read_bytes(file_name: &str, bytes: &[u8]) -> Result<(Dataset, ReadReport)
         // A TopoJSON topology named .json: its first object, saying what else it holds.
         "json" if crate::topojson::looks_like_topojson(text()?) => return first_layer(file_name, bytes),
         "geojson" | "json" => read_geojson(text()?, &name)?,
-        "csv" | "tsv" | "txt" => read_csv(text()?, &name)?,
+        "csv" | "tsv" | "txt" => read_csv_bytes(file_name, bytes, &name)?,
         // A MIF without its .mid (an upload of the one file): no attributes.
         "mif" => crate::mapinfo::read_bytes(bytes, None, &name)?,
         // Picked or dropped with its .dbf, a Shapefile comes zipped (`gather_shapefiles`).
@@ -261,7 +261,8 @@ pub fn read_path(path: &Path) -> Result<(Dataset, ReadReport)> {
         }
         "csv" | "tsv" | "txt" => {
             check_size(path)?;
-            read_csv(&std::fs::read_to_string(path)?, &name)?
+            let leaf = path.file_name().and_then(|n| n.to_str()).unwrap_or("layer.csv");
+            read_csv_bytes(leaf, &std::fs::read(path)?, &name)?
         }
         "shp" => {
             check_size(path)?;
@@ -1314,6 +1315,41 @@ pub fn csv_columns(text: &str, delimiter: Option<u8>) -> Result<Columns> {
     Ok(Columns { delimiter: Some(delimiter), ..columns_of(&headers, &rows) })
 }
 
+/// The text of a delimited file from its bytes, and the note to report when it wasn't UTF-8.
+/// UTF-8 is read as it is. A UTF-16 byte-order mark (Excel's "Unicode text") is read as UTF-16.
+/// Other bytes are read as Windows-1252, the code page most Latin-1 files use: Latin-1's
+/// characters, plus quotes and dashes in 0x80–0x9F. Many public sources still publish CSV in it
+/// (Brazil's DATASUS, INEP and TSE among them). Bytes with a NUL in them aren't text.
+pub fn delimited_text<'a>(file_name: &str, bytes: &'a [u8]) -> Result<(std::borrow::Cow<'a, str>, Option<String>)> {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return Ok((text.into(), None));
+    }
+    if let Some((enc, _)) = encoding_rs::Encoding::for_bom(bytes).filter(|(enc, _)| *enc != encoding_rs::UTF_8) {
+        let (text, malformed) = enc.decode_with_bom_removal(bytes);
+        let mut note = format!("{file_name} was read as {} text", enc.name());
+        if malformed {
+            note.push_str("; bytes that weren't valid in it became the replacement character (U+FFFD)");
+        }
+        return Ok((text, Some(note)));
+    }
+    if bytes.contains(&0) {
+        return Err(DataError::Format(format!("{file_name} is not text")));
+    }
+    // A UTF-8 byte-order mark before a stray Latin-1 byte (Excel's "CSV UTF-8" edited elsewhere)
+    // would become "ï»¿" at the start of the first header.
+    let (text, _) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes));
+    Ok((text, Some(format!("{file_name} isn't UTF-8 text: it was read as Windows-1252 (Latin-1)"))))
+}
+
+/// Reads delimited text from its bytes, in the encoding [`delimited_text`] finds, saying which
+/// when it isn't UTF-8.
+fn read_csv_bytes(file_name: &str, bytes: &[u8], name: &str) -> Result<(Dataset, ReadReport)> {
+    let (text, note) = delimited_text(file_name, bytes)?;
+    let (ds, mut report) = read_csv(&text, name)?;
+    report.messages.extend(note);
+    Ok((ds, report))
+}
+
 /// Reads CSV; columns named like longitude/latitude become point geometry.
 pub fn read_csv(text: &str, name: &str) -> Result<(Dataset, ReadReport)> {
     read_csv_with(text, name, &CsvOptions::default())
@@ -2165,26 +2201,104 @@ pub fn shapefile_names_note(fields: &[Field], target: &str) -> Option<String> {
     // A name read from a file, like a path or layer name, can hold anything, at any length: the
     // notice stays one line, reads in the order it is written, and copies no more of a field name
     // than it shows.
-    let flat = |c: char| {
-        let reorders = matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
-        if c.is_control() || reorders || matches!(c, '\u{2028}' | '\u{2029}') { ' ' } else { c }
-    };
-    let shown = |name: &str| {
-        let mut out = String::new();
-        for c in name.chars().map(flat) {
-            if out.len() + c.len_utf8() > 40 {
-                out.push('…');
-                break;
-            }
-            out.push(c);
-        }
-        out
-    };
-    let target: String = target.chars().map(flat).collect();
-    let listed: Vec<String> = renamed.iter().take(5).map(|(old, new)| format!("'{}' → '{}'", shown(old), shown(new))).collect();
+    let target: String = target.chars().map(dbf_notice_char).collect();
+    let listed: Vec<String> =
+        renamed.iter().take(5).map(|(old, new)| format!("'{}' → '{}'", dbf_notice_name(old), dbf_notice_name(new))).collect();
     let more = if renamed.len() > 5 { format!(" and {} more", renamed.len() - 5) } else { String::new() };
     let count = if renamed.len() == 1 { "1 field name was".to_string() } else { format!("{} field names were", renamed.len()) };
     Some(format!("{target}: {count} changed to fit a Shapefile (10 bytes at most, unique ignoring case): {}{more}", listed.join(", ")))
+}
+
+/// Keeps a diagnostic on one line and prevents field names from reordering its text.
+fn dbf_notice_char(c: char) -> char {
+    let reorders = matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+    if c.is_control() || reorders || matches!(c, '\u{2028}' | '\u{2029}') { ' ' } else { c }
+}
+
+/// A bounded field name for a dBase notice, with controls and directional marks flattened.
+fn dbf_notice_name(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars().map(dbf_notice_char) {
+        if out.len() + c.len_utf8() > 40 {
+            out.push('…');
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Value losses counted independently for each dBase field, using only rows the writer keeps.
+#[derive(Clone, Copy, Default)]
+struct DbfLosses {
+    text: usize,
+    empty: usize,
+    rounded: usize,
+}
+
+/// Counts text cut to 254 bytes, non-null values left empty, and numbers rounded to the field's
+/// precision, in rows whose geometry is written. Each kind has one notice naming the affected
+/// source fields (first five, bounded and flattened); a clean dataset gives none.
+pub fn shapefile_values_notes(ds: &Dataset, target: &str) -> Vec<String> {
+    let decimals: Vec<_> =
+        ds.fields.iter().enumerate().map(|(k, f)| if f.ty == FieldType::Double { dbf_decimals(ds, k) } else { 0 }).collect();
+    let mut counts = vec![DbfLosses::default(); ds.fields.len()];
+    // Geometry is examined once per row, regardless of how many attribute fields it has.
+    for row in ds.features.iter().filter(|f| shapefile_keeps(f.geometry.as_ref(), ds.geometry_type)) {
+        for (k, (field, value)) in ds.fields.iter().zip(&row.attrs).enumerate() {
+            if value.is_null() {
+                continue;
+            }
+            let Some(loss) = counts.get_mut(k) else { continue };
+            match field.ty {
+                FieldType::Text if value.to_string().len() > 254 => loss.text += 1,
+                FieldType::Integer | FieldType::Double => {
+                    let d = decimals.get(k).copied().unwrap_or(0);
+                    match dbf_number(value, field.ty, d) {
+                        None => loss.empty += 1,
+                        Some(number) => {
+                            // The writer uses fixed decimal text, including ties rounded to even.
+                            let written = format!("{number:.d$}").parse::<f64>().ok();
+                            if written != value.as_f64() {
+                                loss.rounded += 1;
+                            }
+                        }
+                    }
+                }
+                FieldType::Boolean if dbf_boolean(value).is_none() => loss.empty += 1,
+                _ => {}
+            }
+        }
+    }
+    let selected = |count: fn(&DbfLosses) -> usize| {
+        let total: usize = counts.iter().map(count).sum();
+        let fields: Vec<_> = ds.fields.iter().zip(&counts).filter(|(_, n)| count(n) > 0).map(|(f, _)| f.name.as_str()).collect();
+        let names: Vec<_> = fields.iter().take(5).map(|s| format!("'{}'", dbf_notice_name(s))).collect();
+        let more = if fields.len() > 5 { format!(" and {} more", fields.len() - 5) } else { String::new() };
+        (total, format!("{}{more}", names.join(", ")))
+    };
+    let target: String = target.chars().map(dbf_notice_char).collect();
+    let mut notes = Vec::new();
+    let (cut, fields) = selected(|n| n.text);
+    if cut > 0 {
+        let what = if cut == 1 { "1 text value was".into() } else { format!("{cut} text values were") };
+        notes.push(format!("{target}: {what} cut to at most 254 bytes, in {fields}"));
+    }
+    let (empty, fields) = selected(|n| n.empty);
+    if empty > 0 {
+        let what = if empty == 1 {
+            "1 value couldn't be written to its dBase field and was".into()
+        } else {
+            format!("{empty} values couldn't be written to their dBase fields and were")
+        };
+        notes.push(format!("{target}: {what} left empty, in {fields}"));
+    }
+    let (rounded, fields) = selected(|n| n.rounded);
+    if rounded > 0 {
+        let what = if rounded == 1 { "1 number was".into() } else { format!("{rounded} numbers were") };
+        notes.push(format!("{target}: {what} rounded to fit dBase field precision, in {fields}"));
+    }
+    notes
 }
 
 /// dBase field names (at most 10 bytes, unique without regard to case) for the fields.
@@ -2208,6 +2322,62 @@ fn dbf_names(fields: &[Field]) -> Vec<String> {
         out.push(name);
     }
     out
+}
+
+/// Decimals of the `.dbf` field for Double field `k`: as many as fit dBase's 24 characters beside
+/// the field's largest whole part, at most 15.
+fn dbf_decimals(ds: &Dataset, k: usize) -> usize {
+    let max = ds
+        .features
+        .iter()
+        .filter_map(|r| r.attrs.get(k).and_then(Value::as_f64))
+        .filter(|v| v.is_finite())
+        .fold(0.0f64, |m, v| m.max(v.abs()));
+    // Digits before the point, a sign and the point itself; the rest are decimals.
+    let int_digits = if max >= 1.0 { (max.log10().floor() as usize).saturating_add(1) } else { 1 };
+    24usize.saturating_sub(int_digits + 2).min(15)
+}
+
+/// The number a `.dbf` numeric field of type `ty` with `d` decimals holds for `v`: none for a
+/// value that isn't a number, or one rejected by the writer's size and precision checks.
+/// Rejected numbers are left empty rather than cut short.
+fn dbf_number(v: &Value, ty: FieldType, d: usize) -> Option<f64> {
+    let x = v.as_f64().filter(|x| {
+        // A whole number past 2^53 would be held only rounded (dBase's decimal text goes through
+        // f64), and one too small for the field's decimals would read 0.
+        let exact = !(matches!(v, Value::Int(i) if i.unsigned_abs() > 1 << 53)
+            || ty == FieldType::Double && *x != 0.0 && x.abs() < 0.5 * 10f64.powi(-(d as i32)));
+        exact && format!("{x:.d$}").len() <= if ty == FieldType::Integer { 18 } else { 24 }
+    })?;
+    Some(if ty == FieldType::Integer { x.round() } else { x })
+}
+
+/// The Boolean values the dBase writer accepts; an incompatible value is left empty.
+fn dbf_boolean(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(b) => Some(*b),
+        Value::Int(i) => Some(*i != 0),
+        _ => None,
+    }
+}
+
+/// Whether [`shapefile_parts_in`] writes a feature with geometry `g` to a layer of type `gt`: one
+/// of the layer's kind with something drawable (a finite point, a line part of two finite points,
+/// a polygon whose outer ring has three).
+fn shapefile_keeps(g: Option<&Geometry>, gt: GeometryType) -> bool {
+    let finite = |c: &&Coord| c.x.is_finite() && c.y.is_finite();
+    match (g, gt) {
+        (Some(g @ (Geometry::Point(_) | Geometry::MultiPoint(_))), GeometryType::Point) => {
+            let mut any = false;
+            g.for_each_coord(|c| any |= finite(&&c));
+            any
+        }
+        (Some(Geometry::Line(parts)), GeometryType::Polyline) => parts.iter().any(|p| p.iter().filter(finite).count() >= 2),
+        (Some(Geometry::Polygon(polys)), GeometryType::Polygon) => {
+            polys.iter().any(|p| p.first().is_some_and(|r| r.iter().filter(finite).count() >= 3))
+        }
+        _ => false,
+    }
 }
 
 /// A dataset as the files of a Shapefile: (extension, bytes) for `.shp`, `.shx`, `.dbf`, `.prj`
@@ -2234,15 +2404,7 @@ pub fn shapefile_parts_in(ds: &Dataset, crs: Crs) -> Result<(Vec<(&'static str, 
             // 18 digits: GDAL reads a wider field as a real number.
             FieldType::Integer => table.add_numeric_field(dbf_name(n)?, 18, 0),
             FieldType::Double => {
-                let max = ds
-                    .features
-                    .iter()
-                    .filter_map(|r| r.attrs.get(k).and_then(Value::as_f64))
-                    .filter(|v| v.is_finite())
-                    .fold(0.0f64, |m, v| m.max(v.abs()));
-                // Digits before the point, a sign and the point itself; the rest are decimals.
-                let int_digits = if max >= 1.0 { (max.log10().floor() as usize).saturating_add(1) } else { 1 };
-                let d = 24usize.saturating_sub(int_digits + 2).min(15);
+                let d = dbf_decimals(ds, k);
                 if let Some(slot) = decimals.get_mut(k) {
                     *slot = d;
                 }
@@ -2260,24 +2422,8 @@ pub fn shapefile_parts_in(ds: &Dataset, crs: Crs) -> Result<(Vec<(&'static str, 
         for (k, (f, n)) in ds.fields.iter().zip(&names).enumerate() {
             let v = r.attrs.get(k).unwrap_or(&Value::Null);
             let value = match f.ty {
-                FieldType::Integer | FieldType::Double => {
-                    let x = v.as_f64().filter(|x| {
-                        // Whatever doesn't fit the field is null rather than cut short; so is a
-                        // whole number past 2^53, which dBase's decimal text would hold only
-                        // rounded (it goes through f64).
-                        let d = decimals.get(k).copied().unwrap_or(0);
-                        // Likewise a number too small for the field's decimals, which would read 0.
-                        let exact = !(matches!(v, Value::Int(i) if i.unsigned_abs() > 1 << 53)
-                            || f.ty == FieldType::Double && *x != 0.0 && x.abs() < 0.5 * 10f64.powi(-(d as i32)));
-                        exact && format!("{x:.d$}").len() <= if f.ty == FieldType::Integer { 18 } else { 24 }
-                    });
-                    FieldValue::Numeric(if f.ty == FieldType::Integer { x.map(f64::round) } else { x })
-                }
-                FieldType::Boolean => FieldValue::Logical(match v {
-                    Value::Bool(b) => Some(*b),
-                    Value::Int(i) => Some(*i != 0),
-                    _ => None,
-                }),
+                FieldType::Integer | FieldType::Double => FieldValue::Numeric(dbf_number(v, f.ty, decimals.get(k).copied().unwrap_or(0))),
+                FieldType::Boolean => FieldValue::Logical(dbf_boolean(v)),
                 FieldType::Text => FieldValue::Character((!v.is_null()).then(|| cut(&v.to_string(), 254).to_string())),
             };
             rec.insert(n.clone(), value);
@@ -2935,6 +3081,36 @@ mod tests {
         let _ = csv_columns("\"unclosed\n", None);
     }
 
+    /// CSV that isn't UTF-8 (#1303): Latin-1, as many public sources publish it, and UTF-16 with
+    /// its byte-order mark are read, with a note; bytes with a NUL aren't text.
+    #[test]
+    fn csv_in_latin1_or_utf16() {
+        let latin1 = b"nome;lat;lon\nS\xe3o Jos\xe9;-5.1;-42.8\n";
+        let (ds, rep) = read_bytes("cnes.csv", latin1).unwrap();
+        assert_eq!(ds.value(0, 0), &Value::Text("São José".into()));
+        assert_eq!(ds.features[0].geometry, Some(Geometry::Point(Coord::new(-42.8, -5.1))));
+        assert!(rep.messages.iter().any(|m| m.contains("cnes.csv") && m.contains("Windows-1252")), "{:?}", rep.messages);
+        // Inside a zip too, as public sources ship it.
+        let zipped = crate::zip::write(&[("cnes.csv".to_string(), latin1.to_vec())]).unwrap();
+        assert_eq!(read_bytes("cnes.zip", &zipped).unwrap().0.value(0, 0), &Value::Text("São José".into()));
+        // UTF-16 little-endian with its mark.
+        let utf16: Vec<u8> = [0xff, 0xfe].into_iter().chain("nome,n\nJosé,1\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let (ds, rep) = read_bytes("t.csv", &utf16).unwrap();
+        assert_eq!(ds.value(0, 0), &Value::Text("José".into()));
+        assert!(rep.messages.iter().any(|m| m.contains("UTF-16") && !m.contains("replacement")), "{:?}", rep.messages);
+        // An odd last byte isn't UTF-16: replaced, and said.
+        let mut odd = utf16.clone();
+        odd.push(b'x');
+        let (_, rep) = read_bytes("t.csv", &odd).unwrap();
+        assert!(rep.messages.iter().any(|m| m.contains("UTF-16") && m.contains("replacement")), "{:?}", rep.messages);
+        // A UTF-8 byte-order mark before a Latin-1 byte doesn't end up in the first header.
+        let (ds, _) = read_bytes("t.csv", b"\xef\xbb\xbfnome;n\nS\xe3o;1\n").unwrap();
+        assert_eq!((ds.fields[0].name.as_str(), ds.value(0, 0)), ("nome", &Value::Text("São".into())));
+        // UTF-8 says nothing; binary data named .csv is refused.
+        assert!(read_bytes("t.csv", "nome,n\nJosé,1\n".as_bytes()).unwrap().1.messages.is_empty());
+        assert!(read_bytes("t.csv", b"a,b\n\x00\xff\x01,2\n").is_err());
+    }
+
     #[test]
     fn csv_points() {
         let (ds, rep) = read_csv("name,Lat,Lon,n\nA,10,20,1\nB,bad,1,2\n", "t").unwrap();
@@ -3303,6 +3479,51 @@ mod tests {
         assert_eq!((said.len(), said[0].0.as_str(), said[31].0.as_str()), (MAX_ZIP_LAYERS, "s00.shp", "s31.shp"));
         let no_dbf: Vec<_> = others.into_iter().filter(|(e, _)| *e != "dbf").collect();
         assert!(zip_shapefile_parts("RIOS_SIMPLES.shp", shp, no_dbf).unwrap_err().contains(".dbf"));
+    }
+
+    /// Typed datasets can retain incompatible cells or fractional values from dynamic sources.
+    #[test]
+    fn shapefile_notes_cover_incompatible_and_rounded_cells() {
+        let cases = [
+            ("integer text", FieldType::Integer, Value::Text("n/a".into()), false),
+            ("double NaN", FieldType::Double, Value::Float(f64::NAN), false),
+            ("double infinity", FieldType::Double, Value::Float(f64::INFINITY), false),
+            ("boolean text", FieldType::Boolean, Value::Text("abc".into()), false),
+            ("integer rounding", FieldType::Integer, Value::Float(2.5), true),
+            ("double rounding", FieldType::Double, Value::Float(2.55), true),
+            ("positive half", FieldType::Double, Value::Float(0.5), true),
+            ("negative half", FieldType::Double, Value::Float(-0.5), true),
+        ];
+        let mut missing = Vec::new();
+        for (name, ty, value, rounded) in cases {
+            let mut ds = Dataset::new("cells", GeometryType::Point, vec![Field::new("value", ty)]);
+            ds.push(Some(Geometry::Point(Coord::new(1., 2.))), vec![value.clone()]);
+            if name == "double rounding" {
+                // The largest whole part leaves one decimal place in this column.
+                ds.push(Some(Geometry::Point(Coord::new(3., 4.))), vec![Value::Float(1e20)]);
+            }
+            if name.ends_with("half") {
+                // A 22-digit whole part forces zero decimal places; ties round to even.
+                ds.push(Some(Geometry::Point(Coord::new(3., 4.))), vec![Value::Float(1e21)]);
+            }
+            let (bytes, _) = write_bytes(&ds, "zip").unwrap();
+            let (back, _) = read_bytes("cells.zip", &bytes).unwrap();
+            if rounded {
+                assert_ne!(back.features[0].attrs[0].as_f64(), value.as_f64(), "{name}");
+            } else {
+                assert_eq!(back.features[0].attrs[0], Value::Null, "{name}");
+            }
+            let notes = shapefile_values_notes(&ds, "cells.zip");
+            let kind = if rounded { "rounded" } else { "left empty" };
+            if !notes.iter().any(|n| n.contains(kind) && n.contains("1 ") && n.contains("value")) {
+                missing.push(name);
+            }
+            ds.features[0].attrs = vec![Value::Null];
+            assert!(shapefile_values_notes(&ds, "cells.zip").is_empty(), "null: {name}");
+            ds.features[0].attrs = vec![if ty == FieldType::Boolean { Value::Bool(false) } else { Value::Int(0) }];
+            assert!(shapefile_values_notes(&ds, "cells.zip").is_empty(), "clean: {name}");
+        }
+        assert!(missing.is_empty(), "losses without notices: {missing:?}");
     }
 
     /// The notice for field names a Shapefile can't hold names each change as the file has it,
