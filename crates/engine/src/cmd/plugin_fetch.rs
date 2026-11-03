@@ -312,8 +312,9 @@ pub(crate) struct UrlWaits {
 /// there: an undo may have taken it away, and a layer added since may then have its id.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Added {
-    /// The layers, by id, with where their data came from (their dataset's source and name).
-    layers: Vec<(u32, Option<String>, String)>,
+    /// The layers, by id, with where their data came from (their dataset's source: a rename
+    /// keeps it).
+    layers: Vec<(u32, Option<String>)>,
     /// The tile layers (a GeoTIFF read in place), by address.
     tiles: Vec<String>,
 }
@@ -323,10 +324,10 @@ impl Added {
     pub(crate) fn of(map: &crate::map::Map, answer: &CmdResult) -> Added {
         let Ok(v) = answer else { return Added::default() };
         let ids = v.get("layers").and_then(Value::as_array).into_iter().flatten().chain(v.get("layer"));
-        let mut layers: Vec<(u32, Option<String>, String)> = Vec::new();
+        let mut layers: Vec<(u32, Option<String>)> = Vec::new();
         for id in ids.filter_map(Value::as_u64).filter_map(|id| u32::try_from(id).ok()) {
             if let Some(l) = map.layer(id).filter(|_| !layers.iter().any(|(m, ..)| *m == id)) {
-                layers.push((id, l.dataset.source.clone(), l.dataset.name.clone()));
+                layers.push((id, l.dataset.source.clone()));
             }
         }
         // A tile layer's answer is its place in the list, which changes: its address doesn't.
@@ -337,9 +338,22 @@ impl Added {
         Added { layers, tiles }
     }
 
+    /// `answer` as it stands in `map` now: a tile layer's place in the list, which moves as others
+    /// are added or taken away, is where it is now.
+    pub(crate) fn answer_now(&self, map: &crate::map::Map, answer: &CmdResult) -> CmdResult {
+        let mut now = answer.clone();
+        if let (Ok(v), Some(url)) = (&mut now, self.tiles.first())
+            && v.get("index").is_some()
+            && let Some(i) = map.tiles.iter().position(|t| t.url == *url)
+        {
+            v["index"] = json!(i);
+        }
+        now
+    }
+
     /// Whether any of it is no longer in `map` (or another layer has its id).
     pub(crate) fn gone(&self, map: &crate::map::Map) -> bool {
-        self.layers.iter().any(|(id, source, name)| map.layer(*id).is_none_or(|l| l.dataset.source != *source || l.dataset.name != *name))
+        self.layers.iter().any(|(id, source)| map.layer(*id).is_none_or(|l| l.dataset.source != *source))
             || self.tiles.iter().any(|url| !map.tiles.iter().any(|t| t.url == *url))
     }
 }
@@ -358,9 +372,18 @@ const MAX_EXPIRED: usize = 1024;
 /// name) isn't it.
 fn asked_by(asked: &Value, params: &Value) -> bool {
     let Some(o) = asked.as_object() else { return false };
-    o.iter().filter(|(k, _)| !matches!(k.as_str(), "request" | "zoom")).all(|(k, v)| match k.as_str() {
-        "url" => v.as_str().map(str::trim) == params["url"].as_str().map(str::trim),
-        _ => params.get(k).is_none_or(|got| got == v),
+    // What the front end leaves out of a download's own `layer.addUrl`: keys adding the bytes
+    // doesn't take, flags it passes on only when true, and empty values.
+    let dropped = |k: &str, v: &Value| {
+        matches!(k, "whole" | "cog" | "dates" | "start" | "end" | "unit" | "interval")
+            || (matches!(k, "service" | "coverage") && v != &json!(true))
+            || v.is_null()
+            || v.as_str().is_some_and(|s| s.trim().is_empty())
+    };
+    o.iter().filter(|(k, _)| !matches!(k.as_str(), "request" | "zoom")).all(|(k, v)| match (k.as_str(), params.get(k)) {
+        ("url", _) => v.as_str().map(str::trim) == params["url"].as_str().map(str::trim),
+        (_, Some(got)) => got == v,
+        (_, None) => dropped(k, v),
     })
 }
 
@@ -411,10 +434,13 @@ impl UrlWaits {
 
     /// Request `n`, no command waiting for it any more, is given up: forgotten, and remembered
     /// so a late landing is refused.
-    fn give_up(&mut self, n: u64) {
+    /// `taken`: whether the front end took it (it may still land); one it didn't is just forgotten.
+    fn give_up(&mut self, n: u64, taken: bool) {
         if let Some(i) = self.in_flight.iter().position(|(m, ..)| *m == n) {
             let (_, asked, _) = self.in_flight.remove(i);
-            self.remember_given_up(n, asked);
+            if taken {
+                self.remember_given_up(n, asked);
+            }
         }
         self.landed.retain(|(m, ..)| *m != n);
     }
@@ -506,9 +532,10 @@ impl Session {
         // Past the given-up downloads that can still land, no more are asked for: each must be
         // remembered until it lands, to be refused then. Those not yet taken by the front end
         // aren't downloaded.
-        if !requests.is_empty() && self.url_waits.given_up_full() {
+        let fresh = |s: &Self, n: &u64| !s.url_waits.has(*n) && !s.plugin_retries.iter().any(|r| r.requests.contains(n));
+        if requests.iter().any(|(n, _)| fresh(self, n)) && self.url_waits.given_up_full() {
             for (n, _) in &requests {
-                if !self.url_waits.has(*n) && !self.plugin_retries.iter().any(|r| r.requests.contains(n)) {
+                if fresh(self, n) {
                     self.url_requests.retain(|q| q["request"].as_u64() != Some(*n));
                 }
             }
@@ -531,8 +558,9 @@ impl Session {
     fn give_up_requests(&mut self, gone: &Retry, keeps: &[u64]) {
         for n in &gone.requests {
             if !keeps.contains(n) && !self.plugin_retries.iter().any(|r| r.requests.contains(n)) {
-                self.url_waits.give_up(*n);
-                // Not yet taken by the front end: not downloaded at all.
+                // Not yet taken by the front end: not downloaded at all, so nothing will land it.
+                let queued = self.url_requests.iter().any(|q| q["request"].as_u64() == Some(*n));
+                self.url_waits.give_up(*n, !queued);
                 self.url_requests.retain(|q| q["request"].as_u64() != Some(*n));
             }
         }
@@ -606,8 +634,11 @@ mod tests {
         assert!(added.layers.len() == 1 && !added.gone(s.map()), "{added:?}");
         s.rerun_landed = vec![(asked.clone(), answer.clone(), added)];
         assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": id}));
+        // Renamed while the command waited: still it.
+        s.run("layer.rename", &json!({"layer": id, "name": "Renamed"})).unwrap();
+        assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": id}));
         // Another layer has its id now.
-        let other = Added { layers: vec![(id, Some("https://x.org/other.geojson".into()), "other".into())], tiles: Vec::new() };
+        let other = Added { layers: vec![(id, Some("https://x.org/other.geojson".into()))], tiles: Vec::new() };
         s.rerun_landed = vec![(asked.clone(), answer, other)];
         let e = s.run("layer.addUrl", &asked).unwrap_err();
         assert!(e.contains("taken away (undone)"), "{e}");
@@ -617,8 +648,13 @@ mod tests {
         let added = Added::of(s.map(), &answer);
         assert!(added.tiles.len() == 1 && !added.gone(s.map()), "{added:?}");
         s.rerun_landed = vec![(asked.clone(), answer.clone(), added)];
-        assert!(s.run("layer.addUrl", &asked).is_ok());
-        s.run("map.removeTiles", &json!({"index": answer.unwrap()["index"]})).unwrap();
+        let at = answer.as_ref().unwrap()["index"].clone();
+        assert_eq!(s.run("layer.addUrl", &asked).unwrap()["index"], at);
+        // Another tile layer put above it: the answer gives where it is now.
+        s.run("map.addTiles", &json!({"url": "https://y.org/{z}/{x}/{y}.png", "name": "U"})).unwrap();
+        let moved = s.map().tiles.iter().position(|t| t.name == "T").unwrap();
+        assert_eq!(s.run("layer.addUrl", &asked).unwrap()["index"], json!(moved));
+        s.run("map.removeTiles", &json!({"index": moved})).unwrap();
         let e = s.run("layer.addUrl", &asked).unwrap_err();
         assert!(e.contains("taken away (undone)"), "{e}");
     }
@@ -674,6 +710,8 @@ mod tests {
         s.retry_plugin("plugin:eng-share-a/f", &p, Vec::new(), vec![(906, asked)]).unwrap();
         assert!(s.url_waits.holds(906, &json!({"url": "https://x.org/g.csv", "x": "lon", "id": 4})));
         assert!(s.url_waits.holds(906, &json!({"url": "https://x.org/g.csv", "x": "lon", "zoom": true})));
+        // A key the front end passes on, left out: another import, which lands nothing.
+        assert!(!s.url_waits.holds(906, &json!({"url": "https://x.org/g.csv"})));
         // Given up past the wait (`expire`): each late landing is refused, once.
         let long_ago = Instant::now().checked_sub(REQUEST_WAIT + Duration::from_secs(1)).unwrap();
         for (n, file) in [(902, "c.csv"), (903, "c2.csv")] {
@@ -700,6 +738,12 @@ mod tests {
         let e = s.retry_plugin("plugin:eng-share-c/f", &p, Vec::new(), vec![(960, json!({"url": "https://x.org/new.csv"}))]).unwrap_err();
         assert!(e.contains("still under way"), "{e}");
         assert!(s.take_url_requests().is_empty(), "not downloaded");
+        // One another command already waits for starts no download: it is shared, not refused.
+        let shared = json!({"url": "https://x.org/shared.csv"});
+        s.url_waits.wait(961, shared.clone());
+        s.retry_plugin("plugin:eng-share-d/f", &p, Vec::new(), vec![(961, shared)]).unwrap();
+        s.plugin_retries.clear();
+        s.url_waits.keep_only(&[]);
         assert!(s.url_waits.given_up(800, &first), "still refused when it lands");
         s.request_failed(&json!({"url": "https://x.org/out.csv", "request": 800}), "offline");
         assert!(!s.url_waits.given_up(800, &first) && !s.url_waits.given_up_full());
@@ -709,6 +753,12 @@ mod tests {
         s.retry_plugin("plugin:eng-share-b/f", &p, Vec::new(), vec![(951, json!({"url": "https://x.org/e.csv"}))]).unwrap();
         let e = s.run("layer.addUrl", &json!({"url": "https://x.org/d.csv", "request": 950})).unwrap_err();
         assert!(e.contains("stopped waiting"), "{e}");
+        // One the front end hadn't taken yet is taken off the queue and forgotten: it can't land.
+        let queued = json!({"url": "https://x.org/q.csv"});
+        s.url_requests.push(json!({"url": "https://x.org/q.csv", "request": 970}));
+        s.retry_plugin("plugin:eng-share-e/f", &p, Vec::new(), vec![(970, queued.clone())]).unwrap();
+        s.retry_plugin("plugin:eng-share-e/f", &p, Vec::new(), Vec::new()).unwrap();
+        assert!(!s.url_waits.given_up(970, &queued) && s.take_url_requests().is_empty());
         // A number given with another address lands nothing.
         let _ = s.run("layer.addDownload", &json!({"url": "https://x.org/other.csv", "request": 951, "id": 424242}));
         assert!(s.url_waits.holds(951, &json!({"url": "https://x.org/e.csv"})), "951 still waits for e.csv");

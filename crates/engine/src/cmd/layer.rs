@@ -2816,7 +2816,7 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
         if missing || added.gone(s.map()) {
             return Err(format!("{url}: the layer its download added was taken away (undone) before the command ran again"));
         }
-        return answer.clone();
+        return added.answer_now(s.map(), answer);
     }
     // An address read through a saved S3 connection is judged by the address it wraps; the whole
     // address stays what is fetched and kept.

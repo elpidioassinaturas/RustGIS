@@ -1024,10 +1024,16 @@ impl Session {
     /// waiting for it runs again, and its `layer.addUrl` answers this error. `p` is the request
     /// the front end took.
     pub fn request_failed(&mut self, p: &serde_json::Value, error: &str) {
+        // Only the download its number names (the same address and import): a number given with
+        // another changes no wait or refusal.
         if let Some(n) = p.get("request").and_then(serde_json::Value::as_u64) {
-            self.url_waits.land(n, Err(error.to_string()), cmd::plugins::fetch::Added::default());
+            if self.url_waits.holds(n, p) {
+                self.url_waits.land(n, Err(error.to_string()), cmd::plugins::fetch::Added::default());
+            }
             // One given up won't land now: nothing left to refuse.
-            self.url_waits.refused(n);
+            if self.url_waits.given_up(n, p) {
+                self.url_waits.refused(n);
+            }
         }
     }
 
