@@ -21821,7 +21821,9 @@ fn the_session_log_records_each_command_run_in_the_session() {
     let mark = s.notice_mark();
     s.run("project.exportLog", &json!({"path": out.display().to_string()})).unwrap();
     assert!(
-        s.notices_since(mark).iter().any(|n| n.text.contains("oldest were dropped past the log's limits")),
+        s.notices_since(mark)
+            .iter()
+            .any(|n| n.text.contains("; not in it: ") && n.text.contains("oldest entries were dropped past the log's limit of 10000")),
         "{:?}",
         s.notices_since(mark)
     );

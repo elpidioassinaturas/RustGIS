@@ -121,10 +121,7 @@ fn export_log(s: &mut Session, p: &Value) -> CmdResult {
     let n = s.log.len();
     rustgis_data::io::write_atomic_with(&path, |w| s.log.write(w, format == "csv")).map_err(|e| format!("{}: {e}", path.display()))?;
     // Entries dropped past the log's limits aren't in the file: said.
-    let dropped = match s.log.dropped() {
-        0 => String::new(),
-        d => format!("; the {d} oldest were dropped past the log's limits before it"),
-    };
+    let dropped = s.log.dropped_said().map(|d| format!("; not in it: {d}")).unwrap_or_default();
     s.notify(format!("Exported the session log ({n} entries) to {}{dropped}", path.display()), false);
     Ok(json!({"path": path.display().to_string(), "entries": n, "format": format}))
 }

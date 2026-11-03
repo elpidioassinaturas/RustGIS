@@ -105,14 +105,14 @@ pub fn pane(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         crate::i18n::fmt("The newest {shown} of {count} entries", &[("shown", &listed.to_string()), ("count", &count.to_string())])
     } else if count < total {
         crate::i18n::fmt("{count} of {total} entries", &[("count", &count.to_string()), ("total", &total.to_string())])
+    } else if count == 1 {
+        tl!("1 entry").to_string()
     } else {
         crate::i18n::fmt("{count} entries", &[("count", &count.to_string())])
     };
     ui.label(egui::RichText::new(note).size(11.0).color(t.text_dim));
     // Entries dropped past the log's limits aren't listed, nor saved: said.
-    let dropped = app.session.log.dropped();
-    if dropped > 0 {
-        let said = crate::i18n::fmt("The {n} oldest entries were dropped past the log's limits", &[("n", &dropped.to_string())]);
+    if let Some(said) = app.session.log.dropped_said() {
         ui.label(egui::RichText::new(said).size(11.0).color(t.text_dim));
     }
     if !app.session.log.on() {
@@ -155,36 +155,41 @@ fn params_text(e: &LogEntry) -> String {
 }
 
 /// One entry: whether it worked, its command, how long it took, when it started, its error and
-/// its parameters (all of them on hover; right-click copies them).
+/// its parameters (all of them on hover; right-click copies them). The right-click is sensed
+/// behind the row's contents, which only sense hover, so their hover texts still show.
 fn row(ui: &mut Ui, item: &Row, t: &Tokens) {
     let (e, params) = (&item.e, item.params.as_str());
     let frame =
         egui::Frame::NONE.stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::same(8));
-    let r = frame.show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            // Worked or failed, said in words too (on hover, and to a screen reader), not by its
-            // colour alone.
-            let (r, dot) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-            ui.painter().circle_filled(r.center(), 4.5, if e.ok { t.green } else { t.red });
-            let worked = if e.ok { tl!("Worked") } else { tl!("Failed") };
-            dot.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, worked));
-            dot.on_hover_text(worked);
-            ui.label(egui::RichText::new(&e.command).font(semibold(12.5)));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(&item.took).size(11.0).color(t.text_dim));
+    let r = ui.scope_builder(egui::UiBuilder::new().sense(Sense::click()), |ui| {
+        frame.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                // Worked or failed, said in words too (on hover, and to a screen reader), not by its
+                // colour alone.
+                let (r, dot) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                ui.painter().circle_filled(r.center(), 4.5, if e.ok { t.green } else { t.red });
+                let worked = if e.ok { tl!("Worked") } else { tl!("Failed") };
+                dot.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, worked));
+                dot.on_hover_text(worked);
+                text(ui, egui::RichText::new(&e.command).font(semibold(12.5)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    text(ui, egui::RichText::new(&item.took).size(11.0).color(t.text_dim));
+                });
             });
-        });
-        ui.label(egui::RichText::new(&item.at).size(11.0).color(t.text_dim));
-        if let Some(err) = &e.error {
-            ui.label(egui::RichText::new(err).size(11.0).color(t.red));
-        }
-        if !params.is_empty() {
-            ui.add(egui::Label::new(egui::RichText::new(&item.line).monospace().size(10.5).color(t.text_dim)).truncate())
+            text(ui, egui::RichText::new(&item.at).size(11.0).color(t.text_dim));
+            if let Some(err) = &e.error {
+                text(ui, egui::RichText::new(err).size(11.0).color(t.red));
+            }
+            if !params.is_empty() {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&item.line).monospace().size(10.5).color(t.text_dim)).truncate().selectable(false),
+                )
                 .on_hover_text(egui::RichText::new(params).monospace());
-        }
+            }
+        })
     });
-    r.response.interact(Sense::click()).context_menu(|ui| {
+    r.response.context_menu(|ui| {
         if ui.add_enabled(!params.is_empty(), egui::Button::new(tl!("Copy Parameters"))).clicked() {
             ui.ctx().copy_text(params.to_string());
             ui.close();
@@ -196,6 +201,11 @@ fn row(ui: &mut Ui, item: &Row, t: &Tokens) {
     });
 }
 
+/// A row's text: not selectable, so a right-click on it reaches the row.
+fn text(ui: &mut Ui, t: egui::RichText) {
+    ui.add(egui::Label::new(t).selectable(false));
+}
+
 /// Saves the log: downloaded as CSV in the browser, where `project.exportLog` can't write a
 /// file (so the download isn't itself an entry in the log, said in the user guide); else to the
 /// CSV or JSON Lines file the user picks, through `project.exportLog`, which the log records.
@@ -204,16 +214,12 @@ fn save(app: &mut RustGisApp) {
         let mut bytes = Vec::new();
         match app.session.log.write(&mut bytes, true) {
             Ok(()) => {
-                app.download_bytes("session-log.csv", bytes);
                 // Entries dropped past the log's limits aren't in the file: said, as an export
-                // says it on the desktop.
-                let dropped = app.session.log.dropped();
-                if dropped > 0 {
-                    let said = crate::i18n::fmt(
-                        "session-log.csv: the {n} oldest entries were dropped past the log's limits before it",
-                        &[("n", &dropped.to_string())],
-                    );
-                    app.session.notify(said, false);
+                // says it on the desktop (not of a download that failed, which says why).
+                if app.download_bytes("session-log.csv", bytes)
+                    && let Some(said) = app.session.log.dropped_said()
+                {
+                    app.session.notify(format!("session-log.csv: not in it: {said}"), false);
                 }
             }
             Err(e) => app.session.notify(e.to_string(), true),
@@ -287,11 +293,43 @@ mod tests {
         h.state_mut().ui.session_log.query = "no such command".into();
         h.run();
         assert!(h.query_by_label("No command matches").is_some());
-        // Tool runs shows the tools run instead (none here).
+        // Tool runs shows the tools run instead: none here, then one.
         h.state_mut().ui.session_log.open = false;
         h.run();
         assert!(h.query_by_label("Filter by command").is_none());
         assert!(h.query_by_label("Tools you run appear here.").is_some());
+        h.state_mut().session.project.gp_history.push(rustgis_engine::GpRecord {
+            tool: "Buffer".into(),
+            id: "buffer".into(),
+            params: json!({}),
+            command: None,
+            at: 0,
+            ok: true,
+            messages: vec!["Made 3 features".into()],
+            millis: 7,
+            outputs: Vec::new(),
+        });
+        h.run();
+        assert!(h.query_by_label("Buffer").is_some() && h.query_by_label("Made 3 features").is_some());
+        assert!(h.query_by_label("Tools you run appear here.").is_none());
+    }
+
+    /// A step joined to the newest entry (a held key's nudges) shows in the pane at once, though
+    /// the log's length is the same.
+    #[test]
+    fn a_joined_entry_is_shown_as_it_is_now() {
+        let mut app = RustGisApp::with_sample();
+        app.session.log.clear();
+        let nudge = |millis| LogEntry { at: 1, command: "layout.nudge".into(), params: json!({"dx": 1}), ok: true, error: None, millis };
+        app.session.log.push(nudge(2));
+        app.ui.session_log.open = true;
+        let mut h = harness(app);
+        h.run();
+        assert!(h.query_by_label("2 ms").is_some());
+        h.state_mut().session.log.join_last(nudge(3));
+        h.run();
+        assert!(h.query_by_label("5 ms").is_some() && h.query_by_label("2 ms").is_none());
+        assert!(h.query_by_label("1 entry").is_some());
     }
 
     /// Past [`SHOWN`] entries the pane lists the newest and says how many match.
@@ -309,7 +347,7 @@ mod tests {
         assert!(h.query_by_label(&format!(r#"{{"name":"Map {}"}}"#, SHOWN + 4)).is_some());
         assert!(h.query_by_label(r#"{"name":"Map 4"}"#).is_none());
         // Nothing dropped, nothing said; each entry says whether it worked, in words.
-        assert!(h.query_by_label_contains("dropped past the log's limits").is_none());
+        assert!(h.query_by_label_contains("were dropped past").is_none());
         assert!(h.query_all_by_label("Worked").next().is_some());
     }
 
@@ -324,7 +362,16 @@ mod tests {
         app.ui.session_log.open = true;
         let mut h = harness(app);
         h.run();
-        assert!(h.query_by_label("The 7 oldest entries were dropped past the log's limits").is_some());
+        assert!(h.query_by_label("7 oldest entries were dropped past the log's limit of 10000").is_some());
+        // Past the plugins' limit, an older plugin command's entry goes, and is said as that.
+        let app = h.state_mut();
+        app.session.log.clear();
+        for i in 0..rustgis_engine::project_log::LOG_PLUGIN_LIMIT + 2 {
+            let command = format!("{}eng/f", rustgis_plugins::PREFIX);
+            app.session.log.push(LogEntry { at: i as u64, command, params: Value::Null, ok: true, error: None, millis: 0 });
+        }
+        h.run();
+        assert!(h.query_by_label("2 older plugin command entries were dropped past the 1000 kept for plugins").is_some());
     }
 
     /// Save Log As… writes the log where the user picks, as CSV or JSON Lines by the name's
@@ -380,7 +427,9 @@ mod tests {
         assert_eq!(name, "session-log.csv");
         assert!(text.starts_with("time_utc,at,command,ok,millis,error,params\n"), "{text}");
         assert!(text.contains("\"map.new\",true"), "{text}");
-        let dropped = |app: &RustGisApp| app.session.notices.iter().any(|n| n.text.contains("dropped past the log's limits"));
+        let dropped = |app: &RustGisApp| {
+            app.session.notices.iter().any(|n| n.text.contains("session-log.csv: not in it: 4 oldest entries were dropped past"))
+        };
         assert!(!dropped(&app), "nothing dropped, nothing said");
         // Past the log's limit, the download says how many it lacks.
         for i in 0..rustgis_engine::project_log::LOG_LIMIT + 3 {
@@ -389,5 +438,38 @@ mod tests {
         save(&mut app);
         assert!(got.borrow_mut().take().is_some());
         assert!(dropped(&app), "{:?}", app.session.notices);
+        // A download that fails says why, not what a file it didn't deliver lacks.
+        app.session.notices.clear();
+        app.services.download = Some(Box::new(|_, _| Err("no room".into())));
+        save(&mut app);
+        assert!(app.session.notices.iter().any(|n| n.text.contains("no room")), "{:?}", app.session.notices);
+        assert!(!dropped(&app), "{:?}", app.session.notices);
+    }
+
+    /// The row's right-click doesn't cover its hover texts (whether it worked, and the whole of
+    /// its parameters), and works on its text too.
+    #[test]
+    fn a_rows_hover_texts_show_under_its_context_menu() {
+        let mut app = RustGisApp::with_sample();
+        app.session.log.clear();
+        let long = "n".repeat(200);
+        app.run("map.new", json!({"name": long})).unwrap();
+        app.ui.session_log.open = true;
+        let mut h = harness(app);
+        h.run();
+        let line = format!(r#"{{"name":"{}"#, "n".repeat(20));
+        h.get_by_label_contains(&line).hover();
+        h.run();
+        h.run();
+        let whole = format!(r#"{{"name":"{long}"}}"#);
+        assert!(h.query_by_label(&whole).is_some(), "the whole parameters on hover");
+        h.get_by_label("Worked").hover();
+        h.run();
+        h.run();
+        assert!(h.query_all_by_label("Worked").count() > 1, "the dot's hover text");
+        // A right-click on the row's text still opens its menu.
+        h.get_by_label("map.new").click_secondary();
+        h.run();
+        assert!(h.query_by_label("Copy Command").is_some());
     }
 }

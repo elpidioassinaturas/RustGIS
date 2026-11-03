@@ -114,7 +114,7 @@ download isn't itself an entry in the log, as a saved file is). **Clear Log** em
   look at an exported log before sharing it. Each entry's parameters are clipped to about 4 KB of
   JSON (a long text is cut, a list keeps its first 100 items), its error to 500 characters and a
   `…`, and the log keeps its last 10,000 entries, the oldest dropped first (the pane and an
-  export say how many were dropped). Plugins' commands take
+  export say how many were dropped, and which: the oldest, or older plugin entries). Plugins' commands take
   at most 1,000 of those places: past that, a plugin's new entry pushes out an older plugin entry,
   not one of the user's.
 

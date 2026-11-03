@@ -366,9 +366,11 @@ pub struct SessionLog {
     /// Counts each change to `entries` (an entry added, the log cleared), so a view of it knows
     /// when to read it again ([`SessionLog::changes`]).
     changes: u64,
-    /// How many entries were dropped past [`LOG_LIMIT`] or [`LOG_PLUGIN_LIMIT`] since the log
-    /// was last cleared ([`SessionLog::dropped`]), so a view or a saved file can say so.
+    /// How many entries were dropped since the log was last cleared, so a view or a saved file
+    /// can say so ([`SessionLog::dropped_said`]): the oldest, past [`LOG_LIMIT`], and older plugin
+    /// commands' (newer than some of the user's still kept), past [`LOG_PLUGIN_LIMIT`].
     dropped: u64,
+    dropped_plugin: u64,
 }
 
 impl SessionLog {
@@ -395,7 +397,7 @@ impl SessionLog {
         {
             self.entries.remove(oldest);
             self.plugin_entries = self.plugin_entries.saturating_sub(1);
-            self.dropped = self.dropped.saturating_add(1);
+            self.dropped_plugin = self.dropped_plugin.saturating_add(1);
         }
         if plugin(&e) {
             self.plugin_entries += 1;
@@ -450,7 +452,23 @@ impl SessionLog {
 
     /// How many entries were dropped past the log's limits since it was last cleared.
     pub fn dropped(&self) -> u64 {
-        self.dropped
+        self.dropped.saturating_add(self.dropped_plugin)
+    }
+
+    /// What was dropped past the log's limits since it was last cleared, by kind, as the pane, an
+    /// export and a download say it; `None` when nothing was.
+    pub fn dropped_said(&self) -> Option<String> {
+        let mut said = Vec::new();
+        if self.dropped > 0 {
+            said.push(format!("{} oldest entries were dropped past the log's limit of {LOG_LIMIT}", self.dropped));
+        }
+        if self.dropped_plugin > 0 {
+            said.push(format!(
+                "{} older plugin command entries were dropped past the {LOG_PLUGIN_LIMIT} kept for plugins",
+                self.dropped_plugin
+            ));
+        }
+        (!said.is_empty()).then(|| said.join("; "))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -471,6 +489,7 @@ impl SessionLog {
     pub fn clear(&mut self) -> usize {
         self.plugin_entries = 0;
         self.dropped = 0;
+        self.dropped_plugin = 0;
         self.changes = self.changes.wrapping_add(1);
         std::mem::take(&mut self.entries).len()
     }

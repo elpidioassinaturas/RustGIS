@@ -1515,9 +1515,10 @@ impl RustGisApp {
         Ok(())
     }
 
-    /// Offers bytes as a download (web).
-    pub(crate) fn download_bytes(&mut self, name: &str, bytes: Vec<u8>) {
-        self.download(name, bytes);
+    /// Offers bytes as a download (web), and says whether it was delivered (a failure is
+    /// notified).
+    pub(crate) fn download_bytes(&mut self, name: &str, bytes: Vec<u8>) -> bool {
+        self.download(name, bytes)
     }
 
     /// Offers bytes as a download (web) and reports whether a download hook exists.
