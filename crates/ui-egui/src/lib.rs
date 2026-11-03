@@ -547,6 +547,7 @@ pub struct UiState {
     pub right: Option<RightPane>,
     /// The right panes open as tabs, in the order they were opened (#303).
     pub right_open: Vec<RightPane>,
+    /// The Diagnostics pane's filter (it also picks what **Copy diagnostics** copies).
     pub diagnostic_filter: rustgis_engine::data::diagnostics::Filter,
     diagnostic_snapshot: Option<(u64, Vec<rustgis_engine::data::diagnostics::Record>)>,
     /// The Web Data service the Web Data pane shows (a `ui.dialog` name, see
@@ -1775,9 +1776,9 @@ impl RustGisApp {
         if let Err(e) = &r {
             log::info!("{id}: {e}");
             // UI-only failures can return before an engine command emits a notice.
-            let text = rustgis_engine::data::diagnostics::redact(e);
-            if !self.session.notices_since(notice_mark).iter().any(|notice| notice.error && notice.text == text) {
-                self.session.notify(text, true);
+            let text = rustgis_engine::data::diagnostics::Redacted::new(e);
+            if !self.session.notices_since(notice_mark).iter().any(|notice| notice.error && notice.text == text.as_str()) {
+                self.session.notify_redacted(text, true);
             }
         }
         // Commands can replace the project, switch maps or change the renderer while the pane
@@ -3283,7 +3284,11 @@ impl RustGisApp {
                 let ext = if ext == "shp" { "zip".to_string() } else { ext };
                 let name = format!("{}.{ext}", l.name);
                 let notes = rustgis_engine::data::export_notes([(ds, l.extent())], &name, crs);
-                let names_note = if ext == "zip" { io::shapefile_names_note(&ds.fields, &name) } else { None };
+                let mut dbf_notes = Vec::new();
+                if ext == "zip" {
+                    dbf_notes.extend(io::shapefile_names_note(&ds.fields, &name));
+                    dbf_notes.extend(io::shapefile_values_notes(ds, &name));
+                }
                 if left_out > 0 {
                     self.session.notify(format!("{name}: {left_out} features without drawable geometry were left out"), false);
                 }
@@ -3291,7 +3296,7 @@ impl RustGisApp {
                     self.session.notify(format!("{name}: no .prj written, as {} has no WKT form", crs.label()), false);
                 }
                 if self.download(&name, bytes) {
-                    for note in notes.into_iter().chain(names_note) {
+                    for note in notes.into_iter().chain(dbf_notes) {
                         self.session.notify(note, false);
                     }
                 }
@@ -4434,8 +4439,19 @@ mod download_service_tests {
             let download: Box<dyn Fn(&str, Vec<u8>) -> Result<(), String>> =
                 if accept { Box::new(|_, _| Ok(())) } else { Box::new(|_, _| Err("browser rejected download".into())) };
             let mut app = RustGisApp::with_sample().with_services(Services { download: Some(download), ..Default::default() });
-            let mut ds = Dataset::new("Sites", GeometryType::Point, vec![Field::new("population_2020", FieldType::Integer)]);
-            ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Int(1)]);
+            let mut ds = Dataset::new(
+                "Sites",
+                GeometryType::Point,
+                vec![
+                    Field::new("population_2020", FieldType::Integer),
+                    Field::new("notes", FieldType::Text),
+                    Field::new("big", FieldType::Integer),
+                ],
+            );
+            ds.push(
+                Some(Geometry::Point(Coord::new(1.0, 2.0))),
+                vec![Value::Int(1), Value::Text("x".repeat(300)), Value::Int(9_007_199_254_740_993)],
+            );
             let id = app.session.map_mut().add_dataset(ds);
             app.session.active_layer = Some(id);
             app
@@ -4443,6 +4459,13 @@ mod download_service_tests {
         let mut app = with(true);
         app.run("ui.exportLayer", json!({"format": "shp"})).unwrap();
         assert_eq!(changed(&app), 1);
+        assert!(app.session.notices.iter().any(|n| n.text == "Sites.zip: 1 text value was cut to at most 254 bytes, in 'notes'"));
+        assert!(
+            app.session
+                .notices
+                .iter()
+                .any(|n| n.text == "Sites.zip: 1 value couldn't be written to its dBase field and was left empty, in 'big'")
+        );
         assert!(app.session.notices.iter().any(|n| n.text
             == "Sites.zip: 1 field name was changed to fit a Shapefile (10 bytes at most, unique ignoring case): \
                 'population_2020' → 'population'"));
@@ -4452,11 +4475,13 @@ mod download_service_tests {
         let _ = app.run("ui.exportLayer", json!({"format": "shp"}));
         assert!(app.session.notices.iter().any(|n| n.error && n.text.contains("browser rejected download")));
         assert_eq!(changed(&app), 0, "nothing was downloaded");
+        assert!(!app.session.notices.iter().any(|n| n.text.contains("254 bytes") || n.text.contains("left empty")));
         let mut app = with(true);
         let countries = app.session.map().layers.iter().find(|l| l.name == "Countries").map(|l| l.id);
         app.session.active_layer = countries;
         app.run("ui.exportLayer", json!({"format": "shp"})).unwrap();
         assert_eq!(changed(&app), 0, "the sample's names fit");
+        assert!(!app.session.notices.iter().any(|n| n.text.contains("254 bytes") || n.text.contains("left empty")));
     }
 
     #[test]
