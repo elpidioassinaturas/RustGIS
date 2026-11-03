@@ -1167,12 +1167,19 @@ impl RustGisApp {
             self.session.raster_defaults = d.sanitized();
         }
         self.ui.raster_defaults_saved = self.session.raster_defaults.clone();
-        // The favourite arrangement of publication layouts; one no longer valid is passed over.
-        if let Some(v) = self.services.load_pref.as_ref().and_then(|load| load(LAYOUT_FAVOURITE_PREF))
-            && let Ok(v) = serde_json::from_str::<Value>(&v)
-            && rustgis_engine::cmd::layout::parse_arrangement(&v).is_ok()
-        {
-            self.session.layout_favourite = v;
+        // The favourite arrangement of publication layouts; one no longer valid is passed over,
+        // said, and classic used.
+        if let Some(text) = self.services.load_pref.as_ref().and_then(|load| load(LAYOUT_FAVOURITE_PREF)) {
+            let read = serde_json::from_str::<Value>(&text)
+                .map_err(|e| e.to_string())
+                .and_then(|v| rustgis_engine::cmd::layout::parse_arrangement(&v).map(|_| v));
+            match read {
+                Ok(v) => self.session.layout_favourite = v,
+                Err(why) => self.session.notify(
+                    format!("the saved favourite arrangement of publication layouts can't be used ({why}), so \"classic\" is used"),
+                    false,
+                ),
+            }
         }
         self.ui.layout_favourite_saved = self.session.layout_favourite.clone();
         self.forms.distance_units = self

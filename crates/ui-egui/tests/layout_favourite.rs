@@ -26,11 +26,17 @@ fn the_favourite_arrangement_is_saved_and_restored() {
         let restored = RustGisApp::new(Session::new(Project::default()))
             .with_services(Services { load_pref: Some(Box::new(move |k| (k == KEY).then(|| value.clone()))), ..Services::default() });
         assert_eq!(restored.session.layout_favourite, favourite);
+        // A valid one says nothing.
+        assert!(!restored.session.notices.iter().any(|n| n.text.contains("favourite arrangement")));
     }
     // One no longer valid is passed over: the default stays.
     for bad in ["\"tidy\"", "not json", "{\"locator\": \"top-left\"}"] {
         let restored = RustGisApp::new(Session::new(Project::default()))
             .with_services(Services { load_pref: Some(Box::new(move |k| (k == KEY).then(|| bad.to_string()))), ..Services::default() });
         assert_eq!(restored.session.layout_favourite, json!("classic"), "{bad}");
+        // ... and says so.
+        let said =
+            restored.session.notices.iter().filter(|n| n.text.contains("favourite arrangement") && n.text.contains("\"classic\" is used"));
+        assert_eq!(said.count(), 1, "{bad}");
     }
 }
