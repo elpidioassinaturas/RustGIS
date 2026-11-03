@@ -1245,14 +1245,29 @@ fn union_all<'a>(polys: impl IntoIterator<Item = &'a geo::Polygon<f64>>) -> Mult
 /// Two million coordinates occupy roughly 32 MB before containers and overlay scratch.
 const MAX_BUFFER_VERTICES: usize = 2_000_000;
 /// Retained ordinary output/selector storage, separate from overlay complexity. Temporary
-/// geometry on each worker and the already loaded input are additional to this allowance.
+/// geometry on each worker and the already loaded input are additional to this allowance. The
+/// browser's budget, and the fewest bytes [`max_buffer_bytes`] allows on the desktop.
 const MAX_BUFFER_BYTES: usize = if cfg!(target_arch = "wasm32") { 128 << 20 } else { 512 << 20 };
+/// The most bytes [`max_buffer_bytes`] allows, however much memory the computer has.
+const BUFFER_BYTES_CEILING: usize = 8 << 30;
 /// Drain results regularly instead of keeping a second whole-layer result array.
 const BUFFER_BATCH: usize = 256;
 /// Bound actual candidate checks across all targets for large distance-selector sets, with
 /// or without a grid. Small sets keep their bounded-width linear scan.
 const MAX_SELECTOR_CHECKS: usize = 50_000_000;
 const BUFFER_STORAGE_ERROR: &str = "Buffer output or distance selectors exceed their memory budget; select fewer features";
+
+/// Buffer's retained-storage budget on this computer: on the desktop a quarter of its memory, from
+/// [`MAX_BUFFER_BYTES`] up to [`BUFFER_BYTES_CEILING`] (#1291 step 2); fixed in the browser.
+pub fn max_buffer_bytes() -> usize {
+    rustgis_data::memory::scaled(rustgis_data::memory::physical(), MAX_BUFFER_BYTES, BUFFER_BYTES_CEILING, 1)
+}
+
+/// [`BUFFER_STORAGE_ERROR`] with the budget it ran out of, so a run refused here but not on a
+/// larger computer says why.
+fn with_budget(e: String, bytes: usize) -> String {
+    if e == BUFFER_STORAGE_ERROR { format!("{e} (this computer's budget is {} MiB)", bytes >> 20) } else { e }
+}
 
 /// Shared retained-storage accounting; workers charge payloads before handing them back.
 struct BufferStorage(std::sync::atomic::AtomicUsize);
@@ -1346,7 +1361,8 @@ fn buffer_rows(
 
 /// Buffer with the output budget shared by all selected input features.
 fn buffer(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
-    buffer_with_limits(inp, p, MAX_BUFFER_VERTICES, MAX_BUFFER_BYTES)
+    let bytes = max_buffer_bytes();
+    buffer_with_limits(inp, p, MAX_BUFFER_VERTICES, bytes).map_err(|e| with_budget(e, bytes))
 }
 
 /// Independent complexity and retained-output budgets; injectable for small boundary tests.
@@ -2451,7 +2467,8 @@ fn selector_heap_bytes(g: &geo::Geometry<f64>) -> usize {
 /// Select against nearby selectors, indexed in the projection used by the predicate and after
 /// any distance buffer. Inversion and input row order keep the exhaustive selection's semantics.
 fn select_by_location(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
-    select_by_location_with_limits(inp, p, MAX_BUFFER_VERTICES, MAX_BUFFER_BYTES)
+    let bytes = max_buffer_bytes();
+    select_by_location_with_limits(inp, p, MAX_BUFFER_VERTICES, bytes).map_err(|e| with_budget(e, bytes))
 }
 
 /// Bounds each distance-buffered selector's complexity and their combined retained storage.
@@ -4943,6 +4960,11 @@ fn parse_stats(p: &Json) -> Result<Vec<StatOp>, String> {
 }
 
 fn zonal_stats(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
+    zonal_stats_on(inp, p, None)
+}
+
+/// [`zonal_stats`] on `threads` threads (none: as many as pay off and the masks' memory allows).
+fn zonal_stats_on(inp: &dyn Inputs, p: &Json, threads: Option<usize>) -> Result<ToolResult, String> {
     let r_name = {
         let n = s(p, "raster");
         if n.is_empty() { s(p, "layer") } else { n }
@@ -5007,38 +5029,48 @@ fn zonal_stats(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
         out.fields.push(Field::new(name.clone(), *ty));
     }
 
-    let target_rows = rows(inp, p, poly_param, poly_ds);
+    let target_rows: Vec<usize> = rows(inp, p, poly_param, poly_ds).into_iter().filter(|&r| r < poly_ds.features.len()).collect();
+    // Each feature's statistics are its own, its cells summed in the same order on any thread, so
+    // the features are worked out on several threads when there are many (#1252). A thread holds
+    // a feature's mask, up to the raster's size, and briefly its trimmed copy too, so their memory
+    // bounds the threads too.
+    let mask_bytes = (r.width as usize).saturating_mul(r.height as usize).saturating_mul(2);
+    let threads = threads.unwrap_or_else(|| crate::parallel::threads_for_scratch(target_rows.len(), PARALLEL_FEATURES, mask_bytes));
+    crate::control::begin(target_rows.len());
+    // A feature's statistics by band, whether its geometry was read, its parts that couldn't be
+    // projected and what went wrong.
+    let worked = crate::parallel::try_map_on(
+        &target_rows,
+        threads,
+        || (),
+        |_, _, &r_idx| {
+            let none = || vec![crate::rasterops::ZoneStats::default(); bands.len()];
+            let Some(f) = poly_ds.features.get(r_idx) else { return Ok((none(), false, 0, None)) };
+            Ok::<_, String>(match &f.geometry {
+                Some(Geometry::Polygon(polys)) if !polys.is_empty() => {
+                    // Dataset geometry is already lon/lat; crs records the source system.
+                    match crate::rasterops::transform_feature_polygons_to_lonlat(polys, None) {
+                        Ok(polys_lonlat) => {
+                            let mut failed_parts = Vec::new();
+                            let st = crate::rasterops::zonal_statistics_with_failures(r, &bands, &polys_lonlat, &mut failed_parts)?;
+                            let detail = (!failed_parts.is_empty())
+                                .then(|| format!("feature {}: raster projection failed for polygon part(s) {failed_parts:?}", f.id));
+                            (st, true, failed_parts.len(), detail)
+                        }
+                        Err(e) => (none(), false, 0, Some(format!("feature {}: {e}", f.id))),
+                    }
+                }
+                _ => (none(), false, 0, Some(format!("feature {}: missing or empty geometry", f.id))),
+            })
+        },
+    )?;
     let mut skipped_features = 0usize;
     let mut skipped_parts = 0usize;
     let mut failure_details = Vec::new();
-    for r_idx in target_rows {
+    for (&r_idx, (stats_by_band, feature_valid, failed_parts, detail)) in target_rows.iter().zip(worked) {
         let Some(f) = poly_ds.features.get(r_idx) else { continue };
-        let (stats_by_band, feature_valid) = match &f.geometry {
-            Some(Geometry::Polygon(polys)) if !polys.is_empty() => {
-                // Dataset geometry is already lon/lat; crs records the source system.
-                match crate::rasterops::transform_feature_polygons_to_lonlat(polys, None) {
-                    Ok(polys_lonlat) => {
-                        let mut failed_parts = Vec::new();
-                        let st = crate::rasterops::zonal_statistics_with_failures(r, &bands, &polys_lonlat, &mut failed_parts)?;
-                        skipped_parts += failed_parts.len();
-                        if !failed_parts.is_empty() {
-                            failure_details
-                                .push(format!("feature {}: raster projection failed for polygon part(s) {failed_parts:?}", f.id));
-                        }
-                        (st, true)
-                    }
-                    Err(e) => {
-                        failure_details.push(format!("feature {}: {e}", f.id));
-                        (vec![crate::rasterops::ZoneStats::default(); bands.len()], false)
-                    }
-                }
-            }
-            _ => {
-                failure_details.push(format!("feature {}: missing or empty geometry", f.id));
-                (vec![crate::rasterops::ZoneStats::default(); bands.len()], false)
-            }
-        };
-
+        skipped_parts += failed_parts;
+        failure_details.extend(detail);
         if !feature_valid {
             skipped_features += 1;
         }
@@ -6615,6 +6647,16 @@ mod tests {
             _ => panic!("expected raster"),
         };
         assert!((pred_inter.bands[0].data[0] - 20.0).abs() < 1e-4, "expected 20.0 at (0.5, 0.5), got {}", pred_inter.bands[0].data[0]);
+    }
+
+    /// A Buffer refused for memory names the budget on this computer (#1291 step 2), which on the
+    /// desktop follows its memory and is never below the fixed one; other errors are left as they are.
+    #[test]
+    fn buffer_budget_follows_the_computer_and_is_named() {
+        assert!(max_buffer_bytes() >= MAX_BUFFER_BYTES && max_buffer_bytes() <= BUFFER_BYTES_CEILING.max(MAX_BUFFER_BYTES));
+        let e = with_budget(BUFFER_STORAGE_ERROR.to_string(), 512 << 20);
+        assert!(e.starts_with(BUFFER_STORAGE_ERROR) && e.contains("512 MiB"), "{e}");
+        assert_eq!(with_budget("Distance must be a number".into(), 512 << 20), "Distance must be a number");
     }
 
     #[test]
@@ -9639,6 +9681,47 @@ mod tests {
         assert!(crate::param_applies("spatialJoin", "merge", &with("", "")));
         assert!(!crate::param_applies("spatialJoin", "merge", &with("", "Join one to many")));
         assert!(crate::param_applies("buffer", "units", &with("", "")));
+    }
+
+    /// Zones worked out on several threads give the same statistics, bit for bit, as on one, in
+    /// input order (#1252): zones without geometry, past the raster's edge and overlapping ones
+    /// included.
+    #[test]
+    fn zonal_stats_on_several_threads_is_zonal_stats_on_one() {
+        let (w, h) = (200u32, 150u32);
+        let band = |k: f32| (0..w * h).map(|i| ((i % w) as f32 * 0.37 + (i / w) as f32 * 1.13 + k).sin() * 1e3 + 0.1).collect::<Vec<f32>>();
+        let gt = rustgis_data::raster::GeoTransform { origin_x: 0.0, origin_y: 15.0, pixel_width: 0.1, pixel_height: -0.1 };
+        let raster = rustgis_data::raster::Raster::new(
+            "elev",
+            w,
+            h,
+            vec![band(0.0), band(2.0)],
+            gt,
+            rustgis_data::raster::Crs::LonLat,
+            None,
+            rustgis_data::raster::ColorHint::Gray,
+            "Float32",
+        )
+        .unwrap();
+        let mut zones = Dataset::new("zones", GeometryType::Polygon, vec![Field::new("id", FieldType::Integer)]);
+        for i in 0..600i64 {
+            let (x, y, d) = ((i * 37 % 230) as f64 / 10.0 - 1.0, (i * 53 % 170) as f64 / 10.0 - 1.0, 0.3 + (i % 7) as f64 * 0.4);
+            zones.push(if i % 61 == 0 { None } else { Some(sq(x, y, d)) }, vec![Value::Int(i)]);
+        }
+        let m =
+            RasterMap { datasets: HashMap::from([("zones".to_string(), zones)]), rasters: HashMap::from([("elev".to_string(), &raster)]) };
+        let p = serde_json::json!({"raster": "elev", "polygons": "zones", "bands": [1, 2], "stats": ["count", "sum", "mean", "min", "max", "stddev"]});
+        let one = zonal_stats_on(&m, &p, Some(1)).unwrap();
+        let attrs = |r: &ToolResult| match &r.output {
+            Output::Layer(l) => l.features.iter().map(|f| format!("{:?}", f.attrs)).collect::<Vec<_>>(),
+            _ => panic!("a layer"),
+        };
+        assert!(attrs(&one).iter().any(|a| a.contains("Float")), "some zones meet the raster");
+        for threads in [2, 7, 16] {
+            let many = zonal_stats_on(&m, &p, Some(threads)).unwrap();
+            assert_eq!(attrs(&many), attrs(&one), "{threads} threads");
+            assert_eq!(many.messages, one.messages, "{threads} threads");
+        }
     }
 
     #[test]

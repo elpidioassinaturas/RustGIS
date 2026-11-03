@@ -70,6 +70,17 @@ switching to another map, a result that adds to or changes the map is refused (o
 tables or a file is still made). Opening another project drops the run. Scripts, models, the AI
 Assistant, the command line and the web app wait for each tool to finish.
 
+**Viewshed**, **IDW Interpolation** and **Kriging** refuse a run that would take more than a second
+or two of work on one thread (a ray step, a cell-point pair), and **Kernel Density** one whose
+points' search windows (the square around each point's radius) cover more than 50 million cells. On the desktop they run on several
+cores (up to 16), and they take as many times more work as the threads they run on. Threads share
+cores and memory, so a run at that limit can take up to about twice as long as a one-thread run at
+its own (measured on one machine, a Xeon Silver 4114; it can be longer on others); in the web app,
+on one thread, the limits stay as they are. The error names the
+limit on this computer and the threads it counted. A tool's own default cell size still follows the
+one-thread limit, so it makes the same grid on any computer; a finer cell size given is what the
+larger limit lets through.
+
 From the command line or a script (`gp.run`), a built-in tool's parameter with a list of choices, such as Buffer's
 units, takes one of them in any letter case (`"meters"` for `Meters`); any other value is an error
 that names the choices (Buffer's units no longer take the abbreviations `m`, `mi` or `metres`).
@@ -239,7 +250,8 @@ to 0.031 % of the distance inside the true curve in the projection plane, and up
 polygon corners and line joins, in addition to the projection error. Negative Buffer
 distances shrink polygons. Buffer and Select Layer By Location limit distances to 5,000 km.
 Ordinary Buffer limits each feature to 2,000,000 outline vertices. Its retained output has a
-separate memory budget: 512 MiB on desktop, 128 MiB in the browser, including geometry
+separate memory budget: on the desktop a quarter of the computer's memory, from 512 MiB up to 8 GiB
+(`bufferBytes` in `gp.env`), and 128 MiB in the browser, including geometry
 allocations, copied attributes and spare row capacity. Features are processed in bounded
 batches, in input order. Many small buffers can therefore exceed 2,000,000 vertices together.
 Dissolve All retains the shared 2,000,000-vertex limit before union and checks the dissolved
@@ -864,6 +876,9 @@ below the web app's fixed limits and never above a ceiling.
 | `rasterSamples`: samples a raster read holds (cells times bands) | 120 million (32 million in the web app) | 8 bytes a sample | 1 billion |
 | `outputPixels`: pixels of a raster a tool makes | 64 million | 16 bytes a pixel | 512 million |
 | `pagedFeatures`: features read from a service page by page | 100,000 | 20 KB a feature (about 100,000 for every 8 GB) | 1 million |
+| `densityCells`: cells of a Kernel Density raster | 16 million | 16 bytes a cell | 512 million |
+| `bufferBytes`: memory for Buffer's output and Select Layer By Location's buffered selectors | 512 MiB (128 MiB in the web app) | the bytes themselves | 8 GiB |
+| `threadScratchBytes`: working memory a tool's threads take together, beyond one thread's | 256 MiB | a sixteenth of memory, on top of the quarter | 4 GiB |
 
 So a computer with 16 GB reads rasters of up to about 500 million samples. A run that passes on one
 computer can be refused on a smaller one; the error names the limit there. Project Raster (`raster.project`) puts a raster
