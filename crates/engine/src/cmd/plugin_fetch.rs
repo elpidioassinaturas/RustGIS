@@ -312,9 +312,10 @@ pub(crate) struct UrlWaits {
 /// there: an undo may have taken it away, and a layer added since may then have its id.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Added {
-    /// The layers, by id, with where their data came from (their dataset's source: a rename
-    /// keeps it).
-    layers: Vec<(u32, Option<String>)>,
+    /// The layers, by id, with their instance ids (fresh for each layer added, kept by a rename
+    /// and by undo): a layer added since with the same id, even of a file of the same name, isn't
+    /// them.
+    layers: Vec<(u32, u64)>,
     /// The tile layers (a GeoTIFF read in place), by address.
     tiles: Vec<String>,
     /// The map it was added to (its instance id, which stays with it as maps are removed or
@@ -328,10 +329,10 @@ impl Added {
         let at = map.instance_id();
         let Ok(v) = answer else { return Added { map: at, ..Added::default() } };
         let ids = v.get("layers").and_then(Value::as_array).into_iter().flatten().chain(v.get("layer"));
-        let mut layers: Vec<(u32, Option<String>)> = Vec::new();
+        let mut layers: Vec<(u32, u64)> = Vec::new();
         for id in ids.filter_map(Value::as_u64).filter_map(|id| u32::try_from(id).ok()) {
             if let Some(l) = map.layer(id).filter(|_| !layers.iter().any(|(m, ..)| *m == id)) {
-                layers.push((id, l.dataset.source.clone()));
+                layers.push((id, l.instance_id()));
             }
         }
         // A tile layer's answer is its place in the list, which changes: its address doesn't.
@@ -363,7 +364,7 @@ impl Added {
 
     /// Whether any of it is no longer in `map` (or another layer has its id).
     pub(crate) fn gone(&self, map: &crate::map::Map) -> bool {
-        self.layers.iter().any(|(id, source)| map.layer(*id).is_none_or(|l| l.dataset.source != *source))
+        self.layers.iter().any(|(id, instance)| map.layer(*id).is_none_or(|l| l.instance_id() != *instance))
             || self.tiles.iter().any(|url| !map.tiles.iter().any(|t| t.url == *url))
     }
 }
@@ -675,10 +676,13 @@ mod tests {
         // Renamed while the command waited: still it.
         s.run("layer.rename", &json!({"layer": id, "name": "Renamed"})).unwrap();
         assert_eq!(s.run("layer.addUrl", &asked).unwrap(), json!({"layer": id}));
-        // Another layer has its id now.
-        let other =
-            Added { layers: vec![(id, Some("https://x.org/other.geojson".into()))], map: s.map().instance_id(), ..Added::default() };
-        s.rerun_landed = vec![(asked.clone(), answer, other)];
+        // Another layer has its id now, of a file of the same name (its source is the same): not it.
+        let added = s.rerun_landed[0].2.clone();
+        let mut other = s.map().layer(id).unwrap().clone();
+        other.renew_instance_id();
+        let at = s.map().layers.iter().position(|l| l.id == id).unwrap();
+        s.map_mut().layers[at] = other;
+        s.rerun_landed = vec![(asked.clone(), answer, added)];
         let e = s.run("layer.addUrl", &asked).unwrap_err();
         assert!(e.contains("taken away (undone)"), "{e}");
         // A tile layer (a GeoTIFF read in place answers its place in the list), then taken away.
@@ -753,17 +757,19 @@ mod tests {
         // A key the front end passes on, left out: another import, which lands nothing.
         assert!(!s.url_waits.holds(906, &json!({"url": "https://x.org/g.csv"})));
         // Given up past the wait (`expire`): each late landing is refused, once.
-        let long_ago = Instant::now().checked_sub(REQUEST_WAIT + Duration::from_secs(1)).unwrap();
-        for (n, file) in [(902, "c.csv"), (903, "c2.csv")] {
-            s.url_waits.in_flight.push((n, json!({"url": format!("https://x.org/{file}")}), long_ago));
-        }
-        s.url_waits.expire();
-        for (n, file) in [(902, "c.csv"), (903, "c2.csv")] {
-            let late = json!({"url": format!(" https://x.org/{file} "), "request": n});
-            assert!(s.url_waits.given_up(n, &late), "{n}");
-            let e = s.run("layer.addUrl", &late).unwrap_err();
-            assert!(e.contains("stopped waiting"), "{e}");
-            assert!(!s.url_waits.given_up(n, &late), "{n}: forgotten once refused");
+        // (Only where the clock has run that long: a machine just started can't be that far back.)
+        if let Some(long_ago) = Instant::now().checked_sub(REQUEST_WAIT + Duration::from_secs(1)) {
+            for (n, file) in [(902, "c.csv"), (903, "c2.csv")] {
+                s.url_waits.in_flight.push((n, json!({"url": format!("https://x.org/{file}")}), long_ago));
+            }
+            s.url_waits.expire();
+            for (n, file) in [(902, "c.csv"), (903, "c2.csv")] {
+                let late = json!({"url": format!(" https://x.org/{file} "), "request": n});
+                assert!(s.url_waits.given_up(n, &late), "{n}");
+                let e = s.run("layer.addUrl", &late).unwrap_err();
+                assert!(e.contains("stopped waiting"), "{e}");
+                assert!(!s.url_waits.given_up(n, &late), "{n}: forgotten once refused");
+            }
         }
         // One still out stays given up however many more are: past the bound, a plugin command
         // asks for no new download (and its request isn't downloaded); one that fails is
