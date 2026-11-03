@@ -28,7 +28,7 @@ pub fn commands() -> Vec<C> {
             .when(|s| if s.can_redo() { None } else { Some("nothing to redo") }),
         C::new("tool.set", "Set Map Tool", "Home › Navigate", set_tool)
             .view()
-            .params(r#"{"tool": "explore"|"select"|"selectPolygon"|"selectLasso"|"selectRadius"|"zoomIn"|"measure"|"measureArea"|"createPoint"|"createLine"|"createPolygon"|"editVertices"|"graphicPoint"|"graphicText"|"graphicLine"|"graphicCurve"|"graphicFreehand"|"graphicPolygon"|"graphicLasso"|"graphicRectangle"|"graphicCircle"|"graphicEllipse"|"graphicPicture"}"#),
+            .params(r#"{"tool": "explore"|"select"|"selectPolygon"|"selectLasso"|"selectRadius"|"zoomIn"|"measure"|"measureArea"|"createPoint"|"createLine"|"createPolygon"|"editVertices"|"cutPolygon"|"reshape"|"graphicPoint"|"graphicText"|"graphicLine"|"graphicCurve"|"graphicFreehand"|"graphicPolygon"|"graphicLasso"|"graphicRectangle"|"graphicCircle"|"graphicEllipse"|"graphicPicture"}"#),
         C::new("info.project", "Project Info", "Project", info).view().params(r#"{"nameFilter"?: string, "includeFields"?: bool}"#),
         C::new("info.commands", "List Commands", "Help", list).view(),
         // The session log (#797): read, written out, emptied, turned on or off. It sits outside
@@ -204,6 +204,17 @@ fn reset(s: &mut Session, p: Project) {
     // nothing of the new project is fetched before.
     s.s3_pending.clear();
     crate::s3_connections::resolve_project_s3(s);
+    // What reading a raster left out (a colour table, names, a sidecar's scale) is said again as
+    // the project opens, as when it was added. One still read in the background isn't here yet.
+    let lost: Vec<(String, String)> = s
+        .project
+        .maps
+        .iter()
+        .flat_map(|m| &m.layers)
+        .filter_map(|l| Some((&l.name, l.raster.as_ref()?.data.as_ref()?)))
+        .flat_map(|(name, d)| d.lost.iter().map(move |l| (name.clone(), l.clone())))
+        .collect();
+    super::raster::say_losses(s, lost);
     // A terrain saved on a DEM name two layers share draws the first of them: said, as the
     // project opens (its layers keep their names).
     let shared: Vec<(String, String)> = s
@@ -377,6 +388,8 @@ fn rename(s: &mut Session, p: &Value) -> CmdResult {
     Ok(Value::Null)
 }
 
+/// Picks the map tool: a Create tool needs a layer of its kind selected, and the tools that
+/// change features (Edit Vertices, Cut Polygon, Reshape) need editing on.
 fn set_tool(s: &mut Session, p: &Value) -> CmdResult {
     let t = parse_tool(p)?;
     if t.creates() {
@@ -392,7 +405,7 @@ fn set_tool(s: &mut Session, p: &Value) -> CmdResult {
             return Err(format!("{} needs a {} layer", t.label(), t.label().trim_start_matches("Create ").to_lowercase()));
         }
     }
-    if t == Tool::EditVertices && !s.map().editing.settings.enabled {
+    if matches!(t, Tool::EditVertices | Tool::CutPolygon | Tool::Reshape) && !s.map().editing.settings.enabled {
         return Err("editing is turned off (Edit › Edit)".into());
     }
     s.tool = t;
