@@ -62,11 +62,12 @@ fn drop_replaced(app: &mut RustGisApp) {
 /// Not while a pointer button is down, or in the frame it comes up: the run would swallow that
 /// release ([`RustGisApp::drop_stale_clicks`]), and egui would hold the button down until the next
 /// click. The click that release makes reaches [`ask`] after this, in the frame's drawing, and
-/// finds the command still waiting.
+/// finds the command still waiting. A window that has lost focus doesn't wait: the release may
+/// never come, and egui clears no button then.
 pub(crate) fn run_next(app: &mut RustGisApp, ctx: &egui::Context) {
     drop_replaced(app);
     if app.ui.plugin_start.waiting.front().is_none_or(|s| s.frames < FRAMES_SHOWN)
-        || ctx.input(|i| i.pointer.any_down() || i.pointer.any_released())
+        || ctx.input(|i| i.focused && (i.pointer.any_down() || i.pointer.any_released()))
     {
         return;
     }
@@ -235,6 +236,28 @@ mod tests {
         h.step();
         assert!(h.state().session.map().layer_by_name("Streams").is_some());
         plugins::unload("ui-held");
+    }
+
+    /// A window that loses focus with a button down may never hear the release, and egui keeps the
+    /// button down: the command doesn't wait for it.
+    #[test]
+    fn a_command_does_not_wait_for_a_button_once_the_window_has_lost_focus() {
+        let mut h = launch("ui-left");
+        let at = pos2(700.0, 400.0);
+        h.event(Event::PointerMoved(at));
+        h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        h.state_mut().run_by_user("plugin:ui-left/f", rename("Rivers", "Streams")).unwrap();
+        for _ in 0..4 {
+            h.step();
+        }
+        assert!(h.state().session.map().layer_by_name("Rivers").is_some(), "it waits while the window has focus");
+        h.input_mut().focused = false;
+        h.event(Event::WindowFocused(false));
+        h.step();
+        assert!(h.ctx.input(|i| i.pointer.any_down()), "egui keeps the button down");
+        assert!(h.state().session.map().layer_by_name("Streams").is_some());
+        plugins::unload("ui-left");
     }
 
     /// A project replacing this one takes the commands waiting in it, which name its layers, and
