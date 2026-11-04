@@ -821,9 +821,13 @@ mod tests {
         let third = json!({"url": "https://x.org/c.geojson"});
         s.url_waits.wait(902, third.clone());
         s.call_requests = Some(Vec::new());
-        s.request_url(&third).unwrap();
+        // However often one call asks for it, its command waits for it once.
+        for _ in 0..3 {
+            s.request_url(&third).unwrap();
+        }
         assert!(s.take_url_requests().is_empty());
-        assert_eq!(s.call_requests.take().unwrap()[0].0, 902);
+        let asked: Vec<u64> = s.call_requests.take().unwrap().iter().map(|(n, _)| *n).collect();
+        assert_eq!(asked, [902]);
         s.request_url(&third).unwrap();
         assert_ne!(s.take_url_requests()[0]["request"], json!(902));
         assert!(s.request_url(&json!("https://x.org/d.geojson")).unwrap_err().contains("an object"));

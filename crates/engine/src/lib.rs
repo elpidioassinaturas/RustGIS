@@ -1050,7 +1050,10 @@ impl Session {
             }
             self.url_requests.push(q);
         }
-        if let Some(asked_now) = self.call_requests.as_mut() {
+        // Once per download, however many times a command asks for it in one call.
+        if let Some(asked_now) = self.call_requests.as_mut()
+            && !asked_now.iter().any(|(n, _)| *n == number)
+        {
             asked_now.push((number, asked));
         }
         self.request_only = true;
