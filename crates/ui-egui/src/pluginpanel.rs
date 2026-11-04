@@ -649,4 +649,26 @@ mod tests {
         assert!(said[0].starts_with(first) && said[0].contains("stopped waiting"), "{said:?}");
         plugins::unload("ui-late");
     }
+
+    /// A service's page that fails is what the plugin command that asked for it is answered, when
+    /// it fails, not the wait running out (#1202).
+    #[test]
+    fn a_failed_service_read_answers_the_command_waiting() {
+        use rustgis_engine::plugins;
+        let pkg = plugins::Package::from_zip(&plugins::testing::package("ui-pages", &["edit", "network"])).unwrap();
+        plugins::load(pkg, "test").unwrap();
+        let mut app = RustGisApp::with_sample();
+        let url = "https://x.org/collections/a/items";
+        app.run("plugin:ui-pages/f", json!({"op": "layer.addUrl", "params": {"url": url, "service": true}})).unwrap();
+        let taken = app.session.take_url_requests();
+        assert_eq!(taken.len(), 1, "{taken:?}");
+        let id = app.session.download_started();
+        let landed = crate::serviceui::Landed { id, url: url.to_string(), params: taken[0].clone(), origin: None };
+        crate::serviceui::go_on(&mut app, landed, 0, rustgis_engine::data::ogc::Step::Failed("its second page failed".into()));
+        let ran = app.session.poll_plugin_retries();
+        assert_eq!(ran.len(), 1, "{ran:?}");
+        assert!(ran[0].1.as_ref().is_err_and(|e| e.contains("its second page failed")), "{ran:?}");
+        assert!(!app.session.plugin_retries_waiting());
+        plugins::unload("ui-pages");
+    }
 }
