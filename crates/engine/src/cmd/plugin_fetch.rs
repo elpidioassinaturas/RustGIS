@@ -557,13 +557,21 @@ impl Session {
         // and the others still wait.
         let fresh = |s: &Self, n: &u64| !s.url_waits.has(*n) && !s.plugin_retries.iter().any(|r| r.requests.contains(n));
         if requests.iter().any(|(n, _)| fresh(self, n)) && self.url_waits.given_up_full() {
+            let mut cancelled = Vec::new();
             for (n, _) in &requests {
                 if fresh(self, n) {
+                    cancelled.extend(
+                        self.url_requests
+                            .iter()
+                            .filter(|q| q["request"].as_u64() == Some(*n))
+                            .filter_map(|q| q["url"].as_str().map(String::from)),
+                    );
                     self.url_requests.retain(|q| q["request"].as_u64() != Some(*n));
                 }
             }
             return Err(format!(
-                "{id}: {MAX_EXPIRED} downloads plugin commands stopped waiting for are still under way; run it again once they have come in"
+                "{id}: {MAX_EXPIRED} downloads plugin commands stopped waiting for are still under way; run it again once they have come in{}",
+                not_started(&cancelled)
             ));
         }
         // One waiting run per command: the latest call's, which replaces an earlier one. The
@@ -962,7 +970,7 @@ mod tests {
         let mark = s.notice_mark();
         s.url_requests.push(json!({"url": "https://x.org/new.csv", "request": 960}));
         let e = s.retry_plugin("plugin:eng-share-c/f", &p, Vec::new(), vec![(960, json!({"url": "https://x.org/new.csv"}))]).unwrap_err();
-        assert!(e.contains("still under way"), "{e}");
+        assert!(e.contains("still under way") && e.contains("its download of https://x.org/new.csv wasn't started"), "{e}");
         assert!(s.take_url_requests().is_empty(), "not downloaded");
         // Refused, it changed nothing: the command's earlier run still waits.
         assert!(s.plugin_retries.iter().any(|r| r.id == "plugin:eng-share-c/f" && r.requests == [959]));
