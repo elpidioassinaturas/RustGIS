@@ -3,6 +3,9 @@
 //! nothing is drawn until it has finished. Clicks made meanwhile, which the window system holds
 //! until then, are dropped, so a second click out of impatience doesn't run it again. Scripts, the
 //! AI Assistant and attached agents run commands at once ([`RustGisApp::run`]).
+//!
+//! A command that isn't a plugin's, asked for during the wait, runs first. One that replaces the
+//! project takes the commands waiting with it, and says so: they name the old project's layers.
 
 use crate::{RustGisApp, i18n};
 use serde_json::Value;
@@ -20,6 +23,8 @@ struct Start {
     id: String,
     params: Value,
     frames: u8,
+    /// The project it was asked for in ([`rustgis_engine::Session::opened`]).
+    opened: u64,
 }
 
 #[derive(Default)]
@@ -32,15 +37,37 @@ pub struct State {
 /// Leaves plugin command `id` to start once the window has shown it. The same command with the
 /// same parameters, already waiting, isn't asked twice.
 pub(crate) fn ask(app: &mut RustGisApp, id: &str, params: Value) {
+    let opened = app.session.opened;
     let waiting = &mut app.ui.plugin_start.waiting;
-    if !waiting.iter().any(|s| s.id == id && s.params == params) {
-        waiting.push_back(Start { id: id.to_string(), params, frames: 0 });
+    if !waiting.iter().any(|s| s.id == id && s.params == params && s.opened == opened) {
+        waiting.push_back(Start { id: id.to_string(), params, frames: 0, opened });
+    }
+}
+
+/// Drops the commands asked for in a project another has replaced, and says which: they would act
+/// on a namesake in the new one.
+fn drop_replaced(app: &mut RustGisApp) {
+    let opened = app.session.opened;
+    let (kept, dropped): (VecDeque<_>, VecDeque<_>) =
+        std::mem::take(&mut app.ui.plugin_start.waiting).into_iter().partition(|s| s.opened == opened);
+    app.ui.plugin_start.waiting = kept;
+    if !dropped.is_empty() {
+        let commands = dropped.iter().map(|s| title(app, &s.id)).collect::<Vec<_>>().join(", ");
+        app.session.notify(i18n::fmt("Not run, because another project opened: {commands}.", &[("commands", &commands)]), true);
     }
 }
 
 /// Runs the command that has been shown. Its errors are notices, as for any command.
-pub(crate) fn run_next(app: &mut RustGisApp) {
-    if app.ui.plugin_start.waiting.front().is_none_or(|s| s.frames < FRAMES_SHOWN) {
+///
+/// Not while a pointer button is down, or in the frame it comes up: the run would swallow that
+/// release ([`RustGisApp::drop_stale_clicks`]), and egui would hold the button down until the next
+/// click. The click that release makes reaches [`ask`] after this, in the frame's drawing, and
+/// finds the command still waiting.
+pub(crate) fn run_next(app: &mut RustGisApp, ctx: &egui::Context) {
+    drop_replaced(app);
+    if app.ui.plugin_start.waiting.front().is_none_or(|s| s.frames < FRAMES_SHOWN)
+        || ctx.input(|i| i.pointer.any_down() || i.pointer.any_released())
+    {
         return;
     }
     let Some(start) = app.ui.plugin_start.waiting.pop_front() else { return };
@@ -61,22 +88,33 @@ pub(crate) fn frame_drawn(app: &mut RustGisApp, ctx: &egui::Context) {
 
 /// What the status bar says while a command waits to start: `Running BrasilData: Solos…`.
 pub(crate) fn running(app: &RustGisApp) -> Option<String> {
-    let id = &app.ui.plugin_start.waiting.front()?.id;
+    let title = title(app, &app.ui.plugin_start.waiting.front()?.id);
+    Some(i18n::fmt("Running {command}…", &[("command", &title)]))
+}
+
+/// A plugin command as the user knows it: `BrasilData: Solos`.
+fn title(app: &RustGisApp, id: &str) -> String {
     let plugin = rustgis_engine::plugins::split_id(id).and_then(|(plugin, item)| Some((rustgis_engine::plugins::get(plugin)?, item)));
-    let title = plugin.map_or_else(
-        || id.clone(),
+    plugin.map_or_else(
+        || id.to_string(),
         |(p, item)| {
             let m = &p.manifest;
             let label = m.commands.iter().find(|c| c.id == item).map_or(item, |c| m.translate(app.lang().code(), &c.label));
-            format!("{}: {}", m.name, label.replace('\n', " "))
+            i18n::fmt("{plugin}: {command}", &[("plugin", &m.name), ("command", &label.replace('\n', " "))])
         },
-    );
-    Some(i18n::fmt("Running {command}…", &[("command", &title)]))
+    )
 }
 
 impl RustGisApp {
     /// Before a frame, from the window: drops the clicks made during a long plugin command, press
-    /// and release alike, so none is half taken.
+    /// and release alike, so none is half taken. No button was down when it started, so this drops
+    /// no release of a press egui has seen (`run_next`); a release left for the next frame, its
+    /// press dropped, is no click to egui.
+    ///
+    /// These events carry no time, and the window reads them in one batch: a click made after the
+    /// command returned, before this frame's input was read, goes with them. That frame comes right
+    /// after the one that ran the command, as egui repaints twice for `frame_drawn`'s request, so
+    /// this is a frame's time at most.
     pub fn drop_stale_clicks(&mut self, input: &mut egui::RawInput) {
         if std::mem::take(&mut self.ui.plugin_start.clicks_stale) {
             input.events.retain(|e| !matches!(e, egui::Event::PointerButton { .. }));
@@ -164,5 +202,65 @@ mod tests {
         let mut input = egui::RawInput { events: events(), ..Default::default() };
         app.drop_stale_clicks(&mut input);
         assert_eq!(input.events.len(), 3, "only those of that run");
+    }
+
+    /// A button held when a command comes to start: it waits for the release, and a frame more.
+    /// Run while the button was down, the release would come in the frame whose clicks are
+    /// dropped, and egui would keep the button down until the next click.
+    #[test]
+    fn a_command_waits_for_a_held_button() {
+        let mut h = launch("ui-held");
+        let id = "plugin:ui-held/f";
+        let at = pos2(700.0, 400.0);
+        let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.event(Event::PointerMoved(at));
+        h.event(button(true));
+        h.step();
+        h.state_mut().run_by_user(id, rename("Rivers", "Streams")).unwrap();
+        for _ in 0..4 {
+            h.step();
+        }
+        // What a long run leaves behind, if it has run.
+        let ran = h.state().session.map().layer_by_name("Streams").is_some();
+        h.state_mut().ui.plugin_start.clicks_stale = ran;
+        let mut input = egui::RawInput { events: vec![button(false)], ..Default::default() };
+        h.state_mut().drop_stale_clicks(&mut input);
+        for event in input.events {
+            h.event(event);
+        }
+        h.step();
+        assert!(!h.ctx.input(|i| i.pointer.any_down()), "the button is up again");
+        assert!(!ran, "it waited for the release");
+        assert!(h.state().session.map().layer_by_name("Rivers").is_some(), "the release's own click comes after `logic`");
+        h.step();
+        assert!(h.state().session.map().layer_by_name("Streams").is_some());
+        plugins::unload("ui-held");
+    }
+
+    /// A project replacing this one takes the commands waiting in it, which name its layers, and
+    /// says so; with none waiting, it says nothing.
+    #[test]
+    fn a_new_project_drops_the_commands_waiting_and_says_so() {
+        let mut h = launch("ui-gone");
+        let id = "plugin:ui-gone/f";
+        let said = |h: &egui_kittest::Harness<'static, RustGisApp>, mark| {
+            h.state().session.notices_since(mark).iter().filter(|n| n.text.contains("Not run") && n.text.contains("ui-gone")).count()
+        };
+        let mark = h.state().session.notice_mark();
+        h.state_mut().run_by_user("project.sample", json!({})).unwrap();
+        h.run();
+        assert_eq!(said(&h, mark), 0, "none waiting");
+        h.state_mut().run_by_user(id, rename("Rivers", "Streams")).unwrap();
+        h.state_mut().run_by_user("project.sample", json!({})).unwrap();
+        h.run();
+        assert!(h.state().session.map().layer_by_name("Rivers").is_some(), "the new project's namesake is left alone");
+        assert_eq!(said(&h, mark), 1);
+        assert!(running(h.state()).is_none());
+        // Asked for in the new project, it runs there.
+        h.state_mut().run_by_user(id, rename("Rivers", "Streams")).unwrap();
+        h.run();
+        assert!(h.state().session.map().layer_by_name("Streams").is_some());
+        assert_eq!(said(&h, mark), 1);
+        plugins::unload("ui-gone");
     }
 }

@@ -3923,9 +3923,9 @@ impl RustGisApp {
         if self.session.tool != rustgis_engine::Tool::Graphic("text") {
             self.ui.dynamic_text = None;
         }
+        pluginstart::run_next(self, ctx);
         // Addresses commands asked for where they couldn't download themselves (the browser):
         // fetched off the frame and added when they land, as Home › Add › Add Data › From URL does.
-        pluginstart::run_next(self);
         for p in self.session.take_url_requests() {
             if let Err(e) = self.run("ui.addUrl", p) {
                 self.session.notify(e, true);

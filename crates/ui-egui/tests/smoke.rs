@@ -1174,6 +1174,35 @@ fn plugin_small_ribbon_columns_and_nested_menus_preserve_actions() {
     rp::unload("ui-small");
 }
 
+/// A second click begun while the first waits to start: the command waits for its release, and
+/// that click finds it still waiting, so it runs once.
+#[test]
+fn a_second_click_on_a_plugin_command_about_to_start_runs_it_once() {
+    let _turn = PLUGINS.lock().unwrap_or_else(|e| e.into_inner());
+    use rustgis_ui_egui::rustgis_engine::plugins as rp;
+    let mut m: serde_json::Value = serde_json::from_str(&rp::testing::manifest("ui-again", &[])).unwrap();
+    m["commands"] = json!([{"id": "e", "label": "Again Error"}]);
+    m["tab"] = json!({"label": "Again Tab", "groups": [{"label": "Again", "items": ["e"]}]});
+    let pkg = rp::testing::zip_of(&[("plugin.json", m.to_string().as_bytes()), ("plugin.wasm", &rp::testing::wasm())]);
+    rp::load(rp::Package::from_zip(&pkg).unwrap(), "test").unwrap();
+    let mut h = harness();
+    h.state_mut().ui.tab = "plugin:ui-again".into();
+    h.run_steps(4);
+    let mark = h.state().session.notice_mark();
+    let at = h.get_by_label("Again Error").rect().center();
+    let button =
+        |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+    h.get_by_label("Again Error").click();
+    h.step();
+    h.event(button(true));
+    // Two frames are 0.5 s here (`step_dt`), so it is still a click (`max_click_duration`).
+    h.run_steps(2);
+    h.event(button(false));
+    h.run_steps(4);
+    assert_eq!(h.state().session.notices_since(mark).iter().filter(|n| n.error && n.text.contains("nope")).count(), 1);
+    rp::unload("ui-again");
+}
+
 #[test]
 fn browse_lists_thousands_of_plugins_quickly() {
     use rustgis_ui_egui::rustgis_engine::plugins::registry;
