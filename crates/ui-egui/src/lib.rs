@@ -3782,8 +3782,9 @@ impl RustGisApp {
             }
             Err(e) => {
                 rustgis_engine::cmd::geolibre::discard_pending(&mut self.session, &pending);
-                // Running it said the error already: again only to name the address it lacks.
-                if !e.starts_with(&url) {
+                // Running it said the error already: again only to name the address it lacks. An
+                // error may name it redacted.
+                if !e.starts_with(&url) && !e.starts_with(&rustgis_engine::sources::redact(&url)) {
                     self.session.notify(format!("{url}: {e}"), true);
                 }
             }

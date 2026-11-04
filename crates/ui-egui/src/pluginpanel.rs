@@ -624,29 +624,31 @@ mod tests {
     }
 
     /// A download that lands after its plugin command stopped waiting for it isn't added, and
-    /// that is said once, with its address (#1202).
+    /// that is said once, with its address, whether or not that holds a key (#1202).
     #[test]
     fn a_late_download_is_refused_in_one_notice() {
         use rustgis_engine::plugins;
         let pkg = plugins::Package::from_zip(&plugins::testing::package("ui-late", &["edit", "network"])).unwrap();
         plugins::load(pkg, "test").unwrap();
-        let mut app = RustGisApp::with_sample();
-        let first = "https://x.org/first.csv";
-        app.run("plugin:ui-late/f", json!({"op": "layer.addUrl", "params": {"url": first}})).unwrap();
-        // The app takes it and starts downloading; the command is run again for another address,
-        // so nothing waits for the first now.
-        let taken = app.session.take_url_requests();
-        assert_eq!(taken.len(), 1, "{taken:?}");
-        app.run("plugin:ui-late/f", json!({"op": "layer.addUrl", "params": {"url": "https://x.org/second.csv"}})).unwrap();
-        let id = app.session.download_started();
-        let mark = app.session.notice_mark();
-        let layers = app.session.map().layers.len();
-        let landed = crate::serviceui::Landed { id, url: first.to_string(), params: taken[0].clone(), origin: None };
-        app.add_landed(landed, b"name,lon,lat\nA,10,50\n".to_vec());
-        assert_eq!(app.session.map().layers.len(), layers, "not added");
-        let said: Vec<String> = app.session.notices_since(mark).iter().filter(|n| n.error).map(|n| n.text.clone()).collect();
-        assert_eq!(said.len(), 1, "{said:?}");
-        assert!(said[0].starts_with(first) && said[0].contains("stopped waiting"), "{said:?}");
+        for first in ["https://x.org/first.csv", "https://x.org/first.csv?token=hunter2"] {
+            let mut app = RustGisApp::with_sample();
+            app.run("plugin:ui-late/f", json!({"op": "layer.addUrl", "params": {"url": first}})).unwrap();
+            // The app takes it and starts downloading; the command is run again for another
+            // address, so nothing waits for the first now.
+            let taken = app.session.take_url_requests();
+            assert_eq!(taken.len(), 1, "{taken:?}");
+            app.run("plugin:ui-late/f", json!({"op": "layer.addUrl", "params": {"url": "https://x.org/second.csv"}})).unwrap();
+            let id = app.session.download_started();
+            let mark = app.session.notice_mark();
+            let layers = app.session.map().layers.len();
+            let landed = crate::serviceui::Landed { id, url: first.to_string(), params: taken[0].clone(), origin: None };
+            app.add_landed(landed, b"name,lon,lat\nA,10,50\n".to_vec());
+            assert_eq!(app.session.map().layers.len(), layers, "not added");
+            let said: Vec<String> = app.session.notices_since(mark).iter().filter(|n| n.error).map(|n| n.text.clone()).collect();
+            assert_eq!(said.len(), 1, "{said:?}");
+            assert!(said[0].starts_with("https://x.org/first.csv") && said[0].contains("stopped waiting"), "{said:?}");
+            assert!(!said[0].contains("hunter2"), "{said:?}");
+        }
         plugins::unload("ui-late");
     }
 
