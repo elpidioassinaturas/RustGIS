@@ -471,9 +471,9 @@ fn rasterize(s: &mut Session, p: &Value) -> CmdResult {
             return Err(format!("{ln}: {what} {x} is past the range of a raster's 32-bit pixels"));
         }
         if whole_field && x.fract() == 0.0 && x.abs() > EXACT_WHOLE {
-            return Err(format!(
-                "{ln}: {what} {x} is more than a raster's pixels hold exactly ({EXACT_WHOLE}); a text field gives codes instead"
-            ));
+            // Only a numeric field's numbers can be given as text instead.
+            let hint = if field.is_some() && !text { "; a text field gives codes instead" } else { "" };
+            return Err(format!("{ln}: {what} {x} is more than a raster's pixels hold exactly ({EXACT_WHOLE}){hint}"));
         }
         // As a pixel holds them: a value that rounds to the no-data value would be lost.
         if x as f32 == nodata as f32 {

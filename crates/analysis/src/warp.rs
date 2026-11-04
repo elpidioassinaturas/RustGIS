@@ -515,13 +515,18 @@ pub struct Burned {
 /// none is `nodata`. Each shape is filled by scanline over its own window of the grid (as
 /// [`crate::rasterops::polygon_mask`]), so a polygon narrower than a cell may hold no cell centre
 /// and be missed (and counted). The band and one shape's window, as filled and as trimmed, are held
-/// at once: at most 6 bytes a cell.
+/// at once: at most 6 bytes a cell. A shape whose value is `nodata` is refused: its cells couldn't
+/// be told from those under none. The time goes by each shape's window and edges, with no cap on
+/// their total; a run under a [`crate::control::Control`] stops between shapes and counts them.
 pub fn rasterize(g: &Grid, shapes: &[Shape], nodata: f32) -> Result<Burned, String> {
     let max = max_samples();
     let too_big =
         || format!("{} × {} cells are more than this computer's {max}: give a larger cellSize or a smaller extent", g.width, g.height);
     if g.width.checked_mul(g.height).is_none_or(|n| n > max) {
         return Err(too_big());
+    }
+    if shapes.iter().any(|s| s.value == nodata || (s.value.is_nan() && nodata.is_nan())) {
+        return Err("a shape's value is the no-data value: give another nodata".into());
     }
     let size = (u32::try_from(g.width).map_err(|_| too_big())?, u32::try_from(g.height).map_err(|_| too_big())?);
     let tr = g.crs.transformer()?;
@@ -530,7 +535,10 @@ pub fn rasterize(g: &Grid, shapes: &[Shape], nodata: f32) -> Result<Burned, Stri
     let mut unplaced = Vec::new();
     let (mut burned, mut missed) = (0, 0);
     let mut failed = Vec::new();
+    crate::control::begin(shapes.len());
     for (i, shape) in shapes.iter().enumerate() {
+        crate::control::check()?;
+        crate::control::reached(i);
         failed.clear();
         let mask = crate::rasterops::polygon_mask_on(&tr, &t, size, &shape.parts, &mut failed)?;
         if !failed.is_empty() {
@@ -1522,5 +1530,46 @@ mod tests {
         assert_eq!(b.cells, 64 - 4 + 1);
         let huge = Grid { width: max_samples(), height: 2, ..g };
         assert!(rasterize(&huge, &shapes, -1.0).unwrap_err().contains("give a larger cellSize"));
+    }
+
+    /// Two 1° squares on a 10 × 10 grid of 1° cells, valued `a` and `b`.
+    fn two_squares(a: f32, b: f32) -> (Grid, [Shape; 2]) {
+        let ring = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![Coord::new(x0, y0), Coord::new(x1, y0), Coord::new(x1, y1), Coord::new(x0, y1), Coord::new(x0, y0)]
+        };
+        let g = Grid { crs: Crs::LonLat, min_x: 0.0, max_y: 10.0, cell_x: 1.0, cell_y: 1.0, width: 10, height: 10 };
+        (
+            g,
+            [
+                Shape { parts: vec![vec![ring(0.0, 0.0, 1.0, 1.0)]], value: a },
+                Shape { parts: vec![vec![ring(5.0, 5.0, 6.0, 6.0)]], value: b },
+            ],
+        )
+    }
+
+    /// A shape valued as the no-data value is refused, a NaN one as NaN too: its cells couldn't be
+    /// told from those under none, and `cells` would leave them out.
+    #[test]
+    fn rasterize_refuses_a_shape_valued_as_no_data() {
+        let (g, shapes) = two_squares(1.0, -1.0);
+        assert!(rasterize(&g, &shapes, -1.0).unwrap_err().contains("no-data value"));
+        let (g, shapes) = two_squares(1.0, f32::NAN);
+        assert!(rasterize(&g, &shapes, f32::NAN).unwrap_err().contains("no-data value"));
+        // Any other value is burned and counted, under a NaN no-data value too.
+        let (g, shapes) = two_squares(1.0, 2.0);
+        assert_eq!((rasterize(&g, &shapes, -1.0).unwrap().cells, rasterize(&g, &shapes, f32::NAN).unwrap().cells), (2, 2));
+    }
+
+    /// A run under a control counts its shapes, and one cancelled stops with no band.
+    #[test]
+    fn rasterize_stops_when_cancelled_and_counts_its_shapes() {
+        let (g, shapes) = two_squares(1.0, 2.0);
+        let run = crate::control::Control::new();
+        crate::run_under("Polygons to Raster", &run, || rasterize(&g, &shapes, -1.0)).unwrap();
+        assert_eq!(run.progress(), Some((2, 2)));
+        let run = crate::control::Control::new();
+        run.cancel();
+        let _installed = crate::control::install(Some(run));
+        assert_eq!(rasterize(&g, &shapes, -1.0).unwrap_err(), crate::control::CANCELLED);
     }
 }

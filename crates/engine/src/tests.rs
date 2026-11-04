@@ -26598,6 +26598,84 @@ fn polygons_burned_onto_a_chosen_grid() {
     assert!(e.contains("no-data value"), "{e}");
 }
 
+/// A whole number past what a pixel holds is refused with advice that applies: a numeric field can
+/// be given as text instead, one `value` can't.
+#[test]
+fn a_whole_number_past_a_pixel_is_refused_with_advice_that_applies() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_geom::Coord;
+    let mut s = world();
+    let ring = vec![Coord::new(0.0, 0.0), Coord::new(1.0, 0.0), Coord::new(1.0, 1.0), Coord::new(0.0, 1.0), Coord::new(0.0, 0.0)];
+    let mut ids = Dataset::new("ids", GeometryType::Polygon, vec![Field::new("code", FieldType::Integer)]);
+    ids.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![V::Int(20_000_001)]);
+    crate::cmd::layer::add_dataset(&mut s, ids);
+    let e = s.run("raster.rasterize", &json!({"layer": "ids", "value": 20_000_000, "cellSize": 1})).unwrap_err();
+    assert_eq!(e, "ids: value 20000000 is more than a raster's pixels hold exactly (16777216)");
+    let e = s.run("raster.rasterize", &json!({"layer": "ids", "field": "code", "cellSize": 1})).unwrap_err();
+    assert_eq!(e, "ids: code 20000001 is more than a raster's pixels hold exactly (16777216); a text field gives codes instead");
+}
+
+/// A text field with more codes than the result lists: the first 256 there, all of them in the
+/// table, `classCount` saying how many, and too many to draw with unique values.
+#[test]
+fn a_text_fields_codes_past_those_listed_are_all_in_its_table() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_geom::Coord;
+    let mut s = world();
+    let mut many = Dataset::new("many", GeometryType::Polygon, vec![Field::new("unit", FieldType::Text)]);
+    for i in 0..257 {
+        let (x0, x1) = (f64::from(i) * 0.1, f64::from(i + 1) * 0.1);
+        let ring = vec![Coord::new(x0, 0.0), Coord::new(x1, 0.0), Coord::new(x1, 0.1), Coord::new(x0, 0.1), Coord::new(x0, 0.0)];
+        many.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![V::Text(format!("u{i:03}"))]);
+    }
+    crate::cmd::layer::add_dataset(&mut s, many);
+    let v = s.run("raster.rasterize", &json!({"layer": "many", "field": "unit", "cellSize": 0.1})).unwrap();
+    assert_eq!(
+        (v["classCount"].as_u64(), v["classes"].as_array().map(Vec::len), v["dataType"].as_str()),
+        (Some(257), Some(256), Some("UInt16"))
+    );
+    assert_eq!(v["classes"][255], json!({"code": 256, "value": "u255"}));
+    let name = v["classTable"].as_str().unwrap();
+    let table = s.project.tables.iter().find(|t| t.name == name).expect("the codes' table");
+    assert_eq!((table.features.len(), table.value(256, 0), table.value(256, 1)), (257, &V::Int(257), &V::Text("u256".into())));
+    assert!(!matches!(
+        s.map().layer(v["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().style.renderer,
+        rustgis_map::RasterRenderer::UniqueValues { .. }
+    ));
+}
+
+/// Georeferencing, projecting and rasterizing need a plugin's `files` only when given a `path`: a
+/// null one is no path, and writes no file. A place named another way still needs it.
+#[test]
+fn plugin_rasters_with_a_null_path_need_no_files() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let mut s = world();
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 0.1, pixel_height: -0.1 };
+    let r = Raster::new("dem", 10, 10, vec![vec![1.0; 100]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    let bytes = geotiff::write(&r, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "dem", rustgis_map::RasterLayer::from_bytes(r, "dem.tif", bytes)).unwrap();
+    let burn = json!({"layer": "Countries", "cellSize": 10, "name": "burned"});
+    let project = json!({"layer": "dem", "crs": 3857, "cellSize": 50_000, "name": "projected"});
+    let georeference =
+        json!({"layer": "dem", "points": [[0, 0, 1, 1], [9, 0, 2, 1], [0, 9, 1, 2]], "transform": "affine", "name": "warped"});
+    plugin("eng-null-path", &["edit"]);
+    for (op, params) in [("raster.rasterize", burn), ("raster.project", project), ("raster.georeference", georeference)] {
+        let with = |key: &str, v: Value| {
+            let mut p = params.clone();
+            p[key] = v;
+            p
+        };
+        forward(&mut s, "eng-null-path", op, with("path", Value::Null)).unwrap();
+        let name = params["name"].as_str().unwrap();
+        assert!(s.map().layer_by_name(name).is_some_and(|l| l.is_raster()), "{op}");
+        for refused in [with("path", json!("out.tif")), with("name", json!("../out"))] {
+            let e = forward(&mut s, "eng-null-path", op, refused.clone()).unwrap_err();
+            assert!(e.contains("'files' permission"), "{refused}: {e}");
+        }
+    }
+    rustgis_plugins::unload("eng-null-path");
+}
+
 /// The Analysis pane's single-pass raster tools made on another thread (#1291 step 3): each raster
 /// handed over (`ran`) is the one its command makes here, bit for bit and with what the command
 /// says of it besides, and a cancelled run is an error saying so.
