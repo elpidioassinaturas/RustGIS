@@ -601,14 +601,14 @@ impl Session {
             self.notify(format!("{said}{}", not_started(&cancelled)), true);
         }
         // `urls` are cache keys (`<plugin> <url>`; plugin ids have no spaces): the answer names
-        // the addresses.
-        let fetching: Vec<&str> = urls.iter().map(|k| k.split_once(' ').map_or(k.as_str(), |(_, u)| u)).collect();
+        // the addresses, without their keys: the assistant and MCP get it as it is.
+        let fetching: Vec<String> = urls.iter().map(|k| crate::sources::redact(k.split_once(' ').map_or(k.as_str(), |(_, u)| u))).collect();
         let mut answer = json!({"pending": true});
         if !fetching.is_empty() {
             answer["fetching"] = json!(fetching);
         }
         if !requests.is_empty() {
-            answer["downloading"] = json!(requests.iter().map(|(_, q)| q["url"].clone()).collect::<Vec<_>>());
+            answer["downloading"] = json!(requests.iter().map(|(_, q)| q["url"].as_str().map(crate::sources::redact)).collect::<Vec<_>>());
         }
         let numbers = requests.iter().map(|(n, _)| *n).collect();
         for (n, asked) in requests {
@@ -778,6 +778,19 @@ mod tests {
         s.run("table.remove", &json!({"table": "sites"})).unwrap();
         let e = s.run("layer.addUrl", &asked).unwrap_err();
         assert!(e.contains("the table its download added was taken away (undone)"), "{e}");
+    }
+
+    /// A waiting command's answer names what it waits for, without the addresses' keys.
+    #[test]
+    fn a_waiting_answer_hides_the_keys_of_its_addresses() {
+        let mut s = Session::new(crate::project::Project::default());
+        let doc = "https://x.org/doc.json?token=hunter2";
+        let csv = "https://x.org/a.csv?token=hunter3";
+        let r = s.retry_plugin("plugin:eng-keys/f", &json!({}), vec![format!("eng-keys {doc}")], vec![(900, json!({"url": csv}))]).unwrap();
+        let (fetching, downloading) = (r["fetching"][0].as_str().unwrap(), r["downloading"][0].as_str().unwrap());
+        assert!(fetching.starts_with("https://x.org/doc.json") && !fetching.contains("hunter2"), "{r}");
+        assert!(downloading.starts_with("https://x.org/a.csv") && !downloading.contains("hunter3"), "{r}");
+        assert!(s.url_waits.holds(900, &json!({"url": csv})), "it still waits for the address asked for");
     }
 
     /// A refused landing's error, which the assistant and MCP get as it is, keeps an address's
