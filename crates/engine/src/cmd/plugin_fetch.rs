@@ -385,8 +385,11 @@ fn same_tile(t: &rustgis_map::tiles::TileLayer, added: &rustgis_map::tiles::Tile
 fn not_started(cancelled: &[String]) -> String {
     match cancelled {
         [] => String::new(),
-        [one] => format!("; its download of {one} wasn't started, and won't be"),
-        many => format!("; its {} downloads not yet started won't be: {}", many.len(), many.join(", ")),
+        [one] => format!("; its download of {} wasn't started, and won't be", crate::sources::redact(one)),
+        many => {
+            let shown: Vec<_> = many.iter().map(|u| crate::sources::redact(u)).collect();
+            format!("; its {} downloads not yet started won't be: {}", many.len(), shown.join(", "))
+        }
     }
 }
 
@@ -971,6 +974,12 @@ mod tests {
         s.url_requests.push(json!({"url": "https://x.org/new.csv", "request": 960}));
         let e = s.retry_plugin("plugin:eng-share-c/f", &p, Vec::new(), vec![(960, json!({"url": "https://x.org/new.csv"}))]).unwrap_err();
         assert!(e.contains("still under way") && e.contains("its download of https://x.org/new.csv wasn't started"), "{e}");
+        for cancelled in [
+            vec!["https://x.org/a?token=hunter2".to_string()],
+            vec!["https://x.org/a?token=hunter2".to_string(), "https://x.org/b".to_string()],
+        ] {
+            assert!(!not_started(&cancelled).contains("hunter2"));
+        }
         assert!(s.take_url_requests().is_empty(), "not downloaded");
         // Refused, it changed nothing: the command's earlier run still waits.
         assert!(s.plugin_retries.iter().any(|r| r.id == "plugin:eng-share-c/f" && r.requests == [959]));
