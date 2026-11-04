@@ -407,7 +407,8 @@ fn asked_by(asked: &Value, params: &Value) -> bool {
     let Some(o) = asked.as_object() else { return false };
     // What the front end passes on to a download's own `layer.addUrl` (the desktop app's
     // `ui.addUrl`): only these come back, and must come back the same. Any other key (`whole`,
-    // `cog`, `dates`, a `name` that isn't text…) it leaves out, and `zoom` it sets itself.
+    // `cog`, `dates`, a `name` that isn't text…) it leaves out. `zoom` it passes on, but may change
+    // (a link's data, once zoomed to), so it isn't compared.
     let passed_on = |k: &str, v: &Value| match k {
         "name" | "layer" | "crs" => v.as_str().is_some_and(|s| !s.trim().is_empty()),
         "x" | "y" | "wkt" | "delimiter" | "paperSpace" | "stream" | "as" => !v.is_null(),
@@ -940,13 +941,14 @@ mod tests {
         s.retry_plugin("plugin:eng-share-a/f", &p, Vec::new(), vec![(905, json!({"url": "https://x.org/f.csv", "x": "lon"}))]).unwrap();
         assert!(!s.url_waits.holds(905, &json!({"url": "https://x.org/f.csv", "x": "lng", "id": 3})));
         assert!(s.url_waits.holds(905, &json!({"url": "https://x.org/f.csv", "x": "lon", "id": 3, "cog": true})));
-        // What the front end doesn't pass on (`whole`, `zoom: false`, a `name` that isn't text,
-        // `bounds` that aren't a list), or sets itself (`zoom`), doesn't stop a landing.
+        // What the front end doesn't pass on (`whole`, a `name` that isn't text, `bounds` that
+        // aren't a list), or may change (`zoom`), doesn't stop a landing.
         let asked =
             json!({"url": "https://x.org/g.csv", "x": "lon", "whole": true, "zoom": false, "dates": ["2020"], "name": 5, "bounds": "x"});
         s.retry_plugin("plugin:eng-share-a/f", &p, Vec::new(), vec![(906, asked)]).unwrap();
         assert!(s.url_waits.holds(906, &json!({"url": "https://x.org/g.csv", "x": "lon", "id": 4})));
         assert!(s.url_waits.holds(906, &json!({"url": "https://x.org/g.csv", "x": "lon", "zoom": true})));
+        assert!(s.url_waits.holds(906, &json!({"url": "https://x.org/g.csv", "x": "lon", "zoom": false})));
         // A key the front end passes on, left out: another import, which lands nothing.
         assert!(!s.url_waits.holds(906, &json!({"url": "https://x.org/g.csv"})));
         // Given up past the wait (`expire`): each late landing is refused, once.
