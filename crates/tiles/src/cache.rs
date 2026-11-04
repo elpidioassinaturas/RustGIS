@@ -750,18 +750,28 @@ pub fn download_limited(url: &str, max: usize, done: Done) {
 /// Like [`download_limited`], but a status in `omit` is an expected answer: its failure isn't
 /// recorded, only noted once per server (a file that may not be there, which the caller handles).
 pub fn download_limited_omitting(url: &str, max: usize, omit: &'static [u16], done: Done) {
-    download_detailed_omitting(url, max, omit, Box::new(move |r| done(r.map_err(|f| f.message))));
+    download_detailed_within(url, max, DOWNLOAD_TIMEOUT, omit, Box::new(move |r| done(r.map_err(|f| f.message))));
 }
+
+/// Like [`download_limited`], giving up after `timeout` natively (the browser's fetch keeps its
+/// own): a small answer that mustn't hold a thread for long (an ArcGIS layer's description).
+pub fn download_within(url: &str, max: usize, timeout: std::time::Duration, done: Done) {
+    download_detailed_within(url, max, timeout, &[], Box::new(move |r| done(r.map_err(|f| f.message))));
+}
+
+/// How long a download off the frame may take natively.
+const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 
 /// Like [`download_limited`], telling what is known of a failure (#509): the status, the headers
 /// that say who answered and an excerpt of the answer. The browser's fetch tells only the
 /// status, read back from its error.
 pub fn download_detailed(url: &str, max: usize, done: DoneDetailed) {
-    download_detailed_omitting(url, max, &[], done);
+    download_detailed_within(url, max, DOWNLOAD_TIMEOUT, &[], done);
 }
 
-/// Like [`download_detailed`], but a status in `omit` isn't recorded as a failure.
-fn download_detailed_omitting(url: &str, max: usize, omit: &'static [u16], done: DoneDetailed) {
+/// Like [`download_detailed`], giving up after `timeout` natively; a status in `omit` isn't
+/// recorded as a failure.
+fn download_detailed_within(url: &str, max: usize, timeout: std::time::Duration, omit: &'static [u16], done: DoneDetailed) {
     if let Err(e) = crate::address::check(url, None) {
         done(Err(Failure::new(url, e)));
         return;
@@ -777,7 +787,7 @@ fn download_detailed_omitting(url: &str, max: usize, omit: &'static [u16], done:
     let f = fetcher().lock().unwrap_or_else(|e| e.into_inner()).clone();
     match f {
         Some(f) => f(marked.clone(), Box::new(move |r| done(r.map_err(|e| Failure::new(&marked, e)))), omit),
-        None => native::download(marked, done, omit),
+        None => native::download_within(marked, timeout, omit, done),
     }
 }
 
@@ -1234,12 +1244,21 @@ mod native {
         }
     }
 
-    pub(super) fn agent() -> ureq::Agent {
+    /// The settings every agent here starts from. An error status is answered, not failed (its
+    /// headers and body say who refused), set here rather than on each request: a request's own
+    /// settings would make the agent set up TLS again, reading the system's certificates.
+    fn config_builder(timeout: std::time::Duration) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
         ureq::Agent::config_builder()
-            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .tls_config(rustgis_data::http::tls_config())
+            .http_status_as_error(false)
+            .timeout_global(Some(timeout))
             .user_agent(USER_AGENT)
             // Redirects are followed by `get`, which checks where each one leads.
             .max_redirects(0)
+    }
+
+    pub(super) fn agent() -> ureq::Agent {
+        config_builder(std::time::Duration::from_secs(30))
             // The workers share the agent: keep a connection open for each fetch a server
             // may have under way, so the next tile doesn't connect again.
             .max_idle_connections_per_host(PER_HOST)
@@ -1256,7 +1275,7 @@ mod native {
 
     /// An agent for downloads, which may take minutes.
     pub(super) fn download_agent(timeout: std::time::Duration) -> ureq::Agent {
-        ureq::Agent::config_builder().timeout_global(Some(timeout)).user_agent(USER_AGENT).max_redirects(0).build().into()
+        config_builder(timeout).build().into()
     }
 
     /// Resolves names as ureq does, keeping only the internet addresses (checked where the
@@ -1287,10 +1306,7 @@ mod native {
 
     /// A download agent that connects only to internet addresses.
     pub(super) fn public_agent(timeout: std::time::Duration) -> ureq::Agent {
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(timeout))
-            .user_agent(USER_AGENT)
-            .max_redirects(0)
+        let config = config_builder(timeout)
             // A proxy would resolve the address itself, past `PublicOnly`.
             .proxy(None)
             .build();
@@ -1337,7 +1353,7 @@ mod native {
                     }
                 }
                 diagnostics.sending();
-                let resp = req.config().http_status_as_error(false).build().call().map_err(unanswered)?;
+                let resp = req.call().map_err(unanswered)?;
                 diagnostics.answered(resp.status().as_u16());
                 let header = |k: &str| resp.headers().get(k).and_then(|v| v.to_str().ok());
                 if resp.status().is_redirection() {
@@ -1391,9 +1407,6 @@ mod native {
                 .post(url)
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
-                .config()
-                .http_status_as_error(false)
-                .build()
                 .send(body)
                 .map_err(unanswered)?;
             let status = resp.status().as_u16();
@@ -1418,11 +1431,16 @@ mod native {
     }
 
     /// Downloads on a thread of its own, so a large file doesn't hold up the tiles.
-    pub(super) fn download(url: String, done: DoneDetailed, omit: &'static [u16]) {
+    #[cfg(test)]
+    pub(super) fn download(url: String, done: DoneDetailed) {
+        download_within(url, super::DOWNLOAD_TIMEOUT, &[], done);
+    }
+
+    pub(super) fn download_within(url: String, timeout: std::time::Duration, omit: &'static [u16], done: DoneDetailed) {
         let capture = Capture::current();
         std::thread::spawn(move || {
             let _scope = capture.enter();
-            done(get_detailed_omitting(&download_agent(std::time::Duration::from_secs(900)), &url, omit));
+            done(get_detailed_omitting(&download_agent(timeout), &url, omit));
         });
     }
 
@@ -1576,9 +1594,8 @@ mod native {
                 {
                     req = req.header("X-Esri-Authorization", &auth);
                 }
-                // An error status is answered, not failed: its headers and body say who refused.
                 diagnostics.sending();
-                let mut resp = req.config().http_status_as_error(false).build().call().map_err(unanswered)?;
+                let mut resp = req.call().map_err(unanswered)?;
                 let status = resp.status().as_u16();
                 diagnostics.answered(status);
                 // A data host refusing the request (or the token): say what to do.
@@ -1715,7 +1732,7 @@ mod native {
         done(Err(format!("{url}: this build has no way to fetch tiles")));
     }
 
-    pub(super) fn download(url: String, done: DoneDetailed, _omit: &'static [u16]) {
+    pub(super) fn download_within(url: String, _timeout: std::time::Duration, _omit: &'static [u16], done: DoneDetailed) {
         let message = format!("{url}: this build has no way to fetch tiles");
         done(Err(crate::failure::Failure::new(&url, message)));
     }
@@ -1803,7 +1820,7 @@ mod tests {
         let (second_tx, second_rx) = std::sync::mpsc::channel();
         {
             let _scope = second.enter();
-            native::download(second_url.clone(), Box::new(move |result| second_tx.send(result).unwrap()), &[]);
+            native::download(second_url.clone(), Box::new(move |result| second_tx.send(result).unwrap()));
             assert_eq!(second_rx.recv_timeout(timeout).unwrap().unwrap_err().message, "http status: 403");
             // The first request finishes while another session owns this dispatch thread.
             release_tx.send(()).unwrap();
@@ -1863,7 +1880,7 @@ mod tests {
         )]);
         let url = format!("{base}/download.json?token=private-query-token");
         let (tx, rx) = std::sync::mpsc::channel();
-        native::download(download_address(&url, 1024), Box::new(move |result| tx.send(result).unwrap()), &[]);
+        native::download(download_address(&url, 1024), Box::new(move |result| tx.send(result).unwrap()));
         let failure = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap_err();
         // Preserve the existing detailed failure API; diagnostics deliberately excludes its excerpt.
         assert_eq!(failure.excerpt(), Some(secret_body));
