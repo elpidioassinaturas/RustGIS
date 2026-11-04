@@ -541,6 +541,9 @@ pub struct Session {
     /// How rasters added from now on are drawn (`raster.setDefaultStyle`; kept with the app's
     /// preferences, not the project).
     pub raster_defaults: rustgis_map::RasterDefaults,
+    /// The favourite arrangement of publication layouts (`layout.arrangement`, #1379): a name or a
+    /// corner for each surround, kept with the app's preferences, not the project.
+    pub layout_favourite: serde_json::Value,
     pub registry: Registry,
     /// Bumped on every change so views can cache.
     pub revision: u64,
@@ -706,6 +709,11 @@ pub struct Session {
     /// one succeeds) through this. Python leaves it unset: a run there holds the interpreter's
     /// lock and can't be interrupted, so it keeps the Script pane's bounds.
     pub long_runs: Option<fn(&str, f64)>,
+    /// Set where a person at a terminal waits on a command (`rustgis-cli run` with stdin and
+    /// stderr a terminal), who can stop it with Ctrl-C: tools and rasters take no work cap
+    /// ([`rustgis_analysis::control::Control::stoppable`]). A program that calls it (an agent, a
+    /// CI job) may wait with a timeout, so there they keep their caps.
+    pub stoppable: bool,
 }
 
 /// The most `layer.addUrl` requests kept for the front end at a time.
@@ -869,6 +877,7 @@ impl Session {
             s3_pending: Vec::new(),
             database_logins: connections::DatabaseLogins::default(),
             raster_defaults: rustgis_map::RasterDefaults::default(),
+            layout_favourite: serde_json::Value::String("classic".into()),
             registry: Registry { commands: cmd::all() },
             revision: 1,
             opened: 0,
@@ -940,6 +949,7 @@ impl Session {
             raster_results: Vec::new(),
             raster_runs: Vec::new(),
             long_runs: None,
+            stoppable: false,
         }
     }
 
