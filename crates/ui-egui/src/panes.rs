@@ -6790,6 +6790,38 @@ mod tests {
         assert_eq!(crate::double_click_delay(2.0), 1.2);
     }
 
+    /// #1321: the frame that takes the first click can be the first slow one. egui reads the delay
+    /// when the next frame begins, so the delay has to follow the frame that just ended: 0.3 s of
+    /// work gives at least 0.9 s, where the fast frames before it gave 0.5 s.
+    #[test]
+    fn a_double_click_counts_across_the_first_slow_frame() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::with_sample();
+        app.ui.right_open.clear();
+        app.ui.right = None;
+        let slow = std::rc::Rc::new(std::cell::Cell::new(false));
+        let frame = slow.clone();
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                if frame.get() {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run_steps(6);
+        let at = h.get_by_label("Rivers").rect().center();
+        slow.set(true);
+        crate::click_in_one_frame(&mut h, at, 1.0 / 60.0);
+        slow.set(false);
+        crate::click_in_one_frame(&mut h, at, 0.7);
+        h.run_steps(3);
+        assert_eq!(h.state().ui.right, Some(RightPane::Symbology));
+    }
+
     /// #808: a web tile layer is listed at its place among the map's layers, moves past them
     /// from its menu, and is dragged to another place.
     #[test]
