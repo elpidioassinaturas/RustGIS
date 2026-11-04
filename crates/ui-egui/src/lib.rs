@@ -33,6 +33,8 @@ mod docpanes;
 mod earthaccessui;
 mod editpanes;
 mod embeddingsui;
+#[cfg(not(target_arch = "wasm32"))]
+mod exportjob;
 mod failureui;
 mod fieldlists;
 mod fieldmenu;
@@ -925,6 +927,9 @@ pub struct RustGisApp {
     pub(crate) graphic_format: graphicformat::GraphicFormat,
     pub forms: editpanes::Forms,
     pub workflow: analysispane::Workflow,
+    /// An export writing its file on its own thread (see [`exportjob`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    export_job: Option<exportjob::ExportJob>,
     /// ModelBuilder's view: the model on its canvas.
     pub mb: modelbuilder::ModelBuilder,
     pub ws: workspacepanes::WorkspaceState,
@@ -942,6 +947,8 @@ pub struct RustGisApp {
     #[cfg(not(target_arch = "wasm32"))]
     pub connect: connectui::ConnectState,
     fonts_frames: u32,
+    /// When this frame's `logic` began, for the double-click delay `ui` sets when it ends.
+    frame_start: Option<web_time::Instant>,
     applied_dark: Option<bool>,
     sent_title: String,
     pub quit_requested: bool,
@@ -1108,6 +1115,8 @@ impl RustGisApp {
             graphic_format: graphicformat::GraphicFormat::default(),
             forms: editpanes::Forms { distance_units: "Meters".into(), ..editpanes::Forms::default() },
             workflow: analysispane::Workflow::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            export_job: None,
             mb: modelbuilder::ModelBuilder::default(),
             ws: workspacepanes::WorkspaceState::default(),
             time: timebar::TimeBarState::default(),
@@ -1117,6 +1126,7 @@ impl RustGisApp {
             docs: docpanes::DocState::default(),
             assistant: assistantpane::AssistantState::default(),
             fonts_frames: 0,
+            frame_start: None,
             applied_dark: None,
             sent_title: String::new(),
             quit_requested: false,
@@ -1762,6 +1772,13 @@ impl RustGisApp {
     /// is removed, as recovery is for a run that didn't close. Call it once, as the app closes.
     pub fn end_autosave(&mut self) {
         autosave::end(self);
+    }
+
+    /// The app closing (the desktop app's `on_exit`): an export still writing is cancelled and
+    /// given a moment to stop, so it leaves no temporary file beside its destination.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn end_exports(&mut self) {
+        exportjob::stop(self, std::time::Duration::from_secs(5));
     }
 
     /// Whether this shell opens files by path (the desktop app; the web app picks them in the
@@ -2657,8 +2674,10 @@ impl RustGisApp {
                         q[k] = v.clone();
                     }
                 }
-                if p.get("zoom").and_then(Value::as_bool) == Some(true) {
-                    q["zoom"] = json!(true);
+                if let Some(zoom) =
+                    p.get("zoom").and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| matches!(s, "true" | "yes" | "1" | "on"))))
+                {
+                    q["zoom"] = json!(zoom);
                 }
                 for k in ["service", "coverage"] {
                     if p.get(k).and_then(Value::as_bool) == Some(true) {
@@ -3429,6 +3448,10 @@ impl RustGisApp {
                     .map(|l| format!("{}.tif", l.name))
                     .unwrap_or_default();
                 if let Some(path) = dialogs::pick_save(&name, &["tif", "tiff"], tl!("GeoTIFF")) {
+                    // Written on a thread of its own, with progress and Cancel in the status bar.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    return exportjob::start(self, "share.exportRaster", json!({"path": path}));
+                    #[cfg(target_arch = "wasm32")]
                     return self.run("share.exportRaster", json!({"path": path}));
                 }
             }
@@ -3456,6 +3479,10 @@ impl RustGisApp {
                     // in the name, as in "U.S. Cities", isn't taken for one).
                     let typed = std::path::Path::new(&path).extension().is_some_and(|e| e.eq_ignore_ascii_case(&ext));
                     let path = if typed { path } else { format!("{path}.{ext}") };
+                    // Written on a thread of its own, with progress and Cancel in the status bar.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    return exportjob::start(self, "share.exportLayer", json!({"path": path}));
+                    #[cfg(target_arch = "wasm32")]
                     return self.run("share.exportLayer", json!({"path": path}));
                 }
             }
@@ -3733,8 +3760,26 @@ impl RustGisApp {
     /// Adds a download that landed (`layer.addDownload`), named in Recent after the connection it
     /// came from; one whose project was closed meanwhile is said and dropped.
     pub(crate) fn add_landed(&mut self, landed: serviceui::Landed, bytes: Vec<u8>) {
+        let current = self.session.download_landed(landed.id, bytes);
+        self.add_download(landed, current);
+    }
+
+    /// Adds a service layer's features that landed read already (its protocol buffer pages,
+    /// joined), as [`Self::add_landed`] adds a download.
+    pub(crate) fn add_landed_read(
+        &mut self,
+        landed: serviceui::Landed,
+        dataset: rustgis_engine::data::Dataset,
+        report: rustgis_engine::data::ReadReport,
+    ) {
+        let current = self.session.download_landed_read(landed.id, dataset, report);
+        self.add_download(landed, current);
+    }
+
+    /// Adds a download handed to the session (`current`: it still belongs to this project).
+    fn add_download(&mut self, landed: serviceui::Landed, current: bool) {
         let serviceui::Landed { id, url, params: mut p, origin } = landed;
-        if !self.session.download_landed(id, bytes) {
+        if !current {
             self.session.notify(i18n::fmt("{url}: downloaded after its project was closed, so it wasn't added", &[("url", &url)]), false);
             return;
         }
@@ -3868,6 +3913,10 @@ impl RustGisApp {
     /// Per-frame work that doesn't draw (theme, fonts, files that arrived).
     pub fn logic(&mut self, ctx: &egui::Context) {
         let _diagnostics = self.session.diagnostics.enter();
+        // A pass egui asks to repeat is the same frame: `ui` sets the delay once, from the first pass.
+        if ctx.current_pass_index() == 0 {
+            self.frame_start = Some(web_time::Instant::now());
+        }
         // The MCP relay: what attached agents sent runs here, on this session, before the frame
         // draws (Session lives on this thread; the listener only queues messages).
         #[cfg(not(target_arch = "wasm32"))]
@@ -4139,11 +4188,11 @@ impl RustGisApp {
         fieldmenu::play(self, &ctx);
         chrome::shortcuts(self, &ctx);
         panes::follow_layer_filter(self);
-        // A Zarr summary, a trend or a workflow running on its thread lands whatever is in view,
-        // the File menu's backstage too, so a project saved there holds it (all are looked at: `|`,
-        // not `||`), and the frames go on while one runs so it's taken when it ends.
+        // A Zarr summary, a trend, a workflow or an export running on its thread lands whatever is
+        // in view, the File menu's backstage too, so a project saved there holds it (all are looked
+        // at: `|`, not `||`), and the frames go on while one runs so it's taken when it ends.
         #[cfg(not(target_arch = "wasm32"))]
-        if workspacepanes::land_summary(self) | analysispane::land_trend(self) | analysispane::land_job(self) {
+        if workspacepanes::land_summary(self) | analysispane::land_trend(self) | analysispane::land_job(self) | exportjob::land(self) {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         if self.ui.backstage {
@@ -4194,6 +4243,15 @@ impl RustGisApp {
             self.sent_title = title;
         }
         pluginstart::frame_drawn(self, &ctx);
+        // egui times clicks by the frame they arrive in: at a slow frame rate the two clicks of a
+        // double-click land too far apart for its default delay (#1321). It reads the delay when
+        // the next frame begins, before that frame's `logic`, so it's set here, from this frame's
+        // work so far (a map drawn on the CPU) and from the last frame's length, painting included
+        // (`stable_dt` leaves out the time spent idle between frames).
+        if let Some(start) = self.frame_start.take() {
+            let dt = ctx.input(|i| i.stable_dt).max(start.elapsed().as_secs_f32());
+            ctx.options_mut(|o| o.input_options.max_double_click_delay = double_click_delay(dt));
+        }
     }
 }
 
@@ -4203,6 +4261,28 @@ fn project_file_name(url: &str) -> Option<&str> {
     let path = url.split(['?', '#']).next().unwrap_or("");
     let last = path.rsplit('/').next().unwrap_or("");
     (rustgis_engine::project::opens_as_project(last) || rustgis_engine::map::geolibre::is_project_file(last)).then_some(last)
+}
+
+/// The longest gap between the two clicks of a double-click, in seconds, for frames `dt` seconds
+/// long. egui times a click by the frame it arrives in, so a gap of 0.3 s can be measured as up to
+/// two frames more. At least 0.5 s, the Windows default; at most 1.2 s, so two separate clicks
+/// still read as two.
+fn double_click_delay(dt: f32) -> f64 {
+    (0.3 + 2.0 * f64::from(dt)).clamp(0.5, 1.2)
+}
+
+/// A test's click whose press and release arrive in one frame, as they do inside a slow one, `gap`
+/// seconds on egui's clock after the frame before.
+#[cfg(test)]
+pub(crate) fn click_in_one_frame(h: &mut egui_kittest::Harness<'_, RustGisApp>, at: egui::Pos2, gap: f64) {
+    let time = h.ctx.input(|i| i.time) + gap;
+    let button =
+        |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+    let input = h.input_mut();
+    input.time = Some(time);
+    input.events.extend([egui::Event::PointerMoved(at), button(true), button(false)]);
+    h.step();
+    h.input_mut().time = None;
 }
 
 /// Tests that fetch through the tile cache take turns: it has one fetcher for the whole process,
