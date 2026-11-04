@@ -1037,7 +1037,8 @@ impl Session {
         // downloaded whole after all) isn't being downloaded: queued again, whole, so it isn't
         // probed again.
         let handed_back = given.is_some_and(|n| self.url_waits.holds(n, &asked));
-        if waiting.is_none() && (handed_back || !self.url_waits.has(number)) {
+        // (Even with the same request queued under another number: nothing else lands this one.)
+        if (handed_back && waiting != Some(number)) || (waiting.is_none() && !self.url_waits.has(number)) {
             if self.url_requests.len() >= MAX_URL_REQUESTS {
                 return Err(format!("{url}: {MAX_URL_REQUESTS} downloads are already waiting; try again when they have landed"));
             }

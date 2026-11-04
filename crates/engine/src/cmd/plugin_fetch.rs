@@ -859,6 +859,16 @@ mod tests {
         let taken = s.take_url_requests();
         let numbers: Vec<_> = taken.iter().map(|q| q["request"].as_u64()).collect();
         assert_eq!(numbers, [Some(next), Some(next + 1)], "{taken:?}");
+        // Handed back with the same request queued under another number: queued as well, or nothing
+        // would land the number its command waits for.
+        let doubled = json!({"url": "https://x.org/f.geojson"});
+        s.url_waits.wait(910, doubled.clone());
+        s.request_url(&doubled).unwrap();
+        s.request_url(&json!({"url": "https://x.org/f.geojson", "request": 910})).unwrap();
+        let taken = s.take_url_requests();
+        assert_eq!(taken.len(), 2, "{taken:?}");
+        assert_eq!((taken[1]["request"].clone(), taken[1]["whole"].clone()), (json!(910), json!(true)), "{taken:?}");
+        assert_ne!(taken[0]["request"], json!(910));
         // Given up, its number is set aside too: another download, and the first one's landing,
         // under that number, is still refused.
         let late = json!({"url": "https://x.org/e.geojson"});
