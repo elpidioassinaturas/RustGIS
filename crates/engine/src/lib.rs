@@ -1020,13 +1020,11 @@ impl Session {
         let url = p.get("url").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
         let asked = cmd::plugins::fetch::without_request(p);
         let waiting = self.url_requests.iter().find(|q| cmd::plugins::fetch::same_request(q, &asked)).and_then(|q| q["request"].as_u64());
-        // A number is taken only as what it was made for here: this request, waited for or given
-        // up (its landing is refused then). Any other is set aside, so the request gets a download
-        // of its own, under a number no other request can get.
-        let given = p
-            .get("request")
-            .and_then(serde_json::Value::as_u64)
-            .filter(|n| self.url_waits.holds(*n, &asked) || self.url_waits.given_up(*n, &asked));
+        // A number is taken only as what it was made for here: this request, waited for. Any other
+        // is set aside, so the request gets a download of its own, under a number no other request
+        // can get. (One given up comes here only from inside another command: a front end's is
+        // refused in `run`.)
+        let given = p.get("request").and_then(serde_json::Value::as_u64).filter(|n| self.url_waits.holds(*n, &asked));
         let made = self.call_requests.as_ref().and_then(|_| self.url_waits.in_flight(&asked));
         let number = match given.or(waiting).or(made) {
             Some(n) => n,

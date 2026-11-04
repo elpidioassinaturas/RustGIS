@@ -859,11 +859,15 @@ mod tests {
         let taken = s.take_url_requests();
         let numbers: Vec<_> = taken.iter().map(|q| q["request"].as_u64()).collect();
         assert_eq!(numbers, [Some(next), Some(next + 1)], "{taken:?}");
-        // Given up, its own number stays, for its landing to be refused.
+        // Given up, its number is set aside too: another download, and the first one's landing,
+        // under that number, is still refused.
         let late = json!({"url": "https://x.org/e.geojson"});
         s.url_waits.remember_given_up(800, late.clone());
         s.request_url(&json!({"url": "https://x.org/e.geojson", "request": 800})).unwrap();
-        assert_eq!(s.take_url_requests()[0]["request"], json!(800));
+        assert_ne!(s.take_url_requests()[0]["request"], json!(800));
+        assert!(s.url_waits.given_up(800, &late));
+        let e = s.run("layer.addUrl", &json!({"url": "https://x.org/e.geojson", "request": 800})).unwrap_err();
+        assert!(e.contains("stopped waiting"), "{e}");
     }
 
     /// Plugin commands waiting for the same download each get its answer, a rerun that waits
