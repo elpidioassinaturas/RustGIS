@@ -410,9 +410,9 @@ fn asked_by(asked: &Value, params: &Value) -> bool {
     // `cog`, `dates`, a `name` that isn't text…) it leaves out. `zoom` it passes on, but may change
     // (a link's data, once zoomed to), so it isn't compared.
     let passed_on = |k: &str, v: &Value| match k {
-        "name" | "layer" | "crs" => v.as_str().is_some_and(|s| !s.trim().is_empty()),
+        "name" | "layer" | "crs" | "connection" => v.as_str().is_some_and(|s| !s.trim().is_empty()),
         "x" | "y" | "wkt" | "delimiter" | "paperSpace" | "stream" | "as" => !v.is_null(),
-        "service" | "coverage" => v == &json!(true),
+        "service" | "coverage" | "anonymous" => v == &json!(true),
         "bounds" => v.is_array(),
         _ => false,
     };
@@ -551,6 +551,20 @@ pub(crate) fn same_request(a: &Value, b: &Value) -> bool {
 }
 
 impl Session {
+    /// What a call for download `p` asks for: without its number, and read with no saved login
+    /// when it comes from a plugin's command. The front end runs the queued request after that
+    /// scope has ended, so the opt-out goes with it through probes, whole-file fallbacks and the
+    /// eventual `layer.addDownload`; a command run again asks for the same.
+    pub(crate) fn asked_for(&self, p: &Value) -> Value {
+        let mut asked = without_request(p);
+        if self.web_logins.is_anonymous()
+            && let Some(o) = asked.as_object_mut()
+        {
+            o.insert("anonymous".into(), json!(true));
+        }
+        asked
+    }
+
     /// Keeps plugin command `id` to run again once `urls` (cache keys) have landed, and the
     /// downloads it left to the app (`requests`: their numbers and what was asked) have been
     /// added: its answer, which says so.
@@ -788,6 +802,20 @@ mod tests {
         assert!(e.contains("the table its download added was taken away (undone)"), "{e}");
     }
 
+    /// A number lands only the read it was given for: a plugin's has no login, and a read that
+    /// may use one, or names a connection it wasn't given, is another.
+    #[test]
+    fn a_read_with_another_login_is_not_what_was_asked() {
+        let u = "https://x.org/a.csv";
+        let plugin = json!({"url": u, "anonymous": true});
+        assert!(asked_by(&plugin, &json!({"url": u, "anonymous": true, "id": 1})));
+        assert!(!asked_by(&plugin, &json!({"url": u, "id": 1})));
+        assert!(!asked_by(&json!({"url": u}), &plugin));
+        assert!(asked_by(&json!({"url": u, "connection": "c1"}), &json!({"url": u, "connection": "c1"})));
+        assert!(!asked_by(&json!({"url": u, "connection": "c1"}), &json!({"url": u, "connection": "c2"})));
+        assert!(!asked_by(&json!({"url": u}), &json!({"url": u, "connection": "c1"})));
+    }
+
     /// A download given up after the wait is said once, with its address, whatever the command
     /// does with its error.
     #[test]
@@ -963,8 +991,9 @@ mod tests {
         // Answers name layers that are on the map (the sample's), as a rerun checks.
         let mut s = Session::new(crate::sample::world_project());
         let (l7, l8) = (u64::from(s.map().layers[0].id), u64::from(s.map().layers[1].id));
-        let asked = json!({"url": "https://x.org/a.csv"});
-        let p = json!({"op": "layer.addUrl", "params": asked});
+        // What a command calls, and what is kept as asked: read with no saved login.
+        let asked = json!({"url": "https://x.org/a.csv", "anonymous": true});
+        let p = json!({"op": "layer.addUrl", "params": {"url": "https://x.org/a.csv"}});
         // Two commands wait for one download (request 900): both get what adding it answered.
         for id in ["plugin:eng-share-a/f", "plugin:eng-share-b/f"] {
             s.retry_plugin(id, &p, Vec::new(), vec![(900, asked.clone())]).unwrap();
@@ -984,9 +1013,10 @@ mod tests {
         assert_eq!(ran[0].1.as_ref().unwrap()["layer"], l7, "{ran:?}");
         assert!(s.take_url_requests().is_empty(), "nothing asked again");
         // The download it waited for answers too, for a run that asks for it.
-        let b = json!({"url": "https://x.org/b.csv"});
+        let b = json!({"url": "https://x.org/b.csv", "anonymous": true});
+        let call = json!({"op": "layer.addUrl", "params": {"url": "https://x.org/b.csv"}});
         s.rerun_landed = vec![(asked.clone(), Ok(json!({"layer": l7})), Default::default())];
-        s.retry_plugin("plugin:eng-share-a/f", &json!({"op": "layer.addUrl", "params": b}), Vec::new(), vec![(904, b.clone())]).unwrap();
+        s.retry_plugin("plugin:eng-share-a/f", &call, Vec::new(), vec![(904, b.clone())]).unwrap();
         s.rerun_landed.clear();
         s.url_waits.land(904, Ok(json!({"layer": l8})), Added::default());
         let ran = s.poll_plugin_retries();

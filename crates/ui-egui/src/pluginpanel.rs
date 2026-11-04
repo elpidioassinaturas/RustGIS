@@ -628,16 +628,16 @@ mod tests {
     #[test]
     fn a_late_download_is_refused_in_one_notice() {
         use rustgis_engine::plugins;
-        let pkg = plugins::Package::from_zip(&plugins::testing::package("ui-late", &["edit", "network"])).unwrap();
+        let pkg = plugins::Package::from_zip(&plugins::testing::package("ui-late-said", &["edit", "network"])).unwrap();
         plugins::load(pkg, "test").unwrap();
         for first in ["https://x.org/first.csv", "https://x.org/first.csv?token=hunter2"] {
             let mut app = RustGisApp::with_sample();
-            app.run("plugin:ui-late/f", json!({"op": "layer.addUrl", "params": {"url": first}})).unwrap();
+            app.run("plugin:ui-late-said/f", json!({"op": "layer.addUrl", "params": {"url": first}})).unwrap();
             // The app takes it and starts downloading; the command is run again for another
             // address, so nothing waits for the first now.
             let taken = app.session.take_url_requests();
             assert_eq!(taken.len(), 1, "{taken:?}");
-            app.run("plugin:ui-late/f", json!({"op": "layer.addUrl", "params": {"url": "https://x.org/second.csv"}})).unwrap();
+            app.run("plugin:ui-late-said/f", json!({"op": "layer.addUrl", "params": {"url": "https://x.org/second.csv"}})).unwrap();
             let id = app.session.download_started();
             let mark = app.session.notice_mark();
             let layers = app.session.map().layers.len();
@@ -649,7 +649,7 @@ mod tests {
             assert!(said[0].starts_with("https://x.org/first.csv") && said[0].contains("stopped waiting"), "{said:?}");
             assert!(!said[0].contains("hunter2"), "{said:?}");
         }
-        plugins::unload("ui-late");
+        plugins::unload("ui-late-said");
     }
 
     /// A service's page that fails is what the plugin command that asked for it is answered, when
