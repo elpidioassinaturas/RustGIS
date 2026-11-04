@@ -1157,9 +1157,10 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
     default the polygons' bounds).
   - **What a cell takes:** a cell takes a polygon's value when its centre falls inside it, holes
     cut out. A numeric `field` gives its values; a text `field` gives codes 1 to n, in sorted order
-    of its values. A table named after the result with "classes" (`code`, `value`) holds every
-    code; the result's `classes` lists the first 256, and `classCount` gives the total. With no
-    field, every polygon gives `value` (1 by default), a mask.
+    of its values. A table named after the result with "classes" (`code`, `value`), numbered if
+    the project has a table of that name, holds every code; the result's `classTable` names it,
+    its `classes` lists the first 256, and `classCount` gives the total. With no field, every
+    polygon gives `value` (1 by default), a mask.
   - Where polygons overlap, the later feature wins, as GDAL burns. With a selection, only the
     selected features are burned. Features with no value in the field, with no valid polygon, or
     holding no cell centre are skipped, and the result and a notice count them.

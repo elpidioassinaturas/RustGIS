@@ -26644,6 +26644,29 @@ fn a_text_fields_codes_past_those_listed_are_all_in_its_table() {
     ));
 }
 
+/// The codes' table doesn't take the place of a table of the user's with its name.
+#[test]
+fn a_text_fields_codes_leave_a_table_of_that_name_alone() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_geom::Coord;
+    let mut s = world();
+    let mut soils = Dataset::new("soils", GeometryType::Polygon, vec![Field::new("unit", FieldType::Text)]);
+    let ring = vec![Coord::new(0.0, 0.0), Coord::new(1.0, 0.0), Coord::new(1.0, 1.0), Coord::new(0.0, 1.0), Coord::new(0.0, 0.0)];
+    soils.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![V::Text("clay".into())]);
+    crate::cmd::layer::add_dataset(&mut s, soils);
+    let v = s.run("raster.rasterize", &json!({"layer": "soils", "field": "unit", "cellSize": 1, "name": "free"})).unwrap();
+    assert_eq!(v["classTable"], "free classes", "no table has the name");
+
+    let mut mine = Dataset::new("units classes", GeometryType::None, vec![Field::new("note", FieldType::Text)]);
+    mine.push_next(None, vec![V::Text("mine".into())]);
+    let id = s.project.add_table(mine);
+    let v = s.run("raster.rasterize", &json!({"layer": "soils", "field": "unit", "cellSize": 1, "name": "units"})).unwrap();
+    assert_eq!(s.project.table(id).expect("the user's table").value(0, 0), &V::Text("mine".into()));
+    assert_eq!(v["classTable"], "units classes (2)");
+    let table = s.project.tables.iter().find(|t| t.name == "units classes (2)").expect("the codes' table");
+    assert_eq!(table.value(0, 1), &V::Text("clay".into()));
+}
+
 /// Georeferencing, projecting and rasterizing need a plugin's `files` only when given a `path`: a
 /// null one is no path, and writes no file. A place named another way still needs it.
 #[test]

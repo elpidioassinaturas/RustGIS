@@ -541,7 +541,7 @@ fn rasterize(s: &mut Session, p: &Value) -> CmdResult {
     if text {
         let layer = info.get("name").and_then(Value::as_str).unwrap_or(&out_name).to_string();
         let mut table = rustgis_data::Dataset::new(
-            format!("{layer} classes"),
+            free_table_name(s, &format!("{layer} classes")),
             GeometryType::None,
             vec![rustgis_data::Field::new("code", FieldType::Integer), rustgis_data::Field::new("value", FieldType::Text)],
         );
@@ -549,12 +549,24 @@ fn rasterize(s: &mut Session, p: &Value) -> CmdResult {
             table.push_next(None, vec![rustgis_data::Value::Int(i as i64 + 1), rustgis_data::Value::Text(c.clone())]);
         }
         info["classTable"] = json!(table.name);
-        s.project.put_table(table);
+        s.project.add_table(table);
         info["classCount"] = json!(classes.len());
         // All the codes are in the table; here, as many as a unique-value legend shows.
         info["classes"] = classes.iter().take(256).enumerate().map(|(i, c)| json!({"code": i + 1, "value": c})).collect();
     }
     Ok(info)
+}
+
+/// `base`, or `base (2)`, `base (3)`… : the first no table of the project has (whatever its case).
+fn free_table_name(s: &Session, base: &str) -> String {
+    let taken = |n: &str| s.project.tables.iter().any(|t| t.name.eq_ignore_ascii_case(n));
+    let mut name = base.to_string();
+    let mut i = 1;
+    while taken(&name) {
+        i += 1;
+        name = format!("{base} ({i})");
+    }
+    name
 }
 
 /// A text field's value, `None` for null or blank.
