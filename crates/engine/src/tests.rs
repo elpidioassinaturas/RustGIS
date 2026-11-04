@@ -7892,6 +7892,20 @@ B,11,51
     let asked = s.take_url_requests();
     let urls: Vec<_> = asked.iter().map(|q| (q["url"].as_str(), q["request"].as_u64())).collect();
     assert_eq!(urls, [(Some("https://x.org/other.csv"), Some(next)), (Some("https://x.org/mine.csv"), Some(next))]);
+    // A run replaced by one asking for another address before its download was started: that
+    // download is never started, and the notice of the replaced run says so.
+    let first = json!({"op": "layer.addUrl", "params": {"url": "https://x.org/first.csv"}});
+    s.run_leaving_downloads("plugin:eng-rerun/f", &first).unwrap();
+    let mark = s.notice_mark();
+    let second = json!({"op": "layer.addUrl", "params": {"url": "https://x.org/second.csv"}});
+    s.run_leaving_downloads("plugin:eng-rerun/f", &second).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(
+        said.iter().any(|t| t.contains("replaced by this one") && t.contains("its download of https://x.org/first.csv wasn't started")),
+        "{said:?}"
+    );
+    let left = s.take_url_requests();
+    assert!(left.iter().all(|q| q["url"] != "https://x.org/first.csv"), "{left:?}");
     rustgis_plugins::unload("eng-rerun");
 }
 

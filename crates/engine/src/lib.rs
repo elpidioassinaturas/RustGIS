@@ -1016,7 +1016,11 @@ impl Session {
         let url = p.get("url").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
         let asked = cmd::plugins::fetch::without_request(p);
         let waiting = self.url_requests.iter().find(|q| cmd::plugins::fetch::same_request(q, &asked)).and_then(|q| q["request"].as_u64());
-        let number = match p.get("request").and_then(serde_json::Value::as_u64).or(waiting).or_else(|| self.url_waits.in_flight(&asked)) {
+        // A number given that another download waited for has (another address) isn't this
+        // request's: set aside, so the request still gets a download of its own.
+        let given =
+            p.get("request").and_then(serde_json::Value::as_u64).filter(|n| !self.url_waits.has(*n) || self.url_waits.holds(*n, &asked));
+        let number = match given.or(waiting).or_else(|| self.url_waits.in_flight(&asked)) {
             Some(n) => n,
             None => {
                 self.next_request += 1;
@@ -1026,7 +1030,7 @@ impl Session {
         // A number the front end took and hands back (in the browser, a file it found must be
         // downloaded whole after all) isn't being downloaded: queued again, whole, so it isn't
         // probed again.
-        let handed_back = p.get("request").and_then(serde_json::Value::as_u64).is_some_and(|n| self.url_waits.holds(n, &asked));
+        let handed_back = given.is_some_and(|n| self.url_waits.holds(n, &asked));
         if waiting.is_none() && (handed_back || !self.url_waits.has(number)) {
             if self.url_requests.len() >= MAX_URL_REQUESTS {
                 return Err(format!("{url}: {MAX_URL_REQUESTS} downloads are already waiting; try again when they have landed"));
@@ -1146,12 +1150,13 @@ impl Session {
                 && let Some(n) = params.get("request").and_then(Value::as_u64)
                 && self.url_waits.given_up(n, params)
             {
-                // Its bytes go too; the front end says the refusal, once.
+                // Its bytes go too; the front end says the refusal, once, with its address.
                 if let Some(d) = params.get("id").and_then(Value::as_u64) {
                     self.downloaded.retain(|(k, _)| *k != d);
                 }
                 self.url_waits.refused(n);
-                return Err("a download that came after its plugin command stopped waiting wasn't added".to_string());
+                let url = params.get("url").and_then(Value::as_str).unwrap_or("download");
+                return Err(format!("{url}: it came after its plugin command stopped waiting, so it wasn't added"));
             }
             let res = self.run_command(id, params);
             // A download a plugin command left to the app, added: what it answered is kept for the

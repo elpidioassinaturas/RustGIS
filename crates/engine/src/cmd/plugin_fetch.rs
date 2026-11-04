@@ -376,6 +376,16 @@ fn same_tile(t: &rustgis_map::tiles::TileLayer, added: &rustgis_map::tiles::Tile
     t.url == added.url && t.kind == added.kind && t.overlay == added.overlay && t.style_layers == added.style_layers
 }
 
+/// What a notice of a run replaced or dropped adds for the downloads only it asked for that
+/// were never started (`cancelled`): nothing when there are none.
+fn not_started(cancelled: &[String]) -> String {
+    match cancelled {
+        [] => String::new(),
+        [one] => format!("; its download of {one} wasn't started, and won't be"),
+        many => format!("; its {} downloads not yet started won't be: {}", many.len(), many.join(", ")),
+    }
+}
+
 /// The most given-up requests whose downloads are still out: each is remembered until its
 /// download lands (and is refused) or fails, and while this many are, plugin commands ask for no
 /// more downloads.
@@ -545,13 +555,17 @@ impl Session {
         let keeps: Vec<u64> = requests.iter().map(|(n, _)| *n).collect();
         if let Some(i) = self.plugin_retries.iter().position(|r| r.id == id) {
             let old = self.plugin_retries.remove(i);
-            self.give_up_requests(&old, &keeps);
-            self.notify(format!("{id}: an earlier run still waiting for the web was replaced by this one"), false);
+            let cancelled = self.give_up_requests(&old, &keeps);
+            self.notify(
+                format!("{id}: an earlier run still waiting for the web was replaced by this one{}", not_started(&cancelled)),
+                false,
+            );
         }
         if self.plugin_retries.len() >= MAX_WAITING {
             let dropped = self.plugin_retries.remove(0);
-            self.give_up_requests(&dropped, &keeps);
-            self.notify(format!("{}: dropped while waiting for the web (too many plugin commands waiting)", dropped.id), true);
+            let cancelled = self.give_up_requests(&dropped, &keeps);
+            let said = format!("{}: dropped while waiting for the web (too many plugin commands waiting)", dropped.id);
+            self.notify(format!("{said}{}", not_started(&cancelled)), true);
         }
         // `urls` are cache keys (`<plugin> <url>`; plugin ids have no spaces): the answer names
         // the addresses.
@@ -574,16 +588,25 @@ impl Session {
     }
 
     /// Gives up the downloads `gone` waited for that neither `keeps` (the run replacing it) nor
-    /// another waiting run still waits for.
-    fn give_up_requests(&mut self, gone: &Retry, keeps: &[u64]) {
+    /// another waiting run still waits for: the addresses of those not started, which are never
+    /// downloaded now. (One under way is refused, and said, when it lands.)
+    fn give_up_requests(&mut self, gone: &Retry, keeps: &[u64]) -> Vec<String> {
+        let mut cancelled = Vec::new();
         for n in &gone.requests {
             if !keeps.contains(n) && !self.rerun_requests.contains(n) && !self.plugin_retries.iter().any(|r| r.requests.contains(n)) {
                 // Not yet taken by the front end: not downloaded at all, so nothing will land it.
-                let queued = self.url_requests.iter().any(|q| q["request"].as_u64() == Some(*n));
-                self.url_waits.give_up(*n, !queued);
+                let queued: Vec<String> = self
+                    .url_requests
+                    .iter()
+                    .filter(|q| q["request"].as_u64() == Some(*n))
+                    .filter_map(|q| q["url"].as_str().map(String::from))
+                    .collect();
+                self.url_waits.give_up(*n, queued.is_empty());
                 self.url_requests.retain(|q| q["request"].as_u64() != Some(*n));
+                cancelled.extend(queued);
             }
         }
+        cancelled
     }
 
     /// Whether plugin commands are waiting for their fetches or downloads, so the front end
@@ -744,6 +767,23 @@ mod tests {
         assert_eq!(s.url_waits.in_flight(&other), Some(901));
         s.request_url(&other).unwrap();
         assert!(s.take_url_requests().is_empty());
+    }
+
+    /// A number given with another address than the download it was given for isn't taken: the
+    /// request is a download of its own, with its own number; handed back with its own address,
+    /// it is queued again, whole (#1202).
+    #[test]
+    fn a_number_given_for_another_address_is_set_aside() {
+        let mut s = Session::new(crate::project::Project::default());
+        s.url_waits.wait(900, json!({"url": "https://x.org/a.geojson"}));
+        s.request_url(&json!({"url": "https://x.org/b.geojson", "request": 900})).unwrap();
+        let taken = s.take_url_requests();
+        assert_eq!(taken.len(), 1, "{taken:?}");
+        assert_eq!(taken[0]["url"], "https://x.org/b.geojson");
+        assert_ne!(taken[0]["request"], json!(900));
+        s.request_url(&json!({"url": "https://x.org/a.geojson", "request": 900})).unwrap();
+        let taken = s.take_url_requests();
+        assert_eq!((taken[0]["request"].clone(), taken[0]["whole"].clone()), (json!(900), json!(true)), "{taken:?}");
     }
 
     /// Plugin commands waiting for the same download each get its answer, a rerun that waits
