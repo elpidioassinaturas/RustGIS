@@ -3758,8 +3758,10 @@ impl RustGisApp {
     /// Adds a download handed to the session (`current`: it still belongs to this project).
     fn add_download(&mut self, landed: serviceui::Landed, current: bool) {
         let serviceui::Landed { id, url, params: mut p, origin } = landed;
+        // Named redacted: a notice with a key in it loses what follows it.
+        let shown = rustgis_engine::sources::redact(&url);
         if !current {
-            let said = i18n::fmt("{url}: downloaded after its project was closed, so it wasn't added", &[("url", &url)]);
+            let said = i18n::fmt("{url}: downloaded after its project was closed, so it wasn't added", &[("url", &shown)]);
             self.session.request_failed(&p, &said);
             self.session.notify(said, false);
             return;
@@ -3784,8 +3786,8 @@ impl RustGisApp {
                 rustgis_engine::cmd::geolibre::discard_pending(&mut self.session, &pending);
                 // Running it said the error already: again only to name the address it lacks. An
                 // error may name it redacted.
-                if !e.starts_with(&url) && !e.starts_with(&rustgis_engine::sources::redact(&url)) {
-                    self.session.notify(format!("{url}: {e}"), true);
+                if !e.starts_with(&url) && !e.starts_with(&shown) {
+                    self.session.notify(format!("{shown}: {e}"), true);
                 }
             }
         }

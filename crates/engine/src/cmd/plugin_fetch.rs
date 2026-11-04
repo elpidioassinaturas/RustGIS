@@ -472,14 +472,18 @@ impl UrlWaits {
         }
     }
 
-    /// Downloads waited for past [`REQUEST_WAIT`] land as failed, and are remembered as given up.
-    fn expire(&mut self) {
+    /// Downloads waited for past [`REQUEST_WAIT`] land as failed, and are remembered as given up:
+    /// their addresses, redacted, to be said (a notice with a key in it loses what follows it).
+    fn expire(&mut self) -> Vec<String> {
         let late: Vec<(u64, Value)> =
             self.in_flight.iter().filter(|(.., at)| at.elapsed() >= REQUEST_WAIT).map(|(n, q, _)| (*n, q.clone())).collect();
+        let mut addresses = Vec::new();
         for (n, asked) in late {
             self.land(n, Err(format!("no download in {} minutes", REQUEST_WAIT.as_secs() / 60)), Added::default());
+            addresses.extend(asked["url"].as_str().map(crate::sources::redact));
             self.remember_given_up(n, asked);
         }
+        addresses
     }
 
     /// Request `n`, no command waiting for it any more, is given up: forgotten, and remembered
@@ -656,7 +660,11 @@ impl Session {
         if self.plugin_retries.is_empty() {
             return Vec::new();
         }
-        self.url_waits.expire();
+        // Said here too: the command may go on without it, and what it answers goes nowhere.
+        for url in self.url_waits.expire() {
+            let minutes = REQUEST_WAIT.as_secs() / 60;
+            self.notify(format!("{url}: no download in {minutes} minutes, so its plugin command stopped waiting for it"), true);
+        }
         let (ready, waiting): (Vec<Retry>, Vec<Retry>) = std::mem::take(&mut self.plugin_retries).into_iter().partition(|r| {
             let c = cache();
             r.urls.iter().all(|u| c.landed(u)) && r.requests.iter().all(|n| self.url_waits.landed.iter().any(|(m, ..)| m == n))
@@ -778,6 +786,25 @@ mod tests {
         s.run("table.remove", &json!({"table": "sites"})).unwrap();
         let e = s.run("layer.addUrl", &asked).unwrap_err();
         assert!(e.contains("the table its download added was taken away (undone)"), "{e}");
+    }
+
+    /// A download given up after the wait is said once, with its address, whatever the command
+    /// does with its error.
+    #[test]
+    fn a_download_given_up_is_said_with_its_address() {
+        // Only where the clock has run that long: a machine just started can't be that far back.
+        let Some(long_ago) = Instant::now().checked_sub(REQUEST_WAIT + Duration::from_secs(1)) else { return };
+        let mut s = Session::new(crate::project::Project::default());
+        let url = "https://x.org/slow.csv?token=hunter2";
+        s.retry_plugin("plugin:eng-slow/f", &json!({}), Vec::new(), vec![(900, json!({"url": url}))]).unwrap();
+        s.url_waits.in_flight[0].2 = long_ago;
+        let mark = s.notice_mark();
+        s.poll_plugin_retries();
+        s.poll_plugin_retries();
+        let notices = s.notices_since(mark);
+        let said: Vec<&str> = notices.iter().filter(|n| n.error && n.text.contains("stopped waiting")).map(|n| n.text.as_str()).collect();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].starts_with("https://x.org/slow.csv") && !said[0].contains("hunter2"), "{said:?}");
     }
 
     /// A waiting command's answer names what it waits for, without the addresses' keys.
