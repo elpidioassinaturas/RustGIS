@@ -17,7 +17,11 @@ use std::time::Duration;
 const FRAMES_SHOWN: u8 = 2;
 
 /// A run this long has clicks held for it that were meant for a window that wasn't answering.
+#[cfg(not(test))]
 const STALE_AFTER: Duration = Duration::from_millis(150);
+/// In tests, every run: the commands there are quick.
+#[cfg(test)]
+const STALE_AFTER: Duration = Duration::ZERO;
 
 struct Start {
     id: String,
@@ -63,7 +67,8 @@ fn drop_replaced(app: &mut RustGisApp) {
 /// release ([`RustGisApp::drop_stale_clicks`]), and egui would hold the button down until the next
 /// click. The click that release makes reaches [`ask`] after this, in the frame's drawing, and
 /// finds the command still waiting. A window that has lost focus doesn't wait: the release may
-/// never come, and egui clears no button then.
+/// never come, and egui clears no button then. Should it come, it isn't swallowed: a run begun with
+/// a button down drops no clicks.
 pub(crate) fn run_next(app: &mut RustGisApp, ctx: &egui::Context) {
     drop_replaced(app);
     if app.ui.plugin_start.waiting.front().is_none_or(|s| s.frames < FRAMES_SHOWN)
@@ -72,9 +77,10 @@ pub(crate) fn run_next(app: &mut RustGisApp, ctx: &egui::Context) {
         return;
     }
     let Some(start) = app.ui.plugin_start.waiting.pop_front() else { return };
+    let held = ctx.input(|i| i.pointer.any_down());
     let began = web_time::Instant::now();
     let _ = app.run(&start.id, start.params);
-    app.ui.plugin_start.clicks_stale = began.elapsed() >= STALE_AFTER;
+    app.ui.plugin_start.clicks_stale = !held && began.elapsed() >= STALE_AFTER;
 }
 
 /// At the end of a frame: a command waiting has been shown once more, with a busy cursor, and
@@ -108,9 +114,9 @@ fn title(app: &RustGisApp, id: &str) -> String {
 
 impl RustGisApp {
     /// Before a frame, from the window: drops the clicks made during a long plugin command, press
-    /// and release alike, so none is half taken. No button was down when it started, so this drops
-    /// no release of a press egui has seen (`run_next`); a release left for the next frame, its
-    /// press dropped, is no click to egui.
+    /// and release alike, so none is half taken. It only follows a run begun with no button down,
+    /// so this drops no release of a press egui has seen (`run_next`); a release left for the next
+    /// frame, its press dropped, is no click to egui.
     ///
     /// These events carry no time, and the window reads them in one batch: a click made after the
     /// command returned, before this frame's input was read, goes with them. That frame comes right
@@ -258,6 +264,76 @@ mod tests {
         assert!(h.ctx.input(|i| i.pointer.any_down()), "egui keeps the button down");
         assert!(h.state().session.map().layer_by_name("Streams").is_some());
         plugins::unload("ui-left");
+    }
+
+    /// The release of a button held through a run, in a window that lost focus, reaches egui, which
+    /// would otherwise keep the button down until the next click. With no button down, a long
+    /// run's clicks are dropped.
+    #[test]
+    fn a_release_after_a_run_begun_with_a_button_down_is_kept() {
+        let mut h = launch("ui-late");
+        let id = "plugin:ui-late/f";
+        let at = pos2(700.0, 400.0);
+        let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.event(Event::PointerMoved(at));
+        h.event(button(true));
+        h.step();
+        h.state_mut().run_by_user(id, rename("Rivers", "Streams")).unwrap();
+        h.input_mut().focused = false;
+        h.event(Event::WindowFocused(false));
+        for _ in 0..4 {
+            h.step();
+        }
+        assert!(h.state().session.map().layer_by_name("Streams").is_some());
+        let mut input = egui::RawInput { events: vec![button(false)], ..Default::default() };
+        h.state_mut().drop_stale_clicks(&mut input);
+        for event in input.events {
+            h.event(event);
+        }
+        h.step();
+        assert!(!h.ctx.input(|i| i.pointer.any_down()), "the button is up again");
+        h.state_mut().run_by_user(id, rename("Streams", "Brooks")).unwrap();
+        for _ in 0..4 {
+            h.step();
+        }
+        assert!(h.state().session.map().layer_by_name("Brooks").is_some());
+        assert!(h.state().ui.plugin_start.clicks_stale);
+        plugins::unload("ui-late");
+    }
+
+    /// The frame that runs a command drops the clicks held for it in the next one, which has to
+    /// come whatever the user does. It does with no other command waiting: `frame_drawn` asked for
+    /// the frame that runs it, and egui answers such a request with one frame more.
+    #[test]
+    fn egui_gives_a_frame_after_the_one_a_repaint_was_asked_for() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let asked = std::sync::Arc::new(AtomicU32::new(0));
+        let ctx = egui::Context::default();
+        let count = asked.clone();
+        ctx.set_request_repaint_callback(move |info| {
+            if info.delay.is_zero() {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let frame = |ctx: &egui::Context, ask: bool| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                if ask {
+                    ui.ctx().request_repaint();
+                }
+            });
+            output.textures_delta.clear();
+        };
+        for _ in 0..4 {
+            frame(&ctx, false);
+        }
+        assert!(!ctx.has_requested_repaint(), "settled");
+        frame(&ctx, true);
+        asked.store(0, Ordering::Relaxed);
+        frame(&ctx, false);
+        assert_eq!(asked.load(Ordering::Relaxed), 1, "the frame that runs the command asks for the next");
+        asked.store(0, Ordering::Relaxed);
+        frame(&ctx, false);
+        assert_eq!(asked.load(Ordering::Relaxed), 0, "and that one for no more");
     }
 
     /// A project replacing this one takes the commands waiting in it, which name its layers, and
