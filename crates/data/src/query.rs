@@ -15,11 +15,13 @@
 //! as numbers. Logic is SQL's three-valued: a comparison with a null is unknown. One exception,
 //! kept from the WHERE language this replaced so saved clauses keep their rows: a NULL in an `IN`
 //! list matches nothing, so `2 NOT IN (1, NULL)` is true where SQL makes it unknown. A `LIKE`
-//! too costly to match ([`MAX_LIKE_STEPS`]) is unknown. Arithmetic on a
+//! too costly to match ([`MAX_LIKE_STEPS`]) is unknown, as is any that would take an expression's
+//! `LIKE`s past what they may take for one row together ([`MAX_ROW_LIKE_STEPS`]). Arithmetic on a
 //! null, a division by zero or an overflow gives null; `+` joins text that isn't a number.
 
-use crate::{Dataset, Value};
+use crate::{Dataset, Measure, Value};
 use std::borrow::Cow;
+use std::cell::Cell;
 
 #[cfg(test)]
 mod legacy;
@@ -114,6 +116,9 @@ pub enum Var {
     RowNumber,
     /// `$id`: the feature's id.
     Id,
+    /// `$area`, `$perimeter`, `$length`, `area(unit)`, `perimeter(unit)`, `line_length(unit)`:
+    /// the feature's geometry measured on the WGS 84 ellipsoid, divided by the unit's size.
+    Measure(Measure, f64),
 }
 
 /// Values an expression reads from where it runs.
@@ -155,6 +160,10 @@ pub enum Func {
     Concat,
     ColorRgb,
     ColorRgba,
+    /// Parsed into [`Var::Measure`], like the two below.
+    Area,
+    Perimeter,
+    LineLength,
 }
 
 /// Functions by name, with their fewest and most arguments.
@@ -190,6 +199,9 @@ const FUNCS: &[(&str, Func, usize, usize)] = &[
     ("concat", Func::Concat, 1, MAX_ARGS),
     ("color_rgb", Func::ColorRgb, 3, 3),
     ("color_rgba", Func::ColorRgba, 4, 4),
+    ("area", Func::Area, 0, 1),
+    ("perimeter", Func::Perimeter, 0, 1),
+    ("line_length", Func::LineLength, 0, 1),
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -595,6 +607,17 @@ impl Parser<'_> {
     fn field(&self, name: &str) -> Result<Expr, String> {
         self.ds.field_index(name).map(Expr::Field).ok_or_else(|| format!("no field named '{name}'"))
     }
+    /// `m` in units of `size`, on a layer of the kind it measures.
+    fn measure(&self, name: &str, m: Measure, size: f64) -> Result<Expr, String> {
+        let want = m.geometry_type();
+        if self.ds.geometry_type != want {
+            let hint = if m == Measure::Length { " (use perimeter on polygons)" } else { "" };
+            return Err(format!("'{name}' measures {} layers{hint}", want.label().to_ascii_lowercase()));
+        }
+        Ok(Expr::Var(Var::Measure(m, size)))
+    }
+    /// A value: a literal, a field, a variable (a measure only on a layer it fits), a call, a
+    /// `CASE` or a bracketed expression.
     fn primary(&mut self) -> Result<Expr, String> {
         match self.next() {
             Some(Tok::LParen) => {
@@ -613,7 +636,10 @@ impl Parser<'_> {
                 "@map_scale" | "$scale" => Ok(Expr::Var(Var::MapScale)),
                 "@row_number" => Ok(Expr::Var(Var::RowNumber)),
                 "$id" => Ok(Expr::Var(Var::Id)),
-                _ => Err(format!("unknown variable '{v}'")),
+                name => match name.strip_prefix('$').and_then(Measure::from_key) {
+                    Some(m) => self.measure(&v, m, 1.0),
+                    None => Err(format!("unknown variable '{v}'")),
+                },
             },
             Some(Tok::Ident(s)) => {
                 if self.toks.get(self.pos) == Some(&Tok::LParen) {
@@ -635,6 +661,8 @@ impl Parser<'_> {
             other => Err(format!("expected a value, found {}", show(other.as_ref()))),
         }
     }
+    /// A call of the function `name`, its arguments counted; a measure's call becomes the
+    /// variable it reads, its unit (fixed text) checked here.
     fn call(&mut self, name: &str) -> Result<Expr, String> {
         let &(fname, f, min, max) =
             FUNCS.iter().find(|(n, ..)| n.eq_ignore_ascii_case(name)).ok_or_else(|| format!("unknown function '{name}'"))?;
@@ -663,7 +691,26 @@ impl Parser<'_> {
             };
             return Err(format!("{fname} takes {n} argument{}", if n == "1" { "" } else { "s" }));
         }
-        Ok(Expr::Call(f, args))
+        let m = match f {
+            Func::Area => Measure::Area,
+            Func::Perimeter => Measure::Perimeter,
+            Func::LineLength => Measure::Length,
+            _ => return Ok(Expr::Call(f, args)),
+        };
+        // The unit is fixed text, so an unknown one is an error here rather than a null per row.
+        let size = match args.first() {
+            None => 1.0,
+            Some(Expr::Lit(Value::Text(u))) => m.unit(u).ok_or_else(|| {
+                let keys: Vec<&str> = m.units().iter().map(|u| u.0).collect();
+                format!("{fname} has no unit '{u}': use one of {}", keys.join(", "))
+            })?,
+            // QGIS's area($geometry) and the like land here.
+            Some(_) => {
+                let example = if m == Measure::Area { "ha" } else { "km" };
+                return Err(format!("{fname} measures the feature's own geometry: its argument is a unit as text, such as '{example}'"));
+            }
+        };
+        self.measure(fname, m, size)
     }
     fn case(&mut self) -> Result<Expr, String> {
         self.deeper()?;
@@ -762,29 +809,46 @@ fn compare(a: &Value, op: Op, b: &Value) -> Option<bool> {
 
 /// The most steps one `LIKE` takes to match. A long text against a pattern of many `%`s costs
 /// up to text × pattern steps (64 KiB of text and a 10,000-character pattern, 6.5 × 10⁸); past
-/// this (a tenth of a second or so), the match is unknown rather than holding up the map.
+/// this (some 15 ms), the match is unknown rather than holding up the map.
 pub const MAX_LIKE_STEPS: usize = 1 << 24;
+
+/// The most steps all of an expression's `LIKE`s take together for one row: four at their cap. A
+/// clause can hold hundreds of `LIKE`s, each up to [`MAX_LIKE_STEPS`]; once they've spent this, the
+/// rest are unknown. A single costly `LIKE` doesn't affect the others.
+pub const MAX_ROW_LIKE_STEPS: usize = 4 * MAX_LIKE_STEPS;
 
 /// SQL LIKE with `%` and `_`, case-insensitive; no match when it would take more than
 /// [`MAX_LIKE_STEPS`].
 pub fn like(text: &str, pat: &str) -> bool {
-    like_within(text, pat).unwrap_or(false)
+    like_within(text, pat, &Cell::new(MAX_LIKE_STEPS)).unwrap_or(false)
 }
 
-/// SQL LIKE with `%` and `_`, case-insensitive: `None` when it would take more than
-/// [`MAX_LIKE_STEPS`].
-fn like_within(text: &str, pat: &str) -> Option<bool> {
+/// SQL LIKE with `%` and `_`, case-insensitive, taking up to [`MAX_LIKE_STEPS`] from `budget`:
+/// `None` when it would take more than that or than `budget` holds, at once when it's empty.
+fn like_within(text: &str, pat: &str, budget: &Cell<usize>) -> Option<bool> {
+    let had = budget.get();
+    if had == 0 {
+        return None;
+    }
+    let mut left = had.min(MAX_LIKE_STEPS);
+    let start = left;
+    let m = like_steps(text, pat, &mut left);
+    budget.set(had - (start - left));
+    m
+}
+
+/// [`like_within`], counting its steps down in `left`.
+fn like_steps(text: &str, pat: &str, left: &mut usize) -> Option<bool> {
     let t: Vec<char> = text.to_lowercase().chars().collect();
     let p: Vec<char> = pat.to_lowercase().chars().collect();
     // Iterative wildcard matching with backtracking on the last '%'.
     let (mut ti, mut pi) = (0usize, 0usize);
     let (mut star, mut mark) = (None::<usize>, 0usize);
-    let mut steps = 0usize;
     while ti < t.len() {
-        steps += 1;
-        if steps > MAX_LIKE_STEPS {
+        if *left == 0 {
             return None;
         }
+        *left -= 1;
         match p.get(pi) {
             Some('%') => {
                 star = Some(pi);
@@ -815,12 +879,12 @@ pub fn eval(e: &Expr, ds: &Dataset, row: usize) -> bool {
 
 /// Whether the row matches, with variables from `env`.
 pub fn matches(e: &Expr, ds: &Dataset, row: usize, env: &Env) -> bool {
-    Eval { ds, row, env }.cond(e) == Some(true)
+    Eval::new(ds, row, env).cond(e) == Some(true)
 }
 
 /// The expression's value for one row.
 pub fn value(e: &Expr, ds: &Dataset, row: usize, env: &Env) -> Value {
-    Eval { ds, row, env }.value(e).into_owned()
+    Eval::new(ds, row, env).value(e).into_owned()
 }
 
 /// Whether a value counts as true: a non-zero number, non-empty text; null is unknown.
@@ -914,9 +978,15 @@ struct Eval<'a> {
     ds: &'a Dataset,
     row: usize,
     env: &'a Env,
+    /// The steps left for the expression's `LIKE`s on this row ([`MAX_ROW_LIKE_STEPS`] in all).
+    like_steps: Cell<usize>,
 }
 
 impl<'a> Eval<'a> {
+    fn new(ds: &'a Dataset, row: usize, env: &'a Env) -> Self {
+        Eval { ds, row, env, like_steps: Cell::new(MAX_ROW_LIKE_STEPS) }
+    }
+
     /// SQL's three-valued logic: `None` is "unknown", what a comparison with a null gives. `NOT`
     /// leaves it unknown, so `NOT (pop > 100)` doesn't match a row whose `pop` is null.
     fn cond(&self, e: &'a Expr) -> Option<bool> {
@@ -948,10 +1018,11 @@ impl<'a> Eval<'a> {
             Expr::IsNull { field, negate } => Some(ds.value(row, *field).is_null() != *negate),
             Expr::Like { field, pattern, negate } => {
                 let v = ds.value(row, *field);
-                if v.is_null() {
+                // Out of steps for this row: unknown, without copying the text.
+                if v.is_null() || self.like_steps.get() == 0 {
                     return None;
                 }
-                like_within(&v.to_string(), pattern).map(|m| m != *negate)
+                like_within(&v.to_string(), pattern, &self.like_steps).map(|m| m != *negate)
             }
             Expr::In { field, values, negate } => {
                 let v = ds.value(row, *field);
@@ -961,6 +1032,10 @@ impl<'a> Eval<'a> {
             Expr::Compare(op, l, r) => compare(&self.value(l), *op, &self.value(r)),
             Expr::IsNullExpr { e, negate } => Some(self.value(e).is_null() != *negate),
             Expr::LikeExpr { e, pattern, negate } => {
+                // Out of steps for this row: unknown, without building the text or the pattern.
+                if self.like_steps.get() == 0 {
+                    return None;
+                }
                 let (v, p) = (self.value(e), self.value(pattern));
                 // A pattern no longer than a clause, as a written one is: matching costs text × pattern.
                 if v.is_null() || p.is_null() {
@@ -971,7 +1046,7 @@ impl<'a> Eval<'a> {
                 if p.chars().count() > MAX_LEN {
                     return Some(*negate);
                 }
-                like_within(&v.to_string(), &p).map(|m| m != *negate)
+                like_within(&v.to_string(), &p, &self.like_steps).map(|m| m != *negate)
             }
             Expr::InExpr { e, list, negate } => {
                 let v = self.value(e);
@@ -995,6 +1070,7 @@ impl<'a> Eval<'a> {
         }
     }
 
+    /// `e`'s value on this row: null where it can't be worked out (a missing field, an error).
     fn value(&self, e: &'a Expr) -> Cow<'a, Value> {
         match e {
             Expr::Lit(v) => Cow::Borrowed(v),
@@ -1003,6 +1079,16 @@ impl<'a> Eval<'a> {
                 Var::MapScale => self.env.map_scale.map(real).unwrap_or(Value::Null),
                 Var::RowNumber => i64::try_from(self.row).ok().and_then(|r| r.checked_add(1)).map(Value::Int).unwrap_or(Value::Null),
                 Var::Id => self.ds.features.get(self.row).and_then(|f| i64::try_from(f.id).ok()).map(Value::Int).unwrap_or(Value::Null),
+                Var::Measure(m, size) => self
+                    .ds
+                    .features
+                    .get(self.row)
+                    .and_then(|f| f.geometry.as_ref())
+                    .and_then(|g| g.wgs84_measure(*m))
+                    // A hole larger than its polygon measures below zero: no sensible area.
+                    .filter(|v| *v >= 0.0)
+                    .map(|v| real(v / size))
+                    .unwrap_or(Value::Null),
             }),
             Expr::Chain(first, rest) => {
                 let mut acc = self.value(first).into_owned();
@@ -1045,6 +1131,7 @@ impl<'a> Eval<'a> {
         }
     }
 
+    /// The value of the function `f` over `args` on this row.
     fn call(&self, f: Func, args: &'a [Expr]) -> Cow<'a, Value> {
         let arg = |i: usize| args.get(i).map(|a| self.value(a)).unwrap_or(Cow::Owned(Value::Null));
         let n = |i: usize| arg(i).as_f64();
@@ -1207,6 +1294,8 @@ impl<'a> Eval<'a> {
                 (Some(r), Some(g), Some(b), Some(a)) => Value::Text(format!("{},{},{},{}", channel(r), channel(g), channel(b), channel(a))),
                 _ => Value::Null,
             },
+            // Parsed into variables, so never called.
+            Func::Area | Func::Perimeter | Func::LineLength => Value::Null,
         })
     }
 }

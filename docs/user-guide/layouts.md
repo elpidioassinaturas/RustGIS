@@ -33,13 +33,28 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     with labels on every edge of a sheet.
     The north arrow, the legend (sized to what it lists), the scale bar with the numeric scale
     under it and the locator sit in the frame's corners, clear of the graticule's
-    labels. Each takes the corner where it covers the least of what the map draws (its layers and
-    labels, not the basemap), so a legend leaves a corner the data fills; when it makes no
-    difference they keep theirs: the locator at the top left, the arrow at the top right, the
-    legend at the bottom left and the scale at the bottom right. With more surrounds than free
-    corners, one warning names those left on the data, to move by hand if that matters (data
-    under every corner alike, such as a context layer filling the frame, isn't worth a warning);
-    two that overlap (a frame too small) are said too.
+    labels. The **arrangement** says which corner is each one's. `classic` (the default favourite) puts the
+    locator at the top left, the arrow at the top right, the legend at the bottom left and the
+    scale at the bottom right. `mirrored` swaps left and right, `legendRight` swaps the legend and
+    the scale, and `legendTop` swaps the legend and the locator. `"arrangement"` also takes a
+    corner for each (`{"locator": "top-left", "northArrow": "top-right", "legend": "bottom-left",
+    "scaleBar": "bottom-right"}`).
+    A surround over what the map draws in its corner (its layers and labels, not the basemap; more
+    than 0.5 % of the surround) moves off the corner, to the freest place in the frame. It keeps
+    2 mm clear of the others, stays near its corner, and lines up with the frame's edges or centre or
+    with another surround. The largest is placed first (the legend, as a rule), so it takes the
+    freest place, and a smaller one whose corner it took moves out of its way.
+    Your favourite arrangement, set with **`layout.arrangement {"favourite": …}`** and kept with
+    the app's preferences, is the one tried first. `"arrangement": "best"`, the default, lays out
+    the favourite and every arrangement by name, and keeps the one that moves the least
+    (by area, so moving the north arrow costs less than moving the legend), then the one leaving
+    the least over the data; the favourite wins a tie. `"favourite"` always takes the favourite.
+    The answer names the arrangement taken (`"arrangement"`) and the surrounds
+    moved off their corners (`"moved"`). Where nowhere is freer, a surround stays. One warning
+    names those left with more than a quarter of their area on the data while a corner of their
+    size had more than a quarter less, to move by hand if that matters (data under every corner
+    alike, such as a context layer filling the frame, isn't worth a warning); two that overlap (a
+    frame too small) are said too.
     The top visible raster gets a colorbar beneath the vector legend if its renderer has a colour
     scale; RGB and untinted hillshade do not. If the legend or colorbar cannot fit, the result
     warns about clipping or resizing. A streamed layer still loading gets a fixed-size legend
@@ -212,8 +227,10 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   damaged) is drawn in the fallback too, and the command that names it says so. The fallback
   starts as the family's own class (a serif's is Serif).
   Scripts give the family's name: `"font": "Garamond"`, with `"fallback": "serif"` if wanted;
-  `labels.fonts` lists the installed families. The project keeps the name, never a file, and no
-  font goes into a PNG or PDF export (their pages are pictures). **Picture** places a PNG or JPEG.
+  `labels.fonts` lists the installed families. The project keeps the name, never a file. A PDF
+  sets its text in the letters' own outlines, so it shows the family wherever it is opened, and
+  the text can still be searched and copied; no font file goes into it. **Picture** places a PNG
+  or JPEG.
 - **Map Series**: one page per feature of an index layer, with the frame zoomed to each feature;
   step through pages, refresh, and export every page into one PDF.
 - Click an element to select it, drag to move, drag its handles to resize, and edit it in the
@@ -242,12 +259,24 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   the other elements' edges and centres, and the line it snapped to is highlighted. Hold Alt to
   place an element freely, or turn **Snap** off in the Page group.
 - **Export** writes PDF (every map series page by default, up to 500), or PNG or SVG of the current page.
+  A PDF keeps the page as vectors: text, shapes, surrounds and map frames (their features, labels
+  and grids, turned with the frame) stay sharp at any zoom or print size, and linear and radial
+  gradient fills are PDF gradients. What is pixels by nature is a picture in it at the export's
+  `dpi`, keeping its layer's opacity and blend mode: rasters, web tile layers, pictures, legend
+  images from map services, a masked layer, and a frame that is tilted, on the globe or with view
+  effects. Hatch and dot fills, shapeburst fills, and sweeping, repeating or reflected gradients
+  are pictures cut to their shape. The `dpi` also sets how fine the vectors' detail is kept, as a
+  PNG at that resolution would show it. A frame or page whose vectors would pass 256 MB (64 MB
+  in the browser) is drawn as a picture instead, and the export says which.
   In SVG each element is a group (an Inkscape layer) named after it: text stays text and rectangles,
-  ellipses and lines stay shapes, while map frames and the other surrounds are pictures at the export
-  resolution, so the page can be finished in a vector editor. SVG text uses the viewer's
+  ellipses and lines stay shapes, and map frames and the other surrounds are kept as vectors as in a
+  PDF (their labels as the letters' shapes, each run labelled with its text), so the page can be
+  finished in a vector editor. What a PDF keeps as pictures is a picture in the SVG too, at the
+  export's `dpi`, and a frame whose vectors would pass the budget is drawn as a picture, with a
+  notice. A text element uses the viewer's
   font (a named family where the viewer has it, else its serif or sans-serif), so its alignment
   and line widths can differ from PNG/PDF and can
-  change when edited. Embedded pictures are clipped to their element boxes;
+  change when edited. A picture standing for a whole element is clipped to its box;
   `layout.export` accepts `dpi` and `"allPages": false` for just the current PDF
   page. **Print** opens the PDF in the system viewer on desktop; **Save Layout File** and
   **Import Layout** move layouts between projects (`.rgislayout`).
@@ -269,7 +298,8 @@ previews it and sets it up.
   relationship, listed beneath it).
 - A where clause or the layer's selection limits the records; a sort field orders them within
   their groups.
-- **Publish › Report**: **Export Report** writes a PDF (or the first page as PNG); **Save As Report
+- **Publish › Report**: **Export Report** writes a PDF, kept as vectors as a layout's is (or
+  the first page as PNG); **Save As Report
   File** keeps the report, and **Report Template** its design without the data source, to start
   reports on other layers (**Publish › Import Report**).
 
@@ -283,7 +313,8 @@ previews, edits and plays it.
   URL with an optional poster picture.
 - Each page has a title, speaker notes and a duration (for **Play**), and can move up or down.
 - **Publish › Output › Presentation › Export Presentation** writes an HTML slideshow (arrow
-  keys, `N` for notes, `P` to play; videos play in place), a PDF, or the first page as PNG.
+  keys, `N` for notes, `P` to play; videos play in place), a PDF (kept as vectors as a layout's
+  is), or the first page as PNG.
   Video sources remain file paths or URLs, so keep them accessible beside the exported slideshow.
   **Save As Presentation File** in the same menu keeps it to import into other projects (`.rgispres`).
 

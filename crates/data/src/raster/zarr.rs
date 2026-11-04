@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value};
 
-use super::{ColorHint, Crs, Exact, GeoTransform, MAX_SAMPLES, Raster};
+use super::{ColorHint, Crs, Exact, GeoTransform, Raster, max_samples};
 use crate::{DataError, Result};
 
 /// The metadata files a store may have at its root: Zarr 3's `zarr.json`, Zarr 2's consolidated
@@ -996,8 +996,9 @@ pub fn plan(store: &Store, sel: &Selection) -> Result<Plan> {
     let (y, x) = map_dims(a);
     let (h, w) = (a.shape.get(y).copied().unwrap_or(0), a.shape.get(x).copied().unwrap_or(0));
     let cells = h.checked_mul(w).ok_or_else(|| bad("too large"))?;
-    if cells == 0 || cells > MAX_SAMPLES as u64 {
-        return Err(bad(format!("{} is {w} × {h}, more than a raster holds", a.path)));
+    let max = max_samples();
+    if cells == 0 || cells > max as u64 {
+        return Err(bad(format!("{} is {w} × {h}, more than the {max} cells a raster holds on this computer", a.path)));
     }
     a.chunk_values()?;
     let mut fixed = vec![0u64; a.shape.len()];
@@ -1155,7 +1156,7 @@ fn axis(v: &[f64]) -> Option<(f64, f64)> {
 pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, name: &str, crs: Option<Crs>) -> Result<Raster> {
     let a = store.array(&plan.var).ok_or_else(|| bad("the variable is gone"))?;
     let (h, w) = (a.shape.get(plan.y).copied().unwrap_or(0) as usize, a.shape.get(plan.x).copied().unwrap_or(0) as usize);
-    let mut grid = vec![f32::NAN; h * w];
+    let mut grid = super::filled(w, h, f32::NAN)?;
     let (cy, cx) = (a.chunks.get(plan.y).copied().unwrap_or(1).max(1), a.chunks.get(plan.x).copied().unwrap_or(1).max(1));
     let nd = a.shape.len();
     // Values meaning "no data", before any scaling, as xarray reads them: the CF attributes, and a
@@ -1270,7 +1271,7 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
     };
     // North up and west to east: flip rows (or columns) as needed.
     if dy > 0.0 {
-        let mut flipped = Vec::with_capacity(grid.len());
+        let mut flipped = super::grid(w, h)?;
         for r in (0..h).rev() {
             flipped.extend_from_slice(grid.get(r * w..(r + 1) * w).unwrap_or_default());
         }

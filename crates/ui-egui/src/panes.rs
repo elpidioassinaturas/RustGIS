@@ -63,12 +63,6 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
     } else {
         clear_pending_symbology(ui.ctx());
     }
-    // A Zarr summary or a trend running on its thread lands whatever pane is in view (both are
-    // looked at: `|`, not `||`), and the frames go on while one runs so it's taken when it ends.
-    #[cfg(not(target_arch = "wasm32"))]
-    if crate::workspacepanes::land_summary(app) | crate::analysispane::land_trend(app) {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
-    }
     // The pane in view always has its tab, however it was set.
     if let Some(right) = app.ui.right
         && !app.ui.right_open.contains(&right)
@@ -86,6 +80,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
         let (id, width) = match right {
             RightPane::WebData => ("right_pane_web", 440.0),
             RightPane::Notebook => ("right_pane_notebook", (room / 2.0).max(320.0).min(max)),
+            RightPane::DiagnosticLog => ("right_pane_diagnostic_log", 480.0),
             _ => ("right_pane", 320.0),
         };
         let pane = egui::Panel::right(id).resizable(true).default_size(width).size_range(260.0..=max).frame(frame).show(ui, |ui| {
@@ -141,6 +136,7 @@ fn right_title(pane: RightPane) -> (&'static str, &'static str) {
         RightPane::Profile => ("Profile", "ui.pane.profile"),
         RightPane::TimeSeries => ("Time Series", "ui.pane.timeSeries"),
         RightPane::Diagnostics => ("Diagnostic Monitor", "ui.pane.diagnostics"),
+        RightPane::DiagnosticLog => ("Diagnostics", "ui.pane.diagnosticLog"),
         RightPane::Infographics => ("Infographics", "ui.pane.infographics"),
         RightPane::Report => ("Report", "ui.pane.report"),
         RightPane::Presentation => ("Presentation", "ui.pane.presentation"),
@@ -180,6 +176,10 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
         crate::sqlpane::show(app, ui, t);
         return;
     }
+    if right == RightPane::DiagnosticLog {
+        crate::diagnosticlog::show(app, ui, t);
+        return;
+    }
     // The Script pane fits its box to the pane's height, the buttons kept in view (#653).
     if right == RightPane::Script {
         crate::analysispane::script_pane(app, ui, t);
@@ -203,7 +203,7 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
             RightPane::Report => crate::reportpane::report(app, ui, t),
             RightPane::Presentation => crate::docpanes::presentation(app, ui, t),
             RightPane::Notebook => crate::docpanes::notebook(app, ui, t),
-            RightPane::Assistant | RightPane::Sql | RightPane::Script => {}
+            RightPane::Assistant | RightPane::Sql | RightPane::Script | RightPane::DiagnosticLog => {}
             RightPane::Shares => crate::docpanes::shares(app, ui, t),
             RightPane::Directions => crate::navui::show(app, ui, t),
             RightPane::Bookmarks => crate::bookmarkpane::show(app, ui, t),
@@ -985,8 +985,19 @@ fn path_name(path: &str) -> SourceName {
 /// The source a layer was read from (a raster's file, or the dataset's file, address or
 /// database), if any: layers made in the app (samples, drawings, tool outputs) have none.
 fn layer_source(l: &Layer) -> Option<SourceName> {
-    let raster = l.raster.as_ref().and_then(|r| r.path.as_ref().or(r.file_name.as_ref()));
-    raster.or(l.dataset.source.as_ref()).filter(|s| !s.trim().is_empty()).map(|s| source_name(s.as_str()))
+    // A service's downloaded raster keeps the address it came from as its dataset source, not
+    // the file name it was read under: group it by that address, as a feature layer is. A layer
+    // with no raster keeps its dataset source as it is (a database's name, say), and a raster
+    // read from an address is grouped by that address rather than by a dataset's other one.
+    let source = l.dataset.source.as_deref();
+    let raster = l.raster.as_ref().and_then(|r| r.path.as_deref().or(r.file_name.as_deref()));
+    let address = source.filter(|s| is_address(s) && !raster.is_some_and(is_address));
+    address.or(raster).or(source).filter(|s| !s.trim().is_empty()).map(source_name)
+}
+
+/// Whether a source names a web address (`file://` paths are files, not addresses).
+fn is_address(s: &str) -> bool {
+    s.split_once("://").is_some_and(|(scheme, _)| !scheme.eq_ignore_ascii_case("file"))
 }
 
 /// A group's heading in a Layers view, with optional hover text.
@@ -1316,8 +1327,10 @@ fn layer_group_row(
             let mut tr = group.transparency;
             ui.horizontal(|ui| {
                 let input_label = ui.label(tl!("Transparency"));
-                let r = ui.add(egui::Slider::new(&mut tr, 0.0..=100.0).suffix(" %").integer()).labelled_by(input_label.id);
-                if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                let r = ui
+                    .add(egui::Slider::new(&mut tr, 0.0..=100.0).update_while_editing(false).suffix(" %").integer())
+                    .labelled_by(input_label.id);
+                if r.drag_stopped() || (crate::widgets::changed(&r) && !r.dragged()) {
                     let _ = app.run("group.set", json!({"group": group.id, "transparency": tr}));
                 }
             });
@@ -1678,8 +1691,8 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, moves: [bool; 2], reord
         ui.horizontal(|ui| {
             let input_label = ui.label(tl!("Opacity"));
             let mut o = tile.opacity * 100.0;
-            let slider = ui.add(egui::Slider::new(&mut o, 0.0..=100.0).suffix("%")).labelled_by(input_label.id);
-            if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+            let slider = ui.add(egui::Slider::new(&mut o, 0.0..=100.0).update_while_editing(false).suffix("%")).labelled_by(input_label.id);
+            if slider.drag_stopped() || (crate::widgets::changed(&slider) && !slider.dragged()) {
                 action = Some(("map.setTiles", json!({"index": i, "opacity": o / 100.0})));
             }
         });
@@ -2000,7 +2013,12 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: 
     {
         raster_legend_rows(ui, entries, 74.0, t);
     } else if l.expanded && has_legend {
-        let field = l.renderer.field().unwrap_or("").to_string();
+        // (By expression: the expression, cut short.)
+        let field = match l.renderer.expression() {
+            Some(e) if e.chars().count() > 60 => format!("{}…", e.chars().take(60).collect::<String>()),
+            Some(e) => e.to_string(),
+            None => l.renderer.field().unwrap_or("").to_string(),
+        };
         ui.horizontal(|ui| {
             ui.add_space(74.0);
             ui.label(egui::RichText::new(field).size(11.0).color(t.text_dim));
@@ -2648,6 +2666,9 @@ pub struct GpForm {
     pub web_run: Option<(u64, &'static str, crate::Slot<rustgis_engine::cmd::gp::ExternalOutput>)>,
     /// A plugin tool running on a thread of its own, so the window stays responsive.
     pub plugin_run: Option<PluginJob>,
+    /// A built-in tool running on a thread of its own, likewise (the browser runs them at once).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub tool_run: Option<ToolJob>,
     /// Files picked in the browser for file parameters, which have no paths there: (name,
     /// contents), sent with the run while the parameter still shows that name.
     pub files: HashMap<&'static str, (String, Vec<u8>)>,
@@ -2669,6 +2690,70 @@ pub struct PluginJob {
     pub slot: crate::Slot<Result<rustgis_engine::analysis::ToolResult, String>>,
     /// Stops the run, and shows what it last logged.
     pub control: std::sync::Arc<rustgis_engine::plugins::tools::Control>,
+}
+
+/// A built-in tool running on a thread of its own.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct ToolJob {
+    pub id: u64,
+    pub tool: &'static str,
+    /// What the run made, once it has.
+    pub slot: crate::Slot<rustgis_engine::cmd::gp::ToolDone>,
+    /// Stops the run, and counts its progress.
+    pub control: std::sync::Arc<rustgis_engine::analysis::control::Control>,
+}
+
+/// Starts a built-in tool on a thread of its own; [`poll_tool_run`] applies what it made.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_tool_run(app: &mut RustGisApp, tool: &'static str, params: &Value, ctx: &egui::Context) {
+    match rustgis_engine::cmd::gp::tool_start(&mut app.session, tool, params) {
+        Ok(run) => {
+            let slot = crate::Slot::default();
+            // Cancel stops it, so it takes no work cap.
+            let control = rustgis_engine::analysis::control::Control::stoppable();
+            let (out, ctl, ctx) = (slot.clone(), control.clone(), ctx.clone());
+            let id = run.id;
+            let spawned = std::thread::Builder::new().name(tool.into()).spawn(move || {
+                let done = run.run(&ctl);
+                // Filled even when poisoned, or the pane would wait for it forever.
+                *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(done);
+                ctx.request_repaint();
+            });
+            match spawned {
+                Ok(_) => {
+                    app.gp.tool_run = Some(ToolJob { id, tool, slot, control });
+                    app.gp.last = None;
+                }
+                Err(e) => {
+                    rustgis_engine::cmd::gp::tool_abandon(&mut app.session, id);
+                    app.gp.last = Some((false, vec![e.to_string()]));
+                }
+            }
+        }
+        Err(e) => app.gp.last = Some((false, vec![e])),
+    }
+}
+
+/// Applies a built-in tool run that finished on its thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn poll_tool_run(app: &mut RustGisApp, ctx: &egui::Context) {
+    let Some(job) = &app.gp.tool_run else { return };
+    // Its project was closed: stop it, as its result has nowhere to go, and say so.
+    if !rustgis_engine::cmd::gp::tool_waiting(&app.session, job.id) {
+        job.control.cancel();
+        dropped(app, job.tool);
+        app.gp.tool_run = None;
+        return;
+    }
+    let Some(done) = take(&job.slot) else {
+        // Its progress moves as it works.
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        return;
+    };
+    let (id, tool) = (job.id, job.tool);
+    app.gp.tool_run = None;
+    let r = rustgis_engine::cmd::gp::tool_complete(&mut app.session, id, done).and_then(|_| app.run("gp.finish", json!({"id": id})));
+    finished(app, tool, r);
 }
 
 /// Starts a plugin tool on a thread of its own; [`poll_plugin_run`] applies what it returns.
@@ -2704,9 +2789,10 @@ fn start_plugin_run(app: &mut RustGisApp, tool: &'static str, params: &Value, ct
 /// Applies a plugin tool run that finished on its thread.
 pub fn poll_plugin_run(app: &mut RustGisApp, ctx: &egui::Context) {
     let Some(job) = &app.gp.plugin_run else { return };
-    // Its project was closed: stop it, as its result has nowhere to go.
+    // Its project was closed: stop it, as its result has nowhere to go, and say so.
     if !rustgis_engine::cmd::gp::plugin_waiting(&app.session, job.id) {
         job.control.cancel();
+        dropped(app, job.tool);
         app.gp.plugin_run = None;
         return;
     }
@@ -2719,6 +2805,12 @@ pub fn poll_plugin_run(app: &mut RustGisApp, ctx: &egui::Context) {
     app.gp.plugin_run = None;
     let r = rustgis_engine::cmd::gp::plugin_complete(&mut app.session, id, result).and_then(|_| app.run("gp.finish", json!({"id": id})));
     finished(app, tool, r);
+}
+
+/// Says that a tool's run was dropped: its project closed while it ran.
+fn dropped(app: &mut RustGisApp, tool: &'static str) {
+    let name = rustgis_engine::analysis::tool(tool).map(|t| t.name).unwrap_or(tool);
+    app.session.notify(crate::i18n::fmt("{tool} was stopped: its project was closed while it ran.", &[("tool", tl_raw!(name))]), false);
 }
 
 /// Shows how an asynchronous tool run went: under its form when it's open, else as a notice.
@@ -3249,7 +3341,14 @@ pub(crate) fn input_table<'a>(session: &'a Session, name: &str) -> Option<&'a ru
 
 fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let Some(spec) = app.gp.tool.and_then(rustgis_engine::analysis::tool) else {
-        // Tool finder.
+        // Tool finder, under the tool running, if one is.
+        let running = app.gp.web_run.is_some() || app.gp.plugin_run.is_some();
+        #[cfg(not(target_arch = "wasm32"))]
+        let running = running || app.gp.tool_run.is_some();
+        if running {
+            run_status(app, ui, t);
+            ui.add_space(8.0);
+        }
         crate::widgets::search_field(ui, &mut app.gp.search, tl!("Find Tools"));
         ui.separator();
         ui.add_space(4.0);
@@ -3673,8 +3772,10 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     ui.add_space(8.0);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-        // One browser run at a time, and one plugin run.
+        // One browser run at a time, and one background run.
         let idle = app.gp.web_run.is_none() && app.gp.plugin_run.is_none();
+        #[cfg(not(target_arch = "wasm32"))]
+        let idle = idle && app.gp.tool_run.is_none();
         if crate::widgets::primary_button(ui, tl!("Run"), idle, vec2(96.0, 30.0)).clicked() {
             // A blank output opens Save As before any work starts. Cancelling writes nothing.
             #[cfg(not(target_arch = "wasm32"))]
@@ -3737,6 +3838,10 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 // On a thread of its own: a plugin tool may run for minutes.
                 #[cfg(not(target_arch = "wasm32"))]
                 start_plugin_run(app, spec.id, &params, ui.ctx());
+            } else if !cfg!(target_arch = "wasm32") {
+                // A built-in tool too, with its progress and Cancel; the browser has no threads.
+                #[cfg(not(target_arch = "wasm32"))]
+                start_tool_run(app, spec.id, &params, ui.ctx());
             } else {
                 let r = app.run("gp.run", json!({"tool": spec.id, "params": params}));
                 app.gp.last = Some(match r {
@@ -3747,6 +3852,29 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             }
         }
     });
+    run_status(app, ui, t);
+    if let Some((ok, msgs)) = &app.gp.last {
+        ui.add_space(8.0);
+        let (fill, stroke, head) =
+            if *ok { (t.green.gamma_multiply(0.12), t.green, "Completed") } else { (t.red.gamma_multiply(0.12), t.red, "Failed") };
+        egui::Frame::NONE
+            .fill(fill)
+            .stroke(Stroke::new(1.0, stroke))
+            .corner_radius(CornerRadius::same(6))
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(egui::RichText::new(tl!(head)).font(semibold(12.5)).color(stroke));
+                for m in msgs {
+                    ui.label(egui::RichText::new(m).size(11.5));
+                }
+            });
+    }
+}
+
+/// The tool running, if one is: in the tool's form and in the finder, so that it can be cancelled
+/// from either.
+fn run_status(app: &RustGisApp, ui: &mut Ui, t: &Tokens) {
     if app.gp.web_run.is_some() {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -3775,22 +3903,27 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             job.control.cancel();
         }
     }
-    if let Some((ok, msgs)) = &app.gp.last {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(job) = &app.gp.tool_run {
         ui.add_space(8.0);
-        let (fill, stroke, head) =
-            if *ok { (t.green.gamma_multiply(0.12), t.green, "Completed") } else { (t.red.gamma_multiply(0.12), t.red, "Failed") };
-        egui::Frame::NONE
-            .fill(fill)
-            .stroke(Stroke::new(1.0, stroke))
-            .corner_radius(CornerRadius::same(6))
-            .inner_margin(egui::Margin::same(8))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(egui::RichText::new(tl!(head)).font(semibold(12.5)).color(stroke));
-                for m in msgs {
-                    ui.label(egui::RichText::new(m).size(11.5));
-                }
+        let mut cancel = false;
+        ui.horizontal(|ui| {
+            ui.spinner();
+            let name = rustgis_engine::analysis::tool(job.tool).map(|t| t.name).unwrap_or(job.tool);
+            // Two labels, not one sentence put together from translated pieces.
+            ui.label(egui::RichText::new(tl!("Running…")).size(12.0));
+            ui.label(egui::RichText::new(tl!(name)).size(12.0).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                cancel = ui.add_enabled(!job.control.is_cancelled(), egui::Button::new(tl!("Cancel"))).clicked();
             });
+        });
+        // How far its current step has come, when it counts its work.
+        if let Some((done, total)) = job.control.progress() {
+            ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32).show_percentage().desired_height(14.0));
+        }
+        if cancel {
+            job.control.cancel();
+        }
     }
 }
 
@@ -4079,8 +4212,14 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     match &l.renderer {
         Renderer::Single(s) => symbol_editor(app, ui, *s, g, t),
-        Renderer::Unique { field, classes, ramp, .. } => {
-            field_combo(app, ui, "Field", field, &all, "unique");
+        Renderer::Unique { field, classes, ramp, expression, .. } => {
+            field_combo(app, ui, "Field", if expression.is_some() { tl!("(expression)") } else { field.as_str() }, &all, "unique");
+            // Or by an expression's values: blank goes back to the field.
+            let id = egui::Id::unique(("unique_expression", crate::labelpane::layer_key(app, &l)));
+            if let Some(text) = expression_box(ui, id, tl!("Expression"), expression.as_deref(), &l.dataset, t) {
+                let e = if text.is_empty() { Value::Null } else { json!(text) };
+                let _ = app.run("layer.symbology", json!({"type": "unique", "expression": e, "ramp": ramp.name()}));
+            }
             ramp_picker(app, ui, ramp, t);
             ui.add_space(6.0);
             ui.label(
@@ -4108,8 +4247,8 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 ui.horizontal(|ui| {
                     let input_label = ui.label(tl!("Classes"));
                     let mut k = asked;
-                    let resp = ui.add(egui::DragValue::new(&mut k).range(1..=12)).labelled_by(input_label.id);
-                    if resp.changed() {
+                    let resp = ui.add(egui::DragValue::new(&mut k).update_while_editing(false).range(1..=12)).labelled_by(input_label.id);
+                    if crate::widgets::changed(&resp) {
                         crate::widgets::one_step_per_press(app, &resp);
                         let _ = app.run(
                             "layer.symbology",
@@ -4151,7 +4290,8 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     ui.horizontal(|ui| {
         let input_label = ui.label(tl!("Transparency"));
         ui.spacing_mut().slider_width = 150.0;
-        let r = ui.add(egui::Slider::new(&mut tr, 0.0..=100.0).suffix(" %").integer()).labelled_by(input_label.id);
+        let r =
+            ui.add(egui::Slider::new(&mut tr, 0.0..=100.0).update_while_editing(false).suffix(" %").integer()).labelled_by(input_label.id);
         transparency_drag(app, ui, &r, &l, tr);
     });
     if !l.graphics {
@@ -4416,7 +4556,7 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
         |ui| {
             ui.set_width(ui.available_width());
             let legend = l.renderer.legend();
-            // Unique Values legends sort their classes by label: row i shows class `order[i]`,
+            // Unique Values legends sort their classes (by value or by label): row i shows class `order[i]`,
             // and the rows past them (`<all other values>`) keep their place.
             let order = l.renderer.class_order();
             // At most MAX_UNIQUE classes (a style import can bring more), then Unique Values'
@@ -4566,8 +4706,8 @@ fn manual_breaks(app: &mut RustGisApp, ui: &mut Ui, field: &str, breaks: &[f64],
                 *v = held;
             }
             let input_label = ui.label(crate::i18n::fmt("Class {n} up to", &[("n", &(i + 1).to_string())]));
-            let r = ui.add(egui::DragValue::new(v).speed(speed)).labelled_by(input_label.id);
-            if r.changed() {
+            let r = ui.add(egui::DragValue::new(v).update_while_editing(false).speed(speed)).labelled_by(input_label.id);
+            if crate::widgets::changed(&r) {
                 ui.data_mut(|d| d.insert_temp(id, *v));
             }
             if (r.drag_stopped() || r.lost_focus()) && ui.data(|d| d.get_temp::<f64>(id)).is_some() {
@@ -4631,8 +4771,10 @@ fn symbol_editor(app: &mut RustGisApp, ui: &mut Ui, s: Symbol, g: GeometryType, 
             ui.end_row();
             let input_label = ui.label(tl!(if g == GeometryType::Polyline { "Line width" } else { "Outline width" }));
             let mut w = s.stroke_width;
-            let resp = ui.add(egui::DragValue::new(&mut w).range(0.0..=12.0).speed(0.05).suffix(" pt")).labelled_by(input_label.id);
-            if resp.changed() {
+            let resp = ui
+                .add(egui::DragValue::new(&mut w).update_while_editing(false).range(0.0..=12.0).speed(0.05).suffix(" pt"))
+                .labelled_by(input_label.id);
+            if crate::widgets::changed(&resp) {
                 crate::widgets::one_step_per_press(app, &resp);
                 let _ = app.run("layer.outline", json!({"width": w}));
             }
@@ -4640,8 +4782,10 @@ fn symbol_editor(app: &mut RustGisApp, ui: &mut Ui, s: Symbol, g: GeometryType, 
             if g == GeometryType::Point {
                 let input_label = ui.label(tl!("Size"));
                 let mut sz = s.size;
-                let resp = ui.add(egui::DragValue::new(&mut sz).range(1.0..=60.0).speed(0.1).suffix(" pt")).labelled_by(input_label.id);
-                if resp.changed() {
+                let resp = ui
+                    .add(egui::DragValue::new(&mut sz).update_while_editing(false).range(1.0..=60.0).speed(0.1).suffix(" pt"))
+                    .labelled_by(input_label.id);
+                if crate::widgets::changed(&resp) {
                     crate::widgets::one_step_per_press(app, &resp);
                     let _ = app.run("layer.marker", json!({"size": sz}));
                 }
@@ -4914,9 +5058,10 @@ fn marker_rows(
     }
     let input_label = ui.label(if m.mark == LineMark::Hash { tl!("Length") } else { tl!("Size") });
     let mut size = m.size;
-    let resp =
-        ui.add(egui::DragValue::new(&mut size).range(0.0..=MAX_LINE_MARKER_SIZE).speed(0.1).suffix(" pt")).labelled_by(input_label.id);
-    if resp.changed() {
+    let resp = ui
+        .add(egui::DragValue::new(&mut size).update_while_editing(false).range(0.0..=MAX_LINE_MARKER_SIZE).speed(0.1).suffix(" pt"))
+        .labelled_by(input_label.id);
+    if crate::widgets::changed(&resp) {
         crate::widgets::one_step_per_press(app, &resp);
         set(app, with(LineMarkers { size, ..m }));
     }
@@ -4925,9 +5070,13 @@ fn marker_rows(
     if points {
         let input_label = ui.label(tl!("Offset right"));
         let mut along = m.offset_along;
-        let drag = egui::DragValue::new(&mut along).range(-MAX_STROKE_OFFSET..=MAX_STROKE_OFFSET).speed(0.05).suffix(" pt");
+        let drag = egui::DragValue::new(&mut along)
+            .update_while_editing(false)
+            .range(-MAX_STROKE_OFFSET..=MAX_STROKE_OFFSET)
+            .speed(0.05)
+            .suffix(" pt");
         let resp = ui.add(drag).on_hover_text(tl!("Shifts the mark right of the point (left when negative)")).labelled_by(input_label.id);
-        if resp.changed() {
+        if crate::widgets::changed(&resp) {
             crate::widgets::one_step_per_press(app, &resp);
             set(app, with(LineMarkers { offset_along: along, ..m }));
         }
@@ -4952,9 +5101,13 @@ fn marker_rows(
         if m.at.has(Placements::INTERVAL) {
             let input_label = ui.label(tl!("Interval"));
             let mut interval = m.interval;
-            let drag = egui::DragValue::new(&mut interval).range(MIN_MARKER_INTERVAL..=MAX_MARKER_INTERVAL).speed(0.2).suffix(" pt");
+            let drag = egui::DragValue::new(&mut interval)
+                .update_while_editing(false)
+                .range(MIN_MARKER_INTERVAL..=MAX_MARKER_INTERVAL)
+                .speed(0.2)
+                .suffix(" pt");
             let resp = ui.add(drag).on_hover_text(tl!("The distance between two marks along the line")).labelled_by(input_label.id);
-            if resp.changed() {
+            if crate::widgets::changed(&resp) {
                 crate::widgets::one_step_per_press(app, &resp);
                 set(app, with(LineMarkers { interval, ..m }));
             }
@@ -4964,10 +5117,10 @@ fn marker_rows(
     ui.label(tl!("Angle"));
     ui.horizontal(|ui| {
         let mut angle = m.angle;
-        let drag = egui::DragValue::new(&mut angle).range(0.0..=359.9).speed(1.0).suffix("°");
+        let drag = egui::DragValue::new(&mut angle).update_while_editing(false).range(0.0..=359.9).speed(1.0).suffix("°");
         let tip = if m.mark == LineMark::Hash { tl!("0° crosses the line square") } else { tl!("Turned further, clockwise") };
         let resp = ui.add(drag).on_hover_text(tip);
-        if resp.changed() {
+        if crate::widgets::changed(&resp) {
             crate::widgets::one_step_per_press(app, &resp);
             set(app, with(LineMarkers { angle, ..m }));
         }
@@ -5415,9 +5568,10 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                 ui.label(tl!("Width"));
                 ui.horizontal(|ui| {
                     let mut ww = w;
-                    let drag = egui::DragValue::new(&mut ww).range(0.0..=MAX_STROKE_WIDTH).speed(0.05).suffix(" pt");
+                    let drag =
+                        egui::DragValue::new(&mut ww).update_while_editing(false).range(0.0..=MAX_STROKE_WIDTH).speed(0.05).suffix(" pt");
                     let resp = ui.add_enabled(st.width.is_some(), drag).on_hover_text(tl!("Width"));
-                    if resp.changed() {
+                    if crate::widgets::changed(&resp) {
                         crate::widgets::one_step_per_press(app, &resp);
                         set(app, LineStroke { width: Some(ww), ..st });
                     }
@@ -5429,14 +5583,18 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                 ui.end_row();
                 ui.label(if points { tl!("Offset down") } else { tl!("Offset") });
                 let mut off = st.offset;
-                let drag = egui::DragValue::new(&mut off).range(-MAX_STROKE_OFFSET..=MAX_STROKE_OFFSET).speed(0.05).suffix(" pt");
+                let drag = egui::DragValue::new(&mut off)
+                    .update_while_editing(false)
+                    .range(-MAX_STROKE_OFFSET..=MAX_STROKE_OFFSET)
+                    .speed(0.05)
+                    .suffix(" pt");
                 let tip = if points {
                     tl!("Shifts the mark below the point (above when negative)")
                 } else {
                     tl!("Shifts the stroke sideways: positive to the right of the line's direction, negative to the left")
                 };
                 let resp = ui.add(drag).on_hover_text(tip);
-                if resp.changed() {
+                if crate::widgets::changed(&resp) {
                     crate::widgets::one_step_per_press(app, &resp);
                     set(app, LineStroke { offset: off, ..st });
                 }
@@ -5526,9 +5684,12 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                     ui.horizontal(|ui| {
                         let mut lv = st.level_at(i);
                         let resp = ui
-                            .add_enabled(st.level.is_some(), egui::DragValue::new(&mut lv).range(0..=255).speed(0.1))
+                            .add_enabled(
+                                st.level.is_some(),
+                                egui::DragValue::new(&mut lv).update_while_editing(false).range(0..=255).speed(0.1),
+                            )
                             .on_hover_text(tl!("Level"));
-                        if resp.changed() {
+                        if crate::widgets::changed(&resp) {
                             crate::widgets::one_step_per_press(app, &resp);
                             set(app, LineStroke { level: Some(lv), ..st });
                         }
@@ -5561,7 +5722,10 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
 // ---------------------------------------------------------------------------------------------
 // History and Details
 
-fn history(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+pub(crate) fn history(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    if crate::sessionlog::tabs(app, ui) {
+        return crate::sessionlog::pane(app, ui, t);
+    }
     let hist = app.session.project.gp_history.clone();
     if hist.is_empty() {
         ui.label(egui::RichText::new(tl!("Tools you run appear here.")).color(t.text_dim));
@@ -5692,7 +5856,8 @@ fn details(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             ("Fields", l.dataset.fields.len().to_string()),
             ("Selected", l.selection.len().to_string()),
             ("Symbology", tl!(l.renderer.kind_label()).to_string()),
-            ("Source", l.dataset.source.clone().unwrap_or_else(|| tl!("In project").into())),
+            // A web or database address without its keys, tokens or password.
+            ("Source", l.dataset.source.as_deref().map_or_else(|| tl!("In project").into(), rustgis_engine::sources::redact)),
             ("Source coordinate system", l.dataset.crs.map(|c| c.label()).unwrap_or_else(|| "EPSG:4326".into())),
             ("West", format!("{:.4}°", e.min_x)),
             ("East", format!("{:.4}°", e.max_x)),
@@ -5841,14 +6006,24 @@ fn rgb_stretch_bounds(app: &mut RustGisApp, ui: &mut Ui, layer: impl std::hash::
     for (name, pair) in [tl!("Red"), tl!("Green"), tl!("Blue")].into_iter().zip(edit.iter_mut()) {
         let [mut lo, mut hi] = *pair;
         let speed = ((hi - lo).abs() / 200.0).clamp(1e-6, 1e6);
+        let typed_from = [lo, hi];
         ui.horizontal(|ui| {
             ui.add_sized([44.0, 18.0], egui::Label::new(name));
             let input_label = ui.label(tl!("Min"));
-            let a = ui.add(egui::DragValue::new(&mut lo).speed(speed)).labelled_by(input_label.id);
+            let a = ui.add(egui::DragValue::new(&mut lo).update_while_editing(false).speed(speed)).labelled_by(input_label.id);
             let input_label = ui.label(tl!("Max"));
-            let b = ui.add(egui::DragValue::new(&mut hi).speed(speed)).labelled_by(input_label.id);
-            done |= a.drag_stopped() || b.drag_stopped() || ((a.changed() || b.changed()) && !a.dragged() && !b.dragged());
-            changed |= a.changed() || b.changed();
+            let b = ui.add(egui::DragValue::new(&mut hi).update_while_editing(false).speed(speed)).labelled_by(input_label.id);
+            // Escape drops a number typed (`widgets::escaped`).
+            if crate::widgets::escaped(&a) {
+                lo = typed_from[0];
+            }
+            if crate::widgets::escaped(&b) {
+                hi = typed_from[1];
+            }
+            done |= a.drag_stopped()
+                || b.drag_stopped()
+                || ((crate::widgets::changed(&a) || crate::widgets::changed(&b)) && !a.dragged() && !b.dragged());
+            changed |= crate::widgets::changed(&a) || crate::widgets::changed(&b);
         });
         if !(lo.is_finite() && hi.is_finite() && lo < hi) {
             ui.label(egui::RichText::new(tl!("Min must be less than Max")).size(11.5).color(t.red));
@@ -5988,8 +6163,8 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
             ui.horizontal(|ui| {
                 let input_label = ui.label(tl!("Classes"));
                 let mut kk = k;
-                let resp = ui.add(egui::DragValue::new(&mut kk).range(1..=32)).labelled_by(input_label.id);
-                if resp.changed() {
+                let resp = ui.add(egui::DragValue::new(&mut kk).update_while_editing(false).range(1..=32)).labelled_by(input_label.id);
+                if crate::widgets::changed(&resp) {
                     crate::widgets::one_step_per_press(app, &resp);
                     let _ = app.run("raster.symbology", json!({"type": "classify", "method": format!("{m:?}"), "classes": kk, "ramp": r}));
                 }
@@ -6025,7 +6200,9 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     let mut x = v;
                     // Kept across a drag until it is let go (#607).
                     let drag = Dragged::lend(ui, egui::Id::unique(("relief_drag", l.id, which)), &mut x);
-                    let r = ui.add(egui::DragValue::new(&mut x).range(range).speed(speed).max_decimals(3)).labelled_by(input_label.id);
+                    let r = ui
+                        .add(egui::DragValue::new(&mut x).update_while_editing(false).range(range).speed(speed).max_decimals(3))
+                        .labelled_by(input_label.id);
                     if drag.settled(ui, &r, &mut x) && x != v {
                         let (a, b, c) = match which {
                             0 => (x, alt, zf),
@@ -6077,11 +6254,15 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     // Each kept across a drag until it is let go (#607); both are sent together.
                     let input_label = ui.label(tl!("Min %"));
                     let drag = Dragged::lend(ui, egui::Id::unique(("percent_clip_drag", l.id, "low")), &mut lo);
-                    let a = ui.add(egui::DragValue::new(&mut lo).range(0.0..=49.0).speed(0.1).max_decimals(2)).labelled_by(input_label.id);
+                    let a = ui
+                        .add(egui::DragValue::new(&mut lo).update_while_editing(false).range(0.0..=49.0).speed(0.1).max_decimals(2))
+                        .labelled_by(input_label.id);
                     let low_settled = drag.settled(ui, &a, &mut lo);
                     let input_label = ui.label(tl!("Max %"));
                     let drag = Dragged::lend(ui, egui::Id::unique(("percent_clip_drag", l.id, "high")), &mut hi);
-                    let b = ui.add(egui::DragValue::new(&mut hi).range(0.0..=49.0).speed(0.1).max_decimals(2)).labelled_by(input_label.id);
+                    let b = ui
+                        .add(egui::DragValue::new(&mut hi).update_while_editing(false).range(0.0..=49.0).speed(0.1).max_decimals(2))
+                        .labelled_by(input_label.id);
                     let high_settled = drag.settled(ui, &b, &mut hi);
                     if (low_settled || high_settled) && (lo != low || hi != high) {
                         let _ = app.run("raster.stretch", json!({"type": "percentClip", "low": lo, "high": hi}));
@@ -6107,16 +6288,26 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                 let pending = ui.data(|d| d.get_temp::<([f64; 2], [f64; 2])>(key)).filter(|(base, _)| *base == [min, max]);
                 let [mut lo, mut hi] = pending.map_or([min, max], |(_, edit)| edit);
                 let speed = ((max - min).abs() / 200.0).clamp(1e-6, 1e6);
+                let typed_from = [lo, hi];
                 ui.horizontal(|ui| {
                     let input_label = ui.label(tl!("Min"));
-                    let a = ui.add(egui::DragValue::new(&mut lo).speed(speed)).labelled_by(input_label.id);
+                    let a = ui.add(egui::DragValue::new(&mut lo).update_while_editing(false).speed(speed)).labelled_by(input_label.id);
                     let input_label = ui.label(tl!("Max"));
-                    let b = ui.add(egui::DragValue::new(&mut hi).speed(speed)).labelled_by(input_label.id);
-                    let done = a.drag_stopped() || b.drag_stopped() || ((a.changed() || b.changed()) && !a.dragged() && !b.dragged());
+                    let b = ui.add(egui::DragValue::new(&mut hi).update_while_editing(false).speed(speed)).labelled_by(input_label.id);
+                    // Escape drops a number typed (`widgets::escaped`).
+                    if crate::widgets::escaped(&a) {
+                        lo = typed_from[0];
+                    }
+                    if crate::widgets::escaped(&b) {
+                        hi = typed_from[1];
+                    }
+                    let done = a.drag_stopped()
+                        || b.drag_stopped()
+                        || ((crate::widgets::changed(&a) || crate::widgets::changed(&b)) && !a.dragged() && !b.dragged());
                     if lo.is_finite() && hi.is_finite() && lo < hi && done {
                         ui.data_mut(|d| d.remove::<([f64; 2], [f64; 2])>(key));
                         let _ = app.run("raster.stretch", json!({"type": "custom", "min": lo, "max": hi}));
-                    } else if a.changed() || b.changed() {
+                    } else if crate::widgets::changed(&a) || crate::widgets::changed(&b) {
                         ui.data_mut(|d| d.insert_temp(key, ([min, max], [lo, hi])));
                     }
                 });
@@ -6130,7 +6321,9 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     let input_label = ui.label(tl!("Deviations"));
                     // Kept across a drag until it is let go (#607).
                     let drag = Dragged::lend(ui, egui::Id::unique(("deviations_drag", l.id)), &mut nn);
-                    let a = ui.add(egui::DragValue::new(&mut nn).range(0.1..=10.0).speed(0.05).max_decimals(2)).labelled_by(input_label.id);
+                    let a = ui
+                        .add(egui::DragValue::new(&mut nn).update_while_editing(false).range(0.1..=10.0).speed(0.05).max_decimals(2))
+                        .labelled_by(input_label.id);
                     if drag.settled(ui, &a, &mut nn) && nn != n {
                         let _ = app.run("raster.stretch", json!({"type": "standardDeviation", "n": nn}));
                     }
@@ -6177,7 +6370,8 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
     ui.horizontal(|ui| {
         let input_label = ui.label(tl!("Transparency"));
         ui.spacing_mut().slider_width = 150.0;
-        let r = ui.add(egui::Slider::new(&mut tr, 0.0..=100.0).suffix(" %").integer()).labelled_by(input_label.id);
+        let r =
+            ui.add(egui::Slider::new(&mut tr, 0.0..=100.0).update_while_editing(false).suffix(" %").integer()).labelled_by(input_label.id);
         transparency_drag(app, ui, &r, l, tr);
     });
 }
@@ -6259,17 +6453,27 @@ fn raster_masking(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, d: &rustgis_engi
                 let [mut lo, mut hi] = pending.map_or([min, max], |(_, edit)| edit);
                 let span = if min.is_finite() && max.is_finite() { (max - min).abs() } else { 100.0 };
                 let speed = (span / 200.0).clamp(1e-6, 1e6);
+                let typed_from = [lo, hi];
                 ui.horizontal(|ui| {
                     let input_label = ui.label(tl!("Min"));
-                    let a = ui.add(egui::DragValue::new(&mut lo).speed(speed)).labelled_by(input_label.id);
+                    let a = ui.add(egui::DragValue::new(&mut lo).update_while_editing(false).speed(speed)).labelled_by(input_label.id);
                     let input_label = ui.label(tl!("Max"));
-                    let b = ui.add(egui::DragValue::new(&mut hi).speed(speed)).labelled_by(input_label.id);
-                    let done = a.drag_stopped() || b.drag_stopped() || ((a.changed() || b.changed()) && !a.dragged() && !b.dragged());
+                    let b = ui.add(egui::DragValue::new(&mut hi).update_while_editing(false).speed(speed)).labelled_by(input_label.id);
+                    // Escape drops a number typed (`widgets::escaped`).
+                    if crate::widgets::escaped(&a) {
+                        lo = typed_from[0];
+                    }
+                    if crate::widgets::escaped(&b) {
+                        hi = typed_from[1];
+                    }
+                    let done = a.drag_stopped()
+                        || b.drag_stopped()
+                        || ((crate::widgets::changed(&a) || crate::widgets::changed(&b)) && !a.dragged() && !b.dragged());
                     if lo <= hi && done {
                         ui.data_mut(|d| d.remove::<([f64; 2], [f64; 2])>(key));
                         let bound = |v: f64| if v.is_finite() { json!(v) } else { Value::Null };
                         let _ = app.run("raster.mask", json!({"min": bound(lo), "max": bound(hi)}));
-                    } else if a.changed() || b.changed() {
+                    } else if crate::widgets::changed(&a) || crate::widgets::changed(&b) {
                         ui.data_mut(|d| d.insert_temp(key, ([min, max], [lo, hi])));
                     }
                 });
@@ -6332,6 +6536,81 @@ pub(crate) fn layout_menu(app: &mut RustGisApp, ui: &mut Ui, n: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run starts a built-in tool on a thread of its own: the pane shows it running, with Cancel,
+    /// and its result lands as gp.run's would, with its layer and history.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_geoprocessing_pane_runs_a_tool_in_the_background() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::with_sample();
+        let _ = app.run("ui.gp.open", json!({"tool": "buffer"}));
+        app.gp.values.insert("input", "Cities".into());
+        app.gp.values.insert("distance", "50".into());
+        app.ws.recording = Some(Vec::new());
+        let layers = app.session.map().layers.len();
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(420.0, 1000.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                poll_tool_run(app, ui.ctx());
+                geoprocessing(app, ui, &Tokens::light());
+            },
+            app,
+        );
+        h.run();
+        h.get_by_label("Run").click();
+        h.step();
+        assert!(h.state().gp.tool_run.is_some(), "it runs in the background");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while h.state().gp.tool_run.is_some() {
+            assert!(std::time::Instant::now() < end, "the run never landed");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.step();
+        }
+        let app = h.state();
+        assert_eq!(app.gp.last.as_ref().map(|l| l.0), Some(true), "{:?}", app.gp.last);
+        assert_eq!(app.session.map().layers.len(), layers + 1);
+        assert_eq!(app.session.project.gp_history.last().map(|r| (r.ok, r.tool.as_str())), Some((true, "Buffer")));
+        // Recorded once, as its run.
+        let steps = app.ws.recording.as_deref().unwrap_or_default();
+        assert_eq!(steps.iter().map(|s| s.command.as_str()).collect::<Vec<_>>(), ["gp.run"]);
+        assert_eq!((&steps[0].params["tool"], &steps[0].params["params"]["input"]), (&json!("buffer"), &json!("Cities")));
+    }
+
+    /// The tool running stays in view, with its Cancel button, when the pane goes back to the
+    /// list of tools.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_tool_running_in_the_background_can_be_cancelled_from_the_tool_list() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::with_sample();
+        let run = rustgis_engine::cmd::gp::tool_start(&mut app.session, "buffer", &json!({"input": "Cities", "distance": 50})).unwrap();
+        let control = rustgis_engine::analysis::control::Control::new();
+        app.gp.tool_run = Some(ToolJob { id: run.id, tool: run.tool, slot: crate::Slot::default(), control: control.clone() });
+        app.gp.tool = None;
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(420.0, 1000.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                geoprocessing(app, ui, &Tokens::light());
+            },
+            app,
+        );
+        // Its spinner keeps repainting: steps, not run.
+        h.run_steps(3);
+        h.get_by_label("Cancel").click();
+        h.run_steps(2);
+        assert!(control.is_cancelled());
+    }
 
     #[test]
     fn field_source_uses_the_longest_input_prefix() {
@@ -6455,6 +6734,7 @@ mod tests {
             other_strokes: Vec::new(),
             class_fills: Default::default(),
             other_fills: Vec::new(),
+            expression: None,
         };
         let listed = stroke_classes(&r);
         let refs: Vec<&ClassRef> = listed.iter().map(|(c, ..)| c).collect();
@@ -6886,6 +7166,39 @@ mod tests {
         assert_eq!(source_name("file://user@localhost/x.gpkg").label, "x.gpkg");
     }
 
+    /// A service's downloaded raster groups under the address it came from, not the file name its
+    /// download was read under; a local raster still groups by its file.
+    #[test]
+    fn a_service_rasters_source_is_its_address() {
+        use rustgis_engine::data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        let raster = || {
+            let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 1.0, pixel_height: -1.0 };
+            Raster::new("soil", 1, 1, vec![vec![1.0]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap()
+        };
+        let mut ds = rustgis_engine::data::Dataset::new("Soil carbon", rustgis_engine::data::GeometryType::None, Vec::new());
+        ds.source = Some("https://user:secret@h/wcs?SERVICE=WCS&COVERAGEID=soc&token=K".into());
+        let mut l = Layer::new(7, ds);
+        l.raster = Some(rustgis_engine::map::RasterLayer::from_bytes(raster(), "coverage.tif", Vec::new()));
+        let src = layer_source(&l).unwrap();
+        assert_eq!(src.label, "h");
+        assert!(!src.key.contains("secret") && !src.hover.contains("secret"));
+        // A local file is grouped by its path, as before.
+        let mut local = Layer::new(8, rustgis_engine::data::Dataset::new("Local", rustgis_engine::data::GeometryType::None, Vec::new()));
+        local.raster = Some(rustgis_engine::map::RasterLayer::from_path(raster(), r"C:\GIS\soil.tif"));
+        assert_eq!(layer_source(&local).unwrap().label, "soil.tif");
+        // A raster read from an address is grouped by that address, not by another address its
+        // dataset names.
+        let mut remote = Layer::new(10, rustgis_engine::data::Dataset::new("Hill", rustgis_engine::data::GeometryType::None, Vec::new()));
+        remote.dataset.source = Some("https://catalog.example/items?f=json".into());
+        remote.raster = Some(rustgis_engine::map::RasterLayer::from_path(raster(), "https://files.example/hill.tif"));
+        assert_eq!(layer_source(&remote).unwrap().label, "files.example");
+        // A layer with no raster keeps its dataset source, even one that names no address scheme
+        // (a database connection kept by name).
+        let mut db = rustgis_engine::data::Dataset::new("Roads", rustgis_engine::data::GeometryType::Polyline, Vec::new());
+        db.source = Some("osm".into());
+        assert_eq!(layer_source(&Layer::new(9, db)).unwrap().label, "osm");
+    }
+
     /// #353: a row wider than the left pane (a long folder path in the Browser, a long favourite in
     /// Data Sources) widened the pane to its 480 px cap, and it stayed that wide on every pane.
     /// The pane keeps the width it was given; the row is cut off at its edge.
@@ -7020,6 +7333,41 @@ mod tests {
         );
         h.run_steps(6);
         h
+    }
+
+    /// Unique Values class by the expression typed under the field; clearing it goes back to a field.
+    #[test]
+    fn unique_values_are_classed_by_the_expression_typed() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let mut h = symbology_retry_harness();
+        let id = layer(h.state(), "retry");
+        h.state_mut().run("layer.symbology", json!({"type": "unique", "field": "c_valid"})).unwrap();
+        h.run_steps(3);
+        let steps = h.state().session.undo_depth();
+        let enter = |h: &mut egui_kittest::Harness<'static, RustGisApp>, text: &str| {
+            h.get_by_role_and_label(Role::TextInput, "Expression").focus();
+            h.run();
+            h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+            h.get_by_role_and_label(Role::TextInput, "Expression").type_text(text);
+            h.run();
+            h.key_press(egui::Key::Enter);
+            h.run_steps(3);
+        };
+        let renderer = |h: &egui_kittest::Harness<'static, RustGisApp>| h.state().session.map().layer(id).unwrap().renderer.clone();
+        enter(&mut h, "nosuch + 1");
+        assert!(h.query_by_label_contains("Invalid:").is_some(), "says why");
+        assert_eq!((renderer(&h).expression(), h.state().session.undo_depth()), (None, steps), "not applied");
+        h.get_by_role_and_label(Role::TextInput, "Expression").focus();
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        enter(&mut h, "if(c_valid > 15, 'high', 'low')");
+        let Renderer::Unique { classes, expression, .. } = renderer(&h) else { panic!() };
+        assert_eq!(expression.as_deref(), Some("if(c_valid > 15, 'high', 'low')"));
+        assert_eq!(classes.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), ["high", "low"], "the rows the query keeps");
+        assert_eq!(h.state().session.undo_depth(), steps + 1);
+        assert!(h.query_all_by_role(Role::ComboBox).any(|n| n.value().as_deref() == Some("(expression)")));
     }
 
     /// A different populated field fixes classification without changing the query or styling on failure.

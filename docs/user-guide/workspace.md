@@ -78,6 +78,16 @@ whether it worked. It is an audit trail of the session, for reviewing work or re
 run; it runs nothing again (History's Copy as code and recorded tasks do that). Every
 front end goes into it alike: the app, scripts, the AI Assistant, the command line, Python and MCP.
 
+In the app, the **History** pane has two views: **Tool runs**, the tools run on the project (saved
+with it, and each can run again), and **Session log**, which shows the log newest first: each
+command with whether it worked, when it started (UTC), how long it took, its error and its
+parameters (on one line; all of them on hover, and a right-click copies them). It lists the newest
+200 that match and says how many there are; type part of a command's id (`layer.`, `export`) to
+filter, or tick **Failed only**. **Save Log As…** writes the whole log as CSV or JSON Lines, as
+the name's extension says (CSV without one; in the browser it is downloaded as CSV, and the
+download isn't itself an entry in the log, as a saved file is). **Clear Log** empties it and
+**Log Commands** turns it off or on.
+
 - **What goes in:** each command that changes the project, and each that names a file, folder,
   address or connection, reads included (an export, a download, a save, opening a file), plus
   undo and redo, with the step they took back or brought back. Reading and looking around within
@@ -103,7 +113,8 @@ front end goes into it alike: the app, scripts, the AI Assistant, the command li
   as plain words, with no name or address form (a password typed into a note), isn't recognised:
   look at an exported log before sharing it. Each entry's parameters are clipped to about 4 KB of
   JSON (a long text is cut, a list keeps its first 100 items), its error to 500 characters and a
-  `…`, and the log keeps its last 10,000 entries, the oldest dropped first. Plugins' commands take
+  `…`, and the log keeps its last 10,000 entries, the oldest dropped first (the pane and an
+  export say how many were dropped, and which: the oldest, or older plugin entries). Plugins' commands take
   at most 1,000 of those places: past that, a plugin's new entry pushes out an older plugin entry,
   not one of the user's.
 
@@ -173,8 +184,18 @@ Each layer keeps its look:
 
 - **Renderers**: single symbol, categorized (as Unique Values, a category's merged values each a
   class, its "all other values" category the rest), graduated (as Graduated Colors), and
-  rule-based where every rule picks values of one field (an else rule the rest); point cluster,
-  displacement and other renderers that wrap one are drawn by the one inside.
+  rule-based: as Unique Values on a field where every rule picks values of that field at every
+  scale (an else rule the rest), else as Unique Values by an
+  [expression](cartography.md) that gives each feature the first rule it meets, each rule a class
+  named by its label. A rule's condition is its filter and its parents' (an else rule's: that
+  none of its siblings draws the feature, at their scales), and its scale range, as `@map_scale`
+  (a rule inside another within both ranges; a switched-off rule takes the rules under it). A
+  top-level else rule draws the rest. QGIS draws a feature that several rules pick with each of
+  their symbols, RustGIS with the first's: the notes say how many such features the layer has. A
+  rule whose filter can't be read on the layer is left out, noted by its label; when none can be,
+  or there are more than 200 rules, or they are too long for one expression, every feature is
+  drawn with the first rule's symbol, noted. Point cluster, displacement and
+  other renderers that wrap one are drawn by the one inside.
 - **Symbols**: simple fills, lines and markers with their colours, widths in any unit, offsets,
   caps, joins, dashes and the symbol's opacity; a line's simple lines as stacked strokes, its
   rendering passes as their levels when the renderer draws in symbol levels; marker and hashed
@@ -224,8 +245,13 @@ does a line of several strokes. They apply to every feature, so a layer whose cl
 ones (or one with a class switched off) leaves them out, noted. One using a
 function or variable it lacks, or a field the layer hasn't, is noted and left out.
 
-QGIS filter expressions carry over where they are SQL: fields compared with values, `LIKE`, `IN`,
-`IS NULL`, joined by `AND`, `OR` and `NOT`. What RustGIS doesn't draw as QGIS does is drawn as
+QGIS filter expressions (a layer's filter, label and renderer rules) carry over: those that are
+SQL (fields compared with values, `LIKE`, `IN`, `IS NULL`, joined by `AND`, `OR` and `NOT`) as
+before, the rest (functions, arithmetic, `CASE`, `@map_scale`) as they are, for the
+[expression language](expressions.md), QGIS's map scale (`@map_scale`, `$scale`) read as RustGIS's
+(see below), in filters and in data-defined symbol and label settings. One it can't read on the layer (a function or variable it
+lacks, a field the layer hasn't) is noted and left out, as is one measuring with `$area`,
+`$perimeter` or `$length`, which QGIS gives in the project's units. What RustGIS doesn't draw as QGIS does is drawn as
 near as it can, or left out, and said: the import's notes list, layer by layer, what was
 approximated (gradient and shapeburst fills' offsets left out and colour ramps other than gradients drawn from their first colour to their last, SVG, raster and random fills and dense brushes as a tint of their colour, SVG markers as circles,
 dashed polygon outlines solid, label halos with sharp corners drawn round and blended ones drawn
@@ -429,7 +455,7 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
 - **Plugins**: **Plugins › Plugin Manager** installs, updates and removes [plugins](../plugins.md)
   from the registry at [plugins.rustgis.app](https://plugins.rustgis.app) or from a file.
 - **Language**: **Settings › Language** switches the interface among
-  [19 languages](../i18n.md) and chooses the [worldview](maps.md#worldview) of the built-in
+  [20 languages](../i18n.md) and chooses the [worldview](maps.md#worldview) of the built-in
   borders.
 - **Autosave**: **Settings › Autosave** sets how often the desktop app keeps a
   [recovery copy](#autosave-and-recovery) of unsaved work, or turns it off.

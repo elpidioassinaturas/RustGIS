@@ -99,7 +99,7 @@ pub fn commands() -> Vec<C> {
             }
             l.renderer = st.renderer;
             let field = l.labels.default.field.clone();
-            let relock = !super::labels::lock_holds(&l.labels, &st.labels);
+            let relock = !super::labels::lock_holds(l, &st.labels);
             l.labels = st.labels;
             // The label field stays if the style's isn't in this layer.
             if l.dataset.field_index(&l.labels.default.field).is_none() {
@@ -109,6 +109,7 @@ pub fn commands() -> Vec<C> {
             l.transparency = st.transparency;
             if relock {
                 s.map_mut().label_lock = None;
+                s.map_mut().label_lock_line_anchors.clear();
             }
             Ok(Value::Null)
         })
@@ -371,11 +372,7 @@ pub(crate) fn read_text(p: &Value) -> Result<String, String> {
         (Some(t), _) if t.len() as u64 <= MAX_FILE => Ok(t.to_string()),
         (Some(_), _) => Err("the file is too large".into()),
         (None, Some(path)) => {
-            let len = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?.len();
-            if len > MAX_FILE {
-                return Err("the file is too large".into());
-            }
-            let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+            let bytes = crate::project::read_file(Path::new(path), MAX_FILE)?;
             // Packages are zip archives holding the project.
             if bytes.starts_with(b"PK") {
                 return package_text(&bytes);
@@ -407,9 +404,7 @@ fn embed_layer(mut l: Layer, budget: &mut u64) -> Layer {
     if let Some(rl) = &mut l.raster
         && rl.embedded.is_none()
         && let Some(path) = rl.path.clone()
-        && std::fs::metadata(&path).is_ok_and(|m| m.len() <= *budget)
-        && let Ok(bytes) = std::fs::read(&path)
-        && bytes.len() as u64 <= *budget
+        && let Ok(bytes) = crate::project::read_file(Path::new(&path), *budget)
     {
         *budget -= bytes.len() as u64;
         rl.file_name = Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string());
@@ -460,6 +455,7 @@ fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
             m.name = format!("{base} ({i})");
         }
         names.push(m.name.clone());
+        m.renew_instance_id();
         s.project.maps.push(m);
     }
     // Repair what was read (rasters reopen, cameras clamp); the sources that read S3 wait for
@@ -549,6 +545,7 @@ fn template(p: &Project) -> Project {
 }
 
 /// Packages only completed imports; runtime download reservations cannot be reopened.
+/// Refuses JSON beyond the project or ZIP inflation limit before creating the archive.
 fn package_project(s: &Session) -> Result<Vec<u8>, String> {
     s.project.ensure_imports_complete()?;
     let mut p = s.project.clone();
@@ -558,6 +555,10 @@ fn package_project(s: &Session) -> Result<Vec<u8>, String> {
     }
     crate::project::strip_addresses(p.addresses_mut());
     let text = serde_json::to_string(&p).map_err(|e| e.to_string())?;
+    let limit = crate::project::MAX_BYTES.min(rustgis_data::zip::MAX_TOTAL as u64);
+    if text.len() as u64 > limit {
+        return Err(format!("the project is too large to package (maximum {} MiB)", limit >> 20));
+    }
     let readme =
         format!("{} — a RustGIS project package.\nOpen it with RustGIS (Project › Open), or unzip it for {}.rgis.\n", p.name, p.name);
     rustgis_data::zip::write(&[
