@@ -10487,6 +10487,9 @@ fn shapefile_by_its_shp_address() {
     // One whose parts download but don't read is named without its token too.
     let e = s.run("layer.addUrl", &json!({"url": format!("{base}/bad/tk.shp?token=1")})).unwrap_err();
     assert!(e.contains("/bad/tk.shp") && !e.contains("token=1"), "{e}");
+    // An address refused before anything is fetched is named without its token too.
+    let e = s.run("layer.addUrl", &json!({"url": format!("{base}/a.tif?token=1"), "cellSize": 10})).unwrap_err();
+    assert!(e.contains("\"cellSize\" goes with \"bbox\"") && !e.contains("token=1"), "{e}");
     // Its .dbf answered so is refused, saying what the 403 may mean.
     let e = s.run("layer.addUrl", &json!({"url": format!("{base}/s3/sem_dbf.shp")})).unwrap_err();
     assert!(e.contains("/s3/sem_dbf.dbf") && e.contains("S3 also answers this for a file that isn't there"), "{e}");

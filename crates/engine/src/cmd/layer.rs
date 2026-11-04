@@ -2884,7 +2884,13 @@ pub fn url_file_name(url: &str, bytes: &[u8]) -> Result<String, String> {
 /// app downloads off the frame and adds the bytes). In the browser, where nothing may wait, the
 /// request is kept for the app ([`Session::request_url`]), which downloads and adds it as its own
 /// Home › Add › Add Data › From URL does, so a plugin, a script or the assistant can add data by address too.
+/// Its errors quote addresses without their keys: the assistant's and MCP's tools return them as
+/// they are.
 pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
+    add_url_as_given(s, p).map_err(|e| crate::sources::redact_text(&e))
+}
+
+fn add_url_as_given(s: &mut Session, p: &Value) -> CmdResult {
     if ["geolibreProject", "geolibreLayer", "geolibreZarr"].iter().any(|key| p.get(key).is_some()) {
         return Err("GeoLibre download state is internal; use project.importGeolibre".into());
     }
@@ -3058,11 +3064,11 @@ fn part_absences(ext: &str, url: &str) -> &'static [u16] {
     }
 }
 
-/// Whether an address is read with keys: one whose query holds a key, token or signature (what
-/// `sources::redact` takes out), or a saved S3 connection.
+/// Whether an address is read with keys: one with a user and password, or whose query holds a key,
+/// token or signature (what `sources::redact` takes out), or a saved S3 connection.
 fn keyed(url: &str) -> bool {
-    // A key, token or signature in the query is what redaction takes out; a query like `?v=2`
-    // carries none.
+    // A user and password, or a key, token or signature in the query, is what redaction takes out;
+    // a query like `?v=2` carries none.
     // (Redaction drops a fragment too, which carries no key.)
     // (A trailing `?` or `&`, which redaction drops too, carries none either.)
     let bare = url.split('#').next().unwrap_or(url).trim_end_matches(['?', '&']);
