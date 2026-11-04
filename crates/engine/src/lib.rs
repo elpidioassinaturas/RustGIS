@@ -1013,6 +1013,9 @@ impl Session {
     /// that command answered (#1202). A request made again while a plugin command waits for it
     /// (clicked twice) is that one, not a second download.
     pub fn request_url(&mut self, p: &serde_json::Value) -> Result<serde_json::Value, String> {
+        if !p.is_object() {
+            return Err("a download is asked for by an object: its \"url\" and how to read it".into());
+        }
         let url = p.get("url").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
         let asked = cmd::plugins::fetch::without_request(p);
         let waiting = self.url_requests.iter().find(|q| cmd::plugins::fetch::same_request(q, &asked)).and_then(|q| q["request"].as_u64());
@@ -1020,7 +1023,10 @@ impl Session {
         // request's: set aside, so the request still gets a download of its own.
         let given =
             p.get("request").and_then(serde_json::Value::as_u64).filter(|n| !self.url_waits.has(*n) || self.url_waits.holds(*n, &asked));
-        let number = match given.or(waiting).or_else(|| self.url_waits.in_flight(&asked)) {
+        // One a plugin command waits for, being made, is this one; added already, it is only for
+        // another plugin command's call: asked from anywhere else, it is downloaded again.
+        let made = if self.call_requests.is_some() { self.url_waits.in_flight(&asked) } else { self.url_waits.being_made(&asked) };
+        let number = match given.or(waiting).or(made) {
             Some(n) => n,
             None => {
                 self.next_request += 1;
@@ -1148,23 +1154,29 @@ impl Session {
             // that error) isn't added: no command is left to go on with it. Nor is one landing
             // again, added already (a caller gave its number itself, then the app's own download
             // came) (#1202).
-            if matches!(id, "layer.addUrl" | "layer.addDownload")
+            let refused = if matches!(id, "layer.addUrl" | "layer.addDownload")
                 && let Some(n) = params.get("request").and_then(Value::as_u64)
                 && (self.url_waits.given_up(n, params) || self.url_waits.added_already(n, params))
             {
-                let again = self.url_waits.added_already(n, params);
-                // Its bytes go too; the front end says the refusal, once, with its address.
+                // Its bytes go too; the refusal is said as any refused command is, once, with its
+                // address.
                 if let Some(d) = params.get("id").and_then(Value::as_u64) {
                     self.downloaded.retain(|(k, _)| *k != d);
                 }
                 let url = params.get("url").and_then(Value::as_str).unwrap_or("download");
-                if again {
-                    return Err(format!("{url}: it was added already for its plugin command, so it wasn't added again"));
-                }
-                self.url_waits.refused(n);
-                return Err(format!("{url}: it came after its plugin command stopped waiting, so it wasn't added"));
-            }
-            let res = self.run_command(id, params);
+                Some(if self.url_waits.added_already(n, params) {
+                    Err(format!("{url}: it was added already for its plugin command, so it wasn't added again"))
+                } else {
+                    self.url_waits.refused(n);
+                    Err(format!("{url}: it came after its plugin command stopped waiting, so it wasn't added"))
+                })
+            } else {
+                None
+            };
+            let res = match refused {
+                Some(refused) => refused,
+                None => self.run_command(id, params),
+            };
             // A download a plugin command left to the app, added: what it answered is kept for the
             // command to run again with (#1202).
             if matches!(id, "layer.addUrl" | "layer.addDownload")

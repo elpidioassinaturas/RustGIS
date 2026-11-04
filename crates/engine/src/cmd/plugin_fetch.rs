@@ -412,11 +412,13 @@ fn asked_by(asked: &Value, params: &Value) -> bool {
         "bounds" => v.is_array(),
         _ => false,
     };
-    o.iter().all(|(k, v)| match k.as_str() {
+    let given = o.iter().all(|(k, v)| match k.as_str() {
         "url" => v.as_str().map(str::trim) == params["url"].as_str().map(str::trim),
         _ if passed_on(k, v) => params.get(k) == Some(v),
         _ => true,
-    })
+    });
+    // ... and nothing it passes on that wasn't asked for (another import of the address).
+    given && params.as_object().is_none_or(|p| p.iter().all(|(k, v)| k == "url" || !passed_on(k, v) || o.get(k) == Some(v)))
 }
 
 impl UrlWaits {
@@ -425,7 +427,12 @@ impl UrlWaits {
     pub(crate) fn in_flight(&self, asked: &Value) -> Option<u64> {
         // One that failed added nothing: asked again, it is downloaded again.
         let made = self.landed.iter().find(|(_, q, answer, _)| answer.is_ok() && same_request(q, asked)).map(|(n, ..)| *n);
-        self.in_flight.iter().find(|(_, q, _)| same_request(q, asked)).map(|(n, ..)| *n).or(made)
+        self.being_made(asked).or(made)
+    }
+
+    /// The number of a download being made for `asked` (not yet landed).
+    pub(crate) fn being_made(&self, asked: &Value) -> Option<u64> {
+        self.in_flight.iter().find(|(_, q, _)| same_request(q, asked)).map(|(n, ..)| *n)
     }
 
     /// Whether a front end's `params` (a `layer.addUrl` or `layer.addDownload` carrying number
@@ -777,13 +784,18 @@ mod tests {
         };
         add(&mut s).unwrap();
         assert_eq!(s.map().layers.len(), 1);
+        let mark = s.notice_mark();
         let e = add(&mut s).unwrap_err();
         assert!(e.starts_with(url) && e.contains("added already"), "{e}");
         assert_eq!(s.map().layers.len(), 1, "added once");
+        // Said by the session, as any refused command is: once, for every front end.
+        let said: Vec<&str> = s.notices_since(mark).iter().filter(|n| n.error).map(|n| n.text.as_str()).collect();
+        assert_eq!(said, [e.as_str()]);
     }
 
     /// A download that failed is asked for again as a new download, not answered as the one
-    /// that failed; one added is the same request still (#1202).
+    /// that failed; one added is the same request still for a plugin command's call, and
+    /// downloaded again for any other; a request that isn't an object is refused (#1202).
     #[test]
     fn a_failed_download_asked_again_is_downloaded_again() {
         let mut s = Session::new(crate::project::Project::default());
@@ -795,13 +807,26 @@ mod tests {
         let taken = s.take_url_requests();
         assert_eq!(taken.len(), 1, "{taken:?}");
         assert_ne!(taken[0]["request"], json!(900));
-        // Added: the same request, nothing downloaded again.
+        // Added: the same request for a plugin command's call, nothing downloaded again...
         let other = json!({"url": "https://x.org/b.geojson"});
         s.url_waits.wait(901, other.clone());
         s.url_waits.land(901, Ok(json!({"layer": 1})), Added::default());
         assert_eq!(s.url_waits.in_flight(&other), Some(901));
+        s.call_requests = Some(Vec::new());
         s.request_url(&other).unwrap();
         assert!(s.take_url_requests().is_empty());
+        assert_eq!(s.call_requests.take().unwrap()[0].0, 901);
+        // ... and downloaded again when asked from anywhere else (the Add Data dialog).
+        s.request_url(&other).unwrap();
+        let taken = s.take_url_requests();
+        assert_eq!(taken.len(), 1, "{taken:?}");
+        assert_ne!(taken[0]["request"], json!(901));
+        // Being made: one download, whoever asks.
+        let third = json!({"url": "https://x.org/c.geojson"});
+        s.url_waits.wait(902, third.clone());
+        s.request_url(&third).unwrap();
+        assert!(s.take_url_requests().is_empty());
+        assert!(s.request_url(&json!("https://x.org/d.geojson")).unwrap_err().contains("an object"));
     }
 
     /// A number given with another address than the download it was given for isn't taken: the
@@ -819,6 +844,9 @@ mod tests {
         s.request_url(&json!({"url": "https://x.org/a.geojson", "request": 900})).unwrap();
         let taken = s.take_url_requests();
         assert_eq!((taken[0]["request"].clone(), taken[0]["whole"].clone()), (json!(900), json!(true)), "{taken:?}");
+        // The same address read another way (columns it wasn't asked with) isn't it either.
+        let other_import = json!({"url": "https://x.org/a.geojson", "x": "lon", "y": "lat", "request": 900});
+        assert!(!s.url_waits.holds(900, &other_import) && s.url_waits.holds(900, &json!({"url": "https://x.org/a.geojson"})));
     }
 
     /// Plugin commands waiting for the same download each get its answer, a rerun that waits
@@ -932,9 +960,12 @@ mod tests {
         // A number given with another address lands nothing.
         let _ = s.run("layer.addDownload", &json!({"url": "https://x.org/other.csv", "request": 951, "id": 424242}));
         assert!(s.url_waits.holds(951, &json!({"url": "https://x.org/e.csv"})), "951 still waits for e.csv");
-        // Asked again once made, while the command waits: that one, not another download.
+        // Asked again by a plugin command's call once made, while the command waits: that one,
+        // not another download.
         s.url_waits.land(951, Ok(json!({"layer": l7})), Added::default());
+        s.call_requests = Some(Vec::new());
         s.request_url(&json!({"url": "https://x.org/e.csv"})).unwrap();
+        s.call_requests = None;
         assert!(s.take_url_requests().is_empty(), "made already");
         // Handed back by the front end that took it (the browser found it must be downloaded
         // whole): queued again, whole. Asked again by its address alone, it is that one.
