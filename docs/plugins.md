@@ -449,7 +449,10 @@ The command then runs again, as for a [fetch](#fetching-a-document): RustGIS und
 did to the project and, once every download it left has been added (or failed), runs it again with
 the same parameters. In that run the same `layer.addUrl` call answers what adding the download
 answered (`{"layer", …}`, or its error) and adds nothing, so the command goes on with the layer:
-clips it, renames it or styles it. The added layer stays its own undo step, and what the command
+clips it, renames it or styles it. Everything the command did before the call runs again as well,
+and only what it did to the project is undone: keep side effects outside the project (files
+written, services called) after the call, or make them safe to repeat. The added layer stays its
+own undo step, and what the command
 does with it is another. So a command can be written as if `layer.addUrl` waited:
 
 ```rust
