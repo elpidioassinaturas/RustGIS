@@ -232,8 +232,9 @@ fn file_of(archive: &str) -> &std::path::Path {
 /// Closes the connections kept to files none of `archives` names, so another program can move or
 /// delete a file once no layer reads it.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn close_unused<'a>(archives: impl Iterator<Item = &'a str> + Clone) {
-    rustgis_data::mbtiles::close_unless(|file| archives.clone().any(|archive| file_of(archive) == file));
+pub fn close_unused<'a>(archives: impl Iterator<Item = &'a str>) {
+    let kept: Vec<&std::path::Path> = archives.map(file_of).collect();
+    rustgis_data::mbtiles::close_unless(|file| kept.contains(&file));
 }
 
 #[cfg(not(target_arch = "wasm32"))]

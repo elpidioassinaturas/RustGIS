@@ -25708,15 +25708,25 @@ fn geolibre_tile_sources_keep_visibility_opacity_and_order() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn mbtiles_files_are_let_go_of_with_their_last_layer() {
-    use rustgis_data::mbtiles::{is_open, tile_path};
+    use rustgis_data::mbtiles::{close, is_open, tile_path};
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            // Also clean up if an assertion fails with the file still open.
+            close(&self.0);
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
     let path = std::env::temp_dir().join(format!("rustgis-mbtiles-release-{}.mbtiles", std::process::id()));
     let _ = std::fs::remove_file(&path);
+    let _cleanup = Cleanup(path.clone());
     let db = rusqlite::Connection::open(&path).unwrap();
     db.execute_batch("CREATE TABLE metadata(name TEXT,value TEXT); CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB); INSERT INTO metadata VALUES('format','png'),('minzoom','0'),('maxzoom','0'); INSERT INTO tiles VALUES(0,0,0,x'00');").unwrap();
     drop(db);
     let mut s = Session::new(Project::default());
     s.run("map.addTiles", &json!({"url": path.display().to_string(), "kind": "mbtiles"})).unwrap();
-    // Another test's command can close it in between, so a tile is read until one command leaves it.
+    // The pool is the process's, and another test's command can close the file at any moment, so
+    // this asks only that a command leave it open once: it fails if every command closes it.
     let stays_open = |s: &mut Session| {
         (0..100).any(|_| {
             tile_path(&path, 0, 0, 0).unwrap();

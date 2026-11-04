@@ -437,8 +437,17 @@ mod file {
         /// Only the files `keep` says no to lose their connections, and one left alone stays open.
         #[test]
         fn close_unless_leaves_the_files_it_keeps() {
+            struct Cleanup(PathBuf);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    // Also clean up if an assertion fails with the files still open.
+                    close_unless(|path| !path.starts_with(&self.0));
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+            }
             let dir = std::env::temp_dir().join(format!("rustgis-mbtiles-close-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
+            let _cleanup = Cleanup(dir.clone());
             let (kept, gone) = (dir.join("kept.mbtiles"), dir.join("gone.mbtiles"));
             for path in [&kept, &gone] {
                 std::fs::write(path, b"").unwrap();
@@ -448,8 +457,6 @@ mod file {
             assert!(is_open(&kept));
             assert!(!is_open(&gone));
             std::fs::remove_file(&gone).unwrap();
-            close(&kept);
-            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 }
