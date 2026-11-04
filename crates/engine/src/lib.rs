@@ -1216,7 +1216,8 @@ impl Session {
                 if let Some(d) = params.get("id").and_then(Value::as_u64) {
                     self.downloaded.retain(|(k, _)| *k != d);
                 }
-                let url = params.get("url").and_then(Value::as_str).unwrap_or("download");
+                // Redacted here too: the assistant and MCP get the error as it is.
+                let url = sources::redact_text(params.get("url").and_then(Value::as_str).unwrap_or("download"));
                 Some(if self.url_waits.added_already(n, params) {
                     Err(format!("{url}: it was added already for its plugin command, so it wasn't added again"))
                 } else {

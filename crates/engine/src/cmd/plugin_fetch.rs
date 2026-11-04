@@ -780,6 +780,20 @@ mod tests {
         assert!(e.contains("the table its download added was taken away (undone)"), "{e}");
     }
 
+    /// A refused landing's error, which the assistant and MCP get as it is, keeps an address's
+    /// keys out of it.
+    #[test]
+    fn a_refused_landing_hides_the_keys_of_its_address() {
+        let mut s = Session::new(crate::project::Project::default());
+        let url = "https://x.org/e.geojson?token=hunter2";
+        s.url_waits.remember_given_up(800, json!({"url": url}));
+        let e = s.run("layer.addUrl", &json!({"url": url, "request": 800})).unwrap_err();
+        assert!(e.starts_with("https://x.org/e.geojson") && e.contains("stopped waiting") && !e.contains("hunter2"), "{e}");
+        s.url_waits.added.push_back((801, json!({"url": url})));
+        let e = s.run("layer.addUrl", &json!({"url": url, "request": 801})).unwrap_err();
+        assert!(e.starts_with("https://x.org/e.geojson") && e.contains("added already") && !e.contains("hunter2"), "{e}");
+    }
+
     /// A caller giving a waited download's number with its address lands it; the app's own
     /// download of it landing after isn't added again, and says so (#1202).
     #[test]
