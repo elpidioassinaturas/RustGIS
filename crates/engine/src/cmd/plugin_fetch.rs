@@ -306,6 +306,10 @@ pub(crate) struct UrlWaits {
     /// addresses (the latest [`MAX_EXPIRED`]): one that lands after is refused, not added with no
     /// command left to go on with it.
     expired: Vec<(u64, Value)>,
+    /// Requests added, with their addresses (the latest [`MAX_EXPIRED`]): one landing again (a
+    /// caller gave its number with the same address, then the app's own download came) isn't
+    /// added twice.
+    added: VecDeque<(u64, Value)>,
 }
 
 /// What adding a landed download added, to tell when its command runs again whether it is still
@@ -440,8 +444,19 @@ impl UrlWaits {
     pub(crate) fn land(&mut self, n: u64, answer: CmdResult, added: Added) {
         if let Some(i) = self.in_flight.iter().position(|(m, ..)| *m == n) {
             let (_, asked, _) = self.in_flight.remove(i);
+            if answer.is_ok() {
+                if self.added.len() >= MAX_EXPIRED {
+                    self.added.pop_front();
+                }
+                self.added.push_back((n, asked.clone()));
+            }
             self.landed.push((n, asked, answer, added));
         }
+    }
+
+    /// Whether `params` land request `n` again: it was added already.
+    pub(crate) fn added_already(&self, n: u64, params: &Value) -> bool {
+        self.added.iter().any(|(m, q)| *m == n && asked_by(q, params))
     }
 
     /// Waits for request `n`, which asked for `asked`.
@@ -745,6 +760,26 @@ mod tests {
         s.run("table.remove", &json!({"table": "sites"})).unwrap();
         let e = s.run("layer.addUrl", &asked).unwrap_err();
         assert!(e.contains("the table its download added was taken away (undone)"), "{e}");
+    }
+
+    /// A caller giving a waited download's number with its address lands it; the app's own
+    /// download of it landing after isn't added again, and says so (#1202).
+    #[test]
+    fn a_download_landed_twice_is_added_once() {
+        let mut s = Session::new(crate::project::Project::default());
+        let url = "https://x.org/a.geojson";
+        s.url_waits.wait(900, json!({"url": url}));
+        let point = br#"{"type": "Point", "coordinates": [1, 2]}"#;
+        let add = |s: &mut Session| {
+            let id = s.download_started();
+            assert!(s.download_landed(id, point.to_vec()));
+            s.run("layer.addDownload", &json!({"id": id, "url": url, "request": 900}))
+        };
+        add(&mut s).unwrap();
+        assert_eq!(s.map().layers.len(), 1);
+        let e = add(&mut s).unwrap_err();
+        assert!(e.starts_with(url) && e.contains("added already"), "{e}");
+        assert_eq!(s.map().layers.len(), 1, "added once");
     }
 
     /// A download that failed is asked for again as a new download, not answered as the one

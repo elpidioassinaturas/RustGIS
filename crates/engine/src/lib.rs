@@ -1016,7 +1016,7 @@ impl Session {
         let url = p.get("url").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
         let asked = cmd::plugins::fetch::without_request(p);
         let waiting = self.url_requests.iter().find(|q| cmd::plugins::fetch::same_request(q, &asked)).and_then(|q| q["request"].as_u64());
-        // A number given that another download waited for has (another address) isn't this
+        // A number given that is another download's (waited for with another address) isn't this
         // request's: set aside, so the request still gets a download of its own.
         let given =
             p.get("request").and_then(serde_json::Value::as_u64).filter(|n| !self.url_waits.has(*n) || self.url_waits.holds(*n, &asked));
@@ -1145,17 +1145,23 @@ impl Session {
             let joins = self.merge.is_some() && self.merge == self.merged && !self.undo.is_empty();
             let (at, start) = (project_log::now_ms(), web_time::Instant::now());
             // A download that lands after its plugin command gave up waiting (it ran again with
-            // that error) isn't added: no command is left to go on with it (#1202).
+            // that error) isn't added: no command is left to go on with it. Nor is one landing
+            // again, added already (a caller gave its number itself, then the app's own download
+            // came) (#1202).
             if matches!(id, "layer.addUrl" | "layer.addDownload")
                 && let Some(n) = params.get("request").and_then(Value::as_u64)
-                && self.url_waits.given_up(n, params)
+                && (self.url_waits.given_up(n, params) || self.url_waits.added_already(n, params))
             {
+                let again = self.url_waits.added_already(n, params);
                 // Its bytes go too; the front end says the refusal, once, with its address.
                 if let Some(d) = params.get("id").and_then(Value::as_u64) {
                     self.downloaded.retain(|(k, _)| *k != d);
                 }
-                self.url_waits.refused(n);
                 let url = params.get("url").and_then(Value::as_str).unwrap_or("download");
+                if again {
+                    return Err(format!("{url}: it was added already for its plugin command, so it wasn't added again"));
+                }
+                self.url_waits.refused(n);
                 return Err(format!("{url}: it came after its plugin command stopped waiting, so it wasn't added"));
             }
             let res = self.run_command(id, params);
