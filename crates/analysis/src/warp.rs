@@ -512,12 +512,12 @@ pub struct Burned {
 
 /// Burns `shapes` onto `g` as one band: a cell whose centre falls inside a shape (its holes cut
 /// out) takes the shape's value, a later shape over an earlier one, as GDAL burns; a cell under
-/// none is `nodata`. Each shape is filled by scanline over its own window of the grid (as
+/// none is `nodata`. Each shape is filled by scanline on the rows it crosses (as
 /// [`crate::rasterops::polygon_mask`]), so a polygon narrower than a cell may hold no cell centre
-/// and be missed (and counted). The band and one shape's window, as filled and as trimmed, are held
-/// at once: at most 6 bytes a cell. A shape whose value is `nodata` is refused: its cells couldn't
-/// be told from those under none. The time goes by each shape's window and edges, with no cap on
-/// their total; a run under a [`crate::control::Control`] stops between shapes and counts them.
+/// and be missed (and counted). The band is held, 4 bytes a cell, and one shape's edges. A shape
+/// whose value is `nodata` is refused: its cells couldn't be told from those under none. The time
+/// goes by each shape's cells and crossings, with no cap on their total; a run under a
+/// [`crate::control::Control`] stops between shapes and counts them.
 pub fn rasterize(g: &Grid, shapes: &[Shape], nodata: f32) -> Result<Burned, String> {
     let max = max_samples();
     let too_big =
@@ -540,23 +540,24 @@ pub fn rasterize(g: &Grid, shapes: &[Shape], nodata: f32) -> Result<Burned, Stri
         crate::control::check()?;
         crate::control::reached(i);
         failed.clear();
-        let mask = crate::rasterops::polygon_mask_on(&tr, &t, size, &shape.parts, &mut failed)?;
+        let placed = crate::rasterops::Placed::new(&tr, &t, size, &shape.parts, &mut failed);
         if !failed.is_empty() {
             unplaced.push(i);
         }
-        let Some((cols, rows, mask)) = mask else {
-            missed += usize::from(failed.is_empty());
-            continue;
-        };
-        burned += 1;
-        let w = (cols.end - cols.start) as usize;
-        for (line, row) in mask.chunks_exact(w).zip(rows) {
-            let start = row as usize * g.width + cols.start as usize;
-            for (cell, inside) in data.get_mut(start..start + w).unwrap_or_default().iter_mut().zip(line) {
-                if *inside {
-                    *cell = shape.value;
+        let mut holds_a_cell = false;
+        if let Some(placed) = &placed {
+            placed.spans(|row, cols| {
+                let start = row as usize * g.width;
+                if let Some(cells) = data.get_mut(start + cols.start as usize..start + cols.end as usize) {
+                    cells.fill(shape.value);
+                    holds_a_cell = true;
                 }
-            }
+            });
+        }
+        if holds_a_cell {
+            burned += 1;
+        } else {
+            missed += usize::from(failed.is_empty());
         }
     }
     let cells = data.iter().filter(|v| !(**v == nodata || (v.is_nan() && nodata.is_nan()))).count();

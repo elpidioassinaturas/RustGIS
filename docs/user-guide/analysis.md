@@ -1166,18 +1166,19 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
   - Cells under no polygon take `nodata` (0 by default). A polygon whose value is the no-data
     value is refused, so give another `nodata`, such as 255, when 0 is a class.
   - **Pixel type:** bytes when every value and the no-data value are whole numbers from 0 to 255,
-    16-bit when they are up to 65,535, and 32-bit floating point otherwise. A whole number past
-    16,777,216 can't be held exactly and is refused; for a field of such numbers, a text field gives
-    codes instead. A decimal value that 32 bits can't hold exactly is rounded, and a notice counts
-    them. Up to 256 whole-number values are drawn with unique values.
+    16-bit when they are up to 65,535, and 32-bit floating point otherwise. Past 16,777,216, 32 bits
+    no longer hold every whole number, so a whole number past it is refused, from an Integer field,
+    a text field's codes or `value`; for an Integer field, a text field gives codes instead. Any
+    other value that 32 bits can't hold exactly, a Double field's included, is rounded, and a notice
+    counts them. Up to 256 whole-number values are drawn with unique values.
   - **Limits:** a polygon narrower than a cell can hold no cell centre and be missed; there is no
     "all touched" rule, and lines and points aren't burned. The grid has to fit in memory (120
     million cells, or more on a computer with more memory; 32 million in the web app): a grid past
     that is refused before anything is burned. A layer read in place (only the part in view loaded)
     is refused until all its features are loaded. Taken from a raster read from its overview, the
     grid is the overview's, and a notice says so. The command runs where it is called, with no Cancel
-    yet and no cap on its work: each polygon is filled over its own part of the grid, so many large
-    or detailed polygons on a fine grid take time in proportion.
+    yet and no cap on its work: each polygon fills the cells it covers, so many large polygons on a
+    fine grid take time in proportion.
 - **Classification Wizard** (unsupervised k-means) and **Classification Tools** (minimum distance
   from training polygons).
 - **Mensuration**: distances along the surface, heights between two points, areas, and volumes
