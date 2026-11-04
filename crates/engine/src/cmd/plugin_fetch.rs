@@ -427,12 +427,7 @@ impl UrlWaits {
     pub(crate) fn in_flight(&self, asked: &Value) -> Option<u64> {
         // One that failed added nothing: asked again, it is downloaded again.
         let made = self.landed.iter().find(|(_, q, answer, _)| answer.is_ok() && same_request(q, asked)).map(|(n, ..)| *n);
-        self.being_made(asked).or(made)
-    }
-
-    /// The number of a download being made for `asked` (not yet landed).
-    pub(crate) fn being_made(&self, asked: &Value) -> Option<u64> {
-        self.in_flight.iter().find(|(_, q, _)| same_request(q, asked)).map(|(n, ..)| *n)
+        self.in_flight.iter().find(|(_, q, _)| same_request(q, asked)).map(|(n, ..)| *n).or(made)
     }
 
     /// Whether a front end's `params` (a `layer.addUrl` or `layer.addDownload` carrying number
@@ -794,8 +789,9 @@ mod tests {
     }
 
     /// A download that failed is asked for again as a new download, not answered as the one
-    /// that failed; one added is the same request still for a plugin command's call, and
-    /// downloaded again for any other; a request that isn't an object is refused (#1202).
+    /// that failed; one being made or added is the same request still for a plugin command's
+    /// call, and another download for any other; a request that isn't an object is refused
+    /// (#1202).
     #[test]
     fn a_failed_download_asked_again_is_downloaded_again() {
         let mut s = Session::new(crate::project::Project::default());
@@ -821,11 +817,15 @@ mod tests {
         let taken = s.take_url_requests();
         assert_eq!(taken.len(), 1, "{taken:?}");
         assert_ne!(taken[0]["request"], json!(901));
-        // Being made: one download, whoever asks.
+        // Being made, the same: that one for a plugin command's call, another from anywhere else.
         let third = json!({"url": "https://x.org/c.geojson"});
         s.url_waits.wait(902, third.clone());
+        s.call_requests = Some(Vec::new());
         s.request_url(&third).unwrap();
         assert!(s.take_url_requests().is_empty());
+        assert_eq!(s.call_requests.take().unwrap()[0].0, 902);
+        s.request_url(&third).unwrap();
+        assert_ne!(s.take_url_requests()[0]["request"], json!(902));
         assert!(s.request_url(&json!("https://x.org/d.geojson")).unwrap_err().contains("an object"));
     }
 
@@ -847,6 +847,19 @@ mod tests {
         // The same address read another way (columns it wasn't asked with) isn't it either.
         let other_import = json!({"url": "https://x.org/a.geojson", "x": "lon", "y": "lat", "request": 900});
         assert!(!s.url_waits.holds(900, &other_import) && s.url_waits.holds(900, &json!({"url": "https://x.org/a.geojson"})));
+        // A number nothing asked under, taken by no one: set aside, so the counter can't reach it
+        // and queue two downloads under one number.
+        let next = s.next_request + 1;
+        s.request_url(&json!({"url": "https://x.org/c.geojson", "request": next + 1})).unwrap();
+        s.request_url(&json!({"url": "https://x.org/d.geojson"})).unwrap();
+        let taken = s.take_url_requests();
+        let numbers: Vec<_> = taken.iter().map(|q| q["request"].as_u64()).collect();
+        assert_eq!(numbers, [Some(next), Some(next + 1)], "{taken:?}");
+        // Given up, its own number stays, for its landing to be refused.
+        let late = json!({"url": "https://x.org/e.geojson"});
+        s.url_waits.remember_given_up(800, late.clone());
+        s.request_url(&json!({"url": "https://x.org/e.geojson", "request": 800})).unwrap();
+        assert_eq!(s.take_url_requests()[0]["request"], json!(800));
     }
 
     /// Plugin commands waiting for the same download each get its answer, a rerun that waits
@@ -968,10 +981,13 @@ mod tests {
         s.call_requests = None;
         assert!(s.take_url_requests().is_empty(), "made already");
         // Handed back by the front end that took it (the browser found it must be downloaded
-        // whole): queued again, whole. Asked again by its address alone, it is that one.
+        // whole): queued again, whole. Asked again by its address alone by a plugin command's
+        // call, it is that one.
         let g = json!({"url": "https://x.org/g.csv"});
         s.retry_plugin("plugin:eng-share-f/f", &p, Vec::new(), vec![(952, g.clone())]).unwrap();
+        s.call_requests = Some(Vec::new());
         s.request_url(&g).unwrap();
+        s.call_requests = None;
         assert!(s.take_url_requests().is_empty(), "under way");
         s.request_url(&json!({"url": "https://x.org/g.csv", "request": 952})).unwrap();
         assert_eq!(s.take_url_requests(), [json!({"url": "https://x.org/g.csv", "request": 952, "whole": true})]);

@@ -1010,8 +1010,9 @@ impl Session {
     ///
     /// Each request has a number (`"request"` in what the front end takes), which it hands on to
     /// the command that adds the download; a plugin command waiting for it runs again with what
-    /// that command answered (#1202). A request made again while a plugin command waits for it
-    /// (clicked twice) is that one, not a second download.
+    /// that command answered (#1202). A plugin command's call asking again for a download a
+    /// command waits for (clicked twice) is that one, not a second download; from anywhere else,
+    /// a request made again once taken is another download, as Add Data From URL's is.
     pub fn request_url(&mut self, p: &serde_json::Value) -> Result<serde_json::Value, String> {
         if !p.is_object() {
             return Err("a download is asked for by an object: its \"url\" and how to read it".into());
@@ -1019,13 +1020,14 @@ impl Session {
         let url = p.get("url").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
         let asked = cmd::plugins::fetch::without_request(p);
         let waiting = self.url_requests.iter().find(|q| cmd::plugins::fetch::same_request(q, &asked)).and_then(|q| q["request"].as_u64());
-        // A number given that is another download's (waited for with another address) isn't this
-        // request's: set aside, so the request still gets a download of its own.
-        let given =
-            p.get("request").and_then(serde_json::Value::as_u64).filter(|n| !self.url_waits.has(*n) || self.url_waits.holds(*n, &asked));
-        // One a plugin command waits for, being made, is this one; added already, it is only for
-        // another plugin command's call: asked from anywhere else, it is downloaded again.
-        let made = if self.call_requests.is_some() { self.url_waits.in_flight(&asked) } else { self.url_waits.being_made(&asked) };
+        // A number is taken only as what it was made for here: this request, waited for or given
+        // up (its landing is refused then). Any other is set aside, so the request gets a download
+        // of its own, under a number no other request can get.
+        let given = p
+            .get("request")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|n| self.url_waits.holds(*n, &asked) || self.url_waits.given_up(*n, &asked));
+        let made = self.call_requests.as_ref().and_then(|_| self.url_waits.in_flight(&asked));
         let number = match given.or(waiting).or(made) {
             Some(n) => n,
             None => {

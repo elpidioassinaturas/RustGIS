@@ -7883,10 +7883,10 @@ B,11,51
     let ran = s.poll_plugin_retries();
     assert!(ran[0].1.as_ref().unwrap_err().contains("404"), "{ran:?}");
     assert!(!s.plugin_retries_waiting());
-    // Another caller's download queued with the number the command's will get: the command's is
+    // Another caller's download queued under the number the command's will get: the command's is
     // still queued, for its own address.
     let next = s.next_request + 1;
-    s.request_url(&json!({"url": "https://x.org/other.csv", "request": next})).unwrap();
+    s.url_requests.push(json!({"url": "https://x.org/other.csv", "request": next}));
     let q = json!({"op": "layer.addUrl", "params": {"url": "https://x.org/mine.csv"}});
     s.run_leaving_downloads("plugin:eng-rerun/f", &q).unwrap();
     let asked = s.take_url_requests();
