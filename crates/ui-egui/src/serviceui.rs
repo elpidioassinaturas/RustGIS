@@ -297,9 +297,10 @@ pub struct PageRead {
 }
 
 /// Starts reading a service's features (`landed`, its download started but nothing fetched yet)
-/// in the background ([`poll_pages`]).
+/// in the background ([`poll_pages`]): an ArcGIS layer whose description lists protocol buffers in
+/// them, in pages.
 pub(crate) fn read_pages(app: &mut RustGisApp, landed: Landed) {
-    let step = ogc::begin(&landed.url, ogc::max_paged_features());
+    let step = ogc::begin_with_pbf(&landed.url, ogc::max_paged_features());
     go_on(app, landed, rustgis_engine::render::rustgis_tiles::cache::MAX_DOWNLOAD, step);
 }
 
@@ -359,8 +360,10 @@ pub fn poll_pages(app: &mut RustGisApp, ctx: &egui::Context) {
 /// unread), or why it couldn't be fetched said.
 pub(crate) fn go_on(app: &mut RustGisApp, landed: Landed, left: usize, step: Step) {
     match step {
-        // Not given by `ogc::begin`, which reads in GeoJSON.
-        Step::Decoded(..) => go_on(app, landed, left, Step::Failed("the pages were read as protocol buffers".into())),
+        Step::Decoded(dataset, report, note) => {
+            noted(app, &landed, note);
+            app.add_landed_read(landed, *dataset, report);
+        }
         Step::Failed(e) => {
             app.session.download_failed(landed.id);
             app.session.request_failed(&landed.params, &e);
@@ -377,11 +380,16 @@ pub(crate) fn go_on(app: &mut RustGisApp, landed: Landed, left: usize, step: Ste
             app.ui.service_pages.push(PageRead { landed, pages, left, slot, asked: web_time::Instant::now() });
         }
         Step::Done(bytes, note) => {
-            if let Some(note) = note {
-                let name = landed.params.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or(&landed.url);
-                app.session.notify(format!("{name}: {note}"), false);
-            }
+            noted(app, &landed, note);
             app.add_landed(landed, bytes);
         }
+    }
+}
+
+/// Says what was left unread of a service layer's features, by its name.
+fn noted(app: &mut RustGisApp, landed: &Landed, note: Option<String>) {
+    if let Some(note) = note {
+        let name = landed.params.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or(&landed.url);
+        app.session.notify(format!("{name}: {note}"), false);
     }
 }
