@@ -701,7 +701,8 @@ impl Session {
         // unless the command gives up now (it has run again too often): then nothing waits for them.
         let giving_up = self.retry_tries >= fetch::MAX_RETRIES;
         for (n, asked) in requested.iter().filter(|_| !giving_up) {
-            let taken = self.url_requests.iter().any(|q| q["request"].as_u64() == Some(*n));
+            // Queued already: this number for this address (another caller may give the number).
+            let taken = self.url_requests.iter().any(|q| q["request"].as_u64() == Some(*n) && fetch::same_request(q, asked));
             if !taken && !self.url_waits.has(*n) {
                 let mut q = asked.clone();
                 q["request"] = json!(n);

@@ -316,8 +316,8 @@ pub(crate) struct Added {
     /// and by undo): a layer added since with the same id, even of a file of the same name, isn't
     /// them.
     layers: Vec<(u32, u64)>,
-    /// The tile layers (a GeoTIFF read in place), by address.
-    tiles: Vec<String>,
+    /// The tile layers (a GeoTIFF read in place), as added: told apart by [`same_tile`].
+    tiles: Vec<rustgis_map::tiles::TileLayer>,
     /// The map it was added to (its instance id, which stays with it as maps are removed or
     /// moved), which may not be the one shown when the command runs again.
     pub(crate) map: u64,
@@ -337,7 +337,7 @@ impl Added {
         }
         // A tile layer's answer is its place in the list, which changes: its address doesn't.
         let tiles = match (v.get("layer"), v.get("index").and_then(Value::as_u64)) {
-            (None, Some(i)) => usize::try_from(i).ok().and_then(|i| map.tiles.get(i)).map(|t| t.url.clone()).into_iter().collect(),
+            (None, Some(i)) => usize::try_from(i).ok().and_then(|i| map.tiles.get(i)).cloned().into_iter().collect(),
             _ => Vec::new(),
         };
         Added { layers, tiles, map: at }
@@ -347,9 +347,9 @@ impl Added {
     /// are added or taken away, is where it is now.
     pub(crate) fn answer_now(&self, map: &crate::map::Map, answer: &CmdResult) -> CmdResult {
         let mut now = answer.clone();
-        if let (Ok(v), Some(url)) = (&mut now, self.tiles.first())
+        if let (Ok(v), Some(added)) = (&mut now, self.tiles.first())
             && v.get("index").is_some()
-            && let Some(i) = map.tiles.iter().position(|t| t.url == *url)
+            && let Some(i) = map.tiles.iter().position(|t| same_tile(t, added))
         {
             v["index"] = json!(i);
         }
@@ -365,8 +365,15 @@ impl Added {
     /// Whether any of it is no longer in `map` (or another layer has its id).
     pub(crate) fn gone(&self, map: &crate::map::Map) -> bool {
         self.layers.iter().any(|(id, instance)| map.layer(*id).is_none_or(|l| l.instance_id() != *instance))
-            || self.tiles.iter().any(|url| !map.tiles.iter().any(|t| t.url == *url))
+            || self.tiles.iter().any(|added| !map.tiles.iter().any(|t| same_tile(t, added)))
     }
+}
+
+/// Whether tile layer `t` is `added`, which has no id: the same address, kind, role and look. A
+/// map can't hold two with all of these (adding one replaces the other), so another layer of the
+/// same address isn't it, and a rename keeps it.
+fn same_tile(t: &rustgis_map::tiles::TileLayer, added: &rustgis_map::tiles::TileLayer) -> bool {
+    t.url == added.url && t.kind == added.kind && t.overlay == added.overlay && t.style_layers == added.style_layers
 }
 
 /// The most given-up requests whose downloads are still out: each is remembered until its
@@ -402,7 +409,8 @@ impl UrlWaits {
     /// The number of a download being made for `asked`, or made and added while its command
     /// waits to run again: a request made again then is that one, not another download.
     pub(crate) fn in_flight(&self, asked: &Value) -> Option<u64> {
-        let made = self.landed.iter().find(|(_, q, ..)| same_request(q, asked)).map(|(n, ..)| *n);
+        // One that failed added nothing: asked again, it is downloaded again.
+        let made = self.landed.iter().find(|(_, q, answer, _)| answer.is_ok() && same_request(q, asked)).map(|(n, ..)| *n);
         self.in_flight.iter().find(|(_, q, _)| same_request(q, asked)).map(|(n, ..)| *n).or(made)
     }
 
@@ -637,8 +645,8 @@ mod tests {
     use super::*;
 
     /// A command run again checks that what its download added is still there: a layer with its
-    /// id but other data (one added after an undo), or a tile layer taken away, is said, not
-    /// answered (#1202).
+    /// id but other data (one added after an undo), a tile layer taken away (another of its
+    /// address left), or a table taken away, is said, not answered (#1202).
     #[test]
     fn a_rerun_says_when_what_its_download_added_is_gone() {
         let mut s = Session::new(crate::sample::world_project());
@@ -697,9 +705,45 @@ mod tests {
         s.run("map.addTiles", &json!({"url": "https://y.org/{z}/{x}/{y}.png", "name": "U"})).unwrap();
         let moved = s.map().tiles.iter().position(|t| t.name == "T").unwrap();
         assert_eq!(s.run("layer.addUrl", &asked).unwrap()["index"], json!(moved));
+        // The same address as an overlay too: not it, so with it taken away, the overlay doesn't
+        // answer for it.
+        s.run("map.addTiles", &json!({"url": "https://x.org/{z}/{x}/{y}.png", "name": "T2", "overlay": true})).unwrap();
+        let moved = s.map().tiles.iter().position(|t| t.name == "T").unwrap();
+        assert_eq!(s.run("layer.addUrl", &asked).unwrap()["index"], json!(moved));
         s.run("map.removeTiles", &json!({"index": moved})).unwrap();
+        assert!(s.map().tiles.iter().any(|t| t.name == "T2"));
         let e = s.run("layer.addUrl", &asked).unwrap_err();
         assert!(e.contains("taken away (undone)"), "{e}");
+        // A standalone table (a file with no geometry), then taken away.
+        let answer = s.run("layer.addDataText", &json!({"fileName": "sites.csv", "text": "id,street\n1,Champ de Mars\n"}));
+        assert!(answer.as_ref().unwrap()["table"].is_string(), "{answer:?}");
+        s.rerun_landed = vec![(asked.clone(), answer.clone(), Added::of(s.map(), &answer))];
+        assert_eq!(s.run("layer.addUrl", &asked), answer);
+        s.run("table.remove", &json!({"table": "sites"})).unwrap();
+        let e = s.run("layer.addUrl", &asked).unwrap_err();
+        assert!(e.contains("the table its download added was taken away (undone)"), "{e}");
+    }
+
+    /// A download that failed is asked for again as a new download, not answered as the one
+    /// that failed; one added is the same request still (#1202).
+    #[test]
+    fn a_failed_download_asked_again_is_downloaded_again() {
+        let mut s = Session::new(crate::project::Project::default());
+        let asked = json!({"url": "https://x.org/a.geojson"});
+        s.url_waits.wait(900, asked.clone());
+        s.url_waits.land(900, Err("https://x.org/a.geojson: 404 Not Found".into()), Added::default());
+        assert_eq!(s.url_waits.in_flight(&asked), None);
+        s.request_url(&asked).unwrap();
+        let taken = s.take_url_requests();
+        assert_eq!(taken.len(), 1, "{taken:?}");
+        assert_ne!(taken[0]["request"], json!(900));
+        // Added: the same request, nothing downloaded again.
+        let other = json!({"url": "https://x.org/b.geojson"});
+        s.url_waits.wait(901, other.clone());
+        s.url_waits.land(901, Ok(json!({"layer": 1})), Added::default());
+        assert_eq!(s.url_waits.in_flight(&other), Some(901));
+        s.request_url(&other).unwrap();
+        assert!(s.take_url_requests().is_empty());
     }
 
     /// Plugin commands waiting for the same download each get its answer, a rerun that waits
