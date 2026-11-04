@@ -8328,6 +8328,28 @@ fn plugin_downloads_are_left_to_the_app() {
     rustgis_plugins::unload("eng-url");
 }
 
+/// A command that gives up says which of its downloads now won't start; one another command
+/// waits for still comes, so it isn't named.
+#[test]
+fn a_command_giving_up_names_the_downloads_it_leaves() {
+    let mut s = world();
+    plugin("eng-giveup", &["edit", "network"]);
+    plugin("eng-giveup-other", &["edit", "network"]);
+    let add = |url: &str| json!({"op": "layer.addUrl", "params": {"url": url}});
+    s.retry_tries = crate::cmd::plugins::fetch::MAX_RETRIES;
+    let e = s.run_leaving_downloads("plugin:eng-giveup/f", &add("https://x.org/new.csv?token=hunter2")).unwrap_err();
+    assert!(e.contains("gave up") && e.contains("its download of https://x.org/new.csv") && !e.contains("hunter2"), "{e}");
+    assert!(s.take_url_requests().is_empty(), "not started");
+    s.retry_tries = 0;
+    s.run_leaving_downloads("plugin:eng-giveup-other/f", &add("https://x.org/shared.csv")).unwrap();
+    s.retry_tries = crate::cmd::plugins::fetch::MAX_RETRIES;
+    let e = s.run_leaving_downloads("plugin:eng-giveup/f", &add("https://x.org/shared.csv")).unwrap_err();
+    assert!(e.contains("gave up") && !e.contains("wasn't started"), "{e}");
+    assert_eq!(s.take_url_requests()[0]["url"], "https://x.org/shared.csv", "the other command's still comes");
+    rustgis_plugins::unload("eng-giveup");
+    rustgis_plugins::unload("eng-giveup-other");
+}
+
 /// A plugin command whose `layer.addUrl` left a download to the app runs again once the app
 /// has added it, and that call then answers the layer added, so the command goes on with it
 /// (#1202). A failed download is the call's error then; a command clicked twice waits for the

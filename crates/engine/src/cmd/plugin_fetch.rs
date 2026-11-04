@@ -552,7 +552,11 @@ impl Session {
     pub(super) fn retry_plugin(&mut self, id: &str, params: &Value, urls: Vec<String>, requests: Vec<(u64, Value)>) -> CmdResult {
         let tries = self.retry_tries;
         if tries >= MAX_RETRIES {
-            return Err(format!("{id}: gave up after fetching {MAX_RETRIES} times"));
+            // This call's downloads went with its undo, and aren't queued again; one another run
+            // waits for still comes.
+            let dropped: Vec<String> =
+                requests.iter().filter(|(n, _)| !self.url_waits.has(*n)).filter_map(|(_, q)| q["url"].as_str().map(String::from)).collect();
+            return Err(format!("{id}: gave up after fetching {MAX_RETRIES} times{}", not_started(&dropped)));
         }
         // Past the given-up downloads that can still land, no more are asked for: each must be
         // remembered until it lands, to be refused then. Those not yet taken by the front end
