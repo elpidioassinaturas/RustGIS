@@ -470,6 +470,11 @@ A call asked again while its download is under way (the button clicked twice) wa
 download, not another. A command runs again at most 64 times, and a download not added within 10
 minutes runs it again with an error.
 
+Other commands that wait for a server (`service.add`, say) still wait with the window held. A
+command the user starts from the ribbon, command search or a panel first shows "Running …" in the
+status bar with a busy cursor, and clicks made during a long run are dropped, so they don't run it
+again.
+
 `rustgis-cli commands` lists every command id and its parameters.
 
 #### Fetching a document

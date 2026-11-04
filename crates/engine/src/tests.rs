@@ -2935,6 +2935,9 @@ fn hostile_params_never_panic(shard: usize) {
         json!({"transform": "spline", "crs": "EPSG:999999999", "pointsCrs": [7], "resampling": 1, "cellSize": -1e308, "path": 5, "points": [[0, 0, 1, 1]]}),
         json!({"transform": "affine", "crs": 32613, "pointsCrs": 4326, "cellSize": 1e-300, "path": "/nonexistent/x.tif", "points": [[0, 0, 1, 1], [1, 0, 2, 1], [0, 1, 1, 2]]}),
         json!({"points": [[0, 0, f64::MAX, f64::MAX], [1, 0, -f64::MAX, f64::MAX], [0, 1, f64::MAX, -f64::MAX]], "compare": true}),
+        // Polygons burned: a layer, a value and a no-data that pass, then a grid that can't be made.
+        json!({"layer": "Countries", "value": 3, "nodata": -1e30, "cellSize": [1e-300, 1e300], "origin": [1e308, -1e308]}),
+        json!({"layer": "Countries", "field": "name", "nodata": f64::MAX, "grid": [], "extent": "view", "path": 7}),
         // Connections: junk kinds, options and secrets; no connection exists in a fresh session.
         json!({"id": "c1", "kind": "s3", "address": "http://127.0.0.1:9", "name": "\u{7}", "group": 5, "options": {"credentials": "nope", "buckets": "NO_", "region": [1]}, "password": 7, "remember": [true], "accessKeyId": "A", "secretAccessKey": 9}),
         json!({"id": "", "kind": "postgres", "address": "postgres:host=127.0.0.1 port=9 password=x", "options": "x"}),
@@ -13723,6 +13726,96 @@ fn exporting_features_refuses_to_replace_an_existing_geopackage() {
     let error = s.run("share.exportLayer", &json!({"layer": "Countries", "path": path})).unwrap_err();
     assert!(error.to_string().contains("Choose a new filename"), "{error}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Export Features adds a layer to an existing GeoPackage as one more table, or replaces one of
+/// its tables, saying which; a layer read in place from that GeoPackage can go back into it (its
+/// filtered copy as another table). `mode` and `tableName` are for GeoPackages only.
+#[test]
+fn exporting_features_adds_or_replaces_a_table_in_an_existing_geopackage() {
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-gpkg-add-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("county.gpkg");
+    let mut s = world();
+    s.run("share.exportLayer", &json!({"layer": "Cities", "path": path})).unwrap();
+    let mark = s.notice_mark();
+    let out = s.run("share.exportLayer", &json!({"layer": "Countries", "path": path, "mode": "addTable"})).unwrap();
+    assert_eq!((out["table"].as_str(), out["replaced"].as_bool()), (Some("Countries"), Some(false)));
+    let texts: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(texts.iter().any(|t| t.ends_with("added the table Countries")), "{texts:?}");
+    let tables = rustgis_data::source::layers(&path).unwrap();
+    assert_eq!(tables, ["Cities", "Countries"]);
+    // Taken: refused, unless replacing.
+    let e = s.run("share.exportLayer", &json!({"layer": "Cities", "path": path, "mode": "addTable"})).unwrap_err();
+    assert!(e.to_string().contains("already has a table Cities"), "{e}");
+    let cities = s.map().layer_by_name("Cities").map(|l| l.dataset.features.len()).unwrap();
+    let mark = s.notice_mark();
+    let out =
+        s.run("share.exportLayer", &json!({"layer": "Countries", "path": path, "mode": "replaceTable", "tableName": "Cities"})).unwrap();
+    assert_eq!(out["replaced"].as_bool(), Some(true));
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("replaced its table Cities, dropping")));
+    let countries = s.map().layer_by_name("Countries").map(|l| l.dataset.features.len()).unwrap();
+    let count = |t: &str| rustgis_data::source::open_path(&path, Some(t)).unwrap().info().count;
+    assert_eq!(count("Cities"), Some(countries as u64));
+    assert_ne!(cities, countries);
+    // Read in place from the GeoPackage, then exported back into it.
+    s.run("layer.addData", &json!({"path": path.display().to_string(), "layer": "Countries", "stream": true, "name": "InPlace"})).unwrap();
+    s.run("share.exportLayer", &json!({"layer": "InPlace", "path": path, "mode": "addTable", "tableName": "copy"})).unwrap();
+    assert_eq!(count("copy"), Some(countries as u64));
+    // Replacing the table a layer reads in place makes it read the new table, and says so.
+    let kind =
+        |s: &Session| s.map().layer_by_name("InPlace").and_then(|l| l.source.as_ref()).and_then(|src| src.info()).map(|i| i.geometry_type);
+    s.map_mut().layers.iter_mut().for_each(|l| {
+        l.sync_source(&rustgis_geom::Extent::new(-20.0, -20.0, 20.0, 20.0), true);
+    });
+    assert_eq!(kind(&s), Some(rustgis_data::GeometryType::Polygon));
+    let mark = s.notice_mark();
+    s.run("share.exportLayer", &json!({"layer": "Cities", "path": path, "mode": "replaceTable", "tableName": "Countries"})).unwrap();
+    assert_eq!(kind(&s), Some(rustgis_data::GeometryType::Point), "the new table's");
+    let read = s.map().layer_by_name("InPlace").map(|l| l.load_all().map(|ds| ds.features.len()));
+    assert_eq!(read, Some(Ok(cities)), "its features are the new table's");
+    assert!(s.notices_since(mark).iter().any(|n| n.text.ends_with("1 layer reads Countries in place, now the new table")));
+    // A layer loaded for editing from a replaced table keeps its rows and edits, and is named.
+    s.run("gpkg.addLayer", &json!({"path": path, "table": "Cities", "name": "Editing"})).unwrap();
+    let mark = s.notice_mark();
+    s.run("share.exportLayer", &json!({"layer": "Countries", "path": path, "mode": "replaceTable", "tableName": "Cities"})).unwrap();
+    assert!(
+        s.notices_since(mark)
+            .iter()
+            .any(|n| n.text.contains("1 layer loaded for editing from Cities still shows") && n.text.ends_with(": Editing")),
+        "{:?}",
+        s.notices_since(mark)
+    );
+    // A standalone table goes in as an attribute table.
+    s.run("layer.addDataText", &json!({"fileName": "owners.csv", "text": "name,n\nShelby,1\n"})).unwrap();
+    let table = s.project.tables.last().map(|t| t.id).unwrap();
+    let out = s.run("share.exportTable", &json!({"table": table, "path": path, "mode": "addTable"})).unwrap();
+    assert_eq!(out["table"].as_str(), Some("owners"));
+    let c = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        c.query_row("SELECT data_type FROM gpkg_contents WHERE table_name = 'owners'", [], |r| r.get::<_, String>(0)).unwrap(),
+        "attributes"
+    );
+    drop(c);
+    // Other formats take neither; a mode not known is refused.
+    let geojson = dir.join("x.geojson");
+    for p in [json!({"mode": "addTable"}), json!({"tableName": "x"})] {
+        let mut p = p;
+        p["path"] = json!(geojson);
+        assert!(s.run("share.exportLayer", &p).unwrap_err().to_string().contains("GeoPackage"), "{p}");
+    }
+    assert!(s.run("share.exportLayer", &json!({"path": path, "mode": "append"})).is_err());
+    // Not strings: refused, not taken for the default.
+    for p in [json!({"mode": 1}), json!({"mode": "addTable", "tableName": ["x"]})] {
+        let mut p = p;
+        p["path"] = json!(path);
+        assert!(s.run("share.exportLayer", &p).unwrap_err().to_string().contains("must be a string"), "{p}");
+    }
+    assert!(!geojson.exists());
+    // The layer read in place holds the file open, which Windows won't remove.
+    drop(s);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -25798,7 +25891,12 @@ fn geolibre_local_source_kinds_and_archives() {
     assert_eq!(s.map().tiles.len(), 2);
     let raster = s.map().layer_by_name("zarr").unwrap().raster.as_ref().unwrap().data.as_ref().unwrap();
     assert!(raster.bands[0].data.iter().all(|v| *v >= 101.0 && *v <= 104.0), "saved time slice must survive native import");
-    std::fs::remove_dir_all(dir).unwrap();
+    // The archives stay open while the session draws them (MBTiles metadata is read on a
+    // background thread), and Windows refuses to delete an open file: release them, and treat
+    // the cleanup as best effort like the other tests do.
+    drop(s);
+    rustgis_data::mbtiles::close(&dir.join("tiles.mbtiles"));
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -27246,6 +27344,284 @@ fn analysis_workflows_run_on_another_thread() {
     assert!(raster_start(&mut s, "analysis.lineOfSight", &p).is_err());
 }
 
+/// `raster.rasterize` burns a polygon layer onto a grid given as `raster.project`'s is: holes cut
+/// out, a later polygon over an earlier one, a text field's codes in a table, numbers in the
+/// smallest pixel type that holds them, the selection alone, another raster's grid exactly, and
+/// bad parameters refused before anything is made.
+#[test]
+fn polygons_burned_onto_a_chosen_grid() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_geom::Coord;
+    let mut s = world();
+    let ring = |x0: f64, y0: f64, x1: f64, y1: f64| {
+        vec![Coord::new(x0, y0), Coord::new(x1, y0), Coord::new(x1, y1), Coord::new(x0, y1), Coord::new(x0, y0)]
+    };
+    let fields = vec![Field::new("unit", FieldType::Text), Field::new("clay", FieldType::Double), Field::new("code", FieldType::Integer)];
+    let mut soils = Dataset::new("soils", GeometryType::Polygon, fields.clone());
+    // A square with a hole, a second square over part of it, and a polygon with no unit.
+    let holed = Geometry::Polygon(vec![vec![ring(0.0, 0.0, 8.0, 8.0), ring(3.0, 3.0, 5.0, 5.0)]]);
+    soils.push(Some(holed), vec![V::Text("Latossolo".into()), V::Float(35.5), V::Int(2)]);
+    soils.push(
+        Some(Geometry::Polygon(vec![vec![ring(4.0, 4.0, 10.0, 10.0)]])),
+        vec![V::Text("Argissolo".into()), V::Float(20.25), V::Int(7)],
+    );
+    soils.push(Some(Geometry::Polygon(vec![vec![ring(20.0, 0.0, 21.0, 1.0)]])), vec![V::Null, V::Null, V::Null]);
+    crate::cmd::layer::add_dataset(&mut s, soils);
+    // The value of the cell whose centre is (x, y) on a raster of 1° cells whose top is at 10°.
+    let at = |r: &Raster, x: f64, y: f64| r.value(0, x.floor() as i64, (10.0 - y).floor() as i64);
+
+    // A text field: codes 1 and 2 in sorted order, listed in a table; the polygon with no unit
+    // is skipped, so the grid covers the other two (10 × 10 cells of 1°).
+    let mark = s.notice_mark();
+    let v = s.run("raster.rasterize", &json!({"layer": "soils", "field": "unit", "cellSize": 1})).unwrap();
+    assert_eq!(
+        (v["name"].as_str(), v["crs"].as_str(), v["dataType"].as_str()),
+        (Some("soils raster"), Some("EPSG:4326"), Some("UInt8")),
+        "{v}"
+    );
+    assert_eq!((v["width"].as_u64(), v["height"].as_u64(), v["corner"].clone()), (Some(10), Some(10), json!([0.0, 10.0])), "{v}");
+    assert_eq!(v["classes"], json!([{"code": 1, "value": "Argissolo"}, {"code": 2, "value": "Latossolo"}]));
+    assert_eq!((v["features"].as_u64(), v["skipped"].clone()), (Some(2), json!({"noValue": 1})));
+    assert!(s.notices_since(mark).iter().any(|n| n.text == "soils: features skipped: 1 with no value"), "lossy input is said");
+    // 60 cells of the holed square and 36 of the other, 15 of them in both.
+    assert_eq!(v["cells"].as_u64(), Some(81));
+    let r = out_raster(&s, &v);
+    assert_eq!(at(&r, 1.5, 1.5), Some(2.0));
+    assert_eq!(at(&r, 3.5, 3.5), None, "the hole stays out");
+    assert_eq!((at(&r, 4.5, 4.5), at(&r, 6.5, 6.5), at(&r, 9.5, 9.5)), (Some(1.0), Some(1.0), Some(1.0)), "the later polygon wins");
+    assert_eq!(at(&r, 9.5, 0.5), None, "no polygon there");
+    let table = s.project.tables.iter().find(|t| t.name == "soils raster classes").expect("the codes' table");
+    assert_eq!((table.features.len(), table.value(1, 0), table.value(1, 1)), (2, &V::Int(2), &V::Text("Latossolo".into())));
+    assert!(matches!(
+        s.map().layer(v["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().style.renderer,
+        rustgis_map::RasterRenderer::UniqueValues { .. }
+    ));
+
+    // A floating-point field keeps its values; a whole-number one fits in bytes; one value gives
+    // a mask.
+    let clay = s.run("raster.rasterize", &json!({"layer": "soils", "field": "clay", "cellSize": 1, "name": "clay"})).unwrap();
+    let r = out_raster(&s, &clay);
+    assert_eq!((clay["dataType"].as_str(), at(&r, 1.5, 1.5), at(&r, 9.5, 9.5)), (Some("Float32"), Some(35.5), Some(20.25)));
+    let code =
+        s.run("raster.rasterize", &json!({"layer": "soils", "field": "code", "cellSize": 1, "nodata": 300, "name": "code"})).unwrap();
+    let r = out_raster(&s, &code);
+    assert_eq!((code["dataType"].as_str(), at(&r, 1.5, 1.5), at(&r, 3.5, 3.5)), (Some("UInt16"), Some(2.0), None), "{code}");
+    let mask = s.run("raster.rasterize", &json!({"layer": "soils", "cellSize": 1, "name": "mask"})).unwrap();
+    let r = out_raster(&s, &mask);
+    // With no field, the polygon with no unit is burned too: the grid reaches it.
+    assert_eq!((mask["dataType"].as_str(), mask["width"].as_u64(), at(&r, 20.5, 0.5)), (Some("UInt8"), Some(21), Some(1.0)), "{mask}");
+
+    // The selection alone: the second square, 6 × 6 cells.
+    s.run("select.byAttributes", &json!({"layer": "soils", "where": "unit = 'Argissolo'"})).unwrap();
+    let mark = s.notice_mark();
+    let sel = s.run("raster.rasterize", &json!({"layer": "soils", "field": "unit", "cellSize": 1, "name": "selected"})).unwrap();
+    assert_eq!(
+        (sel["width"].as_u64(), sel["cells"].as_u64(), sel["classes"].clone()),
+        (Some(6), Some(36), json!([{"code": 1, "value": "Argissolo"}]))
+    );
+    assert!(s.notices_since(mark).is_empty() && sel.get("skipped").is_none(), "clean input says nothing: {sel}");
+    s.run("select.clear", &json!({})).unwrap();
+
+    // On a grid projected from a raster: exactly that grid, and the cells in place there.
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 10.0, pixel_width: 0.5, pixel_height: -0.5 };
+    let dem = Raster::new("dem", 20, 20, vec![vec![1.0; 400]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    let bytes = rustgis_data::raster::geotiff::write(&dem, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "dem", rustgis_map::RasterLayer::from_bytes(dem, "dem.tif", bytes)).unwrap();
+    let merc = s.run("raster.project", &json!({"layer": "dem", "crs": 3857, "cellSize": 50_000, "name": "dem merc"})).unwrap();
+    let on = s.run("raster.rasterize", &json!({"layer": "soils", "field": "unit", "grid": "dem merc", "name": "on dem"})).unwrap();
+    let (t, r) = (out_raster(&s, &merc), out_raster(&s, &on));
+    assert_eq!((r.width, r.height, r.transform, r.crs), (t.width, t.height, t.transform, t.crs));
+    let cell = |lon: f64, lat: f64| {
+        let p = r.transform.to_pixel(r.transformer().from_lonlat(Coord::new(lon, lat)).unwrap());
+        r.value(0, p.0.floor() as i64, p.1.floor() as i64)
+    };
+    assert_eq!((cell(1.5, 1.5), cell(9.0, 9.0), cell(3.8, 3.8)), (Some(2.0), Some(1.0), None), "{on}");
+    // The same crs and cellSize as a projection line up with it, without the template.
+    let same = s.run("raster.rasterize", &json!({"layer": "soils", "crs": 3857, "cellSize": 50_000, "name": "same"})).unwrap();
+    assert_eq!((same["corner"][0].as_f64().unwrap() / 50_000.0).fract(), 0.0, "{same}");
+
+    // Written to a file, as bytes with 0 for no-data.
+    let dir = std::env::temp_dir().join(format!("rustgis-rasterize-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("soils.tif");
+    let _ = std::fs::remove_file(&path);
+    let f = s
+        .run(
+            "raster.rasterize",
+            &json!({"layer": "soils", "field": "unit", "cellSize": 1, "path": path.display().to_string(), "name": "file"}),
+        )
+        .unwrap();
+    assert!(f["cog"]["bytes"].as_u64().is_some_and(|b| b > 0), "{f}");
+    let back = rustgis_data::raster::read_bytes("soils.tif", &std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!((back.data_type.as_str(), back.nodata, at(&back, 1.5, 1.5), at(&back, 3.5, 3.5)), ("UInt8", Some(0.0), Some(2.0), None));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A whole number past what a pixel holds exactly is refused; a decimal one is rounded, and
+    // said, and one that would round to the no-data value is refused. A polygon that holds no cell
+    // centre is said too.
+    let mut big = Dataset::new("big", GeometryType::Polygon, fields);
+    big.push(Some(Geometry::Polygon(vec![vec![ring(0.0, 0.0, 1.0, 1.0)]])), vec![V::Null, V::Float(35.1), V::Int(20_000_001)]);
+    big.push(Some(Geometry::Polygon(vec![vec![ring(5.6, 5.6, 5.7, 5.7)]])), vec![V::Null, V::Float(1e-50), V::Null]);
+    crate::cmd::layer::add_dataset(&mut s, big);
+    let e = s.run("raster.rasterize", &json!({"layer": "big", "field": "code", "cellSize": 1})).unwrap_err();
+    assert!(e.contains("text field"), "{e}");
+    let e = s.run("raster.rasterize", &json!({"layer": "big", "field": "clay", "cellSize": 1})).unwrap_err();
+    assert!(e.contains("no-data value"), "{e}");
+    let mark = s.notice_mark();
+    let v = s.run("raster.rasterize", &json!({"layer": "big", "field": "clay", "nodata": -1, "cellSize": 1, "name": "rounded"})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert_eq!((v["features"].as_u64(), v["skipped"].clone()), (Some(1), json!({"noCell": 1})), "{v}");
+    assert!(said.iter().any(|n| n == "big: 2 value(s) of clay rounded to the raster's 32-bit pixels"), "{said:?}");
+    assert!(
+        said.iter().any(|n| n == "big: features skipped: 1 that hold no cell centre (narrower than a cell, or off the grid)"),
+        "{said:?}"
+    );
+    // A template read from its overview: its grid is taken, and said.
+    let mut over = Raster::new("over", 20, 20, vec![vec![1.0; 400]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    over.overview = Some((80, 80));
+    let bytes = rustgis_data::raster::geotiff::write(&over, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "over", rustgis_map::RasterLayer::from_bytes(over, "over.tif", bytes)).unwrap();
+    let mark = s.notice_mark();
+    s.run("raster.rasterize", &json!({"layer": "soils", "field": "unit", "grid": "over", "name": "on over"})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|n| n == "over: the grid is its 20 × 20 overview's, of the 80 × 80 raster"), "{said:?}");
+
+    // Refused before anything is made.
+    let bad = [
+        json!({"cellSize": 1}),
+        json!({"layer": "dem", "cellSize": 1}),
+        json!({"layer": "Cities", "cellSize": 1}),
+        json!({"layer": "soils", "field": "unit", "value": 3, "cellSize": 1}),
+        json!({"layer": "soils", "field": "nope", "cellSize": 1}),
+        json!({"layer": "soils", "field": 5, "cellSize": 1}),
+        json!({"layer": "soils", "value": "x", "cellSize": 1}),
+        json!({"layer": "soils", "value": 1e300, "cellSize": 1}),
+        json!({"layer": "soils", "nodata": "x", "cellSize": 1}),
+        json!({"layer": "soils", "nodata": 1, "cellSize": 1}),
+        json!({"layer": "soils", "field": "code", "nodata": 7, "cellSize": 1}),
+        json!({"layer": "soils"}),
+        json!({"layer": "soils", "grid": "dem merc", "cellSize": 1}),
+        json!({"layer": "soils", "grid": "Countries"}),
+        json!({"layer": "soils", "cellSize": -1}),
+        json!({"layer": "soils", "cellSize": 1e-9}),
+        json!({"layer": "soils", "cellSize": 1, "extent": 5}),
+        json!({"layer": "soils", "cellSize": 1, "path": "out.png"}),
+        // No cell centre falls in any polygon.
+        json!({"layer": "soils", "cellSize": 1, "extent": [-30.0, -30.0, -29.0, -29.0]}),
+    ];
+    let (layers, tables) = (s.map().layers.len(), s.project.tables.len());
+    for p in bad {
+        assert!(s.run("raster.rasterize", &p).is_err(), "{p}");
+    }
+    assert_eq!((s.map().layers.len(), s.project.tables.len()), (layers, tables), "nothing added by a refused run");
+    let e = s.run("raster.rasterize", &json!({"layer": "soils"})).unwrap_err();
+    assert!(e.contains("cellSize is required"), "{e}");
+    let e = s.run("raster.rasterize", &json!({"layer": "soils", "nodata": 1, "cellSize": 1})).unwrap_err();
+    assert!(e.contains("no-data value"), "{e}");
+}
+
+/// A whole number past what a pixel holds is refused with advice that applies: a numeric field can
+/// be given as text instead, one `value` can't.
+#[test]
+fn a_whole_number_past_a_pixel_is_refused_with_advice_that_applies() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_geom::Coord;
+    let mut s = world();
+    let ring = vec![Coord::new(0.0, 0.0), Coord::new(1.0, 0.0), Coord::new(1.0, 1.0), Coord::new(0.0, 1.0), Coord::new(0.0, 0.0)];
+    let mut ids = Dataset::new("ids", GeometryType::Polygon, vec![Field::new("code", FieldType::Integer)]);
+    ids.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![V::Int(20_000_001)]);
+    crate::cmd::layer::add_dataset(&mut s, ids);
+    let e = s.run("raster.rasterize", &json!({"layer": "ids", "value": 20_000_000, "cellSize": 1})).unwrap_err();
+    assert_eq!(e, "ids: value 20000000 is more than a raster's pixels hold exactly (16777216)");
+    let e = s.run("raster.rasterize", &json!({"layer": "ids", "field": "code", "cellSize": 1})).unwrap_err();
+    assert_eq!(e, "ids: code 20000001 is more than a raster's pixels hold exactly (16777216); a text field gives codes instead");
+}
+
+/// A text field with more codes than the result lists: the first 256 there, all of them in the
+/// table, `classCount` saying how many, and too many to draw with unique values.
+#[test]
+fn a_text_fields_codes_past_those_listed_are_all_in_its_table() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_geom::Coord;
+    let mut s = world();
+    let mut many = Dataset::new("many", GeometryType::Polygon, vec![Field::new("unit", FieldType::Text)]);
+    for i in 0..257 {
+        let (x0, x1) = (f64::from(i) * 0.1, f64::from(i + 1) * 0.1);
+        let ring = vec![Coord::new(x0, 0.0), Coord::new(x1, 0.0), Coord::new(x1, 0.1), Coord::new(x0, 0.1), Coord::new(x0, 0.0)];
+        many.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![V::Text(format!("u{i:03}"))]);
+    }
+    crate::cmd::layer::add_dataset(&mut s, many);
+    let v = s.run("raster.rasterize", &json!({"layer": "many", "field": "unit", "cellSize": 0.1})).unwrap();
+    assert_eq!(
+        (v["classCount"].as_u64(), v["classes"].as_array().map(Vec::len), v["dataType"].as_str()),
+        (Some(257), Some(256), Some("UInt16"))
+    );
+    assert_eq!(v["classes"][255], json!({"code": 256, "value": "u255"}));
+    let name = v["classTable"].as_str().unwrap();
+    let table = s.project.tables.iter().find(|t| t.name == name).expect("the codes' table");
+    assert_eq!((table.features.len(), table.value(256, 0), table.value(256, 1)), (257, &V::Int(257), &V::Text("u256".into())));
+    assert!(!matches!(
+        s.map().layer(v["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().style.renderer,
+        rustgis_map::RasterRenderer::UniqueValues { .. }
+    ));
+}
+
+/// The codes' table doesn't take the place of a table of the user's with its name.
+#[test]
+fn a_text_fields_codes_leave_a_table_of_that_name_alone() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_geom::Coord;
+    let mut s = world();
+    let mut soils = Dataset::new("soils", GeometryType::Polygon, vec![Field::new("unit", FieldType::Text)]);
+    let ring = vec![Coord::new(0.0, 0.0), Coord::new(1.0, 0.0), Coord::new(1.0, 1.0), Coord::new(0.0, 1.0), Coord::new(0.0, 0.0)];
+    soils.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![V::Text("clay".into())]);
+    crate::cmd::layer::add_dataset(&mut s, soils);
+    let v = s.run("raster.rasterize", &json!({"layer": "soils", "field": "unit", "cellSize": 1, "name": "free"})).unwrap();
+    assert_eq!(v["classTable"], "free classes", "no table has the name");
+
+    let mut mine = Dataset::new("units classes", GeometryType::None, vec![Field::new("note", FieldType::Text)]);
+    mine.push_next(None, vec![V::Text("mine".into())]);
+    let id = s.project.add_table(mine);
+    let v = s.run("raster.rasterize", &json!({"layer": "soils", "field": "unit", "cellSize": 1, "name": "units"})).unwrap();
+    assert_eq!(s.project.table(id).expect("the user's table").value(0, 0), &V::Text("mine".into()));
+    assert_eq!(v["classTable"], "units classes (2)");
+    let table = s.project.tables.iter().find(|t| t.name == "units classes (2)").expect("the codes' table");
+    assert_eq!(table.value(0, 1), &V::Text("clay".into()));
+}
+
+/// Georeferencing, projecting and rasterizing need a plugin's `files` only when given a `path`: a
+/// null one is no path, and writes no file. A place named another way still needs it.
+#[test]
+fn plugin_rasters_with_a_null_path_need_no_files() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let mut s = world();
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 0.1, pixel_height: -0.1 };
+    let r = Raster::new("dem", 10, 10, vec![vec![1.0; 100]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    let bytes = geotiff::write(&r, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "dem", rustgis_map::RasterLayer::from_bytes(r, "dem.tif", bytes)).unwrap();
+    let burn = json!({"layer": "Countries", "cellSize": 10, "name": "burned"});
+    let project = json!({"layer": "dem", "crs": 3857, "cellSize": 50_000, "name": "projected"});
+    let georeference =
+        json!({"layer": "dem", "points": [[0, 0, 1, 1], [9, 0, 2, 1], [0, 9, 1, 2]], "transform": "affine", "name": "warped"});
+    plugin("eng-null-path", &["edit"]);
+    for (op, params) in [("raster.rasterize", burn), ("raster.project", project), ("raster.georeference", georeference)] {
+        let with = |key: &str, v: Value| {
+            let mut p = params.clone();
+            p[key] = v;
+            p
+        };
+        forward(&mut s, "eng-null-path", op, with("path", Value::Null)).unwrap();
+        let name = params["name"].as_str().unwrap();
+        assert!(s.map().layer_by_name(name).is_some_and(|l| l.is_raster()), "{op}");
+        for refused in [with("path", json!("out.tif")), with("name", json!("../out"))] {
+            let e = forward(&mut s, "eng-null-path", op, refused.clone()).unwrap_err();
+            assert!(e.contains("'files' permission"), "{refused}: {e}");
+        }
+    }
+    rustgis_plugins::unload("eng-null-path");
+}
+
 /// The Analysis pane's single-pass raster tools made on another thread (#1291 step 3): each raster
 /// handed over (`ran`) is the one its command makes here, bit for bit and with what the command
 /// says of it besides, and a cancelled run is an error saying so.
@@ -27314,6 +27690,75 @@ fn raster_tools_run_on_another_thread() {
     assert!(raster_start(&mut s, "raster.classifySupervised", &none).err().unwrap().contains("at least one band"));
     // Pixels edited by hand stay immediate.
     assert!(runs_in_background("raster.editPixels").is_none());
+}
+
+/// Export Features and Export Raster written on another thread, as the app writes them (#1291
+/// step 3): the file, the answer and what the export says are those of one written here, nothing
+/// is said until it lands, and one cancelled before it starts writes nothing (a cancel in the
+/// middle of a write is the data crate's test).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn exports_run_on_another_thread() {
+    use crate::cmd::exports::{export_land, export_start, runs_in_background};
+    use rustgis_analysis::control::Control;
+    let mut s = world();
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).unwrap().name.clone();
+    let dir = std::env::temp_dir().join(format!("rustgis-exports-thread-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let at = |name: &str| dir.join(name).display().to_string();
+    for (command, file, p) in [
+        ("share.exportLayer", "countries.geojson", json!({"layer": "Countries"})),
+        ("share.exportLayer", "countries.shp", json!({"layer": "Countries"})),
+        ("share.exportLayer", "countries.gpkg", json!({"layer": "Countries", "crs": "EPSG:3857"})),
+        ("share.exportRaster", "dem.tif", json!({"layer": dem})),
+        ("share.exportRaster", "dem_cog.tif", json!({"layer": dem, "cog": true})),
+    ] {
+        assert!(runs_in_background(command).is_some(), "{command}");
+        let (here, there, cancelled) = (at(&format!("here_{file}")), at(&format!("there_{file}")), at(&format!("cancelled_{file}")));
+        let with = |path: &str| {
+            let mut q = p.clone();
+            q["path"] = json!(path);
+            q
+        };
+        let said = |s: &Session, mark: u64, path: &str| -> Vec<String> {
+            s.notices_since(mark).iter().map(|n| n.text.replace(path, "PATH")).collect()
+        };
+        let mark = s.notice_mark();
+        let answer_here = s.run(command, &with(&here)).unwrap();
+        let said_here = said(&s, mark, &here);
+        let run = export_start(&mut s, command, &with(&there)).unwrap();
+        let mark = s.notice_mark();
+        let wrote = std::thread::spawn(move || run.run(&Control::new())).join().unwrap().unwrap();
+        assert!(s.notices_since(mark).is_empty(), "{command}: nothing is said before it lands");
+        let answer_there = export_land(&mut s, wrote);
+        assert_eq!(said(&s, mark, &there), said_here, "{command} {file}");
+        // The path as it appears in JSON: on Windows its backslashes are escaped there.
+        let unpathed = |v: &Value, path: &str| {
+            let escaped = json!(path).to_string();
+            v.to_string().replace(escaped.trim_matches('"'), "PATH")
+        };
+        assert_eq!(unpathed(&answer_there, &there), unpathed(&answer_here, &here), "{command} {file}");
+        // A GeoPackage holds the time it was written: its features are compared instead.
+        if file.ends_with(".gpkg") {
+            let read = |path: &str| rustgis_data::io::read_path(std::path::Path::new(path)).unwrap().0.features.len();
+            assert_eq!(read(&there), read(&here), "{file}");
+        } else {
+            assert_eq!(std::fs::read(&there).unwrap(), std::fs::read(&here).unwrap(), "{file}");
+        }
+        let run = export_start(&mut s, command, &with(&cancelled)).unwrap();
+        let control = Control::new();
+        control.cancel();
+        assert!(run.run(&control).err().unwrap().contains("was cancelled"), "{command}");
+        assert!(!std::path::Path::new(&cancelled).exists(), "{file}: a cancelled export writes nothing");
+    }
+    // Their inputs are read when they start: a missing layer or a bad system is refused then.
+    assert!(export_start(&mut s, "share.exportLayer", &json!({"layer": "nowhere", "path": at("x.geojson")})).is_err());
+    assert!(export_start(&mut s, "share.exportLayer", &json!({"layer": "Countries", "path": at("x.gpkg"), "crs": "EPSG:nope"})).is_err());
+    assert!(export_start(&mut s, "share.exportRaster", &json!({"layer": dem, "path": at("x.tif"), "band": 99})).is_err());
+    // Map and layout exports draw the map: they still run where they're called.
+    assert!(runs_in_background("share.exportMap").is_none() && runs_in_background("layout.export").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// k-means classes and a deep learning classification made on another thread, as the Analysis pane
