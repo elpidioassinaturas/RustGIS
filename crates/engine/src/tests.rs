@@ -10432,6 +10432,13 @@ fn shapefile_by_its_shp_address() {
     assert_eq!(r["features"], 1, "{r}");
     let said = &s.notices.last().unwrap().text;
     assert!(said.contains("no .prj, .cpg found or readable beside it (2 of 3") && said.contains("longitude/latitude"), "{said}");
+    // Their 404s are expected: noted once for the server, not recorded as failed requests.
+    let records = s.diagnostics.records();
+    let failed = |r: &&rustgis_data::diagnostics::Record| {
+        r.severity == rustgis_data::diagnostics::Severity::Error && r.network.as_ref().is_some_and(|n| n.url.contains("/plain/rios."))
+    };
+    assert!(!records.iter().any(|r| failed(&r)), "{records:?}");
+    assert!(records.iter().any(|r| r.message.starts_with("expected absences are omitted")), "{records:?}");
     // With its coordinate system given, nothing is assumed of the missing .prj.
     s.run("layer.addUrl", &json!({"url": format!("{base}/plain/rios.shp"), "name": "Com crs", "crs": "EPSG:31983"})).unwrap();
     let said = &s.notices.last().unwrap().text;

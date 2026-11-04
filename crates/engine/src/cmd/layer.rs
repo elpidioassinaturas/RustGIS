@@ -3001,12 +3001,12 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // Errors name the address without its keys; those about the address itself name it already.
+        // Errors name the address without its keys, and any address they quote (a redirect's)
+        // without its keys too; those about the address itself name it already.
         let shown = crate::sources::redact(url);
-        let named = |e: String| match e.strip_prefix(url) {
-            Some(rest) => format!("{shown}{rest}"),
-            None if e.starts_with(&shown) => e,
-            None => format!("{shown}: {e}"),
+        let named = |e: String| match e.strip_prefix(url).or_else(|| e.strip_prefix(shown.as_str())) {
+            Some(rest) => format!("{shown}{}", crate::sources::redact_text(rest)),
+            None => format!("{shown}: {}", crate::sources::redact_text(&e)),
         };
         // An address without a file name may be a GeoTIFF too: its first bytes are read to see,
         // and anything that doesn't answer as one is downloaded whole, as before.
@@ -3046,6 +3046,16 @@ fn part_not_there(ext: &str, url: &str, e: &str) -> bool {
             Some(403) => !keyed(url),
             _ => false,
         }
+}
+
+/// The statuses a Shapefile's part answers when it isn't there ([`part_not_there`]): expected, so
+/// they are noted once per server rather than recorded as failed requests.
+fn part_absences(ext: &str, url: &str) -> &'static [u16] {
+    match ext {
+        "dbf" => &[],
+        _ if keyed(url) => &[404, 410],
+        _ => &[404, 410, 403],
+    }
 }
 
 /// Whether an address is read with keys: one whose query holds a key, token or signature (what
@@ -3159,11 +3169,11 @@ fn download_shapefile_blocking(url: &str) -> Result<Vec<u8>, String> {
     let until = std::time::Instant::now() + cache::BLOCKING_TIMEOUT;
     // Past it, a part isn't asked for at all (a zero timeout may mean none), and a timeout says
     // where a large file goes instead.
-    let within = |u: &str, max: usize| match until.saturating_duration_since(std::time::Instant::now()) {
+    let within = |u: &str, max: usize, omit: &'static [u16]| match until.saturating_duration_since(std::time::Instant::now()) {
         w if w.is_zero() => Err(cache::large_file_hint("timed out".into())),
-        w => cache::download_blocking_within(u, max, w).map_err(cache::large_file_hint),
+        w => cache::download_blocking_omitting_within(u, max, w, omit).map_err(cache::large_file_hint),
     };
-    let shp = within(url, cache::MAX_DOWNLOAD).map_err(|e| part_failed(url, e))?;
+    let shp = within(url, cache::MAX_DOWNLOAD, &[]).map_err(|e| part_failed(url, e))?;
     // Already zipped (a server answering the address with its parts): read as it is.
     if is_zip(&shp) {
         return Ok(shp);
@@ -3175,7 +3185,7 @@ fn download_shapefile_blocking(url: &str) -> Result<Vec<u8>, String> {
     let mut left = cache::MAX_DOWNLOAD.saturating_sub(shp.len());
     let mut got = Vec::new();
     for (ext, u) in parts {
-        match within(&u, left).and_then(|b| page_part(ext, b)) {
+        match within(&u, left, part_absences(ext, &u)).and_then(|b| page_part(ext, b)) {
             Ok(None) => {}
             Ok(Some(b)) => {
                 left = left.saturating_sub(b.len());
@@ -3247,9 +3257,10 @@ fn download_parts(
         return;
     };
     let next = url.clone();
-    crate::render::rustgis_tiles::cache::download_limited(
+    crate::render::rustgis_tiles::cache::download_limited_omitting(
         &next,
         left,
+        part_absences(ext, &url),
         Box::new(move |r| match r.and_then(|b| page_part(ext, b)) {
             Ok(None) => download_parts(name, shp, parts, got, left, done),
             Ok(Some(b)) => {
