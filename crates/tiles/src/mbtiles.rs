@@ -223,10 +223,22 @@ pub fn info_ready(archive: &str, timeout: Duration) -> Result<Option<Arc<Info>>,
     }
 }
 
+/// The file an archive address names.
+#[cfg(not(target_arch = "wasm32"))]
+fn file_of(archive: &str) -> &std::path::Path {
+    std::path::Path::new(archive.strip_prefix("file://").unwrap_or(archive))
+}
+
+/// Closes the connections kept to files none of `archives` names, so another program can move or
+/// delete a file once no layer reads it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn close_unused<'a>(archives: impl Iterator<Item = &'a str> + Clone) {
+    rustgis_data::mbtiles::close_unless(|file| archives.clone().any(|archive| file_of(archive) == file));
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn read_info(archive: &str) -> Result<Arc<Info>, String> {
-    let path = std::path::Path::new(archive.strip_prefix("file://").unwrap_or(archive));
-    rustgis_data::mbtiles::open_path(path).map(Arc::new)
+    rustgis_data::mbtiles::open_path(file_of(archive)).map(Arc::new)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -271,8 +283,7 @@ pub(crate) fn fetch(url: &str, done: Done) {
 pub(crate) fn read_local(url: &str) -> Result<Vec<u8>, String> {
     let (z, x, y, archive) = parse_url(url).ok_or_else(|| format!("{url}: not an MBTiles tile address"))?;
     check(archive)?;
-    let path = std::path::Path::new(archive.strip_prefix("file://").unwrap_or(archive));
-    Ok(rustgis_data::mbtiles::tile_path(path, z, x, y)?.unwrap_or_default())
+    Ok(rustgis_data::mbtiles::tile_path(file_of(archive), z, x, y)?.unwrap_or_default())
 }
 
 #[cfg(test)]

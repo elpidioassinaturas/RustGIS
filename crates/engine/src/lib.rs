@@ -1125,6 +1125,16 @@ impl Session {
             let joins = self.merge.is_some() && self.merge == self.merged && !self.undo.is_empty();
             let (at, start) = (project_log::now_ms(), web_time::Instant::now());
             let res = self.run_command(id, params);
+            // Whichever command took its last layer away (removed, undone, the project closed).
+            #[cfg(not(target_arch = "wasm32"))]
+            render::rustgis_tiles::mbtiles::close_unused(
+                self.project
+                    .maps
+                    .iter()
+                    .flat_map(|m| &m.tiles)
+                    .filter(|t| t.kind == rustgis_map::TileKind::MbTiles)
+                    .filter_map(|t| t.archive_file()),
+            );
             // A plugin's command waiting for its fetches answers `pending` and runs again when they
             // land: logged then, once. (Another command's `pending`, a download the web app makes, is
             // logged as it is asked for: nothing runs it again.)

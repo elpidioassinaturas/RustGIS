@@ -25703,6 +25703,37 @@ fn geolibre_tile_sources_keep_visibility_opacity_and_order() {
     assert_eq!(s.map().tiles[3].name, "xyz");
 }
 
+/// A file is let go of with its last layer, however that went (Windows won't move or delete a file
+/// SQLite has open), and one still on a map keeps its connections for the next tile.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn mbtiles_files_are_let_go_of_with_their_last_layer() {
+    use rustgis_data::mbtiles::{is_open, tile_path};
+    let path = std::env::temp_dir().join(format!("rustgis-mbtiles-release-{}.mbtiles", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE metadata(name TEXT,value TEXT); CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB); INSERT INTO metadata VALUES('format','png'),('minzoom','0'),('maxzoom','0'); INSERT INTO tiles VALUES(0,0,0,x'00');").unwrap();
+    drop(db);
+    let mut s = Session::new(Project::default());
+    s.run("map.addTiles", &json!({"url": path.display().to_string(), "kind": "mbtiles"})).unwrap();
+    // Another test's command can close it in between, so a tile is read until one command leaves it.
+    let stays_open = |s: &mut Session| {
+        (0..100).any(|_| {
+            tile_path(&path, 0, 0, 0).unwrap();
+            s.run("map.graticule", &json!({})).unwrap();
+            is_open(&path)
+        })
+    };
+    assert!(stays_open(&mut s), "a layer on the map keeps its connections");
+    s.run("map.removeTiles", &json!({})).unwrap();
+    assert!(!is_open(&path), "the layer removed");
+    s.run("edit.undo", &json!({})).unwrap();
+    assert!(stays_open(&mut s), "the layer back");
+    s.run("project.new", &json!({})).unwrap();
+    assert!(!is_open(&path), "the project closed");
+    std::fs::remove_file(&path).unwrap();
+}
+
 /// Sources authored by this test exercise the dispatch for every supported local data kind.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
