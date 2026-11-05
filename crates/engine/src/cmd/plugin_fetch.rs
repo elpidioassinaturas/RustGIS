@@ -437,6 +437,13 @@ impl UrlWaits {
         self.in_flight.iter().find(|(_, q, _)| same_request(q, asked)).map(|(n, ..)| *n).or(made)
     }
 
+    /// Whether what request `n` added once it landed is no longer in the project.
+    pub(crate) fn taken_away(&self, n: u64, maps: &[crate::map::Map]) -> bool {
+        self.landed.iter().any(|(m, _, _, added)| {
+            *m == n && added.added_any() && maps.iter().find(|map| map.instance_id() == added.map).is_none_or(|map| added.gone(map))
+        })
+    }
+
     /// Whether a front end's `params` (a `layer.addUrl` or `layer.addDownload` carrying number
     /// `n`) are what request `n` asked for: the same address. A number given with another address
     /// matches nothing, so no caller can land another command's wait.
@@ -938,6 +945,30 @@ mod tests {
         assert!(s.download_landed_read(id, read, rustgis_data::ReadReport::default()));
         s.run("layer.addDownload", &json!({"id": id, "url": url, "request": 900})).unwrap_err();
         assert!(s.landed_reads.is_empty(), "its read goes");
+    }
+
+    /// A download made while a command still waits is that one when asked for again, until what it
+    /// added is taken away: then a request made since is a new download, not that error (#1202).
+    #[test]
+    fn a_download_taken_away_is_downloaded_again() {
+        let mut s = Session::new(crate::sample::world_project());
+        let asked = json!({"url": "https://x.org/a.geojson"});
+        let ask = |s: &mut Session| {
+            s.call_requests = Some(Vec::new());
+            s.request_url(&asked).unwrap();
+            s.call_requests.take().unwrap()[0].0
+        };
+        let id = s.map().layers[0].id;
+        s.url_waits.wait(900, asked.clone());
+        let answer: CmdResult = Ok(json!({"layer": id}));
+        let added = Added::of(s.map(), &answer);
+        s.url_waits.land(900, answer, added);
+        assert_eq!(ask(&mut s), 900, "still there");
+        assert!(s.take_url_requests().is_empty());
+        s.map_mut().layers.retain(|l| l.id != id);
+        let again = ask(&mut s);
+        assert_ne!(again, 900, "taken away");
+        assert_eq!(s.take_url_requests(), [json!({"url": "https://x.org/a.geojson", "request": again})]);
     }
 
     /// A download that failed is asked for again as a new download, not answered as the one

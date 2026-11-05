@@ -1112,8 +1112,9 @@ impl Session {
     /// Each request has a number (`"request"` in what the front end takes), which it hands on to
     /// the command that adds the download; a plugin command waiting for it runs again with what
     /// that command answered (#1202). A plugin command's call asking again for a download a
-    /// command waits for (clicked twice) is that one, not a second download; from anywhere else,
-    /// a request made again once taken is another download, as Add Data From URL's is.
+    /// command waits for (clicked twice) is that one, not a second download, while what it added
+    /// is still there; from anywhere else, a request made again once taken is another download, as
+    /// Add Data From URL's is.
     pub fn request_url(&mut self, p: &serde_json::Value) -> Result<serde_json::Value, String> {
         if !p.is_object() {
             return Err("a download is asked for by an object: its \"url\" and how to read it".into());
@@ -1126,7 +1127,11 @@ impl Session {
         // can get. (One given up comes here only from inside another command: a front end's is
         // refused in `run`.)
         let given = p.get("request").and_then(serde_json::Value::as_u64).filter(|n| self.url_waits.holds(*n, &asked));
-        let made = self.call_requests.as_ref().and_then(|_| self.url_waits.in_flight(&asked));
+        let made = self
+            .call_requests
+            .as_ref()
+            .and_then(|_| self.url_waits.in_flight(&asked))
+            .filter(|n| !self.url_waits.taken_away(*n, &self.project.maps));
         let number = match given.or(waiting).or(made) {
             Some(n) => n,
             None => {
