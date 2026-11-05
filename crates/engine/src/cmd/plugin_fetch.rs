@@ -675,9 +675,18 @@ impl Session {
             return Vec::new();
         }
         // Said here too: the command may go on without it, and what it answers goes nowhere.
-        for url in self.url_waits.expire() {
-            let minutes = REQUEST_WAIT.as_secs() / 60;
-            self.notify(format!("{url}: no download in {minutes} minutes, so its plugin command stopped waiting for it"), true);
+        let minutes = REQUEST_WAIT.as_secs() / 60;
+        match self.url_waits.expire().as_slice() {
+            [] => {}
+            [url] => self.notify(format!("{url}: no download in {minutes} minutes, so its plugin command stopped waiting for it"), true),
+            many => self.notify(
+                format!(
+                    "{} downloads gave nothing in {minutes} minutes, so their plugin commands stopped waiting for them: {}",
+                    many.len(),
+                    many.join(", ")
+                ),
+                true,
+            ),
         }
         let (ready, waiting): (Vec<Retry>, Vec<Retry>) = std::mem::take(&mut self.plugin_retries).into_iter().partition(|r| {
             let c = cache();
@@ -816,8 +825,8 @@ mod tests {
         assert!(!asked_by(&json!({"url": u}), &json!({"url": u, "connection": "c1"})));
     }
 
-    /// A download given up after the wait is said once, with its address, whatever the command
-    /// does with its error.
+    /// Downloads given up after the wait are said once, in one notice with their addresses,
+    /// whatever the commands do with their errors; none while they still have time.
     #[test]
     fn a_download_given_up_is_said_with_its_address() {
         // Only where the clock has run that long: a machine just started can't be that far back.
@@ -825,14 +834,30 @@ mod tests {
         let mut s = Session::new(crate::project::Project::default());
         let url = "https://x.org/slow.csv?token=hunter2";
         s.retry_plugin("plugin:eng-slow/f", &json!({}), Vec::new(), vec![(900, json!({"url": url}))]).unwrap();
-        s.url_waits.in_flight[0].2 = long_ago;
         let mark = s.notice_mark();
+        s.poll_plugin_retries();
+        assert!(s.notices_since(mark).is_empty(), "it still has time");
+        s.url_waits.in_flight[0].2 = long_ago;
         s.poll_plugin_retries();
         s.poll_plugin_retries();
         let notices = s.notices_since(mark);
         let said: Vec<&str> = notices.iter().filter(|n| n.error && n.text.contains("stopped waiting")).map(|n| n.text.as_str()).collect();
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(said[0].starts_with("https://x.org/slow.csv") && !said[0].contains("hunter2"), "{said:?}");
+        // Several at once: one notice, with how many and which.
+        let others = vec![(901, json!({"url": "https://x.org/a.csv?token=hunter2"})), (902, json!({"url": "https://x.org/b.csv"}))];
+        s.retry_plugin("plugin:eng-slow/g", &json!({}), Vec::new(), others).unwrap();
+        s.url_waits.in_flight.iter_mut().for_each(|w| w.2 = long_ago);
+        let mark = s.notice_mark();
+        s.poll_plugin_retries();
+        let notices = s.notices_since(mark);
+        let said: Vec<&str> = notices.iter().filter(|n| n.error && n.text.contains("stopped waiting")).map(|n| n.text.as_str()).collect();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].starts_with("2 downloads") && said[0].contains("https://x.org/a.csv") && said[0].contains("https://x.org/b.csv"),
+            "{said:?}"
+        );
+        assert!(!said[0].contains("hunter2"), "{said:?}");
     }
 
     /// A waiting command's answer names what it waits for, without the addresses' keys.
