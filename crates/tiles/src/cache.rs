@@ -483,13 +483,18 @@ impl Drop for Answer {
 }
 
 /// Keeps what a fetch begun at `started` answered. A tile of an MBTiles file forgotten since may be
-/// of the old file, so it goes as if never answered; a read asked for after that has its own answer.
+/// of the old file, so it is dropped. Its slot went with the forget: one there now is a newer read's.
 fn land(key: &str, entry: Option<Entry>, started: u64) {
-    match entry.filter(|_| !crate::mbtiles::forgotten_since(key, started)) {
-        Some(entry) => store(key, entry),
+    // Under the lock [`forget`] takes after recording the file: if that hasn't been recorded yet,
+    // what is stored here goes with the slots it removes next.
+    let mut c = lock();
+    if crate::mbtiles::forgotten_since(key, started) {
+        return;
+    }
+    match entry {
+        Some(entry) => keep(&mut c, key, entry),
         // Never answered (or dropped by the fetcher): forgotten, fetched again when asked for.
         None => {
-            let mut c = lock();
             if matches!(c.slots.get(key), Some(Slot { entry: Entry::Pending, .. })) {
                 c.slots.remove(key);
             }
@@ -1040,7 +1045,11 @@ fn finished() {
 }
 
 fn store(url: &str, entry: Entry) {
-    let mut c = lock();
+    keep(&mut lock(), url, entry);
+}
+
+/// [`store`], holding the cache's lock.
+fn keep(c: &mut Cache, url: &str, entry: Entry) {
     let added = if let Entry::Ready(_, n) = &entry { *n } else { 0 };
     // Dropped while it was fetched (cleared, or evicted): kept anyway, it was asked for.
     let tick = c.tick;
@@ -1051,7 +1060,7 @@ fn store(url: &str, entry: Entry) {
     }
     c.bytes += added;
     if c.bytes > BUDGET {
-        evict(&mut c);
+        evict(c);
     }
 }
 
@@ -1795,7 +1804,9 @@ mod tests {
         let new = crate::mbtiles::epoch();
         lock().slots.insert(key.clone(), Slot { entry: Entry::Pending, used: 0, asked: Instant::now() });
         land(&key, failed("old file"), old);
-        assert_eq!(kept(), None);
+        assert!(matches!(lock().slots.get(&key), Some(Slot { entry: Entry::Pending, .. })), "the new read's slot stays");
+        land(&key, None, old);
+        assert!(matches!(lock().slots.get(&key), Some(Slot { entry: Entry::Pending, .. })), "also if the old read went unanswered");
         land(&key, failed("new file"), new);
         assert_eq!(kept().as_deref(), Some("new file"));
         forget(archive);

@@ -26,8 +26,6 @@ const RETRY: Duration = Duration::from_secs(60);
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 /// The epoch of the last clear of every file's metadata.
 static CLEARED: AtomicU64 = AtomicU64::new(0);
-/// Files forgotten one at a time ([`forget_archive`]) kept at most, each with its epoch.
-const MAX_FORGOTTEN: usize = 64;
 /// A pending OS read stops being presented as normal loading after this long.
 #[cfg(not(target_arch = "wasm32"))]
 const READ_DEADLINE: Duration = Duration::from_secs(30);
@@ -101,7 +99,9 @@ fn infos() -> &'static Mutex<HashMap<String, Result<Arc<Info>, (String, Instant)
     I.get_or_init(Mutex::default)
 }
 
-/// When each file was last forgotten by itself. Taken after [`infos`] where both are held.
+/// When each file was last forgotten by itself. Taken after [`infos`] and the cache's lock where
+/// they are held. Kept for good: a read under way may be of any of them, and a path and a number
+/// per file whose last layer went is little.
 fn forgotten() -> &'static Mutex<HashMap<String, u64>> {
     static F: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
     F.get_or_init(Mutex::default)
@@ -138,14 +138,7 @@ pub(crate) fn forget_archive(archive: &str) {
     }
     let mut all = infos().lock().unwrap_or_else(|e| e.into_inner());
     let epoch = EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
-    let mut gone = forgotten().lock().unwrap_or_else(|e| e.into_inner());
-    if gone.len() >= MAX_FORGOTTEN {
-        // Too many to tell apart: reads under way of any file are read again, as after a clear.
-        gone.clear();
-        CLEARED.store(epoch, Ordering::SeqCst);
-    }
-    gone.insert(archive.to_string(), epoch);
-    drop(gone);
+    forgotten().lock().unwrap_or_else(|e| e.into_inner()).insert(archive.to_string(), epoch);
     all.remove(archive);
     drop(all);
     crate::source::forget();
