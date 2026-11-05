@@ -22,7 +22,7 @@ pub const UPLOAD: &str = "upload:";
 const MAX_UPLOADS: usize = 16;
 /// A file that couldn't be read is tried again after this long.
 const RETRY: Duration = Duration::from_secs(60);
-/// Counts metadata clears, so a completion can tell whether one happened since it started.
+/// Counts clears and per-file forgets, so a completion can tell whether one happened since it started.
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 /// The epoch of the last clear of every file's metadata.
 static CLEARED: AtomicU64 = AtomicU64::new(0);
@@ -153,7 +153,7 @@ pub(crate) fn forget_archive(archive: &str) {
     let mut all = infos().lock().unwrap_or_else(|e| e.into_inner());
     let epoch = EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
     let mut gone = forgotten().lock().unwrap_or_else(|e| e.into_inner());
-    if gone.len() >= MAX_FORGOTTEN {
+    if gone.len() >= MAX_FORGOTTEN && !gone.contains_key(archive) {
         gone.clear();
         EMPTIED.store(epoch, Ordering::SeqCst);
         CLEARED.store(epoch, Ordering::SeqCst);
