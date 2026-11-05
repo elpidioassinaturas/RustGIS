@@ -107,7 +107,7 @@ fn forgotten() -> &'static Mutex<HashMap<String, u64>> {
     F.get_or_init(Mutex::default)
 }
 
-/// The epoch a read beginning now began at, for [`forgotten_since`].
+/// The epoch now, to tell later whether a file was forgotten since ([`forgotten_since`]).
 pub(crate) fn epoch() -> u64 {
     EPOCH.load(Ordering::SeqCst)
 }

@@ -239,9 +239,10 @@ fn request(url: &str, want: Want, omit: &'static [u16]) -> State {
             }
         };
     }
+    let asked_at = crate::mbtiles::epoch();
     c.slots.insert(url.to_string(), Slot { entry: Entry::Pending, used: tick, asked: now });
     drop(c);
-    start(url.to_string(), want, omit);
+    start(url.to_string(), want, omit, asked_at);
     State::Pending
 }
 
@@ -378,7 +379,7 @@ pub fn wait_for_news_unless(since: u64, timeout: Duration, stop: impl Fn() -> bo
 }
 
 /// A waiting fetch: what to decode it as, whose diagnostics it goes to, and its expected statuses.
-type Job = (Want, Capture, &'static [u16]);
+type Job = (Want, Capture, &'static [u16], u64);
 
 fn queue() -> &'static Mutex<Queue<Job>> {
     static Q: OnceLock<Mutex<Queue<Job>>> = OnceLock::new();
@@ -386,7 +387,7 @@ fn queue() -> &'static Mutex<Queue<Job>> {
 }
 
 /// Asks for a tile: fetched now when its server has room, else it waits its turn.
-fn start(url: String, want: Want, omit: &'static [u16]) {
+fn start(url: String, want: Want, omit: &'static [u16], asked_at: u64) {
     let capture = Capture::current();
     IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
     let mut swept = Vec::new();
@@ -394,7 +395,7 @@ fn start(url: String, want: Want, omit: &'static [u16]) {
         let mut q = queue().lock().unwrap_or_else(|e| e.into_inner());
         let mut c = lock();
         let latest = c.latest.unwrap_or_else(Instant::now);
-        let now = q.push(url, (want, capture, omit), |u| c.slots.get(u).map(|s| s.asked), latest, &mut swept);
+        let now = q.push(url, (want, capture, omit, asked_at), |u| c.slots.get(u).map(|s| s.asked), latest, &mut swept);
         // Under the same lock as the choice: a tile asked for again meanwhile isn't forgotten.
         forget_dropped(&mut c, &swept);
         now
@@ -453,9 +454,9 @@ fn launch(jobs: Vec<Waiting<Job>>) {
             }
             let _lower = Lower;
             while let Some(w) = pop() {
-                let (want, capture, omit) = w.job;
+                let (want, capture, omit, asked_at) = w.job;
                 let _scope = capture.enter();
-                fetch_tile(w.url, w.host, want, omit);
+                fetch_tile(w.url, w.host, want, omit, asked_at);
             }
         }
         // A tile queued after the last `pop` and before the flag went down is started here.
@@ -472,8 +473,8 @@ struct Answer {
     key: String,
     host: String,
     entry: Option<Entry>,
-    /// When the fetch began, for an MBTiles file forgotten since ([`land`]).
-    started: u64,
+    /// When the tile was asked for, for an MBTiles file forgotten since ([`land`]).
+    asked_at: u64,
 }
 
 impl Answer {
@@ -485,22 +486,22 @@ impl Answer {
 
 impl Drop for Answer {
     fn drop(&mut self) {
-        land(&self.key, self.entry.take(), self.started);
+        land(&self.key, self.entry.take(), self.asked_at);
         release(&self.host);
         finished();
     }
 }
 
-/// Keeps what a fetch begun at `started` answered. A tile of an MBTiles file forgotten since may be
+/// Keeps what a fetch asked for at `asked_at` answered. A tile of an MBTiles file forgotten since may be
 /// of the old file, so it is dropped. Its slot went with the forget: one there now is a newer read's.
-fn land(key: &str, entry: Option<Entry>, started: u64) {
+fn land(key: &str, entry: Option<Entry>, asked_at: u64) {
     if entry.is_some() && login_gone(key) {
         return;
     }
     // Under the lock [`forget`] takes after recording the file: if that hasn't been recorded yet,
     // what is stored here goes with the slots it removes next.
     let mut c = lock();
-    if crate::mbtiles::forgotten_since(key, started) {
+    if crate::mbtiles::forgotten_since(key, asked_at) {
         return;
     }
     match entry {
@@ -514,8 +515,8 @@ fn land(key: &str, entry: Option<Entry>, started: u64) {
     }
 }
 
-fn fetch_tile(url: String, host: String, want: Want, omit: &'static [u16]) {
-    let answer = Answer { key: url.clone(), host, entry: None, started: crate::mbtiles::epoch() };
+fn fetch_tile(url: String, host: String, want: Want, omit: &'static [u16], asked_at: u64) {
+    let answer = Answer { key: url.clone(), host, entry: None, asked_at };
     let done: Done = Box::new(move |bytes| {
         if matches!(&bytes, Err(e) if e == DROPPED) {
             return;
