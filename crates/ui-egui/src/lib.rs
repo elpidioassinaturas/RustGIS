@@ -2979,7 +2979,9 @@ impl RustGisApp {
                     return Ok(Value::Null);
                 }
                 let url = address;
-                let mut q = json!({});
+                // With its address, as the request it may answer has: what fails or lands later is
+                // matched to the plugin command waiting for it by this (#1202).
+                let mut q = json!({"url": url});
                 for k in ["name", "layer", "crs", "connection"] {
                     if let Some(v) = p.get(k).filter(|v| v.as_str().is_some_and(|s| !s.trim().is_empty())) {
                         q[k] = v.clone();

@@ -652,6 +652,40 @@ mod tests {
         plugins::unload("ui-late-said");
     }
 
+    /// A download that fails answers the command waiting for it at once, not when the wait runs
+    /// out, from what the app keeps of the request: a file read whole, and a service's page (#1202).
+    #[test]
+    fn a_failed_download_answers_the_command_waiting_at_once() {
+        use rustgis_engine::plugins;
+        use rustgis_engine::render::rustgis_tiles::cache;
+        let _turn = crate::fetching::turn();
+        cache::set_fetcher(|_, done| done(Err("404 Not Found".into())));
+        let pkg = plugins::Package::from_zip(&plugins::testing::package("ui-fail", &["edit", "network"])).unwrap();
+        plugins::load(pkg, "test").unwrap();
+        for params in [json!({"url": "https://x.org/a.csv"}), json!({"url": "https://x.org/collections/a/items", "service": true})] {
+            let mut app = RustGisApp::with_sample();
+            app.run("plugin:ui-fail/f", json!({"op": "layer.addUrl", "params": params})).unwrap();
+            let taken = app.session.take_url_requests();
+            assert_eq!(taken.len(), 1, "{taken:?}");
+            app.run("ui.addUrl", taken[0].clone()).unwrap();
+            let ctx = egui::Context::default();
+            let mut ran = Vec::new();
+            for _ in 0..400 {
+                app.poll_data_downloads();
+                crate::serviceui::poll_pages(&mut app, &ctx);
+                ran = app.session.poll_plugin_retries();
+                if !ran.is_empty() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(ran.len(), 1, "{params}: {ran:?}");
+            assert!(ran[0].1.as_ref().is_err_and(|e| e.contains("404")), "{params}: {ran:?}");
+            assert!(!app.session.plugin_retries_waiting(), "{params}");
+        }
+        plugins::unload("ui-fail");
+    }
+
     /// A service's page that fails is what the plugin command that asked for it is answered, when
     /// it fails, not the wait running out (#1202).
     #[test]
