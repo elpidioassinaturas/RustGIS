@@ -101,10 +101,21 @@ fn infos() -> &'static Mutex<HashMap<String, Result<Arc<Info>, (String, Instant)
     I.get_or_init(Mutex::default)
 }
 
-/// When each file was last forgotten by itself. Taken while holding [`infos`].
+/// When each file was last forgotten by itself. Taken after [`infos`] where both are held.
 fn forgotten() -> &'static Mutex<HashMap<String, u64>> {
     static F: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
     F.get_or_init(Mutex::default)
+}
+
+/// The epoch a read beginning now began at, for [`forgotten_since`].
+pub(crate) fn epoch() -> u64 {
+    EPOCH.load(Ordering::SeqCst)
+}
+
+/// Whether a tile address is of a file forgotten after `epoch`.
+pub(crate) fn forgotten_since(url: &str, epoch: u64) -> bool {
+    parse_url(url)
+        .is_some_and(|(_, _, _, archive)| forgotten().lock().unwrap_or_else(|e| e.into_inner()).get(archive).is_some_and(|at| *at > epoch))
 }
 
 /// Forgets the files' metadata (with the tile cache), so they are read again.
@@ -112,16 +123,15 @@ pub(crate) fn forget() {
     let mut all = infos().lock().unwrap_or_else(|e| e.into_inner());
     CLEARED.store(EPOCH.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
     all.clear();
-    forgotten().lock().unwrap_or_else(|e| e.into_inner()).clear();
     drop(all);
     #[cfg(not(target_arch = "wasm32"))]
     rustgis_data::mbtiles::close_all();
 }
 
-/// Forgets what was read of one file (its metadata, the styles made from it and its connections),
-/// and won't keep a read of it under way: the file may be replaced next. Reads of other files are
-/// kept, as they may be framing a map. [`cache::forget`](crate::cache::forget) asks this of any
-/// address, so others are left alone.
+/// Forgets what was read of one file (its metadata and its connections) with every file's resolved
+/// styles, made again when next drawn, and won't keep a read of it under way: the file may be
+/// replaced next. Reads of other files are kept, as they may be framing a map.
+/// [`cache::forget`](crate::cache::forget) asks this of any address, so others are left alone.
 pub(crate) fn forget_archive(archive: &str) {
     if check(archive).is_err() {
         return;
@@ -354,6 +364,7 @@ mod tests {
             remember_info("/read-meanwhile.mbtiles", &Err("another file".into()), epoch);
             cached_info("/read-meanwhile.mbtiles").is_some()
         }));
+        assert!(!forgotten().lock().unwrap_or_else(|e| e.into_inner()).contains_key("https://example.com/not-an-archive"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

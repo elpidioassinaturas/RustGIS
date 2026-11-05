@@ -297,6 +297,8 @@ fn resource_of(key: &str) -> &str {
 /// MBTiles file's tiles: it is forgotten when it may be replaced, and its old tiles mustn't stay.
 pub fn forget(url: &str) {
     let url = crate::cog::split(split_download_limit(url).0).0;
+    // First: a tile answered from here on is dropped, and one answered before goes with the rest.
+    crate::mbtiles::forget_archive(url);
     let mut c = lock();
     let dropped: usize = c
         .slots
@@ -311,7 +313,6 @@ pub fn forget(url: &str) {
     c.bytes = c.bytes.saturating_sub(dropped);
     drop(c);
     crate::pmtiles::forget_archive(url);
-    crate::mbtiles::forget_archive(url);
     crate::cog::forget_file(url);
     // Map tiles made from a service's pictures, kept only while one is missing or on its way,
     // and their plans: all are made again (those kept in the cache stay till `clear`).
@@ -462,6 +463,8 @@ struct Answer {
     key: String,
     host: String,
     entry: Option<Entry>,
+    /// When the fetch began, for an MBTiles file forgotten since ([`land`]).
+    started: u64,
 }
 
 impl Answer {
@@ -473,23 +476,29 @@ impl Answer {
 
 impl Drop for Answer {
     fn drop(&mut self) {
-        match self.entry.take() {
-            Some(entry) => store(&self.key, entry),
-            // Never answered (or dropped by the fetcher): forgotten, fetched again when asked for.
-            None => {
-                let mut c = lock();
-                if matches!(c.slots.get(&self.key), Some(Slot { entry: Entry::Pending, .. })) {
-                    c.slots.remove(&self.key);
-                }
-            }
-        }
+        land(&self.key, self.entry.take(), self.started);
         release(&self.host);
         finished();
     }
 }
 
+/// Keeps what a fetch begun at `started` answered. A tile of an MBTiles file forgotten since may be
+/// of the old file, so it goes as if never answered; a read asked for after that has its own answer.
+fn land(key: &str, entry: Option<Entry>, started: u64) {
+    match entry.filter(|_| !crate::mbtiles::forgotten_since(key, started)) {
+        Some(entry) => store(key, entry),
+        // Never answered (or dropped by the fetcher): forgotten, fetched again when asked for.
+        None => {
+            let mut c = lock();
+            if matches!(c.slots.get(key), Some(Slot { entry: Entry::Pending, .. })) {
+                c.slots.remove(key);
+            }
+        }
+    }
+}
+
 fn fetch_tile(url: String, host: String, want: Want, omit: &'static [u16]) {
-    let answer = Answer { key: url.clone(), host, entry: None };
+    let answer = Answer { key: url.clone(), host, entry: None, started: crate::mbtiles::epoch() };
     let done: Done = Box::new(move |bytes| {
         if matches!(&bytes, Err(e) if e == DROPPED) {
             return;
@@ -1032,10 +1041,6 @@ fn finished() {
 
 fn store(url: &str, entry: Entry) {
     let mut c = lock();
-    // A tile of an MBTiles file forgotten while it was read ([`forget`]): of the old file, perhaps.
-    if crate::mbtiles::is_tile(url) && !c.slots.contains_key(url) {
-        return;
-    }
     let added = if let Entry::Ready(_, n) = &entry { *n } else { 0 };
     // Dropped while it was fetched (cleared, or evicted): kept anyway, it was asked for.
     let tick = c.tick;
@@ -1761,15 +1766,39 @@ mod native {
 mod tests {
     use super::*;
 
-    /// A tile still being read when its MBTiles file is forgotten isn't kept when it lands.
+    /// A tile still being read when its MBTiles file is forgotten isn't kept when it lands, even
+    /// after the same tile was asked for again and answered; a read begun since is.
     #[test]
     fn a_forgotten_mbtiles_file_drops_the_tile_being_read() {
         let archive = "/forgotten-pending.mbtiles";
         let key = crate::mbtiles::template(archive).replace("{z}", "0").replace("{x}", "0").replace("{y}", "0");
+        let failed = |why: &str| Some(Entry::Failed(why.into(), Instant::now()));
+        let kept = || match lock().slots.get(&key).map(|s| &s.entry) {
+            Some(Entry::Failed(why, _)) => Some(why.clone()),
+            _ => None,
+        };
+
+        let old = crate::mbtiles::epoch();
         lock().slots.insert(key.clone(), Slot { entry: Entry::Pending, used: 0, asked: Instant::now() });
         forget(archive);
-        store(&key, Entry::Failed("old file".into(), Instant::now()));
+        land(&key, failed("old file"), old);
+        assert_eq!(kept(), None);
         assert!(!lock().slots.contains_key(&key));
+
+        // Asked for again before the old read is over: the new read lands first, or last.
+        land(&key, failed("new file"), crate::mbtiles::epoch());
+        land(&key, failed("old file"), old);
+        assert_eq!(kept().as_deref(), Some("new file"));
+        forget(archive);
+
+        // Or the old one lands while the new one is pending: the new one's answer is what stays.
+        let new = crate::mbtiles::epoch();
+        lock().slots.insert(key.clone(), Slot { entry: Entry::Pending, used: 0, asked: Instant::now() });
+        land(&key, failed("old file"), old);
+        assert_eq!(kept(), None);
+        land(&key, failed("new file"), new);
+        assert_eq!(kept().as_deref(), Some("new file"));
+        forget(archive);
     }
 
     fn network_records(history: &rustgis_data::diagnostics::History, url: &str) -> Vec<rustgis_data::diagnostics::Record> {
