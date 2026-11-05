@@ -2924,13 +2924,13 @@ fn add_url_as_given(s: &mut Session, p: &Value) -> CmdResult {
         // Added to another map than the one shown now: the command's next steps would act on this
         // one, where the layer's id isn't it. (A failed download added nothing: its error stands.)
         if added.added_any() && added.map != s.map().instance_id() {
-            let on = s
-                .project
-                .maps
-                .iter()
-                .find(|m| m.instance_id() == added.map)
-                .map_or_else(|| "a map since taken away".to_string(), |m| format!("map '{}'", m.name));
-            return Err(format!("{url}: its download was added to {on}, not the map shown now: show that map and run the command again"));
+            return Err(match s.project.maps.iter().find(|m| m.instance_id() == added.map) {
+                Some(m) => format!(
+                    "{url}: its download was added to map '{}', not the map shown now: show that map and run the command again",
+                    m.name
+                ),
+                None => format!("{url}: its download was added to a map since taken away, not the map shown now: run the command again"),
+            });
         }
         // What it added (a layer, a tile layer) may have been undone while the command waited,
         // and a layer added since may have its id: said, not named.

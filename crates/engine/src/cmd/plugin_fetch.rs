@@ -306,8 +306,8 @@ pub(crate) struct UrlWaits {
     in_flight: Vec<(u64, Value, Instant)>,
     landed: Vec<(u64, Value, CmdResult, Added)>,
     /// Requests given up (past [`REQUEST_WAIT`], or their command replaced or dropped), with their
-    /// addresses (the latest [`MAX_EXPIRED`]): one that lands after is refused, not added with no
-    /// command left to go on with it.
+    /// addresses (about [`MAX_EXPIRED`] at most, see `remember_given_up`): one that lands after is
+    /// refused, not added with no command left to go on with it.
     expired: Vec<(u64, Value)>,
     /// Requests added, with their addresses (the latest [`MAX_EXPIRED`]): one landing again (a
     /// caller gave its number with the same address, then the app's own download came) isn't
@@ -503,7 +503,8 @@ impl UrlWaits {
     }
 
     /// Kept until its download lands (and is refused) or fails: never forgotten while it can
-    /// still land. [`MAX_EXPIRED`] bounds them by refusing new downloads instead.
+    /// still land. [`MAX_EXPIRED`] bounds them by refusing new downloads instead, so those under
+    /// way by then can still take them a little past it.
     fn remember_given_up(&mut self, n: u64, asked: Value) {
         self.expired.push((n, asked));
     }
@@ -766,6 +767,13 @@ mod tests {
         let e = s.run("layer.addUrl", &asked).unwrap_err();
         let first = s.project.maps[0].name.clone();
         assert!(e.contains(&format!("added to map '{first}', not the map shown now")), "{e}");
+        // Its map deleted meanwhile: there is no showing it.
+        let deleted = s.project.maps.remove(0);
+        s.project.active_map = 0;
+        let e = s.run("layer.addUrl", &asked).unwrap_err();
+        assert!(e.contains("added to a map since taken away") && !e.contains("show that map"), "{e}");
+        s.project.maps.insert(0, deleted);
+        s.project.active_map = 1;
         // A download that failed added nothing: its own error, whichever map is shown.
         let failed: CmdResult = Err("https://x.org/a.geojson: 404 Not Found".into());
         let landed = s.rerun_landed.clone();
