@@ -539,7 +539,16 @@ fn save_model(s: &mut Session, p: &Value) -> CmdResult {
 
 /// A model as a `*.model.json` file: written to `path`, or its text returned.
 fn export_model(s: &mut Session, p: &Value) -> CmdResult {
-    let (name, g, _) = model_graph(s, p)?;
+    let (name, mut g, _) = model_graph(s, p)?;
+    // A file outlives the session: its steps keep their addresses, not this session's logins.
+    let mut addresses = Vec::new();
+    for node in &mut g.nodes {
+        crate::project::recorded_addresses(&mut node.params, &mut addresses);
+        if let Some(layer) = &mut node.layer {
+            addresses.push(layer);
+        }
+    }
+    crate::project::clear_login_bindings(addresses);
     let text = serde_json::to_string_pretty(&crate::model::to_file(&name, &g)).map_err(|e| e.to_string())?;
     let file: String = name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
     match ps(p, "path") {
@@ -627,10 +636,19 @@ pub(crate) fn run_script(s: &mut Session, p: &Value) -> CmdResult {
         if let Some(e) = s.streamed_edit(&id, mutates, label, s.active_layer) {
             return Err(format!("line {n}: {e}"));
         }
-        let r = run(s, &params).map_err(|e| format!("line {n}: {id}: {e}"))?;
+        let r = steps_of(s, |s| run(s, &params)).map_err(|e| format!("line {n}: {id}: {e}"))?;
         out.push(json!({"line": n, "command": id, "result": r}));
     }
     Ok(json!({"ran": out}))
+}
+
+/// `run` as a step of the command running now ([`Session::steps_running`] counts it, on every
+/// path, a panic included, which is raised again).
+pub(crate) fn steps_of<T>(s: &mut Session, run: impl FnOnce(&mut Session) -> T) -> T {
+    s.steps_running += 1;
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(s)));
+    s.steps_running = s.steps_running.saturating_sub(1);
+    r.unwrap_or_else(|p| std::panic::resume_unwind(p))
 }
 
 /// The most lines a script is read to: Run reads no further, and the Script pane colours no further.

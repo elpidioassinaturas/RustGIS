@@ -152,6 +152,7 @@ Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available too
 | Feature Envelope To Polygon | `featureEnvelopeToPolygon` | Data Management › Features |
 | Unsplit Line | `unsplitLine` | Data Management › Features |
 | Check Geometry | `checkGeometry` | Data Management › Features |
+| Repair Geometry | `repairGeometry` | Data Management › Features |
 | XY Table To Point | `xyTableToPoint` | Data Management › Features |
 | Calculate Geometry Attributes | `calculateGeometry` | Data Management › Features |
 | Simplify | `simplify` | Cartography › Generalization |
@@ -888,6 +889,83 @@ of their rings or parts already have problems of their own. Rings and parts that
 gp.run={"tool":"checkGeometry","params":{"input":"Parcels"}}
 ```
 
+### Repairing geometry
+
+**Repair Geometry** (`repairGeometry`) writes every feature to a new layer, `<input>_repaired`
+unless you name it, with its geometry made valid by the rules Check Geometry checks. Only the
+selected features are processed when some are selected. Each output row keeps its feature id,
+fields, attributes and CRS, and adds a text field `repairs`: the codes of what was repaired,
+separated by `, ` and in the order of the table above, or empty for a feature that needed
+nothing. Features with nothing wrong are copied exactly as stored. If the input already has a
+`repairs` field, the new one gets the next free name (`repairs_2`) and the tool says so.
+
+How each problem is repaired:
+
+- `ring_not_closed`: the ring is closed with its first point. `repeated_vertex`: the repeats are
+  dropped. `too_few_points`: the ring or line part is dropped; an exterior ring takes its part's
+  holes with it, and a polygon part without rings is dropped too. These fixes move no coordinate:
+  a feature with only these problems keeps every other vertex exactly.
+- `self_intersection`, `hole_outside_shell`, `rings_intersect`, `disconnected_interior` and
+  `parts_overlap`: the polygon is rebuilt from its area, as the "structure" method of make-valid
+  tools does. Each ring stands for the area it winds around, so a bowtie keeps both of its
+  triangles and the direction rings are wound in doesn't matter: GeoJSON and Shapefiles, which
+  wind them in opposite directions, give the same result. Each part is its exterior ring's area
+  less the union of its holes' areas, and the feature is the union of its parts. So overlapping
+  parts merge into one, overlapping holes merge, a hole outside its exterior ring disappears (what
+  of a hole lies inside it stays a hole), and an interior cut into pieces by rings touching at
+  points becomes one part per piece. A stretch of ring that runs back over itself, with no area,
+  is left out. Rebuilt exterior rings wind counter-clockwise, holes clockwise.
+- Lines may cross themselves, so only their repeated vertices and their parts with fewer than 2
+  distinct points are repaired. Points have nothing to repair but non-finite coordinates.
+
+When a ring of a part crosses itself, Check Geometry doesn't check that part against its other
+rings or the other parts; Repair Geometry checks the feature again after the fixes that move no
+coordinate, and adds `hole_outside_shell`, `rings_intersect` and `parts_overlap` when the rebuild
+finds a hole outside, merges holes or merges parts.
+
+The rebuild uses the [geo](https://github.com/georust/geo) library's boolean overlay, which works on
+an integer grid: half the larger side of the feature's extent spans about 2<sup>29</sup> steps.
+Coordinates are stored in degrees of longitude and latitude, so a step is about
+0.000 000 000 12° (0.013 mm) for a feature 10 km across, and about 0.000 000 24° (2.6 cm at the
+equator) for one spanning the world. Rebuilt coordinates may move by up to five steps from the
+input's rings; in the tests they moved at most two thirds of a step. The overlay also leaves out
+vertices in the middle of straight edges. The tool says how many features were rebuilt and the
+farthest, in degrees, their coordinates may have moved. Every rebuilt geometry is checked again and
+written only when it is valid.
+
+A hole or part narrower than one step of that grid in any direction can be rounded onto a single
+line of it and lose its area, depending on where it lies between the grid's lines. Rounding moves a
+point by up to half a step on each axis, so across a diagonal a piece needs to be wider, up to √2
+steps at 45°. The grid follows the extent of all the rings of a part, or of all the parts of a
+feature, so this happens to a tiny or thin hole or part far from the others, such as a long sliver
+at an angle. So before the overlay takes out a part's holes or merges the parts, a hole or part
+that narrow in any direction is dropped: `no_area` is added after the other codes in `repairs`, and
+the tool says how many holes and parts were dropped this way, from how many features.
+
+A feature that can't be repaired stays in the output without geometry, with its attributes, and
+`repairs` says why. One the tool couldn't repair is written unchanged, never dropped:
+
+| Code | Written | Why |
+| --- | --- | --- |
+| `null_geometry` | without geometry | No geometry, or one without coordinates |
+| `non_finite_coordinate` | without geometry | A coordinate is not a number or infinite |
+| `too_few_points` | without geometry | Every part has too few distinct points |
+| `no_area` | without geometry | Nothing with an area is left once repaired: a ring whose points all lie on one line, or holes covering their whole part |
+| `too_complex` | unchanged | Checking or rebuilding it needs more work than the tool spends on one feature (for the rebuild, about 2 million vertices, counting those it adds where rings cross), or there wasn't enough memory for it |
+| `repair_failed` | unchanged | The geo library failed on it: its relate operation while checking, the overlay, coordinates too large or too small for the overlay's grid, or a rebuilt geometry that isn't valid |
+
+The messages say how many features were repaired, with each code; how many were written without
+geometry and why; how many were left unchanged for each reason; how many rings or parts were
+dropped, and how many holes or parts narrower than the overlay's grid; from how many features holes
+were taken out; in how many parts were merged or pieces written as parts of their own; and how far
+rebuilt coordinates may have moved. On the desktop and the command line a failure of the overlay is
+caught and the feature written unchanged; in the browser it can't be caught, so the rebuild runs only on finite coordinates the grid can hold, with
+its work bounded and its memory asked of the browser first, as in Clip and Dissolve.
+
+```text
+gp.run={"tool":"repairGeometry","params":{"input":"Parcels"}}
+```
+
 ## GeoLibre tools
 
 The desktop app and the command line can also run the
@@ -1017,8 +1095,9 @@ below the web app's fixed limits and never above a ceiling.
 
 So a computer with 16 GB reads rasters of up to about 500 million samples. A run that passes on one
 computer can be refused on a smaller one; the error names the limit there. Project Raster (`raster.project`) puts a raster
-on a grid of any coordinate system, cell size and extent; Raster Functions › Resample matches a target
-raster's grid.
+on a grid of any coordinate system, cell size and extent, and Polygons to Raster
+(`raster.rasterize`) burns polygons onto the same grids; Raster Functions › Resample matches a
+target raster's grid.
 
 The **Script** pane runs commands from text, one per line (`id {json}`); its box grows with the script down to the bottom of the pane,
 short of the buttons, and then scrolls, so **Run** stays in view; Ctrl+Enter (⌘+Enter on macOS)
@@ -1191,6 +1270,41 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
   - The result has to fit in memory (120 million values, cells times bands, or more on a computer
     with more memory; 32 million in the web app): a grid past that is refused, naming the limit. A raster read from its overview is
     projected at that resolution, and the result says so.
+- **Polygons to Raster** (`raster.rasterize`) burns a polygon layer onto a grid, so soil,
+  geology or land-use units line up cell for cell with rasters put on that grid by Project Raster:
+  `{"layer": "Soils", "field": "unit", "grid": "ndvi_100m", "path": "soils_100m.tif"}`. It has no
+  pane yet: run it from the Script pane, the AI Assistant, the command line or Python. The result
+  is a new layer (`name`, by default the layer's name with "raster"), and with `path` a
+  cloud-optimised GeoTIFF too.
+  - **The grid** is given as for Project Raster: `"grid"`, another raster's grid taken exactly, or
+    `crs` (by default the layer's), `cellSize` (required), `origin` (`[0, 0]` by default, so the
+    result lines up with any raster projected with the same `crs` and `cellSize`) and `extent` (by
+    default the polygons' bounds).
+  - **What a cell takes:** a cell takes a polygon's value when its centre falls inside it, holes
+    cut out. A numeric `field` gives its values; a text `field` gives codes 1 to n, in sorted order
+    of its values. A table named after the result with "classes" (`code`, `value`), numbered if
+    the project has a table of that name, holds every code; the result's `classTable` names it,
+    its `classes` lists the first 256, and `classCount` gives the total. With no field, every
+    polygon gives `value` (1 by default), a mask.
+  - Where polygons overlap, the later feature wins, as GDAL burns. With a selection, only the
+    selected features are burned. Features with no value in the field, with no valid polygon, or
+    holding no cell centre are skipped, and the result and a notice count them.
+  - Cells under no polygon take `nodata` (0 by default). A polygon whose value is the no-data
+    value is refused, so give another `nodata`, such as 255, when 0 is a class.
+  - **Pixel type:** bytes when every value and the no-data value are whole numbers from 0 to 255,
+    16-bit when they are up to 65,535, and 32-bit floating point otherwise. Past 16,777,216, 32 bits
+    no longer hold every whole number, so a whole number past it is refused, from an Integer field,
+    a text field's codes or `value`; for an Integer field, a text field gives codes instead. Any
+    other value that 32 bits can't hold exactly, a Double field's included, is rounded, and a notice
+    counts them. Up to 256 whole-number values are drawn with unique values.
+  - **Limits:** a polygon narrower than a cell can hold no cell centre and be missed; there is no
+    "all touched" rule, and lines and points aren't burned. The grid has to fit in memory (120
+    million cells, or more on a computer with more memory; 32 million in the web app): a grid past
+    that is refused before anything is burned. A layer read in place (only the part in view loaded)
+    is refused until all its features are loaded. Taken from a raster read from its overview, the
+    grid is the overview's, and a notice says so. The command runs where it is called, with no Cancel
+    yet and no cap on its work: each polygon fills the cells it covers, so many large polygons on a
+    fine grid take time in proportion.
 - **Classification Wizard** (unsupervised k-means) and **Classification Tools** (minimum distance
   from training polygons).
 - **Mensuration**: distances along the surface, heights between two points, areas, and volumes
