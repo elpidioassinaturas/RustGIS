@@ -2943,9 +2943,7 @@ fn add_url_as_given(s: &mut Session, p: &Value) -> CmdResult {
         if missing || added.gone(s.map()) {
             return Err(format!("{url}: the layer its download added was taken away (undone) before the command ran again"));
         }
-        // A standalone table (a file with no geometry), by its id, which no table gets again.
-        let table = answer.as_ref().ok().filter(|v| v.get("table").is_some()).and_then(|v| v.get("id")).and_then(Value::as_u64);
-        if table.is_some_and(|id| !s.project.tables.iter().any(|t| u64::from(t.id) == id)) {
+        if super::plugins::fetch::table_gone(answer, &s.project) {
             return Err(format!("{url}: the table its download added was taken away (undone) before the command ran again"));
         }
         return added.answer_now(s.map(), answer);

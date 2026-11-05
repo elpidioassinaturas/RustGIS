@@ -1131,7 +1131,7 @@ impl Session {
             .call_requests
             .as_ref()
             .and_then(|_| self.url_waits.in_flight(&asked))
-            .filter(|n| !self.url_waits.taken_away(*n, &self.project.maps));
+            .filter(|n| !self.url_waits.taken_away(*n, &self.project));
         let number = match given.or(waiting).or(made) {
             Some(n) => n,
             None => {

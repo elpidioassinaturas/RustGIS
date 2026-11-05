@@ -376,6 +376,13 @@ impl Added {
     }
 }
 
+/// Whether `answer` added a standalone table (a file with no geometry) that is gone, by its id,
+/// which no table gets again.
+pub(crate) fn table_gone(answer: &CmdResult, project: &crate::project::Project) -> bool {
+    let table = answer.as_ref().ok().filter(|v| v.get("table").is_some()).and_then(|v| v.get("id")).and_then(Value::as_u64);
+    table.is_some_and(|id| !project.tables.iter().any(|t| u64::from(t.id) == id))
+}
+
 /// Whether tile layer `t` is `added`, which has no id: the same address, kind, role and look. A
 /// map can't hold two with all of these (adding one replaces the other), so another layer of the
 /// same address isn't it, and a rename keeps it.
@@ -438,9 +445,12 @@ impl UrlWaits {
     }
 
     /// Whether what request `n` added once it landed is no longer in the project.
-    pub(crate) fn taken_away(&self, n: u64, maps: &[crate::map::Map]) -> bool {
-        self.landed.iter().any(|(m, _, _, added)| {
-            *m == n && added.added_any() && maps.iter().find(|map| map.instance_id() == added.map).is_none_or(|map| added.gone(map))
+    pub(crate) fn taken_away(&self, n: u64, project: &crate::project::Project) -> bool {
+        self.landed.iter().any(|(m, _, answer, added)| {
+            *m == n
+                && (table_gone(answer, project)
+                    || (added.added_any()
+                        && project.maps.iter().find(|map| map.instance_id() == added.map).is_none_or(|map| added.gone(map))))
         })
     }
 
@@ -969,6 +979,18 @@ mod tests {
         let again = ask(&mut s);
         assert_ne!(again, 900, "taken away");
         assert_eq!(s.take_url_requests(), [json!({"url": "https://x.org/a.geojson", "request": again})]);
+        // A standalone table, which no map holds, the same.
+        let mut s = Session::new(crate::sample::world_project());
+        let table = s.project.add_table(rustgis_data::Dataset::new("t", rustgis_data::GeometryType::None, Vec::new()));
+        s.url_waits.wait(901, asked.clone());
+        let answer: CmdResult = Ok(json!({"table": "t", "id": table}));
+        let added = Added::of(s.map(), &answer);
+        s.url_waits.land(901, answer, added);
+        assert_eq!(ask(&mut s), 901, "still there");
+        assert!(s.take_url_requests().is_empty());
+        s.project.tables.retain(|t| t.id != table);
+        assert_ne!(ask(&mut s), 901, "taken away");
+        assert_eq!(s.take_url_requests().len(), 1);
     }
 
     /// A download that failed is asked for again as a new download, not answered as the one
