@@ -107,6 +107,17 @@ pub(crate) fn forget() {
     rustgis_data::mbtiles::close_all();
 }
 
+/// Forgets what was read of one file (its metadata, the styles made from it and its connections),
+/// but not a read under way.
+pub(crate) fn forget_archive(archive: &str) {
+    if infos().lock().unwrap_or_else(|e| e.into_inner()).remove(archive).is_none() {
+        return;
+    }
+    crate::source::forget();
+    #[cfg(not(target_arch = "wasm32"))]
+    rustgis_data::mbtiles::close(file_of(archive));
+}
+
 /// An archive's metadata.
 pub fn info(archive: &str) -> Result<Arc<Info>, String> {
     check(archive)?;

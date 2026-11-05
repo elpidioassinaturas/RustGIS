@@ -25735,6 +25735,9 @@ fn mbtiles_files_are_let_go_of_with_their_last_layer() {
         })
     };
     assert!(stays_open(&mut s), "a layer on the map keeps its connections");
+    s.run("map.addTiles", &json!({"url": path.display().to_string(), "kind": "mbtiles", "overlay": true})).unwrap();
+    s.run("map.removeTiles", &json!({"index": 0})).unwrap();
+    assert!(stays_open(&mut s), "the file's other layer keeps them");
     s.run("map.removeTiles", &json!({})).unwrap();
     assert!(!is_open(&path), "the layer removed");
     s.run("edit.undo", &json!({})).unwrap();
@@ -25742,6 +25745,63 @@ fn mbtiles_files_are_let_go_of_with_their_last_layer() {
     s.run("project.new", &json!({})).unwrap();
     assert!(!is_open(&path), "the project closed");
     std::fs::remove_file(&path).unwrap();
+}
+
+/// A file replaced after its last layer went is read again: its metadata, the style made from them
+/// and its tiles, not what was kept of the old one.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_replaced_mbtiles_file_is_read_again() {
+    use crate::render::rustgis_tiles::{cache, mbtiles, source};
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            rustgis_data::mbtiles::close(&self.0);
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let path = std::env::temp_dir().join(format!("rustgis-mbtiles-replaced-{}.mbtiles", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let _cleanup = Cleanup(path.clone());
+    let write = |size: u32, max_zoom: u8| {
+        if path.exists() {
+            std::fs::remove_file(&path).unwrap();
+        }
+        let mut png = Vec::new();
+        image::RgbaImage::new(size, size).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE metadata(name TEXT,value TEXT); CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB);").unwrap();
+        db.execute("INSERT INTO metadata VALUES('format','png'),('minzoom','0'),('maxzoom',?1),('attribution',?1)", [max_zoom.to_string()])
+            .unwrap();
+        db.execute("INSERT INTO tiles VALUES(0,0,0,?1)", [png]).unwrap();
+    };
+    let url = path.display().to_string();
+    let tile = mbtiles::template(&url).replace("{z}", "0").replace("{x}", "0").replace("{y}", "0");
+    let tile_width = || {
+        for _ in 0..1000 {
+            match cache::get_tile(&tile, cache::Want::Image) {
+                cache::State::Ready(payload) => match &*payload {
+                    cache::Payload::Image(image) => return image.width(),
+                    _ => panic!("not an image"),
+                },
+                cache::State::Failed(e) => panic!("{e}"),
+                cache::State::Pending => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        panic!("the tile never came");
+    };
+    let credits = |s: &Session| match source::resolve(&crate::render::tile_spec(&s.map().tiles[0])) {
+        source::Resolve::Ready(style) => style.attribution.clone(),
+        _ => panic!("the style isn't ready"),
+    };
+    let mut s = Session::new(Project::default());
+    write(2, 1);
+    s.run("map.addTiles", &json!({"url": url, "kind": "mbtiles"})).unwrap();
+    assert_eq!((mbtiles::info(&url).unwrap().max_zoom, credits(&s), tile_width()), (1, vec!["1".to_string()], 2));
+    s.run("map.removeTiles", &json!({})).unwrap();
+    write(4, 5);
+    s.run("map.addTiles", &json!({"url": url, "kind": "mbtiles"})).unwrap();
+    assert_eq!((mbtiles::info(&url).unwrap().max_zoom, credits(&s), tile_width()), (5, vec!["5".to_string()], 4));
 }
 
 /// Sources authored by this test exercise the dispatch for every supported local data kind.

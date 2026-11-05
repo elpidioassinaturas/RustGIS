@@ -1047,6 +1047,17 @@ impl Session {
         Ok(serde_json::json!({"pending": true, "url": url}))
     }
 
+    /// The MBTiles files the project's layers read.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn mbtiles_files(&self) -> impl Iterator<Item = &str> {
+        self.project
+            .maps
+            .iter()
+            .flat_map(|m| &m.tiles)
+            .filter(|t| t.kind == rustgis_map::TileKind::MbTiles)
+            .filter_map(|t| t.archive_file())
+    }
+
     /// Runs a command as [`Session::run`] does, except that the downloads `layer.addUrl` would
     /// wait for (on the desktop) are left to the front end, as in the browser: the app runs the
     /// commands of plugins this way, so a plugin adding data by address doesn't freeze it. The
@@ -1124,17 +1135,19 @@ impl Session {
             // one entry too, as it is one step to undo.
             let joins = self.merge.is_some() && self.merge == self.merged && !self.undo.is_empty();
             let (at, start) = (project_log::now_ms(), web_time::Instant::now());
-            let res = self.run_command(id, params);
-            // Whichever command took its last layer away (removed, undone, the project closed).
             #[cfg(not(target_arch = "wasm32"))]
-            render::rustgis_tiles::mbtiles::close_unused(
-                self.project
-                    .maps
-                    .iter()
-                    .flat_map(|m| &m.tiles)
-                    .filter(|t| t.kind == rustgis_map::TileKind::MbTiles)
-                    .filter_map(|t| t.archive_file()),
-            );
+            let files_before: Vec<String> = self.mbtiles_files().map(str::to_string).collect();
+            let res = self.run_command(id, params);
+            // Whichever command took its last layer away (removed, undone, the project closed):
+            // the file can now be moved or replaced, so what was read of it is forgotten too.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let files: Vec<&str> = self.mbtiles_files().collect();
+                for gone in files_before.iter().filter(|f| !files.contains(&f.as_str())) {
+                    render::rustgis_tiles::cache::forget(gone);
+                }
+                render::rustgis_tiles::mbtiles::close_unused(files.into_iter());
+            }
             // A plugin's command waiting for its fetches answers `pending` and runs again when they
             // land: logged then, once. (Another command's `pending`, a download the web app makes, is
             // logged as it is asked for: nothing runs it again.)

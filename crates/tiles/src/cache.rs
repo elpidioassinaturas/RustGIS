@@ -280,12 +280,12 @@ pub fn clear() {
 }
 
 /// The resource a cache key reads: its address without a download budget, a byte range or a
-/// tail, and for a tile of a PMTiles or COG archive, the archive's address.
+/// tail, and for a tile of a PMTiles, COG or MBTiles archive, the archive's address.
 fn resource_of(key: &str) -> &str {
     let key = split_download_limit(key).0;
     let key = split_tail(key).0;
     let key = split_range(key).0;
-    if key.starts_with(crate::pmtiles::SCHEME) || key.starts_with(crate::cog::SCHEME) {
+    if key.starts_with(crate::pmtiles::SCHEME) || key.starts_with(crate::cog::SCHEME) || crate::mbtiles::is_tile(key) {
         return key.split_once('@').map_or(key, |(_, archive)| crate::cog::split(archive).0);
     }
     key
@@ -310,6 +310,7 @@ pub fn forget(url: &str) {
     c.bytes = c.bytes.saturating_sub(dropped);
     drop(c);
     crate::pmtiles::forget_archive(url);
+    crate::mbtiles::forget_archive(url);
     crate::cog::forget_file(url);
     // Map tiles made from a service's pictures, kept only while one is missing or on its way,
     // and their plans: all are made again (those kept in the cache stay till `clear`).

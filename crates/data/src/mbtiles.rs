@@ -365,7 +365,7 @@ mod file {
 
     /// Whether a connection to `path` is kept open.
     pub fn is_open(path: &Path) -> bool {
-        pool().lock().unwrap_or_else(|e| e.into_inner()).contains_key(path)
+        pool().lock().unwrap_or_else(|e| e.into_inner()).get(path).is_some_and(|open| !open.is_empty())
     }
 
     /// The metadata of the MBTiles file at `path`.
