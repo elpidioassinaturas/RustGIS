@@ -452,7 +452,22 @@ The geocoder is OpenStreetMap's public [Nominatim](https://nominatim.org) by def
 [Photon](https://photon.komoot.io) (`"provider": "photon"`). Their usage policies allow light
 use, so RustGIS sends them at most one request a second and 100 addresses a run; give `"url"` of
 a Nominatim or Photon server of your own for more (up to 10,000, with no wait between requests).
-In the app the requests go out in the background, one at a time, and the layer is added when the
+
+For addresses in the Netherlands, `"provider": "locatieserver"` (**Locatieserver (the
+Netherlands)** in the dialog) uses PDOK's
+[Locatieserver](https://www.pdok.nl/introductie/-/article/pdok-locatieserver-1), the free
+geocoder built on the Dutch government's address and place registers (BAG and others): it finds
+addresses, postcodes, streets, towns, municipalities and provinces. Its answers are open data from
+those registers; Find Place credits PDOK Locatieserver (Kadaster) under the results. PDOK
+publishes no request limit for it, so RustGIS sends it four requests a second and up to 10,000
+addresses a run. An address is matched to the house before its street (`Damrak 1, Amsterdam` is
+the building, not the middle of Damrak). Its places have a point but no extent, so Find Place
+zooms in close around them.
+
+An answer's places without a usable position (no coordinate, or one that can't be read) are left
+out, and a notice says how many; an answer with places but none usable counts as a failed
+request, not as "not found". An address longer than the geocoder takes (400 characters for the
+Locatieserver, 500 for the others) isn't sent cut short: its request fails. In the app the requests go out in the background, one at a time, and the layer is added when the
 last answer lands; `layer.geocode` on the command line waits for them.
 
 ```sh
@@ -804,6 +819,11 @@ connection's kind doesn't change: make a new one); renaming the connection or ch
 at the same origin does not. **Log Out**
 (`connection.logout`) removes the session login. Log in again when a new session needs it.
 
+Creating a login requires secure random numbers: the operating system's generator on desktop,
+or the browser's `crypto.getRandomValues` in the web app. If that source is missing or fails,
+RustGIS refuses the login rather than using a predictable fallback. A failed replacement leaves
+the previous active login usable.
+
 A login is sent only to the connection's origin: the same scheme, host and port, for its
 capabilities, listings, tiles, feature pages and refreshes. On the desktop a redirect within that
 origin keeps the login, and a redirect to another origin is followed without it, never getting
@@ -816,6 +836,10 @@ unchanged and reported.
 A plain `http://` address sends the login unencrypted, so the form asks for confirmation
 and the command needs `"allowInsecure": true`. Error messages, notices, the preferences,
 projects, History and what the [AI Assistant](assistant.md) sees never hold the password or key.
+On the desktop, a failed HEAD request that carried a web-service login records the HTTP status
+without response headers, including after logout or a redirect to another origin: a server could
+echo credentials in those headers. HEAD requests that never carried a login keep their selected
+diagnostic headers on refusal.
 Runtime login bindings are also removed from recorded command parameters, including addresses
 embedded in text, when saving, recovering or exporting them. The live session keeps its originals.
 
@@ -1089,11 +1113,16 @@ rustgis-cli run --cmd 'layer.addZarr={"url":"https://storage.googleapis.com/gcp-
 layer whose step is the time slider's. The slider turns on over the variable's dates when it is
 off, and the layer shows the last of its steps in the slider's window, or nothing when none falls
 in it. Moving or playing the slider reads that step's slice (only its chunks), keeping the last
-eight read. A web store's next two steps are read ahead in the background. The stretch is fixed at
-the first slice's range, so a colour means the same value at every step, and **Export** writes an
-animation of it. An axis longer than the slider's 20,000 steps (hourly ERA5) takes a period with `"start"` and
-`"end"`; given neither (as the dialog adds it), the layer takes 20,000 steps from the one picked. The project keeps such a layer by its store (a folder or a web address)
-and selection, not as a slice, and reads the slider's step again when it opens.
+eight read. A web store's next two steps are read ahead in the background. In the desktop app the
+slider doesn't wait for a step not read yet: the layer shows the step before until the new one is
+read, and a step that can't be read empties the layer and says why. Playing waits for each step to
+be read before it moves on, so every step shows. Scripts, models, notebooks, AI agents, the command
+line and **Export** wait for each step. The stretch is fixed at the first slice's range, so a
+colour means the same value at every step, and **Export** writes an animation of it. An axis longer
+than the slider's 20,000 steps (hourly ERA5) takes a period with `"start"` and `"end"`; given
+neither (as the dialog adds it), the layer takes 20,000 steps from the one picked. The project
+keeps such a layer by its store (a folder or a web address) and selection, not as a slice, and
+reads the slider's step again when it opens.
 
 ```sh
 rustgis-cli run --cmd 'layer.addZarr={"path":"air.zarr","variable":"t","time":true}' --cmd 'time.export={"path":"t.gif"}'

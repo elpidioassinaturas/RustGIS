@@ -295,6 +295,9 @@ pub enum Tool {
     CreatePolygon,
     /// Moves, inserts and deletes the vertices of the selected features.
     EditVertices,
+    /// Drags a layer's label to where it should be (`labels.move`), as QGIS's Move Label tool;
+    /// dragging anything else pans the map.
+    MoveLabel,
     /// Draws a line across the selected polygons to cut them (`edit.cutPolygon`).
     CutPolygon,
     /// Draws a line across the selected feature's boundary to reshape it (`edit.reshape`).
@@ -333,6 +336,7 @@ impl Tool {
             Tool::CreateLine => "createLine",
             Tool::CreatePolygon => "createPolygon",
             Tool::EditVertices => "editVertices",
+            Tool::MoveLabel => "moveLabel",
             Tool::CutPolygon => "cutPolygon",
             Tool::Reshape => "reshape",
             Tool::Graphic(shape) => GRAPHIC_TOOLS.iter().find(|g| g.0 == shape).map_or("graphicPoint", |g| g.1),
@@ -355,6 +359,7 @@ impl Tool {
             Tool::CreateLine,
             Tool::CreatePolygon,
             Tool::EditVertices,
+            Tool::MoveLabel,
             Tool::CutPolygon,
             Tool::Reshape,
         ]
@@ -375,6 +380,7 @@ impl Tool {
             Tool::CreateLine => "Create Line",
             Tool::CreatePolygon => "Create Polygon",
             Tool::EditVertices => "Edit Vertices",
+            Tool::MoveLabel => "Move Label",
             Tool::CutPolygon => "Cut Polygon",
             Tool::Reshape => "Reshape",
             Tool::Graphic(shape) => GRAPHIC_TOOLS.iter().find(|g| g.0 == shape).map_or("Point", |g| g.2),
@@ -445,6 +451,8 @@ pub struct TopologyIssue {
 pub struct Notice {
     pub text: String,
     pub error: bool,
+    /// How the troubleshooting history files it (an error, a warning or information).
+    pub(crate) severity: rustgis_data::diagnostics::Severity,
 }
 
 const UNDO_LIMIT: usize = 40;
@@ -634,6 +642,10 @@ pub struct Session {
     /// A notebook is running: it may not start another, even through a task or model (no
     /// unbounded recursion).
     pub(crate) notebook_running: bool,
+    /// How many commands are running other commands as their steps by calling them directly
+    /// (a script's lines, a plugin's host calls): what those steps do is the script's, not the
+    /// user's own move, so a Zarr step they move to is read before the next line runs.
+    pub(crate) steps_running: u32,
     /// How many geoprocessing history records came with the opened project (from its file).
     pub history_from_file: usize,
     /// The report open in the Report pane, if any.
@@ -658,9 +670,9 @@ pub struct Session {
     /// What the project replaced during the command running held beside itself, to give back if
     /// the command fails ([`PutAside`]); and how deep commands run within commands now.
     put_aside: Option<Box<PutAside>>,
-    depth: u32,
+    pub(crate) depth: u32,
     /// Only the command's registered id, never its parameters. Nested commands restore this.
-    diagnostic_source: Option<&'static str>,
+    pub(crate) diagnostic_source: Option<&'static str>,
     /// How many of the commands running now restore the project if they fail: a replacement is
     /// put aside only under one of them, as only then can it be rolled back.
     restorable: u32,
@@ -748,6 +760,13 @@ pub struct Session {
     /// one succeeds) through this. Python leaves it unset: a run there holds the interpreter's
     /// lock and can't be interrupted, so it keeps the Script pane's bounds.
     pub long_runs: Option<fn(&str, f64)>,
+    /// Zarr layers that follow the time slider read a step not read yet on a thread of their
+    /// own, showing the step before until it lands (the desktop app; see
+    /// [`Session::follow_time_landed`]). Off, as for scripts and the command line, a slider move
+    /// waits for the step.
+    pub zarr_off_frame: bool,
+    /// The Zarr steps landed that [`Session::follow_time_landed`] has seen.
+    zarr_seen: u64,
     /// Set where a person at a terminal waits on a command (`rustgis-cli run` with stdin and
     /// stderr a terminal), who can stop it with Ctrl-C: tools and rasters take no work cap
     /// ([`rustgis_analysis::control::Control::stoppable`]). A program that calls it (an agent, a
@@ -845,21 +864,23 @@ fn fresh_source_ids(before: &Project, after: &mut Project) {
 
 /// A lock names each label by its feature's id, and [`rustgis_data::Dataset::push`] hands the
 /// largest id out again once its feature is deleted: the new feature would take the lock's place
-/// without having been placed (#1135). So a command that removes features removes their entries,
+/// without having been placed (#1135). Saved moved-label positions have the same identity rule.
+/// So a command that removes features removes their locks and saved moves,
 /// whichever way it removes them. Undo brings them back with the rest of the project. A streamed
 /// layer holds only the window in view, so its other features aren't gone. It compares ids, so an
 /// id a single command both removes and hands out stays locked: only restoring from an archive can.
-fn forget_locks_of_removed_features(before: &Project, after: &mut Project) {
+fn forget_label_state_of_removed_features(before: &Project, after: &mut Project) {
     for (i, m) in after.maps.iter_mut().enumerate() {
         let was = before.maps.get(i).filter(|o| o.name == m.name);
-        let Some(lock) = m.label_lock.as_mut() else { continue };
-        for l in m.layers.iter().filter(|l| !l.is_streamed()) {
+        for l in m.layers.iter_mut().filter(|l| !l.is_streamed()) {
             if was.and_then(|o| o.layers.iter().find(|o| o.id == l.id)).is_some_and(|o| o.dataset.features.shares(&l.dataset.features)) {
                 continue;
             }
-            // The lock's ids for this layer, less those it still has: sized by the lock, not the layer.
-            let mut gone: std::collections::HashSet<u64> =
-                lock.iter().filter(|((layer, ..), _)| *layer == l.id).map(|((_, id, ..), _)| *id).collect();
+            // Bound the lookup by saved label state, not the feature count. Off-window ids stay put.
+            let mut gone: std::collections::HashSet<u64> = l.labels.in_order().flat_map(|c| c.moved.iter().map(|m| m.id)).collect();
+            if let Some(lock) = &m.label_lock {
+                gone.extend(lock.iter().filter(|((layer, ..), _)| *layer == l.id).map(|((_, id, ..), _)| *id));
+            }
             if gone.is_empty() {
                 continue;
             }
@@ -869,7 +890,12 @@ fn forget_locks_of_removed_features(before: &Project, after: &mut Project) {
                     break;
                 }
             }
-            lock.retain(|((layer, id, ..), _)| *layer != l.id || !gone.contains(id));
+            for c in std::iter::once(&mut l.labels.default).chain(l.labels.classes.iter_mut()) {
+                c.moved.retain(|entry| !gone.contains(&entry.id));
+            }
+            if let Some(lock) = &mut m.label_lock {
+                lock.retain(|((layer, id, ..), _)| *layer != l.id || !gone.contains(id));
+            }
         }
     }
 }
@@ -888,7 +914,7 @@ fn edits_features(id: &str) -> bool {
 }
 
 impl Session {
-    pub fn new(project: Project) -> Self {
+    pub fn new(mut project: Project) -> Self {
         // The engine's tests never add Shapefile indexes to the user's cache (#1230).
         #[cfg(all(test, not(target_arch = "wasm32")))]
         rustgis_data::source::shp::use_temporary_index_dir();
@@ -901,7 +927,8 @@ impl Session {
         rustgis_data::diagnostics::set_clock(|| {
             web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
         });
-        Session {
+        let label_notices = std::mem::take(&mut project.label_read_notices);
+        let mut session = Session {
             project,
             path: None,
             log: project_log::SessionLog::default(),
@@ -943,6 +970,7 @@ impl Session {
             project_starts: 0,
             trusted_notebooks: Default::default(),
             notebook_running: false,
+            steps_running: 0,
             history_from_file: 0,
             active_report: None,
             active_presentation: None,
@@ -996,8 +1024,14 @@ impl Session {
             raster_results: Vec::new(),
             raster_runs: Vec::new(),
             long_runs: None,
+            zarr_off_frame: false,
+            zarr_seen: 0,
             stoppable: false,
+        };
+        for text in label_notices {
+            session.notify(text, false);
         }
+        session
     }
 
     /// Keeps a query's result the app ran off the frame, for `layer.addSql {"ran": id}`, with the
@@ -1177,6 +1211,22 @@ impl Session {
     }
     pub fn map_mut(&mut self) -> &mut Map {
         self.project.map_mut()
+    }
+
+    /// Whether a Zarr layer on the active map that follows the time slider is waiting for its
+    /// step to be read off the frame ([`Session::zarr_off_frame`]): playing holds its next step.
+    pub fn zarr_waiting(&self) -> bool {
+        self.zarr_off_frame && cmd::zarr::waiting(self)
+    }
+
+    /// Shows the Zarr steps read off the frame ([`Session::zarr_off_frame`]) once they land: the
+    /// app asks each frame. True when one landed, so the map draws again.
+    pub fn follow_time_landed(&mut self) -> bool {
+        if !cmd::zarr::landed_since(&mut self.zarr_seen) {
+            return false;
+        }
+        cmd::zarr::follow_time(self);
+        true
     }
 
     /// Moves the map to the view of a style added with `"view": true` once the style has loaded,
@@ -1455,7 +1505,7 @@ impl Session {
             (Ok(_), Some(_)) if std::mem::take(&mut self.request_only) => {}
             (Ok(_), Some(mut snap)) => {
                 fresh_source_ids(&snap, &mut self.project);
-                forget_locks_of_removed_features(&snap, &mut self.project);
+                forget_label_state_of_removed_features(&snap, &mut self.project);
                 // An edit may change the dates the time slider's window filters on: bound layers
                 // whose features or fields the command changed (features are shared with the
                 // snapshot until written) take the window again.
@@ -1751,11 +1801,16 @@ impl Session {
             return;
         }
         self.diagnostics.push_redacted(severity, self.diagnostic_source.unwrap_or("Application"), &text);
-        self.notices.push(Notice { text: text.into_string(), error: severity == rustgis_data::diagnostics::Severity::Error });
+        self.notices.push(Notice { text: text.into_string(), error: severity == rustgis_data::diagnostics::Severity::Error, severity });
         self.notices_given += 1;
         if self.notices.len() > 200 {
             self.notices.remove(0);
         }
+    }
+
+    /// How many notices were given in this session, including ones no longer kept.
+    pub(crate) fn notices_given(&self) -> u64 {
+        self.notices_given
     }
 
     /// A mark to pass to [`Session::notices_since`].

@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::GpRecord;
 
+#[path = "project_label_losses.rs"]
+pub(crate) mod label_losses;
+
 /// A map export cannot keep runtime-only download reservations, even in a larger project.
 pub(crate) fn ensure_map_imports_complete(map: &Map) -> Result<(), String> {
     if map.layers.iter().any(|layer| layer.dataset.source.as_deref().is_some_and(|source| source.starts_with("geolibre-pending:")))
@@ -53,7 +56,8 @@ pub fn open_command(path: &str) -> &'static str {
         "layer.addData"
     }
 }
-/// Format version written to files.
+/// Saved-document compatibility version, independent of the RustGIS release version.
+/// Advance it when an older reader would lose meaningful saved information on resaving.
 pub const FORMAT: u32 = 1;
 /// Largest project file read or saved (512 MiB).
 pub const MAX_BYTES: u64 = 512 << 20;
@@ -258,7 +262,11 @@ fn identity(text: &str) -> (usize, u64) {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
-    #[serde(default = "format")]
+    /// Read-time label adjustments, consumed by the session and never saved.
+    #[serde(skip)]
+    pub(crate) label_read_notices: Vec<String>,
+    /// The format read from disk; serialization always declares the current writer's format.
+    #[serde(default = "format", serialize_with = "write_format")]
     pub format: u32,
     pub name: String,
     pub maps: Vec<Map>,
@@ -556,6 +564,12 @@ fn format() -> u32 {
     FORMAT
 }
 
+/// Every project serialization, including templates and packages, describes the current
+/// writer's payload rather than retaining the version of the file originally opened.
+fn write_format<S: serde::Serializer>(_: &u32, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_u32(FORMAT)
+}
+
 impl Default for Project {
     fn default() -> Self {
         Project::new("Untitled")
@@ -574,10 +588,28 @@ pub(crate) fn resolve_file_paths<'a>(dir: &str, paths: impl IntoIterator<Item = 
     }
 }
 
+/// Read only compatibility metadata before interpreting any saved payload.
 #[derive(Deserialize)]
-struct ProjectFormat {
+struct FileFormat {
     #[serde(default)]
-    format: Option<u32>,
+    format: u64,
+}
+
+/// Refuse future document formats before typed deserialization or normalization. Missing
+/// metadata is legacy content; arrays include legacy style files. Writers remain unchanged
+/// until a change needs a newer format, at which point it must declare that format.
+pub(crate) fn check_format(text: &str, kind: &str) -> Result<(), String> {
+    if text.len() as u64 > MAX_BYTES {
+        return Err(format!("the {kind} file is too large"));
+    }
+    if text.trim_start().starts_with('[') {
+        return Ok(());
+    }
+    let header: FileFormat = serde_json::from_str(text).map_err(|e| format!("not a RustGIS {kind}: {e}"))?;
+    if header.format > u64::from(FORMAT) {
+        return Err(format!("this {kind} was saved by a newer RustGIS (format {}). Update RustGIS to open it.", header.format));
+    }
+    Ok(())
 }
 
 impl Project {
@@ -605,6 +637,7 @@ impl Project {
 
     pub fn new(name: impl Into<String>) -> Self {
         Project {
+            label_read_notices: Vec::new(),
             format: FORMAT,
             name: name.into(),
             maps: vec![Map::new("Map")],
@@ -1068,16 +1101,10 @@ impl Project {
         Self::read_json(text, false, dir)
     }
 
+    /// Validate compatibility, clear runtime bindings, resolve paths and normalize accepted
+    /// content; only ordinary project opens may restore this process's saved addresses.
     fn read_json(text: &str, restore: bool, dir: Option<&Path>) -> Result<Project, String> {
-        if text.len() as u64 > MAX_BYTES {
-            return Err("the project file is too large".into());
-        }
-        if let Ok(pf) = serde_json::from_str::<ProjectFormat>(text)
-            && let Some(format) = pf.format
-            && format > FORMAT
-        {
-            return Err(format!("this project was saved by a newer RustGIS (format {format}). Update RustGIS to open it."));
-        }
+        check_format(text, "project")?;
         let mut p: Project = serde_json::from_str(text).map_err(|e| {
             let msg = e.to_string();
             if msg.contains("unknown variant") {
@@ -1102,6 +1129,7 @@ impl Project {
             p.resolve_paths(d);
         }
         p.normalize();
+        p.label_read_notices = label_losses::notices(text, &p)?;
         Ok(p)
     }
 

@@ -3192,6 +3192,16 @@ fn layout_groups(app: &mut RustGisApp, ui: &mut Ui) {
         big(ui, app, "export", "Export", "Export the layout as PDF or PNG.", "ui.exportLayout", Value::Null, false, false);
         big(ui, app, "print", "Print", "Print the layout.", "ui.printLayout", Value::Null, false, false);
         col(ui, |ui| {
+            small(
+                ui,
+                app,
+                "copy",
+                "Capture To Clipboard",
+                "Copy an image of the layout to the clipboard.",
+                "ui.captureLayout",
+                Value::Null,
+                false,
+            );
             small(ui, app, "save_as", "Save Layout File", "Save the layout as a layout file.", "ui.saveLayout", Value::Null, false);
             small(ui, app, "map", "Show Map", "Close the layout and show the map.", "layout.close", Value::Null, false);
         });
@@ -4702,6 +4712,24 @@ fn label_groups(app: &mut RustGisApp, ui: &mut Ui) {
                     ui.close();
                 }
             }
+        });
+        // Labels put by hand: the Move Label tool (on and off; Esc leaves it too), and putting the
+        // layer's moved labels back.
+        col(ui, |ui| {
+            let moving = app.session.tool == Tool::MoveLabel;
+            let to = if moving { Tool::Explore } else { Tool::MoveLabel };
+            let desc = "Drag a label to where it should be; its callout's line follows. Shift-click a moved label to put it back.";
+            small(ui, app, "label", "Move Label", desc, "tool.set", json!({"tool": to.code()}), moving);
+            small(
+                ui,
+                app,
+                "undo",
+                "Reset Moved",
+                "Put this layer's moved labels back where their classes place them.",
+                "labels.resetMoved",
+                json!({"all": true}),
+                false,
+            );
         });
     });
     group(ui, "Label Range", |ui| {

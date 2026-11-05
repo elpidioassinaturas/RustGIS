@@ -3316,6 +3316,191 @@ fn labels_take_a_font_by_family_name() {
     assert!(s.run("labels.fonts", &json!({})).unwrap()["fonts"].is_array());
 }
 
+/// A streamed window cannot discard saved moves for off-window features to make space at the cap.
+#[test]
+fn moved_labels_preserve_off_window_features_at_the_cap() {
+    use rustgis_map::symbology::{MAX_MOVED_LABELS, MovedLabel};
+    let mut s = world();
+    let id = s.map().layer_by_name("Cities").unwrap().id;
+    let fid = s.map().layer(id).unwrap().dataset.features.first().unwrap().id;
+    let layer = s.map_mut().layer_mut(id).unwrap();
+    layer.dataset.windowed = true;
+    layer.labels.default.moved = (0..MAX_MOVED_LABELS).map(|i| MovedLabel { id: 1_000_000 + i as u64, at: [1.0, 1.0] }).collect();
+    let error = s.run("labels.move", &json!({"layer": id, "feature": fid, "to": [2, 2]})).unwrap_err();
+    assert!(error.contains("at most"), "{error}");
+    assert_eq!(s.map().layer(id).unwrap().labels.default.moved.len(), MAX_MOVED_LABELS);
+    let error = s.run("labels.move", &json!({"layer": id, "feature": u64::MAX, "to": [2, 2]})).unwrap_err();
+    assert!(error.contains("not present"), "{error}");
+}
+
+/// A class at its most drops the saved moves of features no longer in the layer to make room, and
+/// says how many; a class with room drops none and says nothing.
+#[test]
+fn moved_labels_of_removed_features_make_room_with_a_notice() {
+    use rustgis_map::symbology::{MAX_MOVED_LABELS, MovedLabel};
+    let mut s = world();
+    let id = s.map().layer_by_name("Cities").unwrap().id;
+    let fid = s.map().layer(id).unwrap().dataset.features.first().unwrap().id;
+    let layer = s.map_mut().layer_mut(id).unwrap();
+    layer.labels.default.moved = (0..MAX_MOVED_LABELS).map(|i| MovedLabel { id: 1_000_000 + i as u64, at: [1.0, 1.0] }).collect();
+    let mark = s.notice_mark();
+    s.run("labels.move", &json!({"layer": id, "feature": fid, "to": [2, 2]})).unwrap();
+    assert_eq!(s.map().layer(id).unwrap().labels.default.moved.len(), 1);
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("10000 saved label move(s) of features no longer in the layer")));
+    let mark = s.notice_mark();
+    s.run("labels.move", &json!({"layer": id, "feature": fid, "to": [3, 3]})).unwrap();
+    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("dropped to make room")));
+}
+
+/// A label moved where the map's projection can't draw it is kept, and said not to be drawn;
+/// one moved inside it gets no notice.
+#[test]
+fn a_label_moved_outside_the_projection_says_so() {
+    let mut s = world();
+    let id = s.map().layer_by_name("Cities").unwrap().id;
+    let fid = s.map().layer(id).unwrap().dataset.features.first().unwrap().id;
+    s.run("map.projection", &json!({"type": "usaAlbers"})).unwrap();
+    let mark = s.notice_mark();
+    s.run("labels.move", &json!({"layer": id, "feature": fid, "to": [-100.0, 40.0]})).unwrap();
+    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("isn't drawn")), "inside: no notice");
+    let mark = s.notice_mark();
+    s.run("labels.move", &json!({"layer": id, "feature": fid, "to": [12.5, 41.9]})).unwrap();
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("outside the area the map's projection")));
+    assert_eq!(s.map().layer(id).unwrap().labels.default.moved.len(), 1, "kept");
+}
+
+/// Labels are moved by hand by feature id and put back, one class's or all; bad input is refused.
+#[test]
+fn labels_are_moved_by_command_and_reset() {
+    let mut s = world();
+    let id = s.map().layer_by_name("Cities").unwrap().id;
+    let fid = s.map().layer(id).unwrap().dataset.features.first().unwrap().id;
+    let moved = |s: &Session| s.map().layer(id).unwrap().labels.default.moved.clone();
+    s.run("labels.move", &json!({"layer": id, "feature": fid, "to": [12.5, 41.9]})).unwrap();
+    assert_eq!(moved(&s), vec![rustgis_map::symbology::MovedLabel { id: fid, at: [12.5, 41.9] }]);
+    // By the class's name too (Default's); again moves it again.
+    let name = s.map().layer(id).unwrap().labels.default.name.clone();
+    s.run("labels.move", &json!({"layer": id, "class": name, "feature": fid, "to": [13.0, 42.0]})).unwrap();
+    assert_eq!(moved(&s).len(), 1);
+    // Bad values change nothing.
+    for bad in [
+        json!({"feature": fid}),
+        json!({"feature": "one", "to": [1, 1]}),
+        json!({"feature": fid, "to": [1]}),
+        json!({"feature": fid, "to": [1, 200]}),
+        json!({"feature": fid, "to": ["a", 1]}),
+        json!({"feature": fid, "to": [1, 1], "class": "No such class"}),
+    ] {
+        let mut p = bad.clone();
+        p["layer"] = json!(id);
+        assert!(s.run("labels.move", &p).is_err(), "{bad}");
+    }
+    assert_eq!(moved(&s)[0].at, [13.0, 42.0]);
+    // Saved with the project's layer, and one undo step a move.
+    let saved = serde_json::to_value(&s.map().layer(id).unwrap().labels).unwrap();
+    assert_eq!(saved["moved"], json!([{"id": fid, "at": [13.0, 42.0]}]));
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(moved(&s)[0].at, [12.5, 41.9]);
+    // Put back: one, then all.
+    s.run("labels.move", &json!({"layer": id, "feature": fid, "to": null})).unwrap();
+    assert!(moved(&s).is_empty());
+    s.run("labels.move", &json!({"layer": id, "feature": fid, "to": [1, 1]})).unwrap();
+    // A bad "all" is refused, not taken as false.
+    assert!(s.run("labels.resetMoved", &json!({"layer": id, "all": "tru"})).is_err());
+    assert_eq!(moved(&s).len(), 1);
+    s.run("labels.class.add", &json!({"layer": id, "name": "Named"})).unwrap();
+    s.run("labels.move", &json!({"layer": id, "class": "Named", "feature": fid, "to": [3, 3]})).unwrap();
+    s.run("labels.resetMoved", &json!({"layer": id, "all": true})).unwrap();
+    assert!(moved(&s).is_empty());
+    assert!(s.map().layer(id).unwrap().labels.class("Named").unwrap().moved.is_empty(), "every class's");
+    s.run("labels.class.remove", &json!({"layer": id, "class": "Named"})).unwrap();
+    // Locked, a move locks the labels again where they are placed next: the one moved may not
+    // have been placed when the lock was taken.
+    s.run("labels.lock", &json!({"on": true})).unwrap();
+    let v = crate::render::View { width: 800.0, height: 600.0, pixels_per_point: 1.0, camera: s.map().camera, sky: false };
+    crate::render::render(s.map_mut(), &v).unwrap();
+    assert!(s.map().label_lock.is_some());
+    // With nothing moved, Reset Moved changes nothing and the lock holds.
+    s.run("labels.resetMoved", &json!({"layer": id, "all": true})).unwrap();
+    assert!(s.map().label_lock.is_some(), "a reset with nothing moved keeps the lock");
+    s.run("labels.move", &json!({"layer": id, "feature": fid, "to": [2, 2]})).unwrap();
+    assert!(s.map().label_lock.is_none() && s.map().label_display.locked, "locked again, not unlocked");
+    // A move to where the label already is changes nothing either.
+    crate::render::render(s.map_mut(), &v).unwrap();
+    s.run("labels.move", &json!({"layer": id, "feature": fid, "to": [2, 2]})).unwrap();
+    assert!(s.map().label_lock.is_some(), "a move that changes nothing keeps the lock");
+    // Converted to annotations, a moved label's annotation is where it was put, and the
+    // annotations' classes keep none moved (their ids aren't the features').
+    s.run("labels.lock", &json!({"on": false})).unwrap();
+    let r = s.run("labels.convert", &json!({"layer": id})).unwrap();
+    let a = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap();
+    // It stays moved there under its new id, so its class's offset doesn't shift it.
+    let at = |g: &Option<rustgis_data::Geometry>| match g {
+        Some(rustgis_data::Geometry::Point(c)) => Some([c.x, c.y]),
+        _ => None,
+    };
+    let put = a.dataset.features.iter().find(|f| at(&f.geometry) == Some([2.0, 2.0])).expect("the moved one's annotation");
+    assert_eq!(a.labels.default.moved, vec![rustgis_map::symbology::MovedLabel { id: put.id, at: [2.0, 2.0] }]);
+    // The tool by its code.
+    s.run("tool.set", &json!({"tool": "moveLabel"})).unwrap();
+    assert_eq!(s.tool, crate::Tool::MoveLabel);
+}
+
+#[test]
+fn labels_show_all_and_take_callouts() {
+    // A project file's 0 is off, as the command's is; a length is kept.
+    let ds = rustgis_data::Dataset::new("d", rustgis_data::GeometryType::Point, vec![]);
+    let mut v = serde_json::to_value(rustgis_map::LabelClass::default_for(&ds)).unwrap();
+    for (file, read) in [(json!(0), None), (json!(-3), None), (json!(30), Some(30.0))] {
+        v["callout"] = file;
+        assert_eq!(serde_json::from_value::<rustgis_map::LabelClass>(v.clone()).unwrap().callout, read);
+    }
+    let mut s = world();
+    let class = |s: &Session| {
+        let c = &s.map().layer_by_name("Cities").unwrap().labels.default;
+        (c.show_all, c.callout)
+    };
+    assert_eq!(class(&s), (false, None));
+    s.run("labels.placement", &json!({"layer": "Cities", "showAll": true})).unwrap();
+    assert_eq!(class(&s), (true, None), "no position needed");
+    // On: the default length, then one given, kept within range; on again keeps it.
+    s.run("labels.placement", &json!({"layer": "Cities", "callout": true})).unwrap();
+    assert_eq!(class(&s).1, Some(rustgis_map::symbology::DEFAULT_CALLOUT));
+    let adjusted = |s: &Session, mark| s.notices_since(mark).iter().filter(|n| n.text.contains("callout length")).count();
+    let mark = s.notice_mark();
+    s.run("labels.placement", &json!({"layer": "Cities", "callout": 80})).unwrap();
+    assert_eq!(class(&s).1, Some(80.0));
+    assert_eq!(adjusted(&s, mark), 0, "a length in range says nothing");
+    s.run("labels.placement", &json!({"layer": "Cities", "callout": 99999})).unwrap();
+    assert_eq!(class(&s).1, Some(500.0), "within its range");
+    assert_eq!(adjusted(&s, mark), 1, "and says it was adjusted");
+    s.run("labels.placement", &json!({"layer": "Cities", "callout": true})).unwrap();
+    assert_eq!(class(&s).1, Some(500.0), "on again keeps its length");
+    // Saved with the layer, and read back.
+    let saved = serde_json::to_value(&s.map().layer_by_name("Cities").unwrap().labels).unwrap();
+    assert_eq!((saved["show_all"].clone(), saved["callout"].clone()), (json!(true), json!(500.0)));
+    let back: rustgis_map::symbology::Labeling = serde_json::from_value(saved).unwrap();
+    assert_eq!((back.default.show_all, back.default.callout), (true, Some(500.0)));
+    // A project file's out-of-range length is brought within range.
+    let mut wild = serde_json::to_value(&back).unwrap();
+    wild["callout"] = json!(1e9);
+    let read: rustgis_map::symbology::Labeling = serde_json::from_value(wild).unwrap();
+    assert_eq!(read.default.callout, Some(500.0));
+    // Off, three ways; bad values change nothing.
+    for off in [json!(false), json!(0), json!(null)] {
+        s.run("labels.placement", &json!({"layer": "Cities", "callout": 40})).unwrap();
+        s.run("labels.placement", &json!({"layer": "Cities", "callout": off})).unwrap();
+        assert_eq!(class(&s).1, None, "{off}");
+    }
+    for bad in [json!({"callout": "long"}), json!({"callout": -5}), json!({"showAll": "yes"})] {
+        let mut p = bad.clone();
+        p["layer"] = json!("Cities");
+        assert!(s.run("labels.placement", &p).is_err(), "{bad}");
+    }
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(class(&s), (true, Some(40.0)), "undoes");
+}
+
 /// A label class's halo takes its own colour and width, and its letters a spacing; blank and null
 /// go back to the automatic colour and the thin halo, and other settings leave them.
 #[test]
@@ -3520,7 +3705,7 @@ fn labels_take_other_positions_along_lines() {
     // Turned on or off, the labels are locked again, with the anchors of their places on the line.
     let key = (id, 0, 0, 0);
     for on in [false, true] {
-        s.map_mut().label_lock = Some(vec![(key, 1)]);
+        s.map_mut().label_lock = Some(vec![(key, rustgis_map::LockedPlace { place: 1, callout: None })]);
         s.map_mut().label_lock_line_anchors.insert(key, Default::default());
         s.run("labels.placement", &json!({"layer": "Rivers", "class": "Big", "otherPositions": on})).unwrap();
         assert!(s.map().label_lock.is_none() && s.map().label_lock_line_anchors.is_empty(), "{on}: locked again");
@@ -3642,7 +3827,7 @@ fn changing_line_repeat_relocks_alternative_positions() {
     let c = &mut s.map_mut().layer_mut(id).unwrap().labels.default;
     c.other_positions = true;
     c.placement = rustgis_map::LabelPlacement::Parallel;
-    s.map_mut().label_lock = Some(vec![((id, 0, 0, 0), 1)]);
+    s.map_mut().label_lock = Some(vec![((id, 0, 0, 0), rustgis_map::LockedPlace { place: 1, callout: None })]);
     s.run("labels.placement", &json!({"layer": "Rivers", "repeat": 144})).unwrap();
     assert!(s.map().label_lock.is_none());
 }
@@ -3657,7 +3842,7 @@ fn a_line_class_flag_with_no_effect_keeps_the_lock() {
     let id = s.map().layer_by_name("Rivers").unwrap().id;
     s.run("labels.placement", &json!({"layer": "Rivers", "position": "curved", "otherPositions": true})).unwrap();
     let held = |s: &mut Session, layer: u32, name: &str, change: Value| {
-        s.map_mut().label_lock = Some(vec![((layer, 0, 0, 0), 1)]);
+        s.map_mut().label_lock = Some(vec![((layer, 0, 0, 0), rustgis_map::LockedPlace { place: 1, callout: None })]);
         let mut p = change;
         p["layer"] = json!(name);
         s.run("labels.placement", &p).unwrap();
@@ -3761,6 +3946,184 @@ fn a_new_feature_doesnt_take_the_locked_label_of_a_deleted_one() {
     assert_eq!(draw(&mut s), ["Alpha 2"]);
 }
 
+/// Deleting a feature removes its saved label move before its id can be reused; undo restores it.
+#[test]
+fn a_new_feature_doesnt_take_the_moved_label_of_a_deleted_one() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    let mut s = Session::new(Project::default());
+    let mut data = Dataset::new("Sites", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+    data.push(Some(Geometry::Point(rustgis_geom::Coord::new(0.0, 0.0))), vec![V::Text("Old".into())]);
+    let layer = s.map_mut().add_dataset(data);
+    s.run("labels.enable", &json!({"layer":layer,"on":true})).unwrap();
+    s.run("labels.move", &json!({"layer":layer,"feature":1,"to":[1.0,1.0]})).unwrap();
+    s.map_mut().layer_mut(layer).unwrap().selection = vec![0];
+    s.run("edit.delete", &Value::Null).unwrap();
+    assert!(s.map().layer(layer).unwrap().labels.default.moved.is_empty());
+    s.run("edit.addFeature", &json!({"layer":layer,"geometry":{"type":"Point","coordinates":[0.0,0.0]},"attributes":{"name":"New"}}))
+        .unwrap();
+    assert_eq!(s.map().layer(layer).unwrap().dataset.features[0].id, 1);
+    let view = crate::render::View { width: 800.0, height: 600.0, pixels_per_point: 1.0, camera: s.map().camera, sky: false };
+    let labels = crate::render::render(s.map_mut(), &view).unwrap().labels;
+    assert!(labels.iter().any(|l| l.text == "New" && !l.collide.pinned));
+    s.run("edit.undo", &Value::Null).unwrap();
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(s.map().layer(layer).unwrap().labels.default.moved_to(1), Some([1.0, 1.0]));
+    s.run("edit.redo", &Value::Null).unwrap();
+    assert!(s.map().layer(layer).unwrap().labels.default.moved.is_empty());
+}
+
+/// Project opening reports discarded label settings once per kind; clean settings stay quiet.
+#[test]
+fn opening_projects_reports_moved_label_and_callout_adjustments() {
+    use rustgis_data::{Dataset, Field, FieldType, GeometryType};
+    let mut project = Project::default();
+    project.maps[0].add_dataset(Dataset::new("Sites", GeometryType::Point, vec![Field::new("name", FieldType::Text)]));
+    project.maps[0].layers[0].labels.default.move_label(1, Some([2.0, 3.0]));
+    project.styles.push(crate::project::StyleItem {
+        name: "Saved labels".into(),
+        geometry: GeometryType::Point,
+        renderer: project.maps[0].layers[0].renderer.clone(),
+        labels: project.maps[0].layers[0].labels.clone(),
+        transparency: 0.0,
+    });
+    project.offline_areas.push(crate::project::OfflineArea {
+        name: "Field copy".into(),
+        map: "Map".into(),
+        extent: rustgis_geom::Extent::new(-1.0, -1.0, 1.0, 1.0),
+        created: 0.0,
+        synced: 0.0,
+        data: project.maps[0].clone(),
+    });
+    let clean = serde_json::to_string(&project).unwrap();
+    let clean_session = Session::new(Project::from_json(&clean).unwrap());
+    assert!(clean_session.notices.is_empty());
+    // Callouts written off (false, null or 0) are clean too.
+    for off in [json!(false), json!(null), json!(0)] {
+        let mut v: Value = serde_json::from_str(&clean).unwrap();
+        v["maps"][0]["layers"][0]["labels"]["callout"] = off.clone();
+        v["styles"][0]["labels"]["callout"] = off.clone();
+        assert!(Session::new(Project::from_json(&v.to_string()).unwrap()).notices.is_empty(), "{off}");
+    }
+    let mut damaged: Value = serde_json::from_str(&clean).unwrap();
+    let labels = &mut damaged["maps"][0]["layers"][0]["labels"];
+    labels["moved"] = json!([
+        {"id":1,"at":[2.0,3.0]}, {"id":1,"at":[4.0,5.0]},
+        {"id":-1,"at":[2.0,3.0]}, {"id":1.5,"at":[2.0,3.0]}, {"id":2,"at":[2.0,100.0]}
+    ]);
+    labels["callout"] = json!(900);
+    labels["show_all"] = json!("yes");
+    damaged["styles"][0]["labels"]["moved"] = json!("damaged");
+    damaged["styles"][0]["labels"]["callout"] = json!(-1);
+    let text = damaged.to_string();
+    let loaded = Project::from_json(&text).unwrap();
+    assert_eq!(loaded.maps[0].layers[0].labels.default.moved_to(1), Some([4.0, 5.0]));
+    let startup = Session::new(loaded);
+    assert_eq!(startup.notices.len(), 3);
+    assert!(startup.notices.iter().any(|n| n.text.contains("5 invalid, duplicate or excess moved-label")));
+    assert!(startup.notices.iter().any(|n| n.text.contains("2 callout length setting(s) adjusted")));
+    assert!(startup.notices.iter().any(|n| n.text.contains("1 \"show all labels\" setting(s)")));
+    let mut opened = Session::new(Project::default());
+    opened.run("project.openText", &json!({"text":text})).unwrap();
+    assert_eq!(opened.notices.iter().filter(|n| n.text.contains("while opening the project")).count(), 3);
+    assert!(!serde_json::to_string(&opened.project).unwrap().contains("label_read_notices"));
+    let mut excess: Value = serde_json::from_str(&clean).unwrap();
+    excess["styles"][0]["labels"]["moved"] =
+        Value::Array((0..=rustgis_map::symbology::MAX_MOVED_LABELS).map(|id| json!({"id":id,"at":[0.0,0.0]})).collect());
+    let capped = Session::new(Project::from_json(&excess.to_string()).unwrap());
+    assert_eq!(capped.notices.len(), 1);
+    assert!(capped.notices[0].text.contains("1 invalid, duplicate or excess moved-label"));
+}
+
+/// A style's saved label moves name the features of the layer it was made from: applied, the
+/// layer keeps its own moves instead, and says what it left out; a style without moves is quiet.
+#[test]
+fn applying_a_style_keeps_the_layers_own_label_moves() {
+    let mut s = world();
+    let id = s.map().layer_by_name("Cities").unwrap().id;
+    let ids: Vec<u64> = s.map().layer(id).unwrap().dataset.features.iter().take(2).map(|f| f.id).collect();
+    let said = |s: &Session, mark| s.notices_since(mark).iter().filter(|n| n.text.contains("label move(s)")).count();
+    s.run("style.new", &json!({"layer": id, "name": "Plain"})).unwrap();
+    s.run("labels.move", &json!({"layer": id, "feature": ids[0], "to": [1, 1]})).unwrap();
+    s.run("style.new", &json!({"layer": id, "name": "Moved"})).unwrap();
+    s.run("labels.move", &json!({"layer": id, "feature": ids[0], "to": null})).unwrap();
+    s.run("labels.move", &json!({"layer": id, "feature": ids[1], "to": [2, 2]})).unwrap();
+    // A style that places the labels as they are keeps them locked, the layer's moves and all.
+    s.run("style.new", &json!({"layer": id, "name": "Same"})).unwrap();
+    s.map_mut().label_lock = Some(vec![((id, 0, 0, 0), rustgis_map::LockedPlace::default())]);
+    s.run("style.apply", &json!({"layer": id, "name": "Same"})).unwrap();
+    assert!(s.map().label_lock.is_some(), "placement unchanged keeps the lock");
+    assert_eq!(s.map().layer(id).unwrap().labels.default.moved_to(ids[1]), Some([2.0, 2.0]));
+    let mark = s.notice_mark();
+    s.run("style.apply", &json!({"layer": id, "name": "Plain"})).unwrap();
+    assert_eq!(said(&s, mark), 0, "{:?}", s.notices_since(mark));
+    let mark = s.notice_mark();
+    s.run("style.apply", &json!({"layer": id, "name": "Moved"})).unwrap();
+    let labels = &s.map().layer(id).unwrap().labels.default;
+    assert_eq!((labels.moved_to(ids[0]), labels.moved_to(ids[1])), (None, Some([2.0, 2.0])));
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("1 saved label move(s) in style Moved not applied")));
+}
+
+/// A project template keeps no features, so no saved label moves either, and says so.
+#[test]
+fn a_project_template_leaves_out_label_moves() {
+    let dir = std::env::temp_dir().join(format!("rustgis-template-moves-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("t.rgis");
+    let mut s = world();
+    let mark = s.notice_mark();
+    s.run("project.saveTemplate", &json!({"path": path})).unwrap();
+    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("label move(s)")));
+    let id = s.map().layer_by_name("Cities").unwrap().id;
+    let feature = s.map().layer(id).unwrap().dataset.features[0].id;
+    s.run("labels.move", &json!({"layer": id, "feature": feature, "to": [1, 1]})).unwrap();
+    // A style saved from the layer holds the move too.
+    s.run("style.new", &json!({"layer": id, "name": "Moved"})).unwrap();
+    let mark = s.notice_mark();
+    s.run("project.saveTemplate", &json!({"path": path})).unwrap();
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("2 saved label move(s) left out of the template")));
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(!saved.to_string().contains("\"moved\""));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A map file or layer file read on its own reports discarded label settings as a project does
+/// (Import map, Import Styles, Add Layer File); clean files stay quiet.
+#[test]
+fn map_and_layer_files_report_label_setting_losses() {
+    let s = world();
+    let map = serde_json::to_value(s.map()).unwrap();
+    let layer = serde_json::to_value(s.map().layer_by_name("Cities").unwrap()).unwrap();
+    let damage = |labels: &mut Value| {
+        labels["moved"] = json!("damaged");
+        labels["callout"] = json!(900);
+        labels["show_all"] = json!(3);
+    };
+    let mut bad_map = map.clone();
+    let i = bad_map["layers"].as_array().unwrap().iter().position(|l| l["name"] == "Cities").unwrap();
+    damage(&mut bad_map["layers"][i]["labels"]);
+    let mut bad_layer = layer.clone();
+    damage(&mut bad_layer["labels"]);
+    let said = |cmd: &str, text: &Value| {
+        let mut s = world();
+        let mark = s.notice_mark();
+        s.run(cmd, &json!({"text": text.to_string()})).unwrap();
+        s.notices_since(mark).iter().filter(|n| n.text.contains("while opening the")).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    for (cmd, clean, bad) in [
+        ("map.import", &map, &bad_map),
+        ("style.import", &map, &bad_map),
+        ("style.import", &layer, &bad_layer),
+        ("layer.addLayerFile", &layer, &bad_layer),
+    ] {
+        assert!(said(cmd, clean).is_empty(), "{cmd}: {:?}", said(cmd, clean));
+        let notes = said(cmd, bad);
+        assert_eq!(notes.len(), 3, "{cmd}: {notes:?}");
+        assert!(notes.iter().any(|n| n.contains("1 invalid, duplicate or excess moved-label")), "{cmd}: {notes:?}");
+        assert!(notes.iter().any(|n| n.contains("1 callout length")), "{cmd}: {notes:?}");
+        assert!(notes.iter().any(|n| n.contains("1 \"show all labels\"")), "{cmd}: {notes:?}");
+    }
+}
+
 /// A streamed layer holds only the window in view: a lock's entry for a feature outside it stays
 /// when the window changes (#1135).
 #[test]
@@ -3773,7 +4136,7 @@ fn a_lock_holds_for_a_streamed_layers_features_outside_its_window() {
     let before = s.project.clone();
     // The window moves off the feature: no longer shared with the copy, and without its id.
     s.map_mut().layer_mut(id).unwrap().dataset.features = Vec::new().into();
-    crate::forget_locks_of_removed_features(&before, &mut s.project);
+    crate::forget_label_state_of_removed_features(&before, &mut s.project);
     assert_eq!(s.map().label_lock.as_ref().map(Vec::len), Some(1));
     drop(s);
     remove_shp(&p);
@@ -3809,6 +4172,75 @@ fn a_change_to_the_label_classes_locks_the_labels_again() {
         draw(&mut s);
         assert!(s.map().label_lock.is_some(), "{id}: locked on the next frame");
     }
+}
+
+/// Changes that affect collision placement discard the lock; a new class inherits styling,
+/// but not feature-specific manual positions.
+#[test]
+fn label_collision_changes_refresh_locks_without_copying_moves() {
+    let mut s = world();
+    let id = s.map().layer_by_name("Cities").unwrap().id;
+    let feature = s.map().layer(id).unwrap().dataset.features[0].id;
+    for params in [json!({"showAll":true}), json!({"callout":true}), json!({"callout":false})] {
+        s.map_mut().label_lock = Some(vec![((id, feature, 0, 0), Default::default())]);
+        let mut p = params;
+        p["layer"] = json!(id);
+        s.run("labels.placement", &p).unwrap();
+        assert!(s.map().label_lock.is_none(), "{p} changes collision placement");
+    }
+    s.run("labels.move", &json!({"layer":id,"feature":feature,"to":[1,1]})).unwrap();
+    s.run("labels.class.add", &json!({"layer":id,"name":"New"})).unwrap();
+    let labels = &s.map().layer(id).unwrap().labels;
+    assert_eq!(labels.default.moved.len(), 1);
+    assert!(labels.class("New").unwrap().moved.is_empty());
+}
+
+/// A service refresh assigns new ids: default and named-class moves must not attach to them,
+/// and the discarded moves are counted. Undo restores the old features and positions.
+#[test]
+fn service_refresh_resets_saved_label_moves_with_a_notice() {
+    let server = ogc_server::Server::group_fixture();
+    let mut s = Session::new(Project::default());
+    s.run("service.import", &json!({"url":server.root()})).unwrap();
+    let id = s.map().layer_by_name("Places").unwrap().id;
+    let feature = s.map().layer(id).unwrap().dataset.features[0].id;
+    s.run("labels.class.add", &json!({"layer":id,"name":"Named"})).unwrap();
+    for class in [None, Some("Named")] {
+        let mut p = json!({"layer":id,"feature":feature,"to":[1,1]});
+        if let Some(class) = class {
+            p["class"] = json!(class);
+        }
+        s.run("labels.move", &p).unwrap();
+    }
+    let mark = s.notice_mark();
+    s.run("service.refresh", &json!({"layer":id})).unwrap();
+    assert!(s.map().layer(id).unwrap().labels.in_order().all(|c| c.moved.is_empty()));
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("2 saved label move(s) reset")));
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(s.map().layer(id).unwrap().labels.in_order().map(|c| c.moved.len()).sum::<usize>(), 2);
+    s.run("edit.redo", &Value::Null).unwrap();
+    let mark = s.notice_mark();
+    s.run("service.refresh", &json!({"layer":id})).unwrap();
+    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("saved label move(s) reset")));
+}
+
+/// A refresh whose service no longer offers a layer says how many saved moves went with it.
+#[test]
+fn service_refresh_says_how_many_moves_go_with_a_dropped_layer() {
+    let server = ogc_server::Server::group_fixture();
+    let mut s = Session::new(Project::default());
+    let group = s.run("service.import", &json!({"url":server.root()})).unwrap()["group"].clone();
+    let routes = s.map().layer_by_name("Routes").unwrap().id;
+    let feature = s.map().layer(routes).unwrap().dataset.features[0].id;
+    s.run("labels.move", &json!({"layer":routes,"feature":feature,"to":[1,1]})).unwrap();
+    // The service now offers only Places.
+    let items = json!({"rel": "items", "type": "application/geo+json", "href": "collections/places/items?key=fixture-key"});
+    server.set(ogc_server::CATALOG, &json!({"collections": [{"id": "places", "title": "Places", "links": [items]}]}).to_string());
+    let mark = s.notice_mark();
+    // The whole group: a refresh of one layer leaves its siblings as they are.
+    s.run("service.refresh", &json!({"group":group})).unwrap();
+    assert!(s.map().layer_by_name("Routes").is_none());
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("1 saved label move(s) dropped with layers")));
 }
 
 /// Label classes by command (#618): added from Default and checked before it, renamed, given
@@ -5296,17 +5728,56 @@ fn layout_surrounds_take_cartographic_options() {
     ));
     s.run("layout.update", &json!({"element": bar, "divisions": "2"})).unwrap();
     assert!(matches!(find(&s, "scaleBar").kind, ElementKind::ScaleBar { units: ScaleUnits::Miles, divisions: 2, .. }));
-    for bad in [json!({"units": "parsecs"}), json!({"divisions": "many"}), json!({"style": "zigzag"})] {
+    // Its colours: the lines and labels, and the alternating bar's light divisions; one given
+    // leaves the other as it was.
+    assert!(matches!(
+        find(&s, "scaleBar").kind,
+        ElementKind::ScaleBar { color, fill, .. } if color == Rgba::rgb(0x22, 0x22, 0x22) && fill == Rgba::rgb(0xFF, 0xFF, 0xFF)
+    ));
+    s.run("layout.update", &json!({"element": bar, "color": "#1F4E79"})).unwrap();
+    s.run("layout.update", &json!({"element": bar, "fill": "#00000080"})).unwrap();
+    assert!(matches!(find(&s, "scaleBar").kind, ElementKind::ScaleBar { fill, .. } if fill == Rgba::new(0, 0, 0, 0x80)));
+    s.run("layout.update", &json!({"element": bar, "fill": "#FDE68A"})).unwrap();
+    assert!(matches!(
+        find(&s, "scaleBar").kind,
+        ElementKind::ScaleBar { color, fill, divisions: 2, .. }
+            if color == Rgba::rgb(0x1F, 0x4E, 0x79) && fill == Rgba::rgb(0xFD, 0xE6, 0x8A)
+    ));
+    let bad = [
+        json!({"units": "parsecs"}),
+        json!({"divisions": "many"}),
+        json!({"style": "zigzag"}),
+        json!({"color": "red"}),
+        json!({"fill": "#12"}),
+        json!({"fill": 5}),
+        json!({"color": [255, 0, 0]}),
+    ];
+    for bad in bad {
         let mut p = bad.clone();
         p["element"] = json!(bar);
         assert!(s.run("layout.update", &p).is_err(), "{bad}");
     }
-    let added = s.run("layout.addElement", &json!({"kind": "scaleBar", "units": "feet", "style": "line"})).unwrap()["element"]
-        .as_u64()
-        .unwrap() as u32;
+    // A text's colour is refused as anything but text, when updated as when added; null keeps it.
+    let text = s.run("layout.addElement", &json!({"kind": "text", "text": "T", "color": "#1F4E79"})).unwrap();
+    let text = text["element"].as_u64().unwrap() as u32;
+    let text_color = |s: &Session| match &s.project.layouts[0].element(text).unwrap().kind {
+        ElementKind::Text { color, .. } => *color,
+        _ => panic!("a text"),
+    };
+    for bad in [json!(5), json!([255, 0, 0]), json!(true)] {
+        assert!(s.run("layout.addElement", &json!({"kind": "text", "text": "U", "color": bad})).is_err(), "{bad}");
+        assert!(s.run("layout.update", &json!({"element": text, "color": bad})).is_err(), "{bad}");
+    }
+    s.run("layout.update", &json!({"element": text, "color": null, "text": "V"})).unwrap();
+    assert_eq!(text_color(&s), Rgba::rgb(0x1F, 0x4E, 0x79));
+    s.run("layout.update", &json!({"element": text, "color": "#B91C1C"})).unwrap();
+    assert_eq!(text_color(&s), Rgba::rgb(0xB9, 0x1C, 0x1C));
+    let added = s.run("layout.addElement", &json!({"kind": "scaleBar", "units": "feet", "style": "line", "color": "#B91C1C"})).unwrap();
+    let added = added["element"].as_u64().unwrap() as u32;
     assert!(matches!(
         s.project.layouts[0].element(added).unwrap().kind,
-        ElementKind::ScaleBar { units: ScaleUnits::Feet, divisions: 4, style: ScaleBarStyle::Line, .. }
+        ElementKind::ScaleBar { units: ScaleUnits::Feet, divisions: 4, style: ScaleBarStyle::Line, color, fill, .. }
+            if color == Rgba::rgb(0xB9, 0x1C, 0x1C) && fill == Rgba::rgb(0xFF, 0xFF, 0xFF)
     ));
     // The page draws with them all, and they survive a save.
     let out = std::env::temp_dir().join(format!("rustgis-surrounds-{}.png", std::process::id()));
@@ -14363,6 +14834,106 @@ fn geocoding_places_and_addresses() {
     assert!(crate::cmd::geocode::check_batch(&g, 101).unwrap_err().contains("100"));
 }
 
+/// PDOK's Locatieserver as the geocoder (a local server answering as it does): places found by
+/// name, a table's Dutch addresses turned into points, and the answers' entries without a usable
+/// point counted in a notice (and no notice when every entry has one).
+#[test]
+fn geocoding_with_the_locatieserver() {
+    use crate::render::rustgis_tiles::geocode::Geocoder;
+    let clean = br#"{"response":{"numFound":2,"start":0,"docs":[
+        {"weergavenaam":"Damrak 1, 1012LG Amsterdam","centroide_ll":"POINT(4.89803846 52.37714446)"},
+        {"weergavenaam":"Damrak, Amsterdam","centroide_ll":"POINT(4.89580599 52.37513402)"}]}}"#;
+    let lossy = br#"{"response":{"numFound":2,"start":0,"docs":[
+        {"weergavenaam":"Coolsingel, Rotterdam","centroide_ll":"POINT(4.4795)"},
+        {"weergavenaam":"Coolsingel 40, 3011AD Rotterdam","centroide_ll":"POINT(4.47920127 51.92272076)"}]}}"#;
+    let nothing = br#"{"response":{"numFound":0,"start":0,"docs":[]}}"#;
+    // Each request's path and query exactly as the Locatieserver kind builds them.
+    let path = |q: &str, limit: usize| {
+        let g = Geocoder::new(Some("locatieserver"), Some("http://127.0.0.1")).unwrap();
+        g.url(q, limit).trim_start_matches("http://127.0.0.1").to_string()
+    };
+    let (base, asked) = serve_files(vec![
+        (path("Damrak 1, Amsterdam", 5), clean.to_vec()),
+        (path("Damrak 1, Amsterdam", 1), clean.to_vec()),
+        (path("Coolsingel 40, Rotterdam", 1), lossy.to_vec()),
+        (path("Nergensstraat 9, Nergenshuizen", 1), nothing.to_vec()),
+        (path("Kapot", 5), br#"{"response":{"docs":[{"weergavenaam":"x","centroide_ll":"POINT(x y)"}]}}"#.to_vec()),
+    ]);
+    let url = format!("{base}/free");
+    let left_out =
+        |s: &Session| s.notices.iter().filter(|n| n.text.contains("no usable position")).map(|n| n.text.clone()).collect::<Vec<_>>();
+    let mut s = Session::new(Project::default());
+    let r = s.run("map.findPlace", &json!({"query": "Damrak 1, Amsterdam", "provider": "locatieserver", "url": url})).unwrap();
+    assert_eq!(r["count"], 2, "{r}");
+    assert_eq!(r["places"][0]["name"], "Damrak 1, 1012LG Amsterdam");
+    assert_eq!((r["places"][0]["lon"].as_f64(), r["places"][0]["lat"].as_f64()), (Some(4.89803846), Some(52.37714446)));
+    // The camera went to the first place, longitude and latitude the right way round.
+    let c = s.map().to_lonlat(s.map().camera.center).unwrap();
+    assert!((c.x - 4.898).abs() < 0.01 && (c.y - 52.377).abs() < 0.01, "{c:?}");
+    assert!(left_out(&s).is_empty(), "a clean answer leaves nothing out: {:?}", left_out(&s));
+    // A table of Dutch addresses: one found, one found after an entry without a usable point
+    // (counted), one not found.
+    let csv = "id,street,city\n1,Damrak 1,Amsterdam\n2,Coolsingel 40,Rotterdam\n3,Nergensstraat 9,Nergenshuizen\n";
+    s.run("layer.addDataText", &json!({"fileName": "adressen.csv", "text": csv})).unwrap();
+    let r = s
+        .run("layer.geocode", &json!({"table": "adressen", "address": ["street", "city"], "provider": "locatieserver", "url": url}))
+        .unwrap();
+    assert_eq!((r["matched"].as_u64(), r["unmatched"].as_u64()), (Some(2), Some(1)), "{r}");
+    let l = s.map().layer_by_name("adressen (geocoded)").unwrap();
+    let points: Vec<_> = l.dataset.features.iter().map(|f| f.geometry.clone()).collect();
+    assert_eq!(points[0], Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(4.89803846, 52.37714446))));
+    assert_eq!(points[1], Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(4.47920127, 51.92272076))));
+    assert_eq!(points[2], None);
+    let geocoded = l.dataset.fields.len() - 1;
+    assert_eq!(l.dataset.value(1, geocoded).to_string(), "Coolsingel 40, 3011AD Rotterdam");
+    assert_eq!(left_out(&s).len(), 1, "one notice for the run: {:?}", left_out(&s));
+    assert!(left_out(&s)[0].starts_with("1 of the geocoder's places"), "{:?}", left_out(&s));
+    // An answer whose every place is unusable is an error, not "nothing found"; a query longer
+    // than the Locatieserver takes isn't sent cut short.
+    let e = s.run("map.findPlace", &json!({"query": "Kapot", "provider": "locatieserver", "url": url})).unwrap_err();
+    assert!(e.contains("none with a usable position"), "{e}");
+    let e = s.run("map.findPlace", &json!({"query": "a".repeat(401), "provider": "locatieserver", "url": url})).unwrap_err();
+    assert!(e.contains("up to 400"), "{e}");
+    // Every request asked the Locatieserver's search, for the kinds of place it is given.
+    let asked = asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 5, "{asked:?}");
+    assert!(asked.iter().all(|p| p.starts_with("/free?q=") && p.contains("&fq=type%3A%28provincie%20OR")), "{asked:?}");
+    // The public server takes a whole table, a few requests a second.
+    let g = Geocoder::new(Some("locatieserver"), None).unwrap();
+    assert!(crate::cmd::geocode::check_batch(&g, 5000).is_ok());
+    assert!(crate::cmd::geocode::check_batch(&g, 10_001).unwrap_err().contains("10000"));
+    assert!(g.spacing_ms() > 0);
+}
+
+/// Addresses longer than the Locatieserver takes, ahead of one it finds: each fails on its own
+/// (counted in the run's notice) and isn't sent, rather than counting as the server refusing
+/// requests, which would stop the run before the address it finds.
+#[test]
+fn geocoding_skips_addresses_too_long_for_the_server() {
+    use crate::render::rustgis_tiles::geocode::Geocoder;
+    let clean = br#"{"response":{"numFound":1,"start":0,"docs":[
+        {"weergavenaam":"Damrak 1, 1012LG Amsterdam","centroide_ll":"POINT(4.89803846 52.37714446)"}]}}"#;
+    let g = Geocoder::new(Some("locatieserver"), Some("http://127.0.0.1")).unwrap();
+    let path = g.url("Damrak 1, Amsterdam", 1).trim_start_matches("http://127.0.0.1").to_string();
+    let (base, asked) = serve_files(vec![(path, clean.to_vec())]);
+    let mut csv = "id,address\n".to_string();
+    for (i, c) in ["a", "b", "c", "d", "e", "f"].iter().enumerate() {
+        csv.push_str(&format!("{i},{}\n", c.repeat(401)));
+    }
+    csv.push_str("9,\"Damrak 1, Amsterdam\"\n");
+    let mut s = Session::new(Project::default());
+    s.run("layer.addDataText", &json!({"fileName": "lang.csv", "text": csv})).unwrap();
+    let r = s
+        .run("layer.geocode", &json!({"table": "lang", "address": "address", "provider": "locatieserver", "url": format!("{base}/free")}))
+        .unwrap();
+    assert_eq!((r["matched"].as_u64(), r["unmatched"].as_u64()), (Some(1), Some(6)), "{r}");
+    let failed: Vec<_> = s.notices.iter().filter(|n| n.text.contains("couldn't be looked up")).map(|n| n.text.clone()).collect();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(failed[0].starts_with("6 addresses") && failed[0].contains("401 characters"), "{failed:?}");
+    // Only the address that fits was sent.
+    assert_eq!(asked.lock().unwrap().len(), 1);
+}
+
 /// The SQL workspace's commands: a query's first rows without a layer, and a database's columns
 /// (through DuckDB when it is installed; without it, they say how to get it).
 #[cfg(not(target_arch = "wasm32"))]
@@ -15454,6 +16025,14 @@ fn lidar_sample_refuses_exports_and_statistics() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// The Zarr tests that read steps share the process's slice cache: one at a time, so another's
+/// steps don't push out the one a test expects kept.
+#[cfg(not(target_arch = "wasm32"))]
+fn zarr_cache_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    L.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// A Zarr store in a temporary folder: `t` over three monthly steps (days since 2001-01-01: 0,
 /// 31, 59) on a 3 × 4 grid, step `k`'s values `100·k + i`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -15508,6 +16087,7 @@ fn zarr_store_at(tag: &str, days: &[i32]) -> (std::path::PathBuf, String) {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_zarr_series_at_a_point() {
+    let _cache = zarr_cache_lock();
     let (dir, path) = zarr_store_over_time("series");
     let mut s = Session::new(Project::default());
     // At 1°E 30°N: the stored row 2 (latitudes 10, 20, 30), column 0, so 100·k + 8 at step k.
@@ -15563,6 +16143,7 @@ fn a_zarr_series_at_a_point() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_zarr_variable_summarised_over_time() {
+    let _cache = zarr_cache_lock();
     let (dir, path) = zarr_store_over_time("reduce");
     let mut s = Session::new(Project::default());
     // The first pixel (north up) is the stored cell 8: 8, 108 and 208 at the three steps.
@@ -16535,6 +17116,7 @@ fn a_stac_collection_summarised_over_time() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_zarr_variable_follows_the_time_slider() {
+    let _cache = zarr_cache_lock();
     let (dir, path) = zarr_store_over_time("follow");
     let mut s = Session::new(Project::default());
     let id = s.run("layer.addZarr", &json!({"path": path, "variable": "t", "time": true})).unwrap()["layer"].as_u64().unwrap() as u32;
@@ -16614,6 +17196,78 @@ fn a_zarr_variable_follows_the_time_slider() {
     assert!(fresh.map().time.is_none(), "a store that can't be read leaves the slider as it was");
     let _ = std::fs::remove_dir_all(dir3);
     let _ = std::fs::remove_dir_all(dir2);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Step `k`'s cells of [`zarr_store_at`]'s variable (`100 k + cell`), as its chunk file holds them.
+#[cfg(not(target_arch = "wasm32"))]
+fn f32s_of(base: i32) -> Vec<u8> {
+    (0..12).flat_map(|i| ((base + i) as f32).to_le_bytes()).collect()
+}
+
+/// In the app a time slider move doesn't wait for a Zarr step (#1291 step 3): the step is read on
+/// a thread of its own, the layer showing the step before until it lands; one that fails says why
+/// once it lands. An animation's frames still read each step before they draw.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_zarr_step_is_read_off_the_frame_in_the_app() {
+    let _cache = zarr_cache_lock();
+    let (dir, path) = zarr_store_over_time("offframe");
+    let mut s = Session::new(Project::default());
+    s.zarr_off_frame = true;
+    let id = s.run("layer.addZarr", &json!({"path": path, "variable": "t", "time": true})).unwrap()["layer"].as_u64().unwrap() as u32;
+    let first = |s: &Session| s.map().layer(id).and_then(|l| l.raster.as_ref()).and_then(|r| r.data.as_ref()).map(|d| d.bands[0].data[0]);
+    assert_eq!(first(&s), Some(8.0));
+    let landed = |s: &mut Session, want: Option<f32>| {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while first(s) != want {
+            assert!(std::time::Instant::now() < end, "the step never landed: {:?}", first(s));
+            s.follow_time_landed();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    // The move returns at once: the layer shows the step before, then step 2 once it lands;
+    // playing waits for it meanwhile.
+    s.run("time.goTo", &json!({"step": 2})).unwrap();
+    landed(&mut s, Some(208.0));
+    assert!(!s.zarr_waiting(), "the step shown is the slider's");
+    // A step read before shows at once.
+    s.run("time.goTo", &json!({"step": 0})).unwrap();
+    assert_eq!(first(&s), Some(8.0), "a kept step shows without waiting");
+    // A step that can't be read empties the layer and says why, once.
+    std::fs::write(std::path::Path::new(&path).join("t/1.0.0"), b"short").unwrap();
+    let mark = s.notice_mark();
+    s.run("time.goTo", &json!({"step": 1})).unwrap();
+    landed(&mut s, None);
+    let errors: Vec<_> = s.notices_since(mark).iter().filter(|n| n.error).map(|n| n.text.clone()).collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    s.follow_time_landed();
+    assert_eq!(s.notices_since(mark).iter().filter(|n| n.error).count(), 1, "said once");
+    // Two layers on the failing step: one notice, with a count.
+    s.run("time.goTo", &json!({"step": 0})).unwrap();
+    s.run("layer.addZarr", &json!({"path": path, "variable": "t", "time": true, "name": "again"})).unwrap();
+    let mark = s.notice_mark();
+    s.run("time.goTo", &json!({"step": 1})).unwrap();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while s.zarr_waiting() {
+        assert!(std::time::Instant::now() < end, "the failing step never landed");
+        s.follow_time_landed();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let errors: Vec<_> = s.notices_since(mark).iter().filter(|n| n.error).map(|n| n.text.clone()).collect();
+    assert!(errors.len() == 1 && errors[0].contains("and 1 more layer:"), "{errors:?}");
+    // A script's line waits for its step, so the next line reads it.
+    s.run("time.goTo", &json!({"step": 0})).unwrap();
+    std::fs::write(std::path::Path::new(&path).join("t/1.0.0"), f32s_of(100)).unwrap();
+    let ran = s.run("script.run", &json!({"script": "time.goTo {\"step\": 1}"})).unwrap();
+    assert!(ran["ran"].as_array().is_some_and(|r| r.len() == 1), "{ran}");
+    assert_eq!(first(&s), Some(108.0), "a script's move is read before its next line");
+    // The animation's frames draw their own steps: step 2 is read before its frame.
+    let zip = std::env::temp_dir().join(format!("rustgis-zarr-offframe-{}.zip", std::process::id()));
+    s.run("time.goTo", &json!({"step": 0})).unwrap();
+    let r = s.run("time.export", &json!({"path": zip.display().to_string(), "width": 64, "height": 48, "from": "2001-03-01"})).unwrap();
+    assert_eq!(r["frames"], 1, "{r}");
+    let _ = std::fs::remove_file(zip);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -20465,7 +21119,7 @@ fn ogc_group_refresh_keeps_children_across_rotated_keys_and_rejects_bad_answers(
     let group = added["group"].clone();
     let ids: Vec<u32> = s.map().service_groups[0].children.iter().map(|c| c.layer).collect();
     s.run("layer.rename", &json!({"layer":ids[0], "name":"Renamed"})).unwrap();
-    s.map_mut().label_lock = Some(vec![((ids[0], 0, 0, 0), 0), ((ids[1], 0, 0, 0), 0)]);
+    s.map_mut().label_lock = Some(vec![((ids[0], 0, 0, 0), Default::default()), ((ids[1], 0, 0, 0), Default::default())]);
 
     // A rotated key changes every source address but not the collections: the children stay.
     let mut q = doc("rotated-key");
@@ -27748,6 +28402,11 @@ fn raster_tools_run_on_another_thread() {
 #[test]
 fn exports_run_on_another_thread() {
     use crate::cmd::exports::{export_land, export_start, runs_in_background};
+    // A path as it appears in JSON, as `PATH`: on Windows its backslashes are escaped there.
+    let unpathed_json = |v: &Value, path: &str| {
+        let escaped = json!(path).to_string();
+        v.to_string().replace(escaped.trim_matches('"'), "PATH")
+    };
     use rustgis_analysis::control::Control;
     let mut s = world();
     s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
@@ -27755,7 +28414,12 @@ fn exports_run_on_another_thread() {
     let dir = std::env::temp_dir().join(format!("rustgis-exports-thread-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let at = |name: &str| dir.join(name).display().to_string();
+    s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "map"})).unwrap();
     for (command, file, p) in [
+        ("share.exportMap", "map.png", json!({"width": 64, "height": 48})),
+        ("layout.export", "layout.png", json!({"dpi": 48})),
+        ("layout.export", "layout.pdf", json!({"dpi": 48})),
+        ("layout.export", "layout.svg", json!({"dpi": 48})),
         ("share.exportLayer", "countries.geojson", json!({"layer": "Countries"})),
         ("share.exportLayer", "countries.shp", json!({"layer": "Countries"})),
         ("share.exportLayer", "countries.gpkg", json!({"layer": "Countries", "crs": "EPSG:3857"})),
@@ -27775,11 +28439,19 @@ fn exports_run_on_another_thread() {
         let mark = s.notice_mark();
         let answer_here = s.run(command, &with(&here)).unwrap();
         let said_here = said(&s, mark, &here);
+        let logged = |s: &Session| s.log.entries().last().map(|e| (e.command.clone(), e.params.clone(), e.ok));
+        let logged_here = logged(&s);
+        assert!(logged_here.as_ref().is_some_and(|(c, ..)| c == command), "{command}: logged where it's called");
         let run = export_start(&mut s, command, &with(&there)).unwrap();
-        let mark = s.notice_mark();
-        let wrote = std::thread::spawn(move || run.run(&Control::new())).join().unwrap().unwrap();
+        let (mark, started) = (s.notice_mark(), run.started());
+        let wrote = std::thread::spawn(move || run.run(&Control::new())).join().unwrap();
         assert!(s.notices_since(mark).is_empty(), "{command}: nothing is said before it lands");
-        let answer_there = export_land(&mut s, wrote);
+        let answer_there = export_land(&mut s, started, wrote).unwrap();
+        // The session's log has it as it has the export run here.
+        let there_params = logged(&s).map(|(c, p, ok)| (c, unpathed_json(&p, &there), ok));
+        assert_eq!(there_params, logged_here.map(|(c, p, ok)| (c, unpathed_json(&p, &here), ok)), "{command} {file}");
+        let filed = s.diagnostics.records().last().map(|r| r.source.clone());
+        assert_eq!(filed.as_deref(), Some(command), "the history files what it said under the command");
         assert_eq!(said(&s, mark, &there), said_here, "{command} {file}");
         // The path as it appears in JSON: on Windows its backslashes are escaped there.
         let unpathed = |v: &Value, path: &str| {
@@ -27804,8 +28476,75 @@ fn exports_run_on_another_thread() {
     assert!(export_start(&mut s, "share.exportLayer", &json!({"layer": "nowhere", "path": at("x.geojson")})).is_err());
     assert!(export_start(&mut s, "share.exportLayer", &json!({"layer": "Countries", "path": at("x.gpkg"), "crs": "EPSG:nope"})).is_err());
     assert!(export_start(&mut s, "share.exportRaster", &json!({"layer": dem, "path": at("x.tif"), "band": 99})).is_err());
-    // Map and layout exports draw the map: they still run where they're called.
-    assert!(runs_in_background("share.exportMap").is_none() && runs_in_background("layout.export").is_none());
+    assert!(export_start(&mut s, "layout.export", &json!({"path": at("x.jpg")})).is_err(), "a format it can't write");
+    // Map and layout exports draw a copy of what was there when they started: moving the map or
+    // removing the layout meanwhile changes nothing in the file.
+    let (here, there) = (at("still_here.png"), at("still_there.png"));
+    s.run("share.exportMap", &json!({"path": here, "width": 64, "height": 48})).unwrap();
+    let run = export_start(&mut s, "share.exportMap", &json!({"path": there, "width": 64, "height": 48})).unwrap();
+    s.map_mut().camera.res *= 4.0;
+    run.run(&Control::new()).unwrap();
+    assert_eq!(std::fs::read(&there).unwrap(), std::fs::read(&here).unwrap());
+    let (here, there) = (at("still_here.svg"), at("still_there.svg"));
+    s.map_mut().camera.res /= 4.0;
+    s.run("layout.export", &json!({"path": here, "dpi": 48})).unwrap();
+    let run = export_start(&mut s, "layout.export", &json!({"path": there, "dpi": 48})).unwrap();
+    let layouts = std::mem::take(&mut s.project.layouts);
+    run.run(&Control::new()).unwrap();
+    assert_eq!(std::fs::read(&there).unwrap(), std::fs::read(&here).unwrap());
+    s.project.layouts = layouts;
+    // A layout export that fails says why when it lands, as it does here.
+    let nowhere = dir.join("no").join("such.png").display().to_string();
+    let here = s.run("layout.export", &json!({"path": nowhere, "dpi": 48})).unwrap_err();
+    let run = export_start(&mut s, "layout.export", &json!({"path": nowhere, "dpi": 48})).unwrap();
+    let started = run.started();
+    let mark = s.notice_mark();
+    assert_eq!(export_land(&mut s, started, run.run(&Control::new())).unwrap_err(), here);
+    let errors: Vec<_> = s.notices_since(mark).iter().filter(|n| n.error).map(|n| n.text.clone()).collect();
+    assert_eq!(errors, std::slice::from_ref(&here), "its failure is said once");
+    let filed = s.diagnostics.records().last().map(|r| (r.source.clone(), r.severity));
+    assert_eq!(filed, Some(("layout.export".to_string(), rustgis_data::diagnostics::Severity::Error)), "under the command");
+    assert!(s.log.entries().last().is_some_and(|e| e.command == "layout.export" && !e.ok), "a failed one is logged as failed");
+    // A streamed layer's source that failed on the copy is marked on its live layer, unless that
+    // was opened from somewhere else meanwhile.
+    let li = s.map().layers.iter().position(|l| l.name == "Countries").unwrap();
+    let mut src = rustgis_map::source::SourceLayer::default();
+    src.path = Some("gone.fgb".into());
+    s.map_mut().layers[li].source = Some(src.clone());
+    let mut copy = s.map().detached();
+    let mut failed = src.clone();
+    failed.error = Some("gone.fgb: not found".into());
+    copy.layers[li].source = Some(failed);
+    let land = |s: &mut Session, copy: &rustgis_map::Map| {
+        let wrote = crate::cmd::exports::drawn(std::slice::from_ref(copy), Vec::new(), Ok(json!({})), at("drawn.png"));
+        let started = export_start(s, "share.exportMap", &json!({"path": at("drawn.png")})).unwrap().started();
+        export_land(s, started, wrote).unwrap();
+        s.map().layers[li].source.as_ref().and_then(|src| src.error.clone())
+    };
+    assert_eq!(land(&mut s, &copy).as_deref(), Some("gone.fgb: not found"));
+    s.map_mut().layers[li].source.as_mut().unwrap().error = None;
+    s.map_mut().layers[li].source.as_mut().unwrap().path = Some("found.fgb".into());
+    let mark = s.notice_mark();
+    assert_eq!(land(&mut s, &copy), None, "a source opened afresh keeps its own state");
+    let said = s.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<_>>().join("\n");
+    assert!(said.contains("Countries isn't in the file") && said.contains("gone.fgb: not found"), "and the file's gap is said: {said}");
+    // Opened afresh and failing again: still said, as the file lacks the layer either way.
+    s.map_mut().layers[li].source.as_mut().unwrap().error = Some("found.fgb: not found".into());
+    let mark = s.notice_mark();
+    land(&mut s, &copy);
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("Countries isn't in the file")));
+    // Several left out: one notice, with a count.
+    let mut two = copy.clone();
+    let other = two.layers.iter().position(|l| l.name != "Countries").unwrap();
+    let mut gone = rustgis_map::source::SourceLayer::default();
+    gone.path = Some("gone.fgb".into());
+    gone.error = Some("gone.fgb: not found".into());
+    two.layers[other].source = Some(gone);
+    let mark = s.notice_mark();
+    land(&mut s, &two);
+    let missing: Vec<_> = s.notices_since(mark).iter().filter(|n| n.text.contains("in the file")).map(|n| n.text.clone()).collect();
+    assert!(missing.len() == 1 && missing[0].contains("2 layers aren't in the file"), "{missing:?}");
+    s.map_mut().layers[li].source = None;
     let _ = std::fs::remove_dir_all(&dir);
 }
 
