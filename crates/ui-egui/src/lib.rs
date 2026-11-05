@@ -4160,7 +4160,6 @@ impl RustGisApp {
                     if let Err(e) = connectiontree::run_add_url(self, p, origin.as_deref()) {
                         self.session.request_failed(&pending, &e);
                         self.landed_in_dialog(&pending, Err(&e));
-                        self.session.notify(if e.starts_with(&url) { e } else { format!("{url}: {e}") }, true);
                     }
                 }
                 Err(e) => {
@@ -4487,7 +4486,6 @@ impl RustGisApp {
         for p in self.session.take_url_requests() {
             if let Err(e) = self.run("ui.addUrl", p.clone()) {
                 self.session.request_failed(&p, &e);
-                self.session.notify(e, true);
             }
         }
         // Plugin commands that waited for `host.fetch` answers (the browser) run again once
@@ -5264,6 +5262,33 @@ mod record_tests {
         let other = add("200 OK", crate::serviceui::downloading("Rivers"));
         assert_eq!(other.dialogs.info, Some(crate::serviceui::downloading("Rivers")));
         assert_eq!(other.dialogs.error, None);
+    }
+
+    /// A `ui.addUrl` the app runs that fails is said once, by running it: after a probe found a
+    /// file to download whole, and for a request a command queued.
+    #[test]
+    fn a_failed_ui_add_url_the_app_runs_is_said_once() {
+        let mut app = RustGisApp::with_sample();
+        let p = json!({"url": "https://x.org/a.csv", "connection": "no such connection"});
+        let errors = |app: &RustGisApp, mark| app.session.notices_since(mark).iter().filter(|n| n.error).count();
+        let mark = app.session.notice_mark();
+        let probe: crate::Slot<Result<bool, String>> = Default::default();
+        *probe.lock().unwrap() = Some(Ok(false));
+        app.ui.cog_probes.push((p.clone(), probe));
+        app.poll_data_downloads();
+        assert_eq!(errors(&app, mark), 1, "{:?}", app.session.notices_since(mark));
+        let mark = app.session.notice_mark();
+        app.session.request_url(&p).unwrap();
+        let mut h = egui_kittest::Harness::builder().build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+            },
+            app,
+        );
+        h.step();
+        let app = h.state();
+        assert_eq!(errors(app, mark), 1, "{:?}", app.session.notices_since(mark));
     }
 
     #[test]
