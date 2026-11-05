@@ -292,6 +292,9 @@ pub(crate) struct Retry {
     /// a run that waits again for another download keeps them, so the next run doesn't ask for
     /// those again.
     answered: Vec<(Value, CmdResult, Added)>,
+    /// The errors its earlier runs said, which stay though the runs were undone: the next run does
+    /// the same again, and doesn't repeat them.
+    said: Vec<String>,
     tries: u32,
 }
 
@@ -634,7 +637,16 @@ impl Session {
         }
         // What this run already had answered (it is a rerun waiting again): kept for the next.
         let answered = self.rerun_landed.clone();
-        self.plugin_retries.push(Retry { id: id.to_string(), params: params.clone(), urls, requests: numbers, answered, tries: tries + 1 });
+        let said = self.rerun_said.clone();
+        self.plugin_retries.push(Retry {
+            id: id.to_string(),
+            params: params.clone(),
+            urls,
+            requests: numbers,
+            answered,
+            said,
+            tries: tries + 1,
+        });
         Ok(answer)
     }
 
@@ -710,11 +722,13 @@ impl Session {
                     .filter(|(n, ..)| r.requests.contains(n))
                     .map(|(_, asked, answer, added)| (asked.clone(), answer.clone(), added.clone()));
                 self.rerun_landed = r.answered.iter().cloned().chain(mine).collect();
+                self.rerun_said = r.said;
                 self.retry_tries = r.tries;
                 // Run as the app runs a plugin's command: what it asks for now is left to the app.
                 let res = self.run_leaving_downloads(&r.id, &r.params);
                 self.retry_tries = 0;
                 self.rerun_landed.clear();
+                self.rerun_said.clear();
                 (r.id, res)
             })
             .collect();

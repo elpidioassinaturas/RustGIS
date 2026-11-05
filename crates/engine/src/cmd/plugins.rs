@@ -684,6 +684,7 @@ impl Session {
         let mut requested = Vec::new();
         // The downloads this call leaves to the app: its own, apart from a calling command's.
         let outer = self.call_requests.replace(Vec::new());
+        let mark = self.notice_mark();
         let res = self.guarded(label, mutates, |s| {
             let fetches = fetch::Calls::for_plugin(&plugin.manifest.id);
             let mut bridge = Bridge { s, plugin, fetches, changed: false, requested: false };
@@ -734,8 +735,13 @@ impl Session {
                 self.url_requests.push(q);
             }
         }
+        // The errors this run said stay: the next run, doing the same again, doesn't repeat them.
+        let earlier = self.rerun_said.len();
+        let said: Vec<String> = self.notices_since(mark).iter().filter(|n| n.error).map(|n| n.text.clone()).collect();
+        self.rerun_said.extend(said);
         // The panel's values went back with the failed call: the run again sets them again.
         let res = self.retry_plugin(id, given, pending, requested);
+        self.rerun_said.truncate(earlier);
         if let Err(e) = &res {
             self.notify(e.clone(), true);
         }

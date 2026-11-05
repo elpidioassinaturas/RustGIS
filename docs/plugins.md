@@ -503,8 +503,8 @@ document parsed when it is a JSON object or array.
 - In the web app nothing may wait. A fetch that isn't kept yet answers
   `{"pending": true, "url"}` and starts in the background. The command should then return
   straight away, before doing anything outside the project (writing a file): RustGIS undoes
-  what the call did to the project (its notices stay, and so does anything done outside it),
-  and runs the command
+  what the call did to the project (its error notices stay, and the next run doesn't repeat them;
+  anything done outside the project stays too), and runs the command
   again with the same parameters once every pending answer has landed (up to 8 per call), when
   `host.fetch` answers from what was kept. A command that walks a chain of documents, each
   address taken from the one before, runs once per step, up to 64 times. The browser follows

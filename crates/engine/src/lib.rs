@@ -719,6 +719,8 @@ pub struct Session {
     /// While a plugin command runs again for its downloads: what each one asked for, and what
     /// adding it answered, for its `layer.addUrl` to answer once.
     pub(crate) rerun_landed: Vec<(serde_json::Value, CmdResult, cmd::plugins::fetch::Added)>,
+    /// While a plugin command runs again: the errors its earlier runs said, not said again.
+    pub(crate) rerun_said: Vec<String>,
     /// While plugin commands whose downloads are in run again: the downloads they wait for, still
     /// theirs though the commands are out of `plugin_retries` until each has run.
     pub(crate) rerun_requests: Vec<u64>,
@@ -984,6 +986,7 @@ impl Session {
             next_request: 0,
             call_requests: None,
             rerun_landed: Vec::new(),
+            rerun_said: Vec::new(),
             rerun_requests: Vec::new(),
             retry_tries: 0,
             quiet_failure: false,
@@ -1744,6 +1747,9 @@ impl Session {
     }
 
     fn notice_redacted(&mut self, text: rustgis_data::diagnostics::Redacted, severity: rustgis_data::diagnostics::Severity) {
+        if severity == rustgis_data::diagnostics::Severity::Error && self.rerun_said.iter().any(|said| said == text.as_str()) {
+            return;
+        }
         self.diagnostics.push_redacted(severity, self.diagnostic_source.unwrap_or("Application"), &text);
         self.notices.push(Notice { text: text.into_string(), error: severity == rustgis_data::diagnostics::Severity::Error });
         self.notices_given += 1;

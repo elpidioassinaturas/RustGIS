@@ -8941,6 +8941,38 @@ fn plugin_process_child() {
     rustgis_plugins::testing::serve_if_child();
 }
 
+/// An error a command says before the call that leaves a download stays, and is said once: the
+/// runs after it do the same again, and don't repeat it (#1202).
+#[test]
+fn a_command_run_again_does_not_repeat_its_errors() {
+    let mut s = world();
+    let dir = std::env::temp_dir().join(format!("rustgis-test-eng-said-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let run = rustgis_plugins::testing::child_run("tests::plugin_process_child");
+    std::fs::write(dir.join("plugin.json"), rustgis_plugins::testing::process_manifest("eng-said", &["edit", "network"], &run)).unwrap();
+    rustgis_plugins::load(rustgis_plugins::Package::from_dir(&dir).unwrap(), "test").unwrap();
+    let said = |s: &Session, mark, text: &str| s.notices_since(mark).iter().filter(|n| n.error && n.text.contains(text)).count();
+    let mark = s.notice_mark();
+    let first = "https://x.org/first.csv";
+    let p = json!({"op": "layer.addUrl", "params": {"url": first}});
+    s.run_leaving_downloads("plugin:eng-said/d", &p).unwrap();
+    assert_eq!(said(&s, mark, "said before the call"), 1, "said while it waits");
+    let asked = s.take_url_requests();
+    // Each download that fails runs it again, its `layer.addUrl` answering the error: nothing more.
+    s.request_failed(&asked[0], "404 Not Found");
+    let ran = s.poll_plugin_retries();
+    assert!(ran[0].1.as_ref().is_err_and(|e| e.contains("404")), "{ran:?}");
+    assert_eq!(said(&s, mark, "said before the call"), 1, "not repeated");
+    // The next time it is asked for, it is said again.
+    let mark = s.notice_mark();
+    s.run_leaving_downloads("plugin:eng-said/d", &p).unwrap();
+    assert_eq!(said(&s, mark, "said before the call"), 1, "a new run says it");
+    s.plugin_retries.clear();
+    let _ = s.take_url_requests();
+    rustgis_plugins::unload("eng-said");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn process_plugins_reach_the_project_like_modules() {
     let mut s = world();
