@@ -25790,9 +25790,15 @@ fn a_replaced_mbtiles_file_is_read_again() {
         }
         panic!("the tile never came");
     };
-    let credits = |s: &Session| match source::resolve(&crate::render::tile_spec(&s.map().tiles[0])) {
-        source::Resolve::Ready(style) => style.attribution.clone(),
-        _ => panic!("the style isn't ready"),
+    let credits = |s: &Session| {
+        for _ in 0..1000 {
+            match source::resolve(&crate::render::tile_spec(&s.map().tiles[0])) {
+                source::Resolve::Ready(style) => return style.attribution.clone(),
+                source::Resolve::Failed(e) => panic!("{e}"),
+                _ => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        panic!("the style never came");
     };
     let mut s = Session::new(Project::default());
     write(2, 1);

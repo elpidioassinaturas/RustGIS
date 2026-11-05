@@ -22,8 +22,12 @@ pub const UPLOAD: &str = "upload:";
 const MAX_UPLOADS: usize = 16;
 /// A file that couldn't be read is tried again after this long.
 const RETRY: Duration = Duration::from_secs(60);
-/// Invalidates completions that started before a metadata clear.
+/// Counts metadata clears, so a completion can tell whether one happened since it started.
 static EPOCH: AtomicU64 = AtomicU64::new(0);
+/// The epoch of the last clear of every file's metadata.
+static CLEARED: AtomicU64 = AtomicU64::new(0);
+/// Files forgotten one at a time ([`forget_archive`]) kept at most, each with its epoch.
+const MAX_FORGOTTEN: usize = 64;
 /// A pending OS read stops being presented as normal loading after this long.
 #[cfg(not(target_arch = "wasm32"))]
 const READ_DEADLINE: Duration = Duration::from_secs(30);
@@ -97,22 +101,43 @@ fn infos() -> &'static Mutex<HashMap<String, Result<Arc<Info>, (String, Instant)
     I.get_or_init(Mutex::default)
 }
 
+/// When each file was last forgotten by itself. Taken while holding [`infos`].
+fn forgotten() -> &'static Mutex<HashMap<String, u64>> {
+    static F: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    F.get_or_init(Mutex::default)
+}
+
 /// Forgets the files' metadata (with the tile cache), so they are read again.
 pub(crate) fn forget() {
     let mut all = infos().lock().unwrap_or_else(|e| e.into_inner());
-    EPOCH.fetch_add(1, Ordering::SeqCst);
+    CLEARED.store(EPOCH.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
     all.clear();
+    forgotten().lock().unwrap_or_else(|e| e.into_inner()).clear();
     drop(all);
     #[cfg(not(target_arch = "wasm32"))]
     rustgis_data::mbtiles::close_all();
 }
 
 /// Forgets what was read of one file (its metadata, the styles made from it and its connections),
-/// but not a read under way.
+/// and won't keep a read of it under way: the file may be replaced next. Reads of other files are
+/// kept, as they may be framing a map. [`cache::forget`](crate::cache::forget) asks this of any
+/// address, so others are left alone.
 pub(crate) fn forget_archive(archive: &str) {
-    if infos().lock().unwrap_or_else(|e| e.into_inner()).remove(archive).is_none() {
+    if check(archive).is_err() {
         return;
     }
+    let mut all = infos().lock().unwrap_or_else(|e| e.into_inner());
+    let epoch = EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut gone = forgotten().lock().unwrap_or_else(|e| e.into_inner());
+    if gone.len() >= MAX_FORGOTTEN {
+        // Too many to tell apart: reads under way of any file are read again, as after a clear.
+        gone.clear();
+        CLEARED.store(epoch, Ordering::SeqCst);
+    }
+    gone.insert(archive.to_string(), epoch);
+    drop(gone);
+    all.remove(archive);
+    drop(all);
     crate::source::forget();
     #[cfg(not(target_arch = "wasm32"))]
     rustgis_data::mbtiles::close(file_of(archive));
@@ -135,11 +160,12 @@ pub fn info(archive: &str) -> Result<Arc<Info>, String> {
     r
 }
 
-/// Keeps a completion only if no clear happened since its read started; check and insert share
-/// the same lock as the clear, so an old completion cannot repopulate the new cache.
+/// Keeps a completion only if no clear of its file happened since its read started; check and
+/// insert share the same lock as the clear, so an old completion cannot repopulate the new cache.
 fn remember_info(archive: &str, result: &Result<Arc<Info>, String>, epoch: u64) {
     let mut all = infos().lock().unwrap_or_else(|e| e.into_inner());
-    if EPOCH.load(Ordering::SeqCst) != epoch {
+    let forgotten_at = forgotten().lock().unwrap_or_else(|e| e.into_inner()).get(archive).copied().unwrap_or(0);
+    if epoch < CLEARED.load(Ordering::SeqCst).max(forgotten_at) {
         return;
     }
     if all.len() >= 64 {
@@ -310,6 +336,24 @@ mod tests {
         assert!(cached_info("/old-completion.mbtiles").is_none());
         remember_info("/fresh-completion.mbtiles", &Err("current read".into()), EPOCH.load(Ordering::SeqCst));
         assert!(cached_info("/fresh-completion.mbtiles").is_some());
+    }
+
+    /// The metadata of a read under way when its file was forgotten isn't kept; a read of another
+    /// file is, and an address that is no MBTiles file changes nothing.
+    #[test]
+    fn a_forgotten_file_rejects_only_its_own_older_completion() {
+        let epoch = EPOCH.load(Ordering::SeqCst);
+        forget_archive("/forgotten-while-read.mbtiles");
+        remember_info("/forgotten-while-read.mbtiles", &Err("old file".into()), epoch);
+        assert!(cached_info("/forgotten-while-read.mbtiles").is_none());
+        // Tried several times: another test's clear may fall in between, but not every time.
+        assert!((0..100).any(|_| {
+            let epoch = EPOCH.load(Ordering::SeqCst);
+            forget_archive("/forgotten-while-read.mbtiles");
+            forget_archive("https://example.com/not-an-archive");
+            remember_info("/read-meanwhile.mbtiles", &Err("another file".into()), epoch);
+            cached_info("/read-meanwhile.mbtiles").is_some()
+        }));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

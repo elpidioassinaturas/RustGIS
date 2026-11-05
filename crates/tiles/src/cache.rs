@@ -293,7 +293,8 @@ fn resource_of(key: &str) -> &str {
 
 /// Forgets what was read of one address (and of the archive or file it names), so it is read
 /// again, as [`clear`] does for everything: after the login that signs it changed (a source
-/// whose address stays the same, read again with other keys). Reads under way are kept.
+/// whose address stays the same, read again with other keys). Reads under way are kept, except an
+/// MBTiles file's tiles: it is forgotten when it may be replaced, and its old tiles mustn't stay.
 pub fn forget(url: &str) {
     let url = crate::cog::split(split_download_limit(url).0).0;
     let mut c = lock();
@@ -306,7 +307,7 @@ pub fn forget(url: &str) {
             _ => 0,
         })
         .sum();
-    c.slots.retain(|k, s| matches!(s.entry, Entry::Pending) || resource_of(k) != url);
+    c.slots.retain(|k, s| resource_of(k) != url || (matches!(s.entry, Entry::Pending) && !crate::mbtiles::is_tile(k)));
     c.bytes = c.bytes.saturating_sub(dropped);
     drop(c);
     crate::pmtiles::forget_archive(url);
@@ -1031,6 +1032,10 @@ fn finished() {
 
 fn store(url: &str, entry: Entry) {
     let mut c = lock();
+    // A tile of an MBTiles file forgotten while it was read ([`forget`]): of the old file, perhaps.
+    if crate::mbtiles::is_tile(url) && !c.slots.contains_key(url) {
+        return;
+    }
     let added = if let Entry::Ready(_, n) = &entry { *n } else { 0 };
     // Dropped while it was fetched (cleared, or evicted): kept anyway, it was asked for.
     let tick = c.tick;
@@ -1755,6 +1760,17 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tile still being read when its MBTiles file is forgotten isn't kept when it lands.
+    #[test]
+    fn a_forgotten_mbtiles_file_drops_the_tile_being_read() {
+        let archive = "/forgotten-pending.mbtiles";
+        let key = crate::mbtiles::template(archive).replace("{z}", "0").replace("{x}", "0").replace("{y}", "0");
+        lock().slots.insert(key.clone(), Slot { entry: Entry::Pending, used: 0, asked: Instant::now() });
+        forget(archive);
+        store(&key, Entry::Failed("old file".into(), Instant::now()));
+        assert!(!lock().slots.contains_key(&key));
+    }
 
     fn network_records(history: &rustgis_data::diagnostics::History, url: &str) -> Vec<rustgis_data::diagnostics::Record> {
         history.records().into_iter().filter(|record| record.network.as_ref().is_some_and(|network| network.url == url)).collect()
