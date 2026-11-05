@@ -1280,10 +1280,11 @@ impl Session {
                 && let Some(n) = params.get("request").and_then(Value::as_u64)
                 && (self.url_waits.given_up(n, params) || self.url_waits.added_already(n, params))
             {
-                // Its bytes go too; the refusal is said as any refused command is, once, with its
-                // address.
+                // Its bytes or its read go too; the refusal is said as any refused command is,
+                // once, with its address.
                 if let Some(d) = params.get("id").and_then(Value::as_u64) {
                     self.downloaded.retain(|(k, _)| *k != d);
+                    self.landed_reads.retain(|(k, _)| *k != d);
                 }
                 // Redacted here too: the assistant and MCP get the error as it is.
                 let url = sources::redact_text(params.get("url").and_then(Value::as_str).unwrap_or("download"));

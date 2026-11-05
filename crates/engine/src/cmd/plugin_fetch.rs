@@ -923,6 +923,13 @@ mod tests {
         // Said by the session, as any refused command is: once, for every front end.
         let said: Vec<&str> = s.notices_since(mark).iter().filter(|n| n.error).map(|n| n.text.as_str()).collect();
         assert_eq!(said, [e.as_str()]);
+        assert!(s.downloaded.is_empty(), "its bytes go");
+        // One that landed read already (a service's protocol buffer pages) goes the same way.
+        let id = s.download_started();
+        let read = rustgis_data::Dataset::new("a", rustgis_data::GeometryType::Point, Vec::new());
+        assert!(s.download_landed_read(id, read, rustgis_data::ReadReport::default()));
+        s.run("layer.addDownload", &json!({"id": id, "url": url, "request": 900})).unwrap_err();
+        assert!(s.landed_reads.is_empty(), "its read goes");
     }
 
     /// A download that failed is asked for again as a new download, not answered as the one
