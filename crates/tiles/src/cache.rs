@@ -504,7 +504,8 @@ fn land(key: &str, entry: Option<Entry>, asked_at: u64) {
     if crate::mbtiles::forgotten_since(key, asked_at) {
         return;
     }
-    match entry {
+    // Asked for before the record of forgotten files was emptied, so it can't be told: read again.
+    match entry.filter(|_| !crate::mbtiles::asked_before_emptied(key, asked_at)) {
         Some(entry) => keep(&mut c, key, entry),
         // Never answered (or dropped by the fetcher): forgotten, fetched again when asked for.
         None => {
@@ -1874,10 +1875,39 @@ mod native {
 mod tests {
     use super::*;
 
+    /// Taken by the tests that need the record of forgotten files not to be emptied meanwhile.
+    static FORGOTTEN_RECORD: Mutex<()> = Mutex::new(());
+
+    /// A full record of forgotten files is emptied. A tile asked for before that can't be told, so
+    /// it isn't kept and is asked for again; one asked for since is, and so is what isn't MBTiles.
+    #[test]
+    fn a_full_record_of_forgotten_files_has_older_tiles_read_again() {
+        let _record = FORGOTTEN_RECORD.lock().unwrap_or_else(|e| e.into_inner());
+        let archive = |i: usize| format!("/forgotten-{i}.mbtiles");
+        let key = crate::mbtiles::template(&archive(0)).replace("{z}", "0").replace("{x}", "0").replace("{y}", "0");
+        let failed = |why: &str| Some(Entry::Failed(why.into(), Instant::now()));
+        let old = crate::mbtiles::epoch();
+        lock().slots.insert(key.clone(), Slot { entry: Entry::Pending, used: 0, asked: Instant::now() });
+        for i in 0..=crate::mbtiles::MAX_FORGOTTEN {
+            crate::mbtiles::forget_archive(&archive(i));
+        }
+        assert!(crate::mbtiles::forgotten_len() <= crate::mbtiles::MAX_FORGOTTEN);
+        assert!(!crate::mbtiles::forgotten_since(&key, old), "the record no longer holds it");
+
+        land(&key, failed("old file"), old);
+        assert!(!lock().slots.contains_key(&key));
+        land(&key, failed("new file"), crate::mbtiles::epoch());
+        assert!(matches!(lock().slots.get(&key).map(|s| &s.entry), Some(Entry::Failed(why, _)) if why == "new file"));
+        land("test://not-mbtiles/forgotten.json", failed("kept"), old);
+        assert!(lock().slots.remove("test://not-mbtiles/forgotten.json").is_some());
+        forget(&archive(0));
+    }
+
     /// A tile still being read when its MBTiles file is forgotten isn't kept when it lands, even
     /// after the same tile was asked for again and answered; a read begun since is.
     #[test]
     fn a_forgotten_mbtiles_file_drops_the_tile_being_read() {
+        let _record = FORGOTTEN_RECORD.lock().unwrap_or_else(|e| e.into_inner());
         let archive = "/forgotten-pending.mbtiles";
         let key = crate::mbtiles::template(archive).replace("{z}", "0").replace("{x}", "0").replace("{y}", "0");
         let failed = |why: &str| Some(Entry::Failed(why.into(), Instant::now()));

@@ -26,6 +26,10 @@ const RETRY: Duration = Duration::from_secs(60);
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 /// The epoch of the last clear of every file's metadata.
 static CLEARED: AtomicU64 = AtomicU64::new(0);
+/// Files [`forgotten`] keeps at most; their paths come from command parameters.
+pub(crate) const MAX_FORGOTTEN: usize = 64;
+/// The epoch [`forgotten`] was last emptied at.
+static EMPTIED: AtomicU64 = AtomicU64::new(0);
 /// A pending OS read stops being presented as normal loading after this long.
 #[cfg(not(target_arch = "wasm32"))]
 const READ_DEADLINE: Duration = Duration::from_secs(30);
@@ -100,8 +104,7 @@ fn infos() -> &'static Mutex<HashMap<String, Result<Arc<Info>, (String, Instant)
 }
 
 /// When each file was last forgotten by itself. Taken after [`infos`] and the cache's lock where
-/// they are held. Kept for good: a read under way may be of any of them, and a path and a number
-/// per file whose last layer went is little.
+/// they are held. Emptied when full ([`forget_archive`]): reads asked for before that are read again.
 fn forgotten() -> &'static Mutex<HashMap<String, u64>> {
     static F: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
     F.get_or_init(Mutex::default)
@@ -116,6 +119,17 @@ pub(crate) fn epoch() -> u64 {
 pub(crate) fn forgotten_since(url: &str, epoch: u64) -> bool {
     parse_url(url)
         .is_some_and(|(_, _, _, archive)| forgotten().lock().unwrap_or_else(|e| e.into_inner()).get(archive).is_some_and(|at| *at > epoch))
+}
+
+/// How many files [`forgotten`] holds.
+#[cfg(test)]
+pub(crate) fn forgotten_len() -> usize {
+    forgotten().lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
+/// Whether a tile address was asked for at `epoch`, before [`forgotten`] last lost track of what it held.
+pub(crate) fn asked_before_emptied(url: &str, epoch: u64) -> bool {
+    is_tile(url) && epoch < EMPTIED.load(Ordering::SeqCst)
 }
 
 /// Forgets the files' metadata (with the tile cache), so they are read again.
@@ -138,7 +152,14 @@ pub(crate) fn forget_archive(archive: &str) {
     }
     let mut all = infos().lock().unwrap_or_else(|e| e.into_inner());
     let epoch = EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
-    forgotten().lock().unwrap_or_else(|e| e.into_inner()).insert(archive.to_string(), epoch);
+    let mut gone = forgotten().lock().unwrap_or_else(|e| e.into_inner());
+    if gone.len() >= MAX_FORGOTTEN {
+        gone.clear();
+        EMPTIED.store(epoch, Ordering::SeqCst);
+        CLEARED.store(epoch, Ordering::SeqCst);
+    }
+    gone.insert(archive.to_string(), epoch);
+    drop(gone);
     all.remove(archive);
     drop(all);
     crate::source::forget();
