@@ -2992,7 +2992,9 @@ fn layer_list(form: &mut GpForm, ui: &mut Ui, param: &'static str, cur: &str, of
 }
 
 impl GpForm {
-    /// Opens a tool, pre-filling layer parameters from the active layer.
+    /// Opens a tool, pre-filling layer parameters from the active layer. An external tool's
+    /// optional input stays empty until it's picked: it changes what the tool does, as a weight
+    /// or a mask would (#1517). A built-in tool's only shows when it's asked for.
     pub fn open(&mut self, tool: Option<&'static str>, s: &Session) {
         self.tool = tool;
         self.values.clear();
@@ -3002,8 +3004,14 @@ impl GpForm {
         self.last = None;
         let Some(spec) = tool.and_then(rustgis_engine::analysis::tool) else { return };
         let active = s.active_layer.and_then(|id| s.map().layer(id));
+        let external = rustgis_engine::analysis::is_external(spec);
         for p in spec.params {
             let v = match p.kind {
+                ParamKind::Layer | ParamKind::PolygonLayer | ParamKind::PointLayer | ParamKind::RasterLayer | ParamKind::VectorLayer
+                    if external && !p.required =>
+                {
+                    None
+                }
                 ParamKind::Layer => active.map(|l| l.name.clone()),
                 ParamKind::PolygonLayer => active
                     .filter(|l| l.geometry_type() == GeometryType::Polygon)
@@ -6927,6 +6935,55 @@ pub(crate) fn layout_menu(app: &mut RustGisApp, ui: &mut Ui, n: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An external tool's optional layer inputs stay empty until they're picked, and its required
+    /// ones start at the active layer; a built-in tool's optional one still follows it (#1517).
+    #[test]
+    fn the_form_leaves_an_external_tool_s_optional_layers_empty() {
+        use rustgis_engine::analysis::{ParamSpec as P, ToolSpec, external_placeholder, register_external};
+        const fn layer(name: &'static str, kind: ParamKind, required: bool) -> P {
+            P { name, label: name, kind, required, default: "", help: "" }
+        }
+        const PARAMS: &[P] = &[
+            layer("needed", ParamKind::Layer, true),
+            layer("neededVector", ParamKind::VectorLayer, true),
+            layer("layer", ParamKind::Layer, false),
+            layer("raster", ParamKind::RasterLayer, false),
+            layer("vector", ParamKind::VectorLayer, false),
+            layer("polygon", ParamKind::PolygonLayer, false),
+            layer("point", ParamKind::PointLayer, false),
+            P { name: "text", label: "text", kind: ParamKind::Text, required: false, default: "\"soft\"", help: "" },
+        ];
+        register_external(
+            "formTest",
+            || {
+                vec![ToolSpec {
+                    id: "formTest:optional",
+                    name: "Optional layers",
+                    toolbox: "Form test",
+                    summary: "",
+                    params: PARAMS,
+                    run: external_placeholder,
+                }]
+            },
+            |_, _, _| Err("not run".into()),
+        );
+        let mut app = RustGisApp::with_sample();
+        app.session.active_layer = app.session.map().layer_by_name("Cities").map(|l| l.id);
+
+        app.run("ui.gp.open", json!({"tool": "formTest:optional"})).unwrap();
+        assert_eq!(app.gp.tool, Some("formTest:optional"));
+        let filled = |app: &RustGisApp, name: &str| app.gp.values.get(name).cloned();
+        assert_eq!(filled(&app, "needed").as_deref(), Some("Cities"));
+        assert_eq!(filled(&app, "neededVector").as_deref(), Some("Cities"));
+        for name in ["layer", "raster", "vector", "polygon", "point"] {
+            assert_eq!(filled(&app, name), None, "{name}");
+        }
+        assert_eq!(filled(&app, "text").as_deref(), Some("soft"));
+
+        app.run("ui.gp.open", json!({"tool": "a5Grid"})).unwrap();
+        assert_eq!(filled(&app, "input").as_deref(), Some("Cities"));
+    }
 
     /// Run starts a built-in tool on a thread of its own: the pane shows it running, with Cancel,
     /// and its result lands as gp.run's would, with its layer and history.

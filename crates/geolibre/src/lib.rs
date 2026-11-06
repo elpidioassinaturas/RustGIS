@@ -531,6 +531,12 @@ fn option_value(v: &Value, data: Data) -> Value {
     }
 }
 
+/// Whether option value `v` is the manifest's default `d`. The form sends text, so a default that
+/// isn't text on a field shown as text comes back as its JSON (`[255,255,255,255]`, `false`).
+fn is_default(v: &Value, d: &Value, data: Data) -> bool {
+    option_value(d, data) == *v || (!d.is_string() && v.as_str().and_then(|t| serde_json::from_str::<Value>(t).ok()).as_ref() == Some(d))
+}
+
 /// Immutable manifest metadata paired with one published analysis schema.
 #[derive(Clone)]
 pub struct ResolvedTool {
@@ -628,7 +634,7 @@ fn prepare_with(spec: &ToolSpec, meta: &Meta, inputs: &dyn Inputs, params: &Valu
                 // own default, as when it runs alone. They can differ: `fill_depressions` lists
                 // a `flat_increment` of 0.0001 but, without one, picks a far smaller step that
                 // keeps flats draining (#237).
-                if p.default.as_ref().is_some_and(|d| option_value(d, p.data) == v) {
+                if p.default.as_ref().is_some_and(|d| is_default(&v, d, p.data)) {
                     continue;
                 }
                 job.args.push((p.name.clone(), Arg::Value(v)));

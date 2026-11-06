@@ -190,7 +190,9 @@ cargo build --release --target wasm32-unknown-unknown
   `numericField`, `number`, `text`, `choice` (with 1 to 64 `choices`), `bool` and `file` (see
   [File parameters](#file-parameters)). Each has `name`, `label`, optional `help`, `required`
   (default `false`) and an optional JSON `default`. Parameter names start with a lower-case
-  letter and may also contain upper-case letters and underscores after it.
+  letter and may also contain upper-case letters and underscores after it. In the tool's form, a
+  required layer parameter starts at the active layer; an optional one stays empty until it's
+  picked.
 - `panel` (optional) gives the plugin a pane of its own, with widgets bound to its commands. See
   [A panel](#a-panel).
 - `i18n` translates the plugin's own text into the interface language, by language code (`de`,
