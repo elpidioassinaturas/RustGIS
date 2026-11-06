@@ -679,6 +679,7 @@ impl Session {
     }
 
     /// Whether a command run again has an answer for `wanted`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn rerun_has(&self, wanted: &Value) -> bool {
         let wanted = self.asked_for(wanted);
         self.rerun_landed.iter().any(|(asked, ..)| same_request(asked, &wanted))
