@@ -1333,10 +1333,11 @@ impl Layout {
                         g.width = finite_or(g.width, grid_width()).clamp(0.0, MAX_GRID_WIDTH);
                     }
                 }
-                ElementKind::Legend { exclude, .. } => {
+                ElementKind::Legend { exclude, columns, .. } => {
                     // Names stay whole: a layer's own name isn't cut, and a cut one would no
                     // longer match it.
                     exclude.truncate(MAX_LEGEND_EXCLUDED);
+                    *columns = (*columns).clamp(1, MAX_LEGEND_COLUMNS);
                 }
                 ElementKind::Text { text, size, letter_spacing, .. } => {
                     *size = finite_or(*size, 12.0).clamp(*crate::graphics::FONT_SIZE.start(), *crate::graphics::FONT_SIZE.end());

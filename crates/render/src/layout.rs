@@ -1573,6 +1573,13 @@ fn legend_column(pm: &mut Canvas, r: Rect, rows: &[LegendRow], map: &Map, opts: 
         {
             break;
         }
+        // A layer's name only with room for the class under it.
+        if let (LegendRow::Head(_), Some(next)) = (&row, rows.peek())
+            && matches!(next, LegendRow::Class(..))
+            && y + height + next.height(opts.scale) * ppp > r.bottom() + line * 1e-3
+        {
+            break;
+        }
         match row {
             LegendRow::Plain(l) => {
                 let s = l.renderer.symbol_for(&l.dataset, 0);
@@ -1683,12 +1690,12 @@ pub fn frame_render_scale(map: &Map, center: Coord, scale: f64) -> f64 {
 
 /// Whether a layer only outlines its polygons, with no fill and no labels: context around a map's
 /// data, such as the neighbouring states' borders, which a surround can sit on. No Fill counts,
-/// whatever the renderer; a transparent symbol under stacked fills such as a hatch, a fill by
-/// expression, diagrams or extrusion are more than an outline.
+/// whatever the renderer; a transparent symbol under stacked fills such as a hatch (the layer's or a
+/// class's), a fill by expression, diagrams or extrusion are more than an outline.
 fn only_outlines(l: &rustgis_map::Layer) -> bool {
     use rustgis_map::NoFill;
     let hollow = l.no_fill == Some(NoFill::Override)
-        || (l.fill_layers.is_empty()
+        || (!l.has_fills()
             && (l.no_fill == Some(NoFill::Symbols) || matches!(&l.renderer, rustgis_map::Renderer::Single(s) if s.fill.0[3] == 0)));
     l.geometry_type() == GeometryType::Polygon
         && !l.labels.enabled
@@ -1701,8 +1708,8 @@ fn only_outlines(l: &rustgis_map::Layer) -> bool {
 /// Where a frame showing `map` at 1:`scale` draws its layers: a grid of about `cells` cells across
 /// the frame's longer side, row by row from the top, each `true` where a layer (or its labels)
 /// drew. The basemap is left out, so the frame's background isn't counted, and so are layers that
-/// only outline their polygons ([`only_outlines`]) unless nothing else is shown. For keeping a
-/// layout's surrounds off what its map shows. `None` when the frame can't be drawn.
+/// only outline their polygons ([`only_outlines`]) unless nothing else draws at that scale. For
+/// keeping a layout's surrounds off what its map shows. `None` when the frame can't be drawn.
 ///
 /// The map itself is drawn, not a copy of it (every layer's features): its basemap, web tiles
 /// (a background, like the basemap) and graticule are set aside for the drawing and put back,
@@ -1737,7 +1744,8 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
             self.map.label_lock_line_anchors = std::mem::take(&mut self.anchors);
         }
     }
-    let outlines: Vec<u32> = if map.layers.iter().filter(|l| map.shows(l)).all(only_outlines) {
+    let at = frame_render_scale(map, center, scale);
+    let outlines: Vec<u32> = if map.layers.iter().filter(|l| map.draws_at(l, at)).all(only_outlines) {
         Vec::new()
     } else {
         map.layers.iter().filter(|l| l.visible && only_outlines(l)).map(|l| l.id).collect()
@@ -2407,6 +2415,38 @@ mod tests {
         assert!(!only_outlines(l), "a filled symbol");
         l.no_fill = Some(rustgis_map::NoFill::Symbols);
         assert!(only_outlines(l), "No Fill counts as no fill");
+        let symbol = rustgis_map::Symbol::default_for(GeometryType::Polygon, 0);
+        l.renderer = rustgis_map::Renderer::Unique {
+            field: "g".into(),
+            classes: vec![("a".into(), symbol)],
+            other: symbol,
+            ramp: rustgis_map::Ramp::Ember,
+            class_labels: Default::default(),
+            other_label: None,
+            class_strokes: Default::default(),
+            other_strokes: Vec::new(),
+            class_fills: [("a".to_string(), vec![rustgis_map::fills::FillLayer::default()])].into(),
+            other_fills: Vec::new(),
+            expression: None,
+        };
+        assert!(!only_outlines(l), "No Fill's symbols leave a class's stacked fill drawn");
+        l.no_fill = Some(rustgis_map::NoFill::Override);
+        assert!(only_outlines(l), "the override hides that too");
+        l.no_fill = None;
+        l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol {
+            fill: Rgba::new(0, 0, 0, 0),
+            ..rustgis_map::Symbol::default_for(GeometryType::Polygon, 0)
+        });
+
+        // A layer out of scale at the frame's scale draws nothing there: the outline is all it shows.
+        let drawn_alone = {
+            let far = map.layers.iter().find(|l| l.id != border).map(|l| l.id).unwrap();
+            map.layers.iter_mut().find(|l| l.id == far).unwrap().min_scale = Some(1.0);
+            let shown = count(&mut map);
+            map.layers.iter_mut().find(|l| l.id == far).unwrap().min_scale = None;
+            shown
+        };
+        assert!(drawn_alone > beside, "{drawn_alone} of {beside}");
     }
 
     /// A legend's rows go into columns: as even as they go, a layer's name with the row under it,
@@ -2487,6 +2527,8 @@ mod tests {
         assert!(f64::from(right_narrow) < f64::from(right3) && right_narrow > right1, "{right_narrow} of {right3}");
         // Moved sideways, the letters' lowest edge can land a pixel higher; a lost row would be 15.
         assert!(down_narrow.abs_diff(down3) < LEGEND_ROW as u32 / 2, "no row left out: {down_narrow} of {down3}");
+        // A box with room for a layer's name and not for the row under it draws neither.
+        assert_eq!(ink(1, 500.0, LEGEND_ROW * 1.5), (0, 0), "a name alone at the foot");
     }
 
     /// The widest class label of `rows`, in points.

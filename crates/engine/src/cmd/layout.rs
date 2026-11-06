@@ -1950,11 +1950,12 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             (cw as f64 * fw / gw as f64, ch as f64 * fh / gh as f64)
         });
         let fits = free.and_then(|(rw, rh)| sizes.iter().position(|size| whole(*size).0 <= rw && whole(*size).1 <= rh));
-        if let Some(i) = fits.filter(|i| *i > 0) {
+        // One column too, when the rectangle holds what the box a legend starts with cuts.
+        if let Some(i) = fits.filter(|i| *i > 0 || whole(sizes[0]).0 > at_most_one.0 + 1e-6 || whole(sizes[0]).1 > at_most_one.1 + 1e-6) {
             let (w, h) = whole(sizes[i]);
-            let more = arranged((w.min(wide), h.min(fh * 0.6)));
+            let more = arranged((w.min(wide), h));
             let new = (shown(&more.1, (w, h)), more.1.3.1);
-            if new.0 >= score.0 - 1e-6 {
+            if more.1.0.is_some() && new.0 >= score.0 - 1e-6 {
                 (legend_cols, best, score) = (i + 1, more, new);
             }
         }
@@ -1965,7 +1966,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             let (w, h) = whole(*size);
             let more = arranged((w.min(wide), h.min(fh * 0.6)));
             let new = (shown(&more.1, (w, h)), more.1.3.1);
-            if more_columns_win(new, score) {
+            if more.1.0.is_some() && more_columns_win(new, score) {
                 (legend_cols, best, score) = (i + 1, more, new);
             }
         }
