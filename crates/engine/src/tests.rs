@@ -6853,6 +6853,163 @@ fn a_publication_legend_sized_to_its_rows_fits_them() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A publication legend too long for its corner goes into columns, the fewest that hold it (#1379),
+/// and past three says what it leaves out; a short one stays in one, saved as it always was.
+/// The largest rectangle with nothing drawn, inside the part of the grid asked for.
+#[test]
+fn the_largest_free_rectangle_of_a_grid() {
+    use crate::cmd::layout::largest_free_cells;
+    let grid = |rows: &[&str]| -> Vec<bool> { rows.iter().flat_map(|r| r.chars().map(|c| c == '#')).collect() };
+    let cells = grid(&["....#.", "....#.", "##..#.", "##...."]);
+    assert_eq!(largest_free_cells(6, &cells, (0, 0, 6, 4)), (4, 2));
+    // Inside a part of it: the columns and rows outside don't count.
+    assert_eq!(largest_free_cells(6, &cells, (2, 2, 6, 4)), (2, 2));
+    // A wide run under a taller narrow one, and the other way round.
+    assert_eq!(largest_free_cells(3, &grid(&["#.#", "#.#", "..."]), (0, 0, 3, 3)), (1, 3));
+    assert_eq!(largest_free_cells(4, &grid(&["#..#", "....", "...."]), (0, 0, 4, 3)), (4, 2));
+    // All drawn, all free, nothing asked for.
+    assert_eq!(largest_free_cells(2, &grid(&["##", "##"]), (0, 0, 2, 2)), (0, 0));
+    assert_eq!(largest_free_cells(2, &grid(&["..", ".."]), (0, 0, 2, 2)), (2, 2));
+    assert_eq!(largest_free_cells(2, &grid(&["..", ".."]), (1, 1, 1, 1)), (0, 0));
+}
+
+/// A long legend takes the fewest columns that fit the largest rectangle the map leaves free: data
+/// along the bottom of the frame leaves a wide band above it, too low for one column. Layers that
+/// only outline their polygons don't take that room.
+#[test]
+fn a_publication_legend_takes_the_columns_that_fit_the_free_rectangle() {
+    let dir = std::env::temp_dir().join(format!("rustgis-legend-free-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let polygon = |name: &str, [w, s, e, n]: [f64; 4]| {
+        let path = dir.join(name);
+        let json = json!({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry":
+            {"type": "Polygon", "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]]}}]});
+        std::fs::write(&path, json.to_string()).unwrap();
+        path.display().to_string()
+    };
+    let low = polygon("low.geojson", [0.0, 0.0, 10.0, 6.5]);
+    let border = polygon("border.geojson", [1.0, 7.0, 9.0, 9.0]);
+    let columns = |outline: bool| {
+        let mut s = Session::new(Project::default());
+        for _ in 0..24 {
+            s.run("layer.addData", &json!({"path": low})).unwrap();
+        }
+        if outline {
+            s.run("layer.addData", &json!({"path": border})).unwrap();
+            s.run("layer.color", &json!({"layer": "border", "color": "#00000000"})).unwrap();
+        }
+        let r = s
+            .run("layout.publication", &json!({"profile": "a4-portrait", "extent": [0, 0, 10, 10], "author": "", "locator": "none"}))
+            .unwrap();
+        (r["legendColumns"].as_u64().unwrap(), s.map().layers.iter().all(|l| l.visible))
+    };
+    assert_eq!(columns(false), (2, true));
+    assert_eq!(columns(true), (2, true), "the border doesn't count, and is shown again");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_publication_legend_too_long_goes_into_columns() {
+    use rustgis_map::layout::ElementKind;
+    let dir = std::env::temp_dir().join(format!("rustgis-legend-columns-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.geojson");
+    std::fs::write(
+        &path,
+        r#"{"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [[[4,4],[6,4],[6,6],[4,6],[4,4]]]}}]}"#,
+    )
+    .unwrap();
+    // Filling the frame below 60% of its height: a long legend in one column would cover it, and two
+    // sit above it. A short one stays in one, whatever it covers.
+    let low = dir.join("low.geojson");
+    std::fs::write(
+        &low,
+        r#"{"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [[[0,0],[10,0],[10,6],[0,6],[0,0]]]}}]}"#,
+    )
+    .unwrap();
+    // Labels too long for two columns side by side: they close up, and it says so.
+    let mut s = Session::new(Project::default());
+    for i in 0..60 {
+        s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+        s.run(
+            "layer.rename",
+            &json!({"layer": "a", "name": format!("{i} a layer's name long enough to take more than half of the frame's width")}),
+        )
+        .unwrap();
+    }
+    let r = s.run("layout.publication", &json!({"extent": [0, 0, 10, 10], "author": "", "locator": "none"})).unwrap();
+    assert!(r["legendColumns"].as_u64().unwrap() > 1, "{r}");
+    assert!(r["warnings"].to_string().contains("run into the next"), "{r}");
+    for (layers, columns) in [(3, 1), (30, 2)] {
+        let mut s = Session::new(Project::default());
+        for _ in 0..layers {
+            s.run("layer.addData", &json!({"path": low.display().to_string()})).unwrap();
+        }
+        let r = s.run("layout.publication", &json!({"extent": [0, 0, 10, 10], "author": "", "locator": "none"})).unwrap();
+        assert_eq!(r["legendColumns"], columns, "{layers} layers: {r}");
+    }
+    for (layers, columns, cut) in [(3, 1, false), (60, 3, false), (100, 3, false), (200, 3, true)] {
+        let mut s = Session::new(Project::default());
+        for _ in 0..layers {
+            s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+        }
+        let r = s.run("layout.publication", &json!({"extent": [0, 0, 10, 10], "author": "", "locator": "none"})).unwrap();
+        assert_eq!(r["legendColumns"], columns, "{layers} layers: {r}");
+        assert_eq!(r["warnings"].to_string().contains("more than fits"), cut, "{layers} layers: {r}");
+        let l = s.project.layouts.last().unwrap();
+        let legend = l.elements.iter().find(|e| matches!(e.kind, ElementKind::Legend { .. })).unwrap();
+        assert!(matches!(legend.kind, ElementKind::Legend { columns: c, .. } if c == columns), "{:?}", legend.kind);
+        assert_eq!(serde_json::to_string(&legend.kind).unwrap().contains("columns"), columns > 1);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A publication legend takes another column to show more of itself, or as much and cover at least
+/// a quarter less of what the map draws.
+#[test]
+fn more_columns_win_by_showing_more_or_covering_less() {
+    use crate::cmd::layout::more_columns_win;
+    assert!(more_columns_win((1.0, 500.0), (0.6, 0.0)), "more shown, whatever it covers");
+    assert!(!more_columns_win((0.6, 0.0), (1.0, 500.0)), "less shown, whatever it covers");
+    assert!(more_columns_win((1.0, 300.0), (1.0, 500.0)), "as much shown, covering 40% less");
+    assert!(!more_columns_win((1.0, 400.0), (1.0, 500.0)), "only 20% less");
+    assert!(!more_columns_win((1.0, 0.0), (1.0, 0.0)), "nothing to gain");
+}
+
+/// `"columns"` on a legend: given and changed, refused outside 1 to 3 and on anything else.
+#[test]
+fn a_legend_takes_columns_from_one_to_three() {
+    use rustgis_map::layout::ElementKind;
+    let mut s = Session::new(Project::default());
+    s.run("layout.new", &json!({"template": "map"})).unwrap();
+    let columns = |s: &Session, id: u64| match s.project.layouts[0].element(id as u32).map(|e| &e.kind) {
+        Some(ElementKind::Legend { columns, .. }) => *columns,
+        other => panic!("{other:?}"),
+    };
+    let added = s.run("layout.addElement", &json!({"kind": "legend"})).unwrap();
+    let id = added["element"].as_u64().unwrap();
+    assert_eq!(columns(&s, id), 1);
+    let two = s.run("layout.addElement", &json!({"kind": "legend", "columns": 2})).unwrap();
+    assert_eq!(columns(&s, two["element"].as_u64().unwrap()), 2);
+    s.run("layout.update", &json!({"element": id, "columns": 3})).unwrap();
+    assert_eq!(columns(&s, id), 3);
+    s.run("layout.update", &json!({"element": id, "title": "Key"})).unwrap();
+    assert_eq!(columns(&s, id), 3, "another change leaves them");
+    for bad in [json!(0), json!(4), json!(1.5), json!("2"), json!(-1)] {
+        assert!(s.run("layout.update", &json!({"element": id, "columns": bad})).unwrap_err().contains("1 to 3"), "{bad}");
+        assert!(s.run("layout.addElement", &json!({"kind": "legend", "columns": bad})).unwrap_err().contains("1 to 3"), "{bad}");
+    }
+    assert_eq!(columns(&s, id), 3);
+    let err = s.run("layout.addElement", &json!({"kind": "northArrow", "columns": 2})).unwrap_err();
+    assert!(err.contains("only legends"), "{err}");
+    let arrow = s.run("layout.addElement", &json!({"kind": "northArrow"})).unwrap();
+    let err = s.run("layout.update", &json!({"element": arrow["element"], "columns": 2})).unwrap_err();
+    assert!(err.contains("only legends"), "{err}");
+    // A layout saved before them has one.
+    let old: ElementKind = serde_json::from_str(r#"{"Legend":{"frame":1,"title":"L"}}"#).unwrap();
+    assert!(matches!(old, ElementKind::Legend { columns: 1, .. }), "{old:?}");
+}
+
 /// A publication layout keys a raster theme with a colorbar: the topmost visible raster drawn on a
 /// ramp gets one at the bottom of the legend's box; a map of vectors only gets none.
 #[test]
