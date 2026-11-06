@@ -1536,13 +1536,14 @@ fn legend(
         // The last has the rest of the box's width.
         let right = if k + 1 < starts.len() { x + widest(part, opts.scale) * ppp * close_up } else { r.right() };
         let Some(column) = Rect::from_ltrb(x, y, right, r.bottom()) else { break };
-        legend_column(pm, column, part, map, &opts, ppp);
+        legend_column(pm, column, part, columns > 1, map, &opts, ppp);
         x = right + LEGEND_COLUMN_GAP * ppp * close_up;
     }
 }
 
-/// A column of a legend: its rows from the top of `r`, as many as fit.
-fn legend_column(pm: &mut Canvas, r: Rect, rows: &[LegendRow], map: &Map, opts: &LegendOptions, ppp: f32) {
+/// A column of a legend: its rows from the top of `r`, as many as fit. With `name_with_class`, a
+/// layer's name only with room for the class under it, as [`flow`] keeps them together.
+fn legend_column(pm: &mut Canvas, r: Rect, rows: &[LegendRow], name_with_class: bool, map: &Map, opts: &LegendOptions, ppp: f32) {
     let dark = LEGEND_TEXT;
     let mut y = r.y();
     let line = LEGEND_ROW * ppp;
@@ -1573,8 +1574,7 @@ fn legend_column(pm: &mut Canvas, r: Rect, rows: &[LegendRow], map: &Map, opts: 
         {
             break;
         }
-        // A layer's name only with room for the class under it.
-        if let (LegendRow::Head(_), Some(next)) = (&row, rows.peek())
+        if let (true, LegendRow::Head(_), Some(next)) = (name_with_class, &row, rows.peek())
             && matches!(next, LegendRow::Class(..))
             && y + height + next.height(opts.scale) * ppp > r.bottom() + line * 1e-3
         {
@@ -2532,8 +2532,6 @@ mod tests {
         assert!(f64::from(right_narrow) < f64::from(right3) && right_narrow > right1, "{right_narrow} of {right3}");
         // Moved sideways, the letters' lowest edge can land a pixel higher; a lost row would be 15.
         assert!(down_narrow.abs_diff(down3) < LEGEND_ROW as u32 / 2, "no row left out: {down_narrow} of {down3}");
-        // A box with room for a layer's name and not for the row under it draws neither.
-        assert_eq!(ink(1, 500.0, LEGEND_ROW * 1.5), (0, 0), "a name alone at the foot");
     }
 
     /// The widest class label of `rows`, in points.
@@ -2541,14 +2539,9 @@ mod tests {
         rows.iter().map(|row| row.width(0.0) - 12.0).fold(0.0, f32::max)
     }
 
-    /// A large point symbol makes its row taller and widens its column's symbols only: the columns
-    /// balance what the rows take, and the other column stays as narrow as its labels let it.
-    #[test]
-    fn a_legends_columns_hold_large_point_symbols() {
-        let small = rustgis_map::Symbol { size: 4.0, stroke_width: 0.0, ..rustgis_map::Symbol::default_for(GeometryType::Point, 0) };
-        let classes =
-            (0u32..10).map(|i| (format!("c{i}"), rustgis_map::Symbol { size: if i < 2 { 40.0 } else { 4.0 }, ..small })).collect();
-        let map = point_legend_map(|l| {
+    /// A point layer in Unique Values, for a legend's rows.
+    fn classed_point_map(classes: Vec<(String, rustgis_map::Symbol)>, small: rustgis_map::Symbol) -> Map {
+        point_legend_map(|l| {
             l.renderer = rustgis_map::Renderer::Unique {
                 field: "g".into(),
                 classes,
@@ -2562,7 +2555,41 @@ mod tests {
                 other_fills: Vec::new(),
                 expression: None,
             };
-        });
+        })
+    }
+
+    /// A box one row tall: in one column a layer's name is drawn alone, as it always was; in more,
+    /// it waits for room for the class under it, and the first column stays blank.
+    #[test]
+    fn a_layers_name_stays_with_its_class_only_in_columns() {
+        let small = rustgis_map::Symbol::default_for(GeometryType::Point, 0);
+        let classes = (0u32..4).map(|i| (format!("c{i}"), small)).collect();
+        let map = classed_point_map(classes, small);
+        let opts = || LegendOptions { hide_other: true, exclude: &[], scale: 1e6 };
+        let rows = legend_rows(&map, None, &opts());
+        let (starts, _) = flow(&rows, 2, LEGEND_ROW, 1e6);
+        assert_eq!(starts, vec![0, 2]);
+        let first = widest(column_parts(&rows, &starts).next().unwrap(), 1e6);
+        let drawn_in_first = |columns: usize| {
+            let mut pm = Pixmap::new(300, 15).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            crate::canvas::with_canvas(&mut pm, |c| {
+                legend(c, Rect::from_xywh(0.0, 0.0, 300.0, LEGEND_ROW).unwrap(), &map, ("", columns), None, opts(), 1.0);
+            });
+            (0..first as u32).any(|x| (0..15).any(|y| pm.pixel(x, y).is_some_and(|p| p.red() < 200)))
+        };
+        assert!(drawn_in_first(1), "one column draws the name alone");
+        assert!(!drawn_in_first(2), "two columns keep it with its class");
+    }
+
+    /// A large point symbol makes its row taller and widens its column's symbols only: the columns
+    /// balance what the rows take, and the other column stays as narrow as its labels let it.
+    #[test]
+    fn a_legends_columns_hold_large_point_symbols() {
+        let small = rustgis_map::Symbol { size: 4.0, stroke_width: 0.0, ..rustgis_map::Symbol::default_for(GeometryType::Point, 0) };
+        let classes =
+            (0u32..10).map(|i| (format!("c{i}"), rustgis_map::Symbol { size: if i < 2 { 40.0 } else { 4.0 }, ..small })).collect();
+        let map = classed_point_map(classes, small);
         let opts = LegendOptions { hide_other: true, exclude: &[], scale: 1e6 };
         let rows = legend_rows(&map, None, &opts);
         let tall = rows[1].height(1e6);

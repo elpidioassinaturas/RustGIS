@@ -7137,6 +7137,34 @@ fn a_legends_columns_say_when_its_box_is_too_small() {
     let mark = s.notice_mark();
     s.run("layout.update", &json!({"element": id, "w": 150, "h": 150, "title": "", "columns": 2})).unwrap();
     assert_eq!(said(&s, mark), "");
+    // In columns, its box or what it lists changing without "columns": told, and told nothing when
+    // it still fits or only moves.
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "h": 15})).unwrap();
+    assert!(said(&s, mark).contains("its last rows are left out"), "{}", said(&s, mark));
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "x": 20})).unwrap();
+    assert_eq!(said(&s, mark), "");
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "allClasses": true})).unwrap();
+    assert!(said(&s, mark).contains("its last rows are left out"), "{}", said(&s, mark));
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "h": 150})).unwrap();
+    s.run("layout.update", &json!({"element": id, "hideOther": true})).unwrap();
+    assert_eq!(said(&s, mark), "");
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "w": 12})).unwrap();
+    assert!(said(&s, mark).contains("they close up"), "{}", said(&s, mark));
+    // In one column a change of its box says nothing, as before columns.
+    s.run("layout.update", &json!({"element": id, "w": 150, "h": 150, "columns": 1})).unwrap();
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "h": 15})).unwrap();
+    assert_eq!(said(&s, mark), "");
+    // A frame whose map is gone: said rather than left unchecked.
+    s.project.maps[0].name = "Elsewhere".into();
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "columns": 2})).unwrap();
+    assert!(said(&s, mark).contains("shows no map of this project"), "{}", said(&s, mark));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

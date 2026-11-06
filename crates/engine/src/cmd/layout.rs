@@ -2341,18 +2341,29 @@ fn legend_fit_warnings(columns: usize, (w, h): (f64, f64), (room_w, room_h): (f6
     said
 }
 
-/// Says what a legend given `"columns"` loses in its box, as `layout.publication` does for its own.
+/// Says what a legend loses in its box, as `layout.publication` does for its own, or that it can't
+/// tell.
 fn say_legend_fit(s: &mut Session, li: usize, id: u32) {
     let Some(l) = s.project.layouts.get(li) else { return };
     let Some(e) = l.element(id) else { return };
     let ElementKind::Legend { frame, title, all_classes, hide_other, exclude, columns } = &e.kind else { return };
-    let Some(ElementKind::MapFrame { map, center, scale, .. }) = l.element(*frame).map(|f| &f.kind) else { return };
+    let shown = match l.element(*frame).map(|f| &f.kind) {
+        Some(ElementKind::MapFrame { map, center, scale, .. }) => Some((map.clone(), *center, *scale)),
+        _ => None,
+    };
     let (room_w, room_h) = (e.w, e.h - if title.is_empty() { 0.0 } else { crate::render::layout::legend_title_mm() });
     let (all_classes, hide_other, exclude, columns) = (*all_classes, *hide_other, exclude.clone(), *columns);
-    let (name, center, scale) = (map.clone(), *center, *scale);
-    let Some(map) = s.project.maps.iter_mut().find(|m| m.name.eq_ignore_ascii_case(&name)) else { return };
+    let found = shown
+        .and_then(|(name, center, scale)| Some((s.project.maps.iter_mut().find(|m| m.name.eq_ignore_ascii_case(&name))?, center, scale)));
+    let Some((map, center, scale)) = found else {
+        s.warn("the legend's frame shows no map of this project, so the legend lists nothing");
+        return;
+    };
     let at = crate::render::layout::frame_render_scale(map, center, scale);
-    let Some(sizes) = crate::render::layout::legend_sizes_mm(map, at, all_classes, hide_other, &exclude) else { return };
+    let Some(sizes) = crate::render::layout::legend_sizes_mm(map, at, all_classes, hide_other, &exclude) else {
+        s.warn("a layer's source couldn't be read through, so the legend's fit in its box wasn't checked; exporting says why");
+        return;
+    };
     let size = sizes[columns.clamp(1, MAX_LEGEND_COLUMNS) - 1];
     for said in legend_fit_warnings(columns, size, (room_w, room_h)) {
         s.warn(said);
@@ -3336,7 +3347,15 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         }
         _ => {}
     }
-    if new_columns.is_some() {
+    // A legend in columns is told again when its box or what it lists changes; a move changes neither.
+    let in_columns = matches!(&e.kind, ElementKind::Legend { columns, .. } if *columns > 1);
+    let refitted = f(p, "w").is_some()
+        || f(p, "h").is_some()
+        || ps(p, "title").is_some()
+        || b(p, "allClasses").is_some()
+        || b(p, "hideOther").is_some()
+        || p.get("exclude").is_some_and(|v| !v.is_null());
+    if new_columns.is_some() || (in_columns && refitted) {
         say_legend_fit(s, li, id);
     }
     if let Some(w) = font_told {
