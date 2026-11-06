@@ -10,7 +10,7 @@
 //! here as `"text"`; the command line, MCP and the desktop assistant let these commands fetch
 //! (waiting for the answer).
 
-use rustgis_data::ogc::{Coverage, Offer, Service, SliderSteps};
+use rustgis_data::ogc::{Coverage, Offer, PAST_READ_LIMIT, Service, SliderSteps};
 use serde_json::{Value, json};
 
 use super::ps;
@@ -170,6 +170,9 @@ fn capabilities(p: &Value) -> Result<Discovery, String> {
         if result.service.kind.is_empty() {
             result.service.kind = service.kind.clone();
             result.service.title = service.title.clone();
+        }
+        if let Some(listed) = service.listed {
+            result.service.listed = Some(result.service.layers.len() + listed);
         }
         // Parsers bound each document's collections/layers; visited documents bound the merge.
         // Distinct offers may share a name (including generated tile names and collection ids).
@@ -420,7 +423,12 @@ pub(crate) fn layers(s: &mut Session, p: &Value) -> CmdResult {
     let p = owned.as_ref().unwrap_or(p);
     let bound = crate::service_logins::request_params(s, p)?;
     let p = bound.as_ref();
-    let found = capabilities(p)?;
+    let mut found = capabilities(p)?;
+    let total = found.service.layers.len();
+    if let Some(listed) = found.service.listed.filter(|&listed| listed < total) {
+        found.service.layers.truncate(listed);
+        found.service.notes.push(format!("only the first {listed} of {total} layers are listed; service.add takes any of them by name"));
+    }
     let mut out = service_json(&found.service);
     if let Some(layers) = out.get_mut("layers").and_then(Value::as_array_mut) {
         for (layer, source) in layers.iter_mut().zip(found.sources) {
@@ -450,9 +458,12 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         .find(|(l, _)| l.name == want)
         .or_else(|| candidates().find(|(l, _)| l.name.eq_ignore_ascii_case(want) || l.title.eq_ignore_ascii_case(want)))
         .ok_or_else(|| {
-            // A layer the listing left out, and why (a collection of 3D Tiles, say).
+            // A layer the listing left out, and why (a collection of 3D Tiles, say), or a document
+            // too long to read to its end.
             let quoted = format!("'{}'", want.to_lowercase());
-            let left_out = |n: &&String| n.contains(rustgis_data::ogc::LEFT_OUT_3D) && n.to_lowercase().contains(&quoted);
+            let left_out = |n: &&String| {
+                (n.contains(rustgis_data::ogc::LEFT_OUT_3D) && n.to_lowercase().contains(&quoted)) || n.contains(PAST_READ_LIMIT)
+            };
             match found.service.notes.iter().find(left_out) {
                 Some(why) => format!("{url}: no layer '{want}': {why}"),
                 None => format!("{url}: no layer '{want}' (service.layers lists them)"),
@@ -753,7 +764,10 @@ fn coverage(s: &mut Session, p: &Value) -> CmdResult {
         .filter(|(_, source)| ps(p, "source_url").is_none_or(|s| same_address(s, source)))
         .map(|(layer, _)| layer)
         .find(|l| l.name == want || l.name.eq_ignore_ascii_case(want))
-        .ok_or_else(|| format!("{url}: no coverage '{want}' (service.layers lists them)"))?;
+        .ok_or_else(|| match found.service.notes.iter().find(|n| n.contains(PAST_READ_LIMIT)) {
+            Some(why) => format!("{url}: no coverage '{want}': {why}"),
+            None => format!("{url}: no coverage '{want}' (service.layers lists them)"),
+        })?;
     let Offer::Coverage(c) = &layer.offer else { return Err(format!("{url}: '{want}' isn't a WCS coverage")) };
     let (get, area) = coverage_request(s, p, c)?;
     Ok(json!({"url": get, "name": layer.title, "bbox": area, "describe": rustgis_data::ogc::describe_coverage_url(c)}))

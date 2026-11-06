@@ -439,18 +439,39 @@ pub struct Service {
     pub notes: Vec<String>,
     /// An OGC API landing page's advertised JSON collections document, resolved against it.
     pub collections_url: Option<String>,
+    /// How many of `layers` a listing shows, when not all of them: the others are read only to be
+    /// added by name.
+    pub listed: Option<usize>,
     /// Some advertised collections were left out (past the listing limit, or with an items
     /// address RustGIS doesn't fetch): the listing isn't the whole service.
     pub incomplete: bool,
 }
 
-/// Most layers listed from one service.
-const MAX_LAYERS: usize = 2_000;
+/// Most layers or collections `service.layers` lists from one document. The others are still read
+/// ([`Service::listed`]), so that they can be added by name: which ones come first is up to the
+/// server, and some change their order between answers (#1519).
+const MAX_LISTED_LAYERS: usize = 2_000;
+/// Most layers or collections read from one document, which is hostile input.
+const MAX_READ_LAYERS: usize = if cfg!(test) { 3_000 } else { 100_000 };
+/// How a note says that a document went past what is read of it.
+pub const PAST_READ_LIMIT: &str = "RustGIS reads at most";
 /// Features asked of a WFS in one request.
 pub const FEATURE_LIMIT: usize = 50_000;
 /// Features asked of an OGC API in one request: servers cap their pages (often at 10,000) and
 /// some refuse a larger `limit` outright.
 pub const OGC_API_LIMIT: usize = 10_000;
+
+/// The note for the layers of a document past the `limit` that is read of it.
+fn past_read_limit(left: usize, what: &str, limit: usize) -> String {
+    format!("{left} {what} are left out: {PAST_READ_LIMIT} {limit} from one document")
+}
+
+/// Stops the listing of a document with one layer to an entry at [`MAX_LISTED_LAYERS`].
+fn cut_listing(service: &mut Service) {
+    if service.layers.len() > MAX_LISTED_LAYERS {
+        service.listed = Some(MAX_LISTED_LAYERS);
+    }
+}
 
 /// The address to fetch a service's capabilities from: OGC API landing pages and collection lists
 /// are JSON; WMS, WMTS and WFS addresses get a GetCapabilities request unless they have one.
@@ -893,6 +914,7 @@ fn wms(url: &str, root: &Node) -> Service {
     let mut service = Service { kind: "WMS".into(), title, ..Service::default() };
     let (mut skipped, mut too_long) = (0, 0);
     let mut time_budget = MAX_DOCUMENT_TIME_VALUES;
+    let mut layer_boxes = LayerBoxes::new();
     // Layers inherit their parents' coordinate systems, nearest valid geographic bounds, queryable
     // attribute and time dimension.
     // The SLD profile's GetLegendGraphic (WMS 1.3.0 with SLD 1.1, 1.1.1 with SLD 1.0), when the
@@ -910,7 +932,10 @@ fn wms(url: &str, root: &Node) -> Service {
     while let Some((layer, inherited_crs, inherited_bbox, inherited_queryable, inherited_styles, inherited_time, inherited_scales)) =
         stack.pop()
     {
-        if service.layers.len() >= MAX_LAYERS {
+        if service.layers.len() >= MAX_READ_LAYERS {
+            let named = |l: &Node| l.descendants().filter(|n| n.is_element() && local(n) == "Layer" && child(n, "Name").is_some()).count();
+            let left = named(&layer) + stack.iter().map(|entry| named(&entry.0)).sum::<usize>();
+            service.notes.push(past_read_limit(left, "layers", MAX_READ_LAYERS));
             break;
         }
         // (A layer naming none of its own shares its parent's list, and what is worked out of it.)
@@ -952,7 +977,7 @@ fn wms(url: &str, root: &Node) -> Service {
         // with the other systems it is offered in, for a map drawn in one of them.
         let mercator = crs.names.iter().any(|c| c.split_whitespace().any(is_web_mercator));
         let listed = crs.candidates.get_or_init(|| wms_candidates(&crs.names));
-        let mut native = wms_native(&layer, listed, v13, bbox, mercator);
+        let mut native = wms_native(&layer, listed, v13, bbox, mercator, &mut layer_boxes);
         if !mercator && native.is_none() {
             skipped += 1;
             continue;
@@ -1034,6 +1059,7 @@ fn wms(url: &str, root: &Node) -> Service {
         });
     }
     service.layers.reverse();
+    cut_listing(&mut service);
     if skipped > 0 {
         service.notes.push(format!("{skipped} layers aren't offered in a coordinate system RustGIS can draw and are left out"));
     }
@@ -1095,21 +1121,26 @@ fn wms_candidates(crs: &[String]) -> Vec<Candidate> {
 /// the system's axes as EPSG defines them ([`crate::raster::epsg_axes`]); for a system whose
 /// order RustGIS doesn't know, as the layer's own `BoundingBox` in it is written (else latitude
 /// first in a geographic system other than CRS:84).
-fn wms_native(layer: &Node, listed: &[Candidate], v13: bool, area: Option<[f64; 4]>, mercator: bool) -> Option<(String, warp::Warp)> {
+fn wms_native<'a, 'i>(
+    layer: &Node<'a, 'i>,
+    listed: &[Candidate],
+    v13: bool,
+    area: Option<[f64; 4]>,
+    mercator: bool,
+    read: &mut LayerBoxes<'a, 'i>,
+) -> Option<(String, warp::Warp)> {
     // Its boxes by system (its own, else the nearest it inherits: WMS 1.3.0 §7.2.4.6.8), read
     // once a layer.
     let mut boxes: std::collections::HashMap<u32, Node> = std::collections::HashMap::new();
     if v13 {
-        for b in layer
-            .ancestors()
-            .filter(|a| a.is_element() && local(a) == "Layer")
-            .flat_map(|a| children(&a, "BoundingBox").collect::<Vec<_>>())
-        {
-            // (By code: the box may name the system otherwise than the list, `EPSG:2056` for
-            // `urn:ogc:def:crs:EPSG::2056`; but a CRS:84 box, longitude first, isn't an
-            // EPSG:4326 one.)
-            if let Some(code) = b.attribute("CRS").or(b.attribute("SRS")).filter(|c| !warp::is_crs84(c)).and_then(warp::epsg_of) {
-                boxes.entry(code).or_insert(b);
+        for a in layer.ancestors().filter(|a| a.is_element() && local(a) == "Layer") {
+            for b in read.entry(a.id()).or_insert_with(|| children(&a, "BoundingBox").collect()).iter() {
+                // (By code: the box may name the system otherwise than the list, `EPSG:2056` for
+                // `urn:ogc:def:crs:EPSG::2056`; but a CRS:84 box, longitude first, isn't an
+                // EPSG:4326 one.)
+                if let Some(code) = b.attribute("CRS").or(b.attribute("SRS")).filter(|c| !warp::is_crs84(c)).and_then(warp::epsg_of) {
+                    boxes.entry(code).or_insert(*b);
+                }
             }
         }
     }
@@ -1146,6 +1177,10 @@ fn wms_native(layer: &Node, listed: &[Candidate], v13: bool, area: Option<[f64; 
     let (epsg, lat_first) = if mercator { (3857, false) } else { (first.epsg, first.lat_first) };
     Some((first.name, warp::Warp { epsg, grid: warp::Grid::Map { lat_first }, area, systems }))
 }
+
+/// The `BoundingBox`es of the WMS layers read so far. A service's layers often share one parent:
+/// looking through its children again for each would take the square of their number.
+type LayerBoxes<'a, 'i> = std::collections::HashMap<roxmltree::NodeId, Vec<Node<'a, 'i>>>;
 
 /// Whether `system` is written north (or latitude) first as EPSG defines its axes, when
 /// RustGIS's table knows it ([`crate::raster::epsg_axes`]).
@@ -1356,7 +1391,11 @@ fn wmts(url: &str, root: &Node) -> Service {
         .map(|h| endpoint(&h))
         .unwrap_or_else(|| endpoint(url));
     let (mut skipped, mut too_long) = (0, 0);
-    for layer in children(&contents, "Layer").take(MAX_LAYERS) {
+    let left = children(&contents, "Layer").count().saturating_sub(MAX_READ_LAYERS);
+    if left > 0 {
+        service.notes.push(past_read_limit(left, "layers", MAX_READ_LAYERS));
+    }
+    for layer in children(&contents, "Layer").take(MAX_READ_LAYERS) {
         let Some(name) = child_text(&layer, "Identifier") else { continue };
         let title = child_text(&layer, "Title").unwrap_or_else(|| name.clone());
         let default_style = children(&layer, "Style").find(|s| s.attribute("isDefault") == Some("true")).or_else(|| child(&layer, "Style"));
@@ -1513,6 +1552,7 @@ fn wmts(url: &str, root: &Node) -> Service {
             legends,
         });
     }
+    cut_listing(&mut service);
     if skipped > 0 {
         service.notes.push(format!("{skipped} layers have no tile matrix set RustGIS can draw and are left out"));
     }
@@ -1579,7 +1619,11 @@ fn wfs(url: &str, root: &Node) -> Service {
         return service;
     };
     let Some(list) = child(root, "FeatureTypeList") else { return service };
-    for ft in children(&list, "FeatureType").take(MAX_LAYERS) {
+    let left = children(&list, "FeatureType").count().saturating_sub(MAX_READ_LAYERS);
+    if left > 0 {
+        service.notes.push(past_read_limit(left, "feature types", MAX_READ_LAYERS));
+    }
+    for ft in children(&list, "FeatureType").take(MAX_READ_LAYERS) {
         let Some(name) = child_text(&ft, "Name") else { continue };
         let title = child_text(&ft, "Title").unwrap_or_else(|| name.clone());
         let bbox = child(&ft, "WGS84BoundingBox")
@@ -1631,6 +1675,7 @@ fn wfs(url: &str, root: &Node) -> Service {
             legends: Vec::new(),
         });
     }
+    cut_listing(&mut service);
     service
 }
 
@@ -1766,11 +1811,15 @@ fn wcs(url: &str, root: &Node) -> Service {
             legends: Vec::new(),
         });
     };
-    let mut n = 0;
+    let (mut n, mut left) = (0, 0);
     // WCS 1.1 and 2.0: `CoverageSummary` (nested ones too), named by `CoverageId` or `Identifier`.
     for s in root.descendants().filter(|n| n.is_element() && local(n) == "CoverageSummary") {
         let Some(id) = child_text(&s, "CoverageId").or_else(|| child_text(&s, "Identifier")) else { continue };
-        if id.len() > 500 || n >= MAX_LAYERS {
+        if id.len() > 500 {
+            continue;
+        }
+        if n >= MAX_READ_LAYERS {
+            left += 1;
             continue;
         }
         n += 1;
@@ -1780,7 +1829,11 @@ fn wcs(url: &str, root: &Node) -> Service {
     // WCS 1.0: `CoverageOfferingBrief`, named by `name`, its bounds a `lonLatEnvelope`.
     for b in root.descendants().filter(|n| n.is_element() && local(n) == "CoverageOfferingBrief") {
         let Some(id) = child_text(&b, "name") else { continue };
-        if id.len() > 500 || n >= MAX_LAYERS {
+        if id.len() > 500 {
+            continue;
+        }
+        if n >= MAX_READ_LAYERS {
+            left += 1;
             continue;
         }
         n += 1;
@@ -1791,6 +1844,10 @@ fn wcs(url: &str, root: &Node) -> Service {
             lonlat_box(*pos.first()?, *pos.get(1)?, *pos.get(2)?, *pos.get(3)?)
         });
         add(id, child_text(&b, "label"), bbox);
+    }
+    cut_listing(&mut service);
+    if left > 0 {
+        service.notes.push(past_read_limit(left, "coverages", MAX_READ_LAYERS));
     }
     service
 }
@@ -2164,7 +2221,7 @@ fn arcgis(url: &str, v: &serde_json::Value) -> Result<Service, String> {
             }
             return;
         }
-        for l in v.get("layers").and_then(|l| l.as_array()).into_iter().flatten().take(MAX_LAYERS) {
+        for l in v.get("layers").and_then(|l| l.as_array()).into_iter().flatten().take(MAX_LISTED_LAYERS) {
             let (Some(id), Some(name)) = (l.get("id").and_then(|i| i.as_i64()), l.get("name").and_then(|n| n.as_str())) else { continue };
             // Group layers have sub-layers and no features of their own.
             if l.get("subLayerIds").is_some_and(|s| s.as_array().is_some_and(|a| !a.is_empty())) {
@@ -2210,7 +2267,7 @@ fn arcgis(url: &str, v: &serde_json::Value) -> Result<Service, String> {
         // A dynamic map's layers, each drawn alone (`layers=show:<id>`): a national layer is
         // seen whole this way, where its features would stop at the server's record limit.
         if !template_is_cache(&service) {
-            for l in v.get("layers").and_then(|l| l.as_array()).into_iter().flatten().take(MAX_LAYERS) {
+            for l in v.get("layers").and_then(|l| l.as_array()).into_iter().flatten().take(MAX_LISTED_LAYERS) {
                 let (Some(id), Some(name)) = (l.get("id").and_then(|i| i.as_i64()), l.get("name").and_then(|n| n.as_str())) else {
                     continue;
                 };
@@ -2264,6 +2321,10 @@ fn arcgis(url: &str, v: &serde_json::Value) -> Result<Service, String> {
         });
     } else {
         return Err("an ArcGIS address, but not a FeatureServer, MapServer, ImageServer or VectorTileServer".into());
+    }
+    let left = v.get("layers").and_then(|l| l.as_array()).map_or(0, Vec::len).saturating_sub(MAX_LISTED_LAYERS);
+    if left > 0 {
+        service.notes.push(past_read_limit(left, "layers", MAX_LISTED_LAYERS));
     }
     // A feature layer is read past the server's record limit, page by page, where the layer
     // supports it ([`begin`]). A cut-off answer is pointed out when it lands.
@@ -2326,7 +2387,7 @@ fn arcgis_directory(b: &str, v: &serde_json::Value) -> Service {
     // Names RustGIS won't put into an address (spaces, `?`, `..`): counted in a note.
     let mut unnamed = 0;
     // ArcGIS's own system folder holds geometry and printing tools, never maps.
-    for f in v.get("folders").and_then(|f| f.as_array()).into_iter().flatten().take(MAX_LAYERS) {
+    for f in v.get("folders").and_then(|f| f.as_array()).into_iter().flatten().take(MAX_LISTED_LAYERS) {
         let Some(name) = f.as_str().and_then(|n| {
             let ok = arcgis_name(n);
             unnamed += usize::from(ok.is_none());
@@ -2350,7 +2411,7 @@ fn arcgis_directory(b: &str, v: &serde_json::Value) -> Service {
             legends: Vec::new(),
         });
     }
-    for s in v.get("services").and_then(|s| s.as_array()).into_iter().flatten().take(MAX_LAYERS) {
+    for s in v.get("services").and_then(|s| s.as_array()).into_iter().flatten().take(MAX_LISTED_LAYERS) {
         let Some(kind) = s.get("type").and_then(|t| t.as_str()) else {
             skipped += 1;
             continue;
@@ -2381,6 +2442,12 @@ fn arcgis_directory(b: &str, v: &serde_json::Value) -> Service {
     }
     if unnamed > 0 {
         service.notes.push(format!("{unnamed} folders or services with names RustGIS can't put in an address are left out"));
+    }
+    for (key, what) in [("folders", "folders"), ("services", "services")] {
+        let left = v.get(key).and_then(|l| l.as_array()).map_or(0, Vec::len).saturating_sub(MAX_LISTED_LAYERS);
+        if left > 0 {
+            service.notes.push(past_read_limit(left, what, MAX_LISTED_LAYERS));
+        }
     }
     service
 }
@@ -2431,7 +2498,11 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
     // Collections whose items are 3D content, not features, by what it is and whether their tiles
     // are listed.
     let mut three_d: Vec<((&str, bool), Vec<&str>)> = Vec::new();
-    for c in collections.iter().take(MAX_LAYERS) {
+    for (i, c) in collections.iter().take(MAX_READ_LAYERS).enumerate() {
+        // A collection may make several layers: the list stops at a collection, with all its own.
+        if i == MAX_LISTED_LAYERS {
+            service.listed = Some(service.layers.len());
+        }
         let Some(id) = c.get("id").and_then(|i| i.as_str()) else { continue };
         let links = c.get("links").and_then(|l| l.as_array()).cloned().unwrap_or_default();
         let title = c.get("title").and_then(|t| t.as_str()).unwrap_or(id).to_string();
@@ -2550,10 +2621,10 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
             (true, false) => format!("{noun} {named} also {verb} {what}, {LEFT_OUT_3D}; their tiles are listed"),
         });
     }
-    if collections.len() > MAX_LAYERS {
-        service.notes.push(format!("only the first {MAX_LAYERS} collections are listed"));
+    if collections.len() > MAX_READ_LAYERS {
+        service.notes.push(past_read_limit(collections.len() - MAX_READ_LAYERS, "collections", MAX_READ_LAYERS));
     }
-    service.incomplete = unreadable > 0 || collections.len() > MAX_LAYERS;
+    service.incomplete = unreadable > 0 || collections.len() > MAX_LISTED_LAYERS;
     if service.layers.iter().any(|l| matches!(l.offer, Offer::Features { .. })) {
         service.notes.push(format!("a collection is read up to {} features on this computer, page by page", max_paged_features()));
     }
@@ -4026,7 +4097,7 @@ mod tests {
         let xml = r#"<Layer><CRS>urn:ogc:def:crs:EPSG::3035</CRS><BoundingBox CRS="EPSG:3035" minx="2700000" miny="4000000" maxx="3600000" maxy="4700000"/></Layer>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
         let listed = wms_candidates(&["urn:ogc:def:crs:EPSG::3035".to_string()]);
-        let (_, w) = wms_native(&doc.root_element(), &listed, true, Some([6.0, 47.0, 15.0, 55.0]), false).unwrap();
+        let (_, w) = wms_native(&doc.root_element(), &listed, true, Some([6.0, 47.0, 15.0, 55.0]), false, &mut LayerBoxes::new()).unwrap();
         assert_eq!((w.epsg, w.grid), (3035, warp::Grid::Map { lat_first: true }));
     }
 
@@ -4038,7 +4109,8 @@ mod tests {
         let order = |xml: &str, crs: &str, v13: bool| {
             let doc = roxmltree::Document::parse(xml).unwrap();
             let listed = wms_candidates(&[crs.to_string()]);
-            let (_, w) = wms_native(&doc.root_element(), &listed, v13, Some([10.0, 47.5, 13.0, 50.5]), false).unwrap();
+            let (_, w) =
+                wms_native(&doc.root_element(), &listed, v13, Some([10.0, 47.5, 13.0, 50.5]), false, &mut LayerBoxes::new()).unwrap();
             w.grid
         };
         let gk4 = "<Layer><CRS>EPSG:31468</CRS></Layer>";
@@ -6556,5 +6628,95 @@ mod tests {
         assert!(parse_records("https://c.org/csw", deep.as_bytes()).unwrap_err().contains("deep"));
         let many = format!("<GetRecordsResponse>{}</GetRecordsResponse>", "<Record><title>t</title></Record>".repeat(1000));
         assert_eq!(parse_records("https://c.org/csw", many.as_bytes()).unwrap().records.len(), RECORDS_PAGE as usize * 5);
+    }
+
+    /// Every kind of document is read up to the limit, and what's past it is counted in a note.
+    #[test]
+    fn a_document_past_the_read_limit_says_how_much_it_left_out() {
+        fn many(n: usize, item: impl Fn(usize) -> String) -> String {
+            (0..n).map(item).collect()
+        }
+        fn list(n: usize, item: impl Fn(usize) -> serde_json::Value) -> serde_json::Value {
+            (0..n).map(item).collect()
+        }
+        let wfs = |n| {
+            let types = many(n, |i| format!("<FeatureType><Name>t{i}</Name></FeatureType>"));
+            format!(r#"<WFS_Capabilities version="2.0.0"><FeatureTypeList>{types}</FeatureTypeList></WFS_Capabilities>"#)
+        };
+        // Named layers in an unnamed one, which isn't counted.
+        let wms = |n| {
+            let layers = many(n, |i| format!("<Layer><Name>t{i}</Name></Layer>"));
+            format!(
+                r#"<WMS_Capabilities version="1.3.0"><Capability><Layer><CRS>EPSG:3857</CRS>{layers}</Layer></Capability></WMS_Capabilities>"#
+            )
+        };
+        let wmts = |n| {
+            let layers = many(n, |i| format!("<Layer><ows:Identifier>t{i}</ows:Identifier></Layer>"));
+            format!(
+                r#"<Capabilities xmlns:ows="http://www.opengis.net/ows/1.1" version="1.0.0"><Contents>{layers}</Contents></Capabilities>"#
+            )
+        };
+        let wcs2 = |n| {
+            let coverages = many(n, |i| format!("<CoverageSummary><CoverageId>c{i}</CoverageId></CoverageSummary>"));
+            format!("<Capabilities><Contents>{coverages}</Contents></Capabilities>")
+        };
+        let wcs1 = |n| {
+            let coverages = many(n, |i| format!("<CoverageOfferingBrief><name>c{i}</name></CoverageOfferingBrief>"));
+            format!("<WCS_Capabilities><ContentMetadata>{coverages}</ContentMetadata></WCS_Capabilities>")
+        };
+        let arcgis = |n| serde_json::json!({"layers": list(n, |i| serde_json::json!({"id": i, "name": format!("l{i}")}))}).to_string();
+        let folders = |n| serde_json::json!({"folders": list(n, |i| serde_json::json!(format!("f{i}")))}).to_string();
+        let services =
+            |n| serde_json::json!({"services": list(n, |i| serde_json::json!({"name": format!("s{i}"), "type": "MapServer"}))}).to_string();
+        let ogc = |n| {
+            let items =
+                |i| serde_json::json!({"id": format!("c{i}"), "links": [{"rel": "items", "href": format!("collections/c{i}/items")}]});
+            serde_json::json!({"collections": list(n, items)}).to_string()
+        };
+        // (A WMTS layer needs a tile matrix set to be kept: only the note is looked at.)
+        // (ArcGIS's lists are read as far as they are listed.)
+        let kinds: [(&str, &str, &dyn Fn(usize) -> String, usize, bool); 9] = [
+            ("feature types", "https://x.org/wfs", &wfs, MAX_READ_LAYERS, true),
+            ("layers", "https://x.org/wms", &wms, MAX_READ_LAYERS, true),
+            ("layers", "https://x.org/wmts", &wmts, MAX_READ_LAYERS, false),
+            ("coverages", "https://x.org/wcs", &wcs2, MAX_READ_LAYERS, true),
+            ("coverages", "https://x.org/wcs", &wcs1, MAX_READ_LAYERS, true),
+            ("layers", "https://x.org/arcgis/rest/services/P/FeatureServer", &arcgis, MAX_LISTED_LAYERS, true),
+            ("folders", "https://x.org/arcgis/rest/services", &folders, MAX_LISTED_LAYERS, true),
+            ("services", "https://x.org/arcgis/rest/services", &services, MAX_LISTED_LAYERS, true),
+            ("collections", "https://x.org/collections", &ogc, MAX_READ_LAYERS, true),
+        ];
+        for (what, url, doc, limit, kept) in kinds {
+            let s = parse(url, doc(limit).as_bytes()).unwrap();
+            assert!(!s.notes.iter().any(|n| n.contains(PAST_READ_LIMIT)), "{url}: {:?}", s.notes);
+            assert_eq!(s.layers.len(), if kept { limit } else { 0 }, "{url}");
+            let s = parse(url, doc(limit + 2).as_bytes()).unwrap();
+            let note = format!("2 {what} are left out: {PAST_READ_LIMIT} {limit} from one document");
+            assert!(s.notes.contains(&note), "{url}: {:?}", s.notes);
+            assert_eq!(s.layers.len(), if kept { limit } else { 0 }, "{url}");
+            // What was read past the listing is there to be found, but isn't listed.
+            let cut = kept && limit > MAX_LISTED_LAYERS;
+            assert_eq!(s.listed, cut.then_some(MAX_LISTED_LAYERS), "{url}");
+            assert_eq!(parse(url, doc(MAX_LISTED_LAYERS).as_bytes()).unwrap().listed, None, "{url}");
+        }
+    }
+
+    /// An OGC API past what's listed is read whole, and still marked for those that need it whole.
+    #[test]
+    fn collections_past_the_listing_are_read_and_marked_incomplete() {
+        let doc = |n: usize| {
+            let collections: Vec<_> = (0..n)
+                .map(|i| serde_json::json!({"id": format!("c{i}"), "links": [{"rel": "items", "href": format!("collections/c{i}/items")}]}))
+                .collect();
+            serde_json::json!({"collections": collections}).to_string()
+        };
+        let s = parse("https://x.org/collections", doc(MAX_LISTED_LAYERS).as_bytes()).unwrap();
+        assert!(!s.incomplete);
+        assert_eq!(s.listed, None);
+        let s = parse("https://x.org/collections", doc(MAX_LISTED_LAYERS + 1).as_bytes()).unwrap();
+        assert!(s.incomplete);
+        assert_eq!(s.layers.len(), MAX_LISTED_LAYERS + 1);
+        assert_eq!(s.listed, Some(MAX_LISTED_LAYERS));
+        assert!(!s.notes.iter().any(|n| n.contains(PAST_READ_LIMIT)), "{:?}", s.notes);
     }
 }
