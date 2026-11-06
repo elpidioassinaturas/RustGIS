@@ -1681,6 +1681,11 @@ pub fn legend_sizes_mm(
     }))
 }
 
+/// The height in mm [`legend`] gives a title above its rows, which [`legend_sizes_mm`] leaves out.
+pub fn legend_title_mm() -> f64 {
+    f64::from(LEGEND_ROW) * 1.3 * 25.4 / 96.0
+}
+
 /// The renderer's scale denominator for a frame showing `map` at paper scale 1:`scale` (the one
 /// [`legend_sizes_mm`] takes).
 pub fn frame_render_scale(map: &Map, center: Coord, scale: f64) -> f64 {

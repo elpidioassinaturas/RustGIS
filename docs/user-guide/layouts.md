@@ -175,6 +175,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     staying with the row under it. The box keeps its size, so widen it for the columns: in a box
     too narrow they close up and long labels run into the next or past the box, and a box too
     short fills each column in turn and leaves out the last rows.
+    Giving `"columns"` says when its box loses rows or closes the columns up; resizing the box
+    afterwards doesn't.
   - **Point symbols**: a point layer's symbol is drawn as the map draws it: its marker or the
     stacked marks of its class or layer, its size and outline, the transparency of the layer and
     its groups, and its reference scale at the frame's scale, unturned. A row has one symbol, so

@@ -2048,23 +2048,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         let (ix, iy, iw, ih) = (r.0 + pad, r.1 + pad, lw - 2.0 * pad, lh - 2.0 * pad);
         let bar_fit = if bar.is_some() { bar_h.min(ih) } else { 0.0 };
         let rows_h = (ih - bar_fit - if bar.is_some() { bar_part - bar_h } else { 0.0 }).max(0.0);
-        // A box sized to its content, less the padding again, can come out a rounding error
-        // short of it: that still fits.
-        const FIT_MM: f64 = 1e-6;
-        let (too_wide, too_tall) = (ch > 0.0 && cw > iw + FIT_MM, ch > rows_h + FIT_MM);
-        if legend_cols > 1 {
-            // Its columns close up rather than leave one out.
-            if too_wide {
-                warnings.push("the legend's columns are wider than its box: they close up, long labels run into the next, and the last column's past the box".into());
-            }
-            if too_tall {
-                warnings.push("the legend lists more than fits its corner: its last rows are left out".into());
-            }
-        } else if ch > 0.0 && (too_wide || too_tall) {
-            warnings.push("the legend lists more than fits its corner: its last rows or the ends of long labels are left out".into());
-        }
+        warnings.extend(legend_fit_warnings(legend_cols, (cw, ch), (iw, rows_h)).into_iter().map(String::from));
         // In a column the colorbar takes the column's width, as its rows do.
-        if bar.is_some() && ((bar_w > iw + FIT_MM && !legend_in_column) || bar_h > ih + FIT_MM) {
+        if bar.is_some() && ((bar_w > iw + LEGEND_FIT_MM && !legend_in_column) || bar_h > ih + LEGEND_FIT_MM) {
             warnings.push("the legend's box is smaller than the colorbar: it is drawn narrower or shorter".into());
         }
         if ch > 0.0 && rows_h >= 1.0 {
@@ -2333,6 +2319,46 @@ pub(crate) fn color(p: &Value, k: &str, d: Rgba) -> Result<Rgba, String> {
 
 const ONLY_LEGEND_COLUMNS: &str = "only legends have columns";
 
+/// A box sized to its content, less the padding again, can come out a rounding error short of it:
+/// that still fits.
+const LEGEND_FIT_MM: f64 = 1e-6;
+
+/// What a legend's rows `size` in `columns` columns lose in a box `room`, in mm, each said once.
+fn legend_fit_warnings(columns: usize, (w, h): (f64, f64), (room_w, room_h): (f64, f64)) -> Vec<&'static str> {
+    let (too_wide, too_tall) = (h > 0.0 && w > room_w + LEGEND_FIT_MM, h > room_h + LEGEND_FIT_MM);
+    let mut said = Vec::new();
+    if columns > 1 {
+        // Its columns close up rather than leave one out.
+        if too_wide {
+            said.push("the legend's columns are wider than its box: they close up, long labels run into the next, and the last column's past the box");
+        }
+        if too_tall {
+            said.push("the legend lists more than fits its box: its last rows are left out");
+        }
+    } else if h > 0.0 && (too_wide || too_tall) {
+        said.push("the legend lists more than fits its box: its last rows or the ends of long labels are left out");
+    }
+    said
+}
+
+/// Says what a legend given `"columns"` loses in its box, as `layout.publication` does for its own.
+fn say_legend_fit(s: &mut Session, li: usize, id: u32) {
+    let Some(l) = s.project.layouts.get(li) else { return };
+    let Some(e) = l.element(id) else { return };
+    let ElementKind::Legend { frame, title, all_classes, hide_other, exclude, columns } = &e.kind else { return };
+    let Some(ElementKind::MapFrame { map, center, scale, .. }) = l.element(*frame).map(|f| &f.kind) else { return };
+    let (room_w, room_h) = (e.w, e.h - if title.is_empty() { 0.0 } else { crate::render::layout::legend_title_mm() });
+    let (all_classes, hide_other, exclude, columns) = (*all_classes, *hide_other, exclude.clone(), *columns);
+    let (name, center, scale) = (map.clone(), *center, *scale);
+    let Some(map) = s.project.maps.iter_mut().find(|m| m.name.eq_ignore_ascii_case(&name)) else { return };
+    let at = crate::render::layout::frame_render_scale(map, center, scale);
+    let Some(sizes) = crate::render::layout::legend_sizes_mm(map, at, all_classes, hide_other, &exclude) else { return };
+    let size = sizes[columns.clamp(1, MAX_LEGEND_COLUMNS) - 1];
+    for said in legend_fit_warnings(columns, size, (room_w, room_h)) {
+        s.warn(said);
+    }
+}
+
 /// The `"columns"` a legend is given, refused outside 1 to [`MAX_LEGEND_COLUMNS`].
 fn legend_columns_param(p: &Value) -> Result<Option<usize>, String> {
     let Some(v) = p.get("columns").filter(|v| !v.is_null()) else { return Ok(None) };
@@ -2574,6 +2600,9 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
     };
     let l = s.project.layouts.get_mut(i).ok_or("no layout")?;
     let id = l.add(name, rect, k);
+    if p.get("columns").is_some_and(|v| !v.is_null()) {
+        say_legend_fit(s, i, id);
+    }
     let mut out = json!({"element": id});
     if let Some(w) = warning {
         out["warning"] = json!(w);
@@ -3306,6 +3335,9 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
             }
         }
         _ => {}
+    }
+    if new_columns.is_some() {
+        say_legend_fit(s, li, id);
     }
     if let Some(w) = font_told {
         return Ok(json!({"warning": w}));

@@ -7097,6 +7097,49 @@ fn a_legend_takes_columns_from_one_to_three() {
     }
 }
 
+/// A legend given `"columns"` says when its box doesn't hold them, and only then.
+#[test]
+fn a_legends_columns_say_when_its_box_is_too_small() {
+    let dir = std::env::temp_dir().join(format!("rustgis-legend-box-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.geojson");
+    std::fs::write(
+        &path,
+        r#"{"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [[[4,4],[6,4],[6,6],[4,6],[4,4]]]}}]}"#,
+    )
+    .unwrap();
+    let mut s = Session::new(Project::default());
+    for _ in 0..12 {
+        s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    }
+    s.run("layout.new", &json!({"template": "map"})).unwrap();
+    let said = |s: &Session, mark: u64| s.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<_>>().join(" | ");
+    // One big enough: nothing to say, added or changed.
+    let mark = s.notice_mark();
+    let added = s.run("layout.addElement", &json!({"kind": "legend", "columns": 2, "x": 10, "y": 10, "w": 150, "h": 150})).unwrap();
+    let id = added["element"].as_u64().unwrap();
+    s.run("layout.update", &json!({"element": id, "columns": 3})).unwrap();
+    s.run("layout.update", &json!({"element": id, "columns": 1})).unwrap();
+    assert_eq!(said(&s, mark), "");
+    // Too short: its last rows are left out.
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "h": 15, "columns": 2})).unwrap();
+    assert!(said(&s, mark).contains("its last rows are left out"), "{}", said(&s, mark));
+    // Too narrow: its columns close up.
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "w": 12, "h": 150, "columns": 3})).unwrap();
+    assert!(said(&s, mark).contains("they close up"), "{}", said(&s, mark));
+    // Added too small, in one column.
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "legend", "columns": 1, "x": 10, "y": 10, "w": 150, "h": 15})).unwrap();
+    assert!(said(&s, mark).contains("its last rows or the ends of long labels are left out"), "{}", said(&s, mark));
+    // No title leaves its rows the height it would take.
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "w": 150, "h": 150, "title": "", "columns": 2})).unwrap();
+    assert_eq!(said(&s, mark), "");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A publication layout keys a raster theme with a colorbar: the topmost visible raster drawn on a
 /// ramp gets one at the bottom of the legend's box; a map of vectors only gets none.
 #[test]
