@@ -443,10 +443,17 @@ pub(crate) fn layers(s: &mut Session, p: &Value) -> CmdResult {
 
 /// The error for a name the document doesn't give. It may also be past what is read of the
 /// document, which can't be told from a mistyped name, so that is said beside it.
-fn not_listed(url: &str, what: &str, want: &str, notes: &[String]) -> String {
-    match notes.iter().find(|n| n.contains(PAST_READ_LIMIT)) {
-        Some(why) => format!("{url}: no {what} '{want}' (service.layers lists them; {why})"),
-        None => format!("{url}: no {what} '{want}' (service.layers lists them)"),
+fn not_listed(url: &str, what: &str, want: &str, service: &Service) -> String {
+    let total = service.layers.len();
+    let past_limit = service.notes.iter().find(|n| n.contains(PAST_READ_LIMIT));
+    let listing = match (service.listed.filter(|&listed| listed < total), past_limit) {
+        (Some(listed), _) => format!("service.layers lists the first {listed} of {total}"),
+        (None, Some(_)) => "service.layers lists those read".to_string(),
+        (None, None) => "service.layers lists them".to_string(),
+    };
+    match past_limit {
+        Some(why) => format!("{url}: no {what} '{want}' ({listing}; {why})"),
+        None => format!("{url}: no {what} '{want}' ({listing})"),
     }
 }
 
@@ -472,7 +479,7 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             let left_out = |n: &&String| n.contains(rustgis_data::ogc::LEFT_OUT_3D) && n.to_lowercase().contains(&quoted);
             match found.service.notes.iter().find(left_out) {
                 Some(why) => format!("{url}: no layer '{want}': {why}"),
-                None => not_listed(&url, "layer", want, &found.service.notes),
+                None => not_listed(&url, "layer", want, &found.service),
             }
         })?;
     // A time-enabled layer follows the time slider, at each of its steps, unless a time is asked
@@ -770,7 +777,7 @@ fn coverage(s: &mut Session, p: &Value) -> CmdResult {
         .filter(|(_, source)| ps(p, "source_url").is_none_or(|s| same_address(s, source)))
         .map(|(layer, _)| layer)
         .find(|l| l.name == want || l.name.eq_ignore_ascii_case(want))
-        .ok_or_else(|| not_listed(&url, "coverage", want, &found.service.notes))?;
+        .ok_or_else(|| not_listed(&url, "coverage", want, &found.service))?;
     let Offer::Coverage(c) = &layer.offer else { return Err(format!("{url}: '{want}' isn't a WCS coverage")) };
     let (get, area) = coverage_request(s, p, c)?;
     Ok(json!({"url": get, "name": layer.title, "bbox": area, "describe": rustgis_data::ogc::describe_coverage_url(c)}))

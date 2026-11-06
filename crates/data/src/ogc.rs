@@ -935,7 +935,9 @@ fn wms(url: &str, root: &Node) -> Service {
         if service.layers.len() >= MAX_READ_LAYERS {
             let named = |l: &Node| l.descendants().filter(|n| n.is_element() && local(n) == "Layer" && child(n, "Name").is_some()).count();
             let left = named(&layer) + stack.iter().map(|entry| named(&entry.0)).sum::<usize>();
-            service.notes.push(past_read_limit(left, "layers", MAX_READ_LAYERS));
+            if left > 0 {
+                service.notes.push(past_read_limit(left, "layers", MAX_READ_LAYERS));
+            }
             break;
         }
         // (A layer naming none of its own shares its parent's list, and what is worked out of it.)
@@ -6699,6 +6701,16 @@ mod tests {
             assert_eq!(s.listed, cut.then_some(MAX_LISTED_LAYERS), "{url}");
             assert_eq!(parse(url, doc(MAX_LISTED_LAYERS).as_bytes()).unwrap().listed, None, "{url}");
         }
+        // A WMS is read from its end: past the limit here are only layers without a name, so
+        // nothing that could be added is left out.
+        let layers =
+            "<Layer><Title>group</Title></Layer>".repeat(2) + &many(MAX_READ_LAYERS, |i| format!("<Layer><Name>t{i}</Name></Layer>"));
+        let doc = format!(
+            r#"<WMS_Capabilities version="1.3.0"><Capability><Layer><CRS>EPSG:3857</CRS>{layers}</Layer></Capability></WMS_Capabilities>"#
+        );
+        let s = parse("https://x.org/wms", doc.as_bytes()).unwrap();
+        assert_eq!(s.layers.len(), MAX_READ_LAYERS);
+        assert!(!s.notes.iter().any(|n| n.contains(PAST_READ_LIMIT)), "{:?}", s.notes);
     }
 
     /// An OGC API past what's listed is read whole, and still marked for those that need it whole.
