@@ -178,6 +178,15 @@ const LAYOUT_FAVOURITE_PREF: &str = "layout_favourite_arrangement";
 /// A result an asynchronous service fills in when it's done (the app polls it each frame).
 pub type Slot<T> = std::sync::Arc<std::sync::Mutex<Option<T>>>;
 
+/// One window is read off the frame at a time, however many have started: each may hold 256 MB
+/// and more. Those that wait for their command on the frame don't wait for this.
+#[cfg(not(target_arch = "wasm32"))]
+static WINDOW_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// How many windows may be waiting to be read off the frame: each holds a thread.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_WINDOW_READS: usize = 16;
+
 /// See [`UiState::window_reads`].
 #[cfg(not(target_arch = "wasm32"))]
 type WindowRead = (u64, String, Value, Slot<Result<rustgis_engine::cmd::layer::CogWindow, String>>);
@@ -4281,6 +4290,12 @@ impl RustGisApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn start_window_read(&mut self, p: &Value, url: String, mut q: Value) -> Result<Value, String> {
         let asked = rustgis_engine::cmd::layer::window_asked(&self.session, p)?;
+        if self.ui.window_reads.len() >= MAX_WINDOW_READS {
+            return Err(i18n::fmt(
+                "{url}: {count} windows are waiting to be read: ask again once one has been added",
+                &[("url", &rustgis_engine::sources::redact(&url)), ("count", &MAX_WINDOW_READS.to_string())],
+            ));
+        }
         // What a task needs to read it again, as the download itself can't be (`record_step`).
         let mut window = json!({});
         for k in ["bbox", "cellSize", "cog"] {
@@ -4295,6 +4310,7 @@ impl RustGisApp {
         let diagnostics = self.session.diagnostics.capture();
         let spawned = std::thread::Builder::new().name("cog-window".into()).spawn(move || {
             let _diagnostics = diagnostics.enter();
+            let _turn = WINDOW_TURN.lock().unwrap_or_else(|e| e.into_inner());
             // On a thread no command's catch reaches: a bug must not leave it running forever.
             let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_engine::cmd::layer::read_cog_window(&asked)));
             let read = read.unwrap_or_else(|_| Err(tl!("Reading the window failed unexpectedly").to_string()));
@@ -5357,46 +5373,65 @@ mod record_tests {
     fn a_window_is_read_off_the_frame_and_added_when_it_lands() {
         use std::sync::atomic::Ordering;
         let _turn = crate::fetching::turn();
-        let slow = crate::fetching::slow_ranges(rustgis_engine::data::raster::cog::example(1024, 256));
-        let mut h = egui_kittest::Harness::builder().build_ui_state(
-            |ui, app: &mut RustGisApp| {
-                let ctx = ui.ctx().clone();
-                app.logic(&ctx);
-            },
-            RustGisApp::with_sample(),
-        );
-        let url = format!("{}/scene.tif", slow.origin);
-        // The header in hand, so only the window's tiles wait: those a read on the frame would
-        // hold it for, for the server's 20 s.
-        rustgis_engine::render::rustgis_tiles::cog::info_blocking(&url).unwrap();
-        slow.open.store(false, Ordering::Relaxed);
-        let p = json!({"url": url, "bbox": [10.25, 45.5, 10.5, 45.75], "name": "Window"});
-        h.state_mut().run("ui.addUrl", p).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while slow.held.load(Ordering::Relaxed) == 0 {
-            assert!(std::time::Instant::now() < deadline, "no request held");
+        // With the header in hand only the window's tiles wait: those a read on the frame would hold
+        // it for, for the server's 20 s. Without it, the header waits first.
+        for header_read in [true, false] {
+            let slow = crate::fetching::slow_ranges(rustgis_engine::data::raster::cog::example(1024, 256));
+            let mut h = egui_kittest::Harness::builder().build_ui_state(
+                |ui, app: &mut RustGisApp| {
+                    let ctx = ui.ctx().clone();
+                    app.logic(&ctx);
+                },
+                RustGisApp::with_sample(),
+            );
+            let url = format!("{}/scene.tif", slow.origin);
+            if header_read {
+                rustgis_engine::render::rustgis_tiles::cog::info_blocking(&url).unwrap();
+            }
+            slow.open.store(false, Ordering::Relaxed);
+            let p = json!({"url": url, "bbox": [10.25, 45.5, 10.5, 45.75], "name": "Window"});
+            let asked = std::time::Instant::now();
+            h.state_mut().run("ui.addUrl", p).unwrap();
+            assert!(asked.elapsed() < std::time::Duration::from_secs(5), "asking for it held the frame");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while slow.held.load(Ordering::Relaxed) == 0 {
+                assert!(std::time::Instant::now() < deadline, "no request held");
+                let frame = std::time::Instant::now();
+                h.step();
+                assert!(frame.elapsed() < std::time::Duration::from_secs(5), "the read held the frame");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
             let frame = std::time::Instant::now();
             h.step();
             assert!(frame.elapsed() < std::time::Duration::from_secs(5), "the read held the frame");
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            assert!(h.state().session.map().layer_by_name("Window").is_none());
+            assert_eq!(h.state().ui.window_reads.len(), 1);
+            slow.open.store(true, Ordering::Relaxed);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while h.state().session.map().layer_by_name("Window").is_none() {
+                assert!(std::time::Instant::now() < deadline, "timed out waiting: {:?}", h.state().session.notices);
+                h.step();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let app = h.state();
+            assert!(app.ui.window_reads.is_empty());
+            let data = app.session.map().layer_by_name("Window").and_then(|l| l.raster.as_ref()?.data.clone()).unwrap();
+            assert_eq!((data.width, data.height), (256, 256));
+            assert!(app.session.notices.iter().any(|n| n.text.starts_with("Window: a 256 × 256 window")), "{:?}", app.session.notices);
         }
-        let frame = std::time::Instant::now();
-        h.step();
-        assert!(frame.elapsed() < std::time::Duration::from_secs(5), "the read held the frame");
-        assert!(h.state().session.map().layer_by_name("Window").is_none());
-        assert_eq!(h.state().ui.window_reads.len(), 1);
-        slow.open.store(true, Ordering::Relaxed);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while h.state().session.map().layer_by_name("Window").is_none() {
-            assert!(std::time::Instant::now() < deadline, "timed out waiting: {:?}", h.state().session.notices);
-            h.step();
-            std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    /// Windows waiting to be read are bounded, as each holds a thread (#1330).
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn too_many_windows_waiting_are_refused() {
+        let mut app = RustGisApp::with_sample();
+        for _ in 0..crate::MAX_WINDOW_READS {
+            app.ui.window_reads.push((0, String::new(), serde_json::Value::Null, Default::default()));
         }
-        let app = h.state();
-        assert!(app.ui.window_reads.is_empty());
-        let data = app.session.map().layer_by_name("Window").and_then(|l| l.raster.as_ref()?.data.clone()).unwrap();
-        assert_eq!((data.width, data.height), (256, 256));
-        assert!(app.session.notices.iter().any(|n| n.text.starts_with("Window: a 256 × 256 window")), "{:?}", app.session.notices);
+        let e = app.run("ui.addUrl", json!({"url": "https://x.org/a.tif?token=hidden-1330", "bbox": [1, 2, 3, 4]})).unwrap_err();
+        assert!(e.contains("x.org/a.tif") && e.contains("16 windows") && !e.contains("hidden-1330"), "{e}");
+        assert_eq!(app.ui.window_reads.len(), crate::MAX_WINDOW_READS);
     }
 
     /// A window that can't be read is refused at once, one read that fails says so once, and one

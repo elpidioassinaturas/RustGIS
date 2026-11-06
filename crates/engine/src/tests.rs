@@ -27391,12 +27391,10 @@ fn a_windows_bands_are_started_within_its_wait() {
     assert_eq!(e, "2 of 4 bands read in 5 minutes, so the window is given up: take a smaller box or a larger cellSize");
 }
 
-/// `layer.addUrl` with `"bbox"` (#1204): a window of a cloud-optimised GeoTIFF, read by range as a
-/// raster layer, at full resolution or at the overview a cell size asks for; a palette file's
-/// colours and class names come with it; the window is kept in a saved project, class names too.
 /// A window's read needs no session: on a thread, as the app reads it, then added when it lands
 /// (#1330). What can't be a window is refused before the read starts, and an error names the
 /// address without its keys.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_cog_windows_read_is_apart_from_adding_it() {
     use crate::cmd::layer::{read_cog_window, window_asked};
@@ -27450,6 +27448,9 @@ fn a_cog_windows_read_is_apart_from_adding_it() {
     assert!(e.contains("/a.tif") && !e.contains("hidden-1330"), "{e}");
 }
 
+/// `layer.addUrl` with `"bbox"` (#1204): a window of a cloud-optimised GeoTIFF, read by range as a
+/// raster layer, at full resolution or at the overview a cell size asks for; a palette file's
+/// colours and class names come with it; the window is kept in a saved project, class names too.
 #[test]
 fn a_cog_window_comes_in_as_a_raster() {
     use rustgis_data::raster::ColorHint;

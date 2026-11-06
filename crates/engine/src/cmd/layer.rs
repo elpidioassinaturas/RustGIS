@@ -3672,10 +3672,6 @@ const WINDOW_UNREAD: [&str; 13] =
 #[cfg(not(target_arch = "wasm32"))]
 const METRES_PER_DEGREE: f64 = 111_320.0;
 
-/// One window is read at a time, however many the app has started: each may hold 256 MB and more.
-#[cfg(not(target_arch = "wasm32"))]
-static WINDOW_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// A web address's lowercase form (the address it wraps when read through a saved connection), or
 /// why it isn't one.
 fn web_address(url: &str) -> Result<String, String> {
@@ -3786,7 +3782,6 @@ pub fn read_cog_window(asked: &WindowAsked) -> Result<CogWindow, String> {
     let named = |e: String| crate::sources::redact_text(&if e.starts_with(url) { e } else { format!("{url}: {e}") });
     let [west, south, east, north] = asked.bbox;
     let cell = asked.cell;
-    let _turn = WINDOW_TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // The five minutes count from the header's read.
     let started = std::time::Instant::now();
     let info = cog::info_blocking(url).map_err(named)?;

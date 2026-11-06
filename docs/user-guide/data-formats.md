@@ -148,11 +148,12 @@ tile), without a STAC catalogue:
   may take two minutes more): past that the window is given up, saying how many bands were read.
   A window reads 256 bands at most. A window near the limit takes several hundred MB of memory
   while it is read and kept.
-- In the desktop app (Command Search) the window is read off the frame: the map stays in use,
-  and the layer is added when the read lands. Windows are read one at a time. A read
-  under way can't be cancelled yet; if another project is opened
-  meanwhile, it isn't added, with a notice. On the command line and in a script, the command waits
-  for it and answers what was added.
+- The Add Data From URL dialog has no box to fill in, so a window is asked for by a command. On
+  the command line and in a script, `layer.addUrl` waits for it and answers what was added. In the
+  desktop app, `ui.addUrl` with `"bbox"` reads it off the frame: the map stays in use, and the
+  layer is added when the read lands. These are read one at a time, with 16 waiting at most. A
+  read under way can't be cancelled yet; if another project is opened meanwhile, it isn't added,
+  with a notice.
 - The file's no-data, colour table (a palette file draws in its colours) and band names come
   with it, and class names given as `CLASS_<value>` items in GDAL's metadata tag, as the MapBiomas
   files on Source Cooperative give theirs. These come from the file's own tags: an `.aux.xml`
