@@ -516,6 +516,8 @@ struct PutAside {
     downloading: Vec<u64>,
     downloaded: Vec<(u64, Vec<u8>)>,
     landed_reads: Vec<(u64, LandedRead)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    landed_windows: Vec<(u64, cmd::layer::CogWindow)>,
     url_requests: Vec<serde_json::Value>,
     plugin_retries: Vec<cmd::plugins::fetch::Retry>,
     url_waits: cmd::plugins::fetch::UrlWaits,
@@ -709,6 +711,10 @@ pub struct Session {
     /// Downloads that landed already read (an ArcGIS layer's protocol buffer pages, joined),
     /// waiting for `layer.addDownload` too.
     pub(crate) landed_reads: Vec<(u64, LandedRead)>,
+    /// Windows of cloud-optimised GeoTIFFs the app read off the frame, waiting for
+    /// `layer.addDownload` too.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) landed_windows: Vec<(u64, cmd::layer::CogWindow)>,
     /// Downloads a command asked for where nothing may wait (the browser): the parameters of
     /// `layer.addUrl` calls, for the front end to fetch and add (see [`Session::take_url_requests`]).
     pub(crate) url_requests: Vec<serde_json::Value>,
@@ -1027,6 +1033,8 @@ impl Session {
             downloading: Vec::new(),
             downloaded: Vec::new(),
             landed_reads: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            landed_windows: Vec::new(),
             url_requests: Vec::new(),
             file_outputs: Vec::new(),
             #[cfg(test)]
@@ -1109,6 +1117,18 @@ impl Session {
         let landed = self.landed(id);
         if landed {
             self.landed_reads.push((id, Box::new((dataset, report))));
+        }
+        landed
+    }
+
+    /// Hands over a window of a cloud-optimised GeoTIFF read off the frame
+    /// ([`cmd::layer::read_cog_window`]), for `layer.addDownload {"id"}` as
+    /// [`Session::download_landed`] does.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn download_landed_window(&mut self, id: u64, window: cmd::layer::CogWindow) -> bool {
+        let landed = self.landed(id);
+        if landed {
+            self.landed_windows.push((id, window));
         }
         landed
     }
@@ -1330,6 +1350,8 @@ impl Session {
                 if let Some(d) = params.get("id").and_then(Value::as_u64) {
                     self.downloaded.retain(|(k, _)| *k != d);
                     self.landed_reads.retain(|(k, _)| *k != d);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.landed_windows.retain(|(k, _)| *k != d);
                 }
                 // Redacted here too: the assistant and MCP get the error as it is.
                 let url = sources::redact_text(params.get("url").and_then(Value::as_str).unwrap_or("download"));
@@ -1718,6 +1740,8 @@ impl Session {
             downloading: take(&mut self.downloading),
             downloaded: take(&mut self.downloaded),
             landed_reads: take(&mut self.landed_reads),
+            #[cfg(not(target_arch = "wasm32"))]
+            landed_windows: take(&mut self.landed_windows),
             url_requests: take(&mut self.url_requests),
             plugin_retries: take(&mut self.plugin_retries),
             url_waits: take(&mut self.url_waits),
@@ -1770,6 +1794,8 @@ impl Session {
             downloading,
             downloaded,
             landed_reads,
+            #[cfg(not(target_arch = "wasm32"))]
+            landed_windows,
             url_requests,
             plugin_retries,
             url_waits,
@@ -1796,6 +1822,10 @@ impl Session {
         self.file_outputs = file_outputs;
         (self.downloading, self.downloaded, self.url_requests) = (downloading, downloaded, url_requests);
         self.landed_reads = landed_reads;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.landed_windows = landed_windows;
+        }
         (self.trend_results, self.raster_results, self.raster_runs) = (trend_results, raster_results, raster_runs);
         #[cfg(feature = "geolibre")]
         {

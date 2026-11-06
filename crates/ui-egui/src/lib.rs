@@ -178,6 +178,10 @@ const LAYOUT_FAVOURITE_PREF: &str = "layout_favourite_arrangement";
 /// A result an asynchronous service fills in when it's done (the app polls it each frame).
 pub type Slot<T> = std::sync::Arc<std::sync::Mutex<Option<T>>>;
 
+/// See [`UiState::window_reads`].
+#[cfg(not(target_arch = "wasm32"))]
+type WindowRead = (u64, String, Value, Slot<Result<rustgis_engine::cmd::layer::CogWindow, String>>);
+
 /// A shell's overrides of the Settings › Start-up preferences for one launch.
 #[derive(Clone, Debug, Default)]
 pub struct Start {
@@ -694,6 +698,10 @@ pub struct UiState {
     /// that can be read in place are added so, others downloaded (the `ui.addUrl` parameters,
     /// and the answer).
     pub cog_probes: Vec<(Value, Slot<Result<bool, String>>)>,
+    /// Windows of cloud-optimised GeoTIFFs (`"bbox"`) being read on threads: the session's
+    /// download id, the address, the parameters to add it with, and where the read lands.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub window_reads: Vec<WindowRead>,
     /// Service layers whose features are being read page by page (an ArcGIS layer's description
     /// first).
     pub service_pages: Vec<serviceui::PageRead>,
@@ -876,6 +884,8 @@ impl Default for UiState {
             project_download: None,
             sql: Default::default(),
             cog_probes: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            window_reads: Vec::new(),
             service_pages: Vec::new(),
             link_zoomed: false,
             service: None,
@@ -2275,6 +2285,20 @@ impl RustGisApp {
             }
             finished = again;
             (id, &finished)
+        } else if id == "layer.addDownload" && params.get("window").is_some_and(Value::is_object) {
+            // A window read on a thread: the step is the command that reads it, which a replay
+            // runs again from its address.
+            let mut again = params.clone();
+            if let Some(o) = again.as_object_mut() {
+                let window = o.remove("window");
+                o.remove("id");
+                o.remove("request");
+                if let Some(Value::Object(window)) = window {
+                    o.extend(window);
+                }
+            }
+            finished = again;
+            ("layer.addUrl", &finished)
         } else {
             (id, params)
         };
@@ -2957,7 +2981,10 @@ impl RustGisApp {
                     .map_err(|e| connectionui::translated(&e))?;
                 let p = bound.as_ref();
                 let url = rustgis_engine::data::login_address::inner(p.get("url").and_then(Value::as_str).unwrap_or(url));
-                if url.to_ascii_lowercase().split(['?', '#']).next().is_some_and(|u| u.ends_with(".pmtiles")) {
+                // A window of a cloud-optimised GeoTIFF is read off the frame (below), with no
+                // probe: it is refused unless it is one. In the browser the command refuses it.
+                let window = cfg!(not(target_arch = "wasm32")) && p.get("bbox").is_some_and(|v| !v.is_null());
+                if !window && url.to_ascii_lowercase().split(['?', '#']).next().is_some_and(|u| u.ends_with(".pmtiles")) {
                     return connectiontree::run_named(self, "layer.addUrl", p.clone(), origin.as_deref());
                 }
                 let address = p.get("url").and_then(Value::as_str).unwrap_or(url).to_string();
@@ -2975,7 +3002,7 @@ impl RustGisApp {
                     && !tiff
                     && rustgis_engine::cmd::layer::is_unnamed_url(url)
                     && ["service", "coverage"].iter().all(|k| p.get(*k).and_then(Value::as_bool) != Some(true));
-                if (remote || tiff || unnamed) && !scan && p.get("whole").and_then(Value::as_bool) != Some(true) {
+                if !window && (remote || tiff || unnamed) && !scan && p.get("whole").and_then(Value::as_bool) != Some(true) {
                     let slot: Slot<Result<bool, String>> = Slot::default();
                     let land = slot.clone();
                     if remote {
@@ -3055,6 +3082,10 @@ impl RustGisApp {
                 }
                 if let Some(origin) = &origin {
                     q[connectiontree::ORIGIN] = json!(origin);
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if window {
+                    return self.start_window_read(p, url, q);
                 }
                 let shown = rustgis_engine::data::s3_address::inner(&url);
                 self.session.notify(i18n::fmt("Downloading {url}…", &[("url", shown)]), false);
@@ -4202,21 +4233,84 @@ impl RustGisApp {
             let origin = connectiontree::take_origin_key(&mut p);
             match r {
                 Ok(bytes) => self.add_landed(serviceui::Landed { id, url, params: p, origin }, bytes),
-                Err(e) => {
-                    self.session.download_failed(id);
-                    rustgis_engine::cmd::geolibre::discard_pending(&mut self.session, &p);
-                    self.session.request_failed(&p, &e);
-                    // Named without the address's keys, token or signature.
-                    let e = e.strip_prefix(url.as_str()).map(|r| r.trim_start_matches(": ").to_string()).unwrap_or(e);
-                    let why = rustgis_engine::sources::redact_text(&e);
-                    // An error that names its own address (a Shapefile's part) isn't named again.
-                    let named = why.split_once(": ").is_some_and(|(head, _)| head.contains("://") && !head.contains(' '));
-                    let why = if named { why } else { format!("{}: {why}", rustgis_engine::sources::redact(&url)) };
-                    self.landed_in_dialog(&p, Err(&why));
-                    self.session.notify(why, true);
+                Err(e) => self.landed_failed(id, &url, &p, e),
+            }
+        }
+        // Windows read on threads, added as a download is.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut read = Vec::new();
+            self.ui.window_reads.retain(|(id, url, p, slot)| match slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                Some(r) => {
+                    read.push((*id, url.clone(), p.clone(), r));
+                    false
+                }
+                None => true,
+            });
+            for (id, url, mut p, r) in read {
+                let origin = connectiontree::take_origin_key(&mut p);
+                match r {
+                    Ok(window) => {
+                        let current = self.session.download_landed_window(id, window);
+                        self.add_download(serviceui::Landed { id, url, params: p, origin }, current);
+                    }
+                    Err(e) => self.landed_failed(id, &url, &p, e),
                 }
             }
         }
+    }
+
+    /// Says why a download or a window's read failed, and answers the command waiting for it.
+    fn landed_failed(&mut self, id: u64, url: &str, p: &Value, e: String) {
+        self.session.download_failed(id);
+        rustgis_engine::cmd::geolibre::discard_pending(&mut self.session, p);
+        self.session.request_failed(p, &e);
+        // Named without the address's keys, token or signature.
+        let e = e.strip_prefix(url).map(|r| r.trim_start_matches(": ").to_string()).unwrap_or(e);
+        let why = rustgis_engine::sources::redact_text(&e);
+        // An error that names its own address (a Shapefile's part) isn't named again.
+        let named = why.split_once(": ").is_some_and(|(head, _)| head.contains("://") && !head.contains(' '));
+        let why = if named { why } else { format!("{}: {why}", rustgis_engine::sources::redact(url)) };
+        self.landed_in_dialog(p, Err(&why));
+        self.session.notify(why, true);
+    }
+
+    /// Starts reading a window of a cloud-optimised GeoTIFF (`p`, a `ui.addUrl` with `"bbox"`) on a
+    /// thread, to add it with `q` when it lands (#1330). The command line and scripts wait for it
+    /// in `layer.addUrl` instead. What's wrong with what was asked is refused here, on the frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_window_read(&mut self, p: &Value, url: String, mut q: Value) -> Result<Value, String> {
+        let asked = rustgis_engine::cmd::layer::window_asked(&self.session, p)?;
+        // What a task needs to read it again, as the download itself can't be (`record_step`).
+        let mut window = json!({});
+        for k in ["bbox", "cellSize", "cog"] {
+            if let Some(v) = p.get(k).filter(|v| !v.is_null()) {
+                window[k] = v.clone();
+            }
+        }
+        q["window"] = window;
+        let slot: Slot<Result<rustgis_engine::cmd::layer::CogWindow, String>> = Slot::default();
+        let land = slot.clone();
+        // Its requests stay in the session's diagnostics.
+        let diagnostics = self.session.diagnostics.capture();
+        let spawned = std::thread::Builder::new().name("cog-window".into()).spawn(move || {
+            let _diagnostics = diagnostics.enter();
+            // On a thread no command's catch reaches: a bug must not leave it running forever.
+            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_engine::cmd::layer::read_cog_window(&asked)));
+            let read = read.unwrap_or_else(|_| Err(tl!("Reading the window failed unexpectedly").to_string()));
+            *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(read);
+        });
+        spawned.map_err(|e| {
+            i18n::fmt(
+                "{url}: its read didn't start: {error}",
+                &[("url", &rustgis_engine::sources::redact(&url)), ("error", &e.to_string())],
+            )
+        })?;
+        let shown = rustgis_engine::data::s3_address::inner(&url);
+        self.session.notify(i18n::fmt("Reading {url}…", &[("url", shown)]), false);
+        let id = self.session.download_started();
+        self.ui.window_reads.push((id, url, q, slot));
+        Ok(Value::Null)
     }
 
     /// Adds a download that landed (`layer.addDownload`), named in Recent after the connection it
@@ -4513,6 +4607,11 @@ impl RustGisApp {
         pluginstart::run_again(self, ctx);
         // A frame may not come until the user moves: look again while commands wait.
         if self.session.plugin_retries_waiting() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        // A window's read lands after its last tile, with nothing to wake the frame.
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.ui.window_reads.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         // Zarr steps the time slider moved to, read off the frame, show once they land.
@@ -4860,7 +4959,9 @@ pub(crate) fn click_in_one_frame(h: &mut egui_kittest::Harness<'_, RustGisApp>, 
 /// tests that wait for what it reads (tiles, an archive's header), which that would drop.
 #[cfg(test)]
 pub(crate) mod fetching {
-    use std::sync::{Mutex, MutexGuard};
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, MutexGuard};
 
     static TURN: Mutex<()> = Mutex::new(());
 
@@ -4878,6 +4979,52 @@ pub(crate) mod fetching {
     /// Waits for the tests fetching before this one to end.
     pub(crate) fn turn() -> Turn {
         Turn { _held: TURN.lock().unwrap_or_else(|e| e.into_inner()) }
+    }
+
+    /// A slow server of a file by range ([`slow_ranges`]).
+    pub(crate) struct SlowRanges {
+        pub origin: String,
+        /// While unset, requests are held.
+        pub open: Arc<AtomicBool>,
+        /// How many requests it has held.
+        pub held: Arc<AtomicUsize>,
+    }
+
+    /// Serves `file` by range, holding requests while `open` is unset. A frame waiting for one
+    /// shows as a slow frame, not as a test that hangs: after 20 s it is answered anyway.
+    pub(crate) fn slow_ranges(file: Vec<u8>) -> SlowRanges {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (open, held) = (Arc::new(AtomicBool::new(true)), Arc::new(AtomicUsize::new(0)));
+        let (shut, count, file) = (open.clone(), held.clone(), Arc::new(file));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let (Ok(mut stream), shut, count, file) = (stream, shut.clone(), count.clone(), file.clone()) else { continue };
+                std::thread::spawn(move || {
+                    let mut request = [0u8; 4096];
+                    let read = stream.read(&mut request).unwrap_or(0);
+                    if !shut.load(Ordering::Relaxed) {
+                        count.fetch_add(1, Ordering::Relaxed);
+                        let start = std::time::Instant::now();
+                        while !shut.load(Ordering::Relaxed) && start.elapsed() < std::time::Duration::from_secs(20) {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&request[..read]).to_ascii_lowercase();
+                    let range = request.lines().find_map(|l| l.strip_prefix("range: bytes=")).and_then(|r| {
+                        let (a, b) = r.trim().split_once('-')?;
+                        Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?.min(file.len().saturating_sub(1))))
+                    });
+                    let (status, part) = match range {
+                        Some((a, b)) if a <= b => ("206 Partial Content", &file[a..=b]),
+                        _ => ("200 OK", &file[..]),
+                    };
+                    let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", part.len());
+                    let _ = stream.write_all(part);
+                });
+            }
+        });
+        SlowRanges { origin, open, held }
     }
 }
 
@@ -5186,6 +5333,111 @@ mod record_tests {
         assert!(app.session.notices.iter().any(|n| n.text.contains("session only")));
         app.record_step("layer.color", &json!({"layer": "Lakes", "color": "#123456"}), None);
         assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(1));
+    }
+
+    /// A window read off the frame is a step all the same: the command that reads it, with its box,
+    /// not the download that can't be added again (#1330).
+    #[test]
+    fn a_window_read_off_the_frame_is_recorded_as_the_command_reading_it() {
+        let mut app = RustGisApp::with_sample();
+        app.ws.recording = Some(Vec::new());
+        let window = json!({"bbox": "view", "cellSize": 30, "cog": true});
+        let p = json!({"id": 1, "url": "https://example.com/data", "name": "W", "request": 7, "window": window});
+        app.record_step("layer.addDownload", &p, None);
+        let steps = app.ws.recording.as_ref().unwrap();
+        assert_eq!(steps.len(), 1, "{:?}", app.session.notices);
+        assert_eq!(steps[0].command, "layer.addUrl");
+        assert_eq!(steps[0].params, json!({"url": "https://example.com/data", "name": "W", "bbox": "view", "cellSize": 30, "cog": true}));
+    }
+
+    /// `ui.addUrl` with `"bbox"` (Command Search's `layer.addUrl`): a slow server doesn't hold the
+    /// frame, and the layer lands when the read does (#1330).
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_window_is_read_off_the_frame_and_added_when_it_lands() {
+        use std::sync::atomic::Ordering;
+        let _turn = crate::fetching::turn();
+        let slow = crate::fetching::slow_ranges(rustgis_engine::data::raster::cog::example(1024, 256));
+        let mut h = egui_kittest::Harness::builder().build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+            },
+            RustGisApp::with_sample(),
+        );
+        let url = format!("{}/scene.tif", slow.origin);
+        // The header in hand, so only the window's tiles wait: those a read on the frame would
+        // hold it for, for the server's 20 s.
+        rustgis_engine::render::rustgis_tiles::cog::info_blocking(&url).unwrap();
+        slow.open.store(false, Ordering::Relaxed);
+        let p = json!({"url": url, "bbox": [10.25, 45.5, 10.5, 45.75], "name": "Window"});
+        h.state_mut().run("ui.addUrl", p).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while slow.held.load(Ordering::Relaxed) == 0 {
+            assert!(std::time::Instant::now() < deadline, "no request held");
+            let frame = std::time::Instant::now();
+            h.step();
+            assert!(frame.elapsed() < std::time::Duration::from_secs(5), "the read held the frame");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let frame = std::time::Instant::now();
+        h.step();
+        assert!(frame.elapsed() < std::time::Duration::from_secs(5), "the read held the frame");
+        assert!(h.state().session.map().layer_by_name("Window").is_none());
+        assert_eq!(h.state().ui.window_reads.len(), 1);
+        slow.open.store(true, Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while h.state().session.map().layer_by_name("Window").is_none() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting: {:?}", h.state().session.notices);
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let app = h.state();
+        assert!(app.ui.window_reads.is_empty());
+        let data = app.session.map().layer_by_name("Window").and_then(|l| l.raster.as_ref()?.data.clone()).unwrap();
+        assert_eq!((data.width, data.height), (256, 256));
+        assert!(app.session.notices.iter().any(|n| n.text.starts_with("Window: a 256 × 256 window")), "{:?}", app.session.notices);
+    }
+
+    /// A window that can't be read is refused at once, one read that fails says so once, and one
+    /// whose project was closed meanwhile isn't added (#1330).
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_window_refused_failed_or_left_behind_is_said() {
+        let until = |app: &mut RustGisApp| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !app.ui.window_reads.is_empty() {
+                assert!(std::time::Instant::now() < deadline, "timed out waiting");
+                app.poll_data_downloads();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        let _turn = crate::fetching::turn();
+        let mut app = RustGisApp::with_sample();
+        let e = app.run("ui.addUrl", json!({"url": "https://x.org/a.tif", "bbox": "here"})).unwrap_err();
+        assert!(e.contains("bbox is") && app.ui.window_reads.is_empty(), "{e}");
+        // No probe first, either: a window is a GeoTIFF's or nothing.
+        let e = app.run("ui.addUrl", json!({"url": "https://x.org/a.pmtiles", "bbox": [1, 2, 3, 4]})).unwrap_err();
+        assert!(e.contains("names a .pmtiles file") && app.ui.cog_probes.is_empty(), "{e}");
+        // Not a GeoTIFF: said once, without the address's keys.
+        let slow = crate::fetching::slow_ranges(b"not a tiff at all".to_vec());
+        let url = format!("{}/a.tif?token=hidden-1330", slow.origin);
+        let mark = app.session.notice_mark();
+        app.run("ui.addUrl", json!({"url": url, "bbox": [1, 2, 3, 4], "name": "Bad"})).unwrap();
+        until(&mut app);
+        let errors: Vec<String> = app.session.notices_since(mark).iter().filter(|n| n.error).map(|n| n.text.clone()).collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("/a.tif") && !errors[0].contains("hidden-1330"), "{errors:?}");
+        assert!(app.session.map().layer_by_name("Bad").is_none());
+        // Its project closed while it was read.
+        let slow = crate::fetching::slow_ranges(rustgis_engine::data::raster::cog::example(1024, 256));
+        let url = format!("{}/scene.tif", slow.origin);
+        app.run("ui.addUrl", json!({"url": url, "bbox": [10.25, 45.5, 10.5, 45.75], "name": "Left"})).unwrap();
+        app.run("project.new", json!({})).unwrap();
+        until(&mut app);
+        assert!(app.session.map().layer_by_name("Left").is_none());
+        let said = |n: &rustgis_engine::Notice| n.text.contains("scene.tif") && n.text.contains("its project was closed");
+        assert!(app.session.notices.iter().any(said), "{:?}", app.session.notices);
     }
 
     #[test]
