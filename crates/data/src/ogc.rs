@@ -463,10 +463,10 @@ pub const OGC_API_LIMIT: usize = 10_000;
 
 /// The note for the layers of a document past the `limit` that is read of it.
 fn past_read_limit(left: usize, what: &str, limit: usize) -> String {
-    format!("{left} {what} are left out: {PAST_READ_LIMIT} {limit} from one document")
+    format!("{PAST_READ_LIMIT} {limit} {what} from one document: {left} left out")
 }
 
-/// Stops the listing of a document with one layer to an entry at [`MAX_LISTED_LAYERS`].
+/// Stops the listing at [`MAX_LISTED_LAYERS`], for a document whose every entry makes one layer.
 fn cut_listing(service: &mut Service) {
     if service.layers.len() > MAX_LISTED_LAYERS {
         service.listed = Some(MAX_LISTED_LAYERS);
@@ -6691,7 +6691,7 @@ mod tests {
             assert!(!s.notes.iter().any(|n| n.contains(PAST_READ_LIMIT)), "{url}: {:?}", s.notes);
             assert_eq!(s.layers.len(), if kept { limit } else { 0 }, "{url}");
             let s = parse(url, doc(limit + 2).as_bytes()).unwrap();
-            let note = format!("2 {what} are left out: {PAST_READ_LIMIT} {limit} from one document");
+            let note = format!("{PAST_READ_LIMIT} {limit} {what} from one document: 2 left out");
             assert!(s.notes.contains(&note), "{url}: {:?}", s.notes);
             assert_eq!(s.layers.len(), if kept { limit } else { 0 }, "{url}");
             // What was read past the listing is there to be found, but isn't listed.

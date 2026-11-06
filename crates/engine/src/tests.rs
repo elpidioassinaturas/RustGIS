@@ -14051,11 +14051,6 @@ fn view_lonlat(s: &Session) -> [f64; 4] {
     [e.min_x, e.min_y, e.max_x, e.max_y]
 }
 
-/// #1053: a WFS answering like GeoServer (longitude first, named urn:ogc:def:crs:EPSG::4326) is
-/// read as it comes; one answering latitude first (as deegree does when asked in the URN form) is
-/// turned round, judged against the type's `WGS84BoundingBox`. The app's download
-/// (`layer.addDownload` with `service` and `bounds`) is judged the same way, and left alone
-/// without bounds.
 /// A layer past the first 2000 of a long list is added by its name, and the list says it stops
 /// (#1519: IBGE's WFS has 10,186 types, and its order changes between answers).
 #[test]
@@ -14108,18 +14103,18 @@ fn a_layer_past_the_read_limit_is_refused_saying_so() {
     assert_eq!(
         listed["notes"],
         json!([
-            "1 feature types are left out: RustGIS reads at most 100000 from one document",
+            "RustGIS reads at most 100000 feature types from one document: 1 left out",
             "only the first 2000 of 100000 layers are listed; service.add takes any of them by name",
         ])
     );
     let e = s.run("service.add", &json!({"url": url, "layer": "t:100001", "text": wfs})).unwrap_err();
-    assert!(e.contains("no layer 't:100001': 1 feature types are left out"), "{e}");
+    assert!(e.contains("no layer 't:100001' (service.layers lists them; RustGIS reads at most 100000 feature types"), "{e}");
 
     let wcs: String = (1..=100_001).map(|i| format!("<CoverageSummary><CoverageId>c{i}</CoverageId></CoverageSummary>")).collect();
     let wcs = format!("<Capabilities><Contents>{wcs}</Contents></Capabilities>");
     let p = json!({"url": "https://wcs.example.org/wcs", "layer": "c100001", "text": wcs, "bbox": "full"});
     let e = s.run("service.coverage", &p).unwrap_err();
-    assert!(e.contains("no coverage 'c100001': 1 coverages are left out"), "{e}");
+    assert!(e.contains("no coverage 'c100001' (service.layers lists them; RustGIS reads at most 100000 coverages"), "{e}");
 
     // All under one parent, as a service's layers often are: this takes minutes if each looks
     // through its siblings. (A WMS is read from its end.)
@@ -14128,9 +14123,14 @@ fn a_layer_past_the_read_limit_is_refused_saying_so() {
         r#"<WMS_Capabilities version="1.3.0"><Capability><Layer><CRS>EPSG:3857</CRS>{wms}</Layer></Capability></WMS_Capabilities>"#
     );
     let e = s.run("service.add", &json!({"url": "https://wms.example.org/wms", "layer": "t1", "text": wms})).unwrap_err();
-    assert!(e.contains("no layer 't1': 1 layers are left out"), "{e}");
+    assert!(e.contains("from one document: 1 left out"), "{e}");
 }
 
+/// #1053: a WFS answering like GeoServer (longitude first, named urn:ogc:def:crs:EPSG::4326) is
+/// read as it comes; one answering latitude first (as deegree does when asked in the URN form) is
+/// turned round, judged against the type's `WGS84BoundingBox`. The app's download
+/// (`layer.addDownload` with `service` and `bounds`) is judged the same way, and left alone
+/// without bounds.
 #[test]
 fn wfs_axes_judged_against_the_type_bounds() {
     use ogc_server::{Route, Server};
