@@ -10,6 +10,15 @@ use std::{
     },
 };
 
+/// What a window the app read off the frame says it read (`"window"`, #1330) is what its request
+/// asked for: a box, and its cell size and `"cog"` if the request gave them, nothing else.
+fn asked_window(asked: &Value, window: &Value) -> bool {
+    const KEYS: [&str; 3] = ["bbox", "cellSize", "cog"];
+    let given = |k: &str| asked.get(k).filter(|v| !v.is_null());
+    given("bbox").is_some()
+        && window.as_object().is_some_and(|w| w.keys().all(|k| KEYS.contains(&k.as_str())) && KEYS.iter().all(|k| given(k) == w.get(*k)))
+}
+
 pub(super) struct Claim {
     pub c: Continuation,
     pub params: Value,
@@ -436,7 +445,8 @@ impl Session {
             let refinement = (key == "id" && value.as_u64() == Some(id))
                 || (key == "cog" && in_place && value.as_bool() == Some(true))
                 || (key == "whole" && value.as_bool() == Some(true))
-                || (key == "zoom" && value.as_bool() == Some(false) && claim.params.get(key).and_then(Value::as_bool) == Some(true));
+                || (key == "zoom" && value.as_bool() == Some(false) && claim.params.get(key).and_then(Value::as_bool) == Some(true))
+                || (key == "window" && asked_window(&claim.params, value));
             if !refinement && claim.params.get(key) != Some(value) {
                 return Err("the download's address or parameters changed since it was requested".into());
             }
@@ -488,5 +498,27 @@ impl Session {
     /// Consumes a completed claim and invalidates every captured predicate.
     pub(crate) fn forget_download_claim(&mut self, id: u64) {
         self.policy.work.claims.remove(&id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::asked_window;
+    use serde_json::json;
+
+    /// A window the app read completes its request only as what was asked (#1330): the same box,
+    /// cell size and `"cog"`, and nothing more; a request with no box takes no window.
+    #[test]
+    fn a_landed_window_completes_only_what_was_asked() {
+        let asked = json!({"url": "https://x.org/a.tif", "bbox": [10.25, 45.5, 10.5, 45.75], "cellSize": 30, "name": "W"});
+        assert!(asked_window(&asked, &json!({"bbox": [10.25, 45.5, 10.5, 45.75], "cellSize": 30})));
+        assert!(!asked_window(&asked, &json!({"bbox": [0, 0, 1, 1], "cellSize": 30})), "another box");
+        assert!(!asked_window(&asked, &json!({"bbox": [10.25, 45.5, 10.5, 45.75]})), "its cell size left out");
+        assert!(!asked_window(&asked, &json!({"bbox": [10.25, 45.5, 10.5, 45.75], "cellSize": 30, "cog": true})), "cog not asked");
+        assert!(!asked_window(&asked, &json!({"bbox": [10.25, 45.5, 10.5, 45.75], "cellSize": 30, "url": "https://y.org"})), "another key");
+        assert!(!asked_window(&asked, &json!("view")), "not an object");
+        let view = json!({"url": "https://x.org/a.tif", "bbox": "view", "cellSize": null});
+        assert!(asked_window(&view, &json!({"bbox": "view"})), "a null cell size is none given");
+        assert!(!asked_window(&json!({"url": "https://x.org/a.tif"}), &json!({})), "no box asked");
     }
 }

@@ -30100,11 +30100,19 @@ fn a_cog_window_comes_in_as_a_raster() {
     assert!(e.contains("names a .geojson file"), "{e}");
     let e = s.run("layer.addUrl", &json!({"url": wrapped("https://data.example.com"), "bbox": [10.25, 45.5, 10.5, 45.75]})).unwrap_err();
     assert!(!e.contains("names a .com file"), "{e}");
-    // A plugin's command run by the app doesn't wait for a window: refused, and said.
+    // A plugin's command run by the app leaves a window to the app (#1330): asked for with its
+    // box and nothing fetched; a box that can't be read is refused as the command runs.
+    let before = sent.load(std::sync::atomic::Ordering::Relaxed);
+    let asked = json!({"url": format!("{base}/scene.tif"), "bbox": [10.25, 45.5, 10.5, 45.75], "name": "Left"});
     s.leave_downloads = true;
-    let e = s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "bbox": [10.25, 45.5, 10.5, 45.75]})).unwrap_err();
+    assert_eq!(s.run("layer.addUrl", &asked).unwrap()["pending"], true);
+    let e = s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "bbox": "here"})).unwrap_err();
     s.leave_downloads = false;
-    assert!(e.contains("a plugin's command can't do in the app yet"), "{e}");
+    assert!(e.contains("bbox is"), "{e}");
+    assert_eq!(sent.load(std::sync::atomic::Ordering::Relaxed), before, "nothing fetched");
+    let taken = s.take_url_requests();
+    assert_eq!(taken.len(), 1);
+    assert_eq!(taken[0].params()["bbox"], asked["bbox"]);
     // Byte windows round nothing, and say nothing of it; an Int32 window of 16,777,216 plus the
     // byte value says how many `f32` rounded: the odd ones, half of its 65,536 cells.
     assert!(s.notices_since(mark0).iter().all(|n| !n.text.contains("rounded")), "{:?}", s.notices_since(mark0));

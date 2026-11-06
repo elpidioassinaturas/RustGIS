@@ -3246,13 +3246,14 @@ fn add_url_as_given(s: &mut Session, p: &Value) -> CmdResult {
     }
     if window {
         window_checks(p, url, scan)?;
-        // A plugin's command run by the app leaves what would wait to the app, off the frame; a
-        // window waits for its header and tiles, which the app doesn't take over yet.
+        // A plugin's command run by the app leaves what would wait to the app, off the frame
+        // ([`read_cog_window`]); a box that can't be read is refused now, while the command runs.
         #[cfg(not(target_arch = "wasm32"))]
         if s.leave_downloads {
-            return Err(format!(
-                "{url}: a window (\"bbox\") waits for its tiles, which a plugin's command can't do in the app yet: run layer.addUrl from the command line or a script, or leave out \"bbox\" to draw the file in place"
-            ));
+            window_settled(s, p, url)?;
+            let mut asked = p.clone();
+            asked["url"] = json!(url);
+            return s.request_url(&asked);
         }
         return add_cog_window(s, p, url);
     }
