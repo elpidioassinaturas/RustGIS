@@ -3080,6 +3080,10 @@ fn add_url_as_given(s: &mut Session, p: &Value) -> CmdResult {
     if ["geolibreProject", "geolibreLayer", "geolibreZarr"].iter().any(|key| p.get(key).is_some()) {
         return Err("GeoLibre download state is internal; use project.importGeolibre".into());
     }
+    // Marks a service's document, read and kept for `service.add`: as a download, no layer would come.
+    if super::plugins::fetch::is_document(p) {
+        return Err("\"document\" is internal to service.add: leave it out".into());
+    }
     let url = ps(p, "url").map(str::trim).filter(|u| !u.is_empty()).ok_or("url is required")?;
     // A plugin command run again once the download it left to the app was added (#1202): what
     // adding it answered, as often as the run asks for it (the app downloaded and added it once).

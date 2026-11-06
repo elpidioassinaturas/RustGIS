@@ -952,6 +952,20 @@ mod tests {
         assert!(s.left_document("https://x.org/same").is_none());
     }
 
+    /// `layer.addUrl` can't mark its download as a service's document: nothing would add it, and
+    /// nothing would say so. A plugin's call and a direct one are refused, and nothing is read (#1319).
+    #[test]
+    fn a_download_cannot_be_marked_as_a_document() {
+        let mut s = Session::new(crate::sample::world_project());
+        s.leave_downloads = true;
+        s.call_requests = Some(Vec::new());
+        let marked = json!({"url": "https://x.org/a.csv", "document": true});
+        assert!(s.run("layer.addUrl", &marked).unwrap_err().contains("internal"));
+        assert!(s.call_requests.as_ref().unwrap().is_empty() && s.url_waits.reading.is_empty());
+        // Without the mark, it is a download as ever.
+        assert_eq!(s.run("layer.addUrl", &json!({"url": "https://x.org/a.csv"})).unwrap()["pending"], true);
+    }
+
     /// A run refused for too many given-up downloads starts none of its documents' reads: with no
     /// command waiting, nothing would take them (#1319).
     #[test]
