@@ -767,6 +767,11 @@ mod tests {
         asked.iter().filter(|u| u.contains("GetFeature") && !u.contains("RESULTTYPE=hits")).collect()
     }
 
+    /// Whether `r` answers the area `e`, as near as it is written.
+    fn area_is(r: &Value, e: [f64; 4]) -> bool {
+        r["area"].as_array().is_some_and(|a| a.len() == 4 && a.iter().zip(e).all(|(v, x)| v.as_f64().is_some_and(|v| (v - x).abs() < 1e-3)))
+    }
+
     fn whole_layer_notices(app: &RustGisApp, mark: u64) -> usize {
         app.session.notices_since(mark).iter().filter(|n| n.text.contains("so the whole layer is asked for")).count()
     }
@@ -782,6 +787,8 @@ mod tests {
         let pkg = plugins::Package::from_zip(&plugins::testing::package("ui-wfs", &["edit", "network"])).unwrap();
         plugins::load(pkg, "test").unwrap();
         let mut app = RustGisApp::with_sample();
+        // An error from before doesn't hide that it has started.
+        app.session.notify("an old error".to_string(), true);
         let mark = app.session.notice_mark();
         let layers = app.session.map().layers.len();
         let r = app.run("plugin:ui-wfs/f", solos(json!([-44, -6, -42, -4]))).unwrap();
@@ -880,9 +887,9 @@ mod tests {
         plugins::unload("ui-down");
     }
 
-    /// The window answers while a command waits, so the user may move the map: the command asking
-    /// for the view runs again with the one it began with, and asks for no other area. The user's
-    /// view stays, and the layer comes once.
+    /// The window answers while a command waits, so the user may move the map or resize the window:
+    /// the command asking for the view runs again with the one it began with, and asks for no other
+    /// area. The user's view stays, and the layer comes once.
     #[test]
     fn a_view_moved_while_a_command_waits_asks_for_no_other_area() {
         use rustgis_engine::plugins;
@@ -892,18 +899,52 @@ mod tests {
         plugins::load(pkg, "test").unwrap();
         let mut app = RustGisApp::with_sample();
         let layers = app.session.map().layers.len();
+        app.session.run("map.zoomToExtent", &json!({"extent": [-44, -6, -42, -4]})).unwrap();
+        let began = rustgis_engine::cmd::workspace::view_extent(&app.session);
         app.run("plugin:ui-view/f", solos(json!("view"))).unwrap();
         let mut moved = app.session.map().camera;
         moved.center.x += 1_000_000.0;
         app.session.map_mut().camera = moved;
+        app.session.view_size = (600.0, 300.0);
+        assert_ne!(rustgis_engine::cmd::workspace::view_extent(&app.session), began);
         let (asked, end) = run_out(&mut app, &held, &wfs);
         let r = end.unwrap();
         let features = feature_requests(&asked);
         assert!(features.len() == 1 && features[0].contains("BBOX"), "{asked:?}");
         assert!(r["layer"].is_u64(), "{r}");
+        assert!(area_is(&r, [began.min_x, began.min_y, began.max_x, began.max_y]), "{r} {began:?}");
         assert_eq!(app.session.map().layers.len(), layers + 1);
         assert_eq!(app.session.map().camera, moved, "the user's view stays");
+        assert_eq!(app.session.view_size, (600.0, 300.0));
         plugins::unload("ui-view");
+    }
+
+    /// Another map shown while a command asking for the view waits: it asks for the area it began
+    /// with, once, and that map's view stays. The layer lands in the map shown, as a download does.
+    #[test]
+    fn another_map_shown_while_a_command_waits_asks_for_no_other_area() {
+        use rustgis_engine::plugins;
+        let _turn = crate::fetching::turn();
+        let held = hold_requests();
+        let pkg = plugins::Package::from_zip(&plugins::testing::package("ui-other-map", &["edit", "network"])).unwrap();
+        plugins::load(pkg, "test").unwrap();
+        let mut app = RustGisApp::with_sample();
+        app.session.run("map.zoomToExtent", &json!({"extent": [-44, -6, -42, -4]})).unwrap();
+        let began = rustgis_engine::cmd::workspace::view_extent(&app.session);
+        app.run("plugin:ui-other-map/f", solos(json!("view"))).unwrap();
+        app.session.run("map.new", &json!({"name": "Second"})).unwrap();
+        app.session.run("map.activate", &json!({"name": "Second"})).unwrap();
+        let mut second = app.session.map().camera;
+        second.center.x += 1_000_000.0;
+        app.session.map_mut().camera = second;
+        let (asked, end) = run_out(&mut app, &held, &wfs);
+        let r = end.unwrap();
+        assert_eq!(feature_requests(&asked).len(), 1, "{asked:?}");
+        assert!(area_is(&r, [began.min_x, began.min_y, began.max_x, began.max_y]), "{r} {began:?}");
+        assert_eq!(app.session.map().name, "Second");
+        assert!(app.session.map().layer_by_name("Solos").is_some());
+        assert_eq!(app.session.map().camera, second, "that map's view stays");
+        plugins::unload("ui-other-map");
     }
 
     /// A box given moves the view when the layer is in, whatever the user did meanwhile: what the
@@ -916,11 +957,15 @@ mod tests {
         let pkg = plugins::Package::from_zip(&plugins::testing::package("ui-box", &["edit", "network"])).unwrap();
         plugins::load(pkg, "test").unwrap();
         let mut app = RustGisApp::with_sample();
-        let first = app.session.map().camera;
         app.run("plugin:ui-box/f", solos(json!([-44, -6, -42, -4]))).unwrap();
+        let mut moved = app.session.map().camera;
+        moved.center.x += 1_000_000.0;
+        app.session.map_mut().camera = moved;
         let (_, end) = run_out(&mut app, &held, &wfs);
         end.unwrap();
-        assert_ne!(app.session.map().camera, first);
+        assert_ne!(app.session.map().camera, moved);
+        let center = app.session.map().camera.center_lonlat();
+        assert!((center.x + 43.0).abs() < 0.01 && (center.y + 5.0).abs() < 0.01, "{center:?}");
         plugins::unload("ui-box");
     }
 
@@ -964,6 +1009,19 @@ mod tests {
         assert_eq!(asked.len(), 3, "{asked:?}");
         assert!(end.is_ok(), "{end:?}");
         assert!(app.session.map().tiles.iter().any(|t| t.url == "https://maps.example.com/relief/{z}/{y}/{x}.png"));
+        let standard = |app: &RustGisApp, mark| {
+            app.session.notices_since(mark).iter().filter(|n| n.text.contains("the standard tile address is used")).count()
+        };
+        assert_eq!(standard(&app, 0), 0, "the tiles it names are used");
+        // Its tile sets not read: the standard address, and that is said, once.
+        let mark = app.session.notice_mark();
+        let api = json!({"op": "service.add", "params": {"url": "https://maps.example.com/collections", "type": "ogcapi", "layer": "relief (map tiles)", "name": "Standard"}});
+        assert_eq!(app.run("plugin:ui-map/f", api).unwrap()["pending"], true);
+        let (_, end) = run_out(&mut app, &held, &|url| {
+            if url.contains("/relief/") { Err("502 Bad Gateway".to_string()) } else { Ok(API.as_bytes().to_vec()) }
+        });
+        assert!(end.is_ok(), "{end:?}");
+        assert_eq!(standard(&app, mark), 1, "{:?}", app.session.notices_since(mark));
         plugins::unload("ui-map");
     }
 
@@ -1017,6 +1075,13 @@ mod tests {
         let added = app.session.map().layer_by_name("Carbon").unwrap();
         assert!(added.is_raster() && r["layer"] == json!(added.id), "{r}");
         assert!(added.dataset.source.as_deref().is_some_and(|s| s.contains("GetCoverage")));
+        // An address ending in .tif is a coverage too: downloaded whole, as a raster.
+        let tif_address = json!({"op": "service.add", "params": {"url": "https://wcs.example.org/soc.tif", "type": "wcs", "layer": "soc", "name": "Named", "bbox": [5, 49.2, 5.8, 50]}});
+        assert_eq!(app.run("plugin:ui-wcs/f", tif_address).unwrap()["pending"], true);
+        let (asked, end) = run_out(&mut app, &held, &|url| Ok(doc(url).unwrap_or_else(|| tif.clone())));
+        let r = end.unwrap();
+        assert_eq!(asked.len(), 3, "the coverage asked for once, not probed: {asked:?}");
+        assert!(app.session.map().layer_by_name("Named").is_some_and(|l| l.is_raster() && r["layer"] == json!(l.id)), "{r}");
         // The service answers with its own error, not a GeoTIFF.
         assert_eq!(app.run("plugin:ui-wcs/f", add("Refused")).unwrap()["pending"], true);
         let (_, end) =

@@ -112,11 +112,10 @@ pub(crate) fn frame_drawn(app: &mut RustGisApp, ctx: &egui::Context) {
 }
 
 /// What the status bar says while a command waits to start, or waits off the frame for what it
-/// asked of the web: `Running BrasilData: Solos…`. An error said meanwhile goes first: a command
-/// may wait for minutes, while the window takes other work.
+/// asked of the web: `Running BrasilData: Solos…`. While it waits off the frame, an error said
+/// since it began to wait goes first.
 pub(crate) fn running(app: &RustGisApp) -> Option<String> {
-    let waiting = || app.session.plugin_command_waiting().filter(|_| !app.session.notices.last().is_some_and(|n| n.error));
-    let id = app.ui.plugin_start.waiting.front().map(|s| s.id.as_str()).or_else(waiting)?;
+    let id = app.ui.plugin_start.waiting.front().map(|s| s.id.as_str()).or_else(|| app.session.plugin_command_waiting())?;
     Some(i18n::fmt("Running {command}…", &[("command", &title(app, id))]))
 }
 

@@ -726,13 +726,15 @@ impl Session {
         // The undone call took its download requests with it: they go to the app still, once,
         // unless the command gives up now (it has run again too often): then nothing waits for them.
         let giving_up = self.retry_tries >= fetch::MAX_RETRIES;
+        let mut documents = Vec::new();
         for (n, asked) in requested.iter().filter(|_| !giving_up) {
             // Queued already: this number for this address (another caller may give the number).
             let taken = self.url_requests.iter().any(|q| q["request"].as_u64() == Some(*n) && fetch::same_request(q, asked));
             if !taken && !self.url_waits.has(*n) {
-                // A service's document is read here: the app adds nothing for it.
+                // A service's document is read here, once the run is kept: the app adds nothing
+                // for it, and with no command waiting nothing would take it.
                 if fetch::is_document(asked) {
-                    self.url_waits.read_document(*n, asked);
+                    documents.push((*n, asked.clone()));
                     continue;
                 }
                 let mut q = asked.clone();
@@ -749,6 +751,10 @@ impl Session {
         self.rerun_said.truncate(earlier);
         if let Err(e) = &res {
             self.notify(e.clone(), true);
+        } else {
+            for (n, asked) in &documents {
+                self.url_waits.read_document(*n, asked);
+            }
         }
         res
     }

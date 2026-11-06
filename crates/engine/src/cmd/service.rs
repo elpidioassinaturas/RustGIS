@@ -120,7 +120,8 @@ fn leaves_waits(s: &Session) -> bool {
 /// What a `service.add` waiting for the document at `url` answers: its command runs again.
 fn waiting_for(s: &mut Session, url: &str) -> CmdResult {
     s.request_only = true;
-    Ok(json!({"pending": true, "url": url}))
+    // (Without its keys: a saved login's may be in it, and the plugin gave only the service.)
+    Ok(json!({"pending": true, "url": crate::sources::redact(url)}))
 }
 
 fn capabilities(p: &Value) -> Result<Discovery, String> {
@@ -405,11 +406,21 @@ fn left_template(s: &mut Session, list: &str, vector: bool) -> Result<Option<Str
             return Ok(None);
         }
         let Some(read) = s.left_document(&doc) else { return Err(doc) };
-        let Ok(body) = read else { return Ok(None) };
+        let shown = crate::sources::redact(&doc);
+        let body = match read {
+            Ok(body) => body,
+            Err(e) => {
+                s.notify(format!("{shown}: its tile sets couldn't be read, so the standard tile address is used: {e}"), false);
+                return Ok(None);
+            }
+        };
         match resolve_tiles(list, &doc, &body, vector) {
             Some(TilesStep::Template(t)) => return Ok(checked_template(list, &t).ok()),
             Some(TilesStep::Next(next)) => doc = crate::render::rustgis_tiles::logins::inherit(&doc, &next),
-            None => return Ok(None),
+            None => {
+                s.notify(format!("{shown}: it names no tiles of this layer, so the standard tile address is used"), false);
+                return Ok(None);
+            }
         }
     }
     Ok(None)
@@ -686,7 +697,8 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 if leaving {
-                    return super::layer::add_url(s, &json!({"url": get, "name": name, "coverage": true}));
+                    // (Whole: a coverage's address may end in .tif, and it is read as a raster.)
+                    return super::layer::add_url(s, &json!({"url": get, "name": name, "coverage": true, "whole": true}));
                 }
                 let bytes = crate::render::rustgis_tiles::cache::download_blocking(&get).map_err(|e| format!("{name}: {e}"))?;
                 coverage_check(&name, &bytes)?;
@@ -940,5 +952,15 @@ mod tests {
         assert!(super::slow_whole_layer(slow.clone(), false).ends_with("with \"bbox\": [west, south, east, north] or \"view\""));
         assert_eq!(super::slow_whole_layer(slow.clone(), true), slow);
         assert_eq!(super::slow_whole_layer("404 Not Found".into(), false), "404 Not Found");
+    }
+
+    /// What a command is told it waits for has no keys in it: a saved login's may be in the address.
+    #[test]
+    fn a_document_waited_for_is_named_without_its_keys() {
+        let mut s = crate::Session::new(crate::sample::world_project());
+        let r = super::waiting_for(&mut s, "https://x.org/wfs?request=GetCapabilities&token=hunter2").unwrap();
+        let url = r["url"].as_str().unwrap();
+        assert!(url.starts_with("https://x.org/wfs") && !url.contains("hunter2"), "{r}");
+        assert_eq!(r["pending"], true);
     }
 }
