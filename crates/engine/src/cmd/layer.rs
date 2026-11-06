@@ -3077,9 +3077,7 @@ pub(crate) fn add_url(s: &mut Session, p: &Value) -> CmdResult {
 fn add_url_as_given(s: &mut Session, p: &Value) -> CmdResult {
     let bound = crate::service_logins::request_params(s, p)?;
     let p = bound.as_ref();
-    if ["geolibreProject", "geolibreLayer", "geolibreZarr"].iter().any(|key| p.get(key).is_some()) {
-        return Err("GeoLibre download state is internal; use project.importGeolibre".into());
-    }
+    no_geolibre_state(p)?;
     let url = ps(p, "url").map(str::trim).filter(|u| !u.is_empty()).ok_or("url is required")?;
     // A plugin command run again once the download it left to the app was added (#1202): what
     // adding it answered, as often as the run asks for it (the app downloaded and added it once).
@@ -3682,8 +3680,17 @@ fn web_address(url: &str) -> Result<String, String> {
     Ok(lower)
 }
 
+/// Refuses a GeoLibre project's download state, which only the app's import sets.
+fn no_geolibre_state(p: &Value) -> Result<(), String> {
+    if ["geolibreProject", "geolibreLayer", "geolibreZarr"].iter().any(|key| p.get(key).is_some()) {
+        return Err("GeoLibre download state is internal; use project.importGeolibre".into());
+    }
+    Ok(())
+}
+
 /// Refuses what can't be a window of `url`, before anything is fetched.
 fn window_checks(p: &Value, url: &str, scan: bool) -> Result<(), String> {
+    no_geolibre_state(p)?;
     if scan || b(p, "whole") == Some(true) || rustgis_data::time::is_template(url) {
         return Err(format!(
             "{url}: \"bbox\" reads a window of one cloud-optimised GeoTIFF with its coordinates: leave out \"as\" and \"whole\", and give a single file's address"

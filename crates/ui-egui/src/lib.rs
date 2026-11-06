@@ -183,7 +183,8 @@ pub type Slot<T> = std::sync::Arc<std::sync::Mutex<Option<T>>>;
 #[cfg(not(target_arch = "wasm32"))]
 static WINDOW_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// How many windows may be waiting to be read off the frame: each holds a thread.
+/// How many windows may be under way off the frame, being read or waiting for their turn: each
+/// holds a thread.
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_WINDOW_READS: usize = 16;
 
@@ -4292,7 +4293,7 @@ impl RustGisApp {
         let asked = rustgis_engine::cmd::layer::window_asked(&self.session, p)?;
         if self.ui.window_reads.len() >= MAX_WINDOW_READS {
             return Err(i18n::fmt(
-                "{url}: {count} windows are waiting to be read: ask again once one has been added",
+                "{url}: {count} windows are being read already: ask again once one has been added",
                 &[("url", &rustgis_engine::sources::redact(&url)), ("count", &MAX_WINDOW_READS.to_string())],
             ));
         }
@@ -5421,10 +5422,10 @@ mod record_tests {
         }
     }
 
-    /// Windows waiting to be read are bounded, as each holds a thread (#1330).
+    /// Windows under way are bounded, as each holds a thread (#1330).
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
-    fn too_many_windows_waiting_are_refused() {
+    fn too_many_windows_under_way_are_refused() {
         let mut app = RustGisApp::with_sample();
         for _ in 0..crate::MAX_WINDOW_READS {
             app.ui.window_reads.push((0, String::new(), serde_json::Value::Null, Default::default()));

@@ -151,7 +151,7 @@ tile), without a STAC catalogue:
 - The Add Data From URL dialog has no box to fill in, so a window is asked for by a command. On
   the command line and in a script, `layer.addUrl` waits for it and answers what was added. In the
   desktop app, `ui.addUrl` with `"bbox"` reads it off the frame: the map stays in use, and the
-  layer is added when the read lands. These are read one at a time, with 16 waiting at most. A
+  layer is added when the read lands. These are read one at a time, with 16 under way at most. A
   read under way can't be cancelled yet; if another project is opened meanwhile, it isn't added,
   with a notice.
 - The file's no-data, colour table (a palette file draws in its colours) and band names come
