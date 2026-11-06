@@ -61,9 +61,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     when that shows more of it, or as much while covering at least a quarter less of what the map
     draws (the answer's `legendColumns`); in a side column it stays in one. Polygon layers with no
     fill and no labels, such as neighbouring borders, don't count as what the map draws here, unless
-    nothing else is shown. If the legend or colorbar
-    cannot fit, the result warns about clipping or resizing. A streamed layer still loading gets a fixed-size legend
-    to adjust by hand.
+    nothing else is shown. If the legend or colorbar cannot fit, the result warns about clipping or
+    resizing. A streamed layer still loading gets a fixed-size legend to adjust by hand.
   - **Decimal comma**: `"decimal": ","` prints the graticule, scale bar and colorbar numbers and
     `{scale}` with a decimal comma and points between thousands (`0,05`, `1:6.300.000`).
     `layout.page={"decimal": ","}` sets it on any layout; `"."` restores decimal points.

@@ -1682,11 +1682,20 @@ pub fn frame_render_scale(map: &Map, center: Coord, scale: f64) -> f64 {
 }
 
 /// Whether a layer only outlines its polygons, with no fill and no labels: context around a map's
-/// data, such as the neighbouring states' borders, which a surround can sit on.
+/// data, such as the neighbouring states' borders, which a surround can sit on. No Fill counts,
+/// whatever the renderer; a transparent symbol under stacked fills such as a hatch, a fill by
+/// expression, diagrams or extrusion are more than an outline.
 fn only_outlines(l: &rustgis_map::Layer) -> bool {
+    use rustgis_map::NoFill;
+    let hollow = l.no_fill == Some(NoFill::Override)
+        || (l.fill_layers.is_empty()
+            && (l.no_fill == Some(NoFill::Symbols) || matches!(&l.renderer, rustgis_map::Renderer::Single(s) if s.fill.0[3] == 0)));
     l.geometry_type() == GeometryType::Polygon
         && !l.labels.enabled
-        && matches!(&l.renderer, rustgis_map::Renderer::Single(s) if s.fill.0[3] == 0)
+        && hollow
+        && l.symbol_by.fill.is_none()
+        && l.diagram.is_none()
+        && l.extrusion.is_none()
 }
 
 /// Where a frame showing `map` at 1:`scale` draws its layers: a grid of about `cells` cells across
@@ -2382,6 +2391,22 @@ mod tests {
         assert!(only_outlines(l));
         l.labels.enabled = true;
         assert!(!only_outlines(l), "labels make it more than an outline");
+        l.labels.enabled = false;
+        l.fill_layers = vec![rustgis_map::fills::FillLayer::default()];
+        assert!(!only_outlines(l), "a stacked fill draws inside it");
+        l.no_fill = Some(rustgis_map::NoFill::Symbols);
+        assert!(!only_outlines(l), "No Fill's symbols leave a stacked fill drawn");
+        l.no_fill = Some(rustgis_map::NoFill::Override);
+        assert!(only_outlines(l), "No Fill's override is the fill that hides the rest");
+        l.no_fill = None;
+        l.fill_layers.clear();
+        l.symbol_by.fill = Some("'#ff0000'".into());
+        assert!(!only_outlines(l), "a fill by expression draws inside it");
+        l.symbol_by.fill = None;
+        l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol::default_for(GeometryType::Polygon, 0));
+        assert!(!only_outlines(l), "a filled symbol");
+        l.no_fill = Some(rustgis_map::NoFill::Symbols);
+        assert!(only_outlines(l), "No Fill counts as no fill");
     }
 
     /// A legend's rows go into columns: as even as they go, a layer's name with the row under it,
