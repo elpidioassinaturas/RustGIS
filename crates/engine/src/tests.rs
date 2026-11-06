@@ -7160,6 +7160,14 @@ fn a_legends_columns_say_when_its_box_is_too_small() {
     let mark = s.notice_mark();
     s.run("layout.update", &json!({"element": id, "h": 15})).unwrap();
     assert_eq!(said(&s, mark), "");
+    // Nothing listed: nothing to lose, in a box shorter than its title too.
+    let mut empty = Session::new(Project::default());
+    empty.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    empty.run("layout.new", &json!({"template": "map"})).unwrap();
+    let mark = empty.notice_mark();
+    let p = json!({"kind": "legend", "columns": 2, "exclude": ["a"], "x": 10, "y": 10, "w": 150, "h": 1});
+    empty.run("layout.addElement", &p).unwrap();
+    assert_eq!(said(&empty, mark), "");
     // A frame whose map is gone: said rather than left unchecked.
     s.project.maps[0].name = "Elsewhere".into();
     let mark = s.notice_mark();

@@ -2325,7 +2325,8 @@ const LEGEND_FIT_MM: f64 = 1e-6;
 
 /// What a legend's rows `size` in `columns` columns lose in a box `room`, in mm, each said once.
 fn legend_fit_warnings(columns: usize, (w, h): (f64, f64), (room_w, room_h): (f64, f64)) -> Vec<&'static str> {
-    let (too_wide, too_tall) = (h > 0.0 && w > room_w + LEGEND_FIT_MM, h > room_h + LEGEND_FIT_MM);
+    // With no rows there is nothing to lose, in a box shorter than its title too.
+    let (too_wide, too_tall) = (h > 0.0 && w > room_w + LEGEND_FIT_MM, h > 0.0 && h > room_h + LEGEND_FIT_MM);
     let mut said = Vec::new();
     if columns > 1 {
         // Its columns close up rather than leave one out.
@@ -2335,7 +2336,7 @@ fn legend_fit_warnings(columns: usize, (w, h): (f64, f64), (room_w, room_h): (f6
         if too_tall {
             said.push("the legend lists more than fits its box: its last rows are left out");
         }
-    } else if h > 0.0 && (too_wide || too_tall) {
+    } else if too_wide || too_tall {
         said.push("the legend lists more than fits its box: its last rows or the ends of long labels are left out");
     }
     said
