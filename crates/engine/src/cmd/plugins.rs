@@ -730,6 +730,11 @@ impl Session {
             // Queued already: this number for this address (another caller may give the number).
             let taken = self.url_requests.iter().any(|q| q["request"].as_u64() == Some(*n) && fetch::same_request(q, asked));
             if !taken && !self.url_waits.has(*n) {
+                // A service's document is read here: the app adds nothing for it.
+                if fetch::is_document(asked) {
+                    self.url_waits.read_document(*n, asked);
+                    continue;
+                }
                 let mut q = asked.clone();
                 q["request"] = json!(n);
                 self.url_requests.push(q);

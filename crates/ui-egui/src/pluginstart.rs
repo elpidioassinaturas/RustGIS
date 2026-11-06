@@ -1,5 +1,6 @@
 //! A plugin command the user asks for in the interface starts a frame or two later, so the window
-//! first shows that it is running (#1319): the command may wait for a server on this thread, and
+//! first shows that it is running (#1319): the command may wait for a server on this thread (unless
+//! it is waiting in `layer.addUrl` or `service.add`, which leave that to the frame loop), and
 //! nothing is drawn until it has finished. Clicks made meanwhile, which the window system holds
 //! until then, are dropped, so a second click out of impatience doesn't run it again. Scripts, the
 //! AI Assistant and attached agents run commands at once ([`RustGisApp::run`]).
@@ -39,8 +40,12 @@ pub struct State {
 }
 
 /// Leaves plugin command `id` to start once the window has shown it. The same command with the
-/// same parameters, already waiting, isn't asked twice.
+/// same parameters, already waiting to start or for what it asked of the web, isn't asked twice:
+/// the status bar says it is running.
 pub(crate) fn ask(app: &mut RustGisApp, id: &str, params: Value) {
+    if app.session.plugin_command_waits(id, &params) {
+        return;
+    }
     let opened = app.session.opened;
     let waiting = &mut app.ui.plugin_start.waiting;
     if !waiting.iter().any(|s| s.id == id && s.params == params && s.opened == opened) {
@@ -106,10 +111,13 @@ pub(crate) fn frame_drawn(app: &mut RustGisApp, ctx: &egui::Context) {
     }
 }
 
-/// What the status bar says while a command waits to start: `Running BrasilData: Solos…`.
+/// What the status bar says while a command waits to start, or waits off the frame for what it
+/// asked of the web: `Running BrasilData: Solos…`. An error said meanwhile goes first: a command
+/// may wait for minutes, while the window takes other work.
 pub(crate) fn running(app: &RustGisApp) -> Option<String> {
-    let title = title(app, &app.ui.plugin_start.waiting.front()?.id);
-    Some(i18n::fmt("Running {command}…", &[("command", &title)]))
+    let waiting = || app.session.plugin_command_waiting().filter(|_| !app.session.notices.last().is_some_and(|n| n.error));
+    let id = app.ui.plugin_start.waiting.front().map(|s| s.id.as_str()).or_else(waiting)?;
+    Some(i18n::fmt("Running {command}…", &[("command", &title(app, id))]))
 }
 
 /// A plugin command as the user knows it: `BrasilData: Solos`.
@@ -204,6 +212,23 @@ mod tests {
         h.state_mut().run(id, rename("Brooks", "Creeks")).unwrap();
         assert!(h.state().session.map().layer_by_name("Creeks").is_some());
         plugins::unload("ui-turn");
+    }
+
+    /// The window answers while a command waits for the web, so a click can reach it: the same
+    /// command isn't started over, and another, or the same with other parameters, is (#1319).
+    #[test]
+    fn a_command_waiting_for_the_web_isnt_asked_again() {
+        let pkg = plugins::Package::from_zip(&plugins::testing::package("ui-again-asked", &["edit", "network"])).unwrap();
+        plugins::load(pkg, "test").unwrap();
+        let mut app = RustGisApp::with_sample();
+        let (id, params) = ("plugin:ui-again-asked/f", json!({"op": "layer.addUrl", "params": {"url": "https://x.org/a.csv"}}));
+        app.run(id, params.clone()).unwrap();
+        assert!(app.session.plugin_retries_waiting());
+        ask(&mut app, id, params);
+        assert!(app.ui.plugin_start.waiting.is_empty());
+        ask(&mut app, id, json!({"op": "layer.addUrl", "params": {"url": "https://x.org/b.csv"}}));
+        assert_eq!(app.ui.plugin_start.waiting.len(), 1);
+        plugins::unload("ui-again-asked");
     }
 
     /// Clicks are dropped once, after a long run; what the pointer did otherwise stays.
