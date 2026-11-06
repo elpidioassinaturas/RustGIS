@@ -1103,7 +1103,18 @@ The **Script** pane runs commands from text, one per line (`id {json}`); its box
 short of the buttons, and then scrolls, so **Run** stays in view; Ctrl+Enter (⌘+Enter on macOS)
 in the box runs the script too. Above a run's results, a line tells its number, how long it took
 and when it started (`Run #2 (0.84 s)`, and `14:04 UTC` on the right), so a run made again by
-mistake shows (Undo takes a whole run back). It colours the commands as you type, in both
+mistake shows (Undo takes a whole run back). The results show each line's result cut to a line;
+**Details…** on the run's line opens them whole in a window, as View Details in ArcGIS Pro's
+Geoprocessing History: each line folded under its command, opening to its result laid out to
+read, **Copy** for one and **Copy All** for the run, and why it stopped, if it did. On the
+desktop, a script's tools and models, with
+selections, layer renames and definition queries, the environment and the projection between
+them, are worked out in the background first, so the map and the rest of the window stay in
+use: the status bar shows **Run Script** and **Cancel**, and the results say **Running…** until
+the run is added. From the first line of any other kind (an edit, Add Data, a save, an export,
+a style or a zoom, a plugin or GeoLibre tool, a tool that writes a file) the rest runs as a
+script always has, holding the window until it finishes. A tool whose inputs change meanwhile runs again as the
+results are added, as in a model's run. It colours the commands as you type, in both
 themes: `#` comments in green italics, the command id, and the JSON's strings, numbers and
 `true`/`false`/`null`; an id no command has, or one that can't run in a script (`ui.*`, `script.*`,
 `notebook.run`), and parameters that aren't valid JSON are red and underlined. A script is read to
@@ -1172,6 +1183,18 @@ their name.
   are none. The tools then run in flow order, and each node shows how it fared. A result that
   only feeds other tools is removed once the model has run; the outputs, and tools at the end
   of the flow, stay on the map. A run that fails is undone as a whole.
+- On the desktop, **Run** (here or in the Workflows pane's Models section) works out the tools
+  in the background, so the map and the rest of the window stay in use: the status bar shows
+  **Run Model**, how far its current tool has come, and **Cancel**, and the canvas says
+  **Running…** until the results are added, as one step to undo. What a tool reads that changes
+  meanwhile (an edit, a selection, a layer added or reordered, the environment, the projection)
+  has that tool and those after it run again as the results are added, and so does a tool that
+  writes a file, a plugin tool or a GeoLibre tool, with those after it. Those run as a model
+  always has, holding the window until they finish, with the work limits of a run that can't
+  be cancelled. A file a tool reads by its path isn't compared: one changed during the run
+  gives the result from what was read. A model run from a script in the Script pane is worked
+  out in the background with the script; one run from the command line or the assistant runs
+  where the command runs.
 - **Save** keeps the model in the project; **Export** writes it as a `*.model.json` file, which
   **Import** (or dropping the file on the window) opens again. A model from a file may not read
   or write files. **Copy Command** copies a `model.run` command that runs the model from the

@@ -4160,6 +4160,10 @@ fn a_removed_layers_locked_labels_go_with_it() {
     assert_eq!(locked_layers(&s), (vec![a, b], vec![a, b]));
     s.run("edit.redo", &Value::Null).unwrap();
     assert_eq!(locked_layers(&s), (vec![b], vec![b]));
+    // The last locked layer gone, the lock holds, with nothing in it.
+    s.run("layer.remove", &json!({"layer": b})).unwrap();
+    assert!(s.map().label_lock.as_ref().is_some_and(Vec::is_empty));
+    assert!(s.map().label_lock_line_anchors.is_empty());
 }
 
 /// A deleted feature's lock entry and line anchor go with it, not those of another layer's feature
@@ -4174,6 +4178,36 @@ fn a_deleted_feature_leaves_another_layers_lock_alone() {
     assert_eq!(locked_layers(&s), (vec![a, b], vec![a, b]));
     s.run("edit.redo", &Value::Null).unwrap();
     assert_eq!(locked_layers(&s), (vec![b], vec![b]));
+}
+
+/// Deleting one of a layer's locked features keeps the lock entry and line anchor of the other.
+#[test]
+fn a_deleted_feature_leaves_its_neighbours_lock_alone() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    let mut s = Session::new(Project::default());
+    let mut d = Dataset::new("A", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+    for name in ["one", "two"] {
+        d.push(Some(Geometry::Point(rustgis_geom::Coord::new(0.0, 0.0))), vec![V::Text(name.into())]);
+    }
+    let a = s.map_mut().add_dataset(d);
+    let keys = [(a, 1, 0, 0), (a, 2, 0, 0)];
+    s.map_mut().label_lock = Some(keys.map(|k| (k, Default::default())).to_vec());
+    s.map_mut().label_lock_line_anchors = keys.map(|k| (k, Default::default())).into_iter().collect();
+    // The feature ids the lock and the anchors name, each sorted.
+    let ids = |s: &Session| {
+        let mut lock: Vec<u64> = s.map().label_lock.iter().flatten().map(|((_, f, ..), _)| *f).collect();
+        let mut anchors: Vec<u64> = s.map().label_lock_line_anchors.keys().map(|(_, f, ..)| *f).collect();
+        lock.sort_unstable();
+        anchors.sort_unstable();
+        (lock, anchors)
+    };
+    s.map_mut().layer_mut(a).unwrap().selection = vec![0];
+    s.run("edit.delete", &Value::Null).unwrap();
+    assert_eq!(ids(&s), (vec![2], vec![2]));
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(ids(&s), (vec![1, 2], vec![1, 2]));
+    s.run("edit.redo", &Value::Null).unwrap();
+    assert_eq!(ids(&s), (vec![2], vec![2]));
 }
 
 /// A streamed layer holds only the window in view: a lock's entry for a feature outside it stays
@@ -5838,6 +5872,124 @@ fn layout_surrounds_take_cartographic_options() {
     let text = serde_json::to_string(&s.project.layouts[0]).unwrap();
     let back: rustgis_map::layout::Layout = serde_json::from_str(&text).unwrap();
     assert_eq!(back, s.project.layouts[0]);
+}
+
+/// A layout element refuses a colour, fill or outline its kind doesn't draw, before anything
+/// changes: added and edited through commands, with the layouts unchanged after a refusal.
+#[test]
+fn layout_colours_are_refused_for_elements_without_them() {
+    use rustgis_map::Rgba;
+    use rustgis_map::layout::ElementKind;
+    let mut s = world();
+    s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "map"})).unwrap();
+    let layouts = |s: &Session| serde_json::to_string(&s.project.layouts).unwrap();
+    let find = |s: &Session, code: &str| s.project.layouts[0].elements.iter().find(|e| e.kind.code() == code).unwrap().id;
+    let frame = find(&s, "mapFrame");
+    let red = "#B91C1C";
+    // Added: a kind without the colour is refused, nothing added; with it, it is applied.
+    let refused = [
+        ("legend", "color", "only text, lines"),
+        ("table", "color", "only text, lines"),
+        ("colorbar", "color", "only text, lines"),
+        ("northArrow", "color", "only text, lines"),
+        ("legend", "fill", "take a fill"),
+        ("table", "fill", "take a fill"),
+        ("text", "fill", "take a fill"),
+        ("line", "fill", "take a fill"),
+        ("grid", "fill", "take a fill"),
+        ("legend", "outline", "take an outline"),
+        ("scaleBar", "outline", "take an outline"),
+        ("text", "outline", "take an outline"),
+        ("line", "outline", "take an outline"),
+        ("extentIndicator", "outline", "take an outline"),
+    ];
+    for (kind, key, said) in refused {
+        let before = layouts(&s);
+        let e = s.run("layout.addElement", &json!({"kind": kind, key: red})).unwrap_err();
+        assert!(e.contains(said) && layouts(&s) == before, "{kind} {key}: {e}");
+        // null is not given.
+        let mut p = json!({"kind": kind});
+        p[key] = Value::Null;
+        let after = s.run("layout.addElement", &p);
+        assert!(after.as_ref().err().is_none_or(|e| !e.contains("take a")), "{kind} {key} null: {after:?}");
+    }
+    let before = layouts(&s);
+    let e = s.run("layout.addElement", &json!({"kind": "picture", "color": red})).unwrap_err();
+    assert!(e.contains("take a color") && layouts(&s) == before, "{e}");
+    for (kind, key) in [
+        ("text", "color"),
+        ("dynamicText", "color"),
+        ("line", "color"),
+        ("arrow", "color"),
+        ("rectangle", "color"),
+        ("ellipse", "color"),
+        ("circle", "color"),
+        ("grid", "color"),
+        ("scaleBar", "color"),
+        ("scaleBar", "fill"),
+        ("northArrow", "fill"),
+        ("northArrow", "outline"),
+        ("rectangle", "fill"),
+        ("rectangle", "outline"),
+        ("ellipse", "fill"),
+        ("circle", "outline"),
+    ] {
+        s.run("layout.addElement", &json!({"kind": kind, key: red})).unwrap_or_else(|e| panic!("{kind} {key}: {e}"));
+    }
+    // An extent indicator's colour is its frame's: the template has one map frame, so add another.
+    let inset = s.run("layout.addFrame", &json!({"x": 150, "y": 150, "w": 40, "h": 40})).unwrap()["element"].as_u64().unwrap();
+    s.run("layout.addElement", &json!({"kind": "extentIndicator", "frame": inset, "of": frame, "color": red})).unwrap();
+    let Some(ElementKind::MapFrame { extent_of, extent_color, .. }) = s.project.layouts[0].element(inset as u32).map(|e| &e.kind) else {
+        panic!("the inset is a map frame")
+    };
+    assert_eq!((*extent_of, extent_color.hex()), (Some(frame), red.to_string()));
+    // A rectangle's outline is its "outline", else its "color".
+    let r =
+        s.run("layout.addElement", &json!({"kind": "rectangle", "outline": "#112233", "color": red})).unwrap()["element"].as_u64().unwrap();
+    let outline = |s: &Session, id: u64| match &s.project.layouts[0].element(id as u32).unwrap().kind {
+        ElementKind::Rectangle { outline, .. } | ElementKind::Ellipse { outline, .. } => *outline,
+        k => panic!("{k:?}"),
+    };
+    assert_eq!(outline(&s, r), Rgba::rgb(0x11, 0x22, 0x33));
+    // Updated: the same, the element unchanged when refused.
+    let legend = s.run("layout.addElement", &json!({"kind": "legend"})).unwrap()["element"].as_u64().unwrap();
+    let scale = find(&s, "scaleBar");
+    let table = s.run("layout.addElement", &json!({"kind": "table"})).unwrap()["element"].as_u64().unwrap();
+    for (el, key, said) in [
+        (legend, "color", "take a color"),
+        (u64::from(frame), "color", "take a color"),
+        (table, "color", "take a color"),
+        (legend, "fill", "take a fill"),
+        (table, "fill", "take a fill"),
+        (legend, "outline", "take an outline"),
+        (u64::from(frame), "outline", "take an outline"),
+    ] {
+        let before = layouts(&s);
+        let e = s.run("layout.update", &json!({"element": el, key: red, "name": "Renamed"})).unwrap_err();
+        assert!(e.contains(said) && layouts(&s) == before, "{el} {key}: {e}");
+        s.run("layout.update", &json!({"element": el, key: null})).unwrap();
+    }
+    let arrow = find(&s, "northArrow");
+    let e = s.run("layout.update", &json!({"element": arrow, "color": red})).unwrap_err();
+    assert!(e.contains("take a color"), "{e}");
+    let scale = u64::from(scale);
+    for (el, key) in [
+        (u64::from(arrow), "fill"),
+        (u64::from(arrow), "outline"),
+        (r, "fill"),
+        (r, "outline"),
+        (r, "color"),
+        (scale, "color"),
+        (scale, "fill"),
+    ] {
+        s.run("layout.update", &json!({"element": el, key: red})).unwrap_or_else(|e| panic!("{el} {key}: {e}"));
+    }
+    let text = find(&s, "text");
+    s.run("layout.update", &json!({"element": text, "color": red})).unwrap();
+    let ElementKind::Text { color, .. } = &s.project.layouts[0].element(text).unwrap().kind else { panic!() };
+    assert_eq!(*color, Rgba::rgb(0xB9, 0x1C, 0x1C));
+    let e = s.run("layout.update", &json!({"element": text, "fill": red})).unwrap_err();
+    assert!(e.contains("take a fill"), "{e}");
 }
 
 /// A colorbar shows a raster's colour scale on a layout (#326): added and edited through
@@ -9164,11 +9316,15 @@ fn plugin_downloads_are_left_to_the_app() {
     // Nothing answers there: a download that waited fails.
     let url = "http://127.0.0.1:9/places.csv";
     let p = json!({"op": "layer.addUrl", "params": {"url": url, "name": "Places", "x": "lon", "y": "lat"}});
-    assert_eq!(s.run_leaving_downloads("plugin:eng-url/f", &p).unwrap(), json!({"pending": true, "url": url}));
+    // The command waits for the download, to run again once it is added (#1202).
+    assert_eq!(s.run_leaving_downloads("plugin:eng-url/f", &p).unwrap(), json!({"pending": true, "downloading": [url]}));
     assert_eq!((s.undo.len(), s.map().layers.len()), (undo, layers));
     let asked = s.take_url_requests();
     assert_eq!(asked.len(), 1);
     assert_eq!((asked[0]["name"].as_str(), asked[0]["x"].as_str(), asked[0]["y"].as_str()), (Some("Places"), Some("lon"), Some("lat")));
+    assert!(asked[0]["request"].is_u64(), "{}", asked[0]);
+    s.request_failed(&asked[0], "dropped");
+    s.poll_plugin_retries();
     assert!(s.run("plugin:eng-url/f", &p).is_err(), "run otherwise, it waits");
     assert!(s.take_url_requests().is_empty());
     // An edit run that way is an undo step still.
@@ -9176,6 +9332,110 @@ fn plugin_downloads_are_left_to_the_app() {
     s.run_leaving_downloads("plugin:eng-url/f", &p).unwrap();
     assert_eq!(s.undo.len(), undo + 1);
     rustgis_plugins::unload("eng-url");
+}
+
+/// A command that gives up says which of its downloads now won't start; one another command
+/// waits for still comes, so it isn't named.
+#[test]
+fn a_command_giving_up_names_the_downloads_it_leaves() {
+    let mut s = world();
+    plugin("eng-giveup", &["edit", "network"]);
+    plugin("eng-giveup-other", &["edit", "network"]);
+    let add = |url: &str| json!({"op": "layer.addUrl", "params": {"url": url}});
+    s.retry_tries = crate::cmd::plugins::fetch::MAX_RETRIES;
+    let e = s.run_leaving_downloads("plugin:eng-giveup/f", &add("https://x.org/new.csv?token=hunter2")).unwrap_err();
+    assert!(e.contains("gave up") && e.contains("its download of https://x.org/new.csv") && !e.contains("hunter2"), "{e}");
+    assert!(s.take_url_requests().is_empty(), "not started");
+    s.retry_tries = 0;
+    s.run_leaving_downloads("plugin:eng-giveup-other/f", &add("https://x.org/shared.csv")).unwrap();
+    s.retry_tries = crate::cmd::plugins::fetch::MAX_RETRIES;
+    let e = s.run_leaving_downloads("plugin:eng-giveup/f", &add("https://x.org/shared.csv")).unwrap_err();
+    assert!(e.contains("gave up") && !e.contains("wasn't started"), "{e}");
+    assert_eq!(s.take_url_requests()[0]["url"], "https://x.org/shared.csv", "the other command's still comes");
+    rustgis_plugins::unload("eng-giveup");
+    rustgis_plugins::unload("eng-giveup-other");
+}
+
+/// A plugin command whose `layer.addUrl` left a download to the app runs again once the app
+/// has added it, and that call then answers the layer added, so the command goes on with it
+/// (#1202). A failed download is the call's error then; a command clicked twice waits for the
+/// one download.
+#[test]
+fn a_plugin_command_runs_again_when_its_download_is_added() {
+    let mut s = world();
+    plugin("eng-rerun", &["edit", "network"]);
+    let layers = s.map().layers.len();
+    let url = "https://x.org/places.csv";
+    let p = json!({"op": "layer.addUrl", "params": {"url": url, "name": "Places", "x": "lon", "y": "lat"}});
+    assert_eq!(s.run_leaving_downloads("plugin:eng-rerun/f", &p).unwrap()["downloading"], json!([url]));
+    let asked = s.take_url_requests();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0]["anonymous"], json!(true), "no saved login goes with a plugin's download");
+    // Clicked again while it downloads: the same download, not a second one.
+    s.run_leaving_downloads("plugin:eng-rerun/f", &p).unwrap();
+    assert!(s.take_url_requests().is_empty(), "one download");
+    assert!(s.poll_plugin_retries().is_empty(), "nothing landed yet");
+    // The app downloads it and adds it, with the request's number, as its own step.
+    let id = s.download_started();
+    assert!(
+        s.download_landed(
+            id,
+            b"name,lon,lat
+A,10,50
+B,11,51
+"
+            .to_vec()
+        )
+    );
+    let mut add = asked[0].clone();
+    add["id"] = json!(id);
+    s.run("layer.addDownload", &add).unwrap();
+    assert_eq!(s.map().layers.len(), layers + 1);
+    let added = s.map().layer_by_name("Places").unwrap().id;
+    // The command runs again: its `layer.addUrl` answers the layer added, and adds nothing (nor
+    // an undo step of its own, having changed nothing).
+    let undo = s.undo.len();
+    let ran = s.poll_plugin_retries();
+    assert_eq!(ran.len(), 1, "{ran:?}");
+    let (cmd, answer) = &ran[0];
+    assert_eq!(cmd, "plugin:eng-rerun/f");
+    assert_eq!(answer.as_ref().unwrap()["layer"], json!(added), "{answer:?}");
+    assert_eq!((s.map().layers.len(), s.undo.len()), (layers + 1, undo), "added once");
+    assert!(s.take_url_requests().is_empty() && !s.plugin_retries_waiting());
+    assert!(s.poll_plugin_retries().is_empty(), "run once");
+    // A download that fails: the command runs again, and its `layer.addUrl` answers the error.
+    let q = json!({"op": "layer.addUrl", "params": {"url": "https://x.org/gone.csv"}});
+    s.run_leaving_downloads("plugin:eng-rerun/f", &q).unwrap();
+    let asked = s.take_url_requests();
+    s.request_failed(&asked[0], "https://x.org/gone.csv?token=hunter2: 404 Not Found");
+    let ran = s.poll_plugin_retries();
+    let e = ran[0].1.as_ref().unwrap_err();
+    assert!(e.contains("404") && !e.contains("hunter2"), "{ran:?}");
+    assert!(!s.plugin_retries_waiting());
+    // Another caller's download queued under the number the command's will get: the command's is
+    // still queued, for its own address.
+    let next = s.next_request + 1;
+    s.url_requests.push(json!({"url": "https://x.org/other.csv", "request": next}));
+    let q = json!({"op": "layer.addUrl", "params": {"url": "https://x.org/mine.csv"}});
+    s.run_leaving_downloads("plugin:eng-rerun/f", &q).unwrap();
+    let asked = s.take_url_requests();
+    let urls: Vec<_> = asked.iter().map(|q| (q["url"].as_str(), q["request"].as_u64())).collect();
+    assert_eq!(urls, [(Some("https://x.org/other.csv"), Some(next)), (Some("https://x.org/mine.csv"), Some(next))]);
+    // A run replaced by one asking for another address before its download was started: that
+    // download is never started, and the notice of the replaced run says so.
+    let first = json!({"op": "layer.addUrl", "params": {"url": "https://x.org/first.csv"}});
+    s.run_leaving_downloads("plugin:eng-rerun/f", &first).unwrap();
+    let mark = s.notice_mark();
+    let second = json!({"op": "layer.addUrl", "params": {"url": "https://x.org/second.csv"}});
+    s.run_leaving_downloads("plugin:eng-rerun/f", &second).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(
+        said.iter().any(|t| t.contains("replaced by this one") && t.contains("its download of https://x.org/first.csv wasn't started")),
+        "{said:?}"
+    );
+    let left = s.take_url_requests();
+    assert!(left.iter().all(|q| q["url"] != "https://x.org/first.csv"), "{left:?}");
+    rustgis_plugins::unload("eng-rerun");
 }
 
 #[test]
@@ -9677,6 +9937,38 @@ fn geopackage_plugin_writes_are_user_only_and_reload_needs_files() {
 #[test]
 fn plugin_process_child() {
     rustgis_plugins::testing::serve_if_child();
+}
+
+/// An error a command says before the call that leaves a download stays, and is said once: the
+/// runs after it do the same again, and don't repeat it (#1202).
+#[test]
+fn a_command_run_again_does_not_repeat_its_errors() {
+    let mut s = world();
+    let dir = std::env::temp_dir().join(format!("rustgis-test-eng-said-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let run = rustgis_plugins::testing::child_run("tests::plugin_process_child");
+    std::fs::write(dir.join("plugin.json"), rustgis_plugins::testing::process_manifest("eng-said", &["edit", "network"], &run)).unwrap();
+    rustgis_plugins::load(rustgis_plugins::Package::from_dir(&dir).unwrap(), "test").unwrap();
+    let said = |s: &Session, mark, text: &str| s.notices_since(mark).iter().filter(|n| n.error && n.text.contains(text)).count();
+    let mark = s.notice_mark();
+    let first = "https://x.org/first.csv";
+    let p = json!({"op": "layer.addUrl", "params": {"url": first}});
+    s.run_leaving_downloads("plugin:eng-said/d", &p).unwrap();
+    assert_eq!(said(&s, mark, "said before the call"), 1, "said while it waits");
+    let asked = s.take_url_requests();
+    // Each download that fails runs it again, its `layer.addUrl` answering the error: nothing more.
+    s.request_failed(&asked[0], "404 Not Found");
+    let ran = s.poll_plugin_retries();
+    assert!(ran[0].1.as_ref().is_err_and(|e| e.contains("404")), "{ran:?}");
+    assert_eq!(said(&s, mark, "said before the call"), 1, "not repeated");
+    // The next time it is asked for, it is said again.
+    let mark = s.notice_mark();
+    s.run_leaving_downloads("plugin:eng-said/d", &p).unwrap();
+    assert_eq!(said(&s, mark, "said before the call"), 1, "a new run says it");
+    s.plugin_retries.clear();
+    let _ = s.take_url_requests();
+    rustgis_plugins::unload("eng-said");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -11102,7 +11394,7 @@ fn duckdb_queries_and_databases() {
         assert!(e.contains("need DuckDB"), "{e}");
         return;
     }
-    // A result mixing geometry types: a layer per type.
+    // A result mixing geometry types: a layer per type, its points on top (#1488).
     let r = s.run("layer.addSql", &json!({"sql": query, "name": "Trip"})).unwrap();
     let names: Vec<String> = s.map().layers.iter().map(|l| l.name.clone()).collect();
     assert_eq!(names, vec!["Trip (points)", "Trip (lines)"], "{r}");
@@ -11187,6 +11479,95 @@ fn duckdb_queries_and_databases() {
     let r = s.run("layer.addSql", &json!({"sql": projected, "name": "Utm2", "crs": "EPSG:32633"})).unwrap();
     let e = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().extent();
     assert!((e.min_x - 15.0).abs() < 0.01 && (e.min_y - 37.95).abs() < 0.05, "{e:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A source split by geometry type is added polygons first, so its points end on top and none hides
+/// under its own polygons, whether DuckDB or GDAL split it (#1488). Neither program is needed: the
+/// parts are files already written, as they would have converted them.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn split_sources_keep_their_points_on_top() {
+    use crate::cmd::layer::{add_converted, duckdb_parts, gdal_parts};
+    use rustgis_data::source::{Family, duckdb, gdal};
+    let dir = std::env::temp_dir().join(format!("rustgis-split-order-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let geometry = |f: Family| match f {
+        Family::Points => r#"{"type": "Point", "coordinates": [10, 50]}"#,
+        Family::Lines => r#"{"type": "LineString", "coordinates": [[10, 50], [11, 51]]}"#,
+        Family::Polygons => r#"{"type": "Polygon", "coordinates": [[[10, 50], [11, 50], [11, 51], [10, 50]]]}"#,
+    };
+    // A file per part, in the order both programs give them: points first (`Family::ALL`).
+    let write = |stem: &str, f: Family| {
+        let path = dir.join(format!("{stem}-{}.geojson", f.label()));
+        let feature = format!(r#"{{"type": "Feature", "properties": {{}}, "geometry": {}}}"#, geometry(f));
+        std::fs::write(&path, format!(r#"{{"type": "FeatureCollection", "features": [{feature}]}}"#)).unwrap();
+        path
+    };
+    let names = |s: &Session| s.map().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+
+    // A DuckDB query.
+    let mut s = Session::new(Project::default());
+    let parts = Family::ALL.iter().map(|f| duckdb::Part { path: write("query", *f), family: *f, count: 1 }).collect();
+    let origin =
+        |family| rustgis_map::source::DuckdbOrigin { sql: Some("SELECT 1".into()), database: None, table: None, crs: None, family };
+    let parts = duckdb_parts(&mut s, "Trip", duckdb::Output { parts, skipped: 0 }, origin);
+    add_converted(&mut s, &json!({}), "the query", "DuckDB query", parts).unwrap();
+    assert_eq!(names(&s), ["Trip (points)", "Trip (lines)", "Trip (polygons)"]);
+
+    // A GDAL file with two mixed layers: each keeps its points on top, and the file's second layer
+    // goes above its first, as any layer added after another does.
+    let mut s = Session::new(Project::default());
+    let converted = ["a", "b"]
+        .into_iter()
+        .flat_map(|layer| Family::ALL.map(|f| (layer, f)))
+        .map(|(layer, f)| gdal::Converted {
+            path: write(layer, f),
+            name: format!("{layer} ({})", f.label()),
+            layer: layer.to_string(),
+            family: Some(f),
+            unprojected: false,
+        })
+        .collect();
+    let original = dir.join("file.gpx").display().to_string();
+    add_converted(&mut s, &json!({}), &original, &original, gdal_parts(converted, &original, None)).unwrap();
+    assert_eq!(names(&s), ["b (points)", "b (lines)", "b (polygons)", "a (points)", "a (lines)", "a (polygons)"]);
+
+    // A file the built-in readers split by type (a KML here, as GPX, OSM or DXF): the same order,
+    // and the first layer added (the polygons, away from the rest) still frames an empty map on
+    // its own extent, not on all the data's.
+    let kml = r#"<kml xmlns="http://www.opengis.net/kml/2.2"><Document>
+<Placemark><name>p</name><Point><coordinates>10.5,50.5</coordinates></Point></Placemark>
+<Placemark><name>l</name><LineString><coordinates>10,50 11,51</coordinates></LineString></Placemark>
+<Placemark><name>a</name><Polygon><outerBoundaryIs><LinearRing><coordinates>12,52 13,52 13,53 12,52</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+</Document></kml>"#;
+    let path = dir.join("trip.kml");
+    std::fs::write(&path, kml).unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    assert_eq!(names(&s), ["trip points", "trip lines", "trip polygons"]);
+    let c = s.map().center_lonlat();
+    assert!((c.x - 12.5).abs() < 0.1 && (c.y - 52.5).abs() < 0.2, "{c:?}");
+
+    // A KMZ's ground overlay goes under its layers, and the empty map is framed on the layers, not
+    // on the picture.
+    let mut red = tiny_skia::Pixmap::new(8, 8).unwrap();
+    red.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 255));
+    let doc = r#"<kml xmlns="http://www.opengis.net/kml/2.2"><Document>
+<GroundOverlay><name>Over</name><Icon><href>files/red.png</href></Icon><LatLonBox><north>41</north><south>40</south><east>11</east><west>10</west></LatLonBox></GroundOverlay>
+<Placemark><name>l</name><LineString><coordinates>30,30 31,31</coordinates></LineString></Placemark>
+</Document></kml>"#;
+    let kmz = rustgis_data::zip::write(&[("doc.kml".into(), doc.as_bytes().to_vec()), ("files/red.png".into(), red.encode_png().unwrap())])
+        .unwrap();
+    let path = dir.join("site.kmz");
+    std::fs::write(&path, kmz).unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    let all = names(&s);
+    assert_eq!(all.last().map(String::as_str), Some("Over"), "{all:?}");
+    assert_eq!(all.len(), 2, "{all:?}");
+    let c = s.map().center_lonlat();
+    assert!((c.x - 30.5).abs() < 0.1 && (c.y - 30.5).abs() < 0.2, "{c:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -15845,6 +16226,56 @@ fn a_trend_over_a_stac_collection() {
         assert!(e.contains(said), "{bad}: {e}");
     }
     assert_eq!(s.map().layers.len(), layers);
+}
+
+/// A plugin's command in the app (`leave_downloads`) runs on the frame: a dated GeoTIFF's first
+/// file isn't waited for, and the answer says the map wasn't moved to it.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_plugins_dated_cog_is_added_without_waiting() {
+    // A server that takes the connection and never answers: a probe would wait its minute.
+    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", server.local_addr().unwrap());
+    let mut s = Session::new(Project::default());
+    let start = std::time::Instant::now();
+    let r =
+        s.run_leaving_downloads("layer.addUrl", &json!({"url": format!("{base}/{{date:YYYY}}.tif"), "start": 2020, "end": 2021})).unwrap();
+    assert!(start.elapsed() < std::time::Duration::from_secs(10), "waited {:?}", start.elapsed());
+    assert_eq!(r["inPlace"], true, "{r}");
+    assert!(r["warning"].as_str().is_some_and(|w| w.contains("wasn't moved")), "{r}");
+    drop(server);
+}
+
+/// A GeoTIFF whose header was just read is framed even if the cache forgot it since (a login
+/// ended), and one that can't be read again says why the map wasn't moved to it.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_probed_cog_is_framed_after_the_cache_forgets_it() {
+    use crate::render::rustgis_tiles::{cache, cog};
+    let (base, _) = serve_ranges(rustgis_data::raster::cog::example(512, 128));
+    let url = format!("{base}/scene.tif");
+    assert_eq!(cog::probe_blocking(&url), Ok(true));
+    cache::forget(&url);
+    let mut s = Session::new(Project::default());
+    let r = crate::cmd::layer::add_cog(&mut s, &json!({}), &url, true).unwrap();
+    assert!(r["bounds"].is_array(), "{r}");
+    assert!(r.get("warning").is_none(), "{r}");
+    // Nothing answers at this address any more.
+    let gone = {
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}/gone.tif", server.local_addr().unwrap())
+    };
+    let r = crate::cmd::layer::add_cog(&mut s, &json!({}), &gone, true).unwrap();
+    let warning = r["warning"].as_str().unwrap_or_default();
+    assert!(warning.contains("couldn't be read (") && warning.contains("wasn't moved"), "{r}");
+    // Not waited for, its failure (recorded, not yet tried again) is said too. Another test's
+    // login ending forgets the record, so it is made again for each try.
+    let said = (0..3).any(|_| {
+        let _ = crate::cmd::layer::add_cog(&mut s, &json!({}), &gone, true);
+        let r = crate::cmd::layer::add_cog(&mut s, &json!({}), &gone, false).unwrap();
+        r["warning"].as_str().is_some_and(|w| w.contains("couldn't be read (") && w.contains("wasn't moved"))
+    });
+    assert!(said, "a recorded failure went unsaid");
 }
 
 /// A cloud-optimised GeoTIFF by its address is read in place: its header, then only the tiles a
@@ -28953,4 +29384,204 @@ fn reads_made_ahead_are_taken_by_the_command() {
     control.cancel();
     assert!(ahead.run(&control).err().unwrap().contains("cancelled"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_models_tools_run_ahead_are_taken_by_its_run() {
+    use rustgis_analysis::control::Control;
+    let session = || {
+        let mut s = Session::new(Project::default());
+        let mut points = rustgis_data::Dataset::new("Points", rustgis_data::GeometryType::Point, Vec::new());
+        for (x, y) in [(8.0, 47.0), (9.0, 46.0), (10.0, 45.0)] {
+            points.push_next(Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(x, y))), Vec::new());
+        }
+        s.map_mut().add_layer(rustgis_map::Layer::new(0, points));
+        s
+    };
+    let graph = json!({"nodes": [
+        {"id": "points", "kind": "input", "layer": "Points"},
+        {"id": "near", "kind": "tool", "tool": "buffer", "params": {"distance": 1000}},
+        {"id": "far", "kind": "tool", "tool": "buffer", "params": {"distance": 2000}},
+        {"id": "output", "kind": "output", "name": "Rings"}
+    ], "edges": [
+        {"from": "points", "fromPort": "out", "to": "near", "toPort": "input"},
+        {"from": "near", "fromPort": "out", "to": "far", "toPort": "input"},
+        {"from": "far", "fromPort": "out", "to": "output", "toPort": "in"}
+    ]});
+    let p = json!({"graph": graph.clone()});
+    let rings = |s: &Session| {
+        s.map().layer_by_name("Rings").map(|l| format!("{:?}", l.dataset.features.iter().map(|f| &f.geometry).collect::<Vec<_>>()))
+    };
+    let mut here = session();
+    here.run("model.run", &p).unwrap();
+
+    // Both tools are taken: what the run adds, keeps in history and puts in Undo is the same.
+    let mut s = session();
+    let depth = s.undo_depth();
+    crate::cmd::reads::read_ahead(&s, "model.run", &p).unwrap().run(&Control::stoppable()).unwrap().placed(&mut s);
+    let r = s.run("model.run", &p).unwrap();
+    assert_eq!(s.tools_taken, 2, "{r}");
+    assert!(s.read_ahead.is_none() && s.tools_ahead.is_none());
+    assert_eq!(rings(&s), rings(&here));
+    assert_eq!(s.map().layers.len(), here.map().layers.len());
+    assert_eq!(s.project.gp_history.len(), 2);
+    assert!(s.model_run.as_ref().unwrap().ok);
+    assert_eq!(s.undo_depth(), depth + 1);
+    assert!(s.undo());
+    assert_eq!(s.map().layers.len(), 1);
+
+    // A point added after the run ahead: the tools run here, on it too.
+    let add = |s: &mut Session| {
+        let p = Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(11.0, 44.0)));
+        s.map_mut().layers[0].dataset.push_next(p, Vec::new());
+    };
+    let mut s = session();
+    crate::cmd::reads::read_ahead(&s, "model.run", &json!({"graph": graph})).unwrap().run(&Control::stoppable()).unwrap().placed(&mut s);
+    add(&mut s);
+    let mut here = session();
+    add(&mut here);
+    here.run("model.run", &p).unwrap();
+    s.run("model.run", &p).unwrap();
+    assert_eq!(s.tools_taken, 0);
+    assert!(s.tools_ahead.is_none());
+    assert_eq!(rings(&s), rings(&here));
+
+    // A run ahead that was cancelled is an error, and runs nothing.
+    let control = Control::stoppable();
+    control.cancel();
+    assert!(crate::cmd::reads::read_ahead(&session(), "model.run", &p).unwrap().run(&control).is_err());
+
+    // A model saved as steps takes them too, and so does one with a tool that fails.
+    let mut s = session();
+    s.run(
+        "model.new",
+        &json!({"name": "Steps", "steps": [
+            {"tool": "buffer", "params": {"input": "Points", "distance": 1000}},
+            {"tool": "buffer", "params": {"input": "%1", "distance": 2000}}
+        ]}),
+    )
+    .unwrap();
+    let p = json!({"name": "Steps"});
+    crate::cmd::reads::read_ahead(&s, "model.run", &p).unwrap().run(&Control::stoppable()).unwrap().placed(&mut s);
+    s.run("model.run", &p).unwrap();
+    assert_eq!(s.tools_taken, 2);
+    s.run("model.new", &json!({"name": "Fails", "steps": [{"tool": "buffer", "params": {"input": "Points", "distance": "x"}}]})).unwrap();
+    let p = json!({"name": "Fails"});
+    crate::cmd::reads::read_ahead(&s, "model.run", &p).unwrap().run(&Control::stoppable()).unwrap().placed(&mut s);
+    let e = s.run("model.run", &p).unwrap_err();
+    assert!(e.contains("step 1"), "{e}");
+    assert_eq!(s.tools_taken, 3, "the failure is taken too");
+
+    // A tool that writes a file stops the copy: it writes once, as the run here runs it and
+    // those after it.
+    let dir = std::env::temp_dir().join(format!("rustgis-model-ahead-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("points.pmtiles");
+    let mut s = session();
+    s.run(
+        "model.new",
+        &json!({"name": "Writes", "steps": [
+            {"tool": "buffer", "params": {"input": "Points", "distance": 1000}},
+            {"tool": "vectorToPmtiles", "params": {"input": "Points", "minZoom": 0, "maxZoom": 0, "output": file.display().to_string()}},
+            {"tool": "buffer", "params": {"input": "Points", "distance": 2000}}
+        ]}),
+    )
+    .unwrap();
+    let p = json!({"name": "Writes"});
+    crate::cmd::reads::read_ahead(&s, "model.run", &p).unwrap().run(&Control::stoppable()).unwrap().placed(&mut s);
+    assert!(!file.exists(), "the copy wrote nothing");
+    s.run("model.run", &p).unwrap();
+    assert_eq!(s.tools_taken, 1);
+    assert!(file.exists());
+    assert_eq!(s.project.gp_history.len(), 3);
+
+    // A selection made meanwhile is an input changed: the tools run here, on it.
+    let mut s = session();
+    crate::cmd::reads::read_ahead(&s, "model.run", &json!({"graph": graph})).unwrap().run(&Control::stoppable()).unwrap().placed(&mut s);
+    s.map_mut().layers[0].selection = vec![0];
+    s.run("model.run", &json!({"graph": graph})).unwrap();
+    assert_eq!(s.tools_taken, 0);
+    assert_eq!(s.map().layer_by_name("Rings").unwrap().dataset.features.len(), 1);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_scripts_tools_run_ahead_are_taken_by_its_run() {
+    use rustgis_analysis::control::Control;
+    let session = || {
+        let mut s = Session::new(Project::default());
+        let mut points = rustgis_data::Dataset::new("Points", rustgis_data::GeometryType::Point, Vec::new());
+        for (x, y) in [(8.0, 47.0), (9.0, 46.0), (10.0, 45.0)] {
+            points.push_next(Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(x, y))), Vec::new());
+        }
+        s.map_mut().add_layer(rustgis_map::Layer::new(0, points));
+        s.run("model.new", &json!({"name": "Steps", "steps": [{"tool": "buffer", "params": {"input": "Points", "distance": 1000}}]}))
+            .unwrap();
+        s
+    };
+    let tool = |d: u32| format!(r#"gp.run {{"tool": "buffer", "params": {{"input": "Points", "distance": {d}}}}}"#);
+    let layers = |s: &Session| {
+        s.map()
+            .layers
+            .iter()
+            .map(|l| (l.name.clone(), format!("{:?}", l.dataset.features.iter().map(|f| &f.geometry).collect::<Vec<_>>())))
+            .collect::<Vec<_>>()
+    };
+
+    // Its tools, a selection between them and a model it runs are taken: what the run adds and
+    // keeps in history is the same, as one step to undo.
+    let p = json!({"script": format!("{}\nselect.all {{\"layer\": \"Points\"}}\n{}\nmodel.run {{\"name\": \"Steps\"}}", tool(1000), tool(2000))});
+    let mut here = session();
+    here.run("script.run", &p).unwrap();
+    let mut s = session();
+    let depth = s.undo_depth();
+    crate::cmd::reads::read_ahead(&s, "script.run", &p).unwrap().run(&Control::stoppable()).unwrap().placed(&mut s);
+    let r = s.run("script.run", &p).unwrap();
+    assert_eq!(s.tools_taken, 3, "{r}");
+    assert!(s.read_ahead.is_none() && s.tools_ahead.is_none());
+    assert_eq!(layers(&s), layers(&here));
+    assert_eq!(s.project.gp_history.len(), here.project.gp_history.len());
+    assert_eq!(s.undo_depth(), depth + 1);
+
+    // A line that may reach outside the session stops the copy: the run here runs it and what
+    // follows, so the project is saved once.
+    let dir = std::env::temp_dir().join(format!("rustgis-script-ahead-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let saved = dir.join("saved.rgis");
+    let p = json!({"script": format!("{}\nproject.save {}\n{}", tool(1000), json!({"path": saved.display().to_string()}), tool(2000))});
+    let mut s = session();
+    crate::cmd::reads::read_ahead(&s, "script.run", &p).unwrap().run(&Control::stoppable()).unwrap().placed(&mut s);
+    assert!(!saved.exists(), "the copy saved nothing");
+    s.run("script.run", &p).unwrap();
+    assert_eq!(s.tools_taken, 1);
+    assert!(saved.exists());
+    assert_eq!(s.project.gp_history.len(), 2);
+    std::fs::remove_dir_all(&dir).ok();
+
+    // An edit stops the copy (the rows it makes there are never the run here's): the tool
+    // before it is taken, the one after it runs here.
+    let p = json!({"script": format!("{}\nedit.addField {{\"layer\": \"Points\", \"name\": \"n\", \"type\": \"long\"}}\n{}", tool(1000), tool(2000))});
+    let mut s = session();
+    crate::cmd::reads::read_ahead(&s, "script.run", &p).unwrap().run(&Control::stoppable()).unwrap().placed(&mut s);
+    s.run("script.run", &p).unwrap();
+    assert_eq!(s.tools_taken, 1);
+    assert!(s.map().layer_by_name("Points").unwrap().dataset.fields.iter().any(|f| f.name == "n"));
+
+    // A selection changed meanwhile: the tools after it run here, on it.
+    let p = json!({"script": tool(1000)});
+    let mut s = session();
+    crate::cmd::reads::read_ahead(&s, "script.run", &p).unwrap().run(&Control::stoppable()).unwrap().placed(&mut s);
+    s.map_mut().layers[0].selection = vec![0];
+    s.run("script.run", &p).unwrap();
+    assert_eq!(s.tools_taken, 0);
+    // A script whose first line would stop the copy runs here, with no copy made.
+    let p = json!({"script": format!("edit.addField {{\"layer\": \"Points\", \"name\": \"m\", \"type\": \"long\"}}\n{}", tool(1000))});
+    assert!(crate::cmd::reads::read_ahead(&s, "script.run", &p).is_none());
+    assert!(crate::cmd::reads::read_ahead(&s, "script.run", &json!({"script": "# nothing"})).is_none());
+    // Each command a line may run on the copy is one the session has.
+    for id in crate::cmd::workflows::ON_A_COPY {
+        assert!(s.registry.get(id).is_some(), "{id}");
+    }
 }
