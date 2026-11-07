@@ -144,7 +144,8 @@ pub(crate) fn forget() {
 
 /// Forgets what was read of one file (its metadata and its connections) with every file's resolved
 /// styles, made again when next drawn, and won't keep a read of it under way: the file may be
-/// replaced next. Reads of other files are kept, as they may be framing a map.
+/// replaced next. Reads of other files are kept, as they may be framing a map, until the record of
+/// forgotten files fills up ([`MAX_FORGOTTEN`]).
 /// [`cache::forget`](crate::cache::forget) asks this of any address, so others are left alone.
 pub(crate) fn forget_archive(archive: &str) {
     if check(archive).is_err() {
@@ -186,8 +187,9 @@ pub fn info(archive: &str) -> Result<Arc<Info>, String> {
     r
 }
 
-/// Keeps a completion only if no clear of its file happened since its read started; check and
-/// insert share the same lock as the clear, so an old completion cannot repopulate the new cache.
+/// Keeps a completion only if neither its file nor every file was forgotten since its read started
+/// (a full clear, or the record of forgotten files emptied); check and insert share the same lock
+/// as the clear, so an old completion cannot repopulate the new cache.
 fn remember_info(archive: &str, result: &Result<Arc<Info>, String>, epoch: u64) {
     if crate::cache::check_still(&crate::cache::current_still()).is_err() {
         return;

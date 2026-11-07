@@ -497,7 +497,12 @@ fn resource_of(key: &str) -> &str {
     let key = split_download_limit(key).0;
     let key = split_tail(key).0;
     let key = split_range(key).0;
-    if key.starts_with(crate::pmtiles::SCHEME) || key.starts_with(crate::cog::SCHEME) || crate::mbtiles::is_tile(key) {
+    // An MBTiles file's path whole, as its tiles and the record of forgotten files name it: a
+    // `#` in a file's name isn't a COG's look.
+    if crate::mbtiles::is_tile(key) {
+        return key.split_once('@').map_or(key, |(_, archive)| archive);
+    }
+    if key.starts_with(crate::pmtiles::SCHEME) || key.starts_with(crate::cog::SCHEME) {
         return key.split_once('@').map_or(key, |(_, archive)| crate::cog::split(archive).0);
     }
     key
@@ -508,7 +513,9 @@ fn resource_of(key: &str) -> &str {
 /// whose address stays the same, read again with other keys). Reads under way are kept, except an
 /// MBTiles file's tiles: it is forgotten when it may be replaced, and its old tiles mustn't stay.
 pub fn forget(url: &str) {
-    let url = crate::cog::split(split_download_limit(url).0).0;
+    let url = split_download_limit(url).0;
+    // An MBTiles file's path is taken whole (see [`resource_of`]).
+    let url = if crate::mbtiles::check(url).is_ok() { url } else { crate::cog::split(url).0 };
     // First: a tile answered from here on is dropped, and one answered before goes with the rest.
     crate::mbtiles::forget_archive(url);
     let mut c = lock();
@@ -2196,6 +2203,22 @@ mod tests {
         land("test://not-mbtiles/forgotten.json", failed("kept"), old);
         assert!(lock().slots.remove("test://not-mbtiles/forgotten.json").is_some());
         forget(&archive(0));
+    }
+
+    /// An MBTiles file whose name reads like a COG's look (`#cube=1`) is forgotten under its whole
+    /// path, the one its tiles name: its tiles go, and a read of it under way isn't kept.
+    #[test]
+    fn an_mbtiles_file_named_like_a_look_is_forgotten_whole() {
+        let _turn = turn();
+        let archive = "/maps#cube=1.mbtiles";
+        let key = crate::mbtiles::template(archive).replace("{z}", "0").replace("{x}", "0").replace("{y}", "0");
+        let old = crate::mbtiles::epoch();
+        lock().slots.insert(key.clone(), Slot { entry: Entry::Failed("old file".into(), Instant::now()), used: 0, asked: Instant::now() });
+        forget(archive);
+        assert!(!lock().slots.contains_key(&key));
+        assert!(crate::mbtiles::forgotten_since(&key, old), "the file is recorded under the path its tiles name");
+        land(&key, Some(Entry::Failed("old file".into(), Instant::now())), old);
+        assert!(!lock().slots.contains_key(&key));
     }
 
     /// A tile still being read when its MBTiles file is forgotten isn't kept when it lands, even
