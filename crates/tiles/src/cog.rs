@@ -107,8 +107,7 @@ impl Look {
                     }
                     look.range = Some((lo, hi));
                 }
-                // Only these words: a saved project keeps a look as written, so it holds no free text.
-                "dequantize" if v == "aef" || v == "none" => look.aef = v == "aef",
+                "dequantize" => look.aef = v == "aef",
                 _ => return None,
             }
         }
@@ -1399,11 +1398,6 @@ mod tests {
         assert_eq!(split(&shown), (u, look));
         // Another look replaces it; the file's own adds nothing.
         assert_eq!(with_look(&shown, &Look::default()), u);
-        // Only what a look can say makes one: a saved project keeps looks and no other fragment.
-        assert_eq!(split("https://x.org/a.tiff#dequantize=none"), (u, Look::default()));
-        for other in ["https://x.org/a.tiff#dequantize=s3cret", "https://x.org/a.tiff#range=0,1&dequantize=aef?token=s3cret"] {
-            assert_eq!(split(other), (other, Look::default()));
-        }
         // A template keeps the look, so each look's map tiles are their own.
         let (_, _, _, archive) = parse_url(&template(&shown).replace("{z}/{x}/{y}", "1/0/0")).unwrap();
         assert_eq!(split(&archive).0, u);
