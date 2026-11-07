@@ -479,6 +479,16 @@ fn note_copied_addresses(service: &mut Service, per_layer: usize, limit: usize) 
         ));
     }
 }
+/// The bytes of addresses a layer holds: what its offer is fetched from, and its tile list.
+fn address_bytes(layer: &ServiceLayer) -> usize {
+    let offer = match &layer.offer {
+        Offer::Tiles { template } | Offer::VectorTiles { template, .. } => template.len(),
+        Offer::Features { url } | Offer::Style { url } | Offer::Service { url } => url.len(),
+        Offer::Coverage(c) => c.endpoint.len() + c.id.len(),
+    };
+    offer + layer.tilesets.as_ref().map_or(0, String::len)
+}
+
 /// How a note says that a document went past what is read of it.
 const PAST_READ_LIMIT: &str = "RustGIS reads at most";
 /// Features asked of a WFS in one request.
@@ -2586,10 +2596,21 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
     // Collections whose items are 3D content, not features, by what it is and whether their tiles
     // are listed.
     let mut three_d: Vec<((&str, bool), Vec<&str>)> = Vec::new();
+    // A collection's layers copy the document's own address when their items or tiles links are
+    // missing or relative, and nothing bounds that address: past the listing, reading stops once
+    // the layers' addresses reach `MAX_COPIED_ADDRESS_BYTES`.
+    let (mut copied, mut counted) = (0usize, 0);
+    let mut read = collections.len().min(MAX_READ_LAYERS);
     for (i, c) in collections.iter().take(MAX_READ_LAYERS).enumerate() {
+        copied = service.layers[counted..].iter().map(address_bytes).fold(copied, usize::saturating_add);
+        counted = service.layers.len();
         // A collection may make several layers: the list stops at a collection, with all its own.
         if i == MAX_LISTED_LAYERS {
             service.listed = Some(service.layers.len());
+        }
+        if i >= MAX_LISTED_LAYERS && copied > MAX_COPIED_ADDRESS_BYTES {
+            read = i;
+            break;
         }
         let Some(id) = c.get("id").and_then(|i| i.as_str()) else { continue };
         let links = c.get("links").and_then(|l| l.as_array()).cloned().unwrap_or_default();
@@ -2711,8 +2732,9 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
             (true, false) => format!("{noun} {named} also {verb} {what}, {LEFT_OUT_3D}; their tiles are listed"),
         });
     }
-    if collections.len() > MAX_READ_LAYERS {
-        note_past_read_limit(&mut service, collections.len() - MAX_READ_LAYERS, "collections", MAX_READ_LAYERS);
+    if collections.len() > read {
+        note_past_read_limit(&mut service, collections.len() - read, "collections", read);
+        note_copied_addresses(&mut service, copied.div_ceil(read.max(1)), read);
     }
     service.incomplete = unreadable > 0 || collections.len() > MAX_LISTED_LAYERS;
     if service.layers.iter().any(|l| matches!(l.offer, Offer::Features { .. })) {
@@ -6930,6 +6952,17 @@ mod tests {
         let s = parse("https://x.org/wms", long_wms.as_bytes()).unwrap();
         assert!((MAX_LISTED_LAYERS..MAX_READ_LAYERS).contains(&s.layers.len()), "{}", s.layers.len());
         assert!(s.notes.iter().any(|n| n.starts_with("each of its layers copies 40")), "{:?}", s.notes);
+        // An OGC API's collections without an items link copy the document's own address, which
+        // nothing bounds: a long one lowers how many are read too, and a short one doesn't.
+        let bare = serde_json::json!({"collections": list(MAX_READ_LAYERS, |i| serde_json::json!({"id": format!("c{i}")}))}).to_string();
+        let s = parse(&format!("https://x.org/{}/collections", "a".repeat(4000)), bare.as_bytes()).unwrap();
+        let read = s.layers.len();
+        assert!((MAX_LISTED_LAYERS..MAX_READ_LAYERS).contains(&read), "{read}");
+        let note = format!("{PAST_READ_LIMIT} {read} collections from one document: {} left out", MAX_READ_LAYERS - read);
+        assert_eq!(s.past_read_limit.as_ref(), Some(&note));
+        assert!(s.notes.iter().any(|n| n.starts_with("each of its layers copies 40")), "{:?}", s.notes);
+        let s = parse("https://x.org/collections", bare.as_bytes()).unwrap();
+        assert_eq!((s.layers.len(), s.past_read_limit), (MAX_READ_LAYERS, None));
         // A WMS is read in document order: the layers past the limit are its last, and a parent
         // comes before its sublayers.
         let s = parse("https://x.org/wms", wms(MAX_READ_LAYERS + 1).as_bytes()).unwrap();

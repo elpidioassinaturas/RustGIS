@@ -545,10 +545,17 @@ pub(crate) fn layers(s: &mut Session, p: &Value) -> CmdResult {
         cut = Some(note);
     }
     let mut out = service_json(&found.service);
-    // How many there are and the note that says the list stops, for a window that says it its
-    // own way (Add From Service: its filter searches only those listed).
-    if let Some(note) = cut {
+    // How many there are, for a window that says it its own way: `listedNote` says the list
+    // stops (Add From Service: its filter searches only those listed), and `atLeast` that the
+    // document has more than were read.
+    let past_limit = found.service.past_read_limit.is_some();
+    if cut.is_some() || past_limit {
         out["total"] = json!(total);
+    }
+    if past_limit {
+        out["atLeast"] = json!(true);
+    }
+    if let Some(note) = cut {
         out["listedNote"] = json!(note);
     }
     if let Some(layers) = out.get_mut("layers").and_then(Value::as_array_mut) {

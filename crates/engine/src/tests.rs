@@ -14104,6 +14104,7 @@ fn a_layer_past_the_listing_is_added_by_name() {
     let cut = s.run("service.layers", &json!({"url": url, "text": caps(2001)})).unwrap();
     assert_eq!(cut["total"], 2001);
     assert_eq!(cut["listedNote"], cut["notes"][0]);
+    assert!(cut.get("atLeast").is_none());
     assert_eq!(cut["count"], 2000);
     assert_eq!(cut["layers"].as_array().unwrap().len(), 2000);
     assert_eq!(cut["layers"][1999]["name"], "t:2000");
@@ -14136,6 +14137,8 @@ fn a_layer_past_the_read_limit_is_refused_saying_so() {
     let url = "https://wfs.example.org/wfs";
     let listed = s.run("service.layers", &json!({"url": url, "text": wfs})).unwrap();
     assert_eq!(listed["count"], 2000);
+    // The dialog's heading and Connect's summary count those read, saying there are more.
+    assert_eq!((&listed["total"], &listed["atLeast"]), (&json!(100_000), &json!(true)));
     assert_eq!(
         listed["notes"],
         json!([

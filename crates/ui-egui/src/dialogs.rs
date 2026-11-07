@@ -1012,13 +1012,13 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             let grouped = kind.starts_with("OGC API");
             // A listing that stops short counts them all, and says so here in the dialog's own
             // words instead of its note: the filter searches only those listed.
-            let total = v.get("total").and_then(Value::as_u64);
             let listed_note = v.get("listedNote").and_then(Value::as_str);
+            let count = crate::connectionui::layer_count(v);
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(crate::i18n::fmt(
                         "{kind} {title}: {count} layers",
-                        &[("kind", kind), ("title", title), ("count", &total.unwrap_or(layers.len() as u64).to_string())],
+                        &[("kind", kind), ("title", title), ("count", &count)],
                     ))
                     .strong(),
                 );
@@ -1031,7 +1031,7 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                     ui.label(egui::RichText::new(n).small().weak());
                 }
             }
-            if total.is_some() {
+            if listed_note.is_some() {
                 ui.label(
                     egui::RichText::new(crate::i18n::fmt(
                         "The filter searches the first {n} of them; the service.add command adds any other by its name.",
