@@ -14100,7 +14100,10 @@ fn a_layer_past_the_listing_is_added_by_name() {
     let whole = s.run("service.layers", &json!({"url": url, "text": caps(2000)})).unwrap();
     assert_eq!(whole["count"], 2000);
     assert_eq!(whole["notes"], json!([]));
+    assert!(whole.get("total").is_none() && whole.get("listedNote").is_none());
     let cut = s.run("service.layers", &json!({"url": url, "text": caps(2001)})).unwrap();
+    assert_eq!(cut["total"], 2001);
+    assert_eq!(cut["listedNote"], cut["notes"][0]);
     assert_eq!(cut["count"], 2000);
     assert_eq!(cut["layers"].as_array().unwrap().len(), 2000);
     assert_eq!(cut["layers"][1999]["name"], "t:2000");

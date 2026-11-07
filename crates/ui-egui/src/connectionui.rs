@@ -605,7 +605,8 @@ fn summary(kind: &str, r: &Value) -> String {
         _ => {
             let kind = r["kind"].as_str().unwrap_or("");
             let title = r["title"].as_str().unwrap_or("");
-            let count = r["layers"].as_array().map_or(0, Vec::len);
+            // A listing that stops short counts them all in `total`.
+            let count = r["total"].as_u64().unwrap_or(r["layers"].as_array().map_or(0, Vec::len) as u64);
             if count == 0 && r["next"].is_string() {
                 i18n::fmt("Connected to {kind} {title}", &[("kind", kind), ("title", title)])
             } else {

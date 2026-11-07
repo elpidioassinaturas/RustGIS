@@ -536,11 +536,21 @@ pub(crate) fn layers(s: &mut Session, p: &Value) -> CmdResult {
     let mut found = capabilities(s, p)?;
     notify_withheld(s, found.service.withheld_addresses);
     let of = layer_count(&found.service);
-    if let Some(listed) = found.service.listed.filter(|&listed| listed < found.service.layers.len()) {
+    let total = found.service.layers.len();
+    let mut cut = None;
+    if let Some(listed) = found.service.listed.filter(|&listed| listed < total) {
         found.service.layers.truncate(listed);
-        found.service.notes.push(format!("only the first {listed} of {of} are listed; service.add takes any of them by name"));
+        let note = format!("only the first {listed} of {of} are listed; service.add takes any of them by name");
+        found.service.notes.push(note.clone());
+        cut = Some(note);
     }
     let mut out = service_json(&found.service);
+    // How many there are and the note that says the list stops, for a window that says it its
+    // own way (Add From Service: its filter searches only those listed).
+    if let Some(note) = cut {
+        out["total"] = json!(total);
+        out["listedNote"] = json!(note);
+    }
     if let Some(layers) = out.get_mut("layers").and_then(Value::as_array_mut) {
         for (layer, source) in layers.iter_mut().zip(found.sources) {
             layer_source(layer, source);
