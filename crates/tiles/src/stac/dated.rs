@@ -55,6 +55,11 @@ fn name_of(url: &str) -> &str {
     }
 }
 
+/// Whether an address is a folder's `catalog.json`.
+fn is_folder(url: &str) -> bool {
+    crate::logins::inner(url).split(['?', '#']).next().unwrap_or("").ends_with("/catalog.json")
+}
+
 /// The degrees a tile's folder or file spans, from its name (`W090.00-E000.00`, `S90.00-N00.00`).
 fn degrees(name: &str) -> Option<(f64, f64)> {
     let one = |t: &str| -> Option<f64> {
@@ -209,6 +214,10 @@ pub fn search(root: &str, filter: &Filter, period: (&str, &str), max_items: usiz
             && end.get(..n).is_some_and(|e| name <= e)
     };
     let (folders, mut unread) = children(&doc, root, |u| within(name_of(u)));
+    // A date is a folder of its own: a date written as a file (`2024-01.json`) would give every
+    // date the same items, so it is counted, not read.
+    let (folders, files): (Vec<String>, Vec<String>) = folders.into_iter().partition(|u| is_folder(u));
+    unread += files.len();
     let mut dates: Vec<(String, String)> = Vec::new();
     if layout.day_folders {
         for (month, answer) in folders.iter().zip(read_all(&folders, fetch)) {
@@ -221,7 +230,8 @@ pub fn search(root: &str, filter: &Filter, period: (&str, &str), max_items: usiz
                 date.as_str() >= start && date.as_str() <= end
             };
             let (days, refused) = children(&days, month, in_period);
-            unread += refused;
+            let (days, files): (Vec<String>, Vec<String>) = days.into_iter().partition(|u| is_folder(u));
+            unread += refused + files.len();
             for day in days {
                 dates.push((format!("{}-{}", name_of(month), name_of(&day)), day));
             }
@@ -606,6 +616,19 @@ mod tests {
         let limit = super::super::catalog::MAX_LINKS;
         assert_eq!((at(limit).items.len(), at(limit).unread), (1, 0), "all the links followed: nothing missing");
         assert_eq!((at(limit + 1).items.len(), at(limit + 1).unread), (1, 1), "one past: the column isn't read whole");
+    }
+
+    #[test]
+    fn a_date_written_as_a_file_is_counted_not_read() {
+        let mut docs = tree("YYYY-MM", &["2024-01"]);
+        let mut root: Value = serde_json::from_slice(&docs[ROOT]).unwrap();
+        root["links"].as_array_mut().unwrap().push(json!({"rel": "child", "href": "./2024-02.json"}));
+        docs.insert(ROOT.to_string(), root.to_string().into_bytes());
+        docs.insert("https://x.org/c/2024-02.json".to_string(), catalog_of("child", &["./1/catalog.json".to_string()]));
+        let (r, reads) = run(&docs, [-50.0, -20.0, -40.0, -10.0], ("2024-01-01", "2024-02-29"), 100);
+        assert!(!reads.iter().any(|u| u.ends_with("2024-02.json")), "{reads:?}");
+        let found = r.unwrap();
+        assert_eq!((found.items.len(), found.unread), (1, 1));
     }
 
     #[test]

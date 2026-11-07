@@ -16179,6 +16179,7 @@ fn a_static_collection_by_date_as_a_data_cube() {
             routes.push((leak(format!("/c/{m}/1/E000.00-E090.00/N00.00-N90.00.json")), item(m)));
         }
     }
+    let collection_doc = routes[0].1.clone();
     let url = format!("{}/c/collection.json", serve_routes(routes, 200));
     let cube = |start: &str, end: &str| json!({"url": url, "collection": "jaxa.cube", "asset": "V", "bbox": [10, 45, 11, 46], "start": start, "end": end, "range": [0, 50], "test": "original"});
     let mut s = Session::new(Project::default());
@@ -16189,6 +16190,7 @@ fn a_static_collection_by_date_as_a_data_cube() {
     assert!(!said.iter().any(|t| t.contains("couldn't be read")), "clean input tells no missing document: {said:?}");
     // Its codes for a failed retrieval draw as values on the map, and that is said.
     assert!(said.iter().any(|t| t.contains("2 file(s) mark failed retrievals with codes")), "{said:?}");
+    assert!(!said.iter().any(|t| t.contains("left out, as their codes")), "codes read whole leave nothing out: {said:?}");
     let tile = &s.map().tiles[0];
     assert_eq!(tile.time_urls.len(), 2);
     assert!(tile.time_urls[0].1.ends_with("/2024-01.tiff#range=0,100"), "the range through je:rasters' slope: {}", tile.time_urls[0].1);
@@ -16224,6 +16226,18 @@ fn a_static_collection_by_date_as_a_data_cube() {
     other["url"] = json!(format!("{normal}/n/collection.json"));
     let e = Session::new(Project::default()).run("stac.addCube", &other).unwrap_err();
     assert!(e.contains("no year"), "{e}");
+    // Codes for a failed retrieval that can't be read whole: the item is left out, and said.
+    let bad = item("2024-01").replace(r#""error": [5.0]"#, r#""error": [5.0, "x"]"#);
+    let mut odd = vec![("/c/collection.json", collection_doc)];
+    odd.push(("/c/2024-01/catalog.json", catalog("child", "./1/catalog.json")));
+    odd.push(("/c/2024-01/1/catalog.json", catalog("child", "./E000.00-E090.00/catalog.json")));
+    odd.push(("/c/2024-01/1/E000.00-E090.00/catalog.json", catalog("item", "./N00.00-N90.00.json")));
+    odd.push(("/c/2024-01/1/E000.00-E090.00/N00.00-N90.00.json", bad));
+    let odd_url = format!("{}/c/collection.json", serve_routes(odd, 20));
+    let mut p = cube("2024-01-01", "2024-01-31");
+    p["url"] = json!(odd_url);
+    let e = Session::new(Project::default()).run("stac.addCube", &p).unwrap_err();
+    assert!(e.contains("1 item(s) left out, as their codes for a failed retrieval"), "{e}");
 }
 
 /// A STAC collection's band as a data cube on the time slider (#559), from a local API: a tile

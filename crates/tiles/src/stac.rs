@@ -33,7 +33,7 @@ const MAX_FOOTPRINT: usize = 20_000;
 /// The most properties kept with an item.
 const MAX_PROPERTIES: usize = 100;
 /// The most codes for a failed retrieval kept with an asset.
-const MAX_INVALID: usize = 32;
+pub const MAX_INVALID: usize = 32;
 
 /// A collection an API offers.
 #[derive(Clone, Debug, PartialEq)]
@@ -61,6 +61,9 @@ pub struct Asset {
     /// Stored values that are codes for a failed retrieval rather than values (JAXA Earth's
     /// `je:rasters` `dn.error`).
     pub invalid: Vec<f64>,
+    /// Whether its metadata names such codes but they couldn't be read whole (one isn't a number,
+    /// or there are more than are kept): its values can't be told from them.
+    pub codes_unread: bool,
 }
 
 /// An item: a scene (or tile) with its footprint, time and assets.
@@ -343,6 +346,16 @@ fn item(f: &Value, from: Option<&str>) -> Option<Item> {
         .flatten()
         .take(MAX_ASSETS)
         .filter_map(|(k, a)| {
+            // Codes for a failed retrieval are stored values that aren't values: read whole, or
+            // `None` when one isn't a number or there are more than are kept, so that none is read
+            // as a value (a data cube leaves such an asset's item out, and says so).
+            let invalid = match a.get("je:rasters").and_then(|r| r.get("dn")?.get("error")) {
+                None => Some(Vec::new()),
+                Some(codes) => codes
+                    .as_array()
+                    .filter(|c| c.len() <= MAX_INVALID)
+                    .and_then(|c| c.iter().map(|c| c.as_f64().filter(|v| v.is_finite())).collect::<Option<Vec<f64>>>()),
+            };
             Some(Asset {
                 key: k.chars().take(200).collect(),
                 href: {
@@ -367,16 +380,8 @@ fn item(f: &Value, from: Option<&str>) -> Option<Item> {
                 scale: band_number(a, "scale"),
                 offset: band_number(a, "offset"),
                 nodata: band_number(a, "nodata"),
-                // Codes for a failed retrieval are stored values that aren't values. One left
-                // unread would be read as a value, so an asset with a code that isn't a number, or
-                // more codes than are kept, is left out (a cube counts its item as skipped).
-                invalid: match a.get("je:rasters").and_then(|r| r.get("dn")?.get("error")) {
-                    None => Vec::new(),
-                    Some(codes) => {
-                        let codes = codes.as_array().filter(|c| c.len() <= MAX_INVALID)?;
-                        codes.iter().map(|c| c.as_f64().filter(|v| v.is_finite())).collect::<Option<Vec<f64>>>()?
-                    }
-                },
+                invalid: invalid.clone().unwrap_or_default(),
+                codes_unread: invalid.is_none(),
             })
         })
         .collect();
@@ -886,6 +891,7 @@ mod tests {
             offset: None,
             nodata: None,
             invalid: Vec::new(),
+            codes_unread: false,
         }];
         // A Planetary Computer asset is added after signing it with its container's token.
         let (_, href) = pc.asset_href(None).unwrap();
@@ -972,17 +978,20 @@ mod tests {
     /// A data cube's tile and a band's scale (#559): the grid codes catalogs use, and
     /// `raster:bands` before `eo:bands`.
     #[test]
-    fn retrieval_error_codes_are_read_whole_or_the_asset_is_left_out() {
+    fn retrieval_error_codes_are_read_whole_or_said_unread() {
         let with = |codes: serde_json::Value| {
             let v = serde_json::json!({"type": "Feature", "id": "t", "properties": {"datetime": "2024-01-01T00:00:00Z"},
                 "assets": {"V": {"href": "https://x.org/v.tiff", "je:rasters": {"dn": {"error": codes}}}}});
             item_from_json(&v, None).unwrap().assets
         };
-        assert_eq!(with(serde_json::json!([5, 6.5]))[0].invalid, [5.0, 6.5]);
-        // A code that isn't a number, or more than are kept, would be read as a value.
-        assert!(with(serde_json::json!([5, "x"])).is_empty());
-        assert!(with(serde_json::json!((0..=MAX_INVALID).collect::<Vec<_>>())).is_empty());
-        assert_eq!(with(serde_json::json!((0..MAX_INVALID).collect::<Vec<_>>()))[0].invalid.len(), MAX_INVALID);
+        let read = |codes: serde_json::Value| with(codes).pop().map(|a| (a.invalid, a.codes_unread)).unwrap();
+        assert_eq!(read(serde_json::json!([5, 6.5])), (vec![5.0, 6.5], false));
+        assert_eq!(read(serde_json::json!(null)), (vec![], true), "named but not a list");
+        // A code that isn't a number, or more than are kept, would be read as a value: the asset
+        // stays (a search shows it) but says its codes weren't read.
+        assert_eq!(read(serde_json::json!([5, "x"])), (vec![], true));
+        assert!(read(serde_json::json!((0..=MAX_INVALID).collect::<Vec<_>>())).1);
+        assert_eq!(read(serde_json::json!((0..MAX_INVALID).collect::<Vec<_>>())).0.len(), MAX_INVALID);
     }
 
     #[test]

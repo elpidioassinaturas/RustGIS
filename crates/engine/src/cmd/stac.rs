@@ -420,6 +420,7 @@ pub fn cube_files(s: &mut Session, p: &Value, max_items: usize) -> Result<CubeFi
     let mut nodata: std::collections::HashMap<String, Vec<f64>> = Default::default();
     let mut scales_differ = false;
     let mut coded = 0usize;
+    let mut codes_unread = 0usize;
     let mut duplicates = 0usize;
     let mut without = 0usize;
     // Each public bucket's region, found once ([`public_web`]).
@@ -433,6 +434,12 @@ pub fn cube_files(s: &mut Session, p: &Value, max_items: usize) -> Result<CubeFi
             without += 1;
             continue;
         };
+        // Its codes for a failed retrieval not read whole: its values can't be told from them.
+        if a.codes_unread {
+            codes_unread += 1;
+            without += 1;
+            continue;
+        }
         let key = i.tile.clone().unwrap_or_else(|| match i.bbox {
             Some([w, so, e, n]) => format!("{w:.2},{so:.2},{e:.2},{n:.2}"),
             None => i.id.clone(),
@@ -461,8 +468,21 @@ pub fn cube_files(s: &mut Session, p: &Value, max_items: usize) -> Result<CubeFi
         scales_differ |= scale.is_some_and(|s| s != this);
         scale.get_or_insert(this);
     }
+    // Items left out for their codes: said, in the error when nothing else is left.
+    let unread_codes = (codes_unread > 0).then(|| {
+        format!(
+            "{codes_unread} item(s) left out, as their codes for a failed retrieval couldn't be read whole (one isn't a number, or there are more than {} of them)",
+            stac::MAX_INVALID
+        )
+    });
     if tiles.is_empty() {
-        return Err(format!("no item of {collection} has an asset {asset}"));
+        return Err(match unread_codes {
+            Some(why) => format!("{collection}: {why}"),
+            None => format!("no item of {collection} has an asset {asset}"),
+        });
+    }
+    if let Some(why) = unread_codes {
+        s.warn(format!("{collection}: {why}"));
     }
     // Files reached through signed addresses (Planetary Computer's) expire within hours, so a
     // cube of them couldn't be kept in a project or read a day later.
