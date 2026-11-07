@@ -467,17 +467,19 @@ enum LeftTemplate {
 /// [`advertised_template`] read off the frame. It keeps every foreign hop and counts the addresses
 /// whose query was withheld, as that does. A document that can't be asked for now (too many being
 /// read) fails the command, as it does for the capabilities: it wasn't read, so it doesn't fall
-/// back to the standard tile address.
+/// back to the standard tile address. Every fallback to that address is said.
 fn left_template(s: &mut Session, source: &str, list: &str, vector: bool, withheld: &mut u32) -> Result<LeftTemplate, String> {
     use rustgis_data::ogc::{TilesStep, resolve_tiles};
     let mut out = AdvertisedTemplate { template: None, crossed_origin: crosses_origin(source, list) };
     let mut doc = list.to_string();
     for _ in 0..2 {
-        if crate::render::rustgis_tiles::address::check(&doc, Some(list)).is_err() {
+        let shown = crate::sources::redact(&doc);
+        if let Err(e) = crate::render::rustgis_tiles::address::check(&doc, Some(list)) {
+            let e = crate::sources::redact_text(&e);
+            s.notify(format!("{shown}: this tile set document was refused, so the standard tile address is used: {e}"), false);
             return Ok(LeftTemplate::Read(out));
         }
         let Some(read) = s.left_document(&doc)? else { return Ok(LeftTemplate::Waiting(doc)) };
-        let shown = crate::sources::redact(&doc);
         let body = match read {
             Ok(body) => body,
             Err(e) => {
@@ -493,7 +495,14 @@ fn left_template(s: &mut Session, source: &str, list: &str, vector: bool, withhe
         match resolved.step {
             TilesStep::Template(t) => {
                 out.crossed_origin |= crosses_origin(&doc, &t);
-                out.template = checked_template(list, &t).ok();
+                match checked_template(list, &t) {
+                    Ok(t) => out.template = Some(t),
+                    // (Its error names the template, which may carry keys.)
+                    Err(e) => {
+                        let e = crate::sources::redact_text(&e);
+                        s.notify(format!("{shown}: its tile template was refused, so the standard tile address is used: {e}"), false);
+                    }
+                }
                 return Ok(LeftTemplate::Read(out));
             }
             TilesStep::Next(next) => {
@@ -503,6 +512,10 @@ fn left_template(s: &mut Session, source: &str, list: &str, vector: bool, withhe
             }
         }
     }
+    s.notify(
+        format!("{}: its tile sets lead on past two documents, so the standard tile address is used", crate::sources::redact(list)),
+        false,
+    );
     Ok(LeftTemplate::Read(out))
 }
 
@@ -1168,6 +1181,52 @@ fn fetch_records(url: &str, _: &str) -> Result<rustgis_data::ogc::RecordPage, St
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// Every fallback to the standard tile address off the frame is said (AGENTS.md, Never silent):
+    /// a list leading on past two documents, a template refused, a document address refused. A
+    /// template read says nothing (#1319).
+    #[test]
+    fn a_tile_list_off_the_frame_says_why_it_falls_back() {
+        let (source, list) = ("https://x.org/collections", "https://x.org/collections/a/map/tiles");
+        let land = |s: &mut Session, url: &str, body: Value| {
+            let asked = s.asked_for(&json!({"url": url, "document": true}));
+            let mut added = crate::cmd::plugins::fetch::Added::default();
+            added.document = Some(serde_json::to_vec(&body).unwrap().into());
+            s.rerun_landed.push((asked, Ok(json!({})), added));
+        };
+        let tilesets = |next: &str| json!({"tilesets": [{"tileMatrixSetId": "WebMercatorQuad", "links": [{"rel": "self", "href": next}]}]});
+        let template = |href: &str| json!({"links": [{"rel": "item", "type": "image/png", "href": href}]});
+        // A document asked for past the first, where none should be: it names nothing, said.
+        let nothing_more = |_: &str| json!({});
+        // What the list leads to, read in turn: the template it ends with, and what was said.
+        let read = |first: Value, then: &dyn Fn(&str) -> Value| {
+            let mut s = Session::new(crate::sample::world_project());
+            s.call_requests = Some(Vec::new());
+            land(&mut s, list, first);
+            let mark = s.notice_mark();
+            for _ in 0..3 {
+                match left_template(&mut s, source, list, false, &mut 0).unwrap() {
+                    LeftTemplate::Read(out) => {
+                        let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+                        return (out.template, said);
+                    }
+                    LeftTemplate::Waiting(doc) => land(&mut s, &doc, then(&doc)),
+                }
+            }
+            panic!("it never read a template");
+        };
+        let (t, said) = read(tilesets("https://x.org/t/1"), &|doc| tilesets(&format!("{doc}/more")));
+        assert!(t.is_none() && said.len() == 1 && said[0].contains("past two documents"), "{said:?}");
+        let (t, said) = read(template("https://x.org/paint/{tileMatrix}.png?token=hunter2"), &nothing_more);
+        assert!(t.is_none() && said.len() == 1 && said[0].contains("tile template was refused"), "{said:?}");
+        assert!(!said[0].contains("hunter2"), "{said:?}");
+        // A document on the web pointing into the local network.
+        let (t, said) = read(tilesets("http://127.0.0.1/t/1"), &nothing_more);
+        assert!(t.is_none() && said.len() == 1 && said[0].contains("document was refused"), "{said:?}");
+        let (t, said) = read(template("https://x.org/paint/{tileMatrix}/{tileCol}/{tileRow}.png"), &nothing_more);
+        assert_eq!(t.as_deref(), Some("https://x.org/paint/{z}/{x}/{y}.png"));
+        assert!(said.is_empty(), "{said:?}");
+    }
 
     /// A tile list that can't be asked for, with as many documents being read as can be, fails
     /// the command: it wasn't read, so the layer doesn't go on the standard tile address (#1319).
