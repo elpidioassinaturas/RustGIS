@@ -4343,7 +4343,7 @@ impl RustGisApp {
                 let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_engine::cmd::layer::read_cog_window(&asked)));
                 read.unwrap_or_else(|_| Err(tl!("Reading the window failed unexpectedly").to_string()))
             } else {
-                Err(tl!("its project was closed before its read began, so it wasn't read").to_string())
+                Err(tl!("given up before its read began: its project was closed, or more than 64 downloads started after it").to_string())
             };
             *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(read);
             // The next read waits for the frame to take this one, or for the app to be gone.
@@ -4358,8 +4358,9 @@ impl RustGisApp {
                 &[("url", &rustgis_engine::sources::redact(&url)), ("error", &e.to_string())],
             )
         })?;
-        let shown = rustgis_engine::data::s3_address::inner(&url);
-        self.session.notify(i18n::fmt("Reading {url}…", &[("url", shown)]), false);
+        // Named redacted, and by the address an S3 connection's wraps.
+        let shown = rustgis_engine::sources::redact(rustgis_engine::data::s3_address::inner(&url));
+        self.session.notify(i18n::fmt("Reading {url}…", &[("url", &shown)]), false);
         let id = self.session.download_started();
         self.ui.window_reads.push((id, url, q, slot, left));
         Ok(Value::Null)
@@ -5557,6 +5558,8 @@ mod record_tests {
         let errors: Vec<String> = app.session.notices_since(mark).iter().filter(|n| n.error).map(|n| n.text.clone()).collect();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("/a.tif") && !errors[0].contains("hidden-1330"), "{errors:?}");
+        let reading = app.session.notices_since(mark).iter().find(|n| n.text.starts_with("Reading")).map(|n| n.text.clone()).unwrap();
+        assert!(reading.contains("/a.tif") && !reading.contains("hidden-1330"), "{reading}");
         assert!(app.session.map().layer_by_name("Bad").is_none());
         // Its project closed while it was read.
         let slow = crate::fetching::slow_ranges(rustgis_engine::data::raster::cog::example(1024, 256));
