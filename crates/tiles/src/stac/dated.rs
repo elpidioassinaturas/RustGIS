@@ -104,8 +104,17 @@ type Fetch<'a> = &'a (dyn Fn(&str) -> Result<Vec<u8>, String> + Sync);
 
 /// The area's items below a date's folder, as addresses relative to it: its level's longitude
 /// folders that meet the area, and their items that do. Each date of `dates` reads them all, so
-/// more than `max_items` in the end is refused before they are read.
-fn tiles_of(date: &str, layout: &Layout, filter: &Filter, dates: usize, max_items: usize, fetch: Fetch<'_>) -> Result<Vec<String>, String> {
+/// more than `max_items` in the end is refused before they are read. Also how many items over the
+/// area were refused: an address a document on the web can't point to, or one that isn't below
+/// the date's folder as a plain path, which wouldn't stay in the other dates' folders.
+fn tiles_of(
+    date: &str,
+    layout: &Layout,
+    filter: &Filter,
+    dates: usize,
+    max_items: usize,
+    fetch: Fetch<'_>,
+) -> Result<(Vec<String>, usize), String> {
     let read = |url: &str| -> Result<Value, String> { catalog(&fetch(url)?).ok_or_else(|| format!("{url} isn't a STAC catalog")) };
     let levels = read(date)?;
     let level = children(&levels, date)
@@ -116,21 +125,29 @@ fn tiles_of(date: &str, layout: &Layout, filter: &Filter, dates: usize, max_item
     let columns: Vec<String> = children(&read(&level)?, &level).into_iter().filter(|u| may_meet(name_of(u), west, east)).collect();
     let folder = crate::logins::inner(date).rsplit_once('/').map_or("", |(folder, _)| folder).to_string() + "/";
     let mut tiles = Vec::new();
+    let mut refused = 0;
     for (column, answer) in columns.iter().zip(read_all(&columns, fetch)) {
         let doc = catalog(&answer?).ok_or_else(|| format!("{column} isn't a STAC catalog"))?;
         for (item, _) in links(&doc, "item", column) {
-            if !may_meet(name_of(&item), south, north) || crate::address::check(&item, Some(column)).is_err() {
+            if !may_meet(name_of(&item), south, north) {
                 continue;
             }
-            // Only an item below the date's folder has a place in the other dates' folders too.
-            let Some(path) = crate::logins::inner(&item).strip_prefix(folder.as_str()) else { continue };
+            // Only an item below the date's folder, by a plain path, has a place in the other
+            // dates' folders too: `//host/...` there would be another host's.
+            let path = crate::logins::inner(&item).strip_prefix(folder.as_str());
+            let Some(path) =
+                path.filter(|p| !p.starts_with('/') && !p.contains("://") && crate::address::check(&item, Some(column)).is_ok())
+            else {
+                refused += 1;
+                continue;
+            };
             tiles.push(path.to_string());
             if tiles.len().saturating_mul(dates) > max_items {
                 return Err(format!("more than {max_items} items: take a shorter period or a smaller area"));
             }
         }
     }
-    Ok(tiles)
+    Ok((tiles, refused))
 }
 
 /// What a collection holds over an area and a period.
@@ -184,21 +201,37 @@ pub fn search(root: &str, filter: &Filter, period: (&str, &str), max_items: usiz
     let mut last_error = None;
     for (_, date) in dates.iter().rev().take(DATES_TRIED) {
         match tiles_of(date, &layout, filter, dates.len(), max_items, fetch) {
-            Ok(t) if t.is_empty() => {}
-            Ok(t) => {
-                tiles = t;
-                last_error = None;
-                break;
+            Ok((t, refused)) => {
+                unread += refused;
+                if !t.is_empty() {
+                    tiles = t;
+                    last_error = None;
+                    break;
+                }
             }
             // Too many is the answer however many dates are tried.
             Err(e) if e.starts_with("more than") => return Err(e),
-            Err(e) => last_error = Some(e),
+            // A date whose folders can't be read: an earlier one may give the area's items, but
+            // tiles only this one has are missing then, so it is counted.
+            Err(e) => {
+                unread += 1;
+                last_error = Some(e);
+            }
         }
     }
     if let Some(e) = last_error {
         return Err(e);
     }
-    let urls: Vec<String> = dates.iter().flat_map(|(_, date)| tiles.iter().filter_map(|t| resolve(date, t))).collect();
+    // Each date's own address for an item, checked as a document's link is: one refused is counted.
+    let mut urls: Vec<String> = Vec::new();
+    for (_, date) in &dates {
+        for t in &tiles {
+            match resolve(date, t).filter(|u| crate::address::check(u, Some(date)).is_ok()) {
+                Some(u) => urls.push(u),
+                None => unread += 1,
+            }
+        }
+    }
     let mut items: Vec<Item> = Vec::with_capacity(urls.len());
     let mut last_error = None;
     for (url, answer) in urls.iter().zip(read_all(&urls, fetch)) {
@@ -371,7 +404,7 @@ mod tests {
         docs.remove("https://x.org/c/2024-03/1/catalog.json");
         let (r, _) = run(&docs, area, period, 100);
         let found = r.unwrap();
-        assert_eq!((found.items.len(), found.unread), (2, 1), "2024-02's item is the one missing");
+        assert_eq!((found.items.len(), found.unread), (2, 2), "2024-03's level and 2024-02's item are missing");
         // No date in the period: nothing, for the caller to say.
         let (r, reads) = run(&docs, area, ("1990-01-01", "1990-12-31"), 100);
         assert!(r.unwrap().items.is_empty());
@@ -416,6 +449,23 @@ mod tests {
     }
 
     #[test]
+    fn an_item_path_cant_leave_its_date_folder_in_the_other_dates() {
+        // An item of the date that gives the area's items, on its own host but with a path that
+        // reads as another host's from the dates' folders: never read, and counted.
+        let mut docs = tree("YYYY-MM", &["2024-01", "2024-02"]);
+        docs.insert(
+            "https://x.org/c/2024-02/1/W090.00-E000.00/catalog.json".to_string(),
+            catalog_of("item", &["https://x.org/c/2024-02///127.0.0.1/S90.00-N00.00.json".to_string()]),
+        );
+        let (r, reads) = run(&docs, [-50.0, -20.0, -40.0, -10.0], ("2024-01-01", "2024-02-29"), 100);
+        assert!(reads.iter().all(|u| u.starts_with("https://x.org/")), "{reads:?}");
+        let found = r.unwrap();
+        assert_eq!(found.unread, 1, "the refused item is told");
+        // The date before gives the area's items instead, read at both dates.
+        assert_eq!(found.items.len(), 2);
+    }
+
+    #[test]
     fn hostile_links_are_not_followed() {
         let mut docs = tree("YYYY-MM", &["2024-01"]);
         // Into the local network, and out of the date's folder: neither is an item of the cube.
@@ -424,7 +474,9 @@ mod tests {
             catalog_of("item", &["http://127.0.0.1/x/S90.00-N00.00.json".to_string(), "https://y.org/S90.00-N00.00.json".to_string()]),
         );
         let (r, reads) = run(&docs, [-50.0, -20.0, -40.0, -10.0], ("2024-01-01", "2024-01-31"), 100);
-        assert!(r.unwrap().items.is_empty());
+        let found = r.unwrap();
+        assert!(found.items.is_empty());
+        assert_eq!(found.unread, 2, "both refused items are told");
         assert!(reads.iter().all(|u| u.starts_with("https://x.org/")), "{reads:?}");
         // Names that aren't dates, and spans that aren't degrees.
         assert_eq!(degrees("W090.00-E000.00"), Some((-90.0, 0.0)));
