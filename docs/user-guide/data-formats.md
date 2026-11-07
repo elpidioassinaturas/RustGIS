@@ -304,8 +304,9 @@ Scripts use `service.import {"url":"…","name":"My OGC Layer"}` and
 A long list stops at its first 2,000 layers (for OGC API, collections), and a note says how many
 the service has. Which ones come first is up to the service, and some change their order between
 answers. `service.add` still takes any of them by name, up to 100,000 in one document. An ArcGIS
-service or directory is an exception: it is read and listed up to 2,000 layers, folders and
-services. A note says how many are left out past either limit.
+service or directory is an exception: it is read up to 2,000 layers, folders and services, and
+lists all it reads. A dynamic MapServer offers each of those layers twice, as features and as a
+map, so its list can be twice as long. A note says how many are left out past either limit.
 
 A WMS or WMTS layer's tiles are asked for down to the detail its service gives, and stretched
 only past it: a WMTS layer's over the zooms of its tile matrix set (or those its
