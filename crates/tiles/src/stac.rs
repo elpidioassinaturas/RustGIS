@@ -6,6 +6,8 @@
 use serde_json::Value;
 
 pub mod catalog;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod dated;
 
 /// Element 84's Earth Search (Sentinel-2, Landsat, Copernicus DEM and more, on AWS), the default.
 pub const EARTH_SEARCH: &str = "https://earth-search.aws.element84.com/v1";
@@ -30,6 +32,8 @@ const MAX_TEXT: usize = 2000;
 const MAX_FOOTPRINT: usize = 20_000;
 /// The most properties kept with an item.
 const MAX_PROPERTIES: usize = 100;
+/// The most codes for a failed retrieval kept with an asset.
+const MAX_INVALID: usize = 32;
 
 /// A collection an API offers.
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +58,9 @@ pub struct Asset {
     /// Its first band's stored no-data value (`raster:bands` or `eo:bands` `nodata`), for files
     /// whose own header doesn't name it.
     pub nodata: Option<f64>,
+    /// Stored values that are codes for a failed retrieval rather than values (JAXA Earth's
+    /// `je:rasters` `dn.error`).
+    pub invalid: Vec<f64>,
 }
 
 /// An item: a scene (or tile) with its footprint, time and assets.
@@ -360,6 +367,15 @@ fn item(f: &Value, from: Option<&str>) -> Option<Item> {
                 scale: band_number(a, "scale"),
                 offset: band_number(a, "offset"),
                 nodata: band_number(a, "nodata"),
+                invalid: a
+                    .get("je:rasters")
+                    .and_then(|r| r.get("dn")?.get("error")?.as_array())
+                    .into_iter()
+                    .flatten()
+                    .take(MAX_INVALID)
+                    .filter_map(Value::as_f64)
+                    .filter(|v| v.is_finite())
+                    .collect(),
             })
         })
         .collect();
@@ -418,9 +434,22 @@ fn tile_of(p: &Value) -> Option<String> {
 }
 
 /// An asset's first band's number `key` (`scale`, `offset`, `nodata`): from `raster:bands`, else from
-/// `eo:bands`, where some catalogs (Brazil Data Cube's) put it.
+/// `eo:bands`, where some catalogs (Brazil Data Cube's) put it, else from JAXA Earth's `je:rasters`.
 fn band_number(asset: &Value, key: &str) -> Option<f64> {
-    ["raster:bands", "eo:bands"].iter().find_map(|b| asset.get(*b)?.as_array()?.first()?.get(key)?.as_f64()).filter(|v| v.is_finite())
+    let je = || {
+        let (group, name) = match key {
+            "scale" => ("dn2value", "slope"),
+            "offset" => ("dn2value", "offset"),
+            "nodata" => ("dn", "nodata"),
+            _ => return None,
+        };
+        asset.get("je:rasters")?.get(group)?.get(name)?.as_f64()
+    };
+    ["raster:bands", "eo:bands"]
+        .iter()
+        .find_map(|b| asset.get(*b)?.as_array()?.first()?.get(key)?.as_f64())
+        .or_else(je)
+        .filter(|v| v.is_finite())
 }
 
 /// How many numbers a GeoJSON geometry holds (bounded by how deep it goes).
@@ -855,6 +884,7 @@ mod tests {
             scale: None,
             offset: None,
             nodata: None,
+            invalid: Vec::new(),
         }];
         // A Planetary Computer asset is added after signing it with its container's token.
         let (_, href) = pc.asset_href(None).unwrap();

@@ -15340,6 +15340,83 @@ fn serve_gated(
     (format!("http://{addr}"), sent)
 }
 
+/// A static collection laid out by date (JAXA Earth's) as a data cube: no search, the period's
+/// date folders read and each item's own file taken, with the scale and no-data in `je:rasters`,
+/// on the time slider and in a trend; a document missing is told, and clean input tells nothing.
+#[test]
+fn a_static_collection_by_date_as_a_data_cube() {
+    let (cog, _) = serve_ranges(rustgis_data::raster::cog::example(512, 256));
+    let months = ["2023-12", "2024-01", "2024-02", "2024-03", "2024-04", "2024-05", "2024-06"];
+    let item = |m: &str| {
+        format!(
+            r#"{{"type": "Feature", "id": "N00.00-N90.00", "collection": "jaxa.cube", "bbox": [0, 0, 90, 90], "geometry": null,
+               "properties": {{"datetime": null, "start_datetime": "{m}-01T00:00:00.000000Z"}},
+               "assets": {{"V": {{"href": "{cog}/{m}.tiff", "type": "image/tiff; application=geotiff",
+                  "je:rasters": {{"dn2value": {{"slope": 0.5, "offset": 0.0}}, "dn": {{"nodata": 255.0, "error": [5.0]}}}}}}}}}}"#
+        )
+    };
+    let catalog = |rel: &str, href: &str| format!(r#"{{"type": "Catalog", "links": [{{"rel": "{rel}", "href": "{href}"}}]}}"#);
+    let children: Vec<String> = months.iter().map(|m| format!(r#"{{"rel": "child", "href": "./{m}/catalog.json"}}"#)).collect();
+    let leak = |t: String| -> &'static str { Box::leak(t.into_boxed_str()) };
+    let mut routes: Vec<(&'static str, String)> = vec![(
+        "/c/collection.json",
+        format!(
+            r#"{{"type": "Collection", "id": "collection", "links": [{}], "summaries": {{"je:stac_date_format": ["YYYY-MM"], "je:cog_level_max": [1]}}}}"#,
+            children.join(",")
+        ),
+    )];
+    for m in months {
+        routes.push((leak(format!("/c/{m}/catalog.json")), catalog("child", "./1/catalog.json")));
+        routes.push((leak(format!("/c/{m}/1/catalog.json")), catalog("child", "./E000.00-E090.00/catalog.json")));
+        routes.push((leak(format!("/c/{m}/1/E000.00-E090.00/catalog.json")), catalog("item", "./N00.00-N90.00.json")));
+        if m != "2024-03" {
+            routes.push((leak(format!("/c/{m}/1/E000.00-E090.00/N00.00-N90.00.json")), item(m)));
+        }
+    }
+    let url = format!("{}/c/collection.json", serve_routes(routes, 200));
+    let cube = |start: &str, end: &str| json!({"url": url, "collection": "jaxa.cube", "asset": "V", "bbox": [10, 45, 11, 46], "start": start, "end": end, "range": [0, 50], "test": "original"});
+    let mut s = Session::new(Project::default());
+    let mark = s.notice_mark();
+    let r = s.run("stac.addCube", &cube("2024-01-01", "2024-02-29")).unwrap();
+    assert_eq!((r["items"].as_u64(), r["tiles"].as_u64(), r["dates"].as_u64()), (Some(2), Some(1), Some(2)), "{r}");
+    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("couldn't be read")), "clean input tells nothing");
+    let tile = &s.map().tiles[0];
+    assert_eq!(tile.time_urls.len(), 2);
+    assert!(tile.time_urls[0].1.ends_with("/2024-01.tiff#range=0,100"), "the range through je:rasters' slope: {}", tile.time_urls[0].1);
+    // A document missing: its date is left out, and said.
+    let mut gap = Session::new(Project::default());
+    let mark = gap.notice_mark();
+    let r = gap.run("stac.addCube", &cube("2024-02-01", "2024-04-30")).unwrap();
+    assert_eq!(r["dates"], 2, "{r}");
+    let said: Vec<&str> = gap.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
+    assert!(said.iter().any(|t| t.contains("1 document(s) couldn't be read") && t.contains("jaxa.cube")), "{said:?}");
+    // In a trend, a stored value that is a code for a failed retrieval is no value; the rest are
+    // read through the slope. Pixel (x, y) stores (x + y) % 256, the same at every date.
+    let t = s.run("cube.reduce", &json!({"url": url, "collection": "jaxa.cube", "asset": "V", "bbox": [10, 45, 11, 46], "start": "2024-04-01", "end": "2024-06-30", "stat": "mean"})).unwrap();
+    let id = t["layers"][0].as_u64().or(t["layer"].as_u64()).unwrap() as u32;
+    let data = s.map().layer(id).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    let at = |x: usize, y: usize| data.bands[0].data[y * data.width as usize + x];
+    assert!(at(2, 3).is_nan(), "(2 + 3) is the code: {}", at(2, 3));
+    assert_eq!(at(3, 3), 3.0, "6 through the slope");
+    // Another collection's name, and collections that can't make a cube.
+    let mut wrong = cube("2024-01-01", "2024-02-29");
+    wrong["collection"] = json!("other");
+    let e = Session::new(Project::default()).run("stac.addCube", &wrong).unwrap_err();
+    assert!(e.contains("holds jaxa.cube, not other"), "{e}");
+    let plain = serve_routes(vec![("/s/collection.json", r#"{"type": "Collection", "links": []}"#.to_string())], 2);
+    let mut other = cube("2024-01-01", "2024-02-29");
+    other["url"] = json!(format!("{plain}/s/collection.json"));
+    let e = Session::new(Project::default()).run("stac.addCube", &other).unwrap_err();
+    assert!(e.contains("laid out by date"), "{e}");
+    let normal = serve_routes(
+        vec![("/n/collection.json", r#"{"type": "Collection", "links": [], "summaries": {"je:stac_date_format": ["MM"]}}"#.to_string())],
+        2,
+    );
+    other["url"] = json!(format!("{normal}/n/collection.json"));
+    let e = Session::new(Project::default()).run("stac.addCube", &other).unwrap_err();
+    assert!(e.contains("no year"), "{e}");
+}
+
 /// A STAC collection's band as a data cube on the time slider (#559), from a local API: a tile
 /// layer per grid tile, each a file per date; the slider on over their dates; a fixed range in the
 /// band's own units, through its scale; a tile with no date in the window drawn as nothing.
