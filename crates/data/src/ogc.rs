@@ -447,6 +447,9 @@ pub struct Service {
     pub incomplete: bool,
     /// Destinations that did not inherit one or more query pairs; reported by the caller.
     pub withheld_addresses: u32,
+    /// The document goes past what is read of it: the first note saying so, also in `notes`.
+    /// (Notes can quote the document, so this isn't told from their text.)
+    pub past_read_limit: Option<String>,
 }
 
 /// Most layers or collections `service.layers` lists from one document. The others are still read
@@ -456,16 +459,19 @@ const MAX_LISTED_LAYERS: usize = 2_000;
 /// Most layers or collections read from one document, which is hostile input.
 const MAX_READ_LAYERS: usize = if cfg!(test) { 3_000 } else { 100_000 };
 /// How a note says that a document went past what is read of it.
-pub const PAST_READ_LIMIT: &str = "RustGIS reads at most";
+const PAST_READ_LIMIT: &str = "RustGIS reads at most";
 /// Features asked of a WFS in one request.
 pub const FEATURE_LIMIT: usize = 50_000;
 /// Features asked of an OGC API in one request: servers cap their pages (often at 10,000) and
 /// some refuse a larger `limit` outright.
 pub const OGC_API_LIMIT: usize = 10_000;
 
-/// The note for the layers of a document past the `limit` that is read of it.
-fn past_read_limit(left: usize, what: &str, limit: usize) -> String {
-    format!("{PAST_READ_LIMIT} {limit} {what} from one document: {left} left out")
+/// Notes the layers of a document past the `limit` that is read of it, and keeps the first such
+/// note as [`Service::past_read_limit`].
+fn past_read_limit(service: &mut Service, left: usize, what: &str, limit: usize) {
+    let note = format!("{PAST_READ_LIMIT} {limit} {what} from one document: {left} left out");
+    service.past_read_limit.get_or_insert_with(|| note.clone());
+    service.notes.push(note);
 }
 
 /// Stops the listing at [`MAX_LISTED_LAYERS`], for a document whose every entry makes one layer.
@@ -922,6 +928,8 @@ fn wms(url: &str, root: &Node) -> Service {
     let mut service = Service { kind: "WMS".into(), title, ..Service::default() };
     let (mut skipped, mut too_long) = (0, 0);
     let mut time_budget = MAX_DOCUMENT_TIME_VALUES;
+    // Each layer's time dimension, as it is read.
+    let mut times: Vec<Option<Rc<LayerTime>>> = Vec::new();
     let mut layer_boxes = LayerBoxes::new();
     // Layers inherit their parents' coordinate systems, nearest valid geographic bounds, queryable
     // attribute and time dimension.
@@ -944,7 +952,7 @@ fn wms(url: &str, root: &Node) -> Service {
             let named = |l: &Node| l.descendants().filter(|n| n.is_element() && local(n) == "Layer" && child(n, "Name").is_some()).count();
             let left = named(&layer) + stack.iter().map(|entry| named(&entry.0)).sum::<usize>();
             if left > 0 {
-                service.notes.push(past_read_limit(left, "layers", MAX_READ_LAYERS));
+                past_read_limit(&mut service, left, "layers", MAX_READ_LAYERS);
             }
             break;
         }
@@ -1056,19 +1064,24 @@ fn wms(url: &str, root: &Node) -> Service {
             offer: Offer::Tiles { template },
             bbox,
             tilesets: None,
-            // (The values listed for the whole document are capped: a parent's many, inherited by
-            // a great many layers, aren't copied to each.)
-            time: time.as_deref().map(|t| {
-                let keep = t.values.len().min(time_budget);
-                let values: Vec<String> = t.values.iter().skip(t.values.len() - keep).cloned().collect();
-                time_budget -= values.len();
-                LayerTime { values, default: t.default.clone(), multiple: t.multiple }
-            }),
+            time: None,
             feature_info,
             legends,
         });
+        times.push(time);
     }
     service.layers.reverse();
+    // The values listed for the whole document are capped (a parent's many, inherited by a great
+    // many layers, aren't copied to each), and go to the layers in document order: those a listing
+    // shows first, though the layers are read from the last.
+    for (layer, time) in service.layers.iter_mut().zip(times.into_iter().rev()) {
+        layer.time = time.as_deref().map(|t| {
+            let keep = t.values.len().min(time_budget);
+            let values: Vec<String> = t.values.iter().skip(t.values.len() - keep).cloned().collect();
+            time_budget -= values.len();
+            LayerTime { values, default: t.default.clone(), multiple: t.multiple }
+        });
+    }
     cut_listing(&mut service);
     if skipped > 0 {
         service.notes.push(format!("{skipped} layers aren't offered in a coordinate system RustGIS can draw and are left out"));
@@ -1408,7 +1421,7 @@ fn wmts(url: &str, root: &Node) -> Service {
     let (mut skipped, mut too_long) = (0, 0);
     let left = children(&contents, "Layer").count().saturating_sub(MAX_READ_LAYERS);
     if left > 0 {
-        service.notes.push(past_read_limit(left, "layers", MAX_READ_LAYERS));
+        past_read_limit(&mut service, left, "layers", MAX_READ_LAYERS);
     }
     for layer in children(&contents, "Layer").take(MAX_READ_LAYERS) {
         let Some(name) = child_text(&layer, "Identifier") else { continue };
@@ -1636,7 +1649,7 @@ fn wfs(url: &str, root: &Node) -> Service {
     let Some(list) = child(root, "FeatureTypeList") else { return service };
     let left = children(&list, "FeatureType").count().saturating_sub(MAX_READ_LAYERS);
     if left > 0 {
-        service.notes.push(past_read_limit(left, "feature types", MAX_READ_LAYERS));
+        past_read_limit(&mut service, left, "feature types", MAX_READ_LAYERS);
     }
     for ft in children(&list, "FeatureType").take(MAX_READ_LAYERS) {
         let Some(name) = child_text(&ft, "Name") else { continue };
@@ -1764,8 +1777,9 @@ pub struct Coverage {
     /// common servers answer too, rather than 1.1's multipart answers).
     pub version: String,
     pub id: String,
-    /// The output formats the capabilities list (WCS 2.0's `formatSupported`).
-    pub formats: Vec<String>,
+    /// The output formats the capabilities list (WCS 2.0's `formatSupported`): one list for all
+    /// of a document's coverages, which may be a great many.
+    pub formats: std::sync::Arc<[String]>,
 }
 
 /// What DescribeCoverage says a coverage is: the GeoTIFF format to ask for, the names of its
@@ -1800,7 +1814,7 @@ fn wcs(url: &str, root: &Node) -> Service {
         .and_then(|h| resolve(url, &h))
         .map(|h| endpoint(&h))
         .unwrap_or_else(|| endpoint(url));
-    let formats: Vec<String> = root
+    let formats: std::sync::Arc<[String]> = root
         .descendants()
         .filter(|n| n.is_element() && matches!(local(n), "formatSupported" | "SupportedFormat"))
         .map(|n| text_of(&n))
@@ -1813,7 +1827,8 @@ fn wcs(url: &str, root: &Node) -> Service {
         lonlat_box(*lo.first()?, *lo.get(1)?, *hi.first()?, *hi.get(1)?)
     };
     let mut add = |id: String, title: Option<String>, bbox: Option<[f64; 4]>| {
-        let coverage = Coverage { endpoint: get.clone(), version: version.into(), id: id.clone(), formats: formats.clone() };
+        let coverage =
+            Coverage { endpoint: get.clone(), version: version.into(), id: id.clone(), formats: std::sync::Arc::clone(&formats) };
         service.layers.push(ServiceLayer {
             zooms: None,
             title: title.filter(|t| !t.is_empty()).unwrap_or_else(|| id.clone()),
@@ -1864,7 +1879,7 @@ fn wcs(url: &str, root: &Node) -> Service {
     }
     cut_listing(&mut service);
     if left > 0 {
-        service.notes.push(past_read_limit(left, "coverages", MAX_READ_LAYERS));
+        past_read_limit(&mut service, left, "coverages", MAX_READ_LAYERS);
     }
     if long_ids > 0 {
         service.notes.push(format!("{long_ids} coverages are left out: their identifiers are longer than 500 bytes"));
@@ -2344,7 +2359,7 @@ fn arcgis(url: &str, v: &serde_json::Value) -> Result<Service, String> {
     }
     let left = v.get("layers").and_then(|l| l.as_array()).map_or(0, Vec::len).saturating_sub(MAX_LISTED_LAYERS);
     if left > 0 {
-        service.notes.push(past_read_limit(left, "layers", MAX_LISTED_LAYERS));
+        past_read_limit(&mut service, left, "layers", MAX_LISTED_LAYERS);
     }
     // A feature layer is read past the server's record limit, page by page, where the layer
     // supports it ([`begin`]). A cut-off answer is pointed out when it lands.
@@ -2475,7 +2490,7 @@ fn arcgis_directory(b: &str, v: &serde_json::Value) -> Service {
     for (key, what) in [("folders", "folders"), ("services", "services")] {
         let left = v.get(key).and_then(|l| l.as_array()).map_or(0, Vec::len).saturating_sub(MAX_LISTED_LAYERS);
         if left > 0 {
-            service.notes.push(past_read_limit(left, what, MAX_LISTED_LAYERS));
+            past_read_limit(&mut service, left, what, MAX_LISTED_LAYERS);
         }
     }
     service
@@ -2657,7 +2672,7 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
         });
     }
     if collections.len() > MAX_READ_LAYERS {
-        service.notes.push(past_read_limit(collections.len() - MAX_READ_LAYERS, "collections", MAX_READ_LAYERS));
+        past_read_limit(&mut service, collections.len() - MAX_READ_LAYERS, "collections", MAX_READ_LAYERS);
     }
     service.incomplete = unreadable > 0 || collections.len() > MAX_LISTED_LAYERS;
     if service.layers.iter().any(|l| matches!(l.offer, Offer::Features { .. })) {
@@ -6190,6 +6205,19 @@ mod tests {
         let kept: usize = s.layers.iter().filter_map(|l| l.time.as_ref()).map(|t| t.values.len()).sum();
         assert!(s.layers.len() == 1500 && kept == MAX_DOCUMENT_TIME_VALUES, "{} layers, {kept} values", s.layers.len());
         assert!(s.layers.iter().all(|l| l.time.as_ref().is_some_and(|t| t.default == "1999")));
+        // (They go to the layers first in the document.)
+        assert!(s.layers[..MAX_DOCUMENT_TIME_VALUES / 1000].iter().all(|l| l.time.as_ref().is_some_and(|t| t.values.len() == 1000)));
+        // So a document with more layers than are listed gives them to the listed ones (#1519).
+        let children: String = (0..MAX_LISTED_LAYERS + 500).map(|i| layer(&format!("child{i}"), "")).collect();
+        let crowd = format!(
+            r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms"><Capability><Layer><Title>Root</Title><CRS>EPSG:3857</CRS>{}{children}</Layer></Capability></WMS_Capabilities>"#,
+            dim(r#"default="1999""#, many.trim_end_matches(','))
+        );
+        let s = parse(url, crowd.as_bytes()).unwrap();
+        let with_values = MAX_DOCUMENT_TIME_VALUES / 1000;
+        assert_eq!(s.listed, Some(MAX_LISTED_LAYERS));
+        assert!(s.layers[..with_values].iter().all(|l| l.time.as_ref().is_some_and(|t| t.values.len() == 1000)), "{:?}", s.layers[0].time);
+        assert!(s.layers[with_values..].iter().all(|l| l.time.as_ref().is_some_and(|t| t.values.is_empty())));
         // A GetMap address that carries a TIME of its own (or other GetMap parameters) gives the
         // template one TIME, the layer's.
         let carried = caps.replace("https://maps.example.org/wms?", "https://maps.example.org/wms?map=m&amp;TIME=2000&amp;");
@@ -6822,10 +6850,12 @@ mod tests {
         for (what, url, doc, limit, kept) in kinds {
             let s = parse(url, doc(limit).as_bytes()).unwrap();
             assert!(!s.notes.iter().any(|n| n.contains(PAST_READ_LIMIT)), "{url}: {:?}", s.notes);
+            assert_eq!(s.past_read_limit, None, "{url}");
             assert_eq!(s.layers.len(), if kept { limit } else { 0 }, "{url}");
             let s = parse(url, doc(limit + 2).as_bytes()).unwrap();
             let note = format!("{PAST_READ_LIMIT} {limit} {what} from one document: 2 left out");
             assert!(s.notes.contains(&note), "{url}: {:?}", s.notes);
+            assert_eq!(s.past_read_limit.as_ref(), Some(&note), "{url}");
             assert_eq!(s.layers.len(), if kept { limit } else { 0 }, "{url}");
             // What was read past the listing is there to be found, but isn't listed.
             let cut = kept && limit > MAX_LISTED_LAYERS;
@@ -6842,6 +6872,29 @@ mod tests {
         let s = parse("https://x.org/wms", doc.as_bytes()).unwrap();
         assert_eq!(s.layers.len(), MAX_READ_LAYERS);
         assert!(!s.notes.iter().any(|n| n.contains(PAST_READ_LIMIT)), "{:?}", s.notes);
+        assert_eq!(s.past_read_limit, None);
+        // A note quoting the document can carry the words of this one; it isn't taken for it.
+        let quoted = format!(
+            r#"{{"collections": [{{"id": "{PAST_READ_LIMIT}", "links": [{{"rel": "items", "href": "https://x.org/c/3dtiles"}}]}}]}}"#
+        );
+        let s = parse("https://x.org/collections", quoted.as_bytes()).unwrap();
+        assert!(s.notes.iter().any(|n| n.contains(PAST_READ_LIMIT)), "{:?}", s.notes);
+        assert_eq!(s.past_read_limit, None);
+    }
+
+    /// A document's format lists are one for all its layers: a document may have 100,000 of them.
+    #[test]
+    fn a_documents_format_lists_are_shared_by_its_layers() {
+        let wcs = r#"<Capabilities version="2.0.1"><ServiceMetadata><formatSupported>image/tiff</formatSupported></ServiceMetadata><Contents><CoverageSummary><CoverageId>a</CoverageId></CoverageSummary><CoverageSummary><CoverageId>b</CoverageId></CoverageSummary></Contents></Capabilities>"#;
+        let s = parse("https://x.org/wcs", wcs.as_bytes()).unwrap();
+        let [Offer::Coverage(a), Offer::Coverage(b)] = [&s.layers[0].offer, &s.layers[1].offer] else { panic!("{:?}", s.layers) };
+        assert_eq!(*a.formats, ["image/tiff"]);
+        assert!(std::sync::Arc::ptr_eq(&a.formats, &b.formats));
+        let wms = r#"<WMS_Capabilities version="1.3.0"><Capability><Request><GetFeatureInfo><Format>application/json</Format><DCPType><HTTP><Get><OnlineResource href="https://x.org/wms?"/></Get></HTTP></DCPType></GetFeatureInfo></Request><Layer><CRS>EPSG:3857</CRS><Layer queryable="1"><Name>a</Name></Layer><Layer queryable="1"><Name>b</Name></Layer></Layer></Capability></WMS_Capabilities>"#;
+        let s = parse("https://x.org/wms", wms.as_bytes()).unwrap();
+        let [Some(a), Some(b)] = [&s.layers[0].feature_info, &s.layers[1].feature_info] else { panic!("{:?}", s.layers) };
+        assert_eq!(*a.formats, ["application/json"]);
+        assert!(std::sync::Arc::ptr_eq(&a.formats, &b.formats));
     }
 
     /// A coverage whose identifier is too long for an address is counted in a note.

@@ -10,7 +10,7 @@
 //! here as `"text"`; the command line, MCP and the desktop assistant let these commands fetch
 //! (waiting for the answer).
 
-use rustgis_data::ogc::{Coverage, Offer, PAST_READ_LIMIT, Service, SliderSteps};
+use rustgis_data::ogc::{Coverage, Offer, Service, SliderSteps};
 use serde_json::{Value, json};
 
 use super::ps;
@@ -196,6 +196,7 @@ fn capabilities(s: &mut Session, p: &Value) -> Result<Discovery, String> {
             result.sources.push(CapabilitySource { address: address.clone(), crossed_origin });
         }
         result.service.withheld_addresses = result.service.withheld_addresses.saturating_add(service.withheld_addresses);
+        result.service.past_read_limit = result.service.past_read_limit.take().or(service.past_read_limit);
         result.service.notes.extend(service.notes);
         let features = result.service.layers.iter().any(|l| matches!(l.offer, Offer::Features { .. }));
         let tiles = result.service.layers.iter().any(|l| matches!(l.offer, Offer::Tiles { .. } | Offer::VectorTiles { .. }));
@@ -554,14 +555,14 @@ pub(crate) fn layers(s: &mut Session, p: &Value) -> CmdResult {
 /// How many layers a service has, for a note: those read, when the document goes past the limit.
 fn layer_count(service: &Service) -> String {
     let total = service.layers.len();
-    if service.notes.iter().any(|n| n.contains(PAST_READ_LIMIT)) { format!("the {total} layers read") } else { format!("{total} layers") }
+    if service.past_read_limit.is_some() { format!("the {total} layers read") } else { format!("{total} layers") }
 }
 
 /// The error for a name the document doesn't give. It may also be past what is read of the
 /// document, which can't be told from a mistyped name, so that is said beside it.
 fn not_listed(url: &str, what: &str, want: &str, service: &Service) -> String {
     let total = service.layers.len();
-    let past_limit = service.notes.iter().find(|n| n.contains(PAST_READ_LIMIT));
+    let past_limit = service.past_read_limit.as_deref();
     let listing = match (service.listed.filter(|&listed| listed < total), past_limit) {
         (Some(listed), _) => format!("service.layers lists the first {listed} of {}", layer_count(service)),
         (None, Some(_)) => "service.layers lists those read".to_string(),
