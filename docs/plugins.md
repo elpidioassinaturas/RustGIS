@@ -81,10 +81,16 @@ described below, and RustGIS checks each one:
   a map file) has it taken out again without `network`.
 - No plugin may run the user's scripts, tasks or models, create or save models, install or
   locate other software, manage plugins or connections and logins, replace the project, or
-  step through undo history. It cannot call another plugin's command directly.
+  step through undo history. It cannot call another plugin's command or tool. It may run its
+  own tools through `gp.run`, with the usual `edit` and file requirements.
 
 A [process plugin](#process-plugins) is the exception: it is a program on your computer, not
 sandboxed, and the install prompt says so.
+
+Commands, tool schemas and deferred results stay bound to the exact enabled plugin load that
+started them. Disabling, removing or reloading it prevents further stages and result application.
+Development process programs remain unsandboxed; this load binding does not attest their
+executable bytes or prevent a program from changing on disk.
 
 The install prompt lists these permissions. Each call has a fuel budget, so a plugin stuck in a
 loop is stopped. Memory is capped at 512 MB, and requests and replies are size-limited. A plugin
@@ -480,9 +486,9 @@ the way, once for each document at most, and a map layer is added by the run tha
 
 While a command waits the window answers, so the user can work and the project can change. The
 status bar says the command is running, and asking for it again with the same parameters does
-nothing. A run again sees the view the command first ran with, and the window's size then, on the
-map shown by then, unless it moves the view itself; the layers, the selection and the rest are as
-they are by then. A failed answer is given once a run, in
+nothing. A run again sees the view the command first ran with, and the window's size then, unless
+it moves the view itself; the layers, the selection and the rest are as they are by then. With
+another map shown by then, or another project open, it isn't run again: it stops with an error. A failed answer is given once a run, in
 the order it came, so a call made again after it is a new try. Because everything before the call
 runs again, a command replacing a layer removes the old one after the call: removed before it, the
 run again finds its new layer gone, and says so. With the old name still in use the new layer came
