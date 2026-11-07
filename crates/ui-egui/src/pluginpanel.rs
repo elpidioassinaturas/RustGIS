@@ -690,11 +690,18 @@ mod tests {
     type Held = std::sync::Arc<std::sync::Mutex<Vec<(String, rustgis_engine::render::rustgis_tiles::cache::Done)>>>;
 
     /// A service that answers only when told to ([`answer_held`]): what the window does meanwhile
-    /// can't be waiting for it.
+    /// can't be waiting for it. A test with no turn may start a download meanwhile: that one isn't
+    /// counted as asked here, and is answered at once, as a fetcher must.
     fn hold_requests() -> Held {
         let held = Held::default();
         let keep = held.clone();
-        rustgis_engine::render::rustgis_tiles::cache::set_fetcher(move |url, done| keep.lock().unwrap().push((url, done)));
+        rustgis_engine::render::rustgis_tiles::cache::set_fetcher(move |url, done| {
+            if url.contains(".example.") {
+                keep.lock().unwrap().push((url, done));
+            } else {
+                done(Err("not this test's service".into()));
+            }
+        });
         held
     }
 

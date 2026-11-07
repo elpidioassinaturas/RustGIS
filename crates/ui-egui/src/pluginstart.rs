@@ -217,9 +217,6 @@ mod tests {
     /// command isn't started over, and another, or the same with other parameters, is (#1319).
     #[test]
     fn a_command_waiting_for_the_web_isnt_asked_again() {
-        // A service that never answers: the command only has to be waiting.
-        let _turn = crate::fetching::turn();
-        rustgis_engine::render::rustgis_tiles::cache::set_fetcher(|_, _| {});
         let pkg = plugins::Package::from_zip(&plugins::testing::package("ui-again-asked", &["edit", "network"])).unwrap();
         plugins::load(pkg, "test").unwrap();
         let mut app = RustGisApp::with_sample();
