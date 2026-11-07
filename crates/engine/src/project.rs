@@ -65,7 +65,8 @@ pub const MAX_BYTES: u64 = 512 << 20;
 /// The address a saved file keeps. Only web addresses can contain layer credentials. A tile
 /// template (`pmtiles:…@archive`, `cog:…@archive`) is judged by its archive, and an address read
 /// through a saved S3 connection by the address it wraps, the wrapper rebuilt around it (its
-/// binding and endpoint are provenance, not secrets); a COG's look after either is kept.
+/// binding and endpoint are provenance, not secrets). A COG's look is kept, on any of these and on
+/// a plain address; any other fragment isn't, as OAuth and SAS-style links carry tokens there.
 fn saved_address(address: &str) -> Option<String> {
     if let Some(public) = without_login_binding(address) {
         return Some(saved_address(&public).unwrap_or(public));
@@ -87,7 +88,8 @@ fn saved_address(address: &str) -> Option<String> {
     if !["http", "https", "s3"].iter().any(|s| protocol.eq_ignore_ascii_case(s)) {
         return None;
     }
-    let (scheme, mut rest) = address.split_once("://")?;
+    let (file, look) = split_look(address);
+    let (scheme, mut rest) = file.split_once("://")?;
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     if let Some(at) = rest.get(..end).and_then(|authority| authority.rfind('@')) {
         rest = rest.get(at + 1..)?;
@@ -95,6 +97,7 @@ fn saved_address(address: &str) -> Option<String> {
     let rest = rest.split('#').next().unwrap_or(rest);
     let mut out = format!("{scheme}://{rest}");
     rustgis_data::source::credentials::redact_query(&mut out);
+    out.push_str(look);
     (out != address).then_some(out)
 }
 

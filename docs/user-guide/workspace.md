@@ -34,7 +34,8 @@ back the next time it starts; with autosave off, they are lost, so save before y
 
 Saved layer addresses omit passwords, access keys, tokens and signatures. The open session
 keeps them, but after restarting RustGIS a protected source may need you to sign in to its
-connection again or add it again with credentials.
+connection again or add it again with credentials. A cloud-optimised GeoTIFF's look in its address
+(`#bands=…`, `#range=…`, a data cube's fixed range too) is saved; any other `#` part isn't.
 
 ### Autosave and recovery
 
