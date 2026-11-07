@@ -358,7 +358,7 @@ pub fn cube_files(s: &mut Session, p: &Value, max_items: usize) -> Result<CubeFi
         crate::render::rustgis_tiles::address::check(&api, None)?;
         let filter = stac::catalog::Filter::from_search(&search, None)?;
         let found = stac::dated::search_blocking(&api, &filter, (&day(start), &day(end)), max_items)?;
-        // Its own address says which collection it is; another name given is a mistake.
+        // Its items say which collection it is; another name given is a mistake.
         if let Some(other) = found.items.iter().map(|i| i.collection.as_str()).find(|c| !c.is_empty() && *c != collection) {
             return Err(format!("{api} holds {other}, not {collection}"));
         }

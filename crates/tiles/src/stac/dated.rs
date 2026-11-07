@@ -36,6 +36,7 @@ fn layout(collection: &Value) -> Result<Option<Layout>, String> {
         "YYYY-MM/DD" => true,
         "MM" | "MM-DD" => return Err("its dates have no year (it is a climatology), so they make no time series".into()),
         "YYYY-MM/DD-hh" => return Err("it is hourly, and a data cube has one file per day".into()),
+        "" => return Err(format!("its date format {} isn't text", format.to_string().chars().take(40).collect::<String>())),
         f => return Err(format!("its dates are written {}, which RustGIS doesn't read yet", f.chars().take(40).collect::<String>())),
     };
     let level = first("je:cog_level_max").and_then(|l| l.as_u64()).ok_or("it doesn't say which level holds the full images")?;
@@ -77,9 +78,23 @@ fn may_meet(name: &str, lo: f64, hi: f64) -> bool {
     spans.iter().any(|(from, to)| a < *to && b > *from)
 }
 
-/// A document's child catalogs that may be read from where it was found.
-fn children(doc: &Value, from: &str) -> Vec<String> {
-    links(doc, "child", from).into_iter().map(|(u, _)| u).filter(|u| is_web(u) && crate::address::check(u, Some(from)).is_ok()).collect()
+/// A document's child catalogs that `wanted` keeps (by address), those that may be read from where
+/// it was found, and how many it wanted but refused: an address a document on the web can't point
+/// to, or one past the links followed (counted once, as the document isn't read whole).
+fn children(doc: &Value, from: &str, wanted: impl Fn(&str) -> bool) -> (Vec<String>, usize) {
+    let mut refused = usize::from(too_many(doc, "child"));
+    let mut kept = Vec::new();
+    for (u, _) in links(doc, "child", from) {
+        if !wanted(&u) {
+            continue;
+        }
+        if is_web(&u) && crate::address::check(&u, Some(from)).is_ok() {
+            kept.push(u);
+        } else {
+            refused += 1;
+        }
+    }
+    (kept, refused)
 }
 
 /// A catalog's or collection's document from its bytes.
@@ -125,15 +140,16 @@ fn tiles_of(
 ) -> Result<(Vec<String>, usize), String> {
     let read = |url: &str| -> Result<Value, String> { catalog(&fetch(url)?).ok_or_else(|| format!("{url} isn't a STAC catalog")) };
     let levels = read(date)?;
-    let level = children(&levels, date)
+    // A level refused is a level missing: the error says so.
+    let level = children(&levels, date, |u| name_of(u) == layout.level)
+        .0
         .into_iter()
-        .find(|u| name_of(u) == layout.level)
+        .next()
         .ok_or_else(|| format!("{date} has no level {}", layout.level))?;
     let (west, east, south, north) = filter.bbox.map_or((-180.0, 180.0, -90.0, 90.0), |[w, s, e, n]| (w, e, s, n));
-    let columns: Vec<String> = children(&read(&level)?, &level).into_iter().filter(|u| may_meet(name_of(u), west, east)).collect();
+    let (columns, mut refused) = children(&read(&level)?, &level, |u| may_meet(name_of(u), west, east));
     let folder = crate::logins::inner(date).rsplit_once('/').map_or("", |(folder, _)| folder).to_string() + "/";
     let mut tiles: Vec<String> = Vec::new();
-    let mut refused = 0;
     for (column, answer) in columns.iter().zip(read_all(&columns, fetch)) {
         let doc = catalog(&answer?).ok_or_else(|| format!("{column} isn't a STAC catalog"))?;
         // A column listing more items than are followed isn't read whole: counted.
@@ -192,8 +208,7 @@ pub fn search(root: &str, filter: &Filter, period: (&str, &str), max_items: usiz
             && start.get(..n).is_some_and(|s| s <= name)
             && end.get(..n).is_some_and(|e| name <= e)
     };
-    let folders: Vec<String> = children(&doc, root).into_iter().filter(|u| within(name_of(u))).collect();
-    let mut unread = 0;
+    let (folders, mut unread) = children(&doc, root, |u| within(name_of(u)));
     let mut dates: Vec<(String, String)> = Vec::new();
     if layout.day_folders {
         for (month, answer) in folders.iter().zip(read_all(&folders, fetch)) {
@@ -201,11 +216,14 @@ pub fn search(root: &str, filter: &Filter, period: (&str, &str), max_items: usiz
                 unread += 1;
                 continue;
             };
-            for day in children(&days, month) {
-                let date = format!("{}-{}", name_of(month), name_of(&day));
-                if date.as_str() >= start && date.as_str() <= end {
-                    dates.push((date, day));
-                }
+            let in_period = |day: &str| {
+                let date = format!("{}-{}", name_of(month), name_of(day));
+                date.as_str() >= start && date.as_str() <= end
+            };
+            let (days, refused) = children(&days, month, in_period);
+            unread += refused;
+            for day in days {
+                dates.push((format!("{}-{}", name_of(month), name_of(&day)), day));
             }
         }
     } else {
@@ -557,6 +575,24 @@ mod tests {
         .unwrap();
         assert_eq!(found.items.len(), 2);
         assert!(without.into_inner().unwrap().is_empty(), "reads on a thread without the context");
+    }
+
+    #[test]
+    fn a_refused_month_or_column_is_counted() {
+        // A month of the period on the local network, and a column there: neither read, both told.
+        let mut docs = tree("YYYY-MM", &["2024-01", "2024-02"]);
+        let mut root: Value = serde_json::from_slice(&docs[ROOT]).unwrap();
+        root["links"].as_array_mut().unwrap().push(json!({"rel": "child", "href": "http://127.0.0.1/c/2024-02/catalog.json"}));
+        root["links"].as_array_mut().unwrap().push(json!({"rel": "child", "href": "http://127.0.0.1/c/1990-01/catalog.json"}));
+        docs.insert(ROOT.to_string(), root.to_string().into_bytes());
+        let level = "https://x.org/c/2024-02/1/catalog.json";
+        let mut columns: Value = serde_json::from_slice(&docs[level]).unwrap();
+        columns["links"].as_array_mut().unwrap().push(json!({"rel": "child", "href": "http://127.0.0.1/W090.00-E000.00/catalog.json"}));
+        docs.insert(level.to_string(), columns.to_string().into_bytes());
+        let (r, reads) = run(&docs, [-50.0, -20.0, -40.0, -10.0], ("2024-01-01", "2024-02-29"), 100);
+        assert!(reads.iter().all(|u| u.starts_with("https://x.org/")), "{reads:?}");
+        let found = r.unwrap();
+        assert_eq!((found.items.len(), found.unread), (2, 2), "the month and the column in the period and the area; 1990 isn't wanted");
     }
 
     #[test]

@@ -367,15 +367,16 @@ fn item(f: &Value, from: Option<&str>) -> Option<Item> {
                 scale: band_number(a, "scale"),
                 offset: band_number(a, "offset"),
                 nodata: band_number(a, "nodata"),
-                invalid: a
-                    .get("je:rasters")
-                    .and_then(|r| r.get("dn")?.get("error")?.as_array())
-                    .into_iter()
-                    .flatten()
-                    .take(MAX_INVALID)
-                    .filter_map(Value::as_f64)
-                    .filter(|v| v.is_finite())
-                    .collect(),
+                // Codes for a failed retrieval are stored values that aren't values. One left
+                // unread would be read as a value, so an asset with a code that isn't a number, or
+                // more codes than are kept, is left out (a cube counts its item as skipped).
+                invalid: match a.get("je:rasters").and_then(|r| r.get("dn")?.get("error")) {
+                    None => Vec::new(),
+                    Some(codes) => {
+                        let codes = codes.as_array().filter(|c| c.len() <= MAX_INVALID)?;
+                        codes.iter().map(|c| c.as_f64().filter(|v| v.is_finite())).collect::<Option<Vec<f64>>>()?
+                    }
+                },
             })
         })
         .collect();
@@ -970,6 +971,20 @@ mod tests {
 
     /// A data cube's tile and a band's scale (#559): the grid codes catalogs use, and
     /// `raster:bands` before `eo:bands`.
+    #[test]
+    fn retrieval_error_codes_are_read_whole_or_the_asset_is_left_out() {
+        let with = |codes: serde_json::Value| {
+            let v = serde_json::json!({"type": "Feature", "id": "t", "properties": {"datetime": "2024-01-01T00:00:00Z"},
+                "assets": {"V": {"href": "https://x.org/v.tiff", "je:rasters": {"dn": {"error": codes}}}}});
+            item_from_json(&v, None).unwrap().assets
+        };
+        assert_eq!(with(serde_json::json!([5, 6.5]))[0].invalid, [5.0, 6.5]);
+        // A code that isn't a number, or more than are kept, would be read as a value.
+        assert!(with(serde_json::json!([5, "x"])).is_empty());
+        assert!(with(serde_json::json!((0..=MAX_INVALID).collect::<Vec<_>>())).is_empty());
+        assert_eq!(with(serde_json::json!((0..MAX_INVALID).collect::<Vec<_>>()))[0].invalid.len(), MAX_INVALID);
+    }
+
     #[test]
     fn tiles_and_band_scales() {
         let p = |v: Value| tile_of(&v);
