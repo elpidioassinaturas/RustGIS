@@ -19172,6 +19172,8 @@ fn layer_address_redaction_keeps_a_cogs_look() {
         // Its own words stay.
         ("https://h.example/a.tif#range=0,1000&dequantize=none".into(), "https://h.example/a.tif#range=0,1000&dequantize=none".into()),
         ("cog:{z}/{x}/{y}@https://h.example/a.tif#dequantize=aef".into(), "cog:{z}/{x}/{y}@https://h.example/a.tif#dequantize=aef".into()),
+        ("https://h.example/a.tif#range=0,1000&cube=1".into(), "https://h.example/a.tif#range=0,1000&cube=1".into()),
+        ("https://h.example/a.tif#cube=s3cret".into(), "https://h.example/a.tif".into()),
         // A look after another fragment: only the look stays.
         ("https://h.example/a.tif#sig=s3cret#range=0,1000".into(), "https://h.example/a.tif#range=0,1000".into()),
     ];
@@ -19216,6 +19218,15 @@ fn saved_cubes_keep_their_look() {
     // Opened again before RustGIS closes, it has its token back, with its look.
     t.run("project.open", &json!({"path": path})).unwrap();
     assert_eq!(t.map().tiles[0].time_urls[0].1, with_key);
+
+    // A cube of one file: its address is all that keeps it a tile layer when its project opens.
+    let one_file = "https://h.example/2020.tif#range=0,1000&cube=1";
+    let mut one = Session::new(Project::default());
+    one.map_mut().tiles.push(rustgis_map::TileLayer::new("One date", rustgis_map::TileKind::Cog, one_file));
+    let saved = one.run("project.saveAs", &json!({"path": path})).unwrap();
+    assert_eq!(saved["stripped"], 0, "{saved}");
+    t.run("project.open", &json!({"path": path})).unwrap();
+    assert_eq!(t.map().tiles[0].url, one_file);
     let _ = std::fs::remove_dir_all(dir);
 }
 

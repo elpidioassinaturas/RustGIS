@@ -102,13 +102,16 @@ fn saved_address(address: &str) -> Option<String> {
 }
 
 /// A COG address without its look (`…#bands=…`), and the look as written. A reader takes any word
-/// for `dequantize`, but a saved look holds only numbers and that key's own words: with another
-/// word it stays in the address, and goes as any other fragment does.
+/// for `dequantize` and `cube`, but a saved look holds only numbers and these keys' own words: any
+/// other, or a key not named here, stays in the address and goes as any other fragment does.
 fn split_look(address: &str) -> (&str, &str) {
     let file = crate::render::rustgis_tiles::cog::split(address).0;
     let look = address.get(file.len()..).unwrap_or("");
-    let own_words = look.split(['#', '&']).filter_map(|kv| kv.strip_prefix("dequantize=")).all(|word| matches!(word, "aef" | "none"));
-    if own_words { (file, look) } else { (address, "") }
+    let plain = look.split(['#', '&']).filter(|kv| !kv.is_empty()).all(|kv| {
+        // `Look::parse` has checked that `bands` and `range` are numbers.
+        matches!(kv.split_once('='), Some(("bands" | "range", _) | ("dequantize", "aef" | "none") | ("cube", "0" | "1")))
+    });
+    if plain { (file, look) } else { (address, "") }
 }
 
 /// Strips layer credentials, keeping originals in the visitor's order for the caller to restore.
