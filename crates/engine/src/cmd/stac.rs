@@ -964,7 +964,7 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         // A tile layer's look has no way to name them, so on the map they are values.
         if coded > 0 {
             s.warn(format!(
-                "{collection}: {coded} file(s) mark failed retrievals with codes, which the map draws as values (at the range's low end); Trend Analysis and cube summaries skip them"
+                "{collection}: {coded} file(s) mark failed retrievals with codes, which the map draws as values (inside its range or stretch); Trend Analysis and cube summaries skip them"
             ));
         }
         // One range can't hold if the files store their values alike no longer (a processing

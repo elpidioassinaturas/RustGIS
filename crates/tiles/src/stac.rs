@@ -975,8 +975,7 @@ mod tests {
         assert_eq!(resolve("https://x.org/a", ""), None);
     }
 
-    /// A data cube's tile and a band's scale (#559): the grid codes catalogs use, and
-    /// `raster:bands` before `eo:bands`.
+    /// JAXA Earth's codes for a failed retrieval: read whole, or the asset says they weren't.
     #[test]
     fn retrieval_error_codes_are_read_whole_or_said_unread() {
         let with = |codes: serde_json::Value| {
@@ -994,6 +993,8 @@ mod tests {
         assert_eq!(read(serde_json::json!((0..MAX_INVALID).collect::<Vec<_>>())).0.len(), MAX_INVALID);
     }
 
+    /// A data cube's tile and a band's scale (#559): the grid codes catalogs use, and
+    /// `raster:bands` before `eo:bands`.
     #[test]
     fn tiles_and_band_scales() {
         let p = |v: Value| tile_of(&v);

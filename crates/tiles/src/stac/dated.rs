@@ -88,9 +88,10 @@ fn may_meet(name: &str, lo: f64, hi: f64) -> bool {
 /// to, or one past the links followed (counted once, as the document isn't read whole).
 fn children(doc: &Value, from: &str, wanted: impl Fn(&str) -> bool) -> (Vec<String>, usize) {
     let mut refused = usize::from(too_many(doc, "child"));
-    let mut kept = Vec::new();
+    let mut kept: Vec<String> = Vec::new();
     for (u, _) in links(doc, "child", from) {
-        if !wanted(&u) {
+        // A link listed twice is one folder.
+        if !wanted(&u) || kept.contains(&u) {
             continue;
         }
         if is_web(&u) && crate::address::check(&u, Some(from)).is_ok() {
@@ -629,6 +630,16 @@ mod tests {
         assert!(!reads.iter().any(|u| u.ends_with("2024-02.json")), "{reads:?}");
         let found = r.unwrap();
         assert_eq!((found.items.len(), found.unread), (1, 1));
+    }
+
+    #[test]
+    fn a_date_listed_twice_is_one_date() {
+        let mut docs = tree("YYYY-MM", &["2024-01"]);
+        let mut root: Value = serde_json::from_slice(&docs[ROOT]).unwrap();
+        root["links"].as_array_mut().unwrap().push(json!({"rel": "child", "href": "./2024-01/catalog.json"}));
+        docs.insert(ROOT.to_string(), root.to_string().into_bytes());
+        let (r, _) = run(&docs, [-50.0, -20.0, -40.0, -10.0], ("2024-01-01", "2024-01-31"), 1);
+        assert_eq!(r.unwrap().items.len(), 1, "one tile at one date is within a cap of 1");
     }
 
     #[test]
