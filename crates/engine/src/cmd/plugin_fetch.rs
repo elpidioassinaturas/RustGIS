@@ -490,7 +490,8 @@ impl UrlWaits {
     pub(crate) fn land(&mut self, n: u64, answer: CmdResult, added: Added) {
         if let Some(i) = self.in_flight.iter().position(|(m, ..)| *m == n) {
             let (_, asked, _) = self.in_flight.remove(i);
-            if answer.is_ok() {
+            // (A document adds nothing, and no front end lands it again by its number.)
+            if answer.is_ok() && added.document.is_none() {
                 if self.added.len() >= MAX_EXPIRED {
                     self.added.pop_front();
                 }
@@ -980,6 +981,20 @@ mod tests {
         assert!(e.contains("still under way"), "{e}");
         assert!(s.url_waits.reading.is_empty());
         plugins::unload("refused-read");
+    }
+
+    /// A document read takes no download's place among those added: past [`MAX_EXPIRED`]
+    /// documents, a download added is still refused when it lands again (#1319).
+    #[test]
+    fn documents_read_keep_no_download_out_of_those_added() {
+        let mut waits = UrlWaits::default();
+        waits.wait(1, json!({"url": "https://x.org/a.csv"}));
+        waits.land(1, Ok(json!({})), Added::default());
+        for n in 0..MAX_EXPIRED as u64 {
+            waits.wait(n + 2, json!({"url": format!("https://x.org/doc/{n}"), "document": true}));
+            waits.land(n + 2, Ok(json!({})), Added { document: Some(Arc::from(&b"caps"[..])), ..Added::default() });
+        }
+        assert!(waits.added_already(1, &json!({"url": "https://x.org/a.csv", "request": 1})));
     }
 
     /// A document read off the frame lands for the command waiting for it; one whose command gave
