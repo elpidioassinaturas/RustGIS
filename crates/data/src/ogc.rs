@@ -1132,20 +1132,24 @@ fn wms_native<'a, 'i>(
     read: &mut LayerBoxes<'a, 'i>,
 ) -> Option<(String, warp::Warp)> {
     // Its boxes by system (its own, else the nearest it inherits: WMS 1.3.0 §7.2.4.6.8), read
-    // once a layer.
-    let mut boxes: std::collections::HashMap<u32, Node> = std::collections::HashMap::new();
+    // once for each layer they belong to.
     if v13 {
         for a in layer.ancestors().filter(|a| a.is_element() && local(a) == "Layer") {
-            for b in read.entry(a.id()).or_insert_with(|| children(&a, "BoundingBox").collect()).iter() {
-                // (By code: the box may name the system otherwise than the list, `EPSG:2056` for
-                // `urn:ogc:def:crs:EPSG::2056`; but a CRS:84 box, longitude first, isn't an
-                // EPSG:4326 one.)
-                if let Some(code) = b.attribute("CRS").or(b.attribute("SRS")).filter(|c| !warp::is_crs84(c)).and_then(warp::epsg_of) {
-                    boxes.entry(code).or_insert(*b);
+            read.entry(a.id()).or_insert_with(|| {
+                let mut boxes = std::collections::HashMap::new();
+                for b in children(&a, "BoundingBox") {
+                    // (By code: the box may name the system otherwise than the list, `EPSG:2056` for
+                    // `urn:ogc:def:crs:EPSG::2056`; but a CRS:84 box, longitude first, isn't an
+                    // EPSG:4326 one.)
+                    if let Some(code) = b.attribute("CRS").or(b.attribute("SRS")).filter(|c| !warp::is_crs84(c)).and_then(warp::epsg_of) {
+                        boxes.entry(code).or_insert(b);
+                    }
                 }
-            }
+                boxes
+            });
         }
     }
+    let read = &*read;
     let lat_first = |name: &str, system: crate::raster::Crs| {
         v13 && !warp::is_crs84(name) && {
             // In the order of the system's axes as EPSG defines them (WMS 1.3.0 §6.7.3.3); for a
@@ -1153,7 +1157,7 @@ fn wms_native<'a, 'i>(
             if let Some(north) = epsg_north_first(system) {
                 return north;
             }
-            let own = warp::epsg_of(name).and_then(|code| boxes.get(&code));
+            let own = warp::epsg_of(name).and_then(|code| layer.ancestors().find_map(|a| read.get(&a.id())?.get(&code)));
             let written = own.and_then(|b| {
                 let f = |k: &str| b.attribute(k).and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite());
                 Some([f("minx")?, f("miny")?, f("maxx")?, f("maxy")?])
@@ -1180,9 +1184,10 @@ fn wms_native<'a, 'i>(
     Some((first.name, warp::Warp { epsg, grid: warp::Grid::Map { lat_first }, area, systems }))
 }
 
-/// The `BoundingBox`es of the WMS layers read so far. A service's layers often share one parent:
-/// looking through its children again for each would take the square of their number.
-type LayerBoxes<'a, 'i> = std::collections::HashMap<roxmltree::NodeId, Vec<Node<'a, 'i>>>;
+/// The `BoundingBox`es of the WMS layers read so far, by system. A service's layers often share one
+/// parent: looking through its children or its boxes again for each would take the square of
+/// their number.
+type LayerBoxes<'a, 'i> = std::collections::HashMap<roxmltree::NodeId, std::collections::HashMap<u32, Node<'a, 'i>>>;
 
 /// Whether `system` is written north (or latitude) first as EPSG defines its axes, when
 /// RustGIS's table knows it ([`crate::raster::epsg_axes`]).
@@ -1813,11 +1818,12 @@ fn wcs(url: &str, root: &Node) -> Service {
             legends: Vec::new(),
         });
     };
-    let (mut n, mut left) = (0, 0);
+    let (mut n, mut left, mut long_ids) = (0, 0, 0);
     // WCS 1.1 and 2.0: `CoverageSummary` (nested ones too), named by `CoverageId` or `Identifier`.
     for s in root.descendants().filter(|n| n.is_element() && local(n) == "CoverageSummary") {
         let Some(id) = child_text(&s, "CoverageId").or_else(|| child_text(&s, "Identifier")) else { continue };
         if id.len() > 500 {
+            long_ids += 1;
             continue;
         }
         if n >= MAX_READ_LAYERS {
@@ -1832,6 +1838,7 @@ fn wcs(url: &str, root: &Node) -> Service {
     for b in root.descendants().filter(|n| n.is_element() && local(n) == "CoverageOfferingBrief") {
         let Some(id) = child_text(&b, "name") else { continue };
         if id.len() > 500 {
+            long_ids += 1;
             continue;
         }
         if n >= MAX_READ_LAYERS {
@@ -1850,6 +1857,9 @@ fn wcs(url: &str, root: &Node) -> Service {
     cut_listing(&mut service);
     if left > 0 {
         service.notes.push(past_read_limit(left, "coverages", MAX_READ_LAYERS));
+    }
+    if long_ids > 0 {
+        service.notes.push(format!("{long_ids} coverages are left out: their identifiers are longer than 500 bytes"));
     }
     service
 }
@@ -6711,6 +6721,25 @@ mod tests {
         let s = parse("https://x.org/wms", doc.as_bytes()).unwrap();
         assert_eq!(s.layers.len(), MAX_READ_LAYERS);
         assert!(!s.notes.iter().any(|n| n.contains(PAST_READ_LIMIT)), "{:?}", s.notes);
+    }
+
+    /// A coverage whose identifier is too long for an address is counted in a note.
+    #[test]
+    fn a_coverage_with_a_long_identifier_is_said_to_be_left_out() {
+        let long = "c".repeat(501);
+        let v2 = format!(
+            "<Capabilities><Contents><CoverageSummary><CoverageId>{long}</CoverageId></CoverageSummary><CoverageSummary><CoverageId>c</CoverageId></CoverageSummary></Contents></Capabilities>"
+        );
+        let v1 = format!(
+            "<WCS_Capabilities><ContentMetadata><CoverageOfferingBrief><name>{long}</name></CoverageOfferingBrief><CoverageOfferingBrief><name>c</name></CoverageOfferingBrief></ContentMetadata></WCS_Capabilities>"
+        );
+        for doc in [v2, v1] {
+            let s = parse("https://x.org/wcs", doc.as_bytes()).unwrap();
+            assert_eq!(s.layers.len(), 1);
+            assert_eq!(s.notes, ["1 coverages are left out: their identifiers are longer than 500 bytes"]);
+            let clean = doc.replace(&long, "d");
+            assert!(parse("https://x.org/wcs", clean.as_bytes()).unwrap().notes.is_empty());
+        }
     }
 
     /// An OGC API past what's listed is read whole, and still marked for those that need it whole.

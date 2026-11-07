@@ -424,10 +424,10 @@ pub(crate) fn layers(s: &mut Session, p: &Value) -> CmdResult {
     let bound = crate::service_logins::request_params(s, p)?;
     let p = bound.as_ref();
     let mut found = capabilities(p)?;
-    let total = found.service.layers.len();
-    if let Some(listed) = found.service.listed.filter(|&listed| listed < total) {
+    let of = layer_count(&found.service);
+    if let Some(listed) = found.service.listed.filter(|&listed| listed < found.service.layers.len()) {
         found.service.layers.truncate(listed);
-        found.service.notes.push(format!("only the first {listed} of {total} layers are listed; service.add takes any of them by name"));
+        found.service.notes.push(format!("only the first {listed} of {of} are listed; service.add takes any of them by name"));
     }
     let mut out = service_json(&found.service);
     if let Some(layers) = out.get_mut("layers").and_then(Value::as_array_mut) {
@@ -441,13 +441,19 @@ pub(crate) fn layers(s: &mut Session, p: &Value) -> CmdResult {
     Ok(out)
 }
 
+/// How many layers a service has, for a note: those read, when the document goes past the limit.
+fn layer_count(service: &Service) -> String {
+    let total = service.layers.len();
+    if service.notes.iter().any(|n| n.contains(PAST_READ_LIMIT)) { format!("the {total} layers read") } else { format!("{total} layers") }
+}
+
 /// The error for a name the document doesn't give. It may also be past what is read of the
 /// document, which can't be told from a mistyped name, so that is said beside it.
 fn not_listed(url: &str, what: &str, want: &str, service: &Service) -> String {
     let total = service.layers.len();
     let past_limit = service.notes.iter().find(|n| n.contains(PAST_READ_LIMIT));
     let listing = match (service.listed.filter(|&listed| listed < total), past_limit) {
-        (Some(listed), _) => format!("service.layers lists the first {listed} of {total}"),
+        (Some(listed), _) => format!("service.layers lists the first {listed} of {}", layer_count(service)),
         (None, Some(_)) => "service.layers lists those read".to_string(),
         (None, None) => "service.layers lists them".to_string(),
     };

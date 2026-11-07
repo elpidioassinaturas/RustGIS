@@ -14080,7 +14080,7 @@ fn a_layer_past_the_listing_is_added_by_name() {
     assert!(server.requests().iter().any(|r| r.query.iter().any(|(k, v)| k == "TYPENAMES" && v == "t:2001")));
     // A name it doesn't have isn't sent to a list said to hold them all.
     let e = s.run("service.add", &json!({"url": url, "layer": "t:0", "text": caps(2001)})).unwrap_err();
-    assert!(e.ends_with("no layer 't:0' (service.layers lists the first 2000 of 2001)"), "{e}");
+    assert!(e.ends_with("no layer 't:0' (service.layers lists the first 2000 of 2001 layers)"), "{e}");
 
     // A service group takes all of an OGC API's collections, so it still refuses so long a list.
     let collections: Vec<Value> = (1..=2001)
@@ -14107,12 +14107,14 @@ fn a_layer_past_the_read_limit_is_refused_saying_so() {
         listed["notes"],
         json!([
             "RustGIS reads at most 100000 feature types from one document: 1 left out",
-            "only the first 2000 of 100000 layers are listed; service.add takes any of them by name",
+            "only the first 2000 of the 100000 layers read are listed; service.add takes any of them by name",
         ])
     );
     let e = s.run("service.add", &json!({"url": url, "layer": "t:100001", "text": wfs})).unwrap_err();
     assert!(
-        e.contains("no layer 't:100001' (service.layers lists the first 2000 of 100000; RustGIS reads at most 100000 feature types"),
+        e.contains(
+            "no layer 't:100001' (service.layers lists the first 2000 of the 100000 layers read; RustGIS reads at most 100000 feature types"
+        ),
         "{e}"
     );
 
@@ -14121,7 +14123,9 @@ fn a_layer_past_the_read_limit_is_refused_saying_so() {
     let p = json!({"url": "https://wcs.example.org/wcs", "layer": "c100001", "text": wcs, "bbox": "full"});
     let e = s.run("service.coverage", &p).unwrap_err();
     assert!(
-        e.contains("no coverage 'c100001' (service.layers lists the first 2000 of 100000; RustGIS reads at most 100000 coverages"),
+        e.contains(
+            "no coverage 'c100001' (service.layers lists the first 2000 of the 100000 layers read; RustGIS reads at most 100000 coverages"
+        ),
         "{e}"
     );
 
@@ -14133,6 +14137,15 @@ fn a_layer_past_the_read_limit_is_refused_saying_so() {
     );
     let e = s.run("service.add", &json!({"url": "https://wms.example.org/wms", "layer": "t1", "text": wms})).unwrap_err();
     assert!(e.contains("from one document: 1 left out"), "{e}");
+
+    // Many boxes on the parent they share: this too takes minutes if each looks through them.
+    let boxes = r#"<BoundingBox CRS="EPSG:4326" minx="1" miny="1" maxx="2" maxy="2"/>"#.repeat(50_000);
+    let wms: String = (1..=50_000).map(|i| format!("<Layer><Name>t{i}</Name></Layer>")).collect();
+    let wms = format!(
+        r#"<WMS_Capabilities version="1.3.0"><Capability><Layer><CRS>EPSG:3857</CRS><CRS>EPSG:4326</CRS>{boxes}{wms}</Layer></Capability></WMS_Capabilities>"#
+    );
+    let listed = s.run("service.layers", &json!({"url": "https://wms.example.org/wms", "text": wms})).unwrap();
+    assert_eq!(listed["count"], 2000);
 
     // An ArcGIS service is read as far as it is listed.
     let layers: Vec<Value> = (1..=2001).map(|i| json!({"id": i, "name": format!("l{i}")})).collect();
