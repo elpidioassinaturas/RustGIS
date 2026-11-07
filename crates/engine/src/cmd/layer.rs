@@ -3890,7 +3890,10 @@ fn window_checks(p: &Value, url: &str, scan: bool) -> Result<(), String> {
         ));
     }
     // What a window doesn't read is refused, not dropped: it keeps the file's coordinate system.
-    let unread: Vec<&str> = WINDOW_UNREAD.iter().copied().filter(|k| p.get(*k).is_some_and(|v| !v.is_null())).collect();
+    // A data cube's file is a tile layer that follows the time slider, and a window is a raster:
+    // `"cube": false` asks for nothing.
+    let cube = (b(p, "cube") == Some(true)).then_some("cube");
+    let unread: Vec<&str> = WINDOW_UNREAD.iter().copied().filter(|k| p.get(*k).is_some_and(|v| !v.is_null())).chain(cube).collect();
     if !unread.is_empty() {
         return Err(format!("{url}: a window (\"bbox\") doesn't read {}: leave it out", unread.join(", ")));
     }

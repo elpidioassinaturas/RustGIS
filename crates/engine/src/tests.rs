@@ -29390,10 +29390,13 @@ fn a_cog_windows_read_is_apart_from_adding_it() {
         (json!({"service": true}), "doesn't read service"),
         (json!({"coverage": true}), "doesn't read coverage"),
         (json!({"bounds": [1, 2, 3, 4]}), "doesn't read bounds"),
+        (json!({"cube": true}), "doesn't read cube"),
     ] {
         let e = bad(more);
         assert!(e.contains(why) && !e.contains("hidden-1330"), "{why}: {e}");
     }
+    // `"cube": false` asks for nothing.
+    assert!(window_asked(&s, &json!({"url": "https://x.org/a.tif", "bbox": [1, 2, 3, 4], "cube": false})).is_ok());
     // A file that can't be read: said by the read, without the address's keys.
     let (gone, _) = serve_ranges(b"not a tiff at all".to_vec());
     let asked = window_asked(&s, &json!({"url": format!("{gone}/a.tif?token=hidden-1330"), "bbox": [1, 2, 3, 4]})).unwrap();

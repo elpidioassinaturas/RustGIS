@@ -206,7 +206,9 @@ tile), without a STAC catalogue:
   keeps only its first band once the project is reopened, with a notice. Files stored bottom up
   aren't read this way yet. In the web app, `"bbox"` is refused for now: the file is drawn in
   place without it. An address that names another kind of file (`.geojson`, `.fgb`) is refused
-  with `"bbox"` before anything is read; `"cog": true` takes a GeoTIFF by another name.
+  with `"bbox"` before anything is read; `"cog": true` takes a GeoTIFF by another name. A
+  window is a raster layer that the time slider doesn't step through, so `"cube": true` is
+  refused with it.
 
 A GeoParquet or FlatGeobuf file by its address is read in place too, a view at a time, however
 large: the layer is streamed like a large local file, and the view's features are fetched in the

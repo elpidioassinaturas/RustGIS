@@ -4572,12 +4572,18 @@ impl RustGisApp {
             }
             drop(turn);
         });
-        spawned.map_err(|e| {
-            i18n::fmt(
+        if let Err(e) = spawned {
+            // Answered and given back as a refused window is.
+            let e = i18n::fmt(
                 "{url}: its read didn't start: {error}",
                 &[("url", &rustgis_engine::sources::redact(&url)), ("error", &e.to_string())],
-            )
-        })?;
+            );
+            self.session.request_failed(p, &e);
+            if let Some(id) = claim {
+                self.session.download_failed(id);
+            }
+            return Err(e);
+        }
         // Named redacted, and by the address an S3 connection's wraps.
         let shown = rustgis_engine::sources::redact(rustgis_engine::data::s3_address::inner(&url));
         self.session.notify(i18n::fmt("Reading {url}…", &[("url", &shown)]), false);
