@@ -32,11 +32,14 @@ The browser app doesn't ask yet; it warns before you leave a page with unsaved c
 default), RustGIS keeps your changes as a [recovery copy](#autosave-and-recovery) and offers them
 back the next time it starts; with autosave off, they are lost, so save before you quit.
 
-Saved layer addresses omit passwords, access keys, tokens and signatures. The open session
-keeps them, but after restarting RustGIS a protected source may need you to sign in to its
-connection again or add it again with credentials. A cloud-optimised GeoTIFF's look in its address
-(`#bands=…`, `#range=…`, `#dequantize=aef`, a data cube's fixed range too) is saved; any other `#`
-part isn't.
+Supported layer and video address fields, and recognized task, model, notebook and history
+parameters, omit recognized passwords, access keys, tokens and signatures. Notices count what was removed or could not
+be checked. The open session keeps its credentials, but a saved workflow or protected source may
+need them again when reopened. User notes, feature data and opaque content are preserved; see
+[Sharing projects and generated items](https://github.com/opengeos/RustGIS/blob/main/SECURITY.md#sharing-projects-and-generated-items)
+before sharing a file. Review addresses before sharing too: an unrecognized credential can remain unchanged.
+A cloud-optimised GeoTIFF's look in its address (`#bands=…`, `#range=…`, `#dequantize=aef`, a data
+cube's fixed range too) is saved; any other `#` part isn't.
 
 ### Autosave and recovery
 
