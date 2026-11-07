@@ -179,7 +179,9 @@ const LAYOUT_FAVOURITE_PREF: &str = "layout_favourite_arrangement";
 pub type Slot<T> = std::sync::Arc<std::sync::Mutex<Option<T>>>;
 
 /// One window is read off the frame at a time, however many have started: each may hold 256 MB
-/// and more. Those that wait for their command on the frame don't wait for this.
+/// and more. A read keeps its turn until the frame has taken what it read, so a frame that stalls
+/// holds one window, not all of them. Those that wait for their command on the frame don't wait
+/// for this.
 #[cfg(not(target_arch = "wasm32"))]
 static WINDOW_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -190,7 +192,24 @@ const MAX_WINDOW_READS: usize = 16;
 
 /// See [`UiState::window_reads`].
 #[cfg(not(target_arch = "wasm32"))]
-type WindowRead = (u64, String, Value, Slot<Result<rustgis_engine::cmd::layer::CogWindow, String>>);
+type WindowRead =
+    (u64, String, Value, Slot<Result<rustgis_engine::cmd::layer::CogWindow, String>>, std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+/// A window's turn to be read off the frame, or `None` once `left` says its project was closed:
+/// one waiting for its turn then gives up its place at once, without being read.
+#[cfg(not(target_arch = "wasm32"))]
+fn window_turn(left: &std::sync::atomic::AtomicBool) -> Option<std::sync::MutexGuard<'static, ()>> {
+    loop {
+        if left.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        match WINDOW_TURN.try_lock() {
+            Ok(turn) => return Some(turn),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+}
 
 /// A shell's overrides of the Settings › Start-up preferences for one launch.
 #[derive(Clone, Debug, Default)]
@@ -709,7 +728,8 @@ pub struct UiState {
     /// and the answer).
     pub cog_probes: Vec<(Value, Slot<Result<bool, String>>)>,
     /// Windows of cloud-optimised GeoTIFFs (`"bbox"`) being read on threads: the session's
-    /// download id, the address, the parameters to add it with, and where the read lands.
+    /// download id, the address, the parameters to add it with, where the read lands, and whether
+    /// its project was closed.
     #[cfg(not(target_arch = "wasm32"))]
     pub window_reads: Vec<WindowRead>,
     /// Service layers whose features are being read page by page (an ArcGIS layer's description
@@ -4250,12 +4270,16 @@ impl RustGisApp {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut read = Vec::new();
-            self.ui.window_reads.retain(|(id, url, p, slot)| match slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let session = &self.session;
+            self.ui.window_reads.retain(|(id, url, p, slot, left)| match slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 Some(r) => {
                     read.push((*id, url.clone(), p.clone(), r));
                     false
                 }
-                None => true,
+                None => {
+                    left.store(!session.download_under_way(*id), std::sync::atomic::Ordering::Relaxed);
+                    true
+                }
             });
             for (id, url, mut p, r) in read {
                 let origin = connectiontree::take_origin_key(&mut p);
@@ -4307,15 +4331,26 @@ impl RustGisApp {
         q["window"] = window;
         let slot: Slot<Result<rustgis_engine::cmd::layer::CogWindow, String>> = Slot::default();
         let land = slot.clone();
+        let left = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let leaving = left.clone();
         // Its requests stay in the session's diagnostics.
         let diagnostics = self.session.diagnostics.capture();
         let spawned = std::thread::Builder::new().name("cog-window".into()).spawn(move || {
             let _diagnostics = diagnostics.enter();
-            let _turn = WINDOW_TURN.lock().unwrap_or_else(|e| e.into_inner());
-            // On a thread no command's catch reaches: a bug must not leave it running forever.
-            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_engine::cmd::layer::read_cog_window(&asked)));
-            let read = read.unwrap_or_else(|_| Err(tl!("Reading the window failed unexpectedly").to_string()));
+            let turn = window_turn(&leaving);
+            let read = if turn.is_some() {
+                // On a thread no command's catch reaches: a bug must not leave it running forever.
+                let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_engine::cmd::layer::read_cog_window(&asked)));
+                read.unwrap_or_else(|_| Err(tl!("Reading the window failed unexpectedly").to_string()))
+            } else {
+                Err(tl!("its project was closed before its read began, so it wasn't read").to_string())
+            };
             *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(read);
+            // The next read waits for the frame to take this one, or for the app to be gone.
+            while std::sync::Arc::strong_count(&land) > 1 && land.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            drop(turn);
         });
         spawned.map_err(|e| {
             i18n::fmt(
@@ -4326,7 +4361,7 @@ impl RustGisApp {
         let shown = rustgis_engine::data::s3_address::inner(&url);
         self.session.notify(i18n::fmt("Reading {url}…", &[("url", shown)]), false);
         let id = self.session.download_started();
-        self.ui.window_reads.push((id, url, q, slot));
+        self.ui.window_reads.push((id, url, q, slot, left));
         Ok(Value::Null)
     }
 
@@ -5367,7 +5402,7 @@ mod record_tests {
         assert_eq!(steps[0].params, json!({"url": "https://example.com/data", "name": "W", "bbox": "view", "cellSize": 30, "cog": true}));
     }
 
-    /// `ui.addUrl` with `"bbox"` (Command Search's `layer.addUrl`): a slow server doesn't hold the
+    /// `ui.addUrl` with `"bbox"`: a slow server doesn't hold the
     /// frame, and the layer lands when the read does (#1330).
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
@@ -5428,11 +5463,69 @@ mod record_tests {
     fn too_many_windows_under_way_are_refused() {
         let mut app = RustGisApp::with_sample();
         for _ in 0..crate::MAX_WINDOW_READS {
-            app.ui.window_reads.push((0, String::new(), serde_json::Value::Null, Default::default()));
+            app.ui.window_reads.push((0, String::new(), serde_json::Value::Null, Default::default(), Default::default()));
         }
         let e = app.run("ui.addUrl", json!({"url": "https://x.org/a.tif?token=hidden-1330", "bbox": [1, 2, 3, 4]})).unwrap_err();
         assert!(e.contains("x.org/a.tif") && e.contains("16 windows") && !e.contains("hidden-1330"), "{e}");
         assert_eq!(app.ui.window_reads.len(), crate::MAX_WINDOW_READS);
+    }
+
+    /// A window still waiting for its turn when its project closes gives up its place at once, and
+    /// isn't read (#1330).
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_window_waiting_when_its_project_closes_isnt_read() {
+        use std::sync::atomic::Ordering;
+        let _turn = crate::fetching::turn();
+        let slow = crate::fetching::slow_ranges(rustgis_engine::data::raster::cog::example(1024, 256));
+        slow.open.store(false, Ordering::Relaxed);
+        let mut app = RustGisApp::with_sample();
+        // Another window's read has the turn, and keeps it throughout.
+        let reading = crate::WINDOW_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let url = format!("{}/scene.tif", slow.origin);
+        app.run("ui.addUrl", json!({"url": url, "bbox": [10.25, 45.5, 10.5, 45.75], "name": "Left"})).unwrap();
+        app.run("project.new", json!({})).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !app.ui.window_reads.is_empty() {
+            assert!(std::time::Instant::now() < deadline, "its place wasn't given up");
+            app.poll_data_downloads();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(reading);
+        assert_eq!(slow.held.load(Ordering::Relaxed), 0, "nothing is asked of the server");
+        let said = |n: &rustgis_engine::Notice| n.text.contains("scene.tif") && n.text.contains("before its read began");
+        assert!(app.session.notices.iter().any(said), "{:?}", app.session.notices);
+    }
+
+    /// The next window is read only once the frame has taken the last: a frame that stalls holds
+    /// one window's values, not those of all that were asked for (#1330).
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn the_next_window_waits_for_the_last_to_be_taken() {
+        let _turn = crate::fetching::turn();
+        let slow = crate::fetching::slow_ranges(rustgis_engine::data::raster::cog::example(1024, 256));
+        let mut app = RustGisApp::with_sample();
+        let url = format!("{}/scene.tif", slow.origin);
+        for name in ["First", "Second"] {
+            app.run("ui.addUrl", json!({"url": url, "bbox": [10.25, 45.5, 10.5, 45.75], "name": name})).unwrap();
+        }
+        let landed =
+            |app: &RustGisApp| app.ui.window_reads.iter().filter(|r| r.3.lock().unwrap_or_else(|e| e.into_inner()).is_some()).count();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while landed(&app) == 0 {
+            assert!(std::time::Instant::now() < deadline, "no read landed");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // No frame takes it, so the other isn't read.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(landed(&app), 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !app.ui.window_reads.is_empty() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting: {:?}", app.session.notices);
+            app.poll_data_downloads();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(app.session.map().layer_by_name("First").is_some() && app.session.map().layer_by_name("Second").is_some());
     }
 
     /// A window that can't be read is refused at once, one read that fails says so once, and one

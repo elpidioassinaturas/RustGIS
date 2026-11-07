@@ -1141,6 +1141,12 @@ impl Session {
         true
     }
 
+    /// Whether a download is still under way for this project: `false` once another project was
+    /// opened.
+    pub fn download_under_way(&self, id: u64) -> bool {
+        self.downloading.contains(&id)
+    }
+
     /// Forgets a download that failed.
     pub fn download_failed(&mut self, id: u64) {
         self.downloading.retain(|d| *d != id);
