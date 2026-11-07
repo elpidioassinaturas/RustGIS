@@ -146,8 +146,9 @@ fn tiles_of(
 ) -> Result<(Vec<String>, usize), String> {
     let read = |url: &str| -> Result<Value, String> { catalog(&fetch(url)?).ok_or_else(|| format!("{url} isn't a STAC catalog")) };
     let levels = read(date)?;
-    // A level refused is a level missing: the error says so.
-    let level = children(&levels, date, |u| name_of(u) == layout.level)
+    // A level refused, or written as a file rather than a folder, is a level missing: the error
+    // says so.
+    let level = children(&levels, date, |u| name_of(u) == layout.level && is_folder(u))
         .0
         .into_iter()
         .next()
@@ -640,6 +641,22 @@ mod tests {
         docs.insert(ROOT.to_string(), root.to_string().into_bytes());
         let (r, _) = run(&docs, [-50.0, -20.0, -40.0, -10.0], ("2024-01-01", "2024-01-31"), 1);
         assert_eq!(r.unwrap().items.len(), 1, "one tile at one date is within a cap of 1");
+    }
+
+    #[test]
+    fn a_date_whose_folders_fail_is_counted_though_its_items_are_read() {
+        // The last date's level can't be read: the date before gives the area's items, every item
+        // is read, and the failed discovery is still told.
+        let mut docs = tree("YYYY-MM", &["2024-01", "2024-02", "2024-03"]);
+        docs.remove("https://x.org/c/2024-03/1/catalog.json");
+        let (r, _) = run(&docs, [-50.0, -20.0, -40.0, -10.0], ("2024-01-01", "2024-03-31"), 100);
+        let found = r.unwrap();
+        assert_eq!((found.items.len(), found.unread), (3, 1));
+        // A level written as a file isn't a level: the same.
+        let mut docs = tree("YYYY-MM", &["2024-01", "2024-02"]);
+        docs.insert("https://x.org/c/2024-02/catalog.json".to_string(), catalog_of("child", &["./1.json".to_string()]));
+        let (r, _) = run(&docs, [-50.0, -20.0, -40.0, -10.0], ("2024-01-01", "2024-02-29"), 100);
+        assert_eq!(r.unwrap().unread, 1);
     }
 
     #[test]
