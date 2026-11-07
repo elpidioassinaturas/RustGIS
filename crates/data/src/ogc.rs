@@ -50,6 +50,9 @@ pub struct LayerTime {
     /// Whether several times may be asked for at once: a list or an interval (a WMS layer's
     /// `multipleValues`, WMS 1.3.0 Annex C.2); otherwise one time.
     pub multiple: bool,
+    /// How many of its times are left out past [`MAX_DOCUMENT_TIME_VALUES`], kept for all of a
+    /// document's layers together.
+    pub cut: usize,
 }
 
 /// Most time values kept for a layer: enough for every year of a century and more (swisstopo's
@@ -68,7 +71,7 @@ fn last(mut values: Vec<String>, n: usize) -> Vec<String> {
 
 /// Most time values kept for all of a WMS document's layers together (swisstopo's 56 list about
 /// 2,000).
-const MAX_DOCUMENT_TIME_VALUES: usize = 50_000;
+pub const MAX_DOCUMENT_TIME_VALUES: usize = 50_000;
 
 /// The most steps the time slider takes (`rustgis_map::time::MAX_STEPS`).
 const MAX_SLIDER_STEPS: usize = 20_000;
@@ -337,7 +340,7 @@ fn layer_time(default: Option<&str>, all: Vec<String>, check: fn(&str) -> Result
     // The latest few: those the default and the latest are among.
     let skip = all.len().saturating_sub(MAX_TIME_VALUES);
     let values = all.into_iter().skip(skip).collect();
-    Some(LayerTime { default, values, multiple })
+    Some(LayerTime { default, values, multiple, cut: 0 })
 }
 
 /// A WMS layer's own time dimension: its `Dimension` named `time` with its values (WMS 1.3.0
@@ -458,6 +461,24 @@ pub struct Service {
 const MAX_LISTED_LAYERS: usize = 2_000;
 /// Most layers or collections read from one document, which is hostile input.
 const MAX_READ_LAYERS: usize = if cfg!(test) { 3_000 } else { 100_000 };
+/// Most bytes of a document's own request addresses (its GetMap's, GetFeature's…) copied into
+/// its layers together: each layer's address repeats them, so long ones lower how many are read.
+const MAX_COPIED_ADDRESS_BYTES: usize = if cfg!(test) { 8 << 20 } else { 64 << 20 };
+
+/// How many layers are read from a document whose layers each copy `per_layer` bytes of its
+/// request addresses: [`MAX_READ_LAYERS`], fewer for long addresses, never fewer than are listed.
+fn read_limit(per_layer: usize) -> usize {
+    (MAX_COPIED_ADDRESS_BYTES / per_layer.max(1)).clamp(MAX_LISTED_LAYERS, MAX_READ_LAYERS)
+}
+
+/// Says why a document past a [`read_limit`] lower than [`MAX_READ_LAYERS`] was read no further.
+fn note_copied_addresses(service: &mut Service, per_layer: usize, limit: usize) {
+    if limit < MAX_READ_LAYERS {
+        service.notes.push(format!(
+            "each of its layers copies {per_layer} bytes of the document's request addresses, so RustGIS reads {limit} of them, not {MAX_READ_LAYERS}"
+        ));
+    }
+}
 /// How a note says that a document went past what is read of it.
 const PAST_READ_LIMIT: &str = "RustGIS reads at most";
 /// Features asked of a WFS in one request.
@@ -936,6 +957,9 @@ fn wms(url: &str, root: &Node) -> Service {
     // The SLD profile's GetLegendGraphic (WMS 1.3.0 with SLD 1.1, 1.1.1 with SLD 1.0), when the
     // service offers it in a format RustGIS shows: a layer's legend, drawn from its default style.
     let legend_graphic = wms_legend_graphic(root, url, &get_map, version);
+    let per_layer =
+        get_map.len() + info_request.as_ref().map_or(0, |r| r.url.len()) + legend_graphic.as_ref().map_or(0, |g| g("").url.len());
+    let limit = read_limit(per_layer);
     // (What a layer passes on is shared by its sublayers, not copied for each: a hostile document
     // may give one layer a great many.)
     type Inherited<'a, 'i> = (Node<'a, 'i>, Rc<Systems>, Option<[f64; 4]>, bool, Rc<[Node<'a, 'i>]>, Option<Rc<LayerTime>>, Scales);
@@ -945,14 +969,18 @@ fn wms(url: &str, root: &Node) -> Service {
         .flat_map(|c| children(&c, "Layer").collect::<Vec<_>>())
         .map(|l| (l, Rc::default(), None, false, Rc::from([]), None, Scales::default()))
         .collect();
+    // Read in document order (the last pushed is the first read), so the layers past the read
+    // limit are the document's last, and a parent comes before its sublayers.
+    stack.reverse();
     while let Some((layer, inherited_crs, inherited_bbox, inherited_queryable, inherited_styles, inherited_time, inherited_scales)) =
         stack.pop()
     {
-        if service.layers.len() >= MAX_READ_LAYERS {
+        if service.layers.len() >= limit {
             let named = |l: &Node| l.descendants().filter(|n| n.is_element() && local(n) == "Layer" && child(n, "Name").is_some()).count();
             let left = named(&layer) + stack.iter().map(|entry| named(&entry.0)).sum::<usize>();
             if left > 0 {
-                note_past_read_limit(&mut service, left, "layers", MAX_READ_LAYERS);
+                note_past_read_limit(&mut service, left, "layers", limit);
+                note_copied_addresses(&mut service, per_layer, limit);
             }
             break;
         }
@@ -987,7 +1015,7 @@ fn wms(url: &str, root: &Node) -> Service {
         };
         // Its own scale hints replace those it inherits (WMS 1.3.0 §7.2.4.8).
         let scales = Scales::of(&layer, inherited_scales);
-        for sub in children(&layer, "Layer") {
+        for sub in children(&layer, "Layer").collect::<Vec<_>>().into_iter().rev() {
             stack.push((sub, Rc::clone(&crs), bbox, queryable, Rc::clone(&styles), time.clone(), scales));
         }
         let Some(name) = child_text(&layer, "Name") else { continue };
@@ -1070,18 +1098,17 @@ fn wms(url: &str, root: &Node) -> Service {
         });
         times.push(time);
     }
-    service.layers.reverse();
     // The values listed for the whole document are capped (a parent's many, inherited by a great
-    // many layers, aren't copied to each), and go to the layers in the order they are listed: those
-    // a listing shows first, though the layers are read from the last.
+    // many layers, aren't copied to each), and go to the layers in document order: those a
+    // listing shows first.
     let mut cut_times = 0;
-    for (layer, time) in service.layers.iter_mut().zip(times.into_iter().rev()) {
+    for (layer, time) in service.layers.iter_mut().zip(times) {
         layer.time = time.as_deref().map(|t| {
             let keep = t.values.len().min(time_budget);
             let values: Vec<String> = t.values.iter().skip(t.values.len() - keep).cloned().collect();
             time_budget -= values.len();
             cut_times += usize::from(keep < t.values.len());
-            LayerTime { values, default: t.default.clone(), multiple: t.multiple }
+            LayerTime { cut: t.values.len() - keep, values, default: t.default.clone(), multiple: t.multiple }
         });
     }
     if cut_times > 0 {
@@ -1426,11 +1453,13 @@ fn wmts(url: &str, root: &Node) -> Service {
         .map(|h| endpoint(&h))
         .unwrap_or_else(|| endpoint(url));
     let (mut skipped, mut too_long) = (0, 0);
-    let left = children(&contents, "Layer").count().saturating_sub(MAX_READ_LAYERS);
+    let limit = read_limit(kvp.len());
+    let left = children(&contents, "Layer").count().saturating_sub(limit);
     if left > 0 {
-        note_past_read_limit(&mut service, left, "layers", MAX_READ_LAYERS);
+        note_past_read_limit(&mut service, left, "layers", limit);
+        note_copied_addresses(&mut service, kvp.len(), limit);
     }
-    for layer in children(&contents, "Layer").take(MAX_READ_LAYERS) {
+    for layer in children(&contents, "Layer").take(limit) {
         let Some(name) = child_text(&layer, "Identifier") else { continue };
         let title = child_text(&layer, "Title").unwrap_or_else(|| name.clone());
         let default_style = children(&layer, "Style").find(|s| s.attribute("isDefault") == Some("true")).or_else(|| child(&layer, "Style"));
@@ -1654,11 +1683,13 @@ fn wfs(url: &str, root: &Node) -> Service {
         return service;
     };
     let Some(list) = child(root, "FeatureTypeList") else { return service };
-    let left = children(&list, "FeatureType").count().saturating_sub(MAX_READ_LAYERS);
+    let (per_layer, limit) = (get.len() + json.len(), read_limit(get.len() + json.len()));
+    let left = children(&list, "FeatureType").count().saturating_sub(limit);
     if left > 0 {
-        note_past_read_limit(&mut service, left, "feature types", MAX_READ_LAYERS);
+        note_past_read_limit(&mut service, left, "feature types", limit);
+        note_copied_addresses(&mut service, per_layer, limit);
     }
-    for ft in children(&list, "FeatureType").take(MAX_READ_LAYERS) {
+    for ft in children(&list, "FeatureType").take(limit) {
         let Some(name) = child_text(&ft, "Name") else { continue };
         let title = child_text(&ft, "Title").unwrap_or_else(|| name.clone());
         let bbox = child(&ft, "WGS84BoundingBox")
@@ -1849,6 +1880,7 @@ fn wcs(url: &str, root: &Node) -> Service {
         });
     };
     let (mut n, mut left, mut long_ids) = (0, 0, 0);
+    let limit = read_limit(get.len());
     // WCS 1.1 and 2.0: `CoverageSummary` (nested ones too), named by `CoverageId` or `Identifier`.
     for s in root.descendants().filter(|n| n.is_element() && local(n) == "CoverageSummary") {
         let Some(id) = child_text(&s, "CoverageId").or_else(|| child_text(&s, "Identifier")) else { continue };
@@ -1856,7 +1888,7 @@ fn wcs(url: &str, root: &Node) -> Service {
             long_ids += 1;
             continue;
         }
-        if n >= MAX_READ_LAYERS {
+        if n >= limit {
             left += 1;
             continue;
         }
@@ -1871,7 +1903,7 @@ fn wcs(url: &str, root: &Node) -> Service {
             long_ids += 1;
             continue;
         }
-        if n >= MAX_READ_LAYERS {
+        if n >= limit {
             left += 1;
             continue;
         }
@@ -1886,7 +1918,8 @@ fn wcs(url: &str, root: &Node) -> Service {
     }
     cut_listing(&mut service);
     if left > 0 {
-        note_past_read_limit(&mut service, left, "coverages", MAX_READ_LAYERS);
+        note_past_read_limit(&mut service, left, "coverages", limit);
+        note_copied_addresses(&mut service, get.len(), limit);
     }
     if long_ids > 0 {
         service.notes.push(format!("{long_ids} coverages are left out: their identifiers are longer than 500 bytes"));
@@ -6266,6 +6299,7 @@ mod tests {
             default: default.into(),
             values: values.iter().map(|v| v.to_string()).collect(),
             multiple: false,
+            cut: 0,
         };
         let ms = |t: &str| parse_text(t).unwrap();
         let every = |start: &str, end: &str, unit, interval| SliderSteps::Every { start: ms(start), end: ms(end), unit, interval };
@@ -6876,10 +6910,38 @@ mod tests {
             assert_eq!(s.listed, cut.then_some(MAX_LISTED_LAYERS), "{url}");
             assert_eq!(parse(url, doc(MAX_LISTED_LAYERS).as_bytes()).unwrap().listed, None, "{url}");
         }
-        // A WMS is read from its end: past the limit here are only layers without a name, so
-        // nothing that could be added is left out.
+        // A long request address, copied into each layer, lowers how many are read, though never
+        // below the listing.
+        let href = format!("https://x.org/{}?", "a".repeat(4000));
+        let types = many(MAX_READ_LAYERS, |i| format!("<FeatureType><Name>t{i}</Name></FeatureType>"));
+        let long = format!(
+            r#"<WFS_Capabilities version="2.0.0"><OperationsMetadata><Operation name="GetFeature"><DCP><HTTP><Get href="{href}"/></HTTP></DCP></Operation></OperationsMetadata><FeatureTypeList>{types}</FeatureTypeList></WFS_Capabilities>"#
+        );
+        let s = parse("https://x.org/wfs", long.as_bytes()).unwrap();
+        let read = s.layers.len();
+        assert!((MAX_LISTED_LAYERS..MAX_READ_LAYERS).contains(&read), "{read}");
+        let note = format!("{PAST_READ_LIMIT} {read} feature types from one document: {} left out", MAX_READ_LAYERS - read);
+        assert_eq!(s.past_read_limit.as_ref(), Some(&note));
+        assert!(s.notes.iter().any(|n| n.starts_with("each of its layers copies 40")), "{:?}", s.notes);
+        let long_wms = format!(
+            r#"<WMS_Capabilities version="1.3.0"><Capability><Request><GetMap><DCPType><HTTP><Get><OnlineResource href="{href}"/></Get></HTTP></DCPType></GetMap></Request><Layer><CRS>EPSG:3857</CRS>{}</Layer></Capability></WMS_Capabilities>"#,
+            many(MAX_READ_LAYERS, |i| format!("<Layer><Name>t{i}</Name></Layer>"))
+        );
+        let s = parse("https://x.org/wms", long_wms.as_bytes()).unwrap();
+        assert!((MAX_LISTED_LAYERS..MAX_READ_LAYERS).contains(&s.layers.len()), "{}", s.layers.len());
+        assert!(s.notes.iter().any(|n| n.starts_with("each of its layers copies 40")), "{:?}", s.notes);
+        // A WMS is read in document order: the layers past the limit are its last, and a parent
+        // comes before its sublayers.
+        let s = parse("https://x.org/wms", wms(MAX_READ_LAYERS + 1).as_bytes()).unwrap();
+        assert_eq!(s.layers[0].name, "t0");
+        assert_eq!(s.layers[MAX_READ_LAYERS - 1].name, format!("t{}", MAX_READ_LAYERS - 1));
+        let nested = r#"<WMS_Capabilities version="1.3.0"><Capability><Layer><CRS>EPSG:3857</CRS><Layer><Name>parent</Name><Layer><Name>child</Name></Layer></Layer><Layer><Name>next</Name></Layer></Layer></Capability></WMS_Capabilities>"#;
+        let names: Vec<String> = parse("https://x.org/wms", nested.as_bytes()).unwrap().layers.into_iter().map(|l| l.name).collect();
+        assert_eq!(names, ["parent", "child", "next"]);
+        // Past the limit here are only layers without a name, so nothing that could be added is
+        // left out.
         let layers =
-            "<Layer><Title>group</Title></Layer>".repeat(2) + &many(MAX_READ_LAYERS, |i| format!("<Layer><Name>t{i}</Name></Layer>"));
+            many(MAX_READ_LAYERS, |i| format!("<Layer><Name>t{i}</Name></Layer>")) + &"<Layer><Title>group</Title></Layer>".repeat(2);
         let doc = format!(
             r#"<WMS_Capabilities version="1.3.0"><Capability><Layer><CRS>EPSG:3857</CRS>{layers}</Layer></Capability></WMS_Capabilities>"#
         );
