@@ -663,11 +663,12 @@ impl Session {
 
     /// The service document at `url`, for a plugin command's `service.add` (#1319): what reading it
     /// off the frame gave, or `None` when it is asked for now, and the command runs again once it
-    /// has come. Its waiting, replacing and giving up are a download's.
-    pub(crate) fn left_document(&mut self, url: &str) -> Option<Result<Arc<[u8]>, String>> {
+    /// has come. Its waiting, replacing and giving up are a download's. `Err` when it can't be asked
+    /// for now, with as many being read as can be: not a read that failed.
+    pub(crate) fn left_document(&mut self, url: &str) -> Result<Option<Result<Arc<[u8]>, String>>, String> {
         let asked = self.asked_for(&json!({"url": url, "document": true}));
         if let Some((answer, added)) = self.rerun_answer(&asked) {
-            return Some(answer.and_then(|_| added.document.ok_or_else(|| "no document came".to_string())));
+            return Ok(Some(answer.and_then(|_| added.document.ok_or_else(|| "no document came".to_string()))));
         }
         // Asked for already in this call, or by a run before it: that read, not another.
         let now = self.call_requests.as_deref().unwrap_or_default();
@@ -677,10 +678,7 @@ impl Session {
                 // Each one read stays in memory, so they wait in the numbers a download does.
                 let reading = self.url_waits.reading.len() + now.iter().filter(|(_, q)| is_document(q)).count();
                 if reading >= crate::MAX_URL_REQUESTS {
-                    return Some(Err(format!(
-                        "{} documents are already being read; try again when they have come",
-                        crate::MAX_URL_REQUESTS
-                    )));
+                    return Err(format!("{} documents are already being read; try again when they have come", crate::MAX_URL_REQUESTS));
                 }
                 self.next_request += 1;
                 self.next_request
@@ -691,7 +689,7 @@ impl Session {
         {
             asked_now.push((number, asked));
         }
-        None
+        Ok(None)
     }
 
     /// Whether a command run again has an answer for `wanted`.
@@ -939,17 +937,17 @@ mod tests {
     fn documents_asked_for_in_a_call_are_one_read_each_and_limited() {
         let mut s = Session::new(crate::sample::world_project());
         s.call_requests = Some(Vec::new());
-        assert!(s.left_document("https://x.org/same").is_none());
-        assert!(s.left_document("https://x.org/same").is_none());
+        assert!(s.left_document("https://x.org/same").unwrap().is_none());
+        assert!(s.left_document("https://x.org/same").unwrap().is_none());
         assert_eq!(s.call_requests.as_ref().unwrap().len(), 1);
         for i in 1..crate::MAX_URL_REQUESTS {
-            assert!(s.left_document(&format!("https://x.org/{i}")).is_none());
+            assert!(s.left_document(&format!("https://x.org/{i}")).unwrap().is_none());
         }
-        let e = s.left_document("https://x.org/one-more").unwrap().unwrap_err();
+        let e = s.left_document("https://x.org/one-more").unwrap_err();
         assert!(e.contains("already being read"), "{e}");
         assert_eq!(s.call_requests.as_ref().unwrap().len(), crate::MAX_URL_REQUESTS);
         // One already asked for is still answered as waiting.
-        assert!(s.left_document("https://x.org/same").is_none());
+        assert!(s.left_document("https://x.org/same").unwrap().is_none());
     }
 
     /// `layer.addUrl` can't mark its download as a service's document: nothing would add it, and

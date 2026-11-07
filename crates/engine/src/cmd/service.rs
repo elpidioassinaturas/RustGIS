@@ -188,7 +188,7 @@ fn discover(s: &mut Session, p: &Value, left: bool) -> Result<Discovery, String>
             };
             rustgis_data::ogc::parse(&address, text.as_bytes())
         } else if left {
-            let Some(read) = s.left_document(&address) else {
+            let Some(read) = s.left_document(&address).map_err(|e| format!("{original}: {e}"))? else {
                 result.next = Some(address);
                 return Ok(result);
             };
@@ -457,35 +457,43 @@ fn advertised_template_with(
     out
 }
 
-/// [`advertised_template`] read off the frame: `Err` names the document it waits for. It keeps
-/// every foreign hop and counts the addresses whose query was withheld, as that does.
-fn left_template(s: &mut Session, source: &str, list: &str, vector: bool, withheld: &mut u32) -> Result<AdvertisedTemplate, String> {
+/// What [`left_template`] has: the template, or the document it waits for.
+enum LeftTemplate {
+    Read(AdvertisedTemplate),
+    Waiting(String),
+}
+
+/// [`advertised_template`] read off the frame. It keeps every foreign hop and counts the addresses
+/// whose query was withheld, as that does. A document that can't be asked for now (too many being
+/// read) fails the command, as it does for the capabilities: it wasn't read, so it doesn't fall
+/// back to the standard tile address.
+fn left_template(s: &mut Session, source: &str, list: &str, vector: bool, withheld: &mut u32) -> Result<LeftTemplate, String> {
     use rustgis_data::ogc::{TilesStep, resolve_tiles};
     let mut out = AdvertisedTemplate { template: None, crossed_origin: crosses_origin(source, list) };
     let mut doc = list.to_string();
     for _ in 0..2 {
         if crate::render::rustgis_tiles::address::check(&doc, Some(list)).is_err() {
-            return Ok(out);
+            return Ok(LeftTemplate::Read(out));
         }
-        let Some(read) = s.left_document(&doc) else { return Err(doc) };
+        let Some(read) = s.left_document(&doc)? else { return Ok(LeftTemplate::Waiting(doc)) };
         let shown = crate::sources::redact(&doc);
         let body = match read {
             Ok(body) => body,
             Err(e) => {
                 s.notify(format!("{shown}: its tile sets couldn't be read, so the standard tile address is used: {e}"), false);
-                return Ok(out);
+                return Ok(LeftTemplate::Read(out));
             }
         };
         let Some(resolved) = resolve_tiles(list, &doc, &body, vector) else {
             s.notify(format!("{shown}: it names no tiles of this layer, so the standard tile address is used"), false);
-            return Ok(out);
+            return Ok(LeftTemplate::Read(out));
         };
         *withheld = withheld.saturating_add(resolved.withheld_addresses);
         match resolved.step {
             TilesStep::Template(t) => {
                 out.crossed_origin |= crosses_origin(&doc, &t);
                 out.template = checked_template(list, &t).ok();
-                return Ok(out);
+                return Ok(LeftTemplate::Read(out));
             }
             TilesStep::Next(next) => {
                 out.crossed_origin |= crosses_origin(&doc, &next);
@@ -494,7 +502,7 @@ fn left_template(s: &mut Session, source: &str, list: &str, vector: bool, withhe
             }
         }
     }
-    Ok(out)
+    Ok(LeftTemplate::Read(out))
 }
 
 /// In the browser nothing waits: the app reads the template itself and passes it as `"tiles"`.
@@ -738,10 +746,12 @@ fn add_discovered(s: &mut Session, p: &Value, url: &str, want: &str, found: &Dis
             template: Some(checked_template(source, t)?),
             crossed_origin: crosses_origin(source, list) || crosses_origin(list, t),
         },
-        (Some(list), None) if leaving => match left_template(s, source, list, matches!(layer.offer, Offer::VectorTiles { .. }), withheld) {
-            Ok(advertised) => advertised,
-            Err(doc) => return waiting_for(s, &doc),
-        },
+        (Some(list), None) if leaving => {
+            match left_template(s, source, list, matches!(layer.offer, Offer::VectorTiles { .. }), withheld)? {
+                LeftTemplate::Read(advertised) => advertised,
+                LeftTemplate::Waiting(doc) => return waiting_for(s, &doc),
+            }
+        }
         (Some(list), None) => advertised_template(source, list, matches!(layer.offer, Offer::VectorTiles { .. }), withheld),
         _ => AdvertisedTemplate::default(),
     };
@@ -854,7 +864,9 @@ fn add_discovered(s: &mut Session, p: &Value, url: &str, want: &str, found: &Dis
                 None if leaving => {
                     let c = coverage_for(c, anonymous);
                     let described = describe_address(&c);
-                    let Some(read) = s.left_document(&described) else { return waiting_for(s, &described) };
+                    let Some(read) = s.left_document(&described).map_err(|e| format!("{}: {e}", c.id))? else {
+                        return waiting_for(s, &described);
+                    };
                     let bytes = read.map_err(|e| format!("{}: {e}", c.id))?;
                     let info = rustgis_data::ogc::parse_describe(&c, &bytes)?;
                     let (get, area) = coverage_request_from(s, p, &c, &info)?;
@@ -1155,6 +1167,31 @@ fn fetch_records(url: &str, _: &str) -> Result<rustgis_data::ogc::RecordPage, St
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// A tile list that can't be asked for, with as many documents being read as can be, fails
+    /// the command: it wasn't read, so the layer doesn't go on the standard tile address (#1319).
+    #[test]
+    fn a_tile_list_past_the_read_limit_fails_the_command() {
+        let mut s = Session::new(crate::sample::world_project());
+        s.call_requests = Some(Vec::new());
+        for i in 0..crate::MAX_URL_REQUESTS {
+            assert!(s.left_document(&format!("https://x.org/{i}")).unwrap().is_none());
+        }
+        let mark = s.notice_mark();
+        let mut withheld = 0;
+        let list = "https://x.org/collections/a/map/tiles";
+        let Err(e) = left_template(&mut s, "https://x.org/collections", list, false, &mut withheld) else {
+            panic!("it went on to a template");
+        };
+        assert!(e.contains("already being read"), "{e}");
+        assert!(s.notices_since(mark).is_empty(), "no notice of a standard tile address");
+        // Asked for while there is room, it waits for the list.
+        let mut s = Session::new(crate::sample::world_project());
+        s.call_requests = Some(Vec::new());
+        assert!(
+            matches!(left_template(&mut s, "https://x.org/collections", list, false, &mut withheld), Ok(LeftTemplate::Waiting(d)) if d == list)
+        );
+    }
 
     #[test]
     fn foreign_tileset_hops_stay_anonymous_on_return_and_fallback() {
