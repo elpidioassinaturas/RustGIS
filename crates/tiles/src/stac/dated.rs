@@ -10,7 +10,7 @@
 
 use serde_json::Value;
 
-use super::catalog::{AT_ONCE, Filter, links};
+use super::catalog::{AT_ONCE, Filter, links, too_many};
 use super::{Item, is_web, resolve};
 
 /// How many dates, from the last, are tried for the area's items: the newest can be still coming.
@@ -87,12 +87,20 @@ fn catalog(bytes: &[u8]) -> Option<Value> {
     serde_json::from_slice::<Value>(bytes).ok().filter(|v| matches!(v.get("type").and_then(Value::as_str), Some("Catalog" | "Collection")))
 }
 
-/// Reads documents a few at a time, each on its own thread: the answers, in their order.
+/// Reads documents a few at a time, each on its own thread: the answers, in their order. Each
+/// thread carries the command's request context, so a request withdrawn meanwhile isn't sent.
 fn read_all(urls: &[String], fetch: Fetch<'_>) -> Vec<Result<Vec<u8>, String>> {
     let mut out = Vec::with_capacity(urls.len());
+    let still = crate::cache::current_still();
     for chunk in urls.chunks(AT_ONCE) {
         std::thread::scope(|s| {
-            let handles: Vec<_> = chunk.iter().map(|u| s.spawn(move || fetch(u))).collect();
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|u| {
+                    let still = still.clone();
+                    s.spawn(move || crate::cache::with_optional_still(still, || fetch(u)))
+                })
+                .collect();
             out.extend(handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("the read failed".to_string()))));
         });
     }
@@ -124,10 +132,14 @@ fn tiles_of(
     let (west, east, south, north) = filter.bbox.map_or((-180.0, 180.0, -90.0, 90.0), |[w, s, e, n]| (w, e, s, n));
     let columns: Vec<String> = children(&read(&level)?, &level).into_iter().filter(|u| may_meet(name_of(u), west, east)).collect();
     let folder = crate::logins::inner(date).rsplit_once('/').map_or("", |(folder, _)| folder).to_string() + "/";
-    let mut tiles = Vec::new();
+    let mut tiles: Vec<String> = Vec::new();
     let mut refused = 0;
     for (column, answer) in columns.iter().zip(read_all(&columns, fetch)) {
         let doc = catalog(&answer?).ok_or_else(|| format!("{column} isn't a STAC catalog"))?;
+        // A column listing more items than are followed isn't read whole: counted.
+        if too_many(&doc, "item") {
+            refused += 1;
+        }
         for (item, _) in links(&doc, "item", column) {
             if !may_meet(name_of(&item), south, north) {
                 continue;
@@ -141,6 +153,10 @@ fn tiles_of(
                 refused += 1;
                 continue;
             };
+            // A tile listed twice is one tile.
+            if tiles.iter().any(|t| t == path) {
+                continue;
+            }
             tiles.push(path.to_string());
             if tiles.len().saturating_mul(dates) > max_items {
                 return Err(format!("more than {max_items} items: take a shorter period or a smaller area"));
@@ -234,9 +250,22 @@ pub fn search(root: &str, filter: &Filter, period: (&str, &str), max_items: usiz
     }
     let mut items: Vec<Item> = Vec::with_capacity(urls.len());
     let mut last_error = None;
+    // The dates were chosen by their folders, which hold a month or a year: an item dated its
+    // month's first day is in a period that starts later in that month, so only the area is
+    // checked here.
+    let area = Filter { from: None, to: None, ..filter.clone() };
     for (url, answer) in urls.iter().zip(read_all(&urls, fetch)) {
         match answer.and_then(|bytes| super::parse_item(&bytes, url)) {
-            Ok(item) if filter.keeps(&item, None) => items.push(item),
+            Ok(mut item) if area.keeps(&item, None) => {
+                // An item's files are judged from the item, as a document's links are: one on the
+                // web can't point into the local network. An item losing a file is counted.
+                let files = item.assets.len();
+                item.assets.retain(|a| crate::address::check(&a.href, Some(url)).is_ok());
+                if item.assets.len() < files {
+                    unread += 1;
+                }
+                items.push(item);
+            }
             Ok(_) => {}
             Err(e) => {
                 unread += 1;
@@ -463,6 +492,71 @@ mod tests {
         assert_eq!(found.unread, 1, "the refused item is told");
         // The date before gives the area's items instead, read at both dates.
         assert_eq!(found.items.len(), 2);
+    }
+
+    #[test]
+    fn a_month_that_starts_before_the_period_is_kept() {
+        // Its folder is in the period, so its item is, though its date is the month's first day.
+        let docs = tree("YYYY-MM", &["2024-01", "2024-02"]);
+        let filter = Filter {
+            bbox: Some([-50.0, -20.0, -40.0, -10.0]),
+            from: super::super::catalog::instant("2024-01-15"),
+            to: super::super::catalog::instant("2024-02-29T23:59:59Z"),
+            ..Default::default()
+        };
+        let found =
+            search(ROOT, &filter, ("2024-01-15", "2024-02-29"), 100, &|u| docs.get(u).cloned().ok_or_else(|| format!("{u}: 404"))).unwrap();
+        assert_eq!((found.items.len(), found.unread), (2, 0));
+    }
+
+    #[test]
+    fn a_tile_listed_twice_is_read_once() {
+        let mut docs = tree("YYYY-MM", &["2024-01", "2024-02"]);
+        docs.insert(
+            "https://x.org/c/2024-02/1/W090.00-E000.00/catalog.json".to_string(),
+            catalog_of("item", &["./S90.00-N00.00.json".to_string(), "./S90.00-N00.00.json".to_string()]),
+        );
+        let (r, _) = run(&docs, [-50.0, -20.0, -40.0, -10.0], ("2024-01-01", "2024-02-29"), 2);
+        assert_eq!(r.unwrap().items.len(), 2, "one tile at two dates is within a cap of 2");
+    }
+
+    #[test]
+    fn an_item_on_the_web_cant_point_its_files_into_the_local_network() {
+        // A collection on this computer whose dates are on the web: an item there with a file on
+        // the local network loses that file, and it is counted.
+        let mut docs = tree("YYYY-MM", &["2024-01"]);
+        let local = "http://localhost/c/collection.json";
+        let mut root: Value = serde_json::from_slice(&docs[ROOT]).unwrap();
+        root["links"] = json!([{"rel": "child", "href": "https://x.org/c/2024-01/catalog.json"}]);
+        docs.insert(local.to_string(), root.to_string().into_bytes());
+        let key = "https://x.org/c/2024-01/1/W090.00-E000.00/S90.00-N00.00.json";
+        let mut item: Value = serde_json::from_slice(&docs[key]).unwrap();
+        item["assets"]["V"]["href"] = json!("http://192.168.1.1/a.tiff");
+        docs.insert(key.to_string(), item.to_string().into_bytes());
+        let filter = Filter { bbox: Some([-50.0, -20.0, -40.0, -10.0]), ..Default::default() };
+        let found = search(local, &filter, ("2024-01-01", "2024-01-31"), 100, &|u| docs.get(u).cloned().ok_or_else(|| format!("{u}: 404")))
+            .unwrap();
+        assert_eq!(found.unread, 1);
+        assert!(found.items.iter().all(|i| i.assets.is_empty()), "{:?}", found.items);
+    }
+
+    #[test]
+    fn every_read_carries_the_commands_request_context() {
+        let docs = tree("YYYY-MM", &["2024-01", "2024-02"]);
+        let without = Mutex::new(Vec::new());
+        let filter = Filter { bbox: Some([-50.0, -20.0, -40.0, -10.0]), ..Default::default() };
+        let still: crate::cache::Still = std::sync::Arc::new(|| true);
+        let found = crate::cache::with_still(still, || {
+            search(ROOT, &filter, ("2024-01-01", "2024-02-29"), 100, &|u| {
+                if crate::cache::current_still().is_none() {
+                    without.lock().unwrap().push(u.to_string());
+                }
+                docs.get(u).cloned().ok_or_else(|| format!("{u}: 404"))
+            })
+        })
+        .unwrap();
+        assert_eq!(found.items.len(), 2);
+        assert!(without.into_inner().unwrap().is_empty(), "reads on a thread without the context");
     }
 
     #[test]

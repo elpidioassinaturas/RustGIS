@@ -100,7 +100,7 @@ fn of_rel<'a>(v: &'a Value, rel: &'a str) -> impl Iterator<Item = &'a Value> {
 }
 
 /// Whether a document has more links of a relation than a walk follows.
-fn too_many(v: &Value, rel: &str) -> bool {
+pub(super) fn too_many(v: &Value, rel: &str) -> bool {
     of_rel(v, rel).nth(MAX_LINKS).is_some()
 }
 
