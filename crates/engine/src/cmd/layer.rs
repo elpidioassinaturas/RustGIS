@@ -3663,8 +3663,24 @@ pub(crate) fn address_extension(url: &str) -> Option<String> {
 }
 
 /// `layer.addUrl` keys for other kinds of address, which a window (`"bbox"`) doesn't read.
-const WINDOW_UNREAD: [&str; 13] =
-    ["layer", "x", "y", "wkt", "crs", "delimiter", "paperSpace", "stream", "start", "end", "unit", "interval", "dates"];
+const WINDOW_UNREAD: [&str; 16] = [
+    "layer",
+    "x",
+    "y",
+    "wkt",
+    "crs",
+    "delimiter",
+    "paperSpace",
+    "stream",
+    "start",
+    "end",
+    "unit",
+    "interval",
+    "dates",
+    "service",
+    "coverage",
+    "bounds",
+];
 
 /// Metres in a degree, to compare a cell size in metres with a longitude/latitude file's pixels.
 #[cfg(not(target_arch = "wasm32"))]
@@ -4176,6 +4192,11 @@ fn add_download(s: &mut Session, p: &Value) -> CmdResult {
         let (_, read) = s.landed_windows.remove(i);
         let r = add_window(s, p, read)?;
         return added_download(s, p, r, false, &url);
+    }
+    // No window landed for it: a whole file isn't added in a window's place.
+    if p.get("window").is_some_and(Value::is_object) {
+        let shown = crate::sources::redact(&url);
+        return Err(format!("{shown}: \"window\" is for a window the app read off the frame: use layer.addUrl with \"bbox\""));
     }
     // A download read already (an ArcGIS layer's protocol buffer pages, joined): added as read,
     // with no axes to check against bounds.

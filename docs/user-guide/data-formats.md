@@ -152,7 +152,7 @@ tile), without a STAC catalogue:
   the command line and in a script, `layer.addUrl` waits for it and answers what was added. In the
   desktop app, `ui.addUrl` with `"bbox"` reads it off the frame: the map stays in use, and the
   layer is added when the read lands. These are read one at a time, with 16 under way at most,
-  and the next starts once the last has been added. If another project is opened meanwhile, one
+  and the next starts once the app has taken the last. If another project is opened meanwhile, one
   still waiting isn't read, and one being read can't be cancelled yet: it runs to its end and
   isn't added. Each is said in a notice.
 - The file's no-data, colour table (a palette file draws in its colours) and band names come

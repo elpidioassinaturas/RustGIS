@@ -27418,6 +27418,11 @@ fn a_cog_windows_read_is_apart_from_adding_it() {
     let w = s.map().layer_by_name("Window").and_then(|l| l.raster.as_ref()?.data.clone()).unwrap();
     assert_eq!((w.value(0, 0, 0), w.value(0, 10, 5)), (Some(0.0), Some(15.0)));
     assert_eq!(s.map().layer(r["layer"].as_u64().unwrap() as u32).map(|l| l.name.as_str()), Some("Window"));
+    // A download that isn't a window isn't added as one.
+    let id = s.download_started();
+    assert!(s.download_landed(id, b"{}".to_vec()));
+    let e = s.run("layer.addDownload", &json!({"id": id, "url": url, "window": {"bbox": [1, 2, 3, 4]}})).unwrap_err();
+    assert!(e.contains("\"window\" is for") && !e.contains("hidden-1330"), "{e}");
     // A project opened while it was read: it isn't kept to be added.
     let read = read_cog_window(&window_asked(&s, &p).unwrap()).unwrap();
     let id = s.download_started();
@@ -27440,6 +27445,9 @@ fn a_cog_windows_read_is_apart_from_adding_it() {
         (json!({"geolibreProject": true}), "GeoLibre download state"),
         (json!({"geolibreLayer": 1}), "GeoLibre download state"),
         (json!({"geolibreZarr": false}), "GeoLibre download state"),
+        (json!({"service": true}), "doesn't read service"),
+        (json!({"coverage": true}), "doesn't read coverage"),
+        (json!({"bounds": [1, 2, 3, 4]}), "doesn't read bounds"),
     ] {
         let e = bad(more);
         assert!(e.contains(why) && !e.contains("hidden-1330"), "{why}: {e}");
