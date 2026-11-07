@@ -18,7 +18,7 @@ pub const MAX_READS: usize = 400;
 /// How deep a walk goes below its start.
 pub const MAX_DEPTH: usize = 8;
 /// The most links read from one document.
-const MAX_LINKS: usize = 5000;
+pub(super) const MAX_LINKS: usize = 5000;
 /// The most documents waiting to be read.
 const MAX_QUEUE: usize = 20_000;
 /// The most documents read at once.

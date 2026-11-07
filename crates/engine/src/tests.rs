@@ -16185,7 +16185,10 @@ fn a_static_collection_by_date_as_a_data_cube() {
     let mark = s.notice_mark();
     let r = s.run("stac.addCube", &cube("2024-01-01", "2024-02-29")).unwrap();
     assert_eq!((r["items"].as_u64(), r["tiles"].as_u64(), r["dates"].as_u64()), (Some(2), Some(1), Some(2)), "{r}");
-    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("couldn't be read")), "clean input tells nothing");
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(!said.iter().any(|t| t.contains("couldn't be read")), "clean input tells no missing document: {said:?}");
+    // Its codes for a failed retrieval draw as values on the map, and that is said.
+    assert!(said.iter().any(|t| t.contains("2 file(s) mark failed retrievals with codes")), "{said:?}");
     let tile = &s.map().tiles[0];
     assert_eq!(tile.time_urls.len(), 2);
     assert!(tile.time_urls[0].1.ends_with("/2024-01.tiff#range=0,100"), "the range through je:rasters' slope: {}", tile.time_urls[0].1);
@@ -16265,6 +16268,7 @@ fn a_stac_data_cube_on_the_time_slider() {
         "{r}"
     );
     assert_eq!(r["duplicates"], 1, "the second item of T2 on 2024-01-01 is left out and counted");
+    assert!(!s.notices.iter().any(|n| n.text.contains("failed retrievals")), "no codes, no notice of them");
     assert!(crate::cmd::tiles::NETWORK.contains(&"stac.addCube"), "a network command: a plugin needs the network permission to run it");
     // An end given as a year or a month takes all of it: "end": "2024-01" reaches 31 January.
     // Read as 1 January, it would be before this start and refused.

@@ -106,8 +106,11 @@ and band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentin
 - **A static collection laid out by date:** JAXA Earth's collections have no search, so `"url"` is
   a `collection.json`, and only the period's date folders are read: one date's folders to find the
   items over the area, then those items at each date, about one document per date and tile (a
-  tile that date doesn't have is missed in the others too). Documents that can't be read are told
-  in a notice. Collections with no year in their dates (climatologies) and hourly ones are refused.
+  tile that date doesn't have is missed in the others too). Documents that can't be read, or are
+  refused, are told in a notice. Collections with no year in their dates (climatologies) and hourly
+  ones are refused. The codes a collection gives for a failed retrieval (`dn.error`) draw on the map
+  as values at the range's low end, and a notice says how many files have them; Trend Analysis and
+  cube summaries skip them.
 - **Web app:** creating a cube with **Add as Time Series** is desktop-only. Saved cube tile
   layers can draw in the web app when their servers allow browser requests (CORS).
 - **Its trend:** the same search, given to Trend Analysis (`cube.trend` with `collection`,

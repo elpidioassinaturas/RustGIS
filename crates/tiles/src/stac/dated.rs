@@ -596,6 +596,19 @@ mod tests {
     }
 
     #[test]
+    fn a_column_past_the_links_followed_is_counted() {
+        let column = "https://x.org/c/2024-01/1/W090.00-E000.00/catalog.json";
+        let at = |n: usize| {
+            let mut docs = tree("YYYY-MM", &["2024-01"]);
+            docs.insert(column.to_string(), catalog_of("item", &vec!["./S90.00-N00.00.json".to_string(); n]));
+            run(&docs, [-50.0, -20.0, -40.0, -10.0], ("2024-01-01", "2024-01-31"), 100).0.unwrap()
+        };
+        let limit = super::super::catalog::MAX_LINKS;
+        assert_eq!((at(limit).items.len(), at(limit).unread), (1, 0), "all the links followed: nothing missing");
+        assert_eq!((at(limit + 1).items.len(), at(limit + 1).unread), (1, 1), "one past: the column isn't read whole");
+    }
+
+    #[test]
     fn hostile_links_are_not_followed() {
         let mut docs = tree("YYYY-MM", &["2024-01"]);
         // Into the local network, and out of the date's folder: neither is an item of the cube.

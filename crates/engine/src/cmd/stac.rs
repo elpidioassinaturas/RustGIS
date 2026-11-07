@@ -296,6 +296,8 @@ pub struct CubeFiles {
     pub duplicates: usize,
     /// Whether the assets' scale or offset differ from the first one's.
     pub scales_differ: bool,
+    /// Files whose metadata names codes for a failed retrieval (JAXA Earth's `dn.error`).
+    pub coded: usize,
     pub collection: String,
     pub asset: String,
 }
@@ -364,7 +366,7 @@ pub fn cube_files(s: &mut Session, p: &Value, max_items: usize) -> Result<CubeFi
         }
         if found.unread > 0 {
             s.warn(format!(
-                "{collection}: {} document(s) couldn't be read, so some of its dates or tiles are missing from the cube",
+                "{collection}: {} document(s) couldn't be read, were refused or weren't read whole, so some of its dates or tiles may be missing from the cube",
                 found.unread
             ));
         }
@@ -417,6 +419,7 @@ pub fn cube_files(s: &mut Session, p: &Value, max_items: usize) -> Result<CubeFi
     let mut scales: std::collections::HashMap<String, (f64, f64)> = Default::default();
     let mut nodata: std::collections::HashMap<String, Vec<f64>> = Default::default();
     let mut scales_differ = false;
+    let mut coded = 0usize;
     let mut duplicates = 0usize;
     let mut without = 0usize;
     // Each public bucket's region, found once ([`public_web`]).
@@ -453,6 +456,7 @@ pub fn cube_files(s: &mut Session, p: &Value, max_items: usize) -> Result<CubeFi
         if !stored.is_empty() {
             nodata.insert(href.clone(), stored);
         }
+        coded += usize::from(!a.invalid.is_empty());
         by_day.insert(d, href);
         scales_differ |= scale.is_some_and(|s| s != this);
         scale.get_or_insert(this);
@@ -487,6 +491,7 @@ pub fn cube_files(s: &mut Session, p: &Value, max_items: usize) -> Result<CubeFi
         without,
         duplicates,
         scales_differ,
+        coded,
         collection: collection.to_string(),
         asset: asset.to_string(),
     })
@@ -922,8 +927,26 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 }
             }
         };
-        let CubeFiles { tiles, scale, scales: _, nodata: _, items, named_tiles, without, duplicates, scales_differ, collection, asset } =
-            cube_files(s, p, MAX_CUBE_ITEMS)?;
+        let CubeFiles {
+            tiles,
+            scale,
+            scales: _,
+            nodata: _,
+            items,
+            named_tiles,
+            without,
+            duplicates,
+            scales_differ,
+            coded,
+            collection,
+            asset,
+        } = cube_files(s, p, MAX_CUBE_ITEMS)?;
+        // A tile layer's look has no way to name them, so on the map they are values.
+        if coded > 0 {
+            s.warn(format!(
+                "{collection}: {coded} file(s) mark failed retrievals with codes, which the map draws as values (at the range's low end); Trend Analysis and cube summaries skip them"
+            ));
+        }
         // One range can't hold if the files store their values alike no longer (a processing
         // change of scale or offset partway).
         if range.is_some() && scales_differ {
