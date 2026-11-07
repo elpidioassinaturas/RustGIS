@@ -28674,7 +28674,7 @@ fn a_cog_windows_read_is_apart_from_adding_it() {
         (json!({"whole": true}), "leave out"),
         (json!({"crs": "EPSG:4326"}), "doesn't read crs"),
         (json!({"url": "https://x.org/a.geojson?token=hidden-1330"}), "names a .geojson file"),
-        (json!({"url": "C:/data/a.tif"}), "give an http://"),
+        (json!({"url": "C:/data/a.tif"}), "address (Add Data opens files)"),
         (json!({"geolibreProject": true}), "GeoLibre download state"),
         (json!({"geolibreLayer": 1}), "GeoLibre download state"),
         (json!({"geolibreZarr": false}), "GeoLibre download state"),
