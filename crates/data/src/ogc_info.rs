@@ -27,7 +27,7 @@ pub struct FeatureInfo {
     pub map_format: String,
     /// The answer formats (INFO_FORMAT) the service offers; none when the layer isn't queryable.
     /// (One list for all of a document's layers, which may be a great many.)
-    #[serde(default, skip_serializing_if = "none")]
+    #[serde(default, skip_serializing_if = "no_formats")]
     pub formats: Arc<[String]>,
     /// The system it is asked in, as the service names it, for a layer drawn in a system of its
     /// own (#769); empty, Web Mercator.
@@ -39,7 +39,7 @@ pub struct FeatureInfo {
 }
 
 /// Whether a layer has no answer formats (none is saved).
-fn none(formats: &Arc<[String]>) -> bool {
+fn no_formats(formats: &Arc<[String]>) -> bool {
     formats.is_empty()
 }
 

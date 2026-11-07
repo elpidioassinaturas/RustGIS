@@ -468,7 +468,7 @@ pub const OGC_API_LIMIT: usize = 10_000;
 
 /// Notes the layers of a document past the `limit` that is read of it, and keeps the first such
 /// note as [`Service::past_read_limit`].
-fn past_read_limit(service: &mut Service, left: usize, what: &str, limit: usize) {
+fn note_past_read_limit(service: &mut Service, left: usize, what: &str, limit: usize) {
     let note = format!("{PAST_READ_LIMIT} {limit} {what} from one document: {left} left out");
     service.past_read_limit.get_or_insert_with(|| note.clone());
     service.notes.push(note);
@@ -952,7 +952,7 @@ fn wms(url: &str, root: &Node) -> Service {
             let named = |l: &Node| l.descendants().filter(|n| n.is_element() && local(n) == "Layer" && child(n, "Name").is_some()).count();
             let left = named(&layer) + stack.iter().map(|entry| named(&entry.0)).sum::<usize>();
             if left > 0 {
-                past_read_limit(&mut service, left, "layers", MAX_READ_LAYERS);
+                note_past_read_limit(&mut service, left, "layers", MAX_READ_LAYERS);
             }
             break;
         }
@@ -1072,15 +1072,22 @@ fn wms(url: &str, root: &Node) -> Service {
     }
     service.layers.reverse();
     // The values listed for the whole document are capped (a parent's many, inherited by a great
-    // many layers, aren't copied to each), and go to the layers in document order: those a listing
-    // shows first, though the layers are read from the last.
+    // many layers, aren't copied to each), and go to the layers in the order they are listed: those
+    // a listing shows first, though the layers are read from the last.
+    let mut cut_times = 0;
     for (layer, time) in service.layers.iter_mut().zip(times.into_iter().rev()) {
         layer.time = time.as_deref().map(|t| {
             let keep = t.values.len().min(time_budget);
             let values: Vec<String> = t.values.iter().skip(t.values.len() - keep).cloned().collect();
             time_budget -= values.len();
+            cut_times += usize::from(keep < t.values.len());
             LayerTime { values, default: t.default.clone(), multiple: t.multiple }
         });
+    }
+    if cut_times > 0 {
+        service.notes.push(format!(
+            "{cut_times} layers keep fewer or none of their times: RustGIS keeps {MAX_DOCUMENT_TIME_VALUES} for one document, and they come after them"
+        ));
     }
     cut_listing(&mut service);
     if skipped > 0 {
@@ -1421,7 +1428,7 @@ fn wmts(url: &str, root: &Node) -> Service {
     let (mut skipped, mut too_long) = (0, 0);
     let left = children(&contents, "Layer").count().saturating_sub(MAX_READ_LAYERS);
     if left > 0 {
-        past_read_limit(&mut service, left, "layers", MAX_READ_LAYERS);
+        note_past_read_limit(&mut service, left, "layers", MAX_READ_LAYERS);
     }
     for layer in children(&contents, "Layer").take(MAX_READ_LAYERS) {
         let Some(name) = child_text(&layer, "Identifier") else { continue };
@@ -1649,7 +1656,7 @@ fn wfs(url: &str, root: &Node) -> Service {
     let Some(list) = child(root, "FeatureTypeList") else { return service };
     let left = children(&list, "FeatureType").count().saturating_sub(MAX_READ_LAYERS);
     if left > 0 {
-        past_read_limit(&mut service, left, "feature types", MAX_READ_LAYERS);
+        note_past_read_limit(&mut service, left, "feature types", MAX_READ_LAYERS);
     }
     for ft in children(&list, "FeatureType").take(MAX_READ_LAYERS) {
         let Some(name) = child_text(&ft, "Name") else { continue };
@@ -1879,7 +1886,7 @@ fn wcs(url: &str, root: &Node) -> Service {
     }
     cut_listing(&mut service);
     if left > 0 {
-        past_read_limit(&mut service, left, "coverages", MAX_READ_LAYERS);
+        note_past_read_limit(&mut service, left, "coverages", MAX_READ_LAYERS);
     }
     if long_ids > 0 {
         service.notes.push(format!("{long_ids} coverages are left out: their identifiers are longer than 500 bytes"));
@@ -2359,7 +2366,7 @@ fn arcgis(url: &str, v: &serde_json::Value) -> Result<Service, String> {
     }
     let left = v.get("layers").and_then(|l| l.as_array()).map_or(0, Vec::len).saturating_sub(MAX_LISTED_LAYERS);
     if left > 0 {
-        past_read_limit(&mut service, left, "layers", MAX_LISTED_LAYERS);
+        note_past_read_limit(&mut service, left, "layers", MAX_LISTED_LAYERS);
     }
     // A feature layer is read past the server's record limit, page by page, where the layer
     // supports it ([`begin`]). A cut-off answer is pointed out when it lands.
@@ -2490,7 +2497,7 @@ fn arcgis_directory(b: &str, v: &serde_json::Value) -> Service {
     for (key, what) in [("folders", "folders"), ("services", "services")] {
         let left = v.get(key).and_then(|l| l.as_array()).map_or(0, Vec::len).saturating_sub(MAX_LISTED_LAYERS);
         if left > 0 {
-            past_read_limit(&mut service, left, what, MAX_LISTED_LAYERS);
+            note_past_read_limit(&mut service, left, what, MAX_LISTED_LAYERS);
         }
     }
     service
@@ -2672,7 +2679,7 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
         });
     }
     if collections.len() > MAX_READ_LAYERS {
-        past_read_limit(&mut service, collections.len() - MAX_READ_LAYERS, "collections", MAX_READ_LAYERS);
+        note_past_read_limit(&mut service, collections.len() - MAX_READ_LAYERS, "collections", MAX_READ_LAYERS);
     }
     service.incomplete = unreadable > 0 || collections.len() > MAX_LISTED_LAYERS;
     if service.layers.iter().any(|l| matches!(l.offer, Offer::Features { .. })) {
@@ -6194,6 +6201,8 @@ mod tests {
         let declared = empty.replace(r#"version="1.3.0""#, r#"version="1.1.1""#).replace("<CRS>", "<SRS>").replace("</CRS>", "</SRS>");
         let s = parse(url, declared.as_bytes()).unwrap();
         assert_eq!(s.layers.iter().find(|l| l.name == "part").unwrap().time.as_ref().map(|t| t.default.as_str()), Some("2020"));
+        // A document within the cap keeps all its times, and says nothing of them.
+        assert!(!parse(url, caps.as_bytes()).unwrap().notes.iter().any(|n| n.contains("of their times")));
         // A parent's many times, inherited by a great many layers, aren't kept for each.
         let many: String = (0..1000).map(|i| format!("{},", 1000 + i)).collect();
         let children: String = (0..1500).map(|i| layer(&format!("child{i}"), "")).collect();
@@ -6205,7 +6214,11 @@ mod tests {
         let kept: usize = s.layers.iter().filter_map(|l| l.time.as_ref()).map(|t| t.values.len()).sum();
         assert!(s.layers.len() == 1500 && kept == MAX_DOCUMENT_TIME_VALUES, "{} layers, {kept} values", s.layers.len());
         assert!(s.layers.iter().all(|l| l.time.as_ref().is_some_and(|t| t.default == "1999")));
-        // (They go to the layers first in the document.)
+        // (They go to the layers listed first, and the others are counted.)
+        let note = format!(
+            "1450 layers keep fewer or none of their times: RustGIS keeps {MAX_DOCUMENT_TIME_VALUES} for one document, and they come after them"
+        );
+        assert!(s.notes.contains(&note), "{:?}", s.notes);
         assert!(s.layers[..MAX_DOCUMENT_TIME_VALUES / 1000].iter().all(|l| l.time.as_ref().is_some_and(|t| t.values.len() == 1000)));
         // So a document with more layers than are listed gives them to the listed ones (#1519).
         let children: String = (0..MAX_LISTED_LAYERS + 500).map(|i| layer(&format!("child{i}"), "")).collect();
@@ -6218,6 +6231,7 @@ mod tests {
         assert_eq!(s.listed, Some(MAX_LISTED_LAYERS));
         assert!(s.layers[..with_values].iter().all(|l| l.time.as_ref().is_some_and(|t| t.values.len() == 1000)), "{:?}", s.layers[0].time);
         assert!(s.layers[with_values..].iter().all(|l| l.time.as_ref().is_some_and(|t| t.values.is_empty())));
+        assert!(s.notes.iter().any(|n| n.starts_with("2450 layers keep fewer or none of their times")), "{:?}", s.notes);
         // A GetMap address that carries a TIME of its own (or other GetMap parameters) gives the
         // template one TIME, the layer's.
         let carried = caps.replace("https://maps.example.org/wms?", "https://maps.example.org/wms?map=m&amp;TIME=2000&amp;");
