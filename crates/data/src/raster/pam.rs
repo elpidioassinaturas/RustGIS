@@ -137,24 +137,26 @@ pub fn wavelength_nm(item: &str, text: &str, units: Option<&str>) -> Option<f64>
 }
 
 /// Keeps a band's first wavelength in `slot`: `true` when `nm` is another one, left out (the
-/// same length under another item, to a millionth, is the same one).
+/// same length under another item, to a millionth of a nanometre, is the same one: micrometres
+/// are read to that, so only rounding is absorbed).
 fn keep_first_wavelength(slot: &mut Option<f64>, nm: f64) -> bool {
     match *slot {
         None => {
             *slot = Some(nm);
             false
         }
-        Some(w) => (w - nm).abs() > 1e-6 * w.max(nm),
+        Some(w) => (w - nm).abs() > 1e-6,
     }
 }
 
-/// A sidecar node's metadata items `key` (any domain, any case): their texts.
+/// A sidecar node's metadata items `key` (any domain, any case): their texts, empty for an item
+/// with none (still an item the file gave).
 fn mdi_texts<'a>(node: roxmltree::Node<'a, '_>, key: &'a str) -> impl Iterator<Item = &'a str> {
     node.children()
         .filter(|n| n.has_tag_name("Metadata"))
         .flat_map(|m| m.children())
         .filter(move |n| n.has_tag_name("MDI") && n.attribute("key").is_some_and(|k| k.eq_ignore_ascii_case(key)))
-        .filter_map(|n| n.text())
+        .map(|n| n.text().unwrap_or_default())
 }
 
 /// A sidecar node's metadata item `key` (any domain, any case): its text.
@@ -971,6 +973,18 @@ mod tests {
         let w = |b: usize| pam.band(b).and_then(|b| b.wavelength);
         assert_eq!([w(1), w(2)], [Some(842.0), Some(665.0)]);
         assert_eq!(pam.lost.len(), 2, "{:?}", pam.lost);
+        // An empty item is one the file gave: said, as the metadata tag's is.
+        let empty =
+            parse(r#"<PAMDataset><PAMRasterBand band="1"><Metadata><MDI key="wavelength"/></Metadata></PAMRasterBand></PAMDataset>"#)
+                .unwrap();
+        assert_eq!(empty.band(1).and_then(|b| b.wavelength), None);
+        assert!(empty.lost.iter().any(|l| l.starts_with("1 wavelength(s) that aren't")), "{:?}", empty.lost);
+        // Lengths half a thousandth of a nanometre apart are two.
+        let mut slot = None;
+        assert!(!keep_first_wavelength(&mut slot, 665.0));
+        assert!(!keep_first_wavelength(&mut slot, 0.665e3 + 1e-9));
+        assert!(keep_first_wavelength(&mut slot, 665.0005));
+        assert_eq!(slot, Some(665.0));
         assert!(pam.lost.iter().any(|l| l.starts_with("1 wavelength(s) that aren't")), "{:?}", pam.lost);
         assert!(
             pam.lost.iter().any(|l| l == "1 other wavelength(s) for a band that has one left out (the first is kept)"),

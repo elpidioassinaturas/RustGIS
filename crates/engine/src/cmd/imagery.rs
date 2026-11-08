@@ -895,6 +895,27 @@ fn spectral_points(s: &mut Session, r: &Raster, points: &Value) -> Result<Vec<Va
 /// in a polygon (`zone`), with the bands' names and wavelengths.
 fn spectral(s: &mut Session, p: &Value) -> CmdResult {
     let r = raster(s, p)?;
+    // A zone is read before points, and points before one point: what isn't read is said, once
+    // what is read has been.
+    let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
+    let zone = spectral_zone(p).is_some();
+    let point = given("lon") || given("lat");
+    let left_out = match (zone && given("points"), (zone || given("points")) && point) {
+        (true, true) => Some("points, lon and lat"),
+        (true, false) => Some("points"),
+        (false, true) => Some("lon and lat"),
+        (false, false) => None,
+    };
+    let v = spectral_read(s, p, &r, zone)?;
+    if let Some(what) = left_out {
+        let read = if zone { "the zone's mean is read" } else { "points are read" };
+        s.notify(format!("{}: {what} left out: {read}", r.name), false);
+    }
+    Ok(v)
+}
+
+/// [`spectral`]'s answer: the zone's mean when `zone`, else the points' profiles, else one point's.
+fn spectral_read(s: &mut Session, p: &Value, r: &Raster, zone: bool) -> CmdResult {
     let all: Vec<usize> = (0..r.band_count()).collect();
     let names: Vec<String> = r.bands.iter().map(|b| b.name.clone()).collect();
     // The bands' wavelengths, when the file gives any (`null` for a band without one).
@@ -906,22 +927,8 @@ fn spectral(s: &mut Session, p: &Value) -> CmdResult {
         }
         Ok(v)
     };
-    // A zone is read before points, and points before one point: what isn't read is said.
-    let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
-    let zone = spectral_zone(p).is_some();
-    let point = given("lon") || given("lat");
-    let left_out = match (zone && given("points"), (zone || given("points")) && point) {
-        (true, true) => Some("points, lon and lat"),
-        (true, false) => Some("points"),
-        (false, true) => Some("lon and lat"),
-        (false, false) => None,
-    };
-    if let Some(what) = left_out {
-        let read = if zone { "the zone's mean is read" } else { "points are read" };
-        s.notify(format!("{}: {what} left out: {read}", r.name), false);
-    }
     if let Some(points) = p.get("points").filter(|v| !v.is_null() && !zone) {
-        let profiles = spectral_points(s, &r, points)?;
+        let profiles = spectral_points(s, r, points)?;
         return answer(json!({"bands": names, "profiles": profiles}));
     }
     if let Some(z) = spectral_zone(p) {
@@ -935,7 +942,7 @@ fn spectral(s: &mut Session, p: &Value) -> CmdResult {
             return Err("the zone has no polygon".into());
         };
         let rings = polys.first().ok_or("the zone has no polygon")?;
-        let (means, n) = rasterops::zonal_means(&r, &all, rings).ok_or("no pixels fall in the zone")?;
+        let (means, n) = rasterops::zonal_means(r, &all, rings).ok_or("no pixels fall in the zone")?;
         return answer(json!({"bands": names, "values": means, "pixels": n}));
     }
     let c = Coord::new(f(p, "lon").ok_or("give lon and lat, points or a zone")?, f(p, "lat").ok_or("lat is required")?);

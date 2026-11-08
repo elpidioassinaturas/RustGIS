@@ -34423,6 +34423,11 @@ fn spectral_profiles_at_points_with_wavelengths() {
         let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
         assert_eq!(said, [format!("scene: {left} left out: the zone's mean is read")]);
     }
+    // A run that fails says nothing of what it left out.
+    let mark = s.notice_mark();
+    s.run("raster.spectral", &json!({"layer": "scene", "lon": 10.005, "lat": 44.995, "points": [[20.0, 10.0]]})).unwrap_err();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert_eq!(said, ["the point is outside the raster"], "only the error is said");
     // Points that can't be read are errors.
     for (points, error) in [
         (json!([[20.0, 10.0], [30.0, 10.0]]), "every point is outside the raster"),
