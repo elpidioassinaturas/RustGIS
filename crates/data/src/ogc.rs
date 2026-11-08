@@ -50,8 +50,8 @@ pub struct LayerTime {
     /// Whether several times may be asked for at once: a list or an interval (a WMS layer's
     /// `multipleValues`, WMS 1.3.0 Annex C.2); otherwise one time.
     pub multiple: bool,
-    /// How many of its times are left out past [`MAX_DOCUMENT_TIME_VALUES`], kept for all of a
-    /// document's layers together.
+    /// How many of its times are left out: the earliest past `MAX_TIME_VALUES`, and those past
+    /// [`MAX_DOCUMENT_TIME_VALUES`], kept for all of a document's layers together.
     pub cut: usize,
 }
 
@@ -338,9 +338,16 @@ fn layer_time(default: Option<&str>, all: Vec<String>, check: fn(&str) -> Result
     });
     let default = default.and_then(|t| check(t).ok()).or(listed)?;
     // The latest few: those the default and the latest are among.
-    let skip = all.len().saturating_sub(MAX_TIME_VALUES);
-    let values = all.into_iter().skip(skip).collect();
-    Some(LayerTime { default, values, multiple, cut: 0 })
+    let cut = all.len().saturating_sub(MAX_TIME_VALUES);
+    let values = all.into_iter().skip(cut).collect();
+    Some(LayerTime { default, values, multiple, cut })
+}
+
+/// The note for layers whose own times run past [`MAX_TIME_VALUES`] (`layers` of them).
+fn long_times_note(layers: usize) -> String {
+    format!(
+        "{layers} layers list more than {MAX_TIME_VALUES} times: RustGIS keeps the latest {MAX_TIME_VALUES} of each, and the earliest are left out"
+    )
 }
 
 /// A WMS layer's own time dimension: its `Dimension` named `time` with its values (WMS 1.3.0
@@ -959,8 +966,8 @@ fn wms(url: &str, root: &Node) -> Service {
     let mut service = Service { kind: "WMS".into(), title, ..Service::default() };
     let (mut skipped, mut too_long) = (0, 0);
     let mut time_budget = MAX_DOCUMENT_TIME_VALUES;
-    // Each layer's time dimension, as it is read.
-    let mut times: Vec<Option<Rc<LayerTime>>> = Vec::new();
+    // The layers whose times were cut short (per layer past MAX_TIME_VALUES, and for the document).
+    let (mut cut_times, mut long_times) = (0, 0);
     let mut layer_boxes = LayerBoxes::new();
     // Layers inherit their parents' coordinate systems, nearest valid geographic bounds, queryable
     // attribute and time dimension.
@@ -1102,29 +1109,28 @@ fn wms(url: &str, root: &Node) -> Service {
             offer: Offer::Tiles { template },
             bbox,
             tilesets: None,
-            time: None,
+            // The values listed for the whole document are capped (a parent's many, inherited by a
+            // great many layers, aren't copied to each), spent in document order: those a listing
+            // shows first.
+            time: time.as_deref().map(|t| {
+                let keep = t.values.len().min(time_budget);
+                let values: Vec<String> = t.values.iter().skip(t.values.len() - keep).cloned().collect();
+                time_budget -= values.len();
+                cut_times += usize::from(keep < t.values.len());
+                long_times += usize::from(t.cut > 0);
+                LayerTime { cut: t.cut + t.values.len() - keep, values, default: t.default.clone(), multiple: t.multiple }
+            }),
             feature_info,
             legends,
-        });
-        times.push(time);
-    }
-    // The values listed for the whole document are capped (a parent's many, inherited by a great
-    // many layers, aren't copied to each), and go to the layers in document order: those a
-    // listing shows first.
-    let mut cut_times = 0;
-    for (layer, time) in service.layers.iter_mut().zip(times) {
-        layer.time = time.as_deref().map(|t| {
-            let keep = t.values.len().min(time_budget);
-            let values: Vec<String> = t.values.iter().skip(t.values.len() - keep).cloned().collect();
-            time_budget -= values.len();
-            cut_times += usize::from(keep < t.values.len());
-            LayerTime { cut: t.values.len() - keep, values, default: t.default.clone(), multiple: t.multiple }
         });
     }
     if cut_times > 0 {
         service.notes.push(format!(
             "{cut_times} layers keep fewer or none of their times: RustGIS keeps {MAX_DOCUMENT_TIME_VALUES} for one document, and they come after them"
         ));
+    }
+    if long_times > 0 {
+        service.notes.push(long_times_note(long_times));
     }
     cut_listing(&mut service);
     if skipped > 0 {
@@ -1462,7 +1468,7 @@ fn wmts(url: &str, root: &Node) -> Service {
         .and_then(|h| resolve(url, &h))
         .map(|h| endpoint(&h))
         .unwrap_or_else(|| endpoint(url));
-    let (mut skipped, mut too_long) = (0, 0);
+    let (mut skipped, mut too_long, mut long_times) = (0, 0, 0);
     let limit = read_limit(kvp.len());
     let left = children(&contents, "Layer").count().saturating_sub(limit);
     if left > 0 {
@@ -1613,6 +1619,7 @@ fn wmts(url: &str, root: &Node) -> Service {
             too_long += 1;
             continue;
         }
+        long_times += usize::from(time.as_ref().is_some_and(|t| t.cut > 0));
         service.layers.push(ServiceLayer {
             // A Web Mercator set's own zooms, else those a warped set's matrices make (#769).
             zooms: wmts_zooms(&layer, set, &sets).or_else(|| native.as_ref().and_then(|(_, w)| w.zooms())),
@@ -1634,6 +1641,9 @@ fn wmts(url: &str, root: &Node) -> Service {
         service.notes.push(format!(
             "{too_long} layers in another coordinate system are left out: their addresses are longer than {MAX_ADDRESS} bytes"
         ));
+    }
+    if long_times > 0 {
+        service.notes.push(long_times_note(long_times));
     }
     service
 }
@@ -6144,6 +6154,7 @@ mod tests {
         let s = parse("https://gibs.example.org/wmts/1.0.0/WMTSCapabilities.xml", late.as_bytes()).unwrap();
         let t = s.layers[2].time.as_ref().unwrap();
         assert_eq!((t.default.as_str(), t.values.len()), ("2099-01-01", MAX_TIME_VALUES));
+        assert!(t.cut == 100 && s.notes.contains(&long_times_note(1)), "{} {:?}", t.cut, s.notes);
         assert!(checked_time("2024-06-01").is_ok() && checked_time("2024-06-01T10:00:00Z").is_ok());
         assert!(checked_time("default").is_ok() && checked_time("current").is_ok());
         for bad in ["", "..", ".", "../x", "2024-06-01/../..", "a b", "x?y=1", "latest", &"9".repeat(50)] {
@@ -6257,7 +6268,8 @@ mod tests {
         let s = parse(url, declared.as_bytes()).unwrap();
         assert_eq!(s.layers.iter().find(|l| l.name == "part").unwrap().time.as_ref().map(|t| t.default.as_str()), Some("2020"));
         // A document within the cap keeps all its times, and says nothing of them.
-        assert!(!parse(url, caps.as_bytes()).unwrap().notes.iter().any(|n| n.contains("of their times")));
+        let clean = parse(url, caps.as_bytes()).unwrap();
+        assert!(!clean.notes.iter().any(|n| n.contains("of their times") || n.contains("list more than")));
         // A parent's many times, inherited by a great many layers, aren't kept for each.
         let many: String = (0..1000).map(|i| format!("{},", 1000 + i)).collect();
         let children: String = (0..1500).map(|i| layer(&format!("child{i}"), "")).collect();
@@ -6275,6 +6287,32 @@ mod tests {
         );
         assert!(s.notes.contains(&note), "{:?}", s.notes);
         assert!(s.layers[..MAX_DOCUMENT_TIME_VALUES / 1000].iter().all(|l| l.time.as_ref().is_some_and(|t| t.values.len() == 1000)));
+        // Layers with dimensions of their own (not inherited): the budget goes in document order,
+        // and the layers after it keep none, counted with the times they lose.
+        let own: String = (0..MAX_DOCUMENT_TIME_VALUES / 1000 + 10)
+            .map(|i| layer(&format!("own{i}"), &dim(r#"default="1999""#, many.trim_end_matches(','))))
+            .collect();
+        let owned = format!(
+            r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms"><Capability><Layer><Title>Root</Title><CRS>EPSG:3857</CRS>{own}</Layer></Capability></WMS_Capabilities>"#
+        );
+        let s = parse(url, owned.as_bytes()).unwrap();
+        let with_values = MAX_DOCUMENT_TIME_VALUES / 1000;
+        assert!(s.layers[..with_values].iter().all(|l| l.time.as_ref().is_some_and(|t| t.values.len() == 1000 && t.cut == 0)));
+        assert!(s.layers[with_values..].iter().all(|l| l.time.as_ref().is_some_and(|t| t.values.is_empty() && t.cut == 1000)));
+        let note = format!(
+            "10 layers keep fewer or none of their times: RustGIS keeps {MAX_DOCUMENT_TIME_VALUES} for one document, and they come after them"
+        );
+        assert!(s.notes.contains(&note), "{:?}", s.notes);
+        // One layer's own list past its cap: the earliest are left out, and the note counts it.
+        let long: String = (0..MAX_TIME_VALUES + 100).map(|i| format!("{},", 1000 + i)).collect();
+        let doc = format!(
+            r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms"><Capability><Layer><Title>Root</Title><CRS>EPSG:3857</CRS>{}</Layer></Capability></WMS_Capabilities>"#,
+            layer("long", &dim(r#"default="2099""#, long.trim_end_matches(',')))
+        );
+        let s = parse(url, doc.as_bytes()).unwrap();
+        let t = s.layers[0].time.as_ref().unwrap();
+        assert_eq!((t.values.len(), t.cut, t.values[0].as_str()), (MAX_TIME_VALUES, 100, "1100"));
+        assert!(s.notes.contains(&long_times_note(1)), "{:?}", s.notes);
         // So a document with more layers than are listed gives them to the listed ones (#1519).
         let children: String = (0..MAX_LISTED_LAYERS + 500).map(|i| layer(&format!("child{i}"), "")).collect();
         let crowd = format!(
