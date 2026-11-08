@@ -310,6 +310,15 @@ Scripts use `service.import {"url":"…","name":"My OGC Layer"}` and
 | WCS 1.0 / 2.0 (a 1.1 service is asked in 1.0) | Coverages, with their bounds | A raster: GetCoverage of the map's view within the coverage's bounds (or its whole extent: `"bbox": "full"`), as a GeoTIFF in EPSG:4326, at most 2048 pixels on a side |
 | ArcGIS REST | FeatureServer and MapServer layers; a MapServer's map; an ImageServer; a VectorTileServer | Layers queried as GeoJSON, or in protocol buffers (`f=pbf`, smaller and quicker to read) when the layer's description lists them and names its record limit (the description read first, or given up on after 15 seconds; a first protocol buffer page that can't be fetched or read has the layer read in GeoJSON, with a notice saying why), page by page past the server's record limit (`resultOffset`) up to 100,000 features or more on a computer with more memory (in protocol buffers, also no more than a quarter of the computer's memory once read, from 512 MB, the web app's limit, up to 3 GB; a later page past it ends the read with a notice, and the first page is always kept, within the reader's own limits for a page) (a command such as `service.add` waits a minute at most for the features), where the layer supports paging (ArcGIS Server 10.3 and later; otherwise up to the record limit); a map as its tile cache when it is Web Mercator's pyramid, else exported images; an ImageServer as exported images; a VectorTileServer as its MapLibre style |
 
+A long list stops at its first 2,000 layers (for OGC API, collections), and a note says how many
+the service has. Which ones come first is up to the service, and some change their order between
+answers. `service.add` still takes any of them by name, up to 100,000 in one document, fewer
+(but at least 2,000) when the document's request address (an OGC API's, its own), which each
+layer's repeats, is very long. An ArcGIS service or directory is an exception: it is read up to
+2,000 layers, folders and services, and lists all it reads.
+A dynamic MapServer offers each of those layers twice, as features and as a
+map, so its list can be twice as long. A note says how many are left out past either limit.
+
 A WMS or WMTS layer's tiles are asked for down to the detail its service gives, and stretched
 only past it: a WMTS layer's over the zooms of its tile matrix set (or those its
 `TileMatrixSetLimits` name; swisstopo's SWISSIMAGE goes to zoom 20), a WMS layer's between the
@@ -572,6 +581,7 @@ were rounded, and Export Raster, which writes the rounded values, says so again.
 | GeoJSON, KML, GPX, CSV, CSV with WKT | Analyze › Workflows › Data Interop (`data.convert`; `"format": "geojson"`, `"kml"`, `"gpx"`, `"csv"` or `"wkt"`) | Returns text when `"path"` is omitted; writes a file on desktop when it is given. |
 | GeoTIFF / Cloud-optimised GeoTIFF | Data › Export Raster (`share.exportRaster`) | Untiled GeoTIFF by default; `"cog": true` writes 512-pixel tiles, Deflate compression and overviews. Writes the loaded raster's resolution (an overview when that is what was opened), the selected band or its colour bands. The web app's Export Raster downloads an ordinary GeoTIFF. |
 | PNG | Publish › Export Map (`share.exportMap`) | Configurable DPI, with labels, scale bar and tile credits. |
+| GeoTIFF of the map view | Publish › Export Map to `.tif` (`share.exportMap`) | The view as an RGB GeoTIFF in the map's projection, with labels but no scale bar; tile credits in the Copyright tag; `"cog": true` for a cloud-optimised one. Flat, untilted maps of the Earth only (see [Exporting](sharing.md#exporting)). |
 | PDF | Layouts, reports, presentations and the map view (Print Map), as vectors; a layout's map frames georeferenced (GeoPDF) | |
 | Wavefront OBJ, STL, glTF | Publish › Export To 3D, Share As › Web Scene | Polygons extruded by a field. STL is binary and triangles only (no lines). |
 | Web map, OGC API Features, MapLibre style | Publish › Share As | Open-format files that need no server: see [Sharing](sharing.md). |
