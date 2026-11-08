@@ -1148,7 +1148,8 @@ fn wms(url: &str, root: &Node) -> Service {
 /// may list (a GeoServer's thousands) are worked out once, not again for each layer (#1519).
 #[derive(Default)]
 struct Systems {
-    /// How many names the list has, its parents' included: where a sublayer's own come in it.
+    /// Where a sublayer's own names are numbered from: all the names its parents list, those
+    /// RustGIS leaves out included (only the order matters).
     names: usize,
     mercator: bool,
     first: Vec<Candidate>,
@@ -1156,23 +1157,32 @@ struct Systems {
 
 impl Systems {
     fn with_own(parent: &Systems, own: &[String]) -> Systems {
-        // (The parent's are usable already, and whether one is depends only on its code.)
-        let mut all = parent.first.clone();
-        for mut c in wms_candidates(own).into_iter().filter(|c| warp::usable(c.1).is_some()) {
+        // Each with whether it is known to be usable: the parent's are. Whether one is depends only
+        // on its code, and finding out makes its transformer, so it is asked only of those that
+        // come before the first `MAX_SYSTEMS` usable ones, as `wms_native` did of the whole list.
+        let mut all: Vec<(Candidate, bool)> = parent.first.iter().map(|c| (c.clone(), true)).collect();
+        let inherited = all.len();
+        // (`wms_candidates` gives one name for each system: only the parent's can repeat one.)
+        for mut c in wms_candidates(own) {
             c.3 += parent.names;
             // One name for each system, as in `wms_candidates`: CRS:84 over EPSG:4326, else the
             // first listed. (A system past the parent's first ones comes after them all here too.)
-            match all.iter_mut().find(|p| p.1 == c.1) {
-                Some(p) if warp::is_crs84(&c.0) && !warp::is_crs84(&p.0) => *p = c,
+            match all[..inherited].iter_mut().find(|(p, _)| p.1 == c.1) {
+                Some((p, _)) if warp::is_crs84(&c.0) && !warp::is_crs84(&p.0) => *p = c,
                 Some(_) => {}
-                None => all.push(c),
+                None => all.push((c, false)),
             }
         }
-        all.sort_by_key(|c| (candidate_rank(c), c.3));
+        all.sort_by_key(|(c, _)| (candidate_rank(c), c.3));
         Systems {
             names: parent.names + own.iter().map(|c| c.split_whitespace().count()).sum::<usize>(),
             mercator: parent.mercator || own.iter().any(|c| c.split_whitespace().any(is_web_mercator)),
-            first: all.into_iter().take(warp::MAX_SYSTEMS).collect(),
+            first: all
+                .into_iter()
+                .filter(|(c, known)| *known || warp::usable(c.1).is_some())
+                .take(warp::MAX_SYSTEMS)
+                .map(|(c, _)| c)
+                .collect(),
         }
     }
 }

@@ -91,7 +91,7 @@ pub(crate) fn without_token(p: &Value) -> Result<Option<Value>, String> {
 
 /// One layer's exact capabilities document and the origin history used to reach it. The address
 /// is shared by the document's layers: nothing bounds its length, and a document has up to
-/// `MAX_READ_LAYERS` of them (#1519).
+/// 100,000 of them, the most `rustgis_data::ogc` reads (#1519).
 struct CapabilitySource {
     address: std::sync::Arc<str>,
     crossed_origin: bool,
@@ -126,6 +126,10 @@ impl Discovery {
 
 const MAX_SERVICE_DOCUMENTS: usize = 4;
 
+/// Most bytes of document addresses a listing repeats: each listed layer's `source_url` is its
+/// document's address, which nothing bounds (a landing page links to any collections address).
+const MAX_LISTED_ADDRESS_BYTES: usize = if cfg!(test) { 8 << 20 } else { 64 << 20 };
+
 /// Whether what this `service.add` would wait for is left off the frame: it is a plugin command's,
 /// run by the desktop app, which runs the command again when it has come (#1319).
 fn leaves_waits(s: &Session) -> bool {
@@ -144,8 +148,28 @@ fn capabilities(s: &mut Session, p: &Value) -> Result<Discovery, String> {
 }
 
 /// Reads a service's documents, fetching what `p` doesn't give: waiting for them, or with `left`,
-/// off the frame ([`Session::left_document`]), when a document not in yet is its `next`.
+/// off the frame ([`Session::left_document`]), when a document not in yet is its `next`. Long
+/// document addresses list fewer layers ([`MAX_LISTED_ADDRESS_BYTES`]), said in a note.
 fn discover(s: &mut Session, p: &Value, left: bool) -> Result<Discovery, String> {
+    let mut found = read_documents(s, p, left)?;
+    let listed = found.service.listed.unwrap_or(usize::MAX).min(found.sources.len());
+    let mut bytes = 0usize;
+    let cut = found.sources[..listed].iter().position(|source| {
+        bytes = bytes.saturating_add(source.address.len());
+        bytes > MAX_LISTED_ADDRESS_BYTES
+    });
+    // (At least one, whatever its address.)
+    if let Some((cut, long)) = cut.map(|cut| (cut.max(1), found.sources[cut].address.len())).filter(|&(cut, _)| cut < listed) {
+        found.service.listed = Some(cut);
+        found.service.notes.push(format!(
+            "each listed layer repeats its document's address, {long} bytes long here, and RustGIS lists at most {} MiB of them",
+            MAX_LISTED_ADDRESS_BYTES >> 20
+        ));
+    }
+    Ok(found)
+}
+
+fn read_documents(s: &mut Session, p: &Value, left: bool) -> Result<Discovery, String> {
     let original = url_of(p)?;
     let mut address =
         crate::render::rustgis_tiles::logins::inherit(original, &rustgis_data::ogc::capabilities_url(original, ps(p, "type")));
