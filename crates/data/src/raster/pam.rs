@@ -229,8 +229,10 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
     let (mut cut, mut beyond, mut odd_bands, mut unscaled, mut units) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut items, mut tables, mut odd_nodata, mut odd_wavelengths, mut other_wavelengths) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut seen, mut twice) = (std::collections::HashSet::new(), 0usize);
-    // The unit the dataset gives its bands' wavelengths in, for a band that gives none.
+    // The unit the dataset gives its bands' wavelengths in, for a band that gives none; a
+    // wavelength of the dataset's own is for no band.
     let dataset_units = mdi_text(root, WAVELENGTH_UNITS);
+    odd_wavelengths += WAVELENGTH_ITEMS.iter().map(|w| mdi_texts(root, w).count()).sum::<usize>();
     let mut kept = |t: &str| {
         cut += usize::from(t.chars().nth(MAX_NAME).is_some());
         t.chars().take(MAX_NAME).collect::<String>()
@@ -332,7 +334,9 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
         pam.lost.push(format!("{odd_nodata} no-data value(s) that aren't numbers left out: those pixels are read as values"));
     }
     if odd_wavelengths > 0 {
-        pam.lost.push(format!("{odd_wavelengths} wavelength(s) that aren't a positive length in nanometres or micrometres left out"));
+        pam.lost.push(format!(
+            "{odd_wavelengths} wavelength(s) that aren't a positive length in nanometres or micrometres, or for no band, left out"
+        ));
     }
     if other_wavelengths > 0 {
         pam.lost.push(format!("{other_wavelengths} other wavelength(s) for a band that has one left out (the first is kept)"));
@@ -498,7 +502,7 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
 /// of [`WAVELENGTH_ITEMS`], in that order, in the unit of its band's `wavelength_units` item, else
 /// the dataset's. A band's other wavelength items giving the same length are other names for it,
 /// and aren't counted. Returns how many items were left out: not a length or for no band, and
-/// another length for a band that has one.
+/// another length for a band that has one. A dataset's own item (no `sample`) is for no band.
 fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> (usize, usize) {
     let named = |n: &roxmltree::Node<'_, '_>, name: &str| {
         n.has_tag_name("Item") && n.attribute("name").is_some_and(|a| a.eq_ignore_ascii_case(name))
@@ -518,8 +522,8 @@ fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> (usize, usi
     let mut at: std::collections::HashMap<usize, usize> = pam.bands.iter().enumerate().map(|(i, b)| (b.band, i)).collect();
     let (mut odd, mut other) = (0usize, 0usize);
     for name in WAVELENGTH_ITEMS {
-        // A dataset item (no `sample`) belongs to no band, as GeoLibre also reads it: not counted.
-        for item in root.children().filter(|n| named(n, name) && n.attribute("sample").is_some()) {
+        // A dataset item (no `sample`) is for no band: GeoLibre doesn't read it either; counted.
+        for item in root.children().filter(|n| named(n, name)) {
             let Some(band) = band_of(&item) else {
                 odd += 1;
                 continue;
@@ -908,7 +912,7 @@ mod tests {
             [Some(482.5), Some(561.3), Some(654.6), Some(865.0), Some(1600.0), None, None]
         );
         assert_eq!(pam.lost.len(), 2, "{:?}", pam.lost);
-        assert!(pam.lost[0].starts_with("3 wavelength item(s)"), "{:?}", pam.lost);
+        assert!(pam.lost[0].starts_with("4 wavelength item(s)"), "{:?}", pam.lost);
         assert_eq!(pam.lost[1], "1 other wavelength item(s) for a band that has one left out (the first is kept)");
         // The same length under two items is one wavelength: nothing is said.
         let xml = r#"<GDALMetadata><Item name="CENTRAL_WAVELENGTH_UM" sample="0">0.665</Item><Item name="wavelength" sample="0">665</Item></GDALMetadata>"#;

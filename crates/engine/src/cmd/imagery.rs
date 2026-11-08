@@ -1354,8 +1354,8 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
         first.data_type.clone(),
     )
     .map_err(|e| e.to_string())?;
-    // Band and class names are the first input's, as its cells are where they overlap; an input
-    // naming its bands or classes otherwise is said.
+    // Band and class names and wavelengths are the first input's, as its cells are where they
+    // overlap; an input giving its bands other ones is said.
     out.bands.iter_mut().zip(&first.bands).for_each(|(o, i)| {
         o.name = i.name.clone();
         o.classes = i.classes.clone();
@@ -1366,11 +1366,16 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
     let other: Vec<&str> = rs
         .iter()
         .skip(1)
-        .filter(|r| r.bands.iter().zip(&first.bands).any(|(b, f)| b.name != f.name || b.classes != f.classes))
+        .filter(|r| {
+            r.bands.iter().zip(&first.bands).any(|(b, f)| b.name != f.name || b.classes != f.classes || b.wavelength != f.wavelength)
+        })
         .map(|r| r.name.as_str())
         .collect();
     if !other.is_empty() {
-        s.notify(format!("{}: band or class names other than {}'s, which the mosaic keeps", other.join(", "), first.name), false);
+        s.notify(
+            format!("{}: band names, classes or wavelengths other than {}'s, which the mosaic keeps", other.join(", "), first.name),
+            false,
+        );
     }
     let path = ps(p, "path").map(str::trim).filter(|p| !p.is_empty()).map(str::to_string);
     if let Some(path) = &path {

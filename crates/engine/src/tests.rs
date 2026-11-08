@@ -25917,12 +25917,24 @@ fn dem_tiles_mosaic_clip_by_polygon_share_a_stretch_and_report_overviews() {
     let mark = s.notice_mark();
     let v = s.run("raster.mosaic", &json!({"inputs": ["west", "over"], "name": "renamed"})).unwrap();
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
-    assert!(said.iter().any(|n| n == "over: band or class names other than west's, which the mosaic keeps"), "{said:?}");
+    assert!(said.iter().any(|n| n == "over: band names, classes or wavelengths other than west's, which the mosaic keeps"), "{said:?}");
     assert_eq!(raster(&s, &v).bands[0].name, west_band);
     let mark = s.notice_mark();
     s.run("raster.mosaic", &json!({"inputs": ["west", "east"], "name": "same"})).unwrap();
-    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("band or class names")));
+    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("band names, classes")));
     named(&mut s, &over_band);
+    // So is one giving its band another wavelength; the mosaic keeps the first's.
+    let wavelength = |s: &mut Session, nm: Option<f64>| {
+        let data = s.map_mut().layer_mut(over).unwrap().raster.as_mut().unwrap().data.as_mut().unwrap();
+        std::sync::Arc::make_mut(data).bands[0].wavelength = nm;
+    };
+    wavelength(&mut s, Some(842.0));
+    let mark = s.notice_mark();
+    let v = s.run("raster.mosaic", &json!({"inputs": ["west", "over"], "name": "nir"})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|n| n == "over: band names, classes or wavelengths other than west's, which the mosaic keeps"), "{said:?}");
+    assert_eq!(raster(&s, &v).bands[0].wavelength, None);
+    wavelength(&mut s, None);
     // A file given by path says what its reading left out (here a sidecar's scale); one read whole
     // says nothing.
     let file = dir.join("west.tif");
