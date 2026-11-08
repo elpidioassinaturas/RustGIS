@@ -30848,6 +30848,56 @@ fn a_pdf_says_which_frames_and_pages_it_draws_as_pictures() {
     );
 }
 
+/// A layout's PDF georeferences its map frames (#1191): each as an ISO 32000 viewport with its
+/// corners and its map's coordinate system, so that the frame's corners, taken back to the map,
+/// make the frame's rectangle. A tilted frame is left out, and said.
+#[test]
+fn a_layout_pdf_georeferences_its_map_frames() {
+    let mut s = world();
+    s.run("map.projection", &json!({"type": "EPSG:31983"})).unwrap();
+    s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "map"})).unwrap();
+    let frame = s.project.layouts[0].elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap().clone();
+    s.run("layout.update", &json!({"element": frame.id, "center": [-45.0, -20.0], "scale": 2_000_000.0})).unwrap();
+    let path = std::env::temp_dir().join(format!("rustgis-geopdf-{}.pdf", std::process::id()));
+    let export = |s: &mut Session| {
+        let mark = s.notice_mark();
+        s.run("layout.export", &json!({"path": path, "dpi": 72})).unwrap();
+        let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        (String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned(), said)
+    };
+    let (pdf, said) = export(&mut s);
+    assert!(pdf.starts_with("%PDF-1.7") && pdf.contains("/ExtensionLevel 3"), "{}", &pdf[..20]);
+    assert!(pdf.contains("/VP [<< /Type /Viewport") && pdf.contains("/Subtype /GEO"));
+    assert!(pdf.contains("/GCS << /Type /PROJCS /WKT (PROJCS[") && pdf.contains("/EPSG 31983 >>"), "{pdf}");
+    assert!(!said.iter().any(|t| t.contains("georeferenced")), "{said:?}");
+    // The corners, back on the map, are the frame's rectangle: its top and bottom level, its
+    // sides upright, and as wide as the frame at its scale.
+    let gpts = pdf.split("/GPTS [").nth(1).and_then(|r| r.split(']').next()).unwrap();
+    let n: Vec<f64> = gpts.split_whitespace().map(|v| v.parse().unwrap()).collect();
+    assert_eq!(n.len(), 8, "{gpts}");
+    let m: Vec<rustgis_geom::Coord> = n.chunks(2).map(|c| s.map().to_map(rustgis_geom::Coord::new(c[1], c[0])).unwrap()).collect();
+    let (tl, tr, br, bl) = (m[0], m[1], m[2], m[3]);
+    assert!((tl.y - tr.y).abs() < 0.01 && (bl.y - br.y).abs() < 0.01, "{m:?}");
+    assert!((tl.x - bl.x).abs() < 0.01 && (tr.x - br.x).abs() < 0.01, "{m:?}");
+    let wide = frame.w / 1000.0 * 2_000_000.0;
+    assert!(((tr.x - tl.x) / wide - 1.0).abs() < 1e-3, "{} m for {wide} m", tr.x - tl.x);
+    assert!(tl.y > bl.y, "north up");
+    // Tilted, it shows no flat map to measure on: left out, and said.
+    s.run("layout.update", &json!({"element": frame.id, "pitch": 30})).unwrap();
+    let (pdf, said) = export(&mut s);
+    assert!(pdf.starts_with("%PDF-1.4") && !pdf.contains("/VP ["));
+    assert!(said.iter().any(|t| t == &format!("Map frame '{}' isn't georeferenced in the PDF: it is tilted", frame.name)), "{said:?}");
+    // A projection with no WKT form (Winkel Tripel): georeferenced in longitude/latitude by its
+    // corners, and said.
+    s.run("layout.update", &json!({"element": frame.id, "pitch": 0})).unwrap();
+    s.run("map.projection", &json!({"type": "winkelTripel"})).unwrap();
+    let (pdf, said) = export(&mut s);
+    assert!(pdf.contains("/GCS << /Type /GEOGCS /WKT (GEOGCS[") && pdf.contains("/EPSG 4326 >>"), "{pdf}");
+    let corners = format!("Map frame '{}' is georeferenced in the PDF by its corners in longitude/latitude", frame.name);
+    assert!(said.iter().any(|t| t.starts_with(&corners)), "{said:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn layer_invert_ramp_reverses_the_class_colors() {
     // #1355: Invert Color Ramp reverses the order of a layer's class colours.

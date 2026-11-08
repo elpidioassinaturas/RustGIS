@@ -299,6 +299,12 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   are pictures cut to their shape. The `dpi` also sets how fine the vectors' detail is kept, as a
   PNG at that resolution would show it. A frame or page whose vectors would pass 256 MB (64 MB
   in the browser) is drawn as a picture instead, and the export says which.
+  A PDF is also a GeoPDF: each map frame is georeferenced (an ISO 32000 geospatial viewport, the
+  form GDAL, QGIS, Acrobat and Avenza read), with its map's coordinate system as WKT and its EPSG
+  code when it has one, so a reader shows coordinates and measures in it, and GDAL or QGIS open the
+  page as a georeferenced raster. A tilted frame, one on the globe, and one with a corner off the
+  Earth aren't georeferenced, and the export says which. A frame in a projection with no WKT form
+  is georeferenced by its corners in longitude/latitude, approximate between them, and said.
   In SVG each element is a group (an Inkscape layer) named after it: text stays text and rectangles,
   ellipses and lines stay shapes, and map frames and the other surrounds are kept as vectors as in a
   PDF (their labels as the letters' shapes, each run labelled with its text), so the page can be

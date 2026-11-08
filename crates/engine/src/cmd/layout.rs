@@ -3518,6 +3518,8 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
     // What the PDF draws as pictures because its vectors would grow too large: frames, and
     // whole pages (their surrounds).
     let (mut frames_pictured, mut pages_pictured) = (Vec::new(), Vec::new());
+    // The map frames a PDF can't georeference, and those it georeferences by their corners only.
+    let (mut left_out, mut by_corners): (Vec<(String, &'static str)>, Vec<String>) = (Vec::new(), Vec::new());
     let mut render_pages = || -> Result<(Vec<rustgis_render::pdf::Page>, Option<Vec<u8>>), String> {
         let mut out = Vec::new();
         let mut png = None;
@@ -3543,6 +3545,18 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
             // a memory budget.
             if pdf {
                 let (w, h) = (layout.width, layout.height);
+                // Where its map frames show, for readers to locate and measure in: a GeoPDF (#1191).
+                let geo = rustgis_render::layout::frame_viewports(layout, &s.project.maps);
+                for (name, why) in geo.left_out {
+                    if !left_out.iter().any(|(n, _)| *n == name) {
+                        left_out.push((name, why));
+                    }
+                }
+                for name in geo.by_corners {
+                    if !by_corners.contains(&name) {
+                        by_corners.push(name);
+                    }
+                }
                 let (drawing, pictured) = rustgis_render::layout::render_drawing(layout, &mut s.project.maps, dpi, &info)
                     .ok_or("the page is too large to draw")?;
                 if drawing.overflowed() {
@@ -3550,10 +3564,10 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
                     let layout = s.project.layouts.get(li).ok_or("no layout")?;
                     let img =
                         rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info).ok_or("the page is too large to draw")?;
-                    out.push(rustgis_render::pdf::Page::new(&img, w, h));
+                    out.push(rustgis_render::pdf::Page::new(&img, w, h).with_viewports(geo.viewports));
                 } else {
                     frames_pictured.extend(pictured);
-                    out.push(rustgis_render::pdf::Page::drawing(drawing, w, h));
+                    out.push(rustgis_render::pdf::Page::drawing(drawing, w, h).with_viewports(geo.viewports));
                 }
                 held += out.last().map_or(0, rustgis_render::pdf::Page::len);
                 if held > PDF_BUDGET {
@@ -3579,6 +3593,14 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
     }
     let (pages, png) = result?;
     pictured_notices(s, &frames_pictured, &pages_pictured);
+    for (name, why) in &left_out {
+        s.warn(format!("Map frame '{name}' isn't georeferenced in the PDF: {why}"));
+    }
+    for name in &by_corners {
+        s.warn(format!(
+            "Map frame '{name}' is georeferenced in the PDF by its corners in longitude/latitude, as its projection has no WKT form: positions between them are approximate"
+        ));
+    }
     if pdf { Ok(rustgis_render::pdf::write(&pages, &saved.name)) } else { png.ok_or_else(|| "nothing to draw".to_string()) }
 }
 

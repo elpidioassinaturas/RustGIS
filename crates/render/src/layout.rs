@@ -590,6 +590,93 @@ fn frame_outline_lonlat(map: &Map, cam: &rustgis_map::Camera, w: f64, h: f64) ->
     ring
 }
 
+/// The map frames of a page georeferenced for a PDF ([`frame_viewports`], #1191).
+#[derive(Debug, Default)]
+pub struct Georeferenced {
+    /// One for each visible frame that could be.
+    pub viewports: Vec<crate::pdf::Viewport>,
+    /// The frames that couldn't be, by name, with why.
+    pub left_out: Vec<(String, &'static str)>,
+    /// The frames whose projection has no WKT form, by name: georeferenced by their corners in
+    /// longitude/latitude, so a reader is right at the corners and approximate between them.
+    pub by_corners: Vec<String>,
+}
+
+/// Each visible map frame of `layout` as a PDF viewport ([`crate::pdf::Viewport`]): its place on
+/// the page, its corners' latitude and longitude, and its map's coordinate system as WKT. A
+/// frame on the globe or tilted shows no flat map to measure on, so it is left out, as is one
+/// whose map is missing or with a corner off the Earth.
+pub fn frame_viewports(layout: &Layout, maps: &[Map]) -> Georeferenced {
+    let mut out = Georeferenced::default();
+    for e in layout.elements.iter().filter(|e| e.visible) {
+        let ElementKind::MapFrame { map, center, scale, bearing, pitch, .. } = &e.kind else { continue };
+        let Some(m) = map_index(maps, map).and_then(|i| maps.get(i)) else {
+            out.left_out.push((e.name.clone(), "its map is missing"));
+            continue;
+        };
+        match frame_viewport(e, m, rustgis_map::layout::frame_camera(m, *center, *scale, *bearing, *pitch)) {
+            Ok((v, exact)) => {
+                if !exact {
+                    out.by_corners.push(e.name.clone());
+                }
+                out.viewports.push(v);
+            }
+            Err(why) => out.left_out.push((e.name.clone(), why)),
+        }
+    }
+    out
+}
+
+/// Frame `e` of `map`, seen by `cam`, as a viewport, and whether it is in the map's own
+/// coordinate system (else in longitude/latitude, by its corners).
+fn frame_viewport(
+    e: &rustgis_map::layout::Element,
+    map: &Map,
+    cam: rustgis_map::Camera,
+) -> Result<(crate::pdf::Viewport, bool), &'static str> {
+    use rustgis_data::raster::{crs, wkt};
+    if map.projection.is_globe() {
+        return Err("it shows the globe");
+    }
+    if cam.pitch.abs() > 1e-9 {
+        return Err("it is tilted");
+    }
+    // The map's coordinate system: its WKT and EPSG code, and its PROJ definition (whose datum
+    // the corners are given on).
+    let (system, def) = match &map.projection {
+        rustgis_map::Projection::Custom(code) => {
+            let (def, label) = rustgis_map::projection::lookup(code).map_err(|_| "its projection can't be read")?;
+            let lower = code.trim().to_ascii_lowercase();
+            let digits = lower.strip_prefix("epsg").map_or(lower.as_str(), |r| r.trim_start_matches([':', ' ']));
+            let epsg = digits.parse::<u16>().ok().filter(|_| digits.bytes().all(|b| b.is_ascii_digit()));
+            let text = match epsg {
+                Some(c) => wkt::to_wkt(crs::Crs::Epsg(c)),
+                None => wkt::proj4_to_wkt(&def, &label),
+            };
+            (text.map(|t| (t, epsg)), Some(def))
+        }
+        _ => (wkt::to_wkt(crs::Crs::WebMercator).map(|t| (t, Some(3857))), None),
+    };
+    let (w, h) = (e.w * PT_PER_MM, e.h * PT_PER_MM);
+    let mut corners = [(0.0, 0.0); 4];
+    for (i, (sx, sy)) in [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].into_iter().enumerate() {
+        let c = cam.try_to_map(sx, sy, w, h).and_then(|m| map.to_lonlat(m)).ok_or("a corner is off the Earth")?;
+        // On the system's own datum, as a reader that takes its WKT reads them.
+        let c = match (&system, &def) {
+            (Some(_), Some(def)) => crs::lonlat_on_datum_of(def, c).ok_or("a corner is off the Earth")?,
+            _ => c,
+        };
+        corners[i] = (c.y, c.x);
+    }
+    let exact = system.is_some();
+    let (wkt, epsg) = match system {
+        Some(s) => s,
+        None => (wkt::to_wkt(crs::Crs::LonLat).ok_or("its projection can't be read")?, Some(4326)),
+    };
+    let viewport = crate::pdf::Viewport { name: e.name.clone(), rect_mm: [e.x, e.y, e.w, e.h], corners, wkt, projected: exact, epsg };
+    Ok((viewport, exact))
+}
+
 /// Strokes the ring `ring` (longitude, latitude) on a frame's map `width` points wide: another
 /// frame's extent, as an extent indicator shows it.
 fn outline_lonlat(pm: &mut Canvas, map: &Map, view: &View, ring: &[Coord], color: Rgba, width: f32) {

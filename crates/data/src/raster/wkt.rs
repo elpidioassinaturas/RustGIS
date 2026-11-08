@@ -1170,7 +1170,18 @@ pub fn to_wkt(crs: Crs) -> Option<String> {
             (d.proj4.clone(), d.label.clone(), None)
         }
     };
-    let proj = proj4rs::Proj::from_proj_string(&def).ok()?;
+    def_wkt(&def, &name, code)
+}
+
+/// A PROJ definition as WKT1 named `name`, with no authority: a projection a map is drawn in that
+/// has no EPSG code (a preset, `local:`), as [`to_wkt`] would write it. `None` as there.
+pub fn proj4_to_wkt(def: &str, name: &str) -> Option<String> {
+    def_wkt(def, name, None)
+}
+
+/// A PROJ definition as WKT1, with `code` as its EPSG authority.
+fn def_wkt(def: &str, name: &str, code: Option<u16>) -> Option<String> {
+    let proj = proj4rs::Proj::from_proj_string(def).ok()?;
     let params: Vec<(&str, Option<&str>)> = def
         .split_whitespace()
         .filter_map(|t| t.strip_prefix('+'))
@@ -1189,7 +1200,7 @@ pub fn to_wkt(crs: Crs) -> Option<String> {
     // proj4rs computes `eqc` on a sphere of the semi-major axis and gives that sphere, but RustGIS
     // computes it on the datum's ellipsoid (`crs::ellipsoidal_eqc`), the one written here.
     let (a, b) = match text("proj") {
-        Some("eqc") => super::crs::eqc_geographic(&def).ok()?.ellipse_parameters(),
+        Some("eqc") => super::crs::eqc_geographic(def).ok()?.ellipse_parameters(),
         _ => proj.ellipse_parameters(),
     };
     // A named ellipsoid's flattening as published; else from its axes (PROJ keeps a and b).
@@ -1200,7 +1211,7 @@ pub fn to_wkt(crs: Crs) -> Option<String> {
     };
     let datum_name = match datum {
         Some(d) => d.1.to_string(),
-        None => match national_datum_name(&def, code) {
+        None => match national_datum_name(def, code) {
             Some(n) => n.to_string(),
             None => format!("Unknown based on {ellps_name} ellipsoid"),
         },
@@ -1443,7 +1454,7 @@ pub fn to_wkt(crs: Crs) -> Option<String> {
     let parameters: String = ps.iter().map(|(n, v)| format!(",PARAMETER[{},{}]", quoted(n), num(*v))).collect();
     Some(format!(
         "PROJCS[{},{},PROJECTION[{}]{parameters},UNIT[{},{}],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH]{}]",
-        quoted(&name),
+        quoted(name),
         geogcs(""),
         quoted(method),
         quoted(unit),

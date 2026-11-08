@@ -427,6 +427,27 @@ fn wgs84() -> Result<proj4rs::Proj, String> {
     proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| e.to_string())
 }
 
+/// A WGS 84 longitude/latitude on the datum of the PROJ definition `def`: where a reader that
+/// takes `def`'s own geographic system puts the point (a GeoPDF's corners, #1191). The same
+/// point where `def`'s datum has no shift from WGS 84.
+pub fn lonlat_on_datum_of(def: &str, c: Coord) -> Option<Coord> {
+    const DATUM: [&str; 9] = ["datum", "ellps", "towgs84", "a", "b", "rf", "f", "R", "pm"];
+    let mut geographic = String::from("+proj=longlat");
+    for t in def.split_whitespace() {
+        let key = t.trim_start_matches('+').split('=').next().unwrap_or("");
+        if DATUM.contains(&key) {
+            geographic.push(' ');
+            geographic.push_str(t);
+        }
+    }
+    geographic.push_str(" +no_defs");
+    let to = proj4rs::Proj::from_proj_string(&geographic).ok()?;
+    let mut p = (c.x.to_radians(), c.y.to_radians(), 0.0);
+    proj4rs::transform::transform(&wgs84().ok()?, &to, &mut p).ok()?;
+    let out = Coord::new(p.0.to_degrees(), p.1.to_degrees());
+    out.is_finite().then_some(out)
+}
+
 /// The transformer for a PROJ definition of an equidistant cylindrical projection on an
 /// ellipsoid (EPSG:4087's), computed on it: `None` for any other definition, `eqc` on a sphere
 /// included. A map drawn in such a system uses it too (rustgis-map's `Projector`), so the map,
