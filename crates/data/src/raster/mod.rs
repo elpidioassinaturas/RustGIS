@@ -786,7 +786,7 @@ impl Raster {
     /// metadata", "its .aux.xml sidecar").
     pub fn apply_pam(&mut self, pam: &pam::Pam, from: &str) {
         self.lost.extend(pam.lost.iter().map(|l| format!("{from}: {l}")));
-        // Names for bands the raster doesn't have have nowhere to go.
+        // Names and wavelengths for bands the raster doesn't have have nowhere to go.
         let beyond = pam
             .bands
             .iter()
@@ -796,7 +796,8 @@ impl Raster {
             })
             .count();
         if beyond > 0 {
-            self.lost.push(format!("{from}: names for {beyond} band(s) it doesn't have (it has {}) left out", self.bands.len()));
+            self.lost
+                .push(format!("{from}: names or wavelengths for {beyond} band(s) it doesn't have (it has {}) left out", self.bands.len()));
         }
         // So is a no-data value: it isn't the raster's.
         let outside = pam.bands.iter().filter(|b| (b.band == 0 || b.band > self.bands.len()) && b.nodata.is_some()).count();
@@ -1628,7 +1629,7 @@ pub(crate) mod tests {
             pam::SIDECAR,
         );
         assert!(
-            one.lost.iter().any(|l| l == "its .aux.xml sidecar: names for 1 band(s) it doesn't have (it has 1) left out"),
+            one.lost.iter().any(|l| l == "its .aux.xml sidecar: names or wavelengths for 1 band(s) it doesn't have (it has 1) left out"),
             "{:?}",
             one.lost
         );

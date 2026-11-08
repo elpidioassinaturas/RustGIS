@@ -121,8 +121,10 @@ pub fn wavelength_nm(item: &str, text: &str, units: Option<&str>) -> Option<f64>
     let v = text.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0)?;
     // Micrometres in nanometres, to a millionth of one: 0.665 µm is 665 nm, not 665.0000000000001.
     let nm = |um: f64| (um * 1e9).round() / 1e6;
+    // The result is checked too: a huge micrometre value overflows, a tiny one rounds to 0.
+    let positive = |w: f64| Some(w).filter(|w| w.is_finite() && *w > 0.0);
     if item.eq_ignore_ascii_case(CENTRAL_WAVELENGTH_UM) {
-        return Some(nm(v));
+        return positive(nm(v));
     }
     let unit = units.map(|u| u.trim().to_lowercase()).unwrap_or_default();
     let micro = match unit.as_str() {
@@ -131,7 +133,28 @@ pub fn wavelength_nm(item: &str, text: &str, units: Option<&str>) -> Option<f64>
         "um" | "\u{b5}m" | "\u{3bc}m" | "micrometer" | "micrometers" | "micrometre" | "micrometres" | "micron" | "microns" => true,
         _ => return None,
     };
-    Some(if micro { nm(v) } else { v })
+    positive(if micro { nm(v) } else { v })
+}
+
+/// Keeps a band's first wavelength in `slot`: `true` when `nm` is another one, left out (the
+/// same length under another item, to a millionth, is the same one).
+fn keep_first_wavelength(slot: &mut Option<f64>, nm: f64) -> bool {
+    match *slot {
+        None => {
+            *slot = Some(nm);
+            false
+        }
+        Some(w) => (w - nm).abs() > 1e-6 * w.max(nm),
+    }
+}
+
+/// A sidecar node's metadata items `key` (any domain, any case): their texts.
+fn mdi_texts<'a>(node: roxmltree::Node<'a, '_>, key: &'a str) -> impl Iterator<Item = &'a str> {
+    node.children()
+        .filter(|n| n.has_tag_name("Metadata"))
+        .flat_map(|m| m.children())
+        .filter(move |n| n.has_tag_name("MDI") && n.attribute("key").is_some_and(|k| k.eq_ignore_ascii_case(key)))
+        .filter_map(|n| n.text())
 }
 
 /// A sidecar node's metadata item `key` (any domain, any case): its text.
@@ -204,7 +227,7 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
     // from 1 to `MAX_BANDS`, a band's records after its first, and the scale, offset, units and
     // other band metadata items and colour tables that aren't read, counted.
     let (mut cut, mut beyond, mut odd_bands, mut unscaled, mut units) = (0usize, 0usize, 0usize, 0usize, 0usize);
-    let (mut items, mut tables, mut odd_nodata, mut odd_wavelengths) = (0usize, 0usize, 0usize, 0usize);
+    let (mut items, mut tables, mut odd_nodata, mut odd_wavelengths, mut other_wavelengths) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut seen, mut twice) = (std::collections::HashSet::new(), 0usize);
     // The unit the dataset gives its bands' wavelengths in, for a band that gives none.
     let dataset_units = mdi_text(root, WAVELENGTH_UNITS);
@@ -236,14 +259,18 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
             .flat_map(|m| m.children())
             .filter(|n| n.has_tag_name("MDI") && n.attribute("key").is_none_or(|k| !k.starts_with("STATISTICS_") && !is_wavelength_item(k)))
             .count();
-        // Its wavelength: the first item there is of those that give one, in any domain (GDAL's in
-        // `IMAGERY`, ENVI's in the default one).
+        // Its wavelength: the first that is a length of the items that give one, in that order and
+        // in any domain (GDAL's in `IMAGERY`, ENVI's in the default one), as the metadata tag's.
         let units = mdi_text(b, WAVELENGTH_UNITS).or(dataset_units);
-        let wavelength = WAVELENGTH_ITEMS.iter().find_map(|w| mdi_text(b, w).map(|t| (w, t))).and_then(|(w, t)| {
-            let nm = wavelength_nm(w, t, units);
-            odd_wavelengths += usize::from(nm.is_none());
-            nm
-        });
+        let mut wavelength = None;
+        for w in WAVELENGTH_ITEMS {
+            for t in mdi_texts(b, w) {
+                match wavelength_nm(w, t, units) {
+                    Some(nm) => other_wavelengths += usize::from(keep_first_wavelength(&mut wavelength, nm)),
+                    None => odd_wavelengths += 1,
+                }
+            }
+        }
         // A colour table here isn't read (only the file's own is): one with entries is counted.
         tables += usize::from(b.children().any(|n| n.has_tag_name("ColorTable") && n.children().any(|e| e.has_tag_name("Entry"))));
         let description = text_of("Description").filter(|d| !d.is_empty()).map(&mut kept);
@@ -306,6 +333,9 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
     }
     if odd_wavelengths > 0 {
         pam.lost.push(format!("{odd_wavelengths} wavelength(s) that aren't a positive length in nanometres or micrometres left out"));
+    }
+    if other_wavelengths > 0 {
+        pam.lost.push(format!("{other_wavelengths} other wavelength(s) for a band that has one left out (the first is kept)"));
     }
     if beyond > 0 {
         pam.lost.push(format!("{beyond} class name(s) past the first {MAX_CATEGORIES} of a band left out"));
@@ -374,7 +404,7 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
             twice += 1;
         }
     }
-    let odd_wavelengths = read_wavelengths(root, &mut pam);
+    let (odd_wavelengths, other_wavelengths) = read_wavelengths(root, &mut pam);
     // A band's scale and offset aren't applied: the values stay as stored. One that changes
     // nothing (a scale of 1, an offset of 0) isn't counted.
     let unscaled = root
@@ -446,6 +476,9 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
             "{odd_wavelengths} wavelength item(s) that aren't a positive length in nanometres or micrometres, or for no band from 1 to {MAX_BANDS}, left out"
         ));
     }
+    if other_wavelengths > 0 {
+        pam.lost.push(format!("{other_wavelengths} other wavelength item(s) for a band that has one left out (the first is kept)"));
+    }
     if twice > 0 {
         pam.lost.push(format!("{twice} band or class name(s) given again left out (the first is kept)"));
     }
@@ -463,9 +496,10 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
 
 /// Reads the bands' wavelengths of GDAL's metadata tag into `pam`: a band's (`sample`) first item
 /// of [`WAVELENGTH_ITEMS`], in that order, in the unit of its band's `wavelength_units` item, else
-/// the dataset's. A band's other wavelength items are other names for the same, and aren't
-/// counted. Returns how many items were left out: not a length, or for no band.
-fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> usize {
+/// the dataset's. A band's other wavelength items giving the same length are other names for it,
+/// and aren't counted. Returns how many items were left out: not a length or for no band, and
+/// another length for a band that has one.
+fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> (usize, usize) {
     let named = |n: &roxmltree::Node<'_, '_>, name: &str| {
         n.has_tag_name("Item") && n.attribute("name").is_some_and(|a| a.eq_ignore_ascii_case(name))
     };
@@ -482,7 +516,7 @@ fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> usize {
     }
     // Where each band already described is in `pam.bands`.
     let mut at: std::collections::HashMap<usize, usize> = pam.bands.iter().enumerate().map(|(i, b)| (b.band, i)).collect();
-    let mut odd = 0usize;
+    let (mut odd, mut other) = (0usize, 0usize);
     for name in WAVELENGTH_ITEMS {
         // A dataset item (no `sample`) belongs to no band, as GeoLibre also reads it: not counted.
         for item in root.children().filter(|n| named(n, name) && n.attribute("sample").is_some()) {
@@ -496,9 +530,7 @@ fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> usize {
                 continue;
             };
             match at.get(&band).and_then(|i| pam.bands.get_mut(*i)) {
-                Some(b) => {
-                    b.wavelength.get_or_insert(nm);
-                }
+                Some(b) => other += usize::from(keep_first_wavelength(&mut b.wavelength, nm)),
                 None => {
                     at.insert(band, pam.bands.len());
                     pam.bands.push(PamBand { band, wavelength: Some(nm), ..PamBand::default() });
@@ -506,7 +538,7 @@ fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> usize {
             }
         }
     }
-    odd
+    (odd, other)
 }
 
 /// Whether XML can't hold `c` (a control character other than a tab or a line break, or a
@@ -875,8 +907,14 @@ mod tests {
             [w(1), w(2), w(3), w(4), w(5), w(6), w(7)],
             [Some(482.5), Some(561.3), Some(654.6), Some(865.0), Some(1600.0), None, None]
         );
-        assert_eq!(pam.lost.len(), 1, "{:?}", pam.lost);
+        assert_eq!(pam.lost.len(), 2, "{:?}", pam.lost);
         assert!(pam.lost[0].starts_with("3 wavelength item(s)"), "{:?}", pam.lost);
+        assert_eq!(pam.lost[1], "1 other wavelength item(s) for a band that has one left out (the first is kept)");
+        // The same length under two items is one wavelength: nothing is said.
+        let xml = r#"<GDALMetadata><Item name="CENTRAL_WAVELENGTH_UM" sample="0">0.665</Item><Item name="wavelength" sample="0">665</Item></GDALMetadata>"#;
+        let pam = parse_gdal_metadata(xml).unwrap();
+        assert_eq!(pam.band(1).and_then(|b| b.wavelength), Some(665.0));
+        assert!(pam.lost.is_empty(), "{:?}", pam.lost);
         // A unit the dataset gives is a band's when it gives none; then a large value may be in µm.
         let xml =
             r#"<GDALMetadata><Item name="wavelength_units">micrometers</Item><Item name="wavelength" sample="0">120</Item></GDALMetadata>"#;
@@ -896,6 +934,45 @@ mod tests {
         assert_eq!(pam.band(3).and_then(|b| b.wavelength), Some(2200.0));
         assert_eq!(pam.band(3).and_then(|b| b.description.as_deref()), Some("SWIR 2"));
         assert!(pam.lost.is_empty(), "{:?}", pam.lost);
+    }
+
+    /// Wavelengths whose nanometres overflow or round to zero aren't lengths: left out, and the
+    /// band's next item is read.
+    #[test]
+    fn wavelengths_that_overflow_or_round_to_zero_are_left_out() {
+        for v in ["1e300", "1e-300", "5e-324"] {
+            for (item, units) in [(CENTRAL_WAVELENGTH_UM, None), ("wavelength", Some("micrometers")), ("wavelength", None)] {
+                let w = wavelength_nm(item, v, units);
+                assert!(w.is_none_or(|w| w.is_finite() && w > 0.0), "{item} {v} {units:?}: {w:?}");
+            }
+            assert_eq!(wavelength_nm(CENTRAL_WAVELENGTH_UM, v, None), None, "{v}");
+        }
+        let xml = r#"<GDALMetadata><Item name="CENTRAL_WAVELENGTH_UM" sample="0">1e300</Item><Item name="wavelength" sample="0">842</Item></GDALMetadata>"#;
+        let pam = parse_gdal_metadata(xml).unwrap();
+        assert_eq!(pam.band(1).and_then(|b| b.wavelength), Some(842.0));
+        assert!(pam.lost[0].starts_with("1 wavelength item(s)"), "{:?}", pam.lost);
+    }
+
+    /// A sidecar's band takes the first item that is a length, as the metadata tag's: one that
+    /// isn't is said and the next is read; another length is said and left out.
+    #[test]
+    fn a_sidecar_band_takes_its_first_wavelength_that_is_a_length() {
+        let pam = parse(
+            r#"<PAMDataset>
+  <PAMRasterBand band="1"><Metadata domain="IMAGERY"><MDI key="CENTRAL_WAVELENGTH_UM">1e300</MDI></Metadata><Metadata><MDI key="wavelength">842</MDI></Metadata></PAMRasterBand>
+  <PAMRasterBand band="2"><Metadata domain="IMAGERY"><MDI key="CENTRAL_WAVELENGTH_UM">0.665</MDI></Metadata><Metadata><MDI key="wavelength">665</MDI><MDI key="central_wavelength">700</MDI></Metadata></PAMRasterBand>
+</PAMDataset>"#,
+        )
+        .unwrap();
+        let w = |b: usize| pam.band(b).and_then(|b| b.wavelength);
+        assert_eq!([w(1), w(2)], [Some(842.0), Some(665.0)]);
+        assert_eq!(pam.lost.len(), 2, "{:?}", pam.lost);
+        assert!(pam.lost.iter().any(|l| l.starts_with("1 wavelength(s) that aren't")), "{:?}", pam.lost);
+        assert!(
+            pam.lost.iter().any(|l| l == "1 other wavelength(s) for a band that has one left out (the first is kept)"),
+            "{:?}",
+            pam.lost
+        );
     }
 
     /// A sidecar's wavelengths, in GDAL's `IMAGERY` domain or ENVI's default one; one that isn't a

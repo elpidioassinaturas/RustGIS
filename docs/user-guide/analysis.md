@@ -1411,9 +1411,10 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
   `{"lon", "lat"}` one pixel and `{"zone": "polygons"}` the mean in the selected or first polygon;
   every answer has the band names and, when the file gives any, `"wavelengths"` in nanometres.
   After GeoLibre's spectral profile.
-- **Change Detection** (difference, ratio, percent), **Indices** (NDVI, NDWI, SAVI, NBR, NDBI, EVI), **Process** (clip to the view, to a
-  box, or to a polygon layer's selected or all polygons, with the cells outside them no-data;
-  resample) and the **Pixel Editor** (set the pixels inside a polygon).
+- **Change Detection** (difference, ratio, percent), **Indices** (NDVI, NDWI, SAVI, NBR, NDBI,
+  EVI), **Process** (clip to the view, to a box, or to a polygon layer's selected or all polygons,
+  with the cells outside them no-data; resample) and the **Pixel Editor** (set the pixels inside a
+  polygon).
 - **Mosaic Rasters** (`raster.mosaic`) merges tiles of one grid, such as the 1 km tiles of a state
   elevation model, into one raster in their own coordinate system and cell size, optionally
   written to a GeoTIFF: `{"inputs": ["dgm_1.tif", "dgm_2.tif", …], "path": "dem.tif"}`. Inputs

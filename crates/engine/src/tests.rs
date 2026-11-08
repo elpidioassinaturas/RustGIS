@@ -34394,6 +34394,23 @@ fn spectral_profiles_at_points_with_wavelengths() {
     assert_eq!(both["profiles"][0]["pixel"], json!([0, 0]));
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
     assert_eq!(said, ["scene: lon and lat left out: points are read"]);
+    // A zone is read before both, and says so.
+    let ring = "[10.001, 44.999], [10.019, 44.999], [10.019, 44.981], [10.001, 44.981], [10.001, 44.999]";
+    let zone = format!(r#"{{"type":"Feature","properties":{{}},"geometry":{{"type":"Polygon","coordinates":[[{ring}]]}}}}"#);
+    s.run("layer.addDataText", &json!({"fileName": "zone.geojson", "text": zone})).unwrap();
+    for (extra, left) in [
+        (json!({"lon": 10.005, "lat": 44.995}), "lon and lat"),
+        (json!({"points": [[10.005, 44.995]]}), "points"),
+        (json!({"points": [[10.005, 44.995]], "lon": 10.005}), "points, lon and lat"),
+    ] {
+        let mut params = json!({"layer": "scene", "zone": "zone"});
+        params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let mark = s.notice_mark();
+        let v = s.run("raster.spectral", &params).unwrap();
+        assert!(v["pixels"].as_u64().is_some_and(|n| n > 0), "{v}");
+        let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        assert_eq!(said, [format!("scene: {left} left out: the zone's mean is read")]);
+    }
     // Points that can't be read are errors.
     for (points, error) in [
         (json!([[20.0, 10.0], [30.0, 10.0]]), "every point is outside the raster"),

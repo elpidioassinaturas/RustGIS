@@ -851,6 +851,46 @@ pub(crate) fn change_work(s: &Session, p: &Value) -> Result<super::workflows::Wo
 /// The most points `raster.spectral` reads in one run.
 const MAX_SPECTRAL_POINTS: usize = 1000;
 
+/// `raster.spectral`'s `points`: every band's value at each, in their order. A point off the
+/// raster keeps its place with null values and is said; when every point is off, it's an error.
+fn spectral_points(s: &mut Session, r: &Raster, points: &Value) -> Result<Vec<Value>, String> {
+    let points = points.as_array().ok_or("points is a list of [lon, lat]")?;
+    if points.is_empty() {
+        return Err("points is empty: give at least one [lon, lat]".into());
+    }
+    if points.len() > MAX_SPECTRAL_POINTS {
+        return Err(format!("{} points given: at most {MAX_SPECTRAL_POINTS} are read in one run", points.len()));
+    }
+    let bands = r.band_count();
+    let mut profiles = Vec::with_capacity(points.len());
+    let mut outside = 0usize;
+    for (i, pt) in points.iter().enumerate() {
+        let xy = pt
+            .as_array()
+            .filter(|a| a.len() == 2)
+            .and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)))
+            .filter(|(x, y)| x.is_finite() && y.is_finite())
+            .ok_or_else(|| format!("point {} isn't [lon, lat]", i + 1))?;
+        profiles.push(match r.pixel_at(Coord::new(xy.0, xy.1)) {
+            Some((col, row)) => {
+                let vals: Vec<Option<f32>> = (0..bands).map(|b| r.value(b, col, row)).collect();
+                json!({"lon": xy.0, "lat": xy.1, "pixel": [col, row], "values": vals})
+            }
+            None => {
+                outside += 1;
+                json!({"lon": xy.0, "lat": xy.1, "pixel": null, "values": vec![Value::Null; bands]})
+            }
+        });
+    }
+    if outside == points.len() {
+        return Err(if outside == 1 { "the point is outside the raster".into() } else { "every point is outside the raster".into() });
+    }
+    if outside > 0 {
+        s.notify(format!("{}: {outside} of {} points fall outside the raster: their values are null", r.name, points.len()), false);
+    }
+    Ok(profiles)
+}
+
 /// Every band's value at a point, at several points (`points`, a profile each), or their mean
 /// in a polygon (`zone`), with the bands' names and wavelengths.
 fn spectral(s: &mut Session, p: &Value) -> CmdResult {
@@ -868,51 +908,20 @@ fn spectral(s: &mut Session, p: &Value) -> CmdResult {
     };
     // A zone is read before points, and points before one point: what isn't read is said.
     let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
-    let left_out = if spectral_zone(p).is_some() && given("points") {
-        Some("points")
-    } else if given("points") && (given("lon") || given("lat")) {
-        Some("lon and lat")
-    } else {
-        None
+    let zone = spectral_zone(p).is_some();
+    let point = given("lon") || given("lat");
+    let left_out = match (zone && given("points"), (zone || given("points")) && point) {
+        (true, true) => Some("points, lon and lat"),
+        (true, false) => Some("points"),
+        (false, true) => Some("lon and lat"),
+        (false, false) => None,
     };
     if let Some(what) = left_out {
-        let read = if spectral_zone(p).is_some() { "the zone's mean is read" } else { "points are read" };
+        let read = if zone { "the zone's mean is read" } else { "points are read" };
         s.notify(format!("{}: {what} left out: {read}", r.name), false);
     }
-    if let Some(points) = p.get("points").filter(|v| !v.is_null() && spectral_zone(p).is_none()) {
-        let points = points.as_array().ok_or("points is a list of [lon, lat]")?;
-        if points.is_empty() {
-            return Err("points is empty: give at least one [lon, lat]".into());
-        }
-        if points.len() > MAX_SPECTRAL_POINTS {
-            return Err(format!("{} points given: at most {MAX_SPECTRAL_POINTS} are read in one run", points.len()));
-        }
-        let mut profiles = Vec::with_capacity(points.len());
-        let mut outside = 0usize;
-        for (i, pt) in points.iter().enumerate() {
-            let xy = pt
-                .as_array()
-                .filter(|a| a.len() == 2)
-                .and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)))
-                .filter(|(x, y)| x.is_finite() && y.is_finite())
-                .ok_or_else(|| format!("point {} isn't [lon, lat]", i + 1))?;
-            profiles.push(match r.pixel_at(Coord::new(xy.0, xy.1)) {
-                Some((col, row)) => {
-                    let vals: Vec<Option<f32>> = all.iter().map(|b| r.value(*b, col, row)).collect();
-                    json!({"lon": xy.0, "lat": xy.1, "pixel": [col, row], "values": vals})
-                }
-                None => {
-                    outside += 1;
-                    json!({"lon": xy.0, "lat": xy.1, "pixel": null, "values": vec![Value::Null; all.len()]})
-                }
-            });
-        }
-        if outside == points.len() {
-            return Err(if outside == 1 { "the point is outside the raster".into() } else { "every point is outside the raster".into() });
-        }
-        if outside > 0 {
-            s.notify(format!("{}: {outside} of {} points fall outside the raster: their values are null", r.name, points.len()), false);
-        }
+    if let Some(points) = p.get("points").filter(|v| !v.is_null() && !zone) {
+        let profiles = spectral_points(s, &r, points)?;
         return answer(json!({"bands": names, "profiles": profiles}));
     }
     if let Some(z) = spectral_zone(p) {
