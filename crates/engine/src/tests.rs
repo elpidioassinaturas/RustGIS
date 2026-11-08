@@ -31111,7 +31111,7 @@ fn a_layout_pdf_georeferences_its_map_frames() {
     assert!(pdf.starts_with("%PDF-1.7") && pdf.contains("/ExtensionLevel 3"), "{}", &pdf[..20]);
     assert!(pdf.contains("/VP [<< /Type /Viewport") && pdf.contains("/Subtype /GEO"));
     assert!(pdf.contains("/GCS << /Type /PROJCS /WKT (PROJCS[") && pdf.contains("/EPSG 31983 >>"), "{pdf}");
-    assert!(!said.iter().any(|t| t.contains("georeferenced")), "{said:?}");
+    assert!(!said.iter().any(|t| t.contains("georeference")), "{said:?}");
     // The corners, back on the map, are the frame's rectangle: its top and bottom level, its
     // sides upright, and as wide as the frame at its scale.
     let gpts = pdf.split("/GPTS [").nth(1).and_then(|r| r.split(']').next()).unwrap();
@@ -31139,7 +31139,9 @@ fn a_layout_pdf_georeferences_its_map_frames() {
         said.iter().any(|t| t.starts_with("The PDF georeferences 1 map frame by its corners") && t.ends_with(&format!("({})", frame.name))),
         "{said:?}"
     );
-    // On SAD69 (shifted from WGS 84) the corners are on SAD69, tens of metres from WGS 84's.
+    // On SAD69 (shifted from WGS 84) the corners are on SAD69, tens of metres from WGS 84's, and
+    // moved as PROJ moves them: EPSG:4326 to EPSG:4618 takes this corner (-46.888358 E,
+    // -18.436173 N) 0.000447° east and 0.000468° north (QGIS 3.32.1's gdaltransform).
     s.run("map.projection", &json!({"type": "EPSG:29193"})).unwrap();
     let (pdf, _) = export(&mut s);
     let gpts = pdf.split("/GPTS [").nth(1).and_then(|r| r.split(']').next()).unwrap();
@@ -31153,6 +31155,8 @@ fn a_layout_pdf_georeferences_its_map_frames() {
         .unwrap();
     let moved = ((n[1] - wgs84.x) * 104_600.0).hypot((n[0] - wgs84.y) * 110_600.0);
     assert!(pdf.contains("/EPSG 29193 >>") && moved > 10.0 && moved < 200.0, "{moved} m");
+    let off = ((n[1] - wgs84.x - 0.000_447) * 104_600.0).hypot((n[0] - wgs84.y - 0.000_468) * 110_600.0);
+    assert!(off < 10.0, "{off} m from PROJ's shift");
     // Across 180° in Web Mercator, a corner comes back on the other side of the world: left out.
     s.run("map.projection", &json!({"type": "mercator"})).unwrap();
     s.run("layout.update", &json!({"element": frame.id, "center": [180.0, 0.0]})).unwrap();
