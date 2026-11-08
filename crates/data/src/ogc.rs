@@ -1006,11 +1006,7 @@ fn wms(url: &str, root: &Node) -> Service {
         // (A layer naming none of its own shares its parent's list, and what is worked out of it.)
         let own: Vec<String> =
             layer.children().filter(|c| c.is_element() && matches!(local(c), "CRS" | "SRS")).map(|c| text_of(&c)).collect();
-        let crs: Rc<Systems> = if own.is_empty() {
-            inherited_crs
-        } else {
-            Rc::new(Systems { names: inherited_crs.names.iter().cloned().chain(own).collect(), ..Systems::default() })
-        };
+        let crs: Rc<Systems> = if own.is_empty() { inherited_crs } else { Rc::new(Systems::with_own(&inherited_crs, &own)) };
         let bbox = child(&layer, "EX_GeographicBoundingBox")
             .and_then(|b| {
                 let f = |k: &str| child_text(&b, k).and_then(|t| t.parse::<f64>().ok());
@@ -1040,9 +1036,8 @@ fn wms(url: &str, root: &Node) -> Service {
         let Some(name) = child_text(&layer, "Name") else { continue };
         // In Web Mercator, as the service draws it, else in a system of its own, warped (#769);
         // with the other systems it is offered in, for a map drawn in one of them.
-        let mercator = crs.names.iter().any(|c| c.split_whitespace().any(is_web_mercator));
-        let listed = crs.candidates.get_or_init(|| wms_candidates(&crs.names));
-        let mut native = wms_native(&layer, listed, v13, bbox, mercator, &mut layer_boxes);
+        let mercator = crs.mercator;
+        let mut native = wms_native(&layer, &crs.first, v13, bbox, mercator, &mut layer_boxes);
         if !mercator && native.is_none() {
             skipped += 1;
             continue;
@@ -1146,12 +1141,50 @@ fn wms(url: &str, root: &Node) -> Service {
     service
 }
 
-/// The coordinate systems a WMS layer is offered in, its own and those it inherits, and those of
-/// them RustGIS knows (worked out once, for the layers sharing the list).
+/// The coordinate systems a WMS layer is offered in, its own and those it inherits: whether Web
+/// Mercator is among them, and the first [`warp::MAX_SYSTEMS`] RustGIS can draw the layer in, in
+/// order of preference (see [`wms_candidates`]), the only ones [`wms_native`] takes. A layer
+/// naming systems of its own adds them to its parent's first ones, so the many a service's root
+/// may list (a GeoServer's thousands) are worked out once, not again for each layer (#1519).
 #[derive(Default)]
 struct Systems {
-    names: Vec<String>,
-    candidates: std::cell::OnceCell<Vec<Candidate>>,
+    /// How many names the list has, its parents' included: where a sublayer's own come in it.
+    names: usize,
+    mercator: bool,
+    first: Vec<Candidate>,
+}
+
+impl Systems {
+    fn with_own(parent: &Systems, own: &[String]) -> Systems {
+        // (The parent's are usable already, and whether one is depends only on its code.)
+        let mut all = parent.first.clone();
+        for mut c in wms_candidates(own).into_iter().filter(|c| warp::usable(c.1).is_some()) {
+            c.3 += parent.names;
+            // One name for each system, as in `wms_candidates`: CRS:84 over EPSG:4326, else the
+            // first listed. (A system past the parent's first ones comes after them all here too.)
+            match all.iter_mut().find(|p| p.1 == c.1) {
+                Some(p) if warp::is_crs84(&c.0) && !warp::is_crs84(&p.0) => *p = c,
+                Some(_) => {}
+                None => all.push(c),
+            }
+        }
+        all.sort_by_key(|c| (candidate_rank(c), c.3));
+        Systems {
+            names: parent.names + own.iter().map(|c| c.split_whitespace().count()).sum::<usize>(),
+            mercator: parent.mercator || own.iter().any(|c| c.split_whitespace().any(is_web_mercator)),
+            first: all.into_iter().take(warp::MAX_SYSTEMS).collect(),
+        }
+    }
+}
+
+/// Where a system comes in a WMS layer's order of preference: projected, CRS:84, other
+/// geographic.
+fn candidate_rank((name, _, c, _): &Candidate) -> u8 {
+    match (c.is_geographic(), warp::is_crs84(name)) {
+        (false, _) => 0,
+        (true, true) => 1,
+        (true, false) => 2,
+    }
 }
 
 /// A system of a WMS layer's list that RustGIS knows: its name there, its EPSG code, it, and its
@@ -1179,13 +1212,8 @@ fn wms_candidates(crs: &[String]) -> Vec<Candidate> {
     // One name for each system (EPSG:4326 and CRS:84 differ only in their axes: CRS:84 kept).
     listed.sort_by_cached_key(|(name, code, _, _)| (*code, !warp::is_crs84(name)));
     listed.dedup_by_key(|(_, code, _, _)| *code);
-    let rank = |(name, _, c, _): &Candidate| match (c.is_geographic(), warp::is_crs84(name)) {
-        (false, _) => 0,
-        (true, true) => 1,
-        (true, false) => 2,
-    };
     // In the order the service lists them, the preferred first.
-    listed.sort_by_key(|l| (rank(l), l.3));
+    listed.sort_by_key(|l| (candidate_rank(l), l.3));
     listed
 }
 
@@ -5800,6 +5828,33 @@ mod tests {
             let (_, _, w) = warp::Warp::parse(&template.replace("{z}/{x}/{y}", "0/0/0")).unwrap();
             let warp::Grid::Tiles(ms) = &w.grid else { panic!() };
             assert_eq!((ms[0].left, ms[0].top), at, "{written}");
+        }
+    }
+
+    /// A sublayer's systems, its own added to its parent's first ones, are those its whole list
+    /// gives, so a root's many are worked out once (#1519).
+    #[test]
+    fn a_sublayers_systems_build_on_its_parents_first_ones() {
+        let first = |names: &[String]| -> Vec<(String, u32)> {
+            wms_candidates(names).into_iter().filter(|c| warp::usable(c.1).is_some()).take(warp::MAX_SYSTEMS).map(|c| (c.0, c.1)).collect()
+        };
+        let codes = |r: std::ops::Range<u32>| r.map(|c| format!("EPSG:{c}")).collect::<Vec<_>>();
+        let many = [codes(32601..32671), vec!["EPSG:4326".into(), "EPSG:3857".into()], codes(2000..2100)].concat();
+        let few = vec!["EPSG:4326".to_string(), "EPSG:3857".into()];
+        let owns = [
+            vec!["CRS:84".to_string()],
+            vec!["EPSG:32633".into(), "EPSG:2056".into()],
+            vec!["EPSG:4326 EPSG:31983".into()],
+            codes(32701..32761),
+        ];
+        for root in [&many, &few] {
+            let parent = Systems::with_own(&Systems::default(), root);
+            for own in &owns {
+                let child = Systems::with_own(&parent, own);
+                let whole: Vec<String> = root.iter().chain(own).cloned().collect();
+                assert_eq!(child.first.iter().map(|c| (c.0.clone(), c.1)).collect::<Vec<_>>(), first(&whole), "{own:?}");
+                assert!(child.mercator && !Systems::with_own(&Systems::default(), own).mercator);
+            }
         }
     }
 

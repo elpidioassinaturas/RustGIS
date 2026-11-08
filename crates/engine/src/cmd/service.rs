@@ -89,9 +89,11 @@ pub(crate) fn without_token(p: &Value) -> Result<Option<Value>, String> {
     Ok(Some(owned))
 }
 
-/// One layer's exact capabilities document and the origin history used to reach it.
+/// One layer's exact capabilities document and the origin history used to reach it. The address
+/// is shared by the document's layers: nothing bounds its length, and a document has up to
+/// `MAX_READ_LAYERS` of them (#1519).
 struct CapabilitySource {
-    address: String,
+    address: std::sync::Arc<str>,
     crossed_origin: bool,
 }
 
@@ -216,9 +218,10 @@ fn discover(s: &mut Session, p: &Value, left: bool) -> Result<Discovery, String>
         }
         // Parsers bound each document's collections/layers; visited documents bound the merge.
         // Distinct offers may share a name (including generated tile names and collection ids).
+        let shared: std::sync::Arc<str> = address.as_str().into();
         for layer in service.layers {
             result.service.layers.push(layer);
-            result.sources.push(CapabilitySource { address: address.clone(), crossed_origin });
+            result.sources.push(CapabilitySource { address: shared.clone(), crossed_origin });
         }
         result.service.withheld_addresses = result.service.withheld_addresses.saturating_add(service.withheld_addresses);
         result.service.past_read_limit = result.service.past_read_limit.take().or(service.past_read_limit);
@@ -684,7 +687,7 @@ fn layer_source(layer: &mut Value, source: CapabilitySource) {
         offer.get("type").and_then(Value::as_str) == Some("features")
             && ps(offer, "url").is_some_and(|url| crosses_origin(&source.address, url))
     });
-    layer["source_url"] = json!(source.address);
+    layer["source_url"] = json!(&*source.address);
     if source.crossed_origin || foreign_features {
         layer["anonymous"] = json!(true);
         if let Some(url) = layer.get_mut("offer").and_then(|o| o.get_mut("url"))
@@ -746,7 +749,7 @@ fn add_discovered(s: &mut Session, p: &Value, url: &str, want: &str, found: &Dis
             }
         })?;
     let capability_crossed = source.crossed_origin;
-    let source = source.address.as_str();
+    let source = &*source.address;
     // A time-enabled layer follows the time slider, at each of its steps, unless a time is asked
     // for: one of its times (the layer named with it), or "default" (`false`), the service's.
     // (`"time": true`, the slider, as for a Zarr variable, `layer.addZarr`'s.)
