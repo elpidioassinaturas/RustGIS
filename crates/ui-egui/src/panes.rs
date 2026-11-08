@@ -2994,7 +2994,8 @@ fn layer_list(form: &mut GpForm, ui: &mut Ui, param: &'static str, cur: &str, of
 impl GpForm {
     /// Opens a tool, pre-filling layer parameters from the active layer. An external tool's
     /// optional input stays empty until it's picked: it changes what the tool does, as a weight
-    /// or a mask would (#1517). A built-in tool's only shows when it's asked for.
+    /// or a mask would (#1517). A built-in tool's is filled as before; the form shows A5 Grid's,
+    /// the only one, when its options ask for it (`applies`).
     pub fn open(&mut self, tool: Option<&'static str>, s: &Session) {
         self.tool = tool;
         self.values.clear();
@@ -3297,11 +3298,16 @@ pub(crate) fn takes_field(kind: ParamKind, d: &rustgis_engine::data::Dataset, i:
     }
 }
 
-/// The tool's first layer parameter, whose fields its field parameters take.
+/// The tool's first layer parameter, whose fields its field parameters take and whose layer
+/// names a new output: a required one before an optional one, which an external tool's form
+/// leaves empty (#1517).
 pub(crate) fn first_layer(spec: &rustgis_engine::analysis::ToolSpec) -> Option<&rustgis_engine::analysis::ParamSpec> {
-    spec.params
-        .iter()
-        .find(|p| matches!(p.kind, ParamKind::Layer | ParamKind::PolygonLayer | ParamKind::PointLayer | ParamKind::VectorLayer))
+    let layers = || {
+        spec.params
+            .iter()
+            .filter(|p| matches!(p.kind, ParamKind::Layer | ParamKind::PolygonLayer | ParamKind::PointLayer | ParamKind::VectorLayer))
+    };
+    layers().find(|p| p.required).or_else(|| layers().next())
 }
 
 /// The most specific `<input>_…` prefix wins; otherwise use the first attribute input.
@@ -6945,9 +6951,9 @@ mod tests {
             P { name, label: name, kind, required, default: "", help: "" }
         }
         const PARAMS: &[P] = &[
+            layer("layer", ParamKind::Layer, false),
             layer("needed", ParamKind::Layer, true),
             layer("neededVector", ParamKind::VectorLayer, true),
-            layer("layer", ParamKind::Layer, false),
             layer("raster", ParamKind::RasterLayer, false),
             layer("vector", ParamKind::VectorLayer, false),
             layer("polygon", ParamKind::PolygonLayer, false),
@@ -6980,6 +6986,12 @@ mod tests {
             assert_eq!(filled(&app, name), None, "{name}");
         }
         assert_eq!(filled(&app, "text").as_deref(), Some("soft"));
+        // Its fields and a new output's name come from the required layer, which is filled, not
+        // the optional one before it, which is empty.
+        let spec = rustgis_engine::analysis::tool("formTest:optional").unwrap();
+        assert_eq!(first_layer(spec).map(|p| p.name), Some("needed"));
+        assert_eq!(layer_for_param(spec, "field").map(|p| p.name), Some("needed"));
+        assert_eq!(layer_for_param(spec, "layer_field").map(|p| p.name), Some("layer"), "its own prefix still wins");
 
         app.run("ui.gp.open", json!({"tool": "a5Grid"})).unwrap();
         assert_eq!(filled(&app, "input").as_deref(), Some("Cities"));

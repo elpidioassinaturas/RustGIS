@@ -534,7 +534,12 @@ fn option_value(v: &Value, data: Data) -> Value {
 /// Whether option value `v` is the manifest's default `d`. The form sends text, so a default that
 /// isn't text on a field shown as text comes back as its JSON (`[255,255,255,255]`, `false`).
 fn is_default(v: &Value, d: &Value, data: Data) -> bool {
-    option_value(d, data) == *v || (!d.is_string() && v.as_str().and_then(|t| serde_json::from_str::<Value>(t).ok()).as_ref() == Some(d))
+    option_value(d, data) == *v || (!d.is_string() && json_text(v).as_ref() == Some(d))
+}
+
+/// The JSON a text value spells (`"[255,255,255,255]"` gives the list), if it is text and reads.
+fn json_text(v: &Value) -> Option<Value> {
+    v.as_str().and_then(|t| serde_json::from_str(t).ok())
 }
 
 /// Immutable manifest metadata paired with one published analysis schema.
