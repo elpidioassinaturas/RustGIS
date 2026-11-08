@@ -2877,8 +2877,9 @@ pub fn start_geolibre_load(app: &mut RustGisApp) {
     app.gp.web_load = Some(slot);
 }
 
+/// What a slot holds, taken out; a poisoned slot is still read, as its writer fills it anyway.
 fn take<T>(slot: &crate::Slot<T>) -> Option<T> {
-    slot.lock().ok().and_then(|mut s| s.take())
+    slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
 }
 
 /// Picks up what the browser's GeoLibre runner finished: the tool list, or a tool run.
@@ -7033,6 +7034,24 @@ mod tests {
 
         app.run("ui.gp.open", json!({"tool": "a5Grid"})).unwrap();
         assert_eq!(filled(&app, "input").as_deref(), Some("Cities"));
+    }
+
+    /// A slot poisoned by a panicking writer that filled it anyway is still read, or the pane
+    /// waiting on it would wait forever.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_poisoned_slot_is_still_taken() {
+        let slot: crate::Slot<u32> = crate::Slot::default();
+        let writer = slot.clone();
+        let _ = std::thread::spawn(move || {
+            let mut held = writer.lock().unwrap();
+            *held = Some(7);
+            panic!("the writer fails after filling the slot");
+        })
+        .join();
+        assert!(slot.is_poisoned());
+        assert_eq!(take(&slot), Some(7));
+        assert_eq!(take(&slot), None, "taken once");
     }
 
     /// Run starts a built-in tool on a thread of its own: the pane shows it running, with Cancel,
