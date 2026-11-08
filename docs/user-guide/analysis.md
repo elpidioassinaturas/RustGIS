@@ -176,6 +176,40 @@ measurement, also with a count. An incomplete polygon is measured along its rema
 edges, without assuming it contains the center. The overlay tools, Select By Location, Spatial Join, Summarize
 Within and topology validation refuse latitudes past ±90° before doing their work.
 
+### Batch geoprocessing (`gp.batch`)
+
+Run one tool over many layers in the project or a folder of vector files:
+
+```json
+gp.batch={"tool":"buffer","inputs":["Cities","Rivers"],"outputPattern":"{input}_buf","params":{"distance":50,"units":"Kilometers"}}
+```
+
+- `"tool"`: the tool's id (such as `"buffer"`, `"simplify"` or `"convexHull"`).
+- `"inputs"`: layer names or, on desktop and the command line, file paths; or `"*"` for every
+  vector layer on the active map, hidden ones included (raster and graphics layers are left out,
+  with a notice). In the browser, add a file as a layer first and use its layer name.
+- `"folder"`: on desktop and the command line, a folder whose `.shp`, `.geojson`, `.json`,
+  `.gpkg`, `.fgb`, `.parquet`, `.geoparquet`, `.kml`, `.kmz`, `.gpx` and `.csv` files are run over
+  in file-name order (byte order, so ASCII capitals come before lowercase letters). Subfolders and symbolic links are skipped, with a count.
+- `"outputPattern"` (or `"output_pattern"`): the name of each output layer, `"{input}_{tool}"` by
+  default, where `{input}` is the layer's name or the file's name without its extension and
+  `{tool}` the tool's id. It must include `{input}`. A name already taken gets a number (`_2`).
+  Tools that change a layer in place or select features keep their own names.
+- `"params"`: the parameters every run shares. The batch input replaces a value given there for
+  the input parameter, with a notice.
+- `"param"` (or `"batch_param"`): the parameter each input goes to; by default the tool's first
+  layer parameter, else `"input"`.
+
+One input failing doesn't stop the others. The result counts what `"succeeded"` and `"failed"`,
+names the `"outputs"` (layers or tables) and lists each failure in `"errors"`, with one notice
+for the failures. If every input fails, the batch is an error naming each input and why. What a
+reader drops or assumes for a file input (Z values, a coordinate system) is one notice per kind,
+naming the inputs, and is kept in the history and the result's `"warnings"`. Tools that write a
+file are refused. A batch is yours to run: the AI Assistant asks each time, and plugins and
+imported tasks can't run one.
+
+### Built-in tools
+
 These are the built-in tools; GeoLibre and plugin tools join them when available.
 Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available tools and their parameters):
 
@@ -421,7 +455,9 @@ gap between two parts never counts; a line's parts that cross the antimeridian, 
 where the next begins on its other side, as a GeoJSON file splits a line that crosses it, are one
 line. A ring ends where it starts, so a point there is made once, and a line that ends where it
 starts (a contour) is walked as a ring too; a part shorter than its offsets gets none. A line that
-passes through one place twice gets a point there each time the distance lands on it. Each point
+passes through one place twice gets a point there each time the distance lands on it, except at a
+closed line's shared start and end, which gets one point (a line through A, B and back to A gets
+one at A). Each point
 has its feature's attributes and three fields: `orig_fid`, the feature's OID, as Feature Vertices
 To Points writes it, and, named as in QGIS's Points along geometry, `distance` (how far along its
 part, in `units`, the start offset included) and `angle` (the line's direction there, in degrees
@@ -902,7 +938,13 @@ CRS metadata. Coordinates are used directly, without projection or snapping.
 - **Unsplit Line** (`unsplitLine`) joins line parts at exactly equal endpoints where precisely
   two part ends meet and all attribute values agree. Reversed parts and closed cycles are
   supported. Branches, attribute changes, and intersections away from endpoints stay separate.
-  Every output chain retains its common attributes; no field values are discarded.
+  Every output chain retains its common attributes; no field values are discarded. Each chain of
+  joined parts is its own output feature, so a multipart input can become several features.
+  Joins are decided among the selected features only, when there is a selection: an unselected
+  part meeting an endpoint neither joins it nor stops a join there. Two open parts with
+  equal attributes that share both endpoints join into one closed line when no other considered
+  part ends there; a part that is already closed has two ends at its endpoint, so it joins
+  nothing there.
 
 Missing geometries and empty or too-short parts are skipped with a count. If skipping leaves
 no usable output, the tool returns an error. Non-finite coordinates and malformed rows with
@@ -927,12 +969,13 @@ such as `exterior ring of part 1 crosses itself; 3 repeated vertices in ring 2 o
 feature with more than 20 problems lists the first 20 and counts the rest. If the input already
 has a `problem` or `detail` field, the new one gets the next free name (`problem_2`) and the
 tool says so. When nothing is wrong, the output layer is empty and the message says how many
-features were checked.
+features were checked. `repeated_vertex` is not one of the OGC rules, which allow a point
+repeated in a row: it is a data-quality check reported beside them.
 
 | Code | What is wrong |
 | --- | --- |
 | `null_geometry` | No geometry, or one without coordinates |
-| `non_finite_coordinate` | A coordinate is not a number or infinite. The row is written without geometry, so it can't spoil the layer's extent |
+| `non_finite_coordinate` | A coordinate is not a number or infinite. The row is written without geometry, so it can't spoil the layer's extent. A ring with one is reported for those coordinates and left out of every other check: its points, its edges' crossings and its containment in other rings |
 | `too_few_points` | A line part with fewer than 2 distinct points, a ring with fewer than 3, or a polygon part without rings |
 | `ring_not_closed` | A ring's last point is not its first |
 | `repeated_vertex` | The same vertex twice in a row (a closed ring's last point doesn't count) |
@@ -1156,7 +1199,7 @@ the environment does not set their output grids.
 computer's memory, or a container's limit when it is lower: each plans for a quarter of it, never
 below the web app's fixed limits and never above a ceiling.
 
-| Limit | Fixed (web app, smallest) | Desktop: a quarter of memory at | Ceiling |
+| Limit | Floor (web app value in brackets) | Desktop: a quarter of memory at | Ceiling |
 |---|---|---|---|
 | `rasterSamples`: samples a raster read holds (cells times bands) | 120 million (32 million in the web app) | 8 bytes a sample | 1 billion |
 | `outputPixels`: pixels of a raster a tool makes | 64 million | 16 bytes a pixel | 512 million |
@@ -1270,8 +1313,10 @@ their name.
   has that tool and those after it run again as the results are added, and so does a tool that
   writes a file, a plugin tool or a GeoLibre tool, with those after it. Those run as a model
   always has, holding the window until they finish, with the work limits of a run that can't
-  be cancelled. A file a tool reads by its path isn't compared: one changed during the run
-  gives the result from what was read. A model run from a script in the Script pane is worked
+  be cancelled. The tools worked out in the background take no work limit, as a run that can
+  be stopped takes none. Tools that run holding the window or from the command line keep it, so
+  the same model can finish in the background and stop at the limit there. A file a tool reads
+  by its path isn't compared: one changed during the run gives the result from what was read. A model run from a script in the Script pane is worked
   out in the background with the script; one run from the command line or the assistant runs
   where the command runs.
 - **Save** keeps the model in the project; **Export** writes it as a `*.model.json` file, which
@@ -1376,7 +1421,7 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
   - **Resampling:** `nearest` (the default: it never invents a value, which is right for classes),
     `bilinear` or `cubic` sample each cell at its centre. A cell whose centre falls on a no-data
     pixel (or on NaN, with or without a no-data value; in a colour image, no-data in every
-    channel) is no-data; otherwise they interpolate from the pixels around it that have a value,
+    colour channel, alpha aside) is no-data; otherwise they interpolate from the pixels around it that have a value,
     as gdalwarp does. Going coarser, they skip the detail between cell centres and can give a jagged
     result, where gdalwarp widens its kernel to smooth it. `average` and `mode`
     take every pixel whose centre falls in the cell (no-data skipped), its mean or its most frequent

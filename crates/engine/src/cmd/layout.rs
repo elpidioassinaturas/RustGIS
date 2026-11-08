@@ -786,7 +786,7 @@ pub fn parse_arrangement(v: &Value) -> Result<Homes, String> {
                 let corner = o.get(*key).and_then(Value::as_str).map(str::trim).unwrap_or("");
                 homes[i] = CORNER_NAMES
                     .iter()
-                    .position(|c| *c == corner)
+                    .position(|c| c.eq_ignore_ascii_case(corner))
                     .ok_or_else(|| format!("arrangement: \"{key}\" is \"top-left\", \"top-right\", \"bottom-left\" or \"bottom-right\""))?;
             }
             if (0..4).any(|i| homes[..i].contains(&homes[i])) {
@@ -2062,7 +2062,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             _ => (format!("the {} and the {last}", rest.join(", the ")), "sit"),
         };
         warnings
-            .push(format!("{names} {verb} on what the map shows, the freer corners having gone to the others: move by hand what matters"));
+            .push(format!("{names} {verb} on what the map shows, the freer places having gone to the others: move by hand what matters"));
     }
     for (i, (a, ra)) in placed.iter().enumerate() {
         for (b, rb) in placed.iter().skip(i + 1) {
@@ -3479,11 +3479,9 @@ fn series_page(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"page": page, "pages": n, "name": name}))
 }
 
-/// Renders a layout to PNG or PDF bytes. `all` renders every map series page (PDF only).
 /// What an export of a layout whose texts name installed families is told while the app is still
 /// indexing the fonts (its first seconds; the app's exports don't wait for them): those texts
-/// are drawn in their fallbacks. A script or the command line indexes them at
-/// once.
+/// are drawn in their fallbacks. A script or the command line indexes them at once.
 fn named_fonts_unread(layout: &Layout) -> Option<&'static str> {
     let named = layout.elements.iter().any(|e| matches!(&e.kind, ElementKind::Text { font_name: Some(_), .. }));
     (named && rustgis_render::families::available().is_none()).then_some(

@@ -123,6 +123,8 @@ impl Discovery {
 }
 
 const MAX_SERVICE_DOCUMENTS: usize = 4;
+/// A notice for legend pictures a service listed that its layer cannot keep (an address too long).
+const LEGENDS_LEFT_OUT_NOTICE: &str = "{n} legend picture(s) the service listed were left out: their addresses are too long";
 
 /// Whether what this `service.add` would wait for is left off the frame: it is a plugin command's,
 /// run by the desktop app, which runs the command again when it has come (#1319).
@@ -211,6 +213,9 @@ fn discover(s: &mut Session, p: &Value, left: bool) -> Result<Discovery, String>
             result.service.kind = service.kind.clone();
             result.service.title = service.title.clone();
         }
+        if let Some(listed) = service.listed {
+            result.service.listed = Some(result.service.layers.len() + listed);
+        }
         // Parsers bound each document's collections/layers; visited documents bound the merge.
         // Distinct offers may share a name (including generated tile names and collection ids).
         for layer in service.layers {
@@ -218,6 +223,7 @@ fn discover(s: &mut Session, p: &Value, left: bool) -> Result<Discovery, String>
             result.sources.push(CapabilitySource { address: address.clone(), crossed_origin });
         }
         result.service.withheld_addresses = result.service.withheld_addresses.saturating_add(service.withheld_addresses);
+        result.service.past_read_limit = result.service.past_read_limit.take().or(service.past_read_limit);
         result.service.notes.extend(service.notes);
         let features = result.service.layers.iter().any(|l| matches!(l.offer, Offer::Features { .. }));
         let tiles = result.service.layers.iter().any(|l| matches!(l.offer, Offer::Tiles { .. } | Offer::VectorTiles { .. }));
@@ -408,6 +414,9 @@ fn checked_template(service: &str, t: &str) -> Result<String, String> {
 struct AdvertisedTemplate {
     template: Option<String>,
     crossed_origin: bool,
+    /// Why the standard tile address is used instead, when a template was looked for and not
+    /// found: the notice to give.
+    fallback: Option<String>,
 }
 
 /// Compares canonical origins without treating a runtime login wrapper as part of the origin.
@@ -433,20 +442,41 @@ fn advertised_template_with(
     mut read: impl FnMut(&str) -> Result<Vec<u8>, String>,
 ) -> AdvertisedTemplate {
     use rustgis_data::ogc::{TilesStep, resolve_tiles};
-    let mut out = AdvertisedTemplate { template: None, crossed_origin: crosses_origin(source, list) };
+    let mut out = AdvertisedTemplate { template: None, crossed_origin: crosses_origin(source, list), fallback: None };
     let mut doc = list.to_string();
+    // Each fallback is said, as [`left_template`] says it.
     for _ in 0..2 {
-        if crate::render::rustgis_tiles::address::check(&doc, Some(list)).is_err() {
-            break;
+        let shown = crate::sources::redact(&doc);
+        if let Err(e) = crate::render::rustgis_tiles::address::check(&doc, Some(list)) {
+            let e = crate::sources::redact_text(&e);
+            out.fallback = Some(format!("{shown}: this tile set document was refused, so the standard tile address is used: {e}"));
+            return out;
         }
-        let Ok(body) = read(&doc) else { break };
-        let Some(resolved) = resolve_tiles(list, &doc, &body, vector) else { break };
+        let body = match read(&doc) {
+            Ok(body) => body,
+            Err(e) => {
+                let e = crate::sources::redact_text(&e);
+                out.fallback = Some(format!("{shown}: its tile sets couldn't be read, so the standard tile address is used: {e}"));
+                return out;
+            }
+        };
+        let Some(resolved) = resolve_tiles(list, &doc, &body, vector) else {
+            out.fallback = Some(format!("{shown}: it names no tiles of this layer, so the standard tile address is used"));
+            return out;
+        };
         *withheld = withheld.saturating_add(resolved.withheld_addresses);
         match resolved.step {
             TilesStep::Template(t) => {
                 out.crossed_origin |= crosses_origin(&doc, &t);
-                out.template = checked_template(list, &t).ok();
-                break;
+                match checked_template(list, &t) {
+                    Ok(t) => out.template = Some(t),
+                    // (Its error names the template, which may carry keys.)
+                    Err(e) => {
+                        let e = crate::sources::redact_text(&e);
+                        out.fallback = Some(format!("{shown}: its tile template was refused, so the standard tile address is used: {e}"));
+                    }
+                }
+                return out;
             }
             TilesStep::Next(next) => {
                 out.crossed_origin |= crosses_origin(&doc, &next);
@@ -455,6 +485,8 @@ fn advertised_template_with(
             }
         }
     }
+    out.fallback =
+        Some(format!("{}: its tile sets lead on past two documents, so the standard tile address is used", crate::sources::redact(list)));
     out
 }
 
@@ -470,7 +502,7 @@ enum LeftTemplate {
 /// back to the standard tile address. Every fallback to that address is said.
 fn left_template(s: &mut Session, source: &str, list: &str, vector: bool, withheld: &mut u32) -> Result<LeftTemplate, String> {
     use rustgis_data::ogc::{TilesStep, resolve_tiles};
-    let mut out = AdvertisedTemplate { template: None, crossed_origin: crosses_origin(source, list) };
+    let mut out = AdvertisedTemplate { template: None, crossed_origin: crosses_origin(source, list), fallback: None };
     let mut doc = list.to_string();
     for _ in 0..2 {
         let shown = crate::sources::redact(&doc);
@@ -522,7 +554,7 @@ fn left_template(s: &mut Session, source: &str, list: &str, vector: bool, withhe
 /// In the browser nothing waits: the app reads the template itself and passes it as `"tiles"`.
 #[cfg(target_arch = "wasm32")]
 fn advertised_template(source: &str, list: &str, _: bool, _: &mut u32) -> AdvertisedTemplate {
-    AdvertisedTemplate { template: None, crossed_origin: crosses_origin(source, list) }
+    AdvertisedTemplate { template: None, crossed_origin: crosses_origin(source, list), fallback: None }
 }
 
 /// Adds a template resolved off the command thread through the ordinary admitted command.
@@ -616,9 +648,31 @@ pub(crate) fn layers(s: &mut Session, p: &Value) -> CmdResult {
     let p = owned.as_ref().unwrap_or(p);
     let bound = crate::service_logins::request_params(s, p)?;
     let p = bound.as_ref();
-    let found = capabilities(s, p)?;
+    let mut found = capabilities(s, p)?;
     notify_withheld(s, found.service.withheld_addresses);
+    let of = layer_count(&found.service);
+    let total = found.service.layers.len();
+    let mut cut = None;
+    if let Some(listed) = found.service.listed.filter(|&listed| listed < total) {
+        found.service.layers.truncate(listed);
+        let note = format!("only the first {listed} of {of} are listed; service.add takes any of them by name");
+        found.service.notes.push(note.clone());
+        cut = Some(note);
+    }
     let mut out = service_json(&found.service);
+    // How many there are, for a window that says it its own way: `listedNote` says the list
+    // stops (Add From Service: its filter searches only those listed), and `atLeast` that the
+    // document has more than were read.
+    let past_limit = found.service.past_read_limit.is_some();
+    if cut.is_some() || past_limit {
+        out["total"] = json!(total);
+    }
+    if past_limit {
+        out["atLeast"] = json!(true);
+    }
+    if let Some(note) = cut {
+        out["listedNote"] = json!(note);
+    }
     if let Some(layers) = out.get_mut("layers").and_then(Value::as_array_mut) {
         for (layer, source) in layers.iter_mut().zip(found.sources) {
             layer_source(layer, source);
@@ -628,6 +682,28 @@ pub(crate) fn layers(s: &mut Session, p: &Value) -> CmdResult {
         out["next"] = json!(next);
     }
     Ok(out)
+}
+
+/// How many layers a service has, for a note: those read, when the document goes past the limit.
+fn layer_count(service: &Service) -> String {
+    let total = service.layers.len();
+    if service.past_read_limit.is_some() { format!("the {total} layers read") } else { format!("{total} layers") }
+}
+
+/// The error for a name the document doesn't give. It may also be past what is read of the
+/// document, which can't be told from a mistyped name, so that is said beside it.
+fn not_listed(url: &str, what: &str, want: &str, service: &Service) -> String {
+    let total = service.layers.len();
+    let past_limit = service.past_read_limit.as_deref();
+    let listing = match (service.listed.filter(|&listed| listed < total), past_limit) {
+        (Some(listed), _) => format!("service.layers lists the first {listed} of {}", layer_count(service)),
+        (None, Some(_)) => "service.layers lists those read".to_string(),
+        (None, None) => "service.layers lists them".to_string(),
+    };
+    match past_limit {
+        Some(why) => format!("{url}: no {what} '{want}' ({listing}; {why})"),
+        None => format!("{url}: no {what} '{want}' ({listing})"),
+    }
 }
 
 /// Publishes the selected document and its already-resolved feature login provenance.
@@ -694,7 +770,7 @@ fn add_discovered(s: &mut Session, p: &Value, url: &str, want: &str, found: &Dis
             let left_out = |n: &&String| n.contains(rustgis_data::ogc::LEFT_OUT_3D) && n.to_lowercase().contains(&quoted);
             match found.service.notes.iter().find(left_out) {
                 Some(why) => format!("{url}: no layer '{want}': {why}"),
-                None => format!("{url}: no layer '{want}' (service.layers lists them)"),
+                None => not_listed(url, "layer", want, &found.service),
             }
         })?;
     let capability_crossed = source.crossed_origin;
@@ -716,6 +792,12 @@ fn add_discovered(s: &mut Session, p: &Value, url: &str, want: &str, found: &Dis
     let pinned = asked.is_some_and(|a| a.eq_ignore_ascii_case("default"));
     let slider = match (&layer.time, asked) {
         (Some(t), Some(a)) if a.eq_ignore_ascii_case("slider") => Some(t.slider().ok_or_else(|| match t.changes() {
+            _ if t.values.is_empty() && t.cut > 0 => format!(
+                "{}: its {} times are left out, past the {} RustGIS keeps for one document's layers, so there is nothing for the time slider to step through",
+                layer.title,
+                t.cut,
+                rustgis_data::ogc::MAX_DOCUMENT_TIME_VALUES
+            ),
             true => format!("{}: its times aren't dates the time slider can step to (give one of them as time)", layer.title),
             false => format!(
                 "{}: it lists only one time, {}: nothing for the time slider to step through",
@@ -740,6 +822,19 @@ fn add_discovered(s: &mut Session, p: &Value, url: &str, want: &str, found: &Dis
         (None, Some(_)) => return Err(format!("{}: the layer has no time to pick (leave time out)", layer.title)),
         (None, None) => None,
     };
+    // (A layer far down a document may have lost its times to the document's cap.)
+    if let Some(t) = layer.time.as_ref().filter(|t| t.cut > 0) {
+        s.notify(
+            format!(
+                "{}: {} of its times are left out: RustGIS keeps at most {} for a layer and {} for one document's layers",
+                layer.title,
+                t.cut,
+                rustgis_data::ogc::MAX_TIME_VALUES,
+                rustgis_data::ogc::MAX_DOCUMENT_TIME_VALUES
+            ),
+            false,
+        );
+    }
     let title = match (&time, asked) {
         (Some(t), Some(_)) => format!("{} {t}", layer.title),
         _ => layer.title.clone(),
@@ -759,6 +854,7 @@ fn add_discovered(s: &mut Session, p: &Value, url: &str, want: &str, found: &Dis
         (Some(list), Some(t)) => AdvertisedTemplate {
             template: Some(checked_template(source, t)?),
             crossed_origin: crosses_origin(source, list) || crosses_origin(list, t),
+            fallback: None,
         },
         (Some(list), None) if leaving => {
             match left_template(s, source, list, matches!(layer.offer, Offer::VectorTiles { .. }), withheld)? {
@@ -766,7 +862,13 @@ fn add_discovered(s: &mut Session, p: &Value, url: &str, want: &str, found: &Dis
                 LeftTemplate::Waiting(doc) => return waiting_for(s, &doc),
             }
         }
-        (Some(list), None) => advertised_template(source, list, matches!(layer.offer, Offer::VectorTiles { .. }), withheld),
+        (Some(list), None) => {
+            let advertised = advertised_template(source, list, matches!(layer.offer, Offer::VectorTiles { .. }), withheld);
+            if let Some(note) = &advertised.fallback {
+                s.notify(note.clone(), false);
+            }
+            advertised
+        }
         _ => AdvertisedTemplate::default(),
     };
     match &layer.offer {
@@ -807,8 +909,11 @@ fn add_discovered(s: &mut Session, p: &Value, url: &str, want: &str, found: &Dis
                     }
                 }
             }
-            // (Those the layer wouldn't keep, an address too long, are left out, not refused.)
+            // (Those the layer wouldn't keep, an address too long, are left out, not refused,
+            // and counted in a notice.)
             let legends = rustgis_map::tiles::checked_legends(layer.legends.iter().cloned());
+            let offered = layer.legends.len().min(rustgis_data::ogc::MAX_LEGENDS);
+            s.notify_loss(LEGENDS_LEFT_OUT_NOTICE, u32::try_from(offered.saturating_sub(legends.len())).unwrap_or(u32::MAX));
             if !legends.is_empty() {
                 add["legend"] = json!(legends);
             }
@@ -1091,7 +1196,7 @@ fn coverage(s: &mut Session, p: &Value) -> CmdResult {
         .zip(&found.sources)
         .filter(|(_, source)| ps(p, "source_url").is_none_or(|s| same_address(s, &source.address)))
         .find(|(l, _)| l.name == want || l.name.eq_ignore_ascii_case(want))
-        .ok_or_else(|| format!("{url}: no coverage '{want}' (service.layers lists them)"))?;
+        .ok_or_else(|| not_listed(&url, "coverage", want, &found.service))?;
     let Offer::Coverage(c) = &layer.offer else { return Err(format!("{url}: '{want}' isn't a WCS coverage")) };
     let anonymous = source.crossed_origin
         || crosses_origin(&source.address, &c.endpoint)
@@ -1253,6 +1358,21 @@ mod tests {
         );
     }
 
+    /// The blocking read of an advertised template says each fallback to the standard address.
+    #[test]
+    fn advertised_template_fallbacks_are_said() {
+        let list = "https://tiles-fallback.example.invalid/tiles?f=json";
+        let mut withheld = 0;
+        let none = advertised_template_with(list, list, false, &mut withheld, |_| Ok(b"{}".to_vec()));
+        assert!(none.template.is_none());
+        assert!(none.fallback.as_ref().is_some_and(|n| n.contains("names no tiles")), "{:?}", none.fallback);
+        let refused = advertised_template_with(list, "file:///etc/tiles", false, &mut withheld, |_| Ok(b"{}".to_vec()));
+        assert!(refused.fallback.as_ref().is_some_and(|n| n.contains("was refused")), "{:?}", refused.fallback);
+        let next = json!({"tilesets":[{"tileMatrixSetId":"WebMercatorQuad","links":[{"rel":"self","href":"https://tiles-fallback.example.invalid/next"}]}]});
+        let far = advertised_template_with(list, list, false, &mut withheld, |_| Ok(serde_json::to_vec(&next).unwrap_or_default()));
+        assert!(far.fallback.as_ref().is_some_and(|n| n.contains("past two documents")), "{:?}", far.fallback);
+    }
+
     #[test]
     fn foreign_tileset_hops_stay_anonymous_on_return_and_fallback() {
         use crate::{Project, render::rustgis_tiles as tiles, service_logins as web};
@@ -1295,6 +1415,9 @@ mod tests {
             assert_eq!(reads, [format!("{list_origin}/tiles?f=json"), format!("{next}?f=json")]);
             assert!(resolved.crossed_origin);
             assert_eq!(withheld, 0);
+            // A tile set that couldn't be read is said; one read gives no notice.
+            assert_eq!(resolved.fallback.as_ref().is_some_and(|n| n.contains("couldn't be read")), fail, "{:?}", resolved.fallback);
+            assert!(fail || resolved.fallback.is_none(), "{:?}", resolved.fallback);
             let chosen = resolved.template.unwrap_or_else(|| tiles::logins::inherit(&source, &template));
             if !fail {
                 assert_eq!(chosen, template, "returning to A must not recover its binding");

@@ -196,7 +196,9 @@ impl Session {
         }
         let op = self.authorize(command, params)?;
         let node = op.node.clone();
-        self.with_node(node, |s| crate::cmd::exports::export_start_raw(s, op))
+        // Prepared outside a command: what it couldn't read as true or false is said here (#1600).
+        let source = self.registry.get(command).map(|spec| spec.id);
+        self.with_unread_bools(source, |s| s.with_node(node, |s| crate::cmd::exports::export_start_raw(s, op)))
     }
     /// Exports own their input snapshot. Native delivery may report it after a layer/map switch;
     /// restricted delivery still binds the original live map and source identities.
@@ -408,7 +410,12 @@ impl Session {
                     return Err("this operation needs your approval".into());
                 }
                 let node = self.admit(node)?;
-                self.with_node(node, |s| s.guarded("Run Script", true, |s| crate::cmd::workflows::run_script(s, &json!({"script":script}))))
+                // Its lines run nested: what they couldn't read as true or false is said here (#1600).
+                self.with_unread_bools(Some("script.run"), |s| {
+                    s.with_node(node, |s| {
+                        s.guarded("Run Script", true, |s| crate::cmd::workflows::run_script(s, &json!({"script":script})))
+                    })
+                })
             }
             CallKind::Adapter { .. } => {
                 let node = self.call_node(&self.scope(), call)?;
@@ -693,10 +700,19 @@ impl Session {
     }
     /// Runs a pinned tool and records symbolic output identities for later frozen wires.
     pub(crate) fn invoke_tool(&mut self, op: Authorized<ToolOp>, control: &Arc<rustgis_analysis::control::Control>) -> CmdResult {
+        self.invoke_tool_with(op, control, &crate::cmd::gp::RunOpts::default()).map(|(value, _)| value)
+    }
+    /// [`Self::invoke_tool`] applied as `opts` says (a batch item), returning the run's messages.
+    pub(crate) fn invoke_tool_with(
+        &mut self,
+        op: Authorized<ToolOp>,
+        control: &Arc<rustgis_analysis::control::Control>,
+        opts: &crate::cmd::gp::RunOpts,
+    ) -> Result<(Value, Vec<String>), String> {
         let node = op.node.clone();
         let number = node.number;
-        let result = self.with_node(node, |s| crate::cmd::gp::execute(s, op, control));
-        if let Ok(value) = &result {
+        let result = self.with_node(node, |s| crate::cmd::gp::execute(s, op, control, opts));
+        if let Ok((value, _)) = &result {
             // Engine apply's result identifies the actual output kind. An identically named
             // layer must never substitute for a produced standalone table (or vice versa).
             let layer = value
@@ -737,8 +753,10 @@ impl Session {
             return Err(error);
         }
         let node = op.node;
+        let source = Some(spec.id);
         let op = Authorized { op: RasterOp { spec, params }, node: node.clone() };
-        self.with_node(node, |s| crate::cmd::workflows::raster_start_raw(s, op))
+        // Prepared outside a command: what it couldn't read as true or false is said here (#1600).
+        self.with_unread_bools(source, |s| s.with_node(node, |s| crate::cmd::workflows::raster_start_raw(s, op)))
     }
     /// A UI completion resumes the stored owner; scoped callers must already be that owner.
     pub fn finish_raster(&mut self, command: &str, id: u64, params: &Value) -> CmdResult {
