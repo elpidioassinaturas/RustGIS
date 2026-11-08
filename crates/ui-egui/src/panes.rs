@@ -3011,7 +3011,9 @@ impl GpForm {
                 ParamKind::Layer | ParamKind::PolygonLayer | ParamKind::PointLayer | ParamKind::RasterLayer | ParamKind::VectorLayer
                     if external && !p.required =>
                 {
-                    None
+                    // A layer it names as its default is what a run without one uses (the
+                    // default is filled in then): shown, so the form runs with what it shows.
+                    serde_json::from_str::<String>(p.default).ok().filter(|n| !n.is_empty())
                 }
                 ParamKind::Layer => active.map(|l| l.name.clone()),
                 ParamKind::PolygonLayer => active
@@ -3036,10 +3038,13 @@ impl GpForm {
         }
     }
 
-    /// Puts a standalone table, by its id, in the open tool's first input that takes one.
+    /// Puts a standalone table, by its id, in the open tool's input that takes one: a required
+    /// one before an optional one.
     pub fn pick_table(&mut self, id: u32, s: &Session) {
         let spec = self.tool.and_then(rustgis_engine::analysis::tool);
-        let input = spec.and_then(|t| t.params.iter().find(|p| p.kind == ParamKind::Layer));
+        // Into the input the run needs, as `first_layer` takes it, so the fields follow the table.
+        let layers = || spec.into_iter().flat_map(|t| t.params.iter()).filter(|p| p.kind == ParamKind::Layer);
+        let input = layers().find(|p| p.required).or_else(|| layers().next());
         if let (Some(p), Some(t)) = (input, s.project.table(id)) {
             self.values.insert(p.name, t.name.clone());
             self.tables.insert(p.name, id);
@@ -3310,6 +3315,21 @@ pub(crate) fn first_layer(spec: &rustgis_engine::analysis::ToolSpec) -> Option<&
     layers().find(|p| p.required).or_else(|| layers().next())
 }
 
+/// The layer parameter a new output is named after: a required one of any kind, a raster
+/// too (Topo Render's DEM), before `first_layer`.
+pub(crate) fn output_layer(spec: &rustgis_engine::analysis::ToolSpec) -> Option<&rustgis_engine::analysis::ParamSpec> {
+    spec.params
+        .iter()
+        .find(|p| {
+            p.required
+                && matches!(
+                    p.kind,
+                    ParamKind::Layer | ParamKind::PolygonLayer | ParamKind::PointLayer | ParamKind::VectorLayer | ParamKind::RasterLayer
+                )
+        })
+        .or_else(|| first_layer(spec))
+}
+
 /// The most specific `<input>_…` prefix wins; otherwise use the first attribute input.
 pub(crate) fn layer_for_param<'a>(
     spec: &'a rustgis_engine::analysis::ToolSpec,
@@ -3578,7 +3598,7 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     };
     let plugin_tool = spec.id.starts_with(rustgis_engine::plugins::PREFIX);
     #[cfg(not(target_arch = "wasm32"))]
-    let first_layer = first_layer(spec).map(|p| p.name);
+    let named_after = output_layer(spec).map(|p| p.name);
     // The file parameter whose Browse was pressed: picked once the form is drawn.
     let mut browse_for = None;
     // A parameter that doesn't apply to the options picked (Spatial Join's search distance with
@@ -3806,7 +3826,7 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let name = app.gp.values.get(param).filter(|v| !v.trim().is_empty()).cloned().unwrap_or_else(|| {
-                    format!("{}.{}", first_layer.and_then(|n| app.gp.values.get(n)).map(String::as_str).unwrap_or("output"), ext)
+                    format!("{}.{}", named_after.and_then(|n| app.gp.values.get(n)).map(String::as_str).unwrap_or("output"), ext)
                 });
                 if let Some(path) = crate::dialogs::pick_save(&name, &[ext], tl!(p.label)) {
                     app.gp.values.insert(param, path);
@@ -3831,7 +3851,7 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 if let ParamKind::SaveFile { ext } = p.kind
                     && app.gp.values.get(p.name).is_none_or(|v| v.trim().is_empty())
                 {
-                    let input = first_layer.and_then(|n| app.gp.values.get(n)).map(String::as_str).unwrap_or("output");
+                    let input = named_after.and_then(|n| app.gp.values.get(n)).map(String::as_str).unwrap_or("output");
                     let Some(path) = crate::dialogs::pick_save(&format!("{input}.{ext}"), &[ext], tl!(p.label)) else { return };
                     app.gp.values.insert(p.name, path);
                 }
@@ -6964,19 +6984,15 @@ mod tests {
             layer("vector", ParamKind::VectorLayer, false),
             layer("polygon", ParamKind::PolygonLayer, false),
             layer("point", ParamKind::PointLayer, false),
+            P { name: "named", label: "named", kind: ParamKind::VectorLayer, required: false, default: "\"Countries\"", help: "" },
             P { name: "text", label: "text", kind: ParamKind::Text, required: false, default: "\"soft\"", help: "" },
         ];
+        const RASTER: &[P] = &[layer("mask", ParamKind::VectorLayer, false), layer("dem", ParamKind::RasterLayer, true)];
         register_external(
             "formTest",
             || {
-                vec![ToolSpec {
-                    id: "formTest:optional",
-                    name: "Optional layers",
-                    toolbox: "Form test",
-                    summary: "",
-                    params: PARAMS,
-                    run: external_placeholder,
-                }]
+                let tool = |id, params| ToolSpec { id, name: id, toolbox: "Form test", summary: "", params, run: external_placeholder };
+                vec![tool("formTest:optional", PARAMS), tool("formTest:raster", RASTER)]
             },
             |_, _, _| Err("not run".into()),
         );
@@ -6992,12 +7008,27 @@ mod tests {
             assert_eq!(filled(&app, name), None, "{name}");
         }
         assert_eq!(filled(&app, "text").as_deref(), Some("soft"));
+        assert_eq!(filled(&app, "named").as_deref(), Some("Countries"), "the default a run would use");
         // Its fields and a new output's name come from the required layer, which is filled, not
         // the optional one before it, which is empty.
         let spec = rustgis_engine::analysis::tool("formTest:optional").unwrap();
         assert_eq!(first_layer(spec).map(|p| p.name), Some("needed"));
         assert_eq!(layer_for_param(spec, "field").map(|p| p.name), Some("needed"));
         assert_eq!(layer_for_param(spec, "layer_field").map(|p| p.name), Some("layer"), "its own prefix still wins");
+        assert_eq!(output_layer(spec).map(|p| p.name), Some("needed"));
+        // A required raster names the output, over an optional layer before it.
+        let raster = rustgis_engine::analysis::tool("formTest:raster").unwrap();
+        assert_eq!(output_layer(raster).map(|p| p.name), Some("dem"));
+        // A standalone table opened with it goes into the required input, whose fields its
+        // field parameters take.
+        let table = app.session.project.add_table(rustgis_engine::data::Dataset::new(
+            "Addresses",
+            rustgis_engine::data::GeometryType::None,
+            vec![],
+        ));
+        app.run("ui.gp.open", json!({"tool": "formTest:optional", "table": table})).unwrap();
+        assert_eq!((filled(&app, "needed").as_deref(), app.gp.tables.get("needed")), (Some("Addresses"), Some(&table)));
+        assert_eq!(filled(&app, "layer"), None);
 
         app.run("ui.gp.open", json!({"tool": "a5Grid"})).unwrap();
         assert_eq!(filled(&app, "input").as_deref(), Some("Cities"));

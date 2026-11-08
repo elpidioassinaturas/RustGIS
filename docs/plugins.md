@@ -192,7 +192,7 @@ cargo build --release --target wasm32-unknown-unknown
   (default `false`) and an optional JSON `default`. Parameter names start with a lower-case
   letter and may also contain upper-case letters and underscores after it. In the tool's form, a
   required layer parameter starts at the active layer; an optional one stays empty until it's
-  picked.
+  picked, or shows the layer its `default` names, which a run without one uses.
 - `panel` (optional) gives the plugin a pane of its own, with widgets bound to its commands. See
   [A panel](#a-panel).
 - `i18n` translates the plugin's own text into the interface language, by language code (`de`,
