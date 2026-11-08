@@ -149,6 +149,13 @@ fn keep_first_wavelength(slot: &mut Option<f64>, nm: f64) -> bool {
     }
 }
 
+/// How many of `units` after the first name another unit than it (case and spaces aside): those
+/// are left out, the first being the one read.
+fn other_units<'a>(mut units: impl Iterator<Item = &'a str>) -> usize {
+    let Some(first) = units.next() else { return 0 };
+    units.filter(|u| !u.trim().eq_ignore_ascii_case(first.trim())).count()
+}
+
 /// A sidecar node's metadata items `key` (any domain, any case): their texts, empty for an item
 /// with none (still an item the file gave).
 fn mdi_texts<'a>(node: roxmltree::Node<'a, '_>, key: &'a str) -> impl Iterator<Item = &'a str> {
@@ -230,6 +237,8 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
     // other band metadata items and colour tables that aren't read, counted.
     let (mut cut, mut beyond, mut odd_bands, mut unscaled, mut units) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut items, mut tables, mut odd_nodata, mut odd_wavelengths, mut other_wavelengths) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    // Wavelength units given again otherwise for the dataset or a band (the first is read).
+    let mut units_again = other_units(mdi_texts(root, WAVELENGTH_UNITS));
     let (mut seen, mut twice) = (std::collections::HashSet::new(), 0usize);
     // The unit the dataset gives its bands' wavelengths in, for a band that gives none; a
     // wavelength of the dataset's own is for no band.
@@ -266,6 +275,7 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
         // Its wavelength: the first that is a length of the items that give one, in that order and
         // in any domain (GDAL's in `IMAGERY`, ENVI's in the default one), as the metadata tag's.
         let units = mdi_text(b, WAVELENGTH_UNITS).or(dataset_units);
+        units_again += other_units(mdi_texts(b, WAVELENGTH_UNITS));
         let mut wavelength = None;
         for w in WAVELENGTH_ITEMS {
             for t in mdi_texts(b, w) {
@@ -343,6 +353,9 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
     if other_wavelengths > 0 {
         pam.lost.push(format!("{other_wavelengths} other wavelength(s) for a band that has one left out (the first is kept)"));
     }
+    if units_again > 0 {
+        pam.lost.push(format!("{units_again} other wavelength unit(s) for a band or the dataset left out (the first is kept)"));
+    }
     if beyond > 0 {
         pam.lost.push(format!("{beyond} class name(s) past the first {MAX_CATEGORIES} of a band left out"));
     }
@@ -410,7 +423,7 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
             twice += 1;
         }
     }
-    let (odd_wavelengths, other_wavelengths) = read_wavelengths(root, &mut pam);
+    let (odd_wavelengths, other_wavelengths, units_again) = read_wavelengths(root, &mut pam);
     // A band's scale and offset aren't applied: the values stay as stored. One that changes
     // nothing (a scale of 1, an offset of 0) isn't counted.
     let unscaled = root
@@ -485,6 +498,9 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
     if other_wavelengths > 0 {
         pam.lost.push(format!("{other_wavelengths} other wavelength item(s) for a band that has one left out (the first is kept)"));
     }
+    if units_again > 0 {
+        pam.lost.push(format!("{units_again} other wavelength unit item(s) for a band or the dataset left out (the first is kept)"));
+    }
     if twice > 0 {
         pam.lost.push(format!("{twice} band or class name(s) given again left out (the first is kept)"));
     }
@@ -504,16 +520,18 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
 /// of [`WAVELENGTH_ITEMS`], in that order, in the unit of its band's `wavelength_units` item, else
 /// the dataset's. A band's other wavelength items giving the same length are other names for it,
 /// and aren't counted. Returns how many items were left out: not a length or for no band, and
-/// another length for a band that has one. A dataset's own item (no `sample`) is for no band.
-fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> (usize, usize) {
+/// another length for a band that has one, and units given again otherwise for a band or the
+/// dataset (the first is read). A dataset's own item (no `sample`) is for no band.
+fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> (usize, usize, usize) {
     let named = |n: &roxmltree::Node<'_, '_>, name: &str| {
         n.has_tag_name("Item") && n.attribute("name").is_some_and(|a| a.eq_ignore_ascii_case(name))
     };
     let band_of = |n: &roxmltree::Node<'_, '_>| {
         n.attribute("sample").and_then(|v| v.trim().parse::<usize>().ok()).and_then(|s| s.checked_add(1)).filter(|n| *n <= MAX_BANDS)
     };
-    // The units given, by band (0: the dataset's); units for no band are counted.
-    let (mut odd, mut other) = (0usize, 0usize);
+    // The units given, by band (0: the dataset's); units for no band are counted, and so are
+    // other units given again.
+    let (mut odd, mut other, mut units_again) = (0usize, 0usize, 0usize);
     let mut units: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
     for item in root.children().filter(|n| named(n, WAVELENGTH_UNITS)) {
         let at = if item.attribute("sample").is_none() { Some(0) } else { band_of(&item) };
@@ -522,7 +540,14 @@ fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> (usize, usi
             continue;
         };
         if let Some(t) = item.text() {
-            units.entry(at).or_insert(t);
+            match units.entry(at) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(t);
+                }
+                std::collections::hash_map::Entry::Occupied(o) => {
+                    units_again += usize::from(!o.get().trim().eq_ignore_ascii_case(t.trim()));
+                }
+            }
         }
     }
     // Where each band already described is in `pam.bands`.
@@ -548,7 +573,7 @@ fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> (usize, usi
             }
         }
     }
-    (odd, other)
+    (odd, other, units_again)
 }
 
 /// Whether XML can't hold `c` (a control character other than a tab or a line break, or a
@@ -926,6 +951,12 @@ mod tests {
         let pam = parse_gdal_metadata(xml).unwrap();
         assert_eq!(pam.band(1).and_then(|b| b.wavelength), Some(665.0));
         assert!(pam.lost.is_empty(), "{:?}", pam.lost);
+        // A band's unit given again otherwise: the first is read, and the other said; the same
+        // one again is nothing.
+        let xml = r#"<GDALMetadata><Item name="wavelength_units" sample="0">nm</Item><Item name="wavelength_units" sample="0">um</Item><Item name="wavelength_units" sample="0"> NM </Item><Item name="wavelength" sample="0">1.6</Item></GDALMetadata>"#;
+        let pam = parse_gdal_metadata(xml).unwrap();
+        assert_eq!(pam.band(1).and_then(|b| b.wavelength), Some(1.6));
+        assert_eq!(pam.lost, ["1 other wavelength unit item(s) for a band or the dataset left out (the first is kept)"]);
         // A unit the dataset gives is a band's when it gives none; then a large value may be in µm.
         let xml =
             r#"<GDALMetadata><Item name="wavelength_units">micrometers</Item><Item name="wavelength" sample="0">120</Item></GDALMetadata>"#;
@@ -984,6 +1015,10 @@ mod tests {
                 .unwrap();
         assert_eq!(empty.band(1).and_then(|b| b.wavelength), None);
         assert!(empty.lost.iter().any(|l| l.starts_with("1 wavelength(s) that aren't")), "{:?}", empty.lost);
+        // A band's unit given again otherwise: the first is read, and the other said.
+        let twice = parse(r#"<PAMDataset><PAMRasterBand band="1"><Metadata><MDI key="wavelength_units">nm</MDI><MDI key="wavelength_units">micrometers</MDI><MDI key="wavelength">1.6</MDI></Metadata></PAMRasterBand></PAMDataset>"#).unwrap();
+        assert_eq!(twice.band(1).and_then(|b| b.wavelength), Some(1.6));
+        assert_eq!(twice.lost, ["1 other wavelength unit(s) for a band or the dataset left out (the first is kept)"]);
         // Lengths half a thousandth of a nanometre apart are two.
         let mut slot = None;
         assert!(!keep_first_wavelength(&mut slot, 665.0));

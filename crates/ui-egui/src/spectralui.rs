@@ -100,6 +100,15 @@ pub fn offered(app: &RustGisApp, info: &Value) -> Option<u32> {
 /// Identify's Spectral Profile button: opens the section on the layer `id` and adds the point.
 pub fn from_identify(app: &mut RustGisApp, id: u32, at: rustgis_engine::geom::Coord) {
     let Some(name) = app.session.map().layer(id).map(|l| l.name.clone()) else { return };
+    // Commands find a raster by its name: an earlier layer sharing it would be read instead.
+    if app.session.map().layer_by_name(&name).map(|l| l.id) != Some(id) {
+        let text = crate::i18n::fmt(
+            "{name}: another layer has this name, so its profile would be read from that one: rename one of them",
+            &[("name", &name)],
+        );
+        app.session.notify(text, true);
+        return;
+    }
     if let Err(e) = app.run("ui.pane.workflows", json!({"section": SECTION})) {
         app.session.notify(e, true);
         return;
@@ -492,5 +501,18 @@ mod tests {
         assert_eq!(app.workflow.spectral.samples.len(), 1);
         // A feature isn't offered it.
         assert_eq!(offered(&app, &json!({"layer": "Cities", "layerId": id, "attributes": {}})), None);
+        // A raster named as an earlier one (case aside) isn't read from that one: it is said.
+        app.run("layer.addDataBytes", json!({"fileName": "copy.tif", "data": rgb_tiff_b64(true)})).unwrap();
+        let copy = app.session.map().layer_by_name("copy").map(|l| l.id).expect("the copy");
+        app.run("layer.rename", json!({"layer": "copy", "name": "Scene"})).unwrap();
+        // The layer the name finds is read; the other one, which commands can't reach by its name.
+        let found = app.session.map().layer_by_name("Scene").map(|l| l.id).expect("a scene");
+        let (shadowed, name) = if found == copy { (id, "scene") } else { (copy, "Scene") };
+        let before = app.workflow.spectral.samples.len();
+        let mark = app.session.notice_mark();
+        from_identify(&mut app, shadowed, rustgis_engine::geom::Coord::new(10.005, 44.995));
+        assert_eq!(app.workflow.spectral.samples.len(), before, "nothing read from the other scene");
+        let said: Vec<String> = app.session.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        assert_eq!(said, [format!("{name}: another layer has this name, so its profile would be read from that one: rename one of them")]);
     }
 }
