@@ -318,8 +318,8 @@ when the document's request addresses (an OGC API's, its own; a WMS's GetMap, Ge
 and legend addresses together), which each layer's repeat, are very long: at least 2,000 up to
 about 32 KB, and fewer than are listed past that, at least one, with a note. A list also stops
 early, with a note, once its layers' document addresses (each layer's `source_url`) reach
-64 MiB: 2,000 layers each repeating an address over 32 KB, or an OGC API's longer list one a
-little shorter. An ArcGIS service or directory is an exception: it is read up to
+64 MiB: 2,000 layers each repeating an address over 32 KB, or the more layers of an OGC API's
+list each repeating a somewhat shorter one. An ArcGIS service or directory is an exception: it is read up to
 2,000 layers, folders and services, and lists all it reads.
 A dynamic MapServer offers each of those layers twice, as features and as a
 map, so its list can be twice as long. A note says how many are left out past either limit.
