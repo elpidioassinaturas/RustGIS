@@ -30886,16 +30886,61 @@ fn a_layout_pdf_georeferences_its_map_frames() {
     s.run("layout.update", &json!({"element": frame.id, "pitch": 30})).unwrap();
     let (pdf, said) = export(&mut s);
     assert!(pdf.starts_with("%PDF-1.4") && !pdf.contains("/VP ["));
-    assert!(said.iter().any(|t| t == &format!("Map frame '{}' isn't georeferenced in the PDF: it is tilted", frame.name)), "{said:?}");
+    assert!(said.iter().any(|t| t == &format!("The PDF doesn't georeference 1 map frame ({}: it is tilted)", frame.name)), "{said:?}");
     // A projection with no WKT form (Winkel Tripel): georeferenced in longitude/latitude by its
     // corners, and said.
     s.run("layout.update", &json!({"element": frame.id, "pitch": 0})).unwrap();
     s.run("map.projection", &json!({"type": "winkelTripel"})).unwrap();
     let (pdf, said) = export(&mut s);
     assert!(pdf.contains("/GCS << /Type /GEOGCS /WKT (GEOGCS[") && pdf.contains("/EPSG 4326 >>"), "{pdf}");
-    let corners = format!("Map frame '{}' is georeferenced in the PDF by its corners in longitude/latitude", frame.name);
-    assert!(said.iter().any(|t| t.starts_with(&corners)), "{said:?}");
+    assert!(
+        said.iter().any(|t| t.starts_with("The PDF georeferences 1 map frame by its corners") && t.ends_with(&format!("({})", frame.name))),
+        "{said:?}"
+    );
+    // On SAD69 (shifted from WGS 84) the corners are on SAD69, tens of metres from WGS 84's.
+    s.run("map.projection", &json!({"type": "EPSG:29193"})).unwrap();
+    let (pdf, _) = export(&mut s);
+    let gpts = pdf.split("/GPTS [").nth(1).and_then(|r| r.split(']').next()).unwrap();
+    let n: Vec<f64> = gpts.split_whitespace().map(|v| v.parse().unwrap()).collect();
+    let frame_now = s.project.layouts[0].element(frame.id).unwrap().clone();
+    let rustgis_map::layout::ElementKind::MapFrame { center, scale, .. } = &frame_now.kind else { panic!() };
+    let cam = rustgis_map::layout::frame_camera(s.map(), *center, *scale, 0.0, 0.0);
+    let wgs84 = s
+        .map()
+        .to_lonlat(cam.to_map(0.0, 0.0, frame.w * rustgis_map::layout::PT_PER_MM, frame.h * rustgis_map::layout::PT_PER_MM))
+        .unwrap();
+    let moved = ((n[1] - wgs84.x) * 104_600.0).hypot((n[0] - wgs84.y) * 110_600.0);
+    assert!(pdf.contains("/EPSG 29193 >>") && moved > 10.0 && moved < 200.0, "{moved} m");
+    // Across 180° in Web Mercator, a corner comes back on the other side of the world: left out.
+    s.run("map.projection", &json!({"type": "mercator"})).unwrap();
+    s.run("layout.update", &json!({"element": frame.id, "center": [180.0, 0.0]})).unwrap();
+    let (pdf, said) = export(&mut s);
+    assert!(!pdf.contains("/VP ["), "nothing georeferenced");
+    assert!(said.iter().any(|t| t.contains("crosses its projection's edge (the 180° meridian)")), "{said:?}");
+    // Another body's map isn't given an Earth system.
+    s.run("layout.update", &json!({"element": frame.id, "center": [-45.0, -20.0]})).unwrap();
+    s.run("map.body", &json!({"name": "mars", "basemap": false})).unwrap();
+    let (pdf, said) = export(&mut s);
+    assert!(!pdf.contains("/VP ["));
+    assert!(said.iter().any(|t| t.contains("it is on another body than the Earth")), "{said:?}");
     let _ = std::fs::remove_file(&path);
+}
+
+/// What a PDF doesn't georeference is one notice for each kind, with a count (#1191): a frame
+/// once however many pages it is on, two frames sharing a name two.
+#[test]
+fn a_pdf_says_which_frames_it_doesnt_georeference() {
+    let mut s = Session::new(Project::default());
+    let mark = s.notice_mark();
+    crate::cmd::layout::georeference_notices(&mut s, &[], &[]);
+    assert!(s.notices_since(mark).is_empty(), "everything georeferenced, nothing said");
+    let left =
+        [(1, "Main".to_string(), "it is tilted"), (1, "Main".to_string(), "it is tilted"), (4, "Main".to_string(), "it shows the globe")];
+    crate::cmd::layout::georeference_notices(&mut s, &left, &[(2, "Inset".to_string()), (2, "Inset".to_string())]);
+    let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert_eq!(said[0], "The PDF doesn't georeference 2 map frames (Main: it is tilted, Main: it shows the globe)");
+    assert!(said[1].starts_with("The PDF georeferences 1 map frame by its corners") && said[1].ends_with("(Inset)"), "{}", said[1]);
 }
 
 #[test]

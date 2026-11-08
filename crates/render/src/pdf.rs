@@ -386,6 +386,31 @@ pub(crate) mod tests {
         assert_eq!(literal("é"), "<FEFF00E9>");
     }
 
+    /// A frame's viewport is where the page draws it: from the whole pixel it starts on at the
+    /// export's dpi, the page's pixels stretched over its paper (#1191).
+    #[test]
+    fn a_viewport_is_where_the_page_draws_its_frame() {
+        let mut layout: rustgis_map::layout::Layout = serde_json::from_value(serde_json::json!({
+            "name": "L", "width": 297.0, "height": 210.0,
+            "elements": [{"id": 1, "name": "Main", "x": 10.0, "y": 10.0, "w": 100.0, "h": 80.0,
+                "kind": {"MapFrame": {"map": "Map", "center": {"x": -45.0, "y": -20.0}, "scale": 50000.0}}}]
+        }))
+        .unwrap();
+        layout.clamp();
+        let maps = [rustgis_map::Map::new("Map")];
+        let geo = crate::layout::frame_viewports(&layout, &maps, 72.0);
+        let [x, y, w, _] = geo.viewports[0].rect_mm;
+        // At 72 dpi a millimetre is about 2.83 pixels: 10 mm falls inside pixel 28, where the frame starts.
+        let (wpx, _, k) = crate::layout::page_geometry(&layout, 72.0);
+        let sx = 297.0 / f64::from(wpx);
+        assert!((x - (10.0 * k).round() * sx).abs() < 1e-9 && (x - 10.0).abs() > 0.05, "{x}");
+        assert!((y - (10.0 * k).round() * (210.0 / f64::from(crate::layout::page_geometry(&layout, 72.0).1))).abs() < 1e-9, "{y}");
+        assert!((w - 100.0 * k * sx).abs() < 1e-9, "{w}");
+        // At 254 dpi, ten pixels to the millimetre, it is the frame's own box.
+        let geo = crate::layout::frame_viewports(&layout, &maps, 254.0);
+        assert!((geo.viewports[0].rect_mm[0] - 10.0).abs() < 1e-6, "{:?}", geo.viewports[0].rect_mm);
+    }
+
     #[test]
     fn unwritten_objects_become_nulls_and_writing_twice_keeps_the_first() {
         let mut doc = Doc::new();

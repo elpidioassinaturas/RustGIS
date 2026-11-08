@@ -423,6 +423,27 @@ pub(crate) fn transformer_of(def: &str) -> Result<Transformer, String> {
     Ok(Transformer { kind: Kind::Proj { native: Box::new(native), wgs84: Box::new(wgs84()?), geographic } })
 }
 
+#[cfg(test)]
+mod datum_tests {
+    use super::*;
+
+    /// A corner on a datum shifted from WGS 84 (SAD69) moves by the shift, tens of metres; on one
+    /// with none (SIRGAS 2000) it stays (#1191).
+    #[test]
+    fn a_point_moves_onto_a_shifted_datum_and_not_onto_an_unshifted_one() {
+        let c = Coord::new(-45.0, -20.0);
+        let sirgas = lonlat_on_datum_of(epsg_proj4(31983).unwrap(), c).unwrap();
+        assert!((sirgas.x - c.x).abs() < 1e-9 && (sirgas.y - c.y).abs() < 1e-9, "{sirgas:?}");
+        let sad69 = epsg_proj4(29193).unwrap();
+        assert!(sad69.contains("+towgs84="), "{sad69}");
+        let on = lonlat_on_datum_of(sad69, c).unwrap();
+        // About 40 m east and 40 m north at 20° S: well past a centimetre, short of a kilometre.
+        let (dx, dy) = ((on.x - c.x) * 111_320.0 * 20f64.to_radians().cos(), (on.y - c.y) * 110_574.0);
+        let moved = dx.hypot(dy);
+        assert!(moved > 10.0 && moved < 200.0, "{moved} m ({dx} m, {dy} m)");
+    }
+}
+
 fn wgs84() -> Result<proj4rs::Proj, String> {
     proj4rs::Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| e.to_string())
 }

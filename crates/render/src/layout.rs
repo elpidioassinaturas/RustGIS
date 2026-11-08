@@ -595,48 +595,61 @@ fn frame_outline_lonlat(map: &Map, cam: &rustgis_map::Camera, w: f64, h: f64) ->
 pub struct Georeferenced {
     /// One for each visible frame that could be.
     pub viewports: Vec<crate::pdf::Viewport>,
-    /// The frames that couldn't be, by name, with why.
-    pub left_out: Vec<(String, &'static str)>,
-    /// The frames whose projection has no WKT form, by name: georeferenced by their corners in
-    /// longitude/latitude, so a reader is right at the corners and approximate between them.
-    pub by_corners: Vec<String>,
+    /// The frames that couldn't be, by id and name, with why.
+    pub left_out: Vec<(u32, String, &'static str)>,
+    /// The frames whose coordinate system can't be written as WKT (a grid shift, or a projection
+    /// WKT1 has no name for), by id and name: georeferenced by their corners in longitude/latitude,
+    /// so a reader is right at the corners and approximate between them.
+    pub by_corners: Vec<(u32, String)>,
 }
 
 /// Each visible map frame of `layout` as a PDF viewport ([`crate::pdf::Viewport`]): its place on
-/// the page, its corners' latitude and longitude, and its map's coordinate system as WKT. A
-/// frame on the globe or tilted shows no flat map to measure on, so it is left out, as is one
-/// whose map is missing or with a corner off the Earth.
-pub fn frame_viewports(layout: &Layout, maps: &[Map]) -> Georeferenced {
+/// the page as a page drawn at `dpi` places it, its corners' latitude and longitude, and its
+/// map's coordinate system as WKT. A frame on the globe or tilted shows no flat map to measure
+/// on, so it is left out, as is one on another body than the Earth, one whose map is missing,
+/// one with a corner off the Earth and one across its projection's edge (the 180° meridian).
+pub fn frame_viewports(layout: &Layout, maps: &[Map], dpi: f64) -> Georeferenced {
     let mut out = Georeferenced::default();
+    // A frame is drawn from a whole pixel of the page ([`draw_page`]), whose pixels are stretched
+    // over its paper: the viewport is that box, in millimetres.
+    let (wpx, hpx, k) = page_geometry(layout, dpi);
+    let (sx, sy) = (layout.width / f64::from(wpx.max(1)), layout.height / f64::from(hpx.max(1)));
     for e in layout.elements.iter().filter(|e| e.visible) {
         let ElementKind::MapFrame { map, center, scale, bearing, pitch, .. } = &e.kind else { continue };
         let Some(m) = map_index(maps, map).and_then(|i| maps.get(i)) else {
-            out.left_out.push((e.name.clone(), "its map is missing"));
+            out.left_out.push((e.id, e.name.clone(), "its map is missing"));
             continue;
         };
-        match frame_viewport(e, m, rustgis_map::layout::frame_camera(m, *center, *scale, *bearing, *pitch)) {
+        let placed = [(e.x * k).round() * sx, (e.y * k).round() * sy, e.w * k * sx, e.h * k * sy];
+        match frame_viewport(e, placed, m, rustgis_map::layout::frame_camera(m, *center, *scale, *bearing, *pitch)) {
             Ok((v, exact)) => {
                 if !exact {
-                    out.by_corners.push(e.name.clone());
+                    out.by_corners.push((e.id, e.name.clone()));
                 }
                 out.viewports.push(v);
             }
-            Err(why) => out.left_out.push((e.name.clone(), why)),
+            Err(why) => out.left_out.push((e.id, e.name.clone(), why)),
         }
     }
     out
 }
 
-/// Frame `e` of `map`, seen by `cam`, as a viewport, and whether it is in the map's own
-/// coordinate system (else in longitude/latitude, by its corners).
+/// Frame `e` of `map`, placed at `placed` (millimetres: x, y, width, height) and seen by `cam`, as
+/// a viewport, and whether it is in the map's own coordinate system (else in longitude/latitude,
+/// by its corners).
 fn frame_viewport(
     e: &rustgis_map::layout::Element,
+    placed: [f64; 4],
     map: &Map,
     cam: rustgis_map::Camera,
 ) -> Result<(crate::pdf::Viewport, bool), &'static str> {
     use rustgis_data::raster::{crs, wkt};
     if map.projection.is_globe() {
         return Err("it shows the globe");
+    }
+    // Its coordinates are another body's, which an Earth system would misplace.
+    if !map.body().is_earth() {
+        return Err("it is on another body than the Earth");
     }
     if cam.pitch.abs() > 1e-9 {
         return Err("it is tilted");
@@ -660,10 +673,20 @@ fn frame_viewport(
     let (w, h) = (e.w * PT_PER_MM, e.h * PT_PER_MM);
     let mut corners = [(0.0, 0.0); 4];
     for (i, (sx, sy)) in [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].into_iter().enumerate() {
-        let c = cam.try_to_map(sx, sy, w, h).and_then(|m| map.to_lonlat(m)).ok_or("a corner is off the Earth")?;
+        let m = cam.try_to_map(sx, sy, w, h).ok_or("a corner is off the Earth")?;
+        let c = map.to_lonlat(m).ok_or("a corner is off the Earth")?;
+        // A corner past the projection's edge (Web Mercator's world repeated across 180°) is at a
+        // longitude past ±180°, or comes back elsewhere: a reader, which takes longitudes within
+        // ±180°, would put it on the other side of the world. (In longitude/latitude, below, the
+        // corners are kept within half a turn of each other instead.)
+        let back = map.to_map(c).ok_or("a corner is off the Earth")?;
+        let elsewhere = (back.x - m.x).abs() > 1e-6 * m.x.abs().max(1.0) || (back.y - m.y).abs() > 1e-6 * m.y.abs().max(1.0);
+        if elsewhere || (system.is_some() && c.x.abs() > 180.0) {
+            return Err("it crosses its projection's edge (the 180° meridian)");
+        }
         // On the system's own datum, as a reader that takes its WKT reads them.
         let c = match (&system, &def) {
-            (Some(_), Some(def)) => crs::lonlat_on_datum_of(def, c).ok_or("a corner is off the Earth")?,
+            (Some(_), Some(def)) => crs::lonlat_on_datum_of(def, c).ok_or("its corners can't be moved onto its datum")?,
             _ => c,
         };
         corners[i] = (c.y, c.x);
@@ -671,9 +694,17 @@ fn frame_viewport(
     let exact = system.is_some();
     let (wkt, epsg) = match system {
         Some(s) => s,
-        None => (wkt::to_wkt(crs::Crs::LonLat).ok_or("its projection can't be read")?, Some(4326)),
+        None => {
+            // In longitude/latitude the corners are fitted as they are: across 180° they are kept
+            // within half a turn of the first, so that the frame isn't taken to span the world.
+            let first = corners[0].1;
+            for c in &mut corners {
+                c.1 = first + ((c.1 - first + 540.0).rem_euclid(360.0) - 180.0);
+            }
+            (wkt::to_wkt(crs::Crs::LonLat).ok_or("its projection can't be read")?, Some(4326))
+        }
     };
-    let viewport = crate::pdf::Viewport { name: e.name.clone(), rect_mm: [e.x, e.y, e.w, e.h], corners, wkt, projected: exact, epsg };
+    let viewport = crate::pdf::Viewport { name: e.name.clone(), rect_mm: placed, corners, wkt, projected: exact, epsg };
     Ok((viewport, exact))
 }
 

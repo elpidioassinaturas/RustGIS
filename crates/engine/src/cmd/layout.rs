@@ -3519,7 +3519,7 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
     // whole pages (their surrounds).
     let (mut frames_pictured, mut pages_pictured) = (Vec::new(), Vec::new());
     // The map frames a PDF can't georeference, and those it georeferences by their corners only.
-    let (mut left_out, mut by_corners): (Vec<(String, &'static str)>, Vec<String>) = (Vec::new(), Vec::new());
+    let (mut left_out, mut by_corners): (Vec<(u32, String, &'static str)>, Vec<(u32, String)>) = (Vec::new(), Vec::new());
     let mut render_pages = || -> Result<(Vec<rustgis_render::pdf::Page>, Option<Vec<u8>>), String> {
         let mut out = Vec::new();
         let mut png = None;
@@ -3546,17 +3546,9 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
             if pdf {
                 let (w, h) = (layout.width, layout.height);
                 // Where its map frames show, for readers to locate and measure in: a GeoPDF (#1191).
-                let geo = rustgis_render::layout::frame_viewports(layout, &s.project.maps);
-                for (name, why) in geo.left_out {
-                    if !left_out.iter().any(|(n, _)| *n == name) {
-                        left_out.push((name, why));
-                    }
-                }
-                for name in geo.by_corners {
-                    if !by_corners.contains(&name) {
-                        by_corners.push(name);
-                    }
-                }
+                let geo = rustgis_render::layout::frame_viewports(layout, &s.project.maps, dpi);
+                left_out.extend(geo.left_out);
+                by_corners.extend(geo.by_corners);
                 let (drawing, pictured) = rustgis_render::layout::render_drawing(layout, &mut s.project.maps, dpi, &info)
                     .ok_or("the page is too large to draw")?;
                 if drawing.overflowed() {
@@ -3593,15 +3585,58 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
     }
     let (pages, png) = result?;
     pictured_notices(s, &frames_pictured, &pages_pictured);
-    for (name, why) in &left_out {
-        s.warn(format!("Map frame '{name}' isn't georeferenced in the PDF: {why}"));
+    georeference_notices(s, &left_out, &by_corners);
+    if pdf { Ok(rustgis_render::pdf::write(&pages, &saved.name)) } else { png.ok_or_else(|| "nothing to draw".to_string()) }
+}
+
+/// Says which map frames a PDF doesn't georeference, with why, and which it georeferences by their
+/// corners only (#1191): one notice for each, with a count. A frame is counted once however many
+/// pages of a series it is on (by its id: two frames sharing a name are two), with the first
+/// page's reason.
+pub(crate) fn georeference_notices(s: &mut Session, left_out: &[(u32, String, &'static str)], by_corners: &[(u32, String)]) {
+    let listed = |items: Vec<String>| {
+        let more = items.len().saturating_sub(10);
+        let mut text = items.into_iter().take(10).collect::<Vec<_>>().join(", ");
+        if more > 0 {
+            text.push_str(&format!(" and {more} more"));
+        }
+        text
+    };
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let mut seen = Vec::new();
+    let out: Vec<String> = left_out
+        .iter()
+        .filter(|(id, ..)| {
+            !seen.contains(id) && {
+                seen.push(*id);
+                true
+            }
+        })
+        .map(|(_, n, why)| format!("{n}: {why}"))
+        .collect();
+    if !out.is_empty() {
+        let n = out.len();
+        s.warn(format!("The PDF doesn't georeference {n} map frame{} ({})", plural(n), listed(out)));
     }
-    for name in &by_corners {
+    let mut seen = Vec::new();
+    let corners: Vec<String> = by_corners
+        .iter()
+        .filter(|(id, _)| {
+            !seen.contains(id) && {
+                seen.push(*id);
+                true
+            }
+        })
+        .map(|(_, n)| n.clone())
+        .collect();
+    if !corners.is_empty() {
+        let n = corners.len();
         s.warn(format!(
-            "Map frame '{name}' is georeferenced in the PDF by its corners in longitude/latitude, as its projection has no WKT form: positions between them are approximate"
+            "The PDF georeferences {n} map frame{} by its corners in longitude/latitude, as its coordinate system can't be written as WKT (a grid shift, or a projection WKT1 has no name for): positions between the corners are approximate ({})",
+            plural(n),
+            listed(corners)
         ));
     }
-    if pdf { Ok(rustgis_render::pdf::write(&pages, &saved.name)) } else { png.ok_or_else(|| "nothing to draw".to_string()) }
 }
 
 /// Says which layout elements, map frames and surrounds (by name), and pages (by number) an export
