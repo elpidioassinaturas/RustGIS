@@ -475,9 +475,11 @@ const MAX_READ_LAYERS: usize = if cfg!(test) { 3_000 } else { 100_000 };
 const MAX_COPIED_ADDRESS_BYTES: usize = if cfg!(test) { 8 << 20 } else { 64 << 20 };
 
 /// How many layers are read from a document whose layers each copy `per_layer` bytes of its
-/// request addresses: [`MAX_READ_LAYERS`], fewer for long addresses, never fewer than are listed.
+/// request addresses: [`MAX_READ_LAYERS`], fewer for long addresses, at least one. (Fewer than
+/// are listed only for addresses over 32 KiB, which no service needs: 2000 copies of a 1 MB one
+/// would take 2 GB.)
 fn read_limit(per_layer: usize) -> usize {
-    (MAX_COPIED_ADDRESS_BYTES / per_layer.max(1)).clamp(MAX_LISTED_LAYERS, MAX_READ_LAYERS)
+    (MAX_COPIED_ADDRESS_BYTES / per_layer.max(1)).clamp(1, MAX_READ_LAYERS)
 }
 
 /// Says why a document past a [`read_limit`] lower than [`MAX_READ_LAYERS`] was read no further.
@@ -2647,8 +2649,8 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
     // are listed.
     let mut three_d: Vec<((&str, bool), Vec<&str>)> = Vec::new();
     // A collection's layers copy the document's own address when their items or tiles links are
-    // missing or relative, and nothing bounds that address: past the listing, reading stops once
-    // the layers' addresses reach `MAX_COPIED_ADDRESS_BYTES`.
+    // missing or relative, and nothing bounds that address: reading stops once the layers'
+    // addresses reach `MAX_COPIED_ADDRESS_BYTES` (after the first collection, as `read_limit`).
     let (mut copied, mut counted) = (0usize, 0);
     let mut read = collections.len().min(MAX_READ_LAYERS);
     for (i, c) in collections.iter().take(MAX_READ_LAYERS).enumerate() {
@@ -2658,7 +2660,7 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
         if i == MAX_LISTED_LAYERS {
             service.listed = Some(service.layers.len());
         }
-        if i >= MAX_LISTED_LAYERS && copied > MAX_COPIED_ADDRESS_BYTES {
+        if i > 0 && copied > MAX_COPIED_ADDRESS_BYTES {
             read = i;
             break;
         }
@@ -2786,7 +2788,7 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
         note_past_read_limit(&mut service, collections.len() - read, "collections", read);
         note_copied_addresses(&mut service, copied.div_ceil(read.max(1)), read);
     }
-    service.incomplete = unreadable > 0 || collections.len() > MAX_LISTED_LAYERS;
+    service.incomplete = unreadable > 0 || collections.len() > MAX_LISTED_LAYERS.min(read);
     if service.layers.iter().any(|l| matches!(l.offer, Offer::Features { .. })) {
         service.notes.push(format!("a collection is read up to {} features on this computer, page by page", max_paged_features()));
     }
@@ -7037,8 +7039,8 @@ mod tests {
             assert_eq!(s.listed, cut.then_some(MAX_LISTED_LAYERS), "{url}");
             assert_eq!(parse(url, doc(MAX_LISTED_LAYERS).as_bytes()).unwrap().listed, None, "{url}");
         }
-        // A long request address, copied into each layer, lowers how many are read, though never
-        // below the listing.
+        // A long request address, copied into each layer, lowers how many are read (a 4 KB one not
+        // below the listing).
         let href = format!("https://x.org/{}?", "a".repeat(4000));
         let types = many(MAX_READ_LAYERS, |i| format!("<FeatureType><Name>t{i}</Name></FeatureType>"));
         let long = format!(
@@ -7068,6 +7070,22 @@ mod tests {
         assert!(s.notes.iter().any(|n| n.starts_with("each of its layers copies 40")), "{:?}", s.notes);
         let s = parse("https://x.org/collections", bare.as_bytes()).unwrap();
         assert_eq!((s.layers.len(), s.past_read_limit), (MAX_READ_LAYERS, None));
+        // An address so long that the listing's copies would pass the budget reads fewer than are
+        // listed (at least one), and the collections are said to be incomplete for a group.
+        let huge = "a".repeat(1 << 20);
+        let few = serde_json::json!({"collections": list(100, |i| serde_json::json!({"id": format!("c{i}")}))}).to_string();
+        let s = parse(&format!("https://x.org/{huge}/collections"), few.as_bytes()).unwrap();
+        let read = s.layers.len();
+        assert!((1..100).contains(&read) && s.incomplete && s.listed.is_none(), "{read}");
+        let note = format!("{PAST_READ_LIMIT} {read} collections from one document: {} left out", 100 - read);
+        assert_eq!(s.past_read_limit.as_ref(), Some(&note));
+        let types = many(100, |i| format!("<FeatureType><Name>t{i}</Name></FeatureType>"));
+        let wfs = format!(
+            r#"<WFS_Capabilities version="2.0.0"><OperationsMetadata><Operation name="GetFeature"><DCP><HTTP><Get href="https://x.org/{huge}?"/></HTTP></DCP></Operation></OperationsMetadata><FeatureTypeList>{types}</FeatureTypeList></WFS_Capabilities>"#
+        );
+        let s = parse("https://x.org/wfs", wfs.as_bytes()).unwrap();
+        assert!((1..100).contains(&s.layers.len()), "{}", s.layers.len());
+        assert!(s.notes.iter().any(|n| n.starts_with("each of its layers copies 10")), "{:?}", s.notes);
         // A WMS is read in document order: the layers past the limit are its last, and a parent
         // comes before its sublayers.
         let s = parse("https://x.org/wms", wms(MAX_READ_LAYERS + 1).as_bytes()).unwrap();

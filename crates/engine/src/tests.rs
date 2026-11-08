@@ -14912,7 +14912,9 @@ fn a_long_document_address_lists_fewer_layers() {
     assert_eq!((&long["count"], &long["total"]), (&json!(listed), &json!(600)));
     let cut = format!("only the first {listed} of 600 layers are listed; service.add takes any of them by name");
     assert_eq!(long["listedNote"], json!(cut));
-    let why = format!("each listed layer repeats its document's address, {bytes} bytes long here, and RustGIS lists at most 8 MiB of them");
+    let why = format!(
+        "each listed layer repeats its document's address, {bytes} bytes long here, and RustGIS lists at most 8 MiB of them (at least one layer)"
+    );
     assert!(says(&long, &why) && says(&long, &cut), "{}", long["notes"]);
     let e = s.run("service.add", &json!({"url": url, "layer": "nao", "text": text})).unwrap_err();
     assert!(e.ends_with(&format!("no layer 'nao' (service.layers lists the first {listed} of 600 layers)")), "{e}");
