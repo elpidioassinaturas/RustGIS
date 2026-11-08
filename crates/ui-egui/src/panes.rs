@@ -3042,7 +3042,8 @@ impl GpForm {
     /// one before an optional one.
     pub fn pick_table(&mut self, id: u32, s: &Session) {
         let spec = self.tool.and_then(rustgis_engine::analysis::tool);
-        // Into the input the run needs, as `first_layer` takes it, so the fields follow the table.
+        // Into a required input that takes a table before an optional one, as `first_layer`
+        // orders them.
         let layers = || spec.into_iter().flat_map(|t| t.params.iter()).filter(|p| p.kind == ParamKind::Layer);
         let input = layers().find(|p| p.required).or_else(|| layers().next());
         if let (Some(p), Some(t)) = (input, s.project.table(id)) {
@@ -3303,9 +3304,8 @@ pub(crate) fn takes_field(kind: ParamKind, d: &rustgis_engine::data::Dataset, i:
     }
 }
 
-/// The tool's first layer parameter, whose fields its field parameters take and whose layer
-/// names a new output: a required one before an optional one, which an external tool's form
-/// leaves empty (#1517).
+/// The tool's first layer parameter, whose fields its field parameters take: a required one
+/// before an optional one, which an external tool's form leaves empty (#1517).
 pub(crate) fn first_layer(spec: &rustgis_engine::analysis::ToolSpec) -> Option<&rustgis_engine::analysis::ParamSpec> {
     let layers = || {
         spec.params
@@ -3316,7 +3316,8 @@ pub(crate) fn first_layer(spec: &rustgis_engine::analysis::ToolSpec) -> Option<&
 }
 
 /// The layer parameter a new output is named after: a required one of any kind, a raster
-/// too (Topo Render's DEM), before `first_layer`.
+/// too (Topo Render's DEM), before `first_layer`. Only the desktop's Save As names one.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn output_layer(spec: &rustgis_engine::analysis::ToolSpec) -> Option<&rustgis_engine::analysis::ParamSpec> {
     spec.params
         .iter()
