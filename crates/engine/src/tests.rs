@@ -16877,6 +16877,58 @@ fn a_stac_data_cube_on_the_time_slider() {
 /// its values into `stac.addCube` would (its collection, band, range and cloud cap filled in, its
 /// last full year by default), or into `layer.addZarr` following the slider; `cube.trend` and
 /// `cube.reduce` taking one by `"cube"`; wrong requests refused before anything is added.
+/// An entry that gives no range, as JAXA Earth's don't, is added with one from a sample of its
+/// files (`"range": "auto"`): the same for every date. Its credit goes on the tile layers it
+/// added, and its collection's licence comes back with it.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_entry_without_a_range_takes_one_from_its_files() {
+    use crate::render::rustgis_tiles::cubes;
+    let (cog, _) = serve_ranges(rustgis_data::raster::cog::example(512, 256));
+    let item = |id: &str, date: &str| {
+        format!(
+            r#"{{"type": "Feature", "id": "{id}", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+               "properties": {{"datetime": "{date}T00:00:00Z", "bdc:tiles": ["T1"]}},
+               "assets": {{"B1": {{"href": "{cog}/{id}.tif", "eo:bands": [{{"scale": 0.0001}}]}}}}}}"#
+        )
+    };
+    let features = [item("a1", "2024-01-01"), item("a2", "2024-01-17")].join(",");
+    let licence = r#"{"type": "Collection", "id": "cube", "license": "proprietary", "links": [{"rel": "license", "href": "https://earth.jaxa.jp/en/data/policy/"}]}"#;
+    let base = serve_routes(
+        vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{features}]}}"#)), ("/v1", licence.to_string())],
+        8,
+    );
+    let mut entry = cubes::find("bdc-mod13q1-ndvi").unwrap();
+    entry.url = format!("{base}/v1");
+    entry.source = cubes::Source::Stac { collection: "cube".into(), asset: "B1".into() };
+    (entry.bbox, entry.start, entry.end) = ([0.0, 40.0, 20.0, 50.0], "2023-05-01".into(), Some("2024-12-31".into()));
+    (entry.range, entry.credit) = (None, "JAXA, A test dataset".into());
+    let mut s = Session::new(Project::default());
+    let r = crate::cmd::cube_catalog::open_entry(&mut s, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
+    // The example's values run 0 to 255 (0 to 0.0255 scaled): its 2nd to 98th percentiles.
+    let range: Vec<f64> = r["range"].as_array().unwrap().iter().filter_map(Value::as_f64).collect();
+    assert!(range.len() == 2 && range[0] >= 0.0 && range[0] < 0.002 && range[1] > 0.023 && range[1] <= 0.0256, "{r}");
+    assert_eq!(r["rangeFrom"], "sample");
+    let look = format!("#range={},{}", range[0] / 0.0001, range[1] / 0.0001);
+    let tile = &s.map().tiles[0];
+    assert!(tile.time_urls.len() == 2 && tile.time_urls.iter().all(|(_, u)| u.ends_with(&look)), "{:?} {look}", tile.time_urls);
+    assert_eq!(tile.attribution, "JAXA, A test dataset");
+    assert_eq!(
+        (r["credit"].as_str(), r["license"]["url"].as_str()),
+        (Some("JAXA, A test dataset"), Some("https://earth.jaxa.jp/en/data/policy/"))
+    );
+    // A range given takes its place, as for any entry.
+    let mut t = Session::new(Project::default());
+    let r = crate::cmd::cube_catalog::open_entry(&mut t, &entry, &json!({"bbox": [10, 45, 11, 46], "range": [0, 0.01]})).unwrap();
+    assert!(r.get("rangeFrom").is_none() && t.map().tiles[0].time_urls.iter().all(|(_, u)| u.ends_with("#range=0,100")), "{r}");
+    // Other text is refused, naming "auto", before anything is read.
+    assert!(
+        t.run("stac.addCube", &json!({"url": entry.url, "collection": "cube", "asset": "B1", "range": "wide"}))
+            .unwrap_err()
+            .contains("\"auto\"")
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_catalog_entry_opens_as_its_command_would() {
