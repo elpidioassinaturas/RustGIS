@@ -318,7 +318,7 @@ an example.
 ### A panel
 
 A plugin can have a panel: a pane on the right of the map with texts, checkboxes, sliders,
-buttons and trees bound to its commands. Declare it in `plugin.json`:
+buttons, trees and picks on the map bound to its commands. Declare it in `plugin.json`:
 
 ```json
 "panel": {
@@ -354,10 +354,12 @@ buttons and trees bound to its commands. Declare it in `plugin.json`:
       with its triangle or a double click. `search: true` adds a box above it that keeps the
       nodes whose label holds every word typed (case and accents aside), with the branches
       above them open; a branch found with nothing found below it opens to all its children.
+    - `pick`: a button that asks for a place on the map ([below](#picking-a-place-on-the-map)):
+      a point, or with `"shape": "box"` a box. Its `label` is its command's unless given.
 - A checkbox runs its `command` when it changes, a slider when it is let go, or stepped
-  (never while it is dragged, while the pane shows the label of the value it would take), and a
-  tree when a node is chosen. Without a `command`, a widget's value just goes with the plugin's
-  next request.
+  (never while it is dragged, while the pane shows the label of the value it would take), a
+  tree when a node is chosen, and a pick when the place is picked. Without a `command`, a
+  widget's value just goes with the plugin's next request.
 - `state` (optional) is a command RustGIS runs each time the panel is opened, to answer its
   state.
 - Every `command` reference, including `state`, must name one of the plugin's own commands.
@@ -372,8 +374,9 @@ button, a script or the command line):
 "panel": { "values": { "local": false, "release": 196 }, "changed": ["release"] }
 ```
 
-`values` has each checkbox (`true` or `false`), slider (a whole number) and tree (the chosen
-node's id, or `null`), and `changed` the ones this call set: the widget the user just moved. A
+`values` has each checkbox (`true` or `false`), slider (a whole number), tree (the chosen
+node's id, or `null`) and pick (the place picked last, or `null`), and `changed` the ones this
+call set: the widget the user just moved. A
 widget's command is run with `{"panel": {"release": 196}}` as its parameters, which sets the
 values before the call and is taken out of the request's `params`, so a script or `rustgis-cli`
 can do the same:
@@ -426,6 +429,53 @@ Any command can answer the panel's new state, beside the rest of its answer:
   has no panes, the commands still run with the values given.
 - RustGIS versions before panels ignore `panel` (and refuse a tab that names it): keep the
   commands usable from the ribbon too, or set `minRustgisVersion`.
+
+#### Picking a place on the map
+
+A `pick` lets the user show the plugin a place: where to grow a training sample from, a
+site to report on, an area to download.
+
+```json
+{ "kind": "pick", "id": "seed", "label": "Grow a Sample", "command": "grow" },
+{ "kind": "pick", "id": "area", "label": "Download Inside a Box", "shape": "box", "command": "download" }
+```
+
+- Clicked, the pick waits for the map, and the map's hint and the status bar say what for. The
+  next click on the map is the point (dragging still pans the map); for a box, the next box
+  dragged on it. Esc, choosing another tool, clicking the pick again or closing the panel stops
+  it waiting, with nothing run. A pick turns the Explore tool on.
+- The place is the pick's value, and its `command` runs with it, as any widget's:
+
+  ```json
+  "panel": {
+    "values": {
+      "seed": { "lon": -42.8, "lat": -5.09, "x": -4764474.2, "y": -567363.0, "crs": "EPSG:3857" },
+      "area": null
+    },
+    "changed": ["seed"]
+  }
+  ```
+
+  A point has `lon` and `lat` in degrees (WGS 84) and `x` and `y` in the map's coordinate
+  system, `crs`: its EPSG or ESRI code (`EPSG:3857` for Web Mercator and the globe), or the
+  PROJ definition of another projection (`+proj=robin …`). A box has `bbox`,
+  `[west, south, east, north]` in degrees (a west east of its east crosses the antimeridian),
+  and `extent`, `[xmin, ymin, xmax, ymax]`, the box around it in the map's coordinates, with
+  `crs`. A place on another body's map, or one the projection can't show, has only its
+  degrees.
+- The pane shows the place picked last under the pick, and the map marks it (a box's outline)
+  while the panel is open.
+- A plugin can clear a pick, `"values": {"seed": null}`, but not pick a place itself. A script
+  gives the degrees, and RustGIS works out the rest from the active map:
+
+  ```sh
+  rustgis-cli run --sample --cmd 'plugin:my-plugin/grow={"panel": {"seed": {"lon": -42.8, "lat": -5.09}}}'
+  ```
+
+- It works the same in the desktop app and the web app. On the command line, which has no map
+  to click, the command still runs with the place given.
+- RustGIS versions before picks refuse a manifest with one (its kind is unknown to them), so
+  set `minRustgisVersion` to the first version with picks.
 
 ### What a plugin can ask for
 

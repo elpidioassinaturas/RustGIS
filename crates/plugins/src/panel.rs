@@ -1,5 +1,5 @@
-//! A plugin's panel: a pane of simple widgets (text, checkboxes, sliders, buttons, trees) bound
-//! to its commands, declared in `plugin.json` (`panel`).
+//! A plugin's panel: a pane of simple widgets (text, checkboxes, sliders, buttons, trees, picks
+//! on the map) bound to its commands, declared in `plugin.json` (`panel`).
 //!
 //! A plugin keeps no state between calls (each gets a fresh instance), so the host keeps the
 //! panel's state: the widgets' values and what the plugin last said about them. Every command
@@ -32,8 +32,12 @@ pub const MAX_DECLARED: usize = 2_000;
 pub const MAX_TREE_NODES: usize = 5_000;
 pub const MAX_TREE_DEPTH: usize = 8;
 pub const MAX_TREE_ID: usize = 200;
+/// The longest coordinate system a pick's value names, in characters (a PROJ definition).
+pub const MAX_PICK_CRS: usize = 2_000;
 /// The widget kinds.
-pub const KINDS: &[&str] = &["text", "checkbox", "slider", "button", "tree"];
+pub const KINDS: &[&str] = &["text", "checkbox", "slider", "button", "tree", "pick"];
+/// What a pick asks for on the map: a point (the default) or a box.
+pub const PICK_SHAPES: &[&str] = &["point", "box"];
 
 /// The panel as `plugin.json` declares it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -54,8 +58,8 @@ pub struct PanelDecl {
     pub items: Vec<PanelItemDecl>,
 }
 
-/// A widget. `kind` is `text`, `checkbox`, `slider`, `button` or `tree`; the other fields apply
-/// to some.
+/// A widget. `kind` is `text`, `checkbox`, `slider`, `button`, `tree` or `pick`; the other fields
+/// apply to some.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PanelItemDecl {
@@ -63,8 +67,8 @@ pub struct PanelItemDecl {
     /// How the plugin names it in values and states. A button's defaults to its command.
     #[serde(default)]
     pub id: String,
-    /// A caption (text, slider), the box's label (checkbox) or the button's label (its
-    /// command's label when unset).
+    /// A caption (text, slider), the box's label (checkbox) or the button's label (a button's or a
+    /// pick's; its command's label when unset).
     #[serde(default)]
     pub label: String,
     /// Shown on hover.
@@ -74,8 +78,9 @@ pub struct PanelItemDecl {
     #[serde(default)]
     pub text: String,
     /// The command it runs: a button's when clicked; a checkbox's when ticked or cleared; a
-    /// slider's when let go (or stepped); a tree's when a node is chosen. Optional for
-    /// checkboxes, sliders and trees, whose values then just go with the plugin's next request.
+    /// slider's when let go (or stepped); a tree's when a node is chosen; a pick's when the place
+    /// is picked on the map. Optional for checkboxes, sliders, trees and picks, whose values then
+    /// just go with the plugin's next request.
     #[serde(default)]
     pub command: String,
     /// A checkbox's first value (a bool), or a slider's (a whole number; its `min` if unset).
@@ -92,6 +97,9 @@ pub struct PanelItemDecl {
     /// A tree with a search box above it, which keeps the nodes whose label holds what's typed.
     #[serde(default)]
     pub search: bool,
+    /// What a pick asks for on the map: `point` (when unset) or `box`.
+    #[serde(default)]
+    pub shape: String,
 }
 
 impl PanelItemDecl {
@@ -100,9 +108,14 @@ impl PanelItemDecl {
         if self.id.is_empty() && self.kind == "button" { &self.command } else { &self.id }
     }
 
-    /// Whether it has a value (a checkbox, a slider or a tree).
+    /// Whether it has a value (a checkbox, a slider, a tree or a pick).
     pub fn has_value(&self) -> bool {
-        matches!(self.kind.as_str(), "checkbox" | "slider" | "tree")
+        matches!(self.kind.as_str(), "checkbox" | "slider" | "tree" | "pick")
+    }
+
+    /// Whether it is a pick that asks for a box (a pick with no shape asks for a point).
+    pub fn picks_box(&self) -> bool {
+        self.kind == "pick" && self.shape == "box"
     }
 }
 
@@ -130,7 +143,10 @@ impl PanelDecl {
         for item in &self.items {
             let kind = item.kind.as_str();
             if !KINDS.contains(&kind) {
-                return Err(format!("plugin.json: panel item kind '{}' isn't text, checkbox, slider, button or tree", clip(kind, 40)));
+                return Err(format!(
+                    "plugin.json: panel item kind '{}' isn't text, checkbox, slider, button, tree or pick",
+                    clip(kind, 40)
+                ));
             }
             let id = item.key();
             if !crate::manifest::valid_id(id, false) || !ids.insert(id) {
@@ -147,7 +163,14 @@ impl PanelDecl {
                 "text" if !item.command.is_empty() => return Err(what("a text runs no command")),
                 "button" if item.command.is_empty() => return Err(what("a button needs a command")),
                 "checkbox" if item.label.trim().is_empty() => return Err(what("a checkbox needs a label")),
+                "pick" if item.label.trim().is_empty() && item.command.is_empty() => return Err(what("a pick needs a label or a command")),
                 _ => {}
+            }
+            if kind == "pick" && !item.shape.is_empty() && !PICK_SHAPES.contains(&item.shape.as_str()) {
+                return Err(what(&format!("a pick's shape '{}' isn't point or box", clip(&item.shape, 40))));
+            }
+            if kind != "pick" && !item.shape.is_empty() {
+                return Err(what("shape is for picks"));
             }
             if !item.command.is_empty() && !command(&item.command) {
                 return Err(what(&format!("'{}' isn't one of the plugin's commands", clip(&item.command, 80))));
@@ -188,6 +211,47 @@ fn clip(s: &str, n: usize) -> String {
 /// A whole number from an integer or a float with no fraction (JSON from other languages).
 fn whole(v: &Value) -> Option<i64> {
     v.as_i64().or_else(|| v.as_f64().filter(|x| x.is_finite() && x.fract() == 0.0 && x.abs() <= SLIDER_LIMIT as f64).map(|x| x as i64))
+}
+
+/// A pick's value from `v`, as it is kept: `null` for none; for a point `{"lon", "lat"}`, for a
+/// box `{"bbox": [west, south, east, north]}` (a west east of its east crosses the antimeridian),
+/// in degrees, with what the host works out in the map's coordinates (`x` and `y`, or `extent`
+/// `[xmin, ymin, xmax, ymax]`, and `crs`) when they are right. `None` for anything else.
+pub fn pick_value(item: &PanelItemDecl, v: &Value) -> Option<Value> {
+    if v.is_null() {
+        return Some(Value::Null);
+    }
+    let o = v.as_object()?;
+    let num = |v: Option<&Value>| v.and_then(Value::as_f64).filter(|x| x.is_finite());
+    let four = |k: &str| -> Option<[f64; 4]> {
+        let a = o.get(k)?.as_array().filter(|a| a.len() == 4)?;
+        Some([num(a.first())?, num(a.get(1))?, num(a.get(2))?, num(a.get(3))?])
+    };
+    let lon = |x: f64| (-180.0..=180.0).contains(&x);
+    let lat = |y: f64| (-90.0..=90.0).contains(&y);
+    let mut out = Map::new();
+    if item.picks_box() {
+        let b = four("bbox")?;
+        if !(lon(b[0]) && lon(b[2]) && lat(b[1]) && lat(b[3]) && b[1] <= b[3]) {
+            return None;
+        }
+        out.insert("bbox".into(), json!(b));
+        if let Some(e) = four("extent").filter(|e| e[0] <= e[2] && e[1] <= e[3]) {
+            out.insert("extent".into(), json!(e));
+        }
+    } else {
+        let (x, y) = (num(o.get("lon")).filter(|x| lon(*x))?, num(o.get("lat")).filter(|y| lat(*y))?);
+        out.insert("lon".into(), json!(x));
+        out.insert("lat".into(), json!(y));
+        if let (Some(x), Some(y)) = (num(o.get("x")), num(o.get("y"))) {
+            out.insert("x".into(), json!(x));
+            out.insert("y".into(), json!(y));
+        }
+    }
+    if let Some(crs) = o.get("crs").and_then(Value::as_str).filter(|c| !c.trim().is_empty() && c.chars().count() <= MAX_PICK_CRS) {
+        out.insert("crs".into(), json!(crs));
+    }
+    Some(Value::Object(out))
 }
 
 /// What the plugin last said about one widget.
@@ -305,7 +369,7 @@ impl PanelState {
                     let v = d.default.as_ref().and_then(whole).unwrap_or(d.min).clamp(d.min, d.max.max(d.min));
                     values.insert(id.clone(), json!(v));
                 }
-                "tree" => {
+                "tree" | "pick" => {
                     values.insert(id.clone(), Value::Null);
                 }
                 _ => {}
@@ -342,6 +406,11 @@ impl PanelState {
         self.values.get(id).and_then(Value::as_str)
     }
 
+    /// A pick's place, if one was picked ([`pick_value`]).
+    pub fn picked(&self, id: &str) -> Option<&Map<String, Value>> {
+        self.values.get(id).and_then(Value::as_object)
+    }
+
     /// A slider's label for value `v`: its own label there, or the number.
     pub fn slider_label(&self, id: &str, v: i64) -> String {
         let Some(st) = self.items.get(id) else { return v.to_string() };
@@ -354,8 +423,8 @@ impl PanelState {
     }
 
     /// Sets widget values from `values` (`{"id": value}`): a checkbox takes a bool, a slider a
-    /// whole number (kept within its ends), a tree one of its nodes' ids or `null` for none.
-    /// Anything else is ignored. Returns the ids set.
+    /// whole number (kept within its ends), a tree one of its nodes' ids or `null` for none, a
+    /// pick a place ([`pick_value`]) or `null`. Anything else is ignored. Returns the ids set.
     pub fn set_values(&mut self, decl: &PanelDecl, values: &Value) -> Vec<String> {
         let Some(given) = values.as_object() else { return Vec::new() };
         let mut set = Vec::new();
@@ -369,6 +438,7 @@ impl PanelState {
                     Value::String(n) if self.items.get(id).is_some_and(|s| holds(&s.nodes, n)) => Some(v.clone()),
                     _ => None,
                 },
+                "pick" => pick_value(d, v),
                 _ => whole(v).map(|n| {
                     let (min, max) = self.items.get(id).map_or((d.min, d.max), |s| (s.min, s.max));
                     json!(n.clamp(min, max.max(min)))
@@ -386,7 +456,8 @@ impl PanelState {
     /// An item may set `label` (`null` for the declared one), `text`, `enabled`, `visible`, for a
     /// slider `min`, `max` and `labels`, and for a tree `nodes`. Unknown ids and fields, and values
     /// of the wrong type, are ignored; texts are clipped, sliders' values kept within their ends
-    /// and a tree's chosen node among its nodes.
+    /// and a tree's chosen node among its nodes. A pick's value can only be cleared (`null`): the
+    /// place is the user's to pick.
     pub fn apply(&mut self, decl: &PanelDecl, update: &Value) {
         let empty = Map::new();
         let items = update.get("items").and_then(Value::as_object).unwrap_or(&empty);
@@ -430,8 +501,10 @@ impl PanelState {
                 st.nodes = Arc::new(tree_nodes(nodes, 0, &mut left, &mut Default::default()));
             }
         }
-        if let Some(values) = update.get("values") {
-            self.set_values(decl, values);
+        if let Some(values) = update.get("values").and_then(Value::as_object) {
+            let mut values = values.clone();
+            values.retain(|id, v| v.is_null() || decl.item(id).is_none_or(|d| d.kind != "pick"));
+            self.set_values(decl, &Value::Object(values));
         }
         // New ends keep the values within them, and new nodes the chosen one among them.
         for d in &decl.items {

@@ -9882,6 +9882,56 @@ fn plugin_panels_keep_their_state_between_calls() {
     rustgis_plugins::unload("eng-nopanel");
 }
 
+/// A pick's place reaches the plugin in degrees and in the map's coordinates, worked out by the
+/// session from the map it was picked on, whatever was given for them.
+#[test]
+fn plugin_panel_picks_reach_the_plugin_in_the_maps_coordinates() {
+    let mut s = world();
+    let pkg = rustgis_plugins::Package::from_zip(&rustgis_plugins::testing::pick_package("eng-pick")).unwrap();
+    rustgis_plugins::load(pkg, "test").unwrap();
+    let near = |v: &Value, x: f64, tol: f64| v.as_f64().is_some_and(|v| (v - x).abs() < tol);
+    // Web Mercator: the map's own clicks give only degrees; given map coordinates are replaced.
+    let got = s.run("plugin:eng-pick/q-grow", &json!({"panel": {"seed": {"lon": -42.8, "lat": -5.09, "x": 1, "crs": "mine"}}})).unwrap();
+    let seed = &got["panel"]["values"]["seed"];
+    assert_eq!(got["panel"]["changed"], json!(["seed"]), "{got}");
+    assert_eq!((seed["lon"].as_f64(), seed["lat"].as_f64(), seed["crs"].as_str()), (Some(-42.8), Some(-5.09), Some("EPSG:3857")), "{seed}");
+    let m = crate::geom::lonlat_to_merc(crate::geom::Coord::new(-42.8, -5.09));
+    assert!(near(&seed["x"], m.x, 1e-6) && near(&seed["y"], m.y, 1e-6), "{seed}");
+    assert_eq!(s.plugin_panels["eng-pick"].values["seed"], *seed, "the panel keeps it");
+    // A box: its degrees, and the box around it in the map's coordinates.
+    let got = s.run("plugin:eng-pick/q", &json!({"panel": {"area": {"bbox": [-44, -6, -42, -4]}}})).unwrap();
+    let area = &got["panel"]["values"]["area"];
+    let (sw, ne) = (
+        crate::geom::lonlat_to_merc(crate::geom::Coord::new(-44.0, -6.0)),
+        crate::geom::lonlat_to_merc(crate::geom::Coord::new(-42.0, -4.0)),
+    );
+    let e = &area["extent"];
+    assert!(near(&e[0], sw.x, 1e-3) && near(&e[1], sw.y, 1e-3) && near(&e[2], ne.x, 1e-3) && near(&e[3], ne.y, 1e-3), "{area}");
+    assert_eq!(area["bbox"], json!([-44.0, -6.0, -42.0, -4.0]));
+    assert_eq!(got["panel"]["values"]["seed"]["lon"], -42.8, "the other places go with it");
+    // An EPSG projection names its code, the coordinates in its metres.
+    s.run("map.projection", &json!({"type": "EPSG:31983"})).unwrap();
+    let got = s.run("plugin:eng-pick/q-grow", &json!({"panel": {"seed": {"lon": -43.5, "lat": -5.09}}})).unwrap();
+    let seed = &got["panel"]["values"]["seed"];
+    assert_eq!(seed["crs"], "EPSG:31983", "{seed}");
+    assert!(near(&seed["x"], 666_000.0, 5_000.0) && near(&seed["y"], 9_437_000.0, 5_000.0), "UTM 23S: {seed}");
+    // A preset names its definition.
+    s.run("map.projection", &json!({"type": "robinson"})).unwrap();
+    let got = s.run("plugin:eng-pick/q-grow", &json!({"panel": {"seed": {"lon": 10, "lat": 20}}})).unwrap();
+    let crs = got["panel"]["values"]["seed"]["crs"].as_str().unwrap_or_default().to_string();
+    assert!(crs.starts_with("+proj=robin"), "{crs}");
+    // A widget that runs nothing keeps its place for the next request, set by `plugin.panel`.
+    let st = s.run("plugin.panel", &json!({"id": "eng-pick", "values": {"spot": {"lon": 10, "lat": 20}}})).unwrap();
+    assert!(st["values"]["spot"]["x"].is_f64() && st["values"]["spot"]["crs"].is_string(), "{st}");
+    // Junk never panics and leaves the places as they were.
+    let before = s.plugin_panels["eng-pick"].values.clone();
+    for junk in [json!({"seed": {"lon": 999, "lat": 0}}), json!({"area": {"bbox": "all"}}), json!({"seed": 7}), json!("x")] {
+        let _ = s.run("plugin:eng-pick/q", &json!({"panel": junk}));
+        assert_eq!(s.plugin_panels["eng-pick"].values, before);
+    }
+    rustgis_plugins::unload("eng-pick");
+}
+
 /// Loads the panel test plugin with `edit`, its panel's state command being `state`.
 fn panel_plugin(id: &str, state: &str) {
     let mut m: Value = serde_json::from_str(&rustgis_plugins::testing::panel_manifest(id)).unwrap();

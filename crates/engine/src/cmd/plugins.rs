@@ -32,7 +32,7 @@ pub fn commands() -> Vec<C> {
             .view()
             .params(r#"{"id": plugin id, "url"?: registry.json}"#),
         C::new("plugin.panel", "Plugin Panel State", "Plugins", panel).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Reserved)).view().params(
-            r#"{"id": plugin id, "values"?: {widget id: true/false, a whole number, or a tree node's id (null for none)}, "refresh"?: bool (run the panel's state command)}"#,
+            r#"{"id": plugin id, "values"?: {widget id: true/false, a whole number, a tree node's id, or a pick's place: {"lon", "lat"} or {"bbox": [west, south, east, north]} in degrees (null for none)}, "refresh"?: bool (run the panel's state command)}"#,
         ),
         C::new("plugin.prepare", "Prepare Plugin Environment", "Plugins › Manage", prepare).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Reserved))
             .view()
@@ -52,7 +52,8 @@ fn panel(s: &mut Session, p: &Value) -> CmdResult {
     let decl = plugin.manifest.panel.clone().ok_or_else(|| format!("{} has no panel", plugin.manifest.name))?;
     let before = s.panel_state(id, &decl).clone();
     if let Some(values) = p.get("values") {
-        s.panel_state(id, &decl).set_values(&decl, values);
+        let values = placed(s, &decl, values);
+        s.panel_state(id, &decl).set_values(&decl, &values);
     }
     if b(p, "refresh").unwrap_or(false) && !decl.state.is_empty() {
         // A failed refresh leaves the values as they were, as a failed command does.
@@ -63,6 +64,60 @@ fn panel(s: &mut Session, p: &Value) -> CmdResult {
     }
     let state = s.plugin_panel(id).ok_or("the panel is unavailable")?;
     serde_json::to_value(state).map_err(|e| e.to_string())
+}
+
+/// Panel values given (`{"<widget>": value}`) with each pick's place also in the active map's
+/// coordinates, worked out here whatever was given for them: `x` and `y` for a point, `extent`
+/// (`[xmin, ymin, xmax, ymax]`, the box around it) for a box, and `crs`, the map's coordinate
+/// system (`EPSG:3857` for Web Mercator and the globe). A place the projection can't show, or one
+/// on another body's map, keeps only its degrees.
+fn placed(s: &Session, decl: &rustgis_plugins::PanelDecl, given: &Value) -> Value {
+    use rustgis_map::projection::Flat;
+    let Some(given) = given.as_object() else { return given.clone() };
+    let mut out = given.clone();
+    let map = s.map();
+    let flat = Flat::of(&map.projection);
+    let crs = match (&map.projection, &flat) {
+        (rustgis_map::Projection::Custom(code), Flat::Custom(_)) => match rustgis_map::projection::lookup(code) {
+            Ok((_, label)) if label.starts_with("EPSG:") || label.starts_with("ESRI:") => label,
+            Ok((proj4, _)) => proj4,
+            Err(_) => code.clone(),
+        },
+        _ => "EPSG:3857".to_string(),
+    };
+    for d in decl.items.iter().filter(|d| d.kind == "pick") {
+        let Some(v) = out.get_mut(d.key()).and_then(Value::as_object_mut) else { continue };
+        for k in ["x", "y", "extent", "crs"] {
+            v.remove(k);
+        }
+        if !map.body().is_earth() {
+            continue;
+        }
+        let num = |v: Option<&Value>| v.and_then(Value::as_f64).filter(|x| x.is_finite());
+        let mut add = Vec::new();
+        if d.picks_box() {
+            let b: Option<Vec<f64>> = v.get("bbox").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| num(Some(x))).collect());
+            let Some(&[west, south, east, north]) = b.as_deref() else { continue };
+            // A box across the antimeridian is measured through it.
+            let east = if east < west { east + 360.0 } else { east };
+            let e = flat.extent(&crate::geom::Extent::new(west, south, east, north));
+            if !e.is_empty() && [e.min_x, e.min_y, e.max_x, e.max_y].iter().all(|x| x.is_finite()) {
+                add.push(("extent", json!([e.min_x, e.min_y, e.max_x, e.max_y])));
+            }
+        } else if let (Some(lon), Some(lat)) = (num(v.get("lon")), num(v.get("lat")))
+            && let Some(m) = flat.forward_checked(crate::geom::Coord::new(lon, lat)).filter(|m| m.is_finite())
+        {
+            add.push(("x", json!(m.x)));
+            add.push(("y", json!(m.y)));
+        }
+        if !add.is_empty() {
+            add.push(("crs", json!(crs)));
+        }
+        for (k, value) in add {
+            v.insert(k.to_string(), value);
+        }
+    }
+    Value::Object(out)
 }
 
 /// Makes a Python plugin's environment (it can take minutes: downloads).
@@ -498,10 +553,12 @@ impl Session {
         let mut stripped;
         let (before, request) = match &panel {
             Some(decl) => {
+                // A pick's place in the map's coordinates too, from the map it was picked on.
+                let given = params.get("panel").map(|g| placed(self, decl, g));
                 let state = self.panel_state(&pid, decl);
                 let before = state.clone();
                 let mut changed = Vec::new();
-                if let Some(given) = params.get("panel") {
+                if let Some(given) = &given {
                     changed = state.set_values(decl, given);
                     stripped = params.clone();
                     if let Some(o) = stripped.as_object_mut() {

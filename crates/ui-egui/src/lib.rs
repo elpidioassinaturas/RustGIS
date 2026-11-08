@@ -2289,6 +2289,8 @@ impl RustGisApp {
         r = self.deliver_gp_files(r);
         if r.is_ok() && id == "tool.set" {
             self.map.cancel_sketch();
+            // Esc chooses Explore: a plugin's pick stops waiting for the map, as for any tool.
+            pluginpanel::cancel_pick(self);
         }
         if let Err(e) = &r {
             self.command_failed(id, e, notice_mark);

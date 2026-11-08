@@ -1,15 +1,19 @@
 //! A plugin's panel (`panel` in its `plugin.json`): a right pane of texts, checkboxes, sliders,
-//! buttons and trees bound to the plugin's commands.
+//! buttons, trees and picks bound to the plugin's commands.
 //!
 //! The session keeps the panel's state ([`rustgis_engine::plugins::PanelState`]); this draws it
 //! and turns the user's changes into commands: a widget with a command runs
 //! `plugin:<plugin>/<command>` with `{"panel": {"<widget>": value}}`, one without sets the value
 //! with `plugin.panel`. A slider runs its command when it is let go (or stepped, or moved with
 //! the keys), never while it is dragged: until then the pane shows the value it would take.
+//! A pick waits for the map: the next click there (or a box dragged) is its value, and Esc,
+//! another tool, or the panel closing stops it waiting.
 
 use egui::{Align2, CornerRadius, RichText, Sense, Stroke, Ui, pos2, vec2};
 use std::collections::{HashMap, HashSet};
 
+use rustgis_engine::Tool;
+use rustgis_engine::geom::{Coord, Extent};
 use rustgis_engine::plugins::{Manifest, PanelItemDecl, PanelState, TreeNode, command_id};
 use serde_json::{Value, json};
 
@@ -30,6 +34,8 @@ pub struct State {
     /// since, or moved (by the plugin or a script), opens the branches above it, once, so it
     /// shows and they can still be closed.
     revealed: HashMap<String, Vec<String>>,
+    /// A pick waiting for the map: plugin and widget.
+    picking: Option<(String, String)>,
 }
 
 /// The panel's title (its tab), in the interface language.
@@ -134,6 +140,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             continue;
         }
         match item.kind.as_str() {
+            "pick" => pick_item(app, ui, &pid, m, item, &state, &tr, t),
             "text" => text(ui, item, &state, &tr, t),
             "checkbox" => checkbox(app, ui, &pid, item, &state, &tr),
             "slider" => slider(app, ui, &pid, item, &state, &tr, t),
@@ -176,15 +183,9 @@ fn checkbox(app: &mut RustGisApp, ui: &mut Ui, pid: &str, item: &PanelItemDecl, 
     }
 }
 
-fn button(
-    app: &mut RustGisApp,
-    ui: &mut Ui,
-    pid: &str,
-    m: &Manifest,
-    item: &PanelItemDecl,
-    state: &PanelState,
-    tr: &dyn Fn(&str) -> String,
-) {
+/// A button's or a pick's label, on one line: what the plugin set, the declared one, or its
+/// command's; and its help: the declared one or its command's.
+fn button_label(m: &Manifest, item: &PanelItemDecl, state: &PanelState, tr: &dyn Fn(&str) -> String) -> (String, String) {
     let cmd = m.commands.iter().find(|c| c.id == item.command);
     let label = state
         .items
@@ -195,10 +196,201 @@ fn button(
         .unwrap_or_default()
         .replace('\n', " ");
     let help = if item.help.is_empty() { cmd.as_ref().map(|c| tr(&c.help)).unwrap_or_default() } else { tr(&item.help) };
+    (label, help)
+}
+
+fn button(
+    app: &mut RustGisApp,
+    ui: &mut Ui,
+    pid: &str,
+    m: &Manifest,
+    item: &PanelItemDecl,
+    state: &PanelState,
+    tr: &dyn Fn(&str) -> String,
+) {
+    let (label, help) = button_label(m, item, state, tr);
     let resp = ui.add_enabled(enabled(item, state), egui::Button::new(label).min_size(vec2(64.0, 26.0)));
     let resp = if help.is_empty() { resp } else { resp.on_hover_text(help) };
     if resp.clicked() {
         run(app, &command_id(pid, &item.command), Value::Null);
+    }
+}
+
+/// Where a pick's value is, in words: a point's degrees, or a box's south-west and north-east
+/// corners.
+fn place_text(v: &serde_json::Map<String, Value>) -> Option<String> {
+    let n = |v: Option<&Value>| v.and_then(Value::as_f64);
+    if let Some(b) = v.get("bbox").and_then(Value::as_array) {
+        let (w, s, e, north) = (n(b.first())?, n(b.get(1))?, n(b.get(2))?, n(b.get(3))?);
+        let (sw, ne) = (rustgis_engine::geom::format_lonlat(Coord::new(w, s)), rustgis_engine::geom::format_lonlat(Coord::new(e, north)));
+        return Some(crate::i18n::fmt("{southwest} to {northeast}", &[("southwest", &sw), ("northeast", &ne)]));
+    }
+    Some(rustgis_engine::geom::format_lonlat(Coord::new(n(v.get("lon"))?, n(v.get("lat"))?)))
+}
+
+/// A pick: a button that waits for a place on the map (a click, or a box dragged for a box), then
+/// runs the widget's command with it. Clicked again while it waits, it stops waiting. Under it,
+/// what it waits for, or the place picked last.
+#[allow(clippy::too_many_arguments)]
+fn pick_item(
+    app: &mut RustGisApp,
+    ui: &mut Ui,
+    pid: &str,
+    m: &Manifest,
+    item: &PanelItemDecl,
+    state: &PanelState,
+    tr: &dyn Fn(&str) -> String,
+    t: &crate::theme::Tokens,
+) {
+    let id = item.key();
+    let waiting = app.ui.plugin_panel.picking.as_ref().is_some_and(|(p, i)| p == pid && i == id);
+    let (label, help) = button_label(m, item, state, tr);
+    let on = enabled(item, state);
+    let resp = ui.add_enabled(on, egui::Button::new(format!("⌖ {label}")).selected(waiting).min_size(vec2(64.0, 26.0)));
+    let resp = if help.is_empty() { resp } else { resp.on_hover_text(help) };
+    if resp.clicked() {
+        if waiting {
+            app.ui.plugin_panel.picking = None;
+        } else {
+            // Clicks and drags on the map are the pick's, not another tool's: Explore, whose
+            // drags still pan the map to find the place (for a point).
+            if app.session.tool != Tool::Explore
+                && let Err(e) = app.run("tool.set", json!({"tool": "explore"}))
+            {
+                app.session.notify(e, true);
+                return;
+            }
+            app.map.popup = None;
+            app.ui.plugin_panel.picking = Some((pid.to_string(), id.to_string()));
+        }
+    }
+    let (line, color) = if waiting {
+        let asks = if item.picks_box() { tl!("Drag a box on the map · Esc cancels") } else { tl!("Click the map · Esc cancels") };
+        (Some(asks.to_string()), t.accent_text)
+    } else {
+        (state.picked(id).and_then(place_text), t.text_dim)
+    };
+    if let Some(line) = line {
+        ui.add(egui::Label::new(RichText::new(line).size(11.0).color(color)).wrap());
+    }
+}
+
+/// The pick waiting for the map, while it still can: its plugin's panel is open and the plugin
+/// on, the widget is a pick that shows and is enabled, and the Explore tool is on (any other
+/// tool, Esc among the ways to choose one, ends it). Anything else ends it.
+fn waiting_pick(app: &mut RustGisApp) -> Option<(String, PanelItemDecl)> {
+    let (pid, id) = app.ui.plugin_panel.picking.clone()?;
+    let open = app.ui.right == Some(RightPane::Plugin) && app.ui.plugin_panel.plugin.as_deref() == Some(pid.as_str());
+    let item = (open && app.session.tool == Tool::Explore)
+        .then(|| rustgis_engine::plugins::get(&pid))
+        .flatten()
+        .filter(|p| p.enabled)
+        .and_then(|p| p.manifest.panel.as_ref().and_then(|d| d.item(&id)).filter(|d| d.kind == "pick").cloned())
+        .filter(|_| app.session.plugin_panels.get(&pid).and_then(|s| s.items.get(&id)).is_none_or(|s| s.enabled && s.visible));
+    if item.is_none() {
+        app.ui.plugin_panel.picking = None;
+    }
+    item.map(|i| (pid, i))
+}
+
+/// Ends a pick waiting for the map (another tool was chosen: Esc chooses Explore), dropping a box
+/// being dragged for it.
+pub(crate) fn cancel_pick(app: &mut RustGisApp) {
+    if app.ui.plugin_panel.picking.take().is_some() {
+        app.map.cancel_box_drag();
+    }
+}
+
+/// What a pick waiting for the map asks for, for the map's hint and the status bar.
+pub(crate) fn pick_hint(app: &mut RustGisApp) -> Option<String> {
+    let (pid, item) = waiting_pick(app)?;
+    let plugin = rustgis_engine::plugins::get(&pid)?;
+    let state = app.session.plugin_panels.get(&pid)?;
+    let lang = app.lang().code();
+    let tr = |s: &str| plugin.manifest.translate(lang, s).to_string();
+    let (label, _) = button_label(&plugin.manifest, &item, state, &tr);
+    Some(if item.picks_box() {
+        crate::i18n::fmt("{pick}: drag a box on the map · Esc cancels", &[("pick", &label)])
+    } else {
+        crate::i18n::fmt("{pick}: click the map · Esc cancels", &[("pick", &label)])
+    })
+}
+
+/// Whether a pick waits for a box: a drag on the map draws one.
+pub(crate) fn picks_box(app: &mut RustGisApp) -> bool {
+    waiting_pick(app).is_some_and(|(_, i)| i.picks_box())
+}
+
+/// A longitude in -180..180.
+fn wrap(lon: f64) -> f64 {
+    let l = (lon + 180.0).rem_euclid(360.0) - 180.0;
+    if l == -180.0 && lon > 0.0 { 180.0 } else { l }
+}
+
+/// The place picked: the pick stops waiting and runs its command with it (or keeps it for the
+/// plugin's next one).
+fn picked(app: &mut RustGisApp, pid: &str, item: &PanelItemDecl, value: Value) {
+    app.ui.plugin_panel.picking = None;
+    send(app, pid, item, value);
+}
+
+/// A click on the map at `c`, for a pick waiting for a point. A pick waiting for a box takes the
+/// click too, and goes on waiting for a drag. False when no pick waits.
+pub(crate) fn map_click(app: &mut RustGisApp, c: Coord) -> bool {
+    let Some((pid, item)) = waiting_pick(app) else { return false };
+    if !item.picks_box() {
+        picked(app, &pid, &item, json!({"lon": wrap(c.x), "lat": c.y.clamp(-90.0, 90.0)}));
+    }
+    true
+}
+
+/// A box dragged on the map, `e` in degrees, for a pick waiting for one; false when none waits.
+/// A box wider than the world is the world; one across the antimeridian has its west east of
+/// its east.
+pub(crate) fn box_picked(app: &mut RustGisApp, e: Extent) -> bool {
+    let Some((pid, item)) = waiting_pick(app).filter(|(_, i)| i.picks_box()) else { return false };
+    let (west, east) = if e.width() >= 360.0 { (-180.0, 180.0) } else { (wrap(e.min_x), wrap(e.max_x)) };
+    let bbox = [west, e.min_y.clamp(-90.0, 90.0), east, e.max_y.clamp(-90.0, 90.0)];
+    picked(app, &pid, &item, json!({"bbox": bbox}));
+    true
+}
+
+/// The places the open panel's picks hold, on the map: a point's marker, a box's outline.
+pub(crate) fn paint(app: &RustGisApp, p: &egui::Painter, t: &crate::theme::Tokens, to_screen: impl Fn(Coord) -> Option<egui::Pos2>) {
+    if app.ui.right != Some(RightPane::Plugin) {
+        return;
+    }
+    let Some(pid) = app.ui.plugin_panel.plugin.as_deref() else { return };
+    let (Some(plugin), Some(state)) = (rustgis_engine::plugins::get(pid).filter(|p| p.enabled), app.session.plugin_panels.get(pid)) else {
+        return;
+    };
+    let Some(decl) = plugin.manifest.panel.as_ref() else { return };
+    let n = |v: Option<&Value>| v.and_then(Value::as_f64);
+    let ring = Stroke::new(1.5, egui::Color32::WHITE);
+    for d in decl.items.iter().filter(|d| d.kind == "pick" && state.items.get(d.key()).is_none_or(|s| s.visible)) {
+        let Some(v) = state.picked(d.key()) else { continue };
+        if let Some(b) = v.get("bbox").and_then(Value::as_array) {
+            let (Some(w), Some(s), Some(e), Some(north)) = (n(b.first()), n(b.get(1)), n(b.get(2)), n(b.get(3))) else { continue };
+            let e = if e < w { e + 360.0 } else { e };
+            // Its edges followed, so a curved projection draws them curved.
+            let steps = 24;
+            let mut edge = Vec::new();
+            for (a, z) in [((w, s), (e, s)), ((e, s), (e, north)), ((e, north), (w, north)), ((w, north), (w, s))] {
+                for i in 0..steps {
+                    let f = i as f64 / steps as f64;
+                    edge.push(Coord::new(a.0 + (z.0 - a.0) * f, a.1 + (z.1 - a.1) * f));
+                }
+            }
+            let pts: Option<Vec<egui::Pos2>> = edge.into_iter().map(&to_screen).collect();
+            if let Some(pts) = pts {
+                p.add(egui::Shape::closed_line(pts, Stroke::new(2.0, t.accent)));
+            }
+        } else if let (Some(lon), Some(lat)) = (n(v.get("lon")), n(v.get("lat")))
+            && let Some(sp) = to_screen(Coord::new(lon, lat))
+        {
+            p.circle_filled(sp, 6.0, t.accent);
+            p.circle_stroke(sp, 6.0, ring);
+        }
     }
 }
 
