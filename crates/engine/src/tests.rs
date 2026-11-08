@@ -29833,6 +29833,45 @@ fn a_windows_bands_are_started_within_its_wait() {
     assert_eq!(e, "2 of 4 bands read in 5 minutes, so the window is given up: take a smaller box or a larger cellSize");
 }
 
+/// A plugin's command asking for a window runs again once the app has read it and added it, and
+/// its `layer.addUrl` then answers the raster added (#1330): the window it lands with is the one
+/// the command asked for, so its claim takes it.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_plugin_command_runs_again_when_its_window_is_added() {
+    use crate::cmd::layer::{read_cog_window, window_asked};
+    use rustgis_data::raster::cog::example;
+    let (base, _) = serve_ranges(example(1024, 256));
+    let mut s = world();
+    plugin("eng-window", &["edit", "network"]);
+    let layers = s.map().layers.len();
+    let url = format!("{base}/scene.tif");
+    let bbox = json!([10.25, 45.5, 10.5, 45.75]);
+    let p = json!({"op": "layer.addUrl", "params": {"url": url, "bbox": bbox, "name": "Window"}});
+    s.run_leaving_downloads("plugin:eng-window/f", &p).unwrap();
+    let asked = s.take_url_requests();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(s.map().layers.len(), layers, "nothing added while it is read");
+    // The app reads it apart from the session and adds it with the request's number, and with
+    // what a task needs to read it again, as `start_window_read` does.
+    let id = s.download_started_for(&asked[0]).unwrap();
+    let read = read_cog_window(&window_asked(&s, asked[0].params()).unwrap()).unwrap();
+    assert!(s.download_landed_window(id, read));
+    let mut add = asked[0].params().clone();
+    add["id"] = json!(id);
+    add["window"] = json!({"bbox": bbox});
+    s.complete_download(id, &add).unwrap();
+    assert_eq!(s.map().layers.len(), layers + 1);
+    let added = s.map().layer_by_name("Window").filter(|l| l.is_raster()).unwrap().id;
+    let ran = s.poll_plugin_retries();
+    assert_eq!(ran.len(), 1, "{ran:?}");
+    let (cmd, answer) = &ran[0];
+    assert_eq!(cmd, "plugin:eng-window/f");
+    assert_eq!(answer.as_ref().unwrap()["layer"], json!(added), "{answer:?}");
+    assert_eq!(s.map().layers.len(), layers + 1, "added once");
+    assert!(s.take_url_requests().is_empty() && !s.plugin_retries_waiting());
+}
+
 /// A window's read needs no session: on a thread, as the app reads it, then added when it lands
 /// (#1330). What can't be a window is refused before the read starts, and an error names the
 /// address without its keys.
