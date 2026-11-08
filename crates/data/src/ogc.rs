@@ -57,7 +57,7 @@ pub struct LayerTime {
 
 /// Most time values kept for a layer: enough for every year of a century and more (swisstopo's
 /// aerial photos list 92), as the time slider steps through them.
-const MAX_TIME_VALUES: usize = 1000;
+pub const MAX_TIME_VALUES: usize = 1000;
 
 /// Most time values of a layer's dimension read for its default and latest, the last it lists
 /// (each a few bytes of the document, whose size is capped).
@@ -2612,7 +2612,7 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
     let (mut copied, mut counted) = (0usize, 0);
     let mut read = collections.len().min(MAX_READ_LAYERS);
     for (i, c) in collections.iter().take(MAX_READ_LAYERS).enumerate() {
-        copied = service.layers[counted..].iter().map(address_bytes).fold(copied, usize::saturating_add);
+        copied = service.layers.get(counted..).unwrap_or_default().iter().map(address_bytes).fold(copied, usize::saturating_add);
         counted = service.layers.len();
         // A collection may make several layers: the list stops at a collection, with all its own.
         if i == MAX_LISTED_LAYERS {

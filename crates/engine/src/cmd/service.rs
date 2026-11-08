@@ -705,9 +705,10 @@ fn add_discovered(s: &mut Session, p: &Value, url: &str, want: &str, found: &Dis
     if let Some(t) = layer.time.as_ref().filter(|t| t.cut > 0) {
         s.notify(
             format!(
-                "{}: {} of its times are left out, past the {} RustGIS keeps for one document's layers",
+                "{}: {} of its times are left out: RustGIS keeps at most {} for a layer and {} for one document's layers",
                 layer.title,
                 t.cut,
+                rustgis_data::ogc::MAX_TIME_VALUES,
                 rustgis_data::ogc::MAX_DOCUMENT_TIME_VALUES
             ),
             false,

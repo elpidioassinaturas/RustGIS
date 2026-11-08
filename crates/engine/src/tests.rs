@@ -13169,10 +13169,20 @@ fn a_wms_layer_past_the_time_cap_says_its_times_are_left_out() {
     assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("times are left out")), "{:?}", s.notices_since(mark));
     // 50,000 times go to the first 50 layers.
     s.run("service.add", &json!({"url": url, "layer": "c55", "text": wms})).unwrap();
-    let said = "C55: 1000 of its times are left out, past the 50000 RustGIS keeps for one document's layers";
+    let said = "C55: 1000 of its times are left out: RustGIS keeps at most 1000 for a layer and 50000 for one document's layers";
     assert!(s.notices_since(mark).iter().any(|n| n.text == said), "{:?}", s.notices_since(mark));
     let e = s.run("service.add", &json!({"url": url, "layer": "c55", "text": wms, "time": "slider"})).unwrap_err();
     assert!(e.contains("its 1000 times are left out, past the 50000"), "{e}");
+    // A layer with 1,100 times of its own loses 100 to its own cap, not the document's: the notice says so.
+    let own: String = (0..1100).map(|i| (1000 + i).to_string()).collect::<Vec<_>>().join(",");
+    let long = format!(
+        r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms"><Capability><Layer><Title>Root</Title><CRS>EPSG:3857</CRS><Layer><Name>long</Name><Title>Long</Title><Dimension name="time" units="ISO8601" default="1999">{own}</Dimension></Layer></Layer></Capability></WMS_Capabilities>"#
+    );
+    let mut own_cap = Session::new(Project::default());
+    let mark = own_cap.notice_mark();
+    own_cap.run("service.add", &json!({"url": url, "layer": "long", "text": long})).unwrap();
+    let said = "Long: 100 of its times are left out: RustGIS keeps at most 1000 for a layer and 50000 for one document's layers";
+    assert!(own_cap.notices_since(mark).iter().any(|n| n.text == said), "{:?}", own_cap.notices_since(mark));
 }
 
 /// A WMS layer with a time dimension (WMS 1.3.0 Annex C) is added at its default or the time
