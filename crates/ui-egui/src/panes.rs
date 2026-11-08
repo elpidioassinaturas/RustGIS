@@ -6965,11 +6965,11 @@ mod tests {
 
     /// An external tool's optional layer inputs stay empty until they're picked, and its required
     /// ones start at the active layer; a built-in tool's optional one still follows it (#1517).
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_form_leaves_an_external_tool_s_optional_layers_empty() {
         // Its suite is registered for the whole process: in its own, so that a test counting the
         // tools (`tool_ids_are_offered_for_gp_runs_tool`) doesn't see it come in between reads.
-        #[cfg(not(target_arch = "wasm32"))]
         if crate::isolate_account_test("panes::tests::the_form_leaves_an_external_tool_s_optional_layers_empty") {
             return;
         }
