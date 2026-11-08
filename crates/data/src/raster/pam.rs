@@ -512,17 +512,21 @@ fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> (usize, usi
     let band_of = |n: &roxmltree::Node<'_, '_>| {
         n.attribute("sample").and_then(|v| v.trim().parse::<usize>().ok()).and_then(|s| s.checked_add(1)).filter(|n| *n <= MAX_BANDS)
     };
-    // The units given, by band (0: the dataset's).
+    // The units given, by band (0: the dataset's); units for no band are counted.
+    let (mut odd, mut other) = (0usize, 0usize);
     let mut units: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
     for item in root.children().filter(|n| named(n, WAVELENGTH_UNITS)) {
         let at = if item.attribute("sample").is_none() { Some(0) } else { band_of(&item) };
-        if let (Some(at), Some(t)) = (at, item.text()) {
+        let Some(at) = at else {
+            odd += 1;
+            continue;
+        };
+        if let Some(t) = item.text() {
             units.entry(at).or_insert(t);
         }
     }
     // Where each band already described is in `pam.bands`.
     let mut at: std::collections::HashMap<usize, usize> = pam.bands.iter().enumerate().map(|(i, b)| (b.band, i)).collect();
-    let (mut odd, mut other) = (0usize, 0usize);
     for name in WAVELENGTH_ITEMS {
         // A dataset item (no `sample`) is for no band: GeoLibre doesn't read it either; counted.
         for item in root.children().filter(|n| named(n, name)) {
@@ -905,6 +909,7 @@ mod tests {
   <Item name="wavelength" sample="6">2.2</Item>
   <Item name="wavelength_units" sample="6">furlongs</Item>
   <Item name="wavelength" sample="70000">1</Item>
+  <Item name="wavelength_units" sample="70000">nm</Item>
   <Item name="wavelength">500</Item>
 </GDALMetadata>"#;
         let pam = parse_gdal_metadata(xml).unwrap();
@@ -914,7 +919,7 @@ mod tests {
             [Some(482.5), Some(561.3), Some(654.6), Some(865.0), Some(1600.0), None, None]
         );
         assert_eq!(pam.lost.len(), 2, "{:?}", pam.lost);
-        assert!(pam.lost[0].starts_with("4 wavelength item(s)"), "{:?}", pam.lost);
+        assert!(pam.lost[0].starts_with("5 wavelength item(s)"), "{:?}", pam.lost);
         assert_eq!(pam.lost[1], "1 other wavelength item(s) for a band that has one left out (the first is kept)");
         // The same length under two items is one wavelength: nothing is said.
         let xml = r#"<GDALMetadata><Item name="CENTRAL_WAVELENGTH_UM" sample="0">0.665</Item><Item name="wavelength" sample="0">665</Item></GDALMetadata>"#;

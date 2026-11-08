@@ -3538,7 +3538,7 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
     // A pixel of a raster of two bands or more: its layer, for the spectral profile.
     let spectral = crate::spectralui::offered(app, &info);
     let mut profile = false;
-    // The feature shown, as its layer id and feature id (a raster pixel has neither).
+    // The feature shown, as its layer id and feature id (a raster pixel has no feature id).
     let shown = info["layerId"].as_u64().and_then(|id| u32::try_from(id).ok()).zip(info["fid"].as_u64());
     // Only WMS layers being asked so far, or still waited for: their names.
     let waiting = !is_found(&info);
