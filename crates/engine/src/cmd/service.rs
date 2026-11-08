@@ -161,6 +161,8 @@ fn discover(s: &mut Session, p: &Value, left: bool) -> Result<Discovery, String>
     // (At least one, whatever its address.)
     if let Some((cut, long)) = cut.map(|cut| (cut.max(1), found.sources[cut].address.len())).filter(|&(cut, _)| cut < listed) {
         found.service.listed = Some(cut);
+        // A service group takes every layer read, not those listed: it can't take part of this.
+        found.incomplete = true;
         found.service.notes.push(format!(
             "each listed layer repeats its document's address, {long} bytes long here, and RustGIS lists at most {} MiB of them (at least one layer)",
             MAX_LISTED_ADDRESS_BYTES >> 20

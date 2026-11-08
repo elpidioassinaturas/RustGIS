@@ -14918,6 +14918,10 @@ fn a_long_document_address_lists_fewer_layers() {
     assert!(says(&long, &why) && says(&long, &cut), "{}", long["notes"]);
     let e = s.run("service.add", &json!({"url": url, "layer": "nao", "text": text})).unwrap_err();
     assert!(e.ends_with(&format!("no layer 'nao' (service.layers lists the first {listed} of 600 layers)")), "{e}");
+    // A service group would take them all, each with its address: it refuses the list instead.
+    let e = s.run("service.groupPlan", &json!({"url": url, "text": text})).unwrap_err();
+    assert!(e.contains("an address too long to read them all"), "{e}");
+    assert!(s.run("service.groupPlan", &json!({"url": "https://api.example.org/collections", "text": text})).is_ok());
 }
 
 /// A layer past what RustGIS reads of a document is refused for that reason, not as absent.
