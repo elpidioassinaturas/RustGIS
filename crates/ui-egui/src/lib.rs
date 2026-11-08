@@ -93,6 +93,7 @@ mod shortcutfile;
 mod shortcutui;
 mod showme;
 mod sourcespane;
+mod spectralui;
 mod sqlbox;
 mod sqlpane;
 mod stacui;

@@ -34342,3 +34342,69 @@ fn bundled_ca_roots_are_said_once_a_session() {
     other.say_bundled_roots(true);
     assert_eq!(said(&other), 1);
 }
+
+/// `raster.spectral` reads several points (one off the raster said, its values null), and every
+/// answer gives the bands' wavelengths in nanometres, read back from the GeoTIFF's GDAL metadata;
+/// a raster whose file gives none has none.
+#[test]
+fn spectral_profiles_at_points_with_wavelengths() {
+    use base64::Engine;
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let tiff = |wavelengths: bool| {
+        let gt = GeoTransform { origin_x: 10.0, origin_y: 45.0, pixel_width: 0.01, pixel_height: -0.01 };
+        // Red, green, blue: 30 + i, 20 + i, 10 + i at pixel i.
+        let bands = (0..3).map(|b| (0..16).map(|i| (30 - b * 10 + i) as f32).collect()).collect();
+        let mut r = Raster::new("scene", 4, 4, bands, gt, Crs::LonLat, None, ColorHint::Rgb { alpha: false }, "UInt8").unwrap();
+        if wavelengths {
+            for (band, nm) in r.bands.iter_mut().zip([665.0, 560.0, 490.0]) {
+                band.wavelength = Some(nm);
+            }
+        }
+        base64::engine::general_purpose::STANDARD.encode(geotiff::write(&r, 0).unwrap())
+    };
+    let mut s = Session::new(Project::default());
+    s.run("layer.addDataBytes", &json!({"fileName": "scene.tif", "data": tiff(true)})).unwrap();
+    s.run("layer.addDataBytes", &json!({"fileName": "plain.tif", "data": tiff(false)})).unwrap();
+    let mark = s.notice_mark();
+    let v = s.run("raster.spectral", &json!({"layer": "scene", "points": [[10.005, 44.995], [10.015, 44.985], [20.0, 10.0]]})).unwrap();
+    assert_eq!(v["wavelengths"], json!([665.0, 560.0, 490.0]), "{v}");
+    assert_eq!(v["wavelengthUnit"], "nm");
+    assert_eq!(v["bands"].as_array().map(Vec::len), Some(3));
+    assert_eq!(v["profiles"][0]["pixel"], json!([0, 0]));
+    assert_eq!(v["profiles"][0]["values"], json!([30.0, 20.0, 10.0]));
+    assert_eq!(v["profiles"][1]["pixel"], json!([1, 1]));
+    assert_eq!(v["profiles"][1]["values"], json!([35.0, 25.0, 15.0]));
+    assert_eq!(v["profiles"][2]["pixel"], Value::Null);
+    assert_eq!(v["profiles"][2]["values"], json!([null, null, null]));
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert_eq!(said, ["scene: 1 of 3 points fall outside the raster: their values are null"]);
+    // All inside: nothing said.
+    let mark = s.notice_mark();
+    s.run("raster.spectral", &json!({"layer": "scene", "points": [[10.005, 44.995]]})).unwrap();
+    assert!(s.notices_since(mark).is_empty());
+    // One point and a zone give the wavelengths too; a file without them gives none.
+    let one = s.run("raster.spectral", &json!({"layer": "scene", "lon": 10.005, "lat": 44.995})).unwrap();
+    assert_eq!(one["wavelengths"], json!([665.0, 560.0, 490.0]));
+    assert_eq!(one["values"], json!([30.0, 20.0, 10.0]));
+    let plain = s.run("raster.spectral", &json!({"layer": "plain", "points": [[10.005, 44.995]]})).unwrap();
+    assert!(plain.get("wavelengths").is_none(), "{plain}");
+    // Points read before one point: the point left out is said.
+    let mark = s.notice_mark();
+    let both = s.run("raster.spectral", &json!({"layer": "scene", "lon": 10.015, "lat": 44.985, "points": [[10.005, 44.995]]})).unwrap();
+    assert_eq!(both["profiles"][0]["pixel"], json!([0, 0]));
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert_eq!(said, ["scene: lon and lat left out: points are read"]);
+    // Points that can't be read are errors.
+    for (points, error) in [
+        (json!([[20.0, 10.0], [30.0, 10.0]]), "every point is outside the raster"),
+        (json!([[20.0, 10.0]]), "the point is outside the raster"),
+        (json!([]), "points is empty"),
+        (json!("10,45"), "points is a list"),
+        (json!([[10.0, 45.0], [10.0]]), "point 2 isn't [lon, lat]"),
+        (json!([[10.0, "45"]]), "point 1 isn't [lon, lat]"),
+        (json!(vec![[10.005, 44.995]; 1001]), "at most 1000"),
+    ] {
+        let e = s.run("raster.spectral", &json!({"layer": "scene", "points": points})).unwrap_err();
+        assert!(e.contains(error), "{e}");
+    }
+}

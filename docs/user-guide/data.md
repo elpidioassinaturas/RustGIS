@@ -1120,7 +1120,15 @@ steps where they meet. `raster.stretch` with `{"like": "<layer>"}` gives a layer
 of another layer's stretch as fixed bounds, so the tiles match; `{"type": "custom", "min": …,
 "max": …}` sets the bounds yourself.
 
-Clicking a raster with the Explore tool shows its pixel values. Projects remember a raster's file
+Clicking a raster with the Explore tool shows its pixel values. On a raster of two bands or more,
+the pop-up's **Spectral Profile** button charts every band at that pixel and opens the profile, where
+more points are compared (see [Spectral Analysis](analysis.md)). A band's wavelength is read from the
+GeoTIFF's GDAL metadata or its `.aux.xml` sidecar: GDAL's `CENTRAL_WAVELENGTH_UM` (its `IMAGERY`
+domain), or a `wavelength` or `central_wavelength` item (as rasterio, STAC exports and ENVI files
+through GDAL write them) in the unit a `wavelength_units` item gives. With no unit, a value under 100
+is read as micrometres and any other as nanometres: imaging sensors see from about 0.3 to 15 µm, so
+the two never meet. One that isn't a length is said and left out. The GeoTIFF exports write the
+wavelengths back as `CENTRAL_WAVELENGTH_UM`. Projects remember a raster's file
 path relative to the project and reopen it; rasters added in the browser are stored inside the project.
 
 ### Zarr stores

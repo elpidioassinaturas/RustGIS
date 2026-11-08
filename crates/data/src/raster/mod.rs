@@ -506,6 +506,9 @@ pub struct Band {
     /// The names of the band's classes, by value, from GDAL's `.aux.xml` sidecar (see
     /// [`Band::class_name`]). Empty when the band names no class.
     pub classes: Vec<String>,
+    /// The band's central wavelength in nanometres, from GDAL's metadata (the file's tag or its
+    /// sidecar, [`pam::wavelength_nm`]); `None` when the file gives none.
+    pub wavelength: Option<f64>,
 }
 
 impl Band {
@@ -613,11 +616,13 @@ pub(crate) fn band_name_of(r: &Raster, band: usize) -> Option<&str> {
 }
 
 /// GDAL's metadata tag (42112) for the bands `bands` of `r`, written as samples in that order:
-/// their names, and the first one's class names. Both GeoTIFF writers take it from here.
+/// their names and wavelengths, and the first one's class names. Both GeoTIFF writers take it
+/// from here.
 pub(crate) fn gdal_metadata_of(r: &Raster, bands: &[usize]) -> Option<String> {
     let names: Vec<Option<&str>> = bands.iter().map(|b| band_name_of(r, *b)).collect();
+    let wavelengths: Vec<Option<f64>> = bands.iter().map(|b| r.bands.get(*b).and_then(|b| b.wavelength)).collect();
     let first = bands.first().and_then(|b| r.bands.get(*b)).map_or(&[][..], |b| &b.classes[..]);
-    pam::gdal_metadata(&names, first)
+    pam::gdal_metadata(&names, first, &wavelengths)
 }
 
 /// Text for a TIFF ASCII tag, which holds 7-bit ASCII only: control characters (a NUL would end
@@ -744,6 +749,7 @@ impl Raster {
                 stats: if measure { BandStats::compute(&data, valid) } else { BandStats::default() },
                 data,
                 classes: Vec::new(),
+                wavelength: None,
             })
             .collect();
         let mut r = Raster {
@@ -784,7 +790,10 @@ impl Raster {
         let beyond = pam
             .bands
             .iter()
-            .filter(|b| (b.band == 0 || b.band > self.bands.len()) && (b.description.is_some() || !b.categories.is_empty()))
+            .filter(|b| {
+                (b.band == 0 || b.band > self.bands.len())
+                    && (b.description.is_some() || !b.categories.is_empty() || b.wavelength.is_some())
+            })
             .count();
         if beyond > 0 {
             self.lost.push(format!("{from}: names for {beyond} band(s) it doesn't have (it has {}) left out", self.bands.len()));
@@ -839,6 +848,9 @@ impl Raster {
             }
             if let Some(p) = p.filter(|p| !p.categories.is_empty()) {
                 band.classes = p.categories.clone();
+            }
+            if let Some(w) = p.and_then(|p| p.wavelength) {
+                band.wavelength = Some(w);
             }
             let stored = p.and_then(|p| p.stats).filter(|_| overview);
             if recompute || stored.is_some() {

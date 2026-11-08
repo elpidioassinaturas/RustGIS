@@ -52,6 +52,8 @@ pub struct PamBand {
     /// The names of the band's classes, by value (GDAL's category names): `categories[v]` names
     /// value `v`, and is empty when that value has none. Empty when the band names no class.
     pub categories: Vec<String>,
+    /// The band's central wavelength in nanometres, when the file gives one ([`wavelength_nm`]).
+    pub wavelength: Option<f64>,
 }
 
 /// What a sidecar says about a raster's bands.
@@ -92,6 +94,53 @@ impl Pam {
         let first = values.next()?;
         values.all(|v| v == first).then_some(first)
     }
+}
+
+/// GDAL's item for a band's central wavelength, in micrometres (its `IMAGERY` metadata domain,
+/// GDAL 3.10 and later).
+pub const CENTRAL_WAVELENGTH_UM: &str = "CENTRAL_WAVELENGTH_UM";
+
+/// The band items that give a wavelength, in the order one is taken: GDAL's own, then the
+/// `wavelength` and `central_wavelength` items rasterio, STAC exports and ENVI files write.
+const WAVELENGTH_ITEMS: [&str; 3] = [CENTRAL_WAVELENGTH_UM, "wavelength", "central_wavelength"];
+
+/// The item some files give the unit of their `wavelength` items in (ENVI's `wavelength units`).
+const WAVELENGTH_UNITS: &str = "wavelength_units";
+
+/// Whether a band metadata item named `name` is read as (or for) a wavelength.
+fn is_wavelength_item(name: &str) -> bool {
+    name.eq_ignore_ascii_case(WAVELENGTH_UNITS) || WAVELENGTH_ITEMS.iter().any(|w| name.eq_ignore_ascii_case(w))
+}
+
+/// A wavelength item's value in nanometres: `None` when it isn't a positive number, or its unit
+/// isn't a length this knows. `CENTRAL_WAVELENGTH_UM` is in micrometres by its name; another item
+/// is in the unit `units` gives (nanometres or micrometres, as ENVI and others spell them). With no
+/// unit (or ENVI's `Unknown`), a value under 100 is in micrometres and any other in nanometres:
+/// imaging sensors see from about 0.3 to 15 µm (300 to 15,000 nm), so the two never meet.
+pub fn wavelength_nm(item: &str, text: &str, units: Option<&str>) -> Option<f64> {
+    let v = text.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0)?;
+    // Micrometres in nanometres, to a millionth of one: 0.665 µm is 665 nm, not 665.0000000000001.
+    let nm = |um: f64| (um * 1e9).round() / 1e6;
+    if item.eq_ignore_ascii_case(CENTRAL_WAVELENGTH_UM) {
+        return Some(nm(v));
+    }
+    let unit = units.map(|u| u.trim().to_lowercase()).unwrap_or_default();
+    let micro = match unit.as_str() {
+        "" | "unknown" => v < 100.0,
+        "nm" | "nanometer" | "nanometers" | "nanometre" | "nanometres" => false,
+        "um" | "\u{b5}m" | "\u{3bc}m" | "micrometer" | "micrometers" | "micrometre" | "micrometres" | "micron" | "microns" => true,
+        _ => return None,
+    };
+    Some(if micro { nm(v) } else { v })
+}
+
+/// A sidecar node's metadata item `key` (any domain, any case): its text.
+fn mdi_text<'a>(node: roxmltree::Node<'a, '_>, key: &str) -> Option<&'a str> {
+    node.children()
+        .filter(|n| n.has_tag_name("Metadata"))
+        .flat_map(|m| m.children())
+        .find(|n| n.has_tag_name("MDI") && n.attribute("key").is_some_and(|k| k.eq_ignore_ascii_case(key)))
+        .and_then(|n| n.text())
 }
 
 /// The sidecars GDAL would read for `path`: `x.tif.aux.xml`, then `x.aux.xml`.
@@ -155,8 +204,10 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
     // from 1 to `MAX_BANDS`, a band's records after its first, and the scale, offset, units and
     // other band metadata items and colour tables that aren't read, counted.
     let (mut cut, mut beyond, mut odd_bands, mut unscaled, mut units) = (0usize, 0usize, 0usize, 0usize, 0usize);
-    let (mut items, mut tables, mut odd_nodata) = (0usize, 0usize, 0usize);
+    let (mut items, mut tables, mut odd_nodata, mut odd_wavelengths) = (0usize, 0usize, 0usize, 0usize);
     let (mut seen, mut twice) = (std::collections::HashSet::new(), 0usize);
+    // The unit the dataset gives its bands' wavelengths in, for a band that gives none.
+    let dataset_units = mdi_text(root, WAVELENGTH_UNITS);
     let mut kept = |t: &str| {
         cut += usize::from(t.chars().nth(MAX_NAME).is_some());
         t.chars().take(MAX_NAME).collect::<String>()
@@ -183,8 +234,16 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
             .children()
             .filter(|n| n.has_tag_name("Metadata"))
             .flat_map(|m| m.children())
-            .filter(|n| n.has_tag_name("MDI") && n.attribute("key").is_none_or(|k| !k.starts_with("STATISTICS_")))
+            .filter(|n| n.has_tag_name("MDI") && n.attribute("key").is_none_or(|k| !k.starts_with("STATISTICS_") && !is_wavelength_item(k)))
             .count();
+        // Its wavelength: the first item there is of those that give one, in any domain (GDAL's in
+        // `IMAGERY`, ENVI's in the default one).
+        let units = mdi_text(b, WAVELENGTH_UNITS).or(dataset_units);
+        let wavelength = WAVELENGTH_ITEMS.iter().find_map(|w| mdi_text(b, w).map(|t| (w, t))).and_then(|(w, t)| {
+            let nm = wavelength_nm(w, t, units);
+            odd_wavelengths += usize::from(nm.is_none());
+            nm
+        });
         // A colour table here isn't read (only the file's own is): one with entries is counted.
         tables += usize::from(b.children().any(|n| n.has_tag_name("ColorTable") && n.children().any(|e| e.has_tag_name("Entry"))));
         let description = text_of("Description").filter(|d| !d.is_empty()).map(&mut kept);
@@ -222,7 +281,7 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
         while categories.last().is_some_and(String::is_empty) {
             categories.pop();
         }
-        pam.bands.push(PamBand { band, description, nodata, stats, categories });
+        pam.bands.push(PamBand { band, description, nodata, stats, categories, wavelength });
     }
     if odd_bands > 0 {
         pam.lost.push(format!("{odd_bands} band record(s) for no band from 1 to {MAX_BANDS} left out"));
@@ -244,6 +303,9 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
     }
     if odd_nodata > 0 {
         pam.lost.push(format!("{odd_nodata} no-data value(s) that aren't numbers left out: those pixels are read as values"));
+    }
+    if odd_wavelengths > 0 {
+        pam.lost.push(format!("{odd_wavelengths} wavelength(s) that aren't a positive length in nanometres or micrometres left out"));
     }
     if beyond > 0 {
         pam.lost.push(format!("{beyond} class name(s) past the first {MAX_CATEGORIES} of a band left out"));
@@ -312,6 +374,7 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
             twice += 1;
         }
     }
+    let odd_wavelengths = read_wavelengths(root, &mut pam);
     // A band's scale and offset aren't applied: the values stay as stored. One that changes
     // nothing (a scale of 1, an offset of 0) isn't counted.
     let unscaled = root
@@ -345,6 +408,8 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
         .filter(|n| n.has_tag_name("Item") && (n.attribute("sample").is_some() || n.attribute("role").is_some()))
         .filter(|n| !matches!(n.attribute("role"), Some("description" | "scale" | "offset")))
         .filter(|n| n.attribute("name").is_none_or(|name| !name.starts_with("CLASS_") && !name.starts_with("STATISTICS_")))
+        // Wavelengths, a band's, are read (one that isn't a length is counted with them).
+        .filter(|n| n.attribute("sample").is_none() || n.attribute("name").is_none_or(|name| !is_wavelength_item(name)))
         .count();
     if unread > 0 {
         pam.lost.push(format!("{unread} band item(s) not read: left out"));
@@ -376,6 +441,11 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
     if odd_classes > 0 {
         pam.lost.push(format!("{odd_classes} CLASS_ item(s) whose value isn't a whole number below {MAX_CATEGORIES} left out"));
     }
+    if odd_wavelengths > 0 {
+        pam.lost.push(format!(
+            "{odd_wavelengths} wavelength item(s) that aren't a positive length in nanometres or micrometres, or for no band from 1 to {MAX_BANDS}, left out"
+        ));
+    }
     if twice > 0 {
         pam.lost.push(format!("{twice} band or class name(s) given again left out (the first is kept)"));
     }
@@ -391,6 +461,54 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
     (!pam.bands.is_empty() || !pam.lost.is_empty()).then_some(pam)
 }
 
+/// Reads the bands' wavelengths of GDAL's metadata tag into `pam`: a band's (`sample`) first item
+/// of [`WAVELENGTH_ITEMS`], in that order, in the unit of its band's `wavelength_units` item, else
+/// the dataset's. A band's other wavelength items are other names for the same, and aren't
+/// counted. Returns how many items were left out: not a length, or for no band.
+fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> usize {
+    let named = |n: &roxmltree::Node<'_, '_>, name: &str| {
+        n.has_tag_name("Item") && n.attribute("name").is_some_and(|a| a.eq_ignore_ascii_case(name))
+    };
+    let band_of = |n: &roxmltree::Node<'_, '_>| {
+        n.attribute("sample").and_then(|v| v.trim().parse::<usize>().ok()).and_then(|s| s.checked_add(1)).filter(|n| *n <= MAX_BANDS)
+    };
+    // The units given, by band (0: the dataset's).
+    let mut units: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
+    for item in root.children().filter(|n| named(n, WAVELENGTH_UNITS)) {
+        let at = if item.attribute("sample").is_none() { Some(0) } else { band_of(&item) };
+        if let (Some(at), Some(t)) = (at, item.text()) {
+            units.entry(at).or_insert(t);
+        }
+    }
+    // Where each band already described is in `pam.bands`.
+    let mut at: std::collections::HashMap<usize, usize> = pam.bands.iter().enumerate().map(|(i, b)| (b.band, i)).collect();
+    let mut odd = 0usize;
+    for name in WAVELENGTH_ITEMS {
+        // A dataset item (no `sample`) belongs to no band, as GeoLibre also reads it: not counted.
+        for item in root.children().filter(|n| named(n, name) && n.attribute("sample").is_some()) {
+            let Some(band) = band_of(&item) else {
+                odd += 1;
+                continue;
+            };
+            let unit = units.get(&band).or_else(|| units.get(&0)).copied();
+            let Some(nm) = wavelength_nm(name, item.text().unwrap_or_default(), unit) else {
+                odd += 1;
+                continue;
+            };
+            match at.get(&band).and_then(|i| pam.bands.get_mut(*i)) {
+                Some(b) => {
+                    b.wavelength.get_or_insert(nm);
+                }
+                None => {
+                    at.insert(band, pam.bands.len());
+                    pam.bands.push(PamBand { band, wavelength: Some(nm), ..PamBand::default() });
+                }
+            }
+        }
+    }
+    odd
+}
+
 /// Whether XML can't hold `c` (a control character other than a tab or a line break, or a
 /// noncharacter): [`gdal_metadata`] writes it as a space.
 pub fn xml_cannot_hold(c: char) -> bool {
@@ -403,7 +521,10 @@ pub fn xml_cannot_hold(c: char) -> bool {
 /// are written whole, in plain ASCII (other characters as XML references), as the tag's type is.
 /// A character XML can't hold (a control character other than a tab or a line break) is written
 /// as a space: names read from GDAL's metadata never hold one, since XML can't.
-pub fn gdal_metadata(descriptions: &[Option<&str>], classes: &[String]) -> Option<String> {
+///
+/// Each band's wavelength in `wavelengths` (nanometres, in the order of `descriptions`) is written
+/// as GDAL's `CENTRAL_WAVELENGTH_UM`, in micrometres, in its `IMAGERY` domain.
+pub fn gdal_metadata(descriptions: &[Option<&str>], classes: &[String], wavelengths: &[Option<f64>]) -> Option<String> {
     let mut items = String::new();
     let mut put = |open: String, name: &str| {
         items.push_str(&open);
@@ -429,6 +550,12 @@ pub fn gdal_metadata(descriptions: &[Option<&str>], classes: &[String]) -> Optio
             put(format!("<Item name=\"CLASS_{value}\">"), name.trim());
         }
     }
+    for (sample, nm) in wavelengths.iter().enumerate() {
+        if let Some(nm) = nm.filter(|v| v.is_finite() && *v > 0.0) {
+            items
+                .push_str(&format!("<Item name=\"{CENTRAL_WAVELENGTH_UM}\" sample=\"{sample}\" domain=\"IMAGERY\">{}</Item>", nm / 1000.0));
+        }
+    }
     (!items.is_empty()).then(|| format!("<GDALMetadata>{items}</GDALMetadata>"))
 }
 
@@ -439,16 +566,16 @@ mod tests {
     #[test]
     fn band_and_class_names_written_are_read_back() {
         let classes = vec![String::new(), "Floresta & savana".into(), String::new(), "Formação <campestre>".into()];
-        let xml = gdal_metadata(&[Some("classe_mapbiomas"), None], &classes).unwrap();
+        let xml = gdal_metadata(&[Some("classe_mapbiomas"), None], &classes, &[]).unwrap();
         assert!(xml.is_ascii(), "{xml}");
         let pam = parse_gdal_metadata(&xml).unwrap();
         assert_eq!(pam.band(1).unwrap().categories, classes);
         assert_eq!(pam.band(1).unwrap().description.as_deref(), Some("classe_mapbiomas"));
         assert!(pam.band(2).is_none() && pam.lost.is_empty(), "{pam:?}");
         // Nothing named, no document.
-        assert_eq!(gdal_metadata(&[None, Some(" ")], &[String::new(), " ".into()]), None);
+        assert_eq!(gdal_metadata(&[None, Some(" ")], &[String::new(), " ".into()], &[None, Some(f64::NAN)]), None);
         // A character XML can't hold is written as a space, so the document still reads.
-        let xml = gdal_metadata(&[Some("a\u{1}b")], &[]).unwrap();
+        let xml = gdal_metadata(&[Some("a\u{1}b")], &[], &[]).unwrap();
         assert_eq!(parse_gdal_metadata(&xml).unwrap().band(1).unwrap().description.as_deref(), Some("a b"));
     }
 
@@ -720,6 +847,75 @@ mod tests {
             let pam = parse_gdal_metadata(text).unwrap();
             assert!(pam.bands.is_empty() && pam.lost.len() == 1 && pam.lost[0].contains(said), "{text}: {pam:?}");
         }
+    }
+
+    /// Wavelengths in GDAL's metadata tag: GDAL's own in micrometres first, then `wavelength` and
+    /// `central_wavelength` in the unit given (the band's, else the dataset's) or, with none, by
+    /// their size; those that aren't a length, or are for no band, are said. They aren't counted
+    /// as band items not read.
+    #[test]
+    fn reads_wavelengths_from_gdal_metadata() {
+        let xml = r#"<GDALMetadata>
+  <Item name="CENTRAL_WAVELENGTH_UM" sample="0" domain="IMAGERY">0.4825</Item>
+  <Item name="wavelength" sample="0">999</Item>
+  <Item name="wavelength" sample="1">0.5613</Item>
+  <Item name="wavelength" sample="2"> 654.6 </Item>
+  <Item name="WAVELENGTH" sample="3">865</Item>
+  <Item name="wavelength_units" sample="3">Nanometers</Item>
+  <Item name="central_wavelength" sample="4">1.6</Item>
+  <Item name="wavelength" sample="5">far</Item>
+  <Item name="wavelength" sample="6">2.2</Item>
+  <Item name="wavelength_units" sample="6">furlongs</Item>
+  <Item name="wavelength" sample="70000">1</Item>
+  <Item name="wavelength">500</Item>
+</GDALMetadata>"#;
+        let pam = parse_gdal_metadata(xml).unwrap();
+        let w = |b: usize| pam.band(b).and_then(|b| b.wavelength);
+        assert_eq!(
+            [w(1), w(2), w(3), w(4), w(5), w(6), w(7)],
+            [Some(482.5), Some(561.3), Some(654.6), Some(865.0), Some(1600.0), None, None]
+        );
+        assert_eq!(pam.lost.len(), 1, "{:?}", pam.lost);
+        assert!(pam.lost[0].starts_with("3 wavelength item(s)"), "{:?}", pam.lost);
+        // A unit the dataset gives is a band's when it gives none; then a large value may be in µm.
+        let xml =
+            r#"<GDALMetadata><Item name="wavelength_units">micrometers</Item><Item name="wavelength" sample="0">120</Item></GDALMetadata>"#;
+        let pam = parse_gdal_metadata(xml).unwrap();
+        assert_eq!(pam.band(1).and_then(|b| b.wavelength), Some(120_000.0));
+        assert!(pam.lost.is_empty(), "{:?}", pam.lost);
+    }
+
+    /// Wavelengths written (as GDAL's `CENTRAL_WAVELENGTH_UM`) are read back as they were.
+    #[test]
+    fn wavelengths_written_are_read_back() {
+        let xml = gdal_metadata(&[None, None, Some("SWIR 2")], &[], &[Some(482.5), None, Some(2200.0)]).unwrap();
+        assert!(xml.contains(r#"name="CENTRAL_WAVELENGTH_UM" sample="0" domain="IMAGERY">0.4825<"#), "{xml}");
+        let pam = parse_gdal_metadata(&xml).unwrap();
+        assert_eq!(pam.band(1).and_then(|b| b.wavelength), Some(482.5));
+        assert!(pam.band(2).is_none());
+        assert_eq!(pam.band(3).and_then(|b| b.wavelength), Some(2200.0));
+        assert_eq!(pam.band(3).and_then(|b| b.description.as_deref()), Some("SWIR 2"));
+        assert!(pam.lost.is_empty(), "{:?}", pam.lost);
+    }
+
+    /// A sidecar's wavelengths, in GDAL's `IMAGERY` domain or ENVI's default one; one that isn't a
+    /// length is said, and other band items still are.
+    #[test]
+    fn reads_wavelengths_from_a_sidecar() {
+        let pam = parse(
+            r#"<PAMDataset>
+  <Metadata><MDI key="wavelength_units">Nanometers</MDI></Metadata>
+  <PAMRasterBand band="1"><Metadata domain="IMAGERY"><MDI key="CENTRAL_WAVELENGTH_UM">0.665</MDI><MDI key="FWHM_UM">0.03</MDI></Metadata></PAMRasterBand>
+  <PAMRasterBand band="2"><Metadata><MDI key="wavelength">842</MDI></Metadata></PAMRasterBand>
+  <PAMRasterBand band="3"><Metadata><MDI key="wavelength">far</MDI></Metadata></PAMRasterBand>
+</PAMDataset>"#,
+        )
+        .unwrap();
+        let w = |b: usize| pam.band(b).and_then(|b| b.wavelength);
+        assert_eq!([w(1), w(2), w(3)], [Some(665.0), Some(842.0), None]);
+        assert_eq!(pam.lost.len(), 2, "{:?}", pam.lost);
+        assert!(pam.lost.iter().any(|l| l.starts_with("1 band metadata item(s) not read")), "{:?}", pam.lost);
+        assert!(pam.lost.iter().any(|l| l.starts_with("1 wavelength(s)")), "{:?}", pam.lost);
     }
 
     #[test]

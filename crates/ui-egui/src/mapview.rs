@@ -3051,6 +3051,8 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
     }
     // The NLDI's point, while its pane is open.
     crate::nldiui::paint(app, p, rect, t, |c| lonlat_to_screen(app, rect, c));
+    // The spectral profile's points, while its section shows.
+    crate::spectralui::paint(app, p, t, |c| lonlat_to_screen(app, rect, c));
     // Points picked for a workflow.
     if let Some(pick) = &app.workflow.pick {
         let pts = pick.points.clone();
@@ -3515,6 +3517,7 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
     follow_popup(app);
     let Some(pp) = &app.map.popup else { return };
     let t = Tokens::get(ui.ctx());
+    let at = pp.at;
     let Some(anchor) = lonlat_to_screen(app, rect, pp.at) else { return };
     if !rect.contains(anchor) {
         return;
@@ -3532,6 +3535,9 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
     };
     let mut step: Option<usize> = None;
     let mut zoom = false;
+    // A pixel of a raster of two bands or more: its layer, for the spectral profile.
+    let spectral = crate::spectralui::offered(app, &info);
+    let mut profile = false;
     // The feature shown, as its layer id and feature id (a raster pixel has neither).
     let shown = info["layerId"].as_u64().and_then(|id| u32::try_from(id).ok()).zip(info["fid"].as_u64());
     // Only WMS layers being asked so far, or still waited for: their names.
@@ -3594,6 +3600,15 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                             if ui.add(egui::Button::new(tl!("×")).frame(false)).clicked() {
                                 close = true;
+                            }
+                            // A pixel of several bands: add it to the spectral profile.
+                            if spectral.is_some() {
+                                let (r, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+                                let ink = if resp.hovered() { t.text } else { t.icon };
+                                crate::icons::paint(ui.painter(), r, "chart", ink, t.accent);
+                                if resp.on_hover_text(tl!("Spectral Profile: chart every band here, and compare points")).clicked() {
+                                    profile = true;
+                                }
                             }
                             // A feature (not a raster pixel): zoom to it.
                             if shown.is_some() {
@@ -3704,6 +3719,9 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
         if let Some(e) = extent.filter(|e| !e.is_empty()) {
             app.session.zoom_to(&e);
         }
+    }
+    if let (true, Some(id)) = (profile, spectral) {
+        crate::spectralui::from_identify(app, id, at);
     }
     if close {
         app.map.popup = None;

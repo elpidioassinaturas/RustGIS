@@ -55,7 +55,7 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"before": raster, "after": raster, "band"?: 1-based, "method"?: "difference"|"ratio"|"percent", "name"?, "ran"?: (internal: a raster the app has worked out)}"#),
         C::new("raster.spectral", "Spectral Analysis", "Analyze › Image Analysis", spectral).inputs(spectral_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
             .view()
-            .params(r#"{"layer": raster, "lon"?, "lat"?, "zone"?: polygon layer (the selected or first polygon)}"#),
+            .params(r#"{"layer": raster, "lon"?, "lat"?, "points"?: [[lon, lat], …] (up to 1000: a profile each, in "profiles"; one off the raster has a null pixel and values, and is said), "zone"?: polygon layer (the mean of its selected or first polygon's pixels)}"#),
         C::new("raster.classify", "Classification Wizard", "Analyze › Image Classification", |s, p| {
             super::workflows::made_or_ran(s, p, "raster.classify")
         }).inputs(raster_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
@@ -216,6 +216,7 @@ fn rebuild(r: &Raster, transform: GeoTransform, crs: Crs, bands: Vec<Vec<f32>>) 
         .map_err(|e| e.to_string())?;
     for (o, i) in out.bands.iter_mut().zip(&r.bands) {
         o.name = i.name.clone();
+        o.wavelength = i.wavelength;
     }
     Ok(out)
 }
@@ -847,10 +848,73 @@ pub(crate) fn change_work(s: &Session, p: &Value) -> Result<super::workflows::Wo
     }))
 }
 
+/// The most points `raster.spectral` reads in one run.
+const MAX_SPECTRAL_POINTS: usize = 1000;
+
+/// Every band's value at a point, at several points (`points`, a profile each), or their mean
+/// in a polygon (`zone`), with the bands' names and wavelengths.
 fn spectral(s: &mut Session, p: &Value) -> CmdResult {
     let r = raster(s, p)?;
     let all: Vec<usize> = (0..r.band_count()).collect();
     let names: Vec<String> = r.bands.iter().map(|b| b.name.clone()).collect();
+    // The bands' wavelengths, when the file gives any (`null` for a band without one).
+    let wavelengths: Vec<Option<f64>> = r.bands.iter().map(|b| b.wavelength).collect();
+    let answer = |mut v: Value| {
+        if wavelengths.iter().any(Option::is_some) {
+            v["wavelengths"] = json!(wavelengths);
+            v["wavelengthUnit"] = json!("nm");
+        }
+        Ok(v)
+    };
+    // A zone is read before points, and points before one point: what isn't read is said.
+    let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
+    let left_out = if spectral_zone(p).is_some() && given("points") {
+        Some("points")
+    } else if given("points") && (given("lon") || given("lat")) {
+        Some("lon and lat")
+    } else {
+        None
+    };
+    if let Some(what) = left_out {
+        let read = if spectral_zone(p).is_some() { "the zone's mean is read" } else { "points are read" };
+        s.notify(format!("{}: {what} left out: {read}", r.name), false);
+    }
+    if let Some(points) = p.get("points").filter(|v| !v.is_null() && spectral_zone(p).is_none()) {
+        let points = points.as_array().ok_or("points is a list of [lon, lat]")?;
+        if points.is_empty() {
+            return Err("points is empty: give at least one [lon, lat]".into());
+        }
+        if points.len() > MAX_SPECTRAL_POINTS {
+            return Err(format!("{} points given: at most {MAX_SPECTRAL_POINTS} are read in one run", points.len()));
+        }
+        let mut profiles = Vec::with_capacity(points.len());
+        let mut outside = 0usize;
+        for (i, pt) in points.iter().enumerate() {
+            let xy = pt
+                .as_array()
+                .filter(|a| a.len() == 2)
+                .and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)))
+                .filter(|(x, y)| x.is_finite() && y.is_finite())
+                .ok_or_else(|| format!("point {} isn't [lon, lat]", i + 1))?;
+            profiles.push(match r.pixel_at(Coord::new(xy.0, xy.1)) {
+                Some((col, row)) => {
+                    let vals: Vec<Option<f32>> = all.iter().map(|b| r.value(*b, col, row)).collect();
+                    json!({"lon": xy.0, "lat": xy.1, "pixel": [col, row], "values": vals})
+                }
+                None => {
+                    outside += 1;
+                    json!({"lon": xy.0, "lat": xy.1, "pixel": null, "values": vec![Value::Null; all.len()]})
+                }
+            });
+        }
+        if outside == points.len() {
+            return Err(if outside == 1 { "the point is outside the raster".into() } else { "every point is outside the raster".into() });
+        }
+        if outside > 0 {
+            s.notify(format!("{}: {outside} of {} points fall outside the raster: their values are null", r.name, points.len()), false);
+        }
+        return answer(json!({"bands": names, "profiles": profiles}));
+    }
     if let Some(z) = spectral_zone(p) {
         let l = s
             .map()
@@ -863,12 +927,12 @@ fn spectral(s: &mut Session, p: &Value) -> CmdResult {
         };
         let rings = polys.first().ok_or("the zone has no polygon")?;
         let (means, n) = rasterops::zonal_means(&r, &all, rings).ok_or("no pixels fall in the zone")?;
-        return Ok(json!({"bands": names, "values": means, "pixels": n}));
+        return answer(json!({"bands": names, "values": means, "pixels": n}));
     }
-    let c = Coord::new(f(p, "lon").ok_or("give lon and lat, or a zone")?, f(p, "lat").ok_or("lat is required")?);
+    let c = Coord::new(f(p, "lon").ok_or("give lon and lat, points or a zone")?, f(p, "lat").ok_or("lat is required")?);
     let (col, row) = r.pixel_at(c).ok_or("the point is outside the raster")?;
     let vals: Vec<Option<f32>> = all.iter().map(|b| r.value(*b, col, row)).collect();
-    Ok(json!({"bands": names, "values": vals, "pixel": [col, row]}))
+    answer(json!({"bands": names, "values": vals, "pixel": [col, row]}))
 }
 
 fn supervised(s: &mut Session, p: &Value) -> CmdResult {
@@ -1286,6 +1350,7 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
     out.bands.iter_mut().zip(&first.bands).for_each(|(o, i)| {
         o.name = i.name.clone();
         o.classes = i.classes.clone();
+        o.wavelength = i.wavelength;
     });
     // Cells rounded when an input was read may be among those the mosaic keeps.
     out.keep_rounded_marks(rs.iter().map(|r| &**r));
@@ -1386,7 +1451,10 @@ fn clip_window(
     let o = r.transform.to_world(f64::from(cols.start), f64::from(rows.start));
     let gt = GeoTransform { origin_x: o.x, origin_y: o.y, ..r.transform };
     let mut out = Raster::new(name, w, h, bands, gt, r.crs, nodata, r.color.clone(), r.data_type.clone()).map_err(|e| e.to_string())?;
-    out.bands.iter_mut().zip(&r.bands).for_each(|(o, i)| o.name = i.name.clone());
+    out.bands.iter_mut().zip(&r.bands).for_each(|(o, i)| {
+        o.name = i.name.clone();
+        o.wavelength = i.wavelength;
+    });
     // Some of the values rounded when the file was read may be in the window: how many isn't known.
     out.keep_rounded_mark(r);
     Ok(out)
@@ -1478,7 +1546,10 @@ fn edit_pixels(s: &mut Session, p: &Value) -> CmdResult {
     let nodata = if f(p, "value").is_none() && r.nodata.is_none() { Some(NODATA as f64) } else { r.nodata };
     let mut out = Raster::new(r.name.clone(), r.width, r.height, bands, r.transform, r.crs, nodata, r.color.clone(), r.data_type.clone())
         .map_err(|e| e.to_string())?;
-    out.bands.iter_mut().zip(&r.bands).for_each(|(o, i)| o.name = i.name.clone());
+    out.bands.iter_mut().zip(&r.bands).for_each(|(o, i)| {
+        o.name = i.name.clone();
+        o.wavelength = i.wavelength;
+    });
     // The edit may have overwritten some of the values rounded when the file was read.
     out.keep_rounded_mark(&r);
     replace(s, &layer, out)?;
