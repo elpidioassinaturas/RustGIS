@@ -194,10 +194,10 @@ tile), without a STAC catalogue:
   desktop app, `ui.addUrl` with `"bbox"`, and `layer.addUrl` with it from a plugin's command or
   from a script or model run there, read it off the frame: the map stays in use, and the layer is
   added when the read lands (a plugin's command then runs again with what adding it answered; a
-  script or model is answered `"pending"` and goes on, as with a whole file it downloads). These are read one at a time,
-  with 16 under way at most, and the next starts once the app has taken the last. If another
-  project is opened meanwhile, one still waiting isn't read, and one being read can't be cancelled
-  yet: it runs to its end and isn't added. Each is said in a notice.
+  script or model is answered `"pending"` and goes on, as with a whole file it downloads). These
+  are read one at a time, with 16 under way at most, and the next starts once the app has taken
+  the last. If another project is opened meanwhile, one still waiting isn't read, and one being
+  read can't be cancelled yet: it runs to its end and isn't added. Each is said in a notice.
 - The file's no-data, colour table (a palette file draws in its colours) and band names come
   with it, and class names given as `CLASS_<value>` items in GDAL's metadata tag, as the MapBiomas
   files on Source Cooperative give theirs. These come from the file's own tags: an `.aux.xml`
