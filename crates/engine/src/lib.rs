@@ -816,6 +816,9 @@ pub struct Session {
     /// them (it keeps nothing between calls). Not saved with the project: a plugin's state
     /// command reads what it needs from the map when the panel opens.
     pub plugin_panels: std::collections::BTreeMap<String, rustgis_plugins::PanelState>,
+    /// What running session plugins were last told of the map, to send them events.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) plugin_watch: cmd::plugins::Watch,
     /// Data downloads of this project under way (Home › Add › Add Data › From URL), by id.
     downloading: Vec<u64>,
     /// Downloads that landed, waiting for `layer.addDownload`.
@@ -899,6 +902,10 @@ pub struct Session {
     /// ([`cmd::gp::Ahead::Taking`]), or which that copy records ([`cmd::gp::Ahead::Recording`]).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) tools_ahead: Option<cmd::gp::Ahead>,
+    /// The files a batch read on that copy, which the batch's run here takes
+    /// ([`cmd::gp::FilesAhead`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) files_ahead: Option<cmd::gp::FilesAhead>,
     /// Where the requests a copy of the session makes for a model's run ahead go
     /// ([`cmd::workflows::ahead_on_copy`]): the session's own Diagnostics, as when they're made
     /// there. Its notices stay its own: the run there says them.
@@ -1080,7 +1087,7 @@ impl Session {
         rustgis_data::diagnostics::set_clock(|| {
             web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
         });
-        let label_notices = std::mem::take(&mut project.label_read_notices);
+        let label_notices = project.take_read_notices(&crate::project::ALL_PARTS);
         let mut session = Session {
             project,
             path: None,
@@ -1159,6 +1166,7 @@ impl Session {
             started: Vec::new(),
             plugin_runs: Vec::new(),
             plugin_panels: std::collections::BTreeMap::new(),
+            plugin_watch: Default::default(),
             downloading: Vec::new(),
             downloaded: Vec::new(),
             landed_reads: Vec::new(),
@@ -1194,6 +1202,8 @@ impl Session {
             read_ahead: None,
             #[cfg(not(target_arch = "wasm32"))]
             tools_ahead: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            files_ahead: None,
             #[cfg(not(target_arch = "wasm32"))]
             requests_into: None,
             #[cfg(test)]
@@ -1509,11 +1519,13 @@ impl Session {
                 // command's result as it was, without an entry, and says so in the app's log.
                 let logged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if project_log::is_logged(self, id, params) {
-                        let params = match step {
-                            Some(label) => serde_json::json!({"step": label}),
-                            None => project_log::kept_params(params),
+                        // The step's label isn't a parameter: the command, run again, takes none.
+                        let (params, partial) = match step {
+                            Some(label) => (serde_json::json!({"step": label}), false),
+                            None => project_log::kept_and_partial(params),
                         };
-                        let e = project_log::entry(id, params, &res, at, start.elapsed());
+                        let project = (project_log::kept_name(&self.title()), self.opened);
+                        let e = project_log::entry(project, id, params, partial, &res, at, start.elapsed());
                         if joins && res.is_ok() { self.log.join_last(e) } else { self.log.push(e) }
                     }
                 }));
@@ -1965,6 +1977,19 @@ impl Session {
     /// read, and why. Once for each layer's pixels or failure, one notice of each kind; the app
     /// calls it each frame.
     pub fn notice_landed_rasters(&mut self) {
+        // Streamed vector windows land after project opening too. Check each installed read
+        // once, keeping the same counted notice channel as retained resident expressions.
+        let mut landed = Vec::new();
+        for map in &mut self.project.maps {
+            for layer in &mut map.layers {
+                if layer.source.as_mut().is_some_and(|source| source.take_display_window()) {
+                    landed.push(&*layer);
+                }
+            }
+        }
+        if let Some(message) = cmd::design::display_area_messages(landed.into_iter()) {
+            self.notify(message, false);
+        }
         let (mut lost, mut held, mut failed, mut dropped) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for m in &mut self.project.maps {
             for l in &mut m.layers {

@@ -545,7 +545,8 @@ fn read_bitmap(bitmap: &web_sys::ImageBitmap, w: u32, h: u32) -> Result<Vec<u8>,
 /// How long a tile or document fetch may go without anything coming in: the answer's headers,
 /// or the next part of its body. A slow but steady answer is never cut off; one that stalls is
 /// given up, so it doesn't stay under way forever, holding its server's place in the queue.
-/// Downloads the user asked for have none.
+/// So is a picture the pop-up fetches. Downloads the user asked for have none
+/// (`cache::gives_up_when_stalled`).
 const STALL_MS: i32 = 30_000;
 
 /// What a step of a fetch waits for, or `None` once it has gone [`STALL_MS`] with nothing (the
@@ -597,15 +598,29 @@ async fn fetch_bytes(
     still: Option<rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::Still>,
     omit: &'static [u16],
 ) -> Result<Vec<u8>, String> {
+    use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::address::Reach;
+    fetch_reached(url, Reach::Local, capture, still, omit).await.map(|fetched| fetched.bytes)
+}
+
+/// GET carries its inherited reach into final URL preparation and returns the normalized
+/// credential-free destination with its bytes. Fetch never follows an opaque redirect.
+async fn fetch_reached(
+    url: &str,
+    ceiling: rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::address::Reach,
+    capture: Capture,
+    still: Option<rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::Still>,
+    omit: &'static [u16],
+) -> Result<rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::Fetched, String> {
     use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache::RequestDiagnostics, failure::Failure};
     let mut diagnostics = RequestDiagnostics::with_capture(url, "GET", capture);
     diagnostics.omit_statuses(omit);
     let answer = async {
-        use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache, logins};
+        use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{address, cache, logins};
         let (promise, abort, range, tail, max, url, bound, authenticated) = crate::request::prepare_and_send(
             &still,
             || async {
                 let window = web_sys::window().ok_or("no window")?;
+                let gives_up = cache::gives_up_when_stalled(url, ceiling);
                 // A data download carries its caller's budget (at most MAX_DOWNLOAD); other fetches use 64 MB.
                 let (url, limit) = cache::split_download_limit(url);
                 let max = limit.map(|n| n as u64).unwrap_or(64 << 20);
@@ -617,6 +632,7 @@ async fn fetch_bytes(
                 let bound = url;
                 let prepared = rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::s3::prepare(logins::inner(url))?;
                 let url = prepared.url.as_str();
+                let destination = check_destination(url, ceiling)?;
                 // An ArcGIS sign-in's token, for the portal and the servers it covers, renewed first when it
                 // is about to expire. It goes as the request's `token` parameter, not a header: ArcGIS's
                 // query endpoints answer the header's CORS preflight with an error.
@@ -631,6 +647,10 @@ async fn fetch_bytes(
                     if prepared.signed { None } else { rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::arcgis_auth::with_token(login_url) };
                 // Only the request carries credentials: messages and cache keys keep the original address.
                 let request = arcgis.as_deref().unwrap_or(login_url);
+                // URL parsing in a browser can normalize a numeric or escaped hostname. Judge
+                // that actual destination against the already checked, prepared address.
+                let normalized = web_sys::Url::new(request).map_err(|_| "not a valid request address")?;
+                address::check_reach(&normalized.href(), ceiling)?;
                 let authenticated = prepared.signed || arcgis.is_some() || login.is_some();
                 let err = |e: wasm_bindgen::JsValue| {
                     if authenticated { "the browser couldn't process the authenticated request".to_string() } else { format!("{e:?}") }
@@ -642,8 +662,8 @@ async fn fetch_bytes(
                     (None, None) => None,
                 };
                 let init = web_sys::RequestInit::new();
-                // A tile or document that stalls is given up (see `STALL_MS`).
-                let abort = if limit.is_none() { web_sys::AbortController::new().ok() } else { None };
+                // A tile, document or picture that stalls is given up (see `STALL_MS`).
+                let abort = if gives_up { web_sys::AbortController::new().ok() } else { None };
                 if let Some(a) = &abort {
                     init.set_signal(Some(&a.signal()));
                 }
@@ -662,16 +682,15 @@ async fn fetch_bytes(
                     }
                     init.set_headers(&headers);
                 }
-                // A signed or authorized request goes only where its credentials are for.
-                if authenticated {
-                    init.set_redirect(web_sys::RequestRedirect::Error);
-                }
+                // Fetch hides a manual redirect's Location, so the app cannot check its next
+                // destination. Refuse it instead of letting the browser follow it unchecked.
+                init.set_redirect(if authenticated { web_sys::RequestRedirect::Error } else { web_sys::RequestRedirect::Manual });
                 // A credential-bearing address goes nowhere else: no referrer from it, no cookies with it.
                 if arcgis.is_some() || login.is_some() {
                     init.set_referrer_policy(web_sys::ReferrerPolicy::NoReferrer);
                     init.set_credentials(web_sys::RequestCredentials::Omit);
                 }
-                Ok((window, request.to_string(), init, abort, range, tail, max, prepared.url, bound.to_string(), authenticated))
+                Ok((window, normalized.href(), init, abort, range, tail, max, destination, bound.to_string(), authenticated))
             },
             |(window, request, init, abort, range, tail, max, url, bound, authenticated)| {
                 (window.fetch_with_str_and_init(&request, &init), abort, range, tail, max, url, bound, authenticated)
@@ -704,6 +723,7 @@ async fn fetch_bytes(
                 .dyn_into()
                 .map_err(err)?;
             diagnostics.answered(resp.status());
+            check_redirect(&resp)?;
             if !resp.ok() {
                 return Err(refused(&resp));
             }
@@ -771,12 +791,12 @@ async fn fetch_bytes(
             if whole_tail.is_some_and(|n| bytes.len() as u64 > n) {
                 return Err(format!("{url}: {}", cache::NO_RANGES));
             }
-            Ok(bytes)
+            Ok(cache::Fetched { bytes, origin: address::Origin::named(&url).retain_binding(&bound)? })
         }
         .await;
         cache::check_still(&still)?;
         logins::check(&bound).map_err(str::to_string)?;
-        result.map_err(|error| if authenticated { logins::scrub_error(&format!("{url}: {error}")) } else { error })
+        result.map_err(|error| crate::request::fetch_error(&url, error, authenticated))
     }
     .await;
     diagnostics.record(answer.map_err(|e| Failure::new(url, e))).map_err(|failure| failure.message)
@@ -793,7 +813,7 @@ async fn post_json(
     use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache::RequestDiagnostics, failure::Failure};
     let mut diagnostics = RequestDiagnostics::with_capture(url, "POST", capture);
     let answer = async {
-        use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache, logins, s3};
+        use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{address, cache, logins, s3};
         let (promise, authenticated) = crate::request::prepare_and_send(
             &still,
             || async {
@@ -807,6 +827,7 @@ async fn post_json(
                 let target = logins::inherit(url, &prepared.url);
                 let login = logins::apply(&target).map_err(str::to_string)?;
                 let request = prepared.url.as_str();
+                check_destination(request, address::Reach::Local)?;
                 let err = |e: wasm_bindgen::JsValue| {
                     if login.is_some() { "the browser couldn't process the authenticated request".to_string() } else { format!("{e:?}") }
                 };
@@ -857,7 +878,7 @@ async fn post_json(
         .await;
         cache::check_still(&still)?;
         logins::check(url).map_err(str::to_string)?;
-        result.map_err(|error| if authenticated { logins::scrub_error(&format!("{url}: {error}")) } else { error })
+        result.map_err(|error| crate::request::fetch_error(url, error, authenticated))
     }
     .await;
     diagnostics.record(answer.map_err(|e| Failure::new(url, e))).map_err(|failure| failure.message)
@@ -874,7 +895,7 @@ async fn head(
     use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache::RequestDiagnostics, failure::Failure};
     let mut diagnostics = RequestDiagnostics::with_capture(url, "HEAD", capture);
     let answer = async {
-        use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache, logins, s3};
+        use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{address, cache, logins, s3};
         let sent = crate::request::prepare_and_send(
             &still,
             || async {
@@ -887,6 +908,7 @@ async fn head(
                     return Ok(None);
                 }
                 let url = prepared.url.as_str();
+                check_destination(url, address::Reach::Local)?;
                 let target = logins::inherit(bound, url);
                 let login = logins::apply(&target).map_err(str::to_string)?;
                 let request = login.as_ref().map_or(url, |applied| applied.url.as_str());
@@ -895,6 +917,7 @@ async fn head(
                 };
                 let init = web_sys::RequestInit::new();
                 init.set_method("HEAD");
+                init.set_redirect(if login.is_some() { web_sys::RequestRedirect::Error } else { web_sys::RequestRedirect::Manual });
                 let login_header = login.as_ref().and_then(|applied| applied.header.as_ref());
                 if !prepared.headers.is_empty() || login_header.is_some() {
                     let headers = web_sys::Headers::new().map_err(err)?;
@@ -909,7 +932,6 @@ async fn head(
                     init.set_headers(&headers);
                 }
                 if login.is_some() {
-                    init.set_redirect(web_sys::RequestRedirect::Error);
                     init.set_referrer_policy(web_sys::ReferrerPolicy::NoReferrer);
                     init.set_credentials(web_sys::RequestCredentials::Omit);
                 }
@@ -933,6 +955,7 @@ async fn head(
                 .dyn_into()
                 .map_err(err)?;
             diagnostics.answered(resp.status());
+            check_redirect(&resp)?;
             if !resp.ok() {
                 return Err(refused(&resp));
             }
@@ -947,10 +970,27 @@ async fn head(
         .await;
         cache::check_still(&still)?;
         logins::check(url).map_err(str::to_string)?;
-        result.map_err(|error| if authenticated { logins::scrub_error(&format!("{reached}: {error}")) } else { error })
+        result.map_err(|error| crate::request::fetch_error(&reached, error, authenticated))
     }
     .await;
     diagnostics.record(answer.map_err(|e| Failure::new(url, e))).map_err(|failure| failure.message)
+}
+
+/// Checks the URL as the browser parses it, before any request or login renewal is sent.
+fn check_destination(url: &str, ceiling: rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::address::Reach) -> Result<String, String> {
+    crate::request::destination(url, ceiling, |url| {
+        web_sys::Url::new(url).map(|normalized| normalized.href()).map_err(|_| "not a valid request address".into())
+    })
+}
+
+/// A manual redirect is an opaque, zero-status response: Fetch exposes no Location to check.
+/// Other zero-status responses are unusable too; none is treated as a successful download.
+fn check_redirect(response: &web_sys::Response) -> Result<(), String> {
+    if response.status() == 0 {
+        Err(rustgis_ui_egui::tl!("The browser cannot verify this redirect's destination. Use the final service address.").into())
+    } else {
+        Ok(())
+    }
 }
 
 /// Makes an HTTP request (the AI assistant's calls to its model), returning the response of any
@@ -1023,9 +1063,9 @@ fn clipboard() -> Option<web_sys::Clipboard> {
 /// the app must not read what the user saved on the site.
 fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, embedded: bool) -> Services {
     // Map tiles come through the browser's fetch (the app repaints when they arrive).
-    rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_fetcher_omitting(|url, done, omit| {
+    rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_fetcher_with_origin(|url, ceiling, done, omit| {
         wasm_bindgen_futures::spawn_local(crate::request::handoff(
-            move |capture, still| async move { fetch_bytes(&url, capture, still, omit).await },
+            move |capture, still| async move { fetch_reached(&url, ceiling, capture, still, omit).await },
             done,
         ));
     });
