@@ -132,7 +132,9 @@ isn't itself an entry in the log, as a saved file is). **Clear Log** empties it 
   that waited for its downloads, when its last run started), `command`, `params`, `ok`, `error`
   when it failed, `millis`, how long it took, `project`, the name of the project open when it ran
   (the one it opened, for a command that opens one), and `partial`, true when its parameters were
-  cut short or had secrets taken out.
+  cut short or had secrets taken out, and, for what a session plugin's program asked
+  for between the plugin's commands, `plugin`, that plugin's id (left out of `project.log` and
+  JSON Lines for other entries; an empty cell in CSV).
 - **For the session only:** the log is kept in memory, across the projects opened or made in the
   session, until RustGIS closes or the log is cleared. A saved project, its recovery copy, a
   package or a template carries none of it, so sharing a project shares no log. Reading, writing
@@ -504,6 +506,12 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
   sets the whole interface from 80% to 200%.
 - **Autosave**: **Settings › Autosave** sets how often the desktop app keeps a
   [recovery copy](#autosave-and-recovery) of unsaved work, or turns it off.
+- **Performance**: **Settings › Performance › Threads** sets the most threads one piece of work
+  uses in the desktop app: a tool, a raster read, the drawing of a map's tiles. **Automatic** is
+  the computer's cores, up to 16; fewer keep cores free for other work, and on a computer with
+  more cores a higher setting lets the work use them. It is remembered for the next start and
+  isn't saved with a project (`ui.threads={"threads": 8}`, `null` for Automatic; the same as
+  [`gp.threads`](analysis.md#analysis-workflows)). The web app runs on one thread.
 - **Start-up**: **Settings › Start-up** sets what RustGIS opens with: **Start With** the World Atlas
   sample or a blank map, or, in the desktop app, **Last Project** (the `.rgis` project last opened
   or saved) or **Choose Project…** (one you pick once), the **Projection** the map opens in (a

@@ -809,6 +809,9 @@ pub struct Session {
     /// them (it keeps nothing between calls). Not saved with the project: a plugin's state
     /// command reads what it needs from the map when the panel opens.
     pub plugin_panels: std::collections::BTreeMap<String, rustgis_plugins::PanelState>,
+    /// What running session plugins were last told of the map, to send them events.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) plugin_watch: cmd::plugins::Watch,
     /// Data downloads of this project under way (Home › Add › Add Data › From URL), by id.
     downloading: Vec<u64>,
     /// Downloads that landed, waiting for `layer.addDownload`.
@@ -1154,6 +1157,7 @@ impl Session {
             started: Vec::new(),
             plugin_runs: Vec::new(),
             plugin_panels: std::collections::BTreeMap::new(),
+            plugin_watch: Default::default(),
             downloading: Vec::new(),
             downloaded: Vec::new(),
             landed_reads: Vec::new(),
@@ -1963,6 +1967,19 @@ impl Session {
     /// read, and why. Once for each layer's pixels or failure, one notice of each kind; the app
     /// calls it each frame.
     pub fn notice_landed_rasters(&mut self) {
+        // Streamed vector windows land after project opening too. Check each installed read
+        // once, keeping the same counted notice channel as retained resident expressions.
+        let mut landed = Vec::new();
+        for map in &mut self.project.maps {
+            for layer in &mut map.layers {
+                if layer.source.as_mut().is_some_and(|source| source.take_display_window()) {
+                    landed.push(&*layer);
+                }
+            }
+        }
+        if let Some(message) = cmd::design::display_area_messages(landed.into_iter()) {
+            self.notify(message, false);
+        }
         let (mut lost, mut held, mut failed, mut dropped) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for m in &mut self.project.maps {
             for l in &mut m.layers {

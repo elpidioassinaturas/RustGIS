@@ -122,6 +122,8 @@ pub fn commands() -> Vec<C> {
             }
             l.labels.repoint_missing_fields(&l.dataset);
             l.transparency = st.transparency;
+            let area_notice = super::design::display_area_message(l);
+            if let Some(notice) = area_notice { s.notify(notice,false); }
             if relock {
                 s.map_mut().label_lock = None;
                 s.map_mut().label_lock_line_anchors.clear();
@@ -473,6 +475,7 @@ fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
         },
     };
     let mut names = Vec::new();
+    let first_map = s.project.maps.len();
     for mut m in maps.into_iter().take(MAX_IMPORTED_MAPS) {
         // A binding in a file is no authority to use a login here.
         crate::s3_connections::clear_bindings(m.addresses_mut());
@@ -487,6 +490,9 @@ fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
         m.renew_instance_id();
         s.project.maps.push(m);
     }
+    if let Some(message) = super::design::display_area_messages(s.project.maps.iter().skip(first_map).flat_map(|map| map.layers.iter())) {
+        s.notify(message, false);
+    }
     // Repair what was read (rasters reopen, cameras clamp); the sources that read S3 wait for
     // the saved connection that is to read them.
     for notice in s.project.normalize() {
@@ -496,6 +502,7 @@ fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
     super::connections::resolve_project(s);
     crate::s3_connections::resolve_project_s3(s);
     s.wait_in_place_reads();
+    super::project::say_conversion_fallbacks(s);
     super::connections::note_waiting(s);
     if let Some(n) = names.last()
         && let Some(i) = s.project.maps.iter().position(|m| &m.name == n)
@@ -1023,7 +1030,8 @@ struct Mesh {
     bytes: usize,
     /// Polylines, which STL can't hold.
     lines: usize,
-    /// Caps that couldn't be triangulated and are fanned from their first vertex.
+    /// Caps that couldn't be triangulated (or were left with a fan by the triangulator) and are
+    /// fanned from their first vertex.
     fanned: usize,
     /// Whether polylines are kept (OBJ) or only counted (STL, which can't hold them).
     keep_lines: bool,
@@ -1180,8 +1188,9 @@ fn layer_mesh(s: &Session, p: &Value, keep_lines: bool) -> Result<Mesh, String> 
                         first += m;
                     }
                     // Caps as triangles (concave shapes and holes would fan wrongly as n-gons).
-                    match rustgis_geom::triangulate::triangulate(outer, open.get(1..).unwrap_or(&[])) {
-                        Some(tris) => {
+                    match rustgis_geom::triangulate::triangulate_reporting(outer, open.get(1..).unwrap_or(&[])) {
+                        Some((tris, fanned)) => {
+                            mesh.fanned += usize::from(fanned);
                             for [a, b, c] in tris {
                                 mesh.face(Item::Tri([v + n + a, v + n + b, v + n + c], orient(Orient::Up)))?;
                                 mesh.face(Item::Tri([v + c, v + b, v + a], orient(Orient::Down)))?;
@@ -1338,6 +1347,19 @@ fn mesh_notices(s: &mut Session, mesh: &Mesh) {
     if mesh.default_heights > 0 {
         s.notify(format!("{} feature(s) without a numeric height used the default height instead", mesh.default_heights), false);
     }
+    // OBJ and STL alike: the caps the triangulator gave up on and the ones it could only fan.
+    if mesh.fanned > 0 {
+        s.notify(fanned_caps_note(mesh.fanned), false);
+    }
+}
+
+/// The notice for `n` polygon caps finished as fans, in the 3D exports and the web scene: past the
+/// triangulator's limits a cap is fanned over its outer ring (holes filled), and a ring it can't
+/// cut an ear from is fanned as it stands; either can spill outside a concave shape.
+pub(crate) fn fanned_caps_note(n: usize) -> String {
+    format!(
+        "{n} polygon cap(s) couldn't be triangulated exactly and are approximated by fans: holes may be filled, and concave parts may spill outside"
+    )
 }
 
 /// A feature layer as binary STL, noting what it leaves out.
@@ -1354,15 +1376,6 @@ fn stl_bytes(s: &mut Session, p: &Value) -> Result<(Vec<u8>, StlReport), String>
     if report.degenerate > 0 {
         s.notify(
             format!("Skipped {} zero-area triangle(s), such as edges too short to tell apart in 32-bit floats", report.degenerate),
-            false,
-        );
-    }
-    if report.fanned > 0 {
-        s.notify(
-            format!(
-                "{} polygon cap(s) couldn't be triangulated and are approximated by fans over the outer ring: holes are filled, and concave parts may spill outside",
-                report.fanned
-            ),
             false,
         );
     }

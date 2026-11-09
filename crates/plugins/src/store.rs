@@ -67,7 +67,7 @@ fn write_state(st: &State) -> Result<(), String> {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
     let text = serde_json::to_string_pretty(st).map_err(|e| e.to_string())?;
-    rustgis_data::io::write_atomic(&path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))
+    rustgis_data::io::replace_atomic(&path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Loads every installed package and plugin folder (and the cached blocklist); returns what
@@ -140,16 +140,22 @@ pub fn unpack(bytes: &[u8], pkg: &mut Package) -> Result<(), String> {
         return Ok(());
     }
     let target = unpacked_dir(&pkg.manifest.id).ok_or("there is no folder for plugins")?;
-    unpack_to(bytes, &pkg.sha256, &target)?;
+    unpack_to(bytes, &pkg.sha256, &target, &pkg.manifest.id)?;
     pkg.dir = Some(target);
     Ok(())
 }
 
 /// Unpacks a package to `target`, the folder a process plugin runs from, unless that copy is
 /// already there.
-fn unpack_to(bytes: &[u8], sha256: &str, target: &Path) -> Result<(), String> {
+fn unpack_to(bytes: &[u8], sha256: &str, target: &Path, id: &str) -> Result<(), String> {
     match stage(bytes, sha256, target)? {
-        Some(staged) => swap_in(&staged, target),
+        Some(staged) => {
+            // A session plugin's program runs from these files (on Windows they can't be
+            // replaced while it does): it stops first.
+            let was_running = crate::session::is_running(id);
+            crate::session::stop(id);
+            swap_in(&staged, target).map_err(|e| if was_running { format!("{e} (its running program was stopped first)") } else { e })
+        }
         None => Ok(()),
     }
 }
@@ -166,7 +172,7 @@ fn stage(bytes: &[u8], sha256: &str, target: &Path) -> Result<Option<PathBuf>, S
     let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = parent.join(format!(".{name}-{nanos}"));
     let res = extract(bytes, &tmp)
-        .and_then(|_| rustgis_data::io::write_atomic(&tmp.join(UNPACKED_FROM), sha256.as_bytes()).map_err(|e| e.to_string()));
+        .and_then(|_| rustgis_data::io::replace_atomic(&tmp.join(UNPACKED_FROM), sha256.as_bytes()).map_err(|e| e.to_string()));
     if let Err(e) = res {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e);
@@ -263,14 +269,18 @@ pub fn install_bytes(bytes: &[u8]) -> Result<Arc<Plugin>, String> {
         Some(target) => stage(bytes, &sha256, target)?.map(|s| (s, target)),
         None => None,
     };
-    if let Err(e) = rustgis_data::io::write_atomic(&path, bytes) {
+    if let Err(e) = rustgis_data::io::replace_atomic(&path, bytes) {
         if let Some((s, _)) = &staged {
             let _ = std::fs::remove_dir_all(s);
         }
         return Err(format!("{}: {e}", path.display()));
     }
     if let Some((s, target)) = &staged {
-        swap_in(s, target)?;
+        // A session plugin's program runs from these files (on Windows they can't be replaced
+        // while it does): it stops first.
+        let was_running = crate::session::is_running(&plugin.manifest.id);
+        crate::session::stop(&plugin.manifest.id);
+        swap_in(s, target).map_err(|e| if was_running { format!("{e} (its running program was stopped first)") } else { e })?;
     }
     Ok(crate::register(plugin))
 }
@@ -341,7 +351,7 @@ pub fn save_blocklist(registry_url: &str, text: &str) -> Result<Vec<String>, Str
         && let Some(d) = dir()
     {
         let _ = std::fs::create_dir_all(&d);
-        let _ = rustgis_data::io::write_atomic(&d.join("blocklist.json"), text.as_bytes());
+        let _ = rustgis_data::io::replace_atomic(&d.join("blocklist.json"), text.as_bytes());
     }
     Ok(crate::apply_blocklist(registry_url, list))
 }
