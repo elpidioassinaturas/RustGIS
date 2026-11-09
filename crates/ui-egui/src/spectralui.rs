@@ -76,15 +76,20 @@ pub fn colour(t: &Tokens, n: u32) -> Color32 {
     colours.get((n.max(1) as usize - 1) % colours.len()).copied().unwrap_or(t.accent)
 }
 
-/// The rasters a profile can be read on: those of two bands or more.
-pub fn multiband(app: &RustGisApp) -> Vec<String> {
-    app.session
-        .map()
-        .layers
-        .iter()
-        .filter(|l| l.raster.as_ref().and_then(|r| r.data.as_ref()).is_some_and(|r| r.band_count() >= 2))
-        .map(|l| l.name.clone())
-        .collect()
+/// The rasters a profile can be read on: those of two bands or more, by name, and how many
+/// more are left out because an earlier layer has their name (commands find a layer by its
+/// name, so they would read that one).
+pub fn multiband(app: &RustGisApp) -> (Vec<String>, usize) {
+    let map = app.session.map();
+    let (mut names, mut shadowed) = (Vec::new(), 0usize);
+    for l in map.layers.iter().filter(|l| l.raster.as_ref().and_then(|r| r.data.as_ref()).is_some_and(|r| r.band_count() >= 2)) {
+        if map.layer_by_name(&l.name).map(|f| f.id) == Some(l.id) {
+            names.push(l.name.clone());
+        } else {
+            shadowed += 1;
+        }
+    }
+    (names, shadowed)
 }
 
 /// Whether Identify's result `info` is a pixel of a raster of two bands or more: its layer's id.
@@ -156,11 +161,20 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     ui.add_space(6.0);
     ui.label(egui::RichText::new(tl!("Spectral profile")).font(semibold(12.5)));
     ui.add_space(2.0);
-    let rasters = multiband(app);
+    let (rasters, shadowed) = multiband(app);
+    if shadowed > 0 {
+        let n = shadowed.to_string();
+        let text = crate::i18n::fmt("{n} raster(s) left out: another layer has the same name. Rename them to chart them.", &[("n", &n)]);
+        ui.label(egui::RichText::new(text).small().color(t.red));
+    }
     if rasters.is_empty() {
         ui.label(
             egui::RichText::new(tl!("Add a raster of two or more bands first, such as a Landsat or Sentinel-2 scene.")).weak().small(),
         );
+        // With nothing to read, picking ends: a click would be taken and go nowhere.
+        if app.workflow.pick.as_ref().is_some_and(|p| p.purpose == PURPOSE) {
+            app.workflow.pick = None;
+        }
         return;
     }
     if !rasters.contains(&app.workflow.layer) {
@@ -214,7 +228,7 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 let sp = &mut app.workflow.spectral;
                 sp.message = Some(match std::fs::write(&path, csv(sp)) {
                     Ok(()) => (crate::i18n::fmt("Saved {path}", &[("path", &path)]), false),
-                    Err(e) => (format!("{path}: {e}"), true),
+                    Err(e) => (crate::i18n::fmt("{path}: {error}", &[("path", &path), ("error", &e.to_string())]), true),
                 });
             }
         }
@@ -514,5 +528,24 @@ mod tests {
         assert_eq!(app.workflow.spectral.samples.len(), before, "nothing read from the other scene");
         let said: Vec<String> = app.session.notices_since(mark).iter().map(|n| n.text.clone()).collect();
         assert_eq!(said, [format!("{name}: another layer has this name, so its profile would be read from that one: rename one of them")]);
+        // The section's list leaves it out too, and counts it.
+        let (rasters, shadowed) = multiband(&app);
+        assert_eq!((rasters.len(), shadowed), (1, 1), "{rasters:?}");
+    }
+
+    /// With no raster of two bands or more, the section says so and ends a pick left on.
+    #[test]
+    fn the_profile_ends_its_pick_when_no_raster_is_left() {
+        let mut app = RustGisApp::with_sample();
+        app.workflow.pick = Some(crate::analysispane::Pick { purpose: PURPOSE, needed: 1, points: Vec::new() });
+        let mut h = egui_kittest::Harness::builder().allow_missing_glyphs().with_size(egui::vec2(420.0, 320.0)).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let t = crate::theme::Tokens::get(ui.ctx());
+                section(app, ui, &t);
+            },
+            app,
+        );
+        h.run_steps(1);
+        assert!(h.state().workflow.pick.is_none());
     }
 }
