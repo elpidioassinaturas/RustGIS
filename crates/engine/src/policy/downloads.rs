@@ -62,7 +62,7 @@ impl Session {
             requests: self
                 .url_requests
                 .iter()
-                .map(|q| UrlRequest { key: q.key, params: q.params.clone(), authority: q.authority.clone() })
+                .map(|q| UrlRequest { key: q.key, params: q.params.clone(), authority: q.authority.clone(), view: q.view })
                 .collect(),
             queued: self.policy.work.queued.clone(),
         }
@@ -280,7 +280,8 @@ impl Session {
             self.next_pending = self.next_pending.wrapping_add(1);
             let key = self.next_pending;
             self.policy.work.queued.insert(key, Queued { c: Arc::downgrade(&c), import, consumed: Arc::new(AtomicBool::new(false)) });
-            self.url_requests.push(UrlRequest { key, params, authority: c });
+            let view = self.window_view.take();
+            self.url_requests.push(UrlRequest { key, params, authority: c, view });
         }
         if !import
             && let Some(asked_now) = self.call_requests.as_mut()

@@ -30528,29 +30528,45 @@ fn a_windows_bands_are_started_within_its_wait() {
 
 /// A plugin's command asking for the view's window is read for the view it was asked in, though the
 /// app reads it on a later frame, when the map may show another (#1330): a command run again after
-/// a download sees the view it first ran with only while it runs.
+/// a download sees the view it first ran with only while it runs. The box is kept beside the
+/// request, not in what it asks, so the command run again is answered the raster added.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_window_asked_for_the_view_keeps_the_view_it_was_asked_in() {
-    use crate::cmd::layer::window_asked;
+    use crate::cmd::layer::{read_cog_window, window_asked, window_asked_in};
+    use rustgis_data::raster::cog::example;
+    let (base, _) = serve_ranges(example(1024, 256));
     let mut s = world();
     plugin("eng-window-view", &["edit", "network"]);
-    s.run("map.zoomToExtent", &json!({"extent": [10.0, 45.0, 11.0, 46.0]})).unwrap();
+    let layers = s.map().layers.len();
+    s.run("map.zoomToExtent", &json!({"extent": [10.3, 45.55, 10.45, 45.7]})).unwrap();
     let seen = crate::cmd::workspace::view_extent(&s);
-    let p = json!({"op": "layer.addUrl", "params": {"url": "https://x.org/scene.tif", "bbox": "view", "viewAsked": [0, 0, 1, 1]}});
+    let p = json!({"op": "layer.addUrl", "params": {"url": format!("{base}/scene.tif"), "bbox": "view", "name": "Window"}});
     s.run_leaving_downloads("plugin:eng-window-view/f", &p).unwrap();
     let asked = s.take_url_requests();
     assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].params()["bbox"], "view", "what it asks is as it asked it");
+    let close =
+        |a: [f64; 4], b: rustgis_geom::Extent| a.iter().zip([b.min_x, b.min_y, b.max_x, b.max_y]).all(|(a, b)| (a - b).abs() < 1e-9);
     s.run("map.zoomToExtent", &json!({"extent": [-50.0, -20.0, -40.0, -10.0]})).unwrap();
-    let read = window_asked(&s, asked[0].params()).unwrap().bbox();
-    let want = [seen.min_x, seen.min_y, seen.max_x, seen.max_y];
-    assert!(read.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-9), "{read:?} {want:?}");
-    // What the request says to read is the box it was asked in, not one a caller gave.
-    assert_eq!(asked[0].params()["bbox"], "view");
-    // A box asked for now is the view now.
+    let window = window_asked_in(&s, asked[0].params(), asked[0].view_asked()).unwrap();
+    assert!(close(window.bbox(), seen), "{:?} {seen:?}", window.bbox());
+    // Without the request's box, `"view"` is the view now.
     let now = crate::cmd::workspace::view_extent(&s);
-    let read = window_asked(&s, &json!({"url": "https://x.org/scene.tif", "bbox": "view"})).unwrap().bbox();
-    assert!((read[0] - now.min_x).abs() < 1e-9 && (read[3] - now.max_y).abs() < 1e-9, "{read:?}");
+    assert!(close(window_asked(&s, asked[0].params()).unwrap().bbox(), now));
+    // Read and added: the command run again is answered the raster added, and asks nothing more.
+    let id = s.download_started_for(&asked[0]).unwrap();
+    assert!(s.download_landed_window(id, read_cog_window(&window).unwrap()));
+    let mut add = asked[0].params().clone();
+    add["id"] = json!(id);
+    add["window"] = json!({"bbox": "view"});
+    s.complete_download(id, &add).unwrap();
+    let added = s.map().layer_by_name("Window").filter(|l| l.is_raster()).unwrap().id;
+    let ran = s.poll_plugin_retries();
+    assert_eq!(ran.len(), 1, "{ran:?}");
+    assert_eq!(ran[0].1.as_ref().unwrap()["layer"], json!(added), "{ran:?}");
+    assert_eq!(s.map().layers.len(), layers + 1, "added once");
+    assert!(s.take_url_requests().is_empty() && !s.plugin_retries_waiting());
 }
 
 /// A plugin's command asking for a window runs again once the app has read it and added it, and
