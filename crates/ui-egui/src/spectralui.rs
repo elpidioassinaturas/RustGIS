@@ -191,7 +191,9 @@ pub fn from_identify(app: &mut RustGisApp, id: u32, at: rustgis_engine::geom::Co
         app.session.notify(text, true);
         return;
     }
-    if let Err(e) = app.run("ui.pane.workflows", json!({"section": SECTION})) {
+    // Opening the section ends a map pick; with it already shown, Pick Points stays as it is.
+    let shown = app.ui.right == Some(crate::RightPane::Workflows) && app.workflow.section == SECTION;
+    if !shown && let Err(e) = app.run("ui.pane.workflows", json!({"section": SECTION})) {
         app.session.notify(e, true);
         return;
     }
@@ -751,6 +753,18 @@ mod tests {
         let sp = &app.workflow.spectral;
         assert_eq!(sp.samples.len(), 2, "{:?}", sp.message);
         assert_eq!(sp.message, None);
+    }
+
+    /// Identify's button with the section already shown and Pick Points on: picking stays on.
+    #[test]
+    fn identify_keeps_pick_points_on() {
+        let mut app = app_with_scene(false);
+        app.run("ui.pane.workflows", json!({"section": SECTION})).unwrap();
+        app.workflow.pick = Some(crate::analysispane::Pick { purpose: PURPOSE, needed: 1, points: Vec::new() });
+        let id = app.session.map().layer_by_name("scene").map(|l| l.id).unwrap();
+        from_identify(&mut app, id, rustgis_engine::geom::Coord::new(10.005, 44.995));
+        assert_eq!(app.workflow.spectral.samples.len(), 1);
+        assert!(app.workflow.pick.as_ref().is_some_and(|p| p.purpose == PURPOSE), "Pick Points stays on");
     }
 
     /// A point from Identify on a raster renamed while the section wasn't drawn: the same raster,
