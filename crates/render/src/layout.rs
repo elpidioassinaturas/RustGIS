@@ -600,8 +600,8 @@ pub struct Georeferenced {
     pub left_out: Vec<(u32, String, &'static str)>,
     /// The frames whose coordinate system can't be written as WKT (a grid shift, or a projection
     /// WKT1 has no name for), by id and name:
-    /// georeferenced by their corners in longitude/latitude, which put every place of the frame
-    /// within [`MAX_CORNER_FIT_MM`] of where it is drawn.
+    /// georeferenced by their corners in longitude/latitude, which put the places of a 9 × 9 grid
+    /// over the frame within [`MAX_CORNER_FIT_MM`] of where they are drawn ([`corner_fit_mm`]).
     pub by_corners: Vec<(u32, String)>,
 }
 
