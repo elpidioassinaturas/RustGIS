@@ -25,6 +25,8 @@ pub const PURPOSE: &str = "spectral";
 pub struct Sample {
     /// Its number, from 1: it keeps its colour and marker when an older point goes.
     pub n: u32,
+    /// Its colour's place in [`colour`]'s list: the first no other point kept has.
+    pub slot: usize,
     pub lon: f64,
     pub lat: f64,
     pub pixel: (i64, i64),
@@ -38,6 +40,9 @@ pub struct Spectral {
     pub bands: Vec<String>,
     /// Each band's wavelength in nanometres; empty when the file gives none.
     pub wavelengths: Vec<Option<f64>>,
+    /// The map (its place in the project) and layer the points were read on: a raster of the
+    /// same name on another map, or added again, isn't the same one.
+    pub source: Option<(usize, u32)>,
     /// Oldest first.
     pub samples: Vec<Sample>,
     /// The last point's number.
@@ -64,8 +69,8 @@ impl Spectral {
     }
 }
 
-/// A point's colour, by its number: the same on the chart, its legend and its marker.
-pub fn colour(t: &Tokens, n: u32) -> Color32 {
+/// A point's colour, by its slot: the same on the chart, its legend and its marker.
+pub fn colour(t: &Tokens, slot: usize) -> Color32 {
     let colours = [
         t.accent,
         Color32::from_rgb(214, 96, 77),
@@ -74,7 +79,12 @@ pub fn colour(t: &Tokens, n: u32) -> Color32 {
         Color32::from_rgb(230, 171, 2),
         Color32::from_rgb(27, 158, 119),
     ];
-    colours.get((n.max(1) as usize - 1) % colours.len()).copied().unwrap_or(t.accent)
+    colours.get(slot % colours.len()).copied().unwrap_or(t.accent)
+}
+
+/// The map (its place in the project) and layer the commands read as `layer`.
+fn source_of(app: &RustGisApp, layer: &str) -> Option<(usize, u32)> {
+    app.session.map().layer_by_name(layer).map(|l| (app.session.project.active_map, l.id))
 }
 
 /// The rasters a profile can be read on: those of two bands or more, by name, and how many
@@ -128,6 +138,7 @@ pub fn from_identify(app: &mut RustGisApp, id: u32, at: rustgis_engine::geom::Co
 /// said in the section.
 pub fn add_point(app: &mut RustGisApp, layer: &str, at: rustgis_engine::geom::Coord) {
     let r = app.run("raster.spectral", json!({"layer": layer, "lon": at.x, "lat": at.y}));
+    let source = source_of(app, layer);
     let sp = &mut app.workflow.spectral;
     let v = match r {
         Ok(v) => v,
@@ -139,18 +150,21 @@ pub fn add_point(app: &mut RustGisApp, layer: &str, at: rustgis_engine::geom::Co
     let bands: Vec<String> = v["bands"].as_array().into_iter().flatten().map(|b| b.as_str().unwrap_or_default().to_string()).collect();
     let wavelengths: Vec<Option<f64>> = v["wavelengths"].as_array().into_iter().flatten().map(Value::as_f64).collect();
     // Another raster, or the same one's bands changed: its points aren't comparable.
-    if sp.layer != layer || sp.bands != bands || sp.wavelengths != wavelengths {
+    if sp.layer != layer || sp.source != source || sp.bands != bands || sp.wavelengths != wavelengths {
         sp.samples.clear();
         sp.layer = layer.to_string();
+        sp.source = source;
         sp.bands = bands;
         sp.wavelengths = wavelengths;
     }
     let pixel = (v["pixel"][0].as_i64().unwrap_or(0), v["pixel"][1].as_i64().unwrap_or(0));
     let values: Vec<Option<f64>> = v["values"].as_array().into_iter().flatten().map(Value::as_f64).collect();
     sp.last += 1;
-    sp.samples.push(Sample { n: sp.last, lon: at.x, lat: at.y, pixel, values });
-    let excess = sp.samples.len().saturating_sub(MAX_POINTS);
-    sp.samples.drain(..excess);
+    // The oldest goes first, so the new point may take its colour.
+    let excess = (sp.samples.len() + 1).saturating_sub(MAX_POINTS);
+    sp.samples.drain(..excess.min(sp.samples.len()));
+    let slot = (0..MAX_POINTS).find(|k| sp.samples.iter().all(|s| s.slot != *k)).unwrap_or(0);
+    sp.samples.push(Sample { n: sp.last, slot, lon: at.x, lat: at.y, pixel, values });
     sp.message = (excess > 0).then(|| {
         let n = MAX_POINTS.to_string();
         (crate::i18n::fmt("Up to {n} points are compared: the oldest one was taken off.", &[("n", &n)]), false)
@@ -195,8 +209,10 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         })
         .response
         .on_hover_text(tl!("Layer"));
-    // Points on another raster aren't comparable with this one's.
-    if app.workflow.spectral.layer != app.workflow.layer && !app.workflow.spectral.samples.is_empty() {
+    // Points on another raster aren't comparable with this one's, nor those on a raster of its
+    // name that has since gone (another map, the layer added again).
+    let sp = &app.workflow.spectral;
+    if !sp.samples.is_empty() && (sp.layer != app.workflow.layer || source_of(app, &sp.layer) != sp.source) {
         app.workflow.spectral.clear();
     }
     // Points clicked on the map while picking: each is read, and picking goes on.
@@ -253,7 +269,7 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let mut remove = None;
     for (i, s) in app.workflow.spectral.samples.iter().enumerate() {
         ui.horizontal(|ui| {
-            let c = colour(t, s.n);
+            let c = colour(t, s.slot);
             let (n, lon, lat) = (s.n.to_string(), format!("{:.5}", s.lon), format!("{:.5}", s.lat));
             let (col, row) = (s.pixel.0.to_string(), s.pixel.1.to_string());
             let text = crate::i18n::fmt(
@@ -261,7 +277,10 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 &[("n", &n), ("lon", &lon), ("lat", &lat), ("col", &col), ("row", &row)],
             );
             ui.label(egui::RichText::new(text).small().color(c));
-            if ui.add(egui::Button::new(egui::RichText::new("×").small()).frame(false)).on_hover_text(tl!("Take this point off")).clicked()
+            if ui
+                .add(egui::Button::new(egui::RichText::new(tl!("×")).small()).frame(false))
+                .on_hover_text(tl!("Take this point off"))
+                .clicked()
             {
                 remove = Some(i);
             }
@@ -305,7 +324,7 @@ fn chart(sp: &Spectral, ui: &mut Ui, t: &Tokens) {
     }
     painter.line_segment([pos2(plot.min.x, plot.max.y + 2.0), pos2(plot.max.x, plot.max.y + 2.0)], Stroke::new(1.0, t.border_strong));
     for s in &sp.samples {
-        let c = colour(t, s.n);
+        let c = colour(t, s.slot);
         // Runs between bands with no data, so a gap shows as one.
         let mut runs: Vec<Vec<Pos2>> = vec![Vec::new()];
         for b in &order {
@@ -343,20 +362,24 @@ fn chart(sp: &Spectral, ui: &mut Ui, t: &Tokens) {
     if let Some(b) = near {
         let px = xs.get(b).map_or(plot.min.x, |x| to(*x, lo).x);
         painter.line_segment([pos2(px, plot.min.y), pos2(px, plot.max.y)], Stroke::new(1.0, t.text_dim));
+        // Bands of one wavelength sit at one place: each is shown.
+        let at: Vec<usize> = (0..xs.len()).filter(|i| xs.get(*i) == xs.get(b)).collect();
         resp.on_hover_ui_at_pointer(|ui| {
-            let name = sp.bands.get(b).map_or("", String::as_str);
-            let number = (b + 1).to_string();
-            let title = match sp.wavelengths.get(b).copied().flatten() {
-                Some(w) => {
-                    crate::i18n::fmt("Band {n}: {name}, {wavelength} nm", &[("n", &number), ("name", name), ("wavelength", &fmt(w))])
+            for b in at {
+                let name = sp.bands.get(b).map_or("", String::as_str);
+                let number = (b + 1).to_string();
+                let title = match sp.wavelengths.get(b).copied().flatten() {
+                    Some(w) => {
+                        crate::i18n::fmt("Band {n}: {name}, {wavelength} nm", &[("n", &number), ("name", name), ("wavelength", &fmt(w))])
+                    }
+                    None => crate::i18n::fmt("Band {n}: {name}", &[("n", &number), ("name", name)]),
+                };
+                ui.label(egui::RichText::new(title).small().strong());
+                for s in &sp.samples {
+                    let v = s.values.get(b).copied().flatten().map_or_else(|| tl!("no data").to_string(), fmt);
+                    let n = s.n.to_string();
+                    ui.label(egui::RichText::new(crate::i18n::fmt("● {n}  {v}", &[("n", &n), ("v", &v)])).small().color(colour(t, s.slot)));
                 }
-                None => crate::i18n::fmt("Band {n}: {name}", &[("n", &number), ("name", name)]),
-            };
-            ui.label(egui::RichText::new(title).small().strong());
-            for s in &sp.samples {
-                let v = s.values.get(b).copied().flatten().map_or_else(|| tl!("no data").to_string(), fmt);
-                let n = s.n.to_string();
-                ui.label(egui::RichText::new(crate::i18n::fmt("● {n}  {v}", &[("n", &n), ("v", &v)])).small().color(colour(t, s.n)));
             }
         });
     }
@@ -398,7 +421,7 @@ pub fn paint(app: &RustGisApp, p: &egui::Painter, t: &Tokens, to_screen: impl Fn
     }
     for s in &app.workflow.spectral.samples {
         let Some(at) = to_screen(rustgis_engine::geom::Coord::new(s.lon, s.lat)) else { continue };
-        let c = colour(t, s.n);
+        let c = colour(t, s.slot);
         p.circle_filled(at, 7.0, c);
         p.circle_stroke(at, 7.0, Stroke::new(1.5, Color32::WHITE));
         p.text(at, egui::Align2::CENTER_CENTER, s.n.to_string(), semibold(10.0), Color32::WHITE);
@@ -501,6 +524,29 @@ mod tests {
         add_point(&mut app, "other", rustgis_engine::geom::Coord::new(10.005, 44.995));
         assert_eq!(app.workflow.spectral.samples.len(), 1);
         assert_eq!(app.workflow.spectral.layer, "other");
+    }
+
+    /// A point added after one is taken off takes a colour no point kept has; a raster of the
+    /// same name added again starts the profile again.
+    #[test]
+    fn a_new_point_takes_a_free_colour_and_a_new_raster_starts_again() {
+        let mut app = app_with_scene(false);
+        for i in 0..MAX_POINTS {
+            add_point(&mut app, "scene", rustgis_engine::geom::Coord::new(10.005 + 0.001 * i as f64, 44.995));
+        }
+        app.workflow.spectral.samples.remove(1);
+        add_point(&mut app, "scene", rustgis_engine::geom::Coord::new(10.005, 44.995));
+        let slots: Vec<usize> = app.workflow.spectral.samples.iter().map(|s| s.slot).collect();
+        assert_eq!(slots, [0, 2, 3, 4, 5, 1], "the new point takes the colour point 2 left");
+        // Past six, the oldest goes and the new point takes its colour.
+        add_point(&mut app, "scene", rustgis_engine::geom::Coord::new(10.005, 44.995));
+        let slots: Vec<usize> = app.workflow.spectral.samples.iter().map(|s| s.slot).collect();
+        assert_eq!(slots, [2, 3, 4, 5, 1, 0]);
+        // The scene removed and another of its name added: its points aren't the old ones.
+        app.run("layer.remove", json!({"layer": "scene"})).unwrap();
+        app.run("layer.addDataBytes", json!({"fileName": "scene.tif", "data": rgb_tiff_b64(false)})).unwrap();
+        add_point(&mut app, "scene", rustgis_engine::geom::Coord::new(10.005, 44.995));
+        assert_eq!(app.workflow.spectral.samples.len(), 1);
     }
 
     /// Identify's pop-up offers the profile on a pixel of two bands or more, and its button opens

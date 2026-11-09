@@ -3606,6 +3606,7 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
                                 let (r, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
                                 let ink = if resp.hovered() { t.text } else { t.icon };
                                 crate::icons::paint(ui.painter(), r, "chart", ink, t.accent);
+                                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("Spectral Profile")));
                                 if resp.on_hover_text(tl!("Spectral Profile: chart every band here, and compare points")).clicked() {
                                     profile = true;
                                 }
