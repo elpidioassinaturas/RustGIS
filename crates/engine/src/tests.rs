@@ -31866,6 +31866,12 @@ fn a_frame_drawn_over_another_is_cut_out_of_its_viewport() {
         let [vx, vy, vw, vh] = v.rect_mm;
         assert!(vx + vw <= ix + 1e-9 || ix + iw <= vx + 1e-9 || vy + vh <= iy + 1e-9 || iy + ih <= vy + 1e-9, "{:?}", v.rect_mm);
     }
+    // Their box is the frame's own, as it is placed with nothing over it.
+    s.project.layouts[0].elements.iter_mut().find(|e| e.id == 9_001).unwrap().visible = false;
+    let alone = rustgis_render::layout::frame_viewports(&s.project.layouts[0], &s.project.maps, 72.0);
+    let [fx, fy, fw, fh] = alone.viewports[0].rect_mm;
+    assert_eq!(alone.viewports.len(), 1);
+    assert!([x0 - fx, y0 - fy, x1 - (fx + fw), y1 - (fy + fh)].iter().all(|d| d.abs() < 1e-9), "{:?}", (x0, y0, x1, y1));
 }
 
 #[test]
