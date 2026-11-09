@@ -1456,9 +1456,9 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
   nanometres when the file gives one for every band (see [Rasters](data.md#rasters)), drawn in
   wavelength order, and their numbers otherwise. Hovering the chart shows a band's name, wavelength
   and each point's value; **×** takes a point off, **Clear** all of them, and **Export CSV…**
-  (desktop) writes a row a band (its number, name and wavelength) and a column a point. From
-  scripts, `{"layer": "scene", "points": [[-43.95, -19.92], [-43.96, -19.93]]}` gives a profile a
-  point (up to 1,000; a point off the raster keeps its place with null values, and is said),
+  (desktop) writes a row per band (its number, name and wavelength) and a column per point. From
+  scripts, `{"layer": "scene", "points": [[-43.95, -19.92], [-43.96, -19.93]]}` gives one profile
+  per point (up to 1,000; a point off the raster keeps its place with null values, and is said),
   `{"lon", "lat"}` one pixel and `{"zone": "polygons"}` the mean in the selected or first polygon;
   every answer has the band names and, when the file gives any, `"wavelengths"` in nanometres.
   After GeoLibre's spectral profile.
