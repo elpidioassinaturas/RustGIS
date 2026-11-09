@@ -1143,8 +1143,8 @@ domain), or a `wavelength` or `central_wavelength` item (as rasterio, STAC expor
 through GDAL write them) in the unit a `wavelength_units` item gives. With no unit, a value under 100
 is read as micrometres and any other as nanometres: imaging sensors see from about 0.3 to 15 µm, so
 the two never meet. One that isn't a length from 1 nm to 1 m, or another length for a band that has
-one, is said and left out. A GeoTIFF export writes the wavelengths of the bands it writes (one band, or a raster's
-RGB) back as `CENTRAL_WAVELENGTH_UM`. Projects remember a raster's file
+one, is said and left out. A GeoTIFF export writes the wavelengths of the bands it writes (one
+band, or a raster's RGB) back as `CENTRAL_WAVELENGTH_UM`. Projects remember a raster's file
 path relative to the project and reopen it; rasters added in the browser are stored inside the project.
 
 ### Zarr stores
