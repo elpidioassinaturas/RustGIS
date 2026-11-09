@@ -31725,7 +31725,7 @@ fn a_layout_pdf_georeferences_its_map_frames() {
     assert!(!said.iter().any(|t| t.contains("georeference")), "{said:?}");
     // A projection with no WKT form (the GOES-16 fixed grid): at a large scale its corners in
     // longitude/latitude put every place within half a millimetre, so it is georeferenced by
-    // them, and said; at a small one they wouldn't, so it is left out with a measureless viewport.
+    // them, and said; at a small one they wouldn't, so it is left out: no viewports.
     s.run("map.projection", &json!({"type": "ESRI:102498"})).unwrap();
     s.run("layout.update", &json!({"element": frame.id, "center": [-60.0, -10.0], "scale": 50_000.0})).unwrap();
     let (pdf, said) = export(&mut s);
@@ -31799,9 +31799,9 @@ fn a_pdf_says_which_frames_it_doesnt_georeference() {
 }
 
 /// A frame left out of georeferencing over one that is (a tilted inset on the main map) has a
-/// viewport with no measure after the main map's, so that a reader, which takes the last viewport
-/// holding a point (ISO 32000-1, 12.9.2), gives the inset no coordinates rather than the main
-/// map's (#1191).
+/// viewport without coordinates after the main map's, so that a reader, which takes the last
+/// viewport holding a point (ISO 32000-1, 12.9.2), gives the inset no coordinates rather than the
+/// main map's (#1191).
 #[test]
 fn a_frame_left_out_covers_the_frame_under_it() {
     let mut s = world();

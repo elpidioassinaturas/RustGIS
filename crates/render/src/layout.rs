@@ -593,8 +593,8 @@ fn frame_outline_lonlat(map: &Map, cam: &rustgis_map::Camera, w: f64, h: f64) ->
 /// The map frames of a page georeferenced for a PDF ([`frame_viewports`], #1191).
 #[derive(Debug, Default)]
 pub struct Georeferenced {
-    /// One for each visible frame, in drawing order: georeferenced, or with no measure for a frame
-    /// that couldn't be. None when no frame could be.
+    /// One for each visible frame, in drawing order: georeferenced, or measured on paper only for
+    /// a frame that couldn't be. None when no frame could be.
     pub viewports: Vec<crate::pdf::Viewport>,
     /// The frames that couldn't be, by id and name, with why.
     pub left_out: Vec<(u32, String, &'static str)>,
@@ -615,7 +615,7 @@ pub const MAX_CORNER_FIT_MM: f64 = 0.5;
 /// on, so it is left out, as is one on another body than the Earth, one whose map is missing,
 /// one with a corner off the Earth, one across its projection's edge (the 180° meridian) and one
 /// whose system has no WKT and whose corners alone would misplace it. A frame left out keeps a
-/// viewport with no measure, so that a frame it covers doesn't show through.
+/// viewport with no coordinates, so that a frame it covers doesn't show through.
 pub fn frame_viewports(layout: &Layout, maps: &[Map], dpi: f64) -> Georeferenced {
     let mut out = Georeferenced::default();
     // A frame is drawn from a whole pixel of the page ([`draw_page`]), whose pixels are stretched
@@ -644,7 +644,7 @@ pub fn frame_viewports(layout: &Layout, maps: &[Map], dpi: f64) -> Georeferenced
             }
         }
     }
-    // Only measureless viewports: nothing to locate in, so none.
+    // Only frames without coordinates: nothing to locate in, so none.
     if out.viewports.iter().all(|v| v.measure.is_none()) {
         out.viewports.clear();
     }
