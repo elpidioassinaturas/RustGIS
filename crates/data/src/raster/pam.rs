@@ -252,13 +252,16 @@ pub fn read(path: &Path) -> Option<Pam> {
         [(_, e)] => e.clone(),
         all => all.iter().map(|(name, e)| format!("{name}: {e}")).collect::<Vec<_>>().join("; "),
     };
-    Some(Pam::losing(format!("{reason}: its statistics, no-data and band names are left out")))
+    Some(Pam::losing(format!("{reason}: its statistics, no-data, band names and wavelengths are left out")))
 }
 
 /// Parses a sidecar's text. One that doesn't read as XML, or isn't a PAM document, names nothing:
 /// it comes back with only [`Pam::lost`] saying so. Its size is checked by [`read`] only.
 pub fn parse(text: &str) -> Option<Pam> {
-    Some(parse_sidecar(text).unwrap_or_else(|e| Pam::losing(format!("{e}: its statistics, no-data and band names are left out"))))
+    Some(
+        parse_sidecar(text)
+            .unwrap_or_else(|e| Pam::losing(format!("{e}: its statistics, no-data, band names and wavelengths are left out"))),
+    )
 }
 
 /// [`parse`], with why a document isn't read as the error.
@@ -426,12 +429,14 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
     let opts = ParsingOptions { allow_dtd: false, nodes_limit: crate::io::XML_NODES, ..ParsingOptions::default() };
     let doc = match crate::xml::parse(text, opts) {
         Ok(doc) => doc,
-        Err(e) => return Some(Pam::losing(format!("it doesn't read as XML ({e}): band and class names are left out"))),
+        Err(e) => return Some(Pam::losing(format!("it doesn't read as XML ({e}): band and class names and wavelengths are left out"))),
     };
     let root = doc.root_element();
     if root.tag_name().name() != "GDALMetadata" {
         let name = root.tag_name().name().chars().take(40).collect::<String>();
-        return Some(Pam::losing(format!("it is a <{name}> document, not GDAL's <GDALMetadata>: band and class names are left out")));
+        return Some(Pam::losing(format!(
+            "it is a <{name}> document, not GDAL's <GDALMetadata>: band and class names and wavelengths are left out"
+        )));
     }
     let mut pam = Pam::default();
     // What is left out or cut, counted.
@@ -849,7 +854,7 @@ mod tests {
         ] {
             let pam = parse(text).unwrap();
             assert!(pam.bands.is_empty() && pam.lost.len() == 1 && pam.lost[0].contains(said), "{text}: {pam:?}");
-            assert!(pam.lost[0].ends_with("its statistics, no-data and band names are left out"), "{text}: {pam:?}");
+            assert!(pam.lost[0].ends_with("its statistics, no-data, band names and wavelengths are left out"), "{text}: {pam:?}");
         }
         let deep = format!("<PAMDataset>{}{}</PAMDataset>", "<a>".repeat(100_000), "</a>".repeat(100_000));
         let deep = parse(&deep).unwrap();
@@ -890,7 +895,7 @@ mod tests {
                 && both.lost.len() == 1
                 && both.lost[0].starts_with("x.tif.aux.xml: it isn't UTF-8 text")
                 && both.lost[0].contains("; x.aux.xml: ")
-                && both.lost[0].ends_with(": its statistics, no-data and band names are left out"),
+                && both.lost[0].ends_with(": its statistics, no-data, band names and wavelengths are left out"),
             "{both:?}"
         );
         // A sidecar that parses first says nothing of the other.
@@ -1002,6 +1007,10 @@ mod tests {
         let pam = parse_gdal_metadata(xml).unwrap();
         assert_eq!(pam.band(1).and_then(|b| b.wavelength), Some(1.6));
         assert!(pam.lost.is_empty(), "{:?}", pam.lost);
+        // A tag that doesn't read loses its wavelengths too, and says so.
+        let broken = parse_gdal_metadata(r#"<GDALMetadata><Item name="wavelength" sample="0">665</Item>"#).unwrap();
+        assert_eq!(broken.band(1).and_then(|b| b.wavelength), None);
+        assert!(broken.lost.iter().any(|l| l.ends_with("band and class names and wavelengths are left out")), "{:?}", broken.lost);
         // A unit the dataset gives is a band's when it gives none; then a large value may be in µm.
         let xml =
             r#"<GDALMetadata><Item name="wavelength_units">micrometers</Item><Item name="wavelength" sample="0">120</Item></GDALMetadata>"#;

@@ -418,12 +418,12 @@ fn read_layout(r: Sparse) -> Result<Parse> {
         Ok(Some(v)) => match v.into_string() {
             Ok(t) => super::pam::parse_gdal_metadata(&t),
             Err(e) => {
-                lost.push(format!("its GDAL metadata isn't text ({e}): band and class names are left out"));
+                lost.push(format!("its GDAL metadata isn't text ({e}): band and class names and wavelengths are left out"));
                 None
             }
         },
         Err(e) => {
-            lost.push(format!("its GDAL metadata doesn't decode ({e}): band and class names are left out"));
+            lost.push(format!("its GDAL metadata doesn't decode ({e}): band and class names and wavelengths are left out"));
             None
         }
     };
@@ -1073,7 +1073,7 @@ pub(crate) mod tests {
         bad[entry + 8..entry + 12].copy_from_slice(&(len + 1000).to_le_bytes());
         let Parse::Done(l) = layout(&Sparse::default().with_len(u64::from(len)).with(0, bad)).unwrap() else { panic!("not read") };
         let said: Vec<&String> = l.lost.iter().chain(l.described.iter().flat_map(|d| d.lost.iter())).collect();
-        assert!(said.iter().any(|x| x.contains("band and class names are left out")), "{said:?}");
+        assert!(said.iter().any(|x| x.contains("band and class names and wavelengths are left out")), "{said:?}");
     }
 
     #[test]
