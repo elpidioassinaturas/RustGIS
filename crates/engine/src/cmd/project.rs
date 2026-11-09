@@ -442,9 +442,21 @@ fn open_text(s: &mut Session, p: &Value) -> CmdResult {
 
 /// Saves the project to `path` (`.rgis` added when it has no extension) and makes it the
 /// project's file. The project as it is now is the saved state undo can return to.
+///
+/// The path must name a project file (`.rgis`, or the legacy `.rgisx`, in any case), so a save
+/// never goes over a data file, a package or any other kind of file, including when the
+/// project was opened from a file with another extension.
 fn write(s: &mut Session, path: PathBuf) -> CmdResult {
     let path = if path.extension().is_none() { path.with_extension(crate::project::EXTENSION) } else { path };
     let destination = std::path::absolute(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if !crate::project::is_project_file(&path.to_string_lossy()) {
+        let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        return Err(if ext == crate::project::PACKAGE_EXTENSION {
+            "a project saves to a .rgis file; Package Project (project.package) writes a .rgispkg package".into()
+        } else {
+            format!("a project saves to a .rgis file, not a .{ext} one")
+        });
+    }
     let report = s.project.save(&destination)?;
     let stripped = report.layer_addresses();
     s.mark_saved();
@@ -562,7 +574,7 @@ fn info(s: &mut Session, p: &Value) -> CmdResult {
                     // The text expression it labels by while that reads, as the map draws, else its field.
                     "labels": l.labels.enabled.then(|| {
                         let d = &l.labels.default;
-                        d.by.text.as_deref().filter(|t| rustgis_data::query::parse(t, &l.dataset).is_ok())
+                        d.by.text.as_deref().filter(|t| rustgis_data::query::parse_fields(t, &l.dataset).is_ok())
                             .or(Some(d.field.as_str()).filter(|f| !f.is_empty()))
                     }).flatten(),
                     "labelClasses": label_classes_set(&l.labels)
