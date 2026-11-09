@@ -2,7 +2,8 @@
 //! six compared, against wavelength when the file gives one for every band and band number
 //! otherwise. It is the Workflows pane's Spectral Analysis section, and Identify's pop-up on a
 //! pixel of two or more bands adds that pixel to it. After GeoLibre's spectral profile
-//! (opengeos/geolibre#1818, MIT).
+//! (opengeos/geolibre#1818, MIT): its TypeScript (`cog-spectral-profile.ts` and the NetCDF
+//! profile chart) was read for what it does, and this Rust was written anew, no code copied.
 
 use egui::{Color32, Pos2, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::{Value, json};
