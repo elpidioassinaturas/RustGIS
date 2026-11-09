@@ -149,11 +149,12 @@ fn keep_first_wavelength(slot: &mut Option<f64>, nm: f64) -> bool {
     }
 }
 
-/// How many of `units` after the first name another unit than it (case and spaces aside): those
-/// are left out, the first being the one read.
-fn other_units<'a>(mut units: impl Iterator<Item = &'a str>) -> usize {
+/// How many of `units` after the first that names one name another unit than it (case and
+/// spaces aside): those are left out, the first being the one read. An empty item names none.
+fn other_units<'a>(units: impl Iterator<Item = &'a str>) -> usize {
+    let mut units = units.map(str::trim).filter(|u| !u.is_empty());
     let Some(first) = units.next() else { return 0 };
-    units.filter(|u| !u.trim().eq_ignore_ascii_case(first.trim())).count()
+    units.filter(|u| !u.eq_ignore_ascii_case(first)).count()
 }
 
 /// A sidecar node's metadata items `key` (any domain, any case): their texts, empty for an item
@@ -166,13 +167,15 @@ fn mdi_texts<'a>(node: roxmltree::Node<'a, '_>, key: &'a str) -> impl Iterator<I
         .map(|n| n.text().unwrap_or_default())
 }
 
-/// A sidecar node's metadata item `key` (any domain, any case): its text.
+/// A sidecar node's metadata item `key` (any domain, any case): the text of the first that has
+/// one (an empty item says nothing).
 fn mdi_text<'a>(node: roxmltree::Node<'a, '_>, key: &str) -> Option<&'a str> {
     node.children()
         .filter(|n| n.has_tag_name("Metadata"))
         .flat_map(|m| m.children())
-        .find(|n| n.has_tag_name("MDI") && n.attribute("key").is_some_and(|k| k.eq_ignore_ascii_case(key)))
-        .and_then(|n| n.text())
+        .filter(|n| n.has_tag_name("MDI") && n.attribute("key").is_some_and(|k| k.eq_ignore_ascii_case(key)))
+        .filter_map(|n| n.text())
+        .find(|t| !t.trim().is_empty())
 }
 
 /// The sidecars GDAL would read for `path`: `x.tif.aux.xml`, then `x.aux.xml`.
@@ -539,7 +542,8 @@ fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> (usize, usi
             odd += 1;
             continue;
         };
-        if let Some(t) = item.text() {
+        // An empty unit names none: the next one is read, as in the sidecar.
+        if let Some(t) = item.text().filter(|t| !t.trim().is_empty()) {
             match units.entry(at) {
                 std::collections::hash_map::Entry::Vacant(v) => {
                     v.insert(t);
@@ -1019,6 +1023,13 @@ mod tests {
         let twice = parse(r#"<PAMDataset><PAMRasterBand band="1"><Metadata><MDI key="wavelength_units">nm</MDI><MDI key="wavelength_units">micrometers</MDI><MDI key="wavelength">1.6</MDI></Metadata></PAMRasterBand></PAMDataset>"#).unwrap();
         assert_eq!(twice.band(1).and_then(|b| b.wavelength), Some(1.6));
         assert_eq!(twice.lost, ["1 other wavelength unit(s) for a band or the dataset left out (the first is kept)"]);
+        // An empty unit names none, in the sidecar and the metadata tag alike: the next is read.
+        let sidecar = parse(r#"<PAMDataset><PAMRasterBand band="1"><Metadata><MDI key="wavelength_units"/><MDI key="wavelength_units">nm</MDI><MDI key="wavelength">0.665</MDI></Metadata></PAMRasterBand></PAMDataset>"#).unwrap();
+        let tag = parse_gdal_metadata(r#"<GDALMetadata><Item name="wavelength_units" sample="0"> </Item><Item name="wavelength_units" sample="0">nm</Item><Item name="wavelength" sample="0">0.665</Item></GDALMetadata>"#).unwrap();
+        for pam in [sidecar, tag] {
+            assert_eq!(pam.band(1).and_then(|b| b.wavelength), Some(0.665));
+            assert!(pam.lost.is_empty(), "{:?}", pam.lost);
+        }
         // Lengths half a thousandth of a nanometre apart are two.
         let mut slot = None;
         assert!(!keep_first_wavelength(&mut slot, 665.0));
