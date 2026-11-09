@@ -113,10 +113,12 @@ fn is_wavelength_item(name: &str) -> bool {
 }
 
 /// A wavelength item's value in nanometres: `None` when it isn't a length from 1 nm to 1 m (no
-/// sensor's band lies outside), or its unit isn't a length this knows. `CENTRAL_WAVELENGTH_UM` is in micrometres by its name; another item
-/// is in the unit `units` gives (nanometres or micrometres, as ENVI and others spell them). With no
-/// unit (or ENVI's `Unknown`), a value under 100 is in micrometres and any other in nanometres:
-/// imaging sensors see from about 0.3 to 15 µm (300 to 15,000 nm), so the two never meet.
+/// sensor's band lies outside), or its unit isn't a length this knows.
+///
+/// `CENTRAL_WAVELENGTH_UM` is in micrometres by its name; another item is in the unit `units`
+/// gives (nanometres or micrometres, as ENVI and others spell them). With no unit (or ENVI's
+/// `Unknown`), a value under 100 is in micrometres and any other in nanometres: imaging sensors
+/// see from about 0.3 to 15 µm (300 to 15,000 nm), so the two never meet.
 pub fn wavelength_nm(item: &str, text: &str, units: Option<&str>) -> Option<f64> {
     let v = text.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0)?;
     // Micrometres in nanometres, to a millionth of one: 0.665 µm is 665 nm, not 665.0000000000001.

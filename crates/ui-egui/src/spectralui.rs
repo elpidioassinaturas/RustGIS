@@ -52,6 +52,26 @@ pub struct Spectral {
 }
 
 impl Spectral {
+    /// Takes every point off, as they aren't comparable with what is read now (`now`: the raster
+    /// chosen, or `None` when theirs has changed or gone), and says how many went.
+    pub fn restart(&mut self, now: Option<&str>) {
+        let n = self.samples.len();
+        self.samples.clear();
+        self.message = (n > 0).then(|| {
+            let (n, old) = (n.to_string(), self.layer.clone());
+            let text = match now {
+                Some(now) => crate::i18n::fmt(
+                    "{n} point(s) taken off: they were read on {old}, not on {now}.",
+                    &[("n", &n), ("old", &old), ("now", now)],
+                ),
+                None => {
+                    crate::i18n::fmt("{n} point(s) taken off: {old} has changed or gone since they were read.", &[("n", &n), ("old", &old)])
+                }
+            };
+            (text, false)
+        });
+    }
+
     /// Empties it.
     pub fn clear(&mut self) {
         self.samples.clear();
@@ -155,9 +175,12 @@ pub fn add_point(app: &mut RustGisApp, layer: &str, at: rustgis_engine::geom::Co
     };
     let bands: Vec<String> = v["bands"].as_array().into_iter().flatten().map(|b| b.as_str().unwrap_or_default().to_string()).collect();
     let wavelengths: Vec<Option<f64>> = v["wavelengths"].as_array().into_iter().flatten().map(Value::as_f64).collect();
-    // Another raster, or the same one's bands changed: its points aren't comparable.
+    // Another raster, or the same one's bands changed: its points aren't comparable, and that
+    // they went is said.
+    let mut restarted = None;
     if sp.layer != layer || sp.source != source || sp.bands != bands || sp.wavelengths != wavelengths {
-        sp.samples.clear();
+        sp.restart(if sp.layer.eq_ignore_ascii_case(layer) { None } else { Some(layer) });
+        restarted = sp.message.take();
         sp.layer = layer.to_string();
         sp.source = source;
         sp.bands = bands;
@@ -171,10 +194,13 @@ pub fn add_point(app: &mut RustGisApp, layer: &str, at: rustgis_engine::geom::Co
     sp.samples.drain(..excess.min(sp.samples.len()));
     let slot = (0..MAX_POINTS).find(|k| sp.samples.iter().all(|s| s.slot != *k)).unwrap_or(0);
     sp.samples.push(Sample { n: sp.last, slot, lon: at.x, lat: at.y, pixel, values });
-    sp.message = (excess > 0).then(|| {
-        let n = MAX_POINTS.to_string();
-        (crate::i18n::fmt("Up to {n} points are compared: the oldest one was taken off.", &[("n", &n)]), false)
-    });
+    // What this point did is said: an older one going, or the points before it taken off.
+    sp.message = (excess > 0)
+        .then(|| {
+            let n = MAX_POINTS.to_string();
+            (crate::i18n::fmt("Up to {n} points are compared: the oldest one was taken off.", &[("n", &n)]), false)
+        })
+        .or(restarted);
 }
 
 /// The section: the raster, Pick Points, the chart and its points.
@@ -186,7 +212,7 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     // dropped, even when no raster is left to choose.
     let sp = &app.workflow.spectral;
     if !sp.samples.is_empty() && !fresh(app) {
-        app.workflow.spectral.clear();
+        app.workflow.spectral.restart(None);
     }
     let (rasters, shadowed) = multiband(app);
     if shadowed > 0 {
@@ -198,6 +224,10 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         ui.label(
             egui::RichText::new(tl!("Add a raster of two or more bands first, such as a Landsat or Sentinel-2 scene.")).weak().small(),
         );
+        // Points just taken off are said here too.
+        if let Some((text, _)) = &app.workflow.spectral.message {
+            ui.label(egui::RichText::new(text.as_str()).small().color(t.text_dim));
+        }
         // With nothing to read, picking ends: a click would be taken and go nowhere.
         if app.workflow.pick.as_ref().is_some_and(|p| p.purpose == PURPOSE) {
             app.workflow.pick = None;
@@ -223,7 +253,8 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         .on_hover_text(tl!("Layer"));
     // Points on another raster aren't comparable with this one's.
     if !app.workflow.spectral.samples.is_empty() && app.workflow.spectral.layer != app.workflow.layer {
-        app.workflow.spectral.clear();
+        let now = app.workflow.layer.clone();
+        app.workflow.spectral.restart(Some(&now));
     }
     // Points clicked on the map while picking: each is read, and picking goes on.
     let clicked = match &mut app.workflow.pick {
@@ -537,6 +568,11 @@ mod tests {
         add_point(&mut app, "other", rustgis_engine::geom::Coord::new(10.005, 44.995));
         assert_eq!(app.workflow.spectral.samples.len(), 1);
         assert_eq!(app.workflow.spectral.layer, "other");
+        assert_eq!(
+            app.workflow.spectral.message,
+            Some(("6 point(s) taken off: they were read on scene, not on other.".to_string(), false)),
+            "the points that went are said"
+        );
     }
 
     /// A point added after one is taken off takes a colour no point kept has; a raster of the
@@ -572,6 +608,10 @@ mod tests {
         );
         h.run_steps(1);
         assert!(h.state().workflow.spectral.samples.is_empty());
+        assert_eq!(
+            h.state().workflow.spectral.message,
+            Some(("1 point(s) taken off: scene has changed or gone since they were read.".to_string(), false))
+        );
     }
 
     /// Identify's pop-up offers the profile on a pixel of two bands or more, and its button opens
