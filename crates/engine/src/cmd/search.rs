@@ -398,15 +398,17 @@ fn search_cmd(s: &mut Session, p: &Value) -> CmdResult {
 /// A place typed as an MGRS reference (the centre of the square it names) or a UTM position, in
 /// the forms [`rustgis_geom::parse_mgrs`] and [`rustgis_geom::parse_utm`] accept; `None` for
 /// anything else, an ambiguous UTM zone letter or a reference that names no place.
+#[cfg(test)]
 pub fn parse_grid_reference(text: &str) -> Option<Coord> {
     read_grid_reference(text).ok()
 }
 
-/// As [`parse_grid_reference`], with why a reference was refused: [`GridError::Syntax`] for text
-/// written as neither form, otherwise the reason of the form it was written in. A 100 km square
-/// alone written with spaces (`5 Ave`, `4K TV`) is a number and a word as often as a reference,
-/// so one that names no square is [`GridError::Syntax`] too; written as one word (`38TMJ`), it
-/// says why.
+/// A place typed as an MGRS reference (the centre of the square it names) or a UTM position, in
+/// the forms [`rustgis_geom::parse_mgrs`] and [`rustgis_geom::parse_utm`] accept, or why it was
+/// refused: [`GridError::Syntax`] for text written as neither form, otherwise the reason of the
+/// form it was written in. A 100 km square alone written with spaces (`5 Ave`, `4K TV`) is a
+/// number and a word as often as a reference, so one that names no square is
+/// [`GridError::Syntax`] too; written as one word (`38TMJ`), it says why.
 pub fn read_grid_reference(text: &str) -> Result<Coord, GridError> {
     match rustgis_geom::parse_mgrs(text) {
         Ok(m) => m.centre(),
@@ -721,6 +723,9 @@ mod tests {
             ("38Z 444141 3684706", GridError::Polar),
             ("38ZMB4414084706", GridError::Polar),
             ("99X 1 2", GridError::Zone),
+            // A bad zone is judged before a polar or unknown band.
+            ("0AAA", GridError::Zone),
+            ("61AVE", GridError::Zone),
             ("33U 1000000 5523456", GridError::OutsideZone),
         ] {
             assert_eq!(read_grid_reference(q), Err(why), "{q}");

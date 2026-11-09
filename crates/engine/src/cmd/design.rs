@@ -939,8 +939,8 @@ fn polar_transform(
     })
 }
 
-/// [`modify`] for a move, turn or scale, which leaves a vertex missing a coordinate where it was:
-/// says how many of the features it changed have one.
+/// [`modify`] for a move, turn or scale, which leaves a vertex missing a coordinate (or with an
+/// infinite one) where it was: says how many of the features it changed have one.
 fn move_features(s: &mut Session, mut change: impl FnMut((u32, usize), &Geometry) -> Result<Option<Geometry>, String>) -> CmdResult {
     let mut missing = 0usize;
     let done = modify(s, |key, g| {
@@ -953,7 +953,7 @@ fn move_features(s: &mut Session, mut change: impl FnMut((u32, usize), &Geometry
         Ok(moved)
     })?;
     if missing > 0 {
-        s.warn(format!("{missing} feature(s) have a vertex missing a coordinate, which was left where it was"));
+        s.warn(format!("{missing} feature(s) have a vertex missing a coordinate or with an infinite one, which was left where it was"));
     }
     Ok(done)
 }
@@ -986,7 +986,7 @@ fn modify(s: &mut Session, mut change: impl FnMut((u32, usize), &Geometry) -> Re
 fn set_geometry(s: &mut Session, p: &Json) -> CmdResult {
     let id = s.layer_id(p)?;
     let row = p.get("row").and_then(Json::as_u64).ok_or("row is required")? as usize;
-    let g = p.get("geometry").and_then(rustgis_data::io::geometry_from_geojson).ok_or("geometry must be a GeoJSON geometry")?;
+    let g = super::edit::geometry_param(p)?;
     replace_geometry(s, id, row, g)?;
     Ok(Json::Null)
 }

@@ -39,12 +39,16 @@ pub fn commands() -> Vec<C> {
             let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
             let gpkg = gpkg_table(p, &ext)?;
             let t = s.project.tables.get(s.table_index(p)?).ok_or("no such table")?;
+            let default = t.dataset.name.clone();
             // Tables may retain geometry and its import losses, just as feature layers do.
             let notes = rustgis_data::export_notes([(&t.dataset, t.dataset.extent())], path, Crs::LonLat);
             let mut dbf_notes = Vec::new();
             if matches!(ext.as_str(), "shp" | "zip") {
                 dbf_notes.extend(rustgis_data::io::shapefile_names_note(&t.dataset.fields, path));
                 dbf_notes.extend(rustgis_data::io::shapefile_values_notes(&t.dataset, path));
+            }
+            if matches!(ext.as_str(), "parquet" | "geoparquet") {
+                dbf_notes.extend(rustgis_data::source::parquet::values_note(&t.dataset, path));
             }
             let (left_out, table) =
                 rustgis_data::io::write_path_to(&t.dataset, Path::new(path), Crs::LonLat, &gpkg).map_err(|e| e.to_string())?;
@@ -56,7 +60,7 @@ pub fn commands() -> Vec<C> {
                 s.notify(note, false);
             }
             let mut out = json!({"path": path});
-            report_table(s, path, &gpkg, table, &mut out);
+            report_table(s, path, &gpkg, &default, table, &mut out);
             Ok(out)
         }).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
         .params(
@@ -91,8 +95,26 @@ pub fn gpkg_table(p: &Value, ext: &str) -> Result<GpkgTable, String> {
 /// an export into an existing GeoPackage also says so, what went with a replaced table, and
 /// which views and triggers elsewhere name it. Layers read in place from a replaced table read
 /// it again.
-fn report_table(s: &mut Session, path: &str, gpkg: &GpkgTable, table: Option<GpkgWritten>, out: &mut Value) {
+fn report_table(s: &mut Session, path: &str, gpkg: &GpkgTable, default: &str, table: Option<GpkgWritten>, out: &mut Value) {
     let Some(table) = table else { return };
+    // A new file's table is said only when it isn't the name asked for, or by default the
+    // layer's (a reserved name is prefixed, control characters and edge spaces dropped); one
+    // added to or replaced in a file is always named below.
+    let asked = gpkg.name.as_deref().unwrap_or(default);
+    if gpkg.mode == GpkgMode::NewFile && asked != table.table {
+        let note = if asked.trim().is_empty() {
+            format!("{path}: wrote the table {}, as there was no name to give it", table.table)
+        } else {
+            // Escaped: a control character in the name would otherwise reach the terminal.
+            let asked: String =
+                asked.chars().map(|c| if c.is_control() { c.escape_default().to_string() } else { c.to_string() }).collect();
+            format!(
+                "{path}: wrote the table {} instead of '{asked}' (GeoPackage table names can't start with gpkg_, sqlite_ or rtree_, and lose control characters and edge spaces)",
+                table.table
+            )
+        };
+        s.notify(note, false);
+    }
     if gpkg.mode != GpkgMode::NewFile {
         let (reread, failed) =
             if table.replaced { super::gpkg::reset_sources(s, Path::new(path), &table.table, true) } else { (0, Vec::new()) };
@@ -327,9 +349,14 @@ pub fn map_pdf(s: &mut Session, dpi: f64) -> Result<Vec<u8>, String> {
     let (w, h) = (mm(view.width), mm(view.height));
     let page = if drawing.overflowed() {
         // Too large for vectors: the map as one picture, as it is drawn on screen.
-        super::layout::pictured_notices(s, &[], &[1]);
         let png = rustgis_render::render_png(s.map_mut(), &view)?;
         let pm = rustgis_render::decode_png(&png).ok_or("could not draw the map")?;
+        // Said once the picture is drawn. The budget counts the drawing's pictures (rasters,
+        // tiles) as well as its shapes.
+        let (mb, items) = (rustgis_render::vector::MAX_COST >> 20, rustgis_render::vector::MAX_ITEMS / 1_000_000);
+        s.warn(format!(
+            "The map is drawn as one picture, not vectors: kept as vectors, it would pass the drawing limit ({mb} MB or {items} million items)"
+        ));
         rustgis_render::pdf::Page::new(&pm, w, h)
     } else {
         rustgis_render::pdf::Page::drawing(drawing, w, h)
@@ -583,15 +610,19 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
     if let Some(e) = rustgis_data::export_error(ds, crs) {
         return Err(format!("{path}: {e}"));
     }
-    let (written, left_out, skipped, table) = match &chunks {
+    let parquet = matches!(ext.as_str(), "parquet" | "geoparquet");
+    let (written, left_out, skipped, table, unfit) = match &chunks {
         Some((src, layer)) => {
             let (e, table) =
                 rustgis_data::export::write_source_to(src.as_ref(), layer, Path::new(&path), crs, &gpkg).map_err(|e| e.to_string())?;
-            (e.written, e.left_out, e.skipped, table)
+            // Counted as the chunks were written, as the layer holds none of them.
+            let unfit = rustgis_data::source::parquet::unfit_note(&layer.fields, &e.unfit, path);
+            (e.written, e.left_out, e.skipped, table, unfit)
         }
         None => {
             let (left_out, table) = rustgis_data::io::write_path_to(ds, Path::new(&path), crs, &gpkg).map_err(|e| e.to_string())?;
-            (ds.features.len().saturating_sub(left_out), left_out, unread, table)
+            let unfit = if parquet { rustgis_data::source::parquet::values_note(ds, path) } else { None };
+            (ds.features.len().saturating_sub(left_out), left_out, unread, table, unfit)
         }
     };
     // A streamed layer's extent is its whole source's.
@@ -614,6 +645,7 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
     }
     said.extend(notes);
     said.extend(dbf_notes);
+    said.extend(unfit);
     if shapefile && rustgis_data::raster::wkt::to_wkt(crs).is_none() {
         said.push(format!("{path}: no .prj written, as {} has no WKT form", crs.label()));
     }
@@ -623,9 +655,10 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
     // (layers reading a replaced table) is at hand.
     let written_path = Some(path.to_string());
     let path = path.to_string();
+    let default = ds.name.clone();
     let then: Option<super::exports::Then> = table.map(|t| {
         Box::new(move |s: &mut Session, out: &mut Value| {
-            report_table(s, &path, &gpkg, Some(t), out);
+            report_table(s, &path, &gpkg, &default, Some(t), out);
             Ok(())
         }) as super::exports::Then
     });
