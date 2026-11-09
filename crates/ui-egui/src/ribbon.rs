@@ -3210,10 +3210,14 @@ fn layout_groups(app: &mut RustGisApp, ui: &mut Ui) {
             small(ui, app, "map", "Show Map", "Close the layout and show the map.", "layout.close", Value::Null, false);
         });
         col(ui, |ui| {
-            // A PDF's map frames carry their coordinates (a GeoPDF) unless this is cleared.
-            ui.checkbox(&mut app.ui.pdf_georeference, tl!("Georeference PDF")).on_hover_text(tl!(
-                "Export and print the layout's map frames with their coordinates, so PDF readers can locate and measure in them."
-            ));
+            // A PDF's map frames carry their coordinates (a GeoPDF) unless this is turned off: a
+            // toggle, as Snap and Rulers are.
+            let on = app.ui.pdf_georeference;
+            let desc =
+                "Export and print the layout's map frames to PDF with their coordinates, so PDF readers can locate and measure in them.";
+            if small(ui, app, "globe_view", "Georeference PDF", desc, "ui.menu", Value::Null, on).clicked() {
+                app.ui.pdf_georeference = !on;
+            }
         });
     });
 }

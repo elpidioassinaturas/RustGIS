@@ -308,7 +308,7 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   top carries coordinates there (none when it isn't georeferenced), so a reader doesn't show the
   other's through it. A frame in a projection with no WKT form is
   georeferenced by its corners in longitude/latitude when, between them, that puts every place
-  within 0.5 mm of where it is drawn, and left out otherwise. **Georeference PDF** in the layout's
+  within 0.5 mm of where it is drawn, and left out otherwise. **Georeference PDF** in the Publish tab's
   Export group (`"georeference": false` for `layout.export`) leaves the coordinates out.
   In SVG each element is a group (an Inkscape layer) named after it: text stays text and rectangles,
   ellipses and lines stay shapes, and map frames and the other surrounds are kept as vectors as in a

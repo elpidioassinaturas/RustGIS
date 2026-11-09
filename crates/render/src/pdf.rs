@@ -65,7 +65,7 @@ impl Viewport {
             gpts.join(" "),
             literal(&m.wkt),
         );
-        format!("<< /Type /Viewport /BBox [{x1:.3} {bottom:.3} {x2:.3} {top:.3}] /Name {}{measure} >>", text_string(&self.name))
+        format!("<< /Type /Viewport /BBox [{x1:.3} {bottom:.3} {x2:.3} {top:.3}] /Name {}{measure} >>", literal(&self.name))
     }
 }
 
@@ -396,6 +396,10 @@ pub(crate) mod tests {
         let plain = write(&[Page::new(&a, 210.0, 297.0)], "Plain");
         assert!(plain.starts_with(b"%PDF-1.4") && !String::from_utf8_lossy(&plain).contains("/Extensions"));
         assert_eq!(literal("é"), "<FEFF00E9>");
+        // A frame's name is written whole, however long.
+        let measure = GeoMeasure { corners: [(0.0, 0.0); 4], wkt: "W".into(), projected: true, epsg: None };
+        let long = Viewport { name: "n".repeat(300), rect_mm: [0.0, 0.0, 1.0, 1.0], measure };
+        assert!(long.dictionary(page_h).contains(&format!("/Name ({})", "n".repeat(300))));
     }
 
     /// A frame's viewport is where the page draws it: from the whole pixel it starts on at the

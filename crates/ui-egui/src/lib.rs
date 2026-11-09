@@ -1556,7 +1556,7 @@ impl RustGisApp {
         r
     }
 
-    /// A layout as PDF or PNG bytes, guarded like `Session::run`; a PDF georeferenced as Layout ›
+    /// A layout as PDF or PNG bytes, guarded like `Session::run`; a PDF georeferenced as Publish ›
     /// Export › Georeference PDF says.
     fn layout_bytes(&mut self, li: usize, pdf: bool, dpi: f64) -> Result<Vec<u8>, String> {
         let georeference = self.ui.pdf_georeference;

@@ -640,6 +640,10 @@ pub fn frame_viewports(layout: &Layout, maps: &[Map], dpi: f64) -> Georeferenced
         let mut shown = vec![*placed];
         for (_, over) in &frames[i + 1..] {
             shown = shown.into_iter().flat_map(|r| uncovered(r, *over)).collect();
+            // Past the most, it is left out: cutting on would only make more.
+            if shown.len() > MAX_VIEWPORTS_A_FRAME {
+                break;
+            }
         }
         if shown.is_empty() {
             continue;

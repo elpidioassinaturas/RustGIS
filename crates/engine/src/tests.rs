@@ -31828,6 +31828,14 @@ fn a_frame_drawn_over_another_is_cut_out_of_its_viewport() {
     assert_eq!(geo.viewports.len(), 4, "the main frame around the inset: above, below, left and right of it");
     assert!(geo.viewports.iter().all(|v| v.name == frame.name && v.measure.projected));
     assert!(!geo.viewports.iter().any(|v| inside(v, in_inset)) && geo.viewports.iter().any(|v| inside(v, beside)));
+    // No two overlap.
+    for (i, a) in geo.viewports.iter().enumerate() {
+        for b in &geo.viewports[i + 1..] {
+            let ([ax, ay, aw, ah], [bx, by, bw, bh]) = (a.rect_mm, b.rect_mm);
+            let apart = ax + aw <= bx + 1e-9 || bx + bw <= ax + 1e-9 || ay + ah <= by + 1e-9 || by + bh <= ay + 1e-9;
+            assert!(apart, "{:?} {:?}", a.rect_mm, b.rect_mm);
+        }
+    }
     let area: f64 = geo.viewports.iter().map(|v| v.rect_mm[2] * v.rect_mm[3]).sum();
     let whole = frame.w * frame.h - 40.0 * 30.0;
     assert!((area - whole).abs() < 0.02 * whole, "{area} {whole}");
