@@ -33476,22 +33476,43 @@ fn a_layout_pdf_georeferences_its_map_frames() {
 }
 
 /// What a PDF doesn't georeference is one notice for each kind, with a count (#1191): a frame
-/// once however many pages it is on, two frames sharing a name two.
+/// once however many pages it is on, two frames sharing a name two. A frame so on some pages of a
+/// series only is named with them, so that one georeferenced on the others doesn't read as having
+/// no coordinates anywhere in the PDF.
 #[test]
 fn a_pdf_says_which_frames_it_doesnt_georeference() {
     let mut s = Session::new(Project::default());
     let mark = s.notice_mark();
-    crate::cmd::layout::georeference_notices(&mut s, &[], &[]);
+    crate::cmd::layout::georeference_notices(&mut s, &[], &[], 1);
     assert!(s.notices_since(mark).is_empty(), "everything georeferenced, nothing said");
-    let left =
-        [(1, "Main".to_string(), "it is tilted"), (1, "Main".to_string(), "it is tilted"), (4, "Main".to_string(), "it shows the globe")];
-    crate::cmd::layout::georeference_notices(&mut s, &left, &[(2, "Inset".to_string()), (2, "Inset".to_string())]);
+    let left = [
+        (1, 1, "Main".to_string(), "it is tilted"),
+        (1, 1, "Main".to_string(), "it is tilted"),
+        (1, 4, "Main".to_string(), "it shows the globe"),
+    ];
+    crate::cmd::layout::georeference_notices(&mut s, &left, &[(1, 2, "Inset".to_string()), (1, 2, "Inset".to_string())], 1);
     let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
     assert_eq!(said.len(), 2, "{said:?}");
     assert_eq!(said[0], "The PDF doesn't georeference 2 map frames (Main: it is tilted, Main: it shows the globe)");
     assert!(said[1].starts_with("The PDF georeferences 1 map frame by its corners") && said[1].ends_with("(Inset)"), "{}", said[1]);
     // Information, not warnings: nothing wrong is written.
     assert!(s.notices_since(mark).iter().all(|n| n.severity == rustgis_data::diagnostics::Severity::Info));
+    // A series of five pages: Main left out on pages 3 and 4 only (the first page's reason), the
+    // inset by its corners on every page, an overview by its corners on page 2 only.
+    let mark = s.notice_mark();
+    let left = [(3, 1, "Main".to_string(), "it crosses the 180° meridian"), (4, 1, "Main".to_string(), "it shows the globe")];
+    let mut corners: Vec<(usize, u32, String)> = (1..=5).map(|p| (p, 2, "Inset".to_string())).collect();
+    corners.push((2, 3, "Overview".to_string()));
+    crate::cmd::layout::georeference_notices(&mut s, &left, &corners, 5);
+    let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(said[0], "The PDF doesn't georeference 1 map frame (Main on pages 3 and 4: it crosses the 180° meridian)");
+    assert!(said[1].ends_with("(Inset, Overview on page 2)"), "{}", said[1]);
+    // Many pages are cut to ten, with how many more.
+    let mark = s.notice_mark();
+    let left: Vec<_> = (1..=13).map(|p| (p, 1, "Main".to_string(), "it is tilted")).collect();
+    crate::cmd::layout::georeference_notices(&mut s, &left, &[], 20);
+    let said = &s.notices_since(mark)[0].text;
+    assert!(said.contains("(Main on pages 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 3 more: it is tilted)"), "{said}");
 }
 
 /// Each page of a map series is georeferenced with its own view, not the first page's (#1191).

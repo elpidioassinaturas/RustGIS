@@ -304,8 +304,9 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   code when it has one, so a reader shows coordinates and measures in it, and GDAL or QGIS open the
   page as a georeferenced raster. It carries coordinates only: no layers and no feature
   attributes. A tilted frame, one on the globe, and one with a corner off the Earth aren't
-  georeferenced, and the export says which. Where a frame is drawn over another, only the one on
-  top carries coordinates there (none when it isn't georeferenced), so a reader doesn't show the
+  georeferenced, and the export says which (in a map series, on which pages when not on all: each
+  page moves the frame). Where a frame is drawn over another, only the one on top carries
+  coordinates there (none when it isn't georeferenced), so a reader doesn't show the
   other's through it. A viewport is a rectangle, so a shaped frame (circle, ellipse, polygon)
   drawn over another is left out, and the frame under it has no coordinates in its box. A frame in a projection with no WKT form is
   georeferenced by its corners in longitude/latitude when that puts the places on a 9 × 9 grid

@@ -3538,8 +3538,9 @@ pub fn layout_bytes_with(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: b
     // What the PDF draws as pictures because its vectors would grow too large: frames, and
     // whole pages (their surrounds).
     let (mut frames_pictured, mut pages_pictured) = (Vec::new(), Vec::new());
-    // The map frames a PDF can't georeference, and those it georeferences by their corners only.
-    let (mut left_out, mut by_corners): (Vec<(u32, String, &'static str)>, Vec<(u32, String)>) = (Vec::new(), Vec::new());
+    // The map frames a PDF can't georeference, and those it georeferences by their corners only,
+    // each with the page (from 1) it is on.
+    let (mut left_out, mut by_corners): (Vec<(usize, u32, String, &'static str)>, Vec<(usize, u32, String)>) = (Vec::new(), Vec::new());
     let mut render_pages = || -> Result<(Vec<rustgis_render::pdf::Page>, Option<Vec<u8>>), String> {
         let mut out = Vec::new();
         let mut png = None;
@@ -3571,8 +3572,8 @@ pub fn layout_bytes_with(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: b
                 } else {
                     rustgis_render::layout::Georeferenced::default()
                 };
-                left_out.extend(geo.left_out);
-                by_corners.extend(geo.by_corners);
+                left_out.extend(geo.left_out.into_iter().map(|(id, n, why)| (page + 1, id, n, why)));
+                by_corners.extend(geo.by_corners.into_iter().map(|(id, n)| (page + 1, id, n)));
                 let (drawing, pictured) = rustgis_render::layout::render_drawing(layout, &mut s.project.maps, dpi, &info)
                     .ok_or("the page is too large to draw")?;
                 if drawing.overflowed() {
@@ -3609,16 +3610,24 @@ pub fn layout_bytes_with(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: b
     }
     let (pages, png) = result?;
     pictured_notices(s, &frames_pictured, &pages_pictured);
-    georeference_notices(s, &left_out, &by_corners);
+    georeference_notices(s, &left_out, &by_corners, pages.len());
     if pdf { Ok(rustgis_render::pdf::write(&pages, &saved.name)) } else { png.ok_or_else(|| "nothing to draw".to_string()) }
 }
 
 /// Says which map frames a PDF doesn't georeference, with why, and which it georeferences by their
-/// corners only (#1191): one notice for each, with a count. A frame is counted once however many
-/// pages of a series it is on (by its id: two frames sharing a name are two), with the first
-/// page's reason. Information, not warnings: nothing wrong is written (a frame left out carries no
-/// coordinates, and one placed by its corners is checked to within half a millimetre).
-pub(crate) fn georeference_notices(s: &mut Session, left_out: &[(u32, String, &'static str)], by_corners: &[(u32, String)]) {
+/// corners only (#1191): one notice for each, with a count. Each entry has the page (from 1) it
+/// is on, of the `pages` exported. A frame is counted once however many pages of a series it is
+/// on (by its id: two frames sharing a name are two), with the first page's reason, and named with
+/// its pages when it is so on some of them only: a series moves each frame, which may cross the
+/// 180° meridian on one page and not the next. Information, not warnings: nothing wrong is
+/// written (a frame left out carries no coordinates, and one placed by its corners is checked to
+/// within half a millimetre).
+pub(crate) fn georeference_notices(
+    s: &mut Session,
+    left_out: &[(usize, u32, String, &'static str)],
+    by_corners: &[(usize, u32, String)],
+    pages: usize,
+) {
     let listed = |items: Vec<String>| {
         let more = items.len().saturating_sub(10);
         let mut text = items.into_iter().take(10).collect::<Vec<_>>().join(", ");
@@ -3628,31 +3637,44 @@ pub(crate) fn georeference_notices(s: &mut Session, left_out: &[(u32, String, &'
         text
     };
     let plural = |n: usize| if n == 1 { "" } else { "s" };
-    let mut seen = Vec::new();
-    let out: Vec<String> = left_out
-        .iter()
-        .filter(|(id, ..)| {
-            !seen.contains(id) && {
-                seen.push(*id);
-                true
+    // Each frame once, in the order first met: its name, the first page's reason and its pages.
+    let frames = |entries: Vec<(usize, u32, &str, &'static str)>| {
+        let mut frames: Vec<(u32, String, &'static str, Vec<usize>)> = Vec::new();
+        for (page, id, name, why) in entries {
+            match frames.iter_mut().find(|f| f.0 == id) {
+                Some(f) if !f.3.contains(&page) => f.3.push(page),
+                Some(_) => {}
+                None => frames.push((id, name.to_string(), why, vec![page])),
             }
-        })
-        .map(|(_, n, why)| format!("{n}: {why}"))
+        }
+        frames
+    };
+    // A frame's name, with its pages when it is so on some of the pages only.
+    let named = |name: &str, on: &[usize]| {
+        if pages < 2 || on.len() >= pages {
+            return name.to_string();
+        }
+        let mut shown: Vec<String> = on.iter().map(usize::to_string).collect();
+        let more = shown.len().saturating_sub(10);
+        shown.truncate(10);
+        let listed = match (shown.split_last(), more) {
+            (Some((last, rest)), 0) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+            (_, 0) => shown.join(", "),
+            (_, more) => format!("{} and {more} more", shown.join(", ")),
+        };
+        format!("{name} on page{} {listed}", plural(on.len()))
+    };
+    let out: Vec<String> = frames(left_out.iter().map(|(p, id, n, why)| (*p, *id, n.as_str(), *why)).collect())
+        .into_iter()
+        .map(|(_, n, why, on)| format!("{}: {why}", named(&n, &on)))
         .collect();
     if !out.is_empty() {
         let n = out.len();
         s.notify(format!("The PDF doesn't georeference {n} map frame{} ({})", plural(n), listed(out)), false);
     }
-    let mut seen = Vec::new();
-    let corners: Vec<String> = by_corners
-        .iter()
-        .filter(|(id, _)| {
-            !seen.contains(id) && {
-                seen.push(*id);
-                true
-            }
-        })
-        .map(|(_, n)| n.clone())
+    let corners: Vec<String> = frames(by_corners.iter().map(|(p, id, n)| (*p, *id, n.as_str(), "")).collect())
+        .into_iter()
+        .map(|(_, n, _, on)| named(&n, &on))
         .collect();
     if !corners.is_empty() {
         let n = corners.len();
