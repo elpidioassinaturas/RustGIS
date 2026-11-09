@@ -3266,8 +3266,15 @@ fn plugins_tab(app: &mut RustGisApp, ui: &mut Ui) {
             }
             for c in &m.commands {
                 let icon = if crate::icons::ALL.contains(&c.icon.as_str()) { c.icon.as_str() } else { "plugin" };
-                let id = rustgis_engine::plugins::command_id(&m.id, &c.id);
-                big(ui, app, icon, m.translate(lang, &c.label), m.translate(lang, &c.help), &id, Value::Null, false, false);
+                let label = m.translate(lang, &c.label);
+                let help = m.translate(lang, &c.help);
+                // A command with a dialog opens it; the others run.
+                if c.form.is_empty() {
+                    let id = rustgis_engine::plugins::command_id(&m.id, &c.id);
+                    big(ui, app, icon, label, help, &id, Value::Null, false, false);
+                } else {
+                    big(ui, app, icon, label, help, "ui.pluginForm", json!({"plugin": m.id, "command": c.id}), false, false);
+                }
             }
             for t in &m.tools {
                 let id = rustgis_engine::plugins::command_id(&m.id, &t.id);
@@ -3328,7 +3335,17 @@ fn plugin_entry(
     match m.entry(entry) {
         Some(Entry::Command(c)) => {
             let icon = if crate::icons::ALL.contains(&c.icon.as_str()) { c.icon.as_str() } else { "plugin" };
-            show(icon, m.translate(lang, &c.label), m.translate(lang, &c.help), &command_id(&m.id, &c.id), Value::Null);
+            if c.form.is_empty() {
+                show(icon, m.translate(lang, &c.label), m.translate(lang, &c.help), &command_id(&m.id, &c.id), Value::Null);
+            } else {
+                show(
+                    icon,
+                    m.translate(lang, &c.label),
+                    m.translate(lang, &c.help),
+                    "ui.pluginForm",
+                    json!({"plugin": m.id, "command": c.id}),
+                );
+            }
         }
         Some(Entry::Tool(t)) => {
             let name = m.translate(lang, &t.name);

@@ -216,6 +216,34 @@ fn plugin_tool_and_parameter_limits_stay_bounded() {
     assert!(e.contains("more than 32 parameters"), "{e}");
 }
 
+/// A command's dialog fields are checked like a tool's parameters, take raster layers, and
+/// refuse files; a command without one still parses.
+#[test]
+fn command_dialog_fields_are_checked() {
+    let mut m = json!({"id": "dialogs", "name": "Dialogs", "version": "1.0.0", "permissions": ["files"],
+        "commands": [{"id": "classify", "label": "Classify", "form": [
+            {"name": "image", "label": "Image", "kind": "rasterLayer", "required": true},
+            {"name": "samples", "label": "Samples", "kind": "polygonLayer"},
+            {"name": "field", "label": "Class field", "kind": "field", "default": "class"},
+            {"name": "method", "label": "Method", "kind": "choice", "choices": ["Random Forest", "Minimum distance"]},
+            {"name": "trees", "label": "Trees", "kind": "number", "default": 50}
+        ]}, {"id": "plain", "label": "Plain"}]});
+    let parsed = Manifest::parse(&m.to_string()).unwrap();
+    assert_eq!(parsed.commands[0].form.len(), 5);
+    assert!(parsed.commands[1].form.is_empty());
+    m["commands"][0]["form"][1]["kind"] = json!("file");
+    let e = Manifest::parse(&m.to_string()).unwrap_err();
+    assert!(e.contains("unknown parameter kind 'file'"), "{e}");
+    m["commands"][0]["form"][1] = json!({"name": "image", "label": "Again", "kind": "text"});
+    let e = Manifest::parse(&m.to_string()).unwrap_err();
+    assert!(e.contains("parameter 'image' is invalid or repeated"), "{e}");
+    // Tools still refuse raster layers: they get features, not rasters.
+    let tool = json!({"id": "t", "name": "Tool", "version": "1.0.0",
+        "tools": [{"id": "t", "name": "Tool", "params": [{"name": "image", "label": "Image", "kind": "rasterLayer"}]}]});
+    let e = Manifest::parse(&tool.to_string()).unwrap_err();
+    assert!(e.contains("unknown parameter kind 'rasterLayer'"), "{e}");
+}
+
 /// Enabled plugin tools register with geoprocessing and return layers or selections.
 #[test]
 fn tools_join_the_geoprocessing_tools() {

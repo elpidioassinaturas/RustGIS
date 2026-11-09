@@ -173,6 +173,12 @@ pub struct CommandDecl {
     /// Parameter description for scripts and agents, like a built-in command's.
     #[serde(default = "no_params")]
     pub params: String,
+    /// The command's dialog: when given, its button opens a dialog with these fields, and
+    /// **Run** runs the command with their values as parameters and shows what it answers (its
+    /// `report` text). Fields are declared as tool parameters, plus `rasterLayer` and without
+    /// `file`; a `field` lists the fields of the layer field above it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub form: Vec<ParamDecl>,
 }
 
 fn no_params() -> String {
@@ -266,6 +272,12 @@ pub enum Entry<'a> {
 /// The parameter kinds a tool may use.
 pub const PARAM_KINDS: &[&str] =
     &["layer", "vectorLayer", "polygonLayer", "pointLayer", "field", "numericField", "number", "text", "choice", "bool", "file"];
+
+/// The field kinds a command's dialog may use: a tool's, and raster layers (a command reads
+/// layers itself, by name, so a dialog can offer rasters too), but no `file` (a command that
+/// wants a file has host calls for it, behind the `files` permission).
+pub const FORM_KINDS: &[&str] =
+    &["layer", "vectorLayer", "polygonLayer", "pointLayer", "rasterLayer", "field", "numericField", "number", "text", "choice", "bool"];
 
 /// The most extensions a `file` parameter may list.
 const MAX_EXTENSIONS: usize = 16;
@@ -544,6 +556,7 @@ impl Manifest {
             check_text("command help", &c.help, false)?;
             check_text("command params", &c.params, false)?;
             check_text("command icon", &c.icon, false)?;
+            self.check_params(&c.label, &c.form, FORM_KINDS)?;
         }
         for t in &self.tools {
             if !valid_id(&t.id, false) || !seen.insert(("t", t.id.as_str())) {
@@ -552,43 +565,7 @@ impl Manifest {
             check_text("tool name", &t.name, true)?;
             check_text("tool summary", &t.summary, false)?;
             check_text("toolbox", &t.toolbox, false)?;
-            if t.params.len() > MAX_PARAMS {
-                return Err(format!("plugin.json: {} has more than {MAX_PARAMS} parameters", t.name));
-            }
-            let mut names = std::collections::HashSet::new();
-            for p in &t.params {
-                if !valid_id(&p.name, true) || !names.insert(p.name.as_str()) {
-                    return Err(format!("plugin.json: {}: parameter '{}' is invalid or repeated", t.name, p.name));
-                }
-                check_text("parameter label", &p.label, true)?;
-                check_text("parameter help", &p.help, false)?;
-                if !PARAM_KINDS.contains(&p.kind.as_str()) {
-                    return Err(format!("plugin.json: {}: unknown parameter kind '{}'", t.name, p.kind));
-                }
-                if p.kind == "choice" && (p.choices.is_empty() || p.choices.len() > MAX_CHOICES) {
-                    return Err(format!("plugin.json: {}: '{}' needs 1 to {MAX_CHOICES} choices", t.name, p.name));
-                }
-                for c in &p.choices {
-                    check_text("choice", c, true)?;
-                }
-                // A file parameter hands the tool a file's contents: only with `files`.
-                if p.kind == "file" && !self.has(Permission::Files) {
-                    return Err(format!("plugin.json: {}: '{}' is a file, which needs the 'files' permission", t.name, p.name));
-                }
-                if p.extensions.len() > MAX_EXTENSIONS
-                    || p.extensions.iter().any(|e| e.is_empty() || e.len() > 16 || !e.chars().all(|c| c.is_ascii_alphanumeric()))
-                {
-                    return Err(format!(
-                        "plugin.json: {}: '{}' has invalid extensions (at most {MAX_EXTENSIONS}, letters and digits without the dot)",
-                        t.name, p.name
-                    ));
-                }
-                if let Some(d) = &p.default
-                    && d.to_string().len() > MAX_TEXT
-                {
-                    return Err(format!("plugin.json: {}: '{}' has too long a default", t.name, p.name));
-                }
-            }
+            self.check_params(&t.name, &t.params, PARAM_KINDS)?;
         }
         // Before the tab, which may name it.
         if let Some(panel) = &self.panel {
@@ -610,6 +587,48 @@ impl Manifest {
             for (k, v) in strings {
                 check_text("translated string", k, true)?;
                 check_text("translation", v, false)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks a tool's parameters or a command's dialog fields (`owner` names it in errors).
+    fn check_params(&self, owner: &str, params: &[ParamDecl], kinds: &[&str]) -> Result<(), String> {
+        if params.len() > MAX_PARAMS {
+            return Err(format!("plugin.json: {owner} has more than {MAX_PARAMS} parameters"));
+        }
+        let mut names = std::collections::HashSet::new();
+        for p in params {
+            if !valid_id(&p.name, true) || !names.insert(p.name.as_str()) {
+                return Err(format!("plugin.json: {owner}: parameter '{}' is invalid or repeated", p.name));
+            }
+            check_text("parameter label", &p.label, true)?;
+            check_text("parameter help", &p.help, false)?;
+            if !kinds.contains(&p.kind.as_str()) {
+                return Err(format!("plugin.json: {owner}: unknown parameter kind '{}'", p.kind));
+            }
+            if p.kind == "choice" && (p.choices.is_empty() || p.choices.len() > MAX_CHOICES) {
+                return Err(format!("plugin.json: {owner}: '{}' needs 1 to {MAX_CHOICES} choices", p.name));
+            }
+            for c in &p.choices {
+                check_text("choice", c, true)?;
+            }
+            // A file parameter hands the tool a file's contents: only with `files`.
+            if p.kind == "file" && !self.has(Permission::Files) {
+                return Err(format!("plugin.json: {owner}: '{}' is a file, which needs the 'files' permission", p.name));
+            }
+            if p.extensions.len() > MAX_EXTENSIONS
+                || p.extensions.iter().any(|e| e.is_empty() || e.len() > 16 || !e.chars().all(|c| c.is_ascii_alphanumeric()))
+            {
+                return Err(format!(
+                    "plugin.json: {owner}: '{}' has invalid extensions (at most {MAX_EXTENSIONS}, letters and digits without the dot)",
+                    p.name
+                ));
+            }
+            if let Some(d) = &p.default
+                && d.to_string().len() > MAX_TEXT
+            {
+                return Err(format!("plugin.json: {owner}: '{}' has too long a default", p.name));
             }
         }
         Ok(())

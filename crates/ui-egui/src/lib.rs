@@ -63,6 +63,7 @@ mod navui;
 mod nldiui;
 mod opendataui;
 mod panes;
+mod plugindialog;
 mod pluginpanel;
 mod pluginstart;
 mod pluginsui;
@@ -818,6 +819,8 @@ pub struct UiState {
     pub bookmarks: bookmarkpane::State,
     /// The plugin panel pane: whose panel it shows, and a slider being dragged.
     pub plugin_panel: pluginpanel::State,
+    /// The plugin command dialog open, and each one's last values.
+    pub plugin_dialog: plugindialog::State,
     /// Plugin commands the user asked for, waiting for the window to show they started.
     plugin_start: pluginstart::State,
     /// The search box at the foot of the left pane.
@@ -969,6 +972,7 @@ impl Default for UiState {
             nav: Default::default(),
             bookmarks: Default::default(),
             plugin_panel: Default::default(),
+            plugin_dialog: Default::default(),
             plugin_start: Default::default(),
             search: Default::default(),
             sources: Default::default(),
@@ -2709,6 +2713,8 @@ impl RustGisApp {
             }
             // A plugin's panel: `{"id": plugin}`.
             "ui.pane.plugin" => return pluginpanel::open(self, p),
+            // A plugin command's dialog: `{"plugin": id, "command": id}`.
+            "ui.pluginForm" => return plugindialog::open(self, p),
             // The SQL pane; with "sql" (and "database"), opened on that query, run with "run".
             "ui.pane.sql" => match p.get("sql").and_then(Value::as_str) {
                 Some(sql) => {
@@ -5354,6 +5360,7 @@ impl RustGisApp {
         autosave::offer(self, &ctx);
         saveprompt::show(self, &ctx);
         pluginsui::show(self, &ctx);
+        plugindialog::show(self, &ctx);
         update::show(self, &ctx);
         showme::tick(self, &ctx);
         chrome::command_search(self, &ctx);

@@ -40,7 +40,9 @@ use std::sync::{Arc, RwLock};
 
 use serde_json::{Value, json};
 
-pub use manifest::{CommandDecl, Entry, GroupDecl, ItemDecl, Layout, Manifest, MenuDecl, Permission, Runtime, TabDecl, ToolDecl};
+pub use manifest::{
+    CommandDecl, Entry, GroupDecl, ItemDecl, Layout, Manifest, MenuDecl, ParamDecl, Permission, Runtime, TabDecl, ToolDecl,
+};
 pub use package::Package;
 pub use panel::{Dropped, PanelDecl, PanelItemDecl, PanelState, TreeNode};
 pub use runtime::{Host, NoHost};
