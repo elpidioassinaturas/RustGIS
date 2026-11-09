@@ -47,11 +47,14 @@ pub fn commands() -> Vec<C> {
                 dbf_notes.extend(rustgis_data::io::shapefile_names_note(&t.dataset.fields, path));
                 dbf_notes.extend(rustgis_data::io::shapefile_values_notes(&t.dataset, path));
             }
+            if matches!(ext.as_str(), "parquet" | "geoparquet") {
+                dbf_notes.extend(rustgis_data::source::parquet::values_note(&t.dataset, path));
+            }
             let (left_out, table) =
                 rustgis_data::io::write_path_to(&t.dataset, Path::new(path), Crs::LonLat, &gpkg).map_err(|e| e.to_string())?;
             s.check_continuation(&owner).map_err(|why| super::exports::completion_refused(Some(path), why))?;
-            if left_out > 0 {
-                s.notify(format!("{path}: {left_out} features without drawable geometry were left out"), false);
+            if let Some(note) = rustgis_data::io::left_out_note(path, &ext, left_out) {
+                s.notify(note, false);
             }
             for note in notes.into_iter().chain(dbf_notes) {
                 s.notify(note, false);
@@ -584,7 +587,15 @@ pub(crate) fn layer_work(s: &Session, p: &Value) -> Result<Work, String> {
     // Checked now, so a bad table option is refused before the export starts.
     let ext = Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let gpkg = gpkg_table(p, &ext)?;
-    Ok(Box::new(move || write_layer(&l, &path, asked, gpkg)))
+    let compatibility =
+        ps(p, "crs").and_then(|text| asked.and_then(|crs| rustgis_data::raster::wkt::projection_compatibility_note(text, crs)));
+    Ok(Box::new(move || {
+        let mut wrote = write_layer(&l, &path, asked, gpkg)?;
+        if let Some(note) = compatibility {
+            wrote.notes.insert(0, format!("crs: {note}"));
+        }
+        Ok(wrote)
+    }))
 }
 
 /// Writes layer `l` to `path`, in `asked` or the system the format defaults to; a GeoPackage's
@@ -607,15 +618,19 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
     if let Some(e) = rustgis_data::export_error(ds, crs) {
         return Err(format!("{path}: {e}"));
     }
-    let (written, left_out, skipped, table) = match &chunks {
+    let parquet = matches!(ext.as_str(), "parquet" | "geoparquet");
+    let (written, left_out, skipped, table, unfit) = match &chunks {
         Some((src, layer)) => {
             let (e, table) =
                 rustgis_data::export::write_source_to(src.as_ref(), layer, Path::new(&path), crs, &gpkg).map_err(|e| e.to_string())?;
-            (e.written, e.left_out, e.skipped, table)
+            // Counted as the chunks were written, as the layer holds none of them.
+            let unfit = rustgis_data::source::parquet::unfit_note(&layer.fields, &e.unfit, path);
+            (e.written, e.left_out, e.skipped, table, unfit)
         }
         None => {
             let (left_out, table) = rustgis_data::io::write_path_to(ds, Path::new(&path), crs, &gpkg).map_err(|e| e.to_string())?;
-            (ds.features.len().saturating_sub(left_out), left_out, unread, table)
+            let unfit = if parquet { rustgis_data::source::parquet::values_note(ds, path) } else { None };
+            (ds.features.len().saturating_sub(left_out), left_out, unread, table, unfit)
         }
     };
     // A streamed layer's extent is its whole source's.
@@ -628,16 +643,15 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
         dbf_notes.extend(rustgis_data::io::shapefile_values_notes(ds, path));
     }
     // FlatGeobuf, KML, GPX and Shapefile hold features with geometry only (a Shapefile, only
-    // geometry it can draw).
+    // geometry it can draw, of the layer's kind).
     let mut said = Vec::new();
-    if left_out > 0 {
-        said.push(format!("{path}: {left_out} features without drawable geometry were left out"));
-    }
+    said.extend(rustgis_data::io::left_out_note(path, &ext, left_out));
     if skipped > 0 {
         said.push(format!("{path}: {skipped} rows couldn't be read and were left out"));
     }
     said.extend(notes);
     said.extend(dbf_notes);
+    said.extend(unfit);
     if shapefile && rustgis_data::raster::wkt::to_wkt(crs).is_none() {
         said.push(format!("{path}: no .prj written, as {} has no WKT form", crs.label()));
     }

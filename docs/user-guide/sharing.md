@@ -30,13 +30,32 @@ about them. The web app's Export Map downloads a PNG. A projection
 whose parameters GeoTIFF's keys can't hold (Mollweide, for example) is refused too:
 switch the map to an EPSG projection first.
 
+**Export Raster** writes a tile layer alone too: right-click a WMS, WMTS or XYZ layer (or a
+raster tile archive) in the Layers pane and choose **Export Raster…**, or pick it and use
+**Data › Export Raster**. Its own tiles over the view, at the zoom of the view's scale, are put together
+as an RGBA GeoTIFF in Web Mercator (EPSG:3857): a pixel of the file for a pixel of a tile, not
+resampled, with the layer's transparency and its credits in the Copyright tag. In a script,
+`share.exportRaster` takes `"tiles"` (the tile layer's name, or its index in the Layers pane, 0
+at the top), `"bbox"` (`[west, south, east, north]` in degrees, the view's by default), `"zoom"`
+(the tiles' zoom, 0 to 30) and `"cog"`. A zoom past the service's deepest enlarges its tiles, and
+says so. An export fetches at most 1024 tiles and holds at most 8192 pixels a side: past either it
+is refused, naming a zoom that fits, as many tile services' terms forbid bulk downloads
+(OpenStreetMap's tile usage policy, for one). Tiles that haven't come after a wait (up to a minute for
+each block of up to 2048 pixels), or can't be fetched or drawn (a server's "no tile here"
+included), leave gaps, and the export warns with how many; so does a box where it drew nothing.
+The layer's opacity is a display setting and isn't applied: the file keeps the tiles' own alpha. Vector tiles, and styles that draw them or draw tiles from more
+than one source, are refused: Export Map to a `.tif` writes what they draw. A style drawing only
+one source's raster tiles is written as those tiles. The web app exports the view with Export Map instead.
+
 **Print Map** opens a PDF of the map view, kept as
 vectors as a layout's PDF is (see Layouts), in the system viewer on desktop; **Capture To
 Clipboard** copies a map image. **Export To 3D** writes a layer as a Wavefront OBJ or binary STL model
 with polygons extruded by a field (`share.export3d` writes STL when `path` ends in `.stl`). STL
 holds closed solids only: lines and zero-height features are left out, zero-area triangles are
-skipped, and a cap that can't be triangulated is fanned over its outer ring, filling any holes;
-the notices say how many. OBJ
+skipped, and a cap that can't be triangulated is fanned over its outer ring, filling any holes; one
+the triangulator can only finish as a fan (a hole touching the outer ring along an edge, for
+example) is fanned over what is left of it. Either fan may spill outside the polygon; the notices
+say how many. OBJ
 uses metres east, up and south of the layer's south-west corner (Y up). STL uses metres east and
 north of the model's own south-west corner, which includes the cubes drawn for points and so can
 lie past the layer's, and up from the features' base (Z up, as slicers expect; a negative height
@@ -116,6 +135,16 @@ in the browser. The Share As commands accept a `path`; without one they use the 
   to another project; `model` chooses a model by name.
 - **Web Scene** (`share.webScene`): the visible vector layers as glTF, polygons extruded by their
   layer's extrusion setting, with a camera that looks at the map's centre from its bearing and pitch.
+  Caps are fanned as in OBJ and STL: over the outer ring when the cap can't be triangulated
+  (filling any holes), or over what is left of it when the triangulator can only finish it as a
+  fan. Either fan may spill outside the polygon, and a notice says how many caps are fans. A
+  feature with a coordinate too far from the map's centre for the scene's 32-bit positions is left
+  out, and a notice says how many. The out-of-range count covers what the scene draws: rings with at least three
+  vertices (besides the closing one) and line parts with at least two. A polygon whose outer ring
+  is shorter is skipped and counted separately, as are holes with fewer than three vertices and
+  line parts with a single vertex. A scene carries at most 200,000 visible features with geometry;
+  a counted notice says when later features are left out by this limit. Filtered-out features
+  don't count as omissions. An empty result is refused, with the reasons for its omissions.
 - **Web Link Chart** (`share.linkChart`): the features joined by the map's relationships as a
   node-link HTML page; `relationship` limits it to one relationship.
 

@@ -45,7 +45,7 @@ pub fn commands() -> Vec<C> {
             r#"{"layer": raster, "crs"?: EPSG code or "EPSG:n" of the output (default the layer's), "cellSize"?: number or [x, y] in the output's units (default about the layer's pixel there), "origin"?: [x, y] a cell corner falls on (default [0, 0], so grids of the same cellSize line up), "extent"?: polygon layer (its selected or all features' bounds) | [west, south, east, north] in degrees | "view" (default the layer's footprint), "grid"?: raster layer whose coordinate system, cells and extent are taken exactly (instead of crs, cellSize, origin and extent), "resampling"?: "nearest" (default) | "bilinear" | "cubic" | "average" (the mean of the pixels whose centres fall in a cell) | "mode" (their most frequent value, the least of those tied), "name"?: new layer (default "<layer> projected"), "path"?: GeoTIFF to write it to}"#,
         ),
         C::new("raster.rasterize", "Polygons to Raster", "Analyze › Alignment", rasterize).inputs(rasterize_inputs).roles(&[]).effects(crate::policy::Effects::NONE).params(
-            r#"{"layer": polygon layer (its selected or all features; a later one over an earlier), "field"?: numeric field (its values) or text field (codes 1 to n in sorted order of its values, listed in a table named after the result with classes), "value"?: number every polygon gives when there is no field (default 1), "nodata"?: number of the cells under no polygon (default 0), "crs"?: EPSG code or "EPSG:n" of the output (default the layer's), "cellSize"?: number or [x, y] in the output's units (required without grid), "origin"?: [x, y] a cell corner falls on (default [0, 0], so grids of the same cellSize line up), "extent"?: polygon layer (its selected or all features' bounds) | [west, south, east, north] in degrees | "view" (default the polygons' bounds), "grid"?: raster layer whose coordinate system, cells and extent are taken exactly (instead of crs, cellSize, origin and extent), "name"?: new layer (default "<layer> raster"), "path"?: GeoTIFF to write it to}"#,
+            r#"{"layer": polygon layer (its selected or all features; a later one over an earlier), "field"?: numeric field (its values) or text field (codes 1 to n in sorted order of its values, listed in a table named after the result with classes), "value"?: number every polygon gives when there is no field (default 1), "nodata"?: number of the cells under no polygon (default 0), "crs"?: EPSG code or "EPSG:n" of the output (default the layer's), "cellSize"?: number or [x, y] in the output's units (required without grid), "origin"?: [x, y] a cell corner falls on (default [0, 0], so grids of the same cellSize line up), "extent"?: polygon layer (its selected or all features' bounds) | [west, south, east, north] in degrees | "view"; default the polygons' bounds, "grid"?: raster layer whose coordinate system, cells and extent are taken exactly (instead of crs, cellSize, origin and extent), "name"?: new layer (default "<layer> raster"), "path"?: GeoTIFF to write it to}"#,
         ),
         // A fit is a measurement of the points, not a project change: no undo step.
         C::new("raster.gcpFit", "Control Point Fit", "Analyze › Alignment", gcp_fit).roles(&[]).effects(crate::policy::Effects::NONE).view().params(
@@ -278,17 +278,18 @@ fn georeference(s: &mut Session, p: &Value) -> CmdResult {
     let mut out = rebuild(&r, gt, Crs::LonLat, copied(&r)?)?;
     // The same pixels, so the same values rounded when the file was read.
     out.rounded = r.rounded.clone();
+    out.rounded_some = r.rounded_some.clone();
     let e = out.extent();
     let v = replace(s, &layer, out)?;
     Ok(json!({"layer": v["layer"], "extent": [e.min_x, e.min_y, e.max_x, e.max_y]}))
 }
 
 /// A coordinate system given as an EPSG code or any text [`Crs::parse`] reads.
-fn crs_param(p: &Value, key: &str) -> Result<Option<Crs>, String> {
+fn crs_param(s: &mut Session, p: &Value, key: &str) -> Result<Option<Crs>, String> {
     let bad = || format!("{key} is an EPSG code such as 32613 or \"EPSG:32613\"");
     match p.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(t)) => Crs::parse(t).map(Some),
+        Some(Value::String(t)) => super::parse_crs(s, t).map(Some),
         Some(v) => {
             let code = v.as_u64().filter(|c| *c <= u64::from(u32::MAX)).ok_or_else(bad)?;
             Crs::from_epsg(code as u32).map(Some).ok_or_else(|| format!("unknown coordinate system EPSG:{code}"))
@@ -305,8 +306,8 @@ fn warp_to_fit(s: &mut Session, p: &Value, layer: &str, r: &Raster) -> CmdResult
     let fit = georef::fit(kind, &gcps(p)?)?;
     // Points are longitude/latitude unless said otherwise, and the output stays in their system
     // unless asked to reproject.
-    let points_crs = crs_param(p, "pointsCrs")?.unwrap_or(Crs::LonLat);
-    let crs = crs_param(p, "crs")?.unwrap_or(points_crs);
+    let points_crs = crs_param(s, p, "pointsCrs")?.unwrap_or(Crs::LonLat);
+    let crs = crs_param(s, p, "crs")?.unwrap_or(points_crs);
     let resampling = match p.get("resampling") {
         None | Some(Value::Null) => warp::Resampling::Bilinear,
         Some(v) => v.as_str().and_then(warp::Resampling::parse).ok_or("resampling is nearest, bilinear or cubic")?,
@@ -321,14 +322,18 @@ fn warp_to_fit(s: &mut Session, p: &Value, layer: &str, r: &Raster) -> CmdResult
     };
     let new_layer = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(|n| n.chars().take(200).collect::<String>());
     let out_name = new_layer.clone().unwrap_or_else(|| r.name.clone());
-    let out = warp::warp(r, &fit, &warp::Options { crs, points_crs, resampling, cell, name: out_name })?;
+    let mut out = warp::warp(r, &fit, &warp::Options { crs, points_crs, resampling, cell, name: out_name })?;
+    let used = warp::Method::Sample(resampling).used_on(r);
+    report_resampled_classes(s, r, &out, used.id());
+    // Resampled from values rounded when the file was read, some or all of them.
+    out.keep_rounded_mark(r);
     if let Some((fw, fh)) = r.overview {
         let note =
             format!("{}: warped at reduced resolution, from its {} × {} overview of the {fw} × {fh} raster", r.name, r.width, r.height);
         s.notify(note, false);
     }
     let mut info = json!({
-        "transform": kind.id(), "crs": crs.label(), "pointsCrs": points_crs.label(), "resampling": resampling.id(),
+        "transform": kind.id(), "crs": crs.label(), "pointsCrs": points_crs.label(), "resampling": used.id(),
         "width": out.width, "height": out.height, "bands": out.band_count(), "cellSize": out.transform.pixel_width,
     });
     if let Some((fw, fh)) = r.overview {
@@ -337,10 +342,9 @@ fn warp_to_fit(s: &mut Session, p: &Value, layer: &str, r: &Raster) -> CmdResult
     // A file written is the layer's source; without one the pixels are kept in the project.
     let rl = match &path {
         Some(path) => {
-            let cog =
-                rustgis_data::raster::cogwrite::write_file(&out, 0, std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
+            let wrote = super::raster::write_and_report(s, &out, 0, true, path)?;
             info["path"] = json!(path);
-            info["cog"] = json!({"overviews": cog.levels.len().saturating_sub(1), "bigTiff": cog.big, "bytes": cog.bytes});
+            info["cog"] = wrote.get("cog").cloned().unwrap_or(Value::Null);
             let e = out.extent();
             info["extent"] = json!([e.min_x, e.min_y, e.max_x, e.max_y]);
             RasterLayer::from_path(out, path.clone())
@@ -380,8 +384,10 @@ fn project_raster(s: &mut Session, p: &Value) -> CmdResult {
     let path = tif_path(p)?;
     let out_name = name(p, format!("{} projected", r.name));
     let out = warp::project(&r, &grid, method, out_name.clone())?;
+    let used = method.used_on(&r);
+    report_resampled_classes(s, &r, &out, used.id());
     let mut info = json!({
-        "name": out_name, "crs": grid.crs.label(), "resampling": method.used_on(&r).id(), "width": out.width, "height": out.height, "bands": out.band_count(),
+        "name": out_name, "crs": grid.crs.label(), "resampling": used.id(), "width": out.width, "height": out.height, "bands": out.band_count(),
         "cellSize": [grid.cell_x, grid.cell_y], "corner": [grid.min_x, grid.max_y],
     });
     if let Some((fw, fh)) = r.overview {
@@ -391,6 +397,31 @@ fn project_raster(s: &mut Session, p: &Value) -> CmdResult {
         info["projectedFromOverview"] = json!({"width": r.width, "height": r.height, "of": [fw, fh]});
     }
     add_output(s, out, path, false, info)
+}
+
+/// Report categorical labels removed by value-mixing resampling, with bounded band numbers.
+fn report_resampled_classes(s: &mut Session, source: &Raster, out: &Raster, method: &str) {
+    let mut count = 0usize;
+    let mut bands = Vec::new();
+    for (i, band) in source.bands.iter().enumerate() {
+        if band.classes.iter().any(|name| !name.is_empty()) && out.bands.get(i).is_some_and(|b| b.classes.is_empty()) {
+            count += 1;
+            if bands.len() < 16 {
+                bands.push((i + 1).to_string());
+            }
+        }
+    }
+    if count > 0 {
+        let more = if count > bands.len() { format!(", … ({} more)", count - bands.len()) } else { String::new() };
+        s.notify(
+            format!(
+                "{}: class names of {count} band(s) ({}{more}) not kept under {method}: resampling can mix their values",
+                source.name,
+                bands.join(", ")
+            ),
+            false,
+        );
+    }
 }
 
 /// The largest whole number a raster's 32-bit float pixels hold exactly.
@@ -604,10 +635,9 @@ fn add_output(s: &mut Session, out: Raster, path: Option<String>, classes: bool,
     // A file written is the layer's source; without one the pixels are kept in the project.
     let mut rl = match &path {
         Some(path) => {
-            let cog =
-                rustgis_data::raster::cogwrite::write_file(&out, 0, std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
+            let wrote = super::raster::write_and_report(s, &out, 0, true, path)?;
             info["path"] = json!(path);
-            info["cog"] = json!({"overviews": cog.levels.len().saturating_sub(1), "bigTiff": cog.big, "bytes": cog.bytes});
+            info["cog"] = wrote.get("cog").cloned().unwrap_or(Value::Null);
             RasterLayer::from_path(out, path.clone())
         }
         None => layer_of(out)?,
@@ -657,7 +687,7 @@ fn grid_param(
             warp::Grid::of(&t)
         }
         None => {
-            let crs = crs_param(p, "crs")?.unwrap_or(crs);
+            let crs = crs_param(s, p, "crs")?.unwrap_or(crs);
             let (footprint, pixel) = natural(crs)?;
             let positive = |v: &Value| v.as_f64().filter(|c| c.is_finite() && *c > 0.0);
             let bad_cell = "cellSize is a positive number, or [x, y], in the output's units";
@@ -1129,7 +1159,9 @@ pub(crate) fn process_work(s: &Session, p: &Value) -> Result<super::workflows::W
                 };
                 let nodata = r.nodata.or(Some(NODATA as f64));
                 let color = if matches!(r.color, ColorHint::Palette(_)) { ColorHint::Gray } else { r.color.clone() };
-                let out = Raster::new(out, w, h, bands, gt, r.crs, nodata, color, r.data_type.clone()).map_err(|e| e.to_string())?;
+                let mut out = Raster::new(out, w, h, bands, gt, r.crs, nodata, color, r.data_type.clone()).map_err(|e| e.to_string())?;
+                // The blocks average values rounded when the file was read, some or all of them.
+                out.keep_rounded_mark(&r);
                 super::workflows::made(out, None)
             }))
         }
@@ -1282,6 +1314,19 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
         o.name = i.name.clone();
         o.classes = i.classes.clone();
     });
+    out.copyright = first.copyright.clone();
+    // The first input's metadata accompanies its pixels; report other credits rather than
+    // silently dropping them or attributing every input to the first one's owner.
+    super::raster::say_losses(
+        s,
+        rs.iter()
+            .skip(1)
+            .filter(|r| r.copyright.is_some() && r.copyright != first.copyright)
+            .map(|r| (r.name.clone(), "its copyright differs from the first input's and is not kept in the mosaic".to_string()))
+            .collect(),
+    );
+    // Cells rounded when an input was read may be among those the mosaic keeps.
+    out.keep_rounded_marks(rs.iter().map(|r| &**r));
     let other: Vec<&str> = rs
         .iter()
         .skip(1)
@@ -1293,8 +1338,7 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
     }
     let path = ps(p, "path").map(str::trim).filter(|p| !p.is_empty()).map(str::to_string);
     if let Some(path) = &path {
-        let bytes = rustgis_data::raster::geotiff::write(&out, 0).map_err(|e| e.to_string())?;
-        rustgis_data::io::write_atomic(std::path::Path::new(path), &bytes).map_err(|e| format!("{path}: {e}"))?;
+        super::raster::write_and_report(s, &out, 0, false, path)?;
     }
     let mut v = add(s, out, false)?;
     if let (Some(o), Some(path)) = (v.as_object_mut(), path) {
@@ -1380,6 +1424,8 @@ fn clip_window(
     let gt = GeoTransform { origin_x: o.x, origin_y: o.y, ..r.transform };
     let mut out = Raster::new(name, w, h, bands, gt, r.crs, nodata, r.color.clone(), r.data_type.clone()).map_err(|e| e.to_string())?;
     out.bands.iter_mut().zip(&r.bands).for_each(|(o, i)| o.name = i.name.clone());
+    // Some of the values rounded when the file was read may be in the window: how many isn't known.
+    out.keep_rounded_mark(r);
     Ok(out)
 }
 
@@ -1470,6 +1516,8 @@ fn edit_pixels(s: &mut Session, p: &Value) -> CmdResult {
     let mut out = Raster::new(r.name.clone(), r.width, r.height, bands, r.transform, r.crs, nodata, r.color.clone(), r.data_type.clone())
         .map_err(|e| e.to_string())?;
     out.bands.iter_mut().zip(&r.bands).for_each(|(o, i)| o.name = i.name.clone());
+    // The edit may have overwritten some of the values rounded when the file was read.
+    out.keep_rounded_mark(&r);
     replace(s, &layer, out)?;
     Ok(json!({"pixels": n}))
 }
@@ -1518,7 +1566,14 @@ fn measure(s: &mut Session, p: &Value) -> CmdResult {
             if let Some(first) = pts.first() {
                 ring.push(*first);
             }
-            json!({"kind": "area", "squareMetres": body.area(rustgis_geom::geodesic_ring_area_m2(&ring)), "perimeterMetres": body.length(rustgis_geom::geodesic_length_m(&ring))})
+            if rustgis_geom::ring_area_is_ambiguous(&ring) {
+                return Err("the area is ambiguous: 1 ring winds beyond one whole surface".into());
+            }
+            let area = body.area(rustgis_geom::geodesic_ring_area_m2(&ring));
+            if !area.is_finite() {
+                return Err("the area cannot be measured from these coordinates".into());
+            }
+            json!({"kind": "area", "squareMetres": area, "perimeterMetres": body.length(rustgis_geom::geodesic_ring_perimeter_m(&ring))})
         }
         "height" => {
             let (Some(a), Some(c)) = (pts.first(), pts.get(1)) else { return Err("a height needs two points (base, top)".into()) };
