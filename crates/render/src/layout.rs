@@ -649,6 +649,10 @@ pub fn frame_viewports(layout: &Layout, maps: &[Map], dpi: f64) -> Georeferenced
             out.left_out.push((e.id, e.name.clone(), "its map is missing"));
             continue;
         };
+        if !placed.iter().all(|v| v.is_finite()) {
+            out.left_out.push((e.id, e.name.clone(), "its place on the page isn't a number"));
+            continue;
+        }
         // What the frames drawn over it leave of it.
         let mut shown = vec![*placed];
         for (_, over) in &frames[i + 1..] {
@@ -703,14 +707,16 @@ fn uncovered(r: [f64; 4], cut: [f64; 4]) -> Vec<[f64; 4]> {
 }
 
 /// How far, in millimetres on paper, a reader that fits a frame's corners in longitude/latitude
-/// (`corners`, latitude then longitude, clockwise from the top-left) puts the places at its
-/// centre and its edges' midpoints from where the frame, `w` × `h` points seen by `cam`, draws
-/// them: the worst of the five, the fit being exact at the corners. `None` when one of them
-/// isn't on the map.
+/// (`corners`, latitude then longitude, clockwise from the top-left) puts the places on a 9 × 9
+/// grid over it, its edges included, from where the frame, `w` × `h` points seen by `cam`, draws
+/// them: the worst of them, the fit being exact at the corners. `None` when one of them isn't on
+/// the map.
 fn corner_fit_mm(corners: &[(f64, f64); 4], map: &Map, cam: &rustgis_map::Camera, w: f64, h: f64) -> Option<f64> {
     let [tl, tr, br, bl] = *corners;
     let mut worst: f64 = 0.0;
-    for (u, t) in [(0.5, 0.5), (0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0, 0.5)] {
+    // A 9 × 9 grid over the frame, its edges included (the corners are exact).
+    let grid = (0..=8).flat_map(|i| (0..=8).map(move |j| (f64::from(i) / 8.0, f64::from(j) / 8.0)));
+    for (u, t) in grid {
         // Between the corners, as the unit square's (`/LPTS`) is filled: bilinearly.
         let mix = |a: f64, b: f64, c: f64, d: f64| (1.0 - u) * (1.0 - t) * a + u * (1.0 - t) * b + u * t * c + (1.0 - u) * t * d;
         let (lat, lon) = (mix(tl.0, tr.0, br.0, bl.0), mix(tl.1, tr.1, br.1, bl.1));
@@ -777,6 +783,10 @@ fn frame_viewport(
             (Some(_), Some(def)) => crs::lonlat_on_datum_of(def, c).ok_or("its corners can't be moved onto its datum")?,
             _ => c,
         };
+        // A value no PDF number can be (from a hostile project) is no place.
+        if !(c.x.is_finite() && c.y.is_finite()) {
+            return Err("a corner is off the Earth");
+        }
         Ok((c.y, c.x))
     };
     // Clockwise from the top-left, as `/LPTS` takes them.
@@ -798,11 +808,12 @@ fn frame_viewport(
             // puts no place more than half a millimetre on paper from where the frame draws it.
             match corner_fit_mm(&corners, map, &cam, w, h) {
                 Some(off) if off <= MAX_CORNER_FIT_MM => {}
-                _ => {
+                Some(_) => {
                     return Err(
                         "its coordinate system can't be written as WKT, and its corners alone would put places more than 0.5 mm off",
                     );
                 }
+                None => return Err("its coordinate system can't be written as WKT, and a place between its corners is off the map"),
             }
             (wkt::to_wkt(crs::Crs::LonLat).ok_or("its projection can't be read")?, Some(4326))
         }
