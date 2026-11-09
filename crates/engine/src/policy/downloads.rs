@@ -369,6 +369,11 @@ impl Session {
         }
         let c = (*c).clone();
         let id = self.download_started();
+        // The view a window of the view was asked in, by its number, now that the request is made
+        // (the command's own waits may have been restored since it was queued).
+        if let (Some(v), Some(n)) = (request.view, request.params.get("request").and_then(Value::as_u64)) {
+            self.url_waits.views.insert(n, v);
+        }
         self.policy.work.claims.insert(id, Claim { c, params: request.params.clone(), live: Arc::new(AtomicBool::new(true)), import });
         Ok(id)
     }

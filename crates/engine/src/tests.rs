@@ -30540,6 +30540,30 @@ fn a_script_run_by_the_app_leaves_a_window_to_it() {
     assert_eq!(asked[0].params()["bbox"], p["bbox"]);
 }
 
+/// A command run again that asks for windows of the view in two views is answered each by the
+/// window asked in that view, not twice by the first (#1330).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_command_run_again_gets_each_view_s_own_window() {
+    let mut s = world();
+    let p = json!({"url": "https://x.org/scene.tif", "bbox": "view"});
+    let asked = s.asked_for(&p);
+    let mut views = Vec::new();
+    for (extent, marker) in [([10.0, 45.0, 11.0, 46.0], "A"), ([20.0, 45.0, 21.0, 46.0], "B")] {
+        s.run("map.zoomToExtent", &json!({"extent": extent})).unwrap();
+        let e = crate::cmd::workspace::view_extent(&s);
+        let view = [e.min_x, e.min_y, e.max_x, e.max_y];
+        s.rerun_landed.push((Session::with_view(&asked, Some(view)), Ok(json!({"marker": marker})), Default::default()));
+        views.push(extent);
+    }
+    let answer = |s: &mut Session, extent: [f64; 4]| {
+        s.run("map.zoomToExtent", &json!({"extent": extent})).unwrap();
+        s.with_deferred_downloads(|s| s.run("layer.addUrl", &p)).unwrap()["marker"].clone()
+    };
+    assert_eq!(answer(&mut s, views[1]), "B");
+    assert_eq!(answer(&mut s, views[0]), "A");
+}
+
 /// A request for the view's window joins one queued only when it was asked in the same view:
 /// asked in another, it is another request, read for its own view (#1330).
 #[test]

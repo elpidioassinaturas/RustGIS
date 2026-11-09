@@ -3218,6 +3218,15 @@ fn add_url_as_given(s: &mut Session, p: &Value) -> CmdResult {
     // adding it answered, as often as the run asks for it (the app downloaded and added it once).
     // Answering it changes nothing (the layer is its own undo step).
     let wanted = s.asked_for(p);
+    // A window of the view is answered by the one asked in the view the command sees now.
+    #[cfg(not(target_arch = "wasm32"))]
+    let wanted = match p.get("bbox") {
+        Some(b) if s.leave_downloads && is_view(Some(b)) => {
+            let at = ps(p, "url").map(str::trim).unwrap_or_default();
+            Session::with_view(&wanted, Some(window_settled(s, p, at, None)?.bbox))
+        }
+        _ => wanted,
+    };
     if s.leave_downloads
         && let Some((answer, added)) = s.rerun_answer(&wanted)
     {

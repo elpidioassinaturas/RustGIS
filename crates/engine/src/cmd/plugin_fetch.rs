@@ -319,6 +319,10 @@ pub(crate) struct Retry {
 /// The downloads plugin commands wait for (#1202): those the app is making, with what was
 /// asked and since when, and those added, with what adding them answered, until the command
 /// waiting for them runs again.
+/// The key a window of the view is told apart by when a command run again is answered
+/// ([`Session::with_view`]): matched only, never read as a parameter.
+const VIEW_ASKED: &str = "viewAsked";
+
 #[derive(Clone, Default)]
 pub(crate) struct UrlWaits {
     /// The view's boxes of the window requests asked with `"bbox": "view"`, by their numbers: a
@@ -738,6 +742,17 @@ impl Session {
         Ok(None)
     }
 
+    /// What a window of the view was asked as, for a command run again to be answered by: `asked`
+    /// with the box the view was then (`UrlWaits::views`), so two windows of the view asked in
+    /// two views are told apart. Others are `asked` as it is.
+    pub(crate) fn with_view(asked: &Value, view: Option<[f64; 4]>) -> Value {
+        let mut asked = asked.clone();
+        if let (Some(v), Some(o)) = (view, asked.as_object_mut()) {
+            o.insert(VIEW_ASKED.into(), json!(v));
+        }
+        asked
+    }
+
     /// Whether a command run again has an answer for `wanted`.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn rerun_has(&self, wanted: &Value) -> bool {
@@ -923,12 +938,9 @@ impl Session {
                 // runs, and the ones it waited for. These stay in `landed` until no command waits
                 // for them (`keep_only`, below), so another command waiting for the same download
                 // gets the answer too.
-                let mine = self
-                    .url_waits
-                    .landed
-                    .iter()
-                    .filter(|(n, ..)| r.requests.contains(n))
-                    .map(|(_, asked, answer, added)| (asked.clone(), answer.clone(), added.clone()));
+                let mine = self.url_waits.landed.iter().filter(|(n, ..)| r.requests.contains(n)).map(|(n, asked, answer, added)| {
+                    (Self::with_view(asked, self.url_waits.views.get(n).copied()), answer.clone(), added.clone())
+                });
                 self.rerun_landed = r.answered.iter().cloned().chain(mine).collect();
                 self.rerun_said = r.said;
                 self.retry_tries = r.tries;
