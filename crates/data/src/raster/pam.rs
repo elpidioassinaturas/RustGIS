@@ -112,9 +112,6 @@ fn is_wavelength_item(name: &str) -> bool {
     name.eq_ignore_ascii_case(WAVELENGTH_UNITS) || WAVELENGTH_ITEMS.iter().any(|w| name.eq_ignore_ascii_case(w))
 }
 
-/// A wavelength item's value in nanometres: `None` when it isn't a length from 1 nm to 1 m (no
-/// sensor's band lies outside), or its unit isn't a length this knows.
-///
 /// The length unit a wavelength unit item names, however it is spelt.
 #[derive(Debug, PartialEq)]
 enum Unit {
@@ -139,6 +136,9 @@ fn unit_of(text: &str) -> Unit {
     }
 }
 
+/// A wavelength item's value in nanometres: `None` when it isn't a length from 1 nm to 1 m (no
+/// sensor's band lies outside), or its unit isn't a length this knows.
+///
 /// `CENTRAL_WAVELENGTH_UM` is in micrometres by its name; another item is in the unit `units`
 /// gives (nanometres or micrometres, as ENVI and others spell them). With no unit (or ENVI's
 /// `Unknown`), a value under 100 is in micrometres and any other in nanometres: imaging sensors
