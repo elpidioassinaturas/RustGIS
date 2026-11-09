@@ -1377,7 +1377,10 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
         .iter()
         .skip(1)
         .filter(|r| {
-            r.bands.iter().zip(&first.bands).any(|(b, f)| b.name != f.name || b.classes != f.classes || b.wavelength != f.wavelength)
+            r.bands
+                .iter()
+                .zip(&first.bands)
+                .any(|(b, f)| b.name != f.name || b.classes != f.classes || !raster::pam::same_wavelength(b.wavelength, f.wavelength))
         })
         .map(|r| r.name.as_str())
         .collect();
@@ -1779,7 +1782,7 @@ pub(crate) fn mosaic_work(s: &Session, p: &Value) -> Result<super::workflows::Wo
         .map(|b| {
             let mut each = imgs.iter().map(|r| r.bands.get(b).and_then(|band| band.wavelength));
             let first = each.next().flatten();
-            if each.all(|w| w == first) {
+            if each.all(|w| raster::pam::same_wavelength(w, first)) {
                 first
             } else {
                 differ += 1;
@@ -1788,7 +1791,8 @@ pub(crate) fn mosaic_work(s: &Session, p: &Value) -> Result<super::workflows::Wo
         })
         .collect();
     if differ > 0 {
-        messages.push(format!("{differ} band(s) the images give different wavelengths have none in the mosaic"));
+        messages
+            .push(format!("{differ} band(s) have no wavelength in the mosaic: the images don't all give the same one (or some give none)"));
     }
     let extra = (!messages.is_empty()).then(|| json!({ "messages": messages }));
     Ok(Box::new(move || {

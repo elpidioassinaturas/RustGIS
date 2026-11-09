@@ -51,20 +51,33 @@ pub struct Spectral {
     pub message: Option<(String, bool)>,
 }
 
+/// Why a profile's points are taken off.
+pub enum Restart<'a> {
+    /// Another raster, by this name, is read now.
+    Other(&'a str),
+    /// Another map is shown: the points were read on the one before.
+    OtherMap,
+    /// Their raster has changed or gone.
+    Gone,
+}
+
 impl Spectral {
-    /// Takes every point off, as they aren't comparable with what is read now (`now`: the raster
-    /// chosen, or `None` when theirs has changed or gone), and says how many went.
-    pub fn restart(&mut self, now: Option<&str>) {
+    /// Takes every point off, as they aren't comparable with what is read now, and says how many
+    /// went and why.
+    pub fn restart(&mut self, why: Restart<'_>) {
         let n = self.samples.len();
         self.samples.clear();
         self.message = (n > 0).then(|| {
             let (n, old) = (n.to_string(), self.layer.clone());
-            let text = match now {
-                Some(now) => crate::i18n::fmt(
+            let text = match why {
+                Restart::Other(now) => crate::i18n::fmt(
                     "{n} point(s) taken off: they were read on {old}, not on {now}.",
                     &[("n", &n), ("old", &old), ("now", now)],
                 ),
-                None => {
+                Restart::OtherMap => {
+                    crate::i18n::fmt("{n} point(s) taken off: they were read on {old} on another map.", &[("n", &n), ("old", &old)])
+                }
+                Restart::Gone => {
                     crate::i18n::fmt("{n} point(s) taken off: {old} has changed or gone since they were read.", &[("n", &n), ("old", &old)])
                 }
             };
@@ -105,6 +118,23 @@ pub fn colour(t: &Tokens, slot: usize) -> Color32 {
 /// The map (its place in the project) and layer the commands read as `layer`.
 fn source_of(app: &RustGisApp, layer: &str) -> Option<(usize, u32)> {
     app.session.map().layer_by_name(layer).map(|l| (app.session.project.active_map, l.id))
+}
+
+/// The raster the points were read on, renamed since: the profile follows its new name (when
+/// commands find it by that name), so its points stay.
+pub fn follow_rename(app: &mut RustGisApp) {
+    let Some((map, id)) = app.workflow.spectral.source else { return };
+    if map != app.session.project.active_map {
+        return;
+    }
+    let Some(name) = app.session.map().layer(id).map(|l| l.name.clone()) else { return };
+    if name == app.workflow.spectral.layer || app.session.map().layer_by_name(&name).map(|l| l.id) != Some(id) {
+        return;
+    }
+    if app.workflow.layer == app.workflow.spectral.layer {
+        app.workflow.layer = name.clone();
+    }
+    app.workflow.spectral.layer = name;
 }
 
 /// Whether the points were read on the raster the profile's name finds now.
@@ -179,7 +209,14 @@ pub fn add_point(app: &mut RustGisApp, layer: &str, at: rustgis_engine::geom::Co
     // they went is said.
     let mut restarted = None;
     if sp.layer != layer || sp.source != source || sp.bands != bands || sp.wavelengths != wavelengths {
-        sp.restart(if sp.layer.eq_ignore_ascii_case(layer) { None } else { Some(layer) });
+        let why = if !sp.layer.eq_ignore_ascii_case(layer) {
+            Restart::Other(layer)
+        } else if sp.source.map(|s| s.0) != source.map(|s| s.0) {
+            Restart::OtherMap
+        } else {
+            Restart::Gone
+        };
+        sp.restart(why);
         restarted = sp.message.take();
         sp.layer = layer.to_string();
         sp.source = source;
@@ -208,11 +245,13 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     ui.add_space(6.0);
     ui.label(egui::RichText::new(tl!("Spectral profile")).font(semibold(12.5)));
     ui.add_space(2.0);
-    // Points read on a raster that has since gone (removed, added again, on another map) are
-    // dropped, even when no raster is left to choose.
+    // Points read on a raster renamed since stay; those read on one that has since gone
+    // (removed, added again, on another map) are dropped, even when no raster is left to choose.
+    follow_rename(app);
     let sp = &app.workflow.spectral;
     if !sp.samples.is_empty() && !fresh(app) {
-        app.workflow.spectral.restart(None);
+        let other_map = sp.source.is_some_and(|(map, _)| map != app.session.project.active_map);
+        app.workflow.spectral.restart(if other_map { Restart::OtherMap } else { Restart::Gone });
     }
     let (rasters, shadowed) = multiband(app);
     if shadowed > 0 {
@@ -254,7 +293,7 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     // Points on another raster aren't comparable with this one's.
     if !app.workflow.spectral.samples.is_empty() && app.workflow.spectral.layer != app.workflow.layer {
         let now = app.workflow.layer.clone();
-        app.workflow.spectral.restart(Some(&now));
+        app.workflow.spectral.restart(Restart::Other(&now));
     }
     // Points clicked on the map while picking: each is read, and picking goes on.
     let clicked = match &mut app.workflow.pick {
@@ -591,6 +630,13 @@ mod tests {
         add_point(&mut app, "scene", rustgis_engine::geom::Coord::new(10.005, 44.995));
         let slots: Vec<usize> = app.workflow.spectral.samples.iter().map(|s| s.slot).collect();
         assert_eq!(slots, [2, 3, 4, 5, 1, 0]);
+        // The scene renamed: its points stay, under its new name.
+        app.run("layer.rename", json!({"layer": "scene", "name": "renamed"})).unwrap();
+        follow_rename(&mut app);
+        assert!(fresh(&app));
+        assert_eq!((app.workflow.spectral.layer.as_str(), app.workflow.spectral.samples.len()), ("renamed", MAX_POINTS));
+        app.run("layer.rename", json!({"layer": "renamed", "name": "scene"})).unwrap();
+        follow_rename(&mut app);
         // The scene removed and another of its name added: its points aren't the old ones.
         app.run("layer.remove", json!({"layer": "scene"})).unwrap();
         app.run("layer.addDataBytes", json!({"fileName": "scene.tif", "data": rgb_tiff_b64(false)})).unwrap();
@@ -644,6 +690,26 @@ mod tests {
         // The section's list leaves it out too, and counts it.
         let (rasters, shadowed) = multiband(&app);
         assert_eq!((rasters.len(), shadowed), (1, 1), "{rasters:?}");
+    }
+
+    /// Another map shown: the points read on the one before are taken off, and that is said.
+    #[test]
+    fn another_map_takes_the_points_off_and_says_so() {
+        let mut app = app_with_scene(false);
+        add_point(&mut app, "scene", rustgis_engine::geom::Coord::new(10.005, 44.995));
+        app.run("map.new", json!({"name": "Second"})).unwrap();
+        assert_ne!(app.session.project.active_map, 0, "the new map is shown");
+        let mut h = egui_kittest::Harness::builder().allow_missing_glyphs().with_size(egui::vec2(420.0, 320.0)).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let t = crate::theme::Tokens::get(ui.ctx());
+                section(app, ui, &t);
+            },
+            app,
+        );
+        h.run_steps(1);
+        let sp = &h.state().workflow.spectral;
+        assert!(sp.samples.is_empty());
+        assert_eq!(sp.message, Some(("1 point(s) taken off: they were read on scene on another map.".to_string(), false)));
     }
 
     /// With no raster of two bands or more, the section says so and ends a pick left on.

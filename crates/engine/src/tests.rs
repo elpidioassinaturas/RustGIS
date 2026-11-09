@@ -9013,9 +9013,17 @@ fn layer_effects_and_imagery_tools() {
     let bytes = layer.embedded.clone().expect("the mosaic's GeoTIFF");
     let back = rustgis_data::raster::geotiff::read(std::io::Cursor::new(bytes.as_slice()), "back").unwrap();
     assert_eq!(back.bands[0].wavelength, Some(842.0));
+    // A rounding apart is one wavelength, as the readers take it.
+    give(&mut s, "dem_later", Some(842.000_000_1));
+    let r = s.run("imagery.mosaic", &json!({"name": "Valley"})).unwrap();
+    assert!(r.get("messages").is_none(), "{r}");
     give(&mut s, "dem_later", Some(665.0));
     let r = s.run("imagery.mosaic", &json!({"name": "Valley"})).unwrap();
-    assert_eq!(r["messages"], json!(["1 band(s) the images give different wavelengths have none in the mosaic"]), "{r}");
+    assert_eq!(
+        r["messages"],
+        json!(["1 band(s) have no wavelength in the mosaic: the images don't all give the same one (or some give none)"]),
+        "{r}"
+    );
     let mo = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
     assert_eq!(mo.bands[0].wavelength, None);
     give(&mut s, &dem, None);

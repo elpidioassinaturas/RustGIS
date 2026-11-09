@@ -140,16 +140,24 @@ pub fn wavelength_nm(item: &str, text: &str, units: Option<&str>) -> Option<f64>
     in_range(if micro { nm(v) } else { v })
 }
 
+/// Whether two wavelengths (nanometres, `None` for none) are one: lengths a millionth of a
+/// nanometre apart or less are, as micrometres are read to that, so only rounding is absorbed.
+pub fn same_wavelength(a: Option<f64>, b: Option<f64>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => (a - b).abs() <= 1e-6,
+        (a, b) => a.is_none() && b.is_none(),
+    }
+}
+
 /// Keeps a band's first wavelength in `slot`: `true` when `nm` is another one, left out (the
-/// same length under another item, to a millionth of a nanometre, is the same one: micrometres
-/// are read to that, so only rounding is absorbed).
+/// same length under another item is the same one, [`same_wavelength`]).
 fn keep_first_wavelength(slot: &mut Option<f64>, nm: f64) -> bool {
     match *slot {
         None => {
             *slot = Some(nm);
             false
         }
-        Some(w) => (w - nm).abs() > 1e-6,
+        Some(w) => !same_wavelength(Some(w), Some(nm)),
     }
 }
 
