@@ -34398,6 +34398,10 @@ fn spectral_profiles_at_points_with_wavelengths() {
     let one = s.run("raster.spectral", &json!({"layer": "scene", "lon": 10.005, "lat": 44.995})).unwrap();
     assert_eq!(one["wavelengths"], json!([665.0, 560.0, 490.0]));
     assert_eq!(one["values"], json!([30.0, 20.0, 10.0]));
+    // A resampled raster keeps its bands' wavelengths.
+    s.run("raster.process", &json!({"layer": "scene", "operation": "resample", "factor": 2, "name": "half"})).unwrap();
+    let half = s.run("raster.spectral", &json!({"layer": "half", "lon": 10.005, "lat": 44.995})).unwrap();
+    assert_eq!(half["wavelengths"], json!([665.0, 560.0, 490.0]));
     let plain = s.run("raster.spectral", &json!({"layer": "plain", "points": [[10.005, 44.995]]})).unwrap();
     assert!(plain.get("wavelengths").is_none(), "{plain}");
     // Points read before one point: the point left out is said.

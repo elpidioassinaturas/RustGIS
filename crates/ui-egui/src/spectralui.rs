@@ -354,7 +354,8 @@ fn chart(sp: &Spectral, ui: &mut Ui, t: &Tokens) {
             ui.label(egui::RichText::new(title).small().strong());
             for s in &sp.samples {
                 let v = s.values.get(b).copied().flatten().map_or_else(|| tl!("no data").to_string(), fmt);
-                ui.label(egui::RichText::new(format!("● {}  {v}", s.n)).small().color(colour(t, s.n)));
+                let n = s.n.to_string();
+                ui.label(egui::RichText::new(crate::i18n::fmt("● {n}  {v}", &[("n", &n), ("v", &v)])).small().color(colour(t, s.n)));
             }
         });
     }

@@ -1214,6 +1214,8 @@ pub(crate) fn process_work(s: &Session, p: &Value) -> Result<super::workflows::W
                 let nodata = r.nodata.or(Some(NODATA as f64));
                 let color = if matches!(r.color, ColorHint::Palette(_)) { ColorHint::Gray } else { r.color.clone() };
                 let mut out = Raster::new(out, w, h, bands, gt, r.crs, nodata, color, r.data_type.clone()).map_err(|e| e.to_string())?;
+                // A block's mean is of the same band: its wavelength is the input's.
+                out.bands.iter_mut().zip(&r.bands).for_each(|(o, i)| o.wavelength = i.wavelength);
                 // The blocks average values rounded when the file was read, some or all of them.
                 out.keep_rounded_mark(&r);
                 super::workflows::made(out, None)
