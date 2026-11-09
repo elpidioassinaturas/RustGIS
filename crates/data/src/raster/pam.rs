@@ -289,12 +289,12 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
             .count();
         // Its wavelength: the first that is a length of the items that give one, in that order and
         // in any domain (GDAL's in `IMAGERY`, ENVI's in the default one), as the metadata tag's.
-        let units = mdi_text(b, WAVELENGTH_UNITS).or(dataset_units);
+        let wavelength_units = mdi_text(b, WAVELENGTH_UNITS).or(dataset_units);
         units_again += other_units(mdi_texts(b, WAVELENGTH_UNITS));
         let mut wavelength = None;
         for w in WAVELENGTH_ITEMS {
             for t in mdi_texts(b, w) {
-                match wavelength_nm(w, t, units) {
+                match wavelength_nm(w, t, wavelength_units) {
                     Some(nm) => other_wavelengths += usize::from(keep_first_wavelength(&mut wavelength, nm)),
                     None => odd_wavelengths += 1,
                 }

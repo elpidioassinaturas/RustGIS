@@ -206,9 +206,10 @@ pub fn add_point(app: &mut RustGisApp, layer: &str, at: rustgis_engine::geom::Co
     let bands: Vec<String> = v["bands"].as_array().into_iter().flatten().map(|b| b.as_str().unwrap_or_default().to_string()).collect();
     let wavelengths: Vec<Option<f64>> = v["wavelengths"].as_array().into_iter().flatten().map(Value::as_f64).collect();
     // Another raster, or the same one's bands changed: its points aren't comparable, and that
-    // they went is said.
+    // they went is said. Names are compared as commands find layers, so the same raster written
+    // in another case keeps its points.
     let mut restarted = None;
-    if sp.layer != layer || sp.source != source || sp.bands != bands || sp.wavelengths != wavelengths {
+    if !sp.layer.eq_ignore_ascii_case(layer) || sp.source != source || sp.bands != bands || sp.wavelengths != wavelengths {
         let why = if !sp.layer.eq_ignore_ascii_case(layer) {
             Restart::Other(layer)
         } else if sp.source.map(|s| s.0) != source.map(|s| s.0) {
@@ -218,11 +219,11 @@ pub fn add_point(app: &mut RustGisApp, layer: &str, at: rustgis_engine::geom::Co
         };
         sp.restart(why);
         restarted = sp.message.take();
-        sp.layer = layer.to_string();
         sp.source = source;
         sp.bands = bands;
         sp.wavelengths = wavelengths;
     }
+    sp.layer = layer.to_string();
     let pixel = (v["pixel"][0].as_i64().unwrap_or(0), v["pixel"][1].as_i64().unwrap_or(0));
     let values: Vec<Option<f64>> = v["values"].as_array().into_iter().flatten().map(Value::as_f64).collect();
     sp.last += 1;
@@ -373,6 +374,31 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
 }
 
+/// The range a chart axis is drawn over: `lo` to `hi`, or one either side of a single value, so a
+/// flat profile is drawn across the middle.
+fn scale(lo: f64, hi: f64) -> (f64, f64) {
+    if hi > lo { (lo, hi) } else { (lo - 1.0, hi + 1.0) }
+}
+
+/// The values written beside the chart: the highest and lowest read, or the one value when every
+/// point gives the same.
+fn value_labels(lo: f64, hi: f64) -> Vec<f64> {
+    if hi > lo { vec![hi, lo] } else { vec![lo] }
+}
+
+/// The x axis' title: the wavelengths the bands span (one when they share it), or their numbers.
+fn axis_label(x0: f64, x1: f64, by_wavelength: bool, bands: usize) -> String {
+    let fmt = |v: f64| rustgis_engine::map::symbology::fmt_num(v);
+    if !by_wavelength {
+        let n = bands.to_string();
+        crate::i18n::fmt("Bands 1–{n}", &[("n", &n)])
+    } else if x1 > x0 {
+        crate::i18n::fmt("Wavelength {from}–{to} nm", &[("from", &fmt(x0)), ("to", &fmt(x1))])
+    } else {
+        crate::i18n::fmt("Wavelength {nm} nm", &[("nm", &fmt(x0))])
+    }
+}
+
 /// The chart: a line for each point through its bands, in the order of the x axis; hovering
 /// shows a band's name, wavelength and the points' values.
 fn chart(sp: &Spectral, ui: &mut Ui, t: &Tokens) {
@@ -387,14 +413,16 @@ fn chart(sp: &Spectral, ui: &mut Ui, t: &Tokens) {
         ui.label(egui::RichText::new(tl!("No data at the points picked.")).weak().small());
         return;
     }
-    let (x1, hi) = (if x1 > x0 { x1 } else { x0 + 1.0 }, if hi > lo { hi } else { lo + 1.0 });
+    let labels = value_labels(lo, hi);
+    let axis = axis_label(x0, x1, by_wavelength, sp.bands.len());
+    let ((x0, x1), (lo, hi)) = (scale(x0, x1), scale(lo, hi));
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 190.0), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, t.canvas);
     let fmt = |v: f64| rustgis_engine::map::symbology::fmt_num(v);
     // A gutter on the left for the values at the top and bottom, clear of the lines, and room for
     // the axis' range under it.
-    let gutter = [hi, lo].iter().map(|v| crate::widgets::text_w(ui, &fmt(*v), regular(10.0))).fold(0.0_f32, f32::max) + 12.0;
+    let gutter = labels.iter().map(|v| crate::widgets::text_w(ui, &fmt(*v), regular(10.0))).fold(0.0_f32, f32::max) + 12.0;
     let plot = egui::Rect::from_min_max(rect.min + vec2(gutter, 12.0), rect.max - vec2(12.0, 30.0));
     let to = |x: f64, v: f64| {
         pos2(plot.min.x + ((x - x0) / (x1 - x0)) as f32 * plot.width(), plot.max.y - ((v - lo) / (hi - lo)) as f32 * plot.height())
@@ -425,14 +453,9 @@ fn chart(sp: &Spectral, ui: &mut Ui, t: &Tokens) {
             }
         }
     }
-    painter.text(pos2(plot.min.x - 6.0, plot.min.y), egui::Align2::RIGHT_CENTER, fmt(hi), regular(10.0), t.text_dim);
-    painter.text(pos2(plot.min.x - 6.0, plot.max.y), egui::Align2::RIGHT_CENTER, fmt(lo), regular(10.0), t.text_dim);
-    let axis = if by_wavelength {
-        crate::i18n::fmt("Wavelength {from}–{to} nm", &[("from", &fmt(x0)), ("to", &fmt(x1))])
-    } else {
-        let n = sp.bands.len().to_string();
-        crate::i18n::fmt("Bands 1–{n}", &[("n", &n)])
-    };
+    for v in &labels {
+        painter.text(pos2(plot.min.x - 6.0, to(x0, *v).y), egui::Align2::RIGHT_CENTER, fmt(*v), regular(10.0), t.text_dim);
+    }
     painter.text(rect.center_bottom() + vec2(0.0, -4.0), egui::Align2::CENTER_BOTTOM, axis, regular(10.0), t.text_dim);
     // Hovering: the band nearest the pointer, marked, and every point's value there.
     let near = resp.hover_pos().and_then(|pos| {
@@ -690,6 +713,29 @@ mod tests {
         // The section's list leaves it out too, and counts it.
         let (rasters, shadowed) = multiband(&app);
         assert_eq!((rasters.len(), shadowed), (1, 1), "{rasters:?}");
+    }
+
+    /// A flat profile's labels say what was read, not the room drawn around it.
+    #[test]
+    fn a_flat_profile_is_labelled_with_its_values() {
+        assert_eq!(value_labels(0.0, 0.0), [0.0]);
+        assert_eq!(value_labels(10.0, 35.0), [35.0, 10.0]);
+        assert_eq!(scale(0.0, 0.0), (-1.0, 1.0));
+        assert_eq!(scale(10.0, 35.0), (10.0, 35.0));
+        assert_eq!(axis_label(500.0, 500.0, true, 3), "Wavelength 500 nm");
+        assert_eq!(axis_label(490.0, 665.0, true, 3), "Wavelength 490–665 nm");
+        assert_eq!(axis_label(1.0, 1.0, false, 1), "Bands 1–1");
+    }
+
+    /// The raster the points were read on, written in another case, is the same raster: they stay.
+    #[test]
+    fn the_same_raster_in_another_case_keeps_its_points() {
+        let mut app = app_with_scene(false);
+        add_point(&mut app, "scene", rustgis_engine::geom::Coord::new(10.005, 44.995));
+        add_point(&mut app, "SCENE", rustgis_engine::geom::Coord::new(10.015, 44.985));
+        let sp = &app.workflow.spectral;
+        assert_eq!(sp.samples.len(), 2, "{:?}", sp.message);
+        assert_eq!(sp.message, None);
     }
 
     /// Another map shown: the points read on the one before are taken off, and that is said.
