@@ -2992,9 +2992,11 @@ fn layer_list(form: &mut GpForm, ui: &mut Ui, param: &'static str, cur: &str, of
     }
 }
 
-/// Whether a layer parameter's picker offers no layer (`—`): when it is optional and names no
-/// layer as its default. One that does would run with that layer when left empty (its default
-/// is filled in then), so `—` would show one layer and run with another (#1517).
+/// Whether a layer parameter's picker offers no layer (`—`), to leave it out again once one is
+/// picked: when it is optional and names no layer as its default. One that does would run with
+/// that layer when left empty (its default is filled in then), so `—` would show one layer and
+/// run with another (#1517). A built-in tool's `layer` picker offers none (A5 Grid's follows the
+/// active layer).
 fn no_layer_offered(p: &rustgis_engine::analysis::ParamSpec) -> bool {
     !p.required && serde_json::from_str::<String>(p.default).map_or(true, |n| n.is_empty())
 }
@@ -3660,6 +3662,14 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                     .selected_text(shown)
                     .width(ui.available_width() - 4.0)
                     .show_ui(ui, |ui| {
+                        // An external tool's optional layer, once picked, can be left out again.
+                        if rustgis_engine::analysis::is_external(spec)
+                            && no_layer_offered(p)
+                            && ui.selectable_label(cur.is_empty(), "—").clicked()
+                        {
+                            app.gp.values.remove(p.name);
+                            app.gp.tables.remove(p.name);
+                        }
                         for name in layer_names(ParamKind::Layer) {
                             if ui.selectable_label(picked.is_none() && name == cur, &name).clicked() {
                                 app.gp.values.insert(p.name, name);
@@ -3678,7 +3688,13 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 ui.add_space(4.0);
                 continue;
             }
-            ParamKind::PolygonLayer | ParamKind::PointLayer => Some(layer_names(p.kind)),
+            ParamKind::PolygonLayer | ParamKind::PointLayer => {
+                let mut v = layer_names(p.kind);
+                if no_layer_offered(p) {
+                    v.insert(0, String::new());
+                }
+                Some(v)
+            }
             ParamKind::Field | ParamKind::FieldNames | ParamKind::NumericField | ParamKind::CoordinateField => {
                 let target_param = layer_for_param(spec, p.name).map(|p| p.name);
                 let lname = target_param.and_then(|n| app.gp.values.get(n)).cloned().unwrap_or_default();
@@ -7019,11 +7035,11 @@ mod tests {
         assert_eq!(filled(&app, "text").as_deref(), Some("soft"));
         assert_eq!(filled(&app, "named").as_deref(), Some("Countries"), "the default a run would use");
         // Its picker offers no `—`, which would run with that default too; another optional one does.
-        let offered: Vec<bool> = ["named", "vector", "raster", "neededVector"]
+        let offered: Vec<bool> = ["named", "vector", "raster", "polygon", "point", "layer", "neededVector", "needed"]
             .iter()
             .map(|n| no_layer_offered(PARAMS.iter().find(|p| p.name == *n).unwrap()))
             .collect();
-        assert_eq!(offered, [false, true, true, false]);
+        assert_eq!(offered, [false, true, true, true, true, true, false, false]);
         // Its fields and a new output's name come from the required layer, which is filled, not
         // the optional one before it, which is empty.
         let spec = rustgis_engine::analysis::tool("formTest:optional").unwrap();
