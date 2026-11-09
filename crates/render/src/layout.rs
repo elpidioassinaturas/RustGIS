@@ -593,8 +593,8 @@ fn frame_outline_lonlat(map: &Map, cam: &rustgis_map::Camera, w: f64, h: f64) ->
 /// The map frames of a page georeferenced for a PDF ([`frame_viewports`], #1191).
 #[derive(Debug, Default)]
 pub struct Georeferenced {
-    /// One for each visible frame, in drawing order: georeferenced, or measured on paper only for
-    /// a frame that couldn't be. None when no frame could be.
+    /// The georeferenced frames, in drawing order, each in the rectangles no frame drawn over it
+    /// covers ([`uncovered`]): no two overlap, so a reader never has two to choose from.
     pub viewports: Vec<crate::pdf::Viewport>,
     /// The frames that couldn't be, by id and name, with why.
     pub left_out: Vec<(u32, String, &'static str)>,
@@ -614,41 +614,74 @@ pub const MAX_CORNER_FIT_MM: f64 = 0.5;
 /// map's coordinate system as WKT. A frame on the globe or tilted shows no flat map to measure
 /// on, so it is left out, as is one on another body than the Earth, one whose map is missing,
 /// one with a corner off the Earth, one across its projection's edge (the 180° meridian) and one
-/// whose system has no WKT and whose corners alone would misplace it. A frame left out keeps a
-/// viewport with no coordinates, so that a frame it covers doesn't show through.
+/// whose system has no WKT and whose corners alone would misplace it. A frame drawn over another,
+/// left out or not, is cut out of the other's viewport, so that the other's coordinates don't show
+/// through it: a viewport without coordinates would do it by the standard (the last viewport
+/// holding a point is taken, ISO 32000-1, 12.9.2), but Acrobat Reader doesn't take one.
 pub fn frame_viewports(layout: &Layout, maps: &[Map], dpi: f64) -> Georeferenced {
     let mut out = Georeferenced::default();
     // A frame is drawn from a whole pixel of the page ([`draw_page`]), whose pixels are stretched
     // over its paper: the viewport is that box, in millimetres.
     let (wpx, hpx, k) = page_geometry(layout, dpi);
     let (sx, sy) = (layout.width / f64::from(wpx.max(1)), layout.height / f64::from(hpx.max(1)));
-    for e in layout.elements.iter().filter(|e| e.visible) {
+    let frames: Vec<_> = layout
+        .elements
+        .iter()
+        .filter(|e| e.visible && matches!(e.kind, ElementKind::MapFrame { .. }))
+        .map(|e| (e, [(e.x * k).round() * sx, (e.y * k).round() * sy, e.w * k * sx, e.h * k * sy]))
+        .collect();
+    for (i, (e, placed)) in frames.iter().enumerate() {
         let ElementKind::MapFrame { map, center, scale, bearing, pitch, .. } = &e.kind else { continue };
-        let placed = [(e.x * k).round() * sx, (e.y * k).round() * sy, e.w * k * sx, e.h * k * sy];
-        let bare = || crate::pdf::Viewport { name: e.name.clone(), rect_mm: placed, measure: None };
         let Some(m) = map_index(maps, map).and_then(|i| maps.get(i)) else {
             out.left_out.push((e.id, e.name.clone(), "its map is missing"));
-            out.viewports.push(bare());
             continue;
         };
-        match frame_viewport(e, placed, m, rustgis_map::layout::frame_camera(m, *center, *scale, *bearing, *pitch)) {
+        // What the frames drawn over it leave of it.
+        let mut shown = vec![*placed];
+        for (_, over) in &frames[i + 1..] {
+            shown = shown.into_iter().flat_map(|r| uncovered(r, *over)).collect();
+        }
+        if shown.is_empty() {
+            continue;
+        }
+        if shown.len() > MAX_VIEWPORTS_A_FRAME {
+            out.left_out.push((e.id, e.name.clone(), "too many frames are drawn over it"));
+            continue;
+        }
+        match frame_viewport(e, *placed, &shown, m, rustgis_map::layout::frame_camera(m, *center, *scale, *bearing, *pitch)) {
             Ok((v, exact)) => {
                 if !exact {
                     out.by_corners.push((e.id, e.name.clone()));
                 }
-                out.viewports.push(v);
+                out.viewports.extend(v);
             }
-            Err(why) => {
-                out.left_out.push((e.id, e.name.clone(), why));
-                out.viewports.push(bare());
-            }
+            Err(why) => out.left_out.push((e.id, e.name.clone(), why)),
         }
     }
-    // Only frames without coordinates: nothing to locate in, so none.
-    if out.viewports.iter().all(|v| v.measure.is_none()) {
-        out.viewports.clear();
-    }
     out
+}
+
+/// The most rectangles a frame's viewport is cut into by the frames drawn over it; past it, the
+/// frame is left out.
+const MAX_VIEWPORTS_A_FRAME: usize = 64;
+
+/// A strip narrower than this, in millimetres, left of a frame beside one drawn over it, is
+/// dropped: no one points into it.
+const MIN_STRIP_MM: f64 = 0.01;
+
+/// Rectangle `r` (x, y, width, height) without `cut`: up to four rectangles, the bands above and
+/// below the cut, and beside it between them.
+fn uncovered(r: [f64; 4], cut: [f64; 4]) -> Vec<[f64; 4]> {
+    let (x0, y0, x1, y1) = (r[0], r[1], r[0] + r[2], r[1] + r[3]);
+    let (cx0, cy0, cx1, cy1) = (cut[0].max(x0), cut[1].max(y0), (cut[0] + cut[2]).min(x1), (cut[1] + cut[3]).min(y1));
+    if cx0 >= cx1 || cy0 >= cy1 {
+        return vec![r];
+    }
+    [(x0, y0, x1, cy0), (x0, cy1, x1, y1), (x0, cy0, cx0, cy1), (cx1, cy0, x1, cy1)]
+        .into_iter()
+        .filter(|(a, b, c, d)| c - a >= MIN_STRIP_MM && d - b >= MIN_STRIP_MM)
+        .map(|(a, b, c, d)| [a, b, c - a, d - b])
+        .collect()
 }
 
 /// How far, in millimetres on paper, a reader that fits a frame's corners in longitude/latitude
@@ -671,14 +704,15 @@ fn corner_fit_mm(corners: &[(f64, f64); 4], map: &Map, cam: &rustgis_map::Camera
 }
 
 /// Frame `e` of `map`, placed at `placed` (millimetres: x, y, width, height) and seen by `cam`, as
-/// a viewport, and whether it is in the map's own coordinate system (else in longitude/latitude,
-/// by its corners).
+/// a viewport for each rectangle of it in `shown`, and whether it is in the map's own coordinate
+/// system (else in longitude/latitude, by its corners).
 fn frame_viewport(
     e: &rustgis_map::layout::Element,
     placed: [f64; 4],
+    shown: &[[f64; 4]],
     map: &Map,
     cam: rustgis_map::Camera,
-) -> Result<(crate::pdf::Viewport, bool), &'static str> {
+) -> Result<(Vec<crate::pdf::Viewport>, bool), &'static str> {
     use rustgis_data::raster::{crs, wkt};
     if map.projection.is_globe() {
         return Err("it shows the globe");
@@ -707,8 +741,8 @@ fn frame_viewport(
         _ => (wkt::to_wkt(crs::Crs::WebMercator).map(|t| (t, Some(3857))), None),
     };
     let (w, h) = (e.w * PT_PER_MM, e.h * PT_PER_MM);
-    let mut corners = [(0.0, 0.0); 4];
-    for (i, (sx, sy)) in [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].into_iter().enumerate() {
+    // The latitude and longitude of the frame's point `(sx, sy)` (points from its top-left).
+    let place = |sx: f64, sy: f64| -> Result<(f64, f64), &'static str> {
         let m = cam.try_to_map(sx, sy, w, h).ok_or("a corner is off the Earth")?;
         let c = map.to_lonlat(m).ok_or("a corner is off the Earth")?;
         // A corner past the projection's edge (Web Mercator's world repeated across 180°) is at a
@@ -725,11 +759,16 @@ fn frame_viewport(
             (Some(_), Some(def)) => crs::lonlat_on_datum_of(def, c).ok_or("its corners can't be moved onto its datum")?,
             _ => c,
         };
-        corners[i] = (c.y, c.x);
-    }
+        Ok((c.y, c.x))
+    };
+    // Clockwise from the top-left, as `/LPTS` takes them.
+    let corners_of = |[x0, y0, x1, y1]: [f64; 4]| -> Result<[(f64, f64); 4], &'static str> {
+        Ok([place(x0, y0)?, place(x1, y0)?, place(x1, y1)?, place(x0, y1)?])
+    };
+    let mut corners = corners_of([0.0, 0.0, w, h])?;
     let exact = system.is_some();
-    let (wkt, epsg) = match system {
-        Some(s) => s,
+    let (wkt, epsg) = match &system {
+        Some((text, code)) => (text.clone(), *code),
         None => {
             // In longitude/latitude the corners are fitted as they are: across 180° they are kept
             // within half a turn of the first, so that the frame isn't taken to span the world.
@@ -750,9 +789,23 @@ fn frame_viewport(
             (wkt::to_wkt(crs::Crs::LonLat).ok_or("its projection can't be read")?, Some(4326))
         }
     };
-    let measure = crate::pdf::GeoMeasure { corners, wkt, projected: exact, epsg };
-    let viewport = crate::pdf::Viewport { name: e.name.clone(), rect_mm: placed, measure: Some(measure) };
-    Ok((viewport, exact))
+    let first = corners[0].1;
+    let mut viewports = Vec::with_capacity(shown.len());
+    for r in shown {
+        // The rectangle's corners in the frame's points, the frame being `placed` on the page.
+        let to = |mm: f64, from: f64, size: f64, pts: f64| (mm - from) / size * pts;
+        let (x0, y0) = (to(r[0], placed[0], placed[2], w), to(r[1], placed[1], placed[3], h));
+        let (x1, y1) = (to(r[0] + r[2], placed[0], placed[2], w), to(r[1] + r[3], placed[1], placed[3], h));
+        let mut corners = if *r == placed { corners } else { corners_of([x0, y0, x1, y1])? };
+        if !exact {
+            for c in &mut corners {
+                c.1 = first + ((c.1 - first + 540.0).rem_euclid(360.0) - 180.0);
+            }
+        }
+        let measure = crate::pdf::GeoMeasure { corners, wkt: wkt.clone(), projected: exact, epsg };
+        viewports.push(crate::pdf::Viewport { name: e.name.clone(), rect_mm: *r, measure });
+    }
+    Ok((viewports, exact))
 }
 
 /// Strokes the ring `ring` (longitude, latitude) on a frame's map `width` points wide: another
@@ -2356,6 +2409,23 @@ pub fn map_index(maps: &[rustgis_map::Map], name: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame drawn over another takes its rectangle out of the other's: the bands above and below
+    /// it and the strips beside it are left, a strip too narrow to point into is dropped, and one
+    /// that covers it all leaves nothing (#1191).
+    #[test]
+    fn a_frame_drawn_over_another_leaves_the_rest_of_it() {
+        let r = [0.0, 0.0, 100.0, 50.0];
+        assert_eq!(uncovered(r, [200.0, 0.0, 10.0, 10.0]), [r], "apart");
+        assert_eq!(
+            uncovered(r, [10.0, 10.0, 20.0, 20.0]),
+            [[0.0, 0.0, 100.0, 10.0], [0.0, 30.0, 100.0, 20.0], [0.0, 10.0, 10.0, 20.0], [30.0, 10.0, 70.0, 20.0]]
+        );
+        // Over its top-left corner, and past it.
+        assert_eq!(uncovered(r, [-5.0, -5.0, 15.0, 15.0]), [[0.0, 10.0, 100.0, 40.0], [10.0, 0.0, 90.0, 10.0]]);
+        assert_eq!(uncovered(r, [0.0, 0.0, 100.0, 49.995]), Vec::<[f64; 4]>::new(), "a 0.005 mm strip is dropped");
+        assert!(uncovered(r, [-1.0, -1.0, 102.0, 52.0]).is_empty());
+    }
 
     /// A page with a frame of the built-in world and a title.
     fn vector_page() -> (Layout, Vec<Map>) {

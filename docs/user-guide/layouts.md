@@ -304,8 +304,9 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   code when it has one, so a reader shows coordinates and measures in it, and GDAL or QGIS open the
   page as a georeferenced raster. It carries coordinates only: no layers and no feature
   attributes. A tilted frame, one on the globe, and one with a corner off the Earth aren't
-  georeferenced, and the export says which; such a frame over another carries no coordinates, so
-  a reader doesn't show the other's through it. A frame in a projection with no WKT form is
+  georeferenced, and the export says which. Where a frame is drawn over another, only the one on
+  top carries coordinates there (none when it isn't georeferenced), so a reader doesn't show the
+  other's through it. A frame in a projection with no WKT form is
   georeferenced by its corners in longitude/latitude when, between them, that puts every place
   within 0.5 mm of where it is drawn, and left out otherwise. **Georeference PDF** in the layout's
   Export group (`"georeference": false` for `layout.export`) leaves the coordinates out.

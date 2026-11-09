@@ -20,13 +20,11 @@ pub struct Page {
     viewports: Vec<Viewport>,
 }
 
-/// A map frame's place on a page and, when it is georeferenced, where on the Earth it shows, so
-/// that a reader can locate and measure in it: an ISO 32000 geospatial viewport, which makes the
-/// document a GeoPDF (#1191). A frame that isn't georeferenced has a viewport too, so that a
-/// georeferenced frame under it doesn't show through: a reader takes the last viewport holding a
-/// point, the page's viewports being in drawing order (ISO 32000-1, 12.9.2). Its measure is
-/// millimetres on paper (a rectilinear one), with no coordinates: Acrobat Reader shows no
-/// coordinates anywhere on a page one of whose viewports has no measure.
+/// A georeferenced map frame's place on a page, or the part of it no other frame is drawn over,
+/// and where on the Earth it shows, so that a reader can locate and measure in it: an ISO 32000
+/// geospatial viewport, which makes the document a GeoPDF (#1191). Every viewport has a
+/// geospatial measure: Acrobat Reader shows no coordinates on a page one of whose viewports has
+/// none, and stops when its pointer enters one measured otherwise (a rectilinear measure).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Viewport {
     /// The frame's name.
@@ -34,9 +32,8 @@ pub struct Viewport {
     /// Its rectangle on the page, in millimetres from the page's top-left corner: x, y, width,
     /// height.
     pub rect_mm: [f64; 4],
-    /// Where on the Earth it shows; `None` for a frame that isn't georeferenced (measured in
-    /// millimetres on paper).
-    pub measure: Option<GeoMeasure>,
+    /// Where on the Earth it shows.
+    pub measure: GeoMeasure,
 }
 
 /// Where a georeferenced frame shows on the Earth ([`Viewport`]).
@@ -58,24 +55,16 @@ impl Viewport {
         let k = 72.0 / 25.4;
         let [x, y, w, h] = self.rect_mm;
         let (x1, x2, top, bottom) = (x * k, (x + w) * k, page_h - y * k, page_h - (y + h) * k);
-        let measure = match &self.measure {
-            // Millimetres on paper: a point is 25.4/72 of one.
-            None => " /Measure << /Type /Measure /Subtype /RL /R (1 mm = 1 mm) \
-                     /X [<< /Type /NumberFormat /U (mm) /C 0.352778 >>] /D [<< /Type /NumberFormat /U (mm) /C 1 >>] \
-                     /A [<< /Type /NumberFormat /U (sq mm) /C 1 >>] >>"
-                .to_string(),
-            Some(m) => {
-                let gpts: Vec<String> = m.corners.iter().map(|(lat, lon)| format!("{lat:.9} {lon:.9}")).collect();
-                let kind = if m.projected { "PROJCS" } else { "GEOGCS" };
-                let epsg = m.epsg.map(|c| format!(" /EPSG {c}")).unwrap_or_default();
-                format!(
-                    " /Measure << /Type /Measure /Subtype /GEO /Bounds [0 0 0 1 1 1 1 0] /GPTS [{}] /LPTS [0 1 1 1 1 0 0 0] \
-                     /GCS << /Type /{kind} /WKT {}{epsg} >> /PDU [/M /SQM /DEG] >>",
-                    gpts.join(" "),
-                    literal(&m.wkt),
-                )
-            }
-        };
+        let m = &self.measure;
+        let gpts: Vec<String> = m.corners.iter().map(|(lat, lon)| format!("{lat:.9} {lon:.9}")).collect();
+        let kind = if m.projected { "PROJCS" } else { "GEOGCS" };
+        let epsg = m.epsg.map(|c| format!(" /EPSG {c}")).unwrap_or_default();
+        let measure = format!(
+            " /Measure << /Type /Measure /Subtype /GEO /Bounds [0 0 0 1 1 1 1 0] /GPTS [{}] /LPTS [0 1 1 1 1 0 0 0] \
+             /GCS << /Type /{kind} /WKT {}{epsg} >> /PDU [/M /SQM /DEG] >>",
+            gpts.join(" "),
+            literal(&m.wkt),
+        );
         format!("<< /Type /Viewport /BBox [{x1:.3} {bottom:.3} {x2:.3} {top:.3}] /Name {}{measure} >>", text_string(&self.name))
     }
 }
@@ -239,7 +228,7 @@ impl Doc {
 pub fn write(pages: &[Page], title: &str) -> Vec<u8> {
     // Georeferenced frames make the document PDF 1.7 with Adobe's extension level 3, where
     // geospatial measures are defined (since taken into ISO 32000-2); what else it holds is 1.4.
-    let geo = pages.iter().any(|p| p.viewports.iter().any(|v| v.measure.is_some()));
+    let geo = pages.iter().any(|p| !p.viewports.is_empty());
     let mut doc = if geo { Doc::of_version("1.7") } else { Doc::new() };
     let (catalog, tree, info) = (doc.reserve(), doc.reserve(), doc.reserve());
     let ids: Vec<usize> = pages.iter().map(|_| doc.reserve()).collect();
@@ -383,12 +372,12 @@ pub(crate) mod tests {
         let v = Viewport {
             name: "Main map".into(),
             rect_mm: [25.4, 25.4, 50.8, 25.4],
-            measure: Some(GeoMeasure {
+            measure: GeoMeasure {
                 corners: [(-19.5, -45.5), (-19.5, -44.5), (-20.5, -44.5), (-20.5, -45.5)],
                 wkt: wkt.clone(),
                 projected: true,
                 epsg: Some(31983),
-            }),
+            },
         };
         let page_h = 297.0 * 72.0 / 25.4;
         let d = v.dictionary(page_h);
@@ -407,12 +396,6 @@ pub(crate) mod tests {
         let plain = write(&[Page::new(&a, 210.0, 297.0)], "Plain");
         assert!(plain.starts_with(b"%PDF-1.4") && !String::from_utf8_lossy(&plain).contains("/Extensions"));
         assert_eq!(literal("é"), "<FEFF00E9>");
-        // A frame left out is a viewport measured in millimetres on paper, with no coordinates.
-        let bare = Viewport { name: "Inset".into(), rect_mm: [30.0, 30.0, 10.0, 10.0], measure: None };
-        let d = bare.dictionary(page_h);
-        let bbox = format!("/BBox [85.039 {:.3} 113.386 {:.3}] /Name (Inset)", page_h - 40.0 * 72.0 / 25.4, page_h - 30.0 * 72.0 / 25.4);
-        assert!(d.starts_with("<< /Type /Viewport ") && d.contains(&bbox), "{d}");
-        assert!(d.contains("/Subtype /RL") && d.contains("/U (mm) /C 0.352778") && !d.contains("/GEO") && !d.contains("/GPTS"), "{d}");
     }
 
     /// A frame's viewport is where the page draws it: from the whole pixel it starts on at the

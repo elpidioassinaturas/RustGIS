@@ -31798,18 +31798,19 @@ fn a_pdf_says_which_frames_it_doesnt_georeference() {
     assert!(s.notices_since(mark).iter().all(|n| n.severity == rustgis_data::diagnostics::Severity::Info));
 }
 
-/// A frame left out of georeferencing over one that is (a tilted inset on the main map) has a
-/// viewport without coordinates after the main map's, so that a reader, which takes the last
-/// viewport holding a point (ISO 32000-1, 12.9.2), gives the inset no coordinates rather than the
-/// main map's (#1191).
+/// A frame drawn over another (an inset on the main map) is cut out of the other's viewport, so
+/// that a reader shows the main map's coordinates around the inset and not in it: none there when
+/// the inset is left out of georeferencing (tilted), the inset's own when it isn't (#1191). No two
+/// viewports overlap, and none goes without coordinates, which Acrobat Reader doesn't take.
 #[test]
-fn a_frame_left_out_covers_the_frame_under_it() {
+fn a_frame_drawn_over_another_is_cut_out_of_its_viewport() {
     let mut s = world();
     s.run("map.projection", &json!({"type": "EPSG:31983"})).unwrap();
     s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "map"})).unwrap();
     let frame = s.project.layouts[0].elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap().clone();
     s.run("layout.update", &json!({"element": frame.id, "center": [-45.0, -20.0], "scale": 2_000_000.0})).unwrap();
-    let mut inset = frame.clone();
+    // The inset shows the main map's place, as it is once moved there.
+    let mut inset = s.project.layouts[0].elements.iter().find(|e| e.id == frame.id).unwrap().clone();
     inset.id = 9_001;
     inset.name = "Inset".into();
     (inset.x, inset.y, inset.w, inset.h) = (frame.x + 10.0, frame.y + 10.0, 40.0, 30.0);
@@ -31817,10 +31818,33 @@ fn a_frame_left_out_covers_the_frame_under_it() {
         *pitch = 30.0;
     }
     s.project.layouts[0].elements.push(inset);
+    let inside = |v: &rustgis_render::pdf::Viewport, (x, y): (f64, f64)| {
+        let [vx, vy, w, h] = v.rect_mm;
+        x > vx && x < vx + w && y > vy && y < vy + h
+    };
+    let (in_inset, beside) = ((frame.x + 30.0, frame.y + 25.0), (frame.x + 5.0, frame.y + 5.0));
     let geo = rustgis_render::layout::frame_viewports(&s.project.layouts[0], &s.project.maps, 72.0);
-    let names: Vec<(&str, bool)> = geo.viewports.iter().map(|v| (v.name.as_str(), v.measure.is_some())).collect();
-    assert_eq!(names, [(frame.name.as_str(), true), ("Inset", false)], "drawing order, the inset last");
     assert_eq!(geo.left_out.len(), 1, "{:?}", geo.left_out);
+    assert_eq!(geo.viewports.len(), 4, "the main frame around the inset: above, below, left and right of it");
+    assert!(geo.viewports.iter().all(|v| v.name == frame.name && v.measure.projected));
+    assert!(!geo.viewports.iter().any(|v| inside(v, in_inset)) && geo.viewports.iter().any(|v| inside(v, beside)));
+    let area: f64 = geo.viewports.iter().map(|v| v.rect_mm[2] * v.rect_mm[3]).sum();
+    let whole = frame.w * frame.h - 40.0 * 30.0;
+    assert!((area - whole).abs() < 0.02 * whole, "{area} {whole}");
+    // Where the main map's pieces meet, they give the same place: the band above the inset ends
+    // where the strip left of it starts.
+    let (top, left) = (&geo.viewports[0], &geo.viewports[2]);
+    let (a, b) = (top.measure.corners[3], left.measure.corners[0]);
+    assert!((a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9, "{a:?} {b:?}");
+    // An inset that is georeferenced has its own viewport, drawn last, over no other.
+    let inset = s.project.layouts[0].elements.iter_mut().find(|e| e.id == 9_001).unwrap();
+    if let rustgis_map::layout::ElementKind::MapFrame { pitch, .. } = &mut inset.kind {
+        *pitch = 0.0;
+    }
+    let geo = rustgis_render::layout::frame_viewports(&s.project.layouts[0], &s.project.maps, 72.0);
+    let names: Vec<&str> = geo.viewports.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, [frame.name.as_str(), frame.name.as_str(), frame.name.as_str(), frame.name.as_str(), "Inset"], "{:?}", geo.left_out);
+    assert!(geo.left_out.is_empty() && inside(&geo.viewports[4], in_inset));
 }
 
 #[test]
