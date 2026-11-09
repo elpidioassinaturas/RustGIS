@@ -153,20 +153,36 @@ fn fresh(app: &RustGisApp) -> bool {
     source_of(app, &sp.layer) == sp.source && std::sync::Weak::ptr_eq(&data_of(app, &sp.layer), &sp.read_on)
 }
 
-/// The rasters a profile can be read on: those of two bands or more, by name, and how many
-/// more are left out because an earlier layer has their name (commands find a layer by its
-/// name, so they would read that one).
-pub fn multiband(app: &RustGisApp) -> (Vec<String>, usize) {
+/// The rasters a profile can be read on, and the ones left out of them.
+pub struct Rasters {
+    /// Those of two bands or more, by name.
+    pub names: Vec<String>,
+    /// Left out because an earlier layer has their name (commands find a layer by its name, so
+    /// they would read that one).
+    pub shadowed: usize,
+    /// Left out because their pixels couldn't be read (their bands aren't known).
+    pub unread: usize,
+}
+
+/// The rasters of the active map a profile can be read on (see [`Rasters`]).
+pub fn multiband(app: &RustGisApp) -> Rasters {
     let map = app.session.map();
-    let (mut names, mut shadowed) = (Vec::new(), 0usize);
-    for l in map.layers.iter().filter(|l| l.raster.as_ref().and_then(|r| r.data.as_ref()).is_some_and(|r| r.band_count() >= 2)) {
-        if map.layer_by_name(&l.name).map(|f| f.id) == Some(l.id) {
-            names.push(l.name.clone());
-        } else {
-            shadowed += 1;
+    let mut out = Rasters { names: Vec::new(), shadowed: 0, unread: 0 };
+    for l in &map.layers {
+        let Some(r) = l.raster.as_ref() else { continue };
+        match r.data.as_ref() {
+            Some(data) if data.band_count() >= 2 => {
+                if map.layer_by_name(&l.name).map(|f| f.id) == Some(l.id) {
+                    out.names.push(l.name.clone());
+                } else {
+                    out.shadowed += 1;
+                }
+            }
+            Some(_) => {}
+            None => out.unread += usize::from(r.error.is_some()),
         }
     }
-    (names, shadowed)
+    out
 }
 
 /// Whether Identify's result `info` is a pixel of a raster of two bands or more: its layer's id.
@@ -271,10 +287,15 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         let other_map = sp.source.is_some_and(|(map, _)| map != app.session.project.active_map);
         app.workflow.spectral.restart(if other_map { Restart::OtherMap } else { Restart::Gone });
     }
-    let (rasters, shadowed) = multiband(app);
+    let Rasters { names: rasters, shadowed, unread } = multiband(app);
     if shadowed > 0 {
         let n = shadowed.to_string();
         let text = crate::i18n::fmt("{n} raster(s) left out: another layer has the same name. Rename them to chart them.", &[("n", &n)]);
+        ui.label(egui::RichText::new(text).small().color(t.red));
+    }
+    if unread > 0 {
+        let n = unread.to_string();
+        let text = crate::i18n::fmt("{n} raster(s) couldn't be read, so they are left out.", &[("n", &n)]);
         ui.label(egui::RichText::new(text).small().color(t.red));
     }
     if rasters.is_empty() {
@@ -728,8 +749,21 @@ mod tests {
         let said: Vec<String> = app.session.notices_since(mark).iter().map(|n| n.text.clone()).collect();
         assert_eq!(said, [format!("{name}: another layer has this name, so its profile would be read from that one: rename one of them")]);
         // The section's list leaves it out too, and counts it.
-        let (rasters, shadowed) = multiband(&app);
-        assert_eq!((rasters.len(), shadowed), (1, 1), "{rasters:?}");
+        let rasters = multiband(&app);
+        assert_eq!((rasters.names.len(), rasters.shadowed, rasters.unread), (1, 1, 0), "{:?}", rasters.names);
+    }
+
+    /// A raster whose pixels couldn't be read is left out of the list, and counted.
+    #[test]
+    fn an_unread_raster_is_counted() {
+        let mut app = app_with_scene(false);
+        app.run("layer.addDataBytes", json!({"fileName": "broken.tif", "data": rgb_tiff_b64(false)})).unwrap();
+        let id = app.session.map().layer_by_name("broken").map(|l| l.id).expect("the second scene");
+        let r = app.session.map_mut().layer_mut(id).and_then(|l| l.raster.as_mut()).expect("a raster");
+        r.data = None;
+        r.fail("the file is gone");
+        let rasters = multiband(&app);
+        assert_eq!((rasters.names, rasters.shadowed, rasters.unread), (vec!["scene".to_string()], 0, 1));
     }
 
     /// A flat profile's labels say what was read, not the room drawn around it.
