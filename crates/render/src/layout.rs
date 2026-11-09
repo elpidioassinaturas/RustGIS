@@ -628,7 +628,8 @@ pub fn frame_viewports(layout: &Layout, maps: &[Map], dpi: f64) -> Georeferenced
         .elements
         .iter()
         .filter(|e| e.visible && matches!(e.kind, ElementKind::MapFrame { .. }))
-        .map(|e| (e, [(e.x * k).round() * sx, (e.y * k).round() * sy, e.w * k * sx, e.h * k * sy]))
+        // Rounded as `draw_page` rounds them, in single precision, so the box is the drawn one.
+        .map(|e| (e, [f64::from(((e.x * k) as f32).round()) * sx, f64::from(((e.y * k) as f32).round()) * sy, e.w * k * sx, e.h * k * sy]))
         .collect();
     for (i, (e, placed)) in frames.iter().enumerate() {
         let ElementKind::MapFrame { map, center, scale, bearing, pitch, .. } = &e.kind else { continue };
