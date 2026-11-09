@@ -9514,7 +9514,18 @@ fn plugin_commands_run_like_commands() {
     assert!(!s.can_undo(), "a plugin without 'edit' doesn't take undo snapshots");
     // Reading the map needs no permission.
     let layers = forward(&mut s, "eng-view", "host.layers", json!({})).unwrap();
-    assert!(layers.as_array().unwrap().iter().any(|l| l["name"] == "Cities"));
+    let cities = layers.as_array().unwrap().iter().find(|l| l["name"] == "Cities").unwrap();
+    let e: Vec<f64> = cities["extent"].as_array().unwrap().iter().filter_map(Value::as_f64).collect();
+    assert!(e.len() == 4 && e[0] <= e[2] && e[1] <= e[3] && (-180.0..=180.0).contains(&e[0]) && (-90.0..=90.0).contains(&e[1]), "{cities}");
+    assert_eq!(cities["transparency"], 0.0, "{cities}");
+    assert!(cities.get("group").is_some_and(Value::is_null), "{cities}");
+    if let Some(l) = s.map_mut().layers.iter_mut().find(|l| l.name == "Cities") {
+        l.transparency = 40.0;
+    }
+    s.run("group.add", &json!({"name": "Places", "layers": ["Cities"]})).unwrap();
+    let layers = forward(&mut s, "eng-view", "host.layers", json!({})).unwrap();
+    let cities = layers.as_array().unwrap().iter().find(|l| l["name"] == "Cities").unwrap();
+    assert_eq!((&cities["transparency"], &cities["group"]), (&json!(40.0), &json!("Places")), "{cities}");
     let fc = forward(&mut s, "eng-view", "host.features", json!({"layer": "Cities", "limit": 2})).unwrap();
     assert_eq!(fc["features"].as_array().unwrap().len(), 2);
     assert_eq!(fc["features"][1]["row"], 1);
@@ -10619,6 +10630,13 @@ fn session_plugins_ask_between_commands_and_hear_the_map() {
     if let Some(l) = s.map_mut().layers.first_mut() {
         l.transparency = 0.5;
     }
+    s.poll_plugin_sessions();
+    assert_eq!(s.run("plugin:eng-sess/v", &Value::Null).unwrap()["events"], json!(["layers"]));
+    // So is a group renamed: `host.layers` names each layer's group.
+    s.run("group.add", &json!({"name": "Places", "layers": ["Cities"]})).unwrap();
+    s.poll_plugin_sessions();
+    let _ = s.run("plugin:eng-sess/v", &Value::Null).unwrap();
+    s.map_mut().groups.iter_mut().for_each(|g| g.name = "Towns".into());
     s.poll_plugin_sessions();
     assert_eq!(s.run("plugin:eng-sess/v", &Value::Null).unwrap()["events"], json!(["layers"]));
     // Another layer made active is a layer change too: `host.layers` says which one is.
@@ -26972,6 +26990,15 @@ fn project_info_describes_the_whole_project() {
     assert_eq!(layouts.len(), 1, "{info}");
     assert_eq!(layouts[0]["name"], "Wall map");
     assert_eq!(layouts[0]["mapFrames"][0]["map"], "World", "{info}");
+    let page = s.project.layouts.first().map(|l| (l.width, l.height)).unwrap();
+    assert_eq!((&layouts[0]["width"], &layouts[0]["height"]), (&json!(page.0), &json!(page.1)), "{info}");
+    assert!(page.0 > 0.0 && page.1 > 0.0);
+    if let Some(l) = s.map_mut().layers.iter_mut().find(|l| l.name == "Cities") {
+        l.transparency = 25.0;
+    }
+    let again = s.run("info.project", &json!({})).unwrap();
+    let cities = again["layers"].as_array().unwrap().iter().find(|l| l["name"] == "Cities").cloned().unwrap();
+    assert_eq!(cities["transparency"], 25.0, "{again}");
 
     let some = s.run("info.project", &json!({"nameFilter": "CIT", "includeFields": false})).unwrap();
     let layers = some["layers"].as_array().unwrap();
@@ -35400,4 +35427,48 @@ fn spectral_profiles_at_points_with_wavelengths() {
         let e = s.run("raster.spectral", &json!({"layer": "scene", "points": points})).unwrap_err();
         assert!(e.contains(error), "{e}");
     }
+}
+
+/// `gp.threads` sets the shared count every place that starts threads for CPU work takes (#1562),
+/// says it, the default's and the cores, refuses what it can't take, and `null` goes back to the
+/// default. No undo step and no change to the project: it is the process's, not the project's.
+/// In a process of its own, since the setting holds for the whole process.
+#[test]
+fn the_thread_setting_is_the_whole_process() {
+    #[cfg(not(target_arch = "wasm32"))]
+    if isolate_process_test("tests::the_thread_setting_is_the_whole_process") {
+        return;
+    }
+    let mut s = Session::new(Project::default());
+    let cores = rustgis_data::threads::cores();
+    let default = cores.min(rustgis_data::threads::DEFAULT_MAX);
+    let t = s.run("gp.threads", &json!({})).unwrap();
+    assert_eq!(t, json!({"threads": null, "max": default, "default": default, "cores": cores}));
+    let t = s.run("gp.threads", &json!({"threads": 2})).unwrap();
+    assert_eq!((t["threads"].clone(), t["max"].clone(), t["default"].clone()), (json!(2), json!(cores.min(2)), json!(default)), "{t}");
+    assert_eq!(rustgis_data::threads::max(), cores.min(2), "the count everything takes follows");
+    // `gp.env` says the threads it gives with the other limits (in another session: `gp.env` is
+    // a project command, with an undo step of its own).
+    let env = Session::new(Project::default()).run("gp.env", &json!({})).unwrap();
+    assert_eq!((env["limits"]["threads"].clone(), env["limits"]["cores"].clone()), (json!(cores.min(2)), json!(cores)), "{env}");
+    // Above the cores: all of them, the setting kept as given.
+    let t = s.run("gp.threads", &json!({"threads": 1024})).unwrap();
+    assert_eq!((t["threads"].clone(), t["max"].clone()), (json!(1024), json!(cores)), "{t}");
+    for bad in [json!(0), json!(1025), json!(-1), json!(2.5), json!("4")] {
+        let e = s.run("gp.threads", &json!({"threads": bad})).unwrap_err();
+        assert!(e.contains("1 to 1024"), "{bad}: {e}");
+        assert_eq!(rustgis_data::threads::setting(), Some(1024), "a refused value changes nothing");
+    }
+    assert_eq!(s.run("gp.threads", &json!({"threads": null})).unwrap()["threads"], Value::Null);
+    assert_eq!(rustgis_data::threads::max(), default);
+    assert!(!s.dirty() && !s.can_undo(), "nothing to undo, nothing to save");
+}
+
+/// Only the user changes the thread setting: the assistant asks, and agents, plugins and imported
+/// items can't (`Reserved`), since it reaches every session of the process.
+#[test]
+fn the_thread_setting_is_reserved() {
+    let spec = crate::cmd::all().into_iter().find(|c| c.id == "gp.threads").unwrap();
+    assert!(spec.effects.contains(crate::policy::Effect::Reserved));
+    assert!(!spec.mutates, "no undo step");
 }
