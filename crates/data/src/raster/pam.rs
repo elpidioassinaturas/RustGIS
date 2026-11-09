@@ -115,6 +115,30 @@ fn is_wavelength_item(name: &str) -> bool {
 /// A wavelength item's value in nanometres: `None` when it isn't a length from 1 nm to 1 m (no
 /// sensor's band lies outside), or its unit isn't a length this knows.
 ///
+/// The length unit a wavelength unit item names, however it is spelt.
+#[derive(Debug, PartialEq)]
+enum Unit {
+    /// None: empty, or ENVI's `Unknown`.
+    Unstated,
+    Nanometres,
+    Micrometres,
+    /// Another, by its text (lowercase, spaces aside): not read.
+    Unread(String),
+}
+
+/// The unit `text` names (nanometres or micrometres as ENVI and others spell them, any case).
+fn unit_of(text: &str) -> Unit {
+    let u = text.trim().to_lowercase();
+    match u.as_str() {
+        "" | "unknown" => Unit::Unstated,
+        "nm" | "nanometer" | "nanometers" | "nanometre" | "nanometres" => Unit::Nanometres,
+        "um" | "\u{b5}m" | "\u{3bc}m" | "micrometer" | "micrometers" | "micrometre" | "micrometres" | "micron" | "microns" => {
+            Unit::Micrometres
+        }
+        _ => Unit::Unread(u),
+    }
+}
+
 /// `CENTRAL_WAVELENGTH_UM` is in micrometres by its name; another item is in the unit `units`
 /// gives (nanometres or micrometres, as ENVI and others spell them). With no unit (or ENVI's
 /// `Unknown`), a value under 100 is in micrometres and any other in nanometres: imaging sensors
@@ -130,12 +154,11 @@ pub fn wavelength_nm(item: &str, text: &str, units: Option<&str>) -> Option<f64>
     if item.eq_ignore_ascii_case(CENTRAL_WAVELENGTH_UM) {
         return in_range(nm(v));
     }
-    let unit = units.map(|u| u.trim().to_lowercase()).unwrap_or_default();
-    let micro = match unit.as_str() {
-        "" | "unknown" => v < 100.0,
-        "nm" | "nanometer" | "nanometers" | "nanometre" | "nanometres" => false,
-        "um" | "\u{b5}m" | "\u{3bc}m" | "micrometer" | "micrometers" | "micrometre" | "micrometres" | "micron" | "microns" => true,
-        _ => return None,
+    let micro = match unit_of(units.unwrap_or_default()) {
+        Unit::Unstated => v < 100.0,
+        Unit::Nanometres => false,
+        Unit::Micrometres => true,
+        Unit::Unread(_) => return None,
     };
     in_range(if micro { nm(v) } else { v })
 }
@@ -161,12 +184,13 @@ fn keep_first_wavelength(slot: &mut Option<f64>, nm: f64) -> bool {
     }
 }
 
-/// How many of `units` after the first that names one name another unit than it (case and
-/// spaces aside): those are left out, the first being the one read. An empty item names none.
+/// How many of `units` after the first that names one name another unit than it ([`unit_of`]:
+/// `nm` and `nanometers` are one): those are left out, the first being the one read. An empty
+/// item names none.
 fn other_units<'a>(units: impl Iterator<Item = &'a str>) -> usize {
     let mut units = units.map(str::trim).filter(|u| !u.is_empty());
-    let Some(first) = units.next() else { return 0 };
-    units.filter(|u| !u.eq_ignore_ascii_case(first)).count()
+    let Some(first) = units.next().map(unit_of) else { return 0 };
+    units.filter(|u| unit_of(u) != first).count()
 }
 
 /// A sidecar node's metadata items `key` (any domain, any case): their texts, empty for an item
@@ -561,7 +585,7 @@ fn read_wavelengths(root: roxmltree::Node<'_, '_>, pam: &mut Pam) -> (usize, usi
                     v.insert(t);
                 }
                 std::collections::hash_map::Entry::Occupied(o) => {
-                    units_again += usize::from(!o.get().trim().eq_ignore_ascii_case(t.trim()));
+                    units_again += usize::from(unit_of(o.get()) != unit_of(t));
                 }
             }
         }
@@ -973,6 +997,11 @@ mod tests {
         let pam = parse_gdal_metadata(xml).unwrap();
         assert_eq!(pam.band(1).and_then(|b| b.wavelength), Some(1.6));
         assert_eq!(pam.lost, ["1 other wavelength unit item(s) for a band or the dataset left out (the first is kept)"]);
+        // One unit in two spellings is one unit: nothing is said.
+        let xml = r#"<GDALMetadata><Item name="wavelength_units" sample="0">nm</Item><Item name="wavelength_units" sample="0">nanometers</Item><Item name="wavelength_units">um</Item><Item name="wavelength_units">µm</Item><Item name="wavelength" sample="0">1.6</Item></GDALMetadata>"#;
+        let pam = parse_gdal_metadata(xml).unwrap();
+        assert_eq!(pam.band(1).and_then(|b| b.wavelength), Some(1.6));
+        assert!(pam.lost.is_empty(), "{:?}", pam.lost);
         // A unit the dataset gives is a band's when it gives none; then a large value may be in µm.
         let xml =
             r#"<GDALMetadata><Item name="wavelength_units">micrometers</Item><Item name="wavelength" sample="0">120</Item></GDALMetadata>"#;
@@ -1044,6 +1073,10 @@ mod tests {
         let twice = parse(r#"<PAMDataset><PAMRasterBand band="1"><Metadata><MDI key="wavelength_units">nm</MDI><MDI key="wavelength_units">micrometers</MDI><MDI key="wavelength">1.6</MDI></Metadata></PAMRasterBand></PAMDataset>"#).unwrap();
         assert_eq!(twice.band(1).and_then(|b| b.wavelength), Some(1.6));
         assert_eq!(twice.lost, ["1 other wavelength unit(s) for a band or the dataset left out (the first is kept)"]);
+        // One unit in two spellings is one unit: nothing is said.
+        let spelt = parse(r#"<PAMDataset><PAMRasterBand band="1"><Metadata><MDI key="wavelength_units">nm</MDI><MDI key="wavelength_units">Nanometres</MDI><MDI key="wavelength">1.6</MDI></Metadata></PAMRasterBand></PAMDataset>"#).unwrap();
+        assert_eq!(spelt.band(1).and_then(|b| b.wavelength), Some(1.6));
+        assert!(spelt.lost.is_empty(), "{:?}", spelt.lost);
         // An empty unit names none, in the sidecar and the metadata tag alike: the next is read.
         let sidecar = parse(r#"<PAMDataset><PAMRasterBand band="1"><Metadata><MDI key="wavelength_units"/><MDI key="wavelength_units">nm</MDI><MDI key="wavelength">1.6</MDI></Metadata></PAMRasterBand></PAMDataset>"#).unwrap();
         let tag = parse_gdal_metadata(r#"<GDALMetadata><Item name="wavelength_units" sample="0"> </Item><Item name="wavelength_units" sample="0">nm</Item><Item name="wavelength" sample="0">1.6</Item></GDALMetadata>"#).unwrap();

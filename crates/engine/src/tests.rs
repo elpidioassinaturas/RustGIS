@@ -35349,8 +35349,9 @@ fn spectral_profiles_at_points_with_wavelengths() {
         let bands = (0..3).map(|b| (0..16).map(|i| (30 - b * 10 + i) as f32).collect()).collect();
         let mut r = Raster::new("scene", 4, 4, bands, gt, Crs::LonLat, None, ColorHint::Rgb { alpha: false }, "UInt8").unwrap();
         if wavelengths {
-            for (band, nm) in r.bands.iter_mut().zip([665.0, 560.0, 490.0]) {
+            for ((band, nm), name) in r.bands.iter_mut().zip([665.0, 560.0, 490.0]).zip(["Red", "Green", "Blue"]) {
                 band.wavelength = Some(nm);
+                band.name = name.to_string();
             }
         }
         base64::engine::general_purpose::STANDARD.encode(geotiff::write(&r, 0).unwrap())
@@ -35379,10 +35380,11 @@ fn spectral_profiles_at_points_with_wavelengths() {
     let one = s.run("raster.spectral", &json!({"layer": "scene", "lon": 10.005, "lat": 44.995})).unwrap();
     assert_eq!(one["wavelengths"], json!([665.0, 560.0, 490.0]));
     assert_eq!(one["values"], json!([30.0, 20.0, 10.0]));
-    // A resampled raster keeps its bands' wavelengths.
+    // A resampled raster keeps its bands' names and wavelengths.
     s.run("raster.process", &json!({"layer": "scene", "operation": "resample", "factor": 2, "name": "half"})).unwrap();
     let half = s.run("raster.spectral", &json!({"layer": "half", "lon": 10.005, "lat": 44.995})).unwrap();
     assert_eq!(half["wavelengths"], json!([665.0, 560.0, 490.0]));
+    assert_eq!((&one["bands"], &half["bands"]), (&json!(["Red", "Green", "Blue"]), &json!(["Red", "Green", "Blue"])), "{half}");
     let plain = s.run("raster.spectral", &json!({"layer": "plain", "points": [[10.005, 44.995]]})).unwrap();
     assert!(plain.get("wavelengths").is_none(), "{plain}");
     // Points read before one point: the point left out is said.
