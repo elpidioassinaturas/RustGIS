@@ -316,13 +316,13 @@ pub(crate) struct Retry {
     tries: u32,
 }
 
-/// The downloads plugin commands wait for (#1202): those the app is making, with what was
-/// asked and since when, and those added, with what adding them answered, until the command
-/// waiting for them runs again.
 /// The key a window of the view is told apart by when a command run again is answered
 /// ([`Session::with_view`]): matched only, never read as a parameter.
 const VIEW_ASKED: &str = "viewAsked";
 
+/// The downloads plugin commands wait for (#1202): those the app is making, with what was
+/// asked and since when, and those added, with what adding them answered, until the command
+/// waiting for them runs again.
 #[derive(Clone, Default)]
 pub(crate) struct UrlWaits {
     /// The view's boxes of the window requests asked with `"bbox": "view"`, by their numbers: a
