@@ -30526,6 +30526,23 @@ fn a_windows_bands_are_started_within_its_wait() {
     assert_eq!(e, "2 of 4 bands read in 5 minutes, so the window is given up: take a smaller box or a larger cellSize");
 }
 
+/// A request for the view's window joins one queued only when it was asked in the same view:
+/// asked in another, it is another request, read for its own view (#1330).
+#[test]
+fn a_window_of_the_view_joins_only_one_asked_in_the_same_view() {
+    let mut s = Session::new(Project::default());
+    let p = json!({"url": "https://x.org/scene.tif", "bbox": "view"});
+    let (a, b) = ([10.0, 45.0, 11.0, 46.0], [20.0, 45.0, 21.0, 46.0]);
+    for view in [Some(a), Some(a), Some(b), None] {
+        s.window_view = view;
+        s.request_url(&p).unwrap();
+        s.window_view = None;
+    }
+    let views: Vec<Option<[f64; 4]>> = s.take_url_requests().iter().map(crate::UrlRequest::view_asked).collect();
+    assert_eq!(views, [Some(a), Some(b), None], "the same view's asked once");
+    assert_eq!(s.url_waits.views.len(), 2, "kept by request number");
+}
+
 /// A plugin's command asking for the view's window is read for the view it was asked in, though the
 /// app reads it on a later frame, when the map may show another (#1330): a command run again after
 /// a download sees the view it first ran with only while it runs. The box is kept beside the

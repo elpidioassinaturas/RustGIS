@@ -321,6 +321,10 @@ pub(crate) struct Retry {
 /// waiting for them runs again.
 #[derive(Clone, Default)]
 pub(crate) struct UrlWaits {
+    /// The view's boxes of the window requests asked with `"bbox": "view"`, by their numbers: a
+    /// request for the view joins one being made only when it was asked in the same view. Kept
+    /// here, they go aside with a project and back on a rollback as the waits do.
+    pub(crate) views: std::collections::BTreeMap<u64, [f64; 4]>,
     owners: std::collections::BTreeMap<u64, crate::policy::Continuation>,
     in_flight: Vec<(u64, Value, Instant)>,
     landed: Vec<(u64, Value, CmdResult, Added)>,
@@ -615,6 +619,7 @@ impl UrlWaits {
         let wanted = |n: &u64| waiting.iter().any(|r| r.requests.contains(n));
         self.in_flight.retain(|(n, ..)| wanted(n));
         self.landed.retain(|(n, ..)| wanted(n));
+        self.views.retain(|n, _| wanted(n));
         let retained: Vec<u64> = self
             .in_flight
             .iter()
@@ -880,6 +885,8 @@ impl Session {
     fn poll_plugin_retries_at(&mut self, now: Instant) -> Vec<(String, CmdResult)> {
         self.url_waits.documents_in();
         if self.plugin_retries.is_empty() {
+            // No command waits for a window of the view.
+            self.url_waits.views.clear();
             return Vec::new();
         }
         // Said here too: the command may go on without it, and what it answers goes nowhere.
@@ -945,10 +952,6 @@ impl Session {
         let waiting = std::mem::take(&mut self.plugin_retries);
         self.url_waits.keep_only(&waiting);
         self.plugin_retries = waiting;
-        // The views of requests no longer queued, being made or kept for a command.
-        let queued: Vec<u64> = self.url_requests.iter().filter_map(|q| q.params().get("request").and_then(Value::as_u64)).collect();
-        let waits = &self.url_waits;
-        self.window_views.retain(|n, _| waits.has(*n) || queued.contains(n));
         ran
     }
 }

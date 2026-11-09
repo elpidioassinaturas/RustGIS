@@ -257,13 +257,16 @@ impl Session {
             .call_requests
             .as_ref()
             .and_then(|_| {
+                // A window of the view is the one asked in the same view: another is read again.
                 self.url_waits.in_flight(&asked, |n| {
-                    self.url_waits.owner(n).is_some_and(|owner| self.same_url_caller(owner, &c) && self.check_continuation(owner).is_ok())
+                    self.url_waits.views.get(&n).copied() == self.window_view
+                        && self
+                            .url_waits
+                            .owner(n)
+                            .is_some_and(|owner| self.same_url_caller(owner, &c) && self.check_continuation(owner).is_ok())
                 })
             })
-            .filter(|n| !self.url_waits.taken_away(*n, &self.project))
-            // A window of the view is the one asked in the same view: another is read again.
-            .filter(|n| self.window_views.get(n).copied() == self.window_view);
+            .filter(|n| !self.url_waits.taken_away(*n, &self.project));
         let number = match given.or(waiting).or(made) {
             Some(n) => n,
             None => {
@@ -285,7 +288,7 @@ impl Session {
             self.policy.work.queued.insert(key, Queued { c: Arc::downgrade(&c), import, consumed: Arc::new(AtomicBool::new(false)) });
             let view = self.window_view.take();
             if let Some(v) = view {
-                self.window_views.insert(number, v);
+                self.url_waits.views.insert(number, v);
             }
             self.url_requests.push(UrlRequest { key, params, authority: c, view });
         }
