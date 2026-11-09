@@ -194,7 +194,7 @@ cargo build --release --target wasm32-unknown-unknown
   required layer parameter starts at the active layer, or, when that isn't of the kind it takes (a
   `vectorLayer`, `polygonLayer` or `pointLayer`), at the first layer that is; an optional one
   stays empty until it's picked, or shows the layer its `default` names, which a run without one
-  uses (`—` too: it leaves the parameter out, as a script that doesn't give it does).
+  uses; its picker then offers no `—`, which would leave the parameter out and run with that layer too.
 - `panel` (optional) gives the plugin a pane of its own, with widgets bound to its commands. See
   [A panel](#a-panel).
 - `i18n` translates the plugin's own text into the interface language, by language code (`de`,

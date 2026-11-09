@@ -2992,6 +2992,13 @@ fn layer_list(form: &mut GpForm, ui: &mut Ui, param: &'static str, cur: &str, of
     }
 }
 
+/// Whether a layer parameter's picker offers no layer (`—`): when it is optional and names no
+/// layer as its default. One that does would run with that layer when left empty (its default
+/// is filled in then), so `—` would show one layer and run with another (#1517).
+fn no_layer_offered(p: &rustgis_engine::analysis::ParamSpec) -> bool {
+    !p.required && serde_json::from_str::<String>(p.default).map_or(true, |n| n.is_empty())
+}
+
 impl GpForm {
     /// Opens a tool, pre-filling layer parameters from the active layer. An external tool's
     /// optional input stays empty until it's picked: it changes what the tool does, as a weight
@@ -3733,7 +3740,7 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             ParamKind::Choice(c) => Some(c.iter().map(|s| s.to_string()).collect()),
             ParamKind::RasterLayer | ParamKind::VectorLayer => {
                 let mut v = layer_names(p.kind);
-                if !p.required {
+                if no_layer_offered(p) {
                     v.insert(0, String::new());
                 }
                 Some(v)
@@ -7011,6 +7018,12 @@ mod tests {
         }
         assert_eq!(filled(&app, "text").as_deref(), Some("soft"));
         assert_eq!(filled(&app, "named").as_deref(), Some("Countries"), "the default a run would use");
+        // Its picker offers no `—`, which would run with that default too; another optional one does.
+        let offered: Vec<bool> = ["named", "vector", "raster", "neededVector"]
+            .iter()
+            .map(|n| no_layer_offered(PARAMS.iter().find(|p| p.name == *n).unwrap()))
+            .collect();
+        assert_eq!(offered, [false, true, true, false]);
         // Its fields and a new output's name come from the required layer, which is filled, not
         // the optional one before it, which is empty.
         let spec = rustgis_engine::analysis::tool("formTest:optional").unwrap();
