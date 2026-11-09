@@ -632,7 +632,19 @@ pub fn frame_viewports(layout: &Layout, maps: &[Map], dpi: f64) -> Georeferenced
         .map(|e| (e, [f64::from(((e.x * k) as f32).round()) * sx, f64::from(((e.y * k) as f32).round()) * sy, e.w * k * sx, e.h * k * sy]))
         .collect();
     for (i, (e, placed)) in frames.iter().enumerate() {
-        let ElementKind::MapFrame { map, center, scale, bearing, pitch, .. } = &e.kind else { continue };
+        let ElementKind::MapFrame { map, center, scale, bearing, pitch, shape, .. } = &e.kind else { continue };
+        // A viewport is a rectangle: one for a shaped frame over another would give its places
+        // where the page shows the other's map, around the shape. (It still cuts the other.)
+        let over =
+            |[x, y, w, h]: [f64; 4]| x < placed[0] + placed[2] && placed[0] < x + w && y < placed[1] + placed[3] && placed[1] < y + h;
+        if *shape != rustgis_map::layout::FrameShape::Rectangle && frames[..i].iter().any(|(_, r)| over(*r)) {
+            out.left_out.push((
+                e.id,
+                e.name.clone(),
+                "it isn't a rectangle and is drawn over another frame, whose map shows around its shape",
+            ));
+            continue;
+        }
         let Some(m) = map_index(maps, map).and_then(|i| maps.get(i)) else {
             out.left_out.push((e.id, e.name.clone(), "its map is missing"));
             continue;

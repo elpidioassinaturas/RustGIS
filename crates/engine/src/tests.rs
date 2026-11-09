@@ -31872,6 +31872,16 @@ fn a_frame_drawn_over_another_is_cut_out_of_its_viewport() {
     let [fx, fy, fw, fh] = alone.viewports[0].rect_mm;
     assert_eq!(alone.viewports.len(), 1);
     assert!([x0 - fx, y0 - fy, x1 - (fx + fw), y1 - (fy + fh)].iter().all(|d| d.abs() < 1e-9), "{:?}", (x0, y0, x1, y1));
+    // A round inset over it is left out, and said: its box would give its places around the circle,
+    // where the page shows the main map. The main map is still cut around that box.
+    let inset = s.project.layouts[0].elements.iter_mut().find(|e| e.id == 9_001).unwrap();
+    inset.visible = true;
+    if let rustgis_map::layout::ElementKind::MapFrame { shape, .. } = &mut inset.kind {
+        *shape = rustgis_map::layout::FrameShape::Circle;
+    }
+    let round = rustgis_render::layout::frame_viewports(&s.project.layouts[0], &s.project.maps, 72.0);
+    assert!(round.viewports.iter().all(|v| v.name == frame.name) && round.viewports.len() == 4, "{:?}", round.left_out);
+    assert!(round.left_out.iter().any(|(id, _, why)| *id == 9_001 && why.contains("isn't a rectangle")), "{:?}", round.left_out);
     // Covered all over by a frame drawn over it, it has no viewport, and that is said.
     let over = s.project.layouts[0].elements.iter_mut().find(|e| e.id == 9_001).unwrap();
     (over.visible, over.x, over.y, over.w, over.h) = (true, frame.x - 1.0, frame.y - 1.0, frame.w + 2.0, frame.h + 2.0);
