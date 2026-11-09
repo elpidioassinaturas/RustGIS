@@ -203,6 +203,9 @@ pub fn from_identify(app: &mut RustGisApp, id: u32, at: rustgis_engine::geom::Co
 /// read so far starting it again; the oldest point goes past [`MAX_POINTS`]. What goes wrong is
 /// said in the section.
 pub fn add_point(app: &mut RustGisApp, layer: &str, at: rustgis_engine::geom::Coord) {
+    // A rename since the points were read (with the section not drawn, say, and the point from
+    // Identify) is the same raster: its points stay.
+    follow_rename(app);
     let r = app.run("raster.spectral", json!({"layer": layer, "lon": at.x, "lat": at.y}));
     let (source, data) = (source_of(app, layer), data_of(app, layer));
     let sp = &mut app.workflow.spectral;
@@ -747,6 +750,20 @@ mod tests {
         add_point(&mut app, "SCENE", rustgis_engine::geom::Coord::new(10.015, 44.985));
         let sp = &app.workflow.spectral;
         assert_eq!(sp.samples.len(), 2, "{:?}", sp.message);
+        assert_eq!(sp.message, None);
+    }
+
+    /// A point from Identify on a raster renamed while the section wasn't drawn: the same raster,
+    /// so the points read before stay.
+    #[test]
+    fn identify_on_a_renamed_raster_keeps_its_points() {
+        let mut app = app_with_scene(false);
+        add_point(&mut app, "scene", rustgis_engine::geom::Coord::new(10.005, 44.995));
+        app.run("layer.rename", json!({"layer": "scene", "name": "renamed"})).unwrap();
+        let id = app.session.map().layer_by_name("renamed").map(|l| l.id).unwrap();
+        from_identify(&mut app, id, rustgis_engine::geom::Coord::new(10.015, 44.985));
+        let sp = &app.workflow.spectral;
+        assert_eq!((sp.layer.as_str(), sp.samples.len()), ("renamed", 2), "{:?}", sp.message);
         assert_eq!(sp.message, None);
     }
 
