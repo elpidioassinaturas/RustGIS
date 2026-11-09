@@ -43,6 +43,9 @@ pub struct Spectral {
     /// The map (its place in the project) and layer the points were read on: a raster of the
     /// same name on another map, or added again, isn't the same one.
     pub source: Option<(usize, u32)>,
+    /// The pixels the points were read from: a raster edited in place (Pixel Editor, say) keeps
+    /// its layer and name but not these, so its points are no longer what it holds.
+    read_on: std::sync::Weak<rustgis_engine::data::raster::Raster>,
     /// Oldest first.
     pub samples: Vec<Sample>,
     /// The last point's number.
@@ -120,6 +123,12 @@ fn source_of(app: &RustGisApp, layer: &str) -> Option<(usize, u32)> {
     app.session.map().layer_by_name(layer).map(|l| (app.session.project.active_map, l.id))
 }
 
+/// The pixels of the raster `layer` names now, for [`Spectral::read_on`] (none when it has none).
+fn data_of(app: &RustGisApp, layer: &str) -> std::sync::Weak<rustgis_engine::data::raster::Raster> {
+    let data = app.session.map().layer_by_name(layer).and_then(|l| l.raster.as_ref()?.data.as_ref());
+    data.map(std::sync::Arc::downgrade).unwrap_or_default()
+}
+
 /// The raster the points were read on, renamed since: the profile follows its new name (when
 /// commands find it by that name), so its points stay.
 pub fn follow_rename(app: &mut RustGisApp) {
@@ -137,10 +146,11 @@ pub fn follow_rename(app: &mut RustGisApp) {
     app.workflow.spectral.layer = name;
 }
 
-/// Whether the points were read on the raster the profile's name finds now.
+/// Whether the points were read on the raster the profile's name finds now, as it is now. (A
+/// `Weak` keeps its allocation, so another raster can't take the address the points' one had.)
 fn fresh(app: &RustGisApp) -> bool {
     let sp = &app.workflow.spectral;
-    source_of(app, &sp.layer) == sp.source
+    source_of(app, &sp.layer) == sp.source && std::sync::Weak::ptr_eq(&data_of(app, &sp.layer), &sp.read_on)
 }
 
 /// The rasters a profile can be read on: those of two bands or more, by name, and how many
@@ -194,7 +204,7 @@ pub fn from_identify(app: &mut RustGisApp, id: u32, at: rustgis_engine::geom::Co
 /// said in the section.
 pub fn add_point(app: &mut RustGisApp, layer: &str, at: rustgis_engine::geom::Coord) {
     let r = app.run("raster.spectral", json!({"layer": layer, "lon": at.x, "lat": at.y}));
-    let source = source_of(app, layer);
+    let (source, data) = (source_of(app, layer), data_of(app, layer));
     let sp = &mut app.workflow.spectral;
     let v = match r {
         Ok(v) => v,
@@ -205,11 +215,12 @@ pub fn add_point(app: &mut RustGisApp, layer: &str, at: rustgis_engine::geom::Co
     };
     let bands: Vec<String> = v["bands"].as_array().into_iter().flatten().map(|b| b.as_str().unwrap_or_default().to_string()).collect();
     let wavelengths: Vec<Option<f64>> = v["wavelengths"].as_array().into_iter().flatten().map(Value::as_f64).collect();
-    // Another raster, or the same one's bands changed: its points aren't comparable, and that
-    // they went is said. Names are compared as commands find layers, so the same raster written
-    // in another case keeps its points.
+    // Another raster, or the same one's pixels or bands changed: its points aren't comparable,
+    // and that they went is said. Names are compared as commands find layers, so the same raster
+    // written in another case keeps its points.
     let mut restarted = None;
-    if !sp.layer.eq_ignore_ascii_case(layer) || sp.source != source || sp.bands != bands || sp.wavelengths != wavelengths {
+    let changed = !std::sync::Weak::ptr_eq(&sp.read_on, &data) || sp.bands != bands || sp.wavelengths != wavelengths;
+    if !sp.layer.eq_ignore_ascii_case(layer) || sp.source != source || changed {
         let why = if !sp.layer.eq_ignore_ascii_case(layer) {
             Restart::Other(layer)
         } else if sp.source.map(|s| s.0) != source.map(|s| s.0) {
@@ -220,6 +231,7 @@ pub fn add_point(app: &mut RustGisApp, layer: &str, at: rustgis_engine::geom::Co
         sp.restart(why);
         restarted = sp.message.take();
         sp.source = source;
+        sp.read_on = data;
         sp.bands = bands;
         sp.wavelengths = wavelengths;
     }
@@ -736,6 +748,33 @@ mod tests {
         let sp = &app.workflow.spectral;
         assert_eq!(sp.samples.len(), 2, "{:?}", sp.message);
         assert_eq!(sp.message, None);
+    }
+
+    /// Pixels edited in place (same layer, same name): the points read before are taken off, and
+    /// that is said; a point read after is kept.
+    #[test]
+    fn an_edited_raster_takes_the_points_off_and_says_so() {
+        let mut app = app_with_scene(false);
+        add_point(&mut app, "scene", rustgis_engine::geom::Coord::new(10.005, 44.995));
+        add_point(&mut app, "scene", rustgis_engine::geom::Coord::new(10.015, 44.985));
+        let ring = json!([[10.0, 45.0], [10.04, 45.0], [10.04, 44.96]]);
+        app.run("raster.editPixels", json!({"layer": "scene", "polygon": ring, "value": 99})).unwrap();
+        assert!(!fresh(&app), "the points were read on the pixels before the edit");
+        let mut h = egui_kittest::Harness::builder().allow_missing_glyphs().with_size(egui::vec2(420.0, 320.0)).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let t = crate::theme::Tokens::get(ui.ctx());
+                section(app, ui, &t);
+            },
+            app,
+        );
+        h.run_steps(1);
+        let sp = &h.state().workflow.spectral;
+        assert!(sp.samples.is_empty());
+        assert_eq!(sp.message, Some(("2 point(s) taken off: scene has changed or gone since they were read.".to_string(), false)));
+        // Read again on the edited pixels: the point is kept, and fresh.
+        add_point(h.state_mut(), "scene", rustgis_engine::geom::Coord::new(10.005, 44.995));
+        assert_eq!(h.state().workflow.spectral.samples.len(), 1);
+        assert!(fresh(h.state()));
     }
 
     /// Another map shown: the points read on the one before are taken off, and that is said.
