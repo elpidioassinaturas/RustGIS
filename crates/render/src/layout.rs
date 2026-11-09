@@ -594,14 +594,14 @@ fn frame_outline_lonlat(map: &Map, cam: &rustgis_map::Camera, w: f64, h: f64) ->
 #[derive(Debug, Default)]
 pub struct Georeferenced {
     /// The georeferenced frames, in drawing order, each in the rectangles no frame drawn over it
-    /// covers ([`uncovered`]): no two overlap, so a reader never has two to choose from.
+    /// covers (`uncovered`): no two overlap, so a reader never has two to choose from.
     pub viewports: Vec<crate::pdf::Viewport>,
     /// The frames that couldn't be, by id and name, with why.
     pub left_out: Vec<(u32, String, &'static str)>,
     /// The frames whose coordinate system can't be written as WKT (a grid shift, or a projection
     /// WKT1 has no name for), by id and name:
     /// georeferenced by their corners in longitude/latitude, which put the places of a 9 × 9 grid
-    /// over the frame within [`MAX_CORNER_FIT_MM`] of where they are drawn ([`corner_fit_mm`]).
+    /// over the frame within [`MAX_CORNER_FIT_MM`] of where they are drawn (`corner_fit_mm`).
     pub by_corners: Vec<(u32, String)>,
 }
 
