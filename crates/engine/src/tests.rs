@@ -30526,6 +30526,20 @@ fn a_windows_bands_are_started_within_its_wait() {
     assert_eq!(e, "2 of 4 bands read in 5 minutes, so the window is given up: take a smaller box or a larger cellSize");
 }
 
+/// A script or model the desktop app runs off the frame, as a plugin's command, leaves a window to
+/// the app: answered pending, and queued, not refused (#1330).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_script_run_by_the_app_leaves_a_window_to_it() {
+    let mut s = world();
+    let p = json!({"url": "https://x.org/scene.tif", "bbox": [10.25, 45.5, 10.5, 45.75]});
+    let answer = s.with_deferred_downloads(|s| s.run("layer.addUrl", &p)).unwrap();
+    assert_eq!(answer["pending"], true, "{answer}");
+    let asked = s.take_url_requests();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].params()["bbox"], p["bbox"]);
+}
+
 /// A request for the view's window joins one queued only when it was asked in the same view:
 /// asked in another, it is another request, read for its own view (#1330).
 #[test]

@@ -614,13 +614,13 @@ impl UrlWaits {
         }
     }
 
-    /// Only what `waiting` still waits for is kept.
     /// Keeps the views of the requests still being made or landed only.
     fn prune_views(&mut self) {
         let live: Vec<u64> = self.in_flight.iter().map(|(n, ..)| *n).chain(self.landed.iter().map(|(n, ..)| *n)).collect();
         self.views.retain(|n, _| live.contains(n));
     }
 
+    /// Only what `waiting` still waits for is kept.
     fn keep_only(&mut self, waiting: &[Retry]) {
         let wanted = |n: &u64| waiting.iter().any(|r| r.requests.contains(n));
         self.in_flight.retain(|(n, ..)| wanted(n));
