@@ -615,6 +615,12 @@ impl UrlWaits {
     }
 
     /// Only what `waiting` still waits for is kept.
+    /// Keeps the views of the requests still being made or landed only.
+    fn prune_views(&mut self) {
+        let live: Vec<u64> = self.in_flight.iter().map(|(n, ..)| *n).chain(self.landed.iter().map(|(n, ..)| *n)).collect();
+        self.views.retain(|n, _| live.contains(n));
+    }
+
     fn keep_only(&mut self, waiting: &[Retry]) {
         let wanted = |n: &u64| waiting.iter().any(|r| r.requests.contains(n));
         self.in_flight.retain(|(n, ..)| wanted(n));
@@ -885,8 +891,7 @@ impl Session {
     fn poll_plugin_retries_at(&mut self, now: Instant) -> Vec<(String, CmdResult)> {
         self.url_waits.documents_in();
         if self.plugin_retries.is_empty() {
-            // No command waits for a window of the view.
-            self.url_waits.views.clear();
+            self.url_waits.prune_views();
             return Vec::new();
         }
         // Said here too: the command may go on without it, and what it answers goes nowhere.
