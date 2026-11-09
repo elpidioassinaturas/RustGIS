@@ -154,8 +154,23 @@ fn built_in_arc() -> &'static Arc<Vec<Entry>> {
 /// The list in use: the hosted one ([`fetch_hosted`]) once it has been read, else the built-in
 /// one, followed by JAXA Earth's datasets once its catalog has been read ([`crate::jaxa::fetch`]).
 pub fn list() -> Arc<Vec<Entry>> {
-    let base = hosted().lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| built_in_arc().clone());
-    combined(base, crate::jaxa::entries())
+    combined(base(), crate::jaxa::entries())
+}
+
+/// The hosted list once read, else the built-in one.
+fn base() -> Arc<Vec<Entry>> {
+    hosted().lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| built_in_arc().clone())
+}
+
+/// JAXA Earth's cubes left out of the list in use because one of the list's own has their id
+/// (said by the pane and `cube.catalog`).
+pub fn jaxa_hidden() -> Vec<String> {
+    crate::jaxa::entries().map_or_else(Vec::new, |more| clashing(&base(), &more))
+}
+
+/// The ids of `more` that `base` has too.
+fn clashing(base: &[Entry], more: &[Entry]) -> Vec<String> {
+    more.iter().filter(|e| base.iter().any(|b| b.id == e.id)).map(|e| e.id.clone()).collect()
 }
 
 /// `base` followed by `more`: the same list until either changes, so the pane drawing it every
@@ -171,7 +186,8 @@ fn combined(base: Arc<Vec<Entry>>, more: Option<Arc<Vec<Entry>>>) -> Arc<Vec<Ent
     {
         return all.clone();
     }
-    // An entry of `more` with the id of one of `base` is left out: the list's own comes first.
+    // An entry of `more` with the id of one of `base` is left out: the list's own comes first
+    // ([`jaxa_hidden`] says which).
     let all: Vec<Entry> = base.iter().cloned().chain(more.iter().filter(|e| !base.iter().any(|b| b.id == e.id)).cloned()).collect();
     let all = Arc::new(all);
     *last = Some((base, more, all.clone()));
@@ -576,8 +592,11 @@ mod tests {
         let all = combined(base.clone(), Some(more.clone()));
         assert_eq!(all.len(), base.len() + 1);
         assert_eq!(all.last().map(|e| e.id.as_str()), Some("JAXA.Test_daily/B1"));
-        assert!(Arc::ptr_eq(&all, &combined(base.clone(), Some(more))), "not copied again");
+        assert!(Arc::ptr_eq(&all, &combined(base.clone(), Some(more.clone()))), "not copied again");
         assert!(Arc::ptr_eq(&combined(base.clone(), None), &base));
+        let id = built_in()[1].id.clone();
+        assert_eq!(clashing(&base, &more), [id], "the one left out is named");
+        assert!(clashing(&base, &more[..1]).is_empty());
     }
 
     /// The last full year: the one before this while the cube runs on, its end's once it ended,

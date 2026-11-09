@@ -214,12 +214,14 @@ pane says so, and when it can't be (offline) it says why, with **Try again**.
   The pane reads it from the collection as its entry comes into view and links it as **Licence**;
   `cube.open` reads it too and gives it in its answer. JAXA's terms ask for credit: a cube added
   from the list credits "JAXA" and the dataset's name on its tile layers. The data is free to use
-  and share with that credit; JAXA asks to be told before commercial use.
+  and share with that credit; commercial use is free too, but JAXA's terms (section 2.3) ask to be
+  told of it in advance.
 - **Limits:** `cube.catalog` lists JAXA's datasets once the pane has read the catalog; a command or
   script that never opens the pane sees `"jaxa": {"state": "unread"}`. The catalog is read once a
   run; after a failed read, **Try again** reads it again. Text too long for the list (a title
   over 160 characters, a field over 2,000) is cut, its name ends in "…", and the pane and
-  `cube.catalog` (`"cut"`) say which.
+  `cube.catalog` (`"cut"`) say which. A JAXA cube whose id the list already has is left out for
+  the list's own, and the pane and `cube.catalog` (`"hidden"`) name it.
 
 An entry, as the list holds it (built in from `crates/tiles/src/cubes.json`, and kept with the app's
 assets); a cube is proposed by adding one:

@@ -269,6 +269,7 @@ fn cubes_of(id: &str, title: &str, f: &HashMap<String, String>, cut: &mut Vec<St
     };
     cut_note(cut, id, "dataProvider", get("dataProvider").trim(), 60);
     cut_note(cut, id, "title", title.trim(), 160);
+    cut_note(cut, id, "temporalResolution", &step, MAX_STEP);
     let provider = match clip(get("dataProvider").trim(), 60) {
         p if p.is_empty() => "JAXA Earth API".to_string(),
         p => format!("JAXA Earth API ({p})"),
@@ -331,7 +332,7 @@ fn step_text(step: &str) -> String {
         "monthly" => "1 month".into(),
         "yearly" => "1 year".into(),
         "" | "none" | "null" => "not given".into(),
-        s => clip(s, 40),
+        s => clip(s, MAX_STEP),
     }
 }
 
@@ -368,6 +369,11 @@ fn themes(text: &str) -> Vec<String> {
     out
 }
 
+/// The most characters of a step not among the ones named in [`step_text`].
+const MAX_STEP: usize = 40;
+/// The most characters of a licence link's title.
+const MAX_LICENCE_TITLE: usize = 120;
+
 /// `s`, at most `n` characters: one cut ends in "…".
 fn clip(s: &str, n: usize) -> String {
     if s.chars().nth(n).is_none() {
@@ -400,7 +406,14 @@ pub fn licence_of(collection: &[u8]) -> Result<Licence, String> {
             && l.get("href").and_then(Value::as_str).and_then(cubes::web).is_some_and(|h| h.len() <= 500)
     });
     if let Some(l) = link {
-        let title = l.get("title").and_then(Value::as_str).map(|t| clip(t.trim(), 120)).filter(|t| !t.is_empty());
+        let title = l.get("title").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()).map(|t| {
+            let len = t.chars().count();
+            if len > MAX_LICENCE_TITLE {
+                format!("{} (its title, {len} characters, is cut to {MAX_LICENCE_TITLE})", clip(t, MAX_LICENCE_TITLE))
+            } else {
+                t.to_string()
+            }
+        });
         return Ok(Licence { url: l.get("href").and_then(Value::as_str).unwrap_or_default().to_string(), title });
     }
     match v.get("license").and_then(Value::as_str).map(str::trim) {
@@ -573,6 +586,9 @@ mod tests {
         assert_eq!(c.cut, ["JAXA.Test_daily: its title (170 characters) is cut to 160"]);
         let c = one(&format!("{good}\n* description: {}", "d".repeat(MAX_FIELD + 5)));
         assert_eq!(c.cut, [format!("A dataset: its description ({} characters) is cut to {MAX_FIELD}", MAX_FIELD + 5)]);
+        let c = one(&good.replace("* temporalResolution: daily", &format!("* temporalResolution: {}", "d".repeat(45))));
+        assert_eq!(c.entries[0].step.chars().count(), MAX_STEP);
+        assert_eq!(c.cut, [format!("JAXA.Test_daily: its temporalResolution (45 characters) is cut to {MAX_STEP}")]);
     }
 
     /// A collection's licence: its license link, else an SPDX id; JAXA's collections are told
@@ -582,6 +598,13 @@ mod tests {
         let l = licence_of(br#"{"license": "proprietary", "links": [{"rel": "self", "href": "x"}, {"rel": "license", "href": "https://earth.jaxa.jp/en/data/policy/", "title": "JAXA terms"}]}"#).unwrap();
         assert_eq!((l.url.as_str(), l.title.as_deref()), ("https://earth.jaxa.jp/en/data/policy/", Some("JAXA terms")));
         assert_eq!(licence_of(br#"{"license": "CC-BY-4.0", "links": []}"#).unwrap().url, "https://spdx.org/licenses/CC-BY-4.0.html");
+        // A title too long is cut, and says so.
+        let long = format!(
+            r#"{{"links": [{{"rel": "license", "href": "https://earth.jaxa.jp/en/data/policy/", "title": "{}"}}]}}"#,
+            "t".repeat(130)
+        );
+        let title = licence_of(long.as_bytes()).unwrap().title.unwrap();
+        assert!(title.ends_with("… (its title, 130 characters, is cut to 120)"), "{title}");
         for bad in
             [&br#"{"license": "proprietary"}"#[..], br#"{"links": [{"rel": "license", "href": "javascript:alert(1)"}]}"#, b"not json"]
         {

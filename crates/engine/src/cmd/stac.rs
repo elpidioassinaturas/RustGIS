@@ -1193,10 +1193,10 @@ fn sample_range(
         if l.palette.is_some() {
             return Ok(Sample::Classes);
         }
-        let Some(level) = l.levels.iter().position(|v| v.width.max(v.height) <= SAMPLE_SIDE).or(l.levels.len().checked_sub(1)) else {
-            continue;
+        let level = l.levels.iter().position(|v| v.width.max(v.height) <= SAMPLE_SIDE).or(l.levels.len().checked_sub(1));
+        let Some((level, lv)) = level.and_then(|i| l.levels.get(i).map(|lv| (i, lv))) else {
+            return Err(format!("{href}: it has no image to sample"));
         };
-        let lv = &l.levels[level];
         let (w, h) = (lv.width.min(SAMPLE_SIDE), lv.height.min(SAMPLE_SIDE));
         let (c0, r0) = ((lv.width - w) / 2, (lv.height - h) / 2);
         let read = cog::read_values_blocking(&info, href, level, 0, (c0, c0 + w), (r0, r0 + h))?;

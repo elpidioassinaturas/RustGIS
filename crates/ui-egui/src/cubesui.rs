@@ -190,6 +190,14 @@ fn jaxa_line(ui: &mut egui::Ui, t: &crate::theme::Tokens) {
                 );
                 ui.label(egui::RichText::new(text).small().color(t.text_dim)).on_hover_text(c.cut.join("\n"));
             }
+            let hidden = cubes::jaxa_hidden();
+            if !hidden.is_empty() {
+                let text = crate::i18n::fmt(
+                    "JAXA Earth: {n} of its cubes have the id of one of the list's own and are left out (hover for which)",
+                    &[("n", &hidden.len().to_string())],
+                );
+                ui.label(egui::RichText::new(text).small().color(t.text_dim)).on_hover_text(hidden.join("\n"));
+            }
         }
         jaxa::Status::Failed(why) => {
             ui.horizontal_wrapped(|ui| {
