@@ -646,6 +646,7 @@ pub fn frame_viewports(layout: &Layout, maps: &[Map], dpi: f64) -> Georeferenced
             }
         }
         if shown.is_empty() {
+            out.left_out.push((e.id, e.name.clone(), "the frames drawn over it cover all of it"));
             continue;
         }
         if shown.len() > MAX_VIEWPORTS_A_FRAME {
