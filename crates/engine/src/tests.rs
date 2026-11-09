@@ -31853,6 +31853,19 @@ fn a_frame_drawn_over_another_is_cut_out_of_its_viewport() {
     let names: Vec<&str> = geo.viewports.iter().map(|v| v.name.as_str()).collect();
     assert_eq!(names, [frame.name.as_str(), frame.name.as_str(), frame.name.as_str(), frame.name.as_str(), "Inset"], "{:?}", geo.left_out);
     assert!(geo.left_out.is_empty() && inside(&geo.viewports[4], in_inset));
+    // Exactly the frame without the inset, as both are placed on the page: the pieces fill the
+    // frame's box less the inset's, none reaches into the inset, and none overlaps another (above).
+    let [ix, iy, iw, ih] = geo.viewports[4].rect_mm;
+    let main = &geo.viewports[..4];
+    let (x0, y0) = main.iter().fold((f64::MAX, f64::MAX), |(x, y), v| (x.min(v.rect_mm[0]), y.min(v.rect_mm[1])));
+    let (x1, y1) =
+        main.iter().fold((f64::MIN, f64::MIN), |(x, y), v| (x.max(v.rect_mm[0] + v.rect_mm[2]), y.max(v.rect_mm[1] + v.rect_mm[3])));
+    let area: f64 = main.iter().map(|v| v.rect_mm[2] * v.rect_mm[3]).sum();
+    assert!((area - ((x1 - x0) * (y1 - y0) - iw * ih)).abs() < 1e-6, "{area}");
+    for v in main {
+        let [vx, vy, vw, vh] = v.rect_mm;
+        assert!(vx + vw <= ix + 1e-9 || ix + iw <= vx + 1e-9 || vy + vh <= iy + 1e-9 || iy + ih <= vy + 1e-9, "{:?}", v.rect_mm);
+    }
 }
 
 #[test]
