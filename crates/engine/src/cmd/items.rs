@@ -428,6 +428,9 @@ fn embedded_map(m: &Map, budget: &mut u64) -> Map {
     m
 }
 
+/// The most maps one `map.import` adds.
+const MAX_IMPORTED_MAPS: usize = 100;
+
 /// Adds maps from a map file, project or package.
 fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
     let text = read_text(p)?;
@@ -456,6 +459,11 @@ fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
                 for notice in project.take_read_notices(&[crate::project::ReadPart::Labels, crate::project::ReadPart::Diagrams]) {
                     s.notify(notice, false);
                 }
+                // Hidden diagrams of the maps imported only.
+                let imported = project.maps.iter().take(MAX_IMPORTED_MAPS).flat_map(|m| &m.layers);
+                for (_, notice) in crate::project::label_losses::hidden(imported) {
+                    s.notify(notice, false);
+                }
                 project.maps
             }
             Err(error) => {
@@ -465,7 +473,7 @@ fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
         },
     };
     let mut names = Vec::new();
-    for mut m in maps.into_iter().take(100) {
+    for mut m in maps.into_iter().take(MAX_IMPORTED_MAPS) {
         // A binding in a file is no authority to use a login here.
         crate::s3_connections::clear_bindings(m.addresses_mut());
         crate::project::clear_login_bindings(m.addresses_mut());
@@ -1015,7 +1023,8 @@ struct Mesh {
     bytes: usize,
     /// Polylines, which STL can't hold.
     lines: usize,
-    /// Caps that couldn't be triangulated and are fanned from their first vertex.
+    /// Caps that couldn't be triangulated (or were left with a fan by the triangulator) and are
+    /// fanned from their first vertex.
     fanned: usize,
     /// Whether polylines are kept (OBJ) or only counted (STL, which can't hold them).
     keep_lines: bool,
@@ -1172,8 +1181,9 @@ fn layer_mesh(s: &Session, p: &Value, keep_lines: bool) -> Result<Mesh, String> 
                         first += m;
                     }
                     // Caps as triangles (concave shapes and holes would fan wrongly as n-gons).
-                    match rustgis_geom::triangulate::triangulate(outer, open.get(1..).unwrap_or(&[])) {
-                        Some(tris) => {
+                    match rustgis_geom::triangulate::triangulate_reporting(outer, open.get(1..).unwrap_or(&[])) {
+                        Some((tris, fanned)) => {
+                            mesh.fanned += usize::from(fanned);
                             for [a, b, c] in tris {
                                 mesh.face(Item::Tri([v + n + a, v + n + b, v + n + c], orient(Orient::Up)))?;
                                 mesh.face(Item::Tri([v + c, v + b, v + a], orient(Orient::Down)))?;
@@ -1330,6 +1340,19 @@ fn mesh_notices(s: &mut Session, mesh: &Mesh) {
     if mesh.default_heights > 0 {
         s.notify(format!("{} feature(s) without a numeric height used the default height instead", mesh.default_heights), false);
     }
+    // OBJ and STL alike: the caps the triangulator gave up on and the ones it could only fan.
+    if mesh.fanned > 0 {
+        s.notify(fanned_caps_note(mesh.fanned), false);
+    }
+}
+
+/// The notice for `n` polygon caps finished as fans, in the 3D exports and the web scene: past the
+/// triangulator's limits a cap is fanned over its outer ring (holes filled), and a ring it can't
+/// cut an ear from is fanned as it stands; either can spill outside a concave shape.
+pub(crate) fn fanned_caps_note(n: usize) -> String {
+    format!(
+        "{n} polygon cap(s) couldn't be triangulated exactly and are approximated by fans: holes may be filled, and concave parts may spill outside"
+    )
 }
 
 /// A feature layer as binary STL, noting what it leaves out.
@@ -1346,15 +1369,6 @@ fn stl_bytes(s: &mut Session, p: &Value) -> Result<(Vec<u8>, StlReport), String>
     if report.degenerate > 0 {
         s.notify(
             format!("Skipped {} zero-area triangle(s), such as edges too short to tell apart in 32-bit floats", report.degenerate),
-            false,
-        );
-    }
-    if report.fanned > 0 {
-        s.notify(
-            format!(
-                "{} polygon cap(s) couldn't be triangulated and are approximated by fans over the outer ring: holes are filled, and concave parts may spill outside",
-                report.fanned
-            ),
             false,
         );
     }
