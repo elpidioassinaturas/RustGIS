@@ -16873,10 +16873,6 @@ fn a_stac_data_cube_on_the_time_slider() {
     assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
 }
 
-/// The data cube catalog (#683): its entries listed by theme, area and words; one opened as typing
-/// its values into `stac.addCube` would (its collection, band, range and cloud cap filled in, its
-/// last full year by default), or into `layer.addZarr` following the slider; `cube.trend` and
-/// `cube.reduce` taking one by `"cube"`; wrong requests refused before anything is added.
 /// An entry that gives no range, as JAXA Earth's don't, is added with one from a sample of its
 /// files (`"range": "auto"`): the same for every date. Its credit goes on the tile layers it
 /// added, and its collection's licence comes back with it.
@@ -16927,8 +16923,27 @@ fn an_entry_without_a_range_takes_one_from_its_files() {
             .unwrap_err()
             .contains("\"auto\"")
     );
+    // Files of classes in their own colours take no range, and a notice says so.
+    use rustgis_data::raster::cog::{Example, example_with};
+    let (classes, _) = serve_ranges(example_with(&Example { size: 512, tile: 256, classes: true, ..Example::default() }));
+    let features = [item("a1", "2024-01-01")].join(",").replace(&cog, &classes);
+    let base = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{features}]}}"#))], 4);
+    let mut u = Session::new(Project::default());
+    let mark = u.notices_given();
+    let r = u
+        .run(
+            "stac.addCube",
+            &json!({"url": format!("{base}/v1"), "collection": "cube", "asset": "B1", "range": "auto", "bbox": [10, 45, 11, 46], "start": "2023-05-01", "end": "2024-12-31"}),
+        )
+        .unwrap();
+    assert!(r.get("range").is_none() && r.get("rangeFrom").is_none(), "{r}");
+    assert!(u.notices_since(mark).iter().any(|n| n.text.contains("classes drawn in their own colours")), "{:?}", u.notices_since(mark));
 }
 
+/// The data cube catalog (#683): its entries listed by theme, area and words; one opened as typing
+/// its values into `stac.addCube` would (its collection, band, range and cloud cap filled in, its
+/// last full year by default), or into `layer.addZarr` following the slider; `cube.trend` and
+/// `cube.reduce` taking one by `"cube"`; wrong requests refused before anything is added.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_catalog_entry_opens_as_its_command_would() {

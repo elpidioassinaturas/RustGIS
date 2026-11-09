@@ -35,6 +35,8 @@ const MAX_BYTES: usize = 1 << 20;
 /// The most datasets read, and bands of one.
 const MAX_DATASETS: usize = 500;
 const MAX_BANDS: usize = 16;
+/// The most characters a dataset's field keeps (descriptions run to about 850).
+const MAX_FIELD: usize = 2000;
 /// The most a collection's document may be, read for its licence.
 const MAX_COLLECTION_BYTES: usize = 1 << 20;
 /// Kilometres in a degree of longitude at the equator: JAXA's resolutions are given in km.
@@ -57,6 +59,9 @@ pub struct Catalog {
     pub left_out: Vec<LeftOut>,
     /// How many datasets the catalog lists.
     pub datasets: usize,
+    /// The catalog's text that was too long and is cut, where and by how much (each cut name ends
+    /// in "…").
+    pub cut: Vec<String>,
 }
 
 /// Where the catalog is in a run of the app.
@@ -149,6 +154,7 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
         return Err(format!("JAXA Earth's catalog is larger than {} KB", MAX_BYTES >> 10));
     }
     let mut section = String::new();
+    let mut cut = Vec::new();
     let mut datasets: Vec<(String, HashMap<String, String>)> = Vec::new();
     let mut open = false;
     for line in text.lines().map(str::trim) {
@@ -161,22 +167,25 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
                 if datasets.len() == MAX_DATASETS {
                     return Err(format!("JAXA Earth's catalog lists more than {MAX_DATASETS} datasets"));
                 }
-                datasets.push((clip(h.trim(), 200), HashMap::new()));
+                let h = h.trim();
+                cut_note(&mut cut, h, "heading", h, 200);
+                datasets.push((clip(h, 200), HashMap::new()));
             }
         } else if open
             && let Some((k, v)) = line.strip_prefix("* ").and_then(|f| f.split_once(':'))
-            && let Some((_, fields)) = datasets.last_mut()
+            && let Some((heading, fields)) = datasets.last_mut()
         {
             let k = k.trim();
-            if k.len() <= 40 && k.bytes().all(|b| b.is_ascii_alphanumeric()) {
-                fields.entry(k.to_string()).or_insert_with(|| clip(v.trim(), 2000));
+            if k.len() <= 40 && k.bytes().all(|b| b.is_ascii_alphanumeric()) && !fields.contains_key(k) {
+                cut_note(&mut cut, heading, k, v.trim(), MAX_FIELD);
+                fields.insert(k.to_string(), clip(v.trim(), MAX_FIELD));
             }
         }
     }
     if datasets.is_empty() {
         return Err("JAXA Earth's catalog has no dataset list".into());
     }
-    let mut c = Catalog { datasets: datasets.len(), ..Catalog::default() };
+    let mut c = Catalog { datasets: datasets.len(), cut, ..Catalog::default() };
     for (heading, f) in &datasets {
         let id = f.get("id").map(String::as_str).unwrap_or("");
         let title = f.get("title").map(String::as_str).filter(|t| !t.is_empty()).unwrap_or(heading.as_str());
@@ -184,7 +193,7 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
         if !id.is_empty() && (c.entries.iter().any(|e| e.source_dataset() == Some(id)) || c.left_out.iter().any(|l| l.id == id)) {
             continue;
         }
-        match cubes_of(id, title, f) {
+        match cubes_of(id, title, f, &mut c.cut) {
             Ok(es) => c.entries.extend(es),
             Err(why) => c.left_out.push(LeftOut { id: clip(id, 120), title: clip(title, 200), why }),
         }
@@ -216,7 +225,7 @@ fn is_id(id: &str) -> bool {
 }
 
 /// A dataset's cubes, a band each; why it can't be one otherwise.
-fn cubes_of(id: &str, title: &str, f: &HashMap<String, String>) -> Result<Vec<Entry>, String> {
+fn cubes_of(id: &str, title: &str, f: &HashMap<String, String>, cut: &mut Vec<String>) -> Result<Vec<Entry>, String> {
     if !is_id(id) {
         return Err("it has no id of letters, digits, dots, underscores and hyphens".into());
     }
@@ -258,6 +267,8 @@ fn cubes_of(id: &str, title: &str, f: &HashMap<String, String>) -> Result<Vec<En
         u if is_collection(u) && u.ends_with(&format!("/{id}/collection.json")) => u.to_string(),
         u => return Err(format!("its collection {} isn't in JAXA Earth's buckets", clip(u, 120))),
     };
+    cut_note(cut, id, "dataProvider", get("dataProvider").trim(), 60);
+    cut_note(cut, id, "title", title.trim(), 160);
     let provider = match clip(get("dataProvider").trim(), 60) {
         p if p.is_empty() => "JAXA Earth API".to_string(),
         p => format!("JAXA Earth API ({p})"),
@@ -287,7 +298,8 @@ fn cubes_of(id: &str, title: &str, f: &HashMap<String, String>) -> Result<Vec<En
             license: "the collection's own (JAXA's terms for most datasets)".into(),
             about: format!("https://data.earth.jaxa.jp/en/datasets/#/id/{id}"),
             credit: format!("JAXA, {title}"),
-            words: clip(&words, 600),
+            // Whole: its fields are bounded already, and a cut would lose words to search by.
+            words: words.clone(),
         })
         .collect())
 }
@@ -356,8 +368,20 @@ fn themes(text: &str) -> Vec<String> {
     out
 }
 
+/// `s`, at most `n` characters: one cut ends in "…".
 fn clip(s: &str, n: usize) -> String {
-    s.chars().take(n).collect()
+    if s.chars().nth(n).is_none() {
+        return s.to_string();
+    }
+    s.chars().take(n.saturating_sub(1)).chain(['…']).collect()
+}
+
+/// Notes in `cut` that `what` of `dataset` is longer than `n` characters and is cut.
+fn cut_note(cut: &mut Vec<String>, dataset: &str, what: &str, s: &str, n: usize) {
+    let len = s.chars().count();
+    if len > n && cut.len() < MAX_DATASETS {
+        cut.push(format!("{}: its {what} ({len} characters) is cut to {n}", clip(dataset, 120)));
+    }
 }
 
 /// A collection's licence: the page its `license` link names, and that link's title, if any.
@@ -534,6 +558,21 @@ mod tests {
         // Listed twice: one dataset.
         let twice = parse(&format!("# Dataset List\n## A\n{good}\n## B\n{good}\n")).unwrap();
         assert_eq!((twice.datasets, twice.entries.len()), (2, 1));
+        assert!(c.cut.is_empty() && twice.cut.is_empty());
+        // Text too long is cut, said where and by how much, and its name ends in "…"; its keywords
+        // are all searched still.
+        let long = format!(
+            "{}\n* keywords: {} lastword",
+            good.replace("* title: Test", &format!("* title: {}", "T".repeat(170))),
+            "w ".repeat(400)
+        );
+        let c = one(&long);
+        assert_eq!(c.entries[0].name.chars().count(), 160);
+        assert!(c.entries[0].name.ends_with('…'));
+        assert!(c.entries[0].has_words(&["lastword".to_string()]));
+        assert_eq!(c.cut, ["JAXA.Test_daily: its title (170 characters) is cut to 160"]);
+        let c = one(&format!("{good}\n* description: {}", "d".repeat(MAX_FIELD + 5)));
+        assert_eq!(c.cut, [format!("A dataset: its description ({} characters) is cut to {MAX_FIELD}", MAX_FIELD + 5)]);
     }
 
     /// A collection's licence: its license link, else an SPDX id; JAXA's collections are told

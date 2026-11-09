@@ -997,7 +997,10 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                     Some((r[0], r[1]))
                 }
                 // Classes drawn in their own colours take no range.
-                Ok(Sample::Classes) => None,
+                Ok(Sample::Classes) => {
+                    s.warn(format!("{collection}: the {asset} files are classes drawn in their own colours, so no range is set for them"));
+                    None
+                }
                 Ok(Sample::Empty) => {
                     s.warn(format!("{collection}: the sample of the {asset} files holds no values to set a range by, so each file is stretched on its own"));
                     None

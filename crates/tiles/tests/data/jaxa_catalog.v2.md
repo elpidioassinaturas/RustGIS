@@ -240,7 +240,7 @@ The explanation of each parameter is as follows:
 * id: JAXA.EORC_GSMaP_standard.Gauge.00Z-23Z.v6_half-monthly-normal
 * collection: https://s3.ap-northeast-1.wasabisys.com/je-pds/cog/v1/JAXA.EORC_GSMaP_standard.Gauge.00Z-23Z.v6_half-monthly-normal/collection.json
 * title: Precipitation Rate (Half-monthly-normal)
-* description: GSMaP has multi-satellite global precipitation map under the Global Precipitation Measurement (GPM) Mission, by using Dual-frequency Precipitation Radar (DPR) onboard GPM core satellites, other GPM constellation satellites, and Geostationary satellites. 
+* description: GSMaP has multi-satellite global precipitation map under the Global Precipitation Measurement (GPM) Mission, by using Dual-frequency Precipitation Radar (DPR) onboard GPM core satellites, other GPM constellation satellites, and Geostationary satellites.
 * keywords: Precipitation, DPR, GPM, NASA, JAXA
 * dataProvider: JAXA EORC
 * bands: PRECIP_2012_2021
@@ -272,7 +272,7 @@ The explanation of each parameter is as follows:
 * id: JAXA.EORC_GSMaP_standard.Gauge.00Z-23Z.v6_monthly-normal
 * collection: https://s3.ap-northeast-1.wasabisys.com/je-pds/cog/v1/JAXA.EORC_GSMaP_standard.Gauge.00Z-23Z.v6_monthly-normal/collection.json
 * title: Precipitation Rate (Monthly-normal)
-* description: GSMaP has multi-satellite global precipitation map under the Global Precipitation Measurement (GPM) Mission, by using Dual-frequency Precipitation Radar (DPR) onboard GPM core satellites, other GPM constellation satellites, and Geostationary satellites. 
+* description: GSMaP has multi-satellite global precipitation map under the Global Precipitation Measurement (GPM) Mission, by using Dual-frequency Precipitation Radar (DPR) onboard GPM core satellites, other GPM constellation satellites, and Geostationary satellites.
 * keywords: Precipitation, DPR, GPM, NASA, JAXA
 * dataProvider: JAXA EORC
 * bands: PRECIP_2012_2021

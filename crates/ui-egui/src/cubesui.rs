@@ -183,6 +183,13 @@ fn jaxa_line(ui: &mut egui::Ui, t: &crate::theme::Tokens) {
             );
             let why: Vec<String> = c.left_out.iter().map(|l| format!("{} ({}): {}", l.title, l.id, l.why)).collect();
             ui.label(egui::RichText::new(text).small().color(t.text_dim)).on_hover_text(why.join("\n"));
+            if !c.cut.is_empty() {
+                let text = crate::i18n::fmt(
+                    "JAXA Earth: {n} of its catalog's texts are too long and are cut (hover for which)",
+                    &[("n", &c.cut.len().to_string())],
+                );
+                ui.label(egui::RichText::new(text).small().color(t.text_dim)).on_hover_text(c.cut.join("\n"));
+            }
         }
         jaxa::Status::Failed(why) => {
             ui.horizontal_wrapped(|ui| {

@@ -59,6 +59,7 @@ fn jaxa_status() -> Value {
         jaxa::Status::Read(c) => json!({
             "state": "read", "cubes": c.entries.len(), "datasets": c.datasets,
             "leftOut": c.left_out.iter().map(|l| json!({"id": l.id, "title": l.title, "why": l.why})).collect::<Vec<_>>(),
+            "cut": c.cut,
         }),
         jaxa::Status::Failed(e) => json!({"state": "failed", "error": e}),
     }
