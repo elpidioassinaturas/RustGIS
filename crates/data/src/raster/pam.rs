@@ -112,8 +112,8 @@ fn is_wavelength_item(name: &str) -> bool {
     name.eq_ignore_ascii_case(WAVELENGTH_UNITS) || WAVELENGTH_ITEMS.iter().any(|w| name.eq_ignore_ascii_case(w))
 }
 
-/// A wavelength item's value in nanometres: `None` when it isn't a positive number, or its unit
-/// isn't a length this knows. `CENTRAL_WAVELENGTH_UM` is in micrometres by its name; another item
+/// A wavelength item's value in nanometres: `None` when it isn't a length from 1 nm to 1 m (no
+/// sensor's band lies outside), or its unit isn't a length this knows. `CENTRAL_WAVELENGTH_UM` is in micrometres by its name; another item
 /// is in the unit `units` gives (nanometres or micrometres, as ENVI and others spell them). With no
 /// unit (or ENVI's `Unknown`), a value under 100 is in micrometres and any other in nanometres:
 /// imaging sensors see from about 0.3 to 15 µm (300 to 15,000 nm), so the two never meet.
@@ -121,10 +121,12 @@ pub fn wavelength_nm(item: &str, text: &str, units: Option<&str>) -> Option<f64>
     let v = text.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0)?;
     // Micrometres in nanometres, to a millionth of one: 0.665 µm is 665 nm, not 665.0000000000001.
     let nm = |um: f64| (um * 1e9).round() / 1e6;
-    // The result is checked too: a huge micrometre value overflows, a tiny one rounds to 0.
-    let positive = |w: f64| Some(w).filter(|w| w.is_finite() && *w > 0.0);
+    // The result is checked: a huge micrometre value overflows, a tiny one rounds to 0, and a
+    // length past those a sensor sees would be lost when written in micrometres or stretch the
+    // chart's axis.
+    let in_range = |w: f64| Some(w).filter(|w| (1.0..=1e9).contains(w));
     if item.eq_ignore_ascii_case(CENTRAL_WAVELENGTH_UM) {
-        return positive(nm(v));
+        return in_range(nm(v));
     }
     let unit = units.map(|u| u.trim().to_lowercase()).unwrap_or_default();
     let micro = match unit.as_str() {
@@ -133,7 +135,7 @@ pub fn wavelength_nm(item: &str, text: &str, units: Option<&str>) -> Option<f64>
         "um" | "\u{b5}m" | "\u{3bc}m" | "micrometer" | "micrometers" | "micrometre" | "micrometres" | "micron" | "microns" => true,
         _ => return None,
     };
-    positive(if micro { nm(v) } else { v })
+    in_range(if micro { nm(v) } else { v })
 }
 
 /// Keeps a band's first wavelength in `slot`: `true` when `nm` is another one, left out (the
@@ -350,7 +352,7 @@ fn parse_sidecar(text: &str) -> Result<Pam, String> {
     }
     if odd_wavelengths > 0 {
         pam.lost.push(format!(
-            "{odd_wavelengths} wavelength(s) that aren't a positive length in nanometres or micrometres, or for no band, left out"
+            "{odd_wavelengths} wavelength(s) that aren't a length from 1 nm to 1 m in nanometres or micrometres, or for no band, left out"
         ));
     }
     if other_wavelengths > 0 {
@@ -495,7 +497,7 @@ pub fn parse_gdal_metadata(text: &str) -> Option<Pam> {
     }
     if odd_wavelengths > 0 {
         pam.lost.push(format!(
-            "{odd_wavelengths} wavelength item(s) that aren't a positive length in nanometres or micrometres, or for no band from 1 to {MAX_BANDS}, left out"
+            "{odd_wavelengths} wavelength item(s) that aren't a length from 1 nm to 1 m in nanometres or micrometres, or for no band from 1 to {MAX_BANDS}, left out"
         ));
     }
     if other_wavelengths > 0 {
@@ -993,10 +995,19 @@ mod tests {
             }
             assert_eq!(wavelength_nm(CENTRAL_WAVELENGTH_UM, v, None), None, "{v}");
         }
-        let xml = r#"<GDALMetadata><Item name="CENTRAL_WAVELENGTH_UM" sample="0">1e300</Item><Item name="wavelength" sample="0">842</Item></GDALMetadata>"#;
+        // Lengths past 1 nm to 1 m are left out: written in micrometres a tiny one would round
+        // to 0, and a huge one stretches the chart.
+        for v in ["1e-7", "0.5", "1e300", "2e9"] {
+            assert_eq!(wavelength_nm("wavelength", v, Some("nm")), None, "{v} nm");
+        }
+        assert_eq!(wavelength_nm("wavelength", "1", Some("nm")), Some(1.0));
+        assert_eq!(wavelength_nm("wavelength", "1e9", Some("nm")), Some(1e9));
+        assert_eq!(wavelength_nm("wavelength", "1e-7", Some("micrometers")), None, "0.0001 nm");
+        let xml = r#"<GDALMetadata><Item name="CENTRAL_WAVELENGTH_UM" sample="0">1e300</Item><Item name="wavelength" sample="0">842</Item><Item name="wavelength_units" sample="1">nm</Item><Item name="wavelength" sample="1">1e-7</Item></GDALMetadata>"#;
         let pam = parse_gdal_metadata(xml).unwrap();
         assert_eq!(pam.band(1).and_then(|b| b.wavelength), Some(842.0));
-        assert!(pam.lost[0].starts_with("1 wavelength item(s)"), "{:?}", pam.lost);
+        assert_eq!(pam.band(2).and_then(|b| b.wavelength), None);
+        assert!(pam.lost[0].starts_with("2 wavelength item(s) that aren't a length from 1 nm to 1 m"), "{:?}", pam.lost);
     }
 
     /// A sidecar's band takes the first item that is a length, as the metadata tag's: one that
@@ -1024,10 +1035,10 @@ mod tests {
         assert_eq!(twice.band(1).and_then(|b| b.wavelength), Some(1.6));
         assert_eq!(twice.lost, ["1 other wavelength unit(s) for a band or the dataset left out (the first is kept)"]);
         // An empty unit names none, in the sidecar and the metadata tag alike: the next is read.
-        let sidecar = parse(r#"<PAMDataset><PAMRasterBand band="1"><Metadata><MDI key="wavelength_units"/><MDI key="wavelength_units">nm</MDI><MDI key="wavelength">0.665</MDI></Metadata></PAMRasterBand></PAMDataset>"#).unwrap();
-        let tag = parse_gdal_metadata(r#"<GDALMetadata><Item name="wavelength_units" sample="0"> </Item><Item name="wavelength_units" sample="0">nm</Item><Item name="wavelength" sample="0">0.665</Item></GDALMetadata>"#).unwrap();
+        let sidecar = parse(r#"<PAMDataset><PAMRasterBand band="1"><Metadata><MDI key="wavelength_units"/><MDI key="wavelength_units">nm</MDI><MDI key="wavelength">1.6</MDI></Metadata></PAMRasterBand></PAMDataset>"#).unwrap();
+        let tag = parse_gdal_metadata(r#"<GDALMetadata><Item name="wavelength_units" sample="0"> </Item><Item name="wavelength_units" sample="0">nm</Item><Item name="wavelength" sample="0">1.6</Item></GDALMetadata>"#).unwrap();
         for pam in [sidecar, tag] {
-            assert_eq!(pam.band(1).and_then(|b| b.wavelength), Some(0.665));
+            assert_eq!(pam.band(1).and_then(|b| b.wavelength), Some(1.6));
             assert!(pam.lost.is_empty(), "{:?}", pam.lost);
         }
         // Lengths half a thousandth of a nanometre apart are two.

@@ -87,6 +87,12 @@ fn source_of(app: &RustGisApp, layer: &str) -> Option<(usize, u32)> {
     app.session.map().layer_by_name(layer).map(|l| (app.session.project.active_map, l.id))
 }
 
+/// Whether the points were read on the raster the profile's name finds now.
+fn fresh(app: &RustGisApp) -> bool {
+    let sp = &app.workflow.spectral;
+    source_of(app, &sp.layer) == sp.source
+}
+
 /// The rasters a profile can be read on: those of two bands or more, by name, and how many
 /// more are left out because an earlier layer has their name (commands find a layer by its
 /// name, so they would read that one).
@@ -176,6 +182,12 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     ui.add_space(6.0);
     ui.label(egui::RichText::new(tl!("Spectral profile")).font(semibold(12.5)));
     ui.add_space(2.0);
+    // Points read on a raster that has since gone (removed, added again, on another map) are
+    // dropped, even when no raster is left to choose.
+    let sp = &app.workflow.spectral;
+    if !sp.samples.is_empty() && !fresh(app) {
+        app.workflow.spectral.clear();
+    }
     let (rasters, shadowed) = multiband(app);
     if shadowed > 0 {
         let n = shadowed.to_string();
@@ -209,10 +221,8 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         })
         .response
         .on_hover_text(tl!("Layer"));
-    // Points on another raster aren't comparable with this one's, nor those on a raster of its
-    // name that has since gone (another map, the layer added again).
-    let sp = &app.workflow.spectral;
-    if !sp.samples.is_empty() && (sp.layer != app.workflow.layer || source_of(app, &sp.layer) != sp.source) {
+    // Points on another raster aren't comparable with this one's.
+    if !app.workflow.spectral.samples.is_empty() && app.workflow.spectral.layer != app.workflow.layer {
         app.workflow.spectral.clear();
     }
     // Points clicked on the map while picking: each is read, and picking goes on.
@@ -288,6 +298,8 @@ pub fn section(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     if let Some(i) = remove {
         app.workflow.spectral.samples.remove(i);
+        // What the last point added said is no longer about these points.
+        app.workflow.spectral.message = None;
     }
 }
 
@@ -416,7 +428,8 @@ pub fn csv(sp: &Spectral) -> String {
 
 /// The points' numbered markers on the map, in their colours, while the section shows.
 pub fn paint(app: &RustGisApp, p: &egui::Painter, t: &Tokens, to_screen: impl Fn(rustgis_engine::geom::Coord) -> Option<Pos2>) {
-    if app.ui.right != Some(crate::RightPane::Workflows) || app.workflow.section != SECTION {
+    // Points read on a raster since gone aren't drawn on the one there now.
+    if app.ui.right != Some(crate::RightPane::Workflows) || app.workflow.section != SECTION || !fresh(app) {
         return;
     }
     for s in &app.workflow.spectral.samples {
@@ -547,6 +560,18 @@ mod tests {
         app.run("layer.addDataBytes", json!({"fileName": "scene.tif", "data": rgb_tiff_b64(false)})).unwrap();
         add_point(&mut app, "scene", rustgis_engine::geom::Coord::new(10.005, 44.995));
         assert_eq!(app.workflow.spectral.samples.len(), 1);
+        // The scene removed with no raster left: the section drops its points.
+        app.run("layer.remove", json!({"layer": "scene"})).unwrap();
+        assert!(!fresh(&app), "its points aren't drawn");
+        let mut h = egui_kittest::Harness::builder().allow_missing_glyphs().with_size(egui::vec2(420.0, 320.0)).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let t = crate::theme::Tokens::get(ui.ctx());
+                section(app, ui, &t);
+            },
+            app,
+        );
+        h.run_steps(1);
+        assert!(h.state().workflow.spectral.samples.is_empty());
     }
 
     /// Identify's pop-up offers the profile on a pixel of two bands or more, and its button opens

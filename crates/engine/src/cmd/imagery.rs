@@ -1768,12 +1768,29 @@ pub(crate) fn mosaic_work(s: &Session, p: &Value) -> Result<super::workflows::Wo
             format!("'{name}': band(s) {bands}")
         })
         .collect();
-    let extra = (!omitted.is_empty()).then(|| {
-        json!({"messages": [format!(
-            "{} image(s) have bands omitted from the {nb}-band mosaic: {}",
-            omitted.len(), omitted.join("; ")
-        )]})
-    });
+    let mut messages: Vec<String> = Vec::new();
+    if !omitted.is_empty() {
+        messages.push(format!("{} image(s) have bands omitted from the {nb}-band mosaic: {}", omitted.len(), omitted.join("; ")));
+    }
+    // A band's wavelength is the images' when they all give it the same one; else it has none,
+    // and that is said.
+    let mut differ = 0usize;
+    let wavelengths: Vec<Option<f64>> = (0..nb)
+        .map(|b| {
+            let mut each = imgs.iter().map(|r| r.bands.get(b).and_then(|band| band.wavelength));
+            let first = each.next().flatten();
+            if each.all(|w| w == first) {
+                first
+            } else {
+                differ += 1;
+                None
+            }
+        })
+        .collect();
+    if differ > 0 {
+        messages.push(format!("{differ} band(s) the images give different wavelengths have none in the mosaic"));
+    }
+    let extra = (!messages.is_empty()).then(|| json!({ "messages": messages }));
     Ok(Box::new(move || {
         let refs: Vec<&Raster> = imgs.iter().map(|r| &**r).collect();
         let mut bands = rasterops::mosaic(&refs, &e, cell, (cols, rows), nb, w.method == "mean")?;
@@ -1794,9 +1811,10 @@ pub(crate) fn mosaic_work(s: &Session, p: &Value) -> Result<super::workflows::Wo
         }
         let gt = GeoTransform { origin_x: e.min_x, origin_y: e.max_y, pixel_width: cell, pixel_height: -cell };
         let suffix = if w.kind == "reality" { "DSM" } else { "Orthomosaic" };
-        let out =
+        let mut out =
             Raster::new(format!("{} {suffix}", w.name), cols as u32, rows as u32, bands, gt, Crs::LonLat, Some(NODATA as f64), color, dt)
                 .map_err(|e| e.to_string())?;
+        out.bands.iter_mut().zip(&wavelengths).for_each(|(band, w)| band.wavelength = *w);
         super::workflows::made(out, extra)
     }))
 }
