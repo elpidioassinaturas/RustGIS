@@ -667,6 +667,9 @@ pub struct Example {
     pub sparse: bool,
     /// Without overviews: the full image alone (a file saved without them).
     pub no_overviews: bool,
+    /// Without `classes`: band `b`'s wavelength, 400 + 100 b nanometres, in GDAL's metadata
+    /// (its only item there).
+    pub wavelengths: bool,
 }
 
 impl Default for Example {
@@ -688,6 +691,7 @@ impl Default for Example {
             no_table: false,
             sparse: false,
             no_overviews: false,
+            wavelengths: false,
         }
     }
 }
@@ -826,6 +830,9 @@ pub fn example_with(e: &Example) -> Vec<u8> {
                     r#"<GDALMetadata><Item name="CLASS_3">Forest Formation</Item><Item name="CLASS_15">Pasture</Item></GDALMetadata>"#
                 };
                 t.push((42112, V::A([xml.as_bytes(), b"\0"].concat())));
+            } else if e.wavelengths {
+                let items: String = (0..nb).map(|b| format!(r#"<Item name="wavelength" sample="{b}">{}</Item>"#, 400 + 100 * b)).collect();
+                t.push((42112, V::A([format!("<GDALMetadata>{items}</GDALMetadata>").as_bytes(), b"\0"].concat())));
             }
         }
         if e.int8 {
