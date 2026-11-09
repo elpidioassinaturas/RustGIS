@@ -945,6 +945,10 @@ impl Session {
         let waiting = std::mem::take(&mut self.plugin_retries);
         self.url_waits.keep_only(&waiting);
         self.plugin_retries = waiting;
+        // The views of requests no longer queued, being made or kept for a command.
+        let queued: Vec<u64> = self.url_requests.iter().filter_map(|q| q.params().get("request").and_then(Value::as_u64)).collect();
+        let waits = &self.url_waits;
+        self.window_views.retain(|n, _| waits.has(*n) || queued.contains(n));
         ran
     }
 }

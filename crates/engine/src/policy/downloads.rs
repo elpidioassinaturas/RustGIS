@@ -239,6 +239,7 @@ impl Session {
             .iter()
             .find(|q| {
                 crate::cmd::plugins::fetch::same_request(&q.params, &asked)
+                    && q.view == self.window_view
                     && self.same_url_caller(&q.authority, &c)
                     && self.check_continuation(&q.authority).is_ok()
             })
@@ -260,7 +261,9 @@ impl Session {
                     self.url_waits.owner(n).is_some_and(|owner| self.same_url_caller(owner, &c) && self.check_continuation(owner).is_ok())
                 })
             })
-            .filter(|n| !self.url_waits.taken_away(*n, &self.project));
+            .filter(|n| !self.url_waits.taken_away(*n, &self.project))
+            // A window of the view is the one asked in the same view: another is read again.
+            .filter(|n| self.window_views.get(n).copied() == self.window_view);
         let number = match given.or(waiting).or(made) {
             Some(n) => n,
             None => {
@@ -281,6 +284,9 @@ impl Session {
             let key = self.next_pending;
             self.policy.work.queued.insert(key, Queued { c: Arc::downgrade(&c), import, consumed: Arc::new(AtomicBool::new(false)) });
             let view = self.window_view.take();
+            if let Some(v) = view {
+                self.window_views.insert(number, v);
+            }
             self.url_requests.push(UrlRequest { key, params, authority: c, view });
         }
         if !import

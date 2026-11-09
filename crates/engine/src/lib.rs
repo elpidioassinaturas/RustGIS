@@ -832,6 +832,9 @@ pub struct Session {
     pub(crate) url_requests: Vec<UrlRequest>,
     /// The view's box a window request being queued keeps ([`UrlRequest::view_asked`]).
     pub(crate) window_view: Option<[f64; 4]>,
+    /// The view's boxes of the window requests made, by their numbers: a request for the view
+    /// joins one queued or being made only when it was asked in the same view.
+    pub(crate) window_views: std::collections::BTreeMap<u64, [f64; 4]>,
     /// Set by [`Session::request_url`] for [`Session::guarded`]: the command running changed
     /// nothing, it only left a request (a plugin's own answer can't claim that).
     request_only: bool,
@@ -1166,6 +1169,7 @@ impl Session {
             landed_windows: Vec::new(),
             url_requests: Vec::new(),
             window_view: None,
+            window_views: Default::default(),
             file_outputs: Vec::new(),
             #[cfg(test)]
             queue_gp_files: false,

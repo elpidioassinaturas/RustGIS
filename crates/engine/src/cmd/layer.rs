@@ -4396,20 +4396,22 @@ pub(crate) fn box_in_file_longitudes(x0: f64, x1: f64, fx0: f64, fx1: f64) -> Re
 fn window_box(s: &Session, p: &Value, seen: Option<[f64; 4]>) -> Result<[f64; 4], String> {
     const NEED: &str = "bbox is [west, south, east, north] in degrees, or \"view\"";
     let [w, so, e, n] = match p.get("bbox") {
-        // The view a request was asked in ([`crate::UrlRequest::view_asked`]).
-        Some(v) if is_view(Some(v)) && seen.is_some() => seen.unwrap_or_default(),
-        Some(v) if is_view(Some(v)) => {
-            let e = super::workspace::view_extent(s);
-            if e.is_empty() {
-                return Err("the map's extent isn't known; give bbox".into());
+        Some(v) if is_view(Some(v)) => match seen {
+            // The view a request was asked in ([`crate::UrlRequest::view_asked`]).
+            Some(b) => b,
+            None => {
+                let e = super::workspace::view_extent(s);
+                if e.is_empty() {
+                    return Err("the map's extent isn't known; give bbox".into());
+                }
+                // A view past 180° (across the antimeridian, or the world more than once) isn't
+                // cut to fit: what it shows past there would be left out.
+                if e.min_x < -180.0 || e.max_x > 180.0 {
+                    return Err("the view reaches past 180° of longitude; give bbox".into());
+                }
+                [e.min_x, e.min_y.max(-90.0), e.max_x, e.max_y.min(90.0)]
             }
-            // A view past 180° (across the antimeridian, or the world more than once) isn't cut
-            // to fit: what it shows past there would be left out.
-            if e.min_x < -180.0 || e.max_x > 180.0 {
-                return Err("the view reaches past 180° of longitude; give bbox".into());
-            }
-            [e.min_x, e.min_y.max(-90.0), e.max_x, e.max_y.min(90.0)]
-        }
+        },
         Some(Value::Array(a)) => {
             let v: Option<Vec<f64>> = a.iter().map(|x| x.as_f64().filter(|x| x.is_finite())).collect();
             match v.as_deref() {
