@@ -722,7 +722,12 @@ fn corner_fit_mm(corners: &[(f64, f64); 4], map: &Map, cam: &rustgis_map::Camera
         let (lat, lon) = (mix(tl.0, tr.0, br.0, bl.0), mix(tl.1, tr.1, br.1, bl.1));
         let at = map.to_map(Coord::new((lon + 540.0).rem_euclid(360.0) - 180.0, lat))?;
         let (x, y) = cam.try_to_screen(at, w, h)?;
-        worst = worst.max((x - u * w).hypot(y - t * h));
+        // `f64::max` ignores NaN: a sample that isn't a number is no fit.
+        let off = (x - u * w).hypot(y - t * h);
+        if !off.is_finite() {
+            return None;
+        }
+        worst = worst.max(off);
     }
     (worst.is_finite()).then_some(worst / PT_PER_MM)
 }
