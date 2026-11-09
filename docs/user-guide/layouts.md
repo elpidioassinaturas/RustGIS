@@ -302,9 +302,13 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   A PDF is also a GeoPDF: each map frame is georeferenced (an ISO 32000 geospatial viewport, the
   form GDAL, QGIS, Acrobat and Avenza read), with its map's coordinate system as WKT and its EPSG
   code when it has one, so a reader shows coordinates and measures in it, and GDAL or QGIS open the
-  page as a georeferenced raster. A tilted frame, one on the globe, and one with a corner off the
-  Earth aren't georeferenced, and the export says which. A frame in a projection with no WKT form
-  is georeferenced by its corners in longitude/latitude, approximate between them, and said.
+  page as a georeferenced raster. It carries coordinates only: no layers and no feature
+  attributes. A tilted frame, one on the globe, and one with a corner off the Earth aren't
+  georeferenced, and the export says which; such a frame over another carries no coordinates, so
+  a reader doesn't show the other's through it. A frame in a projection with no WKT form is
+  georeferenced by its corners in longitude/latitude when, between them, that puts every place
+  within 0.5 mm of where it is drawn, and left out otherwise. **Georeference PDF** in the layout's
+  Export group (`"georeference": false` for `layout.export`) leaves the coordinates out.
   In SVG each element is a group (an Inkscape layer) named after it: text stays text and rectangles,
   ellipses and lines stay shapes, and map frames and the other surrounds are kept as vectors as in a
   PDF (their labels as the letters' shapes, each run labelled with its text), so the page can be

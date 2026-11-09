@@ -593,21 +593,29 @@ fn frame_outline_lonlat(map: &Map, cam: &rustgis_map::Camera, w: f64, h: f64) ->
 /// The map frames of a page georeferenced for a PDF ([`frame_viewports`], #1191).
 #[derive(Debug, Default)]
 pub struct Georeferenced {
-    /// One for each visible frame that could be.
+    /// One for each visible frame, in drawing order: georeferenced, or with no measure for a frame
+    /// that couldn't be. None when no frame could be.
     pub viewports: Vec<crate::pdf::Viewport>,
     /// The frames that couldn't be, by id and name, with why.
     pub left_out: Vec<(u32, String, &'static str)>,
     /// The frames whose coordinate system can't be written as WKT (a grid shift, or a projection
-    /// WKT1 has no name for), by id and name: georeferenced by their corners in longitude/latitude,
-    /// so a reader is right at the corners and approximate between them.
+    /// WKT1 has no name for), by id and name:
+    /// georeferenced by their corners in longitude/latitude, which put every place of the frame
+    /// within [`MAX_CORNER_FIT_MM`] of where it is drawn.
     pub by_corners: Vec<(u32, String)>,
 }
+
+/// How far, on paper, a frame georeferenced by its corners in longitude/latitude may put a place
+/// from where the frame draws it: past it, the frame is left out (#1191).
+pub const MAX_CORNER_FIT_MM: f64 = 0.5;
 
 /// Each visible map frame of `layout` as a PDF viewport ([`crate::pdf::Viewport`]): its place on
 /// the page as a page drawn at `dpi` places it, its corners' latitude and longitude, and its
 /// map's coordinate system as WKT. A frame on the globe or tilted shows no flat map to measure
 /// on, so it is left out, as is one on another body than the Earth, one whose map is missing,
-/// one with a corner off the Earth and one across its projection's edge (the 180° meridian).
+/// one with a corner off the Earth, one across its projection's edge (the 180° meridian) and one
+/// whose system has no WKT and whose corners alone would misplace it. A frame left out keeps a
+/// viewport with no measure, so that a frame it covers doesn't show through.
 pub fn frame_viewports(layout: &Layout, maps: &[Map], dpi: f64) -> Georeferenced {
     let mut out = Georeferenced::default();
     // A frame is drawn from a whole pixel of the page ([`draw_page`]), whose pixels are stretched
@@ -616,11 +624,13 @@ pub fn frame_viewports(layout: &Layout, maps: &[Map], dpi: f64) -> Georeferenced
     let (sx, sy) = (layout.width / f64::from(wpx.max(1)), layout.height / f64::from(hpx.max(1)));
     for e in layout.elements.iter().filter(|e| e.visible) {
         let ElementKind::MapFrame { map, center, scale, bearing, pitch, .. } = &e.kind else { continue };
+        let placed = [(e.x * k).round() * sx, (e.y * k).round() * sy, e.w * k * sx, e.h * k * sy];
+        let bare = || crate::pdf::Viewport { name: e.name.clone(), rect_mm: placed, measure: None };
         let Some(m) = map_index(maps, map).and_then(|i| maps.get(i)) else {
             out.left_out.push((e.id, e.name.clone(), "its map is missing"));
+            out.viewports.push(bare());
             continue;
         };
-        let placed = [(e.x * k).round() * sx, (e.y * k).round() * sy, e.w * k * sx, e.h * k * sy];
         match frame_viewport(e, placed, m, rustgis_map::layout::frame_camera(m, *center, *scale, *bearing, *pitch)) {
             Ok((v, exact)) => {
                 if !exact {
@@ -628,10 +638,36 @@ pub fn frame_viewports(layout: &Layout, maps: &[Map], dpi: f64) -> Georeferenced
                 }
                 out.viewports.push(v);
             }
-            Err(why) => out.left_out.push((e.id, e.name.clone(), why)),
+            Err(why) => {
+                out.left_out.push((e.id, e.name.clone(), why));
+                out.viewports.push(bare());
+            }
         }
     }
+    // Only measureless viewports: nothing to locate in, so none.
+    if out.viewports.iter().all(|v| v.measure.is_none()) {
+        out.viewports.clear();
+    }
     out
+}
+
+/// How far, in millimetres on paper, a reader that fits a frame's corners in longitude/latitude
+/// (`corners`, latitude then longitude, clockwise from the top-left) puts the places at its
+/// centre and its edges' midpoints from where the frame, `w` × `h` points seen by `cam`, draws
+/// them: the worst of the five, the fit being exact at the corners. `None` when one of them
+/// isn't on the map.
+fn corner_fit_mm(corners: &[(f64, f64); 4], map: &Map, cam: &rustgis_map::Camera, w: f64, h: f64) -> Option<f64> {
+    let [tl, tr, br, bl] = *corners;
+    let mut worst: f64 = 0.0;
+    for (u, t) in [(0.5, 0.5), (0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0, 0.5)] {
+        // Between the corners, as the unit square's (`/LPTS`) is filled: bilinearly.
+        let mix = |a: f64, b: f64, c: f64, d: f64| (1.0 - u) * (1.0 - t) * a + u * (1.0 - t) * b + u * t * c + (1.0 - u) * t * d;
+        let (lat, lon) = (mix(tl.0, tr.0, br.0, bl.0), mix(tl.1, tr.1, br.1, bl.1));
+        let at = map.to_map(Coord::new((lon + 540.0).rem_euclid(360.0) - 180.0, lat))?;
+        let (x, y) = cam.try_to_screen(at, w, h)?;
+        worst = worst.max((x - u * w).hypot(y - t * h));
+    }
+    (worst.is_finite()).then_some(worst / PT_PER_MM)
 }
 
 /// Frame `e` of `map`, placed at `placed` (millimetres: x, y, width, height) and seen by `cam`, as
@@ -701,10 +737,21 @@ fn frame_viewport(
             for c in &mut corners {
                 c.1 = first + ((c.1 - first + 540.0).rem_euclid(360.0) - 180.0);
             }
+            // A reader is right at the corners only: the frame is written if, between them, it
+            // puts no place more than half a millimetre on paper from where the frame draws it.
+            match corner_fit_mm(&corners, map, &cam, w, h) {
+                Some(off) if off <= MAX_CORNER_FIT_MM => {}
+                _ => {
+                    return Err(
+                        "its coordinate system can't be written as WKT, and its corners alone would put places more than 0.5 mm off",
+                    );
+                }
+            }
             (wkt::to_wkt(crs::Crs::LonLat).ok_or("its projection can't be read")?, Some(4326))
         }
     };
-    let viewport = crate::pdf::Viewport { name: e.name.clone(), rect_mm: placed, corners, wkt, projected: exact, epsg };
+    let measure = crate::pdf::GeoMeasure { corners, wkt, projected: exact, epsg };
+    let viewport = crate::pdf::Viewport { name: e.name.clone(), rect_mm: placed, measure: Some(measure) };
     Ok((viewport, exact))
 }
 

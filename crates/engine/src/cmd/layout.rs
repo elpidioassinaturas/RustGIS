@@ -123,7 +123,7 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"layout"?}"#),
         C::new("layout.export", "Export Layout", "Publish › Output", |s, p| super::exports::write_here(s, p, "layout.export")).inputs(layout_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
-            .params(r#"{"layout"?, "path": "*.png|*.pdf|*.svg" (PNG/SVG: current page; SVG: each element a group of its own; text and shapes as SVG, map frames and surrounds as vectors, rasters and tiles in them as pictures at dpi), "dpi"?: 72..600, "allPages"?: bool (PDF only; default true: every map series page, up to 500; false: the current page)}"#),
+            .params(r#"{"layout"?, "path": "*.png|*.pdf|*.svg" (PNG/SVG: current page; SVG: each element a group of its own; text and shapes as SVG, map frames and surrounds as vectors, rasters and tiles in them as pictures at dpi), "dpi"?: 72..600, "allPages"?: bool (PDF only; default true: every map series page, up to 500; false: the current page), "georeference"?: bool (PDF only; default true: map frames carry their coordinates, a GeoPDF; false: none)}"#),
         C::new("layout.save", "Save Layout File", "Publish › Save As", |s, p| {
             let path = ps(p, "path").ok_or("path is required")?;
             let l = active(s, p)?.clone();
@@ -3491,9 +3491,14 @@ fn named_fonts_unread(layout: &Layout) -> Option<&'static str> {
     )
 }
 
-/// Layout `li` as a PDF (kept as vectors; every map series page when `all`) or a PNG of the
-/// current page, at `dpi`.
+/// Layout `li` as a PDF (kept as vectors; every map series page when `all`; its map frames
+/// georeferenced) or a PNG of the current page, at `dpi`.
 pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) -> Result<Vec<u8>, String> {
+    layout_bytes_with(s, li, pdf, dpi, all, true)
+}
+
+/// [`layout_bytes`], a PDF's map frames georeferenced only when `georeference` (#1191).
+pub fn layout_bytes_with(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool, georeference: bool) -> Result<Vec<u8>, String> {
     let saved = s.project.layouts.get(li).ok_or("no layout")?.clone();
     if let Some(note) = named_fonts_unread(&saved) {
         s.warn(note);
@@ -3546,7 +3551,11 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
             if pdf {
                 let (w, h) = (layout.width, layout.height);
                 // Where its map frames show, for readers to locate and measure in: a GeoPDF (#1191).
-                let geo = rustgis_render::layout::frame_viewports(layout, &s.project.maps, dpi);
+                let geo = if georeference {
+                    rustgis_render::layout::frame_viewports(layout, &s.project.maps, dpi)
+                } else {
+                    rustgis_render::layout::Georeferenced::default()
+                };
                 left_out.extend(geo.left_out);
                 by_corners.extend(geo.by_corners);
                 let (drawing, pictured) = rustgis_render::layout::render_drawing(layout, &mut s.project.maps, dpi, &info)
@@ -3592,7 +3601,8 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
 /// Says which map frames a PDF doesn't georeference, with why, and which it georeferences by their
 /// corners only (#1191): one notice for each, with a count. A frame is counted once however many
 /// pages of a series it is on (by its id: two frames sharing a name are two), with the first
-/// page's reason.
+/// page's reason. Information, not warnings: nothing wrong is written (a frame left out carries no
+/// coordinates, and one placed by its corners is checked to within half a millimetre).
 pub(crate) fn georeference_notices(s: &mut Session, left_out: &[(u32, String, &'static str)], by_corners: &[(u32, String)]) {
     let listed = |items: Vec<String>| {
         let more = items.len().saturating_sub(10);
@@ -3616,7 +3626,7 @@ pub(crate) fn georeference_notices(s: &mut Session, left_out: &[(u32, String, &'
         .collect();
     if !out.is_empty() {
         let n = out.len();
-        s.warn(format!("The PDF doesn't georeference {n} map frame{} ({})", plural(n), listed(out)));
+        s.notify(format!("The PDF doesn't georeference {n} map frame{} ({})", plural(n), listed(out)), false);
     }
     let mut seen = Vec::new();
     let corners: Vec<String> = by_corners
@@ -3631,11 +3641,14 @@ pub(crate) fn georeference_notices(s: &mut Session, left_out: &[(u32, String, &'
         .collect();
     if !corners.is_empty() {
         let n = corners.len();
-        s.warn(format!(
-            "The PDF georeferences {n} map frame{} by its corners in longitude/latitude, as its coordinate system can't be written as WKT (a grid shift, or a projection WKT1 has no name for): positions between the corners are approximate ({})",
-            plural(n),
-            listed(corners)
-        ));
+        s.notify(
+            format!(
+                "The PDF georeferences {n} map frame{} by its corners in longitude/latitude, as its coordinate system can't be written as WKT: between them it puts places within 0.5 mm of where they are drawn ({})",
+                plural(n),
+                listed(corners)
+            ),
+            false,
+        );
     }
 }
 
@@ -3688,7 +3701,7 @@ pub(crate) fn export_work(s: &Session, p: &Value) -> Result<super::exports::Work
     if !pdf && !svg && !lower.ends_with(".png") {
         return Err("export to a .png, .pdf or .svg file".into());
     }
-    let (dpi, all) = (f(p, "dpi").unwrap_or(150.0), b(p, "allPages").unwrap_or(true));
+    let (dpi, all, georeference) = (f(p, "dpi").unwrap_or(150.0), b(p, "allPages").unwrap_or(true), b(p, "georeference").unwrap_or(true));
     let mut project = s.project.clone();
     for m in &mut project.maps {
         m.detach_reads();
@@ -3696,7 +3709,11 @@ pub(crate) fn export_work(s: &Session, p: &Value) -> Result<super::exports::Work
     Ok(Box::new(move || {
         let mut copy = Session::new(project);
         let written = (|| {
-            let bytes = if svg { layout_svg(&mut copy, li, dpi)?.into_bytes() } else { layout_bytes(&mut copy, li, pdf, dpi, all)? };
+            let bytes = if svg {
+                layout_svg(&mut copy, li, dpi)?.into_bytes()
+            } else {
+                layout_bytes_with(&mut copy, li, pdf, dpi, all, georeference)?
+            };
             rustgis_data::progress::check().map_err(|e| e.to_string())?;
             rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
             Ok(json!({"path": path, "bytes": bytes.len()}))
