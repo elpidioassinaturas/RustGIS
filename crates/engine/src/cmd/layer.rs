@@ -3261,14 +3261,25 @@ fn add_url_as_given(s: &mut Session, p: &Value) -> CmdResult {
         return Err(format!("{url}: \"cellSize\" goes with \"bbox\": give a box, or leave it out"));
     }
     if window {
+        // The view a request was asked in is the session's to keep, not a caller's to give.
+        let mut own = p.clone();
+        if let Some(o) = own.as_object_mut() {
+            o.remove(VIEW_ASKED);
+        }
+        let p = &own;
         window_checks(p, url, scan)?;
         // A plugin's command run by the app leaves what would wait to the app, off the frame
         // ([`read_cog_window`]); a box that can't be read is refused now, while the command runs.
         #[cfg(not(target_arch = "wasm32"))]
         if s.leave_downloads {
-            window_settled(s, p, url)?;
+            let settled = window_settled(s, p, url)?;
             let mut asked = p.clone();
             asked["url"] = json!(url);
+            // `"view"` is the view now: the app reads the window on a later frame, and a command
+            // run again after a download sees the view it first ran with only while it runs.
+            if is_view(p.get("bbox")) {
+                asked[VIEW_ASKED] = json!(settled.bbox);
+            }
             return s.request_url(&asked);
         }
         return add_cog_window(s, p, url);
@@ -3998,6 +4009,13 @@ pub struct WindowAsked {
     name: Option<String>,
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+impl WindowAsked {
+    pub(crate) fn bbox(&self) -> [f64; 4] {
+        self.bbox
+    }
+}
+
 /// A window read by [`read_cog_window`], waiting to be added to the project: its raster made and
 /// its GeoTIFF written, so that adding it holds no frame for long.
 #[cfg(not(target_arch = "wasm32"))]
@@ -4375,8 +4393,17 @@ pub(crate) fn box_in_file_longitudes(x0: f64, x1: f64, fx0: f64, fx1: f64) -> Re
 #[cfg(not(target_arch = "wasm32"))]
 fn window_box(s: &Session, p: &Value) -> Result<[f64; 4], String> {
     const NEED: &str = "bbox is [west, south, east, north] in degrees, or \"view\"";
+    let seen = p.get(VIEW_ASKED).and_then(Value::as_array).filter(|_| is_view(p.get("bbox")));
     let [w, so, e, n] = match p.get("bbox") {
-        Some(Value::String(v)) if v.trim().eq_ignore_ascii_case("view") => {
+        // The view a request was made in (`add`, above), checked as a box given.
+        Some(_) if seen.is_some() => {
+            let v: Option<Vec<f64>> = seen.into_iter().flatten().map(|x| x.as_f64().filter(|x| x.is_finite())).collect();
+            match v.as_deref() {
+                Some([w, so, e, n]) => [*w, *so, *e, *n],
+                _ => return Err(NEED.into()),
+            }
+        }
+        Some(v) if is_view(Some(v)) => {
             let e = super::workspace::view_extent(s);
             if e.is_empty() {
                 return Err("the map's extent isn't known; give bbox".into());
@@ -4399,6 +4426,14 @@ fn window_box(s: &Session, p: &Value) -> Result<[f64; 4], String> {
     };
     let (lon, lat) = (|x: f64| (-180.0..=180.0).contains(&x), |y: f64| (-90.0..=90.0).contains(&y));
     if w < e && so < n && lon(w) && lon(e) && lat(so) && lat(n) { Ok([w, so, e, n]) } else { Err(NEED.into()) }
+}
+
+/// Where a window request left to the app keeps the box `"bbox": "view"` was when it was asked for.
+const VIEW_ASKED: &str = "viewAsked";
+
+/// `"bbox": "view"`, in any case or spacing.
+fn is_view(bbox: Option<&Value>) -> bool {
+    bbox.and_then(Value::as_str).is_some_and(|v| v.trim().eq_ignore_ascii_case("view"))
 }
 
 /// A GeoTIFF's name from its address: the file name without its extension, or for a dated

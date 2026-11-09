@@ -30526,6 +30526,33 @@ fn a_windows_bands_are_started_within_its_wait() {
     assert_eq!(e, "2 of 4 bands read in 5 minutes, so the window is given up: take a smaller box or a larger cellSize");
 }
 
+/// A plugin's command asking for the view's window is read for the view it was asked in, though the
+/// app reads it on a later frame, when the map may show another (#1330): a command run again after
+/// a download sees the view it first ran with only while it runs.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_window_asked_for_the_view_keeps_the_view_it_was_asked_in() {
+    use crate::cmd::layer::window_asked;
+    let mut s = world();
+    plugin("eng-window-view", &["edit", "network"]);
+    s.run("map.zoomToExtent", &json!({"extent": [10.0, 45.0, 11.0, 46.0]})).unwrap();
+    let seen = crate::cmd::workspace::view_extent(&s);
+    let p = json!({"op": "layer.addUrl", "params": {"url": "https://x.org/scene.tif", "bbox": "view", "viewAsked": [0, 0, 1, 1]}});
+    s.run_leaving_downloads("plugin:eng-window-view/f", &p).unwrap();
+    let asked = s.take_url_requests();
+    assert_eq!(asked.len(), 1);
+    s.run("map.zoomToExtent", &json!({"extent": [-50.0, -20.0, -40.0, -10.0]})).unwrap();
+    let read = window_asked(&s, asked[0].params()).unwrap().bbox();
+    let want = [seen.min_x, seen.min_y, seen.max_x, seen.max_y];
+    assert!(read.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-9), "{read:?} {want:?}");
+    // What the request says to read is the box it was asked in, not one a caller gave.
+    assert_eq!(asked[0].params()["bbox"], "view");
+    // A box asked for now is the view now.
+    let now = crate::cmd::workspace::view_extent(&s);
+    let read = window_asked(&s, &json!({"url": "https://x.org/scene.tif", "bbox": "view"})).unwrap().bbox();
+    assert!((read[0] - now.min_x).abs() < 1e-9 && (read[3] - now.max_y).abs() < 1e-9, "{read:?}");
+}
+
 /// A plugin's command asking for a window runs again once the app has read it and added it, and
 /// its `layer.addUrl` then answers the raster added (#1330): the window it lands with is the one
 /// the command asked for, so its claim takes it.
