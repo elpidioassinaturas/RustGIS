@@ -3658,7 +3658,7 @@ pub(crate) fn georeference_notices(s: &mut Session, left_out: &[(u32, String, &'
         let n = corners.len();
         s.notify(
             format!(
-                "The PDF georeferences {n} map frame{} by its corners in longitude/latitude, as its coordinate system can't be written as WKT: between them it puts places within 0.5 mm of where they are drawn ({})",
+                "The PDF georeferences {n} map frame{} by its corners in longitude/latitude, as its coordinate system can't be written as WKT: on a 9 × 9 grid over each, it puts places within 0.5 mm of where they are drawn, not proven between them ({})",
                 plural(n),
                 listed(corners)
             ),
