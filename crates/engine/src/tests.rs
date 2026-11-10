@@ -7698,6 +7698,7 @@ fn a_publication_map_moves_aside_for_a_legend_with_no_room() {
     let json = json!({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry":
         {"type": "Polygon", "coordinates": [[[0.0, 0.0], [15.0, 0.0], [15.0, 10.0], [0.0, 10.0], [0.0, 0.0]]]}}]});
     std::fs::write(&path, json.to_string()).unwrap();
+    let mut checked = 0;
     let laid = |layers: usize, extent: Value| {
         let mut s = Session::new(Project::default());
         for _ in 0..layers {
@@ -7746,6 +7747,29 @@ fn a_publication_map_moves_aside_for_a_legend_with_no_room() {
     s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
     let bad = s.run("layout.publication", &json!({"profile": "a4-landscape", "veil": "no"})).unwrap_err();
     assert!(bad.contains("veil is true or false"), "{bad}");
+    // A figure labels only its left and bottom edges, so its margins differ side to side: a move
+    // keeps the extent inside each side's own margin, off the graticule's labels, whatever the
+    // other side's.
+    for (profile, extent) in
+        [("figure-2col", json!([7, 4, 9, 6])), ("figure-2col", json!([6, 4, 9, 6])), ("thesis-half", json!([7, 4, 9, 6]))]
+    {
+        let mut s = Session::new(Project::default());
+        for _ in 0..12 {
+            s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+        }
+        let r = s.run("layout.publication", &json!({"profile": profile, "extent": extent, "author": ""})).unwrap();
+        let l = s.project.layouts.last().unwrap();
+        let el = |name: &str| l.elements.iter().find(|e| e.name == name).map(|e| (e.x, e.y, e.w, e.h));
+        let (Some(frame), Some(outline)) = (el("Map Frame"), el("Extent Outline")) else { continue };
+        let (left, bottom) = (2.0 + 9.0, 2.0 + 6.0);
+        assert!(outline.0 >= frame.0 + left - 0.5, "{profile} {extent}: {outline:?} in the left labels' room of {frame:?}: {r}");
+        assert!(
+            outline.1 + outline.3 <= frame.1 + frame.3 - bottom + 0.5,
+            "{profile} {extent}: {outline:?} in the bottom labels' room: {r}"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "a figure is veiled");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

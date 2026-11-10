@@ -963,6 +963,13 @@ fn landscape_suits(aspect: f64, short: f64, long: f64, style: Style) -> bool {
 /// round scale, with a graticule, legend, scale bar and north arrow; a sheet adds a frame, title,
 /// subtitle and a footer of two boxed columns (sources, cartographic reference) with a note and
 /// authorship under them, each text wrapped to its box with the layout's own font.
+///
+/// It runs on the UI thread, with no Cancel, as on `main` before the veil: it adds a layout (and
+/// may add a locator map) to the project the window shows, and its work is a bounded number of
+/// coarse drawings of the map, not a loop over files or requests. Placing the surrounds draws the
+/// frame once on a grid of 384 cells; when no shape of the legend fits, the search draws it at
+/// most four times more, once per scale it tries (#1379; the whole command took about 0.7 s on a
+/// 14 MB geology map).
 fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let (auto, profile) = publication_profile(p)?;
     let (sheet, page_w, page_h) = (profile.sheet, profile.width, profile.height);
@@ -1937,8 +1944,14 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             for (factor, veil) in passes.into_iter().filter(|(factor, veil)| (!*veil || continuous) && (*factor == 1.0 || sheet)) {
                 let tried = if factor == 1.0 { asked_scale } else { round_scale(asked_scale * factor) };
                 let mm = 1000.0 * flat.ground_per_unit(asked.center()) * s.map().body().ratio() / tried;
-                let slack_x = ((fw - left - right - asked.width() * mm) / 2.0).max(0.0);
-                let slack_y = ((fh - top - bottom - asked.height() * mm) / 2.0).max(0.0);
+                // How far the extent, centred, can go each way and stay inside that side's margin
+                // (a figure labels only its left and bottom edges, so they differ).
+                let (half_w, half_h) = (asked.width() * mm / 2.0, asked.height() * mm / 2.0);
+                let to = |margin: f64, half_frame: f64, half_extent: f64| (half_frame - margin - half_extent).max(0.0);
+                let (to_left, to_right) = (to(left, fw / 2.0, half_w), to(right, fw / 2.0, half_w));
+                let (to_top, to_bottom) = (to(top, fh / 2.0, half_h), to(bottom, fh / 2.0, half_h));
+                // The wide drawing is centred as the frame is, so it reaches the farther way on both.
+                let (slack_x, slack_y) = (to_left.max(to_right), to_top.max(to_bottom));
                 let wide = (fw + 2.0 * slack_x, fh + 2.0 * slack_y);
                 if drawn.as_ref().is_none_or(|d| d.0 != tried) {
                     // A smaller scale can draw more classes, and a streamed layer has its features
@@ -1972,7 +1985,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 let Some((_, Some(whole_frame), Some(here))) = &drawn else { continue };
                 let need = |room: (f64, f64)| here.iter().position(|size| whole(*size).0 <= room.0 && whole(*size).1 <= room.1);
                 let mut found: Option<(usize, f64)> = None;
-                for (dx, dy) in [(0.0, 0.0), (slack_x, 0.0), (-slack_x, 0.0), (0.0, slack_y), (0.0, -slack_y)] {
+                for (dx, dy) in [(0.0, 0.0), (to_right, 0.0), (-to_left, 0.0), (0.0, to_bottom), (0.0, -to_top)] {
                     // Centred with no veil at the asked scale is what has no room; a shift of nothing
                     // is centred.
                     let still = dx == 0.0 && dy == 0.0;
