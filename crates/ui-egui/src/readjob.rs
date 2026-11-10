@@ -1,5 +1,6 @@
-//! Add Data's whole-file reads, layer reload, Load All Features, local archive validation and
-//! model/script tools on the desktop run on a thread of their own (#1291 step 3), so large reads
+//! Add Data's whole-file reads, layer reload, Load All Features, Convert To Annotation's read of a
+//! layer read in place, local archive validation and model/script tools on the desktop run on a
+//! thread of their own (#1291 step 3), so large reads
 //! and tools don't hold the window: the status bar shows the run under way,
 //! how far it has come and Cancel, and [`land`] then runs the command, which takes what was made
 //! ([`reads`]) and adds it as it does when it runs here. They go one at a time, in the order
@@ -62,10 +63,10 @@ struct ReadJob {
     slot: crate::Slot<Result<reads::Read, String>>,
 }
 
-/// Runs Add Data, Load All, Reload Data, archive reload/repair or model/script tools with `p`: its
-/// read on a thread of its own when the desktop app makes it so ([`reads::read_ahead`]), after
-/// any under way; here and now otherwise. While one is under way or waiting it answers that, not
-/// what the command installs, which comes as it lands.
+/// Runs Add Data, Load All, Reload Data, Convert To Annotation, archive reload/repair, model/script
+/// tools or the topology check with `p`: its read on a thread of its own when the desktop app makes it
+/// so ([`reads::read_ahead`]), after any under way; here and now otherwise. While one is under way or
+/// waiting it answers that, not what the command installs, which comes as it lands.
 pub fn run(app: &mut RustGisApp, command: &'static str, p: Value) -> Result<Value, String> {
     run_then(app, command, p, None)
 }
@@ -77,7 +78,7 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, mut p: Value, then:
         let r = app.run(command, p);
         return answered(app, then, r);
     }
-    let layer = matches!(command, "layer.loadAll" | "layer.reloadData")
+    let layer = matches!(command, "layer.loadAll" | "layer.reloadData" | "labels.convert")
         .then(|| app.session.layer_id(&p).ok().and_then(|id| app.session.map().layer(id)).map(|l| (l.instance_id(), l.name.clone())))
         .flatten();
     let notice_mark = app.session.notice_mark();
@@ -242,6 +243,7 @@ fn called<'a>(command: &str, what: &'a str) -> &'a str {
     match (what.is_empty(), command) {
         (false, _) => what,
         (true, "script.run") => tl_raw!("Run Script"),
+        (true, "topology.validate") => tl_raw!("Error Inspector"),
         (true, _) => tl_raw!("Run Model"),
     }
 }
@@ -345,6 +347,9 @@ fn start(app: &mut RustGisApp, mut asked: Asked, p: Value) -> Result<Value, Stri
             return Err(why);
         }
         log::warn!("{name} reads here: its thread didn't start: {e}");
+        // Here, where its Cancel can't be clicked, the topology check takes the work limit of a
+        // run that can't be cancelled; it has none on its thread.
+        let control = if asked.command == "topology.validate" { Control::new() } else { control };
         let read = held
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -787,6 +792,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The Error Inspector's check runs on a thread of its own (#1291), and its errors are kept as
+    /// it lands.
+    #[test]
+    fn a_topology_check_runs_on_a_thread() {
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.reads_off_frame = true;
+        let square = |x: f64| {
+            json!({"type": "Feature", "properties": {}, "geometry": {"type": "Polygon",
+            "coordinates": [[[x, 0.0], [x + 1.0, 0.0], [x + 1.0, 1.0], [x, 1.0], [x, 0.0]]]}})
+        };
+        let parcels = json!({"type": "FeatureCollection", "features": [square(0.0), square(0.5)]});
+        app.run("layer.addDataText", json!({"fileName": "parcels.geojson", "text": parcels.to_string()})).unwrap();
+        app.run("topology.rules", json!({"add": {"rule": "mustNotOverlap", "layer": "parcels"}})).unwrap();
+        let mark = app.session.notice_mark();
+        let started = app.run("topology.validate", Value::Null).unwrap();
+        assert_eq!(started["started"], "Error Inspector", "{started}");
+        landed(&mut app, 60);
+        assert_eq!(app.session.topology_errors.len(), 1);
+        assert!(app.session.notices_since(mark).iter().all(|n| !n.error), "it landed without an error");
+    }
+
     #[test]
     fn load_all_reads_on_a_thread() {
         let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
@@ -1047,6 +1073,28 @@ mod tests {
         assert_eq!(app.session.map().tiles[0].url, replacement.to_str().unwrap());
         assert!(app.session.notices_since(mark).iter().any(|n| n.text == "Repaired Linked"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Convert To Annotation, clicked for a layer read in place (whose view holds none of its
+    /// features), reads all of its source on a thread first: every feature gets its annotation.
+    #[test]
+    fn labels_of_a_layer_read_in_place_convert_after_a_read_on_a_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("streamed.geojson");
+        let point = |name: &str, x: f64| json!({"type": "Feature", "properties": {"name": name}, "geometry": {"type": "Point", "coordinates": [x, 47.0]}});
+        std::fs::write(&path, json!({"type": "FeatureCollection", "features": [point("A", 8.0), point("B", 9.0)]}).to_string()).unwrap();
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.reads_off_frame = true;
+        let id =
+            app.run("layer.addData", json!({"path": path, "stream": true, "name": "places"})).unwrap()["layer"].as_u64().unwrap() as u32;
+        assert!(app.session.map().layer(id).unwrap().dataset.features.is_empty(), "nothing read for a view yet");
+        app.session.active_layer = Some(id);
+        assert_eq!(app.run_by_user("labels.convert", Value::Null).unwrap()["started"], "Convert To Annotation");
+        landed(&mut app, 60);
+        let annotation = app.session.map().layer_by_name("places Annotation").unwrap();
+        assert_eq!(annotation.dataset.features.len(), 2);
+        let l = app.session.map().layer(id).unwrap();
+        assert!(l.is_streamed() && !l.labels.enabled);
     }
 
     fn reload_fixture() -> (tempfile::TempDir, RustGisApp, u32, std::path::PathBuf) {

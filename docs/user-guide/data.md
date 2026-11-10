@@ -113,6 +113,11 @@ or other WKT:
   rotations could be off by a centimetre.
 - A UTM name (`WGS_1984_UTM_Zone_31N`) gives its EPSG code only when the parameters are that
   zone's.
+- Transverse Mercator (South Orientated), the method GDAL and Esri write South Africa's Lo grids
+  with, counts westings and southings, and is read so, its false easting and northing as a false
+  westing and southing. Read from its parameters, a system declaring other axes is refused; one
+  with an EPSG code (EPSG:2048, say) is read by the code, as the code defines it, whatever axes
+  its WKT declares.
 - Projected axes pointing west or south, as in South Africa's Lo grids, are read as such, or
   refused where they can't be (Web Mercator, Krovak, sinusoidal, or such axes declared northing
   first, as in Austria's Ferro grids).
@@ -733,6 +738,16 @@ it: web-service, catalogue, STAC and S3 requests run in the background on both d
 database tests run synchronously on desktop. The web app doesn't offer database kinds for new
 connections; saved database rows remain visible but cannot be opened or tested there. Earth
 Search and Planetary Computer remain available under **Library**.
+
+For a new web-service connection, enter its Basic password or header API key to test it before
+saving. The test uses only the entered login, not a saved service login or an S3 session login
+at the same address.
+For an `http://` address, tick the confirmation before sending the login unencrypted. After a test
+starts, RustGIS clears the password or key and the confirmation from the form; enter them again
+if you want to save a session login. The test does not save the connection or retain its login.
+Test status masks echoed login credentials, and the command log keeps response sizes rather than
+response bodies.
+For an existing service connection, save changes to its address or login definition before testing.
 
 **From Service…** (including **Catalogue search (CSW)**), **Database…**, **STAC Search…** and
 **S3…** can use saved connections directly. Service, database and S3 dialogs offer a **Saved
