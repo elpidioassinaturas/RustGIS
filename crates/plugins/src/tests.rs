@@ -1104,6 +1104,17 @@ fn a_tree_cut_at_its_limit_says_so() {
     assert_eq!(st.apply(&decl, &json!({"items": {"catalogue": {"nodes": flat(3)}}})).notice(), None);
     assert_eq!(st.items["catalogue"].cut, None);
     assert!(serde_json::to_value(&st.items["catalogue"]).unwrap().get("cut").is_none());
+
+    // A dropdown's options past its limit are still in the generic count: only a tree's cut is
+    // said apart.
+    let decl = choice_date_range_panel();
+    let mut st = PanelState::new(&decl);
+    let options: Vec<Value> = (0..=crate::panel::MAX_CHOICES).map(|i| json!({"id": i.to_string()})).collect();
+    let over = st.apply(&decl, &json!({"items": {"product": {"options": options}}}));
+    assert_eq!(st.items["product"].nodes.len(), crate::panel::MAX_CHOICES);
+    assert!(over.cut.is_empty() && st.items["product"].cut.is_none());
+    let notice = over.notice().unwrap();
+    assert!(notice.contains("1 option(s) or tree node(s) left out") && notice.contains("past a dropdown's limit"), "{notice}");
 }
 
 /// A node's label is folded (lower case, accents aside) once, when the node comes: a search,

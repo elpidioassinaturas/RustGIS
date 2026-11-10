@@ -468,7 +468,7 @@ impl Dropped {
         }
         if self.nodes > 0 {
             parts.push(format!(
-                "{} option(s) or tree node(s) left out (no id, one repeated or too long, too deep, or past the limit)",
+                "{} option(s) or tree node(s) left out (no id, one repeated or too long, too deep, or past a dropdown's limit)",
                 self.nodes
             ));
         }
