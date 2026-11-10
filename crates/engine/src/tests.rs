@@ -7657,7 +7657,19 @@ fn a_publication_map_moved_off_its_latitude_draws_the_extent_where_it_was_placed
         for _ in 0..30 {
             s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
         }
+        // A streamed column of points down the middle, every quarter degree.
+        let lon = (extent[0] + extent[2]) / 2.0;
+        let column: Vec<f64> = (0..).map(|i| s0 + 0.25 * f64::from(i)).take_while(|lat| *lat <= n).collect();
+        let points = dir.join(format!("{name}_points.geojson"));
+        let features: Vec<Value> = column
+            .iter()
+            .map(|lat| json!({"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [lon, lat]}}))
+            .collect();
+        std::fs::write(&points, json!({"type": "FeatureCollection", "features": features}).to_string()).unwrap();
+        s.run("layer.addData", &json!({"path": points.display().to_string(), "stream": true, "name": "Column"})).unwrap();
         let r = s.run("layout.publication", &json!({"profile": "a4-portrait", "extent": extent, "author": "", "locator": "none"})).unwrap();
+        // Both move far up or down, off the asked centre's latitude, and are veiled.
+        assert!(r["mapShift"][1].as_f64().unwrap().abs() > 40.0 && r["veiled"] == json!(true), "{name}: moved up or down, veiled: {r}");
         let l = s.project.layouts.last().unwrap();
         let frame = l.elements.iter().find(|e| e.name == "Map Frame").unwrap();
         let rustgis_map::layout::ElementKind::MapFrame { center, scale, .. } = &frame.kind else {
@@ -7665,6 +7677,26 @@ fn a_publication_map_moved_off_its_latitude_draws_the_extent_where_it_was_placed
         };
         let pt = rustgis_map::layout::PT_PER_MM;
         let cam = rustgis_map::layout::frame_camera(s.map(), *center, *scale, 0.0, 0.0);
+        // Every streamed point the frame draws was read before the search drew it.
+        let held: Vec<f64> = s
+            .map()
+            .layers
+            .iter()
+            .find(|l| l.name == "Column")
+            .unwrap()
+            .dataset
+            .features
+            .iter()
+            .filter_map(|f| f.geometry.as_ref())
+            .map(|g| g.extent().min_y)
+            .collect();
+        for lat in &column {
+            let Some(m) = s.map().to_map(Coord::new(lon, *lat)) else { continue };
+            let (_, sy) = cam.to_screen(m, frame.w * pt, frame.h * pt);
+            if (0.0..=frame.h * pt).contains(&sy) {
+                assert!(held.contains(lat), "{name}: the point at {lat}°, {:.1} mm down the frame, isn't read: {held:?}", sy / pt);
+            }
+        }
         // The extent's edges as the frame draws them, in mm on the page.
         let asked = Extent::new(extent[0], extent[1], extent[2], extent[3]);
         let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
@@ -7690,7 +7722,8 @@ fn a_publication_map_moved_off_its_latitude_draws_the_extent_where_it_was_placed
             frame.h
         );
         // The outline follows the extent as drawn, but where the margins clip it.
-        if let Some(o) = l.elements.iter().find(|e| e.name == "Extent Outline") {
+        {
+            let o = l.elements.iter().find(|e| e.name == "Extent Outline").unwrap_or_else(|| panic!("{name}: no Extent Outline: {r}"));
             let margin = 15.0;
             for (side, at, want, edge) in [
                 ("left", o.x, drawn.0, frame.x),
