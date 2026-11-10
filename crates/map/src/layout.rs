@@ -1382,6 +1382,10 @@ impl Layout {
                     // one shows the name, as it would without.
                     labels.retain(|_, label| !label.trim().is_empty());
                     let labelled = labels.len();
+                    // One label per layer, as a command keeps: of two spellings of a name (any
+                    // case), the first in order stays and the other is cut.
+                    let mut seen = std::collections::HashSet::new();
+                    labels.retain(|name, _| seen.insert(name.to_ascii_lowercase()));
                     while labels.len() > MAX_LEGEND_LABELS {
                         labels.pop_last();
                     }

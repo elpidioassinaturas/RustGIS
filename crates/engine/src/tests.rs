@@ -29629,6 +29629,18 @@ fn legends_label_layers() {
         s.project.layouts[2].element(id).map(|e| &e.kind),
         Some(ElementKind::Legend { labels, .. }) if labels["Rivers"].chars().count() == rustgis_map::layout::MAX_LEGEND_LABEL_CHARS
     ));
+    // One with two spellings of a layer keeps the first in order, as a command keeps one, and
+    // says so.
+    let legend = text["elements"].as_array_mut().unwrap().iter_mut().find(|e| e["id"] == json!(id)).unwrap();
+    legend["kind"]["Legend"]["labels"] = json!({"Rivers": "Rios", "rivers": "rios", "Lakes": "Lagos"});
+    let mark = s.notices.len();
+    s.run("layout.import", &json!({"text": text.to_string()})).unwrap();
+    assert_eq!(cut_notice(&s, mark), 1);
+    assert!(matches!(
+        s.project.layouts[3].element(id).map(|e| &e.kind),
+        Some(ElementKind::Legend { labels, .. })
+            if labels.iter().map(|(n, l)| (n.as_str(), l.as_str())).collect::<Vec<_>>() == [("Lakes", "Lagos"), ("Rivers", "Rios")]
+    ));
     std::fs::remove_dir_all(&dir).ok();
     // (The imported layout is the active one now; the rest goes to the first.)
     // The label follows its layer renamed, and goes with it removed, so a later layer of that
