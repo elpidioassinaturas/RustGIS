@@ -2354,9 +2354,12 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
     if kind != "legend" && p.get("columns").is_some_and(|v| !v.is_null()) {
         return Err(ONLY_LEGEND_COLUMNS.into());
     }
-    // (A grid's "labels" is a bool: only an object is a legend's.)
-    if kind != "legend" && p.get("labels").is_some_and(Value::is_object) {
-        return Err(ONLY_LEGEND_LABELS.into());
+    // A grid's "labels" is a bool and a legend's an object (read with it); on any other kind, or as
+    // anything else on a grid, it is refused rather than left unread.
+    match p.get("labels").filter(|v| !v.is_null()) {
+        Some(v) if kind == "grid" && !v.is_boolean() => return Err("a grid's labels is true or false".into()),
+        Some(_) if kind != "legend" && kind != "grid" => return Err(ONLY_LEGEND_LABELS.into()),
+        _ => {}
     }
     // A family is a text's: refused elsewhere, as a legend's left-out layers are, so a script
     // doesn't take it as applied.
@@ -3252,7 +3255,8 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
                 Some(given) => Some(with_labels(labels, given)?),
                 None => None,
             },
-            _ if p.get("labels").is_some_and(Value::is_object) => return Err(ONLY_LEGEND_LABELS.into()),
+            // (A map frame's grid takes its labels under "grid".)
+            _ if p.get("labels").is_some_and(|v| !v.is_null()) => return Err(ONLY_LEGEND_LABELS.into()),
             _ => None,
         }
     };

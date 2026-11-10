@@ -29584,6 +29584,15 @@ fn legends_label_layers() {
     let title = s.project.layouts[0].elements.iter().find(|e| e.name == "Title").unwrap().id;
     assert!(s.run("layout.update", &json!({"element": title, "labels": {"Rivers": "Rios"}})).unwrap_err().contains("only legends"));
     assert!(s.run("layout.addElement", &json!({"kind": "scaleBar", "labels": {"Rivers": "Rios"}})).unwrap_err().contains("only legends"));
+    // Any other value is refused too, rather than left unread, and nothing is added.
+    let count = s.project.layouts[0].elements.len();
+    for v in [json!("Rivers"), json!(["Rivers"]), json!(true)] {
+        assert!(s.run("layout.update", &json!({"element": title, "labels": v})).unwrap_err().contains("only legends"), "{v}");
+        assert!(s.run("layout.addElement", &json!({"kind": "scaleBar", "labels": v})).unwrap_err().contains("only legends"), "{v}");
+    }
+    let err = s.run("layout.addElement", &json!({"kind": "grid", "labels": "no"})).unwrap_err();
+    assert!(err.contains("a grid's labels is true or false"), "{err}");
+    assert_eq!(s.project.layouts[0].elements.len(), count);
     // A grid's own "labels" (a bool) is still its.
     let frame = s.run("layout.addElement", &json!({"kind": "grid", "labels": false})).unwrap()["element"].as_u64().unwrap() as u32;
     assert!(matches!(
