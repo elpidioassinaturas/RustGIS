@@ -33220,6 +33220,35 @@ fn a_window_of_the_view_joins_only_one_asked_in_the_same_view() {
     assert_eq!(s.url_waits.views.len(), 2, "kept by request number");
 }
 
+/// A window of the view that is being read joins a command asking for it again in the same view;
+/// asked in another view, or with a box, it is another request (#1330).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_window_of_the_view_being_read_joins_only_the_same_view() {
+    let mut s = world();
+    plugin("eng-window-flight", &["edit", "network"]);
+    let ask = |s: &mut Session, bbox: Value| {
+        let p = json!({"op": "layer.addUrl", "params": {"url": "https://x.org/scene.tif", "bbox": bbox, "name": "Window"}});
+        s.run_leaving_downloads("plugin:eng-window-flight/f", &p).unwrap();
+        s.take_url_requests()
+    };
+    s.run("map.zoomToExtent", &json!({"extent": [10.0, 45.0, 11.0, 46.0]})).unwrap();
+    let first = ask(&mut s, json!("view"));
+    assert_eq!(first.len(), 1);
+    s.download_started_for(&first[0]).unwrap();
+    // While it is read: the same view joins it.
+    assert!(ask(&mut s, json!("view")).is_empty(), "the same view's window is read once");
+    // Another view: another request, for that view.
+    s.run("map.zoomToExtent", &json!({"extent": [20.0, 45.0, 21.0, 46.0]})).unwrap();
+    let other = ask(&mut s, json!("view"));
+    assert_eq!(other.len(), 1);
+    assert!(other[0].view_asked().is_some() && other[0].view_asked() != first[0].view_asked());
+    // A box: another request, with no view.
+    let boxed = ask(&mut s, json!([10.25, 45.5, 10.5, 45.75]));
+    assert_eq!(boxed.len(), 1);
+    assert_eq!(boxed[0].view_asked(), None);
+}
+
 /// A plugin's command asking for the view's window is read for the view it was asked in, though the
 /// app reads it on a later frame, when the map may show another (#1330): a command run again after
 /// a download sees the view it first ran with only while it runs. The box is kept beside the
