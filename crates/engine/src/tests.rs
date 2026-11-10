@@ -7767,6 +7767,15 @@ fn a_publication_map_moves_aside_for_a_legend_with_no_room() {
             outline.1 + outline.3 <= frame.1 + frame.3 - bottom + 0.5,
             "{profile} {extent}: {outline:?} in the bottom labels' room: {r}"
         );
+        // The veil stops at the graticule's labels, so they stay as dark as on an unveiled map.
+        for veil in l.elements.iter().filter(|e| e.name.starts_with("Veil")) {
+            assert!(
+                veil.x >= frame.0 + left - 1e-6 && veil.y + veil.h <= frame.1 + frame.3 - bottom + 1e-6,
+                "{profile}: {} over the labels: {:?} in {frame:?}",
+                veil.name,
+                (veil.x, veil.y, veil.w, veil.h)
+            );
+        }
         checked += 1;
     }
     assert!(checked > 0, "a figure is veiled");

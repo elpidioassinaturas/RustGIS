@@ -2033,7 +2033,21 @@ fn plain_fill(l: &rustgis_map::Layer) -> bool {
 /// however it ends, as is a label lock waiting to be filled, which the coarse drawing would
 /// otherwise fill.
 pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm: f64, cells: u32) -> Option<(u32, u32, Vec<bool>)> {
-    if !(w_mm > 0.0 && h_mm > 0.0) {
+    frame_coverage_judged_on(map, center, scale, (w_mm, h_mm), (w_mm, h_mm), cells)
+}
+
+/// [`frame_coverage`] of a frame `size` (mm), with what runs on past the frame judged on a frame
+/// `judged` (mm) with the same centre: a drawing wider than the frame asked for, cut for frames
+/// moved inside it, leaves out the same one-colour layers as that frame does.
+pub fn frame_coverage_judged_on(
+    map: &mut Map,
+    center: Coord,
+    scale: f64,
+    (w_mm, h_mm): (f64, f64),
+    judged: (f64, f64),
+    cells: u32,
+) -> Option<(u32, u32, Vec<bool>)> {
+    if !(w_mm > 0.0 && h_mm > 0.0 && judged.0 > 0.0 && judged.1 > 0.0) {
         return None;
     }
     let (w, h) = (w_mm * PT_PER_MM, h_mm * PT_PER_MM);
@@ -2067,7 +2081,8 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
     } else {
         let classes =
             map.layers.iter().any(|l| map.draws_at(l, at) && (l.is_raster() || !matches!(&l.renderer, rustgis_map::Renderer::Single(_))));
-        let frame = crate::view_lonlat(map, &view);
+        let judged_view = View { width: judged.0 * PT_PER_MM, height: judged.1 * PT_PER_MM, ..view };
+        let frame = crate::view_lonlat(map, &judged_view);
         let past_the_frame = |l: &rustgis_map::Layer| {
             let e = l.shown_extent();
             !e.is_empty() && (e.min_x < frame.min_x || e.max_x > frame.max_x || e.min_y < frame.min_y || e.max_y > frame.max_y)
@@ -2850,6 +2865,39 @@ mod tests {
         map.add_dataset(square("study area", 0.1));
         let with_study_area = count(&mut map);
         assert!(with_study_area > beside_classes, "a one-colour layer inside the frame counts: {with_study_area} of {beside_classes}");
+
+        // A drawing three times the frame's width, judged on the frame: a layer running past the
+        // frame but not past the drawing is context in both, and one inside the frame is counted.
+        let mut map = Map::new("m");
+        let neighbour = map.add_dataset(square("neighbour", 0.6));
+        let far = {
+            let mut d = Dataset::new("far", GeometryType::Point, vec![Field::new("g", FieldType::Text)]);
+            d.push(Some(Geometry::Point(Coord::new(-0.3, -0.3))), vec![Value::Text("c".into())]);
+            map.add_dataset(d)
+        };
+        if let Some(l) = map.layers.iter_mut().find(|l| l.id == far) {
+            l.renderer = rustgis_map::Renderer::Unique {
+                field: "g".into(),
+                classes: vec![("c".to_string(), s(0))],
+                other: s(1),
+                ramp: rustgis_map::Ramp::Ember,
+                class_labels: Default::default(),
+                other_label: None,
+                class_strokes: Default::default(),
+                other_strokes: Vec::new(),
+                class_fills: Default::default(),
+                other_fills: Vec::new(),
+                expression: None,
+            };
+        }
+        let drawn = |map: &mut Map, judged: (f64, f64)| {
+            let (.., cells) = frame_coverage_judged_on(map, Coord::new(0.0, 0.0), 1_000_000.0, (300.0, 300.0), judged, 192).unwrap();
+            cells.iter().filter(|c| **c).count()
+        };
+        let on_the_drawing = drawn(&mut map, (300.0, 300.0));
+        let on_the_frame = drawn(&mut map, (100.0, 100.0));
+        assert!(on_the_frame < on_the_drawing / 4, "the neighbour is context on the frame: {on_the_frame} of {on_the_drawing}");
+        assert!(map.layer(neighbour).is_some_and(|l| l.visible), "shown again");
     }
 
     /// A legend's rows go into columns: as even as they go, a layer's name with the row under it,

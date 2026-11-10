@@ -68,12 +68,13 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     of the legend fits, the map moves towards an edge, as far as the asked extent stays in the
     frame, so the room on both its sides joins (the answer's `mapShift`, in mm right and down, and a
     warning). On a map that runs on past the extent, with a long legend, what is outside the extent
-    is then veiled, with the surrounds grouped in its widest band (the answer's `veiled`, and
-    `arrangement` `"veil"`, and a warning), at up to half the scale on a sheet when the frame leaves
-    too little of it, which the result says too. The veil and the surrounds are ordinary elements,
-    to move or delete as any other; `"veil": false` leaves the map unveiled and at its scale. If the
-    legend or colorbar cannot fit, the result warns about clipping or resizing. A streamed layer
-    still loading gets a fixed-size legend to adjust by hand.
+    is then veiled, but for the strips under the graticule's labels, with the surrounds grouped in
+    its widest band (the answer's `veiled`, and `arrangement` `"veil"`, and a warning), at up to
+    half the scale on a sheet when the frame leaves too little of it, which the result says too. The
+    veil and the surrounds are ordinary elements, to move or delete as any other; `"veil": false`
+    leaves the map unveiled and at its scale. If the legend or colorbar cannot fit, the result warns
+    about clipping or resizing. A streamed layer still loading gets a fixed-size legend to adjust by
+    hand.
   - **Decimal comma**: `"decimal": ","` prints the graticule, scale bar and colorbar numbers and
     `{scale}` with a decimal comma and points between thousands (`0,05`, `1:6.300.000`).
     `layout.page={"decimal": ","}` sets it on any layout; `"."` restores decimal points.

@@ -964,12 +964,12 @@ fn landscape_suits(aspect: f64, short: f64, long: f64, style: Style) -> bool {
 /// subtitle and a footer of two boxed columns (sources, cartographic reference) with a note and
 /// authorship under them, each text wrapped to its box with the layout's own font.
 ///
-/// It runs on the UI thread, with no Cancel, as on `main` before the veil: it adds a layout (and
-/// may add a locator map) to the project the window shows, and its work is a bounded number of
-/// coarse drawings of the map, not a loop over files or requests. Placing the surrounds draws the
-/// frame once on a grid of 384 cells; when no shape of the legend fits, the search draws it at
-/// most four times more, once per scale it tries (#1379; the whole command took about 0.7 s on a
-/// 14 MB geology map).
+/// It runs on the UI thread, with no Cancel, as it did before the veil: none of the background
+/// paths (tools, exports, commands that make a raster, models and scripts on a copy) takes a
+/// command that adds a layout, and a locator map, to the project yet. Its cost grows with the
+/// map's features: placing the surrounds draws the frame once on a grid of 384 cells, and when no
+/// shape of the legend fits, the search draws it at most four times more, once per scale it tries
+/// (#1379; the whole command took about 0.7 s on a 14 MB geology map, 0.2 s before the search).
 fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let (auto, profile) = publication_profile(p)?;
     let (sheet, page_w, page_h) = (profile.sheet, profile.width, profile.height);
@@ -1978,8 +1978,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                         }
                     };
                     let cells = (384.0 * wide.0.max(wide.1) / fw.max(fh)).round() as u32;
-                    let whole_frame =
-                        here.and_then(|_| crate::render::layout::frame_coverage(s.map_mut(), centred, tried, wide.0, wide.1, cells));
+                    // What is context is judged on the frame asked for, not the wide drawing, so
+                    // every move's cut leaves out the same layers.
+                    let whole_frame = here
+                        .and_then(|_| crate::render::layout::frame_coverage_judged_on(s.map_mut(), centred, tried, wide, (fw, fh), cells));
                     drawn = Some((tried, whole_frame, here));
                 }
                 let Some((_, Some(whole_frame), Some(here))) = &drawn else { continue };
@@ -2224,22 +2226,25 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         (*at, *drawn_at) = (center, scale);
     }
     // The veil over the frame and under its surrounds, in four bands around the extent, and the
-    // extent's outline: it covers what the map draws there, which is said.
+    // extent's outline: it covers what the map draws there, which is said. It stops at the
+    // graticule's labels, drawn in the frame's own picture under it, so they stay as dark as on an
+    // unveiled map; the map under them stays unveiled, which is said too.
     if let Some((x, y, w, h)) = veiled {
         warnings.push(
-            "what the map draws outside the extent is veiled, for the legend's room, and the surrounds sit there: \"veil\": false leaves it unveiled"
+            "what the map draws outside the extent is veiled, for the legend's room, but for the strips under the graticule's labels, and the surrounds sit there: \"veil\": false leaves it unveiled"
                 .into(),
         );
-        let (x0, y0) = (x.max(fx), y.max(fy));
-        let (x1, y1) = ((x + w).min(fx + fw), (y + h).min(fy + fh));
+        let (x0, y0) = (x.max(area.0), y.max(area.1));
+        let (x1, y1) = ((x + w).min(area.2), (y + h).min(area.3));
         let veil = || pub_card(Rgba::new(255, 255, 255, 150), Rgba::new(0, 0, 0, 0), 0.0, 0.0);
         for (name, band) in [
-            ("Veil Above", (fx, fy, fw, y0 - fy)),
-            ("Veil Below", (fx, y1, fw, fy + fh - y1)),
-            ("Veil Left", (fx, y0, x0 - fx, y1 - y0)),
-            ("Veil Right", (x1, y0, fx + fw - x1, y1 - y0)),
+            ("Veil Above", (area.0, area.1, area.2 - area.0, y0 - area.1)),
+            ("Veil Below", (area.0, y1, area.2 - area.0, area.3 - y1)),
+            ("Veil Left", (area.0, y0, x0 - area.0, y1 - y0)),
+            ("Veil Right", (x1, y0, area.2 - x1, y1 - y0)),
         ] {
-            if band.2 > 0.0 && band.3 > 0.0 {
+            // A band thinner than half a millimetre (a rounding) is left out.
+            if band.2 > 0.5 && band.3 > 0.5 {
                 l.add(name, band, veil());
             }
         }
