@@ -10379,9 +10379,10 @@ fn plugin_panel_picks_reach_the_plugin_in_the_maps_coordinates() {
     // Another body's map: the place keeps only its degrees, and that is said.
     s.run("map.body", &json!({"name": "mars", "basemap": false})).unwrap();
     let mark = s.notice_mark();
-    let got = s.run("plugin:eng-pick/q-grow", &json!({"panel": {"seed": {"lon": 10, "lat": 20}}})).unwrap();
+    let got = s.run("plugin:eng-pick/q-grow", &json!({"panel": {"seed": {"lon": 10, "lat": 20, "x": 1}}})).unwrap();
     assert!(got["panel"]["values"]["seed"].get("x").is_none(), "{got}");
     assert!(said(&s, mark, "degrees only"), "{:?}", s.notices_since(mark));
+    assert!(!said(&s, mark, "replaced"), "a given x left out, not replaced: {:?}", s.notices_since(mark));
     rustgis_plugins::unload("eng-pick");
 }
 

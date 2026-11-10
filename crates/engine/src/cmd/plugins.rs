@@ -136,7 +136,8 @@ fn placed(s: &Session, decl: &rustgis_plugins::PanelDecl, given: &Value) -> (Val
                 clamped.push(d.key().to_string());
             }
             let kept = |k: &str, a: &Value| add.iter().any(|(n, b)| *n == k && same_value(a, b));
-            if was.iter().any(|(k, a)| !kept(k, a)) {
+            // With nothing of the map's to put there, given ones are left out: said as unplaced.
+            if !add.is_empty() && was.iter().any(|(k, a)| !kept(k, a)) {
                 replaced.push(d.key().to_string());
             }
         }
