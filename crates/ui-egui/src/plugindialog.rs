@@ -394,10 +394,11 @@ fn field(
             combo(ui, id, values, &f.name, &options, f.required || f.default.is_some(), None)
         }
         "bool" => {
-            // Sent once ticked or given a default: one never set is left out.
+            // Sent once ticked or given a default: an optional one never set is left out, and a
+            // required one always has a value, unticked until it is ticked.
             let mut on = values.get(&f.name).and_then(Value::as_bool).unwrap_or(false);
             let r = ui.checkbox(&mut on, "");
-            if r.changed() {
+            if r.changed() || (f.required && !values.contains_key(&f.name)) {
                 values.insert(f.name.clone(), json!(on));
             }
             r
@@ -436,7 +437,8 @@ mod tests {
         // Echoes too (the test plugin answers by the id's first letter), with optional fields only.
         commands.push(json!({"id": "qq", "label": "Echo Optional", "form": [
             {"name": "count", "label": "Count", "kind": "number"},
-            {"name": "flag", "label": "Flag", "kind": "bool"}
+            {"name": "flag", "label": "Flag", "kind": "bool"},
+            {"name": "agree", "label": "Agree", "kind": "bool", "required": true}
         ]}));
         for c in commands.iter_mut().filter(|c| c["id"] == "e") {
             c["form"] = json!([{"name": "trees", "label": "Trees", "kind": "number"}]);
@@ -501,19 +503,21 @@ mod tests {
         plugins::unload("ui-dialog");
     }
 
-    /// Optional numbers and checkboxes never set are left out. `{}` opens the dialog as `null`
+    /// Optional numbers and checkboxes never set are left out; a required checkbox always has a
+    /// value, so it never holds Run. `{}` opens the dialog as `null`
     /// does, and its Run with no values runs the command rather than opening the dialog again.
     #[test]
     fn optional_fields_left_alone_are_left_out() {
         let mut h = launch("ui-dialog-optional");
         h.state_mut().run_by_user("plugin:ui-dialog-optional/qq", json!({})).unwrap();
         h.run();
-        assert!(dialog(&h).values.is_empty(), "{:?}", dialog(&h).values);
+        let values = &dialog(&h).values;
+        assert!(!values.contains_key("count") && !values.contains_key("flag"), "{values:?}");
         h.get_by_label("Run").click();
         h.run();
         let Some(Ok(answer)) = &dialog(&h).result else { panic!("{:?}", dialog(&h).result) };
         let echoed: Value = serde_json::from_str(answer).unwrap();
-        assert_eq!(echoed["params"], json!({}));
+        assert_eq!(echoed["params"], json!({"agree": false}), "a required checkbox is sent unticked");
         // A number typed is sent as one; text that isn't a number holds Run.
         let d = h.state_mut().ui.plugin_dialog.open.as_mut().unwrap();
         d.texts.insert("count".into(), "2,5".into());
@@ -528,7 +532,7 @@ mod tests {
         h.run();
         let Some(Ok(answer)) = &dialog(&h).result else { panic!("{:?}", dialog(&h).result) };
         let echoed: Value = serde_json::from_str(answer).unwrap();
-        assert_eq!(echoed["params"], json!({"count": 2.5}));
+        assert_eq!(echoed["params"], json!({"count": 2.5, "agree": false}));
         plugins::unload("ui-dialog-optional");
     }
 

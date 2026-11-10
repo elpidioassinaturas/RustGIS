@@ -275,6 +275,16 @@ fn command_dialog_fields_are_checked() {
         let e = Manifest::parse(&c.to_string()).unwrap_err();
         assert!(e.contains("'col' lists the fields of a layer"), "{e}");
     }
+    // A required field lists those of a layer that must be picked too.
+    let mut c = m.clone();
+    c["commands"][0]["form"] = json!([
+        {"name": "samples", "label": "Samples", "kind": "polygonLayer"},
+        {"name": "col", "label": "Column", "kind": "field", "required": true}
+    ]);
+    let e = Manifest::parse(&c.to_string()).unwrap_err();
+    assert!(e.contains("'col' is required, so the layer field above it must be too"), "{e}");
+    c["commands"][0]["form"][0]["required"] = json!(true);
+    assert!(Manifest::parse(&c.to_string()).is_ok());
 }
 
 /// Enabled plugin tools register with geoprocessing and return layers or selections.

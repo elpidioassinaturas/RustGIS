@@ -438,9 +438,10 @@ fn check_text(what: &str, s: &str, required: bool) -> Result<(), String> {
 /// a default the field can show and send (a number, or a number written as text, for `number`;
 /// `true` or `false` for `bool`; one of its choices for `choice`; text for the other kinds), and
 /// a vector layer field (`vectorLayer`, `polygonLayer` or `pointLayer`) above each `field` or
-/// `numericField`, whose fields it lists.
+/// `numericField`, whose fields it lists, and required when the field is.
 fn check_form(owner: &str, form: &[ParamDecl]) -> Result<(), String> {
-    let mut layer: Option<&str> = None;
+    // The nearest layer field above: its kind, and whether it is required.
+    let mut layer: Option<(&str, bool)> = None;
     for p in form {
         if let Some(d) = &p.default {
             let fits = match p.kind.as_str() {
@@ -454,13 +455,17 @@ fn check_form(owner: &str, form: &[ParamDecl]) -> Result<(), String> {
             }
         }
         match p.kind.as_str() {
-            "layer" | "vectorLayer" | "polygonLayer" | "pointLayer" | "rasterLayer" => layer = Some(p.kind.as_str()),
+            "layer" | "vectorLayer" | "polygonLayer" | "pointLayer" | "rasterLayer" => layer = Some((p.kind.as_str(), p.required)),
             // `layer` may pick a raster too, which has no fields.
-            "field" | "numericField" if !matches!(layer, Some("vectorLayer" | "polygonLayer" | "pointLayer")) => {
+            "field" | "numericField" if !matches!(layer, Some(("vectorLayer" | "polygonLayer" | "pointLayer", _))) => {
                 return Err(format!(
                     "plugin.json: {owner}: '{}' lists the fields of a layer, so it needs a vector layer field above it",
                     p.name
                 ));
+            }
+            // Left at `—`, an optional layer would leave a required field nothing to pick.
+            "field" | "numericField" if p.required && layer.is_some_and(|(_, required)| !required) => {
+                return Err(format!("plugin.json: {owner}: '{}' is required, so the layer field above it must be too", p.name));
             }
             _ => {}
         }
