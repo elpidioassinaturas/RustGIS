@@ -1,10 +1,11 @@
-//! A plugin command's dialog (`commands[].form` in `plugin.json`): the command's button opens a
-//! window with its fields; **Run** runs the command with their values as parameters and shows
+//! A plugin command's dialog (`commands[].form` in `plugin.json`): the command's button, Command
+//! Search entry or shortcut opens a window with its fields; **Run** runs the command with their values as parameters and shows
 //! what it answers (its `report` text) under them, so each step of a plugin has its own
 //! parameters and result instead of sharing one panel.
 //!
-//! The run waits two frames, as a plugin command from the ribbon does ([`crate::pluginstart`]),
-//! so the window shows that it is running before the command holds the frame.
+//! **Run** asks for the command as a ribbon button does ([`crate::pluginstart`]): it starts once
+//! the window has shown it running, clicks held meanwhile are dropped, and a command waiting for
+//! the web answers the dialog when it runs again.
 
 use crate::RustGisApp;
 use egui::{Align2, RichText, Ui};
@@ -12,9 +13,6 @@ use rustgis_engine::analysis::ParamKind;
 use rustgis_engine::plugins::ParamDecl;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
-
-/// Frames drawn between **Run** and the run, so the window shows it running first.
-const FRAMES_SHOWN: u8 = 2;
 
 #[derive(Default)]
 pub struct State {
@@ -27,8 +25,8 @@ struct Dialog {
     plugin: String,
     command: String,
     values: Map<String, Value>,
-    /// Frames drawn since **Run**, while the run waits to start.
-    running: Option<u8>,
+    /// The parameters of the run asked for and not answered yet.
+    asked: Option<Value>,
     /// The last run's report, or its error.
     result: Option<Result<String, String>>,
 }
@@ -43,15 +41,39 @@ pub fn open(app: &mut RustGisApp, p: &Value) -> Result<Value, String> {
         return Err(format!("{plugin}/{command} has no dialog"));
     }
     let key = (plugin.to_string(), command.to_string());
-    let values = app
-        .ui
-        .plugin_dialog
+    let state = &mut app.ui.plugin_dialog;
+    // The dialog it replaces keeps its values too.
+    if let Some(d) = state.open.take() {
+        state.kept.insert((d.plugin, d.command), d.values);
+    }
+    let values = state
         .kept
         .get(&key)
         .cloned()
         .unwrap_or_else(|| c.form.iter().filter_map(|f| f.default.clone().map(|d| (f.name.clone(), d))).collect());
-    app.ui.plugin_dialog.open = Some(Dialog { plugin: key.0, command: key.1, values, running: None, result: None });
+    state.open = Some(Dialog { plugin: key.0, command: key.1, values, asked: None, result: None });
     Ok(Value::Null)
+}
+
+/// Whether the open dialog asked for plugin command `id` with `params` and waits for its answer.
+pub(crate) fn asked(app: &RustGisApp, id: &str, params: &Value) -> bool {
+    app.ui
+        .plugin_dialog
+        .open
+        .as_ref()
+        .is_some_and(|d| d.asked.as_ref() == Some(params) && rustgis_engine::plugins::command_id(&d.plugin, &d.command) == id)
+}
+
+/// Plugin command `id` has run: the dialog waiting for it shows what it answered, unless it now
+/// waits for the web, to run again once that has come in.
+pub(crate) fn answered(app: &mut RustGisApp, id: &str, answer: &Result<Value, String>) {
+    let Some(d) = app.ui.plugin_dialog.open.as_mut() else { return };
+    let Some(params) = d.asked.as_ref() else { return };
+    if rustgis_engine::plugins::command_id(&d.plugin, &d.command) != id || app.session.plugin_command_waits(id, params) {
+        return;
+    }
+    d.asked = None;
+    d.result = Some(answer.as_ref().map(report).map_err(Clone::clone));
 }
 
 /// What a command answered, as the dialog shows it: its `report` text, or the answer itself
@@ -77,17 +99,23 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
     let m = &loaded.manifest;
     let Some(c) = m.commands.iter().find(|c| c.id == d.command) else { return };
     let lang = app.lang().code().to_string();
-
-    if let Some(frames) = d.running {
-        if frames >= FRAMES_SHOWN {
-            let id = rustgis_engine::plugins::command_id(&d.plugin, &d.command);
-            d.result = Some(app.run(&id, Value::Object(d.values.clone())).map(|v| report(&v)));
-            d.running = None;
-        } else {
-            d.running = Some(frames + 1);
-            ctx.request_repaint();
-        }
+    let id = rustgis_engine::plugins::command_id(&d.plugin, &d.command);
+    // A run that ended without an answer: another project opened before it started, or its
+    // downloads never came. The notices say which.
+    if let Some(params) = &d.asked
+        && !crate::pluginstart::waits(app, &id, params)
+    {
+        d.asked = None;
+        d.result = Some(Err(tl!("It stopped without an answer: see the notices.").to_string()));
     }
+    // Fields to fill in before it can run.
+    let missing: Vec<&str> = c
+        .form
+        .iter()
+        .filter(|f| f.required && d.values.get(&f.name).is_none_or(|v| v.is_null() || v.as_str() == Some("")))
+        .map(|f| m.translate(&lang, &f.label))
+        .collect();
+    let mut run = false;
 
     let mut open = true;
     let title = format!("{} › {}", m.translate(&lang, &m.name), m.translate(&lang, &c.label).replace('\n', " "));
@@ -108,11 +136,12 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                 // A field lists the fields of the layer chosen above it.
                 let mut layer: Option<String> = None;
                 for f in &c.form {
-                    let label = ui.label(m.translate(&lang, &f.label));
+                    let text = m.translate(&lang, &f.label);
+                    let mut label = ui.label(if f.required { format!("{text} *") } else { text.to_string() });
                     if !f.help.is_empty() {
-                        label.on_hover_text(m.translate(&lang, &f.help));
+                        label = label.on_hover_text(m.translate(&lang, &f.help));
                     }
-                    field(app, ui, f, &mut d.values, layer.as_deref(), m, &lang);
+                    field(app, ui, f, &mut d.values, layer.as_deref(), m, &lang).labelled_by(label.id);
                     if layer_kind(&f.kind).is_some() {
                         layer = d.values.get(&f.name).and_then(Value::as_str).map(str::to_string);
                     }
@@ -121,10 +150,15 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                let running = d.running.is_some();
-                if ui.add_enabled(!running, egui::Button::new(RichText::new(tl!("Run")).strong())).clicked() {
-                    d.running = Some(0);
-                    d.result = None;
+                let running = d.asked.is_some();
+                let button = ui.add_enabled(!running && missing.is_empty(), egui::Button::new(RichText::new(tl!("Run")).strong()));
+                let button = if missing.is_empty() {
+                    button
+                } else {
+                    button.on_disabled_hover_text(crate::i18n::fmt("Fill in: {fields}", &[("fields", &missing.join(", "))]))
+                };
+                if button.clicked() {
+                    run = true;
                 }
                 if running {
                     ui.spinner();
@@ -147,6 +181,15 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                 );
             }
         });
+    if run {
+        let params = Value::Object(d.values.clone());
+        d.result = None;
+        // Asked as a ribbon button would: errors before it starts are notices, and the answer.
+        match app.run_by_user(&id, params.clone()) {
+            Ok(_) => d.asked = Some(params),
+            Err(e) => d.result = Some(Err(e)),
+        }
+    }
     if open {
         app.ui.plugin_dialog.open = Some(d);
     } else {
@@ -166,30 +209,47 @@ fn layer_kind(kind: &str) -> Option<ParamKind> {
     })
 }
 
-/// A drop-down of `(value, label)` options for `values[key]`; an unset or vanished value
-/// becomes the first option.
+/// A drop-down of `(value, label)` options for `values[key]`. A required one never stays unset:
+/// an unset or vanished value becomes `start`, or the first option. An optional one offers `—`,
+/// which leaves it out, and starts there.
 fn combo(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
     values: &mut Map<String, Value>,
     key: &str,
     options: &[(String, String)],
-) {
+    required: bool,
+    start: Option<&str>,
+) -> egui::Response {
     let cur = values.get(key).and_then(Value::as_str).map(str::to_string);
-    if (cur.is_none() || !options.iter().any(|o| Some(&o.0) == cur.as_ref()))
-        && let Some(first) = options.first()
-    {
-        values.insert(key.to_string(), json!(first.0));
-    }
-    let cur = values.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
-    let shown = options.iter().find(|o| o.0 == cur).map(|o| o.1.clone()).unwrap_or_else(|| tl!("(none)").to_string());
-    egui::ComboBox::from_id_salt(id).selected_text(shown).width(280.0).show_ui(ui, |ui| {
-        for (v, label) in options {
-            if ui.selectable_label(*v == cur, label).clicked() {
+    let known = cur.as_ref().is_some_and(|c| options.iter().any(|o| o.0 == *c));
+    if !known {
+        let first = start.filter(|s| options.iter().any(|o| o.0 == *s)).or(options.first().map(|o| o.0.as_str()));
+        match first {
+            Some(v) if required => {
                 values.insert(key.to_string(), json!(v));
             }
+            _ => {
+                values.remove(key);
+            }
         }
-    });
+    }
+    let cur = values.get(key).and_then(Value::as_str).map(str::to_string);
+    let shown = cur.as_ref().and_then(|c| options.iter().find(|o| o.0 == *c)).map_or("—", |o| o.1.as_str());
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(shown)
+        .width(280.0)
+        .show_ui(ui, |ui| {
+            if !required && ui.selectable_label(cur.is_none(), "—").clicked() {
+                values.remove(key);
+            }
+            for (v, label) in options {
+                if ui.selectable_label(cur.as_deref() == Some(v), label).clicked() {
+                    values.insert(key.to_string(), json!(v));
+                }
+            }
+        })
+        .response
 }
 
 fn field(
@@ -200,7 +260,7 @@ fn field(
     layer: Option<&str>,
     m: &rustgis_engine::plugins::Manifest,
     lang: &str,
-) {
+) -> egui::Response {
     let id = ("plugin_form_field", f.name.as_str());
     if let Some(kind) = layer_kind(&f.kind) {
         let options: Vec<(String, String)> = app
@@ -211,8 +271,9 @@ fn field(
             .filter(|l| crate::panes::takes_layer(kind, l))
             .map(|l| (l.name.clone(), l.name.clone()))
             .collect();
-        combo(ui, id, values, &f.name, &options);
-        return;
+        // A required layer starts at the active one, when it is of the kind.
+        let active = app.session.active_layer.and_then(|a| app.session.map().layers.iter().find(|l| l.id == a)).map(|l| l.name.as_str());
+        return combo(ui, id, values, &f.name, &options, f.required, active);
     }
     match f.kind.as_str() {
         "field" | "numericField" => {
@@ -227,38 +288,130 @@ fn field(
                 })
                 .unwrap_or_default();
             // The field named like the default, when the layer has one.
-            if !values.contains_key(&f.name)
-                && let Some(d) = f.default.as_ref().and_then(Value::as_str)
-                && options.iter().any(|o| o.0 == d)
-            {
-                values.insert(f.name.clone(), json!(d));
-            }
-            combo(ui, id, values, &f.name, &options);
+            let named = f.default.as_ref().and_then(Value::as_str);
+            combo(ui, id, values, &f.name, &options, f.required, named)
         }
         "number" => {
             let mut x = values.get(&f.name).and_then(Value::as_f64).unwrap_or(0.0);
-            if ui.add(egui::DragValue::new(&mut x).speed(1.0)).changed() || !values.contains_key(&f.name) {
+            let r = ui.add(egui::DragValue::new(&mut x).speed(1.0));
+            if r.changed() || !values.contains_key(&f.name) {
                 // A whole number goes as one, for commands that read integers.
                 let v = if x.fract() == 0.0 && x.abs() < 1e15 { json!(x as i64) } else { json!(x) };
                 values.insert(f.name.clone(), v);
             }
+            r
         }
         "choice" => {
             let options: Vec<(String, String)> = f.choices.iter().map(|c| (c.clone(), m.translate(lang, c).to_string())).collect();
-            combo(ui, id, values, &f.name, &options);
+            combo(ui, id, values, &f.name, &options, f.required || f.default.is_some(), None)
         }
         "bool" => {
             let mut on = values.get(&f.name).and_then(Value::as_bool).unwrap_or(false);
-            if ui.checkbox(&mut on, "").changed() || !values.contains_key(&f.name) {
+            let r = ui.checkbox(&mut on, "");
+            if r.changed() || !values.contains_key(&f.name) {
                 values.insert(f.name.clone(), json!(on));
             }
+            r
         }
         // `text`.
         _ => {
             let mut s = values.get(&f.name).and_then(Value::as_str).unwrap_or_default().to_string();
-            if ui.add(egui::TextEdit::singleline(&mut s).desired_width(280.0)).changed() {
+            let r = ui.add(egui::TextEdit::singleline(&mut s).desired_width(280.0));
+            if r.changed() {
                 values.insert(f.name.clone(), json!(s));
             }
+            r
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::vec2;
+    use egui_kittest::kittest::Queryable;
+    use rustgis_engine::plugins;
+
+    /// The test plugin, with dialogs on its echo command `q` and its failing command `e`.
+    fn launch(plugin: &str) -> egui_kittest::Harness<'static, RustGisApp> {
+        let mut m: Value = serde_json::from_str(&plugins::testing::manifest(plugin, &["edit"])).unwrap();
+        let form = json!([
+            {"name": "input", "label": "Input", "kind": "vectorLayer", "required": true},
+            {"name": "other", "label": "Other", "kind": "pointLayer"},
+            {"name": "trees", "label": "Trees", "kind": "number", "default": 50},
+            {"name": "method", "label": "Method", "kind": "choice", "choices": ["a", "b"], "default": "b"},
+            {"name": "note", "label": "Note", "kind": "text", "required": true}
+        ]);
+        let commands = m["commands"].as_array_mut().unwrap();
+        commands.push(json!({"id": "q", "label": "Echo", "form": form}));
+        for c in commands.iter_mut().filter(|c| c["id"] == "e") {
+            c["form"] = json!([{"name": "trees", "label": "Trees", "kind": "number"}]);
+        }
+        let manifest = m.to_string();
+        let zip = plugins::testing::zip_of(&[("plugin.json", manifest.as_bytes()), ("plugin.wasm", &plugins::testing::wasm())]);
+        plugins::load(plugins::Package::from_zip(&zip).unwrap(), "test").unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1400.0, 860.0)).with_max_steps(64).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            RustGisApp::with_sample(),
+        );
+        h.run();
+        h
+    }
+
+    fn dialog<'a>(h: &'a egui_kittest::Harness<'static, RustGisApp>) -> &'a Dialog {
+        h.state().ui.plugin_dialog.open.as_ref().unwrap()
+    }
+
+    /// Run waits for the required fields, asks for the command as a ribbon button does, and
+    /// shows what it answered; the values come back when the dialog opens again.
+    #[test]
+    fn a_command_dialog_runs_with_its_values_and_shows_the_answer() {
+        let mut h = launch("ui-dialog");
+        // Its button (or Command Search, or a shortcut) opens the dialog instead of running it.
+        h.state_mut().run_by_user("plugin:ui-dialog/q", Value::Null).unwrap();
+        h.run();
+        assert!(dialog(&h).asked.is_none() && dialog(&h).result.is_none());
+        // The required layer is picked, the optional one left out, the defaults set.
+        let values = &dialog(&h).values;
+        let input = values["input"].as_str().unwrap().to_string();
+        assert!(h.state().session.map().layer_by_name(&input).is_some_and(|l| !l.is_raster()), "{input}");
+        assert!(!values.contains_key("other"), "{values:?}");
+        assert_eq!((values["trees"].clone(), values["method"].clone()), (json!(50), json!("b")));
+        // The note is required and empty: Run waits for it.
+        h.get_by_label("Run").click();
+        h.run();
+        assert!(dialog(&h).asked.is_none() && dialog(&h).result.is_none());
+        h.state_mut().ui.plugin_dialog.open.as_mut().unwrap().values.insert("note".into(), json!("hi"));
+        h.run();
+        h.get_by_label("Run").click();
+        h.step();
+        assert!(dialog(&h).asked.is_some(), "waits for the window to show it running");
+        h.run();
+        let Some(Ok(answer)) = &dialog(&h).result else { panic!("{:?}", dialog(&h).result) };
+        let echoed: Value = serde_json::from_str(answer).unwrap();
+        assert_eq!(echoed["params"], json!({"input": input, "trees": 50, "method": "b", "note": "hi"}));
+        // Another dialog keeps this one's values for when it opens again.
+        h.state_mut().ui.plugin_dialog.open.as_mut().unwrap().values.insert("trees".into(), json!(7));
+        h.state_mut().run("ui.pluginForm", json!({"plugin": "ui-dialog", "command": "e"})).unwrap();
+        h.run();
+        h.get_by_label("Run").click();
+        h.run();
+        assert!(matches!(&dialog(&h).result, Some(Err(e)) if e.ends_with("nope")), "{:?}", dialog(&h).result);
+        h.state_mut().run("ui.pluginForm", json!({"plugin": "ui-dialog", "command": "q"})).unwrap();
+        assert_eq!(dialog(&h).values["trees"], json!(7));
+        assert!(h.state_mut().run("ui.pluginForm", json!({"plugin": "ui-dialog", "command": "h"})).is_err(), "no dialog");
+        plugins::unload("ui-dialog");
+    }
+
+    /// A `report` text is shown as it is; any other answer as JSON, without its panel state.
+    #[test]
+    fn the_answer_shown_is_its_report() {
+        assert_eq!(report(&json!({"report": "3 classes\nKappa 0.91", "panel": {"values": {}}})), "3 classes\nKappa 0.91");
+        assert_eq!(report(&json!({"n": 1, "panel": {"values": {}}})), "{\n  \"n\": 1\n}");
+        assert_eq!(report(&Value::Null), "Done.");
     }
 }

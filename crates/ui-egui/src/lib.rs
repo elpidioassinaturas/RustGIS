@@ -2198,12 +2198,20 @@ impl RustGisApp {
 
     /// Runs a command the user asked for in the interface (a button, a menu, a shortcut, Command
     /// Search, a file dropped on the window): one that would replace a project with unsaved
-    /// changes asks to save them first, and runs once answered. Scripts, the AI Assistant and
-    /// attached agents run commands without asking ([`Self::run`]).
+    /// changes asks to save them first, and runs once answered; a plugin command with a dialog,
+    /// asked for without parameters, opens it. Scripts, the AI Assistant and attached agents run
+    /// commands without asking ([`Self::run`]).
     pub fn run_by_user(&mut self, id: &str, params: Value) -> Result<Value, String> {
         if saveprompt::asks(self, id) {
             saveprompt::ask(self, saveprompt::Discard::Replace(id.to_string(), params));
             return Ok(Value::Null);
+        }
+        // A plugin's with a dialog opens it, from the ribbon, Command Search or a shortcut alike
+        // (#1547): its Run gives the parameters.
+        if params.is_null()
+            && let Some(c) = rustgis_engine::plugins::command(id).filter(|c| !c.decl.form.is_empty())
+        {
+            return plugindialog::open(self, &json!({"plugin": c.plugin.manifest.id, "command": c.decl.id}));
         }
         // A plugin's may wait for a server: the window says so first (#1319).
         if id.starts_with(rustgis_engine::plugins::PREFIX) {
