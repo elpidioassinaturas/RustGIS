@@ -29654,6 +29654,8 @@ fn legends_label_layers() {
     // (The imported layout is the active one now; the rest goes to the first.)
     // The label follows its layer renamed, and goes with it removed, so a later layer of that
     // name isn't labelled unasked.
+    let lost = |s: &Session, from: usize| s.notices[from..].iter().filter(|n| n.text.contains("lost its label")).count();
+    let mark = s.notices.len();
     s.run("layer.rename", &json!({"layer": "Rivers", "name": "Hidrografia"})).unwrap();
     assert_eq!(labels(&s, id), [pair("Hidrografia", "Rios principais"), pair("Lakes", "Lagos")]);
     s.run("layer.remove", &json!({"layer": "Lakes"})).unwrap();
@@ -29661,6 +29663,10 @@ fn legends_label_layers() {
     // Renamed onto the name of a layer the legend lists, a layer shares that one's label (here
     // none) rather than giving it its own.
     s.run("layer.rename", &json!({"layer": "Hidrografia", "name": "Cities"})).unwrap();
+    // Its label is dropped, and said once for the four legends that had it (this one and the
+    // three layouts imported above); following a rename or a removal is not.
+    assert_eq!(lost(&s, mark), 1);
+    assert!(s.notices[mark..].iter().any(|n| n.text.contains("'Hidrografia', renamed 'Cities', lost its label in 4 legend(s)")));
     assert!(labels(&s, id).is_empty());
     // A WMS or WMTS layer is labelled by name too.
     let wms = json!({"url": "https://maps.example.org/wms/{bbox-epsg-3857}", "name": "Soils", "overlay": true, "legend": "https://maps.example.org/legend.png"});
