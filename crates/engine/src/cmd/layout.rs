@@ -2595,7 +2595,10 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
     };
     let l = s.project.layouts.get_mut(i).ok_or("no layout")?;
     let id = l.add(name, rect, k);
-    if p.get("columns").is_some_and(|v| !v.is_null()) {
+    // In columns, or with labels of its own (which may be wider than its box), it says what it
+    // loses in its box.
+    let labelled = kind == "legend" && p.get("labels").is_some_and(|v| !v.is_null());
+    if p.get("columns").is_some_and(|v| !v.is_null()) || labelled {
         say_legend_fit(s, i, id);
     }
     let mut out = json!({"element": id});
@@ -3423,7 +3426,9 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         || b(p, "hideOther").is_some()
         || p.get("exclude").is_some_and(|v| !v.is_null())
         || p.get("labels").is_some_and(|v| !v.is_null());
-    if new_columns.is_some() || (in_columns && refitted) {
+    // Labels given are told in one column too: a label is text chosen for the box.
+    let labelled = matches!(&e.kind, ElementKind::Legend { .. }) && p.get("labels").is_some_and(|v| !v.is_null());
+    if new_columns.is_some() || (in_columns && refitted) || labelled {
         say_legend_fit(s, li, id);
     }
     if let Some(text) = p.get("grid").and_then(|grid| grid.get("crs")).and_then(Value::as_str) {

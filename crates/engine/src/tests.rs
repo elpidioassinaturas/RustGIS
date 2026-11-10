@@ -29689,6 +29689,35 @@ fn legends_label_layers() {
     assert!(!serde_json::to_string(&s.project.layouts[0].element(id).unwrap()).unwrap().contains("labels"));
 }
 
+/// A legend given labels says when they don't fit its box, added or changed, in one column too
+/// (#1654); labels that fit say nothing.
+#[test]
+fn a_legends_labels_say_when_they_dont_fit() {
+    let mut s = Session::new(sample::world_project());
+    s.run("layout.new", &json!({"name": "Rótulos"})).unwrap();
+    let said = |s: &Session, mark: u64| s.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<_>>().join(" | ");
+    let cut = "the ends of long labels are left out";
+    let box_ = json!({"kind": "legend", "x": 10, "y": 10, "w": 150, "h": 180});
+    let with = |labels: Value| {
+        let mut p = box_.clone();
+        p["labels"] = labels;
+        p
+    };
+    let mark = s.notice_mark();
+    let id = s.run("layout.addElement", &with(json!({"Rivers": "Rios"}))).unwrap()["element"].as_u64().unwrap();
+    assert_eq!(said(&s, mark), "");
+    let long = "Rios principais da América do Sul ".repeat(5);
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &with(json!({"Rivers": long}))).unwrap();
+    assert!(said(&s, mark).contains(cut), "{}", said(&s, mark));
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "labels": {"Rivers": long}})).unwrap();
+    assert!(said(&s, mark).contains(cut), "{}", said(&s, mark));
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "labels": {"Rivers": null}})).unwrap();
+    assert_eq!(said(&s, mark), "");
+}
+
 /// A point layer of events, one a month through 2015 (two in March), with their dates as text,
 /// epoch milliseconds and years.
 fn timed_events() -> Session {
