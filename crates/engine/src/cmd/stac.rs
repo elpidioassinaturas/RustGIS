@@ -974,6 +974,9 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
             }
         };
         // The credit each tile layer of the cube shows (a catalog entry's, as JAXA's terms ask).
+        if p.get("attribution").is_some_and(|v| !v.is_null() && !v.is_string()) {
+            return Err("attribution is text, at most 500 characters".into());
+        }
         let attribution = ps(p, "attribution").map(str::trim).filter(|a| !a.is_empty()).map(str::to_string);
         // A project keeps 500 characters of a tile layer's credit (TileLayer::repair): a longer one
         // is refused, not cut on the way.

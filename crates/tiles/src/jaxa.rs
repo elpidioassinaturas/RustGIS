@@ -197,18 +197,23 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
         return Err("JAXA Earth's catalog has no dataset list".into());
     }
     let mut c = Catalog { datasets: datasets.len(), cut, ..Catalog::default() };
-    let mut seen = std::collections::HashSet::new();
+    // The datasets read as cubes so far, by id.
+    let mut read = std::collections::HashSet::new();
     for (heading, f) in &datasets {
         let id = f.get("id").map(String::as_str).unwrap_or("");
         let title = f.get("title").map(String::as_str).filter(|t| !t.is_empty()).unwrap_or(heading.as_str());
-        // Listed twice, it is one dataset: the listing again is left out, and says so.
-        if !id.is_empty() && !seen.insert(id) {
+        // Listed again once read as cubes, it is one dataset: the listing again is left out, and
+        // says so. One whose earlier listing couldn't be a cube is read on its own.
+        if !id.is_empty() && read.contains(id) {
             let why = "listed again; its first listing, further up the catalog, stands for it".to_string();
             c.left_out.push(LeftOut { id: clip(id, 120), title: clip(title, 200), why });
             continue;
         }
         match cubes_of(id, title, f, &mut c.cut) {
-            Ok(es) => c.entries.extend(es),
+            Ok(es) => {
+                read.insert(id);
+                c.entries.extend(es)
+            }
             Err(why) => {
                 // A heading's cut is noted where it is read; a title of its own, here.
                 if title != heading.as_str() {
@@ -673,6 +678,11 @@ mod tests {
         let twice = parse(&format!("# Dataset List\n## A\n{good}\n## B\n{good}\n")).unwrap();
         assert_eq!((twice.datasets, twice.entries.len(), twice.left_out.len()), (2, 1, 1));
         assert!(twice.left_out[0].id == "JAXA.Test_daily" && twice.left_out[0].why.contains("listed again"), "{:?}", twice.left_out);
+        // A first listing that can't be a cube doesn't stand for a later one that can.
+        let polar = good.replace("* epsg: 4326", "* epsg: 3031");
+        let later = parse(&format!("# Dataset List\n## A\n{polar}\n## B\n{good}\n")).unwrap();
+        assert_eq!((later.entries.len(), later.left_out.len()), (1, 1));
+        assert!(later.left_out[0].why.contains("polar"), "{:?}", later.left_out);
         assert!(c.left_out.is_empty(), "{:?}", c.left_out);
         assert!(c.cut.is_empty() && twice.cut.is_empty());
         // Text too long is cut, said where and by how much, and its name ends in "…"; its keywords
