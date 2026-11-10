@@ -1098,42 +1098,7 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 }
             }
         }
-        dates.sort_by(f64::total_cmp);
-        dates.dedup();
-        // At most MAX_CUBE_ITEMS dates, well under the slider's steps; were it ever more, the cube
-        // is refused rather than left with files the slider can't reach.
-        if dates.len() > rustgis_map::time::MAX_STEPS {
-            undo(s);
-            return Err(format!("{} dates; the time slider takes {} at most", dates.len(), rustgis_map::time::MAX_STEPS));
-        }
-        // The slider over the cube's dates: on over them when it is off; when it is on, taking
-        // them in (its own dates and the cube's, or its span widened to theirs), so every file
-        // can be reached.
-        let slider = match s.map().time.as_ref() {
-            None => {
-                let d: Vec<Value> = dates.iter().map(|d| json!(d)).collect();
-                json!({"dates": d})
-            }
-            Some(t) if !t.dates.is_empty() => {
-                let mut all: Vec<f64> = t.dates.iter().chain(&dates).copied().collect();
-                all.sort_by(f64::total_cmp);
-                all.dedup();
-                if all.len() > rustgis_map::time::MAX_STEPS {
-                    undo(s);
-                    return Err(format!(
-                        "the time slider's dates and the cube's make {}, more than its {} steps: take a shorter period",
-                        all.len(),
-                        rustgis_map::time::MAX_STEPS
-                    ));
-                }
-                json!({"dates": all, "date": t.current})
-            }
-            Some(t) => {
-                let (first, last) = (dates.first().copied().unwrap_or(t.start), dates.last().copied().unwrap_or(t.end));
-                json!({"start": t.start.min(first), "end": t.end.max(last), "date": t.current})
-            }
-        };
-        if let Err(e) = super::time::set(s, &slider) {
+        if let Err(e) = cube_slider(s, &mut dates, &json!({})) {
             undo(s);
             return Err(e);
         }
@@ -1146,6 +1111,44 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         }
         Ok(out)
     }
+}
+
+/// Turns the time slider on over a data cube's dates (sorted and deduplicated here), or, when it
+/// is on, takes them in (its own dates and the cube's, or its span widened to theirs), so every
+/// file can be reached. `fresh`: what else a slider turned on here is set to (AlphaEarth's years
+/// shown as years). Refused, the slider unchanged, when the dates are more than its steps: a cube
+/// left with files the slider can't reach would say nothing of them.
+pub(crate) fn cube_slider(s: &mut Session, dates: &mut Vec<f64>, fresh: &Value) -> Result<(), String> {
+    dates.sort_by(f64::total_cmp);
+    dates.dedup();
+    if dates.len() > rustgis_map::time::MAX_STEPS {
+        return Err(format!("{} dates; the time slider takes {} at most", dates.len(), rustgis_map::time::MAX_STEPS));
+    }
+    let slider = match s.map().time.as_ref() {
+        None => {
+            let mut q = if fresh.is_object() { fresh.clone() } else { json!({}) };
+            q["dates"] = json!(dates);
+            q
+        }
+        Some(t) if !t.dates.is_empty() => {
+            let mut all: Vec<f64> = t.dates.iter().chain(dates.iter()).copied().collect();
+            all.sort_by(f64::total_cmp);
+            all.dedup();
+            if all.len() > rustgis_map::time::MAX_STEPS {
+                return Err(format!(
+                    "the time slider's dates and the cube's make {}, more than its {} steps: take a shorter period",
+                    all.len(),
+                    rustgis_map::time::MAX_STEPS
+                ));
+            }
+            json!({"dates": all, "date": t.current})
+        }
+        Some(t) => {
+            let (first, last) = (dates.first().copied().unwrap_or(t.start), dates.last().copied().unwrap_or(t.end));
+            json!({"start": t.start.min(first), "end": t.end.max(last), "date": t.current})
+        }
+    };
+    super::time::set(s, &slider).map(|_| ())
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
