@@ -383,10 +383,10 @@ pub(crate) fn box_picked(app: &mut RustGisApp, grid: &[Option<Coord>], side: usi
 
 /// The box `[west, south, east, north]` around the places on `grid` (degrees, `side` by `side`,
 /// column by column, `None` off the globe): a box wider than the world is the world, and one
-/// across the antimeridian has its west east of its east. A flat map gives longitudes past ±180
-/// across it (its copies of the world); the globe wraps them, so there each place's is read from
-/// a neighbour's already read, and a box over more than 180° of longitude keeps its side. A box
-/// around a pole (`pole`, its latitude) reaches it, all the way round.
+/// across the antimeridian has a west longitude greater than its east. A flat map gives
+/// longitudes past ±180 across it (its copies of the world); the globe wraps them, so there each
+/// place's is read from a neighbour's already read, and a box over more than 180° of longitude
+/// keeps its side. A box around a pole (`pole`, its latitude) reaches it, all the way round.
 fn box_of(grid: &[Option<Coord>], side: usize, globe: bool, pole: Option<f64>) -> Option<[f64; 4]> {
     if grid.len() != side * side {
         return None;

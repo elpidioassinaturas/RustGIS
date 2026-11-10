@@ -891,7 +891,8 @@ fn panel_picks_take_a_place_on_the_map() {
     // Degrees alone are a place (a script's); half a pair of map coordinates is left out.
     st.set_values(&decl, &json!({"spot": {"lon": 10, "lat": 20, "x": 5}}));
     assert_eq!(st.values["spot"], json!({"lon": 10.0, "lat": 20.0}));
-    // A box: west, south, east and north; a west east of its east crosses the antimeridian.
+    // A box: west, south, east and north; one whose west is greater than its east crosses the
+    // antimeridian.
     assert_eq!(
         st.set_values(&decl, &json!({"area": {"bbox": [170, -10, -170, 10], "extent": [1, 2, 3, 4], "crs": "EPSG:3857"}})),
         ["area"]
@@ -934,6 +935,14 @@ fn panel_picks_take_a_place_on_the_map() {
     let dropped = st.apply(&decl, &json!({"values": {"seed": held.clone()}}));
     assert_eq!(dropped.notice(), None, "{dropped:?}");
     assert_eq!(st.values["seed"], held);
+    // Given back with its numbers written otherwise (whole degrees as integers), it is the same
+    // place, and as quiet.
+    assert_eq!(st.set_values(&decl, &json!({"seed": {"lon": 10, "lat": 0}, "area": {"bbox": [-180, -10, 180, 10]}})), ["seed", "area"]);
+    let held = (st.values["seed"].clone(), st.values["area"].clone());
+    let dropped = st.apply(&decl, &json!({"values": {"seed": {"lon": 10, "lat": 0}, "area": {"bbox": [-180, -10, 180, 10]}}}));
+    assert_eq!(dropped.notice(), None, "{dropped:?}");
+    assert_eq!((st.values["seed"].clone(), st.values["area"].clone()), held);
+    st.apply(&decl, &json!({"values": {"area": null}}));
     assert_eq!(st.values["area"], Value::Null);
     assert_eq!(st.picked("area"), None);
     // The user's own values clear it too.

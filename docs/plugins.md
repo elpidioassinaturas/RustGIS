@@ -493,17 +493,17 @@ site to report on, an area to download.
 
   A point has `lon` and `lat` in degrees (WGS 84; on another body's map, that body's) and `x` and
   `y` in the map's coordinate system, `crs`: its EPSG or ESRI code (`EPSG:3857` for Web Mercator
-  and the globe), or the PROJ definition of another projection (`+proj=robin …`). A box has
-  `bbox`, `[west, south, east, north]` in degrees (a west east of its east crosses the
-  antimeridian), and `extent`, `[xmin, ymin, xmax, ymax]`, the box around it in the map's
-  coordinates, with `crs`. A box across the antimeridian is measured through it on Web Mercator
-  and the globe, unwrapped: its `xmax` goes past the world's edge (20037508.34 m). On a
-  projection whose edge it crosses (Robinson's at 180°, for one) its two parts sit at the map's
-  two sides, and `extent` is the box around both, as wide as the map. A plugin that needs boxes
-  inside the world splits `bbox` at the antimeridian. A place on another body's map, or one the
-  projection can't show, has only its degrees, and on Web Mercator and the globe one past ±85.05°
-  of latitude has its map coordinates at that edge, each with a warning. A place keeps the map
-  coordinates of the map it was picked on, which its `crs` names, until it is picked again.
+  and the globe), or the PROJ definition of another projection (`+proj=robin …`). A box has `bbox`,
+  `[west, south, east, north]` in degrees (a `bbox` whose west longitude is greater than its east
+  crosses the antimeridian), and `extent`, `[xmin, ymin, xmax, ymax]`, the surrounding box in the
+  map's coordinates, with `crs`. A box across the antimeridian is measured through it on Web
+  Mercator and the globe, unwrapped: its `xmax` goes past the world's edge (20037508.34 m). On a
+  projection whose edge it crosses (Robinson's at 180°, for one) its two parts sit at the map's two
+  sides, and `extent` is the box around both, as wide as the map. A plugin that needs boxes inside
+  the world splits `bbox` at the antimeridian. A place on another body's map, or one the projection
+  can't show, has only its degrees, and on Web Mercator and the globe one past ±85.05° of latitude
+  has its map coordinates at that edge, each with a warning. A place keeps the map coordinates of
+  the map it was picked on, which its `crs` names, until it is picked again.
 - The pane shows the place picked last under the pick, and the map marks it (a box's outline)
   while the panel is open.
 - A plugin can clear a pick, `"values": {"seed": null}`, but not pick a place itself: another

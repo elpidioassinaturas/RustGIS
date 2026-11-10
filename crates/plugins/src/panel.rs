@@ -263,11 +263,11 @@ fn whole(v: &Value) -> Option<i64> {
 }
 
 /// A pick's value from `v`, as it is kept: `null` for none; for a point `{"lon", "lat"}`, for a
-/// box `{"bbox": [west, south, east, north]}` (a west east of its east crosses the antimeridian),
-/// in degrees, with what the host works out in the map's coordinates (`x` and `y`, or `extent`
-/// `[xmin, ymin, xmax, ymax]`, and `crs`) when they are right. `None` for anything else. What it
-/// leaves out of an object it takes (a field it doesn't know, a wrong `extent` or `crs`) is
-/// reported by [`PanelState::value_report`].
+/// box `{"bbox": [west, south, east, north]}` (one whose west longitude is greater than its east
+/// crosses the antimeridian), in degrees, with what the host works out in the map's coordinates
+/// (`x` and `y`, or `extent` `[xmin, ymin, xmax, ymax]`, and `crs`) when they are right. `None`
+/// for anything else. What it leaves out of an object it takes (a field it doesn't know, a wrong
+/// `extent` or `crs`) is reported by [`PanelState::value_report`].
 pub fn pick_value(item: &PanelItemDecl, v: &Value) -> Option<Value> {
     if v.is_null() {
         return Some(Value::Null);
@@ -927,12 +927,14 @@ impl PanelState {
         }
         if let Some(values) = update.get("values") {
             // A plugin can clear a pick, not pick a place itself: the others are refused, but for
-            // the place held given back (a plugin answering its whole panel).
+            // the place held given back (a plugin answering its whole panel), compared as it would
+            // be kept, so its numbers written otherwise (`10` for `10.0`) are the same place.
             let mut values = values.clone();
             let mut placed = Vec::new();
             if let Some(o) = values.as_object_mut() {
                 o.retain(|id, v| {
-                    let refused = !v.is_null() && decl.item(id).is_some_and(|d| d.kind == "pick") && self.values.get(id) != Some(v);
+                    let refused = !v.is_null()
+                        && decl.item(id).filter(|d| d.kind == "pick").is_some_and(|d| pick_value(d, v).as_ref() != self.values.get(id));
                     if refused {
                         placed.push(id.clone());
                     }
