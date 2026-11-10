@@ -330,20 +330,10 @@ fn combo(
         .response
 }
 
-/// The number typed in `text`: an integer exactly, as one (for commands that read integers); a
-/// whole number written otherwise (`2.0`, `1e3`) as an integer too, below 2^53, where a float
-/// still holds each; others as floats. `None` when empty, not a number, or an integer past
-/// `i64`, which a float would round unseen.
+/// The number typed in `text`, read as the manifest reads a number default
+/// ([`rustgis_engine::plugins::form_number`]).
 fn number(text: &str) -> Option<Value> {
-    let t = text.trim();
-    if let Ok(i) = t.parse::<i64>() {
-        return Some(json!(i));
-    }
-    if t.strip_prefix(['-', '+']).unwrap_or(t).bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let x = t.parse::<f64>().ok().filter(|x| x.is_finite())?;
-    Some(if x.fract() == 0.0 && x.abs() < 9_007_199_254_740_992.0 { json!(x as i64) } else { json!(x) })
+    rustgis_engine::plugins::form_number(text)
 }
 
 fn field(

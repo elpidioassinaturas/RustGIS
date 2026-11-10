@@ -434,6 +434,22 @@ fn check_text(what: &str, s: &str, required: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// The number in `text`, as a command dialog's number field reads it and sends it: an integer
+/// exactly, as one (for commands that read integers); a whole number written otherwise (`2.0`,
+/// `1e3`) as an integer too, below 2^53, where a float still holds each; others as floats.
+/// `None` when empty, not a number, or an integer past `i64`, which a float would round unseen.
+pub fn form_number(text: &str) -> Option<serde_json::Value> {
+    let t = text.trim();
+    if let Ok(i) = t.parse::<i64>() {
+        return Some(serde_json::json!(i));
+    }
+    if t.strip_prefix(['-', '+']).unwrap_or(t).bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let x = t.parse::<f64>().ok().filter(|x| x.is_finite())?;
+    Some(if x.fract() == 0.0 && x.abs() < 9_007_199_254_740_992.0 { serde_json::json!(x as i64) } else { serde_json::json!(x) })
+}
+
 /// Checks what a dialog's fields need beyond a tool parameter's, so that nothing is lost unseen:
 /// a default the field can show and send (a number, or a number written as text, for `number`;
 /// `true` or `false` for `bool`; one of its choices for `choice`; text for the other kinds), and
@@ -445,7 +461,7 @@ fn check_form(owner: &str, form: &[ParamDecl]) -> Result<(), String> {
     for p in form {
         if let Some(d) = &p.default {
             let fits = match p.kind.as_str() {
-                "number" => d.is_number() || d.as_str().is_some_and(|t| t.trim().parse::<f64>().is_ok_and(f64::is_finite)),
+                "number" => d.is_number() || d.as_str().is_some_and(|t| form_number(t).is_some()),
                 "bool" => d.is_boolean(),
                 "choice" => d.as_str().is_some_and(|t| p.choices.iter().any(|c| c == t)),
                 _ => d.is_string(),

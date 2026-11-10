@@ -247,7 +247,8 @@ fn command_dialog_fields_are_checked() {
     m["commands"][0]["form"][1] = json!({"name": "samples", "label": "Samples", "kind": "polygonLayer"});
     m["commands"][0]["form"][4]["default"] = json!("50");
     assert!(Manifest::parse(&m.to_string()).is_ok());
-    for (i, wrong) in [(4, json!("many")), (2, json!(5)), (4, json!(true))] {
+    // An integer past i64 as text would be rounded or dropped: refused like other wrong defaults.
+    for (i, wrong) in [(4, json!("many")), (2, json!(5)), (4, json!(true)), (4, json!("99999999999999999999"))] {
         let mut m = m.clone();
         m["commands"][0]["form"][i]["default"] = wrong;
         let e = Manifest::parse(&m.to_string()).unwrap_err();
