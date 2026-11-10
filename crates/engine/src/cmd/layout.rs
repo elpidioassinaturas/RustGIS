@@ -969,7 +969,8 @@ fn landscape_suits(aspect: f64, short: f64, long: f64, style: Style) -> bool {
 /// command that adds a layout, and a locator map, to the project yet. Its cost grows with the
 /// map's features: placing the surrounds draws the frame once on a grid of 384 cells, and when no
 /// shape of the legend fits, the search draws it at most four times more, once per scale it tries,
-/// each time on a view wider than the frame that a streamed layer is read for, waited for here
+/// each time on a view wider than the frame that a streamed layer is read for, waited for here,
+/// and where the projection stretches, up to four moved frames per scale on their own
 /// (#1379; the whole command took about 0.7 s on a 14 MB geology map, 0.2 s before the search, and
 /// 0.9 s with its layers read in place).
 fn publication(s: &mut Session, p: &Value) -> CmdResult {
@@ -2001,16 +2002,34 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     let (cx, cy) = (at.x - dx / mm, at.y + dy / mm);
                     let there = if still { Some(centred) } else { flat.inverse(Coord::new(cx, cy)) };
                     let Some(there) = there else { continue };
-                    // The frame moved east by `dx` and south by `dy` is the wide one's part that far
-                    // west and north of its middle.
-                    let mut moved = crop_cells(whole_frame, wide, (slack_x - dx, slack_y - dy), (fw, fh));
-                    // The extent on the page: what is outside it is free once veiled.
+                    // A frame is drawn at its own centre's ground scale, which a move changes where
+                    // the projection stretches (Web Mercator's, with the latitude; a conic's, a
+                    // little): the extent is placed on the page at the moved centre's scale, and a
+                    // move that leaves it out of its margins there isn't made. The frame moved east
+                    // by `dx` and south by `dy` is the wide one's part that far west and north of
+                    // its middle while that scale moves a corner of it half a millimetre at most;
+                    // past that, it is drawn on its own (what is context then judged on itself).
+                    let here_mm = mm * flat.ground_per_unit(Coord::new(cx, cy)) / flat.ground_per_unit(asked.center());
                     let clip = (
-                        fx + fw / 2.0 + (asked.min_x - cx) * mm,
-                        fy + fh / 2.0 - (asked.max_y - cy) * mm,
-                        asked.width() * mm,
-                        asked.height() * mm,
+                        fx + fw / 2.0 + (asked.min_x - cx) * here_mm,
+                        fy + fh / 2.0 - (asked.max_y - cy) * here_mm,
+                        asked.width() * here_mm,
+                        asked.height() * here_mm,
                     );
+                    let kept_whole = clip.0 >= fx + left - 0.5
+                        && clip.1 >= fy + top - 0.5
+                        && clip.0 + clip.2 <= fx + fw - right + 0.5
+                        && clip.1 + clip.3 <= fy + fh - bottom + 0.5;
+                    if !still && !kept_whole {
+                        continue;
+                    }
+                    let drift = (1.0 - flat.ground_per_unit(Coord::new(cx, cy)) / flat.ground_per_unit(at)).abs() * fw.hypot(fh) / 2.0;
+                    let mut moved = if drift <= 0.5 {
+                        crop_cells(whole_frame, wide, (slack_x - dx, slack_y - dy), (fw, fh))
+                    } else {
+                        let Some(own) = crate::render::layout::frame_coverage(s.map_mut(), there, tried, fw, fh, 384) else { continue };
+                        own
+                    };
                     if veil {
                         let (gw, gh) = (moved.0 as usize, moved.1 as usize);
                         for (i, cell) in moved.2.iter_mut().enumerate() {

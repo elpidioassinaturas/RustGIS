@@ -7636,6 +7636,79 @@ fn a_publication_without_a_colorbar_sizes_the_legend_box_to_the_legend() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A moved frame is drawn at its own centre's ground scale (Web Mercator's changes with the
+/// latitude), so the extent drawn there is where the search placed it: whole in the frame, under
+/// its outline, north and south of the equator.
+#[test]
+fn a_publication_map_moved_off_its_latitude_draws_the_extent_where_it_was_placed() {
+    use rustgis_geom::{Coord, Extent};
+    let dir = std::env::temp_dir().join(format!("rustgis-move-latitude-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, fill, extent) in [
+        ("north", [-30.0, 35.0, 70.0, 82.0], [10.0, 57.0, 30.0, 61.0]),
+        ("south", [-75.0, -40.0, -25.0, 5.0], [-52.0, -23.0, -40.0, -19.0]),
+    ] {
+        let path = dir.join(format!("{name}.geojson"));
+        let [w, s0, e, n] = fill;
+        let ring = json!([[[w, s0], [e, s0], [e, n], [w, n], [w, s0]]]);
+        let fc = json!({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": ring}}]});
+        std::fs::write(&path, fc.to_string()).unwrap();
+        let mut s = Session::new(Project::default());
+        for _ in 0..30 {
+            s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+        }
+        let r = s.run("layout.publication", &json!({"profile": "a4-portrait", "extent": extent, "author": "", "locator": "none"})).unwrap();
+        let l = s.project.layouts.last().unwrap();
+        let frame = l.elements.iter().find(|e| e.name == "Map Frame").unwrap();
+        let rustgis_map::layout::ElementKind::MapFrame { center, scale, .. } = &frame.kind else {
+            panic!("{name}: the Map Frame is no map frame")
+        };
+        let pt = rustgis_map::layout::PT_PER_MM;
+        let cam = rustgis_map::layout::frame_camera(s.map(), *center, *scale, 0.0, 0.0);
+        // The extent's edges as the frame draws them, in mm on the page.
+        let asked = Extent::new(extent[0], extent[1], extent[2], extent[3]);
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for i in 0..=32 {
+            let t = f64::from(i) / 32.0;
+            let (x, y) = (asked.min_x + asked.width() * t, asked.min_y + asked.height() * t);
+            for c in [Coord::new(x, asked.min_y), Coord::new(x, asked.max_y), Coord::new(asked.min_x, y), Coord::new(asked.max_x, y)] {
+                let Some(m) = s.map().to_map(c) else { continue };
+                let (sx, sy) = cam.to_screen(m, frame.w * pt, frame.h * pt);
+                (x0, y0, x1, y1) = (x0.min(sx / pt), y0.min(sy / pt), x1.max(sx / pt), y1.max(sy / pt));
+            }
+        }
+        let drawn = (frame.x + x0, frame.y + y0, frame.x + x1, frame.y + y1);
+        assert!(
+            drawn.0 >= frame.x - 0.5
+                && drawn.1 >= frame.y - 0.5
+                && drawn.2 <= frame.x + frame.w + 0.5
+                && drawn.3 <= frame.y + frame.h + 0.5,
+            "{name}: the extent drawn at {drawn:?} isn't whole in the frame ({}, {}, {}, {}): {r}",
+            frame.x,
+            frame.y,
+            frame.w,
+            frame.h
+        );
+        // The outline follows the extent as drawn, but where the margins clip it.
+        if let Some(o) = l.elements.iter().find(|e| e.name == "Extent Outline") {
+            let margin = 15.0;
+            for (side, at, want, edge) in [
+                ("left", o.x, drawn.0, frame.x),
+                ("top", o.y, drawn.1, frame.y),
+                ("right", o.x + o.w, drawn.2, frame.x + frame.w),
+                ("bottom", o.y + o.h, drawn.3, frame.y + frame.h),
+            ] {
+                assert!(
+                    (at - want).abs() <= 0.5 || (at - edge).abs() <= margin,
+                    "{name}: the outline's {side} at {at:.1}, the extent's at {want:.1}: {r}"
+                );
+            }
+        }
+        eprintln!("{name}: shift {} veiled {} scale {}", r["mapShift"], r["veiled"], r["scale"]);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A moved frame's coverage cut from one drawn wide enough for every move is the coverage of the
 /// moved frame drawn on its own, give or take the cells along the edges of what it draws.
 #[test]
