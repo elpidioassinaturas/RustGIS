@@ -47,18 +47,25 @@ pub fn open(app: &mut RustGisApp, p: &Value) -> Result<Value, String> {
     let state = &mut app.ui.plugin_dialog;
     // The dialog it replaces keeps its values too.
     if let Some(d) = state.open.take() {
-        state.kept.insert((d.plugin, d.command), d.values);
+        let form = rustgis_engine::plugins::get(&d.plugin)
+            .and_then(|p| p.manifest.commands.iter().find(|c| c.id == d.command).map(|c| c.form.clone()))
+            .unwrap_or_default();
+        state.kept.insert((d.plugin, d.command), keep(&d.values, &form));
     }
-    let defaults: Map<String, Value> = c.form.iter().filter_map(|f| f.default.clone().map(|d| (f.name.clone(), d))).collect();
+    // Defaults the field can show: one of another kind would be sent unseen.
+    let defaults: Map<String, Value> =
+        c.form.iter().filter_map(|f| f.default.clone().filter(|d| fits(f, d)).map(|d| (f.name.clone(), d))).collect();
     // Kept values where they still fit the form, which a newer version of the plugin may have
-    // changed: a field gone is dropped, and one of another kind starts over at its default.
+    // changed: a field left empty stays empty, a field gone is dropped, and one of another kind,
+    // or added since, starts at its default.
     let values = match state.kept.get(&key) {
         Some(kept) => c
             .form
             .iter()
-            .filter_map(|f| {
-                let v = kept.get(&f.name)?;
-                if fits(f, v) { Some((f.name.clone(), v.clone())) } else { defaults.get(&f.name).map(|d| (f.name.clone(), d.clone())) }
+            .filter_map(|f| match kept.get(&f.name) {
+                Some(Value::Null) => None,
+                Some(v) if fits(f, v) => Some((f.name.clone(), v.clone())),
+                _ => defaults.get(&f.name).map(|d| (f.name.clone(), d.clone())),
             })
             .collect(),
         None => defaults,
@@ -87,13 +94,43 @@ pub(crate) fn answered(app: &mut RustGisApp, id: &str, answer: &Result<Value, St
     }
     let Some(d) = app.ui.plugin_dialog.open.as_mut() else { return };
     d.asked = None;
-    d.result = Some(answer.as_ref().map(report).map_err(Clone::clone));
+    d.result = Some(answer.as_ref().map(|a| shown(report(a))).map_err(|e| shown(e.clone())));
+}
+
+/// A dialog's values as kept when it closes: with `null` for each field left empty, which tells
+/// it apart from a field a newer version of the plugin adds (that one starts at its default).
+fn keep(values: &Map<String, Value>, form: &[ParamDecl]) -> Map<String, Value> {
+    let mut kept = values.clone();
+    for f in form {
+        kept.entry(f.name.clone()).or_insert(Value::Null);
+    }
+    kept
+}
+
+/// The most of an answer the dialog shows, in bytes: a longer one would hold the window (in a
+/// test, a frame took 100 ms with 1 MB shown and 1.9 s with 16 MB; 11 ms with this much).
+const SHOWN: usize = 64 * 1024;
+
+/// `text` as the dialog shows it: its first [`SHOWN`] bytes, and how much more there is.
+fn shown(mut text: String) -> String {
+    if text.len() <= SHOWN {
+        return text;
+    }
+    let mut end = SHOWN;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let more = text[end..].chars().count();
+    text.truncate(end);
+    text.push('\n');
+    text.push_str(&crate::i18n::fmt("… {n} more characters not shown", &[("n", &more.to_string())]));
+    text
 }
 
 /// Whether `v` is a value field `f` gives: a number, a checkbox's bool, or a name or text.
 fn fits(f: &ParamDecl, v: &Value) -> bool {
     match f.kind.as_str() {
-        "number" => v.is_number(),
+        "number" => v.is_number() || v.as_str().is_some_and(|t| number(t).is_some()),
         "bool" => v.is_boolean(),
         _ => v.is_string(),
     }
@@ -227,7 +264,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
     if open {
         app.ui.plugin_dialog.open = Some(d);
     } else {
-        app.ui.plugin_dialog.kept.insert((d.plugin, d.command), d.values);
+        app.ui.plugin_dialog.kept.insert((d.plugin, d.command), keep(&d.values, &c.form));
     }
 }
 
@@ -398,7 +435,8 @@ mod tests {
         // Echoes too (the test plugin answers by the id's first letter), with optional fields only.
         commands.push(json!({"id": "qq", "label": "Echo Optional", "form": [
             {"name": "count", "label": "Count", "kind": "number"},
-            {"name": "flag", "label": "Flag", "kind": "bool"}
+            {"name": "flag", "label": "Flag", "kind": "bool"},
+            {"name": "label", "label": "Label", "kind": "text", "default": 5}
         ]}));
         for c in commands.iter_mut().filter(|c| c["id"] == "e") {
             c["form"] = json!([{"name": "trees", "label": "Trees", "kind": "number"}]);
@@ -463,7 +501,8 @@ mod tests {
         plugins::unload("ui-dialog");
     }
 
-    /// Optional numbers and checkboxes never set are left out. `{}` opens the dialog as `null`
+    /// Optional numbers and checkboxes never set are left out, and so is a default of the wrong
+    /// kind (a number for a text field), which the field couldn't show. `{}` opens the dialog as `null`
     /// does, and its Run with no values runs the command rather than opening the dialog again.
     #[test]
     fn optional_fields_left_alone_are_left_out() {
@@ -513,26 +552,34 @@ mod tests {
     }
 
     /// Values kept from before a plugin changed its form are taken only where they still fit:
-    /// a field gone or of another kind starts over, at its default if it has one.
+    /// a field gone or of another kind starts over, and a field added since starts at its
+    /// default; one the user left empty stays empty.
     #[test]
     fn kept_values_that_no_longer_fit_start_over() {
         let mut h = launch("ui-dialog-stale");
-        let kept = json!({"input": "Countries", "note": 50, "trees": "many", "gone": 1});
+        // `other` was left empty; `trees` came with an update, after these values were kept.
+        let kept = json!({"input": "Countries", "note": 50, "other": null, "gone": 1});
         let kept = kept.as_object().cloned().unwrap();
         h.state_mut().ui.plugin_dialog.kept.insert(("ui-dialog-stale".into(), "q".into()), kept);
         h.state_mut().run("ui.pluginForm", json!({"plugin": "ui-dialog-stale", "command": "q"})).unwrap();
         let values = &dialog(&h).values;
         assert_eq!(values.get("input"), Some(&json!("Countries")));
-        assert_eq!(values.get("trees"), Some(&json!(50)), "{values:?}");
+        assert_eq!(values.get("trees"), Some(&json!(50)), "a new field starts at its default: {values:?}");
+        assert!(!values.contains_key("other"), "left empty: {values:?}");
         assert!(!values.contains_key("note") && !values.contains_key("gone"), "{values:?}");
         plugins::unload("ui-dialog-stale");
     }
 
-    /// A `report` text is shown as it is; any other answer as JSON, without its panel state.
+    /// A `report` text is shown as it is; any other answer as JSON, without its panel state; a
+    /// long one is cut, saying how much more there is.
     #[test]
     fn the_answer_shown_is_its_report() {
         assert_eq!(report(&json!({"report": "3 classes\nKappa 0.91", "panel": {"values": {}}})), "3 classes\nKappa 0.91");
         assert_eq!(report(&json!({"n": 1, "panel": {"values": {}}})), "{\n  \"n\": 1\n}");
         assert_eq!(report(&Value::Null), "Done.");
+        // A long one is cut, and says how much was left out.
+        let long = shown("é".repeat(40_000));
+        assert!(long.len() < SHOWN + 100, "{}", long.len());
+        assert!(long.ends_with("… 7232 more characters not shown"), "{}", &long[long.len() - 60..]);
     }
 }

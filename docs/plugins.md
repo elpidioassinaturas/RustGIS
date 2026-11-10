@@ -196,11 +196,11 @@ cargo build --release --target wasm32-unknown-unknown
   and **Run** waits until the required fields are filled in. An optional number left empty, or a
   checkbox without a `default` never ticked, is left out of the parameters. The dialog shows what
   the command answers: its `report` text when it answers `{"report": "…"}`, or else the answer
-  itself. Its values are kept, for each dialog, until RustGIS closes. Scripts and agents run the
-  command as before, with the parameters they give. RustGIS versions before dialogs ignore `form`
-  and run the command when its button is clicked, without these parameters: set
-  `minRustgisVersion` to the first version with them, or have the command answer what it needs
-  then.
+  itself, up to its first 64 KB, saying how much more there is. Its values are kept, for each
+  dialog, until RustGIS closes. Scripts and agents run the command as before, with the parameters
+  they give. RustGIS versions before dialogs ignore `form` and run the command when its button is
+  clicked, without these parameters: set `minRustgisVersion` to the first version with them, or
+  have the command answer what it needs then.
 - Tool parameter `kind`s: `layer`, `vectorLayer`, `polygonLayer`, `pointLayer`, `field`,
   `numericField`, `number`, `text`, `choice` (with 1 to 64 `choices`), `bool` and `file` (see
   [File parameters](#file-parameters)). Each has `name`, `label`, optional `help`, `required`
