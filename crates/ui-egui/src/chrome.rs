@@ -355,6 +355,11 @@ pub fn status_bar(app: &mut RustGisApp, ui: &mut Ui) {
                     sep(ui, &t);
                     crate::readjob::status(app, ui, &t);
                 }
+                // Downloads and windows being read off the frame, each with its Cancel.
+                if !app.ui.downloads.is_empty() || window_reads_under_way(app) {
+                    sep(ui, &t);
+                    downloads_status(app, ui, &t);
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // The CPU/GPU backend toggle, then the frame rate (live while the map moves,
                     // "— fps" when idle), then the last render's cost.
@@ -453,6 +458,51 @@ pub fn status_bar(app: &mut RustGisApp, ui: &mut Ui) {
                 });
             });
         });
+}
+
+/// Whether windows are being read off the frame (none in the browser).
+fn window_reads_under_way(app: &RustGisApp) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    return !app.ui.window_reads.is_empty();
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = app;
+        false
+    }
+}
+
+/// The downloads under way in the status bar: one with its address and Cancel, several as a menu
+/// of them, each with its Cancel (`RustGisApp::cancel_download`).
+fn downloads_status(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    let under_way = app.downloads_under_way();
+    let mut cancel = None;
+    let row = |ui: &mut Ui, (id, shown): &(u64, String), cancel: &mut Option<u64>| {
+        // Cut short beside the other entries, whole on hover.
+        let short: String =
+            if shown.chars().count() > 48 { format!("{}…", shown.chars().take(47).collect::<String>()) } else { shown.clone() };
+        ui.label(egui::RichText::new(short).size(11.5)).on_hover_text(shown);
+        if ui.small_button(tl!("Cancel")).on_hover_text(tl!("Stop waiting for this download; nothing is added")).clicked() {
+            *cancel = Some(*id);
+        }
+    };
+    ui.spinner();
+    match under_way.as_slice() {
+        [] => {}
+        [one] => {
+            ui.label(egui::RichText::new(tl!("Downloading…")).size(11.5).color(t.text_dim));
+            row(ui, one, &mut cancel);
+        }
+        many => {
+            ui.menu_button(crate::i18n::fmt("{n} downloads", &[("n", &many.len().to_string())]), |ui| {
+                for d in many {
+                    ui.horizontal(|ui| row(ui, d, &mut cancel));
+                }
+            });
+        }
+    }
+    if let Some(id) = cancel {
+        app.cancel_download(id);
+    }
 }
 
 fn sep(ui: &mut Ui, t: &Tokens) {
