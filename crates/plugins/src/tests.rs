@@ -262,10 +262,13 @@ fn command_dialog_fields_are_checked() {
     c["commands"][0]["form"][3]["default"] = json!("Maximum likelihood");
     let e = Manifest::parse(&c.to_string()).unwrap_err();
     assert!(e.contains("'method' has a default of another kind"), "{e}");
-    // A field lists the fields of a vector layer picked above it: none, or a raster, is refused.
+    // A field lists the fields of a vector layer picked above it: none, or a field that may pick
+    // a raster, is refused.
     for form in [
         json!([{"name": "col", "label": "Column", "kind": "field", "required": true}]),
         json!([{"name": "image", "label": "Image", "kind": "rasterLayer"}, {"name": "col", "label": "Column", "kind": "numericField"}]),
+        // `layer` takes rasters too.
+        json!([{"name": "any", "label": "Any", "kind": "layer"}, {"name": "col", "label": "Column", "kind": "field", "required": true}]),
     ] {
         let mut c = m.clone();
         c["commands"][0]["form"] = form;
