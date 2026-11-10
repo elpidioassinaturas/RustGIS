@@ -1012,6 +1012,28 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 bad.chars().take(200).collect::<String>()
             ));
         }
+        // The cube's dates, all its tiles' (as the slider will step through them), within the
+        // slider's steps, its own dates included when it has them: refused before the sample too.
+        let mut dates: Vec<f64> = tiles.values().flat_map(|by_day| by_day.keys()).map(|d| *d as f64 * 86_400_000.0).collect();
+        dates.sort_by(f64::total_cmp);
+        dates.dedup();
+        // At most MAX_CUBE_ITEMS dates, well under the slider's steps; were it ever more, the cube
+        // is refused rather than left with files the slider can't reach.
+        if dates.len() > rustgis_map::time::MAX_STEPS {
+            return Err(format!("{} dates; the time slider takes {} at most", dates.len(), rustgis_map::time::MAX_STEPS));
+        }
+        if let Some(t) = s.map().time.as_ref().filter(|t| !t.dates.is_empty()) {
+            let mut all: Vec<f64> = t.dates.iter().chain(&dates).copied().collect();
+            all.sort_by(f64::total_cmp);
+            all.dedup();
+            if all.len() > rustgis_map::time::MAX_STEPS {
+                return Err(format!(
+                    "the time slider's dates and the cube's make {}, more than its {} steps: take a shorter period",
+                    all.len(),
+                    rustgis_map::time::MAX_STEPS
+                ));
+            }
+        }
         // A range from the files themselves: one for every date and tile, as a range given is.
         let mut sampled = None;
         let range = if !auto {
@@ -1071,7 +1093,6 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
             (None, _) => String::new(),
         };
         let base = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map_or_else(|| format!("{collection} {asset}"), str::to_string);
-        let mut dates: Vec<f64> = Vec::new();
         let many = tiles.len() > 1;
         let mut added = Vec::new();
         // What the map had: a cube that can't be added whole puts its tile layers back as they
@@ -1087,7 +1108,6 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         };
         for (tile, by_day) in &tiles {
             let urls: Vec<(f64, String)> = by_day.iter().map(|(d, u)| (*d as f64 * 86_400_000.0, format!("{u}{look}"))).collect();
-            dates.extend(urls.iter().map(|(d, _)| *d));
             let Some((_, first)) = urls.first() else { continue };
             let name = if many { format!("{base} {tile}") } else { base.clone() };
             let r = match super::layer::add_url(s, &json!({"url": first, "name": name, "cube": true, "connection": p.get("connection")})) {
@@ -1120,14 +1140,6 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                     ));
                 }
             }
-        }
-        dates.sort_by(f64::total_cmp);
-        dates.dedup();
-        // At most MAX_CUBE_ITEMS dates, well under the slider's steps; were it ever more, the cube
-        // is refused rather than left with files the slider can't reach.
-        if dates.len() > rustgis_map::time::MAX_STEPS {
-            undo(s);
-            return Err(format!("{} dates; the time slider takes {} at most", dates.len(), rustgis_map::time::MAX_STEPS));
         }
         // The slider over the cube's dates: on over them when it is off; when it is on, taking
         // them in (its own dates and the cube's, or its span widened to theirs), so every file

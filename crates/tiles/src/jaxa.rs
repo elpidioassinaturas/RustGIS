@@ -266,7 +266,15 @@ fn cubes_of(id: &str, title: &str, f: &HashMap<String, String>, cut: &mut Vec<St
     if step.contains("hour") || id.to_ascii_lowercase().ends_with("_hourly") {
         return Err("it is hourly, and a data cube has one file a day".into());
     }
-    let bands: Vec<&str> = get("bands").split(',').map(str::trim).filter(|b| !b.is_empty()).collect();
+    let mut bands: Vec<&str> = Vec::new();
+    for b in get("bands").split(',').map(str::trim).filter(|b| !b.is_empty()) {
+        // A band named twice is one cube (its id is the dataset's and the band's).
+        if bands.contains(&b) {
+            note(cut, format!("{}: its band {} is listed twice; it is one cube", clip(id, 120), clip(b, 40)));
+        } else {
+            bands.push(b);
+        }
+    }
     if bands.is_empty()
         || bands.len() > MAX_BANDS
         || !bands.iter().all(|b| b.len() <= 40 && b.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')))
@@ -494,11 +502,16 @@ pub fn fetch_licence(collection: &str) {
         all.insert(collection.to_string(), None);
     }
     let key = collection.to_string();
+    #[cfg(not(target_arch = "wasm32"))]
+    let asked = std::time::Instant::now();
     crate::cache::download_limited(
         collection,
         MAX_COLLECTION_BYTES,
         Box::new(move |r| {
             let l = r.and_then(|b| licence_of(&b));
+            // A slow failure here waits as one in `licence_blocking` does.
+            #[cfg(not(target_arch = "wasm32"))]
+            note_read(&key, l.is_err(), asked.elapsed());
             licences().lock().unwrap_or_else(|e| e.into_inner()).insert(key, Some(l));
         }),
     );
@@ -525,8 +538,9 @@ fn waits(failed: Option<std::time::Instant>, now: std::time::Instant) -> bool {
 }
 
 /// A collection's licence, waiting for it (desktop): once read, kept for the run. One that
-/// couldn't be read is asked for again: at once after a quick failure (such as a 404), and
-/// [`RETRY_AFTER`] after one that took [`SLOW_READ`] or more, its error given until then.
+/// couldn't be read (here or by [`fetch_licence`]) is asked for again: at once after a quick
+/// failure (such as a 404), and [`RETRY_AFTER`] after one that took [`SLOW_READ`] or more, its
+/// error given until then.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn licence_blocking(collection: &str) -> Result<Licence, String> {
     match licence(collection) {
@@ -542,16 +556,21 @@ pub fn licence_blocking(collection: &str) -> Result<Licence, String> {
     }
     let asked = std::time::Instant::now();
     let l = crate::cache::download_blocking_limited(collection, MAX_COLLECTION_BYTES).and_then(|b| licence_of(&b));
-    {
-        let mut slow = slow_failures().lock().unwrap_or_else(|e| e.into_inner());
-        if l.is_err() && asked.elapsed() >= SLOW_READ {
-            slow.insert(collection.to_string(), std::time::Instant::now());
-        } else {
-            slow.remove(collection);
-        }
-    }
+    note_read(collection, l.is_err(), asked.elapsed());
     licences().lock().unwrap_or_else(|e| e.into_inner()).insert(collection.to_string(), Some(l.clone()));
     l
+}
+
+/// Notes how a licence read of `collection` ended: a failure after [`SLOW_READ`] or more starts
+/// the wait before it is asked for again; any other end clears it.
+#[cfg(not(target_arch = "wasm32"))]
+fn note_read(collection: &str, failed: bool, took: std::time::Duration) {
+    let mut slow = slow_failures().lock().unwrap_or_else(|e| e.into_inner());
+    if failed && took >= SLOW_READ {
+        slow.insert(collection.to_string(), std::time::Instant::now());
+    } else {
+        slow.remove(collection);
+    }
 }
 
 #[cfg(test)]
@@ -696,6 +715,9 @@ mod tests {
                 "JAXA.Test_daily: its spatialResolution \"ten\" isn't read (kilometres, above 0 and below 1000), so its resolution is not given"
             ]
         );
+        let c = one(&good.replace("* bands: B1", "* bands: B1, B2, B1"));
+        assert_eq!(c.entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["JAXA.Test_daily/B1", "JAXA.Test_daily/B2"]);
+        assert_eq!(c.cut, ["JAXA.Test_daily: its band B1 is listed twice; it is one cube"]);
         let c = one(&format!("{good}\n* title: Again\n* data provider: X"));
         assert_eq!(c.entries[0].name, "Test", "the first title is read");
         assert_eq!(
@@ -715,6 +737,17 @@ mod tests {
         assert!(!waits(None, t));
         assert!(waits(Some(t), t) && waits(Some(t), t + RETRY_AFTER - std::time::Duration::from_secs(1)));
         assert!(!waits(Some(t), t + RETRY_AFTER));
+        // Either read (the pane's in the background, or cube.open's) starts the wait when it fails
+        // slowly, and a quick failure or a read clears it.
+        let key = "test://slow-licence";
+        let at = || slow_failures().lock().unwrap().get(key).copied();
+        note_read(key, true, SLOW_READ);
+        assert!(waits(at(), std::time::Instant::now()));
+        note_read(key, true, std::time::Duration::from_millis(10));
+        assert!(at().is_none());
+        note_read(key, true, SLOW_READ);
+        note_read(key, false, SLOW_READ);
+        assert!(at().is_none());
     }
 
     /// A collection's licence: its license link, else an SPDX id; JAXA's collections are told
