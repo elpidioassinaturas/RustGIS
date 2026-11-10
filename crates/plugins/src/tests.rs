@@ -242,6 +242,21 @@ fn command_dialog_fields_are_checked() {
         "tools": [{"id": "t", "name": "Tool", "params": [{"name": "image", "label": "Image", "kind": "rasterLayer"}]}]});
     let e = Manifest::parse(&tool.to_string()).unwrap_err();
     assert!(e.contains("unknown parameter kind 'rasterLayer'"), "{e}");
+    // A dialog field's default must be one it can show, or the plugin is refused, naming it;
+    // a number written as text is a number.
+    m["commands"][0]["form"][1] = json!({"name": "samples", "label": "Samples", "kind": "polygonLayer"});
+    m["commands"][0]["form"][4]["default"] = json!("50");
+    assert!(Manifest::parse(&m.to_string()).is_ok());
+    for (i, wrong) in [(4, json!("many")), (2, json!(5)), (4, json!(true))] {
+        let mut m = m.clone();
+        m["commands"][0]["form"][i]["default"] = wrong;
+        let e = Manifest::parse(&m.to_string()).unwrap_err();
+        assert!(e.contains("default") && e.contains("Classify"), "{e}");
+    }
+    let mut m = m.clone();
+    m["commands"][0]["form"].as_array_mut().unwrap().push(json!({"name": "save", "label": "Save", "kind": "bool", "default": "yes"}));
+    let e = Manifest::parse(&m.to_string()).unwrap_err();
+    assert!(e.contains("'save' has a default of another kind"), "{e}");
 }
 
 /// Enabled plugin tools register with geoprocessing and return layers or selections.

@@ -52,7 +52,8 @@ pub fn open(app: &mut RustGisApp, p: &Value) -> Result<Value, String> {
             .unwrap_or_default();
         state.kept.insert((d.plugin, d.command), keep(&d.values, &form));
     }
-    // Defaults the field can show: one of another kind would be sent unseen.
+    // Defaults the field can show: one of another kind would be sent unseen (the manifest
+    // refuses those already; this is a backstop).
     let defaults: Map<String, Value> =
         c.form.iter().filter_map(|f| f.default.clone().filter(|d| fits(f, d)).map(|d| (f.name.clone(), d))).collect();
     // Kept values where they still fit the form, which a newer version of the plugin may have
@@ -435,8 +436,7 @@ mod tests {
         // Echoes too (the test plugin answers by the id's first letter), with optional fields only.
         commands.push(json!({"id": "qq", "label": "Echo Optional", "form": [
             {"name": "count", "label": "Count", "kind": "number"},
-            {"name": "flag", "label": "Flag", "kind": "bool"},
-            {"name": "label", "label": "Label", "kind": "text", "default": 5}
+            {"name": "flag", "label": "Flag", "kind": "bool"}
         ]}));
         for c in commands.iter_mut().filter(|c| c["id"] == "e") {
             c["form"] = json!([{"name": "trees", "label": "Trees", "kind": "number"}]);
@@ -501,8 +501,7 @@ mod tests {
         plugins::unload("ui-dialog");
     }
 
-    /// Optional numbers and checkboxes never set are left out, and so is a default of the wrong
-    /// kind (a number for a text field), which the field couldn't show. `{}` opens the dialog as `null`
+    /// Optional numbers and checkboxes never set are left out. `{}` opens the dialog as `null`
     /// does, and its Run with no values runs the command rather than opening the dialog again.
     #[test]
     fn optional_fields_left_alone_are_left_out() {
