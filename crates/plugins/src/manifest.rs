@@ -437,8 +437,8 @@ fn check_text(what: &str, s: &str, required: bool) -> Result<(), String> {
 /// The number in `text`, as a command dialog's number field reads it and sends it: an integer
 /// exactly, as one (for commands that read integers); a whole number written otherwise (`2.0`,
 /// `1e3`) as an integer too; others as floats. `None` when empty, not a number, an integer past
-/// `i64`, or a whole number written otherwise from 2^53 (`1e16`, `9007199254740993.0`): a float
-/// would round those unseen.
+/// `i64`, a whole number written otherwise from 2^53 (`1e16`, `9007199254740993.0`), or a number
+/// too small for a float (`1e-400`): a float would round those unseen.
 pub fn form_number(text: &str) -> Option<serde_json::Value> {
     let t = text.trim();
     if let Ok(i) = t.parse::<i64>() {
@@ -448,6 +448,10 @@ pub fn form_number(text: &str) -> Option<serde_json::Value> {
         return None;
     }
     let x = t.parse::<f64>().ok().filter(|x| x.is_finite())?;
+    // Too small for a float, a number other than zero reads as zero: not taken.
+    if x == 0.0 && t.split(['e', 'E']).next().is_some_and(|m| m.bytes().any(|b| (b'1'..=b'9').contains(&b))) {
+        return None;
+    }
     // A whole number written otherwise past 2^53 may already be rounded: not taken.
     if x.fract() == 0.0 && x.abs() >= 9_007_199_254_740_992.0 {
         return None;

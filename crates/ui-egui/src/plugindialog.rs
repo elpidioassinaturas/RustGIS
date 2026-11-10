@@ -95,7 +95,7 @@ pub(crate) fn answered(app: &mut RustGisApp, id: &str, answer: &Result<Value, St
     }
     let Some(d) = app.ui.plugin_dialog.open.as_mut() else { return };
     d.asked = None;
-    d.result = Some(answer.as_ref().map(|a| shown(report(a))).map_err(|e| shown(e.clone())));
+    d.result = Some(answer.as_ref().map(|a| shown(report(a))).map_err(|e| error_shown(e)));
 }
 
 /// A dialog's values as kept when it closes: with `null` for each field left empty, which tells
@@ -106,6 +106,12 @@ fn keep(values: &Map<String, Value>, form: &[ParamDecl]) -> Map<String, Value> {
         kept.entry(f.name.clone()).or_insert(Value::Null);
     }
     kept
+}
+
+/// A command's error as the dialog shows it: redacted as its notice is (an address's password or
+/// token left out), and cut like an answer.
+fn error_shown(e: &str) -> String {
+    shown(rustgis_engine::Session::redacted(e).into_string())
 }
 
 /// The most of an answer the dialog shows, in bytes: a longer one would hold the window (in a
@@ -126,6 +132,21 @@ fn shown(mut text: String) -> String {
     text.push('\n');
     text.push_str(&crate::i18n::fmt("… {n} more characters not shown", &[("n", &more.to_string())]));
     text
+}
+
+/// Why **Run** waits: the required fields to fill in, and the numbers typed that aren't numbers.
+/// Those are named as such, not as fields to fill in, though they hold no value either.
+fn held<'a>(
+    form: &'a [ParamDecl],
+    values: &Map<String, Value>,
+    texts: &HashMap<String, String>,
+) -> (Vec<&'a ParamDecl>, Vec<&'a ParamDecl>) {
+    let bad: Vec<&ParamDecl> = form
+        .iter()
+        .filter(|f| f.kind == "number" && texts.get(&f.name).is_some_and(|t| !t.trim().is_empty() && number(t).is_none()))
+        .collect();
+    let missing = form.iter().filter(|f| unfilled(f, values) && !bad.iter().any(|b| b.name == f.name)).collect();
+    (missing, bad)
 }
 
 /// Whether required field `f` has no value **Run** would send: none, empty text, or one of
@@ -183,14 +204,9 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         d.result = Some(Err(tl!("It stopped without an answer: see the notices.").to_string()));
     }
     // Fields to fill in before it can run.
-    let missing: Vec<&str> = c.form.iter().filter(|f| unfilled(f, &d.values)).map(|f| m.translate(&lang, &f.label)).collect();
-    // Numbers typed that aren't numbers.
-    let bad: Vec<&str> = c
-        .form
-        .iter()
-        .filter(|f| f.kind == "number" && d.texts.get(&f.name).is_some_and(|t| !t.trim().is_empty() && number(t).is_none()))
-        .map(|f| m.translate(&lang, &f.label))
-        .collect();
+    let (missing, bad) = held(&c.form, &d.values, &d.texts);
+    let missing: Vec<&str> = missing.iter().map(|f| m.translate(&lang, &f.label)).collect();
+    let bad: Vec<&str> = bad.iter().map(|f| m.translate(&lang, &f.label)).collect();
     let mut run = false;
 
     let mut open = true;
@@ -229,13 +245,15 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                 let running = d.asked.is_some();
                 let ready = missing.is_empty() && bad.is_empty();
                 let button = ui.add_enabled(!running && ready, egui::Button::new(RichText::new(tl!("Run")).strong()));
-                let button = if !missing.is_empty() {
-                    button.on_disabled_hover_text(crate::i18n::fmt("Fill in: {fields}", &[("fields", &missing.join(", "))]))
-                } else if !bad.is_empty() {
-                    button.on_disabled_hover_text(crate::i18n::fmt("Not a number: {fields}", &[("fields", &bad.join(", "))]))
-                } else {
-                    button
-                };
+                // Each reason it waits, on its own line.
+                let mut why = Vec::new();
+                if !missing.is_empty() {
+                    why.push(crate::i18n::fmt("Fill in: {fields}", &[("fields", &missing.join(", "))]));
+                }
+                if !bad.is_empty() {
+                    why.push(crate::i18n::fmt("Not a number: {fields}", &[("fields", &bad.join(", "))]));
+                }
+                let button = if why.is_empty() { button } else { button.on_disabled_hover_text(why.join("\n")) };
                 if button.clicked() {
                     run = true;
                 }
@@ -267,7 +285,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         // would open this dialog again: errors before it starts are notices, and the answer.
         match app.ask_plugin(&id, params.clone()) {
             Ok(()) => d.asked = Some(params),
-            Err(e) => d.result = Some(Err(e)),
+            Err(e) => d.result = Some(Err(error_shown(&e))),
         }
     }
     if open {
@@ -596,6 +614,10 @@ mod tests {
         method.required = true;
         assert!(unfilled(&method, &values));
         assert!(!unfilled(&method, &json!({"method": 3}).as_object().cloned().unwrap()));
+        // A required number holding text that isn't one is said to be that, not to be filled in.
+        let texts = HashMap::from([("method".to_string(), "2,5".to_string())]);
+        let (missing, bad) = held(std::slice::from_ref(&method), &Map::new(), &texts);
+        assert!(missing.is_empty() && bad.len() == 1);
     }
 
     /// A `report` text is shown as it is; any other answer as JSON, without its panel state; a
@@ -613,6 +635,11 @@ mod tests {
         assert_eq!(number("9007199254740993.0"), None, "would be rounded");
         assert_eq!(number("1e16"), None);
         assert_eq!(number("1e3"), Some(json!(1000)));
+        assert_eq!(number("1e-400"), None, "too small for a float: would be sent as 0");
+        // Errors are redacted as their notices are.
+        let e = error_shown("https://host/data?sig=abc: HTTP 503");
+        assert!(!e.contains("abc") && e.starts_with("https://host/data"), "{e}");
+        assert_eq!(number("0e10"), Some(json!(0)));
         assert_eq!(number(""), None);
         // A long one is cut, and says how much was left out.
         let long = shown("é".repeat(40_000));
