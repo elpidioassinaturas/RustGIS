@@ -119,6 +119,8 @@ and band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentin
   tile, and the answer gives it (`"range"`, with `"rangeFrom": "sample"`). A sample with no values,
   files of classes in their own colours, or files whose scale changes partway leave each file
   stretched on its own, and a notice says so.
+- **Credit:** `"attribution"` puts a credit on each tile layer the cube adds (as `tiles.add`
+  takes it); a cube opened from the catalog passes its entry's.
 - **Web app:** creating a cube with **Add as Time Series** is desktop-only. Saved cube tile
   layers can draw in the web app when their servers allow browser requests (CORS).
 - **Its trend:** the same search, given to Trend Analysis (`cube.trend` with `collection`,

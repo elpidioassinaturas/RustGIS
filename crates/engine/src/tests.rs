@@ -16913,6 +16913,10 @@ fn an_entry_without_a_range_takes_one_from_its_files() {
         (r["credit"].as_str(), r["license"]["url"].as_str()),
         (Some("JAXA, A test dataset"), Some("https://earth.jaxa.jp/en/data/policy/"))
     );
+    // Opened again over the same files, its new tile layer (in place of the old one) keeps the credit.
+    crate::cmd::cube_catalog::open_entry(&mut s, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
+    assert!(s.map().tiles.iter().filter(|t| !t.time_urls.is_empty()).all(|t| t.attribution == "JAXA, A test dataset"));
+    assert!(!s.map().tiles.is_empty());
     // A range given takes its place, as for any entry.
     let mut t = Session::new(Project::default());
     let r = crate::cmd::cube_catalog::open_entry(&mut t, &entry, &json!({"bbox": [10, 45, 11, 46], "range": [0, 0.01]})).unwrap();
@@ -16938,6 +16942,17 @@ fn an_entry_without_a_range_takes_one_from_its_files() {
         .unwrap();
     assert!(r.get("range").is_none() && r.get("rangeFrom").is_none(), "{r}");
     assert!(u.notices_since(mark).iter().any(|n| n.text.contains("classes drawn in their own colours")), "{:?}", u.notices_since(mark));
+    // A collection whose licence can't be read: the cube is still added and credited, and a
+    // notice says the licence wasn't read, pointing to JAXA's terms.
+    let features = [item("a1", "2024-01-01")].join(",");
+    let base = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{features}]}}"#))], 8);
+    entry.url = format!("{base}/v1");
+    let mut w = Session::new(Project::default());
+    let mark = w.notices_given();
+    let r = crate::cmd::cube_catalog::open_entry(&mut w, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
+    assert!(r.get("license").is_none() && w.map().tiles[0].attribution == "JAXA, A test dataset", "{r}");
+    let said = w.notices_since(mark);
+    assert!(said.iter().any(|n| n.text.contains("its collection's licence wasn't read")), "{said:?}");
 }
 
 /// The data cube catalog (#683): its entries listed by theme, area and words; one opened as typing

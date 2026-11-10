@@ -37,6 +37,8 @@ const MAX_DATASETS: usize = 500;
 const MAX_BANDS: usize = 16;
 /// The most characters a dataset's field keeps (descriptions run to about 850).
 const MAX_FIELD: usize = 2000;
+/// The most cuts noted one by one.
+const MAX_CUTS: usize = 500;
 /// The most a collection's document may be, read for its licence.
 const MAX_COLLECTION_BYTES: usize = 1 << 20;
 /// Kilometres in a degree of longitude at the equator: JAXA's resolutions are given in km.
@@ -195,7 +197,13 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
         }
         match cubes_of(id, title, f, &mut c.cut) {
             Ok(es) => c.entries.extend(es),
-            Err(why) => c.left_out.push(LeftOut { id: clip(id, 120), title: clip(title, 200), why }),
+            Err(why) => {
+                // A heading's cut is noted where it is read; a title of its own, here.
+                if title != heading.as_str() {
+                    cut_note(&mut c.cut, id, "title", title, 200);
+                }
+                c.left_out.push(LeftOut { id: clip(id, 120), title: clip(title, 200), why })
+            }
         }
     }
     Ok(c)
@@ -382,11 +390,17 @@ fn clip(s: &str, n: usize) -> String {
     s.chars().take(n.saturating_sub(1)).chain(['…']).collect()
 }
 
-/// Notes in `cut` that `what` of `dataset` is longer than `n` characters and is cut.
+/// Notes in `cut` that `what` of `dataset` is longer than `n` characters and is cut: the first
+/// [`MAX_CUTS`] of them, then one note that more are cut.
 fn cut_note(cut: &mut Vec<String>, dataset: &str, what: &str, s: &str, n: usize) {
     let len = s.chars().count();
-    if len > n && cut.len() < MAX_DATASETS {
-        cut.push(format!("{}: its {what} ({len} characters) is cut to {n}", clip(dataset, 120)));
+    if len <= n {
+        return;
+    }
+    match cut.len() {
+        k if k < MAX_CUTS => cut.push(format!("{}: its {what} ({len} characters) is cut to {n}", clip(dataset, 120))),
+        MAX_CUTS => cut.push(format!("more of the catalog's text is cut than these {MAX_CUTS} notes list")),
+        _ => {}
     }
 }
 
@@ -463,11 +477,12 @@ pub fn fetch_licence(collection: &str) {
     );
 }
 
-/// A collection's licence, waiting for it (desktop): read once, kept for the run.
+/// A collection's licence, waiting for it (desktop): once read, kept for the run; one that
+/// couldn't be read is asked for again.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn licence_blocking(collection: &str) -> Result<Licence, String> {
-    if let Some(l) = licence(collection) {
-        return l;
+    if let Some(Ok(l)) = licence(collection) {
+        return Ok(l);
     }
     let l = crate::cache::download_blocking_limited(collection, MAX_COLLECTION_BYTES).and_then(|b| licence_of(&b));
     licences().lock().unwrap_or_else(|e| e.into_inner()).insert(collection.to_string(), Some(l.clone()));
@@ -589,6 +604,19 @@ mod tests {
         let c = one(&good.replace("* temporalResolution: daily", &format!("* temporalResolution: {}", "d".repeat(45))));
         assert_eq!(c.entries[0].step.chars().count(), MAX_STEP);
         assert_eq!(c.cut, [format!("JAXA.Test_daily: its temporalResolution (45 characters) is cut to {MAX_STEP}")]);
+        // A dataset left out keeps its title, cut and said, as a listed one does.
+        let c = one(&good.replace("* title: Test", &format!("* title: {}", "T".repeat(210))).replace("* epsg: 4326", "* epsg: 3031"));
+        assert_eq!(c.left_out[0].title.chars().count(), 200);
+        assert_eq!(c.cut, ["JAXA.Test_daily: its title (210 characters) is cut to 200"]);
+        // Past the notes listed one by one, one more says there are more.
+        let mut cut = Vec::new();
+        for _ in 0..MAX_CUTS + 3 {
+            cut_note(&mut cut, "x", "title", "too long", 3);
+        }
+        assert_eq!(cut.len(), MAX_CUTS + 1);
+        assert!(cut[MAX_CUTS].contains("more of the catalog's text is cut"), "{}", cut[MAX_CUTS]);
+        cut_note(&mut cut, "x", "title", "short", 10);
+        assert_eq!(cut.len(), MAX_CUTS + 1);
     }
 
     /// A collection's licence: its license link, else an SPDX id; JAXA's collections are told

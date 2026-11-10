@@ -99,10 +99,12 @@ pub(crate) fn open_entry(s: &mut Session, e: &Entry, p: &Value) -> CmdResult {
             if let Some(n) = name {
                 q["name"] = json!(n);
             }
-            let before = tile_files(s);
+            if !e.credit.is_empty() {
+                q["attribution"] = json!(e.credit);
+            }
             let mut r = s.run("stac.addCube", &q)?;
             if !e.credit.is_empty() {
-                credit(s, e, &before, &mut r);
+                credit(s, e, &mut r);
             }
             r
         }
@@ -123,20 +125,10 @@ pub(crate) fn open_entry(s: &mut Session, e: &Entry, p: &Value) -> CmdResult {
     Ok(r)
 }
 
-/// What each tile layer of the map reads: its address and its files by date.
-fn tile_files(s: &Session) -> Vec<(String, Vec<(f64, String)>)> {
-    s.map().tiles.iter().map(|t| (t.url.clone(), t.time_urls.clone())).collect()
-}
-
-/// Credits a STAC cube on the tile layers it added (those reading files over time that the map
-/// didn't have `before`), as its terms ask, and gives its collection's licence (a JAXA Earth
-/// dataset's: JAXA's terms for most, NASA's or Copernicus's for some), or says why it wasn't read.
-fn credit(s: &mut Session, e: &Entry, before: &[(String, Vec<(f64, String)>)], r: &mut Value) {
-    for t in s.map_mut().tiles.iter_mut() {
-        if !t.time_urls.is_empty() && !before.iter().any(|(u, files)| *u == t.url && *files == t.time_urls) {
-            t.attribution = e.credit.clone();
-        }
-    }
+/// Gives the credit a STAC cube's tile layers took (`stac.addCube`'s `attribution`), as its terms
+/// ask, and its collection's licence (a JAXA Earth dataset's: JAXA's terms for most, NASA's or
+/// Copernicus's for some), or says why it wasn't read.
+fn credit(s: &mut Session, e: &Entry, r: &mut Value) {
     r["credit"] = json!(e.credit);
     #[cfg(not(target_arch = "wasm32"))]
     match jaxa::licence_blocking(&e.url) {

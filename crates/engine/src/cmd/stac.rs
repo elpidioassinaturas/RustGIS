@@ -20,7 +20,7 @@ pub fn commands() -> Vec<C> {
         C::new("stac.addFootprints", "Add STAC Footprints", "Home › Add › Web Data › STAC Search", add_footprints_cmd).roles(&[]).effects(crate::policy::Effects::NONE)
             .params(r#"{"footprints": GeoJSON FeatureCollection (items' footprints, as STAC Search finds them), "name"?: text}"#),
         C::new("stac.addCube", "Add STAC Data Cube", "Home › Add › Web Data › STAC Search", add_cube).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).params(
-            r#"{"url"?: a STAC API (default: Earth Search), or the collection.json of a static collection laid out by date (JAXA Earth's), "collection": id, "asset": key (a band, such as NDVI), "bbox"?: [west, south, east, north] | "view" (default: the map's extent), "start", "end": dates, "maxCloud"?: percent, "range"?: [low, high] (the values shown from black to white, in the asset's own units after its raster:bands scale and offset, the same for every date and tile; default: each file's 2nd–98th percentile) | "auto" (one range for every date and tile, the 2nd–98th percentiles of a sample: the newest file of up to four tiles, read at an overview), "name"?: text, "connection"?: "as service.add: the saved web-service connection whose login the request uses"} → a tile layer per tile of the grid the items cover, each a file per date following the time slider, which turns on over their dates when it is off (desktop)"#,
+            r#"{"url"?: a STAC API (default: Earth Search), or the collection.json of a static collection laid out by date (JAXA Earth's), "collection": id, "asset": key (a band, such as NDVI), "bbox"?: [west, south, east, north] | "view" (default: the map's extent), "start", "end": dates, "maxCloud"?: percent, "range"?: [low, high] (the values shown from black to white, in the asset's own units after its raster:bands scale and offset, the same for every date and tile; default: each file's 2nd–98th percentile) | "auto" (one range for every date and tile, the 2nd–98th percentiles of a sample: the newest file of up to four tiles, read at an overview), "name"?: text, "attribution"?: text (the credit its tile layers show, as in tiles.add), "connection"?: "as service.add: the saved web-service connection whose login the request uses"} → a tile layer per tile of the grid the items cover, each a file per date following the time slider, which turns on over their dates when it is off (desktop)"#,
         ),
         C::new("stac.addAsset", "Add STAC Asset", "Home › Add › Web Data › STAC Search", add_asset).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).params(
             r#"{"item": a STAC item (as stac.search returns it) | "url": an item's address (Planetary Computer assets are signed), "asset"?: key (default: visual, else the first GeoTIFF, else the first data asset), "name"?: text, "connection"?: "as service.add"}"#,
@@ -973,6 +973,8 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 }
             }
         };
+        // The credit each tile layer of the cube shows (a catalog entry's, as JAXA's terms ask).
+        let attribution = ps(p, "attribution").map(str::trim).filter(|a| !a.is_empty()).map(str::to_string);
         let CubeFiles { tiles, scale, scales, nodata, items, named_tiles, without, duplicates, scales_differ, coded, collection, asset } =
             cube_files(s, p, MAX_CUBE_ITEMS)?;
         // A tile layer's look has no way to name them, so on the map they are values.
@@ -1099,6 +1101,9 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 Some(t) => {
                     t.time_urls = urls;
                     t.name = name;
+                    if let Some(a) = &attribution {
+                        t.attribution = a.clone();
+                    }
                     added.push(r);
                 }
                 None => {
