@@ -2672,15 +2672,16 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
             // one whose corners all miss it) uses the part that is on it.
             let r = Rect::from_two_pos(start, end);
             let mut e = Extent::EMPTY;
-            let mut inside = Vec::new();
+            let mut grid = Vec::new();
             let n = 12;
             for i in 0..=n {
                 for j in 0..=n {
                     let q = pos2(r.min.x + r.width() * i as f32 / n as f32, r.min.y + r.height() * j as f32 / n as f32);
-                    if let Some(c) = screen_to_lonlat(app, rect, q) {
+                    let c = screen_to_lonlat(app, rect, q);
+                    if let Some(c) = c {
                         e.expand(c);
-                        inside.push(c);
                     }
+                    grid.push(c);
                 }
             }
             // A pole inside a box on the globe: the box goes all the way round it.
@@ -2691,7 +2692,7 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
                 .flatten();
             if e.is_empty() {
                 // Nothing on the globe.
-            } else if (start - end).length() > 6.0 && crate::pluginpanel::box_picked(app, &inside, pole) {
+            } else if (start - end).length() > 6.0 && crate::pluginpanel::box_picked(app, &grid, n + 1, pole) {
                 // A plugin's pick took it.
             } else if tool == Tool::Select {
                 let mode = ui.input(|i| {

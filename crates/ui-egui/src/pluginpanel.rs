@@ -370,26 +370,49 @@ pub(crate) fn map_click(app: &mut RustGisApp, c: Coord) -> bool {
     true
 }
 
-/// A box dragged on the map, `pts` the places in it in degrees and `pole` the latitude of a pole
-/// inside it (the globe's), for a pick waiting for one; false when none waits.
-pub(crate) fn box_picked(app: &mut RustGisApp, pts: &[Coord], pole: Option<f64>) -> bool {
+/// A box dragged on the map, `grid` the places on a `side` by `side` grid over it in degrees
+/// (column by column, `None` off the globe) and `pole` the latitude of a pole inside it (the
+/// globe's), for a pick waiting for one; false when none waits.
+pub(crate) fn box_picked(app: &mut RustGisApp, grid: &[Option<Coord>], side: usize, pole: Option<f64>) -> bool {
     let Some((pid, item)) = waiting_pick(app).filter(|(_, i)| i.picks_box()) else { return false };
     let globe = app.session.map().projection == rustgis_engine::map::Projection::Globe;
-    let Some(bbox) = box_of(pts, globe, pole) else { return false };
+    let Some(bbox) = box_of(grid, side, globe, pole) else { return false };
     picked(app, &pid, &item, json!({"bbox": bbox}));
     true
 }
 
-/// The box `[west, south, east, north]` around `pts` (degrees): a box wider than the world is
-/// the world, and one across the antimeridian has its west east of its east. A flat map gives
-/// longitudes past ±180 across it (its copies of the world); the globe wraps them, so there they
-/// are read from the first place's. A box around a pole (`pole`, its latitude) reaches it, all
-/// the way round.
-fn box_of(pts: &[Coord], globe: bool, pole: Option<f64>) -> Option<[f64; 4]> {
-    let first = pts.first()?.x;
+/// The box `[west, south, east, north]` around the places on `grid` (degrees, `side` by `side`,
+/// column by column, `None` off the globe): a box wider than the world is the world, and one
+/// across the antimeridian has its west east of its east. A flat map gives longitudes past ±180
+/// across it (its copies of the world); the globe wraps them, so there each place's is read from
+/// a neighbour's already read, and a box over more than 180° of longitude keeps its side. A box
+/// around a pole (`pole`, its latitude) reaches it, all the way round.
+fn box_of(grid: &[Option<Coord>], side: usize, globe: bool, pole: Option<f64>) -> Option<[f64; 4]> {
+    if grid.len() != side * side {
+        return None;
+    }
+    let start = grid.iter().position(Option::is_some)?;
+    let first = grid[start]?.x;
+    let mut read: Vec<Option<f64>> = vec![None; grid.len()];
+    if globe {
+        read[start] = Some(first);
+        let mut todo = vec![start];
+        while let Some(k) = todo.pop() {
+            let Some(at) = read[k] else { continue };
+            let (i, j) = (k / side, k % side);
+            let near = [(i > 0).then(|| k - side), (i + 1 < side).then(|| k + side), (j > 0).then(|| k - 1), (j + 1 < side).then(|| k + 1)];
+            for m in near.into_iter().flatten() {
+                if let (Some(c), None) = (grid[m], read[m]) {
+                    read[m] = Some(at + wrap(c.x - at));
+                    todo.push(m);
+                }
+            }
+        }
+    }
     let mut e = Extent::EMPTY;
-    for c in pts {
-        let x = if globe { first + wrap(c.x - first) } else { c.x };
+    for (k, c) in grid.iter().enumerate() {
+        let Some(c) = c else { continue };
+        let x = if globe { read[k].unwrap_or_else(|| first + wrap(c.x - first)) } else { c.x };
         e.expand(Coord::new(x, c.y));
     }
     if let Some(lat) = pole {
@@ -972,23 +995,47 @@ mod tests {
     use super::*;
 
     /// A box dragged across the antimeridian is the narrow box there, on the globe (longitudes
-    /// wrapped) and on a flat map (past 180); a wide flat one stays wide, and one around a pole
-    /// is the world's width.
+    /// wrapped) and on a flat map (past 180); a wide one stays wide, on a flat map and on the
+    /// globe (a band under the pole over more than 180° of longitude), and one around a pole is
+    /// the world's width.
     #[test]
     fn a_box_across_the_antimeridian_is_the_narrow_one() {
-        let c = |x: f64, y: f64| Coord::new(x, y);
-        let row = |from: f64, to: f64, y: f64| (0..=12).map(move |i| c(from + (to - from) * i as f64 / 12.0, y));
-        let globe: Vec<Coord> = row(179.0, 181.0, -1.0).chain(row(179.0, 181.0, 1.0)).map(|p| c(wrap(p.x), p.y)).collect();
-        assert_eq!(box_of(&globe, true, None), Some([179.0, -1.0, -179.0, 1.0]));
-        let flat: Vec<Coord> = row(179.0, 181.0, -1.0).chain(row(179.0, 181.0, 1.0)).collect();
-        assert_eq!(box_of(&flat, false, None), Some([179.0, -1.0, -179.0, 1.0]));
-        let wide: Vec<Coord> = row(-170.0, 170.0, 0.0).chain(row(-170.0, 170.0, 5.0)).collect();
-        assert_eq!(box_of(&wide, false, None), Some([-170.0, 0.0, 170.0, 5.0]));
-        let pole: Vec<Coord> = (0..6).map(|i| c(wrap(i as f64 * 60.0), 80.0)).collect();
-        assert_eq!(box_of(&pole, true, Some(90.0)), Some([-180.0, 80.0, 180.0, 90.0]), "around a pole");
-        let world: Vec<Coord> = row(-200.0, 200.0, 0.0).collect();
-        assert_eq!(box_of(&world, false, None), Some([-180.0, 0.0, 180.0, 0.0]), "wider than the world");
-        assert_eq!(box_of(&[], true, None), None);
+        const SIDE: usize = 13;
+        // The places on a grid over the box, `at(u, v)` for u, v from 0 to 1, column by column.
+        let grid = |at: &dyn Fn(f64, f64) -> Option<Coord>| -> Vec<Option<Coord>> {
+            let t = |k: usize| k as f64 / (SIDE - 1) as f64;
+            (0..SIDE).flat_map(|i| (0..SIDE).map(move |j| (t(i), t(j)))).map(|(u, v)| at(u, v)).collect()
+        };
+        let c = |x: f64, y: f64| Some(Coord::new(x, y));
+        let globe = grid(&|u, v| c(wrap(179.0 + 2.0 * u), -1.0 + 2.0 * v));
+        assert_eq!(box_of(&globe, SIDE, true, None), Some([179.0, -1.0, -179.0, 1.0]));
+        let flat = grid(&|u, v| c(179.0 + 2.0 * u, -1.0 + 2.0 * v));
+        assert_eq!(box_of(&flat, SIDE, false, None), Some([179.0, -1.0, -179.0, 1.0]));
+        let wide = grid(&|u, v| c(-170.0 + 340.0 * u, 5.0 * v));
+        assert_eq!(box_of(&wide, SIDE, false, None), Some([-170.0, 0.0, 170.0, 5.0]));
+        assert_eq!(box_of(&wide, SIDE, true, None), Some([-170.0, 0.0, 170.0, 5.0]), "wide on the globe");
+        // An orthographic globe centred on 30°N 0° (unit radius, y up), and a band across it
+        // just under the north pole: its longitudes run from about -111 to 111 by way of 0.
+        let (lat0, r) = (30f64.to_radians(), |x: f64, y: f64| (x * x + y * y).sqrt());
+        let ortho = |x: f64, y: f64| {
+            let rho = r(x, y);
+            let s = rho.asin();
+            let lat = (s.cos() * lat0.sin() + y * s.sin() * lat0.cos() / rho).asin();
+            let lon = (x * s.sin()).atan2(rho * s.cos() * lat0.cos() - y * s.sin() * lat0.sin());
+            (rho <= 1.0).then(|| Coord::new(wrap(lon.to_degrees()), lat.to_degrees()))
+        };
+        let band = grid(&|u, v| ortho(-1.0 + 2.0 * u, 0.6 + 0.2 * v));
+        let b = box_of(&band, SIDE, true, None).unwrap_or_default();
+        assert!(b[0] < -100.0 && b[2] > 100.0, "the band's own side, not the far one: {b:?}");
+        // Off the globe on its left: the rest still reads.
+        let part = grid(&|u, v| (u > 0.4).then(|| Coord::new(wrap(170.0 + 20.0 * u), v)));
+        assert_eq!(box_of(&part, SIDE, true, None).map(|b| b[2]), Some(-170.0));
+        let pole = grid(&|u, v| c(wrap(360.0 * u), 80.0 + 5.0 * v));
+        assert_eq!(box_of(&pole, SIDE, true, Some(90.0)), Some([-180.0, 80.0, 180.0, 90.0]), "around a pole");
+        let world = grid(&|u, _| c(-200.0 + 400.0 * u, 0.0));
+        assert_eq!(box_of(&world, SIDE, false, None), Some([-180.0, 0.0, 180.0, 0.0]), "wider than the world");
+        assert_eq!(box_of(&grid(&|_, _| None), SIDE, true, None), None, "nothing on the globe");
+        assert_eq!(box_of(&globe, SIDE - 1, true, None), None, "a grid of another size");
     }
 
     fn node(id: &str, label: &str, children: Vec<TreeNode>) -> TreeNode {
