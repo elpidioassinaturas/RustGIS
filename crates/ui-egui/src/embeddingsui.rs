@@ -58,6 +58,8 @@ pub struct State {
     pub found: Vec<Tile>,
     /// Each tile found's file a year, by `found`'s order, when the search was over the years.
     years: Vec<BTreeMap<i32, String>>,
+    /// Whether the search over the years read the index whole (handed over as `complete`).
+    years_whole: bool,
     /// The footprints layer of the last search, and its project (`Session::opened`): layer ids
     /// are a map's own, so another project's may be the same.
     footprints: Option<(u32, u64)>,
@@ -79,6 +81,7 @@ impl Default for State {
             searched: None,
             found: Vec::new(),
             years: Vec::new(),
+            years_whole: true,
             footprints: None,
             error: None,
             info: None,
@@ -190,6 +193,7 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
                 st.info = Some(info);
                 st.found = tiles;
                 st.years = years;
+                st.years_whole = complete;
                 show_footprints(app);
             }
             Err(e) => app.ui.embeddings.error = Some(e),
@@ -312,7 +316,10 @@ fn add(app: &mut RustGisApp, i: usize) {
                     let found = json!([{"years": years}]);
                     (
                         "embeddings.addCube",
-                        json!({"dataset": "alphaearth", "found": found, "start": first, "end": last, "bands": bands, "stretch": stretch}),
+                        json!({
+                            "dataset": "alphaearth", "found": found, "complete": st.years_whole,
+                            "start": first, "end": last, "bands": bands, "stretch": stretch,
+                        }),
                     )
                 }
                 None => ("embeddings.add", json!({"dataset": "alphaearth", "url": tile.url, "bands": bands, "stretch": stretch})),

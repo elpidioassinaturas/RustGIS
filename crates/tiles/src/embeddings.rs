@@ -17,7 +17,7 @@
 //! Nothing here waits on the network: searches and reads take a callback (the app's, off the
 //! frame), with blocking forms for the command line.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use rustgis_data::source::{Batch, Request, parquet::Vectors};
 use rustgis_data::{Dataset, Feature, Field, FieldType, Geometry, GeometryType, Value};
@@ -365,25 +365,36 @@ pub struct SeriesFound {
     pub complete: bool,
 }
 
-/// A tile's place, the same every year: its coordinate system and its footprint's corners to
-/// about a metre.
-fn place_key(t: &Tile) -> String {
-    let crs = t.detail.split(" · ").next().unwrap_or("");
-    let b = t.bbox.map(|v| (v * 1e5).round() as i64);
-    format!("{crs} {} {} {} {}", b[0], b[1], b[2], b[3])
+/// How far apart (degrees, about 10 m) two years' footprint corners may be and still be one
+/// tile's: far above the noise of the index's coordinates, far below a tile's 82 km, so no
+/// rounding boundary splits a tile in two.
+const SAME_PLACE: f64 = 1e-4;
+
+/// Whether two rows are one tile's: the same coordinate system, and footprints whose corners
+/// agree to [`SAME_PLACE`].
+fn same_place(a: &Tile, b: &Tile) -> bool {
+    let crs = |t: &Tile| t.detail.split(" · ").next().unwrap_or("").to_string();
+    crs(a) == crs(b) && a.bbox.iter().zip(b.bbox.iter()).all(|(x, y)| (x - y).abs() <= SAME_PLACE)
 }
 
 /// The tiles of the years `first` to `last` in what the index read, each with its file a year,
 /// nearest the box's centre first.
 pub fn aef_series(fields: &[Field], batch: &Batch, (first, last): (i32, i32), bbox: [f64; 4]) -> SeriesFound {
     let mut found = SeriesFound { complete: batch.complete, ..Default::default() };
-    let mut at: HashMap<String, usize> = HashMap::new();
+    // Each tile's place as first seen: matched against, so a tile's latest footprint taking over
+    // its card doesn't move what later rows are matched to. A read holds at most MAX_INDEX_ROWS
+    // rows, so comparing each with the tiles so far is cheap.
+    let mut places: Vec<Tile> = Vec::new();
     for (_, t) in aef_rows(fields, batch, bbox, |y| (first..=last).contains(&y)) {
         let Some(year) = t.year else { continue };
-        let i = *at.entry(place_key(&t)).or_insert_with(|| {
-            found.series.push(Series { tile: t.clone(), years: BTreeMap::new() });
-            found.series.len() - 1
-        });
+        let i = match places.iter().position(|p| same_place(p, &t)) {
+            Some(i) => i,
+            None => {
+                places.push(t.clone());
+                found.series.push(Series { tile: t.clone(), years: BTreeMap::new() });
+                found.series.len() - 1
+            }
+        };
         let Some(s) = found.series.get_mut(i) else { continue };
         match s.years.get(&year) {
             Some(u) if *u != t.url => found.duplicates += 1,
@@ -956,7 +967,9 @@ mod tests {
         let base = "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual";
         let batch = Batch {
             features: vec![
-                row(-43.4, 2024, &format!("{base}/2024/23S/xb-0000008192-0000000000.tiff")),
+                // A footprint a hair off another year's, across a 1e-5° rounding boundary: the
+                // same tile still.
+                row(-43.400_005_1, 2024, &format!("{base}/2024/23S/xb-0000008192-0000000000.tiff")),
                 row(-43.4, 2017, &format!("{base}/2017/23S/xa-0000008192-0000000000.tiff")),
                 row(-43.4, 2025, &format!("{base}/2025/23S/xc-0000008192-0000000000.tiff")),
                 // The same tile and year twice: the first kept, the other counted.

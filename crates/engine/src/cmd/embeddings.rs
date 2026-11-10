@@ -30,7 +30,7 @@ pub fn commands() -> Vec<C> {
             r#"{"dataset": "alphaearth" | "earth-index" | "tessera", "url"?: "AlphaEarth's tile or Earth Index's file, as embeddings.search lists it (Earth Index: default the MGRS tile at the view's centre)", "year"?: number (Tessera, default 2024), "bands"?: [red, green, blue] (bands from 1; AlphaEarth default [2, 17, 10], Tessera [1, 2, 3]), "stretch"?: number (AlphaEarth: dequantised values shown over ±stretch, default 0.3), "dimension"?: number (Earth Index: a vector value kept as each point's `value`, from 1), "bbox"?: [west, south, east, north] | "view" (Earth Index and Tessera: the area read, default the map's extent), "name"?: text, "ran"?: (internal: what the app read)}"#,
         ),
         C::new("embeddings.addCube", "Add Satellite Embeddings over Time", "Home › Add › Web Data", add_cube).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).params(
-            r#"{"dataset": "alphaearth", "bbox"?: [west, south, east, north] | "view" (the area searched, default the map's extent), "start"?: year (default 2017), "end"?: year (default 2025), "bands"?: [red, green, blue] (bands from 1, default [2, 17, 10]), "stretch"?: number (dequantised values shown over ±stretch, default 0.3), "name"?: text, "found"?: (internal: the tiles the app found, each {years: {year: address}})} → a tile layer per AlphaEarth tile, a file per year, following the time slider (turned on over the years when it is off)"#,
+            r#"{"dataset": "alphaearth", "bbox"?: [west, south, east, north] | "view" (the area searched, default the map's extent), "start"?: year (default 2017), "end"?: year (default 2025), "bands"?: [red, green, blue] (bands from 1, default [2, 17, 10]), "stretch"?: number (dequantised values shown over ±stretch, default 0.3), "name"?: text, "found"?: (internal: the tiles the app found, each {years: {year: address}}), "complete"?: (internal: false when the app's search read only part of the index)} → a tile layer per AlphaEarth tile, a file per year, following the time slider (turned on over the years when it is off)"#,
         ),
     ]
 }
@@ -180,6 +180,13 @@ fn stretch(p: &Value) -> Result<f32, String> {
 /// it), or from the app's search off the frame (`found`). Natively only the first tile's latest
 /// year's header is read before the layers are added, as `embeddings.add` reads one tile's; the
 /// rest are read in place as the map draws them.
+///
+/// Without `found` the command runs on its caller's thread and waits there for the index and that
+/// header, as `embeddings.search` and `embeddings.add` do: the command line, Python and the
+/// assistant have no frame to hold and want the layers there when the command returns. The app's
+/// own routes (ribbon, command search) open the pane, which searches off the frame and hands its
+/// tiles over (`found`); a plugin's command in the app (`leave_downloads`) is refused rather than
+/// wait on the frame.
 fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
     use crate::render::rustgis_tiles::cog::{self, Look};
     let d = dataset(p)?;
@@ -199,10 +206,13 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
     let b = bands(p, 64, emb::AEF_DEFAULT_BANDS)?;
     let look = Look { cube: true, ..emb::aef_look(b, stretch(p)?) };
     let given = p.get("found").filter(|v| !v.is_null());
-    let series: Vec<BTreeMap<i32, String>> = match given {
-        Some(v) => found(v, start, end)?,
+    // Whether the index was read whole: a tile-year with no file is then the index's gap, not
+    // the read's.
+    let (series, complete) = match given {
+        Some(v) => (found(v, start, end)?, super::b(p, "complete") != Some(false)),
         None => search_series(s, p, (start, end))?,
     };
+    let listed = series.len();
     let series: Vec<BTreeMap<i32, String>> = series.into_iter().filter(|y| !y.is_empty()).collect();
     if series.is_empty() {
         return Err(format!("AlphaEarth has no tiles there for {start}–{end}"));
@@ -277,12 +287,19 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         undo(s);
         return Err(e);
     }
+    if listed > series.len() {
+        s.notify(format!("{base}: {} of the {listed} tiles have no file in {start}–{end} and were left out", listed - series.len()), false);
+    }
     if missing > 0 {
+        let total = series.len() * span;
         s.notify(
-            format!(
-                "{base}: {missing} of the {} tile-years have no file in AlphaEarth's index; in those years the tile shows nothing",
-                series.len() * span
-            ),
+            if complete {
+                format!("{base}: {missing} of the {total} tile-years have no file in AlphaEarth's index; in those years the tile shows nothing")
+            } else {
+                format!(
+                    "{base}: {missing} of the {total} tile-years have no file in the part of AlphaEarth's index that was read (zoom in to read it whole); in those years the tile shows nothing"
+                )
+            },
             false,
         );
     }
@@ -313,8 +330,9 @@ fn found(v: &Value, start: i32, end: i32) -> Result<Vec<BTreeMap<i32, String>>, 
 }
 
 /// AlphaEarth's tiles over the years where the command says, from one read of the index, waiting
-/// for it (the command line), with what the read left out said.
-fn search_series(s: &mut Session, p: &Value, years: (i32, i32)) -> Result<Vec<BTreeMap<i32, String>>, String> {
+/// for it (the command line), with what the read left out said; and whether it read the index
+/// whole for the area.
+fn search_series(s: &mut Session, p: &Value, years: (i32, i32)) -> Result<(Vec<BTreeMap<i32, String>>, bool), String> {
     let area = bbox(s, p)?;
     #[cfg(target_arch = "wasm32")]
     {
@@ -331,12 +349,13 @@ fn search_series(s: &mut Session, p: &Value, years: (i32, i32)) -> Result<Vec<BT
         }
         let f = emb::search_aef_series_blocking(area, years)?;
         series_notices(s, &f);
-        Ok(f.series.into_iter().map(|x| x.years).collect())
+        Ok((f.series.into_iter().map(|x| x.years).collect(), f.complete))
     }
 }
 
 /// What a search over the years left out: rows past one read, tiles past a search's list, and a
 /// tile's second file for a year.
+#[cfg(not(target_arch = "wasm32"))]
 fn series_notices(s: &mut Session, f: &emb::SeriesFound) {
     if !f.complete {
         s.notify("AlphaEarth: the area holds more tiles than one search reads; zoom in to take them all", false);
@@ -561,6 +580,16 @@ mod tests {
         t.run("embeddings.addCube", &json!({"dataset": "alphaearth", "start": 2024, "found": one, "name": "AEF"})).unwrap();
         assert_eq!(t.map().tiles.first().map(|l| l.name.as_str()), Some("AEF"));
         assert!(!t.notices.iter().any(|n| n.text.contains("tile-years")));
+        // A search that read part of the index: the missing years are the read's, said so; a tile
+        // with no file in the years asked for is left out, said.
+        let mut u = Session::new(Project::default());
+        let part = json!([{"years": {"2025": file(2025, "3-4")}}, {"years": {"2016": file(2016, "5-6")}}]);
+        let r = u.run("embeddings.addCube", &json!({"dataset": "alphaearth", "start": 2024, "found": part, "complete": false})).unwrap();
+        assert_eq!((r["tiles"].as_u64(), r["missing"].as_u64()), (Some(1), Some(1)));
+        assert!(
+            u.notices.iter().any(|n| n.text.contains("1 of the 2 tile-years have no file in the part of AlphaEarth's index that was read"))
+        );
+        assert!(u.notices.iter().any(|n| n.text.contains("1 of the 2 tiles have no file in 2024–2025 and were left out")));
         // Other bands (Apply to layers) hold at every year, not only the one shown.
         t.run("map.setTiles", &json!({"index": 0, "bands": [3, 4, 5]})).unwrap();
         t.run("time.goTo", &json!({"step": 0})).unwrap();
