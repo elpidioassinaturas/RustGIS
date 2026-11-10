@@ -682,10 +682,13 @@ impl Session {
     /// eventual `layer.addDownload`; a command run again asks for the same.
     pub(crate) fn asked_for(&self, p: &Value) -> Value {
         let mut asked = without_request(p);
-        if self.web_logins.is_anonymous()
-            && let Some(o) = asked.as_object_mut()
-        {
-            o.insert("anonymous".into(), json!(true));
+        if let Some(o) = asked.as_object_mut() {
+            // Only the session tells windows of the view apart ([`Session::with_view`]): a caller's
+            // own `viewAsked` is left out.
+            o.remove(VIEW_ASKED);
+            if self.web_logins.is_anonymous() {
+                o.insert("anonymous".into(), json!(true));
+            }
         }
         asked
     }

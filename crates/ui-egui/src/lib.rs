@@ -4660,8 +4660,9 @@ impl RustGisApp {
     }
 
     /// Starts reading a window of a cloud-optimised GeoTIFF (`p`, a `ui.addUrl` with `"bbox"`) on a
-    /// thread, to add it with `q` when it lands (#1330). The command line and scripts wait for it
-    /// in `layer.addUrl` instead. What's wrong with what was asked is refused here, on the frame.
+    /// thread, to add it with `q` when it lands (#1330). The command line waits for it in
+    /// `layer.addUrl` instead; a plugin's command or a script the app runs leaves it to the app.
+    /// What's wrong with what was asked is refused here, on the frame.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_window_read(
         &mut self,

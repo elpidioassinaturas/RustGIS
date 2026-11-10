@@ -33198,6 +33198,9 @@ fn a_command_run_again_gets_each_view_s_own_window() {
     };
     assert_eq!(answer(&mut s, views[1]), "B");
     assert_eq!(answer(&mut s, views[0]), "A");
+    // A caller can't write the key the view is told apart by.
+    let written = s.asked_for(&json!({"url": "https://x.org/scene.tif", "bbox": "view", "viewAsked": [0, 0, 1, 1]}));
+    assert_eq!(written, asked);
 }
 
 /// A request for the view's window joins one queued only when it was asked in the same view:
