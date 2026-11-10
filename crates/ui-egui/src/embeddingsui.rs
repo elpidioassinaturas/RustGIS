@@ -578,7 +578,10 @@ pub fn pane(app: &mut RustGisApp, ui: &mut egui::Ui) {
         });
     }
     if cancel {
-        // The read runs on, but what it brings is dropped with its slot.
+        // What the read brings is dropped with its slot, and a data read's download released.
+        // A search's read of the index runs on to its end: it is bounded (one read, at most
+        // MAX_INDEX_ROWS rows) and the index query has no way to be told to stop yet, as for
+        // every other search here.
         if let Some(Read::Data(_, req)) = app.ui.embeddings.reading.take() {
             app.session.download_failed(req.id);
         }

@@ -207,10 +207,16 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
     let look = Look { cube: true, ..emb::aef_look(b, stretch(p)?) };
     let given = p.get("found").filter(|v| !v.is_null());
     // Whether the index was read whole: a tile-year with no file is then the index's gap, not
-    // the read's.
-    let (series, complete) = match given {
-        Some(v) => (found(v, start, end)?, super::b(p, "complete") != Some(false)),
-        None => search_series(s, p, (start, end))?,
+    // the read's. And the files handed over outside the years asked for, left out.
+    let (series, complete, outside) = match given {
+        Some(v) => {
+            let (series, outside) = found(v, start, end)?;
+            (series, super::b(p, "complete") != Some(false), outside)
+        }
+        None => {
+            let (series, complete) = search_series(s, p, (start, end))?;
+            (series, complete, 0)
+        }
     };
     let listed = series.len();
     let series: Vec<BTreeMap<i32, String>> = series.into_iter().filter(|y| !y.is_empty()).collect();
@@ -287,6 +293,16 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         undo(s);
         return Err(e);
     }
+    if outside > 0 {
+        s.notify(
+            if outside == 1 {
+                format!("{base}: 1 file handed over is outside {start}–{end} and was left out")
+            } else {
+                format!("{base}: {outside} files handed over are outside {start}–{end} and were left out")
+            },
+            false,
+        );
+    }
     if listed > series.len() {
         s.notify(format!("{base}: {} of the {listed} tiles have no file in {start}–{end} and were left out", listed - series.len()), false);
     }
@@ -307,14 +323,16 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
 }
 
 /// The tiles the app found and hands over (`found`): each a year's file by year, kept to the
-/// years asked for.
-fn found(v: &Value, start: i32, end: i32) -> Result<Vec<BTreeMap<i32, String>>, String> {
+/// years asked for; and how many files were outside them (said by the caller).
+fn found(v: &Value, start: i32, end: i32) -> Result<(Vec<BTreeMap<i32, String>>, usize), String> {
     let bad = || "found is a list of tiles, each {\"years\": {\"2017\": an https address, …}}".to_string();
     let list = v.as_array().ok_or_else(bad)?;
     if list.len() > emb::MAX_TILES {
         return Err(format!("found holds {} tiles, more than the {} a search lists", list.len(), emb::MAX_TILES));
     }
-    list.iter()
+    let mut outside = 0usize;
+    let series = list
+        .iter()
         .map(|t| {
             let mut out = BTreeMap::new();
             for (y, u) in t.get("years").and_then(Value::as_object).ok_or_else(bad)? {
@@ -322,11 +340,14 @@ fn found(v: &Value, start: i32, end: i32) -> Result<Vec<BTreeMap<i32, String>>, 
                 let u = u.as_str().map(str::trim).filter(|u| u.starts_with("https://") && u.len() <= 4000).ok_or_else(bad)?;
                 if (start..=end).contains(&y) {
                     out.insert(y, u.to_string());
+                } else {
+                    outside += 1;
                 }
             }
             Ok(out)
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((series, outside))
 }
 
 /// AlphaEarth's tiles over the years where the command says, from one read of the index, waiting
@@ -569,6 +590,11 @@ mod tests {
         assert_eq!(t.dates, vec![emb::year_start_ms(2017), emb::year_start_ms(2020), emb::year_start_ms(2025)]);
         assert_eq!(t.format, "YYYY");
         assert!(s.notices.iter().any(|n| n.text.contains("15 of the 18 tile-years have no file")));
+        assert!(
+            s.notices.iter().any(|n| n.text.contains("1 file handed over is outside 2017–2025 and was left out")),
+            "a file outside the years asked for is said: {:?}",
+            s.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
+        );
         // The slider shows each tile's file of its year, or nothing in a year it has none for.
         s.run("time.goTo", &json!({"step": 1})).unwrap();
         assert!(named(&s, a).time_hidden, "no file in 2020");
