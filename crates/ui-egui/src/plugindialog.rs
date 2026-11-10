@@ -388,7 +388,7 @@ fn field(
                 .map(|d| {
                     (0..d.fields.len())
                         .filter(|i| crate::panes::takes_field(kind, d, *i))
-                        .map(|i| (d.fields[i].name.clone(), d.fields[i].name.clone()))
+                        .filter_map(|i| d.fields.get(i).map(|f| (f.name.clone(), f.name.clone())))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -633,6 +633,9 @@ mod tests {
         assert_eq!(number("2.5"), Some(json!(2.5)));
         assert_eq!(number("99999999999999999999"), None);
         assert_eq!(number("9007199254740993.0"), None, "would be rounded");
+        // From 2^52 a float holds no fraction; just below, it holds halves.
+        assert_eq!(number("4503599627370496.5"), None);
+        assert_eq!(number("4503599627370495.5"), Some(json!(4_503_599_627_370_495.5)));
         assert_eq!(number("1e16"), None);
         assert_eq!(number("1e3"), Some(json!(1000)));
         assert_eq!(number("1e-400"), None, "too small for a float: would be sent as 0");
