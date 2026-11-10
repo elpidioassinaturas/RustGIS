@@ -16282,6 +16282,41 @@ fn a_long_document_address_lists_fewer_layers() {
     assert!(s.run("service.groupPlan", &json!({"url": "https://api.example.org/collections", "text": text})).is_ok());
 }
 
+/// `service.layers` with `filter` searches every layer read, not only the first 2000 it lists, and
+/// counts the matches (#1577: IBGE's WFS has 10,186 types, in an order that changes).
+#[test]
+fn a_filter_searches_past_the_listing() {
+    let types: String = (1..=2500)
+        .map(|i| {
+            let title = if (2101..=2103).contains(&i) { format!("Solos do Brasil {i}") } else { format!("Tipo {i}") };
+            format!("<FeatureType><Name>t:{i}</Name><Title>{title}</Title></FeatureType>")
+        })
+        .collect();
+    let caps = format!(r#"<WFS_Capabilities version="2.0.0"><FeatureTypeList>{types}</FeatureTypeList></WFS_Capabilities>"#);
+    let url = "https://wfs.example.org/wfs";
+    let mut s = Session::new(Project::default());
+    let names = |v: &Value| v["layers"].as_array().unwrap().iter().map(|l| l["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    // Without a filter, as before: the first 2000, and no count of matches.
+    let all = s.run("service.layers", &json!({"url": url, "text": caps})).unwrap();
+    assert_eq!((&all["count"], &all["total"]), (&json!(2000), &json!(2500)));
+    assert!(all.get("matched").is_none());
+    // Words in the title or the name, in any case, all of them: past the listing too.
+    let found = s.run("service.layers", &json!({"url": url, "text": caps, "filter": "  BRASIL solos "})).unwrap();
+    assert_eq!(names(&found), ["t:2101", "t:2102", "t:2103"]);
+    assert_eq!((&found["count"], &found["matched"], &found["total"]), (&json!(3), &json!(3), &json!(2500)));
+    assert!(found.get("listedNote").is_none() && found["notes"].as_array().unwrap().is_empty(), "{found}");
+    assert_eq!(found["layers"][0]["source_url"], all["layers"][0]["source_url"]);
+    assert_eq!(names(&s.run("service.layers", &json!({"url": url, "text": caps, "filter": "t:2500"})).unwrap()), ["t:2500"]);
+    let none = s.run("service.layers", &json!({"url": url, "text": caps, "filter": "solos nada"})).unwrap();
+    assert_eq!((&none["count"], &none["matched"]), (&json!(0), &json!(0)));
+    // More matches than a listing holds: the first 2000, said, with how many match.
+    let many = s.run("service.layers", &json!({"url": url, "text": caps, "filter": "tipo"})).unwrap();
+    assert_eq!((&many["count"], &many["matched"], &many["total"]), (&json!(2000), &json!(2497), &json!(2500)));
+    assert_eq!(many["listedNote"], "only the first 2000 of 2497 matching layers are listed; service.add takes any of them by name");
+    // A blank filter is none.
+    assert!(s.run("service.layers", &json!({"url": url, "text": caps, "filter": "  "})).unwrap().get("matched").is_none());
+}
+
 /// A layer past what RustGIS reads of a document is refused for that reason, not as absent.
 #[test]
 fn a_layer_past_the_read_limit_is_refused_saying_so() {

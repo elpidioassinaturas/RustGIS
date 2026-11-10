@@ -2479,13 +2479,35 @@ Connection: close
     h.step();
     h.step();
     h.get_by_label_contains("Local: 2001 layers");
-    h.get_by_label("The filter searches the first 2000 of them; the service.add command adds any other by its name.");
+    h.get_by_label("The first 2000 of them are listed; the filter searches all of them.");
     h.get_by_label("500 of 2000 are listed.");
     assert!(h.query_by_label_contains("only the first 2000").is_none(), "the note isn't said twice");
     h.state_mut().ui.service_browse.filter = "t:20".into();
     h.step();
     h.step();
     assert!(h.query_by_label_contains("are listed.").is_none(), "its 12 matches are all shown");
+    // A layer past the first 2000 is found once typing pauses: all of them are searched (#1577).
+    h.state_mut().ui.service_browse.filter = "T:2001".into();
+    h.step();
+    h.step();
+    h.get_by_label("Searching all 2001 layers…");
+    assert!(h.query_by_label_contains("t:2001").is_none(), "not among the 2000 listed");
+    std::thread::sleep(std::time::Duration::from_millis(350));
+    h.step();
+    h.step();
+    assert!(h.query_by_label_contains("Searching all").is_none());
+    h.get_by_label_contains("t:2001");
+    let conn = h.state().ui.service.as_ref().unwrap();
+    let a = conn.added.as_ref().unwrap();
+    assert!(a.searched && a.matched == 1 && a.rows.len() == 1);
+    // Its row adds it from the search's answer, as a listed row would.
+    let row = &conn.search.as_ref().unwrap().listing.as_ref().unwrap()["layers"][a.rows[0].0];
+    assert_eq!(row["name"], "t:2001");
+    // Cleared, the listing is filtered here again.
+    h.state_mut().ui.service_browse.filter.clear();
+    h.step();
+    h.step();
+    h.get_by_label("The first 2000 of them are listed; the filter searches all of them.");
 }
 
 #[test]
