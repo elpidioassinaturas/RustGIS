@@ -77,7 +77,21 @@ fn jaxa_status() -> Value {
 /// are opened (one that isn't a cloud-optimised GeoTIFF read in place) has spent it.
 fn open(s: &mut Session, p: &Value) -> CmdResult {
     let id = ps(p, "id").map(str::trim).filter(|i| !i.is_empty()).ok_or("id is required (an entry of cube.catalog)")?;
-    open_entry(s, &cubes::find(id)?, p)
+    open_entry(s, &find(id)?, p)
+}
+
+/// The catalog's entry `id`. One not found, while JAXA Earth's catalog isn't read (its datasets
+/// join the list then), says where that stands.
+fn find(id: &str) -> Result<Entry, String> {
+    cubes::find(id).map_err(|e| {
+        let why = match jaxa::status() {
+            jaxa::Status::Read(_) => return e,
+            jaxa::Status::Unread => "it hasn't been read in this run (the Data Cubes pane reads it when first shown)".to_string(),
+            jaxa::Status::Reading => "it is being read".to_string(),
+            jaxa::Status::Failed(f) => format!("it couldn't be read ({f})"),
+        };
+        format!("{e}; JAXA Earth's datasets join it once their catalog is read, and {why}")
+    })
 }
 
 /// Adds `e` to the map, with the area, period and options of `p` (as `cube.open` takes them).
@@ -192,7 +206,7 @@ fn through(end: &Value) -> Value {
 /// would override them.
 pub fn with_entry(p: &Value) -> Result<Cow<'_, Value>, String> {
     let Some(id) = p.get("cube").filter(|v| !v.is_null()) else { return Ok(Cow::Borrowed(p)) };
-    let e = cubes::find(id.as_str().ok_or("cube is an entry's id, from cube.catalog")?)?;
+    let e = find(id.as_str().ok_or("cube is an entry's id, from cube.catalog")?)?;
     if let Some(k) =
         ["layer", "layers", "path", "url", "collection", "asset", "variable"].into_iter().find(|k| p.get(*k).is_some_and(|v| !v.is_null()))
     {

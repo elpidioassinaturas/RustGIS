@@ -420,7 +420,9 @@ pub fn percentile_range(mut values: Vec<f64>) -> Option<[f64; 2]> {
         (lo, hi) = (min, max);
     }
     if hi <= lo {
-        return Some([lo - 0.5, hi + 0.5]);
+        // Past 2^53 half a unit is lost to rounding: no span, so no range.
+        let (a, b) = (lo - 0.5, hi + 0.5);
+        return (a < b).then_some([a, b]);
     }
     let step = 10f64.powf((hi - lo).log10().floor() - 2.0);
     // Twelve significant digits: a step of 0.001 times a whole number leaves no tail of 9s.
@@ -577,6 +579,8 @@ mod tests {
         assert_eq!(percentile_range(Vec::new()), None);
         // A span past the largest number has no range (the caller says why: not "no values").
         assert_eq!(percentile_range(vec![-1e308, 1e308]), None);
+        // Values all alike past 2^53 can't be widened by half a unit: no range either.
+        assert_eq!(percentile_range(vec![1e17; 10]), None);
         // Mostly one value, a few others: the full span rather than nothing.
         let mut few = vec![0.0; 100];
         few.push(5.0);

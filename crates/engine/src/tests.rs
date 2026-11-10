@@ -17055,6 +17055,9 @@ fn a_catalog_entry_opens_as_its_command_would() {
     use crate::render::rustgis_tiles::cubes;
     let mut s = Session::new(Project::default());
     let ids = |r: &Value| r["cubes"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    // An id not in the list, while JAXA Earth's catalog is unread (as here), says so.
+    let e = s.run("cube.open", &json!({"id": "JAXA.Test_daily/B1"})).unwrap_err();
+    assert!(e.contains("no data cube") && e.contains("hasn't been read in this run"), "{e}");
     let all = s.run("cube.catalog", &json!({})).unwrap();
     assert_eq!(all["count"].as_u64(), Some(cubes::built_in().len() as u64));
     assert_eq!(all["themes"].as_array().map(Vec::len), Some(cubes::THEMES.len()));
