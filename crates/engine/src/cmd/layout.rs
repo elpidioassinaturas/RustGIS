@@ -1932,6 +1932,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             // that scale, once, and those sizes are the ones laid out.
             let mut drawn: Option<(f64, Option<(u32, u32, Vec<bool>)>, Option<[(f64, f64); MAX_LEGEND_COLUMNS]>)> = None;
             let mut chosen = known;
+            let mut unknown_at: Option<f64> = None;
             // A figure keeps its scale: its size is fixed, and a smaller scale costs it the most.
             for (factor, veil) in passes.into_iter().filter(|(factor, veil)| (!*veil || continuous) && (*factor == 1.0 || sheet)) {
                 let tried = if factor == 1.0 { asked_scale } else { round_scale(asked_scale * factor) };
@@ -1941,7 +1942,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 let wide = (fw + 2.0 * slack_x, fh + 2.0 * slack_y);
                 if drawn.as_ref().is_none_or(|d| d.0 != tried) {
                     // A smaller scale can draw more classes, and a streamed layer has its features
-                    // read for the wider view.
+                    // read for the wider view. While one is still reading there, or a legend picture
+                    // still loading, the classes aren't known: that scale isn't tried, which is said.
                     let here = if tried == asked_scale {
                         Some(known)
                     } else {
@@ -1954,11 +1956,17 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                             sky: false,
                         };
                         let lonlat = crate::render::view_lonlat(s.map(), &view);
-                        s.map_mut().sync_sources(&lonlat, render_scale, true);
-                        crate::render::layout::legend_sizes_mm(s.map_mut(), render_scale, false, false, &[])
+                        let reading = s.map_mut().sync_sources(&lonlat, render_scale, true);
+                        if reading || crate::render::layout::tile_legends_pending(s.map(), render_scale, &[]) {
+                            unknown_at.get_or_insert(tried);
+                            None
+                        } else {
+                            crate::render::layout::legend_sizes_mm(s.map_mut(), render_scale, false, false, &[])
+                        }
                     };
                     let cells = (384.0 * wide.0.max(wide.1) / fw.max(fh)).round() as u32;
-                    let whole_frame = crate::render::layout::frame_coverage(s.map_mut(), centred, tried, wide.0, wide.1, cells);
+                    let whole_frame =
+                        here.and_then(|_| crate::render::layout::frame_coverage(s.map_mut(), centred, tried, wide.0, wide.1, cells));
                     drawn = Some((tried, whole_frame, here));
                 }
                 let Some((_, Some(whole_frame), Some(here))) = &drawn else { continue };
@@ -2006,6 +2014,22 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 if found.is_some() {
                     break;
                 }
+            }
+            if let Some(at_scale) = unknown_at {
+                warnings.push(format!(
+                    "the map isn't tried at 1:{at_scale:.0} for the legend's room: a layer there is still reading, or a legend picture still loading"
+                ));
+            }
+            // A move changes what the frame shows past the extent, so it is said, as the veil and
+            // the scale are.
+            if map_shift != (0.0, 0.0) {
+                let (dx, dy) = map_shift;
+                let (by, way) =
+                    if dx != 0.0 { (dx, if dx > 0.0 { "right" } else { "left" }) } else { (dy, if dy > 0.0 { "down" } else { "up" }) };
+                warnings.push(format!(
+                    "the map is moved {:.0} mm {way} in its frame (\"mapShift\"), the extent still whole, for the legend's room",
+                    by.abs()
+                ));
             }
             if scale != asked_scale {
                 warnings.push(format!("the map is drawn at 1:{scale:.0}, not 1:{asked_scale:.0}, to leave the legend room"));

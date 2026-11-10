@@ -6687,9 +6687,12 @@ fn publication_layouts_fit_their_pages() {
             assert!(reference.contains("Web Mercator") && reference.contains("WGS 84") && reference.contains("2°"), "{reference}");
             assert!(text("Author").unwrap().contains("{date}"), "the date stays a token the layout fills");
             // Nothing said but, over the sample world's land, the surrounds sharing its one corner
-            // of sea (placement has its own test).
+            // of sea, or the map moved in its frame for the legend (placement has its own tests).
             let said: Vec<&str> = r["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
-            assert!(said.len() <= 1 && said.iter().all(|w| w.contains("on what the map shows")), "{profile}: {r}");
+            assert!(
+                said.len() <= 2 && said.iter().all(|w| w.contains("on what the map shows") || w.contains("in its frame")),
+                "{profile}: {r}"
+            );
         } else {
             assert!(text("Title").is_none() && text("Sources").is_none(), "{profile}: a figure's texts are its caption's");
             assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("caption")), "{r}");
@@ -7702,12 +7705,17 @@ fn a_publication_map_moves_aside_for_a_legend_with_no_room() {
         }
         let r =
             s.run("layout.publication", &json!({"profile": "a4-landscape", "extent": extent, "author": "", "locator": "none"})).unwrap();
-        (r["legendColumns"].as_u64().unwrap(), r["mapShift"][0].as_f64().unwrap(), r["mapShift"][1].as_f64().unwrap(), r["moved"].clone())
+        let said =
+            r["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).find(|w| w.contains("in its frame")).map(String::from);
+        (r["legendColumns"].as_u64().unwrap(), r["mapShift"][0].as_f64().unwrap(), r["mapShift"][1].as_f64().unwrap(), said)
     };
-    let (_, x, y, _) = laid(3, json!([-5, -5, 20, 15]));
+    let (_, x, y, said) = laid(3, json!([-5, -5, 20, 15]));
     assert_eq!((x, y), (0.0, 0.0), "a short legend has room");
-    let (columns, x, y, _) = laid(30, json!([0, 0, 15, 10]));
+    assert_eq!(said, None, "a map left centred isn't said to move");
+    let (columns, x, y, said) = laid(30, json!([0, 0, 15, 10]));
     assert!(x.abs() > 5.0 && y == 0.0, "moved sideways: {x}, {y}");
+    let said = said.expect("a move is said");
+    assert!(said.contains(&format!("{:.0} mm {}", x.abs(), if x > 0.0 { "right" } else { "left" })), "{said}");
     assert_eq!(columns, 1, "one column beside the map");
     // A map running on past the extent: what is outside it is veiled, at the asked scale while the
     // frame leaves a band of it wide enough, and at a smaller one otherwise.
@@ -7718,7 +7726,7 @@ fn a_publication_map_moves_aside_for_a_legend_with_no_room() {
         }
         let p = json!({"profile": "a4-landscape", "extent": extent, "author": "", "locator": "none", "veil": veil});
         let r = s.run("layout.publication", &p).unwrap();
-        let smaller = r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("to leave the legend room"));
+        let smaller = r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("the map is drawn at 1:"));
         let veils = r["elements"].as_array().unwrap().iter().filter(|e| e["name"].as_str().unwrap().starts_with("Veil")).count();
         assert_eq!(r["arrangement"] == "veil", r["veiled"].as_bool().unwrap(), "{r}");
         let said = r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("outside the extent is veiled"));
