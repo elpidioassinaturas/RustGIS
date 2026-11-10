@@ -570,6 +570,17 @@ impl MapView {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn label_dragging_for_tests(&self) -> bool {
+        self.moving_label.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn label_position_for_tests(&self, text: &str) -> Option<Pos2> {
+        let label = self.labels.iter().find(|label| label.text == text)?;
+        Some(self.view_rect?.0.min + vec2(label.x, label.y))
+    }
+
     /// Cancels a vertex preview and its pending release together, leaving other map gestures
     /// alone. The chosen node is cleared because its row/address may now belong to another shape.
     pub(crate) fn cancel_vertex_drag(&mut self) {
@@ -957,12 +968,13 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         if let Some((k, done)) = app.map.tilt_settle.take() {
             app.session.map_mut().adopt_caches(&done.map);
             // A frame of this view that couldn't be drawn isn't tried again: nothing is to fill.
-            if same_view(k, key) && done.rendered.is_none() {
+            if same_view(k, key) && done.rendered.is_none() && done.archives.current([&done.map]) {
                 app.map.filling = false;
             }
             // One drawn before tiles or data arrived still shows; the next follows. So does one
             // of a change made since, for a view whose frame on screen is older still.
             if (same_view(k, key) || (tiled_flat && shows_finished(k, key, app.map.key)))
+                && done.archives.current([&done.map])
                 && let Some(r) = done.rendered
             {
                 // With tile pictures still to draw, a draft: the next frame draws more.
@@ -3093,6 +3105,8 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
     }
     // The NLDI's point, while its pane is open.
     crate::nldiui::paint(app, p, rect, t, |c| lonlat_to_screen(app, rect, c));
+    // The spectral profile's points, while its section shows.
+    crate::spectralui::paint(app, p, t, |c| lonlat_to_screen(app, rect, c));
     // Points picked for a workflow.
     if let Some(pick) = &app.workflow.pick {
         let pts = pick.points.clone();
@@ -3564,6 +3578,7 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
     follow_popup(app);
     let Some(pp) = &app.map.popup else { return };
     let t = Tokens::get(ui.ctx());
+    let at = pp.at;
     let Some(anchor) = lonlat_to_screen(app, rect, pp.at) else { return };
     if !rect.contains(anchor) {
         return;
@@ -3581,7 +3596,10 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
     };
     let mut step: Option<usize> = None;
     let mut zoom = false;
-    // The feature shown, as its layer id and feature id (a raster pixel has neither).
+    // A pixel of a raster of two bands or more: its layer, for the spectral profile.
+    let spectral = crate::spectralui::offered(app, &info);
+    let mut profile = false;
+    // The feature shown, as its layer id and feature id (a raster pixel has no feature id).
     let shown = info["layerId"].as_u64().and_then(|id| u32::try_from(id).ok()).zip(info["fid"].as_u64());
     // Only WMS layers being asked so far, or still waited for: their names.
     let waiting = !is_found(&info);
@@ -3659,6 +3677,16 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                             if ui.add(egui::Button::new(tl!("×")).frame(false)).clicked() {
                                 close = true;
+                            }
+                            // A pixel of several bands: add it to the spectral profile.
+                            if spectral.is_some() {
+                                let (r, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+                                let ink = if resp.hovered() { t.text } else { t.icon };
+                                crate::icons::paint(ui.painter(), r, "chart", ink, t.accent);
+                                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("Spectral Profile")));
+                                if resp.on_hover_text(tl!("Spectral Profile: chart every band here, and compare points")).clicked() {
+                                    profile = true;
+                                }
                             }
                             // A feature (not a raster pixel): zoom to it.
                             if shown.is_some() {
@@ -3838,6 +3866,9 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
         if let Some(e) = extent.filter(|e| !e.is_empty()) {
             app.session.zoom_to(&e);
         }
+    }
+    if let (true, Some(id)) = (profile, spectral) {
+        crate::spectralui::from_identify(app, id, at);
     }
     if close {
         app.map.popup = None;
@@ -4403,6 +4434,25 @@ mod tile_redraw_tests {
         assert!(!keeps_frame(None, changed, 40));
         // Nothing changed: nothing to keep.
         assert!(!keeps_frame(Some(key(3)), key(3), 40));
+    }
+
+    #[test]
+    fn an_eligible_finished_frame_cannot_cross_its_archive_reload() {
+        use rustgis_engine::{
+            map::{Map, TileKind, TileLayer},
+            render,
+        };
+        let mut map = Map::new("Archive publication");
+        map.tiles.push(TileLayer::new("Target", TileKind::PmTiles, "/finished-frame-revision.pmtiles"));
+        let archives = render::archive_revisions([&map]);
+        let (shown, done, now) = (Key { rev: 4, ..key(0) }, Key { rev: 6, ..key(0) }, Key { rev: 9, ..key(0) });
+        let eligible = || shows_finished(done, now, Some(shown)) && archives.current([&map]);
+        assert!(eligible(), "ordinary progressive finished frames still show");
+        render::rustgis_tiles::cache::reload_archive("/finished-frame-unrelated.mbtiles");
+        assert!(eligible(), "another source does not revoke this worker's frame");
+        render::rustgis_tiles::cache::reload_archive(&map.tiles[0].url);
+        assert!(shows_finished(done, now, Some(shown)), "the permissive revision fallback alone still accepts it");
+        assert!(!eligible(), "archive coherence is also required at adoption");
     }
 
     #[test]
