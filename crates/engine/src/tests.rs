@@ -7697,7 +7697,7 @@ fn a_publication_map_moves_aside_for_a_legend_with_no_room() {
     let (veiled, smaller, veils, asked) = on_past(json!([5, 4, 8.7, 6]), json!(false));
     assert_eq!((veiled, smaller, veils), (false, false, false));
     assert!(asked < scale, "1:{asked} against the veil's 1:{scale}");
-    assert_eq!(on_past(json!([7, 4, 9, 6]), json!(true)).0, true, "true is the default");
+    assert!(on_past(json!([7, 4, 9, 6]), json!(true)).0, "true, as by default");
     let mut s = Session::new(Project::default());
     s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
     let bad = s.run("layout.publication", &json!({"profile": "a4-landscape", "veil": "no"})).unwrap_err();
