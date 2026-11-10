@@ -1984,7 +1984,13 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                         } else if tried == asked_scale {
                             Some(known)
                         } else {
-                            crate::render::layout::legend_sizes_mm(s.map_mut(), render_scale, false, false, &[])
+                            // A legend that can't be measured there (a source that can't be read
+                            // through) leaves that scale untried too, which is said.
+                            let measured = crate::render::layout::legend_sizes_mm(s.map_mut(), render_scale, false, false, &[]);
+                            if measured.is_none() {
+                                unknown_at.get_or_insert(tried);
+                            }
+                            measured
                         };
                     let cells = (384.0 * wide.0.max(wide.1) / fw.max(fh)).round() as u32;
                     // What is context is judged on the frame asked for, not the wide drawing, so
@@ -2063,7 +2069,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             }
             if let Some(at_scale) = unknown_at {
                 warnings.push(format!(
-                    "the map isn't moved or veiled at 1:{at_scale:.0} for the legend's room: a layer there is still reading, or a legend picture still loading"
+                    "the map isn't moved or veiled at 1:{at_scale:.0} for the legend's room: a layer there is still reading, a legend picture still loading, or a layer's source can't be read through (exporting says why)"
                 ));
             }
             // A move changes what the frame shows past the extent, so it is said, as the veil and

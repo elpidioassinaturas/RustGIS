@@ -7636,6 +7636,58 @@ fn a_publication_without_a_colorbar_sizes_the_legend_box_to_the_legend() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A smaller scale whose legend can't be measured (a streamed layer shown only there, whose file is
+/// gone) isn't tried, and the result says so.
+#[test]
+fn a_publication_says_a_smaller_scale_whose_legend_cant_be_measured() {
+    let dir = std::env::temp_dir().join(format!("rustgis-unmeasured-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (fill, gone) = (dir.join("fill.geojson"), dir.join("gone.shp"));
+    let square = |w: f64, s0: f64, e: f64, n: f64| {
+        json!({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"k": "a"}, "geometry":
+            {"type": "Polygon", "coordinates": [[[w, s0], [e, s0], [e, n], [w, n], [w, s0]]]}}]})
+    };
+    std::fs::write(&fill, square(0.0, 0.0, 15.0, 10.0).to_string()).unwrap();
+    // A shapefile: its legend is read from the whole source, a chunk at a time.
+    {
+        use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value};
+        use rustgis_geom::Coord;
+        let mut d = Dataset::new("gone", GeometryType::Polygon, vec![Field::new("k", FieldType::Text)]);
+        let ring = [(1.0, 1.0), (14.0, 1.0), (14.0, 9.0), (1.0, 9.0), (1.0, 1.0)];
+        d.push(Some(Geometry::Polygon(vec![vec![ring.map(|(x, y)| Coord::new(x, y)).to_vec()]])), vec![Value::Text("a".into())]);
+        rustgis_data::io::write_path(&d, &gone).unwrap();
+    }
+    let mut s = Session::new(Project::default());
+    for _ in 0..12 {
+        s.run("layer.addData", &json!({"path": fill.display().to_string()})).unwrap();
+    }
+    let p = json!({"profile": "a4-landscape", "extent": [5, 4, 8.7, 6], "author": "", "locator": "none"});
+    let asked = s
+        .run(
+            "layout.publication",
+            &json!({"profile": "a4-landscape", "extent": [5, 4, 8.7, 6], "author": "", "locator": "none", "veil": false}),
+        )
+        .unwrap()["scale"]
+        .as_f64()
+        .unwrap();
+    let id = s.run("layer.addData", &json!({"path": gone.display().to_string(), "stream": true, "name": "Gone"})).unwrap()["layer"]
+        .as_u64()
+        .unwrap();
+    // Drawn by classes, which the legend reads the whole source for; shown only at scales smaller
+    // than the one asked for; then its files are gone.
+    s.run("layer.symbology", &json!({"layer": id, "type": "unique", "field": "k"})).unwrap();
+    s.run("layer.scaleRange", &json!({"layer": id, "max": asked * 1.1})).unwrap();
+    for ext in ["shp", "shx", "dbf"] {
+        let _ = std::fs::remove_file(gone.with_extension(ext));
+    }
+    assert!(!gone.exists(), "the shapefile is gone");
+    let r = s.run("layout.publication", &p).unwrap();
+    let said = r["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).any(|w| w.contains("isn't moved or veiled at 1:"));
+    assert!(said, "the scale not tried is said: {r}");
+    assert!(r["warnings"].to_string().contains("can't be read through"), "and why: {r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A moved frame is drawn at its own centre's ground scale (Web Mercator's changes with the
 /// latitude), so the extent drawn there is where the search placed it: whole in the frame, under
 /// its outline, north and south of the equator.
