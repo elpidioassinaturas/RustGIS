@@ -714,6 +714,10 @@ pub struct Session {
     /// layer lands as the map draws (failing is said then, and read again: see
     /// [`Session::read_in_place_again`]).
     pub in_place_wait: bool,
+    /// Whether commands run on the desktop window's own thread, which draws nothing until each
+    /// answers: a plugin command there is held to the usual two minutes, whatever longer
+    /// `timeout` it declares. The command line, Python, scripts and tests run off any window.
+    pub on_window_thread: bool,
     pub notices: Vec<Notice>,
     /// Counted losses await the outermost guard's cleanup, including failed nested commands.
     /// Runtime-only: never in Project, undo or PutAside, so replacement cannot erase them.
@@ -853,6 +857,9 @@ pub struct Session {
     /// Set by [`Session::run_leaving_downloads`]: `layer.addUrl` leaves what it would wait for
     /// to the front end ([`Session::request_url`]), as in the browser.
     leave_downloads: bool,
+    /// Set by [`prefs::opt_in`]: the command line and Python read the remembered Earthdata token
+    /// for a command that names a data host, before it binds its accounts.
+    saved_secrets_opted_in: bool,
     /// Plugin commands waiting for their `host.fetch` answers, or the downloads their
     /// `layer.addUrl` left to the app, to run again.
     pub(crate) plugin_retries: Vec<cmd::plugins::fetch::Retry>,
@@ -1135,6 +1142,7 @@ impl Session {
             view_size: (1200.0, 720.0),
             style_view: None,
             in_place_wait: true,
+            on_window_thread: false,
             notices: Vec::new(),
             loss_notices: Vec::new(),
             loss_notice_overflow: 0,
@@ -1198,6 +1206,7 @@ impl Session {
             queue_gp_files: false,
             request_only: false,
             leave_downloads: false,
+            saved_secrets_opted_in: false,
             plugin_retries: Vec::new(),
             url_waits: cmd::plugins::fetch::UrlWaits::default(),
             next_request: 0,
