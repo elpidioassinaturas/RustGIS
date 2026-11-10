@@ -25,6 +25,9 @@ struct Dialog {
     plugin: String,
     command: String,
     values: Map<String, Value>,
+    /// Number fields as typed: empty leaves the parameter out, and one that isn't a number
+    /// holds Run.
+    texts: HashMap<String, String>,
     /// The parameters of the run asked for and not answered yet.
     asked: Option<Value>,
     /// The last run's report, or its error.
@@ -51,7 +54,7 @@ pub fn open(app: &mut RustGisApp, p: &Value) -> Result<Value, String> {
         .get(&key)
         .cloned()
         .unwrap_or_else(|| c.form.iter().filter_map(|f| f.default.clone().map(|d| (f.name.clone(), d))).collect());
-    state.open = Some(Dialog { plugin: key.0, command: key.1, values, asked: None, result: None });
+    state.open = Some(Dialog { plugin: key.0, command: key.1, values, texts: HashMap::new(), asked: None, result: None });
     Ok(Value::Null)
 }
 
@@ -115,6 +118,13 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         .filter(|f| f.required && d.values.get(&f.name).is_none_or(|v| v.is_null() || v.as_str() == Some("")))
         .map(|f| m.translate(&lang, &f.label))
         .collect();
+    // Numbers typed that aren't numbers.
+    let bad: Vec<&str> = c
+        .form
+        .iter()
+        .filter(|f| f.kind == "number" && d.texts.get(&f.name).is_some_and(|t| !t.trim().is_empty() && number(t).is_none()))
+        .map(|f| m.translate(&lang, &f.label))
+        .collect();
     let mut run = false;
 
     let mut open = true;
@@ -141,7 +151,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                     if !f.help.is_empty() {
                         label = label.on_hover_text(m.translate(&lang, &f.help));
                     }
-                    field(app, ui, f, &mut d.values, layer.as_deref(), m, &lang).labelled_by(label.id);
+                    field(app, ui, f, &mut d.values, &mut d.texts, layer.as_deref(), m, &lang).labelled_by(label.id);
                     if layer_kind(&f.kind).is_some() {
                         layer = d.values.get(&f.name).and_then(Value::as_str).map(str::to_string);
                     }
@@ -151,11 +161,14 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let running = d.asked.is_some();
-                let button = ui.add_enabled(!running && missing.is_empty(), egui::Button::new(RichText::new(tl!("Run")).strong()));
-                let button = if missing.is_empty() {
-                    button
-                } else {
+                let ready = missing.is_empty() && bad.is_empty();
+                let button = ui.add_enabled(!running && ready, egui::Button::new(RichText::new(tl!("Run")).strong()));
+                let button = if !missing.is_empty() {
                     button.on_disabled_hover_text(crate::i18n::fmt("Fill in: {fields}", &[("fields", &missing.join(", "))]))
+                } else if !bad.is_empty() {
+                    button.on_disabled_hover_text(crate::i18n::fmt("Not a number: {fields}", &[("fields", &bad.join(", "))]))
+                } else {
+                    button
                 };
                 if button.clicked() {
                     run = true;
@@ -184,9 +197,10 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
     if run {
         let params = Value::Object(d.values.clone());
         d.result = None;
-        // Asked as a ribbon button would: errors before it starts are notices, and the answer.
-        match app.run_by_user(&id, params.clone()) {
-            Ok(_) => d.asked = Some(params),
+        // Asked as a ribbon button would, but not through `run_by_user`, where no parameters
+        // would open this dialog again: errors before it starts are notices, and the answer.
+        match app.ask_plugin(&id, params.clone()) {
+            Ok(()) => d.asked = Some(params),
             Err(e) => d.result = Some(Err(e)),
         }
     }
@@ -252,11 +266,19 @@ fn combo(
         .response
 }
 
+/// The number typed in `text`, a whole one as an integer (for commands that read integers);
+/// `None` when empty or not a number.
+fn number(text: &str) -> Option<Value> {
+    let x = text.trim().parse::<f64>().ok().filter(|x| x.is_finite())?;
+    Some(if x.fract() == 0.0 && x.abs() < 1e15 { json!(x as i64) } else { json!(x) })
+}
+
 fn field(
     app: &RustGisApp,
     ui: &mut Ui,
     f: &ParamDecl,
     values: &mut Map<String, Value>,
+    texts: &mut HashMap<String, String>,
     layer: Option<&str>,
     m: &rustgis_engine::plugins::Manifest,
     lang: &str,
@@ -292,12 +314,20 @@ fn field(
             combo(ui, id, values, &f.name, &options, f.required, named)
         }
         "number" => {
-            let mut x = values.get(&f.name).and_then(Value::as_f64).unwrap_or(0.0);
-            let r = ui.add(egui::DragValue::new(&mut x).speed(1.0));
-            if r.changed() || !values.contains_key(&f.name) {
-                // A whole number goes as one, for commands that read integers.
-                let v = if x.fract() == 0.0 && x.abs() < 1e15 { json!(x as i64) } else { json!(x) };
-                values.insert(f.name.clone(), v);
+            // Typed, so that an optional one can be left empty, and out.
+            let text = texts.entry(f.name.clone()).or_insert_with(|| match values.get(&f.name) {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Null) | None => String::new(),
+                Some(v) => v.to_string(),
+            });
+            let r = ui.add(egui::TextEdit::singleline(text).desired_width(120.0));
+            match number(text) {
+                Some(v) => {
+                    values.insert(f.name.clone(), v);
+                }
+                None => {
+                    values.remove(&f.name);
+                }
             }
             r
         }
@@ -306,9 +336,10 @@ fn field(
             combo(ui, id, values, &f.name, &options, f.required || f.default.is_some(), None)
         }
         "bool" => {
+            // Sent once ticked or given a default: one never set is left out.
             let mut on = values.get(&f.name).and_then(Value::as_bool).unwrap_or(false);
             let r = ui.checkbox(&mut on, "");
-            if r.changed() || !values.contains_key(&f.name) {
+            if r.changed() {
                 values.insert(f.name.clone(), json!(on));
             }
             r
@@ -344,6 +375,11 @@ mod tests {
         ]);
         let commands = m["commands"].as_array_mut().unwrap();
         commands.push(json!({"id": "q", "label": "Echo", "form": form}));
+        // Echoes too (the test plugin answers by the id's first letter), with optional fields only.
+        commands.push(json!({"id": "qq", "label": "Echo Optional", "form": [
+            {"name": "count", "label": "Count", "kind": "number"},
+            {"name": "flag", "label": "Flag", "kind": "bool"}
+        ]}));
         for c in commands.iter_mut().filter(|c| c["id"] == "e") {
             c["form"] = json!([{"name": "trees", "label": "Trees", "kind": "number"}]);
         }
@@ -405,6 +441,37 @@ mod tests {
         assert_eq!(dialog(&h).values["trees"], json!(7));
         assert!(h.state_mut().run("ui.pluginForm", json!({"plugin": "ui-dialog", "command": "h"})).is_err(), "no dialog");
         plugins::unload("ui-dialog");
+    }
+
+    /// Optional numbers and checkboxes never set are left out. `{}` opens the dialog as `null`
+    /// does, and its Run with no values runs the command rather than opening the dialog again.
+    #[test]
+    fn optional_fields_left_alone_are_left_out() {
+        let mut h = launch("ui-dialog-optional");
+        h.state_mut().run_by_user("plugin:ui-dialog-optional/qq", json!({})).unwrap();
+        h.run();
+        assert!(dialog(&h).values.is_empty(), "{:?}", dialog(&h).values);
+        h.get_by_label("Run").click();
+        h.run();
+        let Some(Ok(answer)) = &dialog(&h).result else { panic!("{:?}", dialog(&h).result) };
+        let echoed: Value = serde_json::from_str(answer).unwrap();
+        assert_eq!(echoed["params"], json!({}));
+        // A number typed is sent as one; text that isn't a number holds Run.
+        let d = h.state_mut().ui.plugin_dialog.open.as_mut().unwrap();
+        d.texts.insert("count".into(), "2,5".into());
+        d.result = None;
+        h.run();
+        h.get_by_label("Run").click();
+        h.run();
+        assert!(dialog(&h).asked.is_none() && dialog(&h).result.is_none(), "not run");
+        h.state_mut().ui.plugin_dialog.open.as_mut().unwrap().texts.insert("count".into(), "2.5".into());
+        h.run();
+        h.get_by_label("Run").click();
+        h.run();
+        let Some(Ok(answer)) = &dialog(&h).result else { panic!("{:?}", dialog(&h).result) };
+        let echoed: Value = serde_json::from_str(answer).unwrap();
+        assert_eq!(echoed["params"], json!({"count": 2.5}));
+        plugins::unload("ui-dialog-optional");
     }
 
     /// A `report` text is shown as it is; any other answer as JSON, without its panel state.

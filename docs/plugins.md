@@ -187,18 +187,20 @@ cargo build --release --target wasm32-unknown-unknown
 - `commands[].icon`: the name of one of RustGIS's own icons (`stats`, `zoom_full`, `bookmark`,
   `buffer`…), or a puzzle piece when it isn't one.
 - `commands[].form` (optional) gives the command a dialog of its own: its ribbon button (tab
-  entry, Command Search entry, shortcut) opens a window with these fields instead of running it, and **Run** runs the command
-  with their values as its parameters, by their `name`s. Fields are declared like tool
-  parameters (below), with `rasterLayer` added and `file` left out (a command that reads a file
-  asks for it with host calls, behind the `files` permission); a `field` or `numericField` lists
-  the fields of the nearest layer field above it. A required layer starts at the active layer
-  when it is of the kind, an optional one offers `—` to leave it out, and **Run** waits until the
-  required fields are filled in. The dialog shows what the command answers: its `report` text
-  when it answers `{"report": "…"}`, or else the answer itself. Its values are kept, for each
-  dialog, until RustGIS closes. Scripts and agents run the command as before, with the
-  parameters they give. RustGIS versions before dialogs ignore `form` and run the command when
-  its button is clicked, without these parameters: set `minRustgisVersion` to the first version
-  with them, or have the command answer what it needs then.
+  entry, panel button, Command Search entry, shortcut) opens a window with these fields instead of
+  running it, and **Run** runs the command with their values as its parameters, by their `name`s.
+  Fields are declared like tool parameters (below), with `rasterLayer` added and `file` left out
+  (a command that reads a file asks for it with host calls, behind the `files` permission); a
+  `field` or `numericField` lists the fields of the nearest layer field above it. A required layer
+  starts at the active layer when it is of the kind, an optional one offers `—` to leave it out,
+  and **Run** waits until the required fields are filled in. An optional number left empty, or a
+  checkbox without a `default` never ticked, is left out of the parameters. The dialog shows what
+  the command answers: its `report` text when it answers `{"report": "…"}`, or else the answer
+  itself. Its values are kept, for each dialog, until RustGIS closes. Scripts and agents run the
+  command as before, with the parameters they give. RustGIS versions before dialogs ignore `form`
+  and run the command when its button is clicked, without these parameters: set
+  `minRustgisVersion` to the first version with them, or have the command answer what it needs
+  then.
 - Tool parameter `kind`s: `layer`, `vectorLayer`, `polygonLayer`, `pointLayer`, `field`,
   `numericField`, `number`, `text`, `choice` (with 1 to 64 `choices`), `bool` and `file` (see
   [File parameters](#file-parameters)). Each has `name`, `label`, optional `help`, `required`
