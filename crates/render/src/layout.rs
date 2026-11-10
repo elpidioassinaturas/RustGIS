@@ -2007,11 +2007,24 @@ fn only_outlines(l: &rustgis_map::Layer) -> bool {
         && l.extrusion.is_none()
 }
 
+/// Whether a layer fills its polygons in one colour, with no labels and nothing else: beside a layer
+/// drawn by classes or a raster it is context too, such as the neighbouring states in grey.
+fn plain_fill(l: &rustgis_map::Layer) -> bool {
+    l.geometry_type() == GeometryType::Polygon
+        && !l.labels.enabled
+        && !l.has_fills()
+        && matches!(&l.renderer, rustgis_map::Renderer::Single(_))
+        && l.symbol_by.fill.is_none()
+        && l.diagram.is_none()
+        && l.extrusion.is_none()
+}
+
 /// Where a frame showing `map` at 1:`scale` draws its layers: a grid of about `cells` cells across
 /// the frame's longer side, row by row from the top, each `true` where a layer (or its labels)
 /// drew. The basemap is left out, so the frame's background isn't counted, and so are layers that
-/// only outline their polygons ([`only_outlines`]) unless nothing else draws at that scale. For
-/// keeping a layout's surrounds off what its map shows. `None` when the frame can't be drawn.
+/// only outline their polygons ([`only_outlines`]) unless nothing else is shown, and those that
+/// fill them in one colour ([`plain_fill`]) beside a layer drawn by classes or a raster. For keeping a
+/// layout's surrounds off what its map shows. `None` when the frame can't be drawn.
 ///
 /// The map itself is drawn, not a copy of it (every layer's features): its basemap, web tiles
 /// (a background, like the basemap) and graticule are set aside for the drawing and put back,
@@ -2050,7 +2063,9 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
     let outlines: Vec<u32> = if map.layers.iter().filter(|l| map.draws_at(l, at)).all(only_outlines) {
         Vec::new()
     } else {
-        map.layers.iter().filter(|l| l.visible && only_outlines(l)).map(|l| l.id).collect()
+        let classes =
+            map.layers.iter().any(|l| map.draws_at(l, at) && (l.is_raster() || !matches!(&l.renderer, rustgis_map::Renderer::Single(_))));
+        map.layers.iter().filter(|l| l.visible && (only_outlines(l) || (classes && plain_fill(l)))).map(|l| l.id).collect()
     };
     for l in map.layers.iter_mut().filter(|l| outlines.contains(&l.id)) {
         l.visible = false;
@@ -2771,6 +2786,54 @@ mod tests {
             shown
         };
         assert!(drawn_alone > beside, "{drawn_alone} of {beside}");
+        let l = map.layers.iter_mut().find(|l| l.id == border).unwrap();
+        l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol::default_for(GeometryType::Polygon, 0));
+        assert!(plain_fill(l), "one colour");
+        l.labels.enabled = true;
+        assert!(!plain_fill(l), "labels make it more than context");
+    }
+
+    /// A polygon layer in one colour is context beside a layer drawn by classes, and what the map
+    /// shows when all its layers are in one colour.
+    #[test]
+    fn frame_coverage_leaves_out_one_colour_fills_beside_classes() {
+        use rustgis_data::{Dataset, Field, FieldType, Geometry, Value};
+        let count = |map: &mut Map| {
+            let (.., cells) = frame_coverage(map, Coord::new(0.0, 0.0), 1_000_000.0, 100.0, 100.0, 64).unwrap();
+            cells.iter().filter(|c| **c).count()
+        };
+        let mut map = Map::new("m");
+        let mut square = Dataset::new("states", GeometryType::Polygon, Vec::new());
+        square.push(
+            Some(Geometry::Polygon(vec![vec![
+                [(-0.2, -0.2), (0.2, -0.2), (0.2, 0.2), (-0.2, 0.2), (-0.2, -0.2)].map(|(x, y)| Coord::new(x, y)).to_vec(),
+            ]])),
+            Vec::new(),
+        );
+        let states = map.add_dataset(square);
+        let mut d = Dataset::new("far", GeometryType::Point, vec![Field::new("g", FieldType::Text)]);
+        d.push(Some(Geometry::Point(Coord::new(-0.3, -0.3))), vec![Value::Text("c".into())]);
+        let far = map.add_dataset(d);
+        let with_states = count(&mut map);
+        let s = |c| rustgis_map::Symbol::default_for(GeometryType::Point, c);
+        if let Some(l) = map.layers.iter_mut().find(|l| l.id == far) {
+            l.renderer = rustgis_map::Renderer::Unique {
+                field: "g".into(),
+                classes: vec![("c".to_string(), s(0))],
+                other: s(1),
+                ramp: rustgis_map::Ramp::Ember,
+                class_labels: Default::default(),
+                other_label: None,
+                class_strokes: Default::default(),
+                other_strokes: Vec::new(),
+                class_fills: Default::default(),
+                other_fills: Vec::new(),
+                expression: None,
+            };
+        }
+        let beside_classes = count(&mut map);
+        assert!(beside_classes > 0 && beside_classes < with_states, "{beside_classes} of {with_states}");
+        assert!(map.layer(states).is_some_and(|l| l.visible), "shown again");
     }
 
     /// A legend's rows go into columns: as even as they go, a layer's name with the row under it,

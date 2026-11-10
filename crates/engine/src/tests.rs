@@ -7633,6 +7633,78 @@ fn a_publication_without_a_colorbar_sizes_the_legend_box_to_the_legend() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A veiled map's surrounds group in a band: beside each other in a wide one, one over the other in
+/// a tall one, nowhere when they don't fit.
+#[test]
+fn a_veil_panel_groups_the_surrounds_by_the_bands_shape() {
+    use crate::cmd::layout::veil_panel;
+    let (legend, arrow, scale) = ((80.0, 50.0), (8.0, 12.0), (60.0, 10.0));
+    let (l, locator, a, b) = veil_panel((0.0, 0.0, 160.0, 70.0), legend, Some(40.0), arrow, scale, 3.0).unwrap();
+    assert!(l.0 + l.2 <= locator.unwrap().0, "beside it: {l:?} {locator:?}");
+    assert!(a.0 + a.2 <= l.0 + 160.0 && b.1 >= locator.unwrap().1 + 40.0, "{a:?} {b:?}");
+    let (l, locator, _, b) = veil_panel((0.0, 0.0, 90.0, 130.0), legend, Some(40.0), arrow, scale, 3.0).unwrap();
+    assert!(l.1 >= b.1 + b.3 && locator.unwrap().0 == b.0, "under it: {l:?} {b:?}");
+    assert!(veil_panel((0.0, 0.0, 60.0, 60.0), legend, Some(40.0), arrow, scale, 3.0).is_none());
+    assert!(veil_panel((0.0, 0.0, 160.0, 70.0), legend, None, arrow, scale, 3.0).unwrap().1.is_none());
+}
+
+/// With no room for any shape of the legend on either side of a centred map, the map moves towards
+/// an edge, the asked extent still in the frame, and the legend takes the room that joins. With room
+/// already, it stays centred.
+#[test]
+fn a_publication_map_moves_aside_for_a_legend_with_no_room() {
+    let dir = std::env::temp_dir().join(format!("rustgis-map-shift-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a_layer_name.geojson");
+    let json = json!({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry":
+        {"type": "Polygon", "coordinates": [[[0.0, 0.0], [15.0, 0.0], [15.0, 10.0], [0.0, 10.0], [0.0, 0.0]]]}}]});
+    std::fs::write(&path, json.to_string()).unwrap();
+    let laid = |layers: usize, extent: Value| {
+        let mut s = Session::new(Project::default());
+        for _ in 0..layers {
+            s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+        }
+        let r =
+            s.run("layout.publication", &json!({"profile": "a4-landscape", "extent": extent, "author": "", "locator": "none"})).unwrap();
+        (r["legendColumns"].as_u64().unwrap(), r["mapShift"][0].as_f64().unwrap(), r["mapShift"][1].as_f64().unwrap(), r["moved"].clone())
+    };
+    let (_, x, y, _) = laid(3, json!([-5, -5, 20, 15]));
+    assert_eq!((x, y), (0.0, 0.0), "a short legend has room");
+    let (columns, x, y, _) = laid(30, json!([0, 0, 15, 10]));
+    assert!(x.abs() > 5.0 && y == 0.0, "moved sideways: {x}, {y}");
+    assert_eq!(columns, 1, "one column beside the map");
+    // A map running on past the extent: what is outside it is veiled, at the asked scale while the
+    // frame leaves a band of it wide enough, and at a smaller one otherwise.
+    let on_past = |extent: Value, veil: Value| {
+        let mut s = Session::new(Project::default());
+        for _ in 0..12 {
+            s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+        }
+        let p = json!({"profile": "a4-landscape", "extent": extent, "author": "", "locator": "none", "veil": veil});
+        let r = s.run("layout.publication", &p).unwrap();
+        let smaller = r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("to leave the legend room"));
+        let veils = r["elements"].as_array().unwrap().iter().filter(|e| e["name"].as_str().unwrap().starts_with("Veil")).count();
+        assert_eq!(r["arrangement"] == "veil", r["veiled"].as_bool().unwrap(), "{r}");
+        let said = r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("outside the extent is veiled"));
+        assert_eq!(said, r["veiled"].as_bool().unwrap(), "the veil is said, and only then: {r}");
+        (r["veiled"].as_bool().unwrap(), smaller, veils > 0, r["scale"].as_f64().unwrap())
+    };
+    let (veiled, smaller, veils, _) = on_past(json!([7, 4, 9, 6]), Value::Null);
+    assert_eq!((veiled, smaller, veils), (true, false, true), "a narrow extent in a wide frame");
+    let (veiled, smaller, veils, scale) = on_past(json!([5, 4, 8.7, 6]), Value::Null);
+    assert_eq!((veiled, smaller, veils), (true, true, true), "an extent the frame's shape");
+    // `"veil": false` keeps the map as it is drawn: no veil, and the scale it was asked at.
+    let (veiled, smaller, veils, asked) = on_past(json!([5, 4, 8.7, 6]), json!(false));
+    assert_eq!((veiled, smaller, veils), (false, false, false));
+    assert!(asked < scale, "1:{asked} against the veil's 1:{scale}");
+    assert_eq!(on_past(json!([7, 4, 9, 6]), json!(true)).0, true, "true is the default");
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    let bad = s.run("layout.publication", &json!({"profile": "a4-landscape", "veil": "no"})).unwrap_err();
+    assert!(bad.contains("veil is true or false"), "{bad}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_publication_legend_too_long_goes_into_columns() {
     use rustgis_map::layout::ElementKind;
