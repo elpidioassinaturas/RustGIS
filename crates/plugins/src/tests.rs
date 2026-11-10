@@ -253,10 +253,25 @@ fn command_dialog_fields_are_checked() {
         let e = Manifest::parse(&m.to_string()).unwrap_err();
         assert!(e.contains("default") && e.contains("Classify"), "{e}");
     }
-    let mut m = m.clone();
-    m["commands"][0]["form"].as_array_mut().unwrap().push(json!({"name": "save", "label": "Save", "kind": "bool", "default": "yes"}));
-    let e = Manifest::parse(&m.to_string()).unwrap_err();
+    let mut s = m.clone();
+    s["commands"][0]["form"].as_array_mut().unwrap().push(json!({"name": "save", "label": "Save", "kind": "bool", "default": "yes"}));
+    let e = Manifest::parse(&s.to_string()).unwrap_err();
     assert!(e.contains("'save' has a default of another kind"), "{e}");
+    // A choice's default is one of its choices.
+    let mut c = m.clone();
+    c["commands"][0]["form"][3]["default"] = json!("Maximum likelihood");
+    let e = Manifest::parse(&c.to_string()).unwrap_err();
+    assert!(e.contains("'method' has a default of another kind"), "{e}");
+    // A field lists the fields of a vector layer picked above it: none, or a raster, is refused.
+    for form in [
+        json!([{"name": "col", "label": "Column", "kind": "field", "required": true}]),
+        json!([{"name": "image", "label": "Image", "kind": "rasterLayer"}, {"name": "col", "label": "Column", "kind": "numericField"}]),
+    ] {
+        let mut c = m.clone();
+        c["commands"][0]["form"] = form;
+        let e = Manifest::parse(&c.to_string()).unwrap_err();
+        assert!(e.contains("'col' lists the fields of a layer"), "{e}");
+    }
 }
 
 /// Enabled plugin tools register with geoprocessing and return layers or selections.

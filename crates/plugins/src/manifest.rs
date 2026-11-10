@@ -434,19 +434,33 @@ fn check_text(what: &str, s: &str, required: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// A dialog field's default must be one its field can show and send, or it would be lost
-/// unseen: a number (or a number written as text) for `number`, `true` or `false` for `bool`,
-/// text for the other kinds.
-fn check_form_defaults(owner: &str, form: &[ParamDecl]) -> Result<(), String> {
+/// Checks what a dialog's fields need beyond a tool parameter's, so that nothing is lost unseen:
+/// a default the field can show and send (a number, or a number written as text, for `number`;
+/// `true` or `false` for `bool`; one of its choices for `choice`; text for the other kinds), and
+/// a vector layer field above each `field` or `numericField`, whose fields it lists.
+fn check_form(owner: &str, form: &[ParamDecl]) -> Result<(), String> {
+    let mut layer: Option<&str> = None;
     for p in form {
-        let Some(d) = &p.default else { continue };
-        let fits = match p.kind.as_str() {
-            "number" => d.is_number() || d.as_str().is_some_and(|t| t.trim().parse::<f64>().is_ok_and(f64::is_finite)),
-            "bool" => d.is_boolean(),
-            _ => d.is_string(),
-        };
-        if !fits {
-            return Err(format!("plugin.json: {owner}: '{}' has a default of another kind than its field ({})", p.name, p.kind));
+        if let Some(d) = &p.default {
+            let fits = match p.kind.as_str() {
+                "number" => d.is_number() || d.as_str().is_some_and(|t| t.trim().parse::<f64>().is_ok_and(f64::is_finite)),
+                "bool" => d.is_boolean(),
+                "choice" => d.as_str().is_some_and(|t| p.choices.iter().any(|c| c == t)),
+                _ => d.is_string(),
+            };
+            if !fits {
+                return Err(format!("plugin.json: {owner}: '{}' has a default of another kind than its field ({})", p.name, p.kind));
+            }
+        }
+        match p.kind.as_str() {
+            "layer" | "vectorLayer" | "polygonLayer" | "pointLayer" | "rasterLayer" => layer = Some(p.kind.as_str()),
+            "field" | "numericField" if layer.is_none_or(|k| k == "rasterLayer") => {
+                return Err(format!(
+                    "plugin.json: {owner}: '{}' lists the fields of a layer, so it needs a vector layer field above it",
+                    p.name
+                ));
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -575,7 +589,7 @@ impl Manifest {
             check_text("command params", &c.params, false)?;
             check_text("command icon", &c.icon, false)?;
             self.check_params(&c.label, &c.form, FORM_KINDS)?;
-            check_form_defaults(&c.label, &c.form)?;
+            check_form(&c.label, &c.form)?;
         }
         for t in &self.tools {
             if !valid_id(&t.id, false) || !seen.insert(("t", t.id.as_str())) {
