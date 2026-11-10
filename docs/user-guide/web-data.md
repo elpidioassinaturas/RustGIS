@@ -117,8 +117,9 @@ and band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentin
   each read at its finest overview no larger than 512 pixels a side, its values scaled as its
   metadata says and its codes for no value left out. The range is the same for every date and
   tile, and the answer gives it (`"range"`, with `"rangeFrom": "sample"`). A sample with no values,
-  files of classes in their own colours, or files whose scale changes partway leave each file
-  stretched on its own, and a notice says so.
+  files whose scale changes partway, files whose metadata gives a scale of 0 (or none finite), or a
+  sample that can't be read leave each file stretched on its own, and a notice says so. Files of
+  classes in their own colours take no range and keep their colours, and a notice says so.
 - **Credit:** `"attribution"` puts a credit on each tile layer the cube adds (as `tiles.add`
   takes it, at most 500 characters); a cube opened from the catalog passes its entry's.
 - **Web app:** creating a cube with **Add as Time Series** is desktop-only. Saved cube tile
