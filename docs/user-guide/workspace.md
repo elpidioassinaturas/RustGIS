@@ -11,6 +11,20 @@ streamed layers reopen their sources, and file-backed rasters reopen their files
 sources accessible when moving a project. See [Project items](data.md#project-items) for
 templates, packages and files for individual items.
 
+A project file holds the features of every layer loaded whole (GeoJSON, KML/KMZ, GPX, and
+Shapefiles of up to 100,000 features), so a project of many such layers grows large. How large a
+project can be saved and opened follows the computer's memory: on the desktop, as much as a
+quarter of it holds open (about 800 MiB of project for every 16 GB), from 512 MiB up to 4 GiB; in
+the web app and a 32-bit build, 512 MiB. Save refuses a project past it, rather than writing one that can't be opened
+again, and Open refuses a larger file, saying its size, the limit, and how much memory a computer
+needs to open it. A project saved on a
+computer with more memory may need one like it to open. A project package (`.rgispkg`) holds
+at most 1 GiB once unzipped (256 MiB in the web app), its project and its files together, as zip
+archives do here; the package file itself is smaller. `gp.env` reports the limit as
+`projectBytes`. A GeoPackage, FlatGeobuf, GeoParquet or Shapefile of more than 100,000 features
+(or any, added with `"stream": true`) is read in place and stays out of the project file; a
+smaller one is loaded whole.
+
 **Open** also accepts a project package (`.rgispkg`), as do drag-and-drop and the desktop
 command line. A package opens as a new, unsaved project; Save writes a plain `.rgis` file.
 Opening or creating a project clears undo history; saving does not.
@@ -118,7 +132,9 @@ isn't itself an entry in the log, as a saved file is). **Clear Log** empties it 
   that waited for its downloads, when its last run started), `command`, `params`, `ok`, `error`
   when it failed, `millis`, how long it took, `project`, the name of the project open when it ran
   (the one it opened, for a command that opens one), and `partial`, true when its parameters were
-  cut short or had secrets taken out.
+  cut short or had secrets taken out, and, for what a session plugin's program asked
+  for between the plugin's commands, `plugin`, that plugin's id (left out of `project.log` and
+  JSON Lines for other entries; an empty cell in CSV).
 - **For the session only:** the log is kept in memory, across the projects opened or made in the
   session, until RustGIS closes or the log is cleared. A saved project, its recovery copy, a
   package or a template carries none of it, so sharing a project shares no log. Reading, writing
@@ -482,7 +498,7 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
 - **Plugins**: **Plugins › Plugin Manager** installs, updates and removes [plugins](../plugins.md)
   from the registry at [plugins.rustgis.app](https://plugins.rustgis.app) or from a file.
 - **Language**: **Settings › Language** switches the interface among
-  [20 languages](../i18n.md) and chooses the [worldview](maps.md#worldview) of the built-in
+  [21 languages](../i18n.md) and chooses the [worldview](maps.md#worldview) of the built-in
   borders.
 - **Theme**: **Settings › Theme** picks the interface colours, spacing and text sizes, from the
   built-in Light and Dark themes, a theme [file](../themes.md) in the desktop app’s themes folder, or
@@ -490,6 +506,12 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
   sets the whole interface from 80% to 200%.
 - **Autosave**: **Settings › Autosave** sets how often the desktop app keeps a
   [recovery copy](#autosave-and-recovery) of unsaved work, or turns it off.
+- **Performance**: **Settings › Performance › Threads** sets the most threads one piece of work
+  uses in the desktop app: a tool, a raster read, the drawing of a map's tiles. **Automatic** is
+  the computer's cores, up to 16; fewer keep cores free for other work, and on a computer with
+  more cores a higher setting lets the work use them. It is remembered for the next start and
+  isn't saved with a project (`ui.threads={"threads": 8}`, `null` for Automatic; the same as
+  [`gp.threads`](analysis.md#analysis-workflows)). The web app runs on one thread.
 - **Start-up**: **Settings › Start-up** sets what RustGIS opens with: **Start With** the World Atlas
   sample or a blank map, or, in the desktop app, **Last Project** (the `.rgis` project last opened
   or saved) or **Choose Project…** (one you pick once), the **Projection** the map opens in (a

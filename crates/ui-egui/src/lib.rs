@@ -66,6 +66,7 @@ mod panes;
 mod pluginpanel;
 mod pluginstart;
 mod pluginsui;
+mod popupmedia;
 mod portalsui;
 #[cfg(not(target_arch = "wasm32"))]
 mod readjob;
@@ -79,6 +80,8 @@ pub enum Landed {
 }
 #[cfg(not(target_arch = "wasm32"))]
 mod relayshot;
+#[cfg(not(target_arch = "wasm32"))]
+mod reloaddata;
 mod repairsource;
 mod reportpane;
 mod ribbon;
@@ -93,12 +96,14 @@ mod shortcutfile;
 mod shortcutui;
 mod showme;
 mod sourcespane;
+mod spectralui;
 mod sqlbox;
 mod sqlpane;
 mod stacui;
 mod table;
 mod textform;
 pub mod theme;
+mod threadsui;
 mod tilelayer;
 mod tilelegend;
 mod tilt_drape;
@@ -709,6 +714,8 @@ pub struct UiState {
     pub hidden_tabs: Vec<String>,
     /// Extra Quick Access Toolbar commands.
     pub quick_access: Vec<String>,
+    /// Whether a layout's PDF georeferences its map frames (Layout › Export › Georeference PDF).
+    pub(crate) pdf_georeference: bool,
     /// The native title bar the header is drawn into; set by the desktop app on macOS.
     pub titlebar: Option<TitlebarMetrics>,
     /// Saved pane arrangements: (name, left pane, right pane in view, ribbon tab, right panes open).
@@ -980,6 +987,7 @@ impl Default for UiState {
             geolibre_zarr: Vec::new(),
             hidden_tabs: Vec::new(),
             quick_access: Vec::new(),
+            pdf_georeference: true,
             titlebar: None,
             pane_sets: Vec::new(),
             layer_filter: String::new(),
@@ -1100,6 +1108,9 @@ pub struct RustGisApp {
     /// to give its wake callback yet: `logic` installs the wake as soon as a context exists.
     #[cfg(not(target_arch = "wasm32"))]
     relay_wake_pending: bool,
+    /// Whether session plugins' programs ask for a repaint when they send a line.
+    #[cfg(not(target_arch = "wasm32"))]
+    plugin_wake_set: bool,
     /// Extra font faces installed with the interface fonts: (name, face, script). The current
     /// language's face comes right after the interface font (before it for Arabic script), so its
     /// glyph shapes win; the others are last-resort fallbacks. Faces are shared, so reinstalling
@@ -1304,6 +1315,8 @@ impl RustGisApp {
             frame_ctx: None,
             #[cfg(not(target_arch = "wasm32"))]
             relay_wake_pending: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            plugin_wake_set: false,
             extra_fonts: Vec::new(),
             installed_region: None,
             fonts_dirty: false,
@@ -1334,6 +1347,8 @@ impl RustGisApp {
         }
         // Theme readers and startup notices keep translated text, so select the language before reading.
         i18n::set_current(self.chosen_lang());
+        // After the language, so a notice about the saved value is in it.
+        threadsui::load(&mut self);
         // A stored value that is neither `auto` nor a known worldview means `auto`.
         if let Some(w) = self.services.load_pref.as_ref().and_then(|load| load("worldview"))
             && rustgis_engine::sample::Worldview::from_code(&w).is_some()
@@ -1553,11 +1568,13 @@ impl RustGisApp {
         r
     }
 
-    /// A layout as PDF or PNG bytes, guarded like `Session::run`.
+    /// A layout as PDF or PNG bytes, guarded like `Session::run`; a PDF georeferenced as Publish ›
+    /// Export › Georeference PDF says.
     fn layout_bytes(&mut self, li: usize, pdf: bool, dpi: f64) -> Result<Vec<u8>, String> {
+        let georeference = self.ui.pdf_georeference;
         let session = &mut self.session;
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            rustgis_engine::cmd::layout::layout_bytes(session, li, pdf, dpi, true)
+            rustgis_engine::cmd::layout::layout_bytes_with(session, li, pdf, dpi, true, georeference)
         }))
         .unwrap_or_else(|_| Err("the layout export failed unexpectedly".into()));
         if let Err(e) = &r {
@@ -2190,6 +2207,8 @@ impl RustGisApp {
         assistantpane::peer_replaced(self);
         self.ui.web_file = None;
         self.map.deleting = None;
+        // A spectral profile's points were read on the old project's rasters.
+        self.workflow.spectral.clear();
         self.retire_cog_probes();
         if let Some(steps) = self.ws.recording.take() {
             self.session.notify(
@@ -2292,6 +2311,9 @@ impl RustGisApp {
             // Esc chooses Explore: a plugin's pick stops waiting for the map, as for any tool.
             pluginpanel::cancel_pick(self);
         }
+        // Nested commands (including scripts) can replace rows too; never retarget a chosen
+        // vertex or held gesture to the replacement feature at the same row.
+        crate::vertexedit::cancel_stale_drag(self);
         if let Err(e) = &r {
             self.command_failed(id, e, notice_mark);
         }
@@ -2306,6 +2328,8 @@ impl RustGisApp {
             self.ui.web_file = None;
             // A deletion asked for in the old project never reaches a namesake in the new one.
             self.map.deleting = None;
+            // Nor are a spectral profile's points read on a namesake raster of the new one.
+            self.workflow.spectral.clear();
             // A recording's steps name the old project's layers: it ends here, and says so.
             if let Some(steps) = self.ws.recording.take() {
                 let n = steps.len().to_string();
@@ -2350,7 +2374,7 @@ impl RustGisApp {
         // fields stay with the old one.
         layoutview::follow_project(self);
         if r.is_ok() && matches!(id, "edit.undo" | "edit.redo") {
-            self.map.vertex = None;
+            crate::vertexedit::choose(self, None);
             if let Some(before) = steps_before
                 && task_steps(self).is_none_or(|now| now != before)
             {
@@ -2660,6 +2684,12 @@ impl RustGisApp {
         }
         let toggle_right = |ui: &mut UiState, pane: RightPane| ui.toggle_right(pane);
         match id {
+            "ui.reloadData" => {
+                #[cfg(not(target_arch = "wasm32"))]
+                return reloaddata::request(self, p);
+                #[cfg(target_arch = "wasm32")]
+                return Err(tl!("Reload Data from local files requires the desktop app.").into());
+            }
             "ui.pane.contents" => self.ui.left = if self.ui.left == Some(LeftPane::Contents) { None } else { Some(LeftPane::Contents) },
             "ui.pane.catalog" => self.ui.left = if self.ui.left == Some(LeftPane::Catalog) { None } else { Some(LeftPane::Catalog) },
             "ui.pane.sources" => self.ui.left = if self.ui.left == Some(LeftPane::Sources) { None } else { Some(LeftPane::Sources) },
@@ -2773,6 +2803,7 @@ impl RustGisApp {
                 self.apply_worldview();
             }
             "ui.autosave" => return autosave::command(self, p),
+            "ui.threads" => return threadsui::command(self, p),
             // Adds a file as a drop or Add Data does: one holding several layers asks which (#934).
             "ui.addFile" => {
                 let path = p.get("path").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()).ok_or("path is required")?;
@@ -3419,10 +3450,11 @@ impl RustGisApp {
                         if pdf_only { (&["pdf"], tl!("PDF")) } else { (&["pdf", "png", "svg"], tl!("PDF, PNG or SVG")) };
                     if let Some(path) = dialogs::pick_save(&format!("{name}.pdf"), exts, kinds) {
                         // Drawn on a thread of its own, with progress and Cancel in the status bar.
+                        let params = json!({"layout": li, "path": path, "dpi": 200, "georeference": self.ui.pdf_georeference});
                         #[cfg(not(target_arch = "wasm32"))]
-                        return exportjob::start(self, "layout.export", json!({"layout": li, "path": path, "dpi": 200}));
+                        return exportjob::start(self, "layout.export", params);
                         #[cfg(target_arch = "wasm32")]
-                        return self.run("layout.export", json!({"layout": li, "path": path, "dpi": 200}));
+                        return self.run("layout.export", params);
                     }
                 }
             }
@@ -3936,8 +3968,8 @@ impl RustGisApp {
                 if matches!(ext.as_str(), "parquet" | "geoparquet") {
                     dbf_notes.extend(rustgis_engine::data::source::parquet::values_note(ds, &name));
                 }
-                if left_out > 0 {
-                    self.session.notify(format!("{name}: {left_out} features without drawable geometry were left out"), false);
+                if let Some(note) = io::left_out_note(&name, &ext, left_out) {
+                    self.session.notify(note, false);
                 }
                 if ext == "zip" && rustgis_engine::data::raster::wkt::to_wkt(crs).is_none() {
                     self.session.notify(format!("{name}: no .prj written, as {} has no WKT form", crs.label()), false);
@@ -3955,7 +3987,7 @@ impl RustGisApp {
                     let tiles = p.get("tiles").cloned().unwrap_or(Value::Null);
                     return self.run("share.exportRaster", json!({"path": "tiles.tif", "tiles": tiles}));
                 }
-                match rustgis_engine::cmd::raster::geotiff_bytes(&self.session, &Value::Null) {
+                match rustgis_engine::cmd::raster::geotiff_bytes(&mut self.session, &Value::Null) {
                     Ok((name, bytes)) => {
                         self.download(&format!("{name}.tif"), bytes);
                     }
@@ -4998,6 +5030,21 @@ impl RustGisApp {
                 }
             }
             relayshot::drive(self, ctx);
+            // Session plugins' programs: what they asked, and what changed on the map for them.
+            if !self.plugin_wake_set {
+                let ctx = ctx.clone();
+                rustgis_engine::plugins::session::set_wake(std::sync::Arc::new(move || ctx.request_repaint()));
+                self.plugin_wake_set = true;
+            }
+            let state = self.session.state();
+            if self.session.poll_plugin_sessions() > 0 && self.session.state() != state {
+                self.map.cancel_label_drag();
+            }
+            // A program that exits without a last line (something it left running holds its output
+            // open) wakes nothing: while one runs, the app looks at least once a second.
+            if !rustgis_engine::plugins::session::running().is_empty() {
+                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            }
             // A script an agent wrote to the file bridge.
             if let Some(bridge) = self.file_bridge.clone() {
                 if !bridge.has_wake() {
@@ -5606,6 +5653,7 @@ const DEFAULTS_TO_ACTIVE_LAYER: &[&str] = &[
     "data.similar",
     "layer.geocode",
     "layer.repairSource",
+    "layer.reloadData",
     "report.new",
     "report.open",
     "share.webLayer",
@@ -6310,10 +6358,13 @@ mod vertex_undo_tests {
         let id = app.session.map().layer_by_name("Paths").unwrap().id;
         let insert = json!({"layer": id, "row": row, "action": "insert", "index": 0, "lon": 0.5, "lat": 0});
         app.run("edit.vertex", insert).unwrap();
-        app.map.vertex = Some((id, row, VertexId::new(0, 0, 1)));
+        let chosen = Some((id, row, VertexId::new(0, 0, 1)));
+        crate::vertexedit::choose(&mut app, chosen);
+        assert_eq!(app.map.vertex, chosen, "chosen before undo");
         app.run("edit.undo", Value::Null).unwrap();
         assert_eq!(app.map.vertex, None, "undo");
-        app.map.vertex = Some((id, row, VertexId::new(0, 0, 1)));
+        crate::vertexedit::choose(&mut app, chosen);
+        assert_eq!(app.map.vertex, chosen, "chosen before redo");
         app.run("edit.redo", Value::Null).unwrap();
         assert_eq!(app.map.vertex, None, "redo");
     }
