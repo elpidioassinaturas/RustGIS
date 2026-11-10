@@ -181,7 +181,7 @@ fn jaxa_line(ui: &mut egui::Ui, t: &crate::theme::Tokens) {
         }
         jaxa::Status::Read(c) => {
             let text = crate::i18n::fmt(
-                "JAXA Earth: {cubes} cubes from its catalog; {left} of its {datasets} datasets can't be one (hover for why)",
+                "JAXA Earth: {cubes} cubes from its catalog; {left} of its {datasets} datasets are left out (hover for why)",
                 &[("cubes", &c.entries.len().to_string()), ("left", &c.left_out.len().to_string()), ("datasets", &c.datasets.to_string())],
             );
             let why: Vec<String> = c.left_out.iter().map(|l| format!("{} ({}): {}", l.title, l.id, l.why)).collect();
@@ -386,7 +386,7 @@ mod tests {
         (app.ui.cubes.here, app.ui.cubes.query) = (false, "gsmap monthly".into());
         let mut h = harness(app, pane);
         h.run();
-        assert!(h.query_by_label("JAXA Earth: 80 cubes from its catalog; 41 of its 119 datasets can't be one (hover for why)").is_some());
+        assert!(h.query_by_label("JAXA Earth: 80 cubes from its catalog; 41 of its 119 datasets are left out (hover for why)").is_some());
         assert!(h.query_by_label("Precipitation Rate (Monthly)").is_some());
         assert!(h.query_by_label_contains("Credit: JAXA, Precipitation Rate (Monthly)").is_some());
         // Its licence is read from its collection, which tests leave alone.
