@@ -93,14 +93,9 @@ pub fn commands() -> Vec<C> {
                     s.notify(said, false);
                 }
             }
-            // Layers masked by this one follow the new name.
-            for l in &mut s.map_mut().layers {
-                if l.mask.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(&old)) {
-                    l.mask = Some(n.clone());
-                }
-            }
             // So do legends that leave it out.
             legends_follow_layer(s, &old, Some(&n));
+            references_follow_layer(s, &old, &n);
             Ok(r)
         }).roles(&[]).effects(crate::policy::Effects::NONE).params(r#"{"layer"?, "name": string}"#)
         .when(need_layer),
@@ -2985,23 +2980,12 @@ fn define_projection(s: &mut Session, p: &Value) -> CmdResult {
 /// Loads a streamed layer's features into memory, so it can be edited like any other layer.
 fn load_all(s: &mut Session, p: &Value) -> CmdResult {
     let id = s.layer_id(p)?;
-    let key = load_all_key(s.map().layer(id).ok_or("no such layer")?);
-    let ahead = super::reads::take::<LoadedAll>(s, &key);
+    let (mut ds, unread) = super::whole::take_or_read(s, id)?;
     let l = s.map().layer(id).ok_or("no such layer")?;
-    let (mut ds, unread) = match ahead {
-        // Read (or failed) from the source the layer still reads, listing the fields it lists
-        // now: one opened afresh since, or with other fields, is read again.
-        Some((copied, fields, read)) if l.source.as_ref().is_some_and(|src| src.same_opening(&copied)) && fields == l.dataset.fields => {
-            read?
-        }
-        _ => l.load_all_counted()?,
-    };
     // Named as the layer is now: it may have been renamed while the read ran.
     ds.name = l.dataset.name.clone();
-    let (n, name) = (ds.features.len(), l.name.clone());
-    if unread > 0 {
-        s.warn(super::whole::unread_notice(&name, unread));
-    }
+    let n = ds.features.len();
+    unread.say(s);
     let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
     l.dataset = ds;
     l.dataset.windowed = false;
@@ -3011,25 +2995,10 @@ fn load_all(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"layer": id, "features": n}))
 }
 
-/// Load All's read made before it runs: the source it read, the fields the layer listed then, and
-/// what it read with the number of rows that couldn't be read.
-type LoadedAll = (rustgis_map::source::SourceLayer, Vec<rustgis_data::Field>, Result<(rustgis_data::Dataset, usize), String>);
-
-/// The key Load All's read of `l` is taken by (see [`super::reads`]).
-fn load_all_key(l: &rustgis_map::Layer) -> String {
-    format!("loadAll:{}", l.instance_id())
-}
-
 /// Load All's read of the streamed layer `p` names, made before it runs ([`super::reads`]), on a
 /// copy of the layer.
 pub(crate) fn load_all_ahead(s: &Session, p: &Value) -> Option<super::reads::ReadWork> {
-    let l = s.map().layer(s.layer_id(p).ok()?)?;
-    let mut copy = l.clone();
-    let source = copy.source.as_mut()?;
-    // Its own read: the live layer keeps the one under way.
-    source.detach_read();
-    let (copied, fields) = (source.clone(), l.dataset.fields.clone());
-    Some(super::reads::ahead("Load All Features", load_all_key(l), move || (copied, fields, copy.load_all_counted())))
+    super::whole::ahead(s, p, "Load All Features")
 }
 
 /// Adds a layer file: a layer with its data, symbology and labels.
@@ -4835,6 +4804,169 @@ pub(crate) fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>
                 }
             }
         }
+    }
+}
+
+/// Carries typed references to a renamed layer along with it. Map-local references and layout
+/// frames stay in their map. A name still present there keeps its references, as legends do;
+/// project-wide references without a map stay unchanged when another map still has that name.
+/// Script text, tool parameters and history are not rewritten.
+fn references_follow_layer(s: &mut Session, old: &str, new: &str) {
+    use rustgis_map::design::{Elevation, TopologyRule};
+    use rustgis_map::layout::ElementKind;
+
+    let case_only = old.eq_ignore_ascii_case(new);
+    let old_present = !case_only && s.map().layers.iter().any(|l| l.name.eq_ignore_ascii_case(old));
+    let mut old_left = 0usize;
+    let collision = !case_only && s.map().layers.iter().filter(|l| l.name.eq_ignore_ascii_case(new)).count() > 1;
+    let mut collision_left = 0usize;
+    let mut destination_refs = 0usize;
+    let mut replace = |name: &mut String| {
+        if name.eq_ignore_ascii_case(old) {
+            if old_present {
+                old_left += 1;
+            } else if collision {
+                collision_left += 1;
+            } else {
+                *name = new.to_string();
+            }
+        } else if collision && name.eq_ignore_ascii_case(new) {
+            destination_refs += 1;
+        }
+    };
+    for layer in &mut s.map_mut().layers {
+        if let Some(mask) = &mut layer.mask {
+            replace(mask);
+        }
+    }
+    // Elevation and Map Series selectors compare spellings exactly, even though lookup does not.
+    if case_only {
+        if s.map().layers.iter().filter(|l| l.name.eq_ignore_ascii_case(old)).count() == 1 {
+            if let Elevation::Surface(layer) = &mut s.map_mut().editing.settings.elevation {
+                replace(layer);
+            }
+            let map_name = s.map().name.clone();
+            for layout in &mut s.project.layouts {
+                if let Some(series) = &mut layout.series
+                    && layout.elements.iter().any(|e| {
+                        e.id == series.frame && matches!(&e.kind, ElementKind::MapFrame { map, .. } if map.eq_ignore_ascii_case(&map_name))
+                    })
+                {
+                    replace(&mut series.layer);
+                }
+            }
+        }
+        return;
+    }
+    let map_name = s.map().name.clone();
+    let editing = &mut s.map_mut().editing;
+    for relation in &mut editing.relationships {
+        replace(&mut relation.origin);
+        replace(&mut relation.destination);
+    }
+    for rule in &mut editing.topology {
+        match rule {
+            TopologyRule::MustNotOverlap { layer }
+            | TopologyRule::MustNotHaveGaps { layer }
+            | TopologyRule::MustNotSelfIntersect { layer }
+            | TopologyRule::MustNotHaveDangles { layer } => replace(layer),
+            TopologyRule::MustBeCoveredBy { layer, by } => {
+                replace(layer);
+                replace(by);
+            }
+        }
+    }
+    if let Elevation::Surface(layer) = &mut editing.settings.elevation {
+        replace(layer);
+    }
+    for layout in &mut s.project.layouts {
+        let frames: Vec<u32> = layout
+            .elements
+            .iter()
+            .filter_map(|e| match &e.kind {
+                ElementKind::MapFrame { map, .. } if map.eq_ignore_ascii_case(&map_name) => Some(e.id),
+                _ => None,
+            })
+            .collect();
+        for element in &mut layout.elements {
+            match &mut element.kind {
+                ElementKind::Table { frame, layer, .. } | ElementKind::Chart { frame, layer, .. } if frames.contains(frame) => {
+                    replace(layer)
+                }
+                ElementKind::Colorbar { frame, layer: Some(layer), .. } if frames.contains(frame) => replace(layer),
+                _ => {}
+            }
+        }
+        if let Some(series) = &mut layout.series
+            && frames.contains(&series.frame)
+        {
+            replace(&mut series.layer);
+        }
+    }
+    // These items do not record a map; changing an ambiguous name would redirect references
+    // used with another map. Keep those spellings until the user chooses their intended layer.
+    let shared = s.project.maps.iter().enumerate().any(|(i, map)| {
+        i != s.project.active_map
+            && map.layers.iter().any(|layer| layer.name.eq_ignore_ascii_case(old) || layer.name.eq_ignore_ascii_case(new))
+    });
+    let mut left = 0usize;
+    let shared_new = s
+        .project
+        .maps
+        .iter()
+        .enumerate()
+        .any(|(i, map)| i != s.project.active_map && map.layers.iter().any(|layer| layer.name.eq_ignore_ascii_case(new)));
+    let mut project_destination_refs = 0usize;
+    let mut project_reference = |name: &mut String| {
+        if shared_new && name.eq_ignore_ascii_case(new) {
+            project_destination_refs += 1;
+        } else if shared && name.eq_ignore_ascii_case(old) {
+            left += 1;
+        } else {
+            replace(name);
+        }
+    };
+    for report in &mut s.project.reports {
+        project_reference(&mut report.layer);
+    }
+    for model in &mut s.project.models {
+        if let Some(graph) = &mut model.graph {
+            for node in &mut graph.nodes {
+                if let Some(layer) = &mut node.layer {
+                    project_reference(layer);
+                }
+            }
+        }
+    }
+    for workspace in &mut s.project.workspaces {
+        for image in &mut workspace.images {
+            project_reference(image);
+        }
+    }
+    if left > 0 {
+        s.notify_text(crate::notice_text::NoticeText::format(
+            "{count} project reference(s) still name '{old}': another map has a layer of the old or new name; choose the intended layer in those items",
+            [("count", left.to_string().into()), ("old", old.to_string().into())],
+        ), false);
+    }
+    if old_left > 0 {
+        s.notify_text(crate::notice_text::NoticeText::format(
+            "{count} layer reference(s) still name '{old}': another layer in this map has that name; choose the intended layer in those items",
+            [("count", old_left.to_string().into()), ("old", old.to_string().into())],
+        ), false);
+    }
+    if collision_left > 0 {
+        s.notify_text(crate::notice_text::NoticeText::format(
+            "{count} layer reference(s) still name '{old}': two layers are now called '{new}'; give the layer a unique name and choose it in those items",
+            [("count", collision_left.to_string().into()), ("old", old.to_string().into()), ("new", new.to_string().into())],
+        ), false);
+    }
+    let destination_refs = destination_refs + project_destination_refs;
+    if destination_refs > 0 {
+        s.notify_text(crate::notice_text::NoticeText::format(
+            "{count} layer or project reference(s) already name '{new}': the rename created duplicate layer names and may change which layer they use; give the renamed layer a unique name",
+            [("count", destination_refs.to_string().into()), ("new", new.to_string().into())],
+        ), false);
     }
 }
 

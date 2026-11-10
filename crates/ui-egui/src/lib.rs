@@ -2258,6 +2258,18 @@ impl RustGisApp {
             if let Some(command) = archive {
                 return readjob::run(self, command, params);
             }
+            // The topology check's work grows with the layers: on a thread of its own (#1291).
+            if id == "topology.validate" {
+                let params = if params.is_null() { json!({}) } else { params };
+                return readjob::run(self, "topology.validate", params);
+            }
+            // Converting the labels of a layer read in place reads all of its source first, on a
+            // thread of its own, whoever asks (a click, the assistant).
+            if id == "labels.convert"
+                && self.session.layer_id(&params).ok().and_then(|l| self.session.map().layer(l)).is_some_and(|l| l.is_streamed())
+            {
+                return readjob::run(self, "labels.convert", params);
+            }
         }
         self.run_with_prepared(id, params, AppDispatch::Direct)
     }
@@ -3507,7 +3519,13 @@ impl RustGisApp {
                     .0;
                     self.download(&format!("{name}.pdf"), bytes);
                 } else if let Some(path) = dialogs::pick_save(&format!("{name}.pdf"), &["pdf", "png"], tl!("PDF or PNG")) {
-                    return self.run("report.export", json!({"report": i, "path": path, "dpi": 200}));
+                    // Drawn on a thread of its own, with progress and Cancel in the status bar: a
+                    // layer read in place is read whole for it.
+                    let params = json!({"report": i, "path": path, "dpi": 200});
+                    #[cfg(not(target_arch = "wasm32"))]
+                    return exportjob::start(self, "report.export", params);
+                    #[cfg(target_arch = "wasm32")]
+                    return self.run("report.export", params);
                 }
             }
             "ui.saveLayout" => {
@@ -5034,6 +5052,10 @@ impl RustGisApp {
             self.frame_ctx = Some(ctx.clone());
             // Agents the user turned on last time: the relay starts with the app.
             connectui::resume(self);
+            // The Earthdata token remembered on this computer is read now, off the frame, so a
+            // command started later binds it instead of meeting it mid-run (#1626). This runs every
+            // frame; after the first call it returns at once.
+            earthaccessui::restore(self, ctx);
             if let Some(relay) = self.relay.clone() {
                 // A relay started before the first frame has no wake yet; now there is a context
                 // to ask for repaints with.
