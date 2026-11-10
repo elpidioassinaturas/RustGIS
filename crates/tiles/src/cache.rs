@@ -150,6 +150,10 @@ pub const MAX_BYTES: usize = 16 << 20;
 /// The error a fetcher gives a request it dropped unfetched (the view moved on): the address is
 /// forgotten rather than failed, so it is fetched again when it is next wanted.
 pub const DROPPED: &str = "dropped: the view moved on";
+
+/// What a native body's read given up for its request's `Still` says (a download's Cancel): a
+/// cancel, not a failure, so it stays out of the network history as [`DROPPED`] does.
+pub(crate) const CANCELLED_READ: &str = "cancelled while it was read";
 /// The end of a fetcher's error when a range was asked for and the server answered with the
 /// whole file: a file read in place by range is downloaded whole instead.
 pub const NO_RANGES: &str = "the server doesn't answer byte-range requests";
@@ -1302,7 +1306,7 @@ impl<'a> RequestDiagnostics<'a> {
     pub fn failed(&self, failure: &Failure) {
         use crate::failure::Reason;
         use rustgis_data::diagnostics::{Network, NetworkKind};
-        if failure.message == DROPPED {
+        if failure.message == DROPPED || failure.message.contains(CANCELLED_READ) {
             return;
         }
         // The address as asked for, without the download and range markers this module adds.
@@ -2669,9 +2673,6 @@ mod native {
         fetch_answer(agent, url, Reach::Local, false, omit).map(|f| f.bytes).map_err(|f| f.message)
     }
 
-    /// What a body read given up by [`Wanted`] says.
-    pub(crate) const CANCELLED_READ: &str = "cancelled while it was read";
-
     /// A body's read that gives up, at the next bytes that come, once its request is no longer
     /// wanted ([`super::current_still`]: a download's Cancel, or its owner gone), and counts what
     /// it reads into the download's [`super::Progress`], if it has one. A server that sends
@@ -2679,19 +2680,27 @@ mod native {
     struct Wanted<R>(R, Option<std::sync::Arc<super::Progress>>);
 
     impl<R: std::io::Read> Wanted<R> {
-        /// `body`, read for the request on this thread; `total` is what its answer says it holds.
+        /// `body`, a whole answer read for the request on this thread; `total` is what it says it
+        /// holds. One that doesn't say leaves the download's total unknown (a Shapefile's part
+        /// sent in chunks after one that said its size), rather than the bar full while it reads.
         fn new(body: R, total: Option<u64>) -> Self {
             let progress = super::current_progress();
-            if let (Some(p), Some(n)) = (&progress, total) {
-                p.total.store(p.received().saturating_add(n), std::sync::atomic::Ordering::Relaxed);
+            if let Some(p) = &progress {
+                let known = total.map_or(0, |n| p.received().saturating_add(n));
+                p.total.store(known, std::sync::atomic::Ordering::Relaxed);
             }
             Self(body, progress)
+        }
+
+        /// `body`, part of an answer (its last bytes), counted without touching the total.
+        fn part(body: R) -> Self {
+            Self(body, super::current_progress())
         }
     }
 
     impl<R: std::io::Read> std::io::Read for Wanted<R> {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            super::check_current().map_err(|_| std::io::Error::other(CANCELLED_READ))?;
+            super::check_current().map_err(|_| std::io::Error::other(super::CANCELLED_READ))?;
             let n = self.0.read(buf)?;
             if let Some(p) = &self.1 {
                 p.done.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
@@ -2967,7 +2976,7 @@ mod native {
                 // Read one byte past `n` (no more, and no error at the limit): a longer file is
                 // reported as a server without ranges, so the file is downloaded whole instead.
                 let limit = n.min(max as u64).saturating_add(1);
-                Wanted::new(resp.body_mut().with_config().limit(limit.saturating_add(1)).reader(), None)
+                Wanted::part(resp.body_mut().with_config().limit(limit.saturating_add(1)).reader())
                     .take(limit)
                     .read_to_end(&mut buf)
                     .map_err(|e| e.to_string())?;
@@ -3763,6 +3772,9 @@ mod tests {
         let diagnostics = RequestDiagnostics::new(url, "GET");
         diagnostics.failed(&Failure::new(url, DROPPED));
         assert!(network_records(&history, url).is_empty());
+        // Nor is a download's Cancel during its read.
+        diagnostics.failed(&Failure::new(url, CANCELLED_READ));
+        assert!(network_records(&history, url).is_empty());
         diagnostics.failed(&Failure::new(url, "the browser couldn't reach it"));
         let records = network_records(&history, url);
         assert_eq!(records.len(), 1);
@@ -4203,7 +4215,55 @@ mod tests {
         assert!(progress.fraction().is_some_and(|f| f > 0.0 && f < 1.0), "{progress:?}");
         wanted.store(false, Ordering::Relaxed);
         let r = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the download kept reading its body");
-        assert!(r.as_ref().is_err_and(|e| e.contains(super::native::CANCELLED_READ)), "{r:?}");
+        assert!(r.as_ref().is_err_and(|e| e.contains(super::CANCELLED_READ)), "{r:?}");
+    }
+
+    /// A later part of a download (a Shapefile's) whose answer doesn't say its size leaves the
+    /// total unknown, so the bar shows megabytes, not 100 % while its bytes still come.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_part_of_unknown_size_leaves_the_total_unknown() {
+        use std::io::Write;
+        let _turn = crate::cache::turn();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let path = read_request(&mut stream).split_whitespace().nth(1).unwrap_or("").to_string();
+                if path == "/a.shp" {
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789");
+                    continue;
+                }
+                // Chunked, so no length: a 1 kB chunk every 20 ms.
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+                for _ in 0..200 {
+                    if write!(stream, "3e8\r\n{}\r\n", "x".repeat(1000)).is_err() {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                let _ = write!(stream, "0\r\n\r\n");
+            }
+        });
+        let progress = std::sync::Arc::new(super::Progress::default());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let first = tx.clone();
+        super::with_progress(Some(progress.clone()), || {
+            super::download_limited(&format!("http://{addr}/a.shp"), 1_000_000, Box::new(move |r| first.send(r).unwrap_or_default()))
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap();
+        assert_eq!(progress.fraction(), Some(1.0));
+        super::with_progress(Some(progress.clone()), || {
+            super::download_limited(&format!("http://{addr}/a.dbf"), 1_000_000, Box::new(move |r| tx.send(r).unwrap_or_default()))
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while progress.received() < 5_000 {
+            assert!(std::time::Instant::now() < deadline, "nothing counted: {progress:?}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(progress.fraction(), None, "{progress:?}");
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap().is_ok());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

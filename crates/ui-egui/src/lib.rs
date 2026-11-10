@@ -198,6 +198,20 @@ static WINDOW_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_WINDOW_READS: usize = 16;
 
+/// A file downloading from its web address, to be added when it lands ([`UiState::downloads`]).
+pub struct Download {
+    /// The session's download id.
+    pub id: u64,
+    /// Its address.
+    pub url: String,
+    /// The parameters to add it with.
+    pub params: Value,
+    /// Where it lands. While the list holds this, the download is wanted: Cancel takes it out.
+    pub slot: Slot<Result<Vec<u8>, String>>,
+    /// How far it has come (the status bar's).
+    pub progress: std::sync::Arc<rustgis_engine::render::rustgis_tiles::cache::Progress>,
+}
+
 /// A download or a window's read under way, for the status bar ([`RustGisApp::downloads_under_way`]).
 #[derive(Debug)]
 pub(crate) struct UnderWay {
@@ -759,10 +773,8 @@ pub struct UiState {
     pub pending_csv: Option<Value>,
     /// CRS override for the next Shapefile picked by Import Shapefile with Projection.
     pub pending_shapefile: Option<Value>,
-    /// Data downloading from web addresses (Home › Add › Add Data › From URL): the address, the parameters to
-    /// add it with, where the download lands, and how far it has come (the status bar's).
-    pub downloads:
-        Vec<(u64, String, Value, Slot<Result<Vec<u8>, String>>, std::sync::Arc<rustgis_engine::render::rustgis_tiles::cache::Progress>)>,
+    /// Data downloading from web addresses (Home › Add › Add Data › From URL).
+    pub downloads: Vec<Download>,
     /// A project downloading from its web address (`ui.openUrl`, a `?project=` link): the
     /// session's download id, the address and where the download lands. A later one replaces it;
     /// opening another project meanwhile drops it.
@@ -4550,7 +4562,7 @@ impl RustGisApp {
                     )
                 })
             });
-            self.ui.downloads.push((id, url, q, slot, progress));
+            self.ui.downloads.push(Download { id, url, params: q, slot, progress });
 
             Ok(Value::Null)
         })
@@ -4633,9 +4645,9 @@ impl RustGisApp {
             }
         }
         let mut landed = Vec::new();
-        self.ui.downloads.retain(|(id, url, p, slot, _)| match slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        self.ui.downloads.retain(|d| match d.slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
             Some(r) => {
-                landed.push((*id, url.clone(), p.clone(), r));
+                landed.push((d.id, d.url.clone(), d.params.clone(), r));
                 false
             }
             None => true,
@@ -4682,7 +4694,7 @@ impl RustGisApp {
             shown: rustgis_engine::sources::address_in_message(url),
             progress: progress.cloned(),
         };
-        let downloads = self.ui.downloads.iter().map(|(id, url, _, _, progress)| shown(*id, url, Some(progress)));
+        let downloads = self.ui.downloads.iter().map(|d| shown(d.id, &d.url, Some(&d.progress)));
         #[cfg(not(target_arch = "wasm32"))]
         let downloads = downloads.chain(self.ui.window_reads.iter().map(|(id, url, ..)| shown(*id, url, None)));
         let mut under_way: Vec<_> = downloads.collect();
@@ -4696,9 +4708,9 @@ impl RustGisApp {
     /// at the next bytes that come, as its download is no longer wanted (`add_url`); in the
     /// browser it runs to its end, and what it brings is thrown away.
     pub(crate) fn cancel_download(&mut self, id: u64) {
-        let cancelled = self.ui.downloads.iter().position(|d| d.0 == id).map(|i| {
-            let (_, url, p, _, _) = self.ui.downloads.remove(i);
-            (url, p)
+        let cancelled = self.ui.downloads.iter().position(|d| d.id == id).map(|i| {
+            let d = self.ui.downloads.remove(i);
+            (d.url, d.params)
         });
         #[cfg(not(target_arch = "wasm32"))]
         let cancelled = cancelled.or_else(|| {
