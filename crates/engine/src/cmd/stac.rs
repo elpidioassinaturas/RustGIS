@@ -983,6 +983,35 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 "{collection}: {coded} file(s) mark failed retrievals with codes, which the map draws as values (inside its range or stretch); Trend Analysis and cube summaries skip them"
             ));
         }
+        // Refused before anything is read for a range. A tile layer per grid tile, each reading its
+        // first file's header, within the map's room for tile layers: a catalog without grid tiles
+        // (keyed by footprint) could make hundreds.
+        let room = rustgis_map::tiles::MAX_TILE_LAYERS.saturating_sub(s.map().tiles.len());
+        if tiles.len() > room {
+            // Items naming no grid tile are told apart by footprint, which can differ scene by scene.
+            let why = if !named_tiles {
+                format!("{collection}'s items name no grid tile, so each footprint counts as one")
+            } else {
+                "take a smaller area".to_string()
+            };
+            return Err(format!(
+                "{} grid tiles, and the map has room for {room} more tile layers (at most {}): {why}",
+                tiles.len(),
+                rustgis_map::tiles::MAX_TILE_LAYERS
+            ));
+        }
+        // Every file a web address of sane length, as a project keeps them (TileLayer::repair),
+        // so the cube reopens as it was made.
+        if let Some(bad) = tiles.values().flat_map(|by_day| by_day.values()).find(|h| {
+            let plain = crate::render::rustgis_tiles::logins::inner(h);
+            let lower = plain.to_ascii_lowercase();
+            !(lower.starts_with("https://") || lower.starts_with("http://")) || plain.len() > 4000
+        }) {
+            return Err(format!(
+                "{}: a data cube's files are read in place from web addresses (http, https)",
+                bad.chars().take(200).collect::<String>()
+            ));
+        }
         // A range from the files themselves: one for every date and tile, as a range given is.
         let mut sampled = None;
         let range = if !auto {
@@ -990,6 +1019,11 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         } else if scales_differ {
             s.warn(format!(
                 "the {asset} files don't all have the same scale and offset, so no one range fits them all: each file is stretched on its own"
+            ));
+            None
+        } else if let Some((k, o)) = scale.filter(|(k, o)| *k == 0.0 || !k.is_finite() || !o.is_finite()) {
+            s.warn(format!(
+                "the {asset} files' metadata gives a scale of {k} and an offset of {o}, so no range in the band's units fits them: each file is stretched on its own"
             ));
             None
         } else {
@@ -1051,34 +1085,6 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
             m.tiles = tiles_before.clone();
             m.layers.retain(|l| layers_before.contains(&l.id));
         };
-        // A tile layer per grid tile, each reading its first file's header, within the map's room
-        // for tile layers: a catalog without grid tiles (keyed by footprint) could make hundreds.
-        let room = rustgis_map::tiles::MAX_TILE_LAYERS.saturating_sub(s.map().tiles.len());
-        if tiles.len() > room {
-            // Items naming no grid tile are told apart by footprint, which can differ scene by scene.
-            let why = if !named_tiles {
-                format!("{collection}'s items name no grid tile, so each footprint counts as one")
-            } else {
-                "take a smaller area".to_string()
-            };
-            return Err(format!(
-                "{} grid tiles, and the map has room for {room} more tile layers (at most {}): {why}",
-                tiles.len(),
-                rustgis_map::tiles::MAX_TILE_LAYERS
-            ));
-        }
-        // Every file a web address of sane length, as a project keeps them (TileLayer::repair),
-        // so the cube reopens as it was made.
-        if let Some(bad) = tiles.values().flat_map(|by_day| by_day.values()).find(|h| {
-            let plain = crate::render::rustgis_tiles::logins::inner(h);
-            let lower = plain.to_ascii_lowercase();
-            !(lower.starts_with("https://") || lower.starts_with("http://")) || plain.len() > 4000
-        }) {
-            return Err(format!(
-                "{}: a data cube's files are read in place from web addresses (http, https)",
-                bad.chars().take(200).collect::<String>()
-            ));
-        }
         for (tile, by_day) in &tiles {
             let urls: Vec<(f64, String)> = by_day.iter().map(|(d, u)| (*d as f64 * 86_400_000.0, format!("{u}{look}"))).collect();
             dates.extend(urls.iter().map(|(d, _)| *d));

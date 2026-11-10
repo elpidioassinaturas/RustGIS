@@ -16942,6 +16942,20 @@ fn an_entry_without_a_range_takes_one_from_its_files() {
         .unwrap();
     assert!(r.get("range").is_none() && r.get("rangeFrom").is_none(), "{r}");
     assert!(u.notices_since(mark).iter().any(|n| n.text.contains("classes drawn in their own colours")), "{:?}", u.notices_since(mark));
+    // Files whose metadata gives a scale of 0 aren't sampled: no range fits them, and a notice
+    // says each file is stretched on its own (a range can't be left out of a catalog entry).
+    let features = [item("a1", "2024-01-01")].join(",").replace("\"scale\": 0.0001", "\"scale\": 0");
+    let base = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{features}]}}"#))], 4);
+    let mut z = Session::new(Project::default());
+    let mark = z.notices_given();
+    let r = z
+        .run(
+            "stac.addCube",
+            &json!({"url": format!("{base}/v1"), "collection": "cube", "asset": "B1", "range": "auto", "bbox": [10, 45, 11, 46], "start": "2023-05-01", "end": "2024-12-31"}),
+        )
+        .unwrap();
+    assert!(r.get("range").is_none() && !z.map().tiles.is_empty(), "{r}");
+    assert!(z.notices_since(mark).iter().any(|n| n.text.contains("gives a scale of 0")), "{:?}", z.notices_since(mark));
     // A collection whose licence can't be read: the cube is still added and credited, and a
     // notice says the licence wasn't read, pointing to JAXA's terms. Opened again, the licence is
     // asked for again (this server answers its second request for it).
@@ -16984,8 +16998,11 @@ fn an_entry_without_a_range_takes_one_from_its_files() {
     assert_eq!(r["license"]["url"], "https://earth.jaxa.jp/en/data/policy/", "{r}");
     let said = w.notices_since(mark);
     assert!(!said.iter().any(|n| n.text.contains("licence wasn't read")), "{said:?}");
-    // A licence whose server stalls (here 6 s, then a 404) isn't waited for at the next cube.open:
-    // its error is given at once, saying when it is asked for again.
+    // A licence whose server stalls (here 6 s, then a 404) isn't asked for again at the next
+    // cube.open: its error is given at once, saying when it will be. The stall must outlast
+    // `jaxa::SLOW_READ` (5 s), and the two opens come well within `jaxa::RETRY_AFTER` (10 min).
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = asked.clone();
     let search = format!(r#"{{"type": "FeatureCollection", "features": [{}]}}"#, [item("a1", "2024-01-01")].join(","));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -17000,6 +17017,9 @@ fn an_entry_without_a_range_takes_one_from_its_files() {
             if path.starts_with("/v1/search") {
                 let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{search}", search.len());
             } else {
+                if path == "/v1" {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(6));
                     let _ = write!(c, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -17010,9 +17030,11 @@ fn an_entry_without_a_range_takes_one_from_its_files() {
     entry.url = format!("{base}/v1");
     let mut w = Session::new(Project::default());
     crate::cmd::cube_catalog::open_entry(&mut w, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
-    let (mark, began) = (w.notices_given(), std::time::Instant::now());
+    let (mark, before) = (w.notices_given(), asked.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(before >= 1, "the licence was asked for");
     let r = crate::cmd::cube_catalog::open_entry(&mut w, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
-    assert!(r.get("license").is_none() && began.elapsed() < std::time::Duration::from_secs(5), "{:?}", began.elapsed());
+    assert!(r.get("license").is_none(), "{r}");
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), before, "not asked for again");
     let said = w.notices_since(mark);
     assert!(said.iter().any(|n| n.text.contains("licence wasn't read") && n.text.contains("10 minutes")), "{said:?}");
 }

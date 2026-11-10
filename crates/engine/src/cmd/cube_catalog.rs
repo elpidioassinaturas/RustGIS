@@ -17,7 +17,7 @@ use crate::{CmdResult, CommandSpec as C, Session};
 pub fn commands() -> Vec<C> {
     vec![
         C::new("cube.catalog", "Data Cube Catalog", "Home › Add › Web Data", catalog).roles(&[]).effects(crate::policy::Effects::NONE).view().params(
-            r#"{"theme"?: "vegetation"|"land cover"|"water"|"climate"|"ocean"|"atmosphere"|"elevation", "bbox"?: [west, south, east, north] | "view" (entries with data there; default: anywhere), "query"?: "words, all of them in an entry's name, provider, id or keywords"} → the data cubes ready to open (cube.open), each with its provider, themes, area, period, step, resolution, source (a STAC collection and band, or a Zarr variable), licence and credit; JAXA Earth's datasets (a cube a band) once the Data Cubes pane has read its catalog, and "jaxa": where that stands (unread, reading, read with the datasets left out and why, or failed)"#,
+            r#"{"theme"?: "vegetation"|"land cover"|"water"|"climate"|"ocean"|"atmosphere"|"elevation", "bbox"?: [west, south, east, north] | "view" (entries with data there; default: anywhere), "query"?: "words, all of them in an entry's name, provider, id or keywords (a JAXA Earth entry's bands and step too)"} → the data cubes ready to open (cube.open), each with its provider, themes, area, period, step, resolution, source (a STAC collection and band, or a Zarr variable), licence and credit; JAXA Earth's datasets (a cube a band) once the Data Cubes pane has read its catalog, and "jaxa": where that stands (unread, reading, read with the datasets left out and why, or failed)"#,
         ),
         C::new("cube.open", "Open a Data Cube", "Home › Add › Web Data", open).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).params(
             r#"{"id": an entry of cube.catalog (a JAXA Earth dataset's is "<dataset id>/<band>"), "bbox"?: [west, south, east, north] | "view" (a STAC entry's area, default the map's extent; a Zarr entry's variable is read whole, but an area given must meet the entry's), "start"?, "end"?: dates, both or neither (default: the entry's last full calendar year), "maxCloud"?: percent (a STAC entry's cloud cover cap; default the entry's), "range"?: [low, high] | "auto" (a STAC entry's values shown from black to white, in the band's units; default the entry's, or "auto" for one that gives none: the 2nd–98th percentiles of a sample of the files, as stac.addCube takes it), "name"?: text} → the cube on the map, following the time slider, as stac.addCube or layer.addZarr adds it (desktop); an entry with a credit (JAXA Earth's) puts it on the cube's tile layers and gives its collection's licence"#,
@@ -70,8 +70,9 @@ fn jaxa_status() -> Value {
 /// and first reads of the files aren't on a background path yet, and this one moves with them. What
 /// it adds there is bounded: a JAXA collection's licence, at most 1 MB within 60 s, kept for the
 /// run once read (one that failed after 5 s or more is asked for again only 10 minutes later); and
-/// a range's sample, the newest file of up to four tiles, read at an overview (each file's header
-/// and values within two minutes apiece).
+/// a range's sample, the newest file of up to four tiles, read at an overview, after the checks
+/// that can refuse the cube: each file's header and values are two reads of up to two minutes
+/// apiece, so a server that stalls on every read holds the window up to 16 minutes in all.
 fn open(s: &mut Session, p: &Value) -> CmdResult {
     let id = ps(p, "id").map(str::trim).filter(|i| !i.is_empty()).ok_or("id is required (an entry of cube.catalog)")?;
     open_entry(s, &cubes::find(id)?, p)
