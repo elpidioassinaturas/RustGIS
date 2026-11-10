@@ -29537,6 +29537,102 @@ fn legends_leave_layers_out() {
     assert!(left_out(&s, lakes).is_empty());
 }
 
+/// A legend can show a layer under a label instead of its name (#1654): set when added or later,
+/// entry by entry, `null` or `{}` going back to the name; checked against its frame's map; kept
+/// through a saved project and layout file (not written when empty); following a renamed layer
+/// and dropped with a removed one.
+#[test]
+fn legends_label_layers() {
+    use rustgis_map::layout::ElementKind;
+    let mut s = Session::new(sample::world_project());
+    s.run("layout.new", &json!({"name": "Rótulos"})).unwrap();
+    let labels = |s: &Session, id: u32| -> Vec<(String, String)> {
+        match s.project.layouts[0].element(id).map(|e| &e.kind) {
+            Some(ElementKind::Legend { labels, .. }) => labels.iter().map(|(n, l)| (n.clone(), l.clone())).collect(),
+            _ => panic!("a legend"),
+        }
+    };
+    let pair = |n: &str, l: &str| (n.to_string(), l.to_string());
+    let plain = s.run("layout.addElement", &json!({"kind": "legend"})).unwrap()["element"].as_u64().unwrap() as u32;
+    assert!(labels(&s, plain).is_empty());
+    assert!(!serde_json::to_string(&s.project.layouts[0]).unwrap().contains("labels"), "none isn't written");
+    // Names as the map spells them; a blank label is none.
+    let id = s.run("layout.addElement", &json!({"kind": "legend", "labels": {"rivers": "Rios", "LAKES": " "}})).unwrap()["element"]
+        .as_u64()
+        .unwrap() as u32;
+    assert_eq!(labels(&s, id), [pair("Rivers", "Rios")]);
+    // Entries put in over those it has; null takes one back to the name.
+    s.run("layout.update", &json!({"element": id, "labels": {"Lakes": "Lagos", "Cities": "Cidades"}})).unwrap();
+    assert_eq!(labels(&s, id), [pair("Cities", "Cidades"), pair("Lakes", "Lagos"), pair("Rivers", "Rios")]);
+    s.run("layout.update", &json!({"element": id, "labels": {"cities": null, "RIVERS": "Rios principais"}})).unwrap();
+    assert_eq!(labels(&s, id), [pair("Lakes", "Lagos"), pair("Rivers", "Rios principais")]);
+    // A layer the map hasn't, a layer named twice, or not an object of labels is an error that
+    // changes nothing; so is `labels` on another kind of element.
+    for bad in [
+        json!({"Atlantis": "x"}),
+        json!({"Rivers": "a", "rivers": "b"}),
+        json!({"Rivers": 3}),
+        json!({"Rivers": ["Rios"]}),
+        json!(["Rivers"]),
+        json!("Rivers"),
+    ] {
+        assert!(s.run("layout.update", &json!({"element": id, "labels": bad})).is_err(), "{bad}");
+        assert!(s.run("layout.addElement", &json!({"kind": "legend", "labels": bad})).is_err(), "{bad}");
+    }
+    assert!(s.run("layout.update", &json!({"element": id, "labels": {"Atlantis": "x"}})).unwrap_err().contains("no layer 'Atlantis'"));
+    assert_eq!(labels(&s, id), [pair("Lakes", "Lagos"), pair("Rivers", "Rios principais")]);
+    let title = s.project.layouts[0].elements.iter().find(|e| e.name == "Title").unwrap().id;
+    assert!(s.run("layout.update", &json!({"element": title, "labels": {"Rivers": "Rios"}})).unwrap_err().contains("only legends"));
+    assert!(s.run("layout.addElement", &json!({"kind": "scaleBar", "labels": {"Rivers": "Rios"}})).unwrap_err().contains("only legends"));
+    // A grid's own "labels" (a bool) is still its.
+    let frame = s.run("layout.addElement", &json!({"kind": "grid", "labels": false})).unwrap()["element"].as_u64().unwrap() as u32;
+    assert!(matches!(
+        s.project.layouts[0].element(frame).map(|e| &e.kind),
+        Some(ElementKind::MapFrame { grid: Some(g), .. }) if !g.labels
+    ));
+    // A long label is cut to its length.
+    let long = "x".repeat(rustgis_map::layout::MAX_LEGEND_LABEL_CHARS + 50);
+    s.run("layout.update", &json!({"element": plain, "labels": {"Countries": long}})).unwrap();
+    assert_eq!(labels(&s, plain)[0].1.chars().count(), rustgis_map::layout::MAX_LEGEND_LABEL_CHARS);
+    // Kept through a saved project, and a layout file.
+    let dir = std::env::temp_dir().join(format!("rustgis-legend-labels-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rotulos.rgis");
+    s.run("project.saveAs", &json!({"path": path.display().to_string()})).unwrap();
+    s.run("project.open", &json!({"path": path.display().to_string()})).unwrap();
+    assert_eq!(labels(&s, id), [pair("Lakes", "Lagos"), pair("Rivers", "Rios principais")]);
+    let file = dir.join("rotulos.rgislayout");
+    s.run("layout.save", &json!({"path": file.display().to_string()})).unwrap();
+    s.run("layout.import", &json!({"path": file.display().to_string()})).unwrap();
+    assert!(matches!(
+        s.project.layouts[1].element(id).map(|e| &e.kind),
+        Some(ElementKind::Legend { labels, .. }) if labels.get("Rivers").is_some_and(|l| l == "Rios principais")
+    ));
+    std::fs::remove_dir_all(&dir).ok();
+    // (The imported layout is the active one now; the rest goes to the first.)
+    // The label follows its layer renamed, and goes with it removed, so a later layer of that
+    // name isn't labelled unasked.
+    s.run("layer.rename", &json!({"layer": "Rivers", "name": "Hidrografia"})).unwrap();
+    assert_eq!(labels(&s, id), [pair("Hidrografia", "Rios principais"), pair("Lakes", "Lagos")]);
+    s.run("layer.remove", &json!({"layer": "Lakes"})).unwrap();
+    assert_eq!(labels(&s, id), [pair("Hidrografia", "Rios principais")]);
+    // Renamed onto the name of a layer the legend lists, a layer shares that one's label (here
+    // none) rather than giving it its own.
+    s.run("layer.rename", &json!({"layer": "Hidrografia", "name": "Cities"})).unwrap();
+    assert!(labels(&s, id).is_empty());
+    // A WMS or WMTS layer is labelled by name too.
+    let wms = json!({"url": "https://maps.example.org/wms/{bbox-epsg-3857}", "name": "Soils", "overlay": true, "legend": "https://maps.example.org/legend.png"});
+    s.run("map.addTiles", &wms).unwrap();
+    s.run("layout.update", &json!({"layout": 0, "element": id, "labels": {"soils": "Solos"}})).unwrap();
+    assert_eq!(labels(&s, id), [pair("Soils", "Solos")]);
+    s.run("map.setTiles", &json!({"name": "Soils", "rename": "Soil map"})).unwrap();
+    assert_eq!(labels(&s, id), [pair("Soil map", "Solos")]);
+    // An empty object shows every layer's name again.
+    s.run("layout.update", &json!({"layout": 0, "element": id, "labels": {}})).unwrap();
+    assert!(labels(&s, id).is_empty());
+    assert!(!serde_json::to_string(&s.project.layouts[0].element(id).unwrap()).unwrap().contains("labels"));
+}
+
 /// A point layer of events, one a month through 2015 (two in March), with their dates as text,
 /// epoch milliseconds and years.
 fn timed_events() -> Session {
