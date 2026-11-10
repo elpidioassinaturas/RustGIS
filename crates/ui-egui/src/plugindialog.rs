@@ -128,6 +128,13 @@ fn shown(mut text: String) -> String {
     text
 }
 
+/// Whether required field `f` has no value **Run** would send: none, empty text, or one of
+/// another kind, which [`form_params`] leaves out (a plugin replaced while its dialog is open
+/// may have changed the field's kind).
+fn unfilled(f: &ParamDecl, values: &Map<String, Value>) -> bool {
+    f.required && !values.get(&f.name).is_some_and(|v| fits(f, v) && v.as_str() != Some(""))
+}
+
 /// The parameters **Run** sends: the values of the form as it is now. The plugin may have been
 /// replaced since they were set, dropping a field or changing its kind.
 fn form_params(form: &[ParamDecl], values: &Map<String, Value>) -> Value {
@@ -176,12 +183,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         d.result = Some(Err(tl!("It stopped without an answer: see the notices.").to_string()));
     }
     // Fields to fill in before it can run.
-    let missing: Vec<&str> = c
-        .form
-        .iter()
-        .filter(|f| f.required && d.values.get(&f.name).is_none_or(|v| v.is_null() || v.as_str() == Some("")))
-        .map(|f| m.translate(&lang, &f.label))
-        .collect();
+    let missing: Vec<&str> = c.form.iter().filter(|f| unfilled(f, &d.values)).map(|f| m.translate(&lang, &f.label)).collect();
     // Numbers typed that aren't numbers.
     let bad: Vec<&str> = c
         .form
@@ -589,6 +591,11 @@ mod tests {
         .unwrap();
         let values = json!({"input": "Countries", "method": "b", "trees": 50}).as_object().cloned().unwrap();
         assert_eq!(form_params(&form, &values), json!({"input": "Countries"}));
+        // A required field holding a value of another kind holds Run, rather than run without it.
+        let mut method = form[1].clone();
+        method.required = true;
+        assert!(unfilled(&method, &values));
+        assert!(!unfilled(&method, &json!({"method": 3}).as_object().cloned().unwrap()));
     }
 
     /// A `report` text is shown as it is; any other answer as JSON, without its panel state; a
