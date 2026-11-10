@@ -7313,11 +7313,14 @@ fn a_publication_without_a_colorbar_sizes_the_legend_box_to_the_legend() {
     let (bx, legend, bar, r) = boxes(&mut s, base.clone());
     assert!(bar.is_some(), "{r}");
     assert!(bx.unwrap() > legend.unwrap() + 4.0 + 10.0, "room for the colorbar: {r}");
+    let with_bar = bx.unwrap();
     let mut none = base.clone();
     none["colorbar"] = json!("none");
     let (bx, legend, bar, r) = boxes(&mut s, none);
     assert_eq!(bar, None, "{r}");
     assert!((bx.unwrap() - legend.unwrap() - 4.0).abs() < 1e-6, "{bx:?} {legend:?}: {r}");
+    // A legend stretched to its box would pass the line above; the box itself is smaller.
+    assert!(bx.unwrap() < with_bar, "{bx:?} against {with_bar}: {r}");
     let mut bad = base;
     bad["colorbar"] = json!("hidden");
     assert!(s.run("layout.publication", &bad).unwrap_err().contains("colorbar is"));
