@@ -402,7 +402,7 @@ pub(crate) fn day(d: &str) -> Option<String> {
 /// and 98th percentiles of `values` (a sample of its files; not-a-number left out), so a few
 /// outliers don't wash the colours out, rounded outward to a step two orders of magnitude below
 /// the span (a pressure at 101175..101475 keeps that span). Values all alike are widened by half a
-/// unit each way; none at all give none.
+/// unit each way; none at all give none, and neither do values spread wider than a number holds.
 pub fn percentile_range(mut values: Vec<f64>) -> Option<[f64; 2]> {
     values.retain(|v| v.is_finite());
     if values.is_empty() {
@@ -575,6 +575,8 @@ mod tests {
         assert_eq!(percentile_range(vec![3.0; 10]), Some([2.5, 3.5]));
         assert_eq!(percentile_range(vec![f64::NAN]), None);
         assert_eq!(percentile_range(Vec::new()), None);
+        // A span past the largest number has no range (the caller says why: not "no values").
+        assert_eq!(percentile_range(vec![-1e308, 1e308]), None);
         // Mostly one value, a few others: the full span rather than nothing.
         let mut few = vec![0.0; 100];
         few.push(5.0);

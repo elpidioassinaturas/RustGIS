@@ -16927,6 +16927,12 @@ fn an_entry_without_a_range_takes_one_from_its_files() {
             .unwrap_err()
             .contains("\"auto\"")
     );
+    // A credit longer than a project keeps is refused, before anything is read.
+    assert!(
+        t.run("stac.addCube", &json!({"url": entry.url, "collection": "cube", "asset": "B1", "attribution": "x".repeat(501)}))
+            .unwrap_err()
+            .contains("at most 500")
+    );
     // Files of classes in their own colours take no range, and a notice says so.
     use rustgis_data::raster::cog::{Example, example_with};
     let (classes, _) = serve_ranges(example_with(&Example { size: 512, tile: 256, classes: true, ..Example::default() }));
