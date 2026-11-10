@@ -330,11 +330,20 @@ fn combo(
         .response
 }
 
-/// The number typed in `text`, a whole one as an integer (for commands that read integers);
-/// `None` when empty or not a number.
+/// The number typed in `text`: an integer exactly, as one (for commands that read integers); a
+/// whole number written otherwise (`2.0`, `1e3`) as an integer too, below 2^53, where a float
+/// still holds each; others as floats. `None` when empty, not a number, or an integer past
+/// `i64`, which a float would round unseen.
 fn number(text: &str) -> Option<Value> {
-    let x = text.trim().parse::<f64>().ok().filter(|x| x.is_finite())?;
-    Some(if x.fract() == 0.0 && x.abs() < 1e15 { json!(x as i64) } else { json!(x) })
+    let t = text.trim();
+    if let Ok(i) = t.parse::<i64>() {
+        return Some(json!(i));
+    }
+    if t.strip_prefix(['-', '+']).unwrap_or(t).bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let x = t.parse::<f64>().ok().filter(|x| x.is_finite())?;
+    Some(if x.fract() == 0.0 && x.abs() < 9_007_199_254_740_992.0 { json!(x as i64) } else { json!(x) })
 }
 
 fn field(
@@ -599,6 +608,12 @@ mod tests {
         assert_eq!(report(&json!({"report": "3 classes\nKappa 0.91", "panel": {"values": {}}})), "3 classes\nKappa 0.91");
         assert_eq!(report(&json!({"n": 1, "panel": {"values": {}}})), "{\n  \"n\": 1\n}");
         assert_eq!(report(&Value::Null), "Done.");
+        // Numbers typed: integers exactly, past 2^53 too; one past i64 isn't taken, not rounded.
+        assert_eq!(number("9007199254740993"), Some(json!(9_007_199_254_740_993_i64)));
+        assert_eq!(number(" 2.0 "), Some(json!(2)));
+        assert_eq!(number("2.5"), Some(json!(2.5)));
+        assert_eq!(number("99999999999999999999"), None);
+        assert_eq!(number(""), None);
         // A long one is cut, and says how much was left out.
         let long = shown("é".repeat(40_000));
         assert!(long.len() < SHOWN + 100, "{}", long.len());
