@@ -128,6 +128,12 @@ fn shown(mut text: String) -> String {
     text
 }
 
+/// The parameters **Run** sends: the values of the form as it is now. The plugin may have been
+/// replaced since they were set, dropping a field or changing its kind.
+fn form_params(form: &[ParamDecl], values: &Map<String, Value>) -> Value {
+    Value::Object(form.iter().filter_map(|f| values.get(&f.name).filter(|v| fits(f, v)).map(|v| (f.name.clone(), v.clone()))).collect())
+}
+
 /// Whether `v` is a value field `f` gives: a number, a checkbox's bool, or a name or text.
 fn fits(f: &ParamDecl, v: &Value) -> bool {
     match f.kind.as_str() {
@@ -253,7 +259,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
             }
         });
     if run {
-        let params = Value::Object(d.values.clone());
+        let params = form_params(&c.form, &d.values);
         d.result = None;
         // Asked as a ribbon button would, but not through `run_by_user`, where no parameters
         // would open this dialog again: errors before it starts are notices, and the answer.
@@ -571,6 +577,19 @@ mod tests {
         assert!(!values.contains_key("other"), "left empty: {values:?}");
         assert!(!values.contains_key("note") && !values.contains_key("gone"), "{values:?}");
         plugins::unload("ui-dialog-stale");
+    }
+
+    /// Run sends only the values the form has now, of its fields' kinds: a plugin replaced
+    /// while its dialog is open may have dropped a field, or changed its kind.
+    #[test]
+    fn run_sends_only_values_of_the_form_as_it_is() {
+        let form: Vec<ParamDecl> = serde_json::from_value(json!([
+            {"name": "input", "label": "Input", "kind": "vectorLayer"},
+            {"name": "method", "label": "Method", "kind": "number"}
+        ]))
+        .unwrap();
+        let values = json!({"input": "Countries", "method": "b", "trees": 50}).as_object().cloned().unwrap();
+        assert_eq!(form_params(&form, &values), json!({"input": "Countries"}));
     }
 
     /// A `report` text is shown as it is; any other answer as JSON, without its panel state; a
