@@ -436,8 +436,9 @@ fn check_text(what: &str, s: &str, required: bool) -> Result<(), String> {
 
 /// The number in `text`, as a command dialog's number field reads it and sends it: an integer
 /// exactly, as one (for commands that read integers); a whole number written otherwise (`2.0`,
-/// `1e3`) as an integer too, below 2^53, where a float still holds each; others as floats.
-/// `None` when empty, not a number, or an integer past `i64`, which a float would round unseen.
+/// `1e3`) as an integer too; others as floats. `None` when empty, not a number, an integer past
+/// `i64`, or a whole number written otherwise from 2^53 (`1e16`, `9007199254740993.0`): a float
+/// would round those unseen.
 pub fn form_number(text: &str) -> Option<serde_json::Value> {
     let t = text.trim();
     if let Ok(i) = t.parse::<i64>() {
@@ -447,7 +448,21 @@ pub fn form_number(text: &str) -> Option<serde_json::Value> {
         return None;
     }
     let x = t.parse::<f64>().ok().filter(|x| x.is_finite())?;
-    Some(if x.fract() == 0.0 && x.abs() < 9_007_199_254_740_992.0 { serde_json::json!(x as i64) } else { serde_json::json!(x) })
+    // A whole number written otherwise past 2^53 may already be rounded: not taken.
+    if x.fract() == 0.0 && x.abs() >= 9_007_199_254_740_992.0 {
+        return None;
+    }
+    Some(if x.fract() == 0.0 { serde_json::json!(x as i64) } else { serde_json::json!(x) })
+}
+
+/// [`form_number`] for a JSON value, a number or a number written as text: an integer past `i64`
+/// is `None` either way.
+pub fn form_number_value(v: &serde_json::Value) -> Option<serde_json::Value> {
+    match v {
+        serde_json::Value::String(t) => form_number(t),
+        serde_json::Value::Number(n) => form_number(&n.to_string()),
+        _ => None,
+    }
 }
 
 /// Checks what a dialog's fields need beyond a tool parameter's, so that nothing is lost unseen:
@@ -461,7 +476,7 @@ fn check_form(owner: &str, form: &[ParamDecl]) -> Result<(), String> {
     for p in form {
         if let Some(d) = &p.default {
             let fits = match p.kind.as_str() {
-                "number" => d.is_number() || d.as_str().is_some_and(|t| form_number(t).is_some()),
+                "number" => form_number_value(d).is_some(),
                 "bool" => d.is_boolean(),
                 "choice" => d.as_str().is_some_and(|t| p.choices.iter().any(|c| c == t)),
                 _ => d.is_string(),

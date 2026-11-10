@@ -42,6 +42,7 @@ use serde_json::{Value, json};
 
 pub use manifest::{
     CommandDecl, Entry, GroupDecl, ItemDecl, Layout, Manifest, MenuDecl, ParamDecl, Permission, Runtime, TabDecl, ToolDecl, form_number,
+    form_number_value,
 };
 pub use package::Package;
 pub use panel::{Dropped, PanelDecl, PanelItemDecl, PanelState, TreeNode};

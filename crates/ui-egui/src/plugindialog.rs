@@ -144,7 +144,7 @@ fn form_params(form: &[ParamDecl], values: &Map<String, Value>) -> Value {
 /// Whether `v` is a value field `f` gives: a number, a checkbox's bool, or a name or text.
 fn fits(f: &ParamDecl, v: &Value) -> bool {
     match f.kind.as_str() {
-        "number" => v.is_number() || v.as_str().is_some_and(|t| number(t).is_some()),
+        "number" => rustgis_engine::plugins::form_number_value(v).is_some(),
         "bool" => v.is_boolean(),
         _ => v.is_string(),
     }
@@ -610,6 +610,9 @@ mod tests {
         assert_eq!(number(" 2.0 "), Some(json!(2)));
         assert_eq!(number("2.5"), Some(json!(2.5)));
         assert_eq!(number("99999999999999999999"), None);
+        assert_eq!(number("9007199254740993.0"), None, "would be rounded");
+        assert_eq!(number("1e16"), None);
+        assert_eq!(number("1e3"), Some(json!(1000)));
         assert_eq!(number(""), None);
         // A long one is cut, and says how much was left out.
         let long = shown("é".repeat(40_000));
