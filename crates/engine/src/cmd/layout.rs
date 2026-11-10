@@ -3255,7 +3255,10 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
                 Some(given) => Some(with_labels(labels, given)?),
                 None => None,
             },
-            // (A map frame's grid takes its labels under "grid".)
+            // A map frame's grid takes its labels under "grid", as its other options: said where.
+            Some(ElementKind::MapFrame { .. }) if p.get("labels").is_some_and(|v| !v.is_null()) => {
+                return Err(r#"a map frame's grid labels go under "grid": {"grid": {"labels": false}}"#.into());
+            }
             _ if p.get("labels").is_some_and(|v| !v.is_null()) => return Err(ONLY_LEGEND_LABELS.into()),
             _ => None,
         }

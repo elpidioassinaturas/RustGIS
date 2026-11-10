@@ -29599,6 +29599,14 @@ fn legends_label_layers() {
         s.project.layouts[0].element(frame).map(|e| &e.kind),
         Some(ElementKind::MapFrame { grid: Some(g), .. }) if !g.labels
     ));
+    // On layout.update they go under "grid", and a top-level "labels" there says so.
+    let err = s.run("layout.update", &json!({"element": frame, "labels": true})).unwrap_err();
+    assert!(err.contains(r#"go under "grid""#), "{err}");
+    s.run("layout.update", &json!({"element": frame, "grid": {"labels": true}})).unwrap();
+    assert!(matches!(
+        s.project.layouts[0].element(frame).map(|e| &e.kind),
+        Some(ElementKind::MapFrame { grid: Some(g), .. }) if g.labels
+    ));
     // A label longer than a legend keeps is refused, not cut, and changes nothing; one at the
     // limit is kept whole.
     let before = labels(&s, plain);

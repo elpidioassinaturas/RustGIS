@@ -208,11 +208,12 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     it, and a layer the map hasn't is refused. Each entry replaces that layer's label and leaves
     the others; `null` or a blank label shows the layer's name again, and `{}` every layer's. The
     label goes in the layer's row, or over its classes; a WMS or WMTS layer's goes over its
-    picture. It is up to 200 characters (a longer one is refused), and the legend measures it, not the name, so sizing a
-    legend to its content and the warnings on its fit follow the label. Two legends can label a
-    layer differently (in two languages, say). A renamed layer keeps its label; a removed one's
-    is dropped, so a later layer of that name isn't labelled unasked. Labels are saved with the
-    layout, in the project and in a `.rgislayout` file.
+    picture. It is up to 200 characters (a longer one is refused), and the legend measures it, not
+    the name, so sizing a legend to its content and the warnings on its fit follow the label. Two
+    legends can label a layer differently (in two languages, say). A renamed layer keeps its label
+    (not when another layer has its new name, which is said); a removed one's is dropped, so a later
+    layer of that name isn't labelled unasked. Labels are saved with the layout, in the project and
+    in a `.rgislayout` file.
 - **Colorbar**: the colour scale of a raster layer in the frame's map, as the map draws it (its
   stretch, colour ramp and enhancement): a gradient bar for a stretch or a tinted hillshade,
   steps labelled at their breaks for Classify, and a block per value for Unique Values and colour
