@@ -497,7 +497,9 @@ site to report on, an area to download.
   `[west, south, east, north]` in degrees (a west east of its east crosses the antimeridian),
   and `extent`, `[xmin, ymin, xmax, ymax]`, the box around it in the map's coordinates, with
   `crs`. A place on another body's map, or one the projection can't show, has only its
-  degrees, with a warning.
+  degrees, and on Web Mercator and the globe one past ±85.05° of latitude has its map
+  coordinates at that edge, each with a warning. A place keeps the map coordinates of the map
+  it was picked on, which its `crs` names, until it is picked again.
 - The pane shows the place picked last under the pick, and the map marks it (a box's outline)
   while the panel is open.
 - A plugin can clear a pick, `"values": {"seed": null}`, but not pick a place itself: a place

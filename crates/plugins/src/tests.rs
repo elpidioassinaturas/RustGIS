@@ -929,6 +929,11 @@ fn panel_picks_take_a_place_on_the_map() {
     let dropped = st.apply(&decl, &json!({"values": {"seed": {"lon": 1, "lat": 2}, "area": null}}));
     assert_eq!(dropped.values, ["seed"]);
     assert_eq!(st.picked("seed").and_then(|p| p["lon"].as_f64()), Some(-42.8));
+    // An answer that gives back the place held is no refusal: the place stays, quietly.
+    let held = st.values["seed"].clone();
+    let dropped = st.apply(&decl, &json!({"values": {"seed": held.clone()}}));
+    assert_eq!(dropped.notice(), None, "{dropped:?}");
+    assert_eq!(st.values["seed"], held);
     assert_eq!(st.values["area"], Value::Null);
     assert_eq!(st.picked("area"), None);
     // The user's own values clear it too.

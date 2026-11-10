@@ -926,12 +926,13 @@ impl PanelState {
             }
         }
         if let Some(values) = update.get("values") {
-            // A plugin can clear a pick, not pick a place itself: the others are refused.
+            // A plugin can clear a pick, not pick a place itself: the others are refused, but for
+            // the place held given back (a plugin answering its whole panel).
             let mut values = values.clone();
             let mut placed = Vec::new();
             if let Some(o) = values.as_object_mut() {
                 o.retain(|id, v| {
-                    let refused = !v.is_null() && decl.item(id).is_some_and(|d| d.kind == "pick");
+                    let refused = !v.is_null() && decl.item(id).is_some_and(|d| d.kind == "pick") && self.values.get(id) != Some(v);
                     if refused {
                         placed.push(id.clone());
                     }

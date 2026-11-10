@@ -10361,6 +10361,21 @@ fn plugin_panel_picks_reach_the_plugin_in_the_maps_coordinates() {
     let mark = s.notice_mark();
     s.run("plugin.panel", &json!({"id": "eng-pick", "values": {"spot": {"lon": 10, "lat": 20, "crs": "mine"}}})).unwrap();
     assert!(s.notices_since(mark).iter().any(|n| n.text.contains("replaced by the map's") && n.text.contains("spot")), "and the replacing");
+    // The globe's map coordinates are Web Mercator's: past its latitudes they are at its edge,
+    // and that is said.
+    s.run("map.projection", &json!({"type": "globe"})).unwrap();
+    let mark = s.notice_mark();
+    let got = s.run("plugin:eng-pick/q-grow", &json!({"panel": {"seed": {"lon": 10, "lat": 89}}})).unwrap();
+    assert_eq!(got["panel"]["values"]["seed"]["crs"], "EPSG:3857", "{got}");
+    assert!(said(&s, mark, "85.05"), "{:?}", s.notices_since(mark));
+    let mark = s.notice_mark();
+    s.run("plugin:eng-pick/q", &json!({"panel": {"area": {"bbox": [0, 80, 10, 88]}}})).unwrap();
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("85.05") && n.text.contains("area")), "a box too");
+    let mark = s.notice_mark();
+    s.run("plugin:eng-pick/q-grow", &json!({"panel": {"seed": {"lon": 10, "lat": 80}}})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("pick(s)")), "inside it, quiet: {:?}", s.notices_since(mark));
+    // A plugin answering with the place held says nothing about it.
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("not taken")), "{:?}", s.notices_since(mark));
     // Another body's map: the place keeps only its degrees, and that is said.
     s.run("map.body", &json!({"name": "mars", "basemap": false})).unwrap();
     let mark = s.notice_mark();

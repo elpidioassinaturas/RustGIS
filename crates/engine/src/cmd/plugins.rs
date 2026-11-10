@@ -84,7 +84,7 @@ fn placed(s: &Session, decl: &rustgis_plugins::PanelDecl, given: &Value) -> (Val
     if !decl.items.iter().any(|d| d.kind == "pick" && given.contains_key(d.key())) {
         return (Value::Object(given.clone()), None);
     }
-    let (mut replaced, mut unplaced) = (Vec::new(), Vec::new());
+    let (mut replaced, mut unplaced, mut clamped) = (Vec::new(), Vec::new(), Vec::new());
     let mut out = given.clone();
     let map = s.map();
     let flat = Flat::of(&map.projection);
@@ -126,6 +126,15 @@ fn placed(s: &Session, decl: &rustgis_plugins::PanelDecl, given: &Value) -> (Val
             if add.is_empty() {
                 unplaced.push(d.key().to_string());
             }
+            // Web Mercator (the globe's map coordinates too) stops at about 85° of latitude: a
+            // place past it has its map coordinates at that edge.
+            let lats: Vec<f64> = match v.get("bbox").and_then(Value::as_array) {
+                Some(b) if d.picks_box() => [b.get(1), b.get(3)].into_iter().filter_map(num).collect(),
+                _ => num(v.get("lat")).into_iter().collect(),
+            };
+            if matches!(flat, Flat::Mercator) && !add.is_empty() && lats.iter().any(|l| l.abs() > crate::geom::MAX_LAT) {
+                clamped.push(d.key().to_string());
+            }
             let kept = |k: &str, a: &Value| add.iter().any(|(n, b)| *n == k && same_value(a, b));
             if was.iter().any(|(k, a)| !kept(k, a)) {
                 replaced.push(d.key().to_string());
@@ -147,6 +156,10 @@ fn placed(s: &Session, decl: &rustgis_plugins::PanelDecl, given: &Value) -> (Val
         let why = if map.body().is_earth() { "the map's projection can't show them" } else { "the map is of another body" };
         let n = unplaced.len();
         said.push(format!("{n} pick(s) kept in degrees only, with no map coordinates ({why}): {}", unplaced.join(", ")));
+    }
+    if !clamped.is_empty() {
+        let n = clamped.len();
+        said.push(format!("{n} pick(s) past Web Mercator's ±85.05° latitude, their map coordinates at its edge: {}", clamped.join(", ")));
     }
     (Value::Object(out), (!said.is_empty()).then(|| said.join("; ")))
 }
