@@ -496,7 +496,11 @@ site to report on, an area to download.
   PROJ definition of another projection (`+proj=robin …`). A box has `bbox`,
   `[west, south, east, north]` in degrees (a west east of its east crosses the antimeridian),
   and `extent`, `[xmin, ymin, xmax, ymax]`, the box around it in the map's coordinates, with
-  `crs`. A place on another body's map, or one the projection can't show, has only its
+  `crs`. A box across the antimeridian is measured through it on Web Mercator and the globe,
+  unwrapped: its `xmax` goes past the world's edge (20037508.34 m). On a projection whose edge
+  it crosses (Robinson's at 180°, for one) its two parts sit at the map's two sides, and
+  `extent` is the box around both, as wide as the map. A plugin that needs boxes inside the
+  world splits `bbox` at the antimeridian. A place on another body's map, or one the projection can't show, has only its
   degrees, and on Web Mercator and the globe one past ±85.05° of latitude has its map
   coordinates at that edge, each with a warning. A place keeps the map coordinates of the map
   it was picked on, which its `crs` names, until it is picked again.
