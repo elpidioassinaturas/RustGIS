@@ -506,12 +506,13 @@ site to report on, an area to download.
   coordinates of the map it was picked on, which its `crs` names, until it is picked again.
 - The pane shows the place picked last under the pick, and the map marks it (a box's outline)
   while the panel is open.
-- A plugin can clear a pick, `"values": {"seed": null}`, but not pick a place itself: a place
-  in its answer is refused with a warning. A script gives the degrees, and RustGIS works out the
-  rest from the active map: `x`, `y`, `extent` or `crs` given other than the map's are replaced,
-  with a warning. A place it can't read (degrees out of range, a `bbox` that isn't four
-  numbers, south above north) is not taken, and a field it doesn't know is left out, each with a
-  warning:
+- A plugin can clear a pick, `"values": {"seed": null}`, but not pick a place itself: another
+  place in its answer is refused with a warning, and the place the pick holds, given back (an
+  answer with the whole panel), is kept quietly. A script gives the degrees, and RustGIS works
+  out the rest from the active map: `x`, `y`, `extent` or `crs` given other than the map's are
+  replaced, with a warning. A place it can't read (degrees out of range, a `bbox` that isn't
+  four numbers, south above north) is not taken, and a field it doesn't know is left out, each
+  with a warning:
 
   ```sh
   rustgis-cli run --sample --cmd 'plugin:my-plugin/grow={"panel": {"seed": {"lon": -42.8, "lat": -5.09}}}'
