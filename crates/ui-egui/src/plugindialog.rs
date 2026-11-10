@@ -49,11 +49,20 @@ pub fn open(app: &mut RustGisApp, p: &Value) -> Result<Value, String> {
     if let Some(d) = state.open.take() {
         state.kept.insert((d.plugin, d.command), d.values);
     }
-    let values = state
-        .kept
-        .get(&key)
-        .cloned()
-        .unwrap_or_else(|| c.form.iter().filter_map(|f| f.default.clone().map(|d| (f.name.clone(), d))).collect());
+    let defaults: Map<String, Value> = c.form.iter().filter_map(|f| f.default.clone().map(|d| (f.name.clone(), d))).collect();
+    // Kept values where they still fit the form, which a newer version of the plugin may have
+    // changed: a field gone is dropped, and one of another kind starts over at its default.
+    let values = match state.kept.get(&key) {
+        Some(kept) => c
+            .form
+            .iter()
+            .filter_map(|f| {
+                let v = kept.get(&f.name)?;
+                if fits(f, v) { Some((f.name.clone(), v.clone())) } else { defaults.get(&f.name).map(|d| (f.name.clone(), d.clone())) }
+            })
+            .collect(),
+        None => defaults,
+    };
     state.open = Some(Dialog { plugin: key.0, command: key.1, values, texts: HashMap::new(), asked: None, result: None });
     Ok(Value::Null)
 }
@@ -67,16 +76,27 @@ pub(crate) fn asked(app: &RustGisApp, id: &str, params: &Value) -> bool {
         .is_some_and(|d| d.asked.as_ref() == Some(params) && rustgis_engine::plugins::command_id(&d.plugin, &d.command) == id)
 }
 
-/// Plugin command `id` has run: the dialog waiting for it shows what it answered, unless it now
-/// waits for the web, to run again once that has come in.
+/// Plugin command `id` has run: the dialog waiting for it shows what it answered, unless its own
+/// run still waits to start, or now waits for the web, to run again once that has come in.
 pub(crate) fn answered(app: &mut RustGisApp, id: &str, answer: &Result<Value, String>) {
-    let Some(d) = app.ui.plugin_dialog.open.as_mut() else { return };
+    let Some(d) = app.ui.plugin_dialog.open.as_ref() else { return };
     let Some(params) = d.asked.as_ref() else { return };
-    if rustgis_engine::plugins::command_id(&d.plugin, &d.command) != id || app.session.plugin_command_waits(id, params) {
+    // Not while its own run waits to start or for the web: this answer is then another run's.
+    if rustgis_engine::plugins::command_id(&d.plugin, &d.command) != id || crate::pluginstart::waits(app, id, params) {
         return;
     }
+    let Some(d) = app.ui.plugin_dialog.open.as_mut() else { return };
     d.asked = None;
     d.result = Some(answer.as_ref().map(report).map_err(Clone::clone));
+}
+
+/// Whether `v` is a value field `f` gives: a number, a checkbox's bool, or a name or text.
+fn fits(f: &ParamDecl, v: &Value) -> bool {
+    match f.kind.as_str() {
+        "number" => v.is_number(),
+        "bool" => v.is_boolean(),
+        _ => v.is_string(),
+    }
 }
 
 /// What a command answered, as the dialog shows it: its `report` text, or the answer itself
@@ -472,6 +492,40 @@ mod tests {
         let echoed: Value = serde_json::from_str(answer).unwrap();
         assert_eq!(echoed["params"], json!({"count": 2.5}));
         plugins::unload("ui-dialog-optional");
+    }
+
+    /// While the dialog's run waits to start, an answer of the same command run with other
+    /// parameters (a retry landing, say) isn't taken for its own.
+    #[test]
+    fn another_runs_answer_is_not_the_dialogs() {
+        let mut h = launch("ui-dialog-other");
+        h.state_mut().run_by_user("plugin:ui-dialog-other/qq", Value::Null).unwrap();
+        h.run();
+        h.get_by_label("Run").click();
+        h.step();
+        assert!(dialog(&h).asked.is_some(), "waits to start");
+        answered(h.state_mut(), "plugin:ui-dialog-other/qq", &Ok(json!({"report": "another run"})));
+        assert!(dialog(&h).asked.is_some() && dialog(&h).result.is_none(), "{:?}", dialog(&h).result);
+        h.run();
+        let Some(Ok(answer)) = &dialog(&h).result else { panic!("{:?}", dialog(&h).result) };
+        assert!(answer.contains("\"params\""), "{answer}");
+        plugins::unload("ui-dialog-other");
+    }
+
+    /// Values kept from before a plugin changed its form are taken only where they still fit:
+    /// a field gone or of another kind starts over, at its default if it has one.
+    #[test]
+    fn kept_values_that_no_longer_fit_start_over() {
+        let mut h = launch("ui-dialog-stale");
+        let kept = json!({"input": "Countries", "note": 50, "trees": "many", "gone": 1});
+        let kept = kept.as_object().cloned().unwrap();
+        h.state_mut().ui.plugin_dialog.kept.insert(("ui-dialog-stale".into(), "q".into()), kept);
+        h.state_mut().run("ui.pluginForm", json!({"plugin": "ui-dialog-stale", "command": "q"})).unwrap();
+        let values = &dialog(&h).values;
+        assert_eq!(values.get("input"), Some(&json!("Countries")));
+        assert_eq!(values.get("trees"), Some(&json!(50)), "{values:?}");
+        assert!(!values.contains_key("note") && !values.contains_key("gone"), "{values:?}");
+        plugins::unload("ui-dialog-stale");
     }
 
     /// A `report` text is shown as it is; any other answer as JSON, without its panel state.
