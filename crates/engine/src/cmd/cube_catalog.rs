@@ -68,9 +68,10 @@ fn jaxa_status() -> Value {
 
 /// `cube.open`. It runs on the UI thread, as `stac.addCube` (which it calls) does: their STAC search
 /// and first reads of the files aren't on a background path yet, and this one moves with them. What
-/// it adds there is bounded: a JAXA collection's licence, at most 1 MB under the blocking reads'
-/// timeout, read once a run after a read succeeds; and a range's sample, the newest file of up to
-/// four tiles, read at an overview.
+/// it adds there is bounded: a JAXA collection's licence, at most 1 MB within 60 s, kept for the
+/// run once read (one that failed after 5 s or more is asked for again only 10 minutes later); and
+/// a range's sample, the newest file of up to four tiles, read at an overview (each file's header
+/// and values within two minutes apiece).
 fn open(s: &mut Session, p: &Value) -> CmdResult {
     let id = ps(p, "id").map(str::trim).filter(|i| !i.is_empty()).ok_or("id is required (an entry of cube.catalog)")?;
     open_entry(s, &cubes::find(id)?, p)

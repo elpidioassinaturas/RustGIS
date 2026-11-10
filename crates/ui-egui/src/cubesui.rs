@@ -175,6 +175,9 @@ fn jaxa_line(ui: &mut egui::Ui, t: &crate::theme::Tokens) {
         jaxa::Status::Unread => {}
         jaxa::Status::Reading => {
             ui.label(egui::RichText::new(tl!("Reading JAXA Earth's catalog…")).small().color(t.text_dim));
+            // The tile cache's waker comes with the map view, which a layout, the model builder
+            // or the catalog view keeps from drawing: look again until the catalog is read.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
         jaxa::Status::Read(c) => {
             let text = crate::i18n::fmt(
@@ -185,7 +188,7 @@ fn jaxa_line(ui: &mut egui::Ui, t: &crate::theme::Tokens) {
             ui.label(egui::RichText::new(text).small().color(t.text_dim)).on_hover_text(why.join("\n"));
             if !c.cut.is_empty() {
                 let text = crate::i18n::fmt(
-                    "JAXA Earth: {n} of its catalog's texts are too long and are cut (hover for which)",
+                    "JAXA Earth: {n} of its catalog's texts are cut or not read (hover for which)",
                     &[("n", &c.cut.len().to_string())],
                 );
                 ui.label(egui::RichText::new(text).small().color(t.text_dim)).on_hover_text(c.cut.join("\n"));
@@ -231,6 +234,8 @@ fn licence_link(ui: &mut egui::Ui, e: &Entry, shown: bool) {
             #[cfg(not(test))]
             if shown {
                 jaxa::fetch_licence(&e.url);
+                // As for the catalog: look again until the licence is read.
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
             }
             #[cfg(test)]
             let _ = shown;

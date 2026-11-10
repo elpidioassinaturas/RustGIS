@@ -63,7 +63,7 @@ pub struct Catalog {
     /// How many datasets the catalog lists.
     pub datasets: usize,
     /// The catalog's text that was too long and is cut, where and by how much (each cut name ends
-    /// in "…").
+    /// in "…"), and the fields that aren't read, and why.
     pub cut: Vec<String>,
 }
 
@@ -179,7 +179,15 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
             && let Some((heading, fields)) = datasets.last_mut()
         {
             let k = k.trim();
-            if k.len() <= 40 && k.bytes().all(|b| b.is_ascii_alphanumeric()) && !fields.contains_key(k) {
+            if !(k.len() <= 40 && k.bytes().all(|b| b.is_ascii_alphanumeric())) {
+                let k = clip(k, 40);
+                note(
+                    &mut cut,
+                    format!("{}: its field \"{k}\" isn't read (a field's name is 1 to 40 letters and digits)", clip(heading, 120)),
+                );
+            } else if fields.contains_key(k) {
+                note(&mut cut, format!("{}: its {k} is given again; the first is read", clip(heading, 120)));
+            } else {
                 cut_note(&mut cut, heading, k, v.trim(), MAX_FIELD);
                 fields.insert(k.to_string(), clip(v.trim(), MAX_FIELD));
             }
@@ -195,7 +203,7 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
         let title = f.get("title").map(String::as_str).filter(|t| !t.is_empty()).unwrap_or(heading.as_str());
         // Listed twice, it is one dataset: the listing again is left out, and says so.
         if !id.is_empty() && !seen.insert(id) {
-            let why = "listed again further up the catalog; read from its first listing".to_string();
+            let why = "listed again; its first listing, further up the catalog, stands for it".to_string();
             c.left_out.push(LeftOut { id: clip(id, 120), title: clip(title, 200), why });
             continue;
         }
@@ -274,7 +282,18 @@ fn cubes_of(id: &str, title: &str, f: &HashMap<String, String>, cut: &mut Vec<St
     if end.as_ref().is_some_and(|e| *e < start) {
         return Err("its endDate is before its startDate".into());
     }
-    let km = get("spatialResolution").trim().parse::<f64>().ok().filter(|k| k.is_finite() && *k > 0.0 && *k < 1000.0);
+    let given = get("spatialResolution").trim();
+    let km = given.parse::<f64>().ok().filter(|k| k.is_finite() && *k > 0.0 && *k < 1000.0);
+    if km.is_none() && !given.is_empty() {
+        let v = clip(given, 40);
+        note(
+            cut,
+            format!(
+                "{}: its spatialResolution \"{v}\" isn't read (kilometres, above 0 and below 1000), so its resolution is not given",
+                clip(id, 120)
+            ),
+        );
+    }
     let url = match get("collection").trim() {
         "" => format!("{}{id}/collection.json", BUCKETS[0]),
         u if is_collection(u) && u.ends_with(&format!("/{id}/collection.json")) => u.to_string(),
@@ -395,16 +414,19 @@ fn clip(s: &str, n: usize) -> String {
     s.chars().take(n.saturating_sub(1)).chain(['…']).collect()
 }
 
-/// Notes in `cut` that `what` of `dataset` is longer than `n` characters and is cut: the first
-/// [`MAX_CUTS`] of them, then one note that more are cut.
+/// Notes in `cut` that `what` of `dataset` is longer than `n` characters and is cut.
 fn cut_note(cut: &mut Vec<String>, dataset: &str, what: &str, s: &str, n: usize) {
     let len = s.chars().count();
-    if len <= n {
-        return;
+    if len > n {
+        note(cut, format!("{}: its {what} ({len} characters) is cut to {n}", clip(dataset, 120)));
     }
+}
+
+/// Adds a note to `cut`: the first [`MAX_CUTS`] of them, then one note that there are more.
+fn note(cut: &mut Vec<String>, text: String) {
     match cut.len() {
-        k if k < MAX_CUTS => cut.push(format!("{}: its {what} ({len} characters) is cut to {n}", clip(dataset, 120))),
-        MAX_CUTS => cut.push(format!("more of the catalog's text is cut than these {MAX_CUTS} notes list")),
+        k if k < MAX_CUTS => cut.push(text),
+        MAX_CUTS => cut.push(format!("more of the catalog's text is cut or not read than these {MAX_CUTS} notes list")),
         _ => {}
     }
 }
@@ -482,14 +504,52 @@ pub fn fetch_licence(collection: &str) {
     );
 }
 
-/// A collection's licence, waiting for it (desktop): once read, kept for the run; one that
-/// couldn't be read is asked for again.
+/// A failed licence read that took at least this long (a server that stalls)...
+#[cfg(not(target_arch = "wasm32"))]
+const SLOW_READ: std::time::Duration = std::time::Duration::from_secs(5);
+/// ...is asked for again only after this long, so each `cube.open` doesn't wait for it.
+#[cfg(not(target_arch = "wasm32"))]
+const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// When each collection's licence last failed to read, slowly.
+#[cfg(not(target_arch = "wasm32"))]
+fn slow_failures() -> &'static Mutex<HashMap<String, std::time::Instant>> {
+    static SLOW: OnceLock<Mutex<HashMap<String, std::time::Instant>>> = OnceLock::new();
+    SLOW.get_or_init(Mutex::default)
+}
+
+/// Whether a licence that failed slowly at `failed` still waits at `now` to be asked for again.
+#[cfg(not(target_arch = "wasm32"))]
+fn waits(failed: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    failed.is_some_and(|t| now.saturating_duration_since(t) < RETRY_AFTER)
+}
+
+/// A collection's licence, waiting for it (desktop): once read, kept for the run. One that
+/// couldn't be read is asked for again: at once after a quick failure (such as a 404), and
+/// [`RETRY_AFTER`] after one that took [`SLOW_READ`] or more, its error given until then.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn licence_blocking(collection: &str) -> Result<Licence, String> {
-    if let Some(Ok(l)) = licence(collection) {
-        return Ok(l);
+    match licence(collection) {
+        Some(Ok(l)) => return Ok(l),
+        Some(Err(why)) => {
+            let failed = slow_failures().lock().unwrap_or_else(|e| e.into_inner()).get(collection).copied();
+            if waits(failed, std::time::Instant::now()) {
+                let m = RETRY_AFTER.as_secs() / 60;
+                return Err(format!("{why}; that read was slow, so it is asked for again {m} minutes after it"));
+            }
+        }
+        None => {}
     }
+    let asked = std::time::Instant::now();
     let l = crate::cache::download_blocking_limited(collection, MAX_COLLECTION_BYTES).and_then(|b| licence_of(&b));
+    {
+        let mut slow = slow_failures().lock().unwrap_or_else(|e| e.into_inner());
+        if l.is_err() && asked.elapsed() >= SLOW_READ {
+            slow.insert(collection.to_string(), std::time::Instant::now());
+        } else {
+            slow.remove(collection);
+        }
+    }
     licences().lock().unwrap_or_else(|e| e.into_inner()).insert(collection.to_string(), Some(l.clone()));
     l
 }
@@ -507,6 +567,8 @@ mod tests {
     fn the_catalog_reads_as_cubes_and_says_what_it_leaves_out() {
         let c = parse(FIXTURE).unwrap();
         assert_eq!(c.datasets, 119);
+        // Today's catalog: nothing cut, every field read.
+        assert!(c.cut.is_empty(), "{:?}", c.cut);
         // Each dataset once: listed as cubes, or left out.
         let mut ids: Vec<&str> = c.entries.iter().filter_map(|e| e.source_dataset()).collect();
         ids.dedup();
@@ -621,9 +683,38 @@ mod tests {
             cut_note(&mut cut, "x", "title", "too long", 3);
         }
         assert_eq!(cut.len(), MAX_CUTS + 1);
-        assert!(cut[MAX_CUTS].contains("more of the catalog's text is cut"), "{}", cut[MAX_CUTS]);
+        assert!(cut[MAX_CUTS].contains("more of the catalog's text is cut or not read"), "{}", cut[MAX_CUTS]);
         cut_note(&mut cut, "x", "title", "short", 10);
         assert_eq!(cut.len(), MAX_CUTS + 1);
+        // Fields that aren't read are said: a resolution that isn't kilometres, a field given
+        // again, a field whose name isn't letters and digits. A clean dataset gives none (above).
+        let c = one(&good.replace("* spatialResolution: 5.566", "* spatialResolution: ten"));
+        assert_eq!(c.entries[0].resolution, "not given");
+        assert_eq!(
+            c.cut,
+            [
+                "JAXA.Test_daily: its spatialResolution \"ten\" isn't read (kilometres, above 0 and below 1000), so its resolution is not given"
+            ]
+        );
+        let c = one(&format!("{good}\n* title: Again\n* data provider: X"));
+        assert_eq!(c.entries[0].name, "Test", "the first title is read");
+        assert_eq!(
+            c.cut,
+            [
+                "A dataset: its title is given again; the first is read",
+                "A dataset: its field \"data provider\" isn't read (a field's name is 1 to 40 letters and digits)",
+            ]
+        );
+    }
+
+    /// A licence that failed slowly waits a while before it is asked for again; none waits else.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_slow_licence_failure_waits_before_it_is_asked_again() {
+        let t = std::time::Instant::now();
+        assert!(!waits(None, t));
+        assert!(waits(Some(t), t) && waits(Some(t), t + RETRY_AFTER - std::time::Duration::from_secs(1)));
+        assert!(!waits(Some(t), t + RETRY_AFTER));
     }
 
     /// A collection's licence: its license link, else an SPDX id; JAXA's collections are told

@@ -16984,6 +16984,37 @@ fn an_entry_without_a_range_takes_one_from_its_files() {
     assert_eq!(r["license"]["url"], "https://earth.jaxa.jp/en/data/policy/", "{r}");
     let said = w.notices_since(mark);
     assert!(!said.iter().any(|n| n.text.contains("licence wasn't read")), "{said:?}");
+    // A licence whose server stalls (here 6 s, then a 404) isn't waited for at the next cube.open:
+    // its error is given at once, saying when it is asked for again.
+    let search = format!(r#"{{"type": "FeatureCollection", "features": [{}]}}"#, [item("a1", "2024-01-01")].join(","));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for stream in listener.incoming().take(16) {
+            let Ok(mut c) = stream else { continue };
+            let mut buf = [0u8; 4096];
+            let read = c.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..read]);
+            let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+            if path.starts_with("/v1/search") {
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{search}", search.len());
+            } else {
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(6));
+                    let _ = write!(c, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                });
+            }
+        }
+    });
+    entry.url = format!("{base}/v1");
+    let mut w = Session::new(Project::default());
+    crate::cmd::cube_catalog::open_entry(&mut w, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
+    let (mark, began) = (w.notices_given(), std::time::Instant::now());
+    let r = crate::cmd::cube_catalog::open_entry(&mut w, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
+    assert!(r.get("license").is_none() && began.elapsed() < std::time::Duration::from_secs(5), "{:?}", began.elapsed());
+    let said = w.notices_since(mark);
+    assert!(said.iter().any(|n| n.text.contains("licence wasn't read") && n.text.contains("10 minutes")), "{said:?}");
 }
 
 /// The data cube catalog (#683): its entries listed by theme, area and words; one opened as typing

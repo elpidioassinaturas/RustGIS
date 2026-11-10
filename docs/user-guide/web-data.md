@@ -222,7 +222,8 @@ pane says so, and when it can't be (offline) it says why, with **Try again**.
   script that never opens the pane sees `"jaxa": {"state": "unread"}`. The catalog is read once a
   run; after a failed read, **Try again** reads it again. Text too long for the list (a title
   over 160 characters, a field over 2,000) is cut, its name ends in "…", and the pane and
-  `cube.catalog` (`"cut"`) say which. A JAXA cube whose id the list already has is left out for
+  `cube.catalog` (`"cut"`) say which; they also name the fields that aren't read (a resolution
+  that isn't kilometres, a field given twice, a field name that isn't letters and digits). A JAXA cube whose id the list already has is left out for
   the list's own, and the pane and `cube.catalog` (`"hidden"`) name it.
 
 An entry, as the list holds it (built in from `crates/tiles/src/cubes.json`, and kept with the app's
