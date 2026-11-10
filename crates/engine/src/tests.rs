@@ -7672,6 +7672,34 @@ fn a_moved_frames_coverage_is_cut_from_the_wide_one() {
     assert_eq!(held.2.len(), (held.0 * held.1) as usize);
 }
 
+/// The move search draws the map wider than its frame, at the asked scale too, and a streamed
+/// layer is read for all of that: read for the frame alone (half as wide again on each side, in
+/// degrees), it misses what a move shows past that, as in Web Mercator far from the equator.
+#[test]
+fn a_publication_reads_streamed_layers_for_the_move_searchs_wide_drawing() {
+    let dir = std::env::temp_dir().join(format!("rustgis-wide-read-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (fill, points) = (dir.join("fill.geojson"), dir.join("far.geojson"));
+    let square = json!({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry":
+        {"type": "Polygon", "coordinates": [[[-20.0, 10.0], [60.0, 10.0], [60.0, 85.0], [-20.0, 85.0], [-20.0, 10.0]]]}}]});
+    std::fs::write(&fill, square.to_string()).unwrap();
+    let point = |lat: f64| json!({"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [20.0, lat]}});
+    std::fs::write(&points, json!({"type": "FeatureCollection", "features": [point(60.0), point(17.0)]}).to_string()).unwrap();
+    let mut s = Session::new(Project::default());
+    for _ in 0..30 {
+        s.run("layer.addData", &json!({"path": fill.display().to_string()})).unwrap();
+    }
+    s.run("layer.addData", &json!({"path": points.display().to_string(), "stream": true, "name": "Far"})).unwrap();
+    let p = json!({"profile": "a4-portrait", "extent": [0, 58, 40, 62], "author": "", "locator": "none", "veil": false});
+    let r = s.run("layout.publication", &p).unwrap();
+    let far = s.map().layers.iter().find(|l| l.name == "Far").unwrap();
+    // The frame (180 × 243.5 mm at 1:16,000,000) is read down to 20°N; the wide drawing, with the
+    // room to move the extent up, reaches about 13°N.
+    let held: Vec<f64> = far.dataset.features.iter().filter_map(|f| f.geometry.as_ref()).map(|g| g.extent().min_y).collect();
+    assert!(held.contains(&17.0), "the point at 17°N, in the wide drawing, is read: {held:?} {r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A veiled map's surrounds group in a band: beside each other in a wide one, one over the other in
 /// a tall one, nowhere when they don't fit.
 #[test]
@@ -7680,7 +7708,10 @@ fn a_veil_panel_groups_the_surrounds_by_the_bands_shape() {
     let (legend, arrow, scale) = ((80.0, 50.0), (8.0, 12.0), (60.0, 10.0));
     let (l, locator, a, b) = veil_panel((0.0, 0.0, 160.0, 70.0), legend, Some(40.0), arrow, scale, 3.0).unwrap();
     assert!(l.0 + l.2 <= locator.unwrap().0, "beside it: {l:?} {locator:?}");
-    assert!(a.0 + a.2 <= l.0 + 160.0 && b.1 >= locator.unwrap().1 + 40.0, "{a:?} {b:?}");
+    assert!(a.0 + a.2 <= 160.0 && b.1 >= locator.unwrap().1 + 40.0, "{a:?} {b:?}");
+    let apart =
+        |p: (f64, f64, f64, f64), q: (f64, f64, f64, f64)| p.0 + p.2 <= q.0 || q.0 + q.2 <= p.0 || p.1 + p.3 <= q.1 || q.1 + q.3 <= p.1;
+    assert!(apart(a, l) && apart(a, (locator.unwrap().0, locator.unwrap().1, 40.0, 40.0)), "the arrow clear: {a:?} {l:?} {locator:?}");
     let (l, locator, _, b) = veil_panel((0.0, 0.0, 90.0, 130.0), legend, Some(40.0), arrow, scale, 3.0).unwrap();
     assert!(l.1 >= b.1 + b.3 && locator.unwrap().0 == b.0, "under it: {l:?} {b:?}");
     assert!(veil_panel((0.0, 0.0, 60.0, 60.0), legend, Some(40.0), arrow, scale, 3.0).is_none());
@@ -7732,6 +7763,10 @@ fn a_publication_map_moves_aside_for_a_legend_with_no_room() {
         assert_eq!(r["arrangement"] == "veil", r["veiled"].as_bool().unwrap(), "{r}");
         let said = r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("outside the extent is veiled"));
         assert_eq!(said, r["veiled"].as_bool().unwrap(), "the veil is said, and only then: {r}");
+        // The surrounds grouped in the veil's band left their corners, and "moved" names them.
+        if r["veiled"] == json!(true) {
+            assert!(!r["moved"].as_array().unwrap().is_empty(), "the grouped surrounds are named as moved: {r}");
+        }
         (r["veiled"].as_bool().unwrap(), smaller, veils > 0, r["scale"].as_f64().unwrap())
     };
     let (veiled, smaller, veils, _) = on_past(json!([7, 4, 9, 6]), Value::Null);
@@ -7760,7 +7795,14 @@ fn a_publication_map_moves_aside_for_a_legend_with_no_room() {
         let r = s.run("layout.publication", &json!({"profile": profile, "extent": extent, "author": ""})).unwrap();
         let l = s.project.layouts.last().unwrap();
         let el = |name: &str| l.elements.iter().find(|e| e.name == name).map(|e| (e.x, e.y, e.w, e.h));
-        let (Some(frame), Some(outline)) = (el("Map Frame"), el("Extent Outline")) else { continue };
+        // An unveiled map has no outline of its extent; a veiled one has both.
+        if r["veiled"] == json!(false) {
+            assert!(el("Extent Outline").is_none(), "{profile} {extent}: an outline with no veil: {r}");
+            continue;
+        }
+        let (Some(frame), Some(outline)) = (el("Map Frame"), el("Extent Outline")) else {
+            panic!("{profile} {extent}: veiled, with no Map Frame or Extent Outline: {r}");
+        };
         let (left, bottom) = (2.0 + 9.0, 2.0 + 6.0);
         assert!(outline.0 >= frame.0 + left - 0.5, "{profile} {extent}: {outline:?} in the left labels' room of {frame:?}: {r}");
         assert!(
@@ -7778,7 +7820,7 @@ fn a_publication_map_moves_aside_for_a_legend_with_no_room() {
         }
         checked += 1;
     }
-    assert!(checked > 0, "a figure is veiled");
+    assert_eq!(checked, 2, "both figures of the narrow extent are veiled");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

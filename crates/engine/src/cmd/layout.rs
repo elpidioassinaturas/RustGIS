@@ -968,8 +968,10 @@ fn landscape_suits(aspect: f64, short: f64, long: f64, style: Style) -> bool {
 /// paths (tools, exports, commands that make a raster, models and scripts on a copy) takes a
 /// command that adds a layout, and a locator map, to the project yet. Its cost grows with the
 /// map's features: placing the surrounds draws the frame once on a grid of 384 cells, and when no
-/// shape of the legend fits, the search draws it at most four times more, once per scale it tries
-/// (#1379; the whole command took about 0.7 s on a 14 MB geology map, 0.2 s before the search).
+/// shape of the legend fits, the search draws it at most four times more, once per scale it tries,
+/// each time on a view wider than the frame that a streamed layer is read for, waited for here
+/// (#1379; the whole command took about 0.7 s on a 14 MB geology map, 0.2 s before the search, and
+/// 0.9 s with its layers read in place).
 fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let (auto, profile) = publication_profile(p)?;
     let (sheet, page_w, page_h) = (profile.sheet, profile.width, profile.height);
@@ -1954,29 +1956,31 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 let (slack_x, slack_y) = (to_left.max(to_right), to_top.max(to_bottom));
                 let wide = (fw + 2.0 * slack_x, fh + 2.0 * slack_y);
                 if drawn.as_ref().is_none_or(|d| d.0 != tried) {
-                    // A smaller scale can draw more classes, and a streamed layer has its features
-                    // read for the wider view. While one is still reading there, or a legend picture
-                    // still loading, the classes aren't known: that scale isn't tried, which is said.
-                    let here = if tried == asked_scale {
-                        Some(known)
-                    } else {
-                        let render_scale = crate::render::layout::frame_render_scale(s.map(), centred, tried);
-                        let view = crate::render::View {
-                            width: wide.0 * rustgis_map::layout::PT_PER_MM,
-                            height: wide.1 * rustgis_map::layout::PT_PER_MM,
-                            pixels_per_point: 1.0,
-                            camera: rustgis_map::layout::frame_camera(s.map(), centred, tried, 0.0, 0.0),
-                            sky: false,
-                        };
-                        let lonlat = crate::render::view_lonlat(s.map(), &view);
-                        let reading = s.map_mut().sync_sources(&lonlat, render_scale, true);
-                        if reading || crate::render::layout::tile_legends_pending(s.map(), render_scale, &[]) {
+                    // A streamed layer has its features read for the wide view, at the asked scale
+                    // too (the frame's read reaches past the frame by half its size in degrees,
+                    // which the wide view outgrows where the projection stretches, as Web Mercator
+                    // does far from the equator), and a smaller scale can draw more classes. While
+                    // one is still reading there, or a legend picture still loading, what the map
+                    // draws there isn't known: that scale isn't tried, which is said.
+                    let render_scale = crate::render::layout::frame_render_scale(s.map(), centred, tried);
+                    let view = crate::render::View {
+                        width: wide.0 * rustgis_map::layout::PT_PER_MM,
+                        height: wide.1 * rustgis_map::layout::PT_PER_MM,
+                        pixels_per_point: 1.0,
+                        camera: rustgis_map::layout::frame_camera(s.map(), centred, tried, 0.0, 0.0),
+                        sky: false,
+                    };
+                    let lonlat = crate::render::view_lonlat(s.map(), &view);
+                    let reading = s.map_mut().sync_sources(&lonlat, render_scale, true);
+                    let here =
+                        if reading || (tried != asked_scale && crate::render::layout::tile_legends_pending(s.map(), render_scale, &[])) {
                             unknown_at.get_or_insert(tried);
                             None
+                        } else if tried == asked_scale {
+                            Some(known)
                         } else {
                             crate::render::layout::legend_sizes_mm(s.map_mut(), render_scale, false, false, &[])
-                        }
-                    };
+                        };
                     let cells = (384.0 * wide.0.max(wide.1) / fw.max(fh)).round() as u32;
                     // What is context is judged on the frame asked for, not the wide drawing, so
                     // every move's cut leaves out the same layers.
@@ -2032,7 +2036,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             }
             if let Some(at_scale) = unknown_at {
                 warnings.push(format!(
-                    "the map isn't tried at 1:{at_scale:.0} for the legend's room: a layer there is still reading, or a legend picture still loading"
+                    "the map isn't moved or veiled at 1:{at_scale:.0} for the legend's room: a layer there is still reading, or a legend picture still loading"
                 ));
             }
             // A move changes what the frame shows past the extent, so it is said, as the veil and
@@ -2219,7 +2223,15 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 None => spots.push((kind, place)),
             }
         }
-        moved.clear();
+        // "moved" names each surround off its corner, the group's places judged as any other.
+        moved = spots
+            .iter()
+            .filter(|(kind, r)| {
+                let home = at(homes[home_slot(*kind)], r.2, r.3);
+                (home.0 - r.0).abs() > 0.5 || (home.1 - r.1).abs() > 0.5
+            })
+            .map(|(kind, _)| named(*kind))
+            .collect();
         arrangement_used = "veil";
     }
     if let Some(ElementKind::MapFrame { center: at, scale: drawn_at, .. }) = l.element_mut(frame).map(|e| &mut e.kind) {
