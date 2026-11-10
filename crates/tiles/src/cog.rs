@@ -1433,8 +1433,8 @@ pub fn info_blocking(url: &str) -> Result<Arc<Info>, String> {
     info_until(url, &std::sync::atomic::AtomicBool::new(false))
 }
 
-/// [`info_blocking`], giving up within [`STOP_STEP`] of `stop` being set (a download's Cancel),
-/// with [`STOPPED`].
+/// [`info_blocking`], giving up within 100 ms of `stop` being set (a download's Cancel), with
+/// [`STOPPED`].
 #[cfg(not(target_arch = "wasm32"))]
 pub fn info_until(url: &str, stop: &std::sync::atomic::AtomicBool) -> Result<Arc<Info>, String> {
     let url = split(url).0;
@@ -1499,8 +1499,8 @@ pub fn read_values_blocking(
 
 /// [`read_values_blocking`], with how many of the window's values `f32` rounded (32- and 64-bit
 /// whole numbers and 64-bit floats it doesn't hold exactly; no-data isn't counted), and how many
-/// it can't hold at all (past its range: left out, NaN). It gives up within [`STOP_STEP`] of
-/// `stop` being set (a download's Cancel), with [`STOPPED`]; the tiles already asked for are
+/// it can't hold at all (past its range: left out, NaN). It gives up within 100 ms of `stop`
+/// being set (a download's Cancel), with [`STOPPED`]; the tiles already asked for are
 /// still fetched, for the cache.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_values_counted_blocking(

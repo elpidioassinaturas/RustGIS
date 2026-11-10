@@ -70,6 +70,52 @@ fn check_current() -> Result<(), String> {
     check_still(&current_still())
 }
 
+/// How far a whole download has come, for whoever started it (the app's status bar): the bytes
+/// read so far, and the total once the server said it (`Content-Length`; 0 while unknown). A file
+/// of several parts (a Shapefile's) adds each part's total as it starts. The bytes are those
+/// decoded, so a compressed answer may pass its total. Counted natively only.
+#[derive(Debug, Default)]
+pub struct Progress {
+    /// Bytes read.
+    pub done: AtomicU64,
+    /// Bytes expected, or 0 while unknown.
+    pub total: AtomicU64,
+}
+
+impl Progress {
+    /// The bytes read so far.
+    pub fn received(&self) -> u64 {
+        self.done.load(Ordering::Relaxed)
+    }
+
+    /// The part read, 0 to 1, once the total is known.
+    pub fn fraction(&self) -> Option<f32> {
+        let total = self.total.load(Ordering::Relaxed);
+        (total > 0).then(|| (self.received() as f64 / total as f64).min(1.0) as f32)
+    }
+}
+
+thread_local! { static PROGRESS: std::cell::RefCell<Option<Arc<Progress>>> = const { std::cell::RefCell::new(None) }; }
+
+/// Runs `f` with downloads it starts counting into `progress` (taken along to their threads, as
+/// the request's [`Still`] is).
+pub fn with_progress<T>(progress: Option<Arc<Progress>>, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Arc<Progress>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PROGRESS.with(|p| *p.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(PROGRESS.with(|p| p.replace(progress)));
+    f()
+}
+
+/// What downloads started here count into ([`with_progress`]).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn current_progress() -> Option<Arc<Progress>> {
+    PROGRESS.with(|p| p.borrow().clone())
+}
+
 /// Only a live request's failure describes the shared resource. A dropped or retired read
 /// must let the next caller retry immediately under its own authority, without classifying cancellation by error text.
 pub(crate) fn keep_failure(message: &str, still: &Option<Still>) -> bool {
@@ -2546,12 +2592,16 @@ mod native {
     pub(super) fn download_within(url: String, timeout: std::time::Duration, omit: &'static [u16], done: DoneDetailed) {
         let capture = Capture::current();
         let still = super::current_still();
+        let progress = super::current_progress();
         std::thread::spawn(move || {
             super::with_optional_still(still, || {
-                let _scope = capture.enter();
-                let r =
-                    super::check_current().map_err(Failure::from).and_then(|_| get_detailed_omitting(&download_agent(timeout), &url, omit));
-                done(r);
+                super::with_progress(progress, || {
+                    let _scope = capture.enter();
+                    let r = super::check_current()
+                        .map_err(Failure::from)
+                        .and_then(|_| get_detailed_omitting(&download_agent(timeout), &url, omit));
+                    done(r);
+                })
             })
         });
     }
@@ -2560,12 +2610,16 @@ mod native {
     pub(super) fn download_public_within(url: String, timeout: std::time::Duration, done: DoneDetailed) {
         let capture = Capture::current();
         let still = super::current_still();
+        let progress = super::current_progress();
         std::thread::spawn(move || {
             super::with_optional_still(still, || {
-                let _scope = capture.enter();
-                let r =
-                    super::check_current().map_err(Failure::from).and_then(|_| get_detailed_omitting(&public_agent(timeout), &url, &[]));
-                done(r);
+                super::with_progress(progress, || {
+                    let _scope = capture.enter();
+                    let r = super::check_current()
+                        .map_err(Failure::from)
+                        .and_then(|_| get_detailed_omitting(&public_agent(timeout), &url, &[]));
+                    done(r);
+                })
             })
         });
     }
@@ -2613,6 +2667,42 @@ mod native {
     /// and every resolved connection is checked too.
     pub(super) fn get(agent: &ureq::Agent, url: &str, omit: &'static [u16]) -> Result<Vec<u8>, String> {
         fetch_answer(agent, url, Reach::Local, false, omit).map(|f| f.bytes).map_err(|f| f.message)
+    }
+
+    /// What a body read given up by [`Wanted`] says.
+    pub(crate) const CANCELLED_READ: &str = "cancelled while it was read";
+
+    /// A body's read that gives up, at the next bytes that come, once its request is no longer
+    /// wanted ([`super::current_still`]: a download's Cancel, or its owner gone), and counts what
+    /// it reads into the download's [`super::Progress`], if it has one. A server that sends
+    /// nothing more holds it until the agent's timeout, as before.
+    struct Wanted<R>(R, Option<std::sync::Arc<super::Progress>>);
+
+    impl<R: std::io::Read> Wanted<R> {
+        /// `body`, read for the request on this thread; `total` is what its answer says it holds.
+        fn new(body: R, total: Option<u64>) -> Self {
+            let progress = super::current_progress();
+            if let (Some(p), Some(n)) = (&progress, total) {
+                p.total.store(p.received().saturating_add(n), std::sync::atomic::Ordering::Relaxed);
+            }
+            Self(body, progress)
+        }
+    }
+
+    impl<R: std::io::Read> std::io::Read for Wanted<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            super::check_current().map_err(|_| std::io::Error::other(CANCELLED_READ))?;
+            let n = self.0.read(buf)?;
+            if let Some(p) = &self.1 {
+                p.done.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(n)
+        }
+    }
+
+    /// What an answer says its body holds (`Content-Length`).
+    fn body_length(resp: &ureq::http::Response<ureq::Body>) -> Option<u64> {
+        resp.headers().get("content-length")?.to_str().ok()?.trim().parse().ok()
     }
 
     /// The User-Agent every request goes with.
@@ -2877,10 +2967,7 @@ mod native {
                 // Read one byte past `n` (no more, and no error at the limit): a longer file is
                 // reported as a server without ranges, so the file is downloaded whole instead.
                 let limit = n.min(max as u64).saturating_add(1);
-                resp.body_mut()
-                    .with_config()
-                    .limit(limit.saturating_add(1))
-                    .reader()
+                Wanted::new(resp.body_mut().with_config().limit(limit.saturating_add(1)).reader(), None)
                     .take(limit)
                     .read_to_end(&mut buf)
                     .map_err(|e| e.to_string())?;
@@ -2893,10 +2980,8 @@ mod native {
                 return Ok(Fetched { bytes: buf, origin });
             }
             // ureq limits the wire bytes; `take` also caps the decoded bytes when gzip expands them.
-            resp.body_mut()
-                .with_config()
-                .limit(max as u64 + 2)
-                .reader()
+            let total = body_length(&resp);
+            Wanted::new(resp.body_mut().with_config().limit(max as u64 + 2).reader(), total)
                 .take(max as u64 + 1)
                 .read_to_end(&mut buf)
                 .map_err(|e| e.to_string())?;
@@ -4071,6 +4156,54 @@ mod tests {
             }
         }
         String::from_utf8_lossy(&request).into_owned()
+    }
+
+    /// A slow download counts its bytes as they come, against the total its answer says, and one
+    /// no longer wanted (`with_still`: a download's Cancel) stops at the next bytes that come,
+    /// rather than reading the rest of its body.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_slow_download_counts_its_progress_and_stops_once_no_longer_wanted() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let _turn = crate::cache::turn();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else { return };
+            let _ = read_request(&mut stream);
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n");
+            // A kilobyte every 20 ms: 20 s for the whole body.
+            for _ in 0..1000 {
+                if stream.write_all(&[0u8; 1000]).is_err() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+        let wanted = std::sync::Arc::new(AtomicBool::new(true));
+        let still_wanted = wanted.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let progress = std::sync::Arc::new(super::Progress::default());
+        super::with_still(std::sync::Arc::new(move || still_wanted.load(Ordering::Relaxed)), || {
+            super::with_progress(Some(progress.clone()), || {
+                super::download_limited(&format!("http://{addr}/big.bin"), 2_000_000, Box::new(move |r| tx.send(r).unwrap_or_default()))
+            })
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while progress.received() < 5_000 {
+            assert!(std::time::Instant::now() < deadline, "nothing counted: {progress:?}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(progress.total.load(Ordering::Relaxed), 1_000_000);
+        let first = progress.received();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let then = progress.received();
+        assert!(then > first && then < 1_000_000, "{first} then {then}");
+        assert!(progress.fraction().is_some_and(|f| f > 0.0 && f < 1.0), "{progress:?}");
+        wanted.store(false, Ordering::Relaxed);
+        let r = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the download kept reading its body");
+        assert!(r.as_ref().is_err_and(|e| e.contains(super::native::CANCELLED_READ)), "{r:?}");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
