@@ -970,7 +970,8 @@ fn landscape_suits(aspect: f64, short: f64, long: f64, style: Style) -> bool {
 /// map's features: placing the surrounds draws the frame once on a grid of 384 cells, and when no
 /// shape of the legend fits, the search draws it at most four times more, once per scale it tries,
 /// each time on a view wider than the frame that a streamed layer is read for, waited for here,
-/// and where the projection stretches, up to four moved frames per scale on their own
+/// and where the projection stretches, up to four moved frames per scale on their own (in Web
+/// Mercator, the two moved up and down)
 /// (#1379; the whole command took about 0.7 s on a 14 MB geology map, 0.2 s before the search, and
 /// 0.9 s with its layers read in place).
 fn publication(s: &mut Session, p: &Value) -> CmdResult {
@@ -1943,6 +1944,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             let mut drawn: Option<(f64, Option<(u32, u32, Vec<bool>)>, Option<[(f64, f64); MAX_LEGEND_COLUMNS]>)> = None;
             let mut chosen = known;
             let mut unknown_at: Option<f64> = None;
+            // Moved frames drawn on their own (below), by scale and move: a pass with the veil
+            // tries the same moves as the one before it.
+            let mut own_drawn: Vec<((f64, f64, f64), (u32, u32, Vec<bool>))> = Vec::new();
             // A figure keeps its scale: its size is fixed, and a smaller scale costs it the most.
             for (factor, veil) in passes.into_iter().filter(|(factor, veil)| (!*veil || continuous) && (*factor == 1.0 || sheet)) {
                 let tried = if factor == 1.0 { asked_scale } else { round_scale(asked_scale * factor) };
@@ -2007,8 +2011,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     // little): the extent is placed on the page at the moved centre's scale, and a
                     // move that leaves it out of its margins there isn't made. The frame moved east
                     // by `dx` and south by `dy` is the wide one's part that far west and north of
-                    // its middle while that scale moves a corner of it half a millimetre at most;
-                    // past that, it is drawn on its own (what is context then judged on itself).
+                    // its middle while that scale moves a corner of it one cell of the coverage grid
+                    // at most, which the cut is exact to anyway; past that, it is drawn on its own
+                    // (what is context then judged on itself), once.
                     let here_mm = mm * flat.ground_per_unit(Coord::new(cx, cy)) / flat.ground_per_unit(asked.center());
                     let clip = (
                         fx + fw / 2.0 + (asked.min_x - cx) * here_mm,
@@ -2024,10 +2029,13 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                         continue;
                     }
                     let drift = (1.0 - flat.ground_per_unit(Coord::new(cx, cy)) / flat.ground_per_unit(at)).abs() * fw.hypot(fh) / 2.0;
-                    let mut moved = if drift <= 0.5 {
+                    let mut moved = if drift <= fw.max(fh) / 384.0 {
                         crop_cells(whole_frame, wide, (slack_x - dx, slack_y - dy), (fw, fh))
+                    } else if let Some((_, own)) = own_drawn.iter().find(|(key, _)| *key == (tried, dx, dy)) {
+                        own.clone()
                     } else {
                         let Some(own) = crate::render::layout::frame_coverage(s.map_mut(), there, tried, fw, fh, 384) else { continue };
+                        own_drawn.push(((tried, dx, dy), own.clone()));
                         own
                     };
                     if veil {
