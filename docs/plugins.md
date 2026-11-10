@@ -497,12 +497,13 @@ site to report on, an area to download.
   `[west, south, east, north]` in degrees (a west east of its east crosses the antimeridian),
   and `extent`, `[xmin, ymin, xmax, ymax]`, the box around it in the map's coordinates, with
   `crs`. A place on another body's map, or one the projection can't show, has only its
-  degrees.
+  degrees, with a warning.
 - The pane shows the place picked last under the pick, and the map marks it (a box's outline)
   while the panel is open.
 - A plugin can clear a pick, `"values": {"seed": null}`, but not pick a place itself: a place
   in its answer is refused with a warning. A script gives the degrees, and RustGIS works out the
-  rest from the active map. A place it can't read (degrees out of range, a `bbox` that isn't four
+  rest from the active map: `x`, `y`, `extent` or `crs` given other than the map's are replaced,
+  with a warning. A place it can't read (degrees out of range, a `bbox` that isn't four
   numbers, south above north) is not taken, and a field it doesn't know is left out, each with a
   warning:
 

@@ -52,11 +52,11 @@ fn panel(s: &mut Session, p: &Value) -> CmdResult {
     let decl = plugin.manifest.panel.clone().ok_or_else(|| format!("{} has no panel", plugin.manifest.name))?;
     let before = s.panel_state(id, &decl).clone();
     if let Some(values) = p.get("values") {
-        let values = placed(s, &decl, values);
+        let (values, moved) = placed(s, &decl, values);
         let state = s.panel_state(id, &decl);
         let set = state.set_values(&decl, &values);
         let dropped = state.value_report(&decl, &values, &set);
-        if let Some(text) = dropped.notice() {
+        for text in [dropped.notice(), moved].into_iter().flatten() {
             s.warn(format!("{}: {text}", plugin.manifest.name));
         }
     }
@@ -75,13 +75,16 @@ fn panel(s: &mut Session, p: &Value) -> CmdResult {
 /// coordinates, worked out here whatever was given for them: `x` and `y` for a point, `extent`
 /// (`[xmin, ymin, xmax, ymax]`, the box around it) for a box, and `crs`, the map's coordinate
 /// system (`EPSG:3857` for Web Mercator and the globe). A place the projection can't show, or one
-/// on another body's map, keeps only its degrees.
-fn placed(s: &Session, decl: &rustgis_plugins::PanelDecl, given: &Value) -> Value {
+/// on another body's map, keeps only its degrees. Both are said, in the notice beside the values
+/// (`None` when there is nothing to say), as are map coordinates given other than the map's,
+/// which the map's replace. A place the panel can't read is left to its own report.
+fn placed(s: &Session, decl: &rustgis_plugins::PanelDecl, given: &Value) -> (Value, Option<String>) {
     use rustgis_map::projection::Flat;
-    let Some(given) = given.as_object() else { return given.clone() };
+    let Some(given) = given.as_object() else { return (given.clone(), None) };
     if !decl.items.iter().any(|d| d.kind == "pick" && given.contains_key(d.key())) {
-        return Value::Object(given.clone());
+        return (Value::Object(given.clone()), None);
     }
+    let (mut replaced, mut unplaced) = (Vec::new(), Vec::new());
     let mut out = given.clone();
     let map = s.map();
     let flat = Flat::of(&map.projection);
@@ -95,22 +98,20 @@ fn placed(s: &Session, decl: &rustgis_plugins::PanelDecl, given: &Value) -> Valu
     };
     for d in decl.items.iter().filter(|d| d.kind == "pick") {
         let Some(v) = out.get_mut(d.key()).and_then(Value::as_object_mut) else { continue };
-        for k in ["x", "y", "extent", "crs"] {
-            v.remove(k);
-        }
-        if !map.body().is_earth() {
-            continue;
-        }
+        let was: Vec<(&str, Value)> = ["x", "y", "extent", "crs"].into_iter().filter_map(|k| Some((k, v.remove(k)?))).collect();
         let num = |v: Option<&Value>| v.and_then(Value::as_f64).filter(|x| x.is_finite());
         let mut add = Vec::new();
-        if d.picks_box() {
+        if !map.body().is_earth() {
+            // Another body's map: no coordinates of Earth's to give.
+        } else if d.picks_box() {
             let b: Option<Vec<f64>> = v.get("bbox").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| num(Some(x))).collect());
-            let Some(&[west, south, east, north]) = b.as_deref() else { continue };
-            // A box across the antimeridian is measured through it.
-            let east = if east < west { east + 360.0 } else { east };
-            let e = flat.extent(&crate::geom::Extent::new(west, south, east, north));
-            if !e.is_empty() && [e.min_x, e.min_y, e.max_x, e.max_y].iter().all(|x| x.is_finite()) {
-                add.push(("extent", json!([e.min_x, e.min_y, e.max_x, e.max_y])));
+            if let Some(&[west, south, east, north]) = b.as_deref() {
+                // A box across the antimeridian is measured through it.
+                let east = if east < west { east + 360.0 } else { east };
+                let e = flat.extent(&crate::geom::Extent::new(west, south, east, north));
+                if !e.is_empty() && [e.min_x, e.min_y, e.max_x, e.max_y].iter().all(|x| x.is_finite()) {
+                    add.push(("extent", json!([e.min_x, e.min_y, e.max_x, e.max_y])));
+                }
             }
         } else if let (Some(lon), Some(lat)) = (num(v.get("lon")), num(v.get("lat")))
             && let Some(m) = flat.forward_checked(crate::geom::Coord::new(lon, lat)).filter(|m| m.is_finite())
@@ -121,11 +122,45 @@ fn placed(s: &Session, decl: &rustgis_plugins::PanelDecl, given: &Value) -> Valu
         if !add.is_empty() {
             add.push(("crs", json!(crs)));
         }
+        if rustgis_plugins::panel::pick_value(d, &Value::Object(v.clone())).is_some_and(|p| !p.is_null()) {
+            if add.is_empty() {
+                unplaced.push(d.key().to_string());
+            }
+            let kept = |k: &str, a: &Value| add.iter().any(|(n, b)| *n == k && same_value(a, b));
+            if was.iter().any(|(k, a)| !kept(k, a)) {
+                replaced.push(d.key().to_string());
+            }
+        }
         for (k, value) in add {
             v.insert(k.to_string(), value);
         }
     }
-    Value::Object(out)
+    let mut said = Vec::new();
+    if !replaced.is_empty() {
+        let n = replaced.len();
+        said.push(format!(
+            "{n} pick(s) given map coordinates (x, y, extent or crs) other than the active map's, replaced by the map's: {}",
+            replaced.join(", ")
+        ));
+    }
+    if !unplaced.is_empty() {
+        let why = if map.body().is_earth() { "the map's projection can't show them" } else { "the map is of another body" };
+        let n = unplaced.len();
+        said.push(format!("{n} pick(s) kept in degrees only, with no map coordinates ({why}): {}", unplaced.join(", ")));
+    }
+    (Value::Object(out), (!said.is_empty()).then(|| said.join("; ")))
+}
+
+/// Whether a given map coordinate is the map's: numbers to a billionth (of themselves, or of 1
+/// near 0), arrays item by item, anything else as it is.
+fn same_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(_), Value::Number(_)) => {
+            a.as_f64().zip(b.as_f64()).is_some_and(|(a, b)| (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0))
+        }
+        (Value::Array(a), Value::Array(b)) => a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_value(a, b)),
+        _ => a == b,
+    }
 }
 
 /// Makes a Python plugin's environment (it can take minutes: downloads).
@@ -625,6 +660,7 @@ impl Session {
         let mut params = params;
         let mut stripped;
         let mut refused = rustgis_plugins::Dropped::default();
+        let mut moved = None;
         let (before, request) = match &panel {
             Some(decl) => {
                 // A pick's place in the map's coordinates too, from the map it was picked on.
@@ -632,7 +668,8 @@ impl Session {
                 let state = self.panel_state(&pid, decl);
                 let before = state.clone();
                 let mut changed = Vec::new();
-                if let Some(given) = &given {
+                if let Some((given, said)) = &given {
+                    moved.clone_from(said);
                     changed = state.set_values(decl, given);
                     refused = state.value_report(decl, given, &changed);
                     stripped = params.clone();
@@ -709,7 +746,7 @@ impl Session {
         if pending.is_empty() && requested.is_empty() {
             // Suspended attempts restore their input state and run again. Publish its losses
             // only when this attempt is terminal, so a download retry cannot repeat them.
-            if let Some(text) = refused.notice() {
+            for text in [refused.notice(), moved].into_iter().flatten() {
                 self.warn(format!("{name}: {text}"));
             }
             return res;

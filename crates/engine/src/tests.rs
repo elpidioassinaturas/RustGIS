@@ -10304,14 +10304,24 @@ fn plugin_panel_picks_reach_the_plugin_in_the_maps_coordinates() {
     let pkg = rustgis_plugins::Package::from_zip(&rustgis_plugins::testing::pick_package("eng-pick")).unwrap();
     rustgis_plugins::load(pkg, "test").unwrap();
     let near = |v: &Value, x: f64, tol: f64| v.as_f64().is_some_and(|v| (v - x).abs() < tol);
-    // Web Mercator: the map's own clicks give only degrees; given map coordinates are replaced.
+    // Web Mercator: the map's own clicks give only degrees; given map coordinates are replaced,
+    // and said.
+    let mark = s.notice_mark();
     let got = s.run("plugin:eng-pick/q-grow", &json!({"panel": {"seed": {"lon": -42.8, "lat": -5.09, "x": 1, "crs": "mine"}}})).unwrap();
+    let said = |s: &Session, mark: u64, what: &str| s.notices_since(mark).iter().any(|n| n.text.contains(what) && n.text.contains("seed"));
+    assert!(said(&s, mark, "replaced by the map's"), "{:?}", s.notices_since(mark));
     let seed = &got["panel"]["values"]["seed"];
     assert_eq!(got["panel"]["changed"], json!(["seed"]), "{got}");
     assert_eq!((seed["lon"].as_f64(), seed["lat"].as_f64(), seed["crs"].as_str()), (Some(-42.8), Some(-5.09), Some("EPSG:3857")), "{seed}");
     let m = crate::geom::lonlat_to_merc(crate::geom::Coord::new(-42.8, -5.09));
     assert!(near(&seed["x"], m.x, 1e-6) && near(&seed["y"], m.y, 1e-6), "{seed}");
     assert_eq!(s.plugin_panels["eng-pick"].values["seed"], *seed, "the panel keeps it");
+    // The map's own coordinates given back, or degrees alone, are quiet.
+    let mark = s.notice_mark();
+    let again = json!({"panel": {"seed": seed.clone()}});
+    s.run("plugin:eng-pick/q-grow", &again).unwrap();
+    s.run("plugin:eng-pick/q-grow", &json!({"panel": {"seed": {"lon": -42.8, "lat": -5.09}}})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("pick(s)")), "{:?}", s.notices_since(mark));
     // A box: its degrees, and the box around it in the map's coordinates.
     let got = s.run("plugin:eng-pick/q", &json!({"panel": {"area": {"bbox": [-44, -6, -42, -4]}}})).unwrap();
     let area = &got["panel"]["values"]["area"];
@@ -10348,6 +10358,15 @@ fn plugin_panel_picks_reach_the_plugin_in_the_maps_coordinates() {
     let mark = s.notice_mark();
     let _ = s.run("plugin.panel", &json!({"id": "eng-pick", "values": {"spot": {"lon": 10, "lat": 999}}}));
     assert!(s.notices_since(mark).iter().any(|n| n.text.contains("not taken") && n.text.contains("spot")), "plugin.panel says it too");
+    let mark = s.notice_mark();
+    s.run("plugin.panel", &json!({"id": "eng-pick", "values": {"spot": {"lon": 10, "lat": 20, "crs": "mine"}}})).unwrap();
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("replaced by the map's") && n.text.contains("spot")), "and the replacing");
+    // Another body's map: the place keeps only its degrees, and that is said.
+    s.run("map.body", &json!({"name": "mars", "basemap": false})).unwrap();
+    let mark = s.notice_mark();
+    let got = s.run("plugin:eng-pick/q-grow", &json!({"panel": {"seed": {"lon": 10, "lat": 20}}})).unwrap();
+    assert!(got["panel"]["values"]["seed"].get("x").is_none(), "{got}");
+    assert!(said(&s, mark, "degrees only"), "{:?}", s.notices_since(mark));
     rustgis_plugins::unload("eng-pick");
 }
 
