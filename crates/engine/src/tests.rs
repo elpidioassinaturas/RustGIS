@@ -16943,9 +16943,35 @@ fn an_entry_without_a_range_takes_one_from_its_files() {
     assert!(r.get("range").is_none() && r.get("rangeFrom").is_none(), "{r}");
     assert!(u.notices_since(mark).iter().any(|n| n.text.contains("classes drawn in their own colours")), "{:?}", u.notices_since(mark));
     // A collection whose licence can't be read: the cube is still added and credited, and a
-    // notice says the licence wasn't read, pointing to JAXA's terms.
-    let features = [item("a1", "2024-01-01")].join(",");
-    let base = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{features}]}}"#))], 8);
+    // notice says the licence wasn't read, pointing to JAXA's terms. Opened again, the licence is
+    // asked for again (this server answers its second request for it).
+    let search = format!(r#"{{"type": "FeatureCollection", "features": [{}]}}"#, [item("a1", "2024-01-01")].join(","));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let licence = licence.to_string();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let mut asked = 0;
+        for stream in listener.incoming().take(16) {
+            let Ok(mut c) = stream else { continue };
+            let mut buf = [0u8; 4096];
+            let read = c.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..read]);
+            let path = req.split_whitespace().nth(1).unwrap_or("/");
+            let body = if path.starts_with("/v1/search") {
+                Some(search.clone())
+            } else if path == "/v1" {
+                asked += 1;
+                (asked > 1).then(|| licence.clone())
+            } else {
+                None
+            };
+            let _ = match body {
+                Some(b) => write!(c, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len()),
+                None => write!(c, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+            };
+        }
+    });
     entry.url = format!("{base}/v1");
     let mut w = Session::new(Project::default());
     let mark = w.notices_given();
@@ -16953,6 +16979,11 @@ fn an_entry_without_a_range_takes_one_from_its_files() {
     assert!(r.get("license").is_none() && w.map().tiles[0].attribution == "JAXA, A test dataset", "{r}");
     let said = w.notices_since(mark);
     assert!(said.iter().any(|n| n.text.contains("its collection's licence wasn't read")), "{said:?}");
+    let mark = w.notices_given();
+    let r = crate::cmd::cube_catalog::open_entry(&mut w, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
+    assert_eq!(r["license"]["url"], "https://earth.jaxa.jp/en/data/policy/", "{r}");
+    let said = w.notices_since(mark);
+    assert!(!said.iter().any(|n| n.text.contains("licence wasn't read")), "{said:?}");
 }
 
 /// The data cube catalog (#683): its entries listed by theme, area and words; one opened as typing

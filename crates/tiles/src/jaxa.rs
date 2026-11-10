@@ -57,7 +57,8 @@ pub struct LeftOut {
 pub struct Catalog {
     /// A cube for each band of each dataset that can be one.
     pub entries: Vec<Entry>,
-    /// The datasets that can't, each once.
+    /// The datasets that can't, each once, and each listing of a dataset listed again (so these
+    /// and the cubes' datasets add up to [`Catalog::datasets`]).
     pub left_out: Vec<LeftOut>,
     /// How many datasets the catalog lists.
     pub datasets: usize,
@@ -188,11 +189,14 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
         return Err("JAXA Earth's catalog has no dataset list".into());
     }
     let mut c = Catalog { datasets: datasets.len(), cut, ..Catalog::default() };
+    let mut seen = std::collections::HashSet::new();
     for (heading, f) in &datasets {
         let id = f.get("id").map(String::as_str).unwrap_or("");
         let title = f.get("title").map(String::as_str).filter(|t| !t.is_empty()).unwrap_or(heading.as_str());
-        // Listed twice, it is one dataset.
-        if !id.is_empty() && (c.entries.iter().any(|e| e.source_dataset() == Some(id)) || c.left_out.iter().any(|l| l.id == id)) {
+        // Listed twice, it is one dataset: the listing again is left out, and says so.
+        if !id.is_empty() && !seen.insert(id) {
+            let why = "listed again further up the catalog; read from its first listing".to_string();
+            c.left_out.push(LeftOut { id: clip(id, 120), title: clip(title, 200), why });
             continue;
         }
         match cubes_of(id, title, f, &mut c.cut) {
@@ -209,6 +213,7 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
     Ok(c)
 }
 
+#[cfg(test)]
 impl Entry {
     /// The JAXA Earth dataset it reads, if it is one of the catalog's.
     fn source_dataset(&self) -> Option<&str> {
@@ -585,7 +590,9 @@ mod tests {
         assert!(parse(&" ".repeat(MAX_BYTES + 1)).unwrap_err().contains("larger"));
         // Listed twice: one dataset.
         let twice = parse(&format!("# Dataset List\n## A\n{good}\n## B\n{good}\n")).unwrap();
-        assert_eq!((twice.datasets, twice.entries.len()), (2, 1));
+        assert_eq!((twice.datasets, twice.entries.len(), twice.left_out.len()), (2, 1, 1));
+        assert!(twice.left_out[0].id == "JAXA.Test_daily" && twice.left_out[0].why.contains("listed again"), "{:?}", twice.left_out);
+        assert!(c.left_out.is_empty(), "{:?}", c.left_out);
         assert!(c.cut.is_empty() && twice.cut.is_empty());
         // Text too long is cut, said where and by how much, and its name ends in "…"; its keywords
         // are all searched still.

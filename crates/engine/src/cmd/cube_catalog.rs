@@ -66,6 +66,11 @@ fn jaxa_status() -> Value {
     }
 }
 
+/// `cube.open`. It runs on the UI thread, as `stac.addCube` (which it calls) does: their STAC search
+/// and first reads of the files aren't on a background path yet, and this one moves with them. What
+/// it adds there is bounded: a JAXA collection's licence, at most 1 MB under the blocking reads'
+/// timeout, read once a run after a read succeeds; and a range's sample, the newest file of up to
+/// four tiles, read at an overview.
 fn open(s: &mut Session, p: &Value) -> CmdResult {
     let id = ps(p, "id").map(str::trim).filter(|i| !i.is_empty()).ok_or("id is required (an entry of cube.catalog)")?;
     open_entry(s, &cubes::find(id)?, p)
@@ -130,6 +135,9 @@ pub(crate) fn open_entry(s: &mut Session, e: &Entry, p: &Value) -> CmdResult {
 /// Copernicus's for some), or says why it wasn't read.
 fn credit(s: &mut Session, e: &Entry, r: &mut Value) {
     r["credit"] = json!(e.credit);
+    // The browser reads the licence in the pane instead.
+    #[cfg(target_arch = "wasm32")]
+    let _ = s;
     #[cfg(not(target_arch = "wasm32"))]
     match jaxa::licence_blocking(&e.url) {
         Ok(l) => r["license"] = json!({"url": l.url, "title": l.title}),
