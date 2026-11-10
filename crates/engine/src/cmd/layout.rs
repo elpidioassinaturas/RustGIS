@@ -674,6 +674,23 @@ pub(crate) fn largest_free_cells(gw: usize, cells: &[bool], (c0, r0, c1, r1): (u
     best
 }
 
+/// The part of a coverage grid of a page `wide` (mm) that a frame `size` (mm) with its top left at
+/// `at` (mm, from the wide page's top left) covers, to the nearest cell, as a grid of its own; a
+/// frame reaching past the wide page is held inside it.
+pub(crate) fn crop_cells(
+    (gw, gh, cells): &(u32, u32, Vec<bool>),
+    wide: (f64, f64),
+    at: (f64, f64),
+    size: (f64, f64),
+) -> (u32, u32, Vec<bool>) {
+    let (gw, gh) = ((*gw as usize).max(1), (*gh as usize).max(1));
+    let (cell_w, cell_h) = (wide.0 / gw as f64, wide.1 / gh as f64);
+    let (w, h) = (((size.0 / cell_w).round() as usize).clamp(1, gw), ((size.1 / cell_h).round() as usize).clamp(1, gh));
+    let (c0, r0) = (((at.0 / cell_w).round().max(0.0) as usize).min(gw - w), ((at.1 / cell_h).round().max(0.0) as usize).min(gh - h));
+    let out = (r0..r0 + h).flat_map(|r| (c0..c0 + w).map(move |c| cells.get(r * gw + c).copied().unwrap_or(false))).collect();
+    (w as u32, h as u32, out)
+}
+
 /// The surrounds of a veiled map grouped in a band of its veil: the locator with the north arrow at
 /// its right and the scale bar under them, beside the legend or over it, whichever the band's shape
 /// suits, centred in it. Gives the legend's, locator's, arrow's and scale bar's places; `None` when
@@ -1909,12 +1926,43 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             // `"veil": false` keeps the map unveiled, and so at its scale.
             let continuous = continuous && may_veil;
             let passes = [(1.0, false), (1.0, true), (1.25, true), (1.5, true), (2.0, true)];
+            // Each scale's frame is drawn once, wide enough for every move, and each move's frame
+            // cut from it: a move is a translation on the page. So the search draws the map once per
+            // scale it tries (at most four times), not once per place. Its legend is measured at
+            // that scale, once, and those sizes are the ones laid out.
+            let mut drawn: Option<(f64, Option<(u32, u32, Vec<bool>)>, Option<[(f64, f64); MAX_LEGEND_COLUMNS]>)> = None;
+            let mut chosen = known;
             // A figure keeps its scale: its size is fixed, and a smaller scale costs it the most.
             for (factor, veil) in passes.into_iter().filter(|(factor, veil)| (!*veil || continuous) && (*factor == 1.0 || sheet)) {
                 let tried = if factor == 1.0 { asked_scale } else { round_scale(asked_scale * factor) };
                 let mm = 1000.0 * flat.ground_per_unit(asked.center()) * s.map().body().ratio() / tried;
                 let slack_x = ((fw - left - right - asked.width() * mm) / 2.0).max(0.0);
                 let slack_y = ((fh - top - bottom - asked.height() * mm) / 2.0).max(0.0);
+                let wide = (fw + 2.0 * slack_x, fh + 2.0 * slack_y);
+                if drawn.as_ref().is_none_or(|d| d.0 != tried) {
+                    // A smaller scale can draw more classes, and a streamed layer has its features
+                    // read for the wider view.
+                    let here = if tried == asked_scale {
+                        Some(known)
+                    } else {
+                        let render_scale = crate::render::layout::frame_render_scale(s.map(), centred, tried);
+                        let view = crate::render::View {
+                            width: wide.0 * rustgis_map::layout::PT_PER_MM,
+                            height: wide.1 * rustgis_map::layout::PT_PER_MM,
+                            pixels_per_point: 1.0,
+                            camera: rustgis_map::layout::frame_camera(s.map(), centred, tried, 0.0, 0.0),
+                            sky: false,
+                        };
+                        let lonlat = crate::render::view_lonlat(s.map(), &view);
+                        s.map_mut().sync_sources(&lonlat, render_scale, true);
+                        crate::render::layout::legend_sizes_mm(s.map_mut(), render_scale, false, false, &[])
+                    };
+                    let cells = (384.0 * wide.0.max(wide.1) / fw.max(fh)).round() as u32;
+                    let whole_frame = crate::render::layout::frame_coverage(s.map_mut(), centred, tried, wide.0, wide.1, cells);
+                    drawn = Some((tried, whole_frame, here));
+                }
+                let Some((_, Some(whole_frame), Some(here))) = &drawn else { continue };
+                let need = |room: (f64, f64)| here.iter().position(|size| whole(*size).0 <= room.0 && whole(*size).1 <= room.1);
                 let mut found: Option<(usize, f64)> = None;
                 for (dx, dy) in [(0.0, 0.0), (slack_x, 0.0), (-slack_x, 0.0), (0.0, slack_y), (0.0, -slack_y)] {
                     // Centred with no veil at the asked scale is what has no room; a shift of nothing
@@ -1926,7 +1974,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     let (cx, cy) = (at.x - dx / mm, at.y + dy / mm);
                     let there = if still { Some(centred) } else { flat.inverse(Coord::new(cx, cy)) };
                     let Some(there) = there else { continue };
-                    let Some(mut moved) = crate::render::layout::frame_coverage(s.map_mut(), there, tried, fw, fh, 384) else { continue };
+                    // The frame moved east by `dx` and south by `dy` is the wide one's part that far
+                    // west and north of its middle.
+                    let mut moved = crop_cells(whole_frame, wide, (slack_x - dx, slack_y - dy), (fw, fh));
                     // The extent on the page: what is outside it is free once veiled.
                     let clip = (
                         fx + fw / 2.0 + (asked.min_x - cx) * mm,
@@ -1945,11 +1995,12 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     let room = free_room(&moved);
                     let Some(n) = need(room) else { continue };
                     // Under a veil the whole group has to fit, not the legend alone.
-                    let Some(n) = (if veil { grouped(clip, n, &known).map(|(i, _)| i) } else { Some(n) }) else { continue };
+                    let Some(n) = (if veil { grouped(clip, n, here).map(|(i, _)| i) } else { Some(n) }) else { continue };
                     if found.is_none_or(|(fewest, most)| n < fewest || (n == fewest && room.0 * room.1 > most)) {
                         found = Some((n, room.0 * room.1));
                         (center, scale, coverage, map_shift) = (there, tried, Some(moved), (dx, dy));
                         veiled = veil.then_some(clip);
+                        chosen = *here;
                     }
                 }
                 if found.is_some() {
@@ -1958,24 +2009,11 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             }
             if scale != asked_scale {
                 warnings.push(format!("the map is drawn at 1:{scale:.0}, not 1:{asked_scale:.0}, to leave the legend room"));
-                // A wider view can draw more classes, and a streamed layer has its features read.
-                let render_scale = crate::render::layout::frame_render_scale(s.map(), center, scale);
-                let view = crate::render::View {
-                    width: fw * rustgis_map::layout::PT_PER_MM,
-                    height: fh * rustgis_map::layout::PT_PER_MM,
-                    pixels_per_point: 1.0,
-                    camera: rustgis_map::layout::frame_camera(s.map(), center, scale, 0.0, 0.0),
-                    sky: false,
-                };
-                let lonlat = crate::render::view_lonlat(s.map(), &view);
-                s.map_mut().sync_sources(&lonlat, render_scale, true);
-                sizes = crate::render::layout::legend_sizes_mm(s.map_mut(), render_scale, false, false, &[]);
-                if let Some(wider) = sizes {
-                    (cw, ch) = wider[0];
-                    let (w, h) = whole(wider[0]);
-                    if let Some(entry) = surrounds.iter_mut().find(|x| x.0 == Surround::Legend) {
-                        (entry.1, entry.2) = (w.min(fw * 0.45), h.min(fh * 0.6));
-                    }
+                sizes = Some(chosen);
+                (cw, ch) = chosen[0];
+                let (w, h) = whole(chosen[0]);
+                if let Some(entry) = surrounds.iter_mut().find(|x| x.0 == Surround::Legend) {
+                    (entry.1, entry.2) = (w.min(fw * 0.45), h.min(fh * 0.6));
                 }
             }
         }
@@ -2119,22 +2157,28 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         }
         (cw, ch) = sizes[legend_cols - 1];
     }
-    let (homes, (legend_at, mut spots, mut moved, _)) = best;
+    let (homes, (_, mut spots, mut moved, _)) = best;
     // A veiled map has its surrounds grouped in the widest band of the veil that takes them, in the
-    // fewest columns that do, rather than each in a corner of its own.
+    // fewest columns that do, rather than each in a corner of its own. The search found that group
+    // with these very sizes, so it is found again; the legend goes there too when the corners left
+    // it no room.
     let mut arrangement_used = arrangement_name(homes);
     if let (Some(clip), Some(known)) = (veiled, sizes)
-        && let Some((i, (legend_place, locator_place, arrow_place, scale_place))) = grouped(clip, legend_cols - 1, &known)
+        && let Some((i, (legend_place, locator_place, arrow_place, scale_place))) = grouped(clip, 0, &known)
     {
         legend_cols = i + 1;
         (cw, ch) = known[i];
-        for (kind, r) in spots.iter_mut() {
-            *r = match kind {
-                Surround::Legend => legend_place,
-                Surround::Locator => locator_place.unwrap_or(*r),
-                Surround::Arrow => arrow_place,
-                Surround::Scale => scale_place,
-            };
+        for (kind, place) in [
+            (Surround::Legend, Some(legend_place)),
+            (Surround::Locator, locator_place),
+            (Surround::Arrow, Some(arrow_place)),
+            (Surround::Scale, Some(scale_place)),
+        ] {
+            let Some(place) = place.filter(|_| surrounds.iter().any(|x| x.0 == kind)) else { continue };
+            match spots.iter_mut().find(|(k, _)| *k == kind) {
+                Some(spot) => spot.1 = place,
+                None => spots.push((kind, place)),
+            }
         }
         moved.clear();
         arrangement_used = "veil";
@@ -2164,7 +2208,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         }
         l.add("Extent Outline", (x0, y0, x1 - x0, y1 - y0), pub_card(Rgba::new(0, 0, 0, 0), Rgba::rgb(0x2B, 0x26, 0x20), 0.8, 0.0));
     }
-    if surrounds.iter().any(|x| x.0 == Surround::Legend) && legend_at.is_none() {
+    if surrounds.iter().any(|x| x.0 == Surround::Legend) && !spots.iter().any(|(kind, _)| *kind == Surround::Legend) {
         warnings.push(
             "the frame leaves the legend no room beside the locator, so it is left out: give the map more room, or set \"locator\": \"none\""
                 .into(),

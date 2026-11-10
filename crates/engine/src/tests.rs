@@ -7633,6 +7633,42 @@ fn a_publication_without_a_colorbar_sizes_the_legend_box_to_the_legend() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A moved frame's coverage cut from one drawn wide enough for every move is the coverage of the
+/// moved frame drawn on its own, give or take the cells along the edges of what it draws.
+#[test]
+fn a_moved_frames_coverage_is_cut_from_the_wide_one() {
+    use crate::cmd::layout::crop_cells;
+    use crate::render::layout::frame_coverage;
+    use rustgis_data::{Dataset, Geometry, GeometryType};
+    use rustgis_geom::Coord;
+    let mut map = rustgis_map::Map::new("m");
+    let mut d = Dataset::new("shape", GeometryType::Polygon, Vec::new());
+    // An L, so a cut from the wrong side or the wrong way up doesn't match.
+    let ring = [(-0.3, -0.3), (0.4, -0.3), (0.4, -0.1), (-0.1, -0.1), (-0.1, 0.35), (-0.3, 0.35), (-0.3, -0.3)];
+    d.push(Some(Geometry::Polygon(vec![vec![ring.map(|(x, y)| Coord::new(x, y)).to_vec()]])), Vec::new());
+    map.add_dataset(d);
+    let (scale, (fw, fh), (sx, sy)): (f64, (f64, f64), (f64, f64)) = (1_000_000.0, (60.0, 40.0), (20.0, 15.0));
+    let wide = (fw + 2.0 * sx, fh + 2.0 * sy);
+    let centre = Coord::new(0.0, 0.0);
+    let cells = (384.0 * wide.0.max(wide.1) / fw.max(fh)).round() as u32;
+    let whole = frame_coverage(&mut map, centre, scale, wide.0, wide.1, cells).unwrap();
+    let flat = map.flat();
+    let at = flat.forward_checked(centre).unwrap();
+    let mm = 1000.0 * flat.ground_per_unit(at) * map.body().ratio() / scale;
+    for (dx, dy) in [(sx, 0.0), (-sx, 0.0), (0.0, sy), (0.0, -sy)] {
+        let cut = crop_cells(&whole, wide, (sx - dx, sy - dy), (fw, fh));
+        let there = flat.inverse(Coord::new(at.x - dx / mm, at.y + dy / mm)).unwrap();
+        let own = frame_coverage(&mut map, there, scale, fw, fh, 384).unwrap();
+        assert_eq!((cut.0, cut.1), (own.0, own.1), "the same grid");
+        let drawn = own.2.iter().filter(|c| **c).count();
+        let differ = cut.2.iter().zip(&own.2).filter(|(a, b)| a != b).count();
+        assert!(drawn > 100 && differ * 10 < drawn, "moved by {dx}, {dy}: {differ} of {drawn} cells differ");
+    }
+    // A frame reaching past the wide page is held inside it.
+    let held = crop_cells(&whole, wide, (-50.0, 1e9), (fw, fh));
+    assert_eq!(held.2.len(), (held.0 * held.1) as usize);
+}
+
 /// A veiled map's surrounds group in a band: beside each other in a wide one, one over the other in
 /// a tall one, nowhere when they don't fit.
 #[test]

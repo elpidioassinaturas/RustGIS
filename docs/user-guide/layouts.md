@@ -63,15 +63,17 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     when that shows more of it, or as much while covering at least a quarter less of what the map
     draws (the answer's `legendColumns`); in a side column it stays in one. Polygon layers with no
     fill and no labels, such as neighbouring borders, don't count as what the map draws here, unless
-    nothing else is shown, nor do polygon layers in one colour with no labels beside a layer drawn by
-    classes or a raster. When no shape of the legend fits, the map moves towards an edge, as far as
-    the asked extent stays in the frame, so the room on both its sides joins (the answer's
-    `mapShift`, in mm). On a map that runs on past the extent, with a long legend, what is outside
-    the extent is then veiled, with the surrounds grouped in its widest band (the answer's `veiled`,
-    and `arrangement` `"veil"`, and a warning), at up to half the scale on a sheet when the frame
-    leaves too little of it, which the result says too. The veil and the surrounds are ordinary
-    elements, to move or delete as any other; `"veil": false` leaves the map unveiled and at its
-    scale. If the legend or colorbar cannot fit, the result warns about clipping or resizing. A streamed layer still loading gets a fixed-size legend to adjust by hand.
+    nothing else is shown, nor do polygon layers in one colour with no labels that run on past the
+    frame, such as neighbouring states, beside a layer drawn by classes or a raster. When no shape
+    of the legend fits, the map moves towards an edge, as far as the asked extent stays in the
+    frame, so the room on both its sides joins (the answer's `mapShift`, in mm). On a map that runs
+    on past the extent, with a long legend, what is outside the extent is then veiled, with the
+    surrounds grouped in its widest band (the answer's `veiled`, and `arrangement` `"veil"`, and a
+    warning), at up to half the scale on a sheet when the frame leaves too little of it, which the
+    result says too. The veil and the surrounds are ordinary elements, to move or delete as any
+    other; `"veil": false` leaves the map unveiled and at its scale. If the legend or colorbar
+    cannot fit, the result warns about clipping or resizing. A streamed layer still loading gets a
+    fixed-size legend to adjust by hand.
   - **Decimal comma**: `"decimal": ","` prints the graticule, scale bar and colorbar numbers and
     `{scale}` with a decimal comma and points between thousands (`0,05`, `1:6.300.000`).
     `layout.page={"decimal": ","}` sets it on any layout; `"."` restores decimal points.

@@ -2023,8 +2023,10 @@ fn plain_fill(l: &rustgis_map::Layer) -> bool {
 /// the frame's longer side, row by row from the top, each `true` where a layer (or its labels)
 /// drew. The basemap is left out, so the frame's background isn't counted, and so are layers that
 /// only outline their polygons ([`only_outlines`]) unless nothing else is shown, and those that
-/// fill them in one colour ([`plain_fill`]) beside a layer drawn by classes or a raster. For keeping a
-/// layout's surrounds off what its map shows. `None` when the frame can't be drawn.
+/// fill them in one colour ([`plain_fill`]) beside a layer drawn by classes or a raster, when they
+/// run on past the frame, as neighbouring states do: one inside it, such as a study area, is what
+/// the map shows. For keeping a layout's surrounds off what its map shows. `None` when the frame
+/// can't be drawn.
 ///
 /// The map itself is drawn, not a copy of it (every layer's features): its basemap, web tiles
 /// (a background, like the basemap) and graticule are set aside for the drawing and put back,
@@ -2035,7 +2037,7 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
         return None;
     }
     let (w, h) = (w_mm * PT_PER_MM, h_mm * PT_PER_MM);
-    let ppp = f64::from(cells.clamp(8, 512)) / w.max(h);
+    let ppp = f64::from(cells.clamp(8, 1024)) / w.max(h);
     let view = View { width: w, height: h, pixels_per_point: ppp, camera: frame_camera(map, center, scale, 0.0, 0.0), sky: false };
     // Put back when this ends, a panic in the drawing included.
     struct Aside<'a> {
@@ -2065,7 +2067,16 @@ pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm:
     } else {
         let classes =
             map.layers.iter().any(|l| map.draws_at(l, at) && (l.is_raster() || !matches!(&l.renderer, rustgis_map::Renderer::Single(_))));
-        map.layers.iter().filter(|l| l.visible && (only_outlines(l) || (classes && plain_fill(l)))).map(|l| l.id).collect()
+        let frame = crate::view_lonlat(map, &view);
+        let past_the_frame = |l: &rustgis_map::Layer| {
+            let e = l.shown_extent();
+            !e.is_empty() && (e.min_x < frame.min_x || e.max_x > frame.max_x || e.min_y < frame.min_y || e.max_y > frame.max_y)
+        };
+        map.layers
+            .iter()
+            .filter(|l| l.visible && (only_outlines(l) || (classes && plain_fill(l) && past_the_frame(l))))
+            .map(|l| l.id)
+            .collect()
     };
     for l in map.layers.iter_mut().filter(|l| outlines.contains(&l.id)) {
         l.visible = false;
@@ -2793,8 +2804,8 @@ mod tests {
         assert!(!plain_fill(l), "labels make it more than context");
     }
 
-    /// A polygon layer in one colour is context beside a layer drawn by classes, and what the map
-    /// shows when all its layers are in one colour.
+    /// A polygon layer in one colour running on past the frame is context beside a layer drawn by
+    /// classes; one inside the frame, such as a study area, is what the map shows.
     #[test]
     fn frame_coverage_leaves_out_one_colour_fills_beside_classes() {
         use rustgis_data::{Dataset, Field, FieldType, Geometry, Value};
@@ -2803,14 +2814,16 @@ mod tests {
             cells.iter().filter(|c| **c).count()
         };
         let mut map = Map::new("m");
-        let mut square = Dataset::new("states", GeometryType::Polygon, Vec::new());
-        square.push(
-            Some(Geometry::Polygon(vec![vec![
-                [(-0.2, -0.2), (0.2, -0.2), (0.2, 0.2), (-0.2, 0.2), (-0.2, -0.2)].map(|(x, y)| Coord::new(x, y)).to_vec(),
-            ]])),
-            Vec::new(),
-        );
-        let states = map.add_dataset(square);
+        let square = |name: &str, r: f64| {
+            let mut d = Dataset::new(name, GeometryType::Polygon, Vec::new());
+            d.push(
+                Some(Geometry::Polygon(vec![vec![[(-r, -r), (r, -r), (r, r), (-r, r), (-r, -r)].map(|(x, y)| Coord::new(x, y)).to_vec()]])),
+                Vec::new(),
+            );
+            d
+        };
+        // About 0.9° across the frame: the states run on past it.
+        let states = map.add_dataset(square("states", 2.0));
         let mut d = Dataset::new("far", GeometryType::Point, vec![Field::new("g", FieldType::Text)]);
         d.push(Some(Geometry::Point(Coord::new(-0.3, -0.3))), vec![Value::Text("c".into())]);
         let far = map.add_dataset(d);
@@ -2834,6 +2847,9 @@ mod tests {
         let beside_classes = count(&mut map);
         assert!(beside_classes > 0 && beside_classes < with_states, "{beside_classes} of {with_states}");
         assert!(map.layer(states).is_some_and(|l| l.visible), "shown again");
+        map.add_dataset(square("study area", 0.1));
+        let with_study_area = count(&mut map);
+        assert!(with_study_area > beside_classes, "a one-colour layer inside the frame counts: {with_study_area} of {beside_classes}");
     }
 
     /// A legend's rows go into columns: as even as they go, a layer's name with the row under it,
