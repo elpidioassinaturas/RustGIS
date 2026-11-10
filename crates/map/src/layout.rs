@@ -1461,8 +1461,8 @@ impl Layout {
 pub struct LayoutRepairs {
     /// Elements kept with a value brought into range, a new id, or a reference cleared.
     pub elements_adjusted: usize,
-    /// Elements with a name, text, polygon points or legend exclusions cut to their limits (the
-    /// same element may count as adjusted too).
+    /// Elements with a name, text, polygon points, legend exclusions or legend labels cut to their
+    /// limits (the same element may count as adjusted too).
     pub elements_cut: usize,
     /// Elements removed: beyond the 500 a layout holds, or tied to a map frame it doesn't have.
     pub elements_removed: usize,

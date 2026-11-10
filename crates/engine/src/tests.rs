@@ -29590,10 +29590,17 @@ fn legends_label_layers() {
         s.project.layouts[0].element(frame).map(|e| &e.kind),
         Some(ElementKind::MapFrame { grid: Some(g), .. }) if !g.labels
     ));
-    // A long label is cut to its length.
-    let long = "x".repeat(rustgis_map::layout::MAX_LEGEND_LABEL_CHARS + 50);
-    s.run("layout.update", &json!({"element": plain, "labels": {"Countries": long}})).unwrap();
-    assert_eq!(labels(&s, plain)[0].1.chars().count(), rustgis_map::layout::MAX_LEGEND_LABEL_CHARS);
+    // A label longer than a legend keeps is refused, not cut, and changes nothing; one at the
+    // limit is kept whole.
+    let before = labels(&s, plain);
+    let long = "x".repeat(rustgis_map::layout::MAX_LEGEND_LABEL_CHARS + 1);
+    let err = s.run("layout.update", &json!({"element": plain, "labels": {"Countries": long}})).unwrap_err();
+    assert!(err.contains("at most 200 characters") && err.contains("has 201"), "{err}");
+    assert_eq!(labels(&s, plain), before);
+    let full = "é".repeat(rustgis_map::layout::MAX_LEGEND_LABEL_CHARS);
+    s.run("layout.update", &json!({"element": plain, "labels": {"Countries": full}})).unwrap();
+    assert_eq!(labels(&s, plain)[0].1, full);
+    s.run("layout.update", &json!({"element": plain, "labels": {"Countries": null}})).unwrap();
     // Kept through a saved project, and a layout file.
     let dir = std::env::temp_dir().join(format!("rustgis-legend-labels-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -29607,6 +29614,20 @@ fn legends_label_layers() {
     assert!(matches!(
         s.project.layouts[1].element(id).map(|e| &e.kind),
         Some(ElementKind::Legend { labels, .. }) if labels.get("Rivers").is_some_and(|l| l == "Rios principais")
+    ));
+    let cut_notice =
+        |s: &Session, from: usize| s.notices[from..].iter().filter(|n| n.text.contains("legend labels cut to their limits")).count();
+    assert_eq!(cut_notice(&s, 0), 0, "nothing was cut");
+    // A layout file with a label longer than a legend keeps is read with it cut, and says so.
+    let mut text: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let legend = text["elements"].as_array_mut().unwrap().iter_mut().find(|e| e["id"] == json!(id)).unwrap();
+    legend["kind"]["Legend"]["labels"]["Rivers"] = json!("x".repeat(rustgis_map::layout::MAX_LEGEND_LABEL_CHARS + 50));
+    let mark = s.notices.len();
+    s.run("layout.import", &json!({"text": text.to_string()})).unwrap();
+    assert_eq!(cut_notice(&s, mark), 1);
+    assert!(matches!(
+        s.project.layouts[2].element(id).map(|e| &e.kind),
+        Some(ElementKind::Legend { labels, .. }) if labels["Rivers"].chars().count() == rustgis_map::layout::MAX_LEGEND_LABEL_CHARS
     ));
     std::fs::remove_dir_all(&dir).ok();
     // (The imported layout is the active one now; the rest goes to the first.)

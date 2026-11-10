@@ -208,7 +208,7 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     it, and a layer the map hasn't is refused. Each entry replaces that layer's label and leaves
     the others; `null` or a blank label shows the layer's name again, and `{}` every layer's. The
     label goes in the layer's row, or over its classes; a WMS or WMTS layer's goes over its
-    picture. It is up to 200 characters, and the legend measures it, not the name, so sizing a
+    picture. It is up to 200 characters (a longer one is refused), and the legend measures it, not the name, so sizing a
     legend to its content and the warnings on its fit follow the label. Two legends can label a
     layer differently (in two languages, say). A renamed layer keeps its label; a removed one's
     is dropped, so a later layer of that name isn't labelled unasked. Labels are saved with the
