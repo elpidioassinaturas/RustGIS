@@ -102,13 +102,13 @@ whether it worked. It is an audit trail of the session, for reviewing work or re
 run; it runs nothing again by itself, but an entry can be copied back as a Script pane line. Every
 front end goes into it alike: the app, scripts, the AI Assistant, the command line, Python and MCP.
 
-In the app, the **History** pane has two views: **Tool runs**, the tools run on the project (saved
-with it, and each can run again), and **Session log**, which shows the log newest first: each
-command with whether it worked, when it started (UTC) and in which project, how long it took, its
-error and its parameters (on one line; all of them on hover). It lists the newest 200 that match
-and says how many there are; type part of a command's id (`layer.`, `export`) to filter, press
-**This project** to list only the commands run in the project open now (two projects of the same
-name are told apart), or tick **Failed only**.
+In the app, the **History** pane has three tabs: **Tool runs**, the tools run on the project (saved
+with it, and each can run again); **This project**, the session log's entries for the project open
+now (two projects of the same name are told apart); and **Session log**, which shows the whole
+session's log newest first: each command with whether it worked, when it started (UTC) and in which
+project, how long it took, its error and its parameters (on one line; all of them on hover). It
+lists the newest 200 that match and says how many there are; type part of a command's id (`layer.`,
+`export`) to filter, or tick **Failed only**.
 
 A right-click on an entry offers **Copy Parameters** and **Copy Command**, the entry as a line for
 the Script pane (`layer.buffer {"distance":10}`; undo and redo as themselves). A script run offers
@@ -506,6 +506,12 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
   sets the whole interface from 80% to 200%.
 - **Autosave**: **Settings › Autosave** sets how often the desktop app keeps a
   [recovery copy](#autosave-and-recovery) of unsaved work, or turns it off.
+- **Performance**: **Settings › Performance › Threads** sets the most threads one piece of work
+  uses in the desktop app: a tool, a raster read, the drawing of a map's tiles. **Automatic** is
+  the computer's cores, up to 16; fewer keep cores free for other work, and on a computer with
+  more cores a higher setting lets the work use them. It is remembered for the next start and
+  isn't saved with a project (`ui.threads={"threads": 8}`, `null` for Automatic; the same as
+  [`gp.threads`](analysis.md#analysis-workflows)). The web app runs on one thread.
 - **Start-up**: **Settings › Start-up** sets what RustGIS opens with: **Start With** the World Atlas
   sample or a blank map, or, in the desktop app, **Last Project** (the `.rgis` project last opened
   or saved) or **Choose Project…** (one you pick once), the **Projection** the map opens in (a

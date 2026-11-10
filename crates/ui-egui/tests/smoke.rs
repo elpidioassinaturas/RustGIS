@@ -939,6 +939,8 @@ static PLUGINS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn a_ribbon_wider_than_the_window_scrolls_with_arrow_buttons() {
+    // A plugin's tab, added or removed by a test running alongside, would change the tab strip.
+    let _turn = PLUGINS.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = harness();
     h.set_size(egui::vec2(900.0, 600.0));
     h.state_mut().ui.tab = "View".into();
@@ -963,6 +965,9 @@ fn a_ribbon_wider_than_the_window_scrolls_with_arrow_buttons() {
 
 #[test]
 fn a_tab_strip_wider_than_the_window_scrolls_with_arrow_buttons() {
+    // Plugins' tabs follow Help, so one removed by a test running alongside while the strip is
+    // scrolled to its end shifts the tabs right, and a click on Help lands on Settings.
+    let _turn = PLUGINS.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = harness();
     // Narrower than the tabs' text alone, whatever the system font: at 560 points the tabs just
     // fit on macOS once its semibold is drawn heavier (#591), so they didn't need to scroll.
@@ -2006,6 +2011,75 @@ fn data_from_a_web_address_lands_later() {
     assert!(h.state().ui.downloads.is_empty());
 }
 
+/// A failed header probe, ordinary download and project download retain their HTTP reason after
+/// notices and diagnostic history redact the message again (#1475).
+#[test]
+fn address_failures_keep_status_without_credentials() {
+    use ogc_server::{Route, Server};
+    let server = Server::new(
+        ["probe.tif", "remote.fgb", "download.geojson", "project.rgis"]
+            .into_iter()
+            .map(|name| Route { status: 503, ..Route::new(&format!("/{name}"), "") })
+            .collect(),
+    );
+    let mut h = harness();
+    h.step();
+    for (command, file, query) in [
+        ("ui.addUrl", "probe.tif", "sig=hidden-probe"),
+        ("ui.addUrl", "remote.fgb", "token=hidden-remote"),
+        ("ui.addUrl", "download.geojson", "key=hidden-download"),
+        ("ui.openUrl", "project.rgis", "%74oken=hidden-project"),
+    ] {
+        let url = format!("{}/{file}?{query}#hidden-fragment", server.base);
+        h.state_mut().session.notices.clear();
+        h.state_mut().run(command, json!({"url": url})).unwrap();
+        for _ in 0..200 {
+            h.step();
+            if h.state().session.notices.iter().any(|n| n.error) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let notices = &h.state().session.notices;
+        let failure = notices.iter().find(|n| n.error).unwrap_or_else(|| panic!("{file}: no failure notice"));
+        assert!(failure.text.contains(file) && failure.text.contains("503"), "{failure:?}");
+        assert!(notices.iter().all(|n| !n.text.contains("hidden")), "{notices:?}");
+        let report = h.state().session.diagnostics.report(rustgis_engine::data::diagnostics::Filter::All);
+        assert!(!report.contains("hidden"), "{report}");
+        assert!(report.lines().any(|line| line.contains(file) && line.contains("503")), "{report}");
+    }
+}
+
+/// A required Shapefile part is the failed resource, not a second name for its parent.
+#[test]
+fn shapefile_part_failures_keep_one_address_and_the_http_reason() {
+    use ogc_server::{Route, Server};
+    let server = Server::new(vec![Route::new("/secret.shp", "shape-fixture"), Route::new("/versioned.shp", "shape-fixture")]);
+    let mut h = harness();
+    h.step();
+    for (name, query) in [("secret", "token=hidden-part"), ("versioned", "page=2")] {
+        h.state_mut().session.notices.clear();
+        h.state_mut().run("ui.addUrl", json!({"url":format!("{}/{name}.shp?{query}",server.base)})).unwrap();
+        for _ in 0..200 {
+            h.step();
+            if h.state().session.notices.iter().any(|notice| notice.error) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let failure = h.state().session.notices.iter().find(|notice| notice.error).unwrap();
+        assert!(failure.text.contains(&format!("/{name}.dbf")) && failure.text.contains("404"), "{failure:?}");
+        assert!(!failure.text.contains(".shp") && !failure.text.contains("hidden"), "{failure:?}");
+        assert_eq!(failure.text.matches("://").count(), 1, "{failure:?}");
+        let redacted = rustgis_engine::Session::redacted(&failure.text);
+        assert_eq!(redacted.as_str(), failure.text);
+    }
+    assert_eq!(
+        server.requests().iter().map(|request| request.path.as_str()).collect::<Vec<_>>(),
+        ["/secret.shp", "/secret.dbf", "/versioned.shp", "/versioned.dbf"]
+    );
+}
+
 /// A local server answering with a small cloud-optimised GeoTIFF by range, its HEAD answers
 /// announcing the TIFF header's length as Vantor's Transform API does: its address, the bytes it
 /// has sent and the file's length.
@@ -2982,6 +3056,8 @@ fn connections_tree_browses_and_adds() {
 
 /// Save in the web app (issue #197): the browser has no save dialog, so the first Save and every
 /// Save As ask for the file name, and Save then downloads under it; an opened file keeps its name.
+/// A download offered isn't a file saved (the user can cancel the browser's prompt), so the
+/// project keeps its unsaved changes and leaving the page still warns.
 #[test]
 fn web_save_asks_for_the_file_name() {
     let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Vec<u8>)>::new()));
@@ -3003,8 +3079,10 @@ fn web_save_asks_for_the_file_name() {
         app,
     );
     let names = |got: &std::sync::Mutex<Vec<(String, Vec<u8>)>>| got.lock().unwrap().iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
-    // A project never saved: Save asks first, with the project's name.
-    h.state_mut().run("layer.color", json!({"layer": "Countries", "color": "#336699"})).unwrap();
+    // A clean document's Save As rename is itself unsaved; no unrelated dirty edit is needed
+    // to keep the browser's close warning active after a download is merely offered.
+    h.state_mut().session.mark_saved();
+    assert!(!h.state().session.dirty());
     h.state_mut().run("ui.save", json!(null)).unwrap();
     assert_eq!(h.state().dialogs.open, Some("saveProject"));
     assert_eq!(h.state().dialogs.text, "World Atlas.rgis");
@@ -3024,7 +3102,8 @@ fn web_save_asks_for_the_file_name() {
     assert_eq!(h.state().dialogs.open, None);
     assert_eq!(names(&got), ["Trip plan.rgis"]);
     assert_eq!(h.state().session.project.name, "Trip plan");
-    assert!(!h.state().session.dirty());
+    assert!(h.state().session.dirty(), "a download offered doesn't mark the project saved");
+    assert!(h.state().session.notices.iter().any(|n| n.text.starts_with("Download offered: Trip plan.rgis")));
     // Saved once: Save downloads under that name again without asking; Save As asks.
     h.state_mut().run("ui.save", json!(null)).unwrap();
     assert_eq!(h.state().dialogs.open, None);
@@ -3037,9 +3116,13 @@ fn web_save_asks_for_the_file_name() {
     let bytes = got.lock().unwrap()[0].1.clone();
     h.state_mut().open_picked("test.rgis", &bytes).unwrap();
     assert_eq!(h.state().session.project.name, "test");
+    assert!(!h.state().session.dirty());
     h.state_mut().run("ui.save", json!(null)).unwrap();
     assert_eq!(h.state().dialogs.open, None);
     assert_eq!(names(&got).last().map(String::as_str), Some("test.rgis"));
+    assert!(!h.state().session.dirty(), "an unchanged opened project stays clean after a download offer");
+    let notice = h.state().session.notices.iter().rev().find(|n| n.text.starts_with("Download offered: test.rgis")).unwrap();
+    assert!(!notice.text.contains("unsaved changes"), "{}", notice.text);
     // Another project in its place hasn't been saved: Save asks again, even under the same name.
     let n = names(&got).len();
     h.state_mut().run("project.new", json!({"name": "test"})).unwrap();

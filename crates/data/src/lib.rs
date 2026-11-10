@@ -5,6 +5,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod address;
+pub mod citygml;
 pub mod cityjson;
 mod citymodel;
 pub mod color;
@@ -43,6 +44,7 @@ pub mod sheets;
 pub mod source;
 pub mod source_layers;
 pub mod sqlite;
+pub mod threads;
 pub mod time;
 pub mod topojson;
 pub mod value;
@@ -50,7 +52,7 @@ pub mod wkb;
 pub mod xml;
 pub mod zip;
 
-pub use geometry::{Geometry, GeometryType, Measure, VertexId};
+pub use geometry::{Geometry, GeometryType, Measure, VertexId, ambiguous_area_message};
 pub use rustgis_geom::{Coord, Extent};
 pub use value::{Field, FieldType, Value};
 

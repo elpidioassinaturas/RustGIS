@@ -623,8 +623,13 @@ pub(crate) enum Ahead {
 
 #[cfg(not(target_arch = "wasm32"))]
 /// What a model's or script's run on a copy of the session stops at, as its run here does them: a
-/// tool that writes files (which would be written twice), plugin and GeoLibre tools, which run as
-/// they always have, and a script's line that may reach outside the session.
+/// tool that writes files (which would be written twice), a plugin tool (a plugin's program may do
+/// more than hand back its layers, so it runs once, where the user ran it), and a script's line that may reach outside the session. A
+/// GeoLibre tool runs ahead like a built-in one (#1562): the outputs it declares are written to a
+/// scratch folder of its own and handed back, so the run here takes the result instead of running
+/// it again, and Cancel stops its program. (The runner is trusted like any program the user
+/// installs: a tool asked to write elsewhere through its parameters would, and would again if its
+/// result isn't taken.)
 pub(crate) const NOT_AHEAD: &str = "runs where the model or script runs";
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2224,7 +2229,7 @@ pub(crate) fn execute(
         Some(ran) => ran,
         None => {
             #[cfg(not(target_arch = "wasm32"))]
-            if recording && (pin.resolved().source().is_some() || writes_files(spec)) {
+            if recording && (pin.plugin().is_some() || writes_files(spec)) {
                 return Err(NOT_AHEAD.into());
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -6116,7 +6121,7 @@ mod batch_tests {
         .to_string();
         std::fs::write(&f1, content_inside).unwrap();
 
-        // f2 is outside extent [0, 0, 50, 50]
+        // f2 is outside extent [0, 0, 50, 50], with a latitude past the poles (a second reader warning)
         let f2 = root.join("f2.geojson");
         let content_outside = json!({
             "type": "FeatureCollection",
@@ -6154,9 +6159,14 @@ mod batch_tests {
 
         // Result retained diagnostics for both
         let warnings = res["warnings"].as_array().unwrap();
-        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings.len(), 3);
         assert!(warnings[0]["input"].as_str().unwrap().contains("f1.geojson"));
-        assert!(warnings[1]["input"].as_str().unwrap().contains("f2.geojson"));
+        for notice in ["Z or M", "latitude past ±90°"] {
+            assert!(
+                warnings.iter().any(|w| w["input"] == f2_str && w["warning"].as_str().is_some_and(|m| m.contains(notice))),
+                "{notice}: {warnings:?}"
+            );
+        }
 
         let errors = res["errors"].as_array().unwrap();
         assert_eq!(errors.len(), 1);
@@ -6179,6 +6189,7 @@ mod batch_tests {
         assert_eq!(rec2.params["input"], f2_str);
         assert!(rec2.messages.iter().any(|m| m.contains("environment's extent")));
         assert!(rec2.messages.iter().any(|m| m.contains("Z or M")));
+        assert!(rec2.messages.iter().any(|m| m.contains("latitude past ±90°")));
 
         let _ = std::fs::remove_dir_all(root);
     }

@@ -97,7 +97,8 @@ work on one thread (a ray step, a cell-point pair), Kernel Density one whose poi
 too large for its raster; its training fits a share of the sampled pixels, or fewer epochs, instead
 (`dl.train` reports the epochs it ran). A task or model recorded from a pane run keeps these limits
 when it runs again in the app, so a step the pane took on can be refused there, and a model trained
-again can differ. On the desktop these limits grow with the cores the run takes (up to 16), as many
+again can differ. On the desktop these limits grow with the threads the run takes (the cores, up to 16 unless
+[`threads`](#analysis-workflows) says otherwise), as many
 times more work as the threads it runs on. Threads share cores and memory, so a run at that limit
 can take up to about twice as long as a one-thread run at its own (measured on one machine, a Xeon
 Silver 4114; it can be longer on others); in the web app, on one thread, the limits stay as they
@@ -341,7 +342,8 @@ surface from point features using a Quartic (biweight, default) or Gaussian kern
 renormalised to integrate to 1).
 Points can optionally be weighted by a numeric population field (invalid or non-positive weights
 are excluded and reported in the tool messages; for multipoint features, each constituent point part
-receives the feature's weight). Calculations are performed in the linear units
+receives the feature's weight, a part with a coordinate missing or infinite is left out and
+counted, and a feature with no finite part is skipped). Calculations are performed in the linear units
 of a projected coordinate system (defaults to the layer's projected system; if the input layer lacks a
 coordinate system or is in degrees, or to project into a specific system, supply a projected system via `crs`,
 e.g. `EPSG:32618`).
@@ -403,6 +405,12 @@ keep their full area and small antimeridian crossings stay small. Rings winding 
 use the smaller polar region in either direction; reversing a ring does not select its global
 complement. Edges follow the shortest geodesics between vertices. The output fields remain
 `area_km2`, `perimeter_km` and `length_km`; point coordinates are unchanged.
+A ring through both poles can wind beyond one whole surface and bound no single
+region. Calculate Geometry Attributes refuses such input, with the numbers of affected rings
+and features, before changing any fields. The attribute table's Calculate Geometry does the
+same for its chosen rows. Spatial Join's Largest overlap refuses affected selected target or
+join features before writing output. Ordinary polar caps and whole-world rectangles remain
+measurable. Measure Area explains the ambiguity and still shows the perimeter.
 Spatial Join's **Largest overlap** still measures area on a sphere of radius 6,371 km; it can
 differ from the ellipsoid by up to about 0.9 % (a small area near a pole). The same WGS 84
 measure backs the attribute table's **Calculate Geometry** (`edit.calculateGeometry`), the
@@ -419,6 +427,8 @@ and the Measure tools (a ring that goes all the way round at 60° N gives the la
 while **Calculate Geometry Attributes** gives the smaller polar cap. On the Moon or another body, the Measure tools measure on
 that body's sphere. The Radius tools still measure a local Mercator distance, and **Mensuration
 Tools** (`raster.measure`) still measure on the sphere, so those can differ from the numbers above.
+
+For an ambiguous area, the `raster.measure` command with `kind: "area"` returns an error without a measurement object. To request its finite closed-ring perimeter, use `kind: "distance"` and repeat the first point at the end. The on-map Measure overlay continues to show perimeter alongside the area refusal.
 
 **Merge** (`merge`, Data Management › General) appends loaded vector layers of the same geometry
 type (points, lines or polygons) into a new layer. It needs no GeoLibre runner. Choose **Input
@@ -764,9 +774,24 @@ notice. A Double field's values are decimals already, rounded as decimal arithme
 get no notice. Without `statistics`, `field` gives that field's `COUNT`, `SUM`, `MEAN`, `MIN`,
 `MAX` and `STD`, reading its values as numbers.
 
+**Minimum Bounding Geometry** (`convexHull`) encloses each feature in its convex hull (Group
+Option `None`), or all of them in one (`All`, with `count`, the features it enclosed). It passes
+over a vertex with a coordinate missing or infinite, or so far out the hull can't take it (past
+about 9 million degrees), and skips a feature without geometry or with no point left to enclose,
+writing no hull for it; if every feature is skipped, it is an error. A latitude past a pole is
+taken as that pole. A hull with no area is written as what it is: a point for points in one place,
+or the line between the two farthest apart for points on one straight line on the map. The layer is
+a point or line layer when every hull is one, and the tool says so; otherwise it's a polygon layer
+holding any points and lines among its polygons. Dissolve leaves those out, saying how many; as
+Clip masks they cover nothing; a Shapefile export leaves them out, saying how many; and a
+GeoPackage export keeps them in a column that holds any kind of geometry. It says how many of
+each.
+
 **Dissolve** (`dissolve`) merges the polygons sharing a value of `field` into one feature for
 each value, or all of them into one without a field. Each feature has the value and `count`, the
-polygons merged; records with no value form a feature of their own. **Summarize Within**
+polygons merged; records with no value form a feature of their own. A feature with no polygon (no
+geometry, or a point or line in the polygon layer) is left out, with its values, and the tool says
+how many; if none has a polygon, it is an error. **Summarize Within**
 (`countPoints`) copies the polygons and adds `point_count`, the points inside each polygon or on
 its edge; a point where polygons overlap counts in each of them.
 
@@ -1167,7 +1192,7 @@ same trust as installing that package. Tools that read files by path (LiDAR file
 since a web page has no file system.
 
 In the desktop app the Tools pane runs a GeoLibre tool in the background like any other; its
-**Cancel** takes effect when the GeoLibre program ends, and the result is then dropped. On the
+**Cancel** stops the GeoLibre program at once, and nothing is added. On the
 command line RustGIS waits while a tool runs. In the web app the run
 is started in the background and the result is added when it ends, but the tool itself runs
 in the page, so the page is busy while it computes.
@@ -1204,6 +1229,24 @@ clipping its geometry; an existing selection takes precedence and overlay inputs
 The Geostatistical Wizard uses the environment's extent and raster cell size (degrees).
 IDW Interpolation and Ordinary Kriging instead use their own `extent` and `pixelSize` parameters;
 the environment does not set their output grids.
+
+**Threads** (`gp.threads={"threads": 8}`) sets the most threads one piece of work uses, 1 to 1024
+(`null`: the default, the computer's cores up to 16). It is never more than the cores, holds for
+the whole process (every session in it), isn't saved with the project and leaves no undo step.
+Tools, GeoTIFF reads, raster statistics, data-cube trends and the drawing of tiles take their
+threads from it; drawing a raster on the map stays at 8 threads at most, and where each thread
+needs working memory (a tool's, a cube cell's) no more start than `threadScratchBytes` holds
+beyond the first thread's. A
+GeoTIFF read keeps the default count whatever that budget, as before; only a higher setting is
+bounded by it. **Settings › Performance › Threads** in the desktop app, the command
+line's `--threads` and Python's `Session(threads=…)` set the same count. A lower setting also
+lowers the work limits above that grow with the threads a run takes (Viewshed, IDW, Kriging and
+Kernel Density): a run that passes on 16 threads can be refused on 4. Only you change it: the AI
+Assistant asks first, and plugins, imported models and tasks, and MCP agents without full access
+can't. `gp.threads`
+returns the setting (`threads`), the threads it gives (`max`), the default's (`default`) and the
+cores; `gp.env` returns the threads and cores as `limits.threads` and `limits.cores`. The web app
+runs on one thread.
 
 `gp.env` also returns the memory limits on this computer (`limits`). On the desktop they follow the
 computer's memory, or a container's limit when it is lower: each plans for a quarter of it, never
@@ -1245,7 +1288,7 @@ renames and definition queries, the environment and the projection between them,
 in the background first, so the map and the rest of the window stay in use: the status bar shows
 **Run Script** and **Cancel**, and the results say **Running…** until the run is added. From the
 first line of any other kind (an edit, Add Data, a save, an export, a style or a zoom, a plugin
-or GeoLibre tool, a tool that writes a file) the rest runs as a script always has, holding the
+tool, a tool that writes a file) the rest runs as a script always has, holding the
 window until it finishes. A tool whose inputs change meanwhile runs again as the
 results are added, as in a model's run. It colours the commands as you type, in both
 themes: `#` comments in green italics, the command id, and the JSON's strings, numbers and
@@ -1322,8 +1365,11 @@ their name.
   **Running…** until the results are added, as one step to undo. What a tool reads that changes
   meanwhile (an edit, a selection, a layer added or reordered, the environment, the projection)
   has that tool and those after it run again as the results are added, and so does a tool that
-  writes a file, a plugin tool or a GeoLibre tool, with those after it. Those run as a model
-  always has, holding the window until they finish, with the work limits of a run that can't
+  writes a file or a plugin tool, with those after it. GeoLibre tools are worked out in the
+  background like the built-in ones: their outputs go to a folder of their own until they are
+  added. A GeoLibre option that names a file for the program to write isn't an output, so a
+  tool given one writes it in the background, and again if the tool runs again. Those that run again run as a model always has, holding the
+  window until they finish, with the work limits of a run that can't
   be cancelled. The tools worked out in the background take no work limit, as a run that can
   be stopped takes none. Tools that run holding the window or from the command line keep it, so
   the same model can finish in the background and stop at the limit there. A file a tool reads
@@ -1397,16 +1443,32 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
   `cellSize` (output units) says otherwise. The result replaces the layer's raster, or becomes a new
   layer with `name`; `path` also writes it as a cloud-optimised GeoTIFF, which then is the layer's
   file. A raster opened from an overview is warped at that reduced resolution, and the result says
-  so.
+  so. Class names are kept with `nearest`; under `bilinear` or `cubic` they are removed with a
+  notice naming the affected bands, because the values can be mixed. Palette images use `nearest`.
 - **Control Point Fit** (`raster.gcpFit`) fits a similarity, affine, projective, second- or
   third-order polynomial, or thin plate spline transform to control points and reports how well
   it holds: each point's residual in pixels and map units, the RMSE, and each point's error when
   it is left out of the fit. With `compare` it fits them all and recommends the simplest whose
   leave-one-out error is close to the best.
-- **Change Detection** (difference, ratio, percent), **Spectral Analysis** (every band at a
-  pixel), **Indices** (NDVI, NDWI, SAVI, NBR, NDBI, EVI), **Process** (clip to the view, to a
-  box, or to a polygon layer's selected or all polygons, with the cells outside them no-data;
-  resample) and the **Pixel Editor** (set the pixels inside a polygon).
+- **Spectral Analysis** (`raster.spectral`) charts a multiband raster's spectral profile: every
+  band's value at points on the map, to compare the signatures of water, vegetation, soil or roofs
+  before drawing training samples for a classification. Pick the raster, turn on **Pick Points** and
+  click: each click adds a point until you turn it off. Identify's pop-up on a pixel of two bands or
+  more has a **Spectral Profile** button that adds that pixel. Up to six points are compared, a line
+  each, in the colour of a numbered marker on the map. The x axis is the bands' wavelengths in
+  nanometres when the file gives one for every band (see [Rasters](data.md#rasters)), drawn in
+  wavelength order, and their numbers otherwise. Hovering the chart shows a band's name, wavelength
+  and each point's value; **×** takes a point off, **Clear** all of them, and **Export CSV…**
+  (desktop) writes a row per band (its number, name and wavelength) and a column per point. From
+  scripts, `{"layer": "scene", "points": [[-43.95, -19.92], [-43.96, -19.93]]}` gives one profile
+  per point (up to 1,000; a point off the raster keeps its place with null values, and is said),
+  `{"lon", "lat"}` one pixel and `{"zone": "polygons"}` the mean in the selected or first polygon;
+  every answer has the band names and, when the file gives any, `"wavelengths"` in nanometres.
+  After GeoLibre's spectral profile.
+- **Change Detection** (difference, ratio, percent), **Indices** (NDVI, NDWI, SAVI, NBR, NDBI,
+  EVI), **Process** (clip to the view, to a box, or to a polygon layer's selected or all polygons,
+  with the cells outside them no-data; resample) and the **Pixel Editor** (set the pixels inside a
+  polygon).
 - **Mosaic Rasters** (`raster.mosaic`) merges tiles of one grid, such as the 1 km tiles of a state
   elevation model, into one raster in their own coordinate system and cell size, optionally
   written to a GeoTIFF: `{"inputs": ["dgm_1.tif", "dgm_2.tif", …], "path": "dem.tif"}`. Inputs
@@ -1442,7 +1504,9 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
     centre. Classes take `nearest` or `mode`, continuous values `bilinear` or `cubic`, or `average`
     going coarser. A whole-number pixel type keeps its type, so its mean is rounded. On a colour
     image the colours count as much as their pixels are opaque, and `mode` is taken band by band
-    (each channel's most frequent value among the pixels that show).
+    (each channel's most frequent value among the pixels that show). Class names are kept with
+    `nearest` and `mode`; other methods remove them with a notice naming the affected bands.
+    Palette images use `nearest` for sampling and `mode` for aggregation, keeping their classes.
   - Cells off the raster are its no-data value. A raster without one keeps its bands as they are,
     with NaN there in a floating-point type and 0 in a whole-number one, as GDAL leaves them; a
     colour image gains an alpha band instead, so they are see-through.

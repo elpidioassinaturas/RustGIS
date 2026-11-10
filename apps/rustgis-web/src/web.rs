@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use rustgis_ui_egui::rustgis_engine::data::diagnostics::Capture;
+use rustgis_ui_egui::rustgis_engine::{data::diagnostics::Capture, sources::message_with_address};
 use rustgis_ui_egui::{Inbox, RustGisApp, Services, Slot};
 
 use crate::parts::Notes;
@@ -164,7 +164,7 @@ pub fn start() {
                     // to different maps depending on when the import completes.
                     if let Some(url) = &project {
                         if let Err(e) = app.run("ui.openUrl", serde_json::json!({"url": url})) {
-                            app.session.notify(format!("?project={url}: {e}"), true);
+                            app.session.notify(format!("?project={}", message_with_address(url, &e)), true);
                         }
                         let skipped: Vec<&str> =
                             ["data", "stac", "style", "tiles", "zarr"].into_iter().filter(|k| !params(&q, k, 1).is_empty()).collect();
@@ -199,7 +199,7 @@ pub fn start() {
                     // in a notice.
                     for url in params(links, "data", 16) {
                         if let Err(e) = app.run("ui.addUrl", serde_json::json!({"url": url, "zoom": !linked})) {
-                            app.session.notify(format!("?data={url}: {e}"), true);
+                            app.session.notify(format!("?data={}", message_with_address(&url, &e)), true);
                         }
                     }
                     // `?stac=<url>`: a STAC item (its default asset is added, signed when it is a
@@ -210,7 +210,7 @@ pub fn start() {
                     if let Some(url) = stac.first()
                         && let Err(e) = app.run("ui.stacLink", serde_json::json!({"url": url}))
                     {
-                        app.session.notify(format!("?stac={url}: {e}"), true);
+                        app.session.notify(format!("?stac={}", message_with_address(url, &e)), true);
                     }
                     if stac.len() > 1 {
                         app.session.notify(format!("only the first ?stac= link is opened ({} more were left out)", stac.len() - 1), false);
@@ -228,7 +228,7 @@ pub fn start() {
                             match app.run("map.addTiles", p) {
                                 // The first style added opens at its view, not one that failed.
                                 Ok(_) => style_view &= kind.is_none(),
-                                Err(e) => app.session.notify(format!("?{key}={url}: {e}"), true),
+                                Err(e) => app.session.notify(format!("?{key}={}", message_with_address(&url, &e)), true),
                             }
                         }
                     }
@@ -237,7 +237,7 @@ pub fn start() {
                     if let Some(url) = params(links, "zarr", 1).into_iter().next()
                         && let Err(e) = app.run("ui.addZarr", serde_json::json!({"address": url}))
                     {
-                        app.session.notify(format!("?zarr={url}: {e}"), true);
+                        app.session.notify(format!("?zarr={}", message_with_address(&url, &e)), true);
                     }
                     // `?registry=<url>` opens the Plugin Manager on another plugin registry for this
                     // visit (a pull request's preview, say); installing still asks as usual.
@@ -545,7 +545,8 @@ fn read_bitmap(bitmap: &web_sys::ImageBitmap, w: u32, h: u32) -> Result<Vec<u8>,
 /// How long a tile or document fetch may go without anything coming in: the answer's headers,
 /// or the next part of its body. A slow but steady answer is never cut off; one that stalls is
 /// given up, so it doesn't stay under way forever, holding its server's place in the queue.
-/// Downloads the user asked for have none.
+/// So is a picture the pop-up fetches. Downloads the user asked for have none
+/// (`cache::gives_up_when_stalled`).
 const STALL_MS: i32 = 30_000;
 
 /// What a step of a fetch waits for, or `None` once it has gone [`STALL_MS`] with nothing (the
@@ -619,6 +620,7 @@ async fn fetch_reached(
             &still,
             || async {
                 let window = web_sys::window().ok_or("no window")?;
+                let gives_up = cache::gives_up_when_stalled(url, ceiling);
                 // A data download carries its caller's budget (at most MAX_DOWNLOAD); other fetches use 64 MB.
                 let (url, limit) = cache::split_download_limit(url);
                 let max = limit.map(|n| n as u64).unwrap_or(64 << 20);
@@ -660,8 +662,8 @@ async fn fetch_reached(
                     (None, None) => None,
                 };
                 let init = web_sys::RequestInit::new();
-                // A tile or document that stalls is given up (see `STALL_MS`).
-                let abort = if limit.is_none() { web_sys::AbortController::new().ok() } else { None };
+                // A tile, document or picture that stalls is given up (see `STALL_MS`).
+                let abort = if gives_up { web_sys::AbortController::new().ok() } else { None };
                 if let Some(a) = &abort {
                     init.set_signal(Some(&a.signal()));
                 }
@@ -735,7 +737,7 @@ async fn fetch_reached(
             // holds the whole file (a small archive), checked once it's read; else no ranges.
             let whole = range.is_some() && resp.status() != 206;
             if range.is_some_and(|(a, _)| whole && a > 0) {
-                return Err(format!("{url}: {}", cache::NO_RANGES));
+                return Err(message_with_address(&url, cache::NO_RANGES));
             }
             // Fonts are at most about 10 MB and plugins 64 MB; refuse anything larger than allowed, by
             // header when there is one and by the downloaded size otherwise.
@@ -744,7 +746,7 @@ async fn fetch_reached(
             {
                 // The last bytes asked for and a longer file answered: no ranges, so it is downloaded whole.
                 if whole_tail.is_some() {
-                    return Err(format!("{url}: {}", cache::NO_RANGES));
+                    return Err(message_with_address(&url, cache::NO_RANGES));
                 }
                 return Err(format!("{len} bytes is too large"));
             }
@@ -772,7 +774,7 @@ async fn fetch_reached(
                     if (bytes.len() + n) as u64 > max {
                         let _ = reader.cancel();
                         if whole_tail.is_some() {
-                            return Err(format!("{url}: {}", cache::NO_RANGES));
+                            return Err(message_with_address(&url, cache::NO_RANGES));
                         }
                         return Err(format!("larger than {max} bytes"));
                     }
@@ -784,10 +786,10 @@ async fn fetch_reached(
             if let Some((a, b)) = range.filter(|_| whole)
                 && bytes.len() as u64 > b - a + 1
             {
-                return Err(format!("{url}: {}", cache::NO_RANGES));
+                return Err(message_with_address(&url, cache::NO_RANGES));
             }
             if whole_tail.is_some_and(|n| bytes.len() as u64 > n) {
-                return Err(format!("{url}: {}", cache::NO_RANGES));
+                return Err(message_with_address(&url, cache::NO_RANGES));
             }
             Ok(cache::Fetched { bytes, origin: address::Origin::named(&url).retain_binding(&bound)? })
         }
@@ -1249,7 +1251,7 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
             let capture = Capture::current();
             let still = rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::current_still();
             wasm_bindgen_futures::spawn_local(async move {
-                let r = fetch_bytes(&url, capture, still, &[]).await.map_err(|e| format!("{url}: {e}"));
+                let r = fetch_bytes(&url, capture, still, &[]).await.map_err(|e| message_with_address(&url, &e));
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
                 ctx.request_repaint();
             });

@@ -21,6 +21,21 @@ After `Basic` (without a colon) at the start of a line, the rest of the text is 
 when the next word looks like base64: it has a digit or punctuation (a sentence-ending mark
 `.,!?;:)` at its end doesn't count), has 16 characters or more, or has 8 or more with a capital
 after the first letter. So a very short Basic credential such as `YTpi` is kept.
+
+Notices and request errors redact a known address before attaching its failure reason, so a
+token or signature does not hide the HTTP status or other explanation. The complete query and
+fragment are omitted, including values with unescaped spaces. For an unknown URL embedded in
+free text, a secret-named query or fragment still omits the rest of that text: those later
+words might be part of the credential, not an explanation. The same rule applies to copied
+history errors, saved run messages and notebook cell output. Ambiguous slash-containing userinfo
+is omitted rather than guessed to be a host, port and path. A root address is shown with `/`
+before an omission marker or reason, so repeated redaction keeps its host.
+
+Copied run parameters are sanitized as data, without blanket-omitting JSON/XML syntax.
+Typed addresses lose their keys and credential fields are emptied, but opaque text and nested
+values a tool doesn't describe are kept for replay and flagged with a notice: they can still
+hold credentials, so review copied code before sharing it.
+
 Request and response bodies are not captured by network diagnostics.
 Background requests carry their originating session's weak capture token; failures are not
 broadcast to other embedded or Python sessions. Layer names, file paths and URL paths can
@@ -38,6 +53,20 @@ still identify private data, so review copied diagnostics before sharing them.
 - Web basemaps and tile layers request tiles for the area you view; vector styles can also
   request their tile sources and sprites. These requests reveal the requested map area to the
   servers even when your local layers are not uploaded.
+- The identify pop-up can show a picture from a web address in the clicked feature's data (an
+  `image_url`, `photo` or similar field, or an address ending in `.jpg`, `.png` or `.webp`: see
+  [pop-ups](user-guide/editing.md)). Fetching it tells the server the address names, which the
+  data chooses, your IP address and that the picture was viewed, so it could be used to see who
+  opens a file. The pop-up fetches a picture as it opens only when the address is
+  `https://assets.rustgis.app/…`: exactly that host (in any case), over `https://`, with no port,
+  user name or subdomain. On the desktop a redirect that server answers with is followed, as for
+  any download; the web app refuses it, as it does every download's. Any other picture is fetched only when you click
+  **Show Picture** in the pop-up, which names the server first. Plain `http://` pictures and
+  pictures on this computer or the local network are never fetched; on the desktop that includes
+  a name, or a redirect, that resolves to one. A picture kept in the data itself (a
+  `data:image/…` value) needs no request. A fetched picture is kept in memory for the session, or
+  until a sign-out or a login that ends clears the cached web tiles; the web app also uses the
+  browser's own cache. Links in the pop-up open only when you click them.
 - Web data, remote rasters, cloud storage, database connections and online catalogs contact
   their configured servers. Searches may send keywords, coordinates, an area of interest,
   dates or filters; authenticated connections also send the credentials or tokens required by

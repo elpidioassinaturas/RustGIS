@@ -26,10 +26,16 @@ fn err(e: String) -> DataError {
 
 /// The rows of a small metadata table, as (column name → value) lookups.
 fn meta_rows(db: &Db<Shared>, tables: &[Table], name: &str) -> Result<Vec<Vec<(String, Val)>>> {
-    let t = tables
-        .iter()
-        .find(|t| t.name.eq_ignore_ascii_case(name))
-        .ok_or_else(|| DataError::Format(format!("not a GeoPackage: no {name} table")))?;
+    let Some(t) = tables.iter().find(|t| t.name.eq_ignore_ascii_case(name)) else {
+        // Attribute-only and tile-only packages can omit the geometry registration table.
+        if name.eq_ignore_ascii_case("gpkg_geometry_columns") {
+            if !tables.iter().any(|table| table.name.eq_ignore_ascii_case("gpkg_contents")) {
+                return Err(DataError::Format("not a GeoPackage: no gpkg_contents table".into()));
+            }
+            return Ok(Vec::new());
+        }
+        return Err(DataError::Format(format!("not a GeoPackage: no {name} table")));
+    };
     let mut out = Vec::new();
     let mut too_many = false;
     db.rows(t, |_, r| {
@@ -83,6 +89,58 @@ pub fn layers(bytes: Shared) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// Unsupported contents omitted when an uploaded GeoPackage is added as feature layers, by type.
+pub fn unsupported_table_counts(bytes: Shared) -> Result<Vec<(String, u64)>> {
+    let db = Db::open(bytes).map_err(err)?;
+    let schema = db.tables().map_err(err)?;
+    let registered: std::collections::HashSet<String> = meta_rows(&db, &schema, "gpkg_geometry_columns")?
+        .iter()
+        .filter_map(|row| text(get(row, "table_name")))
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    let table = schema
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case("gpkg_contents"))
+        .ok_or_else(|| DataError::Format("not a GeoPackage: no gpkg_contents table".into()))?;
+    let kind_col = table
+        .columns
+        .iter()
+        .position(|c| c.name.eq_ignore_ascii_case("data_type"))
+        .ok_or_else(|| DataError::Format("GeoPackage: gpkg_contents has no data_type column".into()))?;
+    let name_col = table
+        .columns
+        .iter()
+        .position(|c| c.name.eq_ignore_ascii_case("table_name"))
+        .ok_or_else(|| DataError::Format("GeoPackage: gpkg_contents has no table_name column".into()))?;
+    if [kind_col, name_col].iter().any(|&index| table.columns.get(index).is_some_and(|column| column.generated)) {
+        return Err(DataError::Format("GeoPackage: uploaded catalogs with virtual generated table_name or data_type columns are not supported; materialize these columns or select a feature table explicitly".into()));
+    }
+    let mut counts = std::collections::BTreeMap::<String, u64>::new();
+    let mut invalid = 0u64;
+    // Count in place: the contents catalog can be large without materializing its rows.
+    db.rows(table, |_, row| {
+        let (Some(Val::Text(kind)), Some(Val::Text(name))) = (row.get(kind_col), row.get(name_col)) else {
+            invalid = invalid.saturating_add(1);
+            return ControlFlow::Continue(());
+        };
+        if !registered.contains(&name.to_ascii_lowercase()) {
+            let kind = ["attributes", "features", "tiles", "2d-gridded-coverage"]
+                .into_iter()
+                .find(|known| kind.eq_ignore_ascii_case(known))
+                .unwrap_or("other");
+            *counts.entry(kind.to_string()).or_default() += 1;
+        }
+        ControlFlow::Continue(())
+    })
+    .map_err(err)?;
+    if invalid > 0 {
+        return Err(DataError::Format(format!(
+            "GeoPackage: {invalid} invalid gpkg_contents entry/entries: table_name and data_type must be text"
+        )));
+    }
+    Ok(counts.into_iter().collect())
+}
+
 impl GpkgMemSource {
     /// Opens a feature table (default: the first) of the GeoPackage in `bytes`.
     pub fn open_shared(bytes: Shared, layer: Option<&str>) -> Result<Self> {
@@ -117,6 +175,7 @@ impl GpkgMemSource {
             organization: text(get(r, "organization")),
             code: int(get(r, "organization_coordsys_id")),
             definition: text(get(r, "definition")),
+            definition_12_063: text(get(r, "definition_12_063")),
         });
         let reproject = super::gpkg_reproject(srs_id, row, &mut notes)?;
 
@@ -270,6 +329,7 @@ impl FeatureSource for GpkgMemSource {
         &self.info
     }
 
+    /// Keeps rows without geometry in whole reads; they have no location to match an extent.
     fn read(&self, req: &Request) -> Result<Batch> {
         let limit = clamp_limit(req.limit);
         let native = req.extent.map(|e| self.reproject.extent_from_lonlat(&e));
@@ -278,16 +338,20 @@ impl FeatureSource for GpkgMemSource {
         self.db
             .rows(&self.table, |rowid, r| {
                 let blob = match r.get(self.geom_col) {
-                    Some(Val::Blob(b)) => b,
-                    Some(Val::Null) | None => return ControlFlow::Continue(()),
+                    Some(Val::Blob(b)) if !super::gpkg_blob::is_whole_empty_blob(b) => b,
+                    // A row without geometry (NULL, or an empty one) is kept in a whole read; it
+                    // has no place to match an extent.
+                    Some(Val::Null | Val::Blob(_)) | None => {
+                        if native.is_none() && sample.wants() {
+                            sample.keep(Feature { id: rowid as u64, geometry: None, attrs: self.attrs(r) });
+                        }
+                        return ControlFlow::Continue(());
+                    }
                     Some(_) => {
                         skipped += 1;
                         return ControlFlow::Continue(());
                     }
                 };
-                if super::gpkg_blob::is_empty_blob(blob) {
-                    return ControlFlow::Continue(());
-                }
                 let Some((envelope, body)) = super::gpkg_blob::split_blob(blob) else {
                     skipped += 1;
                     return ControlFlow::Continue(());
@@ -333,35 +397,36 @@ impl FeatureSource for GpkgMemSource {
         let mut failed = None;
         self.db
             .rows(&self.table, |rowid, r| {
-                let blob = match r.get(self.geom_col) {
-                    Some(Val::Blob(b)) => b,
-                    Some(Val::Null) | None => return ControlFlow::Continue(()),
+                let geometry = match r.get(self.geom_col) {
+                    Some(Val::Blob(b)) if !super::gpkg_blob::is_whole_empty_blob(b) => {
+                        let Some((envelope, body)) = super::gpkg_blob::split_blob(b) else {
+                            out.skipped += 1;
+                            return ControlFlow::Continue(());
+                        };
+                        if let (Some(q), Some(e)) = (&native, envelope)
+                            && !e.intersects(q)
+                        {
+                            return ControlFlow::Continue(());
+                        }
+                        let Some(geometry) = wkb::decode(body).and_then(|g| self.reproject.geometry(g)) else {
+                            out.skipped += 1;
+                            return ControlFlow::Continue(());
+                        };
+                        if !in_request(&geometry, &req) {
+                            return ControlFlow::Continue(());
+                        }
+                        Some(geometry)
+                    }
+                    // Without geometry (NULL, or an empty one): kept unless an extent is asked for.
+                    Some(Val::Null | Val::Blob(_)) | None if native.is_none() => None,
+                    Some(Val::Null | Val::Blob(_)) | None => return ControlFlow::Continue(()),
                     Some(_) => {
                         out.skipped += 1;
                         return ControlFlow::Continue(());
                     }
                 };
-                if super::gpkg_blob::is_empty_blob(blob) {
-                    return ControlFlow::Continue(());
-                }
-                let Some((envelope, body)) = super::gpkg_blob::split_blob(blob) else {
-                    out.skipped += 1;
-                    return ControlFlow::Continue(());
-                };
-                if let (Some(q), Some(e)) = (&native, envelope)
-                    && !e.intersects(q)
-                {
-                    return ControlFlow::Continue(());
-                }
-                let Some(geometry) = wkb::decode(body).and_then(|g| self.reproject.geometry(g)) else {
-                    out.skipped += 1;
-                    return ControlFlow::Continue(());
-                };
-                if !in_request(&geometry, &req) {
-                    return ControlFlow::Continue(());
-                }
                 out.matched += 1;
-                match chunks.push(Feature { id: rowid as u64, geometry: Some(geometry), attrs: self.attrs(r) }) {
+                match chunks.push(Feature { id: rowid as u64, geometry, attrs: self.attrs(r) }) {
                     Ok(()) => ControlFlow::Continue(()),
                     Err(e) => {
                         failed = Some(e);

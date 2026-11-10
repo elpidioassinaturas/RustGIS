@@ -105,19 +105,17 @@ fn fetch(root: &str, keys: &[String]) -> Result<(HashMap<String, Vec<u8>>, usize
                         if failure.lock().is_ok_and(|f| f.is_some()) {
                             break;
                         }
-                        // A missing file is an expected answer here (see `is_absent`), not a failure: its 404
-                        // or 403 isn't recorded one by one (one note per server says the
-                        // omission, and a store refusing everything still says "access denied"), while
-                        // a real one (a 500, a timeout) does, with its address, status and duration.
+                        // A missing file is an expected answer here (see `is_absent`), not a failure:
+                        // one omission note replaces its 404/403 diagnostics; real failures still say why.
                         let got = crate::render::rustgis_tiles::cache::download_blocking_omitting(&format!("{root}/{k}"), &[404, 403]);
                         match got {
                             Ok(b) => {
                                 let len = b.len() as u64;
                                 if total.fetch_add(len, std::sync::atomic::Ordering::Relaxed).saturating_add(len) > zarr::MAX_READ {
                                     if let Ok(mut f) = failure.lock() {
-                                        f.get_or_insert(format!(
-                                            "{root}: more than {} GB to read: take a smaller part",
-                                            zarr::MAX_READ >> 30
+                                        f.get_or_insert(crate::sources::message_with_address(
+                                            root,
+                                            &format!("more than {} GB to read: take a smaller part", zarr::MAX_READ >> 30),
                                         ));
                                     }
                                     break;
@@ -133,7 +131,7 @@ fn fetch(root: &str, keys: &[String]) -> Result<(HashMap<String, Vec<u8>>, usize
                             }
                             Err(e) => {
                                 if let Ok(mut f) = failure.lock() {
-                                    f.get_or_insert(format!("{root}/{k}: {e}"));
+                                    f.get_or_insert(crate::sources::message_with_address(&format!("{root}/{k}"), &e));
                                 }
                             }
                         }
@@ -208,10 +206,10 @@ fn store_at(url: &str) -> Result<zarr::Store, String> {
     let (got, forbidden) = fetch(url, &keys)?;
     // Every metadata file refused: access is denied, not a store without metadata.
     if got.is_empty() && forbidden > 0 {
-        return Err(format!("{url}: access denied (HTTP 403)"));
+        return Err(crate::sources::message_with_address(url, "access denied (HTTP 403)"));
     }
     let docs: Vec<(String, Vec<u8>)> = got.into_iter().collect();
-    zarr::parse_store(&docs).map_err(|e| format!("{url}: {e}"))
+    zarr::parse_store(&docs).map_err(|e| crate::sources::message_with_address(url, &e.to_string()))
 }
 
 fn info(_s: &mut Session, p: &Value) -> CmdResult {
@@ -264,6 +262,16 @@ pub fn pick_variable(store: &zarr::Store, sel: &mut zarr::Selection) -> Result<(
     Ok(())
 }
 
+/// Keep a typed WKT's compatibility choice with the decoded raster's other read notices.
+fn crs_lost(r: &mut raster::Raster, text: Option<&str>) {
+    if let Some(text) = text
+        && let Some(note) = raster::wkt::projection_compatibility_note(text, r.crs)
+        && !r.lost.iter().any(|existing| existing == note)
+    {
+        r.lost.push(note.to_string());
+    }
+}
+
 pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
     if b(p, "time") == Some(true) {
         return add_following(s, p);
@@ -281,6 +289,7 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         let i = s.downloaded.iter().position(|(d, _)| *d == id).ok_or("no such read (it was dropped when another project opened)")?;
         let (_, tif) = s.downloaded.remove(i);
         let mut r = raster::read_bytes("zarr.tif", &tif).map_err(|e| e.to_string())?;
+        crs_lost(&mut r, crs);
         r.source = Some(root.clone());
         let name = ps(p, "name").map(str::to_string).unwrap_or_else(|| layer_name(&root, &sel, &[]));
         let mut layer = RasterLayer::from_bytes(r, format!("{}.tif", store_name(&root)), tif);
@@ -303,7 +312,8 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         Source::Dir(d) => {
             let store = zarr::read_metadata(Path::new(&d)).map_err(|e| format!("{d}: {e}"))?;
             pick_variable(&store, &mut sel)?;
-            let r = zarr::read_dir(Path::new(&d), &sel.label(), crs).map_err(|e| format!("{d}: {e}"))?;
+            let mut r = zarr::read_dir(Path::new(&d), &sel.label(), crs).map_err(|e| format!("{d}: {e}"))?;
+            crs_lost(&mut r, crs);
             let name = ps(p, "name").map(str::to_string).unwrap_or_else(|| r.name.clone());
             // Absolute, so the project finds the store again from anywhere.
             let full = std::path::absolute(&d).map(|p| p.display().to_string()).unwrap_or(d);
@@ -315,13 +325,18 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         Source::Url(u) => {
             let store = store_at(&u)?;
             pick_variable(&store, &mut sel)?;
-            let plan = zarr::plan(&store, &sel).map_err(|e| format!("{u}: {e}"))?;
+            let plan = zarr::plan(&store, &sel).map_err(|e| crate::sources::message_with_address(&u, &e.to_string()))?;
             let (chunks, forbidden) = fetch(&u, &plan.keys)?;
             if forbidden > 0 {
-                return Err(format!("{u}: access denied (HTTP 403) to {forbidden} of the slice's chunks"));
+                return Err(crate::sources::message_with_address(
+                    &u,
+                    &format!("access denied (HTTP 403) to {forbidden} of the slice's chunks"),
+                ));
             }
             let name = ps(p, "name").map(str::to_string).unwrap_or_else(|| layer_name(&u, &sel, &[]));
-            let mut r = zarr::assemble(&store, &plan, &chunks, &name, crs_parsed).map_err(|e| format!("{u}: {e}"))?;
+            let mut r = zarr::assemble(&store, &plan, &chunks, &name, crs_parsed)
+                .map_err(|e| crate::sources::message_with_address(&u, &e.to_string()))?;
+            crs_lost(&mut r, crs);
             r.source = Some(u.clone());
             // Kept in the project as a GeoTIFF: a web store isn't fetched again when it opens.
             let tif = raster::geotiff::write(&r, 0).map_err(|e| e.to_string())?;
@@ -391,7 +406,7 @@ pub(crate) fn slice_key(zt: &ZarrTime, i: usize) -> String {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or_else(String::new, |d| d.as_millis().to_string())
     };
-    format!("{}\u{0}{}\u{0}{}\u{0}{changed}", zt.store, zt.selection(i), zt.crs.as_deref().unwrap_or(""))
+    format!("{}\u{0}{}\u{0}{}\u{0}{changed}\u{0}{}", zt.store, zt.selection(i), zt.crs.as_deref().unwrap_or(""), zt.read_generation)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -529,7 +544,9 @@ pub(crate) fn read_step(zt: &ZarrTime, i: usize, key: String) -> Result<std::syn
         cache::check_still(&still)?;
         return Ok(r);
     }
-    let r = std::sync::Arc::new(read_slice(zt, i)?.ok_or_else(|| format!("{}: step {i} has no data written", zt.store))?);
+    let r = std::sync::Arc::new(
+        read_slice(zt, i)?.ok_or_else(|| crate::sources::message_with_address(&zt.store, &format!("step {i} has no data written")))?,
+    );
     // Validate outside shared locks: a predicate may consult other runtime state.
     cache::check_still(&still)?;
     if let Ok(mut f) = failed_ahead().lock() {
@@ -565,7 +582,10 @@ pub(crate) fn read_slice(zt: &ZarrTime, i: usize) -> Result<Option<raster::Raste
         let (chunks, forbidden) = fetch(&zt.store, &plan.keys)?;
         // A chunk refused (HTTP 403) isn't one never written: it's said, not read as fill.
         if forbidden > 0 {
-            return Err(format!("{}: access denied (HTTP 403) to {forbidden} of the slice's chunks", zt.store));
+            return Err(crate::sources::message_with_address(
+                &zt.store,
+                &format!("access denied (HTTP 403) to {forbidden} of the slice's chunks"),
+            ));
         }
         let crs = crs.map(Crs::parse).transpose()?;
         zarr::assemble(&st, &plan, &chunks, &sel, crs)
@@ -575,7 +595,10 @@ pub(crate) fn read_slice(zt: &ZarrTime, i: usize) -> Result<Option<raster::Raste
     // A step none of whose chunks is there was never written (Zarr's fill value): `None`, told
     // apart by its error kind, not its message.
     match read {
-        Ok(r) => Ok(Some(r)),
+        Ok(mut r) => {
+            crs_lost(&mut r, crs);
+            Ok(Some(r))
+        }
         Err(rustgis_data::DataError::NoChunks(_)) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
@@ -583,18 +606,75 @@ pub(crate) fn read_slice(zt: &ZarrTime, i: usize) -> Result<Option<raster::Raste
 
 /// Reopens the same time-following variable from a replacement local store.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn relink_following(s: &Session, rl: &RasterLayer, full: &str) -> Result<RasterLayer, String> {
+pub(crate) fn relink_following(
+    slider: Option<&rustgis_map::time::TimeSlider>,
+    rl: &RasterLayer,
+    full: &str,
+) -> Result<RasterLayer, String> {
     let zt = rl.time_zarr.as_ref().ok_or("the raster has no time-following variable")?;
     let store = zarr::read_metadata(Path::new(full)).map_err(|e| format!("{full}: {e}"))?;
     if !store.variables().iter().any(|v| v.path == zt.variable) {
         return Err(format!("{full} has no variable '{}': choose the store the layer was added from", zt.variable));
     }
-    let mut zt = ZarrTime { store: full.into(), shown: None, ..zt.clone() };
+    let coords = store_files(full, &zarr::coordinate_keys(&store, &zt.variable))?;
+    let (dim, dates) =
+        zarr::time_axis(&store, &zt.variable, &coords).ok_or_else(|| format!("{full}: {} no longer has a time axis", zt.variable))?;
+    if dim != zt.dim || !dates.iter().all(|d| d.is_finite()) || !dates.windows(2).all(|w| w[0] < w[1]) {
+        return Err(format!("{full}: {}'s time axis is incompatible with the layer", zt.variable));
+    }
+    let missing_period =
+        || format!("{full}: {} no longer contains the selected time period unchanged; existing layer retained", zt.variable);
+    // Preserve the selected dates, not their old numeric positions: earlier steps may have
+    // been inserted since the layer was opened.
+    let first = zt.dates.first().ok_or_else(missing_period)?;
+    let start = dates.binary_search_by(|date| date.total_cmp(first)).map_err(|_| missing_period())?;
+    let dates = dates.get(start..start.saturating_add(zt.dates.len())).ok_or_else(missing_period)?;
+    if dates != zt.dates {
+        return Err(missing_period());
+    }
+    let offset = u64::try_from(start).map_err(|_| missing_period())?;
+    let mut zt = ZarrTime {
+        store: full.into(),
+        offset,
+        shown: None,
+        read_generation: rustgis_map::raster::next_read_generation(),
+        dates: dates.to_vec(),
+        ..zt.clone()
+    };
     zt.repair();
-    let window = s.map().time.as_ref().map(rustgis_map::time::TimeSlider::window);
+    if let Some(slider) = slider {
+        // Binary search the sorted candidate axis for each window, not dates × steps.
+        // Calendar windows can have gaps (a month after Feb 28 precedes a Mar 31 step).
+        let intersects = |from: f64, to: f64| zt.dates.get(zt.dates.partition_point(|date| *date < from)).is_some_and(|date| *date < to);
+        let reachable = if slider.dates.is_empty() {
+            let k = i64::from(slider.interval.max(1));
+            slider.steps().iter().any(|current| {
+                let from = if slider.cumulative {
+                    f64::NEG_INFINITY
+                } else {
+                    rustgis_data::time::add(*current, slider.unit, -i64::from(slider.before) * k)
+                };
+                let to = rustgis_data::time::add(*current, slider.unit, i64::from(slider.after) * k);
+                intersects(from, to.max(from))
+            })
+        } else {
+            // Irregular windows end at a listed date: consecutive windows cover the axis.
+            let first = slider.dates.first().copied().unwrap_or(slider.start);
+            let last = slider.dates.last().copied().unwrap_or(slider.start);
+            intersects(if slider.cumulative { f64::NEG_INFINITY } else { first }, last + 1.0)
+        };
+        if !reachable {
+            return Err(format!(
+                "{full}: {}'s replacement dates are outside every time slider window; adjust the time slider's range or dates, then retry Reload Data or Repair Data Source",
+                zt.variable
+            ));
+        }
+    }
+    let window = slider.map(rustgis_map::time::TimeSlider::window);
     let want = zt.step_for(window);
     let i = want.unwrap_or(0);
     let r = read_step(&zt, i, slice_key(&zt, i))?;
+    rl.validate_replacement(&r, full)?;
     zt.shown = want;
     let mut new = rl.clone();
     new.path = Some(full.into());
@@ -626,6 +706,7 @@ impl ReadWaits {
             && read.zt.store == zt.store
             && read.zt.crs == zt.crs
             && read.zt.selection(i) == zt.selection(i)
+            && read.zt.read_generation == zt.read_generation
         {
             return read.clone();
         }
@@ -650,6 +731,15 @@ impl ReadWaits {
     fn retain(&mut self, waiting: &std::collections::HashSet<(u64, u64)>) {
         self.layers.retain(|owner, _| waiting.contains(owner));
         self.shared.retain(|_, read| read.strong_count() > 0);
+    }
+
+    /// Stops new requests joining reads begun before a reload (`Some(store)`) or a project
+    /// replacement (`None`): those read what the store held then. Their own layers still poll them.
+    pub(crate) fn forget_shared(&mut self, store: Option<&str>) {
+        match store {
+            Some(store) => self.shared.retain(|(s, ..), _| s != store),
+            None => self.shared.clear(),
+        }
     }
 }
 
@@ -1022,11 +1112,12 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
             dates: picked,
             crs,
             shown: None,
+            read_generation: rustgis_map::raster::next_read_generation(),
         };
         zt.repair();
         // The first step read before the slider is touched, so a store that can't be read leaves
         // the map as it was.
-        let first = read_step(&zt, 0, slice_key(&zt, 0)).map_err(|e| format!("{root}: {e}"))?;
+        let first = read_step(&zt, 0, slice_key(&zt, 0)).map_err(|e| crate::sources::message_with_address(&root, &e))?;
         // The slider, on over the variable's dates when it is off.
         if s.map().time.is_none() {
             let dates: Vec<Value> = zt.dates.iter().map(|d| serde_json::json!(d)).collect();
@@ -1036,7 +1127,7 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         let want = zt.step_for(window);
         // The first slice the layer shows sets its style; with no step in the window, the first step's.
         let r = match want {
-            Some(i) if i != 0 => read_step(&zt, i, slice_key(&zt, i)).map_err(|e| format!("{root}: {e}"))?,
+            Some(i) if i != 0 => read_step(&zt, i, slice_key(&zt, i)).map_err(|e| crate::sources::message_with_address(&root, &e))?,
             _ => first,
         };
         let mut layer = RasterLayer::from_path((*r).clone(), root.clone());
@@ -1090,6 +1181,7 @@ struct SeriesSource {
     /// A layer's period of the axis (a following layer's offset and dates), else the whole axis.
     period: Option<(u64, usize)>,
     crs: Option<String>,
+    read_generation: u64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1105,6 +1197,7 @@ fn series_source(s: &Session, p: &Value) -> Result<SeriesSource, String> {
                 sel: zarr::Selection { variable: zt.variable.clone(), index: zt.index.clone() },
                 period: Some((zt.offset, zt.dates.len())),
                 crs: zt.crs.clone(),
+                read_generation: zt.read_generation,
             });
         }
         // A slice: its store is its folder, or the address it was read from.
@@ -1114,13 +1207,19 @@ fn series_source(s: &Session, p: &Value) -> Result<SeriesSource, String> {
             .clone()
             .or_else(|| rl.data.as_ref().and_then(|d| d.source.clone()))
             .ok_or_else(|| format!("{}: its store isn't known", l.name))?;
-        return Ok(SeriesSource { root, sel: zarr::Selection::parse(&label), period: None, crs: rl.crs.clone() });
+        return Ok(SeriesSource {
+            root,
+            sel: zarr::Selection::parse(&label),
+            period: None,
+            crs: rl.crs.clone(),
+            read_generation: rustgis_map::raster::next_read_generation(),
+        });
     }
     let root = match source(p)? {
         Source::Dir(d) | Source::Url(d) => d,
     };
     let crs = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
-    Ok(SeriesSource { root, sel: selection(p), period: None, crs })
+    Ok(SeriesSource { root, sel: selection(p), period: None, crs, read_generation: rustgis_map::raster::next_read_generation() })
 }
 
 /// A store's metadata, and its files `keys`: a folder's read (files only, bounded), a web
@@ -1136,12 +1235,12 @@ fn store_files(root: &str, keys: &[String]) -> Result<HashMap<String, Vec<u8>>, 
             let (got, forbidden) = fetch(root, batch)?;
             // A file refused (HTTP 403) isn't one never written: said, not read as missing.
             if forbidden > 0 {
-                return Err(format!("{root}: access denied (HTTP 403) to {forbidden} of its files"));
+                return Err(crate::sources::message_with_address(root, &format!("access denied (HTTP 403) to {forbidden} of its files")));
             }
             for (k, b) in got {
                 total = total.saturating_add(b.len() as u64);
                 if total > zarr::MAX_READ {
-                    return Err(format!("{root}: the series is too large to read: take a shorter period"));
+                    return Err(crate::sources::message_with_address(root, "the series is too large to read: take a shorter period"));
                 }
                 out.insert(k, b);
             }
@@ -1233,7 +1332,7 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
                 None => {
                     let given =
                         src.crs.as_deref().ok_or("the store doesn't say its coordinate system; give \"crs\" (such as EPSG:3035)")?;
-                    Crs::parse(given)?
+                    super::parse_crs(s, given)?
                 }
             };
             let m = crs
@@ -1443,6 +1542,7 @@ pub fn zarr_cube(s: &Session, p: &Value) -> Result<ZarrCube, String> {
         dates,
         crs: src.crs.clone(),
         shown: None,
+        read_generation: src.read_generation,
     };
     Ok(ZarrCube { zt, period })
 }
