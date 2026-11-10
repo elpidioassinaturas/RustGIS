@@ -4669,16 +4669,17 @@ impl RustGisApp {
     /// its turn, or its place in the queue for one, within a moment. A whole file's transfer
     /// isn't stopped: it runs to its end off the frame, and what it brings is thrown away.
     pub(crate) fn cancel_download(&mut self, id: u64) {
-        let mut cancelled = self.ui.downloads.iter().position(|d| d.0 == id).map(|i| {
+        let cancelled = self.ui.downloads.iter().position(|d| d.0 == id).map(|i| {
             let (_, url, p, _) = self.ui.downloads.remove(i);
             (url, p)
         });
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(i) = self.ui.window_reads.iter().position(|d| d.0 == id) {
+        let cancelled = cancelled.or_else(|| {
+            let i = self.ui.window_reads.iter().position(|d| d.0 == id)?;
             let (_, url, p, _, left) = self.ui.window_reads.remove(i);
             left.store(true, std::sync::atomic::Ordering::Relaxed);
-            cancelled = Some((url, p));
-        }
+            Some((url, p))
+        });
         let Some((url, mut p)) = cancelled else { return };
         connectiontree::take_origin_key(&mut p);
         let e = tl!("cancelled");
