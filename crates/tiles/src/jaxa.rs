@@ -204,9 +204,15 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
         let title = f.get("title").map(String::as_str).filter(|t| !t.is_empty()).unwrap_or(heading.as_str());
         // Listed again once read as cubes, it is one dataset: the listing again is left out, and
         // says so. One whose earlier listing couldn't be a cube is read on its own.
-        if !id.is_empty() && read.contains(id) {
-            let why = "listed again; its first listing, further up the catalog, stands for it".to_string();
+        let leave_out = |c: &mut Catalog, why: String| {
+            // A heading's cut is noted where it is read; a title of its own, here.
+            if title != heading.as_str() {
+                cut_note(&mut c.cut, id, "title", title, 200);
+            }
             c.left_out.push(LeftOut { id: clip(id, 120), title: clip(title, 200), why });
+        };
+        if !id.is_empty() && read.contains(id) {
+            leave_out(&mut c, "listed again; its first listing, further up the catalog, stands for it".to_string());
             continue;
         }
         match cubes_of(id, title, f, &mut c.cut) {
@@ -214,13 +220,7 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
                 read.insert(id);
                 c.entries.extend(es)
             }
-            Err(why) => {
-                // A heading's cut is noted where it is read; a title of its own, here.
-                if title != heading.as_str() {
-                    cut_note(&mut c.cut, id, "title", title, 200);
-                }
-                c.left_out.push(LeftOut { id: clip(id, 120), title: clip(title, 200), why })
-            }
+            Err(why) => leave_out(&mut c, why),
         }
     }
     Ok(c)
@@ -683,6 +683,19 @@ mod tests {
         let later = parse(&format!("# Dataset List\n## A\n{polar}\n## B\n{good}\n")).unwrap();
         assert_eq!((later.entries.len(), later.left_out.len()), (1, 1));
         assert!(later.left_out[0].why.contains("polar"), "{:?}", later.left_out);
+        // A listing again keeps its title, cut and said, as any left out does.
+        let long = good.replace("* title: Test", &format!("* title: {}", "T".repeat(210)));
+        let again = parse(&format!(
+            "# Dataset List
+## A
+{good}
+## B
+{long}
+"
+        ))
+        .unwrap();
+        assert_eq!(again.left_out[0].title.chars().count(), 200);
+        assert_eq!(again.cut, ["JAXA.Test_daily: its title (210 characters) is cut to 200"]);
         assert!(c.left_out.is_empty(), "{:?}", c.left_out);
         assert!(c.cut.is_empty() && twice.cut.is_empty());
         // Text too long is cut, said where and by how much, and its name ends in "…"; its keywords
