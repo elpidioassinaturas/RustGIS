@@ -6354,7 +6354,7 @@ fn render_drawing_inner(map: &mut Map, view: &View) -> Option<vector::Drawing> {
         text::draw(&mut pm, l, view.pixels_per_point as f32);
     }
     text::scale_bar(&mut pm, view, map.ground_res_at(&view.camera));
-    draw_attribution(&mut pm, &r.attribution, view.pixels_per_point as f32);
+    draw_attribution(&mut pm, &r.attribution, view.pixels_per_point as f32, (0.0, 0.0));
     pm.into_drawing()
 }
 
@@ -6368,7 +6368,7 @@ pub fn render_png(map: &mut Map, view: &View) -> Result<Vec<u8>, String> {
         text::draw(&mut pm, l, view.pixels_per_point as f32);
     }
     text::scale_bar(&mut pm, view, map.ground_res_at(&view.camera));
-    draw_attribution(&mut pm, &r.attribution, view.pixels_per_point as f32);
+    draw_attribution(&mut pm, &r.attribution, view.pixels_per_point as f32, (0.0, 0.0));
     let png = pm.into_pixmap().encode_png().map_err(|e| e.to_string())?;
     revisions.finish([&*map], Some(png), "could not encode the image")
 }
@@ -6441,19 +6441,30 @@ fn render_exported(map: &mut Map, view: &View) -> Result<Rendered, String> {
     Ok(r)
 }
 
-/// The tile layers' credits, small, in the bottom-right corner.
-pub(crate) fn draw_attribution(pm: &mut Canvas, attribution: &[String], ppp: f32) {
+/// The size of the tile layers' credits, in points.
+pub(crate) const ATTRIBUTION_SIZE: f32 = 9.0;
+
+/// The tile layers' credits as [`draw_attribution`] writes them, and their width in points on a
+/// canvas `w` points wide; none when there are none.
+pub(crate) fn attribution_text(attribution: &[String], w: f32) -> Option<(String, f32)> {
     if attribution.is_empty() {
-        return;
+        return None;
     }
     let text = attribution.join(" | ");
-    let size = 9.0;
+    let tw = text::measure(&text, ATTRIBUTION_SIZE, false).min(w);
+    Some((text, tw))
+}
+
+/// The tile layers' credits, small, in the bottom-right corner: `inset` points further in (up
+/// from the bottom, in from the right), to keep clear of what sits along those edges.
+pub(crate) fn draw_attribution(pm: &mut Canvas, attribution: &[String], ppp: f32, (bottom, right): (f32, f32)) {
     let (w, h) = (pm.width() as f32 / ppp, pm.height() as f32 / ppp);
-    let tw = text::measure(&text, size, false).min(w);
+    let Some((text, tw)) = attribution_text(attribution, w) else { return };
+    let size = ATTRIBUTION_SIZE;
     let label = PlacedLabel {
         text,
-        x: w - tw / 2.0 - 4.0,
-        y: h - size * 0.9,
+        x: w - right - tw / 2.0 - 4.0,
+        y: h - bottom - size * 0.9,
         size,
         color: Rgba::rgb(0x33, 0x33, 0x33),
         halo: Some(Rgba::rgb(0xFF, 0xFF, 0xFF)),
