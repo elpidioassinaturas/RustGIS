@@ -1657,8 +1657,9 @@ impl RasterLayer {
             RasterRenderer::Colormap => {
                 let ColorHint::Palette(p) = &r.color else { return Vec::new() };
                 let cats = r.bands.first().and_then(|b| b.stats.categories.clone()).unwrap_or_default();
+                // A negative value has no entry in the table, and the map draws none for it.
                 cats.iter()
-                    .filter(|v| !mask.hides(**v as f32))
+                    .filter(|v| **v >= 0.0 && !mask.hides(**v as f32))
                     .filter_map(|v| p.get(*v as usize).map(|c| RasterLegend::Class { color: Rgba(*c), label: class_label(0, *v) }))
                     .collect()
             }
@@ -1955,6 +1956,25 @@ mod tests {
         assert_eq!(rl.legend_classes(false), None);
         rl.style.renderer = RasterRenderer::Rgb { red: 0, green: 0, blue: 0 };
         assert_eq!(rl.legend_classes(true), None);
+    }
+
+    /// A colour table has no entry for a negative value, and the map draws none: neither the
+    /// Layers pane nor a legend lists it (#1679), where `as usize` would have taken entry 0.
+    #[test]
+    fn a_colour_table_lists_no_negative_value() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 0.01, pixel_height: -0.01 };
+        let mut palette = vec![[0, 0, 0, 0]; 256];
+        palette[0] = [10, 20, 30, 255];
+        palette[1] = [200, 0, 0, 255];
+        palette[2] = [0, 200, 0, 255];
+        let values = vec![-1.0, 1.0, 2.0];
+        let r = Raster::new("change", 3, 1, vec![values], gt, Crs::LonLat, None, ColorHint::Palette(palette), "Int16").unwrap();
+        assert_eq!(r.bands[0].stats.categories.as_deref(), Some(&[-1.0, 1.0, 2.0][..]));
+        let mut rl = RasterLayer::from_path(r, "change.tif");
+        rl.style.renderer = RasterRenderer::Colormap;
+        let labels: Vec<String> = rl.legend_classes(false).unwrap().into_iter().map(|(_, l)| l).collect();
+        assert_eq!(labels, ["1", "2"]);
+        assert_eq!(rl.legend().len(), 2, "the Layers pane alike");
     }
 
     /// A mask decides what a legend lists (#1679): one hiding every pixel leaves no Unique Values
