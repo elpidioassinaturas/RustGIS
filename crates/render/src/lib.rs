@@ -2128,7 +2128,10 @@ fn render_tilted(map: &mut Map, view: &View, full_res_rasters: bool, sources_rea
     map.label_lock = lock;
     match &ground {
         Some(g) => {
-            drape_terrain(pm.pixels(), view, map, &kept, g);
+            // Cut short by Cancel, the frame isn't handed on: half its ground would be missing.
+            if !drape_terrain(pm.pixels(), view, map, &kept, g) {
+                return None;
+            }
             tiles_pending |= g.pending();
         }
         None => warp.finish(pm.pixels()),
@@ -2162,8 +2165,9 @@ fn render_tilted(map: &mut Map, view: &View, full_res_rasters: bool, sources_rea
 /// its own stretch of ground, all drawn far to near so nearer slopes hide what lies behind
 /// them; fog with distance, and the sky behind. (Without terrain, [`Warp`] does it per pixel.)
 /// Reading the grids' heights and ordering the triangles (tens of milliseconds) doesn't look at
-/// Cancel; drawing them, the long part, does.
-fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, f64), Pixmap)], ground: &terrain::Ground) {
+/// Cancel; drawing them, the long part, does. False when an export cancelled meanwhile stopped
+/// it, the picture left half drawn.
+fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, f64), Pixmap)], ground: &terrain::Ground) -> bool {
     let (sky, fog) = tilt_sky(map);
     let cam = view.camera;
     let (w, h) = (view.width, view.height);
@@ -2234,7 +2238,7 @@ fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, 
         // An export cancelled meanwhile (see `rustgis_data::progress`) stops here: it writes
         // nothing. The settled frame on screen has no run to cancel.
         if drawn % 4096 == 0 && rustgis_data::progress::check().is_err() {
-            return;
+            return false;
         }
         let (Some((_, _, pic)), Some(grid)) = (bands.get(bi as usize), grids.get(bi as usize)) else { continue };
         let cell = at as usize / 2;
@@ -2261,6 +2265,7 @@ fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, 
             pm.fill_path(&path, &fog_paint(f), FillRule::Winding, Transform::identity(), None);
         }
     }
+    true
 }
 
 /// The two triangles of the cell (`i`, `j`) of a band's grid of `n` cells a side, [a, b, d] and
@@ -7935,21 +7940,12 @@ mod tests {
         if let Some(l) = m.layers.iter_mut().find(|l| l.name == "dem") {
             l.visible = true;
         }
-        let whole = render(&mut m, &view).expect("a frame");
-        // Cancelled, nothing is laid over the fog: an export throws the frame away.
-        let stopped = {
-            let _probe = rustgis_data::progress::install(Some(std::sync::Arc::new(Cancelled)));
-            render(&mut m, &view).expect("a frame")
-        };
-        // The centre row: the relief's shades, or only the fog's colour.
-        let colours = |r: &Rendered| {
-            (0..400)
-                .filter_map(|x| r.pixmap.pixel(x, 150).map(|p| (p.red(), p.green(), p.blue())))
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-        };
-        assert!(colours(&whole) > 10, "{}", colours(&whole));
-        assert_eq!(colours(&stopped), 1);
+        assert!(render(&mut m, &view).is_some());
+        assert!(render_png(&mut m, &view).is_ok());
+        // Cancelled, the frame stops with its ground half laid, and isn't handed on.
+        let _probe = rustgis_data::progress::install(Some(std::sync::Arc::new(Cancelled)));
+        assert!(render(&mut m, &view).is_none());
+        assert!(render_png(&mut m, &view).is_err());
     }
 
     #[test]
