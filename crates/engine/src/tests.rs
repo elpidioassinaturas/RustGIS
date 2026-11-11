@@ -16317,6 +16317,41 @@ fn a_filter_searches_past_the_listing() {
     assert!(s.run("service.layers", &json!({"url": url, "text": caps, "filter": "  "})).unwrap().get("matched").is_none());
 }
 
+/// A search reads again the documents a listing read, so it doesn't say again what reading them
+/// says: Add From Service searches once per pause in typing, and the notices would repeat (#1577).
+/// The answer's notes still say it.
+#[test]
+fn a_search_does_not_repeat_the_listings_notice() {
+    // A landing page whose collections link doesn't get the address's token: one withheld.
+    let url = "https://collections.invalid/root?f=json&token=RGSYNTH_search";
+    let landing = r#"{"links":[{"rel":"data","type":"application/json","href":"/catalog?f=json"}]}"#;
+    let collections: Vec<Value> = (1..=3)
+        .map(|i| json!({"id": format!("c{i}"), "title": format!("C {i}"), "links": [{"rel": "items", "type": "application/geo+json", "href": format!("https://collections.invalid/collections/c{i}/items")}]}))
+        .collect();
+    let documents = json!([{"url": "https://collections.invalid/catalog?f=json", "text": json!({"collections": collections}).to_string()}]);
+    let mut s = Session::new(Project::default());
+    let withheld = |s: &Session, mark| s.notices_since(mark).iter().filter(|n| n.text.contains("didn't get its keys")).count();
+    let said = |v: &Value| v["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("didn't get its keys"));
+    let mark = s.notice_mark();
+    let p = json!({"url": url, "type": "ogcapi", "text": landing, "documents": documents});
+    let listing = s.run("service.layers", &p).unwrap();
+    assert_eq!(withheld(&s, mark), 1, "{:?}", s.notices_since(mark));
+    assert!(said(&listing), "{listing}");
+    for filter in ["c 1", "c 2", "c"] {
+        let mut p = p.clone();
+        p["filter"] = json!(filter);
+        let found = s.run("service.layers", &p).unwrap();
+        assert!(found["matched"].as_u64().unwrap() > 0 && said(&found), "{found}");
+    }
+    assert_eq!(withheld(&s, mark), 1, "{:?}", s.notices_since(mark));
+    // A filter that isn't text is refused, not ignored.
+    for filter in [json!(["c"]), json!(5)] {
+        let mut p = p.clone();
+        p["filter"] = filter;
+        assert!(s.run("service.layers", &p).unwrap_err().contains("filter must be text"));
+    }
+}
+
 /// A layer past what RustGIS reads of a document is refused for that reason, not as absent.
 #[test]
 fn a_layer_past_the_read_limit_is_refused_saying_so() {
