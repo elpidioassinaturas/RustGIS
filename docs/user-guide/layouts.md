@@ -55,8 +55,10 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     size had more than a quarter less, to move by hand if that matters (data under every corner
     alike, such as a context layer filling the frame, isn't worth a warning); two that overlap (a
     frame too small) are said too.
-    The top visible raster gets a colorbar beneath the vector legend if its renderer has a colour
-    scale; RGB and untinted hillshade do not. `"colorbar": "none"` leaves it out, and the legend's
+    The top visible raster on a colour scale (Stretch, a tinted hillshade) gets a colorbar
+    beneath the legend; RGB and untinted hillshade do not. A raster drawn by classes (Colormap,
+    Unique Values, Classify) has its classes in the legend's rows instead, so a map whose only
+    theme is a land cover gets a filled legend and no colorbar. `"colorbar": "none"` leaves it out, and the legend's
     box is sized for the legend alone: hiding the colorbar afterwards would leave its room empty
     in the box. The legend takes the fewest columns, up to three,
     that fit the largest rectangle the map leaves free; when none fits, a long one is laid in more
@@ -190,6 +192,15 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     (`"allClasses": true`) to list every class of every visible layer instead, and **Hide other
     values** (`"hideOther": true`) to leave `<all other values>` out of the legend in either
     mode (the features it stands for are still drawn).
+  - **Rasters drawn by classes** (Colormap, Unique Values, Classify) are listed under their name
+    with the rows the Layers pane shows for them: a swatch of each class's colour and its label,
+    the class name in the file when it has one, else the value or the range. The legend lists the
+    classes the raster holds (the values in its statistics, without those its mask hides; for
+    Classify on a raster with too many values to list, the classes from its lowest value to its
+    highest), and with **All classes** every class of a Unique Values or Classify renderer. A
+    colour table lists the values the raster holds either way: its 256 entries have no
+    meaningful "all". Rasters on a ramp (Stretch, a tinted hillshade) and RGB composites are left
+    out: a colorbar keys the ramp. **Exclude** leaves a classified raster out by its name.
   - **Columns** (`"columns"`, 1 to 3): its rows side by side under its title, as even as they go,
     each column as wide as its widest row, with its own column of symbols, and a layer's name
     staying with the row under it. The box keeps its size, so widen it for the columns: in a box

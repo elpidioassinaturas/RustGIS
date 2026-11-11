@@ -1958,8 +1958,8 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             update(app, font);
         }
     }
-    // The layers a legend lists: a checkbox for each vector layer of its frame's map and each
-    // WMS or WMTS layer with a legend, ticked when listed. Names gone from the map drop out of
+    // The layers a legend lists: a checkbox for each vector layer of its frame's map, each raster
+    // drawn by classes (#1679) and each WMS or WMTS layer with a legend, ticked when listed. Names gone from the map drop out of
     // the list as it's written back.
     if let ElementKind::Legend { frame, exclude, .. } = &e.kind {
         let map = layout.element(*frame).and_then(|f| match &f.kind {
@@ -1970,7 +1970,7 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
             .map(|m| {
                 // Once each: layers may share a name, and the legend leaves names out.
                 let mut names: Vec<String> = Vec::new();
-                let listed = m.layers.iter().filter(|l| !l.graphics && !l.is_raster()).map(|l| &l.name);
+                let listed = m.layers.iter().filter(|l| rustgis_engine::render::layout::legend_lists(l)).map(|l| &l.name);
                 for name in listed.chain(m.tiles.iter().filter(|t| !t.legends.is_empty()).map(|t| &t.name)) {
                     if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
                         names.push(name.clone());
@@ -1979,7 +1979,8 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                 names
             })
             .unwrap_or_default();
-        // The names left out that the map still has, those not listed here (a raster's) too.
+        // The names left out that the map still has, those not listed here (a raster's on a ramp)
+        // too.
         let kept: Vec<String> = exclude
             .iter()
             .filter(|x| {
