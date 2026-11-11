@@ -177,9 +177,10 @@ fn stretch(p: &Value) -> Result<f32, String> {
 /// of the time slider. Each tile is a tile layer reading its file of the year the slider is at
 /// (`time_urls`, as `stac.addCube` makes them); a year a tile has no file for shows nothing, said.
 /// The tiles come from one read of the index, which holds every year (the command line waits for
-/// it), or from the app's search off the frame (`found`). Natively only the first tile's latest
-/// year's header is read before the layers are added, as `embeddings.add` reads one tile's; the
-/// rest are read in place as the map draws them.
+/// it), or from the app's search off the frame (`found`). Without `found`, natively, only the
+/// first tile's latest year's header is read before the layers are added, as `embeddings.add`
+/// reads one tile's; with `found` (the pane, on the frame) no header is read. The rest are read in
+/// place as the map draws them.
 ///
 /// Without `found` the command runs on its caller's thread and waits there for the index and that
 /// header, as `embeddings.search` and `embeddings.add` do: the command line, Python and the
@@ -247,7 +248,10 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
     // command in it (on the frame).
     let mut probe = cfg!(not(target_arch = "wasm32")) && !s.leave_downloads && given.is_none();
     let span = usize::try_from(end - start + 1).unwrap_or(1);
-    let (mut dates, mut missing, many) = (Vec::new(), 0usize, series.len() > 1);
+    // A tile's place goes in its layer's name when the cube has several, or when a tile layer
+    // already has the name (the pane adds one tile at a time).
+    let tagged = series.len() > 1 || s.map().tiles.iter().any(|t| t.name == base);
+    let (mut dates, mut missing) = (Vec::new(), 0usize);
     for years in &series {
         missing += span.saturating_sub(years.len());
         let urls: Vec<(f64, String)> = years.iter().map(|(y, u)| (emb::year_start_ms(*y), cog::with_look(u, &look))).collect();
@@ -267,7 +271,7 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
                 }
             }
         }
-        let name = match (many, emb::aef_place(&file)) {
+        let name = match (tagged, emb::aef_place(&file)) {
             (true, Some(place)) => format!("{base} · {place}"),
             _ => base.clone(),
         };
@@ -606,6 +610,14 @@ mod tests {
         t.run("embeddings.addCube", &json!({"dataset": "alphaearth", "start": 2024, "found": one, "name": "AEF"})).unwrap();
         assert_eq!(t.map().tiles.first().map(|l| l.name.as_str()), Some("AEF"));
         assert!(!t.notices.iter().any(|n| n.text.contains("tile-years")));
+        // The pane adds a tile at a time: a second cube of the same name takes its place in it.
+        let mut w = Session::new(Project::default());
+        for place in [a, b] {
+            let one = json!([{"years": {"2024": file(2024, place)}}]);
+            w.run("embeddings.addCube", &json!({"dataset": "alphaearth", "found": one})).unwrap();
+        }
+        let names: Vec<&str> = w.map().tiles.iter().map(|l| l.name.as_str()).collect();
+        assert!(names.len() == 2 && names[0] != names[1] && names.iter().any(|n| n.ends_with(b)), "{names:?}");
         // A search that read part of the index: the missing years are the read's, said so; a tile
         // with no file in the years asked for is left out, said.
         let mut u = Session::new(Project::default());

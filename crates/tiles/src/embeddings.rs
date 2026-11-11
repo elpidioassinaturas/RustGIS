@@ -373,8 +373,10 @@ const SAME_PLACE: f64 = 1e-4;
 /// Whether two rows are one tile's: the same coordinate system, and footprints whose corners
 /// agree to [`SAME_PLACE`].
 fn same_place(a: &Tile, b: &Tile) -> bool {
-    let crs = |t: &Tile| t.detail.split(" · ").next().unwrap_or("").to_string();
-    crs(a) == crs(b) && a.bbox.iter().zip(b.bbox.iter()).all(|(x, y)| (x - y).abs() <= SAME_PLACE)
+    fn crs(t: &Tile) -> &str {
+        t.detail.split(" · ").next().unwrap_or("")
+    }
+    a.bbox.iter().zip(b.bbox.iter()).all(|(x, y)| (x - y).abs() <= SAME_PLACE) && crs(a) == crs(b)
 }
 
 /// The tiles of the years `first` to `last` in what the index read, each with its file a year,
