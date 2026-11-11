@@ -2674,9 +2674,9 @@ fn legend_fit_warnings(columns: usize, (w, h): (f64, f64), (room_w, room_h): (f6
 /// What a legend of `map` can't key, or keys only in part, for the rasters it shows by classes
 /// (#1679), those `exclude` leaves out aside: one warning a kind, with how many and their names.
 /// A colour table over more values than a legend can list (over 256, or not whole numbers) gives
-/// no class and no key; classes taken from an overview's statistics (a COG read in place) can
-/// miss a rare one the map draws at full resolution, unless `all_classes` lists every class of the
-/// renderer.
+/// no class and no key; classes taken from an overview's statistics (a COG read in place), or from
+/// a sample of a large raster under a mask, can miss a rare one the map draws, unless
+/// `all_classes` lists every class of the renderer.
 fn raster_key_notices(map: &Map, exclude: &[String], all_classes: bool) -> Vec<String> {
     let shown: Vec<(&str, &rustgis_map::RasterLayer)> = map
         .layers
@@ -2689,6 +2689,7 @@ fn raster_key_notices(map: &Map, exclude: &[String], all_classes: bool) -> Vec<S
     };
     let unlisted = names(&rustgis_map::RasterLayer::classes_unknown);
     let reduced = names(&|r| r.classes_from_overview(all_classes));
+    let sampled = names(&|r| r.classes_from_sample(all_classes));
     let mut said = Vec::new();
     if !unlisted.is_empty() {
         said.push(format!(
@@ -2702,6 +2703,13 @@ fn raster_key_notices(map: &Map, exclude: &[String], all_classes: bool) -> Vec<S
             "{} raster(s) drawn by classes were read through an overview, so the legend lists the classes found there and may miss a rare one the map draws: {}",
             reduced.len(),
             reduced.join(", ")
+        ));
+    }
+    if !sampled.is_empty() {
+        said.push(format!(
+            "{} raster(s) drawn by classes under a mask have more cells than their masked statistics read, so the legend lists the classes of a sample and may miss a rare one the map draws: {}",
+            sampled.len(),
+            sampled.join(", ")
         ));
     }
     said
@@ -3006,6 +3014,11 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
         }
         _ => None,
     };
+    // A colorbar with nothing to show says why, as a notice the app shows.
+    let empty_colorbar = match &k {
+        ElementKind::Colorbar { frame, layer: None, .. } => colorbar_without_raster(s, i, *frame),
+        _ => None,
+    };
     let l = s.project.layouts.get_mut(i).ok_or("no layout")?;
     let id = l.add(name, rect, k);
     // In columns, or with labels of its own (which may be wider than its box), it says what it
@@ -3017,11 +3030,38 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
     if kind == "legend" {
         say_raster_keys(s, i, id);
     }
+    if let Some(said) = empty_colorbar {
+        s.warn(said);
+    }
     let mut out = json!({"element": id});
     if let Some(w) = warning {
         out["warning"] = json!(w);
     }
     Ok(out)
+}
+
+/// What a colorbar with no layer of its own on `frame` says when the frame's map shows no raster
+/// with a colour scale for it but one drawn by classes (#1679): it draws an empty placeholder, and
+/// the legend lists those classes. `None` otherwise.
+fn colorbar_without_raster(s: &Session, li: usize, frame: u32) -> Option<String> {
+    let l = s.project.layouts.get(li)?;
+    let Some(ElementKind::MapFrame { map, .. }) = l.element(frame).map(|f| &f.kind) else { return None };
+    let m = s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map))?;
+    if rustgis_map::layout::colorbar_layer(m, None).is_some() {
+        return None;
+    }
+    let classed: Vec<&str> = m
+        .layers
+        .iter()
+        .filter(|l| m.shows(l) && l.raster.as_ref().is_some_and(|r| r.style.renderer.draws_classes()))
+        .map(|l| l.name.as_str())
+        .collect();
+    (!classed.is_empty()).then(|| {
+        format!(
+            "the colorbar has no raster with a colour scale to show, so it draws an empty placeholder: {} is drawn by classes, which the legend lists (give \"layer\" to show it on the colorbar)",
+            classed.join(", ")
+        )
+    })
 }
 
 /// The raster layer a colorbar on `frame` shows: `name` checked against the frame's map, or the

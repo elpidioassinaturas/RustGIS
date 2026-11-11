@@ -1574,8 +1574,8 @@ pub const MAX_COLORBAR_VALUES: usize = 64;
 /// Colours sampled along a continuous colorbar.
 const RAMP_SAMPLES: usize = 256;
 
-/// The raster layer a colorbar shows: `layer` by name, or the topmost visible raster with a colour
-/// scale ([`color_scale`]) that isn't drawn by classes: a legend lists those (#1679), and a colorbar
+/// The raster layer a colorbar shows: `layer` by name, or the topmost raster the map shows (its
+/// groups visible too) with a colour scale ([`color_scale`]) that isn't drawn by classes: a legend lists those (#1679), and a colorbar
 /// of their codes would be the only key a land cover had. An RGB composite or a land cover over a
 /// DEM leaves it to the DEM.
 pub fn colorbar_layer<'a>(map: &'a Map, layer: Option<&str>) -> Option<&'a Layer> {
@@ -1584,7 +1584,7 @@ pub fn colorbar_layer<'a>(map: &'a Map, layer: Option<&str>) -> Option<&'a Layer
         None => map
             .layers
             .iter()
-            .filter(|l| l.visible)
+            .filter(|l| map.shows(l))
             .find(|l| l.raster.as_ref().is_some_and(|r| !r.style.renderer.draws_classes() && color_scale(r).is_some())),
     }
 }

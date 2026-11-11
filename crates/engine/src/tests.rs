@@ -7771,6 +7771,10 @@ fn a_publication_lists_a_land_covers_classes_instead_of_a_colorbar() {
             .unwrap();
     }
     s.run("layer.move", &json!({"layer": "Altitude", "to": 99})).unwrap();
+    // A colorbar added with the DEM to show says nothing of a placeholder.
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "colorbar"})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("empty placeholder")));
     let r = s.run("layout.publication", &p).unwrap();
     let l = s.project.layouts.last().unwrap();
     let bar = l.elements.iter().find_map(|e| match &e.kind {
@@ -7872,6 +7876,21 @@ fn a_publication_keys_the_raster_under_an_rgb_and_says_an_unlisted_colour_table(
         _ => panic!("no colorbar"),
     };
     assert_eq!(shown(l), None, "the land cover's classes are in the legend, not on a colorbar");
+    // It says so, once; one naming the land cover shows it, and says nothing.
+    let placeholder = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("empty placeholder")).map(|n| n.text.clone()).collect()
+    };
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "colorbar"})).unwrap();
+    assert_eq!(
+        placeholder(&s, mark),
+        [
+            "the colorbar has no raster with a colour scale to show, so it draws an empty placeholder: Uso do solo is drawn by classes, which the legend lists (give \"layer\" to show it on the colorbar)"
+        ]
+    );
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "colorbar", "layer": "Uso do solo"})).unwrap();
+    assert!(placeholder(&s, mark).is_empty());
     // Its classes read through an overview: said once, by the publication and the legend, unless the
     // land cover is left out.
     if let Some(r) = s.map_mut().layers[0].raster.as_mut().and_then(|r| r.data.as_mut()) {

@@ -3615,6 +3615,15 @@ mod tests {
         // Named: a colorbar with no layer leaves a raster drawn by classes to the legend (#1679).
         assert!(rustgis_map::layout::colorbar_layer(&classes, None).is_none());
         assert!(rustgis_map::layout::colorbar_layer(&map, None).is_some(), "a stretch is the default's");
+        // A stretched raster in a hidden group isn't the default's: the one the map shows is.
+        let mut hidden = map.clone();
+        let top = hidden.layers[0].clone();
+        let id = hidden.add_raster("hidden", top.raster.clone().unwrap());
+        let mut group = rustgis_map::LayerGroup::new("off");
+        group.visible = false;
+        group.children.push(id);
+        hidden.add_group(group);
+        assert_eq!(rustgis_map::layout::colorbar_layer(&hidden, None).map(|l| l.name.as_str()), Some("dem"));
         let pm = colorbar_page(&classes, Orientation::Horizontal, false, "");
         let mut colours: Vec<(u8, u8, u8)> = ((16.0 * k) as u32..(84.0 * k) as u32).map(|x| rgb(&pm, x, y)).collect();
         colours.dedup();
