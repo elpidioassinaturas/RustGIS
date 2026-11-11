@@ -706,7 +706,13 @@ pub(crate) fn layers(s: &mut Session, p: &Value) -> CmdResult {
     let p = bound.as_ref();
     let words: Vec<String> = match p.get("filter") {
         None | Some(Value::Null) => Vec::new(),
-        Some(Value::String(f)) => f.split_whitespace().map(str::to_lowercase).collect(),
+        // Each word once: a repeated one would be looked for again in every layer it's in.
+        Some(Value::String(f)) => {
+            let mut words: Vec<String> = f.split_whitespace().map(str::to_lowercase).collect();
+            words.sort_unstable();
+            words.dedup();
+            words
+        }
         Some(_) => return Err("filter must be text: the words a layer's title or name must all contain".into()),
     };
     let mut found = discover_matching(s, p, false, &words)?;

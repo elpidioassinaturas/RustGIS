@@ -16344,6 +16344,11 @@ fn a_search_does_not_repeat_the_listings_notice() {
         assert!(found["matched"].as_u64().unwrap() > 0 && said(&found), "{found}");
     }
     assert_eq!(withheld(&s, mark), 1, "{:?}", s.notices_since(mark));
+    // A word given many times is looked for once, with the same answer.
+    let mut many = p.clone();
+    many["filter"] = json!(vec!["c"; 50_000].join(" ") + " 2");
+    let found = s.run("service.layers", &many).unwrap();
+    assert_eq!(found["matched"], 1, "{found}");
     // A filter that isn't text is refused, not ignored.
     for filter in [json!(["c"]), json!(5)] {
         let mut p = p.clone();
