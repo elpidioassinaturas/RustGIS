@@ -697,6 +697,21 @@ mod tests {
         }
     }
 
+    /// What a search over the years left out is said, each with its count; a whole search says
+    /// nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn series_notes_say_what_a_search_left_out() {
+        let whole = emb::SeriesFound { complete: true, ..Default::default() };
+        assert!(series_notes(&whole).is_empty(), "a whole search says nothing");
+        let gaps = emb::SeriesFound { complete: false, dropped: 61, duplicates: 2, ..Default::default() };
+        let notes = series_notes(&gaps);
+        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert!(notes.iter().any(|n| n == PART_READ), "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("61 tiles past the 60 a search lists were left out")), "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("2 tile-years had a second file in the index")), "{notes:?}");
+    }
+
     /// A plugin's command in the app (`leave_downloads`) doesn't read an AlphaEarth tile's header
     /// on the frame: the layer is added and read as the map draws.
     #[cfg(not(target_arch = "wasm32"))]
