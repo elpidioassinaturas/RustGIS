@@ -362,7 +362,9 @@ fn draw_page(
                     text_block(&mut pm, r, &s, *size as f32, *color, style, ppp);
                 } else {
                     let room = text_room(r, &s, *size as f32, style, ppp);
-                    turned(&mut pm, r, *rotation as f32, room, |c, r, k| text_block(c, r, &s, *size as f32, *color, style, ppp * k));
+                    draw_turned_box(&mut pm, r, *rotation as f32, room, |c, r, k| {
+                        text_block(c, r, &s, *size as f32, *color, style, ppp * k)
+                    });
                 }
             }
             ElementKind::Picture { image } => {
@@ -2403,7 +2405,7 @@ fn text_room(r: Rect, s: &str, size: f32, style: TextStyle, ppp: f64) -> (f32, f
 /// vector PDF), else drawn upright in a picture `room` pixels larger than `r` each way, which is
 /// placed turned. A picture past the page's budget is drawn at a lower resolution and scaled up,
 /// as a frame that large is.
-fn turned(pm: &mut Canvas, r: Rect, degrees: f32, room: (f32, f32), draw: impl FnOnce(&mut Canvas, Rect, f64)) {
+fn draw_turned_box(pm: &mut Canvas, r: Rect, degrees: f32, room: (f32, f32), draw: impl FnOnce(&mut Canvas, Rect, f64)) {
     let (cx, cy) = (r.x() + r.width() / 2.0, r.y() + r.height() / 2.0);
     if pm.is_recording() {
         pm.with_transform(Transform::from_rotate_at(degrees, cx, cy), |c| draw(c, r, 1.0));
@@ -3454,7 +3456,7 @@ mod tests {
         // 20,000 px long (past MAX_SIDE), 20 high, about the canvas's centre.
         let r = Rect::from_xywh(-9_900.0, 90.0, 20_000.0, 20.0).unwrap();
         let mut scale = 0.0;
-        turned(&mut pm, r, 90.0, (0.0, 0.0), |c, inner, k| {
+        draw_turned_box(&mut pm, r, 90.0, (0.0, 0.0), |c, inner, k| {
             scale = k;
             c.fill_rect(inner, &paint(Rgba::rgb(0, 0, 0), 1.0), Transform::identity(), None);
         });

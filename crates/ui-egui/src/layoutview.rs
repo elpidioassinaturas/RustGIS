@@ -287,9 +287,9 @@ fn handle_at(app: &RustGisApp, layout: &Layout, page: Rect, s: f32, pos: Pos2) -
     let r = Rect::from_min_max(to_screen(page, s, (e.x, e.y)), to_screen(page, s, (e.x + e.w, e.y + e.h)));
     let third = r.width().min(r.height()) / 3.0;
     // A turned text's handles are on its turned box.
-    let reach = HANDLE_PICK.min(if r.contains(turn(pos, r.center(), -e.rotation())) { third } else { third.max(5.0) });
+    let reach = HANDLE_PICK.min(if r.contains(screen_turn(pos, r.center(), -e.rotation())) { third } else { third.max(5.0) });
     handles(r)
-        .map(|h| turn(h, r.center(), e.rotation()))
+        .map(|h| screen_turn(h, r.center(), e.rotation()))
         .iter()
         .enumerate()
         .map(|(i, h)| (i, (h.x - pos.x).abs().max((h.y - pos.y).abs())))
@@ -344,7 +344,7 @@ fn turned(start: f64, from: f64, to: f64, steps: bool) -> f64 {
 }
 
 /// `p` turned `degrees` clockwise about `c`, on screen.
-fn turn(p: Pos2, c: Pos2, degrees: f64) -> Pos2 {
+fn screen_turn(p: Pos2, c: Pos2, degrees: f64) -> Pos2 {
     if degrees == 0.0 {
         return p;
     }
@@ -357,7 +357,7 @@ fn turn(p: Pos2, c: Pos2, degrees: f64) -> Pos2 {
 /// the top left round.
 fn turned_corners(page: Rect, s: f32, (x, y, w, h): Box4, degrees: f64) -> [Pos2; 4] {
     let r = Rect::from_min_max(to_screen(page, s, (x, y)), to_screen(page, s, (x + w, y + h)));
-    [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()].map(|p| turn(p, r.center(), degrees))
+    [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()].map(|p| screen_turn(p, r.center(), degrees))
 }
 
 /// The cursor for dragging handle `h` of an element turned `degrees`: the handle's own, an
@@ -795,7 +795,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
     }
     // The dragged element's outline where it will land, and the lines it snapped to.
     if let Some(p) = pointer
-        && let Some((_, r, sx, sy)) = drag_landing(&app.layout, ui, &layout, s, to_mm(page, s, p))
+        && let Some((dragged, r, sx, sy)) = drag_landing(&app.layout, ui, &layout, s, to_mm(page, s, p))
     {
         if let Some(x) = sx {
             vline(to_screen(page, s, (x, 0.0)).x, SNAP_COLOR);
@@ -803,7 +803,8 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
         if let Some(y) = sy {
             hline(to_screen(page, s, (0.0, y)).y, SNAP_COLOR);
         }
-        let rot = app.layout.selected.and_then(|id| layout.element(id)).map_or(0.0, |e| e.rotation());
+        // Turned as the element being dragged is.
+        let rot = layout.element(dragged).map_or(0.0, |e| e.rotation());
         painter.add(egui::Shape::closed_line(turned_corners(page, s, r, rot).to_vec(), Stroke::new(1.5, accent)));
     }
     if let Some(e) = app.layout.selected.and_then(|id| layout.element(id)) {
@@ -821,7 +822,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
             // No handles: a lock at the top-right corner says why.
             crate::icons::paint(&painter, Rect::from_center_size(rt, vec2(16.0, 16.0)), "lock", accent, accent);
         } else {
-            for (i, h) in handles(r).map(|h| turn(h, r.center(), e.rotation())).into_iter().enumerate() {
+            for (i, h) in handles(r).map(|h| screen_turn(h, r.center(), e.rotation())).into_iter().enumerate() {
                 let hr = Rect::from_center_size(h, vec2(HANDLE, HANDLE));
                 painter.rect_filled(hr, 2.0, if active == Some(i) { accent } else { Color32::WHITE });
                 painter.rect_stroke(hr, 2.0, Stroke::new(1.5, accent), egui::StrokeKind::Middle);
