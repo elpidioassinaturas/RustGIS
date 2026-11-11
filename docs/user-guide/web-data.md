@@ -89,11 +89,12 @@ and band, such as INPE's [Brazil Data Cube](https://data.inpe.br/bdc/) or Sentin
   path and row, the Brazil Data Cube's `bdc:tiles`, else their bounding box), and by day.
 - **Layers:** each tile becomes a tile layer read in place, a file per date. The time slider shows
   the last date in its window, and a tile with no date in it draws nothing. The slider turns on
-  over the dates when it is off. When it is on with regular steps, its span widens to the cube's;
-  a cube is refused when the widened span would be more steps than the slider lists (20,000), or
-  when its step is longer than the cube's dates are apart, so some of them would never show (a
-  yearly slider over a monthly cube): the refusal names them, and a shorter step (`time.set`) or
-  the slider turned off takes the cube.
+  over the dates when it is off. When it is on with regular steps, its span widens to the cube's,
+  and the cube is refused in two cases. If the widened span would be more steps than the slider
+  lists (20,000), a longer step (`time.set`) or a shorter period takes the cube. If its step is
+  longer than the cube's dates are apart, so some of them would never show (a yearly slider over a
+  monthly cube), the refusal names those dates, and a shorter step or the slider turned off takes
+  the cube.
 - **Range:** a fixed `"range"` (`[0, 0.9]` for NDVI) is the same for every date and tile, so a grey
   means one value throughout. It is in the band's own units: its `raster:bands` (or `eo:bands`)
   scale and offset turn it into the files' stored values. Without one, each file is stretched on
