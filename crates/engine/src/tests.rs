@@ -19484,6 +19484,178 @@ fn a_stac_data_cube_on_the_time_slider() {
     assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
 }
 
+/// An entry that gives no range, as JAXA Earth's don't, is added with one from a sample of its
+/// files (`"range": "auto"`): the same for every date. Its credit goes on the tile layers it
+/// added, and its collection's licence comes back with it.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_entry_without_a_range_takes_one_from_its_files() {
+    use crate::render::rustgis_tiles::cubes;
+    let (cog, _) = serve_ranges(rustgis_data::raster::cog::example(512, 256));
+    let item = |id: &str, date: &str| {
+        format!(
+            r#"{{"type": "Feature", "id": "{id}", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+               "properties": {{"datetime": "{date}T00:00:00Z", "bdc:tiles": ["T1"]}},
+               "assets": {{"B1": {{"href": "{cog}/{id}.tif", "eo:bands": [{{"scale": 0.0001}}]}}}}}}"#
+        )
+    };
+    let features = [item("a1", "2024-01-01"), item("a2", "2024-01-17")].join(",");
+    let licence = r#"{"type": "Collection", "id": "cube", "license": "proprietary", "links": [{"rel": "license", "href": "https://earth.jaxa.jp/en/data/policy/"}]}"#;
+    let base = serve_routes(
+        vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{features}]}}"#)), ("/v1", licence.to_string())],
+        8,
+    );
+    let mut entry = cubes::find("bdc-mod13q1-ndvi").unwrap();
+    entry.url = format!("{base}/v1");
+    entry.source = cubes::Source::Stac { collection: "cube".into(), asset: "B1".into() };
+    (entry.bbox, entry.start, entry.end) = ([0.0, 40.0, 20.0, 50.0], "2023-05-01".into(), Some("2024-12-31".into()));
+    (entry.range, entry.credit) = (None, "JAXA, A test dataset".into());
+    let mut s = Session::new(Project::default());
+    let r = crate::cmd::cube_catalog::open_entry(&mut s, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
+    // The example's values run 0 to 255 (0 to 0.0255 scaled): its 2nd to 98th percentiles.
+    let range: Vec<f64> = r["range"].as_array().unwrap().iter().filter_map(Value::as_f64).collect();
+    assert!(range.len() == 2 && range[0] >= 0.0 && range[0] < 0.002 && range[1] > 0.023 && range[1] <= 0.0256, "{r}");
+    assert_eq!(r["rangeFrom"], "sample");
+    let look = format!("#range={},{}", range[0] / 0.0001, range[1] / 0.0001);
+    let tile = &s.map().tiles[0];
+    assert!(tile.time_urls.len() == 2 && tile.time_urls.iter().all(|(_, u)| u.ends_with(&look)), "{:?} {look}", tile.time_urls);
+    assert_eq!(tile.attribution, "JAXA, A test dataset");
+    assert_eq!(
+        (r["credit"].as_str(), r["license"]["url"].as_str()),
+        (Some("JAXA, A test dataset"), Some("https://earth.jaxa.jp/en/data/policy/"))
+    );
+    // Opened again over the same files, its new tile layer (in place of the old one) keeps the credit.
+    crate::cmd::cube_catalog::open_entry(&mut s, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
+    assert!(s.map().tiles.iter().filter(|t| !t.time_urls.is_empty()).all(|t| t.attribution == "JAXA, A test dataset"));
+    assert!(!s.map().tiles.is_empty());
+    // A range given takes its place, as for any entry.
+    let mut t = Session::new(Project::default());
+    let r = crate::cmd::cube_catalog::open_entry(&mut t, &entry, &json!({"bbox": [10, 45, 11, 46], "range": [0, 0.01]})).unwrap();
+    assert!(r.get("rangeFrom").is_none() && t.map().tiles[0].time_urls.iter().all(|(_, u)| u.ends_with("#range=0,100")), "{r}");
+    // Other text is refused, naming "auto", before anything is read.
+    assert!(
+        t.run("stac.addCube", &json!({"url": entry.url, "collection": "cube", "asset": "B1", "range": "wide"}))
+            .unwrap_err()
+            .contains("\"auto\"")
+    );
+    // A credit longer than a project keeps, or one that isn't text, is refused before anything is
+    // read.
+    for a in [json!("x".repeat(501)), json!(42), json!(["x"])] {
+        let e = t.run("stac.addCube", &json!({"url": entry.url, "collection": "cube", "asset": "B1", "attribution": a})).unwrap_err();
+        assert!(e.contains("at most 500"), "{a}: {e}");
+    }
+    // Files of classes in their own colours take no range, and a notice says so.
+    use rustgis_data::raster::cog::{Example, example_with};
+    let (classes, _) = serve_ranges(example_with(&Example { size: 512, tile: 256, classes: true, ..Example::default() }));
+    let features = [item("a1", "2024-01-01")].join(",").replace(&cog, &classes);
+    let base = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{features}]}}"#))], 4);
+    let mut u = Session::new(Project::default());
+    let mark = u.notices_given();
+    let r = u
+        .run(
+            "stac.addCube",
+            &json!({"url": format!("{base}/v1"), "collection": "cube", "asset": "B1", "range": "auto", "bbox": [10, 45, 11, 46], "start": "2023-05-01", "end": "2024-12-31"}),
+        )
+        .unwrap();
+    assert!(r.get("range").is_none() && r.get("rangeFrom").is_none(), "{r}");
+    assert!(u.notices_since(mark).iter().any(|n| n.text.contains("classes drawn in their own colours")), "{:?}", u.notices_since(mark));
+    // Files whose metadata gives a scale of 0 aren't sampled: no range fits them, and a notice
+    // says each file is stretched on its own (a range can't be left out of a catalog entry).
+    let features = [item("a1", "2024-01-01")].join(",").replace("\"scale\": 0.0001", "\"scale\": 0");
+    let base = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{features}]}}"#))], 4);
+    let mut z = Session::new(Project::default());
+    let mark = z.notices_given();
+    let r = z
+        .run(
+            "stac.addCube",
+            &json!({"url": format!("{base}/v1"), "collection": "cube", "asset": "B1", "range": "auto", "bbox": [10, 45, 11, 46], "start": "2023-05-01", "end": "2024-12-31"}),
+        )
+        .unwrap();
+    assert!(r.get("range").is_none() && !z.map().tiles.is_empty(), "{r}");
+    assert!(z.notices_since(mark).iter().any(|n| n.text.contains("gives a scale of 0")), "{:?}", z.notices_since(mark));
+    // A collection whose licence can't be read: the cube is still added and credited, and a
+    // notice says the licence wasn't read, pointing to JAXA's terms. Opened again, the licence is
+    // asked for again (this server answers its second request for it).
+    let search = format!(r#"{{"type": "FeatureCollection", "features": [{}]}}"#, [item("a1", "2024-01-01")].join(","));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let licence = licence.to_string();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let mut asked = 0;
+        for stream in listener.incoming().take(16) {
+            let Ok(mut c) = stream else { continue };
+            let mut buf = [0u8; 4096];
+            let read = c.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..read]);
+            let path = req.split_whitespace().nth(1).unwrap_or("/");
+            let body = if path.starts_with("/v1/search") {
+                Some(search.clone())
+            } else if path == "/v1" {
+                asked += 1;
+                (asked > 1).then(|| licence.clone())
+            } else {
+                None
+            };
+            let _ = match body {
+                Some(b) => write!(c, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len()),
+                None => write!(c, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+            };
+        }
+    });
+    entry.url = format!("{base}/v1");
+    let mut w = Session::new(Project::default());
+    let mark = w.notices_given();
+    let r = crate::cmd::cube_catalog::open_entry(&mut w, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
+    assert!(r.get("license").is_none() && w.map().tiles[0].attribution == "JAXA, A test dataset", "{r}");
+    let said = w.notices_since(mark);
+    assert!(said.iter().any(|n| n.text.contains("its collection's licence wasn't read")), "{said:?}");
+    let mark = w.notices_given();
+    let r = crate::cmd::cube_catalog::open_entry(&mut w, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
+    assert_eq!(r["license"]["url"], "https://earth.jaxa.jp/en/data/policy/", "{r}");
+    let said = w.notices_since(mark);
+    assert!(!said.iter().any(|n| n.text.contains("licence wasn't read")), "{said:?}");
+    // A licence whose server stalls (here 6 s, then a 404) isn't asked for again at the next
+    // cube.open: its error is given at once, saying when it will be. The stall must outlast
+    // `jaxa::SLOW_READ` (5 s), and the two opens come well within `jaxa::RETRY_AFTER` (10 min).
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = asked.clone();
+    let search = format!(r#"{{"type": "FeatureCollection", "features": [{}]}}"#, [item("a1", "2024-01-01")].join(","));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for stream in listener.incoming().take(16) {
+            let Ok(mut c) = stream else { continue };
+            let mut buf = [0u8; 4096];
+            let read = c.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..read]);
+            let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+            if path.starts_with("/v1/search") {
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{search}", search.len());
+            } else {
+                if path == "/v1" {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(6));
+                    let _ = write!(c, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                });
+            }
+        }
+    });
+    entry.url = format!("{base}/v1");
+    let mut w = Session::new(Project::default());
+    crate::cmd::cube_catalog::open_entry(&mut w, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
+    let (mark, before) = (w.notices_given(), asked.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(before >= 1, "the licence was asked for");
+    let r = crate::cmd::cube_catalog::open_entry(&mut w, &entry, &json!({"bbox": [10, 45, 11, 46]})).unwrap();
+    assert!(r.get("license").is_none(), "{r}");
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), before, "not asked for again");
+    let said = w.notices_since(mark);
+    assert!(said.iter().any(|n| n.text.contains("licence wasn't read") && n.text.contains("10 minutes")), "{said:?}");
+}
+
 /// The data cube catalog (#683): its entries listed by theme, area and words; one opened as typing
 /// its values into `stac.addCube` would (its collection, band, range and cloud cap filled in, its
 /// last full year by default), or into `layer.addZarr` following the slider; `cube.trend` and
@@ -19494,6 +19666,9 @@ fn a_catalog_entry_opens_as_its_command_would() {
     use crate::render::rustgis_tiles::cubes;
     let mut s = Session::new(Project::default());
     let ids = |r: &Value| r["cubes"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    // An id not in the list, while JAXA Earth's catalog is unread (as here), says so.
+    let e = s.run("cube.open", &json!({"id": "JAXA.Test_daily/B1"})).unwrap_err();
+    assert!(e.contains("no data cube") && e.contains("hasn't been read in this run"), "{e}");
     let all = s.run("cube.catalog", &json!({})).unwrap();
     assert_eq!(all["count"].as_u64(), Some(cubes::built_in().len() as u64));
     assert_eq!(all["themes"].as_array().map(Vec::len), Some(cubes::THEMES.len()));
@@ -27803,12 +27978,15 @@ fn fills_come_back_after_no_fill() {
         let id = s.active_layer.unwrap();
         assert!(filled(&s), "{case}: filled to begin with");
         let steps = [
+            json!({"command": "layer.restoreFill", "params": {}}),
             json!({"command": "layer.symbology", "params": {"type": "single"}}),
             json!({"command": "layer.symbology", "params": {"type": "unique", "field": "kind"}}),
             // Again on the same field and scheme, which carries the classes over.
             json!({"command": "layer.symbology", "params": {"type": "unique", "field": "kind"}}),
+            json!({"command": "layer.restoreFill", "params": {}}),
             json!({"command": "layer.symbology", "params": {"type": "graduated", "field": "n", "classes": 2}}),
             json!({"command": "layer.symbology", "params": {"type": "graduated", "field": "n", "classes": 2}}),
+            json!({"command": "layer.restoreFill", "params": {}}),
             json!({"command": "layer.ramp", "params": {"ramp": "Harbour"}}),
             json!({"command": "layer.color", "params": {"color": "#336699"}}),
             json!({"command": "layer.fillLayers", "params": {"fills": [{"pattern": "solid"}]}}),
@@ -27828,6 +28006,15 @@ fn fills_come_back_after_no_fill() {
             assert_eq!(l.no_fill, Some(if over { rustgis_map::NoFill::Override } else { rustgis_map::NoFill::Symbols }));
             s.run(step["command"].as_str().unwrap(), &step["params"]).unwrap();
             assert!(filled(&s), "{case}: {step} after No Fill draws fills");
+            if step["command"] == "layer.restoreFill" {
+                assert!(s.map().layer(id).unwrap().no_fill.is_none());
+                s.run("edit.undo", &Value::Null).unwrap();
+                assert!(!filled(&s), "{case}: undo restores No Fill");
+                let marker = Some(if over { rustgis_map::NoFill::Override } else { rustgis_map::NoFill::Symbols });
+                assert_eq!(s.map().layer(id).unwrap().no_fill, marker, "{case}: undo restores No Fill's marker");
+                s.run("edit.redo", &Value::Null).unwrap();
+                assert!(filled(&s), "{case}: redo restores fills");
+            }
         }
         // A fill given its own transparent colour leaves the polygons unfilled.
         for colour in ["#11223300", "#00000000"] {
@@ -27871,6 +28058,489 @@ fn fills_come_back_after_no_fill() {
     s.run("layer.color", &json!({"color": "#33669900"})).unwrap();
     s.run("layer.symbology", &json!({"type": "unique", "field": "kind"})).unwrap();
     assert!(!filled(&s), "a chosen transparent fill stays");
+    assert!(s.run("layer.restoreFill", &Value::Null).is_err(), "Restore Fill is off without No Fill");
+    assert!(!filled(&s), "an explicit transparent colour stays");
+}
+
+/// #1299: Restore Fill puts back what No Fill hid, as it was: each fill's opacity, a fill made
+/// transparent before No Fill, a class's own fills and the layer's, for Unique Values and
+/// Graduated Colors (with a class's label and strokes), also after the project is saved and opened
+/// again, saying nothing; a colour chosen while No Fill is on stays. A project that kept nothing
+/// says what it couldn't put back. Off, it changes nothing.
+#[test]
+fn restore_fill_puts_back_what_no_fill_hid() {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as Attr};
+    use rustgis_map::symbology::ClassRef;
+    for (mixed, unique) in [(false, true), (true, true), (false, false), (true, false)] {
+        let case = format!("mixed {mixed}, unique {unique}");
+        let mut ds =
+            Dataset::new("parcels", GeometryType::Polygon, vec![Field::new("kind", FieldType::Text), Field::new("n", FieldType::Integer)]);
+        for (i, kind) in ["a", "b", "c"].into_iter().enumerate() {
+            let x = i as f64 * 2.0;
+            let ring = vec![Coord::new(x, 0.0), Coord::new(x + 1.0, 0.0), Coord::new(x + 1.0, 1.0), Coord::new(x, 0.0)];
+            ds.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Attr::Text(kind.into()), Attr::Int(i as i64)]);
+        }
+        if mixed {
+            ds.push(Some(Geometry::Point(Coord::new(10.0, 0.5))), vec![Attr::Text("a".into()), Attr::Int(1)]);
+        }
+        let mut s = Session::new(Project::default());
+        let id = s.map_mut().add_dataset(ds);
+        s.active_layer = Some(id);
+        let class = |i: usize, with: Value| {
+            let value = ["a", "b", "c"][i];
+            let mut p = if unique { json!({"value": value}) } else { json!({"index": i}) };
+            p.as_object_mut().unwrap().extend(with.as_object().unwrap().clone());
+            p
+        };
+        if unique {
+            s.run("layer.symbology", &json!({"type": "unique", "field": "kind"})).unwrap();
+        } else {
+            s.run("layer.symbology", &json!({"type": "graduated", "field": "n", "classes": 3, "method": "equalInterval"})).unwrap();
+            let r = &mut s.map_mut().layer_mut(id).unwrap().renderer;
+            r.set_class_strokes(&ClassRef::Index(1), vec![rustgis_map::LineStroke::default()]).unwrap();
+        }
+        s.run("layer.classStyle", &class(0, json!({"color": "#33669964", "label": "first"}))).unwrap();
+        s.run("layer.classStyle", &class(1, json!({"color": "#33669900"}))).unwrap();
+        s.run("layer.fillLayers", &class(0, json!({"fills": [{"pattern": "hatch", "angle": 45}]}))).unwrap();
+        s.run("layer.fillLayers", &json!({"fills": [{"pattern": "hatch", "angle": 135}]})).unwrap();
+        let before = s.map().layer(id).unwrap().clone();
+        // Off, it is refused before it runs: no undo step, so the redo one stays.
+        s.run("layer.outline", &json!({"color": "#000000"})).unwrap();
+        s.run("edit.undo", &Value::Null).unwrap();
+        assert!(s.run("layer.restoreFill", &Value::Null).is_err(), "{case}: off");
+        s.run("edit.redo", &Value::Null).unwrap();
+        s.run("edit.undo", &Value::Null).unwrap();
+        s.run("layer.noFill", &Value::Null).unwrap();
+        // Again changes nothing it keeps.
+        s.run("layer.noFill", &Value::Null).unwrap();
+        // Saved and opened again: once as this version saves it, once as an earlier one did.
+        let saved = serde_json::to_value(&s.project).unwrap();
+        let mut earlier = saved.clone();
+        earlier["maps"][0]["layers"].as_array_mut().unwrap().iter_mut().for_each(|l| {
+            l.as_object_mut().unwrap().remove("hidden_fills");
+        });
+        let mut s = Session::new(serde_json::from_value(saved).unwrap());
+        s.active_layer = Some(id);
+        let mark = s.notice_mark();
+        s.run("layer.restoreFill", &Value::Null).unwrap();
+        assert!(s.notices_since(mark).is_empty(), "{case}: {:?}", s.notices_since(mark));
+        let l = s.map().layer(id).unwrap();
+        assert_eq!(l.renderer, before.renderer, "{case}: the classes as they were");
+        assert_eq!(l.fill_layers, before.fill_layers, "{case}: the layer's fills");
+        assert!(l.no_fill.is_none() && l.hidden_fills.is_none(), "{case}: off");
+        assert!(s.run("layer.restoreFill", &Value::Null).is_err(), "{case}: off again");
+        // A class made transparent while No Fill is on stays so; the others come back.
+        s.run("layer.noFill", &Value::Null).unwrap();
+        s.run("layer.classStyle", &class(2, json!({"color": "#11223300"}))).unwrap();
+        s.run("layer.restoreFill", &Value::Null).unwrap();
+        let mut now = Vec::new();
+        s.map_mut().layer_mut(id).unwrap().renderer.map_symbols(|sym| now.push(*sym));
+        let mut was = Vec::new();
+        before.renderer.clone().map_symbols(|sym| was.push(*sym));
+        assert_eq!(now[2].fill.a(), 0, "{case}: the third class stays transparent");
+        assert_eq!(now[..2], was[..2], "{case}: the others as they were");
+        // Kept by nothing: what it couldn't put back is said.
+        let mut s = Session::new(serde_json::from_value(earlier).unwrap());
+        s.active_layer = Some(id);
+        let mark = s.notice_mark();
+        s.run("layer.restoreFill", &Value::Null).unwrap();
+        let said: Vec<_> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        // Every symbol No Fill made transparent: Unique Values' <all other values> too.
+        let what = if mixed { "fill layers".to_string() } else { format!("{} fill(s) at the default opacity", if unique { 4 } else { 3 }) };
+        assert!(said.len() == 1 && said[0].contains(&what), "{case}: {said:?}");
+    }
+}
+
+/// No Fill again, on a layer it already hides (here one with points, so a transparent fill over
+/// its symbols), changes nothing: a class's fills set while it is on stay, and Restore Fill puts
+/// back what it hid, with no notice when nothing was changed since.
+#[test]
+fn no_fill_again_keeps_what_was_set_while_it_is_on() {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as Attr};
+    use rustgis_map::symbology::ClassRef;
+    let mut ds = Dataset::new("parcels", GeometryType::Polygon, vec![Field::new("kind", FieldType::Text)]);
+    for (i, kind) in ["a", "b"].into_iter().enumerate() {
+        let x = i as f64 * 2.0;
+        let ring = vec![Coord::new(x, 0.0), Coord::new(x + 1.0, 0.0), Coord::new(x + 1.0, 1.0), Coord::new(x, 0.0)];
+        ds.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Attr::Text(kind.into())]);
+    }
+    ds.push(Some(Geometry::Point(Coord::new(10.0, 0.5))), vec![Attr::Text("a".into())]);
+    let mut s = Session::new(Project::default());
+    let id = s.map_mut().add_dataset(ds);
+    s.active_layer = Some(id);
+    s.run("layer.symbology", &json!({"type": "unique", "field": "kind"})).unwrap();
+    s.run("layer.noFill", &Value::Null).unwrap();
+    s.run("layer.fillLayers", &json!({"value": "a", "fills": [{"pattern": "hatch"}]})).unwrap();
+    s.run("layer.noFill", &Value::Null).unwrap();
+    let a = ClassRef::Value("a".into());
+    // No Fill on again hides the hatch too, keeping it for Restore Fill.
+    assert!(s.map().layer(id).unwrap().renderer.class_fills(&a).unwrap().is_empty(), "the class's hatch is hidden");
+    let mark = s.notice_mark();
+    s.run("layer.restoreFill", &Value::Null).unwrap();
+    assert!(s.notices_since(mark).is_empty(), "{:?}", s.notices_since(mark));
+    assert_eq!(s.map().layer(id).unwrap().renderer.class_fills(&a).unwrap().len(), 1, "the class's hatch after Restore Fill");
+    assert!(s.map().layer(id).unwrap().no_fill.is_none(), "No Fill is off");
+}
+
+/// A layer of three polygons in Unique Values classes "a", "b" and "c", with a point too when
+/// `mixed` (No Fill then overrides the polygons' fills instead of the symbols').
+fn no_fill_layer(mixed: bool) -> (Session, u32) {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as Attr};
+    let mut ds = Dataset::new("parcels", GeometryType::Polygon, vec![Field::new("kind", FieldType::Text)]);
+    for (i, kind) in ["a", "b", "c"].into_iter().enumerate() {
+        let x = i as f64 * 2.0;
+        let ring = vec![Coord::new(x, 0.0), Coord::new(x + 1.0, 0.0), Coord::new(x + 1.0, 1.0), Coord::new(x, 0.0)];
+        ds.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Attr::Text(kind.into())]);
+    }
+    if mixed {
+        ds.push(Some(Geometry::Point(Coord::new(10.0, 0.5))), vec![Attr::Text("a".into())]);
+    }
+    let mut s = Session::new(Project::default());
+    let id = s.map_mut().add_dataset(ds);
+    s.active_layer = Some(id);
+    s.run("layer.symbology", &json!({"type": "unique", "field": "kind"})).unwrap();
+    (s, id)
+}
+
+/// No Fill again while it is on changes nothing, so it is no step: redo, undo and the saved state
+/// are left as they were.
+#[test]
+fn no_fill_again_is_no_step_to_undo() {
+    let (mut s, id) = no_fill_layer(false);
+    s.run("layer.noFill", &Value::Null).unwrap();
+    s.run("layer.outline", &json!({"color": "#112233"})).unwrap();
+    s.run("edit.undo", &Value::Null).unwrap();
+    let (undo, redo, dirty) = (s.undo.len(), s.redo.len(), s.dirty());
+    assert_eq!(redo, 1);
+    s.run("layer.noFill", &Value::Null).unwrap();
+    assert_eq!((s.undo.len(), s.redo.len(), s.dirty()), (undo, redo, dirty));
+    assert!(s.map().layer(id).unwrap().no_fill.is_some());
+}
+
+/// No Fill on again with nothing shown since keeps no record, so a project saved by an earlier
+/// RustGIS (No Fill on, nothing kept) still says nothing was kept.
+#[test]
+fn no_fill_again_without_a_change_starts_no_record_of_what_was_hidden() {
+    let (mut s, id) = no_fill_layer(false);
+    s.run("layer.noFill", &Value::Null).unwrap();
+    s.map_mut().layer_mut(id).unwrap().hidden_fills = None;
+    s.run("layer.noFill", &Value::Null).unwrap();
+    assert!(s.map().layer(id).unwrap().hidden_fills.is_none());
+    let mark = s.notice_mark();
+    s.run("layer.restoreFill", &Value::Null).unwrap();
+    let said: Vec<_> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.contains("wasn't kept")), "{said:?}");
+}
+
+/// Restore Fill naming a layer without No Fill, while the active layer has it, is refused (the
+/// condition checks the named layer) and changes nothing: no step to undo, redo kept.
+#[test]
+fn restore_fill_on_a_layer_without_no_fill_is_no_step_to_undo() {
+    use rustgis_data::{Dataset, GeometryType};
+    let (mut s, id) = no_fill_layer(false);
+    s.run("layer.noFill", &Value::Null).unwrap();
+    let other = s.map_mut().add_dataset(Dataset::new("other", GeometryType::Polygon, Vec::new()));
+    let (undo, redo, dirty) = (s.undo.len(), s.redo.len(), s.dirty());
+    let refused = s.run("layer.restoreFill", &json!({"layer": other}));
+    assert!(refused.is_err_and(|e| e.contains("No Fill isn't on")), "the named layer has no No Fill");
+    assert_eq!((s.undo.len(), s.redo.len(), s.dirty()), (undo, redo, dirty));
+    assert!(s.map().layer(id).unwrap().no_fill.is_some());
+}
+
+/// A record No Fill on again starts over a project that kept nothing (No Fill saved on by an
+/// earlier RustGIS) holds only what it hid, so Restore Fill still says the rest wasn't kept.
+#[test]
+fn no_fill_again_over_nothing_kept_still_says_what_wasnt_kept() {
+    for mixed in [false, true] {
+        let (mut s, id) = no_fill_layer(mixed);
+        s.run("layer.noFill", &Value::Null).unwrap();
+        s.map_mut().layer_mut(id).unwrap().hidden_fills = None;
+        s.run("layer.fillLayers", &json!({"value": "a", "fills": [{"pattern": "hatch"}]})).unwrap();
+        s.run("layer.noFill", &Value::Null).unwrap();
+        assert!(s.map().layer(id).unwrap().hidden_fills.as_ref().is_some_and(|h| h.partial), "mixed {mixed}");
+        let mark = s.notice_mark();
+        s.run("layer.restoreFill", &Value::Null).unwrap();
+        let said: Vec<_> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        let note = if mixed { "didn't keep them" } else { "wasn't kept" };
+        assert!(said.iter().any(|t| t.contains(note)), "mixed {mixed}: {said:?}");
+        assert!(!said.iter().any(|t| t.contains("changed since")), "mixed {mixed}: {said:?}");
+    }
+}
+
+/// Applying a saved style or symbolizing by subtype gives the layer a new renderer, so No Fill
+/// ends, as with a new symbology: Restore Fill can't put the old fills onto the new classes.
+#[test]
+fn a_new_renderer_from_a_style_or_subtypes_ends_no_fill() {
+    let (mut s, id) = no_fill_layer(false);
+    s.run("style.new", &json!({"name": "plain"})).unwrap();
+    s.run("layer.noFill", &Value::Null).unwrap();
+    let mark = s.notice_mark();
+    s.run("style.apply", &json!({"name": "plain"})).unwrap();
+    let l = s.map().layer(id).unwrap();
+    assert!(l.no_fill.is_none() && l.hidden_fills.is_none());
+    let said: Vec<_> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.contains("turning No Fill off drops")), "{said:?}");
+    assert!(s.run("layer.restoreFill", &Value::Null).is_err());
+
+    let (mut s, id) = no_fill_layer(false);
+    s.map_mut().layer_mut(id).unwrap().dataset.fields.push(rustgis_data::Field::new("code", rustgis_data::FieldType::Integer));
+    for f in &mut s.map_mut().layer_mut(id).unwrap().dataset.features {
+        f.attrs.push(rustgis_data::Value::Int(1));
+    }
+    s.run("layer.noFill", &Value::Null).unwrap();
+    let mark = s.notice_mark();
+    s.run("data.subtypes", &json!({"field": "code", "subtypes": [{"code": 1, "name": "one"}]})).unwrap();
+    let said: Vec<_> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.contains("turning No Fill off drops")), "{said:?}");
+    let l = s.map().layer(id).unwrap();
+    assert!(l.no_fill.is_none() && l.hidden_fills.is_none());
+}
+
+/// A class's fill colour chosen while No Fill is on is recorded for Restore Fill only while the
+/// saved opacities match the symbols: a record of other symbols is left as it is.
+#[test]
+fn class_style_leaves_a_mismatched_opacity_record_alone() {
+    let (mut s, id) = no_fill_layer(false);
+    s.run("layer.noFill", &Value::Null).unwrap();
+    s.map_mut().layer_mut(id).unwrap().hidden_fills.as_mut().unwrap().alphas = vec![0x11];
+    s.run("layer.classStyle", &json!({"value": "a", "color": "#336699"})).unwrap();
+    let hidden = s.map().layer(id).unwrap().hidden_fills.as_ref().unwrap();
+    assert_eq!(hidden.alphas, vec![0x11], "{:?}", hidden.alphas);
+}
+
+/// The layer's own fill layers No Fill hid don't replace fill layers set since; Restore Fill says
+/// it didn't put them back, and says nothing when the layer had none.
+#[test]
+fn restore_fill_says_when_the_layers_hidden_fill_layers_stay_hidden() {
+    let (mut s, id) = no_fill_layer(false);
+    s.run("layer.fillLayers", &json!({"fills": [{"pattern": "hatch", "color": "#00ff00"}]})).unwrap();
+    s.run("layer.noFill", &Value::Null).unwrap();
+    s.run("layer.fillLayers", &json!({"fills": [{"pattern": "hatch", "color": "#ff0000"}]})).unwrap();
+    let mark = s.notice_mark();
+    s.run("layer.noFill", &Value::Null).unwrap();
+    let said: Vec<_> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.contains("kept 1 fill stack(s) shown since")), "the green hatch replaced: {said:?}");
+    s.run("layer.fillLayers", &json!({"fills": [{"pattern": "hatch", "color": "#0000ff"}]})).unwrap();
+    let mark = s.notice_mark();
+    s.run("layer.restoreFill", &Value::Null).unwrap();
+    let said: Vec<_> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.contains("fill layer(s) No Fill hid")), "{said:?}");
+    assert_eq!(s.map().layer(id).unwrap().fill_layers.len(), 1);
+
+    let (mut s, _) = no_fill_layer(false);
+    s.run("layer.noFill", &Value::Null).unwrap();
+    let mark = s.notice_mark();
+    s.run("layer.restoreFill", &Value::Null).unwrap();
+    assert!(s.notices_since(mark).is_empty());
+}
+
+/// No Fill hides fill layers in a colour of their own on the symbols path too (they draw whatever
+/// the symbol's opacity), the layer's and a class's, and Restore Fill puts them back.
+#[test]
+fn no_fill_hides_fill_layers_in_their_own_colour() {
+    let (mut s, id) = no_fill_layer(false);
+    s.run("layer.fillLayers", &json!({"value": "a", "fills": [{"pattern": "hatch", "color": "#ff0000"}]})).unwrap();
+    s.run("layer.fillLayers", &json!({"fills": [{"pattern": "hatch", "color": "#00ff00"}]})).unwrap();
+    let before = s.map().layer(id).unwrap().clone();
+    s.run("layer.noFill", &Value::Null).unwrap();
+    let l = s.map().layer(id).unwrap();
+    assert_eq!(l.no_fill, Some(rustgis_map::NoFill::Symbols));
+    assert!(l.fill_layers.is_empty(), "the layer's own hatch is hidden");
+    assert!(
+        matches!(&l.renderer, rustgis_map::Renderer::Unique { class_fills, .. } if class_fills.is_empty()),
+        "the class hatch is hidden"
+    );
+    s.run("layer.restoreFill", &Value::Null).unwrap();
+    let l = s.map().layer(id).unwrap();
+    assert_eq!(l.fill_layers, before.fill_layers);
+    assert_eq!(l.renderer, before.renderer);
+}
+
+/// A style saved while No Fill is on keeps the fills No Fill hid: the class hatch and the symbols'
+/// opacities, as the layer had them.
+#[test]
+fn a_style_saved_during_no_fill_keeps_the_hidden_fills() {
+    let (mut s, id) = no_fill_layer(false);
+    s.run("layer.fillLayers", &json!({"value": "a", "fills": [{"pattern": "hatch", "color": "#ff0000"}]})).unwrap();
+    let before = s.map().layer(id).unwrap().renderer.clone();
+    s.run("layer.noFill", &Value::Null).unwrap();
+    s.run("style.new", &json!({"name": "kept"})).unwrap();
+    let style = s.project.styles.iter().find(|t| t.name == "kept").unwrap();
+    assert_eq!(style.renderer, before);
+    assert!(s.map().layer(id).unwrap().no_fill.is_some(), "the layer itself stays as it is");
+
+    // Clean: no notice. A class given fills of its own since: the hidden hatch is left out, said once.
+    let mark = s.notice_mark();
+    s.run("style.new", &json!({"name": "clean"})).unwrap();
+    assert!(s.notices_since(mark).is_empty());
+    s.run("layer.fillLayers", &json!({"value": "a", "fills": [{"pattern": "dots"}]})).unwrap();
+    let mark = s.notice_mark();
+    s.run("style.new", &json!({"name": "dots"})).unwrap();
+    let said: Vec<_> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert_eq!(said.iter().filter(|t| t.contains("couldn't be put back")).count(), 1, "{said:?}");
+}
+
+/// A whole-layer fill in another colour, set while No Fill is on, is hidden by No Fill on again
+/// and comes back with Restore Fill (symbols path: the layer's own fills are drawn).
+#[test]
+fn no_fill_again_hides_a_layer_fill_set_while_it_is_on() {
+    let (mut s, id) = no_fill_layer(false);
+    s.run("layer.noFill", &Value::Null).unwrap();
+    s.run("layer.fillLayers", &json!({"fills": [{"pattern": "hatch", "color": "#ff0000"}]})).unwrap();
+    assert_eq!(s.map().layer(id).unwrap().fill_layers.len(), 1);
+    s.run("layer.noFill", &Value::Null).unwrap();
+    assert!(s.map().layer(id).unwrap().fill_layers.is_empty());
+    s.run("layer.restoreFill", &Value::Null).unwrap();
+    assert_eq!(s.map().layer(id).unwrap().fill_layers.len(), 1, "the hatch comes back");
+    assert!(s.map().layer(id).unwrap().no_fill.is_none());
+}
+
+/// Turning No Fill off with a colour scheme, or with fill layers for the whole layer, says how
+/// many hidden fills it drops, once; with nothing hidden it says nothing.
+#[test]
+fn turning_no_fill_off_says_what_it_drops() {
+    let (mut s, id) = no_fill_layer(false);
+    let mark = s.notice_mark();
+    s.run("layer.ramp", &json!({"ramp": "Ember"})).unwrap();
+    assert!(s.notices_since(mark).is_empty(), "nothing hidden, nothing dropped");
+    s.run("layer.noFill", &Value::Null).unwrap();
+    let mark = s.notice_mark();
+    s.run("layer.ramp", &json!({"ramp": "Ember"})).unwrap();
+    let said: Vec<_> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.len() == 1 && said[0].contains("drops"), "{said:?}");
+    assert!(s.map().layer(id).unwrap().hidden_fills.is_none());
+    // On a mixed layer, a whole-layer fill in any colour turns No Fill off, dropping the layer's
+    // own fills it hid.
+    let (mut s, id) = no_fill_layer(true);
+    s.run("layer.fillLayers", &json!({"fills": [{"pattern": "dots"}]})).unwrap();
+    s.run("layer.noFill", &Value::Null).unwrap();
+    let mark = s.notice_mark();
+    s.run("layer.fillLayers", &json!({"fills": [{"pattern": "hatch", "color": "#ff0000"}]})).unwrap();
+    let said: Vec<_> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.len() == 1 && said[0].contains("drops"), "{said:?}");
+    assert!(s.map().layer(id).unwrap().no_fill.is_none());
+    // A fill colour given to the layer turns No Fill off and says what it drops, too.
+    let (mut s, id) = no_fill_layer(false);
+    s.run("layer.noFill", &Value::Null).unwrap();
+    let mark = s.notice_mark();
+    s.run("layer.color", &json!({"layer": id, "color": "#336699"})).unwrap();
+    let said: Vec<_> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.contains("drops")), "{said:?}");
+    assert!(s.map().layer(id).unwrap().no_fill.is_none());
+}
+
+/// No Fill on again hides what was shown since, on both paths, as one undo step; Restore Fill then
+/// shows it as it was shown.
+#[test]
+fn no_fill_again_hides_what_was_shown_since() {
+    use rustgis_map::symbology::ClassRef;
+    // Symbols: a class's colour with an opacity, chosen while No Fill is on, shows that class.
+    let (mut s, id) = no_fill_layer(false);
+    s.run("layer.noFill", &Value::Null).unwrap();
+    s.run("layer.classStyle", &json!({"value": "a", "color": "#11223380"})).unwrap();
+    let alphas = |s: &Session| {
+        let mut out = Vec::new();
+        s.map().layer(id).unwrap().renderer.clone().map_symbols(|sym| out.push(sym.fill.a()));
+        out
+    };
+    assert!(alphas(&s).contains(&0x80));
+    let undo = s.undo.len();
+    s.run("layer.noFill", &Value::Null).unwrap();
+    assert!(alphas(&s).iter().all(|a| *a == 0), "{:?}", alphas(&s));
+    assert_eq!(s.undo.len(), undo + 1);
+    s.run("layer.restoreFill", &Value::Null).unwrap();
+    assert!(alphas(&s).contains(&0x80), "{:?}", alphas(&s));
+    // Override: a class's fills set while No Fill is on are hidden, and kept in place of the
+    // class's earlier ones.
+    let (mut s, id) = no_fill_layer(true);
+    let c = ClassRef::Value("c".into());
+    s.run("layer.fillLayers", &json!({"value": "c", "fills": [{"pattern": "hatch"}]})).unwrap();
+    s.run("layer.noFill", &Value::Null).unwrap();
+    s.run("layer.fillLayers", &json!({"value": "c", "fills": [{"pattern": "dots"}, {"pattern": "hatch"}]})).unwrap();
+    s.run("layer.noFill", &Value::Null).unwrap();
+    assert!(s.map().layer(id).unwrap().renderer.class_fills(&c).unwrap().is_empty());
+    let mark = s.notice_mark();
+    s.run("layer.restoreFill", &Value::Null).unwrap();
+    assert!(s.notices_since(mark).is_empty(), "{:?}", s.notices_since(mark));
+    assert_eq!(s.map().layer(id).unwrap().renderer.class_fills(&c).unwrap().len(), 2, "the dots and hatch set last");
+}
+
+/// A QGIS style with symbols turns No Fill off as Apply Style does, saying what that drops; one
+/// without leaves it on.
+#[test]
+fn qgis_style_turns_no_fill_off_only_with_symbols() {
+    let (mut s, id) = no_fill_layer(false);
+    s.run("layer.noFill", &Value::Null).unwrap();
+    let qml = |renderer: &str| format!(r#"<qgis version="3.40.0"><renderer-v2 type="{renderer}"/></qgis>"#);
+    s.run("style.importQgis", &json!({"text": qml("heatmapRenderer")})).unwrap();
+    assert!(s.map().layer(id).unwrap().no_fill.is_some(), "no symbols in it: still on");
+    for (case, says) in [("on", true), ("already off", false)] {
+        let mark = s.notice_mark();
+        s.run("style.importQgis", &json!({"text": qml("nullSymbol")})).unwrap();
+        assert!(s.map().layer(id).unwrap().no_fill.is_none(), "{case}: its symbols: off");
+        let said = s.notices_since(mark).iter().any(|n| n.text.contains("hidden fill"));
+        assert_eq!(said, says, "{case}: the fills it drops are said");
+    }
+}
+
+/// Restore Fill after an undo puts back what No Fill hid, on both paths: the symbols' own
+/// opacities (one of them 0) and the fill stacks of the layer and its classes.
+#[test]
+fn restore_fill_after_an_undo_puts_back_the_style_from_before_no_fill() {
+    for mixed in [false, true] {
+        let (mut s, id) = no_fill_layer(mixed);
+        s.run("layer.classStyle", &json!({"value": "a", "color": "#11223340"})).unwrap();
+        s.run("layer.classStyle", &json!({"value": "b", "color": "#44556600"})).unwrap();
+        if mixed {
+            s.run("layer.fillLayers", &json!({"fills": [{"pattern": "dots"}]})).unwrap();
+            s.run("layer.fillLayers", &json!({"value": "c", "fills": [{"pattern": "hatch", "angle": 30}]})).unwrap();
+        }
+        let style = |s: &Session| {
+            let l = s.map().layer(id).unwrap();
+            (l.renderer.clone(), l.fill_layers.clone())
+        };
+        let before = style(&s);
+        s.run("layer.noFill", &Value::Null).unwrap();
+        s.run("layer.outline", &json!({"color": "#112233"})).unwrap();
+        s.run("edit.undo", &Value::Null).unwrap();
+        assert!(s.map().layer(id).unwrap().hidden_fills.is_some(), "mixed: {mixed}");
+        let mark = s.notice_mark();
+        s.run("layer.restoreFill", &Value::Null).unwrap();
+        assert!(s.notices_since(mark).is_empty(), "mixed: {mixed}: {:?}", s.notices_since(mark));
+        assert!(style(&s) == before, "mixed: {mixed}");
+    }
+}
+
+/// Restore Fill says when a class's hidden fills can't go back because the class has fills of its
+/// own since No Fill, once, with the count; the classes it could put back come back.
+#[test]
+fn restore_fill_says_when_a_class_was_given_fills_since() {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as Attr};
+    use rustgis_map::symbology::ClassRef;
+    let mut ds = Dataset::new("parcels", GeometryType::Polygon, vec![Field::new("kind", FieldType::Text)]);
+    for (i, kind) in ["a", "b"].into_iter().enumerate() {
+        let x = i as f64 * 2.0;
+        let ring = vec![Coord::new(x, 0.0), Coord::new(x + 1.0, 0.0), Coord::new(x + 1.0, 1.0), Coord::new(x, 0.0)];
+        ds.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Attr::Text(kind.into())]);
+    }
+    ds.push(Some(Geometry::Point(Coord::new(10.0, 0.5))), vec![Attr::Text("a".into())]);
+    let mut s = Session::new(Project::default());
+    let id = s.map_mut().add_dataset(ds);
+    s.active_layer = Some(id);
+    s.run("layer.symbology", &json!({"type": "unique", "field": "kind"})).unwrap();
+    s.run("layer.fillLayers", &json!({"value": "a", "fills": [{"pattern": "hatch"}]})).unwrap();
+    s.run("layer.noFill", &Value::Null).unwrap();
+    // Class a has fills of its own again, so its hidden hatch can't go back over them.
+    s.run("layer.fillLayers", &json!({"value": "a", "fills": [{"pattern": "dots"}]})).unwrap();
+    let mark = s.notice_mark();
+    s.run("layer.restoreFill", &Value::Null).unwrap();
+    let said: Vec<_> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.len() == 1 && said[0].contains("1 class"), "{said:?}");
+    let own = s.map().layer(id).unwrap().renderer.class_fills(&ClassRef::Value("a".into())).unwrap();
+    assert!(
+        matches!(own, [f] if matches!(f.pattern, rustgis_map::fills::FillPattern::Dots { .. })),
+        "class a keeps its own dots, not the hatch No Fill hid: {own:?}"
+    );
 }
 
 /// #1456: a definition query on a streamed source the view filters as it reads (FlatGeobuf)
@@ -34563,6 +35233,60 @@ fn shapefile_exports_say_which_field_names_they_changed() {
     let mark = s.notice_mark();
     assert!(s.run("share.exportTable", &json!({"table": stats, "path": dir.join("stats.shp")})).is_err());
     assert!(changed(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Exporting to a Shapefile says how many vertices with a missing or infinite coordinate it left
+/// out, from a layer and from a standalone table; clean geometry gives no such notice (#1687).
+#[test]
+fn shapefile_exports_say_which_vertices_they_leave_out() {
+    use rustgis_data::{Dataset, Geometry, GeometryType};
+    use rustgis_geom::Coord;
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-shp-vertices-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    isolate_plugins();
+    let mut s = Session::new(Project::default());
+    let said = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("missing or infinite")).map(|n| n.text.clone()).collect()
+    };
+    let stations = |name: &str, x: f64| {
+        let mut ds = Dataset::new(name, GeometryType::Point, vec![]);
+        let members = vec![Coord::new(0.0, 0.0), Coord::new(x, 1.0), Coord::new(2.0, 2.0), Coord::new(3.0, 3.0)];
+        ds.push(Some(Geometry::MultiPoint(members)), vec![]);
+        ds
+    };
+    let id = s.map_mut().add_layer(rustgis_map::Layer::new(0, stations("mp", f64::NAN)));
+    for ext in ["shp", "zip"] {
+        let out = dir.join(format!("mp.{ext}")).display().to_string();
+        let mark = s.notice_mark();
+        s.run("share.exportLayer", &json!({"layer": id, "path": out})).unwrap();
+        assert_eq!(
+            said(&s, mark),
+            [format!("{out}: 1 vertex with a missing or infinite coordinate was left out of the Shapefile")],
+            ".{ext}"
+        );
+    }
+    s.project.add_table(stations("Stations", f64::INFINITY));
+    let out = dir.join("stations.shp").display().to_string();
+    let mark = s.notice_mark();
+    s.run("share.exportTable", &json!({"table": "Stations", "path": out})).unwrap();
+    assert_eq!(said(&s, mark), [format!("{out}: 1 vertex with a missing or infinite coordinate was left out of the Shapefile")]);
+    // Clean geometry: no notice.
+    let clean = s.map_mut().add_layer(rustgis_map::Layer::new(0, stations("clean", 1.0)));
+    let mark = s.notice_mark();
+    s.run("share.exportLayer", &json!({"layer": clean, "path": dir.join("clean.shp")})).unwrap();
+    assert!(said(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
+    // Projected, an infinite latitude is written (Web Mercator puts it at 85.05°), and nothing is
+    // said of it; in longitude/latitude it's left out, and said.
+    let mut polar = Dataset::new("polar", GeometryType::Point, vec![]);
+    polar.push(Some(Geometry::MultiPoint(vec![Coord::new(0.0, 0.0), Coord::new(1.0, f64::INFINITY), Coord::new(2.0, 2.0)])), vec![]);
+    let polar = s.map_mut().add_layer(rustgis_map::Layer::new(0, polar));
+    for (crs, file, notes) in [("EPSG:3857", "polar-3857.shp", 0), ("EPSG:4326", "polar-4326.shp", 1)] {
+        let out = dir.join(file).display().to_string();
+        let mark = s.notice_mark();
+        s.run("share.exportLayer", &json!({"layer": polar, "path": out, "crs": crs})).unwrap();
+        assert_eq!(said(&s, mark).len(), notes, "{crs}: {:?}", s.notices_since(mark));
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }
 
