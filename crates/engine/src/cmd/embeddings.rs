@@ -195,10 +195,13 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         return Err(format!("{}: only AlphaEarth's years make a time cube here", d.name));
     }
     let (first, last) = d.years.unwrap_or((2017, 2025));
-    let year_param = |k: &str, default: i32| match f(p, k) {
+    // Only a year left out (or null) takes the default: one given that isn't a year is refused.
+    let year_param = |k: &str, default: i32| match p.get(k).filter(|v| !v.is_null()) {
         None => Ok(default),
-        Some(y) if y.fract() == 0.0 && y >= f64::from(first) && y <= f64::from(last) => Ok(y as i32),
-        Some(_) => Err(format!("{k} is a year from {first} to {last}")),
+        Some(_) => match f(p, k) {
+            Some(y) if y.fract() == 0.0 && y >= f64::from(first) && y <= f64::from(last) => Ok(y as i32),
+            _ => Err(format!("{k} is a year from {first} to {last}")),
+        },
     };
     let (start, end) = (year_param("start", first)?, year_param("end", last)?);
     if start > end {
@@ -338,9 +341,14 @@ fn found(v: &Value, start: i32, end: i32) -> Result<(Vec<BTreeMap<i32, String>>,
     let series = list
         .iter()
         .map(|t| {
-            let mut out = BTreeMap::new();
+            let (mut out, mut seen) = (BTreeMap::new(), Vec::new());
             for (y, u) in t.get("years").and_then(Value::as_object).ok_or_else(bad)? {
                 let y: i32 = y.trim().parse().map_err(|_| bad())?;
+                // Two keys of one year (" 2017" and "2017"): one file would be lost, so refused.
+                if seen.contains(&y) {
+                    return Err(format!("found: a tile names the year {y} twice"));
+                }
+                seen.push(y);
                 let u = u.as_str().map(str::trim).filter(|u| u.starts_with("https://") && u.len() <= 4000).ok_or_else(bad)?;
                 if (start..=end).contains(&y) {
                     out.insert(y, u.to_string());
@@ -559,6 +567,11 @@ mod tests {
             json!({"dataset": "alphaearth", "found": [{"years": {"2017": "file:///etc/passwd"}}]}),
             json!({"dataset": "alphaearth", "found": [{"years": {"later": "https://x.org/a.tiff"}}]}),
             json!({"dataset": "alphaearth", "found": [{"files": []}]}),
+            // A year that isn't one, not taken as the default.
+            json!({"dataset": "alphaearth", "start": "2020-01-01", "found": tile}),
+            json!({"dataset": "alphaearth", "end": true, "found": tile}),
+            // A year named twice, one file of it lost.
+            json!({"dataset": "alphaearth", "found": [{"years": {"2017": "https://x.org/a.tiff", " 2017": "https://x.org/b.tiff"}}]}),
             // Nothing in the years asked for.
             json!({"dataset": "alphaearth", "start": 2020, "found": tile}),
             json!({"dataset": "alphaearth", "found": vec![json!({"years": {}}); emb::MAX_TILES + 1]}),
