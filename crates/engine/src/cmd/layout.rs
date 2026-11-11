@@ -3062,7 +3062,10 @@ fn colorbar_without_raster(s: &Session, li: usize, frame: u32) -> Option<String>
     }
     let mut why = Vec::new();
     if !listed.is_empty() {
-        why.push(format!("{} is drawn by classes, which the legend lists (give \"layer\" to show it on the colorbar)", listed.join(", ")));
+        why.push(format!(
+            "{} is drawn by classes, which a legend lists rather than a colorbar (give \"layer\" to show its colours on one anyway)",
+            listed.join(", ")
+        ));
     }
     if !unlisted.is_empty() {
         why.push(format!(

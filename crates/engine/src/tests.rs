@@ -7896,7 +7896,7 @@ fn a_publication_keys_the_raster_under_an_rgb_and_says_an_unlisted_colour_table(
     assert_eq!(
         placeholder(&s, mark),
         [
-            "the colorbar has no raster with a colour scale to show, so it draws an empty placeholder: Uso do solo is drawn by classes, which the legend lists (give \"layer\" to show it on the colorbar)"
+            "the colorbar has no raster with a colour scale to show, so it draws an empty placeholder: Uso do solo is drawn by classes, which a legend lists rather than a colorbar (give \"layer\" to show its colours on one anyway)"
         ]
     );
     let mark = s.notice_mark();
