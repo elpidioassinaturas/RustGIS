@@ -122,6 +122,11 @@ impl TiltDrape {
         running
     }
 
+    /// Whether there is a drape to paint.
+    pub fn drawn(&self) -> bool {
+        self.drape.is_some()
+    }
+
     /// Whether the next drape is being drawn.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn busy(&self) -> bool {
