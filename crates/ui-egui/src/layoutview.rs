@@ -277,13 +277,14 @@ const HANDLE_PICK: f32 = 11.0;
 /// The selected element's resize handle at a screen point: the element and the handle (0..8
 /// clockwise from top-left), the nearest within reach. On a small element the reach shrinks, so
 /// its inside still moves it; outside, it keeps a floor, so a thin element's handles can still be
-/// picked up. Navigating, a map frame under the pointer pans instead: no handle. A locked
+/// picked up. Navigating, a map frame under the pointer pans instead: no handle, but a text's,
+/// which often sits on a map (a credit, a turned source line) and sticks out over it. A locked
 /// element has none.
 fn handle_at(app: &RustGisApp, layout: &Layout, page: Rect, s: f32, pos: Pos2) -> Option<(u32, usize)> {
-    if nav_frame(app, layout, page, s, pos).is_some() {
+    let e = app.layout.selected.and_then(|id| layout.element(id)).filter(|e| !e.locked)?;
+    if !matches!(e.kind, ElementKind::Text { .. }) && nav_frame(app, layout, page, s, pos).is_some() {
         return None;
     }
-    let e = app.layout.selected.and_then(|id| layout.element(id)).filter(|e| !e.locked)?;
     let r = Rect::from_min_max(to_screen(page, s, (e.x, e.y)), to_screen(page, s, (e.x + e.w, e.y + e.h)));
     let third = r.width().min(r.height()) / 3.0;
     // A turned text's handles are on its turned box.
@@ -1044,7 +1045,9 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, layout: &L
             Some(_) => None,
             None => ruler_at(&app.layout, resp.rect, p).or_else(|| guide_at(layout, page, s, p).map(|g| g.0)),
         };
-        let navigating = app.layout.drag.is_none() && nav_frame(app, layout, page, s, p).is_some();
+        // A text's handle over the frame comes first (`handle_at`).
+        let navigating =
+            app.layout.drag.is_none() && nav_frame(app, layout, page, s, p).is_some() && handle_at(app, layout, page, s, p).is_none();
         let handle = match app.layout.drag {
             Some(Drag::Resize(_, h, _)) => Some(h),
             None if !navigating => handle_at(app, layout, page, s, p).map(|(_, h)| h),
@@ -2281,6 +2284,73 @@ mod tests {
         let (bx, by, bw, bh) = e.bounds();
         assert!((by - 65.0).abs() < 1e-6 && (bx - 95.0).abs() < 1e-6, "its top and side stay: {bx}, {by}");
         assert!((bh - e.w).abs() < 1e-6 && (bw - 10.0).abs() < 1e-6);
+    }
+
+    /// Navigating map frames, a selected text on a map frame keeps its handles, where they stick
+    /// out over the map too: dragging one resizes the text and leaves the map be. Another
+    /// element's handle over the frame still pans the map (#1763).
+    #[test]
+    fn a_text_on_a_map_frame_keeps_its_handles_while_navigating() {
+        use rustgis_engine::map::layout::ElementKind;
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Nav"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let frame = app.session.project.layouts[li].first_frame().unwrap();
+        let f = app.session.project.layouts[li].element(frame).unwrap().clone();
+        let (x, y) = (f.x + 10.0, f.y + 10.0);
+        let p = json!({"layout": li, "kind": "text", "text": "Fonte: IBGE", "x": x, "y": y, "w": 40, "h": 8});
+        let text = app.run("layout.addElement", p).unwrap()["element"].as_u64().unwrap() as u32;
+        let p = json!({"layout": li, "kind": "rectangle", "x": x, "y": y + 20.0, "w": 40, "h": 20, "fill": "#00000000"});
+        let rect = app.run("layout.addElement", p).unwrap()["element"].as_u64().unwrap() as u32;
+        app.layout.navigate = true;
+        app.layout.selected = Some(text);
+        let area = Rc::new(Cell::new(Rect::NOTHING));
+        let shown = area.clone();
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1000.0, 760.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                shown.set(ui.available_rect_before_wrap());
+                super::show(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        let layout = h.state().session.project.layouts[li].clone();
+        let center = |l: &rustgis_engine::map::layout::Layout| match &l.element(frame).unwrap().kind {
+            ElementKind::MapFrame { center, .. } => *center,
+            k => panic!("{k:?}"),
+        };
+        let before = center(&layout);
+        let (page, s) = page_rect(&h.state().layout, area.get(), &layout);
+        // Just right of the text's right-hand handle: off the text, over the map.
+        let from = to_screen(page, s, (x + 40.0, y + 4.0)) + vec2(3.0, 0.0);
+        assert_eq!(layout.hit(x + 40.0 + f64::from(3.0 / s), y + 4.0), Some(frame), "the point is on the map frame");
+        assert_eq!(handle_at(h.state(), &layout, page, s, from), Some((text, 3)), "the text's handle comes first");
+        let to = to_screen(page, s, (x + 60.0, y + 4.0)) + vec2(3.0, 0.0);
+        let button = |pos: Pos2, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.event(Event::PointerMoved(from));
+        h.step();
+        h.event(button(from, true));
+        h.step();
+        for i in 1..=6 {
+            h.event(Event::PointerMoved(from + (to - from) * i as f32 / 6.0));
+            h.step();
+        }
+        h.event(button(to, false));
+        h.run_steps(2);
+        let after = h.state().session.project.layouts[li].clone();
+        let e = after.element(text).unwrap();
+        assert!((e.w - 60.0).abs() < 1.0 && (e.x - x).abs() < 1e-9, "20 mm wider: {} at {}", e.w, e.x);
+        assert_eq!(center(&after), before, "the map stayed put");
+        // A rectangle's handle there is the map's, as before.
+        h.state_mut().layout.selected = Some(rect);
+        let by = to_screen(page, s, (x + 40.0, y + 30.0)) + vec2(3.0, 0.0);
+        assert_eq!(handle_at(h.state(), &after, page, s, by), None, "the rectangle's handle gives way to panning");
     }
 
     /// Dragging an arrow's round handle from above its centre round to its right turns it a
