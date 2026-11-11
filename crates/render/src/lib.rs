@@ -4014,6 +4014,13 @@ fn render_frame(
                     }
                     rustgis_map::raster::CastShadows::Unavailable(why) => {
                         let e = format!("{}: {why}", layer.name);
+                        // A page's frames say it on the page too (see `layout::shadow_notices`).
+                        SHADOW_NOTICES.with(|n| {
+                            let mut n = n.borrow_mut();
+                            if !n.contains(&e) {
+                                n.push(e.clone());
+                            }
+                        });
                         if !tile_out.errors.contains(&e) {
                             tile_out.errors.push(e);
                         }
@@ -6311,8 +6318,17 @@ thread_local! {
     /// Set while the Layout view's page is drawn on the interface's thread: its frames don't wait
     /// for cast shadows (see [`without_shadow_wait`]).
     static NO_SHADOW_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// A frame drawn at full resolution had cast shadows still to come (see [`shadows_to_come`]).
+    /// A frame drawn at full resolution had cast shadows still to come (see
+    /// [`frame_shadows_to_come`]).
     static SHADOWS_TO_COME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Why layers drawn since the last [`take_shadow_notices`] were drawn without their cast
+    /// shadows, each said once.
+    static SHADOW_NOTICES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The notices of [`SHADOW_NOTICES`], taken.
+pub(crate) fn take_shadow_notices() -> Vec<String> {
+    SHADOW_NOTICES.with(|n| std::mem::take(&mut *n.borrow_mut()))
 }
 
 /// Called when a layer's cast shadows land: the map, or the page, is drawn again.
@@ -6322,7 +6338,7 @@ fn shadows_landed() {
 
 /// Runs `f` (drawing the Layout view's page, on the interface's thread) with its frames drawn
 /// without the cast shadows still being worked out, rather than waiting for them: they say so
-/// ([`shadows_to_come`]), and the page is drawn again as they land.
+/// ([`frame_shadows_to_come`]), and the page is drawn again as they land.
 pub(crate) fn without_shadow_wait<T>(f: impl FnOnce() -> T) -> T {
     let before = NO_SHADOW_WAIT.with(|c| c.replace(true));
     let out = f();
@@ -6331,7 +6347,7 @@ pub(crate) fn without_shadow_wait<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Whether a frame drawn at full resolution since the last call had cast shadows still to come.
-pub(crate) fn shadows_to_come() -> bool {
+pub(crate) fn frame_shadows_to_come() -> bool {
     SHADOWS_TO_COME.with(|c| c.replace(false))
 }
 

@@ -73,6 +73,16 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> R
 thread_local! {
     /// The last [`render_pending`] on this thread drew a frame without cast shadows still to come.
     static PAGE_SHADOWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Why the frames of the pages drawn on this thread since the last [`shadow_notices`] drew
+    /// layers without their cast shadows.
+    static PAGE_NOTICES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Why map frames on the pages drawn on this thread since the last call (by [`render`],
+/// [`render_pending`] or [`render_drawing`]) drew layers without their cast shadows, each once,
+/// named by the layer: to be said, as the map view says its own (Never silent).
+pub fn shadow_notices() -> Vec<String> {
+    PAGE_NOTICES.with(|n| std::mem::take(&mut *n.borrow_mut()))
 }
 
 /// Whether the last [`render_pending`] on this thread drew a frame without cast shadows still
@@ -504,12 +514,22 @@ pub fn frame_map(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp
 /// still on their way (in the browser, which doesn't wait for them).
 fn frame_canvas(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp: f64, record: bool, pending: &mut bool) -> Option<Canvas> {
     let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
-    crate::shadows_to_come();
+    crate::frame_shadows_to_come();
     let img = if record { crate::render_complete_recorded(map, &view) } else { crate::render_complete(map, &view) }?;
-    let shadows = crate::shadows_to_come();
+    let shadows = crate::frame_shadows_to_come();
     if shadows {
         PAGE_SHADOWS.with(|c| c.set(true));
     }
+    // Why a frame's layers were drawn without their cast shadows, kept for the page.
+    let notices = crate::take_shadow_notices();
+    PAGE_NOTICES.with(|n| {
+        let mut n = n.borrow_mut();
+        for e in notices {
+            if !n.contains(&e) {
+                n.push(e);
+            }
+        }
+    });
     *pending |= img.tiles_pending || img.data_pending || shadows;
     Some(finish_frame(img, ppp))
 }
@@ -3323,6 +3343,37 @@ mod tests {
             ElementKind::Colorbar { frame, layer: None, title: title.into(), orientation, ticks: 5, tick_side: TickSide::End, reverse };
         l.add("Colorbar", rect, kind);
         render(&l, &mut [map.clone()], 96.0, &PageInfo::default()).unwrap()
+    }
+
+    /// A page whose frame draws a layer without its cast shadows says why, named by the layer; one
+    /// with them, or without any asked for, says nothing.
+    #[test]
+    fn a_page_says_why_a_frame_drew_no_cast_shadows() {
+        let relief = |shadow| rustgis_map::raster::RasterRenderer::ShadedRelief {
+            band: 0,
+            ramp: None,
+            azimuth: 315.0,
+            altitude: 30.0,
+            z_factor: 1.0,
+            shadow,
+        };
+        shadow_notices();
+        for shadow in [0.0, 1.0] {
+            let map = ramp_map(relief(shadow), rustgis_map::raster::Stretch::MinMax);
+            colorbar_page(&map, Orientation::Horizontal, false, "");
+            assert!(shadow_notices().is_empty(), "shadow {shadow}");
+        }
+        // Read in place with only its overview held: no whole grid to trace.
+        let mut map = ramp_map(relief(1.0), rustgis_map::raster::Stretch::MinMax);
+        let rl = map.layers.iter_mut().find_map(|l| l.raster.as_mut()).unwrap();
+        rl.in_place = true;
+        let mut r = (**rl.data.as_ref().unwrap()).clone();
+        r.overview = Some((1000, 10));
+        rl.data = Some(std::sync::Arc::new(r));
+        colorbar_page(&map, Orientation::Horizontal, false, "");
+        let said = shadow_notices();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].starts_with("dem: ") && said[0].contains("read in place"), "{said:?}");
     }
 
     /// A map with one 100 × 1 raster valued 0–99 by column, styled by `renderer`.

@@ -4085,7 +4085,13 @@ fn layout_bytes_inner(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool
         }
         Ok((out, png))
     };
+    rustgis_render::layout::shadow_notices();
     let result = render_pages();
+    // Layers its frames drew without their cast shadows (read in place, too large for the
+    // browser, no memory): said, as the map's export says them.
+    for e in rustgis_render::layout::shadow_notices() {
+        s.notify(e, true);
+    }
     // Stepping through the series moved the frame; put the layout back however that went.
     if stepping && let Some(cur) = s.project.layouts.get_mut(li) {
         *cur = saved.clone();

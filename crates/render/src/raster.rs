@@ -1122,8 +1122,8 @@ mod tests {
                 let mut one = Pixmap::new(size.0, size.1).unwrap();
                 one.fill(tiny_skia::Color::from_rgba8(20, 120, 40, 255));
                 let mut many = one.clone();
-                draw_with(&mut one, &r, &style, None, &view, opacity, false, Place::Flat(&Flat::Mercator, "mercator"), 1);
-                draw_with(&mut many, &r, &style, None, &view, opacity, false, Place::Flat(&Flat::Mercator, "mercator"), 7);
+                draw_with(&mut one, &r, &style, None, &view, opacity, false, Place::Flat(&Flat::Mercator, "mercator"), 1, None);
+                draw_with(&mut many, &r, &style, None, &view, opacity, false, Place::Flat(&Flat::Mercator, "mercator"), 7, None);
                 assert!(one.data() == many.data(), "res {res} ppp {ppp} opacity {opacity} {resampling:?}");
                 assert!(one.pixels().iter().any(|p| p.green() != 120), "res {res} ppp {ppp}: the raster is drawn");
             }

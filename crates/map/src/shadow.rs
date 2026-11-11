@@ -41,7 +41,9 @@ pub enum Unlit {
 /// as the raster's pixels are, for a sun at `azimuth` (degrees clockwise from north) and `altitude`
 /// (degrees above the horizon), heights scaled by `z_factor`. Cells that are no data or masked are
 /// lit and cast no shadow. Rows are split over up to `threads` threads, each the same as on one.
-/// Looks at `stop` between rows.
+/// Looks at `stop` between rows, and at the run's Cancel (see [`rustgis_data::progress`]) on a
+/// thread that has one (the browser, which works it out where it is asked). A sun under about 5°
+/// traces far over gentle ground: the cost grows with the raster's width as well as its cells.
 pub fn light(
     r: &Raster,
     band: usize,
@@ -72,7 +74,7 @@ pub fn light(
     let chunks: Vec<(usize, &mut [u8])> = out.chunks_mut(rows * w).enumerate().collect();
     let run = |(i, chunk): (usize, &mut [u8])| -> Result<(), Unlit> {
         for (dy, row) in chunk.chunks_mut(w).enumerate() {
-            if stop.load(Ordering::Relaxed) {
+            if stop.load(Ordering::Relaxed) || rustgis_data::progress::check().is_err() {
                 return Err(Unlit::Stopped);
             }
             trace.row(i * rows + dy, row);

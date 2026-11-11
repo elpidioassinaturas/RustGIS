@@ -755,9 +755,16 @@ impl RasterLayer {
         let mut start = None;
         let work = {
             let Ok(mut jobs) = self.cast.0.lock() else { return CastShadows::None };
-            // Grids of pixels no longer held go (their work stops as it is dropped).
-            jobs.retain(|j| j.pixels.strong_count() > 0);
-            match jobs.iter().position(|j| j.key == key && Weak::ptr_eq(&j.pixels, &Arc::downgrade(r))) {
+            // Grids of pixels no longer held go (their work stops as it is dropped), and so does
+            // work stopped part-way (a cancelled run), to be started again.
+            jobs.retain(|j| j.pixels.strong_count() > 0 && !j.work.was_stopped());
+            let pixels = Arc::downgrade(r);
+            let same = |j: &LightJob| j.key == key && Weak::ptr_eq(&j.pixels, &pixels);
+            // The same owner's work for another sun, not done and not waited for, is superseded
+            // (going back to a sun kept too): it stops, as it is dropped. Grids done are kept, for
+            // going back.
+            jobs.retain(|j| same(j) || j.owner != owner || j.work.is_done() || j.work.waited());
+            match jobs.iter().position(same) {
                 Some(i) => {
                     // The latest used last, so the oldest goes first.
                     let mut job = jobs.remove(i);
@@ -767,9 +774,6 @@ impl RasterLayer {
                     work
                 }
                 None => {
-                    // The same owner's work for another sun, not done and not waited for, is
-                    // superseded: it stops (as it is dropped). Grids done are kept, for going back.
-                    jobs.retain(|j| j.owner != owner || j.work.is_done() || j.work.waited());
                     // Past the few kept, the oldest nothing waits for goes.
                     if jobs.len() >= KEPT_LIGHTS
                         && let Some(i) = jobs.iter().position(|j| !j.work.waited())
@@ -828,6 +832,11 @@ struct LightWork {
 impl LightWork {
     fn is_done(&self) -> bool {
         self.done.lock().is_ok_and(|d| d.is_some())
+    }
+
+    /// Whether it was stopped part-way, rather than done.
+    fn was_stopped(&self) -> bool {
+        self.done.lock().is_ok_and(|d| matches!(d.as_ref(), Some(Err(e)) if e == STOPPED))
     }
 
     fn waited(&self) -> bool {
@@ -897,6 +906,9 @@ impl Drop for LightJob {
 #[derive(Clone, Default)]
 struct CastLight(Arc<Mutex<Vec<LightJob>>>);
 
+/// Why a light grid stopped part-way has none: superseded, or its run cancelled.
+const STOPPED: &str = "its cast shadows were stopped";
+
 /// The most light grids a layer and its copies keep.
 const KEPT_LIGHTS: usize = 3;
 
@@ -910,7 +922,7 @@ fn start_light(r: Arc<Raster>, key: LightKey, work: Arc<LightWork>, landed: impl
         }));
         match traced {
             // Stopped, it was replaced: nothing is drawn again for it.
-            Ok(Err(crate::shadow::Unlit::Stopped)) => work.finish(Err("its cast shadows were stopped".into())),
+            Ok(Err(crate::shadow::Unlit::Stopped)) => work.finish(Err(STOPPED.into())),
             Ok(out) => {
                 work.finish(out.map(Arc::new).map_err(|e| match e {
                     crate::shadow::Unlit::Failed => "its cast shadows aren't drawn: working them out failed".into(),
@@ -2362,6 +2374,13 @@ mod tests {
         let second = work_of(&rl, 20.0).unwrap();
         assert!(!second.stop.load(std::sync::atomic::Ordering::SeqCst));
         assert!(work_of(&rl, 30.0).is_some());
+        // Going back to a sun kept stops the one just left, as a new sun would.
+        lit(&mut rl, 40.0);
+        rl.cast_shadows(false, 1, || {});
+        let left = work_of(&rl, 40.0).unwrap();
+        lit(&mut rl, 30.0);
+        rl.cast_shadows(false, 1, || {});
+        assert!(left.is_done() || (left.stop.load(std::sync::atomic::Ordering::SeqCst) && work_of(&rl, 40.0).is_none()));
         assert!(matches!(copy.cast_shadows(true, 2, || {}), CastShadows::Ready(_)));
         // Waited for, the latest is drawn.
         assert!(matches!(rl.cast_shadows(true, 1, || {}), CastShadows::Ready(_)));

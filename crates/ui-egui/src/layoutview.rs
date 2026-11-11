@@ -667,6 +667,13 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
             // shadows still being worked out weren't waited for: drawn again as they land.
             let web = cfg!(target_arch = "wasm32");
             let frames = (web && frames_pending) || rustgis_engine::render::layout::shadows_to_come();
+            // Layers its frames drew without their cast shadows, said once each, as the map
+            // view says them.
+            for e in rustgis_engine::render::layout::shadow_notices() {
+                if app.map.tile_errors.insert(e.clone()) {
+                    app.session.notify(e, true);
+                }
+            }
             // Waiting for the frames draws it again anyway: the legends are asked about once
             // they are whole.
             let legends = web && !frames && rustgis_engine::render::layout::legends_pending(&layout, &app.session.project.maps);

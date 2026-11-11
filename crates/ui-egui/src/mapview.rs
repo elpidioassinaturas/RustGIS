@@ -337,8 +337,9 @@ pub struct MapView {
     pictures: crate::popupmedia::Pictures,
     /// The tile layers' credits, from the last render.
     attribution: Vec<String>,
-    /// Tile layer errors already reported.
-    tile_errors: std::collections::HashSet<String>,
+    /// Tile layer errors, and why layers were drawn without their cast shadows (in the map or
+    /// the Layout view), already reported.
+    pub(crate) tile_errors: std::collections::HashSet<String>,
     /// When the map last rendered (seconds).
     last_render: f64,
     /// The map drawn flat and laid over the globe while it moves.
