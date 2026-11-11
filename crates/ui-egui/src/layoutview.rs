@@ -1959,8 +1959,8 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
         }
     }
     // The layers a legend lists: a checkbox for each vector layer of its frame's map, each raster
-    // drawn by classes (#1679) and each WMS or WMTS layer with a legend, ticked when listed. Names gone from the map drop out of
-    // the list as it's written back.
+    // drawn by classes (#1679) and each WMS or WMTS layer with a legend, ticked when listed. Names
+    // gone from the map drop out of the list as it's written back.
     if let ElementKind::Legend { frame, exclude, .. } = &e.kind {
         let map = layout.element(*frame).and_then(|f| match &f.kind {
             ElementKind::MapFrame { map, .. } => app.session.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map)),

@@ -1832,18 +1832,27 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     surrounds.push((Surround::Arrow, aw, ah));
     // The topmost visible raster with a colour scale that the legend doesn't list by its classes
     // gets a colorbar, under the legend in its box (a map whose theme is a raster on a ramp has its
-    // key there, which the legend's rows don't give). A raster drawn by classes has them in the
-    // legend's rows instead (#1679). `"colorbar": "none"` leaves it out, and its room in the box
-    // with it (#1680).
+    // key there, which the legend's rows don't give): an RGB composite over a DEM leaves it to the
+    // DEM. A raster drawn by classes has them in the legend's rows instead (#1679). `"colorbar":
+    // "none"` leaves it out, and its room in the box with it (#1680).
     let bar = s
         .map()
         .layers
         .iter()
         .filter(|l| l.visible)
         .filter_map(|l| Some((l, l.raster.as_ref()?)))
-        .find(|(_, r)| !r.style.renderer.draws_classes())
-        .filter(|(_, r)| colorbar && rustgis_map::layout::color_scale(r).is_some())
+        .find(|(_, r)| colorbar && !r.style.renderer.draws_classes() && rustgis_map::layout::color_scale(r).is_some())
         .map(|(l, _)| l.name.clone());
+    // A colour table whose values can't be known (too many to list) gives the legend no class, and
+    // the sheet no key for it: said rather than left blank.
+    for l in s.map().layers.iter().filter(|l| s.map().shows(l)) {
+        if l.raster.as_ref().is_some_and(rustgis_map::RasterLayer::classes_unknown) {
+            warnings.push(format!(
+                "'{}' draws its colour table over more values than a legend can list (over 256, or not whole numbers): the legend has no key for it",
+                l.name
+            ));
+        }
+    }
     let (bar_w, bar_h) = (if sheet { 50.0 * k } else { 40.0 }, COLORBAR_MM);
     let bar_part = if bar.is_some() { bar_h + if ch > 0.0 { 2.0 } else { 0.0 } } else { 0.0 };
     let (content_w, content_h) = (if bar.is_some() { cw.max(bar_w) } else { cw }, ch + bar_part);

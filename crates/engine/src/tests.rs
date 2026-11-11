@@ -7781,6 +7781,59 @@ fn a_publication_lists_a_land_covers_classes_instead_of_a_colorbar() {
     assert!(l.elements.iter().any(|e| e.name == "Legend"), "{r}");
 }
 
+/// The colorbar goes to the topmost visible raster with a colour scale: an RGB composite over a
+/// stretched DEM leaves it to the DEM. A colour table over more values than a legend lists gives
+/// neither classes nor a colorbar, and the publication says so; one with its classes known says
+/// nothing (#1679).
+#[test]
+fn a_publication_keys_the_raster_under_an_rgb_and_says_an_unlisted_colour_table() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    use rustgis_map::layout::ElementKind;
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 10.0, pixel_width: 0.5, pixel_height: -0.5 };
+    let add = |s: &mut Session, name: &str, r: Raster| {
+        let bytes = geotiff::write(&r, 0).unwrap();
+        crate::cmd::raster::add_raster(s, name, rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)).unwrap();
+    };
+    let p = json!({"profile": "a4-portrait", "extent": [0, 0, 10, 10], "author": "", "locator": "none"});
+    let bar_of = |s: &Session| {
+        s.project.layouts.last().unwrap().elements.iter().find_map(|e| match &e.kind {
+            ElementKind::Colorbar { layer, .. } => Some(layer.clone()),
+            _ => None,
+        })
+    };
+    // A stretched DEM under an RGB composite.
+    let mut s = Session::new(Project::default());
+    let z: Vec<f32> = (0..400).map(|i| i as f32 * 1.5).collect();
+    add(&mut s, "Altitude", Raster::new("dem", 20, 20, vec![z], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap());
+    let band = |k: f32| (0..400).map(|i| (i as f32 * k) % 255.0).collect::<Vec<f32>>();
+    let rgb =
+        Raster::new("rgb", 20, 20, vec![band(1.0), band(2.0), band(3.0)], gt, Crs::LonLat, None, ColorHint::Rgb { alpha: false }, "Byte");
+    add(&mut s, "Imagem", rgb.unwrap());
+    assert!(s.map().layers[0].raster.as_ref().is_some_and(|r| matches!(r.style.renderer, rustgis_map::RasterRenderer::Rgb { .. })));
+    let r = s.run("layout.publication", &p).unwrap();
+    assert_eq!(bar_of(&s), Some(Some("Altitude".to_string())), "{r}");
+    // A colour table over 300 values: no class to list, no colorbar, and a warning.
+    let mut s = Session::new(Project::default());
+    let mut palette = vec![[0, 0, 0, 0]; 256];
+    for (i, c) in palette.iter_mut().enumerate() {
+        *c = [i as u8, 100, 255 - i as u8, 255];
+    }
+    let z: Vec<f32> = (0..400).map(|i| (i % 300) as f32).collect();
+    let many = Raster::new("many", 20, 20, vec![z], gt, Crs::LonLat, None, ColorHint::Palette(palette), "UInt16").unwrap();
+    assert!(many.bands[0].stats.categories.is_none());
+    let mut rl = rustgis_map::RasterLayer::from_path(many, "many.tif");
+    rl.style.renderer = rustgis_map::RasterRenderer::Colormap;
+    crate::cmd::raster::add_raster(&mut s, "Classes", rl).unwrap();
+    let r = s.run("layout.publication", &p).unwrap();
+    assert_eq!(bar_of(&s), None, "{r}");
+    assert!(r["warnings"].to_string().contains("'Classes' draws its colour table over more values than a legend can list"), "{r}");
+    // Its classes known: nothing said.
+    let mut s = Session::new(Project::default());
+    add_land_cover(&mut s, "Uso do solo", &[(3, "Floresta"), (15, "Pastagem")]);
+    let r = s.run("layout.publication", &p).unwrap();
+    assert!(!r["warnings"].to_string().contains("more values than a legend"), "{r}");
+}
+
 /// A land cover with more classes than its legend's box holds: the publication says it leaves the
 /// last out, and so does a legend added in a small box; five classes fit, and nothing is said
 /// (#1679).

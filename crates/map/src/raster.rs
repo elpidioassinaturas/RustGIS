@@ -1665,13 +1665,21 @@ impl RasterLayer {
         }
     }
 
+    /// Whether it is drawn by its colour table over values its statistics don't list (over 256
+    /// distinct values, or values that aren't whole): [`RasterLayer::legend_classes`] then has no
+    /// class to give, and a colorbar none either (#1679).
+    pub fn classes_unknown(&self) -> bool {
+        matches!(self.style.renderer, RasterRenderer::Colormap)
+            && self.data.as_ref().and_then(|r| r.bands.first()).is_some_and(|b| b.stats.count > 0 && b.stats.categories.is_none())
+    }
+
     /// The classes a layout's legend lists for this raster (#1679): the Layers pane's class rows
     /// ([`RasterLayer::legend`]), a colour and a label each, in the renderer's order. `None` for a
     /// renderer that draws no classes (a stretch, a hillshade, RGB bands), which a colorbar keys.
     /// Without `all_classes`, the classes the raster holds: those of the values in its statistics
     /// (without the masked pixels). A raster with too many values to list (over 256, or not whole)
-    /// gives every Unique Values class, and for Classify the classes from its lowest value's to its
-    /// highest's. With `all_classes`, every class of a Unique Values or Classify renderer. A colour
+    /// gives every Unique Values class, for Classify the classes from its lowest value's to its
+    /// highest's, and for a colour table none ([`RasterLayer::classes_unknown`]). With `all_classes`, every class of a Unique Values or Classify renderer. A colour
     /// table's 256 entries have no meaningful "all": it lists the values the raster holds either
     /// way, as the Layers pane does.
     pub fn legend_classes(&self, all_classes: bool) -> Option<Vec<(Rgba, String)>> {
@@ -1881,6 +1889,9 @@ mod tests {
             RasterRenderer::Classify { band: 0, method: ClassMethod::EqualInterval, ramp: Ramp::Harbour, breaks, classes: 4 };
         assert_eq!(labels(&rl, false), ["1 – 2", "2 – 4", "4 – 10"]);
         assert_eq!(labels(&rl, true), ["1 – 2", "2 – 4", "4 – 10", "10 – 20"]);
+        assert!(!rl.classes_unknown(), "breaks, not a colour table");
+        rl.style.renderer = RasterRenderer::Colormap;
+        assert!(!rl.classes_unknown(), "its values are known");
         // A ramp and bands have no classes: a colorbar keys them, or nothing does.
         rl.style.renderer = RasterRenderer::Stretch { band: 0, ramp: Ramp::Harbour, invert: false };
         assert_eq!(rl.legend_classes(false), None);
@@ -1903,6 +1914,10 @@ mod tests {
             RasterRenderer::Classify { band: 0, method: ClassMethod::EqualInterval, ramp: Ramp::Harbour, breaks, classes: 5 };
         let n = |all| rl.legend_classes(all).unwrap().len();
         assert_eq!((n(false), n(true)), (3, 5), "120, 150 and 200: the classes 100 to 199.9 fall in");
+        // By a colour table, over values it can't list: no class, said by `classes_unknown`.
+        rl.style.renderer = RasterRenderer::Colormap;
+        assert_eq!(rl.legend_classes(false), Some(Vec::new()));
+        assert!(rl.classes_unknown());
     }
 
     /// A following layer's dates are its steps from `offset` on, one each: repair keeps them as
