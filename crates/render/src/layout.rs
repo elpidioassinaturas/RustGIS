@@ -513,33 +513,45 @@ fn finish_frame(img: crate::Rendered, ppp: f64, grid: Option<(&Map, &View, &Grid
     }
     let labels = grid.map(|(map, view, g, comma)| draw_grid(&mut pm, map, view, g, comma)).unwrap_or_default();
     let (w, h) = (pm.width() as f32 / ppp as f32, pm.height() as f32 / ppp as f32);
-    let inset = crate::attribution_text(&img.attribution, w).map_or((0.0, 0.0), |(_, tw)| attribution_inset((w, h), tw, &labels));
+    let inset = crate::attribution_text(&img.attribution).map_or((0.0, 0.0), |(_, tw)| attribution_inset((w, h), tw, &labels));
     crate::draw_attribution(&mut pm, &img.attribution, ppp as f32, inset);
     pm
 }
 
 /// How far further in (up from the bottom, in from the right, in points) the attribution `tw`
 /// points wide goes on a frame `w` × `h` points, so it covers none of the grid's bottom and right
-/// `labels` (each one's edge, and its box in points: left, top, right, bottom): above a bottom
-/// label under it, left of a right one beside it. Where none is in the way, it stays in the
-/// corner.
+/// `labels` (each one's edge, and its box in points: left, top, right, bottom). It goes above a
+/// bottom label under it. Beside a right label, it goes left of it when it still fits in the frame
+/// there, else above it; when neither fits, as far left as the frame holds it. Where none is in
+/// the way, it stays in the corner.
 fn attribution_inset((w, h): (f32, f32), tw: f32, labels: &[(Edge, [f32; 4])]) -> (f32, f32) {
     let size = crate::ATTRIBUTION_SIZE;
     // Half the credit's height, its halo included, and the gap it keeps from a label.
     let (half, gap) = (size * 0.8, 2.0);
     let (mut bottom, mut right) = (0.0f32, 0.0f32);
+    // The credit's foot set `gap` above a label's top `y`: how far up from the bottom that is.
+    let above = |y: f32| h - size * 0.9 + half - y + gap;
     // Each move clears the label for good (the credit only goes up and left), so each label is
-    // met once at most.
+    // met once at most; the last resort ends the search.
     for _ in 0..=labels.len() {
-        let (x1, cy) = (w - right - 4.0, h - bottom - size * 0.9);
-        let (x0, y0, y1) = (x1 - tw, cy - half, cy + half);
+        // Its whole width, where it is drawn: a credit wider than the frame runs past both edges.
+        let (cx, cy) = (crate::attribution_center(w, tw, right), h - bottom - size * 0.9);
+        let (x0, x1, y0, y1) = (cx - tw / 2.0, cx + tw / 2.0, cy - half, cy + half);
         let hit = labels
             .iter()
             .filter(|(e, _)| matches!(e, Edge::Bottom | Edge::Right))
             .find(|(_, b)| x0 < b[2] && b[0] < x1 && y0 < b[3] && b[1] < y1);
         match hit {
-            Some((Edge::Right, b)) => right = w - 4.0 - b[0] + gap,
-            Some((_, b)) => bottom = h - size * 0.9 + half - b[1] + gap,
+            // Left of the label, its right end `gap` short of it, when all of it stays in.
+            Some((Edge::Right, b)) if b[0] - gap - tw >= 0.0 => right += x1 - (b[0] - gap),
+            // Above the label, when all of it stays in.
+            Some((Edge::Right, b)) if b[1] - gap - 2.0 * half >= 0.0 => bottom = above(b[1]),
+            // Neither: as far left as the frame holds it (a credit wider than the frame stays put).
+            Some((Edge::Right, _)) => {
+                right += x0.max(0.0);
+                break;
+            }
+            Some((_, b)) => bottom = above(b[1]),
             None => break,
         }
     }
@@ -3898,23 +3910,37 @@ mod tests {
             |edges, label_orientation| Grid { step: 30.0, color: Rgba::new(0, 0, 0, 0), edges, label_orientation, ..Grid::default() };
         // The grid's labels and the credit, each on its own frame (the credit `inset` from the
         // corner, else where the frame puts it); the pixels both darken.
-        let overlap = |g: &Grid, inset: Option<(f32, f32)>| {
+        let overlap = |g: &Grid, credit: &[String], inset: Option<(f32, f32)>| {
             let mut labels_pm = Canvas::from_pixmap(white());
             let labels = draw_grid(&mut labels_pm, &map, &view, g, false);
             assert!(!labels.is_empty());
             let (w, h) = (fw as f32, fh as f32);
-            let tw = crate::attribution_text(&credit, w).unwrap().1;
+            let tw = crate::attribution_text(credit).unwrap().1;
             let inset = inset.unwrap_or_else(|| attribution_inset((w, h), tw, &labels));
             let mut credit_pm = Canvas::from_pixmap(white());
-            crate::draw_attribution(&mut credit_pm, &credit, ppp as f32, inset);
+            crate::draw_attribution(&mut credit_pm, credit, ppp as f32, inset);
             shaded(labels_pm.pixmap()).iter().zip(shaded(credit_pm.pixmap())).filter(|(a, b)| **a && *b).count()
         };
         let default = grid(GridEdges::default(), Orientation::Horizontal);
-        assert!(overlap(&default, Some((0.0, 0.0))) > 20, "in the corner, the credit runs over the bottom labels");
+        assert!(overlap(&default, &credit, Some((0.0, 0.0))) > 20, "in the corner, the credit runs over the bottom labels");
         for (bottom, right) in [(true, false), (true, true), (false, true)] {
             for orientation in [Orientation::Horizontal, Orientation::Vertical] {
                 let g = grid(GridEdges { top: true, bottom, left: true, right }, orientation);
-                assert_eq!(overlap(&g, None), 0, "bottom {bottom}, right {right}, {orientation:?}");
+                assert_eq!(overlap(&g, &credit, None), 0, "bottom {bottom}, right {right}, {orientation:?}");
+            }
+        }
+        // A credit wider than the frame (several layers' credits, a narrow frame) runs past both
+        // edges; it keeps clear of the bottom and right labels all the same.
+        let long = vec![
+            "© OpenStreetMap contributors".to_string(),
+            "MapBiomas, sistemas de irrigação (CC BY 4.0)".to_string(),
+            "Instituto Brasileiro de Geografia e Estatística".to_string(),
+        ];
+        assert!(crate::attribution_text(&long).unwrap().1 > fw as f32);
+        for (bottom, right) in [(true, true), (false, true)] {
+            for orientation in [Orientation::Horizontal, Orientation::Vertical] {
+                let g = grid(GridEdges { top: false, bottom, left: false, right }, orientation);
+                assert_eq!(overlap(&g, &long, None), 0, "long credit: bottom {bottom}, right {right}, {orientation:?}");
             }
         }
         // Drawn with the frame's map: the labels' pixels are the grid's alone.
@@ -3945,7 +3971,8 @@ mod tests {
     }
 
     /// The credit stays in the corner with nothing under it, goes up above a bottom label and left
-    /// of a right one, and pays no heed to the top and left labels.
+    /// of a right one (above it, when going left would take it out of the frame), and pays no heed
+    /// to the top and left labels.
     #[test]
     fn attribution_inset_steps_round_the_labels_in_its_way() {
         let (size, tw) = ((200.0, 100.0), 60.0);
@@ -3964,6 +3991,24 @@ mod tests {
         // Labels on the other edges are not in its way.
         let others = [(Edge::Left, [130.0, 88.0, 196.0, 98.0]), (Edge::Top, [130.0, 88.0, 196.0, 98.0])];
         assert_eq!(attribution_inset(size, tw, &others), (0.0, 0.0));
+        // Left of a right label it would leave the frame (180 points from x = 16, a label at
+        // x = 163, it would start at x = -19): it goes above the label instead, still in the
+        // corner's column.
+        let side = [(Edge::Right, [163.0, 85.0, 197.0, 97.0])];
+        let (b3, r3) = attribution_inset(size, 180.0, &side);
+        assert_eq!(r3, 0.0);
+        assert!((100.0 - b3 - crate::ATTRIBUTION_SIZE * 0.9 + crate::ATTRIBUTION_SIZE * 0.8 - 83.0).abs() < 1e-3, "{b3}");
+        // No room above it either (a frame 20 points tall): as far left as the frame holds it,
+        // starting at its left edge.
+        let low = [(Edge::Right, [163.0, 3.0, 197.0, 15.0])];
+        let (b4, r4) = attribution_inset((200.0, 20.0), 180.0, &low);
+        assert_eq!(b4, 0.0);
+        assert!((crate::attribution_center(200.0, 180.0, r4) - 90.0).abs() < 1e-3, "{r4}");
+        // Wider than the frame: never left (it can't fit), above the label when there is room.
+        let (b5, r5) = attribution_inset(size, 300.0, &side);
+        assert_eq!((b5, r5), (b3, 0.0));
+        let (b6, r6) = attribution_inset((200.0, 20.0), 300.0, &low);
+        assert_eq!((b6, r6), (0.0, 0.0), "it stays where it was drawn");
     }
 
     #[test]

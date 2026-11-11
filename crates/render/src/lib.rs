@@ -6444,26 +6444,33 @@ fn render_exported(map: &mut Map, view: &View) -> Result<Rendered, String> {
 /// The size of the tile layers' credits, in points.
 pub(crate) const ATTRIBUTION_SIZE: f32 = 9.0;
 
-/// The tile layers' credits as [`draw_attribution`] writes them, and their width in points on a
-/// canvas `w` points wide; none when there are none.
-pub(crate) fn attribution_text(attribution: &[String], w: f32) -> Option<(String, f32)> {
+/// The tile layers' credits as [`draw_attribution`] writes them, and their whole width in points;
+/// none when there are none.
+pub(crate) fn attribution_text(attribution: &[String]) -> Option<(String, f32)> {
     if attribution.is_empty() {
         return None;
     }
     let text = attribution.join(" | ");
-    let tw = text::measure(&text, ATTRIBUTION_SIZE, false).min(w);
+    let tw = text::measure(&text, ATTRIBUTION_SIZE, false);
     Some((text, tw))
+}
+
+/// Where [`draw_attribution`] centres a credit `tw` points wide across a canvas `w` points wide,
+/// `right` points further in from its right edge: one wider than the canvas is centred as if it
+/// were the canvas's width, so it runs past both edges.
+pub(crate) fn attribution_center(w: f32, tw: f32, right: f32) -> f32 {
+    w - right - tw.min(w) / 2.0 - 4.0
 }
 
 /// The tile layers' credits, small, in the bottom-right corner: `inset` points further in (up
 /// from the bottom, in from the right), to keep clear of what sits along those edges.
 pub(crate) fn draw_attribution(pm: &mut Canvas, attribution: &[String], ppp: f32, (bottom, right): (f32, f32)) {
     let (w, h) = (pm.width() as f32 / ppp, pm.height() as f32 / ppp);
-    let Some((text, tw)) = attribution_text(attribution, w) else { return };
+    let Some((text, tw)) = attribution_text(attribution) else { return };
     let size = ATTRIBUTION_SIZE;
     let label = PlacedLabel {
         text,
-        x: w - right - tw / 2.0 - 4.0,
+        x: attribution_center(w, tw, right),
         y: h - bottom - size * 0.9,
         size,
         color: Rgba::rgb(0x33, 0x33, 0x33),
