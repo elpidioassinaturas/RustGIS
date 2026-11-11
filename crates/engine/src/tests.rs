@@ -30918,6 +30918,9 @@ fn lines_and_outlines_take_a_dash() {
     let text = add(&mut s, json!({"kind": "text", "text": "Área de estudo"}));
     assert!(s.run("layout.update", &json!({"element": text, "dash": [4, 2]})).unwrap_err().contains("dash"));
     assert!(s.run("layout.addElement", &json!({"kind": "northArrow", "dash": [4, 2]})).unwrap_err().contains("dash"));
+    // Solid asked for with null is refused there too, not ignored.
+    assert!(s.run("layout.update", &json!({"element": text, "dash": null})).unwrap_err().contains("dash"));
+    assert!(s.run("layout.addElement", &json!({"kind": "text", "dash": null})).unwrap_err().contains("dash"));
     // Locked, even a solid one asked for with null is refused.
     s.run("layout.update", &json!({"element": arrow, "locked": true})).unwrap();
     assert!(s.run("layout.update", &json!({"element": arrow, "dash": null})).unwrap_err().contains("locked"));
