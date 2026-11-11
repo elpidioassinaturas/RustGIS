@@ -2292,20 +2292,24 @@ mod tests {
     fn cast_shadows_are_worked_out_once_per_sun() {
         assert_eq!(tower(0.0).cast_shadows(true, 1, || {}), CastShadows::None);
         let mut rl = tower(0.8);
-        let landed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let count = |n: &Arc<std::sync::atomic::AtomicUsize>| {
-            let n = n.clone();
+        // Each landing is sent: `landed` is called on the worker just after the grid is kept, so
+        // it is waited for, not read at once.
+        let (sent, landings) = std::sync::mpsc::channel::<()>();
+        let landed = |tx: &std::sync::mpsc::Sender<()>| {
+            let tx = tx.clone();
             move || {
-                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = tx.send(());
             }
         };
-        let CastShadows::Ready(grid) = rl.cast_shadows(true, 1, count(&landed)) else { panic!("waited for") };
+        let CastShadows::Ready(grid) = rl.cast_shadows(true, 1, landed(&sent)) else { panic!("waited for") };
+        assert!(landings.recv_timeout(std::time::Duration::from_secs(60)).is_ok(), "landed once");
         // West of the tower, in its shadow; east of it, lit.
         assert_eq!(grid[10 * 20 + 9], 0);
         assert_eq!(grid[10 * 20 + 11], 255);
-        // Kept: the same grid, nothing worked out again.
-        assert!(matches!(rl.cast_shadows(false, 1, count(&landed)), CastShadows::Ready(g) if Arc::ptr_eq(&g, &grid)));
-        assert_eq!(landed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Kept: the same grid, nothing worked out again, and nothing more lands.
+        assert!(matches!(rl.cast_shadows(false, 1, landed(&sent)), CastShadows::Ready(g) if Arc::ptr_eq(&g, &grid)));
+        drop(sent);
+        assert!(landings.recv().is_err(), "landed again");
         // The shadow's strength is drawn, not worked out: the grid is kept for another.
         if let RasterRenderer::ShadedRelief { shadow, .. } = &mut rl.style.renderer {
             *shadow = 0.3;
