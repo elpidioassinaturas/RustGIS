@@ -187,11 +187,14 @@ fn stretch(p: &Value) -> Result<f32, String> {
 /// place as the map draws them.
 ///
 /// Without `found` the command runs on its caller's thread and waits there for the index and that
-/// header, as `embeddings.search` and `embeddings.add` do: the command line, Python and the
-/// assistant have no frame to hold and want the layers there when the command returns. The app's
+/// header, as `embeddings.search` and `embeddings.add` do, so that the caller finds the layers
+/// there when the command returns. The command line and Python have no window to hold. The app's
 /// own routes (ribbon, command search) open the pane, which searches off the frame and hands its
 /// tiles over (`found`); a plugin's command in the app (`leave_downloads`) is refused rather than
-/// wait on the frame.
+/// wait on the frame. The app's assistant runs its tools on the frame without `leave_downloads`
+/// (see [`Session::run_leaving_downloads`]), so there it waits on the frame, as it does for every
+/// command that waits for the network (`embeddings.search`, `layer.addUrl`); moving the
+/// assistant's tools off the frame is a change for all of them, not for this one.
 fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
     use crate::render::rustgis_tiles::cog::{self, Look};
     let d = dataset(p)?;
