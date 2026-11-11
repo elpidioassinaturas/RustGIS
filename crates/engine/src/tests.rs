@@ -7839,6 +7839,17 @@ fn a_publication_keys_the_raster_under_an_rgb_and_says_an_unlisted_colour_table(
         [said],
         "one, with the count: {r}"
     );
+    // A colorbar with no layer has nothing to show either, and doesn't promise the legend.
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "colorbar"})).unwrap();
+    let empty: Vec<String> =
+        s.notices_since(mark).iter().filter(|n| n.text.contains("empty placeholder")).map(|n| n.text.clone()).collect();
+    assert_eq!(
+        empty,
+        [
+            "the colorbar has no raster with a colour scale to show, so it draws an empty placeholder: Mais classes, Classes draws a colour table over more values than a legend or a colorbar can list (over 256, or not whole numbers), so nothing keys it"
+        ]
+    );
     // A legend added says it too, once; told to leave one out, it names the other.
     let mark = s.notice_mark();
     let id = s.run("layout.addElement", &json!({"kind": "legend"})).unwrap()["element"].as_u64().unwrap();
@@ -7889,8 +7900,12 @@ fn a_publication_keys_the_raster_under_an_rgb_and_says_an_unlisted_colour_table(
         ]
     );
     let mark = s.notice_mark();
-    s.run("layout.addElement", &json!({"kind": "colorbar", "layer": "Uso do solo"})).unwrap();
+    let named = s.run("layout.addElement", &json!({"kind": "colorbar", "layer": "Uso do solo"})).unwrap()["element"].clone();
     assert!(placeholder(&s, mark).is_empty());
+    // Set back to no layer, it says so again.
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": named, "layer": ""})).unwrap();
+    assert_eq!(placeholder(&s, mark).len(), 1, "{:?}", s.notices_since(mark));
     // Its classes read through an overview: said once, by the publication and the legend, unless the
     // land cover is left out.
     if let Some(r) = s.map_mut().layers[0].raster.as_mut().and_then(|r| r.data.as_mut()) {

@@ -3041,8 +3041,9 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
 }
 
 /// What a colorbar with no layer of its own on `frame` says when the frame's map shows no raster
-/// with a colour scale for it but one drawn by classes (#1679): it draws an empty placeholder, and
-/// the legend lists those classes. `None` otherwise.
+/// with a colour scale for it but one drawn by classes (#1679): it draws an empty placeholder; the
+/// legend lists those classes, unless a colour table has more values than it can list. `None`
+/// otherwise. Said when the colorbar is added, or set back to no layer.
 fn colorbar_without_raster(s: &Session, li: usize, frame: u32) -> Option<String> {
     let l = s.project.layouts.get(li)?;
     let Some(ElementKind::MapFrame { map, .. }) = l.element(frame).map(|f| &f.kind) else { return None };
@@ -3050,18 +3051,27 @@ fn colorbar_without_raster(s: &Session, li: usize, frame: u32) -> Option<String>
     if rustgis_map::layout::colorbar_layer(m, None).is_some() {
         return None;
     }
-    let classed: Vec<&str> = m
-        .layers
-        .iter()
-        .filter(|l| m.shows(l) && l.raster.as_ref().is_some_and(|r| r.style.renderer.draws_classes()))
-        .map(|l| l.name.as_str())
-        .collect();
-    (!classed.is_empty()).then(|| {
-        format!(
-            "the colorbar has no raster with a colour scale to show, so it draws an empty placeholder: {} is drawn by classes, which the legend lists (give \"layer\" to show it on the colorbar)",
-            classed.join(", ")
-        )
-    })
+    // Those the legend lists, and colour tables over more values than it can list, which nothing keys.
+    let (mut listed, mut unlisted) = (Vec::new(), Vec::new());
+    for l in m.layers.iter().filter(|l| m.shows(l)) {
+        match l.raster.as_ref().filter(|r| r.style.renderer.draws_classes()) {
+            Some(r) if r.classes_unknown() => unlisted.push(l.name.as_str()),
+            Some(_) => listed.push(l.name.as_str()),
+            None => {}
+        }
+    }
+    let mut why = Vec::new();
+    if !listed.is_empty() {
+        why.push(format!("{} is drawn by classes, which the legend lists (give \"layer\" to show it on the colorbar)", listed.join(", ")));
+    }
+    if !unlisted.is_empty() {
+        why.push(format!(
+            "{} draws a colour table over more values than a legend or a colorbar can list (over 256, or not whole numbers), so nothing keys it",
+            unlisted.join(", ")
+        ));
+    }
+    (!why.is_empty())
+        .then(|| format!("the colorbar has no raster with a colour scale to show, so it draws an empty placeholder: {}", why.join("; ")))
 }
 
 /// The raster layer a colorbar on `frame` shows: `name` checked against the frame's map, or the
@@ -3577,6 +3587,8 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
             _ => None,
         }
     };
+    // Set back to no layer: it follows the map's default, which may have nothing to show (#1679).
+    let emptied_colorbar = matches!(&colorbar, Some((Some(None), _, _)));
     // A north arrow's or scale bar's new look, and a map frame's grid: `"grid": false` removes it,
     // `true` adds the default one, an object changes the options it names, and null (not set)
     // leaves it as it is.
@@ -3894,6 +3906,15 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
     }
     if excluding {
         say_raster_keys(s, li, id);
+    }
+    if emptied_colorbar {
+        let frame = s.project.layouts.get(li).and_then(|l| match l.element(id).map(|e| &e.kind) {
+            Some(ElementKind::Colorbar { frame, layer: None, .. }) => Some(*frame),
+            _ => None,
+        });
+        if let Some(said) = frame.and_then(|frame| colorbar_without_raster(s, li, frame)) {
+            s.warn(said);
+        }
     }
     if let Some(text) = p.get("grid").and_then(|grid| grid.get("crs")).and_then(Value::as_str) {
         super::say_crs_note(s, text);
