@@ -203,7 +203,10 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     classes** it lists every class of a Unique Values or Classify renderer. A
     colour table lists the values the raster holds either way: its 256 entries have no
     meaningful "all". Rasters on a ramp (Stretch, a tinted hillshade) and RGB composites are left
-    out: a colorbar keys the ramp. **Exclude** leaves a classified raster out by its name.
+    out: a colorbar keys the ramp. **Exclude** leaves a classified raster out by its name. A
+    cloud-optimised GeoTIFF read in place keeps an overview, and its classes are those of the
+    overview, which can miss a rare one the map draws at full resolution: adding the legend, and
+    `layout.publication`, say so.
   - **Columns** (`"columns"`, 1 to 3): its rows side by side under its title, as even as they go,
     each column as wide as its widest row, with its own column of symbols, and a layer's name
     staying with the row under it. The box keeps its size, so widen it for the columns: in a box
@@ -249,7 +252,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
 - **Colorbar**: the colour scale of a raster layer in the frame's map, as the map draws it (its
   stretch, colour ramp and enhancement): a gradient bar for a stretch or a tinted hillshade,
   steps labelled at their breaks for Classify, and a block per value for Unique Values and colour
-  tables. Its properties pick the **Layer** (the top visible raster unless one is picked), the
+  tables. Its properties pick the **Layer** (unless one is picked, the top visible raster on a
+  colour scale that isn't drawn by classes: a legend lists a land cover's classes), the
   **Title** (the units, such as `Elevation (m)`; the layer's name to start with), the
   **Orientation**, which side the **Labels** go on, how many **Ticks** a gradient labels (2 to
   21, the ends included) and **Reverse** (high values first). An RGB raster or a hillshade

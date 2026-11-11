@@ -3305,8 +3305,9 @@ mod tests {
         assert!(depth(&map, None, false) > 0, "the empty Graduated layer is listed");
     }
 
-    /// A layout with one map frame on `map` and a colorbar of its raster at 10–90 × 10–30 mm
-    /// (a vertical one at 10–30 × 10–90 mm), drawn at 96 dpi.
+    /// A layout with one map frame on `map` and a colorbar of its first raster, by name (one drawn by
+    /// classes isn't a colorbar's by default, #1679), at 10–90 × 10–30 mm (a vertical one at 10–30 ×
+    /// 10–90 mm), drawn at 96 dpi.
     fn colorbar_page(map: &Map, orientation: Orientation, reverse: bool, title: &str) -> Pixmap {
         let mut l = Layout::new("Layout", 100.0, 100.0);
         let frame = l.add(
@@ -3326,8 +3327,8 @@ mod tests {
             },
         );
         let rect = if orientation == Orientation::Vertical { (10.0, 10.0, 20.0, 80.0) } else { (10.0, 10.0, 80.0, 20.0) };
-        let kind =
-            ElementKind::Colorbar { frame, layer: None, title: title.into(), orientation, ticks: 5, tick_side: TickSide::End, reverse };
+        let layer = map.layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone());
+        let kind = ElementKind::Colorbar { frame, layer, title: title.into(), orientation, ticks: 5, tick_side: TickSide::End, reverse };
         l.add("Colorbar", rect, kind);
         render(&l, &mut [map.clone()], 96.0, &PageInfo::default()).unwrap()
     }
@@ -3610,7 +3611,11 @@ mod tests {
         let breaks = vec![24.0, 49.0, 74.0, 99.0];
         let classify =
             RasterRenderer::Classify { band: 0, method: rustgis_map::ClassMethod::EqualInterval, ramp: ramp.clone(), breaks, classes: 4 };
-        let pm = colorbar_page(&ramp_map(classify, Stretch::MinMax), Orientation::Horizontal, false, "");
+        let classes = ramp_map(classify, Stretch::MinMax);
+        // Named: a colorbar with no layer leaves a raster drawn by classes to the legend (#1679).
+        assert!(rustgis_map::layout::colorbar_layer(&classes, None).is_none());
+        assert!(rustgis_map::layout::colorbar_layer(&map, None).is_some(), "a stretch is the default's");
+        let pm = colorbar_page(&classes, Orientation::Horizontal, false, "");
         let mut colours: Vec<(u8, u8, u8)> = ((16.0 * k) as u32..(84.0 * k) as u32).map(|x| rgb(&pm, x, y)).collect();
         colours.dedup();
         assert!((4..=7).contains(&colours.len()), "four steps (and their seams): {colours:?}");

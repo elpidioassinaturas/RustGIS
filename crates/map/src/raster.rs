@@ -1673,6 +1673,17 @@ impl RasterLayer {
             && self.data.as_ref().and_then(|r| r.bands.first()).is_some_and(|b| b.stats.count > 0 && b.stats.categories.is_none())
     }
 
+    /// Whether the classes a legend lists for it ([`RasterLayer::legend_classes`]) come from the
+    /// statistics of an overview (a cloud-optimised GeoTIFF read in place, or pixels read reduced)
+    /// while the map draws the full resolution: a class too rare for the overview can be missing
+    /// (#1679). Not with `all_classes` for Unique Values or Classify, whose every class is listed
+    /// whatever the statistics, nor when no class can be listed ([`RasterLayer::classes_unknown`]).
+    pub fn classes_from_overview(&self, all_classes: bool) -> bool {
+        let Some(r) = &self.data else { return false };
+        let every = all_classes && !matches!(self.style.renderer, RasterRenderer::Colormap);
+        self.style.renderer.draws_classes() && (self.in_place || r.overview.is_some()) && !every && !self.classes_unknown()
+    }
+
     /// The classes a layout's legend lists for this raster (#1679): the Layers pane's class rows
     /// ([`RasterLayer::legend`]), a colour and a label each, in the renderer's order. `None` for a
     /// renderer that draws no classes (a stretch, a hillshade, RGB bands), which a colorbar keys.
@@ -1890,7 +1901,14 @@ mod tests {
         assert_eq!(labels(&rl, false), ["1 – 2", "2 – 4", "4 – 10"]);
         assert_eq!(labels(&rl, true), ["1 – 2", "2 – 4", "4 – 10", "10 – 20"]);
         assert!(!rl.classes_unknown(), "breaks, not a colour table");
+        // Read whole: its statistics are its own. Read in place: an overview's, said unless every
+        // class of its breaks is listed.
+        assert!(!rl.classes_from_overview(false));
+        rl.in_place = true;
+        assert!(rl.classes_from_overview(false) && !rl.classes_from_overview(true));
         rl.style.renderer = RasterRenderer::Colormap;
+        assert!(rl.classes_from_overview(true), "a colour table lists what the overview holds either way");
+        rl.in_place = false;
         assert!(!rl.classes_unknown(), "its values are known");
         // A ramp and bands have no classes: a colorbar keys them, or nothing does.
         rl.style.renderer = RasterRenderer::Stretch { band: 0, ramp: Ramp::Harbour, invert: false };

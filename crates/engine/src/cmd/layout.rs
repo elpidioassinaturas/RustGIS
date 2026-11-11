@@ -93,7 +93,7 @@ pub fn commands() -> Vec<C> {
             r#"{"layout"?, "shape"?: "rectangle"|"circle"|"ellipse"|"polygon"|"lasso", "points"?: [[u, v], …] (polygon/lasso, 0..1 across the frame), "map"?: name, "x"?, "y"?, "w"?, "h"?: mm}"#,
         ),
         C::new("layout.addElement", "Add Element", "Publish › Map Surrounds", add_element).inputs(element_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
-            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"colorbar"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle" (a neatline framing the page unless any of x, y, w, h is given)|"ellipse"|"circle"|"line"|"arrow"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator, which also takes "color" and "width" in points, default red and 2), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA" (text, dynamicText, line, arrow, rectangle, ellipse, circle: its outline; extentIndicator; grid; scaleBar; refused for other kinds), "bold"?: bool (text), "italic"?: bool, "align"?: "left"|"center"|"right", "letterSpacing"?: points, -5 to 50 (text, dynamicText), "font"?: "sans"|"serif"|an installed font family's name, as labels.fonts lists them (text, dynamicText; a family not installed here is drawn in its fallback, and a serif where none is installed in the sans, with a warning; refused for other kinds), "fallback"?: "sans"|"serif" (a named font's, where it isn't installed; default its own class, else sans), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "hideOther"?: bool (legend: leave out <all other values>), "exclude"?: [layer names] (legend: layers it leaves out though the map draws them), "columns"?: 1..3 (legend: the columns its rows are laid in; default 1), "orientation"?: "horizontal"|"vertical" (colorbar), "ticks"?: 2..21 (colorbar: labelled values, ends included), "tickSide"?: "below"|"above"|"right"|"left" (colorbar), "reverse"?: bool (colorbar: high values first), "fill"?: "#RRGGBBAA" (rectangle, ellipse, circle, northArrow; scaleBar: the alternating bar's light divisions, default white; refused for other kinds), "width"?: outline width in points (rectangle, ellipse, circle; 0 for none) or line width in points (line, grid), "radius"?: mm, 0 to 50 (rectangle: rounded corners), "dir"?: "horizontal"|"vertical"|"falling"|"rising" (line), "head"?: "none"|"end"|"start"|"both" (line; default "end" for an arrow), "angle"?: degrees anticlockwise from pointing right, centred on the page unless x or y is given (line, arrow; it sets the box and the direction, so w, h and dir are not used with it), "length"?: mm (line, arrow), "image"?: base64, "path"?: picture file, "layer"?: (table, chart; colorbar: a raster layer, default the top visible one), "field"?, "label"?, "rows"?, "step"?: degrees, or a measured grid's units (metres) (0 picks one), "type"?: "graticule" (latitudes and longitudes, default) | "measured" (eastings and northings in a projected system, as ArcGIS Pro's measured grid), "crs"?: a measured grid's coordinate system: EPSG:25832, WKT or a PROJ string ("" or none: the map's when projected, else the UTM zone at the frame's centre), "short"?: bool (a measured grid's labels as their kilometres' last two digits, 43 for 543000), "labels"?: bool (grid) | {"<layer>": "<label>"} (legend: what it shows instead of a layer's name, as in layout.update; a layer the map hasn't is refused), "style"?: "lines"|"ticks"|"linesAndTicks" (grid) or "classic"|"compass"|"triangle"|"star" (northArrow) or "alternating"|"stepped"|"line" (scaleBar), "tickLength"?: mm, "format"?: "decimal"|"dms", "hemisphere"?: bool (N/S/E/W rather than a sign), "edges"?: ["top","bottom","left","right"] (labelled edges), "labelOrientation"?: "horizontal"|"vertical", "off"?: bool (grid; options not given keep the grid's), "outline"?: "#RRGGBB" (northArrow, or a rectangle's, ellipse's or circle's outline instead of color; refused for other kinds), "units"?: "auto"|"kilometers"|"meters"|"miles"|"feet", "divisions"?: 1..10 (scaleBar, whose "color" is its lines, dark divisions and labels, default #222222), "x"?, "y"?, "w"?, "h"?: mm}"##,
+            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"colorbar"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle" (a neatline framing the page unless any of x, y, w, h is given)|"ellipse"|"circle"|"line"|"arrow"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator, which also takes "color" and "width" in points, default red and 2), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA" (text, dynamicText, line, arrow, rectangle, ellipse, circle: its outline; extentIndicator; grid; scaleBar; refused for other kinds), "bold"?: bool (text), "italic"?: bool, "align"?: "left"|"center"|"right", "letterSpacing"?: points, -5 to 50 (text, dynamicText), "font"?: "sans"|"serif"|an installed font family's name, as labels.fonts lists them (text, dynamicText; a family not installed here is drawn in its fallback, and a serif where none is installed in the sans, with a warning; refused for other kinds), "fallback"?: "sans"|"serif" (a named font's, where it isn't installed; default its own class, else sans), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "hideOther"?: bool (legend: leave out <all other values>), "exclude"?: [layer names] (legend: layers it leaves out though the map draws them), "columns"?: 1..3 (legend: the columns its rows are laid in; default 1), "orientation"?: "horizontal"|"vertical" (colorbar), "ticks"?: 2..21 (colorbar: labelled values, ends included), "tickSide"?: "below"|"above"|"right"|"left" (colorbar), "reverse"?: bool (colorbar: high values first), "fill"?: "#RRGGBBAA" (rectangle, ellipse, circle, northArrow; scaleBar: the alternating bar's light divisions, default white; refused for other kinds), "width"?: outline width in points (rectangle, ellipse, circle; 0 for none) or line width in points (line, grid), "radius"?: mm, 0 to 50 (rectangle: rounded corners), "dir"?: "horizontal"|"vertical"|"falling"|"rising" (line), "head"?: "none"|"end"|"start"|"both" (line; default "end" for an arrow), "angle"?: degrees anticlockwise from pointing right, centred on the page unless x or y is given (line, arrow; it sets the box and the direction, so w, h and dir are not used with it), "length"?: mm (line, arrow), "image"?: base64, "path"?: picture file, "layer"?: (table, chart; colorbar: a raster layer, default the top visible one on a colour scale, not drawn by classes, which a legend lists), "field"?, "label"?, "rows"?, "step"?: degrees, or a measured grid's units (metres) (0 picks one), "type"?: "graticule" (latitudes and longitudes, default) | "measured" (eastings and northings in a projected system, as ArcGIS Pro's measured grid), "crs"?: a measured grid's coordinate system: EPSG:25832, WKT or a PROJ string ("" or none: the map's when projected, else the UTM zone at the frame's centre), "short"?: bool (a measured grid's labels as their kilometres' last two digits, 43 for 543000), "labels"?: bool (grid) | {"<layer>": "<label>"} (legend: what it shows instead of a layer's name, as in layout.update; a layer the map hasn't is refused), "style"?: "lines"|"ticks"|"linesAndTicks" (grid) or "classic"|"compass"|"triangle"|"star" (northArrow) or "alternating"|"stepped"|"line" (scaleBar), "tickLength"?: mm, "format"?: "decimal"|"dms", "hemisphere"?: bool (N/S/E/W rather than a sign), "edges"?: ["top","bottom","left","right"] (labelled edges), "labelOrientation"?: "horizontal"|"vertical", "off"?: bool (grid; options not given keep the grid's), "outline"?: "#RRGGBB" (northArrow, or a rectangle's, ellipse's or circle's outline instead of color; refused for other kinds), "units"?: "auto"|"kilometers"|"meters"|"miles"|"feet", "divisions"?: 1..10 (scaleBar, whose "color" is its lines, dark divisions and labels, default #222222), "x"?, "y"?, "w"?, "h"?: mm}"##,
         ),
         C::new("layout.update", "Element Properties", "Publish › Element", update).inputs(update_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r##"{"layout"?, "element": id, "x"?, "y"?, "w"?, "h"?: mm, "name"?, "visible"?, "locked"?: bool (a locked element takes no other change until unlocked; "locked": false unlocks it and may come with changes), "text"?, "size"?, "color"? (text, line, rectangle, ellipse: its outline; scaleBar: its lines, dark divisions and labels; refused for other elements), "bold"?, "italic"?, "align"?, "letterSpacing"?, "font"?: "sans"|"serif"|an installed font family's name, "fallback"?: "sans"|"serif" (text, as in layout.addElement; refused for other elements), "title"?, "allClasses"?: bool (legend), "hideOther"?: bool (legend), "exclude"?: [layer names] (legend; [] lists every layer again), "labels"?: {"<layer>": "<label>"|null} (legend: what it shows instead of a layer's name, up to 200 characters, a longer one is refused; each entry replaces that layer's label, null or "" shows its name again, {} every layer's; a layer the map hasn't is refused), "columns"?: 1..3 (legend), "orientation"?, "ticks"?, "tickSide"?, "reverse"?: (colorbar), "style"?: (northArrow, scaleBar), "fill"?, "outline"? (northArrow, rectangle, ellipse, and a scaleBar's fill; refused for other elements; for a rectangle or ellipse, color sets it when outline is not given; a scaleBar's fill is the alternating bar's light divisions), "radius"?: mm (rectangle: rounded corners), "width"?: points (rectangle, ellipse, line), "dir"?, "head"?, "angle"?, "length"? (line: turned or sized about its centre, then moved by any x or y; dir does not come with angle or length), "units"?, "divisions"? (scaleBar), "map"?, "scale"?, "center"?: [lon, lat], "bearing"?: degrees clockwise from north, "pitch"?: degrees of tilt (0 to 85), "grid"?: {grid options as in layout.addElement} | false (map frame), "extentIndicator"?: {"color"?, "width"?: points} | false (map frame: its extent indicator's style, or removes it), "layer"?: (colorbar: "" for the top visible raster), "field"?, "rows"?}"##,
@@ -1835,17 +1835,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // key there, which the legend's rows don't give): an RGB composite over a DEM leaves it to the
     // DEM. A raster drawn by classes has them in the legend's rows instead (#1679). `"colorbar":
     // "none"` leaves it out, and its room in the box with it (#1680).
-    let bar = s
-        .map()
-        .layers
-        .iter()
-        .filter(|l| l.visible)
-        .filter_map(|l| Some((l, l.raster.as_ref()?)))
-        .find(|(_, r)| colorbar && !r.style.renderer.draws_classes() && rustgis_map::layout::color_scale(r).is_some())
-        .map(|(l, _)| l.name.clone());
+    let bar = colorbar.then(|| rustgis_map::layout::colorbar_layer(s.map(), None)).flatten().map(|l| l.name.clone());
     // A colour table whose values can't be known (too many to list) gives the legend no class, and
-    // the sheet no key for it: said rather than left blank.
-    warnings.extend(unlisted_colour_tables(s.map(), &[]));
+    // the sheet no key for it; classes from an overview may miss a rare one: said, not left out.
+    warnings.extend(raster_key_notices(s.map(), &[], false));
     let (bar_w, bar_h) = (if sheet { 50.0 * k } else { 40.0 }, COLORBAR_MM);
     let bar_part = if bar.is_some() { bar_h + if ch > 0.0 { 2.0 } else { 0.0 } } else { 0.0 };
     let (content_w, content_h) = (if bar.is_some() { cw.max(bar_w) } else { cw }, ch + bar_part);
@@ -2678,34 +2671,51 @@ fn legend_fit_warnings(columns: usize, (w, h): (f64, f64), (room_w, room_h): (f6
     said
 }
 
-/// The one warning for the rasters `map` shows by a colour table over more values than a legend
-/// can list (over 256, or not whole numbers), which give it no class and no key (#1679): how many
-/// and their names, those `exclude` leaves out aside. `None` when there are none.
-fn unlisted_colour_tables(map: &Map, exclude: &[String]) -> Option<String> {
-    let names: Vec<&str> = map
+/// What a legend of `map` can't key, or keys only in part, for the rasters it shows by classes
+/// (#1679), those `exclude` leaves out aside: one warning a kind, with how many and their names.
+/// A colour table over more values than a legend can list (over 256, or not whole numbers) gives
+/// no class and no key; classes taken from an overview's statistics (a COG read in place) can
+/// miss a rare one the map draws at full resolution, unless `all_classes` lists every class of the
+/// renderer.
+fn raster_key_notices(map: &Map, exclude: &[String], all_classes: bool) -> Vec<String> {
+    let shown: Vec<(&str, &rustgis_map::RasterLayer)> = map
         .layers
         .iter()
         .filter(|l| map.shows(l) && !exclude.iter().any(|n| n.eq_ignore_ascii_case(&l.name)))
-        .filter(|l| l.raster.as_ref().is_some_and(rustgis_map::RasterLayer::classes_unknown))
-        .map(|l| l.name.as_str())
+        .filter_map(|l| Some((l.name.as_str(), l.raster.as_ref()?)))
         .collect();
-    (!names.is_empty()).then(|| {
-        format!(
+    let names = |kind: &dyn Fn(&rustgis_map::RasterLayer) -> bool| -> Vec<&str> {
+        shown.iter().filter(|(_, r)| kind(r)).map(|(n, _)| *n).collect()
+    };
+    let unlisted = names(&rustgis_map::RasterLayer::classes_unknown);
+    let reduced = names(&|r| r.classes_from_overview(all_classes));
+    let mut said = Vec::new();
+    if !unlisted.is_empty() {
+        said.push(format!(
             "{} raster(s) drawn by a colour table over more values than a legend can list (over 256, or not whole numbers) have no key in the legend: {}",
-            names.len(),
-            names.join(", ")
-        )
-    })
+            unlisted.len(),
+            unlisted.join(", ")
+        ));
+    }
+    if !reduced.is_empty() {
+        said.push(format!(
+            "{} raster(s) drawn by classes were read through an overview, so the legend lists the classes found there and may miss a rare one the map draws: {}",
+            reduced.len(),
+            reduced.join(", ")
+        ));
+    }
+    said
 }
 
-/// Says, once, which rasters the legend `id` of the layout `li` can't key ([`unlisted_colour_tables`]),
-/// as `layout.publication` does for its own: for a legend added, or told what it leaves out.
-fn say_unlisted_colour_tables(s: &mut Session, li: usize, id: u32) {
+/// Says, a kind once, what the legend `id` of the layout `li` can't key ([`raster_key_notices`]),
+/// as `layout.publication` does for its own: for a legend added, or told what it leaves out or
+/// whether it lists every class.
+fn say_raster_keys(s: &mut Session, li: usize, id: u32) {
     let Some(l) = s.project.layouts.get(li) else { return };
-    let Some(ElementKind::Legend { frame, exclude, .. }) = l.element(id).map(|e| &e.kind) else { return };
+    let Some(ElementKind::Legend { frame, exclude, all_classes, .. }) = l.element(id).map(|e| &e.kind) else { return };
     let Some(ElementKind::MapFrame { map, .. }) = l.element(*frame).map(|f| &f.kind) else { return };
-    let said = s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map)).and_then(|m| unlisted_colour_tables(m, exclude));
-    if let Some(said) = said {
+    let said = s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map)).map(|m| raster_key_notices(m, exclude, *all_classes));
+    for said in said.unwrap_or_default() {
         s.warn(said);
     }
 }
@@ -3005,7 +3015,7 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
         say_legend_fit(s, i, id);
     }
     if kind == "legend" {
-        say_unlisted_colour_tables(s, i, id);
+        say_raster_keys(s, i, id);
     }
     let mut out = json!({"element": id});
     if let Some(w) = warning {
@@ -3015,7 +3025,8 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
 }
 
 /// The raster layer a colorbar on `frame` shows: `name` checked against the frame's map, or the
-/// map's top visible raster (`None` when the map has none yet).
+/// map's topmost visible raster on a colour scale not drawn by classes
+/// ([`rustgis_map::layout::colorbar_layer`]; `None` when the map has none yet).
 fn colorbar_layer(input: &impl super::InputSource, l: &Layout, frame: u32, name: Option<&str>) -> Result<Option<String>, String> {
     let context = input.input_context();
     let s = &context;
@@ -3834,13 +3845,15 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         || p.get("labels").is_some_and(|v| !v.is_null());
     // Labels given are told in one column too: a label is text chosen for the box.
     let labelled = matches!(&e.kind, ElementKind::Legend { .. }) && p.get("labels").is_some_and(|v| !v.is_null());
-    // Told what it leaves out, it says again which rasters it can't key.
-    let excluding = matches!(&e.kind, ElementKind::Legend { .. }) && p.get("exclude").is_some_and(|v| !v.is_null());
+    // Told what it leaves out, or whether it lists every class, it says again which rasters it
+    // can't key.
+    let excluding =
+        matches!(&e.kind, ElementKind::Legend { .. }) && (p.get("exclude").is_some_and(|v| !v.is_null()) || b(p, "allClasses").is_some());
     if new_columns.is_some() || (in_columns && refitted) || labelled {
         say_legend_fit(s, li, id);
     }
     if excluding {
-        say_unlisted_colour_tables(s, li, id);
+        say_raster_keys(s, li, id);
     }
     if let Some(text) = p.get("grid").and_then(|grid| grid.get("crs")).and_then(Value::as_str) {
         super::say_crs_note(s, text);

@@ -7853,9 +7853,42 @@ fn a_publication_keys_the_raster_under_an_rgb_and_says_an_unlisted_colour_table(
     add_land_cover(&mut s, "Uso do solo", &[(3, "Floresta"), (15, "Pastagem")]);
     let r = s.run("layout.publication", &p).unwrap();
     assert!(!r["warnings"].to_string().contains("more values than a legend"), "{r}");
+    assert!(!r["warnings"].to_string().contains("through an overview"), "{r}");
     let mark = s.notice_mark();
     s.run("layout.addElement", &json!({"kind": "legend"})).unwrap();
-    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("more values than a legend")));
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("more values than a legend") && !n.text.contains("through an overview")));
+    // A colorbar added by hand with no layer: none of the land cover's codes.
+    let r = s.run("layout.addElement", &json!({"kind": "colorbar"})).unwrap();
+    let colorbar = r["element"].as_u64().unwrap() as u32;
+    let l = s.project.layouts.last().unwrap();
+    let shown = |l: &rustgis_map::layout::Layout| match l.element(colorbar).map(|e| &e.kind) {
+        Some(ElementKind::Colorbar { frame, layer, .. }) => match l.element(*frame).map(|f| &f.kind) {
+            Some(ElementKind::MapFrame { map, .. }) => {
+                let m = s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map)).unwrap();
+                rustgis_map::layout::colorbar_layer(m, layer.as_deref()).map(|l| l.name.clone())
+            }
+            _ => panic!("no frame"),
+        },
+        _ => panic!("no colorbar"),
+    };
+    assert_eq!(shown(l), None, "the land cover's classes are in the legend, not on a colorbar");
+    // Its classes read through an overview: said once, by the publication and the legend, unless the
+    // land cover is left out.
+    if let Some(r) = s.map_mut().layers[0].raster.as_mut().and_then(|r| r.data.as_mut()) {
+        std::sync::Arc::make_mut(r).overview = Some((10, 10));
+    }
+    let r = s.run("layout.publication", &p).unwrap();
+    let warnings: Vec<String> = serde_json::from_value(r["warnings"].clone()).unwrap();
+    let reduced = "1 raster(s) drawn by classes were read through an overview, so the legend lists the classes found there and may miss a rare one the map draws: Uso do solo";
+    assert_eq!(warnings.iter().filter(|w| w.contains("through an overview")).collect::<Vec<_>>(), [reduced], "{r}");
+    let mark = s.notice_mark();
+    let id = s.run("layout.addElement", &json!({"kind": "legend"})).unwrap()["element"].as_u64().unwrap();
+    let said: Vec<String> =
+        s.notices_since(mark).iter().filter(|n| n.text.contains("through an overview")).map(|n| n.text.clone()).collect();
+    assert_eq!(said, [reduced]);
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "exclude": ["Uso do solo"]})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("through an overview")), "left out");
 }
 
 /// A land cover with more classes than its legend's box holds: the publication says it leaves the
