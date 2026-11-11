@@ -61,7 +61,7 @@ pub fn export(layer: &RasterLayer, min_zoom: u8, max_zoom: u8, opacity: f32) -> 
     let stats = layer.masked_stats();
     // Its cast shadows, waited for; ones that can't be drawn leave the archive unwritten, as a
     // part drawn from less than it needs does.
-    let light = match layer.cast_shadows(true, u32::MAX, || {}) {
+    let light = match layer.cast_shadows(true, (u64::MAX, u64::MAX), || {}) {
         rustgis_map::raster::CastShadows::Ready(grid) => Some(grid),
         rustgis_map::raster::CastShadows::Unavailable(why) => return Err(format!("{}: {why}, so the archive isn't written", r.name)),
         // Only when the run is cancelled: nothing is written.

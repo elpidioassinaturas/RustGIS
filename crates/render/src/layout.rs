@@ -514,7 +514,9 @@ pub fn frame_map(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp
 /// still on their way (in the browser, which doesn't wait for them).
 fn frame_canvas(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp: f64, record: bool, pending: &mut bool) -> Option<Canvas> {
     let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
+    // What earlier frames (the map view's, another page's) left is not this frame's.
     crate::frame_shadows_to_come();
+    crate::take_shadow_notices();
     let img = if record { crate::render_complete_recorded(map, &view) } else { crate::render_complete(map, &view) }?;
     let shadows = crate::frame_shadows_to_come();
     if shadows {
@@ -3374,6 +3376,70 @@ mod tests {
         let said = shadow_notices();
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(said[0].starts_with("dem: ") && said[0].contains("read in place"), "{said:?}");
+        // What the map view's frame said is not a page's: a clean page drawn after it says nothing.
+        let camera =
+            rustgis_map::Camera { center: rustgis_geom::lonlat_to_merc(Coord::new(0.5, 0.5)), res: 2000.0, bearing: 0.0, pitch: 0.0 };
+        crate::render(&mut map, &crate::View { width: 64.0, height: 64.0, pixels_per_point: 1.0, camera, sky: false });
+        let clean = ramp_map(relief(0.0), rustgis_map::raster::Stretch::MinMax);
+        colorbar_page(&clean, Orientation::Horizontal, false, "");
+        assert!(shadow_notices().is_empty());
+    }
+
+    /// A page with two maps showing copies of one relief (each layer the first of its map, so with
+    /// the same id) under different suns: neither map's grid stops the other's, so the page,
+    /// drawn again while they land, ends up with both.
+    #[test]
+    fn two_maps_lit_otherwise_on_a_page_keep_their_own_shadows() {
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        let n = 300usize;
+        let heights: Vec<f32> = (0..n * n).map(|i| (((i % n) as f32 / 9.0).sin() + ((i / n) as f32 / 7.0).cos()) * 400.0).collect();
+        let gt = GeoTransform { origin_x: -1.0, origin_y: 1.0, pixel_width: 2.0 / n as f64, pixel_height: -2.0 / n as f64 };
+        let dem = Raster::new("dem", n as u32, n as u32, vec![heights], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let rl = rustgis_map::raster::RasterLayer::from_path(dem, "dem.tif");
+        let mut maps = Vec::new();
+        for (name, azimuth) in [("a", 315.0), ("b", 135.0)] {
+            let mut copy = rl.clone();
+            copy.style.renderer = rustgis_map::raster::RasterRenderer::ShadedRelief {
+                band: 0,
+                ramp: None,
+                azimuth,
+                altitude: 10.0,
+                z_factor: 1.0,
+                shadow: 1.0,
+            };
+            let mut m = Map::new(name);
+            assert_eq!(m.add_raster("dem", copy), 1);
+            maps.push(m);
+        }
+        let mut l = Layout::new("Layout", 100.0, 100.0);
+        for (i, name) in ["a", "b"].into_iter().enumerate() {
+            let frame = ElementKind::MapFrame {
+                map: name.into(),
+                center: Coord::new(0.0, 0.0),
+                scale: 1e7,
+                shape: FrameShape::Rectangle,
+                grid: None,
+                extent_of: None,
+                extent_color: rustgis_map::layout::INDICATOR_COLOR,
+                extent_width: rustgis_map::layout::INDICATOR_WIDTH,
+                bearing: 0.0,
+                pitch: 0.0,
+            };
+            l.add(name, (5.0 + 50.0 * i as f64, 5.0, 45.0, 45.0), frame);
+        }
+        // Drawn again until it has no shadows to come, as the Layout view draws it while they
+        // land: with the two maps stopping each other's work, it never would.
+        let start = std::time::Instant::now();
+        loop {
+            shadows_to_come();
+            render_pending(&l, &mut maps, 48.0, &PageInfo::default()).unwrap();
+            if !shadows_to_come() {
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(60), "the page never got its shadows");
+            std::thread::yield_now();
+        }
+        assert!(shadow_notices().is_empty());
     }
 
     /// A map with one 100 × 1 raster valued 0–99 by column, styled by `renderer`.

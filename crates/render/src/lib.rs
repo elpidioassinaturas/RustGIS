@@ -3660,6 +3660,9 @@ fn render_frame(
     record: bool,
 ) -> Option<RenderOutput> {
     let (w, h) = view.pixel_size();
+    // Who draws a layer's cast shadows: this map and the layer, by their live identities (a
+    // layer's id repeats from map to map: a locator's and its main map's, say).
+    let map_instance = map.instance_id();
     // Kept as vectors (`record`) on the CPU, for a flat frame without view effects or a
     // colour-vision simulation it applies (pixel filters over the whole frame; an export,
     // `full_res_rasters`, never simulates colour vision); anything else draws its pixels.
@@ -4002,7 +4005,7 @@ fn render_frame(
                 // Its cast shadows, never waited for here (an export waits before it draws, see
                 // `complete`): drawn without them meanwhile, and again once they land. A map's frame
                 // says so as tiles to come; a page's, as shadows to come.
-                let light = match rl.cast_shadows(false, layer.id, shadows_landed) {
+                let light = match rl.cast_shadows(false, (map_instance, layer.instance_id()), shadows_landed) {
                     rustgis_map::raster::CastShadows::Ready(grid) => Some(grid),
                     rustgis_map::raster::CastShadows::Pending => {
                         if full_res_rasters {
@@ -6356,7 +6359,7 @@ pub(crate) fn frame_shadows_to_come() -> bool {
 fn wait_for_cast_shadows(map: &Map) {
     for layer in map.layers.iter().filter(|l| l.visible) {
         if let Some(rl) = &layer.raster {
-            rl.cast_shadows(true, layer.id, shadows_landed);
+            rl.cast_shadows(true, (map.instance_id(), layer.instance_id()), shadows_landed);
         }
     }
 }

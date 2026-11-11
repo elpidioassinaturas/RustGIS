@@ -729,12 +729,14 @@ impl RasterLayer {
     /// The light its cast shadows leave on each cell (see [`crate::shadow::light`]), when it is
     /// drawn as Shaded Relief with shadows. Worked out once per pixels, band, sun, Z factor and
     /// mask and kept (a few, for copies of the layer lit otherwise: another map, an undo).
-    /// `owner` is who draws it (the layer's id): a new sun from the same owner stops the work
+    /// `owner` is who draws it (its map's and its layer's live identities, see
+    /// [`crate::Layer::instance_id`]; a layer's id repeats from map to map): a new sun from the
+    /// same owner stops the work
     /// for its last one, unless something waits for it. Natively it is worked out on a thread of
     /// its own, then `landed` is called (the map asks to be drawn again); with `wait`, as an
     /// export does, this waits for it. The browser, which has one thread, works it out here, for
     /// at most [`crate::shadow::MAX_BROWSER_CELLS`] cells.
-    pub fn cast_shadows(&self, wait: bool, owner: u32, landed: impl FnOnce() + Send + 'static) -> CastShadows {
+    pub fn cast_shadows(&self, wait: bool, owner: (u64, u64), landed: impl FnOnce() + Send + 'static) -> CastShadows {
         let RasterRenderer::ShadedRelief { band, azimuth, altitude, z_factor, shadow, .. } = self.style.renderer else {
             return CastShadows::None;
         };
@@ -895,7 +897,7 @@ struct LightJob {
     /// Held weakly, so their address isn't reused.
     pixels: Weak<Raster>,
     /// Who drew it last (see [`RasterLayer::cast_shadows`]).
-    owner: u32,
+    owner: (u64, u64),
     work: Arc<LightWork>,
 }
 
@@ -2310,7 +2312,7 @@ mod tests {
     /// for by an export, and worked out again for another sun.
     #[test]
     fn cast_shadows_are_worked_out_once_per_sun() {
-        assert_eq!(tower(0.0).cast_shadows(true, 1, || {}), CastShadows::None);
+        assert_eq!(tower(0.0).cast_shadows(true, (0, 1), || {}), CastShadows::None);
         let mut rl = tower(0.8);
         // Each landing is sent: `landed` is called on the worker just after the grid is kept, so
         // it is waited for, not read at once.
@@ -2321,34 +2323,34 @@ mod tests {
                 let _ = tx.send(());
             }
         };
-        let CastShadows::Ready(grid) = rl.cast_shadows(true, 1, landed(&sent)) else { panic!("waited for") };
+        let CastShadows::Ready(grid) = rl.cast_shadows(true, (0, 1), landed(&sent)) else { panic!("waited for") };
         assert!(landings.recv_timeout(std::time::Duration::from_secs(60)).is_ok(), "landed once");
         // West of the tower, in its shadow; east of it, lit.
         assert_eq!(grid[10 * 20 + 9], 0);
         assert_eq!(grid[10 * 20 + 11], 255);
         // Kept: the same grid, nothing worked out again, and nothing more lands.
-        assert!(matches!(rl.cast_shadows(false, 1, landed(&sent)), CastShadows::Ready(g) if Arc::ptr_eq(&g, &grid)));
+        assert!(matches!(rl.cast_shadows(false, (0, 1), landed(&sent)), CastShadows::Ready(g) if Arc::ptr_eq(&g, &grid)));
         drop(sent);
         assert!(landings.recv().is_err(), "landed again");
         // The shadow's strength is drawn, not worked out: the grid is kept for another.
         if let RasterRenderer::ShadedRelief { shadow, .. } = &mut rl.style.renderer {
             *shadow = 0.3;
         }
-        assert!(matches!(rl.cast_shadows(false, 1, || {}), CastShadows::Ready(g) if Arc::ptr_eq(&g, &grid)));
+        assert!(matches!(rl.cast_shadows(false, (0, 1), || {}), CastShadows::Ready(g) if Arc::ptr_eq(&g, &grid)));
         // Another sun: worked out again, lit from the west now.
         if let RasterRenderer::ShadedRelief { azimuth, .. } = &mut rl.style.renderer {
             *azimuth = 270.0;
         }
-        let CastShadows::Ready(west) = rl.cast_shadows(true, 1, || {}) else { panic!("waited for") };
+        let CastShadows::Ready(west) = rl.cast_shadows(true, (0, 1), || {}) else { panic!("waited for") };
         assert_eq!((west[10 * 20 + 9], west[10 * 20 + 11]), (255, 0));
-        // A copy lit from elsewhere (another map) keeps its own grid beside it: neither stops the
-        // other's.
+        // A copy lit from elsewhere (another map, whose layer has the same id) keeps its own grid
+        // beside it: neither stops the other's.
         let mut copy = rl.clone();
         if let RasterRenderer::ShadedRelief { azimuth, .. } = &mut copy.style.renderer {
             *azimuth = 0.0;
         }
-        assert!(matches!(copy.cast_shadows(true, 2, || {}), CastShadows::Ready(_)));
-        assert!(matches!(rl.cast_shadows(false, 1, || {}), CastShadows::Ready(g) if Arc::ptr_eq(&g, &west)));
+        assert!(matches!(copy.cast_shadows(true, (9, 1), || {}), CastShadows::Ready(_)));
+        assert!(matches!(rl.cast_shadows(false, (0, 1), || {}), CastShadows::Ready(g) if Arc::ptr_eq(&g, &west)));
     }
 
     /// A new sun from the same owner stops the work for its last one, unless it is done; another
@@ -2370,12 +2372,12 @@ mod tests {
         };
         let work_of = |rl: &RasterLayer, az: f64| rl.cast.0.lock().unwrap().iter().find(|j| j.key.azimuth == az).map(|j| j.work.clone());
         lit(&mut rl, 10.0);
-        rl.cast_shadows(false, 1, || {});
+        rl.cast_shadows(false, (0, 1), || {});
         let copy = other(20.0, &rl);
-        copy.cast_shadows(false, 2, || {});
+        copy.cast_shadows(false, (9, 1), || {});
         let first = work_of(&rl, 10.0).unwrap();
         lit(&mut rl, 30.0);
-        rl.cast_shadows(false, 1, || {});
+        rl.cast_shadows(false, (0, 1), || {});
         // Owner 1's last sun is stopped and let go, unless it was done; owner 2's goes on.
         let stopped = first.stop.load(std::sync::atomic::Ordering::SeqCst);
         assert!(first.is_done() || (stopped && work_of(&rl, 10.0).is_none()));
@@ -2384,14 +2386,14 @@ mod tests {
         assert!(work_of(&rl, 30.0).is_some());
         // Going back to a sun kept stops the one just left, as a new sun would.
         lit(&mut rl, 40.0);
-        rl.cast_shadows(false, 1, || {});
+        rl.cast_shadows(false, (0, 1), || {});
         let left = work_of(&rl, 40.0).unwrap();
         lit(&mut rl, 30.0);
-        rl.cast_shadows(false, 1, || {});
+        rl.cast_shadows(false, (0, 1), || {});
         assert!(left.is_done() || (left.stop.load(std::sync::atomic::Ordering::SeqCst) && work_of(&rl, 40.0).is_none()));
-        assert!(matches!(copy.cast_shadows(true, 2, || {}), CastShadows::Ready(_)));
+        assert!(matches!(copy.cast_shadows(true, (9, 1), || {}), CastShadows::Ready(_)));
         // Waited for, the latest is drawn.
-        assert!(matches!(rl.cast_shadows(true, 1, || {}), CastShadows::Ready(_)));
+        assert!(matches!(rl.cast_shadows(true, (0, 1), || {}), CastShadows::Ready(_)));
     }
 
     /// An export cancelled while it waits for a grid it alone waits for stops the work (the
@@ -2417,7 +2419,7 @@ mod tests {
         {
             let _cancelled = rustgis_data::progress::install(Some(std::sync::Arc::new(Cancelled)));
             let tx = sent.clone();
-            let out = rl.cast_shadows(true, 1, move || {
+            let out = rl.cast_shadows(true, (0, 1), move || {
                 let _ = tx.send(());
             });
             assert_eq!(out, CastShadows::Pending, "the cancelled export gives up");
@@ -2427,7 +2429,7 @@ mod tests {
         let work = rl.cast.0.lock().unwrap().first().map(|j| j.work.clone()).unwrap();
         assert!(work.was_stopped());
         // Asked again, it starts over.
-        rl.cast_shadows(false, 1, || {});
+        rl.cast_shadows(false, (0, 1), || {});
         let again = rl.cast.0.lock().unwrap().first().map(|j| j.work.clone()).unwrap();
         assert!(!Arc::ptr_eq(&work, &again));
         again.stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2439,11 +2441,11 @@ mod tests {
     fn cast_shadows_of_a_raster_read_in_place_need_the_whole_image() {
         let mut rl = tower(1.0);
         rl.in_place = true;
-        assert!(matches!(rl.cast_shadows(true, 1, || {}), CastShadows::Ready(_)));
+        assert!(matches!(rl.cast_shadows(true, (0, 1), || {}), CastShadows::Ready(_)));
         let mut r = (**rl.data.as_ref().unwrap()).clone();
         r.overview = Some((80, 80));
         rl.data = Some(Arc::new(r));
-        let CastShadows::Unavailable(why) = rl.cast_shadows(true, 1, || {}) else { panic!("said") };
+        let CastShadows::Unavailable(why) = rl.cast_shadows(true, (0, 1), || {}) else { panic!("said") };
         assert!(why.contains("read in place"), "{why}");
     }
 }
