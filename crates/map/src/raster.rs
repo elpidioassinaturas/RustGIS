@@ -728,7 +728,7 @@ impl RasterLayer {
 
     /// The light its cast shadows leave on each cell (see [`crate::shadow::light`]), when it is
     /// drawn as Shaded Relief with shadows. Worked out once per pixels, band, sun, Z factor and
-    /// mask and kept (a few, for copies of the layer lit otherwise: another map, an undo).
+    /// mask and kept: each owner's latest, and a few of suns left, for going back.
     /// `owner` is who draws it (its map's and its layer's live identities, see
     /// [`crate::Layer::instance_id`]; a layer's id repeats from map to map): a new sun from the
     /// same owner stops the work
@@ -776,11 +776,22 @@ impl RasterLayer {
                     work
                 }
                 None => {
-                    // Past the few kept, the oldest nothing waits for goes.
-                    if jobs.len() >= KEPT_LIGHTS
-                        && let Some(i) = jobs.iter().position(|j| !j.work.waited())
+                    // Each owner's latest grid is kept: it is what that owner draws, and letting it go
+                    // would only have it worked out again, letting another go (a page of more maps,
+                    // lit otherwise, than were kept never got its shadows). The grids of suns
+                    // owners have left, done and waited for by nothing, are kept for going back: the
+                    // oldest goes past a few.
+                    let left: Vec<usize> = (0..jobs.len())
+                        .filter(|i| {
+                            jobs.get(*i).is_some_and(|j| {
+                                j.work.is_done() && !j.work.waited() && jobs.iter().skip(i + 1).any(|later| later.owner == j.owner)
+                            })
+                        })
+                        .collect();
+                    if left.len() >= KEPT_LIGHTS
+                        && let Some(i) = left.first()
                     {
-                        jobs.remove(i);
+                        jobs.remove(*i);
                     }
                     let work = Arc::new(LightWork::default());
                     jobs.push(LightJob { key: key.clone(), pixels: Arc::downgrade(r), owner, work: work.clone() });
@@ -915,7 +926,8 @@ struct CastLight(Arc<Mutex<Vec<LightJob>>>);
 /// Why a light grid stopped part-way has none: superseded, or its run cancelled.
 const STOPPED: &str = "its cast shadows were stopped";
 
-/// The most light grids a layer and its copies keep.
+/// The most grids of suns their owners have left that a layer and its copies keep, besides
+/// each owner's latest.
 const KEPT_LIGHTS: usize = 3;
 
 /// Works out a light grid: natively on a thread of its own (here if the system refuses one),
