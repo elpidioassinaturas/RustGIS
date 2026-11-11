@@ -59,6 +59,14 @@ pub fn export(layer: &RasterLayer, min_zoom: u8, max_zoom: u8, opacity: f32) -> 
         ranges.push((z, x0, x1, y0, y1));
     }
     let stats = layer.masked_stats();
+    // Its cast shadows, waited for; ones that can't be drawn leave the archive unwritten, as a
+    // part drawn from less than it needs does.
+    let light = match layer.cast_shadows(true, || {}) {
+        rustgis_map::raster::CastShadows::Ready(grid) => Some(grid),
+        rustgis_map::raster::CastShadows::Unavailable(why) => return Err(format!("{}: {why}, so the archive isn't written", r.name)),
+        rustgis_map::raster::CastShadows::Pending | rustgis_map::raster::CastShadows::None => None,
+    };
+    let light = light.as_deref().map(Vec::as_slice);
     // A raster read in place waits for its tiles natively, two minutes at most in all.
     let deadline = web_time::Instant::now() + rustgis_data::raster::IN_PLACE_WAIT;
     let mut tiles = Vec::new();
@@ -80,7 +88,7 @@ pub fn export(layer: &RasterLayer, min_zoom: u8, max_zoom: u8, opacity: f32) -> 
                         let mut idle = 0;
                         loop {
                             let drawn_at = crate::rustgis_tiles::cache::generation();
-                            match raster::draw_in_place(&mut image, address, r, &layer.style, stats, &view, opacity, true, place) {
+                            match raster::draw_in_place(&mut image, address, r, &layer.style, stats, &view, opacity, true, place, light) {
                                 Ok(false) => break,
                                 Ok(true) => {}
                                 // Drawn from less than the tile needs: not written in its place.
@@ -106,7 +114,7 @@ pub fn export(layer: &RasterLayer, min_zoom: u8, max_zoom: u8, opacity: f32) -> 
                             image.fill(tiny_skia::Color::TRANSPARENT);
                         }
                     }
-                    None => raster::draw(&mut image, r, &layer.style, stats, &view, opacity, true, place),
+                    None => raster::draw(&mut image, r, &layer.style, stats, &view, opacity, true, place, light),
                 }
                 if image.data().as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 0) {
                     continue;

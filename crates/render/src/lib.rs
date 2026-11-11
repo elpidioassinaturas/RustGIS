@@ -3999,12 +3999,31 @@ fn render_frame(
                 };
                 let stats = rl.masked_stats();
                 let stats = stats.as_ref().map(|s| s.as_slice());
+                // Its cast shadows: an export waits for them; the map draws without them meanwhile,
+                // and again once they land.
+                let landed = || rustgis_tiles::cache::notify_at(web_time::Instant::now());
+                let light = match rl.cast_shadows(full_res_rasters, landed) {
+                    rustgis_map::raster::CastShadows::Ready(grid) => Some(grid),
+                    rustgis_map::raster::CastShadows::Pending => {
+                        tile_out.pending = true;
+                        None
+                    }
+                    rustgis_map::raster::CastShadows::Unavailable(why) => {
+                        let e = format!("{}: {why}", layer.name);
+                        if !tile_out.errors.contains(&e) {
+                            tile_out.errors.push(e);
+                        }
+                        None
+                    }
+                    rustgis_map::raster::CastShadows::None => None,
+                };
+                let light = light.as_deref().map(Vec::as_slice);
                 // Read in place: the part in view, at the level the view needs.
                 let address = rl.path.as_deref().filter(|_| rl.in_place);
                 let mut draw_it = |pm: &mut Pixmap, opacity: f32| match address {
                     // Drawn from less than the view needs (a coarser level, tiles that couldn't be
                     // read): shown, and said with the tile errors.
-                    Some(a) => match raster::draw_in_place(pm, a, data, &rl.style, stats, view, opacity, full_res_rasters, place) {
+                    Some(a) => match raster::draw_in_place(pm, a, data, &rl.style, stats, view, opacity, full_res_rasters, place, light) {
                         Ok(pending) => {
                             tile_out.pending |= pending;
                             if pending && !tile_out.pending_in_place.contains(&layer.id) {
@@ -4021,7 +4040,7 @@ fn render_frame(
                             }
                         }
                     },
-                    None => raster::draw(pm, data, &rl.style, stats, view, opacity, full_res_rasters, place),
+                    None => raster::draw(pm, data, &rl.style, stats, view, opacity, full_res_rasters, place, light),
                 };
                 if offscreen {
                     let mut target = Pixmap::new(w, h)?;

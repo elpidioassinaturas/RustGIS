@@ -3117,6 +3117,31 @@ fn custom_projections_switch_keep_scale_query_and_render() {
     }
 }
 
+/// Shaded Relief's cast shadows: set, kept when left out, clamped, a new one without; saved with
+/// the project only when there are some, and drawn in an export (waited for).
+#[test]
+fn shaded_relief_keeps_its_cast_shadows() {
+    let mut s = with_raster();
+    let shadow = |s: &Session| match s.map().layers.first().and_then(|l| l.raster.as_ref()).map(|r| &r.style.renderer) {
+        Some(rustgis_map::RasterRenderer::ShadedRelief { shadow, .. }) => *shadow,
+        other => panic!("{other:?}"),
+    };
+    s.run("raster.symbology", &json!({"type": "shadedRelief"})).unwrap();
+    assert_eq!(shadow(&s), 0.0);
+    let shadows_saved = |s: &mut Session| s.project.saved_text(None).unwrap().0.matches("\"shadow\"").count();
+    let before = shadows_saved(&mut s);
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "shadow": 0.7})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": 200})).unwrap();
+    assert_eq!(shadow(&s), 0.7, "left out, kept");
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "shadow": 4})).unwrap();
+    assert_eq!(shadow(&s), 1.0);
+    assert_eq!(shadows_saved(&mut s), before + 1, "saved only when there are some");
+    assert!(crate::cmd::share::map_png(&mut s, Some(300.0), Some(200.0), None).unwrap().len() > 1000);
+    s.run("raster.symbology", &json!({"type": "stretch"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief"})).unwrap();
+    assert_eq!(shadow(&s), 0.0, "a new Shaded Relief casts none");
+}
+
 #[test]
 fn raster_layers_open_style_identify_and_round_trip() {
     let mut s = with_raster();
