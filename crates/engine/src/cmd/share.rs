@@ -353,6 +353,7 @@ fn map_pdf_inner(s: &mut Session, dpi: f64) -> Result<Vec<u8>, String> {
     let ppp = (dpi / 96.0).clamp(0.5, 6.0);
     let view =
         View { width: vw.clamp(16.0, 8000.0), height: vh.clamp(16.0, 8000.0), pixels_per_point: ppp, camera: s.map().camera, sky: false };
+    rustgis_render::take_shadow_notices();
     let drawing = rustgis_render::render_drawing(s.map_mut(), &view)?;
     let mm = |pt: f64| pt * 25.4 / 96.0;
     let (w, h) = (mm(view.width), mm(view.height));
@@ -370,6 +371,10 @@ fn map_pdf_inner(s: &mut Session, dpi: f64) -> Result<Vec<u8>, String> {
     } else {
         rustgis_render::pdf::Page::drawing(drawing, w, h)
     };
+    // Layers drawn without their cast shadows (see `rustgis_render::take_shadow_notices`).
+    for e in rustgis_render::take_shadow_notices() {
+        s.warn(e);
+    }
     Ok(rustgis_render::pdf::write(&[page], &s.map().name))
 }
 
@@ -411,14 +416,23 @@ pub(crate) fn map_work(s: &Session, p: &Value) -> Result<Work, String> {
     }
     let (mut map, view_size) = (s.map().detached(), s.view_size);
     Ok(Box::new(move || {
+        let mut shadows = Vec::new();
         let written = (|| {
             let png = png_of(&mut map, view_size, width, height, dpi)?;
+            // Layers drawn without their cast shadows (see `rustgis_render::take_shadow_notices`).
+            shadows = rustgis_render::take_shadow_notices();
             rustgis_data::progress::check().map_err(|e| e.to_string())?;
             rustgis_data::io::write_atomic(Path::new(&path), &png).map_err(|e| format!("{path}: {e}"))?;
             Ok(json!({"path": path, "bytes": png.len()}))
         })();
-        // What the size limit did is said of a file written.
-        let sized = if written.is_ok() { sized } else { Vec::new() };
+        // What the size limit did, and layers drawn without their cast shadows, are said of a
+        // file written.
+        let sized = if written.is_ok() {
+            let warn = rustgis_data::diagnostics::Severity::Warning;
+            sized.into_iter().chain(shadows.into_iter().map(|e| (warn, format!("{path}: {e}")))).collect()
+        } else {
+            Vec::new()
+        };
         super::exports::drawn(std::slice::from_ref(&map), sized, written, path)
     }))
 }

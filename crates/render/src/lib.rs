@@ -6329,8 +6329,10 @@ thread_local! {
     static SHADOW_NOTICES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The notices of [`SHADOW_NOTICES`], taken.
-pub(crate) fn take_shadow_notices() -> Vec<String> {
+/// Why layers drawn on this thread since the last call were drawn without their cast shadows,
+/// each once, named by the layer ("Relief: its cast shadows aren't drawn: …"). An export takes
+/// them after [`render_png`] to say them (Never silent); [`render_placed`] gives them as gaps.
+pub fn take_shadow_notices() -> Vec<String> {
     SHADOW_NOTICES.with(|n| std::mem::take(&mut *n.borrow_mut()))
 }
 
@@ -6477,7 +6479,10 @@ pub struct Placed {
 pub fn render_placed(map: &mut Map, view: &View) -> Result<Placed, String> {
     let revisions = archive_revisions([&*map]);
     let r = render_exported(map, view)?;
-    let mut gaps = Vec::new();
+    // Layers drawn without their cast shadows are said as such, not as tile layers that failed.
+    let shadows = take_shadow_notices();
+    let tile_errors: Vec<&String> = r.tile_errors.iter().filter(|e| !shadows.contains(e)).collect();
+    let mut gaps = shadows;
     if r.tiles_pending {
         gaps.push("some tiles were still on their way when the export stopped waiting, so parts of tile layers are empty: export again once the map has drawn them".to_string());
     }
@@ -6487,8 +6492,8 @@ pub fn render_placed(map: &mut Map, view: &View) -> Result<Placed, String> {
                 .to_string(),
         );
     }
-    if let Some(first) = r.tile_errors.first() {
-        let n = r.tile_errors.len();
+    if let Some(first) = tile_errors.first() {
+        let n = tile_errors.len();
         gaps.push(if n == 1 {
             format!("a tile layer couldn't be drawn, so its part is empty: {first}")
         } else {
@@ -6506,6 +6511,8 @@ pub fn render_placed(map: &mut Map, view: &View) -> Result<Placed, String> {
 /// tiles haven't come, or that is drawn from less than the view needs.
 fn render_exported(map: &mut Map, view: &View) -> Result<Rendered, String> {
     let revisions = archive_revisions([&*map]);
+    // What earlier frames on this thread said is not this export's (see `take_shadow_notices`).
+    take_shadow_notices();
     let result = render_complete(map, view);
     let r = revisions.finish([&*map], result, "could not draw the map")?;
     // A raster read in place drawn from less than the view needs isn't written: its tiles still

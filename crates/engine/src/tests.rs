@@ -3142,6 +3142,37 @@ fn shaded_relief_keeps_its_cast_shadows() {
     assert_eq!(shadow(&s), 0.0, "a new Shaded Relief casts none");
 }
 
+/// A map export that draws a layer without its cast shadows says so, as such (not as a tile layer
+/// that failed), in a PNG and a GeoTIFF alike; one with nothing missing says nothing.
+#[test]
+fn a_map_export_says_a_layer_drawn_without_its_cast_shadows() {
+    let mut s = with_raster();
+    s.run("layer.zoomTo", &json!({"layer": "scene"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "shadow": 1})).unwrap();
+    let dir = std::env::temp_dir().join(format!("rustgis-cast-notice-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let said =
+        |s: &Session| s.notices.iter().filter(|n| n.text.contains("cast shadows aren't drawn")).map(|n| n.text.clone()).collect::<Vec<_>>();
+    s.run("share.exportMap", &json!({"path": dir.join("clean.png").display().to_string(), "width": 200, "height": 150})).unwrap();
+    assert!(said(&s).is_empty(), "{:?}", said(&s));
+    // Read in place with only its overview held: no whole grid to trace.
+    let rl = s.map_mut().layers.iter_mut().find_map(|l| l.raster.as_mut()).unwrap();
+    rl.in_place = true;
+    let mut r = (**rl.data.as_ref().unwrap()).clone();
+    r.overview = Some((800, 600));
+    rl.data = Some(std::sync::Arc::new(r));
+    for name in ["shadowless.png", "shadowless.tif"] {
+        let before = said(&s).len();
+        s.run("share.exportMap", &json!({"path": dir.join(name).display().to_string(), "width": 200, "height": 150})).unwrap();
+        let now = said(&s);
+        assert_eq!(now.len(), before + 1, "{name}: {now:?}");
+        let last = now.last().unwrap();
+        assert!(last.contains("scene: its cast shadows aren't drawn") && last.contains("read in place"), "{name}: {last}");
+        assert!(!last.contains("tile layer"), "{name}: {last}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn raster_layers_open_style_identify_and_round_trip() {
     let mut s = with_raster();
