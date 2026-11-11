@@ -1221,6 +1221,30 @@ pub(crate) fn cube_slider(s: &mut Session, dates: &mut Vec<f64>, fresh: &Value) 
                     rustgis_map::time::MAX_STEPS
                 ));
             }
+            // Each of the cube's dates shown at some step: a step longer than the dates' spacing
+            // (two years over yearly files) shows the later of two in one window, never the other.
+            let mut w = t.clone();
+            (w.start, w.end) = (a, z);
+            let mut shown = vec![false; dates.len()];
+            for step in w.steps() {
+                w.current = step;
+                let (from, to) = w.window();
+                let i = dates.partition_point(|d| *d < to);
+                if let Some(seen) = i.checked_sub(1).filter(|&j| dates.get(j).is_some_and(|d| *d >= from)).and_then(|j| shown.get_mut(j)) {
+                    *seen = true;
+                }
+            }
+            let unseen: Vec<String> =
+                dates.iter().zip(&shown).filter(|(_, s)| !**s).map(|(d, _)| rustgis_data::time::format(*d, "YYYY-MM-DD")).collect();
+            if !unseen.is_empty() {
+                let more = if unseen.len() > 5 { format!(" and {} more", unseen.len() - 5) } else { String::new() };
+                return Err(format!(
+                    "the time slider's step never shows {} of the cube's {} dates on their own ({}{more}): make its step shorter (time.set unit, interval) or turn it off first",
+                    unseen.len(),
+                    dates.len(),
+                    unseen.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
             json!({"start": a, "end": z, "date": t.current})
         }
     };

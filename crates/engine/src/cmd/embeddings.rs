@@ -673,6 +673,19 @@ mod tests {
         let e = h.run("embeddings.addCube", &json!({"dataset": "alphaearth", "found": two})).unwrap_err();
         assert!(e.contains("steps"), "{e}");
         assert!(h.map().tiles.is_empty() && h.map().time == before, "a refused cube leaves the map as it was");
+        // A slider stepping two years at a time would show 2018's file in 2017's step, and never
+        // 2017's: refused, saying which dates; a yearly one takes the cube.
+        let nine: serde_json::Map<String, Value> = (2017..=2025).map(|y| (y.to_string(), json!(file(y, a)))).collect();
+        let nine = json!([{"years": nine}]);
+        let mut g = Session::new(Project::default());
+        g.run("time.set", &json!({"start": "2017", "end": "2025", "unit": "year", "interval": 2})).unwrap();
+        let before = g.map().time.clone();
+        let e = g.run("embeddings.addCube", &json!({"dataset": "alphaearth", "found": nine})).unwrap_err();
+        assert!(e.contains("2017-01-01") && e.contains("step"), "{e}");
+        assert!(g.map().tiles.is_empty() && g.map().time == before);
+        let mut y = Session::new(Project::default());
+        y.run("time.set", &json!({"start": "2017", "end": "2025", "unit": "year"})).unwrap();
+        y.run("embeddings.addCube", &json!({"dataset": "alphaearth", "found": nine})).unwrap();
         // Other bands (Apply to layers) hold at every year, not only the one shown.
         t.run("map.setTiles", &json!({"index": 0, "bands": [3, 4, 5]})).unwrap();
         t.run("time.goTo", &json!({"step": 0})).unwrap();
