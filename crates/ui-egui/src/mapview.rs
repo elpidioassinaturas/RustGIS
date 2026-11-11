@@ -1003,7 +1003,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                         show_frame(app, ui.ctx(), r, &done.view, (w, h), k, time, globe_view);
                         // Over terrain the settled frame's mesh is finer than the drape's
                         // (#1523): the relief's outline would jump, so it fades in over it.
-                        if app.map.drape_painted && done.view.camera.pitch != 0.0 && app.session.map().view.terrain.is_some() {
+                        if app.map.drape_painted && done.view.camera.pitch != 0.0 && done.map.view.terrain.is_some() {
                             app.map.tilt_fade = Some(time);
                         }
                     }

@@ -2161,6 +2161,8 @@ fn render_tilted(map: &mut Map, view: &View, full_res_rasters: bool, sources_rea
 /// triangles raised to the ground's height and mapped from its picture, every band keeping to
 /// its own stretch of ground, all drawn far to near so nearer slopes hide what lies behind
 /// them; fog with distance, and the sky behind. (Without terrain, [`Warp`] does it per pixel.)
+/// Reading the grids' heights and ordering the triangles (tens of milliseconds) doesn't look at
+/// Cancel; drawing them, the long part, does.
 fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, f64), Pixmap)], ground: &terrain::Ground) {
     let (sky, fog) = tilt_sky(map);
     let cam = view.camera;
