@@ -196,7 +196,9 @@ pub fn share_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Ve
         "webMap" => {
             let mut m = map_of(s, p)?;
             m.layers.iter_mut().filter(|l| shared_layer("webMap", l)).try_for_each(load_whole)?;
+            rustgis_render::take_shadow_notices();
             let html = web_map_html(&m, &m.name)?;
+            super::share::say_shadows(s);
             Ok((m.name.clone(), html.into_bytes(), m.name))
         }
         "webLayer" => {

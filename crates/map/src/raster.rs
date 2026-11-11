@@ -726,6 +726,12 @@ impl RasterLayer {
         Some(stats)
     }
 
+    /// Whether it is drawn with cast shadows (Shaded Relief with a shadow above 0): its frames are
+    /// drawn again as they land (see [`RasterLayer::cast_shadows`]).
+    pub fn casts_shadows(&self) -> bool {
+        matches!(self.style.renderer, RasterRenderer::ShadedRelief { shadow, .. } if shadow > 0.0)
+    }
+
     /// The light its cast shadows leave on each cell (see [`crate::shadow::light`]), when it is
     /// drawn as Shaded Relief with shadows. Worked out once per pixels, band, sun, Z factor and
     /// mask and kept: each owner's latest, and a few of suns left, for going back.
@@ -773,6 +779,9 @@ impl RasterLayer {
                     job.owner = owner;
                     let work = job.work.clone();
                     jobs.push(job);
+                    // Joining work under way (an export's, another frame's): drawn again when it
+                    // lands too.
+                    work.on_landing(landed);
                     work
                 }
                 None => {
@@ -794,6 +803,7 @@ impl RasterLayer {
                         jobs.remove(*i);
                     }
                     let work = Arc::new(LightWork::default());
+                    work.on_landing(landed);
                     jobs.push(LightJob { key: key.clone(), pixels: Arc::downgrade(r), owner, work: work.clone() });
                     start = Some((r.clone(), key));
                     work
@@ -802,7 +812,7 @@ impl RasterLayer {
         };
         // Started without holding the lock: a thread the system refuses runs it here.
         if let Some((r, key)) = start {
-            start_light(r, key, work.clone(), landed);
+            start_light(r, key, work.clone());
         }
         work.result(wait)
     }
@@ -840,9 +850,33 @@ struct LightWork {
     landed: std::sync::Condvar,
     /// How many wait for it (exports): it is neither superseded nor let go meanwhile.
     waiting: std::sync::atomic::AtomicUsize,
+    /// Called once it is done: each frame or page drawn while it was to come asks to be drawn
+    /// again (at most [`MAX_LANDINGS`] are kept; the first already redraws them all).
+    landings: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
 }
 
+/// The most landing calls a light grid's work keeps.
+const MAX_LANDINGS: usize = 32;
+
 impl LightWork {
+    /// Calls `landed` once the work is done; nothing when it is already (the caller has it).
+    fn on_landing(&self, landed: impl FnOnce() + Send + 'static) {
+        // Checked under the calls' lock, which `land` takes after the work is done: a call is
+        // either kept and made, or not needed.
+        let Ok(mut calls) = self.landings.lock() else { return };
+        if !self.is_done() && calls.len() < MAX_LANDINGS {
+            calls.push(Box::new(landed));
+        }
+    }
+
+    /// Makes the landing calls, once the work is done.
+    fn land(&self) {
+        let calls = self.landings.lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
+        for call in calls {
+            call();
+        }
+    }
+
     fn is_done(&self) -> bool {
         self.done.lock().is_ok_and(|d| d.is_some())
     }
@@ -932,7 +966,7 @@ const KEPT_LIGHTS: usize = 3;
 
 /// Works out a light grid: natively on a thread of its own (here if the system refuses one),
 /// in the browser here.
-fn start_light(r: Arc<Raster>, key: LightKey, work: Arc<LightWork>, landed: impl FnOnce() + Send + 'static) {
+fn start_light(r: Arc<Raster>, key: LightKey, work: Arc<LightWork>) {
     let run = move || {
         let threads = rustgis_data::threads::max();
         let traced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -943,19 +977,19 @@ fn start_light(r: Arc<Raster>, key: LightKey, work: Arc<LightWork>, landed: impl
             // to come is drawn again, and asks for what it draws now.
             Ok(Err(crate::shadow::Unlit::Stopped)) => {
                 work.finish(Err(STOPPED.into()));
-                landed();
+                work.land();
             }
             Ok(out) => {
                 work.finish(out.map(Arc::new).map_err(|e| match e {
                     crate::shadow::Unlit::Failed => "its cast shadows aren't drawn: working them out failed".into(),
                     _ => "its cast shadows aren't drawn: there isn't the memory for them".into(),
                 }));
-                landed();
+                work.land();
             }
             // Said, rather than leaving an export waiting.
             Err(_) => {
                 work.finish(Err("its cast shadows aren't drawn: working them out failed".into()));
-                landed();
+                work.land();
             }
         }
     };
@@ -2445,6 +2479,34 @@ mod tests {
         let again = rl.cast.0.lock().unwrap().first().map(|j| j.work.clone()).unwrap();
         assert!(!Arc::ptr_eq(&work, &again));
         again.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A frame joining work under way (an export started it) is drawn again when it lands too.
+    #[test]
+    fn who_joins_work_under_way_is_told_when_it_lands() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 0.0, pixel_width: 30.0, pixel_height: -30.0 };
+        let data: Vec<f32> = (0..800 * 800).map(|i| ((i % 800) as f32 * 0.01) + ((i / 800) as f32 * 0.01)).collect();
+        let r = Raster::new("plain", 800, 800, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut rl = RasterLayer::from_path(r, "plain.tif");
+        rl.style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 135.0, altitude: 3.0, z_factor: 1.0, shadow: 1.0 };
+        let (sent, landings) = std::sync::mpsc::channel::<&'static str>();
+        let told = |who: &'static str| {
+            let tx = sent.clone();
+            move || {
+                let _ = tx.send(who);
+            }
+        };
+        let first = rl.cast_shadows(false, (0, 1), told("starter"));
+        let joined = rl.cast_shadows(false, (5, 1), told("joiner"));
+        // Joined while under way (it traces far under a 3° sun), both are told; done already, the
+        // joiner has the grid and needs no call.
+        if first == CastShadows::Pending && joined == CastShadows::Pending {
+            let mut heard = vec![landings.recv_timeout(std::time::Duration::from_secs(120)).unwrap()];
+            heard.push(landings.recv_timeout(std::time::Duration::from_secs(120)).unwrap());
+            heard.sort_unstable();
+            assert_eq!(heard, ["joiner", "starter"]);
+        }
+        assert!(matches!(rl.cast_shadows(true, (0, 1), || {}), CastShadows::Ready(_)));
     }
 
     /// Read in place with only its overview held, it is drawn without cast shadows, and says so;

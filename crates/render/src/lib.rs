@@ -6341,18 +6341,19 @@ fn shadows_landed() {
     rustgis_tiles::cache::notify_at(web_time::Instant::now());
 }
 
-/// Runs `f` (drawing the Layout view's page, on the interface's thread) with its frames drawn
-/// without the cast shadows still being worked out, rather than waiting for them: they say so
-/// ([`frame_shadows_to_come`]), and the page is drawn again as they land.
-pub(crate) fn without_shadow_wait<T>(f: impl FnOnce() -> T) -> T {
+/// Runs `f` (drawing on the interface's thread: the Layout view's page, a capture of the map) with
+/// its frames drawn without the cast shadows still being worked out, rather than waiting for
+/// them: they say so ([`frame_shadows_to_come`]), and a page is drawn again as they land.
+pub fn without_shadow_wait<T>(f: impl FnOnce() -> T) -> T {
     let before = NO_SHADOW_WAIT.with(|c| c.replace(true));
     let out = f();
     NO_SHADOW_WAIT.with(|c| c.set(before));
     out
 }
 
-/// Whether a frame drawn at full resolution since the last call had cast shadows still to come.
-pub(crate) fn frame_shadows_to_come() -> bool {
+/// Whether a frame drawn at full resolution on this thread since the last call had cast shadows
+/// still to come (drawn in [`without_shadow_wait`]).
+pub fn frame_shadows_to_come() -> bool {
     SHADOWS_TO_COME.with(|c| c.replace(false))
 }
 

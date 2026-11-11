@@ -671,7 +671,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
             // view says them.
             for e in rustgis_engine::render::layout::shadow_notices() {
                 if app.map.tile_errors.insert(e.clone()) {
-                    app.session.notify(e, true);
+                    app.session.warn(e);
                 }
             }
             // Waiting for the frames draws it again anyway: the legends are asked about once

@@ -200,10 +200,26 @@ pub fn map_png_fitted(s: &mut Session, dpi: f64) -> Result<Vec<u8>, String> {
     Ok(png)
 }
 
-/// Renders the active map at the current view (or a requested size) to PNG bytes.
+/// Renders the active map at the current view (or a requested size) to PNG bytes. Layers drawn
+/// without their cast shadows (unavailable, or still being worked out when drawn in
+/// [`rustgis_render::without_shadow_wait`]) are said.
 pub fn map_png(s: &mut Session, width: Option<f64>, height: Option<f64>, dpi: Option<f64>) -> Result<Vec<u8>, String> {
     let view_size = s.view_size;
-    png_of(s.map_mut(), view_size, width, height, dpi)
+    rustgis_render::frame_shadows_to_come();
+    let png = png_of(s.map_mut(), view_size, width, height, dpi)?;
+    say_shadows(s);
+    if rustgis_render::frame_shadows_to_come() {
+        s.warn("The map image: some layers are drawn without their cast shadows, still being worked out: draw it again once the map shows them");
+    }
+    Ok(png)
+}
+
+/// Says why layers drawn on this thread were drawn without their cast shadows (see
+/// [`rustgis_render::take_shadow_notices`]), as warnings: what was drawn is written.
+pub(crate) fn say_shadows(s: &mut Session) {
+    for e in rustgis_render::take_shadow_notices() {
+        s.warn(e);
+    }
 }
 
 /// Renders `map` at its camera in a view of `(vw, vh)` points (or a requested size) to PNG bytes.

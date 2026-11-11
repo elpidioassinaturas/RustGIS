@@ -3750,9 +3750,12 @@ impl RustGisApp {
             }
             "ui.captureMap" => {
                 let session = &mut self.session;
-                let png =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_engine::cmd::share::map_png_fitted(session, 192.0)))
-                        .unwrap_or_else(|_| Err("the capture failed unexpectedly".into()))?;
+                // On the interface's thread: cast shadows still being worked out aren't waited for
+                // (the capture says so).
+                let png = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rustgis_engine::render::without_shadow_wait(|| rustgis_engine::cmd::share::map_png_fitted(session, 192.0))
+                }))
+                .unwrap_or_else(|_| Err("the capture failed unexpectedly".into()))?;
                 let pm = rustgis_engine::render::decode_png(&png).ok_or("could not draw the map")?;
                 let size = [pm.width() as usize, pm.height() as usize];
                 self.ui.copy_image = Some(egui::ColorImage::from_rgba_premultiplied(size, pm.data()));
@@ -4083,9 +4086,12 @@ impl RustGisApp {
             "ui.exportMap" if self.services.download.is_some() => {
                 // The same last-resort panic guard `Session::run` gives commands.
                 let session = &mut self.session;
-                let png =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_engine::cmd::share::map_png_fitted(session, 192.0)))
-                        .unwrap_or_else(|_| Err("Export Map failed unexpectedly".into()));
+                // On the interface's thread: cast shadows still being worked out aren't waited for
+                // (the export says so).
+                let png = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rustgis_engine::render::without_shadow_wait(|| rustgis_engine::cmd::share::map_png_fitted(session, 192.0))
+                }))
+                .unwrap_or_else(|_| Err("Export Map failed unexpectedly".into()));
                 let png = match png {
                     Ok(p) => p,
                     Err(e) => {

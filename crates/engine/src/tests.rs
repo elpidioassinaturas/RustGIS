@@ -3143,7 +3143,8 @@ fn shaded_relief_keeps_its_cast_shadows() {
 }
 
 /// A map export that draws a layer without its cast shadows says so, as such (not as a tile layer
-/// that failed), in a PNG and a GeoTIFF alike; one with nothing missing says nothing.
+/// that failed), in a PNG, a GeoTIFF and the app's map image alike; one with nothing missing says
+/// nothing.
 #[test]
 fn a_map_export_says_a_layer_drawn_without_its_cast_shadows() {
     let mut s = with_raster();
@@ -3170,6 +3171,10 @@ fn a_map_export_says_a_layer_drawn_without_its_cast_shadows() {
         assert!(last.contains("scene: its cast shadows aren't drawn") && last.contains("read in place"), "{name}: {last}");
         assert!(!last.contains("tile layer"), "{name}: {last}");
     }
+    // The app's Capture To Clipboard and Export Map download (`map_png`) say it too.
+    let before = said(&s).len();
+    crate::cmd::share::map_png(&mut s, Some(200.0), Some(150.0), None).unwrap();
+    assert_eq!(said(&s).len(), before + 1, "{:?}", said(&s));
     std::fs::remove_dir_all(&dir).ok();
 }
 
