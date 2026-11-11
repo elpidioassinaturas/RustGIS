@@ -1738,7 +1738,7 @@ pub(crate) fn layout_notices(
     let cut = total(|r| r.elements_cut);
     if cut > 0 {
         notices.push(format!(
-            "{name}: {cut} layout element(s) with a name, text, polygon points or legend exclusions cut to their limits {when} (in {})",
+            "{name}: {cut} layout element(s) with a name, text, polygon points, legend exclusions or legend labels cut to their limits {when} (in {})",
             layout_names(repairs, |r| r.elements_cut)
         ));
     }
@@ -1888,6 +1888,7 @@ impl Durable for Table {
         if let Some(v) = provenance {
             p.string(Leaf::Table, v, true, rustgis_map::paths::is_local(v));
         }
+        p.count_numbers(dataset);
     }
 
     /// Resolves a prepared location through owned fields, without allocation or policy.

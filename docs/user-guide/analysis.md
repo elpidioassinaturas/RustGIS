@@ -94,8 +94,8 @@ run` called from another program, such as an agent or a CI job, which may wait w
 Viewshed, IDW Interpolation and Kriging refuse a run that would take more than a second or two of
 work on one thread (a ray step, a cell-point pair), Kernel Density one whose points' search windows
 (the square around each point's radius) cover more than 50 million cells, and Deep Learning a model
-too large for its raster; its training fits a share of the sampled pixels, or fewer epochs, instead
-(`dl.train` reports the epochs it ran). A task or model recorded from a pane run keeps these limits
+too large for its raster; its training fits a share of the sampled pixels, or fewer epochs, instead,
+and says how many of each it trained on (`"limited"` in `dl.train`'s and `dl.classify`'s answer). A task or model recorded from a pane run keeps these limits
 when it runs again in the app, so a step the pane took on can be refused there, and a model trained
 again can differ. On the desktop these limits grow with the threads the run takes (the cores, up to 16 unless
 [`threads`](#analysis-workflows) says otherwise), as many
@@ -529,20 +529,27 @@ gp.run={"tool":"pointsAlongLines","params":{"input":"Rivers","distance":500,"uni
 **IDW Interpolation** works like the QGIS tool of the same name: every point weighs on every
 cell by 1/distanceᴾ, where P is the distance coefficient (2 by default). Lines and polygons
 contribute their vertices. Leave the extent empty to use the input's, or give it as
-`xmin,ymin,xmax,ymax` in degrees. `pixelSize` sets the cell size in degrees; when omitted it
-starts at 300 cells across the extent and coarsens for large inputs. The result is a Float32
-GeoTIFF layer. The **Geostatistical Wizard** is a separate IDW workflow: it uses 12 nearest
-neighbours by default (`neighbors`), rather than every point.
+`xmin,ymin,xmax,ymax`. `pixelSize` sets the cell size; when omitted it starts at 300 cells
+across the extent and coarsens for large inputs. The result is a Float32 GeoTIFF layer. The
+**Geostatistical Wizard** is a separate IDW workflow, in degrees: it uses 12 nearest neighbours
+by default (`neighbors`), rather than every point.
+
+IDW Interpolation and Ordinary Kriging make their raster in the projected coordinate system given
+as `crs` (such as `EPSG:32616` for UTM zone 16N, or a State Plane code), and then take the
+extent, pixel size and Kriging's `range` in its units, usually metres or feet. Without `crs`
+they work in longitude and latitude, with all three in degrees, as they did before `crs` was
+there; for a layer read from a projected file they then say so, naming its system. A geographic
+`crs` is refused, and points the system can't hold are left out and counted.
 
 **Ordinary Kriging** (`kriging`) estimates both a value and its uncertainty. Set `input` and a
 numeric `field`, then choose a `model`: **Spherical** (default), **Exponential** or **Gaussian**.
 `neighbours` defaults to 12 (minimum 2, capped at 32). Optional `nugget`, `sill` and `range`
 override the defaults: zero nugget, the sample variance (1 for near-constant values), and a
-third of the extent's diagonal. Coordinates, `range`, `extent` and `pixelSize` are in degrees
-(WGS 84). Points at the same location are averaged; multipoints contribute their points, while
-lines and polygons contribute their bounding-box centres. At least two distinct locations with
-numeric values are needed. It adds **two separate Float32 GeoTIFF layers**: the prediction,
-named by `output`, and `<output>_variance`.
+third of the extent's diagonal. `range`, `extent` and `pixelSize` are in the units of `crs`, or
+in degrees without it (see above). Points at the same location are averaged; multipoints
+contribute their points, while lines and polygons contribute their bounding-box centres. At least
+two distinct locations with numeric values are needed. It adds **two separate Float32 GeoTIFF
+layers**: the prediction, named by `output`, and `<output>_variance`.
 
 **Erase** (`erase`) removes from `input` features (points, lines or polygons) their parts inside
 the `erase` polygons. An erase polygon's edge counts as inside it, as for Clip, so a point on the
@@ -560,8 +567,8 @@ overlay must be polygons. An overlay field whose name the input already has gets
 Overlapping features within one layer are not split against each other. Like Clip and Erase, the
 overlay works on the map's Web Mercator coordinates, so the parts' edges are straight on the map
 within ±85.05° (beyond it, see **Near the poles** above).
-Selections in both layers are honoured. To measure each part, run Calculate Geometry Attributes on
-the result:
+Selections in both layers are honoured, and a row selected twice is used once, so its parts come out
+once. To measure each part, run Calculate Geometry Attributes on the result:
 
 ```text
 gp.run={"tool":"intersect","params":{"input":"parcels","overlay":"floodplain","output":"parcels_in_floodplain"}}
@@ -610,6 +617,15 @@ field), empty ones included. Selections in both layers are honoured.
 ```text
 gp.run={"tool":"split","params":{"input":"roads","split":"districts","field":"name"}}
 ```
+
+Clip, Erase, Intersect, Identity, Union, Symmetrical Difference, Update and Split leave out a
+feature of the clip, erase, overlay, update or split layer with no polygon, and say how many: one
+without geometry, a point or line in the polygon layer (as Minimum Bounding Geometry's flat hulls
+are), or an empty polygon. Clip also leaves out a mask whose polygons, unioned, have no area, and
+the others a feature of several parts that, unioned, come to nothing (Update writes it as it is),
+saying how many. When none of the features of that layer is left, Clip, Intersect and Split, whose
+result would be empty, stop with an error. In all of them, a feature selected twice in that layer is
+used once.
 
 **Near** (`near`) copies `input` and adds, for each feature, the nearest feature of `near`: its OID
 as the attribute table shows it (`near_fid`), the distance to it (`near_dist`, in `units`,
@@ -782,10 +798,10 @@ writing no hull for it; if every feature is skipped, it is an error. A latitude 
 taken as that pole. A hull with no area is written as what it is: a point for points in one place,
 or the line between the two farthest apart for points on one straight line on the map. The layer is
 a point or line layer when every hull is one, and the tool says so; otherwise it's a polygon layer
-holding any points and lines among its polygons. Dissolve leaves those out, saying how many; as
-Clip masks they cover nothing; a Shapefile export leaves them out, saying how many; and a
-GeoPackage export keeps them in a column that holds any kind of geometry. It says how many of
-each.
+holding any points and lines among its polygons. Dissolve leaves those out, saying how many; so
+do Clip and the overlay tools when the layer is their mask or overlay; a Shapefile export leaves
+them out, saying how many; and a GeoPackage export keeps them in a column that holds any kind of
+geometry. The tool says how many hulls have no area.
 
 **Dissolve** (`dissolve`) merges the polygons sharing a value of `field` into one feature for
 each value, or all of them into one without a field. Each feature has the value and `count`, the

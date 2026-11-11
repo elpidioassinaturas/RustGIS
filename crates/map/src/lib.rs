@@ -123,6 +123,24 @@ pub enum NoFill {
     Symbols,
 }
 
+/// What No Fill hid ([`Layer::hidden_fills`]), for Restore Fill to put back.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HiddenFills {
+    /// Each symbol's fill opacity before No Fill, in [`Renderer::map_symbols`] order (made 0).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alphas: Vec<u8>,
+    /// The layer's own fills before No Fill (replaced by its transparent one).
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "fills::de_fills")]
+    pub fills: Vec<fills::FillLayer>,
+    /// The classes' own fills before No Fill (taken off).
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "de_class_fills")]
+    pub class_fills: Vec<(symbology::ClassRef, Vec<fills::FillLayer>)>,
+    /// Started by No Fill on again over a layer that kept nothing (saved with No Fill on by an
+    /// earlier RustGIS): it holds only what was hidden since, not what the first No Fill hid.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
+}
+
 /// A layer: a dataset drawn with a renderer and labels.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Layer {
@@ -187,6 +205,9 @@ pub struct Layer {
     /// fill in the symbol's colour shows them again. A fill colour chosen transparent isn't this.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "de_no_fill")]
     pub no_fill: Option<NoFill>,
+    /// What No Fill hid, while it is on: Restore Fill puts back what wasn't changed since.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "de_hidden_fills")]
+    pub hidden_fills: Option<HiddenFills>,
     /// Draws the stacked strokes in levels (symbol levels): every feature's strokes of one
     /// [`LineStroke::level`] before any of the next, so road casings join under the cores
     /// instead of cutting across them where lines meet.
@@ -451,6 +472,7 @@ impl Layer {
             line_strokes: Vec::new(),
             fill_layers: Vec::new(),
             no_fill: None,
+            hidden_fills: None,
             stroke_levels: false,
             marker_rotation: None,
             diagram: None,
@@ -577,6 +599,15 @@ impl Layer {
             }
         }
         self.source.as_ref().is_some_and(|s| s.is_pending())
+    }
+
+    /// The ids of the selected features: those of the selected rows, and for a layer read in place
+    /// those parked for its next read (a project just opened, its view not yet read).
+    pub fn selected_ids(&self) -> std::collections::HashSet<u64> {
+        let mut ids: std::collections::HashSet<u64> =
+            self.selection.iter().filter_map(|r| self.dataset.features.get(*r)).map(|f| f.id).collect();
+        ids.extend(self.source.iter().flat_map(|src| src.saved_selection.iter().copied()));
+        ids
     }
 
     /// Replaces a streamed layer's features, keeping the selection (by feature id).
@@ -2780,6 +2811,20 @@ fn de_no_fill<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<NoFill>, 
     })
 }
 
+/// [`Layer::hidden_fills`] that don't read as this version keeps them read as none kept, rather
+/// than failing the whole project; Restore Fill then says what it couldn't put back.
+fn de_hidden_fills<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<HiddenFills>, D::Error> {
+    Ok(Option::<serde_json::Value>::deserialize(d)?.and_then(|v| serde_json::from_value(v).ok()))
+}
+
+/// [`HiddenFills::class_fills`] read as a layer's own fill stacks are: each stack at most
+/// [`fills::MAX_FILLS`], so a saved stack Restore Fill would refuse still opens.
+fn de_class_fills<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<(symbology::ClassRef, Vec<fills::FillLayer>)>, D::Error> {
+    #[derive(Deserialize)]
+    struct Saved(symbology::ClassRef, #[serde(deserialize_with = "fills::de_fills")] Vec<fills::FillLayer>);
+    Ok(Vec::<Saved>::deserialize(d)?.into_iter().map(|Saved(class, f)| (class, f)).collect())
+}
+
 /// Reads a layer's reference scale as `layer.referenceScale` would leave it: one out of
 /// [`REFERENCE_SCALES`] (or not a number) is none. A project file is hostile input.
 fn de_reference_scale<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
@@ -2908,6 +2953,7 @@ impl Layer {
             line_strokes: _,
             fill_layers: _,
             no_fill: _,
+            hidden_fills: _,
             stroke_levels: _,
             marker_rotation: _,
             symbol_by: _,
@@ -3244,6 +3290,34 @@ mod tests {
             v["no_fill"] = unknown.clone();
             assert_eq!(serde_json::from_value::<Layer>(v.clone()).unwrap().no_fill, None, "{unknown}");
         }
+        // What No Fill hid is saved with it; one that doesn't read is none kept.
+        let kept = HiddenFills {
+            alphas: vec![170, 0],
+            fills: vec![fills::FillLayer::hatch(45.0, 4.0, 0.5)],
+            class_fills: vec![(symbology::ClassRef::Index(1), vec![fills::FillLayer::default()])],
+            partial: true,
+        };
+        l.hidden_fills = Some(kept.clone());
+        let text = serde_json::to_string(&l).unwrap();
+        assert_eq!(serde_json::from_str::<Layer>(&text).unwrap().hidden_fills, Some(kept));
+        let mut v = serde_json::to_value(&l).unwrap();
+        for unknown in
+            [serde_json::json!("Later"), serde_json::json!({"alphas": [300]}), serde_json::json!({"class_fills": [["Later", []]]})]
+        {
+            v["hidden_fills"] = unknown.clone();
+            assert_eq!(serde_json::from_value::<Layer>(v.clone()).unwrap().hidden_fills, None, "{unknown}");
+        }
+    }
+
+    #[test]
+    fn a_saved_class_stack_reads_bounded_like_a_layer_stack() {
+        // Restore Fill would refuse a class stack past MAX_FILLS, so a saved one reads at most that.
+        let stack: Vec<_> = (0..fills::MAX_FILLS + 4).map(|_| serde_json::json!({})).collect();
+        let saved = serde_json::json!({"class_fills": [[{"Index": 1}, stack]]});
+        let read: HiddenFills = serde_json::from_value(saved).unwrap();
+        assert_eq!(read.class_fills.len(), 1);
+        assert_eq!(read.class_fills[0].0, symbology::ClassRef::Index(1));
+        assert_eq!(read.class_fills[0].1.len(), fills::MAX_FILLS);
     }
 
     #[test]

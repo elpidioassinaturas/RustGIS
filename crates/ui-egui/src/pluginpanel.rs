@@ -1,5 +1,5 @@
 //! A plugin's panel (`panel` in its `plugin.json`): a right pane of texts, checkboxes, sliders,
-//! buttons, trees, dropdowns, date pickers, range sliders and picks bound to the plugin's
+//! buttons, trees, forms, dropdowns, date pickers, range sliders and picks bound to the plugin's
 //! commands.
 //!
 //! The session keeps the panel's state ([`rustgis_engine::plugins::PanelState`]); this draws it
@@ -7,16 +7,18 @@
 //! `plugin:<plugin>/<command>` with `{"panel": {"<widget>": value}}`, one without sets the value
 //! with `plugin.panel`. A slider or a range runs its command when it is let go (or stepped, or
 //! moved with the keys), never while it is dragged: until then the pane shows the value it would
-//! take. A date runs its command when a day is picked in its calendar, or a date typed is
-//! confirmed (Enter, or leaving the box). A pick waits for the map: the next click there (or a
-//! box dragged) is its value, and Esc, another tool, or the panel closing stops it waiting.
+//! take. A form's text and number fields send when they lose focus, its other fields at once. A
+//! date runs its command when a day is picked in its calendar, or a date typed is confirmed
+//! (Enter, or leaving the box). A pick waits for the map: the next click there (or a box dragged)
+//! is its value, and Esc, another tool, or the panel closing stops it waiting.
 
 use egui::{Align2, CornerRadius, RichText, Sense, Stroke, Ui, pos2, vec2};
 use std::collections::{HashMap, HashSet};
 
 use rustgis_engine::Tool;
 use rustgis_engine::geom::{Coord, Extent};
-use rustgis_engine::plugins::{Manifest, PanelItemDecl, PanelState, TreeNode, command_id};
+use rustgis_engine::plugins::panel::{ItemState, MAX_TREE_NODES};
+use rustgis_engine::plugins::{FormField, Manifest, PanelItemDecl, PanelState, TreeNode, command_id};
 use serde_json::{Value, json};
 
 use crate::theme::{Tokens, regular, semibold};
@@ -46,8 +48,19 @@ pub struct State {
     /// since, or moved (by the plugin or a script), opens the branches above it, once, so it
     /// shows and they can still be closed.
     revealed: HashMap<String, Vec<String>>,
+    /// A form's text and number fields being typed in, by widget and field, and the value they
+    /// showed when typing began (so a value the plugin sets since wins).
+    typing: HashMap<(String, String), Typing>,
+    /// A change sent this frame was refused: the frame's button clicks wait, since they would
+    /// act on the values the refused change tried to replace.
+    refused: bool,
     /// A pick waiting for the map: plugin and widget.
     picking: Option<(String, String)>,
+}
+
+struct Typing {
+    text: String,
+    was: String,
 }
 
 /// The panel's title (its tab), in the interface language.
@@ -94,6 +107,7 @@ pub fn open(app: &mut RustGisApp, p: &Value) -> Result<Value, String> {
 
 fn run(app: &mut RustGisApp, id: &str, p: Value) {
     if let Err(e) = app.run_by_user(id, p) {
+        app.ui.plugin_panel.refused = true;
         app.session.notify(e, true);
     }
 }
@@ -122,6 +136,9 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     };
     let m = &plugin.manifest;
     let Some(decl) = m.panel.as_ref() else { return };
+    // A draft belongs to a form field the plugin still gives: one it removed takes its draft
+    // with it, so a field given back later starts from its stored value.
+    app.ui.plugin_panel.typing.retain(|(w, f), _| state.items.get(w.as_str()).is_some_and(|s| s.fields.iter().any(|x| x.id == *f)));
     let lang = app.lang().code();
     let tr = |s: &str| m.translate(lang, s).to_string();
     ui.horizontal(|ui| {
@@ -137,25 +154,28 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     ui.separator();
     ui.add_space(4.0);
     let items: Vec<&PanelItemDecl> = decl.items.iter().filter(|d| state.items.get(d.key()).is_none_or(|s| s.visible)).collect();
+    app.ui.plugin_panel.refused = false;
     // What was being typed or dragged in a pane, or a widget, out of sight since is let go: the
     // box would otherwise show the old text over what the plugin set meanwhile.
     let frame = ui.ctx().cumulative_frame_nr();
     let pane = &mut app.ui.plugin_panel;
     if pane.drawn.saturating_add(1) < frame {
         pane.date_text.clear();
+        pane.typing.clear();
         pane.dragging = None;
         pane.range_drag = None;
     }
     pane.drawn = frame;
     pane.date_text.retain(|k, _| items.iter().any(|d| d.kind == "date" && d.key() == k && enabled(d, &state)));
     let mut i = 0;
+    let mut clicks: Vec<String> = Vec::new();
     while let Some(item) = items.get(i).copied() {
         // Buttons side by side, wrapping, as many as follow each other.
         if item.kind == "button" {
             let n = items.iter().skip(i).take_while(|d| d.kind == "button").count();
             ui.horizontal_wrapped(|ui| {
                 for b in items.iter().skip(i).take(n) {
-                    button(app, ui, &pid, m, b, &state, &tr);
+                    clicks.extend(button(ui, &pid, m, b, &state, &tr));
                 }
             });
             ui.add_space(8.0);
@@ -168,6 +188,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             "checkbox" => checkbox(app, ui, &pid, item, &state, &tr),
             "slider" => slider(app, ui, &pid, item, &state, &tr, t),
             "tree" => tree(app, ui, &pid, item, &state, &tr, t),
+            "form" => form(app, ui, &pid, item, &state, &tr, t),
             "choice" => choice(app, ui, &pid, item, &state, &tr, t),
             "date" => date(app, ui, &pid, item, &state, &tr, t),
             "range" => range(app, ui, &pid, item, &state, &tr, t),
@@ -175,6 +196,14 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         }
         ui.add_space(8.0);
         i += 1;
+    }
+    // A button runs after the widgets' changes of this frame are sent: a form field left by
+    // the click (the focus moves to the button) goes first, so the command sees it. If one of
+    // those changes was refused, the click waits: its command would act on the old values.
+    if !app.ui.plugin_panel.refused {
+        for id in clicks {
+            run(app, &id, Value::Null);
+        }
     }
 }
 
@@ -225,21 +254,186 @@ fn button_label(m: &Manifest, item: &PanelItemDecl, state: &PanelState, tr: &dyn
     (label, help)
 }
 
-fn button(
-    app: &mut RustGisApp,
-    ui: &mut Ui,
-    pid: &str,
-    m: &Manifest,
-    item: &PanelItemDecl,
-    state: &PanelState,
-    tr: &dyn Fn(&str) -> String,
-) {
+/// A button's command when it was clicked. The caller runs it once the frame's other changes
+/// are sent (see [`show`]).
+fn button(ui: &mut Ui, pid: &str, m: &Manifest, item: &PanelItemDecl, state: &PanelState, tr: &dyn Fn(&str) -> String) -> Option<String> {
     let (label, help) = button_label(m, item, state, tr);
     let resp = ui.add_enabled(enabled(item, state), egui::Button::new(label).min_size(vec2(64.0, 26.0)));
     let resp = if help.is_empty() { resp } else { resp.on_hover_text(help) };
-    if resp.clicked() {
-        run(app, &command_id(pid, &item.command), Value::Null);
+    resp.clicked().then(|| command_id(pid, &item.command))
+}
+
+/// A form: a label per field and its widget, the fields the plugin gave. A text or number
+/// sends when it loses focus, so the plugin is not run on every keystroke; a checkbox, a choice
+/// or a set of them at once. Every change carries the whole form, as the plugin set it.
+fn form(app: &mut RustGisApp, ui: &mut Ui, pid: &str, item: &PanelItemDecl, state: &PanelState, tr: &dyn Fn(&str) -> String, t: &Tokens) {
+    let id = item.key();
+    let Some(st) = state.items.get(id) else { return };
+    let label = label_of(item, state, tr);
+    if !label.is_empty() {
+        let r = ui.label(RichText::new(label).size(11.0).color(t.text_dim));
+        if !item.help.is_empty() {
+            r.on_hover_text(tr(&item.help));
+        }
     }
+    if st.fields.is_empty() {
+        ui.label(RichText::new("—").size(12.5).color(t.text_dim));
+        return;
+    }
+    let on = enabled(item, state);
+    let mut changes: Vec<(String, Value)> = Vec::new();
+    ui.add_enabled_ui(on, |ui| {
+        egui::Grid::new(("plugin-form", pid, id)).num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            for f in st.fields.iter() {
+                let text = RichText::new(if f.required { format!("{} *", f.label) } else { f.label.clone() }).size(11.0).color(t.text_dim);
+                // A form label wraps in a narrow column instead of widening it: a long
+                // description would otherwise push the field's value box out of the pane.
+                // The label names its widget for screen readers.
+                let named = ui
+                    .scope(|ui| {
+                        ui.set_max_width(96.0);
+                        ui.add(egui::Label::new(text).wrap())
+                    })
+                    .inner
+                    .id;
+                match f.kind.as_str() {
+                    "checkbox" => {
+                        let mut v = state.form_value(id, &f.id).and_then(Value::as_bool).unwrap_or(false);
+                        let r = ui.checkbox(&mut v, "").labelled_by(named);
+                        let r = if f.help.is_empty() { r } else { r.on_hover_text(tr(&f.help)) };
+                        if r.changed() {
+                            changes.push((f.id.clone(), json!(v)));
+                        }
+                    }
+                    "select" => {
+                        let now = state.form_value(id, &f.id).and_then(Value::as_str).unwrap_or_default();
+                        let r = egui::ComboBox::from_id_salt(("plugin-form-select", pid, id, &f.id))
+                            .selected_text(if now.is_empty() { "—" } else { now })
+                            .show_ui(ui, |ui| {
+                                for c in &f.choices {
+                                    if ui.selectable_label(now == c, c).clicked() {
+                                        changes.push((f.id.clone(), json!(c)));
+                                    }
+                                }
+                            });
+                        let r = r.response.labelled_by(named);
+                        if !f.help.is_empty() {
+                            r.on_hover_text(tr(&f.help));
+                        }
+                    }
+                    "multi" => {
+                        let mut now: Vec<String> = state
+                            .form_value(id, &f.id)
+                            .and_then(Value::as_array)
+                            .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+                            .unwrap_or_default();
+                        let shown = if now.is_empty() { "—".to_string() } else { now.join(", ") };
+                        // Stays open across ticks so several choices can be picked in one go.
+                        let r = egui::ComboBox::from_id_salt(("plugin-form-multi", pid, id, &f.id))
+                            .selected_text(shown)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show_ui(ui, |ui| {
+                                for c in &f.choices {
+                                    let mut on = now.iter().any(|x| x == c);
+                                    if ui.checkbox(&mut on, c).changed() {
+                                        if on {
+                                            now.push(c.clone());
+                                        } else {
+                                            now.retain(|x| x != c);
+                                        }
+                                        changes.push((f.id.clone(), json!(now)));
+                                    }
+                                }
+                            });
+                        let r = r.response.labelled_by(named);
+                        if !f.help.is_empty() {
+                            r.on_hover_text(tr(&f.help));
+                        }
+                    }
+                    kind => {
+                        let stored = state.form_value(id, &f.id).map_or_else(String::new, shown_value);
+                        let key = (id.to_string(), f.id.clone());
+                        let mut text = match app.ui.plugin_panel.typing.get(&key) {
+                            Some(w) if w.was == stored => w.text.clone(),
+                            Some(_) => {
+                                app.ui.plugin_panel.typing.remove(&key);
+                                stored.clone()
+                            }
+                            None => stored.clone(),
+                        };
+                        let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(160.0)).labelled_by(named);
+                        let bad = kind == "number" && typed_value(f, &text).is_none();
+                        if bad {
+                            ui.painter().rect_stroke(r.rect, CornerRadius::same(3), Stroke::new(1.0, t.red), egui::StrokeKind::Inside);
+                        }
+                        let r = if f.help.is_empty() { r } else { r.on_hover_text(tr(&f.help)) };
+                        if r.changed() {
+                            app.ui.plugin_panel.typing.insert(key.clone(), Typing { text: text.clone(), was: stored.clone() });
+                        }
+                        if r.lost_focus() {
+                            // The draft ends with the focus; the value is sent only if it changed.
+                            // Escape ends the edit without a send: the draft is discarded.
+                            app.ui.plugin_panel.typing.remove(&key);
+                            let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                            if let Some(v) = typed_value(f, &text)
+                                && !escaped
+                                && !same_value(state.form_value(id, &f.id), &v)
+                            {
+                                changes.push((f.id.clone(), v));
+                            }
+                        }
+                    }
+                }
+                ui.end_row();
+            }
+        });
+    });
+    if !changes.is_empty() {
+        let mut values = state.form(id).cloned().unwrap_or_default();
+        for (field, v) in changes {
+            values.insert(field, v);
+        }
+        send(app, pid, item, Value::Object(values));
+    }
+}
+
+/// How a form field's value shows in its text box.
+fn shown_value(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Whether `stored` already holds `v`: numbers compare by value, so `0` is `0.0`.
+fn same_value(stored: Option<&Value>, v: &Value) -> bool {
+    match (stored, v) {
+        (Some(Value::Number(a)), Value::Number(b)) => a.as_f64() == b.as_f64(),
+        (Some(a), b) => a == b,
+        (None, _) => false,
+    }
+}
+
+/// A text or number field's value from what the user typed: a whole number for an integer
+/// field, a finite number for the other, and the text itself otherwise.
+fn typed_value(f: &FormField, text: &str) -> Option<Value> {
+    if f.kind != "number" {
+        return Some(json!(text));
+    }
+    // A whole number is read as it is typed, so one past the range the backend keeps (2^53) is
+    // refused rather than rounded to it.
+    if f.integer
+        && let Ok(i) = text.trim().parse::<i64>()
+    {
+        return (i.unsigned_abs() <= 9_007_199_254_740_992).then(|| json!(i));
+    }
+    let n: f64 = text.trim().parse().ok().filter(|n: &f64| n.is_finite())?;
+    if f.integer && (n.fract() != 0.0 || n.abs() > 9_007_199_254_740_992.0) {
+        return None;
+    }
+    Some(if f.integer { json!(n as i64) } else { json!(n) })
 }
 
 /// Where a pick's value is, in words: a point's degrees, or a box's south-west and north-east
@@ -560,14 +754,6 @@ struct TreeRow<'a> {
     held: bool,
 }
 
-/// Lower case without accents, so that "arbol" finds "Árboles".
-/// Letters are decomposed and their marks dropped, whether the text came with them composed or not;
-/// lower case first, since some letters lower-case into a letter and a mark (`İ`).
-fn fold(s: &str) -> String {
-    use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
-    s.to_lowercase().nfd().filter(|c| !is_combining_mark(*c)).collect()
-}
-
 /// The ids of the branches above node `id` in `nodes`, the top one first; false when it isn't
 /// among them.
 fn ancestors<'a>(nodes: &'a [TreeNode], id: &str, out: &mut Vec<&'a str>) -> bool {
@@ -584,15 +770,10 @@ fn ancestors<'a>(nodes: &'a [TreeNode], id: &str, out: &mut Vec<&'a str>) -> boo
     false
 }
 
-/// Whether `label` holds every word of a search (folded as [`fold`] folds them).
-fn holds_words(label: &str, words: &[String]) -> bool {
-    let label = fold(label);
-    words.iter().all(|w| label.contains(w.as_str()))
-}
-
 /// The rows of `nodes`: with no `words`, each node and, when open, its children. Searching, the
-/// nodes whose label holds every word, and every branch above one held open, a branch found too;
-/// a branch found with nothing found below it shows as it is, opening as ever.
+/// nodes whose label holds every word (folded as [`TreeNode::fold`] folds them, against the label
+/// folded when the node came: nothing is folded per frame), and every branch above one held open,
+/// a branch found too; a branch found with nothing found below it shows as it is, opening as ever.
 fn tree_rows<'a>(nodes: &'a [TreeNode], depth: usize, words: &[String], open: &HashSet<String>, out: &mut Vec<TreeRow<'a>>) {
     for n in nodes {
         let at = out.len();
@@ -606,7 +787,7 @@ fn tree_rows<'a>(nodes: &'a [TreeNode], depth: usize, words: &[String], open: &H
                 }
                 continue;
             }
-            if !holds_words(&n.label, words) {
+            if !n.holds_words(words) {
                 out.pop();
                 continue;
             }
@@ -641,7 +822,7 @@ fn tree(app: &mut RustGisApp, ui: &mut Ui, pid: &str, item: &PanelItemDecl, stat
     }
     // (Only with its box: a plugin updated without one leaves no search behind that can't be cleared.)
     let mut words: Vec<String> = match app.ui.plugin_panel.search.get(id) {
-        Some(q) if item.search => fold(q).split_whitespace().map(String::from).collect(),
+        Some(q) if item.search => TreeNode::fold(q).split_whitespace().map(String::from).collect(),
         _ => Vec::new(),
     };
     words.sort_unstable();
@@ -667,6 +848,7 @@ fn tree(app: &mut RustGisApp, ui: &mut Ui, pid: &str, item: &PanelItemDecl, stat
     if rows.is_empty() {
         let empty = if words.is_empty() { "—" } else { tl!("Nothing matches.") };
         ui.label(RichText::new(empty).size(12.5).color(t.text_dim));
+        cut_note(ui, st, t);
         return;
     }
     let (mut toggle, mut pick) = (None, None);
@@ -735,8 +917,22 @@ fn tree(app: &mut RustGisApp, ui: &mut Ui, pid: &str, item: &PanelItemDecl, stat
             open.insert(n);
         }
     }
+    cut_note(ui, st, t);
     if let Some(n) = pick {
         send(app, pid, item, json!(n));
+    }
+}
+
+/// Under a tree the plugin gave more nodes than it holds, how many it shows of how many: what a
+/// search doesn't find may be among those left out.
+fn cut_note(ui: &mut Ui, st: &ItemState, t: &Tokens) {
+    if let Some(given) = st.cut {
+        let kept = MAX_TREE_NODES.to_string();
+        let note = crate::i18n::fmt(
+            "Only the first {kept} of the {given} nodes the plugin gave are shown: a tree holds at most {kept}.",
+            &[("kept", &kept), ("given", &given.to_string())],
+        );
+        ui.label(RichText::new(note).size(11.0).color(t.text_dim));
     }
 }
 
@@ -1039,13 +1235,13 @@ mod tests {
     }
 
     fn node(id: &str, label: &str, children: Vec<TreeNode>) -> TreeNode {
-        TreeNode { id: id.into(), label: label.into(), count: None, children }
+        TreeNode::new(id.into(), label.into(), None, children)
     }
 
     /// The rows shown for `query` with `open` branches: each id indented by its depth, `/` when
     /// its children show, `*` when a search holds it open.
     fn shown(nodes: &[TreeNode], query: &str, open: &[&str]) -> Vec<String> {
-        let words: Vec<String> = fold(query).split_whitespace().map(String::from).collect();
+        let words: Vec<String> = TreeNode::fold(query).split_whitespace().map(String::from).collect();
         let open: HashSet<String> = open.iter().map(|s| s.to_string()).collect();
         let mut rows = Vec::new();
         tree_rows(nodes, 0, &words, &open, &mut rows);
@@ -1092,7 +1288,7 @@ mod tests {
         let nested = vec![node("cul", "Cultura", vec![node("live", "Cultura viva", vec![]), node("c1", "Teatro", vec![])])];
         assert_eq!(shown(&nested, "cultura", &[]), ["cul/*", "  live"]);
         assert!(shown(&tree, "zzz", &["env"]).is_empty());
-        assert_eq!(fold("Ñandú Çà Åland İzmir"), "nandu ca aland izmir");
+        assert_eq!(TreeNode::fold("Ñandú Çà Åland İzmir"), "nandu ca aland izmir");
         // A node chosen elsewhere opens the branches above it.
         let mut above = Vec::new();
         assert!(ancestors(&tree, "601", &mut above));
@@ -1103,6 +1299,32 @@ mod tests {
         let decomposed = vec![node("601", "A\u{301}rboles urbanos", vec![])];
         assert_eq!(shown(&decomposed, "arbol", &[]), ["601"]);
         assert_eq!(shown(&decomposed, "árbol arbol", &[]), ["601"], "a word given twice");
+    }
+
+    #[test]
+    fn a_form_field_reads_the_number_it_shows() {
+        let field = |integer| FormField {
+            id: "n".into(),
+            kind: "number".into(),
+            label: "N".into(),
+            help: String::new(),
+            choices: Vec::new(),
+            default: None,
+            required: false,
+            integer,
+        };
+        assert_eq!(typed_value(&field(true), "3"), Some(json!(3)));
+        assert_eq!(typed_value(&field(true), " 3.0 "), Some(json!(3)), "a whole number written as a float");
+        assert_eq!(typed_value(&field(true), "3.5"), None);
+        assert_eq!(typed_value(&field(false), "3.5"), Some(json!(3.5)));
+        assert_eq!(typed_value(&field(false), "x"), None);
+        assert_eq!(typed_value(&field(false), "inf"), None);
+        assert_eq!(typed_value(&field(false), ""), None);
+        assert!(same_value(Some(&json!(0)), &json!(0.0)), "a number left as it was isn't sent");
+        assert!(!same_value(Some(&json!(0)), &json!(0.5)));
+        assert!(!same_value(None, &json!(0)));
+        assert_eq!(shown_value(&json!(2)), "2");
+        assert_eq!(shown_value(&json!("two")), "two");
     }
 
     /// A plugin's command adding data by address doesn't wait for it: the app downloads it off
