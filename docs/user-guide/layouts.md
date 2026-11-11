@@ -55,14 +55,14 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     size had more than a quarter less, to move by hand if that matters (data under every corner
     alike, such as a context layer filling the frame, isn't worth a warning); two that overlap (a
     frame too small) are said too.
-    The top visible raster on a colour scale (Stretch, a tinted hillshade) gets a colorbar
-    beneath the legend; RGB and untinted hillshade do not, so an RGB composite over a DEM leaves
-    it to the DEM. A raster drawn by classes (Colormap, Unique Values, Classify) has its classes
-    in the legend's rows instead, so a map whose only theme is a land cover gets a filled legend
-    and no colorbar; a colour table over more values than a legend lists (over 256, or not whole)
-    has neither, and a warning says so. `"colorbar": "none"` leaves it out, and the legend's
-    box is sized for the legend alone: hiding the colorbar afterwards would leave its room empty
-    in the box. The legend takes the fewest columns, up to three,
+    The top visible raster with a colour scale, not drawn by classes (Stretch, a tinted hillshade),
+    gets a colorbar beneath the legend; RGB and untinted hillshade do not, so an RGB composite over
+    a DEM leaves it to the DEM. A raster drawn by classes (Colormap, Unique Values, Classify) has
+    its classes in the legend's rows instead, so a map whose only theme is a land cover gets a
+    filled legend and no colorbar; a colour table over more values than a legend lists (over 256, or
+    not whole) has neither, and a warning says so. `"colorbar": "none"` leaves it out, and the
+    legend's box is sized for the legend alone: hiding the colorbar afterwards would leave its room
+    empty in the box. The legend takes the fewest columns, up to three,
     that fit the largest rectangle the map leaves free; when none fits, a long one is laid in more
     when that shows more of it, or as much while covering at least a quarter less of what the map
     draws (the answer's `legendColumns`); in a side column it stays in one. Polygon layers with no
@@ -253,8 +253,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
 - **Colorbar**: the colour scale of a raster layer in the frame's map, as the map draws it (its
   stretch, colour ramp and enhancement): a gradient bar for a stretch or a tinted hillshade,
   steps labelled at their breaks for Classify, and a block per value for Unique Values and colour
-  tables. Its properties pick the **Layer** (unless one is picked, the top visible raster on a
-  colour scale that isn't drawn by classes: a legend lists a land cover's classes, and a colorbar
+  tables. Its properties pick the **Layer** (unless one is picked, the top visible raster with a
+  colour scale, not drawn by classes: a legend lists a land cover's classes, and a colorbar
   added over a map with only such rasters draws an empty placeholder and says so), the
   **Title** (the units, such as `Elevation (m)`; the layer's name to start with), the
   **Orientation**, which side the **Labels** go on, how many **Ticks** a gradient labels (2 to
