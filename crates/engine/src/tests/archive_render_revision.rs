@@ -404,10 +404,13 @@ fn a_complete_render_waits_for_a_held_archive_read() {
         let (placed, answer) = mpsc::channel();
         let worker = std::thread::spawn(move || placed.send(cache::with_still(still, || render::render_placed(&mut map, &view))).unwrap());
         receive.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
-        assert!(cache::in_flight() > 0, "a held {kind:?} read is under way");
+        let counted = cache::in_flight() > 0;
         // Held far longer than six idle passes take: the render is still waiting for it.
-        assert!(answer.recv_timeout(std::time::Duration::from_millis(500)).is_err(), "the render gave up on a held {kind:?} read");
+        let waited = answer.recv_timeout(std::time::Duration::from_millis(500)).is_err();
+        // Released before asserting, so a failure doesn't leave the reader on the barrier.
         resume.wait();
+        assert!(counted, "a held {kind:?} read is under way");
+        assert!(waited, "the render gave up on a held {kind:?} read");
         let placed = answer.recv_timeout(std::time::Duration::from_secs(60)).unwrap().unwrap();
         worker.join().unwrap();
         assert_eq!(placed.credits, ["Old archive credits"], "{kind:?}: {:?}", placed.gaps);

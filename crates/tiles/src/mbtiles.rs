@@ -322,7 +322,8 @@ pub fn info_ready(archive: &str, timeout: Duration) -> Result<Option<Arc<Info>>,
             let address = archive.to_string();
             let worker_key = key.clone();
             let still = crate::cache::current_still();
-            // Under way until the read is over, as a tile is: an export waits for it.
+            // Under way until the read is over, as a tile is: an export waits for it. A thread
+            // that can't start drops it here, under `all`: the waker mustn't take this lock.
             let counted = crate::cache::Counted::start();
             let spawned = std::thread::Builder::new().name("rustgis-mbtiles-info".into()).spawn(move || {
                 crate::cache::with_optional_still(still, || {
