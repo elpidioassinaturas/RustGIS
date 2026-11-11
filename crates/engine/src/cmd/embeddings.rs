@@ -164,9 +164,13 @@ fn add(s: &mut Session, p: &Value) -> CmdResult {
     }
 }
 
-/// AlphaEarth's stretch a command names: dequantised values shown over ±stretch.
+/// AlphaEarth's stretch a command names: dequantised values shown over ±stretch. Only a stretch
+/// left out (or null) takes the default: one given that isn't a number is refused.
 fn stretch(p: &Value) -> Result<f32, String> {
-    let stretch = f(p, "stretch").map(|v| v as f32).unwrap_or(emb::AEF_DEFAULT_STRETCH);
+    let stretch = match p.get("stretch").filter(|v| !v.is_null()) {
+        None => emb::AEF_DEFAULT_STRETCH,
+        Some(_) => f(p, "stretch").map_or(f32::NAN, |v| v as f32),
+    };
     if !(stretch.is_finite() && stretch > 0.0 && stretch <= 1.0) {
         return Err("stretch is a number above 0, at most 1".into());
     }
@@ -211,15 +215,16 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
     let look = Look { cube: true, ..emb::aef_look(b, stretch(p)?) };
     let given = p.get("found").filter(|v| !v.is_null());
     // Whether the index was read whole: a tile-year with no file is then the index's gap, not
-    // the read's. And the files handed over outside the years asked for, left out.
-    let (series, complete, outside) = match given {
+    // the read's. The files handed over outside the years asked for, left out. And what the
+    // search left out, said once the cube is added (a refused one adds nothing to speak of).
+    let (series, complete, outside, notes) = match given {
         Some(v) => {
             let (series, outside) = found(v, start, end)?;
-            (series, super::b(p, "complete") != Some(false), outside)
+            (series, super::b(p, "complete") != Some(false), outside, Vec::new())
         }
         None => {
-            let (series, complete) = search_series(s, p, (start, end))?;
-            (series, complete, 0)
+            let (series, complete, notes) = search_series(s, p, (start, end))?;
+            (series, complete, 0, notes)
         }
     };
     let listed = series.len();
@@ -300,6 +305,9 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
         undo(s);
         return Err(e);
     }
+    for note in notes {
+        s.notify(note, false);
+    }
     if outside > 0 {
         s.notify(
             if outside == 1 {
@@ -341,14 +349,13 @@ fn found(v: &Value, start: i32, end: i32) -> Result<(Vec<BTreeMap<i32, String>>,
     let series = list
         .iter()
         .map(|t| {
-            let (mut out, mut seen) = (BTreeMap::new(), Vec::new());
+            let (mut out, mut seen) = (BTreeMap::new(), std::collections::BTreeSet::new());
             for (y, u) in t.get("years").and_then(Value::as_object).ok_or_else(bad)? {
                 let y: i32 = y.trim().parse().map_err(|_| bad())?;
                 // Two keys of one year (" 2017" and "2017"): one file would be lost, so refused.
-                if seen.contains(&y) {
+                if !seen.insert(y) {
                     return Err(format!("found: a tile names the year {y} twice"));
                 }
-                seen.push(y);
                 let u = u.as_str().map(str::trim).filter(|u| u.starts_with("https://") && u.len() <= 4000).ok_or_else(bad)?;
                 if (start..=end).contains(&y) {
                     out.insert(y, u.to_string());
@@ -363,9 +370,9 @@ fn found(v: &Value, start: i32, end: i32) -> Result<(Vec<BTreeMap<i32, String>>,
 }
 
 /// AlphaEarth's tiles over the years where the command says, from one read of the index, waiting
-/// for it (the command line), with what the read left out said; and whether it read the index
-/// whole for the area.
-fn search_series(s: &mut Session, p: &Value, years: (i32, i32)) -> Result<(Vec<BTreeMap<i32, String>>, bool), String> {
+/// for it (the command line); whether it read the index whole for the area; and what the read
+/// left out, to be said.
+fn search_series(s: &mut Session, p: &Value, years: (i32, i32)) -> Result<(Vec<BTreeMap<i32, String>>, bool, Vec<String>), String> {
     let area = bbox(s, p)?;
     #[cfg(target_arch = "wasm32")]
     {
@@ -381,27 +388,26 @@ fn search_series(s: &mut Session, p: &Value, years: (i32, i32)) -> Result<(Vec<B
             );
         }
         let f = emb::search_aef_series_blocking(area, years)?;
-        series_notices(s, &f);
-        Ok((f.series.into_iter().map(|x| x.years).collect(), f.complete))
+        let notes = series_notes(&f);
+        Ok((f.series.into_iter().map(|x| x.years).collect(), f.complete, notes))
     }
 }
 
 /// What a search over the years left out: rows past one read, tiles past a search's list, and a
 /// tile's second file for a year.
 #[cfg(not(target_arch = "wasm32"))]
-fn series_notices(s: &mut Session, f: &emb::SeriesFound) {
+fn series_notes(f: &emb::SeriesFound) -> Vec<String> {
+    let mut notes = Vec::new();
     if !f.complete {
-        s.notify("AlphaEarth: the area holds more tiles than one search reads; zoom in to take them all", false);
+        notes.push("AlphaEarth: the area holds more tiles than one search reads; zoom in to take them all".to_string());
     }
     if f.dropped > 0 {
-        s.notify(
-            format!("AlphaEarth: {} tiles past the {} a search lists were left out; zoom in for them", f.dropped, emb::MAX_TILES),
-            false,
-        );
+        notes.push(format!("AlphaEarth: {} tiles past the {} a search lists were left out; zoom in for them", f.dropped, emb::MAX_TILES));
     }
     if f.duplicates > 0 {
-        s.notify(format!("AlphaEarth: {} tile-years had a second file in the index; the first was taken", f.duplicates), false);
+        notes.push(format!("AlphaEarth: {} tile-years had a second file in the index; the first was taken", f.duplicates));
     }
+    notes
 }
 
 /// Bytes the app read and handed over, by their id (`ran`).
@@ -562,6 +568,9 @@ mod tests {
             json!({"dataset": "alphaearth", "end": 2024.5, "found": tile}),
             json!({"dataset": "alphaearth", "start": 2024, "end": 2020, "found": tile}),
             json!({"dataset": "alphaearth", "stretch": 2, "found": tile}),
+            // A stretch that isn't a number, not taken as the default.
+            json!({"dataset": "alphaearth", "stretch": "big", "found": tile}),
+            json!({"dataset": "alphaearth", "stretch": true, "found": tile}),
             json!({"dataset": "alphaearth", "bands": [1, 2], "found": tile}),
             json!({"dataset": "alphaearth", "found": "tiles"}),
             json!({"dataset": "alphaearth", "found": [{"years": {"2017": "file:///etc/passwd"}}]}),
