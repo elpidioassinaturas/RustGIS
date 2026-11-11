@@ -1612,7 +1612,7 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                                 .unwrap_or_default(),
                             _ => Vec::new(),
                         };
-                        let top = tl!("Top visible raster");
+                        let top = tl!("Top raster with a colour scale");
                         egui::ComboBox::from_id_salt(("colorbar_layer", id))
                             .selected_text(layer.as_deref().unwrap_or(top))
                             .show_ui(ui, |ui| {

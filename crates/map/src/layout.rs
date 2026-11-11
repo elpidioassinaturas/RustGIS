@@ -945,7 +945,8 @@ pub enum ElementKind {
     /// for classes, a block per value for unique values and colour tables (#326).
     Colorbar {
         frame: u32,
-        /// The raster layer (by name); `None` is the top visible raster of the frame's map.
+        /// The raster layer (by name); `None` is the frame map's top shown raster with a colour scale
+        /// that isn't drawn by classes ([`colorbar_layer`]).
         #[serde(default)]
         layer: Option<String>,
         /// Drawn beside the bar, e.g. the units: `Elevation (m)`.
