@@ -67,15 +67,39 @@ pub fn archive_revisions(layout: &Layout, maps: &[Map]) -> crate::ArchiveRevisio
 /// Renders a layout at `dpi` (dots per inch). `maps` are the project's maps, found by name.
 /// Refuses a linked archive changed while composing the page, including its different map frames.
 pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Result<Pixmap, String> {
-    render_pending(layout, maps, dpi, info).map(|(pm, _)| pm)
+    render_page(layout, maps, dpi, info, true).map(|(pm, _)| pm)
+}
+
+thread_local! {
+    /// The last [`render_pending`] on this thread drew a frame without cast shadows still to come.
+    static PAGE_SHADOWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the last [`render_pending`] on this thread drew a frame without cast shadows still
+/// being worked out: the page is to be drawn again as they land (natively too, where its tiles
+/// were waited for).
+pub fn shadows_to_come() -> bool {
+    PAGE_SHADOWS.with(|c| c.replace(false))
 }
 
 /// [`render`], and whether a map frame on the page drew while some of its tiles, or a read of its
 /// streamed layers or rasters, were still on their way: in the browser, which doesn't wait for
 /// them, the page is drawn again once they land.
+/// Drawn for the Layout view on the interface's thread, its frames don't wait for cast shadows
+/// still being worked out: [`shadows_to_come`] says so, and the page is drawn again as they land.
 pub fn render_pending(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Result<(Pixmap, bool), String> {
+    render_page(layout, maps, dpi, info, false)
+}
+
+/// [`render_pending`], its frames waiting for cast shadows when `wait_shadows` (an export).
+fn render_page(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo, wait_shadows: bool) -> Result<(Pixmap, bool), String> {
     let revisions = archive_revisions(layout, maps);
-    let result = render_pending_inner(layout, maps, dpi, info);
+    PAGE_SHADOWS.with(|c| c.set(false));
+    let result = if wait_shadows {
+        render_pending_inner(layout, maps, dpi, info)
+    } else {
+        crate::without_shadow_wait(|| render_pending_inner(layout, maps, dpi, info))
+    };
     revisions.finish_revision(archive_revisions(layout, maps), result, "the page is too large to draw")
 }
 
@@ -480,8 +504,13 @@ pub fn frame_map(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp
 /// still on their way (in the browser, which doesn't wait for them).
 fn frame_canvas(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp: f64, record: bool, pending: &mut bool) -> Option<Canvas> {
     let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
+    crate::shadows_to_come();
     let img = if record { crate::render_complete_recorded(map, &view) } else { crate::render_complete(map, &view) }?;
-    *pending |= img.tiles_pending || img.data_pending;
+    let shadows = crate::shadows_to_come();
+    if shadows {
+        PAGE_SHADOWS.with(|c| c.set(true));
+    }
+    *pending |= img.tiles_pending || img.data_pending || shadows;
     Some(finish_frame(img, ppp))
 }
 

@@ -33,6 +33,8 @@ pub enum Unlit {
     Stopped,
     /// The grid couldn't be held.
     NoMemory,
+    /// A thread working it out failed (panicked).
+    Failed,
 }
 
 /// The light left by cast shadows on each cell of `band` (`0` in shadow to `255` lit), row by row
@@ -94,7 +96,7 @@ pub fn light(
                 }
             }
             let mut results: Vec<Result<(), Unlit>> = refused.into_iter().filter_map(take).map(run).collect();
-            results.extend(handles.into_iter().map(|h| h.join().unwrap_or(Err(Unlit::Stopped))));
+            results.extend(handles.into_iter().map(|h| h.join().unwrap_or(Err(Unlit::Failed))));
             results
         });
         results.into_iter().collect::<Result<(), Unlit>>()?;

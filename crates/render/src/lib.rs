@@ -3999,13 +3999,17 @@ fn render_frame(
                 };
                 let stats = rl.masked_stats();
                 let stats = stats.as_ref().map(|s| s.as_slice());
-                // Its cast shadows: an export waits for them; the map draws without them meanwhile,
-                // and again once they land.
-                let landed = || rustgis_tiles::cache::notify_at(web_time::Instant::now());
-                let light = match rl.cast_shadows(full_res_rasters, landed) {
+                // Its cast shadows, never waited for here (an export waits before it draws, see
+                // `complete`): drawn without them meanwhile, and again once they land. A map's frame
+                // says so as tiles to come; a page's, as shadows to come.
+                let light = match rl.cast_shadows(false, layer.id, shadows_landed) {
                     rustgis_map::raster::CastShadows::Ready(grid) => Some(grid),
                     rustgis_map::raster::CastShadows::Pending => {
-                        tile_out.pending = true;
+                        if full_res_rasters {
+                            SHADOWS_TO_COME.with(|c| c.set(true));
+                        } else {
+                            tile_out.pending = true;
+                        }
                         None
                     }
                     rustgis_map::raster::CastShadows::Unavailable(why) => {
@@ -6303,6 +6307,44 @@ impl LabelGrid {
     }
 }
 
+thread_local! {
+    /// Set while the Layout view's page is drawn on the interface's thread: its frames don't wait
+    /// for cast shadows (see [`without_shadow_wait`]).
+    static NO_SHADOW_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A frame drawn at full resolution had cast shadows still to come (see [`shadows_to_come`]).
+    static SHADOWS_TO_COME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Called when a layer's cast shadows land: the map, or the page, is drawn again.
+fn shadows_landed() {
+    rustgis_tiles::cache::notify_at(web_time::Instant::now());
+}
+
+/// Runs `f` (drawing the Layout view's page, on the interface's thread) with its frames drawn
+/// without the cast shadows still being worked out, rather than waiting for them: they say so
+/// ([`shadows_to_come`]), and the page is drawn again as they land.
+pub(crate) fn without_shadow_wait<T>(f: impl FnOnce() -> T) -> T {
+    let before = NO_SHADOW_WAIT.with(|c| c.replace(true));
+    let out = f();
+    NO_SHADOW_WAIT.with(|c| c.set(before));
+    out
+}
+
+/// Whether a frame drawn at full resolution since the last call had cast shadows still to come.
+pub(crate) fn shadows_to_come() -> bool {
+    SHADOWS_TO_COME.with(|c| c.replace(false))
+}
+
+/// Waits for the cast shadows of the map's visible Shaded Relief layers, as an export does (it
+/// runs off the interface's thread); the wait gives up when the run is cancelled.
+fn wait_for_cast_shadows(map: &Map) {
+    for layer in map.layers.iter().filter(|l| l.visible) {
+        if let Some(rl) = &layer.raster {
+            rl.cast_shadows(true, layer.id, shadows_landed);
+        }
+    }
+}
+
 /// Render passes [`render_complete`] makes at most with nothing come since the last (the wait ran
 /// out, or nothing was under way): passes that draw what came are bound by its minute alone.
 const IDLE_PASSES: usize = 6;
@@ -6323,6 +6365,11 @@ pub(crate) fn render_complete_recorded(map: &mut Map, view: &View) -> Option<Ren
 
 /// [`render_complete`]'s passes, each recorded when `record`.
 fn complete(map: &mut Map, view: &View, record: bool) -> Option<Rendered> {
+    // Cast shadows still being worked out are waited for first, unless this draws the Layout
+    // view's page on the interface's thread (see `without_shadow_wait`).
+    if !NO_SHADOW_WAIT.with(std::cell::Cell::get) {
+        wait_for_cast_shadows(map);
+    }
     // What had come when it drew: what lands meanwhile is news to the wait.
     let mut drawn_at = rustgis_tiles::cache::generation();
     let mut r = render_cpu(map, view, true, record)?;
@@ -8454,6 +8501,27 @@ mod tests {
         d.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![]);
         m.add_dataset(d);
         m
+    }
+
+    /// An export waits for a layer's cast shadows, worked out off the frame, and draws them.
+    #[test]
+    fn an_export_waits_for_cast_shadows() {
+        let mut m = hill_map();
+        let id = m.layers.iter().find(|l| l.raster.is_some()).map(|l| l.id).unwrap();
+        let lit = |m: &mut Map, shadow: f64| {
+            let l = m.layer_mut(id).unwrap();
+            l.visible = true;
+            l.raster.as_mut().unwrap().style.renderer =
+                rustgis_map::RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 315.0, altitude: 5.0, z_factor: 1.0, shadow };
+        };
+        let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 1200.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
+        lit(&mut m, 0.0);
+        let plain = render_complete(&mut m, &view).unwrap();
+        lit(&mut m, 1.0);
+        let shaded = render_complete(&mut m, &view).unwrap();
+        assert!(!shaded.tiles_pending);
+        assert_ne!(plain.pixmap.data(), shaded.pixmap.data(), "drawn with its shadows");
     }
 
     #[test]

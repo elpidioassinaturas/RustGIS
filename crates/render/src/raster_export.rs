@@ -61,7 +61,7 @@ pub fn export(layer: &RasterLayer, min_zoom: u8, max_zoom: u8, opacity: f32) -> 
     let stats = layer.masked_stats();
     // Its cast shadows, waited for; ones that can't be drawn leave the archive unwritten, as a
     // part drawn from less than it needs does.
-    let light = match layer.cast_shadows(true, || {}) {
+    let light = match layer.cast_shadows(true, u32::MAX, || {}) {
         rustgis_map::raster::CastShadows::Ready(grid) => Some(grid),
         rustgis_map::raster::CastShadows::Unavailable(why) => return Err(format!("{}: {why}, so the archive isn't written", r.name)),
         rustgis_map::raster::CastShadows::Pending | rustgis_map::raster::CastShadows::None => None,
@@ -182,6 +182,12 @@ mod tests {
         let layer = RasterLayer::in_place(overview, "http://127.0.0.1:9/gone.tif");
         let e = export(&layer, 2, 2, 1.0).err().unwrap_or_else(|| panic!("an archive of the overview"));
         assert!(e.contains("the archive isn't written"), "{e}");
+        // With cast shadows, which only the whole image could have: refused for them, and said.
+        let mut layer = layer;
+        layer.style.renderer =
+            rustgis_map::RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 315.0, altitude: 30.0, z_factor: 1.0, shadow: 1.0 };
+        let e = export(&layer, 2, 2, 1.0).err().unwrap_or_else(|| panic!("an archive without its shadows"));
+        assert!(e.contains("cast shadows") && e.contains("read in place"), "{e}");
     }
 
     #[test]

@@ -879,6 +879,9 @@ mod tests {
             let (pixel, lit, unlit, half) = drawn(shadow, light);
             assert_eq!(pixel, [lit, unlit, half][which], "shadow {shadow}, grid {}", light.is_some());
         }
+        // In full shadow the relief keeps its ambient light (a quarter of its colour), not black.
+        let (pixel, _, _, _) = drawn(1.0, none);
+        assert_eq!(pixel, [64, 64, 64, 255]);
         // A grid of another size isn't read.
         let (pixel, lit, _, _) = drawn(1.0, Some(&dark[..10]));
         assert_eq!(pixel, lit);

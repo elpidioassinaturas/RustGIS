@@ -728,11 +728,13 @@ impl RasterLayer {
 
     /// The light its cast shadows leave on each cell (see [`crate::shadow::light`]), when it is
     /// drawn as Shaded Relief with shadows. Worked out once per pixels, band, sun, Z factor and
-    /// mask and kept; a change to any of them stops the work for the old one. Natively it is
-    /// worked out on a thread of its own, then `landed` is called (the map asks to be drawn
-    /// again); with `wait`, as an export does, this waits for it. The browser, which has one
-    /// thread, works it out here, for at most [`crate::shadow::MAX_BROWSER_CELLS`] cells.
-    pub fn cast_shadows(&self, wait: bool, landed: impl FnOnce() + Send + 'static) -> CastShadows {
+    /// mask and kept (a few, for copies of the layer lit otherwise: another map, an undo).
+    /// `owner` is who draws it (the layer's id): a new sun from the same owner stops the work
+    /// for its last one, unless something waits for it. Natively it is worked out on a thread of
+    /// its own, then `landed` is called (the map asks to be drawn again); with `wait`, as an
+    /// export does, this waits for it. The browser, which has one thread, works it out here, for
+    /// at most [`crate::shadow::MAX_BROWSER_CELLS`] cells.
+    pub fn cast_shadows(&self, wait: bool, owner: u32, landed: impl FnOnce() + Send + 'static) -> CastShadows {
         let RasterRenderer::ShadedRelief { band, azimuth, altitude, z_factor, shadow, .. } = self.style.renderer else {
             return CastShadows::None;
         };
@@ -750,6 +752,7 @@ impl RasterLayer {
             ));
         }
         let key = LightKey { band, azimuth, altitude, z_factor, mask: self.style.mask.clone() };
+        let mut start = None;
         let work = {
             let Ok(mut jobs) = self.cast.0.lock() else { return CastShadows::None };
             // Grids of pixels no longer held go (their work stops as it is dropped).
@@ -757,24 +760,33 @@ impl RasterLayer {
             match jobs.iter().position(|j| j.key == key && Weak::ptr_eq(&j.pixels, &Arc::downgrade(r))) {
                 Some(i) => {
                     // The latest used last, so the oldest goes first.
-                    let job = jobs.remove(i);
+                    let mut job = jobs.remove(i);
+                    job.owner = owner;
                     let work = job.work.clone();
                     jobs.push(job);
                     work
                 }
                 None => {
-                    // A few kept, for copies of the layer lit otherwise (another map, an undo):
-                    // past them, the oldest goes and its work stops.
-                    if jobs.len() >= KEPT_LIGHTS {
-                        jobs.remove(0);
+                    // The same owner's work for another sun, not done and not waited for, is
+                    // superseded: it stops (as it is dropped). Grids done are kept, for going back.
+                    jobs.retain(|j| j.owner != owner || j.work.is_done() || j.work.waited());
+                    // Past the few kept, the oldest nothing waits for goes.
+                    if jobs.len() >= KEPT_LIGHTS
+                        && let Some(i) = jobs.iter().position(|j| !j.work.waited())
+                    {
+                        jobs.remove(i);
                     }
                     let work = Arc::new(LightWork::default());
-                    jobs.push(LightJob { key: key.clone(), pixels: Arc::downgrade(r), work: work.clone() });
-                    start_light(r.clone(), key, work.clone(), landed);
+                    jobs.push(LightJob { key: key.clone(), pixels: Arc::downgrade(r), owner, work: work.clone() });
+                    start = Some((r.clone(), key));
                     work
                 }
             }
         };
+        // Started without holding the lock: a thread the system refuses runs it here.
+        if let Some((r, key)) = start {
+            start_light(r, key, work.clone(), landed);
+        }
         work.result(wait)
     }
 }
@@ -809,9 +821,19 @@ struct LightWork {
     /// The grid, or why there is none, once it is done.
     done: Mutex<Option<Result<Arc<Vec<u8>>, String>>>,
     landed: std::sync::Condvar,
+    /// How many wait for it (exports): it is neither superseded nor let go meanwhile.
+    waiting: std::sync::atomic::AtomicUsize,
 }
 
 impl LightWork {
+    fn is_done(&self) -> bool {
+        self.done.lock().is_ok_and(|d| d.is_some())
+    }
+
+    fn waited(&self) -> bool {
+        self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+
     fn finish(&self, out: Result<Arc<Vec<u8>>, String>) {
         if let Ok(mut done) = self.done.lock() {
             *done = Some(out);
@@ -822,6 +844,7 @@ impl LightWork {
     /// What it has: with `wait`, once it is done, unless the run waiting is cancelled (see
     /// [`rustgis_data::progress`]).
     fn result(&self, wait: bool) -> CastShadows {
+        let _waiting = wait.then(|| Waiting::on(&self.waiting));
         let Ok(mut done) = self.done.lock() else { return CastShadows::None };
         while wait && done.is_none() && rustgis_data::progress::check().is_ok() {
             done = match self.landed.wait_timeout(done, std::time::Duration::from_millis(100)) {
@@ -837,11 +860,29 @@ impl LightWork {
     }
 }
 
+/// Counts one waiting for a light grid while it lives.
+struct Waiting<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> Waiting<'a> {
+    fn on(count: &'a std::sync::atomic::AtomicUsize) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Waiting(count)
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// The light grid kept for a layer, and the work for it.
 struct LightJob {
     key: LightKey,
     /// Held weakly, so their address isn't reused.
     pixels: Weak<Raster>,
+    /// Who drew it last (see [`RasterLayer::cast_shadows`]).
+    owner: u32,
     work: Arc<LightWork>,
 }
 
@@ -871,7 +912,10 @@ fn start_light(r: Arc<Raster>, key: LightKey, work: Arc<LightWork>, landed: impl
             // Stopped, it was replaced: nothing is drawn again for it.
             Ok(Err(crate::shadow::Unlit::Stopped)) => work.finish(Err("its cast shadows were stopped".into())),
             Ok(out) => {
-                work.finish(out.map(Arc::new).map_err(|_| "its cast shadows aren't drawn: there isn't the memory for them".into()));
+                work.finish(out.map(Arc::new).map_err(|e| match e {
+                    crate::shadow::Unlit::Failed => "its cast shadows aren't drawn: working them out failed".into(),
+                    _ => "its cast shadows aren't drawn: there isn't the memory for them".into(),
+                }));
                 landed();
             }
             // Said, rather than leaving an export waiting.
@@ -2246,7 +2290,7 @@ mod tests {
     /// for by an export, and worked out again for another sun.
     #[test]
     fn cast_shadows_are_worked_out_once_per_sun() {
-        assert_eq!(tower(0.0).cast_shadows(true, || {}), CastShadows::None);
+        assert_eq!(tower(0.0).cast_shadows(true, 1, || {}), CastShadows::None);
         let mut rl = tower(0.8);
         let landed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = |n: &Arc<std::sync::atomic::AtomicUsize>| {
@@ -2255,23 +2299,23 @@ mod tests {
                 n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         };
-        let CastShadows::Ready(grid) = rl.cast_shadows(true, count(&landed)) else { panic!("waited for") };
+        let CastShadows::Ready(grid) = rl.cast_shadows(true, 1, count(&landed)) else { panic!("waited for") };
         // West of the tower, in its shadow; east of it, lit.
         assert_eq!(grid[10 * 20 + 9], 0);
         assert_eq!(grid[10 * 20 + 11], 255);
         // Kept: the same grid, nothing worked out again.
-        assert!(matches!(rl.cast_shadows(false, count(&landed)), CastShadows::Ready(g) if Arc::ptr_eq(&g, &grid)));
+        assert!(matches!(rl.cast_shadows(false, 1, count(&landed)), CastShadows::Ready(g) if Arc::ptr_eq(&g, &grid)));
         assert_eq!(landed.load(std::sync::atomic::Ordering::SeqCst), 1);
         // The shadow's strength is drawn, not worked out: the grid is kept for another.
         if let RasterRenderer::ShadedRelief { shadow, .. } = &mut rl.style.renderer {
             *shadow = 0.3;
         }
-        assert!(matches!(rl.cast_shadows(false, || {}), CastShadows::Ready(g) if Arc::ptr_eq(&g, &grid)));
+        assert!(matches!(rl.cast_shadows(false, 1, || {}), CastShadows::Ready(g) if Arc::ptr_eq(&g, &grid)));
         // Another sun: worked out again, lit from the west now.
         if let RasterRenderer::ShadedRelief { azimuth, .. } = &mut rl.style.renderer {
             *azimuth = 270.0;
         }
-        let CastShadows::Ready(west) = rl.cast_shadows(true, || {}) else { panic!("waited for") };
+        let CastShadows::Ready(west) = rl.cast_shadows(true, 1, || {}) else { panic!("waited for") };
         assert_eq!((west[10 * 20 + 9], west[10 * 20 + 11]), (255, 0));
         // A copy lit from elsewhere (another map) keeps its own grid beside it: neither stops the
         // other's.
@@ -2279,8 +2323,44 @@ mod tests {
         if let RasterRenderer::ShadedRelief { azimuth, .. } = &mut copy.style.renderer {
             *azimuth = 0.0;
         }
-        assert!(matches!(copy.cast_shadows(true, || {}), CastShadows::Ready(_)));
-        assert!(matches!(rl.cast_shadows(false, || {}), CastShadows::Ready(g) if Arc::ptr_eq(&g, &west)));
+        assert!(matches!(copy.cast_shadows(true, 2, || {}), CastShadows::Ready(_)));
+        assert!(matches!(rl.cast_shadows(false, 1, || {}), CastShadows::Ready(g) if Arc::ptr_eq(&g, &west)));
+    }
+
+    /// A new sun from the same owner stops the work for its last one, unless it is done; another
+    /// owner's (a copy on another map) goes on.
+    #[test]
+    fn a_new_sun_supersedes_the_owners_last_work() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 0.0, pixel_width: 30.0, pixel_height: -30.0 };
+        let data: Vec<f32> = (0..1200 * 1200).map(|i| (((i % 1200) as f32 / 7.0).sin() * 300.0) + (i / 1200) as f32).collect();
+        let r = Raster::new("hills", 1200, 1200, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut rl = RasterLayer::from_path(r, "hills.tif");
+        let lit = |rl: &mut RasterLayer, az: f64| {
+            rl.style.renderer =
+                RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: az, altitude: 10.0, z_factor: 1.0, shadow: 1.0 };
+        };
+        let other = |az: f64, rl: &RasterLayer| {
+            let mut c = rl.clone();
+            lit(&mut c, az);
+            c
+        };
+        let work_of = |rl: &RasterLayer, az: f64| rl.cast.0.lock().unwrap().iter().find(|j| j.key.azimuth == az).map(|j| j.work.clone());
+        lit(&mut rl, 10.0);
+        rl.cast_shadows(false, 1, || {});
+        let copy = other(20.0, &rl);
+        copy.cast_shadows(false, 2, || {});
+        let first = work_of(&rl, 10.0).unwrap();
+        lit(&mut rl, 30.0);
+        rl.cast_shadows(false, 1, || {});
+        // Owner 1's last sun is stopped and let go, unless it was done; owner 2's goes on.
+        let stopped = first.stop.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(first.is_done() || (stopped && work_of(&rl, 10.0).is_none()));
+        let second = work_of(&rl, 20.0).unwrap();
+        assert!(!second.stop.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(work_of(&rl, 30.0).is_some());
+        assert!(matches!(copy.cast_shadows(true, 2, || {}), CastShadows::Ready(_)));
+        // Waited for, the latest is drawn.
+        assert!(matches!(rl.cast_shadows(true, 1, || {}), CastShadows::Ready(_)));
     }
 
     /// Read in place with only its overview held, it is drawn without cast shadows, and says so;
@@ -2289,11 +2369,11 @@ mod tests {
     fn cast_shadows_of_a_raster_read_in_place_need_the_whole_image() {
         let mut rl = tower(1.0);
         rl.in_place = true;
-        assert!(matches!(rl.cast_shadows(true, || {}), CastShadows::Ready(_)));
+        assert!(matches!(rl.cast_shadows(true, 1, || {}), CastShadows::Ready(_)));
         let mut r = (**rl.data.as_ref().unwrap()).clone();
         r.overview = Some((80, 80));
         rl.data = Some(Arc::new(r));
-        let CastShadows::Unavailable(why) = rl.cast_shadows(true, || {}) else { panic!("said") };
+        let CastShadows::Unavailable(why) = rl.cast_shadows(true, 1, || {}) else { panic!("said") };
         assert!(why.contains("read in place"), "{why}");
     }
 }

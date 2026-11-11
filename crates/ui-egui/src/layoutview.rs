@@ -663,9 +663,10 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
                 None => app.layout.texture = Some(ui.ctx().load_texture("layout", img, egui::TextureOptions::LINEAR)),
             }
             app.layout.key = Some(key);
-            // Natively the page waited for them already: drawn again, it would wait again.
+            // Natively the page waited for them already: drawn again, it would wait again. Cast
+            // shadows still being worked out weren't waited for: drawn again as they land.
             let web = cfg!(target_arch = "wasm32");
-            let frames = web && frames_pending;
+            let frames = (web && frames_pending) || rustgis_engine::render::layout::shadows_to_come();
             // Waiting for the frames draws it again anyway: the legends are asked about once
             // they are whole.
             let legends = web && !frames && rustgis_engine::render::layout::legends_pending(&layout, &app.session.project.maps);
