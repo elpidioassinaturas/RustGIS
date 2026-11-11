@@ -7821,17 +7821,41 @@ fn a_publication_keys_the_raster_under_an_rgb_and_says_an_unlisted_colour_table(
     let z: Vec<f32> = (0..400).map(|i| (i % 300) as f32).collect();
     let many = Raster::new("many", 20, 20, vec![z], gt, Crs::LonLat, None, ColorHint::Palette(palette), "UInt16").unwrap();
     assert!(many.bands[0].stats.categories.is_none());
-    let mut rl = rustgis_map::RasterLayer::from_path(many, "many.tif");
-    rl.style.renderer = rustgis_map::RasterRenderer::Colormap;
-    crate::cmd::raster::add_raster(&mut s, "Classes", rl).unwrap();
+    for name in ["Classes", "Mais classes"] {
+        let mut rl = rustgis_map::RasterLayer::from_path(many.clone(), "many.tif");
+        rl.style.renderer = rustgis_map::RasterRenderer::Colormap;
+        crate::cmd::raster::add_raster(&mut s, name, rl).unwrap();
+    }
+    let said = "2 raster(s) drawn by a colour table over more values than a legend can list (over 256, or not whole numbers) have no key in the legend: Mais classes, Classes";
     let r = s.run("layout.publication", &p).unwrap();
     assert_eq!(bar_of(&s), None, "{r}");
-    assert!(r["warnings"].to_string().contains("'Classes' draws its colour table over more values than a legend can list"), "{r}");
+    let warnings: Vec<String> = serde_json::from_value(r["warnings"].clone()).unwrap();
+    assert_eq!(
+        warnings.iter().filter(|w| w.contains("over more values than a legend")).collect::<Vec<_>>(),
+        [said],
+        "one, with the count: {r}"
+    );
+    // A legend added says it too, once; told to leave one out, it names the other.
+    let mark = s.notice_mark();
+    let id = s.run("layout.addElement", &json!({"kind": "legend"})).unwrap()["element"].as_u64().unwrap();
+    let notices = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("over more values than a legend")).map(|n| n.text.clone()).collect()
+    };
+    assert_eq!(notices(&s, mark), [said]);
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "exclude": ["classes"]})).unwrap();
+    assert_eq!(notices(&s, mark), [said.replace("2 raster(s)", "1 raster(s)").replace(": Mais classes, Classes", ": Mais classes")]);
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "exclude": ["Classes", "Mais classes"]})).unwrap();
+    assert!(notices(&s, mark).is_empty(), "both left out: nothing to say");
     // Its classes known: nothing said.
     let mut s = Session::new(Project::default());
     add_land_cover(&mut s, "Uso do solo", &[(3, "Floresta"), (15, "Pastagem")]);
     let r = s.run("layout.publication", &p).unwrap();
     assert!(!r["warnings"].to_string().contains("more values than a legend"), "{r}");
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "legend"})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("more values than a legend")));
 }
 
 /// A land cover with more classes than its legend's box holds: the publication says it leaves the

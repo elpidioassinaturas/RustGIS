@@ -1845,14 +1845,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         .map(|(l, _)| l.name.clone());
     // A colour table whose values can't be known (too many to list) gives the legend no class, and
     // the sheet no key for it: said rather than left blank.
-    for l in s.map().layers.iter().filter(|l| s.map().shows(l)) {
-        if l.raster.as_ref().is_some_and(rustgis_map::RasterLayer::classes_unknown) {
-            warnings.push(format!(
-                "'{}' draws its colour table over more values than a legend can list (over 256, or not whole numbers): the legend has no key for it",
-                l.name
-            ));
-        }
-    }
+    warnings.extend(unlisted_colour_tables(s.map(), &[]));
     let (bar_w, bar_h) = (if sheet { 50.0 * k } else { 40.0 }, COLORBAR_MM);
     let bar_part = if bar.is_some() { bar_h + if ch > 0.0 { 2.0 } else { 0.0 } } else { 0.0 };
     let (content_w, content_h) = (if bar.is_some() { cw.max(bar_w) } else { cw }, ch + bar_part);
@@ -2685,6 +2678,38 @@ fn legend_fit_warnings(columns: usize, (w, h): (f64, f64), (room_w, room_h): (f6
     said
 }
 
+/// The one warning for the rasters `map` shows by a colour table over more values than a legend
+/// can list (over 256, or not whole numbers), which give it no class and no key (#1679): how many
+/// and their names, those `exclude` leaves out aside. `None` when there are none.
+fn unlisted_colour_tables(map: &Map, exclude: &[String]) -> Option<String> {
+    let names: Vec<&str> = map
+        .layers
+        .iter()
+        .filter(|l| map.shows(l) && !exclude.iter().any(|n| n.eq_ignore_ascii_case(&l.name)))
+        .filter(|l| l.raster.as_ref().is_some_and(rustgis_map::RasterLayer::classes_unknown))
+        .map(|l| l.name.as_str())
+        .collect();
+    (!names.is_empty()).then(|| {
+        format!(
+            "{} raster(s) drawn by a colour table over more values than a legend can list (over 256, or not whole numbers) have no key in the legend: {}",
+            names.len(),
+            names.join(", ")
+        )
+    })
+}
+
+/// Says, once, which rasters the legend `id` of the layout `li` can't key ([`unlisted_colour_tables`]),
+/// as `layout.publication` does for its own: for a legend added, or told what it leaves out.
+fn say_unlisted_colour_tables(s: &mut Session, li: usize, id: u32) {
+    let Some(l) = s.project.layouts.get(li) else { return };
+    let Some(ElementKind::Legend { frame, exclude, .. }) = l.element(id).map(|e| &e.kind) else { return };
+    let Some(ElementKind::MapFrame { map, .. }) = l.element(*frame).map(|f| &f.kind) else { return };
+    let said = s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map)).and_then(|m| unlisted_colour_tables(m, exclude));
+    if let Some(said) = said {
+        s.warn(said);
+    }
+}
+
 /// Says what a legend loses in its box, as `layout.publication` does for its own, or that it can't
 /// tell.
 fn say_legend_fit(s: &mut Session, li: usize, id: u32) {
@@ -2978,6 +3003,9 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
     let labelled = kind == "legend" && p.get("labels").is_some_and(|v| !v.is_null());
     if p.get("columns").is_some_and(|v| !v.is_null()) || labelled {
         say_legend_fit(s, i, id);
+    }
+    if kind == "legend" {
+        say_unlisted_colour_tables(s, i, id);
     }
     let mut out = json!({"element": id});
     if let Some(w) = warning {
@@ -3806,8 +3834,13 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         || p.get("labels").is_some_and(|v| !v.is_null());
     // Labels given are told in one column too: a label is text chosen for the box.
     let labelled = matches!(&e.kind, ElementKind::Legend { .. }) && p.get("labels").is_some_and(|v| !v.is_null());
+    // Told what it leaves out, it says again which rasters it can't key.
+    let excluding = matches!(&e.kind, ElementKind::Legend { .. }) && p.get("exclude").is_some_and(|v| !v.is_null());
     if new_columns.is_some() || (in_columns && refitted) || labelled {
         say_legend_fit(s, li, id);
+    }
+    if excluding {
+        say_unlisted_colour_tables(s, li, id);
     }
     if let Some(text) = p.get("grid").and_then(|grid| grid.get("crs")).and_then(Value::as_str) {
         super::say_crs_note(s, text);
