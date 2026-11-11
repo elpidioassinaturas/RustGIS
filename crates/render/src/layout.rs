@@ -360,9 +360,8 @@ fn draw_page(
                 let style = TextStyle { face, align: *align, spacing: *letter_spacing as f32 };
                 if *rotation == 0.0 {
                     text_block(&mut pm, r, &s, *size as f32, *color, style, ppp);
-                } else {
-                    let room = text_room(r, &s, *size as f32, style, ppp);
-                    draw_turned_box(&mut pm, r, *rotation as f32, room, |c, r, k| {
+                } else if let Some(area) = text_area(r, &s, *size as f32, style, ppp) {
+                    draw_turned_box(&mut pm, r, *rotation as f32, area, |c, r, k| {
                         text_block(c, r, &s, *size as f32, *color, style, ppp * k)
                     });
                 }
@@ -2390,35 +2389,49 @@ pub fn line_pitch_mm(size: f64) -> f64 {
     size.clamp(2.0, 400.0) * 1.33 * 1.25 * 25.4 / 96.0
 }
 
-/// Room (pixels, each way) a picture of [`text_block`] in `r` keeps around the box, for the ink
-/// drawn past it: the widest line's overhang, and a line's height above and below.
-fn text_room(r: Rect, s: &str, size: f32, style: TextStyle, ppp: f64) -> (f32, f32) {
+/// The part of a text element's box (pixels, from its top-left corner) [`text_block`] inks, a line's
+/// height more each way: across, its lines as each is aligned (past the box where one overruns
+/// it); down, its lines, or the box and the line [`text_block`] still draws past it. `None` when
+/// it has no line.
+fn text_area(r: Rect, s: &str, size: f32, style: TextStyle, ppp: f64) -> Option<Rect> {
     let px = size.clamp(2.0, 400.0) * 1.33 * ppp as f32;
     let spacing = style.spacing * 1.33 * ppp as f32;
-    let widest =
-        s.lines().take(200).map(|l| text::styled_extent(l, px, style.face, spacing)).map(|(lo, hi)| hi - lo.min(0.0)).fold(0.0, f32::max);
-    ((widest - r.width()).max(0.0) + px, 2.0 * px)
+    let w = r.width();
+    let (mut x0, mut x1, mut lines) = (f32::INFINITY, f32::NEG_INFINITY, 0u16);
+    for line in s.lines().take(200) {
+        let (lo, hi) = text::styled_extent(line, px, style.face, spacing);
+        // Where `text_block` puts the ink: from the edge (left), or by the ink (centre, right).
+        let (a, b) = match style.align {
+            TextAlign::Left => (lo, hi),
+            TextAlign::Center => ((w - (hi - lo)) / 2.0, (w + (hi - lo)) / 2.0),
+            TextAlign::Right => (w - (hi - lo), w),
+        };
+        (x0, x1, lines) = (x0.min(a), x1.max(b), lines + 1);
+    }
+    let down = (r.height() + px).min(f32::from(lines) * px * 1.25);
+    (lines > 0).then(|| Rect::from_ltrb(x0 - px, -px, x1 + px, down + px)).flatten()
 }
 
 /// Draws with `draw` (given the box to draw in and how many of the page's pixels one of its own
 /// is) turned `degrees` clockwise about the centre of `r`: kept turned on a recording canvas (a
-/// vector PDF), else drawn upright in a picture `room` pixels larger than `r` each way, which is
-/// placed turned. A picture past the page's budget is drawn at a lower resolution and scaled up,
-/// as a frame that large is.
-fn draw_turned_box(pm: &mut Canvas, r: Rect, degrees: f32, room: (f32, f32), draw: impl FnOnce(&mut Canvas, Rect, f64)) {
+/// vector PDF), else drawn upright in a picture of `area` (pixels from the box's top-left corner:
+/// what it inks), which is placed turned. A picture past the page's budget is drawn at a lower
+/// resolution and scaled up, as a frame that large is. Its size is at least a pixel and at most
+/// the budget, and `r` and `area` have a size, so the picture is always made.
+fn draw_turned_box(pm: &mut Canvas, r: Rect, degrees: f32, area: Rect, draw: impl FnOnce(&mut Canvas, Rect, f64)) {
     let (cx, cy) = (r.x() + r.width() / 2.0, r.y() + r.height() / 2.0);
     if pm.is_recording() {
         pm.with_transform(Transform::from_rotate_at(degrees, cx, cy), |c| draw(c, r, 1.0));
         return;
     }
-    let (w, h) = (f64::from(r.width() + 2.0 * room.0), f64::from(r.height() + 2.0 * room.1));
+    let (w, h) = (f64::from(area.width()), f64::from(area.height()));
     let k = (MAX_PIXELS / (w * h)).sqrt().min(MAX_SIDE / w.max(h)).min(1.0) as f32;
     let (pw, ph) = ((w as f32 * k).ceil().max(1.0), (h as f32 * k).ceil().max(1.0));
-    let inner = Rect::from_xywh((pw - r.width() * k) / 2.0, (ph - r.height() * k) / 2.0, r.width() * k, r.height() * k);
+    // The box in the picture: its corner `area`'s offset away from the picture's.
+    let inner = Rect::from_xywh(-area.x() * k, -area.y() * k, r.width() * k, r.height() * k);
     let (Some(mut pic), Some(inner)) = (Canvas::new(pw as u32, ph as u32), inner) else { return };
     draw(&mut pic, inner, f64::from(k));
-    let place =
-        Transform::from_translate(-pw / 2.0, -ph / 2.0).post_scale(1.0 / k, 1.0 / k).post_translate(cx, cy).post_rotate_at(degrees, cx, cy);
+    let place = Transform::from_scale(1.0 / k, 1.0 / k).post_translate(r.x() + area.x(), r.y() + area.y()).post_rotate_at(degrees, cx, cy);
     let paint = PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..PixmapPaint::default() };
     pm.draw_pixmap(0, 0, pic.pixmap().as_ref(), &paint, place, None);
 }
@@ -3448,6 +3461,35 @@ mod tests {
         }
     }
 
+    /// A turned text's picture covers the lines it draws, not its whole box: a short line in a
+    /// large box takes a small picture, where its alignment puts the line (#1763).
+    #[test]
+    fn a_turned_texts_picture_covers_its_lines() {
+        let r = Rect::from_xywh(0.0, 0.0, 2000.0, 1000.0).unwrap();
+        let plain = TextStyle { face: text::Face::default(), align: TextAlign::Left, spacing: 0.0 };
+        let px = 14.0 * 1.33;
+        let area = |align| text_area(r, "Fonte: IBGE", 14.0, TextStyle { align, ..plain }, 1.0).unwrap();
+        let left = area(TextAlign::Left);
+        assert!(left.width() < 200.0 && left.height() < 4.0 * px, "{left:?}");
+        assert!(left.left() < 0.0 && left.top() < 0.0, "a line's height of room: {left:?}");
+        let right = area(TextAlign::Right);
+        assert!((right.right() - (2000.0 + px)).abs() < 1.0 && (right.width() - left.width()).abs() < 1.0, "{right:?}");
+        let centre = area(TextAlign::Center);
+        assert!(((centre.left() + centre.right()) / 2.0 - 1000.0).abs() < 1.0, "{centre:?}");
+        // Two lines, twice the pitch; nothing when there is no line.
+        let two = text_area(
+            r,
+            "Fonte: IBGE
+Elaboração: RustGIS",
+            14.0,
+            plain,
+            1.0,
+        )
+        .unwrap();
+        assert!((two.height() - left.height() - px * 1.25).abs() < 0.01);
+        assert!(text_area(r, "", 14.0, plain, 1.0).is_none());
+    }
+
     /// A turned box past the page's budget is still drawn turned, at a lower resolution, not
     /// left out or left upright (#1763).
     #[test]
@@ -3456,7 +3498,8 @@ mod tests {
         // 20,000 px long (past MAX_SIDE), 20 high, about the canvas's centre.
         let r = Rect::from_xywh(-9_900.0, 90.0, 20_000.0, 20.0).unwrap();
         let mut scale = 0.0;
-        draw_turned_box(&mut pm, r, 90.0, (0.0, 0.0), |c, inner, k| {
+        let area = Rect::from_xywh(0.0, 0.0, r.width(), r.height()).unwrap();
+        draw_turned_box(&mut pm, r, 90.0, area, |c, inner, k| {
             scale = k;
             c.fill_rect(inner, &paint(Rgba::rgb(0, 0, 0), 1.0), Transform::identity(), None);
         });
