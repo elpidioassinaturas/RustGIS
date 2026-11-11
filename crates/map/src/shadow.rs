@@ -42,7 +42,8 @@ pub enum Unlit {
 /// (degrees above the horizon), heights scaled by `z_factor`. Cells that are no data or masked are
 /// lit and cast no shadow. Rows are split over up to `threads` threads, each the same as on one.
 /// Looks at `stop` between rows, and at the run's Cancel (see [`rustgis_data::progress`]) on a
-/// thread that has one (the browser, which works it out where it is asked). A sun under about 5°
+/// thread that has one (the browser, which works it out where it is asked). On the desktop the
+/// worker has none: a cancelled export that waited for it alone sets `stop`. A sun under about 5°
 /// traces far over gentle ground: the cost grows with the raster's width as well as its cells.
 pub fn light(
     r: &Raster,

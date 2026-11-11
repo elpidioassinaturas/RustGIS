@@ -64,7 +64,14 @@ pub fn export(layer: &RasterLayer, min_zoom: u8, max_zoom: u8, opacity: f32) -> 
     let light = match layer.cast_shadows(true, u32::MAX, || {}) {
         rustgis_map::raster::CastShadows::Ready(grid) => Some(grid),
         rustgis_map::raster::CastShadows::Unavailable(why) => return Err(format!("{}: {why}, so the archive isn't written", r.name)),
-        rustgis_map::raster::CastShadows::Pending | rustgis_map::raster::CastShadows::None => None,
+        // Only when the run is cancelled: nothing is written.
+        rustgis_map::raster::CastShadows::Pending => {
+            return Err(format!(
+                "{}: its cast shadows weren't worked out (the export was cancelled), so the archive isn't written",
+                r.name
+            ));
+        }
+        rustgis_map::raster::CastShadows::None => None,
     };
     let light = light.as_deref().map(Vec::as_slice);
     // A raster read in place waits for its tiles natively, two minutes at most in all.
@@ -188,6 +195,31 @@ mod tests {
             rustgis_map::RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 315.0, altitude: 30.0, z_factor: 1.0, shadow: 1.0 };
         let e = export(&layer, 2, 2, 1.0).err().unwrap_or_else(|| panic!("an archive without its shadows"));
         assert!(e.contains("cast shadows") && e.contains("read in place"), "{e}");
+    }
+
+    /// An export cancelled while it waits for a layer's cast shadows writes nothing, and says why.
+    #[test]
+    #[allow(clippy::panic)]
+    fn a_cancelled_wait_for_cast_shadows_writes_no_archive() {
+        struct Cancelled;
+        impl rustgis_data::progress::Probe for Cancelled {
+            fn cancelled(&self) -> bool {
+                true
+            }
+            fn begin(&self, _: u64) {}
+            fn advance(&self, _: u64) {}
+        }
+        let n = 1500u32;
+        let data: Vec<f32> = (0..n * n).map(|i| (i % n) as f32 * 0.01).collect();
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 1.0 / f64::from(n), pixel_height: -1.0 / f64::from(n) };
+        let raster =
+            Raster::new("plain", n, n, vec![data], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap_or_else(|e| panic!("{e}"));
+        let mut layer = RasterLayer::from_path(raster, "plain.tif");
+        layer.style.renderer =
+            rustgis_map::RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 90.0, altitude: 2.0, z_factor: 1.0, shadow: 1.0 };
+        let _cancelled = rustgis_data::progress::install(Some(std::sync::Arc::new(Cancelled)));
+        let e = export(&layer, 0, 0, 1.0).err().unwrap_or_else(|| panic!("an archive without its shadows"));
+        assert!(e.contains("cancelled") && e.contains("isn't written"), "{e}");
     }
 
     #[test]

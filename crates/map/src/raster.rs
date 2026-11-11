@@ -851,7 +851,8 @@ impl LightWork {
     }
 
     /// What it has: with `wait`, once it is done, unless the run waiting is cancelled (see
-    /// [`rustgis_data::progress`]).
+    /// [`rustgis_data::progress`]). A cancelled run that was the only one waiting stops the work
+    /// too (the worker has no probe of its own): the map, drawing again, starts it over.
     fn result(&self, wait: bool) -> CastShadows {
         let _waiting = wait.then(|| Waiting::on(&self.waiting));
         let Ok(mut done) = self.done.lock() else { return CastShadows::None };
@@ -860,6 +861,9 @@ impl LightWork {
                 Ok((d, _)) => d,
                 Err(_) => return CastShadows::None,
             };
+        }
+        if wait && done.is_none() && self.waiting.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         match done.as_ref() {
             Some(Ok(grid)) => CastShadows::Ready(grid.clone()),
@@ -921,8 +925,12 @@ fn start_light(r: Arc<Raster>, key: LightKey, work: Arc<LightWork>, landed: impl
             crate::shadow::light(&r, key.band, &key.mask, key.azimuth, key.altitude, key.z_factor, threads, &work.stop)
         }));
         match traced {
-            // Stopped, it was replaced: nothing is drawn again for it.
-            Ok(Err(crate::shadow::Unlit::Stopped)) => work.finish(Err(STOPPED.into())),
+            // Stopped (superseded, or its export cancelled): a frame or page drawn while it was
+            // to come is drawn again, and asks for what it draws now.
+            Ok(Err(crate::shadow::Unlit::Stopped)) => {
+                work.finish(Err(STOPPED.into()));
+                landed();
+            }
             Ok(out) => {
                 work.finish(out.map(Arc::new).map_err(|e| match e {
                     crate::shadow::Unlit::Failed => "its cast shadows aren't drawn: working them out failed".into(),
@@ -2384,6 +2392,45 @@ mod tests {
         assert!(matches!(copy.cast_shadows(true, 2, || {}), CastShadows::Ready(_)));
         // Waited for, the latest is drawn.
         assert!(matches!(rl.cast_shadows(true, 1, || {}), CastShadows::Ready(_)));
+    }
+
+    /// An export cancelled while it waits for a grid it alone waits for stops the work (the
+    /// worker has no probe of its own), and the grid isn't kept: the next draw starts it over.
+    #[test]
+    fn a_cancelled_export_stops_the_work_it_waited_for() {
+        struct Cancelled;
+        impl rustgis_data::progress::Probe for Cancelled {
+            fn cancelled(&self) -> bool {
+                true
+            }
+            fn begin(&self, _: u64) {}
+            fn advance(&self, _: u64) {}
+        }
+        // Gentle ground under a sun at 2°: every cell traces to the raster's edge, far longer
+        // than the stop takes.
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 0.0, pixel_width: 30.0, pixel_height: -30.0 };
+        let data: Vec<f32> = (0..2000 * 2000).map(|i| ((i % 2000) as f32 * 0.01) + ((i / 2000) as f32 * 0.01)).collect();
+        let r = Raster::new("plain", 2000, 2000, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut rl = RasterLayer::from_path(r, "plain.tif");
+        rl.style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 135.0, altitude: 2.0, z_factor: 1.0, shadow: 1.0 };
+        let (sent, landings) = std::sync::mpsc::channel::<()>();
+        {
+            let _cancelled = rustgis_data::progress::install(Some(std::sync::Arc::new(Cancelled)));
+            let tx = sent.clone();
+            let out = rl.cast_shadows(true, 1, move || {
+                let _ = tx.send(());
+            });
+            assert_eq!(out, CastShadows::Pending, "the cancelled export gives up");
+        }
+        // The worker stops and says so (the map draws again), with no grid.
+        assert!(landings.recv_timeout(std::time::Duration::from_secs(60)).is_ok(), "landed");
+        let work = rl.cast.0.lock().unwrap().first().map(|j| j.work.clone()).unwrap();
+        assert!(work.was_stopped());
+        // Asked again, it starts over.
+        rl.cast_shadows(false, 1, || {});
+        let again = rl.cast.0.lock().unwrap().first().map(|j| j.work.clone()).unwrap();
+        assert!(!Arc::ptr_eq(&work, &again));
+        again.stop.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Read in place with only its overview held, it is drawn without cast shadows, and says so;
