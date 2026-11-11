@@ -1636,7 +1636,8 @@ impl ArchiveRevision {
         if self.0 != current.0 {
             return Err("a tile archive changed during rendering; export again after the reload finishes".to_string());
         }
-        result.ok_or_else(|| failure.to_string())
+        // A frame cut short by Cancel (see `drape_terrain`) says it was cancelled.
+        result.ok_or_else(|| rustgis_data::progress::check().err().map_or_else(|| failure.to_string(), |e| e.to_string()))
     }
 }
 
@@ -7924,10 +7925,11 @@ mod tests {
 
     #[test]
     fn a_cancelled_export_stops_laying_the_map_over_its_terrain() {
-        struct Cancelled;
-        impl rustgis_data::progress::Probe for Cancelled {
+        // Cancelled once the terrain's drawing has looked once: halfway through its triangles.
+        struct CancelledMidway(std::sync::atomic::AtomicUsize);
+        impl rustgis_data::progress::Probe for CancelledMidway {
             fn cancelled(&self) -> bool {
-                true
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 1
             }
             fn begin(&self, _: u64) {}
             fn advance(&self, _: u64) {}
@@ -7942,10 +7944,17 @@ mod tests {
         }
         assert!(render(&mut m, &view).is_some());
         assert!(render_png(&mut m, &view).is_ok());
-        // Cancelled, the frame stops with its ground half laid, and isn't handed on.
-        let _probe = rustgis_data::progress::install(Some(std::sync::Arc::new(Cancelled)));
-        assert!(render(&mut m, &view).is_none());
-        assert!(render_png(&mut m, &view).is_err());
+        // Cancelled, the frame stops with its ground half laid, and isn't handed on: an export
+        // says it was cancelled.
+        let probe = std::sync::Arc::new(CancelledMidway(std::sync::atomic::AtomicUsize::new(0)));
+        {
+            let _probe = rustgis_data::progress::install(Some(probe.clone()));
+            assert!(render(&mut m, &view).is_none());
+        }
+        assert!(probe.0.load(std::sync::atomic::Ordering::Relaxed) >= 2, "the drawing went on after the first look");
+        probe.0.store(0, std::sync::atomic::Ordering::Relaxed);
+        let _probe = rustgis_data::progress::install(Some(probe));
+        assert_eq!(render_png(&mut m, &view).err().as_deref(), Some(rustgis_data::DataError::Cancelled.to_string().as_str()));
     }
 
     #[test]
