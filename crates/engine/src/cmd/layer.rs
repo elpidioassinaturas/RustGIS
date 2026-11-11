@@ -4481,6 +4481,14 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
 /// quote the address without its keys.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_cog_window(asked: &WindowAsked) -> Result<CogWindow, String> {
+    read_cog_window_until(asked, &std::sync::atomic::AtomicBool::new(false))
+}
+
+/// [`read_cog_window`], giving up within a moment of `stop` being set (the app's Cancel of the
+/// download, or its project closed): in the wait on the header, before each band and in the wait
+/// on its tiles. Making the raster and writing its GeoTIFF, once the values are in, don't look.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_cog_window_until(asked: &WindowAsked, stop: &std::sync::atomic::AtomicBool) -> Result<CogWindow, String> {
     use crate::render::rustgis_tiles::cog;
     use rustgis_data::raster::cog::Level;
     let url = asked.url.as_str();
@@ -4489,7 +4497,7 @@ pub fn read_cog_window(asked: &WindowAsked) -> Result<CogWindow, String> {
     let cell = asked.cell;
     // The five minutes count from the header's read.
     let started = std::time::Instant::now();
-    let info = cog::info_blocking(url).map_err(named)?;
+    let info = cog::info_until(url, stop).map_err(named)?;
     let layout = &info.layout;
     let (pw, ph) = (layout.transform.pixel_width, layout.transform.pixel_height);
     if !(pw.is_finite() && ph.is_finite() && pw != 0.0 && ph != 0.0) {
@@ -4642,7 +4650,8 @@ pub fn read_cog_window(asked: &WindowAsked) -> Result<CogWindow, String> {
     let (mut bands, mut rounded, mut overflowed) = (Vec::with_capacity(count), Vec::with_capacity(count), 0u64);
     for band in 0..count {
         band_in_time(band, count, started.elapsed(), WINDOW_WAIT).map_err(named)?;
-        let (values, changed, past) = cog::read_values_counted_blocking(&info, url, level, band, (c0, c1), (r0, r1)).map_err(named)?;
+        let (values, changed, past) =
+            cog::read_values_counted_blocking(&info, url, level, band, (c0, c1), (r0, r1), stop).map_err(named)?;
         bands.push(values);
         rounded.push(changed);
         overflowed += past;
@@ -5041,12 +5050,13 @@ fn add_sample(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"layer": id}))
 }
 
-/// Legends that leave out layer `old` of the active map, in the frames that show it, follow it:
-/// to its new name, or (`None`, the layer deleted) by dropping it, so a later layer of that name
-/// isn't left out unasked. Called once the layer is renamed or gone: while another layer still
-/// bears `old` (names may repeat), the legends keep it for that one. Renamed onto the name of
-/// another layer a legend lists, the layer is listed with it rather than taking that one out.
-/// A WMS or WMTS layer's name counts as a layer's: legends list those too.
+/// Legends that leave out or label layer `old` of the active map, in the frames that show it,
+/// follow it: to its new name, or (`None`, the layer deleted) by dropping it, so a later layer of
+/// that name isn't left out or labelled unasked. Called once the layer is renamed or gone: while
+/// another layer still bears `old` (names may repeat), the legends keep it for that one. Renamed
+/// onto the name of another layer a legend lists, the layer is listed with it rather than taking
+/// that one out, and under that one's label rather than giving it its own, which is said. A WMS or
+/// WMTS layer's name counts as a layer's: legends list those too.
 pub(crate) fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>) {
     let named = |s: &Session, n: &str| {
         let m = s.map();
@@ -5057,6 +5067,7 @@ pub(crate) fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>
     }
     let shared = new.is_some_and(|n| named(s, n) > 1);
     let map = s.map().name.clone();
+    let mut unlabelled = 0usize;
     for layout in &mut s.project.layouts {
         let frames: Vec<u32> = layout
             .elements
@@ -5065,9 +5076,21 @@ pub(crate) fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>
             .map(|e| e.id)
             .collect();
         for e in &mut layout.elements {
-            if let rustgis_map::layout::ElementKind::Legend { frame, exclude, .. } = &mut e.kind
+            if let rustgis_map::layout::ElementKind::Legend { frame, exclude, labels, .. } = &mut e.kind
                 && frames.contains(frame)
             {
+                // Its label (#1654), taken off the old name; onto the new one unless another layer
+                // bears that name, whose label (or none) the renamed layer then shares.
+                let keys: Vec<String> = labels.keys().filter(|n| n.eq_ignore_ascii_case(old)).cloned().collect();
+                let label = keys.iter().filter_map(|k| labels.remove(k)).last();
+                match (new, label, shared) {
+                    (Some(n), Some(l), false) => {
+                        labels.retain(|x, _| !x.eq_ignore_ascii_case(n));
+                        labels.insert(n.to_string(), l);
+                    }
+                    (Some(_), Some(_), true) => unlabelled += 1,
+                    _ => {}
+                }
                 match new {
                     // Another layer the legend lists bears the new name: carrying the exclusion
                     // over would take that one out too, so the renamed layer is listed with it.
@@ -5090,6 +5113,14 @@ pub(crate) fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>
                 }
             }
         }
+    }
+    // The text given for the layer goes while the layer stays: said. (A removed layer's goes
+    // with its row.)
+    if let Some(n) = new.filter(|_| unlabelled > 0) {
+        s.notify(
+            format!("'{old}', renamed '{n}', lost its label in {unlabelled} legend(s): another layer is called '{n}', and a legend labels layers by name"),
+            false,
+        );
     }
 }
 
