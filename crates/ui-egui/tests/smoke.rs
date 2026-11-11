@@ -2435,7 +2435,7 @@ fn a_service_is_listed_when_its_capabilities_land() {
 }
 
 /// A listing that stops short says in Add From Service how many layers there are, that its filter
-/// searches only those listed, and how many of them are shown, in one place and not three.
+/// searches all of them, and how many of them are shown, in one place and not three.
 #[test]
 fn a_cut_listing_says_what_the_filter_searches() {
     use std::io::{Read, Write};
@@ -2503,6 +2503,15 @@ Connection: close
     // Its row adds it from the search's answer, as a listed row would.
     let row = &conn.search.as_ref().unwrap().listing.as_ref().unwrap()["layers"][a.rows[0].0];
     assert_eq!(row["name"], "t:2001");
+    // More matches than a search lists: its note says so, not only how many rows are shown.
+    h.state_mut().ui.service_browse.filter = "t:".into();
+    h.step();
+    h.step();
+    std::thread::sleep(std::time::Duration::from_millis(350));
+    h.step();
+    h.step();
+    h.get_by_label("only the first 2000 of 2001 matching layers are listed; service.add takes any of them by name");
+    h.get_by_label("500 of 2001 are listed.");
     // Cleared, the listing is filtered here again.
     h.state_mut().ui.service_browse.filter.clear();
     h.step();

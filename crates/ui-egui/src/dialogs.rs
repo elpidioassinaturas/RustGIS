@@ -867,7 +867,12 @@ fn filter_key(filter: &str) -> String {
 /// documents the dialog keeps, with `filter`, so nothing is downloaded. A listing that holds them
 /// all is filtered in the dialog, as before. Gives how long until a search is due, to draw again
 /// then. One read of the documents on the UI thread per pause in typing, as for each document
-/// that arrives: the parsed layers aren't kept, which would hold up to 100,000 of them.
+/// that arrives (`poll_service`): the parsed layers aren't kept, which would hold up to 100,000
+/// of them. It stays on the frame because `service.layers` binds a saved connection's login to
+/// the addresses its rows carry, in this session: a session of its own off the frame would leave
+/// that out, and adding a row would go without it. Nothing is fetched (the documents are
+/// kept, and no search starts while one is `pending`); IBGE's WFS, 12 MB and 10,186 layers,
+/// takes about 0.3 s in a dev build.
 fn search_all(app: &mut RustGisApp) -> Option<web_time::Duration> {
     let conn = app.ui.service.as_mut()?;
     let key = filter_key(&app.ui.service_browse.filter);
@@ -1087,7 +1092,7 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             let layers = v.get("layers").and_then(Value::as_array).unwrap_or(&none);
             let grouped = kind.starts_with("OGC API");
             // A listing that stops short counts them all, and says so here in the dialog's own
-            // words instead of its note: the filter searches only those listed.
+            // words instead of its note: the filter searches all of them (`search_all`).
             let listed_note = v.get("listedNote").and_then(Value::as_str);
             let count = crate::connectionui::layer_count(v);
             ui.horizontal(|ui| {
@@ -1125,7 +1130,18 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                             ui.colored_label(t.red, e);
                             None
                         }
-                        Some(Ok(_)) => None,
+                        // The search's own notes, beside the listing's: more matches than it
+                        // lists (its `listedNote`), or a list cut by its addresses' length.
+                        Some(Ok(found)) => {
+                            let shown: Vec<&str> =
+                                v.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+                            for n in found.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+                                if !shown.contains(&n) {
+                                    ui.label(egui::RichText::new(n).small().weak());
+                                }
+                            }
+                            None
+                        }
                     }
                 };
                 if let Some(line) = line {
