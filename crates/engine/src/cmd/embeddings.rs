@@ -223,7 +223,10 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
     let (series, complete, outside, notes) = match given {
         Some(v) => {
             let (series, outside) = found(v, start, end)?;
-            (series, super::b(p, "complete") != Some(false), outside, Vec::new())
+            let complete = super::b(p, "complete") != Some(false);
+            // A part read: said even when every year of the tiles handed over is there.
+            let notes = if complete { Vec::new() } else { vec![PART_READ.to_string()] };
+            (series, complete, outside, notes)
         }
         None => {
             let (series, complete, notes) = search_series(s, p, (start, end))?;
@@ -396,13 +399,16 @@ fn search_series(s: &mut Session, p: &Value, years: (i32, i32)) -> Result<(Vec<B
     }
 }
 
+/// A search over the years that read part of the index, said.
+const PART_READ: &str = "AlphaEarth: the area holds more tiles than one search reads; zoom in to take them all";
+
 /// What a search over the years left out: rows past one read, tiles past a search's list, and a
 /// tile's second file for a year.
 #[cfg(not(target_arch = "wasm32"))]
 fn series_notes(f: &emb::SeriesFound) -> Vec<String> {
     let mut notes = Vec::new();
     if !f.complete {
-        notes.push("AlphaEarth: the area holds more tiles than one search reads; zoom in to take them all".to_string());
+        notes.push(PART_READ.to_string());
     }
     if f.dropped > 0 {
         notes.push(format!("AlphaEarth: {} tiles past the {} a search lists were left out; zoom in for them", f.dropped, emb::MAX_TILES));
@@ -653,6 +659,20 @@ mod tests {
             u.notices.iter().any(|n| n.text.contains("1 of the 2 tile-years have no file in the part of AlphaEarth's index that was read"))
         );
         assert!(u.notices.iter().any(|n| n.text.contains("1 of the 2 tiles have no file in 2024–2025 and were left out")));
+        // A part read with every year there: still said.
+        let mut v = Session::new(Project::default());
+        let whole = json!([{"years": {"2024": file(2024, "7-8"), "2025": file(2025, "7-8")}}]);
+        v.run("embeddings.addCube", &json!({"dataset": "alphaearth", "start": 2024, "found": whole, "complete": false})).unwrap();
+        assert!(v.notices.iter().any(|n| n.text.contains("more tiles than one search reads")), "a part read is said");
+        // An hourly slider widened over the years would be more steps than it lists: refused,
+        // the slider and the map as they were.
+        let mut h = Session::new(Project::default());
+        h.run("time.set", &json!({"start": "2024-06-01", "end": "2024-06-02", "unit": "hour"})).unwrap();
+        let before = h.map().time.clone();
+        let two = json!([{"years": {"2017": file(2017, a), "2025": file(2025, a)}}]);
+        let e = h.run("embeddings.addCube", &json!({"dataset": "alphaearth", "found": two})).unwrap_err();
+        assert!(e.contains("steps"), "{e}");
+        assert!(h.map().tiles.is_empty() && h.map().time == before, "a refused cube leaves the map as it was");
         // Other bands (Apply to layers) hold at every year, not only the one shown.
         t.run("map.setTiles", &json!({"index": 0, "bands": [3, 4, 5]})).unwrap();
         t.run("time.goTo", &json!({"step": 0})).unwrap();

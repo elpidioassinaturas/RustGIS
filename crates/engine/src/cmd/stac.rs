@@ -1211,7 +1211,17 @@ pub(crate) fn cube_slider(s: &mut Session, dates: &mut Vec<f64>, fresh: &Value) 
         }
         Some(t) => {
             let (first, last) = (dates.first().copied().unwrap_or(t.start), dates.last().copied().unwrap_or(t.end));
-            json!({"start": t.start.min(first), "end": t.end.max(last), "date": t.current})
+            let (a, z) = (t.start.min(first), t.end.max(last));
+            // Its steps over the span widened (an hourly slider over years): past what it lists,
+            // the cube's later dates couldn't be reached.
+            let n = rustgis_data::time::steps(a, z, t.unit, t.interval, rustgis_map::time::MAX_STEPS + 1).len();
+            if n > rustgis_map::time::MAX_STEPS {
+                return Err(format!(
+                    "the time slider's steps over the cube's period would be more than its {}: make its step longer (time.set unit) or take a shorter period",
+                    rustgis_map::time::MAX_STEPS
+                ));
+            }
+            json!({"start": a, "end": z, "date": t.current})
         }
     };
     super::time::set(s, &slider).map(|_| ())
