@@ -370,8 +370,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   are pictures cut to their shape. The `dpi` also sets how fine the vectors' detail is kept, as a
   PNG at that resolution would show it. A frame or page whose vectors would pass 256 MB (64 MB
   in the browser) is drawn as a picture instead, and the export says which.
-  Its page has layers (PDF optional content groups), which vector editors such as Illustrator,
-  Inkscape, Affinity and VectorCraft open as layers, and PDF readers list in their layers panel:
+  Its page has layers (PDF optional content groups), which a vector editor that reads them opens
+  as layers (VectorCraft, where it was checked), and PDF readers list in their layers panel:
   one for each element, named after it, and inside a map frame's, one for each map layer and one
   for each layer's labels (`Labels: <layer>`), and one for the frame's grid. A map series' pages
   share them. `"pdf": {"layers": false}` on `layout.export` leaves them out. A map exported as PDF

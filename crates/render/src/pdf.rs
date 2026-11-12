@@ -230,8 +230,8 @@ impl Doc {
 pub struct Options {
     /// The drawings' layers as optional content groups (#1815): each layout element, and in a
     /// map frame each map layer and each layer's labels, a layer named after it, nested as drawn,
-    /// so a vector editor (Illustrator, Inkscape, Affinity, VectorCraft) opens the page with
-    /// them as its layers. Off, the page is the same, without them.
+    /// so a vector editor that reads optional content (VectorCraft, where it was checked) opens
+    /// the page with them as its layers. Off, the page is the same, without them.
     pub layers: bool,
 }
 

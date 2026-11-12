@@ -4003,7 +4003,7 @@ fn render_frame(
         if !layer.visible || !layer.in_scale_range(scale) || held.contains(&layer.id) {
             continue;
         }
-        pm.layer(Some(&layer.name));
+        pm.layer(Some(&layer_name(layer)));
         let opacity = layer.opacity() * group_opacity.get(&layer.id).copied().unwrap_or(1.0);
         let mask = masks.iter().find(|(id, _)| *id == layer.id).map(|(_, m)| m);
         let (blend, layer_blend) = (blend_mode(layer.blend), layer.blend);
@@ -5170,7 +5170,8 @@ fn render_frame(
     // fixed labels (graphics text) come first, then one for each key.
     let label_layers: Vec<(u32, String)> = if pm.is_recording() {
         let fixed = placed.labels.len().saturating_sub(placed.keys.len());
-        let name = |id: u32| map.layers.iter().find(|l| l.id == id).map(|l| l.name.clone()).unwrap_or_default();
+        let names: std::collections::HashMap<u32, String> = map.layers.iter().map(|l| (l.id, layer_name(l))).collect();
+        let name = |id: u32| names.get(&id).cloned().unwrap_or_default();
         std::iter::repeat_n((u32::MAX, String::new()), fixed).chain(placed.keys.iter().map(|((id, ..), _)| (*id, name(*id)))).collect()
     } else {
         Vec::new()
@@ -6525,6 +6526,12 @@ fn render_drawing_inner(map: &mut Map, view: &View) -> Option<vector::Drawing> {
     pm.into_drawing()
 }
 
+/// A map layer's name as a recording's layer is named (#1815): a layer with none is named after
+/// its id, as a layout element with none is after its kind.
+fn layer_name(layer: &rustgis_map::Layer) -> String {
+    if layer.name.trim().is_empty() { format!("Layer {}", layer.id) } else { layer.name.clone() }
+}
+
 /// Draws a frame's unplaced and placed labels. A recording keeps each map layer's placed labels
 /// together as a layer of their own, "Labels: <layer>" (#1815), the layers in the order of their
 /// first label: placed labels don't overlap, so the page looks the same.
@@ -6532,6 +6539,13 @@ pub(crate) fn draw_labels(pm: &mut Canvas, (unplaced, labels, layers): (&[Placed
     for l in unplaced {
         text::draw(pm, l, ppp);
     }
+    // Recorded, there is a layer for each label (see `render_frame`).
+    debug_assert!(
+        !pm.is_recording() || layers.is_empty() || layers.len() == labels.len(),
+        "{} layers for {} labels",
+        layers.len(),
+        labels.len()
+    );
     if !pm.is_recording() || layers.len() != labels.len() {
         for l in labels {
             text::draw(pm, l, ppp);
