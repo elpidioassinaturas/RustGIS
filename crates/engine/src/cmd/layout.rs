@@ -953,12 +953,18 @@ fn corners_of(homes: Homes) -> Value {
 /// [`MAX_ARRANGEMENT_NAME`], with control characters, or one `"arrangement"` already reads.
 fn check_arrangement_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() || name.trim() != name || name.chars().count() > MAX_ARRANGEMENT_NAME || name.chars().any(char::is_control) {
-        return Err(format!("an arrangement's name is 1 to {MAX_ARRANGEMENT_NAME} characters"));
+        return Err(format!("an arrangement's name is 1 to {MAX_ARRANGEMENT_NAME} characters, without control characters"));
     }
     if ARRANGEMENTS.iter().map(|(n, _)| *n).chain(RESERVED_ARRANGEMENT_NAMES).any(|n| same_name(n, name)) {
         return Err(format!("\"{name}\" names an arrangement already: choose another name"));
     }
     Ok(())
+}
+
+/// Whether this version would use a saved arrangement `name` with `corners`: a name
+/// `layout.arrangement` saves, and a corner for each surround.
+pub fn usable_saved_arrangement(name: &str, corners: &Value) -> bool {
+    check_arrangement_name(name).is_ok() && corners.is_object() && parse_arrangement(corners, &serde_json::Map::new()).is_ok()
 }
 
 /// The arrangements saved by name as the preferences keep them (a JSON object of names and
@@ -969,11 +975,8 @@ pub fn read_saved_arrangements(text: &str) -> Option<(serde_json::Map<String, Va
     let Ok(Value::Object(entries)) = serde_json::from_str::<Value>(text) else { return None };
     let (mut kept, mut passed) = (serde_json::Map::new(), serde_json::Map::new());
     for (name, corners) in entries {
-        let usable = check_arrangement_name(&name).is_ok()
-            && corners.is_object()
-            && parse_arrangement(&corners, &serde_json::Map::new()).is_ok()
-            && !kept.keys().any(|k| same_name(k, &name))
-            && kept.len() < MAX_SAVED_ARRANGEMENTS;
+        let usable =
+            usable_saved_arrangement(&name, &corners) && !kept.keys().any(|k| same_name(k, &name)) && kept.len() < MAX_SAVED_ARRANGEMENTS;
         if usable {
             kept.insert(name, corners);
         } else {

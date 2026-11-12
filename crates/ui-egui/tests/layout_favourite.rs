@@ -113,7 +113,7 @@ fn saved_arrangements_are_kept_and_restored() {
     // An arrangement removed takes with it one passed over beside it under the same name but for
     // case, so it doesn't come back at the next start.
     let mirrored = json!({"locator": "top-right", "northArrow": "top-left", "legend": "bottom-right", "scaleBar": "bottom-left"});
-    let text = json!({"Atlas": atlas, "atlas": mirrored, "Keep": mirrored}).to_string();
+    let text = json!({"Atlas": atlas, "atlas": mirrored, "ATLAS": {"locator": "middle"}, "Keep": mirrored}).to_string();
     let writes = saved.clone();
     let mut restored = RustGisApp::new(Session::new(Project::default())).with_services(Services {
         load_pref: Some(Box::new(move |k| (k == SAVED).then(|| text.clone()))),
@@ -122,5 +122,6 @@ fn saved_arrangements_are_kept_and_restored() {
     });
     restored.run("layout.arrangement", json!({"remove": "Atlas"})).unwrap();
     let written: serde_json::Value = serde_json::from_str(&last(SAVED)).unwrap();
-    assert_eq!(written, json!({"Keep": mirrored}));
+    // One this version can't read stays as it was.
+    assert_eq!(written, json!({"Keep": mirrored, "ATLAS": {"locator": "middle"}}));
 }

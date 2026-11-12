@@ -2863,7 +2863,10 @@ impl RustGisApp {
             let kept = &self.session.layout_arrangements;
             let removed: Vec<String> =
                 self.ui.layout_arrangements_saved.keys().filter(|k| !kept.contains_key(*k)).map(|k| k.to_lowercase()).collect();
-            self.ui.layout_arrangements_unread.retain(|name, _| !removed.contains(&name.to_lowercase()));
+            // Only those this version would use: one it can't read stays as it was.
+            self.ui.layout_arrangements_unread.retain(|name, corners| {
+                !removed.contains(&name.to_lowercase()) || !rustgis_engine::cmd::layout::usable_saved_arrangement(name, corners)
+            });
             self.ui.layout_arrangements_saved = self.session.layout_arrangements.clone();
             // Those this version couldn't use go back as they were, but where one saved here took
             // their very name.
