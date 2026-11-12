@@ -372,7 +372,7 @@ fn check_size(path: &Path) -> Result<()> {
 }
 
 /// The field KML and GPX name placemarks by: one called `name`, if any.
-fn name_field(ds: &Dataset) -> Option<usize> {
+pub fn name_field(ds: &Dataset) -> Option<usize> {
     ds.fields.iter().position(|f| f.name.eq_ignore_ascii_case("name"))
 }
 
@@ -516,7 +516,7 @@ fn projected_bytes(ds: &Dataset, ext: &str, crs: Crs) -> Result<(Vec<u8>, usize)
             let kml = crate::interop::to_kml(ds, name_field(ds))?.into_bytes();
             (crate::zip::write(&[("doc.kml".to_string(), kml)]).map_err(DataError::Format)?, without_geometry(ds))
         }
-        "gpx" => (crate::interop::to_gpx(ds, name_field(ds))?.into_bytes(), without_geometry(ds)),
+        "gpx" => (crate::interop::to_gpx(ds, name_field(ds))?.into_bytes(), gpx_left_out(ds)),
         "shp" | "zip" => {
             let (parts, left_out) = shapefile_parts_in(ds, crs)?;
             let base: String = ds.name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | ' ') { c } else { '_' }).collect();
@@ -2499,6 +2499,26 @@ pub fn shapefile_names_note(fields: &[Field], target: &str) -> Option<String> {
     Some(format!("{target}: {count} changed to fit a Shapefile (10 bytes at most, unique ignoring case): {}{more}", listed.join(", ")))
 }
 
+/// What an export to `target` says of its date fields: Shapefile, GeoPackage, GeoParquet and
+/// FlatGeobuf have date columns, which this version doesn't write yet, so their dates go in as ISO
+/// 8601 text and the field type is lost. `None` for other formats, whose dates are text anyway, or
+/// without date fields.
+pub fn dates_as_text_note(fields: &[Field], target: &str) -> Option<String> {
+    let ext = Path::new(target).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !matches!(ext.as_str(), "shp" | "zip" | "gpkg" | "parquet" | "geoparquet" | "fgb") {
+        return None;
+    }
+    let dates: Vec<String> = fields.iter().filter(|f| f.ty.is_temporal()).map(|f| format!("'{}'", dbf_notice_name(&f.name))).collect();
+    if dates.is_empty() {
+        return None;
+    }
+    let target: String = target.chars().map(dbf_notice_char).collect();
+    let listed: Vec<&str> = dates.iter().take(5).map(String::as_str).collect();
+    let more = if dates.len() > 5 { format!(" and {} more", dates.len() - 5) } else { String::new() };
+    let count = if dates.len() == 1 { "1 date field was".to_string() } else { format!("{} date fields were", dates.len()) };
+    Some(format!("{target}: {count} written as text (ISO 8601), not as dates: {}{more}", listed.join(", ")))
+}
+
 /// Keeps a diagnostic on one line and prevents field names from reordering its text.
 pub(crate) fn dbf_notice_char(c: char) -> char {
     let reorders = matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
@@ -2541,7 +2561,8 @@ pub fn shapefile_values_notes(ds: &Dataset, target: &str) -> Vec<String> {
             }
             let Some(loss) = counts.get_mut(k) else { continue };
             match field.ty {
-                FieldType::Text if value.to_string().len() > 254 => loss.text += 1,
+                // A date field is written as its text too, so text held in one is cut the same way.
+                FieldType::Text | FieldType::Date | FieldType::DateTime if value.to_string().len() > 254 => loss.text += 1,
                 FieldType::Integer | FieldType::Double => {
                     let d = decimals.get(k).copied().unwrap_or(0);
                     match dbf_number(value, field.ty, d) {
@@ -2663,6 +2684,128 @@ pub fn left_out_note(name: &str, ext: &str, left_out: usize) -> Option<String> {
         ),
         _ => format!("{name}: {left_out} features without drawable geometry were left out"),
     })
+}
+
+/// What CSV can't hold of a layer's geometry: it has a point a row (a point layer's longitude
+/// and latitude, see [`CsvWriter`]), and no geometry for a line or polygon layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CsvLosses {
+    /// Features of a point layer with more than one point (a multipoint), or another shape,
+    /// written as one point.
+    pub as_one_point: usize,
+    /// Features whose geometry isn't written: in a line or polygon layer (or one that declares
+    /// no type), and in a point layer those with no point to write (an empty multipoint).
+    pub unwritten: usize,
+}
+
+impl CsvLosses {
+    /// The losses of `features` in a layer of type `gt`; a streamed export adds up its chunks'.
+    pub fn of(features: &[crate::Feature], gt: GeometryType) -> Self {
+        let mut out = Self::default();
+        for g in features.iter().filter_map(|f| f.geometry.as_ref()) {
+            match (gt, g) {
+                (GeometryType::Point, Geometry::Point(_)) => {}
+                // No point to write: its coordinate cells are left empty.
+                (GeometryType::Point, g) if g.label_point().is_none() => out.unwritten += 1,
+                (GeometryType::Point, Geometry::MultiPoint(v)) if v.len() <= 1 => {}
+                (GeometryType::Point, _) => out.as_one_point += 1,
+                // A layer of lines or polygons, or one that declares no type: no coordinates.
+                _ => out.unwritten += 1,
+            }
+        }
+        out
+    }
+
+    /// One notice for each loss of a layer written to `target`; none without loss. Geometry
+    /// not written is counted by feature, whatever its kind: a layer of one type can hold others.
+    pub fn notes(self, target: &str) -> Vec<String> {
+        let mut notes = Vec::new();
+        if self.as_one_point > 0 {
+            let what = if self.as_one_point == 1 { "1 feature has".to_string() } else { format!("{} features have", self.as_one_point) };
+            notes.push(format!(
+                "{target}: {what} more than one point (a multipoint, line or polygon) and was written as one, as CSV holds a point a row"
+            ));
+        }
+        if self.unwritten > 0 {
+            let what = if self.unwritten == 1 { "1 feature".to_string() } else { format!("{} features", self.unwritten) };
+            notes.push(format!("{target}: CSV holds a point a row, so the geometry of {what} wasn't written, only the attributes"));
+        }
+        notes
+    }
+}
+
+impl std::ops::AddAssign for CsvLosses {
+    /// Adds a chunk's losses.
+    fn add_assign(&mut self, other: Self) {
+        self.as_one_point += other.as_one_point;
+        self.unwritten += other.unwritten;
+    }
+}
+
+/// What a CSV or GPX file (extension `ext`) of the whole dataset `ds` can't hold, written to
+/// `target`: [`CsvLosses`]' notices, or [`gpx_notes`] with each feature named from `name_field`;
+/// none for another format. A streamed export counts CSV's a chunk at a time instead.
+pub fn export_losses_notes(ds: &Dataset, ext: &str, name_field: Option<usize>, target: &str) -> Vec<String> {
+    match ext {
+        "csv" => CsvLosses::of(&ds.features, ds.geometry_type).notes(target),
+        "gpx" => gpx_notes(ds, name_field, target),
+        _ => Vec::new(),
+    }
+}
+
+/// Features a GPX file of `ds` leaves out: those without geometry, and multipoints without a
+/// point, which give no waypoint.
+pub fn gpx_left_out(ds: &Dataset) -> usize {
+    let empty = |g: &Option<Geometry>| match g {
+        None => true,
+        Some(Geometry::MultiPoint(v)) => v.is_empty(),
+        Some(_) => false,
+    };
+    ds.features.iter().filter(|f| empty(&f.geometry)).count()
+}
+
+/// What a GPX file of `ds` can't hold, each feature named from field `name_field`: other
+/// fields' values, polygons (written as tracks along their outer rings, holes left out) and
+/// multipoints (a waypoint per point). One notice per kind; none for a layer GPX holds whole.
+pub fn gpx_notes(ds: &Dataset, name_field: Option<usize>, target: &str) -> Vec<String> {
+    let drawn = || ds.features.iter().filter(|f| f.geometry.is_some());
+    let fields: Vec<&str> = (ds.fields.iter().enumerate())
+        .filter(|(k, _)| Some(*k) != name_field)
+        .filter(|(k, _)| drawn().any(|f| f.attrs.get(*k).is_some_and(|v| !v.is_null())))
+        .map(|(_, f)| f.name.as_str())
+        .collect();
+    let (mut polygons, mut holes, mut multipoints) = (0, 0, 0);
+    for g in drawn().filter_map(|f| f.geometry.as_ref()) {
+        match g {
+            Geometry::Polygon(polys) => {
+                polygons += 1;
+                holes += polys.iter().map(|rings| rings.len().saturating_sub(1)).sum::<usize>();
+            }
+            Geometry::MultiPoint(v) if v.len() > 1 => multipoints += 1,
+            _ => {}
+        }
+    }
+    let mut notes = Vec::new();
+    if !fields.is_empty() {
+        let names: Vec<_> = fields.iter().take(5).map(|s| format!("'{}'", dbf_notice_name(s))).collect();
+        let more = if fields.len() > 5 { format!(" and {} more", fields.len() - 5) } else { String::new() };
+        let what = if fields.len() == 1 { "1 field wasn't" } else { "fields weren't" };
+        notes.push(format!("{target}: GPX holds a name for each feature, so {what} written: {}{more}", names.join(", ")));
+    }
+    if polygons > 0 {
+        let what = if polygons == 1 { "1 polygon was".to_string() } else { format!("{polygons} polygons were") };
+        let left = match holes {
+            0 => String::new(),
+            1 => ", and 1 hole left out".to_string(),
+            n => format!(", and {n} holes left out"),
+        };
+        notes.push(format!("{target}: GPX has no areas, so {what} written as tracks along their outer edges{left}"));
+    }
+    if multipoints > 0 {
+        let what = if multipoints == 1 { "1 multipoint was".to_string() } else { format!("{multipoints} multipoints were") };
+        notes.push(format!("{target}: {what} written as a waypoint for each of its points"));
+    }
+    notes
 }
 
 /// Whether [`shapefile_parts_in`] writes a feature with geometry `g` to a layer of type `gt`: one
@@ -2811,7 +2954,8 @@ pub fn shapefile_parts_in(ds: &Dataset, crs: Crs) -> Result<(Vec<(&'static str, 
                 table.add_numeric_field(dbf_name(n)?, 24, u8::try_from(d).unwrap_or(15))
             }
             FieldType::Boolean => table.add_logical_field(dbf_name(n)?),
-            FieldType::Text => {
+            // Dates are ISO text until Shapefile's own date fields are written.
+            FieldType::Text | FieldType::Date | FieldType::DateTime => {
                 let longest = ds.features.iter().filter_map(|r| r.attrs.get(k)).map(|v| v.to_string().len()).max().unwrap_or(0);
                 table.add_character_field(dbf_name(n)?, u8::try_from(longest.clamp(1, 254)).unwrap_or(254))
             }
@@ -2824,7 +2968,9 @@ pub fn shapefile_parts_in(ds: &Dataset, crs: Crs) -> Result<(Vec<(&'static str, 
             let value = match f.ty {
                 FieldType::Integer | FieldType::Double => FieldValue::Numeric(dbf_number(v, f.ty, decimals.get(k).copied().unwrap_or(0))),
                 FieldType::Boolean => FieldValue::Logical(dbf_boolean(v)),
-                FieldType::Text => FieldValue::Character((!v.is_null()).then(|| cut(&v.to_string(), 254).to_string())),
+                FieldType::Text | FieldType::Date | FieldType::DateTime => {
+                    FieldValue::Character((!v.is_null()).then(|| cut(&v.to_string(), 254).to_string()))
+                }
             };
             rec.insert(n.clone(), value);
         }
@@ -3951,6 +4097,38 @@ mod tests {
         assert!(to_csv(&ds).unwrap().contains("longitude"));
     }
 
+    /// A layer that declares no geometry type gets no coordinate columns, so geometry it holds
+    /// is counted as not written, as for a line or polygon layer; a point layer's points aren't.
+    #[test]
+    fn csv_losses_count_geometry_a_layer_without_a_type_holds() {
+        let square =
+            Geometry::Polygon(vec![vec![vec![Coord::new(0.0, 0.0), Coord::new(1.0, 0.0), Coord::new(1.0, 1.0), Coord::new(0.0, 0.0)]]]);
+        let mut ds = Dataset::new("t", GeometryType::None, vec![]);
+        ds.push(Some(square), vec![]);
+        ds.push(None, vec![]);
+        let losses = CsvLosses::of(&ds.features, ds.geometry_type);
+        assert_eq!(losses, CsvLosses { as_one_point: 0, unwritten: 1 });
+        assert!(losses.notes("t.csv")[0].contains("the geometry of 1 feature wasn't written"));
+        assert!(!to_csv(&ds).unwrap().contains("longitude"));
+        let points = [crate::Feature { id: 0, geometry: Some(Geometry::Point(Coord::new(1.0, 2.0))), attrs: vec![] }];
+        assert_eq!(CsvLosses::of(&points, GeometryType::Point), CsvLosses::default());
+        // A multipoint without a point in a point layer gets empty coordinate cells.
+        let empty = [crate::Feature { id: 1, geometry: Some(Geometry::MultiPoint(vec![])), attrs: vec![] }];
+        assert_eq!(CsvLosses::of(&empty, GeometryType::Point), CsvLosses { as_one_point: 0, unwritten: 1 });
+    }
+
+    /// GPX leaves out a feature without geometry and a multipoint without a point (no waypoint
+    /// for it), and counts both; a point is written.
+    #[test]
+    fn gpx_counts_a_multipoint_without_points_as_left_out() {
+        let mut ds = Dataset::new("t", GeometryType::Point, vec![]);
+        ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![]);
+        ds.push(Some(Geometry::MultiPoint(vec![])), vec![]);
+        ds.push(None, vec![]);
+        assert_eq!(gpx_left_out(&ds), 2);
+        assert_eq!(write_bytes(&ds, "gpx").unwrap().1, 2);
+    }
+
     #[test]
     fn csv_leading_zeros_and_guard_roundtrip() {
         let (ds, _) = read_csv("zip,n,note\n02134,0,-abc\n10001,0.5,=x\n", "t").unwrap();
@@ -4383,6 +4561,26 @@ mod tests {
             assert!(shapefile_values_notes(&ds, "cells.zip").is_empty(), "clean: {name}");
         }
         assert!(missing.is_empty(), "losses without notices: {missing:?}");
+    }
+
+    #[test]
+    fn dates_written_as_text_are_said() {
+        let fields = [Field::new("id", FieldType::Integer), Field::new("issued", FieldType::Date), Field::new("ts", FieldType::DateTime)];
+        for target in ["a.shp", "a.zip", "a.gpkg", "a.parquet", "a.fgb"] {
+            assert_eq!(
+                dates_as_text_note(&fields, target).as_deref(),
+                Some(format!("{target}: 2 date fields were written as text (ISO 8601), not as dates: 'issued', 'ts'").as_str())
+            );
+        }
+        // Formats without date columns, and layers without dates, say nothing.
+        for target in ["a.geojson", "a.csv", "a.kml"] {
+            assert_eq!(dates_as_text_note(&fields, target), None, "{target}");
+        }
+        assert_eq!(dates_as_text_note(&fields[..1], "a.gpkg"), None);
+        // Text held in a date field is cut to a Shapefile's 254 bytes like any text, and said.
+        let mut ds = Dataset::new("d", GeometryType::Point, vec![Field::new("issued", FieldType::Date)]);
+        ds.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![Value::Text("x".repeat(300))]);
+        assert_eq!(shapefile_values_notes(&ds, "a.shp"), ["a.shp: 1 text value was cut to at most 254 bytes, in 'issued'"]);
     }
 
     /// The notice for field names a Shapefile can't hold names each change as the file has it,

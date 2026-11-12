@@ -54,7 +54,12 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     names those left with more than a quarter of their area on the data while a corner of their
     size had more than a quarter less, to move by hand if that matters (data under every corner
     alike, such as a context layer filling the frame, isn't worth a warning); two that overlap (a
-    frame too small) are said too.
+    frame too small) are said too. To see why a surround moved or stayed,
+    **`"coverage": "grid.png"`** writes the grid the placement searched: what the map draws dark,
+    the free cells white, the strips the graticule's labels keep tinted blue, and the surrounds
+    placed over the map outlined in red. It shows the map's frame only: what sits outside it (a
+    side column's locator and legend, as `"style": "panel"` places them, the titles and the
+    footer) isn't on it.
     The top visible raster with a colour scale, not drawn by classes (Stretch, a tinted hillshade),
     gets a colorbar beneath the legend; RGB and untinted hillshade do not, so an RGB composite over
     a DEM leaves it to the DEM. A raster drawn by classes (Colormap, Unique Values, Classify) has
@@ -372,11 +377,17 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   in the browser) is drawn as a picture instead, and the export says which.
   Its text is set in the fonts it is drawn in, each embedded as a subset of its glyphs, so a vector
   editor that reads embedded fonts (VectorCraft, where it was checked) opens it as text that can be
-  edited; it can be searched and copied in any PDF reader. A face whose licence forbids embedding or subsetting,
-  one drawn at another weight than its variable font file's default, or one whose file can't be
-  read is set as its letters' outlines instead, and the export names it with why.
+  edited; it can be searched and copied in any PDF reader. A face whose licence forbids embedding
+  or subsetting, one drawn at another weight than its variable font file's default, or one whose
+  file can't be read is set as its letters' outlines instead, and the export names it with why.
   `"pdf": {"text": "outlines"}` on `layout.export` sets all the text as outlines, as a print shop
   asking for outlined type wants.
+  Its page has layers (PDF optional content groups), which a vector editor that reads them opens
+  as layers (VectorCraft, where it was checked), and PDF readers list in their layers panel:
+  one for each element, named after it, and inside a map frame's, one for each map layer and one
+  for each layer's labels (`Labels: <layer>`), and one for the frame's grid. A map series' pages
+  share them. `"pdf": {"layers": false}` on `layout.export` leaves them out. The map view's PDF
+  (Publish › Print Map) has its map layers and labels as layers too.
   A PDF is also a GeoPDF: each map frame is georeferenced (an ISO 32000 geospatial viewport, the
   form GDAL, QGIS, Acrobat and Avenza read), with its map's coordinate system as WKT and its EPSG
   code when it has one, so a reader shows coordinates and measures in it, and GDAL or QGIS open the

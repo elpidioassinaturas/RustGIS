@@ -31,6 +31,8 @@ mod cswui;
 mod cubesui;
 mod diagnosticlog;
 mod dialogs;
+#[cfg(not(target_arch = "wasm32"))]
+mod diskwatch;
 mod docpanes;
 mod earthaccessui;
 mod editpanes;
@@ -706,6 +708,9 @@ pub struct UiState {
     /// The Web Data service the Web Data pane shows (a `ui.dialog` name, see
     /// `panes::web_data_name`).
     pub web_data: &'static str,
+    /// The Layer Properties pane's tab: the one last chosen, or asked for with
+    /// `ui.pane.layerProperties {"tab"}`.
+    pub layer_properties_tab: layerprops::Topic,
     pub dark: bool,
     /// The theme file in use, by name. Empty follows `dark` and the system.
     pub theme_name: String,
@@ -743,6 +748,8 @@ pub struct UiState {
     pub start_projection: String,
     /// The EPSG or ESRI code typed in Settings › Start-up › Projection.
     pub start_projection_input: String,
+    /// The coordinate system typed in View › Graticule's menu for the measured grid.
+    pub graticule_crs_input: String,
     /// Start-up preference: the extent the map opens on, `[minLon, minLat, maxLon, maxLat]`;
     /// `None` for the full extent.
     pub start_extent: Option<[f64; 4]>,
@@ -962,6 +969,7 @@ impl Default for UiState {
             diagnostic_filter: rustgis_engine::data::diagnostics::Filter::All,
             diagnostic_snapshot: None,
             web_data: "opendata",
+            layer_properties_tab: layerprops::Topic::General,
             dark: false,
             theme_name: String::new(),
             interface_scale: 1.0,
@@ -978,6 +986,7 @@ impl Default for UiState {
             last_project: None,
             start_projection: String::new(),
             start_projection_input: String::new(),
+            graticule_crs_input: String::new(),
             start_extent: None,
             start_view: None,
             ribbon_minimized: false,
@@ -1108,6 +1117,13 @@ pub struct RustGisApp {
     /// Add Data and Load All Features read on a thread of their own (the desktop app; see
     /// [`readjob`]). Off, as for tests and the examples, they read as the command runs.
     pub reads_off_frame: bool,
+    /// Watches linked local files for changes made outside RustGIS and offers Reload Data
+    /// (the desktop app; see [`diskwatch`]). Off for tests, unless one turns it on (as `ui_shot`'s
+    /// `watchFiles` does).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub watch_files: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    diskwatch: diskwatch::Watch,
     /// ModelBuilder's view: the model on its canvas.
     pub mb: modelbuilder::ModelBuilder,
     pub ws: workspacepanes::WorkspaceState,
@@ -1363,6 +1379,10 @@ impl RustGisApp {
             #[cfg(not(target_arch = "wasm32"))]
             reads: readjob::Reads::default(),
             reads_off_frame: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            watch_files: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            diskwatch: diskwatch::Watch::default(),
             mb: modelbuilder::ModelBuilder::default(),
             ws: workspacepanes::WorkspaceState::default(),
             time: timebar::TimeBarState::default(),
@@ -1691,7 +1711,7 @@ impl RustGisApp {
                 dpi,
                 true,
                 georeference,
-                rustgis_engine::render::pdf::Text::Fonts,
+                rustgis_engine::render::pdf::Options::default(),
             )
         }))
         .unwrap_or_else(|_| Err("the layout export failed unexpectedly".into()));
@@ -2457,6 +2477,14 @@ impl RustGisApp {
             AppDispatch::ResolvedTiles { crossed_origin, .. } => Some(*crossed_origin),
             _ => None,
         };
+        // What a watched file a save or export writes holds just before it does.
+        #[cfg(not(target_arch = "wasm32"))]
+        let before_write = diskwatch::before_write(self, id, &params);
+        // Discard Edits reads its table as it runs: what the file holds now is what it reads.
+        #[cfg(not(target_arch = "wasm32"))]
+        if id == "gpkg.discardEdits" {
+            diskwatch::reading(self, id, &params);
+        }
         let mut r = match dispatch {
             AppDispatch::Prepared(prepared) => self.session.run_prepared(*prepared),
             AppDispatch::InPlace(id) => self.session.add_in_place_for(id, &params),
@@ -2471,6 +2499,13 @@ impl RustGisApp {
             AppDispatch::Direct => self.session.run(id, &params),
         };
         r = self.deliver_gp_files(r);
+        // A reload acknowledges what it read; a save into a watched file is RustGIS's own write.
+        #[cfg(not(target_arch = "wasm32"))]
+        match &r {
+            Ok(answer) => diskwatch::ran(self, id, &params, answer, before_write),
+            Err(_) if matches!(id, "layer.reloadData" | "map.reloadTiles" | "gpkg.discardEdits") => diskwatch::not_read(self, id, &params),
+            Err(_) => {}
+        }
         if r.is_ok() && id == "tool.set" {
             self.map.cancel_sketch();
             // Esc chooses Explore: a plugin's pick stops waiting for the map, as for any tool.
@@ -2616,6 +2651,14 @@ impl RustGisApp {
             let name = self.session.active_layer.and_then(|l| map.layer(l)).filter(|l| l.raster.is_some()).map(|l| l.name.clone())?;
             let shared = map.layers.iter().filter(|l| l.name.eq_ignore_ascii_case(&name)).count() > 1;
             return Some((name, shared));
+        }
+        // A STAC search reads the active layer only to take its selection as the search area
+        // (`intersects: "selection"`, compared as the engine does), so a bbox or GeoJSON search
+        // names none.
+        if id == "stac.search"
+            && !params.get("intersects").and_then(Value::as_str).is_some_and(|v| v.trim().eq_ignore_ascii_case("selection"))
+        {
+            return None;
         }
         let spec = self.session.registry.get(id).filter(|c| c.mutates && params.get("layer").is_none_or(Value::is_null)).copied()?;
         if !spec.param_keys().is_some_and(|k| k.contains(&"layer")) {
@@ -2900,22 +2943,36 @@ impl RustGisApp {
                 if given.is_some() { self.ui.open_right(RightPane::Labeling) } else { toggle_right(&mut self.ui, RightPane::Labeling) }
             }
             // The Layer Properties pane (#1803), on `{"layer": id}` when given (a layer's
-            // right-click menu), as the Labeling pane is; feature and raster layers alike.
+            // right-click menu), as the Labeling pane is; feature and raster layers alike. With
+            // `{"tab": "general"|"source"|"display"|"query"}` it shows that tab (Data › Definition
+            // Query asks for "query", a feature layer's only).
             "ui.pane.layerProperties" => {
                 let given = match p.get("layer").filter(|l| !l.is_null()) {
                     Some(_) => Some(self.session.layer_id(p)?),
                     None => None,
                 };
+                let tab = match p.get("tab").filter(|t| !t.is_null()) {
+                    Some(t) => {
+                        Some(t.as_str().and_then(layerprops::Topic::parse).ok_or("unknown tab: give general, source, display or query")?)
+                    }
+                    None => None,
+                };
+                let layer = given.or(self.session.active_layer).and_then(|id| self.session.map().layer(id));
                 // Showing its tab already open needs no layer.
-                if (given.is_some() || !self.ui.right_open.contains(&RightPane::LayerProperties))
-                    && given.or(self.session.active_layer).and_then(|id| self.session.map().layer(id)).is_none()
-                {
+                if (given.is_some() || tab.is_some() || !self.ui.right_open.contains(&RightPane::LayerProperties)) && layer.is_none() {
                     return Err("select a layer in the Layers pane first".into());
+                }
+                if tab == Some(layerprops::Topic::Query) && layer.is_some_and(|l| l.is_raster()) {
+                    return Err("a raster layer has no definition query: the Query tab is a feature layer's".into());
                 }
                 if let Some(id) = given {
                     self.session.run("layer.select", &json!({"layer": id}))?;
                 }
-                if given.is_some() {
+                if let Some(tab) = tab {
+                    self.ui.layer_properties_tab = tab;
+                }
+                // Asked for a layer or a tab, it is shown, even when already in view.
+                if given.is_some() || tab.is_some() {
                     self.ui.open_right(RightPane::LayerProperties)
                 } else {
                     toggle_right(&mut self.ui, RightPane::LayerProperties)
@@ -4207,6 +4264,9 @@ impl RustGisApp {
                 if matches!(ext.as_str(), "parquet" | "geoparquet") {
                     dbf_notes.extend(rustgis_engine::data::source::parquet::values_note(ds, &name));
                 }
+                dbf_notes.extend(io::dates_as_text_note(&ds.fields, &name));
+                // CSV holds a point a row, GPX a name for each feature and no areas.
+                dbf_notes.extend(io::export_losses_notes(ds, &ext, io::name_field(ds), &name));
                 if let Some(note) = io::left_out_note(&name, &ext, left_out) {
                     self.session.notify(note, false);
                 }
@@ -5491,6 +5551,10 @@ impl RustGisApp {
         self.note_last_project();
         saveprompt::close_requested(self, ctx);
         autosave::tick(self, ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.watch_files {
+            diskwatch::tick(self, ctx);
+        }
         self.ensure_script_font();
         // Fonts downloaded by the web app.
         let fonts: Vec<(String, Vec<u8>)> = match &self.services.font_inbox {
@@ -5718,6 +5782,10 @@ impl RustGisApp {
         mapview::confirm_delete(self, &ctx);
         autosave::offer(self, &ctx);
         saveprompt::show(self, &ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.watch_files {
+            diskwatch::show(self, &ctx);
+        }
         pluginsui::show(self, &ctx);
         extensionsui::show(self, &ctx);
         plugindialog::show(self, &ctx);
@@ -5986,6 +6054,7 @@ const MAX_STEP_BYTES: usize = 4 << 20;
 /// `record_tests::every_optional_layer_is_classified` fails until it is placed here or there.
 const DEFAULTS_TO_ACTIVE_LAYER: &[&str] = &[
     "select.byAttributes",
+    "stac.search",
     "select.rows",
     "select.layerFromSelection",
     "data.similar",
@@ -6030,6 +6099,23 @@ mod record_tests {
         let layers: Vec<Option<&serde_json::Value>> =
             steps.iter().filter(|s| s.command == "map.terrain").map(|s| s.params.get("layer")).collect();
         assert_eq!(layers, [Some(&json!(dem.1)), None]);
+    }
+
+    /// A STAC search records the active layer only when its search area is that layer's selection.
+    #[test]
+    fn a_stac_search_names_the_active_layer_only_for_its_selection() {
+        let mut app = RustGisApp::with_sample();
+        let layer = app.session.map().layers.first().map(|l| l.id);
+        app.session.active_layer = layer;
+        for (params, names) in [
+            (json!({"intersects": "selection"}), true),
+            (json!({"intersects": " Selection "}), true),
+            (json!({"bbox": [0, 0, 1, 1]}), false),
+            (json!({"intersects": {"type": "Point", "coordinates": [0, 0]}}), false),
+            (json!({}), false),
+        ] {
+            assert_eq!(app.layer_acted_on("stac.search", &params).is_some(), names, "{params}");
+        }
     }
 
     /// Every command with an optional `layer` either needs an active layer to be enabled, defaults

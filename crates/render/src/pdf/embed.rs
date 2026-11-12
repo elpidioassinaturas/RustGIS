@@ -201,7 +201,7 @@ fn tag(name: &str, glyphs: &[GlyphId]) -> String {
 mod tests {
     use super::*;
     use crate::pdf::tests::objects;
-    use crate::pdf::{Page, Text, write, write_with};
+    use crate::pdf::{Options, Page, Text, write, write_with};
     use crate::vector::{Drawing, Glyph, GlyphRun};
     use tiny_skia::{Color, Transform};
 
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn text_in_fonts_is_its_face_embedded() {
         let font = face(|_| ());
-        let (pdf, outlined) = write_with(&[page(font, "Ação")], "Fonts", Text::Fonts);
+        let (pdf, outlined) = write_with(&[page(font, "Ação")], "Fonts", Options { text: Text::Fonts, ..Options::default() });
         assert!(outlined.is_empty(), "{outlined:?}");
         let objs = objects(&pdf);
         let dicts: Vec<&str> = objs.iter().map(|o| o.0.as_str()).collect();
@@ -264,7 +264,7 @@ mod tests {
         // Each CID is its character's glyph (CIDToGIDMap /Identity), with its width in /W.
         assert_eq!(cids_are_their_glyphs(font, &objs, "/Subtype /CIDFontType2"), 4, "A, ç, ã, o");
         // Outlines, as before, whatever the face allows.
-        let (outlines, none) = write_with(&[page(font, "Ação")], "Fonts", Text::Outlines);
+        let (outlines, none) = write_with(&[page(font, "Ação")], "Fonts", Options { text: Text::Outlines, ..Options::default() });
         assert!(none.is_empty() && outlines == write(&[page(font, "Ação")], "Fonts"));
         let text = String::from_utf8_lossy(&outlines);
         assert!(text.contains("/Subtype /Type3") && !text.contains("/Type0"));
@@ -313,7 +313,7 @@ mod tests {
     fn a_cff_face_is_a_cid_font_type0() {
         let bytes: &'static [u8] = include_bytes!("../../testdata/test-cff.otf");
         let font: &'static FontRef<'static> = Box::leak(Box::new(FontRef::try_from_slice(bytes).unwrap()));
-        let (pdf, outlined) = write_with(&[page(font, "CAB")], "CFF", Text::Fonts);
+        let (pdf, outlined) = write_with(&[page(font, "CAB")], "CFF", Options { text: Text::Fonts, ..Options::default() });
         assert!(outlined.is_empty(), "{outlined:?}");
         let text = String::from_utf8_lossy(&pdf);
         assert!(text.starts_with("%PDF-1.6") && !text.contains("/Type3"), "OpenType font files are PDF 1.6");
@@ -331,7 +331,7 @@ mod tests {
             let os2 = table(b, b"OS/2");
             b[os2 + 8..os2 + 10].copy_from_slice(&2u16.to_be_bytes());
         });
-        let (pdf, outlined) = write_with(&[page(font, "Rio")], "Restricted", Text::Fonts);
+        let (pdf, outlined) = write_with(&[page(font, "Rio")], "Restricted", Options { text: Text::Fonts, ..Options::default() });
         let text = String::from_utf8_lossy(&pdf);
         assert!(text.contains("/Subtype /Type3") && !text.contains("/Type0"));
         assert_eq!(outlined.len(), 1, "{outlined:?}");
@@ -357,10 +357,11 @@ mod tests {
         assert_eq!(full.unwrap().to_string(), "the document's embedded faces would pass 32 MB");
     }
 
-    /// A font file cut short or scrambled anywhere never panics: its face is embedded, or set in
-    /// outlines with the reason.
+    /// A font file cut short or scrambled (in its glyphs, its table directory or its metrics) that
+    /// the font parser still reads never panics embedding or naming its face: the face is embedded,
+    /// or refused with the reason.
     #[test]
-    fn a_hostile_font_file_never_panics() {
+    fn embedding_a_scrambled_font_file_never_panics() {
         let clean = epaint_default_fonts::UBUNTU_LIGHT;
         let glyf = table(clean, b"glyf");
         let mut tried = 0;

@@ -210,7 +210,13 @@ on the desktop, or **Project › New › QGIS Project…** (`project.importQgis=
 The QGIS Project picker filters for `.qgs` and `.qgz` files on both desktop and web.
 Its layers come in the layer tree's order, each from its file (GeoPackage, Shapefile, GeoJSON,
 GeoTIFF and the other formats RustGIS reads), a CSV of
-points, XYZ tiles or a WMS layer, unchecked layers and groups hidden. The map takes the project's
+points, XYZ tiles or a WMS layer, unchecked layers and groups hidden. The layer tree's groups come in
+as [layer groups](index.md), nested as in QGIS (to eight levels and 2,000 groups; the layers of
+groups past that go in the group holding them), open or closed, each layer in its group with its
+own box; a group drawn as one (a QGIS group layer) takes its visibility range and its
+opacity, the opacity applied to each of its layers. Web tile layers (XYZ, and WMS layers drawn as tiles) can't be in a group and come in
+outside it. The layers draw in the layer tree's order, also when the project sets an order of
+its own (noted). The map takes the project's
 coordinate system and its saved view (or its layers' extent, when that view shows none of them),
 with no basemap and no graticule, as QGIS draws it. A project in degrees (EPSG:4326 and other supported
 longitude/latitude systems) opens in the Equirectangular projection, the plate carrée QGIS draws
@@ -264,6 +270,19 @@ Each layer keeps its look:
   field the layer hasn't, is left out, noted. Histograms, stacked bars and text diagrams are
   left out (RustGIS's bar diagrams draw each category's share, QGIS's histograms its value), and
   scale ranges, distances from the feature and data-defined diagram settings noted.
+- **Annotations**: each annotation layer, and the project's main one (on top, as "Annotations"),
+  as a [graphics layer](cartography.md#graphics): markers, lines and polygons in their symbol's colours, sizes and widths;
+  point text, rectangle text and text along a line as text graphics, with their font size,
+  colour, weight, slant, letter spacing and alignment; pictures (PNG and JPEG) fitted in their box;
+  a rectangle text's or picture's background and frame as a rectangle. They are taken from the
+  layer's coordinate system to the map's and drawn in their z order. RustGIS centres a text
+  graphic on its point, draws it level and with its own halo, and draws text along a line level
+  at the line's middle, all noted. RustGIS draws a graphics layer's texts after all layers, so a
+  text QGIS draws under a shape, or under a layer above, comes out over it (noted). A picture
+  whose aspect is locked keeps it on the map, as QGIS does; an import keeps at most 64 MiB of
+  pictures as stored (base64, about 48 MiB of PNG or JPEG files), and those past it are left out
+  (noted). SVG pictures, callouts and annotations QGIS
+  keeps switched off are left out, noted.
 - **Rasters**: singleband grey as a stretch from black to white, singleband pseudocolour as a
   stretch along its colour map (interpolated), as Classify (discrete) or as Unique Values (exact),
   paletted as Unique Values, multiband colour as RGB and hillshade as Shaded Relief; with the
@@ -312,11 +331,12 @@ dashed polygon outlines solid, label halos with sharp corners drawn round and bl
 over the map, label backgrounds of other shapes drawn as rectangles, label distances from lines
 and polygons, a distance around points moved straight up, labels wrapped at a shortest line
 length or justified, values outside a graduated renderer's ranges in its first or last class, file options
-such as `layerid` that RustGIS doesn't read) and what was skipped (arrow lines, other data-defined
+such as `layerid` that RustGIS doesn't read, groups showing one layer at a time as ordinary groups,
+a group layer's opacity applied to each of its layers and its blending mode drawn as Normal) and what was skipped (arrow lines, group layers' draw effects, other data-defined
 settings, draw effects, label callouts, contours and other raster
 renderers RustGIS has no match for, PostGIS, WFS
 and other sources RustGIS doesn't read, histogram, stacked bar and text diagrams, joins, virtual fields, a layer's other styles,
-and the project's print layouts, annotations, bookmarks, map themes and relations). A database
+and the project's print layouts, QGIS 3's older annotation balloons, bookmarks, map themes and relations). A database
 password in a project never reaches the notes.
 
 A QGIS layer style (`.qml`) styles the selected layer the same way, a feature layer or a raster:

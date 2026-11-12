@@ -720,7 +720,7 @@ pub static TOOLS: &[ToolSpec] = &[
                 kind: K::Text,
                 required: false,
                 default: "",
-                help: "xmin,ymin,xmax,ymax in the coordinate system's units (degrees when it is empty); the input's extent when empty.",
+                help: "xmin,ymin,xmax,ymax in the units of the system the raster is made in (see Coordinate System); the input's extent when empty.",
             },
             P {
                 name: "pixelSize",
@@ -728,7 +728,7 @@ pub static TOOLS: &[ToolSpec] = &[
                 kind: K::Number,
                 required: false,
                 default: "",
-                help: "The output cell size in the coordinate system's units (degrees when it is empty); 300 cells across the extent when empty.",
+                help: "The output cell size in the units of the system the raster is made in (see Coordinate System); 300 cells across the extent when empty.",
             },
             P {
                 name: "crs",
@@ -736,7 +736,7 @@ pub static TOOLS: &[ToolSpec] = &[
                 kind: K::Text,
                 required: false,
                 default: "",
-                help: "A projected coordinate system (e.g. EPSG:32618) to make the raster in, its units for the extent and pixel size; longitude/latitude in degrees when empty or EPSG:4326.",
+                help: "A projected coordinate system (e.g. EPSG:32618) to make the raster in, its units for the extent and pixel size; when empty, the one the layer was read in if projected, else degrees; EPSG:4326 for degrees.",
             },
             P { name: "output", label: "Output Name", kind: K::Text, required: false, default: "", help: "" },
         ],
@@ -878,7 +878,7 @@ pub static TOOLS: &[ToolSpec] = &[
                 kind: K::Number,
                 required: false,
                 default: "",
-                help: "Spatial correlation distance in the coordinate system's units, degrees when it is empty (defaults to 1/3 extent diagonal).",
+                help: "Spatial correlation distance in the units of the system the raster is made in (see Coordinate System; defaults to 1/3 extent diagonal).",
             },
             P {
                 name: "extent",
@@ -886,7 +886,7 @@ pub static TOOLS: &[ToolSpec] = &[
                 kind: K::Text,
                 required: false,
                 default: "",
-                help: "xmin,ymin,xmax,ymax in the coordinate system's units (degrees when it is empty); the input's extent when empty.",
+                help: "xmin,ymin,xmax,ymax in the units of the system the raster is made in (see Coordinate System); the input's extent when empty.",
             },
             P {
                 name: "pixelSize",
@@ -894,7 +894,7 @@ pub static TOOLS: &[ToolSpec] = &[
                 kind: K::Number,
                 required: false,
                 default: "",
-                help: "The output cell size in the coordinate system's units (degrees when it is empty); up to 250 cells across the extent when empty.",
+                help: "The output cell size in the units of the system the raster is made in (see Coordinate System); up to 250 cells across the extent when empty.",
             },
             P {
                 name: "crs",
@@ -902,7 +902,7 @@ pub static TOOLS: &[ToolSpec] = &[
                 kind: K::Text,
                 required: false,
                 default: "",
-                help: "A projected coordinate system (e.g. EPSG:32618) to make the raster in, its units for the extent, pixel size and range; longitude/latitude in degrees when empty or EPSG:4326.",
+                help: "A projected coordinate system (e.g. EPSG:32618) to make the raster in, its units for the extent, pixel size and range; when empty, the one the layer was read in if projected, else degrees; EPSG:4326 for degrees.",
             },
             P { name: "output", label: "Output Name", kind: K::Text, required: false, default: "", help: "" },
         ],
@@ -2318,8 +2318,14 @@ fn converted(v: &Value, ty: FieldType) -> Value {
         (Value::Int(_), FieldType::Integer)
         | (Value::Float(_), FieldType::Double)
         | (Value::Text(_), FieldType::Text)
-        | (Value::Bool(_), FieldType::Boolean) => v.clone(),
+        | (Value::Bool(_), FieldType::Boolean)
+        | (Value::Date(_), FieldType::Date)
+        | (Value::DateTime(_), FieldType::DateTime) => v.clone(),
         (Value::Null, _) => Value::Null,
+        // A date-time into a date field is the day it shows, as Calculate Field puts it.
+        (Value::DateTime(t), FieldType::Date) => Value::Date(t.date()),
+        // A date is no number or yes/no: null, and counted, rather than read as one.
+        (Value::Date(_) | Value::DateTime(_), FieldType::Integer | FieldType::Double | FieldType::Boolean) => Value::Null,
         (Value::Int(i), FieldType::Double) => Value::Float(*i as f64),
         // In range, truncated; out of range (or not a number), empty rather than clamped. i64's
         // bounds as f64 are exactly -2⁶³ and 2⁶³.
@@ -2390,19 +2396,44 @@ fn update_on(inp: &dyn Inputs, p: &Json, threads: Option<usize>) -> Result<ToolR
         }
     }
     let kept = out.features.len();
+    // For each input field, how many update values its type couldn't hold, written as null, and
+    // how many date-times a date field kept only the day of.
+    let mut unfit = vec![(0usize, 0usize); ds.fields.len()];
     crate::control::begin(zones.len());
     for (done, z) in zones.iter().enumerate() {
         crate::control::check()?;
         crate::control::reached(done);
         let Some(u) = up.features.get(z.row) else { continue };
-        let attrs =
-            ds.fields.iter().zip(&from).map(|(f, i)| i.and_then(|i| u.attrs.get(i)).map_or(Value::Null, |v| converted(v, f.ty))).collect();
+        let attrs = ds
+            .fields
+            .iter()
+            .zip(&from)
+            .zip(&mut unfit)
+            .map(|((f, i), (n, days))| {
+                let Some(v) = i.and_then(|i| u.attrs.get(i)) else { return Value::Null };
+                let c = converted(v, f.ty);
+                // Empty or `<null>` text asks for null: no loss.
+                *n += usize::from(c.is_null() && !v.asks_null());
+                *days += usize::from(matches!(v, Value::DateTime(t) if f.ty == FieldType::Date && !t.is_date()));
+                c
+            })
+            .collect();
         out.push_next(u.geometry.clone(), attrs);
     }
     let added = out.features.len() - kept;
-    let mut r = result(out, format!("Update: {kept} input features kept, {added} update features added"))?;
-    r.messages.extend(left_out.notes("Update", &up.name));
-    Ok(r)
+    let mut messages = vec![format!("Update: {kept} input features kept, {added} update features added")];
+    messages.extend(left_out.notes("Update", &up.name));
+    let features = |n: usize| if n == 1 { "1 update feature".to_string() } else { format!("{n} update features") };
+    for (f, (n, days)) in ds.fields.iter().zip(unfit) {
+        if n > 0 {
+            messages.push(format!("Update: '{}' is null in {}, whose value isn't a {} value", f.name, features(n), f.ty.label()));
+        }
+        if days > 0 {
+            let their = if days == 1 { "its" } else { "their" };
+            messages.push(format!("Update: '{}' holds dates, so {} kept only {their} day", f.name, features(days)));
+        }
+    }
+    Ok(ToolResult { output: Output::Layer(out), messages })
 }
 
 /// The most split areas (split polygons, or values of the split field) Split takes: more is an
@@ -3070,7 +3101,7 @@ pub(crate) fn try_clone_value(v: &Value) -> Result<Value, TryReserveError> {
             s.push_str(t);
             Value::Text(s)
         }
-        Value::Null | Value::Int(_) | Value::Float(_) | Value::Bool(_) => v.clone(),
+        Value::Null | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Date(_) | Value::DateTime(_) => v.clone(),
     })
 }
 
@@ -3704,7 +3735,7 @@ fn coordinate(v: &Value) -> Option<f64> {
                 Err(_) => return None,
             }
         }
-        Value::Null | Value::Bool(_) => return None,
+        Value::Null | Value::Bool(_) | Value::Date(_) | Value::DateTime(_) => return None,
     };
     n.is_finite().then_some(n)
 }
@@ -3723,10 +3754,11 @@ pub fn holds_coordinates(ds: &Dataset, field: usize) -> bool {
     }
 }
 
-/// Typed WKT retains its explicit method warning; a code alone follows the compatibility policy.
-fn crs_with_compatibility_note(text: &str) -> Result<(Crs, Option<&'static str>), String> {
+/// Typed WKT retains its explicit method warning, and says a shift it gives that isn't applied; a
+/// code alone follows the compatibility policy.
+fn crs_with_compatibility_note(text: &str) -> Result<(Crs, Option<String>), String> {
     let crs = Crs::parse(text)?;
-    Ok((crs, rustgis_data::raster::wkt::projection_compatibility_note(text, crs)))
+    Ok((crs, rustgis_data::raster::wkt::typed_crs_note(text, crs)))
 }
 
 fn xy_table_to_point(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
@@ -4281,6 +4313,7 @@ fn idw_interpolation(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     };
     // Defaults only when a value is not given: a bad one is refused, not replaced.
     let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|t| !t.trim().is_empty()));
+    let crs_note = in_its_units(p, crs, crs_note, &extent, &pts, &["extent", "pixelSize"]);
     let cell = match num(p, "pixelSize") {
         Some(c) if c > 0.0 => c,
         _ if given("pixelSize") => return Err("the pixel size must be more than zero".into()),
@@ -4292,7 +4325,8 @@ fn idw_interpolation(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
         None => 2.0,
     };
     let name = out_name(p, format!("{}_{field}_idw", ds.name));
-    let r = crate::rasterops::idw(&pts, &extent, cell, power, 0, &name, crs).map_err(|e| with_note(e, &beyond_note))?;
+    let r =
+        crate::rasterops::idw(&pts, &extent, cell, power, 0, &name, crs).map_err(|e| with_note(with_note(e, &beyond_note), &crs_note))?;
     let bytes = rustgis_data::raster::geotiff::write(&r, 0).map_err(|e| e.to_string())?;
     let msg = format!("IDW Interpolation: {} × {} cells from {} points", r.width, r.height, pts.len());
     Ok(ToolResult {
@@ -4393,6 +4427,7 @@ fn kriging_interpolation(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, Strin
         }
     };
     let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|t| !t.trim().is_empty()));
+    let crs_note = in_its_units(p, crs, crs_note, &extent, &pts, &["extent", "pixelSize", "range"]);
     let neighbours = match num(p, "neighbours") {
         Some(n) if n >= 2.0 => (n as usize).min(32),
         Some(_) => return Err("neighbours must be at least 2".into()),
@@ -4429,7 +4464,8 @@ fn kriging_interpolation(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, Strin
     }
 
     let name = out_name(p, format!("{}_{field}_kriging", ds.name));
-    let r = crate::kriging::kriging(&pts, &extent, cell, &params, neighbours, &name, crs).map_err(|e| with_note(e, &beyond_note))?;
+    let r = crate::kriging::kriging(&pts, &extent, cell, &params, neighbours, &name, crs)
+        .map_err(|e| with_note(with_note(e, &beyond_note), &crs_note))?;
     let pred_bytes = rustgis_data::raster::geotiff::write(&r, 0).map_err(|e| e.to_string())?;
     let var_bytes = rustgis_data::raster::geotiff::write(&r, 1).map_err(|e| e.to_string())?;
     let var_name = format!("{name}_variance");
@@ -4443,20 +4479,55 @@ fn kriging_interpolation(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, Strin
     })
 }
 
+/// The projected system an interpolation takes from a layer read in `crs` when it is given none
+/// (#1743): `None` for none or a geographic one (degrees, with nothing to say), else the system, or
+/// why it can't be used. The Geostatistical Wizard's hint shows the same choice.
+pub fn layer_raster_crs(crs: Option<Crs>) -> Option<Result<Crs, String>> {
+    let c = crs.filter(|c| !c.is_geographic())?;
+    Some(if c.is_geocentric() {
+        Err(format!("{}, which can't hold its cells", c.label()))
+    } else {
+        c.transformer().map(|_| c).map_err(|e| format!("{}, which this version can't project to ({e})", c.label()))
+    })
+}
+
 /// The coordinate system an interpolation (`tool`) makes its grid in: the projected system given as
-/// `p`'s `crs`, or longitude/latitude in degrees when it is empty or `EPSG:4326`, as before `crs`
-/// was there. The note says what the run used where that could surprise: the compatibility note on
-/// the system given, or degrees for a layer read from a projected file.
+/// `p`'s `crs`; degrees for `EPSG:4326`; else [`layer_raster_crs`], the projected system `ds` was
+/// read in, as Kernel Density uses, and degrees for a layer read in degrees. The note says what the
+/// run used where that could surprise: the system it took from the layer, or the compatibility note
+/// on the one given.
 pub fn raster_crs(ds: &Dataset, p: &Json, tool: &str) -> Result<(Crs, Option<String>), String> {
     if p.get("crs").is_some_and(|v| !v.is_null() && !v.is_string()) {
         return Err("crs must be text".into());
     }
     match s(p, "crs").trim() {
-        "" => Ok((Crs::LonLat, degrees_note(ds, tool))),
+        "" => Ok(match layer_raster_crs(ds.crs) {
+            // A system that can't hold a raster's cells (geocentric), or one this version can't
+            // project to: degrees, as before, and said why.
+            Some(Err(why)) => (
+                Crs::LonLat,
+                Some(format!(
+                    "{tool}: made in degrees of longitude and latitude, though {} was read in {why}; give a projected crs to make it in metres or feet",
+                    ds.name
+                )),
+            ),
+            Some(Ok(c)) => (
+                c,
+                Some(format!(
+                    "{tool}: made in {}, the coordinate system {} was read in, with its units for the extent and sizes; set crs to EPSG:4326 to make it in degrees",
+                    c.label(),
+                    ds.name
+                )),
+            ),
+            None => (Crs::LonLat, None),
+        }),
         // Asked for by name: degrees, with nothing to say.
         text if Crs::parse(text).is_ok_and(|c| c == Crs::LonLat) => Ok((Crs::LonLat, None)),
         text => {
-            let (crs, note) = projected_crs(text)?;
+            let (crs, note) = projected_crs(text).map_err(|e| match Crs::parse(text) {
+                Ok(c) if c.is_geographic() => format!("{e}; EPSG:4326 makes it in degrees"),
+                _ => e,
+            })?;
             Ok((crs, note.map(|note| format!("{tool}: its coordinate system: {note}"))))
         }
     }
@@ -4464,27 +4535,15 @@ pub fn raster_crs(ds: &Dataset, p: &Json, tool: &str) -> Result<(Crs, Option<Str
 
 /// The projected coordinate system `text` names, and its compatibility note, or an error for one
 /// in degrees: a raster's cells are measured in a projected system's units.
-pub fn projected_crs(text: &str) -> Result<(Crs, Option<&'static str>), String> {
+pub fn projected_crs(text: &str) -> Result<(Crs, Option<String>), String> {
     let (crs, note) = crs_with_compatibility_note(text)?;
     if crs.is_geocentric() {
         return Err("crs must be a projected coordinate system, not a geocentric one (X, Y and Z from the Earth's centre)".into());
     }
     if crs.is_geographic() {
-        return Err("crs must be a projected coordinate system with linear units (such as UTM or State Plane, e.g. EPSG:32618); leave it empty to work in degrees".into());
+        return Err("crs must be a projected coordinate system with linear units (such as UTM or State Plane, e.g. EPSG:32618)".into());
     }
     Ok((crs, note))
-}
-
-/// The note `tool` gives when it makes a raster in degrees from `ds`, read from a file in a
-/// projected system: it names the system and the setting that would use it.
-fn degrees_note(ds: &Dataset, tool: &str) -> Option<String> {
-    ds.crs.filter(|c| !c.is_geographic()).map(|c| {
-        format!(
-            "{tool}: made in degrees of longitude and latitude, though {} was read in {}; set its coordinate system (crs) to make it in that system's units",
-            ds.name,
-            c.label()
-        )
-    })
 }
 
 /// `pts` (longitude/latitude) in `crs`, and a note counting those left out because the system
@@ -4522,6 +4581,30 @@ fn in_projected(crs: Crs, to: &Transformer, c: Coord) -> Option<Coord> {
     // past it through, onto the edge.
     let held = crs != Crs::WebMercator || c.y.abs() <= rustgis_geom::MAX_LAT;
     held.then(|| to.from_lonlat(c)).flatten().filter(|p| p.is_finite() && to.to_lonlat(*p).is_some_and(|back| (back.y - c.y).abs() < 1e-4))
+}
+
+/// The note on a system an interpolation took from the layer (`p`'s `crs` empty), naming the values
+/// among `keys` that `p` gives, read in its units: a script written when these tools worked in
+/// degrees is told, not answered in metres without a word (#1743). An `extent` that holds none of
+/// `pts` is said too, with how to ask for degrees; it isn't refused, as one in the system's units
+/// may lie away from the points and still be interpolated.
+pub fn in_its_units(p: &Json, crs: Crs, note: Option<String>, extent: &Extent, pts: &[(Coord, f64)], keys: &[&str]) -> Option<String> {
+    let note = note?;
+    if crs == Crs::LonLat || !s(p, "crs").trim().is_empty() {
+        return Some(note);
+    }
+    let given: Vec<&str> = keys
+        .iter()
+        .copied()
+        .filter(|k| p.get(*k).is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|t| !t.trim().is_empty())))
+        .collect();
+    if given.is_empty() {
+        return Some(note);
+    }
+    // With no points left (the system holds none), the run's own error says why.
+    let outside = given.contains(&"extent") && !pts.is_empty() && !pts.iter().any(|(c, _)| extent.contains(*c));
+    let outside = if outside { "; the extent holds none of the points: if it is in degrees, set crs to EPSG:4326" } else { "" };
+    Some(format!("{note} ({} as given, in its units{outside})", given.join(", ")))
 }
 
 /// `e` with `note` after it, when there is one: what was left out can be why a run failed.
@@ -5246,19 +5329,28 @@ fn summary_statistics(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> 
     let ds = input(inp, p, "input")?;
     let mut requests = stats::parse_requests(ds, p.get("statistics"))?;
     let field_only = requests.is_empty();
+    // A Statistics Field is read as numbers, except a date field: its values are dates, which give
+    // a count and the earliest and latest, not sums.
+    let mut as_numbers = field_only;
     if field_only {
         let field = s(p, "field").trim();
         if field.is_empty() {
             return Err("give the statistics to compute, or a Statistics Field".into());
         }
         let fi = find_field_case_insensitive(ds, field)?;
-        requests = [Stat::Count, Stat::Sum, Stat::Mean, Stat::Min, Stat::Max, Stat::Std].map(|stat| Request { field: fi, stat }).to_vec();
+        let stats: &[Stat] = if ds.fields.get(fi).is_some_and(|f| f.ty.is_temporal()) {
+            as_numbers = false;
+            &[Stat::Count, Stat::Min, Stat::Max]
+        } else {
+            &[Stat::Count, Stat::Sum, Stat::Mean, Stat::Min, Stat::Max, Stat::Std]
+        };
+        requests = stats.iter().map(|&stat| Request { field: fi, stat }).collect();
     }
     let cases = key_fields(ds, p.get("case"), "Case Field")?;
     let separator = concatenate_separator(p)?;
     let mut fields: Vec<Field> = cases.iter().filter_map(|&c| ds.fields.get(c).cloned()).collect();
     fields.push(Field::new("FREQUENCY", FieldType::Integer));
-    let added = statistic_fields(ds, &requests, field_only, &fields)?;
+    let added = statistic_fields(ds, &requests, as_numbers, &fields)?;
     let first_added = fields.len();
     fields.extend(added);
     if let Some(c) = cases.iter().filter_map(|&c| ds.fields.get(c)).find(|f| f.name.eq_ignore_ascii_case("FREQUENCY")) {
@@ -5271,11 +5363,11 @@ fn summary_statistics(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> 
     rs.sort_unstable();
     rs.dedup();
     let mut rounded = Rounded::new(requests.len());
-    rounded.count_texts(ds, &rs, &requests, field_only);
+    rounded.count_texts(ds, &rs, &requests, as_numbers);
     for group in stats::group_rows(ds, &rs, &cases) {
         let mut row = group.key;
         row.push(stats::count(group.rows.len()));
-        row.extend(statistic_values(ds, &group.rows, &requests, field_only, separator, &mut rounded));
+        row.extend(statistic_values(ds, &group.rows, &requests, as_numbers, separator, &mut rounded));
         // One past the last id: `push` would search them all for each group.
         out.push_next(None, row);
     }
@@ -5292,8 +5384,8 @@ fn summary_statistics(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> 
 fn statistic_fields(ds: &Dataset, requests: &[crate::stats::Request], as_numbers: bool, taken: &[Field]) -> Result<Vec<Field>, String> {
     let mut out: Vec<Field> = Vec::with_capacity(requests.len());
     for r in requests {
-        let (name, numeric) = ds.fields.get(r.field).map(|f| (f.name.as_str(), f.ty.is_numeric())).unwrap_or_default();
-        let field = Field::new(format!("{}_{name}", r.stat.name()), r.stat.output_type(numeric || as_numbers));
+        let (name, ty) = ds.fields.get(r.field).map(|f| (f.name.as_str(), f.ty)).unwrap_or(("", FieldType::Text));
+        let field = Field::new(format!("{}_{name}", r.stat.name()), r.stat.output_type(ty, as_numbers));
         if taken.iter().chain(&out).any(|f| f.name.eq_ignore_ascii_case(&field.name)) {
             return Err(format!("the output would have two fields named '{}'", field.name));
         }
@@ -5559,7 +5651,7 @@ fn pivot_table(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
         return Err(format!("{} rows by {width} fields would make more than {MAX_PIVOT_CELLS} values; select fewer records", groups.len()));
     }
     let mut fields: Vec<Field> = keys.iter().filter_map(|&k| ds.fields.get(k).cloned()).collect();
-    let ty = stat.map_or(value_type, |st| st.output_type(value_type.is_numeric()));
+    let ty = stat.map_or(value_type, |st| st.output_type(value_type, false));
     let values = columns.iter().map(|c| c.key.first().unwrap_or(&Value::Null));
     let names = pivot_field_names(field_name(pivot), values, &fields);
     let first_pivot_field = fields.len();
@@ -10390,7 +10482,7 @@ mod tests {
         for tool in ["idwInterpolation", "kriging"] {
             let p = serde_json::json!({"input": "wells", "field": "v", "pixelSize": 500, "crs": "EPSG:32616"});
             let r = crate::run(tool, &m, &p).unwrap_or_else(|e| panic!("{tool}: {e}"));
-            assert!(!r.messages.iter().any(|m| m.contains("made in degrees") || m.contains("beyond what")), "{tool}: {:?}", r.messages);
+            assert!(!r.messages.iter().any(|m| m.contains("was read in") || m.contains("beyond what")), "{tool}: {:?}", r.messages);
             let Output::Layers(out) = r.output else { panic!("{tool}: expected layers") };
             let Some(OutputLayer::Raster { file_name, bytes, .. }) = out.first() else { panic!("{tool}: expected a raster") };
             let g = rustgis_data::raster::read_bytes(file_name, bytes).unwrap_or_else(|e| panic!("{tool}: {e}"));
@@ -10407,10 +10499,69 @@ mod tests {
                 let p = serde_json::json!({"input": "wells", "field": "v", "crs": crs});
                 assert!(crate::run(tool, &m, &p).is_err(), "{tool}: {why}");
             }
-            // Without `crs`, a layer read in UTM is made in degrees, and the run names its system.
-            let r = crate::run(tool, &m, &serde_json::json!({"input": "wells", "field": "v"})).unwrap_or_else(|e| panic!("{tool}: {e}"));
+            // Without `crs`, a layer read in UTM is made in UTM, and the run says it took that.
+            let made_in = |p: serde_json::Value| {
+                let r = crate::run(tool, &m, &p).unwrap_or_else(|e| panic!("{tool}: {e}"));
+                let Output::Layers(out) = r.output else { panic!("{tool}: expected layers") };
+                let Some(OutputLayer::Raster { file_name, bytes, .. }) = out.first() else { panic!("{tool}: expected a raster") };
+                let g = rustgis_data::raster::read_bytes(file_name, bytes).unwrap_or_else(|e| panic!("{tool}: {e}"));
+                (g.crs, r.messages)
+            };
+            let (crs, messages) = made_in(serde_json::json!({"input": "wells", "field": "v"}));
+            assert_eq!(crs, Crs::Epsg(32616), "{tool}");
             let label = Crs::Epsg(32616).label();
-            assert!(r.messages.iter().any(|m| m.contains("made in degrees") && m.contains(&label)), "{tool}: {:?}", r.messages);
+            assert!(
+                messages.iter().any(|m| m.contains(&format!("made in {label}, the coordinate system wells was read in"))),
+                "{tool}: {messages:?}"
+            );
+            // A layer read in a system that can't hold the cells (geocentric) is made in degrees,
+            // and said.
+            let mut geocentric = m.0.get("wells").cloned().unwrap_or_else(|| panic!("wells"));
+            geocentric.crs = Some(Crs::Epsg(4978));
+            let m_geo = Map(HashMap::from([("wells".to_string(), geocentric)]));
+            let r =
+                crate::run(tool, &m_geo, &serde_json::json!({"input": "wells", "field": "v"})).unwrap_or_else(|e| panic!("{tool}: {e}"));
+            assert!(
+                r.messages.iter().any(|m| m.contains("made in degrees") && m.contains("can't hold its cells")),
+                "{tool}: {:?}",
+                r.messages
+            );
+            // So is one this version can't project to, saying so.
+            let mut unknown = m.0.get("wells").cloned().unwrap_or_else(|| panic!("wells"));
+            unknown.crs = Some(Crs::Custom(u32::MAX));
+            let m_unknown = Map(HashMap::from([("wells".to_string(), unknown)]));
+            let r = crate::run(tool, &m_unknown, &serde_json::json!({"input": "wells", "field": "v"}))
+                .unwrap_or_else(|e| panic!("{tool}: {e}"));
+            assert!(r.messages.iter().any(|m| m.contains("made in degrees") && m.contains("can't project to")), "{tool}: {:?}", r.messages);
+            // Values a script gave in degrees, read in the layer's metres, are said, not taken quietly:
+            // an extent holding no points is refused, and too many cells say the units.
+            let run = |p: serde_json::Value| crate::run(tool, &m, &p);
+            let r = run(serde_json::json!({"input": "wells", "field": "v", "extent": "-90.1,35.05,-89.9,35.25"}))
+                .unwrap_or_else(|e| panic!("{tool}: {e}"));
+            assert!(
+                r.messages.iter().any(|m| m.contains("the extent holds none of the points: if it is in degrees, set crs to EPSG:4326")),
+                "{tool}: {:?}",
+                r.messages
+            );
+            // An extent in metres away from the wells is made too, with the same word: its numbers
+            // can't say which units they were meant in.
+            let r = run(serde_json::json!({"input": "wells", "field": "v", "extent": "0,0,10000,10000"}))
+                .unwrap_or_else(|e| panic!("{tool}: {e}"));
+            assert!(
+                r.messages.iter().any(|m| m.contains("(extent as given, in its units; the extent holds none of the points")),
+                "{tool}: {:?}",
+                r.messages
+            );
+            let e = run(serde_json::json!({"input": "wells", "field": "v", "pixelSize": 0.01})).err().unwrap_or_default();
+            assert!(e.contains(&format!("made in {label}")), "{tool}: {e}");
+            let r = run(serde_json::json!({"input": "wells", "field": "v", "pixelSize": 500})).unwrap_or_else(|e| panic!("{tool}: {e}"));
+            assert!(r.messages.iter().any(|m| m.contains("(pixelSize as given, in its units)")), "{tool}: {:?}", r.messages);
+            let e = run(serde_json::json!({"input": "wells", "field": "v", "crs": "EPSG:4269"})).err().unwrap_or_default();
+            assert!(e.contains("EPSG:4326 makes it in degrees"), "{tool}: {e}");
+            // EPSG:4326 asks for degrees, with nothing to say.
+            let (crs, messages) = made_in(serde_json::json!({"input": "wells", "field": "v", "crs": "EPSG:4326"}));
+            assert_eq!(crs, Crs::LonLat, "{tool}");
+            assert!(!messages.iter().any(|m| m.contains("was read in")), "{tool}: {messages:?}");
         }
 
         // A point Web Mercator can't hold is left out and counted; the others make the raster.
@@ -10423,7 +10574,7 @@ mod tests {
             let p = serde_json::json!({"input": "polar", "field": "v", "crs": "EPSG:3857"});
             let r = crate::run(tool, &m, &p).unwrap_or_else(|e| panic!("{tool}: {e}"));
             assert!(r.messages.iter().any(|m| m.starts_with("1 point(s) beyond what")), "{tool}: {:?}", r.messages);
-            assert!(!r.messages.iter().any(|m| m.contains("made in degrees")), "{tool}: {:?}", r.messages);
+            assert!(!r.messages.iter().any(|m| m.contains("was read in")), "{tool}: {:?}", r.messages);
         }
     }
 
@@ -10477,18 +10628,23 @@ mod tests {
         assert!(crate::run("kriging", &m, &serde_json::json!({"input": "pts", "field": "v", "range": -5})).is_err());
         assert!(crate::run("kriging", &m, &serde_json::json!({"input": "pts", "field": "v", "range": "none"})).is_err());
 
-        // Source CRS metadata does not change the normalized longitude/latitude geometry.
+        // A layer read in a projected system is made in degrees when EPSG:4326 asks, as before
+        // `crs` was there: the same rasters. Left empty it takes the layer's system, and says so.
         let Some(pts_layer) = m.0.get("pts") else { panic!("missing pts") };
         let mut proj_pts = pts_layer.clone();
         proj_pts.crs = Some(rustgis_data::raster::Crs::WebMercator);
         let m_proj = Map(HashMap::from([("proj_pts".to_string(), proj_pts)]));
-        let projected =
-            crate::run("kriging", &m_proj, &serde_json::json!({"input": "proj_pts", "field": "v", "extent": "0,0,2,2", "pixelSize": 0.5}))
-                .unwrap();
-        // Without `crs` it is still made in degrees, and says so for a layer read in metres.
-        let degrees_note = |messages: &[String]| messages.iter().any(|m| m.contains("made in degrees"));
-        assert!(degrees_note(&projected.messages), "{:?}", projected.messages);
-        assert!(!degrees_note(&r.messages), "{:?}", r.messages);
+        let in_degrees = serde_json::json!({"input": "proj_pts", "field": "v", "extent": "0,0,2,2", "pixelSize": 0.5, "crs": "EPSG:4326"});
+        let projected = crate::run("kriging", &m_proj, &in_degrees).unwrap();
+        let assumed = |messages: &[String]| messages.iter().any(|m| m.contains("the coordinate system pts was read in"));
+        assert!(!assumed(&projected.messages), "{:?}", projected.messages);
+        assert!(!r.messages.iter().any(|m| m.contains("was read in")), "{:?}", r.messages);
+        let in_its_own = crate::run("kriging", &m_proj, &serde_json::json!({"input": "proj_pts", "field": "v"})).unwrap();
+        assert!(assumed(&in_its_own.messages), "{:?}", in_its_own.messages);
+        let Output::Layers(own) = in_its_own.output else { panic!("expected layers") };
+        let Some(OutputLayer::Raster { file_name, bytes, .. }) = own.first() else { panic!("expected a raster") };
+        let g = rustgis_data::raster::read_bytes(file_name, bytes).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(g.crs, rustgis_data::raster::Crs::WebMercator);
         let Output::Layers(projected_layers) = projected.output else { panic!("expected layers") };
         assert_eq!(projected_layers.len(), out.len());
         for (actual, expected) in projected_layers.iter().zip(&out) {
@@ -12217,7 +12373,9 @@ mod tests {
         m.0.get_mut("parcels").unwrap().push(None, vec![Value::Text("p3".into()), Value::Text("lot".into())]);
         // An update feature without geometry adds nothing.
         m.0.get_mut("zones").unwrap().push(None, vec![Value::Text("z0".into()), Value::Null]);
-        let out = layer(crate::run("update", &m, &serde_json::json!({"input": "parcels", "update": "zones"})).unwrap());
+        let res = crate::run("update", &m, &serde_json::json!({"input": "parcels", "update": "zones"})).unwrap();
+        assert!(!res.messages.iter().any(|m| m.contains("is null in")), "values that fit say nothing: {:?}", res.messages);
+        let out = layer(res);
         assert_eq!(out.name, "parcels_Update");
         let names: Vec<&str> = out.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["id", "use"], "the input's fields only");
@@ -12244,6 +12402,25 @@ mod tests {
         assert_eq!(out.features[4].geometry, zones.features[1].geometry);
         let e = crate::run("update", &inputs(), &serde_json::json!({"input": "pts", "update": "polys"})).unwrap_err();
         assert!(e.contains("not a polygon layer"), "{e}");
+    }
+
+    #[test]
+    fn update_says_what_a_date_field_keeps_of_a_date_time() {
+        let fields = vec![Field::new("d", FieldType::Date), Field::new("n", FieldType::Integer)];
+        let mut parcels = Dataset::new("parcels", GeometryType::Polygon, fields);
+        parcels.push(Some(sq(0.0, 0.0, 1.0)), vec![Value::Null, Value::Null]);
+        let fields = vec![Field::new("d", FieldType::DateTime), Field::new("n", FieldType::Text)];
+        let mut zones = Dataset::new("zones", GeometryType::Polygon, fields);
+        let at = |t: &str| Value::DateTime(rustgis_data::DateTime::parse(t).unwrap());
+        // A midnight without a zone is all there is to its day; `<null>` asks for null.
+        zones.push(Some(sq(5.0, 0.0, 1.0)), vec![at("2026-03-05T00:00:00"), Value::Text("<null>".into())]);
+        let m = |zones: Dataset| Map(HashMap::from([("parcels".to_string(), parcels.clone()), ("zones".to_string(), zones)]));
+        let res = crate::run("update", &m(zones.clone()), &serde_json::json!({"input": "parcels", "update": "zones"})).unwrap();
+        assert_eq!(res.messages.len(), 1, "{:?}", res.messages);
+        zones.push(Some(sq(7.0, 0.0, 1.0)), vec![at("2026-03-05T14:30:00+02:00"), Value::Null]);
+        let res = crate::run("update", &m(zones), &serde_json::json!({"input": "parcels", "update": "zones"})).unwrap();
+        assert_eq!(res.messages.get(1).map(String::as_str), Some("Update: 'd' holds dates, so 1 update feature kept only its day"));
+        assert_eq!(res.messages.len(), 2);
     }
 
     #[test]
@@ -12274,7 +12451,14 @@ mod tests {
         zones.push(Some(sq(5.0, 0.0, 1.0)), row(0.1, " 7 ", 3, 1));
         zones.push(Some(sq(7.0, 0.0, 1.0)), row(2.5, "seven", -2, 0));
         let m = Map(HashMap::from([("parcels".to_string(), parcels), ("zones".to_string(), zones)]));
-        let out = layer(crate::run("update", &m, &serde_json::json!({"input": "parcels", "update": "zones"})).unwrap());
+        let res = crate::run("update", &m, &serde_json::json!({"input": "parcels", "update": "zones"})).unwrap();
+        // "seven" isn't a whole number: null, and said.
+        assert_eq!(
+            res.messages.get(1).map(String::as_str),
+            Some("Update: 'n' is null in 1 update feature, whose value isn't a Long value")
+        );
+        assert_eq!(res.messages.len(), 2);
+        let out = layer(res);
         let attrs: Vec<&[Value]> = out.features.iter().skip(1).map(|f| f.attrs.as_slice()).collect();
         assert_eq!(
             attrs,
@@ -12314,6 +12498,16 @@ mod tests {
         assert_eq!(converted(&Value::Int(5), FieldType::Text), Value::Text("5".into()));
         assert_eq!(converted(&Value::Text("x".into()), FieldType::Double), Value::Null);
         assert_eq!(converted(&Value::Null, FieldType::Text), Value::Null);
+        // A date-time into a date field is its day; a date into a date-time field, its midnight.
+        let t = Value::parse("2026-03-05T23:30:00+02:00", FieldType::DateTime);
+        assert_eq!(converted(&t, FieldType::Date), Value::parse("2026-03-05", FieldType::Date));
+        let d = Value::parse("2026-03-05", FieldType::Date);
+        assert_eq!(converted(&d, FieldType::DateTime), Value::parse("2026-03-05T00:00:00", FieldType::DateTime));
+        // A date into a number or yes/no field is null (and counted), not read as false.
+        for ty in [FieldType::Boolean, FieldType::Integer, FieldType::Double] {
+            assert_eq!(converted(&d, ty), Value::Null, "{ty:?}");
+            assert_eq!(converted(&t, ty), Value::Null, "{ty:?}");
+        }
     }
 
     /// The layers of a tool's output with several.
@@ -13682,6 +13876,26 @@ mod tests {
         let text = layer(crate::run("summaryStatistics", &m, &serde_json::json!({"input": "parcels", "field": "owner"})).unwrap());
         assert_eq!((column(&text, "COUNT_owner"), column(&text, "MEAN_owner")), (vec![Value::Int(0)], vec![Value::Null]));
         assert_eq!(text.fields.get(3).map(|f| f.ty), Some(FieldType::Double));
+        // A date field gives its count and its earliest and latest dates, as dates.
+        let mut permits = Dataset::new("permits", GeometryType::Polygon, vec![Field::new("issued", FieldType::Date)]);
+        for day in ["2026-03-05", "1999-12-31", "", "2026-01-01"] {
+            permits.push(Some(sq(0.0, 0.0, 1.0)), vec![Value::parse(day, FieldType::Date)]);
+        }
+        let m = Map(HashMap::from([("permits".to_string(), permits)]));
+        let dates = layer(crate::run("summaryStatistics", &m, &serde_json::json!({"input": "permits", "field": "issued"})).unwrap());
+        let names: Vec<(&str, FieldType)> = dates.fields.iter().map(|f| (f.name.as_str(), f.ty)).collect();
+        assert_eq!(
+            names,
+            [
+                ("FREQUENCY", FieldType::Integer),
+                ("COUNT_issued", FieldType::Integer),
+                ("MIN_issued", FieldType::Date),
+                ("MAX_issued", FieldType::Date)
+            ]
+        );
+        assert_eq!(column(&dates, "COUNT_issued"), [Value::Int(3)]);
+        assert_eq!(column(&dates, "MIN_issued"), [Value::parse("1999-12-31", FieldType::Date)]);
+        assert_eq!(column(&dates, "MAX_issued"), [Value::parse("2026-03-05", FieldType::Date)]);
     }
 
     /// A statistics list over several case fields: groups for each (zone, district), the pairs'
