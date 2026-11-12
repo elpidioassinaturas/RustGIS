@@ -129,7 +129,7 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"layout"?}"#),
         C::new("layout.export", "Export Layout", "Publish › Output", |s, p| super::exports::write_here(s, p, "layout.export")).inputs(layout_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
-            .params(r#"{"layout"?, "path": "*.png|*.pdf|*.svg" (PNG/SVG: current page; SVG: each element a group of its own; text and shapes as SVG, map frames and surrounds as vectors, rasters and tiles in them as pictures at dpi), "dpi"?: 72..600, "allPages"?: bool (PDF only; default true: every map series page, up to 500; false: the current page), "georeference"?: bool (PDF only; default true: map frames carry their coordinates, a GeoPDF; false: none)}"#),
+            .params(r#"{"layout"?, "path": "*.png|*.pdf|*.svg" (PNG/SVG: current page; SVG: each element a group of its own; text and shapes as SVG, map frames and surrounds as vectors, rasters and tiles in them as pictures at dpi), "dpi"?: 72..600, "allPages"?: bool (PDF only; default true: every map series page, up to 500; false: the current page), "georeference"?: bool (PDF only; default true: map frames carry their coordinates, a GeoPDF; false: none), "pdf"?: {"text"?: "fonts" (default: text in its faces, embedded as subsets, editable in a vector editor; a face that can't be is set in outlines, and said)|"outlines" (glyphs as outlines, as print shops ask)}}"#),
         C::new("layout.save", "Save Layout File", "Publish › Save As", |s, p| {
             let path = ps(p, "path").ok_or("path is required")?;
             let l = active(s, p)?.clone();
@@ -4188,15 +4188,24 @@ fn named_fonts_unread(layout: &Layout) -> Option<&'static str> {
 /// Layout `li` as a PDF (kept as vectors; every map series page when `all`; its map frames
 /// georeferenced) or a PNG of the current page, at `dpi`.
 pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) -> Result<Vec<u8>, String> {
-    layout_bytes_with(s, li, pdf, dpi, all, true)
+    layout_bytes_with(s, li, pdf, dpi, all, true, rustgis_render::pdf::Text::Fonts)
 }
 
-/// [`layout_bytes`], a PDF's map frames georeferenced only when `georeference` (#1191).
-/// Returns an actionable error if a linked archive changes while the pages are drawn.
-pub fn layout_bytes_with(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool, georeference: bool) -> Result<Vec<u8>, String> {
+/// [`layout_bytes`], a PDF's map frames georeferenced only when `georeference` (#1191), its text
+/// written as `text` says (#1815). Returns an actionable error if a linked archive changes while
+/// the pages are drawn.
+pub fn layout_bytes_with(
+    s: &mut Session,
+    li: usize,
+    pdf: bool,
+    dpi: f64,
+    all: bool,
+    georeference: bool,
+    text: rustgis_render::pdf::Text,
+) -> Result<Vec<u8>, String> {
     let layout = s.project.layouts.get(li).ok_or("no layout")?;
     let revisions = rustgis_render::layout::archive_revisions(layout, &s.project.maps);
-    let result = layout_bytes_inner(s, li, pdf, dpi, all, georeference);
+    let result = layout_bytes_inner(s, li, pdf, dpi, all, georeference, text);
     let layout = s.project.layouts.get(li).ok_or("no layout")?;
     revisions.finish_revision(
         rustgis_render::layout::archive_revisions(layout, &s.project.maps),
@@ -4205,7 +4214,15 @@ pub fn layout_bytes_with(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: b
     )?
 }
 
-fn layout_bytes_inner(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool, georeference: bool) -> Result<Vec<u8>, String> {
+fn layout_bytes_inner(
+    s: &mut Session,
+    li: usize,
+    pdf: bool,
+    dpi: f64,
+    all: bool,
+    georeference: bool,
+    text: rustgis_render::pdf::Text,
+) -> Result<Vec<u8>, String> {
     let saved = s.project.layouts.get(li).ok_or("no layout")?.clone();
     if let Some(note) = named_fonts_unread(&saved) {
         s.warn(note);
@@ -4309,7 +4326,30 @@ fn layout_bytes_inner(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool
     let (pages, png) = result?;
     pictured_notices(s, &frames_pictured, &pages_pictured);
     georeference_notices(s, &left_out, &by_corners, pages.len());
-    if pdf { Ok(rustgis_render::pdf::write(&pages, &saved.name)) } else { png.ok_or_else(|| "nothing to draw".to_string()) }
+    if !pdf {
+        return png.ok_or_else(|| "nothing to draw".to_string());
+    }
+    let (bytes, outlined) = rustgis_render::pdf::write_with(&pages, &saved.name, text);
+    outlined_notice(s, &outlined);
+    Ok(bytes)
+}
+
+/// Says which faces a PDF set in outlines though its text was to be in fonts (#1815), with why:
+/// their text is drawings, not text, in a vector editor. One notice, the faces counted.
+fn outlined_notice(s: &mut Session, outlined: &[rustgis_render::pdf::Outlined]) {
+    let n = outlined.len();
+    if n == 0 {
+        return;
+    }
+    let mut each: Vec<String> = outlined.iter().take(10).map(|o| format!("{} ({})", o.face, o.why)).collect();
+    if n > 10 {
+        each.push(format!("and {} more", n - 10));
+    }
+    s.warn(format!(
+        "The PDF sets the text of {n} face{} as outlines, not as text a vector editor can edit: {}",
+        if n == 1 { "" } else { "s" },
+        each.join(", ")
+    ));
 }
 
 /// Says which map frames a PDF doesn't georeference, with why, and which it georeferences by their
@@ -4425,6 +4465,20 @@ pub(crate) fn pictured_notices(s: &mut Session, frames: &[(u32, String)], pages:
     }
 }
 
+/// How `layout.export`'s `"pdf": {"text": …}` asks a PDF's text to be written (#1815): in its
+/// fonts unless it says `"outlines"`.
+fn pdf_text(p: &Value) -> Result<rustgis_render::pdf::Text, String> {
+    use rustgis_render::pdf::Text;
+    let Some(pdf) = p.get("pdf").filter(|v| !v.is_null()) else { return Ok(Text::Fonts) };
+    let Some(pdf) = pdf.as_object() else { return Err(r#"pdf is an object: {"text": "fonts"|"outlines"}"#.into()) };
+    match pdf.get("text").and_then(Value::as_str) {
+        None if pdf.get("text").is_none_or(Value::is_null) => Ok(Text::Fonts),
+        Some("fonts") => Ok(Text::Fonts),
+        Some("outlines") => Ok(Text::Outlines),
+        _ => Err(r#"pdf.text is "fonts" or "outlines""#.into()),
+    }
+}
+
 /// `layout.export`: a layout to a PNG, PDF or SVG. It draws a copy of the project, so the project
 /// can change meanwhile (a map series steps through its pages on the copy); a cancelled export
 /// stops at the next page, or its map's wait for tiles, and writes nothing.
@@ -4437,6 +4491,7 @@ pub(crate) fn export_work(s: &Session, p: &Value) -> Result<super::exports::Work
         return Err("export to a .png, .pdf or .svg file".into());
     }
     let (dpi, all, georeference) = (f(p, "dpi").unwrap_or(150.0), b(p, "allPages").unwrap_or(true), b(p, "georeference").unwrap_or(true));
+    let text = pdf_text(p)?;
     let mut project = s.project.clone();
     for m in &mut project.maps {
         m.detach_reads();
@@ -4447,7 +4502,7 @@ pub(crate) fn export_work(s: &Session, p: &Value) -> Result<super::exports::Work
             let bytes = if svg {
                 layout_svg(&mut copy, li, dpi)?.into_bytes()
             } else {
-                layout_bytes_with(&mut copy, li, pdf, dpi, all, georeference)?
+                layout_bytes_with(&mut copy, li, pdf, dpi, all, georeference, text)?
             };
             rustgis_data::progress::check().map_err(|e| e.to_string())?;
             rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;

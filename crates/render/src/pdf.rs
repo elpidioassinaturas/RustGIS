@@ -1,14 +1,15 @@
 //! A PDF writer. A page is either one picture (a rendered page, at the page's size) or a
 //! [`Drawing`] kept as vectors: its paths, text and pictures become the page's content, its text
-//! set in fonts whose glyphs are their outlines (Type 3), searchable and copyable through each
-//! font's map back to Unicode. A page's map frames can be georeferenced ([`Viewport`]), which
-//! makes the document a GeoPDF.
+//! set in its faces embedded as subsets, or in fonts whose glyphs are their outlines (Type 3)
+//! ([`Text`]); searchable and copyable either way, through each font's map back to Unicode. A
+//! page's map frames can be georeferenced ([`Viewport`]), which makes the document a GeoPDF.
 
 use tiny_skia::Pixmap;
 
 use crate::vector::{Drawing, Item, deflate_rows};
 
 mod content;
+mod embed;
 mod fonts;
 
 /// One PDF page and its size in millimetres. Pictures are compressed as they are made, so a long
@@ -224,15 +225,67 @@ impl Doc {
     }
 }
 
-/// Writes the pages as a PDF document.
+/// How a document's vector text is written (#1815).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Text {
+    /// In the faces it is set in, embedded as subsets, so that a vector editor reads it as text;
+    /// a face that can't be is set in outlines, and said ([`Outlined`]).
+    Fonts,
+    /// In fonts whose glyphs are their outlines (Type 3): searchable and copyable, but drawings
+    /// in a vector editor, as a print shop asking for outlined type wants.
+    Outlines,
+}
+
+/// A face whose text was set in outlines though [`Text::Fonts`] was asked for, and why.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Outlined {
+    pub face: String,
+    pub why: String,
+}
+
+/// Writes the pages as a PDF document, its text in outlines ([`Text::Outlines`]).
 pub fn write(pages: &[Page], title: &str) -> Vec<u8> {
+    write_with(pages, title, Text::Outlines).0
+}
+
+/// Writes the pages as a PDF document, its text as `text` says, and the faces set in outlines
+/// though fonts were asked for.
+pub fn write_with(pages: &[Page], title: &str, text: Text) -> (Vec<u8>, Vec<Outlined>) {
+    // Every face's glyphs, gathered before any is written: a face is embedded or not as a whole,
+    // and its glyphs' codes are the subset's.
+    let mut used: Vec<(&'static ab_glyph::FontRef<'static>, Vec<ab_glyph::GlyphId>)> = Vec::new();
+    if text == Text::Fonts {
+        let mut seen = (std::collections::HashMap::new(), std::collections::HashSet::new());
+        for p in pages {
+            if let Content::Vector { items, .. } = &p.content {
+                gather(items, &mut used, &mut seen);
+            }
+        }
+    }
+    let (mut real, mut outlined, mut room) = (Vec::new(), Vec::new(), embed::MAX_EMBEDDED);
+    for (font, glyphs) in used {
+        match embed::embed(font, &glyphs, room) {
+            Ok(e) => {
+                room = room.saturating_sub(e.file.len());
+                real.push((font, e));
+            }
+            Err(why) => outlined.push(Outlined { face: embed::face_name(font), why: why.to_string() }),
+        }
+    }
     // Georeferenced frames make the document PDF 1.7 with Adobe's extension level 3, where
-    // geospatial measures are defined (since taken into ISO 32000-2); what else it holds is 1.4.
+    // geospatial measures are defined (since taken into ISO 32000-2); an embedded CFF face makes
+    // it 1.6, where OpenType font files are; what else it holds is 1.4.
     let geo = pages.iter().any(|p| !p.viewports.is_empty());
-    let mut doc = if geo { Doc::of_version("1.7") } else { Doc::new() };
+    let mut doc = if geo {
+        Doc::of_version("1.7")
+    } else if real.iter().any(|(_, e)| e.cff) {
+        Doc::of_version("1.6")
+    } else {
+        Doc::new()
+    };
     let (catalog, tree, info) = (doc.reserve(), doc.reserve(), doc.reserve());
     let ids: Vec<usize> = pages.iter().map(|_| doc.reserve()).collect();
-    let mut fonts = fonts::Fonts::default();
+    let mut fonts = fonts::Fonts::with_real(&mut doc, real);
     for (p, &page) in pages.iter().zip(&ids) {
         let (pw, ph) = (p.width_mm * 72.0 / 25.4, p.height_mm * 72.0 / 25.4);
         let (contents, resources) = match &p.content {
@@ -273,7 +326,34 @@ pub fn write(pages: &[Page], title: &str) -> Vec<u8> {
     let kids: Vec<String> = ids.iter().map(|i| format!("{i} 0 R")).collect();
     doc.put(tree, format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), pages.len()).as_bytes());
     doc.put(info, format!("<< /Title {} /Producer (RustGIS) >>", text_string(title)).as_bytes());
-    doc.finish(catalog, info)
+    (doc.finish(catalog, info), outlined)
+}
+
+/// Faces' places in the list of glyphs used, by their address, and the glyphs already listed.
+type Seen = (std::collections::HashMap<usize, usize>, std::collections::HashSet<(usize, u16)>);
+
+/// Adds the glyphs `items` set to `used`, face by face, each once.
+fn gather(items: &[Item], used: &mut Vec<(&'static ab_glyph::FontRef<'static>, Vec<ab_glyph::GlyphId>)>, seen: &mut Seen) {
+    for item in items {
+        match item {
+            Item::Glyphs(run) => {
+                let key = std::ptr::from_ref(run.font) as usize;
+                let at = *seen.0.entry(key).or_insert_with(|| {
+                    used.push((run.font, Vec::new()));
+                    used.len() - 1
+                });
+                for g in &run.glyphs {
+                    if seen.1.insert((key, g.id.0))
+                        && let Some((_, glyphs)) = used.get_mut(at)
+                    {
+                        glyphs.push(g.id);
+                    }
+                }
+            }
+            Item::Group(g) => gather(&g.items, used, seen),
+            Item::Fill { .. } | Item::Stroke { .. } | Item::Image(_) => {}
+        }
+    }
 }
 
 /// A PDF literal string of any length (a WKT): ASCII in parentheses, its backslashes and
