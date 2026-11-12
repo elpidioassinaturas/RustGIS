@@ -37130,9 +37130,12 @@ fn a_layout_pdf_sets_its_text_in_its_fonts() {
     let (outlines, said) = export(&mut s, json!({"pdf": {"text": "outlines"}})).unwrap();
     assert!(outlines.contains("/Subtype /Type3") && !outlines.contains("/Type0"), "{said:?}");
     assert_eq!(export(&mut s, json!({"pdf": {"text": "fonts"}})).unwrap().0.len(), pdf.len());
-    for bad in [json!({"pdf": {"text": "curves"}}), json!({"pdf": "outlines"}), json!({"pdf": {"text": 1}})] {
+    for bad in
+        [json!({"pdf": {"text": "curves"}}), json!({"pdf": "outlines"}), json!({"pdf": {"text": 1}}), json!({"pdf": {"txt": "outlines"}})]
+    {
         let err = export(&mut s, bad.clone()).unwrap_err();
-        assert!(err.contains("\"fonts\" or \"outlines\"") || err.contains("fonts\"|\"outlines"), "{bad}: {err}");
+        let said = ["\"fonts\" or \"outlines\"", "fonts\"|\"outlines", "pdf has no key \"txt\": its keys are text"];
+        assert!(said.iter().any(|s| err.contains(s)), "{bad}: {err}");
     }
     let _ = std::fs::remove_file(&path);
 }

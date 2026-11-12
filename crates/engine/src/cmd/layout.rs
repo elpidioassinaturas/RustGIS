@@ -4465,13 +4465,20 @@ pub(crate) fn pictured_notices(s: &mut Session, frames: &[(u32, String)], pages:
     }
 }
 
+/// The keys `layout.export`'s `"pdf"` takes.
+const PDF_KEYS: &[&str] = &["text"];
+
 /// How `layout.export`'s `"pdf": {"text": …}` asks a PDF's text to be written (#1815): in its
 /// fonts unless it says `"outlines"`. It is checked whatever the export writes, a PNG or SVG
-/// too, so a script's mistake shows on its first run.
+/// too, so a script's mistake shows on its first run; a key it doesn't know is refused, with
+/// the keys it takes.
 fn pdf_text(p: &Value) -> Result<rustgis_render::pdf::Text, String> {
     use rustgis_render::pdf::Text;
     let Some(pdf) = p.get("pdf").filter(|v| !v.is_null()) else { return Ok(Text::Fonts) };
     let Some(pdf) = pdf.as_object() else { return Err(r#"pdf is an object: {"text": "fonts"|"outlines"}"#.into()) };
+    if let Some(key) = pdf.keys().find(|k| !PDF_KEYS.contains(&k.as_str())) {
+        return Err(format!("pdf has no key \"{key}\": its keys are {}", PDF_KEYS.join(", ")));
+    }
     match pdf.get("text") {
         None | Some(Value::Null) => Ok(Text::Fonts),
         Some(v) if v == "fonts" => Ok(Text::Fonts),
