@@ -202,8 +202,10 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     class, and for Classify the classes from its lowest value to its highest. With **All
     classes** it lists every class of a Unique Values or Classify renderer. A
     colour table lists the values the raster holds either way: its 256 entries have no
-    meaningful "all". Rasters on a ramp (Stretch, a tinted hillshade) and RGB composites are left
-    out: a colorbar keys the ramp. **Exclude** leaves a classified raster out by its name. A
+    meaningful "all". The rows are the Layers pane's, and the legend also lists them under a mask
+    where the pane doesn't yet: a colour table over too many values lists those its mask leaves
+    when they are few enough. Rasters on a ramp (Stretch, a tinted hillshade) and RGB composites are left out: a
+    colorbar keys the ramp. **Exclude** leaves a classified raster out by its name. A
     cloud-optimised GeoTIFF read in place keeps an overview, and its classes are those of the
     overview, which can miss a rare one the map draws at full resolution; so can the classes of a
     raster under a mask with more than about four million cells, whose masked statistics read a
