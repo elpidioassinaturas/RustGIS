@@ -531,15 +531,16 @@ cell by 1/distanceᴾ, where P is the distance coefficient (2 by default). Lines
 contribute their vertices. Leave the extent empty to use the input's, or give it as
 `xmin,ymin,xmax,ymax`. `pixelSize` sets the cell size; when omitted it starts at 300 cells
 across the extent and coarsens for large inputs. The result is a Float32 GeoTIFF layer. The
-**Geostatistical Wizard** is a separate IDW workflow, in degrees: it uses 12 nearest neighbours
-by default (`neighbors`), rather than every point.
+**Geostatistical Wizard** is a separate IDW workflow, with its coordinate system from Environments
+(below): it uses 12 nearest neighbours by default (`neighbors`), rather than every point.
 
 IDW Interpolation and Ordinary Kriging make their raster in the projected coordinate system given
 as `crs` (such as `EPSG:32616` for UTM zone 16N, or a State Plane code), and then take the
 extent, pixel size and Kriging's `range` in its units, usually metres or feet. Without `crs`
 they work in longitude and latitude, with all three in degrees, as they did before `crs` was
-there; for a layer read from a projected file they then say so, naming its system. A geographic
-`crs` is refused, and points the system can't hold are left out and counted.
+there; for a layer read from a projected file they then say so, naming its system. `EPSG:4326`
+also means degrees; another geographic `crs` is refused, and points the system can't hold are left
+out and counted.
 
 **Ordinary Kriging** (`kriging`) estimates both a value and its uncertainty. Set `input` and a
 numeric `field`, then choose a `model`: **Spherical** (default), **Exponential** or **Gaussian**.
@@ -623,7 +624,8 @@ feature of the clip, erase, overlay, update or split layer with no polygon, and 
 without geometry, a point or line in the polygon layer (as Minimum Bounding Geometry's flat hulls
 are), or an empty polygon. Clip also leaves out a mask whose polygons, unioned, have no area, and
 the others a feature of several parts that, unioned, come to nothing (Update writes it as it is),
-saying how many. When none of the features of that layer is left, Clip, Intersect and Split, whose
+saying how many. Clip also says how many input features it leaves out for having no geometry, or
+an empty one. When none of the features of that layer is left, Clip, Intersect and Split, whose
 result would be empty, stop with an error. In all of them, a feature selected twice in that layer is
 used once.
 
@@ -1242,9 +1244,17 @@ Rasters these make are kept in the project. **Environments** (`gp.env`) set an e
 view, full extent, a layer or a longitude/latitude box (or `null` to clear it). For tools that
 honour it, this restricts an unselected main feature input by bounding-box intersection, not by
 clipping its geometry; an existing selection takes precedence and overlay inputs stay whole.
-The Geostatistical Wizard uses the environment's extent and raster cell size (degrees).
-IDW Interpolation and Ordinary Kriging instead use their own `extent` and `pixelSize` parameters;
-the environment does not set their output grids.
+The environment can also set a projected coordinate system for the Geostatistical Wizard's rasters
+(`gp.env={"crs": "EPSG:32616"}`, or **Set Coordinate System**; `null` goes back to degrees), and
+`cellSize` is then in its units. That cell size is kept apart from the cell size in degrees, so an
+older RustGIS opening the project keeps making rasters in degrees; `gp.env` returns the system and
+its cell size as `projected` (`crs` there is the text to give it back), and `cellSize` stays the one
+in degrees. The Geostatistical Wizard
+uses the environment's extent, coordinate system and cell size; its own `crs` and `cellSize` win
+over them (`EPSG:4326` asks for degrees, with the degree cell size), and without a system it works
+in degrees, as before. IDW Interpolation and Ordinary Kriging
+instead use their own `extent`, `pixelSize` and `crs` parameters; the environment does not set
+their output grids.
 
 **Threads** (`gp.threads={"threads": 8}`) sets the most threads one piece of work uses, 1 to 1024
 (`null`: the default, the computer's cores up to 16). It is never more than the cores, holds for
@@ -1438,7 +1448,8 @@ save and run models without the canvas:
 
 ## Imagery
 
-The Analyze tab's imagery groups open their tools in the Workflows pane:
+The Imagery tab's groups open their tools in the Workflows pane. The tab belongs to the Imagery
+[extension](index.md#extensions): turn it on in Plugins › Extensions to show the tab:
 
 - **Ortho Mapping** and **Reality Mapping** workspaces mosaic georeferenced images into an
   orthomosaic, or elevation rasters into a surface model that exports as a 3D mesh (OBJ).
@@ -1755,11 +1766,11 @@ the wrong field.
 
 ## Deep learning and hosted imagery
 
-**Analyze › Deep Learning Tools** trains a neural network (a multilayer perceptron) on the pixels
+**Imagery › Deep Learning Tools** trains a neural network (a multilayer perceptron) on the pixels
 under training polygons and classifies every pixel, adding a class raster with a confidence band
 and reporting the accuracy on held-back pixels. Run from its pane in the desktop app, it trains
 on every sampled pixel for all the epochs asked, however long that takes, and can be cancelled;
 elsewhere it keeps to a few seconds of work (see the limits above). Trained models stay in the project; **Publish ›
-Share As › Deep Learning** saves one as a package to apply in other projects. **Analyze › Create
+Share As › Deep Learning** saves one as a package to apply in other projects. **Imagery › Create
 Hosted Imagery** cuts a raster into XYZ web map tiles (PNG, transparent outside the raster) with
 a TileJSON file and a viewer page.
