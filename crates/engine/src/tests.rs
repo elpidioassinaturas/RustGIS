@@ -41907,3 +41907,41 @@ fn the_footer_lines_up_with_a_legend_at_the_right() {
         assert_eq!(around, footer(), "{legend:?}");
     }
 }
+
+/// `layout.publication` itself lines the footer's right column up with a legend placed at the
+/// right (#1379): with `"arrangement": "legendRight"` and a legend wide enough to start between
+/// 45 % and 70 % of the frame's width, the Reference Box starts where the Legend Box does.
+#[test]
+fn a_publication_footer_lines_up_with_its_legend() {
+    let piaui = json!([-46.8, -11.6, -38.5, -2.2]);
+    let mut seen = Vec::new();
+    for name in
+        ["Countries of the world", "Countries of the world, Natural Earth", "Countries of the world, Natural Earth 1:110m (public domain)"]
+    {
+        let mut s = world();
+        s.run("layer.rename", &json!({"layer": "Countries", "name": name})).unwrap();
+        s.run(
+            "layout.publication",
+            &json!({"profile": "a4-portrait", "extent": piaui, "arrangement": "legendRight", "author": "", "sources": "Natural Earth"}),
+        )
+        .unwrap();
+        let l = s.project.layouts.last().unwrap();
+        let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap();
+        let frame = l.elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap();
+        let (legend, reference, sources) = (named("Legend Box"), named("Reference Box"), named("Sources Box"));
+        let at = (legend.x - frame.x) / frame.w;
+        let right = legend.x + legend.w >= frame.x + 0.9 * frame.w;
+        seen.push((name, at, right, reference.x, legend.x));
+        if (0.45..=0.70).contains(&at) && right {
+            assert!(
+                (reference.x - legend.x).abs() < 1e-9,
+                "{name}: the Reference Box at {} mm, the legend at {} mm",
+                reference.x,
+                legend.x
+            );
+            assert!(sources.x + sources.w < reference.x && reference.x + reference.w <= frame.x + frame.w + 1e-9, "{name}");
+            return;
+        }
+    }
+    panic!("no legend fell between 45 % and 70 % of the frame at its right: {seen:?}");
+}
