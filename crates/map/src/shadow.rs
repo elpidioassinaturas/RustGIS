@@ -8,8 +8,8 @@
 //! suns, franciscoparrao/surtgis#153), and keeps the steepest angle up to the terrain it passes.
 //! The share of the disc above that angle is the light the cell keeps. The trace stops once
 //! nothing farther can change it: the terrain left can't rise above the angle kept (or the disc's
-//! lower edge), or the disc is already hidden. The sky is traced the same way, in
-//! [`SKY_DIRECTIONS`] directions. Cells outside the raster cast no shadow on it, and hide none of
+//! lower edge), or the disc is already hidden. The sky is traced likewise, in [`SKY_DIRECTIONS`]
+//! directions, reading the two cells either side of each step. Cells outside the raster cast no shadow on it, and hide none of
 //! its sky.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -85,12 +85,13 @@ pub const SKY_SPREAD: usize = 16;
 /// half sphere above its horizon, `1 − mean(sin γ)` over [`SKY_DIRECTIONS`] directions, `γ` being
 /// the angle up to the horizon in each (0 where the terrain falls away, so a peak sees the whole
 /// sky), looked for up to [`SKY_REACH`] cells away, in steps [`SKY_SPREAD`] spreads. Heights are
-/// read between cells as [`light`] reads them; cells that are no data or masked see the whole sky
-/// and hide none of it. Threads, `stop` and Cancel are as [`light`] has them.
+/// read from the two cells either side of each step, the nearer one where the other is no data;
+/// cells that are no data or masked see the whole sky and hide none of it. Threads, `stop` and
+/// Cancel are as [`light`] has them.
 ///
 /// This is the sky-view factor of Zakšek, Oštir and Kokalj, "Sky-View Factor as a Relief
-/// Visualization Technique", Remote Sensing 3(2), 398–415, 2011 (doi:10.3390/rs3020398), with the
-/// horizon traced as [`light`] traces it; no other code was followed.
+/// Visualization Technique", Remote Sensing 3(2), 398–415, 2011 (doi:10.3390/rs3020398), its
+/// horizon traced here; no other code was followed.
 pub fn sky(r: &Raster, band: usize, mask: &RasterMask, z_factor: f64, threads: usize, stop: &AtomicBool) -> Result<Vec<u8>, Unlit> {
     let (cx, cy) = r.cell_size_m();
     let reach = SKY_REACH * cx.max(cy);
