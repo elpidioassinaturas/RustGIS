@@ -85,10 +85,10 @@ fn saved_arrangements_are_kept_and_restored() {
         ..Services::default()
     });
     assert_eq!(restored.session.layout_arrangements.len(), 1);
-    let said = restored.session.notices.iter().filter(|n| n.text.contains("2 saved arrangements")).count();
-    assert_eq!(said, 0, "one notice, without a count's plural");
-    let said = restored.session.notices.iter().filter(|n| n.text.contains("can't use: 3")).count();
-    assert_eq!(said, 1);
+    // One notice for them all, with their count.
+    let said: Vec<_> = restored.session.notices.iter().filter(|n| n.text.contains("arrangements of publication layouts")).collect();
+    assert_eq!(said.len(), 1);
+    assert!(said[0].text.contains("can't use: 3"), "{}", said[0].text);
     restored.run("layout.arrangement", json!({"save": "Half", "arrangement": "mirrored"})).unwrap();
     let written: serde_json::Value = serde_json::from_str(&last(SAVED)).unwrap();
     // Kept as they were, a name in other capitals too; the one saved here under that very name
