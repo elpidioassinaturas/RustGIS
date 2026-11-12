@@ -3576,6 +3576,34 @@ fn shaded_relief_keeps_its_cast_shadows() {
     assert_eq!(shadow(&s), 0.0, "a new Shaded Relief casts none");
 }
 
+/// Shaded Relief's sky visibility is set, clamped, kept when left out (the shadows' too), saved
+/// with the project only when there is some, and drawn in an export (waited for) with nothing to
+/// say.
+#[test]
+fn shaded_relief_keeps_its_sky_visibility() {
+    let mut s = with_raster();
+    let light = |s: &Session| match s.map().layers.first().and_then(|l| l.raster.as_ref()).map(|r| &r.style.renderer) {
+        Some(rustgis_map::RasterRenderer::ShadedRelief { shadow, sky, .. }) => (*shadow, *sky),
+        other => panic!("{other:?}"),
+    };
+    s.run("raster.symbology", &json!({"type": "shadedRelief"})).unwrap();
+    assert_eq!(light(&s), (0.0, 0.0));
+    let skies_saved = |s: &mut Session| s.project.saved_text(None).unwrap().0.matches("\"sky\"").count();
+    let before = skies_saved(&mut s);
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "sky": 0.6, "shadow": 0.5})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": 200})).unwrap();
+    assert_eq!(light(&s), (0.5, 0.6), "left out, kept");
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "sky": -3})).unwrap();
+    assert_eq!(light(&s), (0.5, 0.0));
+    assert_eq!(skies_saved(&mut s), before, "saved only when there is some");
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "sky": 4})).unwrap();
+    assert_eq!(light(&s), (0.5, 1.0));
+    assert_eq!(skies_saved(&mut s), before + 1);
+    s.notices.clear();
+    assert!(crate::cmd::share::map_png(&mut s, Some(300.0), Some(200.0), None).unwrap().len() > 1000);
+    assert!(s.notices.iter().all(|n| !n.text.contains("sky")), "{:?}", s.notices);
+}
+
 /// A map export that draws a layer without its cast shadows says so, as such (not as a tile layer
 /// that failed), in a PNG, a GeoTIFF and the app's map image alike; one with nothing missing says
 /// nothing.
