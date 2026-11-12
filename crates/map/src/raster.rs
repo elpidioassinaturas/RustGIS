@@ -2498,14 +2498,13 @@ mod tests {
         };
         let first = rl.cast_shadows(false, (0, 1), told("starter"));
         let joined = rl.cast_shadows(false, (5, 1), told("joiner"));
-        // Joined while under way (it traces far under a 3° sun), both are told; done already, the
-        // joiner has the grid and needs no call.
-        if first == CastShadows::Pending && joined == CastShadows::Pending {
-            let mut heard = vec![landings.recv_timeout(std::time::Duration::from_secs(120)).unwrap()];
-            heard.push(landings.recv_timeout(std::time::Duration::from_secs(120)).unwrap());
-            heard.sort_unstable();
-            assert_eq!(heard, ["joiner", "starter"]);
-        }
+        // Joined while under way (it traces far under a 3° sun, for longer than the next call
+        // takes), both are told.
+        assert!(first == CastShadows::Pending && joined == CastShadows::Pending, "joined while under way");
+        let mut heard = vec![landings.recv_timeout(std::time::Duration::from_secs(120)).unwrap()];
+        heard.push(landings.recv_timeout(std::time::Duration::from_secs(120)).unwrap());
+        heard.sort_unstable();
+        assert_eq!(heard, ["joiner", "starter"]);
         assert!(matches!(rl.cast_shadows(true, (0, 1), || {}), CastShadows::Ready(_)));
     }
 

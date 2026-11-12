@@ -6420,10 +6420,13 @@ pub(crate) fn frame_with_shadows_to_come<T>(f: impl FnOnce() -> T) -> (T, bool) 
     (out, to_come)
 }
 
-/// Waits for the cast shadows of the map's visible Shaded Relief layers, as an export does (it
+/// Waits for the cast shadows of the map's Shaded Relief layers drawn in `view` (visible, in
+/// their scale range and not held by a group, as `render_frame` draws them), as an export does (it
 /// runs off the interface's thread); the wait gives up when the run is cancelled.
-fn wait_for_cast_shadows(map: &Map) {
-    for layer in map.layers.iter().filter(|l| l.visible) {
+fn wait_for_cast_shadows(map: &Map, view: &View) {
+    let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
+    let held = map.held_by_group(scale);
+    for layer in map.layers.iter().filter(|l| l.visible && l.in_scale_range(scale) && !held.contains(&l.id)) {
         if let Some(rl) = &layer.raster {
             rl.cast_shadows(true, (map.instance_id(), layer.instance_id()), shadows_landed);
         }
@@ -6453,7 +6456,7 @@ fn complete(map: &mut Map, view: &View, record: bool) -> Option<Rendered> {
     // Cast shadows still being worked out are waited for first, unless this draws on the
     // interface's thread (see `on_the_interface_thread`).
     if !NO_SHADOW_WAIT.with(std::cell::Cell::get) {
-        wait_for_cast_shadows(map);
+        wait_for_cast_shadows(map, view);
     }
     // What had come when it drew: what lands meanwhile is news to the wait.
     let mut drawn_at = rustgis_tiles::cache::generation();
@@ -6544,13 +6547,19 @@ pub fn render_placed(map: &mut Map, view: &View) -> Result<Placed, String> {
     let revisions = archive_revisions([&*map]);
     // Layers drawn without their cast shadows are said as gaps, not as tile layers that failed;
     // what frames before it said is kept for `shadows_said`.
-    let before = take_shadow_notices();
+    let (before, before_come) = (take_shadow_notices(), SHADOWS_TO_COME.with(|c| c.replace(false)));
     let r = render_exported(map, view);
-    let shadows = take_shadow_notices();
+    let (shadows, to_come) = (take_shadow_notices(), SHADOWS_TO_COME.with(|c| c.replace(before_come)));
     SHADOW_NOTICES.with(|n| *n.borrow_mut() = before);
     let r = r?;
     let tile_errors: Vec<&String> = r.tile_errors.iter().filter(|e| !shadows.contains(e)).collect();
     let mut gaps = shadows;
+    if to_come {
+        gaps.push(
+            "some layers' cast shadows were still being worked out, as the window doesn't wait for them, so they are drawn without them: export again once the map shows them"
+                .to_string(),
+        );
+    }
     if r.tiles_pending {
         gaps.push("some tiles were still on their way when the export stopped waiting, so parts of tile layers are empty: export again once the map has drawn them".to_string());
     }
@@ -8632,6 +8641,43 @@ mod tests {
         let shaded = render_complete(&mut m, &view).unwrap();
         assert!(!shaded.tiles_pending);
         assert_ne!(plain.pixmap.data(), shaded.pixmap.data(), "drawn with its shadows");
+    }
+
+    /// An export doesn't wait for, nor start, the cast shadows of a layer it doesn't draw: one
+    /// outside its scale range, or held by a group.
+    #[test]
+    fn an_export_waits_only_for_the_cast_shadows_it_draws() {
+        let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 1200.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
+        for grouped in [false, true] {
+            let mut m = hill_map();
+            let id = m.layers.iter().find(|l| l.raster.is_some()).map(|l| l.id).unwrap();
+            let l = m.layer_mut(id).unwrap();
+            l.visible = true;
+            l.raster.as_mut().unwrap().style.renderer = rustgis_map::RasterRenderer::ShadedRelief {
+                band: 0,
+                ramp: None,
+                azimuth: 200.0,
+                altitude: 5.0,
+                z_factor: 1.0,
+                shadow: 1.0,
+            };
+            // Drawn only zoomed in past 1:1: or in a group drawn only there.
+            if grouped {
+                let mut g = rustgis_map::LayerGroup::new("Relief");
+                g.children = vec![id];
+                g.min_scale = Some(1.0);
+                m.add_group(g);
+            } else {
+                l.min_scale = Some(1.0);
+            }
+            render_complete(&mut m, &view).unwrap();
+            let rl = m.layer(id).and_then(|l| l.raster.as_ref()).unwrap();
+            assert!(
+                matches!(rl.cast_shadows(false, (0, 0), || {}), rustgis_map::raster::CastShadows::Pending),
+                "grouped {grouped}: nothing was worked out for it"
+            );
+        }
     }
 
     #[test]

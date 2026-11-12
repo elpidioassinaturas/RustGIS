@@ -3239,6 +3239,19 @@ fn every_drawing_of_the_map_says_a_layer_drawn_without_its_cast_shadows() {
         "{:?}",
         s.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
     );
+    // A file exported there (a script's, or while a style's view loads) says it was written
+    // without them, a GeoTIFF too.
+    let dir = std::env::temp_dir().join(format!("rustgis-cast-here-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (azimuth, name) in [(124, "here.png"), (125, "here.tif")] {
+        s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": azimuth, "shadow": 1})).unwrap();
+        s.notices.clear();
+        let path = dir.join(name).display().to_string();
+        s.run("share.exportMap", &json!({"path": path, "width": 200, "height": 150})).unwrap();
+        let texts: Vec<&String> = s.notices.iter().map(|n| &n.text).collect();
+        assert!(texts.iter().any(|t| t.starts_with(&path) && t.contains("still being worked out")), "{name}: {texts:?}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
