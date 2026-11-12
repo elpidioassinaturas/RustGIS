@@ -11,6 +11,7 @@ use rustgis_map::layout::{
     MAX_SCALE_DIVISIONS, MAX_TICK_MM, MIN_ELEMENT_MM, MapSeries, Orientation, PAGES, ScaleBarStyle, ScaleUnits, TextAlign, TickSide,
     fit_scale, line_angle, line_at_angle, line_length,
 };
+use rustgis_map::symbology::{Dash, MAX_DASH_STEP, MAX_DASH_STEPS};
 use rustgis_map::{Map, Rgba};
 use serde_json::{Value, json};
 
@@ -93,10 +94,10 @@ pub fn commands() -> Vec<C> {
             r#"{"layout"?, "shape"?: "rectangle"|"circle"|"ellipse"|"polygon"|"lasso", "points"?: [[u, v], …] (polygon/lasso, 0..1 across the frame), "map"?: name, "x"?, "y"?, "w"?, "h"?: mm}"#,
         ),
         C::new("layout.addElement", "Add Element", "Publish › Map Surrounds", add_element).inputs(element_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
-            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"colorbar"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle" (a neatline framing the page unless any of x, y, w, h is given)|"ellipse"|"circle"|"line"|"arrow"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator, which also takes "color" and "width" in points, default red and 2), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA" (text, dynamicText, line, arrow, rectangle, ellipse, circle: its outline; extentIndicator; grid; scaleBar; refused for other kinds), "bold"?: bool (text), "italic"?: bool, "align"?: "left"|"center"|"right", "letterSpacing"?: points, -5 to 50 (text, dynamicText), "font"?: "sans"|"serif"|an installed font family's name, as labels.fonts lists them (text, dynamicText; a family not installed here is drawn in its fallback, and a serif where none is installed in the sans, with a warning; refused for other kinds), "fallback"?: "sans"|"serif" (a named font's, where it isn't installed; default its own class, else sans), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "hideOther"?: bool (legend: leave out <all other values>), "exclude"?: [layer names] (legend: layers it leaves out though the map draws them), "columns"?: 1..3 (legend: the columns its rows are laid in; default 1), "orientation"?: "horizontal"|"vertical" (colorbar), "ticks"?: 2..21 (colorbar: labelled values, ends included), "tickSide"?: "below"|"above"|"right"|"left" (colorbar), "reverse"?: bool (colorbar: high values first), "fill"?: "#RRGGBBAA" (rectangle, ellipse, circle, northArrow; scaleBar: the alternating bar's light divisions, default white; refused for other kinds), "width"?: outline width in points (rectangle, ellipse, circle; 0 for none) or line width in points (line, grid), "radius"?: mm, 0 to 50 (rectangle: rounded corners), "dir"?: "horizontal"|"vertical"|"falling"|"rising" (line), "head"?: "none"|"end"|"start"|"both" (line; default "end" for an arrow), "angle"?: degrees anticlockwise from pointing right, centred on the page unless x or y is given (line, arrow; it sets the box and the direction, so w, h and dir are not used with it), "length"?: mm (line, arrow), "image"?: base64, "path"?: picture file, "layer"?: (table, chart; colorbar: a raster layer, default the top visible one), "field"?, "label"?, "rows"?, "step"?: degrees, or a measured grid's units (metres) (0 picks one), "type"?: "graticule" (latitudes and longitudes, default) | "measured" (eastings and northings in a projected system, as ArcGIS Pro's measured grid), "crs"?: a measured grid's coordinate system: EPSG:25832, WKT or a PROJ string ("" or none: the map's when projected, else the UTM zone at the frame's centre), "short"?: bool (a measured grid's labels as their kilometres' last two digits, 43 for 543000), "labels"?: bool (grid) | {"<layer>": "<label>"} (legend: what it shows instead of a layer's name, as in layout.update; a layer the map hasn't is refused), "style"?: "lines"|"ticks"|"linesAndTicks" (grid) or "classic"|"compass"|"triangle"|"star" (northArrow) or "alternating"|"stepped"|"line" (scaleBar), "tickLength"?: mm, "format"?: "decimal"|"dms", "hemisphere"?: bool (N/S/E/W rather than a sign), "edges"?: ["top","bottom","left","right"] (labelled edges), "labelOrientation"?: "horizontal"|"vertical", "off"?: bool (grid; options not given keep the grid's), "outline"?: "#RRGGBB" (northArrow, or a rectangle's, ellipse's or circle's outline instead of color; refused for other kinds), "units"?: "auto"|"kilometers"|"meters"|"miles"|"feet", "divisions"?: 1..10 (scaleBar, whose "color" is its lines, dark divisions and labels, default #222222), "x"?, "y"?, "w"?, "h"?: mm}"##,
+            r##"{"layout"?, "kind": "northArrow"|"scaleBar"|"legend"|"colorbar"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle" (a neatline framing the page unless any of x, y, w, h is given)|"ellipse"|"circle"|"line"|"arrow"|"extentIndicator"|"grid", "frame"?: element id (default: the first map frame), "of"?: frame id (extentIndicator, which also takes "color" and "width" in points, default red and 2), "text"?, "size"?, "color"?: "#RRGGBB"|"#RRGGBBAA" (text, dynamicText, line, arrow, rectangle, ellipse, circle: its outline; extentIndicator; grid; scaleBar; refused for other kinds), "bold"?: bool (text), "italic"?: bool, "align"?: "left"|"center"|"right", "letterSpacing"?: points, -5 to 50 (text, dynamicText), "rotation"?: degrees clockwise about the box's centre, 90 reading top to bottom and -90 bottom to top, kept within -180 to 180 (text, dynamicText; refused for other kinds), "font"?: "sans"|"serif"|an installed font family's name, as labels.fonts lists them (text, dynamicText; a family not installed here is drawn in its fallback, and a serif where none is installed in the sans, with a warning; refused for other kinds), "fallback"?: "sans"|"serif" (a named font's, where it isn't installed; default its own class, else sans), "title"?: legend title (default "Legend"), "allClasses"?: bool (legend: every class, not only those the frame draws), "hideOther"?: bool (legend: leave out <all other values>), "exclude"?: [layer names] (legend: layers it leaves out though the map draws them), "columns"?: 1..3 (legend: the columns its rows are laid in; default 1), "orientation"?: "horizontal"|"vertical" (colorbar), "ticks"?: 2..21 (colorbar: labelled values, ends included), "tickSide"?: "below"|"above"|"right"|"left" (colorbar), "reverse"?: bool (colorbar: high values first), "fill"?: "#RRGGBBAA" (rectangle, ellipse, circle, northArrow; scaleBar: the alternating bar's light divisions, default white; refused for other kinds), "width"?: outline width in points (rectangle, ellipse, circle; 0 for none) or line width in points (line, grid), "radius"?: mm, 0 to 50 (rectangle: rounded corners), "dash"?: [points, …] (line, arrow, and a rectangle's, ellipse's or circle's outline: dash, gap, … in turn, as layer.lineStrokes takes it, at most 8, each 0 to 500; an arrow's heads stay solid; [] or null for solid; refused, null too, for other kinds), "dir"?: "horizontal"|"vertical"|"falling"|"rising" (line), "head"?: "none"|"end"|"start"|"both" (line; default "end" for an arrow), "angle"?: degrees anticlockwise from pointing right, centred on the page unless x or y is given (line, arrow; it sets the box and the direction, so w, h and dir are not used with it), "length"?: mm (line, arrow), "image"?: base64, "path"?: picture file, "layer"?: (table, chart; colorbar: a raster layer, default the top visible one), "field"?, "label"?, "rows"?, "step"?: degrees, or a measured grid's units (metres) (0 picks one), "type"?: "graticule" (latitudes and longitudes, default) | "measured" (eastings and northings in a projected system, as ArcGIS Pro's measured grid), "crs"?: a measured grid's coordinate system: EPSG:25832, WKT or a PROJ string ("" or none: the map's when projected, else the UTM zone at the frame's centre), "short"?: bool (a measured grid's labels as their kilometres' last two digits, 43 for 543000), "labels"?: bool (grid) | {"<layer>": "<label>"} (legend: what it shows instead of a layer's name, as in layout.update; a layer the map hasn't is refused), "style"?: "lines"|"ticks"|"linesAndTicks" (grid) or "classic"|"compass"|"triangle"|"star" (northArrow) or "alternating"|"stepped"|"line" (scaleBar), "tickLength"?: mm, "format"?: "decimal"|"dms", "hemisphere"?: bool (N/S/E/W rather than a sign), "edges"?: ["top","bottom","left","right"] (labelled edges), "labelOrientation"?: "horizontal"|"vertical", "off"?: bool (grid; options not given keep the grid's), "outline"?: "#RRGGBB" (northArrow, or a rectangle's, ellipse's or circle's outline instead of color; refused for other kinds), "units"?: "auto"|"kilometers"|"meters"|"miles"|"feet", "divisions"?: 1..10 (scaleBar, whose "color" is its lines, dark divisions and labels, default #222222), "x"?, "y"?, "w"?, "h"?: mm}"##,
         ),
         C::new("layout.update", "Element Properties", "Publish › Element", update).inputs(update_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
-            r##"{"layout"?, "element": id, "x"?, "y"?, "w"?, "h"?: mm, "name"?, "visible"?, "locked"?: bool (a locked element takes no other change until unlocked; "locked": false unlocks it and may come with changes), "text"?, "size"?, "color"? (text, line, rectangle, ellipse: its outline; scaleBar: its lines, dark divisions and labels; refused for other elements), "bold"?, "italic"?, "align"?, "letterSpacing"?, "font"?: "sans"|"serif"|an installed font family's name, "fallback"?: "sans"|"serif" (text, as in layout.addElement; refused for other elements), "title"?, "allClasses"?: bool (legend), "hideOther"?: bool (legend), "exclude"?: [layer names] (legend; [] lists every layer again), "labels"?: {"<layer>": "<label>"|null} (legend: what it shows instead of a layer's name, up to 200 characters, a longer one is refused; each entry replaces that layer's label, null or "" shows its name again, {} every layer's; a layer the map hasn't is refused), "columns"?: 1..3 (legend), "orientation"?, "ticks"?, "tickSide"?, "reverse"?: (colorbar), "style"?: (northArrow, scaleBar), "fill"?, "outline"? (northArrow, rectangle, ellipse, and a scaleBar's fill; refused for other elements; for a rectangle or ellipse, color sets it when outline is not given; a scaleBar's fill is the alternating bar's light divisions), "radius"?: mm (rectangle: rounded corners), "width"?: points (rectangle, ellipse, line), "dir"?, "head"?, "angle"?, "length"? (line: turned or sized about its centre, then moved by any x or y; dir does not come with angle or length), "units"?, "divisions"? (scaleBar), "map"?, "scale"?, "center"?: [lon, lat], "bearing"?: degrees clockwise from north, "pitch"?: degrees of tilt (0 to 85), "grid"?: {grid options as in layout.addElement} | false (map frame), "extentIndicator"?: {"color"?, "width"?: points} | false (map frame: its extent indicator's style, or removes it), "layer"?: (colorbar: "" for the top visible raster), "field"?, "rows"?}"##,
+            r##"{"layout"?, "element": id, "x"?, "y"?, "w"?, "h"?: mm, "name"?, "visible"?, "locked"?: bool (a locked element takes no other change until unlocked; "locked": false unlocks it and may come with changes), "text"?, "size"?, "color"? (text, line, rectangle, ellipse: its outline; scaleBar: its lines, dark divisions and labels; refused for other elements), "bold"?, "italic"?, "align"?, "letterSpacing"?, "rotation"?: degrees clockwise (text, as in layout.addElement; refused for other elements), "font"?: "sans"|"serif"|an installed font family's name, "fallback"?: "sans"|"serif" (text, as in layout.addElement; refused for other elements), "title"?, "allClasses"?: bool (legend), "hideOther"?: bool (legend), "exclude"?: [layer names] (legend; [] lists every layer again), "labels"?: {"<layer>": "<label>"|null} (legend: what it shows instead of a layer's name, up to 200 characters, a longer one is refused; each entry replaces that layer's label, null or "" shows its name again, {} every layer's; a layer the map hasn't is refused), "columns"?: 1..3 (legend), "orientation"?, "ticks"?, "tickSide"?, "reverse"?: (colorbar), "style"?: (northArrow, scaleBar), "fill"?, "outline"? (northArrow, rectangle, ellipse, and a scaleBar's fill; refused for other elements; for a rectangle or ellipse, color sets it when outline is not given; a scaleBar's fill is the alternating bar's light divisions), "radius"?: mm (rectangle: rounded corners), "width"?: points (rectangle, ellipse, line), "dash"?: [points, …]|[]|null (line, rectangle, ellipse, as in layout.addElement; [] or null makes it solid; refused, null too, for other elements), "dir"?, "head"?, "angle"?, "length"? (line: turned or sized about its centre, then moved by any x or y; dir does not come with angle or length), "units"?, "divisions"? (scaleBar), "map"?, "scale"?, "center"?: [lon, lat], "bearing"?: degrees clockwise from north, "pitch"?: degrees of tilt (0 to 85), "grid"?: {grid options as in layout.addElement} | false (map frame), "extentIndicator"?: {"color"?, "width"?: points} | false (map frame: its extent indicator's style, or removes it), "layer"?: (colorbar: "" for the top visible raster), "field"?, "rows"?}"##,
         ),
         C::new("layout.guides", "Guides", "Publish › Page Setup", guides).inputs(object_inputs).roles(&[]).effects(crate::policy::Effects::NONE).params(
             r#"{"layout"?, "x"?: [mm] (vertical guides, from the page's left edge), "y"?: [mm] (horizontal guides, from its top edge), "clear"?: bool (remove every guide first)}"#,
@@ -519,7 +520,7 @@ fn pub_text(text: String, size: f64, color: Rgba, bold: bool, align: TextAlign) 
 
 /// [`pub_text`] in `font`.
 fn pub_text_in(text: String, size: f64, color: Rgba, bold: bool, align: TextAlign, font: FontFamily) -> ElementKind {
-    ElementKind::Text { text, size, color, bold, italic: false, align, letter_spacing: 0.0, font, font_name: None }
+    ElementKind::Text { text, size, color, bold, italic: false, align, letter_spacing: 0.0, font, font_name: None, rotation: 0.0 }
 }
 
 /// How a publication sheet is arranged around its map.
@@ -602,7 +603,7 @@ fn pub_box(fill: Rgba, outline: Rgba, width: f64) -> ElementKind {
 
 /// [`pub_box`] with its corners rounded by `radius` millimetres.
 fn pub_card(fill: Rgba, outline: Rgba, width: f64, radius: f64) -> ElementKind {
-    ElementKind::Rectangle { fill, outline, width, radius }
+    ElementKind::Rectangle { fill, outline, width, radius, dash: None }
 }
 
 /// The surrounds a publication layout places in the map frame's corners.
@@ -1305,6 +1306,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                                         width: 0.75,
                                         dir: LineDir::Vertical,
                                         head: LineHead::None,
+                                        dash: None,
                                     },
                                 ));
                             }
@@ -1432,7 +1434,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                             around.push((
                                 "Panel Rule".into(),
                                 (ix, y + 1.5 * k, tw, 1.0),
-                                ElementKind::Line { color: accent, width: 1.0, dir: LineDir::Horizontal, head: LineHead::None },
+                                ElementKind::Line { color: accent, width: 1.0, dir: LineDir::Horizontal, head: LineHead::None, dash: None },
                             ));
                             y += 4.0 * k;
                         }
@@ -1510,7 +1512,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                         around.push((
                             "Column Rule".into(),
                             (cx, cy, cw, 1.0),
-                            ElementKind::Line { color: accent, width: 1.5, dir: LineDir::Horizontal, head: LineHead::None },
+                            ElementKind::Line { color: accent, width: 1.5, dir: LineDir::Horizontal, head: LineHead::None, dash: None },
                         ));
                         cy += 3.0 * k;
                         if let Some(hd) = headings.get(2).filter(|h| !h.trim().is_empty()) {
@@ -1759,6 +1761,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     // Simplified sketches aren't the source's rows: saving them would overwrite it.
                     layer.gpkg = None;
                     layer.postgis = None;
+                    layer.synced = None;
                     layer.dataset.features = l
                         .dataset
                         .features
@@ -2730,6 +2733,13 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
     if kind != "rectangle" && p.get("radius").is_some_and(|v| !v.is_null()) {
         return Err(ONLY_RECTANGLE_RADIUS.into());
     }
+    // `null` too: on a line it means solid, so elsewhere it is refused rather than ignored.
+    if !matches!(kind, "line" | "arrow" | "rectangle" | "ellipse" | "circle") && p.get("dash").is_some() {
+        return Err(ONLY_DASH.into());
+    }
+    if !matches!(kind, "text" | "dynamicText") && gives(p, "rotation") {
+        return Err(ONLY_TEXT_ROTATION.into());
+    }
     if !matches!(
         kind,
         "text" | "dynamicText" | "rectangle" | "ellipse" | "circle" | "line" | "arrow" | "extentIndicator" | "grid" | "scaleBar"
@@ -2804,6 +2814,7 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
             let size = f(p, "size").unwrap_or(12.0).clamp(*fonts.start(), *fonts.end());
             let (italic, align, letter_spacing) = text_style(p, false, TextAlign::Left, 0.0)?;
             let (font, font_name) = text_font(p, (FontFamily::Sans, None))?;
+            let rotation = text_rotation(p)?.unwrap_or(0.0);
             let k = ElementKind::Text {
                 text,
                 size,
@@ -2814,6 +2825,7 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
                 letter_spacing,
                 font,
                 font_name,
+                rotation,
             };
             (if kind == "text" { "Text" } else { "Dynamic Text" }, place(p, l, (15.0, 12.0, 120.0, (size * 0.5).max(8.0)))?, k)
         }
@@ -2850,6 +2862,7 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
                 outline: color(p, "outline", color(p, "color", Rgba::rgb(0x22, 0x22, 0x22))?)?,
                 width: shape_width(p, 1.0)?.clamp(0.0, 50.0),
                 radius: corner_radius(p, 0.0)?,
+                dash: element_dash(p)?.flatten(),
             };
             // Without a box it frames the page, as a neatline does; with any part of one it's a shape.
             if ["x", "y", "w", "h"].iter().any(|k| p.get(k).is_some_and(|v| !v.is_null())) {
@@ -2863,6 +2876,7 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
                 fill: color(p, "fill", Rgba::new(0, 0, 0, 0))?,
                 outline: color(p, "outline", color(p, "color", Rgba::rgb(0x22, 0x22, 0x22))?)?,
                 width: shape_width(p, 1.0)?.clamp(0.0, 50.0),
+                dash: element_dash(p)?.flatten(),
             };
             // A circle is an ellipse in a square box.
             let d = (pw.min(ph) * 0.25).max(5.0);
@@ -2875,6 +2889,7 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
             let head = line_head(p, if arrow { LineHead::End } else { LineHead::None })?;
             let color = color(p, "color", Rgba::rgb(0x22, 0x22, 0x22))?;
             let width = shape_width(p, if arrow { 1.5 } else { 1.0 })?.clamp(0.1, 50.0);
+            let dash = element_dash(p)?.flatten();
             let len = (pw.min(ph) * 0.4).max(10.0);
             let name = if head == LineHead::None { "Line" } else { "Arrow" };
             // At an angle, centred on the page unless x or y moves it; else the box is the
@@ -2907,7 +2922,7 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
                     (place(p, l, ((pw - w) / 2.0, (ph - h) / 2.0, w, h))?, dir, head)
                 }
             };
-            (name, rect, ElementKind::Line { color, width, dir, head })
+            (name, rect, ElementKind::Line { color, width, dir, head, dash })
         }
         "extentIndicator" => {
             let frame = frame_of(l, p)?;
@@ -3148,8 +3163,41 @@ pub(crate) fn text_style(p: &Value, italic: bool, align: TextAlign, spacing: f64
     Ok((italic, align, spacing))
 }
 
+/// What a `rotation` given for an element that isn't a text is told.
+const ONLY_TEXT_ROTATION: &str = "only text elements take a rotation";
+
+/// A text's `rotation` when given: degrees clockwise, kept within -180..=180 (450 is 90); refused
+/// when not a number, as the other numbers of a layout are.
+fn text_rotation(p: &Value) -> Result<Option<f64>, String> {
+    Ok(given_num(p, "rotation", "a number of degrees, clockwise")?.map(rustgis_map::layout::rotation))
+}
+
 /// What a `font` given for an element that isn't a text is told.
 const ONLY_TEXT_FONT: &str = "only text elements take a font or a fallback";
+
+/// What a `dash` given for an element that draws no line or outline is told.
+const ONLY_DASH: &str = "only lines, arrows, rectangles, ellipses and circles take a dash";
+
+/// A line's or an outline's `dash` when given, read as a line layer's stroke reads it
+/// (`layer.lineStrokes`): `Some(None)` for solid (`null` or `[]`), `Some(Some(_))` for a pattern,
+/// `None` when not given; refused when it isn't one.
+fn element_dash(p: &Value) -> Result<Option<Option<Dash>>, String> {
+    let bad = || {
+        format!(
+            "dash is a list of 1 to {MAX_DASH_STEPS} lengths in points (dash, gap, …), each 0 to {MAX_DASH_STEP}, not all 0; [] or null for solid"
+        )
+    };
+    match p.get("dash") {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::Array(a)) if a.is_empty() => Ok(Some(None)),
+        Some(Value::Array(a)) => {
+            let steps: Vec<f32> = a.iter().map(|v| v.as_f64().map(|x| x.clamp(-1e6, 1e6) as f32)).collect::<Option<_>>().ok_or_else(bad)?;
+            Dash::new(&steps).map(|d| Some(Some(d))).ok_or_else(bad)
+        }
+        Some(_) => Err(bad()),
+    }
+}
 
 /// Rounded corners are a rectangle's: refused elsewhere, as a family is, so a script doesn't take
 /// them as applied.
@@ -3412,28 +3460,30 @@ fn restyle(kind: &ElementKind, p: &Value) -> Result<Option<ElementKind>, String>
             let (color, fill) = (color(p, "color", *c)?, color(p, "fill", *fill)?);
             Ok(Some(ElementKind::ScaleBar { frame: *frame, units, divisions, style, color, fill }))
         }
-        ElementKind::Rectangle { fill, outline, width, .. } | ElementKind::Ellipse { fill, outline, width } => {
-            if ["fill", "outline", "color", "width", "radius"].iter().all(|k| p.get(k).is_none()) {
+        ElementKind::Rectangle { fill, outline, width, dash, .. } | ElementKind::Ellipse { fill, outline, width, dash } => {
+            if ["fill", "outline", "color", "width", "radius", "dash"].iter().all(|k| p.get(k).is_none()) {
                 return Ok(None);
             }
+            let dash = element_dash(p)?.unwrap_or(*dash);
             // The outline's colour is "outline", or "color" as when adding one.
             let (fill, outline) = (color(p, "fill", *fill)?, color(p, "outline", color(p, "color", *outline)?)?);
             let width = shape_width(p, *width)?.clamp(0.0, 50.0);
             Ok(Some(match kind {
                 ElementKind::Rectangle { radius, .. } => {
-                    ElementKind::Rectangle { fill, outline, width, radius: corner_radius(p, *radius)? }
+                    ElementKind::Rectangle { fill, outline, width, radius: corner_radius(p, *radius)?, dash }
                 }
-                _ => ElementKind::Ellipse { fill, outline, width },
+                _ => ElementKind::Ellipse { fill, outline, width, dash },
             }))
         }
-        ElementKind::Line { color: c, width, dir, head } => {
-            if ["color", "width", "dir", "head"].iter().all(|k| p.get(k).is_none()) {
+        ElementKind::Line { color: c, width, dir, head, dash } => {
+            if ["color", "width", "dir", "head", "dash"].iter().all(|k| p.get(k).is_none()) {
                 return Ok(None);
             }
+            let dash = element_dash(p)?.unwrap_or(*dash);
             let dir = line_dir(p, *dir)?;
             let head = line_head(p, *head)?;
             let width = shape_width(p, *width)?.clamp(0.1, 50.0);
-            Ok(Some(ElementKind::Line { color: color(p, "color", *c)?, width, dir, head }))
+            Ok(Some(ElementKind::Line { color: color(p, "color", *c)?, width, dir, head, dash }))
         }
         _ => Ok(None),
     }
@@ -3459,8 +3509,10 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
     }
     let li = index(s, p)?;
     // Locked, it takes no change but being unlocked, which may come with other changes.
-    let changes =
-        p.as_object().is_some_and(|o| o.iter().any(|(k, v)| !v.is_null() && !matches!(k.as_str(), "layout" | "element" | "locked")));
+    // "dash": null makes a line solid, so it is a change too.
+    let changes = p
+        .as_object()
+        .is_some_and(|o| o.iter().any(|(k, v)| (!v.is_null() || k == "dash") && !matches!(k.as_str(), "layout" | "element" | "locked")));
     if changes && b(p, "locked") != Some(false) {
         unlocked(s.project.layouts.get(li).ok_or("no layout")?, id)?;
     }
@@ -3584,6 +3636,10 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         _ if gives_font(p) => return Err(ONLY_TEXT_FONT.into()),
         _ => None,
     };
+    let new_rotation = match text_rotation(p)? {
+        Some(_) if !matches!(kind_now, Some(ElementKind::Text { .. })) => return Err(ONLY_TEXT_ROTATION.into()),
+        r => r,
+    };
     // A family asked for that isn't drawn as asked: said whenever the call asks for one (again
     // too, as `layout.addElement` says it), so a script is told what it gets; a call that changes
     // something else on such a text isn't told again.
@@ -3601,6 +3657,15 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         && !matches!(s.project.layouts.get(li).and_then(|l| l.element(id)).map(|e| &e.kind), Some(ElementKind::Rectangle { .. }))
     {
         return Err(ONLY_RECTANGLE_RADIUS.into());
+    }
+    // `null` too: it makes a line solid, so elsewhere it is refused rather than ignored.
+    if p.get("dash").is_some()
+        && !matches!(
+            s.project.layouts.get(li).and_then(|l| l.element(id)).map(|e| &e.kind),
+            Some(ElementKind::Line { .. } | ElementKind::Rectangle { .. } | ElementKind::Ellipse { .. })
+        )
+    {
+        return Err(ONLY_DASH.into());
     }
     // A legend's left-out layers, checked against its frame's map before anything changes.
     let new_exclude = {
@@ -3676,9 +3741,12 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         }
     }
     match &mut e.kind {
-        ElementKind::Text { text, size, color, bold, italic, align, letter_spacing, font, font_name } => {
+        ElementKind::Text { text, size, color, bold, italic, align, letter_spacing, font, font_name, rotation } => {
             if let Some(((i, a, l), (f, n))) = new_text_style {
                 (*italic, *align, *letter_spacing, *font, *font_name) = (i, a, l, f, n);
+            }
+            if let Some(r) = new_rotation {
+                *rotation = r;
             }
             if let Some(t) = ps(p, "text") {
                 *text = t.chars().take(5000).collect();
@@ -4025,7 +4093,7 @@ fn layout_bytes_inner(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool
     // The map frames a PDF can't georeference, and those it georeferences by their corners only,
     // each with the page (from 1) it is on.
     let (mut left_out, mut by_corners): (Vec<(usize, u32, String, &'static str)>, Vec<(usize, u32, String)>) = (Vec::new(), Vec::new());
-    let mut render_pages = || -> Result<(Vec<rustgis_render::pdf::Page>, Option<Vec<u8>>), String> {
+    let render_pages = || -> Result<(Vec<rustgis_render::pdf::Page>, Option<Vec<u8>>), String> {
         let mut out = Vec::new();
         let mut png = None;
         let mut held = 0usize;
@@ -4085,7 +4153,15 @@ fn layout_bytes_inner(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool
         }
         Ok((out, png))
     };
-    let result = render_pages();
+    // Layers its frames drew without their cast shadows (read in place, too large for the
+    // browser, no memory, still being worked out on the interface's thread): said, as the map's
+    // export says them.
+    let (result, said) = rustgis_render::shadows_said(render_pages);
+    if result.is_ok() {
+        for w in super::share::shadow_warnings("The layout", &said) {
+            s.warn(w);
+        }
+    }
     // Stepping through the series moved the frame; put the layout back however that went.
     if stepping && let Some(cur) = s.project.layouts.get_mut(li) {
         *cur = saved.clone();

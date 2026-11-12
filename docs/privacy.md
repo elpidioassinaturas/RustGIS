@@ -27,9 +27,34 @@ token or signature does not hide the HTTP status or other explanation. The compl
 fragment are omitted, including values with unescaped spaces. For an unknown URL embedded in
 free text, a secret-named query or fragment still omits the rest of that text: those later
 words might be part of the credential, not an explanation. The same rule applies to copied
-history errors, saved run messages and notebook cell output. Ambiguous slash-containing userinfo
-is omitted rather than guessed to be a host, port and path. A root address is shown with `/`
-before an omission marker or reason, so repeated redaction keeps its host.
+history errors, saved run messages and notebook cell output. Scheme-less text is cut only in
+copied history errors and the project log's saved parameters and errors (Copy as code keeps opaque
+text parameters and says so, as below):
+a secret in the query or fragment of one of its words (`data.tif?token=abc def`,
+`a.tif?x=1;token=abc def`) goes with the rest of the text, saying
+`[query and the rest omitted]`. A word alone (`data.tif?pwd=hunter2`, `data.tif#pwd=hunter2`) has
+only the secret's value emptied, with no marker. A `key`, `sig` or `sas` counts only when its value reads as a key,
+so `a.tif?key=abc def` stays. Notices and notebook output cut only `scheme://` addresses and
+keep scheme-less text as written. For an unknown
+`scheme://` URL, a query with no secret name (`?custom=hidden unescaped hidden`) is omitted only
+to its first space: the redactor can't tell a value's later words from prose, so they are kept.
+Ambiguous slash-containing userinfo is omitted rather than guessed to be a host, port and path.
+So is a bare `scheme://name:text` (no `/`, `\`, `?`, `#` or `@` in it, not an IPv6 host in
+brackets, ended by whitespace rather than a quote, and a `text` that isn't empty once trailing
+punctuation is trimmed) of an unknown URL when a word with an `@` (and
+something before it, no slash, not another address) follows on its line
+(`https://alice:pass word@host/x`, `redis://:pa ss@host`): the text may be a password with a
+space in it, so the rest of the text is omitted too, saying `[address and the rest omitted]`.
+When `text` could be a port (one to five digits: `https://host:8080 user@example.org`,
+`https://alice:12 word@host`) only the next word counts, since a port and a short password look
+alike and prose often follows a host and port; otherwise any of the next four words, so a
+password with more spaces than that, or with a `/` or an `@` in it (`https://alice:pa@ss word@host`
+reads as user information followed by an email), is not found this way. A path
+(`https://host:8080/x user@example.org`) ends the ambiguity, and the words are kept. A root
+address is shown with `/` before an omission marker or reason, so
+repeated redaction keeps its host. A message that names a known address says when its query or
+fragment was taken out (`[query omitted]`, `[fragment omitted]`); the address kept in a saved
+source or a project never carries a marker.
 
 Copied run parameters are sanitized as data, without blanket-omitting JSON/XML syntax.
 Typed addresses lose their keys and credential fields are emptied, but opaque text and nested
@@ -67,6 +92,11 @@ still identify private data, so review copied diagnostics before sharing them.
   `data:image/…` value) needs no request. A fetched picture is kept in memory for the session, or
   until a sign-out or a login that ends clears the cached web tiles; the web app also uses the
   browser's own cache. Links in the pop-up open only when you click them.
+- Choosing a worldview other than the default, or the original detail, in **Settings ›
+  Language › Worldview** downloads its borders from source.coop (`data.source.coop`, the `opengeos/data` repository),
+  once on the desktop (they are kept in the cache folder) and once a session in the web app.
+  Until you choose one, a system whose time zone or language is mainland China's downloads
+  China's view the same way.
 - Web data, remote rasters, cloud storage, database connections and online catalogs contact
   their configured servers. Searches may send keywords, coordinates, an area of interest,
   dates or filters; authenticated connections also send the credentials or tokens required by

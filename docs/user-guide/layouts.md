@@ -256,6 +256,13 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   also given; when adding, it is also an extent indicator's or a grid's. `fill` is a north
   arrow's, a shape's or a scale bar's, and `outline` a north arrow's or a shape's. A legend,
   picture, table and the like take none.
+  A line and the outline of a rectangle, circle or ellipse can be dashed: **Dash** in their
+  properties offers the Symbology pane's patterns (Solid, Dashed, Dotted, Dash-dot, Long dash),
+  scaled by the width as there, for a dashed leader, a box marking a study area or an inset's
+  extent, or a dotted neatline. On an arrow only the shaft is dashed; its heads stay solid. A
+  command gives the pattern as a line layer's stroke takes it, lengths in points, dash and gap in
+  turn (at most 8, each up to 500): `layout.update={"element":7,"dash":[4,2]}`, with `[]` or
+  `null` for solid again. Every export draws it, SVG as a `stroke-dasharray`.
 - **Arrows**: **Arrow** adds an arrow pointing right. Drag the round handle above a selected arrow
   or line to turn it about its centre: it snaps to level, upright and diagonal within 3°, and
   **Shift** turns it in 15° steps. **Angle** in its properties sets it exactly (0° points right,
@@ -290,6 +297,13 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   and the commands say so. A family that is installed but whose file can't be read (too large,
   damaged) is drawn in the fallback too, and the command that names it says so. The fallback
   starts as the family's own class (a serif's is Serif).
+  A text turns with **Rotation**, in degrees clockwise about the centre of its box, as a map
+  frame's bearing turns: 90 reads top to bottom and -90 bottom to top, for a source line up the
+  margin, a vertical coordinate or a name along a river. The 0°, 90° and -90° buttons beside it set
+  those. The element keeps its unturned box (X, Y, Width, Height), so moving and aligning work as
+  before; its selection and handles follow the turned box. Every export draws it turned (PNG, PDF,
+  GeoPDF, SVG). Scripts set `"rotation": 90` on `layout.addElement` and `layout.update`; an angle
+  outside -180 to 180 is kept as the same turn within it (450 is 90).
   Scripts give the family's name: `"font": "Garamond"`, with `"fallback": "serif"` if wanted;
   `labels.fonts` lists the installed families. The project keeps the name, never a file. A PDF
   sets its text in the letters' own outlines, so it shows the family wherever it is opened, and

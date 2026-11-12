@@ -37,6 +37,7 @@ mod editpanes;
 mod embeddingsui;
 #[cfg(not(target_arch = "wasm32"))]
 mod exportjob;
+mod extensionsui;
 mod failureui;
 mod fieldlists;
 mod fieldmenu;
@@ -51,6 +52,7 @@ mod keymap;
 mod labelfonts;
 mod labelpane;
 mod layerchooser;
+mod layerprops;
 mod layoutview;
 #[cfg(not(target_arch = "wasm32"))]
 mod localagents;
@@ -115,6 +117,7 @@ mod vertexedit;
 mod webdataui;
 mod widgets;
 mod workspacepanes;
+mod worldviewui;
 mod zarrui;
 
 use rustgis_engine::cmd::service_added::Removal;
@@ -442,6 +445,8 @@ pub struct ServiceConn {
     /// `wms`, `wmts`, `wfs`, `ogcapi`, `arcgis`, or `auto`.
     pub kind: &'static str,
     pub slot: Slot<Result<Vec<u8>, Failure>>,
+    /// Supplied-document parsing on a desktop worker, owned by this connection alone.
+    pub reading: Option<serviceui::ListingRead>,
     /// The capabilities document, once it has arrived.
     pub text: Option<String>,
     /// Additional capabilities documents, keyed by their requested address.
@@ -456,6 +461,20 @@ pub struct ServiceConn {
     pub error: Option<String>,
     /// A capabilities request that failed, with what the server said (#509).
     pub failure: Option<Failure>,
+    /// The filter as last typed, and when: a listing that stops short is searched whole once
+    /// typing pauses (`dialogs::SEARCH_PAUSE`), not on every key (#1577).
+    pub typed: Option<(String, web_time::Instant)>,
+    /// `service.layers` run again with the filter, over every layer read of a listing that stops
+    /// short.
+    pub search: Option<ServiceSearch>,
+}
+
+/// A search of all of a service's layers (`service.layers` with `filter`), for Add From Service.
+pub struct ServiceSearch {
+    /// The filter it was run with.
+    pub filter: String,
+    /// Its answer (the first matches, with `matched`), or why it failed.
+    pub listing: Result<Value, String>,
 }
 
 /// Add From Service's rows: the layers of a listing that match the filter, and for each the
@@ -470,6 +489,8 @@ pub struct ServiceAdded {
     pub filter: String,
     /// How many layers match the filter (the first `dialogs::SHOWN_LAYERS` are shown).
     pub matched: usize,
+    /// The rows are places in the search's answer (`ServiceConn::search`), not in the listing.
+    pub searched: bool,
     /// Each shown row: its place in the listing, and the command that removes it when it is on
     /// the map (`None`: the row says Add).
     pub rows: Vec<(usize, Option<Removal>)>,
@@ -632,6 +653,8 @@ pub enum RightPane {
     Format,
     /// The selected feature layer's labels (#617).
     Labeling,
+    /// The selected layer's settings in one place, a tab per topic (#1803).
+    LayerProperties,
     /// A Home › Add › Web Data service: the one `UiState::web_data` names.
     WebData,
     /// A plugin's panel: the one `UiState::plugin_panel` names.
@@ -694,9 +717,14 @@ pub struct UiState {
     pub dark_follows_system: bool,
     /// Interface language preference: a language code or `auto`.
     pub language: String,
-    /// Worldview preference for the built-in countries and world outline: `auto`, `default` or
-    /// `china`.
+    /// Worldview preference for the built-in countries and world outline: a worldview's code
+    /// (such as `default`, `chn` or `ind`), or `auto` until one is chosen (China's on a system in
+    /// mainland China, else the default).
     pub worldview: String,
+    /// How detailed a downloaded worldview is: `simplified` (the default) or `original`.
+    pub worldview_detail: String,
+    /// The worldview being downloaded.
+    pub worldview_fetch: Option<worldviewui::Fetch>,
     /// Start-up preference: what RustGIS opens with.
     pub start_with: StartWith,
     /// Whether a file holding several layers asks which to add (#934), or adds them all.
@@ -941,6 +969,8 @@ impl Default for UiState {
             dark_follows_system: true,
             language: i18n::AUTO.into(),
             worldview: i18n::AUTO.into(),
+            worldview_detail: rustgis_engine::sample::Detail::default().code().into(),
+            worldview_fetch: None,
             start_with: StartWith::Sample,
             ask_layers: true,
             reserved_shortcuts: Vec::new(),
@@ -1085,6 +1115,8 @@ pub struct RustGisApp {
     pub time: timebar::TimeBarState,
     /// The Plugin Manager and plugin downloads.
     pub plugins: pluginsui::PluginsState,
+    /// The Extensions window and the saved extension choices (#1752).
+    pub extensions: extensionsui::ExtensionsState,
     /// Help › Check for Updates.
     pub update: update::UpdateState,
     pub reports: reportpane::ReportState,
@@ -1162,6 +1194,27 @@ pub struct RustGisApp {
     shown_lang: i18n::Lang,
     /// The project path last seen, so a change (whoever opened or saved it) updates Last Project.
     seen_project: Option<std::path::PathBuf>,
+}
+
+/// Says what `source.syncState` found, once its check lands: whether the layer and its file are
+/// in step, and which parts of the file changed. A check that failed was said already.
+#[cfg(not(target_arch = "wasm32"))]
+fn sync_state_said(app: &mut RustGisApp, landed: Landed) {
+    let Landed::Ran(Ok(v)) = landed else { return };
+    let layer = v.get("layer").and_then(Value::as_u64).and_then(|id| u32::try_from(id).ok());
+    let layer = layer.and_then(|id| app.session.map().layer(id)).map(|l| l.name.clone()).unwrap_or_default();
+    let path = v.get("path").and_then(Value::as_str).unwrap_or_default();
+    let file = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path).to_string();
+    let parts: Vec<&str> = v.get("changed").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+    let parts = parts.join(", ");
+    let args = [("layer", layer.as_str()), ("file", file.as_str()), ("parts", parts.as_str())];
+    let text = match v.get("state").and_then(Value::as_str) {
+        Some("inSync") => i18n::fmt("{layer} is in step with {file}", &args),
+        Some("edited") => i18n::fmt("{layer} was edited since it was read from {file}", &args),
+        Some("sourceChanged") => i18n::fmt("{file} changed since {layer} was read from it ({parts})", &args),
+        _ => i18n::fmt("{layer} was edited, and {file} changed, since the layer was read from it ({parts})", &args),
+    };
+    app.session.notify(text, false);
 }
 
 impl RustGisApp {
@@ -1314,6 +1367,7 @@ impl RustGisApp {
             ws: workspacepanes::WorkspaceState::default(),
             time: timebar::TimeBarState::default(),
             plugins: pluginsui::PluginsState::default(),
+            extensions: extensionsui::ExtensionsState::default(),
             update: update::UpdateState::default(),
             reports: reportpane::ReportState::default(),
             docs: docpanes::DocState::default(),
@@ -1380,11 +1434,34 @@ impl RustGisApp {
         i18n::set_current(self.chosen_lang());
         // After the language, so a notice about the saved value is in it.
         threadsui::load(&mut self);
-        // A stored value that is neither `auto` nor a known worldview means `auto`.
-        if let Some(w) = self.services.load_pref.as_ref().and_then(|load| load("worldview"))
-            && rustgis_engine::sample::Worldview::from_code(&w).is_some()
-        {
-            self.ui.worldview = w.trim().to_ascii_lowercase();
+        // A stored value that is neither `auto` nor a known worldview means `auto`; `china`, as
+        // earlier versions saved it, is China's view. One this version doesn't know (from a newer
+        // RustGIS) is said, and stays saved until another is chosen.
+        let load = |key: &str| self.services.load_pref.as_ref().and_then(|load| load(key)).map(|v| v.trim().to_ascii_lowercase());
+        let (stored, stored_detail) = (load("worldview"), load("worldview_detail"));
+        if let Some(code) = stored.filter(|c| c != i18n::AUTO) {
+            match rustgis_engine::sample::Worldview::from_code(&code) {
+                Some(w) => self.ui.worldview = w.code().to_string(),
+                None => self.session.notify(
+                    i18n::fmt(
+                        "The saved worldview '{code}' isn't one this version knows, so it is ignored until you choose one",
+                        &[("code", &code)],
+                    ),
+                    false,
+                ),
+            }
+        }
+        if let Some(code) = stored_detail {
+            match rustgis_engine::sample::Detail::from_code(&code) {
+                Some(d) => self.ui.worldview_detail = d.code().to_string(),
+                None => self.session.notify(
+                    i18n::fmt(
+                        "The saved worldview detail '{code}' isn't one this version knows; simplified borders are used",
+                        &[("code", &code)],
+                    ),
+                    false,
+                ),
+            }
         }
         self.apply_worldview();
         self.ui.start_with =
@@ -1467,6 +1544,8 @@ impl RustGisApp {
         // take_saved_look finds a saved theme only once the folder is read.
         self.load_themes();
         self.take_saved_look();
+        // Which extensions are on, before the tabs they add are looked at.
+        extensionsui::load(&mut self);
         self.ui.hidden_tabs = ribbon::current_hidden_tabs(list(self.services.load_pref.as_ref().and_then(|load| load("hidden_tabs"))));
         self.ui.quick_access = list(self.services.load_pref.as_ref().and_then(|load| load("quick_access")));
         // The browser's GeoLibre tools, loaded in an earlier visit: load them again (the runner
@@ -1893,24 +1972,17 @@ impl RustGisApp {
     /// The sample "World Atlas" project.
     pub fn with_sample() -> Self {
         // Tests don't depend on the machine's time zone and locale.
-        rustgis_engine::sample::apply_worldview(if cfg!(test) { "default" } else { i18n::AUTO });
+        rustgis_engine::sample::apply_view(if cfg!(test) { "default" } else { i18n::AUTO }, "");
         let mut s = Session::new(Project::default());
         let _ = s.run("project.sample", &Value::Null);
         s.mark_saved();
         RustGisApp::new(s)
     }
 
-    /// Applies the worldview preference; an untouched sample project's countries follow it.
+    /// Applies the worldview preference, downloading its countries if they aren't at hand; an
+    /// untouched sample project's countries follow it.
     fn apply_worldview(&mut self) {
-        use rustgis_engine::sample;
-        let before = sample::worldview();
-        // Tests don't depend on the machine's time zone and locale.
-        let pref = if cfg!(test) && self.ui.worldview == i18n::AUTO { "default" } else { self.ui.worldview.as_str() };
-        let after = sample::apply_worldview(pref);
-        if after != before {
-            sample::swap_countries(&mut self.session, before, after);
-            self.map.invalidate();
-        }
+        worldviewui::apply(self);
     }
 
     /// Reloads available theme files from the user folder, retaining built-ins when it is absent.
@@ -2292,6 +2364,12 @@ impl RustGisApp {
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
         #[cfg(not(target_arch = "wasm32"))]
         if self.reads_off_frame {
+            if id == "service.layers" {
+                return readjob::run(self, "service.layers", params);
+            }
+            if id == "service.add" && params.get("text").and_then(Value::as_str).is_some() {
+                return readjob::run(self, "service.add", params);
+            }
             let archive = match id {
                 "map.reloadTiles" => Some("map.reloadTiles"),
                 "map.repairTiles" => Some("map.repairTiles"),
@@ -2304,6 +2382,11 @@ impl RustGisApp {
             if id == "topology.validate" {
                 let params = if params.is_null() { json!({}) } else { params };
                 return readjob::run(self, "topology.validate", params);
+            }
+            // Comparing a layer with its file hashes the file: on a thread of its own, and what
+            // it found said once it lands (Command Search shows no answer).
+            if id == "source.syncState" {
+                return readjob::run_then(self, "source.syncState", params, Some(sync_state_said));
             }
             // Converting the labels of a layer read in place reads all of its source first, on a
             // thread of its own, whoever asks (a click, the assistant).
@@ -2808,6 +2891,28 @@ impl RustGisApp {
                 // A layer's menu asks for that layer's labels: shown, even when already in view.
                 if given.is_some() { self.ui.open_right(RightPane::Labeling) } else { toggle_right(&mut self.ui, RightPane::Labeling) }
             }
+            // The Layer Properties pane (#1803), on `{"layer": id}` when given (a layer's
+            // right-click menu), as the Labeling pane is; feature and raster layers alike.
+            "ui.pane.layerProperties" => {
+                let given = match p.get("layer").filter(|l| !l.is_null()) {
+                    Some(_) => Some(self.session.layer_id(p)?),
+                    None => None,
+                };
+                // Showing its tab already open needs no layer.
+                if (given.is_some() || !self.ui.right_open.contains(&RightPane::LayerProperties))
+                    && given.or(self.session.active_layer).and_then(|id| self.session.map().layer(id)).is_none()
+                {
+                    return Err("select a layer in the Layers pane first".into());
+                }
+                if let Some(id) = given {
+                    self.session.run("layer.select", &json!({"layer": id}))?;
+                }
+                if given.is_some() {
+                    self.ui.open_right(RightPane::LayerProperties)
+                } else {
+                    toggle_right(&mut self.ui, RightPane::LayerProperties)
+                }
+            }
             // A plugin's panel: `{"id": plugin}`.
             "ui.pane.plugin" => return pluginpanel::open(self, p),
             // A plugin command's dialog: `{"plugin": id, "command": id}`.
@@ -2829,6 +2934,10 @@ impl RustGisApp {
             // Opens the Workflows pane at a section (staying open when switching sections).
             "ui.pane.workflows" => {
                 let section = p.get("section").and_then(Value::as_str);
+                // A section of an extension that is off is refused before anything changes.
+                if let Some(why) = section.and_then(|s| analysispane::section_blocked(&self.session, s)) {
+                    return Err(why);
+                }
                 // A map pick started in another section (or before the pane closes) ends here.
                 self.workflow.pick = None;
                 match section.and_then(|s| analysispane::SECTIONS.iter().find(|x| x.0 == s)) {
@@ -2868,13 +2977,40 @@ impl RustGisApp {
                 self.map.invalidate();
             }
             "ui.worldview" => {
-                let code = p.get("worldview").and_then(Value::as_str).unwrap_or(i18n::AUTO).to_ascii_lowercase();
-                if code != i18n::AUTO && rustgis_engine::sample::Worldview::from_code(&code).is_none() {
-                    return Err(format!("unknown worldview '{code}'"));
+                // `detail` alone (a missing or null worldview) keeps the worldview; no parameters at
+                // all mean `auto`.
+                let detail_only = p.get("worldview").is_none_or(Value::is_null) && p.get("detail").is_some_and(|d| !d.is_null());
+                let code = match p.get("worldview") {
+                    _ if detail_only => None,
+                    None | Some(Value::Null) => Some(i18n::AUTO.to_string()),
+                    Some(Value::String(c)) => Some(c.trim().to_ascii_lowercase()),
+                    Some(other) => return Err(format!("worldview must be a worldview's code, not {other}")),
+                };
+                let detail = match p.get("detail") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(d)) => Some(
+                        rustgis_engine::sample::Detail::from_code(d)
+                            .ok_or_else(|| format!("unknown worldview detail '{d}': original or simplified"))?,
+                    ),
+                    Some(other) => return Err(format!("detail must be original or simplified, not {other}")),
+                };
+                if let Some(code) = code {
+                    // Kept as the worldview's own code, so `China` and `chn` are saved alike.
+                    self.ui.worldview = if code == i18n::AUTO {
+                        code
+                    } else {
+                        let w = rustgis_engine::sample::Worldview::from_code(&code).ok_or_else(|| format!("unknown worldview '{code}'"))?;
+                        w.code().to_string()
+                    };
+                    if let Some(save) = &self.services.save_pref {
+                        save("worldview", &self.ui.worldview);
+                    }
                 }
-                self.ui.worldview = code;
-                if let Some(save) = &self.services.save_pref {
-                    save("worldview", &self.ui.worldview);
+                if let Some(d) = detail {
+                    self.ui.worldview_detail = d.code().to_string();
+                    if let Some(save) = &self.services.save_pref {
+                        save("worldview_detail", &self.ui.worldview_detail);
+                    }
                 }
                 self.apply_worldview();
             }
@@ -3173,6 +3309,9 @@ impl RustGisApp {
                     };
                 }
             }
+            "ui.extensions" => {
+                self.extensions.open = p.get("open").and_then(Value::as_bool).unwrap_or(!self.extensions.open);
+            }
             "ui.installPlugin" => pluginsui::install_from_file(self, p.get("path").and_then(Value::as_str)),
             // What a click with Explore does: identify there and show the popup.
             "ui.identify" => {
@@ -3359,6 +3498,7 @@ impl RustGisApp {
                     connection: resolved_connection,
                     kind,
                     slot,
+                    reading: None,
                     text: None,
                     documents: Vec::new(),
                     pending: Some(caps),
@@ -3366,6 +3506,8 @@ impl RustGisApp {
                     added: None,
                     error: None,
                     failure: None,
+                    typed: None,
+                    search: None,
                 });
             }
             "ui.importShapefile" => {
@@ -3379,6 +3521,10 @@ impl RustGisApp {
                     self.ui.pending_shapefile = Some(json!({"crs": text}));
                     open("shapefile");
                 } else if let Some(path) = dialogs::pick_open(&["shp", "zip"], tl!("Shapefile")) {
+                    // Read on a thread of its own, as Add Data's other files are.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    return readjob::run(self, "layer.addData", json!({"path": path, "crs": text}));
+                    #[cfg(target_arch = "wasm32")]
                     return self.run("layer.addData", json!({"path": path, "crs": text}));
                 }
             }
@@ -5109,6 +5255,20 @@ impl RustGisApp {
     fn poll_service(&mut self) {
         self.poll_service_steps();
         let Some(conn) = &mut self.ui.service else { return };
+        if let Some(reading) = &conn.reading {
+            let done = reading.slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            let Some(done) = done else { return };
+            let cancelled = reading.control.is_cancelled();
+            let filter = reading.filter.clone();
+            conn.reading = None;
+            let result = if cancelled {
+                Err(tl!("Service discovery was cancelled").to_string())
+            } else {
+                done.and_then(|read| rustgis_engine::cmd::reads::read_land(&mut self.session, read))
+            };
+            serviceui::listed(conn, result, filter);
+            return;
+        }
         let Some(r) = conn.slot.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
         let document = conn.pending.take().unwrap_or_else(|| conn.url.clone());
         match r {
@@ -5132,18 +5292,20 @@ impl RustGisApp {
                 if let Some(connection) = &conn.connection {
                     p["connection"] = json!(connection);
                 }
-                // Not `self.run`: an error belongs in the dialog, not the notices.
-                match self.session.run("service.layers", &p) {
-                    Ok(v) => {
-                        conn.pending = v.get("next").and_then(Value::as_str).map(str::to_string);
-                        if let Some(next) = &conn.pending {
-                            conn.slot = fetch_detailed_into(next);
+                #[cfg(not(target_arch = "wasm32"))]
+                if self.reads_off_frame {
+                    match serviceui::ListingRead::start(&mut self.session, &p) {
+                        Ok(reading) => {
+                            conn.reading = Some(reading);
+                            conn.pending = Some(document);
                         }
-                        conn.listing = Some(v);
-                        conn.added = None;
+                        Err(error) => conn.error = Some(error),
                     }
-                    Err(e) => conn.error = Some(e),
+                    return;
                 }
+                // Not `self.run`: an error belongs in the dialog, not the notices.
+                let result = self.session.run("service.layers", &p);
+                serviceui::listed(conn, result, None);
             }
             Err(f) => conn.failure = Some(f),
         }
@@ -5152,6 +5314,10 @@ impl RustGisApp {
     /// Per-frame work that doesn't draw (theme, fonts, files that arrived).
     pub fn logic(&mut self, ctx: &egui::Context) {
         let _diagnostics = self.session.diagnostics.enter();
+        // What this thread draws (an image, a print, a page, a preview, an agent's snapshot)
+        // never waits for cast shadows still being worked out: it says they were (Never hold the
+        // window). Exports drawn off it wait for them.
+        rustgis_engine::render::on_the_interface_thread();
         // A pass egui asks to repeat is the same frame: `ui` sets the delay once, from the first pass.
         if ctx.current_pass_index() == 0 {
             self.frame_start = Some(web_time::Instant::now());
@@ -5298,6 +5464,7 @@ impl RustGisApp {
         connectionui::poll(self, ctx);
         connectiontree::poll(self, ctx);
         portalsui::poll(self, ctx);
+        worldviewui::poll(self, ctx);
         catalogsui::poll(self, ctx);
         opendataui::poll(self, ctx);
         embeddingsui::poll(self, ctx);
@@ -5308,6 +5475,7 @@ impl RustGisApp {
         zarrui::poll(self, ctx);
         geolibreui::poll(self, ctx);
         pluginsui::poll(self, ctx);
+        extensionsui::persist(self);
         assistantpane::poll(self, ctx);
         // A project the MCP relay, the assistant or a plugin opened or saved this frame (they run
         // on the session directly) becomes Last Project now, not a frame later the app may not
@@ -5491,6 +5659,8 @@ impl RustGisApp {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let _diagnostics = self.session.diagnostics.enter();
+        // See `logic`.
+        rustgis_engine::render::on_the_interface_thread();
         let ctx = ui.ctx().clone();
         // Fonts installed by `logic` take effect on the next frame.
         if self.fonts_frames < 2 {
@@ -5541,6 +5711,7 @@ impl RustGisApp {
         autosave::offer(self, &ctx);
         saveprompt::show(self, &ctx);
         pluginsui::show(self, &ctx);
+        extensionsui::show(self, &ctx);
         plugindialog::show(self, &ctx);
         update::show(self, &ctx);
         showme::tick(self, &ctx);
@@ -6695,6 +6866,7 @@ mod download_service_tests {
 
     /// Real UI discovery never restores a login after a foreign hop, while a public saved
     /// connection on a same-origin chain can still gain its legitimate login later.
+    /// Empty supplied collections retain the legacy map offer and its UI tile-resolver path.
     #[test]
     fn tile_discovery_keeps_foreign_lineage_and_same_origin_connections() {
         use rustgis_engine::render::rustgis_tiles::{cache, logins};
@@ -6740,9 +6912,18 @@ mod download_service_tests {
                     connection = c["id"].as_str().unwrap().to_string();
                 }
             }
-            let text = json!({"title":"Lineage","links":[{"rel":"tilesets-map","href":format!("{a}/list")}]}).to_string();
-            let source = crate::serviceui::ServiceSource { url: a.into(), kind: "ogcapi", text: text.clone(), documents: Vec::new() };
-            let listing = app.session.run("service.layers", &json!({"url":a,"type":"ogcapi","text":text,"connection":connection})).unwrap();
+            let text = json!({"title":"Lineage","links":[
+                {"rel":"tilesets-map","href":format!("{a}/list")},
+                {"rel":"data","type":"application/json","href":format!("{a}/collections")}
+            ]})
+            .to_string();
+            let documents = vec![json!({"url":format!("{a}/collections"),"text":"{\"collections\":[]}"})];
+            let source =
+                crate::serviceui::ServiceSource { url: a.into(), kind: "ogcapi", text: text.clone(), documents: documents.clone() };
+            let listing = app
+                .session
+                .run("service.layers", &json!({"url":a,"type":"ogcapi","text":text,"documents":documents,"connection":connection}))
+                .unwrap();
             crate::serviceui::add_layer_from(&mut app, &source, &listing["layers"][0], "", None, false, None, Some(&connection)).unwrap();
             app.ws.recording = Some(Vec::new());
             for _ in 0..3 {
@@ -6789,6 +6970,81 @@ mod download_service_tests {
                 Some(&(logins::inner(&url).to_string(), !foreign)),
                 "render fetch preserves lineage after reload"
             );
+        }
+    }
+
+    /// The dialog schedules supplied-document parsing and polls its result on a later frame.
+    /// Cancel also wins over a completed result that has not yet been installed.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn ogc_dataset_dialog_listing_runs_off_frame_and_cancels() {
+        let wait = |app: &mut RustGisApp| {
+            let started = std::time::Instant::now();
+            while app.ui.service.as_ref().unwrap().reading.is_some() && started.elapsed() < std::time::Duration::from_secs(5) {
+                app.poll_service();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(app.ui.service.as_ref().unwrap().reading.is_none());
+        };
+        let text = br#"{"collections":[{"id":"roads"},{"id":"water"}]}"#;
+        for cancel in [false, true] {
+            let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+            app.reads_off_frame = true;
+            app.ui.service = Some(super::ServiceConn {
+                url: "https://maps.example.org/dataset".into(),
+                connection: None,
+                kind: "ogcapi",
+                slot: std::sync::Arc::new(std::sync::Mutex::new(Some(Ok(text.to_vec())))),
+                reading: None,
+                text: None,
+                documents: Vec::new(),
+                pending: None,
+                listing: None,
+                added: None,
+                typed: None,
+                search: None,
+                error: None,
+                failure: None,
+            });
+            app.poll_service();
+            let conn = app.ui.service.as_ref().unwrap();
+            assert!(conn.reading.is_some(), "parsing is scheduled, not run on this frame");
+            assert!(conn.listing.is_none());
+            if cancel {
+                let started = std::time::Instant::now();
+                let reading = conn.reading.as_ref().unwrap();
+                while reading.slot.lock().unwrap().is_none() && started.elapsed() < std::time::Duration::from_secs(5) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                assert!(reading.slot.lock().unwrap().is_some(), "the result is ready but has not landed");
+                conn.reading.as_ref().unwrap().control.cancel();
+            }
+            wait(&mut app);
+            let conn = app.ui.service.as_ref().unwrap();
+            assert!(conn.reading.is_none());
+            assert!(conn.pending.is_none());
+            if cancel {
+                assert!(conn.error.as_ref().is_some_and(|e| e.contains("cancelled")));
+                assert!(conn.listing.is_none());
+                let conn = app.ui.service.as_mut().unwrap();
+                super::serviceui::listed(conn, Ok(json!({"count":0,"layers":[]})), None);
+                assert!(conn.error.is_none(), "a successful retry clears the cancellation error");
+            } else {
+                assert!(conn.error.is_none(), "{:?}", conn.error);
+                assert_eq!(conn.listing.as_ref().unwrap()["count"], 2);
+                let params = json!({"url":conn.url,"type":"ogcapi","text":String::from_utf8_lossy(text),"filter":"roads"});
+                let reading = super::serviceui::ListingRead::start(&mut app.session, &params).unwrap();
+                let conn = app.ui.service.as_mut().unwrap();
+                conn.reading = Some(reading);
+                conn.pending = Some(conn.url.clone());
+                app.ui.service_browse.filter = "water".into();
+                wait(&mut app);
+                let conn = app.ui.service.as_ref().unwrap();
+                let search = conn.search.as_ref().unwrap();
+                assert_eq!(search.filter, "roads", "an earlier search retains its own key");
+                assert_eq!(search.listing.as_ref().unwrap()["count"], 1);
+                assert_eq!(conn.listing.as_ref().unwrap()["count"], 2, "a search never replaces the root listing");
+            }
         }
     }
 

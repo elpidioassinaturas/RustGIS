@@ -1735,6 +1735,28 @@ pub(crate) fn fetch_local(url: String, done: Done) {
     );
 }
 
+/// Work the map waits for that runs off the fetch workers (an MBTiles file's metadata, read on a
+/// thread of its own), counted in [`in_flight`] from [`Counted::start`] until dropped, as a fetch
+/// is: an export waiting for the map's tiles waits for it too. However it ends (answered, unwound
+/// by a panic, or its thread never started), the drop draws again and the count goes down once.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct Counted(());
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Counted {
+    pub(crate) fn start() -> Self {
+        IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+        Self(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Counted {
+    fn drop(&mut self) {
+        finished();
+    }
+}
+
 /// Something the map draws from arrived outside the cache (a PMTiles archive's header): draw
 /// again.
 pub(crate) fn notify() {
@@ -4244,21 +4266,33 @@ mod tests {
         let _turn = crate::cache::turn();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        // Sent once the test has looked at the progress mid-download. The server holds the
+        // response open until then, so the progress is read while bytes are still to come, and
+        // then sends the rest at once: no sleeps for a busy runner to stretch (macOS CI). A
+        // failed assertion drops the sender, and the server closes the response at once rather
+        // than holding a download in flight for the tests after this one.
+        let (release, released) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
+                let _ = stream.set_nodelay(true);
                 let path = read_request(&mut stream).split_whitespace().nth(1).unwrap_or("").to_string();
                 if path == "/a.shp" {
                     let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789");
                     continue;
                 }
-                // Chunked, so no length: a 1 kB chunk every 20 ms.
-                let _ = write!(stream, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
-                for _ in 0..200 {
-                    if write!(stream, "3e8\r\n{}\r\n", "x".repeat(1000)).is_err() {
-                        return;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                // Chunked, so no length: 10 kB, past the 5 kB the test waits for, then a pause
+                // until the test has looked.
+                let chunk = format!("3e8\r\n{}\r\n", "x".repeat(1000));
+                let head = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}", chunk.repeat(10));
+                if stream.write_all(head.as_bytes()).is_err() {
+                    return;
+                }
+                if released.recv_timeout(std::time::Duration::from_secs(30)).is_err() {
+                    return;
+                }
+                if stream.write_all(chunk.repeat(190).as_bytes()).is_err() {
+                    return;
                 }
                 let _ = write!(stream, "0\r\n\r\n");
             }
@@ -4280,6 +4314,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert_eq!(progress.fraction(), None, "{progress:?}");
+        let _ = release.send(());
         assert!(rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap().is_ok());
     }
 

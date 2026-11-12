@@ -4,6 +4,8 @@ Plugins add commands, geoprocessing tools and assistant skills to RustGIS. A plu
 `plugin.json` manifest and is packaged as a `.rgplugin` file. WebAssembly plugins run sandboxed
 in the desktop app, on the command line and in the web app. [Process plugins](#process-plugins)
 run a local program instead and need the desktop app or command line.
+Parts of RustGIS itself that you can turn on or off without installing anything are
+[extensions](user-guide/index.md#extensions).
 
 Browse the [plugin catalog](https://plugins.rustgis.app/catalog/).
 [opengeos/rustgis-plugins](https://github.com/opengeos/rustgis-plugins) holds the registry,
@@ -254,6 +256,18 @@ The plugin needs the `files` permission:
 - The tool gets the file in the request's `files`, by parameter name, as
   `{"name": "run.nc", "data": base64}`. The parameter itself holds just the file name.
 - Files are at most 64 MB. The Geoprocessing history keeps the file's name, not its contents.
+- A process plugin, which can open files itself, can take the file's path instead with
+  `"mode": "path"`. RustGIS then checks the file is there but doesn't read it, so the 64 MB
+  limit doesn't apply. The parameter holds the file's full path (a relative one is made full, as
+  the program runs in its own folder), and there is no `files` entry:
+
+  ```json
+  { "name": "input", "label": "Input LAS file", "kind": "file", "mode": "path", "required": true, "extensions": ["las", "laz"] }
+  ```
+
+  `mode` is `"contents"` (the default) or `"path"`; a WebAssembly plugin can't use `path`.
+  RustGIS versions before `mode` read the file anyway, so set `minRustgisVersion` to the first
+  version with it.
 - RustGIS versions before file parameters refuse a plugin that has one, so set
   `minRustgisVersion` to the first version with them.
 

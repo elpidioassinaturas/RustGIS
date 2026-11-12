@@ -28,7 +28,7 @@ Formats](data-formats.md).
 | ASCII grid (`.asc`, with an optional `.prj`) | Yes | No |
 | Unreferenced TIFF and PNG scans; JPEG with `"as": "scan"` | Yes | GeoTIFF after georeferencing |
 | Through GDAL: JPEG 2000, ERDAS Imagine, SRTM HGT, DTED, NetCDF, HDF, ENVI, SAGA… | Yes (desktop, when GDAL is installed) | No |
-| Web tiles: XYZ/TMS/WMS rasters, Mapbox Vector Tiles, MapLibre styles, PMTiles and MBTiles archives | Yes | Yes (Analyze › Create Hosted Imagery) |
+| Web tiles: XYZ/TMS/WMS rasters, Mapbox Vector Tiles, MapLibre styles, PMTiles and MBTiles archives | Yes | Yes (Imagery › Create Hosted Imagery) |
 | RustGIS project (`.rgis`; older `.rgisx` files open too) | Yes | Yes |
 
 Add data with **Home › Add › Add Data**: its main button opens the file picker, and its menu offers
@@ -1172,6 +1172,23 @@ With a raster layer selected in Layers, the **Style** and **Data** tabs show its
 | Style › Rendering | **Symbology**: Stretch, RGB, Classify, Unique Values, Colormap, Shaded Relief; **Stretch Type**: None, Minimum Maximum, Custom Min/Max (your own bounds, one pair per colour channel on an RGB layer), Percent Clip, Standard Deviation, Histogram Equalize; **DRA** (stretch the pixels in view); **Resampling** (nearest or bilinear); **Band Combination** (natural colour, colour infrared, or any bands) |
 | Style › Enhancement | Brightness, contrast, gamma |
 | Data | Raster information (size, bands, statistics, coordinate system) and Export Raster (GeoTIFF) |
+
+**Cast shadows**, on a Shaded Relief layer (`raster.symbology` `"shadow"`, 0 to 1), darkens the
+slopes the terrain hides from the sun as well as those facing away from it: a valley behind a ridge
+is in shadow, with a soft edge. Only the direct light is darkened: a slope in full shadow keeps the
+relief's ambient light. 0, the default, draws the relief as before. The shadows are worked out once
+for the layer's sun, band and Z factor, off the map's frame on the desktop: the map and the Layout
+view draw without them for the moment that takes (under a second for a few million cells on a
+multi-core computer, several seconds on one thread; a sun under about 5° traces much farther, some
+seconds on a multi-core computer and twenty or so on one thread), then with them. An export
+waits for them; what the window draws at once (Copy Map or Copy Layout to the clipboard, printing,
+the presentation and report previews, an agent's snapshot) doesn't, and says the layers it drew
+without them.
+The strength is drawn, not worked out, so changing it is immediate. The browser works them out for
+rasters of at most 500,000 cells, and a cloud-optimised GeoTIFF read in place has none unless its
+whole image is held: either way the layer is drawn without them, and a notice says so. Terrain
+outside the raster casts nothing on it, and a grid spanning 0 to 360° casts nothing across its
+seam.
 
 **Masking**, at the foot of the Symbology pane (`raster.mask`), hides pixel values from view without
 changing the data: values to draw as no data (a background of 0 or −9999 the file doesn't flag, QA
