@@ -1448,6 +1448,54 @@ fn scale_number(v: f64, step: f64) -> String {
     if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
 }
 
+/// The share of its element's width a scale bar's length may take.
+const BAR_SHARE: f64 = 0.85;
+/// A scale bar's labels' size, and how far its bar starts in from the element's left edge (px).
+const BAR_LABEL_PT: f32 = 8.0;
+const BAR_INSET: f32 = 2.0;
+
+/// What a scale bar counts: its whole length in its unit, that unit in metres and its abbreviation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BarPlan {
+    total: f64,
+    unit_m: f64,
+    abbr: &'static str,
+}
+
+/// The bar a scale bar draws in an element `width_pt` points wide at `ground_per_pt` ground metres
+/// a point: the roundest length within [`BAR_SHARE`] of the width. `None` when it draws none.
+fn bar_plan(ground_per_pt: f64, width_pt: f64, units: ScaleUnits) -> Option<BarPlan> {
+    if !(ground_per_pt.is_finite() && ground_per_pt > 0.0 && width_pt.is_finite()) {
+        return None;
+    }
+    let room_m = ground_per_pt * width_pt * BAR_SHARE;
+    let (unit_m, abbr) = units.resolve(rustgis_geom::nice_distance(room_m));
+    let total = rustgis_geom::nice_distance(room_m / unit_m);
+    (total > 0.0).then_some(BarPlan { total, unit_m, abbr })
+}
+
+/// A scale bar's label at division `i` of `divisions`, the last with the unit.
+fn bar_label(total: f64, divisions: usize, i: usize, abbr: &str, comma: bool) -> String {
+    let v = decimal(scale_number(total * i as f64 / divisions as f64, total / divisions as f64), comma);
+    if i == divisions { format!("{v} {abbr}") } else { v }
+}
+
+/// The narrowest element, in points, in which a scale bar draws the same bar as in one `width_pt`
+/// wide (its length, unit and divisions), its last label and `pad_pt` after it included, so a box
+/// can be the size of its bar (#1379). `width_pt` when no narrower one draws that bar; `None` when
+/// it draws none.
+pub fn scale_bar_width_pt(ground_per_pt: f64, width_pt: f64, bar: (ScaleUnits, usize), comma: bool, pad_pt: f64) -> Option<f64> {
+    let (units, divisions) = bar;
+    let plan = bar_plan(ground_per_pt, width_pt, units)?;
+    let divisions = divisions.clamp(1, rustgis_map::layout::MAX_SCALE_DIVISIONS);
+    let len = plan.total * plan.unit_m / ground_per_pt;
+    let last = bar_label(plan.total, divisions, divisions, plan.abbr, comma);
+    let half = f64::from(text::measure(&last, BAR_LABEL_PT, false)) / 2.0;
+    // A hair over the share the bar takes, so a rounding doesn't pick the next shorter length.
+    let w = (len / BAR_SHARE * (1.0 + 1e-6)).max(f64::from(BAR_INSET) + len + half + pad_pt);
+    Some(if w < width_pt && bar_plan(ground_per_pt, w, units) == Some(plan) { w } else { width_pt })
+}
+
 /// A scale bar filling most of the element's width, in `units`, with `divisions` labelled steps.
 /// `ground_per_pt` is ground metres per logical point of paper; `colors` are its lines, dark
 /// divisions and labels, then the alternating bar's light divisions.
@@ -1462,19 +1510,11 @@ fn scale_bar(
 ) {
     let (units, divisions, style) = bar;
     let (dark, light) = colors;
-    if !(ground_per_pt.is_finite() && ground_per_pt > 0.0) {
-        return;
-    }
     let divisions = divisions.clamp(1, rustgis_map::layout::MAX_SCALE_DIVISIONS);
-    let room_m = ground_per_pt * r.width() as f64 / ppp * 0.85;
-    let (unit_m, abbr) = units.resolve(rustgis_geom::nice_distance(room_m));
-    let total = rustgis_geom::nice_distance(room_m / unit_m);
-    if total <= 0.0 {
-        return;
-    }
+    let Some(BarPlan { total, unit_m, abbr }) = bar_plan(ground_per_pt, f64::from(r.width()) / ppp, units) else { return };
     let len = (total * unit_m / ground_per_pt * ppp) as f32;
     let bar_h = (r.height() * 0.28).min(6.0 * ppp as f32);
-    let (x0, y0) = (r.x() + 2.0, r.y() + r.height() * 0.62 - bar_h / 2.0);
+    let (x0, y0) = (r.x() + BAR_INSET, r.y() + r.height() * 0.62 - bar_h / 2.0);
     let seg = len / divisions as f32;
     let line = Stroke { width: 0.6 * ppp as f32, ..Stroke::default() };
     let stroke = |pm: &mut Canvas, pts: &[(f32, f32)], w: &Stroke| {
@@ -1520,15 +1560,10 @@ fn scale_bar(
     }
     // Labels at the divisions, the last with the unit; one that would touch its neighbour is left
     // out (never the ends).
-    let px = 8.0 * 1.33 * ppp as f32;
+    let px = BAR_LABEL_PT * 1.33 * ppp as f32;
     let ty = y0 - px * 0.7;
     let gap = 3.0 * ppp as f32;
-    let labels: Vec<(f32, String)> = (0..=divisions)
-        .map(|i| {
-            let v = decimal(scale_number(total * i as f64 / divisions as f64, total / divisions as f64), comma);
-            (x0 + seg * i as f32, if i == divisions { format!("{v} {abbr}") } else { v })
-        })
-        .collect();
+    let labels: Vec<(f32, String)> = (0..=divisions).map(|i| (x0 + seg * i as f32, bar_label(total, divisions, i, abbr, comma))).collect();
     let half = |s: &str| text::measure(s, px / 1.33, false) / 2.0;
     let last = labels.last().map(|(x, s)| x - half(s)).unwrap_or(f32::MAX);
     let mut right = f32::MIN;
@@ -4553,6 +4588,36 @@ Elaboração: RustGIS",
             assert!(dark < 20, "{style:?}: {dark} dark pixels across the bar");
             assert_ne!(pm.data(), four.data());
         }
+    }
+
+    /// The narrowest element for a scale bar draws the very bar a wider one does, labels and all,
+    /// within itself (#1379).
+    #[test]
+    fn a_scale_bar_draws_the_same_in_its_narrowest_element() {
+        let draw = |ground: f64, width: f32| {
+            let mut pm = Pixmap::new(320, 60).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            let r = Rect::from_xywh(0.0, 0.0, width, 60.0).unwrap();
+            let colors = (Rgba::rgb(0x22, 0x22, 0x22), Rgba::rgb(0xFF, 0xFF, 0xFF));
+            crate::canvas::with_canvas(&mut pm, |c| {
+                scale_bar(c, r, ground, (ScaleUnits::Auto, 4, ScaleBarStyle::Alternating), colors, 1.0, true)
+            });
+            pm
+        };
+        // 20 km on a bar of 300 points takes two thirds of it; 10 km at 37.2 m a point, a third.
+        for (ground, narrower_than) in [(100.0, 260.0), (37.2, 190.0), (78.4, 300.0)] {
+            let w = scale_bar_width_pt(ground, 300.0, (ScaleUnits::Auto, 4), true, 4.0).unwrap();
+            assert!(w < narrower_than, "{ground} m a point: {w} points");
+            let (wide, narrow) = (draw(ground, 300.0), draw(ground, w as f32));
+            assert_eq!(wide.data(), narrow.data(), "{ground} m a point: the same bar in {w} points");
+            let past =
+                (w.ceil() as u32..320).flat_map(|x| (0..60).map(move |y| (x, y))).filter(|&(x, y)| narrow.pixel(x, y).is_some_and(ink));
+            assert_eq!(past.count(), 0, "{ground} m a point: nothing drawn past {w} points");
+        }
+        assert_eq!(scale_bar_width_pt(0.0, 300.0, (ScaleUnits::Auto, 4), false, 4.0), None);
+        // Miles count in other lengths: the box still draws the same bar.
+        let w = scale_bar_width_pt(100.0, 300.0, (ScaleUnits::Miles, 4), false, 4.0).unwrap();
+        assert!(w <= 300.0 && bar_plan(100.0, w, ScaleUnits::Miles) == bar_plan(100.0, 300.0, ScaleUnits::Miles));
     }
 
     #[test]

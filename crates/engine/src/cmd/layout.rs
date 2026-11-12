@@ -1825,7 +1825,28 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         sizes = None;
         warnings.push("a WMS or WMTS layer's legend picture is still loading: the legend has a fixed size to fit by hand".into());
     }
-    let (sw, sh, nh) = ((fw * 0.3).max(25.0), if sheet { 8.0 * k } else { 6.0 }, pitch(small_pt) + 0.5);
+    let (sh, nh) = (if sheet { 8.0 * k } else { 6.0 }, pitch(small_pt) + 0.5);
+    // The scale bar's box at a scale: the size of its bar and labels and of the scale under them,
+    // with the padding (#1379). The bar is the one a box 30 % of the frame's width (25 mm at least)
+    // draws: that rule picks its length and divisions, and the box is the narrowest that draws it
+    // the same, so at least the bar's length over the share of a box the renderer gives a bar.
+    let bar_kind = match ElementKind::scale_bar(frame) {
+        ElementKind::ScaleBar { units, divisions, .. } => Some((units, divisions)),
+        _ => None,
+    };
+    let scale_box = |ground_per_pt: f64, scale: f64| {
+        let (widest, pt) = ((fw * 0.3).max(25.0), rustgis_map::layout::PT_PER_MM);
+        let bar_w = bar_kind
+            .and_then(|kind| crate::render::layout::scale_bar_width_pt(ground_per_pt, widest * pt, kind, comma, 1.5 * pt))
+            .map_or(widest, |w| w / pt);
+        let ratio = rustgis_map::graphics::scale_ratio(scale);
+        let ratio = if comma { ratio.replace(',', ".") } else { ratio };
+        let text_w = crate::render::report::width_mm(&ratio, small_pt as f32, false) + 2.0;
+        (bar_w.max(text_w).min(widest), sh + nh)
+    };
+    let ground_per_pt = |s: &Session, center: Coord, scale: f64| {
+        s.map().ground_res_at(&rustgis_map::layout::frame_camera(s.map(), center, scale, 0.0, 0.0))
+    };
     let pad = 2.0;
     // The surrounds to place: what each is and its size (the arrangement gives its corner).
     let mut surrounds: Vec<(Surround, f64, f64)> = Vec::new();
@@ -1846,6 +1867,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     if content_h > 0.0 && !legend_in_column {
         surrounds.push((Surround::Legend, (content_w + 2.0 * pad).min(fw * 0.45), (content_h + 2.0 * pad).min(fh * 0.6)));
     }
+    let (sw, _) = scale_box(ground_per_pt(s, center, scale), scale);
     surrounds.push((Surround::Scale, sw, sh + nh));
     // A corner's rectangle for a surround `w` × `h`.
     let at = |corner: usize, w: f64, h: f64| {
@@ -1899,12 +1921,11 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         bands
     };
     let size_of = |kind: Surround| surrounds.iter().find(|x| x.0 == kind).map(|x| (x.1, x.2));
-    let (locator_side, arrow_size, scale_size) =
-        (size_of(Surround::Locator).map(|x| x.0), size_of(Surround::Arrow), size_of(Surround::Scale));
+    let (locator_side, arrow_size) = (size_of(Surround::Locator).map(|x| x.0), size_of(Surround::Arrow));
     // The fewest columns from `from` up in which the surrounds group in a band around `clip`, with
-    // their places.
-    let grouped = |clip: Rect, from: usize, known: &[(f64, f64); MAX_LEGEND_COLUMNS]| {
-        let (arrow, scale_bar) = (arrow_size?, scale_size?);
+    // their places; the scale bar's box `scale_bar` is the one at the scale tried.
+    let grouped = |clip: Rect, from: usize, known: &[(f64, f64); MAX_LEGEND_COLUMNS], scale_bar: (f64, f64)| {
+        let arrow = arrow_size?;
         (from..known.len()).find_map(|i| {
             bands_around(clip)
                 .iter()
@@ -1957,6 +1978,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             for (factor, veil) in passes.into_iter().filter(|(factor, veil)| (!*veil || continuous) && (*factor == 1.0 || sheet)) {
                 let tried = if factor == 1.0 { asked_scale } else { round_scale(asked_scale * factor) };
                 let mm = 1000.0 * flat.ground_per_unit(asked.center()) * s.map().body().ratio() / tried;
+                let tried_bar = scale_box(ground_per_pt(s, centred, tried), tried);
                 // How far the extent, centred, can go each way and stay inside that side's margin
                 // (a figure labels only its left and bottom edges, so they differ).
                 let (half_w, half_h) = (asked.width() * mm / 2.0, asked.height() * mm / 2.0);
@@ -2062,7 +2084,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     let room = free_room(&moved);
                     let Some(n) = need(room) else { continue };
                     // Under a veil the whole group has to fit, not the legend alone.
-                    let Some(n) = (if veil { grouped(clip, n, here).map(|(i, _)| i) } else { Some(n) }) else { continue };
+                    let Some(n) = (if veil { grouped(clip, n, here, tried_bar).map(|(i, _)| i) } else { Some(n) }) else { continue };
                     if found.is_none_or(|(fewest, most)| n < fewest || (n == fewest && room.0 * room.1 > most)) {
                         found = Some((n, room.0 * room.1));
                         (center, scale, coverage, map_shift) = (there, tried, Some(moved), (dx, dy));
@@ -2097,6 +2119,11 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 let (w, h) = whole(chosen[0]);
                 if let Some(entry) = surrounds.iter_mut().find(|x| x.0 == Surround::Legend) {
                     (entry.1, entry.2) = (w.min(fw * 0.45), h.min(fh * 0.6));
+                }
+                // The scale bar's box too: the bar a scale draws differs.
+                let bar_box = scale_box(ground_per_pt(s, center, scale), scale);
+                if let Some(entry) = surrounds.iter_mut().find(|x| x.0 == Surround::Scale) {
+                    (entry.1, entry.2) = bar_box;
                 }
             }
         }
@@ -2247,7 +2274,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // it no room.
     let mut arrangement_used = arrangement_name(homes);
     if let (Some(clip), Some(known)) = (veiled, sizes)
-        && let Some((i, (legend_place, locator_place, arrow_place, scale_place))) = grouped(clip, 0, &known)
+        && let Some((i, (legend_place, locator_place, arrow_place, scale_place))) =
+            grouped(clip, 0, &known, scale_box(ground_per_pt(s, center, scale), scale))
     {
         legend_cols = i + 1;
         (cw, ch) = known[i];
@@ -2415,9 +2443,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     }
     if let Some((sx, sy, w, h)) = spot_of(Surround::Scale) {
         placed.push(("scale bar", (sx, sy, w, h)));
-        l.add("Scale Box", (sx, sy, sw, sh + nh), surround_box(paper));
-        l.add("Scale Bar", (sx, sy, sw, sh), ElementKind::scale_bar(frame));
-        l.add("Scale", (sx, sy + sh, sw, nh), pub_text("{scale}".into(), small_pt, ink, false, TextAlign::Center));
+        l.add("Scale Box", (sx, sy, w, sh + nh), surround_box(paper));
+        l.add("Scale Bar", (sx, sy, w, sh), ElementKind::scale_bar(frame));
+        l.add("Scale", (sx, sy + sh, w, nh), pub_text("{scale}".into(), small_pt, ink, false, TextAlign::Center));
     }
     // What placing couldn't avoid: a surround over the map's drawing while a clearly freer corner
     // went to another (more surrounds than free corners), or two overlapping (a frame too small

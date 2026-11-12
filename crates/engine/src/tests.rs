@@ -6979,6 +6979,7 @@ fn publication_layouts_fit_their_pages() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut s = world();
     let piaui = json!([-46.8, -11.6, -38.5, -2.2]);
+    let mut narrower = 0;
     let long =
         "NDVI: MOD13Q1 v6.1 (NASA LP DAAC), 16-day composites at 250 m, read through the Brazil Data Cube (INPE) and averaged to 1 km";
     let profiles = [
@@ -7026,6 +7027,15 @@ fn publication_layouts_fit_their_pages() {
         let (a, b) = (named("Legend Box"), named("Scale Box"));
         let apart = a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
         assert!(apart, "{profile}: the legend reaches the scale bar");
+        // The scale bar's box is the size of its bar (#1379): at most the 30 % of the frame (25 mm
+        // at least) it used to take, and its bar the length that width draws.
+        let bar = named("Scale Bar");
+        let widest = (frame.w * 0.3).max(25.0);
+        let per_mm = scale * rustgis_map::layout::PAPER_M_PER_PT * rustgis_map::layout::PT_PER_MM;
+        let drawn = |w: f64| rustgis_geom::nice_distance(per_mm * w * 0.85);
+        assert!(b.w <= widest + 1e-9 && bar.w == b.w, "{profile}: a {} mm box for a {} mm bar, {widest} mm at most", b.w, bar.w);
+        assert_eq!(drawn(b.w), drawn(widest), "{profile}: the bar in a {} mm box", b.w);
+        narrower += usize::from(b.w < widest - 1.0);
         // A round scale, two significant figures, at which the extent still fits.
         let unit = 10f64.powf(scale.log10().floor() - 1.0);
         assert!(((scale / unit) - (scale / unit).round()).abs() < 1e-6, "{profile}: 1:{scale}");
@@ -7078,6 +7088,7 @@ fn publication_layouts_fit_their_pages() {
         assert!(std::fs::metadata(&png).unwrap().len() > 1000, "{profile}");
     }
     assert_eq!(s.project.layouts.len(), profiles.len(), "a layout each, the earlier ones untouched");
+    assert!(narrower > 0, "no profile's scale bar box is narrower than 30 % of its frame");
     // A long title wraps within the frame, and pushes the map down; the result names every
     // element for layout.update.
     let r = s.run("layout.publication", &json!({"extent": piaui, "title": long})).unwrap();
