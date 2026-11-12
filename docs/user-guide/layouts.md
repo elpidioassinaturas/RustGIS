@@ -50,13 +50,14 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     (by area, so moving the north arrow costs less than moving the legend), then the one leaving
     the least over the data; the favourite wins a tie. `"favourite"` always takes the favourite.
     The answer names the arrangement taken (`"arrangement"`) and the surrounds
-    moved off their corners (`"moved"`). To see why one moved, **`"coverage": "grid.png"`**
-    writes the grid the placement searched: what the map draws dark, the free cells white, the
-    strips the graticule's labels keep tinted blue, and the surrounds placed outlined in red. Where nowhere is freer, a surround stays. One warning
+    moved off their corners (`"moved"`). Where nowhere is freer, a surround stays. One warning
     names those left with more than a quarter of their area on the data while a corner of their
     size had more than a quarter less, to move by hand if that matters (data under every corner
     alike, such as a context layer filling the frame, isn't worth a warning); two that overlap (a
-    frame too small) are said too.
+    frame too small) are said too. To see why a surround moved or stayed,
+    **`"coverage": "grid.png"`** writes the grid the placement searched: what the map draws dark,
+    the free cells white, the strips the graticule's labels keep tinted blue, and the surrounds
+    placed outlined in red.
     The top visible raster with a colour scale, not drawn by classes (Stretch, a tinted hillshade),
     gets a colorbar beneath the legend; RGB and untinted hillshade do not, so an RGB composite over
     a DEM leaves it to the DEM. A raster drawn by classes (Colormap, Unique Values, Classify) has
