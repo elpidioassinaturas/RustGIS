@@ -1106,10 +1106,6 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // A sheet's sizes follow its short side (A4's 210 mm is 1); a figure keeps its texts at their
     // printed size, whatever its width.
     let k = if sheet { page_w.min(page_h) / 210.0 } else { 1.0 };
-    // A panel's or an editorial page's map is as wide as its column: where the area is less tall
-    // than the frame the sheet leaves it, the sheet is laid out again with the frame the area's
-    // height (and a little room), and the whole put in the middle of the page, rather than the map
-    // showing more of its surroundings.
     // The sources and the reference that have something in them, each its heading in `head_pt` and
     // lines in `body_pt`, `tw` wide. Each one's elements keep their names (`Sources`, `Reference`)
     // whatever its heading reads, the heading filled and wrapped like the rest.
@@ -1125,6 +1121,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             })
             .collect()
     };
+    // A panel's or an editorial page's map is as wide as its column: where the area is less tall
+    // than the frame the sheet leaves it, the sheet is laid out again with the frame the area's
+    // height (and a little room), and the whole put in the middle of the page, rather than the map
+    // showing more of its surroundings.
     let page_full = page_h;
     let mut freed = 0.0f64;
     let (mut target, mut passes): (Option<f64>, u32) = (None, 0);
@@ -2520,7 +2520,8 @@ pub(crate) fn align_footer(
     };
     let (Some(a), Some(b), Some(head_at)) = (find("Sources Box"), find("Reference Box"), find("Sources Heading")) else { return };
     let (Some(head_pt), Some(body_pt)) = (size(Some(head_at)), size(find("Sources")).or_else(|| size(find("Reference")))) else { return };
-    let (left, right, inner) = (around[a].1, around[b].1, around[head_at].1.0 - around[a].1.0);
+    let (Some(left), Some(right), Some(head)) = (around.get(a), around.get(b), around.get(head_at)) else { return };
+    let (left, right, inner) = (left.1, right.1, head.1.0 - left.1.0);
     let gap = right.0 - (left.0 + left.2);
     let (lw, rw) = (legend.0 - gap - left.0, right.0 + right.2 - legend.0);
     // Side by side, and the move a real one.
