@@ -964,8 +964,6 @@ const STOPPED: &str = "its cast shadows were stopped";
 /// each owner's latest.
 const KEPT_LIGHTS: usize = 3;
 
-/// Works out a light grid: natively on a thread of its own (here if the system refuses one),
-/// in the browser here.
 /// Held by [`hold_cast_shadows`]: light work waits for it before it traces.
 static LIGHT_HOLD: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
@@ -976,6 +974,8 @@ pub fn hold_cast_shadows() -> std::sync::RwLockWriteGuard<'static, ()> {
     LIGHT_HOLD.write().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Works out a light grid: natively on a thread of its own (here if the system refuses one),
+/// in the browser here.
 fn start_light(r: Arc<Raster>, key: LightKey, work: Arc<LightWork>) {
     let run = move || {
         drop(LIGHT_HOLD.read().unwrap_or_else(|e| e.into_inner()));
