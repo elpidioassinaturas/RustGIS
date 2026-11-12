@@ -411,7 +411,7 @@ mod tests {
         };
         assert!(!svg(0.0).contains("rotate("));
         assert!(svg(-90.0).contains(r#"transform="rotate(-90 40 35)">Fonte: IBGE</text>"#), "{}", svg(-90.0));
->    }
+    }
 
     #[test]
     fn surrounds_on_a_frame_keep_the_picture_resolution() {

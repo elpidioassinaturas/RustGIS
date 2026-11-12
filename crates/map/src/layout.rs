@@ -2125,7 +2125,7 @@ mod tests {
         // The element keeps its unturned box.
         let e = l.element(id).unwrap();
         assert_eq!((e.x, e.y, e.w, e.h), (20.0, 45.0, 60.0, 10.0));
->    }
+    }
 
     #[test]
     fn loaded_grids_and_scale_bars_are_limited() {

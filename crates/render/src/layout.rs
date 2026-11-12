@@ -3571,6 +3571,48 @@ mod tests {
         assert!(round(&png(oval(dash))) >= 20, "{}", round(&png(oval(dash))));
     }
 
+    /// A dashed box round a turned text, on one page (#1763): the picture has the box's gaps and
+    /// the text running down the page inside it; the recorded page (the PDF's) keeps the dashes as
+    /// pieces and the text as glyphs; the SVG writes the dash array and the turn.
+    #[test]
+    fn a_dashed_box_and_a_turned_text_share_a_page() {
+        use crate::vector::Item;
+        // The text's box (10, 45, 80, 10) mm turned 90° about (50, 50): 45..55 across, 10..90 down.
+        let mut layout = turned_text_page(90.0);
+        let dash = rustgis_map::symbology::Dash::new(&[6.0, 6.0]);
+        let outline = Rgba::rgb(0, 0, 0);
+        layout.add(
+            "Box",
+            (5.0, 5.0, 90.0, 90.0),
+            ElementKind::Rectangle { fill: Rgba::new(0, 0, 0, 0), outline, width: 2.0, radius: 0.0, dash },
+        );
+        let info = PageInfo::default();
+        let png = render(&layout, &mut [], 96.0, &info).unwrap();
+        let px = |mm: f64| (mm * 96.0 / 25.4).round() as u32;
+        assert!(gaps(&png, (px(10.0)..px(90.0)).map(|x| (x, px(5.0)))) >= 3, "the box's top is dashed");
+        // Inside the box: the text, tall and narrow about x = 50 mm.
+        let inside: Vec<(u32, u32)> =
+            (px(8.0)..px(92.0)).flat_map(|y| (px(8.0)..px(92.0)).map(move |x| (x, y))).filter(|&(x, y)| rgb(&png, x, y).0 < 128).collect();
+        let (l, r) = (inside.iter().map(|p| p.0).min().unwrap(), inside.iter().map(|p| p.0).max().unwrap());
+        let (t, b) = (inside.iter().map(|p| p.1).min().unwrap(), inside.iter().map(|p| p.1).max().unwrap());
+        assert!(b - t > 4 * (r - l) && l > px(44.0) && r < px(56.0), "the text runs down the page: {l},{t} to {r},{b}");
+        let (drawing, _) = render_drawing(&layout, &mut [], 96.0, &info).unwrap();
+        let (_, _, items) = drawing.finish();
+        let pieces: usize = items
+            .iter()
+            .filter_map(|i| if let Item::Stroke { path, .. } = i { Some(path) } else { None })
+            .map(|p| p.segments().filter(|s| matches!(s, tiny_skia::PathSegment::MoveTo(_))).count())
+            .sum();
+        let text: String = items
+            .iter()
+            .filter_map(|i| if let Item::Glyphs(r) = i { Some(r) } else { None })
+            .flat_map(|r| r.glyphs.iter().map(|g| g.ch))
+            .collect();
+        assert!(pieces > 20 && text == "Fonte: IBGE, 2022", "{pieces} dashes, text {text:?}");
+        let svg = crate::svg::layout_svg(&layout, &mut [], 96.0, &info).unwrap().0;
+        assert!(svg.contains("stroke-dasharray") && svg.contains(r#"transform="rotate(90 50 50)""#), "{svg}");
+    }
+
     /// A dashed outline is kept as vectors, its dashes as the pieces of the path (as a dashed line
     /// layer's are), which draw what its picture shows (#1763).
     #[test]
@@ -3712,7 +3754,7 @@ Elaboração: RustGIS",
     fn a_turned_text_is_kept_turned_as_vectors() {
         use crate::vector::Item;
         let layout = turned_text_page(90.0);
->        let info = PageInfo::default();
+        let info = PageInfo::default();
         let png = render(&layout, &mut [], 96.0, &info).unwrap();
         let (drawing, _) = render_drawing(&layout, &mut [], 96.0, &info).unwrap();
         let (_, _, items) = drawing.finish();
