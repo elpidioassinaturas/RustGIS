@@ -1282,6 +1282,16 @@ Google Cloud's CMIP6 bucket does, ARCO-ERA5's doesn't (the desktop reads both).
 rustgis-cli run --cmd 'layer.addZarr={"url":"https://storage.googleapis.com/gcp-public-data-arco-era5/ar/1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2","variable":"2m_temperature","index":{"time":539100}}'
 ```
 
+**A window** of the map (`layer.addZarr` with `"cells": [first column, first row, end column, end
+row]`, the ends not included, or `"bbox": [west, south, east, north]` in the grid's coordinates,
+degrees for a longitude/latitude grid) reads only the chunks it touches, and only its part of the
+coordinates (by byte range when they are stored uncompressed). A box is placed by the variable's
+coordinates, read whole, so it takes grids of up to 4,000,000 cells a side; a longer one takes
+`"cells"`. A box reaching past the grid is read within it, and says so; `raster.zarrInfo` with
+`"bbox"` gives the cells a box covers (`window.cells`). A window is at least 2 × 2 cells, and
+doesn't follow the time slider yet. A folder's window is kept in the layer's selection
+(`t[time=3,cells=…]`) and read again when the project opens.
+
 **Follow the time slider** (desktop; `layer.addZarr` with `"time": true`) adds the variable as one
 layer whose step is the time slider's. The slider turns on over the variable's dates when it is
 off, and the layer shows the last of its steps in the slider's window, or nothing when none falls
