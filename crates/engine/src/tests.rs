@@ -7031,8 +7031,13 @@ fn publication_layouts_fit_their_pages() {
         // at least) it used to take, and its bar the length that width draws.
         let bar = named("Scale Bar");
         let widest = (frame.w * 0.3).max(25.0);
+        // The bar a box `w` wide draws, as the renderer picks it: its unit, then its length in it.
         let per_mm = scale * rustgis_map::layout::PAPER_M_PER_PT * rustgis_map::layout::PT_PER_MM;
-        let drawn = |w: f64| rustgis_geom::nice_distance(per_mm * w * 0.85);
+        let drawn = |w: f64| {
+            let room = per_mm * w * 0.85;
+            let (unit, abbr) = rustgis_map::layout::ScaleUnits::Auto.resolve(rustgis_geom::nice_distance(room));
+            (rustgis_geom::nice_distance(room / unit), abbr)
+        };
         assert!(b.w <= widest + 1e-9 && bar.w == b.w, "{profile}: a {} mm box for a {} mm bar, {widest} mm at most", b.w, bar.w);
         assert_eq!(drawn(b.w), drawn(widest), "{profile}: the bar in a {} mm box", b.w);
         narrower += usize::from(b.w < widest - 1.0);

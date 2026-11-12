@@ -577,6 +577,12 @@ fn attribution_inset((w, h): (f32, f32), tw: f32, labels: &[(Edge, [f32; 4])]) -
     (bottom, right)
 }
 
+/// A scale as `{scale}` prints it: `1:6,300,000`, or `1:6.300.000` with a decimal comma.
+pub fn scale_ratio_text(scale: f64, comma: bool) -> String {
+    let ratio = rustgis_map::graphics::scale_ratio(scale);
+    if comma { decimal(ratio, true) } else { ratio }
+}
+
 /// Expands layout text tokens: the page ones here, the map ones from the first frame.
 pub fn expand(t: &str, layout: &Layout, info: &PageInfo, frame: Option<(&Map, rustgis_map::Camera)>) -> String {
     // The frame's scale, worked out once for both its forms below.
@@ -584,7 +590,7 @@ pub fn expand(t: &str, layout: &Layout, info: &PageInfo, frame: Option<(&Map, ru
     // A layout with a decimal comma prints its scale with points between thousands: put in first,
     // so a page or layout name holding "{scale}" isn't read as the token.
     let t = match scale {
-        Some(scale) if layout.decimal_comma => t.replace("{scale}", &decimal(rustgis_map::graphics::scale_ratio(scale), true)),
+        Some(scale) if layout.decimal_comma => t.replace("{scale}", &scale_ratio_text(scale, true)),
         _ => t.to_string(),
     };
     let t = t
@@ -1450,7 +1456,8 @@ fn scale_number(v: f64, step: f64) -> String {
 
 /// The share of its element's width a scale bar's length may take.
 const BAR_SHARE: f64 = 0.85;
-/// A scale bar's labels' size, and how far its bar starts in from the element's left edge (px).
+/// A scale bar's labels' size, and how far its bar starts in from the element's left edge, in
+/// pixels: at most as many points at a pixel a point or more, which [`scale_bar_width_pt`] counts.
 const BAR_LABEL_PT: f32 = 8.0;
 const BAR_INSET: f32 = 2.0;
 

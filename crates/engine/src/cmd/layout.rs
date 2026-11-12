@@ -1828,19 +1828,19 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let (sh, nh) = (if sheet { 8.0 * k } else { 6.0 }, pitch(small_pt) + 0.5);
     // The scale bar's box at a scale: the size of its bar and labels and of the scale under them,
     // with the padding (#1379). The bar is the one a box 30 % of the frame's width (25 mm at least)
-    // draws: that rule picks its length and divisions, and the box is the narrowest that draws it
-    // the same, so at least the bar's length over the share of a box the renderer gives a bar.
+    // would draw, which sets its length and divisions. The box is the narrowest that draws that same
+    // bar: the renderer gives a bar at most 85 % of its box, so the box is at least the bar's length
+    // over 0.85.
     let bar_kind = match ElementKind::scale_bar(frame) {
         ElementKind::ScaleBar { units, divisions, .. } => Some((units, divisions)),
         _ => None,
     };
     let scale_box = |ground_per_pt: f64, scale: f64| {
-        let (widest, pt) = ((fw * 0.3).max(25.0), rustgis_map::layout::PT_PER_MM);
+        let (widest, pt_per_mm) = ((fw * 0.3).max(25.0), rustgis_map::layout::PT_PER_MM);
         let bar_w = bar_kind
-            .and_then(|kind| crate::render::layout::scale_bar_width_pt(ground_per_pt, widest * pt, kind, comma, 1.5 * pt))
-            .map_or(widest, |w| w / pt);
-        let ratio = rustgis_map::graphics::scale_ratio(scale);
-        let ratio = if comma { ratio.replace(',', ".") } else { ratio };
+            .and_then(|kind| crate::render::layout::scale_bar_width_pt(ground_per_pt, widest * pt_per_mm, kind, comma, 1.5 * pt_per_mm))
+            .map_or(widest, |w| w / pt_per_mm);
+        let ratio = crate::render::layout::scale_ratio_text(scale, comma);
         let text_w = crate::render::report::width_mm(&ratio, small_pt as f32, false) + 2.0;
         (bar_w.max(text_w).min(widest), sh + nh)
     };
@@ -1978,7 +1978,6 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             for (factor, veil) in passes.into_iter().filter(|(factor, veil)| (!*veil || continuous) && (*factor == 1.0 || sheet)) {
                 let tried = if factor == 1.0 { asked_scale } else { round_scale(asked_scale * factor) };
                 let mm = 1000.0 * flat.ground_per_unit(asked.center()) * s.map().body().ratio() / tried;
-                let tried_bar = scale_box(ground_per_pt(s, centred, tried), tried);
                 // How far the extent, centred, can go each way and stay inside that side's margin
                 // (a figure labels only its left and bottom edges, so they differ).
                 let (half_w, half_h) = (asked.width() * mm / 2.0, asked.height() * mm / 2.0);
@@ -2083,8 +2082,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     }
                     let room = free_room(&moved);
                     let Some(n) = need(room) else { continue };
-                    // Under a veil the whole group has to fit, not the legend alone.
-                    let Some(n) = (if veil { grouped(clip, n, here, tried_bar).map(|(i, _)| i) } else { Some(n) }) else { continue };
+                    // Under a veil the whole group has to fit, not the legend alone, the scale bar's box
+                    // as drawn there.
+                    let bar_box = scale_box(ground_per_pt(s, there, tried), tried);
+                    let Some(n) = (if veil { grouped(clip, n, here, bar_box).map(|(i, _)| i) } else { Some(n) }) else { continue };
                     if found.is_none_or(|(fewest, most)| n < fewest || (n == fewest && room.0 * room.1 > most)) {
                         found = Some((n, room.0 * room.1));
                         (center, scale, coverage, map_shift) = (there, tried, Some(moved), (dx, dy));
@@ -2120,13 +2121,13 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 if let Some(entry) = surrounds.iter_mut().find(|x| x.0 == Surround::Legend) {
                     (entry.1, entry.2) = (w.min(fw * 0.45), h.min(fh * 0.6));
                 }
-                // The scale bar's box too: the bar a scale draws differs.
-                let bar_box = scale_box(ground_per_pt(s, center, scale), scale);
-                if let Some(entry) = surrounds.iter_mut().find(|x| x.0 == Surround::Scale) {
-                    (entry.1, entry.2) = bar_box;
-                }
             }
         }
+    }
+    // The scale bar's box as the frame is drawn, moved or at another scale or not.
+    let bar_box = scale_box(ground_per_pt(s, center, scale), scale);
+    if let Some(entry) = surrounds.iter_mut().find(|x| x.0 == Surround::Scale) {
+        (entry.1, entry.2) = bar_box;
     }
     // Its cells summed from the top left (a summed-area table), so a rectangle's count is four
     // lookups, however large: the search off the corners tries thousands.
