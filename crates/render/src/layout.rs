@@ -70,33 +70,12 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> R
     render_page(layout, maps, dpi, info, true).map(|(pm, _)| pm)
 }
 
-thread_local! {
-    /// The last [`render_pending`] on this thread drew a frame without cast shadows still to come.
-    static PAGE_SHADOWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Why the frames of the pages drawn on this thread since the last [`shadow_notices`] drew
-    /// layers without their cast shadows.
-    static PAGE_NOTICES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Why map frames on the pages drawn on this thread since the last call (by [`render`],
-/// [`render_pending`] or [`render_drawing`]) drew layers without their cast shadows, each once,
-/// named by the layer: to be said, as the map view says its own (Never silent).
-pub fn shadow_notices() -> Vec<String> {
-    PAGE_NOTICES.with(|n| std::mem::take(&mut *n.borrow_mut()))
-}
-
-/// Whether the last [`render_pending`] on this thread drew a frame without cast shadows still
-/// being worked out: the page is to be drawn again as they land (natively too, where its tiles
-/// were waited for).
-pub fn shadows_to_come() -> bool {
-    PAGE_SHADOWS.with(|c| c.replace(false))
-}
-
 /// [`render`], and whether a map frame on the page drew while some of its tiles, or a read of its
 /// streamed layers or rasters, were still on their way: in the browser, which doesn't wait for
 /// them, the page is drawn again once they land.
 /// Drawn for the Layout view on the interface's thread, its frames don't wait for cast shadows
-/// still being worked out: [`shadows_to_come`] says so, and the page is drawn again as they land.
+/// still being worked out: [`crate::shadows_said`] says so, and the page is drawn again as they
+/// land (natively too, where its tiles were waited for).
 pub fn render_pending(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Result<(Pixmap, bool), String> {
     render_page(layout, maps, dpi, info, false)
 }
@@ -104,7 +83,6 @@ pub fn render_pending(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageIn
 /// [`render_pending`], its frames waiting for cast shadows when `wait_shadows` (an export).
 fn render_page(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo, wait_shadows: bool) -> Result<(Pixmap, bool), String> {
     let revisions = archive_revisions(layout, maps);
-    PAGE_SHADOWS.with(|c| c.set(false));
     let result = if wait_shadows {
         render_pending_inner(layout, maps, dpi, info)
     } else {
@@ -530,24 +508,12 @@ fn frame_canvas(
     grid: Option<(&Grid, bool)>,
 ) -> Option<Canvas> {
     let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
-    // What earlier frames (the map view's, another page's) left is not this frame's.
-    crate::frame_shadows_to_come();
-    crate::take_shadow_notices();
-    let img = if record { crate::render_complete_recorded(map, &view) } else { crate::render_complete(map, &view) }?;
-    let shadows = crate::frame_shadows_to_come();
-    if shadows {
-        PAGE_SHADOWS.with(|c| c.set(true));
-    }
-    // Why a frame's layers were drawn without their cast shadows, kept for the page.
-    let notices = crate::take_shadow_notices();
-    PAGE_NOTICES.with(|n| {
-        let mut n = n.borrow_mut();
-        for e in notices {
-            if !n.contains(&e) {
-                n.push(e);
-            }
-        }
+    // Why its layers were drawn without their cast shadows is kept for the page's caller (see
+    // `crate::shadows_said`).
+    let (img, shadows) = crate::frame_with_shadows_to_come(|| {
+        if record { crate::render_complete_recorded(map, &view) } else { crate::render_complete(map, &view) }
     });
+    let img = img?;
     *pending |= img.tiles_pending || img.data_pending || shadows;
     Some(finish_frame(img, ppp, grid.map(|(g, comma)| (&*map, &view, g, comma))))
 }
@@ -3495,11 +3461,10 @@ mod tests {
             z_factor: 1.0,
             shadow,
         };
-        shadow_notices();
         for shadow in [0.0, 1.0] {
             let map = ramp_map(relief(shadow), rustgis_map::raster::Stretch::MinMax);
-            colorbar_page(&map, Orientation::Horizontal, false, "");
-            assert!(shadow_notices().is_empty(), "shadow {shadow}");
+            let (_, said) = crate::shadows_said(|| colorbar_page(&map, Orientation::Horizontal, false, ""));
+            assert!(said.notices.is_empty() && !said.to_come, "shadow {shadow}: {said:?}");
         }
         // Read in place with only its overview held: no whole grid to trace.
         let mut map = ramp_map(relief(1.0), rustgis_map::raster::Stretch::MinMax);
@@ -3508,8 +3473,8 @@ mod tests {
         let mut r = (**rl.data.as_ref().unwrap()).clone();
         r.overview = Some((1000, 10));
         rl.data = Some(std::sync::Arc::new(r));
-        colorbar_page(&map, Orientation::Horizontal, false, "");
-        let said = shadow_notices();
+        let (_, said) = crate::shadows_said(|| colorbar_page(&map, Orientation::Horizontal, false, ""));
+        let said = said.notices;
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(said[0].starts_with("dem: ") && said[0].contains("read in place"), "{said:?}");
         // What the map view's frame said is not a page's: a clean page drawn after it says nothing.
@@ -3517,8 +3482,8 @@ mod tests {
             rustgis_map::Camera { center: rustgis_geom::lonlat_to_merc(Coord::new(0.5, 0.5)), res: 2000.0, bearing: 0.0, pitch: 0.0 };
         crate::render(&mut map, &crate::View { width: 64.0, height: 64.0, pixels_per_point: 1.0, camera, sky: false });
         let clean = ramp_map(relief(0.0), rustgis_map::raster::Stretch::MinMax);
-        colorbar_page(&clean, Orientation::Horizontal, false, "");
-        assert!(shadow_notices().is_empty());
+        let (_, said) = crate::shadows_said(|| colorbar_page(&clean, Orientation::Horizontal, false, ""));
+        assert!(said.notices.is_empty(), "{said:?}");
     }
 
     /// A page with maps showing copies of one relief (each layer the first of its map, so with the
@@ -3563,15 +3528,15 @@ mod tests {
         }
         let start = std::time::Instant::now();
         loop {
-            shadows_to_come();
-            render_pending(&l, &mut maps, 48.0, &PageInfo::default()).unwrap();
-            if !shadows_to_come() {
+            let (drawn, said) = crate::shadows_said(|| render_pending(&l, &mut maps, 48.0, &PageInfo::default()));
+            drawn.unwrap();
+            assert!(said.notices.is_empty(), "{said:?}");
+            if !said.to_come {
                 break;
             }
             assert!(start.elapsed() < std::time::Duration::from_secs(60), "the page never got its shadows");
             std::thread::yield_now();
         }
-        assert!(shadow_notices().is_empty());
     }
 
     /// Two maps lit otherwise on a page: neither map's grid stops the other's.

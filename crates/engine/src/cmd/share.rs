@@ -201,25 +201,37 @@ pub fn map_png_fitted(s: &mut Session, dpi: f64) -> Result<Vec<u8>, String> {
 }
 
 /// Renders the active map at the current view (or a requested size) to PNG bytes. Layers drawn
-/// without their cast shadows (unavailable, or still being worked out when drawn in
-/// [`rustgis_render::without_shadow_wait`]) are said.
+/// without their cast shadows are said ([`saying_shadows`]).
 pub fn map_png(s: &mut Session, width: Option<f64>, height: Option<f64>, dpi: Option<f64>) -> Result<Vec<u8>, String> {
     let view_size = s.view_size;
-    rustgis_render::frame_shadows_to_come();
-    let png = png_of(s.map_mut(), view_size, width, height, dpi)?;
-    say_shadows(s);
-    if rustgis_render::frame_shadows_to_come() {
-        s.warn("The map image: some layers are drawn without their cast shadows, still being worked out: draw it again once the map shows them");
-    }
-    Ok(png)
+    saying_shadows(s, "The map image", |s| png_of(s.map_mut(), view_size, width, height, dpi))
 }
 
-/// Says why layers drawn on this thread were drawn without their cast shadows (see
-/// [`rustgis_render::take_shadow_notices`]), as warnings: what was drawn is written.
-pub(crate) fn say_shadows(s: &mut Session) {
-    for e in rustgis_render::take_shadow_notices() {
-        s.warn(e);
+/// Runs `draw`, which draws maps or pages for `s` (an image, an export, a shared item), and says
+/// as warnings about `what` what its frames said of their cast shadows once it drew (see
+/// [`shadow_warnings`]). Whatever the engine draws for someone goes through it, or through
+/// [`rustgis_render::shadows_said`] off the session (Never silent).
+pub(crate) fn saying_shadows<T>(s: &mut Session, what: &str, draw: impl FnOnce(&mut Session) -> Result<T, String>) -> Result<T, String> {
+    let (drawn, said) = rustgis_render::shadows_said(|| draw(s));
+    if drawn.is_ok() {
+        for w in shadow_warnings(what, &said) {
+            s.warn(w);
+        }
     }
+    drawn
+}
+
+/// What frames said of their cast shadows, as warnings about `what`: layers drawn without them,
+/// and, drawn on the interface's thread (which doesn't wait for them), that some were still
+/// being worked out. What was drawn is written all the same.
+pub(crate) fn shadow_warnings(what: &str, said: &rustgis_render::ShadowsSaid) -> Vec<String> {
+    let mut out: Vec<String> = said.notices.iter().map(|e| format!("{what}: {e}")).collect();
+    if said.to_come {
+        out.push(format!(
+            "{what}: some layers are drawn without their cast shadows, still being worked out: draw it again once the map shows them"
+        ));
+    }
+    out
 }
 
 /// Renders `map` at its camera in a view of `(vw, vh)` points (or a requested size) to PNG bytes.
@@ -360,7 +372,7 @@ fn export_view(
 /// inch of screen, kept as vectors with what is pixels by nature drawn at `dpi`.
 pub fn map_pdf(s: &mut Session, dpi: f64) -> Result<Vec<u8>, String> {
     let revisions = rustgis_render::archive_revisions([s.map()]);
-    let result = map_pdf_inner(s, dpi);
+    let result = saying_shadows(s, "The map PDF", |s| map_pdf_inner(s, dpi));
     revisions.finish_revision(rustgis_render::archive_revisions([s.map()]), Some(result), "could not draw the map")?
 }
 
@@ -369,7 +381,6 @@ fn map_pdf_inner(s: &mut Session, dpi: f64) -> Result<Vec<u8>, String> {
     let ppp = (dpi / 96.0).clamp(0.5, 6.0);
     let view =
         View { width: vw.clamp(16.0, 8000.0), height: vh.clamp(16.0, 8000.0), pixels_per_point: ppp, camera: s.map().camera, sky: false };
-    rustgis_render::take_shadow_notices();
     let drawing = rustgis_render::render_drawing(s.map_mut(), &view)?;
     let mm = |pt: f64| pt * 25.4 / 96.0;
     let (w, h) = (mm(view.width), mm(view.height));
@@ -387,10 +398,6 @@ fn map_pdf_inner(s: &mut Session, dpi: f64) -> Result<Vec<u8>, String> {
     } else {
         rustgis_render::pdf::Page::drawing(drawing, w, h)
     };
-    // Layers drawn without their cast shadows (see `rustgis_render::take_shadow_notices`).
-    for e in rustgis_render::take_shadow_notices() {
-        s.warn(e);
-    }
     Ok(rustgis_render::pdf::write(&[page], &s.map().name))
 }
 
@@ -434,9 +441,9 @@ pub(crate) fn map_work(s: &Session, p: &Value) -> Result<Work, String> {
     Ok(Box::new(move || {
         let mut shadows = Vec::new();
         let written = (|| {
-            let png = png_of(&mut map, view_size, width, height, dpi)?;
-            // Layers drawn without their cast shadows (see `rustgis_render::take_shadow_notices`).
-            shadows = rustgis_render::take_shadow_notices();
+            let (png, said) = rustgis_render::shadows_said(|| png_of(&mut map, view_size, width, height, dpi));
+            let png = png?;
+            shadows = shadow_warnings(&path, &said);
             rustgis_data::progress::check().map_err(|e| e.to_string())?;
             rustgis_data::io::write_atomic(Path::new(&path), &png).map_err(|e| format!("{path}: {e}"))?;
             Ok(json!({"path": path, "bytes": png.len()}))
@@ -445,7 +452,7 @@ pub(crate) fn map_work(s: &Session, p: &Value) -> Result<Work, String> {
         // file written.
         let sized = if written.is_ok() {
             let warn = rustgis_data::diagnostics::Severity::Warning;
-            sized.into_iter().chain(shadows.into_iter().map(|e| (warn, format!("{path}: {e}")))).collect()
+            sized.into_iter().chain(shadows.into_iter().map(|e| (warn, e))).collect()
         } else {
             Vec::new()
         };

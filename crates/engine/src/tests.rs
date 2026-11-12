@@ -3178,6 +3178,69 @@ fn a_map_export_says_a_layer_drawn_without_its_cast_shadows() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Whatever draws the map for someone says a layer drawn without its cast shadows, named by the
+/// layer: the map's image, PDF and web map, and the exports of a layout, a presentation and a
+/// report showing it. Drawn on the interface's thread, which doesn't wait for them, shadows still
+/// being worked out are said too.
+#[test]
+fn every_drawing_of_the_map_says_a_layer_drawn_without_its_cast_shadows() {
+    let mut s = with_raster();
+    s.run("layer.zoomTo", &json!({"layer": "scene"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "shadow": 1})).unwrap();
+    s.run("layout.new", &json!({"page": "a5", "template": "map"})).unwrap();
+    s.run("presentation.new", &json!({"name": "Relief"})).unwrap();
+    // First, as a PNG of the presentation is its first page.
+    s.run("presentation.mapPage", &json!({"title": "Relief", "at": 0})).unwrap();
+    assert_eq!(s.project.presentations[0].pages[0].kind.code(), "map");
+    s.run("report.new", &json!({"layer": "Countries", "name": "Relief", "fields": ["name"], "where": "name LIKE 'F%'"})).unwrap();
+    s.run("report.newTemplate", &json!({"report": "Relief"})).unwrap();
+    // Read in place with only its overview held: no whole grid to trace.
+    let rl = s.map_mut().layers.iter_mut().find_map(|l| l.raster.as_mut()).unwrap();
+    rl.in_place = true;
+    let mut r = (**rl.data.as_ref().unwrap()).clone();
+    r.overview = Some((800, 600));
+    rl.data = Some(std::sync::Arc::new(r));
+    let said = |s: &Session| s.notices.iter().filter(|n| n.text.contains("scene: its cast shadows aren't drawn")).count();
+    let dir = std::env::temp_dir().join(format!("rustgis-cast-every-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |name: &str| dir.join(name).display().to_string();
+    let draws: Vec<(&str, Box<dyn Fn(&mut Session)>)> = vec![
+        ("map image", Box::new(|s| drop(crate::cmd::share::map_png(s, Some(200.0), Some(150.0), None).unwrap()))),
+        ("map PDF", Box::new(|s| drop(crate::cmd::share::map_pdf(s, 72.0).unwrap()))),
+        (
+            "map export",
+            Box::new(|s| drop(s.run("share.exportMap", &json!({"path": path("map.png"), "width": 200, "height": 150})).unwrap())),
+        ),
+        ("web map", Box::new(|s| drop(crate::cmd::sharing::share_bytes(s, "webMap", &json!({})).unwrap()))),
+        ("layout PNG", Box::new(|s| drop(s.run("layout.export", &json!({"layout": 0, "path": path("page.png"), "dpi": 36})).unwrap()))),
+        ("layout PDF", Box::new(|s| drop(s.run("layout.export", &json!({"layout": 0, "path": path("page.pdf"), "dpi": 36})).unwrap()))),
+        ("presentation PDF", Box::new(|s| drop(s.run("presentation.export", &json!({"path": path("deck.pdf"), "dpi": 36})).unwrap()))),
+        ("presentation PNG", Box::new(|s| drop(s.run("presentation.export", &json!({"path": path("deck.png"), "dpi": 36})).unwrap()))),
+        (
+            "report PDF",
+            Box::new(|s| drop(s.run("report.export", &json!({"report": "Relief", "path": path("report.pdf"), "dpi": 36})).unwrap())),
+        ),
+    ];
+    for (what, draw) in &draws {
+        // A notice repeating the last one is kept once (two presentation exports in a row).
+        s.notices.clear();
+        draw(&mut s);
+        assert!(said(&s) > 0, "{what}: {:?}", s.notices.iter().map(|n| &n.text).collect::<Vec<_>>());
+    }
+    std::fs::remove_dir_all(&dir).ok();
+    // On the interface's thread a new sun's shadows aren't waited for: the image says so.
+    let mut s = with_raster();
+    s.run("layer.zoomTo", &json!({"layer": "scene"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": 123, "shadow": 1})).unwrap();
+    crate::render::on_the_interface_thread();
+    crate::cmd::share::map_png(&mut s, Some(200.0), Some(150.0), None).unwrap();
+    assert!(
+        s.notices.iter().any(|n| n.text.contains("still being worked out")),
+        "{:?}",
+        s.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn raster_layers_open_style_identify_and_round_trip() {
     let mut s = with_raster();

@@ -6339,22 +6339,50 @@ impl LabelGrid {
 }
 
 thread_local! {
-    /// Set while the Layout view's page is drawn on the interface's thread: its frames don't wait
-    /// for cast shadows (see [`without_shadow_wait`]).
+    /// Set on the interface's thread ([`on_the_interface_thread`]), and while the Layout view's
+    /// page is drawn: frames don't wait for cast shadows (see [`without_shadow_wait`]).
     static NO_SHADOW_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// A frame drawn at full resolution had cast shadows still to come (see
-    /// [`frame_shadows_to_come`]).
+    /// A frame drawn at full resolution had cast shadows still to come (see [`shadows_said`]).
     static SHADOWS_TO_COME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Why layers drawn since the last [`take_shadow_notices`] were drawn without their cast
-    /// shadows, each said once.
+    /// Why layers drawn on this thread were drawn without their cast shadows, each said once (see
+    /// [`shadows_said`]).
     static SHADOW_NOTICES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Why layers drawn on this thread since the last call were drawn without their cast shadows,
-/// each once, named by the layer ("Relief: its cast shadows aren't drawn: …"). An export takes
-/// them after [`render_png`] to say them (Never silent); [`render_placed`] gives them as gaps.
-pub fn take_shadow_notices() -> Vec<String> {
+/// What the frames drawn in [`shadows_said`] said of their cast shadows.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ShadowsSaid {
+    /// Why layers were drawn without them, each once, named by the layer ("Relief: its cast
+    /// shadows aren't drawn: …").
+    pub notices: Vec<String>,
+    /// Some were drawn without them still being worked out (on the interface's thread, which
+    /// doesn't wait): drawn again once they land, they show them.
+    pub to_come: bool,
+}
+
+/// Runs `f`, which draws maps or pages on this thread, and gives what its frames said of their
+/// cast shadows: the one way to read it, so whatever draws for someone says it (Never silent).
+/// What frames drawn before on this thread left (the map view's, say) is not `f`'s.
+pub fn shadows_said<T>(f: impl FnOnce() -> T) -> (T, ShadowsSaid) {
+    take_said();
+    let out = f();
+    (out, take_said())
+}
+
+/// What frames drawn on this thread since the last call said of their cast shadows.
+fn take_said() -> ShadowsSaid {
+    ShadowsSaid { notices: take_shadow_notices(), to_come: SHADOWS_TO_COME.with(|c| c.replace(false)) }
+}
+
+fn take_shadow_notices() -> Vec<String> {
     SHADOW_NOTICES.with(|n| std::mem::take(&mut *n.borrow_mut()))
+}
+
+/// Marks this thread as the interface's: frames drawn on it (an image, a print, a page drawn while
+/// the window waits) never wait for cast shadows still being worked out (Never hold the window).
+/// They are drawn without them, which [`shadows_said`] says; exports drawn off it wait for them.
+pub fn on_the_interface_thread() {
+    NO_SHADOW_WAIT.with(|c| c.set(true));
 }
 
 /// Called when a layer's cast shadows land: the map, or the page, is drawn again.
@@ -6362,20 +6390,26 @@ fn shadows_landed() {
     rustgis_tiles::cache::notify_at(web_time::Instant::now());
 }
 
-/// Runs `f` (drawing on the interface's thread: the Layout view's page, a capture of the map) with
-/// its frames drawn without the cast shadows still being worked out, rather than waiting for
-/// them: they say so ([`frame_shadows_to_come`]), and a page is drawn again as they land.
-pub fn without_shadow_wait<T>(f: impl FnOnce() -> T) -> T {
+/// Runs `f` (the Layout view's page) with its frames drawn without the cast shadows still being
+/// worked out, rather than waiting for them: they say so ([`shadows_said`]), and the page is
+/// drawn again as they land.
+pub(crate) fn without_shadow_wait<T>(f: impl FnOnce() -> T) -> T {
     let before = NO_SHADOW_WAIT.with(|c| c.replace(true));
     let out = f();
     NO_SHADOW_WAIT.with(|c| c.set(before));
     out
 }
 
-/// Whether a frame drawn at full resolution on this thread since the last call had cast shadows
-/// still to come (drawn in [`without_shadow_wait`]).
-pub fn frame_shadows_to_come() -> bool {
-    SHADOWS_TO_COME.with(|c| c.replace(false))
+/// Runs `f`, which draws one frame, and whether that frame had cast shadows still to come; what
+/// frames before it said is kept for [`shadows_said`].
+pub(crate) fn frame_with_shadows_to_come<T>(f: impl FnOnce() -> T) -> (T, bool) {
+    let before = SHADOWS_TO_COME.with(|c| c.replace(false));
+    let out = f();
+    let to_come = SHADOWS_TO_COME.with(|c| c.replace(before));
+    if to_come {
+        SHADOWS_TO_COME.with(|c| c.set(true));
+    }
+    (out, to_come)
 }
 
 /// Waits for the cast shadows of the map's visible Shaded Relief layers, as an export does (it
@@ -6408,8 +6442,8 @@ pub(crate) fn render_complete_recorded(map: &mut Map, view: &View) -> Option<Ren
 
 /// [`render_complete`]'s passes, each recorded when `record`.
 fn complete(map: &mut Map, view: &View, record: bool) -> Option<Rendered> {
-    // Cast shadows still being worked out are waited for first, unless this draws the Layout
-    // view's page on the interface's thread (see `without_shadow_wait`).
+    // Cast shadows still being worked out are waited for first, unless this draws on the
+    // interface's thread (see `on_the_interface_thread`).
     if !NO_SHADOW_WAIT.with(std::cell::Cell::get) {
         wait_for_cast_shadows(map);
     }
@@ -6500,9 +6534,13 @@ pub struct Placed {
 /// [`render_png`] refuses.
 pub fn render_placed(map: &mut Map, view: &View) -> Result<Placed, String> {
     let revisions = archive_revisions([&*map]);
-    let r = render_exported(map, view)?;
-    // Layers drawn without their cast shadows are said as such, not as tile layers that failed.
+    // Layers drawn without their cast shadows are said as gaps, not as tile layers that failed;
+    // what frames before it said is kept for `shadows_said`.
+    let before = take_shadow_notices();
+    let r = render_exported(map, view);
     let shadows = take_shadow_notices();
+    SHADOW_NOTICES.with(|n| *n.borrow_mut() = before);
+    let r = r?;
     let tile_errors: Vec<&String> = r.tile_errors.iter().filter(|e| !shadows.contains(e)).collect();
     let mut gaps = shadows;
     if r.tiles_pending {
@@ -6533,8 +6571,6 @@ pub fn render_placed(map: &mut Map, view: &View) -> Result<Placed, String> {
 /// tiles haven't come, or that is drawn from less than the view needs.
 fn render_exported(map: &mut Map, view: &View) -> Result<Rendered, String> {
     let revisions = archive_revisions([&*map]);
-    // What earlier frames on this thread said is not this export's (see `take_shadow_notices`).
-    take_shadow_notices();
     let result = render_complete(map, view);
     let r = revisions.finish([&*map], result, "could not draw the map")?;
     // A raster read in place drawn from less than the view needs isn't written: its tiles still

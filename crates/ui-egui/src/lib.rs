@@ -3780,12 +3780,9 @@ impl RustGisApp {
             }
             "ui.captureMap" => {
                 let session = &mut self.session;
-                // On the interface's thread: cast shadows still being worked out aren't waited for
-                // (the capture says so).
-                let png = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    rustgis_engine::render::without_shadow_wait(|| rustgis_engine::cmd::share::map_png_fitted(session, 192.0))
-                }))
-                .unwrap_or_else(|_| Err("the capture failed unexpectedly".into()))?;
+                let png =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_engine::cmd::share::map_png_fitted(session, 192.0)))
+                        .unwrap_or_else(|_| Err("the capture failed unexpectedly".into()))?;
                 let pm = rustgis_engine::render::decode_png(&png).ok_or("could not draw the map")?;
                 let size = [pm.width() as usize, pm.height() as usize];
                 self.ui.copy_image = Some(egui::ColorImage::from_rgba_premultiplied(size, pm.data()));
@@ -4116,12 +4113,9 @@ impl RustGisApp {
             "ui.exportMap" if self.services.download.is_some() => {
                 // The same last-resort panic guard `Session::run` gives commands.
                 let session = &mut self.session;
-                // On the interface's thread: cast shadows still being worked out aren't waited for
-                // (the export says so).
-                let png = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    rustgis_engine::render::without_shadow_wait(|| rustgis_engine::cmd::share::map_png_fitted(session, 192.0))
-                }))
-                .unwrap_or_else(|_| Err("Export Map failed unexpectedly".into()));
+                let png =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_engine::cmd::share::map_png_fitted(session, 192.0)))
+                        .unwrap_or_else(|_| Err("Export Map failed unexpectedly".into()));
                 let png = match png {
                     Ok(p) => p,
                     Err(e) => {
@@ -5271,6 +5265,10 @@ impl RustGisApp {
     /// Per-frame work that doesn't draw (theme, fonts, files that arrived).
     pub fn logic(&mut self, ctx: &egui::Context) {
         let _diagnostics = self.session.diagnostics.enter();
+        // What this thread draws (an image, a print, a page, a preview, an agent's snapshot)
+        // never waits for cast shadows still being worked out: it says they were (Never hold the
+        // window). Exports drawn off it wait for them.
+        rustgis_engine::render::on_the_interface_thread();
         // A pass egui asks to repeat is the same frame: `ui` sets the delay once, from the first pass.
         if ctx.current_pass_index() == 0 {
             self.frame_start = Some(web_time::Instant::now());
@@ -5612,6 +5610,8 @@ impl RustGisApp {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let _diagnostics = self.session.diagnostics.enter();
+        // See `logic`.
+        rustgis_engine::render::on_the_interface_thread();
         let ctx = ui.ctx().clone();
         // Fonts installed by `logic` take effect on the next frame.
         if self.fonts_frames < 2 {
