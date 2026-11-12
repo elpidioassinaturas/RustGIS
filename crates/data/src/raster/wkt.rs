@@ -243,7 +243,8 @@ fn norm(s: &str) -> String {
     out.trim_end_matches('_').to_string()
 }
 
-/// The coordinate system a WKT text (WKT1, OGC or Esri, or WKT2) describes.
+/// The coordinate system a WKT text (WKT1, OGC or Esri, or WKT2) describes, without the note
+/// [`read_wkt`] gives: a reader that can pass a notice on calls that instead.
 pub fn crs_from_wkt(text: &str) -> Result<Crs, String> {
     read_wkt(text).map(|(crs, _)| crs)
 }
@@ -258,48 +259,208 @@ pub fn crs_from_wkt(text: &str) -> Result<Crs, String> {
 /// refused. So is another body's planetographic system, or a projection of one, unless its axes
 /// say they count east. On most bodies planetographic longitudes count west, and an Esri `.prj`
 /// has no axes to say otherwise.
+///
+/// A shift to WGS 84 the file gives that can't be applied (a grid, [`unapplied`]) is said,
+/// whichever way the system is read: by its code, by a UTM name or from its parameters. So is a
+/// bound system without a transformation, read as its source ([`untransformed`]).
 pub fn read_wkt(text: &str) -> Result<(Crs, Option<String>), String> {
-    let root = wkt1(parse(text)?, 0)?;
+    read_tree(&tree(text)?, None)
+}
+
+/// Whether WKT `text` is read in place of the EPSG `code` RustGIS knows that comes with it (a
+/// GeoPackage row's, a File Geodatabase's WKID):
+/// - `None`: the code is used. The text gives no shift to WGS 84, or the code's own, or it isn't
+///   WKT.
+/// - `Some(Ok(..))`: the system read from the text in place of the code, with its note. A text
+///   that gives another shift but can't be read with it gives the code's system, and the note
+///   says that the text's shift is set aside.
+/// - `Some(Err(..))`: the text comes first but is refused: another body's system that can't be
+///   read.
+///
+/// The code stands in for the text's own `AUTHORITY`, and the same rule applies ([`read_root`]).
+/// EPSG's codes are the Earth's, so another body's system is read from its text whatever the code.
+pub fn read_wkt_over_code(text: &str, code: u32) -> Option<Result<(Crs, Option<String>), String>> {
+    // Another body is looked for in the text first: `tree` can't parse a WKT2 whose longitudes
+    // count west, so a check on the tree would miss it.
+    if planetary_datum(text).is_some() {
+        return Some(read_wkt(text));
+    }
+    let root = match tree(text) {
+        Ok(root) => root,
+        // A bound system that can't be read (its target's shift to WGS 84 isn't known, say)
+        // still gives a transformation. The code is used without it, which is said. Other text
+        // that can't be read gives no shift to set aside.
+        Err(e) => {
+            let by_code = Crs::from_epsg(code)?;
+            let transformed = parse(text).is_ok_and(|n| has_bound_transformation(&n, 0));
+            return transformed.then(|| Ok((by_code, Some(set_aside_note(code, by_code, &e)))));
+        }
+    };
+    let files_shift = towgs84(geogcs(&root).and_then(|g| g.child("DATUM")));
+    if files_shift.is_none_or(|shift| matches_bundled_shift(code, &shift)) {
+        return None;
+    }
+    Some(read_tree(&root, Some(code)))
+}
+
+/// Whether a parsed WKT2 text holds a `BOUNDCRS` with a transformation of its own, whether or not
+/// [`bound`] can read it. The bound system may be nested: a compound system's horizontal part,
+/// or another bound system's source. A transformation outside a `BOUNDCRS` shifts no system.
+fn has_bound_transformation(n: &Node, depth: usize) -> bool {
+    let bound = n.name.eq_ignore_ascii_case("BOUNDCRS") && n.child("ABRIDGEDTRANSFORMATION").is_some();
+    depth <= MAX_DEPTH && (bound || n.nodes().any(|c| has_bound_transformation(c, depth + 1)))
+}
+
+/// [`read_wkt`] of a WKT1 tree. `code`, an EPSG code that comes with the text, replaces the tree's
+/// own `AUTHORITY` ([`read_root`]).
+fn read_tree(root: &Node, code: Option<u32>) -> Result<(Crs, Option<String>), String> {
+    let (crs, note) = read_root(root, code)?;
+    let dropped = dropped_note(root, "the file's", crs);
+    let note = match (note, dropped) {
+        (Some(note), Some(dropped)) => Some(format!("{note}; {dropped}")),
+        (note, dropped) => note.or(dropped),
+    };
+    Ok((crs, note))
+}
+
+/// A WKT text as a WKT1 tree, with a grid GDAL gives in its `PROJ4` extension
+/// ([`lift_proj4_grids`]) marked on its datum.
+fn tree(text: &str) -> Result<Node, String> {
+    let mut root = wkt1(parse(text)?, 0)?;
+    lift_proj4_grids(&mut root);
+    Ok(root)
+}
+
+/// GDAL's other form of a grid (`EXTENSION["PROJ4","… +nadgrids=conus …"]` on the system itself)
+/// marked on the source's datum ([`UNAPPLIED`]), as [`unapplied`] reads the `PROJ4_GRIDS` one.
+/// `@null`, which old Web Mercator files carry, is no shift.
+fn lift_proj4_grids(root: &mut Node) {
+    let grids =
+        root.nodes().filter(|n| n.name.eq_ignore_ascii_case("EXTENSION") && n.title().eq_ignore_ascii_case("PROJ4")).find_map(|e| {
+            let Some(Item::Text(def)) = e.items.get(1) else { return None };
+            let value = def.split_whitespace().find_map(|k| k.strip_prefix("+nadgrids="))?;
+            grid_names(value)
+        });
+    if let Some(grids) = grids
+        && unapplied(geogcs(root).and_then(|g| g.child("DATUM"))).is_none()
+    {
+        put_mark(root, UNAPPLIED, &format!("grid shift ({grids})"));
+    }
+}
+
+/// The grid files a comma-separated list names, without `@null` (no shift) and the `@` that marks
+/// one optional; `None` when none is left.
+fn grid_names(value: &str) -> Option<String> {
+    let grids: Vec<&str> =
+        value.split(',').map(|g| g.trim().trim_start_matches('@')).filter(|g| !g.is_empty() && !g.eq_ignore_ascii_case("null")).collect();
+    (!grids.is_empty()).then(|| grids.join(", "))
+}
+
+/// The EPSG code `crs` is read by when its bundled shift to WGS 84 is other than none: a
+/// transformation the file gives that isn't applied is then replaced by that shift, not by none.
+fn code_with_shift(crs: Crs) -> Option<u16> {
+    let code = crs.epsg();
+    (code > 0 && epsg_proj4(code).and_then(bundled_shift).is_some_and(|s| s.iter().any(|v| *v != 0.0))).then_some(code)
+}
+
+/// What [`read_wkt`] says of a shift to WGS 84 a system gives but RustGIS can't apply
+/// ([`unapplied`]), or of a bound system without a transformation ([`untransformed`]); `whose`
+/// says whose it is (`the file's`), and `crs` is the system it is read as.
+fn dropped_note(root: &Node, whose: &str, crs: Crs) -> Option<String> {
+    let datum = geogcs(root).and_then(|g| g.child("DATUM"));
+    // On the source's datum, or on the source itself when it has none ([`put_mark`]).
+    if let Some(what) = unapplied(datum).or_else(|| mark(Some(root), UNAPPLIED)) {
+        let what = clip(&what);
+        // Read by an EPSG code whose own shift is applied in its place: off by the difference.
+        return Some(match code_with_shift(crs) {
+            Some(code) => format!(
+                "{whose} {what} isn't applied; EPSG:{code}'s own shift to WGS 84 is used in its place, so positions may be off by the difference between the two"
+            ),
+            None => format!("{whose} {what} isn't applied, so positions may be off by as much as that shift"),
+        });
+    }
+    let to = untransformed(datum).or_else(|| mark(Some(root), UNTRANSFORMED))?;
+    Some(format!("{whose} bound coordinate system has no transformation to {}, so it is read as its source system", clip(&to)))
+}
+
+/// What [`read_wkt`] would say of a shift WKT `text` gives but RustGIS can't apply, for a system
+/// read otherwise as `crs`: by its EPSG code, or by [`Crs::parse`], which drops [`read_wkt`]'s
+/// note. `None` for text that isn't WKT.
+pub fn unapplied_note(text: &str, crs: Crs) -> Option<String> {
+    dropped_note(&tree(text).ok()?, "the definition's", crs)
+}
+
+/// The notes a coordinate system given as text keeps when [`Crs::parse`] reads it as `crs`: its
+/// projection compatibility choice ([`projection_compatibility_note`]) and a shift it doesn't
+/// apply ([`unapplied_note`]).
+pub fn typed_crs_note(text: &str, crs: Crs) -> Option<String> {
+    compatibility_and_dropped(text, crs, "the definition's")
+}
+
+/// [`typed_crs_note`] for a file's own text, whose other notes are said otherwise (another body's
+/// `.prj` next to a grid): the shift it doesn't apply is the file's.
+pub(crate) fn file_crs_note(text: &str, crs: Crs) -> Option<String> {
+    compatibility_and_dropped(text, crs, "the file's")
+}
+
+fn compatibility_and_dropped(text: &str, crs: Crs, whose: &str) -> Option<String> {
+    let dropped = tree(text).ok().and_then(|root| dropped_note(&root, whose, crs));
+    let notes: Vec<String> = projection_compatibility_note(text, crs).map(str::to_owned).into_iter().chain(dropped).collect();
+    (!notes.is_empty()).then(|| notes.join("; "))
+}
+
+/// [`read_wkt`] of a system in WKT1 form, without what it says of a shift it can't apply. `code`
+/// is an EPSG code that comes with the text, used in place of its own `AUTHORITY`.
+fn read_root(root: &Node, code: Option<u32>) -> Result<(Crs, Option<String>), String> {
+    let Some((code, by_code)) = earth_code(root, code) else {
+        return read_system(root);
+    };
     // A shift the file gives (a `TOWGS84`, or a `BOUNDCRS`'s transformation) wins over the one
     // bundled for its EPSG code, as in PROJ and GDAL. The code is used only when the two are the
     // same.
-    let files_shift = towgs84(geogcs(&root).and_then(|g| g.child("DATUM")));
-    // EPSG's codes are the Earth's: one on another body's system is read from its parameters.
-    let by_code = root
-        .child("AUTHORITY")
-        .filter(|a| a.title().eq_ignore_ascii_case("EPSG") && !on_another_body(geogcs(&root)))
-        .and_then(authority_code)
-        .and_then(|code| Some((code, Crs::from_epsg(code)?)));
-    if let Some((code, crs)) = by_code
-        && files_shift.as_ref().is_none_or(|shift| matches_bundled_shift(code, shift))
-    {
-        return Ok((crs, projection_note(&root, crs).map(str::to_owned)));
+    let files_shift = towgs84(geogcs(root).and_then(|g| g.child("DATUM")));
+    if files_shift.as_ref().is_none_or(|shift| matches_bundled_shift(code, shift)) {
+        return Ok((by_code, projection_note(root, by_code).map(str::to_owned)));
     }
     // A system that can't be read from its parameters is still read by its EPSG code, with the
     // code's shift in place of the file's, which is said.
-    match (read_system(&root), by_code) {
-        (Err(e), Some((code, crs))) => {
-            // A code whose shift is none (WGS 84's, or a WGS 84-like datum's) doesn't replace the
-            // file's either.
-            let codes_shift = !matches!(crs, Crs::LonLat | Crs::WebMercator)
-                && u16::try_from(code).ok().and_then(epsg_proj4).and_then(bundled_shift).is_some_and(|s| s.iter().any(|v| *v != 0.0));
-            let note = if codes_shift {
-                format!("the file's own shift to WGS 84 is set aside for EPSG:{code}'s, because {e}")
-            } else {
-                format!(
-                    "the file's own shift to WGS 84 is set aside, because {e}, and EPSG:{code} is read without it, so positions may be off by as much as that shift"
-                )
-            };
-            Ok((crs, with_projection_note(Some(note), &root, crs)))
-        }
+    match read_system(root) {
+        Err(e) => Ok((by_code, with_projection_note(Some(set_aside_note(code, by_code, &e)), root, by_code))),
         // A shift of zero, where the code has one, may be a writer's placeholder: said, as the
         // positions then differ from the code's by that shift.
-        (Ok((crs, note)), Some((code, _))) if files_shift.is_some_and(|s| s.iter().all(|v| *v == 0.0)) => {
+        Ok((crs, note)) if files_shift.is_some_and(|s| s.iter().all(|v| *v == 0.0)) => {
             let zero = format!("the file gives a shift of zero to WGS 84, which is used in place of EPSG:{code}'s transformation");
             Ok((crs, Some(note.map_or(zero.clone(), |n| format!("{n}; {zero}")))))
         }
-        (read, _) => read,
+        read => read,
     }
+}
+
+/// What is said of a file's shift to WGS 84 when its system is read by EPSG `code` (`by_code`)
+/// without it, because of `why`.
+fn set_aside_note(code: u32, by_code: Crs, why: &str) -> String {
+    // A code whose shift is none (WGS 84's, or a WGS 84-like datum's) doesn't replace the file's
+    // either.
+    let codes_shift = !matches!(by_code, Crs::LonLat | Crs::WebMercator)
+        && u16::try_from(code).ok().and_then(epsg_proj4).and_then(bundled_shift).is_some_and(|s| s.iter().any(|v| *v != 0.0));
+    if codes_shift {
+        format!("the file's own shift to WGS 84 is set aside for EPSG:{code}'s, because {why}")
+    } else {
+        format!(
+            "the file's own shift to WGS 84 is set aside, because {why}, and EPSG:{code} is read without it, so positions may be off by as much as that shift"
+        )
+    }
+}
+
+/// The EPSG code a WKT1 system on the Earth may be read by, with the system it names: `code` when
+/// one comes with the text, else its own `AUTHORITY`'s. `None` for another body's system, which is
+/// read from its parameters, as EPSG's codes are the Earth's.
+fn earth_code(root: &Node, code: Option<u32>) -> Option<(u32, Crs)> {
+    if on_another_body(geogcs(root)) {
+        return None;
+    }
+    let code = code.or_else(|| root.child("AUTHORITY").filter(|a| a.title().eq_ignore_ascii_case("EPSG")).and_then(authority_code))?;
+    Some((code, Crs::from_epsg(code)?))
 }
 
 /// A WKT1 system read from its parameters, with its note ([`read_wkt`]).
@@ -742,7 +903,13 @@ const FRAME_METHODS: [u32; 8] = [9607, 1032, 1056, 1057, 1066, 1133, 1140, 1149]
 
 /// A `BOUNDCRS` (PROJ's form of a WKT1 `TOWGS84`) as its source system with the shift to WGS 84
 /// of its transformation, in metres, arc-seconds and parts per million. A transformation to
-/// another system than WGS 84 is followed by that system's own shift ([`onward_shift`]).
+/// another system than WGS 84 is followed by that system's own shift ([`onward_shift`]). One
+/// without Helmert translations (a grid, NTv2 or NADCON, which PROJ refuses too without the grid
+/// file) can't be applied: the source is read without it, which [`read_wkt`] says ([`UNAPPLIED`]).
+/// One without a transformation, which ISO 19162 requires and PROJ refuses, is read as its source
+/// too, which [`read_wkt`] says ([`UNTRANSFORMED`]): refused, a Shapefile's `.prj` would leave its
+/// data read as longitude/latitude, far off for a projected source. In either case a source
+/// without a datum is read as it is, the mark on the source itself ([`put_mark`]).
 fn bound(b: Node, depth: usize) -> Result<Node, String> {
     let (mut source, mut target, mut transformation) = (None, None, None);
     for n in b.into_nodes() {
@@ -755,8 +922,25 @@ fn bound(b: Node, depth: usize) -> Result<Node, String> {
         }
     }
     let mut crs = wkt1(source.ok_or("the bound coordinate system has no source")?, depth + 1)?;
-    let Some(t) = transformation.as_ref() else { return Ok(crs) };
+    let to = target.as_ref().map(|t| t.title().trim()).filter(|t| !t.is_empty()).unwrap_or("its target").to_string();
+    let Some(t) = transformation.as_ref() else {
+        // A source on WGS 84 (or a datum read as it) needs no transformation: nothing is lost.
+        if wgs84_like(geogcs(&crs).and_then(|g| g.child("DATUM"))).is_none() {
+            put_mark(&mut crs, UNTRANSFORMED, &to);
+        }
+        return Ok(crs);
+    };
     let method = t.child("METHOD");
+    // PROJ's placeholders. A ballpark offset is no known shift: the source is read alone, and its
+    // datum says so as without one. A null offset is a shift of none, applied as such.
+    let placeholder = |prefix: &str| method.is_some_and(|m| norm(m.title()).starts_with(prefix));
+    if placeholder("BALLPARK_") {
+        return Ok(crs);
+    }
+    let null = placeholder("NULL_");
+    if null && source_datum(&mut crs).is_none() {
+        return Ok(crs);
+    }
     let frame =
         method.is_some_and(|m| epsg_id(m).is_some_and(|c| FRAME_METHODS.contains(&c)) || norm(m.title()).contains("COORDINATE_FRAME"));
     // EPSG codes of the translations, rotations and scale difference.
@@ -794,7 +978,22 @@ fn bound(b: Node, depth: usize) -> Result<Node, String> {
         get(8609, "Y_AXIS_ROTATION", Measure::Angle),
         get(8610, "Z_AXIS_ROTATION", Measure::Angle),
     ];
-    let Some(mut towgs84) = shift.into_iter().collect::<Option<Vec<f64>>>() else { return Ok(crs) };
+    let shift = if null { [Some(0.0); 3] } else { shift };
+    let Some(mut towgs84) = shift.into_iter().collect::<Option<Vec<f64>>>() else {
+        // Named with its method, its target and its grid files, on the source's datum, where the
+        // shift would have gone. The target plays no part in where the source is read, so isn't
+        // checked.
+        let method = method.map(|m| m.title().trim()).filter(|m| !m.is_empty()).unwrap_or("unnamed");
+        let files: Vec<&str> = t
+            .nodes()
+            .filter(|n| n.name.eq_ignore_ascii_case("PARAMETERFILE"))
+            .filter_map(|f| f.items.get(1).and_then(|i| if let Item::Text(file) = i { Some(file.trim()) } else { None }))
+            .filter(|f| !f.is_empty())
+            .collect();
+        let files = if files.is_empty() { String::new() } else { format!(" ({})", files.join(", ")) };
+        put_mark(&mut crs, UNAPPLIED, &format!("{method} transformation to {to}{files}"));
+        return Ok(crs);
+    };
     let scale = get(8611, "SCALE_DIFFERENCE", Measure::Scale);
     if scale.is_some() || turn.iter().any(Option::is_some) {
         // Seven parameters, the ones not given none. TOWGS84 rotates by the position vector
@@ -1522,10 +1721,74 @@ fn towgs84(datum: Option<&Node>) -> Option<Vec<f64>> {
     datum.and_then(|d| d.child("TOWGS84")).map(Node::nums).filter(|t| (t.len() == 3 || t.len() == 7) && t.iter().all(|v| v.is_finite()))
 }
 
+/// The name of the mark [`bound`] leaves for a transformation it can't apply ([`put_mark`]): its
+/// title names it (`NTv2 transformation to WGS 84 (ntv2_0.gsb)`). [`Parser`] reads names of
+/// letters, digits and `_` only, so no file can give one; the tree is never written out.
+const UNAPPLIED: &str = "rustgis:unapplied";
+
+/// The name of the mark [`bound`] leaves for a bound system without a transformation: its title
+/// names the target. No file can give one either ([`UNAPPLIED`]).
+const UNTRANSFORMED: &str = "rustgis:untransformed";
+
+/// The datum of a WKT1 system (its own `GEOGCS`'s, or its base one's), where [`bound`] puts the
+/// shift or says why there is none.
+fn source_datum(crs: &mut Node) -> Option<&mut Node> {
+    let geog = if crs.name.eq_ignore_ascii_case("GEOGCS") { Some(crs) } else { crs.child_mut("GEOGCS") };
+    geog.and_then(|g| g.child_mut("DATUM"))
+}
+
+/// Leaves the mark `name` titled `value` on a bound system's source: on its datum, or on the
+/// source itself when it has none, which is read as before without a datum.
+fn put_mark(crs: &mut Node, name: &str, value: &str) {
+    let mark = Item::Node(Node::new(name, value, []));
+    match source_datum(crs) {
+        Some(datum) => datum.items.push(mark),
+        None => crs.items.push(mark),
+    }
+}
+
+/// The title of the mark `name` [`put_mark`] left among `node`'s children.
+fn mark(node: Option<&Node>, name: &str) -> Option<String> {
+    node?.nodes().find(|n| n.name == name).map(|n| n.title().to_string())
+}
+
+/// The target a bound system without a transformation names ([`UNTRANSFORMED`]), on its datum.
+fn untransformed(datum: Option<&Node>) -> Option<String> {
+    mark(datum, UNTRANSFORMED)
+}
+
+/// At most 120 characters of `s`, for a notice: the names in it come from the file.
+fn clip(s: &str) -> String {
+    let mut out: String = s.chars().take(120).collect();
+    if out.len() < s.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// The shift to WGS 84 that a datum's file gives but RustGIS can't apply, named: a bound
+/// system's transformation [`bound`] left on it ([`UNAPPLIED`]), or GDAL's WKT1 grid
+/// (`EXTENSION["PROJ4_GRIDS","ntv2_0.gsb"]`), whose `@null` is no shift. PROJ applies a grid only
+/// with its file, and refuses the system without it; RustGIS reads the datum without it.
+fn unapplied(datum: Option<&Node>) -> Option<String> {
+    mark(datum, UNAPPLIED).or_else(|| {
+        datum?.nodes().filter(|n| n.name.eq_ignore_ascii_case("EXTENSION") && n.title().eq_ignore_ascii_case("PROJ4_GRIDS")).find_map(|e| {
+            let Some(Item::Text(value)) = e.items.get(1) else { return None };
+            // Named without "to WGS 84": another body's datum can carry one too.
+            Some(format!("grid shift ({})", grid_names(value)?))
+        })
+    })
+}
+
 /// A note when the datum (of a `GEOGCS`) is neither WGS 84-like nor shifted to it by `TOWGS84`.
+/// A datum whose file gives a shift that can't be applied has [`read_wkt`] say that instead.
 fn datum_note(geog: Option<&Node>) -> Option<String> {
     let datum = geog?.child("DATUM")?;
-    if wgs84_like(Some(datum)).is_some() || towgs84(Some(datum)).is_some() || national_datum(Some(datum)).is_some() {
+    if wgs84_like(Some(datum)).is_some()
+        || towgs84(Some(datum)).is_some()
+        || national_datum(Some(datum)).is_some()
+        || unapplied(Some(datum)).is_some()
+    {
         return None;
     }
     Some(format!(
@@ -2697,7 +2960,7 @@ pub(crate) mod tests {
     const LO19_POINT: (Coord, Coord) = (Coord { x: 46_246.675, y: 3_752_681.842_5 }, Coord { x: 18.5, y: -33.9 });
 
     /// WGS 84 longitude/latitude, as PROJ writes its WKT2.
-    const WGS84_WKT2: &str = r#"GEOGCRS["WGS 84",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563]],CS[ellipsoidal,2],AXIS["lat",north],AXIS["lon",east],ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",4326]]"#;
+    pub(crate) const WGS84_WKT2: &str = r#"GEOGCRS["WGS 84",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563]],CS[ellipsoidal,2],AXIS["lat",north],AXIS["lon",east],ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",4326]]"#;
 
     /// OSGB 36 longitude/latitude (EPSG:4277), as PROJ writes its WKT2.
     const OSGB36_WKT2: &str = r#"GEOGCRS["OSGB36",DATUM["Ordnance Survey of Great Britain 1936",ELLIPSOID["Airy 1830",6377563.396,299.3249646,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],CS[ellipsoidal,2],AXIS["geodetic latitude (Lat)",north,ORDER[1],ANGLEUNIT["degree",0.0174532925199433]],AXIS["geodetic longitude (Lon)",east,ORDER[2],ANGLEUNIT["degree",0.0174532925199433]],ID["EPSG",4277]]"#;
@@ -2713,7 +2976,7 @@ pub(crate) mod tests {
 
     /// A `BOUNDCRS` from `source` to `target` by a position vector transformation of `shift`
     /// (metres, arc-seconds, parts per million; three or seven of them).
-    fn bound_crs(source: &str, target: &str, shift: &[f64]) -> String {
+    pub(crate) fn bound_crs(source: &str, target: &str, shift: &[f64]) -> String {
         let names =
             ["X-axis translation", "Y-axis translation", "Z-axis translation", "X-axis rotation", "Y-axis rotation", "Z-axis rotation"];
         let mut params: Vec<String> =
@@ -2781,6 +3044,203 @@ pub(crate) mod tests {
     /// How far apart two longitudes/latitudes are, in metres (near enough for a few metres).
     pub(crate) fn metres_apart(a: Coord, b: Coord) -> f64 {
         ((a.x - b.x) * b.y.to_radians().cos()).hypot(a.y - b.y) * METRES_PER_DEGREE
+    }
+
+    /// A bound system whose transformation RustGIS can't apply, a grid (NTv2, as PROJ 9.8.1 writes
+    /// `+nadgrids=`) or another without Helmert translations, is read as its source system with a
+    /// note naming the transformation, and so is GDAL's WKT1 form of a grid
+    /// (`EXTENSION["PROJ4_GRIDS",…]`), but not `@null`, which is no shift. One without a
+    /// transformation, which ISO 19162 requires and PROJ refuses, is read as its source with a note
+    /// saying so. A Helmert one is applied, without the note (#1678).
+    /// UTM zone 17N on NAD 27, as PROJ 9.8.1 writes it in WKT2 without a code.
+    pub(crate) const NAD27_UTM17: &str = r#"PROJCRS["unknown",BASEGEOGCRS["unknown",DATUM["North American Datum 1927",ELLIPSOID["Clarke 1866",6378206.4,294.978698213898,LENGTHUNIT["metre",1]],ID["EPSG",6267]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8901]]],CONVERSION["UTM zone 17N",METHOD["Transverse Mercator",ID["EPSG",9807]],PARAMETER["Latitude of natural origin",0,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8801]],PARAMETER["Longitude of natural origin",-81,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8802]],PARAMETER["Scale factor at natural origin",0.9996,SCALEUNIT["unity",1],ID["EPSG",8805]],PARAMETER["False easting",500000,LENGTHUNIT["metre",1],ID["EPSG",8806]],PARAMETER["False northing",0,LENGTHUNIT["metre",1],ID["EPSG",8807]],ID["EPSG",16017]],CS[Cartesian,2],AXIS["(E)",east,ORDER[1],LENGTHUNIT["metre",1,ID["EPSG",9001]]],AXIS["(N)",north,ORDER[2],LENGTHUNIT["metre",1,ID["EPSG",9001]]]]"#;
+
+    /// [`NAD27_UTM17`] bound to WGS 84 by the NTv2 grid `conus`: PROJ 9.8.1's WKT2 for
+    /// `+proj=utm +zone=17 +datum=NAD27 +nadgrids=conus +type=crs`.
+    pub(crate) const BOUND_BY_A_GRID: &str = r#"BOUNDCRS[SOURCECRS[PROJCRS["unknown",BASEGEOGCRS["unknown",DATUM["North American Datum 1927",ELLIPSOID["Clarke 1866",6378206.4,294.978698213898,LENGTHUNIT["metre",1]],ID["EPSG",6267]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8901]]],CONVERSION["UTM zone 17N",METHOD["Transverse Mercator",ID["EPSG",9807]],PARAMETER["Latitude of natural origin",0,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8801]],PARAMETER["Longitude of natural origin",-81,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8802]],PARAMETER["Scale factor at natural origin",0.9996,SCALEUNIT["unity",1],ID["EPSG",8805]],PARAMETER["False easting",500000,LENGTHUNIT["metre",1],ID["EPSG",8806]],PARAMETER["False northing",0,LENGTHUNIT["metre",1],ID["EPSG",8807]],ID["EPSG",16017]],CS[Cartesian,2],AXIS["(E)",east,ORDER[1],LENGTHUNIT["metre",1,ID["EPSG",9001]]],AXIS["(N)",north,ORDER[2],LENGTHUNIT["metre",1,ID["EPSG",9001]]]]],TARGETCRS[GEOGCRS["WGS 84",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],CS[ellipsoidal,2],AXIS["latitude",north,ORDER[1],ANGLEUNIT["degree",0.0174532925199433]],AXIS["longitude",east,ORDER[2],ANGLEUNIT["degree",0.0174532925199433]],ID["EPSG",4326]]],ABRIDGEDTRANSFORMATION["unknown to WGS84",METHOD["NTv2",ID["EPSG",9615]],PARAMETERFILE["Latitude and longitude difference file","conus",ID["EPSG",8656]]]]"#;
+
+    #[test]
+    fn a_bound_system_says_when_its_transformation_isnt_applied() {
+        // PROJ 9.8.1's WKT2 for `+proj=longlat +datum=NAD27 +nadgrids=ntv2_0.gsb +type=crs`, and
+        // for UTM zone 17N on it with `+nadgrids=conus`.
+        const NAD27: &str = r#"GEOGCRS["unknown",DATUM["North American Datum 1927",ELLIPSOID["Clarke 1866",6378206.4,294.978698213898,LENGTHUNIT["metre",1]],ID["EPSG",6267]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8901]],CS[ellipsoidal,2],AXIS["longitude",east,ORDER[1],ANGLEUNIT["degree",0.0174532925199433,ID["EPSG",9122]]],AXIS["latitude",north,ORDER[2],ANGLEUNIT["degree",0.0174532925199433,ID["EPSG",9122]]]]"#;
+        const UTM17: &str = NAD27_UTM17;
+        const WGS84: &str = r#"GEOGCRS["WGS 84",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],CS[ellipsoidal,2],AXIS["latitude",north,ORDER[1],ANGLEUNIT["degree",0.0174532925199433]],AXIS["longitude",east,ORDER[2],ANGLEUNIT["degree",0.0174532925199433]],ID["EPSG",4326]]"#;
+        let grid = |source: &str, file: &str| {
+            format!(
+                r#"BOUNDCRS[SOURCECRS[{source}],TARGETCRS[{WGS84}],ABRIDGEDTRANSFORMATION["unknown to WGS84",METHOD["NTv2",ID["EPSG",9615]],PARAMETERFILE["Latitude and longitude difference file","{file}",ID["EPSG",8656]]]]"#
+            )
+        };
+        // Read as the source alone. Alone, its datum has no conversion to WGS 84 in the file, and
+        // says so; bound, the file gives one, and what's said is that it isn't applied.
+        let as_source = |wkt: &str, source: &str, dropped: &str| {
+            let (crs, note) = read_wkt(wkt).unwrap();
+            let (alone, alone_note) = read_wkt(source).unwrap();
+            assert_eq!(crs, alone, "{wkt}");
+            assert!(alone_note.as_deref().is_some_and(|n| n.contains("has no conversion to WGS 84 in the file")), "{alone_note:?}");
+            assert_eq!(note.as_deref(), Some(dropped), "{wkt}");
+        };
+        as_source(
+            &grid(NAD27, "ntv2_0.gsb"),
+            NAD27,
+            "the file's NTv2 transformation to WGS 84 (ntv2_0.gsb) isn't applied, so positions may be off by as much as that shift",
+        );
+        as_source(
+            &grid(UTM17, "conus"),
+            UTM17,
+            "the file's NTv2 transformation to WGS 84 (conus) isn't applied, so positions may be off by as much as that shift",
+        );
+        // Another method without Helmert translations: named, without a file.
+        let offsets = grid(NAD27, "x").replace(
+            r#"METHOD["NTv2",ID["EPSG",9615]],PARAMETERFILE["Latitude and longitude difference file","x",ID["EPSG",8656]]"#,
+            r#"METHOD["Geographic2D offsets",ID["EPSG",9619]],PARAMETER["Latitude offset",-0.5,ANGLEUNIT["arc-second",4.84813681109536E-06],ID["EPSG",8601]],PARAMETER["Longitude offset",1.5,ANGLEUNIT["arc-second",4.84813681109536E-06],ID["EPSG",8602]]"#,
+        );
+        assert!(offsets.contains("Geographic2D offsets"), "{offsets}");
+        as_source(
+            &offsets,
+            NAD27,
+            "the file's Geographic2D offsets transformation to WGS 84 isn't applied, so positions may be off by as much as that shift",
+        );
+        // GDAL's WKT1 of the first (PROJ 9.8.1's WKT1_GDAL): the grid in an extension. `@null`
+        // is no shift, and says nothing.
+        let wkt1 = r#"GEOGCS["unknown",DATUM["North_American_Datum_1927",SPHEROID["Clarke 1866",6378206.4,294.978698213898,AUTHORITY["EPSG","7008"]],EXTENSION["PROJ4_GRIDS","ntv2_0.gsb"],AUTHORITY["EPSG","6267"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]]]"#;
+        let plain = wkt1.replace(r#"EXTENSION["PROJ4_GRIDS","ntv2_0.gsb"],"#, "");
+        assert_ne!(plain, wkt1);
+        as_source(wkt1, &plain, "the file's grid shift (ntv2_0.gsb) isn't applied, so positions may be off by as much as that shift");
+        assert_eq!(read_wkt(&wkt1.replace("ntv2_0.gsb", "@null")).unwrap(), read_wkt(&plain).unwrap());
+        // A name from the file is cut short in the notice.
+        let long = "g".repeat(5000);
+        let (_, note) = read_wkt(&grid(NAD27, &long)).unwrap();
+        let note = note.unwrap();
+        assert!(note.chars().count() < 250 && note.contains('…') && note.ends_with("as much as that shift"), "{note}");
+        // No transformation (PROJ refuses the system): read as the source, as projected data refused
+        // would be read as longitude/latitude, and said. Its datum note still stands, as the file
+        // has no conversion for it.
+        let untransformed = "the file's bound coordinate system has no transformation to WGS 84, so it is read as its source system";
+        for source in [NAD27, UTM17] {
+            let none = format!(r#"BOUNDCRS[SOURCECRS[{source}],TARGETCRS[{WGS84}]]"#);
+            let (crs, note) = read_wkt(&none).unwrap();
+            let (alone, alone_note) = read_wkt(source).unwrap();
+            assert_eq!(crs, alone, "{none}");
+            let note = note.unwrap();
+            assert!(note.ends_with(untransformed) && note.contains(alone_note.as_deref().unwrap()), "{note}");
+        }
+        // On WGS 84 there is nothing to convert, and nothing is said.
+        let (crs, note) = read_wkt(&format!(r#"BOUNDCRS[SOURCECRS[{WGS84}],TARGETCRS[{WGS84}]]"#)).unwrap();
+        assert_eq!((crs, note), (Crs::LonLat, None));
+        // PROJ's placeholders: a ballpark offset is no known shift, so the source's datum note
+        // stands alone; a null offset is a shift of none, and says nothing of a grid either.
+        let method = r#"METHOD["NTv2",ID["EPSG",9615]],PARAMETERFILE["Latitude and longitude difference file","x",ID["EPSG",8656]]"#;
+        let (alone, alone_note) = read_wkt(NAD27).unwrap();
+        for placeholder in ["Ballpark geographic offset", "Null geographic offset"] {
+            let wkt = grid(NAD27, "x").replace(method, &format!(r#"METHOD["{placeholder}"]"#));
+            assert_ne!(wkt, grid(NAD27, "x"));
+            let (crs, note) = read_wkt(&wkt).unwrap();
+            let note = note.unwrap_or_default();
+            assert!(!note.contains("isn't applied") && !note.contains("has no transformation"), "{placeholder}: {note}");
+            if placeholder.starts_with("Ballpark") {
+                assert_eq!((crs, Some(note)), (alone, alone_note.clone()), "{placeholder}");
+            } else {
+                assert!(!note.contains("has no conversion"), "{placeholder}: {note}");
+            }
+        }
+        // GDAL's other form of a grid: `+nadgrids=` in the system's `PROJ4` extension. Said as the
+        // `PROJ4_GRIDS` one is, in place of the datum note; `@null` says nothing.
+        let utm_wkt1 = r#"PROJCS["NAD27 / UTM zone 17N",GEOGCS["NAD27",DATUM["North_American_Datum_1927",SPHEROID["Clarke 1866",6378206.4,294.978698213898]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",-81],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1]]"#;
+        let with = |grids: &str| {
+            utm_wkt1.replace(
+                r#"UNIT["metre",1]]"#,
+                &format!(r#"UNIT["metre",1],EXTENSION["PROJ4","+proj=utm +zone=17 +datum=NAD27 +nadgrids={grids} +units=m +no_defs"]]"#),
+            )
+        };
+        let (plain_crs, _) = read_wkt(utm_wkt1).unwrap();
+        let (crs, note) = read_wkt(&with("conus")).unwrap();
+        assert_eq!(
+            (crs, note.as_deref()),
+            (plain_crs, Some("the file's grid shift (conus) isn't applied, so positions may be off by as much as that shift"))
+        );
+        assert_eq!(read_wkt(&with("@null")).unwrap(), read_wkt(utm_wkt1).unwrap());
+        // An optional grid (`@`) is named without PROJ's mark.
+        let (_, note) = read_wkt(&with("@conus,@null")).unwrap();
+        assert_eq!(note.as_deref(), Some("the file's grid shift (conus) isn't applied, so positions may be off by as much as that shift"));
+        // A system read otherwise (by `Crs::parse`, typed into a command, or by a GeoPackage
+        // row's EPSG code) says it as the definition's; one without a grid, or a code, says
+        // nothing.
+        assert_eq!(grid(UTM17, "conus"), BOUND_BY_A_GRID);
+        let said = "the definition's NTv2 transformation to WGS 84 (conus) isn't applied, so positions may be off by as much as that shift";
+        assert_eq!(unapplied_note(BOUND_BY_A_GRID, Crs::parse(BOUND_BY_A_GRID).unwrap()).as_deref(), Some(said));
+        assert_eq!(typed_crs_note(BOUND_BY_A_GRID, Crs::parse(BOUND_BY_A_GRID).unwrap()).as_deref(), Some(said));
+        // What those paths said before: nothing.
+        assert_eq!(projection_compatibility_note(BOUND_BY_A_GRID, Crs::parse(BOUND_BY_A_GRID).unwrap()), None);
+        let none = format!(r#"BOUNDCRS[SOURCECRS[{UTM17}],TARGETCRS[{WGS84}]]"#);
+        assert_eq!(
+            unapplied_note(&none, Crs::parse(&none).unwrap()).as_deref(),
+            Some(untransformed.replace("the file's", "the definition's").as_str())
+        );
+        for clean in [UTM17, "EPSG:32617"] {
+            assert_eq!(unapplied_note(clean, Crs::parse(clean).unwrap()), None, "{clean}");
+            assert_eq!(typed_crs_note(clean, Crs::parse(clean).unwrap()), None, "{clean}");
+        }
+        // A Helmert transformation is applied, and says nothing of it.
+        let (_, note) = read_wkt(&bound_crs(OSGB36_WKT2, WGS84_WKT2, &[375.0, -111.0, 431.0])).unwrap();
+        assert!(!note.as_deref().unwrap_or("").contains("isn't applied"), "{note:?}");
+        // The marks `bound` leaves can't come from a file: an extension or a node of a like name
+        // is read as any other it doesn't know, in WKT1 or WKT2, and the datum note stays.
+        for forged in [
+            r#"EXTENSION["RUSTGIS_UNAPPLIED","a forged grid"]"#,
+            r#"EXTENSION["RUSTGIS_UNTRANSFORMED","Mars"]"#,
+            r#"EXTENSION["rustgis:unapplied","a forged grid"]"#,
+            r#"RUSTGIS_UNAPPLIED["a forged grid"]"#,
+            r#"rustgis_untransformed["Mars"]"#,
+        ] {
+            let in_wkt1 = wkt1.replace(r#"EXTENSION["PROJ4_GRIDS","ntv2_0.gsb"]"#, forged);
+            assert_eq!(read_wkt(&in_wkt1), read_wkt(&plain), "{in_wkt1}");
+            let in_wkt2 = NAD27.replace(r#"ID["EPSG",6267]],PRIMEM"#, &format!(r#"ID["EPSG",6267],{forged}],PRIMEM"#));
+            assert_ne!(in_wkt2, NAD27);
+            assert_eq!(read_wkt(&in_wkt2), read_wkt(NAD27), "{in_wkt2}");
+        }
+        // Nor can a mark's own name be written: the parser reads no name with a colon.
+        assert!(read_wkt(&wkt1.replace(r#"EXTENSION["PROJ4_GRIDS","ntv2_0.gsb"]"#, r#"rustgis:unapplied["x"]"#)).is_err());
+        // A source without a datum is read as the source alone, as before, and the notice is
+        // said from its mark on the source itself.
+        let datum = r#"DATUM["North American Datum 1927",ELLIPSOID["Clarke 1866",6378206.4,294.978698213898,LENGTHUNIT["metre",1]],ID["EPSG",6267]],"#;
+        for source in [NAD27, UTM17] {
+            let no_datum = source.replace(datum, "");
+            assert_ne!(no_datum, source);
+            let (alone, alone_note) = read_wkt(&no_datum).unwrap();
+            for (bound, said) in [
+                (format!(r#"BOUNDCRS[SOURCECRS[{no_datum}],TARGETCRS[{WGS84}]]"#), untransformed),
+                (
+                    grid(&no_datum, "x.gsb"),
+                    "the file's NTv2 transformation to WGS 84 (x.gsb) isn't applied, so positions may be off by as much as that shift",
+                ),
+            ] {
+                let (crs, note) = read_wkt(&bound).unwrap();
+                assert_eq!(crs, alone, "{bound}");
+                let expected = alone_note.as_ref().map_or_else(|| said.to_string(), |n| format!("{n}; {said}"));
+                assert_eq!(note, Some(expected), "{bound}");
+            }
+        }
+    }
+
+    /// The issue's case (#1678): a Shapefile whose `.prj` is NAD 27 bound to WGS 84 by an NTv2 grid,
+    /// as PROJ 9.8.1 writes it, says when it's read that the grid isn't applied.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_prj_bound_by_a_grid_says_it_isnt_applied() {
+        let prj = r#"BOUNDCRS[SOURCECRS[GEOGCRS["unknown",DATUM["North American Datum 1927",ELLIPSOID["Clarke 1866",6378206.4,294.978698213898,LENGTHUNIT["metre",1]],ID["EPSG",6267]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8901]],CS[ellipsoidal,2],AXIS["longitude",east,ORDER[1],ANGLEUNIT["degree",0.0174532925199433,ID["EPSG",9122]]],AXIS["latitude",north,ORDER[2],ANGLEUNIT["degree",0.0174532925199433,ID["EPSG",9122]]]]],TARGETCRS[GEOGCRS["WGS 84",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],CS[ellipsoidal,2],AXIS["latitude",north,ORDER[1],ANGLEUNIT["degree",0.0174532925199433]],AXIS["longitude",east,ORDER[2],ANGLEUNIT["degree",0.0174532925199433]],ID["EPSG",4326]]],ABRIDGEDTRANSFORMATION["unknown to WGS84",METHOD["NTv2",ID["EPSG",9615]],PARAMETERFILE["Latitude and longitude difference file","ntv2_0.gsb",ID["EPSG",8656]]]]"#;
+        let dir = std::env::temp_dir().join(format!("rustgis-bound-grid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ds = crate::Dataset::new("nad27", crate::GeometryType::Point, vec![]);
+        ds.push(Some(crate::Geometry::Point(Coord::new(-79.0, 43.0))), vec![]);
+        let shp = dir.join("nad27.shp");
+        crate::io::write_path(&ds, &shp).unwrap();
+        std::fs::write(shp.with_extension("prj"), prj).unwrap();
+        let (_, report) = crate::io::read_path(&shp).unwrap();
+        let said = "the .prj file: the file's NTv2 transformation to WGS 84 (ntv2_0.gsb) isn't applied, so positions may be off by as much as that shift";
+        assert!(report.messages.iter().any(|m| m == said), "{:?}", report.messages);
+        assert!(!report.messages.iter().any(|m| m.contains("has no conversion to WGS 84 in the file")), "{:?}", report.messages);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -3343,6 +3803,139 @@ pub(crate) mod tests {
         assert!(crs.is_planetary(), "{crs:?}");
     }
 
+    /// An EPSG code that comes with a WKT (a GeoPackage row's) is used as the WKT's own `AUTHORITY`
+    /// would be (#1677): when the WKT gives no shift, or the code's own.
+    #[test]
+    fn a_code_beside_a_wkt_is_used_when_the_wkt_gives_no_other_shift() {
+        let bng = to_wkt(Crs::Epsg(27700)).unwrap();
+        let own = "TOWGS84[446.448,-125.157,542.06,0.15,0.247,0.842,-20.489]";
+        assert!(bng.contains(own), "{bng}");
+        // The code's own shift, or none: the code is used.
+        assert_eq!(read_wkt_over_code(&bng, 27700), None);
+        let unshifted = bng.replace(&format!(",{own}"), "");
+        assert_ne!(unshifted, bng);
+        assert_eq!(read_wkt_over_code(&unshifted, 27700), None);
+        // The code stands in for the WKT's own, also one that names another system.
+        let mislabelled = bng.replace(r#"AUTHORITY["EPSG","27700"]]"#, r#"AUTHORITY["EPSG","4277"]]"#);
+        assert_ne!(mislabelled, bng);
+        assert_eq!(read_wkt(&mislabelled).map(|r| r.0), Ok(Crs::Epsg(4277)));
+        assert_eq!(read_wkt_over_code(&mislabelled, 27700), None);
+        // A grid isn't a shift to compare: the code is used, and its caller says the grid isn't
+        // applied ([`unapplied_note`]). Text that isn't WKT leaves the code too.
+        assert_eq!(read_wkt_over_code(BOUND_BY_A_GRID, 26717), None);
+        assert_eq!(read_wkt_over_code("PROJCS[", 27700), None);
+    }
+
+    /// A WKT that gives another shift than the code beside it, a `TOWGS84` or a `BOUNDCRS`'s, is
+    /// read in place of the code, as a `.prj` is read in place of its own `AUTHORITY` (#1677).
+    #[test]
+    fn a_wkt_with_another_shift_is_read_in_place_of_the_code_beside_it() {
+        let bng = to_wkt(Crs::Epsg(27700)).unwrap();
+        let own = "TOWGS84[446.448,-125.157,542.06,0.15,0.247,0.842,-20.489]";
+        assert!(bng.contains(own), "{bng}");
+        // Another shift is the WKT's, as in a `.prj`.
+        let other = bng.replace(own, "TOWGS84[375,-111,431,0,0,0,0]");
+        let read = read_wkt_over_code(&other, 27700).unwrap();
+        assert_eq!(read, read_wkt(&other));
+        let (crs, note) = read.unwrap();
+        assert!(crs.custom_def().is_some_and(|d| d.proj4.contains("+towgs84=375,-111,431,0,0,0,0")) && note.is_none(), "{crs:?} {note:?}");
+        // So is a `BOUNDCRS`'s, of a WKT2 without a code of its own.
+        let rows = corpus();
+        let bng2 = rows.iter().find(|r| r.0 == "EPSG:27700").unwrap().2;
+        assert!(!bng2.contains(r#"ID["EPSG",27700]"#), "{bng2}");
+        let osgb = epsg_proj4(4277).and_then(earth_of).unwrap().1;
+        assert_eq!(read_wkt_over_code(&bound_crs(bng2, WGS84_WKT2, &osgb), 27700), None);
+        let (crs, note) = read_wkt_over_code(&bound_crs(bng2, WGS84_WKT2, &[375.0, -111.0, 431.0]), 27700).unwrap().unwrap();
+        assert!(crs.custom_def().is_some_and(|d| d.proj4.contains("+towgs84=375,-111,431 ")) && note.is_none(), "{crs:?} {note:?}");
+        // A shift of zero where the code has one is the WKT's, said.
+        let zero = bng.replace(own, "TOWGS84[0,0,0,0,0,0,0]");
+        let (crs, note) = read_wkt_over_code(&zero, 27700).unwrap().unwrap();
+        assert!(matches!(crs, Crs::Custom(_)), "{crs:?}");
+        assert_eq!(
+            note.as_deref(),
+            Some("the file gives a shift of zero to WGS 84, which is used in place of EPSG:27700's transformation")
+        );
+        // A system that can't be read from its parameters (Krovak North Orientated) is read by the
+        // code, with the code's shift in place of the WKT's, said.
+        let krovak = rows.iter().find(|r| r.0 == "EPSG:5514").unwrap().2;
+        assert_eq!(read_wkt_over_code(&bound_crs(krovak, WGS84_WKT2, &[589.0, 76.0, 480.0]), 5514), None);
+        let (crs, note) = read_wkt_over_code(&bound_crs(krovak, WGS84_WKT2, &[570.8, 85.7, 462.8]), 5514).unwrap().unwrap();
+        assert_eq!(crs, Crs::Epsg(5514));
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "the file's own shift to WGS 84 is set aside for EPSG:5514's, because the Krovak (North Orientated) projection isn't supported"
+            )
+        );
+    }
+
+    /// A `BOUNDCRS` that can't be read with its transformation leaves the code beside it, and says
+    /// that the shift it gives is set aside (#1677). Alone, as in a `.prj`, the same text is
+    /// refused. Text that can't be read and gives no transformation leaves the code with nothing
+    /// to say.
+    #[test]
+    fn a_bound_wkt_that_cant_be_read_leaves_the_code_beside_it_and_says_so() {
+        let rows = corpus();
+        let wkt2 = |code: &str| rows.iter().find(|r| r.0 == code).unwrap().2;
+        // A target whose shift to WGS 84 isn't known: NAD 27's is a grid.
+        let nad27 = wkt2("EPSG:4267");
+        let bound = bound_crs(wkt2("EPSG:27700"), nad27, &[375.0, -111.0, 431.0]);
+        let why = "the shift from NAD27 to WGS 84 isn't known";
+        assert_eq!(read_wkt(&bound), Err(why.to_string()));
+        assert_eq!(
+            read_wkt_over_code(&bound, 27700),
+            Some(Ok((Crs::Epsg(27700), Some(format!("the file's own shift to WGS 84 is set aside for EPSG:27700's, because {why}")))))
+        );
+        // A code without a shift of its own (NAD 27's) is read without the text's.
+        let lost = bound_crs(BESSEL_WKT2, nad27, &BESSEL_SHIFT);
+        assert_eq!(
+            read_wkt_over_code(&lost, 4267),
+            Some(Ok((
+                Crs::Epsg(4267),
+                Some(format!(
+                    "the file's own shift to WGS 84 is set aside, because {why}, and EPSG:4267 is read without it, so positions may be off by as much as that shift"
+                ))
+            )))
+        );
+        // The same systems bound to WGS 84 are read with their shift, with nothing to say.
+        assert!(matches!(
+            read_wkt_over_code(&bound_crs(wkt2("EPSG:27700"), WGS84_WKT2, &[375.0, -111.0, 431.0]), 27700),
+            Some(Ok((_, None)))
+        ));
+        // So is a bound system that is a compound system's horizontal part.
+        let compound = format!(r#"COMPOUNDCRS["with heights",{bound},VERTCRS["heights"]]"#);
+        assert_eq!(read_wkt(&compound), Err(why.to_string()));
+        assert!(matches!(read_wkt_over_code(&compound, 27700), Some(Ok((Crs::Epsg(27700), Some(note)))) if note.ends_with(why)));
+        // Nothing to set aside: a bound system that gives no transformation, and text cut short,
+        // which isn't WKT.
+        let no_source = format!("BOUNDCRS[TARGETCRS[{WGS84_WKT2}]]");
+        assert!(read_wkt(&no_source).is_err());
+        assert_eq!(read_wkt_over_code(&no_source, 27700), None);
+        let cut = bound.strip_suffix("]]").unwrap();
+        assert_eq!(read_wkt_over_code(cut, 27700), None);
+        // Nor is there in text that only holds a transformation, bound to no system: one alone, or
+        // in a compound system without a horizontal part, which can't be read.
+        let alone = r#"ABRIDGEDTRANSFORMATION["t",METHOD["Geocentric translations"],PARAMETER["X-axis translation",375]]"#;
+        assert_eq!(read_wkt_over_code(alone, 27700), None);
+        let unbound = format!(r#"COMPOUNDCRS["no horizontal part",{alone}]"#);
+        assert_eq!(read_wkt(&unbound), Err("the compound coordinate system has no horizontal part".into()));
+        assert_eq!(read_wkt_over_code(&unbound, 27700), None);
+    }
+
+    /// Another body's WKT is read, or refused, whatever the EPSG code beside it: EPSG's codes are
+    /// the Earth's (#1677).
+    #[test]
+    fn another_bodys_wkt_is_read_in_place_of_the_code_beside_it() {
+        let mars = r#"GEOGCS["Mars_2015_Ographic",DATUM["D_Mars_2015",SPHEROID["Mars_2015",3396190.0,169.894447223612]],PRIMEM["Reference_Meridian",0.0],UNIT["Degree",0.0174532925199433]]"#;
+        assert_eq!(read_wkt_over_code(mars, 4326), Some(Err(planetary::OGRAPHIC.to_string())));
+        let ocentric = mars.replace("Mars_2015_Ographic", "Mars_2015_Ocentric").replace("169.894447223612", "0");
+        assert!(matches!(read_wkt_over_code(&ocentric, 4326), Some(Ok((crs, Some(_)))) if crs.is_planetary()));
+        // Longitudes counted west in WKT2, which can't be parsed into WKT1.
+        let west = r#"GEOGCRS["Mars (2015) / Ographic",DATUM["Mars (2015)",ELLIPSOID["Mars (2015)",3396190,169.894447223612,LENGTHUNIT["metre",1]]],PRIMEM["Reference Meridian",0,ANGLEUNIT["degree",0.0174532925199433]],CS[ellipsoidal,2],AXIS["geodetic latitude (Lat)",north,ORDER[1],ANGLEUNIT["degree",0.0174532925199433]],AXIS["geodetic longitude (Lon)",west,ORDER[2],ANGLEUNIT["degree",0.0174532925199433]],ID["IAU",49901,2015]]"#;
+        assert!(tree(west).is_err());
+        assert!(matches!(read_wkt_over_code(west, 4326), Some(Err(_))));
+    }
+
     /// Web Mercator's codes with a shift of zero, as GDAL writes them, are Web Mercator. Read from
     /// their parameters, as Mercator on an ellipsoid, points would be 21 km off.
     #[test]
@@ -3602,6 +4195,8 @@ pub(crate) mod tests {
             let crs = Crs::from_epsg(u32::from(code)).unwrap();
             let wkt = to_wkt(crs).unwrap_or_else(|| panic!("EPSG:{code}: {def}"));
             assert_eq!(crs_from_wkt(&wkt), Ok(crs), "{wkt}");
+            // Beside its code, as the GeoPackage writer puts it, the code is used.
+            assert_eq!(read_wkt_over_code(&wkt, u32::from(code)), None, "{wkt}");
             written += 1;
         }
         assert!(written > 5000, "{written}");

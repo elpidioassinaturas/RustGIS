@@ -507,7 +507,8 @@ pub struct GpEnvironment {
     #[serde(default)]
     pub cell_size: Option<f64>,
     /// The projected coordinate system the Geostatistical Wizard makes its surface in, and the cell
-    /// size in its units, when the run doesn't say; `None`: degrees, with `cell_size`. Kept apart
+    /// size in its units, when the run doesn't say; `None`: the projected system the layer was read in,
+    /// else degrees with `cell_size`. Kept apart
     /// from `cell_size` so an older RustGIS, which reads only that, still makes it in degrees rather
     /// than reading this system's units as degrees: losing it costs that version the setting, not
     /// the raster.
@@ -1342,6 +1343,36 @@ impl Project {
                 NoticeText::format(
                     "the environment's coordinate system {crs} isn't a projected one this version can use, so it was left out",
                     [("crs", g.crs.label().into())],
+                ),
+            ));
+        }
+        // A measured graticule's system `map.graticule` would refuse (too long, unreadable here, or
+        // in degrees), from a hand-edited file or one saved where it reads (a PROJ string the web
+        // app can't): left out, said, and the graticule falls back to the map's own system.
+        // One notice for all of them, with how many and which.
+        let mut left_out = Vec::new();
+        for m in &mut p.maps {
+            let Some(c) = m.graticule_crs.take() else { continue };
+            let usable = c.trim().chars().nth(rustgis_map::layout::MAX_GRID_CRS).is_none()
+                && rustgis_data::raster::Crs::parse(c.trim())
+                    .is_ok_and(|r| !r.is_geographic() && !r.is_geocentric() && r.transformer().is_ok());
+            if usable {
+                m.graticule_crs = Some(c);
+            } else {
+                left_out.push(format!("{} ({})", m.name, rustgis_map::graticule::short_crs(&c)));
+            }
+        }
+        if !left_out.is_empty() {
+            let n = left_out.len();
+            let mut which = left_out.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+            if n > 3 {
+                which = format!("{which} and {} more", n - 3);
+            }
+            p.read_notices.push((
+                ReadPart::Maps,
+                NoticeText::format(
+                    "{n} map(s): the measured graticule's coordinate system isn't a projected one this version can use, so it was left out (the map's own, else the UTM zone at the centre, is used): {which}",
+                    [("n", n.to_string().into()), ("which", which.into())],
                 ),
             ));
         }

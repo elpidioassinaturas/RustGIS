@@ -103,10 +103,18 @@ times more work as the threads it runs on. Threads share cores and memory, so a 
 can take up to about twice as long as a one-thread run at its own (measured on one machine, a Xeon
 Silver 4114; it can be longer on others); in the web app, on one thread, the limits stay as they
 are. The error names the limit on this computer and the threads it counted. The limits on memory
-(the cells a grid may have, and those on the following pages) hold everywhere, as does Viewshed's on
-its window: a radius covering more than 25 million cells, or 100,000 cells across, is refused. A
-tool's own default cell size still follows the one-thread limit, so it makes the same grid on any
-computer and from any caller; a finer cell size given is what a larger limit, or none, lets through.
+(the cells a grid may have, and those on the following pages) hold everywhere. Viewshed has no limit
+on its window (a radius past the raster's diagonal is taken as the diagonal), only on its ray steps,
+counted before it starts as the most it can take: each cell within the radius a step per cell
+between it and the observer (two with bilinear heights), though a ray stops where the ground first
+hides its cell and a cell with no data walks none. With no radius it covers the whole raster, so
+on a large one it can be refused where a run can't be stopped (listed above); a smaller radius, or
+a run from its pane on the desktop or with `rustgis-cli run` typed at a terminal, gets it through.
+Nothing caps it there, so a whole-raster viewshed of a large DEM can take long: its steps are at
+most its cells times the raster's longer side (counted twice with bilinear heights). Its progress
+shows, and **Cancel** stops it. A tool's own default cell size still follows the one-thread limit,
+so it makes the same grid on any computer and from any caller; a finer cell size given is what a
+larger limit, or none, lets through.
 
 From the command line or a script (`gp.run`), a built-in tool's parameter with a list of choices, such as Buffer's
 units, takes one of them in any letter case (`"meters"` for `Meters`); any other value is an error
@@ -543,10 +551,14 @@ across the extent and coarsens for large inputs. The result is a Float32 GeoTIFF
 IDW Interpolation and Ordinary Kriging make their raster in the projected coordinate system given
 as `crs` (such as `EPSG:32616` for UTM zone 16N, or a State Plane code), and then take the
 extent, pixel size and Kriging's `range` in its units, usually metres or feet. Without `crs`
-they work in longitude and latitude, with all three in degrees, as they did before `crs` was
-there; for a layer read from a projected file they then say so, naming its system. `EPSG:4326`
-also means degrees; another geographic `crs` is refused, and points the system can't hold are left
-out and counted.
+they use the projected system the layer was read in, as Kernel Density does, and say so, naming
+it; a layer read in longitude and latitude gives a raster in degrees, with all three in degrees.
+`crs: "EPSG:4326"` makes it in degrees whatever the layer was read in, as these tools always did
+before `crs` was there; so does a layer read in a system that can't hold a raster's cells (a
+geocentric one) or that this version can't project to, with a notice saying which. A script
+written when these tools worked in degrees is told: the notice names the extent, pixel size or range
+it gave, now read in the layer's units, and says when a given extent holds none of the points. Another geographic `crs` is refused, and points the system can't
+hold are left out and counted.
 
 **Ordinary Kriging** (`kriging`) estimates both a value and its uncertainty. Set `input` and a
 numeric `field`, then choose a `model`: **Spherical** (default), **Exponential** or **Gaussian**.
@@ -718,7 +730,10 @@ into a `target` table or layer based on matching key values:
   full (`"47157000100"` matches `47157000100`), so an all-digit ID typed as a number in one table and
   as text in the other (Census GEOIDs, FIPS codes, ZIP codes) joins when the codes match exactly as
   written. Leading zeros stay meaningful: a number that lost its zero (`1001` for `"01001"`) leaves its
-  record unmatched, and a warning says how many records missed this way, with the first pair. Other
+  record unmatched, and a warning says how many records missed this way, with the first pair. A date
+  key matches a text key holding its ISO 8601 text (`2026-03-05`), and a date-time key the text
+  as RustGIS writes it (`2026-03-05T14:30:00`, or `2026-03-05T14:30:00+02:00` with its offset). Two
+  date-time keys match by instant, so the same moment at different offsets matches. Other
   incompatible key data types (e.g. text vs floating point or boolean) are rejected, and the message
   suggests converting one key with Add Field and Calculate Field.
 - **Transferred fields:** `fields` selects specific source fields to transfer (a comma-separated list
@@ -781,7 +796,8 @@ input produced by another tool, type its field names before running the model.
 
 Every statistic but `NULLS` leaves out empty values. A text field takes `COUNT`, `MIN`, `MAX`,
 `FIRST`, `LAST`, `UNIQUE`, `CONCATENATE`, `MODE`, `MINORITY` and `NULLS`; the rest need a numeric
-field. A group with no values gets empty statistics, except a `COUNT` and `UNIQUE` of 0 (its
+field. A date or date-time field takes the same ones as text; its `MIN`, `MAX`, `FIRST`, `LAST`,
+`MODE` and `MINORITY` are dates, with `MIN` and `MAX` by instant. A group with no values gets empty statistics, except a `COUNT` and `UNIQUE` of 0 (its
 `NULLS` is its `FREQUENCY`). Two output fields can't share a name, so a case field can't be called
 `FREQUENCY` or `<STAT>_<field>` for a statistic asked for. Counts are whole numbers, `CONCATENATE`
 and the statistics of a text field are text, and the others are decimal. A decimal holds whole
@@ -1231,7 +1247,7 @@ click them on the map:
 | Raster Functions | Slope, aspect, hillshade, NDVI, band math (`(b4-b3)/(b4+b3)`), remapping, thresholds, resampling |
 | Function Editor | Chains raster functions, each on the previous output |
 | Suitability Modeler | Scores rasters 1–10 and adds them with weights |
-| Visibility Analysis | A viewshed from a point on an elevation raster, with the Earth's curvature and the refraction of visible light (1/7, as `gdal_viewshed`) |
+| Visibility Analysis | A viewshed from a point on an elevation raster, with the Earth's curvature and the refraction of visible light (1/7, as `gdal_viewshed`). The ground along each ray is the cell each point falls in by default; `heights: "bilinear"` (**Ground heights › Between cells (bilinear)** in the Workflows pane) reads it between the cells' centres instead. Both are estimates of the ground between cell centres; between cells is closer on ground that bulges (a hill seen from its top), where the nearest cell can hide cells just inside the horizon. With no radius, or one longer than the raster's diagonal, the viewshed covers the whole raster. The map's **Viewshed N km Here** reads the ground as the Workflows pane's **Ground heights** says. On a raster round the whole Earth the rays don't cross its east–west edge, which the analysis says when the radius reaches it and the way across is shorter: the ground just across the edge is left out, worked out the long way round where the radius reaches the far edge through the raster too (always with no radius), or partly both, near the observer's row and not farther from it. The observer's height must be from 0 to 10,000 m. Ground with no data hides nothing, and next to it bilinear heights take the nearest cell's height; the analysis says how many cells this touched, in a notice. The answer gives both counts (0 when there is nothing to say): `acrossNoData` counts the visible cells whose rays crossed ground with no data (a hidden cell stays hidden whatever that ground is, so it isn't counted, and 0 doesn't mean no ray crossed any); `readNearest` counts every cell, visible or hidden, whose ray took a nearest height next to no data in bilinear mode |
 | Exploratory 3D Analysis | A line of sight between two points, split into seen and hidden parts, with the same curvature and refraction |
 | Geostatistical Wizard | An IDW surface from feature values, using 12 nearest neighbours by default |
 | Network Analysis | The shortest (or cheapest, by a cost field) route over a line layer |
@@ -1251,16 +1267,18 @@ view, full extent, a layer or a longitude/latitude box (or `null` to clear it). 
 honour it, this restricts an unselected main feature input by bounding-box intersection, not by
 clipping its geometry; an existing selection takes precedence and overlay inputs stay whole.
 The environment can also set a projected coordinate system for the Geostatistical Wizard's rasters
-(`gp.env={"crs": "EPSG:32616"}`, or **Set Coordinate System**; `null` goes back to degrees), and
+(`gp.env={"crs": "EPSG:32616"}`, or **Set Coordinate System**; `null` clears it), and
 `cellSize` is then in its units. That cell size is kept apart from the cell size in degrees, so an
 older RustGIS opening the project keeps making rasters in degrees; `gp.env` returns the system and
 its cell size as `projected` (`crs` there is the text to give it back), and `cellSize` stays the one
 in degrees. The Geostatistical Wizard
 uses the environment's extent, coordinate system and cell size; its own `crs` and `cellSize` win
-over them (`EPSG:4326` asks for degrees, with the degree cell size), and without a system it works
-in degrees, as before. IDW Interpolation and Ordinary Kriging
-instead use their own `extent`, `pixelSize` and `crs` parameters; the environment does not set
-their output grids.
+over them (`EPSG:4326` asks for degrees, with the degree cell size), and without either system it
+uses the layer's, as IDW Interpolation and Ordinary Kriging do. A cell size the environment holds in
+another system's units (degrees, for a surface made in the layer's system) isn't used, and the
+run says so. IDW Interpolation and Ordinary
+Kriging instead use their own `extent`, `pixelSize` and `crs` parameters; the environment does not
+set their output grids.
 
 **Threads** (`gp.threads={"threads": 8}`) sets the most threads one piece of work uses, 1 to 1024
 (`null`: the default, the computer's cores up to 16). It is never more than the cores, holds for
@@ -1503,7 +1521,14 @@ The Imagery tab's groups open their tools in the Workflows pane. The tab belongs
 - **Change Detection** (difference, ratio, percent), **Indices** (NDVI, NDWI, SAVI, NBR, NDBI,
   EVI), **Process** (clip to the view, to a box, or to a polygon layer's selected or all polygons,
   with the cells outside them no-data; resample) and the **Pixel Editor** (set the pixels inside a
-  polygon).
+  polygon). As in Project Raster, the cells outside the polygons are see-through instead (0, with
+  alpha 0) in an image with an alpha band, and a three-band colour image with neither alpha nor
+  no-data gains one for them, so an 8-bit image stays 8-bit when it is exported. A colour image
+  with a fourth band of data and no alpha (RGB and near-infrared) gets no-data there as before
+  (−3.4e38 when it has none). Project Raster doesn't give it an alpha band either: a colour image's
+  alpha is read from its fourth band, which holds its data. A clip that gained an alpha band has
+  four bands, so Mosaic Rasters refuses it beside three-band tiles, saying how many bands each
+  has: clip the others the same way, or mosaic first and clip the result.
 - **Mosaic Rasters** (`raster.mosaic`) merges tiles of one grid, such as the 1 km tiles of a state
   elevation model, into one raster in their own coordinate system and cell size, optionally
   written to a GeoTIFF: `{"inputs": ["dgm_1.tif", "dgm_2.tif", …], "path": "dem.tif"}`. Inputs

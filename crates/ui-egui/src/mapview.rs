@@ -3075,12 +3075,12 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
                         } else if !is_found(&v) {
                             // Only WMS layers being asked: the click found nothing yet, so it clears
                             // the selection as an empty click does.
-                            let _ = app.session.run("select.clear", &Value::Null);
+                            clear_selection_quietly(app);
                         }
                         Some(Popup::new(v, c, app.session.project.active_map, app.session.opened))
                     }
                     _ => {
-                        let _ = app.session.run("select.clear", &Value::Null);
+                        clear_selection_quietly(app);
                         None
                     }
                 };
@@ -3259,6 +3259,14 @@ fn with_template(app: &RustGisApp, mut p: Value) -> Value {
 
 /// Adds a graphic drawn with a tool, then returns to Explore unless the tool is kept.
 pub fn finish_graphic(app: &mut RustGisApp, shape: &str, pts: Vec<Coord>) {
+    // While the STAC search area is being drawn, the shape goes to it, not to a graphics layer.
+    if let Some(taken) = crate::stacui::take_drawn(app, shape, &pts) {
+        app.map.cancel_sketch();
+        if taken && !app.session.keep_tool {
+            app.session.tool = Tool::Explore;
+        }
+        return;
+    }
     let coords: Vec<[f64; 2]> = pts.iter().map(|c| [c.x, c.y]).collect();
     let ok = app.run("graphics.add", json!({"shape": shape, "points": coords})).is_ok();
     app.map.cancel_sketch();
@@ -3288,6 +3296,8 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
         p.rect_filled(r, 0.0, accent.gamma_multiply(0.12));
         p.rect_stroke(r, 0.0, Stroke::new(1.5, accent), egui::StrokeKind::Middle);
     }
+    // The STAC search area, while that pane is open.
+    crate::stacui::paint_area(app, p, rect, accent);
     // Vertices of the selected features while editing.
     let editing = &app.session.map().editing;
     if editing.settings.enabled
@@ -4552,7 +4562,8 @@ fn shown_layers(session: &rustgis_engine::Session) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     let project = &session.project;
     let map = project.map();
-    (&session.path, &project.name, project.active_map, &map.name, map.basemap, map.graticule).hash(&mut h);
+    (&session.path, &project.name, project.active_map, &map.name, map.basemap, map.graticule, map.graticule_type, &map.graticule_crs)
+        .hash(&mut h);
     for l in &map.layers {
         (l.id, l.visible).hash(&mut h);
     }
@@ -4872,6 +4883,14 @@ mod picture_tests {
         assert!(bomb.len() < 4 << 20, "{}", bomb.len());
         assert!(super::decode_picture(&bomb).is_err());
         assert!(super::decode_picture(b"not a picture").is_err());
+    }
+}
+
+/// An empty click clears the selection when there is one. With nothing selected it does nothing:
+/// `select.clear` refuses then ("nothing is selected"), and a click is not a request to be told so.
+fn clear_selection_quietly(app: &mut RustGisApp) {
+    if app.session.map().selection_count() > 0 {
+        let _ = app.session.run("select.clear", &Value::Null);
     }
 }
 
@@ -5239,6 +5258,44 @@ mod tests {
         assert_eq!(h.state().session.tool, Tool::Select);
         selection_click(&mut h, [2., 2.]);
         assert_eq!(selection_rows(&h), vec![1]);
+    }
+
+    /// An Explore click on empty map clears a selection, and with nothing selected gives no
+    /// "nothing is selected" error notice.
+    #[test]
+    fn explore_click_on_empty_map_clears_without_a_notice() {
+        let mut h = selection_harness();
+        h.state_mut().run("tool.set", json!({"tool": "explore"})).unwrap();
+        let mark = h.state().session.notice_mark();
+        selection_click(&mut h, [3.5, 1.5]);
+        assert!(selection_rows(&h).is_empty());
+        h.state_mut().run("select.rows", json!({"layer": "Points", "rows": [1]})).unwrap();
+        // A second empty click, elsewhere, with a row selected: it clears the selection.
+        selection_click(&mut h, [1.0, 3.5]);
+        assert!(selection_rows(&h).is_empty(), "an empty click clears the selection");
+        let errors: Vec<_> = h.state().session.notices_since(mark).iter().filter(|n| n.error).map(|n| n.text.clone()).collect();
+        assert!(errors.is_empty(), "no error notice: {errors:?}");
+    }
+
+    /// An Explore click on empty map that only asks a WMS layer clears a selection too, and with
+    /// nothing selected gives no "nothing is selected" error notice.
+    #[test]
+    fn explore_click_asking_only_wms_clears_without_a_notice() {
+        let mut h = selection_harness();
+        let url = "https://wms.example.org/?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=over&STYLES=&CRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256&FORMAT=image%2Fpng";
+        h.state_mut().run("map.addTiles", json!({"url": url, "name": "Over", "overlay": true})).unwrap();
+        h.state_mut().run("map.popupMode", json!({"mode": "visible"})).unwrap();
+        h.state_mut().run("tool.set", json!({"tool": "explore"})).unwrap();
+        let mark = h.state().session.notice_mark();
+        selection_click(&mut h, [3.5, 1.5]);
+        assert!(h.state().map.popup.is_some(), "the click asks the WMS layer");
+        assert!(selection_rows(&h).is_empty());
+        h.state_mut().run("select.rows", json!({"layer": "Points", "rows": [1]})).unwrap();
+        selection_click(&mut h, [1.0, 3.5]);
+        assert!(selection_rows(&h).is_empty(), "the click clears the selection");
+        // The made-up WMS server's own failure may land too: only the refusal is checked.
+        let refused = h.state().session.notices_since(mark).iter().any(|n| n.error && n.text.contains("nothing is selected"));
+        assert!(!refused, "no \"nothing is selected\" notice");
     }
 
     #[test]
