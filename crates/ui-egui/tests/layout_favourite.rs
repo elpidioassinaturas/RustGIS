@@ -77,7 +77,7 @@ fn saved_arrangements_are_kept_and_restored() {
     assert!(!restored.session.notices.iter().any(|n| n.text.contains("arrangement")));
     // What can't be used is left out and counted, once, and saved again as it was.
     let half = json!({"locator": "top-left"});
-    let text = json!({"Atlas": atlas, "best": atlas, "Half": half}).to_string();
+    let text = json!({"Atlas": atlas, "atlas": half, "best": atlas, "Half": half}).to_string();
     let writes = saved.clone();
     let mut restored = RustGisApp::new(Session::new(Project::default())).with_services(Services {
         load_pref: Some(Box::new(move |k| (k == SAVED).then(|| text.clone()))),
@@ -87,12 +87,14 @@ fn saved_arrangements_are_kept_and_restored() {
     assert_eq!(restored.session.layout_arrangements.len(), 1);
     let said = restored.session.notices.iter().filter(|n| n.text.contains("2 saved arrangements")).count();
     assert_eq!(said, 0, "one notice, without a count's plural");
-    let said = restored.session.notices.iter().filter(|n| n.text.contains("can't use: 2")).count();
+    let said = restored.session.notices.iter().filter(|n| n.text.contains("can't use: 3")).count();
     assert_eq!(said, 1);
-    restored.run("layout.arrangement", json!({"save": "half", "arrangement": "classic"})).unwrap();
+    restored.run("layout.arrangement", json!({"save": "Half", "arrangement": "classic"})).unwrap();
     let written: serde_json::Value = serde_json::from_str(&last(SAVED)).unwrap();
-    assert_eq!(written["best"], atlas, "kept as it was");
-    assert!(written.get("Half").is_none() && written["half"]["locator"] == "top-left", "{written}");
+    // Kept as they were, a name in other capitals too; the one saved here under that very name
+    // takes its place.
+    assert_eq!((written["best"].clone(), written["atlas"].clone()), (atlas.clone(), half.clone()), "{written}");
+    assert_eq!(written["Half"]["locator"], "top-left", "{written}");
     // Text that isn't a list of arrangements is said, and never saved over.
     let writes = saved.clone();
     let mut restored = RustGisApp::new(Session::new(Project::default())).with_services(Services {

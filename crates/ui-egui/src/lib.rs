@@ -2859,10 +2859,9 @@ impl RustGisApp {
     fn save_layout_favourite(&mut self) {
         if self.session.layout_arrangements != self.ui.layout_arrangements_saved && !self.ui.layout_arrangements_unreadable {
             self.ui.layout_arrangements_saved = self.session.layout_arrangements.clone();
-            // Those this version couldn't use go back as they were, but where a name saved here
-            // (case aside) took their place.
+            // Those this version couldn't use go back as they were, but where one saved here took
+            // their very name.
             let mut all = self.ui.layout_arrangements_unread.clone();
-            all.retain(|name, _| !self.session.layout_arrangements.keys().any(|k| k.eq_ignore_ascii_case(name)));
             all.extend(self.session.layout_arrangements.clone());
             if let Some(save) = &self.services.save_pref {
                 save(LAYOUT_ARRANGEMENTS_PREF, &Value::Object(all).to_string());

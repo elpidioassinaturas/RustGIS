@@ -1026,11 +1026,7 @@ fn arrangement(s: &mut Session, p: &Value) -> CmdResult {
     let mut warnings: Vec<String> = Vec::new();
     let mut favourite = s.layout_favourite.clone();
     if let Some(name) = remove {
-        let key = saved
-            .keys()
-            .find(|k| k.eq_ignore_ascii_case(&name))
-            .cloned()
-            .ok_or_else(|| format!("no arrangement is saved as \"{name}\""))?;
+        let key = saved.keys().find(|k| same_name(k, &name)).cloned().ok_or_else(|| format!("no arrangement is saved as \"{name}\""))?;
         let corners = saved.remove(&key).unwrap_or(Value::Null);
         // A favourite named after it keeps its corners.
         if favourite.as_str().is_some_and(|f| same_name(f.trim(), &key)) {

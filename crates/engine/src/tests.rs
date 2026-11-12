@@ -41691,7 +41691,7 @@ fn arrangements_are_saved_by_name() {
     // Case aside beyond ASCII too.
     s.run("layout.arrangement", &json!({"save": "Écran", "arrangement": "legendTop"})).unwrap();
     assert_eq!(arrangements_to_try(&s, &json!("écran")).unwrap()[0].0, "Écran");
-    s.run("layout.arrangement", &json!({"remove": "ÉCRAN"})).unwrap();
+    s.run("layout.arrangement", &json!({"remove": "écran"})).unwrap();
     // The favourite by its name; removed, it keeps its corners, which is said.
     s.run("layout.arrangement", &json!({"favourite": "Atlas"})).unwrap();
     assert_eq!(arrangements_to_try(&s, &json!("favourite")).unwrap()[0].0, "Atlas");
