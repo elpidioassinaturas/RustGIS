@@ -3921,9 +3921,10 @@ const PLACED_OVER_MAP: [&str; 3] = ["Legend Box", "Locator", "North Arrow"];
 /// A publication's scale bar box measured again after its frame's scale or width changed (#1379):
 /// the "Scale Box", the "Scale Bar" of `frame` and the "Scale" under it, as a publication lays them
 /// out (one place, one width, none locked), take the width that bar and the text under it (its
-/// tokens filled, measured as drawn) now need, kept on the side of the frame they are nearer. A
-/// layout without them, with them moved apart, or with that text spaced out or in another font
-/// (which the width can't be measured for) is left as it is. A box that would then cover the
+/// tokens filled as the page draws them, measured as drawn) now need, kept on the side of the
+/// frame they are nearer. A layout without them, with them moved apart, with that text spaced out
+/// or in another font, or naming a map series page (which differs from page to page) is left as
+/// it is. A box that would then cover the
 /// legend, locator or north arrow, which it didn't, stays as it was, which is said.
 fn refit_scale_box(s: &mut Session, li: usize, frame: u32) {
     let Some(l) = s.project.layouts.get(li) else { return };
@@ -3940,14 +3941,18 @@ fn refit_scale_box(s: &mut Session, li: usize, frame: u32) {
     else {
         return;
     };
-    if *letter_spacing != 0.0 || *font != FontFamily::Sans || font_name.is_some() {
+    if *letter_spacing != 0.0 || *font != FontFamily::Sans || font_name.is_some() || (l.series.is_some() && written.contains("{page")) {
         return;
     }
+    // Its tokens filled as the page draws them, `{scale}` from the frame.
+    let info = crate::render::layout::PageInfo { page: 1, pages: 1, page_name: String::new() };
+    let cam = rustgis_map::layout::frame_camera(m, *center, *scale, 0.0, 0.0);
+    let filled = crate::render::layout::expand(written, l, &info, Some((m, cam)));
     let together = [bar, text].iter().all(|e| (e.x - boxed.x).abs() < 1e-6 && (e.w - boxed.w).abs() < 1e-6 && !e.locked);
     if *of != frame || !together || boxed.locked {
         return;
     }
-    let w = scale_box_width(ground_per_pt, *scale, fr.w, (*units, *divisions), l.decimal_comma, (written, *size, *bold));
+    let w = scale_box_width(ground_per_pt, *scale, fr.w, (*units, *divisions), l.decimal_comma, (&filled, *size, *bold));
     let x = if boxed.x + boxed.w / 2.0 > fr.x + fr.w / 2.0 { boxed.x + boxed.w - w } else { boxed.x };
     let covers = |(x, w): (f64, f64), e: &rustgis_map::layout::Element| {
         x < e.x + e.w && e.x < x + w && boxed.y < e.y + e.h && e.y < boxed.y + boxed.h
@@ -3960,7 +3965,7 @@ fn refit_scale_box(s: &mut Session, li: usize, frame: u32) {
         .map(|e| e.name.to_lowercase().replace(" box", ""));
     if let Some(what) = newly {
         s.notify(
-            format!("the scale bar's box would now cover the {what}, so it is left as it was: run layout.publication again to place them"),
+            format!("the scale bar's box would now cover the {what}, so it is left as it was: move or widen it by hand, or make the layout again with layout.publication"),
             false,
         );
         return;

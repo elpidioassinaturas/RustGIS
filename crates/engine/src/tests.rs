@@ -7107,7 +7107,12 @@ fn publication_layouts_fit_their_pages() {
     // of one's own around it is measured too.
     let id_of = |s: &Session, n: &str| s.project.layouts[li].elements.iter().find(|e| e.name == n).map(|e| e.id).unwrap();
     let scale_text = id_of(&s, "Scale");
-    for (scale, text) in [(40_000_000.0, "{scale}"), (1_500_000.0, "{scale}"), (25_000_000.0, "Escala aproximada {scale}")] {
+    for (scale, text) in [
+        (40_000_000.0, "{scale}"),
+        (1_500_000.0, "{scale}"),
+        (25_000_000.0, "Escala aproximada {scale}"),
+        (2_500_000.0, "{scale} · {map} · {date}"),
+    ] {
         s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": text})).unwrap();
         s.run("layout.update", &json!({"layout": li, "element": frame, "scale": scale})).unwrap();
         let l = &s.project.layouts[li];
@@ -7115,7 +7120,11 @@ fn publication_layouts_fit_their_pages() {
         let (b, bar, written) = (named("Scale Box"), named("Scale Bar"), named("Scale"));
         let ElementKind::Text { text: stored, size, .. } = &written.kind else { panic!() };
         assert_eq!(stored, text);
-        let filled = stored.replace("{scale}", &crate::render::layout::scale_ratio_text(scale, l.decimal_comma));
+        let ElementKind::MapFrame { map, .. } = &l.element(frame).unwrap().kind else { panic!() };
+        let filled = stored
+            .replace("{scale}", &crate::render::layout::scale_ratio_text(scale, l.decimal_comma))
+            .replace("{map}", map)
+            .replace("{date}", "0000-00-00");
         let Some(ElementKind::MapFrame { scale: drawn, .. }) = l.element(frame).map(|e| &e.kind) else { panic!() };
         assert_eq!(*drawn, scale);
         let wide = crate::render::report::width_mm(&filled, *size as f32, false);

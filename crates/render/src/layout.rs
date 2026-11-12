@@ -4599,8 +4599,6 @@ Elaboração: RustGIS",
         }
     }
 
-    /// The narrowest element for a scale bar draws the very bar a wider one does, labels and all,
-    /// within itself (#1379).
     /// The narrowest element keeps its bar where an export rebuilds it from an f32 rectangle: near
     /// an A2 sheet's right edge, at 300 and 600 dpi (#1379).
     #[test]
@@ -4623,6 +4621,8 @@ Elaboração: RustGIS",
         }
     }
 
+    /// The narrowest element for a scale bar draws the very bar a wider one does, labels and all,
+    /// within itself (#1379).
     #[test]
     fn a_scale_bar_draws_the_same_in_its_narrowest_element() {
         let draw = |ground: f64, width: f32| {
