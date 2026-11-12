@@ -62,9 +62,13 @@ impl std::fmt::Display for Refused {
 }
 
 /// A name for the face in a notice: its full name, else its family, else its PostScript name.
-pub(super) fn face_name(font: &FontRef<'_>) -> String {
+/// In a collection, the face that draws `glyphs` as `font` does ([`drawn_as`]); where none
+/// does (another instance of a variable font), the first with as many glyphs and units per em.
+pub(super) fn face_name(font: &FontRef<'_>, glyphs: &[GlyphId]) -> String {
     let data = font.font_data();
-    let face = (0..collection_len(data)).find_map(|i| ttf_parser::Face::parse(data, i).ok().filter(|f| same_face(font, f)));
+    let index = drawn_as(font, glyphs)
+        .or_else(|| (0..collection_len(data)).find(|&i| ttf_parser::Face::parse(data, i).is_ok_and(|f| same_face(font, &f))));
+    let face = index.and_then(|i| ttf_parser::Face::parse(data, i).ok());
     face.and_then(|f| {
         [ttf_parser::name_id::FULL_NAME, ttf_parser::name_id::FAMILY, ttf_parser::name_id::POST_SCRIPT_NAME]
             .into_iter()
@@ -85,6 +89,19 @@ fn same_face(font: &FontRef<'_>, face: &ttf_parser::Face) -> bool {
     usize::from(face.number_of_glyphs()) == font.glyph_count() && font.units_per_em() == Some(f32::from(face.units_per_em()))
 }
 
+/// The face of `font`'s file that draws `glyphs` as `font` does, at the file's own default
+/// instance: its index (a collection's faces can share glyphs; any that draws them alike will do).
+fn drawn_as(font: &FontRef<'_>, glyphs: &[GlyphId]) -> Option<u32> {
+    let data = font.font_data();
+    (0..collection_len(data)).find(|&i| {
+        FontRef::try_from_slice_and_index(data, i).is_ok_and(|fresh| {
+            fresh.glyph_count() == font.glyph_count()
+                && fresh.units_per_em() == font.units_per_em()
+                && glyphs.iter().all(|&g| draws_alike(font, &fresh, g))
+        })
+    })
+}
+
 /// The face `font` as a subset holding `glyphs`, or why it can't be. A subsetter that fails
 /// leaves the face to outlines; natively, one that panics on a hostile file does too (its panic
 /// caught). In the browser a panic can't be caught (wasm32 aborts), but no file of the user's
@@ -93,16 +110,7 @@ fn same_face(font: &FontRef<'_>, face: &ttf_parser::Face) -> bool {
 /// can still embed.
 pub(super) fn embed(font: &FontRef<'_>, glyphs: &[GlyphId], room: usize) -> Result<Embedded, Refused> {
     let data = font.font_data();
-    // The face of the file that draws these glyphs as `font` does (a collection's faces can share
-    // glyphs; any that draws them alike will do), at the file's own default instance.
-    let index = (0..collection_len(data)).find(|&i| {
-        FontRef::try_from_slice_and_index(data, i).is_ok_and(|fresh| {
-            fresh.glyph_count() == font.glyph_count()
-                && fresh.units_per_em() == font.units_per_em()
-                && glyphs.iter().all(|&g| draws_alike(font, &fresh, g))
-        })
-    });
-    let Some(index) = index else {
+    let Some(index) = drawn_as(font, glyphs) else {
         return Err(if ab_glyph::VariableFont::variations(font).is_empty() { Refused::NotInFile } else { Refused::Instance });
     };
     let face = ttf_parser::Face::parse(data, index).map_err(|e| Refused::Unreadable(e.to_string()))?;
@@ -331,15 +339,17 @@ mod tests {
         assert_eq!(outlined[0].why, "its licence forbids embedding");
     }
 
-    /// A face drawn at another instance than its file's default isn't the file's face: embedding
-    /// the file would draw it otherwise. A static face (Ubuntu Light) has none, so it is embedded;
-    /// a face its file doesn't hold as drawn is refused.
+    /// A face is embedded only from the file that draws it as the export does. A static face
+    /// (Ubuntu Light) is its file's own, so it is embedded; another file's glyphs draw otherwise,
+    /// so a face is never matched to one. (`Refused::Instance` needs a variable font drawn at
+    /// another weight, which no bundled face is; `Refused::NotInFile` is all but unreachable,
+    /// since `font_data` is the very file the face was read from.)
     #[test]
     fn only_the_face_as_drawn_is_embedded() {
         let font = face(|_| ());
         let glyphs: Vec<GlyphId> = "Rio".chars().map(|c| font.glyph_id(c)).collect();
         assert!(embed(font, &glyphs, MAX_EMBEDDED).is_ok());
-        // Another file's face, read from this one's bytes, draws its glyphs otherwise.
+        // Another file's glyphs draw otherwise, so a face is never matched to one.
         let hack = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
         assert!(!draws_alike(font, &hack, glyphs[0]));
         let full = embed(font, &glyphs, 10).err();
@@ -368,7 +378,7 @@ mod tests {
             tried += 1;
             let glyphs: Vec<GlyphId> = (0..40).map(GlyphId).collect();
             let _ = embed(&font, &glyphs, MAX_EMBEDDED);
-            let _ = face_name(&font);
+            let _ = face_name(&font, &glyphs);
         }
         assert!(tried > 10, "{tried} scrambled files parsed");
     }

@@ -274,7 +274,7 @@ pub fn write_with(pages: &[Page], title: &str, text: Text) -> (Vec<u8>, Vec<Outl
                 room = room.saturating_sub(e.file.len());
                 real.push((font, e));
             }
-            Err(why) => outlined.push(Outlined { face: embed::face_name(font), why: why.to_string() }),
+            Err(why) => outlined.push(Outlined { face: embed::face_name(font, &glyphs), why: why.to_string() }),
         }
     }
     // Georeferenced frames make the document PDF 1.7 with Adobe's extension level 3, where
