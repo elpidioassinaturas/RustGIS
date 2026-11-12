@@ -374,8 +374,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   as layers (VectorCraft, where it was checked), and PDF readers list in their layers panel:
   one for each element, named after it, and inside a map frame's, one for each map layer and one
   for each layer's labels (`Labels: <layer>`), and one for the frame's grid. A map series' pages
-  share them. `"pdf": {"layers": false}` on `layout.export` leaves them out. A map exported as PDF
-  (Publish › Export Map) has its map layers and labels as layers too.
+  share them. `"pdf": {"layers": false}` on `layout.export` leaves them out. The map view's PDF
+  (Publish › Print Map) has its map layers and labels as layers too.
   A PDF is also a GeoPDF: each map frame is georeferenced (an ISO 32000 geospatial viewport, the
   form GDAL, QGIS, Acrobat and Avenza read), with its map's coordinate system as WKT and its EPSG
   code when it has one, so a reader shows coordinates and measures in it, and GDAL or QGIS open the

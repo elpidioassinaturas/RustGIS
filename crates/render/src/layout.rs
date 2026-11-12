@@ -228,8 +228,9 @@ fn draw_page(
         }
     }
     for e in layout.elements.iter().filter(visible) {
-        // Each element is a layer of the recording, named after it (#1815).
-        pm.layer(Some(if e.name.trim().is_empty() { e.kind.code() } else { &e.name }));
+        // Each element is a layer of the recording, named after it (#1815) and identified by its
+        // id: the same layer on every page of a series, whatever other elements draw there.
+        pm.layer_with_id(if e.name.trim().is_empty() { e.kind.code() } else { &e.name }, u64::from(e.id));
         let (x, y, ew, eh) =
             ((e.x * k - f64::from(bounds.x())) as f32, (e.y * k - f64::from(bounds.y())) as f32, (e.w * k) as f32, (e.h * k) as f32);
         let Some(r) = Rect::from_xywh(x, y, ew.max(1.0), eh.max(1.0)) else { continue };
@@ -2737,6 +2738,29 @@ mod tests {
         assert_eq!(uncovered(r, [-5.0, -5.0, 15.0, 15.0]), [[0.0, 10.0, 100.0, 40.0], [10.0, 0.0, 90.0, 10.0]]);
         assert_eq!(uncovered(r, [0.0, 0.0, 100.0, 49.995]), Vec::<[f64; 4]>::new(), "a 0.005 mm strip is dropped");
         assert!(uncovered(r, [-1.0, -1.0, 102.0, 52.0]).is_empty());
+    }
+
+    /// Each element is a layer of the page's recording, named after it and identified by its id
+    /// (#1815): two elements named alike are told apart by id, not by which comes first, so an
+    /// element that draws nothing on one page of a series doesn't hand its layer to the other.
+    #[test]
+    fn each_element_is_a_layer_with_its_id() {
+        use crate::vector::Item;
+        let mut layout = Layout::new("Layers", 120.0, 90.0);
+        let text = |t: &str| ElementKind::text(t, 12.0, Rgba::rgb(0, 0, 0), false);
+        let (a, b) =
+            (layout.add("Texto", (10.0, 10.0, 60.0, 10.0), text("Um")), layout.add("Texto", (10.0, 30.0, 60.0, 10.0), text("Dois")));
+        let layers = |layout: &Layout| {
+            let (drawing, _) = render_drawing(layout, &mut [], 96.0, &PageInfo::default()).unwrap();
+            let (_, _, items) = drawing.finish();
+            items.into_iter().filter_map(|i| if let Item::Group(g) = i { Some((g.layer?, g.layer_id?)) } else { None }).collect::<Vec<_>>()
+        };
+        assert_eq!(layers(&layout), [("Texto".to_string(), u64::from(a)), ("Texto".to_string(), u64::from(b))]);
+        // The first draws nothing: the second keeps its own layer.
+        if let Some(ElementKind::Text { text, .. }) = layout.elements.iter_mut().find(|e| e.id == a).map(|e| &mut e.kind) {
+            text.clear();
+        }
+        assert_eq!(layers(&layout), [("Texto".to_string(), u64::from(b))]);
     }
 
     /// A page with a frame of the built-in world and a title.
