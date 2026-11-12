@@ -38313,6 +38313,35 @@ fn must_be_covered_by_says_which_polygons_it_left_out_at_a_pole() {
     }
 }
 
+/// The faces a PDF sets in outlines though fonts were asked for (#1815) are said in one notice:
+/// none, nothing said; one face, singular; more, plural; past ten, the first ten and how many more.
+#[test]
+fn a_pdf_says_which_faces_it_sets_in_outlines() {
+    let mut s = Session::new(Project::default());
+    let faces = |n: usize| -> Vec<rustgis_render::pdf::Outlined> {
+        (1..=n).map(|i| rustgis_render::pdf::Outlined { face: format!("Face {i}"), why: "its licence forbids embedding".into() }).collect()
+    };
+    let said = |s: &mut Session, n: usize| {
+        let mark = s.notice_mark();
+        crate::cmd::layout::outlined_notice(s, &faces(n));
+        s.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    assert!(said(&mut s, 0).is_empty(), "every face embedded, nothing said");
+    let lead = "The PDF sets the text of";
+    let tail = "as outlines, not as text a vector editor can edit:";
+    assert_eq!(said(&mut s, 1), [format!("{lead} 1 face {tail} Face 1 (its licence forbids embedding)")]);
+    let two = said(&mut s, 2);
+    assert_eq!(two.len(), 1, "one notice");
+    assert!(
+        two[0].starts_with(&format!("{lead} 2 faces {tail} Face 1 (")) && two[0].ends_with(", Face 2 (its licence forbids embedding)"),
+        "{two:?}"
+    );
+    let eleven = said(&mut s, 11);
+    assert_eq!(eleven.len(), 1, "one notice");
+    assert!(eleven[0].starts_with(&format!("{lead} 11 faces {tail}")), "{eleven:?}");
+    assert!(eleven[0].contains("Face 10 (") && !eleven[0].contains("Face 11") && eleven[0].ends_with(", and 1 more"), "{eleven:?}");
+}
+
 #[test]
 fn a_pdf_says_which_frames_and_pages_it_draws_as_pictures() {
     let mut s = Session::new(Project::default());
