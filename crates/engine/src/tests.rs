@@ -41699,6 +41699,10 @@ fn arrangements_are_saved_by_name() {
     assert_eq!((s.layout_favourite.clone(), r["corners"].clone()), (atlas.clone(), atlas.clone()), "{r}");
     assert!(r["warnings"][0].as_str().unwrap().contains("keeps its corners"), "{r}");
     assert!(r["saved"].get("Atlas").is_none() && s.layout_arrangements.len() == 1);
+    // Removed with another favourite given, nothing is said of keeping its corners.
+    s.run("layout.arrangement", &json!({"save": "Spare", "arrangement": "legendTop", "favourite": "Spare"})).unwrap();
+    let r = s.run("layout.arrangement", &json!({"remove": "Spare", "favourite": atlas})).unwrap();
+    assert!(r["warnings"].as_array().unwrap().is_empty() && s.layout_favourite == atlas, "{r}");
     // Saved again under a name in other capitals, it replaces it, which is said.
     let r = s.run("layout.arrangement", &json!({"save": "COPY", "arrangement": "classic"})).unwrap();
     assert_eq!((s.layout_arrangements.len(), r["saved"]["COPY"]["locator"].clone()), (1, json!("top-left")), "{r}");

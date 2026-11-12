@@ -89,12 +89,12 @@ fn saved_arrangements_are_kept_and_restored() {
     assert_eq!(said, 0, "one notice, without a count's plural");
     let said = restored.session.notices.iter().filter(|n| n.text.contains("can't use: 3")).count();
     assert_eq!(said, 1);
-    restored.run("layout.arrangement", json!({"save": "Half", "arrangement": "classic"})).unwrap();
+    restored.run("layout.arrangement", json!({"save": "Half", "arrangement": "mirrored"})).unwrap();
     let written: serde_json::Value = serde_json::from_str(&last(SAVED)).unwrap();
     // Kept as they were, a name in other capitals too; the one saved here under that very name
     // takes its place.
     assert_eq!((written["best"].clone(), written["atlas"].clone()), (atlas.clone(), half.clone()), "{written}");
-    assert_eq!(written["Half"]["locator"], "top-left", "{written}");
+    assert_eq!(written["Half"]["locator"], "top-right", "{written}");
     // Text that isn't a list of arrangements is said, and never saved over.
     let writes = saved.clone();
     let mut restored = RustGisApp::new(Session::new(Project::default())).with_services(Services {
