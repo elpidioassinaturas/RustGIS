@@ -4767,7 +4767,7 @@ fn layout_bytes_inner(
 
 /// Says which faces a PDF set in outlines though its text was to be in fonts (#1815), with why:
 /// their text is drawings, not text, in a vector editor. One notice, the faces counted.
-fn outlined_notice(s: &mut Session, outlined: &[rustgis_render::pdf::Outlined]) {
+pub(crate) fn outlined_notice(s: &mut Session, outlined: &[rustgis_render::pdf::Outlined]) {
     let n = outlined.len();
     if n == 0 {
         return;
