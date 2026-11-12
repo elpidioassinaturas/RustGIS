@@ -1025,6 +1025,10 @@ fn arrangement(s: &mut Session, p: &Value) -> CmdResult {
         Some(_) => Err(format!("{key} is {what}")),
     };
     let (remove, save) = (text("remove", "the name of a saved arrangement")?, text("save", "a name for \"arrangement\"")?);
+    // An arrangement given with nothing to save it under would do nothing.
+    if save.is_none() && p.get("arrangement").is_some_and(|v| !v.is_null()) {
+        return Err("\"arrangement\" is saved under a name given as \"save\"; the favourite is set with \"favourite\"".into());
+    }
     let mut saved = s.layout_arrangements.clone();
     let mut warnings: Vec<String> = Vec::new();
     let mut favourite = s.layout_favourite.clone();

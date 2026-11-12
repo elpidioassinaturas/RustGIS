@@ -90,7 +90,7 @@ fn saved_arrangements_are_kept_and_restored() {
     assert_eq!(said.len(), 1);
     assert_eq!(
         said[0].text,
-        "Saved arrangements of publication layouts this version can't use: 3. They are left out, and kept with the preferences."
+        "Saved arrangements of publication layouts left out: 3 (not usable by this version, a second name for one kept, or past the limit of 20). They are kept with the preferences."
     );
     restored.run("layout.arrangement", json!({"save": "Half", "arrangement": "mirrored"})).unwrap();
     let written: serde_json::Value = serde_json::from_str(&last(SAVED)).unwrap();

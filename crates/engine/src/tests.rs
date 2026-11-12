@@ -43130,6 +43130,7 @@ fn arrangements_are_saved_by_name() {
         (json!({"save": "Atlas"}), "save takes \"arrangement\""),
         (json!({"save": "Atlas", "arrangement": "tidy"}), "\"COPY\", or a corner"),
         (json!({"save": 3, "arrangement": "classic"}), "save is a name"),
+        (json!({"arrangement": "legendTop"}), "saved under a name given as \"save\""),
         (json!({"remove": "Atlas"}), "no arrangement is saved as \"Atlas\""),
         (json!({"remove": "COPY", "favourite": "COPY"}), "not \"COPY\""),
     ] {

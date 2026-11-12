@@ -1531,7 +1531,7 @@ impl RustGisApp {
                     if !unread.is_empty() {
                         self.session.notify(
                             crate::i18n::fmt(
-                                "Saved arrangements of publication layouts this version can't use: {count}. They are left out, and kept with the preferences.",
+                                "Saved arrangements of publication layouts left out: {count} (not usable by this version, a second name for one kept, or past the limit of 20). They are kept with the preferences.",
                                 &[("count", &unread.len().to_string())],
                             ),
                             false,
