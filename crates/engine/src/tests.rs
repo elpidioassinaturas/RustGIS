@@ -3117,6 +3117,130 @@ fn custom_projections_switch_keep_scale_query_and_render() {
     }
 }
 
+/// Shaded Relief's cast shadows: set, kept when left out, clamped, a new one without; saved with
+/// the project only when there are some, and drawn in an export (waited for).
+#[test]
+fn shaded_relief_keeps_its_cast_shadows() {
+    let mut s = with_raster();
+    let shadow = |s: &Session| match s.map().layers.first().and_then(|l| l.raster.as_ref()).map(|r| &r.style.renderer) {
+        Some(rustgis_map::RasterRenderer::ShadedRelief { shadow, .. }) => *shadow,
+        other => panic!("{other:?}"),
+    };
+    s.run("raster.symbology", &json!({"type": "shadedRelief"})).unwrap();
+    assert_eq!(shadow(&s), 0.0);
+    let shadows_saved = |s: &mut Session| s.project.saved_text(None).unwrap().0.matches("\"shadow\"").count();
+    let before = shadows_saved(&mut s);
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "shadow": 0.7})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": 200})).unwrap();
+    assert_eq!(shadow(&s), 0.7, "left out, kept");
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "shadow": 4})).unwrap();
+    assert_eq!(shadow(&s), 1.0);
+    assert_eq!(shadows_saved(&mut s), before + 1, "saved only when there are some");
+    assert!(crate::cmd::share::map_png(&mut s, Some(300.0), Some(200.0), None).unwrap().len() > 1000);
+    s.run("raster.symbology", &json!({"type": "stretch"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief"})).unwrap();
+    assert_eq!(shadow(&s), 0.0, "a new Shaded Relief casts none");
+}
+
+/// A map export that draws a layer without its cast shadows says so, as such (not as a tile layer
+/// that failed), in a PNG, a GeoTIFF and the app's map image alike; one with nothing missing says
+/// nothing.
+#[test]
+fn a_map_export_says_a_layer_drawn_without_its_cast_shadows() {
+    let mut s = with_raster();
+    s.run("layer.zoomTo", &json!({"layer": "scene"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "shadow": 1})).unwrap();
+    let dir = std::env::temp_dir().join(format!("rustgis-cast-notice-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let said =
+        |s: &Session| s.notices.iter().filter(|n| n.text.contains("cast shadows aren't drawn")).map(|n| n.text.clone()).collect::<Vec<_>>();
+    s.run("share.exportMap", &json!({"path": dir.join("clean.png").display().to_string(), "width": 200, "height": 150})).unwrap();
+    assert!(said(&s).is_empty(), "{:?}", said(&s));
+    // Read in place with only its overview held: no whole grid to trace.
+    let rl = s.map_mut().layers.iter_mut().find_map(|l| l.raster.as_mut()).unwrap();
+    rl.in_place = true;
+    let mut r = (**rl.data.as_ref().unwrap()).clone();
+    r.overview = Some((800, 600));
+    rl.data = Some(std::sync::Arc::new(r));
+    for name in ["shadowless.png", "shadowless.tif"] {
+        let before = said(&s).len();
+        s.run("share.exportMap", &json!({"path": dir.join(name).display().to_string(), "width": 200, "height": 150})).unwrap();
+        let now = said(&s);
+        assert_eq!(now.len(), before + 1, "{name}: {now:?}");
+        let last = now.last().unwrap();
+        assert!(last.contains("scene: its cast shadows aren't drawn") && last.contains("read in place"), "{name}: {last}");
+        assert!(!last.contains("tile layer"), "{name}: {last}");
+    }
+    // The app's Capture To Clipboard and Export Map download (`map_png`) say it too.
+    let before = said(&s).len();
+    crate::cmd::share::map_png(&mut s, Some(200.0), Some(150.0), None).unwrap();
+    assert_eq!(said(&s).len(), before + 1, "{:?}", said(&s));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Whatever draws the map for someone says a layer drawn without its cast shadows, named by the
+/// layer: the map's image, PDF and web map, and the exports of a layout, a presentation and a
+/// report showing it. Drawn on the interface's thread, which doesn't wait for them, shadows still
+/// being worked out are said too.
+#[test]
+fn every_drawing_of_the_map_says_a_layer_drawn_without_its_cast_shadows() {
+    let mut s = with_raster();
+    s.run("layer.zoomTo", &json!({"layer": "scene"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "shadow": 1})).unwrap();
+    s.run("layout.new", &json!({"page": "a5", "template": "map"})).unwrap();
+    s.run("presentation.new", &json!({"name": "Relief"})).unwrap();
+    // First, as a PNG of the presentation is its first page.
+    s.run("presentation.mapPage", &json!({"title": "Relief", "at": 0})).unwrap();
+    assert_eq!(s.project.presentations[0].pages[0].kind.code(), "map");
+    s.run("report.new", &json!({"layer": "Countries", "name": "Relief", "fields": ["name"], "where": "name LIKE 'F%'"})).unwrap();
+    s.run("report.newTemplate", &json!({"report": "Relief"})).unwrap();
+    // Read in place with only its overview held: no whole grid to trace.
+    let rl = s.map_mut().layers.iter_mut().find_map(|l| l.raster.as_mut()).unwrap();
+    rl.in_place = true;
+    let mut r = (**rl.data.as_ref().unwrap()).clone();
+    r.overview = Some((800, 600));
+    rl.data = Some(std::sync::Arc::new(r));
+    let said = |s: &Session| s.notices.iter().filter(|n| n.text.contains("scene: its cast shadows aren't drawn")).count();
+    let dir = std::env::temp_dir().join(format!("rustgis-cast-every-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |name: &str| dir.join(name).display().to_string();
+    let draws: Vec<(&str, Box<dyn Fn(&mut Session)>)> = vec![
+        ("map image", Box::new(|s| drop(crate::cmd::share::map_png(s, Some(200.0), Some(150.0), None).unwrap()))),
+        ("map PDF", Box::new(|s| drop(crate::cmd::share::map_pdf(s, 72.0).unwrap()))),
+        (
+            "map export",
+            Box::new(|s| drop(s.run("share.exportMap", &json!({"path": path("map.png"), "width": 200, "height": 150})).unwrap())),
+        ),
+        ("web map", Box::new(|s| drop(crate::cmd::sharing::share_bytes(s, "webMap", &json!({})).unwrap()))),
+        ("layout PNG", Box::new(|s| drop(s.run("layout.export", &json!({"layout": 0, "path": path("page.png"), "dpi": 36})).unwrap()))),
+        ("layout PDF", Box::new(|s| drop(s.run("layout.export", &json!({"layout": 0, "path": path("page.pdf"), "dpi": 36})).unwrap()))),
+        ("presentation PDF", Box::new(|s| drop(s.run("presentation.export", &json!({"path": path("deck.pdf"), "dpi": 36})).unwrap()))),
+        ("presentation PNG", Box::new(|s| drop(s.run("presentation.export", &json!({"path": path("deck.png"), "dpi": 36})).unwrap()))),
+        (
+            "report PDF",
+            Box::new(|s| drop(s.run("report.export", &json!({"report": "Relief", "path": path("report.pdf"), "dpi": 36})).unwrap())),
+        ),
+    ];
+    for (what, draw) in &draws {
+        // A notice repeating the last one is kept once (two presentation exports in a row).
+        s.notices.clear();
+        draw(&mut s);
+        assert!(said(&s) > 0, "{what}: {:?}", s.notices.iter().map(|n| &n.text).collect::<Vec<_>>());
+    }
+    std::fs::remove_dir_all(&dir).ok();
+    // On the interface's thread a new sun's shadows aren't waited for: the image says so.
+    let mut s = with_raster();
+    s.run("layer.zoomTo", &json!({"layer": "scene"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": 123, "shadow": 1})).unwrap();
+    crate::render::on_the_interface_thread();
+    crate::cmd::share::map_png(&mut s, Some(200.0), Some(150.0), None).unwrap();
+    assert!(
+        s.notices.iter().any(|n| n.text.contains("still being worked out")),
+        "{:?}",
+        s.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn raster_layers_open_style_identify_and_round_trip() {
     let mut s = with_raster();
@@ -27159,7 +27283,7 @@ fn layout_shapes_are_added_restyled_and_saved() {
     s.run("layout.update", &json!({"element": line, "dir": "rising", "color": "#123456"})).unwrap();
     let l = &s.project.layouts[li];
     match &l.element(circle).unwrap().kind {
-        ElementKind::Ellipse { fill, outline, width } => {
+        ElementKind::Ellipse { fill, outline, width, .. } => {
             assert_eq!((fill.hex(), outline.hex(), *width), ("#00FF00".into(), "#0000FF".into(), 0.0))
         }
         k => panic!("{k:?}"),
@@ -28142,6 +28266,8 @@ fn copied_history_replays_public_structured_parameters_without_changing_results(
 #[path = "../../../tests/support/ogc_server.rs"]
 mod ogc_server;
 
+mod ogc_dataset;
+
 #[path = "../../../tests/support/esripbf.rs"]
 mod esripbf_answers;
 
@@ -28237,7 +28363,7 @@ fn ogc_landing_discovery_is_bounded_and_checks_addresses() {
     }
     let error = session.run("service.layers", &json!({"url":root,"text":link(&format!("{root}?f=json"))})).unwrap_err();
     assert!(error.contains("loop"), "{error}");
-    let docs: Vec<Value> = (1..=3)
+    let docs: Vec<Value> = (1..=31)
         .map(|n| {
             json!({
                 "url":format!("https://example.org/ogc/{n}"),
@@ -28246,7 +28372,7 @@ fn ogc_landing_discovery_is_bounded_and_checks_addresses() {
         })
         .collect();
     let error = session.run("service.layers", &json!({"url":root,"text":link("https://example.org/ogc/1"),"documents":docs})).unwrap_err();
-    assert!(error.contains("four documents"), "{error}");
+    assert!(error.contains("32 documents"), "{error}");
     let docs = json!([
         {"url":"https://example.org/ogc/a","text":link("https://example.org/ogc/b")},
         {"url":"https://example.org/ogc/b","text":link("https://example.org/ogc/a")}
@@ -31196,6 +31322,60 @@ fn text_elements_take_italic_alignment_and_spacing() {
         assert!(s.run("layout.addElement", &add).is_err());
     }
     assert_eq!(style(&s, ocean), (false, TextAlign::Center, MAX_LETTER_SPACING));
+}
+
+/// Lines, arrows and the outlines of rectangles, ellipses and circles take a `dash` (#1763), read
+/// as a line layer's stroke reads one: kept through a save, `[]` or `null` solid again, refused
+/// when it isn't a pattern or for an element that draws no line, with nothing changed.
+#[test]
+fn lines_and_outlines_take_a_dash() {
+    use rustgis_map::layout::ElementKind;
+    let mut s = Session::new(sample::world_project());
+    s.run("layout.new", &json!({"name": "Dashes"})).unwrap();
+    let dash = |s: &Session, id: u32| match s.project.layouts[0].element(id).map(|e| &e.kind) {
+        Some(ElementKind::Line { dash, .. } | ElementKind::Rectangle { dash, .. } | ElementKind::Ellipse { dash, .. }) => {
+            dash.map(|d| d.steps().to_vec())
+        }
+        _ => panic!("a line or a shape"),
+    };
+    let add = |s: &mut Session, p: Value| s.run("layout.addElement", &p).unwrap()["element"].as_u64().unwrap() as u32;
+    let arrow = add(&mut s, json!({"kind": "arrow", "dash": [4, 2]}));
+    let study = add(&mut s, json!({"kind": "rectangle", "x": 20, "y": 20, "w": 40, "h": 30, "dash": [3]}));
+    let circle = add(&mut s, json!({"kind": "circle", "dash": [1, 2]}));
+    let plain = add(&mut s, json!({"kind": "line"}));
+    assert_eq!(
+        (dash(&s, arrow), dash(&s, study), dash(&s, circle), dash(&s, plain)),
+        (Some(vec![4.0, 2.0]), Some(vec![3.0]), Some(vec![1.0, 2.0]), None)
+    );
+    let saved = serde_json::to_string(&s.project.layouts[0]).unwrap();
+    let back: rustgis_map::layout::Layout = serde_json::from_str(&saved).unwrap();
+    assert_eq!(back, s.project.layouts[0]);
+    // Changed, made solid with [] or null, and left alone by an update that doesn't give it.
+    s.run("layout.update", &json!({"element": plain, "dash": [4, 2, 1, 2]})).unwrap();
+    assert_eq!(dash(&s, plain), Some(vec![4.0, 2.0, 1.0, 2.0]));
+    s.run("layout.update", &json!({"element": plain, "width": 3})).unwrap();
+    assert_eq!(dash(&s, plain), Some(vec![4.0, 2.0, 1.0, 2.0]));
+    s.run("layout.update", &json!({"element": plain, "dash": []})).unwrap();
+    s.run("layout.update", &json!({"element": circle, "dash": null})).unwrap();
+    assert_eq!((dash(&s, plain), dash(&s, circle)), (None, None));
+    // Not a pattern: refused, said, nothing changed.
+    for bad in [json!("4 2"), json!(["a"]), json!([-1]), json!([0, 0]), json!([1, 1, 1, 1, 1, 1, 1, 1, 1]), json!([501])] {
+        let err = s.run("layout.update", &json!({"element": study, "dash": bad, "width": 5})).unwrap_err();
+        assert!(err.starts_with("dash is a list"), "{bad}: {err}");
+        assert!(s.run("layout.addElement", &json!({"kind": "line", "dash": bad})).is_err());
+    }
+    assert_eq!(dash(&s, study), Some(vec![3.0]));
+    // Only lines and shapes draw one.
+    let text = add(&mut s, json!({"kind": "text", "text": "Área de estudo"}));
+    assert!(s.run("layout.update", &json!({"element": text, "dash": [4, 2]})).unwrap_err().contains("dash"));
+    assert!(s.run("layout.addElement", &json!({"kind": "northArrow", "dash": [4, 2]})).unwrap_err().contains("dash"));
+    // Solid asked for with null is refused there too, not ignored.
+    assert!(s.run("layout.update", &json!({"element": text, "dash": null})).unwrap_err().contains("dash"));
+    assert!(s.run("layout.addElement", &json!({"kind": "text", "dash": null})).unwrap_err().contains("dash"));
+    // Locked, even a solid one asked for with null is refused.
+    s.run("layout.update", &json!({"element": arrow, "locked": true})).unwrap();
+    assert!(s.run("layout.update", &json!({"element": arrow, "dash": null})).unwrap_err().contains("locked"));
+    assert_eq!(dash(&s, arrow), Some(vec![4.0, 2.0]));
 }
 
 /// Text elements turn by `rotation` (#1763): in degrees clockwise, kept within -180 to 180, not
@@ -41098,6 +41278,15 @@ fn long_commands_stop_when_cancelled_while_they_run() {
         let run = crate::cmd::exports::export_start(&mut s, command, p).unwrap_or_else(|e| panic!("{command}: {e}"));
         let control = Control::cancelled_once_started();
         note(command, run.run(&control).map(|_| ()), &control);
+    }
+
+    // The Add Service dialog replays supplied metadata off the desktop frame too.
+    let params = json!({"url":"https://maps.example.org/dataset","type":"ogcapi","text":"{\"collections\":[]}"});
+    for command in ["service.layers", "service.add"] {
+        let read = crate::cmd::reads::read_ahead(&mut s, command, &params).unwrap();
+        assert!(read.reads());
+        let control = Control::cancelled_once_started();
+        note(command, read.run(&control).map(|_| ()), &control);
     }
 
     // The tools whose work grows past a second or two on real data: buffers, overlays, joins,
