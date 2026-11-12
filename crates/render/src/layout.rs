@@ -1498,8 +1498,10 @@ pub fn scale_bar_width_pt(ground_per_pt: f64, width_pt: f64, bar: (ScaleUnits, u
     let len = plan.total * plan.unit_m / ground_per_pt;
     let last = bar_label(plan.total, divisions, divisions, plan.abbr, comma);
     let half = f64::from(text::measure(&last, BAR_LABEL_PT, false)) / 2.0;
-    // A hair over the share the bar takes, so a rounding doesn't pick the next shorter length.
-    let w = (len / BAR_SHARE * (1.0 + 1e-6)).max(f64::from(BAR_INSET) + len + half + pad_pt);
+    // A little over the share the bar takes, so the f32 rectangle an export rebuilds the width
+    // from (its error growing with the element's place on the page) doesn't pick the next shorter
+    // length: a ten-thousandth, 0.003 mm on a 30 mm box.
+    let w = (len / BAR_SHARE * (1.0 + 1e-4)).max(f64::from(BAR_INSET) + len + half + pad_pt);
     Some(if w < width_pt && bar_plan(ground_per_pt, w, units) == Some(plan) { w } else { width_pt })
 }
 
@@ -4599,6 +4601,26 @@ Elaboração: RustGIS",
 
     /// The narrowest element for a scale bar draws the very bar a wider one does, labels and all,
     /// within itself (#1379).
+    /// The narrowest element keeps its bar where an export rebuilds it from an f32 rectangle: near
+    /// an A2 sheet's right edge, at 300 and 600 dpi (#1379).
+    #[test]
+    fn a_scale_bar_keeps_its_bar_near_the_right_edge_at_print_density() {
+        let pt_per_mm = 72.0 / 25.4;
+        for i in 0..400 {
+            let ground = 10f64.powf(-1.0 + 4.0 * f64::from(i) / 400.0);
+            for widest_mm in [25.0, 63.0, 126.0] {
+                let w_pt = scale_bar_width_pt(ground, widest_mm * pt_per_mm, (ScaleUnits::Auto, 4), false, 4.0).unwrap();
+                let plan = bar_plan(ground, w_pt, ScaleUnits::Auto);
+                for (x_mm, dpi) in [(380.0, 300.0), (560.0, 300.0), (380.0, 600.0), (560.0, 600.0)] {
+                    let (k, ppp) = (dpi / 25.4, dpi / 72.0);
+                    let r = Rect::from_xywh((x_mm * k) as f32, 0.0, (w_pt / pt_per_mm * k) as f32, 10.0).unwrap();
+                    let drawn = bar_plan(ground, f64::from(r.width()) / ppp, ScaleUnits::Auto);
+                    assert_eq!(drawn, plan, "{ground} m a point, {widest_mm} mm at most, x {x_mm} mm, {dpi} dpi");
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_scale_bar_draws_the_same_in_its_narrowest_element() {
         let draw = |ground: f64, width: f32| {

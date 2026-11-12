@@ -1836,13 +1836,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         _ => None,
     };
     let scale_box = |ground_per_pt: f64, scale: f64| {
-        let (widest, pt_per_mm) = ((fw * 0.3).max(25.0), rustgis_map::layout::PT_PER_MM);
-        let bar_w = bar_kind
-            .and_then(|kind| crate::render::layout::scale_bar_width_pt(ground_per_pt, widest * pt_per_mm, kind, comma, 1.5 * pt_per_mm))
-            .map_or(widest, |w| w / pt_per_mm);
-        let ratio = crate::render::layout::scale_ratio_text(scale, comma);
-        let text_w = crate::render::report::width_mm(&ratio, small_pt as f32, false) + 2.0;
-        (bar_w.max(text_w).min(widest), sh + nh)
+        let w = bar_kind.map_or((fw * 0.3).max(25.0), |bar| scale_box_width(ground_per_pt, scale, fw, bar, comma, small_pt));
+        (w, sh + nh)
     };
     let ground_per_pt = |s: &Session, center: Coord, scale: f64| {
         s.map().ground_res_at(&rustgis_map::layout::frame_camera(s.map(), center, scale, 0.0, 0.0))
@@ -1867,8 +1862,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     if content_h > 0.0 && !legend_in_column {
         surrounds.push((Surround::Legend, (content_w + 2.0 * pad).min(fw * 0.45), (content_h + 2.0 * pad).min(fh * 0.6)));
     }
-    let (sw, _) = scale_box(ground_per_pt(s, center, scale), scale);
-    surrounds.push((Surround::Scale, sw, sh + nh));
+    // Its width is set once the frame's centre and scale are settled, below; nothing reads it before.
+    surrounds.push((Surround::Scale, 0.0, sh + nh));
     // A corner's rectangle for a surround `w` × `h`.
     let at = |corner: usize, w: f64, h: f64| {
         let x = if corner.is_multiple_of(2) { fx + left } else { fx + fw - right - w };
@@ -2084,8 +2079,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     let Some(n) = need(room) else { continue };
                     // Under a veil the whole group has to fit, not the legend alone, the scale bar's box
                     // as drawn there.
-                    let bar_box = scale_box(ground_per_pt(s, there, tried), tried);
-                    let Some(n) = (if veil { grouped(clip, n, here, bar_box).map(|(i, _)| i) } else { Some(n) }) else { continue };
+                    let in_group = |s: &Session| grouped(clip, n, here, scale_box(ground_per_pt(s, there, tried), tried));
+                    let Some(n) = (if veil { in_group(s).map(|(i, _)| i) } else { Some(n) }) else { continue };
                     if found.is_none_or(|(fewest, most)| n < fewest || (n == fewest && room.0 * room.1 > most)) {
                         found = Some((n, room.0 * room.1));
                         (center, scale, coverage, map_shift) = (there, tried, Some(moved), (dx, dy));
@@ -3892,10 +3887,61 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
     if let Some(text) = p.get("grid").and_then(|grid| grid.get("crs")).and_then(Value::as_str) {
         super::say_crs_note(s, text);
     }
+    // A frame drawn at another scale or width: a publication's scale bar box measured again.
+    let frame = s.project.layouts.get(li).and_then(|l| l.element(id)).map(|e| &e.kind);
+    if matches!(frame, Some(ElementKind::MapFrame { .. })) && ["scale", "w"].iter().any(|k| p.get(*k).is_some_and(|v| !v.is_null())) {
+        refit_scale_box(s, li, id);
+    }
     if let Some(w) = font_told {
         return Ok(json!({"warning": w}));
     }
     Ok(Value::Null)
+}
+
+/// The width (mm) of a publication's scale bar box (#1379), for a frame `frame_w` mm wide at
+/// `scale` and `ground_per_pt` ground metres a point: the bar a box 30 % of the frame's width (25
+/// mm at least) would draw sets its length and divisions, and the box is the narrowest that draws
+/// that same bar (at least its length over the 85 % of a box the renderer gives a bar), its last
+/// label included, and holds the scale written under it in `text_pt`.
+fn scale_box_width(ground_per_pt: f64, scale: f64, frame_w: f64, bar: (ScaleUnits, usize), comma: bool, text_pt: f64) -> f64 {
+    let (widest, pt_per_mm) = ((frame_w * 0.3).max(25.0), rustgis_map::layout::PT_PER_MM);
+    let bar_w = crate::render::layout::scale_bar_width_pt(ground_per_pt, widest * pt_per_mm, bar, comma, 1.5 * pt_per_mm)
+        .map_or(widest, |w| w / pt_per_mm);
+    let ratio = crate::render::layout::scale_ratio_text(scale, comma);
+    let text_w = crate::render::report::width_mm(&ratio, text_pt as f32, false) + 2.0;
+    bar_w.max(text_w).min(widest)
+}
+
+/// A publication's scale bar box measured again after its frame's scale or width changed (#1379):
+/// the "Scale Box", the "Scale Bar" of `frame` and the "Scale" under it, as a publication lays them
+/// out (one place, one width, none locked), take the width that bar and scale now need, kept on the
+/// side of the frame they are nearer. A layout without them, or with them moved apart, is left as
+/// it is.
+fn refit_scale_box(s: &mut Session, li: usize, frame: u32) {
+    let Some(l) = s.project.layouts.get(li) else { return };
+    let Some(fr) = l.element(frame) else { return };
+    let ElementKind::MapFrame { map, center, scale, .. } = &fr.kind else { return };
+    let Some(m) = s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map)) else { return };
+    let ground_per_pt = m.ground_res_at(&rustgis_map::layout::frame_camera(m, *center, *scale, 0.0, 0.0));
+    let named = |name: &str| l.elements.iter().find(|e| e.name == name);
+    let (Some(boxed), Some(bar), Some(text)) = (named("Scale Box"), named("Scale Bar"), named("Scale")) else { return };
+    let (ElementKind::ScaleBar { frame: of, units, divisions, .. }, ElementKind::Text { size, .. }) = (&bar.kind, &text.kind) else {
+        return;
+    };
+    let together = [bar, text].iter().all(|e| (e.x - boxed.x).abs() < 1e-6 && (e.w - boxed.w).abs() < 1e-6 && !e.locked);
+    if *of != frame || !together || boxed.locked {
+        return;
+    }
+    let w = scale_box_width(ground_per_pt, *scale, fr.w, (*units, *divisions), l.decimal_comma, *size);
+    let x = if boxed.x + boxed.w / 2.0 > fr.x + fr.w / 2.0 { boxed.x + boxed.w - w } else { boxed.x };
+    let ids = [boxed.id, bar.id, text.id];
+    if let Some(l) = s.project.layouts.get_mut(li) {
+        for id in ids {
+            if let Some(e) = l.element_mut(id) {
+                (e.x, e.w) = (x, w);
+            }
+        }
+    }
 }
 
 /// Points a frame at an extent.
@@ -3953,6 +3999,7 @@ fn frame_zoom(s: &mut Session, p: &Value) -> CmdResult {
         }
         o => return Err(format!("unknown zoom '{o}'")),
     }
+    refit_scale_box(s, li, frame);
     Ok(json!({"element": frame}))
 }
 

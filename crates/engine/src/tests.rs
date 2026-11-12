@@ -7094,6 +7094,19 @@ fn publication_layouts_fit_their_pages() {
     }
     assert_eq!(s.project.layouts.len(), profiles.len(), "a layout each, the earlier ones untouched");
     assert!(narrower > 0, "no profile's scale bar box is narrower than 30 % of its frame");
+    // The frame drawn at another scale: the box is measured again, its scale written in it and
+    // the box, bar and scale one width (#1379).
+    let li = s.project.layouts.len() - 1;
+    let frame = s.project.layouts[li].elements.iter().find(|e| e.kind.code() == "mapFrame").map(|e| e.id).unwrap();
+    for scale in [40_000_000.0, 1_500_000.0] {
+        s.run("layout.update", &json!({"layout": li, "element": frame, "scale": scale})).unwrap();
+        let l = &s.project.layouts[li];
+        let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap();
+        let (b, bar, text) = (named("Scale Box"), named("Scale Bar"), named("Scale"));
+        let ElementKind::Text { size, .. } = &text.kind else { panic!() };
+        let written = crate::render::report::width_mm(&rustgis_map::graphics::scale_ratio(scale), *size as f32, false);
+        assert!(written < b.w && bar.w == b.w && text.w == b.w && bar.x == b.x, "1:{scale}: {written} mm of text in a {} mm box", b.w);
+    }
     // A long title wraps within the frame, and pushes the map down; the result names every
     // element for layout.update.
     let r = s.run("layout.publication", &json!({"extent": piaui, "title": long})).unwrap();
