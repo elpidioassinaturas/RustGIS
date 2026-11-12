@@ -1963,10 +1963,13 @@ impl RasterLayer {
             RasterRenderer::Colormap => {
                 let ColorHint::Palette(p) = &r.color else { return Vec::new() };
                 let cats = r.bands.first().and_then(|b| b.stats.categories.clone()).unwrap_or_default();
-                // A negative value has no entry in the table, and the map draws none for it.
+                // A negative value has no entry in the table, and the map draws none for it, nor
+                // for an entry that is fully transparent (a background value).
                 cats.iter()
                     .filter(|v| **v >= 0.0 && !mask.hides(**v as f32))
-                    .filter_map(|v| p.get(*v as usize).map(|c| RasterLegend::Class { color: Rgba(*c), label: class_label(0, *v) }))
+                    .filter_map(|v| {
+                        p.get(*v as usize).filter(|c| c[3] > 0).map(|c| RasterLegend::Class { color: Rgba(*c), label: class_label(0, *v) })
+                    })
                     .collect()
             }
         }
@@ -2058,7 +2061,7 @@ impl RasterLayer {
                     (ColorHint::Palette(p), Some(left)) if !own => {
                         let label = |v: f64| r.bands.first().and_then(|b| b.class_name(v)).map_or_else(|| fmt_num(v), str::to_owned);
                         let shown = left.iter().filter(|v| **v >= 0.0 && !self.style.mask.hides(**v as f32));
-                        Some(shown.filter_map(|v| p.get(*v as usize).map(|c| (Rgba(*c), label(*v)))).collect())
+                        Some(shown.filter_map(|v| p.get(*v as usize).filter(|c| c[3] > 0).map(|c| (Rgba(*c), label(*v)))).collect())
                     }
                     _ => Some(classes().collect()),
                 }
@@ -2292,6 +2295,23 @@ mod tests {
         rl.style.renderer = RasterRenderer::Colormap;
         let labels: Vec<String> = rl.legend_classes(false).unwrap().into_iter().map(|(_, l)| l).collect();
         assert_eq!(labels, ["1", "2"]);
+        assert_eq!(rl.legend().len(), 2, "the Layers pane alike");
+    }
+
+    /// A fully transparent entry of a colour table (a background value) draws nothing on the map:
+    /// neither the Layers pane nor a legend lists it, as a colorbar leaves it out (#1679).
+    #[test]
+    fn a_colour_table_lists_no_transparent_entry() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 0.01, pixel_height: -0.01 };
+        let mut palette = vec![[0, 0, 0, 0]; 256];
+        palette[1] = [200, 0, 0, 255];
+        palette[2] = [0, 200, 0, 255];
+        let values = vec![0.0, 1.0, 2.0];
+        let r = Raster::new("clip", 3, 1, vec![values], gt, Crs::LonLat, None, ColorHint::Palette(palette), "UInt8").unwrap();
+        let mut rl = RasterLayer::from_path(r, "clip.tif");
+        rl.style.renderer = RasterRenderer::Colormap;
+        let labels: Vec<String> = rl.legend_classes(false).unwrap().into_iter().map(|(_, l)| l).collect();
+        assert_eq!(labels, ["1", "2"], "0 is transparent: not a class the map draws");
         assert_eq!(rl.legend().len(), 2, "the Layers pane alike");
     }
 
