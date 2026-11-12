@@ -8108,6 +8108,45 @@ fn a_publication_keys_the_raster_under_an_rgb_and_says_an_unlisted_colour_table(
     assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("through an overview")), "left out");
 }
 
+/// A raster drawn by classes under a mask, with more cells than its masked statistics read: the
+/// publication and a legend say its classes come from a sample; every class asked for (nothing
+/// to sample) or no mask (the band's own statistics, read whole) says nothing (#1679).
+#[test]
+fn a_masked_raster_too_large_to_read_whole_says_its_classes_are_sampled() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+    use rustgis_map::raster::{RasterMask, RasterRenderer};
+    // 2049 × 2049 cells, over the 4,194,304 its masked statistics read whole.
+    let n = 2049usize;
+    let z: Vec<f32> = (0..n * n).map(|i| (1 + i * 4 / (n * n)) as f32).collect();
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 10.0, pixel_width: 10.0 / n as f64, pixel_height: -10.0 / n as f64 };
+    let r = Raster::new("lc", n as u32, n as u32, vec![z], gt, Crs::LonLat, None, ColorHint::Gray, "UInt8").unwrap();
+    let mut rl = rustgis_map::RasterLayer::from_path(r, "lc.tif");
+    let values = (1..=4u8).map(|v| (f64::from(v), rustgis_map::Rgba::rgb(v * 50, 120, 200))).collect();
+    rl.style.renderer = RasterRenderer::UniqueValues { band: 0, ramp: rustgis_map::Ramp::Harbour, values };
+    rl.style.mask = RasterMask { values: vec![1.0], ..RasterMask::default() };
+    let mut s = Session::new(Project::default());
+    crate::cmd::raster::add_raster(&mut s, "Classes", rl).unwrap();
+    let sampled = "1 raster(s) drawn by classes under a mask have more cells than their masked statistics read, so the legend lists the classes of a sample and may miss a rare one the map draws: Classes";
+    let said = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("classes of a sample")).map(|n| n.text.clone()).collect()
+    };
+    let p = json!({"profile": "a4-portrait", "extent": [0, 0, 10, 10], "author": "", "locator": "none"});
+    let r = s.run("layout.publication", &p).unwrap();
+    let warnings: Vec<String> = serde_json::from_value(r["warnings"].clone()).unwrap();
+    assert_eq!(warnings.iter().filter(|w| w.contains("classes of a sample")).collect::<Vec<_>>(), [sampled], "{r}");
+    let mark = s.notice_mark();
+    let id = s.run("layout.addElement", &json!({"kind": "legend"})).unwrap()["element"].as_u64().unwrap();
+    assert_eq!(said(&s, mark), [sampled]);
+    // Every class asked for: the renderer's classes, not a sample's.
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "allClasses": true})).unwrap();
+    assert!(said(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
+    // No mask: the band's own statistics, read whole.
+    s.map_mut().layers[0].raster.as_mut().unwrap().style.mask = RasterMask::default();
+    let r = s.run("layout.publication", &p).unwrap();
+    assert!(!r["warnings"].to_string().contains("classes of a sample"), "{r}");
+}
+
 /// A land cover with more classes than its legend's box holds: the publication says it leaves the
 /// last out, and so does a legend added in a small box; five classes fit, and nothing is said
 /// (#1679).
