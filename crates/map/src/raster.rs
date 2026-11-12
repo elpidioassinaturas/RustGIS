@@ -732,6 +732,14 @@ impl RasterLayer {
         matches!(self.style.renderer, RasterRenderer::ShadedRelief { shadow, .. } if shadow > 0.0)
     }
 
+    /// How many wait for its cast shadows now (exports), its copies' too: for tests of what an
+    /// export waits for.
+    #[doc(hidden)]
+    pub fn cast_shadow_waiters(&self) -> usize {
+        let Ok(jobs) = self.cast.0.lock() else { return 0 };
+        jobs.iter().map(|j| j.work.waiting.load(std::sync::atomic::Ordering::SeqCst)).sum()
+    }
+
     /// The light its cast shadows leave on each cell (see [`crate::shadow::light`]), when it is
     /// drawn as Shaded Relief with shadows. Worked out once per pixels, band, sun, Z factor and
     /// mask and kept: each owner's latest, and a few of suns left, for going back.

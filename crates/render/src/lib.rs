@@ -8691,14 +8691,17 @@ mod tests {
         // Drawn only zoomed out past a scale between the centre's and the far band's.
         l.max_scale = Some((centre + farthest) / 2.0);
         // Its work held before it traces: an export that waits for it can't end until it is let
-        // go; one that doesn't ends at once.
+        // go, and says it waits (a copy of the layer shares its grids); one that doesn't ends.
+        let probe = m.layer(id).and_then(|l| l.raster.clone()).unwrap();
         let hold = rustgis_map::raster::hold_cast_shadows();
         let export = std::thread::spawn(move || {
             render_complete(&mut m, &view).unwrap();
             m
         });
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let waited = !export.is_finished();
+        while probe.cast_shadow_waiters() == 0 && !export.is_finished() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let waited = probe.cast_shadow_waiters() > 0;
         drop(hold);
         let m = export.join().unwrap();
         assert!(waited, "the export waited for the far band's cast shadows");
