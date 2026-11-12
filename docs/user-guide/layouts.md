@@ -402,9 +402,12 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   in the browser) is drawn as a picture instead, and the export says which.
   Its text is set in the fonts it is drawn in, each embedded as a subset of its glyphs, so a vector
   editor that reads embedded fonts (VectorCraft, where it was checked) opens it as text that can be
-  edited; it can be searched and copied in any PDF reader. A face whose licence forbids embedding
-  or subsetting, one drawn at another weight than its variable font file's default, or one whose
-  file can't be read is set as its letters' outlines instead, and the export names it with why.
+  edited; it can be searched and copied in any PDF reader. A face is set as its letters' outlines
+  instead, and the export names it with why, when its licence forbids embedding or subsetting or
+  allows embedding bitmaps only; when it is drawn at another weight or width than its variable font
+  file's default; when its file doesn't hold it as drawn; when its file can't be subset (a damaged
+  file, or a CFF2 variable font); when its subset would pass 8 MB; or when the document's
+  embedded faces would pass 32 MB.
   `"pdf": {"text": "outlines"}` on `layout.export` sets all the text as outlines, as a print shop
   asking for outlined type wants.
   Its page has layers (PDF optional content groups), which a vector editor that reads them opens
