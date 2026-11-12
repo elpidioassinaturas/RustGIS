@@ -369,6 +369,19 @@ pub fn info(url: &str) -> Result<Option<Arc<Info>>, String> {
     Ok(None)
 }
 
+/// A file's info if its header is already in, without asking for it (a layer the map doesn't
+/// draw starts no read): what has landed, for what is said once it has. `None` while it is being
+/// read, after a failed read, or where the address may not be read now (a login that ended).
+pub fn info_landed(url: &str) -> Option<Arc<Info>> {
+    crate::cache::check_still(&crate::cache::current_still()).ok()?;
+    crate::logins::check(url).ok()?;
+    let url = split(url).0;
+    match infos().lock().unwrap_or_else(|e| e.into_inner()).get(url) {
+        Some(State::Ready(info)) => Some(info.clone()),
+        _ => None,
+    }
+}
+
 /// Shares parsed headers and loading waiters, retaining retry delays only for resource failures.
 fn with_info(url: &str, then: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>) {
     let then = caller_callback(then);

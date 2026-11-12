@@ -2017,8 +2017,9 @@ impl Session {
     /// read in place land later: in the browser, a project, an import): what the file's header
     /// left out (`Raster::lost`: a colour table missing or short, GDAL metadata that doesn't
     /// decode), an overview statistics and tools read, a layer read in place that couldn't be
-    /// read, and why. Once for each layer's pixels or failure, one notice of each kind; the app
-    /// calls it each frame.
+    /// read, and why; and what the header of a cloud-optimised GeoTIFF drawn as tiles leaves out,
+    /// once its header lands. Once for each layer's pixels, failure or header, one notice of each
+    /// kind; the app calls it each frame.
     pub fn notice_landed_rasters(&mut self) {
         // Streamed vector windows land after project opening too. Check each installed read
         // once, keeping the same counted notice channel as retained resident expressions.
@@ -2050,6 +2051,17 @@ impl Session {
                 if let Some(what) = in_place.then(|| in_place_overview(&d)).flatten() {
                     held.push((l.name.clone(), what));
                 }
+            }
+        }
+        // Cloud-optimised GeoTIFFs drawn as tiles (a dated series, a data cube's file, AlphaEarth's
+        // embeddings, `map.addTiles` with kind `cog`): what each header leaves out, once a layer,
+        // when it lands (asked for by the map drawing it, or by adding it); a reopened project
+        // says it again.
+        for m in &mut self.project.maps {
+            for t in m.tiles.iter_mut().filter(|t| t.kind == rustgis_map::TileKind::Cog && !t.header_said) {
+                let Some(info) = render::rustgis_tiles::cog::info_landed(&t.url) else { continue };
+                t.header_said = true;
+                lost.extend(cmd::layer::tile_header_losses(&info).into_iter().map(|what| (t.name.clone(), what)));
             }
         }
         // What a header left out, as adding the layer says it (one notice a kind, with counts).

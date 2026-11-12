@@ -23206,6 +23206,108 @@ fn a_tile_layer_says_its_wavelengths_need_a_window() {
     );
 }
 
+/// A cloud-optimised GeoTIFF drawn as tiles (a data cube's file) added before its header is in
+/// (as the browser adds it: nothing waits) says what its header leaves out once it lands: once,
+/// however often asked, and once more when its project opens again. A clean file says nothing.
+#[test]
+fn a_tile_cog_added_before_its_header_says_its_losses_once_when_it_lands() {
+    use crate::render::rustgis_tiles::{cache, cog};
+    use rustgis_data::raster::cog::{Example, example_with};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    let lossy = example_with(&Example { size: 512, tile: 256, classes: true, lossy: true, ..Example::default() });
+    let clean = rustgis_data::raster::cog::example(512, 256);
+    let losses = ["its colour table has 384 entries", "1 CLASS_ item(s)", "without its band names, class names or wavelengths"];
+    for (file, want) in [(lossy, 1), (clean, 0)] {
+        let gate = std::sync::Arc::new(AtomicBool::new(false));
+        let (base, _) = serve_gated(file, true, Some(gate.clone()));
+        let url = format!("{base}/cube-2020.tif");
+        let mut s = Session::new(Project::default());
+        s.in_place_wait = false;
+        crate::cmd::layer::add_cog(&mut s, &json!({"name": "Cube", "cube": true}), &url, false).unwrap();
+        assert_eq!(s.map().tiles.len(), 1, "a data cube's file is a tile layer");
+        let about = |s: &Session| s.notices.iter().filter(|n| n.text.starts_with("Cube: ")).map(|n| n.text.clone()).collect::<Vec<_>>();
+        let said = |s: &Session, what: &str| about(s).iter().filter(|t| t.contains(what)).count();
+        s.notice_landed_rasters();
+        assert!(about(&s).is_empty(), "said before its header is in: {:?}", about(&s));
+        // Its header lands (asked for as it was added; the map drawing it asks too).
+        gate.store(true, Ordering::Relaxed);
+        let start = Instant::now();
+        while !matches!(cog::info(&url), Ok(Some(_))) && start.elapsed() < Duration::from_secs(20) {
+            cache::wait(Duration::from_millis(50));
+        }
+        assert!(matches!(cog::info(&url), Ok(Some(_))), "the header never landed");
+        s.notice_landed_rasters();
+        s.notice_landed_rasters();
+        s.run("map.zoomIn", &Value::Null).unwrap();
+        for what in losses {
+            assert_eq!(said(&s, what), want, "{what}: {:?}", about(&s));
+        }
+        if want == 0 {
+            assert!(about(&s).is_empty(), "a clean file says nothing: {:?}", about(&s));
+        }
+        // A project opened again says it again, once.
+        let text = serde_json::to_string(&s.project).unwrap();
+        let mut t = Session::new(Project::default());
+        t.run("project.openText", &json!({"text": text})).unwrap();
+        assert_eq!(t.map().tiles.len(), 1);
+        t.notice_landed_rasters();
+        for what in losses {
+            assert_eq!(said(&t, what), want, "reopened, {what}: {:?}", about(&t));
+        }
+    }
+}
+
+/// A project raster not read in place (one behind a service login, as a connection's login made
+/// again reads it) is downloaded whole in the background, and says what reading it lost once its
+/// pixels land: once, however often asked. One that loses nothing says nothing.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_background_raster_says_its_losses_once_when_it_lands() {
+    if isolate_process_test("tests::a_background_raster_says_its_losses_once_when_it_lands") {
+        return;
+    }
+    use crate::render::rustgis_tiles::{cache, logins};
+    use rustgis_data::raster::cog::{Example, example_with};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    let lossy = example_with(&Example { size: 300, tile: 128, classes: true, no_table: true, ..Example::default() });
+    let clean = example_with(&Example { size: 300, tile: 128, classes: true, ..Example::default() });
+    let said = |s: &Session| s.notices.iter().filter(|n| n.text.contains("no colour table")).count();
+    for (file, want) in [(lossy, 1), (clean, 0)] {
+        let pixels = rustgis_data::raster::read_bytes("classes.tif", &file).unwrap();
+        let gate = std::sync::Arc::new(AtomicBool::new(false));
+        let (base, _) = serve_gated(file, false, Some(gate.clone()));
+        let binding = logins::activate(&base, "late-landing", logins::Method::Header("X-Key".into()), "late-landing-key", true).unwrap();
+        let address = logins::bind(&binding, &format!("{base}/classes.tif")).unwrap();
+        let mut s = Session::new(Project::default());
+        let mut layer = rustgis_map::raster::RasterLayer::from_path(pixels, address);
+        layer.data = None;
+        let id = s.map_mut().add_raster("Classes".to_string(), layer);
+        let raster = |s: &mut Session| s.map_mut().layer_mut(id).and_then(|l| l.raster.as_mut()).unwrap().data.is_some();
+        // Downloaded whole in the background: not landed yet, nothing said.
+        s.map_mut().layer_mut(id).and_then(|l| l.raster.as_mut()).unwrap().reload().unwrap();
+        assert!(!raster(&mut s), "read before its download came in");
+        s.notice_landed_rasters();
+        assert_eq!(said(&s), 0, "said before it landed");
+        gate.store(true, Ordering::Relaxed);
+        let view = rustgis_geom::Extent::new(10.0, 45.0, 11.0, 46.0);
+        let start = Instant::now();
+        while !raster(&mut s) && start.elapsed() < Duration::from_secs(20) {
+            cache::wait(Duration::from_millis(50));
+            s.map_mut().sync_sources(&view, 1000.0, false);
+            s.notice_landed_rasters();
+        }
+        let rl = s.map().layer(id).and_then(|l| l.raster.clone()).unwrap();
+        assert!(rl.data.is_some() && !rl.in_place, "{:?}", rl.error);
+        // Said once for these pixels, however often asked.
+        s.notice_landed_rasters();
+        s.run("map.zoomIn", &Value::Null).unwrap();
+        assert_eq!(said(&s), want, "{:?}", s.notices.iter().map(|n| n.text.as_str()).collect::<Vec<_>>());
+        assert!(logins::deactivate(&binding));
+    }
+}
+
 /// Dated-series keys given as `null` (a script's unused ones) ask for nothing: the GeoTIFF is a
 /// raster layer read in place, not a tile layer.
 #[test]

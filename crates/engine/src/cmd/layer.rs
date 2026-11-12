@@ -4255,23 +4255,16 @@ pub(crate) fn add_cog_with(s: &mut Session, p: &Value, url: &str, strict: bool, 
             s.zoom_to(&rustgis_geom::Extent::new(w, so, e, n));
         }
         r["bounds"] = json!(info.bounds);
-        // Drawn in place, the tiles are drawn as values (a palette image's by its colour table):
-        // what the header holds beside them (band and class names, wavelengths) comes only with a
-        // window, and is said.
-        let l = &info.layout;
-        let named = l
-            .described
-            .as_ref()
-            .is_some_and(|d| d.bands.iter().any(|b| b.description.is_some() || !b.categories.is_empty() || b.wavelength.is_some()));
-        let mut said: Vec<String> = l.lost.clone();
-        said.extend(l.described.iter().flat_map(|d| d.lost.iter().map(|x| format!("{}: {x}", rustgis_data::raster::pam::GDAL_METADATA))));
-        if named {
-            said.push("drawn in place without its band names, class names or wavelengths: a window (\"bbox\") reads them".into());
-        }
         // A tile layer's own name, as added.
         let shown = r.get("name").and_then(Value::as_str).unwrap_or(name).to_string();
-        for line in said {
+        for line in tile_header_losses(&info) {
             s.notify(format!("{shown}: {line}"), false);
+        }
+        // Said now, not again as it lands (see `Session::notice_landed_rasters`).
+        if let Some(t) =
+            r.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()).and_then(|i| s.map_mut().tiles.get_mut(i))
+        {
+            t.header_said = true;
         }
     } else if probed || why.is_some() || r.get("dated").is_some() {
         // Added, but its (first date's) file couldn't be read: the view stays where it was.
@@ -4282,6 +4275,25 @@ pub(crate) fn add_cog_with(s: &mut Session, p: &Value, url: &str, strict: bool, 
     }
     r["inPlace"] = json!(true);
     Ok(r)
+}
+
+/// What a cloud-optimised GeoTIFF drawn as tiles (a dated series, a data cube's file, AlphaEarth's
+/// embeddings) leaves out of its header, a line each: what reading it lost (a colour table short,
+/// GDAL metadata that doesn't decode) and, drawn as values (a palette image's by its colour table),
+/// the band and class names and wavelengths beside them, which come only with a window. Said as it
+/// is added when its header is in, else once it lands (`Session::notice_landed_rasters`).
+pub(crate) fn tile_header_losses(info: &crate::render::rustgis_tiles::cog::Info) -> Vec<String> {
+    let l = &info.layout;
+    let named = l
+        .described
+        .as_ref()
+        .is_some_and(|d| d.bands.iter().any(|b| b.description.is_some() || !b.categories.is_empty() || b.wavelength.is_some()));
+    let mut said: Vec<String> = l.lost.clone();
+    said.extend(l.described.iter().flat_map(|d| d.lost.iter().map(|x| format!("{}: {x}", rustgis_data::raster::pam::GDAL_METADATA))));
+    if named {
+        said.push("drawn in place without its band names, class names or wavelengths: a window (\"bbox\") reads them".into());
+    }
+    said
 }
 
 /// Adds a cloud-optimised GeoTIFF as a raster layer read in place: its overview held (read now
