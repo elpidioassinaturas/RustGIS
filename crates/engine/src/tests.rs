@@ -6968,6 +6968,11 @@ fn layout_colorbars_follow_a_raster() {
     assert_eq!(s.project.layouts[0].element(id).map(|e| e.visible), Some(true), "undo brings it back");
 }
 
+/// The middle of a layout's frame, across.
+fn frame_x_mid(s: &Session, li: usize, frame: u32) -> f64 {
+    s.project.layouts[li].element(frame).map(|e| e.x + e.w / 2.0).unwrap()
+}
+
 /// `layout.publication` (#682): every profile builds a layout that fits its page, the map frame
 /// at a round scale that still fits the extent, the footer boxed in two columns below the map
 /// with long lines wrapped, the tokens filled from the map; a figure leaves its title to the
@@ -7098,15 +7103,39 @@ fn publication_layouts_fit_their_pages() {
     // the box, bar and scale one width (#1379).
     let li = s.project.layouts.len() - 1;
     let frame = s.project.layouts[li].elements.iter().find(|e| e.kind.code() == "mapFrame").map(|e| e.id).unwrap();
-    for scale in [40_000_000.0, 1_500_000.0] {
+    // The scale written there is its `{scale}` token, filled from the frame as it is drawn; a text
+    // of one's own around it is measured too.
+    let id_of = |s: &Session, n: &str| s.project.layouts[li].elements.iter().find(|e| e.name == n).map(|e| e.id).unwrap();
+    let scale_text = id_of(&s, "Scale");
+    for (scale, text) in [(40_000_000.0, "{scale}"), (1_500_000.0, "{scale}"), (25_000_000.0, "Escala aproximada {scale}")] {
+        s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": text})).unwrap();
         s.run("layout.update", &json!({"layout": li, "element": frame, "scale": scale})).unwrap();
         let l = &s.project.layouts[li];
         let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap();
-        let (b, bar, text) = (named("Scale Box"), named("Scale Bar"), named("Scale"));
-        let ElementKind::Text { size, .. } = &text.kind else { panic!() };
-        let written = crate::render::report::width_mm(&rustgis_map::graphics::scale_ratio(scale), *size as f32, false);
-        assert!(written < b.w && bar.w == b.w && text.w == b.w && bar.x == b.x, "1:{scale}: {written} mm of text in a {} mm box", b.w);
+        let (b, bar, written) = (named("Scale Box"), named("Scale Bar"), named("Scale"));
+        let ElementKind::Text { text: stored, size, .. } = &written.kind else { panic!() };
+        assert_eq!(stored, text);
+        let filled = stored.replace("{scale}", &crate::render::layout::scale_ratio_text(scale, l.decimal_comma));
+        let Some(ElementKind::MapFrame { scale: drawn, .. }) = l.element(frame).map(|e| &e.kind) else { panic!() };
+        assert_eq!(*drawn, scale);
+        let wide = crate::render::report::width_mm(&filled, *size as f32, false);
+        assert!(wide < b.w && bar.w == b.w && written.w == b.w && bar.x == b.x, "{filled}: {wide} mm of text in a {} mm box", b.w);
     }
+    // A box that would now cover the north arrow stays as it was, which is said: from a narrow
+    // box, a long text makes it grow towards the arrow put beside it.
+    s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": "{scale}"})).unwrap();
+    s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 1_500_000.0})).unwrap();
+    let (b, arrow) = (id_of(&s, "Scale Box"), id_of(&s, "North Arrow"));
+    let boxed = s.project.layouts[li].element(b).cloned().unwrap();
+    // Beside it on the side it grows to: the left one when it keeps its right edge.
+    let x = if boxed.x + boxed.w / 2.0 > frame_x_mid(&s, li, frame) { boxed.x - 5.5 } else { boxed.x + boxed.w + 0.5 };
+    s.run("layout.update", &json!({"layout": li, "element": arrow, "x": x, "y": boxed.y, "w": 5.0, "h": 5.0})).unwrap();
+    s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": "Escala gráfica aproximada da folha {scale}"})).unwrap();
+    let mark = s.notices.len();
+    s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 30_000_000.0})).unwrap();
+    let after = s.project.layouts[li].element(b).cloned().unwrap();
+    assert_eq!((after.x, after.w), (boxed.x, boxed.w), "the box stays");
+    assert!(s.notices[mark..].iter().any(|n| n.text.contains("would now cover the north arrow")), "said");
     // A long title wraps within the frame, and pushes the map down; the result names every
     // element for layout.update.
     let r = s.run("layout.publication", &json!({"extent": piaui, "title": long})).unwrap();

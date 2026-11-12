@@ -1836,7 +1836,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         _ => None,
     };
     let scale_box = |ground_per_pt: f64, scale: f64| {
-        let w = bar_kind.map_or((fw * 0.3).max(25.0), |bar| scale_box_width(ground_per_pt, scale, fw, bar, comma, small_pt));
+        let text = ("{scale}", small_pt, false);
+        let w = bar_kind.map_or((fw * 0.3).max(25.0), |bar| scale_box_width(ground_per_pt, scale, fw, bar, comma, text));
         (w, sh + nh)
     };
     let ground_per_pt = |s: &Session, center: Coord, scale: f64| {
@@ -3902,21 +3903,28 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
 /// `scale` and `ground_per_pt` ground metres a point: the bar a box 30 % of the frame's width (25
 /// mm at least) would draw sets its length and divisions, and the box is the narrowest that draws
 /// that same bar (at least its length over the 85 % of a box the renderer gives a bar), its last
-/// label included, and holds the scale written under it in `text_pt`.
-fn scale_box_width(ground_per_pt: f64, scale: f64, frame_w: f64, bar: (ScaleUnits, usize), comma: bool, text_pt: f64) -> f64 {
-    let (widest, pt_per_mm) = ((frame_w * 0.3).max(25.0), rustgis_map::layout::PT_PER_MM);
+/// label included, and holds the text written under it: `text` (its `{scale}` filled), in
+/// `text_pt` points, bold or not.
+fn scale_box_width(ground_per_pt: f64, scale: f64, frame_w_mm: f64, bar: (ScaleUnits, usize), comma: bool, text: (&str, f64, bool)) -> f64 {
+    let (text, text_pt, bold) = text;
+    let (widest, pt_per_mm) = ((frame_w_mm * 0.3).max(25.0), rustgis_map::layout::PT_PER_MM);
     let bar_w = crate::render::layout::scale_bar_width_pt(ground_per_pt, widest * pt_per_mm, bar, comma, 1.5 * pt_per_mm)
         .map_or(widest, |w| w / pt_per_mm);
-    let ratio = crate::render::layout::scale_ratio_text(scale, comma);
-    let text_w = crate::render::report::width_mm(&ratio, text_pt as f32, false) + 2.0;
+    let written = text.replace("{scale}", &crate::render::layout::scale_ratio_text(scale, comma));
+    let text_w = written.lines().map(|line| crate::render::report::width_mm(line, text_pt as f32, bold)).fold(0.0, f64::max) + 2.0;
     bar_w.max(text_w).min(widest)
 }
 
+/// What a publication places over its map, which a scale bar box measured again must stay off.
+const PLACED_OVER_MAP: [&str; 3] = ["Legend Box", "Locator", "North Arrow"];
+
 /// A publication's scale bar box measured again after its frame's scale or width changed (#1379):
 /// the "Scale Box", the "Scale Bar" of `frame` and the "Scale" under it, as a publication lays them
-/// out (one place, one width, none locked), take the width that bar and scale now need, kept on the
-/// side of the frame they are nearer. A layout without them, or with them moved apart, is left as
-/// it is.
+/// out (one place, one width, none locked), take the width that bar and the text under it (its
+/// tokens filled, measured as drawn) now need, kept on the side of the frame they are nearer. A
+/// layout without them, with them moved apart, or with that text spaced out or in another font
+/// (which the width can't be measured for) is left as it is. A box that would then cover the
+/// legend, locator or north arrow, which it didn't, stays as it was, which is said.
 fn refit_scale_box(s: &mut Session, li: usize, frame: u32) {
     let Some(l) = s.project.layouts.get(li) else { return };
     let Some(fr) = l.element(frame) else { return };
@@ -3925,15 +3933,38 @@ fn refit_scale_box(s: &mut Session, li: usize, frame: u32) {
     let ground_per_pt = m.ground_res_at(&rustgis_map::layout::frame_camera(m, *center, *scale, 0.0, 0.0));
     let named = |name: &str| l.elements.iter().find(|e| e.name == name);
     let (Some(boxed), Some(bar), Some(text)) = (named("Scale Box"), named("Scale Bar"), named("Scale")) else { return };
-    let (ElementKind::ScaleBar { frame: of, units, divisions, .. }, ElementKind::Text { size, .. }) = (&bar.kind, &text.kind) else {
+    let (
+        ElementKind::ScaleBar { frame: of, units, divisions, .. },
+        ElementKind::Text { text: written, size, bold, letter_spacing, font, font_name, .. },
+    ) = (&bar.kind, &text.kind)
+    else {
         return;
     };
+    if *letter_spacing != 0.0 || *font != FontFamily::Sans || font_name.is_some() {
+        return;
+    }
     let together = [bar, text].iter().all(|e| (e.x - boxed.x).abs() < 1e-6 && (e.w - boxed.w).abs() < 1e-6 && !e.locked);
     if *of != frame || !together || boxed.locked {
         return;
     }
-    let w = scale_box_width(ground_per_pt, *scale, fr.w, (*units, *divisions), l.decimal_comma, *size);
+    let w = scale_box_width(ground_per_pt, *scale, fr.w, (*units, *divisions), l.decimal_comma, (written, *size, *bold));
     let x = if boxed.x + boxed.w / 2.0 > fr.x + fr.w / 2.0 { boxed.x + boxed.w - w } else { boxed.x };
+    let covers = |(x, w): (f64, f64), e: &rustgis_map::layout::Element| {
+        x < e.x + e.w && e.x < x + w && boxed.y < e.y + e.h && e.y < boxed.y + boxed.h
+    };
+    let newly = l
+        .elements
+        .iter()
+        .filter(|e| PLACED_OVER_MAP.contains(&e.name.as_str()) && e.visible)
+        .find(|e| covers((x, w), e) && !covers((boxed.x, boxed.w), e))
+        .map(|e| e.name.to_lowercase().replace(" box", ""));
+    if let Some(what) = newly {
+        s.notify(
+            format!("the scale bar's box would now cover the {what}, so it is left as it was: run layout.publication again to place them"),
+            false,
+        );
+        return;
+    }
     let ids = [boxed.id, bar.id, text.id];
     if let Some(l) = s.project.layouts.get_mut(li) {
         for id in ids {
