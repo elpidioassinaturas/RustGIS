@@ -87,10 +87,16 @@ pub const SKY_SPREAD: usize = 16;
 /// sky), looked for up to [`SKY_REACH`] cells away, in steps [`SKY_SPREAD`] spreads. Heights are
 /// read between cells as [`light`] reads them; cells that are no data or masked see the whole sky
 /// and hide none of it. Threads, `stop` and Cancel are as [`light`] has them.
+///
+/// This is the sky-view factor of Zakšek, Oštir and Kokalj, "Sky-View Factor as a Relief
+/// Visualization Technique", Remote Sensing 3(2), 398–415, 2011 (doi:10.3390/rs3020398), with the
+/// horizon traced as [`light`] traces it; no other code was followed.
 pub fn sky(r: &Raster, band: usize, mask: &RasterMask, z_factor: f64, threads: usize, stop: &AtomicBool) -> Result<Vec<u8>, Unlit> {
     let (cx, cy) = r.cell_size_m();
     let reach = SKY_REACH * cx.max(cy);
-    let ways: Vec<Vec<Read>> = (0..SKY_DIRECTIONS).map(|i| reads(&Way::new(r, i as f64 * 360.0 / SKY_DIRECTIONS as f64), reach)).collect();
+    let longest = r.width.max(r.height) as usize;
+    let ways: Vec<Vec<Read>> =
+        (0..SKY_DIRECTIONS).map(|i| reads(&Way::new(r, i as f64 * 360.0 / SKY_DIRECTIONS as f64), reach, longest)).collect();
     each_row(r, band, mask, z_factor, threads, stop, |trace, row, out| {
         for (col, cell) in out.iter_mut().enumerate() {
             let Some(z0) = trace.at(col, row) else { continue };
@@ -118,12 +124,13 @@ struct Read {
     per_metre: f64,
 }
 
-/// The reads of a sky trace along `way`, up to `reach` metres: one step at a time, then steps of
-/// the steps taken over [`SKY_SPREAD`].
-fn reads(way: &Way, reach: f64) -> Vec<Read> {
+/// The reads of a sky trace along `way`, up to `reach` metres and at most `steps` steps (no trace
+/// goes past the raster's longer side, whatever its cells' size says): one step at a time, then
+/// steps of the steps taken over [`SKY_SPREAD`].
+fn reads(way: &Way, reach: f64, steps: usize) -> Vec<Read> {
     let mut out = Vec::new();
     let mut n = 1usize;
-    while n as f64 * way.metres <= reach {
+    while n <= steps && n as f64 * way.metres <= reach {
         let k = n as f64;
         let (x, y) = (way.step.0 * k, -way.step.1 * k);
         let (fx, fy) = (x - x.floor(), y - y.floor());
@@ -518,7 +525,7 @@ mod tests {
             // or a step farther (3 cells at 50), where the trace reads the ground outside whole.
             let (near, far) = (depth / (RADIUS - 0.1 * CELL), depth / (RADIUS + 5.0 * CELL));
             for azimuth in (0..72).map(|i| f64::from(i) * 5.0) {
-                let t = trace.skyline(&reads(&Way::new(&r, azimuth), reach), 60, 60, -depth);
+                let t = trace.skyline(&reads(&Way::new(&r, azimuth), reach, n as usize), 60, 60, -depth);
                 assert!((far..=near).contains(&t), "depth {depth}, azimuth {azimuth}: {t} not in {far}..{near}");
             }
             let sin = |t: f64| t / (1.0 + t * t).sqrt();
@@ -526,6 +533,29 @@ mod tests {
             let seen = f64::from(sky_of(&r, 1)[60 * n as usize + 60]);
             assert!((least.floor()..=most.ceil()).contains(&seen), "depth {depth}: {seen} not in {least}..{most}");
         }
+    }
+
+    /// Cells too large for their size to be a number of metres (1e308 m, past `f64` once
+    /// squared) give no endless trace: the reads stop at the raster's side, and the sky is seen.
+    #[test]
+    fn huge_cells_end_the_sky_trace() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 0.0, pixel_width: 1e308, pixel_height: -1e308 };
+        let data: Vec<f32> = (0..400).map(|i| if i == 210 { 900.0 } else { 0.0 }).collect();
+        let r = Raster::new(
+            "huge",
+            20,
+            20,
+            vec![data],
+            gt,
+            Crs::from_epsg(31983).unwrap_or(Crs::WebMercator),
+            None,
+            ColorHint::Gray,
+            "Float32",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let way = Way::new(&r, 30.0);
+        assert!(reads(&way, f64::INFINITY, 20).len() <= 20);
+        assert_eq!(sky_of(&r, 1).len(), 400);
     }
 
     /// A tilted plane hides the sky uphill by its slope in each direction, and none of it
