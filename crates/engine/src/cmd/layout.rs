@@ -4336,7 +4336,8 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
     // publication's scale bar box measured again.
     if let Some(basis) = basis {
         let given = |keys: &[&str]| keys.iter().any(|k| p.get(*k).is_some_and(|v| !v.is_null()));
-        if (id == basis.frame && given(&["scale", "w"])) || (id == basis.text_id && given(&["text", "size", "bold"])) {
+        let restyled = id == basis.bar_id && given(&["units", "divisions"]);
+        if (id == basis.frame && given(&["scale", "w"])) || (id == basis.text_id && given(&["text", "size", "bold"])) || restyled {
             refit_scale_box(s, li, &basis);
         }
     }
@@ -4370,18 +4371,48 @@ fn scale_text_mm(text: &str, text_pt: f64, bold: bool) -> f64 {
 /// What a publication places over its map, which a scale bar box measured again must stay off.
 const PLACED_OVER_MAP: [&str; 3] = ["Legend Box", "Locator", "North Arrow"];
 
-/// What a publication's scale bar box is measured from: its frame (id, centre, scale, width) and
-/// the text under its bar (id, text, size, boldness).
+/// What a publication's scale bar box is measured from: its frame (id, centre, scale, width), its
+/// bar (id, units, divisions) and the text under the bar (id, text, size, boldness).
 #[derive(Clone)]
 struct BoxBasis {
     frame: u32,
     center: Coord,
     scale: f64,
     frame_w: f64,
+    bar_id: u32,
+    units: ScaleUnits,
+    divisions: usize,
     text_id: u32,
     text: String,
     size: f64,
     bold: bool,
+}
+
+/// The text under a publication's scale bar as the page draws it from `b`: `{scale}` filled as
+/// `layout.publication` fills it, the other tokens from the frame's map.
+fn basis_text(l: &Layout, m: &rustgis_map::Map, b: &BoxBasis) -> String {
+    let info = crate::render::layout::PageInfo { page: 1, pages: 1, page_name: String::new() };
+    let cam = rustgis_map::layout::frame_camera(m, b.center, b.scale, 0.0, 0.0);
+    let text = b.text.replace("{scale}", &crate::render::layout::scale_ratio_text(b.scale, l.decimal_comma));
+    crate::render::layout::expand(&text, l, &info, Some((m, cam)))
+}
+
+/// The automatic width (mm) of a publication's scale bar box measured from `b`: the one
+/// `layout.publication` gives it for that frame, bar and text.
+fn basis_width(l: &Layout, m: &rustgis_map::Map, b: &BoxBasis) -> f64 {
+    let ground_per_pt = m.ground_res_at(&rustgis_map::layout::frame_camera(m, b.center, b.scale, 0.0, 0.0));
+    let filled = basis_text(l, m, b);
+    scale_box_width(ground_per_pt, b.scale, b.frame_w, (b.units, b.divisions), l.decimal_comma, (&filled, b.size, b.bold))
+}
+
+/// The automatic width (mm) of layout `li`'s publication scale bar box as things are now.
+#[cfg(test)]
+pub(crate) fn scale_box_auto(s: &Session, li: usize) -> Option<f64> {
+    let b = scale_box_basis(s, li)?;
+    let l = s.project.layouts.get(li)?;
+    let ElementKind::MapFrame { map, .. } = &l.element(b.frame)?.kind else { return None };
+    let m = s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map))?;
+    Some(basis_width(l, m, &b))
 }
 
 /// The basis of a layout's publication scale bar box as it is now (#1379); `None` without one.
@@ -4389,7 +4420,8 @@ fn scale_box_basis(s: &Session, li: usize) -> Option<BoxBasis> {
     let l = s.project.layouts.get(li)?;
     let named = |name: &str| l.elements.iter().find(|e| e.name == name);
     let (bar, written) = (named("Scale Bar")?, named("Scale")?);
-    let (ElementKind::ScaleBar { frame, .. }, ElementKind::Text { text, size, bold, .. }) = (&bar.kind, &written.kind) else {
+    let (ElementKind::ScaleBar { frame, units, divisions, .. }, ElementKind::Text { text, size, bold, .. }) = (&bar.kind, &written.kind)
+    else {
         return None;
     };
     let fr = l.element(*frame)?;
@@ -4399,6 +4431,9 @@ fn scale_box_basis(s: &Session, li: usize) -> Option<BoxBasis> {
         center: *center,
         scale: *scale,
         frame_w: fr.w,
+        bar_id: bar.id,
+        units: *units,
+        divisions: *divisions,
         text_id: written.id,
         text: text.clone(),
         size: *size,
@@ -4414,23 +4449,21 @@ fn scale_box_basis(s: &Session, li: usize) -> Option<BoxBasis> {
 /// or in another font, naming a map series page (which differs from page to page), or of a frame
 /// other than the first (whose map the page fills the text from) is left as it is; so is a text
 /// longer than the widest box a publication gives. Only a box as wide as `before` (what it was
-/// measured from before the change: its frame and text) makes it is measured again: one set by
-/// hand keeps its width. A change to the text under the bar measures it again too; a restyled
-/// bar alone doesn't. A box that would then cover the legend, locator or north arrow, which it
-/// didn't, stays as it was, which is said.
+/// measured from before the change: its frame, bar and text) makes it is measured again: one set
+/// by hand keeps its width. A change to the text under the bar or to the bar's units or divisions
+/// measures it again too. A box that would then cover the legend, locator or north arrow, which
+/// it didn't, stays as it was, which is said.
 fn refit_scale_box(s: &mut Session, li: usize, before: &BoxBasis) {
     let frame = before.frame;
+    let Some(now) = scale_box_basis(s, li).filter(|b| b.frame == frame) else { return };
     let Some(l) = s.project.layouts.get(li) else { return };
     let Some(fr) = l.element(frame) else { return };
-    let ElementKind::MapFrame { map, center, scale, .. } = &fr.kind else { return };
+    let ElementKind::MapFrame { map, .. } = &fr.kind else { return };
     let Some(m) = s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map)) else { return };
-    let ground_per_pt = m.ground_res_at(&rustgis_map::layout::frame_camera(m, *center, *scale, 0.0, 0.0));
     let named = |name: &str| l.elements.iter().find(|e| e.name == name);
     let (Some(boxed), Some(bar), Some(text)) = (named("Scale Box"), named("Scale Bar"), named("Scale")) else { return };
-    let (
-        ElementKind::ScaleBar { frame: of, units, divisions, .. },
-        ElementKind::Text { text: written, size, bold, letter_spacing, font, font_name, .. },
-    ) = (&bar.kind, &text.kind)
+    let (ElementKind::ScaleBar { frame: of, .. }, ElementKind::Text { text: written, letter_spacing, font, font_name, .. }) =
+        (&bar.kind, &text.kind)
     else {
         return;
     };
@@ -4442,29 +4475,21 @@ fn refit_scale_box(s: &mut Session, li: usize, before: &BoxBasis) {
     {
         return;
     }
-    // Its tokens filled as the page draws them, `{scale}` from the frame.
-    let info = crate::render::layout::PageInfo { page: 1, pages: 1, page_name: String::new() };
-    let cam = rustgis_map::layout::frame_camera(m, *center, *scale, 0.0, 0.0);
-    let filled = crate::render::layout::expand(written, l, &info, Some((m, cam)));
+    // Its tokens filled as the page draws them.
+    let filled = basis_text(l, m, &now);
     let together = [bar, text].iter().all(|e| (e.x - boxed.x).abs() < 1e-6 && (e.w - boxed.w).abs() < 1e-6 && !e.locked);
     if *of != frame || !together || boxed.locked {
         return;
     }
     // A text longer than the widest box a publication gives: a width set by hand for it is kept.
-    if scale_text_mm(&filled, *size, *bold) > (fr.w * 0.3).max(25.0) {
+    if scale_text_mm(&filled, now.size, now.bold) > (fr.w * 0.3).max(25.0) {
         return;
     }
     // The width the box had from its basis before the change: another one was set by hand.
-    let was = {
-        let cam = rustgis_map::layout::frame_camera(m, before.center, before.scale, 0.0, 0.0);
-        let filled = crate::render::layout::expand(&before.text, l, &info, Some((m, cam)));
-        let bar = (*units, *divisions);
-        scale_box_width(m.ground_res_at(&cam), before.scale, before.frame_w, bar, l.decimal_comma, (&filled, before.size, before.bold))
-    };
-    if (boxed.w - was).abs() > 0.01 {
+    if (boxed.w - basis_width(l, m, before)).abs() > 0.01 {
         return;
     }
-    let w = scale_box_width(ground_per_pt, *scale, fr.w, (*units, *divisions), l.decimal_comma, (&filled, *size, *bold));
+    let w = basis_width(l, m, &now);
     let x = if boxed.x + boxed.w / 2.0 > fr.x + fr.w / 2.0 { boxed.x + boxed.w - w } else { boxed.x };
     let covers = |(x, w): (f64, f64), e: &rustgis_map::layout::Element| {
         x < e.x + e.w && e.x < x + w && boxed.y < e.y + e.h && e.y < boxed.y + boxed.h

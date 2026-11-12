@@ -2916,9 +2916,20 @@ impl RustGisApp {
             let removed: Vec<String> =
                 before.keys().chain(kept.keys()).filter(|k| before.get(*k) != kept.get(*k)).map(|k| k.to_lowercase()).collect();
             // Only those this version would use: one it can't read stays as it was.
+            let passed = self.ui.layout_arrangements_unread.len();
             self.ui.layout_arrangements_unread.retain(|name, corners| {
                 !removed.contains(&name.to_lowercase()) || !rustgis_engine::cmd::layout::usable_saved_arrangement(name, corners)
             });
+            let dropped = passed - self.ui.layout_arrangements_unread.len();
+            if dropped > 0 {
+                self.session.notify(
+                    crate::i18n::fmt(
+                        "Saved arrangements of publication layouts passed over under a name saved or removed now are dropped: {count}.",
+                        &[("count", &dropped.to_string())],
+                    ),
+                    false,
+                );
+            }
             self.ui.layout_arrangements_saved = self.session.layout_arrangements.clone();
             // Those this version couldn't use go back as they were, but where one saved here took
             // their very name.

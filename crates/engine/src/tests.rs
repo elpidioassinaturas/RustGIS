@@ -7689,6 +7689,29 @@ fn publication_layouts_fit_their_pages() {
     s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 9_000_000.0})).unwrap();
     s.run("layout.frameZoom", &json!({"layout": li, "element": frame, "to": "full"})).unwrap();
     assert_eq!(s.project.layouts[li].element(b).map(|e| e.w), Some(set), "the width set by hand, {auto} mm automatic");
+    // An untouched box follows: a new scale, the bar restyled, then another scale, each leave it
+    // as wide as it is automatically then.
+    s.run("layout.publication", &json!({"profile": "thesis-half", "extent": piaui})).unwrap();
+    let li = s.project.layouts.len() - 1;
+    let id_in = |s: &Session, n: &str| s.project.layouts[li].elements.iter().find(|e| e.name == n).map(|e| e.id).unwrap();
+    let frame = s.project.layouts[li].elements.iter().find(|e| e.kind.code() == "mapFrame").map(|e| e.id).unwrap();
+    let (b, bar) = (id_in(&s, "Scale Box"), id_in(&s, "Scale Bar"));
+    let width = |s: &Session| s.project.layouts[li].element(b).map(|e| e.w).unwrap();
+    let first = width(&s);
+    let mut widths = Vec::new();
+    for change in [
+        json!({"element": frame, "scale": 20_000_000.0}),
+        json!({"element": bar, "units": "miles"}),
+        json!({"element": frame, "scale": 7_000_000.0}),
+    ] {
+        let mut change = change;
+        change["layout"] = json!(li);
+        s.run("layout.update", &change).unwrap();
+        let auto = crate::cmd::layout::scale_box_auto(&s, li).unwrap();
+        assert!((width(&s) - auto).abs() < 1e-9, "{change}: {} mm, {auto} mm automatic", width(&s));
+        widths.push(width(&s));
+    }
+    assert!(widths.iter().any(|w| (w - first).abs() > 0.5), "the box changed: {first} mm, then {widths:?}");
     // A long title wraps within the frame, and pushes the map down; the result names every
     // element for layout.update.
     let r = s.run("layout.publication", &json!({"extent": piaui, "title": long})).unwrap();
