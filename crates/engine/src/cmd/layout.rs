@@ -3923,8 +3923,8 @@ const PLACED_OVER_MAP: [&str; 3] = ["Legend Box", "Locator", "North Arrow"];
 /// out (one place, one width, none locked), take the width that bar and the text under it (its
 /// tokens filled as the page draws them, measured as drawn) now need, kept on the side of the
 /// frame they are nearer. A layout without them, with them moved apart, with that text spaced out
-/// or in another font, or naming a map series page (which differs from page to page) is left as
-/// it is. A box that would then cover the
+/// or in another font, naming a map series page (which differs from page to page), or of a frame
+/// other than the first (whose map the page fills the text from) is left as it is. A box that would then cover the
 /// legend, locator or north arrow, which it didn't, stays as it was, which is said.
 fn refit_scale_box(s: &mut Session, li: usize, frame: u32) {
     let Some(l) = s.project.layouts.get(li) else { return };
@@ -3941,7 +3941,12 @@ fn refit_scale_box(s: &mut Session, li: usize, frame: u32) {
     else {
         return;
     };
-    if *letter_spacing != 0.0 || *font != FontFamily::Sans || font_name.is_some() || (l.series.is_some() && written.contains("{page")) {
+    if *letter_spacing != 0.0
+        || *font != FontFamily::Sans
+        || font_name.is_some()
+        || (l.series.is_some() && written.contains("{page"))
+        || l.first_frame() != Some(frame)
+    {
         return;
     }
     // Its tokens filled as the page draws them, `{scale}` from the frame.
