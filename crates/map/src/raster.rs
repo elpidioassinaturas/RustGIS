@@ -1677,15 +1677,21 @@ impl RasterLayer {
         stats.is_some_and(|s| s.count > 0 && s.categories.is_none())
     }
 
+    /// Whether its mask hides every pixel its masked statistics read: a legend then lists no class
+    /// the raster holds, so none can be missing from a sample or an overview (#1679).
+    fn mask_hides_all(&self) -> bool {
+        self.masked_stats().is_some_and(|m| m.first().is_some_and(|s| s.count == 0))
+    }
+
     /// Whether the classes a legend lists for it ([`RasterLayer::legend_classes`]) come from a
     /// sample of its pixels: under a mask, a band of more than [`MASK_STATS_SAMPLE`] cells has its
     /// statistics read from every few cells ([`RasterMask::stats`]), so a class too rare for the
     /// sample can be missing (#1679). Not with `all_classes` for Unique Values or Classify, nor when
-    /// no class can be listed; a colour table's come from the sample only when its own statistics,
+    /// no class can be listed (a mask hiding every pixel included); a colour table's come from the sample only when its own statistics,
     /// read whole, can't list its values.
     pub fn classes_from_sample(&self, all_classes: bool) -> bool {
         let Some(r) = &self.data else { return false };
-        if !self.style.renderer.draws_classes() || self.style.mask.is_empty() || self.classes_unknown() {
+        if !self.style.renderer.draws_classes() || self.style.mask.is_empty() || self.classes_unknown() || self.mask_hides_all() {
             return false;
         }
         let band = self.style.renderer.bands().first().copied().unwrap_or(0);
@@ -1701,11 +1707,16 @@ impl RasterLayer {
     /// statistics of an overview (a cloud-optimised GeoTIFF read in place, or pixels read reduced)
     /// while the map draws the full resolution: a class too rare for the overview can be missing
     /// (#1679). Not with `all_classes` for Unique Values or Classify, whose every class is listed
-    /// whatever the statistics, nor when no class can be listed ([`RasterLayer::classes_unknown`]).
+    /// whatever the statistics, nor when no class can be listed ([`RasterLayer::classes_unknown`],
+    /// or a mask hiding every pixel).
     pub fn classes_from_overview(&self, all_classes: bool) -> bool {
         let Some(r) = &self.data else { return false };
         let every = all_classes && !matches!(self.style.renderer, RasterRenderer::Colormap);
-        self.style.renderer.draws_classes() && (self.in_place || r.overview.is_some()) && !every && !self.classes_unknown()
+        self.style.renderer.draws_classes()
+            && (self.in_place || r.overview.is_some())
+            && !every
+            && !self.classes_unknown()
+            && !self.mask_hides_all()
     }
 
     /// The classes a layout's legend lists for this raster (#1679): the Layers pane's class rows
@@ -2018,6 +2029,12 @@ mod tests {
         assert!(!rl.classes_from_sample(false), "no mask: the band's own statistics");
         rl.style.mask = RasterMask { values: vec![4.0], ..RasterMask::default() };
         assert!(rl.classes_from_sample(false) && !rl.classes_from_sample(true));
+        // A mask hiding every pixel: no class listed, so none missing from a sample or an overview.
+        rl.in_place = true;
+        assert!(rl.classes_from_overview(false), "read in place, a class can be missing");
+        rl.style.mask = RasterMask { values: vec![1.0, 2.0, 3.0, 4.0], ..RasterMask::default() };
+        assert_eq!(rl.legend_classes(false), Some(Vec::new()));
+        assert!(!rl.classes_from_sample(false) && !rl.classes_from_overview(false));
     }
 
     /// Class breaks over a raster with too many values to list them: the classes from its lowest
