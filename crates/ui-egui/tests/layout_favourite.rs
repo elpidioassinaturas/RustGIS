@@ -61,6 +61,8 @@ fn saved_arrangements_are_kept_and_restored() {
     });
     let atlas = json!({"locator": "bottom-left", "northArrow": "top-left", "legend": "top-right", "scaleBar": "bottom-right"});
     app.run("layout.arrangement", json!({"save": "Atlas", "arrangement": atlas, "favourite": "Atlas"})).unwrap();
+    // With nothing passed over, a save drops nothing and says nothing of it.
+    assert!(!app.session.notices.iter().any(|n| n.text.contains("are dropped")));
     let last = |key: &str| saved.lock().unwrap().iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.clone()).unwrap();
     let (arrangements, favourite) = (last(SAVED), last(KEY));
     assert_eq!(serde_json::from_str::<serde_json::Value>(&arrangements).unwrap(), json!({"Atlas": atlas}));
