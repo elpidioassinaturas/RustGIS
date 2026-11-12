@@ -228,8 +228,12 @@ impl Canvas {
 
     /// Draws with `f` as a halo `width` wide (#1815): the glyphs it keeps are a halo's copy of the
     /// text, filled and stroked that wide (see [`vector::GlyphRun::halo`]), so a PDF writes the
-    /// halo as text too. Only a recording keeps halos so; a canvas that draws pixels runs `f`.
+    /// halo as text too. Only a recording keeps halos so; a canvas that draws pixels runs `f`. A
+    /// width that isn't a positive number is no halo: nothing is drawn, as on the pixels.
     pub fn halo(&mut self, width: f32, f: impl FnOnce(&mut Canvas)) {
+        if !(width.is_finite() && width > 0.0) {
+            return;
+        }
         let old = self.rec.as_mut().map(|r| r.halo.replace(width));
         f(self);
         if let (Some(r), Some(old)) = (&mut self.rec, old) {
@@ -478,6 +482,30 @@ mod tests {
         assert_eq!(alpha(22), Some(255), "the child inside the clip");
         assert_eq!(alpha(17), Some(0), "the child outside the clip");
         assert_eq!(alpha(27), Some(0), "the clip past the child");
+    }
+
+    /// A halo of no width, or of one that isn't a number, draws nothing (#1815): not a copy of
+    /// the text in the halo's colour set as plain text.
+    #[test]
+    fn a_halo_of_no_width_draws_nothing() {
+        let font = crate::text::label_font().unwrap();
+        let run = || GlyphRun {
+            font,
+            size: 12.0,
+            color: Color::WHITE,
+            transform: Transform::identity(),
+            glyphs: vec![crate::vector::Glyph { id: ab_glyph::Font::glyph_id(font, 'A'), x: 0.0, ch: 'A' }],
+            halo: None,
+        };
+        for width in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let mut c = Canvas::recording(40, 20).unwrap();
+            c.halo(width, |c| c.glyphs(run()));
+            assert!(c.into_drawing().unwrap().is_empty(), "{width}");
+        }
+        let mut c = Canvas::recording(40, 20).unwrap();
+        c.halo(2.0, |c| c.glyphs(run()));
+        let (_, _, items) = c.into_drawing().unwrap().finish();
+        assert!(matches!(items.as_slice(), [Item::Glyphs(r)] if r.halo == Some(2.0)));
     }
 
     #[test]
