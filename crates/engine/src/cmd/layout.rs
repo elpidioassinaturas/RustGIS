@@ -840,6 +840,11 @@ pub const MAX_ARRANGEMENT_NAME: usize = 40;
 /// the answer gives.
 const RESERVED_ARRANGEMENT_NAMES: [&str; 4] = ["best", "favourite", "custom", "veil"];
 
+/// Two arrangement names the same but for case (beyond ASCII too).
+fn same_name(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
 /// The arrangements saved by name (`layout.arrangement {"save": …}`), each its name and corners;
 /// an entry that isn't an arrangement is passed over.
 fn saved_arrangements(saved: &serde_json::Map<String, Value>) -> impl Iterator<Item = (&String, Homes)> {
@@ -918,15 +923,24 @@ fn arrangement_name(homes: Homes) -> &'static str {
 /// A built-in or saved arrangement by `name` (case aside): its name as it is kept, and its corners.
 fn arrangement_named(name: &str, saved: &serde_json::Map<String, Value>) -> Option<(String, Homes)> {
     let name = name.trim();
-    let built_in = ARRANGEMENTS.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(n, h)| ((*n).to_string(), *h));
-    built_in.or_else(|| saved_arrangements(saved).find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(n, h)| (n.clone(), h)))
+    let built_in = ARRANGEMENTS.iter().find(|(n, _)| same_name(n, name)).map(|(n, h)| ((*n).to_string(), *h));
+    built_in.or_else(|| saved_arrangements(saved).find(|(n, _)| same_name(n, name)).map(|(n, h)| (n.clone(), h)))
 }
 
-/// What an arrangement given as `v` is called in the answer: its name, or `"custom"`.
+/// What an arrangement given as `v` is called in the answer: its name; given corner by corner,
+/// the name of the built-in or saved one with those corners, else `"custom"`.
 fn arrangement_label(v: &Value, homes: Homes, saved: &serde_json::Map<String, Value>) -> String {
+    let by_corners = || {
+        ARRANGEMENTS
+            .iter()
+            .find(|(_, h)| *h == homes)
+            .map(|(n, _)| (*n).to_string())
+            .or_else(|| saved_arrangements(saved).find(|(_, h)| *h == homes).map(|(n, _)| n.clone()))
+            .unwrap_or_else(|| "custom".into())
+    };
     match v {
-        Value::String(name) => arrangement_named(name, saved).map_or_else(|| arrangement_name(homes).to_string(), |(n, _)| n),
-        _ => arrangement_name(homes).to_string(),
+        Value::String(name) => arrangement_named(name, saved).map_or_else(by_corners, |(n, _)| n),
+        _ => by_corners(),
     }
 }
 
@@ -941,7 +955,7 @@ fn check_arrangement_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() || name.trim() != name || name.chars().count() > MAX_ARRANGEMENT_NAME || name.chars().any(char::is_control) {
         return Err(format!("an arrangement's name is 1 to {MAX_ARRANGEMENT_NAME} characters"));
     }
-    if ARRANGEMENTS.iter().map(|(n, _)| *n).chain(RESERVED_ARRANGEMENT_NAMES).any(|n| n.eq_ignore_ascii_case(name)) {
+    if ARRANGEMENTS.iter().map(|(n, _)| *n).chain(RESERVED_ARRANGEMENT_NAMES).any(|n| same_name(n, name)) {
         return Err(format!("\"{name}\" names an arrangement already: choose another name"));
     }
     Ok(())
@@ -958,7 +972,7 @@ pub fn read_saved_arrangements(text: &str) -> Option<(serde_json::Map<String, Va
         let usable = check_arrangement_name(&name).is_ok()
             && corners.is_object()
             && parse_arrangement(&corners, &serde_json::Map::new()).is_ok()
-            && !kept.keys().any(|k| k.eq_ignore_ascii_case(&name))
+            && !kept.keys().any(|k| same_name(k, &name))
             && kept.len() < MAX_SAVED_ARRANGEMENTS;
         if usable {
             kept.insert(name, corners);
@@ -1019,7 +1033,7 @@ fn arrangement(s: &mut Session, p: &Value) -> CmdResult {
             .ok_or_else(|| format!("no arrangement is saved as \"{name}\""))?;
         let corners = saved.remove(&key).unwrap_or(Value::Null);
         // A favourite named after it keeps its corners.
-        if favourite.as_str().is_some_and(|f| f.trim().eq_ignore_ascii_case(&key)) {
+        if favourite.as_str().is_some_and(|f| same_name(f.trim(), &key)) {
             favourite = corners;
             warnings.push(format!("the favourite was the arrangement \"{key}\": it keeps its corners"));
         }
@@ -1030,7 +1044,7 @@ fn arrangement(s: &mut Session, p: &Value) -> CmdResult {
             Some(v) => parse_arrangement(v, &saved)?,
         };
         check_arrangement_name(&name)?;
-        match saved.keys().find(|k| k.eq_ignore_ascii_case(&name)).cloned() {
+        match saved.keys().find(|k| same_name(k, &name)).cloned() {
             Some(old) => {
                 saved.remove(&old);
                 warnings.push(format!("the arrangement saved as \"{old}\" is replaced"));

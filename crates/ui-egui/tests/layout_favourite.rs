@@ -86,9 +86,23 @@ fn saved_arrangements_are_kept_and_restored() {
     });
     assert_eq!(restored.session.layout_arrangements.len(), 1);
     let said = restored.session.notices.iter().filter(|n| n.text.contains("2 saved arrangements")).count();
+    assert_eq!(said, 0, "one notice, without a count's plural");
+    let said = restored.session.notices.iter().filter(|n| n.text.contains("can't use: 2")).count();
     assert_eq!(said, 1);
     restored.run("layout.arrangement", json!({"save": "half", "arrangement": "classic"})).unwrap();
     let written: serde_json::Value = serde_json::from_str(&last(SAVED)).unwrap();
     assert_eq!(written["best"], atlas, "kept as it was");
     assert!(written.get("Half").is_none() && written["half"]["locator"] == "top-left", "{written}");
+    // Text that isn't a list of arrangements is said, and never saved over.
+    let writes = saved.clone();
+    let mut restored = RustGisApp::new(Session::new(Project::default())).with_services(Services {
+        load_pref: Some(Box::new(|k| (k == SAVED).then(|| "a newer format".to_string()))),
+        save_pref: Some(Box::new(move |k, v| writes.lock().unwrap().push((k.to_string(), v.to_string())))),
+        ..Services::default()
+    });
+    assert!(restored.session.notices.iter().any(|n| n.text.contains("can't be read: they are left as they are")));
+    let before = saved.lock().unwrap().len();
+    restored.run("layout.arrangement", json!({"save": "Atlas", "arrangement": "classic"})).unwrap();
+    assert!(saved.lock().unwrap()[before..].iter().all(|(k, _)| k != SAVED));
+    assert!(restored.session.layout_arrangements.contains_key("Atlas"), "for the session");
 }

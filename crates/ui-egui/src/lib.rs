@@ -902,6 +902,8 @@ pub struct UiState {
     /// Entries of that preference this version can't use (a newer one's), saved again with it as
     /// they were.
     pub layout_arrangements_unread: serde_json::Map<String, Value>,
+    /// That preference couldn't be read at all: it is left as it is, never saved over.
+    pub layout_arrangements_unreadable: bool,
     /// Home › Add › Add Data › Zarr…: its store, choices and fetches.
     pub zarr: zarrui::State,
     /// Independent Zarr reads for imported GeoLibre layers; does not share the picker state.
@@ -1053,6 +1055,7 @@ impl Default for UiState {
             layout_favourite_saved: Value::Null,
             layout_arrangements_saved: Default::default(),
             layout_arrangements_unread: Default::default(),
+            layout_arrangements_unreadable: false,
             zarr: Default::default(),
             geolibre_zarr: Vec::new(),
             hidden_tabs: Vec::new(),
@@ -1501,21 +1504,28 @@ impl RustGisApp {
         self.ui.raster_defaults_saved = self.session.raster_defaults.clone();
         // The arrangements saved by name, before the favourite, which may name one; those this
         // version can't use are said, and kept as they are with the preference. Text that isn't a
-        // list of them is said and left as it is until a save.
+        // list of them is said and never saved over: arrangements saved then last the session.
         if let Some(text) = self.services.load_pref.as_ref().and_then(|load| load(LAYOUT_ARRANGEMENTS_PREF)) {
-            let read = rustgis_engine::cmd::layout::read_saved_arrangements(&text);
-            let passed = read.as_ref().map_or(1, |(_, passed)| passed.len());
-            if let Some((kept, unread)) = read {
-                (self.session.layout_arrangements, self.ui.layout_arrangements_unread) = (kept, unread);
-            }
-            if passed > 0 {
-                self.session.notify(
-                    crate::i18n::fmt(
-                        "{count} saved arrangements of publication layouts can't be used here: they are left out, and kept with the preferences.",
-                        &[("count", &passed.to_string())],
-                    ),
-                    false,
-                );
+            match rustgis_engine::cmd::layout::read_saved_arrangements(&text) {
+                Some((kept, unread)) => {
+                    if !unread.is_empty() {
+                        self.session.notify(
+                            crate::i18n::fmt(
+                                "Saved arrangements of publication layouts this version can't use: {count}. They are left out, and kept with the preferences.",
+                                &[("count", &unread.len().to_string())],
+                            ),
+                            false,
+                        );
+                    }
+                    (self.session.layout_arrangements, self.ui.layout_arrangements_unread) = (kept, unread);
+                }
+                None => {
+                    self.ui.layout_arrangements_unreadable = true;
+                    self.session.notify(
+                        tl!("The saved arrangements of publication layouts can't be read: they are left as they are, and arrangements saved now last only until the app closes.").to_string(),
+                        false,
+                    );
+                }
             }
         }
         self.ui.layout_arrangements_saved = self.session.layout_arrangements.clone();
@@ -2847,7 +2857,7 @@ impl RustGisApp {
     /// Saves the favourite arrangement of publication layouts, and those saved by name, when
     /// `layout.arrangement` changed them.
     fn save_layout_favourite(&mut self) {
-        if self.session.layout_arrangements != self.ui.layout_arrangements_saved {
+        if self.session.layout_arrangements != self.ui.layout_arrangements_saved && !self.ui.layout_arrangements_unreadable {
             self.ui.layout_arrangements_saved = self.session.layout_arrangements.clone();
             // Those this version couldn't use go back as they were, but where a name saved here
             // (case aside) took their place.

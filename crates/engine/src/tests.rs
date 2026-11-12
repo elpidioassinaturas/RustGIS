@@ -41684,6 +41684,14 @@ fn arrangements_are_saved_by_name() {
     let names: Vec<&str> = tried.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, ["classic", "mirrored", "legendRight", "legendTop", "Atlas"]);
     assert_eq!(arrangements_to_try(&s, &Value::Null).unwrap(), tried);
+    // A favourite given corner by corner as a saved one is called by its name.
+    s.run("layout.arrangement", &json!({"favourite": atlas})).unwrap();
+    assert_eq!(arrangements_to_try(&s, &json!("favourite")).unwrap()[0].0, "Atlas");
+    assert_eq!(arrangements_to_try(&s, &atlas).unwrap()[0].0, "Atlas");
+    // Case aside beyond ASCII too.
+    s.run("layout.arrangement", &json!({"save": "Écran", "arrangement": "legendTop"})).unwrap();
+    assert_eq!(arrangements_to_try(&s, &json!("écran")).unwrap()[0].0, "Écran");
+    s.run("layout.arrangement", &json!({"remove": "ÉCRAN"})).unwrap();
     // The favourite by its name; removed, it keeps its corners, which is said.
     s.run("layout.arrangement", &json!({"favourite": "Atlas"})).unwrap();
     assert_eq!(arrangements_to_try(&s, &json!("favourite")).unwrap()[0].0, "Atlas");
