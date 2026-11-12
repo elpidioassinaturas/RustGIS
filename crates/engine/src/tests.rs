@@ -41700,6 +41700,8 @@ fn publication_writes_its_coverage_grid() {
     assert_eq!(s.project.layouts.len(), layouts + 1);
     // A project holding all the layouts it can is refused before the file is written.
     let full = dir.join("full.png");
+    // One a run before left behind would pass for not written.
+    let _ = std::fs::remove_file(&full);
     let blank = s.project.layouts[0].clone();
     s.project.layouts.resize(crate::project::MAX_LAYOUTS, blank);
     let e = s.run("layout.publication", &json!({"extent": piaui, "coverage": full.display().to_string()})).unwrap_err();

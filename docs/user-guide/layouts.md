@@ -57,7 +57,9 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     frame too small) are said too. To see why a surround moved or stayed,
     **`"coverage": "grid.png"`** writes the grid the placement searched: what the map draws dark,
     the free cells white, the strips the graticule's labels keep tinted blue, and the surrounds
-    placed outlined in red.
+    placed over the map outlined in red. It shows the map's frame only: what sits outside it (a
+    side column's locator and legend, as `"style": "panel"` places them, the titles and the
+    footer) isn't on it.
     The top visible raster with a colour scale, not drawn by classes (Stretch, a tinted hillshade),
     gets a colorbar beneath the legend; RGB and untinted hillshade do not, so an RGB composite over
     a DEM leaves it to the DEM. A raster drawn by classes (Colormap, Unique Values, Classify) has
