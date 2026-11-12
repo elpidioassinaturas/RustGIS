@@ -4562,7 +4562,8 @@ fn shown_layers(session: &rustgis_engine::Session) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     let project = &session.project;
     let map = project.map();
-    (&session.path, &project.name, project.active_map, &map.name, map.basemap, map.graticule).hash(&mut h);
+    (&session.path, &project.name, project.active_map, &map.name, map.basemap, map.graticule, map.graticule_type, &map.graticule_crs)
+        .hash(&mut h);
     for l in &map.layers {
         (l.id, l.visible).hash(&mut h);
     }
@@ -5274,6 +5275,27 @@ mod tests {
         assert!(selection_rows(&h).is_empty(), "an empty click clears the selection");
         let errors: Vec<_> = h.state().session.notices_since(mark).iter().filter(|n| n.error).map(|n| n.text.clone()).collect();
         assert!(errors.is_empty(), "no error notice: {errors:?}");
+    }
+
+    /// An Explore click on empty map that only asks a WMS layer clears a selection too, and with
+    /// nothing selected gives no "nothing is selected" error notice.
+    #[test]
+    fn explore_click_asking_only_wms_clears_without_a_notice() {
+        let mut h = selection_harness();
+        let url = "https://wms.example.org/?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=over&STYLES=&CRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256&FORMAT=image%2Fpng";
+        h.state_mut().run("map.addTiles", json!({"url": url, "name": "Over", "overlay": true})).unwrap();
+        h.state_mut().run("map.popupMode", json!({"mode": "visible"})).unwrap();
+        h.state_mut().run("tool.set", json!({"tool": "explore"})).unwrap();
+        let mark = h.state().session.notice_mark();
+        selection_click(&mut h, [3.5, 1.5]);
+        assert!(h.state().map.popup.is_some(), "the click asks the WMS layer");
+        assert!(selection_rows(&h).is_empty());
+        h.state_mut().run("select.rows", json!({"layer": "Points", "rows": [1]})).unwrap();
+        selection_click(&mut h, [1.0, 3.5]);
+        assert!(selection_rows(&h).is_empty(), "the click clears the selection");
+        // The made-up WMS server's own failure may land too: only the refusal is checked.
+        let refused = h.state().session.notices_since(mark).iter().any(|n| n.error && n.text.contains("nothing is selected"));
+        assert!(!refused, "no \"nothing is selected\" notice");
     }
 
     #[test]

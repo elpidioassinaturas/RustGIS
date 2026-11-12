@@ -52,6 +52,10 @@ pub fn commands() -> Vec<C> {
             if matches!(ext.as_str(), "parquet" | "geoparquet") {
                 dbf_notes.extend(rustgis_data::source::parquet::values_note(&t.dataset, path));
             }
+            dbf_notes.extend(rustgis_data::io::dates_as_text_note(&t.dataset.fields, path));
+            // CSV holds a point a row, GPX a name for each feature and no areas.
+            let name_field = rustgis_data::io::name_field(&t.dataset);
+            dbf_notes.extend(rustgis_data::io::export_losses_notes(&t.dataset, &ext, name_field, path));
             let (left_out, table) =
                 rustgis_data::io::write_path_to(&t.dataset, Path::new(path), Crs::LonLat, &gpkg).map_err(|e| e.to_string())?;
             s.check_continuation(&owner).map_err(|why| super::exports::completion_refused(Some(path), why))?;
@@ -634,8 +638,7 @@ pub(crate) fn layer_work(s: &Session, p: &Value) -> Result<Work, String> {
     // Checked now, so a bad table option is refused before the export starts.
     let ext = Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let gpkg = gpkg_table(p, &ext)?;
-    let compatibility =
-        ps(p, "crs").and_then(|text| asked.and_then(|crs| rustgis_data::raster::wkt::projection_compatibility_note(text, crs)));
+    let compatibility = ps(p, "crs").and_then(|text| asked.and_then(|crs| rustgis_data::raster::wkt::typed_crs_note(text, crs)));
     Ok(Box::new(move || {
         let mut wrote = write_layer(&l, &path, asked, gpkg)?;
         if let Some(note) = compatibility {
@@ -666,20 +669,21 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
         return Err(format!("{path}: {e}"));
     }
     let parquet = matches!(ext.as_str(), "parquet" | "geoparquet");
-    let (written, left_out, skipped, table, unfit, null_numbers, moved) = match &chunks {
+    let (written, left_out, skipped, table, unfit, null_numbers, moved, csv) = match &chunks {
         Some((src, layer)) => {
             let (e, table) =
                 rustgis_data::export::write_source_to(src.as_ref(), layer, Path::new(&path), crs, &gpkg).map_err(|e| e.to_string())?;
             // Counted as the chunks were written, as the layer holds none of them.
             let unfit = rustgis_data::source::parquet::unfit_note(&layer.fields, &e.unfit, path);
             let moved = rustgis_data::web_mercator_moved_note(path, &layer.name, e.beyond_web_mercator);
-            (e.written, e.left_out, e.skipped, table, unfit, e.null_numbers, moved)
+            (e.written, e.left_out, e.skipped, table, unfit, e.null_numbers, moved, e.csv)
         }
         None => {
             let (left_out, table) = rustgis_data::io::write_path_to(ds, Path::new(&path), crs, &gpkg).map_err(|e| e.to_string())?;
             let unfit = if parquet { rustgis_data::source::parquet::values_note(ds, path) } else { None };
             let null_numbers = rustgis_data::export::numbers_written_as_null(&ds.features, &ds.fields, &ext);
-            (ds.features.len().saturating_sub(left_out), left_out, unread, table, unfit, null_numbers, None)
+            let csv = if ext == "csv" { rustgis_data::io::CsvLosses::of(&ds.features, ds.geometry_type) } else { Default::default() };
+            (ds.features.len().saturating_sub(left_out), left_out, unread, table, unfit, null_numbers, None, csv)
         }
     };
     // The features written give their own extent. A streamed layer written a chunk at a time has
@@ -697,10 +701,18 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
         dbf_notes.extend(rustgis_data::io::shapefile_values_notes(ds, path));
         dbf_notes.extend(rustgis_data::io::shapefile_geometry_notes(ds, path, crs));
     }
+    dbf_notes.extend(rustgis_data::io::dates_as_text_note(&ds.fields, path));
     // FlatGeobuf, KML, GPX and Shapefile hold features with geometry only (a Shapefile, only
     // geometry it can draw, of the layer's kind).
     let mut said = Vec::new();
     said.extend(rustgis_data::io::left_out_note(path, &ext, left_out));
+    // CSV holds a point a row, GPX a name for each feature and no areas.
+    if ext == "csv" {
+        said.extend(csv.notes(path));
+    }
+    if ext == "gpx" {
+        said.extend(rustgis_data::io::gpx_notes(ds, rustgis_data::io::name_field(ds), path));
+    }
     if skipped > 0 {
         said.push(format!("{path}: {skipped} rows couldn't be read and were left out"));
     }
