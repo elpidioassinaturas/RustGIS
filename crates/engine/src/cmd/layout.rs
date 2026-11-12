@@ -3911,8 +3911,13 @@ fn scale_box_width(ground_per_pt: f64, scale: f64, frame_w_mm: f64, bar: (ScaleU
     let bar_w = crate::render::layout::scale_bar_width_pt(ground_per_pt, widest * pt_per_mm, bar, comma, 1.5 * pt_per_mm)
         .map_or(widest, |w| w / pt_per_mm);
     let written = text.replace("{scale}", &crate::render::layout::scale_ratio_text(scale, comma));
-    let text_w = written.lines().map(|line| crate::render::report::width_mm(line, text_pt as f32, bold)).fold(0.0, f64::max) + 2.0;
-    bar_w.max(text_w).min(widest)
+    bar_w.max(scale_text_mm(&written, text_pt, bold)).min(widest)
+}
+
+/// The width (mm) a scale bar box gives the text under its bar, its tokens filled: its longest
+/// line in `text_pt` points, bold or not, and a millimetre each side.
+fn scale_text_mm(text: &str, text_pt: f64, bold: bool) -> f64 {
+    text.lines().map(|line| crate::render::report::width_mm(line, text_pt as f32, bold)).fold(0.0, f64::max) + 2.0
 }
 
 /// What a publication places over its map, which a scale bar box measured again must stay off.
@@ -3924,8 +3929,11 @@ const PLACED_OVER_MAP: [&str; 3] = ["Legend Box", "Locator", "North Arrow"];
 /// tokens filled as the page draws them, measured as drawn) now need, kept on the side of the
 /// frame they are nearer. A layout without them, with them moved apart, with that text spaced out
 /// or in another font, naming a map series page (which differs from page to page), or of a frame
-/// other than the first (whose map the page fills the text from) is left as it is. A box that would then cover the
-/// legend, locator or north arrow, which it didn't, stays as it was, which is said.
+/// other than the first (whose map the page fills the text from) is left as it is; so is a text
+/// longer than the widest box a publication gives (a box widened by hand for it keeps its width).
+/// A change to the text or the bar alone doesn't measure the box again; the next change of the
+/// frame's scale or width does. A box that would then cover the legend, locator or north arrow,
+/// which it didn't, stays as it was, which is said.
 fn refit_scale_box(s: &mut Session, li: usize, frame: u32) {
     let Some(l) = s.project.layouts.get(li) else { return };
     let Some(fr) = l.element(frame) else { return };
@@ -3955,6 +3963,10 @@ fn refit_scale_box(s: &mut Session, li: usize, frame: u32) {
     let filled = crate::render::layout::expand(written, l, &info, Some((m, cam)));
     let together = [bar, text].iter().all(|e| (e.x - boxed.x).abs() < 1e-6 && (e.w - boxed.w).abs() < 1e-6 && !e.locked);
     if *of != frame || !together || boxed.locked {
+        return;
+    }
+    // A text longer than the widest box a publication gives: a width set by hand for it is kept.
+    if scale_text_mm(&filled, *size, *bold) > (fr.w * 0.3).max(25.0) {
         return;
     }
     let w = scale_box_width(ground_per_pt, *scale, fr.w, (*units, *divisions), l.decimal_comma, (&filled, *size, *bold));
