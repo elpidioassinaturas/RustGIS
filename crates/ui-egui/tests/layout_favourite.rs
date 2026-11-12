@@ -88,7 +88,10 @@ fn saved_arrangements_are_kept_and_restored() {
     // One notice for them all, with their count.
     let said: Vec<_> = restored.session.notices.iter().filter(|n| n.text.contains("arrangements of publication layouts")).collect();
     assert_eq!(said.len(), 1);
-    assert!(said[0].text.contains("can't use: 3"), "{}", said[0].text);
+    assert_eq!(
+        said[0].text,
+        "Saved arrangements of publication layouts this version can't use: 3. They are left out, and kept with the preferences."
+    );
     restored.run("layout.arrangement", json!({"save": "Half", "arrangement": "mirrored"})).unwrap();
     let written: serde_json::Value = serde_json::from_str(&last(SAVED)).unwrap();
     // Kept as they were, a name in other capitals too; the one saved here under that very name
@@ -107,4 +110,17 @@ fn saved_arrangements_are_kept_and_restored() {
     restored.run("layout.arrangement", json!({"save": "Atlas", "arrangement": "classic"})).unwrap();
     assert!(saved.lock().unwrap()[before..].iter().all(|(k, _)| k != SAVED));
     assert!(restored.session.layout_arrangements.contains_key("Atlas"), "for the session");
+    // An arrangement removed takes with it one passed over beside it under the same name but for
+    // case, so it doesn't come back at the next start.
+    let mirrored = json!({"locator": "top-right", "northArrow": "top-left", "legend": "bottom-right", "scaleBar": "bottom-left"});
+    let text = json!({"Atlas": atlas, "atlas": mirrored, "Keep": mirrored}).to_string();
+    let writes = saved.clone();
+    let mut restored = RustGisApp::new(Session::new(Project::default())).with_services(Services {
+        load_pref: Some(Box::new(move |k| (k == SAVED).then(|| text.clone()))),
+        save_pref: Some(Box::new(move |k, v| writes.lock().unwrap().push((k.to_string(), v.to_string())))),
+        ..Services::default()
+    });
+    restored.run("layout.arrangement", json!({"remove": "Atlas"})).unwrap();
+    let written: serde_json::Value = serde_json::from_str(&last(SAVED)).unwrap();
+    assert_eq!(written, json!({"Keep": mirrored}));
 }
