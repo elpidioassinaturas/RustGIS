@@ -201,6 +201,8 @@ pub(crate) const IN_BACKGROUND: &[(&str, &str, Start)] = &[
     ("raster.process", "Process", super::imagery::process_work),
     ("imagery.mosaic", "Build Mosaic", super::imagery::mosaic_work),
     ("dl.classify", "Deep Learning", super::deeplearning::classify_work),
+    ("embeddings.similarity", "Satellite Embedding Similarity", super::embeddings::similarity_work),
+    ("embeddings.change", "Satellite Embedding Change", super::embeddings::change_work),
 ];
 
 /// `command` and what it is called, when it makes its raster on another thread from the app (see
