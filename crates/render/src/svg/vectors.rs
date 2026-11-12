@@ -425,7 +425,7 @@ mod tests {
             let mut frame = Drawing::new(40.0, 40.0);
             for (x, blend) in [(0.0, Blend::Normal), (5.0, Blend::Multiply)] {
                 if layered {
-                    frame.begin_layer(if x == 0.0 { "Land" } else { "Shade" });
+                    frame.begin_layer(if x == 0.0 { "Land" } else { "Shade" }, None);
                 }
                 let mut layer = Drawing::new(40.0, 40.0);
                 layer.fill(rect(x), Brush::Solid(Color::from_rgba8(200, 0, 0, 255)), FillRule::Winding, Transform::identity());

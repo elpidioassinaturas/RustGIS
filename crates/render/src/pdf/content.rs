@@ -340,14 +340,14 @@ impl Writer<'_> {
     /// clipped and moved on its own, which draws the same: a vector editor can't put a layer
     /// inside a clipping group, so it would flatten them.
     fn group(&mut self, out: &mut Vec<u8>, st: &mut State, g: &Group) {
-        let outer = self.open_layer(out, g.layer.as_deref());
+        let outer = self.open_layer(out, g);
         let composite = g.opacity < 0.999 || g.blend != Blend::Normal;
         let is_layer = |i: &Item| matches!(i, Item::Group(c) if c.layer.is_some());
         if self.layers.on && !composite && g.items.iter().any(is_layer) {
             for run in g.items.chunk_by(|a, b| !is_layer(a) && !is_layer(b)) {
                 match run {
                     [Item::Group(c)] if c.layer.is_some() => {
-                        let inner = self.open_layer(out, c.layer.as_deref());
+                        let inner = self.open_layer(out, c);
                         self.clipped(out, st, g, |w, out, st| w.items(out, st, &c.items));
                         self.close_layer(out, inner);
                     }
@@ -410,14 +410,21 @@ impl Writer<'_> {
         let _ = writeln!(out, "/G{gs} gs /X{form} Do");
     }
 
-    /// Begins marking the layer `name` (none for `None`, or when the document writes no layers):
-    /// the layer written in before, for [`Writer::close_layer`].
-    fn open_layer(&mut self, out: &mut Vec<u8>, name: Option<&str>) -> Option<Option<usize>> {
-        let name = name.filter(|_| self.layers.on)?;
+    /// Begins marking `g`'s layer, if it is one (and the document writes layers): the layer
+    /// written in before, for [`Writer::close_layer`].
+    fn open_layer(&mut self, out: &mut Vec<u8>, g: &Group) -> Option<Option<usize>> {
+        let name = g.layer.as_deref().filter(|_| self.layers.on)?;
         let outer = self.parent;
-        let n = self.siblings.entry((outer, name.to_string())).or_insert(0);
-        let (at, id) = self.layers.group(self.doc, outer, name, *n);
-        *n += 1;
+        // Without an id, the second of two layers named alike is another layer.
+        let n = match g.layer_id {
+            Some(_) => 0,
+            None => {
+                let n = self.siblings.entry((outer, name.to_string())).or_insert(0);
+                *n += 1;
+                *n - 1
+            }
+        };
+        let (at, id) = self.layers.group(self.doc, outer, name, g.layer_id, n);
         if !self.res.properties.contains(&id) {
             self.res.properties.push(id);
         }

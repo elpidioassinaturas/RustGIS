@@ -4003,7 +4003,7 @@ fn render_frame(
         if !layer.visible || !layer.in_scale_range(scale) || held.contains(&layer.id) {
             continue;
         }
-        pm.layer(Some(&layer_name(layer)));
+        pm.layer_with_id(&layer_name(layer), u64::from(layer.id));
         let opacity = layer.opacity() * group_opacity.get(&layer.id).copied().unwrap_or(1.0);
         let mask = masks.iter().find(|(id, _)| *id == layer.id).map(|(_, m)| m);
         let (blend, layer_blend) = (blend_mode(layer.blend), layer.blend);
@@ -6533,36 +6533,28 @@ fn layer_name(layer: &rustgis_map::Layer) -> String {
 }
 
 /// Draws a frame's unplaced and placed labels. A recording keeps each map layer's placed labels
-/// together as a layer of their own, "Labels: <layer>" (#1815), the layers in the order of their
-/// first label: placed labels don't overlap, so the page looks the same.
+/// as a layer of their own, "Labels: <layer>" (#1815): drawn in the placement's order, as the
+/// pixels draw them (labels can overlap: pinned ones, a class that shows all), each run of one
+/// layer's labels is marked as that layer, so one layer can be several runs.
 pub(crate) fn draw_labels(pm: &mut Canvas, (unplaced, labels, layers): (&[PlacedLabel], &[PlacedLabel], &[(u32, String)]), ppp: f32) {
     for l in unplaced {
         text::draw(pm, l, ppp);
     }
-    // Recorded, there is a layer for each label (see `render_frame`).
-    debug_assert!(
-        !pm.is_recording() || layers.is_empty() || layers.len() == labels.len(),
-        "{} layers for {} labels",
-        layers.len(),
-        labels.len()
-    );
+    // Recorded, there is a layer for each label (see `render_frame`); without, no layers.
     if !pm.is_recording() || layers.len() != labels.len() {
         for l in labels {
             text::draw(pm, l, ppp);
         }
         return;
     }
-    let mut first = std::collections::HashMap::new();
-    for (i, (id, _)) in layers.iter().enumerate() {
-        first.entry(*id).or_insert(i);
-    }
-    let mut order: Vec<usize> = (0..labels.len()).collect();
-    order.sort_by_key(|i| layers.get(*i).and_then(|(id, _)| first.get(id)).copied().unwrap_or(0));
     let mut shown = None;
-    for i in order {
-        let (Some(l), Some((id, name))) = (labels.get(i), layers.get(i)) else { continue };
+    for (l, (id, name)) in labels.iter().zip(layers) {
         if shown != Some(*id) {
-            pm.layer((*id != u32::MAX).then(|| format!("Labels: {name}")).as_deref());
+            if *id == u32::MAX {
+                pm.layer(None);
+            } else {
+                pm.layer_with_id(&format!("Labels: {name}"), u64::from(*id));
+            }
             shown = Some(*id);
         }
         text::draw(pm, l, ppp);
@@ -6736,6 +6728,50 @@ mod tests {
             glyphs: Vec::new(),
             background: None,
         }
+    }
+
+    /// Labels of two map layers that overlap (a class that shows all, a pinned label) are
+    /// recorded in the placement's order, as the pixels draw them, so the one on top stays on
+    /// top: each run of one layer's labels is marked as that layer, and its runs are one PDF
+    /// layer (#1815).
+    #[test]
+    fn overlapping_labels_of_two_layers_keep_their_order() {
+        use crate::vector::Item;
+        let labels = [label("Aa", 10.0, None, 0.0), label("Bb", 12.0, None, 0.0), label("Cc", 14.0, None, 0.0)];
+        let layers = [(1, "Rios".to_string()), (2, "Cidades".to_string()), (1, "Rios".to_string())];
+        let record = || {
+            let mut pm = Canvas::recording(120, 40).unwrap();
+            draw_labels(&mut pm, (&[], &labels, &layers), 1.0);
+            pm.into_drawing().unwrap()
+        };
+        let (_, _, items) = record().finish();
+        fn text(items: &[Item]) -> String {
+            items
+                .iter()
+                .map(|i| match i {
+                    Item::Glyphs(r) => r.glyphs.iter().map(|g| g.ch).collect(),
+                    Item::Group(g) => text(&g.items),
+                    _ => String::new(),
+                })
+                .collect()
+        }
+        let runs: Vec<(String, String)> =
+            items.iter().filter_map(|i| if let Item::Group(g) = i { Some((g.layer.clone()?, text(&g.items))) } else { None }).collect();
+        let want = [("Labels: Rios", "Aa"), ("Labels: Cidades", "Bb"), ("Labels: Rios", "Cc")];
+        assert_eq!(runs, want.map(|(a, b)| (a.to_string(), b.to_string())));
+        // One PDF layer for Rios's two runs, marked around each in turn.
+        let pdf = crate::pdf::write(&[crate::pdf::Page::drawing(record(), 40.0, 15.0)], "Labels");
+        let objs = crate::pdf::tests::objects(&pdf);
+        let id = |name: &str| {
+            let ids: Vec<usize> =
+                objs.iter().enumerate().filter(|o| o.1.0 == format!("<< /Type /OCG /Name ({name}) >>")).map(|o| o.0 + 1).collect();
+            assert_eq!(ids.len(), 1, "{name}");
+            ids[0]
+        };
+        let (rios, cidades) = (id("Labels: Rios"), id("Labels: Cidades"));
+        let content = objs.iter().map(|o| String::from_utf8_lossy(&o.1).into_owned()).find(|c| c.contains(" BDC")).unwrap();
+        let marks: Vec<&str> = content.lines().filter(|l| l.ends_with(" BDC")).collect();
+        assert_eq!(marks, [format!("/OC /OC{rios} BDC"), format!("/OC /OC{cidades} BDC"), format!("/OC /OC{rios} BDC")]);
     }
 
     /// While a label is dragged, its callout's line is worked out where it is: from its feature,

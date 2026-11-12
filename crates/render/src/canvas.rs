@@ -241,12 +241,22 @@ impl Canvas {
     /// recording keeps layers; they change nothing drawn. Layers set this way don't nest: each
     /// ends the one before, so a caller can set one at the top of a loop that may `continue`.
     pub fn layer(&mut self, name: Option<&str>) {
+        self.set_layer(name.map(|n| (n, None)));
+    }
+
+    /// [`Canvas::layer`] for a layer identified by `id` as well as named (see
+    /// [`vector::Group::layer_id`]): a map layer's, or its labels', whose runs make one layer.
+    pub fn layer_with_id(&mut self, name: &str, id: u64) {
+        self.set_layer(Some((name, Some(id))));
+    }
+
+    fn set_layer(&mut self, layer: Option<(&str, Option<u64>)>) {
         self.keep(|r| {
             if std::mem::take(&mut r.layer) {
                 r.drawing.end_group();
             }
-            if let Some(name) = name {
-                r.drawing.begin_layer(name);
+            if let Some((name, id)) = layer {
+                r.drawing.begin_layer(name, id);
                 r.layer = true;
             }
         });

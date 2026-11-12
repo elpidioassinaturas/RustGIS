@@ -37128,7 +37128,7 @@ fn a_layout_pdf_has_its_elements_and_map_layers_as_layers() {
     // Without layers, and refused values.
     let plain = export(&mut s, json!({"pdf": {"layers": false}})).unwrap();
     assert!(!plain.contains("/OCProperties") && !plain.contains("/Type /OCG") && plain.contains("/VP [<< /Type /Viewport"));
-    for bad in [json!({"pdf": {"layers": "no"}}), json!({"pdf": false})] {
+    for bad in [json!({"pdf": {"layers": "no"}}), json!({"pdf": false}), json!({"pdf": {"layer": false}})] {
         let err = export(&mut s, bad.clone()).unwrap_err();
         assert!(err.contains("pdf"), "{bad}: {err}");
     }

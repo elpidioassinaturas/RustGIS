@@ -4442,12 +4442,19 @@ pub(crate) fn pictured_notices(s: &mut Session, frames: &[(u32, String)], pages:
     }
 }
 
+/// The keys `layout.export`'s `"pdf"` takes.
+const PDF_KEYS: &[&str] = &["layers"];
+
 /// How `layout.export`'s `"pdf": {…}` asks a PDF to be written: with its layers unless
-/// `"layers": false` (#1815).
+/// `"layers": false` (#1815). A key it doesn't know is refused, with the keys it takes.
 fn pdf_options(p: &Value) -> Result<rustgis_render::pdf::Options, String> {
     let mut options = rustgis_render::pdf::Options::default();
     let Some(pdf) = p.get("pdf").filter(|v| !v.is_null()) else { return Ok(options) };
     let Some(pdf) = pdf.as_object() else { return Err(r#"pdf is an object: {"layers": true|false}"#.into()) };
+    // A key it doesn't know (a typo) is refused, not left to change nothing unsaid.
+    if let Some(key) = pdf.keys().find(|k| !PDF_KEYS.contains(&k.as_str())) {
+        return Err(format!("pdf has no key \"{key}\": its keys are {}", PDF_KEYS.join(", ")));
+    }
     match pdf.get("layers") {
         None | Some(Value::Null) => {}
         Some(Value::Bool(on)) => options.layers = *on,

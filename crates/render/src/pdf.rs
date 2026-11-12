@@ -243,21 +243,22 @@ impl Default for Options {
 
 /// The document's optional content groups, one for each layer drawn, in the order first drawn:
 /// a layer is the same group on every page it is on (a map series' title, page after page), by
-/// its name, the group it is in, and which of the layers so named there it is.
+/// its name, the group it is in, and its id, or without one which of the layers so named there
+/// it is.
 #[derive(Default)]
 pub(crate) struct Layers {
     /// Whether layers are written at all ([`Options::layers`]).
     pub(crate) on: bool,
     /// Each group's object number, name, and the group it is in (its place here).
     list: Vec<(usize, String, Option<usize>)>,
-    by_key: std::collections::HashMap<(Option<usize>, String, usize), usize>,
+    by_key: std::collections::HashMap<(Option<usize>, String, Option<u64>, usize), usize>,
 }
 
 impl Layers {
-    /// The `n`th group named `name` inside group `parent`: its place here and object number,
-    /// numbered the first time.
-    pub(crate) fn group(&mut self, doc: &mut Doc, parent: Option<usize>, name: &str, n: usize) -> (usize, usize) {
-        let key = (parent, name.to_string(), n);
+    /// The group named `name` with `id` inside group `parent`, or without an id the `n`th so
+    /// named there: its place here and object number, numbered the first time.
+    pub(crate) fn group(&mut self, doc: &mut Doc, parent: Option<usize>, name: &str, id: Option<u64>, n: usize) -> (usize, usize) {
+        let key = (parent, name.to_string(), id, if id.is_some() { 0 } else { n });
         if let Some(&at) = self.by_key.get(&key)
             && let Some(&(id, ..)) = self.list.get(at)
         {
@@ -531,21 +532,21 @@ pub(crate) mod tests {
             d.fill(tiny_skia::PathBuilder::from_rect(r), fill, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity());
         };
         let mut d = Drawing::new(20.0, 20.0);
-        d.begin_layer("Título (rascunho)");
+        d.begin_layer("Título (rascunho)", None);
         square(&mut d, 1);
         d.end_group();
-        d.begin_layer("Mapa");
+        d.begin_layer("Mapa", None);
         let mut frame = Drawing::new(20.0, 20.0);
-        frame.begin_layer("Países");
+        frame.begin_layer("Países", Some(7));
         square(&mut frame, 2);
         frame.end_group();
-        frame.begin_layer("Labels: Países");
+        frame.begin_layer("Labels: Países", Some(7));
         square(&mut frame, 3);
         frame.end_group();
         d.place(frame, tiny_skia::Transform::from_translate(2.0, 2.0), 1.0, rustgis_map::effects::Blend::Normal, None);
         d.end_group();
         for c in [4, 5] {
-            d.begin_layer("Texto");
+            d.begin_layer("Texto", None);
             square(&mut d, c);
             d.end_group();
         }
