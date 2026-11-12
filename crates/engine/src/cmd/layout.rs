@@ -2473,9 +2473,12 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     for (n, r, kind) in around {
         l.add(&n, r, kind);
     }
+    if s.project.layouts.len() >= crate::project::MAX_LAYOUTS {
+        return Err(format!("a project holds at most {} layouts; remove one first", crate::project::MAX_LAYOUTS));
+    }
     // The coverage grid as the placement searched it, with what was placed on it, for a look at
-    // why a surround moved (#1379). The layout is made by then: a file that can't be written is
-    // said, and the layout kept.
+    // why a surround moved (#1379). The layout is made by then (nothing below refuses it): a file
+    // that can't be written is said, and the layout kept.
     let mut coverage_written = Value::Null;
     if let Some(path) = &coverage_path {
         let rects: Vec<Rect> = placed.iter().map(|(_, r)| *r).collect();
@@ -2490,9 +2493,6 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     }
     // Every element by name and id, for `layout.update`.
     let elements: Vec<Value> = l.elements.iter().map(|e| json!({"element": e.id, "name": e.name, "kind": e.kind.code()})).collect();
-    if s.project.layouts.len() >= crate::project::MAX_LAYOUTS {
-        return Err(format!("a project holds at most {} layouts; remove one first", crate::project::MAX_LAYOUTS));
-    }
     s.project.layouts.push(l);
     let i = s.project.layouts.len() - 1;
     s.active_layout = Some(i);

@@ -41698,6 +41698,14 @@ fn publication_writes_its_coverage_grid() {
     assert!(r["coverage"].is_null(), "{r}");
     assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("the coverage image isn't written")), "{r}");
     assert_eq!(s.project.layouts.len(), layouts + 1);
+    // A project holding all the layouts it can is refused before the file is written.
+    let full = dir.join("full.png");
+    let blank = s.project.layouts[0].clone();
+    s.project.layouts.resize(crate::project::MAX_LAYOUTS, blank);
+    let e = s.run("layout.publication", &json!({"extent": piaui, "coverage": full.display().to_string()})).unwrap_err();
+    assert!(e.contains("at most"), "{e}");
+    assert!(!full.exists());
+    s.project.layouts.truncate(layouts + 1);
     // Without it, no file and no warning about one.
     let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
     assert!(r["coverage"].is_null() && !r["warnings"].to_string().contains("coverage"), "{r}");
