@@ -129,7 +129,7 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"layout"?}"#),
         C::new("layout.export", "Export Layout", "Publish › Output", |s, p| super::exports::write_here(s, p, "layout.export")).inputs(layout_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
-            .params(r#"{"layout"?, "path": "*.png|*.pdf|*.svg" (PNG/SVG: current page; SVG: each element a group of its own; text and shapes as SVG, map frames and surrounds as vectors, rasters and tiles in them as pictures at dpi), "dpi"?: 72..600, "allPages"?: bool (PDF only; default true: every map series page, up to 500; false: the current page), "georeference"?: bool (PDF only; default true: map frames carry their coordinates, a GeoPDF; false: none)}"#),
+            .params(r#"{"layout"?, "path": "*.png|*.pdf|*.svg" (PNG/SVG: current page; SVG: each element a group of its own; text and shapes as SVG, map frames and surrounds as vectors, rasters and tiles in them as pictures at dpi), "dpi"?: 72..600, "allPages"?: bool (PDF only; default true: every map series page, up to 500; false: the current page), "georeference"?: bool (PDF only; default true: map frames carry their coordinates, a GeoPDF; false: none), "pdf"?: {"layers"?: bool (default true: each element, and in a map frame each layer and its labels, a PDF layer that vector editors open as a layer; false: none)}}"#),
         C::new("layout.save", "Save Layout File", "Publish › Save As", |s, p| {
             let path = ps(p, "path").ok_or("path is required")?;
             let l = active(s, p)?.clone();
@@ -4188,15 +4188,24 @@ fn named_fonts_unread(layout: &Layout) -> Option<&'static str> {
 /// Layout `li` as a PDF (kept as vectors; every map series page when `all`; its map frames
 /// georeferenced) or a PNG of the current page, at `dpi`.
 pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) -> Result<Vec<u8>, String> {
-    layout_bytes_with(s, li, pdf, dpi, all, true)
+    layout_bytes_with(s, li, pdf, dpi, all, true, rustgis_render::pdf::Options::default())
 }
 
-/// [`layout_bytes`], a PDF's map frames georeferenced only when `georeference` (#1191).
-/// Returns an actionable error if a linked archive changes while the pages are drawn.
-pub fn layout_bytes_with(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool, georeference: bool) -> Result<Vec<u8>, String> {
+/// [`layout_bytes`], a PDF's map frames georeferenced only when `georeference` (#1191), written
+/// as `options` say (its layers, #1815). Returns an actionable error if a linked archive changes
+/// while the pages are drawn.
+pub fn layout_bytes_with(
+    s: &mut Session,
+    li: usize,
+    pdf: bool,
+    dpi: f64,
+    all: bool,
+    georeference: bool,
+    options: rustgis_render::pdf::Options,
+) -> Result<Vec<u8>, String> {
     let layout = s.project.layouts.get(li).ok_or("no layout")?;
     let revisions = rustgis_render::layout::archive_revisions(layout, &s.project.maps);
-    let result = layout_bytes_inner(s, li, pdf, dpi, all, georeference);
+    let result = layout_bytes_inner(s, li, pdf, dpi, all, georeference, options);
     let layout = s.project.layouts.get(li).ok_or("no layout")?;
     revisions.finish_revision(
         rustgis_render::layout::archive_revisions(layout, &s.project.maps),
@@ -4205,7 +4214,15 @@ pub fn layout_bytes_with(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: b
     )?
 }
 
-fn layout_bytes_inner(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool, georeference: bool) -> Result<Vec<u8>, String> {
+fn layout_bytes_inner(
+    s: &mut Session,
+    li: usize,
+    pdf: bool,
+    dpi: f64,
+    all: bool,
+    georeference: bool,
+    options: rustgis_render::pdf::Options,
+) -> Result<Vec<u8>, String> {
     let saved = s.project.layouts.get(li).ok_or("no layout")?.clone();
     if let Some(note) = named_fonts_unread(&saved) {
         s.warn(note);
@@ -4309,7 +4326,7 @@ fn layout_bytes_inner(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool
     let (pages, png) = result?;
     pictured_notices(s, &frames_pictured, &pages_pictured);
     georeference_notices(s, &left_out, &by_corners, pages.len());
-    if pdf { Ok(rustgis_render::pdf::write(&pages, &saved.name)) } else { png.ok_or_else(|| "nothing to draw".to_string()) }
+    if pdf { Ok(rustgis_render::pdf::write_with(&pages, &saved.name, options)) } else { png.ok_or_else(|| "nothing to draw".to_string()) }
 }
 
 /// Says which map frames a PDF doesn't georeference, with why, and which it georeferences by their
@@ -4425,6 +4442,20 @@ pub(crate) fn pictured_notices(s: &mut Session, frames: &[(u32, String)], pages:
     }
 }
 
+/// How `layout.export`'s `"pdf": {…}` asks a PDF to be written: with its layers unless
+/// `"layers": false` (#1815).
+fn pdf_options(p: &Value) -> Result<rustgis_render::pdf::Options, String> {
+    let mut options = rustgis_render::pdf::Options::default();
+    let Some(pdf) = p.get("pdf").filter(|v| !v.is_null()) else { return Ok(options) };
+    let Some(pdf) = pdf.as_object() else { return Err(r#"pdf is an object: {"layers": true|false}"#.into()) };
+    match pdf.get("layers") {
+        None | Some(Value::Null) => {}
+        Some(Value::Bool(on)) => options.layers = *on,
+        Some(_) => return Err("pdf.layers is true or false".into()),
+    }
+    Ok(options)
+}
+
 /// `layout.export`: a layout to a PNG, PDF or SVG. It draws a copy of the project, so the project
 /// can change meanwhile (a map series steps through its pages on the copy); a cancelled export
 /// stops at the next page, or its map's wait for tiles, and writes nothing.
@@ -4437,6 +4468,7 @@ pub(crate) fn export_work(s: &Session, p: &Value) -> Result<super::exports::Work
         return Err("export to a .png, .pdf or .svg file".into());
     }
     let (dpi, all, georeference) = (f(p, "dpi").unwrap_or(150.0), b(p, "allPages").unwrap_or(true), b(p, "georeference").unwrap_or(true));
+    let options = pdf_options(p)?;
     let mut project = s.project.clone();
     for m in &mut project.maps {
         m.detach_reads();
@@ -4447,7 +4479,7 @@ pub(crate) fn export_work(s: &Session, p: &Value) -> Result<super::exports::Work
             let bytes = if svg {
                 layout_svg(&mut copy, li, dpi)?.into_bytes()
             } else {
-                layout_bytes_with(&mut copy, li, pdf, dpi, all, georeference)?
+                layout_bytes_with(&mut copy, li, pdf, dpi, all, georeference, options)?
             };
             rustgis_data::progress::check().map_err(|e| e.to_string())?;
             rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;

@@ -135,6 +135,9 @@ pub struct Group {
     pub blend: Blend,
     pub clip: Option<Clip>,
     pub transform: Transform,
+    /// The layer its items make, named: a layout element, a map layer or its labels, which a PDF
+    /// writes as an optional content group so a vector editor opens it as a layer (#1815).
+    pub layer: Option<String>,
 }
 
 /// A clip path: what is outside it isn't drawn.
@@ -226,7 +229,22 @@ impl Drawing {
         let opacity = if opacity.is_finite() { opacity.clamp(0.0, 1.0) } else { 1.0 };
         let clip = clip.filter(|c| c.transform.is_finite());
         self.cost += clip.as_ref().map_or(0, |c| path_cost(&c.path)) + 120;
-        self.open.push(Group { items: Vec::new(), opacity, blend, clip, transform: Transform::identity() });
+        self.open.push(Group { items: Vec::new(), opacity, blend, clip, transform: Transform::identity(), layer: None });
+    }
+
+    /// Starts a layer named `name`: what is drawn until [`Drawing::end_group`] is one, drawn as
+    /// it would be without it (see [`Group::layer`]).
+    pub fn begin_layer(&mut self, name: &str) {
+        self.cost += 120 + name.len();
+        let layer = Some(name.chars().filter(|c| !c.is_control()).take(200).collect());
+        self.open.push(Group {
+            items: Vec::new(),
+            opacity: 1.0,
+            blend: Blend::Normal,
+            clip: None,
+            transform: Transform::identity(),
+            layer,
+        });
     }
 
     /// Places `child` as a group: its items moved by `transform` (from its space to this
@@ -253,7 +271,7 @@ impl Drawing {
         self.count += count;
         self.cost += cost;
         let opacity = if opacity.is_finite() { opacity.clamp(0.0, 1.0) } else { 1.0 };
-        self.add(Item::Group(Group { items, opacity, blend, clip, transform }));
+        self.add(Item::Group(Group { items, opacity, blend, clip, transform, layer: None }));
     }
 
     /// Ends the innermost group begun; nothing when none is open. An empty group is left out.
@@ -382,6 +400,20 @@ pub(crate) fn deflate_rows<'a, T: 'a>(rows: impl Iterator<Item = &'a [T]>, mut f
         true
     });
     (status == TDEFLStatus::Done).then_some(out)
+}
+
+/// `items` with every layer's group replaced by its items, at any depth: for tests that look at
+/// what is drawn, not at the layers it is in.
+#[cfg(test)]
+pub(crate) fn without_layers(items: Vec<Item>) -> Vec<Item> {
+    items
+        .into_iter()
+        .flat_map(|i| match i {
+            Item::Group(g) if g.layer.is_some() => without_layers(g.items),
+            Item::Group(g) => vec![Item::Group(Group { items: without_layers(g.items), ..g })],
+            other => vec![other],
+        })
+        .collect()
 }
 
 /// Draws `items` (moved by `base`) back onto pixels with tiny-skia: for tests comparing a

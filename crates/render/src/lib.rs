@@ -537,6 +537,9 @@ pub struct Rendered {
     pub pending_in_place: Vec<u32>,
     /// The frame kept as vectors, when it was recorded ([`render_complete_recorded`]).
     pub(crate) recorded: Option<Canvas>,
+    /// When recorded, each of `labels`' map layer, by id and name (`u32::MAX` and no name for
+    /// a label of no layer's), for [`draw_labels`]; else empty.
+    pub(crate) label_layers: Vec<(u32, String)>,
 }
 
 /// Which rasteriser [`render_backend`] targets: the tiny-skia CPU pixmap (the default, and the
@@ -2571,6 +2574,7 @@ fn render_tilted(map: &mut Map, view: &View, full_res_rasters: bool, sources_rea
         partial,
         pending_in_place,
         recorded: None,
+        label_layers: Vec::new(),
     })
 }
 
@@ -3985,6 +3989,8 @@ fn render_frame(
     // The layer drawn last, whose tile layers go over it before the next.
     let mut below: Option<u32> = None;
     for li in order {
+        // Each layer drawn is a layer of the recording (#1815); what comes between them isn't.
+        pm.layer(None);
         // A frame no longer wanted stops between layers (see `cancel`).
         if cancel::requested() {
             break;
@@ -3997,6 +4003,7 @@ fn render_frame(
         if !layer.visible || !layer.in_scale_range(scale) || held.contains(&layer.id) {
             continue;
         }
+        pm.layer(Some(&layer.name));
         let opacity = layer.opacity() * group_opacity.get(&layer.id).copied().unwrap_or(1.0);
         let mask = masks.iter().find(|(id, _)| *id == layer.id).map(|(_, m)| m);
         let (blend, layer_blend) = (blend_mode(layer.blend), layer.blend);
@@ -5091,6 +5098,7 @@ fn render_frame(
             cpu_dirty = true;
         }
     }
+    pm.layer(None);
     // A frame stopped part-way (see `cancel`) is no frame: its tiles, labels and effects aren't
     // worth working out.
     if cancel::requested() {
@@ -5158,6 +5166,15 @@ fn render_frame(
         None => (view.width, view.height),
     };
     let placed = place_labels_with_previews(label_candidates, fixed_labels, lw as f32, lh as f32, lock.is_some(), display.show_unplaced);
+    // Each placed label's map layer, for a recording to keep each layer's labels together: the
+    // fixed labels (graphics text) come first, then one for each key.
+    let label_layers: Vec<(u32, String)> = if pm.is_recording() {
+        let fixed = placed.labels.len().saturating_sub(placed.keys.len());
+        let name = |id: u32| map.layers.iter().find(|l| l.id == id).map(|l| l.name.clone()).unwrap_or_default();
+        std::iter::repeat_n((u32::MAX, String::new()), fixed).chain(placed.keys.iter().map(|((id, ..), _)| (*id, name(*id)))).collect()
+    } else {
+        Vec::new()
+    };
     // (The lock is never taken from a tilted view: its labels' places out of sight are dropped,
     // so the numbers of the places they take aren't those of their class's.)
     if display.locked && map.label_lock.is_none() && !matches!(labels_to, Labels::Tilted(..)) {
@@ -5206,6 +5223,7 @@ fn render_frame(
                 partial,
                 pending_in_place,
                 recorded,
+                label_layers,
             }))
         }
         Backend::Gpu | Backend::GpuLive => {
@@ -6501,12 +6519,41 @@ fn render_drawing_inner(map: &mut Map, view: &View) -> Option<vector::Drawing> {
             c
         }
     };
-    for l in r.unplaced.iter().chain(&r.labels) {
-        text::draw(&mut pm, l, view.pixels_per_point as f32);
-    }
+    draw_labels(&mut pm, (&r.unplaced, &r.labels, &r.label_layers), view.pixels_per_point as f32);
     text::scale_bar(&mut pm, view, map.ground_res_at(&view.camera));
     draw_attribution(&mut pm, &r.attribution, view.pixels_per_point as f32, (0.0, 0.0));
     pm.into_drawing()
+}
+
+/// Draws a frame's unplaced and placed labels. A recording keeps each map layer's placed labels
+/// together as a layer of their own, "Labels: <layer>" (#1815), the layers in the order of their
+/// first label: placed labels don't overlap, so the page looks the same.
+pub(crate) fn draw_labels(pm: &mut Canvas, (unplaced, labels, layers): (&[PlacedLabel], &[PlacedLabel], &[(u32, String)]), ppp: f32) {
+    for l in unplaced {
+        text::draw(pm, l, ppp);
+    }
+    if !pm.is_recording() || layers.len() != labels.len() {
+        for l in labels {
+            text::draw(pm, l, ppp);
+        }
+        return;
+    }
+    let mut first = std::collections::HashMap::new();
+    for (i, (id, _)) in layers.iter().enumerate() {
+        first.entry(*id).or_insert(i);
+    }
+    let mut order: Vec<usize> = (0..labels.len()).collect();
+    order.sort_by_key(|i| layers.get(*i).and_then(|(id, _)| first.get(id)).copied().unwrap_or(0));
+    let mut shown = None;
+    for i in order {
+        let (Some(l), Some((id, name))) = (labels.get(i), layers.get(i)) else { continue };
+        if shown != Some(*id) {
+            pm.layer((*id != u32::MAX).then(|| format!("Labels: {name}")).as_deref());
+            shown = Some(*id);
+        }
+        text::draw(pm, l, ppp);
+    }
+    pm.layer(None);
 }
 
 /// Renders a map with its labels, a scale bar and a north arrow to PNG bytes.

@@ -228,6 +228,8 @@ fn draw_page(
         }
     }
     for e in layout.elements.iter().filter(visible) {
+        // Each element is a layer of the recording, named after it (#1815).
+        pm.layer(Some(if e.name.trim().is_empty() { e.kind.code() } else { &e.name }));
         let (x, y, ew, eh) =
             ((e.x * k - f64::from(bounds.x())) as f32, (e.y * k - f64::from(bounds.y())) as f32, (e.w * k) as f32, (e.h * k) as f32);
         let Some(r) = Rect::from_xywh(x, y, ew.max(1.0), eh.max(1.0)) else { continue };
@@ -476,6 +478,7 @@ fn draw_page(
             }
         }
     }
+    pm.layer(None);
     Some(pm)
 }
 
@@ -526,14 +529,16 @@ pub fn frame_map_preview(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: 
 /// comma or not) and its attribution drawn on it: on its recording when it was recorded, else on
 /// its pixels. The attribution keeps clear of the grid's labels.
 fn finish_frame(img: crate::Rendered, ppp: f64, grid: Option<(&Map, &View, &Grid, bool)>) -> Canvas {
-    let mut pm = img.recorded.unwrap_or_else(|| Canvas::from_pixmap(img.pixmap));
-    for l in img.unplaced.iter().chain(&img.labels) {
-        text::draw(&mut pm, l, ppp as f32);
-    }
-    let labels = grid.map(|(map, view, g, comma)| draw_grid(&mut pm, map, view, g, comma)).unwrap_or_default();
+    let crate::Rendered { pixmap, recorded, labels, unplaced, label_layers, attribution, .. } = img;
+    let mut pm = recorded.unwrap_or_else(|| Canvas::from_pixmap(pixmap));
+    crate::draw_labels(&mut pm, (&unplaced, &labels, &label_layers), ppp as f32);
+    // The grid is a layer of its own (#1815).
+    pm.layer(grid.is_some().then_some("Grid"));
+    let grid_labels = grid.map(|(map, view, g, comma)| draw_grid(&mut pm, map, view, g, comma)).unwrap_or_default();
+    pm.layer(None);
     let (w, h) = (pm.width() as f32 / ppp as f32, pm.height() as f32 / ppp as f32);
-    let inset = crate::attribution_text(&img.attribution).map_or((0.0, 0.0), |(_, tw)| attribution_inset((w, h), tw, &labels));
-    crate::draw_attribution(&mut pm, &img.attribution, ppp as f32, inset);
+    let inset = crate::attribution_text(&attribution).map_or((0.0, 0.0), |(_, tw)| attribution_inset((w, h), tw, &grid_labels));
+    crate::draw_attribution(&mut pm, &attribution, ppp as f32, inset);
     pm
 }
 
@@ -2754,6 +2759,7 @@ mod tests {
         let (drawing, pictured) = render_drawing(&layout, &mut maps, 150.0, &PageInfo::default()).unwrap();
         assert!(pictured.is_empty() && !drawing.overflowed());
         let (_, _, items) = drawing.finish();
+        let items = crate::vector::without_layers(items);
         let text: String = items
             .iter()
             .filter_map(|i| if let Item::Glyphs(r) = i { Some(r) } else { None })
@@ -2805,6 +2811,7 @@ mod tests {
         }
         let (drawing, _) = render_drawing(&layout, &mut maps, 96.0, &PageInfo::default()).unwrap();
         let (_, _, items) = drawing.finish();
+        let items = crate::vector::without_layers(items);
         let frame = items.iter().find_map(|i| if let Item::Group(g) = i { Some(g) } else { None }).expect("the frame's group");
         // The turned view holds the north-up frame, turned.
         let Some(Item::Group(north)) = frame.items.first() else { panic!("the north-up frame inside") };
@@ -2822,6 +2829,7 @@ mod tests {
         let (drawing, pictured) = result.unwrap();
         assert_eq!(pictured.iter().map(|p| p.1.as_str()).collect::<Vec<_>>(), ["World"]);
         let (_, _, items) = drawing.finish();
+        let items = crate::vector::without_layers(items);
         assert!(items.iter().any(|i| matches!(i, Item::Image(_))), "the frame as a picture");
     }
 
@@ -3844,6 +3852,7 @@ mod tests {
         assert!(b - t > 4 * (r - l) && l > px(44.0) && r < px(56.0), "the text runs down the page: {l},{t} to {r},{b}");
         let (drawing, _) = render_drawing(&layout, &mut [], 96.0, &info).unwrap();
         let (_, _, items) = drawing.finish();
+        let items = crate::vector::without_layers(items);
         let pieces: usize = items
             .iter()
             .filter_map(|i| if let Item::Stroke { path, .. } = i { Some(path) } else { None })
@@ -3871,6 +3880,7 @@ mod tests {
         let png = render(&layout, &mut [], 96.0, &info).unwrap();
         let (drawing, _) = render_drawing(&layout, &mut [], 96.0, &info).unwrap();
         let (_, _, items) = drawing.finish();
+        let items = crate::vector::without_layers(items);
         let pieces: usize = items
             .iter()
             .filter_map(|i| if let Item::Stroke { path, .. } = i { Some(path) } else { None })
@@ -4004,6 +4014,7 @@ Elaboração: RustGIS",
         let png = render(&layout, &mut [], 96.0, &info).unwrap();
         let (drawing, _) = render_drawing(&layout, &mut [], 96.0, &info).unwrap();
         let (_, _, items) = drawing.finish();
+        let items = crate::vector::without_layers(items);
         let text: String = items
             .iter()
             .filter_map(|i| if let Item::Glyphs(r) = i { Some(r) } else { None })
@@ -4560,6 +4571,7 @@ Elaboração: RustGIS",
             partial: Vec::new(),
             pending_in_place: Vec::new(),
             recorded: None,
+            label_layers: Vec::new(),
         };
         let framed = finish_frame(img, ppp, Some((&map, &view, &all, false)));
         let (a, b) = (labels_pm.pixmap(), framed.pixmap());
