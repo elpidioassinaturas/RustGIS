@@ -296,29 +296,12 @@ impl Trace<'_> {
     }
 
     /// The height between cell centres at column `x` and row `y` (fractional, inside the grid),
-    /// bilinear between the four around it; with one of them missing, the nearest one. On a row or
-    /// a column, where each step of a trace is, only the two cells either side are read.
+    /// bilinear between the four around it; with one of them missing, the nearest one.
     fn between(&self, x: f64, y: f64) -> Option<f64> {
         // Truncating is flooring here (both are at least 0), and much cheaper.
         let (i, j) = (x as usize, y as usize);
         let (fx, fy) = (x - i as f64, y - j as f64);
         let (i1, j1) = ((i + 1).min(self.w - 1), (j + 1).min(self.h - 1));
-        let two = |a: Option<f64>, b: Option<f64>, f: f64| match (a, b) {
-            (Some(a), Some(b)) => Some(a + (b - a) * f),
-            (a, b) => {
-                if f < 0.5 {
-                    a
-                } else {
-                    b
-                }
-            }
-        };
-        if fy == 0.0 {
-            return two(self.at(i, j), self.at(i1, j), fx);
-        }
-        if fx == 0.0 {
-            return two(self.at(i, j), self.at(i, j1), fy);
-        }
         match (self.at(i, j), self.at(i1, j), self.at(i, j1), self.at(i1, j1)) {
             (Some(a), Some(b), Some(c), Some(d)) => {
                 let top = a + (b - a) * fx;
@@ -330,9 +313,9 @@ impl Trace<'_> {
     }
 
     /// The steepest tangent up to the terrain seen along `way` from the cell at column `col`, row
-    /// `row` and height `z0` (`-∞` with nothing seen). The trace stops
-    /// once nothing farther can change what it is for: the terrain left can't rise above the
-    /// tangent kept or `floor`, or the tangent is already `ceiling`.
+    /// `row` and height `z0` (`-∞` with nothing seen). The trace stops once nothing farther can
+    /// change what it is for: the terrain left can't rise above the tangent kept or `floor`, or the
+    /// tangent is already `ceiling`.
     fn horizon(&self, way: &Way, (col, row, z0): (usize, usize, f64), floor: f64, ceiling: f64) -> f64 {
         let (sx, sy) = way.step;
         let (wmax, hmax) = ((self.w - 1) as f64, (self.h - 1) as f64);
