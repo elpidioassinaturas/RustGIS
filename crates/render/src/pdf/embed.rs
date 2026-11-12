@@ -253,10 +253,23 @@ mod tests {
         }
         let content = objs.iter().map(|o| String::from_utf8_lossy(&o.1).into_owned()).find(|s| s.contains(" TJ")).unwrap();
         assert!(content.contains("[<0001>") && content.contains("<0004>] TJ"), "codes are CIDs: {content}");
-        // Each CID is its character's glyph: in the subset (CIDToGIDMap /Identity) the same
-        // advance and outline as the face's own glyph, and the same width in /W.
+        // Each CID is its character's glyph (CIDToGIDMap /Identity), with its width in /W.
+        assert_eq!(cids_are_their_glyphs(font, &objs, "/Subtype /CIDFontType2"), 4, "A, ç, ã, o");
+        // Outlines, as before, whatever the face allows.
+        let (outlines, none) = write_with(&[page(font, "Ação")], "Fonts", Text::Outlines);
+        assert!(none.is_empty() && outlines == write(&[page(font, "Ação")], "Fonts"));
+        let text = String::from_utf8_lossy(&outlines);
+        assert!(text.contains("/Subtype /Type3") && !text.contains("/Type0"));
+    }
+
+    /// Checks, for every CID of the document's two-byte ToUnicode map, that the subset embedded
+    /// for the CID font whose dictionary holds `subtype` draws its character as `font` does at
+    /// that CID (the same advance and outline) and that /W has the face's width for it; how many
+    /// CIDs it checked.
+    fn cids_are_their_glyphs(font: &FontRef<'static>, objs: &[(String, Vec<u8>)], subtype: &str) -> usize {
+        let file = objs.iter().find(|o| o.0.contains("/Length1") || o.0.contains("/Subtype /OpenType")).unwrap();
         let subset = FontRef::try_from_slice(&file.1).unwrap();
-        let cid_font = objs.iter().find(|o| o.0.contains("/Subtype /CIDFontType2")).map(|o| o.0.as_str()).unwrap();
+        let cid_font = objs.iter().find(|o| o.0.contains(subtype)).map(|o| o.0.as_str()).unwrap();
         let w: Vec<f32> = cid_font
             .split("/W [")
             .nth(1)
@@ -268,6 +281,7 @@ mod tests {
             .split_whitespace()
             .map(|v| v.parse().unwrap())
             .collect();
+        let cmap = objs.iter().map(|o| String::from_utf8_lossy(&o.1).into_owned()).find(|s| s.contains("<0000> <FFFF>")).unwrap();
         let upm = font.units_per_em().unwrap();
         let mut checked = 0;
         for line in cmap.lines().filter(|l| l.starts_with('<') && l.len() == 13 && *l != "<0000> <FFFF>") {
@@ -277,17 +291,29 @@ mod tests {
             assert_eq!(font.h_advance_unscaled(own), subset.h_advance_unscaled(sub), "{ch}: CID {cid}");
             let points = |f: &FontRef, g| f.outline(g).map(|o| o.curves.iter().map(curve_points).collect::<Vec<_>>());
             assert_eq!(points(font, own), points(&subset, sub), "{ch}: CID {cid}'s outline");
-            let width =
-                w.chunks(2).find(|p| p[0] == f32::from(cid)).map(|p| p[1]).unwrap_or_else(|| panic!("CID {cid} in {w:?}: {cid_font}"));
+            let width = w.chunks(2).find(|p| p[0] == f32::from(cid)).map(|p| p[1]).unwrap_or_else(|| panic!("CID {cid} in {w:?}"));
             assert!((width - font.h_advance_unscaled(own) / upm * 1000.0).abs() < 0.01, "{ch}: /W {width}");
             checked += 1;
         }
-        assert_eq!(checked, 4, "A, ç, ã, o");
-        // Outlines, as before, whatever the face allows.
-        let (outlines, none) = write_with(&[page(font, "Ação")], "Fonts", Text::Outlines);
-        assert!(none.is_empty() && outlines == write(&[page(font, "Ação")], "Fonts"));
-        let text = String::from_utf8_lossy(&outlines);
-        assert!(text.contains("/Subtype /Type3") && !text.contains("/Type0"));
+        checked
+    }
+
+    /// A CFF face (an OpenType .otf) is embedded as a CIDFontType0 over its subset as an
+    /// OpenType file (FontFile3, PDF 1.6), each CID its character's glyph. The face is the
+    /// test's own (testdata/README.md): a square, a triangle and two bars, each its own width.
+    #[test]
+    fn a_cff_face_is_a_cid_font_type0() {
+        let bytes: &'static [u8] = include_bytes!("../../testdata/test-cff.otf");
+        let font: &'static FontRef<'static> = Box::leak(Box::new(FontRef::try_from_slice(bytes).unwrap()));
+        let (pdf, outlined) = write_with(&[page(font, "CAB")], "CFF", Text::Fonts);
+        assert!(outlined.is_empty(), "{outlined:?}");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.starts_with("%PDF-1.6") && !text.contains("/Type3"), "OpenType font files are PDF 1.6");
+        let objs = objects(&pdf);
+        let cid_font = objs.iter().find(|o| o.0.contains("/Subtype /CIDFontType0")).map(|o| o.0.as_str()).unwrap();
+        assert!(!cid_font.contains("/CIDToGIDMap"), "{cid_font}");
+        assert!(objs.iter().any(|o| o.0.contains("/FontFile3")) && objs.iter().any(|o| o.0.contains("/Subtype /OpenType")));
+        assert_eq!(cids_are_their_glyphs(font, &objs, "/Subtype /CIDFontType0"), 3, "C, A, B");
     }
 
     /// A face whose licence forbids embedding (fsType 2) is set in outlines, and said.
