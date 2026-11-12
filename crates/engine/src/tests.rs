@@ -7025,6 +7025,74 @@ fn layout_legends_list_what_the_frame_draws() {
     assert!(matches!(old, rustgis_map::layout::ElementKind::Legend { all_classes: false, hide_other: false, .. }));
 }
 
+/// A measured grid can be labelled as MGRS (#1042 piece 9): with no system or a WGS 84 UTM zone's
+/// EPSG code; refused for a graticule and over another system, nothing changed, and dropped by a
+/// switch to a graticule; kept with the project, and left off, said, when a file names another
+/// system with it.
+#[test]
+fn a_measured_grid_can_be_labelled_as_mgrs() {
+    use rustgis_map::layout::ElementKind;
+    let mut s = world();
+    s.run("layout.new", &json!({"page": "a4", "template": "map"})).unwrap();
+    let frame = s.project.layouts[0].elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap().id;
+    let grid = |s: &Session| match &s.project.layouts[0].element(frame).unwrap().kind {
+        ElementKind::MapFrame { grid, .. } => grid.clone().unwrap(),
+        k => panic!("{k:?}"),
+    };
+    s.run("layout.addElement", &json!({"kind": "grid"})).unwrap();
+    let e = s.run("layout.update", &json!({"element": frame, "grid": {"mgrs": true}})).unwrap_err();
+    assert!(e.contains("measured"), "{e}");
+    s.run("layout.update", &json!({"element": frame, "grid": {"type": "measured", "mgrs": true}})).unwrap();
+    assert!(grid(&s).mgrs && grid(&s).crs.is_none());
+    s.run("layout.update", &json!({"element": frame, "grid": {"crs": "EPSG:32733"}})).unwrap();
+    assert_eq!(grid(&s).crs.as_deref(), Some("EPSG:32733"));
+    let before = grid(&s);
+    for crs in ["EPSG:2056", "EPSG:25832", "+proj=utm +zone=33 +datum=WGS84"] {
+        let e = s.run("layout.update", &json!({"element": frame, "grid": {"crs": crs}})).unwrap_err();
+        assert!(e.contains("MGRS labels need a WGS 84 UTM zone") && e.contains(crs), "{e}");
+    }
+    assert_eq!(grid(&s), before, "a refusal changes nothing");
+    // Off, any system again; on again over one that isn't a UTM zone, refused.
+    s.run("layout.update", &json!({"element": frame, "grid": {"mgrs": false, "crs": "EPSG:2056"}})).unwrap();
+    assert!(s.run("layout.update", &json!({"element": frame, "grid": {"mgrs": true}})).is_err());
+    assert!(!grid(&s).mgrs);
+    s.run("layout.update", &json!({"element": frame, "grid": {"mgrs": true, "crs": ""}})).unwrap();
+    assert!(grid(&s).mgrs && grid(&s).crs.is_none());
+    // A graticule doesn't keep them, so any system can be named on it, and measured again it's
+    // a plain measured grid.
+    s.run("layout.update", &json!({"element": frame, "grid": {"type": "graticule"}})).unwrap();
+    assert!(!grid(&s).mgrs);
+    s.run("layout.update", &json!({"element": frame, "grid": {"crs": "EPSG:2056"}})).unwrap();
+    s.run("layout.update", &json!({"element": frame, "grid": {"type": "measured"}})).unwrap();
+    assert!(!grid(&s).mgrs && grid(&s).crs.as_deref() == Some("EPSG:2056"));
+    s.run("layout.update", &json!({"element": frame, "grid": {"mgrs": true, "crs": ""}})).unwrap();
+    // Kept with the project; a file naming another system with it has it left off, and said.
+    let text = serde_json::to_string(&s.project).unwrap();
+    let back = crate::Project::from_json(&text).unwrap();
+    let saved = |p: &crate::Project| match &p.layouts[0].element(frame).unwrap().kind {
+        ElementKind::MapFrame { grid, .. } => grid.clone().unwrap(),
+        _ => panic!(),
+    };
+    assert!(saved(&back).mgrs);
+    let edited = text.replace("\"mgrs\":true", "\"mgrs\":true,\"crs\":\"EPSG:2056\"");
+    assert_ne!(edited, text);
+    let mut back = crate::Project::from_json(&edited).unwrap();
+    let g = saved(&back);
+    assert_eq!((g.mgrs, g.crs.as_deref()), (false, Some("EPSG:2056")));
+    let said: Vec<String> = back.take_read_notices(&[crate::project::ReadPart::Layouts]).iter().map(|n| n.english()).collect();
+    assert!(said.iter().any(|n| n.contains("MGRS labels turned off on 1 map frame grid(s)")), "{said:?}");
+    assert!(!said.iter().any(|n| n.contains("value out of range")), "{said:?}");
+    // A blank system kept from a file is none: the grid can still be changed.
+    let blank = text.replace("\"mgrs\":true", "\"mgrs\":true,\"crs\":\" \"");
+    let mut blank_project = crate::Project::from_json(&blank).unwrap();
+    let blank_said: Vec<String> =
+        blank_project.take_read_notices(&[crate::project::ReadPart::Layouts]).iter().map(|n| n.english()).collect();
+    assert!(!blank_said.iter().any(|n| n.contains("MGRS labels turned off") || n.contains("value out of range")), "{blank_said:?}");
+    let mut opened = Session::new(blank_project);
+    assert!(saved(&opened.project).mgrs);
+    opened.run("layout.update", &json!({"element": frame, "grid": {"color": "#FF0000"}})).unwrap();
+}
+
 /// A map frame's grid can be a measured grid (#1008): eastings and northings in a projected
 /// system its step apart in metres, with whole or short labels; a system that isn't projected, or
 /// isn't one, is refused; a change of type starts its step afresh.
@@ -7421,6 +7489,11 @@ fn layout_colorbars_follow_a_raster() {
     assert_eq!(s.project.layouts[0].element(id).map(|e| e.visible), Some(true), "undo brings it back");
 }
 
+/// The middle of a layout's frame, across.
+fn frame_x_mid(s: &Session, li: usize, frame: u32) -> f64 {
+    s.project.layouts[li].element(frame).map(|e| e.x + e.w / 2.0).unwrap()
+}
+
 /// `layout.publication` (#682): every profile builds a layout that fits its page, the map frame
 /// at a round scale that still fits the extent, the footer boxed in two columns below the map
 /// with long lines wrapped, the tokens filled from the map; a figure leaves its title to the
@@ -7432,6 +7505,7 @@ fn publication_layouts_fit_their_pages() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut s = world();
     let piaui = json!([-46.8, -11.6, -38.5, -2.2]);
+    let mut narrower = 0;
     let long =
         "NDVI: MOD13Q1 v6.1 (NASA LP DAAC), 16-day composites at 250 m, read through the Brazil Data Cube (INPE) and averaged to 1 km";
     let profiles = [
@@ -7479,6 +7553,20 @@ fn publication_layouts_fit_their_pages() {
         let (a, b) = (named("Legend Box"), named("Scale Box"));
         let apart = a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
         assert!(apart, "{profile}: the legend reaches the scale bar");
+        // The scale bar's box is the size of its bar (#1379): at most the 30 % of the frame (25 mm
+        // at least) it used to take, and its bar the length that width draws.
+        let bar = named("Scale Bar");
+        let widest = (frame.w * 0.3).max(25.0);
+        // The bar a box `w` wide draws, as the renderer picks it: its unit, then its length in it.
+        let per_mm = scale * rustgis_map::layout::PAPER_M_PER_PT * rustgis_map::layout::PT_PER_MM;
+        let drawn = |w: f64| {
+            let room = per_mm * w * 0.85;
+            let (unit, abbr) = rustgis_map::layout::ScaleUnits::Auto.resolve(rustgis_geom::nice_distance(room));
+            (rustgis_geom::nice_distance(room / unit), abbr)
+        };
+        assert!(b.w <= widest + 1e-9 && bar.w == b.w, "{profile}: a {} mm box for a {} mm bar, {widest} mm at most", b.w, bar.w);
+        assert_eq!(drawn(b.w), drawn(widest), "{profile}: the bar in a {} mm box", b.w);
+        narrower += usize::from(b.w < widest - 1.0);
         // A round scale, two significant figures, at which the extent still fits.
         let unit = 10f64.powf(scale.log10().floor() - 1.0);
         assert!(((scale / unit) - (scale / unit).round()).abs() < 1e-6, "{profile}: 1:{scale}");
@@ -7531,6 +7619,62 @@ fn publication_layouts_fit_their_pages() {
         assert!(std::fs::metadata(&png).unwrap().len() > 1000, "{profile}");
     }
     assert_eq!(s.project.layouts.len(), profiles.len(), "a layout each, the earlier ones untouched");
+    assert!(narrower > 0, "no profile's scale bar box is narrower than 30 % of its frame");
+    // The frame drawn at another scale: the box is measured again, its scale written in it and
+    // the box, bar and scale one width (#1379).
+    let li = s.project.layouts.len() - 1;
+    let frame = s.project.layouts[li].elements.iter().find(|e| e.kind.code() == "mapFrame").map(|e| e.id).unwrap();
+    // The scale written there is its `{scale}` token, filled from the frame as it is drawn; a text
+    // of one's own around it is measured too.
+    let id_of = |s: &Session, n: &str| s.project.layouts[li].elements.iter().find(|e| e.name == n).map(|e| e.id).unwrap();
+    let scale_text = id_of(&s, "Scale");
+    for (scale, text) in [
+        (40_000_000.0, "{scale}"),
+        (1_500_000.0, "{scale}"),
+        (25_000_000.0, "Escala aproximada {scale}"),
+        (2_500_000.0, "{scale} · {map} · {date}"),
+    ] {
+        s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": text})).unwrap();
+        s.run("layout.update", &json!({"layout": li, "element": frame, "scale": scale})).unwrap();
+        let l = &s.project.layouts[li];
+        let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap();
+        let (b, bar, written) = (named("Scale Box"), named("Scale Bar"), named("Scale"));
+        let ElementKind::Text { text: stored, size, .. } = &written.kind else { panic!() };
+        assert_eq!(stored, text);
+        let ElementKind::MapFrame { map, .. } = &l.element(frame).unwrap().kind else { panic!() };
+        let filled = stored
+            .replace("{scale}", &crate::render::layout::scale_ratio_text(scale, l.decimal_comma))
+            .replace("{map}", map)
+            .replace("{date}", "0000-00-00");
+        let Some(ElementKind::MapFrame { scale: drawn, .. }) = l.element(frame).map(|e| &e.kind) else { panic!() };
+        assert_eq!(*drawn, scale);
+        let wide = crate::render::report::width_mm(&filled, *size as f32, false);
+        assert!(wide < b.w && bar.w == b.w && written.w == b.w && bar.x == b.x, "{filled}: {wide} mm of text in a {} mm box", b.w);
+    }
+    // A box that would now cover the north arrow stays as it was, which is said: from a narrow
+    // box, a long text makes it grow towards the arrow put beside it.
+    s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": "{scale}"})).unwrap();
+    s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 1_500_000.0})).unwrap();
+    let (b, arrow) = (id_of(&s, "Scale Box"), id_of(&s, "North Arrow"));
+    let boxed = s.project.layouts[li].element(b).cloned().unwrap();
+    // Beside it on the side it grows to: the left one when it keeps its right edge.
+    let x = if boxed.x + boxed.w / 2.0 > frame_x_mid(&s, li, frame) { boxed.x - 5.5 } else { boxed.x + boxed.w + 0.5 };
+    s.run("layout.update", &json!({"layout": li, "element": arrow, "x": x, "y": boxed.y, "w": 5.0, "h": 5.0})).unwrap();
+    s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": "Escala aproximada da folha {scale}"})).unwrap();
+    let mark = s.notices.len();
+    s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 30_000_000.0})).unwrap();
+    let after = s.project.layouts[li].element(b).cloned().unwrap();
+    assert_eq!((after.x, after.w), (boxed.x, boxed.w), "the box stays");
+    assert!(s.notices[mark..].iter().any(|n| n.text.contains("would now cover the north arrow")), "said");
+    // A text longer than the widest box, its box widened by hand for it: the width is kept.
+    s.run("layout.update", &json!({"layout": li, "element": arrow, "x": 0.0, "y": 0.0})).unwrap();
+    let long = "Escala aproximada da folha impressa em papel de formato A4 {scale}";
+    s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": long})).unwrap();
+    for name in ["Scale Box", "Scale Bar", "Scale"] {
+        s.run("layout.update", &json!({"layout": li, "element": id_of(&s, name), "w": 120.0})).unwrap();
+    }
+    s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 12_000_000.0})).unwrap();
+    assert_eq!(s.project.layouts[li].element(b).map(|e| e.w), Some(120.0), "the width set by hand");
     // A long title wraps within the frame, and pushes the map down; the result names every
     // element for layout.update.
     let r = s.run("layout.publication", &json!({"extent": piaui, "title": long})).unwrap();
@@ -38194,6 +38338,73 @@ fn a_pdf_says_which_frames_and_pages_it_draws_as_pictures() {
     );
 }
 
+/// A layout's PDF has layers (#1815): each element an optional content group named after it,
+/// its map frame's map layers and their labels inside the frame's; the GeoPDF viewports stay.
+/// `"pdf": {"layers": false}` leaves them out, a bad value is refused, and a layout with no map
+/// has its elements' layers alone.
+#[test]
+fn a_layout_pdf_has_its_elements_and_map_layers_as_layers() {
+    let mut s = world();
+    s.run("labels.field", &json!({"layer": "Countries", "field": "name"})).unwrap();
+    s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "map"})).unwrap();
+    s.run("layout.addElement", &json!({"kind": "text", "text": "Uso (rascunho)"})).unwrap();
+    let path = std::env::temp_dir().join(format!("rustgis-layers-{}.pdf", std::process::id()));
+    let export = |s: &mut Session, extra: Value| {
+        let mut p = json!({"path": path, "dpi": 72});
+        if let (Some(p), Some(extra)) = (p.as_object_mut(), extra.as_object()) {
+            p.extend(extra.clone());
+        }
+        s.run("layout.export", &p).map(|_| String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned())
+    };
+    let pdf = export(&mut s, json!({})).unwrap();
+    let name = |n: &str| format!("<< /Type /OCG /Name {} >>", literal_pdf(n));
+    let id = |pdf: &str, n: &str| {
+        let at = pdf.find(&name(n)).unwrap_or_else(|| panic!("no layer {n}"));
+        pdf[..at].rsplit("endobj\n").next().and_then(|o| o.split(' ').next()).map(str::to_string).unwrap()
+    };
+    let layout = s.project.layouts[0].clone();
+    for e in layout.elements.iter().filter(|e| e.visible) {
+        let n = if e.name.trim().is_empty() { e.kind.code().to_string() } else { e.name.clone() };
+        assert!(pdf.contains(&name(&n)), "element {n}");
+    }
+    let frame = layout.elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap();
+    let (f, countries, labels) = (id(&pdf, &frame.name), id(&pdf, "Countries"), id(&pdf, "Labels: Countries"));
+    let order = pdf.split("/Order [").nth(1).unwrap();
+    let inner = order.split(&format!("{f} 0 R [")).nth(1).unwrap_or_else(|| panic!("the frame's layers nest in it: {order}"));
+    let inner = inner.split(']').next().unwrap();
+    assert!(inner.contains(&format!("{countries} 0 R")) && inner.contains(&format!("{labels} 0 R")), "{inner}");
+    assert!(pdf.contains("/VP [<< /Type /Viewport"), "still a GeoPDF");
+    // Without layers, and refused values.
+    let plain = export(&mut s, json!({"pdf": {"layers": false}})).unwrap();
+    assert!(!plain.contains("/OCProperties") && !plain.contains("/Type /OCG") && plain.contains("/VP [<< /Type /Viewport"));
+    for bad in [json!({"pdf": {"layers": "no"}}), json!({"pdf": false}), json!({"pdf": {"layer": false}})] {
+        let err = export(&mut s, bad.clone()).unwrap_err();
+        assert!(err.contains("pdf"), "{bad}: {err}");
+    }
+    // A layout with no map: its elements' layers, one each.
+    let mut s = Session::new(Project::default());
+    s.run("layout.new", &json!({"page": "a4"})).unwrap();
+    s.project.layouts[0].elements.retain(|e| e.kind.code() != "mapFrame");
+    s.run("layout.addElement", &json!({"kind": "text", "text": "Só texto"})).unwrap();
+    let added = s.project.layouts[0].elements.last().map(|e| e.name.clone()).unwrap();
+    let pdf = export(&mut s, json!({})).unwrap();
+    let drawn = s.project.layouts[0].elements.iter().filter(|e| e.visible).count();
+    assert!(pdf.contains(&name(&added)) && pdf.contains("/OCProperties") && !pdf.contains("/VP ["), "{added}");
+    assert!(pdf.matches("/Type /OCG").count() <= drawn && !pdf.contains("Labels:"), "{drawn}");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `s` as a PDF text string, as the PDF writer writes names: ASCII in parentheses, its
+/// parentheses and backslashes escaped, anything else UTF-16BE hex.
+fn literal_pdf(s: &str) -> String {
+    if s.is_ascii() {
+        let escaped: String = s.chars().flat_map(|c| if matches!(c, '(' | ')' | '\\') { vec!['\\', c] } else { vec![c] }).collect();
+        format!("({escaped})")
+    } else {
+        format!("<FEFF{}>", s.encode_utf16().map(|u| format!("{u:04X}")).collect::<String>())
+    }
+}
+
 /// A layout's PDF georeferences its map frames (#1191): each as an ISO 32000 viewport with its
 /// corners and its map's coordinate system, so that the frame's corners, taken back to the map,
 /// make the frame's rectangle. A tilted frame is left out, and said.
@@ -38231,7 +38442,8 @@ fn a_layout_pdf_georeferences_its_map_frames() {
     // Tilted, it shows no flat map to measure on: left out, and said.
     s.run("layout.update", &json!({"element": frame.id, "pitch": 30})).unwrap();
     let (pdf, said) = export(&mut s);
-    assert!(pdf.starts_with("%PDF-1.4") && !pdf.contains("/VP ["));
+    // (PDF 1.5 for its layers, #1815.)
+    assert!(pdf.starts_with("%PDF-1.5") && !pdf.contains("/VP ["));
     assert!(said.iter().any(|t| t == &format!("The PDF doesn't georeference 1 map frame ({}: it is tilted)", frame.name)), "{said:?}");
     // A world projection RustGIS computes itself (Winkel Tripel) is written as WKT too.
     s.run("layout.update", &json!({"element": frame.id, "pitch": 0})).unwrap();
@@ -38260,7 +38472,7 @@ fn a_layout_pdf_georeferences_its_map_frames() {
     let mark = s.notice_mark();
     s.run("layout.export", &json!({"path": path, "dpi": 72, "georeference": false})).unwrap();
     let plain = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
-    assert!(plain.starts_with("%PDF-1.4") && !plain.contains("/VP ["));
+    assert!(plain.starts_with("%PDF-1.5") && !plain.contains("/VP ["), "1.5 for its layers (#1815)");
     assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("georeference")));
     // On SAD69 (shifted from WGS 84) the corners are on SAD69, tens of metres from WGS 84's, and
     // moved as PROJ moves them: EPSG:4326 to EPSG:4618 takes this corner (-46.888358 E,
@@ -43177,6 +43389,89 @@ fn a_publication_footer_lines_up_with_its_legend() {
         }
     }
     panic!("no legend fell between 45 % and 70 % of the frame at its right: {seen:?}");
+}
+
+/// Arrangements saved by name (#1379): `layout.arrangement` saves, lists and removes them, within
+/// limits and refusing what it can't keep; `layout.publication` takes one by name, `best` tries
+/// them after the built-in ones, and a favourite named after one removed keeps its corners.
+#[test]
+fn arrangements_are_saved_by_name() {
+    use crate::cmd::layout::{MAX_ARRANGEMENT_NAME, MAX_SAVED_ARRANGEMENTS, arrangements_to_try, read_saved_arrangements};
+    let mut s = world();
+    let atlas = json!({"locator": "bottom-left", "northArrow": "top-left", "legend": "top-right", "scaleBar": "bottom-right"});
+    let r = s.run("layout.arrangement", &json!({"save": "Atlas", "arrangement": atlas})).unwrap();
+    assert_eq!(r["saved"]["Atlas"], atlas, "{r}");
+    assert_eq!(r["arrangements"].as_array().unwrap().last(), Some(&json!("Atlas")), "{r}");
+    // A name copies that arrangement's corners.
+    let r = s.run("layout.arrangement", &json!({"save": "Copy", "arrangement": "mirrored"})).unwrap();
+    assert_eq!(r["saved"]["Copy"]["locator"], "top-right", "{r}");
+    // Taken by name, case aside, and named in the answer as it is kept.
+    let homes = |v: &Value| crate::cmd::layout::parse_arrangement(v, &Default::default()).unwrap();
+    assert_eq!(arrangements_to_try(&s, &json!("atlas")).unwrap(), vec![("Atlas".to_string(), homes(&atlas))]);
+    let extent = json!([-46.8, -11.6, -38.5, -2.2]);
+    let r = s.run("layout.publication", &json!({"extent": extent, "author": "", "arrangement": "ATLAS"})).unwrap();
+    assert_eq!(r["arrangement"], "Atlas", "{r}");
+    // Best tries it after the built-in ones; one with a built-in's corners only once.
+    let tried = arrangements_to_try(&s, &json!("best")).unwrap();
+    let names: Vec<&str> = tried.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["classic", "mirrored", "legendRight", "legendTop", "Atlas"]);
+    assert_eq!(arrangements_to_try(&s, &Value::Null).unwrap(), tried);
+    // A favourite given corner by corner as a saved one is called by its name.
+    s.run("layout.arrangement", &json!({"favourite": atlas})).unwrap();
+    assert_eq!(arrangements_to_try(&s, &json!("favourite")).unwrap()[0].0, "Atlas");
+    assert_eq!(arrangements_to_try(&s, &atlas).unwrap()[0].0, "Atlas");
+    // Case aside beyond ASCII too.
+    s.run("layout.arrangement", &json!({"save": "Écran", "arrangement": "legendTop"})).unwrap();
+    assert_eq!(arrangements_to_try(&s, &json!("écran")).unwrap()[0].0, "Écran");
+    s.run("layout.arrangement", &json!({"remove": "écran"})).unwrap();
+    // The favourite by its name; removed, it keeps its corners, which is said.
+    s.run("layout.arrangement", &json!({"favourite": "Atlas"})).unwrap();
+    assert_eq!(arrangements_to_try(&s, &json!("favourite")).unwrap()[0].0, "Atlas");
+    let r = s.run("layout.arrangement", &json!({"remove": "atlas"})).unwrap();
+    assert_eq!((s.layout_favourite.clone(), r["corners"].clone()), (atlas.clone(), atlas.clone()), "{r}");
+    assert!(r["warnings"][0].as_str().unwrap().contains("keeps its corners"), "{r}");
+    assert!(r["saved"].get("Atlas").is_none() && s.layout_arrangements.len() == 1);
+    // Removed with another favourite given, nothing is said of keeping its corners.
+    s.run("layout.arrangement", &json!({"save": "Spare", "arrangement": "legendTop", "favourite": "Spare"})).unwrap();
+    let r = s.run("layout.arrangement", &json!({"remove": "Spare", "favourite": atlas})).unwrap();
+    assert!(r["warnings"].as_array().unwrap().is_empty() && s.layout_favourite == atlas, "{r}");
+    // Saved again under a name in other capitals, it replaces it, which is said.
+    let r = s.run("layout.arrangement", &json!({"save": "COPY", "arrangement": "classic"})).unwrap();
+    assert_eq!((s.layout_arrangements.len(), r["saved"]["COPY"]["locator"].clone()), (1, json!("top-left")), "{r}");
+    assert!(r["warnings"][0].as_str().unwrap().contains("is replaced"), "{r}");
+    // Refused, naming what is wrong, with nothing changed.
+    let long = "x".repeat(MAX_ARRANGEMENT_NAME + 1);
+    for (bad, why) in [
+        (json!({"save": "Best", "arrangement": "classic"}), "names an arrangement already"),
+        (json!({"save": "Classic", "arrangement": "mirrored"}), "names an arrangement already"),
+        (json!({"save": " ", "arrangement": "classic"}), "1 to 40 characters"),
+        (json!({"save": long, "arrangement": "classic"}), "1 to 40 characters"),
+        (json!({"save": "a\tb", "arrangement": "classic"}), "1 to 40 characters"),
+        (json!({"save": "Atlas"}), "save takes \"arrangement\""),
+        (json!({"save": "Atlas", "arrangement": "tidy"}), "\"COPY\", or a corner"),
+        (json!({"save": 3, "arrangement": "classic"}), "save is a name"),
+        (json!({"arrangement": "legendTop"}), "saved under a name given as \"save\""),
+        (json!({"remove": "Atlas"}), "no arrangement is saved as \"Atlas\""),
+        (json!({"remove": "COPY", "favourite": "COPY"}), "not \"COPY\""),
+    ] {
+        let e = s.run("layout.arrangement", &bad).unwrap_err();
+        assert!(e.contains(why), "{bad}: {e}");
+        assert_eq!((s.layout_arrangements.len(), s.layout_favourite.clone()), (1, atlas.clone()), "{bad}");
+    }
+    // At most so many.
+    for i in 1..MAX_SAVED_ARRANGEMENTS {
+        s.run("layout.arrangement", &json!({"save": format!("Mine {i}"), "arrangement": "legendTop"})).unwrap();
+    }
+    let e = s.run("layout.arrangement", &json!({"save": "One more", "arrangement": "classic"})).unwrap_err();
+    assert!(e.contains("at most 20 arrangements"), "{e}");
+    assert_eq!(s.layout_arrangements.len(), MAX_SAVED_ARRANGEMENTS);
+    // As the preferences keep them: what can't be used is counted, the rest kept.
+    let text = json!({"Ok": atlas, "best": atlas, "Half": {"locator": "top-left"}, "ok": atlas, "Not": "classic"}).to_string();
+    let (kept, passed) = read_saved_arrangements(&text).unwrap();
+    assert_eq!((kept.keys().map(String::as_str).collect::<Vec<_>>(), passed.len()), (vec!["Ok"], 4));
+    assert_eq!(passed["Half"], json!({"locator": "top-left"}), "kept as it was");
+    assert_eq!(read_saved_arrangements("not json"), None);
+    assert_eq!(read_saved_arrangements("{}"), Some(Default::default()));
 }
 
 /// `"coverage"` (#1379) writes the grid the placement searched as a PNG, three pixels a cell: dark
