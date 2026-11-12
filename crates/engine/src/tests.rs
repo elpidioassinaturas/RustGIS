@@ -8108,6 +8108,43 @@ fn a_publication_keys_the_raster_under_an_rgb_and_says_an_unlisted_colour_table(
     assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("through an overview")), "left out");
 }
 
+/// A stretched raster on top still reading keeps its place: the publication gives no colorbar and
+/// says why, rather than the scale of the stretched raster under it under its name; once read, it
+/// gets the colorbar (#1679).
+#[test]
+fn a_publication_gives_no_colorbar_for_a_raster_still_reading() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+    let mut s = Session::new(Project::default());
+    for (name, k) in [("Profundidade", 2.0), ("Altitude", 1.5)] {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 10.0, pixel_width: 0.5, pixel_height: -0.5 };
+        let z: Vec<f32> = (0..400).map(|i| i as f32 * k).collect();
+        let r = Raster::new(name, 20, 20, vec![z], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let bytes = rustgis_data::raster::geotiff::write(&r, 0).unwrap();
+        crate::cmd::raster::add_raster(&mut s, name, rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)).unwrap();
+    }
+    s.run("layer.move", &json!({"layer": "Altitude", "to": 99})).unwrap();
+    let p = json!({"profile": "a4-portrait", "extent": [0, 0, 10, 10], "author": "", "locator": "none"});
+    let bar = |s: &Session| {
+        s.project.layouts.last().unwrap().elements.iter().find_map(|e| match &e.kind {
+            rustgis_map::layout::ElementKind::Colorbar { layer, .. } => Some(layer.clone()),
+            _ => None,
+        })
+    };
+    fn top(s: &mut Session) -> &mut rustgis_map::RasterLayer {
+        s.map_mut().layers.iter_mut().find(|l| l.name == "Profundidade").and_then(|l| l.raster.as_mut()).unwrap()
+    }
+    let read = top(&mut s).data.take();
+    let r = s.run("layout.publication", &p).unwrap();
+    assert_eq!(bar(&s), None, "not the DEM's scale under its name: {r}");
+    let still = "Profundidade is still reading, so its colour scale isn't known and the layout has no colorbar for it; add one with layout.addElement once it has read";
+    assert!(r["warnings"].as_array().unwrap().iter().any(|w| w == still), "{r}");
+    // Read: its colorbar, and nothing said.
+    top(&mut s).data = read;
+    let r = s.run("layout.publication", &p).unwrap();
+    assert_eq!(bar(&s), Some(Some("Profundidade".to_string())), "{r}");
+    assert!(!r["warnings"].to_string().contains("still reading"), "{r}");
+}
+
 /// A raster drawn by classes under a mask, with more cells than its masked statistics read: the
 /// publication and a legend say its classes come from a sample; every class asked for (nothing
 /// to sample) or no mask (the band's own statistics, read whole) says nothing (#1679).

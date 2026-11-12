@@ -1625,15 +1625,18 @@ const RAMP_SAMPLES: usize = 256;
 /// The raster layer a colorbar shows: `layer` by name, or the topmost raster the map shows (its
 /// groups visible too) with a colour scale ([`color_scale`]) that isn't drawn by classes: a legend lists those (#1679), and a colorbar
 /// of their codes would be the only key a land cover had. An RGB composite or a land cover over a
-/// DEM leaves it to the DEM.
+/// DEM leaves it to the DEM. A raster on a ramp (Stretch, a tinted hillshade) whose pixels aren't
+/// read yet keeps its place: it is returned with no colour scale to show, rather than the one of
+/// a raster under it.
 pub fn colorbar_layer<'a>(map: &'a Map, layer: Option<&str>) -> Option<&'a Layer> {
     match layer {
         Some(n) => map.layer_by_name(n).filter(|l| l.is_raster()),
-        None => map
-            .layers
-            .iter()
-            .filter(|l| map.shows(l))
-            .find(|l| l.raster.as_ref().is_some_and(|r| !r.style.renderer.draws_classes() && color_scale(r).is_some())),
+        None => map.layers.iter().filter(|l| map.shows(l)).find(|l| {
+            l.raster.as_ref().is_some_and(|r| match r.data {
+                None => matches!(r.style.renderer, RasterRenderer::Stretch { .. } | RasterRenderer::ShadedRelief { ramp: Some(_), .. }),
+                Some(_) => !r.style.renderer.draws_classes() && color_scale(r).is_some(),
+            })
+        }),
     }
 }
 

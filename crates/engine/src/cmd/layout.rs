@@ -1836,7 +1836,18 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // key there, which the legend's rows don't give): an RGB composite over a DEM leaves it to the
     // DEM. A raster drawn by classes has them in the legend's rows instead (#1679). `"colorbar":
     // "none"` leaves it out, and its room in the box with it (#1680).
-    let bar = colorbar.then(|| rustgis_map::layout::colorbar_layer(s.map(), None)).flatten().map(|l| l.name.clone());
+    // One on top whose pixels aren't read yet has no scale to show: no colorbar, rather than the
+    // scale of a raster under it under its name.
+    let top_raster = colorbar.then(|| rustgis_map::layout::colorbar_layer(s.map(), None)).flatten();
+    let scaled = |l: &&rustgis_map::Layer| l.raster.as_ref().is_some_and(|r| rustgis_map::layout::color_scale(r).is_some());
+    let bar = top_raster.filter(scaled).map(|l| l.name.clone());
+    if let Some(l) = top_raster.filter(|l| !scaled(l)) {
+        let why = if l.raster.as_ref().is_some_and(|r| r.error.is_some()) { "couldn't be read" } else { "is still reading" };
+        warnings.push(format!(
+            "{} {why}, so its colour scale isn't known and the layout has no colorbar for it; add one with layout.addElement once it has read",
+            l.name
+        ));
+    }
     // A colour table whose values can't be known (too many to list) gives the legend no class, and
     // the sheet no key for it; classes from an overview may miss a rare one: said, not left out.
     warnings.extend(raster_key_notices(s.map(), &[], false));
