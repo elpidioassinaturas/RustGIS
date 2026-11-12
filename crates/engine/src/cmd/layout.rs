@@ -35,7 +35,7 @@ pub fn commands() -> Vec<C> {
             r#"{"profile"?: "a4" (the default) | "a3" | "a2" (a sheet turned to portrait or landscape, whichever the area's map comes out larger on: its extent east to west against north to south, on the map's projection) | "a4-portrait"|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading, an editorial column's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000), "colorbar"?: "auto" (the default: the top visible raster with a colour scale, not drawn by classes, gets one, under the legend in its box; a raster drawn by classes has them in the legend's rows instead) | "none" (no colorbar, and the legend's box has no room for one), "veil"?: true (the default: when no shape of the legend fits, a map that runs on past the extent, with a long legend, has what is outside the extent veiled and its surrounds grouped there, at up to half the scale on a sheet) | false (never veiled, and drawn at its scale; the map may still move aside), "style"?: "classic" (the default: the title over the map, the footer under it) | "banner" (the title and subtitle in a band of the accent colour across the top) | "panel" (the map at the left, a panel at the right with the title, locator, legend, sources and reference) | "editorial" (the title large in serif, a column at the right with the note, the locator and the legend) | "modular" (cards on a light page: the map, the locator and the legend each in one, the sources and reference in tinted ones) | "poster" (the page in the accent colour, the title in light text, the map in a light card, the footer in darker blocks) (a sheet's arrangement; figures leave it to the caption), "accent"?: a colour as #RRGGBB (the style's colour: its band, panel tint, headings and rules, a poster's page), "arrangement"?: "best" (the default: the favourite, each arrangement by name and each saved with layout.arrangement laid out, the one moving the least area off its corners kept, then the one leaving the least over the data, the favourite on a tie) | "favourite" (layout.arrangement's) | an arrangement by name (built in or saved) or corner by corner, as layout.arrangement takes (the corners the locator, north arrow, legend and scale bar are at home in; one covering what the map draws there still moves), "coverage"?: "*.png" (writes the coverage grid the placement searched, as it settled on it, three pixels a cell: what the map draws dark, the free cells white, both tinted blue in the strips the graticule's labels keep, the surrounds placed over the map outlined in red; the answer gives its path)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
         ),
         C::new("layout.arrangement", "Favourite Arrangement", "Publish › Layout", arrangement).roles(&[]).effects(crate::policy::Effects::NONE).view().params(
-            r#"{"favourite"?: "classic" (the locator top left, the north arrow top right, the legend bottom left, the scale bar bottom right) | "mirrored" | "legendRight" | "legendTop" | {"locator", "northArrow", "legend", "scaleBar": "top-left"|"top-right"|"bottom-left"|"bottom-right", each a corner of its own} | a saved arrangement's name, "save"?: a name (1 to 40 characters, not a built-in one nor "best", "favourite", "custom" or "veil"; one saved under it already, case aside, is replaced) to save "arrangement" under: a name, or a corner for each surround (at most 20 saved), "remove"?: a saved arrangement's name (a favourite named after it keeps its corners, unless "favourite" gives another)} → the favourite arrangement of publication layouts and those saved by name (kept with the app's preferences), the favourite's corners, the arrangements by name and the saved ones' corners; a removal, then a save, then the favourite; with none of them given, they are only shown"#,
+            r#"{"favourite"?: "classic" (the locator top left, the north arrow top right, the legend bottom left, the scale bar bottom right) | "mirrored" | "legendRight" | "legendTop" | {"locator", "northArrow", "legend", "scaleBar": "top-left"|"top-right"|"bottom-left"|"bottom-right", each a corner of its own} | a saved arrangement's name, "save"?: a name (1 to 40 characters, not a built-in one nor "best", "favourite", "custom" or "veil"; one saved under it already, case aside, is replaced) to save "arrangement" under (at most 20 saved), "arrangement"?: what "save" saves: an arrangement by name, or a corner for each surround as "favourite" takes them (refused without "save"), "remove"?: a saved arrangement's name (a favourite named after it keeps its corners, unless "favourite" gives another)} → the favourite arrangement of publication layouts and those saved by name (kept with the app's preferences), the favourite's corners, the arrangements by name and the saved ones' corners; a removal, then a save, then the favourite; with none of them given, they are only shown"#,
         ),
         C::new("layout.activate", "Open Layout", "Browser", |s, p| {
             let i = index(s, &by_name(p))?;
@@ -3956,6 +3956,8 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         }
     }
     let li = index(s, p)?;
+    // What a publication's scale bar box was measured from, before this change.
+    let basis = scale_box_basis(s, li);
     // Locked, it takes no change but being unlocked, which may come with other changes.
     // "dash": null makes a line solid, so it is a change too.
     let changes = p
@@ -4330,10 +4332,13 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
     if let Some(text) = p.get("grid").and_then(|grid| grid.get("crs")).and_then(Value::as_str) {
         super::say_crs_note(s, text);
     }
-    // A frame drawn at another scale or width: a publication's scale bar box measured again.
-    let frame = s.project.layouts.get(li).and_then(|l| l.element(id)).map(|e| &e.kind);
-    if matches!(frame, Some(ElementKind::MapFrame { .. })) && ["scale", "w"].iter().any(|k| p.get(*k).is_some_and(|v| !v.is_null())) {
-        refit_scale_box(s, li, id);
+    // Its frame drawn at another scale or width, or the text under its bar changed: a
+    // publication's scale bar box measured again.
+    if let Some(basis) = basis {
+        let given = |keys: &[&str]| keys.iter().any(|k| p.get(*k).is_some_and(|v| !v.is_null()));
+        if (id == basis.frame && given(&["scale", "w"])) || (id == basis.text_id && given(&["text", "size", "bold"])) {
+            refit_scale_box(s, li, &basis);
+        }
     }
     if let Some(w) = font_told {
         return Ok(json!({"warning": w}));
@@ -4365,6 +4370,42 @@ fn scale_text_mm(text: &str, text_pt: f64, bold: bool) -> f64 {
 /// What a publication places over its map, which a scale bar box measured again must stay off.
 const PLACED_OVER_MAP: [&str; 3] = ["Legend Box", "Locator", "North Arrow"];
 
+/// What a publication's scale bar box is measured from: its frame (id, centre, scale, width) and
+/// the text under its bar (id, text, size, boldness).
+#[derive(Clone)]
+struct BoxBasis {
+    frame: u32,
+    center: Coord,
+    scale: f64,
+    frame_w: f64,
+    text_id: u32,
+    text: String,
+    size: f64,
+    bold: bool,
+}
+
+/// The basis of a layout's publication scale bar box as it is now (#1379); `None` without one.
+fn scale_box_basis(s: &Session, li: usize) -> Option<BoxBasis> {
+    let l = s.project.layouts.get(li)?;
+    let named = |name: &str| l.elements.iter().find(|e| e.name == name);
+    let (bar, written) = (named("Scale Bar")?, named("Scale")?);
+    let (ElementKind::ScaleBar { frame, .. }, ElementKind::Text { text, size, bold, .. }) = (&bar.kind, &written.kind) else {
+        return None;
+    };
+    let fr = l.element(*frame)?;
+    let ElementKind::MapFrame { center, scale, .. } = &fr.kind else { return None };
+    Some(BoxBasis {
+        frame: *frame,
+        center: *center,
+        scale: *scale,
+        frame_w: fr.w,
+        text_id: written.id,
+        text: text.clone(),
+        size: *size,
+        bold: *bold,
+    })
+}
+
 /// A publication's scale bar box measured again after its frame's scale or width changed (#1379):
 /// the "Scale Box", the "Scale Bar" of `frame` and the "Scale" under it, as a publication lays them
 /// out (one place, one width, none locked), take the width that bar and the text under it (its
@@ -4372,11 +4413,13 @@ const PLACED_OVER_MAP: [&str; 3] = ["Legend Box", "Locator", "North Arrow"];
 /// frame they are nearer. A layout without them, with them moved apart, with that text spaced out
 /// or in another font, naming a map series page (which differs from page to page), or of a frame
 /// other than the first (whose map the page fills the text from) is left as it is; so is a text
-/// longer than the widest box a publication gives (a box widened by hand for it keeps its width).
-/// A change to the text or the bar alone doesn't measure the box again; the next change of the
-/// frame's scale or width does. A box that would then cover the legend, locator or north arrow,
-/// which it didn't, stays as it was, which is said.
-fn refit_scale_box(s: &mut Session, li: usize, frame: u32) {
+/// longer than the widest box a publication gives. Only a box as wide as `before` (what it was
+/// measured from before the change: its frame and text) makes it is measured again: one set by
+/// hand keeps its width. A change to the text under the bar measures it again too; a restyled
+/// bar alone doesn't. A box that would then cover the legend, locator or north arrow, which it
+/// didn't, stays as it was, which is said.
+fn refit_scale_box(s: &mut Session, li: usize, before: &BoxBasis) {
+    let frame = before.frame;
     let Some(l) = s.project.layouts.get(li) else { return };
     let Some(fr) = l.element(frame) else { return };
     let ElementKind::MapFrame { map, center, scale, .. } = &fr.kind else { return };
@@ -4409,6 +4452,16 @@ fn refit_scale_box(s: &mut Session, li: usize, frame: u32) {
     }
     // A text longer than the widest box a publication gives: a width set by hand for it is kept.
     if scale_text_mm(&filled, *size, *bold) > (fr.w * 0.3).max(25.0) {
+        return;
+    }
+    // The width the box had from its basis before the change: another one was set by hand.
+    let was = {
+        let cam = rustgis_map::layout::frame_camera(m, before.center, before.scale, 0.0, 0.0);
+        let filled = crate::render::layout::expand(&before.text, l, &info, Some((m, cam)));
+        let bar = (*units, *divisions);
+        scale_box_width(m.ground_res_at(&cam), before.scale, before.frame_w, bar, l.decimal_comma, (&filled, before.size, before.bold))
+    };
+    if (boxed.w - was).abs() > 0.01 {
         return;
     }
     let w = scale_box_width(ground_per_pt, *scale, fr.w, (*units, *divisions), l.decimal_comma, (&filled, *size, *bold));
@@ -4458,6 +4511,7 @@ fn set_frame(s: &mut Session, li: usize, frame: u32, e: &Extent) -> Result<(), S
 
 fn frame_zoom(s: &mut Session, p: &Value) -> CmdResult {
     let li = index(s, p)?;
+    let basis = scale_box_basis(s, li);
     let l = s.project.layouts.get(li).ok_or("no layout")?;
     let frame = zoom_frame(l, p)?;
     unlocked(l, frame)?;
@@ -4494,7 +4548,9 @@ fn frame_zoom(s: &mut Session, p: &Value) -> CmdResult {
         }
         o => return Err(format!("unknown zoom '{o}'")),
     }
-    refit_scale_box(s, li, frame);
+    if let Some(basis) = basis.filter(|b| b.frame == frame) {
+        refit_scale_box(s, li, &basis);
+    }
     Ok(json!({"element": frame}))
 }
 

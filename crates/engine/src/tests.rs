@@ -7660,8 +7660,8 @@ fn publication_layouts_fit_their_pages() {
     // Beside it on the side it grows to: the left one when it keeps its right edge.
     let x = if boxed.x + boxed.w / 2.0 > frame_x_mid(&s, li, frame) { boxed.x - 5.5 } else { boxed.x + boxed.w + 0.5 };
     s.run("layout.update", &json!({"layout": li, "element": arrow, "x": x, "y": boxed.y, "w": 5.0, "h": 5.0})).unwrap();
-    s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": "Escala aproximada da folha {scale}"})).unwrap();
     let mark = s.notices.len();
+    s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": "Escala aproximada da folha {scale}"})).unwrap();
     s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 30_000_000.0})).unwrap();
     let after = s.project.layouts[li].element(b).cloned().unwrap();
     assert_eq!((after.x, after.w), (boxed.x, boxed.w), "the box stays");
@@ -7675,6 +7675,20 @@ fn publication_layouts_fit_their_pages() {
     }
     s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 12_000_000.0})).unwrap();
     assert_eq!(s.project.layouts[li].element(b).map(|e| e.w), Some(120.0), "the width set by hand");
+    // So does one set by hand within the widest box a publication gives.
+    s.run("layout.publication", &json!({"profile": "thesis-half", "extent": piaui})).unwrap();
+    let li = s.project.layouts.len() - 1;
+    let frame = s.project.layouts[li].elements.iter().find(|e| e.kind.code() == "mapFrame").map(|e| e.id).unwrap();
+    let id_in = |s: &Session, n: &str| s.project.layouts[li].elements.iter().find(|e| e.name == n).map(|e| e.id).unwrap();
+    let (b, widest) = (id_in(&s, "Scale Box"), s.project.layouts[li].element(frame).map(|e| (e.w * 0.3).max(25.0)).unwrap());
+    let auto = s.project.layouts[li].element(b).map(|e| e.w).unwrap();
+    let set = if auto + 2.0 < widest { auto + 2.0 } else { auto - 2.0 };
+    for name in ["Scale Box", "Scale Bar", "Scale"] {
+        s.run("layout.update", &json!({"layout": li, "element": id_in(&s, name), "w": set})).unwrap();
+    }
+    s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 9_000_000.0})).unwrap();
+    s.run("layout.frameZoom", &json!({"layout": li, "element": frame, "to": "full"})).unwrap();
+    assert_eq!(s.project.layouts[li].element(b).map(|e| e.w), Some(set), "the width set by hand, {auto} mm automatic");
     // A long title wraps within the frame, and pushes the map down; the result names every
     // element for layout.update.
     let r = s.run("layout.publication", &json!({"extent": piaui, "title": long})).unwrap();
@@ -43528,6 +43542,15 @@ fn arrangements_are_saved_by_name() {
     // A name copies that arrangement's corners.
     let r = s.run("layout.arrangement", &json!({"save": "Copy", "arrangement": "mirrored"})).unwrap();
     assert_eq!(r["saved"]["Copy"]["locator"], "top-right", "{r}");
+    // "arrangement" with "save" is read, not said to be ignored.
+    let mark = s.notices.len();
+    s.run("layout.arrangement", &json!({"save": "Print", "arrangement": "classic"})).unwrap();
+    assert!(
+        !s.notices[mark..].iter().any(|n| n.text.contains("ignores")),
+        "{:?}",
+        s.notices[mark..].iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
+    s.run("layout.arrangement", &json!({"remove": "Print"})).unwrap();
     // Taken by name, case aside, and named in the answer as it is kept.
     let homes = |v: &Value| crate::cmd::layout::parse_arrangement(v, &Default::default()).unwrap();
     assert_eq!(arrangements_to_try(&s, &json!("atlas")).unwrap(), vec![("Atlas".to_string(), homes(&atlas))]);

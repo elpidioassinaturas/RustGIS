@@ -2909,11 +2909,12 @@ impl RustGisApp {
     /// `layout.arrangement` changed them.
     fn save_layout_favourite(&mut self) {
         if self.session.layout_arrangements != self.ui.layout_arrangements_saved && !self.ui.layout_arrangements_unreadable {
-            // An arrangement removed here takes with it the entries passed over beside it under
-            // the same name but for case, so it doesn't come back at the next start.
-            let kept = &self.session.layout_arrangements;
+            // An arrangement removed, saved or replaced here takes with it the entries passed over
+            // beside it under the same name but for case: one removed doesn't come back at the next
+            // start, and one saved isn't passed over then for the older entry.
+            let (kept, before) = (&self.session.layout_arrangements, &self.ui.layout_arrangements_saved);
             let removed: Vec<String> =
-                self.ui.layout_arrangements_saved.keys().filter(|k| !kept.contains_key(*k)).map(|k| k.to_lowercase()).collect();
+                before.keys().chain(kept.keys()).filter(|k| before.get(*k) != kept.get(*k)).map(|k| k.to_lowercase()).collect();
             // Only those this version would use: one it can't read stays as it was.
             self.ui.layout_arrangements_unread.retain(|name, corners| {
                 !removed.contains(&name.to_lowercase()) || !rustgis_engine::cmd::layout::usable_saved_arrangement(name, corners)
