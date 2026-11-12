@@ -249,7 +249,9 @@ pub fn write(pages: &[Page], title: &str) -> Vec<u8> {
 }
 
 /// Writes the pages as a PDF document, its text as `text` says, and the faces set in outlines
-/// though fonts were asked for.
+/// though fonts were asked for. Each face is subset in one step; between faces it looks at
+/// Cancel (`rustgis_data::progress`), and once cancelled sets the faces left in outlines, unsaid:
+/// a cancelled export writes nothing.
 pub fn write_with(pages: &[Page], title: &str, text: Text) -> (Vec<u8>, Vec<Outlined>) {
     // Every face's glyphs, gathered before any is written: a face is embedded or not as a whole,
     // and its glyphs' codes are the subset's.
@@ -264,6 +266,9 @@ pub fn write_with(pages: &[Page], title: &str, text: Text) -> (Vec<u8>, Vec<Outl
     }
     let (mut real, mut outlined, mut room) = (Vec::new(), Vec::new(), embed::MAX_EMBEDDED);
     for (font, glyphs) in used {
+        if rustgis_data::progress::check().is_err() {
+            break;
+        }
         match embed::embed(font, &glyphs, room) {
             Ok(e) => {
                 room = room.saturating_sub(e.file.len());

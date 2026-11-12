@@ -371,8 +371,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   PNG at that resolution would show it. A frame or page whose vectors would pass 256 MB (64 MB
   in the browser) is drawn as a picture instead, and the export says which.
   Its text is set in the fonts it is drawn in, each embedded as a subset of its glyphs, so a vector
-  editor (Inkscape, Illustrator, Affinity, VectorCraft) opens it as text that can be edited; it can
-  be searched and copied in any PDF reader. A face whose licence forbids embedding or subsetting,
+  editor that reads embedded fonts (VectorCraft, where it was checked) opens it as text that can be
+  edited; it can be searched and copied in any PDF reader. A face whose licence forbids embedding or subsetting,
   one drawn at another weight than its variable font file's default, or one whose file can't be
   read is set as its letters' outlines instead, and the export names it with why.
   `"pdf": {"text": "outlines"}` on `layout.export` sets all the text as outlines, as a print shop

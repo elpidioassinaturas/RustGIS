@@ -42,9 +42,10 @@ pub(super) enum Refused {
     NotInFile,
     /// Its file can't be read or subset.
     Unreadable(String),
-    /// Its subset would pass [`MAX_SUBSET`], or the document's faces [`MAX_EMBEDDED`]: the limit
-    /// passed, in bytes.
-    TooLarge(usize),
+    /// Its subset would pass [`MAX_SUBSET`].
+    SubsetTooLarge,
+    /// With it, the document's embedded faces would pass [`MAX_EMBEDDED`].
+    DocumentTooLarge,
 }
 
 impl std::fmt::Display for Refused {
@@ -54,8 +55,8 @@ impl std::fmt::Display for Refused {
             Refused::Instance => f.write_str("it is drawn at another weight or width than its file's default"),
             Refused::NotInFile => f.write_str("its file doesn't hold it as drawn"),
             Refused::Unreadable(e) => write!(f, "its file could not be subset: {e}"),
-            Refused::TooLarge(limit) if *limit == MAX_SUBSET => write!(f, "its subset passes {} MB", MAX_SUBSET >> 20),
-            Refused::TooLarge(_) => write!(f, "the document's embedded faces would pass {} MB", MAX_EMBEDDED >> 20),
+            Refused::SubsetTooLarge => write!(f, "its subset passes {} MB", MAX_SUBSET >> 20),
+            Refused::DocumentTooLarge => write!(f, "the document's embedded faces would pass {} MB", MAX_EMBEDDED >> 20),
         }
     }
 }
@@ -84,9 +85,12 @@ fn same_face(font: &FontRef<'_>, face: &ttf_parser::Face) -> bool {
     usize::from(face.number_of_glyphs()) == font.glyph_count() && font.units_per_em() == Some(f32::from(face.units_per_em()))
 }
 
-/// The face `font` as a subset holding `glyphs`, or why it can't be. Never panics, whatever the
-/// file holds: a subsetter that fails, or would, leaves the face to outlines. `room` is what the
-/// document can still embed.
+/// The face `font` as a subset holding `glyphs`, or why it can't be. A subsetter that fails
+/// leaves the face to outlines; natively, one that panics on a hostile file does too (its panic
+/// caught). In the browser a panic can't be caught (wasm32 aborts), but no file of the user's
+/// reaches it there: fonts are read from disk (the interface's, installed families, CJK and script
+/// faces), so the web has only the label face bundled with the app. `room` is what the document
+/// can still embed.
 pub(super) fn embed(font: &FontRef<'_>, glyphs: &[GlyphId], room: usize) -> Result<Embedded, Refused> {
     let data = font.font_data();
     // The face of the file that draws these glyphs as `font` does (a collection's faces can share
@@ -124,10 +128,10 @@ pub(super) fn embed(font: &FontRef<'_>, glyphs: &[GlyphId], room: usize) -> Resu
         Err(_) => return Err(Refused::Unreadable("the subsetter failed".into())),
     };
     if file.len() > MAX_SUBSET {
-        return Err(Refused::TooLarge(MAX_SUBSET));
+        return Err(Refused::SubsetTooLarge);
     }
     if file.len() > room {
-        return Err(Refused::TooLarge(MAX_EMBEDDED));
+        return Err(Refused::DocumentTooLarge);
     }
     let k = 1000.0 / f32::from(face.units_per_em().max(1));
     let b = face.global_bounding_box();
@@ -249,6 +253,36 @@ mod tests {
         }
         let content = objs.iter().map(|o| String::from_utf8_lossy(&o.1).into_owned()).find(|s| s.contains(" TJ")).unwrap();
         assert!(content.contains("[<0001>") && content.contains("<0004>] TJ"), "codes are CIDs: {content}");
+        // Each CID is its character's glyph: in the subset (CIDToGIDMap /Identity) the same
+        // advance and outline as the face's own glyph, and the same width in /W.
+        let subset = FontRef::try_from_slice(&file.1).unwrap();
+        let cid_font = objs.iter().find(|o| o.0.contains("/Subtype /CIDFontType2")).map(|o| o.0.as_str()).unwrap();
+        let w: Vec<f32> = cid_font
+            .split("/W [")
+            .nth(1)
+            .unwrap()
+            .split(" ]")
+            .next()
+            .unwrap()
+            .replace(['[', ']'], " ")
+            .split_whitespace()
+            .map(|v| v.parse().unwrap())
+            .collect();
+        let upm = font.units_per_em().unwrap();
+        let mut checked = 0;
+        for line in cmap.lines().filter(|l| l.starts_with('<') && l.len() == 13 && *l != "<0000> <FFFF>") {
+            let cid = u16::from_str_radix(&line[1..5], 16).unwrap();
+            let ch = char::from_u32(u32::from_str_radix(&line[8..12], 16).unwrap()).unwrap();
+            let (own, sub) = (font.glyph_id(ch), GlyphId(cid));
+            assert_eq!(font.h_advance_unscaled(own), subset.h_advance_unscaled(sub), "{ch}: CID {cid}");
+            let points = |f: &FontRef, g| f.outline(g).map(|o| o.curves.iter().map(curve_points).collect::<Vec<_>>());
+            assert_eq!(points(font, own), points(&subset, sub), "{ch}: CID {cid}'s outline");
+            let width =
+                w.chunks(2).find(|p| p[0] == f32::from(cid)).map(|p| p[1]).unwrap_or_else(|| panic!("CID {cid} in {w:?}: {cid_font}"));
+            assert!((width - font.h_advance_unscaled(own) / upm * 1000.0).abs() < 0.01, "{ch}: /W {width}");
+            checked += 1;
+        }
+        assert_eq!(checked, 4, "A, ç, ã, o");
         // Outlines, as before, whatever the face allows.
         let (outlines, none) = write_with(&[page(font, "Ação")], "Fonts", Text::Outlines);
         assert!(none.is_empty() && outlines == write(&[page(font, "Ação")], "Fonts"));
@@ -283,7 +317,7 @@ mod tests {
         let hack = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
         assert!(!draws_alike(font, &hack, glyphs[0]));
         let full = embed(font, &glyphs, 10).err();
-        assert_eq!(full, Some(Refused::TooLarge(MAX_EMBEDDED)), "past the room left");
+        assert_eq!(full, Some(Refused::DocumentTooLarge), "past the room left");
         assert_eq!(full.unwrap().to_string(), "the document's embedded faces would pass 32 MB");
     }
 

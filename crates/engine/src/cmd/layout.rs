@@ -4466,16 +4466,17 @@ pub(crate) fn pictured_notices(s: &mut Session, frames: &[(u32, String)], pages:
 }
 
 /// How `layout.export`'s `"pdf": {"text": …}` asks a PDF's text to be written (#1815): in its
-/// fonts unless it says `"outlines"`.
+/// fonts unless it says `"outlines"`. It is checked whatever the export writes, a PNG or SVG
+/// too, so a script's mistake shows on its first run.
 fn pdf_text(p: &Value) -> Result<rustgis_render::pdf::Text, String> {
     use rustgis_render::pdf::Text;
     let Some(pdf) = p.get("pdf").filter(|v| !v.is_null()) else { return Ok(Text::Fonts) };
     let Some(pdf) = pdf.as_object() else { return Err(r#"pdf is an object: {"text": "fonts"|"outlines"}"#.into()) };
-    match pdf.get("text").and_then(Value::as_str) {
-        None if pdf.get("text").is_none_or(Value::is_null) => Ok(Text::Fonts),
-        Some("fonts") => Ok(Text::Fonts),
-        Some("outlines") => Ok(Text::Outlines),
-        _ => Err(r#"pdf.text is "fonts" or "outlines""#.into()),
+    match pdf.get("text") {
+        None | Some(Value::Null) => Ok(Text::Fonts),
+        Some(v) if v == "fonts" => Ok(Text::Fonts),
+        Some(v) if v == "outlines" => Ok(Text::Outlines),
+        Some(_) => Err(r#"pdf.text is "fonts" or "outlines""#.into()),
     }
 }
 
