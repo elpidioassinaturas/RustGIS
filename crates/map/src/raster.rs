@@ -2089,7 +2089,18 @@ impl RasterLayer {
                     }),
                     None => None,
                 };
-                Some(classes().enumerate().filter(|(i, _)| held.as_ref().is_none_or(|held| held.contains(i))).map(|(_, c)| c).collect())
+                // A flag per class, so a file with very many breaks costs one pass, not one per row.
+                let keep = held.map(|held| {
+                    let mut keep = vec![false; breaks.len()];
+                    for i in held {
+                        if let Some(k) = keep.get_mut(i) {
+                            *k = true;
+                        }
+                    }
+                    keep
+                });
+                let kept = |i: usize| keep.as_ref().is_none_or(|keep| keep.get(i).copied().unwrap_or(false));
+                Some(classes().enumerate().filter(|(i, _)| kept(*i)).map(|(_, c)| c).collect())
             }
             RasterRenderer::Stretch { .. } | RasterRenderer::Rgb { .. } | RasterRenderer::ShadedRelief { .. } => None,
         }
