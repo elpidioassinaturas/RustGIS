@@ -199,7 +199,12 @@ fn glyphs(out: &mut String, defs: &mut Defs, run: &GlyphRun) {
     let face = std::ptr::from_ref(run.font) as usize;
     let k = run.size / upm;
     let text: String = run.glyphs.iter().map(|g| g.ch).collect();
-    let _ = writeln!(out, r#"<g aria-label="{}"{}{}>"#, super::esc(&text), paint("fill", run.color), transform_attr(run.transform));
+    // A halo's copy (#1815) stroked as well, its width in the glyphs' own units (each is placed
+    // scaled by `k`).
+    let stroke = run.halo.filter(|w| w.is_finite() && *w > 0.0 && k > 0.0).map_or(String::new(), |w| {
+        format!(r#"{} stroke-width="{}" stroke-linejoin="round" stroke-linecap="round""#, paint("stroke", run.color), trimmed(w / k, 4))
+    });
+    let _ = writeln!(out, r#"<g aria-label="{}"{}{stroke}{}>"#, super::esc(&text), paint("fill", run.color), transform_attr(run.transform));
     for g in &run.glyphs {
         let id = match defs.glyphs.get(&(face, g.id.0)) {
             Some(id) => id.clone(),
@@ -378,7 +383,7 @@ mod tests {
         let o = font.glyph_id('o');
         let glyphs =
             vec![Glyph { id: o, x: 0.0, ch: 'o' }, Glyph { id: font.glyph_id(' '), x: 6.0, ch: ' ' }, Glyph { id: o, x: 9.0, ch: 'o' }];
-        d.glyphs(GlyphRun { font, size: 12.0, color: Color::BLACK, transform: Transform::from_translate(60.0, 40.0), glyphs });
+        d.glyphs(GlyphRun { font, size: 12.0, color: Color::BLACK, transform: Transform::from_translate(60.0, 40.0), glyphs, halo: None });
         let mut pic = tiny_skia::Pixmap::new(2, 2).unwrap();
         pic.fill(Color::from_rgba8(0, 128, 0, 255));
         d.image(pic.as_ref(), Transform::from_scale(5.0, 5.0), 0.5, false);
@@ -413,6 +418,23 @@ mod tests {
             "{svg}"
         );
         assert!(defs.text.contains(r#"<clipPath id="clip2" clipPathUnits="userSpaceOnUse"><path d="M100 10"#));
+    }
+
+    /// A halo's copy of the text (#1815) is the run stroked as well, rounded, its width in the
+    /// glyphs' own units so that it is the run's once they are scaled.
+    #[test]
+    fn a_halo_run_is_stroked() {
+        let font = crate::text::label_font().unwrap();
+        let glyphs = vec![Glyph { id: ab_glyph::Font::glyph_id(font, 'H'), x: 0.0, ch: 'H' }];
+        let upm = ab_glyph::Font::units_per_em(font).unwrap();
+        let mut d = Drawing::new(40.0, 40.0);
+        d.glyphs(GlyphRun { font, size: 10.0, color: Color::WHITE, transform: Transform::identity(), glyphs, halo: Some(2.0) });
+        let (_, _, list) = d.finish();
+        let (mut svg, mut defs) = (String::new(), Defs::default());
+        items(&mut svg, &mut defs, &list).unwrap();
+        let width = format!(r#"stroke-width="{}""#, trimmed(2.0 / (10.0 / upm), 4));
+        assert!(svg.contains(r##"stroke="#ffffff""##) && svg.contains(&width), "{svg}");
+        assert!(svg.contains(r#"stroke-linejoin="round" stroke-linecap="round""#), "{svg}");
     }
 
     /// A blended map layer over another, each in a layer (#1815), blends with the one beneath in

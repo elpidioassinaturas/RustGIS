@@ -31,6 +31,8 @@ struct Recording {
     ts: Transform,
     /// A layer is open ([`Canvas::layer`]).
     layer: bool,
+    /// The glyphs kept are a halo this wide ([`Canvas::halo`]).
+    halo: Option<f32>,
 }
 
 impl Canvas {
@@ -48,7 +50,7 @@ impl Canvas {
     pub fn recording(width: u32, height: u32) -> Option<Canvas> {
         let pm = Pixmap::new(width, height)?;
         let drawing = Drawing::new(width as f32, height as f32);
-        Some(Canvas { pm, rec: Some(Box::new(Recording { drawing, dirty: false, ts: Transform::identity(), layer: false })) })
+        Some(Canvas { pm, rec: Some(Box::new(Recording { drawing, dirty: false, ts: Transform::identity(), layer: false, halo: None })) })
     }
 
     /// Whether it records.
@@ -205,6 +207,7 @@ impl Canvas {
     pub fn glyphs(&mut self, mut run: GlyphRun) {
         self.keep(|r| {
             run.transform = r.ts.pre_concat(run.transform);
+            run.halo = run.halo.or(r.halo);
             r.drawing.glyphs(run);
         });
     }
@@ -220,6 +223,17 @@ impl Canvas {
         f(self);
         if let (Some(r), Some(old)) = (&mut self.rec, old) {
             r.ts = old;
+        }
+    }
+
+    /// Draws with `f` as a halo `width` wide (#1815): the glyphs it keeps are a halo's copy of the
+    /// text, filled and stroked that wide (see [`vector::GlyphRun::halo`]), so a PDF writes the
+    /// halo as text too. Only a recording keeps halos so; a canvas that draws pixels runs `f`.
+    pub fn halo(&mut self, width: f32, f: impl FnOnce(&mut Canvas)) {
+        let old = self.rec.as_mut().map(|r| r.halo.replace(width));
+        f(self);
+        if let (Some(r), Some(old)) = (&mut self.rec, old) {
+            r.halo = old;
         }
     }
 
@@ -467,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn a_label_keeps_its_halo_as_a_shape_and_its_text_once() {
+    fn a_label_keeps_its_halo_as_text_and_its_text_once() {
         let label = crate::PlacedLabel {
             text: "Memphis".into(),
             x: 50.0,
@@ -493,9 +507,13 @@ mod tests {
         crate::text::draw(&mut c, &label, 1.0);
         let (_, _, items) = c.into_drawing().unwrap().finish();
         let [Item::Group(halo), Item::Glyphs(run)] = items.as_slice() else { panic!("a halo and the text") };
-        // The halo: the letters and their outline spread round them, opaque, in one coat.
-        assert!(matches!(halo.items.as_slice(), [Item::Fill { .. }, Item::Stroke { .. }]));
-        assert_eq!(run.glyphs.iter().map(|g| g.ch).collect::<String>(), "Memphis");
+        // The halo (#1815): a copy of the text under it, its glyphs filled and stroked twice the
+        // halo's reach (1.2 points) wide, opaque, in one coat.
+        let [Item::Glyphs(copy)] = halo.items.as_slice() else { panic!("the halo as a run of glyphs") };
+        assert_eq!(copy.halo, Some(2.4));
+        assert_eq!(copy.color, tiny_skia::Color::WHITE);
+        assert_eq!((copy.glyphs.as_slice(), copy.transform), (run.glyphs.as_slice(), run.transform), "the text's own glyphs, where it is");
+        assert_eq!((run.halo, run.glyphs.iter().map(|g| g.ch).collect::<String>().as_str()), (None, "Memphis"));
         // Turned with the label, not drawn as a turned picture.
         assert!(run.transform.ky.abs() > 0.1);
         // A halo of no width draws nothing, as on the pixels.

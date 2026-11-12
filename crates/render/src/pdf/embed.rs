@@ -230,6 +230,7 @@ mod tests {
             color: Color::BLACK,
             transform: Transform::from_row(1.0, 0.0, kx, 1.0, 10.0, 40.0),
             glyphs: text.chars().zip(0..).map(|(ch, i)| Glyph { id: font.glyph_id(ch), x: 11.0 * i as f32, ch }).collect(),
+            halo: None,
         };
         let mut d = Drawing::new(200.0, 100.0);
         d.glyphs(run(0.0));
@@ -322,6 +323,48 @@ mod tests {
         assert!(!cid_font.contains("/CIDToGIDMap"), "{cid_font}");
         assert!(objs.iter().any(|o| o.0.contains("/FontFile3")) && objs.iter().any(|o| o.0.contains("/Subtype /OpenType")));
         assert_eq!(cids_are_their_glyphs(font, &objs, "/Subtype /CIDFontType0"), 3, "C, A, B");
+    }
+
+    /// A halo (#1815) is its text again under it, filled and stroked: in an embedded face, the
+    /// same font in rendering mode 2, its stroke rounded and as wide as the run's scale makes it,
+    /// marked as an artifact; in outlines, its glyphs' outlines filled and stroked, as before.
+    #[test]
+    fn a_halo_is_its_text_filled_and_stroked() {
+        let font = face(|_| ());
+        let run = |halo: Option<f32>, color: Color| GlyphRun {
+            font,
+            size: 20.0,
+            color,
+            transform: Transform::from_row(2.0, 0.0, 0.0, 2.0, 10.0, 40.0),
+            glyphs: "Rio".chars().zip(0..).map(|(ch, i)| Glyph { id: font.glyph_id(ch), x: 11.0 * i as f32, ch }).collect(),
+            halo,
+        };
+        let page = || {
+            let mut d = Drawing::new(200.0, 100.0);
+            d.begin_group(0.9, rustgis_map::effects::Blend::Normal, None);
+            d.glyphs(run(Some(2.4), Color::WHITE));
+            d.end_group();
+            d.glyphs(run(None, Color::BLACK));
+            Page::drawing(d, 100.0, 50.0)
+        };
+        let streams =
+            |pdf: &[u8]| objects(pdf).into_iter().map(|o| String::from_utf8_lossy(&o.1).into_owned()).collect::<Vec<_>>().join("\n");
+        let (pdf, outlined) = write_with(&[page()], "Halo", Options { text: Text::Fonts, ..Options::default() });
+        assert!(outlined.is_empty());
+        let text = String::from_utf8_lossy(&pdf);
+        assert_eq!(text.matches("/Subtype /Type0").count(), 1, "the halo in the text's own font");
+        let content = streams(&pdf);
+        let halo = content.split("/Artifact BMC\n").nth(1).and_then(|h| h.split("EMC\n").next()).unwrap_or_else(|| panic!("{content}"));
+        assert!(halo.starts_with("BT\n2 Tr\n") && halo.ends_with("] TJ\n0 Tr\nET\n"), "{halo}");
+        // Stroked in white, rounded, the run's 2.4 pixels doubled by its scale.
+        assert!(
+            content.contains("1 1 1 RG") && content.contains("4.8 w") && content.contains("1 J") && content.contains("1 j"),
+            "{content}"
+        );
+        assert_eq!(content.matches(" Tr\n").count(), 2, "the text itself is filled only");
+        // In outlines: the halo as its glyphs' outlines, filled and stroked.
+        let outlines = streams(&write_with(&[page()], "Halo", Options { text: Text::Outlines, ..Options::default() }).0);
+        assert!(!outlines.contains(" Tr\n") && !outlines.contains("/Artifact") && outlines.contains("\nB\n"), "{outlines}");
     }
 
     /// A face whose licence forbids embedding (fsType 2) is set in outlines, and said.
