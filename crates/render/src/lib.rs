@@ -2672,16 +2672,7 @@ fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, 
         let (dst, src) = ([p.0, q.0, r.0], [p.1, q.1, r.1]);
         let Some(t) = affine(src, dst) else { continue };
         // A hair larger all round, so neighbours leave no seam.
-        let (cx, cy) = ((dst[0].0 + dst[1].0 + dst[2].0) / 3.0, (dst[0].1 + dst[1].1 + dst[2].1) / 3.0);
-        let mut pb = PathBuilder::new();
-        for (i, (x, y)) in dst.iter().enumerate() {
-            let (dx, dy) = (x - cx, y - cy);
-            let len = dx.hypot(dy).max(1e-9);
-            let (x, y) = ((x + dx / len * 0.6) as f32, (y + dy / len * 0.6) as f32);
-            if i == 0 { pb.move_to(x, y) } else { pb.line_to(x, y) }
-        }
-        pb.close();
-        let Some(path) = pb.finish() else { continue };
+        let Some(path) = grown_triangle(dst) else { continue };
         let shader = tiny_skia::Pattern::new(pic.as_ref(), SpreadMode::Pad, tiny_skia::FilterQuality::Bilinear, 1.0, t);
         pm.fill_path(&path, &Paint { shader, anti_alias: true, ..Paint::default() }, FillRule::Winding, Transform::identity(), None);
         // Fog from halfway to the reach.
@@ -2700,6 +2691,62 @@ fn triangles<V: Copy>(grid: &[Option<V>], n: usize, i: usize, j: usize) -> Optio
     let at = |i: usize, j: usize| grid.get(j * (n + 1) + i).copied().flatten();
     let (a, b, c, d) = (at(i, j)?, at(i + 1, j)?, at(i, j + 1)?, at(i + 1, j + 1)?);
     Some([[a, b, d], [a, d, c]])
+}
+
+/// How far [`grown_triangle`] moves each edge of a draped triangle outward (physical pixels):
+/// two neighbours then overlap, and their anti-aliased edges leave no seam for the sky to show
+/// through (#1881).
+const DRAPE_GROWTH: f64 = 0.6;
+/// The farthest [`grown_triangle`] reaches past a corner, along its bisector (physical pixels):
+/// a sliver's sharp corner reaching farther stood out of a ridge against the sky.
+const DRAPE_CORNER_REACH: f64 = 1.0;
+
+/// The outline of the triangle `t` (either winding) with each edge moved outward along its own
+/// normal by [`DRAPE_GROWTH`], the corners where the moved edges meet. Every edge then overlaps
+/// its neighbour by the same amount, whatever the triangle's shape: moving the corners away from
+/// the centroid instead barely moved a long thin triangle's long edges, the ones perspective makes
+/// of far cells. A corner sharper than about 74° would reach farther than [`DRAPE_CORNER_REACH`]:
+/// it is cut square there, its edges still moved in full. `None` for a triangle with no area.
+fn grown_triangle(t: [(f64, f64); 3]) -> Option<tiny_skia::Path> {
+    let area = (t[1].0 - t[0].0) * (t[2].1 - t[0].1) - (t[2].0 - t[0].0) * (t[1].1 - t[0].1);
+    if area.abs() < 1e-12 || !area.is_finite() {
+        return None;
+    }
+    let sign = area.signum();
+    // The direction of the edge a → b and its outward normal; zero for an edge with no length.
+    let along = |a: (f64, f64), b: (f64, f64)| {
+        let (ex, ey) = (b.0 - a.0, b.1 - a.1);
+        let l = ex.hypot(ey);
+        if l < 1e-9 { ((0.0, 0.0), (0.0, 0.0)) } else { ((ex / l, ey / l), (sign * ey / l, -sign * ex / l)) }
+    };
+    let dot = |a: (f64, f64), b: (f64, f64)| a.0 * b.0 + a.1 * b.1;
+    let (d, reach) = (DRAPE_GROWTH, DRAPE_CORNER_REACH);
+    let mut pb = PathBuilder::new();
+    let mut first = true;
+    let mut point = |(x, y): (f64, f64)| {
+        if std::mem::take(&mut first) { pb.move_to(x as f32, y as f32) } else { pb.line_to(x as f32, y as f32) }
+    };
+    for (i, &v) in t.iter().enumerate() {
+        let ((t1, n1), (t2, n2)) = (along(t[(i + 2) % 3], v), along(v, t[(i + 1) % 3]));
+        // The moved edges meet at v + d (n1 + n2) / (1 + n1 · n2), |n1 + n2| / (1 + n1 · n2)
+        // being 1 / cos of half the turn between the normals.
+        let (mx, my) = (n1.0 + n2.0, n1.1 + n2.1);
+        let (c, m_len) = (1.0 + dot(n1, n2), mx.hypot(my));
+        if m_len * d <= reach * c {
+            let k = if c < 1e-12 { 0.0 } else { d / c };
+            point((v.0 + mx * k, v.1 + my * k));
+            continue;
+        }
+        // Too sharp: each moved edge stops where it crosses the square cut `reach` past v.
+        let u = (mx / m_len, my / m_len);
+        for (tk, nk) in [(t1, n1), (t2, n2)] {
+            let tu = dot(tk, u);
+            let s = if tu.abs() < 1e-9 { 0.0 } else { (reach - d * dot(nk, u)) / tu };
+            point((v.0 + d * nk.0 + s * tk.0, v.1 + d * nk.1 + s * tk.1));
+        }
+    }
+    pb.close();
+    pb.finish()
 }
 
 /// The affine map taking the triangle `src` onto `dst` (physical pixels); `None` for a
@@ -8924,6 +8971,95 @@ mod tests {
             Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer("none".into()), exaggeration: 1.0 });
         assert!(terrain::Ground::of(&hilly, &camera).is_none());
         assert!(render(&mut hilly, &view).is_some());
+    }
+
+    /// The outline's points and, for each edge a → b of `t`, the farthest any of them lies
+    /// outside it.
+    fn grown_reach(t: [(f64, f64); 3]) -> (Vec<(f64, f64)>, [f64; 3]) {
+        let path = grown_triangle(t).expect("a triangle with area");
+        let pts: Vec<(f64, f64)> = path.points().iter().map(|p| (f64::from(p.x), f64::from(p.y))).collect();
+        let centre = ((t[0].0 + t[1].0 + t[2].0) / 3.0, (t[0].1 + t[1].1 + t[2].1) / 3.0);
+        let out = |i: usize| {
+            let (a, b) = (t[i], t[(i + 1) % 3]);
+            let l = (b.0 - a.0).hypot(b.1 - a.1);
+            let side = |p: (f64, f64)| ((b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)) / l;
+            let s = -side(centre).signum();
+            pts.iter().map(|p| s * side(*p)).fold(f64::MIN, f64::max)
+        };
+        let reach = [out(0), out(1), out(2)];
+        (pts, reach)
+    }
+
+    #[test]
+    fn a_thin_draped_triangle_moves_its_long_edges_out_in_full() {
+        // #1881: half of a far cell, 100 px wide and 4 high. Moving its corners 0.6 px away from
+        // the centroid moved the long edge (0, 0)–(100, 4) out by 0.02 px.
+        for t in [[(0.0, 0.0), (100.0, 0.0), (100.0, 4.0)], [(0.0, 0.0), (100.0, 4.0), (100.0, 0.0)]] {
+            let (_, reach) = grown_reach(t);
+            for r in reach {
+                assert!((r - DRAPE_GROWTH).abs() < 1e-3, "{reach:?} for {t:?}");
+            }
+        }
+        // A right triangle the same way: the right angle where the moved edges meet, 0.85 px
+        // out; the 45° corners, whose meeting points lie 1.6 px out, cut.
+        let (pts, reach) = grown_reach([(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)]);
+        assert_eq!(pts.len(), 5, "{pts:?}");
+        assert!(reach.iter().all(|r| (r - DRAPE_GROWTH).abs() < 1e-3), "{reach:?}");
+        assert!((pts[0].0 + DRAPE_GROWTH).abs() < 1e-4 && (pts[0].1 + DRAPE_GROWTH).abs() < 1e-4, "{pts:?}");
+        // No area, nothing to draw.
+        assert!(grown_triangle([(0.0, 0.0), (5.0, 5.0), (10.0, 10.0)]).is_none());
+    }
+
+    #[test]
+    fn a_draped_slivers_sharp_corner_reaches_no_farther_than_the_cap() {
+        // The corner at (0, 0) is 1.1° sharp: where its moved edges meet, 60 px out, it is cut.
+        let t = [(0.0, 0.0), (100.0, 0.0), (100.0, 2.0)];
+        let (pts, reach) = grown_reach(t);
+        assert_eq!(pts.len(), 4, "{pts:?}");
+        assert!(reach.iter().all(|r| (r - DRAPE_GROWTH).abs() < 1e-3), "{reach:?}");
+        // Along the corner's bisector, pointing out of the triangle.
+        let half = 1.0_f64.atan2(50.0) / 2.0;
+        let u = (-half.cos(), -half.sin());
+        let past = pts.iter().map(|p| p.0 * u.0 + p.1 * u.1).fold(f64::MIN, f64::max);
+        assert!((past - DRAPE_CORNER_REACH).abs() < 1e-3, "{past} {pts:?}");
+        // The square corners move out as before, about 0.6 px each way.
+        assert!(pts.iter().all(|p| p.0 < 100.0 + 0.61 && p.1 < 2.0 + 1.0), "{pts:?}");
+    }
+
+    #[test]
+    fn the_two_halves_of_a_draped_cell_leave_no_seam() {
+        // #1881: a far cell, long and thin as perspective makes it, its halves drawn
+        // anti-aliased over black as `drape_terrain` draws them. Moving their corners away from
+        // their centroids left the diagonal's pixels grey.
+        let mut pm = Pixmap::new(64, 16).expect("pixmap");
+        pm.fill(tiny_skia::Color::BLACK);
+        let (a, b, c, d) = ((2.3, 4.2), (61.7, 5.1), (4.1, 10.6), (59.2, 11.3));
+        let white = Paint { anti_alias: true, ..paint(Rgba::rgb(255, 255, 255), 1.0) };
+        for half in [[a, b, d], [a, d, c]] {
+            let path = grown_triangle(half).expect("area");
+            pm.fill_path(&path, &white, FillRule::Winding, Transform::identity(), None);
+        }
+        // Every pixel lying a pixel or more inside the cell is white.
+        let quad = [a, b, d, c];
+        let inside = |p: (f64, f64)| {
+            (0..4).all(|i| {
+                let (s, e) = (quad[i], quad[(i + 1) % 4]);
+                let l = (e.0 - s.0).hypot(e.1 - s.1);
+                ((e.0 - s.0) * (p.1 - s.1) - (e.1 - s.1) * (p.0 - s.0)) / l >= 1.0
+            })
+        };
+        let mut checked = 0;
+        for y in 0..16 {
+            for x in 0..64 {
+                if !inside((f64::from(x) + 0.5, f64::from(y) + 0.5)) {
+                    continue;
+                }
+                checked += 1;
+                let px = pm.pixel(x, y).expect("in the pixmap");
+                assert!(px.red() == 255 && px.green() == 255 && px.blue() == 255, "a seam at ({x}, {y}): {px:?}");
+            }
+        }
+        assert!(checked > 100, "{checked}");
     }
 
     #[test]
