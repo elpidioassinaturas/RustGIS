@@ -539,7 +539,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e}"));
         let way = Way::new(&r, 30.0);
         assert!(reads(&way, f64::INFINITY, 20).len() <= 20);
-        assert_eq!(sky_of(&r, 1).len(), 400);
+        assert!(sky_of(&r, 1).iter().all(|v| *v == 255), "the sky is seen whole");
     }
 
     /// A tilted plane hides the sky uphill by its slope in each direction, and none of it
