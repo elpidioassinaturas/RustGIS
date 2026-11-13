@@ -1241,6 +1241,11 @@ whole image is held: either way the layer is drawn without them, and a notice sa
 outside the raster casts nothing on it, and a grid spanning 0 to 360° casts nothing across its
 seam.
 
+With **Resampling** set to bilinear, a Shaded Relief layer's light (its hillshade and cast shadows)
+is blended between the cells' centres, as its values are, so a cell drawn over many pixels shades
+smoothly instead of in squares; nearest keeps one light per cell, as before. A cell with no data,
+or masked, is left out of the blend, so it doesn't darken the relief next to it.
+
 **Masking**, at the foot of the Symbology pane (`raster.mask`), hides pixel values from view without
 changing the data: values to draw as no data (a background of 0 or −9999 the file doesn't flag, QA
 flags, land cover classes such as `0, 254, 255`), and values outside, or inside, a range. The

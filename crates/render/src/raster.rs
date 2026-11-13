@@ -671,6 +671,8 @@ impl Pass1<'_> {
             }
             // Nearest sampling: the last cell read, and the pixel it was read for.
             let mut last: Option<((i64, i64), usize)> = None;
+            // Bilinear relief: the last four cells' lights, by the first's column and row.
+            let mut quad: Option<((i64, i64), [Option<f64>; 4])> = None;
             for dx in 0..bw {
                 let px = self.x0 + dx;
                 let pos = match self.rotated {
@@ -736,29 +738,84 @@ impl Pass1<'_> {
                         }
                     }
                 }
-                if let (Some((az, alt, zf)), Some(b)) = (self.relief, self.bands.first()) {
-                    let (ci, ri) = cell;
-                    let centre = value(r, self.mask, *b, ci, ri, self.wrap_width).unwrap_or(0.0) as f64;
-                    let mut z = [centre; 9];
-                    for (k, (dx, dy)) in
-                        [(-1, -1), (0, -1), (1, -1), (-1, 0), (0, 0), (1, 0), (-1, 1), (0, 1), (1, 1)].into_iter().enumerate()
-                    {
-                        let (dx, dy) = (dx * self.east_north.0, dy * self.east_north.1);
-                        z[k] = value(r, self.mask, *b, ci + dx, ri + dy, self.wrap_width).map(f64::from).unwrap_or(centre);
-                    }
+                if let (Some(relief), Some(&b)) = (self.relief, self.bands.first()) {
+                    // Bilinear: the light blended between the four cells around the point, as the
+                    // band values are (#1880). Nearest, or no cell around it lit: its own cell's.
+                    let blended = (self.resampling == Resampling::Bilinear).then(|| {
+                        let (x, y) = (c - 0.5, row - 0.5);
+                        let at = (x.floor() as i64, y.floor() as i64);
+                        let lights = match quad {
+                            Some((q, lights)) if q == at => lights,
+                            _ => {
+                                let lights = self.quad_lights(b, relief, at);
+                                quad = Some((at, lights));
+                                lights
+                            }
+                        };
+                        blend(lights, x - x.floor(), y - y.floor())
+                    });
+                    let light = blended.flatten().unwrap_or_else(|| {
+                        let centre = value(r, self.mask, b, cell.0, cell.1, self.wrap_width).unwrap_or(0.0);
+                        self.light(b, relief, cell, f64::from(centre))
+                    });
                     if let Some(s) = shade.get_mut(i) {
-                        *s = hillshade(&z, self.cell.0, self.cell.1, az, alt, zf);
-                        if let Some((grid, strength)) = self.shadow
-                            && let Some(lit) = grid.get(ri as usize * r.width as usize + ci as usize)
-                        {
-                            let left = 1.0 - strength * (1.0 - f64::from(*lit) / 255.0);
-                            *s = (f64::from(*s) * left).round().clamp(0.0, 255.0) as u8;
-                        }
+                        *s = light.round().clamp(0.0, 255.0) as u8;
                     }
                 }
             }
         }
     }
+
+    /// The light on the relief's cell `(ci, ri)`, from 0 to 255 and not rounded: the hillshade of
+    /// its 3 × 3 window, times what the cast shadows leave on it. `centre` is the cell's height,
+    /// and stands in for a neighbour that is no data, masked or outside the grid. Every light a
+    /// cell gets is worked out here, so that [`blend`] smooths each of them.
+    fn light(&self, band: usize, (az, alt, zf): (f64, f64, f64), (ci, ri): (i64, i64), centre: f64) -> f64 {
+        let r = self.r;
+        let mut z = [centre; 9];
+        for (k, (dx, dy)) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (0, 0), (1, 0), (-1, 1), (0, 1), (1, 1)].into_iter().enumerate() {
+            let (dx, dy) = (dx * self.east_north.0, dy * self.east_north.1);
+            z[k] = value(r, self.mask, band, ci + dx, ri + dy, self.wrap_width).map(f64::from).unwrap_or(centre);
+        }
+        let mut light = f64::from(hillshade(&z, self.cell.0, self.cell.1, az, alt, zf));
+        if let Some((grid, strength)) = self.shadow
+            && let Some(lit) = grid.get(ri as usize * r.width as usize + ci as usize)
+        {
+            light *= 1.0 - strength * (1.0 - f64::from(*lit) / 255.0);
+        }
+        light
+    }
+
+    /// The lights of the four cells whose centres are around a point, from the cell `(i, j)` at
+    /// its top left: `(i, j)`, `(i + 1, j)`, `(i, j + 1)` and `(i + 1, j + 1)`. A cell that is no
+    /// data, masked or outside the grid has none; a column past a whole turn's edge wraps.
+    fn quad_lights(&self, band: usize, relief: (f64, f64, f64), (i, j): (i64, i64)) -> [Option<f64>; 4] {
+        let (w, h) = (i64::from(self.r.width), i64::from(self.r.height));
+        [(0, 0), (1, 0), (0, 1), (1, 1)].map(|(di, dj)| {
+            let (ci, ri) = (self.wrap_width.map_or(i + di, |ww| (i + di).rem_euclid(ww)), j + dj);
+            if ci < 0 || ri < 0 || ci >= w || ri >= h {
+                return None;
+            }
+            let centre = value(self.r, self.mask, band, ci, ri, self.wrap_width)?;
+            Some(self.light(band, relief, (ci, ri), f64::from(centre)))
+        })
+    }
+}
+
+/// The four lights of [`Pass1::quad_lights`] blended bilinearly at `(fx, fy)` (0 to 1) from the
+/// first. A cell without one is left out and the others' weights scaled up: the light is
+/// clamped at the grid's edge, and a clipped or masked edge isn't darkened. At a cell's centre
+/// this is that cell's light exactly. `None` when none of the four with a weight has a light.
+fn blend(lights: [Option<f64>; 4], fx: f64, fy: f64) -> Option<f64> {
+    let weights = [(1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy];
+    let (mut sum, mut total) = (0.0, 0.0);
+    for (light, w) in lights.into_iter().zip(weights) {
+        if let Some(light) = light {
+            sum += w * light;
+            total += w;
+        }
+    }
+    (total > 0.0).then(|| sum / total)
 }
 
 /// Whether two pixels' band values are the same (NaN, no data, equal to itself).
@@ -1237,5 +1294,83 @@ mod tests {
                 assert!(a == 255 && (lo..=hi).contains(&v), "{x0}: {v} at x {x}, outside {lo}–{hi}");
             }
         }
+    }
+
+    /// A row of 600 screen pixels across a relief of 6 × 3 cells of 100 m whose slope grows
+    /// eastward, lit from the west, its middle row drawn: cell `k` covers pixels `100 k - 1` to
+    /// `100 k + 98`, its centre on `100 k + 49`, and the last pixel is past the raster. The red
+    /// channel of each pixel, or `None` where it isn't drawn. `light` is a cast-shadow grid, drawn
+    /// at full strength.
+    fn relief_row(resampling: Resampling, nodata: Option<f64>, mask: &[f64], light: Option<&[u8]>) -> Vec<Option<u8>> {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 300.0, pixel_width: 100.0, pixel_height: -100.0 };
+        let data = [0.0, 0.0, 20.0, 60.0, 120.0, 200.0].repeat(3);
+        let r = Raster::new("relief", 6, 3, vec![data], gt, Crs::WebMercator, nodata, ColorHint::Gray, "Float32").unwrap();
+        let mut style = RasterStyle::default_for(&r);
+        let shadow = if light.is_some() { 1.0 } else { 0.0 };
+        style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 270.0, altitude: 45.0, z_factor: 1.0, shadow };
+        style.resampling = resampling;
+        style.mask = RasterMask { values: mask.to_vec(), ..RasterMask::default() };
+        let view = View {
+            width: 600.0,
+            height: 1.0,
+            pixels_per_point: 1.0,
+            camera: Camera { center: Coord::new(300.5, 150.0), res: 1.0, bearing: 0.0, pitch: 0.0 },
+            sky: false,
+        };
+        let mut pm = Pixmap::new(600, 1).unwrap();
+        draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), light);
+        (0..600).map(|x| pm.pixel(x, 0).filter(|p| p.alpha() > 0).map(|p| p.red())).collect()
+    }
+
+    /// Bilinear relief blends the four cells' light (#1880): the same as Nearest at each cell's
+    /// centre and in the outer half of the edge cells, and in between from one centre's light to
+    /// the next, not in steps. Nearest keeps one light per cell.
+    #[test]
+    fn bilinear_relief_blends_the_light_between_cell_centres() {
+        let nearest = relief_row(Resampling::Nearest, None, &[], None);
+        let bilinear = relief_row(Resampling::Bilinear, None, &[], None);
+        let centre = |k: usize| nearest[100 * k + 49].unwrap();
+        for k in 0..6 {
+            assert!(nearest[100 * k..100 * k + 98].iter().all(|v| *v == Some(centre(k))), "nearest, cell {k}");
+            assert_eq!(bilinear[100 * k + 49], Some(centre(k)), "bilinear at the centre of cell {k}");
+        }
+        assert!(bilinear[..49].iter().all(|v| *v == Some(centre(0))) && bilinear[550..599].iter().all(|v| *v == Some(centre(5))));
+        for k in 1..4 {
+            let (a, b) = (centre(k), centre(k + 1));
+            assert!(b > a + 5, "the slope grows toward the sun: {a} to {b}");
+            let between: Vec<u8> = bilinear[100 * k + 49..=100 * k + 149].iter().map(|v| v.unwrap()).collect();
+            assert!(between.windows(2).all(|w| w[0] <= w[1] && w[1] - w[0] <= 2), "cells {k} to {}: {between:?}", k + 1);
+            let middle = between[50];
+            assert!(a < middle && middle < b, "cells {k} to {}: {middle} between {a} and {b}", k + 1);
+        }
+    }
+
+    /// A no-data or masked cell is left out of the blend, the others' weights scaled up: next to
+    /// it the relief keeps its own cell's light, rather than darkening toward the hole.
+    #[test]
+    fn bilinear_relief_leaves_a_hidden_cell_out_of_the_blend() {
+        for (nodata, mask) in [(Some(120.0), &[][..]), (None, &[120.0][..])] {
+            let nearest = relief_row(Resampling::Nearest, nodata, mask, None);
+            let bilinear = relief_row(Resampling::Bilinear, nodata, mask, None);
+            // Cell 4 is hidden; cell 3's light runs on to its edge, and cell 5's from its own.
+            assert!(bilinear[399..499].iter().all(Option::is_none), "{nodata:?} {mask:?}");
+            assert!(bilinear[349..399].iter().all(|v| v.is_some() && *v == nearest[349]), "{nodata:?} {mask:?}");
+            assert!(bilinear[499..599].iter().all(|v| v.is_some() && *v == nearest[549]), "{nodata:?} {mask:?}");
+        }
+    }
+
+    /// The light cast shadows leave is blended with the hillshade: from a lit cell to a shadowed
+    /// one, Bilinear dims gradually where Nearest steps.
+    #[test]
+    fn bilinear_relief_blends_the_cast_shadows_too() {
+        // Cell 2 in full shadow in every row, the others lit.
+        let light: Vec<u8> = [255, 255, 0, 255, 255, 255].repeat(3);
+        let nearest = relief_row(Resampling::Nearest, None, &[], Some(&light));
+        let bilinear = relief_row(Resampling::Bilinear, None, &[], Some(&light));
+        let (lit, dark) = (nearest[149].unwrap(), nearest[249].unwrap());
+        assert!(dark < lit && nearest[198] == Some(lit) && nearest[199] == Some(dark), "{lit} {dark}");
+        assert_eq!((bilinear[149], bilinear[249]), (Some(lit), Some(dark)));
+        let middle = bilinear[199].unwrap();
+        assert!(dark < middle && middle < lit, "{middle} between {dark} and {lit}");
     }
 }
