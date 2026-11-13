@@ -1660,6 +1660,13 @@ pub struct ZarrCube {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn zarr_cube(s: &Session, p: &Value) -> Result<ZarrCube, String> {
     let mut src = series_source(s, p)?;
+    // A layer that is a window of its variable: its steps over time would be read whole.
+    if src.sel.window.is_some() {
+        return Err(format!(
+            "{} is a window of its variable: add the variable without a window to summarise it over time",
+            src.sel.label()
+        ));
+    }
     let store = if is_web(&src.root) {
         cached_store(&src.root)?
     } else {

@@ -43785,6 +43785,9 @@ fn a_zarr_window_reads_only_its_chunks_by_range() {
     // A box in degrees gives the same cells; one reaching past the grid is read within it, and said.
     let r = s.run("layer.addZarr", &json!({"url": url, "variable": "v", "index": {"time": 1}, "bbox": [2.2, 5.2, 4.8, 7.8]})).unwrap();
     assert_eq!(pixels(&s, &r).2, data);
+    // A window isn't summarised over time: that would read the whole variable.
+    let e = s.run("zarr.reduce", &json!({"layer": r["layer"], "stat": "mean"})).unwrap_err();
+    assert!(e.contains("is a window of its variable: add the variable without a window"), "{e}");
     let info = s.run("raster.zarrInfo", &json!({"url": url, "bbox": [2.2, 5.2, 4.8, 7.8]})).unwrap();
     assert_eq!(info["window"]["cells"], json!([2, 1, 5, 4]));
     assert_eq!(info["variables"][0]["chunks"], json!([1, 2, 3]));

@@ -1622,8 +1622,9 @@ pub fn locate(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>>, 
     Ok(row.zip(col))
 }
 
-/// The chunk keys of `variable`'s map coordinates, for [`window_of`]: all of them are read, so
-/// longer ones than [`MAX_COORDS`] can't place a box (a window is given in cells instead).
+/// The chunk keys of `variable`'s map coordinates, for [`window_of`]: each is read whole (its
+/// first [`MAX_CHUNKS`] chunks, as any coordinate), so longer ones than [`MAX_COORDS`] can't place
+/// a box (a window is given in cells instead).
 pub fn window_keys(store: &Store, variable: &str) -> Result<Vec<String>> {
     let a = store.array(variable).ok_or_else(|| bad(format!("no variable named {variable}")))?;
     let names = a.dim_names();
