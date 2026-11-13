@@ -1289,8 +1289,8 @@ coordinates (by byte range when they are stored uncompressed). A box is placed b
 coordinates, read whole, so it takes grids of up to 4,000,000 cells a side; a longer one takes
 `"cells"`. A box reaching past the grid is read within it, and says so; `raster.zarrInfo` with
 `"bbox"` gives the cells a box covers (`window.cells`). A window is at least 2 × 2 cells, and
-doesn't follow the time slider yet. A folder's window is kept in the layer's selection
-(`t[time=3,cells=…]`) and read again when the project opens.
+doesn't follow the time slider yet. A window is kept in the project as a GeoTIFF, as a web
+store's slice is, also from a folder.
 
 **Follow the time slider** (desktop; `layer.addZarr` with `"time": true`) adds the variable as one
 layer whose step is the time slider's. The slider turns on over the variable's dates when it is

@@ -938,21 +938,36 @@ impl Selection {
     }
 
     pub fn parse(s: &str) -> Selection {
+        Selection::read(s).0
+    }
+
+    /// [`Selection::parse`] for a slice about to be read: a `cells=` part that isn't four whole
+    /// numbers is refused, not read as the whole slice.
+    pub fn parse_strict(s: &str) -> Result<Selection> {
+        match Selection::read(s) {
+            (_, true) => Err(bad(format!("{s}: its cells aren't four whole numbers (first column, first row, end column, end row)"))),
+            (sel, false) => Ok(sel),
+        }
+    }
+
+    /// The selection, and whether it has a `cells=` part that isn't a window.
+    fn read(s: &str) -> (Selection, bool) {
         let s = s.trim();
-        let Some((v, rest)) = s.split_once('[') else { return Selection { variable: s.to_string(), ..Selection::default() } };
-        let mut sel = Selection { variable: v.to_string(), ..Selection::default() };
+        let Some((v, rest)) = s.split_once('[') else { return (Selection { variable: s.to_string(), ..Selection::default() }, false) };
+        let (mut sel, mut malformed) = (Selection { variable: v.to_string(), ..Selection::default() }, false);
         for (k, v) in rest.trim_end_matches(']').split(',').filter_map(|kv| kv.split_once('=')).take(MAX_DIMS + 1) {
             let (k, v) = (k.trim(), v.trim());
             if k == "cells" {
-                let n: Vec<u64> = v.split(':').filter_map(|n| n.parse().ok()).collect();
-                if let [x0, y0, x1, y1] = n[..] {
-                    sel.window = Some(Window { x0, y0, x1, y1 });
+                let n: Vec<Option<u64>> = v.split(':').map(|n| n.trim().parse().ok()).collect();
+                match n[..] {
+                    [Some(x0), Some(y0), Some(x1), Some(y1)] => sel.window = Some(Window { x0, y0, x1, y1 }),
+                    _ => malformed = true,
                 }
             } else if let Ok(i) = v.parse() {
                 sel.index.push((k.to_string(), i));
             }
         }
-        sel
+        (sel, malformed)
     }
 }
 
@@ -1655,7 +1670,9 @@ pub fn window_of(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>
     // them: the range, and whether it was cut to the grid; None when it misses it.
     let cells = |lo: f64, hi: f64, v0: f64, dv: f64, len: u64| {
         let (i, j) = if dv > 0.0 { ((lo - v0) / dv, (hi - v0) / dv) } else { ((hi - v0) / dv, (lo - v0) / dv) };
-        let (i, j) = (i.floor(), j.ceil());
+        // An edge on a cell's edge, to within rounding, takes no cell past it.
+        let snap = |v: f64| if (v - v.round()).abs() < 1e-6 { v.round() } else { v };
+        let (i, j) = (snap(i).floor(), snap(j).ceil());
         let (from, to) = (i.max(0.0) as u64, j.min(len as f64).max(0.0) as u64);
         (from < to).then(|| {
             // Two cells at least, so the window's coordinates give the cell size.
@@ -2088,7 +2105,7 @@ pub fn read_dir(dir: &std::path::Path, selection: &str, crs: Option<&str>) -> Re
 /// [`read_dir`] with the store's metadata already read ([`read_metadata`]).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_dir_in(store: &Store, dir: &std::path::Path, selection: &str, crs: Option<&str>) -> Result<Raster> {
-    let mut sel = Selection::parse(selection);
+    let mut sel = Selection::parse_strict(selection)?;
     if sel.variable.is_empty() {
         sel.variable = store
             .variables()
@@ -2919,7 +2936,15 @@ mod tests {
         assert!(r.bands[0].data[at(2, 2)].is_nan());
         assert_eq!(r.bands[0].data[at(2, 0)], 404.0);
         // The same window from a folder.
+        // Removed however the test ends.
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
         let dir = std::env::temp_dir().join(format!("rustgis-zarr-window-{}", std::process::id()));
+        let _gone = Gone(dir.clone());
         for (k, b) in &files {
             let path = dir.join(k);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2930,7 +2955,11 @@ mod tests {
         assert_eq!(Selection::parse(&label), sel(0, w0));
         let from_dir = read_dir(&dir, &label, None).unwrap();
         assert_eq!(format!("{:?}", from_dir.bands[0].data), format!("{:?}", r.bands[0].data));
-        let _ = std::fs::remove_dir_all(&dir);
+        // A window that isn't four whole numbers is refused, not read as the whole slice.
+        for bad in ["v[time=0,cells=4:x:10:8]", "v[time=0,cells=4:2:10]"] {
+            assert!(Selection::parse_strict(bad).is_err(), "{bad}");
+            assert!(read_dir(&dir, bad, None).unwrap_err().to_string().contains("aren't four whole numbers"), "{bad}");
+        }
         // A sharded variable's window reads the shards it touches.
         let sharded = window_store(true);
         let store_s = parse_store(&sharded[..1]).unwrap();
@@ -2944,6 +2973,11 @@ mod tests {
         }
         assert_eq!(window_of(&store, "v", &coords, [21.0, 41.0, 49.0, 69.0]).unwrap(), (Window { x0: 2, y0: 1, x1: 5, y1: 4 }, false));
         assert_eq!(window_of(&store, "v", &coords, [-50.0, 41.0, 13.0, 200.0]).unwrap(), (Window { x0: 0, y0: 0, x1: 2, y1: 4 }, true));
+        // An edge on a cell's edge but for rounding takes no cell past it.
+        assert_eq!(
+            window_of(&store, "v", &coords, [11.0, 41.0, (0.1 + 0.2) * 100.0, 69.0]).unwrap().0,
+            Window { x0: 1, y0: 1, x1: 3, y1: 4 }
+        );
         // Within one cell: two, so the cell size is known.
         assert_eq!(window_of(&store, "v", &coords, [21.0, 41.0, 22.0, 42.0]).unwrap().0, Window { x0: 2, y0: 3, x1: 4, y1: 5 });
         assert!(window_of(&store, "v", &coords, [500.0, 41.0, 600.0, 69.0]).is_err());

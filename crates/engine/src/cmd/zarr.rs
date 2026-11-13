@@ -378,6 +378,12 @@ fn place_window(root: &str, store: &zarr::Store, sel: &mut zarr::Selection, aske
     }
 }
 
+/// `layer.addZarr`. By a folder or web address it reads the slice on the UI thread, with no Cancel,
+/// as it did before windows: the Add Data › Zarr dialog reads its slices off the frame and hands
+/// them over (`"ran"`), and none of the background paths takes a command that adds a layer from a
+/// store yet. A window bounds the read: `"cells"` reads only the chunks it touches and its part of
+/// the coordinates; `"bbox"` first reads the variable's two map coordinates whole, at most
+/// `MAX_COORDS` values each (32 MB as Float64), each file a download of at most 60 s.
 pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
     let asked = asked_window(p)?;
     if b(p, "time") == Some(true) {
@@ -430,7 +436,16 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             let name = ps(p, "name").map(str::to_string).unwrap_or_else(|| r.name.clone());
             // Absolute, so the project finds the store again from anywhere.
             let full = std::path::absolute(&d).map(|p| p.display().to_string()).unwrap_or(d);
-            let mut layer = RasterLayer::from_path(r, full);
+            // A window is kept in the project as a GeoTIFF, as a web store's slice is, and its
+            // label only names it: an older RustGIS reading the folder again by the label would
+            // read the whole slice and save it back without the window.
+            let mut layer = if sel.window.is_some() {
+                r.source = Some(full.clone());
+                let tif = raster::geotiff::write(&r, 0).map_err(|e| e.to_string())?;
+                RasterLayer::from_bytes(r, format!("{}.tif", store_name(&full)), tif)
+            } else {
+                RasterLayer::from_path(r, full)
+            };
             layer.subdataset = Some(sel.label());
             layer.crs = crs.map(str::to_string);
             super::raster::add_raster(s, &name, layer)

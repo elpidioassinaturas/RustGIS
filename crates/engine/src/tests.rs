@@ -43728,7 +43728,15 @@ fn a_zarr_window_reads_only_its_chunks_by_range() {
             .collect();
         files.push((format!("v/c/{t}/{gy}/{gx}"), body));
     }
+    // Removed however the test ends.
+    struct Gone(std::path::PathBuf);
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     let dir = std::env::temp_dir().join(format!("rustgis-zarr-window-engine-{}", std::process::id()));
+    let _gone = Gone(dir.clone());
     for (k, b) in &files {
         let path = dir.join("s.zarr").join(k);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -43762,10 +43770,18 @@ fn a_zarr_window_reads_only_its_chunks_by_range() {
     assert_eq!(chunks, ["/s.zarr/v/c/1/0/0", "/s.zarr/v/c/1/0/1", "/s.zarr/v/c/1/1/0", "/s.zarr/v/c/1/1/1"]);
     assert_eq!(of("lat/c/0"), ["8-31"]);
     assert_eq!(of("lon/c/0"), ["16-39"]);
-    // From a folder: the same cells.
+    // From a folder: the same cells, kept in the project as a GeoTIFF (an older RustGIS would read
+    // the folder again by the label, whole).
     let r =
         s.run("layer.addZarr", &json!({"path": dir.join("s.zarr"), "variable": "v", "index": {"time": 1}, "cells": [2, 1, 5, 4]})).unwrap();
     assert_eq!(pixels(&s, &r).2, data);
+    let layer = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap();
+    assert!(
+        layer.path.is_none() && layer.subdataset.as_deref() == Some("v[time=1,cells=2:1:5:4]"),
+        "{:?} {:?}",
+        layer.path,
+        layer.subdataset
+    );
     // A box in degrees gives the same cells; one reaching past the grid is read within it, and said.
     let r = s.run("layer.addZarr", &json!({"url": url, "variable": "v", "index": {"time": 1}, "bbox": [2.2, 5.2, 4.8, 7.8]})).unwrap();
     assert_eq!(pixels(&s, &r).2, data);
@@ -43789,5 +43805,4 @@ fn a_zarr_window_reads_only_its_chunks_by_range() {
     ] {
         assert!(s.run("layer.addZarr", &bad).is_err(), "{bad}");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
