@@ -631,7 +631,6 @@ pub enum RightPane {
     Geoprocessing,
     Symbology,
     History,
-    Details,
     Editing,
     Design,
     Workflows,
@@ -2442,6 +2441,9 @@ impl RustGisApp {
             if id == "service.add" && params.get("text").and_then(Value::as_str).is_some() {
                 return readjob::run(self, "service.add", params);
             }
+            if id == "layer.repairSource" {
+                return readjob::run(self, "layer.repairSource", params);
+            }
             let archive = match id {
                 "map.reloadTiles" => Some("map.reloadTiles"),
                 "map.repairTiles" => Some("map.repairTiles"),
@@ -2909,15 +2911,27 @@ impl RustGisApp {
     /// `layout.arrangement` changed them.
     fn save_layout_favourite(&mut self) {
         if self.session.layout_arrangements != self.ui.layout_arrangements_saved && !self.ui.layout_arrangements_unreadable {
-            // An arrangement removed here takes with it the entries passed over beside it under
-            // the same name but for case, so it doesn't come back at the next start.
-            let kept = &self.session.layout_arrangements;
+            // An arrangement removed, saved or replaced here takes with it the entries passed over
+            // beside it under the same name but for case: one removed doesn't come back at the next
+            // start, and one saved isn't passed over then for the older entry.
+            let (kept, before) = (&self.session.layout_arrangements, &self.ui.layout_arrangements_saved);
             let removed: Vec<String> =
-                self.ui.layout_arrangements_saved.keys().filter(|k| !kept.contains_key(*k)).map(|k| k.to_lowercase()).collect();
+                before.keys().chain(kept.keys()).filter(|k| before.get(*k) != kept.get(*k)).map(|k| k.to_lowercase()).collect();
             // Only those this version would use: one it can't read stays as it was.
+            let passed = self.ui.layout_arrangements_unread.len();
             self.ui.layout_arrangements_unread.retain(|name, corners| {
                 !removed.contains(&name.to_lowercase()) || !rustgis_engine::cmd::layout::usable_saved_arrangement(name, corners)
             });
+            let dropped = passed - self.ui.layout_arrangements_unread.len();
+            if dropped > 0 {
+                self.session.notify(
+                    crate::i18n::fmt(
+                        "Saved arrangements of publication layouts passed over under a name saved or removed now are dropped: {count}.",
+                        &[("count", &dropped.to_string())],
+                    ),
+                    false,
+                );
+            }
             self.ui.layout_arrangements_saved = self.session.layout_arrangements.clone();
             // Those this version couldn't use go back as they were, but where one saved here took
             // their very name.
@@ -2974,7 +2988,16 @@ impl RustGisApp {
                 toggle_right(&mut self.ui, RightPane::Symbology)
             }
             "ui.pane.history" => toggle_right(&mut self.ui, RightPane::History),
-            "ui.pane.details" => toggle_right(&mut self.ui, RightPane::Details),
+            // The Layer Properties pane on its Source tab (#1803), for the layer given (`{"layer"}`)
+            // or the selected one; with neither, it hides the pane when it is in view on Source.
+            "ui.pane.details" => {
+                let layer = p.get("layer").filter(|l| !l.is_null());
+                if layer.is_none() && layerprops::source_in_view(&self.ui) {
+                    self.ui.close_right(RightPane::LayerProperties);
+                } else {
+                    return self.run_ui("ui.pane.layerProperties", &json!({"tab": "source", "layer": layer}));
+                }
+            }
             "ui.pane.editing" => toggle_right(&mut self.ui, RightPane::Editing),
             "ui.pane.design" => toggle_right(&mut self.ui, RightPane::Design),
             "ui.pane.script" => toggle_right(&mut self.ui, RightPane::Script),
