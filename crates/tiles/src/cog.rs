@@ -1512,15 +1512,16 @@ pub fn read_values_counted_blocking(
     rows: (u32, u32),
     stop: &std::sync::atomic::AtomicBool,
 ) -> Result<(Vec<f32>, u64, u64), String> {
-    let mut read = read_bands_counted_blocking(info, url, level, &[band], cols, rows, stop)?;
+    let mut read = read_bands_counted_blocking(info, url, level, &[band], cols, rows, Duration::from_secs(120), stop)?;
     read.pop().ok_or_else(|| "no band was read".to_string())
 }
 
 /// [`read_values_counted_blocking`] for several bands of the window at once (in their order): their
 /// tiles are asked for together, so the reads of a file whose bands are stored apart (a chunk a
-/// band, as AlphaEarth's 64) overlap instead of following one another. The two minutes are for
+/// band, as AlphaEarth's 64) overlap instead of following one another. It waits up to `wait` for
 /// them all.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 pub fn read_bands_counted_blocking(
     info: &Arc<Info>,
     url: &str,
@@ -1528,6 +1529,7 @@ pub fn read_bands_counted_blocking(
     bands: &[usize],
     cols: (u32, u32),
     rows: (u32, u32),
+    wait: Duration,
     stop: &std::sync::atomic::AtomicBool,
 ) -> Result<Vec<(Vec<f32>, u64, u64)>, String> {
     let url = split(url).0.to_string();
@@ -1567,8 +1569,12 @@ pub fn read_bands_counted_blocking(
     }
     let (tx, rx) = std::sync::mpsc::channel();
     fetch_bands(info.clone(), url.clone(), level, tiles.clone(), bands.to_vec(), Box::new(move |r| tx.send(r).unwrap_or_default()));
-    let picked =
-        wait_until(&rx, Duration::from_secs(120), stop).map_err(|stopped| stopped_or(stopped, &url, "tiles not read in two minutes"))??;
+    let late = if wait == Duration::from_secs(120) {
+        "tiles not read in two minutes".to_string()
+    } else {
+        format!("tiles not read in {} s", wait.as_secs())
+    };
+    let picked = wait_until(&rx, wait, stop).map_err(|stopped| stopped_or(stopped, &url, &late))??;
     let nodata = info.layout.nodata.map(|v| v as f32);
     for (&t, p) in tiles.iter().zip(&picked) {
         let (tx0, ty0) = ((t % across).saturating_mul(tw), (t / across).saturating_mul(th));

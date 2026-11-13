@@ -549,10 +549,18 @@ const AEF_NODATA: f32 = -128.0;
 #[cfg(not(target_arch = "wasm32"))]
 const AEF_BANDS: usize = 64;
 
+/// `embeddings.similarity` (#1720), the raster [`similarity_work`] makes. Run as a command, it
+/// works on its caller's thread, waiting for AlphaEarth's index and the window: the command line
+/// and Python have no window to hold, and the app's workflows start it on a thread
+/// ([`super::workflows::raster_start`]) and add what it made with `ran`. The app's assistant runs
+/// its tools on the frame, so there the window waits, as it does for `raster.change` and the other
+/// commands that read the network; a plugin's command in the app is refused ([`analysis`]).
 fn similarity(s: &mut Session, p: &Value) -> CmdResult {
     super::workflows::made_or_ran(s, p, "embeddings.similarity")
 }
 
+/// `embeddings.change` (#1720), the raster [`change_work`] makes: on its caller's thread, as
+/// [`similarity`] says.
 fn change(s: &mut Session, p: &Value) -> CmdResult {
     super::workflows::made_or_ran(s, p, "embeddings.change")
 }
@@ -636,12 +644,7 @@ pub(crate) fn similarity_work(s: &Session, p: &Value) -> Result<super::workflows
         notes.extend(w.notes());
         let r = &w.raster;
         let (reference, missed) = reference(r, &points)?;
-        if missed > 0 {
-            notes.push(format!(
-                "{missed} of the {} reference points have no embedding in the area read (outside it, or no data there) and were left out",
-                points.len()
-            ));
-        }
+        notes.extend(missed_points(missed, points.len()));
         let band = similarity_band(r, &reference)?;
         let name = name.unwrap_or_else(|| format!("AlphaEarth {year} similarity"));
         let raster = rustgis_analysis::rasterops::derive(r, &name, vec![band])?;
@@ -670,6 +673,8 @@ pub(crate) fn change_work(s: &Session, p: &Value) -> Result<super::workflows::Wo
         let (Some(a), Some(b)) = (files.first(), files.get(1)) else { return Err("AlphaEarth has no files there".into()) };
         let a = read_window(a, area, cell)?;
         let b = read_window(b, area, cell)?;
+        // The two years' windows are on one grid (change_band refuses them otherwise), so they
+        // say the same of their read: the first's is said.
         notes.extend(a.notes());
         let band = change_band(&a.raster, &b.raster)?;
         let name = name.unwrap_or_else(|| format!("AlphaEarth change {from}–{to}"));
@@ -706,14 +711,22 @@ fn made_saying(r: rustgis_data::raster::Raster, notes: Vec<String>, extra: Value
 #[cfg(not(target_arch = "wasm32"))]
 fn tile_files(area: [f64; 4], years: &[i32]) -> Result<(Vec<String>, String, Vec<String>), String> {
     let span = (years.iter().copied().min().unwrap_or(2024), years.iter().copied().max().unwrap_or(2024));
-    let found = emb::search_aef_series_blocking(area, span)?;
+    pick_tile(&emb::search_aef_series_blocking(area, span)?, years)
+}
+
+/// [`tile_files`]'s pick from what the search `found`: the first tile (the nearest the area's
+/// centre) with files for all of `years`, and what to say of the search (part of the index read,
+/// tiles past a search's list left out, the others the area meets).
+#[cfg(not(target_arch = "wasm32"))]
+fn pick_tile(found: &emb::SeriesFound, years: &[i32]) -> Result<(Vec<String>, String, Vec<String>), String> {
     let listed = years.iter().map(i32::to_string).collect::<Vec<_>>().join(" and ");
-    let tile = found.series.iter().find(|t| years.iter().all(|y| t.years.contains_key(y))).ok_or_else(|| {
-        if found.series.is_empty() {
-            "AlphaEarth has no tiles there".to_string()
-        } else {
-            format!("AlphaEarth has no tile there with files for {listed}")
-        }
+    let (kept, dropped) = (found.series.len(), found.dropped);
+    let tile = found.series.iter().find(|t| years.iter().all(|y| t.years.contains_key(y))).ok_or_else(|| match (kept, dropped) {
+        (0, 0) => "AlphaEarth has no tiles there".to_string(),
+        (_, 0) => format!("AlphaEarth has no tile there with files for {listed}"),
+        _ => format!(
+            "none of the {kept} AlphaEarth tiles nearest the area's centre has files for {listed}, and {dropped} more were left out: take a smaller box"
+        ),
     })?;
     let files: Vec<String> = years.iter().filter_map(|y| tile.years.get(y).cloned()).collect();
     let place = files.first().and_then(|u| emb::aef_place(u)).unwrap_or_else(|| tile.tile.title.clone());
@@ -724,13 +737,27 @@ fn tile_files(area: [f64; 4], years: &[i32]) -> Result<(Vec<String>, String, Vec
                 .to_string(),
         );
     }
-    if found.series.len() > 1 {
+    if dropped > 0 {
+        notes.push(format!(
+            "{dropped} AlphaEarth tiles past the {} nearest the area's centre were left out, not looked at: take a smaller box",
+            emb::MAX_TILES
+        ));
+    }
+    if kept + dropped > 1 {
         notes.push(format!(
             "the area meets {} AlphaEarth tiles: one is read ({place}), the nearest its centre with files for {listed}; a box within one tile is read whole",
-            found.series.len()
+            kept + dropped
         ));
     }
     Ok((files, place, notes))
+}
+
+/// What a similarity says of its reference points that have no embedding in the area read.
+#[cfg(not(target_arch = "wasm32"))]
+fn missed_points(missed: usize, of: usize) -> Option<String> {
+    (missed > 0).then(|| {
+        format!("{missed} of the {of} reference points have no embedding in the area read (outside it, or no data there) and were left out")
+    })
 }
 
 /// A window of AlphaEarth's file `url` over `area`, every band, read on a thread of its own while
@@ -739,7 +766,7 @@ fn tile_files(area: [f64; 4], years: &[i32]) -> Result<(Vec<String>, String, Vec
 #[cfg(not(target_arch = "wasm32"))]
 fn read_window(url: &str, area: [f64; 4], cell: Option<f64>) -> Result<super::layer::WindowRaster, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
-    let asked = super::layer::WindowAsked::of(url, area, cell);
+    let asked = super::layer::WindowAsked::of(url, area, cell, AEF_BANDS);
     let stop = AtomicBool::new(false);
     let w = std::thread::scope(|scope| {
         let reader = std::thread::Builder::new()
@@ -755,9 +782,6 @@ fn read_window(url: &str, area: [f64; 4], cell: Option<f64>) -> Result<super::la
         reader.join().unwrap_or_else(|_| Err(format!("{url}: the read failed unexpectedly")))
     })?;
     rustgis_data::progress::check().map_err(|e| e.to_string())?;
-    if w.raster.band_count() != AEF_BANDS {
-        return Err(format!("{url}: {} bands, where AlphaEarth's files have {AEF_BANDS}", w.raster.band_count()));
-    }
     Ok(w)
 }
 
@@ -1150,5 +1174,68 @@ mod tests {
         s.leave_downloads = true;
         let e = s.run("embeddings.change", &json!({"dataset": "alphaearth", "bbox": area})).unwrap_err();
         assert!(e.contains("plugin"), "{e}");
+    }
+
+    #[test]
+    fn similarity_and_change_say_what_the_search_and_the_points_left_out() {
+        let tile = |place: &str, years: &[i32]| emb::Series {
+            tile: emb::Tile {
+                dataset: "alphaearth",
+                id: place.into(),
+                title: place.into(),
+                detail: String::new(),
+                url: String::new(),
+                year: None,
+                bbox: [0.0; 4],
+                footprint: Vec::new(),
+            },
+            years: years.iter().map(|y| (*y, format!("https://x.org/{y}/23S/h{y}-{place}.tiff"))).collect(),
+        };
+        // One tile, the index read whole: nothing to say.
+        let one = emb::SeriesFound { series: vec![tile("0-0", &[2017, 2025])], dropped: 0, duplicates: 0, complete: true };
+        let (files, place, notes) = pick_tile(&one, &[2017, 2025]).unwrap();
+        assert_eq!(files, ["https://x.org/2017/23S/h2017-0-0.tiff", "https://x.org/2025/23S/h2025-0-0.tiff"]);
+        assert_eq!((place.as_str(), notes.len()), ("23S 0-0", 0));
+        // The nearest tile without 2017: the next one is read. Part of the index read, and three
+        // tiles past a search's list: each said, the tiles counted with them.
+        let many =
+            emb::SeriesFound { series: vec![tile("0-0", &[2025]), tile("0-1", &[2017, 2025])], dropped: 3, duplicates: 0, complete: false };
+        let (files, place, notes) = pick_tile(&many, &[2017, 2025]).unwrap();
+        assert_eq!((files.len(), place.as_str()), (2, "23S 0-1"));
+        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert!(notes[0].contains("a tile nearer its centre may have been missed"), "{notes:?}");
+        assert_eq!(notes[1], "3 AlphaEarth tiles past the 60 nearest the area's centre were left out, not looked at: take a smaller box");
+        assert!(notes[2].starts_with("the area meets 5 AlphaEarth tiles: one is read (23S 0-1)"), "{notes:?}");
+        // No tile with the years: tiles left out are said, not taken for none there.
+        assert!(
+            pick_tile(&many, &[2018])
+                .unwrap_err()
+                .contains("none of the 2 AlphaEarth tiles nearest the area's centre has files for 2018, and 3 more")
+        );
+        let kept = emb::SeriesFound { dropped: 0, complete: true, ..many.clone() };
+        assert_eq!(pick_tile(&kept, &[2018]).unwrap_err(), "AlphaEarth has no tile there with files for 2018");
+        assert_eq!(pick_tile(&emb::SeriesFound::default(), &[2018]).unwrap_err(), "AlphaEarth has no tiles there");
+        // Reference points with no embedding: said with a count, nothing when all have one.
+        assert_eq!(missed_points(0, 3), None);
+        assert_eq!(
+            missed_points(1, 3).as_deref(),
+            Some("1 of the 3 reference points have no embedding in the area read (outside it, or no data there) and were left out")
+        );
+        // What the work says is said once its raster is added, under the layer's name; a raster
+        // with nothing to say adds none.
+        let mut s = Session::new(Project::default());
+        let r = quantised([[1.0; 3]; 4]);
+        let made = |name: &str, notes: Vec<String>| {
+            let raster = rustgis_analysis::rasterops::derive(&r, name, vec![vec![0.5; 4]]).unwrap();
+            made_saying(raster, notes, json!({"year": 2024})).unwrap()
+        };
+        let mark = s.notice_mark();
+        let v = super::super::workflows::add_made(&mut s, made("Sim", notes.clone())).unwrap();
+        assert_eq!(v["year"], 2024);
+        let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        assert_eq!(said.iter().filter(|n| n.starts_with("Sim: ")).count(), 3, "{said:?}");
+        let mark = s.notice_mark();
+        super::super::workflows::add_made(&mut s, made("Clean", Vec::new())).unwrap();
+        assert!(!s.notices_since(mark).iter().any(|n| n.text.starts_with("Clean: ")));
     }
 }

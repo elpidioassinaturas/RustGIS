@@ -4398,6 +4398,10 @@ const WINDOW_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 #[cfg(not(target_arch = "wasm32"))]
 const WINDOW_BATCH: usize = 16;
 
+/// How long a window's band may be waited for: a batch of bands has this much a band.
+#[cfg(not(target_arch = "wasm32"))]
+const BAND_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// The extension an address's file name has (lowercase, without the dot), if it has one: the
 /// query and fragment aside.
 pub(crate) fn address_extension(url: &str) -> Option<String> {
@@ -4489,15 +4493,19 @@ pub struct WindowAsked {
     bbox: [f64; 4],
     cell: Option<f64>,
     name: Option<String>,
+    /// The bands the file must have, when the caller needs a number of them (checked from its
+    /// header, before anything else is read).
+    bands: Option<usize>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl WindowAsked {
     /// A window of the file at `url` over `bbox` (west, south, east, north in degrees), with the
     /// coarsest level whose cells are at most `cell` (the full image without), as `layer.addUrl`
-    /// with that box and `"cellSize"` reads it.
-    pub(crate) fn of(url: &str, bbox: [f64; 4], cell: Option<f64>) -> WindowAsked {
-        WindowAsked { url: url.to_string(), bbox, cell, name: None }
+    /// with that box and `"cellSize"` reads it; a file without `bands` bands is refused from its
+    /// header.
+    pub(crate) fn of(url: &str, bbox: [f64; 4], cell: Option<f64>, bands: usize) -> WindowAsked {
+        WindowAsked { url: url.to_string(), bbox, cell, name: None, bands: Some(bands) }
     }
 }
 
@@ -4532,7 +4540,7 @@ fn window_settled(s: &Session, p: &Value, url: &str, seen: Option<[f64; 4]>) -> 
         Some(v) => Some(v.as_f64().filter(|c| c.is_finite() && *c > 0.0).ok_or_else(|| named("cellSize is a size above 0".into()))?),
     };
     let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(String::from);
-    Ok(WindowAsked { url: url.to_string(), bbox, cell, name })
+    Ok(WindowAsked { url: url.to_string(), bbox, cell, name, bands: None })
 }
 
 /// A window the app reads off the frame: `p`, a `layer.addUrl` with `"bbox"` and its address bound
@@ -4740,13 +4748,17 @@ pub(crate) fn read_window_raster(asked: &WindowAsked, stop: &std::sync::atomic::
         )));
     }
     let count = layout.bands.max(1);
+    if let Some(want) = asked.bands.filter(|n| *n != count) {
+        return Err(named(format!("it has {count} band(s), where {want} are needed")));
+    }
     if count > MAX_WINDOW_BANDS {
         return Err(named(format!("the file has {count} bands; a window reads {MAX_WINDOW_BANDS} at most")));
     }
     // One read a batch of bands (their tiles asked for together, so a file of many bands stored
-    // apart isn't read one band after another), each waiting up to two minutes; no batch is
-    // started once five minutes are up (the header's read counted), so the last one started may
-    // run two minutes more.
+    // apart isn't read one band after another), each waiting up to two minutes a band
+    // ([`batch_wait`]); no batch is started once five minutes are up (the header's read counted),
+    // and none runs past two minutes more, as the last band started could when they were read
+    // one at a time.
     // The values `f32` rounded (32- and 64-bit whole numbers and floats), a count a band, are said
     // when the layer is added, as for a file read whole.
     // Those past its range can't be held: left out (no value), and said apart.
@@ -4754,8 +4766,9 @@ pub(crate) fn read_window_raster(asked: &WindowAsked, stop: &std::sync::atomic::
     let all: Vec<usize> = (0..count).collect();
     for batch in all.chunks(WINDOW_BATCH) {
         band_in_time(batch.first().copied().unwrap_or(0), count, started.elapsed(), WINDOW_WAIT).map_err(named)?;
+        let wait = batch_wait(batch.len(), started.elapsed());
         for (values, changed, past) in
-            cog::read_bands_counted_blocking(&info, url, level, batch, (c0, c1), (r0, r1), stop).map_err(named)?
+            cog::read_bands_counted_blocking(&info, url, level, batch, (c0, c1), (r0, r1), wait, stop).map_err(named)?
         {
             bands.push(values);
             rounded.push(changed);
@@ -4822,8 +4835,9 @@ pub(crate) fn read_window_raster(asked: &WindowAsked, stop: &std::sync::atomic::
 }
 
 /// [`read_cog_window`], giving up within a moment of `stop` being set (the app's Cancel of the
-/// download, or its project closed): in the wait on the header, before each band and in the wait
-/// on its tiles. Making the raster and writing its GeoTIFF, once the values are in, don't look.
+/// download, or its project closed): in the wait on the header, before each batch of bands and in
+/// the wait on their tiles. Making the raster and writing its GeoTIFF, once the values are in,
+/// don't look.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_cog_window_until(asked: &WindowAsked, stop: &std::sync::atomic::AtomicBool) -> Result<CogWindow, String> {
     let named = |e: String| crate::sources::message_with_address(&asked.url, &e);
@@ -4913,6 +4927,15 @@ pub(crate) fn band_in_time(band: usize, count: usize, elapsed: std::time::Durati
         ));
     }
     Ok(())
+}
+
+/// How long a batch of `bands` bands of a window may wait for its tiles, `elapsed` into the
+/// window's read: two minutes a band, but no later than two minutes past the window's wait (when
+/// the last batch may still start), and never less than one band's two minutes.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn batch_wait(bands: usize, elapsed: std::time::Duration) -> std::time::Duration {
+    let left = (WINDOW_WAIT + BAND_WAIT).saturating_sub(elapsed).max(BAND_WAIT);
+    BAND_WAIT.saturating_mul(u32::try_from(bands.max(1)).unwrap_or(u32::MAX)).min(left)
 }
 
 /// A window can't be read in the web app yet: nothing there may wait for the tiles.

@@ -168,7 +168,7 @@ pub(crate) fn made_layer(name: String, layer: rustgis_map::RasterLayer, extra: O
 
 /// Adds a made raster as a layer: the command's answer is the layer's (its id, size and bands) and
 /// what the command says besides (`extra`), and what it does then.
-fn add_made(s: &mut Session, m: Made) -> CmdResult {
+pub(crate) fn add_made(s: &mut Session, m: Made) -> CmdResult {
     let Made { name, layer, extra, then, .. } = m;
     let mut v = super::raster::add_raster(s, &name, layer)?;
     if let (Some(Value::Object(more)), Some(o)) = (extra, v.as_object_mut()) {
