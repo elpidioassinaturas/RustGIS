@@ -109,6 +109,27 @@ impl FeatureSource for Runs {
     }
 }
 
+/// An explicit mixed-case format selects its text writer even when the path says otherwise.
+#[test]
+fn an_explicit_export_format_ignores_case_and_the_filename() {
+    let d = folder("explicit-format");
+    let mut ds = Dataset::new("places", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+    ds.push_next(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Text("place".into())]);
+    let src = Runs::new(&ds, 1);
+    for format in ["CSV", "GeOjSoN"] {
+        let path = d.join(format!("{format}.bin"));
+        assert_eq!(write_source_as_in(&src, &ds, &path, Crs::LonLat, format).unwrap().written, 1);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("place"), "{format}: {text}");
+        if format == "GeOjSoN" {
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["features"].as_array().unwrap().len(), 1);
+        } else {
+            assert_eq!(text, crate::io::to_csv(&ds).unwrap());
+        }
+    }
+    std::fs::remove_dir_all(d).unwrap();
+}
+
 /// An export in Web Mercator written a chunk at a time counts the vertices beyond 85.05° it
 /// writes at 85.05°, as it writes them: from a source that declares no extent, whose features
 /// beyond aren't in its first chunk. In longitude/latitude, or within 85.05°, it counts none.
@@ -183,6 +204,7 @@ fn a_streamed_export_writes_what_a_whole_export_writes() {
                     csv: if ext == "csv" { crate::io::CsvLosses::of(&whole.features, whole.geometry_type) } else { Default::default() },
                     unread_dates: Vec::new(),
                     utc_dates,
+                    date_messages: Vec::new(),
                 };
                 assert_eq!(streamed, expected, "{what}");
                 let (a, b) = (read_back(&a), read_back(&b));
@@ -295,7 +317,7 @@ fn a_layer_without_a_declared_type_takes_its_first_geometrys() {
     let layer = Dataset::new("points", GeometryType::None, points.fields.clone());
     write_chunks_in(&Runs::new(&points, 2), &layer, &d.join("points.csv"), Crs::LonLat, 1).unwrap();
     let text = std::fs::read_to_string(d.join("points.csv")).unwrap();
-    assert!(text.starts_with("n,longitude,latitude"), "{text}");
+    assert!(text.starts_with("longitude,latitude,n"), "{text}");
 }
 
 /// Rows a source couldn't read are counted, so an export can say how many it left out; a clean

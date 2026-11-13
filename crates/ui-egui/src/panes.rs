@@ -1,4 +1,4 @@
-//! Docked panes: Layers and Browser on the left; Geoprocessing, Symbology, History and Details
+//! Docked panes: Layers and Browser on the left; Geoprocessing, Symbology, History and the rest
 //! on the right.
 
 use std::collections::HashMap;
@@ -115,6 +115,8 @@ pub(crate) fn close_pane_of(app: &mut RustGisApp, id: &str) -> bool {
     if !id.starts_with("ui.pane.") {
         return false;
     }
+    // Details is the Layer Properties pane on its Source tab (#1803): closing it closes that pane.
+    let id = if id == "ui.pane.details" { "ui.pane.layerProperties" } else { id };
     if let Some((pane, ..)) = LEFT_PANES.iter().find(|p| p.3 == id) {
         if app.ui.left == Some(*pane) {
             app.ui.left = None;
@@ -131,7 +133,6 @@ fn right_title(pane: RightPane) -> (&'static str, &'static str) {
         RightPane::Geoprocessing => ("Tools", "ui.pane.geoprocessing"),
         RightPane::Symbology => ("Symbology", "ui.pane.symbology"),
         RightPane::History => ("History", "ui.pane.history"),
-        RightPane::Details => ("Details", "ui.pane.details"),
         RightPane::Editing => ("Editing", "ui.pane.editing"),
         RightPane::Design => ("Data Design", "ui.pane.design"),
         RightPane::Workflows => ("Workflows", "ui.pane.workflows"),
@@ -198,7 +199,6 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
             RightPane::Geoprocessing => geoprocessing(app, ui, t),
             RightPane::Symbology => symbology(app, ui, t),
             RightPane::History => history(app, ui, t),
-            RightPane::Details => details(app, ui, t),
             RightPane::Editing => crate::editpanes::editing(app, ui, t),
             RightPane::Design => crate::editpanes::design(app, ui, t),
             RightPane::Workflows => crate::analysispane::workflows(app, ui, t),
@@ -2367,12 +2367,9 @@ fn layer_menu(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, reorder: bool) {
         ui.close();
     }
     ui.separator();
+    // F2 too (`keymap::DEFAULTS`).
     if ui.button(tl!("Rename…")).clicked() {
         let _ = app.run("ui.dialog", json!({"name": "renameLayer"}));
-        ui.close();
-    }
-    if !l.is_raster() && ui.button(tl!("Define Projection…")).clicked() {
-        let _ = app.run("ui.dialog", json!({"name": "defineProjection"}));
         ui.close();
     }
     // Layer groups (#413): a service's collections stay in their service group.
@@ -2408,8 +2405,8 @@ fn layer_menu(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, reorder: bool) {
             ui.close();
         }
     } else {
-        // The definition query and the time slider binding are on the Query and Time tabs of
-        // Properties… (#1803).
+        // The definition query, the time slider binding and Define Projection… are on the Query,
+        // Time and Source tabs of Properties… (#1803).
         if ui.button(tl!("Export Features…")).clicked() {
             let _ = app.run("ui.exportLayer", Value::Null);
             ui.close();
@@ -6226,7 +6223,7 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
 }
 
 // ---------------------------------------------------------------------------------------------
-// History and Details
+// History, and what the Source tab shows of a layer
 
 pub(crate) fn history(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     if crate::sessionlog::tabs(app, ui, t) {
@@ -6343,18 +6340,8 @@ fn save_history_script(app: &mut RustGisApp) {
     }
 }
 
-/// Shows the selected layer's source metadata alongside its internal longitude/latitude extent.
-fn details(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
-    let Some(l) = app.session.active_layer.and_then(|id| app.session.map().layer(id)) else {
-        ui.label(egui::RichText::new(tl!("Select a layer in the Layers pane.")).color(t.text_dim));
-        return;
-    };
-    ui.label(egui::RichText::new(&l.name).font(semibold(14.0)));
-    source_details(ui, l, t);
-}
-
-/// What the Details pane and the Layer Properties pane's Source tab (#1803) show of a layer: its
-/// geometry, counts, source, coordinate system, extent and fields, or a raster's own details.
+/// What the Layer Properties pane's Source tab (#1803) shows of a layer: its geometry, counts,
+/// source, coordinate system, extent and fields, or a raster's own details.
 pub(crate) fn source_details(ui: &mut Ui, l: &Layer, t: &Tokens) {
     let e = l.extent();
     if let Some(rl) = &l.raster {
@@ -6729,10 +6716,10 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
         RasterRenderer::Colormap => {
             ui.label(egui::RichText::new(tl!("Colors from the raster's own color table.")).size(11.5).color(t.text_dim));
         }
-        RasterRenderer::ShadedRelief { band, ramp, azimuth, altitude, z_factor, shadow } => {
-            let (az, alt, zf, sh, rp) = (*azimuth, *altitude, *z_factor, *shadow, ramp.as_ref().map(|r| r.name().to_string()));
+        RasterRenderer::ShadedRelief { band, ramp, azimuth, altitude, z_factor, shadow, sky } => {
+            let (az, alt, zf, sh, sk, rp) = (*azimuth, *altitude, *z_factor, *shadow, *sky, ramp.as_ref().map(|r| r.name().to_string()));
             let relief = move |band: usize, az: f64, alt: f64, zf: f64, sh: f64| {
-                let mut p = json!({"type": "shadedRelief", "band": band + 1, "azimuth": az, "altitude": alt, "zFactor": zf, "shadow": sh});
+                let mut p = json!({"type": "shadedRelief", "band": band + 1, "azimuth": az, "altitude": alt, "zFactor": zf, "shadow": sh, "sky": sk});
                 match &rp {
                     Some(r) => p["ramp"] = json!(r),
                     None => p["grey"] = json!(true),
@@ -6746,6 +6733,7 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     ("Altitude", alt, 0.0..=90.0, 0.5, 1),
                     ("Z factor", zf, 0.001..=1000.0, 0.01, 2),
                     ("Cast shadows", sh, 0.0..=1.0, 0.01, 3),
+                    ("Sky visibility", sk, 0.0..=1.0, 0.01, 4),
                 ] {
                     let input_label = ui.label(tl!(label));
                     let mut x = v;
@@ -6754,19 +6742,26 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     let r = ui
                         .add(egui::DragValue::new(&mut x).update_while_editing(false).range(range).speed(speed).max_decimals(3))
                         .labelled_by(input_label.id);
-                    let r = if which == 3 {
-                        r.on_hover_text(tl!("How dark the shadows the terrain casts are, from 0 (none) to 1, for the sun set above"))
-                    } else {
-                        r
+                    let r = match which {
+                        3 => r.on_hover_text(tl!("How dark the shadows the terrain casts are, from 0 (none) to 1, for the sun set above")),
+                        4 => r.on_hover_text(tl!(
+                            "How much the sky each cell sees, over the terrain around it, scales its ambient light, from 0 (not at all) to 1"
+                        )),
+                        _ => r,
                     };
                     if drag.settled(ui, &r, &mut x) && x != v {
                         let (a, b, c, d) = match which {
                             0 => (x, alt, zf, sh),
                             1 => (az, x, zf, sh),
                             2 => (az, alt, x, sh),
-                            _ => (az, alt, zf, x),
+                            3 => (az, alt, zf, x),
+                            _ => (az, alt, zf, sh),
                         };
-                        let _ = app.run("raster.symbology", relief(*band, a, b, c, d));
+                        let mut p = relief(*band, a, b, c, d);
+                        if which == 4 {
+                            p["sky"] = json!(x);
+                        }
+                        let _ = app.run("raster.symbology", p);
                     }
                     ui.end_row();
                 }
@@ -8461,5 +8456,50 @@ mod tests {
         let map = h.state().session.map();
         assert!(map.layer_by_name("Cities Annotation").is_some(), "no annotation layer");
         assert!(!map.layer_by_name("Cities").unwrap().labels.enabled, "the layer's own labels give way to it");
+    }
+
+    /// Define Projection… is on the Source tab of Properties…, not in the layer menu (#1803); the
+    /// menu's data actions stay, for the layers they apply to: here a file read in place.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_layer_menu_leaves_define_projection_to_properties() {
+        use egui_kittest::kittest::Queryable;
+        use rustgis_engine::data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as V, raster::Crs, source::gpkg};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("places.gpkg");
+        let mut data = Dataset::new("places", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        data.push(Some(Geometry::Point(Coord::new(1.0, 20.0))), vec![V::Text("a".into())]);
+        gpkg::write_in(&data, &path, Crs::LonLat).unwrap();
+        let mut app = RustGisApp::with_sample();
+        app.run("layer.addData", json!({"path": &path, "stream": true, "name": "Places"})).unwrap();
+        let l = app.session.map().layer_by_name("Places").cloned().unwrap();
+        assert!(l.is_streamed() && l.linked_file().is_some());
+        let mut h = egui_kittest::Harness::builder().build_ui_state(move |ui, app: &mut RustGisApp| layer_menu(app, ui, &l, true), app);
+        h.step();
+        assert!(h.query_by_label("Define Projection…").is_none(), "Define Projection… is still in the menu");
+        for kept in ["Rename…", "Export Features…", "Load All Features", "Reload Data", "Repair Data Source…", "Properties…"] {
+            assert!(h.query_by_label(kept).is_some(), "no {kept}");
+        }
+    }
+
+    /// F2 renames the active layer: it opens the Rename dialog with the layer's name, as the
+    /// layer menu's Rename… does.
+    #[test]
+    fn f2_opens_the_rename_dialog_for_the_active_layer() {
+        let mut app = RustGisApp::with_sample();
+        app.session.active_layer = Some(layer(&app, "Rivers"));
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).with_max_steps(64).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run_steps(2);
+        h.key_press(egui::Key::F2);
+        h.run_steps(2);
+        assert_eq!(h.state().dialogs.open, Some("renameLayer"));
+        assert_eq!(h.state().dialogs.text, "Rivers");
     }
 }

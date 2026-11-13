@@ -2747,6 +2747,50 @@ fn a_reference_scale_is_set_kept_and_undone() {
 }
 
 #[test]
+fn a_reference_scale_out_of_range_in_a_project_is_left_out_and_said() {
+    let mut s = world();
+    s.run("layer.referenceScale", &json!({"layer": "Rivers", "scale": 25000})).unwrap();
+    let text = serde_json::to_string(&s.project).unwrap();
+    let said = |text: &str| {
+        let mut t = Session::new(Project::default());
+        let mark = t.notices_given();
+        t.run("project.openText", &json!({"text": text})).unwrap();
+        let notices: Vec<String> = t.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        (t.map().layer_by_name("Rivers").unwrap().reference_scale, notices)
+    };
+    // One the command takes opens as saved, with nothing to say.
+    let (kept, notices) = said(&text);
+    assert_eq!(kept, Some(25000.0));
+    assert!(!notices.iter().any(|n| n.contains("reference scale")), "{notices:?}");
+    // One it would refuse is left out, and the notice names the layer.
+    for bad in ["1e39", "-5", "0"] {
+        let edited = text.replace("\"reference_scale\":25000.0", &format!("\"reference_scale\":{bad}"));
+        assert_ne!(edited, text);
+        let (kept, notices) = said(&edited);
+        assert_eq!(kept, None, "{bad}");
+        assert!(
+            notices.iter().any(|n| n.contains("1 layer(s) with a reference scale out of range") && n.contains("'Rivers'")),
+            "{bad}: {notices:?}"
+        );
+    }
+    // So does a map file or a layer file added on its own, and a clean one says nothing.
+    let map = serde_json::to_string(s.map()).unwrap();
+    let layer = serde_json::to_string(s.map().layer_by_name("Rivers").unwrap()).unwrap();
+    for (command, text) in [("map.import", map), ("layer.addLayerFile", layer)] {
+        let said = |text: String| {
+            let mut t = world();
+            let mark = t.notices_given();
+            t.run(command, &json!({"text": text})).unwrap();
+            t.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<String>>()
+        };
+        let clean = said(text.clone());
+        assert!(!clean.iter().any(|n| n.contains("reference scale")), "{command}: {clean:?}");
+        let bad = said(text.replace("\"reference_scale\":25000.0", "\"reference_scale\":0"));
+        assert!(bad.iter().any(|n| n.contains("reference scale out of range") && n.contains("'Rivers'")), "{command}: {bad:?}");
+    }
+}
+
+#[test]
 fn rivers_are_labelled_along_their_lines_in_italics() {
     let mut s = world();
     s.run("labels.field", &json!({"layer": "Rivers", "field": "name"})).unwrap();
@@ -3926,6 +3970,64 @@ fn shaded_relief_keeps_its_cast_shadows() {
     s.run("raster.symbology", &json!({"type": "stretch"})).unwrap();
     s.run("raster.symbology", &json!({"type": "shadedRelief"})).unwrap();
     assert_eq!(shadow(&s), 0.0, "a new Shaded Relief casts none");
+}
+
+/// Shaded Relief's sky visibility is set, clamped, kept when left out (the shadows' too), saved
+/// with the project only when there is some, and drawn in an export (waited for) with nothing to
+/// say.
+#[test]
+fn shaded_relief_keeps_its_sky_visibility() {
+    let mut s = with_raster();
+    let light = |s: &Session| match s.map().layers.first().and_then(|l| l.raster.as_ref()).map(|r| &r.style.renderer) {
+        Some(rustgis_map::RasterRenderer::ShadedRelief { shadow, sky, .. }) => (*shadow, *sky),
+        other => panic!("{other:?}"),
+    };
+    s.run("raster.symbology", &json!({"type": "shadedRelief"})).unwrap();
+    assert_eq!(light(&s), (0.0, 0.0));
+    let skies_saved = |s: &mut Session| s.project.saved_text(None).unwrap().0.matches("\"sky\"").count();
+    let before = skies_saved(&mut s);
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "sky": 0.6, "shadow": 0.5})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": 200})).unwrap();
+    assert_eq!(light(&s), (0.5, 0.6), "left out, kept");
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "sky": -3})).unwrap();
+    assert_eq!(light(&s), (0.5, 0.0));
+    assert_eq!(skies_saved(&mut s), before, "saved only when there is some");
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "sky": 4})).unwrap();
+    assert_eq!(light(&s), (0.5, 1.0));
+    assert_eq!(skies_saved(&mut s), before + 1);
+    s.notices.clear();
+    assert!(crate::cmd::share::map_png(&mut s, Some(300.0), Some(200.0), None).unwrap().len() > 1000);
+    assert!(s.notices.iter().all(|n| !n.text.contains("sky")), "{:?}", s.notices);
+}
+
+/// An export draws the sky a pit hides: its floor darker with `sky` 1 than with 0, the ground
+/// around it (which sees the whole sky) the same. The first export with the sky, from a cold
+/// cache, waits for the grid: it is the same image as one drawn once the grid is kept.
+#[test]
+fn an_export_draws_the_sky_a_pit_hides_and_waits_for_it() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let mut s = world();
+    // A round pit 16 cells across and 400 m deep, in flat ground 41 cells of 30 m a side.
+    let pit: Vec<f32> =
+        (0..41 * 41).map(|i| if f64::from(i % 41 - 20).hypot(f64::from(i / 41 - 20)) <= 8.0 { -400.0 } else { 0.0 }).collect();
+    let gt = GeoTransform { origin_x: 500_000.0, origin_y: 7_000_000.0, pixel_width: 30.0, pixel_height: -30.0 };
+    let r = Raster::new("pit", 41, 41, vec![pit], gt, Crs::from_epsg(31983).unwrap(), None, ColorHint::Gray, "Float32").unwrap();
+    let bytes = geotiff::write(&r, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "pit", rustgis_map::RasterLayer::from_bytes(r, "pit.tif".to_string(), bytes)).unwrap();
+    s.run("layer.zoomTo", &json!({"layer": "pit"})).unwrap();
+    let drawn = |s: &mut Session, sky: f64| {
+        s.run("raster.symbology", &json!({"layer": "pit", "type": "shadedRelief", "grey": true, "sky": sky})).unwrap();
+        let png = crate::cmd::share::map_png(s, Some(200.0), Some(200.0), None).unwrap();
+        crate::render::decode_png(&png).unwrap()
+    };
+    let open = drawn(&mut s, 0.0);
+    let cold = drawn(&mut s, 1.0);
+    let ready = drawn(&mut s, 1.0);
+    assert!(cold.data() == ready.data(), "the first export waited for the sky");
+    let red = |p: &tiny_skia::Pixmap, x: u32, y: u32| p.pixel(x, y).unwrap().red();
+    // The pit's floor, in the middle, sees less sky; flat ground well outside it, all of it.
+    assert!(red(&cold, 100, 100) < red(&open, 100, 100), "{} vs {}", red(&cold, 100, 100), red(&open, 100, 100));
+    assert_eq!(red(&cold, 170, 100), red(&open, 170, 100));
 }
 
 /// A map export that draws a layer without its cast shadows says so, as such (not as a tile layer
@@ -8012,8 +8114,8 @@ fn publication_layouts_fit_their_pages() {
     // Beside it on the side it grows to: the left one when it keeps its right edge.
     let x = if boxed.x + boxed.w / 2.0 > frame_x_mid(&s, li, frame) { boxed.x - 5.5 } else { boxed.x + boxed.w + 0.5 };
     s.run("layout.update", &json!({"layout": li, "element": arrow, "x": x, "y": boxed.y, "w": 5.0, "h": 5.0})).unwrap();
-    s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": "Escala aproximada da folha {scale}"})).unwrap();
     let mark = s.notices.len();
+    s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": "Escala aproximada da folha {scale}"})).unwrap();
     s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 30_000_000.0})).unwrap();
     let after = s.project.layouts[li].element(b).cloned().unwrap();
     assert_eq!((after.x, after.w), (boxed.x, boxed.w), "the box stays");
@@ -8027,6 +8129,43 @@ fn publication_layouts_fit_their_pages() {
     }
     s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 12_000_000.0})).unwrap();
     assert_eq!(s.project.layouts[li].element(b).map(|e| e.w), Some(120.0), "the width set by hand");
+    // So does one set by hand within the widest box a publication gives.
+    s.run("layout.publication", &json!({"profile": "thesis-half", "extent": piaui})).unwrap();
+    let li = s.project.layouts.len() - 1;
+    let frame = s.project.layouts[li].elements.iter().find(|e| e.kind.code() == "mapFrame").map(|e| e.id).unwrap();
+    let id_in = |s: &Session, n: &str| s.project.layouts[li].elements.iter().find(|e| e.name == n).map(|e| e.id).unwrap();
+    let (b, widest) = (id_in(&s, "Scale Box"), s.project.layouts[li].element(frame).map(|e| (e.w * 0.3).max(25.0)).unwrap());
+    let auto = s.project.layouts[li].element(b).map(|e| e.w).unwrap();
+    let set = if auto + 2.0 < widest { auto + 2.0 } else { auto - 2.0 };
+    for name in ["Scale Box", "Scale Bar", "Scale"] {
+        s.run("layout.update", &json!({"layout": li, "element": id_in(&s, name), "w": set})).unwrap();
+    }
+    s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 9_000_000.0})).unwrap();
+    s.run("layout.frameZoom", &json!({"layout": li, "element": frame, "to": "full"})).unwrap();
+    assert_eq!(s.project.layouts[li].element(b).map(|e| e.w), Some(set), "the width set by hand, {auto} mm automatic");
+    // An untouched box follows: a new scale, the bar restyled, then another scale, each leave it
+    // as wide as it is automatically then.
+    s.run("layout.publication", &json!({"profile": "thesis-half", "extent": piaui})).unwrap();
+    let li = s.project.layouts.len() - 1;
+    let id_in = |s: &Session, n: &str| s.project.layouts[li].elements.iter().find(|e| e.name == n).map(|e| e.id).unwrap();
+    let frame = s.project.layouts[li].elements.iter().find(|e| e.kind.code() == "mapFrame").map(|e| e.id).unwrap();
+    let (b, bar) = (id_in(&s, "Scale Box"), id_in(&s, "Scale Bar"));
+    let width = |s: &Session| s.project.layouts[li].element(b).map(|e| e.w).unwrap();
+    let first = width(&s);
+    let mut widths = Vec::new();
+    for change in [
+        json!({"element": frame, "scale": 20_000_000.0}),
+        json!({"element": bar, "units": "miles"}),
+        json!({"element": frame, "scale": 7_000_000.0}),
+    ] {
+        let mut change = change;
+        change["layout"] = json!(li);
+        s.run("layout.update", &change).unwrap();
+        let auto = crate::cmd::layout::scale_box_auto(&s, li).unwrap();
+        assert!((width(&s) - auto).abs() < 1e-9, "{change}: {} mm, {auto} mm automatic", width(&s));
+        widths.push(width(&s));
+    }
+    assert!(widths.iter().any(|w| (w - first).abs() > 0.5), "the box changed: {first} mm, then {widths:?}");
     // A long title wraps within the frame, and pushes the map down; the result names every
     // element for layout.update.
     let r = s.run("layout.publication", &json!({"extent": piaui, "title": long})).unwrap();
@@ -11447,6 +11586,58 @@ fn a_scan_warped_onto_its_points_is_placed_for_real() {
     t.run("project.openText", &json!({"text": text})).unwrap();
     let again = t.map().layer_by_name("plate").unwrap().raster.as_ref().unwrap().data.clone().unwrap();
     assert!(again.georeferenced && again.transform == out.transform, "{:?} vs {:?}", again.transform, out.transform);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A hillshade is made as bytes, 1–255 with 0 for no data, so it is exported as 8-bit samples (a
+/// GeoTIFF and a COG); it is still drawn as a grey stretch, even of a plane with a single shade,
+/// which as whole numbers would otherwise be drawn as classes. A chain ending in one is the same.
+#[test]
+fn hillshade_is_made_and_written_as_bytes() {
+    use base64::Engine;
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let mut s = world();
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let gt = GeoTransform { origin_x: 10.0, origin_y: 45.04, pixel_width: 0.001, pixel_height: -0.001 };
+    let plane = Raster::new("plane", 10, 10, vec![vec![50.0; 100]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    let plane = base64::engine::general_purpose::STANDARD.encode(geotiff::write(&plane, 0).unwrap());
+    s.run("layer.addDataBytes", &json!({"fileName": "plane.tif", "data": plane})).unwrap();
+    let shade = |s: &mut Session, cmd: &str, p: Value| {
+        let r = s.run(cmd, &p).unwrap_or_else(|e| panic!("{cmd} {p}: {e}"));
+        let l = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().raster.clone().unwrap();
+        let d = l.data.clone().unwrap();
+        assert_eq!((d.data_type.as_str(), d.nodata), ("UInt8", Some(0.0)), "{cmd} {p}");
+        assert!(matches!(l.style.renderer, rustgis_map::RasterRenderer::Stretch { .. }), "{cmd} {p}: {:?}", l.style.renderer);
+        (s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().name.clone(), d)
+    };
+    let (hill, d) = shade(&mut s, "raster.function", json!({"layer": "dem", "function": "hillshade"}));
+    let st = &d.bands[0].stats;
+    assert!(st.min >= 1.0 && st.max <= 255.0 && st.count == 1600, "{st:?}");
+    let (_, flat) = shade(&mut s, "raster.function", json!({"layer": "plane", "function": "hillshade"}));
+    assert_eq!(flat.bands[0].stats.categories.as_ref().map(Vec::len), Some(1));
+    let steps = json!([{"function": "bandMath", "expression": "b1 * 2"}, {"function": "hillshade"}]);
+    shade(&mut s, "raster.functionChain", json!({"layer": "dem", "steps": steps}));
+    // A step after a hillshade reads its no-data, and makes floats again.
+    let r = s
+        .run(
+            "raster.functionChain",
+            &json!({"layer": "dem", "steps": [{"function": "hillshade"}, {"function": "threshold", "value": 128}]}),
+        )
+        .unwrap();
+    let after = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().raster.clone().unwrap().data.unwrap();
+    assert_eq!((after.data_type.as_str(), after.bands[0].stats.count), ("Float32", 1600));
+    let dir = std::env::temp_dir().join(format!("rustgis-hillshade-bytes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for cog in [false, true] {
+        let tif = dir.join(format!("hill-{cog}.tif"));
+        s.run("share.exportRaster", &json!({"layer": hill, "path": tif.display().to_string(), "cog": cog})).unwrap();
+        let back = rustgis_data::raster::read_path(&tif).unwrap();
+        assert_eq!(
+            (back.data_type.as_str(), back.nodata, back.bands[0].data.as_slice()),
+            ("UInt8", Some(0.0), d.bands[0].data.as_slice()),
+            "cog: {cog}"
+        );
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -20272,7 +20463,7 @@ fn dropped_z_values_are_said_on_import_and_export() {
         assert!(said(&s, mark), "stream {stream}: {:?}", s.notices_since(mark));
         assert!(std::fs::read_to_string(&out).unwrap().contains("[1.0,2.0]"));
         let mark = s.notice_mark();
-        s.run("data.convert", &json!({"layer": id, "format": "wkt"})).unwrap();
+        s.run("data.convert", &json!({"layer": id, "format": "wkt", "path": dir.join(format!("converted-{stream}.csv"))})).unwrap();
         assert!(said(&s, mark), "stream {stream}");
     }
     let mut s = world();
@@ -34624,6 +34815,133 @@ impl Drop for GpkgRegressionFixture {
     }
 }
 
+/// Conversion reads the source even when the current view contains no features; the explicit
+/// format wins over the filename. Text-only conversion must not return a partial view.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn data_interop_reads_the_whole_source() {
+    let fixture = GpkgRegressionFixture::new("interop");
+    let mut s = Session::new(Project::default());
+    let loaded = s.run("layer.addData", &json!({"path": fixture.path(), "stream": true})).unwrap();
+    let id = loaded["layer"].as_u64().unwrap() as u32;
+    assert!(s.map().layer(id).unwrap().is_streamed());
+    s.map_mut().layer_mut(id).unwrap().dataset.features.clear();
+    for format in ["geojson", "csv", "kml", "gpx", "wkt"] {
+        let path = fixture.dir.join(format!("{format}.txt"));
+        let mark = s.notice_mark();
+        let answer = s.run("data.convert", &json!({"layer": id, "format": format, "path": path, "nameField": "lanes"})).unwrap();
+        assert_eq!(s.notices_since(mark).iter().filter(|n| n.text == format!("Exported {}", path.display())).count(), 1, "{format}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(answer["bytes"].as_u64(), Some(text.len() as u64));
+        let count = match format {
+            "geojson" => serde_json::from_str::<Value>(&text).unwrap()["features"].as_array().unwrap().len(),
+            "kml" => {
+                assert!(text.contains("<name>2</name>"));
+                text.matches("<Placemark>").count()
+            }
+            "gpx" => {
+                assert!(text.contains("<name>2</name>"));
+                text.matches("<wpt ").count()
+            }
+            _ => text.lines().count() - 1,
+        };
+        assert_eq!(count, 3, "{format}: conversion lost source features");
+    }
+    let error = s.run("data.convert", &json!({"layer": id, "format": "geojson"})).unwrap_err();
+    assert!(error.contains("path"), "{error}");
+}
+
+/// A non-finite REAL survives source reading but becomes JSON null: both whole and chunked
+/// conversion report the count after success, and a clean conversion gives no such notice.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn data_interop_reports_non_finite_numbers() {
+    let fixture = GpkgRegressionFixture::new("interop-numbers");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    db.execute_batch("ALTER TABLE roads ADD COLUMN reading REAL; UPDATE roads SET reading = 1e999 WHERE fid IN (1, 2);").unwrap();
+    for stream in [false, true] {
+        let mut s = Session::new(Project::default());
+        let id = s.run("layer.addData", &json!({"path": fixture.path(), "stream": stream})).unwrap()["layer"].clone();
+        let mark = s.notice_mark();
+        let path = fixture.dir.join(format!("numbers-{stream}.json"));
+        s.run("data.convert", &json!({"layer": id, "format": "geojson", "path": path})).unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(text.matches("\"reading\":null").count(), 3);
+        let notes: Vec<_> = s.notices_since(mark).iter().filter(|n| n.text.contains("aren't finite numbers")).collect();
+        assert_eq!(notes.len(), 1, "stream {stream}: {:?}", s.notices_since(mark));
+        assert!(notes[0].text.contains("2 attribute value(s)"), "{}", notes[0].text);
+        if !stream {
+            let mark = s.notice_mark();
+            s.run("data.convert", &json!({"layer": id, "format": "geojson"})).unwrap();
+            assert!(s.notices_since(mark).iter().any(|n| n.text.contains("2 attribute value(s)")));
+        }
+    }
+    db.execute_batch("UPDATE roads SET reading = 1.5;").unwrap();
+    let mut s = Session::new(Project::default());
+    let id = s.run("layer.addData", &json!({"path": fixture.path(), "stream": true})).unwrap()["layer"].clone();
+    let mark = s.notice_mark();
+    s.run("data.convert", &json!({"layer": id, "format": "geojson", "path": fixture.dir.join("clean.json")})).unwrap();
+    assert_eq!(
+        s.notices_since(mark).iter().map(|n| n.text.as_str()).collect::<Vec<_>>(),
+        [format!("Exported {}", fixture.dir.join("clean.json").display())],
+        "a clean conversion reports completion without loss notices"
+    );
+}
+
+/// Date parsing can empty a value outside the loaded view. Both source-read paths report
+/// that loss once, while a valid date produces no unread-date notice.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn data_interop_reports_unread_dates_from_the_whole_source() {
+    let fixture = GpkgRegressionFixture::new("interop-dates");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    db.execute_batch("ALTER TABLE roads ADD COLUMN issued DATE; UPDATE roads SET issued = '2026-01-01' WHERE fid = 1;").unwrap();
+    for valid in [false, true] {
+        db.execute("UPDATE roads SET issued = ?1 WHERE fid = 2", [if valid { "2026-02-02" } else { "not-a-date" }]).unwrap();
+        for format in ["geojson", "kml"] {
+            let mut s = Session::new(Project::default());
+            let added = s.run("layer.addData", &json!({"path": fixture.path(), "stream": true})).unwrap();
+            let id = added["layer"].as_u64().unwrap() as u32;
+            assert!(s.map().layer(id).unwrap().is_streamed());
+            s.map_mut().layer_mut(id).unwrap().dataset.features.clear();
+            let path = fixture.dir.join(format!("dates-{valid}.{format}"));
+            let mark = s.notice_mark();
+            s.run("data.convert", &json!({"layer": id, "format": format, "path": path})).unwrap();
+            let notes: Vec<_> =
+                s.notices_since(mark).iter().filter(|n| n.text.contains("read as empty") && n.text.contains("issued")).collect();
+            assert_eq!(notes.len(), usize::from(!valid), "{format} valid {valid}: {:?}", s.notices_since(mark));
+            if !valid {
+                assert!(notes[0].text.contains("1 value isn't a date"), "{}", notes[0].text);
+            }
+            if format == "geojson" {
+                let out: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+                let row = out["features"].as_array().unwrap().iter().find(|f| f["id"] == 2).unwrap();
+                assert_eq!(row["properties"]["issued"].is_null(), !valid);
+            }
+        }
+    }
+}
+
+/// Each serializer observes Cancel during its work and preserves the previous destination.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn data_interop_cancels_every_format_before_replacing_the_file() {
+    use crate::cmd::exports::export_start;
+    use rustgis_analysis::control::Control;
+    let fixture = GpkgRegressionFixture::new("interop-cancel");
+    let mut s = world();
+    for format in ["geojson", "csv", "kml", "gpx", "wkt"] {
+        let path = fixture.dir.join(format!("{format}.txt"));
+        std::fs::write(&path, "previous file").unwrap();
+        let run = export_start(&mut s, "data.convert", &json!({"layer": "Cities", "format": format, "path": path})).unwrap();
+        let control = Control::cancelled_once_started();
+        let error = run.run(&control).err().unwrap();
+        assert!(control.looked() > 0, "{format}: serializer did not check Cancel");
+        assert!(error.contains("cancelled"), "{format}: {error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous file");
+    }
+}
+
 /// A streamed layer's export says how many of its source's rows couldn't be read, written a
 /// chunk at a time (GeoJSON) or from a whole read (KML) alike.
 #[cfg(not(target_arch = "wasm32"))]
@@ -34689,13 +35007,13 @@ fn geopackage_past_the_count_limit_streams_exports_and_reads_whole() {
     let output = fixture.dir.join("whole.csv");
     let exported = s.run("share.exportLayer", &json!({"layer": id, "path": output})).unwrap();
     assert_eq!(exported["features"].as_u64(), Some(count as u64));
-    // A header, then every row once and in order (the first column is the road's name).
+    // A header, then every row once and in order (the road's name after its coordinates).
     let mut lines = std::io::BufRead::lines(std::io::BufReader::new(std::fs::File::open(&output).unwrap()));
-    assert!(lines.next().unwrap().unwrap().starts_with("name,"));
+    assert!(lines.next().unwrap().unwrap().starts_with("longitude,latitude,name"));
     let mut rows = 0;
     for (k, line) in lines.enumerate() {
         let line = line.unwrap();
-        assert!(line.starts_with(&format!("road {},", k + 1)), "row {k}: {line}");
+        assert_eq!(line.split(',').nth(2), Some(format!("road {}", k + 1).as_str()), "row {k}: {line}");
         rows += 1;
     }
     assert_eq!(rows, count, "every row");
@@ -37510,6 +37828,15 @@ fn a_windows_bands_are_started_within_its_wait() {
     assert!(band_in_time(3, 4, Duration::from_secs(299), wait).is_ok());
     let e = band_in_time(2, 4, Duration::from_secs(301), wait).unwrap_err();
     assert_eq!(e, "2 of 4 bands read in 5 minutes, so the window is given up: take a smaller box or a larger cellSize");
+    // A batch of bands waits two minutes a band, within the window's five minutes and the two
+    // past them the last band started had.
+    use crate::cmd::layer::batch_wait;
+    let s = Duration::from_secs;
+    assert_eq!(batch_wait(1, s(0)), s(120));
+    assert_eq!(batch_wait(2, s(0)), s(240));
+    assert_eq!(batch_wait(16, s(0)), s(420));
+    assert_eq!(batch_wait(16, s(299)), s(121));
+    assert_eq!(batch_wait(16, s(400)), s(120), "a band's two minutes at least");
 }
 
 /// A script or model the desktop app runs off the frame, as a plugin's command, leaves a window to
@@ -37756,6 +38083,67 @@ fn a_cog_windows_read_is_apart_from_adding_it() {
     let asked = window_asked(&s, &json!({"url": format!("{gone}/a.tif?token=hidden-1330"), "bbox": [1, 2, 3, 4]})).unwrap();
     let e = read_cog_window(&asked).err().unwrap();
     assert!(e.contains("/a.tif") && !e.contains("hidden-1330"), "{e}");
+}
+
+/// A window of a file stored bottom-up, as AlphaEarth's are (planar signed bytes, no-data −128, a
+/// positive Y pixel size; #1720): its rows turned over once read, so the raster is north up, its
+/// values where they lie and its no-data kept.
+#[test]
+fn a_bottom_up_cog_window_comes_in_north_up() {
+    use rustgis_data::raster::cog::{Example, example_with};
+    // 1024 pixels over 10°–11° E, 45°–46° N, the file's row y at 45° + y/1024; band b of pixel
+    // (x, y) is (x + y + 10 b) % 100 − 50, and pixel (0, 0), the south-west corner, is no-data.
+    let e = Example { size: 1024, tile: 256, bands: 2, planar: true, int8: true, bottom_up: true, ..Example::default() };
+    let (base, _) = serve_ranges(example_with(&e));
+    let mut s = world();
+    let url = format!("{base}/aef.tif");
+    let r = s.run("layer.addUrl", &json!({"url": url, "bbox": [10.25, 45.5, 10.5, 45.75], "name": "Up"})).unwrap();
+    assert_eq!(r["window"]["columns"], json!([256, 512]));
+    let w = s.map().layer_by_name("Up").and_then(|l| l.raster.as_ref()?.data.clone()).unwrap();
+    assert_eq!((w.width, w.height, w.band_count()), (256, 256, 2));
+    assert_eq!((w.transform.origin_x, w.transform.origin_y), (10.25, 45.75));
+    assert!(w.transform.pixel_height < 0.0);
+    // The window's north-west cell is the file's (256, 767); five rows down and ten across, (266, 762).
+    assert_eq!((w.value(0, 0, 0), w.value(1, 0, 0), w.value(0, 10, 5)), (Some(-27.0), Some(-17.0), Some(-22.0)));
+    // At the file's south-west corner, the window's bottom-left cell is the file's no-data.
+    s.run("layer.addUrl", &json!({"url": url, "bbox": [10.0, 45.0, 10.01, 45.01], "name": "Corner"})).unwrap();
+    let c = s.map().layer_by_name("Corner").and_then(|l| l.raster.as_ref()?.data.clone()).unwrap();
+    assert_eq!((c.value(0, 0, i64::from(c.height) - 1), c.value(0, 1, i64::from(c.height) - 1)), (None, Some(-49.0)));
+    assert_eq!(c.transform.origin_y, 45.0 + f64::from(c.height) / 1024.0);
+}
+
+/// A window read for a raster made from it (AlphaEarth's similarity and change, #1720) says what
+/// its header left out, as `layer.addUrl` says it when it adds the window; a clean file, nothing.
+#[test]
+fn a_window_read_for_another_raster_says_what_its_header_left_out() {
+    use crate::cmd::layer::{WindowAsked, read_window_raster};
+    use rustgis_data::raster::cog::{Example, example, example_with};
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (lossy, _) = serve_ranges(example_with(&Example { size: 512, tile: 256, classes: true, lossy: true, ..Example::default() }));
+    let w = read_window_raster(&WindowAsked::of(&format!("{lossy}/lossy.tif"), [10.0, 45.0, 10.5, 45.5], None, 1), &stop).unwrap();
+    let notes = w.notes();
+    assert!(notes.iter().any(|n| n.starts_with("its colour table has 384 entries")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("its GDAL metadata: 1 CLASS_ item(s)")), "{notes:?}");
+    let (clean, _) = serve_ranges(example(512, 256));
+    let w = read_window_raster(&WindowAsked::of(&format!("{clean}/clean.tif"), [10.0, 45.0, 10.5, 45.5], None, 1), &stop).unwrap();
+    assert_eq!(w.notes().len(), 1, "only the read: {:?}", w.notes());
+    // A change says what each year's file left out, by its year, and once for both when both left
+    // it out; the read, the same for both, once.
+    use crate::cmd::embeddings::two_years_notes;
+    let lossy = read_window_raster(&WindowAsked::of(&format!("{lossy}/lossy.tif"), [10.0, 45.0, 10.5, 45.5], None, 1), &stop).unwrap();
+    let said = two_years_notes(&w, &lossy, (2017, 2025));
+    assert!(said.iter().any(|n| n.starts_with("the 2025 file: its colour table has 384 entries")), "{said:?}");
+    assert!(!said.iter().any(|n| n.starts_with("the 2017")), "{said:?}");
+    assert_eq!(said.iter().filter(|n| n.contains("window of the full image")).count(), 1, "{said:?}");
+    let said = two_years_notes(&lossy, &w, (2017, 2025));
+    assert!(said.iter().any(|n| n.starts_with("the 2017 file: its colour table has 384 entries")), "{said:?}");
+    let said = two_years_notes(&lossy, &lossy, (2017, 2025));
+    assert_eq!(said.iter().filter(|n| n.contains("its colour table has 384 entries")).count(), 1, "{said:?}");
+    assert!(said.iter().any(|n| n.starts_with("the 2017 and 2025 files: its colour table")), "{said:?}");
+    assert_eq!(two_years_notes(&w, &w, (2017, 2025)).len(), 1, "two clean files: only the read");
+    // A file without the bands asked for is refused from its header.
+    let e = read_window_raster(&WindowAsked::of(&format!("{clean}/clean.tif"), [10.0, 45.0, 10.5, 45.5], None, 64), &stop).err().unwrap();
+    assert!(e.contains("it has 1 band(s), where 64 are needed"), "{e}");
 }
 
 /// `layer.addUrl` with `"bbox"` (#1204): a window of a cloud-optimised GeoTIFF, read by range as a
@@ -38178,6 +38566,61 @@ fn geoparquet_export_says_which_values_it_wrote_as_null() {
             }
         }
     }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Exporting to a GeoPackage says which field names it changed to be unique ignoring case, as
+/// SQLite's columns are, and as the file has them: from a layer read whole or in place, and from
+/// a table; names that differ otherwise give no such notice.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_exports_say_which_field_names_they_changed() {
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-gpkg-names-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("sites.geojson");
+    std::fs::write(
+        &src,
+        r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"name":"a","NAME":"b","id":3},"geometry":{"type":"Point","coordinates":[1,2]}}]}"#,
+    )
+    .unwrap();
+    isolate_plugins();
+    let mut s = Session::new(Project::default());
+    let changed = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("changed to fit a GeoPackage")).map(|n| n.text.clone()).collect()
+    };
+    let names = |s: &mut Session, out: &str| -> Vec<String> {
+        let back = s.run("layer.addData", &json!({"path": out})).unwrap()["layer"].as_u64().unwrap() as u32;
+        s.map().layer(back).unwrap().dataset.fields.iter().map(|f| f.name.clone()).collect()
+    };
+    for stream in [false, true] {
+        let id = s.run("layer.addData", &json!({"path": src, "stream": stream})).unwrap()["layer"].as_u64().unwrap();
+        let out = dir.join(format!("out-{stream}.gpkg")).display().to_string();
+        let mark = s.notice_mark();
+        s.run("share.exportLayer", &json!({"layer": id, "path": out})).unwrap();
+        let said = changed(&s, mark);
+        assert_eq!(said.len(), 1, "stream {stream}: {:?}", s.notices_since(mark));
+        // The notice names the field the file renamed, as the file has it.
+        let back = names(&mut s, &out);
+        let renamed = back.iter().find(|n| n.ends_with("_1")).unwrap();
+        let old = renamed.trim_end_matches("_1");
+        assert!(said[0].ends_with(&format!("unique ignoring case): '{old}' → '{renamed}'")), "stream {stream}: {said:?} {back:?}");
+    }
+    // A table, the same way; names that differ otherwise say nothing.
+    use rustgis_data::{Dataset, Field, FieldType, GeometryType};
+    let table = |name: &str, fields: &[&str]| {
+        let mut ds = Dataset::new(name, GeometryType::None, fields.iter().map(|f| Field::new(*f, FieldType::Integer)).collect());
+        ds.push(None, fields.iter().map(|_| rustgis_data::Value::Int(1)).collect());
+        ds
+    };
+    s.project.add_table(table("Cased", &["A", "a"]));
+    s.project.add_table(table("Fits", &["a", "b", "fid"]));
+    let out = dir.join("cased.gpkg").display().to_string();
+    let mark = s.notice_mark();
+    s.run("share.exportTable", &json!({"table": "Cased", "path": out})).unwrap();
+    assert_eq!(changed(&s, mark), [format!("{out}: 1 field name was changed to fit a GeoPackage (unique ignoring case): 'a' → 'a_1'")]);
+    let mark = s.notice_mark();
+    s.run("share.exportTable", &json!({"table": "Fits", "path": dir.join("fits.gpkg")})).unwrap();
+    assert!(changed(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -40035,6 +40478,8 @@ fn exports_run_on_another_thread() {
     let at = |name: &str| dir.join(name).display().to_string();
     s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "map"})).unwrap();
     for (command, file, p) in [
+        ("data.convert", "converted.geojson", json!({"layer": "Cities", "format": "geojson"})),
+        ("data.convert", "converted.wkt.csv", json!({"layer": "Cities", "format": "wkt"})),
         ("share.exportMap", "map.png", json!({"width": 64, "height": 48})),
         ("layout.export", "layout.png", json!({"dpi": 48})),
         ("layout.export", "layout.pdf", json!({"dpi": 48})),
@@ -43302,6 +43747,9 @@ fn long_commands_stop_when_cancelled_while_they_run() {
             "dl.classify",
             json!({"layer": "scene", "training": "training", "classField": "class", "bands": [1, 2], "epochs": 30, "model": "landcover"}),
         ),
+        // Cancelled before the index is read: nothing reaches the network.
+        ("embeddings.similarity", json!({"dataset": "alphaearth", "point": [10.01, 45.01], "bbox": [10.0, 45.0, 10.02, 45.02]})),
+        ("embeddings.change", json!({"dataset": "alphaearth", "bbox": [10.0, 45.0, 10.02, 45.02]})),
     ];
     // Every command that runs in the background is here, and only those.
     fn listed<'a>(l: &[(&'a str, Value)]) -> std::collections::BTreeSet<&'a str> {
@@ -43318,6 +43766,7 @@ fn long_commands_stop_when_cancelled_while_they_run() {
     }
 
     let exports = [
+        ("data.convert", json!({"layer": "Cities", "format": "geojson", "path": out("converted.geojson")})),
         ("share.exportLayer", json!({"layer": "Cities", "path": out("cities.geojson")})),
         ("share.exportRaster", json!({"layer": dem, "path": out("dem.tif")})),
         ("share.exportMap", json!({"path": out("map.png"), "width": 320, "height": 200})),
@@ -43341,6 +43790,25 @@ fn long_commands_stop_when_cancelled_while_they_run() {
         let control = Control::cancelled_once_started();
         note(command, read.run(&control).map(|_| ()), &control);
     }
+
+    // Replacement validation can now scan temporal fields as well as probing geometry.
+    let mut dates = rustgis_data::Dataset::new(
+        "dates",
+        rustgis_data::GeometryType::Point,
+        vec![rustgis_data::Field::new("day", rustgis_data::FieldType::Date)],
+    );
+    dates.push(
+        Some(rustgis_data::Geometry::Point(rustgis_data::Coord::new(0.0, 0.0))),
+        vec![rustgis_data::Value::parse("2024-02-29", rustgis_data::FieldType::Date)],
+    );
+    let replacement = out("cancel-repair-source.fgb");
+    std::fs::write(&replacement, rustgis_data::source::fgb::write(&dates).unwrap()).unwrap();
+    let id = s.run("layer.addData", &json!({"path": replacement, "stream": true})).unwrap()["layer"].as_u64().unwrap();
+    let read = crate::cmd::reads::read_ahead(&mut s, "layer.repairSource", &json!({"layer": id, "path": replacement})).unwrap();
+    assert!(read.reads());
+    let control = Control::cancelled_once_started();
+    note("layer.repairSource", read.run(&control).map(|_| ()), &control);
+    std::fs::remove_file(replacement).unwrap();
 
     // The tools whose work grows past a second or two on real data: buffers, overlays, joins,
     // hulls, densities and interpolation. Run in the background as the Analysis pane runs them; a
@@ -43811,6 +44279,156 @@ fn stac_search_by_shape_says_what_it_leaves_out() {
     assert_eq!(said(&s, "have no geometry"), before);
 }
 
+/// An RGBA orthophoto whose see-through cells hold −3.4e38 (a Float32 one, as an export from
+/// before #1759 wrote it, its alpha 0 to 255 as that file had it), with opaque black cells, on
+/// 40 × 40 one-metre cells in UTM zone 11N: see-through in its left ten columns, black along its
+/// top row. With its colours, which are 10 to 249 elsewhere.
+#[cfg(not(target_arch = "wasm32"))]
+fn see_through_ortho(name: &str, see: impl Fn(usize) -> bool, offset: f32) -> rustgis_data::raster::Raster {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+    let (w, n) = (40usize, 1600usize);
+    let colour = |b: usize| -> Vec<f32> {
+        (0..n).map(|i| if see(i) { -3.4e38 } else if i < w { 0.0 } else { (10 + (i * 7 + b * 60) % 240) as f32 } + offset).collect()
+    };
+    let alpha = (0..n).map(|i| if see(i) { 0.0 } else { 255.0 }).collect();
+    let gt = GeoTransform { origin_x: 500_000.0, origin_y: 4_800_040.0, pixel_width: 1.0, pixel_height: -1.0 };
+    let utm = Crs::from_epsg(32611).unwrap();
+    Raster::new(name, 40, 40, vec![colour(0), colour(1), colour(2), alpha], gt, utm, None, ColorHint::Rgb { alpha: true }, "Float32")
+        .unwrap()
+}
+
+/// The cells an RGBA raster's alpha draws see-through are left out of its colour bands'
+/// statistics (#1810): read from a file, projected (nearest) and clipped to a polygon. Its opaque
+/// black cells count, its alpha band counts every cell, and the stretch shared from it (`like`)
+/// spans its opaque colours, not −3.4e38.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn see_through_cells_are_left_out_of_an_rgba_rasters_statistics() {
+    use rustgis_data::raster::geotiff;
+    let dir = std::env::temp_dir().join(format!("rustgis-see-through-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("ortho.tif");
+    std::fs::write(&path, geotiff::write(&see_through_ortho("ortho", |i| i % 40 < 10, 0.0), 0).unwrap()).unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path, "name": "ortho"})).unwrap();
+    let tr = rustgis_data::raster::Crs::from_epsg(32611).unwrap().transformer().unwrap();
+    let ll = |x: f64, y: f64| {
+        let c = tr.to_lonlat(rustgis_geom::Coord::new(x, y)).unwrap();
+        json!([c.x, c.y])
+    };
+    // A square over the middle, across the see-through columns.
+    s.run("layer.template", &json!({"template": "polygons", "name": "Boundary"})).unwrap();
+    let ring = [
+        ll(500_005.0, 4_800_035.0),
+        ll(500_035.0, 4_800_035.0),
+        ll(500_035.0, 4_800_005.0),
+        ll(500_005.0, 4_800_005.0),
+        ll(500_005.0, 4_800_035.0),
+    ];
+    s.run("edit.addFeature", &json!({"layer": "Boundary", "geometry": {"type": "Polygon", "coordinates": [ring]}})).unwrap();
+    s.run("raster.project", &json!({"layer": "ortho", "crs": 32611, "cellSize": 1.0, "resampling": "nearest", "name": "projected"}))
+        .unwrap();
+    s.run(
+        "raster.process",
+        &json!({"layer": "ortho", "operation": "clip", "polygon": "Boundary", "selectedOnly": false, "name": "clipped"}),
+    )
+    .unwrap();
+    for name in ["ortho", "projected", "clipped"] {
+        let r = s.map().layer_by_name(name).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+        // The cells its alpha shows: alpha above half a 256th of opaque (Float32's 1).
+        let shown = r.bands[3].data.iter().filter(|a| **a >= 0.5 / 255.0).count();
+        assert!(shown > 0 && shown < r.bands[3].data.len(), "{name}: {shown}");
+        let info = s.run("raster.info", &json!({"layer": name})).unwrap();
+        for b in 0..3 {
+            let band = &info["bands"][b];
+            assert_eq!(band["validPixels"], json!(shown), "{name} band {b}: {band}");
+            let (min, max) = (band["min"].as_f64().unwrap(), band["max"].as_f64().unwrap());
+            assert!((0.0..=249.0).contains(&min) && (10.0..=249.0).contains(&max), "{name} band {b}: {band}");
+        }
+        assert_eq!(info["bands"][3]["validPixels"], json!(r.bands[3].data.len()), "{name}");
+    }
+    // The file's black row counts.
+    assert_eq!(s.run("raster.info", &json!({"layer": "ortho"})).unwrap()["bands"][0]["min"], json!(0.0));
+    // The range now drawn, shared: within the opaque colours.
+    s.run("raster.stretch", &json!({"layer": "ortho", "like": "ortho"})).unwrap();
+    let style = &s.map().layer_by_name("ortho").unwrap().raster.as_ref().unwrap().style;
+    let rustgis_map::raster::Stretch::Custom { bands: Some(bands), .. } = style.stretch else { panic!("{:?}", style.stretch) };
+    assert!(bands.iter().all(|[lo, hi]| (0.0..=249.0).contains(lo) && (0.0..=249.0).contains(hi) && lo < hi), "{bands:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Change Detection leaves out a cell either raster draws see-through (#1810): the first's left
+/// ten columns, holding −3.4e38, and the second's bottom ten rows, holding a stray 7, on the same
+/// grid and on one moved 0.4 m. Every cell both show compares, black ones included: 5 apart. A
+/// second moved five cells east, see-through in its own right ten columns, has its alpha
+/// resampled as its band is: read at the first's cells instead, it would hide other columns.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn change_detection_leaves_out_see_through_cells() {
+    use rustgis_data::raster::Raster;
+    let before = see_through_ortho("before", |i| i % 40 < 10, 0.0);
+    // Five cells east: its column k is the first's column k + 5, with the first's colours plus 5
+    // (its first five columns cover the first's see-through ones), see-through from its column 30.
+    let moved = {
+        let see = |i: usize| i % 40 >= 30;
+        let bands = (0..4)
+            .map(|b| {
+                (0..1600)
+                    .map(|i| match (b, see(i)) {
+                        (3, true) => 0.0,
+                        (3, false) => 255.0,
+                        (_, true) => 7.0,
+                        (_, false) => before.bands[b].data[i + 5] + 5.0,
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut gt = before.transform;
+        gt.origin_x += 5.0;
+        Raster::new("after moved", 40, 40, bands, gt, before.crs, None, before.color.clone(), "Float32").unwrap()
+    };
+    let mut after = see_through_ortho("after", |i| i >= 1200, 5.0);
+    for band in after.bands.iter_mut().take(3) {
+        for v in band.data.iter_mut().skip(1200) {
+            *v = 7.0;
+        }
+    }
+    let shifted = {
+        let mut gt = after.transform;
+        gt.origin_x += 0.4;
+        let bands = after.bands.iter().map(|b| b.data.clone()).collect();
+        Raster::new("after shifted", 40, 40, bands, gt, after.crs, None, after.color.clone(), "Float32").unwrap()
+    };
+    let mut s = Session::new(Project::default());
+    for r in [before, after, shifted, moved] {
+        let name = r.name.clone();
+        let bytes = rustgis_data::raster::geotiff::write(&r, 0).unwrap();
+        crate::cmd::raster::add_raster(&mut s, &name, rustgis_map::RasterLayer::from_bytes(r, "x.tif", bytes)).unwrap();
+    }
+    for after in ["after", "after shifted"] {
+        let out = format!("{after} change");
+        s.run("raster.change", &json!({"before": "before", "after": after, "method": "difference", "name": out})).unwrap();
+        let r = s.map().layer_by_name(&out).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+        let kept: Vec<f32> = r.bands[0].data.iter().copied().filter(|v| r.is_valid(*v)).collect();
+        // Opaque in both: columns 10 to 39 of rows 0 to 29. The shift of 0.4 m east keeps each
+        // cell's centre in the same column of the second.
+        assert_eq!(kept.len(), 30 * 30, "{after}");
+        assert!(kept.iter().all(|v| *v == 5.0), "{after}: {:?}", kept.iter().find(|v| **v != 5.0));
+    }
+    // Moved: the first's columns 0 to 4 are off the second, 5 to 9 see-through in the first, and
+    // 35 to 39 the second's see-through 30 to 34; 10 to 34 of every row compare, 5 apart. Its alpha
+    // read at the first's cells would hide 30 to 39 instead (800 cells, and 7s compared).
+    s.run("raster.change", &json!({"before": "before", "after": "after moved", "method": "difference", "name": "moved change"})).unwrap();
+    let r = s.map().layer_by_name("moved change").unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    let kept: Vec<usize> = (0..1600).filter(|i| r.is_valid(r.bands[0].data[*i])).collect();
+    assert_eq!(kept.len(), 25 * 40);
+    assert!(
+        kept.iter().all(|i| (10..35).contains(&(i % 40)) && r.bands[0].data[*i] == 5.0),
+        "{:?}",
+        kept.iter().find(|i| r.bands[0].data[**i] != 5.0)
+    );
+}
+
 /// A layer read whole from a Shapefile or GeoJSON file remembers the files and its rows as read
 /// (#1385): `source.syncState` says when it has edits the file lacks, when the file changed
 /// since, and neither once an edit is undone. The record is saved with the project.
@@ -44071,6 +44689,15 @@ fn arrangements_are_saved_by_name() {
     // A name copies that arrangement's corners.
     let r = s.run("layout.arrangement", &json!({"save": "Copy", "arrangement": "mirrored"})).unwrap();
     assert_eq!(r["saved"]["Copy"]["locator"], "top-right", "{r}");
+    // "arrangement" with "save" is read, not said to be ignored.
+    let mark = s.notices.len();
+    s.run("layout.arrangement", &json!({"save": "Print", "arrangement": "classic"})).unwrap();
+    assert!(
+        !s.notices[mark..].iter().any(|n| n.text.contains("ignores")),
+        "{:?}",
+        s.notices[mark..].iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
+    s.run("layout.arrangement", &json!({"remove": "Print"})).unwrap();
     // Taken by name, case aside, and named in the answer as it is kept.
     let homes = |v: &Value| crate::cmd::layout::parse_arrangement(v, &Default::default()).unwrap();
     assert_eq!(arrangements_to_try(&s, &json!("atlas")).unwrap(), vec![("Atlas".to_string(), homes(&atlas))]);
@@ -44192,5 +44819,46 @@ fn publication_writes_its_coverage_grid() {
     // Without it, no file and no warning about one.
     let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
     assert!(r["coverage"].is_null() && !r["warnings"].to_string().contains("coverage"), "{r}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Repair and reload complete a native date schema on their worker before probing/installing
+/// it. Cancellation prevents installation, and landing keeps the live layer presentation.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_date_source_repair_and_reload_use_finished_candidates() {
+    use crate::cmd::reads::{read_ahead, read_land};
+    use rustgis_analysis::control::Control;
+    use rustgis_data::{Dataset, Field, FieldType, GeometryType, Value as Attr};
+    let mut ds = Dataset::new("dates", GeometryType::Point, vec![Field::new("day", FieldType::Date)]);
+    ds.push(Some(rustgis_data::Geometry::Point(rustgis_data::Coord::new(0.0, 0.0))), vec![Attr::parse("2024-02-29", FieldType::Date)]);
+    let dir = std::env::temp_dir().join(format!("rustgis-date-repair-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let old = dir.join("old.fgb");
+    let new = dir.join("new.fgb");
+    let bytes = rustgis_data::source::fgb::write(&ds).unwrap();
+    std::fs::write(&old, &bytes).unwrap();
+    std::fs::write(&new, &bytes).unwrap();
+    let mut s = Session::new(Project::default());
+    let id = s.run("layer.addData", &json!({"path": old, "stream": true})).unwrap()["layer"].as_u64().unwrap() as u32;
+    for command in ["layer.reloadData", "layer.repairSource"] {
+        let p = json!({"layer": id, "path": new});
+        let control = Control::cancelled_once_started();
+        let before = s.undo_depth();
+        assert!(read_ahead(&mut s, command, &p).unwrap().run(&control).is_err());
+        assert!(control.looked() > 0);
+        assert_eq!(s.undo_depth(), before);
+        let ahead = read_ahead(&mut s, command, &p).unwrap();
+        assert!(ahead.reads());
+        let read = ahead.run(&Control::new()).unwrap();
+        s.map_mut().layer_mut(id).unwrap().transparency = 42.0;
+        read_land(&mut s, read).unwrap();
+        let layer = s.map().layer(id).unwrap();
+        assert_eq!(layer.transparency, 42.0);
+        let source = layer.source.as_ref().unwrap();
+        assert!(source.is_open() && !source.is_pending());
+        assert_eq!(source.info().unwrap().fields[0].ty, FieldType::Date);
+        assert_eq!(layer.load_all_counted().unwrap().0.value(0, 0).to_string(), "2024-02-29");
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }
