@@ -1367,7 +1367,8 @@ row]`, the ends not included, or `"bbox": [west, south, east, north]` in the gri
 degrees for a longitude/latitude grid) reads only the chunks it touches, and only its part of the
 coordinates (by byte range when they are stored uncompressed). A box is placed by the variable's
 coordinates, read whole, so it takes grids of up to 4,000,000 cells a side; a longer one takes
-`"cells"`. A box reaching past the grid is read within it, and says so; `raster.zarrInfo` with
+`"cells"`. A box reaching past the grid is read within it, and says so; one over a longitude grid's
+edge (0°/360°, or ±180°) is refused: give a box on each side; `raster.zarrInfo` with
 `"bbox"` gives the cells a box covers (`window.cells`). A window is at least 2 × 2 cells, and
 doesn't follow the time slider yet. A window is kept in the project as a GeoTIFF, as a web
 store's slice is, also from a folder.

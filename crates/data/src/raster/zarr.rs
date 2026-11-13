@@ -957,7 +957,8 @@ impl Selection {
         let (mut sel, mut malformed) = (Selection { variable: v.to_string(), ..Selection::default() }, false);
         for (k, v) in rest.trim_end_matches(']').split(',').filter_map(|kv| kv.split_once('=')).take(MAX_DIMS + 1) {
             let (k, v) = (k.trim(), v.trim());
-            if k == "cells" {
+            // A window is four `:`-separated whole numbers; a dimension named `cells` has a step.
+            if k == "cells" && v.contains(':') {
                 let n: Vec<Option<u64>> = v.split(':').map(|n| n.trim().parse().ok()).collect();
                 match n[..] {
                     [Some(x0), Some(y0), Some(x1), Some(y1)] => sel.window = Some(Window { x0, y0, x1, y1 }),
@@ -965,6 +966,8 @@ impl Selection {
                 }
             } else if let Ok(i) = v.parse() {
                 sel.index.push((k.to_string(), i));
+            } else if k == "cells" {
+                malformed = true;
             }
         }
         (sel, malformed)
@@ -1690,7 +1693,17 @@ pub fn window_of(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>
     let rows = cells(s, n, y0, dy, ys.len() as u64);
     // A longitude may be written another way round the globe than the grid's.
     let turns: &[f64] = if geographic(xc) { &[0.0, 360.0, -360.0] } else { &[0.0] };
-    let cols = turns.iter().find_map(|k| cells(w + k, e + k, x0, dx, xs.len() as u64));
+    let hits: Vec<_> = turns.iter().filter_map(|k| cells(w + k, e + k, x0, dx, xs.len() as u64)).collect();
+    // Over the grid's seam (0°/360°, or ±180°) the box is two runs of columns, which a window
+    // isn't: refused rather than read on one side.
+    if hits.len() > 1 {
+        return Err(bad(format!(
+            "{}: the bbox crosses the grid's edge at {:.0}°, so it is two parts of the grid: give a box on each side",
+            a.path,
+            x0 + dx * xs.len() as f64
+        )));
+    }
+    let cols = hits.first().copied();
     let (Some((y0, y1, cut_y)), Some((x0, x1, cut_x))) = (rows, cols) else {
         return Err(bad(format!("{}: the bbox lies outside its grid", a.path)));
     };
@@ -2962,7 +2975,12 @@ mod tests {
         let from_dir = read_dir(&dir, &label, None).unwrap();
         assert_eq!(format!("{:?}", from_dir.bands[0].data), format!("{:?}", r.bands[0].data));
         // A window that isn't four whole numbers is refused, not read as the whole slice.
-        for bad in ["v[time=0,cells=4:x:10:8]", "v[time=0,cells=4:2:10]"] {
+        // A dimension named `cells` keeps its step through a label.
+        let named = Selection { variable: "v".into(), index: vec![("cells".into(), 1)], window: Some(w0) };
+        assert_eq!(named.label(), "v[cells=1,cells=4:2:10:8]");
+        assert_eq!(Selection::parse_strict(&named.label()).unwrap(), named);
+        assert_eq!(Selection::parse_strict("v[cells=1]").unwrap().index, [("cells".to_string(), 1)]);
+        for bad in ["v[time=0,cells=4:x:10:8]", "v[time=0,cells=4:2:10]", "v[cells=x]"] {
             assert!(Selection::parse_strict(bad).is_err(), "{bad}");
             assert!(read_dir(&dir, bad, None).unwrap_err().to_string().contains("aren't four whole numbers"), "{bad}");
         }
@@ -2988,6 +3006,25 @@ mod tests {
         assert_eq!(window_of(&store, "v", &coords, [21.0, 41.0, 22.0, 42.0]).unwrap().0, Window { x0: 2, y0: 3, x1: 4, y1: 5 });
         assert!(window_of(&store, "v", &coords, [500.0, 41.0, 600.0, 69.0]).is_err());
         assert!(window_of(&store, "v", &coords, [49.0, 41.0, 21.0, 69.0]).is_err());
+        // On a longitude grid of 0–360°, a box over its 0°/360° seam is refused (it is two runs of
+        // columns); one on either side, written either way round, is read.
+        let globe = serde_json::json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+            "v": {"zarr_format": 3, "node_type": "array", "shape": [2, 12], "data_type": "int16", "dimension_names": ["lat", "lon"],
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2, 12]}}, "codecs": [{"name": "bytes"}], "fill_value": 0},
+            "lat": {"zarr_format": 3, "node_type": "array", "shape": [2], "data_type": "float64", "dimension_names": ["lat"],
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2]}}, "codecs": [{"name": "bytes"}], "fill_value": 0},
+            "lon": {"zarr_format": 3, "node_type": "array", "shape": [12], "data_type": "float64", "dimension_names": ["lon"],
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [12]}}, "codecs": [{"name": "bytes"}], "fill_value": 0}}}});
+        let globe = parse_store(&[("zarr.json".into(), globe.to_string().into_bytes())]).unwrap();
+        let mut gc = HashMap::new();
+        gc.insert("lat/c/0".to_string(), [15.0f64, -15.0].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>());
+        gc.insert("lon/c/0".to_string(), (0..12).flat_map(|i| (15.0 + 30.0 * i as f64).to_le_bytes()).collect::<Vec<u8>>());
+        for seam in [[-20.0, -10.0, 20.0, 10.0], [340.0, -10.0, 380.0, 10.0]] {
+            let e = window_of(&globe, "v", &gc, seam).unwrap_err().to_string();
+            assert!(e.contains("crosses the grid's edge at 360°"), "{seam:?}: {e}");
+        }
+        assert_eq!(window_of(&globe, "v", &gc, [-50.0, -10.0, -10.0, 10.0]).unwrap(), (Window { x0: 10, y0: 0, x1: 12, y1: 2 }, false));
+        assert_eq!(window_of(&globe, "v", &gc, [10.0, -10.0, 50.0, 10.0]).unwrap(), (Window { x0: 0, y0: 0, x1: 2, y1: 2 }, false));
         // A window outside the grid, or under 2 × 2 cells, is refused; one wanting more chunks than
         // a read takes says to take a smaller one.
         for w in [Window { x0: 2, y0: 1, x1: 13, y1: 4 }, Window { x0: 2, y0: 1, x1: 3, y1: 4 }, Window { x0: 5, y0: 1, x1: 2, y1: 4 }] {

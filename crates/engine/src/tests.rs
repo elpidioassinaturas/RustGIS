@@ -24494,6 +24494,14 @@ fn timed_zarr_open_failures_keep_status_without_store_credentials() {
 fn a_zarr_windows_series_after_reopening() {
     let _cache = zarr_cache_lock();
     let (dir, path) = zarr_store_over_time("window-reopen");
+    // Removed however the test ends.
+    struct Gone(std::path::PathBuf);
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _gone = Gone(dir.clone());
     let mut s = Session::new(Project::default());
     let id = s.run("layer.addZarr", &json!({"path": path, "variable": "t", "index": {"time": 1}, "cells": [0, 0, 2, 2]})).unwrap()["layer"]
         .as_u64()
@@ -24509,9 +24517,8 @@ fn a_zarr_windows_series_after_reopening() {
     // Read again from its GeoTIFF: the window, not the whole slice.
     let data = t.map().layer(id).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
     assert_eq!((data.width, data.height), (2, 2));
-    let r = t.run("zarr.series", &json!({"layer": id, "lon": 1.0, "lat": 20.0}));
-    let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(r.unwrap()["values"], json!([4.0, 104.0, 204.0]));
+    let r = t.run("zarr.series", &json!({"layer": id, "lon": 1.0, "lat": 20.0})).unwrap();
+    assert_eq!(r["values"], json!([4.0, 104.0, 204.0]));
 }
 
 /// A Zarr variable's series at a point (#555): the values along its time dimension at the cell
@@ -44864,9 +44871,15 @@ fn serve_ranged_files(files: Vec<(String, Vec<u8>)>) -> (String, std::sync::Arc<
             let Ok(mut s) = stream else { continue };
             let (files, log) = (files.clone(), log.clone());
             std::thread::spawn(move || {
-                let mut buf = [0u8; 4096];
-                let read = s.read(&mut buf).unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..read]).to_string();
+                // The request's whole head (to its blank line, at most 16 KB), however it arrives.
+                let (mut head, mut buf) = (Vec::new(), [0u8; 4096]);
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < 16 << 10 {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let req = String::from_utf8_lossy(&head).to_string();
                 let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
                 let range = req.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=").map(|r| r.trim().to_string()));
                 log.lock().unwrap().push((path.clone(), range.clone().unwrap_or_default()));
