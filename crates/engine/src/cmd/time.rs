@@ -408,6 +408,10 @@ pub(super) fn frames(
                 // step's address by now, so each frame shows its own date's imagery, and a
                 // turned view its own ground.
                 let png = super::share::map_png_unsaid(s, Some(w), Some(h), Some(dpi))?;
+                // What this frame's file left out, said while its header is surely in (a cleared
+                // tile cache could drop it before the export ends): the slider, or the camera,
+                // moves on before the command's own landing check.
+                s.notice_landed_rasters();
                 // After the frame, so one whose wait for tiles was cut short is never kept.
                 rustgis_data::progress::check().map_err(|e| e.to_string())?;
                 match (&mut enc, gif) {
