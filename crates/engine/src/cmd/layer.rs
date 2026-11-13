@@ -4896,11 +4896,13 @@ impl WindowRaster {
     /// holds but isn't read, values past `f32`'s range), for a caller that makes another raster
     /// from it and so doesn't add this one (whose `lost` the layer would say).
     pub(crate) fn notes(&self) -> Vec<String> {
-        std::iter::once(self.read.clone())
-            .chain(self.finer.clone())
-            .chain(self.edges.iter().cloned())
-            .chain(self.raster.lost.iter().cloned())
-            .collect()
+        self.read_notes().into_iter().chain(self.raster.lost.iter().cloned()).collect()
+    }
+
+    /// What to say of the read alone (its size and level, a cell size finer than the file's, the
+    /// box's edges), without what the raster left out: the same for windows of one grid.
+    pub(crate) fn read_notes(&self) -> Vec<String> {
+        std::iter::once(self.read.clone()).chain(self.finer.clone()).chain(self.edges.iter().cloned()).collect()
     }
 }
 

@@ -673,9 +673,7 @@ pub(crate) fn change_work(s: &Session, p: &Value) -> Result<super::workflows::Wo
         let (Some(a), Some(b)) = (files.first(), files.get(1)) else { return Err("AlphaEarth has no files there".into()) };
         let a = read_window(a, area, cell)?;
         let b = read_window(b, area, cell)?;
-        // The two years' windows are on one grid (change_band refuses them otherwise), so they
-        // say the same of their read: the first's is said.
-        notes.extend(a.notes());
+        notes.extend(two_years_notes(&a, &b, (from, to)));
         let band = change_band(&a.raster, &b.raster)?;
         let name = name.unwrap_or_else(|| format!("AlphaEarth change {from}–{to}"));
         let raster = rustgis_analysis::rasterops::derive(&a.raster, &name, vec![band])?;
@@ -757,6 +755,25 @@ fn pick_tile(found: &emb::SeriesFound, years: &[i32]) -> Result<(Vec<String>, St
         ));
     }
     Ok((files, place, notes))
+}
+
+/// What a change says of its two years' windows: what the first says of its read (the windows
+/// are on one grid, so the second's says the same; anything it adds is said too, by its year),
+/// and what each file's header left out, by year: once, for both, when both left it out.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn two_years_notes(a: &super::layer::WindowRaster, b: &super::layer::WindowRaster, (from, to): (i32, i32)) -> Vec<String> {
+    let mut notes = a.read_notes();
+    for n in b.read_notes() {
+        if !notes.contains(&n) {
+            notes.push(format!("the {to} file: {n}"));
+        }
+    }
+    for l in &a.raster.lost {
+        let both = b.raster.lost.contains(l);
+        notes.push(if both { format!("the {from} and {to} files: {l}") } else { format!("the {from} file: {l}") });
+    }
+    notes.extend(b.raster.lost.iter().filter(|l| !a.raster.lost.contains(l)).map(|l| format!("the {to} file: {l}")));
+    notes
 }
 
 /// What a similarity says of its reference points that have no embedding in the area read.

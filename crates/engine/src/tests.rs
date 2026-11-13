@@ -37809,6 +37809,20 @@ fn a_window_read_for_another_raster_says_what_its_header_left_out() {
     let (clean, _) = serve_ranges(example(512, 256));
     let w = read_window_raster(&WindowAsked::of(&format!("{clean}/clean.tif"), [10.0, 45.0, 10.5, 45.5], None, 1), &stop).unwrap();
     assert_eq!(w.notes().len(), 1, "only the read: {:?}", w.notes());
+    // A change says what each year's file left out, by its year, and once for both when both left
+    // it out; the read, the same for both, once.
+    use crate::cmd::embeddings::two_years_notes;
+    let lossy = read_window_raster(&WindowAsked::of(&format!("{lossy}/lossy.tif"), [10.0, 45.0, 10.5, 45.5], None, 1), &stop).unwrap();
+    let said = two_years_notes(&w, &lossy, (2017, 2025));
+    assert!(said.iter().any(|n| n.starts_with("the 2025 file: its colour table has 384 entries")), "{said:?}");
+    assert!(!said.iter().any(|n| n.starts_with("the 2017")), "{said:?}");
+    assert_eq!(said.iter().filter(|n| n.contains("window of the full image")).count(), 1, "{said:?}");
+    let said = two_years_notes(&lossy, &w, (2017, 2025));
+    assert!(said.iter().any(|n| n.starts_with("the 2017 file: its colour table has 384 entries")), "{said:?}");
+    let said = two_years_notes(&lossy, &lossy, (2017, 2025));
+    assert_eq!(said.iter().filter(|n| n.contains("its colour table has 384 entries")).count(), 1, "{said:?}");
+    assert!(said.iter().any(|n| n.starts_with("the 2017 and 2025 files: its colour table")), "{said:?}");
+    assert_eq!(two_years_notes(&w, &w, (2017, 2025)).len(), 1, "two clean files: only the read");
     // A file without the bands asked for is refused from its header.
     let e = read_window_raster(&WindowAsked::of(&format!("{clean}/clean.tif"), [10.0, 45.0, 10.5, 45.5], None, 64), &stop).err().unwrap();
     assert!(e.contains("it has 1 band(s), where 64 are needed"), "{e}");
