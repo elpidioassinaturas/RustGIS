@@ -13,10 +13,10 @@ pub const SHOWS: [(&str, u32, u32, bool); 4] =
     [("step", 0, 1, false), ("wide", 1, 1, false), ("wider", 3, 3, false), ("cumulative", 0, 1, true)];
 
 /// The most frames an export makes.
-const MAX_FRAMES: usize = 2000;
+pub(super) const MAX_FRAMES: usize = 2000;
 /// The most pixels an export renders over all its frames (it blocks while it runs): 300 frames
 /// at 1280 × 720, or 2000 at about 500 × 300.
-const MAX_PIXELS: f64 = 3.0e8;
+pub(super) const MAX_PIXELS: f64 = 3.0e8;
 
 /// The map has a time slider.
 fn need_slider(s: &Session) -> Option<&'static str> {
@@ -340,7 +340,17 @@ fn export(s: &mut Session, p: &Value) -> CmdResult {
     let speed = f(p, "speed").map_or(saved.speed_ms, |x| x.clamp(16.0, 60_000.0) as u32);
     // Each frame shows the view's extent, as Export Map does. The slider comes back however the
     // frames end (an error, or a panic the session catches).
-    let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frames(s, &steps, w, h, gif.then_some(speed))));
+    let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        frames(s, "The time animation", steps.len(), (w, h, 96.0), gif.then_some(speed), |s, i| {
+            if let (Some(sl), Some(t)) = (s.map_mut().time.as_mut(), steps.get(i)) {
+                sl.current = *t;
+            }
+            s.map_mut().apply_time();
+            // Zarr layers that follow the slider read this step's slice, here: each frame draws
+            // its own step.
+            super::zarr::follow_time_now(s);
+        })
+    }));
     s.map_mut().time = Some(saved);
     s.map_mut().apply_time();
     // The step it is back at, read here: a command after the export may read the layer.
@@ -353,14 +363,31 @@ fn export(s: &mut Session, p: &Value) -> CmdResult {
 /// The browser build doesn't export (files go through the app's services there), so it leaves
 /// the GIF encoder out.
 #[cfg(target_arch = "wasm32")]
-fn frames(_: &mut Session, _: &[f64], _: f64, _: f64, _: Option<u32>) -> Result<Vec<u8>, String> {
-    Err("exporting time animations needs the desktop app".into())
+pub(super) fn frames(
+    _: &mut Session,
+    _: &str,
+    _: usize,
+    _: (f64, f64, f64),
+    _: Option<u32>,
+    _: impl FnMut(&mut Session, usize),
+) -> Result<Vec<u8>, String> {
+    Err("exporting animations needs the desktop app".into())
 }
 
-/// Renders the map at each step: an animated GIF that loops, each frame shown for `gif`
-/// milliseconds, or (`None`) a zip of PNGs.
+/// Renders the map `n` times at `(width, height, dpi)`, after `go` set the session up for each
+/// frame (a time step, a turn of the camera): an animated GIF that loops, each frame shown for
+/// `gif` milliseconds, or (`None`) a zip of PNGs. A run asked to stop (`rustgis_data::progress`)
+/// stops between frames with nothing made, and what the frames said of their cast shadows is
+/// said once, about `what`, not once a frame.
 #[cfg(not(target_arch = "wasm32"))]
-fn frames(s: &mut Session, steps: &[f64], w: f64, h: f64, gif: Option<u32>) -> Result<Vec<u8>, String> {
+pub(super) fn frames(
+    s: &mut Session,
+    what: &str,
+    n: usize,
+    (w, h, dpi): (f64, f64, f64),
+    gif: Option<u32>,
+    mut go: impl FnMut(&mut Session, usize),
+) -> Result<Vec<u8>, String> {
     use image::codecs::gif::{GifEncoder, Repeat};
     let mut out = Vec::new();
     let mut pngs = Vec::new();
@@ -373,27 +400,27 @@ fn frames(s: &mut Session, steps: &[f64], w: f64, h: f64, gif: Option<u32>) -> R
             }
             None => None,
         };
-        for (i, t) in steps.iter().enumerate() {
-            if let Some(sl) = s.map_mut().time.as_mut() {
-                sl.current = *t;
-            }
-            s.map_mut().apply_time();
-            // Zarr layers that follow the slider read this step's slice, here: each frame draws
-            // its own step.
-            super::zarr::follow_time_now(s);
-            // Dated tile layers have this step's address now: natively, map_png (through
-            // rustgis_render::render_complete) fetches the tiles it lacks and waits for them
-            // before it draws, so each frame shows its own date's imagery.
-            let png = super::share::map_png(s, Some(w), Some(h), Some(96.0))?;
-            match (&mut enc, gif) {
-                (Some(e), Some(ms)) => {
-                    let img = image::load_from_memory_with_format(&png, image::ImageFormat::Png).map_err(|e| e.to_string())?.to_rgba8();
-                    let delay = image::Delay::from_numer_denom_ms(ms, 1);
-                    e.encode_frame(image::Frame::from_parts(img, 0, 0, delay)).map_err(|e| e.to_string())?;
+        super::share::saying_shadows(s, what, |s| {
+            for i in 0..n {
+                go(s, i);
+                // Natively the frame (through rustgis_render::render_complete) fetches the tiles
+                // it lacks and waits for them before it draws: dated tile layers have this
+                // step's address by now, so each frame shows its own date's imagery, and a
+                // turned view its own ground.
+                let png = super::share::map_png_unsaid(s, Some(w), Some(h), Some(dpi))?;
+                // After the frame, so one whose wait for tiles was cut short is never kept.
+                rustgis_data::progress::check().map_err(|e| e.to_string())?;
+                match (&mut enc, gif) {
+                    (Some(e), Some(ms)) => {
+                        let img = image::load_from_memory_with_format(&png, image::ImageFormat::Png).map_err(|e| e.to_string())?.to_rgba8();
+                        let delay = image::Delay::from_numer_denom_ms(ms, 1);
+                        e.encode_frame(image::Frame::from_parts(img, 0, 0, delay)).map_err(|e| e.to_string())?;
+                    }
+                    _ => pngs.push((format!("frame_{:04}.png", i + 1), png)),
                 }
-                _ => pngs.push((format!("frame_{:04}.png", i + 1), png)),
             }
-        }
+            Ok(())
+        })?;
     }
     if gif.is_some() { Ok(out) } else { rustgis_data::zip::write(&pngs) }
 }

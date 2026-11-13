@@ -4452,6 +4452,7 @@ fn hostile_params_never_panic(shard: usize) {
                 | "project.exportLog"
                 | "share.exportMap"
                 | "time.export"
+                | "map.exportOrbit"
                 | "share.exportLayer"
                 | "share.exportTable"
                 | "share.exportRaster"
@@ -45065,6 +45066,111 @@ fn native_date_source_repair_and_reload_use_finished_candidates() {
         assert!(source.is_open() && !source.is_pending());
         assert_eq!(source.info().unwrap().fields[0].ty, FieldType::Date);
         assert_eq!(layer.load_all_counted().unwrap().0.value(0, 0).to_string(), "2024-02-29");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// An orbit draws the map at a bearing a frame and puts the view back: a whole turn stops one
+/// step short of where it began (it loops), a part of one ends on its last bearing.
+#[test]
+fn an_orbit_is_exported_as_png_frames_or_a_gif_and_the_view_comes_back() {
+    use image::AnimationDecoder;
+    let mut s = world();
+    s.run("map.setBearing", &json!({"bearing": 30})).unwrap();
+    s.run("map.setPitch", &json!({"pitch": 50})).unwrap();
+    let before = s.map().camera;
+    let dir = std::env::temp_dir().join(format!("rustgis-orbit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let at = |name: &str| dir.join(name).display().to_string();
+    // The map drawn at each of `bearings`, as an export of that size draws it.
+    let drawn = |s: &mut Session, bearings: &[f64]| -> Vec<Vec<u8>> {
+        let frames = bearings
+            .iter()
+            .map(|b| {
+                s.map_mut().camera.set_bearing(*b);
+                crate::cmd::share::map_png(s, Some(96.0), Some(64.0), Some(96.0)).unwrap()
+            })
+            .collect();
+        s.map_mut().camera = before;
+        frames
+    };
+    let pngs = |name: &str| -> Vec<Vec<u8>> {
+        rustgis_data::zip::read(&std::fs::read(dir.join(name)).unwrap()).unwrap().into_iter().map(|(_, png)| png).collect()
+    };
+    let r = s.run("map.exportOrbit", &json!({"path": at("round.zip"), "frames": 4, "width": 96, "height": 64})).unwrap();
+    assert_eq!((r["frames"].as_u64(), r["turn"].as_f64()), (Some(4), Some(360.0)), "{r}");
+    assert_eq!(s.map().camera, before, "the view comes back");
+    let round = pngs("round.zip");
+    assert!(round == drawn(&mut s, &[30.0, 120.0, 210.0, 300.0]), "a quarter of a turn a frame, never back at the first");
+    assert!(round[0] != round[1] && round[0] != round[2], "the frames differ");
+    s.run("map.exportOrbit", &json!({"path": at("part.zip"), "frames": 3, "turn": -90, "width": 96, "height": 64})).unwrap();
+    assert!(pngs("part.zip") == drawn(&mut s, &[30.0, -15.0, -60.0]), "a part of a turn ends on its last bearing");
+    // A GIF that loops, each frame shown for the speed asked.
+    s.run("map.exportOrbit", &json!({"path": at("round.gif"), "frames": 3, "width": 96, "height": 64, "speed": 80})).unwrap();
+    let gif = std::fs::read(dir.join("round.gif")).unwrap();
+    assert!(gif.starts_with(b"GIF89a"));
+    let shown: Vec<image::Frame> =
+        image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&gif)).unwrap().into_frames().collect_frames().unwrap();
+    assert_eq!(shown.len(), 3);
+    assert!(shown.iter().all(|f| f.delay().numer_denom_ms() == (80, 1) && f.buffer().dimensions() == (96, 64)));
+    assert_eq!(s.map().camera, before);
+    // What it can't draw as asked is refused before anything is drawn or written.
+    for (junk, why) in [
+        (json!({"frames": 0}), "frames must be"),
+        (json!({"frames": 2.5}), "whole number"),
+        (json!({"frames": 2001}), "frames must be"),
+        (json!({"frames": "many"}), "frames must be"),
+        (json!({"turn": 0}), "turn must not be 0"),
+        (json!({"turn": 4000}), "turn must be"),
+        (json!({"width": 10}), "width must be"),
+        (json!({"height": 5000}), "height must be"),
+        (json!({"dpi": 1000}), "dpi must be"),
+        (json!({"speed": 1}), "speed must be"),
+        (json!({"frames": 2000, "width": 4096, "height": 4096}), "million pixels"),
+    ] {
+        let mut p = junk.clone();
+        p["path"] = json!(at("refused.zip"));
+        let e = s.run("map.exportOrbit", &p).unwrap_err();
+        assert!(e.contains(why), "{junk}: {e}");
+    }
+    assert!(s.run("map.exportOrbit", &json!({"path": at("refused.png")})).unwrap_err().contains(".gif"));
+    assert!(s.run("map.exportOrbit", &json!({"frames": 2})).unwrap_err().contains("path is required"));
+    assert!(!dir.join("refused.zip").exists() && !dir.join("refused.png").exists());
+    assert_eq!(s.map().camera, before);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A run asked to stop ends an orbit, and a time animation, between frames: nothing is written
+/// and the view is back where it was.
+#[test]
+fn a_stopped_run_ends_an_animation_export_with_nothing_written() {
+    struct Stopped;
+    impl rustgis_data::progress::Probe for Stopped {
+        fn cancelled(&self) -> bool {
+            true
+        }
+        fn begin(&self, _: u64) {}
+        fn advance(&self, _: u64) {}
+    }
+    let mut s = world();
+    s.run("time.set", &json!({"dates": ["2020-01-01", "2020-01-02"], "date": "2020-01-02"})).unwrap();
+    s.run("map.setBearing", &json!({"bearing": 30})).unwrap();
+    let before = s.map().camera;
+    let date = s.run("time.info", &Value::Null).unwrap()["date"].clone();
+    let dir = std::env::temp_dir().join(format!("rustgis-orbit-stopped-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for command in ["map.exportOrbit", "time.export"] {
+        let path = dir.join(format!("{command}.zip"));
+        let params = json!({"path": path.display().to_string(), "width": 96, "height": 64});
+        s.run(command, &params).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let stopped = rustgis_data::progress::install(Some(std::sync::Arc::new(Stopped)));
+        let e = s.run(command, &params).unwrap_err();
+        drop(stopped);
+        assert!(e.contains("cancel"), "{command}: {e}");
+        assert!(!path.exists(), "{command} wrote a file");
+        assert_eq!(s.map().camera, before, "{command}");
+        assert_eq!(s.run("time.info", &Value::Null).unwrap()["date"], date, "{command}");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }

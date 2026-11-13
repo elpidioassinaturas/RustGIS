@@ -190,6 +190,7 @@ fn permission_review_render_owners_require_tile_network_access() {
     for (id, params) in [
         ("time.export", json!({"path":"review-frames.zip"})),
         ("animation.export", json!({"path":"review-camera.zip"})),
+        ("map.exportOrbit", json!({"path":"review-orbit.zip","frames":2})),
         ("project.thumbnail", json!({"create":true})),
         ("map.thumbnail", json!({"create":true})),
     ] {
@@ -212,6 +213,7 @@ fn permission_review_render_owners_bind_raw_tile_routes() {
     for (id, params) in [
         ("time.export", json!({"path":"review-frames.zip"})),
         ("animation.export", json!({"path":"review-camera.zip"})),
+        ("map.exportOrbit", json!({"path":"review-orbit.zip","frames":2})),
         ("project.thumbnail", json!({"create":true})),
         ("map.thumbnail", json!({"create":true})),
     ] {
