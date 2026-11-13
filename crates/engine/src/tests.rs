@@ -45443,7 +45443,7 @@ fn an_orbit_is_exported_as_png_frames_or_a_gif_and_the_view_comes_back() {
 #[test]
 fn a_stopped_run_ends_an_animation_export_with_nothing_written() {
     /// Asked to stop once it was asked `0` times whether it was: 0 stops a run before its first
-    /// frame, 2 one that has drawn a frame.
+    /// frame, 2 one that has drawn a frame, 3 one that has drawn two.
     struct Stopped(u32, std::sync::atomic::AtomicU32);
     impl rustgis_data::progress::Probe for Stopped {
         fn cancelled(&self) -> bool {
@@ -45464,7 +45464,9 @@ fn a_stopped_run_ends_an_animation_export_with_nothing_written() {
         let params = json!({"path": path.display().to_string(), "width": 96, "height": 64});
         s.run(command, &params).unwrap();
         std::fs::remove_file(&path).unwrap();
-        for after in [0, 2] {
+        // Stopped at once, before the second frame, and after it: an orbit's second frame has
+        // turned the camera, so it is the restore that brings the view back.
+        for after in [0, 2, 3] {
             let stopped = rustgis_data::progress::install(Some(std::sync::Arc::new(Stopped(after, 0.into()))));
             let e = s.run(command, &params).unwrap_err();
             drop(stopped);

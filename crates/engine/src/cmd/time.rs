@@ -310,6 +310,8 @@ fn export_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::In
         places.insert(crate::sources::redact(&tile.url));
         places.extend(tile.legends.iter().map(|legend| crate::sources::redact(&legend.url)));
     });
+    // The terrain's elevation tiles come from one address at every step.
+    places.extend(super::tiles::terrain_tiles(input.map()).map(crate::sources::redact));
     inputs.review_places = places.into_iter().collect();
     Ok(inputs)
 }
@@ -317,7 +319,8 @@ fn export_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::In
 /// A later selected frame can reveal another source even when the current frame draws none.
 pub(crate) fn export_reach(input: &super::InputContext<'_>, p: &Value) -> crate::policy::Effects {
     let Ok(frames) = export_frames(input.map(), p) else { return crate::policy::Effects::NONE };
-    let mut reach = crate::policy::Effects::NONE;
+    // The terrain's elevation tiles are the same at every step.
+    let mut reach = super::tiles::terrain_reach(input.map());
     frame_tiles(input.map(), &frames, |tile| {
         reach = reach.union(super::tiles::render_tile_reach(tile));
     });
