@@ -706,11 +706,16 @@ impl Pass1<'_> {
                 }
                 let i = dy * bw + dx;
                 // How many cells one screen pixel spans here, along the row: from the last pixel in
-                // the grid, or the next one on the row's first.
+                // the grid, or the next one on the row's first. Across a whole turn's seam the columns
+                // are counted the short way round: 35.95 to 0.05 is a tenth of a cell, not 35.9.
                 let last_drawn = prev.replace((dx, c, row));
+                let cols_apart = |other: f64| {
+                    let d = (c - other).abs();
+                    self.wrap_width.map_or(d, |w| d.min(w as f64 - d))
+                };
                 let span = || match last_drawn {
-                    Some((pdx, pc, pr)) => (c - pc).hypot(row - pr) / (dx - pdx) as f64,
-                    None => pos_at(dx + 1).map_or(0.0, |(nc, nr)| (nc - c).hypot(nr - row)),
+                    Some((pdx, pc, pr)) => cols_apart(pc).hypot(row - pr) / (dx - pdx) as f64,
+                    None => pos_at(dx + 1).map_or(0.0, |(nc, nr)| cols_apart(nc).hypot(nr - row)),
                 };
                 // Truncating is flooring here (both are at least 0), and much cheaper.
                 let cell = (c as i64, row as i64);
@@ -1432,5 +1437,44 @@ mod tests {
         }
         // Two pixels to a cell: blended.
         assert_ne!(row(Resampling::Bilinear, 50.0), row(Resampling::Nearest, 50.0));
+    }
+
+    /// A grid spanning one whole turn blends its light across the 0°/360° seam as anywhere else:
+    /// the cells on either side of it are neighbours, and a pixel just across it is a fraction of
+    /// a cell from the last one, not a whole turn.
+    #[test]
+    fn bilinear_relief_blends_across_a_whole_turns_seam() {
+        // 36 x 18 cells of 10 degrees, flat; the cast shadows leave no light on column 0 (0 to
+        // 10 degrees east) and all of it on the others.
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 90.0, pixel_width: 10.0, pixel_height: -10.0 };
+        let r = Raster::new("turn", 36, 18, vec![vec![0.0; 36 * 18]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let light: Vec<u8> = (0..36 * 18).map(|k| if k % 36 == 0 { 0 } else { 255 }).collect();
+        // 80 pixels of half a degree across the seam, on row 8's centre (5 degrees north).
+        let view = View {
+            width: 80.0,
+            height: 1.0,
+            pixels_per_point: 1.0,
+            camera: Camera { center: lonlat_to_merc(Coord::new(0.0, 5.0)), res: 1_113_194.9 / 20.0, bearing: 0.0, pitch: 0.0 },
+            sky: false,
+        };
+        let row = |resampling: Resampling| {
+            let mut style = RasterStyle::default_for(&r);
+            style.renderer =
+                RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 315.0, altitude: 45.0, z_factor: 1.0, shadow: 1.0 };
+            style.resampling = resampling;
+            let mut pm = Pixmap::new(80, 1).unwrap();
+            draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), Some(&light));
+            (0..80).map(|x| pm.pixel(x, 0).unwrap().red()).collect::<Vec<_>>()
+        };
+        let (nearest, bilinear) = (row(Resampling::Nearest), row(Resampling::Bilinear));
+        // Column 35's centre (5 degrees west) is on pixel 29.5, column 0's on 49.5; the seam lies
+        // between pixels 39 and 40.
+        let (lit, dark) = (nearest[29], nearest[50]);
+        assert!(dark + 20 < lit && nearest[39] == lit && nearest[40] == dark, "{nearest:?}");
+        let across = &bilinear[30..=49];
+        assert!(across.windows(2).all(|w| w[0] >= w[1]), "darkens steadily across the seam: {across:?}");
+        for x in [39, 40] {
+            assert!(dark + 10 < bilinear[x] && bilinear[x] + 10 < lit, "pixel {x} blends: {across:?}");
+        }
     }
 }
