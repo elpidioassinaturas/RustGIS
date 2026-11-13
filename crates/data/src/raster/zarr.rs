@@ -818,6 +818,25 @@ fn bitunshuffle(d: &[u8], size: usize, format: u8) -> Vec<u8> {
     out
 }
 
+/// The length of a shard's index of `count` chunks: 16 bytes a chunk, and a checksum after them.
+fn index_len(count: usize, index: &[Codec]) -> Option<usize> {
+    count.checked_mul(16)?.checked_add(if index.contains(&Codec::Crc32c) { 4 } else { 0 })
+}
+
+/// A shard's index (`raw`, encoded with `index`): each of its `count` chunks' (offset, size),
+/// `(u64::MAX, u64::MAX)` for one it doesn't hold.
+fn shard_index(raw: &[u8], count: usize, index: &[Codec]) -> Result<Vec<(u64, u64)>> {
+    if Some(raw.len()) != index_len(count, index) {
+        return Err(bad("a shard's index is cut"));
+    }
+    let (idx, little) = decode_chunk(index, raw, &[count as u64, 2], DType { kind: Kind::UInt, size: 8, little: true }, None)?;
+    let word = |b: &[u8]| -> u64 {
+        let b: [u8; 8] = b.try_into().unwrap_or([0xff; 8]);
+        if little { u64::from_le_bytes(b) } else { u64::from_be_bytes(b) }
+    };
+    Ok(idx.as_chunks::<16>().0.iter().map(|p| p.split_at(8)).map(|(o, l)| (word(o), word(l))).collect())
+}
+
 /// A shard of `shard` values: its chunks of `inner` values, each decoded with `codecs`, put in
 /// place (row-major), with its index of (offset, size) pairs (`index` its encoding) at the end
 /// or the start. Chunks it doesn't hold are `fill`. Returns the values' bytes and byte order.
@@ -844,18 +863,10 @@ fn unshard(
         .ok_or_else(|| bad("a shard too large"))?;
     // The index: 16 bytes a chunk, and a checksum after them. It must lie in the file, so its size
     // is bounded by the file's before anything is made for it.
-    let checksum = if index.contains(&Codec::Crc32c) { 4 } else { 0 };
-    let ilen = count
-        .checked_mul(16)
-        .and_then(|n| n.checked_add(checksum))
-        .filter(|&n| n <= d.len())
-        .ok_or_else(|| bad("a shard's index is cut"))?;
+    let ilen = index_len(count, index).filter(|&n| n <= d.len()).ok_or_else(|| bad("a shard's index is cut"))?;
     let raw = if index_at_end { d.get(d.len() - ilen..) } else { d.get(..ilen) }.ok_or_else(|| bad("a shard's index is cut"))?;
-    let (idx, il) = decode_chunk(index, raw, &[count as u64, 2], DType { kind: Kind::UInt, size: 8, little: true }, None)?;
-    let word = |i: usize| -> u64 {
-        let b: [u8; 8] = idx.get(i * 8..i * 8 + 8).and_then(|b| b.try_into().ok()).unwrap_or([0xff; 8]);
-        if il { u64::from_le_bytes(b) } else { u64::from_be_bytes(b) }
-    };
+    let idx = shard_index(raw, count, index)?;
+    let word = |i: usize| -> u64 { idx.get(i / 2).map_or(u64::MAX, |&(o, l)| if i.is_multiple_of(2) { o } else { l }) };
     let little = codecs.iter().find_map(|c| if let Codec::Bytes { little } = c { Some(*little) } else { None }).unwrap_or(dtype.little);
     let size = dtype.size;
     let total = shard
@@ -987,10 +998,21 @@ pub struct Part {
 pub enum Span {
     /// Bytes `first..=last`.
     Bytes(u64, u64),
+    /// The file's last `n` bytes.
+    Tail(u64),
+}
+
+/// A shard a window of a sharded variable reads: where its index is, and which of its chunks.
+#[derive(Clone, Debug)]
+struct ShardRead {
+    key: String,
+    count: usize,
+    chunks: Vec<usize>,
 }
 
 /// What a slice needs: the chunk files to fetch (`keys`, whole), the bytes of files to fetch
-/// (`parts`, for a window: its coordinates stored plain), and how they make the raster.
+/// (`parts`, for a window: shards' indexes, coordinates), and how they make the raster. A window
+/// of a sharded variable then reads the shards' chunks it needs ([`inner_parts`]).
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub keys: Vec<String>,
@@ -1003,6 +1025,12 @@ pub struct Plan {
     xcoord: Option<String>,
     window: Window,
     windowed: bool,
+    shards: Vec<ShardRead>,
+}
+
+/// The id a shard's chunk `c` (in the shard's row-major order) is handed back under.
+fn inner_id(shard: &str, c: usize) -> String {
+    format!("{shard}#{c}")
 }
 
 /// Whether a 1D array's chunks are its values as they are (no compression), so a window reads
@@ -1131,14 +1159,21 @@ pub fn plan(store: &Store, sel: &Selection) -> Result<Plan> {
             }
         }
     }
-    let size = |d: usize| a.chunks.get(d).copied().unwrap_or(1).max(1);
+    // A window of a sharded variable reads the shards' chunks it needs, by range; otherwise it reads
+    // whole chunk files.
+    let sharding = match a.codecs.first() {
+        Some(Codec::Sharding { inner, index, .. }) if sel.window.is_some() => Some((inner, index)),
+        _ => None,
+    };
+    let unit = sharding.map_or(&a.chunks, |(inner, _)| inner);
+    let size = |d: usize| unit.get(d).copied().unwrap_or(1).max(1);
     let (ry, rx) = (window.y0 / size(y)..window.y1.div_ceil(size(y)), window.x0 / size(x)..window.x1.div_ceil(size(x)));
     let n = (ry.end - ry.start).saturating_mul(rx.end - rx.start);
     if n > MAX_CHUNKS as u64 {
         let what = if sel.window.is_some() { "the window" } else { "one slice" };
         return Err(bad(format!("{} needs {n} chunks for {what}, more than {MAX_CHUNKS}: take a smaller window", a.path)));
     }
-    let (mut keys, mut parts) = (Vec::new(), Vec::new());
+    let (mut keys, mut parts, mut shards) = (Vec::new(), Vec::new(), Vec::<ShardRead>::new());
     for cy in ry {
         for cx in rx.clone() {
             let idx: Vec<u64> = (0..a.shape.len())
@@ -1148,7 +1183,29 @@ pub fn plan(store: &Store, sel: &Selection) -> Result<Plan> {
                     d => fixed.get(d).copied().unwrap_or(0) / size(d),
                 })
                 .collect();
-            keys.push(a.chunk_key(&idx));
+            let Some((inner, index)) = sharding else {
+                keys.push(a.chunk_key(&idx));
+                continue;
+            };
+            // The shard holding this chunk, and the chunk's place in the shard's row-major order.
+            let per: Vec<u64> = a.chunks.iter().zip(inner).map(|(s, i)| s / i.max(&1)).collect();
+            let shard: Vec<u64> = idx.iter().zip(&per).map(|(u, p)| u / p.max(&1)).collect();
+            let c = idx.iter().zip(&per).fold(0u64, |c, (u, p)| c * p + u % p.max(&1));
+            let key = a.chunk_key(&shard);
+            match shards.iter_mut().find(|s| s.key == key) {
+                Some(s) => s.chunks.push(c as usize),
+                None => {
+                    let count = per.iter().product::<u64>() as usize;
+                    let len = index_len(count, index).ok_or_else(|| bad("a shard too large"))? as u64;
+                    let span = if matches!(a.codecs.first(), Some(Codec::Sharding { index_at_end: false, .. })) {
+                        Span::Bytes(0, len - 1)
+                    } else {
+                        Span::Tail(len)
+                    };
+                    parts.push(Part { key: key.clone(), span, id: format!("{key}#index") });
+                    shards.push(ShardRead { key, count, chunks: vec![c as usize] });
+                }
+            }
         }
     }
     let coord = |d: usize| names.get(d).and_then(|n| store.coordinate(a, n)).filter(|c| c.shape.first() == a.shape.get(d));
@@ -1183,7 +1240,37 @@ pub fn plan(store: &Store, sel: &Selection) -> Result<Plan> {
         xcoord: xc.map(|c| c.path.clone()),
         window,
         windowed: sel.window.is_some(),
+        shards,
     })
+}
+
+/// The shards' chunks a window of a sharded variable reads, from their indexes (`got`, by the ids
+/// of the plan's index [`Part`]s): each chunk's bytes. A shard that isn't stored, and a chunk its
+/// index says it doesn't hold, are left out (their cells are empty, as a chunk never written).
+pub fn inner_parts(store: &Store, plan: &Plan, got: &HashMap<String, Vec<u8>>) -> Result<Vec<Part>> {
+    let Some(a) = store.array(&plan.var) else { return Ok(Vec::new()) };
+    let Some(Codec::Sharding { index, .. }) = a.codecs.first() else { return Ok(Vec::new()) };
+    let (mut parts, mut total) = (Vec::new(), 0u64);
+    for s in &plan.shards {
+        let Some(raw) = got.get(&format!("{}#index", s.key)) else { continue };
+        let idx = shard_index(raw, s.count, index).map_err(|e| bad(format!("{}: {e}", s.key)))?;
+        for &c in &s.chunks {
+            let Some(&(off, len)) = idx.get(c) else { continue };
+            if off == u64::MAX && len == u64::MAX {
+                continue;
+            }
+            let last = off
+                .checked_add(len)
+                .filter(|_| len > 0 && len <= MAX_CHUNK_FILE)
+                .ok_or_else(|| bad(format!("{}: a chunk's place in it is wrong", s.key)))?;
+            total = total.saturating_add(len);
+            if total > MAX_READ {
+                return Err(bad(format!("{}: the window's chunks are more than {} GB: take a smaller window", a.path, MAX_READ >> 30)));
+            }
+            parts.push(Part { key: s.key.clone(), span: Span::Bytes(off, last - 1), id: inner_id(&s.key, c) });
+        }
+    }
+    Ok(parts)
 }
 
 /// A 1D array's values, from its chunks (missing ones are its fill value).
@@ -1307,7 +1394,13 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
     let win = plan.window;
     let (h, w) = ((win.y1 - win.y0) as usize, (win.x1 - win.x0) as usize);
     let mut grid = super::filled(w, h, f32::NAN)?;
-    let (cy, cx) = (a.chunks.get(plan.y).copied().unwrap_or(1).max(1), a.chunks.get(plan.x).copied().unwrap_or(1).max(1));
+    // What the cells are read from: chunks, or a window's chunks of shards.
+    let inner = match a.codecs.first() {
+        Some(Codec::Sharding { inner, codecs, .. }) if !plan.shards.is_empty() => Some((inner, codecs)),
+        _ => None,
+    };
+    let unit = inner.map_or(&a.chunks, |(i, _)| i);
+    let (cy, cx) = (unit.get(plan.y).copied().unwrap_or(1).max(1), unit.get(plan.x).copied().unwrap_or(1).max(1));
     let nd = a.shape.len();
     // Values meaning "no data", before any scaling, as xarray reads them: the CF attributes, and a
     // Zarr 2 array's fill_value (xarray's _FillValue encoding). A Zarr 3 array's fill_value (0 by
@@ -1326,7 +1419,7 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
     // digits), or scaled ones whose f32 no longer gives back the stored value.
     let scaled = scale != 1.0 || offset != 0.0;
     let mut rounded = 0u64;
-    let size = |d: usize| a.chunks.get(d).copied().unwrap_or(1).max(1);
+    let size = |d: usize| unit.get(d).copied().unwrap_or(1).max(1);
     for gy in win.y0 / cy..win.y1.div_ceil(cy) {
         for gx in win.x0 / cx..win.x1.div_ceil(cx) {
             let idx: Vec<u64> = (0..nd)
@@ -1336,9 +1429,23 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
                     d => plan.fixed.get(d).copied().unwrap_or(0) / size(d),
                 })
                 .collect();
-            let Some(bytes) = chunks.get(&a.chunk_key(&idx)) else { continue };
+            let id = match inner {
+                Some((i, _)) => {
+                    let per: Vec<u64> = a.chunks.iter().zip(i).map(|(s, i)| s / i.max(&1)).collect();
+                    let shard: Vec<u64> = idx.iter().zip(&per).map(|(u, p)| u / p.max(&1)).collect();
+                    inner_id(&a.chunk_key(&shard), idx.iter().zip(&per).fold(0u64, |c, (u, p)| c * p + u % p.max(&1)) as usize)
+                }
+                None => a.chunk_key(&idx),
+            };
+            let Some(bytes) = chunks.get(&id) else { continue };
             found += 1;
-            let (vals, dt) = a.decode_bytes(bytes)?;
+            let (vals, dt) = match inner {
+                Some((i, codecs)) => {
+                    let (d, little) = decode_chunk(codecs, bytes, i, a.dtype, a.fill).map_err(|e| bad(format!("{}: {e}", a.path)))?;
+                    (d, DType { little, ..a.dtype })
+                }
+                None => a.decode_bytes(bytes)?,
+            };
             // Each value's position in the chunk, row-major (or column-major).
             let local: Vec<u64> = (0..nd).map(|d| plan.fixed.get(d).copied().unwrap_or(0) % size(d)).collect();
             let strides: Vec<u64> = {
@@ -2055,6 +2162,8 @@ pub fn info(store: &Store, chunks: &HashMap<String, Vec<u8>>) -> Value {
                 "dtype": format!("{:?}{}", v.dtype.kind, v.dtype.size * 8),
                 "dims": dims,
                 "chunks": v.chunks,
+                // A sharded variable's chunks inside its shards: what a window reads of them.
+                "innerChunks": match v.codecs.first() { Some(Codec::Sharding { inner, .. }) => Some(inner), _ => None },
                 "readable": v.unsupported().is_none(),
                 "why": v.unsupported(),
             })
@@ -2156,14 +2265,16 @@ pub fn read_dir_in(store: &Store, dir: &std::path::Path, selection: &str, crs: O
         }
         chunks.insert(k.clone(), std::fs::read(&path)?);
     }
-    // A window's bytes of files: its coordinates stored plain.
+    // A window's bytes of files: shards' indexes and coordinates, then the shards' chunks.
     let mut read = |parts: &[Part], chunks: &mut HashMap<String, Vec<u8>>| -> Result<()> {
         use std::io::{Read, Seek, SeekFrom};
         for part in parts {
             let Ok(mut f) = std::fs::File::open(dir.join(&part.key)) else { continue };
             let len = f.metadata()?.len();
-            let Span::Bytes(first, last) = part.span;
-            let n = last - first + 1;
+            let (first, n) = match part.span {
+                Span::Bytes(a, b) => (a, b - a + 1),
+                Span::Tail(n) => (len.saturating_sub(n), n.min(len)),
+            };
             total = total.saturating_add(n);
             if first.saturating_add(n) > len || n > MAX_CHUNK_FILE || total > MAX_READ {
                 return Err(bad(format!("{}: {} is cut, or the window's chunks are too large to read", dir.display(), part.key)));
@@ -2176,6 +2287,8 @@ pub fn read_dir_in(store: &Store, dir: &std::path::Path, selection: &str, crs: O
         Ok(())
     };
     read(&p.parts, &mut chunks)?;
+    let inner = inner_parts(store, &p, &chunks)?;
+    read(&inner, &mut chunks)?;
     let crs = crs.map(Crs::parse).transpose().map_err(DataError::Format)?;
     let stem = dir.file_stem().and_then(|s| s.to_str()).unwrap_or("zarr");
     let mut r = assemble(store, &p, &chunks, &format!("{stem} {}", sel.label()), crs)?;
@@ -2932,8 +3045,11 @@ mod tests {
         let mut got: HashMap<String, Vec<u8>> = files.iter().filter(|(k, _)| p.keys.contains(k)).cloned().collect();
         for q in &p.parts {
             let Some((_, f)) = files.iter().find(|(k, _)| *k == q.key) else { continue };
-            let Span::Bytes(a, b) = q.span;
-            got.insert(q.id.clone(), f[a as usize..=b as usize].to_vec());
+            let bytes = match q.span {
+                Span::Bytes(a, b) => f[a as usize..=b as usize].to_vec(),
+                Span::Tail(n) => f[f.len() - n as usize..].to_vec(),
+            };
+            got.insert(q.id.clone(), bytes);
         }
         got
     }
@@ -2995,12 +3111,6 @@ mod tests {
             assert!(Selection::parse_strict(bad).is_err(), "{bad}");
             assert!(read_dir(&dir, bad, None).unwrap_err().to_string().contains("aren't four whole numbers"), "{bad}");
         }
-        // A sharded variable's window reads the shards it touches.
-        let sharded = window_store(true);
-        let store_s = parse_store(&sharded[..1]).unwrap();
-        let p = plan(&store_s, &sel(1, Window { x0: 2, y0: 1, x1: 5, y1: 4 })).unwrap();
-        assert_eq!(p.keys, ["v/c/1/0/0", "x/c/0"]);
-        assert_eq!(assemble(&store_s, &p, &read_plan(&sharded, &p), "v", None).unwrap().bands[0].data, want);
         // A box in the grid's coordinates is the cells it covers, cut to the grid (and said so).
         let mut coords = HashMap::new();
         for k in window_keys(&store, "v").unwrap() {
@@ -3080,5 +3190,62 @@ mod tests {
         let mut cut = read_plan(&files, &p);
         cut.insert("y/c/0@8-31".into(), vec![0u8; 16]);
         assert!(assemble(&store, &p, &cut, "v", None).is_err());
+    }
+
+    /// A window of a sharded variable reads each shard's index by its last bytes, then only the
+    /// shard's chunks it needs, by range; a chunk the index says isn't there, and a shard not stored,
+    /// are empty. An index cut short, or placing a chunk past what a read takes, is an error.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_window_reads_only_its_shards_chunks_by_range() {
+        let files = window_store(true);
+        let store = parse_store(&files[..1]).unwrap();
+        let sel = |t: u64, w: Window| Selection { variable: "v".into(), index: vec![("time".into(), t)], window: Some(w) };
+        let read = |p: &Plan| {
+            let mut got = read_plan(&files, p);
+            let inner = inner_parts(&store, p, &got).unwrap();
+            let q = Plan { keys: Vec::new(), parts: inner.clone(), ..p.clone() };
+            got.extend(read_plan(&files, &q));
+            (inner, got)
+        };
+        // Columns 2–5 and rows 1–4 of step 1: shard (1, 0, 0)'s four chunks, by range.
+        let p = plan(&store, &sel(1, Window { x0: 2, y0: 1, x1: 5, y1: 4 })).unwrap();
+        assert_eq!(p.keys, ["x/c/0"]);
+        let spans = |key: &str| p.parts.iter().filter(|q| q.key == key).map(|q| q.span).collect::<Vec<_>>();
+        assert_eq!(spans("v/c/1/0/0"), [Span::Tail(4 * 16 + 4)]);
+        assert_eq!(spans("y/c/0"), [Span::Bytes(8, 31)]);
+        let (inner, got) = read(&p);
+        assert_eq!(inner.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(), ["v/c/1/0/0#0", "v/c/1/0/0#1", "v/c/1/0/0#2", "v/c/1/0/0#3"]);
+        let r = assemble(&store, &p, &got, "v", None).unwrap();
+        assert_eq!(r.bands[0].data, (1..4).flat_map(|r| (2..5).map(move |c| (1000 + r * 100 + c) as f32)).collect::<Vec<_>>());
+        // Step 0, rows 2–7 and columns 4–9: the chunk shard (0, 0, 0) doesn't hold and shard
+        // (0, 1, 1), not stored, are neither asked for nor filled.
+        let w0 = Window { x0: 4, y0: 2, x1: 10, y1: 8 };
+        let p = plan(&store, &sel(0, w0)).unwrap();
+        let (inner, got) = read(&p);
+        assert!(inner.iter().all(|q| q.id != "v/c/0/0/0#3" && q.key != "v/c/0/1/1"), "{inner:?}");
+        let r = assemble(&store, &p, &got, "v", None).unwrap();
+        let at = |r: usize, c: usize| r * 6 + c;
+        assert!(r.bands[0].data[at(0, 0)].is_nan() && r.bands[0].data[at(1, 1)].is_nan() && r.bands[0].data[at(2, 2)].is_nan());
+        assert_eq!((r.bands[0].data[at(0, 2)], r.bands[0].data[at(2, 0)]), (206.0, 404.0));
+        // From a folder, by range: the same cells.
+        let dir = std::env::temp_dir().join(format!("rustgis-zarr-shard-window-{}", std::process::id()));
+        for (k, b) in &files {
+            let path = dir.join(k);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b).unwrap();
+        }
+        let from_dir = read_dir(&dir, &sel(0, w0).label(), None).unwrap();
+        assert_eq!(format!("{:?}", from_dir.bands[0].data), format!("{:?}", r.bands[0].data));
+        let _ = std::fs::remove_dir_all(&dir);
+        // An index cut short, or one placing a chunk past what a read takes.
+        let p = plan(&store, &sel(1, Window { x0: 2, y0: 1, x1: 5, y1: 4 })).unwrap();
+        let mut cut = HashMap::new();
+        cut.insert("v/c/1/0/0#index".to_string(), vec![0u8; 20]);
+        assert!(inner_parts(&store, &p, &cut).is_err());
+        let mut lying = vec![0u8; 68];
+        lying[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        cut.insert("v/c/1/0/0#index".to_string(), lying);
+        assert!(inner_parts(&store, &p, &cut).is_err());
     }
 }
