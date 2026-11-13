@@ -773,11 +773,12 @@ no value.
 The vectors are dequantised (`sign(v)·(v/127.5)²`) and scaled to unit length first. When the area
 meets several tiles, the one nearest its centre with the years asked for is read, and the others
 are said: keep the area within one tile. They run on the desktop and the command line (in the web
-app, not yet), and there is no button for them yet:
+app, not yet), and there is no button for them yet. Each adds its raster as a layer: `share.exportRaster`
+saves its values as a GeoTIFF, and `share.exportMap` a PNG preview of the map:
 
 ```sh
-rustgis-cli run --cmd 'embeddings.similarity={"dataset":"alphaearth","year":2024,"point":[-42.88,-20.75],"bbox":[-42.91,-20.78,-42.85,-20.735]}' --cmd 'share.exportMap={"path":"aef_similarity.png"}'
-rustgis-cli run --cmd 'embeddings.change={"dataset":"alphaearth","from":2017,"to":2025,"bbox":[-42.91,-20.78,-42.85,-20.735]}' --cmd 'share.exportMap={"path":"aef_change.png"}'
+rustgis-cli run --cmd 'embeddings.similarity={"dataset":"alphaearth","year":2024,"point":[-42.88,-20.75],"bbox":[-42.91,-20.78,-42.85,-20.735]}' --cmd 'share.exportRaster={"layer":"AlphaEarth 2024 similarity","path":"aef_similarity.tif"}' --cmd 'share.exportMap={"path":"aef_similarity.png"}'
+rustgis-cli run --cmd 'embeddings.change={"dataset":"alphaearth","from":2017,"to":2025,"bbox":[-42.91,-20.78,-42.85,-20.735]}' --cmd 'share.exportRaster={"layer":"AlphaEarth change 2017–2025","path":"aef_change.tif"}' --cmd 'share.exportMap={"path":"aef_change.png"}'
 ```
 
 These reach the network: the AI Assistant asks first and plugins need the network permission.

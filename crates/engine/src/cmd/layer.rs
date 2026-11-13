@@ -4892,9 +4892,15 @@ pub(crate) struct WindowRaster {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl WindowRaster {
-    /// What to say of the read, in order.
+    /// What to say of the read, in order, and what its raster left out (`lost`: what the header
+    /// holds but isn't read, values past `f32`'s range), for a caller that makes another raster
+    /// from it and so doesn't add this one (whose `lost` the layer would say).
     pub(crate) fn notes(&self) -> Vec<String> {
-        std::iter::once(self.read.clone()).chain(self.finer.clone()).chain(self.edges.iter().cloned()).collect()
+        std::iter::once(self.read.clone())
+            .chain(self.finer.clone())
+            .chain(self.edges.iter().cloned())
+            .chain(self.raster.lost.iter().cloned())
+            .collect()
     }
 }
 

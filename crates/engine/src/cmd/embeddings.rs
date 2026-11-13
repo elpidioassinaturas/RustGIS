@@ -721,12 +721,16 @@ fn tile_files(area: [f64; 4], years: &[i32]) -> Result<(Vec<String>, String, Vec
 fn pick_tile(found: &emb::SeriesFound, years: &[i32]) -> Result<(Vec<String>, String, Vec<String>), String> {
     let listed = years.iter().map(i32::to_string).collect::<Vec<_>>().join(" and ");
     let (kept, dropped) = (found.series.len(), found.dropped);
-    let tile = found.series.iter().find(|t| years.iter().all(|y| t.years.contains_key(y))).ok_or_else(|| match (kept, dropped) {
-        (0, 0) => "AlphaEarth has no tiles there".to_string(),
-        (_, 0) => format!("AlphaEarth has no tile there with files for {listed}"),
-        _ => format!(
-            "none of the {kept} AlphaEarth tiles nearest the area's centre has files for {listed}, and {dropped} more were left out: take a smaller box"
-        ),
+    let tile = found.series.iter().find(|t| years.iter().all(|y| t.years.contains_key(y))).ok_or_else(|| {
+        let none = match (kept, dropped) {
+            (0, 0) => "AlphaEarth has no tiles there".to_string(),
+            (_, 0) => format!("AlphaEarth has no tile there with files for {listed}"),
+            _ => format!(
+                "none of the {kept} AlphaEarth tiles nearest the area's centre has files for {listed}, and {dropped} more were left out: take a smaller box"
+            ),
+        };
+        // A part of the index read: the tile may be in the rest of it.
+        if found.complete { none } else { format!("{none}, in the part of the index that was read: take a smaller box to read it whole") }
     })?;
     let files: Vec<String> = years.iter().filter_map(|y| tile.years.get(y).cloned()).collect();
     let place = files.first().and_then(|u| emb::aef_place(u)).unwrap_or_else(|| tile.tile.title.clone());
@@ -742,6 +746,9 @@ fn pick_tile(found: &emb::SeriesFound, years: &[i32]) -> Result<(Vec<String>, St
             "{dropped} AlphaEarth tiles past the {} nearest the area's centre were left out, not looked at: take a smaller box",
             emb::MAX_TILES
         ));
+    }
+    if found.duplicates > 0 {
+        notes.push(format!("{} tile-years had a second file in AlphaEarth's index; the first was taken", found.duplicates));
     }
     if kept + dropped > 1 {
         notes.push(format!(
@@ -1199,22 +1206,30 @@ mod tests {
         // The nearest tile without 2017: the next one is read. Part of the index read, and three
         // tiles past a search's list: each said, the tiles counted with them.
         let many =
-            emb::SeriesFound { series: vec![tile("0-0", &[2025]), tile("0-1", &[2017, 2025])], dropped: 3, duplicates: 0, complete: false };
+            emb::SeriesFound { series: vec![tile("0-0", &[2025]), tile("0-1", &[2017, 2025])], dropped: 3, duplicates: 2, complete: false };
         let (files, place, notes) = pick_tile(&many, &[2017, 2025]).unwrap();
         assert_eq!((files.len(), place.as_str()), (2, "23S 0-1"));
-        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert_eq!(notes.len(), 4, "{notes:?}");
         assert!(notes[0].contains("a tile nearer its centre may have been missed"), "{notes:?}");
         assert_eq!(notes[1], "3 AlphaEarth tiles past the 60 nearest the area's centre were left out, not looked at: take a smaller box");
-        assert!(notes[2].starts_with("the area meets 5 AlphaEarth tiles: one is read (23S 0-1)"), "{notes:?}");
-        // No tile with the years: tiles left out are said, not taken for none there.
+        assert_eq!(notes[2], "2 tile-years had a second file in AlphaEarth's index; the first was taken");
+        assert!(notes[3].starts_with("the area meets 5 AlphaEarth tiles: one is read (23S 0-1)"), "{notes:?}");
+        // No tile with the years: tiles left out are said, not taken for none there, and so is a
+        // part of the index read.
+        let e = pick_tile(&many, &[2018]).unwrap_err();
+        assert!(e.contains("none of the 2 AlphaEarth tiles nearest the area's centre has files for 2018, and 3 more"), "{e}");
         assert!(
-            pick_tile(&many, &[2018])
-                .unwrap_err()
-                .contains("none of the 2 AlphaEarth tiles nearest the area's centre has files for 2018, and 3 more")
+            e.ends_with(
+                "and 3 more were left out: take a smaller box, in the part of the index that was read: take a smaller box to read it whole"
+            ),
+            "{e}"
         );
-        let kept = emb::SeriesFound { dropped: 0, complete: true, ..many.clone() };
+        let kept = emb::SeriesFound { dropped: 0, duplicates: 0, complete: true, ..many.clone() };
         assert_eq!(pick_tile(&kept, &[2018]).unwrap_err(), "AlphaEarth has no tile there with files for 2018");
-        assert_eq!(pick_tile(&emb::SeriesFound::default(), &[2018]).unwrap_err(), "AlphaEarth has no tiles there");
+        assert_eq!(
+            pick_tile(&emb::SeriesFound { complete: true, ..emb::SeriesFound::default() }, &[2018]).unwrap_err(),
+            "AlphaEarth has no tiles there"
+        );
         // Reference points with no embedding: said with a count, nothing when all have one.
         assert_eq!(missed_points(0, 3), None);
         assert_eq!(
@@ -1233,7 +1248,7 @@ mod tests {
         let v = super::super::workflows::add_made(&mut s, made("Sim", notes.clone())).unwrap();
         assert_eq!(v["year"], 2024);
         let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
-        assert_eq!(said.iter().filter(|n| n.starts_with("Sim: ")).count(), 3, "{said:?}");
+        assert_eq!(said.iter().filter(|n| n.starts_with("Sim: ")).count(), 4, "{said:?}");
         let mark = s.notice_mark();
         super::super::workflows::add_made(&mut s, made("Clean", Vec::new())).unwrap();
         assert!(!s.notices_since(mark).iter().any(|n| n.text.starts_with("Clean: ")));
