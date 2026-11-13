@@ -191,22 +191,13 @@ fn curve_points(c: &OutlineCurve) -> (u8, [(f32, f32); 4]) {
 /// A subset's six-letter tag, from its face's name, glyphs and file (its size and bytes): the same
 /// subset, the same tag, and two files with the same name and glyphs, two tags.
 fn tag(name: &str, glyphs: &[GlyphId], file: &[u8]) -> String {
+    // FNV-1a, a byte at a time: a multiplication carries a byte's bits only upwards, so a wider
+    // value mixed at once would leave its high bytes out of the low bits the letters are read from.
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut mix = |v: u64| h = (h ^ v).wrapping_mul(0x0100_0000_01b3);
-    for b in name.bytes() {
-        mix(u64::from(b));
-    }
-    for g in glyphs {
-        mix(u64::from(g.0));
-    }
-    mix(file.len() as u64);
-    // The file eight bytes at a time (a large face is read once, quickly), then what is left.
-    let (words, rest) = file.as_chunks::<8>();
-    for b in rest {
-        mix(u64::from(*b));
-    }
-    for w in words {
-        mix(u64::from_le_bytes(*w));
+    let glyph_bytes = glyphs.iter().flat_map(|g| g.0.to_le_bytes());
+    let len_bytes = (file.len() as u64).to_le_bytes();
+    for b in name.bytes().chain(glyph_bytes).chain(len_bytes).chain(file.iter().copied()) {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
     }
     (0..6).map(|i| char::from(b'A' + ((h >> (i * 5)) % 26) as u8)).collect()
 }
@@ -322,14 +313,20 @@ mod tests {
     }
 
     /// A subset's tag follows its face's file, not only its name and glyphs: two files with the
-    /// same name and glyphs get two tags (#1815).
+    /// same name and glyphs get two tags (#1815), whichever of their bytes differs, the high bytes
+    /// of an eight-byte word too.
     #[test]
     fn a_subset_tag_follows_its_file() {
         let glyphs = [GlyphId(3), GlyphId(7)];
-        let (a, b) = (tag("Face", &glyphs, b"one file"), tag("Face", &glyphs, b"another file"));
-        assert_eq!(a, tag("Face", &glyphs, b"one file"), "the same subset, the same tag");
-        assert_ne!(a, b);
+        let a = tag("Face", &glyphs, b"ABCDEFGHIJKLMNOP");
+        assert_eq!(a, tag("Face", &glyphs, b"ABCDEFGHIJKLMNOP"), "the same subset, the same tag");
         assert!(a.len() == 6 && a.chars().all(|c| c.is_ascii_uppercase()), "{a}");
+        // The same length, one byte apart: each of a word's eight bytes, in turn.
+        for at in 0..8 {
+            let mut other = *b"ABCDEFGHIJKLMNOP";
+            other[at] ^= 0x5A;
+            assert_ne!(a, tag("Face", &glyphs, &other), "byte {at}");
+        }
     }
 
     /// A CFF face (an OpenType .otf) is embedded as a CIDFontType0 over its subset as an
