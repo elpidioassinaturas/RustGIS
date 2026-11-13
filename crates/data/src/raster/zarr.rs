@@ -1246,7 +1246,8 @@ pub fn plan(store: &Store, sel: &Selection) -> Result<Plan> {
 
 /// The shards' chunks a window of a sharded variable reads, from their indexes (`got`, by the ids
 /// of the plan's index [`Part`]s): each chunk's bytes. A shard that isn't stored, and a chunk its
-/// index says it doesn't hold, are left out (their cells are empty, as a chunk never written).
+/// index says it doesn't hold, are left out: [`assemble`] leaves the first empty, as a chunk never
+/// written, and gives the second the fill value, as a shard read whole does.
 pub fn inner_parts(store: &Store, plan: &Plan, got: &HashMap<String, Vec<u8>>) -> Result<Vec<Part>> {
     let Some(a) = store.array(&plan.var) else { return Ok(Vec::new()) };
     let Some(Codec::Sharding { index, .. }) = a.codecs.first() else { return Ok(Vec::new()) };
@@ -1429,23 +1430,31 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
                     d => plan.fixed.get(d).copied().unwrap_or(0) / size(d),
                 })
                 .collect();
-            let id = match inner {
+            // The chunk's id, and (in a shard) the shard's key.
+            let (id, shard) = match inner {
                 Some((i, _)) => {
                     let per: Vec<u64> = a.chunks.iter().zip(i).map(|(s, i)| s / i.max(&1)).collect();
                     let shard: Vec<u64> = idx.iter().zip(&per).map(|(u, p)| u / p.max(&1)).collect();
-                    inner_id(&a.chunk_key(&shard), idx.iter().zip(&per).fold(0u64, |c, (u, p)| c * p + u % p.max(&1)) as usize)
+                    let key = a.chunk_key(&shard);
+                    (inner_id(&key, idx.iter().zip(&per).fold(0u64, |c, (u, p)| c * p + u % p.max(&1)) as usize), Some(key))
                 }
-                None => a.chunk_key(&idx),
+                None => (a.chunk_key(&idx), None),
             };
-            let Some(bytes) = chunks.get(&id) else { continue };
-            found += 1;
-            let (vals, dt) = match inner {
-                Some((i, codecs)) => {
+            let (vals, dt) = match (chunks.get(&id), inner) {
+                (Some(bytes), Some((i, codecs))) => {
                     let (d, little) = decode_chunk(codecs, bytes, i, a.dtype, a.fill).map_err(|e| bad(format!("{}: {e}", a.path)))?;
                     (d, DType { little, ..a.dtype })
                 }
-                None => a.decode_bytes(bytes)?,
+                (Some(bytes), None) => a.decode_bytes(bytes)?,
+                // A chunk a stored shard doesn't hold shows the fill value, as when the shard is
+                // read whole ([`unshard`]); a shard not stored is left empty, as a chunk never written.
+                (None, Some((i, _))) if shard.is_some_and(|k| chunks.contains_key(&format!("{k}#index"))) => {
+                    let n = i.iter().product::<u64>() as usize;
+                    (a.dtype.encode(a.fill.unwrap_or(0.0), a.dtype.little).repeat(n), a.dtype)
+                }
+                (None, _) => continue,
             };
+            found += 1;
             // Each value's position in the chunk, row-major (or column-major).
             let local: Vec<u64> = (0..nd).map(|d| plan.fixed.get(d).copied().unwrap_or(0) % size(d)).collect();
             let strides: Vec<u64> = {
@@ -3193,8 +3202,9 @@ mod tests {
     }
 
     /// A window of a sharded variable reads each shard's index by its last bytes, then only the
-    /// shard's chunks it needs, by range; a chunk the index says isn't there, and a shard not stored,
-    /// are empty. An index cut short, or placing a chunk past what a read takes, is an error.
+    /// shard's chunks it needs, by range; a chunk the index says isn't there shows the fill value
+    /// and a shard not stored is empty, as when the shards are read whole. An index cut short, or
+    /// placing a chunk past what a read takes, is an error.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_window_reads_only_its_shards_chunks_by_range() {
@@ -3219,15 +3229,23 @@ mod tests {
         let r = assemble(&store, &p, &got, "v", None).unwrap();
         assert_eq!(r.bands[0].data, (1..4).flat_map(|r| (2..5).map(move |c| (1000 + r * 100 + c) as f32)).collect::<Vec<_>>());
         // Step 0, rows 2–7 and columns 4–9: the chunk shard (0, 0, 0) doesn't hold and shard
-        // (0, 1, 1), not stored, are neither asked for nor filled.
+        // (0, 1, 1), not stored, are not asked for. The first shows the fill value and the second
+        // is empty, as when the shards are read whole.
         let w0 = Window { x0: 4, y0: 2, x1: 10, y1: 8 };
         let p = plan(&store, &sel(0, w0)).unwrap();
         let (inner, got) = read(&p);
         assert!(inner.iter().all(|q| q.id != "v/c/0/0/0#3" && q.key != "v/c/0/1/1"), "{inner:?}");
         let r = assemble(&store, &p, &got, "v", None).unwrap();
         let at = |r: usize, c: usize| r * 6 + c;
-        assert!(r.bands[0].data[at(0, 0)].is_nan() && r.bands[0].data[at(1, 1)].is_nan() && r.bands[0].data[at(2, 2)].is_nan());
+        assert_eq!((r.bands[0].data[at(0, 0)], r.bands[0].data[at(1, 1)]), (-1.0, -1.0));
+        assert!(r.bands[0].data[at(2, 2)].is_nan());
         assert_eq!((r.bands[0].data[at(0, 2)], r.bands[0].data[at(2, 0)]), (206.0, 404.0));
+        let whole = Selection { window: None, ..sel(0, w0) };
+        let pw = plan(&store, &whole).unwrap();
+        let all = assemble(&store, &pw, &read_plan(&files, &pw), "v", None).unwrap();
+        let cut: Vec<f32> =
+            (2..8).flat_map(|row| (4..10).map(move |col| (row, col))).map(|(row, col)| all.bands[0].data[row * 12 + col]).collect();
+        assert_eq!(format!("{cut:?}"), format!("{:?}", r.bands[0].data));
         // From a folder, by range: the same cells.
         let dir = std::env::temp_dir().join(format!("rustgis-zarr-shard-window-{}", std::process::id()));
         for (k, b) in &files {
