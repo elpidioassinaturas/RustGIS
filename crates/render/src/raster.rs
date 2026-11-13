@@ -671,9 +671,13 @@ impl Pass1<'_> {
             }
             // Nearest sampling: the last cell read, and the pixel it was read for.
             let mut last: Option<((i64, i64), usize)> = None;
-            // Bilinear relief: the last four cells' lights, by the first's column and row.
+            // Bilinear relief: the last four cells' lights, by the first's column and row; and the
+            // last pixel that fell in the grid, with its source position.
             let mut quad: Option<((i64, i64), [Option<f64>; 4])> = None;
-            for dx in 0..bw {
+            let mut prev: Option<(usize, f64, f64)> = None;
+            // The source position of the pixel in column `dx` of this row, its column wrapped here,
+            // not in `source`: the grid's columns run on across a 0..360° seam.
+            let pos_at = |dx: usize| {
                 let px = self.x0 + dx;
                 let pos = match self.rotated {
                     // Back-rotate the screen pixel about the centre, then find its source exactly.
@@ -693,13 +697,21 @@ impl Pass1<'_> {
                         }
                     }
                 };
-                let Some((c, row)) = pos else { continue };
-                // Wrapped here, not in `source`: the grid's columns run on across a 0..360° seam.
-                let c = r.wrap_col(c);
+                pos.map(|(c, row)| (r.wrap_col(c), row))
+            };
+            for dx in 0..bw {
+                let Some((c, row)) = pos_at(dx) else { continue };
                 if c < 0.0 || row < 0.0 || c >= r.width as f64 || row >= r.height as f64 {
                     continue;
                 }
                 let i = dy * bw + dx;
+                // How many cells one screen pixel spans here, along the row: from the last pixel in
+                // the grid, or the next one on the row's first.
+                let last_drawn = prev.replace((dx, c, row));
+                let span = || match last_drawn {
+                    Some((pdx, pc, pr)) => (c - pc).hypot(row - pr) / (dx - pdx) as f64,
+                    None => pos_at(dx + 1).map_or(0.0, |(nc, nr)| (nc - c).hypot(nr - row)),
+                };
                 // Truncating is flooring here (both are at least 0), and much cheaper.
                 let cell = (c as i64, row as i64);
                 // The same cell as the last pixel, sampled nearest: the same values.
@@ -741,17 +753,24 @@ impl Pass1<'_> {
                 if let (Some(relief), Some(&b)) = (self.relief, self.bands.first()) {
                     // Bilinear: the light blended between the four cells around the point, as the
                     // band values are (#1880). Nearest, or no cell around it lit: its own cell's.
-                    let blended = (self.resampling == Resampling::Bilinear).then(|| {
+                    // So too where a cell is a pixel across or less: the blend can't be seen there,
+                    // and each pixel would work out four new lights.
+                    let blended = (self.resampling == Resampling::Bilinear && span() < 1.0).then(|| {
                         let (x, y) = (c - 0.5, row - 0.5);
                         let at = (x.floor() as i64, y.floor() as i64);
+                        let cell_light = |i, j| self.cell_light(b, relief, (i, j));
                         let lights = match quad {
                             Some((q, lights)) if q == at => lights,
-                            _ => {
-                                let lights = self.quad_lights(b, relief, at);
-                                quad = Some((at, lights));
-                                lights
+                            // One cell east or west: two of the lights are the last four's.
+                            Some(((qi, qj), [_, ne, _, se])) if qj == at.1 && qi + 1 == at.0 => {
+                                [ne, cell_light(at.0 + 1, at.1), se, cell_light(at.0 + 1, at.1 + 1)]
                             }
+                            Some(((qi, qj), [nw, _, sw, _])) if qj == at.1 && qi - 1 == at.0 => {
+                                [cell_light(at.0, at.1), nw, cell_light(at.0, at.1 + 1), sw]
+                            }
+                            _ => self.quad_lights(b, relief, at),
                         };
+                        quad = Some((at, lights));
                         blend(lights, x - x.floor(), y - y.floor())
                     });
                     let light = blended.flatten().unwrap_or_else(|| {
@@ -786,19 +805,21 @@ impl Pass1<'_> {
         light
     }
 
+    /// The light of the cell `(i, j)`, or none when it is no data, masked or outside the grid; a
+    /// column past a whole turn's edge wraps.
+    fn cell_light(&self, band: usize, relief: (f64, f64, f64), (i, j): (i64, i64)) -> Option<f64> {
+        let ci = self.wrap_width.map_or(i, |w| i.rem_euclid(w));
+        if ci < 0 || j < 0 || ci >= i64::from(self.r.width) || j >= i64::from(self.r.height) {
+            return None;
+        }
+        let centre = value(self.r, self.mask, band, ci, j, self.wrap_width)?;
+        Some(self.light(band, relief, (ci, j), f64::from(centre)))
+    }
+
     /// The lights of the four cells whose centres are around a point, from the cell `(i, j)` at
-    /// its top left: `(i, j)`, `(i + 1, j)`, `(i, j + 1)` and `(i + 1, j + 1)`. A cell that is no
-    /// data, masked or outside the grid has none; a column past a whole turn's edge wraps.
+    /// its top left: `(i, j)`, `(i + 1, j)`, `(i, j + 1)` and `(i + 1, j + 1)`.
     fn quad_lights(&self, band: usize, relief: (f64, f64, f64), (i, j): (i64, i64)) -> [Option<f64>; 4] {
-        let (w, h) = (i64::from(self.r.width), i64::from(self.r.height));
-        [(0, 0), (1, 0), (0, 1), (1, 1)].map(|(di, dj)| {
-            let (ci, ri) = (self.wrap_width.map_or(i + di, |ww| (i + di).rem_euclid(ww)), j + dj);
-            if ci < 0 || ri < 0 || ci >= w || ri >= h {
-                return None;
-            }
-            let centre = value(self.r, self.mask, band, ci, ri, self.wrap_width)?;
-            Some(self.light(band, relief, (ci, ri), f64::from(centre)))
-        })
+        [(0, 0), (1, 0), (0, 1), (1, 1)].map(|(di, dj)| self.cell_light(band, relief, (i + di, j + dj)))
     }
 }
 
@@ -1300,10 +1321,15 @@ mod tests {
     /// eastward, lit from the west, its middle row drawn: cell `k` covers pixels `100 k - 1` to
     /// `100 k + 98`, its centre on `100 k + 49`, and the last pixel is past the raster. The red
     /// channel of each pixel, or `None` where it isn't drawn. `light` is a cast-shadow grid, drawn
-    /// at full strength.
-    fn relief_row(resampling: Resampling, nodata: Option<f64>, mask: &[f64], light: Option<&[u8]>) -> Vec<Option<u8>> {
-        let gt = GeoTransform { origin_x: 0.0, origin_y: 300.0, pixel_width: 100.0, pixel_height: -100.0 };
-        let data = [0.0, 0.0, 20.0, 60.0, 120.0, 200.0].repeat(3);
+    /// at full strength; a `mirrored` grid is stored right to left.
+    fn relief_row(resampling: Resampling, nodata: Option<f64>, mask: &[f64], light: Option<&[u8]>, mirrored: bool) -> Vec<Option<u8>> {
+        let (origin_x, pixel_width) = if mirrored { (600.0, -100.0) } else { (0.0, 100.0) };
+        let gt = GeoTransform { origin_x, origin_y: 300.0, pixel_width, pixel_height: -100.0 };
+        let mut heights = [0.0, 0.0, 20.0, 60.0, 120.0, 200.0];
+        if mirrored {
+            heights.reverse();
+        }
+        let data = heights.repeat(3);
         let r = Raster::new("relief", 6, 3, vec![data], gt, Crs::WebMercator, nodata, ColorHint::Gray, "Float32").unwrap();
         let mut style = RasterStyle::default_for(&r);
         let shadow = if light.is_some() { 1.0 } else { 0.0 };
@@ -1327,8 +1353,11 @@ mod tests {
     /// the next, not in steps. Nearest keeps one light per cell.
     #[test]
     fn bilinear_relief_blends_the_light_between_cell_centres() {
-        let nearest = relief_row(Resampling::Nearest, None, &[], None);
-        let bilinear = relief_row(Resampling::Bilinear, None, &[], None);
+        let nearest = relief_row(Resampling::Nearest, None, &[], None, false);
+        let bilinear = relief_row(Resampling::Bilinear, None, &[], None, false);
+        // Stored right to left, the cells are read westward: the same pixels (the last one, on
+        // the raster's edge, falls on the other side of it).
+        assert_eq!(relief_row(Resampling::Bilinear, None, &[], None, true)[..599], bilinear[..599]);
         let centre = |k: usize| nearest[100 * k + 49].unwrap();
         for k in 0..6 {
             assert!(nearest[100 * k..100 * k + 98].iter().all(|v| *v == Some(centre(k))), "nearest, cell {k}");
@@ -1350,8 +1379,8 @@ mod tests {
     #[test]
     fn bilinear_relief_leaves_a_hidden_cell_out_of_the_blend() {
         for (nodata, mask) in [(Some(120.0), &[][..]), (None, &[120.0][..])] {
-            let nearest = relief_row(Resampling::Nearest, nodata, mask, None);
-            let bilinear = relief_row(Resampling::Bilinear, nodata, mask, None);
+            let nearest = relief_row(Resampling::Nearest, nodata, mask, None, false);
+            let bilinear = relief_row(Resampling::Bilinear, nodata, mask, None, false);
             // Cell 4 is hidden; cell 3's light runs on to its edge, and cell 5's from its own.
             assert!(bilinear[399..499].iter().all(Option::is_none), "{nodata:?} {mask:?}");
             assert!(bilinear[349..399].iter().all(|v| v.is_some() && *v == nearest[349]), "{nodata:?} {mask:?}");
@@ -1365,12 +1394,43 @@ mod tests {
     fn bilinear_relief_blends_the_cast_shadows_too() {
         // Cell 2 in full shadow in every row, the others lit.
         let light: Vec<u8> = [255, 255, 0, 255, 255, 255].repeat(3);
-        let nearest = relief_row(Resampling::Nearest, None, &[], Some(&light));
-        let bilinear = relief_row(Resampling::Bilinear, None, &[], Some(&light));
+        let nearest = relief_row(Resampling::Nearest, None, &[], Some(&light), false);
+        let bilinear = relief_row(Resampling::Bilinear, None, &[], Some(&light), false);
         let (lit, dark) = (nearest[149].unwrap(), nearest[249].unwrap());
         assert!(dark < lit && nearest[198] == Some(lit) && nearest[199] == Some(dark), "{lit} {dark}");
         assert_eq!((bilinear[149], bilinear[249]), (Some(lit), Some(dark)));
         let middle = bilinear[199].unwrap();
         assert!(dark < middle && middle < lit, "{middle} between {dark} and {lit}");
+    }
+
+    /// Where a cell is a pixel across or less, Bilinear relief draws each cell's own light, as
+    /// before #1880: the blend couldn't be seen, and would work out four lights for each pixel.
+    #[test]
+    fn bilinear_relief_keeps_the_cells_light_when_a_cell_is_a_pixel_or_less() {
+        // 40 x 3 cells of 100 m with uneven heights, seen 24 pixels wide at `res` m a pixel.
+        let row = |resampling: Resampling, res: f64| {
+            let gt = GeoTransform { origin_x: 0.0, origin_y: 300.0, pixel_width: 100.0, pixel_height: -100.0 };
+            let data = (0..120).map(|k| (k * 37 % 11) as f32 * 10.0).collect();
+            let r = Raster::new("relief", 40, 3, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+            let mut style = RasterStyle::default_for(&r);
+            style.renderer =
+                RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 270.0, altitude: 45.0, z_factor: 1.0, shadow: 0.0 };
+            style.resampling = resampling;
+            let view = View {
+                width: 24.0,
+                height: 1.0,
+                pixels_per_point: 1.0,
+                camera: Camera { center: Coord::new(2000.0, 150.0), res, bearing: 0.0, pitch: 0.0 },
+                sky: false,
+            };
+            let mut pm = Pixmap::new(24, 1).unwrap();
+            draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"), None);
+            (0..24).map(|x| pm.pixel(x, 0).map(|p| p.red())).collect::<Vec<_>>()
+        };
+        for res in [100.0, 150.0] {
+            assert_eq!(row(Resampling::Bilinear, res), row(Resampling::Nearest, res), "{res} m a pixel");
+        }
+        // Two pixels to a cell: blended.
+        assert_ne!(row(Resampling::Bilinear, 50.0), row(Resampling::Nearest, 50.0));
     }
 }
