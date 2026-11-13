@@ -1371,8 +1371,14 @@ mod tests {
         assert_eq!(app.diskwatch.status(&target), Status::Changed);
         // The first reload starts on its thread; the file changes; a second waits behind it. The
         // second's read was prepared before the first replaced the source, so the engine refuses
-        // it when it lands (nothing is discarded).
+        // it when it lands (nothing is discarded). The first's thread looks at the file before the
+        // change, or it would read the last version and rightly clear the mark.
         app.run("ui.reloadData", json!({"layer": id})).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !crate::readjob::looked_for_tests(&app) {
+            assert!(std::time::Instant::now() < end, "the first reload never looked at its file");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         replace(3);
         app.run("ui.reloadData", json!({"layer": id})).unwrap();
         let land_all = |app: &mut RustGisApp| {

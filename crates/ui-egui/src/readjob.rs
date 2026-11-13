@@ -591,6 +591,16 @@ impl Reads {
     }
 }
 
+/// Whether the reload under way has looked at its file on its thread: what it saw waits in its
+/// `seen` slot until it lands. False with no reload under way.
+#[cfg(test)]
+pub(crate) fn looked_for_tests(app: &RustGisApp) -> bool {
+    let Some((_, looked)) = app.reads.job.as_ref().and_then(|job| job.seen.as_ref()) else {
+        return false;
+    };
+    looked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some()
+}
+
 /// Whether the status bar shows a read.
 pub fn showing(app: &RustGisApp) -> bool {
     app.reads.job.is_some()
