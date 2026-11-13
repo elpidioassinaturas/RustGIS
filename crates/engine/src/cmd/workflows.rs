@@ -1019,6 +1019,7 @@ fn function_work(s: &Session, p: &Value) -> Result<Work, String> {
     let src = raster_of(s, ps(p, "layer").ok_or("layer is required")?)?;
     let target = resample_target(s, p)?;
     let name = out_name(p, format!("{}_{}", src.name, ps(p, "function").unwrap_or("")));
+    let defaults = s.raster_defaults.clone();
     let mut p = p.clone();
     // Read here, on the command's thread, where an unreadable value is said (#1600); only a remap
     // or threshold reads it.
@@ -1027,9 +1028,30 @@ fn function_work(s: &Session, p: &Value) -> Result<Work, String> {
     }
     Ok(Box::new(move || {
         let pixels = apply_function(&src, &p, target.as_deref())?;
+        if is_hillshade(&p) {
+            return made_hillshade(rasterops::derive_hillshade(&src, &name, pixels)?, &defaults);
+        }
         // Only a resample takes another raster's grid.
         made(rasterops::derive(target.as_deref().unwrap_or(&src), &name, vec![pixels])?, None)
     }))
+}
+
+/// Whether raster function step `p` is a hillshade, whose pixels are bytes
+/// ([`rasterops::derive_hillshade`]).
+fn is_hillshade(p: &Value) -> bool {
+    ps(p, "function") == Some("hillshade")
+}
+
+/// [`made`] for a hillshade, drawn as a stretch on the session's raster `defaults` however few
+/// shades it holds: as whole numbers, 16 or fewer (a gentle slope) would otherwise be drawn as
+/// classes (Unique Values).
+fn made_hillshade(raster: Raster, defaults: &rustgis_map::RasterDefaults) -> Result<Made, String> {
+    let mut m = made(raster, None)?;
+    let style = &mut m.layer.style;
+    style.renderer = rustgis_map::RasterRenderer::Stretch { band: 0, ramp: defaults.ramp.clone(), invert: defaults.invert };
+    style.stretch = defaults.stretch;
+    style.resampling = defaults.resampling;
+    Ok(m)
 }
 
 /// Runs raster functions one after another, each on the previous one's output.
@@ -1056,6 +1078,7 @@ fn function_chain_work(s: &Session, p: &Value) -> Result<Work, String> {
         .map(|(i, st)| resample_target(s, st).map_err(|e| format!("step {} ({}): {e}", i + 1, func(st))))
         .collect::<Result<_, _>>()?;
     let named = Some(out_name(p, String::new())).filter(|n| !n.is_empty());
+    let defaults = s.raster_defaults.clone();
     Ok(Box::new(move || {
         let mut cur: Raster = (*src).clone();
         let mut names = Vec::new();
@@ -1063,11 +1086,19 @@ fn function_chain_work(s: &Session, p: &Value) -> Result<Work, String> {
             let f = func(st);
             let pixels = apply_function(&cur, st, target.as_deref()).map_err(|e| format!("step {} ({f}): {e}", i + 1))?;
             // Only a resample takes another raster's grid; otherwise the grid is the current one.
-            cur = rasterops::derive(target.as_deref().unwrap_or(&cur), &cur.name, vec![pixels])?;
+            cur = if is_hillshade(st) {
+                rasterops::derive_hillshade(&cur, &cur.name, pixels)?
+            } else {
+                rasterops::derive(target.as_deref().unwrap_or(&cur), &cur.name, vec![pixels])?
+            };
             names.push(f);
         }
         cur.name = named.unwrap_or_else(|| format!("{}_{}", cur.name, names.join("_")));
-        made(cur, None)
+        // A chain that ends in a hillshade is drawn as one.
+        match steps.last() {
+            Some(last) if is_hillshade(last) => made_hillshade(cur, &defaults),
+            _ => made(cur, None),
+        }
     }))
 }
 
@@ -1596,43 +1627,130 @@ fn similar(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"similar": rows}))
 }
 
-/// Converts a layer to GeoJSON, CSV, KML, GPX or WKT text, written to `path` or returned; says when
-/// the layer's Z or M values were dropped on import, its positions are approximate or aren't
-/// longitude/latitude, or CSV, KML or GPX couldn't hold some of it.
+/// Converts text on the caller's thread for scripts and browser downloads. A streamed layer
+/// needs a file path so its full source can be read off the desktop frame, rather than returning
+/// only its loaded view. File conversions use the shared export lifecycle.
 fn convert(s: &mut Session, p: &Value) -> CmdResult {
+    if ps(p, "path").is_some() {
+        return super::exports::write_here(s, p, "data.convert");
+    }
+    let id = s.layer_id(p)?;
+    if s.map().layer(id).is_some_and(|l| l.is_streamed()) {
+        return Err("a streamed layer needs a path to convert its whole source; text conversion would contain only the loaded view".into());
+    }
     let ds = feature_ds(s, p)?;
+    let (text, notes) = converted(ds, p)?;
+    let null_numbers = rustgis_data::export::numbers_written_as_null(&ds.features, &ds.fields, conversion_format(p)?);
+    let target = ds.name.clone();
+    for note in notes {
+        s.notify(note, false);
+    }
+    super::share::notify_null_numbers(s, &target, null_numbers);
+    Ok(json!({"text": text}))
+}
+
+/// Captures a conversion's layer and parameters without reading its source on the UI thread.
+/// GeoJSON and CSV use the chunk writer; KML, GPX and WKT read whole within the existing memory
+/// limits, then check Cancel between features (one geometry's serialization is indivisible).
+pub(crate) fn convert_work(s: &Session, p: &Value) -> Result<super::exports::Work, String> {
+    feature_ds(s, p)?;
+    let id = s.layer_id(p)?;
+    let layer = s.map().layer(id).ok_or("no such layer")?.clone();
+    let path = ps(p, "path").ok_or("path is required")?.to_string();
+    conversion_format(p)?;
+    let params = p.clone();
+    Ok(Box::new(move || {
+        let format = conversion_format(&params)?;
+        let chunks = if layer.is_streamed() && matches!(format, "geojson" | "csv") { layer.chunk_export()? } else { None };
+        let (mut notes, null_numbers) = if let Some((source, ds)) = chunks {
+            let result = rustgis_data::export::write_source_as_in(
+                source.as_ref(),
+                &ds,
+                std::path::Path::new(&path),
+                rustgis_data::raster::Crs::LonLat,
+                format,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut notes = rustgis_data::export_notes([(&ds, layer.extent())], &path, rustgis_data::raster::Crs::LonLat);
+            if format == "csv" {
+                notes.extend(result.csv.notes(&path));
+            }
+            if result.skipped > 0 {
+                notes.push(format!("{path}: {} rows couldn't be read and were left out", result.skipped));
+            }
+            notes.extend(
+                rustgis_data::source::unread_dates_note(&ds.fields, &result.unread_dates)
+                    .map(|n| format!("{path}: {}: {n}, so they're empty in the export", ds.name)),
+            );
+            (notes, result.null_numbers)
+        } else {
+            let (whole, unreadable) = if layer.is_streamed() {
+                layer.load_all_counted().map(|(ds, n)| (Some(ds), n))?
+            } else {
+                (None, rustgis_map::Unreadable::default())
+            };
+            let ds = whole.as_ref().unwrap_or(&layer.dataset);
+            rustgis_data::progress::begin(ds.features.len());
+            let (text, mut notes) = converted(ds, &params)?;
+            rustgis_data::io::write_atomic(std::path::Path::new(&path), text.as_bytes()).map_err(|e| format!("{path}: {e}"))?;
+            if unreadable.rows > 0 {
+                notes.push(format!("{path}: {} rows couldn't be read and were left out", unreadable.rows));
+            }
+            notes.extend(unreadable.dates.iter().map(|n| format!("{path}: {}: {n}, so they're empty in the export", ds.name)));
+            (notes, rustgis_data::export::numbers_written_as_null(&ds.features, &ds.fields, format))
+        };
+        let bytes = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?.len();
+        notes.push(format!("Exported {path}"));
+        let target = path.clone();
+        let then = (null_numbers > 0).then(|| {
+            Box::new(move |s: &mut Session, _: &mut Value| {
+                super::share::notify_null_numbers(s, &target, null_numbers);
+                Ok(())
+            }) as super::exports::Then
+        });
+        Ok(super::exports::Wrote {
+            answer: json!({"path": path, "bytes": bytes}),
+            notes,
+            written_path: Some(path),
+            then,
+            #[cfg(not(target_arch = "wasm32"))]
+            owner: None,
+        })
+    }))
+}
+
+/// Validates the existing case-sensitive format parameter before starting background work.
+fn conversion_format(p: &Value) -> Result<&str, String> {
+    match ps(p, "format").ok_or("format is required")? {
+        f @ ("geojson" | "csv" | "kml" | "gpx" | "wkt") => Ok(f),
+        f => Err(format!("unknown format '{f}'")),
+    }
+}
+
+/// Serializes a complete dataset and collects its loss notices for delivery after success.
+fn converted(ds: &Dataset, p: &Value) -> Result<(String, Vec<String>), String> {
     let name_field =
         ps(p, "nameField").and_then(|n| ds.field_index(n)).or_else(|| ds.fields.iter().position(|f| f.name.eq_ignore_ascii_case("name")));
-    let text = match ps(p, "format").ok_or("format is required")? {
-        "geojson" => rustgis_data::io::to_geojson(ds).to_string(),
+    let format = conversion_format(p)?;
+    let text = match format {
+        "geojson" => rustgis_data::io::to_geojson_text(ds).map_err(|e| e.to_string())?,
         "csv" => rustgis_data::io::to_csv(ds).map_err(|e| e.to_string())?,
         "kml" => rustgis_data::interop::to_kml(ds, name_field).map_err(|e| e.to_string())?,
         "gpx" => rustgis_data::interop::to_gpx(ds, name_field).map_err(|e| e.to_string())?,
-        "wkt" => rustgis_data::interop::to_wkt_csv(ds),
-        f => return Err(format!("unknown format '{f}'")),
+        _ => rustgis_data::interop::to_wkt_csv(ds).map_err(|e| e.to_string())?,
     };
     // Every format here is longitude/latitude.
     let target = ps(p, "path").unwrap_or(&ds.name);
     let mut notes = rustgis_data::export_notes([(ds, ds.extent())], target, rustgis_data::raster::Crs::LonLat);
     // CSV holds a point a row, GPX a name for each feature and no areas.
-    notes.extend(rustgis_data::io::export_losses_notes(ds, ps(p, "format").unwrap_or(""), name_field, target));
+    notes.extend(rustgis_data::io::export_losses_notes(ds, format, name_field, target));
     // KML and GPX hold features with geometry only.
-    if let Some(ext @ ("kml" | "gpx")) = ps(p, "format") {
+    if let ext @ ("kml" | "gpx") = format {
         let without =
             if ext == "gpx" { rustgis_data::io::gpx_left_out(ds) } else { ds.features.iter().filter(|f| f.geometry.is_none()).count() };
         notes.extend(rustgis_data::io::left_out_note(target, ext, without));
     }
-    let out = match ps(p, "path") {
-        Some(path) => {
-            rustgis_data::io::write_atomic(std::path::Path::new(path), text.as_bytes()).map_err(|e| format!("{path}: {e}"))?;
-            json!({"path": path, "bytes": text.len()})
-        }
-        None => json!({"text": text}),
-    };
-    for note in notes {
-        s.notify(note, false);
-    }
-    Ok(out)
+    Ok((text, notes))
 }
 
 /// Binds the extent layer, or all full-extent layers, without computing a view or loading pixels.

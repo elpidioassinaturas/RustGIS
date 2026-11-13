@@ -685,6 +685,124 @@ fn date_fields_work_from_adding_to_saving() {
     );
 }
 
+/// A text field converts to dates: ISO text becomes dates, text that isn't one becomes null and is
+/// said with examples, and undo brings the text back. A field that isn't text, a filter that
+/// would stop reading, and a type that isn't a date are refused.
+#[test]
+fn text_fields_convert_to_dates() {
+    use rustgis_data::{FieldType, Value as V};
+    let mut s = world();
+    s.run("edit.addField", &json!({"layer": "Cities", "name": "founded", "type": "text"})).unwrap();
+    s.run("edit.addField", &json!({"layer": "Cities", "name": "seen", "type": "text"})).unwrap();
+    let rows = [("2026-03-05", "2026-03-05 14:30"), ("1999-12-31T00:00:00", "2026-03-05T14:30:00+02:00"), ("n/a", "soon"), ("", "<null>")];
+    for (row, (day, at)) in rows.iter().enumerate() {
+        s.run("edit.setValue", &json!({"layer": "Cities", "row": row, "field": "founded", "value": day})).unwrap();
+        s.run("edit.setValue", &json!({"layer": "Cities", "row": row, "field": "seen", "value": at})).unwrap();
+    }
+    let column = |s: &Session, field: &str| {
+        let ds = &s.map().layer_by_name("Cities").unwrap().dataset;
+        let k = ds.field_index(field).unwrap();
+        (ds.fields[k].ty, (0..4).map(|r| ds.value(r, k).clone()).collect::<Vec<_>>())
+    };
+    let before = column(&s, "founded");
+    let mark = s.notice_mark();
+    let out = s.run("edit.convertField", &json!({"layer": "Cities", "field": "founded", "type": "date"})).unwrap();
+    assert_eq!((out["converted"].as_u64(), out["null"].as_u64()), (Some(2), Some(1)));
+    let day = |d| V::parse(d, FieldType::Date);
+    assert_eq!(column(&s, "founded"), (FieldType::Date, vec![day("2026-03-05"), day("1999-12-31"), V::Null, V::Null]));
+    let notices: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert_eq!(notices, ["Convert Field: 'founded' holds dates now, and is null in 1 row whose text isn't a date: 'n/a'"]);
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(column(&s, "founded"), before);
+
+    let mark = s.notice_mark();
+    s.run("edit.convertField", &json!({"layer": "Cities", "field": "seen", "type": "datetime"})).unwrap();
+    let at = |t| V::parse(t, FieldType::DateTime);
+    assert_eq!(
+        column(&s, "seen"),
+        (FieldType::DateTime, vec![at("2026-03-05T14:30:00"), at("2026-03-05T14:30:00+02:00"), V::Null, V::Null])
+    );
+    assert_eq!(s.notices_since(mark).len(), 1);
+    // Clean text converts without a word.
+    s.run("edit.setValue", &json!({"layer": "Cities", "row": 2, "field": "founded", "value": "2026-01-01"})).unwrap();
+    let mark = s.notice_mark();
+    s.run("edit.convertField", &json!({"layer": "Cities", "field": "founded", "type": "date"})).unwrap();
+    assert!(s.notices_since(mark).is_empty());
+
+    let err = s.run("edit.convertField", &json!({"layer": "Cities", "field": "founded", "type": "date"})).unwrap_err();
+    assert_eq!(err, "'founded' is a Date field: only a text field converts to dates");
+    let err = s.run("edit.convertField", &json!({"layer": "Cities", "field": "name", "type": "long"})).unwrap_err();
+    assert!(err.contains("date or datetime"), "{err}");
+    s.run("edit.addField", &json!({"layer": "Cities", "name": "code", "type": "text"})).unwrap();
+    s.run("layer.definitionQuery", &json!({"layer": "Cities", "where": "code > 5 OR code IS NULL"})).unwrap();
+    let err = s.run("edit.convertField", &json!({"layer": "Cities", "field": "code", "type": "date"})).unwrap_err();
+    assert!(err.starts_with("the definition query (code > 5 OR code IS NULL) wouldn't read 'code' as dates"), "{err}");
+    s.run("layer.definitionQuery", &json!({"layer": "Cities", "where": ""})).unwrap();
+    // So is one an attribute rule would stop reading: it would stop checking without a word.
+    let rule = json!({"layer": "Cities", "name": "Small", "kind": "constraint", "expression": "code > 5 OR code IS NULL"});
+    s.run("data.attributeRule", &rule).unwrap();
+    let err = s.run("edit.convertField", &json!({"layer": "Cities", "field": "code", "type": "date"})).unwrap_err();
+    assert!(err.starts_with("attribute rule 'Small' wouldn't read 'code' as dates"), "{err}");
+    s.run("data.attributeRule", &json!({"layer": "Cities", "name": "Small", "remove": true})).unwrap();
+    // So is one the labels' text expression would stop reading.
+    s.map_mut().layers.iter_mut().find(|l| l.name == "Cities").unwrap().labels.default.by.text = Some("code + 1".into());
+    let err = s.run("edit.convertField", &json!({"layer": "Cities", "field": "code", "type": "date"})).unwrap_err();
+    assert!(err.starts_with("the labels' text expression wouldn't read 'code' as dates"), "{err}");
+    // So is one a label class's clause would stop reading.
+    let cities = s.map_mut().layers.iter_mut().find(|l| l.name == "Cities").unwrap();
+    cities.labels.default.by.text = None;
+    let mut class = cities.labels.default.clone();
+    (class.name, class.where_) = ("Coded".into(), Some("code > 5".into()));
+    cities.labels.classes.push(class);
+    let err = s.run("edit.convertField", &json!({"layer": "Cities", "field": "code", "type": "date"})).unwrap_err();
+    assert!(err.starts_with("label class 'Coded' wouldn't read 'code' as dates"), "{err}");
+}
+
+/// A Shapefile read in place a view at a time says, once, the dates its view reads found weren't
+/// dates (a whole read says them as it reads).
+#[test]
+fn a_streamed_shapefile_says_dates_it_could_not_read_once() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    struct Dir(std::path::PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = Dir(std::env::temp_dir().join(format!("rustgis-streamed-dates-{}-{nanos}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let mut ds = Dataset::new("permits", GeometryType::Point, vec![Field::new("issued", FieldType::Date)]);
+    for (i, day) in ["2026-03-05", "1999-12-31"].into_iter().enumerate() {
+        ds.push(Some(Geometry::Point(rustgis_geom::Coord::new(i as f64, 1.0))), vec![V::parse(day, FieldType::Date)]);
+    }
+    let shp = dir.0.join("permits.shp");
+    rustgis_data::io::write_path(&ds, &shp).unwrap();
+    let dbf = shp.with_extension("dbf");
+    let mut table = std::fs::read(&dbf).unwrap();
+    let at = table.windows(8).position(|w| w == b"19991231").unwrap();
+    table[at..at + 8].copy_from_slice(b"20260230");
+    std::fs::write(&dbf, table).unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": shp.display().to_string(), "stream": true})).unwrap();
+    let mark = s.notice_mark();
+    for _ in 0..2 {
+        s.map_mut().sync_sources(&rustgis_geom::Extent::new(-180.0, -90.0, 180.0, 90.0), 1000.0, true);
+        s.notice_landed_rasters();
+    }
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains("date")).collect();
+    assert_eq!(
+        said,
+        [
+            "permits: some values in its date fields aren't dates and show as empty (Load All Features counts them all); so far, 1 value isn't a date and was read as empty, in 'issued'"
+        ]
+    );
+    // Converting a field is refused while the layer is read in place, as every edit is.
+    s.run("edit.addField", &json!({"layer": "permits", "name": "note", "type": "text"})).unwrap_err();
+    let err = s.run("edit.convertField", &json!({"layer": "permits", "field": "issued", "type": "datetime"})).unwrap_err();
+    assert!(err.contains("Load All Features"), "{err}");
+}
+
 /// A polygon layer stacks fills (a colour, hatch lines, markers on a grid), for the layer or a
 /// class of its own; junk is refused and numbers held within range; each change undoes, and the
 /// project keeps them (a layer without them saves as before).
@@ -1674,6 +1792,240 @@ fn qgis_layer_tree_groups_import_as_layer_groups() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A QGIS project's bookmarks come in at their places (turned as QGIS turns them), its relations
+/// as relationships, its map's rotation as the bearing, and its layers' time settings as time
+/// slider bindings, the slider left off as QGIS opens a project (every feature drawn).
+#[test]
+fn qgis_bookmarks_relations_rotation_and_time_import() {
+    let dir = std::env::temp_dir().join(format!("rustgis-qgis-structure-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = |id: &str, props: &[&str]| {
+        let features: Vec<String> = props
+            .iter()
+            .map(|p| format!(r#"{{"type":"Feature","properties":{p},"geometry":{{"type":"Point","coordinates":[8.5,47.4]}}}}"#))
+            .collect();
+        std::fs::write(dir.join(format!("{id}.geojson")), format!(r#"{{"type":"FeatureCollection","features":[{}]}}"#, features.join(",")))
+            .unwrap();
+    };
+    file("parcels", &[r#"{"id":1}"#, r#"{"id":2}"#]);
+    file("owners", &[r#"{"pid":1}"#, r#"{"pid":2}"#]);
+    file("Owners", &[r#"{"pid":1,"when":"soon"}"#]);
+    // Two date fields: QGIS's is the second.
+    file("events", &[r#"{"made":"2019-01-01","when":"2020-03-01","note":"a"}"#, r#"{"made":"2019-02-01","when":"2021-05-01","note":"b"}"#]);
+    // A file of several layers (waypoints, tracks, track points), each with a name field: QGIS's
+    // layer is one of them (`layerid`).
+    std::fs::write(
+        dir.join("trip.gpx"),
+        r#"<gpx version="1.1" creator="t" xmlns="http://www.topografix.com/GPX/1/1"><wpt lat="47.4" lon="8.5"><name>a</name></wpt><trk><name>b</name><trkseg><trkpt lat="47.4" lon="8.5"/><trkpt lat="47.5" lon="8.6"/></trkseg></trk></gpx>"#,
+    )
+    .unwrap();
+    let layer = |id: &str, temporal: &str| {
+        format!(
+            r#"<maplayer type="vector"><id>{id}_1</id><datasource>./{id}.geojson</datasource><layername>{id}</layername><provider>ogr</provider>{temporal}</maplayer>"#
+        )
+    };
+    let on = |field: &str| format!(r#"<temporal enabled="1" mode="1" startField="{field}" accumulate="0" limitMode="0"/>"#);
+    let layers = [layer("parcels", &on("nope")), layer("owners", ""), layer("events", &on("when")), layer("Owners", &on("when"))].concat()
+        + r#"<maplayer type="vector"><id>trip_1</id><datasource>./trip.gpx|layerid=1</datasource><layername>trip</layername><provider>ogr</provider></maplayer>"#;
+    let qgs = format!(
+        r#"<qgis version="4.2.3">
+      <projectCrs><spatialrefsys><authid>EPSG:3857</authid></spatialrefsys></projectCrs>
+      <mapcanvas name="theMapCanvas"><extent><xmin>930000</xmin><ymin>6000000</ymin><xmax>960000</xmax><ymax>6030000</ymax></extent><rotation>15</rotation></mapcanvas>
+      <projectlayers>{layers}</projectlayers>
+      <relations>
+        <relation id="own" name="Owners of parcel" referencedLayer="parcels_1" referencingLayer="owners_1" strength="Association"><fieldRef referencedField="id" referencingField="pid"/></relation>
+        <relation id="gone" name="To nowhere" referencedLayer="parcels_1" referencingLayer="missing_1" strength="Association"><fieldRef referencedField="id" referencingField="pid"/></relation>
+        <relation id="trip" name="Trip names" referencedLayer="trip_1" referencingLayer="owners_1" strength="Association"><fieldRef referencedField="name" referencingField="pid"/></relation>
+      </relations>
+      <Bookmarks>
+        <Bookmark extent="Polygon ((8.4 47.3, 8.6 47.3, 8.6 47.45, 8.4 47.45, 8.4 47.3))" group="" id="a" name="Zurich" rotation="0"><spatialrefsys><authid>EPSG:4326</authid></spatialrefsys></Bookmark>
+        <Bookmark extent="Polygon ((900000 5900000, 1000000 5900000, 1000000 6000000, 900000 6000000, 900000 5900000))" group="" id="b" name="Web" rotation="30"/>
+        <Bookmark extent="Polygon ((2680000 1240000, 2700000 1240000, 2700000 1260000, 2680000 1260000, 2680000 1240000))" group="" id="c" name="Zurich" rotation="0"><spatialrefsys><authid>EPSG:2056</authid></spatialrefsys></Bookmark>
+        <Bookmark extent="Polygon ((1 1, 2 1, 2 2, 1 2, 1 1))" group="" id="d" name="Odd" rotation="0"><spatialrefsys><authid>EPSG:999999</authid></spatialrefsys></Bookmark>
+        <Bookmark extent="Polygon ((-400 0, 10 0, 10 10, -400 10, -400 0))" group="" id="e" name="Beyond" rotation="0"><spatialrefsys><authid>EPSG:4326</authid></spatialrefsys></Bookmark>
+      </Bookmarks>
+    </qgis>"#
+    );
+    let mut s = world();
+    let out = s.run("project.importQgis", &json!({"text": qgs, "dir": dir.display().to_string()})).unwrap();
+    let notes = serde_json::to_string(&out["notes"]).unwrap();
+    let m = s.map();
+    let turned = |bearing: f64, by: f64| (bearing + by).rem_euclid(360.0).min((-(bearing + by)).rem_euclid(360.0)) < 1e-9;
+    // The map turned 15° clockwise: north 15° east of up.
+    assert!(turned(m.camera.bearing, 15.0), "{}", m.camera.bearing);
+    let names: Vec<&str> = m.bookmarks.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["Zurich", "Web", "Zurich 2"], "{notes}");
+    let centre = |i: usize| m.to_lonlat(m.bookmarks[i].camera.center).unwrap();
+    let (zurich, lv95) = (centre(0), centre(2));
+    assert!((zurich.x - 8.5).abs() < 1e-6 && (zurich.y - 47.375).abs() < 0.01, "{zurich:?}");
+    // LV95 2690000/1250000 is 8.631°E 47.395°N.
+    assert!((lv95.x - 8.631).abs() < 0.001 && (lv95.y - 47.395).abs() < 0.001, "{lv95:?}");
+    assert!(turned(m.bookmarks[1].camera.bearing, 30.0), "{}", m.bookmarks[1].camera.bearing);
+    assert!(turned(m.bookmarks[0].camera.bearing, 0.0));
+    // Fitted facing north whatever came before (the map turned 15°, the bookmark not): the zoom
+    // a north-up map fitting the same place takes.
+    let mut north = rustgis_map::Map::new("north");
+    north.fit_lonlat(&rustgis_geom::Extent::new(8.4, 47.3, 8.6, 47.45), s.view_size.0, s.view_size.1);
+    assert!(
+        (m.bookmarks[0].camera.res - north.camera.res).abs() < 1e-6 * north.camera.res,
+        "{} {}",
+        m.bookmarks[0].camera.res,
+        north.camera.res
+    );
+    assert!(notes.contains("its bookmarks in a coordinate system RustGIS can't read (1: Odd)"), "{notes}");
+    assert!(notes.contains("its bookmarks whose place lies outside their coordinate system's area (1: Beyond)"), "{notes}");
+    let rels = &m.editing.relationships;
+    assert_eq!(rels.len(), 1, "{notes}");
+    let r = &rels[0];
+    assert_eq!(
+        (r.name.as_str(), r.origin.as_str(), r.origin_key.as_str(), r.destination.as_str(), r.destination_key.as_str()),
+        // Another layer's name differs only by case: layers' names are kept apart, the relation
+        // following the one renamed.
+        ("Owners of parcel", "parcels", "id", "owners (2)", "pid")
+    );
+    assert!(notes.contains("its relations between layers that didn't come in or haven't the fields (1: To nowhere)"), "{notes}");
+    // Its layer came in as two with the field: not related to either, and said.
+    assert!(
+        notes
+            .contains("its relations to a layer that came in as several tables with the field, any of which it could mean (1: Trip names)"),
+        "{notes}"
+    );
+    // Bound, the slider off: every feature shows, as QGIS opens a project.
+    let events = m.layer_by_name("events").unwrap();
+    assert_eq!(events.time.as_ref().map(|t| t.field.as_str()), Some("when"));
+    assert!(m.time.is_none());
+    assert!(events.time.as_ref().unwrap().keeps(&events.dataset).is_none());
+    assert!(m.layer_by_name("parcels").unwrap().time.is_none());
+    assert!(notes.contains("its time settings, by the field nope, which the layer hasn't"), "{notes}");
+    assert!(notes.contains("its time settings, by the field when, none of whose values read as dates"), "{notes}");
+    // Related Data selects through it.
+    let id = s.map().layer_by_name("parcels").unwrap().id;
+    s.map_mut().layer_mut(id).unwrap().selection = vec![0];
+    s.run("data.related", &json!({"name": "Owners of parcel"})).unwrap();
+    assert_eq!(s.map().layer_by_name("owners (2)").unwrap().selection.len(), 1);
+    // Turned on for it (as the Time Slider button does), the slider keeps its field and spans its
+    // dates.
+    let on = s.run("time.bind", &json!({"layer": "events"})).unwrap();
+    assert_eq!(on["field"], "when", "{on}");
+    assert_eq!((&on["start"], &on["end"]), (&json!("2020-03"), &json!("2021-05")), "{on}");
+    // Bound to a field with no dates, it takes one that has them, as before.
+    let id = s.map().layer_by_name("events").unwrap().id;
+    s.map_mut().layer_mut(id).unwrap().time = Some(rustgis_map::time::TimeBinding::new("note"));
+    let on = s.run("time.bind", &json!({"layer": "events"})).unwrap();
+    assert_ne!(on["field"], "note", "{on}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A bookmark the map's projection doesn't reach isn't saved with another place's view, and a
+/// name past a bookmark's longest is cut, both noted.
+#[test]
+fn qgis_bookmarks_the_map_cannot_show_or_name_are_noted() {
+    let long = "N".repeat(130);
+    // A name that fits, twice: the second is shortened to make room for its number.
+    let fits = "M".repeat(119);
+    let qgs = format!(
+        r#"<qgis version="4.2.3"><projectCrs><spatialrefsys><authid>EPSG:32631</authid></spatialrefsys></projectCrs><Bookmarks>
+      <Bookmark extent="Polygon ((2.2 48.8, 2.5 48.8, 2.5 48.9, 2.2 48.9, 2.2 48.8))" name="{fits}"><spatialrefsys><authid>EPSG:4326</authid></spatialrefsys></Bookmark>
+      <Bookmark extent="Polygon ((2.2 48.8, 2.5 48.8, 2.5 48.9, 2.2 48.9, 2.2 48.8))" name="{fits}"><spatialrefsys><authid>EPSG:4326</authid></spatialrefsys></Bookmark>
+      <Bookmark extent="Polygon ((2.2 48.8, 2.5 48.8, 2.5 48.9, 2.2 48.9, 2.2 48.8))" name="Paris"><spatialrefsys><authid>EPSG:4326</authid></spatialrefsys></Bookmark>
+      <Bookmark extent="Polygon ((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))" name="New York"><spatialrefsys><authid>EPSG:4326</authid></spatialrefsys></Bookmark>
+      <Bookmark extent="Polygon ((2.2 48.8, 2.5 48.8, 2.5 48.9, 2.2 48.9, 2.2 48.8))" name="{long}"><spatialrefsys><authid>EPSG:4326</authid></spatialrefsys></Bookmark>
+      <Bookmark extent="Polygon ((440000 5400000, 460000 5400000, 460000 5420000, 440000 5420000, 440000 5400000))" name="In the project's"/>
+    </Bookmarks></qgis>"#
+    );
+    let mut s = world();
+    let out = s.run("project.importQgis", &json!({"text": qgs})).unwrap();
+    let notes = serde_json::to_string(&out["notes"]).unwrap();
+    let names: Vec<usize> = s.map().bookmarks.iter().map(|b| b.name.chars().count()).collect();
+    assert_eq!(names, [119, 120, 5, 120, 16], "{notes}");
+    assert!(s.map().bookmarks[1].name.ends_with("M 2"));
+    assert!(notes.contains("its bookmarks whose place the map's projection doesn't reach (1: New York)"), "{notes}");
+    assert!(notes.contains("bookmark names cut to 120 characters (2)"), "{notes}");
+    // One read in the project's coordinate system, said.
+    assert!(notes.contains("its bookmarks with no coordinate system of their own, read in the project's (1: In the project's)"), "{notes}");
+    // On a Web Mercator map, one reaching past its 85° is fitted to the part it shows, and said.
+    let polar = r#"<qgis version="4.2.3"><projectCrs><spatialrefsys><authid>EPSG:3857</authid></spatialrefsys></projectCrs><Bookmarks>
+      <Bookmark extent="Polygon ((10 80, 20 80, 20 89, 10 89, 10 80))" name="Polar"><spatialrefsys><authid>EPSG:4326</authid></spatialrefsys></Bookmark>
+      <Bookmark extent="Polygon ((10 70, 20 70, 20 80, 10 80, 10 70))" name="Arctic"><spatialrefsys><authid>EPSG:4326</authid></spatialrefsys></Bookmark>
+      <Bookmark extent="Polygon ((10 86, 20 86, 20 89, 10 89, 10 86))" name="Pole"><spatialrefsys><authid>EPSG:4326</authid></spatialrefsys></Bookmark>
+    </Bookmarks></qgis>"#;
+    let mut s = world();
+    let out = s.run("project.importQgis", &json!({"text": polar})).unwrap();
+    let notes = serde_json::to_string(&out["notes"]).unwrap();
+    assert_eq!(s.map().bookmarks.len(), 2, "{notes}");
+    // One wholly past them shows nothing: not added, and said.
+    assert!(notes.contains("its bookmarks whose place the map's projection doesn't reach (1: Pole)"), "{notes}");
+    assert!(
+        notes.contains("its bookmarks reaching past the 85° a Web Mercator map shows, fitted to the part it does (1: Polar)"),
+        "{notes}"
+    );
+}
+
+/// A QGIS style's time settings bind a streamed layer on its date field, though its rows aren't
+/// read until it is drawn; a field it hasn't is still refused, and noted.
+#[test]
+fn qgis_time_settings_bind_a_streamed_layer() {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    let mut ds = Dataset::new("dated", GeometryType::Point, vec![Field::new("when", FieldType::Text)]);
+    for (i, d) in ["2020-01-01", "2021-06-01"].iter().enumerate() {
+        ds.push(Some(Geometry::Point(Coord::new(8.0 + i as f64, 47.0))), vec![V::Text((*d).into())]);
+    }
+    let path = std::env::temp_dir().join(format!("rustgis-engine-{}-dated.fgb", std::process::id()));
+    rustgis_data::io::write_path(&ds, &path).unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path.display().to_string(), "stream": true})).unwrap();
+    assert!(s.map().layers[0].is_streamed() && s.map().layers[0].dataset.features.is_empty());
+    let qml = |field: &str| {
+        format!(r#"<qgis version="4.2.3"><temporal enabled="1" mode="1" startField="{field}" accumulate="0" limitMode="0"/></qgis>"#)
+    };
+    let out = s.run("style.importQgis", &json!({"layer": "dated", "text": qml("when")})).unwrap();
+    assert_eq!(s.map().layers[0].time.as_ref().map(|t| t.field.as_str()), Some("when"), "{out}");
+    // Its dates aren't read yet: said.
+    assert!(out.to_string().contains("bound before its features are read"), "{out}");
+    s.map_mut().layers[0].time = None;
+    let out = s.run("style.importQgis", &json!({"layer": "dated", "text": qml("nope")})).unwrap();
+    assert!(s.map().layers[0].time.is_none());
+    assert!(out.to_string().contains("its time settings, by the field nope, which the layer hasn't"), "{out}");
+    let _ = std::fs::remove_file(path);
+}
+
+/// Bookmarks in more coordinate systems than an import reads: those past the first 100 systems
+/// are left out, and noted.
+#[test]
+fn qgis_bookmarks_in_too_many_coordinate_systems_are_noted() {
+    let mark = |i: u32, code: u32| {
+        format!(
+            r#"<Bookmark extent="Polygon ((500000 0, 500100 0, 500100 100, 500000 100, 500000 0))" name="B{i}"><spatialrefsys><authid>EPSG:{code}</authid></spatialrefsys></Bookmark>"#
+        )
+    };
+    // 101 UTM zones, north and south.
+    let codes = (32601..=32660).chain(32701..=32741);
+    let marks: String = codes.enumerate().map(|(i, c)| mark(i as u32, c)).collect();
+    let qgs = format!(r#"<qgis version="4.2.3"><Bookmarks>{marks}</Bookmarks></qgis>"#);
+    let mut s = world();
+    let out = s.run("project.importQgis", &json!({"text": qgs})).unwrap();
+    let notes = serde_json::to_string(&out["notes"]).unwrap();
+    assert!(notes.contains("its bookmarks in coordinate systems past the first 100 (1: B100)"), "{notes}");
+    assert!(!s.map().bookmarks.iter().any(|b| b.name == "B100"));
+}
+
+/// Many bookmarks of one name come in numbered, quickly (each name's next number remembered).
+#[test]
+fn many_qgis_bookmarks_of_one_name_come_in_numbered() {
+    let mark = r#"<Bookmark extent="Polygon ((8.4 47.3, 8.6 47.3, 8.6 47.45, 8.4 47.45, 8.4 47.3))" name="Here"><spatialrefsys><authid>EPSG:4326</authid></spatialrefsys></Bookmark>"#;
+    let qgs = format!(r#"<qgis version="4.2.3"><Bookmarks>{}</Bookmarks></qgis>"#, mark.repeat(5000));
+    let mut s = world();
+    let started = std::time::Instant::now();
+    s.run("project.importQgis", &json!({"text": qgs})).unwrap();
+    let m = s.map();
+    assert_eq!(m.bookmarks.len(), 5000);
+    assert_eq!(
+        (m.bookmarks[0].name.as_str(), m.bookmarks[1].name.as_str(), m.bookmarks[4999].name.as_str()),
+        ("Here", "Here 2", "Here 5000")
+    );
+    assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
+}
+
 /// A picture whose aspect is locked keeps it on the map, as QGIS fits it on its canvas: in a
 /// project in degrees (drawn as plate carrée) its box in degrees, in a Web Mercator one its box in
 /// Mercator metres, has the picture's 2:1 aspect, the layer being in degrees either way.
@@ -2392,6 +2744,50 @@ fn a_reference_scale_is_set_kept_and_undone() {
     assert_eq!(s.map().layer_by_name("Rivers").unwrap().reference_scale, None);
     s.run("edit.undo", &Value::Null).unwrap();
     check(&s);
+}
+
+#[test]
+fn a_reference_scale_out_of_range_in_a_project_is_left_out_and_said() {
+    let mut s = world();
+    s.run("layer.referenceScale", &json!({"layer": "Rivers", "scale": 25000})).unwrap();
+    let text = serde_json::to_string(&s.project).unwrap();
+    let said = |text: &str| {
+        let mut t = Session::new(Project::default());
+        let mark = t.notices_given();
+        t.run("project.openText", &json!({"text": text})).unwrap();
+        let notices: Vec<String> = t.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        (t.map().layer_by_name("Rivers").unwrap().reference_scale, notices)
+    };
+    // One the command takes opens as saved, with nothing to say.
+    let (kept, notices) = said(&text);
+    assert_eq!(kept, Some(25000.0));
+    assert!(!notices.iter().any(|n| n.contains("reference scale")), "{notices:?}");
+    // One it would refuse is left out, and the notice names the layer.
+    for bad in ["1e39", "-5", "0"] {
+        let edited = text.replace("\"reference_scale\":25000.0", &format!("\"reference_scale\":{bad}"));
+        assert_ne!(edited, text);
+        let (kept, notices) = said(&edited);
+        assert_eq!(kept, None, "{bad}");
+        assert!(
+            notices.iter().any(|n| n.contains("1 layer(s) with a reference scale out of range") && n.contains("'Rivers'")),
+            "{bad}: {notices:?}"
+        );
+    }
+    // So does a map file or a layer file added on its own, and a clean one says nothing.
+    let map = serde_json::to_string(s.map()).unwrap();
+    let layer = serde_json::to_string(s.map().layer_by_name("Rivers").unwrap()).unwrap();
+    for (command, text) in [("map.import", map), ("layer.addLayerFile", layer)] {
+        let said = |text: String| {
+            let mut t = world();
+            let mark = t.notices_given();
+            t.run(command, &json!({"text": text})).unwrap();
+            t.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<String>>()
+        };
+        let clean = said(text.clone());
+        assert!(!clean.iter().any(|n| n.contains("reference scale")), "{command}: {clean:?}");
+        let bad = said(text.replace("\"reference_scale\":25000.0", "\"reference_scale\":0"));
+        assert!(bad.iter().any(|n| n.contains("reference scale out of range") && n.contains("'Rivers'")), "{command}: {bad:?}");
+    }
 }
 
 #[test]
@@ -9712,9 +10108,9 @@ fn layouts_compose_export_and_round_trip() {
     let pdf = std::fs::read(&pdf_path).unwrap();
     let count = format!("/Count {pages}");
     assert!(pdf.windows(count.len()).any(|w| w == count.as_bytes()), "one PDF page per series page");
-    // Kept as vectors: its text in outline fonts, no page a picture, and nothing too large.
+    // Kept as vectors: its text in its fonts (#1815), no page a picture, and nothing too large.
     let has = |needle: &[u8]| pdf.windows(needle.len()).any(|w| w == needle);
-    assert!(has(b"/Subtype /Type3") && has(b"/ToUnicode") && has(b"/Contents"));
+    assert!(has(b"/Subtype /Type0") && has(b"/ToUnicode") && has(b"/Contents"));
     assert!(!has(b"/Im0 Do"), "no page is one picture");
     assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("as pictures, not vectors")));
     assert_eq!(s.project.layouts[0].series.as_ref().unwrap().page, 1, "the shown page is restored");
@@ -11095,6 +11491,58 @@ fn a_scan_warped_onto_its_points_is_placed_for_real() {
     t.run("project.openText", &json!({"text": text})).unwrap();
     let again = t.map().layer_by_name("plate").unwrap().raster.as_ref().unwrap().data.clone().unwrap();
     assert!(again.georeferenced && again.transform == out.transform, "{:?} vs {:?}", again.transform, out.transform);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A hillshade is made as bytes, 1–255 with 0 for no data, so it is exported as 8-bit samples (a
+/// GeoTIFF and a COG); it is still drawn as a grey stretch, even of a plane with a single shade,
+/// which as whole numbers would otherwise be drawn as classes. A chain ending in one is the same.
+#[test]
+fn hillshade_is_made_and_written_as_bytes() {
+    use base64::Engine;
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let mut s = world();
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let gt = GeoTransform { origin_x: 10.0, origin_y: 45.04, pixel_width: 0.001, pixel_height: -0.001 };
+    let plane = Raster::new("plane", 10, 10, vec![vec![50.0; 100]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    let plane = base64::engine::general_purpose::STANDARD.encode(geotiff::write(&plane, 0).unwrap());
+    s.run("layer.addDataBytes", &json!({"fileName": "plane.tif", "data": plane})).unwrap();
+    let shade = |s: &mut Session, cmd: &str, p: Value| {
+        let r = s.run(cmd, &p).unwrap_or_else(|e| panic!("{cmd} {p}: {e}"));
+        let l = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().raster.clone().unwrap();
+        let d = l.data.clone().unwrap();
+        assert_eq!((d.data_type.as_str(), d.nodata), ("UInt8", Some(0.0)), "{cmd} {p}");
+        assert!(matches!(l.style.renderer, rustgis_map::RasterRenderer::Stretch { .. }), "{cmd} {p}: {:?}", l.style.renderer);
+        (s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().name.clone(), d)
+    };
+    let (hill, d) = shade(&mut s, "raster.function", json!({"layer": "dem", "function": "hillshade"}));
+    let st = &d.bands[0].stats;
+    assert!(st.min >= 1.0 && st.max <= 255.0 && st.count == 1600, "{st:?}");
+    let (_, flat) = shade(&mut s, "raster.function", json!({"layer": "plane", "function": "hillshade"}));
+    assert_eq!(flat.bands[0].stats.categories.as_ref().map(Vec::len), Some(1));
+    let steps = json!([{"function": "bandMath", "expression": "b1 * 2"}, {"function": "hillshade"}]);
+    shade(&mut s, "raster.functionChain", json!({"layer": "dem", "steps": steps}));
+    // A step after a hillshade reads its no-data, and makes floats again.
+    let r = s
+        .run(
+            "raster.functionChain",
+            &json!({"layer": "dem", "steps": [{"function": "hillshade"}, {"function": "threshold", "value": 128}]}),
+        )
+        .unwrap();
+    let after = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().raster.clone().unwrap().data.unwrap();
+    assert_eq!((after.data_type.as_str(), after.bands[0].stats.count), ("Float32", 1600));
+    let dir = std::env::temp_dir().join(format!("rustgis-hillshade-bytes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for cog in [false, true] {
+        let tif = dir.join(format!("hill-{cog}.tif"));
+        s.run("share.exportRaster", &json!({"layer": hill, "path": tif.display().to_string(), "cog": cog})).unwrap();
+        let back = rustgis_data::raster::read_path(&tif).unwrap();
+        assert_eq!(
+            (back.data_type.as_str(), back.nodata, back.bands[0].data.as_slice()),
+            ("UInt8", Some(0.0), d.bands[0].data.as_slice()),
+            "cog: {cog}"
+        );
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -19920,7 +20368,7 @@ fn dropped_z_values_are_said_on_import_and_export() {
         assert!(said(&s, mark), "stream {stream}: {:?}", s.notices_since(mark));
         assert!(std::fs::read_to_string(&out).unwrap().contains("[1.0,2.0]"));
         let mark = s.notice_mark();
-        s.run("data.convert", &json!({"layer": id, "format": "wkt"})).unwrap();
+        s.run("data.convert", &json!({"layer": id, "format": "wkt", "path": dir.join(format!("converted-{stream}.csv"))})).unwrap();
         assert!(said(&s, mark), "stream {stream}");
     }
     let mut s = world();
@@ -21062,6 +21510,81 @@ fn geocoding_places_and_addresses() {
     // A public server takes a hundred addresses a run.
     let g = Geocoder::new(None, None).unwrap();
     assert!(crate::cmd::geocode::check_batch(&g, 101).unwrap_err().contains("100"));
+}
+
+/// Applying supplied answers does not require a network-capable Census endpoint, including
+/// in the browser where the public server lacks CORS.
+#[test]
+fn geocoding_census_supplied_answers_need_no_fetch() {
+    let mut s = Session::new(Project::default());
+    s.run("layer.addDataText", &json!({"fileName":"addresses.csv", "text":"address\nA\n"})).unwrap();
+    let result = s
+        .run(
+            "layer.geocode",
+            &json!({"provider":"census", "table":"addresses", "address":"address",
+        "places":{"A":{"lon":-77.0,"lat":38.0,"name":"A"}}}),
+        )
+        .unwrap();
+    assert_eq!(result["matched"], 1);
+}
+
+/// Census's address response through both public commands, served locally so the test needs
+/// no network. A malformed candidate is reported; unmatched rows retain their attributes.
+#[test]
+fn geocoding_with_census() {
+    let clean = br#"{"result":{"addressMatches":[{"matchedAddress":"4600 SILVER HILL RD, WASHINGTON, DC, 20233","coordinates":{"x":-76.92748724230096,"y":38.84601622386617}}, {"matchedAddress":"SECOND CANDIDATE","coordinates":{"x":-77,"y":38}}]}}"#;
+    let lossy = br#"{"result":{"addressMatches":[{}, {"matchedAddress":"SECOND ADDRESS","coordinates":{"x":-77.0,"y":38.9}}]}}"#;
+    let path = |q: &str| format!("/locations/onelineaddress?address={q}&benchmark=Public_AR_Current&format=json");
+    let (base, asked) = serve_files(vec![
+        (path("4600%20Silver%20Hill%20Rd%2C%20Washington%2C%20DC%2020233"), clean.to_vec()),
+        (path("second"), lossy.to_vec()),
+        (path("missing"), br#"{"result":{"addressMatches":[]}}"#.to_vec()),
+    ]);
+    let mut s = Session::new(Project::default());
+    let result = s
+        .run("map.findPlace", &json!({"provider":"census", "url":base, "query":"4600 Silver Hill Rd, Washington, DC 20233", "limit":1}))
+        .unwrap();
+    assert_eq!(result["count"], 1);
+    assert_eq!(result["places"][0]["lon"], -76.92748724230096);
+    assert_eq!(result["places"][0]["lat"], 38.84601622386617);
+    assert_eq!(s.notices.len(), 1);
+    assert_eq!(s.notices[0].text, "Search candidates not shown: 1 (limit 1).");
+    s.run("layer.addDataText", &json!({"fileName":"addresses.csv", "text":"id,address\n1,second\n2,missing\n"})).unwrap();
+    let result = s.run("layer.geocode", &json!({"provider":"census", "url":base, "table":"addresses", "address":"address"})).unwrap();
+    assert_eq!(result["matched"], 1);
+    assert_eq!(result["unmatched"], 1);
+    let l = s.map().layer_by_name("addresses (geocoded)").unwrap();
+    assert_eq!(l.dataset.features[0].geometry, Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(-77.0, 38.9))));
+    assert!(l.dataset.features[1].geometry.is_none());
+    assert_eq!(l.dataset.value(1, 1).to_string(), "missing");
+    assert_eq!(s.notices.iter().filter(|n| n.text.starts_with("1 of the geocoder's places")).count(), 1);
+    assert_eq!(asked.lock().unwrap().len(), 3);
+}
+
+/// The command reports alternatives omitted by batch geocoding, including the parser cap;
+/// an unambiguous match produces no notice.
+#[test]
+fn geocoding_census_batch_reports_unused_candidates() {
+    for count in [1, 3, 25] {
+        let p = json!({"matchedAddress":"A", "coordinates":{"x":-77.0,"y":38.0}});
+        let response = serde_json::to_vec(&json!({"result":{"addressMatches":vec![p;count]}})).unwrap();
+        let (base, _) = serve_files(vec![("/locations/onelineaddress?address=A&benchmark=Public_AR_Current&format=json".into(), response)]);
+        let mut s = Session::new(Project::default());
+        s.run("layer.addDataText", &json!({"fileName":"addresses.csv", "text":"address\nA\n"})).unwrap();
+        let mark = s.notice_mark();
+        let result = s.run("layer.geocode", &json!({"provider":"census", "url":base, "table":"addresses", "address":"address"})).unwrap();
+        assert_eq!(result["matched"], 1);
+        let notices = s.notices_since(mark);
+        if count == 1 {
+            assert!(notices.is_empty(), "{notices:?}");
+        } else {
+            assert_eq!(notices.len(), 1);
+            assert_eq!(
+                notices[0].text,
+                format!("{} additional geocoding candidates were not used; the first match was kept for each address.", count - 1)
+            );
+        }
+    }
 }
 
 /// PDOK's Locatieserver as the geocoder (a local server answering as it does): places found by
@@ -33899,6 +34422,9 @@ fn geopackage_edits_save_back() {
     db.execute_batch(
         "ALTER TABLE roads ADD COLUMN photo BLOB;
          UPDATE roads SET photo = x'00ff' WHERE fid = 1;
+         ALTER TABLE roads ADD COLUMN seen DATETIME;
+         UPDATE roads SET seen = 'soon' WHERE fid = 2;
+         UPDATE roads SET seen = '2026-01-01T00:00:00+02:00' WHERE fid = 1;
          CREATE TABLE other (id INTEGER PRIMARY KEY, v TEXT);
          INSERT INTO other VALUES (1, 'keep');
          CREATE TRIGGER no_bad BEFORE INSERT ON roads WHEN NEW.name = 'bad'
@@ -33916,9 +34442,16 @@ fn geopackage_edits_save_back() {
     };
     let p = json!({"layer": "R"});
     let mut s = Session::new(Project::default());
+    let mark = s.notice_mark();
     let loaded = s.run("gpkg.addLayer", &json!({"path": path, "table": "roads", "name": "R"})).unwrap();
     assert_eq!((loaded["features"].as_u64(), loaded["matched"].as_u64(), loaded["skipped"].as_u64()), (Some(3), Some(3), Some(0)));
     assert_eq!(loaded["writable"], true);
+    // A stored date that isn't one loads as null, said; saving leaves it unless it's edited.
+    let said = "R: 1 value isn't a date and was read as empty, in 'seen'; saving leaves them as they are unless they're edited";
+    assert!(s.notices_since(mark).iter().any(|n| n.text == said), "{:?}", s.notices_since(mark));
+    // Saving can't change a column's type, so a text column isn't converted to dates here.
+    let err = s.run("edit.convertField", &json!({"layer": "R", "field": "name", "type": "date"})).unwrap_err();
+    assert!(err.contains("saving can't change a column's type"), "{err}");
     let id = loaded["layer"].as_u64().unwrap() as u32;
     let row_of = |s: &Session, key: u64| s.map().layer(id).unwrap().dataset.features.iter().position(|f| f.id == key).unwrap();
     let ids: Vec<_> = s.map().layer(id).unwrap().dataset.features.iter().map(|f| f.id).collect();
@@ -33945,7 +34478,8 @@ fn geopackage_edits_save_back() {
         json!({"layer": "R", "geometry": {"type": "LineString", "coordinates": [[13, 22], [13.1, 22.1]]},
             "attributes": {"name": name, "lanes": 4}})
     };
-    s.run("edit.addFeature", &new_line("new")).unwrap();
+    let added = s.run("edit.addFeature", &new_line("new")).unwrap()["row"].as_u64().unwrap() as usize;
+    s.run("edit.setValue", &json!({"layer": "R", "row": added, "field": "seen", "value": "2026-03-05T14:30:00+02:00"})).unwrap();
     // Deleting the highest loaded key must not make the new feature reuse its baseline id.
     let l = s.map().layer(id).unwrap();
     assert_eq!(l.dataset.features.len(), 3);
@@ -33970,8 +34504,18 @@ fn geopackage_edits_save_back() {
     }
 
     let before = changed_at();
+    let mark = s.notice_mark();
     let r = s.run("gpkg.saveEdits", &p).unwrap();
     assert_eq!((r["inserted"].as_u64(), r["updated"].as_u64(), r["deleted"].as_u64()), (Some(1), Some(2), Some(1)), "{r}");
+    // The new date-time is saved in UTC, and said. Row 1's stored offset is left as it is (only its
+    // name was edited), and isn't counted; the value that wasn't a date is kept.
+    let said = "R: roads: 1 date-time was written in UTC, as GeoPackage stores them, without their own offsets, in 'seen'";
+    assert!(s.notices_since(mark).iter().any(|n| n.text == said), "{:?}", s.notices_since(mark));
+    let seen = |key: i64| -> Option<String> { db.query_row("SELECT seen FROM roads WHERE fid = ?1", [key], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        (seen(1).as_deref(), seen(2).as_deref(), seen(4).as_deref()),
+        (Some("2026-01-01T00:00:00+02:00"), Some("soon"), Some("2026-03-05T12:30:00.000Z"))
+    );
     assert_eq!(r["keys"], json!([4]));
     assert!(s.map().layer(id).unwrap().dataset.features.iter().any(|f| f.id == 4));
     assert_eq!(counts(&mut s), (0, 0, 0));
@@ -34176,6 +34720,133 @@ impl Drop for GpkgRegressionFixture {
     }
 }
 
+/// Conversion reads the source even when the current view contains no features; the explicit
+/// format wins over the filename. Text-only conversion must not return a partial view.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn data_interop_reads_the_whole_source() {
+    let fixture = GpkgRegressionFixture::new("interop");
+    let mut s = Session::new(Project::default());
+    let loaded = s.run("layer.addData", &json!({"path": fixture.path(), "stream": true})).unwrap();
+    let id = loaded["layer"].as_u64().unwrap() as u32;
+    assert!(s.map().layer(id).unwrap().is_streamed());
+    s.map_mut().layer_mut(id).unwrap().dataset.features.clear();
+    for format in ["geojson", "csv", "kml", "gpx", "wkt"] {
+        let path = fixture.dir.join(format!("{format}.txt"));
+        let mark = s.notice_mark();
+        let answer = s.run("data.convert", &json!({"layer": id, "format": format, "path": path, "nameField": "lanes"})).unwrap();
+        assert_eq!(s.notices_since(mark).iter().filter(|n| n.text == format!("Exported {}", path.display())).count(), 1, "{format}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(answer["bytes"].as_u64(), Some(text.len() as u64));
+        let count = match format {
+            "geojson" => serde_json::from_str::<Value>(&text).unwrap()["features"].as_array().unwrap().len(),
+            "kml" => {
+                assert!(text.contains("<name>2</name>"));
+                text.matches("<Placemark>").count()
+            }
+            "gpx" => {
+                assert!(text.contains("<name>2</name>"));
+                text.matches("<wpt ").count()
+            }
+            _ => text.lines().count() - 1,
+        };
+        assert_eq!(count, 3, "{format}: conversion lost source features");
+    }
+    let error = s.run("data.convert", &json!({"layer": id, "format": "geojson"})).unwrap_err();
+    assert!(error.contains("path"), "{error}");
+}
+
+/// A non-finite REAL survives source reading but becomes JSON null: both whole and chunked
+/// conversion report the count after success, and a clean conversion gives no such notice.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn data_interop_reports_non_finite_numbers() {
+    let fixture = GpkgRegressionFixture::new("interop-numbers");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    db.execute_batch("ALTER TABLE roads ADD COLUMN reading REAL; UPDATE roads SET reading = 1e999 WHERE fid IN (1, 2);").unwrap();
+    for stream in [false, true] {
+        let mut s = Session::new(Project::default());
+        let id = s.run("layer.addData", &json!({"path": fixture.path(), "stream": stream})).unwrap()["layer"].clone();
+        let mark = s.notice_mark();
+        let path = fixture.dir.join(format!("numbers-{stream}.json"));
+        s.run("data.convert", &json!({"layer": id, "format": "geojson", "path": path})).unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(text.matches("\"reading\":null").count(), 3);
+        let notes: Vec<_> = s.notices_since(mark).iter().filter(|n| n.text.contains("aren't finite numbers")).collect();
+        assert_eq!(notes.len(), 1, "stream {stream}: {:?}", s.notices_since(mark));
+        assert!(notes[0].text.contains("2 attribute value(s)"), "{}", notes[0].text);
+        if !stream {
+            let mark = s.notice_mark();
+            s.run("data.convert", &json!({"layer": id, "format": "geojson"})).unwrap();
+            assert!(s.notices_since(mark).iter().any(|n| n.text.contains("2 attribute value(s)")));
+        }
+    }
+    db.execute_batch("UPDATE roads SET reading = 1.5;").unwrap();
+    let mut s = Session::new(Project::default());
+    let id = s.run("layer.addData", &json!({"path": fixture.path(), "stream": true})).unwrap()["layer"].clone();
+    let mark = s.notice_mark();
+    s.run("data.convert", &json!({"layer": id, "format": "geojson", "path": fixture.dir.join("clean.json")})).unwrap();
+    assert_eq!(
+        s.notices_since(mark).iter().map(|n| n.text.as_str()).collect::<Vec<_>>(),
+        [format!("Exported {}", fixture.dir.join("clean.json").display())],
+        "a clean conversion reports completion without loss notices"
+    );
+}
+
+/// Date parsing can empty a value outside the loaded view. Both source-read paths report
+/// that loss once, while a valid date produces no unread-date notice.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn data_interop_reports_unread_dates_from_the_whole_source() {
+    let fixture = GpkgRegressionFixture::new("interop-dates");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    db.execute_batch("ALTER TABLE roads ADD COLUMN issued DATE; UPDATE roads SET issued = '2026-01-01' WHERE fid = 1;").unwrap();
+    for valid in [false, true] {
+        db.execute("UPDATE roads SET issued = ?1 WHERE fid = 2", [if valid { "2026-02-02" } else { "not-a-date" }]).unwrap();
+        for format in ["geojson", "kml"] {
+            let mut s = Session::new(Project::default());
+            let added = s.run("layer.addData", &json!({"path": fixture.path(), "stream": true})).unwrap();
+            let id = added["layer"].as_u64().unwrap() as u32;
+            assert!(s.map().layer(id).unwrap().is_streamed());
+            s.map_mut().layer_mut(id).unwrap().dataset.features.clear();
+            let path = fixture.dir.join(format!("dates-{valid}.{format}"));
+            let mark = s.notice_mark();
+            s.run("data.convert", &json!({"layer": id, "format": format, "path": path})).unwrap();
+            let notes: Vec<_> =
+                s.notices_since(mark).iter().filter(|n| n.text.contains("read as empty") && n.text.contains("issued")).collect();
+            assert_eq!(notes.len(), usize::from(!valid), "{format} valid {valid}: {:?}", s.notices_since(mark));
+            if !valid {
+                assert!(notes[0].text.contains("1 value isn't a date"), "{}", notes[0].text);
+            }
+            if format == "geojson" {
+                let out: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+                let row = out["features"].as_array().unwrap().iter().find(|f| f["id"] == 2).unwrap();
+                assert_eq!(row["properties"]["issued"].is_null(), !valid);
+            }
+        }
+    }
+}
+
+/// Each serializer observes Cancel during its work and preserves the previous destination.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn data_interop_cancels_every_format_before_replacing_the_file() {
+    use crate::cmd::exports::export_start;
+    use rustgis_analysis::control::Control;
+    let fixture = GpkgRegressionFixture::new("interop-cancel");
+    let mut s = world();
+    for format in ["geojson", "csv", "kml", "gpx", "wkt"] {
+        let path = fixture.dir.join(format!("{format}.txt"));
+        std::fs::write(&path, "previous file").unwrap();
+        let run = export_start(&mut s, "data.convert", &json!({"layer": "Cities", "format": format, "path": path})).unwrap();
+        let control = Control::cancelled_once_started();
+        let error = run.run(&control).err().unwrap();
+        assert!(control.looked() > 0, "{format}: serializer did not check Cancel");
+        assert!(error.contains("cancelled"), "{format}: {error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous file");
+    }
+}
+
 /// A streamed layer's export says how many of its source's rows couldn't be read, written a
 /// chunk at a time (GeoJSON) or from a whole read (KML) alike.
 #[cfg(not(target_arch = "wasm32"))]
@@ -34241,13 +34912,13 @@ fn geopackage_past_the_count_limit_streams_exports_and_reads_whole() {
     let output = fixture.dir.join("whole.csv");
     let exported = s.run("share.exportLayer", &json!({"layer": id, "path": output})).unwrap();
     assert_eq!(exported["features"].as_u64(), Some(count as u64));
-    // A header, then every row once and in order (the first column is the road's name).
+    // A header, then every row once and in order (the road's name after its coordinates).
     let mut lines = std::io::BufRead::lines(std::io::BufReader::new(std::fs::File::open(&output).unwrap()));
-    assert!(lines.next().unwrap().unwrap().starts_with("name,"));
+    assert!(lines.next().unwrap().unwrap().starts_with("longitude,latitude,name"));
     let mut rows = 0;
     for (k, line) in lines.enumerate() {
         let line = line.unwrap();
-        assert!(line.starts_with(&format!("road {},", k + 1)), "row {k}: {line}");
+        assert_eq!(line.split(',').nth(2), Some(format!("road {}", k + 1).as_str()), "row {k}: {line}");
         rows += 1;
     }
     assert_eq!(rows, count, "every row");
@@ -37733,6 +38404,61 @@ fn geoparquet_export_says_which_values_it_wrote_as_null() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Exporting to a GeoPackage says which field names it changed to be unique ignoring case, as
+/// SQLite's columns are, and as the file has them: from a layer read whole or in place, and from
+/// a table; names that differ otherwise give no such notice.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_exports_say_which_field_names_they_changed() {
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-gpkg-names-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("sites.geojson");
+    std::fs::write(
+        &src,
+        r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"name":"a","NAME":"b","id":3},"geometry":{"type":"Point","coordinates":[1,2]}}]}"#,
+    )
+    .unwrap();
+    isolate_plugins();
+    let mut s = Session::new(Project::default());
+    let changed = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("changed to fit a GeoPackage")).map(|n| n.text.clone()).collect()
+    };
+    let names = |s: &mut Session, out: &str| -> Vec<String> {
+        let back = s.run("layer.addData", &json!({"path": out})).unwrap()["layer"].as_u64().unwrap() as u32;
+        s.map().layer(back).unwrap().dataset.fields.iter().map(|f| f.name.clone()).collect()
+    };
+    for stream in [false, true] {
+        let id = s.run("layer.addData", &json!({"path": src, "stream": stream})).unwrap()["layer"].as_u64().unwrap();
+        let out = dir.join(format!("out-{stream}.gpkg")).display().to_string();
+        let mark = s.notice_mark();
+        s.run("share.exportLayer", &json!({"layer": id, "path": out})).unwrap();
+        let said = changed(&s, mark);
+        assert_eq!(said.len(), 1, "stream {stream}: {:?}", s.notices_since(mark));
+        // The notice names the field the file renamed, as the file has it.
+        let back = names(&mut s, &out);
+        let renamed = back.iter().find(|n| n.ends_with("_1")).unwrap();
+        let old = renamed.trim_end_matches("_1");
+        assert!(said[0].ends_with(&format!("unique ignoring case): '{old}' → '{renamed}'")), "stream {stream}: {said:?} {back:?}");
+    }
+    // A table, the same way; names that differ otherwise say nothing.
+    use rustgis_data::{Dataset, Field, FieldType, GeometryType};
+    let table = |name: &str, fields: &[&str]| {
+        let mut ds = Dataset::new(name, GeometryType::None, fields.iter().map(|f| Field::new(*f, FieldType::Integer)).collect());
+        ds.push(None, fields.iter().map(|_| rustgis_data::Value::Int(1)).collect());
+        ds
+    };
+    s.project.add_table(table("Cased", &["A", "a"]));
+    s.project.add_table(table("Fits", &["a", "b", "fid"]));
+    let out = dir.join("cased.gpkg").display().to_string();
+    let mark = s.notice_mark();
+    s.run("share.exportTable", &json!({"table": "Cased", "path": out})).unwrap();
+    assert_eq!(changed(&s, mark), [format!("{out}: 1 field name was changed to fit a GeoPackage (unique ignoring case): 'a' → 'a_1'")]);
+    let mark = s.notice_mark();
+    s.run("share.exportTable", &json!({"table": "Fits", "path": dir.join("fits.gpkg")})).unwrap();
+    assert!(changed(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Exporting to a Shapefile says which field names it changed to fit dBase's 10 bytes, as the
 /// file has them, from a layer read whole or in place; names that fit, and other formats, give no
 /// such notice.
@@ -38313,6 +39039,35 @@ fn must_be_covered_by_says_which_polygons_it_left_out_at_a_pole() {
     }
 }
 
+/// The faces a PDF sets in outlines though fonts were asked for (#1815) are said in one notice:
+/// none, nothing said; one face, singular; more, plural; past ten, the first ten and how many more.
+#[test]
+fn a_pdf_says_which_faces_it_sets_in_outlines() {
+    let mut s = Session::new(Project::default());
+    let faces = |n: usize| -> Vec<rustgis_render::pdf::Outlined> {
+        (1..=n).map(|i| rustgis_render::pdf::Outlined { face: format!("Face {i}"), why: "its licence forbids embedding".into() }).collect()
+    };
+    let said = |s: &mut Session, n: usize| {
+        let mark = s.notice_mark();
+        crate::cmd::layout::outlined_notice(s, &faces(n));
+        s.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    assert!(said(&mut s, 0).is_empty(), "every face embedded, nothing said");
+    let lead = "The PDF sets the text of";
+    let tail = "as outlines, not as text a vector editor can edit:";
+    assert_eq!(said(&mut s, 1), [format!("{lead} 1 face {tail} Face 1 (its licence forbids embedding)")]);
+    let two = said(&mut s, 2);
+    assert_eq!(two.len(), 1, "one notice");
+    assert!(
+        two[0].starts_with(&format!("{lead} 2 faces {tail} Face 1 (")) && two[0].ends_with(", Face 2 (its licence forbids embedding)"),
+        "{two:?}"
+    );
+    let eleven = said(&mut s, 11);
+    assert_eq!(eleven.len(), 1, "one notice");
+    assert!(eleven[0].starts_with(&format!("{lead} 11 faces {tail}")), "{eleven:?}");
+    assert!(eleven[0].contains("Face 10 (") && !eleven[0].contains("Face 11") && eleven[0].ends_with(", and 1 more"), "{eleven:?}");
+}
+
 #[test]
 fn a_pdf_says_which_frames_and_pages_it_draws_as_pictures() {
     let mut s = Session::new(Project::default());
@@ -38336,6 +39091,65 @@ fn a_pdf_says_which_frames_and_pages_it_draws_as_pictures() {
     assert!(
         s.notices_since(mark)[0].text.ends_with("(page 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 and 5 more)")
     );
+}
+
+/// A layout's PDF sets its text in its faces, embedded as subsets (#1815): a layout text and a
+/// map's labels come out as Type 0 fonts over CID fonts, their text read back through each font's
+/// map; `"pdf": {"text": "outlines"}` keeps the Type 3 outlines, and anything else is refused.
+#[test]
+fn a_layout_pdf_sets_its_text_in_its_fonts() {
+    let mut s = world();
+    s.run("labels.field", &json!({"layer": "Countries", "field": "name"})).unwrap();
+    s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "map"})).unwrap();
+    s.run("layout.addElement", &json!({"kind": "text", "text": "Ocupação do solo"})).unwrap();
+    let path = std::env::temp_dir().join(format!("rustgis-fonts-{}.pdf", std::process::id()));
+    // Removed however the test ends.
+    struct Removed(std::path::PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _removed = Removed(path.clone());
+    let export = |s: &mut Session, p: Value| {
+        let mark = s.notice_mark();
+        let mut p = p;
+        p["path"] = json!(path);
+        p["dpi"] = json!(72);
+        s.run("layout.export", &p).map(|_| {
+            let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+            (String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned(), said)
+        })
+    };
+    let (pdf, said) = export(&mut s, json!({})).unwrap();
+    assert!(pdf.contains("/Subtype /Type0") && pdf.contains("/Encoding /Identity-H"), "{said:?}");
+    assert!(pdf.contains("/Subtype /CIDFontType2") || pdf.contains("/Subtype /CIDFontType0"));
+    assert!(!pdf.contains("/Subtype /Type3"), "every face embedded: {said:?}");
+    assert!(!said.iter().any(|t| t.contains("as outlines")), "{said:?}");
+    // The text read back: the title's and the labels' characters are in the fonts' maps.
+    let raw = std::fs::read(&path).unwrap();
+    let maps: String = raw
+        .windows(8)
+        .enumerate()
+        .filter(|(_, w)| w == b"\nstream\n")
+        .filter_map(|(i, _)| miniz_oxide::inflate::decompress_to_vec_zlib(&raw[i + 8..]).ok())
+        .map(|d| String::from_utf8_lossy(&d).into_owned())
+        .filter(|d| d.contains("<0000> <FFFF>"))
+        .collect();
+    for ch in ['O', 'ç', 'ã'] {
+        assert!(maps.contains(&format!("> <{:04X}>", ch as u32)), "{ch}");
+    }
+    let (outlines, said) = export(&mut s, json!({"pdf": {"text": "outlines"}})).unwrap();
+    assert!(outlines.contains("/Subtype /Type3") && !outlines.contains("/Type0"), "{said:?}");
+    export(&mut s, json!({"pdf": {"text": "fonts"}})).unwrap();
+    assert!(std::fs::read(&path).unwrap() == raw, "\"fonts\" is the default, byte for byte");
+    for bad in
+        [json!({"pdf": {"text": "curves"}}), json!({"pdf": "outlines"}), json!({"pdf": {"text": 1}}), json!({"pdf": {"txt": "outlines"}})]
+    {
+        let err = export(&mut s, bad.clone()).unwrap_err();
+        let said = ["\"fonts\" or \"outlines\"", "fonts\"|\"outlines", "pdf has no key \"txt\": its keys are layers, text"];
+        assert!(said.iter().any(|s| err.contains(s)), "{bad}: {err}");
+    }
 }
 
 /// A layout's PDF has layers (#1815): each element an optional content group named after it,
@@ -39499,6 +40313,8 @@ fn exports_run_on_another_thread() {
     let at = |name: &str| dir.join(name).display().to_string();
     s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "map"})).unwrap();
     for (command, file, p) in [
+        ("data.convert", "converted.geojson", json!({"layer": "Cities", "format": "geojson"})),
+        ("data.convert", "converted.wkt.csv", json!({"layer": "Cities", "format": "wkt"})),
         ("share.exportMap", "map.png", json!({"width": 64, "height": 48})),
         ("layout.export", "layout.png", json!({"dpi": 48})),
         ("layout.export", "layout.pdf", json!({"dpi": 48})),
@@ -42782,6 +43598,7 @@ fn long_commands_stop_when_cancelled_while_they_run() {
     }
 
     let exports = [
+        ("data.convert", json!({"layer": "Cities", "format": "geojson", "path": out("converted.geojson")})),
         ("share.exportLayer", json!({"layer": "Cities", "path": out("cities.geojson")})),
         ("share.exportRaster", json!({"layer": dem, "path": out("dem.tif")})),
         ("share.exportMap", json!({"path": out("map.png"), "width": 320, "height": 200})),
@@ -42805,6 +43622,25 @@ fn long_commands_stop_when_cancelled_while_they_run() {
         let control = Control::cancelled_once_started();
         note(command, read.run(&control).map(|_| ()), &control);
     }
+
+    // Replacement validation can now scan temporal fields as well as probing geometry.
+    let mut dates = rustgis_data::Dataset::new(
+        "dates",
+        rustgis_data::GeometryType::Point,
+        vec![rustgis_data::Field::new("day", rustgis_data::FieldType::Date)],
+    );
+    dates.push(
+        Some(rustgis_data::Geometry::Point(rustgis_data::Coord::new(0.0, 0.0))),
+        vec![rustgis_data::Value::parse("2024-02-29", rustgis_data::FieldType::Date)],
+    );
+    let replacement = out("cancel-repair-source.fgb");
+    std::fs::write(&replacement, rustgis_data::source::fgb::write(&dates).unwrap()).unwrap();
+    let id = s.run("layer.addData", &json!({"path": replacement, "stream": true})).unwrap()["layer"].as_u64().unwrap();
+    let read = crate::cmd::reads::read_ahead(&mut s, "layer.repairSource", &json!({"layer": id, "path": replacement})).unwrap();
+    assert!(read.reads());
+    let control = Control::cancelled_once_started();
+    note("layer.repairSource", read.run(&control).map(|_| ()), &control);
+    std::fs::remove_file(replacement).unwrap();
 
     // The tools whose work grows past a second or two on real data: buffers, overlays, joins,
     // hulls, densities and interpolation. Run in the background as the Analysis pane runs them; a
@@ -43808,4 +44644,45 @@ fn a_zarr_window_reads_only_its_chunks_by_range() {
     ] {
         assert!(s.run("layer.addZarr", &bad).is_err(), "{bad}");
     }
+}
+
+/// Repair and reload complete a native date schema on their worker before probing/installing
+/// it. Cancellation prevents installation, and landing keeps the live layer presentation.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_date_source_repair_and_reload_use_finished_candidates() {
+    use crate::cmd::reads::{read_ahead, read_land};
+    use rustgis_analysis::control::Control;
+    use rustgis_data::{Dataset, Field, FieldType, GeometryType, Value as Attr};
+    let mut ds = Dataset::new("dates", GeometryType::Point, vec![Field::new("day", FieldType::Date)]);
+    ds.push(Some(rustgis_data::Geometry::Point(rustgis_data::Coord::new(0.0, 0.0))), vec![Attr::parse("2024-02-29", FieldType::Date)]);
+    let dir = std::env::temp_dir().join(format!("rustgis-date-repair-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let old = dir.join("old.fgb");
+    let new = dir.join("new.fgb");
+    let bytes = rustgis_data::source::fgb::write(&ds).unwrap();
+    std::fs::write(&old, &bytes).unwrap();
+    std::fs::write(&new, &bytes).unwrap();
+    let mut s = Session::new(Project::default());
+    let id = s.run("layer.addData", &json!({"path": old, "stream": true})).unwrap()["layer"].as_u64().unwrap() as u32;
+    for command in ["layer.reloadData", "layer.repairSource"] {
+        let p = json!({"layer": id, "path": new});
+        let control = Control::cancelled_once_started();
+        let before = s.undo_depth();
+        assert!(read_ahead(&mut s, command, &p).unwrap().run(&control).is_err());
+        assert!(control.looked() > 0);
+        assert_eq!(s.undo_depth(), before);
+        let ahead = read_ahead(&mut s, command, &p).unwrap();
+        assert!(ahead.reads());
+        let read = ahead.run(&Control::new()).unwrap();
+        s.map_mut().layer_mut(id).unwrap().transparency = 42.0;
+        read_land(&mut s, read).unwrap();
+        let layer = s.map().layer(id).unwrap();
+        assert_eq!(layer.transparency, 42.0);
+        let source = layer.source.as_ref().unwrap();
+        assert!(source.is_open() && !source.is_pending());
+        assert_eq!(source.info().unwrap().fields[0].ty, FieldType::Date);
+        assert_eq!(layer.load_all_counted().unwrap().0.value(0, 0).to_string(), "2024-02-29");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }

@@ -31,10 +31,11 @@ This guide walks through RustGIS by task. Each page covers one part of the app:
 - **Layers pane** (left): the map's layers in drawing order, with their legends. A new layer goes
   on top, whatever its kind (a feature, raster or web layer, an analysis result). Tick a layer to
   show or hide it; drag it up or down to change the drawing order; right-click it to zoom to it,
-  rename or remove it and more. The entire layer block, including its expanded legend and
-  classes, is split 50/50: drop in its upper half to insert above, or its lower half to insert
-  below. The insertion line shows the destination. Drop inside the first block's upper half
-  to move to the top, or inside the final block's lower half to move to the bottom.
+  rename it (or press ++f2++) or remove it and more. The entire layer block, including its
+  expanded legend and classes, is split 50/50: drop in its upper half to insert above, or its
+  lower half to insert below. The insertion line shows the destination. Drop inside the first
+  block's upper half to move to the top, or inside the final block's lower half to move to the
+  bottom.
   Type in the box at the top to show only the layers and tables
   whose names contain the text (++escape++ clears it); a selected layer it hides is no longer
   selected, and layers can be reordered again once it is cleared. The buttons beside the list's
@@ -87,8 +88,8 @@ This guide walks through RustGIS by task. Each page covers one part of the app:
 - **Map view**: one tab per map and layout. The buttons at the top right zoom in, zoom out and go
   to the full extent; the north arrow and scale bar sit in the corners (on a rotated or tilted
   map, click the north arrow to face north and look straight down); tile credits at the bottom right.
-- **Panes** (right): Tools (geoprocessing), Symbology, Labeling, History, Details, Bookmarks,
-  Editing, Workflows, Script, SQL, the AI Assistant and more. Open them from **View › Windows** or the commands that use
+- **Panes** (right): Tools (geoprocessing), Symbology, Labeling, Layer Properties, History,
+  Bookmarks, Editing, Workflows, Script, SQL, the AI Assistant and more. Open them from **View › Windows** or the commands that use
   them. Each pane opened gets a tab at the top, in the order opened: click a tab to show its pane,
   and its **✕** to close it (the next tab shows; closing the last hides the side). Right-click a
   tab to close it, the others or all; the **✕** at the header's end closes every pane. Tabs that
@@ -415,6 +416,7 @@ found shows in the status bar. CLI and Python: `source.syncState` with `{"layer"
 | Arrow keys / ++shift++ + arrow keys | Nudge the selected layout element / nudge it further |
 | ++alt+shift+right++ / ++alt+shift+left++ | Indent the active layer into the group above it / outdent it out of its group |
 | ++alt+shift+up++ / ++alt+shift+down++ | Move the active layer up / down one step in the Layers pane |
+| ++f2++ | Rename the active layer |
 | ++ctrl+c++ / ++ctrl+x++ / ++ctrl+v++ | Copy / Cut / Paste features |
 
 On macOS, ++cmd++ takes the place of ++ctrl++. **Help › Shortcuts** lists them all in the app,

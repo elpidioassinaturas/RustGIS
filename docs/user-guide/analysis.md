@@ -37,6 +37,14 @@ map are unchanged. The toolbar says how many columns are hidden, and clicking it
 Hiding the column the rows are sorted by clears the sort. The order and hidden columns are kept
 per table until another project is opened, and are not saved in the project.
 
+A text column's menu also has **Convert to Date** and **Convert to Date and Time**
+(`edit.convertField`, `"type"`: `date` or `datetime`): the field becomes a date field and each
+value is read as ISO 8601 (`2026-03-05`; `2026-03-05T14:30:00+02:00`, or with a space for the
+`T`). Text that isn't a date becomes empty, and a notice counts those rows and shows the first
+few; undo brings the text back. Use it for dates from CSV, GeoJSON or other files that hold them as
+text. A field with a domain, subtypes or contingent values, or one a definition query or display
+filter would no longer read as dates (comparing it with a number), is refused.
+
 <figure markdown="span">
   ![The attribute table docked under the map: the 14 African countries of more than 30 million people, selected by attributes, highlighted on the map and in the table](https://assets.rustgis.app/images/attribute-table.webp)
   <figcaption>The attribute table, with a selection highlighted on the map and in the table.</figcaption>
@@ -1244,7 +1252,7 @@ click them on the map:
 
 | Workflow | What it does |
 | --- | --- |
-| Raster Functions | Slope, aspect, hillshade, NDVI, band math (`(b4-b3)/(b4+b3)`), remapping, thresholds, resampling |
+| Raster Functions | Slope, aspect, hillshade (8-bit shades from 1 to 255, with 0 for no data), NDVI, band math (`(b4-b3)/(b4+b3)`), remapping, thresholds, resampling |
 | Function Editor | Chains raster functions, each on the previous output |
 | Suitability Modeler | Scores rasters 1–10 and adds them with weights |
 | Visibility Analysis | A viewshed from a point on an elevation raster, with the Earth's curvature and the refraction of visible light (1/7, as `gdal_viewshed`). The ground along each ray is the cell each point falls in by default; `heights: "bilinear"` (**Ground heights › Between cells (bilinear)** in the Workflows pane) reads it between the cells' centres instead. Both are estimates of the ground between cell centres; between cells is closer on ground that bulges (a hill seen from its top), where the nearest cell can hide cells just inside the horizon. With no radius, or one longer than the raster's diagonal, the viewshed covers the whole raster. The map's **Viewshed N km Here** reads the ground as the Workflows pane's **Ground heights** says. On a raster round the whole Earth the rays don't cross its east–west edge, which the analysis says when the radius reaches it and the way across is shorter: the ground just across the edge is left out, worked out the long way round where the radius reaches the far edge through the raster too (always with no radius), or partly both, near the observer's row and not farther from it. The observer's height must be from 0 to 10,000 m. Ground with no data hides nothing, and next to it bilinear heights take the nearest cell's height; the analysis says how many cells this touched, in a notice. The answer gives both counts (0 when there is nothing to say): `acrossNoData` counts the visible cells whose rays crossed ground with no data (a hidden cell stays hidden whatever that ground is, so it isn't counted, and 0 doesn't mean no ray crossed any); `readNearest` counts every cell, visible or hidden, whose ray took a nearest height next to no data in bilinear mode |
