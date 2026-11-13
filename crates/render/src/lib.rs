@@ -2708,13 +2708,15 @@ const DRAPE_GROWTH_SHARE: f64 = 0.5;
 const DRAPE_CORNER_REACH: f64 = 1.0;
 
 /// The outline of the triangle `t` (either winding) with each edge moved outward along its own
-/// normal, the corners where the moved edges meet. Every edge then overlaps its neighbour by the
-/// same amount, whatever the triangle's shape: moving the corners away from the centroid instead
-/// barely moved a long thin triangle's long edges, the ones perspective makes of far cells. An
-/// edge moves [`DRAPE_GROWTH`], or [`DRAPE_GROWTH_SHARE`] of the triangle's height over it if
-/// that's less. Where the moved edges would meet farther than [`DRAPE_CORNER_REACH`] from the
-/// corner (one sharper than about 74°, or nearly straight between edges moved unequally), they
-/// stop across from it, joined by a bevel. `None` for a triangle with no area.
+/// normal, the corners where the moved edges meet. An edge moves [`DRAPE_GROWTH`], or
+/// [`DRAPE_GROWTH_SHARE`] of the triangle's height over it if that's less: an edge with the
+/// triangle at least 1.2 px high over it overlaps its neighbour by the full [`DRAPE_GROWTH`],
+/// whether the triangle is long and thin or not, and one under a lower triangle by less.
+/// Moving the corners away from the centroid instead barely moved a long thin triangle's long
+/// edges, the ones perspective makes of far cells. Where the moved edges would meet farther
+/// than [`DRAPE_CORNER_REACH`] from the corner (one sharper than about 74°, or nearly straight
+/// between edges moved unequally), they stop across from it, joined by a bevel. `None` for a
+/// triangle with no area.
 fn grown_triangle(t: [(f64, f64); 3]) -> Option<tiny_skia::Path> {
     // Twice the signed area: positive when the corners turn from +x towards +y.
     let area2 = (t[1].0 - t[0].0) * (t[2].1 - t[0].1) - (t[2].0 - t[0].0) * (t[1].1 - t[0].1);
