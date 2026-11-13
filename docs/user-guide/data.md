@@ -130,7 +130,8 @@ or other WKT:
 
 - A transformation in the file (a `TOWGS84`, or a WKT2 `BOUNDCRS`'s) takes precedence, also over
   the built-in one of an EPSG code in the WKT, as in PROJ and GDAL. It also takes precedence over
-  the EPSG code given beside the WKT in a GeoPackage system or a File Geodatabase. A system
+  the EPSG code given beside the WKT in a GeoPackage system, a FlatGeobuf header or a File
+  Geodatabase. A system
   RustGIS can read only by that code keeps the code's transformation, with a notice. Web Mercator
   is on WGS 84, so a transformation its file gives is set aside, with a notice.
 - A `BOUNDCRS` whose transformation goes to another datum than WGS 84 continues with that
@@ -139,7 +140,7 @@ or other WKT:
   none of these, when the target gives a zero transformation where its datum has another (a
   writer's placeholder, as for ED50 or NAD 27), or when combining the two transformations'
   rotations could be off by a centimetre. When it is refused beside the EPSG code of a GeoPackage
-  system or a File Geodatabase, the code is used instead, with a notice.
+  system, a FlatGeobuf header or a File Geodatabase, the code is used instead, with a notice.
 - A grid transformation (NTv2 or NADCON, a `BOUNDCRS`'s, or GDAL's WKT1 `PROJ4_GRIDS` or
   `+nadgrids` in its `PROJ4` extension), or another without Helmert translations, isn't applied:
   the system is read without it, with a notice naming it and its grid file, as positions may be
@@ -147,9 +148,9 @@ or other WKT:
   WGS 84 uses that shift instead, and the notice says so. A `BOUNDCRS` without a transformation, which
   PROJ refuses, is read as its source system, with a notice unless the source is on WGS 84. A
   ballpark offset is no known shift (the datum's own notice says so), and a null offset is none.
-- The notices come with WKT read from a Shapefile's or ASCII grid's `.prj`, a GeoPackage's or
-  FileGDB's system, a LAS file or a Zarr store. WKT given as a command's `crs`, and a GeoPackage
-  system read by its EPSG code, say of these only the two above: a transformation that isn't
+- The notices come with WKT read from a Shapefile's or ASCII grid's `.prj`, a GeoPackage's,
+  FlatGeobuf's or FileGDB's system, a LAS file or a Zarr store. WKT given as a command's `crs`,
+  and a GeoPackage or FlatGeobuf system read by its EPSG code, say of these only the two above: a transformation that isn't
   applied, and a `BOUNDCRS` without one (typed WKT also says its projection method's formula, as
   below). A Zarr store's `crs` says them only when the slice uses it: a store that gives its own
   system, or a longitude/latitude grid, doesn't. A PostGIS, MySQL or SQL Server layer's `crs` is
@@ -1255,6 +1256,17 @@ With a raster layer selected in Layers, the **Style** and **Data** tabs show its
 | Style › Enhancement | Brightness, contrast, gamma |
 | Data | Raster information (size, bands, statistics, coordinate system) and Export Raster (GeoTIFF) |
 
+**See-through cells** of an image with an alpha band (RGBA, or grey and alpha) are left out of
+its colour bands' statistics. These are the cells the map draws fully see-through: an alpha of no
+value, or one under half a 256th of opaque. That is alpha 0 in an 8-bit image, 128 or less of
+65535 in a 16-bit one, and under about 0.002 of 1 in a Float32 one. Leaving them out changes
+Raster information's counts and ranges, and the stretches taken from them: Minimum Maximum,
+Percent Clip, Standard Deviation, Histogram Equalize, a style mask's, and a cloud-optimised
+GeoTIFF's own. So a value those cells hold, such as −3.4e38 in a Float32 image, doesn't set the
+stretch, and an opaque black cell still counts. The alpha band's own statistics count every
+alpha with a value, see-through ones included.
+**Change Detection** gives no-data where either image is see-through.
+
 **Cast shadows**, on a Shaded Relief layer (`raster.symbology` `"shadow"`, 0 to 1), darkens the
 slopes the terrain hides from the sun as well as those facing away from it: a valley behind a ridge
 is in shadow, with a soft edge. Only the direct light is darkened: a slope in full shadow keeps the
@@ -1271,6 +1283,20 @@ rasters of at most 500,000 cells, and a cloud-optimised GeoTIFF read in place ha
 whole image is held: either way the layer is drawn without them, and a notice says so. Terrain
 outside the raster casts nothing on it, and a grid spanning 0 to 360° casts nothing across its
 seam.
+
+**Sky visibility**, on a Shaded Relief layer (`raster.symbology` `"sky"`, 0 to 1), dims the
+relief's ambient light where the terrain around a cell hides part of the sky: valley floors, pits
+and the foot of a cliff get less of it than a plain or a ridge, whatever the sun. Each cell's sky is
+the share of the half sphere above its horizon, looked for in 16 directions up to 100 cells away
+(past 32 cells, in steps of a sixteenth of the distance, so a peak narrower than that far away can
+be missed); 1 scales the ambient light by it, 0, the default, draws the relief as before, and the
+direct light (and its cast shadows) is left as it is. It is worked out once for the layer's band,
+Z factor and mask, not for the sun, so moving the sun doesn't work it out again: off the map's
+frame on the desktop, about a second for two million cells on a multi-core computer, nine or so on
+one thread. It is drawn, waited for by
+exports, and said when it can't be drawn (in the browser over 500,000 cells, or a cloud-optimised
+GeoTIFF read in place) as cast shadows are. Terrain outside the raster, or farther than 100 cells,
+hides none of its sky.
 
 **Masking**, at the foot of the Symbology pane (`raster.mask`), hides pixel values from view without
 changing the data: values to draw as no data (a background of 0 or −9999 the file doesn't flag, QA

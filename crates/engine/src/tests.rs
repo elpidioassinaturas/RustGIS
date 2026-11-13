@@ -3972,6 +3972,64 @@ fn shaded_relief_keeps_its_cast_shadows() {
     assert_eq!(shadow(&s), 0.0, "a new Shaded Relief casts none");
 }
 
+/// Shaded Relief's sky visibility is set, clamped, kept when left out (the shadows' too), saved
+/// with the project only when there is some, and drawn in an export (waited for) with nothing to
+/// say.
+#[test]
+fn shaded_relief_keeps_its_sky_visibility() {
+    let mut s = with_raster();
+    let light = |s: &Session| match s.map().layers.first().and_then(|l| l.raster.as_ref()).map(|r| &r.style.renderer) {
+        Some(rustgis_map::RasterRenderer::ShadedRelief { shadow, sky, .. }) => (*shadow, *sky),
+        other => panic!("{other:?}"),
+    };
+    s.run("raster.symbology", &json!({"type": "shadedRelief"})).unwrap();
+    assert_eq!(light(&s), (0.0, 0.0));
+    let skies_saved = |s: &mut Session| s.project.saved_text(None).unwrap().0.matches("\"sky\"").count();
+    let before = skies_saved(&mut s);
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "sky": 0.6, "shadow": 0.5})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": 200})).unwrap();
+    assert_eq!(light(&s), (0.5, 0.6), "left out, kept");
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "sky": -3})).unwrap();
+    assert_eq!(light(&s), (0.5, 0.0));
+    assert_eq!(skies_saved(&mut s), before, "saved only when there is some");
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "sky": 4})).unwrap();
+    assert_eq!(light(&s), (0.5, 1.0));
+    assert_eq!(skies_saved(&mut s), before + 1);
+    s.notices.clear();
+    assert!(crate::cmd::share::map_png(&mut s, Some(300.0), Some(200.0), None).unwrap().len() > 1000);
+    assert!(s.notices.iter().all(|n| !n.text.contains("sky")), "{:?}", s.notices);
+}
+
+/// An export draws the sky a pit hides: its floor darker with `sky` 1 than with 0, the ground
+/// around it (which sees the whole sky) the same. The first export with the sky, from a cold
+/// cache, waits for the grid: it is the same image as one drawn once the grid is kept.
+#[test]
+fn an_export_draws_the_sky_a_pit_hides_and_waits_for_it() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let mut s = world();
+    // A round pit 16 cells across and 400 m deep, in flat ground 41 cells of 30 m a side.
+    let pit: Vec<f32> =
+        (0..41 * 41).map(|i| if f64::from(i % 41 - 20).hypot(f64::from(i / 41 - 20)) <= 8.0 { -400.0 } else { 0.0 }).collect();
+    let gt = GeoTransform { origin_x: 500_000.0, origin_y: 7_000_000.0, pixel_width: 30.0, pixel_height: -30.0 };
+    let r = Raster::new("pit", 41, 41, vec![pit], gt, Crs::from_epsg(31983).unwrap(), None, ColorHint::Gray, "Float32").unwrap();
+    let bytes = geotiff::write(&r, 0).unwrap();
+    crate::cmd::raster::add_raster(&mut s, "pit", rustgis_map::RasterLayer::from_bytes(r, "pit.tif".to_string(), bytes)).unwrap();
+    s.run("layer.zoomTo", &json!({"layer": "pit"})).unwrap();
+    let drawn = |s: &mut Session, sky: f64| {
+        s.run("raster.symbology", &json!({"layer": "pit", "type": "shadedRelief", "grey": true, "sky": sky})).unwrap();
+        let png = crate::cmd::share::map_png(s, Some(200.0), Some(200.0), None).unwrap();
+        crate::render::decode_png(&png).unwrap()
+    };
+    let open = drawn(&mut s, 0.0);
+    let cold = drawn(&mut s, 1.0);
+    let ready = drawn(&mut s, 1.0);
+    assert!(cold.data() == ready.data(), "the first export waited for the sky");
+    let red = |p: &tiny_skia::Pixmap, x: u32, y: u32| p.pixel(x, y).unwrap().red();
+    // The pit's floor, in the middle, sees less sky; flat ground well outside it, all of it.
+    assert!(red(&cold, 100, 100) < red(&open, 100, 100), "{} vs {}", red(&cold, 100, 100), red(&open, 100, 100));
+    assert_eq!(red(&cold, 170, 100), red(&open, 170, 100));
+}
+
 /// A map export that draws a layer without its cast shadows says so, as such (not as a tile layer
 /// that failed), in a PNG, a GeoTIFF and the app's map image alike; one with nothing missing says
 /// nothing.
@@ -8056,8 +8114,8 @@ fn publication_layouts_fit_their_pages() {
     // Beside it on the side it grows to: the left one when it keeps its right edge.
     let x = if boxed.x + boxed.w / 2.0 > frame_x_mid(&s, li, frame) { boxed.x - 5.5 } else { boxed.x + boxed.w + 0.5 };
     s.run("layout.update", &json!({"layout": li, "element": arrow, "x": x, "y": boxed.y, "w": 5.0, "h": 5.0})).unwrap();
-    s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": "Escala aproximada da folha {scale}"})).unwrap();
     let mark = s.notices.len();
+    s.run("layout.update", &json!({"layout": li, "element": scale_text, "text": "Escala aproximada da folha {scale}"})).unwrap();
     s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 30_000_000.0})).unwrap();
     let after = s.project.layouts[li].element(b).cloned().unwrap();
     assert_eq!((after.x, after.w), (boxed.x, boxed.w), "the box stays");
@@ -8071,6 +8129,43 @@ fn publication_layouts_fit_their_pages() {
     }
     s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 12_000_000.0})).unwrap();
     assert_eq!(s.project.layouts[li].element(b).map(|e| e.w), Some(120.0), "the width set by hand");
+    // So does one set by hand within the widest box a publication gives.
+    s.run("layout.publication", &json!({"profile": "thesis-half", "extent": piaui})).unwrap();
+    let li = s.project.layouts.len() - 1;
+    let frame = s.project.layouts[li].elements.iter().find(|e| e.kind.code() == "mapFrame").map(|e| e.id).unwrap();
+    let id_in = |s: &Session, n: &str| s.project.layouts[li].elements.iter().find(|e| e.name == n).map(|e| e.id).unwrap();
+    let (b, widest) = (id_in(&s, "Scale Box"), s.project.layouts[li].element(frame).map(|e| (e.w * 0.3).max(25.0)).unwrap());
+    let auto = s.project.layouts[li].element(b).map(|e| e.w).unwrap();
+    let set = if auto + 2.0 < widest { auto + 2.0 } else { auto - 2.0 };
+    for name in ["Scale Box", "Scale Bar", "Scale"] {
+        s.run("layout.update", &json!({"layout": li, "element": id_in(&s, name), "w": set})).unwrap();
+    }
+    s.run("layout.update", &json!({"layout": li, "element": frame, "scale": 9_000_000.0})).unwrap();
+    s.run("layout.frameZoom", &json!({"layout": li, "element": frame, "to": "full"})).unwrap();
+    assert_eq!(s.project.layouts[li].element(b).map(|e| e.w), Some(set), "the width set by hand, {auto} mm automatic");
+    // An untouched box follows: a new scale, the bar restyled, then another scale, each leave it
+    // as wide as it is automatically then.
+    s.run("layout.publication", &json!({"profile": "thesis-half", "extent": piaui})).unwrap();
+    let li = s.project.layouts.len() - 1;
+    let id_in = |s: &Session, n: &str| s.project.layouts[li].elements.iter().find(|e| e.name == n).map(|e| e.id).unwrap();
+    let frame = s.project.layouts[li].elements.iter().find(|e| e.kind.code() == "mapFrame").map(|e| e.id).unwrap();
+    let (b, bar) = (id_in(&s, "Scale Box"), id_in(&s, "Scale Bar"));
+    let width = |s: &Session| s.project.layouts[li].element(b).map(|e| e.w).unwrap();
+    let first = width(&s);
+    let mut widths = Vec::new();
+    for change in [
+        json!({"element": frame, "scale": 20_000_000.0}),
+        json!({"element": bar, "units": "miles"}),
+        json!({"element": frame, "scale": 7_000_000.0}),
+    ] {
+        let mut change = change;
+        change["layout"] = json!(li);
+        s.run("layout.update", &change).unwrap();
+        let auto = crate::cmd::layout::scale_box_auto(&s, li).unwrap();
+        assert!((width(&s) - auto).abs() < 1e-9, "{change}: {} mm, {auto} mm automatic", width(&s));
+        widths.push(width(&s));
+    }
+    assert!(widths.iter().any(|w| (w - first).abs() > 0.5), "the box changed: {first} mm, then {widths:?}");
     // A long title wraps within the frame, and pushes the map down; the result names every
     // element for layout.update.
     let r = s.run("layout.publication", &json!({"extent": piaui, "title": long})).unwrap();
@@ -37760,6 +37855,15 @@ fn a_windows_bands_are_started_within_its_wait() {
     assert!(band_in_time(3, 4, Duration::from_secs(299), wait).is_ok());
     let e = band_in_time(2, 4, Duration::from_secs(301), wait).unwrap_err();
     assert_eq!(e, "2 of 4 bands read in 5 minutes, so the window is given up: take a smaller box or a larger cellSize");
+    // A batch of bands waits two minutes a band, within the window's five minutes and the two
+    // past them the last band started had.
+    use crate::cmd::layer::batch_wait;
+    let s = Duration::from_secs;
+    assert_eq!(batch_wait(1, s(0)), s(120));
+    assert_eq!(batch_wait(2, s(0)), s(240));
+    assert_eq!(batch_wait(16, s(0)), s(420));
+    assert_eq!(batch_wait(16, s(299)), s(121));
+    assert_eq!(batch_wait(16, s(400)), s(120), "a band's two minutes at least");
 }
 
 /// A script or model the desktop app runs off the frame, as a plugin's command, leaves a window to
@@ -38006,6 +38110,67 @@ fn a_cog_windows_read_is_apart_from_adding_it() {
     let asked = window_asked(&s, &json!({"url": format!("{gone}/a.tif?token=hidden-1330"), "bbox": [1, 2, 3, 4]})).unwrap();
     let e = read_cog_window(&asked).err().unwrap();
     assert!(e.contains("/a.tif") && !e.contains("hidden-1330"), "{e}");
+}
+
+/// A window of a file stored bottom-up, as AlphaEarth's are (planar signed bytes, no-data −128, a
+/// positive Y pixel size; #1720): its rows turned over once read, so the raster is north up, its
+/// values where they lie and its no-data kept.
+#[test]
+fn a_bottom_up_cog_window_comes_in_north_up() {
+    use rustgis_data::raster::cog::{Example, example_with};
+    // 1024 pixels over 10°–11° E, 45°–46° N, the file's row y at 45° + y/1024; band b of pixel
+    // (x, y) is (x + y + 10 b) % 100 − 50, and pixel (0, 0), the south-west corner, is no-data.
+    let e = Example { size: 1024, tile: 256, bands: 2, planar: true, int8: true, bottom_up: true, ..Example::default() };
+    let (base, _) = serve_ranges(example_with(&e));
+    let mut s = world();
+    let url = format!("{base}/aef.tif");
+    let r = s.run("layer.addUrl", &json!({"url": url, "bbox": [10.25, 45.5, 10.5, 45.75], "name": "Up"})).unwrap();
+    assert_eq!(r["window"]["columns"], json!([256, 512]));
+    let w = s.map().layer_by_name("Up").and_then(|l| l.raster.as_ref()?.data.clone()).unwrap();
+    assert_eq!((w.width, w.height, w.band_count()), (256, 256, 2));
+    assert_eq!((w.transform.origin_x, w.transform.origin_y), (10.25, 45.75));
+    assert!(w.transform.pixel_height < 0.0);
+    // The window's north-west cell is the file's (256, 767); five rows down and ten across, (266, 762).
+    assert_eq!((w.value(0, 0, 0), w.value(1, 0, 0), w.value(0, 10, 5)), (Some(-27.0), Some(-17.0), Some(-22.0)));
+    // At the file's south-west corner, the window's bottom-left cell is the file's no-data.
+    s.run("layer.addUrl", &json!({"url": url, "bbox": [10.0, 45.0, 10.01, 45.01], "name": "Corner"})).unwrap();
+    let c = s.map().layer_by_name("Corner").and_then(|l| l.raster.as_ref()?.data.clone()).unwrap();
+    assert_eq!((c.value(0, 0, i64::from(c.height) - 1), c.value(0, 1, i64::from(c.height) - 1)), (None, Some(-49.0)));
+    assert_eq!(c.transform.origin_y, 45.0 + f64::from(c.height) / 1024.0);
+}
+
+/// A window read for a raster made from it (AlphaEarth's similarity and change, #1720) says what
+/// its header left out, as `layer.addUrl` says it when it adds the window; a clean file, nothing.
+#[test]
+fn a_window_read_for_another_raster_says_what_its_header_left_out() {
+    use crate::cmd::layer::{WindowAsked, read_window_raster};
+    use rustgis_data::raster::cog::{Example, example, example_with};
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (lossy, _) = serve_ranges(example_with(&Example { size: 512, tile: 256, classes: true, lossy: true, ..Example::default() }));
+    let w = read_window_raster(&WindowAsked::of(&format!("{lossy}/lossy.tif"), [10.0, 45.0, 10.5, 45.5], None, 1), &stop).unwrap();
+    let notes = w.notes();
+    assert!(notes.iter().any(|n| n.starts_with("its colour table has 384 entries")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("its GDAL metadata: 1 CLASS_ item(s)")), "{notes:?}");
+    let (clean, _) = serve_ranges(example(512, 256));
+    let w = read_window_raster(&WindowAsked::of(&format!("{clean}/clean.tif"), [10.0, 45.0, 10.5, 45.5], None, 1), &stop).unwrap();
+    assert_eq!(w.notes().len(), 1, "only the read: {:?}", w.notes());
+    // A change says what each year's file left out, by its year, and once for both when both left
+    // it out; the read, the same for both, once.
+    use crate::cmd::embeddings::two_years_notes;
+    let lossy = read_window_raster(&WindowAsked::of(&format!("{lossy}/lossy.tif"), [10.0, 45.0, 10.5, 45.5], None, 1), &stop).unwrap();
+    let said = two_years_notes(&w, &lossy, (2017, 2025));
+    assert!(said.iter().any(|n| n.starts_with("the 2025 file: its colour table has 384 entries")), "{said:?}");
+    assert!(!said.iter().any(|n| n.starts_with("the 2017")), "{said:?}");
+    assert_eq!(said.iter().filter(|n| n.contains("window of the full image")).count(), 1, "{said:?}");
+    let said = two_years_notes(&lossy, &w, (2017, 2025));
+    assert!(said.iter().any(|n| n.starts_with("the 2017 file: its colour table has 384 entries")), "{said:?}");
+    let said = two_years_notes(&lossy, &lossy, (2017, 2025));
+    assert_eq!(said.iter().filter(|n| n.contains("its colour table has 384 entries")).count(), 1, "{said:?}");
+    assert!(said.iter().any(|n| n.starts_with("the 2017 and 2025 files: its colour table")), "{said:?}");
+    assert_eq!(two_years_notes(&w, &w, (2017, 2025)).len(), 1, "two clean files: only the read");
+    // A file without the bands asked for is refused from its header.
+    let e = read_window_raster(&WindowAsked::of(&format!("{clean}/clean.tif"), [10.0, 45.0, 10.5, 45.5], None, 64), &stop).err().unwrap();
+    assert!(e.contains("it has 1 band(s), where 64 are needed"), "{e}");
 }
 
 /// `layer.addUrl` with `"bbox"` (#1204): a window of a cloud-optimised GeoTIFF, read by range as a
@@ -43609,6 +43774,9 @@ fn long_commands_stop_when_cancelled_while_they_run() {
             "dl.classify",
             json!({"layer": "scene", "training": "training", "classField": "class", "bands": [1, 2], "epochs": 30, "model": "landcover"}),
         ),
+        // Cancelled before the index is read: nothing reaches the network.
+        ("embeddings.similarity", json!({"dataset": "alphaearth", "point": [10.01, 45.01], "bbox": [10.0, 45.0, 10.02, 45.02]})),
+        ("embeddings.change", json!({"dataset": "alphaearth", "bbox": [10.0, 45.0, 10.02, 45.02]})),
     ];
     // Every command that runs in the background is here, and only those.
     fn listed<'a>(l: &[(&'a str, Value)]) -> std::collections::BTreeSet<&'a str> {
@@ -44138,6 +44306,156 @@ fn stac_search_by_shape_says_what_it_leaves_out() {
     assert_eq!(said(&s, "have no geometry"), before);
 }
 
+/// An RGBA orthophoto whose see-through cells hold −3.4e38 (a Float32 one, as an export from
+/// before #1759 wrote it, its alpha 0 to 255 as that file had it), with opaque black cells, on
+/// 40 × 40 one-metre cells in UTM zone 11N: see-through in its left ten columns, black along its
+/// top row. With its colours, which are 10 to 249 elsewhere.
+#[cfg(not(target_arch = "wasm32"))]
+fn see_through_ortho(name: &str, see: impl Fn(usize) -> bool, offset: f32) -> rustgis_data::raster::Raster {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+    let (w, n) = (40usize, 1600usize);
+    let colour = |b: usize| -> Vec<f32> {
+        (0..n).map(|i| if see(i) { -3.4e38 } else if i < w { 0.0 } else { (10 + (i * 7 + b * 60) % 240) as f32 } + offset).collect()
+    };
+    let alpha = (0..n).map(|i| if see(i) { 0.0 } else { 255.0 }).collect();
+    let gt = GeoTransform { origin_x: 500_000.0, origin_y: 4_800_040.0, pixel_width: 1.0, pixel_height: -1.0 };
+    let utm = Crs::from_epsg(32611).unwrap();
+    Raster::new(name, 40, 40, vec![colour(0), colour(1), colour(2), alpha], gt, utm, None, ColorHint::Rgb { alpha: true }, "Float32")
+        .unwrap()
+}
+
+/// The cells an RGBA raster's alpha draws see-through are left out of its colour bands'
+/// statistics (#1810): read from a file, projected (nearest) and clipped to a polygon. Its opaque
+/// black cells count, its alpha band counts every cell, and the stretch shared from it (`like`)
+/// spans its opaque colours, not −3.4e38.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn see_through_cells_are_left_out_of_an_rgba_rasters_statistics() {
+    use rustgis_data::raster::geotiff;
+    let dir = std::env::temp_dir().join(format!("rustgis-see-through-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("ortho.tif");
+    std::fs::write(&path, geotiff::write(&see_through_ortho("ortho", |i| i % 40 < 10, 0.0), 0).unwrap()).unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path, "name": "ortho"})).unwrap();
+    let tr = rustgis_data::raster::Crs::from_epsg(32611).unwrap().transformer().unwrap();
+    let ll = |x: f64, y: f64| {
+        let c = tr.to_lonlat(rustgis_geom::Coord::new(x, y)).unwrap();
+        json!([c.x, c.y])
+    };
+    // A square over the middle, across the see-through columns.
+    s.run("layer.template", &json!({"template": "polygons", "name": "Boundary"})).unwrap();
+    let ring = [
+        ll(500_005.0, 4_800_035.0),
+        ll(500_035.0, 4_800_035.0),
+        ll(500_035.0, 4_800_005.0),
+        ll(500_005.0, 4_800_005.0),
+        ll(500_005.0, 4_800_035.0),
+    ];
+    s.run("edit.addFeature", &json!({"layer": "Boundary", "geometry": {"type": "Polygon", "coordinates": [ring]}})).unwrap();
+    s.run("raster.project", &json!({"layer": "ortho", "crs": 32611, "cellSize": 1.0, "resampling": "nearest", "name": "projected"}))
+        .unwrap();
+    s.run(
+        "raster.process",
+        &json!({"layer": "ortho", "operation": "clip", "polygon": "Boundary", "selectedOnly": false, "name": "clipped"}),
+    )
+    .unwrap();
+    for name in ["ortho", "projected", "clipped"] {
+        let r = s.map().layer_by_name(name).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+        // The cells its alpha shows: alpha above half a 256th of opaque (Float32's 1).
+        let shown = r.bands[3].data.iter().filter(|a| **a >= 0.5 / 255.0).count();
+        assert!(shown > 0 && shown < r.bands[3].data.len(), "{name}: {shown}");
+        let info = s.run("raster.info", &json!({"layer": name})).unwrap();
+        for b in 0..3 {
+            let band = &info["bands"][b];
+            assert_eq!(band["validPixels"], json!(shown), "{name} band {b}: {band}");
+            let (min, max) = (band["min"].as_f64().unwrap(), band["max"].as_f64().unwrap());
+            assert!((0.0..=249.0).contains(&min) && (10.0..=249.0).contains(&max), "{name} band {b}: {band}");
+        }
+        assert_eq!(info["bands"][3]["validPixels"], json!(r.bands[3].data.len()), "{name}");
+    }
+    // The file's black row counts.
+    assert_eq!(s.run("raster.info", &json!({"layer": "ortho"})).unwrap()["bands"][0]["min"], json!(0.0));
+    // The range now drawn, shared: within the opaque colours.
+    s.run("raster.stretch", &json!({"layer": "ortho", "like": "ortho"})).unwrap();
+    let style = &s.map().layer_by_name("ortho").unwrap().raster.as_ref().unwrap().style;
+    let rustgis_map::raster::Stretch::Custom { bands: Some(bands), .. } = style.stretch else { panic!("{:?}", style.stretch) };
+    assert!(bands.iter().all(|[lo, hi]| (0.0..=249.0).contains(lo) && (0.0..=249.0).contains(hi) && lo < hi), "{bands:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Change Detection leaves out a cell either raster draws see-through (#1810): the first's left
+/// ten columns, holding −3.4e38, and the second's bottom ten rows, holding a stray 7, on the same
+/// grid and on one moved 0.4 m. Every cell both show compares, black ones included: 5 apart. A
+/// second moved five cells east, see-through in its own right ten columns, has its alpha
+/// resampled as its band is: read at the first's cells instead, it would hide other columns.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn change_detection_leaves_out_see_through_cells() {
+    use rustgis_data::raster::Raster;
+    let before = see_through_ortho("before", |i| i % 40 < 10, 0.0);
+    // Five cells east: its column k is the first's column k + 5, with the first's colours plus 5
+    // (its first five columns cover the first's see-through ones), see-through from its column 30.
+    let moved = {
+        let see = |i: usize| i % 40 >= 30;
+        let bands = (0..4)
+            .map(|b| {
+                (0..1600)
+                    .map(|i| match (b, see(i)) {
+                        (3, true) => 0.0,
+                        (3, false) => 255.0,
+                        (_, true) => 7.0,
+                        (_, false) => before.bands[b].data[i + 5] + 5.0,
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut gt = before.transform;
+        gt.origin_x += 5.0;
+        Raster::new("after moved", 40, 40, bands, gt, before.crs, None, before.color.clone(), "Float32").unwrap()
+    };
+    let mut after = see_through_ortho("after", |i| i >= 1200, 5.0);
+    for band in after.bands.iter_mut().take(3) {
+        for v in band.data.iter_mut().skip(1200) {
+            *v = 7.0;
+        }
+    }
+    let shifted = {
+        let mut gt = after.transform;
+        gt.origin_x += 0.4;
+        let bands = after.bands.iter().map(|b| b.data.clone()).collect();
+        Raster::new("after shifted", 40, 40, bands, gt, after.crs, None, after.color.clone(), "Float32").unwrap()
+    };
+    let mut s = Session::new(Project::default());
+    for r in [before, after, shifted, moved] {
+        let name = r.name.clone();
+        let bytes = rustgis_data::raster::geotiff::write(&r, 0).unwrap();
+        crate::cmd::raster::add_raster(&mut s, &name, rustgis_map::RasterLayer::from_bytes(r, "x.tif", bytes)).unwrap();
+    }
+    for after in ["after", "after shifted"] {
+        let out = format!("{after} change");
+        s.run("raster.change", &json!({"before": "before", "after": after, "method": "difference", "name": out})).unwrap();
+        let r = s.map().layer_by_name(&out).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+        let kept: Vec<f32> = r.bands[0].data.iter().copied().filter(|v| r.is_valid(*v)).collect();
+        // Opaque in both: columns 10 to 39 of rows 0 to 29. The shift of 0.4 m east keeps each
+        // cell's centre in the same column of the second.
+        assert_eq!(kept.len(), 30 * 30, "{after}");
+        assert!(kept.iter().all(|v| *v == 5.0), "{after}: {:?}", kept.iter().find(|v| **v != 5.0));
+    }
+    // Moved: the first's columns 0 to 4 are off the second, 5 to 9 see-through in the first, and
+    // 35 to 39 the second's see-through 30 to 34; 10 to 34 of every row compare, 5 apart. Its alpha
+    // read at the first's cells would hide 30 to 39 instead (800 cells, and 7s compared).
+    s.run("raster.change", &json!({"before": "before", "after": "after moved", "method": "difference", "name": "moved change"})).unwrap();
+    let r = s.map().layer_by_name("moved change").unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    let kept: Vec<usize> = (0..1600).filter(|i| r.is_valid(r.bands[0].data[*i])).collect();
+    assert_eq!(kept.len(), 25 * 40);
+    assert!(
+        kept.iter().all(|i| (10..35).contains(&(i % 40)) && r.bands[0].data[*i] == 5.0),
+        "{:?}",
+        kept.iter().find(|i| r.bands[0].data[**i] != 5.0)
+    );
+}
+
 /// A layer read whole from a Shapefile or GeoJSON file remembers the files and its rows as read
 /// (#1385): `source.syncState` says when it has edits the file lacks, when the file changed
 /// since, and neither once an edit is undone. The record is saved with the project.
@@ -44398,6 +44716,15 @@ fn arrangements_are_saved_by_name() {
     // A name copies that arrangement's corners.
     let r = s.run("layout.arrangement", &json!({"save": "Copy", "arrangement": "mirrored"})).unwrap();
     assert_eq!(r["saved"]["Copy"]["locator"], "top-right", "{r}");
+    // "arrangement" with "save" is read, not said to be ignored.
+    let mark = s.notices.len();
+    s.run("layout.arrangement", &json!({"save": "Print", "arrangement": "classic"})).unwrap();
+    assert!(
+        !s.notices[mark..].iter().any(|n| n.text.contains("ignores")),
+        "{:?}",
+        s.notices[mark..].iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
+    s.run("layout.arrangement", &json!({"remove": "Print"})).unwrap();
     // Taken by name, case aside, and named in the answer as it is kept.
     let homes = |v: &Value| crate::cmd::layout::parse_arrangement(v, &Default::default()).unwrap();
     assert_eq!(arrangements_to_try(&s, &json!("atlas")).unwrap(), vec![("Atlas".to_string(), homes(&atlas))]);
@@ -44673,6 +45000,212 @@ fn a_zarr_window_reads_only_its_chunks_by_range() {
     ] {
         assert!(s.run("layer.addZarr", &bad).is_err(), "{bad}");
     }
+}
+
+/// Commands that take the first N of a list refuse a list given over its limit, and say what
+/// they leave of one they work out or read (#1896): `raster.measure`'s points; the lines
+/// `profile.alongSelected` profiles; the steps `map.route`'s answer lists; the fields
+/// `report.autofill` fills in; what `bookmark.import` leaves of a file. Nothing is said within
+/// the limits.
+#[test]
+fn lists_past_their_limit_are_refused_or_said() {
+    let said = |s: &Session, mark: u64, what: &str| {
+        s.notices_since(mark).iter().filter(|n| n.text.contains(what)).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    let mut s = world();
+    // A measurement's points: refused past 10,000, taken at 10,000.
+    let ring = |n: usize| -> Vec<Value> {
+        (0..n)
+            .map(|i| {
+                let a = i as f64 / n as f64 * std::f64::consts::TAU;
+                json!([10.0 + a.cos() * 0.01, 45.0 + a.sin() * 0.01])
+            })
+            .collect()
+    };
+    let e = s.run("raster.measure", &json!({"kind": "area", "points": ring(10_001)})).unwrap_err();
+    assert!(e.contains("10001 entries") && e.contains("at most 10000"), "{e}");
+    s.run("raster.measure", &json!({"kind": "area", "points": ring(10_000)})).unwrap();
+    // Profiles along 51 lines: the first 50, and said; along 50, nothing said.
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).unwrap().name.clone();
+    s.run("layer.template", &json!({"template": "lines", "name": "Trails"})).unwrap();
+    for i in 0..51 {
+        let y = 45.002 + i as f64 * 0.0005;
+        s.run(
+            "edit.addFeature",
+            &json!({"layer": "Trails", "geometry": {"type": "LineString", "coordinates": [[10.002, y], [10.038, y]]}}),
+        )
+        .unwrap();
+    }
+    // Adding a feature selects it alone: every line is selected here.
+    s.run("select.all", &json!({"layer": "Trails"})).unwrap();
+    let mark = s.notice_mark();
+    let out = s.run("profile.alongSelected", &json!({"layer": dem, "lines": "Trails"})).unwrap();
+    assert_eq!(out.as_array().map(Vec::len), Some(50));
+    assert_eq!(said(&s, mark, "Profile Along Selected Lines"), ["Profile Along Selected Lines: the first 50 of the 51 lines are profiled"]);
+    s.run("layer.template", &json!({"template": "lines", "name": "Fifty"})).unwrap();
+    for i in 0..50 {
+        let y = 45.002 + i as f64 * 0.0005;
+        s.run("edit.addFeature", &json!({"layer": "Fifty", "geometry": {"type": "LineString", "coordinates": [[10.002, y], [10.038, y]]}}))
+            .unwrap();
+    }
+    s.run("select.all", &json!({"layer": "Fifty"})).unwrap();
+    let mark = s.notice_mark();
+    assert_eq!(s.run("profile.alongSelected", &json!({"layer": dem, "lines": "Fifty"})).unwrap().as_array().map(Vec::len), Some(50));
+    assert!(said(&s, mark, "Profile Along").is_empty());
+    // A route of 201 steps: the answer lists 200 and says so; the steps layer has 201.
+    let step = r#"{"geometry":"g~idcBwjpoXl@InGo@","name":"Main St","distance":10.0,"duration":2.0,"maneuver":{"instruction":"Go on.","type":"continue","location":[13.378236,52.51634]}}"#;
+    let route = |n: usize| {
+        format!(
+            r#"{{"code":"Ok","routes":[{{"duration":402.0,"distance":2010.0,"legs":[{{"summary":"Main St","steps":[{}]}}]}}]}}"#,
+            vec![step; n].join(",")
+        )
+    };
+    let mut t = Session::new(Project::default());
+    let mark = t.notice_mark();
+    let r = t.run("map.route", &json!({"answer": route(201), "zoom": false})).unwrap();
+    assert_eq!(r["steps"].as_array().map(Vec::len), Some(200));
+    assert_eq!(t.map().layer_by_name("Route steps").map(|l| l.dataset.features.len()), Some(201));
+    assert_eq!(
+        said(&t, mark, "Directions"),
+        ["Directions: the answer lists the first 200 of the route's 201 steps; the Route steps layer has them all"]
+    );
+    let mark = t.notice_mark();
+    t.run("map.route", &json!({"answer": route(201), "zoom": false, "addLayer": false})).unwrap();
+    assert_eq!(said(&t, mark, "Directions"), ["Directions: the answer lists the first 200 of the route's 201 steps"]);
+    let mark = t.notice_mark();
+    t.run("map.route", &json!({"answer": route(200), "zoom": false, "addLayer": false})).unwrap();
+    assert!(said(&t, mark, "Directions").is_empty());
+    // A report on a layer of 65 fields: the first 64 filled in, and said.
+    let header: Vec<String> = (0..65).map(|i| format!("f{i}")).collect();
+    let csv = format!("lon,lat,{}\n10,45,{}\n", header.join(","), vec!["1"; 65].join(","));
+    use base64::Engine as _;
+    s.run("layer.addDataBytes", &json!({"fileName": "wide.csv", "data": base64::engine::general_purpose::STANDARD.encode(csv)})).unwrap();
+    s.run("report.new", &json!({"layer": "wide", "name": "Wide", "fields": ["f0"]})).unwrap();
+    let mark = s.notice_mark();
+    let r = s.run("report.autofill", &json!({"report": "Wide"})).unwrap();
+    assert_eq!(r["fields"].as_array().map(Vec::len), Some(64));
+    let n = s.map().layer_by_name("wide").unwrap().dataset.fields.len();
+    assert_eq!(said(&s, mark, "fields are filled in"), [format!("Wide: the first 64 of the layer's {n} fields are filled in")]);
+    // A layer of exactly 64 fields: all filled in, by autofill or by default, and nothing said.
+    let k = 64 - (n - 65);
+    let header: Vec<String> = (0..k).map(|i| format!("g{i}")).collect();
+    let csv = format!("lon,lat,{}\n10,45,{}\n", header.join(","), vec!["1"; k].join(","));
+    s.run("layer.addDataBytes", &json!({"fileName": "narrow.csv", "data": base64::engine::general_purpose::STANDARD.encode(csv)})).unwrap();
+    assert_eq!(s.map().layer_by_name("narrow").unwrap().dataset.fields.len(), 64);
+    s.run("report.new", &json!({"layer": "narrow", "name": "Narrow", "fields": ["g0"]})).unwrap();
+    let mark = s.notice_mark();
+    assert_eq!(s.run("report.autofill", &json!({"report": "Narrow"})).unwrap()["fields"].as_array().map(Vec::len), Some(64));
+    s.run("report.new", &json!({"layer": "narrow", "name": "Narrow default"})).unwrap();
+    assert_eq!(s.project.reports.last().map(|r| r.fields.len()), Some(64));
+    assert!(said(&s, mark, "64").is_empty(), "{:?}", said(&s, mark, "64"));
+    // The rest of a report's lists: given ones refused past their limits, a layer's said.
+    let reports = s.project.reports.len();
+    let wide: Vec<String> = (0..65).map(|i| format!("f{i}")).collect();
+    let e = s.run("report.new", &json!({"layer": "wide", "fields": wide})).unwrap_err();
+    assert!(e.contains("fields has 65 entries") && e.contains("at most 64"), "{e}");
+    let e = s.run("report.new", &json!({"layer": "wide", "groups": ["f0", "f1", "f2", "f3", "f4"]})).unwrap_err();
+    assert!(e.contains("groups has 5 entries") && e.contains("at most 4"), "{e}");
+    assert_eq!(s.project.reports.len(), reports, "nothing added");
+    let e = s.run("report.field", &json!({"report": "Wide", "field": "f64"})).unwrap_err();
+    assert!(e.contains("at most 64 fields"), "{e}");
+    assert_eq!(s.project.reports.iter().find(|r| r.name == "Wide").map(|r| r.fields.len()), Some(64));
+    let mark = s.notice_mark();
+    let r = s.run("report.new", &json!({"layer": "wide", "name": "Default"})).unwrap();
+    assert_eq!(s.project.reports.last().map(|r| r.fields.len()), Some(64), "{r}");
+    assert_eq!(said(&s, mark, "the first 64"), [format!("Default: the report lists the first 64 of the layer's {n} fields")]);
+    s.run("data.relate", &json!({"name": "Country of city", "origin": "Countries", "originKey": "name", "destination": "Cities", "destinationKey": "adm0name"}))
+        .unwrap();
+    s.run("report.new", &json!({"layer": "Countries", "name": "Nations", "fields": ["name"]})).unwrap();
+    let e = s.run("report.subreport", &json!({"relationship": "Country of city", "fields": vec!["name"; 65]})).unwrap_err();
+    assert!(e.contains("fields has 65 entries") && e.contains("at most 64"), "{e}");
+    // A report moved to the wide layer, none of its columns there: the default columns, said.
+    let mark = s.notice_mark();
+    s.run("report.update", &json!({"report": "Nations", "layer": "wide"})).unwrap();
+    assert_eq!(s.project.reports.iter().find(|r| r.name == "Nations").map(|r| r.fields.len()), Some(64));
+    assert_eq!(
+        said(&s, mark, "the first 64"),
+        [format!("Nations: the report's columns are the first 64 of the layer's {n} fields while changing the report layer")]
+    );
+    // A bookmarks file: what isn't taken is said, one notice a kind with its count.
+    let place = |name: String| json!({"name": name, "lon": 10.0, "lat": 45.0, "metresPerPixel": 10.0});
+    let mut long_description = place("Described".into());
+    long_description["description"] = json!("é".repeat(2001));
+    let file = json!({"bookmarks": [
+        place("Plain".into()),
+        json!({"lon": 10.0, "lat": 45.0, "metresPerPixel": 10.0}),
+        json!({"name": "Nowhere", "lon": 10.0, "lat": 95.0, "metresPerPixel": 10.0}),
+        json!({"name": "Unplaced"}),
+        place("é".repeat(121)),
+        // A long name left out for its place: not counted as cut.
+        json!({"name": "ê".repeat(121), "lon": 200.0, "lat": 45.0, "metresPerPixel": 10.0}),
+        long_description,
+    ]});
+    let mark = s.notice_mark();
+    let r = s.run("bookmark.import", &json!({"text": file.to_string()})).unwrap();
+    assert_eq!(r["added"].as_array().map(Vec::len), Some(3), "{r}");
+    let mut notes = said(&s, mark, "Import Bookmarks");
+    notes.sort();
+    assert_eq!(
+        notes,
+        [
+            "Import Bookmarks: 1 bookmark(s) with a description cut to 2000 characters",
+            "Import Bookmarks: 1 bookmark(s) with a name cut to 120 characters",
+            "Import Bookmarks: 1 bookmark(s) without a name left out",
+            "Import Bookmarks: 3 bookmark(s) without a place this map can show left out",
+        ]
+    );
+    // A clean file says nothing.
+    let mark = s.notice_mark();
+    s.run("bookmark.import", &json!({"text": json!({"bookmarks": [place("Again".into())]}).to_string()})).unwrap();
+    assert!(said(&s, mark, "Import Bookmarks").is_empty());
+    // A file of nothing this map can show: refused, with what was left out and why.
+    let e = s
+        .run(
+            "bookmark.import",
+            &json!({"text": json!({"bookmarks": [{"name": "Unplaced"}, {"lon": 10.0, "lat": 45.0, "metresPerPixel": 10.0}]}).to_string()}),
+        )
+        .unwrap_err();
+    assert_eq!(
+        e,
+        "the file has no bookmarks this map can show: 1 bookmark(s) without a name left out, 1 bookmark(s) without a place this map can show left out"
+    );
+    // The map's 10,000 bookmarks, on a new map: 10,001 keeps the first 10,000 in order and says
+    // the one left; 10,000 are all taken, and nothing is said.
+    let many = |n: usize| json!({"bookmarks": (0..n).map(|i| place(format!("B{i}"))).collect::<Vec<_>>()}).to_string();
+    for (n, kept, note) in
+        [(10_001, 10_000, vec!["Import Bookmarks: 1 bookmark(s) past the map's 10000 left out"]), (10_000, 10_000, vec![])]
+    {
+        s.run("map.new", &json!({"name": format!("Bookmarks {n}")})).unwrap();
+        let mark = s.notice_mark();
+        let r = s.run("bookmark.import", &json!({"text": many(n)})).unwrap();
+        assert_eq!(r["added"].as_array().map(Vec::len), Some(kept));
+        let names: Vec<&str> = s.map().bookmarks.iter().map(|b| b.name.as_str()).collect();
+        // Each kept at its place in the file: the i-th is B{i}.
+        assert_eq!(names.len(), kept);
+        assert_eq!(names.iter().enumerate().find(|(i, n)| **n != format!("B{i}")), None);
+        assert_eq!(said(&s, mark, "Import Bookmarks"), note);
+    }
+    // The limit counts bookmarks kept, not the file's entries: one without a name first, then
+    // 10,000 good ones, are all taken, and only the one without a name is said.
+    s.run("map.new", &json!({"name": "Bookmarks skipped first"})).unwrap();
+    let mut file: Vec<Value> = vec![json!({"lon": 10.0, "lat": 45.0, "metresPerPixel": 10.0})];
+    file.extend((0..10_000).map(|i| place(format!("B{i}"))));
+    let mark = s.notice_mark();
+    let r = s.run("bookmark.import", &json!({"text": json!({"bookmarks": file}).to_string()})).unwrap();
+    assert_eq!((r["added"].as_array().map(Vec::len), s.map().bookmarks.len()), (Some(10_000), 10_000));
+    assert_eq!(s.map().bookmarks.iter().enumerate().find(|(i, b)| b.name != format!("B{i}")).map(|(i, _)| i), None);
+    assert_eq!(said(&s, mark, "Import Bookmarks"), ["Import Bookmarks: 1 bookmark(s) without a name left out"]);
+    // The full map: a bookmark replacing one by its name is taken, a new one is left out and said.
+    s.run("map.activate", &json!({"name": "Bookmarks 10000"})).unwrap();
+    let mark = s.notice_mark();
+    let mut again = place("b5".into());
+    again["description"] = json!("Moved");
+    let r = s.run("bookmark.import", &json!({"text": json!({"bookmarks": [again, place("Extra".into())]}).to_string()})).unwrap();
+    assert_eq!(r["added"], json!(["b5"]));
+    assert_eq!(s.map().bookmarks.iter().find(|b| b.name == "B5").map(|b| b.description.as_str()), Some("Moved"));
+    assert_eq!(s.map().bookmarks.len(), 10_000);
+    assert_eq!(said(&s, mark, "Import Bookmarks"), ["Import Bookmarks: 1 bookmark(s) past the map's 10000 left out"]);
 }
 
 /// Repair and reload complete a native date schema on their worker before probing/installing
