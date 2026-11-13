@@ -438,11 +438,16 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             let full = std::path::absolute(&d).map(|p| p.display().to_string()).unwrap_or(d);
             // A window is kept in the project as a GeoTIFF, as a web store's slice is, and its
             // label only names it: an older RustGIS reading the folder again by the label would
-            // read the whole slice and save it back without the window.
+            // read the whole slice and save it back without the window. The layer is read from
+            // its GeoTIFF (embedded bytes come before a path, in older versions too); its path
+            // only keeps where the store is, for a series or summary from the layer once the
+            // project opens again.
             let mut layer = if sel.window.is_some() {
                 r.source = Some(full.clone());
                 let tif = raster::geotiff::write(&r, 0).map_err(|e| e.to_string())?;
-                RasterLayer::from_bytes(r, format!("{}.tif", store_name(&full)), tif)
+                let mut layer = RasterLayer::from_bytes(r, format!("{}.tif", store_name(&full)), tif);
+                layer.path = Some(full);
+                layer
             } else {
                 RasterLayer::from_path(r, full)
             };

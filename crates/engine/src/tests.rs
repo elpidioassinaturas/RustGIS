@@ -24392,6 +24392,33 @@ fn timed_zarr_open_failures_keep_status_without_store_credentials() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A window of a folder store keeps its store through a save and reopen: a series at a point is
+/// read from it, as from a whole slice (#1885).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_zarr_windows_series_after_reopening() {
+    let _cache = zarr_cache_lock();
+    let (dir, path) = zarr_store_over_time("window-reopen");
+    let mut s = Session::new(Project::default());
+    let id = s.run("layer.addZarr", &json!({"path": path, "variable": "t", "index": {"time": 1}, "cells": [0, 0, 2, 2]})).unwrap()["layer"]
+        .as_u64()
+        .unwrap();
+    // At 1°E 20°N: the stored row 1, column 0, so 100·k + 4 at step k.
+    let at = json!({"layer": id, "lon": 1.0, "lat": 20.0});
+    assert_eq!(s.run("zarr.series", &at).unwrap()["values"], json!([4.0, 104.0, 204.0]));
+    let saved = dir.join("window.rgis");
+    s.run("project.saveAs", &json!({"path": saved.display().to_string()})).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.open", &json!({"path": saved.display().to_string()})).unwrap();
+    let id = t.map().layers.iter().find(|l| l.raster.is_some()).unwrap().id;
+    // Read again from its GeoTIFF: the window, not the whole slice.
+    let data = t.map().layer(id).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    assert_eq!((data.width, data.height), (2, 2));
+    let r = t.run("zarr.series", &json!({"layer": id, "lon": 1.0, "lat": 20.0}));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(r.unwrap()["values"], json!([4.0, 104.0, 204.0]));
+}
+
 /// A Zarr variable's series at a point (#555): the values along its time dimension at the cell
 /// holding it, read from the chunks holding that cell, through a layer or the store itself.
 #[cfg(not(target_arch = "wasm32"))]
@@ -44607,13 +44634,15 @@ fn a_zarr_window_reads_only_its_chunks_by_range() {
     assert_eq!(of("lat/c/0"), ["8-31"]);
     assert_eq!(of("lon/c/0"), ["16-39"]);
     // From a folder: the same cells, kept in the project as a GeoTIFF (an older RustGIS would read
-    // the folder again by the label, whole).
+    // the folder again by the label, whole), with the folder kept as where its store is.
     let r =
         s.run("layer.addZarr", &json!({"path": dir.join("s.zarr"), "variable": "v", "index": {"time": 1}, "cells": [2, 1, 5, 4]})).unwrap();
     assert_eq!(pixels(&s, &r).2, data);
     let layer = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap();
     assert!(
-        layer.path.is_none() && layer.subdataset.as_deref() == Some("v[time=1,cells=2:1:5:4]"),
+        layer.embedded.is_some()
+            && layer.path.as_deref().is_some_and(|p| p.ends_with("s.zarr"))
+            && layer.subdataset.as_deref() == Some("v[time=1,cells=2:1:5:4]"),
         "{:?} {:?}",
         layer.path,
         layer.subdataset

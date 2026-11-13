@@ -1008,13 +1008,18 @@ fn plain(c: &Array) -> bool {
     c.shape.len() == 1 && c.codecs.iter().all(|k| matches!(k, Codec::Bytes { .. } | Codec::Crc32c))
 }
 
-/// The bytes of chunk `i` of a plain 1D array ([`plain`]) holding its values `a..b`.
-fn coord_part(c: &Array, i: u64, a: u64, b: u64) -> Part {
-    let (start, size) = (i * c.chunks.first().copied().unwrap_or(1).max(1), c.dtype.size as u64);
+/// The bytes of chunk `i` of a plain 1D array ([`plain`]) holding its values `a..b`; an error
+/// when they lie past what a byte offset holds (a chunk size no store has).
+fn coord_part(c: &Array, i: u64, a: u64, b: u64) -> Result<Part> {
+    let (cs, size) = (c.chunks.first().copied().unwrap_or(1).max(1), c.dtype.size as u64);
+    let at = |v: u64| i.checked_mul(cs).and_then(|start| v.checked_sub(start)).and_then(|n| n.checked_mul(size));
+    let (first, last) = at(a)
+        .zip(at(b).and_then(|e| e.checked_sub(1)))
+        .filter(|(f, l)| f <= l)
+        .ok_or_else(|| bad(format!("{}: its chunks are too large to read", c.path)))?;
     let key = c.chunk_key(&[i]);
-    let span = Span::Bytes((a - start) * size, (b - start) * size - 1);
-    let id = format!("{key}@{}-{}", (a - start) * size, (b - start) * size - 1);
-    Part { key, span, id }
+    let id = format!("{key}@{first}-{last}");
+    Ok(Part { key, span: Span::Bytes(first, last), id })
 }
 
 /// Values `start..end` of a 1D array, from its chunks or, for a [`plain`] one in a window, the bytes
@@ -1031,9 +1036,9 @@ fn coord_values(c: &Array, start: u64, end: u64, windowed: bool, chunks: &HashMa
     let dt = DType { little: little.unwrap_or(c.dtype.little), ..c.dtype };
     let mut out = Vec::new();
     for i in start / cs..end.div_ceil(cs) {
-        let (a, b) = ((i * cs).max(start), ((i + 1) * cs).min(end));
+        let (a, b) = ((i * cs).max(start), (i + 1).saturating_mul(cs).min(end));
         if plain(c) {
-            match chunks.get(&coord_part(c, i, a, b).id) {
+            match chunks.get(&coord_part(c, i, a, b)?.id) {
                 Some(bytes) if bytes.len() as u64 == (b - a) * dt.size as u64 => {
                     out.extend(bytes.chunks_exact(dt.size).map(|v| dt.value(v)))
                 }
@@ -1158,7 +1163,7 @@ pub fn plan(store: &Store, sel: &Selection) -> Result<Plan> {
         }
         for i in start / cs..end.div_ceil(cs) {
             if plain(c) {
-                parts.push(coord_part(c, i, (i * cs).max(start), ((i + 1) * cs).min(end)));
+                parts.push(coord_part(c, i, (i * cs).max(start), (i + 1).saturating_mul(cs).min(end))?);
             } else {
                 keys.push(c.chunk_key(&[i]));
             }
@@ -2994,6 +2999,18 @@ mod tests {
         let e = plan(&many, &Selection { variable: "".into(), index: vec![], window: Some(Window { x0: 0, y0: 0, x1: 65, y1: 65 }) })
             .unwrap_err();
         assert!(e.to_string().contains("4225 chunks for the window, more than 4096: take a smaller window"), "{e}");
+        // A coordinate chunk sized past what a byte offset holds (hostile metadata) neither panics
+        // nor overflows: its window reads, or is refused.
+        for (n, cs) in [(u64::MAX / 2 + 9, u64::MAX / 2 + 1), (u64::MAX / 2 + 9, u64::MAX / 2 + 9)] {
+            let z = serde_json::json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+                "v": {"zarr_format": 3, "node_type": "array", "shape": [2, n], "data_type": "int16", "dimension_names": ["y", "x"],
+                    "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1, 1]}}, "codecs": [{"name": "bytes"}], "fill_value": 0},
+                "x": {"zarr_format": 3, "node_type": "array", "shape": [n], "data_type": "float64", "dimension_names": ["x"],
+                    "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [cs]}}, "codecs": [{"name": "bytes"}], "fill_value": 0}}}});
+            let hostile = parse_store(&[("zarr.json".into(), z.to_string().into_bytes())]).unwrap();
+            let w = Window { x0: n - 4, y0: 0, x1: n - 2, y1: 2 };
+            let _ = plan(&hostile, &Selection { variable: "v".into(), index: vec![], window: Some(w) });
+        }
         // A coordinate's bytes cut short is an error, not a misplaced raster.
         let p = plan(&store, &sel(1, Window { x0: 2, y0: 1, x1: 5, y1: 4 })).unwrap();
         let mut cut = read_plan(&files, &p);
