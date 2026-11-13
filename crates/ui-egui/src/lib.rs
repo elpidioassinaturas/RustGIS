@@ -3008,17 +3008,17 @@ impl RustGisApp {
             }
             // The Layer Properties pane (#1803), on `{"layer": id}` when given (a layer's
             // right-click menu), as the Labeling pane is; feature and raster layers alike. With
-            // `{"tab": "general"|"source"|"display"|"query"}` it shows that tab (Data › Definition
-            // Query asks for "query", a feature layer's only).
+            // `{"tab": "general"|"source"|"display"|"query"|"time"}` it shows that tab (Data ›
+            // Definition Query asks for "query"; "query" and "time" are a feature layer's only).
             "ui.pane.layerProperties" => {
                 let given = match p.get("layer").filter(|l| !l.is_null()) {
                     Some(_) => Some(self.session.layer_id(p)?),
                     None => None,
                 };
                 let tab = match p.get("tab").filter(|t| !t.is_null()) {
-                    Some(t) => {
-                        Some(t.as_str().and_then(layerprops::Topic::parse).ok_or("unknown tab: give general, source, display or query")?)
-                    }
+                    Some(t) => Some(
+                        t.as_str().and_then(layerprops::Topic::parse).ok_or("unknown tab: give general, source, display, query or time")?,
+                    ),
                     None => None,
                 };
                 let layer = given.or(self.session.active_layer).and_then(|id| self.session.map().layer(id));
@@ -3026,8 +3026,10 @@ impl RustGisApp {
                 if (given.is_some() || tab.is_some() || !self.ui.right_open.contains(&RightPane::LayerProperties)) && layer.is_none() {
                     return Err("select a layer in the Layers pane first".into());
                 }
-                if tab == Some(layerprops::Topic::Query) && layer.is_some_and(|l| l.is_raster()) {
-                    return Err("a raster layer has no definition query: the Query tab is a feature layer's".into());
+                if tab.is_some_and(layerprops::Topic::feature_only) && layer.is_some_and(|l| l.is_raster()) {
+                    return Err(
+                        "a raster layer has no definition query or time binding: the Query and Time tabs are a feature layer's".into()
+                    );
                 }
                 if let Some(id) = given {
                     self.session.run("layer.select", &json!({"layer": id}))?;
@@ -4301,7 +4303,12 @@ impl RustGisApp {
                 let ext = p.get("format").and_then(Value::as_str).unwrap_or("geojson").to_ascii_lowercase();
                 rustgis_engine::cmd::share::gpkg_table(p, &ext)?;
                 // A streamed layer exports its whole source, not the features read for the view.
-                let whole = if l.is_streamed() { Some(l.load_all()?) } else { None };
+                let (whole, lost) = if l.is_streamed() {
+                    let (ds, lost) = l.load_all_counted()?;
+                    (Some(ds), lost)
+                } else {
+                    (None, Default::default())
+                };
                 // In the layer's own coordinate system, as share.exportLayer writes a file.
                 let ds = whole.as_ref().unwrap_or(&l.dataset);
                 use rustgis_engine::data::io;
@@ -4329,6 +4336,11 @@ impl RustGisApp {
                     dbf_notes.extend(rustgis_engine::data::source::parquet::values_note(ds, &name));
                 }
                 dbf_notes.extend(io::dates_as_text_note(&ds.fields, &name));
+                dbf_notes.extend(rustgis_engine::cmd::share::gpkg_dates_note(ds, &ext, &name));
+                if lost.rows > 0 {
+                    dbf_notes.push(format!("{name}: {} rows couldn't be read and were left out", lost.rows));
+                }
+                dbf_notes.extend(lost.dates.iter().map(|n| format!("{name}: {}: {n}, so they're empty in the export", l.name)));
                 // CSV holds a point a row, GPX a name for each feature and no areas.
                 dbf_notes.extend(io::export_losses_notes(ds, &ext, io::name_field(ds), &name));
                 if let Some(note) = io::left_out_note(&name, &ext, left_out) {

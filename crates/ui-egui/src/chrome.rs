@@ -355,6 +355,7 @@ pub fn status_bar(app: &mut RustGisApp, ui: &mut Ui) {
                     sep(ui, &t);
                     crate::readjob::status(app, ui, &t);
                 }
+                crate::geocodeui::status(app, ui);
                 // Downloads and windows being read off the frame, each with its Cancel.
                 if !app.ui.downloads.is_empty() || window_reads_under_way(app) {
                     sep(ui, &t);
@@ -740,6 +741,13 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
             if !app.map.toasts.iter().any(|t| t.text == text) {
                 app.session.notify(text, true);
             }
+            continue;
+        }
+        // Rename with no name given (F2) opens the Rename dialog for the active layer, as Command
+        // Search does: the name is typed there. One naming another layer runs the command, which
+        // says the name is missing, rather than renaming the active layer instead.
+        if id == "layer.rename" && p.get("name").is_none() && p.get("layer").is_none() {
+            let _ = app.run("ui.dialog", json!({"name": "renameLayer"}));
             continue;
         }
         let _ = app.run_by_user(id, p);
