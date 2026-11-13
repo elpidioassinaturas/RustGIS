@@ -95,7 +95,7 @@ degrees (default 360, once round; negative turns the other way) over `"frames"` 
 60), keeping the centre, the scale and the pitch, and draws each frame as Export Map draws the
 view, at `"width"` × `"height"` points (default 640 × 400) and `"dpi"` (default 96). A path
 ending in `.gif` gives an animated GIF that loops, each frame shown for `"speed"` milliseconds
-(default 50); one ending in `.zip` gives the frames as PNGs (`frame_0001.png`…), to build a video
+(default 50; a GIF keeps times to the hundredth of a second, so 55 shows as 50 or 60); one ending in `.zip` gives the frames as PNGs (`frame_0001.png`…), to build a video
 with another tool, since a GIF's 256 colours can band a smooth relief. A turn of 360° stops one
 step short of where it began, so the loop has no frame twice; a part of a turn ends on its last
 bearing. The light of a shaded relief stays with the ground, not the camera. The view comes back

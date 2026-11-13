@@ -402,6 +402,8 @@ pub(super) fn frames(
         };
         super::share::saying_shadows(s, what, |s| {
             for i in 0..n {
+                // Before the frame, so a run already asked to stop draws nothing.
+                rustgis_data::progress::check().map_err(|e| e.to_string())?;
                 go(s, i);
                 // Natively the frame (through rustgis_render::render_complete) fetches the tiles
                 // it lacks and waits for them before it draws: dated tile layers have this

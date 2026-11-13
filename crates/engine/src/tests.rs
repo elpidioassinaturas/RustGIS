@@ -45442,10 +45442,12 @@ fn an_orbit_is_exported_as_png_frames_or_a_gif_and_the_view_comes_back() {
 /// and the view is back where it was.
 #[test]
 fn a_stopped_run_ends_an_animation_export_with_nothing_written() {
-    struct Stopped;
+    /// Asked to stop once it was asked `0` times whether it was: 0 stops a run before its first
+    /// frame, 2 one that has drawn a frame.
+    struct Stopped(u32, std::sync::atomic::AtomicU32);
     impl rustgis_data::progress::Probe for Stopped {
         fn cancelled(&self) -> bool {
-            true
+            self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= self.0
         }
         fn begin(&self, _: u64) {}
         fn advance(&self, _: u64) {}
@@ -45462,13 +45464,42 @@ fn a_stopped_run_ends_an_animation_export_with_nothing_written() {
         let params = json!({"path": path.display().to_string(), "width": 96, "height": 64});
         s.run(command, &params).unwrap();
         std::fs::remove_file(&path).unwrap();
-        let stopped = rustgis_data::progress::install(Some(std::sync::Arc::new(Stopped)));
-        let e = s.run(command, &params).unwrap_err();
-        drop(stopped);
-        assert!(e.contains("cancel"), "{command}: {e}");
-        assert!(!path.exists(), "{command} wrote a file");
-        assert_eq!(s.map().camera, before, "{command}");
-        assert_eq!(s.run("time.info", &Value::Null).unwrap()["date"], date, "{command}");
+        for after in [0, 2] {
+            let stopped = rustgis_data::progress::install(Some(std::sync::Arc::new(Stopped(after, 0.into()))));
+            let e = s.run(command, &params).unwrap_err();
+            drop(stopped);
+            assert!(e.contains("cancel"), "{command} after {after}: {e}");
+            assert!(!path.exists(), "{command} after {after} wrote a file");
+            assert_eq!(s.map().camera, before, "{command} after {after}");
+            assert_eq!(s.run("time.info", &Value::Null).unwrap()["date"], date, "{command} after {after}");
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// An animation's frames say a layer drawn without its cast shadows once for the export, about
+/// the export, not once a frame.
+#[test]
+fn an_animation_export_says_its_missing_cast_shadows_once() {
+    let mut s = with_raster();
+    s.run("layer.zoomTo", &json!({"layer": "scene"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "shadow": 1})).unwrap();
+    s.run("time.set", &json!({"dates": ["2020-01-01", "2020-01-02", "2020-01-03"], "date": "2020-01-01"})).unwrap();
+    // Read in place with only its overview held: no whole grid to trace.
+    let rl = s.map_mut().layers.iter_mut().find_map(|l| l.raster.as_mut()).unwrap();
+    rl.in_place = true;
+    let mut r = (**rl.data.as_ref().unwrap()).clone();
+    r.overview = Some((800, 600));
+    rl.data = Some(std::sync::Arc::new(r));
+    let dir = std::env::temp_dir().join(format!("rustgis-orbit-shadows-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (command, what) in [("map.exportOrbit", "The orbit: scene: "), ("time.export", "The time animation: scene: ")] {
+        let from = s.notices.len();
+        let path = dir.join(format!("{command}.zip")).display().to_string();
+        assert_eq!(s.run(command, &json!({"path": path, "frames": 3, "width": 96, "height": 64})).unwrap()["frames"], 3);
+        let said: Vec<&str> =
+            s.notices[from..].iter().map(|n| n.text.as_str()).filter(|t| t.contains("cast shadows aren't drawn")).collect();
+        assert!(said.len() == 1 && said[0].starts_with(what), "{command}: {said:?}");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }

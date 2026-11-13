@@ -53,7 +53,7 @@ pub fn commands() -> Vec<C> {
         ),
         C::new("map.exportOrbit", "Export Orbit", "View › Scene", export_orbit).inputs(orbit_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
-            .params(r#"{"path": "*.gif" | "*.zip" (PNG frames), "frames"?: 1 to 2000 (default 60), "turn"?: degrees the bearing turns by over the frames (default 360, once round; negative turns the other way), "width"?, "height"?: points, 64 to 4096 (default 640 × 400), "dpi"?: 48 to 600 (default 96), "speed"?: milliseconds a GIF frame shows for (default 50)}"#),
+            .params(r#"{"path": "*.gif" | "*.zip" (PNG frames), "frames"?: 1 to 2000 (default 60), "turn"?: degrees the bearing turns by over the frames (default 360, once round; negative turns the other way), "width"?, "height"?: points, 64 to 4096 (default 640 × 400), "dpi"?: 48 to 600 (default 96), "speed"?: milliseconds a GIF frame shows for (default 50; a GIF keeps it to the hundredth of a second)}"#),
         C::new("map.displayType", "Display Type", "View › Options", |s, p| {
             let fast = match ps(p, "mode").ok_or("mode is required")? {
                 "quality" => false,
@@ -193,6 +193,12 @@ fn orbit_inputs(input: &super::InputContext<'_>, _: &Value) -> Result<super::Inp
 /// Turns the view about its centre, keeping its scale and pitch, and writes a frame a step as an
 /// animated GIF or a zip of PNGs (the writer `time.export` uses). The view comes back to where
 /// it was however the frames end.
+///
+/// It runs to its end where it is called, the interface's thread in the app, as `time.export`
+/// and `animation.export` do: each frame is drawn from the session's own map, which the camera
+/// turns, while a background export (`exports::IN_BACKGROUND`) reads the session once and draws
+/// without it. Drawing the frames from a copy of the map, with progress and Cancel, is part 2 of
+/// #1916.
 fn export_orbit(s: &mut Session, p: &Value) -> CmdResult {
     use super::time::{MAX_FRAMES, MAX_PIXELS};
     // Files are written by the desktop app; the browser's go through its services.
