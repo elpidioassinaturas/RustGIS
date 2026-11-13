@@ -244,6 +244,11 @@ fn store_at(url: &str) -> Result<zarr::Store, String> {
     zarr::parse_store(&docs).map_err(|e| crate::sources::message_with_address(url, &e.to_string()))
 }
 
+/// `raster.zarrInfo`. It reads the store's metadata and coordinates on the UI thread, with no
+/// Cancel, as it did before windows: the Add Data › Zarr dialog reads them off the frame, and none
+/// of the background paths takes a command that answers with what a store holds yet. A `"bbox"`
+/// adds the variable's two map coordinates, read whole: at most `MAX_COORDS` values each (32 MB
+/// as Float64), each file a download of at most 60 s.
 fn info(_s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
@@ -255,11 +260,16 @@ fn info(_s: &mut Session, p: &Value) -> CmdResult {
         let (root, store, mut v) = info_of(p)?;
         // A bbox: the window of cells it is in a variable's grid, for layer.addZarr's cells.
         if let Some(asked) = asked_window(p)? {
+            // Cells are given to layer.addZarr, which checks them against the grid; here only a
+            // box is placed.
+            if matches!(asked, Asked::Cells(_)) {
+                return Err("raster.zarrInfo takes a bbox, which it gives as cells: give cells to layer.addZarr".into());
+            }
             let mut sel = zarr::Selection { variable: ps(p, "variable").map(str::trim).unwrap_or("").to_string(), ..Default::default() };
             pick_variable(&store, &mut sel)?;
             let cut = place_window(&root, &store, &mut sel, Some(asked))?;
             let w = sel.window.unwrap_or_default();
-            v["window"] = serde_json::json!({"variable": sel.variable, "cells": [w.x0, w.y0, w.x1, w.y1], "note": cut});
+            v["window"] = serde_json::json!({"variable": sel.variable, "cells": [w.x0, w.y0, w.x1, w.y1], "notes": cut});
         }
         Ok(v)
     }
@@ -357,23 +367,30 @@ fn asked_window(p: &Value) -> Result<Option<Asked>, String> {
 }
 
 /// Puts the window asked for on `sel`: a box placed by the variable's coordinates (read from the
-/// store at `root`). What is said of it: a box reaching past the grid, read only within it.
+/// store at `root`). What is said of it: a box reaching past the grid, read only within it; a box
+/// within one cell along an axis, read as two there.
 #[cfg(not(target_arch = "wasm32"))]
-fn place_window(root: &str, store: &zarr::Store, sel: &mut zarr::Selection, asked: Option<Asked>) -> Result<Option<String>, String> {
+fn place_window(root: &str, store: &zarr::Store, sel: &mut zarr::Selection, asked: Option<Asked>) -> Result<Vec<String>, String> {
     let at = |e: rustgis_data::DataError| crate::sources::message_with_address(root, &e.to_string());
     match asked {
-        None => Ok(None),
+        None => Ok(Vec::new()),
         Some(Asked::Cells(w)) => {
             sel.window = Some(w);
-            Ok(None)
+            Ok(Vec::new())
         }
         Some(Asked::Bbox(bbox)) => {
             let coords = store_files(root, &zarr::window_keys(store, &sel.variable).map_err(at)?)?;
-            let (w, cut) = zarr::window_of(store, &sel.variable, &coords, bbox).map_err(at)?;
+            let (w, cut, widened) = zarr::window_of(store, &sel.variable, &coords, bbox).map_err(at)?;
             sel.window = Some(w);
-            Ok(cut.then(|| {
-                format!("the bbox reaches past the grid: only columns {}–{} and rows {}–{} within it are read", w.x0, w.x1, w.y0, w.y1)
-            }))
+            let cells = format!("columns {}–{} and rows {}–{}", w.x0, w.x1, w.y0, w.y1);
+            let mut said = Vec::new();
+            if cut {
+                said.push(format!("the bbox reaches past the grid: only {cells} within it are read"));
+            }
+            if widened {
+                said.push(format!("the bbox is within one cell along an axis, and a window is 2 × 2 cells at least: {cells} are read"));
+            }
+            Ok(said)
         }
     }
 }

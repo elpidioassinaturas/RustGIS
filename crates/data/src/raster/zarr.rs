@@ -1656,10 +1656,11 @@ pub fn window_keys(store: &Store, variable: &str) -> Result<Vec<String>> {
 
 /// The window of `variable`'s map cells a box `[west, south, east, north]` covers, in the grid's own
 /// coordinates (degrees, of either longitude convention, for a longitude/latitude grid), from its
-/// coordinates (`chunks` from [`window_keys`]); and whether the box reaches past the grid (only the
-/// part within it is read). At least 2 × 2 cells, so the cell size is known. The coordinates must
-/// be evenly spaced, as for a slice.
-pub fn window_of(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>>, bbox: [f64; 4]) -> Result<(Window, bool)> {
+/// coordinates (`chunks` from [`window_keys`]); whether the box reaches past the grid (only the
+/// part within it is read); and whether it was widened to 2 × 2 cells, the fewest a window takes so
+/// the cell size is known. A box round the whole globe, or holding the whole axis, is the whole
+/// axis. The coordinates must be evenly spaced, as for a slice.
+pub fn window_of(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>>, bbox: [f64; 4]) -> Result<(Window, bool, bool)> {
     let [w, s, e, n] = bbox;
     if !bbox.iter().all(|v| v.is_finite()) || w >= e || s >= n {
         return Err(bad("bbox is [west, south, east, north], west below east and south below north"));
@@ -1676,7 +1677,8 @@ pub fn window_of(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>
         return Err(bad(format!("{}: its coordinates aren't evenly spaced", a.path)));
     };
     // The cells from `lo` to `hi` along an axis whose first edge is `v0`, a step `dv`, `len` of
-    // them: the range, and whether it was cut to the grid; None when it misses it.
+    // them: the range, whether it was cut to the grid, and whether it was widened to two cells;
+    // None when it misses it.
     let cells = |lo: f64, hi: f64, v0: f64, dv: f64, len: u64| {
         let (i, j) = if dv > 0.0 { ((lo - v0) / dv, (hi - v0) / dv) } else { ((hi - v0) / dv, (lo - v0) / dv) };
         // An edge on a cell's edge, to within rounding, takes no cell past it.
@@ -1685,29 +1687,38 @@ pub fn window_of(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>
         let (from, to) = (i.max(0.0) as u64, j.min(len as f64).max(0.0) as u64);
         (from < to).then(|| {
             // Two cells at least, so the window's coordinates give the cell size.
+            let widened = to - from < 2;
             let (from, to) =
-                if to - from < 2 { (from.min(len.saturating_sub(2)), (from.min(len.saturating_sub(2)) + 2).min(len)) } else { (from, to) };
-            (from, to, i < 0.0 || j > len as f64)
+                if widened { (from.min(len.saturating_sub(2)), (from.min(len.saturating_sub(2)) + 2).min(len)) } else { (from, to) };
+            (from, to, i < 0.0 || j > len as f64, widened)
         })
     };
     let rows = cells(s, n, y0, dy, ys.len() as u64);
     // A longitude may be written another way round the globe than the grid's.
     let turns: &[f64] = if geographic(xc) { &[0.0, 360.0, -360.0] } else { &[0.0] };
-    let hits: Vec<_> = turns.iter().filter_map(|k| cells(w + k, e + k, x0, dx, xs.len() as u64)).collect();
-    // Over the grid's seam (0°/360°, or ±180°) the box is two runs of columns, which a window
-    // isn't: refused rather than read on one side.
-    if hits.len() > 1 {
+    let len = xs.len() as u64;
+    let hits: Vec<_> = turns.iter().filter_map(|k| cells(w + k, e + k, x0, dx, len)).collect();
+    // A box holding the whole axis in one turn, or (longitude) going round the globe, is the whole
+    // axis: one run of columns.
+    let whole = hits
+        .iter()
+        .find(|h| h.0 == 0 && h.1 == len)
+        .copied()
+        .or_else(|| (turns.len() > 1 && e - w >= 360.0).then_some((0, len, true, false)));
+    // Over the grid's seam (0°/360°, or ±180°) a box is otherwise two runs of columns, which a
+    // window isn't: refused rather than read on one side.
+    if whole.is_none() && hits.len() > 1 {
         return Err(bad(format!(
             "{}: the bbox crosses the grid's edge at {:.0}°, so it is two parts of the grid: give a box on each side",
             a.path,
             x0 + dx * xs.len() as f64
         )));
     }
-    let cols = hits.first().copied();
-    let (Some((y0, y1, cut_y)), Some((x0, x1, cut_x))) = (rows, cols) else {
+    let cols = whole.or_else(|| hits.first().copied());
+    let (Some((y0, y1, cut_y, wide_y)), Some((x0, x1, cut_x, wide_x))) = (rows, cols) else {
         return Err(bad(format!("{}: the bbox lies outside its grid", a.path)));
     };
-    Ok((Window { x0, y0, x1, y1 }, cut_x || cut_y))
+    Ok((Window { x0, y0, x1, y1 }, cut_x || cut_y, wide_x || wide_y))
 }
 
 /// What a point's series needs (see [`plan_series`]).
@@ -2995,15 +3006,24 @@ mod tests {
         for k in window_keys(&store, "v").unwrap() {
             coords.insert(k.clone(), files.iter().find(|(f, _)| *f == k).unwrap().1.clone());
         }
-        assert_eq!(window_of(&store, "v", &coords, [21.0, 41.0, 49.0, 69.0]).unwrap(), (Window { x0: 2, y0: 1, x1: 5, y1: 4 }, false));
-        assert_eq!(window_of(&store, "v", &coords, [-50.0, 41.0, 13.0, 200.0]).unwrap(), (Window { x0: 0, y0: 0, x1: 2, y1: 4 }, true));
+        assert_eq!(
+            window_of(&store, "v", &coords, [21.0, 41.0, 49.0, 69.0]).unwrap(),
+            (Window { x0: 2, y0: 1, x1: 5, y1: 4 }, false, false)
+        );
+        assert_eq!(
+            window_of(&store, "v", &coords, [-50.0, 41.0, 13.0, 200.0]).unwrap(),
+            (Window { x0: 0, y0: 0, x1: 2, y1: 4 }, true, false)
+        );
         // An edge on a cell's edge but for rounding takes no cell past it.
         assert_eq!(
             window_of(&store, "v", &coords, [11.0, 41.0, (0.1 + 0.2) * 100.0, 69.0]).unwrap().0,
             Window { x0: 1, y0: 1, x1: 3, y1: 4 }
         );
-        // Within one cell: two, so the cell size is known.
-        assert_eq!(window_of(&store, "v", &coords, [21.0, 41.0, 22.0, 42.0]).unwrap().0, Window { x0: 2, y0: 3, x1: 4, y1: 5 });
+        // Within one cell: two, so the cell size is known, and said.
+        assert_eq!(
+            window_of(&store, "v", &coords, [21.0, 41.0, 22.0, 42.0]).unwrap(),
+            (Window { x0: 2, y0: 3, x1: 4, y1: 5 }, false, true)
+        );
         assert!(window_of(&store, "v", &coords, [500.0, 41.0, 600.0, 69.0]).is_err());
         assert!(window_of(&store, "v", &coords, [49.0, 41.0, 21.0, 69.0]).is_err());
         // On a longitude grid of 0–360°, a box over its 0°/360° seam is refused (it is two runs of
@@ -3023,8 +3043,15 @@ mod tests {
             let e = window_of(&globe, "v", &gc, seam).unwrap_err().to_string();
             assert!(e.contains("crosses the grid's edge at 360°"), "{seam:?}: {e}");
         }
-        assert_eq!(window_of(&globe, "v", &gc, [-50.0, -10.0, -10.0, 10.0]).unwrap(), (Window { x0: 10, y0: 0, x1: 12, y1: 2 }, false));
-        assert_eq!(window_of(&globe, "v", &gc, [10.0, -10.0, 50.0, 10.0]).unwrap(), (Window { x0: 0, y0: 0, x1: 2, y1: 2 }, false));
+        assert_eq!(
+            window_of(&globe, "v", &gc, [-50.0, -10.0, -10.0, 10.0]).unwrap(),
+            (Window { x0: 10, y0: 0, x1: 12, y1: 2 }, false, false)
+        );
+        assert_eq!(window_of(&globe, "v", &gc, [10.0, -10.0, 50.0, 10.0]).unwrap(), (Window { x0: 0, y0: 0, x1: 2, y1: 2 }, false, false));
+        // A box round the whole globe, or holding the whole axis in one turn, is the whole axis.
+        let all = (Window { x0: 0, y0: 0, x1: 12, y1: 2 }, true, false);
+        assert_eq!(window_of(&globe, "v", &gc, [-200.0, -10.0, 200.0, 10.0]).unwrap(), all);
+        assert_eq!(window_of(&globe, "v", &gc, [-10.0, -10.0, 370.0, 10.0]).unwrap(), all);
         // A window outside the grid, or under 2 × 2 cells, is refused; one wanting more chunks than
         // a read takes says to take a smaller one.
         for w in [Window { x0: 2, y0: 1, x1: 13, y1: 4 }, Window { x0: 2, y0: 1, x1: 3, y1: 4 }, Window { x0: 5, y0: 1, x1: 2, y1: 4 }] {

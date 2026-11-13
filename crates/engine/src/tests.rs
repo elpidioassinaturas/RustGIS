@@ -44988,13 +44988,26 @@ fn a_zarr_window_reads_only_its_chunks_by_range() {
         layer.subdataset
     );
     // A box in degrees gives the same cells; one reaching past the grid is read within it, and said.
+    let mark = s.notice_mark();
     let r = s.run("layer.addZarr", &json!({"url": url, "variable": "v", "index": {"time": 1}, "bbox": [2.2, 5.2, 4.8, 7.8]})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("bbox")), "{:?}", s.notices_since(mark));
     assert_eq!(pixels(&s, &r).2, data);
     // A window isn't summarised over time: that would read the whole variable.
     let e = s.run("zarr.reduce", &json!({"layer": r["layer"], "stat": "mean"})).unwrap_err();
     assert!(e.contains("is a window of its variable: add the variable without a window"), "{e}");
+    // A box within one cell is read as two along that axis, and said.
+    let mark = s.notice_mark();
+    s.run("layer.addZarr", &json!({"url": url, "variable": "v", "index": {"time": 1}, "bbox": [2.2, 5.2, 2.4, 7.8]})).unwrap();
+    assert!(
+        s.notices_since(mark).iter().any(|n| n.text.contains("within one cell along an axis") && n.text.contains("columns 2–4")),
+        "{:?}",
+        s.notices_since(mark)
+    );
     let info = s.run("raster.zarrInfo", &json!({"url": url, "bbox": [2.2, 5.2, 4.8, 7.8]})).unwrap();
     assert_eq!(info["window"]["cells"], json!([2, 1, 5, 4]));
+    // Cells aren't placed (nor checked) here: they are refused, not echoed back.
+    let e = s.run("raster.zarrInfo", &json!({"url": url, "cells": [0, 0, 999_999, 999_999]})).unwrap_err();
+    assert!(e.contains("raster.zarrInfo takes a bbox"), "{e}");
     assert_eq!(info["variables"][0]["chunks"], json!([1, 2, 3]));
     let mark = s.notice_mark();
     s.run("layer.addZarr", &json!({"url": url, "variable": "v", "bbox": [-20.0, 5.2, 4.8, 7.8]})).unwrap();
