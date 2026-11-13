@@ -153,7 +153,7 @@ pub(super) fn embed(font: &FontRef<'_>, glyphs: &[GlyphId], room: usize) -> Resu
     let name = if name.is_empty() { "Face".to_string() } else { name };
     Ok(Embedded {
         cff: face.tables().cff.is_some(),
-        name: format!("{}+{name}", tag(&name, glyphs)),
+        name: format!("{}+{name}", tag(&name, glyphs, data)),
         remapper,
         bbox: [f32::from(b.x_min) * k, f32::from(b.y_min) * k, f32::from(b.x_max) * k, f32::from(b.y_max) * k],
         ascent: f32::from(face.ascender()) * k,
@@ -188,11 +188,25 @@ fn curve_points(c: &OutlineCurve) -> (u8, [(f32, f32); 4]) {
     }
 }
 
-/// A subset's six-letter tag, from its face's name and glyphs: the same subset, the same tag.
-fn tag(name: &str, glyphs: &[GlyphId]) -> String {
+/// A subset's six-letter tag, from its face's name, glyphs and file (its size and bytes): the same
+/// subset, the same tag, and two files with the same name and glyphs, two tags.
+fn tag(name: &str, glyphs: &[GlyphId], file: &[u8]) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in name.bytes().chain(glyphs.iter().flat_map(|g| g.0.to_le_bytes())) {
-        h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+    let mut mix = |v: u64| h = (h ^ v).wrapping_mul(0x0100_0000_01b3);
+    for b in name.bytes() {
+        mix(u64::from(b));
+    }
+    for g in glyphs {
+        mix(u64::from(g.0));
+    }
+    mix(file.len() as u64);
+    // The file eight bytes at a time (a large face is read once, quickly), then what is left.
+    let (words, rest) = file.as_chunks::<8>();
+    for b in rest {
+        mix(u64::from(*b));
+    }
+    for w in words {
+        mix(u64::from_le_bytes(*w));
     }
     (0..6).map(|i| char::from(b'A' + ((h >> (i * 5)) % 26) as u8)).collect()
 }
@@ -310,6 +324,17 @@ mod tests {
     /// A CFF face (an OpenType .otf) is embedded as a CIDFontType0 over its subset as an
     /// OpenType file (FontFile3, PDF 1.6), each CID its character's glyph. The face is the
     /// test's own (testdata/README.md): a square, a triangle and two bars, each its own width.
+    /// A subset's tag follows its face's file, not only its name and glyphs: two files with the
+    /// same name and glyphs get two tags (#1815).
+    #[test]
+    fn a_subset_tag_follows_its_file() {
+        let glyphs = [GlyphId(3), GlyphId(7)];
+        let (a, b) = (tag("Face", &glyphs, b"one file"), tag("Face", &glyphs, b"another file"));
+        assert_eq!(a, tag("Face", &glyphs, b"one file"), "the same subset, the same tag");
+        assert_ne!(a, b);
+        assert!(a.len() == 6 && a.chars().all(|c| c.is_ascii_uppercase()), "{a}");
+    }
+
     #[test]
     fn a_cff_face_is_a_cid_font_type0() {
         let bytes: &'static [u8] = include_bytes!("../../testdata/test-cff.otf");
