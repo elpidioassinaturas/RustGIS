@@ -321,9 +321,6 @@ mod tests {
         checked
     }
 
-    /// A CFF face (an OpenType .otf) is embedded as a CIDFontType0 over its subset as an
-    /// OpenType file (FontFile3, PDF 1.6), each CID its character's glyph. The face is the
-    /// test's own (testdata/README.md): a square, a triangle and two bars, each its own width.
     /// A subset's tag follows its face's file, not only its name and glyphs: two files with the
     /// same name and glyphs get two tags (#1815).
     #[test]
@@ -335,6 +332,9 @@ mod tests {
         assert!(a.len() == 6 && a.chars().all(|c| c.is_ascii_uppercase()), "{a}");
     }
 
+    /// A CFF face (an OpenType .otf) is embedded as a CIDFontType0 over its subset as an
+    /// OpenType file (FontFile3, PDF 1.6), each CID its character's glyph. The face is the
+    /// test's own (testdata/README.md): a square, a triangle and two bars, each its own width.
     #[test]
     fn a_cff_face_is_a_cid_font_type0() {
         let bytes: &'static [u8] = include_bytes!("../../testdata/test-cff.otf");

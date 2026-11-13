@@ -204,7 +204,10 @@ fn glyphs(out: &mut String, defs: &mut Defs, run: &GlyphRun) {
     let stroke = run.halo.filter(|w| w.is_finite() && *w > 0.0 && k > 0.0).map_or(String::new(), |w| {
         format!(r#"{} stroke-width="{}" stroke-linejoin="round" stroke-linecap="round""#, paint("stroke", run.color), trimmed(w / k, 4))
     });
-    let _ = writeln!(out, r#"<g aria-label="{}"{}{stroke}{}>"#, super::esc(&text), paint("fill", run.color), transform_attr(run.transform));
+    // The halo's copy is decoration: hidden from screen readers, which read the label once (as a
+    // PDF marks it an artifact).
+    let label = if run.halo.is_some() { r#" aria-hidden="true""#.to_string() } else { format!(r#" aria-label="{}""#, super::esc(&text)) };
+    let _ = writeln!(out, r#"<g{label}{}{stroke}{}>"#, paint("fill", run.color), transform_attr(run.transform));
     for g in &run.glyphs {
         let id = match defs.glyphs.get(&(face, g.id.0)) {
             Some(id) => id.clone(),
@@ -421,20 +424,26 @@ mod tests {
     }
 
     /// A halo's copy of the text (#1815) is the run stroked as well, rounded, its width in the
-    /// glyphs' own units so that it is the run's once they are scaled.
+    /// glyphs' own units so that it is the run's once they are scaled; it is hidden from screen
+    /// readers, and the text over it keeps its label, so the label is read once.
     #[test]
     fn a_halo_run_is_stroked() {
         let font = crate::text::label_font().unwrap();
         let glyphs = vec![Glyph { id: ab_glyph::Font::glyph_id(font, 'H'), x: 0.0, ch: 'H' }];
         let upm = ab_glyph::Font::units_per_em(font).unwrap();
         let mut d = Drawing::new(40.0, 40.0);
-        d.glyphs(GlyphRun { font, size: 10.0, color: Color::WHITE, transform: Transform::identity(), glyphs, halo: Some(2.0) });
+        let run = |color, halo| GlyphRun { font, size: 10.0, color, transform: Transform::identity(), glyphs: glyphs.clone(), halo };
+        d.glyphs(run(Color::WHITE, Some(2.0)));
+        d.glyphs(run(Color::BLACK, None));
         let (_, _, list) = d.finish();
         let (mut svg, mut defs) = (String::new(), Defs::default());
         items(&mut svg, &mut defs, &list).unwrap();
         let width = format!(r#"stroke-width="{}""#, trimmed(2.0 / (10.0 / upm), 4));
         assert!(svg.contains(r##"stroke="#ffffff""##) && svg.contains(&width), "{svg}");
         assert!(svg.contains(r#"stroke-linejoin="round" stroke-linecap="round""#), "{svg}");
+        let groups: Vec<&str> = svg.lines().filter(|l| l.starts_with("<g ")).collect();
+        assert!(groups[0].starts_with(r#"<g aria-hidden="true""#) && !groups[0].contains("aria-label"), "{svg}");
+        assert!(groups[1].starts_with(r#"<g aria-label="H""#) && !groups[1].contains("stroke"), "{svg}");
     }
 
     /// A blended map layer over another, each in a layer (#1815), blends with the one beneath in
