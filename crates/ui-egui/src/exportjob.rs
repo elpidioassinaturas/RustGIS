@@ -183,6 +183,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// View › Scene › Export Orbit opens its dialog with the command's defaults, and the frames it
+    /// asks for are drawn on a thread of their own, the view left where it is.
+    #[test]
+    fn export_orbit_opens_its_dialog_and_draws_on_a_thread() {
+        let mut app = RustGisApp::with_sample();
+        app.run("ui.dialog", json!({"name": "exportOrbit"})).unwrap();
+        assert_eq!(app.dialogs.open, Some("exportOrbit"));
+        assert_eq!([&app.dialogs.a, &app.dialogs.b, &app.dialogs.e], ["60", "360", "50"]);
+        let camera = app.session.map().camera;
+        let dir = std::env::temp_dir().join(format!("rustgis-export-orbit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("orbit.zip");
+        crate::dialogs::PICKED.with(|c| *c.borrow_mut() = Some(path.display().to_string()));
+        let asked = json!({"frames": 3, "turn": 90, "width": 96, "height": 64});
+        assert_eq!(app.run("ui.exportOrbit", asked).unwrap()["started"], "Export Orbit");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while land(&mut app) {
+            assert!(std::time::Instant::now() < end, "Export Orbit never landed");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let exported = format!("Exported {}", path.display());
+        assert!(app.session.notices.iter().any(|n| n.text == exported && !n.error), "{:?}", app.session.notices.last());
+        assert_eq!(rustgis_engine::data::zip::read(&std::fs::read(&path).unwrap()).unwrap().len(), 3);
+        assert_eq!(app.session.map().camera, camera);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The ribbon's Export Map to a `.tif` writes a GeoTIFF on a thread like the PNG, at 192 DPI
     /// where that fits (the engine's `fit`).
     #[test]

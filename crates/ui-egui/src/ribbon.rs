@@ -2102,6 +2102,16 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 json!({"mode": if v.fast { "quality" } else { "speed" }}),
                 v.fast,
             );
+            small(
+                ui,
+                app,
+                "maneuver_roundabout",
+                "Export Orbit",
+                "Write a turn of the view about its centre as an animated GIF or PNG frames.",
+                "ui.dialog",
+                json!({"name": "exportOrbit"}),
+                false,
+            );
         });
     });
     group(ui, "Windows", |ui| {

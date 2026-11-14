@@ -4363,6 +4363,19 @@ impl RustGisApp {
                     return self.run("animation.export", json!({"path": path}));
                 }
             }
+            // Export Orbit's dialog, its parameters in `p`: the file picked, then the frames drawn
+            // on a thread of their own, with progress and Cancel in the status bar.
+            "ui.exportOrbit" => {
+                let name = format!("{} orbit.gif", self.session.map().name);
+                if let Some(path) = dialogs::pick_save(&name, &["gif", "zip"], tl!("Animated GIF or PNG frames (zip)")) {
+                    let mut args = p.clone();
+                    args["path"] = json!(path);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    return exportjob::start(self, "map.exportOrbit", args);
+                    #[cfg(target_arch = "wasm32")]
+                    return self.run("map.exportOrbit", args);
+                }
+            }
             "ui.magnifier" => self.map.magnifier = p.get("on").and_then(Value::as_bool).unwrap_or(!self.map.magnifier),
             "ui.layoutSelect" => self.layout.selected = p.get("element").and_then(Value::as_u64).map(|v| v as u32),
             "ui.layoutTool" => {
