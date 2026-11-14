@@ -2976,6 +2976,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lerc-writer"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0386d9f86240d1d3e386b0a6478b280c8971585d3e45fdcd25e324c189a7607c"
+dependencies = [
+ "lerc-core",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4824,7 +4833,9 @@ dependencies = [
  "geozero",
  "image",
  "laz",
+ "lerc-core",
  "lerc-reader",
+ "lerc-writer",
  "lz4_flex",
  "miniz_oxide 0.9.1",
  "mysql",

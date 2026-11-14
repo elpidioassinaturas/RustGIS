@@ -81,6 +81,9 @@ parquet = { workspace = true, features = ["arrow"] }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 proptest = { workspace = true }
+# Writing LERC blobs with masks, band sets and padded strips that GDAL never writes.
+lerc-writer = "0.5"
+lerc-core = "0.5"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 # Writing Zstandard-compressed GeoTIFFs.

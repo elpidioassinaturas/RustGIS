@@ -6,8 +6,10 @@
 //! Error Raster Compression), possibly wrapped in Deflate or Zstandard: the `LercParameters` tag
 //! (50674) gives the LERC version and that extra layer (0 none, 1 Deflate, 2 Zstandard). A blob of
 //! a chunk with several samples per pixel holds them all, pixel by pixel, or one blob per band one
-//! after another. Pixels LERC marks invalid come back as NaN in floating-point images and as the
-//! image's no-data value (`GDAL_NODATA`), else 0, in integer ones, as GDAL reads them.
+//! after another, each with its own validity mask (a later band's may be left out when it is the
+//! one before it). Samples a mask marks invalid are said ([`Chunk::gaps`]): the readers make them
+//! no-data. A Byte image whose last sample is an unassociated alpha of only 0 and 255 is stored by
+//! GDAL without that sample, its alpha the mask: it is put back, 255 where the mask is set.
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -31,9 +33,40 @@ pub(crate) fn is_lerc<R: Read + Seek>(dec: &mut Decoder<R>) -> bool {
     dec.find_tag_unsigned::<u16>(Tag::Compression).ok().flatten() == Some(COMPRESSION)
 }
 
-/// Chunk `index` (a strip or tile, counting through every plane) of the decoder's current image,
-/// cropped to the image as `Decoder::read_chunk` returns it.
-pub(crate) fn chunk<R: Read + Seek>(dec: &mut Decoder<R>, index: u32) -> Result<DecodingResult> {
+/// Where an image's chunks are in the file: its offsets and byte counts, read once for every chunk
+/// of the image a reader decodes (the `tiff` crate keeps its own copy private).
+#[derive(Default)]
+pub(crate) struct Table {
+    offsets: Vec<u64>,
+    counts: Vec<u64>,
+}
+
+impl Table {
+    /// Chunk `index`'s offset and byte count, the table read from the decoder's current image the
+    /// first time.
+    fn get<R: Read + Seek>(&mut self, dec: &mut Decoder<R>, tiled: bool, index: u32) -> Result<(u64, u64)> {
+        if self.offsets.is_empty() {
+            let (offsets, counts) = if tiled { (Tag::TileOffsets, Tag::TileByteCounts) } else { (Tag::StripOffsets, Tag::StripByteCounts) };
+            self.offsets = dec.find_tag_unsigned_vec::<u64>(offsets).ok().flatten().unwrap_or_default();
+            self.counts = dec.find_tag_unsigned_vec::<u64>(counts).ok().flatten().unwrap_or_default();
+        }
+        match (self.offsets.get(index as usize), self.counts.get(index as usize)) {
+            (Some(o), Some(c)) => Ok((*o, *c)),
+            _ => Err(err("no such chunk")),
+        }
+    }
+}
+
+/// A decoded chunk: its samples, cropped to the image as `Decoder::read_chunk` returns them, and
+/// which of them the chunk's validity masks mark invalid (`None` when none is).
+pub(crate) struct Chunk {
+    pub(crate) samples: DecodingResult,
+    pub(crate) gaps: Option<Vec<bool>>,
+}
+
+/// Chunk `index` (a strip or tile, counting through every plane) of the decoder's current image.
+/// `table` keeps the image's chunk offsets from one call to the next.
+pub(crate) fn chunk<R: Read + Seek>(dec: &mut Decoder<R>, index: u32, table: &mut Table) -> Result<Chunk> {
     let (w, h) = dec.dimensions().map_err(err)?;
     let tag = |dec: &mut Decoder<R>, t: Tag| dec.find_tag_unsigned::<u32>(t).ok().flatten();
     let tiled = tag(dec, Tag::TileWidth).is_some();
@@ -55,6 +88,13 @@ pub(crate) fn chunk<R: Read + Seek>(dec: &mut Decoder<R>, index: u32) -> Result<
     let planar = tag(dec, Tag::PlanarConfiguration) == Some(2);
     let samples = if planar { 1 } else { spp };
     let extra = dec.find_tag_unsigned_vec::<u32>(Tag::Unknown(50674)).ok().flatten().and_then(|v| v.get(1).copied()).unwrap_or(0);
+    // An unassociated alpha (ExtraSamples 2) last, in a Byte image of pixels stored together: GDAL
+    // may keep it as the mask.
+    let alpha_last = !planar
+        && samples > 1
+        && bps == 8
+        && format == 1
+        && dec.find_tag_unsigned_vec::<u16>(Tag::ExtraSamples).ok().flatten().and_then(|v| v.last().copied()) == Some(2);
     let nodata = dec
         .find_tag(Tag::Unknown(42113))
         .ok()
@@ -69,14 +109,11 @@ pub(crate) fn chunk<R: Read + Seek>(dec: &mut Decoder<R>, index: u32) -> Result<
     let (x0, y0) = ((c % across.max(1)) * cw, (c / across.max(1)) * ch);
     let dw = if tiled { cw.min(w.saturating_sub(x0)) } else { w } as usize;
     let dh = ch.min(h.saturating_sub(y0)) as usize;
-    // A tile is coded whole, padding included; a strip only has the image's rows.
+    // A tile is coded whole, padding included; a strip has at least the image's rows (a producer
+    // may pad the last one to the full strip).
     let (bw, bh) = (cw as usize, if tiled { ch as usize } else { dh });
 
-    let (offsets, counts) = if tiled { (Tag::TileOffsets, Tag::TileByteCounts) } else { (Tag::StripOffsets, Tag::StripByteCounts) };
-    let at = |dec: &mut Decoder<R>, t: Tag| dec.find_tag_unsigned_vec::<u64>(t).ok().flatten().and_then(|v| v.get(index as usize).copied());
-    let (Some(offset), Some(count)) = (at(dec, offsets), at(dec, counts)) else {
-        return Err(err("no such chunk"));
-    };
+    let (offset, count) = table.get(dec, tiled, index)?;
     let count = usize::try_from(count).ok().filter(|n| *n <= MAX_CHUNK_BYTES).ok_or_else(|| err("a chunk is too large"))?;
     // Read as far as the file goes, not allocated from the claim.
     let r = dec.inner();
@@ -88,22 +125,38 @@ pub(crate) fn chunk<R: Read + Seek>(dec: &mut Decoder<R>, index: u32) -> Result<
     }
     let blob = unwrap_layer(encoded, extra)?;
 
-    let (values, mask) = decode_blob(&blob, bw, bh, samples)?;
+    let decoded = decode_blob(&blob, bw, bh, !tiled, samples, alpha_last)?;
     let float = format == 3;
     let fill = if float { f64::NAN } else { nodata.unwrap_or(0.0) };
-    let mut out = empty(format, bps, dw * dh * samples)?;
+    let n = dw * dh * samples;
+    let mut out = empty(format, bps, n)?;
+    let mut gaps = decoded.valid.as_ref().map(|_| Vec::with_capacity(n));
     for y in 0..dh {
         let row = y * bw;
         for x in 0..dw {
-            let valid = mask.as_ref().is_none_or(|m| m.get(row + x).is_some_and(|v| *v != 0));
             for s in 0..samples {
                 let i = (row + x) * samples + s;
-                let v = if valid { values.get(i).copied() } else { None };
-                push(&mut out, v, fill);
+                let valid = decoded.valid.as_ref().is_none_or(|m| m.get(i).copied().unwrap_or(false));
+                push(&mut out, if valid { decoded.values.get(i).copied() } else { None }, fill);
+                if let Some(g) = gaps.as_mut() {
+                    g.push(!valid);
+                }
             }
         }
     }
-    Ok(out)
+    // A chunk with every sample valid says no gaps.
+    let gaps = gaps.filter(|g| g.iter().any(|b| *b));
+    Ok(Chunk { samples: out, gaps })
+}
+
+/// Turns the samples `gaps` marks (see [`Chunk::gaps`]) into NaN, no-data, in `values`, the chunk's
+/// samples as 32-bit floats in the same order.
+pub(crate) fn blank(values: &mut [f32], gaps: Option<&[bool]>) {
+    for (v, g) in values.iter_mut().zip(gaps.unwrap_or_default()) {
+        if *g {
+            *v = f32::NAN;
+        }
+    }
 }
 
 /// The LERC blob inside a chunk: undoes the Deflate or Zstandard layer `extra` names.
@@ -126,46 +179,94 @@ fn unwrap_layer(encoded: Vec<u8>, extra: u32) -> Result<Vec<u8>> {
     }
 }
 
-/// The chunk's samples (pixel by pixel, every sample of a pixel together) and its validity mask
-/// (one byte a pixel, 0 for invalid), checked against the chunk's `width × height × samples`. The
-/// blob holds every sample of a pixel, or is one blob per sample after another.
-fn decode_blob(blob: &[u8], width: usize, height: usize, samples: usize) -> Result<(Vec<f64>, Option<Vec<u8>>)> {
+/// A chunk's decoded samples, pixel by pixel (every sample of a pixel together), and which of them
+/// are valid (`None`: all of them).
+struct Blobs {
+    values: Vec<f64>,
+    valid: Option<Vec<bool>>,
+}
+
+/// Decodes a chunk's blob, `width` pixels wide and `height` rows (at least, in a `strip`), of
+/// `samples` a pixel: one blob holding them all, or one blob per sample (or a few) after another.
+/// Each header is checked against the chunk before any samples are decoded. With `alpha_last`, a
+/// single blob one sample short holds every sample but an alpha, which its mask gives.
+fn decode_blob(blob: &[u8], width: usize, height: usize, strip: bool, samples: usize, alpha_last: bool) -> Result<Blobs> {
     let pixels = width.checked_mul(height).ok_or_else(|| err("a chunk is too large"))?;
+    // Each part: its samples a pixel, its values (blob rows cut to `height`) and its mask.
     let mut parts: Vec<(usize, Vec<f64>, Option<Vec<u8>>)> = Vec::new();
     let mut rest = blob;
     let mut depth = 0usize;
     while depth < samples && !rest.is_empty() {
-        let d = lerc_reader::decode_first_to_f64(rest).map_err(err)?;
-        if (d.info.width as usize, d.info.height as usize) != (width, height) {
-            return Err(err(format!("a blob is {} × {}, its chunk {width} × {height}", d.info.width, d.info.height)));
+        // A later band's mask may be left out when it is the one before it.
+        let inherited = parts.last().and_then(|(_, _, m)| m.clone());
+        let info = match &inherited {
+            Some(m) => lerc_reader::inspect_first_with_mask(rest, m),
+            None => lerc_reader::inspect_first(rest),
         }
-        let n = d.info.depth.max(1) as usize;
-        if d.pixels.len() != pixels.saturating_mul(n) {
+        .map_err(err)?;
+        let (bw, bh, n) = (info.width as usize, info.height as usize, info.depth.max(1) as usize);
+        if bw != width || !(bh == height || strip && bh > height) {
+            return Err(err(format!("a blob is {bw} × {bh}, its chunk {width} × {height}")));
+        }
+        if bw.saturating_mul(bh).saturating_mul(n).saturating_mul(8) > MAX_CHUNK_BYTES || depth + n > samples {
+            return Err(err("a blob holds more samples than its chunk"));
+        }
+        let d = match &inherited {
+            Some(m) => lerc_reader::decode_first_to_f64_with_mask(rest, m),
+            None => lerc_reader::decode_first_to_f64(rest),
+        }
+        .map_err(err)?;
+        if d.pixels.len() != bw * bh * n {
             return Err(err("a blob holds fewer samples than it says"));
         }
+        // Rows past the strip's own are padding.
+        let mut values = d.pixels;
+        values.truncate(pixels * n);
+        let mask = d.mask.or(inherited).map(|mut m| {
+            m.truncate(pixels);
+            m
+        });
         depth += n;
-        rest = rest.get(d.info.blob_size.max(1)..).unwrap_or_default();
-        parts.push((n, d.pixels, d.mask));
+        rest = rest.get(info.blob_size.max(1)..).unwrap_or_default();
+        parts.push((n, values, mask));
+    }
+    // GDAL's alpha in the mask: one blob, one sample short.
+    if alpha_last && parts.len() == 1 && depth + 1 == samples {
+        let (n, v, mask) = parts.into_iter().next().ok_or_else(|| err("a chunk holds no blob"))?;
+        let mut values = Vec::with_capacity(pixels * samples);
+        for i in 0..pixels {
+            values.extend((0..n).map(|k| v.get(i * n + k).copied().unwrap_or(0.0)));
+            let opaque = mask.as_ref().is_none_or(|m| m.get(i).is_some_and(|b| *b != 0));
+            values.push(if opaque { 255.0 } else { 0.0 });
+        }
+        return Ok(Blobs { values, valid: None });
     }
     if depth != samples {
         return Err(err(format!("a chunk holds {depth} samples a pixel, its image {samples}")));
     }
-    if parts.len() == 1 {
-        let (_, values, mask) = parts.into_iter().next().ok_or_else(|| err("a chunk holds no blob"))?;
-        return Ok((values, mask));
+    // Interleaved pixel by pixel; each sample valid by its own blob's mask.
+    let any_mask = parts.iter().any(|(_, _, m)| m.is_some());
+    let mut valid = any_mask.then(|| Vec::with_capacity(pixels * samples));
+    if let [(n, _, m)] = parts.as_slice() {
+        if let (Some(valid), Some(m)) = (valid.as_mut(), m.as_ref()) {
+            for i in 0..pixels {
+                valid.extend(std::iter::repeat_n(m.get(i).is_some_and(|b| *b != 0), *n));
+            }
+        }
+        let (_, values, _) = parts.into_iter().next().ok_or_else(|| err("a chunk holds no blob"))?;
+        return Ok(Blobs { values, valid });
     }
-    // One blob per sample (or a few): interleaved pixel by pixel.
-    let mut values = Vec::with_capacity(pixels.saturating_mul(samples));
+    let mut values = Vec::with_capacity(pixels * samples);
     for i in 0..pixels {
-        for (n, v, _) in &parts {
+        for (n, v, m) in &parts {
             values.extend((0..*n).map(|k| v.get(i * n + k).copied().unwrap_or(f64::NAN)));
+            if let Some(valid) = valid.as_mut() {
+                let ok = m.as_ref().is_none_or(|m| m.get(i).is_some_and(|b| *b != 0));
+                valid.extend(std::iter::repeat_n(ok, *n));
+            }
         }
     }
-    // A pixel is valid when every blob says so.
-    let masks: Vec<&Vec<u8>> = parts.iter().filter_map(|(_, _, m)| m.as_ref()).collect();
-    let mask =
-        (!masks.is_empty()).then(|| (0..pixels).map(|i| u8::from(masks.iter().all(|m| m.get(i).is_some_and(|v| *v != 0)))).collect());
-    Ok((values, mask))
+    Ok(Blobs { values, valid })
 }
 
 /// No samples yet, of the type `format` and `bps` name, with room for `n`.
@@ -286,5 +387,101 @@ mod tests {
         }
         // A file cut short in its tiles.
         assert!(geotiff::read(Cursor::new(good.get(..good.len() - 200).unwrap().to_vec()), "cut").is_err());
+    }
+
+    #[test]
+    fn an_alpha_kept_as_the_mask_is_put_back() {
+        // GDAL stores the 0/255 alpha of this RGBA image as LERC's mask: the blob has three samples.
+        // A transparent pixel's colour isn't stored: it reads 0, as GDAL reads it.
+        let r = open("lerc_u8_rgba_alpha_mask.tif");
+        assert_eq!((r.width, r.height, r.bands.len()), (40, 30, 4));
+        for y in 0..30i64 {
+            for x in 0..40i64 {
+                let px = if (x + y) % 3 == 0 { [0, 0, 0, 0] } else { [(x * 5 + y) % 256, (x + y * 7) % 256, (x * 3) % 256, 255] };
+                for (b, v) in px.iter().enumerate() {
+                    assert_eq!(r.value(b, x, y), Some(*v as f32), "band {b} at ({x}, {y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_band_keeps_its_own_mask() {
+        // NaN in every band where (x + y) % 5 == 0, and in the first band also where x == 7: GDAL
+        // writes a blob a band, each with its mask (the last two the same, the third left to
+        // inherit the second's).
+        let r = open("lerc_f32_band_masks.tif");
+        assert_eq!((r.width, r.height, r.bands.len()), (40, 30, 3));
+        for b in 0..3usize {
+            for y in 0..30i64 {
+                for x in 0..40i64 {
+                    let hole = (x + y) % 5 == 0 || (b == 0 && x == 7);
+                    let want = (!hole).then_some((x as f64 * 1.5 + y as f64 + b as f64 * 100.0) as f32);
+                    assert_eq!(r.value(b, x, y), want, "band {b} at ({x}, {y})");
+                }
+            }
+        }
+    }
+
+    /// A LERC blob of `data` (`depth` samples a pixel), with `mask` (a byte a pixel) if given.
+    fn blob<T: lerc_core::Sample>(w: u32, h: u32, depth: u32, data: &[T], mask: Option<&[u8]>) -> Vec<u8> {
+        let raster = lerc_core::RasterView::new(w, h, depth, data).unwrap();
+        let mask = mask.map(|m| lerc_core::MaskView::new(w, h, m).unwrap());
+        lerc_writer::encode(raster, mask, lerc_writer::EncodeOptions::default()).unwrap()
+    }
+
+    #[test]
+    fn integer_samples_a_mask_drops_are_gaps_not_values() {
+        // UInt16, 4 × 3, two samples a pixel; pixels 1 and 6 invalid. GDAL never writes such a
+        // mask for integers, other producers can: those samples must become no-data, not 0.
+        let data: Vec<u16> = (0..24).map(|v| v as u16 * 10 + 1).collect();
+        let mut mask = vec![1u8; 12];
+        mask[1] = 0;
+        mask[6] = 0;
+        let b = super::decode_blob(&blob(4, 3, 2, &data, Some(&mask)), 4, 3, false, 2, false).unwrap();
+        let valid = b.valid.expect("a mask");
+        for (i, ok) in valid.iter().enumerate() {
+            assert_eq!(*ok, i / 2 != 1 && i / 2 != 6, "sample {i}");
+        }
+        let mut values: Vec<f32> = b.values.iter().map(|v| *v as f32).collect();
+        let gaps: Vec<bool> = valid.iter().map(|v| !v).collect();
+        super::blank(&mut values, Some(&gaps));
+        assert!(values[2].is_nan() && values[3].is_nan() && values[12].is_nan() && values[13].is_nan());
+        assert_eq!(values[0], 1.0);
+        // A clean blob says nothing is missing.
+        let clean = super::decode_blob(&blob(4, 3, 2, &data, None), 4, 3, false, 2, false).unwrap();
+        assert!(clean.valid.is_none());
+    }
+
+    #[test]
+    fn a_later_band_inherits_the_mask_before_it() {
+        // Two UInt8 bands, one blob each: the writer stores the mask with the first and leaves the
+        // second to inherit it.
+        let data: Vec<u8> = (0..24).map(|v| v as u8).collect();
+        let set = lerc_core::BandSetView::new(4, 3, 1, 2, lerc_core::BandLayout::Bsq, &data).unwrap();
+        let mut mask = vec![1u8; 12];
+        mask[5] = 0;
+        let bytes = lerc_writer::encode_band_set(set, Some(lerc_core::MaskView::new(4, 3, &mask).unwrap()), Default::default()).unwrap();
+        let b = super::decode_blob(&bytes, 4, 3, false, 2, false).unwrap();
+        // Pixel by pixel: band 0 then band 1.
+        assert_eq!(b.values.get(..4), Some(&[0.0, 12.0, 1.0, 13.0][..]));
+        let valid = b.valid.expect("a mask");
+        assert_eq!(valid.get(10..12), Some(&[false, false][..]), "pixel 5 in both bands");
+        assert_eq!(valid.iter().filter(|v| !**v).count(), 2);
+    }
+
+    #[test]
+    fn a_padded_last_strip_is_cut_and_a_wrong_size_refused() {
+        // A strip coded 5 rows tall for the 3 rows the image has left.
+        let data: Vec<u8> = (0..20).map(|v| v as u8).collect();
+        let padded = blob(4, 5, 1, &data, None);
+        let b = super::decode_blob(&padded, 4, 3, true, 1, false).unwrap();
+        assert_eq!(b.values, (0..12).map(f64::from).collect::<Vec<_>>());
+        // A tile must be its full size, and a blob of another width never fits.
+        assert!(super::decode_blob(&padded, 4, 3, false, 1, false).is_err());
+        assert!(super::decode_blob(&padded, 5, 5, true, 1, false).is_err());
+        // More samples a pixel than the image has.
+        let deep = blob(2, 2, 3, &[0u8; 12], None);
+        assert!(super::decode_blob(&deep, 2, 2, false, 2, false).is_err());
     }
 }

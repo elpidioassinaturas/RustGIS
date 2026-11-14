@@ -48,3 +48,20 @@ write("lerc_zstd_i16_planar_strips.tif", i, "int16", tiled=False, blockysize=8, 
 x, y = grid(40, 30)
 d = x * 0.25 - y * 1.5
 write("lerc_zstd_f64.tif", d[None], "float64", tiled=True, blockxsize=16, blockysize=16, compress="lerc_zstd")
+
+# Four bands of Byte, the last an unassociated alpha of only 0 and 255, pixel-interleaved, 40 × 30
+# in 16 × 16 tiles: GDAL stores the alpha as LERC's mask, and the blob has three samples a pixel.
+x, y = grid(40, 30)
+rgba = np.stack([(x * 5 + y) % 256, (x + y * 7) % 256, (x * 3) % 256, np.where((x + y) % 3 == 0, 0, 255)])
+write("lerc_u8_rgba_alpha_mask.tif", rgba, "uint8", tiled=True, blockxsize=16, blockysize=16, compress="lerc",
+      interleave="pixel", photometric="rgb", alpha="yes")
+
+# Three bands of Float32, pixel-interleaved, 40 × 30 in 16 × 16 tiles: NaN where (x + y) % 5 == 0
+# in every band, and also where x == 7 in the first only. A pixel NaN in some bands only makes GDAL
+# write one blob a band, each with its own mask; the last two masks are the same.
+x, y = grid(40, 30)
+v = np.stack([x * 1.5 + y + b * 100.0 for b in range(3)])
+v[:, (x + y) % 5 == 0] = np.nan
+v[0, x == 7] = np.nan
+write("lerc_f32_band_masks.tif", v, "float32", nodata=float("nan"), tiled=True, blockxsize=16, blockysize=16, compress="lerc_zstd",
+      interleave="pixel")
