@@ -2711,14 +2711,18 @@ const DRAPE_CORNER_REACH: f64 = 1.0;
 /// normal, the corners where the moved edges meet. An edge moves [`DRAPE_GROWTH`], or
 /// [`DRAPE_GROWTH_SHARE`] of the triangle's height over it if that's less: an edge with the
 /// triangle at least 1.2 px high over it overlaps its neighbour by the full [`DRAPE_GROWTH`],
-/// whether the triangle is long and thin or not, and one under a lower triangle by less (two
-/// neighbours under 1 px high over their shared edge can leave a faint seam). Moving the corners
-/// away from the centroid instead barely moved a long thin triangle's long edges, the ones
-/// perspective makes of far cells. Where the moved edges would meet farther than
+/// whether the triangle is long and thin or not (unless a bevel at its ends holds it down, see
+/// below), and one under a lower triangle by less. Two moves over a shared edge that sum to under
+/// 1 px can leave a faint seam, as when a neighbour is under 0.8 px high over it or both are under
+/// 1 px high. Moving the corners away from the centroid instead barely moved a long thin
+/// triangle's long edges, the ones perspective makes of far cells. Where the moved edges would
+/// meet farther than
 /// [`DRAPE_CORNER_REACH`] from the corner (sharper than about 74° between edges moved in full,
 /// or nearly straight between edges moved unequally), both stop across from it by the smaller
 /// of their two moves, joined by a bevel: no point of the outline lies farther out from an edge
-/// than that edge's own move. `None` for a triangle with no area.
+/// than that edge's own move. So a bevel holds its edge down to the smaller move at that corner,
+/// along the whole edge when both its ends bevel (a tall edge beside a low one can then grow only
+/// the low one's move along its length). `None` for a triangle with no area.
 fn grown_triangle(t: [(f64, f64); 3]) -> Option<tiny_skia::Path> {
     // Twice the signed area: positive when the corners turn from +x towards +y.
     let area2 = (t[1].0 - t[0].0) * (t[2].1 - t[0].1) - (t[2].0 - t[0].0) * (t[1].1 - t[0].1);
