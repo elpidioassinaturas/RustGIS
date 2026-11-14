@@ -1045,6 +1045,30 @@ fn text_fields_convert_to_dates() {
     s.run("edit.convertField", &json!({"layer": "Cities", "field": "founded", "type": "date"})).unwrap();
     assert!(s.notices_since(mark).is_empty());
 
+    // A field with text and none of it a date is refused, and stays text; digits past the
+    // microsecond are rounded and said, none said for fewer.
+    s.run("edit.addField", &json!({"layer": "Cities", "name": "us", "type": "text"})).unwrap();
+    for (row, text) in ["03/05/2026", "05.03.2026", "", "<null>"].into_iter().enumerate() {
+        s.run("edit.setValue", &json!({"layer": "Cities", "row": row, "field": "us", "value": text})).unwrap();
+    }
+    let mark = s.notice_mark();
+    let err = s.run("edit.convertField", &json!({"layer": "Cities", "field": "us", "type": "date"})).unwrap_err();
+    assert_eq!(err, "'us' stays text: none of its values is a date (ISO 8601, like 2026-03-05), first '03/05/2026'");
+    assert_eq!(column(&s, "us").0, FieldType::Text);
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.starts_with("Convert Field")));
+    s.run("edit.addField", &json!({"layer": "Cities", "name": "fine", "type": "text"})).unwrap();
+    for (row, text) in
+        ["2026-03-05T14:30:00.123456789Z", "2026-03-05T14:30:00.5Z", "2026-03-05T14:30:00.000000400Z", ""].into_iter().enumerate()
+    {
+        s.run("edit.setValue", &json!({"layer": "Cities", "row": row, "field": "fine", "value": text})).unwrap();
+    }
+    let mark = s.notice_mark();
+    let out = s.run("edit.convertField", &json!({"layer": "Cities", "field": "fine", "type": "datetime"})).unwrap();
+    assert_eq!((out["converted"].as_u64(), out["null"].as_u64()), (Some(3), Some(0)));
+    let notices: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert_eq!(notices, ["Convert Field: 2 values were rounded to the microsecond in 'fine', as more digits than that aren't kept"]);
+    assert_eq!(column(&s, "fine").1[0], at("2026-03-05T14:30:00.123457Z"));
+
     let err = s.run("edit.convertField", &json!({"layer": "Cities", "field": "founded", "type": "date"})).unwrap_err();
     assert_eq!(err, "'founded' is a Date field: only a text field converts to dates");
     let err = s.run("edit.convertField", &json!({"layer": "Cities", "field": "name", "type": "long"})).unwrap_err();
@@ -1117,6 +1141,76 @@ fn a_streamed_shapefile_says_dates_it_could_not_read_once() {
     s.run("edit.addField", &json!({"layer": "permits", "name": "note", "type": "text"})).unwrap_err();
     let err = s.run("edit.convertField", &json!({"layer": "permits", "field": "issued", "type": "datetime"})).unwrap_err();
     assert!(err.contains("Load All Features"), "{err}");
+}
+
+/// Load All Features of a GeoPackage read in place says the date-times it read rounded to the
+/// microsecond; a clean one says nothing of them.
+#[test]
+fn loading_a_streamed_layer_whole_says_the_date_times_it_rounded() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!("rustgis-whole-rounded-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, stored, said) in [("fine", "2026-03-05T14:30:00.123456789Z", 1), ("clean", "2026-03-05T14:30:00.123456Z", 0)] {
+        let mut ds = Dataset::new(name, GeometryType::Point, vec![Field::new("seen", FieldType::DateTime)]);
+        ds.push(Some(Geometry::Point(rustgis_geom::Coord::new(1.0, 1.0))), vec![V::parse("2026-01-01T00:00:00Z", FieldType::DateTime)]);
+        let path = dir.join(format!("{name}.gpkg"));
+        rustgis_data::io::write_path(&ds, &path).unwrap();
+        // The spatial index's triggers call GeoPackage functions a plain connection lacks; the
+        // geometry isn't changed, so the index stays right without them.
+        let c = rusqlite::Connection::open(&path).unwrap();
+        let triggers: Vec<String> = c
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for t in triggers {
+            c.execute(&format!("DROP TRIGGER \"{t}\""), []).unwrap();
+        }
+        c.execute(&format!("UPDATE \"{name}\" SET seen = ?1"), [stored]).unwrap();
+        let mut s = Session::new(Project::default());
+        s.run("layer.addData", &json!({"path": path.display().to_string(), "stream": true})).unwrap();
+        assert!(s.map().layers[0].is_streamed(), "{name} is read in place");
+        let rounded = |s: &Session, mark| -> Vec<String> {
+            s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains("rounded to the microsecond")).collect()
+        };
+        // A tool reading the layer whole, and a share of it, say it too.
+        let mark = s.notice_mark();
+        let out = s.run("gp.run", &json!({"tool": "buffer", "params": {"input": name, "distance": 10}})).unwrap();
+        assert_eq!(rounded(&s, mark).len(), said, "{name} buffer: {out}");
+        let mark = s.notice_mark();
+        crate::cmd::sharing::share_bytes(&mut s, "webLayer", &json!({"layer": name})).unwrap();
+        assert_eq!(rounded(&s, mark).len(), said, "{name} share");
+        let mark = s.notice_mark();
+        s.run("layer.loadAll", &json!({"layer": name})).unwrap();
+        let said_now = rounded(&s, mark);
+        assert_eq!(said_now.len(), said, "{name}: {said_now:?}");
+        if said == 1 {
+            assert!(said_now[0].starts_with(&format!("{name}: 1 date-time was rounded to the microsecond")), "{said_now:?}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every export of a layer read in place, the browser's download too, says what its whole read did
+/// to dates: values read as empty and date-times rounded; a clean read says nothing.
+#[test]
+fn an_export_says_what_its_whole_read_did_to_dates() {
+    let lost = rustgis_map::Unreadable {
+        rows: 0,
+        dates: Some("1 value isn't a date and was read as empty, in 'day'".into()),
+        rounded: Some("1 date-time was rounded to the microsecond, as more digits than that aren't kept, in 'at'".into()),
+    };
+    assert_eq!(
+        crate::cmd::share::read_date_notes("out.geojson", "Sites", &lost),
+        [
+            "out.geojson: Sites: 1 value isn't a date and was read as empty, in 'day', so they're empty in the export",
+            "out.geojson: Sites: 1 date-time was rounded to the microsecond, as more digits than that aren't kept, in 'at' when read for the export",
+        ]
+    );
+    assert!(crate::cmd::share::read_date_notes("out.geojson", "Sites", &rustgis_map::Unreadable::default()).is_empty());
 }
 
 /// A polygon layer stacks fills (a colour, hatch lines, markers on a grid), for the layer or a
@@ -47956,6 +48050,69 @@ fn an_animation_export_says_its_missing_cast_shadows_once() {
         assert!(said.len() == 1 && said[0].starts_with(what), "{command}: {said:?}");
     }
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A FlatGeobuf has no date type, so a date field with no values in the export reads back as a
+/// date-time field: the export says so, for a layer held whole and one read in place. A date
+/// field with a value, and one only in features without geometry (not written), are the other
+/// two cases.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_flatgeobuf_export_says_which_empty_date_fields_read_back_as_date_times() {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    let dir = std::env::temp_dir().join(format!("rustgis-fgb-dates-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fields = vec![Field::new("empty", FieldType::Date), Field::new("full", FieldType::Date), Field::new("lost", FieldType::Date)];
+    let day = V::parse("2026-03-05", FieldType::Date);
+    let mut ds = Dataset::new("days", GeometryType::Point, fields);
+    ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![V::Null, day.clone(), V::Null]);
+    ds.push(None, vec![V::Null, V::Null, day.clone()]);
+    let gpkg = dir.join("days.gpkg");
+    rustgis_data::io::write_path(&ds, &gpkg).unwrap();
+    for stream in [false, true] {
+        let mut s = Session::new(Project::default());
+        s.run("layer.addData", &json!({"path": gpkg.display().to_string(), "stream": stream})).unwrap();
+        let (mark, fgb) = (s.notice_mark(), dir.join(format!("days-{stream}.fgb")));
+        s.run("share.exportLayer", &json!({"layer": "days", "path": fgb.display().to_string()})).unwrap();
+        let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains("date field")).collect();
+        assert_eq!(said.len(), 1, "stream {stream}: {said:?}");
+        assert!(said[0].ends_with("2 date fields have no values, and FlatGeobuf can't tell a date from a date-time, so it reads back as a date-time field, in 'empty', 'lost'"), "{said:?}");
+        // The other formats say nothing of it.
+        let (mark, shp) = (s.notice_mark(), dir.join(format!("days-{stream}.gpkg")));
+        s.run("share.exportLayer", &json!({"layer": "days", "path": shp.display().to_string()})).unwrap();
+        assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("FlatGeobuf")));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A save to a table names the layer and the table in its notices, and once when they're the same.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_save_names_a_layer_and_its_table_once_when_they_are_the_same() {
+    assert_eq!(crate::cmd::saved_target("wells", "wells"), "wells");
+    assert_eq!(crate::cmd::saved_target("Wells", "wells"), "Wells: wells");
+}
+
+/// What reading a DuckDB result says of its dates names the layer the user knows, not the cache
+/// file it was converted into. Runs only when DuckDB is installed (`RUSTGIS_DUCKDB_BIN`).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_duckdb_result_names_its_layer_in_its_date_notices() {
+    if !rustgis_data::source::duckdb::available() {
+        eprintln!("skipped: DuckDB isn't installed");
+        return;
+    }
+    let mut s = Session::new(Project::default());
+    let sql = "SELECT 1 AS id, DATE 'infinity' AS day, TIMESTAMP_NS '2026-03-05 12:34:56.123456789' AS at, ST_Point(1, 2) AS geom";
+    let mark = s.notice_mark();
+    s.run("layer.addSql", &json!({"sql": sql, "name": "Chosen", "stream": false})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.contains(&"Chosen: 1 value isn't a date and was read as empty, in 'day'".to_string()), "{said:?}");
+    assert!(
+        said.contains(&"Chosen: 1 date-time was rounded to the microsecond, as more digits than that aren't kept, in 'at'".to_string()),
+        "{said:?}"
+    );
+    assert!(said.iter().all(|n| !n.contains(".points")), "{said:?}");
 }
 
 /// A zoom to a place wholly past a Web Mercator map's 85° leaves the view where it is, says so,

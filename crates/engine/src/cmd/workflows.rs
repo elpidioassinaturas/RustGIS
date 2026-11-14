@@ -1909,6 +1909,10 @@ pub(crate) fn convert_work(s: &Session, p: &Value) -> Result<super::exports::Wor
                 rustgis_data::source::unread_dates_note(&ds.fields, &result.unread_dates)
                     .map(|n| format!("{path}: {}: {n}, so they're empty in the export", ds.name)),
             );
+            notes.extend(
+                rustgis_data::source::rounded_dates_note(&ds.fields, &result.rounded_dates)
+                    .map(|n| format!("{path}: {}: {n} when read for the export", ds.name)),
+            );
             (notes, result.null_numbers)
         } else {
             let (whole, unreadable) = if layer.is_streamed() {
@@ -1923,7 +1927,7 @@ pub(crate) fn convert_work(s: &Session, p: &Value) -> Result<super::exports::Wor
             if unreadable.rows > 0 {
                 notes.push(format!("{path}: {} rows couldn't be read and were left out", unreadable.rows));
             }
-            notes.extend(unreadable.dates.iter().map(|n| format!("{path}: {}: {n}, so they're empty in the export", ds.name)));
+            notes.extend(super::share::read_date_notes(&path, &ds.name, &unreadable));
             (notes, rustgis_data::export::numbers_written_as_null(&ds.features, &ds.fields, format))
         };
         let bytes = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?.len();

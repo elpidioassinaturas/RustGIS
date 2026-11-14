@@ -246,6 +246,7 @@ impl FgbSource {
                 slots: &self.slots,
                 values: vec![Value::Null; self.info.fields.len()],
                 unread_dates: Vec::new(),
+                rounded_dates: Vec::new(),
             };
             // Reads skip a feature with unreadable properties and report it in Batch::skipped.
             // Such a feature must not influence the inferred date type either.
@@ -256,7 +257,7 @@ impl FgbSource {
                 if let Some(Value::Text(s)) = props.values.get(k) {
                     let state = if crate::Date::parse(s).is_some() {
                         1
-                    } else if crate::DateTime::parse(s).is_some() {
+                    } else if crate::DateTime::parse_rounding(s).is_some() {
                         2
                     } else if is_clock(s) {
                         4
@@ -342,12 +343,14 @@ impl FgbSource {
                 slots: &self.slots,
                 values: vec![Value::Null; self.info.fields.len()],
                 unread_dates: Vec::new(),
+                rounded_dates: Vec::new(),
             };
             if f.process_properties(&mut props).is_err() {
                 out.skipped += 1;
                 continue;
             }
             super::add_unread_dates(&mut out.unread_dates, &props.unread_dates);
+            super::add_unread_dates(&mut out.rounded_dates, &props.rounded_dates);
             sample.keep(Feature { id, geometry: Some(geometry), attrs: props.values });
         }
         out.matched = if late || matched == 0 { sample.seen() } else { matched };
@@ -405,12 +408,14 @@ impl FgbSource {
                 slots: &self.slots,
                 values: vec![Value::Null; self.info.fields.len()],
                 unread_dates: Vec::new(),
+                rounded_dates: Vec::new(),
             };
             if f.process_properties(&mut props).is_err() {
                 out.skipped += 1;
                 continue;
             }
             super::add_unread_dates(&mut out.unread_dates, &props.unread_dates);
+            super::add_unread_dates(&mut out.rounded_dates, &props.rounded_dates);
             out.matched += 1;
             chunks.push(Feature { id, geometry: Some(geometry), attrs: props.values })?;
         }
@@ -714,12 +719,14 @@ impl FgbSource {
                 slots: &self.slots,
                 values: vec![Value::Null; self.info.fields.len()],
                 unread_dates: Vec::new(),
+                rounded_dates: Vec::new(),
             };
             if feat.process_properties(&mut props).is_err() {
                 out.skipped += 1;
                 continue;
             }
             super::add_unread_dates(&mut out.unread_dates, &props.unread_dates);
+            super::add_unread_dates(&mut out.rounded_dates, &props.rounded_dates);
             let feature = Feature { id, geometry: Some(geometry), attrs: props.values };
             if late {
                 sample.keep(feature);
@@ -829,6 +836,7 @@ struct Props<'a> {
     slots: &'a [Option<usize>],
     values: Vec<Value>,
     unread_dates: Vec<usize>,
+    rounded_dates: Vec<usize>,
 }
 
 impl PropertyProcessor for Props<'_> {
@@ -854,9 +862,11 @@ impl PropertyProcessor for Props<'_> {
         let value = match (self.fields.get(idx).map(|f| f.ty), value) {
             (Some(FieldType::Double), Value::Int(i)) => Value::Float(i as f64),
             (Some(ty @ (FieldType::Date | FieldType::DateTime)), Value::Text(s)) => {
-                let value = Value::parse_source(&s, ty);
+                let (value, rounded) = Value::parse_stored_counted(&s, ty);
                 if !s.trim().is_empty() && value.is_null() {
                     super::unread_date(&mut self.unread_dates, idx);
+                } else if rounded {
+                    super::unread_date(&mut self.rounded_dates, idx);
                 }
                 value
             }
@@ -991,8 +1001,10 @@ fn write_run(
             }
             // Refuse an invalid date before writing its native column: otherwise another reader
             // could replace it with null, while this writer reported a successful, lossless export.
+            // A date is what a read takes as one (digits past the microsecond included: the text
+            // is written as it is, and a read rounds it and says so).
             for (field, value) in fields.iter().zip(&feat.attrs) {
-                if field.ty.is_temporal() && !value.is_null() && Value::parse_source(&value.to_string(), field.ty).is_null() {
+                if field.ty.is_temporal() && !value.is_null() && Value::parse_stored_counted(&value.to_string(), field.ty).0.is_null() {
                     return Err(DataError::Format(format!(
                         "FlatGeobuf: feature {} has an invalid date in '{}'",
                         feat.id,
@@ -1009,10 +1021,18 @@ fn write_run(
                         Value::Int(x) => out.property(i, &f.name, &ColumnValue::Long(*x)),
                         Value::Float(x) => out.property(i, &f.name, &ColumnValue::Double(*x)),
                         Value::Bool(x) => out.property(i, &f.name, &ColumnValue::Bool(*x)),
-                        Value::Text(x) if matches!(f.ty, FieldType::Date | FieldType::DateTime) => {
-                            out.property(i, &f.name, &ColumnValue::DateTime(x))
-                        }
+                        // A date field's text as its day (a midnight `…T00:00:00` too), so a read
+                        // still finds a column of dates; a date-time's text as it is.
+                        Value::Text(x) if f.ty == FieldType::Date => match Value::parse_stored_counted(x, f.ty).0 {
+                            Value::Date(d) => out.property(i, &f.name, &ColumnValue::DateTime(&d.to_string())),
+                            _ => out.property(i, &f.name, &ColumnValue::DateTime(x)),
+                        },
+                        Value::Text(x) if f.ty == FieldType::DateTime => out.property(i, &f.name, &ColumnValue::DateTime(x)),
                         Value::Text(x) => out.property(i, &f.name, &ColumnValue::String(x)),
+                        // A midnight in a date field as its day, as text that is one.
+                        Value::DateTime(t) if f.ty == FieldType::Date && t.is_date() => {
+                            out.property(i, &f.name, &ColumnValue::DateTime(&t.date().to_string()))
+                        }
                         Value::Date(_) | Value::DateTime(_) => out.property(i, &f.name, &ColumnValue::DateTime(&v.to_string())),
                     };
                     if let Err(e) = r {
