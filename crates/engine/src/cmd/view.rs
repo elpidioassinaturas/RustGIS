@@ -300,6 +300,10 @@ fn walk(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"lon": c.x, "lat": c.y}))
 }
 
+/// The shortest side of a block diagram's box (Web Mercator metres): shorter, it was most likely
+/// given in degrees.
+const MIN_BLOCK_SIDE: f64 = 10.0;
+
 /// A block diagram's settings (#1914) from `map.terrain`'s `"block"` object, checked.
 fn terrain_block(b: &serde_json::Map<String, Value>) -> Result<rustgis_map::view::TerrainBlock, String> {
     if let Some(k) = b.keys().find(|k| !matches!(k.as_str(), "extent" | "depth" | "walls")) {
@@ -311,7 +315,19 @@ fn terrain_block(b: &serde_json::Map<String, Value>) -> Result<rustgis_map::view
         Some(Value::Array(a)) => {
             let e: Vec<f64> = a.iter().filter_map(Value::as_f64).filter(|v| v.is_finite()).collect();
             match e[..] {
-                [x0, y0, x1, y1] if a.len() == 4 && x0 < x1 && y0 < y1 => Some([x0, y0, x1, y1]),
+                [x0, y0, x1, y1] if a.len() == 4 && x0 < x1 && y0 < y1 => {
+                    let world = rustgis_geom::MERCATOR_R * std::f64::consts::PI;
+                    if [x0, y0, x1, y1].iter().any(|v| v.abs() > world) {
+                        return Err(format!("block's extent is in Web Mercator metres, within ±{world:.0}"));
+                    }
+                    // Degrees given for metres make a box a fraction of a metre wide.
+                    if x1 - x0 < MIN_BLOCK_SIDE || y1 - y0 < MIN_BLOCK_SIDE {
+                        return Err(format!(
+                            "block's extent is in Web Mercator metres, at least {MIN_BLOCK_SIDE} a side (longitude and latitude in degrees need converting)"
+                        ));
+                    }
+                    Some([x0, y0, x1, y1])
+                }
                 _ => return Err("block's extent is [xmin, ymin, xmax, ymax], numbers with xmin < xmax and ymin < ymax".into()),
             }
         }
@@ -414,17 +430,13 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
             );
         }
     };
-    let out = json!({
+    let mut out = json!({
         "source": match &t.source {
             TerrainSource::Layer(n) => json!({"layer": n}),
             TerrainSource::Tiles { url, encoding } => json!({"tiles": crate::sources::redact_output(url), "encoding": encoding.code()}),
         },
         "exaggeration": t.exaggeration,
-        "block": t.block.as_ref().map(|b| json!({
-            "extent": b.extent.map_or(json!("layer"), |e| json!(e)),
-            "depth": b.depth,
-            "walls": b.walls.hex(),
-        })),
+        "block": null,
     });
     // Over elevation tiles there is no layer's extent to cut the block to.
     if matches!(t.source, TerrainSource::Tiles { .. }) && t.block.as_ref().is_some_and(|b| b.extent.is_none()) {
@@ -433,19 +445,43 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
         }
         return Err("a block over elevation tiles needs an extent box [xmin, ymin, xmax, ymax] (Terrain stays as it was)".into());
     }
-    // A DEM whose corners give no box (one off the map's world, say) would draw no block.
-    if let (TerrainSource::Layer(n), Some(rustgis_map::view::TerrainBlock { extent: None, .. })) = (&t.source, &t.block)
-        && let Some(r) = m.layer_by_name(n).and_then(|l| l.raster.as_ref()).and_then(|r| r.data.clone())
-        && rustgis_render::terrain::raster_box(&r).is_none()
-    {
-        let e = format!(
+    // The DEM's own box, where a block on its extent is cut.
+    let dem_box = match (&t.source, &t.block) {
+        (TerrainSource::Layer(n), Some(_)) => m
+            .layer_by_name(n)
+            .and_then(|l| l.raster.as_ref())
+            .and_then(|r| r.data.clone())
+            .map(|r| (n.clone(), rustgis_render::terrain::raster_box(&r))),
+        _ => None,
+    };
+    let refused = match (&dem_box, t.block.as_ref().and_then(|b| b.extent)) {
+        // A DEM whose corners give no box (one off the map's world, say) would draw no block.
+        (Some((n, None)), None) => Some(format!(
             "no box fits inside '{n}''s extent on the map: give the block an extent [xmin, ymin, xmax, ymax] (Terrain stays as it was)"
-        );
+        )),
+        // A box off the DEM would draw nothing.
+        (Some((n, Some(d))), Some(e)) if e[2] <= d[0] || e[0] >= d[2] || e[3] <= d[1] || e[1] >= d[3] => Some(format!(
+            "block's extent doesn't overlap '{n}' (its box is [{:.0}, {:.0}, {:.0}, {:.0}] in Web Mercator metres; Terrain stays as it was)",
+            d[0], d[1], d[2], d[3]
+        )),
+        _ => None,
+    };
+    if let Some(e) = refused {
         if let Some(old) = old_terrain {
             m.view.terrain = Some(old);
         }
         return Err(e);
     }
+    // The box the block is cut to, as numbers: the DEM's (an approximation for one turned by its
+    // projection) when none was given.
+    out["block"] = t.block.as_ref().map_or(Value::Null, |b| {
+        let (extent, from) = match (b.extent, dem_box.as_ref().and_then(|d| d.1)) {
+            (Some(e), _) => (json!(e), "box"),
+            (None, Some(d)) => (json!(d), "layer"),
+            (None, None) => (json!("layer"), "layer"),
+        };
+        json!({"extent": extent, "extent_from": from, "depth": b.depth, "walls": b.walls.hex()})
+    });
     // The terrain keeps its DEM by name: with two layers of that name (a rename can make them),
     // it would draw the first one's heights. Checked for a terrain kept on too.
     if let TerrainSource::Layer(n) = &t.source

@@ -91,7 +91,9 @@ A **block diagram** cuts the relief to a box, as geomorphology and soil science 
 in a projection such as UTM, a north-up box inside it, close to the largest), with the map's sky and fog
 around it, and the box's sides facing the eye as walls from the ground's profile down to a flat
 base. `"extent": [xmin, ymin, xmax, ymax]` gives another box, in the map's units (Web Mercator
-metres; needed over elevation tiles, which have no extent of their own); `"depth"` puts the base
+metres, at least 10 a side; needed over elevation tiles, which have no extent of their own; a box
+in degrees, off the world or off the DEM is refused, and the result gives the box cut to as
+numbers); `"depth"` puts the base
 that many metres below the lowest ground in the box (ground with no height, drawn at 0, counts as 0; default half the box's relief, at least
 100 m; both are stretched by the exaggeration), and `"walls": "#RRGGBB"` colours the walls
 (default `#C8B89A`, a sandy brown). The walls are lit by the way they face the light, as extruded

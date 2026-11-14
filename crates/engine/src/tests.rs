@@ -7510,12 +7510,18 @@ fn terrain_block_is_checked_kept_and_taken_off() {
     let mut s = world();
     s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
     let dem = s.map().layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone()).unwrap();
-    // Wrong settings are refused before anything changes.
+    // The DEM covers 10–10.04° E, 45–45.04° N: about x 1113195–1117648, y 5621521–5627821.
+    let inside = json!([1114000, 5622000, 1116000, 5625000]);
+    // Wrong settings are refused before anything changes: a box in degrees, off the Web
+    // Mercator world, or off the DEM among them.
     for bad in [
         json!("box"),
         json!({"extent": [10, 0, 0, 10]}),
         json!({"extent": [0, 0, 10]}),
         json!({"extent": "view"}),
+        json!({"extent": [10.0, 45.0, 10.04, 45.04]}),
+        json!({"extent": [0, 0, 1000, 3e7]}),
+        json!({"extent": [0, 0, 1000, 500]}),
         json!({"depth": -5}),
         json!({"walls": "#C8B89A80"}),
         json!({"walls": {"layer": "Countries"}}),
@@ -7523,15 +7529,21 @@ fn terrain_block_is_checked_kept_and_taken_off() {
     ] {
         assert!(s.run("map.terrain", &json!({"layer": dem, "block": bad})).is_err(), "{bad}");
     }
+    let e = s.run("map.terrain", &json!({"layer": dem, "block": {"extent": [10.0, 45.0, 10.04, 45.04]}})).unwrap_err();
+    assert!(e.contains("degrees"), "{e}");
     assert!(s.map().view.terrain.is_none());
-    // The DEM's extent by default, and the default walls.
+    // The DEM's extent by default, reported as the box it is cut to, and the default walls.
     let v = s.run("map.terrain", &json!({"layer": dem, "block": {}})).unwrap();
-    assert_eq!(v["block"], json!({"extent": "layer", "depth": null, "walls": "#C8B89A"}));
+    assert_eq!((v["block"]["extent_from"].as_str(), v["block"]["walls"].as_str()), (Some("layer"), Some("#C8B89A")));
+    let cut: Vec<f64> = v["block"]["extent"].as_array().unwrap().iter().filter_map(Value::as_f64).collect();
+    let want = [1_113_195.0, 5_621_521.0, 1_117_648.0, 5_627_821.0];
+    assert!(cut.len() == 4 && cut.iter().zip(want).all(|(c, w)| (c - w).abs() < 2.0), "{cut:?}");
     // Kept when only the exaggeration changes, and saved with the project.
-    let v = s
-        .run("map.terrain", &json!({"exaggeration": 2, "block": {"extent": [0, 0, 1000, 500], "depth": 300, "walls": "#806040"}}))
-        .unwrap();
-    assert_eq!(v["block"]["extent"], json!([0.0, 0.0, 1000.0, 500.0]));
+    let v = s.run("map.terrain", &json!({"exaggeration": 2, "block": {"extent": inside, "depth": 300, "walls": "#806040"}})).unwrap();
+    assert_eq!(
+        (&v["block"]["extent"], v["block"]["extent_from"].as_str()),
+        (&json!([1114000.0, 5622000.0, 1116000.0, 5625000.0]), Some("box"))
+    );
     let v = s.run("map.terrain", &json!({"exaggeration": 3})).unwrap();
     assert_eq!(v["block"]["depth"], 300.0);
     let saved = serde_json::to_string(&s.map().view).unwrap_or_default();
@@ -7545,14 +7557,14 @@ fn terrain_block_is_checked_kept_and_taken_off() {
     let e = s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "block": {}})).unwrap_err();
     assert!(e.contains("needs an extent box"), "{e}");
     assert!(matches!(&s.map().view.terrain, Some(t) if matches!(t.source, rustgis_map::view::TerrainSource::Layer(_))));
-    s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "block": {"extent": [0, 0, 1, 1]}})).unwrap();
+    s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "block": {"extent": [0, 0, 1000, 1000]}})).unwrap();
     // A block on the DEM's extent left behind on a switch to tiles; one with a box kept.
     s.run("map.terrain", &json!({"layer": dem, "block": {}})).unwrap();
     let v = s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png"})).unwrap();
     assert!(v["block"].is_null(), "{v}");
-    s.run("map.terrain", &json!({"layer": dem, "block": {"extent": [0, 0, 1, 1]}})).unwrap();
+    s.run("map.terrain", &json!({"layer": dem, "block": {"extent": inside}})).unwrap();
     let v = s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png"})).unwrap();
-    assert_eq!(v["block"]["extent"], json!([0.0, 0.0, 1.0, 1.0]));
+    assert_eq!(v["block"]["extent"], json!([1114000.0, 5622000.0, 1116000.0, 5625000.0]));
 }
 
 #[test]

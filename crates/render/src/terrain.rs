@@ -202,10 +202,11 @@ impl Ground {
     /// when none is given; none over elevation tiles then), and its base `depth` metres below the
     /// lowest ground read in it (on a grid of [`BLOCK_SAMPLES`] cells a side; where a DEM has no
     /// height, 0, as the ground is drawn there; elevation tiles not read yet are left out), or
-    /// half its relief, at least `BLOCK_MIN_DEPTH`,
-    /// both exaggerated as the heights are. Elevation tiles are read for it at a zoom the box
-    /// spans at most two tiles of, so the grid asks for a few tiles however large the box: its
-    /// lowest and highest ground only set the base, which a coarser tile serves.
+    /// half its relief, at least `BLOCK_MIN_DEPTH`, both exaggerated as the heights are.
+    ///
+    /// Elevation tiles are read for it at a zoom the box spans at most two tiles of, so the grid
+    /// asks for a few tiles however large the box: its lowest and highest ground only set the
+    /// base, which a coarser tile serves.
     pub fn block(&self, map: &Map) -> Option<Block> {
         let b = map.view.terrain.as_ref()?.block.as_ref()?;
         let [x0, y0, x1, y1] = match (b.extent, &self.heights) {

@@ -2591,12 +2591,14 @@ fn render_tilted(map: &mut Map, view: &View, full_res_rasters: bool, sources_rea
 /// triangles raised to the ground's height and mapped from its picture, every band keeping to
 /// its own stretch of ground, all drawn far to near so nearer slopes hide what lies behind
 /// them; fog with distance, and the sky behind. (Without terrain, [`Warp`] does it per pixel.)
-/// A block diagram (#1914, [`terrain::Ground::block`]) keeps only the ground inside its box,
-/// triangles across its edge cut there (`block::clip`), and stands the walls facing the eye over it.
 /// Cancel is looked at before each band's grid of heights is read (up to 641 × 641 points,
 /// `terrain::settled_cells`) and while the triangles are drawn, the long part; ordering them
 /// doesn't. False when an export cancelled meanwhile, or a settled frame gone out of date
 /// (`cancel`), stopped it, the picture left half drawn.
+///
+/// A block diagram (#1914, [`terrain::Ground::block`]) keeps only the ground inside its box,
+/// triangles across its edge cut there (`block::clip`), and stands the walls facing the eye over
+/// it.
 fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, f64), Pixmap)], ground: &terrain::Ground) -> bool {
     let (sky, fog) = tilt_sky(map);
     let cam = view.camera;
