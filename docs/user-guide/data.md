@@ -1324,8 +1324,20 @@ exports, and said when it can't be drawn (in the browser over 500,000 cells, or 
 GeoTIFF read in place) as cast shadows are. Terrain outside the raster, or farther than 100 cells,
 hides none of its sky.
 
+**Rock on steep slopes**, on a Shaded Relief layer (`raster.symbology`
+`"rock": {"from": 25, "to": 40, "color": "#B2ACA4"}`), tints steep ground toward a rock colour,
+so cliffs and scarps stand out from the gentle slopes of the same height. Below **From** degrees
+of slope the ramp's colour is kept, above **To** the rock colour is used, and between them the two
+are blended on a smooth step. The light (hillshade, cast shadows and sky visibility) then shades
+that colour as it shades the ramp. The slope is the ground's own, worked out from the same 3 × 3
+window as the hillshade but without the Z factor, so 35° means 35° whatever the exaggeration
+(metres at the cell's latitude for a geographic raster). A 30 m DEM averages a cliff with its
+foot, so its walls come out gentler than they are: 25° to 40° suits it, and a finer DEM can start
+higher. Missing keys keep the current rock's (or those defaults), and `"rock": false` removes it;
+it is off by default and saved with the project only when set.
+
 With **Resampling** set to bilinear, a Shaded Relief layer's light (its hillshade, cast shadows and
-sky visibility) is blended between the cells' centres, as its values are, so a cell drawn over many
+sky visibility) and its rock tint are blended between the cells' centres, as its values are, so a cell drawn over many
 pixels shades smoothly instead of in squares; nearest keeps one light per cell, as before. A cell
 with no data, or masked, is left out of the blend, so it doesn't darken the relief next to it.
 

@@ -4325,6 +4325,38 @@ fn shaded_relief_keeps_its_sky_visibility() {
     assert!(s.notices.iter().all(|n| !n.text.contains("sky")), "{:?}", s.notices);
 }
 
+/// Shaded Relief's rock on steep slopes (#1913): an object turns it on, its missing keys from the
+/// current rock or the defaults; kept when left out; `false` removes it; a `from` not below `to`
+/// or a bad colour is refused; saved with the project only when set, and drawn in an export.
+#[test]
+fn shaded_relief_keeps_its_rock_on_steep_slopes() {
+    use rustgis_map::raster::Rock;
+    let mut s = with_raster();
+    let rock = |s: &Session| match s.map().layers.first().and_then(|l| l.raster.as_ref()).map(|r| &r.style.renderer) {
+        Some(rustgis_map::RasterRenderer::ShadedRelief { rock, .. }) => *rock,
+        other => panic!("{other:?}"),
+    };
+    let rocks_saved = |s: &mut Session| s.project.saved_text(None).unwrap().0.matches("\"rock\"").count();
+    s.run("raster.symbology", &json!({"type": "shadedRelief"})).unwrap();
+    assert_eq!(rock(&s), None, "off by default");
+    let before = rocks_saved(&mut s);
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "rock": {}})).unwrap();
+    assert_eq!(rock(&s), Some(Rock::DEFAULT));
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "rock": {"to": 50, "color": "#806040"}})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": 200})).unwrap();
+    let want = Rock { from: 25.0, to: 50.0, color: rustgis_map::Rgba::rgb(0x80, 0x60, 0x40) };
+    assert_eq!(rock(&s), Some(want), "left out, kept; its missing keys too");
+    assert_eq!(rocks_saved(&mut s), before + 1, "saved when set");
+    for bad in [json!({"from": 40, "to": 30}), json!({"from": 30, "to": 30}), json!({"color": "rock"}), json!(3)] {
+        assert!(s.run("raster.symbology", &json!({"type": "shadedRelief", "rock": bad})).is_err(), "{bad}");
+        assert_eq!(rock(&s), Some(want), "{bad}: refused, the rock kept");
+    }
+    assert!(crate::cmd::share::map_png(&mut s, Some(300.0), Some(200.0), None).unwrap().len() > 1000);
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "rock": false})).unwrap();
+    assert_eq!(rock(&s), None);
+    assert_eq!(rocks_saved(&mut s), before, "not saved once removed");
+}
+
 /// An export draws the sky a pit hides: its floor darker with `sky` 1 than with 0, the ground
 /// around it (which sees the whole sky) the same. The first export with the sky, from a cold
 /// cache, waits for the grid: it is the same image as one drawn once the grid is kept.
