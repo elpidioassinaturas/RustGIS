@@ -1921,6 +1921,19 @@ fn delimited_text_options_go_with_the_picked_file() {
     let r = app.open_picked(&picked, b"lon,lat\n1,2\n").unwrap();
     let e = app.session.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().extent();
     assert_eq!((e.min_x, e.min_y), (1.0, 2.0));
+    // DAT and gzip picks carry the same explicit columns and delimiter to their importer.
+    use base64::Engine as _;
+    let gzip = base64::engine::general_purpose::STANDARD.decode("H4sIAAAAAAAC/8tMqUlNLC6pycsvKsngcqwxNKgxMuACACT4xC0WAAAA").unwrap();
+    let utf16: Vec<u8> = [0xff, 0xfe].into_iter().chain("id|east|north\nA|10|20\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+    for (name, bytes) in
+        [("points.dat", b"id|east|north\nA|10|20\n".as_slice()), ("points.dat", utf16.as_slice()), ("points.csv.gz", gzip.as_slice())]
+    {
+        app.run("ui.addDelimited", json!({"x":"east", "y":"north", "delimiter":"|"})).unwrap();
+        let picked = format!("{}{name}", rustgis_ui_egui::DELIMITED_PICK);
+        let r = app.open_picked(&picked, bytes).unwrap();
+        let e = app.session.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().extent();
+        assert_eq!((e.min_x, e.min_y), (10.0, 20.0), "{name}");
+    }
 }
 
 /// Add Delimited Text in the web app: the file first, then the dialog lists its columns (the ones

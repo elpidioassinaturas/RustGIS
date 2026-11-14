@@ -2001,14 +2001,17 @@ impl RustGisApp {
             || rustgis_engine::data::source::is_source_name(name)
             || rustgis_engine::data::io::is_multi_layer_name(name)
             || rustgis_engine::data::sheets::is_sheet_name(name)
+            || lower.ends_with(".gz")
+            || (lower.ends_with(".dat") && std::str::from_utf8(bytes).is_err())
         {
             use base64::Engine;
             let data = base64::engine::general_purpose::STANDARD.encode(bytes);
             let mut p = json!({"fileName": name, "data": data});
-            // A picked spreadsheet, Shapefile ZIP or DXF takes its import options.
+            // Picked vector files and delimited tables retain their import options.
             let takes_options = rustgis_engine::data::sheets::is_sheet_name(name)
                 || lower.ends_with(".zip")
-                || rustgis_engine::data::dxf::is_dxf_name(name);
+                || rustgis_engine::data::dxf::is_dxf_name(name)
+                || rustgis_engine::data::io::is_delimited_name(name);
             if let Some(Value::Object(opts)) = opts.filter(|_| takes_options) {
                 for (k, v) in opts {
                     p[k] = v;
@@ -2030,7 +2033,7 @@ impl RustGisApp {
             r
         } else {
             let mut p = json!({"fileName": name, "text": text});
-            if let Some(Value::Object(opts)) = opts.filter(|_| [".csv", ".tsv", ".txt"].iter().any(|e| lower.ends_with(e))) {
+            if let Some(Value::Object(opts)) = opts.filter(|_| rustgis_engine::data::io::is_delimited_name(name)) {
                 for (k, v) in opts {
                     p[k] = v;
                 }
@@ -3685,13 +3688,18 @@ impl RustGisApp {
                     // `null`: the dialog, for the file picked.
                     self.ui.pending_csv = Some(opts.unwrap_or(Value::Null));
                     open("text");
-                } else if let Some(path) =
-                    dialogs::pick_open(&["csv", "tsv", "txt", "xlsx", "xlsm", "xlsb", "xls", "ods"], tl!("Delimited text and spreadsheets"))
-                {
+                } else if let Some(path) = dialogs::pick_open(
+                    &["csv", "tsv", "txt", "dat", "gz", "xlsx", "xlsm", "xlsb", "xls", "ods"],
+                    tl!("Delimited text and spreadsheets"),
+                ) {
                     return match opts {
                         Some(mut q) => {
                             q["path"] = json!(path);
-                            self.run("layer.addData", q)
+                            #[cfg(not(target_arch = "wasm32"))]
+                            let added = readjob::run(self, "layer.addData", q);
+                            #[cfg(target_arch = "wasm32")]
+                            let added = self.run("layer.addData", q);
+                            added
                         }
                         None => dialogs::open_csv(self, &path.clone(), dialogs::CsvSource::Path(path)),
                     };
@@ -3891,6 +3899,9 @@ impl RustGisApp {
                             "json",
                             "csv",
                             "tsv",
+                            "txt",
+                            "dat",
+                            "gz",
                             "xlsx",
                             "xlsm",
                             "xlsb",
