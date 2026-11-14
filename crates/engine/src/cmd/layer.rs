@@ -5441,6 +5441,10 @@ fn references_follow_layer(s: &mut Session, old: &str, new: &str) {
             replace(mask);
         }
     }
+    // The terrain's water layer (#1915), kept by name as a mask is.
+    if let Some(water) = s.map_mut().view.terrain.as_mut().and_then(|t| t.water.as_mut()) {
+        replace(&mut water.layer);
+    }
     // Elevation and Map Series selectors compare spellings exactly, even though lookup does not.
     if case_only {
         if s.map().layers.iter().filter(|l| l.name.eq_ignore_ascii_case(old)).count() == 1 {

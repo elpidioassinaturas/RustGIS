@@ -13,6 +13,8 @@ use rustgis_map::{Camera, Map};
 use rustgis_tiles::cache::{self, Payload, State, Want};
 use rustgis_tiles::template::{self, TileId};
 
+mod water;
+
 /// Cells along each side of a tilted view's band laid over the relief while the map moves (the
 /// drape, `tilt_drape` in the app): few enough to lay out every frame.
 pub const CELLS: usize = 40;
@@ -75,6 +77,8 @@ pub struct Ground {
     exaggeration: f64,
     /// The map's body's ground over the Earth's (#223): heights are metres on it.
     body: f64,
+    /// Water flat at its level over the heights (#1915), when the terrain names a water layer.
+    water: Option<Arc<water::Water>>,
 }
 
 impl Ground {
@@ -108,20 +112,32 @@ impl Ground {
                 }
             }
         };
-        Some(Ground { heights, exaggeration, body: map.body().ratio() })
+        let mut ground = Ground { heights, exaggeration, body: map.body().ratio(), water: None };
+        ground.water = water::of(map, &ground);
+        Some(ground)
     }
 
-    /// The ground's height (metres, exaggerated) at a Web Mercator point; `None` where nothing
-    /// is known (off the DEM, or no tile read yet).
+    /// The ground's height (metres, exaggerated) at a Web Mercator point: a water body's level
+    /// inside one (#1915); `None` where nothing is known (off the DEM, or no tile read yet).
     pub fn height(&self, m: Coord) -> Option<f64> {
-        let h = match &self.heights {
-            Heights::Raster { raster, wrap_width } => raster_height(raster, m, *wrap_width)?,
-            Heights::Tiles { url, encoding, zoom, read, pending, waiting } => {
-                tile_height(url, *encoding, *zoom, read, pending, waiting, m)?
-            }
-        };
+        let h = self.water.as_ref().and_then(|w| w.level(m)).or_else(|| self.raw_height(m))?;
         let h = h * self.exaggeration;
         h.is_finite().then_some(h)
+    }
+
+    /// The heights' own height (metres, before exaggeration, water left out) at a Web Mercator
+    /// point.
+    fn raw_height(&self, m: Coord) -> Option<f64> {
+        match &self.heights {
+            Heights::Raster { raster, wrap_width } => raster_height(raster, m, *wrap_width),
+            Heights::Tiles { url, encoding, zoom, read, pending, waiting } => tile_height(url, *encoding, *zoom, read, pending, waiting, m),
+        }
+    }
+
+    /// How many polygons of the terrain's water layer have no level, so stay on the ground: no
+    /// height known along their shore and no level given (#1915). 0 without water.
+    pub fn water_unlevelled(&self) -> usize {
+        self.water.as_ref().map_or(0, |w| w.unlevelled)
     }
 
     /// How high the ground stands at `m` in a view of `cam`, in logical pixels at the centre's
@@ -322,7 +338,7 @@ mod tests {
         let data = [0.0, 10.0, 20.0, 30.0].repeat(3);
         let raster = Arc::new(Raster::new("heights", 4, 3, vec![data], gt, crs, nodata, ColorHint::Gray, "Float32").unwrap());
         let wrap_width = crate::raster::full_turn_width(&raster);
-        Ground { heights: Heights::Raster { raster, wrap_width }, exaggeration: 1.0, body: 1.0 }
+        Ground { heights: Heights::Raster { raster, wrap_width }, exaggeration: 1.0, body: 1.0, water: None }
     }
 
     #[test]
@@ -403,7 +419,7 @@ mod tests {
             let gt = GeoTransform { origin_x: west, origin_y: 90.0, pixel_width: 1.0, pixel_height: -60.0 };
             let raster =
                 Arc::new(Raster::new("heights", 10, 3, vec![vec![0.0; 30]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap());
-            Ground { heights: Heights::Raster { raster, wrap_width: None }, exaggeration: 1.0, body: 1.0 }
+            Ground { heights: Heights::Raster { raster, wrap_width: None }, exaggeration: 1.0, body: 1.0, water: None }
         };
         let east_of_seam = regional(-180.0).cells_across(&[at(170.0, 30.0), at(186.0, 30.0)]).unwrap();
         assert!((east_of_seam - 6.0).abs() < 1e-6, "{east_of_seam}");
@@ -421,6 +437,7 @@ mod tests {
             },
             exaggeration: 1.0,
             body: 1.0,
+            water: None,
         };
         let half = std::f64::consts::PI * MERCATOR_R;
         let world = tiles.cells_across(&[Coord::new(-2.0 * half, half), Coord::new(2.0 * half, -half)]).unwrap();
