@@ -17,9 +17,10 @@ use rustgis_tiles::template::{self, TileId};
 /// drape, `tilt_drape` in the app): few enough to lay out every frame.
 pub const CELLS: usize = 40;
 
-/// Cells along each side of a band laid over the relief in the frame that stays on screen once
-/// the map settles, and in exports (#1523): fine enough that a ridge's outline follows the
-/// ridge, where 40 drew it in long straight lines and let a massif sink into its surroundings.
+/// The fewest cells along each side of a band laid over the relief in the frame that stays on
+/// screen once the map settles, and in exports (#1523; [`settled_cells`] grows it with the
+/// picture, #1882): fine enough that a ridge's outline follows the ridge, where 40 drew it in long
+/// straight lines and let a massif sink into its surroundings.
 pub const SETTLED_CELLS: usize = 4 * CELLS;
 
 /// The most cells along each side of a band laid over the relief in the settled frame and in
