@@ -214,8 +214,9 @@ the fallback. Keep the sidecar files together.
 
 Open a feature layer's table with ++ctrl+t++ (++cmd+t++ on macOS), **Home › Selection › Attributes**
 or **Attribute Table** on a feature layer's **Data** tab (`table.open`). Rows and map selections stay in sync.
-Standalone tables open from their right-click menu; their cells are read only. See [The attribute table](analysis.md#the-attribute-table) for
-sorting, filtering, selection and the SQL `WHERE` clause syntax used by **Select By Attributes**
+Standalone tables open from their right-click menu and are edited the same way
+([editing a standalone table](analysis.md#editing-a-standalone-table)). See
+[The attribute table](analysis.md#the-attribute-table) for sorting, filtering, selection and the SQL `WHERE` clause syntax used by **Select By Attributes**
 and **Definition Query** (the full grammar is in [Expressions](expressions.md)). These clauses filter a layer; they are not DuckDB queries.
 
 For an editable feature layer, double-click a cell to change it. The table's toolbar also adds
@@ -1224,9 +1225,12 @@ longitude/latitude degrees. On the desktop, a GDAL `.aux.xml` file next to a ras
 or `dem.aux.xml`) names its bands from their descriptions, gives the no-data value when the file
 has none, and supplies the band statistics when only an overview of the raster is read. Its
 category names (GDAL's `SetCategoryNames`, one per value) label the classes in the legend of a
-Colormap or Unique Values layer; a value without a name shows the value itself. The band
+Colormap or Unique Values layer; a value without a name shows the value itself. Without category
+names, the name column of a raster attribute table in the sidecar labels them the same way (a table
+of value ranges isn't read, and is said). The band
 descriptions GDAL and rasterio write inside a GeoTIFF (its `GDAL_METADATA` tag) name its bands
-too, a sidecar's taking precedence.
+too, a sidecar's taking precedence; a table's names don't replace class names the GeoTIFF itself
+gives, or the sidecar's category names, and a table left unread that way is said.
 Exporting a raster opened from an overview writes that overview; the results of adding and of
 exporting it (`layer.addData`, `share.exportRaster`) give the full size as `overviewOf`, so scripts
 and the MCP server see it too. A GeoTIFF read in place that is added before its overview is in
@@ -1322,6 +1326,11 @@ exports, and said when it can't be drawn (in the browser over 500,000 cells, or 
 GeoTIFF read in place) as cast shadows are. Terrain outside the raster, or farther than 100 cells,
 hides none of its sky.
 
+With **Resampling** set to bilinear, a Shaded Relief layer's light (its hillshade, cast shadows and
+sky visibility) is blended between the cells' centres, as its values are, so a cell drawn over many
+pixels shades smoothly instead of in squares; nearest keeps one light per cell, as before. A cell
+with no data, or masked, is left out of the blend, so it doesn't darken the relief next to it.
+
 **Masking**, at the foot of the Symbology pane (`raster.mask`), hides pixel values from view without
 changing the data: values to draw as no data (a background of 0 or −9999 the file doesn't flag, QA
 flags, land cover classes such as `0, 254, 255`), and values outside, or inside, a range. The
@@ -1385,6 +1394,18 @@ Google Cloud's CMIP6 bucket does, ARCO-ERA5's doesn't (the desktop reads both).
 ```sh
 rustgis-cli run --cmd 'layer.addZarr={"url":"https://storage.googleapis.com/gcp-public-data-arco-era5/ar/1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2","variable":"2m_temperature","index":{"time":539100}}'
 ```
+
+**A window** of the map (`layer.addZarr` with `"cells": [first column, first row, end column, end
+row]`, the ends not included, or `"bbox": [west, south, east, north]` in the grid's coordinates,
+degrees for a longitude/latitude grid) reads only the chunks it touches, and only its part of the
+coordinates (by byte range when they are stored uncompressed). A box is placed by the variable's
+coordinates, read whole, so it takes grids of up to 4,000,000 cells a side; a longer one takes
+`"cells"`. A box reaching past the grid is read within it, and says so; one over a longitude grid's
+edge (0°/360°, or ±180°) is refused: give a box on each side (one round the whole globe is the
+whole grid); `raster.zarrInfo` with
+`"bbox"` gives the cells a box covers (`window.cells`). A window is at least 2 × 2 cells (a box within one cell is widened to two, and says so), and
+doesn't follow the time slider yet. A window is kept in the project as a GeoTIFF, as a web
+store's slice is, also from a folder.
 
 **Follow the time slider** (desktop; `layer.addZarr` with `"time": true`) adds the variable as one
 layer whose step is the time slider's. The slider turns on over the variable's dates when it is
@@ -1461,10 +1482,12 @@ Packages are zip files. Project and map packages can newly embed a combined 512 
 raster files on the desktop (128 MiB in the web app); a raster that doesn't fit stays linked.
 Already embedded uploads are retained. Local streamed vector files, databases and web layers
 stay linked to their sources. A mobile map package keeps only the visible layers and simplifies their
-geometry, for phones and tablets. Styles can also be imported from the layers of a layer file,
-map file or project. Data › Layer Templates adds empty layers with ready-made schemas (places,
-routes, areas, observations…) to draw into. Add Folder connects a folder to the Browser, which
-also lists the project's layouts, styles and tasks. A task's steps each run a command; New Task
+geometry, for phones and tablets; what simplifying changes or leaves alone (a latitude past a pole
+taken as the pole, a one-vertex line part left out, a feature left as it was or too intricate to
+simplify whole) is said, as Simplify says it. Styles can also be imported from the layers of a
+layer file, map file or project. Data › Layer Templates adds empty layers with ready-made schemas
+(places, routes, areas, observations…) to draw into. Add Folder connects a folder to the Browser,
+which also lists the project's layouts, styles and tasks. A task's steps each run a command; New Task
 From History turns the geoprocessing history into a task you can replay.
 
 Saved projects, templates, map and layer files, and packages remove recognized credentials from
