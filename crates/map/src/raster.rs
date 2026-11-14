@@ -1150,7 +1150,7 @@ impl Default for ZarrTime {
     }
 }
 
-fn is_no_shadow(v: &f64) -> bool {
+fn is_no_light(v: &f64) -> bool {
     *v == 0.0
 }
 
@@ -1365,11 +1365,11 @@ pub enum RasterRenderer {
         azimuth: f64,
         altitude: f64,
         z_factor: f64,
-        #[serde(default, skip_serializing_if = "is_no_shadow")]
+        #[serde(default, skip_serializing_if = "is_no_light")]
         shadow: f64,
-        #[serde(default, skip_serializing_if = "is_no_shadow")]
+        #[serde(default, skip_serializing_if = "is_no_light")]
         sky: f64,
-        #[serde(default, skip_serializing_if = "is_no_shadow")]
+        #[serde(default, skip_serializing_if = "is_no_light")]
         fill: f64,
     },
 }
