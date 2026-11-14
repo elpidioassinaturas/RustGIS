@@ -68,7 +68,7 @@ pub const READ_FORMAT: u32 = 2;
 pub const CAPABILITIES: &[&str] = &[];
 /// The most entries a document's `requires` may list: past it the document is refused without
 /// the rest being read.
-const MAX_REQUIRES: usize = 256;
+pub(crate) const MAX_REQUIRES: usize = 256;
 /// The longest capability name kept whole, in bytes: a longer one can't be a known capability
 /// (none is longer, held below), so only its start is kept, marked `…`, for the refusal to show.
 const MAX_CAPABILITY_BYTES: usize = 128;

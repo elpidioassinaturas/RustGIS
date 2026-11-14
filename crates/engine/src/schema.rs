@@ -8,7 +8,7 @@
 
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 
-use crate::project::{CAPABILITIES, FORMAT, Project, READ_FORMAT};
+use crate::project::{CAPABILITIES, FORMAT, MAX_REQUIRES, Project, READ_FORMAT};
 
 /// Where the schema is kept, from the repository's root.
 pub const PATH: &str = "schema/project.schema.json";
@@ -46,7 +46,50 @@ pub fn project() -> serde_json::Value {
     schema.insert("x-rustgis-writes-format".into(), FORMAT.into());
     schema.insert("x-rustgis-reads-format".into(), READ_FORMAT.into());
     schema.insert("x-rustgis-capabilities".into(), CAPABILITIES.into());
-    schema.to_value()
+    let mut value = schema.to_value();
+    if let Some(properties) = value.get_mut("properties").and_then(serde_json::Value::as_object_mut) {
+        // A newer format is refused (`check_format`), and so is a `requires` naming a capability
+        // this RustGIS doesn't know, listing more than MAX_REQUIRES or holding anything but names
+        // (null is nothing required).
+        if let Some(format) = properties.get_mut("format").and_then(serde_json::Value::as_object_mut) {
+            format.insert("maximum".into(), READ_FORMAT.into());
+        }
+        properties.insert(
+            "requires".into(),
+            serde_json::json!({
+                "description": "The capabilities this file needs past its format, each one this RustGIS knows.",
+                "type": ["array", "null"],
+                "maxItems": MAX_REQUIRES,
+                "items": { "type": "string", "enum": CAPABILITIES }
+            }),
+        );
+    }
+    bound_integers(&mut value);
+    value
+}
+
+/// Gives every fixed-width integer its range, which the reader holds it to: schemars gives
+/// `minimum: 0` to unsigned ones and the range only to those of 8 and 16 bits, and a `format`
+/// alone doesn't constrain a value.
+fn bound_integers(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let range: Option<(serde_json::Value, serde_json::Value)> = match map.get("format").and_then(serde_json::Value::as_str) {
+                Some("int32") => Some((i32::MIN.into(), i32::MAX.into())),
+                Some("int64" | "int") => Some((i64::MIN.into(), i64::MAX.into())),
+                Some("uint32") => Some((0.into(), u32::MAX.into())),
+                Some("uint64" | "uint") => Some((0.into(), u64::MAX.into())),
+                _ => None,
+            };
+            if let Some((min, max)) = range {
+                map.entry("minimum").or_insert(min);
+                map.entry("maximum").or_insert(max);
+            }
+            map.values_mut().for_each(bound_integers);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(bound_integers),
+        _ => {}
+    }
 }
 
 /// [`project`] as the file holds it: pretty-printed, with a final newline.
