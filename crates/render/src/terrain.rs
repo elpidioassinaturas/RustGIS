@@ -200,8 +200,11 @@ impl Ground {
 
     /// The block diagram `map`'s terrain is cut to, when it has one: its box (the DEM's extent
     /// when none is given; none over elevation tiles then), and its base `depth` metres below the
-    /// lowest ground read in it (on a grid of [`BLOCK_SAMPLES`] cells a side), or half its
-    /// relief, at least `BLOCK_MIN_DEPTH`, both exaggerated as the heights are.
+    /// lowest ground read in it (on a grid of [`BLOCK_SAMPLES`] cells a side; where no height is
+    /// known, 0, as the ground is drawn there), or half its relief, at least `BLOCK_MIN_DEPTH`,
+    /// both exaggerated as the heights are. Elevation tiles are read for it at a zoom the box
+    /// spans at most two tiles of, so the grid asks for a few tiles however large the box: its
+    /// lowest and highest ground only set the base, which a coarser tile serves.
     pub fn block(&self, map: &Map) -> Option<Block> {
         let b = map.view.terrain.as_ref()?.block.as_ref()?;
         let [x0, y0, x1, y1] = match (b.extent, &self.heights) {
@@ -209,15 +212,28 @@ impl Ground {
             (None, Heights::Raster { raster, .. }) => raster_box(raster)?,
             (None, Heights::Tiles { .. }) => return None,
         };
+        let world = 2.0 * std::f64::consts::PI * MERCATOR_R;
+        let coarse = (world / (x1 - x0).max(y1 - y0).max(1e-9)).log2().floor();
+        let coarse = if coarse.is_finite() { coarse.clamp(0.0, f64::from(MAX_TILE_ZOOM)) as u8 } else { 0 };
+        let sample = |m: Coord| match &self.heights {
+            Heights::Raster { .. } => self.height(m),
+            Heights::Tiles { url, encoding, zoom, read, pending, waiting } => {
+                let h = tile_height(url, *encoding, coarse.min(*zoom), read, pending, waiting, m)? * self.exaggeration;
+                h.is_finite().then_some(h)
+            }
+        };
         let n = BLOCK_SAMPLES as f64;
         let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
         for (i, j) in (0..=BLOCK_SAMPLES).flat_map(|j| (0..=BLOCK_SAMPLES).map(move |i| (i as f64, j as f64))) {
-            if let Some(h) = self.height(Coord::new(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * j / n)) {
-                (lo, hi) = (lo.min(h), hi.max(h));
+            match sample(Coord::new(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * j / n)) {
+                Some(h) => (lo, hi) = (lo.min(h), hi.max(h)),
+                // Drawn at 0 (`up_px`): the base goes below it too.
+                None => lo = lo.min(0.0),
             }
         }
         if lo > hi {
-            (lo, hi) = (0.0, 0.0);
+            hi = lo.min(0.0);
+            lo = hi;
         }
         let depth = match b.depth {
             Some(d) => d * self.exaggeration,
@@ -239,7 +255,7 @@ impl Ground {
 /// smallest and second largest of their x and of their y): its whole extent for a DEM in
 /// geographic or Web Mercator coordinates, a little less for one turned a little by its
 /// projection (UTM). `None` when a corner can't be placed.
-fn raster_box(r: &Raster) -> Option<[f64; 4]> {
+pub fn raster_box(r: &Raster) -> Option<[f64; 4]> {
     let gt = &r.transform;
     let (w, h) = (gt.pixel_width * f64::from(r.width), gt.pixel_height * f64::from(r.height));
     let t = r.transformer();
@@ -387,6 +403,30 @@ mod tests {
         let raster = Arc::new(Raster::new("heights", 4, 3, vec![data], gt, crs, nodata, ColorHint::Gray, "Float32").unwrap());
         let wrap_width = crate::raster::full_turn_width(&raster);
         Ground { heights: Heights::Raster { raster, wrap_width }, exaggeration: 1.0, body: 1.0 }
+    }
+
+    #[test]
+    fn a_blocks_base_goes_below_the_nodata_drawn_at_zero() {
+        // #1914: ground 5000 m high beside nodata (drawn at 0): the base is 1000 m below 0, not
+        // below 5000 m, so the walls still go down.
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 100.0, pixel_width: 100.0, pixel_height: -100.0 };
+        let raster =
+            Raster::new("dem", 2, 1, vec![vec![5000.0, -9999.0]], gt, Crs::WebMercator, Some(-9999.0), ColorHint::Gray, "Float32").unwrap();
+        let mut m = Map::new("Map");
+        m.add_raster("dem", rustgis_map::RasterLayer::from_path(raster, "dem.tif"));
+        let block = rustgis_map::view::TerrainBlock {
+            extent: Some([0.0, 0.0, 200.0, 100.0]),
+            depth: Some(1000.0),
+            walls: rustgis_map::view::BLOCK_WALLS,
+        };
+        m.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+            exaggeration: 1.0,
+            block: Some(block),
+        });
+        let camera = Camera { center: Coord::new(100.0, 50.0), res: 1.0, bearing: 0.0, pitch: 60.0 };
+        let b = Ground::of(&m, &camera).and_then(|g| g.block(&m)).expect("a block");
+        assert!((b.base + 1000.0).abs() < 1e-6, "{}", b.base);
     }
 
     #[test]

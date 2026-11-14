@@ -184,23 +184,25 @@ pub(crate) fn draw_walls(pm: &mut Pixmap, view: &View, ground: &Ground, b: &Bloc
             }
         }
         let Some(path) = wall.finish() else { continue };
-        let fill = b.walls.lerp(fog, fog_at(nearest));
+        // Shaded, then into the fog: in full fog both ends are the fog.
+        let f = fog_at(nearest);
+        let (top, foot) = (b.walls.shade(top_shade).lerp(fog, f), b.walls.shade(foot_shade).lerp(fog, f));
         // Darker toward the foot: from the stretches' feet on average to their tops.
         let avg = |p: (f64, f64)| Point::from_xy((p.0 / count) as f32, (p.1 / count) as f32);
         let shader = tiny_skia::LinearGradient::new(
             avg(foot_mid),
             avg(top_mid),
-            vec![GradientStop::new(0.0, color(fill.shade(foot_shade))), GradientStop::new(1.0, color(fill.shade(top_shade)))],
+            vec![GradientStop::new(0.0, color(foot)), GradientStop::new(1.0, color(top))],
             SpreadMode::Pad,
             Transform::identity(),
         );
         let paint_wall = match shader {
             Some(shader) => Paint { shader, anti_alias: true, ..Paint::default() },
-            None => paint(fill.shade(top_shade), 1.0),
+            None => paint(top, 1.0),
         };
         pm.fill_path(&path, &paint_wall, FillRule::Winding, Transform::identity(), None);
         if let Some(path) = outline.finish() {
-            let edge = b.walls.shade(0.45).lerp(fog, fog_at(nearest));
+            let edge = b.walls.shade(0.45).lerp(fog, f);
             let stroke = Stroke { width: (0.7 * k) as f32, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Stroke::default() };
             pm.stroke_path(&path, &paint(edge, 1.0), &stroke, Transform::identity(), None);
         }

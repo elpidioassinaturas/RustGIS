@@ -92,7 +92,7 @@ in a projection such as UTM, the largest north-up box inside it), with the map's
 around it, and the box's sides facing the eye as walls from the ground's profile down to a flat
 base. `"extent": [xmin, ymin, xmax, ymax]` gives another box, in the map's units (Web Mercator
 metres; needed over elevation tiles, which have no extent of their own); `"depth"` puts the base
-that many metres below the lowest ground in the box (default half the box's relief, at least
+that many metres below the lowest ground in the box (ground with no height, drawn at 0, counts as 0; default half the box's relief, at least
 100 m; both are stretched by the exaggeration), and `"walls": "#RRGGBB"` colours the walls
 (default `#C8B89A`, a sandy brown). The walls are lit by the way they face the light, as extruded
 walls are, darker toward their foot, and outlined. Left out, the block stays as it was;

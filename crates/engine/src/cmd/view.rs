@@ -430,6 +430,19 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
         }
         return Err("a block over elevation tiles needs an extent box [xmin, ymin, xmax, ymax] (Terrain stays as it was)".into());
     }
+    // A DEM whose corners give no box (one off the map's world, say) would draw no block.
+    if let (TerrainSource::Layer(n), Some(rustgis_map::view::TerrainBlock { extent: None, .. })) = (&t.source, &t.block)
+        && let Some(r) = m.layer_by_name(n).and_then(|l| l.raster.as_ref()).and_then(|r| r.data.clone())
+        && rustgis_render::terrain::raster_box(&r).is_none()
+    {
+        let e = format!(
+            "no box fits inside '{n}''s extent on the map: give the block an extent [xmin, ymin, xmax, ymax] (Terrain stays as it was)"
+        );
+        if let Some(old) = old_terrain {
+            m.view.terrain = Some(old);
+        }
+        return Err(e);
+    }
     // The terrain keeps its DEM by name: with two layers of that name (a rename can make them),
     // it would draw the first one's heights. Checked for a terrain kept on too.
     if let TerrainSource::Layer(n) = &t.source
