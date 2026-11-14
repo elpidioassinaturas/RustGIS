@@ -62,6 +62,9 @@ pub fn project() -> Result<serde_json::Value, String> {
         .and_then(serde_json::Value::as_object_mut)
         .ok_or("the project schema has no `format` property to bound by READ_FORMAT")?
         .insert("maximum".into(), READ_FORMAT.into());
+    if properties.contains_key("requires") {
+        return Err("the project schema already has a `requires` property: the capability bound would replace it".into());
+    }
     properties.insert(
         "requires".into(),
         serde_json::json!({
