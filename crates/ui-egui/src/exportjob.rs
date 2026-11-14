@@ -209,6 +209,11 @@ mod tests {
             assert!(app.run("ui.exportOrbit", bad).unwrap_err().contains(key));
         }
         assert!(crate::dialogs::PICKED.with(|c| c.borrow().is_some()));
+        // A picker cancelled answers null (the dialog stays open) and starts nothing.
+        let picked = crate::dialogs::PICKED.with(|c| c.borrow_mut().take());
+        assert_eq!(app.run("ui.exportOrbit", Value::Null).unwrap(), Value::Null);
+        assert!(idle(&app).is_ok());
+        crate::dialogs::PICKED.with(|c| *c.borrow_mut() = picked);
         let asked = json!({"frames": 3, "turn": 90, "width": 96, "height": 64});
         assert_eq!(app.run("ui.exportOrbit", asked).unwrap()["started"], "Export Orbit");
         // A second one is refused while it runs, before its file is picked.

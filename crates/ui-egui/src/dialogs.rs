@@ -512,6 +512,9 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                         ui.end_row();
                     }
                 });
+                // A file picker cancelled keeps the dialog open, the values typed still in it:
+                // `ui.exportOrbit` answers null when no file was picked.
+                let mut picked = true;
                 close = buttons(app, ui, "Export…", |app| {
                     // Empty keeps the command's default; anything else must be a number, which
                     // the command checks against its range.
@@ -524,8 +527,9 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                             p[key] = json!(n.ok_or_else(|| crate::i18n::fmt("{what} must be a number", &[("what", tl_raw!(label))]))?);
                         }
                     }
-                    app.run("ui.exportOrbit", p).map(|_| ())
-                });
+                    picked = !app.run("ui.exportOrbit", p)?.is_null();
+                    Ok(())
+                }) && picked;
             }
             "bookmark" => {
                 let input_label = ui.label(tl!("Name"));
