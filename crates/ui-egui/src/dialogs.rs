@@ -591,9 +591,17 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
             "calculateField" => {
                 /// The data Calculate Field reads: the table's it was opened on, else the active layer's.
                 fn data(app: &crate::RustGisApp) -> Option<&rustgis_engine::data::Dataset> {
-                    match app.dialogs.table {
-                        Some((opened, id)) => app.session.project.table(id).filter(|_| opened == app.session.opened).map(|t| &t.dataset),
-                        None => app.session.active_layer.and_then(|id| app.session.map().layer(id)).map(|l| &l.dataset),
+                    data_of(app.dialogs.table, &app.session)
+                }
+                /// The same, from the dialog's table and the session apart, so the box can be
+                /// written while it's read.
+                fn data_of(
+                    table: Option<(u64, u32)>,
+                    session: &rustgis_engine::Session,
+                ) -> Option<&rustgis_engine::data::Dataset> {
+                    match table {
+                        Some((opened, id)) => session.project.table(id).filter(|_| opened == session.opened).map(|t| &t.dataset),
+                        None => session.active_layer.and_then(|id| session.map().layer(id)).map(|l| &l.dataset),
                     }
                 }
                 let fields: Vec<String> = data(app).map(|d| calculation_fields(d).map(|f| f.name.clone()).collect()).unwrap_or_default();
@@ -606,12 +614,16 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                     }).response.labelled_by(input_label.id);
                 });
                 let input_label = ui.label(format!("{} =", app.dialogs.a));
-                let edit = egui::TextEdit::singleline(&mut app.dialogs.text)
-                    .hint_text(tl!("e.g.  pop_est / 1000000   or   upper(name) || ' ' || round(area, 1)"))
-                    .char_limit(rustgis_engine::data::query::MAX_LEN)
-                    .font(egui::TextStyle::Monospace)
-                    .desired_width(f32::INFINITY);
-                ui.add(edit).labelled_by(input_label.id);
+                // Suggestions as it's typed: the fields, functions, variables and keywords (#1240).
+                let ds = data_of(app.dialogs.table, &app.session);
+                fn style(edit: egui::TextEdit<'_>) -> egui::TextEdit<'_> {
+                    edit.hint_text(tl!("e.g.  pop_est / 1000000   or   upper(name) || ' ' || round(area, 1)"))
+                        .char_limit(rustgis_engine::data::query::MAX_LEN)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                }
+                crate::exprcomplete::expr_edit(ui, egui::Id::unique("cf_expression"), &mut app.dialogs.text, ds, style)
+                    .labelled_by(input_label.id);
                 let text = app.dialogs.text.trim();
                 let reads = data(app).filter(|_| !text.is_empty()).map(|d| rustgis_engine::cmd::edit::check_calculation(text, d));
                 if let Some(Err(e)) = reads {
@@ -2698,6 +2710,39 @@ mod tests {
         let ds = &h.state().session.project.tables[0].dataset;
         assert_eq!(ds.value(0, 0), &rustgis_engine::data::Value::Text("changed".into()));
         assert_eq!(ds.value(0, 1), &rustgis_engine::data::Value::Text("second".into()));
+    }
+
+    /// Calculate Field suggests as the expression is typed (#1240): Enter takes the highlighted
+    /// field, quoted as the expression needs, and doesn't calculate; Escape closes the list and
+    /// leaves the dialog and the text as they are.
+    #[test]
+    fn calculate_field_suggests_the_fields_as_its_expression_is_typed() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::new(Session::new(rustgis_engine::Project::default()));
+        app.run("layer.addDataText", json!({"fileName": "pops.csv", "text": "Pop Est,name\n1,a\n"})).unwrap();
+        app.run("edit.enable", json!({"on": true})).unwrap();
+        let id = app.session.project.tables[0].id;
+        app.run("ui.dialog", json!({"name": "calculateField", "table": id})).unwrap();
+        let mut h = app_harness(app);
+        h.run_steps(3);
+        h.ctx.memory_mut(|m| m.request_focus(egui::Id::unique("cf_expression")));
+        h.run();
+        h.event(egui::Event::Text("po".into()));
+        h.run();
+        assert!(h.query_by_role_and_label(Role::Button, "\"Pop Est\"").is_some(), "the field offered, as written");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(h.state().dialogs.text, "\"Pop Est\"");
+        assert_eq!(h.state().dialogs.open, Some("calculateField"), "Enter took the field, not Calculate");
+        h.event(egui::Event::Text(" * ro".into()));
+        h.run();
+        assert!(h.query_by_role_and_label(Role::Button, "round()").is_some(), "the function offered");
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert!(h.query_by_role_and_label(Role::Button, "round()").is_none(), "the list closed");
+        assert_eq!(h.state().dialogs.text, "\"Pop Est\" * ro");
+        assert_eq!(h.state().dialogs.open, Some("calculateField"));
     }
 
     /// The app in a harness, its fonts installed on the first pass (the dialog draws on the next).

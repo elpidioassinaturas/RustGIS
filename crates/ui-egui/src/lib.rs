@@ -40,6 +40,7 @@ mod editpanes;
 mod embeddingsui;
 #[cfg(not(target_arch = "wasm32"))]
 mod exportjob;
+mod exprcomplete;
 mod extensionsui;
 mod failureui;
 mod fieldlists;
