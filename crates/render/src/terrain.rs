@@ -140,31 +140,24 @@ impl Ground {
 
     /// How many of the ground's own cells span the stretch of ground with these `corners` (Web
     /// Mercator), along the longer side of their box in the ground's grid: a DEM's cells, the
-    /// box clipped to the DEM (a whole turn's columns, as [`raster_height`] reads them, wrap
-    /// round instead); elevation tiles' pixels at the zoom read. A turned stretch's box
-    /// is up to √2 longer than its side. `None` when no corner lands on the grid's plane.
+    /// box clipped to the DEM (a geographic DEM's columns met again a whole turn round, as
+    /// [`raster_height`] reads them; a whole turn's not clipped at all); elevation tiles'
+    /// pixels at the zoom read. A turned stretch's box is up to √2 longer than its side.
+    /// `None` when no corner lands on the grid's plane.
     pub fn cells_across(&self, corners: &[Coord]) -> Option<f64> {
-        let (pixels, (w, h), full_turn): (Vec<(f64, f64)>, _, _) = match &self.heights {
+        // `turn`: a geographic DEM's columns in 360°, where `raster_height` meets it again.
+        let (pixels, (w, h), full_turn, turn): (Vec<(f64, f64)>, _, _, _) = match &self.heights {
             Heights::Raster { raster, wrap_width } => {
                 let t = raster.transformer();
-                let mut pixels: Vec<(f64, f64)> =
-                    corners.iter().filter_map(|m| t.from_merc(*m)).map(|n| raster.transform.to_pixel(n)).collect();
-                // As `raster_height` reads them: moved round by the whole turns that bring the
-                // stretch's middle onto the grid (a 0–360° grid, a view a turn away), all by the
-                // same turns, so a stretch across the seam keeps its width.
-                let xs: Vec<f64> = pixels.iter().map(|p| p.0).filter(|x| x.is_finite()).collect();
-                if !xs.is_empty() {
-                    let mid = xs.iter().sum::<f64>() / xs.len() as f64;
-                    let shift = raster.wrap_col(mid) - mid;
-                    pixels.iter_mut().for_each(|p| p.0 += shift);
-                }
-                (pixels, (f64::from(raster.width), f64::from(raster.height)), wrap_width.is_some())
+                let pixels = corners.iter().filter_map(|m| t.from_merc(*m)).map(|n| raster.transform.to_pixel(n)).collect();
+                let turn = t.is_geographic().then(|| 360.0 / raster.transform.pixel_width.abs()).filter(|t| t.is_finite());
+                (pixels, (f64::from(raster.width), f64::from(raster.height)), wrap_width.is_some(), turn)
             }
             Heights::Tiles { zoom, .. } => {
                 let half = std::f64::consts::PI * MERCATOR_R;
                 let n = 256.0 * f64::from(1u32 << (*zoom).min(30));
                 let pixels = corners.iter().map(|m| ((m.x + half) / (2.0 * half) * n, (half - m.y) / (2.0 * half) * n)).collect();
-                (pixels, (n, n), false)
+                (pixels, (n, n), false, None)
             }
         };
         let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
@@ -175,8 +168,17 @@ impl Ground {
             return None;
         }
         let across = |a: f64, b: f64, size: f64| (b.min(size) - a.max(0.0)).max(0.0);
-        // A whole turn's columns go on past either edge: no edge to clip at, one turn at most.
-        let x = if full_turn { (x1 - x0).clamp(0.0, w) } else { across(x0, x1, w) };
+        let x = match turn {
+            // A whole turn's columns go on past either edge: no edge to clip at, one turn at most.
+            _ if full_turn => (x1 - x0).clamp(0.0, w),
+            // Moved round by the whole turns that put most of the stretch on the DEM (a 0–360°
+            // grid, a stretch across the seam from a DEM beside it, a view a turn away).
+            Some(t) => {
+                let k = ((w - x0 - x1) / 2.0 / t).round();
+                [k - 1.0, k, k + 1.0].iter().map(|k| across(x0 + k * t, x1 + k * t, w)).fold(0.0, f64::max)
+            }
+            None => across(x0, x1, w),
+        };
         Some(x.max(across(y0, y1, h)))
     }
 
@@ -395,6 +397,18 @@ mod tests {
         assert!((seam - 1.0).abs() < 1e-6, "{seam}");
         let away = ground.cells_across(&[at(495.0, 30.0), at(585.0, 30.0)]).unwrap();
         assert!((away - 1.0).abs() < 1e-6, "{away}");
+        // A regional DEM of 1° cells beside the seam: a stretch across the seam from it counts
+        // the cells it reaches there, as its heights are read, though its middle is off the DEM.
+        let regional = |west: f64| {
+            let gt = GeoTransform { origin_x: west, origin_y: 90.0, pixel_width: 1.0, pixel_height: -60.0 };
+            let raster =
+                Arc::new(Raster::new("heights", 10, 3, vec![vec![0.0; 30]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap());
+            Ground { heights: Heights::Raster { raster, wrap_width: None }, exaggeration: 1.0, body: 1.0 }
+        };
+        let east_of_seam = regional(-180.0).cells_across(&[at(170.0, 30.0), at(186.0, 30.0)]).unwrap();
+        assert!((east_of_seam - 6.0).abs() < 1e-6, "{east_of_seam}");
+        let a_turn_on = regional(0.0).cells_across(&[at(345.0, 30.0), at(365.0, 30.0)]).unwrap();
+        assert!((a_turn_on - 5.0).abs() < 1e-6, "{a_turn_on}");
         // Elevation tiles: their pixels at the zoom read; the whole world at zoom 2 is 1024.
         let tiles = Ground {
             heights: Heights::Tiles {
