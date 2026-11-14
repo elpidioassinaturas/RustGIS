@@ -23,8 +23,8 @@ const MAX_GRID: usize = 256;
 /// The most references to its edges a polygon's strips hold, on average per edge.
 const EDGES_PER_STRIP_REF: usize = 16;
 
-/// How long a water read over elevation tiles with some along its shores missing (on their way,
-/// or failed and waiting to be asked again) is used before it is read again.
+/// How long a water read over elevation tiles with some along its shores still on their way is
+/// used before it is read again.
 const RETRY_MISSING: web_time::Duration = web_time::Duration::from_secs(1);
 
 /// The strip of `n`, each `step` high from `y0`, that holds `y`.
@@ -46,7 +46,7 @@ pub(super) struct Water {
     /// Polygons whose shore was read at wider steps than half a cell of the ground, to keep
     /// within [`MAX_SHORE_SAMPLES`]: their lowest shore may lie between two steps.
     pub(super) coarse: usize,
-    /// Every height along the shores was there (over elevation tiles, some may not have come).
+    /// No tile along the shores was still on its way (over elevation tiles).
     complete: bool,
 }
 
@@ -116,7 +116,7 @@ impl Slabs {
 
 impl Water {
     /// The level (metres, before exaggeration) of the water at a Web Mercator point, when one of
-    /// the lakes holds it.
+    /// the lakes holds it. Where water polygons overlap, the first in the layer's rows gives it.
     pub(super) fn level(&self, m: Coord) -> Option<f64> {
         if self.lakes.is_empty() || !self.extent.contains(m) {
             return None;
@@ -139,7 +139,7 @@ impl Water {
         let perimeter: f64 =
             polygons.iter().filter(|(_, given)| given.is_none()).flat_map(|(rings, _)| rings).map(|r| ring_length(r)).sum();
         let mut lakes = Vec::new();
-        let (mut unlevelled, mut coarse, mut complete) = (0, 0, true);
+        let (mut unlevelled, mut coarse) = (0, 0);
         let mut extent = Extent::EMPTY;
         // Half the ground's cell, or the shortest step that keeps every shore within the budget.
         let least_step = perimeter / budget.max(1) as f64;
@@ -155,7 +155,6 @@ impl Water {
                 None => {
                     let shore = shore_level(&rings, ground, half_cell, least_step);
                     coarse += usize::from(shore.coarse);
-                    complete &= !shore.missing;
                     shore.low
                 }
             };
@@ -180,6 +179,9 @@ impl Water {
                 }
             }
         }
+        // Tiles still on their way give more shore later; one that failed is final for this water
+        // (its zoom, tiles and layer), as a frame draws without it.
+        let complete = !ground.pending();
         Water { lakes, extent, cols, rows, cells, unlevelled, coarse, complete }
     }
 }
@@ -203,19 +205,18 @@ fn cell_size(ground: &Ground) -> Option<f64> {
 }
 
 /// What a polygon's shore read: its lowest height (metres, before exaggeration; `None` when no
-/// height along it is known: off the DEM, tiles not read yet), whether it was read at wider
-/// steps than half a cell, and whether a height along it was missing over elevation tiles.
+/// height along it is known: off the DEM, tiles not read yet), and whether it was read at wider
+/// steps than half a cell (or with the cell unknown, two steps an edge).
 struct Shore {
     low: Option<f64>,
     coarse: bool,
-    missing: bool,
 }
 
 /// The shore of a polygon's rings, read every `half_cell` (two steps an edge when the ground's
 /// cell isn't known), or every `least_step` when that is longer.
 fn shore_level(rings: &[Vec<Coord>], ground: &Ground, half_cell: Option<f64>, least_step: f64) -> Shore {
-    let tiles = matches!(ground.heights, Heights::Tiles { .. });
-    let (mut low, mut coarse, mut missing) = (f64::INFINITY, false, false);
+    // Without the ground's cell, two steps an edge: said as a coarse read.
+    let (mut low, mut coarse) = (f64::INFINITY, half_cell.is_none());
     for r in rings {
         for (a, b) in r.iter().zip(r.iter().cycle().skip(1)).take(r.len()) {
             let len = (b.x - a.x).hypot(b.y - a.y);
@@ -228,14 +229,13 @@ fn shore_level(rings: &[Vec<Coord>], ground: &Ground, half_cell: Option<f64>, le
             coarse |= n < wanted;
             for k in 0..n as usize {
                 let t = k as f64 / n;
-                match ground.raw_height(Coord::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)) {
-                    Some(h) => low = low.min(h),
-                    None => missing |= tiles,
+                if let Some(h) = ground.raw_height(Coord::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)) {
+                    low = low.min(h);
                 }
             }
         }
     }
-    Shore { low: low.is_finite().then_some(low), coarse, missing }
+    Shore { low: low.is_finite().then_some(low), coarse }
 }
 
 /// The most heights read along one edge of a shore.
@@ -276,8 +276,8 @@ impl Key {
 }
 
 /// The waters read last, kept while their layer, field and heights stay the same: a view drawn as
-/// the map moves reads no shore again. One read over elevation tiles with some missing is read
-/// again after [`RETRY_MISSING`], once tiles have come or a failed one may be asked again.
+/// the map moves reads no shore again. One read over elevation tiles with some still on their way
+/// is read again after [`RETRY_MISSING`].
 static LAST: Mutex<Vec<(Key, Arc<Water>, web_time::Instant)>> = Mutex::new(Vec::new());
 /// How many waters [`LAST`] keeps (maps drawn side by side, a layout's frames).
 const KEPT: usize = 4;
@@ -401,6 +401,12 @@ mod tests {
         // A budget too small for half a cell along it: read at wider steps, and counted.
         let w = Water::build(vec![(band, None)], &g, 1000);
         assert_eq!(w.coarse, 1);
+        // Without the ground's cell, two steps an edge: counted as a coarse read too.
+        let lake = vec![square(at(0.2, -0.2).x, at(0.2, -0.2).y, 30_000.0)];
+        assert!(shore_level(&lake, &g, None, 0.0).coarse);
+        assert!(!shore_level(&lake, &g, cell_size(&g).map(|c| c / 2.0), 0.0).coarse);
+        // Over a DEM nothing is on its way: the read is complete, and kept.
+        assert!(w.complete);
         // A level given reads no shore at all.
         let w = Water::build(vec![(vec![square(0.0, 0.0, 1.0)], Some(5.0))], &g, 1);
         assert_eq!((w.coarse, w.unlevelled), (0, 0));
