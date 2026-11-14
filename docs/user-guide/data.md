@@ -1248,7 +1248,8 @@ Exported to a file, a cloud-optimised one is written tile by tile, never held wh
 browser builds it in memory to download it).
 GeoTIFFs may be regular or cloud-optimised: grey, RGB(A), palette (coloured by the file's colour
 table, as land cover such as the NLCD is) or multiband, of any pixel type, tiled or striped, and
-compressed with Deflate, LZW, PackBits, JPEG or Zstandard. JPEG-compressed YCbCr images are shown
+compressed with Deflate, LZW, PackBits, JPEG, Zstandard or LERC (alone, or wrapped in Deflate or
+Zstandard, as GDAL writes it; pixels LERC marks invalid are no-data). JPEG-compressed YCbCr images are shown
 as RGB; other YCbCr and CMYK images aren't read. A rotated or skewed image is resampled to a
 north-up grid as it is read. The coordinate system is an EPSG code,
 or the file's own projection described in its GeoKeys (Albers, Lambert conformal conic, transverse

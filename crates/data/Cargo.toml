@@ -42,6 +42,7 @@ image = { workspace = true, features = ["jpeg"] }
 base64 = { workspace = true }
 lz4_flex = { workspace = true }
 ruzstd = { workspace = true }
+lerc-reader = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Azimuthal equidistant systems (Equi7's EPSG 27701–27707, ESRI's polar ones) need proj4rs' `aeqd`,

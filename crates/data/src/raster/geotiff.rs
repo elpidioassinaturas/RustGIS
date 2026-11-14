@@ -808,8 +808,12 @@ fn lzw<R: Read + Seek>(dec: &mut Decoder<R>) -> bool {
 }
 
 /// Decodes chunk `index` (a strip or tile) of the current image. The `tiff` crate fails on some
-/// LZW chunks it should read (issue #350): those are decoded by [`super::lzw`] instead.
+/// LZW chunks it should read (issue #350): those are decoded by [`super::lzw`] instead. It has no
+/// LERC codec: LERC chunks are decoded by [`super::lerc`] (#1818).
 pub(crate) fn read_chunk<R: Read + Seek>(dec: &mut Decoder<R>, index: u32) -> Result<DecodingResult> {
+    if super::lerc::is_lerc(dec) {
+        return super::lerc::chunk(dec, index);
+    }
     match dec.read_chunk(index) {
         Ok(v) => Ok(v),
         Err(e) if lzw(dec) => super::lzw::chunk(dec, index).map_err(|_| err(e)),
@@ -1529,7 +1533,10 @@ pub(super) fn read_limited_with_nodata(
     // A large image, from a file, is read a chunk at a time on several threads (not one of
     // fewer than 8 bits a sample, whose chunks pack several pixels to a byte).
     let chunked = open.is_some() && n >= 1 << 20 && bits(&mut dec) >= 8;
-    let whole = if decimate_by > 1 || extra_samples || planar_tiles || chunked {
+    // The decoder has no LERC codec: such an image is read a chunk at a time, every chunk decoded
+    // by [`super::lerc`] (#1818).
+    let lerc = super::lerc::is_lerc(&mut dec);
+    let whole = if decimate_by > 1 || extra_samples || planar_tiles || chunked || lerc {
         None
     } else {
         let mut buf = DecodingResult::U8(Vec::new());
