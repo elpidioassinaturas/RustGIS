@@ -117,7 +117,11 @@ pub(crate) fn chunk<R: Read + Seek>(dec: &mut Decoder<R>, index: u32, table: &mu
 
     let float = format == 3;
     let fill = if float { f64::NAN } else { nodata.unwrap_or(0.0) };
-    let n = dw * dh * samples;
+    // Bounded before anything is allocated, a chunk with no bytes too (8 bytes a sample, as decoded).
+    let coded = bw.checked_mul(bh).and_then(|p| p.checked_mul(samples)).filter(|s| s.saturating_mul(8) <= MAX_CHUNK_BYTES);
+    let Some(n) = coded.map(|_| dw * dh * samples) else {
+        return Err(err("a chunk is too large"));
+    };
     let expected = data_type(format, bps)?;
     let (offset, count) = table.get(dec, tiled, index)?;
     if count == 0 {
@@ -578,6 +582,37 @@ mod tests {
     fn a_chunk_too_large_is_refused_before_decoding() {
         let shape = super::Shape { width: 4096, height: 4096, strip: false, samples: 255, alpha_last: false };
         assert!(super::decode_blob(&[], shape, lerc_core::DataType::U8).is_err());
+    }
+
+    #[test]
+    fn an_empty_chunk_too_large_is_refused_before_allocating() {
+        // The Float64 file's grid, 3 × 2 tiles, made 16384-pixel tiles (2 GiB a tile as decoded),
+        // the first tile's byte count 0: refused, never allocated.
+        let path = format!("{}/tests/data/lerc/lerc_zstd_f64.tif", env!("CARGO_MANIFEST_DIR"));
+        let mut b = std::fs::read(path).unwrap();
+        let u16_at = |b: &[u8], i: usize| u16::from_le_bytes([b[i], b[i + 1]]) as usize;
+        let u32_at = |b: &[u8], i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as usize;
+        let ifd = u32_at(&b, 4);
+        let entry = |b: &[u8], tag: usize| (0..u16_at(b, ifd)).map(|k| ifd + 2 + 12 * k).find(|e| u16_at(b, *e) == tag).unwrap();
+        let set = |b: &mut Vec<u8>, tag: usize, v: u32| {
+            let e = entry(b, tag);
+            if u16_at(b, e + 2) == 3 {
+                b[e + 8..e + 10].copy_from_slice(&(v as u16).to_le_bytes());
+            } else {
+                b[e + 8..e + 12].copy_from_slice(&v.to_le_bytes());
+            }
+        };
+        set(&mut b, 256, 3 * 16384);
+        set(&mut b, 257, 2 * 16384);
+        set(&mut b, 322, 16384);
+        set(&mut b, 323, 16384);
+        let counts = entry(&b, 325);
+        let size = if u16_at(&b, counts + 2) == 3 { 2 } else { 4 };
+        let first = u32_at(&b, counts + 8);
+        b[first..first + size].fill(0);
+        let mut dec = tiff::decoder::Decoder::new(Cursor::new(b)).unwrap().with_limits(tiff::decoder::Limits::unlimited());
+        let e = super::chunk(&mut dec, 0, &mut super::Table::default()).err().expect("refused");
+        assert!(e.to_string().contains("too large"), "{e}");
     }
 
     #[test]
