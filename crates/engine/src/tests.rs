@@ -45461,7 +45461,7 @@ fn a_zarr_window_reads_only_its_chunks_by_range() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b).unwrap();
     }
-    let (base, asked) = serve_ranged_files(files.iter().map(|(k, b)| (format!("/s.zarr/{k}"), b.clone())).collect());
+    let (base, log) = serve_ranged_files(files.iter().map(|(k, b)| (format!("/s.zarr/{k}"), b.clone())).collect());
     let url = format!("{base}/s.zarr");
     let pixels = |s: &Session, r: &Value| {
         let id = r["layer"].as_u64().unwrap() as u32;
@@ -45474,7 +45474,7 @@ fn a_zarr_window_reads_only_its_chunks_by_range() {
     assert_eq!((w, h), (3, 3));
     assert_eq!(data, (1..4).flat_map(|r| (2..5).map(move |c| (1000 + r * 100 + c) as f32)).collect::<Vec<_>>());
     assert_eq!((transform.origin_x, transform.origin_y), (2.0, 8.0));
-    let asked: Vec<(String, String)> = asked.lock().unwrap().clone();
+    let asked: Vec<(String, String)> = log.lock().unwrap().clone();
     let of = |key: &str| asked.iter().filter(|(p, _)| p == &format!("/s.zarr/{key}")).map(|(_, r)| r.as_str()).collect::<Vec<_>>();
     // The index (4 chunks × 16 bytes and a checksum), then the four chunks, 12 bytes each.
     let mut shard = of("v/c/1/0/0");
@@ -45483,6 +45483,17 @@ fn a_zarr_window_reads_only_its_chunks_by_range() {
     assert_eq!(of("lat/c/0"), ["8-31"]);
     assert_eq!(of("lon/c/0"), ["16-39"]);
     assert!(asked.iter().all(|(p, _)| !p.starts_with("/s.zarr/v/") || p == "/s.zarr/v/c/1/0/0"), "{asked:?}");
+    // A window inside one of the shard's chunks (rows 2–3, columns 3–4: its last chunk) asks for
+    // the index and that chunk's 12 bytes only.
+    log.lock().unwrap().clear();
+    let r = s.run("layer.addZarr", &json!({"url": url, "variable": "v", "index": {"time": 1}, "cells": [3, 2, 5, 4]})).unwrap();
+    assert_eq!(pixels(&s, &r).2, (2..4).flat_map(|r| (3..5).map(move |c| (1000 + r * 100 + c) as f32)).collect::<Vec<_>>());
+    let one: Vec<(String, String)> = log.lock().unwrap().clone();
+    let v: Vec<&(String, String)> = one.iter().filter(|(p, _)| p.starts_with("/s.zarr/v/")).collect();
+    assert!(v.iter().all(|(p, _)| p == "/s.zarr/v/c/1/0/0"), "{one:?}");
+    let mut ranges: Vec<&str> = v.iter().map(|(_, r)| r.as_str()).collect();
+    ranges.sort();
+    assert_eq!(ranges, ["-68", "36-47"], "{one:?}");
     // From a folder: the same cells, kept in the project as a GeoTIFF (an older RustGIS would read
     // the folder again by the label, whole), with the folder kept as where its store is.
     let r =

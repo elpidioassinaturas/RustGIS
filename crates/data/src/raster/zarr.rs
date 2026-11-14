@@ -1408,10 +1408,13 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
     let mut grid = super::filled(w, h, f32::NAN)?;
     // What the cells are read from: chunks, or a window's chunks of shards.
     let inner = match a.codecs.first() {
-        Some(Codec::Sharding { inner, codecs, .. }) if !plan.shards.is_empty() => Some((inner, codecs)),
+        Some(Codec::Sharding { inner, codecs, index, .. }) if !plan.shards.is_empty() => Some((inner, codecs, index)),
         _ => None,
     };
-    let unit = inner.map_or(&a.chunks, |(i, _)| i);
+    let unit = inner.map_or(&a.chunks, |(i, _, _)| i);
+    // A shard's chunks along each dimension, and the shards' indexes as read, by shard key.
+    let per: Vec<u64> = inner.map_or_else(Vec::new, |(i, _, _)| a.chunks.iter().zip(i).map(|(s, i)| s / i.max(&1)).collect());
+    let mut indexes: HashMap<String, Vec<(u64, u64)>> = HashMap::new();
     let (cy, cx) = (unit.get(plan.y).copied().unwrap_or(1).max(1), unit.get(plan.x).copied().unwrap_or(1).max(1));
     let nd = a.shape.len();
     // Values meaning "no data", before any scaling, as xarray reads them: the CF attributes, and a
@@ -1441,29 +1444,40 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
                     d => plan.fixed.get(d).copied().unwrap_or(0) / size(d),
                 })
                 .collect();
-            // The chunk's id, and (in a shard) the shard's key.
+            // The chunk's id, and (in a shard) the shard's key and the chunk's place in it.
             let (id, shard) = match inner {
-                Some((i, _)) => {
-                    let per: Vec<u64> = a.chunks.iter().zip(i).map(|(s, i)| s / i.max(&1)).collect();
+                Some(_) => {
                     let shard: Vec<u64> = idx.iter().zip(&per).map(|(u, p)| u / p.max(&1)).collect();
                     let key = a.chunk_key(&shard);
-                    (inner_id(&key, idx.iter().zip(&per).fold(0u64, |c, (u, p)| c * p + u % p.max(&1)) as usize), Some(key))
+                    let c = idx.iter().zip(&per).fold(0u64, |c, (u, p)| c * p + u % p.max(&1)) as usize;
+                    (inner_id(&key, c), Some((key, c)))
                 }
                 None => (a.chunk_key(&idx), None),
             };
             let (vals, dt) = match (chunks.get(&id), inner) {
-                (Some(bytes), Some((i, codecs))) => {
+                (Some(bytes), Some((i, codecs, _))) => {
                     let (d, little) = decode_chunk(codecs, bytes, i, a.dtype, a.fill).map_err(|e| bad(format!("{}: {e}", a.path)))?;
                     (d, DType { little, ..a.dtype })
                 }
                 (Some(bytes), None) => a.decode_bytes(bytes)?,
-                // A chunk a stored shard doesn't hold shows the fill value, as when the shard is
-                // read whole ([`unshard`]); a shard not stored is left empty, as a chunk never written.
-                (None, Some((i, _))) if shard.is_some_and(|k| chunks.contains_key(&format!("{k}#index"))) => {
+                // A shard not stored is left empty, as a chunk never written. In a stored shard, a
+                // chunk its index says it doesn't hold shows the fill value, as when the shard is
+                // read whole ([`unshard`]); one its index places but that wasn't read (the shard
+                // gone since its index was) is an error, not cells made up.
+                (None, Some((i, _, index))) => {
+                    let Some((key, c)) = &shard else { continue };
+                    let Some(raw) = chunks.get(&format!("{key}#index")) else { continue };
+                    if !indexes.contains_key(key) {
+                        let count = per.iter().product::<u64>() as usize;
+                        indexes.insert(key.clone(), shard_index(raw, count, index).map_err(|e| bad(format!("{key}: {e}")))?);
+                    }
+                    if indexes.get(key).and_then(|x| x.get(*c)).is_some_and(|&e| e != (u64::MAX, u64::MAX)) {
+                        return Err(bad(format!("{}: a chunk of shard {key} wasn't read", a.path)));
+                    }
                     let n = i.iter().product::<u64>() as usize;
                     (a.dtype.encode(a.fill.unwrap_or(0.0), a.dtype.little).repeat(n), a.dtype)
                 }
-                (None, _) => continue,
+                (None, None) => continue,
             };
             found += 1;
             // Each value's position in the chunk, row-major (or column-major).
@@ -3249,6 +3263,11 @@ mod tests {
         assert_eq!(inner.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(), ["v/c/1/0/0#0", "v/c/1/0/0#1", "v/c/1/0/0#2", "v/c/1/0/0#3"]);
         let r = assemble(&store, &p, &got, "v", None).unwrap();
         assert_eq!(r.bands[0].data, (1..4).flat_map(|r| (2..5).map(move |c| (1000 + r * 100 + c) as f32)).collect::<Vec<_>>());
+        // A chunk the index places but whose bytes didn't come (the shard gone since its index
+        // was read) is an error, not the fill value.
+        let mut gone = got.clone();
+        gone.remove("v/c/1/0/0#0");
+        assert!(assemble(&store, &p, &gone, "v", None).is_err());
         // Step 0, rows 2–7 and columns 4–9: the chunk shard (0, 0, 0) doesn't hold and shard
         // (0, 1, 1), not stored, are not asked for. The first shows the fill value and the second
         // is empty, as when the shards are read whole.
