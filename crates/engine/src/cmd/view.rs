@@ -190,25 +190,25 @@ fn orbit_inputs(input: &super::InputContext<'_>, _: &Value) -> Result<super::Inp
     Ok(super::tiles::render_inputs(input.map()))
 }
 
-/// Turns the view about its centre, keeping its scale and pitch, and draws a frame a step as an
-/// animated GIF or a zip of PNGs (the writer `time.export` uses). The frames are drawn from a
-/// copy of the map, so the view never moves: the app draws them on a thread of its own, with a
-/// frame a step of progress and Cancel between frames (`exports::IN_BACKGROUND`), and a script
-/// where it is called (`exports::write_here`). As with Export Map's copy, what a raster read on
-/// the copy left out is said by the session's own landing check (`notice_landed_rasters`, after
-/// each command and on each frame of the app), not frame by frame here.
-pub(crate) fn orbit_work(s: &Session, p: &Value) -> Result<super::exports::Work, String> {
+/// What an orbit export draws, its parameters checked: [`check_orbit_params`].
+struct Orbit {
+    frames: f64,
+    turn: f64,
+    w: f64,
+    h: f64,
+    dpi: f64,
+    speed: u32,
+}
+
+/// Checks an orbit export's parameters other than its path (each number in its range, and the
+/// pixels within the bound), with nothing drawn or written: the app calls it before its file
+/// picker opens, and [`orbit_work`] before it draws.
+pub fn check_orbit_params(p: &Value) -> Result<(), String> {
+    orbit_params(p).map(|_| ())
+}
+
+fn orbit_params(p: &Value) -> Result<Orbit, String> {
     use super::time::{MAX_FRAMES, MAX_PIXELS};
-    // Files are written by the desktop app; the browser's go through its services.
-    if cfg!(target_arch = "wasm32") {
-        return Err("exporting an orbit needs the desktop app".into());
-    }
-    let path = ps(p, "path").ok_or("path is required (a .gif, or a .zip of PNG frames)")?.to_string();
-    let lower = path.to_ascii_lowercase();
-    let gif = lower.ends_with(".gif");
-    if !gif && !lower.ends_with(".zip") {
-        return Err("path must end in .gif (an animation) or .zip (PNG frames)".into());
-    }
     // A number outside its range is refused, never drawn at the nearest one unsaid.
     let within = |k: &str, default: f64, (least, most): (f64, f64)| match p.get(k) {
         None | Some(Value::Null) => Ok(default),
@@ -235,6 +235,28 @@ pub(crate) fn orbit_work(s: &Session, p: &Value) -> Result<super::exports::Work,
             MAX_PIXELS / 1e6
         ));
     }
+    Ok(Orbit { frames, turn, w, h, dpi, speed })
+}
+
+/// Turns the view about its centre, keeping its scale and pitch, and draws a frame a step as an
+/// animated GIF or a zip of PNGs (the writer `time.export` uses). The frames are drawn from a
+/// copy of the map, so the view never moves: the app draws them on a thread of its own, with a
+/// frame a step of progress and Cancel between frames (`exports::IN_BACKGROUND`), and a script
+/// where it is called (`exports::write_here`). As with Export Map's copy, what a raster read on
+/// the copy left out is said by the session's own landing check (`notice_landed_rasters`, after
+/// each command and on each frame of the app), not frame by frame here.
+pub(crate) fn orbit_work(s: &Session, p: &Value) -> Result<super::exports::Work, String> {
+    // Files are written by the desktop app; the browser's go through its services.
+    if cfg!(target_arch = "wasm32") {
+        return Err("exporting an orbit needs the desktop app".into());
+    }
+    let path = ps(p, "path").ok_or("path is required (a .gif, or a .zip of PNG frames)")?.to_string();
+    let lower = path.to_ascii_lowercase();
+    let gif = lower.ends_with(".gif");
+    if !gif && !lower.ends_with(".zip") {
+        return Err("path must end in .gif (an animation) or .zip (PNG frames)".into());
+    }
+    let Orbit { frames, turn, w, h, dpi, speed } = orbit_params(p)?;
     let n = frames as usize;
     let (mut map, view_size) = (s.map().detached(), s.view_size);
     let start = map.camera.bearing;

@@ -104,9 +104,9 @@ bearing. The light of a shaded relief stays with the ground, not the camera. The
 from a copy of the map, so the view doesn't move. The frames count against a limit of 300 million
 pixels in all (170 frames at 1600 × 1100, say), and a size past it is refused.
 
-In the app, **View › Scene › Export Orbit** opens a dialog with the frames, the turn, the size
-and a GIF's frame time (an empty box keeps the default); **Export…** asks where to write the
-file. The frames are then drawn in the background, so the window stays free: the status bar
+In the desktop app, **View › Scene › Export Orbit…** opens a dialog with the frames, the turn,
+the size and a GIF's frame time (an empty box keeps the default); **Export…** checks them and
+only then asks where to write the file. The frames are then drawn in the background, so the window stays free: the status bar
 shows the export, how many frames it has drawn, and **Cancel**, which stops it between frames
 and writes nothing. From a script or the command line the command runs to its end before it
 answers:

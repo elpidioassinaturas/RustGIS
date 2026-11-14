@@ -2102,6 +2102,8 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 json!({"mode": if v.fast { "quality" } else { "speed" }}),
                 v.fast,
             );
+            // Drawn and written by the desktop app only: the browser's `ui.dialog` refuses it.
+            #[cfg(not(target_arch = "wasm32"))]
             small(
                 ui,
                 app,

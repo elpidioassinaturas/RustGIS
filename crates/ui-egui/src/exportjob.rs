@@ -200,6 +200,15 @@ mod tests {
         for junk in [json!([]), json!(3), json!("orbit")] {
             assert!(app.run("ui.exportOrbit", junk).unwrap_err().contains("object"));
         }
+        // So is a number out of its range: the picked file is still there, untaken.
+        for (bad, key) in [
+            (json!({"frames": 5000}), "frames"),
+            (json!({"turn": 0}), "turn"),
+            (json!({"frames": 2000, "width": 4096, "height": 4096}), "million pixels"),
+        ] {
+            assert!(app.run("ui.exportOrbit", bad).unwrap_err().contains(key));
+        }
+        assert!(crate::dialogs::PICKED.with(|c| c.borrow().is_some()));
         let asked = json!({"frames": 3, "turn": 90, "width": 96, "height": 64});
         assert_eq!(app.run("ui.exportOrbit", asked).unwrap()["started"], "Export Orbit");
         // A second one is refused while it runs, before its file is picked.
