@@ -2639,29 +2639,23 @@ fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, 
         }
         let kb = f64::from(pic.width()) / v.width.max(1e-9);
         let n = band_cells(v, pic.width().max(pic.height()), ground);
-        let grid: Vec<Option<Vertex>> = (0..=n)
-            .flat_map(|j| (0..=n).map(move |i| (i, j)))
-            .map(|(i, j)| {
-                let (lx, ly) = (v.width * i as f64 / n as f64, v.height * j as f64 / n as f64);
-                let m = v.camera.to_map(lx, ly, v.width, v.height);
-                let depth = 1.0 / cam.depth_scale(m, h)?;
+        // Each vertex, and with a block, the sides of its box the vertex lies beyond, from the
+        // same map point.
+        let points = (n + 1) * (n + 1);
+        let mut grid: Vec<Option<Vertex>> = Vec::with_capacity(points);
+        let mut codes: Vec<Option<u8>> = Vec::with_capacity(if block.is_some() { points } else { 0 });
+        for (i, j) in (0..=n).flat_map(|j| (0..=n).map(move |i| (i, j))) {
+            let (lx, ly) = (v.width * i as f64 / n as f64, v.height * j as f64 / n as f64);
+            let m = v.camera.to_map(lx, ly, v.width, v.height);
+            if let Some(b) = &block {
+                codes.push(Some(block::outcode(b, m)));
+            }
+            grid.push(cam.depth_scale(m, h).and_then(|scale| {
                 let (u, gv) = cam.ground_px(m);
                 let (sx, sy) = cam.project_raised(u, gv, ground.up_px(m, &cam), w, h)?;
-                (sx.is_finite() && sy.is_finite()).then_some(((sx * k, sy * k), (lx * kb, ly * kb), depth))
-            })
-            .collect();
-        let codes: Vec<Option<u8>> = match &block {
-            Some(b) => (0..=n)
-                .flat_map(|j| (0..=n).map(move |i| (i, j)))
-                .map(|(i, j)| {
-                    Some(block::outcode(
-                        b,
-                        v.camera.to_map(v.width * i as f64 / n as f64, v.height * j as f64 / n as f64, v.width, v.height),
-                    ))
-                })
-                .collect(),
-            None => Vec::new(),
-        };
+                (sx.is_finite() && sy.is_finite()).then_some(((sx * k, sy * k), (lx * kb, ly * kb), 1.0 / scale))
+            }));
+        }
         // Its own stretch of ground, a little over at the seams.
         let margin = ((d1.min(far) - d0) * 0.02).max(0.0);
         for (cell, (i, j)) in (0..n).flat_map(|j| (0..n).map(move |i| (i, j))).enumerate() {

@@ -88,7 +88,7 @@ not lifted onto the relief yet, and identify and selection still pick on the fla
 
 A **block diagram** cuts the relief to a box, as geomorphology and soil science figures do:
 `map.terrain` with `"block": {}` draws only the ground inside the DEM layer's extent (for a DEM
-in a projection such as UTM, the largest north-up box inside it), with the map's sky and fog
+in a projection such as UTM, a north-up box inside it, close to the largest), with the map's sky and fog
 around it, and the box's sides facing the eye as walls from the ground's profile down to a flat
 base. `"extent": [xmin, ymin, xmax, ymax]` gives another box, in the map's units (Web Mercator
 metres; needed over elevation tiles, which have no extent of their own); `"depth"` puts the base

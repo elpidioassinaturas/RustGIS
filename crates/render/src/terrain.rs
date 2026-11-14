@@ -200,8 +200,9 @@ impl Ground {
 
     /// The block diagram `map`'s terrain is cut to, when it has one: its box (the DEM's extent
     /// when none is given; none over elevation tiles then), and its base `depth` metres below the
-    /// lowest ground read in it (on a grid of [`BLOCK_SAMPLES`] cells a side; where no height is
-    /// known, 0, as the ground is drawn there), or half its relief, at least `BLOCK_MIN_DEPTH`,
+    /// lowest ground read in it (on a grid of [`BLOCK_SAMPLES`] cells a side; where a DEM has no
+    /// height, 0, as the ground is drawn there; elevation tiles not read yet are left out), or
+    /// half its relief, at least `BLOCK_MIN_DEPTH`,
     /// both exaggerated as the heights are. Elevation tiles are read for it at a zoom the box
     /// spans at most two tiles of, so the grid asks for a few tiles however large the box: its
     /// lowest and highest ground only set the base, which a coarser tile serves.
@@ -227,8 +228,10 @@ impl Ground {
         for (i, j) in (0..=BLOCK_SAMPLES).flat_map(|j| (0..=BLOCK_SAMPLES).map(move |i| (i as f64, j as f64))) {
             match sample(Coord::new(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * j / n)) {
                 Some(h) => (lo, hi) = (lo.min(h), hi.max(h)),
-                // Drawn at 0 (`up_px`): the base goes below it too.
-                None => lo = lo.min(0.0),
+                // A DEM's nodata is drawn at 0 (`up_px`): the base goes below it too. A tile not
+                // read yet is skipped, or the walls would drop while tiles load, then jump back.
+                None if matches!(self.heights, Heights::Raster { .. }) => lo = lo.min(0.0),
+                None => {}
             }
         }
         if lo > hi {
