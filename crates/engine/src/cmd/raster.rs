@@ -840,7 +840,10 @@ fn relief_rock(v: &Value, cur: Option<Rock>) -> Result<Option<Rock>, String> {
     if from >= to {
         return Err(format!("rock's from ({from}°) must be below its to ({to}°)"));
     }
-    let color = super::layout::color(v, "color", was.color)?.with_alpha(255);
+    let color = super::layout::color(v, "color", was.color)?;
+    if color.a() != 255 {
+        return Err("rock's color must be #RRGGBB: the rock is opaque".into());
+    }
     Ok(Some(Rock { from, to, color }))
 }
 

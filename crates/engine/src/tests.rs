@@ -4383,7 +4383,9 @@ fn shaded_relief_keeps_its_rock_on_steep_slopes() {
     let want = Rock { from: 25.0, to: 50.0, color: rustgis_map::Rgba::rgb(0x80, 0x60, 0x40) };
     assert_eq!(rock(&s), Some(want), "left out, kept; its missing keys too");
     assert_eq!(rocks_saved(&mut s), before + 1, "saved when set");
-    for bad in [json!({"from": 40, "to": 30}), json!({"from": 30, "to": 30}), json!({"color": "rock"}), json!(3)] {
+    for bad in
+        [json!({"from": 40, "to": 30}), json!({"from": 30, "to": 30}), json!({"color": "rock"}), json!({"color": "#B2ACA480"}), json!(3)]
+    {
         assert!(s.run("raster.symbology", &json!({"type": "shadedRelief", "rock": bad})).is_err(), "{bad}");
         assert_eq!(rock(&s), Some(want), "{bad}: refused, the rock kept");
     }
