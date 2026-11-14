@@ -320,8 +320,11 @@ fn terrain_block(b: &serde_json::Map<String, Value>) -> Result<rustgis_map::view
                     if [x0, y0, x1, y1].iter().any(|v| v.abs() > world) {
                         return Err(format!("block's extent is in Web Mercator metres, within ±{world:.0}"));
                     }
-                    // Degrees given for metres make a box a fraction of a metre wide.
-                    if x1 - x0 < MIN_BLOCK_SIDE || y1 - y0 < MIN_BLOCK_SIDE {
+                    // Degrees given for metres make a box a fraction of a metre wide, or one
+                    // within ±180 by ±90 of (0, 0): a block under 360 m by 180 m in the Gulf of
+                    // Guinea, never the one meant.
+                    let degrees = x0 >= -180.0 && x1 <= 180.0 && y0 >= -90.0 && y1 <= 90.0;
+                    if degrees || x1 - x0 < MIN_BLOCK_SIDE || y1 - y0 < MIN_BLOCK_SIDE {
                         return Err(format!(
                             "block's extent is in Web Mercator metres, at least {MIN_BLOCK_SIDE} a side (longitude and latitude in degrees need converting)"
                         ));

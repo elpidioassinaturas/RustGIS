@@ -7557,6 +7557,10 @@ fn terrain_block_is_checked_kept_and_taken_off() {
     let e = s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "block": {}})).unwrap_err();
     assert!(e.contains("needs an extent box"), "{e}");
     assert!(matches!(&s.map().view.terrain, Some(t) if matches!(t.source, rustgis_map::view::TerrainSource::Layer(_))));
+    // A box in whole degrees over tiles (no DEM to miss) is refused as degrees too.
+    let e =
+        s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "block": {"extent": [-50, -25, -40, -15]}})).unwrap_err();
+    assert!(e.contains("degrees"), "{e}");
     s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "block": {"extent": [0, 0, 1000, 1000]}})).unwrap();
     // A block on the DEM's extent left behind on a switch to tiles; one with a box kept.
     s.run("map.terrain", &json!({"layer": dem, "block": {}})).unwrap();
