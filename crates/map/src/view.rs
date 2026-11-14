@@ -185,11 +185,43 @@ pub struct Terrain {
     pub source: TerrainSource,
     #[serde(default = "one")]
     pub exaggeration: f64,
+    /// A block diagram (#1914): the ground cut to a box, its sides walls down to a base. None
+    /// drapes the map as far as the view reaches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<TerrainBlock>,
 }
 
 fn one() -> f64 {
     1.0
 }
+
+/// The colour of a block diagram's walls when none is given: a sandy brown.
+pub const BLOCK_WALLS: crate::color::Rgba = crate::color::Rgba::rgb(0xC8, 0xB8, 0x9A);
+
+fn block_walls() -> crate::color::Rgba {
+    BLOCK_WALLS
+}
+
+/// A block diagram cut from a map's terrain (#1914): only the ground inside the box is drawn, and
+/// its sides facing the eye are walls from the ground's profile down to a flat base.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TerrainBlock {
+    /// The box, `[xmin, ymin, xmax, ymax]` in the map's units (Web Mercator metres: terrain
+    /// shows on a Web Mercator map only). None: the terrain layer's extent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extent: Option<[f64; 4]>,
+    /// Metres from the lowest ground in the box down to the base, before exaggeration. None:
+    /// half the box's relief, at least [`BLOCK_MIN_DEPTH`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<f64>,
+    /// The walls' colour.
+    #[serde(default = "block_walls")]
+    pub walls: crate::color::Rgba,
+}
+
+/// The least depth (metres, before exaggeration) of a block diagram's base below its lowest
+/// ground when no depth is given.
+pub const BLOCK_MIN_DEPTH: f64 = 100.0;
 
 /// The most a terrain's heights are exaggerated.
 pub const MAX_EXAGGERATION: f64 = 20.0;

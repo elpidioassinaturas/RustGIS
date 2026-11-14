@@ -6,6 +6,7 @@
 //! the labels too, for export and the command line.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod block;
 pub mod cancel;
 mod canvas;
 mod diagrams;
@@ -2590,6 +2591,8 @@ fn render_tilted(map: &mut Map, view: &View, full_res_rasters: bool, sources_rea
 /// triangles raised to the ground's height and mapped from its picture, every band keeping to
 /// its own stretch of ground, all drawn far to near so nearer slopes hide what lies behind
 /// them; fog with distance, and the sky behind. (Without terrain, [`Warp`] does it per pixel.)
+/// A block diagram (#1914, [`terrain::Ground::block`]) keeps only the ground inside its box,
+/// triangles across its edge cut there (`block::clip`), and stands the walls facing the eye over it.
 /// Cancel is looked at before each band's grid of heights is read (up to 641 × 641 points,
 /// `terrain::settled_cells`) and while the triangles are drawn, the long part; ordering them
 /// doesn't. False when an export cancelled meanwhile, or a settled frame gone out of date
@@ -2624,8 +2627,12 @@ fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, 
     // at 160 cells).
     type Vertex = ((f64, f64), (f64, f64), f64);
     let (pw, ph) = (f64::from(pm.width()), f64::from(pm.height()));
-    let mut grids: Vec<(usize, Vec<Option<Vertex>>)> = Vec::with_capacity(bands.len());
+    let mut grids: Vec<(usize, Vec<Option<Vertex>>, Vec<Option<u8>>)> = Vec::with_capacity(bands.len());
     let mut tris: Vec<(f64, u32, u32)> = Vec::new();
+    // A block diagram (#1914): each vertex's sides of the box it lies beyond, and the stretches of
+    // the box's edge the ground cut to it ends at, for the walls.
+    let block = ground.block(map);
+    let mut edges = Vec::new();
     for (bi, (v, (d0, d1), pic)) in bands.iter().enumerate() {
         if rustgis_data::progress::check().is_err() || cancel::requested() {
             return false;
@@ -2643,51 +2650,106 @@ fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, 
                 (sx.is_finite() && sy.is_finite()).then_some(((sx * k, sy * k), (lx * kb, ly * kb), depth))
             })
             .collect();
+        let codes: Vec<Option<u8>> = match &block {
+            Some(b) => (0..=n)
+                .flat_map(|j| (0..=n).map(move |i| (i, j)))
+                .map(|(i, j)| {
+                    Some(block::outcode(
+                        b,
+                        v.camera.to_map(v.width * i as f64 / n as f64, v.height * j as f64 / n as f64, v.width, v.height),
+                    ))
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         // Its own stretch of ground, a little over at the seams.
         let margin = ((d1.min(far) - d0) * 0.02).max(0.0);
         for (cell, (i, j)) in (0..n).flat_map(|j| (0..n).map(move |i| (i, j))).enumerate() {
             let Some(halves) = triangles(&grid, n, i, j) else { continue };
+            let codes = triangles(&codes, n, i, j);
             for (half, [p, q, r]) in halves.into_iter().enumerate() {
                 let depth = (p.2 + q.2 + r.2) / 3.0;
                 if depth < d0 - margin || depth > d1 + margin || p.2.min(q.2).min(r.2) > far {
                     continue;
                 }
-                // Wholly off one side of the picture: nothing to draw.
+                // Wholly beyond one side of the block's box: not drawn.
+                let code = codes.and_then(|c| c.get(half).copied()).unwrap_or([0; 3]);
+                if code[0] & code[1] & code[2] != 0 {
+                    continue;
+                }
+                // Wholly off one side of the picture: nothing to draw. Across the block's edge it
+                // is still cut, for the wall under it, which can reach into the picture.
                 let xs = [p.0.0, q.0.0, r.0.0];
                 let ys = [p.0.1, q.0.1, r.0.1];
-                if xs.iter().all(|x| *x < 0.0) || xs.iter().all(|x| *x > pw) || ys.iter().all(|y| *y < 0.0) || ys.iter().all(|y| *y > ph) {
+                let off =
+                    xs.iter().all(|x| *x < 0.0) || xs.iter().all(|x| *x > pw) || ys.iter().all(|y| *y < 0.0) || ys.iter().all(|y| *y > ph);
+                if off && code == [0; 3] {
                     continue;
                 }
                 tris.push((depth, bi as u32, (cell * 2 + half) as u32));
             }
         }
-        grids.push((n, grid));
+        grids.push((n, grid, codes));
     }
     tris.sort_by(|a, b| b.0.total_cmp(&a.0));
     let fog_paint = |t: f64| paint(fog, t as f32);
+    let fog_at = |depth: f64| fog_share(depth, far);
     for (drawn, (depth, bi, at)) in tris.into_iter().enumerate() {
         // An export cancelled meanwhile (see `rustgis_data::progress`) stops here: it writes
         // nothing. So does a settled frame on screen gone out of date (see `cancel`).
         if drawn % 4096 == 0 && (rustgis_data::progress::check().is_err() || cancel::requested()) {
             return false;
         }
-        let (Some((_, _, pic)), Some((n, grid))) = (bands.get(bi as usize), grids.get(bi as usize)) else { continue };
-        let (n, cell) = (*n, at as usize / 2);
-        let Some([p, q, r]) = triangles(grid, n, cell % n, cell / n).and_then(|t| t.get(at as usize % 2).copied()) else { continue };
+        let (Some((v, _, pic)), Some((n, grid, codes))) = (bands.get(bi as usize), grids.get(bi as usize)) else { continue };
+        let (n, cell, half) = (*n, at as usize / 2, at as usize % 2);
+        let Some([p, q, r]) = triangles(grid, n, cell % n, cell / n).and_then(|t| t.get(half).copied()) else { continue };
         let (dst, src) = ([p.0, q.0, r.0], [p.1, q.1, r.1]);
         let Some(t) = affine(src, dst) else { continue };
-        // Each edge moved a hair outward along its normal, so neighbours overlap and leave no seam.
-        let Some(path) = grown_triangle(dst) else { continue };
-        let shader = tiny_skia::Pattern::new(pic.as_ref(), SpreadMode::Pad, tiny_skia::FilterQuality::Bilinear, 1.0, t);
-        pm.fill_path(&path, &Paint { shader, anti_alias: true, ..Paint::default() }, FillRule::Winding, Transform::identity(), None);
+        // Across the block's edge: the part inside the box, fanned into triangles from its first
+        // corner, and the stretch of edge under it kept for the walls.
+        let cut = match (&block, triangles(codes, n, cell % n, cell / n).and_then(|c| c.get(half).copied())) {
+            (Some(b), Some(c)) if c != [0; 3] => {
+                let kb = f64::from(pic.width()) / v.width.max(1e-9);
+                let m = src.map(|(x, y)| v.camera.to_map(x / kb, y / kb, v.width, v.height));
+                let poly = block::clip(m, b);
+                let screen: Vec<(f64, f64)> = poly
+                    .iter()
+                    .map(|(w, _, _)| {
+                        (w[0] * dst[0].0 + w[1] * dst[1].0 + w[2] * dst[2].0, w[0] * dst[0].1 + w[1] * dst[1].1 + w[2] * dst[2].1)
+                    })
+                    .collect();
+                block::edges(&poly, &screen, depth, &mut edges);
+                Some(screen)
+            }
+            _ => None,
+        };
+        let pieces: Vec<[(f64, f64); 3]> = match &cut {
+            Some(s) => (2..s.len()).filter_map(|i| Some([*s.first()?, *s.get(i - 1)?, *s.get(i)?])).collect(),
+            None => vec![dst],
+        };
         // Fog from halfway to the reach.
-        let f = ((depth - far * 0.5) / (far * 0.5)).clamp(0.0, 1.0);
-        let f = f * f * (3.0 - 2.0 * f);
-        if f > 0.004 {
-            pm.fill_path(&path, &fog_paint(f), FillRule::Winding, Transform::identity(), None);
+        let f = fog_at(depth);
+        for piece in pieces {
+            // Each edge moved a hair outward along its normal, so neighbours overlap and leave no seam.
+            let Some(path) = grown_triangle(piece) else { continue };
+            let shader = tiny_skia::Pattern::new(pic.as_ref(), SpreadMode::Pad, tiny_skia::FilterQuality::Bilinear, 1.0, t);
+            pm.fill_path(&path, &Paint { shader, anti_alias: true, ..Paint::default() }, FillRule::Winding, Transform::identity(), None);
+            if f > 0.004 {
+                pm.fill_path(&path, &fog_paint(f), FillRule::Winding, Transform::identity(), None);
+            }
         }
     }
+    if let Some(b) = &block {
+        block::draw_walls(pm, view, ground, b, &edges, fog, far);
+    }
     true
+}
+
+/// How much of the fog covers what lies `depth` away in a tilted view whose reach is `far`:
+/// none up to halfway, all of it at the reach, eased.
+fn fog_share(depth: f64, far: f64) -> f64 {
+    let f = ((depth - far * 0.5) / (far * 0.5)).clamp(0.0, 1.0);
+    f * f * (3.0 - 2.0 * f)
 }
 
 /// Cells along each side of the mesh laying the band `v` over `ground`, its picture
@@ -9006,8 +9068,11 @@ mod tests {
         let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
         let mut flat = hill_map();
         let mut hilly = hill_map();
-        hilly.view.terrain =
-            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer("dem".into()), exaggeration: 2.0 });
+        hilly.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+            exaggeration: 2.0,
+            block: None,
+        });
         // The ground's height is read from the DEM (exaggerated), and nothing off it.
         let g = terrain::Ground::of(&hilly, &camera).expect("terrain");
         let top = g.height(lonlat_to_merc(Coord::new(0.0, 0.0))).unwrap();
@@ -9030,8 +9095,11 @@ mod tests {
         assert_ne!(a.pixmap.data(), b.pixmap.data());
         assert!(b.pixmap.pixels().iter().all(|p| p.alpha() == 255));
         // A DEM layer gone (renamed or removed) leaves the ground flat.
-        hilly.view.terrain =
-            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer("none".into()), exaggeration: 1.0 });
+        hilly.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer("none".into()),
+            exaggeration: 1.0,
+            block: None,
+        });
         assert!(terrain::Ground::of(&hilly, &camera).is_none());
         assert!(render(&mut hilly, &view).is_some());
     }
@@ -9244,7 +9312,11 @@ mod tests {
             l.visible = false;
         }
         let terrain = |name: &str| {
-            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer(name.into()), exaggeration: 2.0 })
+            Some(rustgis_map::view::Terrain {
+                source: rustgis_map::view::TerrainSource::Layer(name.into()),
+                exaggeration: 2.0,
+                block: None,
+            })
         };
         // Where its far edge lies flat, and raised to its height.
         m.view.terrain = terrain("dem");
@@ -9264,6 +9336,57 @@ mod tests {
     }
 
     #[test]
+    fn a_block_diagram_cuts_the_ground_to_its_box_and_stands_its_near_wall() {
+        // #1914: a flat DEM 500 m high and 10 km a side, seen from the south, cut to a box 2 km
+        // a side. With the block, the ground beside the box is the fog behind, and below its near
+        // edge stands the wall, down to the base 1000 m lower.
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 20.0, bearing: 0.0, pitch: 60.0 };
+        let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let gt = GeoTransform { origin_x: -5000.0, origin_y: 5000.0, pixel_width: 20.0, pixel_height: -20.0 };
+        let dem =
+            Raster::new("dem", 500, 500, vec![vec![500.0; 500 * 500]], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.add_raster("dem", rustgis_map::RasterLayer::from_path(dem, "dem.tif"));
+        let block = |extent| rustgis_map::view::TerrainBlock { extent, depth: Some(1000.0), walls: rustgis_map::view::BLOCK_WALLS };
+        let terrain = |block: Option<rustgis_map::view::TerrainBlock>| {
+            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer("dem".into()), exaggeration: 1.0, block })
+        };
+        // With no box, the DEM's extent.
+        m.view.terrain = terrain(Some(block(None)));
+        let g = terrain::Ground::of(&m, &camera).expect("terrain");
+        let b = g.block(&m).expect("a block");
+        assert!([b.x0 + 5000.0, b.y0 + 5000.0, b.x1 - 5000.0, b.y1 - 5000.0].iter().all(|d| d.abs() < 1e-6), "{b:?}");
+        m.view.terrain = terrain(Some(block(Some([-1000.0, -1000.0, 1000.0, 1000.0]))));
+        let b = g.block(&m).expect("a block");
+        assert!((b.base + 500.0).abs() < 1e-6, "{}", b.base);
+        let cut = render(&mut m, &view).expect("a frame");
+        m.view.terrain = terrain(None);
+        let whole = render(&mut m, &view).expect("a frame");
+        // The near edge's middle, on the ground and at the base.
+        let edge = Coord::new(0.0, -1000.0);
+        let (u, v) = camera.ground_px(edge);
+        let at =
+            |metres: f64| camera.project_raised(u, v, metres / g.per_unit(edge) / camera.res, view.width, view.height).expect("in view").1;
+        let (top, foot) = (at(500.0), at(-500.0));
+        assert!(foot - top > 20.0 && foot < 290.0, "{top} {foot}");
+        // Halfway down the wall: the walls' sandy brown, shaded, where the whole ground showed
+        // the plain map below the edge.
+        let px = |r: &Rendered, x: u32, y: f64| r.pixmap.pixel(x, y as u32).expect("in the frame").demultiply();
+        let wall = px(&cut, 200, (top + foot) / 2.0);
+        assert!(wall.red() > wall.green() && wall.green() > wall.blue() + 8 && wall != px(&whole, 200, (top + foot) / 2.0), "{wall:?}");
+        // Beside the box, level with its near edge: the fog, where the whole ground showed the map.
+        let (_, fog) = tilt_sky(&m);
+        let beside = px(&cut, 4, top - 4.0);
+        assert!(
+            [(beside.red(), fog.r()), (beside.green(), fog.g()), (beside.blue(), fog.b())].iter().all(|(a, b)| a.abs_diff(*b) <= 2),
+            "{beside:?} vs {fog:?}"
+        );
+        assert_ne!(beside, px(&whole, 4, top - 4.0));
+    }
+
+    #[test]
     fn the_settled_mesh_follows_the_picture_up_to_the_dem() {
         // #1882: each band's mesh grows with its picture, within 160 and 640 cells a side, and
         // never past the DEM's own cells across its ground; a small DEM keeps 160.
@@ -9276,8 +9399,11 @@ mod tests {
             let dem = Raster::new("dem", side, side, vec![heights], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
             let mut m = Map::new("Map");
             m.add_raster("dem", rustgis_map::RasterLayer::from_path(dem, "dem.tif"));
-            m.view.terrain =
-                Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer("dem".into()), exaggeration: 1.0 });
+            m.view.terrain = Some(rustgis_map::view::Terrain {
+                source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+                exaggeration: 1.0,
+                block: None,
+            });
             let g = terrain::Ground::of(&m, &camera).expect("terrain");
             let view = View { width: 1600.0, height: 1100.0, pixels_per_point: ppp, camera, sky: false };
             camera
@@ -9320,8 +9446,11 @@ mod tests {
         let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, -0.6)), res: 600.0, bearing: 0.0, pitch: 65.0 };
         let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
         let mut m = hill_map();
-        m.view.terrain =
-            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer("dem".into()), exaggeration: 2.0 });
+        m.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+            exaggeration: 2.0,
+            block: None,
+        });
         if let Some(l) = m.layers.iter_mut().find(|l| l.name == "dem") {
             l.visible = true;
         }
@@ -9347,8 +9476,11 @@ mod tests {
         let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, -0.6)), res: 600.0, bearing: 0.0, pitch: 65.0 };
         let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
         let mut m = hill_map();
-        m.view.terrain =
-            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer("dem".into()), exaggeration: 2.0 });
+        m.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+            exaggeration: 2.0,
+            block: None,
+        });
         let ground = terrain::Ground::of(&m, &camera).expect("terrain");
         let bands: Vec<(View, (f64, f64), Pixmap)> = camera
             .tilt_bands(view.width, view.height)

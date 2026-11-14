@@ -7506,6 +7506,49 @@ fn layout_frames_turn_and_tilt() {
 }
 
 #[test]
+fn terrain_block_is_checked_kept_and_taken_off() {
+    let mut s = world();
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone()).unwrap();
+    // Wrong settings are refused before anything changes.
+    for bad in [
+        json!("box"),
+        json!({"extent": [10, 0, 0, 10]}),
+        json!({"extent": [0, 0, 10]}),
+        json!({"extent": "view"}),
+        json!({"depth": -5}),
+        json!({"walls": "#C8B89A80"}),
+        json!({"walls": {"layer": "Countries"}}),
+        json!({"base": 3}),
+    ] {
+        assert!(s.run("map.terrain", &json!({"layer": dem, "block": bad})).is_err(), "{bad}");
+    }
+    assert!(s.map().view.terrain.is_none());
+    // The DEM's extent by default, and the default walls.
+    let v = s.run("map.terrain", &json!({"layer": dem, "block": {}})).unwrap();
+    assert_eq!(v["block"], json!({"extent": "layer", "depth": null, "walls": "#C8B89A"}));
+    // Kept when only the exaggeration changes, and saved with the project.
+    let v = s
+        .run("map.terrain", &json!({"exaggeration": 2, "block": {"extent": [0, 0, 1000, 500], "depth": 300, "walls": "#806040"}}))
+        .unwrap();
+    assert_eq!(v["block"]["extent"], json!([0.0, 0.0, 1000.0, 500.0]));
+    let v = s.run("map.terrain", &json!({"exaggeration": 3})).unwrap();
+    assert_eq!(v["block"]["depth"], 300.0);
+    let saved = serde_json::to_string(&s.map().view).unwrap_or_default();
+    let back: rustgis_map::view::ViewSettings = serde_json::from_str(&saved).unwrap_or_default();
+    assert_eq!(back.terrain, s.map().view.terrain);
+    // false takes it off; a terrain saved without one reads back with none.
+    let v = s.run("map.terrain", &json!({"block": false})).unwrap();
+    assert!(v["block"].is_null());
+    assert!(!serde_json::to_string(&s.map().view).unwrap_or_default().contains("block"));
+    // Over elevation tiles there's no layer extent: a box is needed, and the terrain stays.
+    let e = s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "block": {}})).unwrap_err();
+    assert!(e.contains("needs an extent box"), "{e}");
+    assert!(matches!(&s.map().view.terrain, Some(t) if matches!(t.source, rustgis_map::view::TerrainSource::Layer(_))));
+    s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "block": {"extent": [0, 0, 1, 1]}})).unwrap();
+}
+
+#[test]
 fn terrain_is_set_from_a_dem_or_tiles() {
     let mut s = world();
     // A source is required, and must be a raster layer or an XYZ URL.
@@ -7566,7 +7609,8 @@ fn terrain_is_set_from_a_dem_or_tiles() {
         if let Some(l) = m.layers.iter_mut().filter(|l| l.is_raster()).nth(1) {
             l.name = first.clone();
         }
-        m.view.terrain = Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer(first), exaggeration: 1.0 });
+        m.view.terrain =
+            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer(first), exaggeration: 1.0, block: None });
         let mut opened = Session::new(Project::default());
         crate::cmd::project::reset_to(&mut opened, saved);
         assert!(opened.notices.iter().any(|n| n.text.contains("is shared by two layers")), "{:?}", opened.notices);

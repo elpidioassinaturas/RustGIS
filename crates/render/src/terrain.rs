@@ -9,7 +9,7 @@ use std::sync::Arc;
 use rustgis_data::raster::Raster;
 use rustgis_geom::{Coord, MERCATOR_R};
 use rustgis_map::view::{TerrainEncoding, TerrainSource};
-use rustgis_map::{Camera, Map};
+use rustgis_map::{Camera, Map, Rgba};
 use rustgis_tiles::cache::{self, Payload, State, Want};
 use rustgis_tiles::template::{self, TileId};
 
@@ -68,6 +68,22 @@ enum Heights {
         waiting: RefCell<std::collections::HashSet<TileId>>,
     },
 }
+
+/// A map's block diagram as a frame draws it (#1914, `TerrainBlock`): the box the ground is cut
+/// to (Web Mercator) and the height of its base.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Block {
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+    /// The base's height: metres, exaggerated as [`Ground::height`]'s are.
+    pub base: f64,
+    pub walls: Rgba,
+}
+
+/// Points along each side of the grid of heights read for a block's lowest and highest ground.
+const BLOCK_SAMPLES: usize = 64;
 
 /// The ground of a map's terrain, read for one view.
 pub struct Ground {
@@ -182,6 +198,34 @@ impl Ground {
         Some(x.max(across(y0, y1, h)))
     }
 
+    /// The block diagram `map`'s terrain is cut to, when it has one: its box (the DEM's extent
+    /// when none is given; none over elevation tiles then), and its base `depth` metres below the
+    /// lowest ground read in it (on a grid of [`BLOCK_SAMPLES`] cells a side), or half its
+    /// relief, at least `BLOCK_MIN_DEPTH`, both exaggerated as the heights are.
+    pub fn block(&self, map: &Map) -> Option<Block> {
+        let b = map.view.terrain.as_ref()?.block.as_ref()?;
+        let [x0, y0, x1, y1] = match (b.extent, &self.heights) {
+            (Some(e), _) => e,
+            (None, Heights::Raster { raster, .. }) => raster_box(raster)?,
+            (None, Heights::Tiles { .. }) => return None,
+        };
+        let n = BLOCK_SAMPLES as f64;
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for (i, j) in (0..=BLOCK_SAMPLES).flat_map(|j| (0..=BLOCK_SAMPLES).map(move |i| (i as f64, j as f64))) {
+            if let Some(h) = self.height(Coord::new(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * j / n)) {
+                (lo, hi) = (lo.min(h), hi.max(h));
+            }
+        }
+        if lo > hi {
+            (lo, hi) = (0.0, 0.0);
+        }
+        let depth = match b.depth {
+            Some(d) => d * self.exaggeration,
+            None => (0.5 * (hi - lo)).max(rustgis_map::view::BLOCK_MIN_DEPTH * self.exaggeration),
+        };
+        Some(Block { x0, y0, x1, y1, base: lo - depth, walls: b.walls })
+    }
+
     /// Whether elevation tiles are still on their way (drawing again later shows more).
     pub fn pending(&self) -> bool {
         match &self.heights {
@@ -189,6 +233,26 @@ impl Ground {
             Heights::Tiles { pending, .. } => *pending.borrow(),
         }
     }
+}
+
+/// The largest north-up Web Mercator box inside a DEM's corners, near enough (the second
+/// smallest and second largest of their x and of their y): its whole extent for a DEM in
+/// geographic or Web Mercator coordinates, a little less for one turned a little by its
+/// projection (UTM). `None` when a corner can't be placed.
+fn raster_box(r: &Raster) -> Option<[f64; 4]> {
+    let gt = &r.transform;
+    let (w, h) = (gt.pixel_width * f64::from(r.width), gt.pixel_height * f64::from(r.height));
+    let t = r.transformer();
+    let mut xs = [0.0; 4];
+    let mut ys = [0.0; 4];
+    for (k, (dx, dy)) in [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)].into_iter().enumerate() {
+        let m = rustgis_geom::lonlat_to_merc(t.to_lonlat(Coord::new(gt.origin_x + dx, gt.origin_y + dy))?);
+        (xs[k], ys[k]) = (m.x, m.y);
+    }
+    xs.sort_by(f64::total_cmp);
+    ys.sort_by(f64::total_cmp);
+    let b = [xs[1], ys[1], xs[2], ys[2]];
+    (b.iter().all(|v| v.is_finite()) && b[0] < b[2] && b[1] < b[3]).then_some(b)
 }
 
 /// A DEM's height at a Web Mercator point, read bilinearly from its first band; nodata and

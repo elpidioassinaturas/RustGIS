@@ -49,7 +49,7 @@ pub fn commands() -> Vec<C> {
         }).roles(&[]).effects(crate::policy::Effects::NONE)
         .params(r#"{"mode": "none"|"distance", "distance"?: metres from the view's centre}"#),
         C::new("map.terrain", "Terrain", "View › Scene", terrain).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).params(
-            r#"{"layer"?: a DEM raster layer (heights in metres; without layer or tiles, and no terrain yet, the active layer when it is a raster) | "tiles"?: elevation tile URL with {z}/{x}/{y}, "encoding"?: "terrarium"|"mapbox" (tiles; default terrarium), "exaggeration"?: 0 to 20 (default 1, or the terrain's), "off"?: true}"#,
+            r##"{"layer"?: a DEM raster layer (heights in metres; without layer or tiles, and no terrain yet, the active layer when it is a raster) | "tiles"?: elevation tile URL with {z}/{x}/{y}, "encoding"?: "terrarium"|"mapbox" (tiles; default terrarium), "exaggeration"?: 0 to 20 (default 1, or the terrain's), "block"?: a block diagram {"extent"?: "layer" (the DEM's extent, default) | [xmin, ymin, xmax, ymax] in map units (needed over tiles), "depth"?: metres from the lowest ground to the base (default half the relief, at least 100), "walls"?: "#RRGGBB" (default #C8B89A)}, or false to take it off (default: as it was), "off"?: true}"##,
         ),
         C::new("map.exportOrbit", "Export Orbit", "View › Scene", |s, p| super::exports::write_here(s, p, "map.exportOrbit")).inputs(orbit_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
@@ -300,6 +300,37 @@ fn walk(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"lon": c.x, "lat": c.y}))
 }
 
+/// A block diagram's settings (#1914) from `map.terrain`'s `"block"` object, checked.
+fn terrain_block(b: &serde_json::Map<String, Value>) -> Result<rustgis_map::view::TerrainBlock, String> {
+    if let Some(k) = b.keys().find(|k| !matches!(k.as_str(), "extent" | "depth" | "walls")) {
+        return Err(format!("block has no '{k}' (extent, depth, walls)"));
+    }
+    let extent = match b.get("extent") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s.eq_ignore_ascii_case("layer") => None,
+        Some(Value::Array(a)) => {
+            let e: Vec<f64> = a.iter().filter_map(Value::as_f64).filter(|v| v.is_finite()).collect();
+            match e[..] {
+                [x0, y0, x1, y1] if a.len() == 4 && x0 < x1 && y0 < y1 => Some([x0, y0, x1, y1]),
+                _ => return Err("block's extent is [xmin, ymin, xmax, ymax], numbers with xmin < xmax and ymin < ymax".into()),
+            }
+        }
+        Some(_) => return Err("block's extent is \"layer\" or [xmin, ymin, xmax, ymax]".into()),
+    };
+    let depth = match b.get("depth") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_f64().filter(|d| d.is_finite() && (0.0..=20_000.0).contains(d)).ok_or("block's depth is metres, 0 to 20000")?),
+    };
+    let walls = match b.get("walls") {
+        None | Some(Value::Null) => rustgis_map::view::BLOCK_WALLS,
+        Some(Value::String(c)) => {
+            rustgis_map::Rgba::from_hex(c).filter(|c| c.a() == 255).ok_or("block's walls is an opaque colour, #RRGGBB")?
+        }
+        Some(_) => return Err("block's walls is a colour, #RRGGBB".into()),
+    };
+    Ok(rustgis_map::view::TerrainBlock { extent, depth, walls })
+}
+
 /// Sets the map's terrain: the relief a tilted view drapes the map over, from a DEM raster layer
 /// or elevation tiles, or turns it off. Parameters are checked before anything changes.
 fn terrain(s: &mut Session, p: &Value) -> CmdResult {
@@ -308,6 +339,14 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
         s.map_mut().view.terrain = None;
         return Ok(json!({"terrain": null}));
     }
+    // Left out, the block stays as it was; false or null takes it off.
+    let block = match p.get("block") {
+        None => None,
+        Some(Value::Null | Value::Bool(false)) => Some(None),
+        Some(Value::Bool(true)) => Some(Some(terrain_block(&serde_json::Map::new())?)),
+        Some(Value::Object(b)) => Some(Some(terrain_block(b)?)),
+        Some(_) => return Err("block is an object {\"extent\"?, \"depth\"?, \"walls\"?}, or false to take it off".into()),
+    };
     let exaggeration = match p.get("exaggeration").filter(|v| !v.is_null()) {
         Some(_) => {
             Some(f(p, "exaggeration").filter(|v| v.is_finite()).ok_or("exaggeration must be a number")?.clamp(0.0, MAX_EXAGGERATION))
@@ -356,9 +395,16 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     let m = s.map_mut();
     let old_terrain = m.view.terrain.clone();
     let t = match (source, m.view.terrain.take()) {
-        (Some(source), old) => Terrain { source, exaggeration: exaggeration.or(old.map(|t| t.exaggeration)).unwrap_or(1.0) },
-        // Only a new exaggeration: the terrain keeps its source.
-        (None, Some(old)) => Terrain { exaggeration: exaggeration.unwrap_or(old.exaggeration), ..old },
+        (Some(source), old) => {
+            let (old_exaggeration, old_block) = old.map_or((None, None), |t| (Some(t.exaggeration), t.block));
+            Terrain { source, exaggeration: exaggeration.or(old_exaggeration).unwrap_or(1.0), block: block.clone().unwrap_or(old_block) }
+        }
+        // Only a new exaggeration or block: the terrain keeps its source.
+        (None, Some(old)) => Terrain {
+            exaggeration: exaggeration.unwrap_or(old.exaggeration),
+            block: block.clone().unwrap_or_else(|| old.block.clone()),
+            ..old
+        },
         (None, None) => {
             return Err(
                 "make a DEM raster layer the active layer first (a script can instead name a layer, or give elevation tiles)".into()
@@ -371,7 +417,19 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
             TerrainSource::Tiles { url, encoding } => json!({"tiles": crate::sources::redact_output(url), "encoding": encoding.code()}),
         },
         "exaggeration": t.exaggeration,
+        "block": t.block.as_ref().map(|b| json!({
+            "extent": b.extent.map_or(json!("layer"), |e| json!(e)),
+            "depth": b.depth,
+            "walls": b.walls.hex(),
+        })),
     });
+    // Over elevation tiles there is no layer's extent to cut the block to.
+    if matches!(t.source, TerrainSource::Tiles { .. }) && t.block.as_ref().is_some_and(|b| b.extent.is_none()) {
+        if let Some(old) = old_terrain {
+            m.view.terrain = Some(old);
+        }
+        return Err("a block over elevation tiles needs an extent box [xmin, ymin, xmax, ymax] (Terrain stays as it was)".into());
+    }
     // The terrain keeps its DEM by name: with two layers of that name (a rename can make them),
     // it would draw the first one's heights. Checked for a terrain kept on too.
     if let TerrainSource::Layer(n) = &t.source
