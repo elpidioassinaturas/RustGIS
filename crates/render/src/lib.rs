@@ -7037,6 +7037,29 @@ mod tests {
         assert!(pm.pixels().pixel(115, 20).is_some_and(|p| p.green() > 200), "nothing above the line");
     }
 
+    /// A bold label draws more ink than a regular one: in a bold face, or, where the fonts have no
+    /// heavier face (the built-in one, the browser's: `RUSTGIS_BUILTIN_FONTS`), thickened by hand.
+    /// Upright and turned, italic too, and with its halo. (Bold drew exactly as regular there.)
+    #[test]
+    fn bold_labels_are_heavier_than_regular_ones() {
+        let ink = |l: &PlacedLabel| {
+            let mut pm = Canvas::new(300, 120).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            text::draw(&mut pm, l, 1.0);
+            pm.pixels().pixels().iter().map(|p| 255 - u32::from(p.green())).sum::<u32>()
+        };
+        let plain = PlacedLabel { y: 60.0, color: Rgba::rgb(0, 0, 0), halo: None, size: 16.0, ..label("Amsterdam", 150.0, None, 0.0) };
+        for (what, l) in [
+            ("upright", plain.clone()),
+            ("turned", PlacedLabel { angle: Some(0.3), ..plain.clone() }),
+            ("italic", PlacedLabel { italic: true, ..plain.clone() }),
+            ("with a halo", PlacedLabel { halo: Some(Rgba::rgb(255, 0, 255)), ..plain.clone() }),
+        ] {
+            let (regular, bold) = (ink(&l), ink(&PlacedLabel { bold: true, ..l.clone() }));
+            assert!(f64::from(bold) > f64::from(regular) * 1.08, "{what}: bold {bold}, regular {regular}");
+        }
+    }
+
     /// A halo of its own width reaches past the letters, so its label's collision box grows by it:
     /// another label's text never falls under it. The thin halo and none leave the box as it was.
     #[test]
